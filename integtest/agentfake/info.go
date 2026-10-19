@@ -333,18 +333,23 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // cntlrInfoLocked derives CntlrInfo from the cntlr's last accepted request:
 // one row per object it named — per slice, per group (meta and data), per leg
 // AND per spare leg of every group, per td, per subsystem, per namespace, per
-// clone and per xfer. td_id_to_thin_info is filled only when the request's
+// clone and per xfer — and, for each clone of its clone_list, a group row for
+// the clone's clone meta group and a leg row per leg and per spare leg of it,
+// as for a slice's group (dnv-worker.md, Integration test plan, The fake
+// agent). td_id_to_thin_info is filled only when the request's
 // cntlr.primary is true and the thin_ok lever says so (architecture.md, sp
 // role; cnagent CN14 "primary only"), minus any thin_missing_slices — the
 // created-flip negative of the worker suite's smoke case (RW19). The same
 // cntlr.primary gates every when_primary row override (resolveCntlrRow).
 //
-// side_id_to_path holds one row per side of every leg with two sides — the
-// shape a migration gives a leg — on a primary and a standby alike, as the
-// real cn agent reports its paths (cnagent.md CN28): OK "live/optimized" for
-// a provisioned side, which is what the worker's cutover waits for on the
-// primary (dnv-worker.md RW18), and PROVISIONING "provisioning" for one that
-// is not, the side the real agent connects to only once it is provisioned. A
+// side_id_to_path holds one row per side of every leg of a slice's group with
+// two sides — the shape a migration gives a leg; a leg of a clone meta group
+// never has a second side, since no migration moves it — on a primary and a
+// standby alike, as the real cn agent reports its paths (cnagent.md CN28): OK
+// "live/optimized" for a provisioned side, which is what the worker's cutover
+// waits for on the primary (dnv-worker.md RW18), and PROVISIONING
+// "provisioning" for one that is not, the side the real agent connects to
+// only once it is provisioned. A
 // row override, keyed "side_id_to_path.<side_id>", holds a path down.
 func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
@@ -387,23 +392,12 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 		grpList = append(grpList, slice.GetMetaGrpList()...)
 		grpList = append(grpList, slice.GetDataGrpList()...)
 		for _, grp := range grpList {
-			info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveCntlrRow(
-				key, primary, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
-			legList := make([]*pb.Leg, 0,
-				len(grp.GetLegList())+len(grp.GetSpareLegList()))
-			legList = append(legList, grp.GetLegList()...)
-			legList = append(legList, grp.GetSpareLegList()...)
-			for _, leg := range legList {
-				info.LegIdToLeg[leg.GetLegId()] = a.resolveCntlrRow(
-					key, primary, rowKey("leg_id_to_leg", leg.GetLegId()))
-				if len(leg.GetSideList()) != 2 {
-					continue
-				}
-				for _, side := range leg.GetSideList() {
-					info.SideIdToPath[side.GetSideId()] =
-						a.pathRowLocked(key, primary, side)
-				}
-			}
+			a.grpRowsLocked(info, key, primary, grp, true)
+		}
+	}
+	for _, clone := range req.GetCloneList() {
+		if grp := clone.GetMetaGrp(); grp != nil {
+			a.grpRowsLocked(info, key, primary, grp, false)
 		}
 	}
 	thinOk := false
@@ -467,6 +461,32 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 			key, primary, rowKey("xfer_id_to_namespace", xferId))
 	}
 	return info
+}
+
+// grpRowsLocked derives one group's rows into info (cntlrInfoLocked): its
+// group row and a leg row per leg and per spare leg, and, with paths, the
+// path rows of every leg with two sides. A clone meta group is walked without
+// paths: no migration gives its legs a second side.
+func (a *Agent) grpRowsLocked(
+	info *pb.CntlrInfo, key string, primary bool, grp *pb.Group, paths bool,
+) {
+	info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveCntlrRow(
+		key, primary, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
+	legList := make([]*pb.Leg, 0,
+		len(grp.GetLegList())+len(grp.GetSpareLegList()))
+	legList = append(legList, grp.GetLegList()...)
+	legList = append(legList, grp.GetSpareLegList()...)
+	for _, leg := range legList {
+		info.LegIdToLeg[leg.GetLegId()] = a.resolveCntlrRow(
+			key, primary, rowKey("leg_id_to_leg", leg.GetLegId()))
+		if !paths || len(leg.GetSideList()) != 2 {
+			continue
+		}
+		for _, side := range leg.GetSideList() {
+			info.SideIdToPath[side.GetSideId()] =
+				a.pathRowLocked(key, primary, side)
+		}
+	}
 }
 
 // pathRowLocked resolves one side's path row (cntlrInfoLocked): live for a

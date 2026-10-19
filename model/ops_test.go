@@ -17,7 +17,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// noExpectRev is the expectRev the worker's own calls pass to the three ops
+// noExpectRev is the expectRev the worker's own calls pass to the five ops
 // the gateway shares with it (gateway.md GW6): 0 skips the SpRev token
 // check, which is what every test below wants unless it is testing the check.
 const noExpectRev = uint64(0)

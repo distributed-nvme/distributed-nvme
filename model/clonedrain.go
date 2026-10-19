@@ -120,9 +120,10 @@ func loadCloneForOp(
 // would both cost an op and invent a second copy of the truth.
 //
 // It neither reads nor bumps SpRev (CLD8). A batch changes nothing a side or a
-// cntlr is sent — the clone left every request with the latch (CLD5) — so a
-// bump would only re-send the SP's whole desired state to every side of its
-// slices and every cntlr once per batch. Nor does the pool's existence need a
+// cntlr is sent — the latch took the clone, with its chunks, out of every
+// cntlr's request (CLD5), and no side's request carries a clone's chunks — so
+// a bump would only re-send the SP's whole desired state to every side and
+// every cntlr once per batch. Nor does the pool's existence need a
 // revision read: the SpConf load refuses a pool that is gone (CLD2), and the
 // sp drain deletes the SpConf and the SpRev key in one transaction (SPD12).
 // The pool's revision therefore moves once for the latch and once for the
@@ -220,9 +221,9 @@ func DrainCloneBm(
 //     group gives nothing back, so a drain is never stranded on one.
 //
 // The pointer's removal and the DnRev bump take a side out of its dn agent's
-// next SyncupDn; no dn agent has built anything for a clone meta side
-// (architecture.md, Terminology and object model), so there is nothing to
-// tear down, and nothing here waits on an agent (CLD10).
+// next SyncupDn, which tears down the side the sp worker drove until this
+// transaction (dnv-worker.md RW14), as it does any side whose pointer left,
+// and nothing here waits on an agent (CLD10).
 //
 // cc is the cluster's stored conf, used as stored (architecture.md, Common
 // validation): MaintainDnCapacity's key embeds the bin index its ladder

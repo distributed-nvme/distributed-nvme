@@ -496,7 +496,11 @@ deleted and re-created under the name is another clone) and to have a
 group ("clone has no group"); group, leg and side ids are unique in the SP
 and address the rest. No clone-keyed op takes a clone with no group; the
 clone drain's batches and its final transaction take one all the same, so
-a drain is never stranded on one.
+a drain is never stranded on one. The sp worker writes the health epochs
+of a clone meta group's legs and sides through the two epoch twins (HL2),
+runs RW18's clone flip through `FlipCloneProvisioned`, and runs leg repair
+on a clone meta group through `CreateCloneSpareLeg` and
+`SwitchCloneSpareLeg` (AR8).
 
 * `SetDnErrEpoch` and `SetCnErrEpoch` require the record to exist. With a
   non-zero epoch they set it only when the stored value is zero (the threshold
@@ -1122,8 +1126,8 @@ an unknown cluster.
 
 A revision worker runs per rev key (a cluster id and an object id): it
 pushes revisions to the agent(s) and health-checks them; for the sp role it
-is a coordinator with one child goroutine per side of the SP's slices and
-per cntlr (RW14). An **object** is a DN, a CN, a side or a cntlr — the unit
+is a coordinator with one child goroutine per side and per cntlr of the SP
+(RW14). An **object** is a DN, a CN, a side or a cntlr — the unit
 of one `Check*` stream and one goroutine; a **round** is one `Check*`
 request and reply exchange on an object's stream; the **handle** is the
 mutable part of a rev value, `addr_port` for a node and `sp_name` for an SP
@@ -1132,7 +1136,7 @@ mutable part of a rev value, `addr_port` for a node and `sp_name` for an SP
 ### The per-object loop
 
 RW1. **One goroutine per object** — one per DN (dn role), per CN (cn role),
-per side of an SP's slices and per cntlr (sp role). The goroutine alone
+per side and per cntlr of an SP (sp role). The goroutine alone
 owns the object's `Check*` stream, its `Syncup*` calls and the loop's own
 state, which is what makes the "one `Syncup*` at a time per object" of
 `architecture.md`, Common agent rules, and the "one stream per object" of
@@ -1261,7 +1265,7 @@ outside the bounds of the dn agent's side conf gate (`dnagent.md` DN8) —
 and converged nothing (`dnagent.md`, Names and constants in `common`).
 `SyncupDn`, `SyncupSide` and `SyncupCntlr` can return it, and the same
 values are checked on this side first — `extent_size` by RW9's gate, the
-SP's `bdev_conf` and every slice group's length to zero by RW14's — so a
+SP's `bdev_conf` and every group's length to zero by RW14's — so a
 request this worker sends should never provoke it. From a live agent, a
 `ReplyCodeInvalidConf` to `SyncupDn` or `SyncupCntlr` means the agent's
 copy of those rules and `model`'s have drifted apart (`dnagent.md`, Shared
@@ -1546,16 +1550,19 @@ and health per HL1.
 
 RW14. The SP revision worker is a **coordinator**. On every desired change
 (an `SpRev` put: `revision` plus `sp_name`) it loads the SP with
-`model.LoadSp` (MD3), resolves the `dn_id` of every side of the SP's
-slices (through `DnByAddr` by the side's `addr_port`) and every cntlr's
-`cn_id`, builds every such side's `SyncupSideRequest` and every
+`model.LoadSp` (MD3), resolves the `dn_id` of every side of the SP
+(through `DnByAddr` by the side's `addr_port`) and every cntlr's
+`cn_id`, builds every `SyncupSideRequest` and every
 `SyncupCntlrRequest` once (RW15, RW16), keeping
 with each side's plan the side's `err_epoch` as that same load read it, for
 the sides-first hold (below), and diffs
-its **children**: one per side of the SP's slices — the sp id, leg id and
-side id, spare legs' sides included — and one per cntlr. A side of a clone
-meta group gets no plan, no request and no child, so nothing drives it
-(`architecture.md`, Terminology and object model). New: start; gone: stop
+its **children**: one per side — the sp id, leg id and
+side id, spare legs' sides included — and one per cntlr. The sides of the
+SP are those of its slices' groups and, after them in `clone_name_list`
+order, those of every clone's clone meta group (`architecture.md`,
+Terminology and object model): a clone being deleted keeps its sides
+driven until the clone drain's final transaction takes them from their
+DNs (CLD5, CLD9), and a clone with no group has none. New: start; gone: stop
 (RW11), without waiting for the stop; a child whose endpoint changed is
 restarted at the new one, the new child driving nothing until the old one
 has stopped (RW1);
@@ -1585,7 +1592,7 @@ dm-error, dm-linear, subsystem and namespace down. The **other** cntlr
 children are unaffected — RW16's request carries no peer's `cn_id`, so on
 the cntlr side the effect stays confined to that cntlr's own child, left
 idle by the rule above — and the primary's leg rows are still placed on
-their slice (HL2).
+the record that holds each leg, its slice or its clone (HL2).
 
 **Sides first.** The side half of the diff is applied at once, unless a
 demotion hold keeps it back (RW22). The cntlr half — every running cntlr
@@ -1680,9 +1687,10 @@ kept (RW22) — leaves the side out, and the leg AR8 parks on that disk node
 price of leaving a side out is the narrowing itself: a side the load found
 unhealthy that answers after all is not waited for, and the three races
 above stay open for it. The cost is also paid in normal
-operation: a new side — of a new SP, a grow, a spare, a migration destination
-— whose first `CheckSide` and `SyncupSide` reach its disk node before the dn
-role's `SyncupDn` has introduced its pointer is refused
+operation: a new side — of a new SP, a grow, a spare, a migration destination,
+a clone's clone meta group — whose first `CheckSide` and `SyncupSide` reach
+its disk node before the dn role's `SyncupDn` has introduced its pointer is
+refused
 (`ReplyCodeUnknownObject`, `dnagent.md` DN8; normal per RW5) and tries again
 at its next round, one `side_interval` after its first round ended, which
 falls after the hold's deadline when the two intervals are equal, as they are
@@ -1703,10 +1711,11 @@ one `cntlr_interval` after the sides.
 
 Between the load and the plan the fan-out validates the SP's stored
 `bdev_conf` with `model.ValidateBdevConf` (`architecture.md`, Common
-validation), and then the length to zero of every group of the SP's
-slices (RW15): such a group from whose stored block counts
-`model.SideZeroBytes` derives no length is refused the same way, because
-its sides would otherwise be sent a length the dn agent refuses
+validation), and then the length to zero of every group of the SP, a
+clone meta group's included, a deleting clone's too (RW15): a group from
+whose stored block counts `model.SideZeroBytes`, or for a clone meta group
+`model.CloneMetaSideZeroBytes`, derives no length is refused the same way,
+because its sides would otherwise be sent a length the dn agent refuses
 (`dnagent.md` DN8). That geometry is what RW16's
 request carries verbatim and what RW15's side request derives values from
 — every side's `zero_bytes` and the migration destination's `block_size`.
@@ -1817,10 +1826,15 @@ protocol, says to zero: for a group of the meta list its leg span, the
 group's `meta_blocks` plus its `data_blocks`, and for a group of the data
 list its meta region and first data block, its `meta_blocks` plus one,
 each block of the pool's `bdev_conf.dm_pool_conf.data_block_size`
-(`model.SideZeroBytes`). It is computed once per group from stored values
-alone — no extent size and no cluster conf — and every side of the group
+(`model.SideZeroBytes`), and for a clone meta group the length of a group
+of the data list, not its leg span (`model.CloneMetaSideZeroBytes`;
+`architecture.md`, Side provisioning protocol, says why). It is computed
+once per group from stored values alone — no extent size and no cluster
+conf — and every side of the group
 carries it: an active leg's and a spare's, a migration's source and
-destination, provisioned or not. If the side's leg has two sides and a
+destination, provisioned or not. A side of a clone meta group carries no
+migration conf: no migration moves its leg (`architecture.md`, Clones).
+If the side's leg has two sides and a
 `Migration` of the SP names this side as
 `src_side_id`: a `migr_src_conf` with `migr_id`, `dst_side_id`,
 `dst_dn_id`, `dst_provisioned` — the destination side's `provisioned` while
@@ -1859,8 +1873,11 @@ gate RW19 defers to, HL1 the reason) for a side whose driven request
 and the last one the agent acknowledged cannot disagree here) carried
 `provisioned` false and whose `side_info` reports `zeroed_bytes` equal
 to a non-zero `zero_bytes`, the child reports the side to the
-coordinator, which runs `model.FlipProvisioned` (several sides reported
-within one round MAY share one STM). The bump re-fans the SP (RW14) and the
+coordinator, which runs `model.FlipProvisioned`, or for a side of a clone
+meta group the clone flip, `model.FlipCloneProvisioned`, in an STM of its
+own after the slice flip's (several sides reported within one round MAY
+share one STM of each). A side of a clone being deleted is not reported:
+the clone flip would skip it (MD6). The bump re-fans the SP (RW14) and the
 re-synced sides carry `provisioned` true. Nothing is remembered across a
 handoff: the new owner's first round that gets a reply carries the full
 `*Info`, as the first reply on every stream does (a missed round drops its
@@ -1896,8 +1913,8 @@ no arrays and no thin pools, and its disable is AR5's trigger on its own,
 so the cutover waits for the report of the primary that takes over, or of
 the same cntlr once it is enabled again.
 The coordinator runs `model.StartCutover`
-(MD6) for it, after the provisioned flip and before the created flip, one
-STM per migration. One that commits leaves the candidates, and its bump
+(MD6) for it, after the two provisioned flips and before the created flip,
+one STM per migration. One that commits leaves the candidates, and its bump
 re-fans the SP, whose side requests then carry the cleared flag (RW15); one
 that fails or is refused is logged and tried again on a later report. The
 coordinator does not read the pool's level; `model.StartCutover` refuses at
@@ -1934,10 +1951,10 @@ it wrote — a get of each candidate's td key, a put of each one it flips, and
 `SpRev`'s read and put — so it costs at most two compares per candidate plus
 two, which `MaxFlipCreatedPerTxn` keeps within `EtcdMaxTxnOps`. A pending
 provisioned flip of the same SP MAY share one of those STMs; that STM then
-also reads the `Slice` of each side the provisioned flip lists and writes
-each `Slice` it changes, up to two compares per slice over the count above.
-This one does not take it: RW18's flip runs as an STM of its own, before the
-created flip's.
+also reads the record that holds each side the provisioned flip lists, a
+`Slice` or a `Clone`, and writes each record it changes, up to two compares
+per record over the count above. This one does not take it: RW18's two
+flips each run as an STM of their own, before the created flip's.
 When a call fails at its second STM or a later one, the coordinator logs that
 failure and no `flip applied` record (Log records), not even for the tds the
 earlier STMs committed: those stay `created` in etcd, and the refs
@@ -2026,10 +2043,13 @@ it is not COVERED by one: that gate checked the conf the round was built
 from, while this write is the health monitor's, issued against a conf
 re-read from the cache after the gate ran — one the watch goroutine may
 have replaced in between. It is not the only worker STM write that takes a
-`ClusterConf` — the sp role's `GrowSlice`, `CreateSpareLeg` and
-`DrainSpSlice` take one too (MD6, HL6) — but those three sit behind AR1's
-cluster-conf gate, and `GrowSlice` re-checks both confs, `DrainSpSlice` the
-cluster's, at the top of its own STM besides. Guessing a ladder here would
+`ClusterConf` — the sp role's `GrowSlice`, `CreateSpareLeg` and its
+clone-keyed twin `CreateCloneSpareLeg`, and `DrainSpSlice` take one too
+(MD6, HL6) — but those four sit behind AR1's cluster-conf gate, and
+`GrowSlice` re-checks both confs, `DrainSpSlice` the cluster's, at the top
+of its own STM besides; the clone drain's `FinishCloneDelete` takes one as
+well, ahead of every gate of the pass, and refuses an unusable one at the
+top of its own STM (CLD7). Guessing a ladder here would
 leave the real capacity key undeleted, and the bin scan of
 `architecture.md`, Finding DN candidates, would go on offering it as an
 allocation candidate for a DN HL1 has just flagged unhealthy — a DN whose
@@ -2038,7 +2058,9 @@ its place. The **CN** write needs no conf at all: CN capacity keys carry no
 bin index (`architecture.md`, Finding CN candidates).
 
 HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch`,
-`SetLegErrEpoch` and `SetSideErrEpoch`:
+`SetLegErrEpoch` and `SetSideErrEpoch` and, for a leg or a side of a clone
+meta group, whose record is the clone's, through their clone-keyed twins
+`SetCloneLegErrEpoch` and `SetCloneSideErrEpoch` (MD6):
 
 * `Cntlr.err_epoch` is set to now (if zero) when its `CheckCntlr` stream
   cannot be opened, breaks or misses a round — a round whose observation
@@ -2218,8 +2240,9 @@ of the monitor's own writes, and these loads re-seed it: the sp
 coordinator's reaction pass, every `cntlr_interval` (AR1), hands each side
 and cntlr child its record's `err_epoch`, which the child folds in before
 it judges its next reply or missed round, and re-seeds the leg monitors it
-keeps itself; the dn and cn roles re-seed from the `DnConf` or `CnConf`
-every syncup reads (RW13), and since a node whose revision stays put and
+keeps itself — the legs and sides of the SP's slices and of its clones'
+clone meta groups alike; the dn and cn roles re-seed from the `DnConf` or
+`CnConf` every syncup reads (RW13), and since a node whose revision stays put and
 whose agent answers code zero never syncs, a dn or cn monitor also
 re-reads the record itself before a verdict once `nodeRecordMaxAge` has
 passed without its reading or writing it — one read per `nodeRecordMaxAge`
@@ -2269,11 +2292,13 @@ answers from is not too old and is one a round asked for (HL7).
 
 HL6. **No cross-role health writes.** The sp role's health bookkeeping —
 this section's `err_epoch` writers — never touches `DnConf` or `CnConf`
-(it writes `Cntlr`, `Leg` and `Side`, and the `CdcEntry` keys a cntlr
+(it writes `Cntlr`, `Leg` and `Side` — the last two inside their `Slice`
+or `Clone` — and the `CdcEntry` keys a cntlr
 write rewrites (HL2), nothing else), and the dn/cn roles never touch SP
 records. (The sp role's *reactions* do rewrite `DnConf` and `CnConf`
 through the model ops — `GrowSlice` charges DNs and every cntlr CN,
-`CreateSpareLeg` charges its one DN, `ReplaceCntlr` rewrites two `CnConf`s
+`CreateSpareLeg` and its clone-keyed twin `CreateCloneSpareLeg` each charge
+their one DN, `ReplaceCntlr` rewrites two `CnConf`s
 — and so do the sp drain, whose D1 credits every cntlr CN and whose D2
 batches credit every DN they touch (`model/drain.go`), and the clone
 drain's final STM, which gives a clone's metadata units back to every
@@ -2461,10 +2486,10 @@ dead, the longer one when only the cntlr's path is bad.
 AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
 `cntlr_interval` (its own ticker). A pass starts with a fresh `SnapshotRev`
 (EU4) of `SpConf`, every `Cntlr` and every `Slice` of the SP — the records
-the reactions read, and the ones this worker itself writes the
-`err_epoch`s into — and the sub-objects `SpConf` lists (AR5's and AR7's
-row classes attribute rows through its tds, subsystems, transfers and
-clones), plus the in-memory latest `CntlrInfo` of the **primary** cntlr
+the reactions read, and with the `Clone`s the ones this worker itself
+writes the `err_epoch`s into — and the sub-objects `SpConf` lists (AR5's
+and AR7's row classes attribute rows through its tds, subsystems,
+transfers and clones), plus the in-memory latest `CntlrInfo` of the **primary** cntlr
 (pool usage, spare readiness, AR5's and AR7's rows), `now` (unix seconds),
 the two records kept from an earlier pass that a pass decides by — the
 coordinator's records of the last failover it applied (AR5's second
@@ -2490,11 +2515,12 @@ reusing the fan-out's: AR6 reads `low_water_mark_pct` and `data_block_size`
 straight off it and sizes a meta grow with the cluster's `extent_size`,
 while the DN scans of AR6 and AR8 walk the bin ladder and every allocating
 reaction takes its oversampling batch from `alloc_conf`. A third gate
-follows the `bdev_conf` one: every group of the SP's slices must give a
-length to zero (`model.SideZeroBytes`), the check RW14's fan-out makes. No
+follows the `bdev_conf` one: every group of the SP, a clone meta group
+included, must give a length to zero (`model.SideZeroBytes`,
+`model.CloneMetaSideZeroBytes`), the check RW14's fan-out makes. No
 reaction reads a length to zero, but the pass must not commit a reaction
 the fan-out cannot deliver, and the fan-out builds no request for an SP
-with a slice's group that gives none: a failover, say, would take the old
+with a group that gives none: a failover, say, would take the old
 primary out of the discovery records at its commit, while the new one's
 promotion waits on the refused fan-out. A failure of any gate refuses the
 pass with one `invalid stored conf` record (Log records, once per distinct
@@ -2542,14 +2568,17 @@ check finds them, ahead of any scan and any transaction (each can hold
 indefinitely — a grow deferred on the CN, a ceiling of `architecture.md`,
 GrowSlice — and must not disable AR7 and AR8 for the duration); AR7's
 `shared_state` and `same_error`, which can hold as long as AR5's and move
-the scan to the next cntlr; and AR8's `leg_has_two_sides`,
-`spare_list_full`, step 3's `spare_unprovisioned` and step 2's wait for a
-pending spare (`spare_pending`), which move the scan to the next candidate
-leg — a spare that cannot be connected stays pending until its leg has
-been unhealthy for `leg_unhealthy`, one the primary never reports has no
-bound at all, and step 3's hold on a spare whose DN failed while it zeroed
-has none either. Everything else ends the pass: every `ErrPrecondition`,
-every empty allocator scan and every transient op failure — `GrowSlice`'s
+the scan to the next cntlr; and AR8's `leg_has_two_sides`, a clone meta
+group's `no_healthy_leg`, `spare_list_full`, step 3's `spare_unprovisioned`
+and step 2's wait for a pending spare (`spare_pending`), which move the
+scan to the next candidate leg — a spare that cannot be connected stays
+pending until its leg has been unhealthy for `leg_unhealthy`, one the
+primary never reports has no bound at all, step 3's hold on a spare whose
+DN failed while it zeroed has none either, and a clone meta group whose
+other legs of its `leg_list` are unhealthy waits until one of them reads
+healthy again.
+Everything else ends the pass: every `ErrPrecondition`, every empty
+allocator scan and every transient op failure — `GrowSlice`'s
 refusal from inside its transaction among them, though it carries the
 `grow_pending` or `grp_list_full` of the pass's own check (its record names
 the op, Log records): that check found the grow applicable on the pass's
@@ -2562,7 +2591,8 @@ overlapping on one SP (VW7) cannot apply an action twice — the second STM
 fails its precondition — with one exception, a spare create, and that only
 in a narrow case. A group may hold several spares and nothing records which
 repair a spare was made for (MD6), so the second create is refused by
-whichever of `CreateSpareLeg`'s checks comes first: as `spare list full`,
+whichever of `CreateSpareLeg`'s checks, or its clone-keyed twin's, comes
+first: as `spare list full`,
 the op's own refusal and not AR8's `spare_list_full` skip, when the first
 owner's spare filled the group's spare list; otherwise as
 `spare_unprovisioned` while that spare is still unprovisioned, and, once
@@ -2923,8 +2953,9 @@ Like AR5's refusals these read a report, which no STM sees, so
 
 ### Leg repair
 
-AR8. **Triggers.** A leg in the `leg_list` of a slice's group needs repair
-when either
+AR8. **Triggers.** A leg in the `leg_list` of a slice's group, or of the
+clone meta group of a clone that is not `deleting` (`architecture.md`,
+Terminology and object model), needs repair when either
 
 * **Case 1** — `Leg.err_epoch` is set, `now` minus it is at least
   `leg_unhealthy`, and this coordinator's own latest verdict on the leg is
@@ -2945,19 +2976,46 @@ two sides has a user migration in flight and is left alone;
 `SwitchSpareLeg` re-checks this inside its STM, MD6, so step 1's switch is
 refused too when the migration starts after the pass read the leg); the SP
 is not suppressed (AR3). Several unhealthy legs: the smallest `leg_id`
-first.
+first, over the slices' groups and the clone meta groups of the SP
+together.
+
+**A clone meta group.** Leg repair runs on it as on a slice's group, with
+the clone-keyed `CreateCloneSpareLeg` and `SwitchCloneSpareLeg` in the
+place of `CreateSpareLeg` and `SwitchSpareLeg` (MD6), and with one more
+precondition: another leg of the group's `leg_list` has no `err_epoch`.
+Without one, the pass logs `reaction skipped` (`no_healthy_leg`) for the
+leg, switches and creates nothing for the group, and goes on to the next
+candidate leg (AR2); a spare leg does not count, since nothing written on
+the group reaches a leg while it is a spare. Reason: a leg with an
+`err_epoch` may hold the only copy of what was written on the group, and
+once every leg of its `leg_list` carries one, repairs that switched a
+fresh spare in for each of them would leave the group looking whole with
+none of it, while a group left as it is keeps those legs for one of them
+to come back. The test reads `err_epoch`s alone,
+so a spare an earlier repair switched in counts as that other leg from the
+switch on, whether or not the group's data has been copied onto it. The
+rule is the pass's alone: the two ops, which the operator's spare leg calls
+run as well (`architecture.md`, Spare legs), do not re-check it in their
+STMs. A clone being deleted is no candidate: its group goes back to its DNs
+in CLD9's transaction, so a spare made for it would hold an extent for
+nothing, and both ops refuse such a clone (MD6). The cn agent builds
+nothing for a clone meta group (`architecture.md`, Terminology and object
+model), so the primary reports no row of its legs: none of them gets the
+`err_epoch` both triggers need, and none of its spares reads ready (Known
+limits).
 
 **Procedure**, one step per pass, on the leg's group:
 1. a **ready** spare exists — it has exactly one side (a spare with two
    sides has a user migration in flight and is neither ready nor pending;
    MD6's switch would refuse it), that side has `Side.provisioned` true,
    and the primary's latest `leg_id_to_leg` row of the spare reads
-   `RES_STATUS_OK` (spares are connected and probed, `architecture.md`,
-   Spare legs) — then an internal `SwitchSpareLeg` of the spare and the
-   leg: the spare takes the leg's place, the old leg is **parked** in
-   `spare_leg_list` — still connected and probed, its `err_epoch` still
-   set, never repaired again (only `leg_list` legs are); a user-created
-   ready spare is used the same way — that is what spares are for.
+   `RES_STATUS_OK` (the spares of a slice's group are connected and
+   probed, `architecture.md`, Spare legs) — then an internal
+   `SwitchSpareLeg` of the spare and the leg: the spare takes the leg's
+   place, the old leg is **parked** in `spare_leg_list` — its `err_epoch`
+   still set, never repaired again (only `leg_list` legs are), and on a
+   slice's group still connected and probed; a user-created ready spare is
+   used the same way — that is what spares are for.
    "Probed" holds literally — the primary reports a leg whose prober has
    not completed a round as `RES_STATUS_PENDING` (a first round stalled
    past `CnLegProbeStallSeconds` reads `ERROR`, `cnagent.md` CN11), so a
@@ -2983,7 +3041,7 @@ first.
    (case 2's condition): a leg parked by case 2 still carries that side
    `err_epoch`, and one parked by case 1 has already reached
    `leg_unhealthy`, so both start out dead by these tests. Neither stays
-   dead by identity: a parked leg
+   dead by identity: a parked leg of a slice's group
    is still probed, so one whose DN comes back (side `err_epoch` cleared)
    while its leg still reads `ERROR`, or one that recovers and later fails
    again (a fresh leg `err_epoch`), is a pending spare again by this same
@@ -3006,7 +3064,8 @@ first.
    (MD6): `reaction skipped` (`candidate changed`), and the next pass plans
    from a snapshot that holds what changed, as AR7's does; the new side
    provisions (`architecture.md`, Side provisioning protocol), RW18 flips
-   it, the cntlrs connect to it, and a later pass finds it ready. The step
+   it, and on a slice's group the cntlrs connect to it and a later pass
+   finds it ready. The step
    is held — no scan, no op — while a spare of the group still has an
    unprovisioned side, which `CreateSpareLeg` refuses (MD6): the pass logs
    `reaction skipped` (`spare_unprovisioned`) and goes on to the next
@@ -3286,10 +3345,11 @@ deleting clone is absent from every cntlr's `clone_list` and from the
 primary's chunk-push plans (BM4 targets), at every `sp_level`; the cn
 agent's sweep (`cnagent.md` CN21) tears the clone's stack down, and
 CLD9's transaction takes the pointers of the clone meta group's sides out of
-their DNs' records, where no dn agent has built anything for them (RW14), so
-there are ZERO agent changes: to an agent either is indistinguishable from
-a post-delete syncup. Full absence is deliberately distinct from level
-suppression, under which the cn agent keeps a clone's local chunk files for
+their DNs' records, the sp worker driving those sides until then (RW14),
+so each DN's agent tears its side down as it does any side whose pointer
+left; there are ZERO agent changes: to an agent either is
+indistinguishable from a post-delete syncup. Full absence is deliberately
+distinct from level suppression, under which the cn agent keeps a clone's local chunk files for
 a later rebuild (`cnagent.md` CN21). The teardown's disconnect of the source
 runs off the pass (`cnagent.md` CN10), so until a later pass finds the
 source gone the converge answers `ReplyCodeLeftover` (RW5). No push of the
@@ -3503,8 +3563,8 @@ observer or an earlier owner left;
 the primary role, the re-enable of a primary counting as one and none when
 the cntlr is demoted before it settles, plus a repeat for a plan loaded
 before the write landed (HL2) or for a second owner in an overlap (VW7);
-`flip applied` a committed provisioned or created flip or a committed
-cutover, naming the new `SpRev`
+`flip applied` a committed provisioned flip, the clone flip's included, a
+committed created flip or a committed cutover, naming the new `SpRev`
 — for a provisioned flip and a cutover the revision their own transaction
 wrote, never a later one, so a reply to the first request that carries the
 change is never older than the record — and a cutover's naming the cntlr
@@ -3697,9 +3757,12 @@ revision gate being per object and not per cluster.
   `SpRev`, so the pool's revision moves once for the latch and once for the
   last step (CLD12), reaches the CN as an exclusion and in its last step
   gives the clone's metadata units back on every cntlr's CN, record and
-  capacity value alike, and the sides of its clone meta group back to their
-  DNs, extents, pointers and capacity keys, with one `DnRev` bump each
-  (CLD9), and both resume from etcd alone after a restart of the fleet;
+  capacity value alike, and the sides of its clone meta group, which the
+  pool's coordinator has driven to provisioned and flipped (RW14, RW18),
+  back to their DNs, extents, pointers and capacity keys, with one `DnRev`
+  bump each, after which each DN's agent is sent a side list without its
+  side (CLD9), and both resume from etcd alone after a restart of the
+  fleet;
 * vote — every shard has exactly one owner through a join, a crash, a
   graceful stop and a self-fence, and every request names its sender;
 * handoff — a killed owner's shards are re-driven at the same revision with
@@ -3764,9 +3827,11 @@ case stages;
 AR7's charge of a new CN past its metadata ceiling, since the reaction case's
 pools hold no clone, and the `candidate changed` refusal of AR8 step 3's
 create — a group that gained a DN after the pass's snapshot, or a stale
-pick — with the next pass's retry; the tripwires of SPD1 and SPD14 and the
-guards of SPD2; and the guards of CLD2 and the gateway halves of CLD1 and
-CLD3, the gateway suite owning the clone latch.
+pick — with the next pass's retry; AR8 on a clone meta group, its order
+across the pool, its precondition of its own and its skip of a clone being
+deleted, since no suite case fails a leg of one; the tripwires of SPD1 and
+SPD14 and the guards of SPD2; and the guards of CLD2 and the gateway halves
+of CLD1 and CLD3, the gateway suite owning the clone latch.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the three conf gates are unit-tested instead.
 Eight records no suite case stages: `sp drain failed` and `clone drain failed`,
@@ -3880,10 +3945,16 @@ ends as soon as its lever is cleared or its caller gives up, and a round
 derives, a migration destination whose request carries the side
 provisioned and its cutover pending reports both migration rows waiting
 for the cutover, with the reason the cutover reads, and each cntlr reports
-a path row per side of a leg that has two sides, live once that side is
-provisioned (RW18); a lever's row overrides them, its reason included. It
-stamps every reply as an agent does (`dnagent.md` SH28): a round or an info
-read about an object it knows, and a `Syncup*` it does not refuse, answers
+a path row per side of a slice's leg that has two sides, live once that
+side is provisioned (RW18); a lever's row overrides them, its reason
+included. A cntlr also reports, for each clone its request carries, a
+group row and a leg row per leg and per spare of the clone's clone meta
+group, as for a slice's group, rows the cn agent does not report
+(`architecture.md`, Terminology and object model), so that a Go case can
+stage HL2's leg rows and AR8 on such a group; no leg of it has a second
+side, so none has a path row. It stamps every reply as an agent does
+(`dnagent.md` SH28): a round or an info read about an object it knows, and
+a `Syncup*` it does not refuse, answers
 from a new observation, made as it answers and under the call's trace id —
 the round's own for a round — so that, unless a lever says otherwise, no
 round answers from an observation that is late, too old or already seen; a
@@ -4020,10 +4091,10 @@ which no suite case sets, so no suite case runs RW13's count compare.
   the others (AR2). A spare the primary never reports at all stays pending
   with no bound.
 * **A spare whose DN fails while it zeroes blocks its group's next spare until
-  that DN finishes zeroing it or an operator deletes it.** `CreateSpareLeg`
-  refuses while any spare of the group has an unprovisioned side (MD6), so AR8
-  step 3 cannot replace it; the pass holds that group only
-  (`spare_unprovisioned`, AR2).
+  that DN finishes zeroing it or an operator deletes it.** `CreateSpareLeg`,
+  and on a clone meta group `CreateCloneSpareLeg`, refuses while any spare of
+  the group has an unprovisioned side (MD6), so AR8 step 3 cannot replace it;
+  the pass holds that group only (`spare_unprovisioned`, AR2).
 * **Two overlapping owners can create two spares for one repair when one
   owner's snapshot holds a DN that is out of the group when the other
   owner's create commits, and the other owner's spare lands on that DN.**
@@ -4263,7 +4334,16 @@ which no suite case sets, so no suite case runs RW13's count compare.
   What else those rows cost on the cn agent is `cnagent.md`, Known limits.
 * **`RedundNone` legs have no automatic repair**: no spare can exist, and the
   migration that could have moved a readable-but-sick side is an operator's
-  tool (`CreateMigration`), not a reaction (Automatic reactions).
+  tool (`CreateMigration`), not a reaction (Automatic reactions). A leg of
+  a clone meta group in such a pool has neither, since `CreateMigration`
+  refuses its side (`architecture.md`, Clones).
+* **Leg repair never fires on a clone meta group.** The cn agent builds
+  nothing for one (`architecture.md`, Terminology and object model), so the
+  primary reports no row of its legs, and none of them gets the `err_epoch`
+  both of AR8's triggers need, nor does a spare of it read ready. A leg
+  whose DN is gone stays in the group until an operator switches a spare in
+  by the spare leg calls (`architecture.md`, Spare legs) or deletes the
+  clone.
 * **Reaction inputs are one pass old**: `err_epoch`s are read fresh each pass,
   but pool usage and spare readiness come from the primary's last Check reply,
   at most one interval old, which answers from an observation HL7 lets be

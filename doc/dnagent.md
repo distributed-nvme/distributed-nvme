@@ -1999,10 +1999,8 @@ distinguishable. At true with no record the agent **never** allocates: the
 data is gone (a lost or foreign disk), and silently re-allocating would
 present a fresh impostor as the data-bearing leg. That is the hard
 resource error `side_dev_info` of `RES_STATUS_ERROR` with details "record
-missing", which feeds `err_epoch` and the replacement flows (the
-spare-switch of `architecture.md`, Automatic reactions, for raid1 —
-automatic after the leg-unhealthy threshold; effectively delete-SP for
-`RedundNone`).
+missing", which feeds `err_epoch` and the replacement flows
+(`architecture.md`, Side provisioning protocol).
 
 Build `DnSideName` as a multi-target dm-linear concatenating the record's
 runs, each run mapping to the disk at `DnDataOffset` plus the run's start

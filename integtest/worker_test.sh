@@ -1291,6 +1291,27 @@ clone_meta_grp() { # <grp id>
 		--leg "$((g + 3)):1" --side "$((g + 3)):$((g + 4)):2:0")
 }
 
+# clone_provisioned reports whether every side of one clone's clone meta
+# group, its spares' included, is provisioned: the sp worker drives those
+# sides as it drives a slice's and flips each through the clone flip once its
+# fake reports the zeroing done (dnv-worker.md RW14, RW18). A clone that is
+# not there, or has no side, is not.
+clone_provisioned() { # <sp> <clone name>
+	local got
+	got=$(ctl get-sp --sp "$1" | "$JQ" -r --arg c "$2" '
+		[ .clones[$c].meta_grp | (.leg_list[]?, .spare_leg_list[]?)
+		  | .side_list[]? | .provisioned ] | (length > 0 and all)') || return 1
+	[ "$got" = true ]
+}
+
+# clone_flip_cnt counts the `flip applied kind=provisioned` records that name
+# one clone, the records of the clone flip (dnv-worker.md RW18), over every
+# worker log of the case; a failed read fails the count.
+clone_flip_cnt() { # <clone name>
+	wcount 'select(.msg == "flip applied") | select(.kind == "provisioned")
+		| select(.clone_name == $c)' --arg c "$1"
+}
+
 slice_json() { ctl get-slice --sp "$1" --id "$2"; }
 
 # leg_epoch / side_epoch read one Leg's / Side's err_epoch out of a Slice.
@@ -2201,6 +2222,12 @@ EOF
 	clone_meta_grp "$CLONE_GRP_ID"
 	ctl put-clone --sp sp0 --name c0 --id "$CLONE_ID" --dst-td td0 \
 		--src-slice-cnt 2 "${CLONE_GRP[@]}"
+	# The coordinator drives c0's clone meta group's two sides as it drives a
+	# slice's, and the clone flip that marks them provisioned bumps SpRev
+	# (dnv-worker.md RW14, RW18). It is waited for here, before any chunk
+	# exists to push, so that no stage below counts across one of its bumps.
+	wait_until "$WAIT_SYNCUP" "c0's clone meta group provisioned" \
+		clone_provisioned sp0 c0
 	# Hold the clone pushes back while the three chunks are seeded: the fake's
 	# chunk_id_list lever (dnv-worker.md, Integration test plan, The fake agent)
 	# forces cn0 to report exactly the pairs about to be written as already
@@ -4747,13 +4774,29 @@ case_drain() {
 		req_ge 1 cn0 SyncupCntlr '((.clone_list // []) | length) == 1'
 	# CLD12's revision contract, counted (dnv-worker.md, CLD8, CLD12). The
 	# baseline must be quiet: each provisioned flip of sp3's sides bumps SpRev
-	# too (RW18), so it is taken once every side is provisioned and nothing
-	# has moved it for a while. Stage 6 counts the batch again with the fleet
+	# too (RW18), the clone flip of c0's clone meta group's two sides among
+	# them, so it is taken once every side is provisioned and nothing has
+	# moved it for a while. Stage 6 counts the batch again with the fleet
 	# stopped, where no other writer exists.
 	wait_until "$WAIT_SYNCUP" "sp3: every side of slice 1 provisioned" \
 		all_provisioned sp3 1
 	wait_until "$WAIT_SYNCUP" "sp3: every side of slice 2 provisioned" \
 		all_provisioned sp3 2
+	wait_until "$WAIT_SYNCUP" "sp3: every side of c0's clone meta group provisioned" \
+		clone_provisioned sp3 c0
+	# The worker drove c0's two sides as a slice's (RW14): each DN's fake was
+	# sent its side's request and told it provisioned, and the clone flip
+	# wrote each side once, its records naming the clone.
+	local c0Side
+	for i in 1 2; do
+		c0Side=$((CLONE_GRP_ID + 2 * i))
+		wait_until "$WAIT_SHORT" "$(dn_dir "$i"): side $c0Side told provisioned" \
+			req_ge 1 "$(dn_dir "$i")" SyncupSide \
+			'(.side_pointer.side_id | tostring) == $s
+			 and (.side_conf.provisioned // false)' --arg s "$c0Side"
+	done
+	assert_eq "$(clone_flip_cnt c0)" 2 \
+		"flip applied kind=provisioned records naming c0 (one per side)"
 	local rev_quiet
 	rev_quiet=$(sp_rev_num 4)
 	assert_none_for 3 "an SpRev bump of sp3 with nothing left to flip" \
@@ -4794,10 +4837,22 @@ case_drain() {
 	# (cnagent.md CN21) drops the stack and the local chunk files precisely
 	# when the id stops appearing — so the SP must keep syncing while
 	# carrying no clone at all; the dn agents' half is the pointers the
-	# final STM took off dn 1 and dn 2, checked above.
+	# final STM took off dn 1 and dn 2, checked above, which each DN's fake
+	# is then told: a SyncupDn at the final STM's DN revision whose side list
+	# no longer names the side the worker drove there.
 	wait_until "$WAIT_SYNCUP" "cn0: a NEW SyncupCntlr with the clone excluded" \
 		reqs_gt "$excluded_before" cn0 SyncupCntlr \
 		'((.clone_list // []) | length) == 0'
+	local dnRevs=("$((dn1_rev + 2))" "$((dn2_rev + 2))")
+	for i in 1 2; do
+		c0Side=$((CLONE_GRP_ID + 2 * i))
+		wait_until "$WAIT_SYNCUP" "$(dn_dir "$i"): a SyncupDn without side $c0Side" \
+			req_ge 1 "$(dn_dir "$i")" SyncupDn \
+			'(.revision // 0) >= $r
+			 and ([(.side_pointer_list // [])[]
+			       | select((.side_id | tostring) == $s)] | length) == 0' \
+			--argjson r "${dnRevs[$((i - 1))]}" --arg s "$c0Side"
+	done
 	# And the SP itself is untouched by any of it: its last step gives back
 	# only what the clone itself holds, the metadata units and the clone
 	# meta group's sides checked above, so each DN holds the slices' four
@@ -4830,6 +4885,11 @@ case_drain() {
 		"--kind clone --name c1 --src-slice-idx \$s --bm-idx \$b --hex 0102" \
 		"> /dev/null; done; done"
 	assert_eq "$(key_cnt clone_bitmap)" "65" "c1's chunk keys"
+	# The fleet drives c1's sides to provisioned before it stops, so that the
+	# drain gives back sides a worker drove and no flip of them is left to
+	# move SpRev once the fleet is back.
+	wait_until "$WAIT_SYNCUP" "sp3: every side of c1's clone meta group provisioned" \
+		clone_provisioned sp3 c1
 	for w in w1 w2 w3; do stop_worker "$w"; done
 	local rev_latch
 	latched=$(ctl set-clone-deleting --sp sp3 --name c1)

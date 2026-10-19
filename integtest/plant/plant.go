@@ -733,9 +733,10 @@ func DelRev(
 // single put that says "the same DN now answers somewhere else".
 //
 // It rewrites nothing else: Sides already placed on the DN keep the old
-// addr_port copy their Slice holds, because the rev keys have no rename path
-// and no RPC changes a node's endpoint. A case moves only a DN that carries
-// no side. It returns the old endpoint and the new revision.
+// addr_port copy their Slice, or for a side of a clone meta group their Clone,
+// holds, because the rev keys have no rename path and no RPC changes a node's
+// endpoint. A case moves only a DN that carries no side. It returns the old
+// endpoint and the new revision.
 func MoveDn(
 	ctx context.Context,
 	cli *etcdutil.Client,

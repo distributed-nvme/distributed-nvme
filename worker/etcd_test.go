@@ -138,6 +138,108 @@ func TestCntlrSettleWritesThroughModel(t *testing.T) {
 	}
 }
 
+// TestCloneGroupWritesThroughModel checks the sp role's writes on a clone
+// meta group below the healthWriter and spOps seams, against real etcd: a leg
+// monitor and a side monitor of the group set and clear their own object's
+// err_epoch in the Clone record through the clone-keyed twins, and the clone
+// flip sets the side's provisioned flag and returns the SpRev revision its
+// STM committed (HL2, RW18, MD6). The fakes of the other tests only record
+// the arguments, so an adapter that called the wrong twin would pass them.
+func TestCloneGroupWritesThroughModel(t *testing.T) {
+	cli := newTestClient(t)
+	captureLogs(t)
+	ctx := context.Background()
+	cid := testClusterId()
+	const (
+		spId   = uint64(3)
+		shard  = uint32(5)
+		name   = "c0"
+		id     = uint64(9)
+		legA   = uint64(20)
+		legB   = uint64(21)
+		sideA  = uint64(30)
+		sideB  = uint64(31)
+		spRevN = uint64(40)
+	)
+	key := model.CloneKey(cid, spId, name)
+	err := cli.Put(ctx, key, &pb.Clone{
+		CloneId: id,
+		MetaGrp: &pb.Group{
+			GrpId: 10, ExtCnt: 1, MetaBlocks: 7, DataBlocks: 1017,
+			LegList: []*pb.Leg{
+				{LegId: legA, SideList: []*pb.Side{{SideId: sideA}}},
+				{LegId: legB, SideList: []*pb.Side{{SideId: sideB}}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed Clone: %v", err)
+	}
+	err = cli.Put(ctx, model.SpRevKey(shard, cid, spId), &pb.SpRev{
+		Revision: spRevN, SpName: "sp0",
+	})
+	if err != nil {
+		t.Fatalf("seed SpRev: %v", err)
+	}
+
+	clk := newFakeClock()
+	d := newTestDeps(testConfig(common.WorkerRoleSp), newFakeStore(), clk)
+	d.cli = cli
+	d.health = &modelHealthWriter{cli: cli}
+	stored := &pb.Clone{}
+	load := func() {
+		t.Helper()
+		if _, err := cli.Get(ctx, key, stored); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+	}
+	legs := func() []*pb.Leg { return stored.GetMetaGrp().GetLegList() }
+
+	leg := newCloneLegMonitor(d, cid, spId, name, id, legA)
+	side := newCloneSideMonitor(d, cid, spId, name, id, sideB)
+	leg.observe(ctx, healthErrorRow, "leg")
+	side.observe(ctx, healthUnreachable, "")
+	load()
+	now := clk.nowUnix()
+	if got := legs()[0].GetErrEpoch(); got != now {
+		t.Fatalf("leg A err_epoch = %d, want %d", got, now)
+	}
+	if got := legs()[1].GetSideList()[0].GetErrEpoch(); got != now {
+		t.Fatalf("side B err_epoch = %d, want %d", got, now)
+	}
+	if legs()[1].GetErrEpoch() != 0 || legs()[0].GetSideList()[0].
+		GetErrEpoch() != 0 {
+		t.Fatalf("a write landed on another object: %v", stored)
+	}
+	leg.observe(ctx, healthClean, "")
+	side.observe(ctx, healthClean, "")
+	load()
+	if legs()[0].GetErrEpoch() != 0 ||
+		legs()[1].GetSideList()[0].GetErrEpoch() != 0 {
+		t.Fatalf("recovery did not clear: %v", stored)
+	}
+
+	ops := &modelSpOps{cli: cli}
+	ref := model.CloneSideRef{
+		CloneName: name, CloneId: id, LegId: legB, SideId: sideB,
+	}
+	flipped, revision, err := ops.flipCloneProvisioned(
+		ctx, cid, shard, spId, []model.CloneSideRef{ref},
+	)
+	if err != nil {
+		t.Fatalf("clone flip: %v", err)
+	}
+	if len(flipped) != 1 || flipped[0] != ref || revision != spRevN+1 {
+		t.Fatalf("clone flip = %v at %d, want %v at %d", flipped,
+			revision, ref, spRevN+1)
+	}
+	load()
+	if !legs()[1].GetSideList()[0].GetProvisioned() ||
+		legs()[0].GetSideList()[0].GetProvisioned() {
+		t.Fatalf("flip landed wrong: %v", stored)
+	}
+}
+
 // TestReactionCnScanThroughModel checks AR7's scan below the reactionOps seam,
 // against real etcd: the production adapter hands the exclusion to model's
 // two-tier FindCnCandidatesAntiAffine, not to the one-tier FindCnCandidates.

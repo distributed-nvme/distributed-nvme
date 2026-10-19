@@ -137,10 +137,12 @@ func dropMigration(
 // like an active one and can be moved off it.
 //
 // A side of a clone's clone meta group is refused FAILED_PRECONDITION
-// (architecture.md, Migrations): a clone is a copy in flight, and moving a
-// leg of its group would need a clone-keyed twin of the whole migration
-// path. The clones are read only when no slice holds the side, so the
-// migration of a slice's side never depends on the clone keys.
+// (architecture.md, Migrations): a clone is a copy in flight, moving a leg
+// of its group would need a clone-keyed twin of the whole migration path,
+// and a leg of an md-raid1 clone meta group is replaced through a spare
+// instead, by the spare leg calls (architecture.md, Clones). The clones are
+// read only when no slice holds the side, so the migration of a slice's side
+// never depends on the clone keys.
 func migrSrcLocation(
 	stm etcdutil.STM,
 	sc *spScope,

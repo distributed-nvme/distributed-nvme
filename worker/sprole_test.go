@@ -279,6 +279,7 @@ func spTestWorker(d *deps) *spWorker {
 		cntlrs:   make(map[uint64]*cntlrChild),
 		legs:     make(map[uint64]*healthMonitor),
 		legSlice: make(map[uint64]uint64),
+		legClone: make(map[uint64]cloneOwner),
 		tdRefs:   make(map[uint64]model.TdRef),
 		reportCh: make(chan spReport, 8),
 	}
@@ -477,11 +478,12 @@ func TestSpSideRequestNoPrimary(t *testing.T) {
 }
 
 // TestSpSideZeroBytes pins RW15's length to zero (model.SideZeroBytes) on every
-// kind of side the sp role drives: a meta group's side gets its whole leg and
-// a data group's side its meta region and first data block, the same for the
-// active leg, the spare and both sides of a migration, provisioned or not,
-// with md-raid1 and without. A group whose stored counts give no length gets
-// no request at all, never one carrying a length of zero.
+// kind of side of a slice's group the sp role drives: a meta group's side gets
+// its whole leg and a data group's side its meta region and first data block,
+// the same for the active leg, the spare and both sides of a migration,
+// provisioned or not, with md-raid1 and without. A group whose stored counts
+// give no length gets no request at all, never one carrying a length of zero.
+// The sides of a clone meta group are TestSpCloneSideZeroBytes's.
 func TestSpSideZeroBytes(t *testing.T) {
 	captureLogs(t)
 	t.Run("md-raid1", func(t *testing.T) {
@@ -1865,6 +1867,9 @@ func TestSpUnresolvedCntlrLeavesEverySideIdle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := captureLogs(t)
 			state := spFixture()
+			// The sides of a clone meta group are left idle with the
+			// slices' (RW14).
+			withCloneGrp(state)
 			tc.unhinge(state)
 			w := spTestWorker(nil)
 			plan := w.buildPlan(context.Background(), state)
@@ -1894,6 +1899,12 @@ func TestSpUnresolvedCntlrLeavesEverySideIdle(t *testing.T) {
 			if plan.legSlice[spLegMeta] != spSliceA {
 				t.Fatalf("legSlice = %v, want the legs still indexed",
 					plan.legSlice)
+			}
+			// And so does the leg -> clone index of a clone meta group.
+			want := cloneOwner{name: spCloneNm, id: spCloneId}
+			if plan.legClone[spCloneLegB] != want {
+				t.Fatalf("legClone = %v, want the clone's legs still "+
+					"indexed", plan.legClone)
 			}
 		})
 	}
@@ -2585,12 +2596,17 @@ type fakeSpOps struct {
 	// so a test can tell that ticks have run.
 	loads       int
 	provisioned [][]model.SideRef
-	created     [][]model.TdRef
-	// applySides / applyTds decide what the STM reports back as WRITTEN. nil
-	// means "everything the caller listed"; a set restricts it, which is how
-	// the tests reproduce a candidate another owner flipped first.
-	applySides map[model.SideRef]bool
-	applyTds   map[model.TdRef]bool
+	// cloneProvisioned records every flipCloneProvisioned call, as
+	// provisioned records flipProvisioned's.
+	cloneProvisioned [][]model.CloneSideRef
+	created          [][]model.TdRef
+	// applySides / applyCloneSides / applyTds decide what the STM reports
+	// back as WRITTEN. nil means "everything the caller listed"; a set
+	// restricts it, which is how the tests reproduce a candidate another
+	// owner flipped first.
+	applySides      map[model.SideRef]bool
+	applyCloneSides map[model.CloneSideRef]bool
+	applyTds        map[model.TdRef]bool
 	// onLoad, when set, sees every state a load returns, on the loader's
 	// goroutine and before the loader does.
 	onLoad func(state *model.SpState)
@@ -2600,8 +2616,11 @@ type fakeSpOps struct {
 	cutovers   []cutoverCall
 	cutoverErr error
 	cutoverRev uint64
-	// provisionedRev is the revision a flipProvisioned that wrote returns.
+	// provisionedRev is the revision a flipProvisioned or a
+	// flipCloneProvisioned that wrote returns.
 	provisionedRev uint64
+	// order names every flip and cutover call, in call order.
+	order []string
 }
 
 // cutoverCall is one startCutover call of the coordinator.
@@ -2653,6 +2672,7 @@ func (o *fakeSpOps) flipProvisioned(
 ) ([]model.SideRef, uint64, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.order = append(o.order, "provisioned")
 	o.provisioned = append(o.provisioned, sides)
 	if o.applySides == nil {
 		return sides, o.provisionedRev, nil
@@ -2660,6 +2680,32 @@ func (o *fakeSpOps) flipProvisioned(
 	var applied []model.SideRef
 	for _, ref := range sides {
 		if o.applySides[ref] {
+			applied = append(applied, ref)
+		}
+	}
+	if len(applied) == 0 {
+		return nil, 0, nil
+	}
+	return applied, o.provisionedRev, nil
+}
+
+func (o *fakeSpOps) flipCloneProvisioned(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	sides []model.CloneSideRef,
+) ([]model.CloneSideRef, uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.order = append(o.order, "clone_provisioned")
+	o.cloneProvisioned = append(o.cloneProvisioned, sides)
+	if o.applyCloneSides == nil {
+		return sides, o.provisionedRev, nil
+	}
+	var applied []model.CloneSideRef
+	for _, ref := range sides {
+		if o.applyCloneSides[ref] {
 			applied = append(applied, ref)
 		}
 	}
@@ -2678,6 +2724,7 @@ func (o *fakeSpOps) flipCreated(
 ) ([]model.TdRef, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.order = append(o.order, "created")
 	o.created = append(o.created, cands)
 	if o.applyTds == nil {
 		return cands, nil
@@ -2702,6 +2749,7 @@ func (o *fakeSpOps) startCutover(
 ) (uint64, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.order = append(o.order, "cutover")
 	o.cutovers = append(o.cutovers, cutoverCall{
 		spName: spName, ref: ref, cntlrId: cntlrId,
 	})
@@ -2727,6 +2775,19 @@ func (o *fakeSpOps) provisionedCalls() [][]model.SideRef {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return append([][]model.SideRef(nil), o.provisioned...)
+}
+
+// callOrder is the names of the flip and cutover calls, in call order.
+func (o *fakeSpOps) callOrder() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.order...)
+}
+
+func (o *fakeSpOps) cloneProvisionedCalls() [][]model.CloneSideRef {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([][]model.CloneSideRef(nil), o.cloneProvisioned...)
 }
 
 func (o *fakeSpOps) createdCalls() [][]model.TdRef {
@@ -3012,9 +3073,10 @@ func noMetaBlocks(state *model.SpState) {
 // spNoLengthCases each corrupt the stored SP so that one group gives its sides
 // no length to zero (RW15, model.SideZeroBytes), one per place the group gate
 // must look: the first slice's data list and its meta list, the second slice,
-// a group behind the first of its list — the shape a grow leaves — and a
-// block size at which a data group's length is no whole number of
-// common.DnZeroAlign units. field is what the refusal's error names.
+// a group behind the first of its list — the shape a grow leaves — a block
+// size at which a data group's length is no whole number of
+// common.DnZeroAlign units, a clone's clone meta group and a deleting clone's
+// (model.CloneMetaSideZeroBytes). field is what the refusal's error names.
 var spNoLengthCases = []struct {
 	name    string
 	corrupt func(state *model.SpState)
@@ -3060,12 +3122,32 @@ var spNoLengthCases = []struct {
 		field: fmt.Sprintf("group 101 length to zero %d is not a multiple "+
 			"of %d", (5+1)*512, common.DnZeroAlign),
 	},
+	{
+		// The clone meta groups are walked after the slices (RW14).
+		name: "a clone meta group",
+		corrupt: func(state *model.SpState) {
+			withCloneGrp(state)
+			state.Clones[spCloneNm].MetaGrp.MetaBlocks = 0
+		},
+		field: fmt.Sprintf("group %d meta_blocks is zero", spCloneGrp),
+	},
+	{
+		// A clone being deleted keeps its sides driven, so its group is
+		// gated too.
+		name: "a deleting clone's meta group",
+		corrupt: func(state *model.SpState) {
+			withDeletingClone(state)
+			state.Clones[spCloneGoneNm].MetaGrp.DataBlocks = 0
+		},
+		field: fmt.Sprintf("group %d data_blocks is zero", spCloneGoneGrp),
+	},
 }
 
 // TestCheckSideZeroBytes pins the walk of the group gate that both fanOut
 // (RW14) and the reaction pass (AR1) run: the fixture passes it, and every
 // case of spNoLengthCases is refused with an error naming its group, so the
-// gate skips no list, no slice and no group behind the first of a list.
+// gate skips no list, no slice, no group behind the first of a list and no
+// clone meta group, a deleting clone's included.
 func TestCheckSideZeroBytes(t *testing.T) {
 	if err := checkSideZeroBytes(spFixture()); err != nil {
 		t.Fatalf("the fixture is refused: %v", err)
@@ -3082,7 +3164,8 @@ func TestCheckSideZeroBytes(t *testing.T) {
 
 // TestSpFanOutRefusesAGroupWithNoLength checks the second gate in front of
 // RW14: every side request carries its group's length to zero (RW15), and a
-// group whose stored counts give none (model.SideZeroBytes) refuses the whole
+// group whose stored counts give none (model.SideZeroBytes, or
+// model.CloneMetaSideZeroBytes for a clone meta group) refuses the whole
 // plan exactly as an invalid bdev_conf does — one record naming the group,
 // nothing built, no child started — rather than send its sides a length of
 // zero the dn agent's side conf gate would refuse (dnagent.md DN8). It runs
@@ -3108,7 +3191,11 @@ func TestSpFanOutRefusesAGroupWithNoLength(t *testing.T) {
 			})
 
 			t.Run("recovers on the ticker", inBubble(func(t *testing.T) {
-				h, _ := spRefusedFanOut(t, tc.corrupt, tc.field)
+				h, w := spRefusedFanOut(t, tc.corrupt, tc.field)
+				// A deleting clone's drain runs ahead of the pass's gates
+				// (CLD7), on a model surface that must not reach the
+				// harness's nil etcd client.
+				h.reactWith(w, &fakeReactionOps{})
 				// Ticks under the STILL-bad group: the reaction pass refuses
 				// it once too, in its own half of the memo, and then both
 				// stay quiet however many ticks follow.
@@ -5975,13 +6062,16 @@ const orphanPrimaryUnhealthy = 60
 // owner's verdicts are clean.
 const orphanAge = 30
 
-// spStateHealthWriter is a fake health writer whose cntlr, leg and side writes
-// also land in the harness's stored SpState, under MD6's set/clear rule, so
+// spStateHealthWriter is a fake health writer whose cntlr writes, and a
+// slice's leg and side writes, also land in the harness's stored SpState,
+// under MD6's set/clear rule, so
 // the reaction pass reads what the monitors wrote (AR1): the etcd of a
 // live-coordinator health test. A write lands in the state before it is
 // recorded: the test takes a recorded write as proof that the state holds it,
 // and another observer's stamp laid between the two would be overwritten by a
-// write the test had already seen. A write the fake fails lands nowhere.
+// write the test had already seen. A write the fake fails lands nowhere. The
+// writes on a clone meta group are the embedded fakeHealthWriter's, recorded
+// and landing nowhere: no test that installs this writer plants such a group.
 type spStateHealthWriter struct {
 	*fakeHealthWriter
 	ops *fakeSpOps

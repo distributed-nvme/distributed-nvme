@@ -16,8 +16,8 @@ import (
 // in the group's spare_leg_list. On a slice's group every cntlr connects to
 // its side and health-checks it (architecture.md, Primary cntlr, step 1), but
 // md never sees the leg until SwitchSpareLeg moves it into leg_list, so a
-// spare is pre-connected capacity and nothing more. On a clone meta group a
-// spare is its record and its DN's charge alone: no cntlr connects to it
+// spare is pre-connected capacity and nothing more. On a clone meta group the
+// sp worker drives a spare's side as any side, and no cntlr connects to it
 // (architecture.md, Terminology and object model).
 //
 // All three requests address a group by grp_id and carry NO slice id, so each
@@ -33,12 +33,12 @@ import (
 // between plan and decision is caught where it matters.
 //
 // Two of the three are model ops (gateway.md, Scope and placement: reused,
-// never duplicated): on a slice's group the ones the sp-worker's leg repair
-// (dnv-worker.md AR8) already drives, and on a clone meta group their
-// clone-keyed twins (dnv-worker.md MD6). DeleteSpareLeg is the gateway's own
-// STM on either, because no worker reaction ever removes a spare — a parked
-// leg stays parked until an operator frees the slot with DeleteSpareLeg
-// (dnv-worker.md AR8).
+// never duplicated), the ones the sp-worker's leg repair (dnv-worker.md AR8)
+// already drives: on a slice's group the slice-keyed ops, and on a clone
+// meta group their clone-keyed twins (dnv-worker.md MD6). DeleteSpareLeg is
+// the gateway's own STM on either, because no worker reaction ever removes a
+// spare — a parked leg stays parked until an operator frees the slot with
+// DeleteSpareLeg (dnv-worker.md AR8).
 
 // opDeleteSpareLeg is the op name DeleteSpareLeg's own STM gives its ledger
 // flush and the bump helper; it is the RPC name so a log line names something
@@ -282,9 +282,9 @@ func (s *Server) CreateSpareLeg(
 		// The Side the op writes is provisioned = false ([D15]), and a
 		// switch takes only a provisioned spare (architecture.md, Spare
 		// legs), which is why a fresh spare cannot be switched in at once.
-		// A slice's spare side is flipped by the sp-worker once the dn agent
-		// reports its zeroing done (architecture.md, Side provisioning
-		// protocol).
+		// Only the sp-worker flips it, once the dn agent reports the side's
+		// zeroing done, through the clone flip on a clone meta group
+		// (architecture.md, Side provisioning protocol; dnv-worker.md RW18).
 		var newId uint64
 		if loc.Clone != nil {
 			newId, err = model.CreateCloneSpareLeg(

@@ -171,11 +171,11 @@ always means the SP's `DmPoolConf.data_block_size`.
   also carry up to `MaxSpareLegPerGrp` **spare legs**, which are not md
   members until a switch; the spare legs of a slice's group are connected
   and health-checked (Spare legs).
-* **side** — The DN part of a leg, charged to its DN in extents. A side of
-  a slice's group is DN-resident: one side device `DnSideName` (a
-  dm-linear over the side's [D13] extent runs) plus, per cntlr, a
-  dm-error, a dm-linear and an nvmet subsystem exported to that cntlr's
-  CN. Figs `000DiskNode` and `010Side` (Disk node).
+* **side** — The DN-resident part of a leg, charged to its DN in extents:
+  one side device `DnSideName` (a dm-linear over the side's [D13] extent
+  runs) plus, per cntlr, a dm-error, a dm-linear and an nvmet subsystem
+  exported to that cntlr's CN. Figs `000DiskNode` and `010Side` (Disk
+  node).
 * **thin device (td)** — A user volume: one dm-thin volume per slice plus
   one raid0 (dm striped) across the per-slice thin volumes on the primary.
   Snapshots are thin devices with `ori_id` set. `created` marks a td whose
@@ -193,24 +193,30 @@ always means the SP's `DmPoolConf.data_block_size`.
   `CloneMetaGrpExtCnt` extents per side, which `CreateClone` requires to
   have room for the clone's dm-clone metadata (Clones): one leg or the legs
   of an md-raid1, as the pool's redundancy gives a group, and the spare legs
-  the spare leg calls add (Spare legs). Its sides are sides of the pool,
-  charged to their DNs and pointed at from their `DnConf`, and its group,
-  leg and side ids come from `SpConf.next_id` with every other id of the
-  pool. It belongs to no slice: the model's operations on it are functions
-  of their own, which take the clone's name and `clone_id` (`dnv-worker.md`
-  MD6), the gateway finds it by its ids among the pool's clones when no
-  slice holds them, and no cntlr's footprint counts it. Reason: a footprint
+  the spare leg calls add (Spare legs).
+  Its sides are sides of the pool, charged to their DNs and pointed at from
+  their `DnConf`, and its group, leg and side ids come from
+  `SpConf.next_id` with every other id of the pool. It belongs to no slice:
+  the model's operations on it are functions of their own, which take the
+  clone's name and `clone_id` (`dnv-worker.md` MD6), the gateway finds it
+  by its ids among the pool's clones when no slice holds them, and no
+  cntlr's footprint counts it. Reason: a footprint
   stands for the pool space a cntlr's CN may serve to hosts, the workload it
   will carry, and the group's extents are room for a copy's dm-clone
-  metadata, which is no part of that space. The group is records and DN
-  charges alone. No sp worker sends a request for its sides or judges, flips
-  or repairs its legs and sides (`dnv-worker.md` RW14, AR8), so no dn agent
-  builds a side of it; the cn agent, whose cntlr request carries the clone
-  with its group, connects to none of its legs and assembles no array over
-  them; so none of the side devices, exports, connections and probes the
-  entries above describe exists for it, and the cn agent keeps the clone's
-  dm-clone metadata in the CN's arena (Clones). The clone drain's last
-  transaction gives its sides back with the clone (`dnv-worker.md` CLD9).
+  metadata, which is no part of that space. The sp worker drives its sides
+  as it drives a slice's — their requests, which carry the group's length
+  to zero (Side provisioning protocol) and the cntlrs a failover's fence
+  reads, their check rounds and health epochs, and their `provisioned`
+  flip — so each DN's agent builds, zeroes and exports its side like any
+  side (`dnv-worker.md` RW14, RW15, RW18, HL2), and leg repair runs over
+  its legs, with a precondition of its own (`dnv-worker.md` AR8).
+  The cn agent, whose cntlr request carries the clone with its group,
+  connects to none of its legs and assembles no array over them, so the
+  primary reports no row of its legs and the worker, which judges a leg by
+  that row, sets no health epoch on them, which leaves leg repair nothing to
+  act on; and the cn agent keeps the clone's dm-clone metadata in the CN's
+  arena (Clones). The clone drain's last transaction gives its sides back
+  with the clone (`dnv-worker.md` CLD9).
 * **transfer (xfer)** — The source-side counterpart of a clone: it exports
   a local namespace's raid0 over a dedicated subsystem so that another SP,
   possibly of another cluster, can clone from it. Fig. `100Transfer`
@@ -381,8 +387,8 @@ flowchart BT
     S1 -->|"ANA non-optimized"| B1["standby cntlr CNs …"]
 ```
 
-*Fig. `000DiskNode` — one DN: its extent area hands extents to the sides of
-slices it hosts, and each of them exports one path per cntlr of its SP.*
+*Fig. `000DiskNode` — one DN: its extent area hands extents to the sides it
+hosts; every side exports one path per cntlr of its SP.*
 
 Per DN, once (created by the dn agent at the first `SyncupDn`):
 
@@ -2375,8 +2381,8 @@ clones' clone meta groups included. Action: STM write and `SpRev` bump.
 Reply `sp_id`.
 
 **UpdateStoragePoolLevel** — Action: an STM sets `SpConf.sp_level` and
-bumps `SpRev`; workers propagate it to every side of the SP's slices and
-every cntlr (the field rides in both `Syncup*` requests). The levels are
+bumps `SpRev`; workers propagate it to every side and every cntlr of the
+SP (the field rides in both `Syncup*` requests). The levels are
 ordered, each including all restrictions of the levels before it; SpLevel
 gives their meaning and their purpose, staged disaster recovery and
 maintenance.
@@ -2492,7 +2498,7 @@ same way. The sp worker's writers of the entries — its health write for a
 cntlr (sp role), its failover and its cntlr replacement (Automatic
 reactions) — do not: they rewrite only the entries that exist and leave a
 missing one missing (`dnv-worker.md` MD6). The sp worker's next
-`SyncupSide` round tells every side of the SP's slices about the new
+`SyncupSide` round tells every side of the SP about the new
 standby (`side_conf.standby_id_list`), and the sides grow a dm-error,
 dm-linear and nvmet export for it (Disk node). Reply `cntlr_id`.
 
@@ -2953,17 +2959,19 @@ chunk keys in batches and then the `Clone` key together with its
 `clone_name_list` entry, giving the clone's metadata units back to the CN
 of every cntlr of the SP and the sides of its clone meta group back to
 their DNs in that transaction, which takes their pointers out of the DNs'
-records; no dn agent has built anything for those sides (Terminology and
-object model), so none has anything to remove (`dnv-worker.md` CLD5, CLD9;
-Metadata units).
+records. The sp worker drives those sides until then, and each DN's agent
+then sees its side's pointer disappear and tears the side down
+(`dnv-worker.md` CLD5, CLD9; Metadata units).
 
 No migration moves a leg of a clone meta group: `CreateMigration` refuses
 one of its sides `FAILED_PRECONDITION` naming the clone (Migrations), and
 the leg bitmap read, which only a migration uses, refuses one of its legs
 the same way (Bitmap reads). Reason: a clone is a copy in flight, and
 moving a leg of its group by migration would need a clone-keyed twin of the
-whole migration path. The spare leg calls take a clone meta group as they
-take a slice's, and refuse one whose clone is being deleted (Spare legs).
+whole migration path, while a leg of an md-raid1 clone meta group is
+replaced through a spare, by the spare leg calls (Spare legs). The spare
+leg calls take a clone meta group as they take a slice's, and refuse one
+whose clone is being deleted (Spare legs).
 
 Consequences, all of them following from the `Clone` key and its
 `clone_name_list` entry surviving until the last transaction: `DeleteClone`
@@ -3231,8 +3239,9 @@ written where a slice's would be, and a clone being deleted is refused
 `FAILED_PRECONDITION`, as every mutation of one but `DeleteClone` is
 (`dnv-worker.md` CLD1): its group goes back to its DNs at the end of its
 drain. The cntlrs' connections and md arrays that the actions below
-describe are those of a slice's group (Primary cntlr), and the sp worker's
-leg repair they name runs on a slice's group (`dnv-worker.md` AR8).
+describe are those of a slice's group (Primary cntlr); the sp worker's leg
+repair they name runs on both kinds of group, on a clone meta group with
+the rules `dnv-worker.md` AR8 adds for one.
 
 **CreateSpareLeg** — Errors: `NOT_FOUND` when `grp_id` is not in the SP;
 `INVALID_ARGUMENT` when the group is `RedundNone`; `RESOURCE_EXHAUSTED` at
@@ -3564,12 +3573,9 @@ not a hardware property — the kernel does not promise that a discarded
 region reads as zeros, and NVMe read-zeroes after deallocate is
 optional. Therefore **every side has the prefix its group needs zeroed
 before its first export**, tracked on disk as a byte count, gated by a
-CP-visible `provisioned` flag ([D15]). This holds for every new side of
-a slice's group: made with the pool, by a grow or an auto-grow, as a spare
-leg, or as a migration destination. A side of a clone meta group has a
-length to zero (below) and is never exported: no sp worker sends a
-request for it (`dnv-worker.md` RW14), so no dn agent allocates, zeroes or
-exports it, and no worker flips its `provisioned`.
+CP-visible `provisioned` flag ([D15]). This holds for every new side:
+made with the pool, by a grow or an auto-grow, as a spare leg, as a
+migration destination, or with a clone's clone meta group (Clones).
 
 **What is zeroed.** Every side of a group has the same length to zero
 from its start (Group on-leg layout: meta region, data region, health
@@ -3618,9 +3624,9 @@ blocks, which are multiples of `DnZeroAlign`, while `extent_size` need not
 be a multiple of it (Common validation), and the span needs no extent
 size, so the sp worker reads no cluster conf for it. The gateway stores
 nothing for the length, and no agent carries a second copy of the leg
-layout rule. A stored group of a slice whose block counts give no length
-is refused like an invalid stored geometry: the sp worker builds no
-request for its pool and runs no reaction for it (`dnv-worker.md` RW14,
+layout rule. A stored group whose block counts give no length, a clone
+meta group included, is refused like an invalid stored geometry: the sp
+worker builds no request for its pool and runs no reaction for it (`dnv-worker.md` RW14,
 AR1). The dn agent records the length when it allocates the side, and its
 conf gate refuses a length of zero, one that is not a multiple of
 `DnZeroAlign`, and one longer than the side (Common agent rules).
@@ -3662,13 +3668,16 @@ Allocation is permitted **only** at `provisioned` false: at true a
 missing record means the data is gone (a lost or foreign disk), and
 silently re-allocating would present a fresh impostor as the data-bearing
 leg, so it is a hard resource error on `side_dev_info` that feeds
-`err_epoch` and the replacement flows (raid1: the spare switch, which
-Automatic reactions performs after `leg_unhealthy`; `RedundNone`:
-effectively delete-SP). **The agent always trusts its own count over the
-flag** — the disk is authoritative ([D13]); the etcd flag is a gate,
-never evidence. A record whose extent total disagrees with `ext_cnt`, or
-whose length to zero disagrees with the request's, is an error. While the
-gate is closed every resource above the side device reports
+`err_epoch` and the replacement flows (on a slice's group: under raid1
+the spare switch, which Automatic reactions performs after
+`leg_unhealthy`, and under `RedundNone` effectively delete-SP; on a clone
+meta group, on which leg repair never fires: an operator's spare leg calls
+under raid1, or the clone's delete, `dnv-worker.md`, Known limits). **The
+agent always trusts its own count over the flag** — the disk is
+authoritative ([D13]); the etcd flag is a gate, never evidence. A record
+whose extent total disagrees with `ext_cnt`, or whose length to zero
+disagrees with the request's, is an error. While the gate is closed
+every resource above the side device reports
 `RES_STATUS_PROVISIONING`, and `RES_STATUS_ERROR` stays confined to
 `side_dev_info`. `SideInfo.zeroed_bytes` and `zero_bytes` are filled on
 every reply and every Check round; equal values, with the length above
@@ -3936,7 +3945,7 @@ start the background read that makes the next one, which a `Get*Info`
 never does (`dnagent.md` SH28, SH29):
 
 * **One stream per object.** The owning worker keeps one `CheckDn` per DN,
-  one `CheckSide` per side of an SP's slices (`dnv-worker.md` RW14), one
+  one `CheckSide` per side of an SP (`dnv-worker.md` RW14), one
   `CheckCn` per CN and one `CheckCntlr` per cntlr open for as long as it
   owns the object (Membership and shard ownership). A worker's open streams
   therefore grow with the objects its shards hold (Known limits). Rounds are
@@ -4207,7 +4216,7 @@ An sp-role worker watches the `SpRev` keys of each owned shard
 (`SpRevPrefix`); the key yields `cluster_id` and `sp_id`, the value the
 revision and `sp_name` — the `SpConf` key suffix, so this path needs no
 `sp_id_to_name` lookup ([D10]). On a bump it loads the SP and fans out
-`SyncupSide` to **every side** of the SP's slices and `SyncupCntlr` to
+`SyncupSide` to **every side** of the SP and `SyncupCntlr` to
 **every cntlr**, with the new revision; each request always carries the
 full desired state (Common agent rules), and each side's DN and each cntlr's CN
 is resolved by reading the `DnConf` or `CnConf` at the record's endpoint
@@ -4244,8 +4253,8 @@ in flight per migration or clone, in address order (`dnv-worker.md` BM2,
 BM3).
 
 The `Syncup*` replies and, continuously, the `CheckSide` and `CheckCntlr`
-streams the sp role keeps open to every side of its SPs' slices and every
-cntlr of its SPs (Check streams) feed health: `err_epoch` is set and
+streams the sp role keeps open to every side and every cntlr of its SPs
+(Check streams) feed health: `err_epoch` is set and
 cleared on the `Cntlr`, `Leg` and `Side` records accordingly, in STMs that
 bump no revision — a failing health block (Group on-leg layout: meta
 region, data region, health block) reported by the primary turns into
@@ -4268,9 +4277,10 @@ not pending and false while it is, and both sides' `cutover_pending` from
 the `Migration`; it flips `Side.provisioned` true, bumping `SpRev`, when
 an accepted reply reports the side's zeroing complete (`dnv-worker.md`
 RW18). The normal fan-out then re-syncs the sides, now exporting
-(`dnagent.md` DN10), and the cntlrs, now connecting (`cnagent.md` CN10);
-there are no long gRPC deadlines and no Check-round exemptions — every RPC
-stays short.
+(`dnagent.md` DN10), and the cntlrs, now connecting to a flipped side of a
+slice's group (`cnagent.md` CN10; the cn agent connects to no leg of a
+clone meta group, Terminology and object model); there are no long gRPC
+deadlines and no Check-round exemptions — every RPC stays short.
 
 **Cutover.** Beside the provisioned flip the sp role starts each
 migration's cutover, once the destination side reports that it waits for
@@ -4352,13 +4362,15 @@ The four reactions:
   (`dnv-worker.md` MD6). It
   deletes the old cntlr rather than demoting it, so it starts no demotion
   hold of its own (sp role).
-* **Leg repair** (`dnv-worker.md` AR8): a leg of a slice's group unhealthy
-  for `leg_unhealthy`, or unhealthy while its side has been unhealthy for
-  `side_unhealthy`, is switched out for a ready spare by an internal
-  `SwitchSpareLeg`; when the group has no spare on its way and room for
-  one, an internal
-  `CreateSpareLeg` makes one first (Spare legs). There is no migration
-  reaction (`dnv-worker.md`, Automatic reactions — `worker/reaction.go`).
+* **Leg repair** (`dnv-worker.md` AR8): a leg of a slice's group or of a
+  clone's clone meta group unhealthy for `leg_unhealthy`, or unhealthy
+  while its side has been unhealthy for `side_unhealthy`, is switched out
+  for a ready spare by an internal `SwitchSpareLeg`; when the group has no
+  spare on its way and room for one, an internal
+  `CreateSpareLeg` makes one first (Spare legs). On a clone meta group the
+  two ops are their clone-keyed twins, under the rules AR8 adds for one.
+  There is no migration reaction (`dnv-worker.md`, Automatic reactions —
+  `worker/reaction.go`).
 
 The worker never deletes user data on its own (`dnv-worker.md` AR9).
 
@@ -5680,8 +5692,8 @@ document and the component documents cite it by its id.
   The zeroing runs in the background, off the agent's locks and under the
   ordinary command timeouts (Common validation; Side provisioning
   protocol; `dnagent.md` DN9); a synchronous zeroing inside one
-  `SyncupSide` is not an option, because a meta group's side is zeroed
-  over its whole leg span and a node-read holder plus one queued
+  `SyncupSide` is not an option, because the side of a slice's meta group
+  is zeroed over its whole leg span and a node-read holder plus one queued
   `SyncupDn` writer would freeze the whole DN agent. The meta-region
   zeroing is also what lets the group assembly take a leg without a
   superblock for a fresh side, and dm-thin's whole-block writes are what
@@ -5845,8 +5857,8 @@ that component's document and only pointed to here.
   Scale-out is by storage pool: spread SPs, and so their primaries, across
   CNs.
 * **Revision granularity is the SP.** Any `SpRev` bump re-fans the complete
-  desired state to every side of the SP's slices and every cntlr of the SP
-  (Common agent rules, full sync; sp role). During initial provisioning
+  desired state to every side and every cntlr of the SP (Common agent
+  rules, full sync; sp role). During initial provisioning
   each side's `provisioned` flip is itself a bump, so a large SP's
   bring-up costs O(sides × (sides + cntlrs)) syncups; the sp role's
   allowance to batch several flips into one STM (`dnv-worker.md` RW18) is

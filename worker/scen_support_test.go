@@ -208,24 +208,23 @@ func (c *stdCluster) nextSpId(t *testing.T) uint64 {
 	return model.SpNextId(c.load(t).Conf)
 }
 
-// sideOf finds a side of the pool's slices by its id: its leg, whether that
-// leg is a spare, and the side; ok is false when no slice holds such a side.
+// sideOf finds a side of the pool by its id, in a slice's group or a clone's
+// clone meta group (poolGrps): its leg, whether that leg is a spare, and the
+// side; ok is false when the pool holds no such side.
 func (c *stdCluster) sideOf(t *testing.T, sideId uint64) (*pb.Leg, bool, *pb.Side, bool) {
 	t.Helper()
-	for _, slice := range c.load(t).Slices {
-		for _, grp := range append(slices.Clone(slice.GetMetaGrpList()), slice.GetDataGrpList()...) {
-			for _, leg := range grp.GetLegList() {
-				for _, side := range leg.GetSideList() {
-					if side.GetSideId() == sideId {
-						return leg, false, side, true
-					}
+	for _, grp := range poolGrps(c.load(t)) {
+		for _, leg := range grp.GetLegList() {
+			for _, side := range leg.GetSideList() {
+				if side.GetSideId() == sideId {
+					return leg, false, side, true
 				}
 			}
-			for _, leg := range grp.GetSpareLegList() {
-				for _, side := range leg.GetSideList() {
-					if side.GetSideId() == sideId {
-						return leg, true, side, true
-					}
+		}
+		for _, leg := range grp.GetSpareLegList() {
+			for _, side := range leg.GetSideList() {
+				if side.GetSideId() == sideId {
+					return leg, true, side, true
 				}
 			}
 		}

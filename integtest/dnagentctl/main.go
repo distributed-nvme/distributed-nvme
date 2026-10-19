@@ -431,8 +431,9 @@ func cmdSyncupSide(args []string) {
 	// (dnagent.md DN9).
 	zeroBytes := fs.Uint64("zero-bytes", 0,
 		"side_conf.zero_bytes — the bytes from the side's start zeroed "+
-			"before its gate opens: the whole leg for a side of a meta "+
-			"group, the meta region and first data block for a data group's")
+			"before its gate opens: the whole leg for a side of a slice's "+
+			"meta group, the meta region and first data block for a side "+
+			"of a data group or of a clone meta group")
 	fs.Var(&revision, "revision", "request revision")
 	fs.Var(&extCnt, "ext-cnt", "side size in DN VG extents")
 	fs.Var(&primaryCn, "primary-cn", "primary CN id")

@@ -32,11 +32,11 @@ suite drives the gateway with a dedicated test client, `gatewayctl`, not
 with `dnvctl`.
 
 The STM bodies of the public RPCs live in the per-resource files of
-`gateway/`. The three mutations `model` shares with the worker —
-`GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` — are reused, never
-duplicated (`dnv-worker.md` MD8), and so are the clone-keyed twins of the
-last two, `CreateCloneSpareLeg` and `SwitchCloneSpareLeg`, which the spare
-leg RPCs call on a clone meta group (`dnv-worker.md` MD6).
+`gateway/`. The five mutations `model` shares with the worker —
+`GrowSlice`, `CreateSpareLeg`, `SwitchSpareLeg` and the clone-keyed twins
+of the last two, `CreateCloneSpareLeg` and `SwitchCloneSpareLeg`, which the
+spare leg RPCs call on a clone meta group (`dnv-worker.md` MD6) — are
+reused, never duplicated (`dnv-worker.md` MD8).
 
 The package's files follow `layout.md`, Directory tree: serving and the
 trace-id mint (GW1 to GW3); the shared handler helpers — resolution, the
@@ -70,9 +70,9 @@ etcd key kind: it writes only kinds of `architecture.md`, Key table, and
 nothing that describes itself (GW1). The `model` exports it rests on are
 stated beside the rules that call them — `SpNextId` (GW12, GW19) and
 `TakeSpIds` (GW12), the revision bump helpers and the expected revision of
-the three shared mutations and their two clone-keyed twins (GW6), the
-list-range prefixes (GW10), and the conf resolvers and stored-conf
-validators (GW11); `model` itself is `dnv-worker.md`'s (MD1 to MD9).
+the five shared mutations (GW6), the list-range prefixes (GW10), and the
+conf resolvers and stored-conf validators (GW11); `model` itself is
+`dnv-worker.md`'s (MD1 to MD9).
 
 ### Constants this document owns
 
@@ -256,11 +256,11 @@ its candidate unit (GW9): their later transactions — the deciding STM, which
 is the `model` op the sp worker shares, and `GrowSlice`'s CN-budget
 pre-check — take the cluster id, and the `ClusterConf` where they use it,
 from that snapshot and never read `ClusterConf` themselves; on a clone meta
-group the deciding STM of the two spare leg RPCs is the clone-keyed twin of
-the shared op (Spare legs). The **paged** `List*` RPCs use plain reads, not
-an STM (`architecture.md`, page_token; GW10). `ListThinDevices`,
-`ListSubsystems` and the single-object `Get*` RPCs are one-STM consistency
-reads (Thin devices, Subsystems and namespaces, Clones).
+group the deciding STM of the two spare leg RPCs is that op's clone-keyed
+twin, which the sp worker shares too (Spare legs). The **paged** `List*`
+RPCs use plain reads, not an STM (`architecture.md`, page_token; GW10).
+`ListThinDevices`, `ListSubsystems` and the single-object `Get*` RPCs are
+one-STM consistency reads (Thin devices, Subsystems and namespaces, Clones).
 
 GW6. **Token check, presence-based.** The token is the request's revision
 token: its `DnRev`, `CnRev` or `SpRev` message. The contract — presence,
@@ -300,9 +300,9 @@ through `openSpRead`, which has no `deleting` gate, before its
 `ABORTED`, phase 1's other answers — `NOT_FOUND` for an unknown clone among
 them — and the hydration check's agent call all come ahead of it (Clones).
 
-The three `model` mutations the gateway shares with the worker —
-`GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` — and the clone-keyed
-twins of the last two take an expected revision and re-check it first inside
+The five `model` mutations the gateway shares with the worker —
+`GrowSlice`, `CreateSpareLeg`, `SwitchSpareLeg` and the clone-keyed twins
+of the last two — take an expected revision and re-check it first inside
 their own STM, zero skipping the check (`dnv-worker.md` MD6); a mismatch is
 an `ErrPrecondition` with `ReasonStaleRevision`. The gateway passes the
 token's revision, which is zero exactly when the request carried no token
@@ -392,9 +392,9 @@ uncommitted (`dnv-worker.md` EU4).
   candidate unit that did not settle — its ctx ended, or its rounds reached
   GW9's cap.
 
-`model.ErrNotFound` maps to `NOT_FOUND`, though none of the three shared
-mutations and their clone-keyed twins (GW6) returns it: when the SP its
-handler resolved is gone by the time the mutation's own STM runs,
+`model.ErrNotFound` maps to `NOT_FOUND`, though none of the five shared
+mutations (GW6) returns it: when the SP its handler resolved is gone by
+the time the mutation's own STM runs,
 `checkSpRev` or `loadSpConfForOp` refuses with an `ErrPrecondition`, so the
 client sees `FAILED_PRECONDITION`. An `ErrPrecondition` with reason
 "candidate changed" maps to nothing (GW9).

@@ -490,7 +490,9 @@ func TestCloneDrainArmsAfterACommittedBatch(t *testing.T) {
 
 // TestCloneExclusionFromThePlans is CLD5: a latched clone is fully absent from
 // every cntlr's clone_list and from the primary's chunk-push plans, at every
-// sp_level, while a sibling clone of the same SP keeps converging.
+// sp_level, while a sibling clone of the same SP keeps converging. The sides
+// of its clone meta group are not excluded: they stay driven until the final
+// STM (CLD9) takes them from their DNs.
 //
 // Full absence is deliberately distinct from level suppression. A
 // level-suppressed clone (SP_LEVEL_NO_CLONE) keeps its local chunk files for a
@@ -516,10 +518,22 @@ func TestCloneExclusionFromThePlans(t *testing.T) {
 				state.Conf.GetCloneNameList(), "clone1")
 			state.Clones["clone1"] = &pb.Clone{CloneId: spCloneId + 1}
 			state.CloneBmIdx["clone1"] = []model.BmChunk{{SliceIdx: 0, Idx: 0}}
+			withCloneGrp(state)
 			state.Clones[spCloneNm].Deleting = true
 
 			w := spTestWorker(nil)
 			plan := w.buildPlan(context.Background(), state)
+			for _, key := range []sideKey{
+				cloneSideKey(spCloneLegA, spCloneSideA),
+				cloneSideKey(spCloneLegB, spCloneSideB),
+				cloneSideKey(spCloneLegSpare, spCloneSideSpare),
+			} {
+				if side := plan.sides[key]; side == nil ||
+					!side.cloneDeleting {
+					t.Errorf("the deleting clone's side %+v is not driven "+
+						"as a deleting clone's: %+v", key, side)
+				}
+			}
 			primary := plan.cntlrs[spCntlrPrimary]
 			if primary == nil {
 				t.Fatalf("no plan for the primary cntlr")

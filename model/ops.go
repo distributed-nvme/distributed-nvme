@@ -93,11 +93,12 @@ const ReasonCandidateChanged = "candidate changed"
 // not two.
 const ReasonGrowPending = "grow_pending"
 
-// ReasonSpareUnprovisioned is the Reason a CreateSpareLeg carries when a spare
-// of the group still has an unprovisioned side (UnprovisionedSpare). It is
-// exported for the reason ReasonGrowPending is: worker/reaction.go logs the
-// SAME `reaction skipped reason=` string when its pass holds the group on
-// that rule before it would call the op.
+// ReasonSpareUnprovisioned is the Reason a CreateSpareLeg, or its clone-keyed
+// twin CreateCloneSpareLeg, carries when a spare of the group still has an
+// unprovisioned side (UnprovisionedSpare). It is exported for the reason
+// ReasonGrowPending is: worker/reaction.go logs the SAME `reaction skipped
+// reason=` string when its pass holds the group on that rule before it would
+// call the op.
 const ReasonSpareUnprovisioned = "spare_unprovisioned"
 
 // ReasonGrpListFull is the Reason a GrowSlice carries when the slice's group
@@ -116,12 +117,12 @@ const ReasonGrpListFull = "grp_list_full"
 // filled the list after the gateway's own pre-check.
 const ReasonSpareListFull = "spare list full"
 
-// ReasonStaleRevision is the Reason the three ops the gateway shares with the
-// worker, and the two clone-keyed spare twins, carry when their expectRev
-// argument does not match the stored SpRev.revision (gateway.md GW6). The
-// gateway maps exactly this reason to ABORTED "stale revision" (GW7); every
-// other ErrPrecondition reason is a FAILED_PRECONDITION, so the two must be
-// distinguishable by string.
+// ReasonStaleRevision is the Reason the five ops the gateway shares with the
+// worker — GrowSlice, the two spare ops and their clone-keyed twins — carry
+// when their expectRev argument does not match the stored SpRev.revision
+// (gateway.md GW6). The gateway maps exactly this reason to ABORTED "stale
+// revision" (GW7); every other ErrPrecondition reason is a
+// FAILED_PRECONDITION, so the two must be distinguishable by string.
 const ReasonStaleRevision = "stale revision"
 
 // fail builds one precondition failure (MD7).
@@ -531,12 +532,11 @@ func loadSpConfForOp(
 	return conf, nil
 }
 
-// checkSpRev is the optimistic-concurrency gate the gateway asks the three
-// shared ops, and their two clone-keyed spare twins, to apply before they
-// touch anything (gateway.md GW6;
-// architecture.md, Revision keys and the sync fan-out):
-// the stored SpRev.revision MUST equal expectRev. expectRev 0 skips the check
-// entirely, which is what the worker's own internal calls pass — the worker
+// checkSpRev is the optimistic-concurrency gate the gateway asks the five ops
+// it shares with the worker to apply before they touch anything (gateway.md
+// GW6; architecture.md, Revision keys and the sync fan-out): the stored
+// SpRev.revision MUST equal expectRev. expectRev 0 skips the check entirely,
+// which is what the worker's own internal calls pass — the worker
 // converges on what etcd holds and carries no client token. The gateway passes
 // 0 for the same reason: GW6 is presence-based, so a request that carried no
 // token message is unchecked at the handler and unchecked here too. A request
@@ -586,9 +586,9 @@ func BumpSpRev(
 
 // bumpSpRevTo is BumpSpRev that also returns the revision it writes: the
 // revision the STM commits when it commits, which an op that reports it
-// hands its caller (FlipProvisioned, StartCutover) so the "flip applied"
-// record (dnv-worker.md, Log records) names that revision and never a later
-// one read back.
+// hands its caller (FlipProvisioned, FlipCloneProvisioned, StartCutover) so
+// the "flip applied" record (dnv-worker.md, Log records) names that revision
+// and never a later one read back.
 func bumpSpRevTo(
 	s etcdutil.STM,
 	op string,
@@ -2863,11 +2863,13 @@ func CreateCloneSpareLeg(
 // order, that has a side still unprovisioned — any side, so a spare with a
 // migration's second side counts while that side is unprovisioned — or nil.
 //
-// It lives here, not in worker/reaction.go, because AR8 step 3 applies it in
-// two places: CreateSpareLeg as the precondition AR2 requires it to re-validate
-// inside its STM, and the pass as the hold that keeps a spare stuck
+// It lives here, not in worker/reaction.go, because AR8 step 3 applies it
+// both in the ops and in the pass: CreateSpareLeg and its clone-keyed twin
+// CreateCloneSpareLeg as the precondition AR2 requires them to re-validate
+// inside their STMs, and the pass as the hold that keeps a spare stuck
 // unprovisioned — its DN gone while it zeroed — from ending every pass on the
-// op's refusal. One rule, one implementation, so the two cannot disagree.
+// op's refusal. One rule, one implementation, so the ops and the pass cannot
+// disagree.
 func UnprovisionedSpare(grp *pb.Group) *pb.Leg {
 	for _, spare := range grp.GetSpareLegList() {
 		for _, side := range spare.GetSideList() {

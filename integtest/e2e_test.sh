@@ -282,9 +282,9 @@ REACT_SLICE_CAP=8
 # common.MinDnExtSize — 64 MiB, the smallest extent validateDnBinConf
 # (gateway/validate.go) accepts. Small extents are what keep the run's
 # real allocation inside the E2E5 caps: every group here is one extent per
-# leg, which a meta group's zeroing allocates whole and a data group's only
-# as far as its meta region and first data block, the rest as it is written
-# (see BACKING_SIZE).
+# leg, which a slice's meta group's zeroing allocates whole and a data
+# group's or a clone meta group's only as far as its meta region and first
+# data block, the rest as it is written (see BACKING_SIZE).
 # Cluster-scoped and WRITE-ONCE (no UpdateCluster RPC), so it is only ever
 # applied by `cluster create --extent-size` against an EMPTY etcd.
 EXTENT_SIZE=67108864
@@ -463,12 +463,12 @@ WORKER_ROLES="dn cn sp"
 # hole punch (measured on the lab's 7.0 guests: `stat %b` grows by
 # the zeroed length). So a side costs its backing file what its disk node
 # zeroes whether or not anything writes it: a meta side all of its extents,
-# a data side its meta region and first data block (architecture.md, Side
-# provisioning protocol). The rest of a data side allocates only as it is
-# written — a host's writes through dm-thin, which writes every block it
-# provisions whole, md's rebuild onto a spare, a migration's copy — and a
-# fresh file also carries the backing pattern below. The E2E5 caps count all
-# of it.
+# a data side or a side of a clone meta group its meta region and first data
+# block (architecture.md, Side provisioning protocol). The rest of a data side
+# allocates only as it is written — a host's writes through dm-thin, which
+# writes every block it provisions whole, md's rebuild onto a spare, a
+# migration's copy — and a fresh file also carries the backing pattern below.
+# The E2E5 caps count all of it.
 BACKING_SIZE=2G
 
 # common.DnDataOffset — where the extent area begins on a dn agent's disk:
@@ -1763,15 +1763,16 @@ derive_params() {
 	# agent's own on-disk metadata in its backing file, the shipped binaries
 	# and pattern, the host pattern files, the CN tmpfs arenas, the sides a
 	# case adds after the create (a grow, a spare leg, a migration
-	# destination, each zeroed as any side of its group), and every byte
-	# written into a data region: a host's writes, for which dm-thin writes
-	# whole blocks, md's rebuild onto a spare, a migration's copy, a clone's
-	# hydration. The CN thin metadata, the md superblocks and bitmaps and the
-	# health blocks cost nothing more here: they land in bytes the zeroing has
-	# already allocated, a meta side whole and a data side's meta region. The
-	# cp's etcd and logs are the heaviest contributors after a smoke case;
-	# 4 GiB leaves room for the copy and react cases, which write more, while
-	# still being a number a real leak would cross.
+	# destination, a clone's clone meta group, each zeroed as any side of its
+	# group), and every byte written into a data region: a host's writes, for
+	# which dm-thin writes whole blocks, md's rebuild onto a spare, a
+	# migration's copy, a clone's hydration. The CN thin metadata, the md
+	# superblocks and bitmaps and the health blocks cost nothing more here:
+	# they land in bytes the zeroing has already allocated, a meta side whole
+	# and a data side's meta region. The cp's etcd and logs are the heaviest
+	# contributors after a smoke case; 4 GiB leaves room for the copy and
+	# react cases, which write more, while still being a number a real leak
+	# would cross.
 	#
 	# The react twins of the first and the third, REACT_SP_ZERO_BYTES and
 	# REACT_RUN_CAP_BYTES, are at the end; RUN_SLACK_BYTES serves both.
@@ -5691,9 +5692,9 @@ MEM_MIN_BYTES=$((2 << 30))
 # and the real figure is far below the cap because a DN holds few sides: a
 # backing file costs the backing pattern, what the agent's
 # `blkdiscard --zeroout` allocates for its sides — a meta side's whole
-# extent, a data side's meta region and first data block — and what is
-# written into them (see BACKING_SIZE), and the create puts at most one side
-# of the sp on any DN.
+# extent, a data side's or a clone meta group's side's meta region and first
+# data block — and what is written into them (see BACKING_SIZE), and the
+# create puts at most one side of the sp on any DN.
 FREE_MIN_NODE=$((4 << 30))
 FREE_PER_DN=$((64 << 20))
 FREE_MIN_CP=$((2 << 30))
@@ -9817,15 +9818,16 @@ read_space() { # <helper wrapper> <index|""> <label>
 #                 agent's `blkdiscard --zeroout` into an allocating fallocate
 #                 (see BACKING_SIZE), so what a DN zeroes for a side costs
 #                 its file whether or not anything writes it — a meta side
-#                 its whole extent, a data side its meta region and first data
-#                 block — and every byte written into a data side allocates
-#                 too, which a spare's full rebuild takes to the side's whole
-#                 extent. Nothing in the dn agent discards a freed side's
-#                 extents. The cap — four 64 MiB extents — thus bounds, in
-#                 effect, how many extents' worth one DN has zeroed or had
-#                 written through its sides since its backing file was created
-#                 (a fresh one per case): four of them, the pattern and the
-#                 agent's own on-disk metadata are already over it.
+#                 its whole extent, a data side or a clone meta group's side
+#                 its meta region and first data block — and every byte
+#                 written into a data side allocates too, which a spare's
+#                 full rebuild takes to the side's whole extent. Nothing in
+#                 the dn agent discards a freed side's extents. The cap — four
+#                 64 MiB extents — thus bounds, in effect, how many extents'
+#                 worth one DN has zeroed or had written through its sides
+#                 since its backing file was created (a fresh one per case):
+#                 four of them, the pattern and the agent's own on-disk
+#                 metadata are already over it.
 #   RUN_CAP_BYTES everything this run wrote on all ten guests, $WORK plus
 #                 $TMPFS_DIR. The tmpfs is counted separately because it is NOT
 #                 under $WORK: CnTmpfsPath is fixed at common.DefaultTmpfsPrefix

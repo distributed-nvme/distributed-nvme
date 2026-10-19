@@ -209,12 +209,13 @@ Backing files are created sparse but for the backing pattern, one random
 pattern for the whole run, written before the agent starts at two places of
 the first extent: where a data group's side placed there has its first data
 block, and at the end of the extent. A loop device allocates what it zeroes
-(`dnagent_integtest.md`, Assumptions and preflight checks). A meta group's
-side is zeroed whole and a data group's side only over its first blocks
-(`architecture.md`, Side provisioning protocol), so what a host or md writes
-into a data group's side allocates too. The allocation caps, one per backing
-file and one for the whole run at what the pool's own sides zero plus slack,
-count both and the pattern, and are asserted after every case.
+(`dnagent_integtest.md`, Assumptions and preflight checks). A side of a
+slice's meta group is zeroed whole, and a data group's side and a clone meta
+group's side only over their first blocks (`architecture.md`, Side
+provisioning protocol), so what a host or md writes into a data group's side
+allocates too. The allocation caps, one per backing file and one for the
+whole run at what the pool's own sides zero plus slack, count both and the
+pattern, and are asserted after every case.
 
 E2E6. **Cleanup runs unconditionally at the start, and only on success at the
 end.** `cleanup_all` runs before anything is built, between cases, at the end

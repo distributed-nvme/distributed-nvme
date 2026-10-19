@@ -1041,16 +1041,14 @@ type wideLegSide struct {
 	side *pb.Side
 }
 
-// wideSides lists every side of a load, spare legs' included.
+// wideSides lists every side of a load, spare legs' included, the clones'
+// clone meta groups' too (poolGrps).
 func wideSides(state *model.SpState) []wideLegSide {
 	var out []wideLegSide
-	for _, sliceId := range state.Conf.GetSliceIdList() {
-		slice := state.Slices[sliceId]
-		for _, grp := range append(slices.Clone(slice.GetMetaGrpList()), slice.GetDataGrpList()...) {
-			for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
-				for _, side := range leg.GetSideList() {
-					out = append(out, wideLegSide{leg, side})
-				}
+	for _, grp := range poolGrps(state) {
+		for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
+			for _, side := range leg.GetSideList() {
+				out = append(out, wideLegSide{leg, side})
 			}
 		}
 	}

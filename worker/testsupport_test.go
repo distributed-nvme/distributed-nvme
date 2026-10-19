@@ -653,16 +653,20 @@ func (s *fakeStore) has(key string) bool {
 // ---------------------------------------------------------------------------
 
 // healthWrite is one recorded err_epoch write (HL3). settle is a cntlr
-// write's request to clear the record's settling flag too (HL2).
+// write's request to clear the record's settling flag too (HL2). A leg's or a
+// side's write names the slice that holds it in sliceId or, for a leg or a
+// side of a clone meta group, the clone in cloneName and cloneId.
 type healthWrite struct {
-	record  string
-	cid     uint64
-	addr    string
-	spId    uint64
-	sliceId uint64
-	objId   uint64
-	epoch   uint64
-	settle  bool
+	record    string
+	cid       uint64
+	addr      string
+	spId      uint64
+	sliceId   uint64
+	cloneName string
+	cloneId   uint64
+	objId     uint64
+	epoch     uint64
+	settle    bool
 }
 
 // fakeHealthWriter records the MD6 ops health.go would have run.
@@ -756,6 +760,36 @@ func (w *fakeHealthWriter) setSideErrEpoch(
 	return w.record(healthWrite{
 		record: healthRecordSide, cid: cid, spId: spId,
 		sliceId: sliceId, objId: sideId, epoch: epoch,
+	})
+}
+
+func (w *fakeHealthWriter) setCloneLegErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	legId uint64,
+	epoch uint64,
+) error {
+	return w.record(healthWrite{
+		record: healthRecordLeg, cid: cid, spId: spId,
+		cloneName: cloneName, cloneId: cloneId, objId: legId, epoch: epoch,
+	})
+}
+
+func (w *fakeHealthWriter) setCloneSideErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	return w.record(healthWrite{
+		record: healthRecordSide, cid: cid, spId: spId,
+		cloneName: cloneName, cloneId: cloneId, objId: sideId, epoch: epoch,
 	})
 }
 

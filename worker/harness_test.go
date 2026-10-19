@@ -1144,18 +1144,37 @@ func (c *stdCluster) cnAgent(id uint64) *agentfake.Agent {
 	return c.h.fleet.Agent(stdCnAddr(id))
 }
 
+// poolGrps is every group of a load whose sides the pool's coordinator
+// drives (dnv-worker.md RW14): the meta and then the data groups of every
+// slice, in slice_id_list order, and then the clone meta group of every
+// clone, in clone_name_list order, a clone being deleted included and a
+// clone with no group adding none. The harness's walks over a pool's legs and
+// sides go through it, so none of them leaves the clone meta groups out.
+func poolGrps(state *model.SpState) []*pb.Group {
+	var grps []*pb.Group
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		slice := state.Slices[sliceId]
+		grps = append(grps, slice.GetMetaGrpList()...)
+		grps = append(grps, slice.GetDataGrpList()...)
+	}
+	for _, name := range state.Conf.GetCloneNameList() {
+		if grp := state.Clones[name].GetMetaGrp(); grp != nil {
+			grps = append(grps, grp)
+		}
+	}
+	return grps
+}
+
 // sideAgent is the fake that holds a side by the pool's record, and the
 // side's object key there.
 func (c *stdCluster) sideAgent(t *testing.T, sideId uint64) (*agentfake.Agent, string) {
 	t.Helper()
-	for _, slice := range c.load(t).Slices {
-		for _, grp := range append(slices.Clone(slice.GetMetaGrpList()), slice.GetDataGrpList()...) {
-			for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
-				for _, side := range leg.GetSideList() {
-					if side.GetSideId() == sideId {
-						return c.h.fleet.Agent(side.GetAddrPort()),
-							agentfake.SideKey(stdSpId, leg.GetLegId(), sideId)
-					}
+	for _, grp := range poolGrps(c.load(t)) {
+		for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
+			for _, side := range leg.GetSideList() {
+				if side.GetSideId() == sideId {
+					return c.h.fleet.Agent(side.GetAddrPort()),
+						agentfake.SideKey(stdSpId, leg.GetLegId(), sideId)
 				}
 			}
 		}
@@ -1343,9 +1362,10 @@ func cntlrPtrSet(list []*pb.CntlrPointer) string {
 // convergedNow reads etcd and the fakes once and reports whether the cluster
 // has converged, as waitConverged defines it, short of the rounds after it:
 // every object's fake keeps a syncup at the revision its key holds with the
-// planted content (storedSyncup), every side is provisioned, the thin device
-// created, the primary settled, and no health epoch is set. It returns why
-// not, and every object's fake with its counts.
+// planted content (storedSyncup), every side — of the slices' groups and of
+// the clones' clone meta groups alike (poolGrps) — is provisioned, the thin
+// device created, the primary settled, and no health epoch is set. It returns
+// why not, and every object's fake with its counts.
 func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 	t.Helper()
 	conv := convergence{
@@ -1400,33 +1420,30 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 	}
 	state := c.load(t)
 	conv.spRev = state.SpRevision
-	for _, sliceId := range state.Conf.GetSliceIdList() {
-		slice := state.Slices[sliceId]
-		for _, grp := range append(slices.Clone(slice.GetMetaGrpList()), slice.GetDataGrpList()...) {
-			for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
-				if leg.GetErrEpoch() != 0 {
-					note("leg %d: err_epoch %d", leg.GetLegId(), leg.GetErrEpoch())
-				}
-				for _, side := range leg.GetSideList() {
-					name := fmt.Sprintf("side %d", side.GetSideId())
-					agent := c.h.fleet.Agent(side.GetAddrPort())
-					key := agentfake.SideKey(stdSpId, leg.GetLegId(), side.GetSideId())
-					msg, syncups, rounds := storedSyncup(agent, key)
-					conv.objs = append(conv.objs, objProgress{name, agent, key, syncups, rounds})
-					req, _ := msg.(*pb.SyncupSideRequest)
-					switch {
-					case !side.GetProvisioned():
-						note("%s: not provisioned", name)
-					case side.GetErrEpoch() != 0:
-						note("%s: err_epoch %d", name, side.GetErrEpoch())
-					case req == nil:
-						note("%s: keeps no SyncupSide yet", name)
-					case req.GetRevision() != state.SpRevision:
-						note("%s: keeps a SyncupSide at revision %d, SpRev %d", name,
-							req.GetRevision(), state.SpRevision)
-					case !req.GetSideConf().GetProvisioned():
-						note("%s: keeps a SyncupSide that says not provisioned", name)
-					}
+	for _, grp := range poolGrps(state) {
+		for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
+			if leg.GetErrEpoch() != 0 {
+				note("leg %d: err_epoch %d", leg.GetLegId(), leg.GetErrEpoch())
+			}
+			for _, side := range leg.GetSideList() {
+				name := fmt.Sprintf("side %d", side.GetSideId())
+				agent := c.h.fleet.Agent(side.GetAddrPort())
+				key := agentfake.SideKey(stdSpId, leg.GetLegId(), side.GetSideId())
+				msg, syncups, rounds := storedSyncup(agent, key)
+				conv.objs = append(conv.objs, objProgress{name, agent, key, syncups, rounds})
+				req, _ := msg.(*pb.SyncupSideRequest)
+				switch {
+				case !side.GetProvisioned():
+					note("%s: not provisioned", name)
+				case side.GetErrEpoch() != 0:
+					note("%s: err_epoch %d", name, side.GetErrEpoch())
+				case req == nil:
+					note("%s: keeps no SyncupSide yet", name)
+				case req.GetRevision() != state.SpRevision:
+					note("%s: keeps a SyncupSide at revision %d, SpRev %d", name,
+						req.GetRevision(), state.SpRevision)
+				case !req.GetSideConf().GetProvisioned():
+					note("%s: keeps a SyncupSide that says not provisioned", name)
 				}
 			}
 		}

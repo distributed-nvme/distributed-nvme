@@ -226,7 +226,8 @@ type reactionCall struct {
 	spareLegId  uint64
 	targetLegId uint64
 	now         uint64
-	// The clone drain's target, for the CLD7 derivation assertions.
+	// The clone drain's target, for the CLD7 derivation assertions, and the
+	// clone of a clone-keyed spare op (AR8 on a clone meta group).
 	cloneName string
 	cloneId   uint64
 	// The plan a replacement was scanned against (AR7's spCnAddrs).
@@ -437,6 +438,47 @@ func (o *fakeReactionOps) switchSpareLeg(
 	})
 }
 
+// The clone-keyed twins of the two spare ops (AR8 on a clone meta group)
+// record the clone they were handed where the slice's record a slice.
+
+func (o *fakeReactionOps) createCloneSpareLeg(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+	grpId uint64,
+	dn model.Cand,
+	grpDnAddrs []string,
+	cc *pb.ClusterConf,
+) (uint64, error) {
+	err := o.record(reactionCall{
+		op: "create_clone_spare", cloneName: cloneName, cloneId: cloneId,
+		grpId: grpId, legs: []model.Cand{dn}, grpDn: grpDnAddrs,
+	})
+	return 888, err
+}
+
+func (o *fakeReactionOps) switchCloneSpareLeg(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+	grpId uint64,
+	spareLegId uint64,
+	targetLegId uint64,
+) error {
+	return o.record(reactionCall{
+		op: "switch_clone_spare", cloneName: cloneName, cloneId: cloneId,
+		grpId: grpId, spareLegId: spareLegId, targetLegId: targetLegId,
+	})
+}
+
 // The three sp-drain ops (SPD9/SPD10/SPD12). They record like every other
 // mutation — wantOps() therefore pins the drain's phase order exactly as it
 // pins a reaction's — and report the harness's canned counts.
@@ -620,8 +662,10 @@ func syncupVerdict(memo *verdictMemo, cntlrId uint64, unhealthy bool) {
 }
 
 // judgeStoredEpochs notes a verdict of unhealthy in memo for every cntlr, leg
-// and side of state whose err_epoch is set — for a cntlr, failoverRun of them
-// from rounds, the run AR5's threshold trigger needs (AR10).
+// and side of state whose err_epoch is set — the legs and sides of the
+// slices and of the clones' clone meta groups alike — and for a cntlr,
+// failoverRun of them from rounds, the run AR5's threshold trigger needs
+// (AR10).
 func judgeStoredEpochs(memo *verdictMemo, state *model.SpState) {
 	for cntlrId, cntlr := range state.Cntlrs {
 		if cntlr.GetErrEpoch() != 0 {
@@ -630,22 +674,29 @@ func judgeStoredEpochs(memo *verdictMemo, state *model.SpState) {
 			}
 		}
 	}
+	var grps []*pb.Group
 	for _, slice := range state.Slices {
-		for _, grp := range allGroups(slice) {
-			for _, list := range [][]*pb.Leg{
-				grp.GetLegList(), grp.GetSpareLegList(),
-			} {
-				for _, leg := range list {
-					if leg.GetErrEpoch() != 0 {
-						memo.noteLeg(leg.GetLegId(), true)
-					}
-					for _, side := range leg.GetSideList() {
-						if side.GetErrEpoch() != 0 {
-							memo.noteSide(sideKey{
-								legId:  leg.GetLegId(),
-								sideId: side.GetSideId(),
-							}, true)
-						}
+		grps = append(grps, allGroups(slice)...)
+	}
+	for _, clone := range state.Clones {
+		if grp := clone.GetMetaGrp(); grp != nil {
+			grps = append(grps, grp)
+		}
+	}
+	for _, grp := range grps {
+		for _, list := range [][]*pb.Leg{
+			grp.GetLegList(), grp.GetSpareLegList(),
+		} {
+			for _, leg := range list {
+				if leg.GetErrEpoch() != 0 {
+					memo.noteLeg(leg.GetLegId(), true)
+				}
+				for _, side := range leg.GetSideList() {
+					if side.GetErrEpoch() != 0 {
+						memo.noteSide(sideKey{
+							legId:  leg.GetLegId(),
+							sideId: side.GetSideId(),
+						}, true)
 					}
 				}
 			}

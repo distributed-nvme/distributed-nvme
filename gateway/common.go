@@ -117,10 +117,10 @@ func mapStmErr(err error) error {
 	return errAborted("%v", err)
 }
 
-// mapModelErr maps an error returned by one of the three model ops the
+// mapModelErr maps an error returned by one of the five model ops the
 // gateway shares with the worker — GrowSlice, CreateSpareLeg, SwitchSpareLeg
-// — or by the clone-keyed twins of the last two, CreateCloneSpareLeg and
-// SwitchCloneSpareLeg, each of which runs its own STM, onto GW7.
+// and the clone-keyed twins of the last two, CreateCloneSpareLeg and
+// SwitchCloneSpareLeg — each of which runs its own STM, onto GW7.
 //
 // ReasonStaleRevision is the token check the gateway asked the op to run and
 // is ABORTED; ReasonCandidateChanged never reaches a client (GW9: the caller

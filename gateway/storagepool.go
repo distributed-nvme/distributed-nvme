@@ -1108,8 +1108,8 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 //
 // The level is not applied here in any sense — it rides in both Syncup*
 // requests, so the bump is the whole mechanism: the workers see the new SpRev,
-// re-push every side of the SP's slices and every cntlr, and the agents tear
-// the stack down to whatever the level allows.
+// re-push every side and every cntlr of the SP, and the agents tear the stack
+// down to whatever the level allows.
 //
 // It is written and bumped unconditionally even when the level is unchanged:
 // GW6's idempotent no-write covers the three Update*Enabled/Disabled RPCs

@@ -390,15 +390,15 @@ const (
 // running until the side's length to zero is zeroed.
 //
 // That length is side_conf.zero_bytes, which the sp worker derives from the
-// side's group: the whole leg for a side of a meta group, which holds the thin
-// pool's metadata, and the meta region plus the first data block for a side
-// of a data group. Those are the parts of a side that must read as zeros
-// (architecture.md, Side provisioning protocol), and discard-reads-zeros is
-// not a hardware guarantee, so `blkdiscard --zeroout` is what actually puts
-// the zeros there; the rest of a data side is never zeroed, because dm-thin
-// never lets a host read a block it has not written ([D15]). The counts live
-// in the record because zeroed is a property of the side's *allocation*, not
-// of the disk extent.
+// side's group: the whole leg for a side of a slice's meta group, which holds
+// the thin pool's metadata, and the meta region plus the first data block for
+// a side of a data group or of a clone meta group. Those are the parts of a
+// side that must read as zeros (architecture.md, Side provisioning protocol),
+// and discard-reads-zeros is not a hardware guarantee, so `blkdiscard
+// --zeroout` is what actually puts the zeros there; the rest of a data side
+// is never zeroed, because dm-thin never lets a host read a block it has not
+// written ([D15]). The counts live in the record because zeroed is a
+// property of the side's *allocation*, not of the disk extent.
 //
 // The six rows of the converge matrix of dnagent.md DN9 (request provisioned
 // × local state):

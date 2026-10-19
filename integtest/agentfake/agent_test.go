@@ -853,7 +853,7 @@ func TestForcedReplyCodeRejects(t *testing.T) {
 // cntlrFixture is a SyncupCntlrRequest shaped like worker_test.sh's cases,
 // which the derivation tests assert against: two slices, a meta and a data
 // group with a spare leg each, two tds, one subsystem with two namespaces, one
-// clone and one xfer.
+// clone with a clone meta group of two legs and a spare, and one xfer.
 func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
 	return &pb.SyncupCntlrRequest{
 		ClusterId:    1,
@@ -904,8 +904,28 @@ func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
 				},
 			},
 		},
-		CloneList: []*pb.Clone{{CloneId: 41, DstTdId: 7}},
-		XferList:  []*pb.Transfer{{XferId: 51}},
+		CloneList: []*pb.Clone{{
+			CloneId: 41,
+			DstTdId: 7,
+			MetaGrp: &pb.Group{
+				GrpId:  71,
+				ExtCnt: 1,
+				LegList: []*pb.Leg{
+					{LegId: 711, LegIdx: 0, SideList: []*pb.Side{
+						{SideId: 7111, Provisioned: true},
+					}},
+					{LegId: 712, LegIdx: 1, SideList: []*pb.Side{
+						{SideId: 7121, Provisioned: true},
+					}},
+				},
+				SpareLegList: []*pb.Leg{
+					{LegId: 713, LegIdx: 2, SideList: []*pb.Side{
+						{SideId: 7131},
+					}},
+				},
+			},
+		}},
+		XferList: []*pb.Transfer{{XferId: 51}},
 	}
 }
 
@@ -940,6 +960,7 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	setBehavior(t, agent, `{
 	  "objects": {"cntlr 1:1": {"rows": {
 	    "leg_id_to_leg.103": {"status": "ERROR", "details": "probe timeout"},
+	    "leg_id_to_leg.712": {"status": "ERROR", "details": "probe timeout"},
 	    "slice_id_to_dm_pool.1": {"details": "0 8192 thin-pool 5 40/1024"}
 	  }}}
 	}`)
@@ -956,11 +977,14 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	wantKeys(t, "slice_id_to_dm_pool", info.GetSliceIdToDmPool(), 1, 2)
 	wantKeys(t, "slice_id_to_meta", info.GetSliceIdToMeta(), 1, 2)
 	wantKeys(t, "slice_id_to_data", info.GetSliceIdToData(), 1, 2)
-	wantKeys(t, "grp_id_to_md_raid", info.GetGrpIdToMdRaid(), 11, 12, 21)
+	// The clone's clone meta group, 71, has its rows as a slice's group has
+	// (dnv-worker.md, Integration test plan, The fake agent).
+	wantKeys(t, "grp_id_to_md_raid", info.GetGrpIdToMdRaid(), 11, 12, 21, 71)
 	// One row per leg AND per SPARE leg of every group: 102 and 202 are the
-	// spares, and worker_test.sh case D step 7 reads exactly them.
+	// spares, and worker_test.sh case D step 7 reads exactly them; 711 to 713
+	// are the clone meta group's.
 	wantKeys(t, "leg_id_to_leg", info.GetLegIdToLeg(),
-		101, 102, 103, 104, 201, 202)
+		101, 102, 103, 104, 201, 202, 711, 712, 713)
 	wantKeys(t, "td_id_to_raid0", info.GetTdIdToRaid0(), 7, 8)
 	wantKeys(t, "td_id_to_dm_error", info.GetTdIdToDmError(), 7, 8)
 	wantKeys(t, "ss_id_to_subsystem", info.GetSsIdToSubsystem(), 3)
@@ -995,6 +1019,17 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	if got := info.GetLegIdToLeg()[101].GetStatus(); got !=
 		pb.ResStatus_RES_STATUS_OK {
 		t.Errorf("leg_id_to_leg.101 status = %v, want the default OK", got)
+	}
+	// A lever on a clone meta group's leg row bites as on a slice's.
+	cloneLeg := info.GetLegIdToLeg()[712]
+	if cloneLeg.GetResName() != "leg_id_to_leg.712" ||
+		cloneLeg.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		cloneLeg.GetDetails() != "probe timeout" {
+		t.Errorf("leg_id_to_leg.712 = %v, want the lever's ERROR", cloneLeg)
+	}
+	if got := info.GetLegIdToLeg()[713].GetStatus(); got !=
+		pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("leg_id_to_leg.713 status = %v, want the default OK", got)
 	}
 
 	// bm_info_list: one entry per clone, res_id = clone_id (architecture.md,
@@ -1335,10 +1370,11 @@ func TestSideInfoAwaitsTheCutover(t *testing.T) {
 }
 
 // TestCntlrInfoPathRows is the fake's side_id_to_path (dnv-worker.md,
-// Integration test plan, The fake agent): one row per side of a leg with two
-// sides and none for any other leg, on a standby as on the primary, live for
-// a provisioned side and held at provisioning for one that is not, under the
-// row levers.
+// Integration test plan, The fake agent): one row per side of a slice's leg
+// with two sides and none for any other leg, on a standby as on the primary,
+// live for a provisioned side and held at provisioning for one that is not,
+// under the row levers. A leg of a clone meta group gets no path row even
+// when it is given a second side, a shape no migration makes.
 func TestCntlrInfoPathRows(t *testing.T) {
 	request := func(primary bool) *pb.SyncupCntlrRequest {
 		req := cntlrFixture(primary)
@@ -1353,6 +1389,9 @@ func TestCntlrInfoPathRows(t *testing.T) {
 		grp.GetLegList()[1].SideList = []*pb.Side{
 			{SideId: 63, Provisioned: true},
 		}
+		cloneLeg := req.GetCloneList()[0].GetMetaGrp().GetLegList()[0]
+		cloneLeg.SideList = append(cloneLeg.SideList,
+			&pb.Side{SideId: 7112, Provisioned: true})
 		return req
 	}
 	syncup := func(

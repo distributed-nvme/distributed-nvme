@@ -15,20 +15,22 @@ import (
 // A new side zeroes the part of itself that must read as zeros before its
 // first export (architecture.md, Side provisioning protocol): its first
 // side_conf.zero_bytes bytes, which the sp worker derives from the side's
-// group — the whole leg of a meta group, whose thin-pool metadata dm-thin
-// formats fresh only over a first block that reads zero, and the meta region
-// plus the first data block of a data group, where a stale md superblock or
-// an earlier pool's volume head would otherwise be read. discard is not a
-// zero guarantee (the kernel dropped discard_zeroes_data in 4.12 and NVMe
-// DLFEAT read-zeroes is optional), so the prefix is zeroed with
-// `blkdiscard --zeroout`, tracked as a byte count in the side's on-disk
-// allocation record and gated by the CP-visible `provisioned` flag ([D15]).
+// group — the whole leg of a slice's meta group, whose thin-pool metadata
+// dm-thin formats fresh only over a first block that reads zero, the meta
+// region plus the first data block of a data group, where a stale md
+// superblock or an earlier pool's volume head would otherwise be read, and
+// the same meta region and first data block of a clone meta group, for the
+// reasons that section gives. discard is not a zero guarantee (the kernel
+// dropped discard_zeroes_data in 4.12 and NVMe DLFEAT read-zeroes is
+// optional), so the prefix is zeroed with `blkdiscard --zeroout`, tracked as
+// a byte count in the side's on-disk allocation record and gated by the
+// CP-visible `provisioned` flag ([D15]).
 //
-// The work is a goroutine rather than part of the RPC because a meta group's
-// side is zeroed whole, which can take far longer than an RPC may hold its
-// locks: a node-read holder plus one queued SyncupDn writer would freeze the
-// entire DN agent (RWMutex writer preference) and block the side's reads and
-// syncups, so its observation would age past the worker's bound
+// The work is a goroutine rather than part of the RPC because the side of a
+// slice's meta group is zeroed whole, which can take far longer than an RPC
+// may hold its locks: a node-read holder plus one queued SyncupDn writer would
+// freeze the entire DN agent (RWMutex writer preference) and block the side's
+// reads and syncups, so its observation would age past the worker's bound
 // (dnv-worker.md HL7). The registry is keyed by the side tuple, single-flight
 // per side, created on demand by any converge — the startup reconcile
 // included — that finds zeroing still needed, except for a migration

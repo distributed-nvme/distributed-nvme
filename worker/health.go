@@ -120,6 +120,27 @@ type healthWriter interface {
 		sideId uint64,
 		epoch uint64,
 	) error
+	// setCloneLegErrEpoch and setCloneSideErrEpoch are the two above for a
+	// leg and a side of a clone meta group, whose record is the clone's,
+	// named by its name and proved by its clone_id (MD6's clone-keyed twins).
+	setCloneLegErrEpoch(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		cloneName string,
+		cloneId uint64,
+		legId uint64,
+		epoch uint64,
+	) error
+	setCloneSideErrEpoch(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		cloneName string,
+		cloneId uint64,
+		sideId uint64,
+		epoch uint64,
+	) error
 }
 
 // modelHealthWriter is the production healthWriter (HL1/HL2 -> MD6).
@@ -179,6 +200,34 @@ func (w *modelHealthWriter) setSideErrEpoch(
 	epoch uint64,
 ) error {
 	return model.SetSideErrEpoch(ctx, w.cli, cid, spId, sliceId, sideId, epoch)
+}
+
+func (w *modelHealthWriter) setCloneLegErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	legId uint64,
+	epoch uint64,
+) error {
+	return model.SetCloneLegErrEpoch(
+		ctx, w.cli, cid, spId, cloneName, cloneId, legId, epoch,
+	)
+}
+
+func (w *modelHealthWriter) setCloneSideErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	return model.SetCloneSideErrEpoch(
+		ctx, w.cli, cid, spId, cloneName, cloneId, sideId, epoch,
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +719,36 @@ func newLegMonitor(
 	}
 }
 
+// newCloneLegMonitor is newLegMonitor for a leg of a clone meta group, whose
+// record is the clone's (HL2): the same rules, written through the
+// clone-keyed twin of the leg's epoch write.
+func newCloneLegMonitor(
+	d *deps,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	legId uint64,
+) *healthMonitor {
+	return &healthMonitor{
+		deps:   d,
+		role:   common.WorkerRoleSp,
+		record: healthRecordLeg,
+		cid:    cid,
+		attrs: []slog.Attr{
+			slog.Uint64("sp_id", spId),
+			slog.String("clone_name", cloneName),
+			slog.Uint64("clone_id", cloneId),
+			slog.Uint64("leg_id", legId),
+		},
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
+			return d.health.setCloneLegErrEpoch(
+				ctx, cid, spId, cloneName, cloneId, legId, epoch,
+			)
+		},
+	}
+}
+
 // newSideMonitor builds the health monitor of one side (HL2).
 func newSideMonitor(
 	d *deps,
@@ -691,6 +770,35 @@ func newSideMonitor(
 		write: func(ctx context.Context, epoch uint64, _ bool) error {
 			return d.health.setSideErrEpoch(
 				ctx, cid, spId, sliceId, sideId, epoch,
+			)
+		},
+	}
+}
+
+// newCloneSideMonitor is newSideMonitor for a side of a clone meta group,
+// written through the clone-keyed twin of the side's epoch write (HL2).
+func newCloneSideMonitor(
+	d *deps,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	sideId uint64,
+) *healthMonitor {
+	return &healthMonitor{
+		deps:   d,
+		role:   common.WorkerRoleSp,
+		record: healthRecordSide,
+		cid:    cid,
+		attrs: []slog.Attr{
+			slog.Uint64("sp_id", spId),
+			slog.String("clone_name", cloneName),
+			slog.Uint64("clone_id", cloneId),
+			slog.Uint64("side_id", sideId),
+		},
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
+			return d.health.setCloneSideErrEpoch(
+				ctx, cid, spId, cloneName, cloneId, sideId, epoch,
 			)
 		},
 	}

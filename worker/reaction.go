@@ -14,10 +14,11 @@
 // (MD6/MD7), and the loser gets model.ErrPrecondition back — save in one
 // narrow case of a spare create (AR2). A group may hold several spares, so
 // its full list alone does not keep two creates apart; the loser of a spare
-// create is refused by whichever of model.CreateSpareLeg's checks comes
-// first: "spare list full" when the winner's spare filled the list;
-// otherwise spare_unprovisioned while that spare is still unprovisioned,
-// and once RW18 has flipped it, `candidate changed`, when the loser's plan
+// create is refused by whichever of model.CreateSpareLeg's checks, or its
+// clone-keyed twin's, comes first: "spare list full" when the winner's spare
+// filled the list; otherwise spare_unprovisioned while that spare is still
+// unprovisioned, and once RW18 has flipped it, `candidate changed`, when the
+// loser's plan
 // — the group's DNs its scan black-listed — does not hold the DN of the
 // winner's spare. It does hold it when the loser's snapshot holds a DN that
 // is out of the group when the winner's create commits and the winner's
@@ -93,14 +94,19 @@ const (
 	// reasonSpareListFull is AR8 step 4: only an operator frees a slot.
 	reasonSpareListFull = "spare_list_full"
 	// reasonSpareUnprovisioned is AR8 step 3's hold: a spare of the group
-	// still has an unprovisioned side, which model.CreateSpareLeg refuses.
-	// It is model's string, for the reason reasonGrowPending is.
+	// still has an unprovisioned side, which model.CreateSpareLeg and its
+	// clone-keyed twin model.CreateCloneSpareLeg refuse. It is model's
+	// string, for the reason reasonGrowPending is.
 	reasonSpareUnprovisioned = model.ReasonSpareUnprovisioned
 	// reasonRedundNone is AR8's "RedundNone groups only log" (AR9).
 	reasonRedundNone = "redund_none"
 	// reasonTwoSides is AR8's "a leg with two sides has a user migration in
 	// flight and is left alone".
 	reasonTwoSides = "leg_has_two_sides"
+	// reasonNoHealthyLeg is AR8's precondition of its own on a clone meta
+	// group: no other leg of the group's leg_list is free of a health epoch,
+	// so leg repair neither switches nor creates a spare for it.
+	reasonNoHealthyLeg = "no_healthy_leg"
 	// reasonMetaLadderCap is the dm-thin metadata ceiling of architecture.md,
 	// GrowSlice (model's metaSizeCap), reached before model.GrowSlice is even
 	// called because the allocator has to search for the ladder's size first.
@@ -236,6 +242,34 @@ type reactionOps interface {
 		spId uint64,
 		spName string,
 		sliceId uint64,
+		grpId uint64,
+		spareLegId uint64,
+		targetLegId uint64,
+	) error
+	// createCloneSpareLeg and switchCloneSpareLeg are the two above on a
+	// clone's clone meta group, the clone named by its name and proved by
+	// its clone_id (MD6's clone-keyed twins).
+	createCloneSpareLeg(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		cloneName string,
+		cloneId uint64,
+		grpId uint64,
+		dn model.Cand,
+		grpDnAddrs []string,
+		cc *pb.ClusterConf,
+	) (uint64, error)
+	switchCloneSpareLeg(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		cloneName string,
+		cloneId uint64,
 		grpId uint64,
 		spareLegId uint64,
 		targetLegId uint64,
@@ -435,6 +469,43 @@ func (o *modelReactionOps) switchSpareLeg(
 ) error {
 	return model.SwitchSpareLeg(
 		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, grpId,
+		spareLegId, targetLegId,
+	)
+}
+
+func (o *modelReactionOps) createCloneSpareLeg(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+	grpId uint64,
+	dn model.Cand,
+	grpDnAddrs []string,
+	cc *pb.ClusterConf,
+) (uint64, error) {
+	return model.CreateCloneSpareLeg(
+		ctx, o.cli, cid, shard, spId, spName, 0, cloneName, cloneId, grpId,
+		dn, grpDnAddrs, cc,
+	)
+}
+
+func (o *modelReactionOps) switchCloneSpareLeg(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+	grpId uint64,
+	spareLegId uint64,
+	targetLegId uint64,
+) error {
+	return model.SwitchCloneSpareLeg(
+		ctx, o.cli, cid, shard, spId, spName, 0, cloneName, cloneId, grpId,
 		spareLegId, targetLegId,
 	)
 }
@@ -672,8 +743,9 @@ type judgedSet struct {
 }
 
 // snapshot copies the memo for one pass, after it has dropped every object
-// the pass's snapshot no longer lists: ids are never reused within an SP, so
-// such an entry could only grow the memo.
+// the pass's snapshot no longer lists — the legs and sides of its slices and
+// of its clones' clone meta groups are the ones it lists (judgedGrps): ids
+// are never reused within an SP, so such an entry could only grow the memo.
 func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 	out := judgedSet{
 		cntlrs: make(map[uint64]bool),
@@ -686,20 +758,18 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 	}
 	legs := make(map[uint64]bool)
 	sides := make(map[sideKey]bool)
-	for _, slice := range state.Slices {
-		for _, grp := range allGroups(slice) {
-			for _, list := range [][]*pb.Leg{
-				grp.GetLegList(),
-				grp.GetSpareLegList(),
-			} {
-				for _, leg := range list {
-					legs[leg.GetLegId()] = true
-					for _, side := range leg.GetSideList() {
-						sides[sideKey{
-							legId:  leg.GetLegId(),
-							sideId: side.GetSideId(),
-						}] = true
-					}
+	for _, grp := range judgedGrps(state) {
+		for _, list := range [][]*pb.Leg{
+			grp.GetLegList(),
+			grp.GetSpareLegList(),
+		} {
+			for _, leg := range list {
+				legs[leg.GetLegId()] = true
+				for _, side := range leg.GetSideList() {
+					sides[sideKey{
+						legId:  leg.GetLegId(),
+						sideId: side.GetSideId(),
+					}] = true
 				}
 			}
 		}
@@ -1742,22 +1812,44 @@ func spFootprint(state *model.SpState) uint64 {
 // ---------------------------------------------------------------------------
 
 // repairTarget is one leg the pass may repair, with everything the ops need to
-// address it.
+// address it: the slice whose record holds the leg or, for a leg of a clone
+// meta group, the clone whose record does (clone set, sliceId zero), which
+// the clone-keyed ops take instead (MD6).
 type repairTarget struct {
 	sliceId uint64
+	clone   *cloneOwner
 	grp     *pb.Group
 	leg     *pb.Leg
 }
 
+// ids are the attributes that name the target in the pass's records: its
+// slice, or its clone by name and clone_id, then its group and its leg.
+func (t *repairTarget) ids() []slog.Attr {
+	owner := []slog.Attr{slog.Uint64("slice_id", t.sliceId)}
+	if t.clone != nil {
+		owner = []slog.Attr{
+			slog.String("clone_name", t.clone.name),
+			slog.Uint64("clone_id", t.clone.id),
+		}
+	}
+	return withAttr(owner,
+		slog.Uint64("grp_id", t.grp.GetGrpId()),
+		slog.Uint64("leg_id", t.leg.GetLegId()),
+	)
+}
+
 // tryLegRepair is AR8: one step per pass on the group of the unhealthy leg
-// with the smallest leg_id. It reports whether the pass ends here.
+// with the smallest leg_id, across the slices' groups and the clone meta
+// groups alike. It reports whether the pass ends here.
 //
-// AR8's four holds — "the leg has exactly one side" (this leg), step 2's
+// AR8's five holds — "the leg has exactly one side" (this leg), a clone meta
+// group with no other leg of its leg_list free of a health epoch, step 2's
 // wait for a pending spare, step 4's full spare list and step 3's spare still
-// unprovisioned (this group) — are
-// part of the candidate test, not reasons to end the pass. Each is a property of ONE leg
-// or ONE group, and each can hold for a very long time: a two-sided leg has a
-// user migration in flight (hours), a spare that cannot be connected stays
+// unprovisioned (this group) — are part of the candidate test, not reasons
+// to end the pass. Each is a property of ONE leg or ONE group, and each can
+// hold for a very long time: a two-sided leg has a user migration in flight
+// (hours), a clone meta group whose other leg_list legs are unhealthy stays
+// so until one of them answers again, a spare that cannot be connected stays
 // pending until its leg has been unhealthy for leg_unhealthy (and one the
 // primary never reports stays pending for good), only DeleteSpareLeg by
 // an operator frees a spare slot (AR8 step 4), and a spare whose DN failed
@@ -1769,11 +1861,7 @@ type repairTarget struct {
 // `reason=spare_list_full`) and the scan moves on.
 func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 	for _, target := range repairCandidates(p) {
-		ids := []slog.Attr{
-			slog.Uint64("slice_id", target.sliceId),
-			slog.Uint64("grp_id", target.grp.GetGrpId()),
-			slog.Uint64("leg_id", target.leg.GetLegId()),
-		}
+		ids := target.ids()
 		if !isMdRaid1(p.state.Conf) {
 			// AR8/AR9: a RedundNone group has no redundancy to re-home, so
 			// the worker only ever logs it. An operator moves the data.
@@ -1790,6 +1878,19 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			// leg. The next candidate may still be repairable.
 			w.reactionSkipped(
 				ctx, reactionSpareCreate, reasonTwoSides, ids...,
+			)
+			continue
+		}
+		if target.clone != nil && !otherLegHealthy(target) {
+			// AR8's precondition of its own on a clone meta group: every
+			// other leg of the group's leg_list has a health epoch, so a
+			// switch or a create would start replacing the last legs that
+			// may still hold what was written on the group with fresh spares
+			// holding none of it. The group is left as it is until one of
+			// those legs answers again; the next candidate, in another
+			// group, may still be repairable.
+			w.reactionSkipped(
+				ctx, reactionSpareCreate, reasonNoHealthyLeg, ids...,
 			)
 			continue
 		}
@@ -1824,16 +1925,17 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			continue
 		}
 		if spare := model.UnprovisionedSpare(target.grp); spare != nil {
-			// model.CreateSpareLeg refuses while a spare of the group has a
-			// side still unprovisioned (MD6). The unprovisioned spares that
-			// get here are the ones step 2 does not wait for — a side with
-			// an err_epoch, its DN unreachable or reporting ERROR while it
-			// zeroed, say, or a second side a migration gave the spare — and
-			// the first kind stays unprovisioned until its DN finishes zeroing
-			// it or an operator deletes it. That is an event on THIS group, so
-			// the scan goes on to the next candidate rather than ending the
-			// pass on the op's refusal, and runs no candidate scan the op
-			// could only throw away.
+			// model.CreateSpareLeg, and its clone-keyed twin
+			// model.CreateCloneSpareLeg, refuses while a spare of the group
+			// has a side still unprovisioned (MD6). The unprovisioned spares
+			// that get here are the ones step 2 does not wait for — a side
+			// with an err_epoch, its DN unreachable or reporting ERROR while
+			// it zeroed, say, or a second side a migration gave the spare —
+			// and the first kind stays unprovisioned until its DN finishes
+			// zeroing it or an operator deletes it. That is an event on THIS
+			// group, so the scan goes on to the next candidate rather than
+			// ending the pass on the op's refusal, and runs no candidate scan
+			// the op could only throw away.
 			w.reactionSkipped(
 				ctx, reactionSpareCreate, reasonSpareUnprovisioned,
 				withAttr(ids, slog.Uint64("spare_leg_id", spare.GetLegId()))...,
@@ -1845,11 +1947,15 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 	return false
 }
 
-// repairCandidates is AR8's trigger scan over BOTH group lists of every slice:
-// every leg_list leg that needs repair, in ascending leg_id order — AR8's
-// "several unhealthy legs ⇒ the smallest leg_id first". Spare legs are never
+// repairCandidates is AR8's trigger scan over BOTH group lists of every slice
+// and over the clone meta group of every clone: every leg_list leg that needs
+// repair, in ascending leg_id order across the whole SP — AR8's "several
+// unhealthy legs ⇒ the smallest leg_id first". Spare legs are never
 // scanned — a parked leg keeps its err_epoch and is never repaired again
-// (AR8 steps 1 and 4).
+// (AR8 steps 1 and 4). A clone being deleted is passed over: its group goes
+// back to its DNs in the clone drain's final transaction (CLD9), so a repair
+// would spend an extent for nothing, and the clone-keyed spare ops refuse it
+// anyway (MD6). A clone with no group has no leg.
 //
 // The whole ordered list is returned rather than only its head because AR8's
 // per-leg preconditions are applied by tryLegRepair as it walks it: the
@@ -1873,10 +1979,41 @@ func repairCandidates(p *spPass) []*repairTarget {
 			}
 		}
 	}
+	for _, cloneName := range p.state.Conf.GetCloneNameList() {
+		clone, ok := p.state.Clones[cloneName]
+		if !ok || clone.GetDeleting() || clone.GetMetaGrp() == nil {
+			continue
+		}
+		owner := &cloneOwner{name: cloneName, id: clone.GetCloneId()}
+		grp := clone.GetMetaGrp()
+		for _, leg := range grp.GetLegList() {
+			if !legNeedsRepair(p, leg) {
+				continue
+			}
+			found = append(found, &repairTarget{
+				clone: owner, grp: grp, leg: leg,
+			})
+		}
+	}
 	sort.SliceStable(found, func(i, j int) bool {
 		return found[i].leg.GetLegId() < found[j].leg.GetLegId()
 	})
 	return found
+}
+
+// otherLegHealthy is AR8's precondition of its own on a clone meta group: a
+// leg of the target's group's leg_list other than the target has no health
+// epoch. Spare legs do not count: nothing written on the group reaches a leg
+// while it is a spare. It reads the health epochs alone, so a spare an
+// earlier repair switched in counts from the switch on, whether or not the
+// group's data has been copied onto it.
+func otherLegHealthy(target *repairTarget) bool {
+	for _, leg := range target.grp.GetLegList() {
+		if leg.GetLegId() != target.leg.GetLegId() && leg.GetErrEpoch() == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // legNeedsRepair is AR8's two triggers. Both require Leg.err_epoch != 0: a
@@ -1988,7 +2125,8 @@ func pendingSpare(p *spPass, grp *pb.Group) *pb.Leg {
 	return nil
 }
 
-// switchSpare runs AR8 step 1.
+// switchSpare runs AR8 step 1, through the clone-keyed op on a clone meta
+// group.
 func (w *spWorker) switchSpare(
 	ctx context.Context,
 	target *repairTarget,
@@ -1996,11 +2134,20 @@ func (w *spWorker) switchSpare(
 	ids []slog.Attr,
 ) bool {
 	ids = withAttr(ids, slog.Uint64("spare_leg_id", spare.GetLegId()))
-	err := w.reactor().ops.switchSpareLeg(
-		ctx, w.cid, w.shard, w.spId, w.desired.handle,
-		target.sliceId, target.grp.GetGrpId(),
-		spare.GetLegId(), target.leg.GetLegId(),
-	)
+	var err error
+	if c := target.clone; c != nil {
+		err = w.reactor().ops.switchCloneSpareLeg(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			c.name, c.id, target.grp.GetGrpId(),
+			spare.GetLegId(), target.leg.GetLegId(),
+		)
+	} else {
+		err = w.reactor().ops.switchSpareLeg(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			target.sliceId, target.grp.GetGrpId(),
+			spare.GetLegId(), target.leg.GetLegId(),
+		)
+	}
 	if err != nil {
 		w.reactionFailed(ctx, reactionSpareSwitch, err, ids...)
 		return true
@@ -2023,7 +2170,8 @@ func (w *spWorker) switchSpare(
 // could not exclude — or when the pick itself is gone, disabled or short of
 // extents since the scan (MD6). Like every ErrPrecondition, that ends the pass
 // with `reaction skipped` (AR2), and the next pass plans from a snapshot that
-// holds what changed.
+// holds what changed. On a clone meta group the scan is the same, with the
+// group's ext_cnt, and the create is the clone-keyed op.
 func (w *spWorker) createSpare(
 	ctx context.Context,
 	p *spPass,
@@ -2045,10 +2193,18 @@ func (w *spWorker) createSpare(
 		w.reactionSkipped(ctx, reactionSpareCreate, reasonNoCandidate, ids...)
 		return true
 	}
-	legId, err := w.reactor().ops.createSpareLeg(
-		ctx, w.cid, w.shard, w.spId, w.desired.handle,
-		target.sliceId, target.grp.GetGrpId(), picks[0], plan, p.cc,
-	)
+	var legId uint64
+	if c := target.clone; c != nil {
+		legId, err = w.reactor().ops.createCloneSpareLeg(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			c.name, c.id, target.grp.GetGrpId(), picks[0], plan, p.cc,
+		)
+	} else {
+		legId, err = w.reactor().ops.createSpareLeg(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			target.sliceId, target.grp.GetGrpId(), picks[0], plan, p.cc,
+		)
+	}
 	if err != nil {
 		w.reactionFailed(ctx, reactionSpareCreate, err, ids...)
 		return true

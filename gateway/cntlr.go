@@ -186,10 +186,10 @@ func planCreateCntlr(
 
 // CreateCntlr is the CreateCntlr of architecture.md, Cntlrs: it adds one
 // standby controller to an SP on a CN that hosts none of the SP's cntlrs yet.
-// The sp-worker's next SyncupSide round tells every side of the SP's slices
-// about the new standby and the sides grow an export for it (architecture.md,
-// Disk node), which is why the whole RPC is one SpRev bump away from being
-// visible.
+// The sp-worker's next SyncupSide round tells every side of the SP, those of
+// the clones' clone meta groups included, about the new standby and the sides
+// grow an export for it (architecture.md, Disk node), which is why the whole
+// RPC is one SpRev bump away from being visible.
 //
 // It allocates, so it is a candidate unit (GW9): the CN scan runs outside the
 // transaction and the transaction re-validates the pick. The scan needs a

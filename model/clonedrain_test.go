@@ -92,8 +92,9 @@ func (e *opsEnv) drainCloneChunkCnt() int {
 // transaction whose size is the clone's shape.
 //
 // The SpRev half is the batch's other contract: a batch changes nothing a side
-// or a cntlr is sent, the clone having left every request with the latch
-// (CLD5), so a bump would re-send the SP's whole desired state once per batch
+// or a cntlr is sent, the latch having taken the clone, with its chunks, out of
+// every cntlr's request (CLD5) and no side's request carrying a clone's
+// chunks, so a bump would re-send the SP's whole desired state once per batch
 // for deletes no agent reads. The key's mod_revision is compared as well as
 // its value, so a put of the same revision fails here too.
 func TestDrainCloneBm(t *testing.T) {

@@ -182,13 +182,14 @@ func TestScenPoolDrainFinalStepLogsItsEndOnce(t *testing.T) {
 // latch can find its chunk key already deleted by the drain's batch; that
 // push ends with `bitmap push failed`, the clone drains to its end all the
 // same, no push of it follows, and the pool converges with the clone gone.
-// The case holds the first push at the primary's fake, and the primary's
-// syncups, so the plan from before the latch is the one that runs when the
-// batch has deleted the chunks. The clone's clone meta group sits on dn 1 and
-// dn 2, and the worker's final step gives it back (CLD9): each of the two
-// ends as it was before the clone, its extents, its pointers and its
-// capacity key, with one more DnRev bump, the one that tells its agent the
-// side is gone, and dn 3 is never touched.
+// The case holds the first push at the primary's fake, and then the primary's
+// syncups, once one of them has been accepted at the last chunk's revision or
+// later, so the plan from before the latch, which holds a chunk after the held
+// one, is the one that runs when the batch has deleted the chunks. The
+// clone's clone meta group sits on dn 1 and dn 2, and the worker's final step
+// gives it back (CLD9): each of the two ends as it was before the clone, its
+// extents, its pointers and its capacity key, with one more DnRev bump, the
+// one that tells its agent the side is gone, and dn 3 is never touched.
 func TestScenCloneDrainPushToADeletedChunkIsHarmless(t *testing.T) {
 	t.Parallel()
 	tmo := harnessTimeouts()
@@ -226,17 +227,31 @@ func TestScenCloneDrainPushToADeletedChunkIsHarmless(t *testing.T) {
 				before[id])
 		}
 	}
+	var lastChunk plant.Bitmap
 	for idx := uint32(0); idx < 3; idx++ {
-		if _, err := plant.PutCloneBitmap(ctx, h.cli, c.cl, c.sp.Ref, plant.CloneBitmapSpec{
+		bm, err := plant.PutCloneBitmap(ctx, h.cli, c.cl, c.sp.Ref, plant.CloneBitmapSpec{
 			Clone: "c0", SrcSliceIdx: 0, BmIdx: idx, Data: []byte{byte(idx + 1)},
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("PutCloneBitmap: %v", err)
 		}
+		lastChunk = bm
 	}
 	h.waitUntil(t, 20*time.Second, "the first push of the clone at cn 1",
 		func() (bool, string) {
 			return len(hold.arrivals()) == 1, fmt.Sprintf("%d pushes", len(hold.arrivals()))
 		})
+	// The held push's plan can come from a syncup that ran before the last
+	// chunk's put, and a plan of the first chunk alone would find no chunk
+	// gone once the hold opens. A syncup accepted at the last chunk's
+	// revision or later plans every chunk the primary has not acknowledged,
+	// the last one among them (BM2), and that plan waits behind the held
+	// push (BM3).
+	h.waitRecord(t, 20*time.Second, w, msgSyncupResult, func(rec logRecord) bool {
+		id, ok := cntlrIdOf(rec)
+		return ok && id == 1 && rec.num("revision") >= lastChunk.SpRev &&
+			rec.num("code") == 0 && rec.str("error") == ""
+	})
 	primary, primaryKey := c.cntlrAgent(t, 1)
 	setLever(t, primary, primaryKey, func(o *agentfake.Object) { o.HangSyncup = true })
 	defer setLever(t, primary, primaryKey, func(o *agentfake.Object) { o.HangSyncup = false })
