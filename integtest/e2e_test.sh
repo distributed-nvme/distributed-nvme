@@ -7402,8 +7402,8 @@ SP_LEG_PATH="$SP_GRP_PATH | .leg_list[]"
 SP_SPARE_LEG_PATH="$SP_GRP_PATH | .spare_leg_list[]"
 SP_SIDE_PATH="$SP_LEG_PATH | .side_list[]"
 
-# Every side of the sp, PARKED AND SPARE LEGS INCLUDED. It exists for two
-# things. One is the "is anything still zeroing?" poll below: a spare
+# Every side of the sp's slices, PARKED AND SPARE LEGS INCLUDED. It exists
+# for two things. One is the "is anything still zeroing?" poll below: a spare
 # leg's side is created provisioned = false like any other and only the
 # sp-worker flips it, and model.SwitchSpareLeg (model/ops.go) refuses a spare
 # whose side is not provisioned ("spare side is not provisioned").
@@ -13328,9 +13328,10 @@ copy_clone_build() {
 #
 # $TD_CLONE is REBUILT and not reused, and that is not tidiness: [D3] makes
 # "the destination td was never written before the clone" a contract the CP
-# cannot verify, and the recovery of architecture.md, Clone crash recovery,
-# equates "mapped in the destination thin pool" with "already copied". A td
-# that a failed clone partially hydrated
+# cannot verify, since a region the source bitmaps skip reads the
+# destination's own blocks, and the recovery of architecture.md, Clone crash
+# recovery, equates "mapped in the destination thin pool" with "already
+# copied". A td that a failed clone partially hydrated
 # violates both. `td delete` also refuses while the clone still exists
 # ("thin device %s is the destination of clone %s",
 # decideDeleteThinDevice (gateway/thindevice.go)), which is why the drain is

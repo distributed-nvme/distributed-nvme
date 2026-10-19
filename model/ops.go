@@ -61,22 +61,29 @@ const (
 	opReplaceCntlr     = "ReplaceCntlr"
 	opCreateSpareLeg   = "CreateSpareLeg"
 	opSwitchSpareLeg   = "SwitchSpareLeg"
+	// The clone-keyed twins of the five slice-keyed ops above that reach a
+	// group's legs and sides: the same rules on a clone's clone meta group.
+	opSetCloneLegErrEpoch  = "SetCloneLegErrEpoch"
+	opSetCloneSideErrEpoch = "SetCloneSideErrEpoch"
+	opFlipCloneProvisioned = "FlipCloneProvisioned"
+	opCreateCloneSpareLeg  = "CreateCloneSpareLeg"
+	opSwitchCloneSpareLeg  = "SwitchCloneSpareLeg"
 )
 
 // ReasonCandidateChanged is the one reason string MD5 pins: a pick whose
 // capacity key is no longer the one the scan saw, or a pick scanned against a
 // plan the SP has moved past — for ReplaceCntlr a surviving cntlr the plan did
-// not hold, for CreateSpareLeg a DN the group gained since the plan. For
-// CreateSpareLeg it also covers a pick that has gone stale in any other way
-// since the scan: its DnConf deleted, the DN no longer allocatable — disabled,
-// say — or short of free extents (checkDnPick's vanishedIsChanged). The
-// caller rescans and retries the scan + STM as one unit (architecture.md,
-// Storage pools, CreateStoragePool step 2).
+// not hold, for CreateSpareLeg and its clone twin a DN the group gained since
+// the plan. For those two it also covers a pick that has gone stale in any
+// other way since the scan: its DnConf deleted, the DN no longer allocatable
+// — disabled, say — or short of free extents (checkDnPick's
+// vanishedIsChanged). The caller rescans and retries the scan + STM as one
+// unit (architecture.md, Storage pools, CreateStoragePool step 2).
 //
 // It is exported for the same reason ReasonStaleRevision is: the gateway calls
-// GrowSlice and CreateSpareLeg from inside its own candidate unit (gateway.md
-// GW9) and must tell "rescan and retry" apart from every other
-// ErrPrecondition, which is a FAILED_PRECONDITION for the client.
+// GrowSlice, CreateSpareLeg and CreateCloneSpareLeg from inside its own
+// candidate unit (gateway.md GW9) and must tell "rescan and retry" apart from
+// every other ErrPrecondition, which is a FAILED_PRECONDITION for the client.
 const ReasonCandidateChanged = "candidate changed"
 
 // ReasonGrowPending is the Reason a GrowSlice carries when the AR6 pending
@@ -100,20 +107,21 @@ const ReasonSpareUnprovisioned = "spare_unprovisioned"
 // pass finds the list full before it would scan for a grow.
 const ReasonGrpListFull = "grp_list_full"
 
-// ReasonSpareListFull is the Reason a CreateSpareLeg carries when the group's
-// spare_leg_list already holds common.MaxSpareLegPerGrp spares. It is
-// exported because the gateway answers it with the count-ceiling code its
-// error table lists for that limit (gateway.md GW7), not with the
-// FAILED_PRECONDITION every other ErrPrecondition maps to: a gateway create
-// reaches it when another create filled the list after the gateway's own
-// pre-check.
+// ReasonSpareListFull is the Reason a CreateSpareLeg, or its clone-keyed twin
+// CreateCloneSpareLeg, carries when the group's spare_leg_list already holds
+// common.MaxSpareLegPerGrp spares. It is exported because the gateway answers
+// it with the count-ceiling code its error table lists for that limit
+// (gateway.md GW7), not with the FAILED_PRECONDITION every other
+// ErrPrecondition maps to: a gateway create reaches it when another create
+// filled the list after the gateway's own pre-check.
 const ReasonSpareListFull = "spare list full"
 
 // ReasonStaleRevision is the Reason the three ops the gateway shares with the
-// worker carry when their expectRev argument does not match the stored
-// SpRev.revision (gateway.md GW6). The gateway maps exactly this reason to
-// ABORTED "stale revision" (GW7); every other ErrPrecondition reason is a
-// FAILED_PRECONDITION, so the two must be distinguishable by string.
+// worker, and the two clone-keyed spare twins, carry when their expectRev
+// argument does not match the stored SpRev.revision (gateway.md GW6). The
+// gateway maps exactly this reason to ABORTED "stale revision" (GW7); every
+// other ErrPrecondition reason is a FAILED_PRECONDITION, so the two must be
+// distinguishable by string.
 const ReasonStaleRevision = "stale revision"
 
 // fail builds one precondition failure (MD7).
@@ -158,8 +166,8 @@ const ReasonNoIdLeft = "no id left"
 // TakeSpIds takes n consecutive per-SP ids from SpConf.next_id, returns the
 // first and advances the counter in conf past them, which the caller then
 // stores (architecture.md, Globals: id allocation + shard buckets). Every id
-// a GrowSlice, a ReplaceCntlr or a CreateSpareLeg mints, and every run the
-// gateway's per-SP minter commits, is taken here.
+// a GrowSlice, a ReplaceCntlr, a CreateSpareLeg or a CreateCloneSpareLeg
+// mints, and every run the gateway's per-SP minter commits, is taken here.
 //
 // The largest 64-bit value is never an id, because the counter cannot store
 // the value past it: a counter at that value has no id left, and a counter
@@ -282,8 +290,9 @@ func ceilDiv(a uint64, b uint64) uint64 {
 // GroupBlocks computes one group's meta_blocks and data_blocks
 // (architecture.md, Group on-leg layout: meta region, data region, health
 // block). Both counts are derived, never configured, and are
-// stored in the Group by whoever creates it — CreateStoragePool and GrowSlice
-// alike, which is why this is exported.
+// stored in the Group by whoever creates it — CreateStoragePool, GrowSlice
+// and CreateClone, for a clone's clone meta group, alike, which is why this
+// is exported.
 //
 //	total_group_blocks = ext_cnt × extent_size / block_size
 //	bitmap_chunk       = bitmap_chunk_block_cnt × block_size
@@ -411,6 +420,23 @@ func SideZeroBytes(
 	return zeroBytes, nil
 }
 
+// CloneMetaSideZeroBytes is the length to zero of every side of grp, a
+// clone's clone meta group (architecture.md, Side provisioning protocol): the
+// data-group length of SideZeroBytes, the meta region and the first block of
+// the data region, and never the whole side as for a slice's meta group,
+// whatever "meta" in the group's name suggests.
+//
+// The length is chosen for dm-clone metadata, not a thin pool's: dm-clone
+// formats fresh metadata when the first block of its metadata device reads
+// zero, so that block is the one a recycled extent's stale superblock must not
+// survive in, and dm-clone writes the rest of its metadata device before it
+// reads it.
+// Zeroing the whole side would write the rest of it for no reader. The
+// refusals are SideZeroBytes's.
+func CloneMetaSideZeroBytes(grp *pb.Group, blockSize uint64) (uint64, error) {
+	return SideZeroBytes(grp, false, blockSize)
+}
+
 // MetaLadderExtCnt is the meta ladder of architecture.md, GrowSlice: the
 // ext_cnt of the meta group a
 // meta GrowSlice would append to a slice whose meta groups currently total
@@ -506,7 +532,8 @@ func loadSpConfForOp(
 }
 
 // checkSpRev is the optimistic-concurrency gate the gateway asks the three
-// shared ops to apply before they touch anything (gateway.md GW6;
+// shared ops, and their two clone-keyed spare twins, to apply before they
+// touch anything (gateway.md GW6;
 // architecture.md, Revision keys and the sync fan-out):
 // the stored SpRev.revision MUST equal expectRev. expectRev 0 skips the check
 // entirely, which is what the worker's own internal calls pass — the worker
@@ -706,6 +733,101 @@ func findGroup(slice *pb.Slice, grpId uint64) *pb.Group {
 		}
 	}
 	return nil
+}
+
+// The clone-keyed twins of the four finders above. A clone owns exactly one
+// group, its clone meta group (Clone.meta_grp), so they search that group's
+// leg_list and spare_leg_list and nothing else; a clone with no group holds
+// no leg and no side. They are separate functions, as every clone-keyed path
+// is, so no slice-keyed path ever walks a clone.
+
+// cloneLegs returns every leg of the clone's group, active legs first and
+// spares after, as allLegs does for a slice.
+func cloneLegs(clone *pb.Clone) []*pb.Leg {
+	return legsOf(clone.GetMetaGrp())
+}
+
+// findCloneLeg returns the leg with legId in the clone's group, or nil.
+func findCloneLeg(clone *pb.Clone, legId uint64) *pb.Leg {
+	for _, leg := range cloneLegs(clone) {
+		if leg.GetLegId() == legId {
+			return leg
+		}
+	}
+	return nil
+}
+
+// findCloneSide returns the side with sideId in the clone's group, or nil.
+// Side ids are unique within the SP, as for findSide.
+func findCloneSide(clone *pb.Clone, sideId uint64) *pb.Side {
+	for _, leg := range cloneLegs(clone) {
+		for _, side := range leg.GetSideList() {
+			if side.GetSideId() == sideId {
+				return side
+			}
+		}
+	}
+	return nil
+}
+
+// findCloneSideOfLeg returns the side with sideId inside the leg with legId
+// of the clone's group, or nil, checking both ids for findSideOfLeg's reason.
+func findCloneSideOfLeg(
+	clone *pb.Clone,
+	legId uint64,
+	sideId uint64,
+) *pb.Side {
+	leg := findCloneLeg(clone, legId)
+	if leg == nil {
+		return nil
+	}
+	for _, side := range leg.GetSideList() {
+		if side.GetSideId() == sideId {
+			return side
+		}
+	}
+	return nil
+}
+
+// findCloneGroup returns the clone's group when its grp_id is grpId, or nil.
+func findCloneGroup(clone *pb.Clone, grpId uint64) *pb.Group {
+	grp := clone.GetMetaGrp()
+	if grp == nil || grp.GetGrpId() != grpId {
+		return nil
+	}
+	return grp
+}
+
+// loadCloneForTwin reads one clone inside the caller's STM for a clone-keyed
+// op and applies the checks every one of them shares: the Clone exists, it is
+// the one the caller addressed, and it has a group. The record is keyed by
+// its name, so a clone deleted and re-created under the same name between
+// the caller's snapshot and this STM carries another clone_id, and none of
+// the group, leg and side ids the caller carries mean anything in it. A
+// clone with no group has no leg or side to act on, so no clone-keyed op
+// takes one; the clone drain takes it all the same, so its drain is never
+// stranded (dnv-worker.md MD6). The deleting flag is each op's own: the
+// spare ops refuse a deleting clone, the epoch writes do not look at it, and
+// the flip skips it.
+func loadCloneForTwin(
+	s etcdutil.STM,
+	op string,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+) (*pb.Clone, error) {
+	clone := &pb.Clone{}
+	if !s.Get(CloneKey(cid, spId, cloneName), clone) {
+		return nil, fail(op, "clone not found")
+	}
+	if clone.GetCloneId() != cloneId {
+		return nil, fail(op, "clone id changed")
+	}
+	if clone.GetMetaGrp() == nil {
+		return nil, fail(op, "clone has no group")
+	}
+	return clone, nil
 }
 
 // isMdRaid1 reports whether the SP's groups are md-raid1 groups. Redundancy is
@@ -1056,6 +1178,79 @@ func SetSideErrEpoch(
 	})
 }
 
+// SetCloneLegErrEpoch is SetLegErrEpoch's clone-keyed twin (MD6, HL2): it sets
+// or clears the err_epoch of one leg of a clone's clone meta group, an active
+// leg or a spare, by the same rule. The clone is addressed by its name and
+// proved by its clone_id (loadCloneForTwin); the leg is looked up in the
+// group's leg_list and spare_leg_list. A deleting clone is written all the
+// same: its legs stay in its record, with their health epochs, until the clone
+// drain's final transaction removes them. Legs are embedded in the Clone, so
+// the whole Clone is rewritten; nothing bumps a revision.
+func SetCloneLegErrEpoch(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	legId uint64,
+	epoch uint64,
+) error {
+	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		clone, err := loadCloneForTwin(
+			s, opSetCloneLegErrEpoch, cid, spId, cloneName, cloneId,
+		)
+		if err != nil {
+			return err
+		}
+		leg := findCloneLeg(clone, legId)
+		if leg == nil {
+			return fail(opSetCloneLegErrEpoch, "leg not found")
+		}
+		value, changed := applyErrEpoch(leg.GetErrEpoch(), epoch)
+		if !changed {
+			return nil
+		}
+		leg.ErrEpoch = value
+		s.Put(CloneKey(cid, spId, cloneName), clone)
+		return nil
+	})
+}
+
+// SetCloneSideErrEpoch is SetSideErrEpoch's clone-keyed twin (MD6, HL2): one
+// side of a clone's clone meta group, looked up in both leg lists of the
+// group, by the rule and with the checks of SetCloneLegErrEpoch.
+func SetCloneSideErrEpoch(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+	cloneId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		clone, err := loadCloneForTwin(
+			s, opSetCloneSideErrEpoch, cid, spId, cloneName, cloneId,
+		)
+		if err != nil {
+			return err
+		}
+		side := findCloneSide(clone, sideId)
+		if side == nil {
+			return fail(opSetCloneSideErrEpoch, "side not found")
+		}
+		value, changed := applyErrEpoch(side.GetErrEpoch(), epoch)
+		if !changed {
+			return nil
+		}
+		side.ErrEpoch = value
+		s.Put(CloneKey(cid, spId, cloneName), clone)
+		return nil
+	})
+}
+
 // ---------------------------------------------------------------------------
 // The two flips (MD6, RW18, RW19)
 // ---------------------------------------------------------------------------
@@ -1159,6 +1354,111 @@ func FlipProvisioned(
 		return nil, 0, err
 	}
 	return flipped, revision, nil
+}
+
+// CloneSideRef names one side of a clone's clone meta group for
+// FlipCloneProvisioned (MD6): the name that keys the clone's record, the
+// clone_id that proves the record is still the one observed, and the side
+// pointer RW18 reports.
+type CloneSideRef struct {
+	CloneName string
+	CloneId   uint64
+	LegId     uint64
+	SideId    uint64
+}
+
+// FlipCloneProvisioned is FlipProvisioned's clone-keyed twin (MD6, RW18): it
+// sets Side.provisioned on every listed side of a clone meta group that is
+// still false, bumps SpRev exactly once if at least one was flipped, and
+// returns the sides it actually wrote, in the order they were listed, with
+// the revision its STM committed, 0 when it wrote nothing — for the reasons
+// FlipProvisioned gives.
+//
+// Every clone is read once and written at most once, however many of its
+// sides the batch names. One difference from the slice flip, for a reason: a
+// listed clone that is gone, or whose clone_id moved, is SKIPPED with its
+// sides, not a failure of the batch. A slice lives as long as its pool, so a
+// missing one is a lost invariant; a clone leaves its pool in normal
+// operation, through the clone drain, and failing the batch would drop the
+// flips of every other clone it names. A clone with no group has no side to
+// flip, so its refs are stale ones and are skipped too. So is a clone being
+// deleted: its sides go back with its record in the clone drain's final
+// transaction, and a flip would bump the pool for nothing (dnv-worker.md
+// CLD9).
+//
+// At MaxCloneCntPerSp clones the STM reads and writes every Clone key and the
+// SpRev key, two compares each, which is over etcd's default transaction cap:
+// it is one of the transactions that need EtcdMaxTxnOps.
+func FlipCloneProvisioned(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	sides []CloneSideRef,
+) ([]CloneSideRef, uint64, error) {
+	var flipped []CloneSideRef
+	var revision uint64
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		// A retried attempt (EU4) re-reads everything, so the report of the
+		// abandoned one is dropped with it.
+		flipped = nil
+		revision = 0
+		// Every clone is read once, gone ones included, so a name the batch
+		// repeats costs no second read.
+		clones := make(map[string]*pb.Clone)
+		var touched []string
+		for _, ref := range sides {
+			clone, ok := clones[ref.CloneName]
+			if !ok {
+				clone = &pb.Clone{}
+				key := CloneKey(cid, spId, ref.CloneName)
+				if !s.Get(key, clone) {
+					clone = nil
+				}
+				clones[ref.CloneName] = clone
+			}
+			if clone == nil || clone.GetCloneId() != ref.CloneId ||
+				clone.GetDeleting() {
+				continue
+			}
+			side := findCloneSideOfLeg(clone, ref.LegId, ref.SideId)
+			if side == nil || side.GetProvisioned() {
+				continue
+			}
+			side.Provisioned = true
+			flipped = append(flipped, ref)
+			if !containsName(touched, ref.CloneName) {
+				touched = append(touched, ref.CloneName)
+			}
+		}
+		if len(flipped) == 0 {
+			return nil
+		}
+		for _, cloneName := range touched {
+			s.Put(CloneKey(cid, spId, cloneName), clones[cloneName])
+		}
+		var err error
+		revision, err = bumpSpRevTo(
+			s, opFlipCloneProvisioned, shard, cid, spId,
+		)
+		return err
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return flipped, revision, nil
+}
+
+// containsName reports whether names already holds name. The lists it guards
+// hold at most MaxCloneCntPerSp entries, so a linear scan is the right shape.
+func containsName(names []string, name string) bool {
+	for _, item := range names {
+		if item == name {
+			return true
+		}
+	}
+	return false
 }
 
 // containsId reports whether ids already holds id. The lists it guards hold at
@@ -2430,6 +2730,135 @@ func CreateSpareLeg(
 	return legId, nil
 }
 
+// CreateCloneSpareLeg is CreateSpareLeg's clone-keyed twin (MD6, AR8;
+// architecture.md, Spare legs): it appends one spare leg to a clone's clone
+// meta group and returns its leg_id. The clone is addressed by its name and
+// proved by its clone_id, it must have a group (loadCloneForTwin), and grpId
+// must be that group's id. Every other check and every effect is
+// CreateSpareLeg's, in the same order — the expected revision first, the SP
+// checks, md-raid1, the spare list's room, no spare still unprovisioned, the
+// gain check ahead of the address check, the pick re-validated with
+// vanishedIsChanged — and for the same reasons; the spare inherits the
+// group's ext_cnt, meta_blocks and data_blocks, takes two ids through
+// TakeSpIds, and charges its one DN; the Clone and the SpConf are put and
+// SpRev is bumped. No CN is charged: the clone meta group counts in no
+// cntlr's footprint.
+//
+// One check is its own: a clone being deleted is refused ("clone deleting"),
+// as loadSpConfForOp refuses a pool being deleted. Its group goes back to
+// the disk nodes in the clone drain's final transaction (dnv-worker.md CLD9),
+// and a spare made for it would spend an extent for nothing.
+func CreateCloneSpareLeg(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	cloneName string,
+	cloneId uint64,
+	grpId uint64,
+	dn Cand,
+	grpDnAddrs []string,
+	cc *pb.ClusterConf,
+) (uint64, error) {
+	planned := make(map[string]struct{}, len(grpDnAddrs))
+	for _, addrPort := range grpDnAddrs {
+		planned[addrPort] = struct{}{}
+	}
+	legId := uint64(0)
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		legId = 0
+		if err := checkSpRev(
+			s, opCreateCloneSpareLeg, shard, cid, spId, expectRev,
+		); err != nil {
+			return err
+		}
+		conf, err := loadSpConfForOp(
+			s, opCreateCloneSpareLeg, cid, spName, spId,
+		)
+		if err != nil {
+			return err
+		}
+		if !isMdRaid1(conf) {
+			return fail(opCreateCloneSpareLeg, "group is not md-raid1")
+		}
+		clone, err := loadCloneForTwin(
+			s, opCreateCloneSpareLeg, cid, spId, cloneName, cloneId,
+		)
+		if err != nil {
+			return err
+		}
+		if clone.GetDeleting() {
+			return fail(opCreateCloneSpareLeg, "clone deleting")
+		}
+		grp := findCloneGroup(clone, grpId)
+		if grp == nil {
+			return fail(opCreateCloneSpareLeg, "group not found")
+		}
+		if len(grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
+			return fail(opCreateCloneSpareLeg, ReasonSpareListFull)
+		}
+		if UnprovisionedSpare(grp) != nil {
+			return fail(opCreateCloneSpareLeg, ReasonSpareUnprovisioned)
+		}
+		// The plan first, as in CreateSpareLeg.
+		if grpGainedDn(grp, planned) {
+			return fail(opCreateCloneSpareLeg, ReasonCandidateChanged)
+		}
+		if grpHostsAddr(grp, dn.AddrPort) {
+			return fail(opCreateCloneSpareLeg, "dn already in the group")
+		}
+		slot, err := firstCntlidSlot(conf, opCreateCloneSpareLeg)
+		if err != nil {
+			return err
+		}
+		extCnt := grp.GetExtCnt()
+		if extCnt == 0 {
+			return fail(opCreateCloneSpareLeg, "group is empty")
+		}
+		dnConf, err := checkDnPick(
+			s, opCreateCloneSpareLeg, cid, cc, dn, extCnt, true,
+		)
+		if err != nil {
+			return err
+		}
+		legId, err = TakeSpIds(conf, opCreateCloneSpareLeg, 2)
+		if err != nil {
+			return err
+		}
+		sideId := legId + 1
+		grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
+			LegId:  legId,
+			LegIdx: nextLegIdx(grp),
+			SideList: []*pb.Side{{
+				SideId:      sideId,
+				AddrPort:    dn.AddrPort,
+				CntlidSlot:  slot,
+				NvmeTrConf:  dnConf.GetNvmeTrConf(),
+				ErrEpoch:    0,
+				Provisioned: false,
+			}},
+		})
+		ptr := &pb.SidePointer{SpId: spId, LegId: legId, SideId: sideId}
+		err = chargeDn(
+			s, opCreateCloneSpareLeg, cid, cc, dn.AddrPort, dnConf, ptr,
+			extCnt,
+		)
+		if err != nil {
+			return err
+		}
+		s.Put(CloneKey(cid, spId, cloneName), clone)
+		s.Put(SpConfKey(cid, spName), conf)
+		return BumpSpRev(s, opCreateCloneSpareLeg, shard, cid, spId)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return legId, nil
+}
+
 // UnprovisionedSpare is the first spare of the group, in spare_leg_list
 // order, that has a side still unprovisioned — any side, so a spare with a
 // migration's second side counts while that side is unprovisioned — or nil.
@@ -2587,6 +3016,90 @@ func SwitchSpareLeg(
 		)
 		s.Put(sliceKey, slice)
 		return BumpSpRev(s, opSwitchSpareLeg, shard, cid, spId)
+	})
+}
+
+// SwitchCloneSpareLeg is SwitchSpareLeg's clone-keyed twin (MD6, AR8;
+// architecture.md, Spare legs): it makes a ready spare of a clone's clone
+// meta group active and parks the leg it replaces. The clone is addressed by
+// its name and proved by its clone_id, it must have a group
+// (loadCloneForTwin), it must not be deleting ("clone deleting", for
+// CreateCloneSpareLeg's reason), and grpId must be its group's id. Every
+// other check and every effect is SwitchSpareLeg's: the expected revision
+// first, the SP checks, the spare in spare_leg_list and the target in
+// leg_list, each with exactly one side, the spare's side provisioned; the
+// spare takes the target's position, the target is appended to the spares,
+// the Clone is put and SpRev is bumped. The one-side checks keep the mirror,
+// though a clone meta leg never gets a migration's second side.
+func SwitchCloneSpareLeg(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	cloneName string,
+	cloneId uint64,
+	grpId uint64,
+	spareLegId uint64,
+	targetLegId uint64,
+) error {
+	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		if err := checkSpRev(
+			s, opSwitchCloneSpareLeg, shard, cid, spId, expectRev,
+		); err != nil {
+			return err
+		}
+		if _, err := loadSpConfForOp(
+			s, opSwitchCloneSpareLeg, cid, spName, spId,
+		); err != nil {
+			return err
+		}
+		clone, err := loadCloneForTwin(
+			s, opSwitchCloneSpareLeg, cid, spId, cloneName, cloneId,
+		)
+		if err != nil {
+			return err
+		}
+		if clone.GetDeleting() {
+			return fail(opSwitchCloneSpareLeg, "clone deleting")
+		}
+		grp := findCloneGroup(clone, grpId)
+		if grp == nil {
+			return fail(opSwitchCloneSpareLeg, "group not found")
+		}
+		spareIdx := legIdxIn(grp.GetSpareLegList(), spareLegId)
+		if spareIdx < 0 {
+			return fail(opSwitchCloneSpareLeg, "spare leg not found")
+		}
+		targetIdx := legIdxIn(grp.GetLegList(), targetLegId)
+		if targetIdx < 0 {
+			return fail(opSwitchCloneSpareLeg, "target leg not found")
+		}
+		spare := grp.GetSpareLegList()[spareIdx]
+		if len(spare.GetSideList()) != 1 {
+			return fail(opSwitchCloneSpareLeg, "spare leg has no single side")
+		}
+		target := grp.GetLegList()[targetIdx]
+		if len(target.GetSideList()) != 1 {
+			return fail(opSwitchCloneSpareLeg,
+				"target leg has no single side")
+		}
+		if !spare.GetSideList()[0].GetProvisioned() {
+			return fail(opSwitchCloneSpareLeg,
+				"spare side is not provisioned")
+		}
+		grp.LegList[targetIdx] = spare
+		grp.SpareLegList = append(
+			append(
+				grp.SpareLegList[:spareIdx:spareIdx],
+				grp.SpareLegList[spareIdx+1:]...,
+			),
+			target,
+		)
+		s.Put(CloneKey(cid, spId, cloneName), clone)
+		return BumpSpRev(s, opSwitchCloneSpareLeg, shard, cid, spId)
 	})
 }
 

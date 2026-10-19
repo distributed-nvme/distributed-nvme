@@ -2,7 +2,10 @@ package worker
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -174,10 +177,11 @@ func TestCloneDrainRunsAlongsideTheReactions(t *testing.T) {
 // would strand a latched clone for as long as it held — permanently, the latch
 // being one-way and nothing else ever removing those keys.
 //
-//   - the RW21 cluster-conf cache MISS: the drain reads no cluster conf, and
+//   - the RW21 cluster-conf cache MISS: a batch reads no cluster conf, and
 //     a cluster absent from a watch-populated cache is an ordinary startup
-//     state.
-//   - an INVALID cluster conf: the reactions refuse, the drain does not.
+//     state. The final step reads it itself and fails alone
+//     (TestCloneDrainFinalStepTakesTheClusterConf).
+//   - an INVALID cluster conf: the reactions refuse, the batches do not.
 //   - sp_level: a doomed clone drains at any level, SPD6's rule scoped down to
 //     the clone. At SP_LEVEL_NO_THINPOOL the reactions are suppressed and the
 //     batch still runs.
@@ -265,6 +269,84 @@ func TestCloneDrainIgnoresEveryPassGate(t *testing.T) {
 				msgInvalidStoredConf, got)
 		}
 	})
+}
+
+// TestCloneDrainFinalStepTakesTheClusterConf is CLD7's one exception to "no
+// gate": the final STM gives the clone meta group's sides back, which moves
+// DN capacity keys whose bins come from the cluster's ladder, so it is handed
+// the cluster conf the cache holds, as it is, and the STM itself refuses an
+// unusable one (model.FinishCloneDelete). A cluster missing from the cache
+// fails that one step, logged as `clone drain failed` with the step and the
+// cause, while a sibling clone's batch still runs in the same pass; the next
+// pass or wake-up after the conf is back finishes the clone. Every row runs
+// through the pass and through the wake-up.
+func TestCloneDrainFinalStepTakesTheClusterConf(t *testing.T) {
+	for _, via := range drainPaths {
+		t.Run("hands the cached conf/"+via.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			h.withClone("c0", 700, nil)
+			h.latchClone("c0")
+			// An invalid conf is handed as it is: the refusal is the STM's.
+			cc := reactClusterConf()
+			cc.DnBinConf = nil
+			setCachedConf(h.deps, testCid, cc)
+			via.run(h)
+			calls := h.wantOps("finish_clone")
+			if !proto.Equal(calls[0].cc, cc) {
+				t.Errorf("the final STM got %v, want the cache's %v",
+					calls[0].cc, cc)
+			}
+		})
+
+		t.Run("with the cluster missing from the cache/"+via.name,
+			func(t *testing.T) {
+				h := newReactHarness(t, reactFixture(t))
+				h.withClone("c0", 700, nil)
+				h.withClone("c1", 701, [][2]uint32{{0, 0}})
+				h.latchClone("c0")
+				h.latchClone("c1")
+				h.deps.conf.mu.Lock()
+				delete(h.deps.conf.entries, testCid)
+				h.deps.conf.mu.Unlock()
+				via.run(h)
+				// c0's final step did not run; c1's batch did.
+				calls := h.wantOps("drain_clone_bm")
+				if calls[0].cloneName != "c1" {
+					t.Errorf("the batch targeted %q, want c1",
+						calls[0].cloneName)
+				}
+				recs := h.logs.withMsg(msgCloneDrainFailed)
+				if len(recs) != 1 {
+					t.Fatalf("%q records = %d, want 1",
+						msgCloneDrainFailed, len(recs))
+				}
+				if recs[0]["step"] != cloneDrainStepFinal ||
+					recs[0]["clone_name"] != "c0" {
+					t.Errorf("record step %v clone %v, want %q for c0",
+						recs[0]["step"], recs[0]["clone_name"],
+						cloneDrainStepFinal)
+				}
+				errText, _ := recs[0]["error"].(string)
+				if !strings.Contains(errText, errNoClusterConf.Error()) {
+					t.Errorf("error = %q, want it to name %q", errText,
+						errNoClusterConf.Error())
+				}
+				if got := len(h.logs.withMsg(msgCloneDrainDone)); got != 0 {
+					t.Errorf("%q records = %d, want 0", msgCloneDrainDone,
+						got)
+				}
+				// The conf is back: the next step finishes the clone.
+				setCachedConf(h.deps, testCid, reactClusterConf())
+				via.run(h)
+				calls = h.wantOps("drain_clone_bm", "finish_clone",
+					"drain_clone_bm")
+				if calls[1].cloneName != "c0" ||
+					!proto.Equal(calls[1].cc, reactClusterConf()) {
+					t.Errorf("final STM for %q with %v, want c0 with the "+
+						"cache's conf", calls[1].cloneName, calls[1].cc)
+				}
+			})
+	}
 }
 
 // TestCloneDrainOnePerPassPerClone is CLD7's bound: one step per deleting
@@ -414,8 +496,8 @@ func TestCloneDrainArmsAfterACommittedBatch(t *testing.T) {
 // level-suppressed clone (SP_LEVEL_NO_CLONE) keeps its local chunk files for a
 // later rebuild; a deleting one must lose them, and the cn agent's sweep
 // (cnagent.md CN21) drops them precisely when the clone id is absent from the
-// plan. That sweep, and the build phase after it, are the whole physical
-// teardown (CLD5), so a clone an exclusion left in a cntlr's clone_list would
+// plan. That sweep, and the build phase after it, are the whole teardown on the
+// cntlrs (CLD5), so a clone an exclusion left in a cntlr's clone_list would
 // keep its chunk files there, and on the primary what the level leaves of its
 // stack, until the final STM (CLD9) takes it out of the plan.
 func TestCloneExclusionFromThePlans(t *testing.T) {

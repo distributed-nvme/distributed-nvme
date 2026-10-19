@@ -155,7 +155,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // capacity key from one — the RPCs that take DN capacity as well as the ones
 // that give it back.
 //
-// The twelve cases are six different gates:
+// The thirteen cases are seven different gates:
 //
 //   - CreateDiskNode and CreateControllerNode check inside their own STM,
 //     immediately above the division that turns the node's byte count into
@@ -166,7 +166,8 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     dm-thin metadata cap and nothing else;
 //   - the five allocating RPCs — CreateStoragePool, GrowSlice, CreateCntlr,
 //     CreateSpareLeg and CreateMigration, i.e. every caller of pickDns or
-//     pickCn — reach the check through the scan (architecture.md,
+//     pickCn but CreateClone, whose own gate below answers first — reach the
+//     check through the scan (architecture.md,
 //     Per-operation allocation), which refuses rather than scan with a batch
 //     size of zero: a zero width finds no candidate
 //     and would report a cluster full of free extents as RESOURCE_EXHAUSTED.
@@ -179,6 +180,10 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     the extent size before it scans (migrMetaUnitsOf, architecture.md,
 //     Metadata units), so its refusal comes from that gate, which runs the
 //     same predicate;
+//   - CreateClone's plan lays its clone meta group out from the extent size
+//     before it scans (planCloneGrp, architecture.md, Clones), so its refusal
+//     comes from that gate, which runs the same predicate, ahead of
+//     pickDns's;
 //   - DeleteSpareLeg, FinishMigration and CancelMigration reach newDnLedger's
 //     gate: those three are every handler that RELEASES DN capacity through a
 //     ledger and has no conf gate of its own, and all three are driven here
@@ -200,7 +205,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     wrong one.
 //
 // Each gate validates the WHOLE stored conf rather than the member it is
-// about to use, which is why one zeroed member reaches all twelve. Two are
+// about to use, which is why one zeroed member reaches all thirteen. Two are
 // planted in turn: `dn_bin_conf.extent_size`, the fixture's member and the
 // one a gateway that lost its gate would divide by, and
 // `alloc_conf.dn_batch_size`, which nothing divides by — so the second row
@@ -213,7 +218,9 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // merged geometry is judged is TestCreateStoragePoolJudgesTheMergedGeometry's
 // to pin. CreateMigration is in the same position: the same predicate runs in
 // migrMetaUnitsOf in its plan, in pickDns, and in newDnLedger and
-// migrMetaUnitsOf again in its STM, in that order.
+// migrMetaUnitsOf again in its STM, in that order; and so is CreateClone,
+// whose planCloneGrp runs it in its plan and its STM, with pickDns and
+// newDnLedger between and after.
 //
 // The five release cases come FIRST in the list, because scReplay runs the
 // cases in order against the repaired conf: an allocating case replayed
@@ -232,6 +239,16 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	// leg" precondition (architecture.md, Migrations) cannot stand in for the
 	// conf refusal.
 	srcSideId := dataGrp.GetLegList()[0].GetSideList()[0].GetSideId()
+	// The clone case's destination, created while the conf is healthy.
+	if _, err := env.srv.CreateThinDevice(env.ctx,
+		&pb.CreateThinDeviceRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			TdName:      "sc-clone-dst",
+			Size:        1 << 30,
+		}); err != nil {
+		t.Fatalf("CreateThinDevice for the CreateClone case: %v", err)
+	}
 	// What the three ledger cases release, built while the conf is still
 	// healthy, each on an object of its own so that no case's own preconditions
 	// (architecture.md, `service Gateway` — RPC specifications) can stand in for
@@ -435,6 +452,21 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 				})
 			return err
 		}},
+		{"CreateClone", func() error {
+			_, err := env.srv.CreateClone(env.ctx, &pb.CreateCloneRequest{
+				ClusterName:   env.name,
+				SpName:        sptSpName,
+				CloneName:     "sc-clone",
+				SrcTrConf:     []*pb.NvmeTrConf{sptTrConf("src:9000")},
+				SrcNqn:        "nqn.2024-01.io.dnv:src",
+				SrcNsIdx:      1,
+				SrcSliceCnt:   1,
+				SrcStripeSize: 64 * 1024,
+				SrcBlockSize:  1024 * 1024,
+				DstTdName:     "sc-clone-dst",
+			})
+			return err
+		}},
 	}
 
 	for _, tc := range []struct {
@@ -536,10 +568,11 @@ func TestStoredClusterConfRefusalNamesTheZeroedMember(t *testing.T) {
 // CreateThinDevice reads it for the stripe it sizes against (architecture.md,
 // Thin devices), GrowSlice for the layout of the group it adds
 // (architecture.md, Group on-leg layout: meta region, data region, health
-// block), and CreateClone and CreateMigration for the pool block size their
-// metadata units are counted in (cloneMetaUnitsOf, migrMetaUnitsOf;
-// architecture.md, Metadata units), and each has its own
-// gate — GrowSlice's sits right below the ClusterConf gate the test above
+// block), CreateClone for the pool block size its clone meta group is laid
+// out in and its metadata is bounded by (planCloneGrp; architecture.md,
+// Clones), and CreateMigration for the pool block size its metadata units
+// are counted in (migrMetaUnitsOf; architecture.md, Metadata units), and
+// each has its own gate — GrowSlice's sits right below the ClusterConf gate the test above
 // drives, so the two tests together cover both of its checks.
 // FinishMigration and CancelMigration read no geometry: they give back the
 // units the Migration records.

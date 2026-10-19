@@ -253,6 +253,89 @@ func TestParseSideSpec(t *testing.T) {
 	}
 }
 
+func TestParseCloneLegSpec(t *testing.T) {
+	got, err := parseCloneLegSpec("0x31:1")
+	if err != nil {
+		t.Fatalf("parseCloneLegSpec failed: %v", err)
+	}
+	if got != (plant.CloneLegSpec{LegId: 0x31, LegIdx: 1}) {
+		t.Fatalf("parseCloneLegSpec = %+v", got)
+	}
+	for _, bad := range []string{"", "31", "31:1:0", "31:x", "31:0x100000000"} {
+		if _, err := parseCloneLegSpec(bad); err == nil {
+			t.Errorf("parseCloneLegSpec(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+// TestCloneLegsOf pins how put-clone joins its --leg and --side flags: each
+// leg takes the one side that names it, in the order of the --leg flags, and
+// every unmatched, doubled or zero id is refused.
+func TestCloneLegsOf(t *testing.T) {
+	got, err := cloneLegsOf(
+		[]string{"0x32:0", "0x34:1"},
+		[]string{"0x34:0x35:2:1", "0x32:0x33:1:0"},
+	)
+	if err != nil {
+		t.Fatalf("cloneLegsOf failed: %v", err)
+	}
+	want := []plant.CloneLegSpec{
+		{LegId: 0x32, LegIdx: 0, SideId: 0x33, DnId: 1, Slot: 0},
+		{LegId: 0x34, LegIdx: 1, SideId: 0x35, DnId: 2, Slot: 1},
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("cloneLegsOf = %+v, want %+v", got, want)
+	}
+	bad := []struct {
+		legs, sides []string
+		want        string
+	}{
+		{[]string{"0x32:0"}, nil, "has no --side"},
+		{[]string{"0x32:0"}, []string{"0x99:0x33:1:0"}, "no --leg names"},
+		{[]string{"0x32:0"},
+			[]string{"0x32:0x33:1:0", "0x32:0x35:2:0"}, "already has a side"},
+		{[]string{"0x32:0", "0x32:1"}, nil, "named twice"},
+		{[]string{"0:0"}, nil, "leg id 0"},
+		{[]string{"0x32:0"}, []string{"0x32:0:1:0"}, "side id 0"},
+		{[]string{"0x32"}, nil, "--leg"},
+		{[]string{"0x32:0"}, []string{"0x32:0x33:1"}, "--side"},
+	}
+	for _, tc := range bad {
+		_, err := cloneLegsOf(tc.legs, tc.sides)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("cloneLegsOf(%q, %q) = %v, want an error naming %q",
+				tc.legs, tc.sides, err, tc.want)
+		}
+	}
+}
+
+// TestEpochHolder pins where set-epoch looks for its object: a cntlr needs
+// neither --slice nor --clone, a leg or a side exactly one of them.
+func TestEpochHolder(t *testing.T) {
+	cases := []struct {
+		kind  string
+		slice uint64
+		clone string
+		ok    bool
+	}{
+		{"cntlr", 0, "", true},
+		{"cntlr", 1, "", false},
+		{"cntlr", 0, "c0", false},
+		{"leg", 1, "", true},
+		{"leg", 0, "c0", true},
+		{"leg", 0, "", false},
+		{"side", 1, "c0", false},
+		{"side", 0, "c0", true},
+	}
+	for _, tc := range cases {
+		err := epochHolder(tc.kind, tc.slice, tc.clone)
+		if (err == nil) != tc.ok {
+			t.Errorf("epochHolder(%s, %d, %q) = %v, want ok %t",
+				tc.kind, tc.slice, tc.clone, err, tc.ok)
+		}
+	}
+}
+
 func TestParseMigrSpec(t *testing.T) {
 	got, err := parseMigrSpec("m0:3:1:0x9")
 	if err != nil {

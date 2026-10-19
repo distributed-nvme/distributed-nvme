@@ -153,8 +153,9 @@ func startEtcdOnce(bin string) (string, func(), error) {
 		// which is what SIZES the requirement (gateway.md, Constants this
 		// document owns), the sp drain's maximum-shape D2 batch (SPD13; SPD14
 		// is the tripwire pair that keeps it so), one created-flip
-		// transaction (RW19, MaxFlipCreatedPerTxn) and ReplaceCntlr at the
-		// ceilings, which reads every clone of the SP (MD6).
+		// transaction (RW19, MaxFlipCreatedPerTxn), a clone flip over every
+		// clone of the SP (MD6) and ReplaceCntlr at the ceilings, which
+		// reads every clone of the SP (MD6).
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		// dnv also requires --max-request-bytes=EtcdMaxRequestBytes
 		// (dnv-worker.md, Constants this document owns): the server's own

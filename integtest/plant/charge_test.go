@@ -1,8 +1,9 @@
-// Tests of the bookkeeping PutClone and PutMigr write inside their
+// Tests of the bookkeeping PutSp, PutClone and PutMigr write inside their
 // transactions, over an in-memory STM: the metadata units a planted copy
 // costs (architecture.md, Metadata units), PutClone's charge to the CN of
-// every cntlr of the pool and PutMigr's charge to its destination DN, and how
-// PutClone finds the td it sizes a clone by.
+// every cntlr of the pool, the DN charge the three share (chargeDn) — a
+// pool's sides, a clone meta group's and a migration's destination — and
+// how PutClone finds the td it sizes a clone by.
 package plant
 
 import (
@@ -269,13 +270,15 @@ func TestCloneChargePerCn(t *testing.T) {
 	})
 }
 
-// TestMigrDstCharge pins PutMigr's charge of its destination DN
-// (architecture.md, Metadata units): the side pointer, the extents and the
-// migration's units in the one write of the record, the capacity value
-// following the record, one DnRev bump, no refusal past the DN's metadata
-// area, and a DN short of extents refused before any write — the charge
-// FinishMigration and CancelMigration give back.
-func TestMigrDstCharge(t *testing.T) {
+// TestDnCharge pins chargeDn, the DN charge of PutSp, PutClone and PutMigr
+// (architecture.md, Capacity index keys; Metadata units): the side pointers,
+// the extents and the units in the one write of the record, the capacity
+// value following the record, one DnRev bump however many pointers, no
+// refusal past the DN's metadata area, and a DN short of extents refused
+// before any write — the charge a migration's finish or cancel and the two
+// drains give back. A migration's destination brings units; a pool's sides
+// and a clone meta group's bring none.
+func TestDnCharge(t *testing.T) {
 	const (
 		cid    = uint64(0xc1d)
 		spId   = uint64(7)
@@ -290,6 +293,7 @@ func TestMigrDstCharge(t *testing.T) {
 	)
 	cc := &pb.ClusterConf{DnBinConf: model.ResolveDnBinConf(nil)}
 	ptr := &pb.SidePointer{SpId: spId, LegId: 0x31, SideId: 0x32}
+	second := &pb.SidePointer{SpId: spId, LegId: 0x33, SideId: 0x34}
 	held := &pb.SidePointer{SpId: spId, LegId: 0x11, SideId: 0x12}
 	capKey := func(t *testing.T, freeExt uint64) string {
 		t.Helper()
@@ -320,10 +324,12 @@ func TestMigrDstCharge(t *testing.T) {
 		}
 		return m, read
 	}
-	// charged checks one successful charge: the record and its capacity
-	// value carry the extents and the units, the key moved with the free
-	// count, the revision went up once, and nothing else was written.
-	charged := func(t *testing.T, m *memStm, dnRev, used uint64) {
+	// charged checks one successful charge of extCnt extents, units units
+	// and the pointers ptrs: the record and its capacity value carry them,
+	// the key moved with the free count, the revision went up once, and
+	// nothing else was written.
+	charged := func(t *testing.T, m *memStm, dnRev, used, extCnt, units uint64,
+		ptrs ...*pb.SidePointer) {
 		t.Helper()
 		dn := &pb.DnConf{}
 		if !m.peek(model.DnConfKey(cid, addr), dn) {
@@ -337,10 +343,9 @@ func TestMigrDstCharge(t *testing.T) {
 			t.Errorf("used_meta_units %d, want %d", dn.GetUsedMetaUnits(),
 				used+units)
 		}
-		ptrs := dn.GetSidePtrList()
-		if len(ptrs) != 2 || !proto.Equal(ptrs[0], held) ||
-			!proto.Equal(ptrs[1], ptr) {
-			t.Errorf("side_ptr_list %v, want %v then %v", ptrs, held, ptr)
+		want := append([]*pb.SidePointer{held}, ptrs...)
+		if !equalPtrs(dn.GetSidePtrList(), want) {
+			t.Errorf("side_ptr_list %v, want %v", dn.GetSidePtrList(), want)
 		}
 		if m.peek(capKey(t, free), &pb.DnCapacity{}) {
 			t.Errorf("the capacity key of %d free extents is still there",
@@ -374,22 +379,33 @@ func TestMigrDstCharge(t *testing.T) {
 
 	t.Run("the units ride the extents' write", func(t *testing.T) {
 		m, dn := fixture(t, free, 10)
-		dnRev, err := chargeMigrDst(m, cid, cc, addr, dn, ptr, extCnt, units)
+		dnRev, err := chargeDn(m, cid, cc, addr, dn,
+			[]*pb.SidePointer{ptr}, extCnt, units)
 		if err != nil {
-			t.Fatalf("chargeMigrDst: %v", err)
+			t.Fatalf("chargeDn: %v", err)
 		}
-		charged(t, m, dnRev, 10)
+		charged(t, m, dnRev, 10, extCnt, units, ptr)
 	})
+	t.Run("two pointers and no unit, one write and one bump",
+		func(t *testing.T) {
+			m, dn := fixture(t, free, 10)
+			dnRev, err := chargeDn(m, cid, cc, addr, dn,
+				[]*pb.SidePointer{ptr, second}, extCnt, 0)
+			if err != nil {
+				t.Fatalf("chargeDn: %v", err)
+			}
+			charged(t, m, dnRev, 10, extCnt, 0, ptr, second)
+		})
 	t.Run("a DN past its metadata area is charged all the same",
 		func(t *testing.T) {
 			used := uint64(common.DnCloneMetaUnitCnt - 1)
 			m, dn := fixture(t, free, used)
-			dnRev, err := chargeMigrDst(
-				m, cid, cc, addr, dn, ptr, extCnt, units)
+			dnRev, err := chargeDn(m, cid, cc, addr, dn,
+				[]*pb.SidePointer{ptr}, extCnt, units)
 			if err != nil {
-				t.Fatalf("chargeMigrDst refused a full DN: %v", err)
+				t.Fatalf("chargeDn refused a full DN: %v", err)
 			}
-			charged(t, m, dnRev, used)
+			charged(t, m, dnRev, used, extCnt, units, ptr)
 			after := &pb.DnConf{}
 			m.peek(model.DnConfKey(cid, addr), after)
 			if room := model.DnFreeMetaUnits(after); room != 0 {
@@ -400,10 +416,10 @@ func TestMigrDstCharge(t *testing.T) {
 	t.Run("a DN short of extents refuses before any write",
 		func(t *testing.T) {
 			m, dn := fixture(t, extCnt-1, 0)
-			_, err := chargeMigrDst(m, cid, cc, addr, dn, ptr, extCnt, units)
+			_, err := chargeDn(m, cid, cc, addr, dn,
+				[]*pb.SidePointer{ptr}, extCnt, units)
 			if err == nil || !strings.Contains(err.Error(), "free_ext_cnt") {
-				t.Fatalf("chargeMigrDst = %v, want a free_ext_cnt refusal",
-					err)
+				t.Fatalf("chargeDn = %v, want a free_ext_cnt refusal", err)
 			}
 			if len(m.puts) != 0 {
 				t.Errorf("the refusal wrote %v", m.puts)

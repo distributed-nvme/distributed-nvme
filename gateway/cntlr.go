@@ -186,9 +186,10 @@ func planCreateCntlr(
 
 // CreateCntlr is the CreateCntlr of architecture.md, Cntlrs: it adds one
 // standby controller to an SP on a CN that hosts none of the SP's cntlrs yet.
-// The sp-worker's next SyncupSide round tells every side about the new standby
-// and the sides grow an export for it (architecture.md, Disk node), which is
-// why the whole RPC is one SpRev bump away from being visible.
+// The sp-worker's next SyncupSide round tells every side of the SP's slices
+// about the new standby and the sides grow an export for it (architecture.md,
+// Disk node), which is why the whole RPC is one SpRev bump away from being
+// visible.
 //
 // It allocates, so it is a candidate unit (GW9): the CN scan runs outside the
 // transaction and the transaction re-validates the pick. The scan needs a
@@ -681,7 +682,10 @@ func (s *Server) InspectCntlr(
 // located by the bounded slice scan of findSide — every slice, every meta and
 // data group, active legs and spare legs alike — because a side_id is unique
 // inside the SP but carries no hint of which slice holds it (architecture.md,
-// Cntlrs); an unknown id is NOT_FOUND.
+// Cntlrs); only when no slice holds it are the clones read and their clone
+// meta groups scanned the same way (findCloneSide), so the inspect of a
+// slice's side never depends on the clone keys. An id in neither is
+// NOT_FOUND.
 //
 // The agent request names the side by the full SidePointer, not by side_id
 // alone: the dn agent keys its objects by (sp_id, leg_id, side_id), so the
@@ -725,21 +729,32 @@ func (s *Server) InspectSide(
 		if err != nil {
 			return err
 		}
-		loc, ok := findSide(sc.Conf, slices, req.GetSideId())
-		if !ok {
-			return errNotFound("side %d not found", req.GetSideId())
+		var leg *pb.Leg
+		var side *pb.Side
+		if loc, ok := findSide(sc.Conf, slices, req.GetSideId()); ok {
+			leg, side = loc.Leg, loc.Side
+		} else {
+			clones, err := loadClones(stm, sc.Cid, sc.Conf)
+			if err != nil {
+				return err
+			}
+			cloneLoc, ok := findCloneSide(sc.Conf, clones, req.GetSideId())
+			if !ok {
+				return errNotFound("side %d not found", req.GetSideId())
+			}
+			leg, side = cloneLoc.Leg, cloneLoc.Side
 		}
-		dnKey := model.DnConfKey(sc.Cid, loc.Side.GetAddrPort())
+		dnKey := model.DnConfKey(sc.Cid, side.GetAddrPort())
 		dn := &pb.DnConf{}
 		if !stm.Get(dnKey, dn) {
 			return errAborted("dn_conf key %q is missing", dnKey)
 		}
 		cid = sc.Cid
 		dnId = dn.GetDnId()
-		addrPort = loc.Side.GetAddrPort()
+		addrPort = side.GetAddrPort()
 		pointer = &pb.SidePointer{
 			SpId:   sc.SpId(),
-			LegId:  loc.Leg.GetLegId(),
+			LegId:  leg.GetLegId(),
 			SideId: req.GetSideId(),
 		}
 		return nil

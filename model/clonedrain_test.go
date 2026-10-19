@@ -70,16 +70,6 @@ func (e *opsEnv) setCloneMetaUnits(name string, units uint64) {
 	mustPut(e.t, e.cli, CloneKey(e.cid, opsSpId, name), clone)
 }
 
-// containsName reports whether list already holds name.
-func containsName(list []string, name string) bool {
-	for _, item := range list {
-		if item == name {
-			return true
-		}
-	}
-	return false
-}
-
 // drainCloneChunkCnt counts the surviving chunk keys of the fixture clone.
 func (e *opsEnv) drainCloneChunkCnt() int {
 	e.t.Helper()
@@ -138,9 +128,9 @@ func TestDrainCloneBm(t *testing.T) {
 		}
 	}
 	// CLD8: the record is untouched. proto.Equal against the pre-batch record
-	// is the whole statement — the drain reads nothing out of the record
-	// (CLD7) and must write nothing into it (CLD8), including a field added
-	// later.
+	// is the whole statement — the drain's choice of step consults nothing in
+	// the record (CLD7), and a batch must write nothing into it (CLD8),
+	// including a field added later.
 	if got := env.clone(drainCloneName); !proto.Equal(got, before) {
 		t.Errorf("the batch rewrote the Clone: got %v, want %v", got, before)
 	}
@@ -329,9 +319,10 @@ func TestDrainCloneBmReadsNoRevision(t *testing.T) {
 // and CLD8's idempotent pop — run for real: two goroutines drive the
 // same clone's drain to the end at the same time, and the clone must end up
 // gone with neither reporting a failure that is not one of the named benign
-// races. The clone's metadata units come back exactly once: the loser of the
-// final STM finds the clone gone, so a second release, which would take
-// other units off each CN, never happens. And the pool's revision moves exactly
+// races. The clone's metadata units and the extents of its clone meta group
+// come back exactly once: the loser of the final STM finds the clone gone,
+// so a second release, which would take other units off each CN and credit
+// each DN twice, never happens. And the pool's revision moves exactly
 // once over the whole drain, for the final STM (CLD12): ten or more batches
 // from two drivers bump nothing (CLD8).
 //
@@ -353,6 +344,12 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 	env.setCloneMetaUnits(drainCloneName, 3)
 	env.setCnUsed(opsCnA, 3+5)
 	env.setCnUsed(opsCnB, 3+5)
+	grp := opsCloneGrp(true)
+	env.setCloneGrp(drainCloneName, grp)
+	env.chargeGrp(grp)
+	dnRevs := map[string]uint64{
+		opsDnC: env.dnRev(opsDnC), opsDnD: env.dnRev(opsDnD),
+	}
 	revBefore := env.spRev()
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
@@ -394,7 +391,7 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 				if len(chunks) == 0 {
 					err = FinishCloneDelete(env.ctx, env.cli, env.cid,
 						opsShard, opsSpId, opsSpName, drainCloneName,
-						drainCloneId)
+						drainCloneId, env.cc)
 				} else {
 					_, err = DrainCloneBm(env.ctx, env.cli, env.cid,
 						opsSpId, opsSpName, drainCloneName, drainCloneId,
@@ -447,6 +444,18 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 				"clone's 3 given back once", addrPort, got)
 		}
 	}
+	for addrPort, rev := range dnRevs {
+		dn := env.dn(addrPort)
+		if dn.GetFreeExtCnt() != opsDnFree || len(dn.GetSidePtrList()) != 0 {
+			t.Errorf("%s: free %d with pointers %v, want %d and none — "+
+				"the group's side given back once", addrPort,
+				dn.GetFreeExtCnt(), dn.GetSidePtrList(), opsDnFree)
+		}
+		if got := env.dnRev(addrPort); got != rev+1 {
+			t.Errorf("%s rev: got %d, want %d (one bump)", addrPort, got,
+				rev+1)
+		}
+	}
 }
 
 // TestFinishCloneDelete is CLD9: the Clone key and its clone_name_list entry go
@@ -464,7 +473,7 @@ func TestFinishCloneDelete(t *testing.T) {
 	revBefore := env.spRev()
 
 	if err := FinishCloneDelete(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, drainCloneName, drainCloneId); err != nil {
+		opsSpName, drainCloneName, drainCloneId, env.cc); err != nil {
 		t.Fatalf("FinishCloneDelete: %v", err)
 	}
 	if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
@@ -485,15 +494,16 @@ func TestFinishCloneDelete(t *testing.T) {
 // finishDrainClone runs the final STM on the fixture's drain clone.
 func (e *opsEnv) finishDrainClone() error {
 	return FinishCloneDelete(e.ctx, e.cli, e.cid, opsShard, opsSpId,
-		opsSpName, drainCloneName, drainCloneId)
+		opsSpName, drainCloneName, drainCloneId, e.cc)
 }
 
-// TestFinishCloneDeleteReleasesMetaUnits pins the one ledger the clone drain
-// moves (architecture.md, Metadata units): the final STM gives the clone's
-// meta_units back on the CN of every cntlr of the SP, and the counts other
-// clones charged stay. The capacity values follow the records. Only a count
-// moves, so no CN's free extents, pointers or revision move, and no DN key is
-// touched at all.
+// TestFinishCloneDeleteReleasesMetaUnits pins the units ledger the clone
+// drain moves (architecture.md, Metadata units): the final STM gives the
+// clone's meta_units back on the CN of every cntlr of the SP, and the counts
+// other clones charged stay. The capacity values follow the records. Only a
+// count moves, so no CN's free extents, pointers or revision move. The clone
+// has no group here, so no DN key is touched at all; the DN ledger is
+// TestFinishCloneDeleteGivesTheGroupBack's.
 func TestFinishCloneDeleteReleasesMetaUnits(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()
@@ -707,13 +717,17 @@ func TestFinishCloneDeleteWithoutUnitsReadsNoCn(t *testing.T) {
 	}
 }
 
-// TestFinishCloneDeleteAtTheCntlrCeiling commits the final STM at its widest
+// TestFinishCloneDeleteAtTheCeiling commits the final STM at its widest
 // shape against the real etcd this package runs with
 // --max-txn-ops=common.EtcdMaxTxnOps: MaxCntlrCntPerSp cntlrs, each on a CN
-// of its own, so every release is a read of the Cntlr and of the CN and a
-// write of the CN and of its capacity key. Every CN is credited, and the
-// whole release is one transaction with the clone's removal.
-func TestFinishCloneDeleteAtTheCntlrCeiling(t *testing.T) {
+// of its own, so every units release is a read of the Cntlr and of the CN
+// and a write of the CN and of its capacity key; and a clone meta group of
+// MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares, each side on a DN of
+// its own, so every side given back is a read and a write of its DN, of its
+// DnRev, and a delete and a put of its capacity key. Every CN and DN is
+// credited, and the whole release is one transaction with the clone's
+// removal.
+func TestFinishCloneDeleteAtTheCeiling(t *testing.T) {
 	env := newOpsEnv(t)
 	conf := env.spConf()
 	addrs := []string{opsCnA, opsCnB}
@@ -735,10 +749,22 @@ func TestFinishCloneDeleteAtTheCntlrCeiling(t *testing.T) {
 	for _, addrPort := range addrs {
 		env.setCnUsed(addrPort, 3+5)
 	}
+	var dnAddrs []string
+	for idx := 0; idx < common.MaxAllocLegPerGrp+common.MaxSpareLegPerGrp; idx++ {
+		addrPort := fmt.Sprintf("ceil-dn-%d:9000", idx)
+		env.putDn(addrPort, uint64(910+idx), uint32(idx), opsDnFree)
+		dnAddrs = append(dnAddrs, addrPort)
+	}
+	grp := cloneGrpAt(opsCloneGrpId, true, dnAddrs...)
+	grp.SpareLegList = grp.LegList[common.MaxAllocLegPerGrp:]
+	grp.LegList = grp.LegList[:common.MaxAllocLegPerGrp]
+	env.setCloneGrp(drainCloneName, grp)
+	env.chargeGrp(grp)
 
 	if err := env.finishDrainClone(); err != nil {
 		t.Fatalf("a maximum-shape FinishCloneDelete (%d cntlrs on as many "+
-			"CNs) did not commit: %v", common.MaxCntlrCntPerSp, err)
+			"CNs, %d sides on as many DNs) did not commit: %v",
+			common.MaxCntlrCntPerSp, len(dnAddrs), err)
 	}
 	rev := env.modRev(SpConfKey(env.cid, opsSpName))
 	for _, addrPort := range addrs {
@@ -749,6 +775,201 @@ func TestFinishCloneDeleteAtTheCntlrCeiling(t *testing.T) {
 			t.Errorf("%s: mod_revision %d, want the op's %d",
 				addrPort, got, rev)
 		}
+	}
+	for _, addrPort := range dnAddrs {
+		dn := env.dn(addrPort)
+		if dn.GetFreeExtCnt() != opsDnFree || len(dn.GetSidePtrList()) != 0 {
+			t.Errorf("%s: free %d with pointers %v, want %d and none",
+				addrPort, dn.GetFreeExtCnt(), dn.GetSidePtrList(), opsDnFree)
+		}
+		if got := env.modRev(DnConfKey(env.cid, addrPort)); got != rev {
+			t.Errorf("%s: mod_revision %d, want the op's %d",
+				addrPort, got, rev)
+		}
+	}
+}
+
+// TestFinishCloneDeleteGivesTheGroupBack pins the DN ledger of the final STM
+// (dnv-worker.md CLD9): every side of the clone meta group, legs and spares,
+// goes back to its DN as a slice drain batch gives a group's back — the
+// pointer out, the group's ext_cnt back, the capacity key moved with the free
+// count it embeds, one DnRev bump per DN — in the transaction that removes
+// the clone. Only the clone's own pointers leave: the slice's sides on the
+// same DN, and another SP's pointer that shares a side_id, stay. A DN the
+// group does not use is not touched.
+func TestFinishCloneDeleteGivesTheGroupBack(t *testing.T) {
+	env := newOpsEnv(t)
+	env.chargeFixture()
+	env.putDrainClone(true, nil)
+	grp := opsCloneGrp(true)
+	// A spare on dn-a, which carries the slice's two sides of that DN.
+	grp.SpareLegList = []*pb.Leg{{
+		LegId:    opsCloneSpareLeg,
+		LegIdx:   2,
+		SideList: []*pb.Side{opsSide(opsCloneSpareSide, opsDnA, true)},
+	}}
+	env.setCloneGrp(drainCloneName, grp)
+	env.chargeGrp(grp)
+	// A pointer of ANOTHER sp that collides on side_id, for
+	// TestDrainSpSliceAccounting's reason.
+	foreign := &pb.SidePointer{
+		SpId: opsSpId + 1, LegId: opsCloneLegA, SideId: opsCloneSideA,
+	}
+	dnC := env.dn(opsDnC)
+	dnC.SidePtrList = append(dnC.GetSidePtrList(), foreign)
+	mustPut(t, env.cli, DnConfKey(env.cid, opsDnC), dnC)
+	type node struct {
+		dn  *pb.DnConf
+		rev uint64
+	}
+	before := map[string]node{}
+	for _, addrPort := range []string{opsDnA, opsDnB, opsDnC, opsDnD} {
+		before[addrPort] = node{env.dn(addrPort), env.dnRev(addrPort)}
+	}
+	cnB := env.cn(opsCnB)
+	revBefore := env.spRev()
+
+	if err := env.finishDrainClone(); err != nil {
+		t.Fatalf("FinishCloneDelete: %v", err)
+	}
+	for addrPort, want := range map[string]struct {
+		ptrs []*pb.SidePointer
+	}{
+		opsDnA: {before[opsDnA].dn.GetSidePtrList()[:2]},
+		opsDnC: {[]*pb.SidePointer{foreign}},
+		opsDnD: {nil},
+	} {
+		dn := env.dn(addrPort)
+		wantFree := before[addrPort].dn.GetFreeExtCnt() +
+			common.CloneMetaGrpExtCnt
+		if dn.GetFreeExtCnt() != wantFree {
+			t.Errorf("%s: free_ext_cnt %d, want %d", addrPort,
+				dn.GetFreeExtCnt(), wantFree)
+		}
+		if len(dn.GetSidePtrList()) != len(want.ptrs) {
+			t.Errorf("%s: side_ptr_list %v, want %v", addrPort,
+				dn.GetSidePtrList(), want.ptrs)
+		} else {
+			for idx, ptr := range want.ptrs {
+				if !proto.Equal(dn.GetSidePtrList()[idx], ptr) {
+					t.Errorf("%s: side_ptr_list %v, want %v", addrPort,
+						dn.GetSidePtrList(), want.ptrs)
+					break
+				}
+			}
+		}
+		if got := env.dnRev(addrPort); got != before[addrPort].rev+1 {
+			t.Errorf("%s rev: got %d, want %d (one bump)", addrPort, got,
+				before[addrPort].rev+1)
+		}
+		oldFree := before[addrPort].dn.GetFreeExtCnt()
+		if env.exists(DnCapacityKey(
+			env.cid, mustBin(t, env, oldFree), oldFree, addrPort)) {
+			t.Errorf("%s: the charged capacity key survived", addrPort)
+		}
+		if !env.exists(DnCapacityKey(
+			env.cid, mustBin(t, env, wantFree), wantFree, addrPort)) {
+			t.Errorf("%s: no capacity key for the restored free count",
+				addrPort)
+		}
+	}
+	if got := env.dn(opsDnB); !proto.Equal(got, before[opsDnB].dn) {
+		t.Errorf("dn-b, outside the group, moved: %v", got)
+	}
+	if got := env.dnRev(opsDnB); got != before[opsDnB].rev {
+		t.Errorf("dn-b rev: got %d, want %d", got, before[opsDnB].rev)
+	}
+	// The clone meta group is in no cntlr's footprint, so no CN extent
+	// moves for it.
+	if got := env.cn(opsCnB); !proto.Equal(got, cnB) {
+		t.Errorf("cn-b moved: %v", got)
+	}
+	if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
+		t.Errorf("the clone key survived")
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev: got %d, want %d (one bump)", got, revBefore+1)
+	}
+}
+
+// TestFinishCloneDeleteSkipsALostDn is the RECEIVING ledger's stance of
+// DrainSpSlice: a DN record that is gone has nothing left to credit, so the
+// release skips it — without writing it back into existence — and the clone
+// still goes, its other DN credited.
+func TestFinishCloneDeleteSkipsALostDn(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putDrainClone(true, nil)
+	grp := opsCloneGrp(true)
+	env.setCloneGrp(drainCloneName, grp)
+	env.chargeGrp(grp)
+	env.delKey(DnConfKey(env.cid, opsDnD))
+
+	if err := env.finishDrainClone(); err != nil {
+		t.Fatalf("FinishCloneDelete over a lost dn_conf: %v", err)
+	}
+	if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
+		t.Errorf("the clone key survived")
+	}
+	if env.exists(DnConfKey(env.cid, opsDnD)) {
+		t.Errorf("the lost dn_conf was written back")
+	}
+	if dn := env.dn(opsDnC); dn.GetFreeExtCnt() != opsDnFree ||
+		len(dn.GetSidePtrList()) != 0 {
+		t.Errorf("dn-c: free %d with pointers %v, want %d and none",
+			dn.GetFreeExtCnt(), dn.GetSidePtrList(), opsDnFree)
+	}
+}
+
+// TestFinishCloneDeleteRefusesAnInvalidStoredConf is the gate
+// (architecture.md, Common validation) the final STM needs for
+// MaintainDnCapacity's sake, TestDrainSliceRefusesAnInvalidStoredConf's
+// reason: a capacity key embeds the bin index the stored ladder yields. The
+// refusal writes nothing, a missing conf is refused like an invalid one, and
+// the very same STM commits once the conf is repaired.
+func TestFinishCloneDeleteRefusesAnInvalidStoredConf(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(env *opsEnv)
+		reason string
+	}{
+		{"extent_size", func(env *opsEnv) {
+			env.cc.DnBinConf.ExtentSize = 0
+		}, "invalid stored conf: dn_bin_conf.extent_size is zero"},
+		{"dn_batch_size", func(env *opsEnv) {
+			env.cc.AllocConf.DnBatchSize = 0
+		}, "invalid stored conf: alloc_conf.dn_batch_size 0 is outside [1, 1024]"},
+		{"missing", func(env *opsEnv) {
+			env.cc = nil
+		}, "invalid stored conf: dn_bin_conf.extent_size is zero"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			env.putDrainClone(true, nil)
+			grp := opsCloneGrp(true)
+			env.setCloneGrp(drainCloneName, grp)
+			env.chargeGrp(grp)
+			tc.mutate(env)
+			before := env.storeRev()
+			precondition := wantPrecondition(t, env.finishDrainClone(),
+				opFinishCloneDelete)
+			if precondition.Reason != tc.reason {
+				t.Errorf("Reason: got %q, want %q", precondition.Reason,
+					tc.reason)
+			}
+			if got := env.storeRev(); got != before {
+				t.Errorf("the refusal wrote: store revision %d, want %d",
+					got, before)
+			}
+			env.cc = testClusterConf()
+			env.cc.DnBinConf.ExtentSize = opsExtSize
+			if err := env.finishDrainClone(); err != nil {
+				t.Fatalf("FinishCloneDelete with the conf repaired: %v", err)
+			}
+			if got := env.dn(opsDnC).GetFreeExtCnt(); got != opsDnFree {
+				t.Errorf("dn-c free_ext_cnt: got %d, want %d", got,
+					opsDnFree)
+			}
+		})
 	}
 }
 
@@ -775,7 +996,7 @@ func TestCloneDrainOpsRefuseALiveClone(t *testing.T) {
 		}},
 		{"FinishCloneDelete", opFinishCloneDelete, func(env *opsEnv) error {
 			return FinishCloneDelete(env.ctx, env.cli, env.cid, opsShard,
-				opsSpId, opsSpName, drainCloneName, drainCloneId)
+				opsSpId, opsSpName, drainCloneName, drainCloneId, env.cc)
 		}},
 	}
 	guards := []struct {
@@ -848,13 +1069,15 @@ func TestCloneDrainOpsRefuseALiveClone(t *testing.T) {
 // TestCloneDrainLeavesTheSpAlone pins what the drain must NOT touch. Its
 // batches are ledger-free — clone chunks are not budgeted to any node, and a
 // batch bumps no SpRev, which is what makes it MaxDelBmPerTxn plus two
-// compares whatever the ceilings become — and its final STM moves one count
-// only, the clone's metadata units on its cntlrs' CNs
-// (TestFinishCloneDeleteReleasesMetaUnits). So no DN key moves, no CN's free
-// extents or revision move, the SP's own inventory is untouched but for the
-// one name the final STM removes, and its revision moves once, for that
-// final STM (CLD12). The run behind the metadata wrapper is agent-local,
-// freed by the cn agent's sweep (cnagent.md CN21).
+// compares whatever the ceilings become — and its final STM moves only what
+// the clone itself was charged: its metadata units on its cntlrs' CNs
+// (TestFinishCloneDeleteReleasesMetaUnits) and the extents of its own clone
+// meta group on that group's DNs (TestFinishCloneDeleteGivesTheGroupBack).
+// So no DN of the slice moves, no CN's free extents or revision move, the
+// SP's own inventory is untouched but for the one name the final STM
+// removes, and its revision moves once, for that final STM (CLD12). The run
+// behind the metadata wrapper is agent-local, freed by the cn agent's sweep
+// (cnagent.md CN21).
 func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()
@@ -862,47 +1085,61 @@ func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	env.setCloneMetaUnits(drainCloneName, 3)
 	env.setCnUsed(opsCnA, 3)
 	env.setCnUsed(opsCnB, 3)
+	grp := opsCloneGrp(true)
+	env.setCloneGrp(drainCloneName, grp)
+	env.chargeGrp(grp)
 	before := struct {
-		dnA, dnB, cnA uint64
-		dnARev        uint64
-		cnARev        uint64
+		dnA, dnB      *pb.DnConf
+		dnARev, cnRev uint64
+		cnA           uint64
 		slice         *pb.Slice
 	}{
-		env.dn(opsDnA).GetFreeExtCnt(), env.dn(opsDnB).GetFreeExtCnt(),
-		env.cn(opsCnA).GetFreeExtCnt(),
-		env.dnRev(opsDnA), env.cnRev(opsCnA), env.slice(),
+		env.dn(opsDnA), env.dn(opsDnB), env.dnRev(opsDnA), env.cnRev(opsCnA),
+		env.cn(opsCnA).GetFreeExtCnt(), env.slice(),
 	}
+	dnCRev := env.dnRev(opsDnC)
 	revBefore := env.spRev()
 
 	if _, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId, chunks); err != nil {
 		t.Fatalf("DrainCloneBm: %v", err)
 	}
+	// The batch moves no node at all, the group's DNs included.
+	if got := env.dnRev(opsDnC); got != dnCRev {
+		t.Errorf("a batch bumped dn-c's DnRev: %d, want %d", got, dnCRev)
+	}
 	if err := FinishCloneDelete(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, drainCloneName, drainCloneId); err != nil {
+		opsSpName, drainCloneName, drainCloneId, env.cc); err != nil {
 		t.Fatalf("FinishCloneDelete: %v", err)
 	}
-	if got := env.dn(opsDnA).GetFreeExtCnt(); got != before.dnA {
-		t.Errorf("dn-a free_ext_cnt moved: %d, want %d", got, before.dnA)
+	if got := env.dn(opsDnA); !proto.Equal(got, before.dnA) {
+		t.Errorf("dn-a, carrying only the slice's sides, moved: %v", got)
 	}
-	if got := env.dn(opsDnB).GetFreeExtCnt(); got != before.dnB {
-		t.Errorf("dn-b free_ext_cnt moved: %d, want %d", got, before.dnB)
+	if got := env.dn(opsDnB); !proto.Equal(got, before.dnB) {
+		t.Errorf("dn-b, carrying only the slice's sides, moved: %v", got)
+	}
+	if got := env.dnRev(opsDnA); got != before.dnARev {
+		t.Errorf("the clone drain bumped a slice DN's DnRev: %d, want %d",
+			got, before.dnARev)
 	}
 	if got := env.cn(opsCnA).GetFreeExtCnt(); got != before.cnA {
 		t.Errorf("cn-a free_ext_cnt moved: %d, want %d", got, before.cnA)
 	}
-	if got := env.dnRev(opsDnA); got != before.dnARev {
-		t.Errorf("the clone drain bumped a DnRev: %d, want %d",
-			got, before.dnARev)
-	}
-	if got := env.cnRev(opsCnA); got != before.cnARev {
+	if got := env.cnRev(opsCnA); got != before.cnRev {
 		t.Errorf("the clone drain bumped a CnRev: %d, want %d",
-			got, before.cnARev)
+			got, before.cnRev)
 	}
-	// The one count the final STM moves.
+	if got := env.slice(); !proto.Equal(got, before.slice) {
+		t.Errorf("the clone drain changed the slice: %v", got)
+	}
+	// The two charges the clone itself held come back.
 	if got := env.cn(opsCnA).GetUsedMetaUnits(); got != 0 {
 		t.Errorf("cn-a used_meta_units: got %d, want the clone's 3 back",
 			got)
+	}
+	if got := env.dn(opsDnC).GetFreeExtCnt(); got != opsDnFree {
+		t.Errorf("dn-c free_ext_cnt: got %d, want the group's extent back "+
+			"(%d)", got, opsDnFree)
 	}
 	conf := env.spConf()
 	if len(conf.GetSliceIdList()) != 1 || len(conf.GetCntlrIdList()) != 2 {

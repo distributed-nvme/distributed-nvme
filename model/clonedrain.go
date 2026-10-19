@@ -24,13 +24,18 @@ import (
 //     bumps the `sp_rev` key (CLD8): it reads the SpConf and the Clone and
 //     deletes its chunks, which is what makes it a constant MaxDelBmPerTxn
 //     plus two compares whatever the ceilings become. The final STM moves
-//     one count and nothing else: the clone's metadata units go back on the
-//     CN of every cntlr of the SP (architecture.md, Metadata units), at most
-//     four compares per cntlr — its Cntlr and its CN's record read, that
-//     record and its capacity key written — over a constant few, so it is
-//     bounded by MaxCntlrCntPerSp. The run behind the metadata wrapper on
-//     each CN is agent-local and freed by the cn agent's sweep (cnagent.md
-//     CN21); the count is what the gateway charges new clones against.
+//     two ledgers. The clone's metadata units go back on the CN of every
+//     cntlr of the SP (architecture.md, Metadata units), at most four
+//     compares per cntlr — its Cntlr and its CN's record read, that record
+//     and its capacity key written — so MaxCntlrCntPerSp bounds them; the run
+//     behind the metadata wrapper on each CN is agent-local and freed by the
+//     cn agent's sweep (cnagent.md CN21), and the count is what the gateway
+//     charges new clones against. The sides of the clone's clone meta group
+//     go back to their DNs exactly as an sp drain batch gives a slice's
+//     back, at most six compares per distinct DN, and a clone meta group has
+//     at most MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares of one
+//     side each, so those bound them. The final STM is the one step that
+//     needs the cluster's stored conf, for the DN capacity keys' bins.
 //   - The SP OUTLIVES the clone, so the final STM bumps SpRev like every other
 //     mutator instead of deleting a stop signal.
 //   - The drain runs ALONGSIDE the SP's normal reaction pass rather than
@@ -116,12 +121,12 @@ func loadCloneForOp(
 //
 // It neither reads nor bumps SpRev (CLD8). A batch changes nothing a side or a
 // cntlr is sent — the clone left every request with the latch (CLD5) — so a
-// bump would only re-send the SP's whole desired state to every side and cntlr
-// once per batch. Nor does the pool's existence need a revision read: the
-// SpConf load refuses a pool that is gone (CLD2), and the sp drain deletes the
-// SpConf and the SpRev key in one transaction (SPD12). The pool's revision
-// therefore moves once for the latch and once for the final STM, whatever the
-// batch count (CLD12).
+// bump would only re-send the SP's whole desired state to every side of its
+// slices and every cntlr once per batch. Nor does the pool's existence need a
+// revision read: the SpConf load refuses a pool that is gone (CLD2), and the
+// sp drain deletes the SpConf and the SpRev key in one transaction (SPD12).
+// The pool's revision therefore moves once for the latch and once for the
+// final STM, whatever the batch count (CLD12).
 //
 // Physical effect: none (CLD8). The CN drops its local chunk files in its sweep
 // (cnagent.md CN21) once the clone has left the cntlr's request, which the
@@ -176,7 +181,8 @@ func DrainCloneBm(
 }
 
 // FinishCloneDelete removes the Clone key and its `clone_name_list` entry in one
-// STM and bumps SpRev (CLD9).
+// STM, gives the sides of the clone's clone meta group back to their DNs, and
+// bumps SpRev (CLD9).
 //
 // The two go together and never separately, for the sp drain's slice-final
 // reason: model.LoadSp fetches clones by iterating `clone_name_list`, so a
@@ -197,13 +203,32 @@ func DrainCloneBm(
 // (CLD12). After the commit the name is reusable and `DeleteStoragePool`'s
 // clone precondition no longer sees it.
 //
-// The same STM gives the clone's metadata units back (architecture.md,
-// Metadata units; releaseCloneMetaUnits): its meta_units leave the
-// used_meta_units of the CN of every cntlr the SP has now, once per cntlr and
-// stopping at zero, with the capacity value rewritten and no CnRev bumped,
-// since only a count moves. That is the one ledger the drain touches, and the
-// release happens here, in the step that removes the record the units are
-// read from, so they are given back exactly once.
+// The same STM gives the clone's two charges back, both here, in the step
+// that removes the record they are read from, so each is given back exactly
+// once:
+//
+//   - the metadata units (architecture.md, Metadata units;
+//     releaseCloneMetaUnits): its meta_units leave the used_meta_units of the
+//     CN of every cntlr the SP has now, once per cntlr and stopping at zero,
+//     with the capacity value rewritten and no CnRev bumped, since only a
+//     count moves;
+//   - the clone meta group: every side of its legs and its spares goes back
+//     through the DN ledger exactly as DrainSpSlice gives a popped group's
+//     back — per distinct DN once, the pointer out, the group's ext_cnt back,
+//     the capacity key maintained and one DnRev bump. A DnConf that is gone
+//     is skipped, there being nothing left to credit, and a clone with no
+//     group gives nothing back, so a drain is never stranded on one.
+//
+// The pointer's removal and the DnRev bump take a side out of its dn agent's
+// next SyncupDn; no dn agent has built anything for a clone meta side
+// (architecture.md, Terminology and object model), so there is nothing to
+// tear down, and nothing here waits on an agent (CLD10).
+//
+// cc is the cluster's stored conf, used as stored (architecture.md, Common
+// validation): MaintainDnCapacity's key embeds the bin index its ladder
+// yields, so it is gated at the top of the STM, ahead of the first read, as
+// DrainSpSlice gates it, and a refusal returns having staged nothing. The
+// gate holds for a clone with no group too, so the step has one contract.
 func FinishCloneDelete(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -213,8 +238,12 @@ func FinishCloneDelete(
 	spName string,
 	cloneName string,
 	cloneId uint64,
+	cc *pb.ClusterConf,
 ) error {
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		if err := ValidateClusterConf(cc); err != nil {
+			return fail(opFinishCloneDelete, err.Error())
+		}
 		conf, clone, err := loadCloneForOp(
 			s, opFinishCloneDelete, cid, spName, spId, cloneName, cloneId)
 		if err != nil {
@@ -225,9 +254,22 @@ func FinishCloneDelete(
 		if err != nil {
 			return err
 		}
+		rel := newDnReleaser(s, cid, cc)
+		grp := clone.GetMetaGrp()
+		for _, leg := range legsOf(grp) {
+			for _, side := range leg.GetSideList() {
+				rel.release(
+					side.GetAddrPort(), spId,
+					side.GetSideId(), grp.GetExtCnt(),
+				)
+			}
+		}
 		s.Del(CloneKey(cid, spId, cloneName))
 		conf.CloneNameList = removeName(conf.GetCloneNameList(), cloneName)
 		s.Put(SpConfKey(cid, spName), conf)
+		if err := rel.flush(opFinishCloneDelete); err != nil {
+			return err
+		}
 		return BumpSpRev(s, opFinishCloneDelete, shard, cid, spId)
 	})
 }

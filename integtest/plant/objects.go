@@ -3,6 +3,7 @@ package plant
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -102,7 +103,10 @@ func PutTds(
 				if conf.NextDevId <= devId {
 					conf.NextDevId = devId + 1
 				}
-				tdId := takeId(conf, spec.Id)
+				tdId, err := takeId(conf, "PutTds", spec.Id)
+				if err != nil {
+					return err
+				}
 				s.Put(key, &pb.ThinDevice{
 					TdId:    tdId,
 					DevId:   devId,
@@ -217,14 +221,20 @@ func PutSs(
 		if s.Get(key, &pb.Subsystem{}) {
 			return fmt.Errorf("%q already exists", key)
 		}
-		out.Id = takeId(conf, spec.Id)
+		out.Id, err = takeId(conf, "PutSs", spec.Id)
+		if err != nil {
+			return err
+		}
 		subsystem := &pb.Subsystem{
 			SsId:   out.Id,
 			Serial: spec.Serial,
 			Model:  spec.Model,
 		}
 		for _, ns := range spec.Namespaces {
-			nsId := takeId(conf, ns.NsId)
+			nsId, err := takeId(conf, "PutSs", ns.NsId)
+			if err != nil {
+				return err
+			}
 			uuid, nguid := nsIdentity(cid, target.Id, nsId)
 			subsystem.NsList = append(subsystem.NsList, &pb.Namespace{
 				NsId:      nsId,
@@ -269,7 +279,38 @@ func PutSs(
 // Clones (architecture.md, Clones)
 // ---------------------------------------------------------------------------
 
-// CloneSpec is one clone to plant.
+// CloneLegSpec places one leg of a clone's clone meta group and the leg's
+// one side on a DN, with the side's cntlid slot. A Spare leg goes to the
+// group's spare_leg_list and needs a pool of md-raid1 groups, its leg_idx
+// sharing the group's index space with the active legs. Every side is
+// planted unprovisioned, so two or more spares in one group make a shape no
+// gateway writes, for LegSpec's reason: model.CreateCloneSpareLeg refuses a
+// new spare while a spare of the group still has an unprovisioned side. A
+// case that wants a shape the gateway can reach flips, with
+// SetCloneProvisioned, the sides of every spare of the group but at most one.
+type CloneLegSpec struct {
+	// LegId and SideId are the leg's and its side's ids; 0 takes the pool's
+	// next free one.
+	LegId  uint64
+	LegIdx uint32
+	Spare  bool
+	SideId uint64
+	DnId   uint64
+	Slot   uint32
+}
+
+func (l CloneLegSpec) String() string {
+	spare := ""
+	if l.Spare {
+		spare = ":spare"
+	}
+	return fmt.Sprintf("%#x:%d:%#x:%#x:%d%s",
+		l.LegId, l.LegIdx, l.SideId, l.DnId, l.Slot, spare)
+}
+
+// CloneSpec is one clone to plant, with its clone meta group
+// (architecture.md, Terminology and object model) placed as the caller
+// chooses.
 type CloneSpec struct {
 	Name string
 	// Id is the clone_id; 0 takes the pool's next free one.
@@ -281,9 +322,21 @@ type CloneSpec struct {
 	SrcNsIdx      uint32
 	SrcStripeSize uint64
 	SrcBlockSize  uint64
+	// GrpId is the clone meta group's grp_id; 0 takes the pool's next free
+	// one.
+	GrpId uint64
+	// Legs places the group's legs, one side each. No leg plants a clone
+	// with no group, a shape CreateClone never writes, which no clone-keyed
+	// op takes and the clone drain deletes all the same (dnv-worker.md
+	// MD6).
+	Legs []CloneLegSpec
 }
 
-// Check refuses a clone no key could be written for.
+// Check refuses a clone no key could be written for, and a clone meta group
+// placed in a way no gateway places one: a leg on dn 0, a leg id, a side id
+// or a leg_idx used twice, no leg that is not a spare, or two legs on one DN,
+// which leave the group no redundancy. A GrpId with no leg is refused too:
+// it names a group the clone would not get.
 func (spec CloneSpec) Check() error {
 	if spec.Name == "" {
 		return fmt.Errorf("the clone name is empty")
@@ -291,19 +344,80 @@ func (spec CloneSpec) Check() error {
 	if spec.DstTd == "" {
 		return fmt.Errorf("the clone's destination td is not named")
 	}
+	if len(spec.Legs) == 0 {
+		if spec.GrpId != 0 {
+			return fmt.Errorf("clone %q: group %#x has no leg",
+				spec.Name, spec.GrpId)
+		}
+		return nil
+	}
+	legIds := make(map[uint64]bool, len(spec.Legs))
+	sideIds := make(map[uint64]bool, len(spec.Legs))
+	legIdxs := make(map[uint32]bool, len(spec.Legs))
+	dnIds := make(map[uint64]bool, len(spec.Legs))
+	active := 0
+	for _, leg := range spec.Legs {
+		switch {
+		case leg.DnId == 0:
+			return fmt.Errorf("clone %q: leg %s: dn 0 is never valid",
+				spec.Name, leg)
+		case leg.LegId != 0 && legIds[leg.LegId]:
+			return fmt.Errorf("clone %q: leg id %#x is used twice",
+				spec.Name, leg.LegId)
+		case leg.SideId != 0 && sideIds[leg.SideId]:
+			return fmt.Errorf("clone %q: side id %#x is used twice",
+				spec.Name, leg.SideId)
+		case legIdxs[leg.LegIdx]:
+			return fmt.Errorf("clone %q: leg_idx %d is used twice",
+				spec.Name, leg.LegIdx)
+		case dnIds[leg.DnId]:
+			return fmt.Errorf(
+				"clone %q: dn %#x carries two legs of the group "+
+					"(two legs of one group on one node have no redundancy)",
+				spec.Name, leg.DnId)
+		}
+		if leg.LegId != 0 {
+			legIds[leg.LegId] = true
+		}
+		if leg.SideId != 0 {
+			sideIds[leg.SideId] = true
+		}
+		legIdxs[leg.LegIdx] = true
+		dnIds[leg.DnId] = true
+		if !leg.Spare {
+			active++
+		}
+	}
+	if active == 0 {
+		return fmt.Errorf("clone %q: the group has no leg that is not a spare",
+			spec.Name)
+	}
 	return nil
 }
 
 // Clone is one planted clone: its id, its destination td's id, the units it
-// stored and the units it charged each CN, keyed by the CN's endpoint.
+// stored and the units it charged each CN, keyed by the CN's endpoint, and
+// its clone meta group's — the group's id, its legs' ids and their sides',
+// both in the spec's order, its geometry and the revision each DN it charged
+// went to, keyed by the DN's endpoint. A clone with no group has zero and
+// empty ones.
 type Clone struct {
-	Name      string
-	Id        uint64
-	DstTdId   uint64
-	MetaUnits uint64
-	Charged   map[string]uint64
-	SpRev     uint64
+	Name        string
+	Id          uint64
+	DstTdId     uint64
+	MetaUnits   uint64
+	Charged     map[string]uint64
+	GrpId       uint64
+	LegIds      []uint64
+	SideIds     []uint64
+	MetaBlocks  uint64
+	DataBlocks  uint64
+	DnRevisions map[string]uint64
+	SpRev       uint64
 }
+
+// opPutClone names PutClone in a refusal of model.TakeSpIds.
+const opPutClone = "PutClone"
 
 // PutClone writes one Clone and its SpConf.clone_name_list entry
 // (architecture.md, Clones), then bumps SpRev once.
@@ -311,13 +425,23 @@ type Clone struct {
 // It charges the clone's metadata units as CreateClone does (architecture.md,
 // Metadata units): common.CloneMetaUnits of the destination td's size at the
 // pool's block size, stored on the Clone record and charged to the CN of
-// every cntlr of the pool (chargeCloneCns). The clone drain's last step,
-// model.FinishCloneDelete, gives exactly those charges back, so a planted
-// clone that drains leaves its nodes' counts where it found them. Unlike
-// CreateClone it never refuses a CN past its area: the library plants
-// whatever shape a case needs, and the worker's cntlr replacement can leave
-// a CN past its ceiling anyway. A DstTd id that no td of the pool carries is
-// planted with no units, as there is no size to charge for.
+// every cntlr of the pool (chargeCloneCns). Unlike CreateClone it never
+// refuses a CN past its area: the library plants whatever shape a case
+// needs, and the worker's cntlr replacement can leave a CN past its ceiling
+// anyway. A DstTd id that no td of the pool carries is planted with no
+// units, as there is no size to charge for.
+//
+// It writes the clone's clone meta group with the placement the spec gives
+// (putCloneGrp) and charges its DNs as CreateClone charges a clone's
+// (architecture.md, Clones): a group of common.CloneMetaGrpExtCnt extents
+// laid out by model.GroupBlocks, every side unprovisioned, and each DN
+// charged once through chargeDn, its pointer in, the extents off, its
+// capacity key moved and its DnRev bumped, and no metadata unit, which a
+// clone meta side never takes. The clone drain's last step,
+// model.FinishCloneDelete, gives back exactly the units and the sides, so a
+// planted clone that drains leaves its nodes' counts where it found them.
+// The zero ids are taken as CreateClone mints them: the clone's, the
+// group's, then each leg's before its side's, in the spec's order of legs.
 func PutClone(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -328,10 +452,27 @@ func PutClone(
 	if err := spec.Check(); err != nil {
 		return Clone{}, err
 	}
+	// The group's DNs are resolved to the endpoints their records are keyed
+	// by outside the STM, as PutSp resolves a pool's; the STM re-reads each
+	// record and re-checks its id. The extent size the group is laid out by
+	// is the cluster's stored conf, gated as PutSp gates it.
+	addrs := make([]string, 0, len(spec.Legs))
+	for _, leg := range spec.Legs {
+		addr, err := DnAddr(ctx, cli, cl, leg.DnId)
+		if err != nil {
+			return Clone{}, err
+		}
+		addrs = append(addrs, addr)
+	}
+	if len(spec.Legs) > 0 {
+		if err := model.ValidateClusterConf(cl.Conf); err != nil {
+			return Clone{}, err
+		}
+	}
 	cid := cl.Id
 	var out Clone
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		out = Clone{Name: spec.Name}
+		out = Clone{Name: spec.Name, DnRevisions: make(map[string]uint64)}
 		conf, err := getSpConf(s, cid, target)
 		if err != nil {
 			return err
@@ -356,7 +497,13 @@ func PutClone(
 		if err != nil {
 			return err
 		}
-		out.Id = takeId(conf, spec.Id)
+		if out.Id, err = takeId(conf, opPutClone, spec.Id); err != nil {
+			return err
+		}
+		grp, err := putCloneGrp(s, cl, target, conf, spec, addrs, &out)
+		if err != nil {
+			return err
+		}
 		s.Put(key, &pb.Clone{
 			CloneId:       out.Id,
 			SrcNqn:        spec.SrcNqn,
@@ -366,6 +513,7 @@ func PutClone(
 			SrcBlockSize:  spec.SrcBlockSize,
 			DstTdId:       out.DstTdId,
 			MetaUnits:     out.MetaUnits,
+			MetaGrp:       grp,
 		})
 		conf.CloneNameList = append(conf.CloneNameList, spec.Name)
 		s.Put(model.SpConfKey(cid, target.Name), conf)
@@ -376,6 +524,215 @@ func PutClone(
 		return Clone{}, err
 	}
 	return out, nil
+}
+
+// putCloneGrp is PutClone's clone meta group inside its STM: it lays the
+// group out, takes its ids, charges its DNs and returns the record the Clone
+// carries, nil for a spec with no leg, filling out's group fields. addrs are
+// the endpoints of the legs' DNs, in the spec's order.
+//
+// It refuses, before anything is written, what no gateway could have
+// written and what would make the clone drain go wrong: a spare in a pool
+// whose groups are not md-raid1 (the pool's stored redund_conf decides, a
+// group having no redundancy of its own), a slot outside the pool's
+// cntlid_slot_list, a DN short of the group's extents, and a group, leg or
+// side id that a slice or another clone of the pool already uses for its
+// own kind (poolIds). The side id above all: the clone drain takes a side's
+// pointer out of its DN by the pool and the side id alone
+// (model.FinishCloneDelete), so a clone side sharing a slice side's id would
+// take that slice side's pointer with it. Ids of two kinds may meet, as
+// newSpPlan lets them. It does not judge the leg count against the pool's
+// redundancy, the destination against the one-extent bound CreateClone
+// applies, or a DN for being disabled: the library plants whatever shape a
+// case needs.
+//
+// It reads every slice and every clone of the pool for the id check, so at
+// the widest pool PutClone's STM is past etcd's default number of operations
+// per transaction, far below common.EtcdMaxTxnOps, which every etcd the
+// suites and the Go cases start runs with: MaxSliceCntPerSp slices and
+// MaxCloneCntPerSp - 1 clones read, beside the few keys of the pool and the
+// clone, the cntlrs and CNs of the units' charge, and six compares per DN of
+// the group, its record and its revision read and written and its capacity
+// key moved.
+func putCloneGrp(
+	s etcdutil.STM,
+	cl Cluster,
+	target SpRef,
+	conf *pb.SpConf,
+	spec CloneSpec,
+	addrs []string,
+	out *Clone,
+) (*pb.Group, error) {
+	if len(spec.Legs) == 0 {
+		return nil, nil
+	}
+	cid, cc := cl.Id, cl.Conf
+	raid1 := conf.GetBdevConf().GetRedundConf().GetRedundMdRaid1() != nil
+	for _, leg := range spec.Legs {
+		if leg.Spare && !raid1 {
+			return nil, fmt.Errorf(
+				"clone %q: leg %s: a spare leg needs md-raid1 groups "+
+					"(architecture.md, Spare legs)", spec.Name, leg)
+		}
+		if !slices.Contains(conf.GetCntlidSlotList(), leg.Slot) {
+			return nil, fmt.Errorf(
+				"clone %q: leg %s: cntlid slot %d is not in the slot list "+
+					"of storage pool %q", spec.Name, leg, leg.Slot, target.Name)
+		}
+	}
+	metaBlocks, dataBlocks, err := model.GroupBlocks(
+		common.CloneMetaGrpExtCnt, cc.GetDnBinConf().GetExtentSize(),
+		conf.GetBdevConf())
+	if err != nil {
+		return nil, fmt.Errorf("storage pool %q: %w", target.Name, err)
+	}
+	used, err := readPoolIds(s, cid, conf)
+	if err != nil {
+		return nil, err
+	}
+	claim := func(kind string, id uint64) error {
+		if err := used.claim(kind, id); err != nil {
+			return fmt.Errorf("clone %q: %w in storage pool %q",
+				spec.Name, err, target.Name)
+		}
+		return nil
+	}
+	grp := &pb.Group{
+		ExtCnt:     common.CloneMetaGrpExtCnt,
+		MetaBlocks: metaBlocks,
+		DataBlocks: dataBlocks,
+	}
+	if grp.GrpId, err = takeId(conf, opPutClone, spec.GrpId); err != nil {
+		return nil, err
+	}
+	if err := claim("group", grp.GrpId); err != nil {
+		return nil, err
+	}
+	for i, l := range spec.Legs {
+		legId, err := takeId(conf, opPutClone, l.LegId)
+		if err != nil {
+			return nil, err
+		}
+		sideId, err := takeId(conf, opPutClone, l.SideId)
+		if err != nil {
+			return nil, err
+		}
+		if err := claim("leg", legId); err != nil {
+			return nil, err
+		}
+		if err := claim("side", sideId); err != nil {
+			return nil, err
+		}
+		key := model.DnConfKey(cid, addrs[i])
+		dn := &pb.DnConf{}
+		if !s.Get(key, dn) {
+			return nil, fmt.Errorf("%q not found", key)
+		}
+		if dn.GetDnId() != l.DnId {
+			return nil, fmt.Errorf("%q holds dn %#x, want %#x",
+				addrs[i], dn.GetDnId(), l.DnId)
+		}
+		revision, err := chargeDn(s, cid, cc, addrs[i], dn,
+			[]*pb.SidePointer{{
+				SpId:   target.Id,
+				LegId:  legId,
+				SideId: sideId,
+			}}, common.CloneMetaGrpExtCnt, 0)
+		if err != nil {
+			return nil, err
+		}
+		leg := &pb.Leg{
+			LegId:  legId,
+			LegIdx: l.LegIdx,
+			SideList: []*pb.Side{{
+				SideId:      sideId,
+				AddrPort:    addrs[i],
+				CntlidSlot:  l.Slot,
+				NvmeTrConf:  dn.GetNvmeTrConf(),
+				ErrEpoch:    0,
+				Provisioned: false,
+			}},
+		}
+		if l.Spare {
+			grp.SpareLegList = append(grp.SpareLegList, leg)
+		} else {
+			grp.LegList = append(grp.LegList, leg)
+		}
+		out.LegIds = append(out.LegIds, legId)
+		out.SideIds = append(out.SideIds, sideId)
+		out.DnRevisions[addrs[i]] = revision
+	}
+	out.GrpId = grp.GetGrpId()
+	out.MetaBlocks = metaBlocks
+	out.DataBlocks = dataBlocks
+	return grp, nil
+}
+
+// poolIds holds, per kind — "group", "leg" and "side" — every id the slices
+// and the clones of one pool use, as readPoolIds reads them.
+type poolIds map[string]map[uint64]bool
+
+// readPoolIds reads every slice and every clone of the pool inside the
+// caller's STM and collects their groups', legs' and sides' ids, spare legs
+// and a migration's second side included. A listed slice or clone whose key
+// is missing refuses: an id it held could no longer be told apart.
+func readPoolIds(
+	s etcdutil.STM,
+	cid uint64,
+	conf *pb.SpConf,
+) (poolIds, error) {
+	ids := poolIds{
+		"group": make(map[uint64]bool),
+		"leg":   make(map[uint64]bool),
+		"side":  make(map[uint64]bool),
+	}
+	addGrp := func(grp *pb.Group) {
+		ids["group"][grp.GetGrpId()] = true
+		legLists := [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()}
+		for _, legList := range legLists {
+			for _, leg := range legList {
+				ids["leg"][leg.GetLegId()] = true
+				for _, side := range leg.GetSideList() {
+					ids["side"][side.GetSideId()] = true
+				}
+			}
+		}
+	}
+	for _, sliceId := range conf.GetSliceIdList() {
+		key := model.SliceKey(cid, conf.GetSpId(), sliceId)
+		slice := &pb.Slice{}
+		if !s.Get(key, slice) {
+			return nil, fmt.Errorf("%q not found", key)
+		}
+		for _, grp := range slice.GetMetaGrpList() {
+			addGrp(grp)
+		}
+		for _, grp := range slice.GetDataGrpList() {
+			addGrp(grp)
+		}
+	}
+	for _, cloneName := range conf.GetCloneNameList() {
+		key := model.CloneKey(cid, conf.GetSpId(), cloneName)
+		clone := &pb.Clone{}
+		if !s.Get(key, clone) {
+			return nil, fmt.Errorf("%q not found", key)
+		}
+		if grp := clone.GetMetaGrp(); grp != nil {
+			addGrp(grp)
+		}
+	}
+	return ids, nil
+}
+
+// claim refuses an id the pool already uses for its kind, and counts it as
+// used otherwise, so the ids of one group are kept apart from each other
+// too.
+func (ids poolIds) claim(kind string, id uint64) error {
+	if ids[kind][id] {
+		return fmt.Errorf("%s id %#x is already used", kind, id)
+	}
+	ids[kind][id] = true
+	return nil
 }
 
 // plantedCloneTd resolves PutClone's DstTd inside its STM: a td name first,
@@ -534,7 +891,10 @@ func PutXfer(
 		if s.Get(key, &pb.Transfer{}) {
 			return fmt.Errorf("%q already exists", key)
 		}
-		out.Id = takeId(conf, spec.Id)
+		out.Id, err = takeId(conf, "PutXfer", spec.Id)
+		if err != nil {
+			return err
+		}
 		s.Put(key, &pb.Transfer{
 			XferId:   out.Id,
 			OriNqn:   spec.OriNqn,
@@ -615,11 +975,15 @@ type Migr struct {
 // CreateMigration treatment (architecture.md, Migrations; Metadata units):
 // the side pointer, the group's ext_cnt off its budget, the migration's
 // metadata units (plantedMigrUnits) on its used count, its capacity key
-// maintained and its DnRev bumped once (chargeMigrDst). The units are stored
+// maintained and its DnRev bumped once (chargeDn). The units are stored
 // on the Migration record too, which is where FinishMigration and
 // CancelMigration read what to give back. It refuses a DN short of extents,
 // whose count would wrap below zero, but never one past its metadata area: a
 // used count only grows, and the library plants whatever shape a case needs.
+// The source is looked up in the slices alone, so a side of a clone meta
+// group is no source, as CreateMigration refuses one (architecture.md,
+// Clones), and a destination side id that a slice or a clone of the pool
+// already uses is refused, as PutClone refuses one.
 //
 // CutoverPending writes the record's cutover_pending, which CreateMigration
 // always sets and only the sp worker's cutover clears (architecture.md,
@@ -703,14 +1067,30 @@ func PutMigr(
 				"no side %#x in storage pool %q", spec.SrcSide, target.Name,
 			)
 		}
-		out.Id = takeId(conf, spec.Id)
-		out.DstSide = takeId(conf, spec.DstSide)
+		if out.Id, err = takeId(conf, "PutMigr", spec.Id); err != nil {
+			return err
+		}
+		out.DstSide, err = takeId(conf, "PutMigr", spec.DstSide)
+		if err != nil {
+			return err
+		}
 		for _, side := range leg.GetSideList() {
 			if side.GetSideId() == out.DstSide {
 				return fmt.Errorf(
 					"leg %#x already carries side %#x", out.LegId, out.DstSide,
 				)
 			}
+		}
+		// A DN pointer is removed by the pool and the side id alone, by the
+		// clone drain's final step among others, so the new side's id must
+		// be one no slice or clone of the pool uses.
+		used, err := readPoolIds(s, cid, conf)
+		if err != nil {
+			return err
+		}
+		if err := used.claim("side", out.DstSide); err != nil {
+			return fmt.Errorf("migration %q: %w in storage pool %q",
+				spec.Name, err, target.Name)
 		}
 		out.MetaUnits, err = plantedMigrUnits(
 			conf, out.ExtCnt, cc.GetDnBinConf().GetExtentSize())
@@ -736,12 +1116,12 @@ func PutMigr(
 		})
 		conf.MigrNameList = append(conf.MigrNameList, spec.Name)
 		s.Put(model.SpConfKey(cid, target.Name), conf)
-		out.DnRevision, err = chargeMigrDst(s, cid, cc, dstAddr, dn,
-			&pb.SidePointer{
+		out.DnRevision, err = chargeDn(s, cid, cc, dstAddr, dn,
+			[]*pb.SidePointer{{
 				SpId:   target.Id,
 				LegId:  out.LegId,
 				SideId: out.DstSide,
-			}, out.ExtCnt, out.MetaUnits)
+			}}, out.ExtCnt, out.MetaUnits)
 		if err != nil {
 			return err
 		}
@@ -772,24 +1152,27 @@ func plantedMigrUnits(
 		extCnt*extentSize, model.PoolBlockSize(bdev)), nil
 }
 
-// chargeMigrDst is PutMigr's bookkeeping of its destination DN, inside
-// PutMigr's STM, as CreateMigration does it (architecture.md, Storage pools;
-// Capacity index keys; Metadata units; Revision keys and the sync fan-out):
-// the side pointer in, extCnt off free_ext_cnt and the migration's units on
-// used_meta_units, all in the one write of the record, the capacity key
-// following the record (model.MaintainDnCapacity) and the DN's revision
-// bumped once — the units FinishMigration and CancelMigration give back. dn
-// is the record as read in the same STM, which MaintainDnCapacity needs to
-// find the key it replaces. It refuses a DN short of extents, whose count
-// would wrap below zero, and writes nothing then, but never refuses one past
-// its metadata area. It returns the DN's new revision.
-func chargeMigrDst(
+// chargeDn is one DN's bookkeeping inside a caller's STM, as the gateway's
+// creates do it (architecture.md, Storage pools; Capacity index keys;
+// Metadata units; Revision keys and the sync fan-out): the side pointers in,
+// extCnt off free_ext_cnt and units on used_meta_units, all in the one write
+// of the record, the capacity key following the record
+// (model.MaintainDnCapacity) and the DN's revision bumped once. PutSp charges
+// each DN of a pool through it, its units zero; PutMigr its destination DN,
+// with the units FinishMigration and CancelMigration give back; and PutClone
+// each DN of a clone's clone meta group, its units zero, since a clone meta
+// side takes no metadata unit. dn is the record as read in the same STM,
+// which MaintainDnCapacity needs to find the key it replaces. It refuses a
+// DN short of extents, whose count would wrap below zero, and writes nothing
+// then, but never refuses one past its metadata area. It returns the DN's
+// new revision.
+func chargeDn(
 	s etcdutil.STM,
 	cid uint64,
 	cc *pb.ClusterConf,
 	addrPort string,
 	dn *pb.DnConf,
-	ptr *pb.SidePointer,
+	ptrs []*pb.SidePointer,
 	extCnt uint64,
 	units uint64,
 ) (uint64, error) {
@@ -800,7 +1183,7 @@ func chargeMigrDst(
 		)
 	}
 	newDn := proto.Clone(dn).(*pb.DnConf)
-	newDn.SidePtrList = append(newDn.SidePtrList, ptr)
+	newDn.SidePtrList = append(newDn.SidePtrList, ptrs...)
 	newDn.FreeExtCnt -= extCnt
 	newDn.UsedMetaUnits += units
 	s.Put(model.DnConfKey(cid, addrPort), newDn)

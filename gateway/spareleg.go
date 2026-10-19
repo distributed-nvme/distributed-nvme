@@ -13,13 +13,17 @@ import (
 
 // This file is architecture.md, Spare legs (gateway.md, Spare legs): the three
 // RPCs that give an md-raid1 group its standby capacity. A spare leg is a Leg
-// in the group's spare_leg_list — every cntlr connects to its side and
-// health-checks it (architecture.md, Primary cntlr, step 1), but md never sees
-// the leg until SwitchSpareLeg moves it into leg_list, so a spare is
-// pre-connected capacity and nothing more.
+// in the group's spare_leg_list. On a slice's group every cntlr connects to
+// its side and health-checks it (architecture.md, Primary cntlr, step 1), but
+// md never sees the leg until SwitchSpareLeg moves it into leg_list, so a
+// spare is pre-connected capacity and nothing more. On a clone meta group a
+// spare is its record and its DN's charge alone: no cntlr connects to it
+// (architecture.md, Terminology and object model).
 //
 // All three requests address a group by grp_id and carry NO slice id, so each
-// handler must first find the slice that holds the group. CreateSpareLeg and
+// handler must first find what holds the group: a slice, or, when no slice
+// does, a clone, whose clone meta group is a group of the pool too
+// (architecture.md, Terminology and object model). CreateSpareLeg and
 // SwitchSpareLeg locate it in a plain snapshot (gateway.md, Spare legs) that
 // plans but does not decide — everything it read is read again inside the
 // model op's own STM, and CreateSpareLeg takes a fresh snapshot in every round
@@ -28,20 +32,37 @@ import (
 // group that moved, a token that went stale or a spare list that filled up
 // between plan and decision is caught where it matters.
 //
-// Two of the three are model ops the sp-worker's leg repair (dnv-worker.md
-// AR8) already drives (gateway.md, Scope and placement:
-// reused, never duplicated); DeleteSpareLeg is the gateway's own STM, because
-// no worker reaction ever removes a spare — a parked leg stays parked until an
-// operator frees the slot with DeleteSpareLeg (dnv-worker.md AR8).
+// Two of the three are model ops (gateway.md, Scope and placement: reused,
+// never duplicated): on a slice's group the ones the sp-worker's leg repair
+// (dnv-worker.md AR8) already drives, and on a clone meta group their
+// clone-keyed twins (dnv-worker.md MD6). DeleteSpareLeg is the gateway's own
+// STM on either, because no worker reaction ever removes a spare — a parked
+// leg stays parked until an operator frees the slot with DeleteSpareLeg
+// (dnv-worker.md AR8).
 
 // opDeleteSpareLeg is the op name DeleteSpareLeg's own STM gives its ledger
 // flush and the bump helper; it is the RPC name so a log line names something
 // greppable.
 const opDeleteSpareLeg = "DeleteSpareLeg"
 
+// spareGrpLocation is where openGrpForSpareLeg found the group: in a slice,
+// with Clone nil, or as a clone's clone meta group, with Clone set and Slice
+// empty. Grp is the group either way.
+type spareGrpLocation struct {
+	Grp   *pb.Group
+	Slice sliceLocation
+	Clone *cloneLocation
+}
+
 // openGrpForSpareLeg is the opening the three spare-leg RPCs share: resolve
 // the cluster and the SP, check the token, then locate the group by id across
-// every slice of the SP (GW5 → GW6, in that order).
+// every slice of the SP (GW5 → GW6, in that order) and, only when no slice
+// holds it, across the clones' clone meta groups, so a slice's group never
+// depends on the clone keys. A clone being deleted refuses all three
+// FAILED_PRECONDITION, as loadLiveClone refuses the clone RPCs that address
+// one (dnv-worker.md CLD1): its group goes back to its DNs in the clone drain's
+// final transaction, and a spare made, removed or switched in for it would
+// change a group that is going away.
 //
 // The token is checked by openSp BEFORE the group is looked up, so a client
 // that sent a stale one always sees ABORTED "stale revision" and never a
@@ -58,42 +79,54 @@ func openGrpForSpareLeg(
 	spName string,
 	tok *pb.SpRev,
 	grpId uint64,
-) (*spScope, sliceLocation, error) {
+) (*spScope, spareGrpLocation, error) {
 	sc, err := openSp(stm, clusterName, spName, tok)
 	if err != nil {
-		return nil, sliceLocation{}, err
+		return nil, spareGrpLocation{}, err
 	}
 	slices, err := loadSlices(stm, sc.Cid, sc.Conf)
 	if err != nil {
-		return nil, sliceLocation{}, err
+		return nil, spareGrpLocation{}, err
 	}
-	loc, ok := findGrp(sc.Conf, slices, grpId)
+	if loc, ok := findGrp(sc.Conf, slices, grpId); ok {
+		return sc, spareGrpLocation{Grp: loc.Grp, Slice: loc}, nil
+	}
+	clones, err := loadClones(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return nil, spareGrpLocation{}, err
+	}
+	cloneLoc, ok := findCloneGrp(sc.Conf, clones, grpId)
 	if !ok {
-		return nil, sliceLocation{}, errNotFound(
+		return nil, spareGrpLocation{}, errNotFound(
 			"group %d not found in storage pool %q", grpId, spName)
 	}
-	return sc, loc, nil
+	if cloneLoc.Clone.GetDeleting() {
+		return nil, spareGrpLocation{}, errPrecondition(
+			"clone %q is being deleted", cloneLoc.CloneName)
+	}
+	return sc, spareGrpLocation{Grp: cloneLoc.Grp, Clone: &cloneLoc}, nil
 }
 
 // snapshotGrpForSpareLeg runs openGrpForSpareLeg in a read-only snapshot: the
 // plain pre-read the two model-backed RPCs plan from (gateway.md, Spare legs;
 // architecture.md, STM discipline). Every read is served at one store
-// revision, so the SpConf, the slice list and the
+// revision, so the SpConf, the slice list or the clone and the
 // group agree with each other — a plan assembled from a torn read would pick
 // a DN for a group that no longer has that size.
 //
 // It is deliberately not the deciding read: the model op re-resolves the SP,
-// re-reads the slice and re-checks the token inside its own STM, which is
-// AG4's "nothing from phase 1 is trusted" applied to a pre-read.
+// re-reads the slice or the clone and re-checks the token inside its own
+// STM, which is AG4's "nothing from phase 1 is trusted" applied to a
+// pre-read.
 func (s *Server) snapshotGrpForSpareLeg(
 	ctx context.Context,
 	clusterName string,
 	spName string,
 	tok *pb.SpRev,
 	grpId uint64,
-) (*spScope, sliceLocation, error) {
+) (*spScope, spareGrpLocation, error) {
 	var sc *spScope
-	var loc sliceLocation
+	var loc spareGrpLocation
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 		var err error
 		sc, loc, err = openGrpForSpareLeg(
@@ -101,7 +134,7 @@ func (s *Server) snapshotGrpForSpareLeg(
 		return err
 	})
 	if err != nil {
-		return nil, sliceLocation{}, mapStmErr(err)
+		return nil, spareGrpLocation{}, mapStmErr(err)
 	}
 	return sc, loc, nil
 }
@@ -154,8 +187,9 @@ func removeSpareLeg(list []*pb.Leg, legId uint64) []*pb.Leg {
 // Per-operation allocation: the domain exclusion
 // yields rather than refuse the spare altogether).
 //
-// It is a GW9 candidate unit around model.CreateSpareLeg (gateway.md, Scope
-// and placement), each round of which plans, scans and decides, as
+// It is a GW9 candidate unit around model.CreateSpareLeg, or, on a clone
+// meta group, its twin model.CreateCloneSpareLeg (gateway.md, Scope and
+// placement), each round of which plans, scans and decides, as
 // CreateMigration's does. The plan — the group as a fresh snapshot reads it,
 // its DNs as the black list and their locations as tier 1 — is read again in
 // every round: the op's STM refuses a round whose group gained a DN since the
@@ -245,15 +279,27 @@ func (s *Server) CreateSpareLeg(
 		if err != nil {
 			return err
 		}
-		// The Side the op writes is provisioned = false ([D15]); only the
-		// sp-worker flips it, once the dn agent reports the side's zeroing
-		// done (architecture.md, Side provisioning protocol), which is why a
-		// fresh spare cannot be switched in at once.
-		newId, err := model.CreateSpareLeg(
-			ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
-			req.GetSpRev().GetRevision(), loc.SliceId, req.GetGrpId(),
-			picks[0], planBlack, sc.Cc,
-		)
+		// The Side the op writes is provisioned = false ([D15]), and a
+		// switch takes only a provisioned spare (architecture.md, Spare
+		// legs), which is why a fresh spare cannot be switched in at once.
+		// A slice's spare side is flipped by the sp-worker once the dn agent
+		// reports its zeroing done (architecture.md, Side provisioning
+		// protocol).
+		var newId uint64
+		if loc.Clone != nil {
+			newId, err = model.CreateCloneSpareLeg(
+				ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
+				req.GetSpRev().GetRevision(), loc.Clone.CloneName,
+				loc.Clone.Clone.GetCloneId(), req.GetGrpId(), picks[0],
+				planBlack, sc.Cc,
+			)
+		} else {
+			newId, err = model.CreateSpareLeg(
+				ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
+				req.GetSpRev().GetRevision(), loc.Slice.SliceId,
+				req.GetGrpId(), picks[0], planBlack, sc.Cc,
+			)
+		}
 		if isSpareListFull(err) {
 			// The op's own full-list check: a create committed since the
 			// snapshot filled the list. It is the same ceiling the
@@ -282,8 +328,8 @@ func spareListFull(grpId uint64) error {
 		grpId, common.MaxSpareLegPerGrp)
 }
 
-// isSpareListFull reports whether err is model.CreateSpareLeg's refusal of a
-// group whose spare list is already full.
+// isSpareListFull reports whether err is model.CreateSpareLeg's refusal, or
+// its clone twin's, of a group whose spare list is already full.
 func isSpareListFull(err error) bool {
 	var pre *model.ErrPrecondition
 	return errors.As(err, &pre) && pre.Reason == model.ReasonSpareListFull
@@ -295,15 +341,17 @@ func isSpareListFull(err error) bool {
 // This is the gateway's own STM — model exports no op for it — and the whole
 // RPC is that one transaction (GW8): resolve, token, group and spare leg by
 // id, no migration running on that leg, then the two writes that must land
-// together, the Slice without the leg and the DN with its extents and its
-// pointer back. A refusal returns before the first Put, so an unknown id or a
-// spare under migration leaves the store untouched.
+// together, the Slice — or, for a clone meta group, the Clone — without the
+// leg and the DN with its extents and its pointer back. A refusal returns
+// before the first Put, so an unknown id or a spare under migration leaves
+// the store untouched.
 //
 // No CN and no cntlr is touched, exactly as model.CreateSpareLeg touches
 // none: the footprint a cntlr's CN reserves for the SP is Σ ext_cnt over
 // GROUPS (architecture.md, Storage pools; architecture.md, Cntlrs), and a
-// spare leg changes no group's ext_cnt. The bumps are therefore one SpRev (the
-// slice changed) and one DnRev per DN the ledger touched (architecture.md,
+// spare leg changes no group's ext_cnt, nor does a clone meta group count in
+// it. The bumps are therefore one SpRev (the slice or the clone changed) and
+// one DnRev per DN the ledger touched (architecture.md,
 // Revision keys and the sync fan-out), the DnRev coming from the ledger's
 // flush.
 func (s *Server) DeleteSpareLeg(
@@ -332,12 +380,14 @@ func (s *Server) DeleteSpareLeg(
 				"spare leg %d not found in group %d",
 				req.GetLegId(), req.GetGrpId())
 		}
-		// A spare's side can be a migration source (architecture.md,
-		// Migrations, takes any leg of the SP), and the destination then hangs
-		// off this very leg. Releasing both would leave the Migration naming
-		// sides in no leg, which neither FinishMigration nor CancelMigration
-		// can end — and an SP whose migr_name_list never empties can never be
-		// deleted.
+		// The side of a slice's spare can be a migration source
+		// (architecture.md, Migrations, takes a side of any leg of a slice,
+		// spare legs included), and the destination then hangs off this very
+		// leg. Releasing both would leave the Migration naming sides in no leg,
+		// which neither FinishMigration nor CancelMigration can end — and an SP
+		// whose migr_name_list never empties can never be deleted. A spare of a
+		// clone meta group never has a second side, since no migration moves
+		// one, so on that path the check only keeps the two alike.
 		if len(spare.GetSideList()) > 1 {
 			return errMigrRunning(spare)
 		}
@@ -359,7 +409,13 @@ func (s *Server) DeleteSpareLeg(
 		}
 		loc.Grp.SpareLegList = removeSpareLeg(
 			loc.Grp.GetSpareLegList(), req.GetLegId())
-		stm.Put(model.SliceKey(sc.Cid, sc.SpId(), loc.SliceId), loc.Slice)
+		if loc.Clone != nil {
+			stm.Put(model.CloneKey(
+				sc.Cid, sc.SpId(), loc.Clone.CloneName), loc.Clone.Clone)
+		} else {
+			stm.Put(model.SliceKey(
+				sc.Cid, sc.SpId(), loc.Slice.SliceId), loc.Slice.Slice)
+		}
 		if err := ledger.flush(opDeleteSpareLeg); err != nil {
 			return err
 		}
@@ -373,13 +429,14 @@ func (s *Server) DeleteSpareLeg(
 
 // SwitchSpareLeg is the SwitchSpareLeg of architecture.md, Spare legs, the
 // only way a spare becomes active: the spare takes the target's POSITION in
-// leg_list — the md member slot the array is missing — and the target is
-// parked in spare_leg_list, still connected and probed but never repaired
-// again.
+// leg_list and the target is parked in spare_leg_list, never repaired again.
+// On a slice's group that position is the md member slot the array is
+// missing, and the parked leg stays connected and probed.
 //
 // The swap is model.SwitchSpareLeg, the same op the sp-worker's leg repair
 // (dnv-worker.md AR8) calls (gateway.md, Scope and
-// placement), and its preconditions are this RPC's. The one that a caller
+// placement), or, on a clone meta group, its twin model.SwitchCloneSpareLeg,
+// and its preconditions are this RPC's. The one that a caller
 // meets in practice is that of architecture.md, Spare legs: the spare's side
 // must be `provisioned`, so a side still zeroing never becomes an md member
 // (architecture.md, Side provisioning protocol). It surfaces as
@@ -439,11 +496,20 @@ func (s *Server) SwitchSpareLeg(
 			return nil, errMigrRunning(leg)
 		}
 	}
-	err = model.SwitchSpareLeg(
-		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
-		req.GetSpRev().GetRevision(), loc.SliceId, req.GetGrpId(),
-		req.GetSpareLegId(), req.GetTargetLegId(),
-	)
+	if loc.Clone != nil {
+		err = model.SwitchCloneSpareLeg(
+			ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
+			req.GetSpRev().GetRevision(), loc.Clone.CloneName,
+			loc.Clone.Clone.GetCloneId(), req.GetGrpId(),
+			req.GetSpareLegId(), req.GetTargetLegId(),
+		)
+	} else {
+		err = model.SwitchSpareLeg(
+			ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
+			req.GetSpRev().GetRevision(), loc.Slice.SliceId,
+			req.GetGrpId(), req.GetSpareLegId(), req.GetTargetLegId(),
+		)
+	}
 	if err != nil {
 		return nil, mapModelErr(err)
 	}

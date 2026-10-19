@@ -449,7 +449,8 @@ func (m *healthMonitor) observeSettle(
 // wrong bin, which the bin scan of architecture.md, Finding DN candidates,
 // would then hand out as an allocation candidate for a DN HL1 has just flagged
 // unhealthy. An UNUSABLE stored conf is refused the same way and for exactly
-// the same reason (architecture.md, Common validation).
+// the same reason (architecture.md, Common validation). The clone drain's
+// final step, which credits DNs, fails on it for the same reason (CLD7).
 var errNoClusterConf = errors.New("cluster conf missing")
 
 // newDnMonitor builds the health monitor of one DN (HL1). The cluster conf the

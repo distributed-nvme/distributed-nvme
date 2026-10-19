@@ -81,6 +81,36 @@ func TestCreateSpareLegNeverMintsIdZero(t *testing.T) {
 	}
 }
 
+// TestCreateCloneSpareLegNeverMintsIdZero is the same rule at the clone-keyed
+// twin, which takes its two ids from the same counter.
+func TestCreateCloneSpareLegNeverMintsIdZero(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putGrpClone(opsCloneName, opsCloneId, opsCloneGrp(true), false)
+	resetNextId(env, 0)
+
+	legId, err := CreateCloneSpareLeg(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsCloneName, opsCloneId, opsCloneGrpId, env.dnCand(opsDnA),
+		env.cloneGrpDnAddrs(), env.cc,
+	)
+	if err != nil {
+		t.Fatalf("CreateCloneSpareLeg: %v", err)
+	}
+	if legId != SpFirstId {
+		t.Fatalf("leg_id: got %d, want %d (0 is the none sentinel)",
+			legId, SpFirstId)
+	}
+	spare := findCloneLeg(env.clone(opsCloneName), legId)
+	if spare == nil || len(spare.GetSideList()) != 1 ||
+		spare.GetSideList()[0].GetSideId() != SpFirstId+1 {
+		t.Errorf("spare: got %v, want leg %d with side %d", spare,
+			SpFirstId, SpFirstId+1)
+	}
+	if got := env.spConf().GetNextId(); got != SpFirstId+2 {
+		t.Errorf("next_id: got %d, want %d", got, SpFirstId+2)
+	}
+}
+
 // TestReplaceCntlrNeverMintsIdZero is AR7's mint: a cntlr with id 0 would be
 // invisible to AR5's election (failoverCandidate returns 0 for "no candidate"
 // and worker/reaction.go tests the plan's candidate against 0), so a healthy,
@@ -217,7 +247,7 @@ func (e *opsEnv) storeRev() int64 {
 	return rev
 }
 
-// TestOpsTakeTheirIdsUpToTheTop is the same rule at the three ops that mint
+// TestOpsTakeTheirIdsUpToTheTop is the same rule at the four ops that mint
 // ids (dnv-worker.md, MD6): with exactly the ids an op takes left below the
 // largest 64-bit value, the op commits them, its first id the counter's, and
 // leaves next_id at that value; with one fewer left it is refused with
@@ -265,6 +295,22 @@ func TestOpsTakeTheirIdsUpToTheTop(t *testing.T) {
 					opsSpName, noExpectRev, opsSliceId, opsDataGrpId,
 					env.dnCand(opsDnC), env.grpDnAddrs(opsDataGrpId),
 					env.cc,
+				)
+			},
+		},
+		{
+			// The clone-keyed twin's two ids, as the slice spare's.
+			name: "CreateCloneSpareLeg", op: opCreateCloneSpareLeg, n: 2,
+			setup: func(env *opsEnv) {
+				env.putGrpClone(opsCloneName, opsCloneId,
+					opsCloneGrp(true), false)
+			},
+			run: func(env *opsEnv) (uint64, error) {
+				return CreateCloneSpareLeg(
+					env.ctx, env.cli, env.cid, opsShard, opsSpId,
+					opsSpName, noExpectRev, opsCloneName, opsCloneId,
+					opsCloneGrpId, env.dnCand(opsDnA),
+					env.cloneGrpDnAddrs(), env.cc,
 				)
 			},
 		},

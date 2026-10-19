@@ -184,7 +184,11 @@ func TestScenPoolDrainFinalStepLogsItsEndOnce(t *testing.T) {
 // same, no push of it follows, and the pool converges with the clone gone.
 // The case holds the first push at the primary's fake, and the primary's
 // syncups, so the plan from before the latch is the one that runs when the
-// batch has deleted the chunks.
+// batch has deleted the chunks. The clone's clone meta group sits on dn 1 and
+// dn 2, and the worker's final step gives it back (CLD9): each of the two
+// ends as it was before the clone, its extents, its pointers and its
+// capacity key, with one more DnRev bump, the one that tells its agent the
+// side is gone, and dn 3 is never touched.
 func TestScenCloneDrainPushToADeletedChunkIsHarmless(t *testing.T) {
 	t.Parallel()
 	tmo := harnessTimeouts()
@@ -204,13 +208,23 @@ func TestScenCloneDrainPushToADeletedChunkIsHarmless(t *testing.T) {
 	c.waitConverged(t)
 	ctx := context.Background()
 
-	clone, err := plant.PutClone(ctx, h.cli, c.cl, c.sp.Ref, plant.CloneSpec{
+	var before [4]dnLedger
+	for id := uint64(1); id <= 3; id++ {
+		before[id] = c.dnLedgerOf(t, id)
+	}
+	clone := c.putStdClone(t, plant.CloneSpec{
 		Name: "c0", DstTd: "td0", SrcSliceCnt: 1,
 		SrcNqn: "nqn.2026-10.io.dnv-wh:src", SrcNsIdx: 1,
 		SrcStripeSize: 1 << 20, SrcBlockSize: 1 << 16,
 	})
-	if err != nil {
-		t.Fatalf("PutClone: %v", err)
+	for id := uint64(1); id <= 2; id++ {
+		got := c.dnLedgerOf(t, id)
+		if got.free != before[id].free-1 || got.ptrs == before[id].ptrs ||
+			!got.keyed || got.rev != before[id].rev+1 {
+			t.Fatalf("dn %d after the clone's put: %+v, before %+v; want "+
+				"one extent and one pointer more, keyed, one bump", id, got,
+				before[id])
+		}
 	}
 	for idx := uint32(0); idx < 3; idx++ {
 		if _, err := plant.PutCloneBitmap(ctx, h.cli, c.cl, c.sp.Ref, plant.CloneBitmapSpec{
@@ -270,6 +284,16 @@ func TestScenCloneDrainPushToADeletedChunkIsHarmless(t *testing.T) {
 	msg, _, _ := lastSyncup(primary, primaryKey)
 	if clones := msg.(*pb.SyncupCntlrRequest).GetCloneList(); len(clones) != 0 {
 		t.Errorf("the primary's last syncup still carries clones %v", clones)
+	}
+	for id := uint64(1); id <= 3; id++ {
+		want := before[id]
+		if id <= 2 {
+			want.rev += 2
+		}
+		if got := c.dnLedgerOf(t, id); got != want {
+			t.Errorf("dn %d after the clone's drain: %+v, want %+v", id, got,
+				want)
+		}
 	}
 }
 

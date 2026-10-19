@@ -54,8 +54,9 @@ FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
 # (architecture.md, Storage pools); the sp drain's D2 batch (SPD10), a
-# created-flip transaction of MaxFlipCreatedPerTxn tds (RW19) and the cntlr
-# replacement at the ceilings (AR7) are three more.
+# created-flip transaction of MaxFlipCreatedPerTxn tds (RW19), a clone flip
+# over MaxCloneCntPerSp clones (MD6) and the cntlr replacement at the
+# ceilings (AR7) are four more.
 # Their compare counts, and the factors that multiply into them, are asserted
 # from the named constants in gateway/txnbudget_test.go, not restated here.
 # This suite runs no gateway — `wctl put-sp` plants its pools directly — so
@@ -176,6 +177,9 @@ TD_ID=0x10
 SS_ID=0x20
 NS_ID=0x21
 CLONE_ID=0x30
+# The group of the clone meta group put-clone plants with clone CLONE_ID; its
+# legs and their sides take the ids after it (clone_meta_grp).
+CLONE_GRP_ID=0x31
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it
 
@@ -1273,6 +1277,20 @@ cn_meta_used() { ctl get-cn --id "$1" | "$JQ" -r .used_meta_units; }
 dn_err_epoch() { ctl get-dn --id "$1" | "$JQ" -r .err_epoch; }
 cn_err_epoch() { ctl get-cn --id "$1" | "$JQ" -r .err_epoch; }
 
+# clone_meta_grp sets CLONE_GRP to put-clone's flags for a clone meta group
+# (dnv-worker.md, Integration test plan, The driver) of two legs of one side
+# each, on dn 1 and dn 2 and on cntlid slot 0, as CreateClone places one in a
+# RAID1 pool on two DNs of two locations: group <grp>, legs <grp>+1 and
+# <grp>+3, their sides <grp>+2 and <grp>+4. The ids are labelled per kind,
+# as every object here is, so they only have to be free in their own kind.
+CLONE_GRP=()
+clone_meta_grp() { # <grp id>
+	local g=$(($1))
+	CLONE_GRP=(--grp "$g"
+		--leg "$((g + 1)):0" --side "$((g + 1)):$((g + 2)):1:0"
+		--leg "$((g + 3)):1" --side "$((g + 3)):$((g + 4)):2:0")
+}
+
 slice_json() { ctl get-slice --sp "$1" --id "$2"; }
 
 # leg_epoch / side_epoch read one Leg's / Side's err_epoch out of a Slice.
@@ -2180,7 +2198,9 @@ EOF
 		      or (.migr_src_conf.cutover_pending // false))' \
 		--argjson r "$cut_rev")" 0 \
 		"dn0: side 1 requests from the cutover's revision on that still hold its role"
-	ctl put-clone --sp sp0 --name c0 --id "$CLONE_ID" --dst-td td0 --src-slice-cnt 2
+	clone_meta_grp "$CLONE_GRP_ID"
+	ctl put-clone --sp sp0 --name c0 --id "$CLONE_ID" --dst-td td0 \
+		--src-slice-cnt 2 "${CLONE_GRP[@]}"
 	# Hold the clone pushes back while the three chunks are seeded: the fake's
 	# chunk_id_list lever (dnv-worker.md, Integration test plan, The fake agent)
 	# forces cn0 to report exactly the pairs about to be written as already
@@ -4479,6 +4499,46 @@ drain_assert_units() { # <units> <label>
 	done
 }
 
+# dn_cap_free reads the free extent count a DN's capacity KEY embeds
+# (architecture.md, Capacity index keys), in decimal: the copy of the
+# record's count that a capacity scan reads. A failed read DIES, and so does
+# a DN with no key or with two, for cap_meta_used's reason.
+dn_cap_free() { # <addr_port>
+	local keys cnt hex
+	keys=$(ctl list-keys --prefix dn_capacity) ||
+		die "dn_cap_free: \`workerctl list-keys --prefix dn_capacity\` failed"
+	cnt=$(printf '%s\n' "$keys" | awk -v a="$1" '$NF == a { n++ } END { print n + 0 }')
+	[ "$cnt" = 1 ] || die "dn_cap_free: $1 has $cnt dn_capacity keys, want 1"
+	hex=$(printf '%s\n' "$keys" | awk -v a="$1" '$NF == a && !seen { print $(NF - 1); seen = 1 }')
+	printf '%d' "$((16#$hex))"
+}
+
+# drain_assert_clone_dns is the disk node half of a clone's accounting
+# (dnv-worker.md CLD9): sp3's clones place their clone meta group on dn 1 and
+# dn 2 (clone_meta_grp), and each of the two holds <free> extents on its
+# record and in its capacity key alike and <ptrs> side pointers, <held> of
+# them, 1 or 0, to the side the group <grp id> puts on it; dn 1 is at
+# revision <rev 1> and dn 2 at <rev 2>.
+drain_assert_clone_dns() { # <free> <ptrs> <grp id> <held: 1|0> <rev 1> <rev 2> <label>
+	local free=$1 ptrs=$2 g=$(($3)) held=$4 label=$7 i side dn rev
+	local -a revs=("$5" "$6")
+	for i in 1 2; do
+		side=$((g + 2 * i))
+		dn=$(ctl get-dn --id "$i")
+		rev=${revs[$((i - 1))]}
+		assert_eq "$(jq_of "$dn" .free_ext_cnt)" "$free" \
+			"$label: dn $i free_ext_cnt"
+		assert_eq "$(dn_cap_free "$(dn_addr "$i")")" "$free" \
+			"$label: dn $i free_ext_cnt in its dn_capacity key"
+		assert_eq "$(jq_of "$dn" '(.side_ptr_list // []) | length')" \
+			"$ptrs" "$label: dn $i side_ptr_list length"
+		assert_eq "$(printf '%s' "$dn" | "$JQ" -r --arg s "$side" \
+			'[(.side_ptr_list // [])[] | select((.side_id | tostring) == $s)]
+			 | length')" "$held" "$label: dn $i pointers to clone side $side"
+		assert_eq "$(dn_rev "$i")" "$rev" "$label: dn $i dn_rev"
+	done
+}
+
 # drain_put_sp plants the case fixture: one SP with TWO slices, each a meta and
 # a data group, every leg on one of the two DNs. Two slices is the smallest
 # shape that proves a batch never spans slices (SPD10) — the drain must take one
@@ -4652,17 +4712,30 @@ case_drain() {
 	drain_put_sp sp3 4
 	ctl put-td --sp sp3 --name td0 --id "$TD_ID" --size 10737418240 >/dev/null
 	drain_assert_units 0 "before c0"
+	# sp3 leaves each DN 58 extents and four side pointers (stage 1).
+	local dn1_rev dn2_rev
+	dn1_rev=$(dn_rev 1)
+	dn2_rev=$(dn_rev 2)
+	want_number "$dn1_rev" "dn 1's revision before c0"
+	want_number "$dn2_rev" "dn 2's revision before c0"
+	drain_assert_clone_dns 58 4 "$CLONE_GRP_ID" 0 "$dn1_rev" "$dn2_rev" \
+		"before c0"
+	clone_meta_grp "$CLONE_GRP_ID"
 	ctl put-clone --sp sp3 --name c0 --id "$CLONE_ID" --dst-td td0 \
-		--src-slice-cnt 5 >/dev/null
+		--src-slice-cnt 5 "${CLONE_GRP[@]}" >/dev/null
 	# The planted clone is charged as CreateClone charges one
-	# (architecture.md, Metadata units): the formula over td0's size at the
-	# pool's block size, stored on the record and charged to the CN of each
-	# of sp3's cntlrs. The drain's last step must give exactly that back.
+	# (architecture.md, Metadata units; Clones): the formula over td0's size
+	# at the pool's block size, stored on the record and charged to the CN of
+	# each of sp3's cntlrs, and its clone meta group's sides, one extent
+	# each, on dn 1 and dn 2, each DN's pointer in and its revision bumped
+	# once. The drain's last step must give exactly that back.
 	local cloneUnits
 	cloneUnits=$(meta_units 10737418240 "$BLOCK_SIZE")
 	assert_eq "$(ctl get-sp --sp sp3 | "$JQ" -r '.clones.c0.meta_units')" \
 		"$cloneUnits" "c0 meta_units"
 	drain_assert_units "$cloneUnits" "after put-clone c0"
+	drain_assert_clone_dns 57 5 "$CLONE_GRP_ID" 1 \
+		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after put-clone c0"
 	# One ssh for all 65 puts: 65 round trips would dominate the case.
 	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
 		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
@@ -4711,21 +4784,25 @@ case_drain() {
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
 		"no clone drain step failed"
 	# The final STM gives c0's units back on both CNs, so each capacity value
-	# reads its whole area free again.
+	# reads its whole area free again, and its clone meta group's sides back
+	# to dn 1 and dn 2, each DN's revision bumped once more (CLD9).
 	drain_assert_units 0 "after c0 drained"
+	drain_assert_clone_dns 58 4 "$CLONE_GRP_ID" 0 \
+		"$((dn1_rev + 2))" "$((dn2_rev + 2))" "after c0 drained"
 	# CLD5, observed from the agent's side: the latched clone left every
-	# cntlr's plan. That exclusion IS the teardown — the cn agent's sweep
+	# cntlr's plan. That exclusion IS the cn agent's teardown — its sweep
 	# (cnagent.md CN21) drops the stack and the local chunk files precisely
 	# when the id stops appearing — so the SP must keep syncing while
-	# carrying no clone at all.
+	# carrying no clone at all; the dn agents' half is the pointers the
+	# final STM took off dn 1 and dn 2, checked above.
 	wait_until "$WAIT_SYNCUP" "cn0: a NEW SyncupCntlr with the clone excluded" \
 		reqs_gt "$excluded_before" cn0 SyncupCntlr \
 		'((.clone_list // []) | length) == 0'
-	# And the SP itself is untouched by any of it: the clone drain moves no
-	# extent — its last step gives back only the clone's metadata units,
-	# checked above — and the SP outlives the clone.
+	# And the SP itself is untouched by any of it: its last step gives back
+	# only what the clone itself holds, the metadata units and the clone
+	# meta group's sides checked above, so each DN holds the slices' four
+	# sides and their extents again, and the SP outlives the clone.
 	assert_eq "$(key_cnt slice)" "2" "sp3's slices are untouched"
-	assert_eq "$(dn_free 1)" "58" "the clone drain moved no DN budget"
 
 	stage 6 "a PARTIALLY drained clone resumes after a worker restart"
 	# CLD7's "crash, restart and ownership handoff all resume through this same
@@ -4734,10 +4811,19 @@ case_drain() {
 	# is latched and advanced by exactly ONE batch; what the restarted fleet
 	# finds is a clone with some chunks gone and some left, and nothing but the
 	# surviving keys tells it where it is.
-	local w
+	local w c1Grp
+	# c1's clone meta group takes ids of its own, past c0's.
+	c1Grp=$((CLONE_GRP_ID + 8))
+	dn1_rev=$(dn_rev 1)
+	dn2_rev=$(dn_rev 2)
+	want_number "$dn1_rev" "dn 1's revision before c1"
+	want_number "$dn2_rev" "dn 2's revision before c1"
+	clone_meta_grp "$c1Grp"
 	ctl put-clone --sp sp3 --name c1 --id "$((CLONE_ID + 1))" --dst-td td0 \
-		--src-slice-cnt 5 >/dev/null
+		--src-slice-cnt 5 "${CLONE_GRP[@]}" >/dev/null
 	drain_assert_units "$cloneUnits" "after put-clone c1"
+	drain_assert_clone_dns 57 5 "$c1Grp" 1 \
+		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after put-clone c1"
 	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
 		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--cluster $CLUSTER --trace-id $TRACE put-bitmap --sp sp3" \
@@ -4762,9 +4848,11 @@ case_drain() {
 	# count, and it is none (CLD8).
 	assert_eq "$(sp_rev_num 4)" "$rev_latch" \
 		"SpRev after one batch with the fleet stopped"
-	# A batch removes chunk keys only: the units stay charged until the
-	# final STM.
+	# A batch removes chunk keys only: the units and the clone meta group's
+	# extents stay charged until the final STM (CLD8).
 	drain_assert_units "$cloneUnits" "after the partial batch"
+	drain_assert_clone_dns 57 5 "$c1Grp" 1 \
+		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after the partial batch"
 	clone_steps_before=$(clone_drain_step_records)
 	for w in w1 w2 w3; do start_worker "$w"; done
 	for w in w1 w2 w3; do wait_registered "$w"; done
@@ -4786,6 +4874,8 @@ case_drain() {
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
 		"no clone drain step failed"
 	drain_assert_units 0 "after c1's resumed drain"
+	drain_assert_clone_dns 58 4 "$c1Grp" 0 \
+		"$((dn1_rev + 2))" "$((dn2_rev + 2))" "after c1's resumed drain"
 }
 
 case_vote() {

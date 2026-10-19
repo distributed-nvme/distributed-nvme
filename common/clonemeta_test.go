@@ -49,6 +49,43 @@ func TestCloneMetaUnits(t *testing.T) {
 	}
 }
 
+// TestCloneMetaBytes pins the byte budget CloneMetaUnits rounds up
+// (architecture.md, Metadata units): the base, and one byte per whole block
+// of the copy, with no rounding of its own, so a partial block adds nothing
+// and a block size of zero counts no region at all.
+func TestCloneMetaBytes(t *testing.T) {
+	cases := []struct {
+		name      string
+		copyBytes uint64
+		blockSize uint64
+		want      uint64
+	}{
+		{"an empty copy", 0, mib, CloneMetaBaseBytes},
+		{"under one block", mib - 1, mib, CloneMetaBaseBytes},
+		{"one block", mib, mib, CloneMetaBaseBytes + 1},
+		{"a partial second block", 2*mib - 1, mib, CloneMetaBaseBytes + 1},
+		{"1 TiB at 1 MiB", tib, mib, CloneMetaBaseBytes + mib},
+		{"1 TiB at 64 KiB", tib, 64 * kib, CloneMetaBaseBytes + 16*mib},
+		{"57 TiB at 1 MiB", 57 * tib, mib, CloneMetaBaseBytes + 57*mib},
+		{"block size 0", tib, 0, CloneMetaBaseBytes},
+	}
+	for _, tc := range cases {
+		got := CloneMetaBytes(tc.copyBytes, tc.blockSize)
+		if got != tc.want {
+			t.Errorf("%s: CloneMetaBytes(%d, %d) = %d, want %d",
+				tc.name, tc.copyBytes, tc.blockSize, got, tc.want)
+		}
+		// The units are these bytes in whole units, rounded up.
+		units := CloneMetaUnits(tc.copyBytes, tc.blockSize)
+		if units*CnCloneMetaUnit < got ||
+			(units-1)*CnCloneMetaUnit >= got {
+			t.Errorf("%s: CloneMetaUnits = %d units for %d bytes, want "+
+				"the bytes rounded up to whole units of %d", tc.name,
+				units, got, CnCloneMetaUnit)
+		}
+	}
+}
+
 // oldCnCloneMetaUnits is the cn agent's own arithmetic that CloneMetaUnits
 // replaces: the regions of the clone's destination td at the pool's block
 // size, none when the block size is zero, and the 4 MiB base plus one byte

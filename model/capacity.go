@@ -608,9 +608,10 @@ func MaintainDnCapacity(
 	// ladder names a key nothing ever wrote and leaves the live one behind.
 	// The gates that do that are, in the gateway, CreateDiskNode,
 	// DeleteDiskNode, UpdateDiskNodeDisabled and newDnLedger (the constructor
-	// the five handlers that keep their own DN bookkeeping share); in model,
-	// GrowSlice's and DrainSpSlice's own gates and, for CreateSpareLeg, its
-	// two callers'; in the worker, newDnMonitor's per-write re-validation. The
+	// the six handlers that keep their own DN bookkeeping share); in model,
+	// GrowSlice's, DrainSpSlice's and FinishCloneDelete's own gates and, for
+	// CreateSpareLeg and CreateCloneSpareLeg, their callers'; in the worker,
+	// newDnMonitor's per-write re-validation. The
 	// callers with no gate are integtest/plant's PutDn and PutDns, MoveDn,
 	// PutMigr and SetDnFree, which plant records on purpose for
 	// integtest/workerctl and the worker's Go tests; plant's PutSp validates

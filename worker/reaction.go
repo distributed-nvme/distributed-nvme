@@ -284,9 +284,11 @@ type reactionOps interface {
 		chunks []model.BmChunk,
 	) (int, error)
 	// finishCloneDelete is the clone drain's final STM (CLD9): the Clone key
-	// and its clone_name_list entry, together, and the clone's metadata units
+	// and its clone_name_list entry, together, the clone's metadata units
 	// given back on the CN of every cntlr of the SP (architecture.md,
-	// Metadata units).
+	// Metadata units), and the sides of its clone meta group given back to
+	// their DNs, under the cluster's stored conf cc, which the STM refuses
+	// when it is unusable (CLD7).
 	finishCloneDelete(
 		ctx context.Context,
 		cid uint64,
@@ -295,6 +297,7 @@ type reactionOps interface {
 		spName string,
 		cloneName string,
 		cloneId uint64,
+		cc *pb.ClusterConf,
 	) error
 }
 
@@ -492,9 +495,10 @@ func (o *modelReactionOps) finishCloneDelete(
 	spName string,
 	cloneName string,
 	cloneId uint64,
+	cc *pb.ClusterConf,
 ) error {
 	return model.FinishCloneDelete(
-		ctx, o.cli, cid, shard, spId, spName, cloneName, cloneId,
+		ctx, o.cli, cid, shard, spId, spName, cloneName, cloneId, cc,
 	)
 }
 
@@ -791,9 +795,11 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// CLD7: the clone drain runs ALONGSIDE the reactions rather than instead of
 	// them — the SP is healthy and its other children must keep converging —
 	// and ahead of EVERY gate below, because none of them applies to it. It
-	// reads no cluster conf (unlike the sp drain's D2, which maintains DN
-	// capacity keys), no SP geometry, and no sp_level. A gate that could stop
-	// it would strand a latched clone permanently, the latch being one-way.
+	// reads no SP geometry and no sp_level, and its batches no cluster conf;
+	// its final step reads the cluster conf from the cache itself and fails
+	// alone, logged, when there is no usable one (drainCloneStep). A gate
+	// that could stop every step would strand a latched clone permanently,
+	// the latch being one-way.
 	//
 	// (The design words the order as "the normal fan-out first, then one batch
 	// per deleting clone". The fan-out is a different function here, driven by

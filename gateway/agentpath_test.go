@@ -891,7 +891,8 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
 	})
 
-	// spFixture is the shared bed of the cntlr and side subtests: two fakes,
+	// spFixture is the shared bed of the cntlr, side and clone side
+	// subtests: two fakes,
 	// each serving both agent services — the first registered as a DN and
 	// the one CN, the second as the second DN the whole-SP distinct-DN rule
 	// (architecture.md, Per-operation allocation) demands (1 slice is still a
@@ -1094,6 +1095,79 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 		}
 		wantInspectObs(t, "InspectSide with no observation",
 			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
+	})
+
+	// A side of a clone's clone meta group is found once no slice holds its
+	// id, and the agent is asked for it by the pointer of the clone's leg:
+	// the dn agent keys a clone meta side as it keys any side.
+	t.Run("clone side", func(t *testing.T) {
+		fx := newSpFixture(t)
+		ctx := context.Background()
+		if _, err := fx.srv.CreateThinDevice(ctx, &pb.CreateThinDeviceRequest{
+			ClusterName: fx.cluster,
+			SpName:      fx.spName,
+			TdName:      "clone-dst",
+			Size:        1 << 30,
+		}); err != nil {
+			t.Fatalf("CreateThinDevice: %v", err)
+		}
+		if _, err := fx.srv.CreateClone(ctx, &pb.CreateCloneRequest{
+			ClusterName:   fx.cluster,
+			SpName:        fx.spName,
+			CloneName:     "clone-a",
+			SrcTrConf:     []*pb.NvmeTrConf{agentpathTrConf("src:9000")},
+			SrcNqn:        "nqn.2024-01.io.dnv:src",
+			SrcNsIdx:      1,
+			SrcSliceCnt:   1,
+			SrcStripeSize: 64 * 1024,
+			SrcBlockSize:  1024 * 1024,
+			DstTdName:     "clone-dst",
+		}); err != nil {
+			t.Fatalf("CreateClone: %v", err)
+		}
+		clone := &pb.Clone{}
+		agentpathMustGet(t, fx.cli, model.CloneKey(
+			fx.cid, fx.conf.GetSpId(), "clone-a"), clone)
+		leg := clone.GetMetaGrp().GetLegList()[0]
+		side := leg.GetSideList()[0]
+		fake := fx.fakes[side.GetAddrPort()]
+		if fake == nil {
+			t.Fatalf("the clone's side is on %s, which is no fake agent",
+				side.GetAddrPort())
+		}
+
+		reply, err := fx.srv.InspectSide(ctx, &pb.InspectSideRequest{
+			ClusterName: fx.cluster,
+			SpName:      fx.spName,
+			SideId:      side.GetSideId(),
+		})
+		if err != nil {
+			t.Fatalf("InspectSide: %v", err)
+		}
+		if !proto.Equal(reply.GetSideInfo(), wantSideInfo) {
+			t.Errorf("side_info = %v, want the agent's %v",
+				reply.GetSideInfo(), wantSideInfo)
+		}
+		fake.mu.Lock()
+		infoReqs := append(
+			[]*pb.GetSideInfoRequest(nil), fake.sideInfoReqs...)
+		fake.mu.Unlock()
+		if len(infoReqs) != 1 {
+			t.Fatalf("GetSideInfo calls = %d, want 1", len(infoReqs))
+		}
+		wantPointer := &pb.SidePointer{
+			SpId:   fx.conf.GetSpId(),
+			LegId:  leg.GetLegId(),
+			SideId: side.GetSideId(),
+		}
+		dnId := fx.dnIds[side.GetAddrPort()]
+		if infoReqs[0].GetClusterId() != fx.cid ||
+			infoReqs[0].GetDnId() != dnId ||
+			!proto.Equal(infoReqs[0].GetSidePointer(), wantPointer) {
+			t.Errorf("GetSideInfo asked for (%#x, %d, %v), want (%#x, %d, %v)",
+				infoReqs[0].GetClusterId(), infoReqs[0].GetDnId(),
+				infoReqs[0].GetSidePointer(), fx.cid, dnId, wantPointer)
+		}
 	})
 }
 

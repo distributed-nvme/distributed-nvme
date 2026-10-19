@@ -50,7 +50,7 @@ func isMdRaid1(bdev *pb.BdevConf) bool {
 // scan of architecture.md, Per-operation allocation, keeps out, and the free
 // metadata units each candidate's metadata area must still have. ExcludeLocs
 // is empty for the DN scans that section leaves on
-// the plain scan (CreateStoragePool's and GrowSlice's). MetaUnits is zero for
+// the plain scan (CreateStoragePool's, GrowSlice's and CreateClone's). MetaUnits is zero for
 // every scan but CreateMigration's, whose one destination holds a dm-clone
 // run in its node's metadata area (architecture.md, Metadata units).
 type dnPickPlan struct {
@@ -275,15 +275,17 @@ type dnLedger struct {
 // validation), so the ledger refuses with the same errAborted the allocating
 // paths already give (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 //
-// Five handlers build a ledger — CreateStoragePool, DeleteSpareLeg, and
-// CreateMigration, FinishMigration and CancelMigration — and each builds it
-// before staging its first write, so a refusal here returns having written
-// nothing rather than relying on the transaction being abandoned (EU4).
-// DeleteStoragePool builds none: it latches, and the worker's drain returns
-// the extents (dnv-worker.md, The sp drain). Two of the five reach a
-// conf gate before this one anyway (CreateStoragePool's own, CreateMigration's
-// in its plan, through migrMetaUnitsOf and pickDns); the other three have
-// none, which is what this covers.
+// Six handlers build a ledger — CreateStoragePool, CreateClone,
+// DeleteSpareLeg, and CreateMigration, FinishMigration and CancelMigration —
+// and each builds it before staging its first write, so a refusal here
+// returns having written nothing rather than relying on the transaction being
+// abandoned (EU4). DeleteStoragePool builds none: it latches, and the
+// worker's drain returns the extents (dnv-worker.md, The sp drain); nor does
+// DeleteClone, whose drain gives the clone meta group back (dnv-worker.md,
+// The clone drain). Three of the six reach a conf gate before this one
+// anyway (CreateStoragePool's own, CreateClone's in planCloneGrp,
+// CreateMigration's in its plan, through migrMetaUnitsOf and pickDns); the
+// other three have none, which is what this covers.
 func newDnLedger(
 	s etcdutil.STM,
 	cid uint64,
@@ -737,7 +739,9 @@ func loadCntlrs(
 // included. A listed clone whose key is missing is an ABORTED
 // (architecture.md, UNEXPECTED_ERROR → `ABORTED`), as a listed slice's is in
 // loadSlices: a unit sum computed from a partial list would charge a node
-// less, or give it back less, than the SP's clones hold there.
+// less, or give it back less, than the SP's clones hold there, and a walk of
+// the clones' clone meta groups over a partial list would miss a group, a
+// leg or a side the pool holds.
 func loadClones(
 	s etcdutil.STM,
 	cid uint64,
@@ -1007,4 +1011,104 @@ func findGrp(
 		}
 	}
 	return sliceLocation{}, false
+}
+
+// cloneLocation is where a clone walk found something: the clone, under the
+// name that keys its record, and its clone meta group with the leg and side
+// that hold the object (architecture.md, Terminology and object model).
+type cloneLocation struct {
+	CloneName string
+	Clone     *pb.Clone
+	Grp       *pb.Group
+	Leg       *pb.Leg
+	Side      *pb.Side
+	IsSpare   bool
+}
+
+// The clone twins of the three slice walks above. A clone meta group belongs
+// to no slice, so every lookup that takes a group, leg or side id walks the
+// slices first and, only when no slice holds the id, the clones, through
+// these: separate functions, as every clone-keyed path is, so no slice walk
+// ever sees a clone. Ids are unique in the SP, so a hit in either walk is the
+// object. clones is what loadClones returns, in clone_name_list order, and a
+// clone with no group holds no group, leg or side and is passed over, so the
+// proto getters' zero ids never match one.
+
+// findCloneGrp locates one group by id among the clones' clone meta groups.
+func findCloneGrp(
+	conf *pb.SpConf,
+	clones []*pb.Clone,
+	grpId uint64,
+) (cloneLocation, bool) {
+	for idx, clone := range clones {
+		grp := clone.GetMetaGrp()
+		if grp == nil || grp.GetGrpId() != grpId {
+			continue
+		}
+		return cloneLocation{
+			CloneName: conf.GetCloneNameList()[idx],
+			Clone:     clone,
+			Grp:       grp,
+		}, true
+	}
+	return cloneLocation{}, false
+}
+
+// findCloneLeg locates one leg by id among the clones' clone meta groups, in
+// both the active and the spare list.
+func findCloneLeg(
+	conf *pb.SpConf,
+	clones []*pb.Clone,
+	legId uint64,
+) (cloneLocation, bool) {
+	for idx, clone := range clones {
+		grp := clone.GetMetaGrp()
+		if grp == nil {
+			continue
+		}
+		for _, leg := range allLegs(grp) {
+			if leg.GetLegId() != legId {
+				continue
+			}
+			return cloneLocation{
+				CloneName: conf.GetCloneNameList()[idx],
+				Clone:     clone,
+				Grp:       grp,
+				Leg:       leg,
+				IsSpare:   spareLegOf(grp, legId) != nil,
+			}, true
+		}
+	}
+	return cloneLocation{}, false
+}
+
+// findCloneSide locates one side by id among the clones' clone meta groups,
+// active legs and spare legs alike.
+func findCloneSide(
+	conf *pb.SpConf,
+	clones []*pb.Clone,
+	sideId uint64,
+) (cloneLocation, bool) {
+	for idx, clone := range clones {
+		grp := clone.GetMetaGrp()
+		if grp == nil {
+			continue
+		}
+		for _, leg := range allLegs(grp) {
+			for _, side := range leg.GetSideList() {
+				if side.GetSideId() != sideId {
+					continue
+				}
+				return cloneLocation{
+					CloneName: conf.GetCloneNameList()[idx],
+					Clone:     clone,
+					Grp:       grp,
+					Leg:       leg,
+					Side:      side,
+					IsSpare:   spareLegOf(grp, leg.GetLegId()) != nil,
+				}, true
+			}
+		}
+	}
+	return cloneLocation{}, false
 }

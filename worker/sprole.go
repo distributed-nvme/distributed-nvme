@@ -263,9 +263,10 @@ type cntlrPlan struct {
 type spPlan struct {
 	sides  map[sideKey]*sidePlan
 	cntlrs map[uint64]*cntlrPlan
-	// legSlice maps every leg of the SP — spares included — to the slice its
-	// record lives in, which is what lets the coordinator write the PRIMARY's
-	// leg rows (HL2).
+	// legSlice maps every leg of the SP's slices — spares included — to the
+	// slice its record lives in, which is what lets the coordinator write the
+	// PRIMARY's leg rows (HL2). It holds no leg of a clone meta group, which
+	// is in no slice.
 	legSlice map[uint64]uint64
 	// tdRefs are the tds whose created flag is still false, keyed by td_id:
 	// the only candidates RW19 may flip.
@@ -747,10 +748,10 @@ func (w *spWorker) refuseSpConf(ctx context.Context, err error) {
 }
 
 // buildPlan turns one loaded SP into every request the fan-out sends
-// (RW15/RW16). It resolves each side's dn_id through SpState.DnByAddr and each
-// cntlr's cn_id through CnByAddr (architecture.md, sp role): those two maps are
-// read at the same store revision as the SP itself, so no request can mix two
-// views.
+// (RW15/RW16). It resolves each planned side's dn_id through SpState.DnByAddr
+// and each cntlr's cn_id through CnByAddr (architecture.md, sp role): those
+// two maps are read at the same store revision as the SP itself, so no request
+// can mix two views.
 func (w *spWorker) buildPlan(
 	ctx context.Context,
 	state *model.SpState,
@@ -976,9 +977,10 @@ func checkSideZeroBytes(state *model.SpState) error {
 	return nil
 }
 
-// buildSidePlans walks every side of the SP — both groups of every slice, both
-// the active legs and the SPARE legs (RW14; architecture.md, Spare legs) — and
-// builds its request.
+// buildSidePlans walks every side of the SP's slices — both group lists of
+// every slice, both the active legs and the SPARE legs (RW14; architecture.md,
+// Spare legs) — and builds its request. A side of a clone meta group is not
+// walked, so it gets no plan, no request and no child (RW14).
 //
 // withRequests is false while the SP's cntlr set is unresolved: the walk then
 // only indexes the legs, which is what lets the coordinator keep placing the

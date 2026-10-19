@@ -3170,10 +3170,22 @@ func TestVolFixtureUnits(t *testing.T) {
 // count — the source bitmap is a pure optimization that may arrive later, and
 // what a clone holds is the set of its chunk keys. It does carry its metadata
 // units, which every later charge and release reads (architecture.md,
-// Metadata units).
+// Metadata units), and its clone meta group: one leg per leg the pool's
+// redundancy gives a group, each one side of one extent, laid out as the
+// pool's one-extent meta groups are, on distinct DNs, and charged to them as
+// a new group's sides are (volWantCloneGrp). The ids come from next_id in
+// GW15's order: the clone's, the group's, then per leg its leg_id and
+// side_id.
+//
+// dn_batch_size 1 and two DNs ahead of the others leave the scan exactly two
+// candidates, so the DNs are forced and only their order is a draw.
 func TestCreateCloneWritesRecord(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
+	env.setDnBatchSize(1)
+	env.setDnFree(volDnC, volDnCFree)
+	env.setDnFree(volDnD, volDnCFree-1)
+	dnBefore := volDnSnapshot(env)
 	reply := volCreateClone(env, "clone-a", "dst")
 	if reply.GetCloneId() != volNextId {
 		t.Errorf("reply clone_id: got %d, want %d",
@@ -3192,15 +3204,25 @@ func TestCreateCloneWritesRecord(t *testing.T) {
 		AutoResume:    true,
 		MetaUnits:     volCloneUnits,
 	}
-	if got := env.clone("clone-a"); !proto.Equal(got, want) {
-		t.Errorf("clone: got %v, want %v", got, want)
+	got := env.clone("clone-a")
+	gotNoGrp := proto.Clone(got).(*pb.Clone)
+	gotNoGrp.MetaGrp = nil
+	if !proto.Equal(gotNoGrp, want) {
+		t.Errorf("clone: got %v, want %v", gotNoGrp, want)
+	}
+	addrs := volWantCloneGrp(t, env, got, dnBefore)
+	if !volSameAddrs(addrs, volDnC, volDnD) {
+		t.Errorf("the group's legs are on %v, want dn-c and dn-d, the "+
+			"only two the scan offers", addrs)
 	}
 	conf := env.spConf()
 	if fmt.Sprint(conf.GetCloneNameList()) != "[clone-a]" {
 		t.Errorf("clone_name_list: got %v", conf.GetCloneNameList())
 	}
-	if conf.GetNextId() != volNextId+1 {
-		t.Errorf("next_id: got %d, want %d", conf.GetNextId(), volNextId+1)
+	// clone_id, grp_id, and a leg_id and a side_id per leg.
+	wantNextId := volNextId + 2 + 2*common.MaxAllocLegPerGrp
+	if conf.GetNextId() != wantNextId {
+		t.Errorf("next_id: got %d, want %d", conf.GetNextId(), wantNextId)
 	}
 	if rev := env.spRev(); rev != 2 {
 		t.Errorf("sp_rev: got %d, want 2", rev)

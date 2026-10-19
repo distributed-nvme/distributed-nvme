@@ -1003,8 +1003,9 @@ func (s *Server) ListStoragePools(
 // not empty, because an SP with no slot can produce no side). The
 // state-dependent half has to be inside it: a slot may only leave the list
 // when nothing uses it, and what uses one is
-// every cntlr's cntlid_slot and every side's, which are only knowable from the
-// cntlrs and slices this transaction reads.
+// every cntlr's cntlid_slot and every side's, the sides of the clones' clone
+// meta groups included, which are only knowable from the cntlrs, slices and
+// clones this transaction reads.
 //
 // Sides are included, not just cntlrs, because a side's cntlid_slot is what
 // the DN's nvmet subsystem exports it under (architecture.md, cntlid slots);
@@ -1070,6 +1071,26 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 				}
 			}
 		}
+		// A clone meta group belongs to no slice, so its sides are walked
+		// apart, through the clones; a clone with no group has none.
+		clones, err := loadClones(stm, sc.Cid, sc.Conf)
+		if err != nil {
+			return err
+		}
+		for idx, clone := range clones {
+			for _, leg := range allLegs(clone.GetMetaGrp()) {
+				for _, side := range leg.GetSideList() {
+					if wanted[side.GetCntlidSlot()] {
+						continue
+					}
+					return errInvalid(
+						"cntlid_slot_list drops slot %d, which side %d of "+
+							"clone %q uses",
+						side.GetCntlidSlot(), side.GetSideId(),
+						sc.Conf.GetCloneNameList()[idx])
+				}
+			}
+		}
 		sc.Conf.CntlidSlotList = req.GetCntlidSlotList()
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
 		spId = sc.SpId()
@@ -1087,8 +1108,8 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 //
 // The level is not applied here in any sense — it rides in both Syncup*
 // requests, so the bump is the whole mechanism: the workers see the new SpRev,
-// re-push every side and cntlr, and the agents tear the stack down to whatever
-// the level allows.
+// re-push every side of the SP's slices and every cntlr, and the agents tear
+// the stack down to whatever the level allows.
 //
 // It is written and bumped unconditionally even when the level is unchanged:
 // GW6's idempotent no-write covers the three Update*Enabled/Disabled RPCs

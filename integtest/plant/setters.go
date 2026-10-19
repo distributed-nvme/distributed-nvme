@@ -224,9 +224,9 @@ func SetCnFree(
 // Health epochs (dnv-worker.md, Integration test plan, The driver)
 // ---------------------------------------------------------------------------
 //
-// The three Set*Epoch calls plant one err_epoch and write nothing else: a
-// Cntlr's, or a Leg's or a Side's inside its Slice, and 0 clears it. They are
-// raw: they bump no revision, as no health write does (HL3), and touch no
+// The Set*Epoch calls plant one err_epoch and write nothing else: a
+// Cntlr's, or a Leg's or a Side's inside its Slice or inside its clone's
+// clone meta group, and 0 clears it. They are raw: they bump no revision, as no health write does (HL3), and touch no
 // CdcEntry and no settling flag. On a leg, a side, a primary or a disabled
 // cntlr, a health write that sets or clears the epoch can leave just that as
 // well, so there a case plants the epoch an earlier owner or another observer
@@ -347,29 +347,115 @@ func setSliceEpoch(
 		slice.GetDataGrpList()...,
 	)
 	for _, grp := range grps {
-		legs := append(
-			append([]*pb.Leg(nil), grp.GetLegList()...),
-			grp.GetSpareLegList()...,
-		)
-		for _, leg := range legs {
-			if kind == "leg" && leg.GetLegId() == id {
-				old = leg.GetErrEpoch()
-				leg.ErrEpoch = epoch
+		if old, found = setGroupEpoch(grp, kind, id, epoch); found {
+			return old, true
+		}
+	}
+	return 0, false
+}
+
+// setGroupEpoch is setSliceEpoch's walk of one group, which the clone setters
+// share: the err_epoch of one leg or one side of grp, on an active or a spare
+// leg, and the value it replaced; found is false when grp holds no such
+// object, and a nil grp holds none.
+func setGroupEpoch(
+	grp *pb.Group, kind string, id uint64, epoch uint64,
+) (old uint64, found bool) {
+	legs := append(
+		append([]*pb.Leg(nil), grp.GetLegList()...),
+		grp.GetSpareLegList()...,
+	)
+	for _, leg := range legs {
+		if kind == "leg" && leg.GetLegId() == id {
+			old = leg.GetErrEpoch()
+			leg.ErrEpoch = epoch
+			return old, true
+		}
+		if kind != "side" {
+			continue
+		}
+		for _, side := range leg.GetSideList() {
+			if side.GetSideId() == id {
+				old = side.GetErrEpoch()
+				side.ErrEpoch = epoch
 				return old, true
-			}
-			if kind != "side" {
-				continue
-			}
-			for _, side := range leg.GetSideList() {
-				if side.GetSideId() == id {
-					old = side.GetErrEpoch()
-					side.ErrEpoch = epoch
-					return old, true
-				}
 			}
 		}
 	}
 	return 0, false
+}
+
+// SetCloneLegEpoch plants the err_epoch of one leg of a clone's clone meta
+// group, active or spare, where model.SetCloneLegErrEpoch looks it up.
+func SetCloneLegEpoch(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl Cluster,
+	target SpRef,
+	cloneName string,
+	legId uint64,
+	epoch uint64,
+) (uint64, error) {
+	return setCloneObjEpoch(
+		ctx, cli, cl, target, "leg", cloneName, legId, epoch)
+}
+
+// SetCloneSideEpoch plants the err_epoch of one side of a clone's clone meta
+// group, on an active or a spare leg, where model.SetCloneSideErrEpoch looks
+// it up.
+func SetCloneSideEpoch(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl Cluster,
+	target SpRef,
+	cloneName string,
+	sideId uint64,
+	epoch uint64,
+) (uint64, error) {
+	return setCloneObjEpoch(
+		ctx, cli, cl, target, "side", cloneName, sideId, epoch)
+}
+
+// setCloneObjEpoch is SetCloneLegEpoch and SetCloneSideEpoch, the clone
+// twin of setSliceObjEpoch: kind is "leg" or "side", and a clone with no
+// group holds neither.
+func setCloneObjEpoch(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl Cluster,
+	target SpRef,
+	kind string,
+	cloneName string,
+	id uint64,
+	epoch uint64,
+) (uint64, error) {
+	if cloneName == "" {
+		return 0, fmt.Errorf("the clone name is empty")
+	}
+	cid := cl.Id
+	var old uint64
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		old = 0
+		if _, err := getSpConf(s, cid, target); err != nil {
+			return err
+		}
+		key := model.CloneKey(cid, target.Id, cloneName)
+		clone := &pb.Clone{}
+		if !s.Get(key, clone) {
+			return fmt.Errorf("%q not found", key)
+		}
+		var found bool
+		old, found = setGroupEpoch(clone.GetMetaGrp(), kind, id, epoch)
+		if !found {
+			return fmt.Errorf("clone %q holds no %s %#x", cloneName, kind, id)
+		}
+		s.Put(key, clone)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return old, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +545,60 @@ func SetProvisioned(
 		return false, 0, err
 	}
 	return len(flipped) == 1, spRev, nil
+}
+
+// SetCloneProvisioned is SetProvisioned's twin for one side of a clone's
+// clone meta group, through model.FlipCloneProvisioned, the clone-keyed
+// twin of the provisioned flip (dnv-worker.md MD6). A case pulls it where it
+// needs a provisioned side of such a group: a spare the switch takes
+// (architecture.md, Spare legs), or a group with at most one unprovisioned
+// spare. It returns the clone's id, whether the flip applied and the pool's
+// revision after it.
+//
+// The clone_id comes from the stored record rather than from the caller, for
+// SetCreated's reason: the op takes the clone's name and its id so that a
+// clone deleted and re-created under the name between the read and the
+// transaction is skipped. The op also skips, and so does not flip, a side
+// already provisioned, a side that is not on the leg the caller names, and
+// any side of a clone being deleted.
+func SetCloneProvisioned(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl Cluster,
+	target SpRef,
+	cloneName string,
+	legId uint64,
+	sideId uint64,
+) (uint64, bool, uint64, error) {
+	if cloneName == "" {
+		return 0, false, 0, fmt.Errorf("the clone name is empty")
+	}
+	key := model.CloneKey(cl.Id, target.Id, cloneName)
+	clone := &pb.Clone{}
+	found, err := cli.Get(ctx, key, clone)
+	if err != nil {
+		return 0, false, 0, err
+	}
+	if !found {
+		return 0, false, 0, fmt.Errorf("key %q not found", key)
+	}
+	flipped, _, err := model.FlipCloneProvisioned(
+		ctx, cli, cl.Id, target.Shard, target.Id,
+		[]model.CloneSideRef{{
+			CloneName: cloneName,
+			CloneId:   clone.GetCloneId(),
+			LegId:     legId,
+			SideId:    sideId,
+		}},
+	)
+	if err != nil {
+		return 0, false, 0, err
+	}
+	spRev, err := SpRevision(ctx, cli, cl, target)
+	if err != nil {
+		return 0, false, 0, err
+	}
+	return clone.GetCloneId(), len(flipped) == 1, spRev, nil
 }
 
 // Cutover is what StartCutover started: the migration it named, the cntlr
@@ -616,10 +756,11 @@ type Latch struct {
 // precondition in a test library is how the two drift apart.
 //
 // That precondition is also what lets the sp drain give back no metadata
-// units (architecture.md, Metadata units): a pool that still has a clone or a
-// migration cannot be deleted. A pool latched here while it still holds a
-// planted clone or migration therefore leaves their units charged on its
-// nodes once it has drained.
+// units and no clone meta group (architecture.md, Metadata units; Clones): a
+// pool that still has a clone or a migration cannot be deleted. A pool
+// latched here while it still holds a planted clone or migration therefore
+// leaves their units charged on its nodes once it has drained, and a clone's
+// clone meta group charged on its DNs, its sides' pointers with it.
 func SetDeleting(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -794,12 +935,15 @@ func SetCloneDeleting(
 }
 
 // CloneDrain is what DrainClone ran: its steps, the chunk KEYS it removed
-// (the Clone record carries no count of its own to confuse them with), and
-// whether the clone is gone.
+// (the Clone record carries no count of its own to confuse them with),
+// whether the clone is gone, and, when this call ran the final step, the
+// sides of the clone's clone meta group the record held as that step removed
+// it, which the step gave back to their DNs.
 type CloneDrain struct {
-	Steps    int
-	ChunkCnt int
-	Deleted  bool
+	Steps      int
+	ChunkCnt   int
+	Deleted    bool
+	GrpSideCnt int
 }
 
 // DrainClone runs a latched clone's drain to completion, or for maxSteps
@@ -819,7 +963,11 @@ type CloneDrain struct {
 // units). Each of those CNs holds them: CreateClone and PutClone charge the
 // CNs of the cntlrs the pool has at the time, and CreateCntlr, like the
 // worker's cntlr replacement, charges the CN it places a later cntlr on the
-// pool's whole clone sum. Both suites read that release after a drain.
+// pool's whole clone sum. The same step gives the sides of the clone's clone
+// meta group back to their DNs (dnv-worker.md CLD9), which moves their
+// capacity keys, so it is handed the cluster's stored conf, cl.Conf, as
+// DrainSp's slice batches are. Both suites read both releases after a
+// drain.
 //
 // A clone that was never there is a caller error, not a finished drain:
 // Deleted must mean "this call, or an earlier one, removed it", so the
@@ -867,11 +1015,18 @@ func DrainClone(
 		}
 		if len(batch) == 0 {
 			err = model.FinishCloneDelete(ctx, cli, cid, target.Shard,
-				target.Id, target.Name, cloneName, clone.GetCloneId())
+				target.Id, target.Name, cloneName, clone.GetCloneId(),
+				cl.Conf)
 			if err != nil {
 				return out, fmt.Errorf("final: %w", err)
 			}
 			out.Deleted = true
+			for _, leg := range append(
+				append([]*pb.Leg(nil), clone.GetMetaGrp().GetLegList()...),
+				clone.GetMetaGrp().GetSpareLegList()...,
+			) {
+				out.GrpSideCnt += len(leg.GetSideList())
+			}
 		} else {
 			removed, err := model.DrainCloneBm(ctx, cli, cid,
 				target.Id, target.Name, cloneName, clone.GetCloneId(), batch)

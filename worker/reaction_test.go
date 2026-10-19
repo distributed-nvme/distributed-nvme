@@ -234,6 +234,8 @@ type reactionCall struct {
 	// The plan a spare create was scanned against (AR8 step 3's black
 	// list), which the op holds the group's DNs against.
 	grpDn []string
+	// The cluster conf the clone drain's final STM was handed (CLD7).
+	cc *pb.ClusterConf
 }
 
 // candQuery is one allocator scan a pass ran.
@@ -525,10 +527,11 @@ func (o *fakeReactionOps) finishCloneDelete(
 	spName string,
 	cloneName string,
 	cloneId uint64,
+	cc *pb.ClusterConf,
 ) error {
 	o.mu.Lock()
 	o.calls = append(o.calls, reactionCall{
-		op: "finish_clone", cloneName: cloneName, cloneId: cloneId,
+		op: "finish_clone", cloneName: cloneName, cloneId: cloneId, cc: cc,
 	})
 	err := o.cloneDrainErr
 	o.mu.Unlock()

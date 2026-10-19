@@ -74,9 +74,10 @@ FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
 # (architecture.md, Storage pools); the sp drain's D2 batch
 # (dnv-worker.md SPD13), a
-# created-flip transaction of MaxFlipCreatedPerTxn tds (dnv-worker.md RW19)
-# and the worker's cntlr replacement at the ceilings (dnv-worker.md AR7) are
-# three more. Their compare counts, and the factors that multiply into them,
+# created-flip transaction of MaxFlipCreatedPerTxn tds (dnv-worker.md RW19),
+# a clone flip over MaxCloneCntPerSp clones (dnv-worker.md MD6) and the
+# worker's cntlr replacement at the ceilings (dnv-worker.md AR7) are four
+# more. Their compare counts, and the factors that multiply into them,
 # are asserted from the named constants in gateway/txnbudget_test.go, not
 # restated here. This suite's own creates and drains stay far under the
 # ceiling: it creates SP_SLICE_CNT-slice pools, and `wctl drain-sp` is
@@ -1231,11 +1232,12 @@ smoke_cn_dir() { # <addr_port>
 	printf 'cn%d' $((${1##*:} - CN_PORT_BASE))
 }
 
-# smoke_sp_footprint is Σ ext_cnt over every group of the SP — what
-# architecture.md, Per-operation allocation, says ONE cntlr's CN reserves,
-# because every cntlr stacks every group of every slice. It is recomputed from
-# the stored slices rather than tracked in a variable so that it stays right
-# across the two GrowSlices of step 7.
+# smoke_sp_footprint is Σ ext_cnt over every group of the SP's slices, no
+# clone meta group counting — what architecture.md, Per-operation
+# allocation, says ONE cntlr's CN reserves, because every cntlr stacks every
+# group of every slice. It is recomputed from the stored slices rather than
+# tracked in a variable so that it stays right across the two GrowSlices of
+# step 7.
 smoke_sp_footprint() { # <sp>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
@@ -1384,6 +1386,50 @@ smoke_check_dn_units() { # <addr_port, or "" for no DN> <units>
 		assert_eq "$(dn_meta_used "$addr")" "$want" "$addr: used_meta_units"
 		assert_eq "$(cap_meta_used dn_capacity "$addr")" "$want" \
 			"$addr: used_meta_units in the dn_capacity value"
+	done
+}
+
+# smoke_dn_ledgers prints one line per DN, dn0 to dn3: its free_ext_cnt, the
+# length of its side_ptr_list and its DnRev — the before of
+# smoke_check_clone_dns. A failed read DIES: a ledger that did not answer
+# would turn every later comparison into one against nothing.
+smoke_dn_ledgers() {
+	local i addr json
+	for i in 0 1 2 3; do
+		addr=$(dn_addr "$i")
+		json=$(dn_json "$addr") ||
+			die "smoke_dn_ledgers: \`workerctl get-dn --addr $addr\` failed"
+		printf '%s %s %s\n' "$(smoke_jq "$json" '.free_ext_cnt')" \
+			"$(smoke_jq "$json" '(.side_ptr_list // []) | length')" \
+			"$(dn_rev_of "$addr")"
+	done
+}
+
+# smoke_check_clone_dns is the DN audit of a clone's clone meta group
+# (architecture.md, Clones; Capacity index keys): every DN in <dns>, one
+# addr_port per line, holds <held> extents fewer and <held> side pointers
+# more than <before>, the smoke_dn_ledgers lines read before the create, its
+# capacity key agrees with the record, and its DnRev is <bumps> past
+# <before>'s; every other DN is exactly as <before> says. The sides are not
+# smoke_check_dn's to count: it walks the slices.
+smoke_check_clone_dns() { # <before> <dns> <held> <bumps> <label>
+	local before=$1 dns=$2 held=$3 bumps=$4 label=$5
+	local i addr free sides rev on
+	for i in 0 1 2 3; do
+		addr=$(dn_addr "$i")
+		read -r free sides rev <<<"$(sed -n "$((i + 1))p" <<<"$before")"
+		on=0
+		if grep -qxF "$addr" <<<"$dns"; then on=1; fi
+		assert_eq "$(dn_free "$addr")" "$((free - on * held))" \
+			"$label: $addr free_ext_cnt"
+		assert_eq "$(smoke_cap_free dn_capacity "$addr")" \
+			"$((free - on * held))" \
+			"$label: $addr free_ext_cnt embedded in the dn_capacity key"
+		assert_eq "$(smoke_jq "$(dn_json "$addr")" \
+			'(.side_ptr_list // []) | length')" "$((sides + on * held))" \
+			"$label: $addr side_ptr_list length"
+		assert_eq "$(dn_rev_of "$addr")" "$((rev + on * bumps))" \
+			"$label: $addr dn_rev"
 	done
 }
 
@@ -2439,9 +2485,12 @@ EOF
 	#
 	# Every CN's CnRev first: the clone's metadata units are charged to its
 	# cntlrs' CNs by a write that changes units only, which moves no revision
-	# (architecture.md, Metadata units).
+	# (architecture.md, Metadata units). Every DN's ledger too: the clone's
+	# clone meta group takes extents on the DNs its legs land on.
 	local -a cnRevBefore=()
 	for i in 0 1 2; do cnRevBefore[i]=$(cn_rev_of "$(cn_addr "$i")"); done
+	local dnBefore
+	dnBefore=$(smoke_dn_ledgers)
 	out=$(gw create-clone --sp sp0 --rev "$SP_REV" --name cl0 --dst-td t1 \
 		--src-nqn "$srcNqn" --src-idx 1 --src-slices "$MAX_SLICE_CNT" \
 		--src-stripe 1048576 --src-block 1073741824)
@@ -2451,6 +2500,29 @@ EOF
 	assert_ne "$cloneId" "0" "create-clone clone_id"
 	clone=$(smoke_jq "$(sp_json sp0)" '.clones.cl0 | @json')
 	assert_field "$clone" '.clone_id' "$cloneId" "clone clone_id"
+	# Its clone meta group (architecture.md, Clones): sp0's own leg count,
+	# one side of one extent per leg, no spare, every side unprovisioned and
+	# on a DN of its own — the DNs here sit in four locations — each of
+	# those DNs charged its extent and its pointer with one DnRev bump.
+	local grpLegs cloneDns
+	grpLegs=$(smoke_jq "$(sp_json sp0)" \
+		'[.slices[] | .meta_grp_list[0].leg_list | length][0]')
+	assert_field "$clone" '.meta_grp.ext_cnt' "1" "clone meta group ext_cnt"
+	assert_field "$clone" '.meta_grp.leg_list | length' "$grpLegs" \
+		"clone meta group legs, as many as sp0's groups have"
+	assert_field "$clone" '(.meta_grp.spare_leg_list // []) | length' "0" \
+		"clone meta group spares"
+	assert_field "$clone" \
+		'[.meta_grp.leg_list[].side_list | length] | unique | @json' '[1]' \
+		"one side per leg of the clone meta group"
+	assert_field "$clone" \
+		'[.meta_grp.leg_list[].side_list[].provisioned] | unique | @json' \
+		'[false]' "the clone meta group's sides start unprovisioned ([D15])"
+	cloneDns=$(smoke_jq "$clone" \
+		'[.meta_grp.leg_list[].side_list[].addr_port] | unique | .[]')
+	assert_eq "$(printf '%s\n' "$cloneDns" | grep -c .)" "$grpLegs" \
+		"the clone meta group's legs sit on distinct DNs"
+	smoke_check_clone_dns "$dnBefore" "$cloneDns" 1 1 "after create-clone"
 	# The clone's units (architecture.md, Metadata units): the formula over
 	# t1's size at sp0's block size, stored on the record and charged to the
 	# CN of EVERY cntlr of sp0, the standby's too, since either may become the
@@ -2601,8 +2673,13 @@ EOF
 	assert_field "$(smoke_ns sp0 "$nqn" 1)" '.suspended' "false" \
 		"the destination td's namespace stays resumed"
 	# The drain's last step gives the units back on every cntlr's CN, again
-	# by a write that moves no CnRev.
+	# by a write that moves no CnRev, and the clone meta group's sides back
+	# to their DNs, each DN's revision bumped once more (dnv-worker.md
+	# CLD9).
 	smoke_check_cn_units sp0 0 "${cnRevBefore[@]}"
+	assert_eq "$(jq_of "$out" '.grp_side_cnt')" "$grpLegs" \
+		"the drain's final step gave every side of the group back"
+	smoke_check_clone_dns "$dnBefore" "$cloneDns" 0 2 "after the clone drain"
 
 	# -------------------------------------------------------------------
 	stage 14 "migration on the first data group: create, bitmap, cancel, finish"
@@ -5880,14 +5957,19 @@ case_restart() {
 # refuses what a node has no room for instead of letting the node build it,
 # fail and report an error. This case fills both kinds of area to their
 # ceilings with real calls — the suite may not plant a count through
-# workerctl (Integration test plan, The etcd verification) — and shows a
-# clone too big for any area refused, clones accepted up to a CN's ceiling
-# and refused past it, the node of a standby counted like the primary's, a
-# cntlr create refused when its one candidate lacks room, and a migration
-# create skipping a full DN for one with room. Every refusal is bracketed
-# with assert_no_write and must say "metadata room", the phrase every
-# RESOURCE_EXHAUSTED message about a shortfall of units carries. Then the
-# cancel, the finish and the clone drains give every unit back.
+# workerctl (Integration test plan, The etcd verification) — and shows
+# clones accepted up to a CN's ceiling and refused past it, the node of a
+# standby counted like the primary's, a cntlr create refused when its one
+# candidate lacks room, and a migration create skipping a full DN for one
+# with room. Every refusal of room is bracketed with assert_no_write and
+# must say "metadata room", the phrase every RESOURCE_EXHAUSTED message
+# about a shortfall of units carries. Then the cancel, the finish and the
+# clone drains give every unit back. A clone too big for a CN's area is
+# refused before any area is looked at: CreateClone bounds its dm-clone
+# metadata by the data region of one side of its clone meta group, one
+# extent a side (architecture.md, Clones), and at this extent size a copy
+# the area cannot hold is one that side cannot hold either, a
+# FAILED_PRECONDITION that names the bound, bracketed the same.
 #
 # Room is a matter of regions, one per pool block, so the pools here use
 # CEIL_BLOCK, the smallest block the gateway accepts, at which one unit is
@@ -5897,8 +5979,10 @@ case_restart() {
 # "size", the fakes' GetDnSize and GetCnSize reply) that holds such a group
 # on a DN and the footprint of the pool that owns it on a CN. dn2 keeps
 # DN_SIZE: it is the small DN with room that stage 6's probe lands on. Every
-# pool's legs go to dn0 and dn3, so dn1 holds nothing until stage 6's
-# migration fills its area.
+# pool's legs go to dn0 and dn3. A clone's clone meta group may land on any
+# DN, but it takes extents only, never a metadata unit, so dn1's area holds
+# nothing until stage 6's migration fills it, and the few extents the groups
+# take leave every DN the room its stages need.
 #
 # The two refusals that must come from the scan's skip — the cntlr create of
 # stage 5 and probe A of stage 6 — each have exactly one candidate, on
@@ -5976,7 +6060,7 @@ ceil_dn_used() { # <addr_port> <units> <label>
 case_ceiling() {
 	CASE=ceiling
 
-	local out i addr d k rev want ext efill bigext bigSize hugeTd
+	local out i addr d k rev want ext efill bigext bigSize hugeTd bound
 	local fill fillTd overTd overUnits standbyId standbyAddr newCntlr
 	local fillSide probeSide metaExt probeUnits srcAddr srcRev
 	local -a cnRev=()
@@ -6001,8 +6085,8 @@ case_ceiling() {
 	assert_eq "$(meta_units "$((efill * ext))" "$CEIL_BLOCK")" \
 		"$DN_META_UNITS" "a migration of $efill extents fills a DN's area"
 	# A big node holds that group with DN_EXTENTS extents to spare: on a DN
-	# for the one-extent legs of the small pools, on a CN for their
-	# footprints next to spE2's.
+	# for the one-extent legs of the small pools and of their clones' clone
+	# meta groups, on a CN for the pools' footprints next to spE2's.
 	bigext=$((efill + DN_EXTENTS))
 	bigSize=$((bigext * ext))
 	for d in dn0 dn1 dn3 cn0 cn1 cn2; do
@@ -6028,7 +6112,7 @@ case_ceiling() {
 	done
 
 	# -----------------------------------------------------------------
-	stage 2 "a clone too big for any CN's area is refused"
+	stage 2 "a clone whose metadata one side of its group cannot hold is refused"
 	# -----------------------------------------------------------------
 	gw create-sp --sp spE0 --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 1 \
 		--block-size "$CEIL_BLOCK" --cn-white "$(cn_addr 0),$(cn_addr 1)" \
@@ -6038,16 +6122,29 @@ case_ceiling() {
 		"[\"$(cn_addr 0)\",\"$(cn_addr 1)\"]" "spE0's cntlrs are on cn0 and cn1"
 	assert_field "$(sp_json spE0)" '.sp_conf.bdev_conf.dm_pool_conf.data_block_size' \
 		"$CEIL_BLOCK" "spE0's stored block size"
+	# A copy of tHuge needs one unit more than a CN's area holds, and more
+	# metadata than the data region of one side of a clone meta group, one
+	# extent at CEIL_BLOCK (architecture.md, Clones): CreateClone refuses it
+	# FAILED_PRECONDITION before any charge, naming the largest destination
+	# one side holds, which is below tHuge's size.
 	hugeTd=$(ceil_td_for $((CN_META_UNITS + 1)))
 	assert_eq "$(meta_units "$hugeTd" "$CEIL_BLOCK")" "$((CN_META_UNITS + 1))" \
 		"a clone of tHuge needs one unit more than a CN's area holds"
 	gw create-td --sp spE0 --rev "$SP_REV" --name tHuge --size "$hugeTd" \
 		>/dev/null
 	refresh_rev spE0
-	assert_no_write "create-clone of a td too big for any CN's area" \
-		ceil_gwx_out RESOURCE_EXHAUSTED create-clone --sp spE0 --rev "$SP_REV" \
-		--name cHuge --dst-td tHuge "${src[@]}"
-	ceil_assert_room "create-clone cHuge"
+	assert_no_write "create-clone of a td whose metadata one side cannot hold" \
+		ceil_gwx_out FAILED_PRECONDITION create-clone --sp spE0 \
+		--rev "$SP_REV" --name cHuge --dst-td tHuge "${src[@]}"
+	bound=$(jq_of "$CEIL_OUT" '.message
+		| capture("the largest destination it holds is (?<b>[0-9]+) bytes")
+		| .b')
+	case "$bound" in
+	'' | *[!0-9]*) die "the cHuge refusal names no bound: $(jq_of "$CEIL_OUT" \
+		'.message')" ;;
+	esac
+	[ "$bound" -lt "$hugeTd" ] ||
+		die "the cHuge refusal's bound $bound is not below tHuge's $hugeTd"
 	for i in 0 1; do ceil_cn_used "$(cn_addr "$i")" 0 "after cHuge"; done
 	assert_eq "$(jq_of "$(sp_json spE0)" '.sp_conf.clone_name_list | length')" \
 		"0" "spE0 holds no clone after the refusal"

@@ -937,13 +937,16 @@ func advanceNextId(conf *pb.SpConf, ids ...uint64) {
 }
 
 // takeId is a sub-object id: the spec's own, or, for 0, the pool's next free
-// one (model.SpNextId). Either way next_id moves past it.
-func takeId(conf *pb.SpConf, id uint64) uint64 {
+// one, taken through model.TakeSpIds as every create takes it, so a counter
+// with no id left refuses the call that would take one (architecture.md,
+// Globals: id allocation + shard buckets). Either way next_id moves past it.
+// op names the call in the refusal.
+func takeId(conf *pb.SpConf, op string, id uint64) (uint64, error) {
 	if id == 0 {
-		id = model.SpNextId(conf)
+		return model.TakeSpIds(conf, op, 1)
 	}
 	advanceNextId(conf, id)
-	return id
+	return id, nil
 }
 
 // containsName reports whether a name list already holds name.

@@ -104,7 +104,8 @@ func TestCloneDrainBatchBudget(t *testing.T) {
 	// maximum shape, which is the one the number is SIZED by
 	// (TestCreateStoragePoolBudget below), the SP drain's D2 batch
 	// (TestSpDrainBatchBudget below), the created flip's transaction
-	// (TestFlipCreatedTxnBudget below) and ReplaceCntlr
+	// (TestFlipCreatedTxnBudget below), the clone flip
+	// (TestFlipCloneProvisionedTxnBudget below) and ReplaceCntlr
 	// (TestReplaceCntlrTxnBudget below) — and this assertion is what would
 	// notice if the clone drain's batches stopped being free of it.
 	if budget > etcdDefaultTxnOps {
@@ -762,14 +763,18 @@ func (shape txnShape) check(t *testing.T) {
 }
 
 // TestCreateCloneTxnBudget is CreateClone's tripwire: its STM reads every
-// other clone of the pool for the one-destination rule and charges the
-// clone's metadata units to the CN of every cntlr (architecture.md, Metadata
-// units). The charge changes only units, so the capacity key stays where it
-// is — one put, no delete — and no CnRev is read or written.
+// other clone of the pool for the one-destination rule, charges the clone's
+// metadata units to the CN of every cntlr (architecture.md, Metadata units),
+// and charges every leg's DN its clone meta group's side as a new group's
+// legs are charged (dnLedger). The units charge changes only units, so the
+// CN's capacity key stays where it is — one put, no delete — and no CnRev is
+// read or written; a leg's DN is verified, written, re-indexed and bumped. A
+// clone meta group has the legs the pool's redundancy gives a group, at most
+// MaxAllocLegPerGrp (SPD1 cites it here), each on a distinct DN.
 func TestCreateCloneTxnBudget(t *testing.T) {
 	txnShape{
 		name: "CreateClone",
-		stm:  "clone.go's CreateClone and cnLedger.chargeUnits",
+		stm:  "clone.go's CreateClone, cnLedger.chargeUnits and dnLedger",
 		// ClusterConf, SpConf, SpRev, the new Clone key (absent, which still
 		// costs a compare) and the destination td.
 		fixedReads: 5,
@@ -781,8 +786,58 @@ func TestCreateCloneTxnBudget(t *testing.T) {
 			{"other clone", 1, common.MaxCloneCntPerSp - 1, 63},
 			// The Cntlr and its CnConf read, the CnConf and cn_capacity put.
 			{"cntlr", 4, common.MaxCntlrCntPerSp, 4},
+			// The DnConf, the scan's dn_capacity key and the DnRev read;
+			// the DnConf put, the dn_capacity delete and put, and the DnRev
+			// put.
+			{"leg DN", 7, common.MaxAllocLegPerGrp, 2},
 		},
-		maxCompares: 87,
+		maxCompares: 101,
+		overDefault: false,
+	}.check(t)
+}
+
+// TestDeleteSpareLegTxnBudget is DeleteSpareLeg's tripwire at its widest, a
+// spare of a clone meta group: the group is looked up in every slice first
+// and only then in every clone (openGrpForSpareLeg), and the spare's one side
+// gives its DN back its extent through the DN ledger. A spare of a slice's
+// group reads no clone and is the narrower shape. A spare never has a
+// second side here, since a spare under migration is refused.
+func TestDeleteSpareLegTxnBudget(t *testing.T) {
+	txnShape{
+		name: "DeleteSpareLeg",
+		stm:  "spareleg.go's DeleteSpareLeg, openGrpForSpareLeg and dnLedger",
+		// ClusterConf, SpConf, SpRev, and the spare's DnConf and DnRev.
+		fixedReads: 5,
+		// The Clone, the DnConf, the dn_capacity delete and put, the DnRev
+		// and the SpRev.
+		fixedWrites: 6,
+		terms: []txnTerm{
+			{"slice", 1, common.MaxSliceCntPerSp, 32},
+			{"clone", 1, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 107,
+		overDefault: false,
+	}.check(t)
+}
+
+// TestUpdateCntlidSlotListTxnBudget is UpdateStoragePoolCntlidSlotList's
+// tripwire: a slot may leave the list only when no cntlr and no side uses
+// it, so its STM reads every cntlr, every slice and every clone of the pool,
+// the clones for the sides of their clone meta groups.
+func TestUpdateCntlidSlotListTxnBudget(t *testing.T) {
+	txnShape{
+		name: "UpdateStoragePoolCntlidSlotList",
+		stm:  "storagepool.go's UpdateStoragePoolCntlidSlotList",
+		// ClusterConf, SpConf and SpRev.
+		fixedReads: 3,
+		// The SpConf and SpRev puts.
+		fixedWrites: 2,
+		terms: []txnTerm{
+			{"cntlr", 1, common.MaxCntlrCntPerSp, 4},
+			{"slice", 1, common.MaxSliceCntPerSp, 32},
+			{"clone", 1, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 105,
 		overDefault: false,
 	}.check(t)
 }
@@ -894,15 +949,20 @@ func TestReplaceCntlrTxnBudget(t *testing.T) {
 }
 
 // TestFinishCloneDeleteTxnBudget is the tripwire of model.FinishCloneDelete,
-// the clone drain's final step (dnv-worker.md CLD9): it gives the clone's
-// metadata units back on the CN of every cntlr of the pool, a units-only
-// change, so one capacity put and no CnRev per CN. model/clonedrain_test.go's
-// TestFinishCloneDeleteAtTheCntlrCeiling commits this shape against a real
-// etcd.
+// the clone drain's final step (dnv-worker.md CLD9, CLD11): it gives the
+// clone's metadata units back on the CN of every cntlr of the pool, a
+// units-only change, so one capacity put and no CnRev per CN; and it gives
+// every side of the clone meta group back to its DN, through the DN ledger
+// an sp drain batch uses. A clone meta group has at most MaxAllocLegPerGrp
+// legs and MaxSpareLegPerGrp spares, one side each — its legs are never
+// migrated — on as many distinct DNs (SPD1 cites MaxAllocLegPerGrp here).
+// model/clonedrain_test.go's TestFinishCloneDeleteAtTheCeiling commits this
+// shape against a real etcd.
 func TestFinishCloneDeleteTxnBudget(t *testing.T) {
 	txnShape{
 		name: "FinishCloneDelete",
-		stm:  "model.FinishCloneDelete's STM and releaseCloneMetaUnits",
+		stm: "model.FinishCloneDelete's STM, releaseCloneMetaUnits and " +
+			"the dnReleaser",
 		// SpConf, the Clone and SpRev.
 		fixedReads: 3,
 		// The Clone delete and the SpConf and SpRev puts.
@@ -910,9 +970,38 @@ func TestFinishCloneDeleteTxnBudget(t *testing.T) {
 		terms: []txnTerm{
 			// The Cntlr and its CnConf read, the CnConf and cn_capacity put.
 			{"cntlr", 4, common.MaxCntlrCntPerSp, 4},
+			// The DnConf and DnRev read; the DnConf put, the dn_capacity
+			// delete and put, and the DnRev put.
+			{"dn", 6,
+				common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp, 4},
 		},
-		maxCompares: 22,
+		maxCompares: 46,
 		overDefault: false,
+	}.check(t)
+}
+
+// TestFlipCloneProvisionedTxnBudget is the tripwire of
+// model.FlipCloneProvisioned, the clone-keyed provisioned flip (dnv-worker.md
+// MD6): one STM reads every Clone its refs name and writes every one it
+// flips, and the refs of one call can name every clone of the pool, which
+// takes it past etcd's default cap — one of the transactions the deployment
+// flag exists for. model/clonegrp_test.go's
+// TestFlipCloneProvisionedAtTheCloneCeiling commits this shape against a real
+// etcd.
+func TestFlipCloneProvisionedTxnBudget(t *testing.T) {
+	txnShape{
+		name: "FlipCloneProvisioned",
+		stm:  "model.FlipCloneProvisioned's STM and bumpSpRevTo",
+		// SpRev.
+		fixedReads: 1,
+		// SpRev.
+		fixedWrites: 1,
+		terms: []txnTerm{
+			// The Clone read and put.
+			{"clone", 2, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 130,
+		overDefault: true,
 	}.check(t)
 }
 

@@ -55,9 +55,10 @@ func newConfCache(d *deps) *confCache {
 // get returns one cluster's configuration as stored (RW9). The returned
 // message is never mutated by the cache, so callers may hold it for as long as
 // they like — and they validate it before use, because the cache does not:
-// each of the four readers has a different way to refuse (idle the loop, keep
-// the tick cadence, skip the pass, fail the health write), and a validating
-// get() would either hide that or log it four times.
+// each of the five readers has a different way to refuse (idle the loop, keep
+// the tick cadence, skip the pass, fail the health write, fail the clone
+// drain's final step, whose model op validates it), and a validating get()
+// would either hide that or log it five times.
 func (c *confCache) get(cid uint64) (*pb.ClusterConf, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

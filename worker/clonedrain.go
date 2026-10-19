@@ -16,10 +16,12 @@
 //     away. The wake-up a batch posts once its call succeeds (drainTick)
 //     runs the next steps alone, as the sp drain's does, and leaves the
 //     reactions to the pass.
-//   - The teardown comes from EXCLUSION rather than from a step (CLD5). From
-//     the first post-latch fan-out the deleting clone is absent from every
-//     cntlr's plan and from the primary's chunk-push plans, and the cn
-//     agent's sweep (cnagent.md CN21) dismantles the stack exactly once.
+//   - The cntlrs' teardown comes from EXCLUSION rather than from a step
+//     (CLD5). From the first post-latch fan-out the deleting clone is absent
+//     from every cntlr's plan and from the primary's chunk-push plans, and
+//     the cn agent's sweep (cnagent.md CN21) dismantles the stack exactly
+//     once. Only the sides of the clone's clone meta group leave by a step:
+//     the final one takes their pointers out of their DNs' records (CLD9).
 //   - The final step BUMPS SpRev instead of deleting it. The SP outlives the
 //     clone, so the bump is every mutator's normal epilogue rather than the
 //     stop signal the sp drain's D3 removes.
@@ -28,6 +30,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 
@@ -59,10 +62,14 @@ const (
 // It is called on every reaction pass of a live SP, ahead of the reactions and
 // of every gate of the pass (CLD7), because none applies to it: a doomed clone
 // drains at any `sp_level` (SPD6's rule scoped down to the clone), and the
-// drain reads no cluster conf and no geometry, neither a block size nor a
-// group's block counts, so neither of the SP's own gates, its `bdev_conf` and
-// its groups' lengths to zero (AR1), must be able to strand a clone the way
-// they could have stranded a latched SP. The drain's wake-up (drainTick)
+// drain reads no geometry, neither a block size nor a group's block counts,
+// so neither of the SP's own gates, its `bdev_conf` and its groups' lengths
+// to zero (AR1), must be able to strand a clone the way they could have
+// stranded a latched SP. Nor does the pass's cluster-conf gate stand in front
+// of it: the batches read no cluster conf, and the final step, which gives
+// the clone meta group's sides back and so maintains DN capacity keys, reads
+// the conf from the cache itself, so a missing or unusable one stops that
+// one step and no other (drainCloneStep). The drain's wake-up (drainTick)
 // calls it as well, alone and with no gate in front of it either.
 //
 // One step per clone per pass or wake-up, bounded by MaxCloneCntPerSp. Clones
@@ -109,9 +116,24 @@ func (w *spWorker) drainCloneStep(
 		// CLD9: the final STM is invoked only when the scan found zero
 		// surviving chunk keys, and that emptiness is permanent — after the
 		// latch no append can add one (CLD1) and batches only delete.
+		//
+		// CLD7: it gives the group's sides back, and every DN it credits
+		// moves its capacity key, whose bin comes from the cluster's
+		// ladder, so it takes the cluster conf from the cache. A cluster
+		// missing from the cache fails this step alone, logged like any
+		// failed step; an unusable conf is the STM's own refusal
+		// (model.ValidateClusterConf at its top). Either way the next pass
+		// or wake-up tries again, and the batches never wait on it.
+		cc, ok := w.deps.conf.get(w.cid)
+		if !ok {
+			w.cloneDrainFailed(ctx, cloneDrainStepFinal, fmt.Errorf(
+				"clone drain cluster %016x: %w", w.cid, errNoClusterConf,
+			), ids...)
+			return
+		}
 		err := ops.finishCloneDelete(
 			ctx, w.cid, w.shard, w.spId, w.desired.handle,
-			name, clone.GetCloneId(),
+			name, clone.GetCloneId(), cc,
 		)
 		if err != nil {
 			w.cloneDrainFailed(ctx, cloneDrainStepFinal, err, ids...)

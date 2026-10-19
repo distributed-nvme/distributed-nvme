@@ -55,7 +55,10 @@ var idKeyLen = len(fmt.Sprintf(common.IdKeyFmt, uint64(math.MaxUint64)))
 // widestCounts is the entry count of every list and map the three widest
 // messages reach: the cntlr syncup, the pool get reply and the cntlr report.
 func widestCounts() map[protoreflect.FullName]int {
-	grpsPerSp := common.MaxSliceCntPerSp * 2 * common.MaxGrpCntPerSlice
+	// Every group of the pool: the slices' and one clone meta group per
+	// clone (Clone.meta_grp, which the builder fills as any group).
+	grpsPerSp := common.MaxSliceCntPerSp*2*common.MaxGrpCntPerSlice +
+		common.MaxCloneCntPerSp
 	legsPerGrp := common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
 	return map[protoreflect.FullName]int{
 		// The pool's state, as a cntlr syncup and a pool get reply carry it.
@@ -455,10 +458,11 @@ func shapeOf(slices []*pb.Slice) sliceShape {
 	return shape
 }
 
-// widestPoolShape is the shape of a pool at the limits: every slice of
-// MaxSliceCntPerSp holds MaxGrpCntPerSlice groups in each of its two lists,
-// every group MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares of one side
-// each, and MaxMigrCntPerSp migrations add a side each.
+// widestPoolShape is the shape of a pool's slices at the limits: every slice
+// of MaxSliceCntPerSp holds MaxGrpCntPerSlice groups in each of its two
+// lists, every group MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares of
+// one side each, and MaxMigrCntPerSp migrations add a side each. The clones'
+// groups are not in it; cloneGrpShape is theirs.
 func widestPoolShape() sliceShape {
 	groups := common.MaxSliceCntPerSp * 2 * common.MaxGrpCntPerSlice
 	legs := groups * common.MaxAllocLegPerGrp
@@ -469,6 +473,22 @@ func widestPoolShape() sliceShape {
 		legs:   legs,
 		spares: spares,
 		sides:  legs + spares + common.MaxMigrCntPerSp,
+	}
+}
+
+// cloneGrpShape is the shape of the clone meta groups of a pool at the
+// limits: one group per clone of MaxCloneCntPerSp, of the legs and spares of
+// a slice's group. No migration moves one of its legs, so each side is alone
+// on its leg.
+func cloneGrpShape() sliceShape {
+	groups := common.MaxCloneCntPerSp
+	legs := groups * common.MaxAllocLegPerGrp
+	spares := groups * common.MaxSpareLegPerGrp
+	return sliceShape{
+		groups: groups,
+		legs:   legs,
+		spares: spares,
+		sides:  legs + spares,
 	}
 }
 
@@ -516,6 +536,19 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 			t.Errorf("%s holds %+v, want the widest pool %+v", c.name, got, want)
 		}
 	}
+	clones := cloneGrpShape()
+	var cloneGrps []*pb.Slice
+	for _, clone := range syncup.GetCloneList() {
+		cloneGrps = append(cloneGrps, &pb.Slice{
+			MetaGrpList: []*pb.Group{clone.GetMetaGrp()},
+		})
+	}
+	if got := shapeOf(cloneGrps); got.groups != clones.groups ||
+		got.legs != clones.legs || got.spares != clones.spares ||
+		got.sides != clones.sides {
+		t.Errorf("the cntlr syncup's clones hold %+v, want the widest "+
+			"clone meta groups %+v", got, clones)
+	}
 	info := noText.GetCntlrInfo()
 	thinRows := 0
 	for _, thin := range info.GetTdIdToThinInfo() {
@@ -529,12 +562,16 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 		name      string
 		got, want int
 	}{
-		{"leg rows", len(info.GetLegIdToLeg()), want.legs + want.spares},
+		// A leg row per leg and spare of every group of the pool, the
+		// clones' groups included.
+		{"leg rows", len(info.GetLegIdToLeg()),
+			want.legs + want.spares + clones.legs + clones.spares},
 		// Every side of a leg with two sides: twice the legs a migration
 		// gave a second side.
 		{"path rows", len(info.GetSideIdToPath()),
 			2 * (want.sides - want.legs - want.spares)},
-		{"group rows", len(info.GetGrpIdToMdRaid()), want.groups},
+		{"group rows", len(info.GetGrpIdToMdRaid()),
+			want.groups + clones.groups},
 		{"thin rows", thinRows, len(syncup.GetTdList()) * want.slices},
 		{"clone chunk ids", chunkIds,
 			len(syncup.GetCloneList()) * want.slices * common.MaxCloneBmCnt},

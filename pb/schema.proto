@@ -609,6 +609,18 @@ message Clone {
     // sizes its run with the same formula and does not read it. Appended,
     // never renumbered.
     uint64 meta_units = 13;
+    // The clone meta group (architecture.md, Terminology and object model):
+    // the one group the clone owns, one leg or the legs of an md-raid1 as
+    // the pool's redundancy gives a group, whose sides are charged to disk
+    // nodes and pointed at from their DnConf as a slice's sides are. Its
+    // group, leg and side ids come from SpConf.next_id with every other id
+    // of the pool. The clone drain's final transaction gives its sides back
+    // (dnv-worker.md CLD9). One group and not a list, so the
+    // name keeps it apart from a slice's meta_grp_list. A record without it
+    // decodes as a clone with no group, which no clone-keyed op takes and
+    // the clone drain deletes all the same (dnv-worker.md MD6). Appended,
+    // never renumbered.
+    Group meta_grp = 14;
 }
 
 // {dnv_prefix} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx}

@@ -483,6 +483,82 @@ func parseSideSpec(spec string) (plant.SideSpec, error) {
 	return out, nil
 }
 
+const cloneLegForm = "leg:idx"
+
+// parseCloneLegSpec reads one `--leg leg:idx` of put-clone: one leg of the
+// clone's clone meta group, which put-clone has no --group for, the clone
+// owning exactly one. Its side is a `--side` of put-sp's form that names it
+// (cloneLegsOf).
+func parseCloneLegSpec(spec string) (plant.CloneLegSpec, error) {
+	var out plant.CloneLegSpec
+	parts, err := splitSpec(spec, 2, cloneLegForm)
+	if err != nil {
+		return out, err
+	}
+	if out.LegId, err = parseIdField(parts[0], spec, cloneLegForm); err != nil {
+		return out, err
+	}
+	if out.LegIdx, err = parseU32Field(parts[1], spec, cloneLegForm); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// cloneLegsOf joins put-clone's `--leg leg:idx` and `--side
+// leg:side:dn_id:slot` flags into the library's legs, one side each, in the
+// order the --leg flags come. A leg with no side or with two, a side whose
+// leg no --leg names, and a leg or side id of 0 are refused: the library
+// takes a 0 for "the next free id", which is for Go callers only.
+func cloneLegsOf(legSpecs []string, sideSpecs []string) (
+	[]plant.CloneLegSpec, error,
+) {
+	legs := make([]plant.CloneLegSpec, 0, len(legSpecs))
+	at := make(map[uint64]int, len(legSpecs))
+	for _, text := range legSpecs {
+		leg, err := parseCloneLegSpec(text)
+		if err != nil {
+			return nil, fmt.Errorf("--leg: %w", err)
+		}
+		if leg.LegId == 0 {
+			return nil, fmt.Errorf("--leg %q: leg id 0 is never valid", text)
+		}
+		if _, dup := at[leg.LegId]; dup {
+			return nil, fmt.Errorf("--leg %q: leg %#x is named twice",
+				text, leg.LegId)
+		}
+		at[leg.LegId] = len(legs)
+		legs = append(legs, leg)
+	}
+	sided := make(map[uint64]bool, len(legs))
+	for _, text := range sideSpecs {
+		side, err := parseSideSpec(text)
+		if err != nil {
+			return nil, fmt.Errorf("--side: %w", err)
+		}
+		idx, ok := at[side.LegId]
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("--side %q: no --leg names leg %#x",
+				text, side.LegId)
+		case sided[side.LegId]:
+			return nil, fmt.Errorf("--side %q: leg %#x already has a side "+
+				"(a leg of a clone meta group has one)", text, side.LegId)
+		case side.SideId == 0:
+			return nil, fmt.Errorf("--side %q: side id 0 is never valid", text)
+		}
+		sided[side.LegId] = true
+		legs[idx].SideId = side.SideId
+		legs[idx].DnId = side.DnId
+		legs[idx].Slot = side.Slot
+	}
+	for _, leg := range legs {
+		if !sided[leg.LegId] {
+			return nil, fmt.Errorf("leg %#x has no --side", leg.LegId)
+		}
+	}
+	return legs, nil
+}
+
 const migrForm = "name:id:src_side:dst_side"
 
 // parseMigrSpec reads the `--migr name:id:src_side:dst_side` of put-migr into
@@ -1723,21 +1799,30 @@ func cmdPutSs(g *globals, args []string) {
 	})
 }
 
-// cmdPutClone writes one Clone and charges its units through plant.PutClone
-// (architecture.md, Clones; Metadata units). --dst-td accepts either a td
-// name or a td_id.
+// cmdPutClone writes one Clone with its clone meta group and charges both
+// through plant.PutClone (architecture.md, Clones; Metadata units): the units
+// to the CN of every cntlr of the pool, the group's extents to the DNs its
+// --side flags name. --dst-td accepts either a td name or a td_id. The
+// group is required, as every clone CreateClone writes has one: --grp, and
+// one --leg per leg with the --side that places it (cloneLegsOf). The legs
+// are active ones; a spare a Go caller plants through the library.
 func cmdPutClone(g *globals, args []string) {
 	fs := newFlagSet("put-clone", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "clone_name (required)")
-	var id hexUint
+	var id, grpId hexUint
 	fs.Var(&id, "id", "clone_id (required)")
+	fs.Var(&grpId, "grp", "grp_id of the clone meta group (required)")
 	dstTd := fs.String("dst-td", "", "destination td name or td_id (required)")
 	srcSliceCnt := fs.Uint("src-slice-cnt", 0, "Clone.src_slice_cnt")
 	srcNqn := fs.String("src-nqn", "", "Clone.src_nqn")
 	srcNsIdx := fs.Uint("src-ns-idx", 0, "Clone.src_ns_idx")
 	srcStripe := fs.Uint64("src-stripe-size", 0, "Clone.src_stripe_size")
 	srcBlock := fs.Uint64("src-block-size", 0, "Clone.src_block_size")
+	var legSpecs, sideSpecs stringList
+	fs.Var(&legSpecs, "leg", cloneLegForm+
+		" of the clone meta group (repeatable, at least one)")
+	fs.Var(&sideSpecs, "side", sideForm+" of each --leg (one per leg)")
 	fs.Parse(args)
 
 	if *name == "" {
@@ -1746,6 +1831,16 @@ func cmdPutClone(g *globals, args []string) {
 	cloneId := requireId(id)
 	if *dstTd == "" {
 		die("--dst-td is required")
+	}
+	if uint64(grpId) == 0 {
+		die("--grp is required and must not be 0")
+	}
+	if len(legSpecs) == 0 {
+		die("put-clone: at least one --leg is required")
+	}
+	legs, err := cloneLegsOf(legSpecs, sideSpecs)
+	if err != nil {
+		die("put-clone: %v", err)
 	}
 	spec := plant.CloneSpec{
 		Name:          *name,
@@ -1756,6 +1851,11 @@ func cmdPutClone(g *globals, args []string) {
 		SrcNsIdx:      uint32(*srcNsIdx),
 		SrcStripeSize: *srcStripe,
 		SrcBlockSize:  *srcBlock,
+		GrpId:         uint64(grpId),
+		Legs:          legs,
+	}
+	if err := spec.Check(); err != nil {
+		die("put-clone: %v", err)
 	}
 
 	ctx, done, cli := g.open()
@@ -1768,13 +1868,19 @@ func cmdPutClone(g *globals, args []string) {
 		die("put-clone: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":     target.Name,
-		"clone_name":  clone.Name,
-		"clone_id":    idHex(clone.Id),
-		"dst_td_id":   idHex(clone.DstTdId),
-		"meta_units":  clone.MetaUnits,
-		"charged_cns": clone.Charged,
-		"sp_rev":      clone.SpRev,
+		"sp_name":      target.Name,
+		"clone_name":   clone.Name,
+		"clone_id":     idHex(clone.Id),
+		"dst_td_id":    idHex(clone.DstTdId),
+		"meta_units":   clone.MetaUnits,
+		"charged_cns":  clone.Charged,
+		"grp_id":       idHex(clone.GrpId),
+		"leg_id_list":  idHexList(clone.LegIds),
+		"side_id_list": idHexList(clone.SideIds),
+		"meta_blocks":  clone.MetaBlocks,
+		"data_blocks":  clone.DataBlocks,
+		"dn_revisions": clone.DnRevisions,
+		"sp_rev":       clone.SpRev,
 	})
 }
 
@@ -2104,10 +2210,12 @@ func cmdSetFree(g *globals, args []string) {
 }
 
 // cmdSetEpoch plants one err_epoch, a Cntlr's or a Leg's or a Side's, through
-// plant.SetCntlrEpoch, plant.SetLegEpoch or plant.SetSideEpoch: set --age
-// seconds before now, or cleared with --clear. Now is the clock of the host
-// it runs on, which in the suites is the test server, whose clock the workers
-// read too. The library call is raw: it writes the epoch and nothing else
+// plant.SetCntlrEpoch, plant.SetLegEpoch or plant.SetSideEpoch, or, with
+// --clone, a leg's or a side's of that clone's clone meta group through
+// plant.SetCloneLegEpoch or plant.SetCloneSideEpoch: set --age seconds before
+// now, or cleared with --clear. Now is the clock of the host it runs on,
+// which in the suites is the test server, whose clock the workers read too.
+// The library call is raw: it writes the epoch and nothing else
 // (dnv-worker.md, Integration test plan, The driver).
 func cmdSetEpoch(g *globals, args []string) {
 	fs := newFlagSet("set-epoch", g)
@@ -2117,15 +2225,16 @@ func cmdSetEpoch(g *globals, args []string) {
 	fs.Var(&id, "id", "cntlr_id, leg_id or side_id (required)")
 	var sliceId hexUint
 	fs.Var(&sliceId, "slice", "slice_id of the leg or the side")
+	cloneName := fs.String("clone", "",
+		"clone_name whose clone meta group holds the leg or the side")
 	age := fs.Uint64("age", 0, "seconds before now the err_epoch is set to")
 	clearEpoch := fs.Bool("clear", false, "set the err_epoch to 0 instead")
 	fs.Parse(rest)
 	kind = kindArg(fs, kind, "cntlr", "leg", "side")
 
 	objId := requireId(id)
-	if (kind == "cntlr") != (uint64(sliceId) == 0) {
-		die("--slice is required for a leg or a side, and refused for a " +
-			"cntlr")
+	if err := epochHolder(kind, uint64(sliceId), *cloneName); err != nil {
+		die("set-epoch: %v", err)
 	}
 	ageGiven := false
 	fs.Visit(func(f *flag.Flag) {
@@ -2146,12 +2255,18 @@ func cmdSetEpoch(g *globals, args []string) {
 	target := resolveSp(ctx, cli, cl, *sp)
 
 	var old uint64
-	switch kind {
-	case "cntlr":
+	switch {
+	case kind == "cntlr":
 		old, err = plant.SetCntlrEpoch(ctx, cli, cl, target, objId, epoch)
-	case "leg":
+	case kind == "leg" && *cloneName != "":
+		old, err = plant.SetCloneLegEpoch(
+			ctx, cli, cl, target, *cloneName, objId, epoch)
+	case kind == "leg":
 		old, err = plant.SetLegEpoch(
 			ctx, cli, cl, target, uint64(sliceId), objId, epoch)
+	case *cloneName != "":
+		old, err = plant.SetCloneSideEpoch(
+			ctx, cli, cl, target, *cloneName, objId, epoch)
 	default:
 		old, err = plant.SetSideEpoch(
 			ctx, cli, cl, target, uint64(sliceId), objId, epoch)
@@ -2164,9 +2279,27 @@ func cmdSetEpoch(g *globals, args []string) {
 		"kind":          kind,
 		"id":            idHex(objId),
 		"slice_id":      idHex(uint64(sliceId)),
+		"clone_name":    *cloneName,
 		"err_epoch":     epoch,
 		"old_err_epoch": old,
 	})
+}
+
+// epochHolder checks that set-epoch names where its object lives: a cntlr
+// by its id alone, a leg or a side by exactly one of --slice and --clone,
+// the slice or the clone whose group holds it.
+func epochHolder(kind string, sliceId uint64, cloneName string) error {
+	if kind == "cntlr" {
+		if sliceId != 0 || cloneName != "" {
+			return fmt.Errorf("--slice and --clone are refused for a cntlr")
+		}
+		return nil
+	}
+	if (sliceId == 0) == (cloneName == "") {
+		return fmt.Errorf("a %s takes exactly one of --slice and --clone",
+			kind)
+	}
+	return nil
 }
 
 // plantedEpoch is the err_epoch set-epoch writes: age seconds before now, or
@@ -2196,7 +2329,9 @@ func plantedEpoch(
 // set-created, set-provisioned and start-cutover, with the drains below, are
 // the ONLY writes the gateway integration suite performs through workerctl
 // (gateway.md, Integration test plan, The etcd verification). Each is a
-// library call that goes through the very model op the worker calls.
+// library call that goes through the very model op the worker calls, except
+// set-provisioned --clone, which goes through that op's clone-keyed twin
+// (dnv-worker.md MD6).
 
 // cmdSetCreated flips ThinDevice.created through plant.SetCreated
 // (dnv-worker.md RW19).
@@ -2228,21 +2363,47 @@ func cmdSetCreated(g *globals, args []string) {
 }
 
 // cmdSetProvisioned flips one Side.provisioned through plant.SetProvisioned
-// (architecture.md, Side provisioning protocol).
+// (architecture.md, Side provisioning protocol), or, with --clone in place of
+// --slice, one side of that clone's clone meta group through
+// plant.SetCloneProvisioned, the clone-keyed twin of the flip (dnv-worker.md
+// MD6).
 func cmdSetProvisioned(g *globals, args []string) {
 	fs := newFlagSet("set-provisioned", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	var slice, leg, side hexUint
-	fs.Var(&slice, "slice", "slice_id (required)")
+	fs.Var(&slice, "slice", "slice_id (required without --clone)")
+	cloneName := fs.String("clone", "",
+		"clone_name whose clone meta group holds the side, in place of "+
+			"--slice")
 	fs.Var(&leg, "leg", "leg_id (required)")
 	fs.Var(&side, "side", "side_id (required)")
 	fs.Parse(args)
 
+	if (uint64(slice) == 0) == (*cloneName == "") {
+		usageDie("set-provisioned: exactly one of --slice and --clone is " +
+			"required")
+	}
 	ctx, done, cli := g.open()
 	defer done()
 	cl := g.loadCluster(ctx, cli)
 	target := resolveSp(ctx, cli, cl, *sp)
 
+	if *cloneName != "" {
+		cloneId, flipped, spRev, err := plant.SetCloneProvisioned(
+			ctx, cli, cl, target, *cloneName, uint64(leg), uint64(side))
+		if err != nil {
+			die("set-provisioned: %v", err)
+		}
+		emit(map[string]any{
+			"clone_name": *cloneName,
+			"clone_id":   idHex(cloneId),
+			"leg_id":     idHex(uint64(leg)),
+			"side_id":    idHex(uint64(side)),
+			"flipped":    flipped,
+			"sp_rev":     spRev,
+		})
+		return
+	}
 	ref := model.SideRef{
 		SliceId: uint64(slice),
 		LegId:   uint64(leg),
@@ -2420,6 +2581,9 @@ func cmdDrainClone(g *globals, args []string) {
 		// record carries no count of its own to confuse it with.
 		"chunk_cnt":     drain.ChunkCnt,
 		"clone_deleted": drain.Deleted,
+		// grp_side_cnt is the sides of the clone meta group this drain's
+		// final step gave back, 0 when it ran none.
+		"grp_side_cnt": drain.GrpSideCnt,
 	})
 }
 

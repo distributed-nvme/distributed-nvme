@@ -114,9 +114,11 @@ const (
 	// SPD1: it is CITED from all three places that make that choice —
 	// gateway/alloc.go legCntOf, model/ops.go legCntOf and worker/reaction.go
 	// legCnt — and from the sp-drain batch budget tripwire
-	// (gateway/txnbudget_test.go TestSpDrainBatchBudget), so that widening the
-	// allocator's group shape without revisiting MaxDelGrpPerTxn fails a test
-	// instead of a deployment.
+	// (gateway/txnbudget_test.go TestSpDrainBatchBudget), the clone drain's
+	// final-step tripwire (TestFinishCloneDeleteTxnBudget) and CreateClone's
+	// (TestCreateCloneTxnBudget), so that widening the allocator's group
+	// shape without revisiting MaxDelGrpPerTxn fails a test instead of a
+	// deployment.
 	MaxAllocLegPerGrp = 2
 	// MaxDelGrpPerTxn is the most groups ONE sp-drain batch removes from one
 	// slice in a single transaction (dnv-worker.md SPD10). It bounds
@@ -225,6 +227,11 @@ const (
 	// is exactly one unit of either area, so a copy of one region or more
 	// needs two units or more (architecture.md, Metadata units).
 	CloneMetaBaseBytes = 4 * 1024 * 1024
+	// CloneMetaGrpExtCnt is the ext_cnt of a clone meta group, the group a
+	// clone owns (architecture.md, Terminology and object model): one extent
+	// per side, the same for every clone, so every clone meta group has one
+	// shape.
+	CloneMetaGrpExtCnt = 1
 
 	// dnv DN disk format ([D13]). All byte offsets on the raw --disk device.
 	DnHeaderOffset     = 0 // 4 KiB header block
@@ -566,8 +573,9 @@ const (
 	// addition of gateway.md, Constants this document owns, and the
 	// arithmetic tripwired against it is that section's for CreateStoragePool,
 	// DeleteThinDevice, CreateCntlr and DeleteCntlr, dnv-worker.md's for the
-	// created flip (RW19), for the cntlr replacement (MD6) and for the two
-	// drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
+	// created flip (RW19), for the cntlr replacement and the clone flip (MD6)
+	// and for the two drains — SPD13/SPD14 for the sp drain, CLD11 for the
+	// clone drain.
 	//
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -659,10 +667,23 @@ const (
 	// and DeleteCntlr read every clone of the pool too, for the units the
 	// cntlr's node is charged or given back, and stay under etcd's default:
 	// 124 COMPARES each at the ceilings, four short of it
-	// (TestCreateCntlrTxnBudget, TestDeleteCntlrTxnBudget).
+	// (TestCreateCntlrTxnBudget, TestDeleteCntlrTxnBudget); so do three
+	// more that read every clone — CreateClone, which also verifies and
+	// charges the DN of each leg of its clone meta group (101 COMPARES,
+	// TestCreateCloneTxnBudget), UpdateStoragePoolCntlidSlotList (105,
+	// TestUpdateCntlidSlotListTxnBudget) and DeleteSpareLeg of a clone meta
+	// group's spare (107, TestDeleteSpareLegTxnBudget). The clone flip,
+	// the provisioned flip of the sides of clone meta groups, is a fourth
+	// (dnv-worker.md MD6): one STM reads and writes every Clone its refs
+	// name, so a flip over every clone of a pool commits
 	//
-	// DeleteThinDevice stays below all four — the create, D2, the flip and
-	// ReplaceCntlr — whatever the td count: its deciding STM commits having
+	//	2 x MaxCloneCntPerSp + 2 = 130 COMPARES
+	//
+	// (gateway/txnbudget_test.go's TestFlipCloneProvisionedTxnBudget; model's
+	// TestFlipCloneProvisionedAtTheCloneCeiling commits it).
+	//
+	// DeleteThinDevice stays below all five — the create, D2, the two flips
+	// and ReplaceCntlr — whatever the td count: its deciding STM commits having
 	// read the fixed resolution and token keys, the target td and one key per
 	// subsystem and per clone of the SP, so with its three writes it is
 	// 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the ceilings
@@ -673,8 +694,9 @@ const (
 	// delete in a pool of MaxTdCntPerSp tds. A walk inside the STM would cost
 	// one compare per td and put a delete from a full pool past the budget.
 	//
-	// The clone drain's batches, MaxDelBmPerTxn + 2 ops each, fit the default
-	// (dnv-worker.md CLD11).
+	// The clone drain's batches, MaxDelBmPerTxn + 2 ops each, fit the default,
+	// and so does its final transaction, which gives a clone's metadata units
+	// and its clone meta group's sides back (dnv-worker.md CLD11).
 	//
 	// The Go test etcd launchers pass it from here; the shell suites that
 	// start an etcd cannot import common, so they read it at preflight from

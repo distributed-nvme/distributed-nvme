@@ -209,6 +209,12 @@ func (s *Server) GetThinDeviceBitmap(
 // then walks that slice's pool metadata down through the group geometry to
 // this leg's data region.
 //
+// A leg of a clone's clone meta group is refused FAILED_PRECONDITION
+// (architecture.md, Bitmap reads): no migration moves it, so no caller has a
+// bitmap of it to feed, and it belongs to no slice for the agent to derive.
+// The clones are read only when no slice holds the leg, and the leg is judged
+// before the primary, as a slice's is.
+//
 // The reply is the agent's bytes VERBATIM (GW14) — same convention as
 // GetThinDeviceBitmap, bit k = 1 iff no pool block maps there, LSB-first with
 // zero pad bits, produced by the agent and never touched here.
@@ -236,7 +242,18 @@ func (s *Server) GetLegBitmap(
 			return err
 		}
 		if _, ok := findLeg(sc.Conf, slices, req.GetLegId()); !ok {
-			return errNotFound("leg %d not found", req.GetLegId())
+			clones, err := loadClones(stm, sc.Cid, sc.Conf)
+			if err != nil {
+				return err
+			}
+			cloneLoc, ok := findCloneLeg(sc.Conf, clones, req.GetLegId())
+			if !ok {
+				return errNotFound("leg %d not found", req.GetLegId())
+			}
+			return errPrecondition(
+				"leg %d belongs to the clone meta group of clone %q, which "+
+					"no migration moves, so its bitmap is never read",
+				req.GetLegId(), cloneLoc.CloneName)
 		}
 		found, err := openBitmapTarget(stm, sc, req.GetSpName())
 		if err != nil {

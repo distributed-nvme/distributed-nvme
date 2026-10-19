@@ -34,7 +34,9 @@ with `dnvctl`.
 The STM bodies of the public RPCs live in the per-resource files of
 `gateway/`. The three mutations `model` shares with the worker —
 `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` — are reused, never
-duplicated (`dnv-worker.md` MD8).
+duplicated (`dnv-worker.md` MD8), and so are the clone-keyed twins of the
+last two, `CreateCloneSpareLeg` and `SwitchCloneSpareLeg`, which the spare
+leg RPCs call on a clone meta group (`dnv-worker.md` MD6).
 
 The package's files follow `layout.md`, Directory tree: serving and the
 trace-id mint (GW1 to GW3); the shared handler helpers — resolution, the
@@ -67,11 +69,10 @@ The gateway's surface is `service Gateway` in `pb/schema.proto`. It adds no
 etcd key kind: it writes only kinds of `architecture.md`, Key table, and
 nothing that describes itself (GW1). The `model` exports it rests on are
 stated beside the rules that call them — `SpNextId` (GW12, GW19) and
-`TakeSpIds` (GW12), the
-revision bump helpers and the expected revision of the three shared
-mutations (GW6), the list-range prefixes (GW10), and the conf resolvers and
-stored-conf validators (GW11); `model` itself is `dnv-worker.md`'s (MD1 to
-MD9).
+`TakeSpIds` (GW12), the revision bump helpers and the expected revision of
+the three shared mutations and their two clone-keyed twins (GW6), the
+list-range prefixes (GW10), and the conf resolvers and stored-conf
+validators (GW11); `model` itself is `dnv-worker.md`'s (MD1 to MD9).
 
 ### Constants this document owns
 
@@ -96,32 +97,36 @@ message far inside `GrpcMaxMsgSize`. It is a clone positioning quantum only
 `EtcdMaxTxnOps` is a deployment requirement, not a client setting: every
 etcd serving dnv runs with `--max-txn-ops` at this value or higher, well
 above etcd's own default. etcd caps a transaction on the longest of its
-compare and operation lists, and the serializable-snapshot STM of
-`etcdutil` compares every key it read AND every key it wrote, so that sum is
-what has to fit. The transaction this number is SIZED by is
-`CreateStoragePool` at its widest shape: `MaxSliceCntPerSp` slices of two
-md-raid1 groups of `MaxAllocLegPerGrp` legs, each leg on a distinct DN, and
-`MaxCntlrCntPerSp` cntlrs. `init_ext_cnt` moves extent counts, not key
-counts, so every factor of that shape is a ceiling constant and the bound is
-tripwirable: a unit test asserts the arithmetic from the named constants, and
-another commits one widest-shape create against a real etcd started with
-`--max-txn-ops` at `EtcdMaxTxnOps`. The headroom is thin in the DN dimension:
-one more key read or written per DN costs one compare per DN of the widest
-shape. Other bounded transactions exceed etcd's default too without sizing
-this number: the sp drain's D2 batch (`dnv-worker.md` SPD13), the created
-flip's transaction (`dnv-worker.md` RW19) and the worker's cntlr
-replacement at the ceilings (`dnv-worker.md` MD6, AR7), whose STM reads
-every clone of the SP to move the clones' metadata units from the old
-cntlr's CN to the new one (`architecture.md`, Metadata units); each of the
-three is held to its count by a test pair like the create's. `CreateCntlr`
-and `DeleteCntlr` read every clone of the SP too and stay under etcd's
-default. `DeleteThinDevice` stays below all four — the create, the D2 batch, the
-flip and the replacement — whatever the td count: its deciding STM commits
-having read no td but its target, because the walk for uncreated snapshots
-is a read-only plan outside it, verified by the pool's identity and
-revision (Thin devices). The clone drain's batches and its final
-transaction fit etcd's default and size nothing here (`dnv-worker.md`
-CLD11).
+compare and operation lists, and the serializable-snapshot STM of `etcdutil`
+compares every key it read AND every key it wrote, so that sum is what has
+to fit. The transaction this number is SIZED by is `CreateStoragePool` at
+its widest shape: `MaxSliceCntPerSp` slices of two md-raid1 groups of
+`MaxAllocLegPerGrp` legs, each leg on a distinct DN, and `MaxCntlrCntPerSp`
+cntlrs. `init_ext_cnt` moves extent counts, not key counts, so every factor
+of that shape is a ceiling constant and the bound is tripwirable: a unit
+test asserts the arithmetic from the named constants, and another commits
+one widest-shape create against a real etcd started with `--max-txn-ops` at
+`EtcdMaxTxnOps`. The headroom is thin in the DN dimension: one more key read
+or written per DN costs one compare per DN of the widest shape. Other
+bounded transactions exceed etcd's default too without sizing this number:
+the sp drain's D2 batch (`dnv-worker.md` SPD13), the created flip's
+transaction (`dnv-worker.md` RW19), the clone flip's, whose one STM reads
+and writes every clone its sides belong to (`dnv-worker.md` MD6), and the
+worker's cntlr replacement at the ceilings (`dnv-worker.md` MD6, AR7), whose
+STM reads every clone of the SP to move the clones' metadata units from the
+old cntlr's CN to the new one (`architecture.md`, Metadata units); each of
+the four is held to its count by a test pair like the create's.
+`CreateCntlr` and `DeleteCntlr` read every clone of the SP too and stay
+under etcd's default, and so do `CreateClone`, which also charges its clone
+meta group's DNs, `UpdateStoragePoolCntlidSlotList`, and `DeleteSpareLeg` on
+a clone meta group, which read every clone as well; each is held to its
+count by a tripwire. `DeleteThinDevice` stays below
+all five — the create, the D2 batch, the two flips and the replacement —
+whatever the td count: its deciding STM commits having read no td but its
+target, because the walk for uncreated snapshots is a read-only plan outside
+it, verified by the pool's identity and revision (Thin devices). The clone
+drain's batches and its final transaction fit etcd's default and size
+nothing here (`dnv-worker.md` CLD11).
 
 `MaxCandidateRoundCnt` bounds the rounds of one candidate unit (GW9): a
 unit whose every round so far ended in candidate changed answers `ABORTED`
@@ -133,17 +138,20 @@ a round only to another create's commit.
 No other constant is this document's. `MaxAllocLegPerGrp` and
 `MaxDelGrpPerTxn` are the sp drain's (`dnv-worker.md`, The sp drain) and
 appear here through the transaction budget above, and `MaxAllocLegPerGrp`
-also as the md-raid1 leg count of `legCntOf`; `DefaultSliceCntPerSp`,
-the count substituted for a zero `slice_cnt`, is carried by
-`architecture.md`, Storage pools (Storage pools and GrowSlice only names
-where the handler substitutes it); `DefaultClusterName`,
-`ShardBucketSize`, the `Max*CntPerCluster` ceilings, the id step's
-`IdStepStride`, `ThinIdStepStride` and `MaxThinDevId`, `MaxCloneBmCnt`,
-`MaxMigrBmCnt` and the bounds of `architecture.md`, Common validation, are
-`architecture.md`'s, and so are the metadata ceilings `CnCloneMetaUnitCnt`
-and `DnCloneMetaUnitCnt` and the unit formula `CloneMetaUnits` the gateway
-charges by (`architecture.md`, Metadata units). `EtcdMaxRequestBytes` is
-`dnv-worker.md`'s and `GrpcMaxMsgSize` is `grpc.md`'s.
+also as the md-raid1 leg count of `legCntOf`; `DefaultSliceCntPerSp`, the
+count substituted for a zero `slice_cnt`, is carried by `architecture.md`,
+Storage pools (Storage pools and GrowSlice only names where the handler
+substitutes it); `DefaultClusterName`, `ShardBucketSize`, the
+`Max*CntPerCluster` ceilings, the id step's `IdStepStride`,
+`ThinIdStepStride` and `MaxThinDevId`, `MaxCloneBmCnt`, `MaxMigrBmCnt` and
+the bounds of `architecture.md`, Common validation, are `architecture.md`'s,
+and so are the metadata ceilings `CnCloneMetaUnitCnt` and
+`DnCloneMetaUnitCnt` and the unit formula `CloneMetaUnits` the gateway
+charges by (`architecture.md`, Metadata units), and `CloneMetaGrpExtCnt`,
+the extents of a clone meta group's side, with the byte budget
+`CloneMetaBytes` its bound compares (`architecture.md`, Clones).
+`EtcdMaxRequestBytes` is `dnv-worker.md`'s and `GrpcMaxMsgSize` is
+`grpc.md`'s.
 
 ## Serving and lifecycle
 
@@ -223,33 +231,34 @@ contract — the `ClusterConf` read first, the `SpConf` read, the `deleting`
 gate every mutating SP RPC but `DeleteStoragePool` applies, and the three
 RPCs that make the `ClusterConf` read in a planning snapshot — is
 `architecture.md`, `service Gateway` — RPC specifications, and STM
-discipline. GW11's resolution of conf defaults is a different operation,
-and the text says which it means. `resolveCluster` makes the first read of
-every handler's STM and planning snapshot, except `CreateCluster`'s and
+discipline. GW11's resolution of conf defaults is a different operation, and
+the text says which it means. `resolveCluster` makes the first read of every
+handler's STM and planning snapshot, except `CreateCluster`'s and
 `ListClusters`' — the two RPCs that resolve no cluster — the pool
 transactions of `AdvanceClusterIds` (GW19), and the later transactions of
-the three RPCs named below: `model.ClusterConfKey` of the
-`cluster_name`, defaulted to `common.DefaultClusterName`, yielding the
-`ClusterConf` and the cluster id, `model.ClusterId` of the name and the
-stored creation epoch, which prefixes every further key. `resolveSp` then
-reads `model.SpConfKey` of the cluster id and the `sp_name` and applies the
-`deleting` gate when its caller asks for it. The SP-scoped handlers open
-with one of three wrappers over that pair: `openSp` — resolution with the
-gate, then the `SpRev` read and GW6's token check — opens every planning
-snapshot and the deciding STM of every SP-scoped mutator but
-`DeleteStoragePool` and the three whose deciding STM is a `model` op;
-`openSpRead` — resolution without the gate and without the token check —
-opens every SP-scoped read-only RPC and `DeleteClone`'s phase 1 (Clones);
-`openSpFlags` is `openSp` with the gate selectable, and `DeleteStoragePool`
-is its one caller with the gate off (Storage pools and GrowSlice).
-`GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` resolve in their planning
-`Snapshot` only (Storage pools and GrowSlice, Spare legs) — `CreateSpareLeg`
-in a fresh one each round of its candidate unit (GW9): their later
-transactions — the deciding STM, which is the `model` op the sp worker
-shares, and `GrowSlice`'s CN-budget pre-check — take the cluster id, and the
-`ClusterConf` where they use it, from that snapshot and never read
-`ClusterConf` themselves. The **paged** `List*` RPCs use plain reads, not an
-STM (`architecture.md`, page_token; GW10). `ListThinDevices`,
+the three RPCs named below: `model.ClusterConfKey` of the `cluster_name`,
+defaulted to `common.DefaultClusterName`, yielding the `ClusterConf` and the
+cluster id, `model.ClusterId` of the name and the stored creation epoch,
+which prefixes every further key. `resolveSp` then reads `model.SpConfKey`
+of the cluster id and the `sp_name` and applies the `deleting` gate when its
+caller asks for it. The SP-scoped handlers open with one of three wrappers
+over that pair: `openSp` — resolution with the gate, then the `SpRev` read
+and GW6's token check — opens every planning snapshot and the deciding STM
+of every SP-scoped mutator but `DeleteStoragePool` and the three whose
+deciding STM is a `model` op; `openSpRead` — resolution without the gate and
+without the token check — opens every SP-scoped read-only RPC and
+`DeleteClone`'s phase 1 (Clones); `openSpFlags` is `openSp` with the gate
+selectable, and `DeleteStoragePool` is its one caller with the gate off
+(Storage pools and GrowSlice). `GrowSlice`, `CreateSpareLeg` and
+`SwitchSpareLeg` resolve in their planning `Snapshot` only (Storage pools
+and GrowSlice, Spare legs) — `CreateSpareLeg` in a fresh one each round of
+its candidate unit (GW9): their later transactions — the deciding STM, which
+is the `model` op the sp worker shares, and `GrowSlice`'s CN-budget
+pre-check — take the cluster id, and the `ClusterConf` where they use it,
+from that snapshot and never read `ClusterConf` themselves; on a clone meta
+group the deciding STM of the two spare leg RPCs is the clone-keyed twin of
+the shared op (Spare legs). The **paged** `List*` RPCs use plain reads, not
+an STM (`architecture.md`, page_token; GW10). `ListThinDevices`,
 `ListSubsystems` and the single-object `Get*` RPCs are one-STM consistency
 reads (Thin devices, Subsystems and namespaces, Clones).
 
@@ -292,15 +301,15 @@ through `openSpRead`, which has no `deleting` gate, before its
 them — and the hydration check's agent call all come ahead of it (Clones).
 
 The three `model` mutations the gateway shares with the worker —
-`GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` — take an expected
-revision and re-check it first inside their own STM, zero skipping the
-check (`dnv-worker.md` MD6); a mismatch is an `ErrPrecondition` with
-`ReasonStaleRevision`. The gateway passes the token's revision, which is
-zero exactly when the request carried no token message — and zero means
-"skip" there just as absence does here, so the two layers agree by
-construction; the worker's own calls pass zero. A token that is merely
-*present* with a zero revision never reaches `model`: this check refuses it
-first.
+`GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` — and the clone-keyed
+twins of the last two take an expected revision and re-check it first inside
+their own STM, zero skipping the check (`dnv-worker.md` MD6); a mismatch is
+an `ErrPrecondition` with `ReasonStaleRevision`. The gateway passes the
+token's revision, which is zero exactly when the request carried no token
+message — and zero means "skip" there just as absence does here, so the two
+layers agree by construction; the worker's own calls pass zero. A token that
+is merely *present* with a zero revision never reaches `model`: this check
+refuses it first.
 
 Every mutation that changes agent-visible desired state bumps the matching
 revision exactly once in the same STM, through `model.BumpSpRev`,
@@ -337,8 +346,13 @@ uncommitted (`dnv-worker.md` EU4).
   ceiling (`architecture.md`, GrowSlice), a counter the id step cannot move
   without wrapping (GW19), a `next_id` with fewer ids left than the call
   takes (`architecture.md`, Globals: id allocation + shard buckets; GW12),
-  and a pool that has spent every thin id (`architecture.md`, Thin
-  devices).
+  a pool that has spent every thin id (`architecture.md`, Thin
+  devices), a clone destination whose dm-clone metadata one side of a clone
+  meta group cannot hold (`CreateClone`, the message naming the largest
+  destination one side holds), a side or a leg of a clone meta group named
+  to `CreateMigration` or `GetLegBitmap`, and a spare leg call on the group
+  of a clone being deleted (`architecture.md`, Clones, Migrations, Bitmap
+  reads, Spare legs).
 * `RESOURCE_EXHAUSTED`: a global's `shard_bucket` sum at `Max*CntPerCluster`;
   the per-SP and per-group count ceilings — `cntlr_id_list` at
   `MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at
@@ -347,9 +361,9 @@ uncommitted (`dnv-worker.md` EU4).
   `MaxXferCntPerSp`, `migr_name_list` at `MaxMigrCntPerSp`, a group's
   `spare_leg_list` at `MaxSpareLegPerGrp` (`architecture.md`,
   `service Gateway` — RPC specifications), whether the gateway's own check
-  sees it or `model.CreateSpareLeg`'s, whose `ErrPrecondition` with
-  `model.ReasonSpareListFull` a create committed after the gateway's check
-  reaches (Spare legs); too few candidates
+  sees it or `model.CreateSpareLeg`'s or its clone-keyed twin's, whose
+  `ErrPrecondition` with `model.ReasonSpareListFull` a create committed
+  after the gateway's check reaches (Spare legs); too few candidates
   (`architecture.md`, Per-operation allocation); `AppendMigrationBitmap`'s
   `bm_cnt` at `MaxMigrBmCnt`; `AppendCloneBitmap`'s stored chunk plus the
   new page above `CloneBmChunkBytes` — one chunk's ceiling reached by
@@ -379,10 +393,11 @@ uncommitted (`dnv-worker.md` EU4).
   GW9's cap.
 
 `model.ErrNotFound` maps to `NOT_FOUND`, though none of the three shared
-mutations (GW6) returns it: when the SP its handler resolved is gone by the time
-the mutation's own STM runs, `checkSpRev` or `loadSpConfForOp` refuses with
-an `ErrPrecondition`, so the client sees `FAILED_PRECONDITION`. An
-`ErrPrecondition` with reason "candidate changed" maps to nothing (GW9).
+mutations and their clone-keyed twins (GW6) returns it: when the SP its
+handler resolved is gone by the time the mutation's own STM runs,
+`checkSpRev` or `loadSpConfForOp` refuses with an `ErrPrecondition`, so the
+client sees `FAILED_PRECONDITION`. An `ErrPrecondition` with reason
+"candidate changed" maps to nothing (GW9).
 
 The dividing line: `RESOURCE_EXHAUSTED` is capacity or quota that could be
 freed or extended (extents, candidates, count ceilings — though not
@@ -406,7 +421,8 @@ allocatable") rather than a GW9 re-scan. `CreateSpareLeg` sets
 `checkDnPick`'s `vanishedIsChanged`, which turns those three refusals into
 `ReasonCandidateChanged`, so a stale pick there re-scans as it does on the
 gateway-ledger paths, which treat every vanished pick, and one that has
-lost the metadata room the round needs, as candidate-changed.
+lost the metadata room the round needs, as candidate-changed. The
+clone-keyed twin of `CreateSpareLeg` sets it the same way.
 
 GW8. **One STM per RPC** (`architecture.md`, STM discipline). Everything
 computable beforehand (name formatting, group plans, candidate lists, the
@@ -419,45 +435,45 @@ for a two-phase RPC (AG4) it is the second one. `AdvanceClusterIds` is the
 one RPC that commits in several: the globals' STM, then one per pool (GW19).
 
 GW9. **Candidate unit retry.** Allocating RPCs (`CreateStoragePool`,
-`GrowSlice`, `CreateCntlr`, `CreateMigration`, `CreateSpareLeg`) loop over a
-candidate unit: scan candidates outside (`model.FindDnCandidatesAntiAffine`
-or `model.FindCnCandidatesAntiAffine`, then `model.PickRandom`), then run the
-STM, which re-reads each pick's exact capacity key (the bin index, free
-extents and endpoint its `Cand` carries) and fails `ErrPrecondition`
-"candidate changed" when one is gone; when the pick's node no longer has
-the free metadata units the round needs, which `verifyPick` reads from the
-node's record because a write that changes only units leaves the key where
-it is (`architecture.md`, Metadata units); or when the RPC's own plan
-re-check fails — `CreateStoragePool`'s cluster id and leg count
-(`architecture.md`, Storage pools), and the gain checks of `CreateCntlr`,
+`GrowSlice`, `CreateCntlr`, `CreateMigration`, `CreateSpareLeg`,
+`CreateClone`) loop over a candidate unit: scan candidates outside
+(`model.FindDnCandidatesAntiAffine` or `model.FindCnCandidatesAntiAffine`,
+then `model.PickRandom`), then run the STM, which re-reads each pick's exact
+capacity key (the bin index, free extents and endpoint its `Cand` carries)
+and fails `ErrPrecondition` "candidate changed" when one is gone; when the
+pick's node no longer has the free metadata units the round needs, which
+`verifyPick` reads from the node's record because a write that changes only
+units leaves the key where it is (`architecture.md`, Metadata units); or
+when the RPC's own plan re-check fails — `CreateStoragePool`'s and
+`CreateClone`'s cluster id and leg count (`architecture.md`, Storage pools,
+Per-operation allocation), and the gain checks of `CreateCntlr`,
 `CreateMigration` and `CreateSpareLeg` (`architecture.md`, Per-operation
-allocation). `CreateSpareLeg`'s op fails it too for a pick deleted,
-disabled or otherwise taken out of allocation, or short of extents, since
-the scan (GW7's dividing line). On that error — and only that error — the
-handler plans, scans and commits again, for at most `MaxCandidateRoundCnt`
-rounds in all: a unit whose ctx has ended, which is checked first, or
-whose rounds have reached the cap answers `ABORTED` "candidate allocation
-did not settle", naming the ctx's error or the cap. The cap is what bounds
-a request whose client set no deadline, which steady churn could otherwise
-hold in its handler for ever (Constants this document owns). The reason
-is never surfaced to a client. Each allocating RPC answers its count
-ceiling in every round ahead of its scan, from a read made before the
-scan: `MaxSpCntPerCluster` (`CreateStoragePool`, at the place
-`architecture.md`, Storage pools, gives it), `MaxCntlrCntPerSp`
-(`CreateCntlr`) and `MaxMigrCntPerSp` (`CreateMigration`) from the planning
+allocation).
+`CreateSpareLeg`'s op fails it too for a pick deleted, disabled or otherwise
+taken out of allocation, or short of extents, since the scan (GW7's dividing
+line). On that error — and only that error — the handler plans, scans and
+commits again, for at most `MaxCandidateRoundCnt` rounds in all: a unit
+whose ctx has ended, which is checked first, or whose rounds have reached
+the cap answers `ABORTED` "candidate allocation did not settle", naming the
+ctx's error or the cap. The cap is what bounds a request whose client set no
+deadline, which steady churn could otherwise hold in its handler for ever
+(Constants this document owns). The reason is never surfaced to a client.
+Each allocating RPC answers its count ceiling in every round ahead of its
+scan, from a read made before the scan: `MaxSpCntPerCluster`
+(`CreateStoragePool`, at the place `architecture.md`, Storage pools, gives
+it), `MaxCntlrCntPerSp` (`CreateCntlr`), `MaxMigrCntPerSp`
+(`CreateMigration`) and `MaxCloneCntPerSp` (`CreateClone`) from the planning
 read, right behind GW6's token check, and the spare list at
 `MaxSpareLegPerGrp` and `GrowSlice`'s group ceiling from the planning
-snapshot. A caller at a
-ceiling then hears the ceiling rather than a scan's shortfall, and no scan
-is run for a create that cannot commit. The deciding STM checks the
-ceiling again, because only it sees a create that commits between the two
-reads.
-`DeleteThinDevice` runs the same loop, cap included, without allocating:
-its scan is the plan's walk for uncreated snapshots, and its STM fails
-candidate-changed when the SP it resolves is
-not the one the plan walked or its `SpRev.revision` is no longer the one the
-plan read — though a request carrying the token that finds the revision
-moved fails GW6 first, `ABORTED` (Thin devices).
+snapshot. A caller at a ceiling then hears the ceiling rather than a scan's
+shortfall, and no scan is run for a create that cannot commit. The deciding
+STM checks the ceiling again, because only it sees a create that commits
+between the two reads. `DeleteThinDevice` runs the same loop, cap included,
+without allocating: its scan is the plan's walk for uncreated snapshots, and
+its STM fails candidate-changed when the SP it resolves is not the one the
+plan walked or its `SpRev.revision` is no longer the one the plan read —
+though a request carrying the token that finds the revision moved fails GW6
+first, `ABORTED` (Thin devices).
 
 GW10. **Pagination.** The token, the page and the plain reads of the paged
 lists are `architecture.md`, page_token; `pageNames` carries them out. It
@@ -494,18 +510,22 @@ before the merge that gives its scans their leg count and that the geometry
 rules of `architecture.md`, Common validation, judge, and again in its STM
 before any group geometry) and the `GrowSlice` handler (before any group
 geometry), in `newDnLedger` — the DN ledger `CreateStoragePool`,
-`DeleteSpareLeg`, `CreateMigration`, `FinishMigration` and `CancelMigration`
-build before staging their first write, for the same capacity-key reason —
+`CreateClone`, `DeleteSpareLeg`, `CreateMigration`, `FinishMigration` and
+`CancelMigration` build before staging their first write, for the same
+capacity-key reason —
 and in the scans `pickDns` and `pickCn` (where a zero batch size would
 silently make the scan width zero and turn every allocation into
-`RESOURCE_EXHAUSTED`), and in `CreateMigration`'s plan and STM before the
+`RESOURCE_EXHAUSTED`), in `CreateMigration`'s plan and STM before the
 destination's metadata units are sized by the cluster's `extent_size`
-(`migrMetaUnitsOf`); `model.ValidateBdevConf` in `GrowSlice`, in
-`CreateThinDevice` (before sizing against the stripe), and in
-`CreateClone` and `CreateMigration` before a copy's metadata units are
-sized by the SP's block size (`cloneMetaUnitsOf`, `migrMetaUnitsOf`: a zero
-there would size every copy at one unit, `architecture.md`, Metadata
-units). Such a zero is a lost
+(`migrMetaUnitsOf`), and in `CreateClone`'s plan and STM before its clone
+meta group is laid out from that `extent_size` (`planCloneGrp`);
+`model.ValidateBdevConf` in `GrowSlice`, in `CreateThinDevice` (before
+sizing against the stripe), in `CreateClone`'s plan and STM before its
+clone meta group is laid out and its metadata bounded by the SP's block
+size (`planCloneGrp`), and in `CreateClone` and `CreateMigration` before a
+copy's metadata units are sized by that block size (`cloneMetaUnitsOf`,
+`migrMetaUnitsOf`: a zero there would size every copy at one unit,
+`architecture.md`, Metadata units). Such a zero is a lost
 invariant, not a bad request, so every one of those gates is GW7's `ABORTED`
 and never `INVALID_ARGUMENT`. `model.GrowSlice` re-runs both validators
 inside its own STM and can report that refusal only as an `ErrPrecondition`,
@@ -788,8 +808,11 @@ position, and a re-run of the STM closure on the same picks and reads
   cluster id (GW10).
 * **UpdateStoragePoolCntlidSlotList** — STM: resolve; token; the validation
   of `architecture.md`, Storage pools (a duplicate, a value at or above
-  `CnCntlidSlotCnt`, or removing a slot in use is `INVALID_ARGUMENT`);
-  write; `BumpSpRev`. Reply `sp_id`.
+  `CnCntlidSlotCnt`, or removing a slot in use is `INVALID_ARGUMENT`), the
+  slots in use read from every cntlr, every slice's sides and the sides of
+  every clone's clone meta group, the clones read for that alone, and a
+  refusal for a clone's side naming the clone; write; `BumpSpRev`. Reply
+  `sp_id`.
 * **UpdateStoragePoolLevel** — STM: resolve; token; set `sp_level`;
   `BumpSpRev`. Reply `sp_id`.
 * **FindStoragePoolNames** — an `etcdutil` snapshot (one store revision, no
@@ -900,9 +923,12 @@ position, and a re-run of the STM closure on the same picks and reads
   `cntlr_info`, `obs_stamp` and `obs_age` as `InspectDiskNode` replies its
   own (`architecture.md`, Cntlrs).
 * **InspectSide** — STM: resolve; find the side by scanning the SP's slices
-  (bounded, `architecture.md`, Cntlrs) for `side_id` (`NOT_FOUND`), keeping
+  (bounded, `architecture.md`, Cntlrs) for `side_id`, and only when no slice
+  holds it the clones' clone meta groups (`findCloneSide`), so the inspect of
+  a slice's side reads no clone (`NOT_FOUND` when neither holds it), keeping
   its DN's `addr_port`, its `dn_id` (through `DnConfKey`) and the side
-  pointer (deliberately no `SpRev` read); after the STM, `GetSideInfo` with
+  pointer, whose leg is the slice's or the clone's (deliberately no `SpRev`
+  read); after the STM, `GetSideInfo` with
   the cluster id, `dn_id` and the side pointer; a failure is `ABORTED`.
   Reply `applied_revision`, `side_info`, `obs_stamp` and `obs_age` as
   `InspectDiskNode` replies its own.
@@ -1010,22 +1036,47 @@ The codes are those of `architecture.md`, Clones, and the ones the bullets
 below name.
 
 * **CreateClone** — validate the bounds of `architecture.md`, Clones
-  (`validateCloneGeometry`); STM: resolve; token; the `MaxCloneCntPerSp`
-  ceiling, checked ahead of the name; the name free; the destination td by
-  name; a destination td that any `Clone.dst_td_id` names (walk
-  `clone_name_list`, a draining clone included) is refused; then, after
-  every other refusal and before any write, the clone's metadata units
-  (`cloneMetaUnitsOf`: `model.ValidateBdevConf` of the SP's stored conf,
-  GW11, then the formula of `architecture.md`, Metadata units, over the
-  td's `size` and the SP's block size), and one charge per cntlr of the SP,
-  a disabled one included, on the CN its record names (`loadCntlrs`, then
-  the CN ledger's `chargeUnits`), so a CN short of the room is
-  `RESOURCE_EXHAUSTED` naming that CN and "metadata room", with nothing
-  written; mint `clone_id`; put the `Clone` with its `dst_td_id` and its
-  `meta_units`; flush the ledger, which writes each charged CN once and
-  rewrites its capacity value and bumps no `CnRev`, since only its used
-  units changed; append to `clone_name_list`; `BumpSpRev`. Reply
-  `clone_id`.
+  (`validateCloneGeometry`); then a candidate unit (GW9), because the
+  clone's clone meta group takes extents on DNs. Each round plans from one
+  read-only `Snapshot` opened with `openSp`, so a stale token is `ABORTED`
+  first, and runs every refusal of `cloneCreateChecks`, which the deciding
+  STM runs again, in its order: the `MaxCloneCntPerSp` ceiling, checked
+  ahead of the name; the name free; the destination td by name; a
+  destination td that any `Clone.dst_td_id` names (walk `clone_name_list`, a
+  draining clone included) refused; then the group's plan (`planCloneGrp`) —
+  `model.ValidateClusterConf` and `model.ValidateBdevConf` of the stored
+  confs (GW11), the legs `legCntOf` gives the SP's stored conf, the layout
+  `model.GroupBlocks` gives a group of `CloneMetaGrpExtCnt` extents (a
+  failure there is `ABORTED`: every slice of the pool already has a meta
+  group of the meta ladder's first rung laid out from the same write-once
+  confs), and the bound of `architecture.md`, Clones, the destination's
+  `common.CloneMetaBytes` at the SP's block size against the data blocks of
+  one side, `FAILED_PRECONDITION` naming the largest destination one side
+  holds. Then the DN scan (`pickDns`) for that many legs of
+  `CloneMetaGrpExtCnt` extents each, with no black list and no location
+  excluded, as `architecture.md`, Per-operation allocation, places a clone
+  meta group; too few is `RESOURCE_EXHAUSTED`. STM: resolve; token; the same
+  checks again; the cluster id or the leg count other than the scan's is
+  candidate changed; after every refusal of `cloneCreateChecks` and before
+  any write, the clone's metadata units (`cloneMetaUnitsOf`: the formula of
+  `architecture.md`, Metadata units, over the td's `size` and the SP's block
+  size) and one charge per cntlr of the SP, a disabled one included, on the
+  CN its record names (`loadCntlrs`, then the CN ledger's `chargeUnits`), so
+  a CN short of the room is `RESOURCE_EXHAUSTED` naming that CN and
+  "metadata room", with nothing written; the DN ledger (`newDnLedger`) and
+  every pick re-verified (`verifyPick`; a moved one is candidate changed);
+  mint `clone_id`, then the group's `grp_id`, then per pick, in pick order,
+  a `leg_id` and its `side_id` (GW15's order); per pick a `Leg` of one
+  `Side` (`addr_port` and `nvme_tr_conf` from the DN, `cntlid_slot` the
+  first of `cntlid_slot_list`, `provisioned` false) and the DN charged the
+  group's extents and the side's pointer; put the `Clone` with its
+  `dst_td_id`, its `meta_units` and its group (`meta_grp`, no spare); flush
+  the CN ledger, which writes each charged CN once and rewrites its capacity
+  value and bumps no `CnRev`, since only its used units changed, and the DN
+  ledger, which writes each charged DN once, moves its capacity key and
+  bumps its `DnRev` once; append to `clone_name_list`; `BumpSpRev`. No CN is
+  charged extents: the clone meta group is in no cntlr's footprint
+  (`architecture.md`, Terminology and object model). Reply `clone_id`.
 * **DeleteClone** — it LATCHES, and the sp worker drains (`dnv-worker.md`,
   The clone drain). Two-phase (AG4). Phase 1 STM (read-only): resolve,
   through `openSpRead` and so without the SP's `deleting` gate, which only
@@ -1076,7 +1127,9 @@ below name.
   cosmetic: a racing append could otherwise write a chunk key behind the
   drain, and the drain's final emptiness guard rests on "after the latch,
   no chunk key can ever appear again". `GetClone` and `DeleteClone`'s own
-  phase 1 keep using plain `loadClone`.
+  phase 1 keep using plain `loadClone`. The three spare leg calls, which
+  write a clone's record when they act on its clone meta group, refuse a
+  deleting clone the same way in `openGrpForSpareLeg` (Spare legs).
 * **GetClone** — one STM read. Reply the `Clone`.
 * **UpdateCloneTrConf** — STM: resolve; token; the clone
   (`loadLiveClone`); replace `src_tr_conf_list`; `BumpSpRev`. Reply
@@ -1135,7 +1188,10 @@ The codes are those of `architecture.md`, Migrations.
 
 * **CreateMigration** — the `MaxMigrCntPerSp` ceiling, right behind the
   token in each round's planning read (`migrCntBelowCeiling`, GW9); locate
-  `src_side_id` by a slice scan; its leg
+  `src_side_id` by a slice scan, and, only when no slice holds it, among the
+  sides of the clones' clone meta groups, where a find is
+  `FAILED_PRECONDITION` naming the clone (`migrSrcLocation`, in the plan and
+  in the STM alike); its leg
   already holding two sides is refused; a candidate unit for one DN
   (`pickDns`, with the black list and the two tiers of `architecture.md`,
   Per-operation allocation; the group's DN locations are read outside every
@@ -1208,11 +1264,17 @@ rather than a candidate problem.
 
 The codes are those of `architecture.md`, Spare legs. The requests carry
 `grp_id` but no slice id, so each handler must locate the
-slice containing the group. `SwitchSpareLeg` does it by scanning the SP's
-slices in a plain snapshot, and `CreateSpareLeg` in a fresh one each round
-of its candidate unit (the model op re-verifies in its own STM);
-`DeleteSpareLeg` has no snapshot — its locate runs directly inside its one
-deciding STM below.
+slice containing the group, or, when no slice holds it, the clone whose
+clone meta group it is (`openGrpForSpareLeg`, which reads the clones only
+then), which also refuses a clone being deleted (`architecture.md`, Spare
+legs; `dnv-worker.md` CLD1).
+`SwitchSpareLeg` does it in a plain snapshot, and `CreateSpareLeg` in a
+fresh one each round of its candidate unit (the model op re-verifies in its
+own STM); `DeleteSpareLeg` has no snapshot — its locate runs directly
+inside its one deciding STM below. On a clone meta group the model ops are
+the clone-keyed twins, `model.CreateCloneSpareLeg` and
+`model.SwitchCloneSpareLeg`, with the same preconditions and the clone's
+record written in the slice's place (`dnv-worker.md` MD6).
 
 * **CreateSpareLeg** — a candidate unit for one DN (GW9), each round of
   which plans from its own snapshot, as `CreateMigration`'s does: the group
@@ -1221,12 +1283,12 @@ deciding STM below.
   every DN the group occupies through a leg or a spare (`grpDnAddrs`), as
   the black list, and their locations as tier 1 (`grpDnLocations`); then
   `pickDns` with the two tiers of `architecture.md`, Per-operation
-  allocation, and no metadata units; then the call of `model.CreateSpareLeg`
-  with the token's revision as its expected revision (GW6) and the plan,
-  whose STM checks the full list again — a create committed since the
-  snapshot reaches it, and its `model.ReasonSpareListFull` is answered
-  `RESOURCE_EXHAUSTED` like the pre-check (GW7) — also refuses while a
-  spare of the group still has an
+  allocation, and no metadata units; then the call of
+  `model.CreateSpareLeg`, or of its clone twin, with the token's revision as
+  its expected revision (GW6) and the plan, whose STM checks the full list
+  again — a create committed since the snapshot reaches it, and its
+  `model.ReasonSpareListFull` is answered `RESOURCE_EXHAUSTED` like the
+  pre-check (GW7) — also refuses while a spare of the group still has an
   unprovisioned side (`FAILED_PRECONDITION` through `ErrPrecondition`,
   `dnv-worker.md` AR8), and answers candidate changed — so the round runs
   again from a fresh snapshot — for a group that holds a DN outside the
@@ -1236,14 +1298,15 @@ deciding STM below.
 * **DeleteSpareLeg** — STM: resolve; token; the group and the spare leg by
   id; a spare with two sides is refused with `CreateMigration`'s own
   two-sides message (`architecture.md`, Spare legs, says why); remove it
-  from `spare_leg_list`, release its DN (with `BumpDnRev`); `BumpSpRev`.
-  Reply `leg_id`.
+  from `spare_leg_list` and put the `Slice` or, for a clone meta group, the
+  `Clone`; release its DN (with `BumpDnRev`); `BumpSpRev`. Reply `leg_id`.
 * **SwitchSpareLeg** — the pre-read refuses either leg with two sides with
-  the same message; then the call of `model.SwitchSpareLeg` with the
-  token's revision as its expected revision (GW6); its own preconditions of
-  `architecture.md`, Spare legs, apply, the pre-read's two-sides check again
-  inside the STM among them, each `FAILED_PRECONDITION` through
-  `ErrPrecondition`. Reply `curr_active_leg_id` and `curr_spare_leg_id`.
+  the same message; then the call of `model.SwitchSpareLeg`, or of its clone
+  twin, with the token's revision as its expected revision (GW6); its own
+  preconditions of `architecture.md`, Spare legs, apply, the pre-read's
+  two-sides check again inside the STM among them, each
+  `FAILED_PRECONDITION` through `ErrPrecondition`. Reply
+  `curr_active_leg_id` and `curr_spare_leg_id`.
 
 ### Bitmap reads
 
@@ -1263,8 +1326,10 @@ bullets below name.
   bitmap **verbatim** — the wire convention is produced by the agent, and
   the gateway never touches bits (GW14).
 * **GetLegBitmap** — the same shape; the leg is located by a slice scan
-  (`NOT_FOUND`), and the call is `GetLegBm` with the `leg_id`,
-  `start_block` and `block_cnt`.
+  and, only when no slice holds it, among the legs of the clones' clone meta
+  groups, where a find is `FAILED_PRECONDITION` naming the clone, judged
+  before the primary (`NOT_FOUND` when neither holds it); the call is
+  `GetLegBm` with the `leg_id`, `start_block` and `block_cnt`.
 
 ## Agent calls
 
@@ -1472,7 +1537,10 @@ gateway, never through `workerctl`.
   destination's provisioned flip and the cutover; the clone's
   pair-addressed chunks, its latch with the destination namespace resumed,
   its repeat delete and its refusals while latched, then its drain; the
-  metadata units of
+  clone's clone meta group, as many legs of `CloneMetaGrpExtCnt` extents
+  as the pool's groups have, each on a DN of its own, charged to those DNs
+  at the create and given back by the drain, extents, pointers and capacity
+  keys alike, with one `DnRev` bump each time; the metadata units of
   `architecture.md`, Metadata units — a new node's none, the clone's on the
   CN of every cntlr of its pool, kept through the latch and given back by
   the drain, each migration's on its destination DN, given back by the
@@ -1518,21 +1586,23 @@ gateway, never through `workerctl`.
 * ceiling (one gateway) — the metadata areas of `architecture.md`, Metadata
   units, filled to their ceilings with real calls, on fake nodes that report
   sizes large enough for copies of many units and on pools at the smallest
-  block size, where a copy costs the most units: a clone too big for any
-  CN's arena is refused; clones are accepted until their units fill the CNs
-  of both cntlrs of their pool exactly, and the next is refused; a pool
-  whose primary's CN has room is refused a clone because its standby's CN
-  is full, the refusal naming that CN; a cntlr create whose one candidate
-  CN lacks room for the pool's clone units is refused, and the same create
-  fits once a clone drain gives the units back; a migration create whose
-  one candidate DN is full is refused, and placed on the DN with room once
-  a second candidate is allowed; then the cancel, the finish and the clone
-  drains give every unit back. The refusals that only the scan's skip may
-  answer each have one candidate on purpose: with two, the random pick
-  would land on the node with room either way. Every refusal writes
-  nothing and says "metadata room", and every charge and release shows on
-  the node's record and its capacity value alike, a units-only one with no
-  revision moved.
+  block size, where a copy costs the most units: a clone whose metadata
+  one side of its clone meta group cannot hold, a copy too big for a CN's
+  area as well, is refused before any area is looked at, the refusal
+  naming the largest destination one side holds; clones are accepted until
+  their units fill the CNs of both cntlrs of their pool exactly, and the
+  next is refused; a pool whose primary's CN has room is refused a clone
+  because its standby's CN is full, the refusal naming that CN; a cntlr
+  create whose one candidate CN lacks room for the pool's clone units is
+  refused, and the same create fits once a clone drain gives the units
+  back; a migration create whose one candidate DN is full is refused, and
+  placed on the DN with room once a second candidate is allowed; then the
+  cancel, the finish and the clone drains give every unit back. The
+  refusals that only the scan's skip may answer each have one candidate on
+  purpose: with two, the random pick would land on the node with room
+  either way. Every refusal writes nothing, every refusal of room says
+  "metadata room", and every charge and release shows on the node's record
+  and its capacity value alike, a units-only one with no revision moved.
 
 **Rules exercised.** The smoke case exercises GW4 to GW12, GW14 and GW19 across
 every resource group, GW5's `deleting` gate on a latched pool, GW10's

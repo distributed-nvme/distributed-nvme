@@ -595,12 +595,13 @@ func TestDrainTickReseedsNoHealth(t *testing.T) {
 // conf runs the step and clears that refusal's memo. The invalid conf's row
 // runs through the pass as well, whose deleting branch keeps the same gate
 // and the same clear. The SP's own two gates stay out of its way. A live SP's
-// clone drain takes no gate at all, the cluster-conf gate included — and
-// unlike the pass, whose reactions still refuse a bad conf, the wake-up then
-// logs no refusal either. Nor does it clear the pass's refusal memo, which
-// the wake-up clears only for a latched SP's step, so a steady bad conf
-// costs one record however many wake-ups fall between two passes
-// (dnv-worker.md, Log records).
+// clone drain batch takes no gate at all, the cluster-conf gate included —
+// and unlike the pass, whose reactions still refuse a bad conf, the wake-up
+// then logs no refusal either (the final step's own conf check is
+// TestCloneDrainFinalStepTakesTheClusterConf's). Nor does it clear the
+// pass's refusal memo, which the wake-up clears only for a latched SP's
+// step, so a steady bad conf costs one record however many wake-ups fall
+// between two passes (dnv-worker.md, Log records).
 func TestDrainTickGates(t *testing.T) {
 	t.Run("sp drain/with the cluster missing from the cache", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))

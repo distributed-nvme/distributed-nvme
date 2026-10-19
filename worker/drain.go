@@ -243,8 +243,10 @@ func (w *spWorker) armDrain() {
 // no reaction. Those keep the cntlr_interval pass (AR1), so a drain of many
 // steps evaluates the reactions on the pass's cadence and not once more per
 // step. A live SP takes no cluster-conf gate here, exactly as its pass runs
-// the clone drain ahead of that gate: the clone drain reads no cluster conf
-// (CLD7). A wake-up that finds nothing left to drain does nothing.
+// the clone drain ahead of that gate: the clone drain's batches read no
+// cluster conf, and its final step reads it itself and fails alone when it
+// is unusable (CLD7). A wake-up that finds nothing left to drain does
+// nothing.
 func (w *spWorker) drainTick(ctx context.Context) {
 	state, ok := w.loadPassState(ctx)
 	if !ok {

@@ -19,6 +19,7 @@ const (
 	fixtureDnAddrA = "dn-a:9000"
 	fixtureDnAddrB = "dn-b:9000"
 	fixtureDnAddrC = "dn-c:9000"
+	fixtureDnAddrD = "dn-d:9000"
 	fixtureCnAddrA = "cn-a:9000"
 	fixtureCnAddrB = "cn-b:9000"
 	// fixtureSpRevision is the fixture's SpRev revision: not 1, so a loader
@@ -45,7 +46,9 @@ func fixtureSpConf() *pb.SpConf {
 
 // writeSp writes the whole fixture: one slice with a meta group, a data group
 // and a spare leg, so that the loader's side walk has to reach a spare's side
-// to find dn-c.
+// to find dn-c, and one clone whose clone meta group has a leg on dn-d, which
+// only the walk over the clones finds, and a spare on dn-a, which the slice
+// already holds.
 func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	t.Helper()
 	conf := fixtureSpConf()
@@ -104,6 +107,25 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	})
 	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone0"), &pb.Clone{
 		CloneId: 91,
+		MetaGrp: &pb.Group{
+			GrpId:  44,
+			ExtCnt: common.CloneMetaGrpExtCnt,
+			LegList: []*pb.Leg{{
+				LegId: 54,
+				SideList: []*pb.Side{{
+					SideId:   64,
+					AddrPort: fixtureDnAddrD,
+				}},
+			}},
+			SpareLegList: []*pb.Leg{{
+				LegId:  55,
+				LegIdx: 1,
+				SideList: []*pb.Side{{
+					SideId:   65,
+					AddrPort: fixtureDnAddrA,
+				}},
+			}},
+		},
 	})
 	mustPut(t, cli, TransferKey(cid, fixtureSpId, "xfer0"), &pb.Transfer{
 		XferId: 92,
@@ -129,7 +151,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 		)
 	}
 	for i, addrPort := range []string{
-		fixtureDnAddrA, fixtureDnAddrB, fixtureDnAddrC,
+		fixtureDnAddrA, fixtureDnAddrB, fixtureDnAddrC, fixtureDnAddrD,
 	} {
 		mustPut(t, cli, DnConfKey(cid, addrPort), &pb.DnConf{
 			DnId:       uint64(i + 1),
@@ -268,9 +290,12 @@ func TestLoadSpHappyPath(t *testing.T) {
 		}
 	}
 	// The spare leg's side counts: dn-c is only reachable through
-	// spare_leg_list.
-	if len(state.DnByAddr) != 3 ||
-		state.DnByAddr[fixtureDnAddrC].GetDnId() != 3 {
+	// spare_leg_list. So does the clone meta group's: dn-d is only
+	// reachable through the clone, and dn-a, which both the slice and the
+	// clone's spare hold, is one record.
+	if len(state.DnByAddr) != 4 ||
+		state.DnByAddr[fixtureDnAddrC].GetDnId() != 3 ||
+		state.DnByAddr[fixtureDnAddrD].GetDnId() != 4 {
 		t.Errorf("DnByAddr = %v", state.DnByAddr)
 	}
 	if len(state.CnByAddr) != 2 ||
@@ -491,5 +516,57 @@ func TestLoadSpRevAdvances(t *testing.T) {
 	// one revision.
 	if !equalUint32s(bmIndexes(first.MigrBmIdx["migr0"]), []uint32{0}) {
 		t.Errorf("first load's index changed under it: %v", first.MigrBmIdx)
+	}
+}
+
+// TestLoadSpReadsCloneGroupNodes pins the loader's walk over the clones
+// (MD3): the DN of every side of a clone meta group is read after the slices'
+// in clone_name_list order, a latched clone's included, so a lost record of
+// such a DN lands in Missing after the slices' ones, and a clone with no
+// group adds no read at all.
+func TestLoadSpReadsCloneGroupNodes(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	writeSp(t, cli, cid)
+	clone := &pb.Clone{}
+	if _, err := cli.Get(ctx, CloneKey(cid, fixtureSpId, "clone0"),
+		clone); err != nil {
+		t.Fatalf("Get clone0: %v", err)
+	}
+	clone.Deleting = true
+	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone0"), clone)
+	conf := fixtureSpConf()
+	conf.CloneNameList = append(conf.CloneNameList, "clone1")
+	mustPut(t, cli, SpConfKey(cid, fixtureSpName), conf)
+	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone1"), &pb.Clone{
+		CloneId: 94,
+	})
+	if err := cli.Delete(ctx, DnConfKey(cid, fixtureDnAddrC)); err != nil {
+		t.Fatalf("Delete dn-c: %v", err)
+	}
+	if err := cli.Delete(ctx, DnConfKey(cid, fixtureDnAddrD)); err != nil {
+		t.Fatalf("Delete dn-d: %v", err)
+	}
+
+	state, err := LoadSp(ctx, cli, cid, fixtureSpName)
+	if err != nil {
+		t.Fatalf("LoadSp: %v", err)
+	}
+	want := []string{
+		DnConfKey(cid, fixtureDnAddrC),
+		DnConfKey(cid, fixtureDnAddrD),
+	}
+	if !equalStrings(state.Missing, want) {
+		t.Errorf("Missing = %v, want %v: the slice's DN first, then the "+
+			"latched clone's", state.Missing, want)
+	}
+	if len(state.DnByAddr) != 2 || state.DnByAddr[fixtureDnAddrA] == nil ||
+		state.DnByAddr[fixtureDnAddrB] == nil {
+		t.Errorf("DnByAddr = %v, want dn-a and dn-b", state.DnByAddr)
+	}
+	if state.Clones["clone1"].GetMetaGrp() != nil {
+		t.Errorf("clone1 = %v, want a clone with no group",
+			state.Clones["clone1"])
 	}
 }

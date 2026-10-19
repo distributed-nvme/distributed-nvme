@@ -157,9 +157,11 @@ func startEtcdOnce(bin string) (string, func(), error) {
 		// maximum-shape sp-drain batch (SPD13) reach — and THIS package
 		// commits that batch, in TestDrainSpSliceAtTheCeiling (SPD14), as it
 		// commits the created flip's transactions (RW19) in
-		// TestFlipCreatedAtTheTdCeiling and a maximum-shape ReplaceCntlr,
-		// which reads every clone of the SP (dnv-worker.md MD6), in
-		// TestReplaceCntlrAtTheCeiling.
+		// TestFlipCreatedAtTheTdCeiling, a clone flip over every clone of
+		// the SP (dnv-worker.md MD6) in
+		// TestFlipCloneProvisionedAtTheCloneCeiling and a maximum-shape
+		// ReplaceCntlr, which reads every clone of the SP (dnv-worker.md
+		// MD6), in TestReplaceCntlrAtTheCeiling.
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		// dnv also requires --max-request-bytes=EtcdMaxRequestBytes
 		// (dnv-worker.md, Constants this document owns): the server's own

@@ -487,8 +487,8 @@ func sptWantStale(t *testing.T, err error) {
 	}
 }
 
-// sptSideWalk is every side of an SP with the group it belongs to, which is
-// what the DN accounting assertions are computed from.
+// sptSideWalk is every side of an SP's slices with the group it belongs to,
+// which is what the DN accounting assertions are computed from.
 type sptSideWalk struct {
 	AddrPort string
 	ExtCnt   uint64

@@ -118,16 +118,17 @@ func mapStmErr(err error) error {
 }
 
 // mapModelErr maps an error returned by one of the three model ops the
-// gateway shares with the worker — GrowSlice, CreateSpareLeg, SwitchSpareLeg,
-// each of which runs its own STM — onto GW7.
+// gateway shares with the worker — GrowSlice, CreateSpareLeg, SwitchSpareLeg
+// — or by the clone-keyed twins of the last two, CreateCloneSpareLeg and
+// SwitchCloneSpareLeg, each of which runs its own STM, onto GW7.
 //
 // ReasonStaleRevision is the token check the gateway asked the op to run and
 // is ABORTED; ReasonCandidateChanged never reaches a client (GW9: the caller
 // re-runs the whole candidate unit) and is reported to the caller of this
-// helper through isCandidateChanged instead — CreateSpareLeg's group that
-// gained a DN since the round's plan, and its pick deleted, disabled or
-// otherwise no longer allocatable, or short of extents, since the scan,
-// arrive that way; every other ErrPrecondition is a documented public
+// helper through isCandidateChanged instead — CreateSpareLeg's group, or
+// its twin's, that gained a DN since the round's plan, and its pick deleted,
+// disabled or otherwise no longer allocatable, or short of extents, since the
+// scan, arrive that way; every other ErrPrecondition is a documented public
 // precondition and therefore FAILED_PRECONDITION.
 func mapModelErr(err error) error {
 	if err == nil {
@@ -159,12 +160,12 @@ func mapModelErr(err error) error {
 // units the round needs (verifyPick reads them from the node's record, since
 // a write that changes only units leaves the key where it is;
 // architecture.md, Metadata units), or when what the scan was planned from
-// has moved under it: CreateStoragePool's cluster_id or leg count,
-// CreateCntlr's SP, which as the closure reads it has a cntlr on a CN the
+// has moved under it: CreateStoragePool's and CreateClone's cluster_id or
+// leg count, CreateCntlr's SP, which as the closure reads it has a cntlr on a CN the
 // scan's read of its cntlrs did not, or CreateMigration's group, which as the
 // closure reads it occupies a DN the scan's read of it did not.
-// model.CreateSpareLeg answers it, through mapModelErr, for the same gain on
-// its group and for a pick deleted, disabled or otherwise no longer
+// model.CreateSpareLeg and its clone twin answer it, through mapModelErr,
+// for the same gain on their group and for a pick deleted, disabled or otherwise no longer
 // allocatable, or short of extents, since the scan. DeleteThinDevice's
 // deciding STM returns it too, for a stale plan:
 // another SP than the one the plan walked, or, for a token-less request, a

@@ -239,6 +239,35 @@ func (c *smallCluster) dnCapacityKey(
 	return model.DnCapacityKey(c.cl.Id, binIdx, freeExt, dnAddr(id))
 }
 
+// dnHolds fails the case unless dn id holds free extents and exactly the
+// side pointers ptrs, in order, carries the capacity key of that free count
+// and not the one of gone, the count it held before the write under test,
+// and is at revision rev.
+func (c *smallCluster) dnHolds(
+	t *testing.T,
+	ctx context.Context,
+	id uint64,
+	free uint64,
+	gone uint64,
+	ptrs []*pb.SidePointer,
+	rev uint64,
+) {
+	t.Helper()
+	dn := c.dnConf(t, ctx, id)
+	if dn.GetFreeExtCnt() != free || !equalPtrs(dn.GetSidePtrList(), ptrs) {
+		t.Errorf("dn %d holds %d free extents and sides %v, want %d and %v",
+			id, dn.GetFreeExtCnt(), dn.GetSidePtrList(), free, ptrs)
+	}
+	mustGet(t, ctx, c.cli, c.dnCapacityKey(t, id, free), &pb.DnCapacity{})
+	if gone != free {
+		mustAbsent(t, ctx, c.cli, c.dnCapacityKey(t, id, gone),
+			&pb.DnCapacity{})
+	}
+	if got := c.dnRev(t, ctx, id); got != rev {
+		t.Errorf("dn %d is at revision %d, want %d", id, got, rev)
+	}
+}
+
 // TestPutClusterReadsBack pins PutCluster: the conf it stores is the
 // resolved one LoadCluster reads back under the same cluster_id, with the
 // three globals beside it, and a second PutCluster of the name is refused.
@@ -532,8 +561,10 @@ func TestPutSpReadsBack(t *testing.T) {
 // TestPutSubObjectsReadBack pins what PutTds, PutSs, PutClone, PutXfer,
 // PutMigr and the two bitmap calls store, as model.LoadSp reads it: the ids
 // they take for a zero, one pool revision bump per transaction, the CdcEntry
-// of a subsystem, the units of a clone on every cntlr's CN and those of a
-// migration on its destination DN, and a migration's second side on its leg.
+// of a subsystem, the units of a clone on every cntlr's CN, a clone's clone
+// meta group laid out, its sides on the DNs it names and charged there, a
+// clone planted without one, those units of a migration on its destination
+// DN, and a migration's second side on its leg.
 func TestPutSubObjectsReadBack(t *testing.T) {
 	ctx := testCtx(t)
 	c := plantSmallCluster(t, ctx, true)
@@ -596,9 +627,19 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 		t.Fatalf("two namespaces of one index = %v, want a refusal", err)
 	}
 
+	// c0's group takes ids below its own, so the ids every later zero takes
+	// are the ones a clone with no group would leave: legs on dn 1, which
+	// holds the pool's sides too, and on dn 5, the spare on dn 3, the
+	// pool's spare's DN.
 	clone, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
 		Name: "c0", Id: 40, DstTd: "td0", SrcSliceCnt: 1,
 		SrcNqn: "nqn.2024-01.io.dnv-it:src",
+		GrpId:  33,
+		Legs: []CloneLegSpec{
+			{LegId: 34, LegIdx: 0, SideId: 35, DnId: 1, Slot: 0},
+			{LegId: 36, LegIdx: 1, SideId: 37, DnId: 5, Slot: 1},
+			{LegId: 38, LegIdx: 2, SideId: 39, DnId: 3, Slot: 2, Spare: true},
+		},
 	})
 	if err != nil {
 		t.Fatalf("PutClone: %v", err)
@@ -611,6 +652,37 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 		t.Fatalf("PutClone = %+v, want %d units on cn 1 and cn 2", clone,
 			units)
 	}
+	metaBlocks, dataBlocks, err := model.GroupBlocks(
+		common.CloneMetaGrpExtCnt, common.MinDnExtSize,
+		c.load(t, ctx).Conf.GetBdevConf())
+	if err != nil {
+		t.Fatalf("GroupBlocks: %v", err)
+	}
+	if clone.GrpId != 33 || !equalU64(clone.LegIds, 34, 36, 38) ||
+		!equalU64(clone.SideIds, 35, 37, 39) ||
+		clone.MetaBlocks != metaBlocks || clone.DataBlocks != dataBlocks ||
+		len(clone.DnRevisions) != 3 || clone.DnRevisions[dnAddr(1)] != 3 ||
+		clone.DnRevisions[dnAddr(3)] != 3 ||
+		clone.DnRevisions[dnAddr(5)] != 2 {
+		t.Fatalf("PutClone's group = %+v, want group 33 of legs 34, 36 "+
+			"and 38 at %d and %d blocks, dn 1 and dn 3 at revision 3, "+
+			"dn 5 at 2", clone, metaBlocks, dataBlocks)
+	}
+	// One extent off each DN of the group, its pointer after the ones the
+	// DN held, the capacity key moved and one DnRev bump.
+	cloneSide := func(legId, sideId uint64) *pb.SidePointer {
+		return &pb.SidePointer{SpId: ref.Id, LegId: legId, SideId: sideId}
+	}
+	c.dnHolds(t, ctx, 1, nodeFree-4, nodeFree-3, []*pb.SidePointer{
+		cloneSide(3, 8), cloneSide(6, 10), cloneSide(34, 35),
+	}, 3)
+	c.dnHolds(t, ctx, 3, nodeFree-3, nodeFree-2, []*pb.SidePointer{
+		cloneSide(12, 13), cloneSide(38, 39),
+	}, 3)
+	c.dnHolds(t, ctx, 5, nodeFree-1, nodeFree, []*pb.SidePointer{
+		cloneSide(36, 37),
+	}, 2)
+	// c1 names no leg, so it is planted with no group and charges no DN.
 	byId, err := PutClone(ctx, c.cli, c.cl, ref,
 		CloneSpec{Name: "c1", DstTd: "0x15"})
 	if err != nil {
@@ -618,8 +690,11 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	}
 	nextRev(t, "PutClone", byId.SpRev)
 	if byId.Id != 41 || byId.DstTdId != 21 ||
-		byId.MetaUnits != common.CloneMetaUnits(2<<30, blockSize) {
-		t.Fatalf("PutClone by td_id = %+v, want td1's size", byId)
+		byId.MetaUnits != common.CloneMetaUnits(2<<30, blockSize) ||
+		byId.GrpId != 0 || len(byId.LegIds) != 0 ||
+		len(byId.DnRevisions) != 0 {
+		t.Fatalf("PutClone by td_id = %+v, want td1's size and no group",
+			byId)
 	}
 	for cnId := uint64(1); cnId <= 2; cnId++ {
 		cn := c.cnConf(t, ctx, cnId)
@@ -758,6 +833,38 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 			model.CdcTrConfList(cntlrs)) {
 		t.Fatalf("CdcEntry %v", entry)
 	}
+	trOf := func(id uint64) *pb.NvmeTrConf { return nvmeTrConfOf(dnAddr(id)) }
+	wantGrp := &pb.Group{
+		GrpId: 33, ExtCnt: common.CloneMetaGrpExtCnt,
+		MetaBlocks: metaBlocks, DataBlocks: dataBlocks,
+		LegList: []*pb.Leg{
+			{LegId: 34, LegIdx: 0, SideList: []*pb.Side{{
+				SideId: 35, AddrPort: dnAddr(1), CntlidSlot: 0,
+				NvmeTrConf: trOf(1),
+			}}},
+			{LegId: 36, LegIdx: 1, SideList: []*pb.Side{{
+				SideId: 37, AddrPort: dnAddr(5), CntlidSlot: 1,
+				NvmeTrConf: trOf(5),
+			}}},
+		},
+		SpareLegList: []*pb.Leg{
+			{LegId: 38, LegIdx: 2, SideList: []*pb.Side{{
+				SideId: 39, AddrPort: dnAddr(3), CntlidSlot: 2,
+				NvmeTrConf: trOf(3),
+			}}},
+		},
+	}
+	if got := state.Clones["c0"].GetMetaGrp(); !proto.Equal(got, wantGrp) {
+		t.Fatalf("c0's clone meta group %v, want %v", got, wantGrp)
+	}
+	if got := state.Clones["c1"].GetMetaGrp(); got != nil {
+		t.Fatalf("c1 carries a group %v, want none", got)
+	}
+	// The load reads the DN of every side of a clone meta group, as the
+	// worker's snapshot does: dn 5 holds no side of a slice.
+	if state.DnByAddr[dnAddr(5)].GetDnId() != 5 {
+		t.Fatalf("the load holds no record of dn 5, which holds c0's side")
+	}
 	if state.Clones["c0"].GetMetaUnits() != units ||
 		state.Xfers["x0"].GetOriNsIdx() != 1 ||
 		state.Migrs["m0"].GetBmCnt() != 2 ||
@@ -782,8 +889,9 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 
 // TestSettersReadBack pins every setter on a planted pool: each writes what
 // it names and nothing else, the pool setters bump the pool's revision once,
-// the epochs and the budgets bump none, and the worker-role calls go through
-// the model ops the worker uses.
+// the epochs and the budgets bump none — a clone meta group's as a slice's
+// — and the worker-role calls go through the model ops, the clone flip among
+// them.
 func TestSettersReadBack(t *testing.T) {
 	ctx := testCtx(t)
 	c := plantSmallCluster(t, ctx, true)
@@ -991,6 +1099,79 @@ func TestSettersReadBack(t *testing.T) {
 		t.Fatalf("td0 is not created")
 	}
 
+	// A clone meta group's legs and sides, through the clone setters: the
+	// epochs raw, the flip through model.FlipCloneProvisioned.
+	if _, err := PutTd(ctx, c.cli, c.cl, ref,
+		TdSpec{Name: "tdC", Size: 1 << 30}); err != nil {
+		t.Fatalf("PutTd: %v", err)
+	}
+	clone, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
+		Name: "c0", DstTd: "tdC",
+		Legs: []CloneLegSpec{
+			{LegIdx: 0, DnId: 1},
+			{LegIdx: 1, DnId: 2},
+			{LegIdx: 2, DnId: 3, Spare: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutClone: %v", err)
+	}
+	rev = c.spRev(t, ctx)
+	if old, err := SetCloneLegEpoch(ctx, c.cli, c.cl, ref, "c0",
+		clone.LegIds[2], 99); err != nil || old != 0 {
+		t.Fatalf("SetCloneLegEpoch on the spare = %d, %v", old, err)
+	}
+	if old, err := SetCloneSideEpoch(ctx, c.cli, c.cl, ref, "c0",
+		clone.SideIds[0], 77); err != nil || old != 0 {
+		t.Fatalf("SetCloneSideEpoch on the first leg's side = %d, %v", old,
+			err)
+	}
+	if old, err := SetCloneSideEpoch(ctx, c.cli, c.cl, ref, "c0",
+		clone.SideIds[0], 0); err != nil || old != 77 {
+		t.Fatalf("SetCloneSideEpoch clear = %d, %v; want the old 77", old,
+			err)
+	}
+	if _, err := SetCloneSideEpoch(ctx, c.cli, c.cl, ref, "c0", 8,
+		77); err == nil || !strings.Contains(err.Error(), "holds no side") {
+		t.Fatalf("SetCloneSideEpoch on a slice's side = %v, want a refusal",
+			err)
+	}
+	if _, err := SetCloneLegEpoch(ctx, c.cli, c.cl, ref, "nosuch",
+		clone.LegIds[0], 77); err == nil {
+		t.Fatalf("SetCloneLegEpoch on a clone never planted succeeded")
+	}
+	grp := c.load(t, ctx).Clones["c0"].GetMetaGrp()
+	if grp.GetSpareLegList()[0].GetErrEpoch() != 99 ||
+		grp.GetLegList()[0].GetSideList()[0].GetErrEpoch() != 0 ||
+		grp.GetLegList()[0].GetErrEpoch() != 0 {
+		t.Fatalf("c0's group %v, want only the spare's epoch at 99", grp)
+	}
+	if got := c.spRev(t, ctx); got != rev {
+		t.Fatalf("the clone epochs moved the pool's revision to %d", got)
+	}
+	cloneId, flipped, spRev, err := SetCloneProvisioned(ctx, c.cli, c.cl,
+		ref, "c0", clone.LegIds[2], clone.SideIds[2])
+	if err != nil || !flipped || cloneId != clone.Id || spRev != rev+1 ||
+		spRev != c.spRev(t, ctx) {
+		t.Fatalf("SetCloneProvisioned = %d, %t at %d, %v; want clone %d "+
+			"flipped at %d", cloneId, flipped, spRev, err, clone.Id, rev+1)
+	}
+	if _, flipped, _, err := SetCloneProvisioned(ctx, c.cli, c.cl, ref,
+		"c0", clone.LegIds[2], clone.SideIds[2]); err != nil || flipped {
+		t.Fatalf("a second SetCloneProvisioned = %t, %v; want no flip",
+			flipped, err)
+	}
+	if _, _, _, err := SetCloneProvisioned(ctx, c.cli, c.cl, ref, "nosuch",
+		clone.LegIds[2], clone.SideIds[2]); err == nil {
+		t.Fatalf("SetCloneProvisioned of a clone never planted succeeded")
+	}
+	grp = c.load(t, ctx).Clones["c0"].GetMetaGrp()
+	if !grp.GetSpareLegList()[0].GetSideList()[0].GetProvisioned() ||
+		grp.GetLegList()[0].GetSideList()[0].GetProvisioned() {
+		t.Fatalf("c0's group %v, want only the spare's side provisioned",
+			grp)
+	}
+
 	// The level, after the cutover, which a level of NO_MIGRATION and
 	// above would refuse.
 	rev = c.spRev(t, ctx)
@@ -1012,7 +1193,10 @@ func TestSettersReadBack(t *testing.T) {
 // drains: a latch bumps the pool's revision once and a second one nothing, a
 // drain of one step leaves the object, and a drain to the end removes it and
 // gives back exactly what the plants charged — the clone's units on every
-// CN, the pool's extents and pointers on every node.
+// CN; its clone meta group's extents, pointers and capacity keys on the DNs
+// of its legs and its spare, with one DnRev bump each, a DN it shares with
+// the pool keeping the pool's sides; the pool's extents and pointers on
+// every node.
 func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 	ctx := testCtx(t)
 	c := plantSmallCluster(t, ctx, true)
@@ -1022,14 +1206,41 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 		TdSpec{Name: "td0", Size: 1 << 30}); err != nil {
 		t.Fatalf("PutTd: %v", err)
 	}
-	clone, err := PutClone(ctx, c.cli, c.cl, ref,
-		CloneSpec{Name: "c0", DstTd: "td0"})
+	// The group's legs on dn 1, beside the pool's sides 8 and 10, and on
+	// dn 4, its spare on dn 5; every id a zero takes.
+	clone, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
+		Name: "c0", DstTd: "td0",
+		Legs: []CloneLegSpec{
+			{LegIdx: 0, DnId: 1},
+			{LegIdx: 1, DnId: 4},
+			{LegIdx: 2, DnId: 5, Spare: true},
+		},
+	})
 	if err != nil {
 		t.Fatalf("PutClone: %v", err)
 	}
 	if clone.MetaUnits == 0 {
 		t.Fatalf("the clone took no units")
 	}
+	if clone.GrpId != clone.Id+1 || len(clone.LegIds) != 3 ||
+		len(clone.SideIds) != 3 {
+		t.Fatalf("PutClone = %+v, want a group of three legs taking the "+
+			"ids after the clone's", clone)
+	}
+	poolSides := []*pb.SidePointer{
+		{SpId: ref.Id, LegId: 3, SideId: 8},
+		{SpId: ref.Id, LegId: 6, SideId: 10},
+	}
+	cloneSide := func(i int) *pb.SidePointer {
+		return &pb.SidePointer{SpId: ref.Id, LegId: clone.LegIds[i],
+			SideId: clone.SideIds[i]}
+	}
+	c.dnHolds(t, ctx, 1, nodeFree-4, nodeFree-3,
+		append(append([]*pb.SidePointer(nil), poolSides...), cloneSide(0)), 3)
+	c.dnHolds(t, ctx, 4, nodeFree-1, nodeFree,
+		[]*pb.SidePointer{cloneSide(1)}, 2)
+	c.dnHolds(t, ctx, 5, nodeFree-1, nodeFree,
+		[]*pb.SidePointer{cloneSide(2)}, 2)
 	for idx := uint32(0); idx < 3; idx++ {
 		if _, err := PutCloneBitmap(ctx, c.cli, c.cl, ref, CloneBitmapSpec{
 			Clone: "c0", BmIdx: idx, Data: []byte{byte(idx)},
@@ -1047,18 +1258,35 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 		t.Fatalf("a second SetCloneDeleting = %+v, %v; want no bump", again,
 			err)
 	}
+	// A batch removes chunk keys only: the group stays charged.
 	step, err := DrainClone(ctx, c.cli, c.cl, ref, "c0", 1)
-	if err != nil || step.Steps != 1 || step.ChunkCnt != 3 || step.Deleted {
+	if err != nil || step.Steps != 1 || step.ChunkCnt != 3 || step.Deleted ||
+		step.GrpSideCnt != 0 {
 		t.Fatalf("DrainClone for one step = %+v, %v", step, err)
 	}
+	c.dnHolds(t, ctx, 4, nodeFree-1, nodeFree-1,
+		[]*pb.SidePointer{cloneSide(1)}, 2)
 	done, err := DrainClone(ctx, c.cli, c.cl, ref, "c0", 4096)
-	if err != nil || !done.Deleted || done.ChunkCnt != 0 {
+	if err != nil || !done.Deleted || done.ChunkCnt != 0 ||
+		done.GrpSideCnt != 3 {
 		t.Fatalf("DrainClone to the end = %+v, %v", done, err)
 	}
 	mustAbsent(t, ctx, c.cli, model.CloneKey(cid, ref.Id, "c0"), &pb.Clone{})
 	for cnId := uint64(1); cnId <= 2; cnId++ {
 		if used := c.cnConf(t, ctx, cnId).GetUsedMetaUnits(); used != 0 {
 			t.Errorf("cn %d still uses %d units after the drain", cnId, used)
+		}
+	}
+	// The final step gave every side of the group back, the spare's too,
+	// each DN with one more DnRev bump, and took only the clone's pointer
+	// off dn 1. The DNs the clone never used kept their revisions.
+	c.dnHolds(t, ctx, 1, nodeFree-3, nodeFree-4, poolSides, 4)
+	c.dnHolds(t, ctx, 4, nodeFree, nodeFree-1, nil, 3)
+	c.dnHolds(t, ctx, 5, nodeFree, nodeFree-1, nil, 3)
+	for _, dnId := range []uint64{2, 3} {
+		if got := c.dnRev(t, ctx, dnId); got != 2 {
+			t.Errorf("dn %d is at revision %d after the clone's drain, "+
+				"want PutSp's 2", dnId, got)
 		}
 	}
 	if _, err := DrainClone(ctx, c.cli, c.cl, ref, "c0", 4096); err == nil {
@@ -1109,6 +1337,153 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 		t.Fatalf("SpGlobal still counts the pool in shard %#x: %v",
 			smokeShard, global)
 	}
+}
+
+// TestPutCloneRefusals pins what PutClone refuses inside its STM, each
+// before anything is written: a group, leg or side id a slice or another
+// clone of the pool already uses for its kind, a slot outside the pool's
+// list, a DN short of an extent, and a spare in a pool whose groups are not
+// md-raid1. An id of another kind may meet one of the pool's, as PutSp lets
+// it. PutMigr takes no side of a clone meta group as its source, nor a clone
+// meta side's id for its destination.
+func TestPutCloneRefusals(t *testing.T) {
+	ctx := testCtx(t)
+	c := plantSmallCluster(t, ctx, true)
+	cid, ref := c.cl.Id, c.sp.Ref
+	for _, name := range []string{"td0", "td1", "td2"} {
+		if _, err := PutTd(ctx, c.cli, c.cl, ref,
+			TdSpec{Name: name, Size: 1 << 30}); err != nil {
+			t.Fatalf("PutTd %s: %v", name, err)
+		}
+	}
+	// c0's group takes explicit ids: 40, legs 41 and 43, sides 42 and 44.
+	if _, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
+		Name: "c0", DstTd: "td0", GrpId: 40,
+		Legs: []CloneLegSpec{
+			{LegId: 41, LegIdx: 0, SideId: 42, DnId: 4},
+			{LegId: 43, LegIdx: 1, SideId: 44, DnId: 5},
+		},
+	}); err != nil {
+		t.Fatalf("PutClone c0: %v", err)
+	}
+	// refused fails the case unless the spec is refused with want and the
+	// store is as it was: no clone key, the pool's revision and every DN's
+	// record and revision unchanged.
+	refused := func(t *testing.T, spec CloneSpec, want string) {
+		t.Helper()
+		rev := c.spRev(t, ctx)
+		var before []*pb.DnConf
+		var revs []uint64
+		for id := uint64(1); id <= 5; id++ {
+			before = append(before, c.dnConf(t, ctx, id))
+			revs = append(revs, c.dnRev(t, ctx, id))
+		}
+		_, err := PutClone(ctx, c.cli, c.cl, ref, spec)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("PutClone %s = %v, want a refusal naming %q",
+				spec.Name, err, want)
+		}
+		mustAbsent(t, ctx, c.cli, model.CloneKey(cid, ref.Id, spec.Name),
+			&pb.Clone{})
+		if got := c.spRev(t, ctx); got != rev {
+			t.Errorf("the refusal moved the pool's revision to %d", got)
+		}
+		for id := uint64(1); id <= 5; id++ {
+			if dn := c.dnConf(t, ctx, id); !proto.Equal(dn, before[id-1]) ||
+				c.dnRev(t, ctx, id) != revs[id-1] {
+				t.Errorf("the refusal wrote dn %d: %v", id, dn)
+			}
+		}
+	}
+	two := func(name string, grp, leg0, side0, leg1, side1 uint64,
+		slot uint32) CloneSpec {
+		return CloneSpec{
+			Name: name, DstTd: "td1", GrpId: grp,
+			Legs: []CloneLegSpec{
+				{LegId: leg0, LegIdx: 0, SideId: side0, DnId: 1, Slot: slot},
+				{LegId: leg1, LegIdx: 1, SideId: side1, DnId: 2, Slot: slot},
+			},
+		}
+	}
+	refused(t, two("cSide", 50, 51, 8, 53, 54, 0),
+		"side id 0x8 is already used")
+	refused(t, two("cLeg", 50, 51, 52, 6, 54, 0),
+		"leg id 0x6 is already used")
+	refused(t, two("cGrp", 5, 51, 52, 53, 54, 0),
+		"group id 0x5 is already used")
+	refused(t, two("cCloneSide", 50, 51, 44, 53, 54, 0),
+		"side id 0x2c is already used")
+	refused(t, two("cCloneLeg", 50, 41, 52, 53, 54, 0),
+		"leg id 0x29 is already used")
+	refused(t, two("cCloneGrp", 40, 51, 52, 53, 54, 0),
+		"group id 0x28 is already used")
+	refused(t, two("cSlot", 50, 51, 52, 53, 54, 7), "cntlid slot 7")
+	if _, _, err := SetDnFree(ctx, c.cli, c.cl, 2, 0); err != nil {
+		t.Fatalf("SetDnFree: %v", err)
+	}
+	refused(t, two("cShort", 50, 51, 52, 53, 54, 0), "free_ext_cnt 0")
+	if _, _, err := SetDnFree(ctx, c.cli, c.cl, 2,
+		nodeFree-3); err != nil {
+		t.Fatalf("SetDnFree: %v", err)
+	}
+	// A side of a clone meta group is no migration's source.
+	if _, err := PutMigr(ctx, c.cli, c.cl, ref, MigrSpec{
+		Name: "mClone", SrcSide: 42, DstDn: 3,
+	}); err == nil || !strings.Contains(err.Error(), "no side 0x2a") {
+		t.Fatalf("PutMigr of clone side 42 = %v, want a refusal", err)
+	}
+	// Nor is a clone meta side's id a migration destination's: on a DN
+	// holding both, the clone drain would take the destination's pointer
+	// with the clone's, since a pointer is removed by pool and side id.
+	if _, err := PutMigr(ctx, c.cli, c.cl, ref, MigrSpec{
+		Name: "mDst", SrcSide: 8, DstSide: 44, DstDn: 3,
+	}); err == nil ||
+		!strings.Contains(err.Error(), "side id 0x2c is already used") {
+		t.Fatalf("PutMigr onto clone side id 44 = %v, want a refusal", err)
+	}
+	mustAbsent(t, ctx, c.cli, model.MigrationKey(cid, ref.Id, "mDst"),
+		&pb.Migration{})
+	// Ids of another kind may meet the pool's: group 8 beside side 8, leg
+	// 10 beside side 10, side 2 beside group 2.
+	if _, err := PutClone(ctx, c.cli, c.cl, ref,
+		two("cKinds", 8, 10, 2, 53, 54, 0)); err != nil {
+		t.Fatalf("PutClone with ids of other kinds: %v", err)
+	}
+
+	// A pool of redund_none groups takes no spare.
+	none, err := PutSp(ctx, c.cli, c.cl, SpSpec{
+		Name: "sp1", Id: 2, Shard: smokeShard, Slots: []uint32{0},
+		Cntlrs: []CntlrSpec{{CntlrId: 1, CnId: 3, Slot: 0, Primary: true}},
+		Slices: []SliceSpec{{SliceId: 1, SliceIdx: 0}},
+		Groups: []GroupSpec{
+			{SliceId: 1, GrpId: 2, Meta: true, ExtCnt: 1},
+			{SliceId: 1, GrpId: 3, ExtCnt: 1},
+		},
+		Legs: []LegSpec{{GrpId: 2, LegId: 4}, {GrpId: 3, LegId: 5}},
+		Sides: []SideSpec{
+			{LegId: 4, SideId: 6, DnId: 3},
+			{LegId: 5, SideId: 7, DnId: 3},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutSp sp1: %v", err)
+	}
+	if _, err := PutTd(ctx, c.cli, c.cl, none.Ref,
+		TdSpec{Name: "td0", Size: 1 << 30}); err != nil {
+		t.Fatalf("PutTd: %v", err)
+	}
+	_, err = PutClone(ctx, c.cli, c.cl, none.Ref, CloneSpec{
+		Name: "cSpare", DstTd: "td0",
+		Legs: []CloneLegSpec{
+			{LegIdx: 0, DnId: 4},
+			{LegIdx: 1, DnId: 5, Spare: true},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "needs md-raid1") {
+		t.Fatalf("a spare in a redund_none pool = %v, want a refusal", err)
+	}
+	mustAbsent(t, ctx, c.cli, model.CloneKey(cid, none.Ref.Id, "cSpare"),
+		&pb.Clone{})
 }
 
 // TestNodeListsTakeIds pins PutDns and PutCns at the per-cluster ceilings,
@@ -1274,11 +1649,13 @@ func TestNodeListsTakeIds(t *testing.T) {
 // common.MaxAllocLegPerGrp legs and common.MaxSpareLegPerGrp spare legs,
 // common.MaxCntlrCntPerSp cntlrs, common.MaxSsCntPerSp subsystems of
 // common.MaxNsCntPerSs namespaces, common.MaxTdCntPerSp thin devices,
-// common.MaxCloneCntPerSp clones, common.MaxXferCntPerSp transfers and
-// common.MaxMigrCntPerSp migrations, and reads it back through model.LoadSp.
-// Its spares stay unprovisioned, a shape no gateway writes (LegSpec), which
-// is enough for a case that reads the planting back. It is a full shape, so
-// it is skipped under -short.
+// common.MaxCloneCntPerSp clones, each with a clone meta group of the
+// widest shape, common.MaxXferCntPerSp transfers and common.MaxMigrCntPerSp
+// migrations, and reads it back through model.LoadSp. The last clones' puts
+// read every slice and every other clone of the pool in one transaction
+// (putCloneGrp). Its spares stay unprovisioned, a shape no gateway writes
+// (LegSpec), which is enough for a case that reads the planting back. It is
+// a full shape, so it is skipped under -short.
 func TestWidestPoolPlants(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a full shape; skipped under -short")
@@ -1384,9 +1761,16 @@ func TestWidestPoolPlants(t *testing.T) {
 	}
 	cloneUnits := uint64(0)
 	for i := 0; i < common.MaxCloneCntPerSp; i++ {
-		clone, err := PutClone(ctx, cli, cl, ref, CloneSpec{
+		cloneSpec := CloneSpec{
 			Name: fmt.Sprintf("c%d", i), DstTd: tds[i].Name,
-		})
+		}
+		for l := 0; l < legCnt; l++ {
+			cloneSpec.Legs = append(cloneSpec.Legs, CloneLegSpec{
+				LegIdx: uint32(l), DnId: uint64(l + 1),
+				Spare: l >= common.MaxAllocLegPerGrp,
+			})
+		}
+		clone, err := PutClone(ctx, cli, cl, ref, cloneSpec)
 		if err != nil {
 			t.Fatalf("PutClone %d: %v", i, err)
 		}
@@ -1451,6 +1835,14 @@ func TestWidestPoolPlants(t *testing.T) {
 			t.Fatalf("subsystem %v", subsystem)
 		}
 	}
+	for name, clone := range state.Clones {
+		grp := clone.GetMetaGrp()
+		if len(grp.GetLegList()) != common.MaxAllocLegPerGrp ||
+			len(grp.GetSpareLegList()) != common.MaxSpareLegPerGrp {
+			t.Fatalf("clone %s's group has %d legs and %d spares", name,
+				len(grp.GetLegList()), len(grp.GetSpareLegList()))
+		}
+	}
 	for addr, cn := range state.CnByAddr {
 		if cn.GetUsedMetaUnits() != cloneUnits ||
 			cn.GetFreeExtCnt() != free-sp.Footprint {
@@ -1459,9 +1851,10 @@ func TestWidestPoolPlants(t *testing.T) {
 				free-sp.Footprint)
 		}
 	}
+	// dn 1 holds a side of every group of every slice and of every clone.
 	for addr, dn := range state.DnByAddr {
-		if want := uint64(2 * sliceCnt); addr == dnAddr(1) &&
-			uint64(len(dn.GetSidePtrList())) != want {
+		want := uint64(2*sliceCnt + common.MaxCloneCntPerSp)
+		if addr == dnAddr(1) && uint64(len(dn.GetSidePtrList())) != want {
 			t.Fatalf("dn 1 holds %d sides, want %d",
 				len(dn.GetSidePtrList()), want)
 		}

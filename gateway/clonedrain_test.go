@@ -68,7 +68,7 @@ func volDrainClone(env *volEnv, cloneName string) {
 		if len(chunks) == 0 {
 			err = model.FinishCloneDelete(
 				env.ctx, env.cli, env.cid, volShard, volSpId, volSpName,
-				cloneName, clone.GetCloneId())
+				cloneName, clone.GetCloneId(), env.cc)
 		} else {
 			batch := chunks
 			if len(batch) > common.MaxDelBmPerTxn {
@@ -171,20 +171,27 @@ func TestDeleteCloneLatchesOnly(t *testing.T) {
 	}
 }
 
-// TestCloneDrainGivesTheUnitsBack pins where a clone's metadata units come
-// back (architecture.md, Metadata units): CreateClone charged them to the CN
-// of every cntlr of the pool, the latch leaves them there — the clone is
-// still a clone of the pool until the drain's final step, and a cntlr created
-// meanwhile is charged them too — and model.FinishCloneDelete gives them back
-// on every cntlr's CN in the step that removes the record. Another clone's
-// units stay, the capacity values follow the counts, and no CN revision moves
-// at any point, since only units change.
-func TestCloneDrainGivesTheUnitsBack(t *testing.T) {
+// TestCloneDrainGivesTheUnitsAndTheExtentsBack pins where a clone's two
+// charges come back (architecture.md, Metadata units; architecture.md,
+// Clones): CreateClone charged its metadata units to the CN of every cntlr of
+// the pool and its clone meta group's sides to their DNs, the latch leaves
+// both where they are — the clone is still a clone of the pool until the
+// drain's final step, and a cntlr created meanwhile is charged its units too
+// — and model.FinishCloneDelete gives both back in the step that removes the
+// record. Another clone's units and sides stay, the capacity values follow
+// the counts, and no CN revision moves at any point, since only units change
+// there. A DN of the drained group ends with the record it had before the
+// clone was created, at the revision two bumps later — the charge and the
+// release — so a clone made and deleted leaves no charge behind.
+func TestCloneDrainGivesTheUnitsAndTheExtentsBack(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst-a", 900, 7, 0, true)
 	env.putTd("dst-b", 901, 8, 0, true)
+	dnBefore := volDnSnapshot(env)
 	volCreateClone(env, "clone-a", "dst-a")
+	grpA := volCloneGrpOf(env, "clone-a")
 	volCreateClone(env, "clone-b", "dst-b")
+	grpB := volCloneGrpOf(env, "clone-b")
 	both := 2 * volCloneUnits
 	for _, addrPort := range []string{volCnA, volCnB} {
 		volWantCnUnits(t, env, addrPort, both, 1)
@@ -194,6 +201,12 @@ func TestCloneDrainGivesTheUnitsBack(t *testing.T) {
 	for _, addrPort := range []string{volCnA, volCnB} {
 		volWantCnUnits(t, env, addrPort, both, 1)
 	}
+	latched := volDnSnapshot(env)
+	for addrPort, was := range latched {
+		if got := env.dn(addrPort); !proto.Equal(got, was.conf) {
+			t.Errorf("%s moved on the latch: %v", addrPort, got)
+		}
+	}
 
 	volDrainClone(env, "clone-a")
 	if env.exists(model.CloneKey(env.cid, volSpId, "clone-a"), &pb.Clone{}) {
@@ -201,6 +214,49 @@ func TestCloneDrainGivesTheUnitsBack(t *testing.T) {
 	}
 	for _, addrPort := range []string{volCnA, volCnB} {
 		volWantCnUnits(t, env, addrPort, volCloneUnits, 1)
+	}
+	// Every DN ends as clone-b alone would have left it: clone-a's sides,
+	// legs and spares alike, are gone from it, clone-b's stay.
+	sidesOf := func(grp *pb.Group) map[string]*pb.SidePointer {
+		out := make(map[string]*pb.SidePointer)
+		for _, leg := range allLegs(grp) {
+			for _, side := range leg.GetSideList() {
+				out[side.GetAddrPort()] = &pb.SidePointer{
+					SpId:   volSpId,
+					LegId:  leg.GetLegId(),
+					SideId: side.GetSideId(),
+				}
+			}
+		}
+		return out
+	}
+	sidesA, sidesB := sidesOf(grpA), sidesOf(grpB)
+	for addrPort, was := range dnBefore {
+		want := proto.Clone(was.conf).(*pb.DnConf)
+		wantRev := was.rev
+		if _, ok := sidesA[addrPort]; ok {
+			wantRev += 2
+		}
+		if ptr, ok := sidesB[addrPort]; ok {
+			want.FreeExtCnt -= common.CloneMetaGrpExtCnt
+			want.SidePtrList = append(want.SidePtrList, ptr)
+			wantRev++
+		}
+		got := env.dn(addrPort)
+		if !proto.Equal(got, want) {
+			t.Errorf("%s after the drain: got %v, want %v", addrPort, got,
+				want)
+		}
+		if gotRev := env.dnRev(addrPort); gotRev != wantRev {
+			t.Errorf("%s rev after the drain: got %d, want %d", addrPort,
+				gotRev, wantRev)
+		}
+		if value := env.dnCapValue(addrPort); !proto.Equal(
+			value, model.DnCapacityValue(got),
+		) {
+			t.Errorf("%s capacity value: got %v, want the record's",
+				addrPort, value)
+		}
 	}
 }
 
@@ -671,7 +727,7 @@ func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 	}
 	if err := model.FinishCloneDelete(
 		env.ctx, env.cli, env.cid, volShard, volSpId, volSpName,
-		"clone-max", clone.GetCloneId(),
+		"clone-max", clone.GetCloneId(), env.cc,
 	); err != nil {
 		t.Fatalf("FinishCloneDelete: %v", err)
 	}

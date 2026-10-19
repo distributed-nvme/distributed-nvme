@@ -431,7 +431,8 @@ func assertMostNodeRevisions(
 
 // The widest pool's shape (architecture.md, Cardinality limits): every
 // per-pool maximum at once, with one meta group and one data group per
-// slice as CreateStoragePool builds a pool. Every group's legs sit on
+// slice as CreateStoragePool builds a pool, and a clone meta group of the
+// same legs and spares for every clone. Every group's legs sit on
 // wideGrpDnCnt disk nodes, one leg of each group on each, and each
 // migration's new side goes to a disk node of its own past them. The
 // placement is the case's free choice, because the worker does not care how
@@ -487,11 +488,15 @@ type widePool struct {
 	migrs  []wideMigr
 	// before is every key etcd held before the pool was planted.
 	before map[string]bool
+	// preClone is the ledger of each disk node of the groups, by dn_id,
+	// before the clones were planted (dnLedgerOf).
+	preClone map[uint64]dnLedger
 }
 
 // plantWide adds the fakes and plants the widest pool: the cluster, the
 // nodes, the pool with the first spare of every group provisioned, every
-// thin device, subsystem, clone, transfer and migration, and the levers:
+// thin device, subsystem, clone with its clone meta group, its first spare
+// provisioned too, every transfer and migration, and the levers:
 // thin rows reported OK on every cntlr while it is primary, and the path row
 // of every migration's new side held at PROVISIONING on every cntlr, so no
 // cutover starts (RW18).
@@ -632,8 +637,16 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 		}
 		wp.sss = append(wp.sss, ss)
 	}
+	// Every clone's clone meta group has a pool group's legs and spares,
+	// one on each of the groups' disk nodes, its ids the pool's next, and
+	// its first spare provisioned, so that no group of the pool holds two
+	// unprovisioned spares.
+	wp.preClone = make(map[uint64]dnLedger, wideGrpDnCnt)
+	for id := uint64(1); id <= wideGrpDnCnt; id++ {
+		wp.preClone[id] = wp.dnLedgerOf(t, id)
+	}
 	for i := 0; i < common.MaxCloneCntPerSp; i++ {
-		clone, err := plant.PutClone(ctx, h.cli, cl, wp.sp.Ref, plant.CloneSpec{
+		spec := plant.CloneSpec{
 			Name:          fmt.Sprintf("clone%02d", i),
 			DstTd:         wp.tds[tdIdx].Name,
 			SrcSliceCnt:   1,
@@ -641,9 +654,23 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 			SrcNsIdx:      1,
 			SrcStripeSize: 64 << 10,
 			SrcBlockSize:  64 << 10,
-		})
+		}
+		for legIdx := uint32(0); legIdx < wideLegCnt; legIdx++ {
+			spec.Legs = append(spec.Legs, plant.CloneLegSpec{
+				LegIdx: legIdx, DnId: uint64(legIdx) + 1,
+				Spare: legIdx >= common.MaxAllocLegPerGrp,
+			})
+		}
+		clone, err := plant.PutClone(ctx, h.cli, cl, wp.sp.Ref, spec)
 		if err != nil {
 			t.Fatalf("PutClone %d: %v", i, err)
+		}
+		spare := common.MaxAllocLegPerGrp
+		if _, ok, _, err := plant.SetCloneProvisioned(ctx, h.cli, cl,
+			wp.sp.Ref, clone.Name, clone.LegIds[spare],
+			clone.SideIds[spare]); err != nil || !ok {
+			t.Fatalf("provision %s's spare side %d: flipped %t, %v",
+				clone.Name, clone.SideIds[spare], ok, err)
 		}
 		tdIdx++
 		wp.clones = append(wp.clones, clone)
@@ -746,19 +773,28 @@ func (wp *widePool) assertWideShape(t *testing.T) {
 			t.Errorf("the pool holds %d %s, want %d", c.got, c.what, c.want)
 		}
 	}
+	grps := make([]*pb.Group, 0, 2*len(state.Slices)+len(state.Clones))
 	for _, slice := range state.Slices {
-		grps := append(append([]*pb.Group(nil), slice.GetMetaGrpList()...), slice.GetDataGrpList()...)
-		if len(grps) != 2 {
+		sliceGrps := append(append([]*pb.Group(nil), slice.GetMetaGrpList()...), slice.GetDataGrpList()...)
+		if len(sliceGrps) != 2 {
 			t.Errorf("slice %d holds %d groups, want a meta and a data group",
-				slice.GetSliceIdx(), len(grps))
+				slice.GetSliceIdx(), len(sliceGrps))
 		}
-		for _, grp := range grps {
-			if len(grp.GetLegList()) != common.MaxAllocLegPerGrp ||
-				len(grp.GetSpareLegList()) != common.MaxSpareLegPerGrp {
-				t.Errorf("group %d holds %d legs and %d spares, want %d and %d",
-					grp.GetGrpId(), len(grp.GetLegList()), len(grp.GetSpareLegList()),
-					common.MaxAllocLegPerGrp, common.MaxSpareLegPerGrp)
-			}
+		grps = append(grps, sliceGrps...)
+	}
+	for name, clone := range state.Clones {
+		if clone.GetMetaGrp() == nil {
+			t.Errorf("clone %s holds no clone meta group", name)
+			continue
+		}
+		grps = append(grps, clone.GetMetaGrp())
+	}
+	for _, grp := range grps {
+		if len(grp.GetLegList()) != common.MaxAllocLegPerGrp ||
+			len(grp.GetSpareLegList()) != common.MaxSpareLegPerGrp {
+			t.Errorf("group %d holds %d legs and %d spares, want %d and %d",
+				grp.GetGrpId(), len(grp.GetLegList()), len(grp.GetSpareLegList()),
+				common.MaxAllocLegPerGrp, common.MaxSpareLegPerGrp)
 		}
 	}
 }
@@ -831,15 +867,17 @@ func (wp *widePool) waitWideConverged(t *testing.T, what string) convergence {
 // a pool of MaxSliceCntPerSp slices, MaxCntlrCntPerSp cntlrs, RAID1 groups of
 // MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares, MaxSsCntPerSp
 // subsystems of MaxNsCntPerSs namespaces, MaxTdCntPerSp thin devices,
-// MaxCloneCntPerSp clones, MaxXferCntPerSp transfers and MaxMigrCntPerSp
+// MaxCloneCntPerSp clones, each with a clone meta group of the same legs and
+// spares, MaxXferCntPerSp transfers and MaxMigrCntPerSp
 // migrations. It converges (waitConverged's meaning); a disabled primary
 // fails over to a standby (AR5); one migration runs to its cutover by the
 // worker's own path once the new primary reports a live path to its new
 // side (RW18), and the others stay pending; and, emptied as the gateway
 // requires before a delete (SPD4) — the clones by the worker's own clone
-// drain (CLD7, CLD9) — the pool drains to its end (SPD8 to SPD12): every key
-// of it is gone, every node's free extent count and metadata units are back,
-// and every node's fake is told it holds nothing (SPD13).
+// drain (CLD7, CLD9), which gives their clone meta groups back to their disk
+// nodes — the pool drains to its end (SPD8 to SPD12): every key of it is
+// gone, every node's free extent count and metadata units are back, and
+// every node's fake is told it holds nothing (SPD13).
 func TestFullShapeWidestPool(t *testing.T) {
 	t.Parallel()
 	skipFullShape(t)
@@ -1101,7 +1139,10 @@ func (wp *widePool) assertCutoverTold(t *testing.T, cut wideMigr) {
 
 // drainClones latches every clone as DeleteClone does (CLD4) and waits for
 // the worker's clone drain to remove each (CLD9): the clone records and
-// names go, and every CN gets the clones' metadata units back.
+// names go, every CN gets the clones' metadata units back, and every disk
+// node of the clone meta groups gets their extents, pointers and capacity
+// key back, its revision moved once by each clone's put and once by its
+// drain's final step.
 func (wp *widePool) drainClones(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -1119,6 +1160,13 @@ func (wp *widePool) drainClones(t *testing.T) {
 	for id := uint64(1); id <= wideCnCnt; id++ {
 		if units := wp.cnConf(t, id).GetUsedMetaUnits(); units != 0 {
 			t.Errorf("cn %d holds %d metadata units after the clone drain", id, units)
+		}
+	}
+	for id, before := range wp.preClone {
+		want := before
+		want.rev += 2 * uint64(len(wp.clones))
+		if got := wp.dnLedgerOf(t, id); got != want {
+			t.Errorf("dn %d after the clone drain: %+v, want %+v", id, got, want)
 		}
 	}
 }

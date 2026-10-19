@@ -698,20 +698,8 @@ func PutSp(
 		// --- the DN bookkeeping, once per DN (architecture.md, Storage
 		// pools; Capacity index keys; Revision keys and the sync fan-out) ---
 		for _, addr := range dnOrder {
-			dn := dns[addr]
-			charge := dnCharge[addr]
-			if dn.GetFreeExtCnt() < charge {
-				return fmt.Errorf(
-					"dn %#x at %q has free_ext_cnt %d, needs %d",
-					dn.GetDnId(), addr, dn.GetFreeExtCnt(), charge,
-				)
-			}
-			newDn := proto.Clone(dn).(*pb.DnConf)
-			newDn.SidePtrList = append(newDn.SidePtrList, dnPtrs[addr]...)
-			newDn.FreeExtCnt -= charge
-			s.Put(model.DnConfKey(cid, addr), newDn)
-			model.MaintainDnCapacity(s, cid, addr, cc, dn, newDn)
-			revision, err := bumpDnRev(s, cid, newDn)
+			revision, err := chargeDn(s, cid, cc, addr, dns[addr],
+				dnPtrs[addr], dnCharge[addr], 0)
 			if err != nil {
 				return err
 			}

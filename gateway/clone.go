@@ -17,10 +17,12 @@ import (
 // namespaces onto it (fig. `090Clone`). The gateway only ever writes desired
 // state and bumps SpRev, and never waits for a cntlr to act on it.
 //
-// Four of the five RPCs are the plain SP-scoped shapes of gateway.md, The
-// handler pattern. DeleteClone is the exception: with force = false it must
-// PROVE the copy finished before it may take the dm-clone away, and that proof
-// lives only on the primary's CN — hence the two-phase AG4 shape.
+// Three of the five RPCs are the plain SP-scoped shapes of gateway.md, The
+// handler pattern. CreateClone is a candidate unit (GW9), because the clone's
+// clone meta group takes extents on DNs. DeleteClone is the other exception:
+// with force = false it must PROVE the copy finished before it may take the
+// dm-clone away, and that proof lives only on the primary's CN — hence the
+// two-phase AG4 shape.
 
 // The op names the bump helper cites; they are the RPC names so a log line
 // names something greppable.
@@ -90,27 +92,188 @@ func cloneMetaUnitsOf(conf *pb.SpConf, td *pb.ThinDevice) (uint64, error) {
 	return common.CloneMetaUnits(td.GetSize(), model.PoolBlockSize(bdev)), nil
 }
 
-// CreateClone is the CreateClone of architecture.md, Clones: one Clone record,
-// one name in `clone_name_list`, one SpRev bump. Everything the primary needs
-// to build the dm-clone is in that record, so the RPC is pure etcd.
+// cloneGrpPlan is the shape of a new clone's clone meta group
+// (architecture.md, Clones): Legs legs, one per pick, each one side of
+// common.CloneMetaGrpExtCnt extents, laid out as MetaBlocks and DataBlocks
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block).
+type cloneGrpPlan struct {
+	Legs       int
+	MetaBlocks uint64
+	DataBlocks uint64
+}
+
+// planCloneGrp sizes a new clone's clone meta group from the stored confs and
+// refuses a destination whose dm-clone metadata it cannot hold. CreateClone's
+// planning read and its deciding STM both run it, so the two give one refusal
+// the same words.
+//
+// The legs are the pool's own redundancy's (legCntOf, the gateway's one place
+// that chooses a leg count, dnv-worker.md SPD1): a clone meta group is a group
+// of the pool, held to the rule every group of it follows. Both stored confs
+// are validated first and refused ABORTED (GW11), the cluster's extent size
+// and the pool's block size being what the layout and the bound are computed
+// from. model.GroupBlocks of one extent cannot fail on a conf that validates:
+// every slice of the pool has a one-extent meta group CreateStoragePool laid
+// out from these same two write-once confs, so a failure is a lost invariant,
+// ABORTED as well.
+//
+// The bound: the metadata a copy of the destination takes,
+// common.CloneMetaBytes of its size and the block, must fit the data region
+// of one side, DataBlocks blocks, the md layout having taken MetaBlocks. A
+// destination that does not fit is FAILED_PRECONDITION, a property of the
+// request against the pool's own geometry that no capacity frees, and the
+// message names the bound, the largest destination size whose metadata still
+// fits.
+func planCloneGrp(
+	cc *pb.ClusterConf,
+	conf *pb.SpConf,
+	td *pb.ThinDevice,
+	cloneName string,
+	tdName string,
+) (cloneGrpPlan, error) {
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return cloneGrpPlan{}, errAborted("%v", err)
+	}
+	bdev := spBdevConf(conf)
+	if err := model.ValidateBdevConf(bdev); err != nil {
+		return cloneGrpPlan{}, errAborted("%v", err)
+	}
+	metaBlocks, dataBlocks, err := model.GroupBlocks(
+		common.CloneMetaGrpExtCnt, cc.GetDnBinConf().GetExtentSize(), bdev)
+	if err != nil {
+		return cloneGrpPlan{}, errAborted("%v", err)
+	}
+	blockSize := model.PoolBlockSize(bdev)
+	room := dataBlocks * blockSize
+	need := common.CloneMetaBytes(td.GetSize(), blockSize)
+	if need > room {
+		if room < common.CloneMetaBaseBytes {
+			return cloneGrpPlan{}, errPrecondition(
+				"clone %q: one side of a clone meta group holds %d bytes "+
+					"of data, less than the %d-byte base of any dm-clone "+
+					"metadata", cloneName, room, common.CloneMetaBaseBytes)
+		}
+		// need > room means td.size / blockSize > room - base, so this
+		// product is at most td.size and cannot overflow.
+		largest := (room-common.CloneMetaBaseBytes+1)*blockSize - 1
+		return cloneGrpPlan{}, errPrecondition(
+			"clone %q: the dm-clone metadata of the %d-byte destination "+
+				"%q at a %d-byte block takes %d bytes, over the %d bytes "+
+				"of data one side of a clone meta group holds; the largest "+
+				"destination it holds is %d bytes",
+			cloneName, td.GetSize(), tdName, blockSize, need, room, largest)
+	}
+	return cloneGrpPlan{
+		Legs:       legCntOf(bdev),
+		MetaBlocks: metaBlocks,
+		DataBlocks: dataBlocks,
+	}, nil
+}
+
+// cloneCreateChecks is every refusal CreateClone judges from what it reads,
+// in its order, behind the resolution and the token check openSp makes: the
+// MaxCloneCntPerSp ceiling, ahead of the name so a pool at the ceiling hears
+// the ceiling; the name free; the destination td by name; a destination no
+// other clone names; and the clone meta group's plan and bound
+// (planCloneGrp). The planning read and the deciding STM both run it, so a
+// refusal reached in either has the same words, and the planning read
+// answers every one of them ahead of the scan (GW9).
+func cloneCreateChecks(
+	stm etcdutil.STM,
+	sc *spScope,
+	req *pb.CreateCloneRequest,
+) (*pb.ThinDevice, cloneGrpPlan, error) {
+	if len(sc.Conf.GetCloneNameList()) >= common.MaxCloneCntPerSp {
+		return nil, cloneGrpPlan{}, errExhausted(
+			"storage pool %q holds %d clones, the maximum is %d",
+			req.GetSpName(), len(sc.Conf.GetCloneNameList()),
+			common.MaxCloneCntPerSp)
+	}
+	cloneKey := model.CloneKey(sc.Cid, sc.SpId(), req.GetCloneName())
+	// Both halves are checked: the list is what every other RPC walks, the
+	// key is what actually holds the record, and a create must not overwrite
+	// either one if they ever disagree.
+	if containsName(sc.Conf.GetCloneNameList(), req.GetCloneName()) ||
+		stm.Get(cloneKey, &pb.Clone{}) {
+		return nil, cloneGrpPlan{}, errExists(
+			"clone %q already exists", req.GetCloneName())
+	}
+	td := &pb.ThinDevice{}
+	tdKey := model.ThinDeviceKey(sc.Cid, sc.SpId(), req.GetDstTdName())
+	if !stm.Get(tdKey, td) {
+		return nil, cloneGrpPlan{}, errNotFound(
+			"thin device %q not found", req.GetDstTdName())
+	}
+	// One td can be the destination of at most one clone: two dm-clones
+	// writing the same raid0 would each believe they own its regions. The
+	// scan is bounded by MaxCloneCntPerSp.
+	for _, name := range sc.Conf.GetCloneNameList() {
+		otherKey := model.CloneKey(sc.Cid, sc.SpId(), name)
+		other := &pb.Clone{}
+		if !stm.Get(otherKey, other) {
+			return nil, cloneGrpPlan{}, errAborted(
+				"clone key %q is missing", otherKey)
+		}
+		if other.GetDstTdId() == td.GetTdId() {
+			return nil, cloneGrpPlan{}, errPrecondition(
+				"thin device %q is already the destination of clone %q",
+				req.GetDstTdName(), name)
+		}
+	}
+	plan, err := planCloneGrp(
+		sc.Cc, sc.Conf, td, req.GetCloneName(), req.GetDstTdName())
+	if err != nil {
+		return nil, cloneGrpPlan{}, err
+	}
+	return td, plan, nil
+}
+
+// CreateClone is the CreateClone of architecture.md, Clones: one Clone record
+// carrying its clone meta group, one name in `clone_name_list`, one SpRev
+// bump. Everything the primary needs to build the dm-clone is in that record,
+// so the RPC calls no agent.
+//
+// It is a GW9 candidate unit, because the clone meta group is a new group of
+// the pool and its sides take extents on DNs (architecture.md, Per-operation
+// allocation). Each round plans from a read-only snapshot opened with openSp,
+// so a stale token is ABORTED before anything else, and that snapshot runs
+// every refusal of cloneCreateChecks, the bound included, ahead of the scan.
+// The DN scan
+// runs outside every transaction and places the group as architecture.md,
+// Per-operation allocation, places a clone's — one DN per location among the
+// legs, the black list empty and no location excluded, so the legs may land
+// on DNs the pool's other groups already use — and fewer candidates than legs
+// is RESOURCE_EXHAUSTED. The deciding STM runs the same checks again and
+// drops the round as candidate changed when the cluster id or the leg count
+// is no longer the one the scan was drawn for, or when a pick's capacity key
+// has moved (dnLedger.verifyPick).
 //
 // One of the section's rules is deliberately NOT enforced here. The
-// destination td MUST be empty — freshly created and never written — because
-// clone crash recovery (architecture.md, Clone crash recovery) equates "mapped
-// in the destination thin pool" with
-// "already copied"; the CP cannot see whether a td was written, so that
-// stays a documented-unverifiable contract ([D3]).
+// destination td MUST be empty, freshly created and never written ([D3]): a
+// source chunk the cn agent discards marks its regions copied without a
+// copy, so each such region then reads the destination's own blocks, which
+// are zeros only in a thin device that was never written; and clone crash
+// recovery (architecture.md, Clone crash recovery) equates "mapped in the
+// destination thin pool" with "already copied". The CP cannot see whether a
+// td was written, so that stays a documented-unverifiable contract.
 //
-// The ceiling that actually binds is not MaxCloneCntPerSp but the metadata
-// area of every CN that holds a cntlr of the SP, each shared by every clone of
-// every cntlr on its node (architecture.md, Metadata units). The clone's
-// units (cloneMetaUnitsOf) are charged to the CN of EVERY cntlr of the SP,
-// disabled ones included, because a failover or a cntlr replacement can make
-// any of them the primary, which builds every clone of the SP on its own CN.
-// A CN short of the room refuses the create RESOURCE_EXHAUSTED before
-// anything is written. The units are stored on the record, where every later
-// charge and release reads them. The charge changes only the CNs' used units,
-// so it rewrites each CN's record and capacity value and bumps no CnRev.
+// The clone's metadata units (cloneMetaUnitsOf) are charged to the CN of
+// EVERY cntlr of the SP, disabled ones included, because a failover or a
+// cntlr replacement can make any of them the primary, which builds every
+// clone of the SP on its own CN (architecture.md, Metadata units). A CN short
+// of the room refuses the create RESOURCE_EXHAUSTED before anything is
+// written. The units are stored on the record, where every later charge and
+// release reads them. The charge changes only the CNs' used units, so it
+// rewrites each CN's record and capacity value and bumps no CnRev.
+//
+// The clone meta group's sides are charged to their DNs through the DN
+// ledger, each DN written once with its pointer and its extents and bumped
+// once, as CreateStoragePool charges a new group's; no CN is charged extents
+// for it, since no cntlr's footprint counts it. Its ids come from the pool's
+// counter after the clone's own, in GW15's order: the grp_id, then per pick
+// a leg_id and its side_id, so a re-run of the closure on the same picks
+// writes the same set (GW8).
 func (s *Server) CreateClone(
 	ctx context.Context,
 	req *pb.CreateCloneRequest,
@@ -147,95 +310,182 @@ func (s *Server) CreateClone(
 	); err != nil {
 		return nil, err
 	}
+	what := fmt.Sprintf("clone %q", req.GetCloneName())
 	var cloneId uint64
-	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
-		cloneId = 0
-		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev())
-		if err != nil {
-			return err
-		}
-		if len(sc.Conf.GetCloneNameList()) >= common.MaxCloneCntPerSp {
-			return errExhausted(
-				"storage pool %q holds %d clones, the maximum is %d",
-				req.GetSpName(), len(sc.Conf.GetCloneNameList()),
-				common.MaxCloneCntPerSp)
-		}
-		cloneKey := model.CloneKey(sc.Cid, sc.SpId(), req.GetCloneName())
-		// Both halves are checked: the list is what every other RPC walks,
-		// the key is what actually holds the record, and a create must not
-		// overwrite either one if they ever disagree.
-		if containsName(sc.Conf.GetCloneNameList(), req.GetCloneName()) ||
-			stm.Get(cloneKey, &pb.Clone{}) {
-			return errExists("clone %q already exists", req.GetCloneName())
-		}
-		td := &pb.ThinDevice{}
-		tdKey := model.ThinDeviceKey(sc.Cid, sc.SpId(), req.GetDstTdName())
-		if !stm.Get(tdKey, td) {
-			return errNotFound(
-				"thin device %q not found", req.GetDstTdName())
-		}
-		// One td can be the destination of at most one clone: two dm-clones
-		// writing the same raid0 would each believe they own its regions.
-		// The scan is bounded by MaxCloneCntPerSp.
-		for _, name := range sc.Conf.GetCloneNameList() {
-			otherKey := model.CloneKey(sc.Cid, sc.SpId(), name)
-			other := &pb.Clone{}
-			if !stm.Get(otherKey, other) {
-				return errAborted("clone key %q is missing", otherKey)
-			}
-			if other.GetDstTdId() == td.GetTdId() {
-				return errPrecondition(
-					"thin device %q is already the destination of clone %q",
-					req.GetDstTdName(), name)
-			}
-		}
-		// The metadata room comes after every other refusal, so a request
-		// that breaks a rule of its own hears that rule, and before any
-		// write: a CN short of room is RESOURCE_EXHAUSTED with nothing
-		// written (architecture.md, Metadata units). One charge per cntlr,
-		// each on the CN its record names, the ledger writing each CN once.
-		units, err := cloneMetaUnitsOf(sc.Conf, td)
-		if err != nil {
-			return err
-		}
-		cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
-		if err != nil {
-			return err
-		}
-		ledger := newCnLedger(stm, sc.Cid)
-		what := fmt.Sprintf("clone %q", req.GetCloneName())
-		for _, cntlr := range cntlrs {
-			err := ledger.chargeUnits(cntlr.GetAddrPort(), units, what)
+	err := candidateUnit(ctx, func() error {
+		// The plan: which cluster to scan and how many legs to place.
+		var (
+			planCid  uint64
+			planCc   *pb.ClusterConf
+			planLegs int
+		)
+		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+			// openSp, not openSpRead: this is a MUTATOR's planning read, so
+			// GW6 wants the token checked before any other state check.
+			sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+				req.GetSpRev())
 			if err != nil {
 				return err
 			}
-		}
-		minter := newSpIdMinter(sc.Conf)
-		cloneId = minter.mint()
-		stm.Put(cloneKey, &pb.Clone{
-			CloneId:       cloneId,
-			SrcTrConfList: req.GetSrcTrConf(),
-			SrcNqn:        req.GetSrcNqn(),
-			SrcNsIdx:      req.GetSrcNsIdx(),
-			SrcSliceCnt:   req.GetSrcSliceCnt(),
-			SrcStripeSize: req.GetSrcStripeSize(),
-			SrcBlockSize:  req.GetSrcBlockSize(),
-			DstTdId:       td.GetTdId(),
-			DmCloneConf:   req.GetDmCloneConf(),
-			AutoResume:    req.GetAutoResume(),
-			MetaUnits:     units,
+			_, plan, err := cloneCreateChecks(stm, sc, req)
+			if err != nil {
+				return err
+			}
+			planCid = sc.Cid
+			planCc = sc.Cc
+			planLegs = plan.Legs
+			return nil
 		})
-		if err := ledger.flush(opCreateClone); err != nil {
+		if err != nil {
+			return mapStmErr(err)
+		}
+		// A clone meta group's placement (architecture.md, Per-operation
+		// allocation): no black list and no location excluded, the scan's
+		// own one-DN-per-location rule spreading the legs. The request names
+		// no DN selector.
+		picks, err := pickDns(
+			ctx, s.cli, planCid, planCc,
+			dnPickPlan{
+				ExtCnt:      common.CloneMetaGrpExtCnt,
+				Legs:        planLegs,
+				ExcludeLocs: nil,
+			},
+			nil, nil, what,
+		)
+		if err != nil {
 			return err
 		}
-		sc.Conf.CloneNameList = append(
-			sc.Conf.CloneNameList, req.GetCloneName())
-		if err := minter.commit(sc.Conf, opCreateClone); err != nil {
-			return err
-		}
-		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
-		return bumpSp(stm, opCreateClone, sc)
+		return s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+			cloneId = 0
+			sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+				req.GetSpRev())
+			if err != nil {
+				return err
+			}
+			td, plan, err := cloneCreateChecks(stm, sc, req)
+			if err != nil {
+				return err
+			}
+			if sc.Cid != planCid || plan.Legs != len(picks) {
+				// The scan planned for another cluster or another leg
+				// count; its picks describe a group this transaction is
+				// not building.
+				return errCandidateChanged
+			}
+			// The metadata room comes after every refusal of cloneCreateChecks,
+			// so a request that breaks a rule of its own hears that rule, and
+			// before any write: a CN short of room is RESOURCE_EXHAUSTED with
+			// nothing written (architecture.md, Metadata units). One charge per
+			// cntlr, each on the CN its record names, the ledger writing each
+			// CN once.
+			units, err := cloneMetaUnitsOf(sc.Conf, td)
+			if err != nil {
+				return err
+			}
+			cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+			if err != nil {
+				return err
+			}
+			cnl := newCnLedger(stm, sc.Cid)
+			for _, cntlr := range cntlrs {
+				err := cnl.chargeUnits(cntlr.GetAddrPort(), units, what)
+				if err != nil {
+					return err
+				}
+			}
+			slots := sc.Conf.GetCntlidSlotList()
+			if len(slots) == 0 {
+				// CreateStoragePool stores a list and the slot list update
+				// refuses an empty one, so this is unreachable; a side
+				// cannot be written without a slot (architecture.md,
+				// cntlid slots).
+				return errPrecondition(
+					"storage pool %q has an empty cntlid_slot_list",
+					req.GetSpName())
+			}
+			// Every pick is verified and every charge staged before the
+			// first Put, so a moved capacity key returns having written
+			// nothing.
+			dnl, err := newDnLedger(stm, sc.Cid, sc.Cc)
+			if err != nil {
+				return err
+			}
+			dns := make([]*pb.DnConf, 0, len(picks))
+			for _, cand := range picks {
+				dn, err := dnl.verifyPick(
+					cand, common.CloneMetaGrpExtCnt, 0)
+				if err != nil {
+					return err
+				}
+				dns = append(dns, dn)
+			}
+			minter := newSpIdMinter(sc.Conf)
+			cloneId = minter.mint()
+			grp := &pb.Group{
+				GrpId:      minter.mint(),
+				ExtCnt:     common.CloneMetaGrpExtCnt,
+				MetaBlocks: plan.MetaBlocks,
+				DataBlocks: plan.DataBlocks,
+			}
+			for idx, cand := range picks {
+				legId := minter.mint()
+				sideId := minter.mint()
+				grp.LegList = append(grp.LegList, &pb.Leg{
+					LegId:  legId,
+					LegIdx: uint32(idx),
+					SideList: []*pb.Side{{
+						SideId:     sideId,
+						AddrPort:   cand.AddrPort,
+						CntlidSlot: slots[0],
+						NvmeTrConf: dns[idx].GetNvmeTrConf(),
+						ErrEpoch:   0,
+						// [D15]: a new side starts unprovisioned
+						// (architecture.md, Side provisioning protocol).
+						Provisioned: false,
+					}},
+				})
+				err := dnl.charge(
+					cand.AddrPort,
+					&pb.SidePointer{
+						SpId:   sc.SpId(),
+						LegId:  legId,
+						SideId: sideId,
+					},
+					common.CloneMetaGrpExtCnt)
+				if err != nil {
+					return err
+				}
+			}
+			if err := minter.commit(sc.Conf, opCreateClone); err != nil {
+				return err
+			}
+			stm.Put(
+				model.CloneKey(sc.Cid, sc.SpId(), req.GetCloneName()),
+				&pb.Clone{
+					CloneId:       cloneId,
+					SrcTrConfList: req.GetSrcTrConf(),
+					SrcNqn:        req.GetSrcNqn(),
+					SrcNsIdx:      req.GetSrcNsIdx(),
+					SrcSliceCnt:   req.GetSrcSliceCnt(),
+					SrcStripeSize: req.GetSrcStripeSize(),
+					SrcBlockSize:  req.GetSrcBlockSize(),
+					DstTdId:       td.GetTdId(),
+					DmCloneConf:   req.GetDmCloneConf(),
+					AutoResume:    req.GetAutoResume(),
+					MetaUnits:     units,
+					MetaGrp:       grp,
+				})
+			if err := cnl.flush(opCreateClone); err != nil {
+				return err
+			}
+			if err := dnl.flush(opCreateClone); err != nil {
+				return err
+			}
+			sc.Conf.CloneNameList = append(
+				sc.Conf.CloneNameList, req.GetCloneName())
+			stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
+			return bumpSp(stm, opCreateClone, sc)
+		})
 	})
 	if err != nil {
 		return nil, mapStmErr(err)

@@ -1,10 +1,12 @@
 // Tests of the library's helpers that need no etcd: the transport record
 // and the namespace identity it plants, the sub-object id rules, how
-// StartCutover names a migration and its cntlr, and where the epoch setters
-// find their object.
+// StartCutover names a migration and its cntlr, where the epoch setters
+// find their object, and what a clone's spec refuses before any etcd call.
 package plant
 
 import (
+	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -238,24 +240,153 @@ func TestSetSliceEpoch(t *testing.T) {
 }
 
 // TestTakeId pins how a sub-object gets its id: a given one is kept, 0 takes
-// the pool's next free one (model.SpNextId), and next_id moves past either.
+// the pool's next free one through model.TakeSpIds, and next_id moves past
+// either; a counter with no id left refuses a 0 and is left as it was.
 func TestTakeId(t *testing.T) {
+	take := func(conf *pb.SpConf, id uint64) uint64 {
+		t.Helper()
+		got, err := takeId(conf, "TestTakeId", id)
+		if err != nil {
+			t.Fatalf("takeId(%d): %v", id, err)
+		}
+		return got
+	}
 	conf := &pb.SpConf{NextId: 7}
-	if got := takeId(conf, 0); got != 7 || conf.NextId != 8 {
+	if got := take(conf, 0); got != 7 || conf.NextId != 8 {
 		t.Fatalf("takeId(0) = %d, next_id %d; want 7, 8", got, conf.NextId)
 	}
-	if got := takeId(conf, 3); got != 3 || conf.NextId != 8 {
+	if got := take(conf, 3); got != 3 || conf.NextId != 8 {
 		t.Fatalf("takeId(3) = %d, next_id %d; want 3, 8", got, conf.NextId)
 	}
-	if got := takeId(conf, 20); got != 20 || conf.NextId != 21 {
+	if got := take(conf, 20); got != 20 || conf.NextId != 21 {
 		t.Fatalf("takeId(20) = %d, next_id %d; want 20, 21", got,
 			conf.NextId)
 	}
 	// A pool whose next_id was never set starts at model.SpFirstId.
 	fresh := &pb.SpConf{}
-	if got := takeId(fresh, 0); got != model.SpFirstId ||
+	if got := take(fresh, 0); got != model.SpFirstId ||
 		fresh.NextId != model.SpFirstId+1 {
 		t.Fatalf("takeId(0) on a fresh pool = %d, next_id %d; want %d, %d",
 			got, fresh.NextId, model.SpFirstId, model.SpFirstId+1)
+	}
+	// The last id a counter hands out is the one below the largest value;
+	// at the largest value it has none left.
+	top := &pb.SpConf{NextId: math.MaxUint64 - 1}
+	if got := take(top, 0); got != math.MaxUint64-1 ||
+		top.NextId != math.MaxUint64 {
+		t.Fatalf("takeId(0) one below the top = %d, next_id %d", got,
+			top.NextId)
+	}
+	got, err := takeId(top, "TestTakeId", 0)
+	var refusal *model.ErrPrecondition
+	if !errors.As(err, &refusal) || refusal.Reason != model.ReasonNoIdLeft ||
+		top.NextId != math.MaxUint64 {
+		t.Fatalf("takeId(0) at the top = %d, %v, next_id %d; want a %q "+
+			"refusal and the counter as it was", got, err, top.NextId,
+			model.ReasonNoIdLeft)
+	}
+}
+
+// TestSetGroupEpoch pins the group walk the clone setters share with
+// setSliceEpoch: a leg or a side of an active or a spare leg, the old value
+// returned and nothing else touched; and a clone with no group, whose group
+// is nil, holds no object.
+func TestSetGroupEpoch(t *testing.T) {
+	newGrp := func() *pb.Group {
+		return &pb.Group{
+			GrpId: 61,
+			LegList: []*pb.Leg{{
+				LegId: 62, SideList: []*pb.Side{{SideId: 63}},
+			}},
+			SpareLegList: []*pb.Leg{{
+				LegId: 64, ErrEpoch: 5,
+				SideList: []*pb.Side{{SideId: 65, ErrEpoch: 6}},
+			}},
+		}
+	}
+	cases := []struct {
+		kind  string
+		id    uint64
+		old   uint64
+		found bool
+	}{
+		{"leg", 62, 0, true},
+		{"leg", 64, 5, true},
+		{"side", 63, 0, true},
+		{"side", 65, 6, true},
+		{"leg", 63, 0, false},
+		{"side", 61, 0, false},
+	}
+	for _, tc := range cases {
+		grp := newGrp()
+		old, found := setGroupEpoch(grp, tc.kind, tc.id, 42)
+		if found != tc.found || old != tc.old {
+			t.Errorf("setGroupEpoch(%s %d) = %d, %v; want %d, %v",
+				tc.kind, tc.id, old, found, tc.old, tc.found)
+			continue
+		}
+		if found {
+			// Undo the one write: what remains must be the fixture.
+			setGroupEpoch(grp, tc.kind, tc.id, tc.old)
+		}
+		if !proto.Equal(grp, newGrp()) {
+			t.Errorf("setGroupEpoch(%s %d) changed more than its object: %v",
+				tc.kind, tc.id, grp)
+		}
+	}
+	if old, found := setGroupEpoch(nil, "leg", 62, 42); found || old != 0 {
+		t.Errorf("setGroupEpoch on no group = %d, %v; want nothing found",
+			old, found)
+	}
+}
+
+// TestCloneSpecCheck pins what CloneSpec.Check refuses before any etcd call:
+// a group placed in a way no gateway places one, and a group id with no
+// leg. A spec with no leg plants a clone with no group and passes.
+func TestCloneSpecCheck(t *testing.T) {
+	base := func(legs ...CloneLegSpec) CloneSpec {
+		return CloneSpec{Name: "c0", DstTd: "td0", Legs: legs}
+	}
+	leg := func(legId, sideId, dnId uint64, idx uint32) CloneLegSpec {
+		return CloneLegSpec{LegId: legId, LegIdx: idx, SideId: sideId,
+			DnId: dnId}
+	}
+	spare := func(l CloneLegSpec) CloneLegSpec {
+		l.Spare = true
+		return l
+	}
+	good := []CloneSpec{
+		base(),
+		base(leg(0, 0, 1, 0)),
+		base(leg(10, 11, 1, 0), leg(12, 13, 2, 1), spare(leg(14, 15, 3, 2))),
+		base(leg(0, 0, 1, 0), leg(0, 0, 2, 1)),
+	}
+	for i, spec := range good {
+		if err := spec.Check(); err != nil {
+			t.Errorf("good spec %d: %v", i, err)
+		}
+	}
+	withGrp := base()
+	withGrp.GrpId = 9
+	bad := []struct {
+		spec CloneSpec
+		want string
+	}{
+		{CloneSpec{DstTd: "td0"}, "name is empty"},
+		{CloneSpec{Name: "c0"}, "not named"},
+		{withGrp, "has no leg"},
+		{base(leg(10, 11, 0, 0)), "dn 0"},
+		{base(leg(10, 11, 1, 0), leg(10, 13, 2, 1)), "leg id 0xa is used twice"},
+		{base(leg(10, 11, 1, 0), leg(12, 11, 2, 1)), "side id 0xb is used twice"},
+		{base(leg(10, 11, 1, 0), leg(12, 13, 2, 0)), "leg_idx 0 is used twice"},
+		{base(leg(10, 11, 1, 0), leg(12, 13, 1, 1)), "carries two legs"},
+		{base(spare(leg(10, 11, 1, 0))), "no leg that is not a spare"},
+	}
+	for _, tc := range bad {
+		err := tc.spec.Check()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Check(%+v) = %v, want a refusal naming %q",
+				tc.spec, err, tc.want)
+		}
 	}
 }

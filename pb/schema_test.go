@@ -121,3 +121,26 @@ func TestDnInfoDiskCountsNumbers(t *testing.T) {
 		t.Errorf("%s has %d fields, want 5", counts.FullName(), got)
 	}
 }
+
+// TestCloneMetaGrpNumber pins the clone's group: one Group, not a list, at
+// number 14, the number after the metadata units. It is appended: a field
+// renumbered onto a stored record's number decodes that value into the wrong
+// field, or into unknown fields, with no error, and a list in its place would
+// decode an old record's group as a list of one.
+func TestCloneMetaGrpNumber(t *testing.T) {
+	md := (&pb.Clone{}).ProtoReflect().Descriptor()
+	grp := (&pb.Group{}).ProtoReflect().Descriptor()
+	fd := md.Fields().ByName("meta_grp")
+	if fd == nil {
+		t.Fatalf("%s has no field meta_grp", md.FullName())
+	}
+	if fd.Number() != 14 || fd.Kind() != protoreflect.MessageKind ||
+		fd.Cardinality() != protoreflect.Optional {
+		t.Errorf("%s.meta_grp is %v %v at %d, want a single message at 14",
+			md.FullName(), fd.Cardinality(), fd.Kind(), fd.Number())
+	}
+	if fd.Message() != grp {
+		t.Errorf("%s.meta_grp is a %v, want %s", md.FullName(),
+			fd.Message().FullName(), grp.FullName())
+	}
+}

@@ -125,23 +125,42 @@ func dropMigration(
 }
 
 // migrSrcLocation locates a CreateMigration source side and asserts its leg
-// can still take a destination (the two errors of architecture.md,
-// Migrations).
+// can still take a destination (the errors of architecture.md, Migrations,
+// on the source side: not found, a side of a clone meta group, a leg with two
+// sides).
 //
 // The same walk runs twice — once to plan the allocation and once inside the
 // deciding transaction — and shares one implementation so the two can never
 // disagree about what they refuse. findSide covers spare legs as well as
-// active ones, which the "any leg of the SP" of architecture.md, Migrations,
-// asks for: a spare's side sits on a disk node exactly like an active one and
-// can be moved off it.
+// active ones, since architecture.md, Migrations, takes a side of any leg of
+// a slice, spare legs included: a spare's side sits on a disk node exactly
+// like an active one and can be moved off it.
+//
+// A side of a clone's clone meta group is refused FAILED_PRECONDITION
+// (architecture.md, Migrations): a clone is a copy in flight, and moving a
+// leg of its group would need a clone-keyed twin of the whole migration
+// path. The clones are read only when no slice holds the side, so the
+// migration of a slice's side never depends on the clone keys.
 func migrSrcLocation(
-	conf *pb.SpConf,
+	stm etcdutil.STM,
+	sc *spScope,
 	slices []*pb.Slice,
 	spName string,
 	srcSideId uint64,
 ) (sliceLocation, error) {
-	loc, ok := findSide(conf, slices, srcSideId)
+	loc, ok := findSide(sc.Conf, slices, srcSideId)
 	if !ok {
+		clones, err := loadClones(stm, sc.Cid, sc.Conf)
+		if err != nil {
+			return sliceLocation{}, err
+		}
+		if cloneLoc, ok := findCloneSide(
+			sc.Conf, clones, srcSideId,
+		); ok {
+			return sliceLocation{}, errPrecondition(
+				"side %d belongs to the clone meta group of clone %q, "+
+					"which no migration moves", srcSideId, cloneLoc.CloneName)
+		}
 		return sliceLocation{}, errNotFound(
 			"side %d is not in any leg of storage pool %q", srcSideId, spName)
 	}
@@ -354,7 +373,7 @@ func (s *Server) CreateMigration(
 				return err
 			}
 			loc, err := migrSrcLocation(
-				sc.Conf, slices, req.GetSpName(), req.GetSrcSideId())
+				stm, sc, slices, req.GetSpName(), req.GetSrcSideId())
 			if err != nil {
 				return err
 			}
@@ -422,7 +441,7 @@ func (s *Server) CreateMigration(
 				return err
 			}
 			loc, err := migrSrcLocation(
-				sc.Conf, slices, req.GetSpName(), req.GetSrcSideId())
+				stm, sc, slices, req.GetSpName(), req.GetSrcSideId())
 			if err != nil {
 				return err
 			}

@@ -208,8 +208,8 @@ func (c *stdCluster) nextSpId(t *testing.T) uint64 {
 	return model.SpNextId(c.load(t).Conf)
 }
 
-// sideOf finds a side of the pool by its id: its leg, whether that leg is a
-// spare, and the side; ok is false when the pool holds no such side.
+// sideOf finds a side of the pool's slices by its id: its leg, whether that
+// leg is a spare, and the side; ok is false when no slice holds such a side.
 func (c *stdCluster) sideOf(t *testing.T, sideId uint64) (*pb.Leg, bool, *pb.Side, bool) {
 	t.Helper()
 	for _, slice := range c.load(t).Slices {
@@ -367,6 +367,45 @@ func (h *workerHarness) waitRounds(
 			}
 			return true, ""
 		})
+}
+
+// putStdClone plants a clone of the standard pool, spec with its clone meta
+// group placed as CreateClone places one in this RAID1 pool: two legs of one
+// side each, on dn 1 and dn 2, which sit in two locations, every id the
+// pool's next; dn 3 holds none of it.
+func (c *stdCluster) putStdClone(t *testing.T, spec plant.CloneSpec) plant.Clone {
+	t.Helper()
+	spec.Legs = []plant.CloneLegSpec{
+		{LegIdx: 0, DnId: 1},
+		{LegIdx: 1, DnId: 2},
+	}
+	clone, err := plant.PutClone(context.Background(), c.h.cli, c.cl, c.sp.Ref, spec)
+	if err != nil {
+		t.Fatalf("PutClone %s: %v", spec.Name, err)
+	}
+	return clone
+}
+
+// dnLedger is one disk node's charge as etcd holds it: its free extents, its
+// side pointers (sidePtrSet), whether the capacity key of that free count is
+// there, and its revision.
+type dnLedger struct {
+	free  uint64
+	ptrs  string
+	keyed bool
+	rev   uint64
+}
+
+// dnLedgerOf reads dn id's ledger.
+func (c *stdCluster) dnLedgerOf(t *testing.T, id uint64) dnLedger {
+	t.Helper()
+	conf := c.dnConf(t, id)
+	return dnLedger{
+		free:  conf.GetFreeExtCnt(),
+		ptrs:  sidePtrSet(conf.GetSidePtrList()),
+		keyed: c.dnCapacityKeyed(t, id),
+		rev:   c.dnRev(t, id),
+	}
 }
 
 // dnFree and cnFree read a node's free extent count from its record.

@@ -75,7 +75,8 @@ type SpState struct {
 	CloneBmIdx map[string][]BmChunk
 	MigrBmIdx  map[string][]BmChunk
 	// DnByAddr holds one record per distinct Side.addr_port of the SP,
-	// spare legs included; CnByAddr one per distinct Cntlr.addr_port.
+	// spare legs and the sides of every clone meta group included; CnByAddr
+	// one per distinct Cntlr.addr_port.
 	DnByAddr map[string]*pb.DnConf
 	CnByAddr map[string]*pb.CnConf
 	// Missing lists the keys the SpConf pointed at that did not exist.
@@ -121,13 +122,29 @@ func appendAddr(
 	return append(list, addrPort)
 }
 
-// sideAddrs walks the slices of the SP in Conf.slice_id_list order and returns
-// every distinct Side.addr_port — both groups of a slice, and both the active
-// legs and the spare legs of a group, because a spare's side is provisioned
-// and health-checked exactly like an active one (architecture.md, Spare legs).
-func sideAddrs(conf *pb.SpConf, slices map[uint64]*pb.Slice) []string {
+// sideAddrs walks the slices of the SP in Conf.slice_id_list order and then the
+// clones in Conf.clone_name_list order, and returns every distinct
+// Side.addr_port — both groups of a slice and the clone meta group of a clone,
+// a latched clone's included, since its sides stay pointed at from their DNs
+// until the clone drain's final transaction; and both the active legs and the
+// spare legs of a group, because a spare's side sits on its DN exactly like an
+// active one's (architecture.md, Spare legs). The clones come after the slices
+// so that one load's node reads keep a fixed order; a clone with no group adds
+// nothing.
+func sideAddrs(
+	conf *pb.SpConf,
+	slices map[uint64]*pb.Slice,
+	clones map[string]*pb.Clone,
+) []string {
 	var addrs []string
 	seen := make(map[string]struct{})
+	addGrp := func(grp *pb.Group) {
+		for _, leg := range legsOf(grp) {
+			for _, side := range leg.GetSideList() {
+				addrs = appendAddr(addrs, seen, side.GetAddrPort())
+			}
+		}
+	}
 	for _, sliceId := range conf.GetSliceIdList() {
 		slice, ok := slices[sliceId]
 		if !ok {
@@ -139,21 +156,16 @@ func sideAddrs(conf *pb.SpConf, slices map[uint64]*pb.Slice) []string {
 		}
 		for _, grpList := range grpLists {
 			for _, grp := range grpList {
-				legLists := [][]*pb.Leg{
-					grp.GetLegList(),
-					grp.GetSpareLegList(),
-				}
-				for _, legList := range legLists {
-					for _, leg := range legList {
-						for _, side := range leg.GetSideList() {
-							addrs = appendAddr(
-								addrs, seen, side.GetAddrPort(),
-							)
-						}
-					}
-				}
+				addGrp(grp)
 			}
 		}
+	}
+	for _, cloneName := range conf.GetCloneNameList() {
+		clone, ok := clones[cloneName]
+		if !ok {
+			continue
+		}
+		addGrp(clone.GetMetaGrp())
 	}
 	return addrs
 }
@@ -261,10 +273,11 @@ func loadSpConf(
 		state.Migrs[migrName] = migr
 	}
 	// The node records come last: their addresses are embedded in the
-	// slices and cntlrs read above. They are part of the same snapshot
-	// because a side's request resolves its DN's endpoint and a cntlr's its
-	// CN's (dnv-worker.md RW14), and a reaction weighs their free_ext_cnt.
-	for _, addrPort := range sideAddrs(conf, state.Slices) {
+	// slices, clones and cntlrs read above. They are part of the same
+	// snapshot because a side's request resolves its DN's endpoint and a
+	// cntlr's its CN's (dnv-worker.md RW14), and leg repair excludes the
+	// locations of a group's DNs (dnv-worker.md AR8).
+	for _, addrPort := range sideAddrs(conf, state.Slices, state.Clones) {
 		key := DnConfKey(cid, addrPort)
 		dn := &pb.DnConf{}
 		if !s.Get(key, dn) {

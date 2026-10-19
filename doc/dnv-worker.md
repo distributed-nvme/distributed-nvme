@@ -85,10 +85,10 @@ notification, before the etcd client ends it with an error (EU3);
 a constant the block holds for the gateway
 (`gateway.md`, Constants this document owns) because the transaction it
 is sized by is `CreateStoragePool` at its widest shape, while the sp drain's
-slice batch (SPD13, SPD14), the created flip's transaction (RW19) and the
-cntlr replacement's (MD6, AR7) are the other bounded transactions it has to
-cover, and the clone drain's batch and final transaction (CLD11) are checked
-against it but fit etcd's default cap;
+slice batch (SPD13, SPD14), the created flip's transaction (RW19), the clone
+flip's and the cntlr replacement's (MD6, AR7) are the other bounded
+transactions it has to cover, and the clone drain's batch and final
+transaction (CLD11) are checked against it but fit etcd's default cap;
 `EtcdMaxRequestBytes`, the `--max-request-bytes` requirement on every etcd
 serving dnv and the etcd client's send limit (EU1), sized by the provisioned
 flip (RW18) whose sides span every slice of a pool at the widest shape —
@@ -392,7 +392,9 @@ that snapshot, zero when the key is absent; `Conf`; `Cntlrs` by cntlr id from
 addresses present (keys only) with their mod revisions, one `BmChunk` per
 chunk carrying its slice index, its index and its `ModRev`, the slice index
 always zero for a migration chunk; `DnByAddr`, the `DnConf` of every side's
-`addr_port` of the SP; and `CnByAddr`, the `CnConf` of every cntlr's. A
+`addr_port` of the SP, the sides of every clone's clone meta group included,
+a latched clone's too, read after the slices' in `clone_name_list` order;
+and `CnByAddr`, the `CnConf` of every cntlr's. A
 missing `SpConf` returns `ErrNotFound` (the SP is being deleted; the rev key's
 delete follows). A listed sub-object whose key is missing is reported in
 `Missing` and logged by the caller; the load still succeeds. `SpRevision` is
@@ -457,10 +459,11 @@ means an `ErrPrecondition` with `ReasonCandidateChanged`, on which the caller re
 and retries the scan and the STM as one unit (the candidate unit of
 `architecture.md`, Storage pools). `ReplaceCntlr` fails with the same reason
 when the plan the scan ran against has moved: a surviving cntlr of the SP sits
-on a CN outside the SP endpoints it is handed (MD6). `CreateSpareLeg` fails
-with it when the group holds a DN outside the group DNs it is handed, and
-when its pick has gone stale in any other way since the scan — its record
-deleted, the DN no longer allocatable, or short of extents (MD6).
+on a CN outside the SP endpoints it is handed (MD6). `CreateSpareLeg` and
+its clone-keyed twin fail with it when the group holds a DN outside the
+group DNs they are handed, and when their pick has gone stale in any other
+way since the scan — its record deleted, the DN no longer allocatable, or
+short of extents (MD6).
 
 MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated`: one per
 `MaxFlipCreatedPerTxn` candidates, RW19), re-validates every precondition it
@@ -469,16 +472,31 @@ lists (MD7), and bumps exactly the revisions the equivalent RPC bumps
 `architecture.md`, Workers). `now` is the caller's unix seconds; thresholds
 are resolved inside from `SpConf.event_threshold` with the defaults of
 `architecture.md`, Common validation. The shard and the sp id address the
-`SpRev` key; the sp name the `SpConf`. Three ops — `GrowSlice`,
-`CreateSpareLeg`, `SwitchSpareLeg` — also take an expected revision: when
+`SpRev` key; the sp name the `SpConf`. Five ops — `GrowSlice`,
+`CreateSpareLeg`, `SwitchSpareLeg` and the clone-keyed `CreateCloneSpareLeg`
+and `SwitchCloneSpareLeg` — also take an expected revision: when
 non-zero the STM re-checks `SpRev.revision` against it first
 (`ErrPrecondition` with `ReasonStaleRevision` on mismatch); zero skips the
 check — the caller's opt-out, which `gateway.md` GW6 defines for the public
-RPCs; this worker's reaction path passes zero. The three ops that mint ids
-— `GrowSlice`, `ReplaceCntlr`, `CreateSpareLeg` — take them through
-`TakeSpIds` and require the pool's `next_id` to have every id they take
-left (`ReasonNoIdLeft` otherwise; `architecture.md`, Globals: id
-allocation + shard buckets).
+RPCs; this worker's reaction path passes zero. The four ops that mint ids
+— `GrowSlice`, `ReplaceCntlr`, `CreateSpareLeg`, `CreateCloneSpareLeg` —
+take them through `TakeSpIds` and require the pool's `next_id` to have
+every id they take left (`ReasonNoIdLeft` otherwise; `architecture.md`,
+Globals: id allocation + shard buckets).
+
+The clone-keyed twins — `SetCloneLegErrEpoch`, `SetCloneSideErrEpoch`,
+`FlipCloneProvisioned`, `CreateCloneSpareLeg` and `SwitchCloneSpareLeg` —
+apply the rules of their slice-keyed siblings to a clone's clone meta group
+(`architecture.md`, Terminology and object model), through functions of
+their own, so no slice-keyed op ever walks a clone and no clone-keyed op a
+slice. A clone's record is keyed by its name, so each takes the clone's
+name and its `clone_id`, and requires, as its clone checks, the `Clone` to
+exist ("clone not found"), to carry that id ("clone id changed": a clone
+deleted and re-created under the name is another clone) and to have a
+group ("clone has no group"); group, leg and side ids are unique in the SP
+and address the rest. No clone-keyed op takes a clone with no group; the
+clone drain's batches and its final transaction take one all the same, so
+a drain is never stranded on one.
 
 * `SetDnErrEpoch` and `SetCnErrEpoch` require the record to exist. With a
   non-zero epoch they set it only when the stored value is zero (the threshold
@@ -506,11 +524,28 @@ allocation + shard buckets).
 * `SetLegErrEpoch` and `SetSideErrEpoch` require the slice to exist and the
   leg or side to be found in any group's `leg_list` or `spare_leg_list`; the
   same rule on the embedded record; they rewrite the `Slice`; no bump.
+* `SetCloneLegErrEpoch` and `SetCloneSideErrEpoch` require the clone checks
+  and the leg or side to be found in the clone's group, in its `leg_list` or
+  `spare_leg_list`; the same rule. They accept a `deleting` clone too: its
+  legs and sides stay in its record, with their health epochs, until CLD9's
+  transaction removes them. They rewrite the `Clone`; no bump.
 * `FlipProvisioned` takes a list of `SideRef`s and requires the slice to
   exist: every listed side still `provisioned` false is set true; `SpRev` is
   bumped once iff any was written. It returns the sides actually flipped and
   the revision its bump wrote, so the `flip applied` record can name each,
   at that revision (RW18; Log records).
+* `FlipCloneProvisioned` takes a list of `CloneSideRef`s (the clone's name
+  and `clone_id`, the leg id and the side id) and flips as
+  `FlipProvisioned` does: each `Clone` read once and written at most once,
+  every listed side still `provisioned` false set true, `SpRev` bumped once
+  iff any was written, and the sides flipped returned with that revision.
+  Unlike a missing slice, a clone that is gone, carries another `clone_id`,
+  has no group or is `deleting` is skipped with its sides and fails nothing:
+  a clone leaves its pool in normal operation, through the clone drain, and
+  failing the batch would drop every other clone's flip, while a `deleting`
+  clone's sides go back with its record (CLD9). Its one STM, when it flips
+  a side of each of `MaxCloneCntPerSp` clones, is past etcd's default
+  transaction cap (Constants this document owns).
 * `FlipCreated` takes a list of `TdRef`s (name, td id and the torn mark the
   reports carried) and commits them
   `MaxFlipCreatedPerTxn` at a time in list order, one STM each (RW19): it
@@ -592,24 +627,24 @@ allocation + shard buckets).
   cntlr committed after the caller's snapshot, whose CN and domain the scan
   could not exclude; only a gain is checked, and ahead of "not hosting a cntlr
   of this SP"); the picked CN allocatable with free extents at least the SP
-  footprint (the sum of `ext_cnt` over all groups), not hosting a cntlr of
-  this SP, its capacity key unchanged; every clone `clone_name_list` names
-  to exist ("clone not found" otherwise). It moves the SP's clone units —
-  the sum of `meta_units` over every listed clone, a draining one included
-  — from the old CN to the new one (`architecture.md`, Metadata units): it
-  deletes the old `Cntlr` (its CN, if the record still exists: pointer out,
-  footprint back, the units back, stopping at zero, capacity, `CnRev`);
-  creates the new `Cntlr` with the old one's `cntlid_slot`, `primary` as
-  requested, `disabled` false and `settling` equal to `primary` (HL2), its
-  `cntlr_id` the next id (new CN: pointer in, footprint out, the units in
-  with no room check, even past its ceiling, capacity, `CnRev`); rewrites
-  the SP's `CdcEntry` records as `SetCntlrErrEpoch` does, which drops the
-  old cntlr and lists the new one; the `SpConf`; one `SpRev` bump for both
-  halves. The new CN's room is no precondition (`architecture.md`, Metadata
-  units, says why). Its STM reads
-  every clone of the SP, which takes it past etcd's default transaction cap
-  at the ceilings (`gateway.md`, Constants this document owns). Nor is
-  AR10's own verdict re-checked here (AR7).
+  footprint (the sum of `ext_cnt` over all groups of its slices), not hosting
+  a cntlr of this SP, its capacity key unchanged; every clone
+  `clone_name_list` names to exist ("clone not found" otherwise). It moves the
+  SP's clone units — the sum of `meta_units` over every listed clone, a
+  draining one included — from the old CN to the new one (`architecture.md`,
+  Metadata units): it deletes the old `Cntlr` (its CN, if the record still
+  exists: pointer out, footprint back, the units back, stopping at zero,
+  capacity, `CnRev`); creates the new `Cntlr` with the old one's
+  `cntlid_slot`, `primary` as requested, `disabled` false and `settling` equal
+  to `primary` (HL2), its `cntlr_id` the next id (new CN: pointer in,
+  footprint out, the units in with no room check, even past its ceiling,
+  capacity, `CnRev`); rewrites the SP's `CdcEntry` records as
+  `SetCntlrErrEpoch` does, which drops the old cntlr and lists the new one;
+  the `SpConf`; one `SpRev` bump for both halves. The new CN's room is no
+  precondition (`architecture.md`, Metadata units, says why). Its STM reads
+  every clone of the SP, which takes it past etcd's default transaction cap at
+  the ceilings (`gateway.md`, Constants this document owns). Nor is AR10's own
+  verdict re-checked here (AR7).
 * `CreateSpareLeg` takes the slice, the group, the picked DN, the group's
   DNs the pick was scanned against (`grpDnAddrs`, the scan's black list) and
   the cluster conf, and requires the SP checks; the expected revision as in
@@ -635,6 +670,15 @@ allocation + shard buckets).
   false, `cntlid_slot` the first of `cntlid_slot_list`) to `spare_leg_list`;
   DN bookkeeping plus `DnRev`; the `Slice` and the `SpConf`; a `SpRev` bump
   (`architecture.md`, Spare legs).
+* `CreateCloneSpareLeg` takes the clone, the group, the picked DN, the
+  group's DNs the pick was scanned against and the cluster conf, and
+  requires what `CreateSpareLeg` requires, in the same order, the clone
+  checks taking the slice's place, and the clone not `deleting` ("clone
+  deleting": its group goes back to its DNs in CLD9's transaction, and a
+  spare would spend an extent for nothing). It appends the spare to the
+  clone's group as `CreateSpareLeg` appends one; DN bookkeeping plus
+  `DnRev`; the `Clone` and the `SpConf`; a `SpRev` bump. No CN is charged:
+  the clone meta group is in no cntlr's footprint.
 * `SwitchSpareLeg` takes the slice, the group, the spare and the target, and
   requires the SP checks; the expected revision as in the preamble; the spare
   in `spare_leg_list`, the target in `leg_list`; each with exactly one side
@@ -643,6 +687,10 @@ allocation + shard buckets).
   nor parked, `architecture.md`, Spare legs); the spare's side `provisioned`.
   The spare takes the target's position in `leg_list`; the target is appended
   to `spare_leg_list`; a `SpRev` bump.
+* `SwitchCloneSpareLeg` takes the clone, the group, the spare and the target,
+  and requires and does what `SwitchSpareLeg` does, on the clone's group,
+  with the clone checks and the clone not `deleting`, for
+  `CreateCloneSpareLeg`'s reason; it rewrites the `Clone`.
 * `DrainSpCntlrs` requires the drain checks of SPD2 (`SpConf` exists, `sp_id`
   unchanged, `deleting` true — `sp_level` is deliberately not consulted) and
   every listed `Cntlr` key to exist. It deletes every `Cntlr`; per DISTINCT CN
@@ -677,17 +725,24 @@ allocation + shard buckets).
   there — a delete is an idempotent pop, so the loser of an accepted
   two-owner overlap reports a full batch and removes nothing. An empty batch
   is a no-op that writes nothing.
-* `FinishCloneDelete` requires the clone drain checks, and, when the clone
-  holds metadata units, every `Cntlr` the `SpConf` lists to exist ("cntlr
-  not found" otherwise, read before anything is written). It deletes the
-  `Clone` key AND removes the name from `clone_name_list` in the same STM,
-  and gives the clone's `meta_units` back on the CN of every cntlr of the SP
+* `FinishCloneDelete` takes the clone and the cluster conf, and requires
+  the cluster conf valid (`architecture.md`, Common validation, for
+  `MaintainDnCapacity`'s ladder, checked first, so a refusal writes
+  nothing), the clone drain checks, and, when the clone holds metadata
+  units, every `Cntlr` the `SpConf` lists to exist ("cntlr not found"
+  otherwise, read before anything is written). It deletes the `Clone` key
+  AND removes the name from `clone_name_list` in the same STM; gives the
+  clone's `meta_units` back on the CN of every cntlr of the SP
   (`architecture.md`, Metadata units): once per cntlr, one write per CN,
   each release stopping at zero, the capacity value rewritten and no
   `CnRev` bumped, since only a count moves; a CN whose record is gone is
   skipped, there being nothing to give the units back to, and a clone with
-  no units reads no `Cntlr` or `CnConf` at all; a `SpRev` bump (the SP
-  outlives the clone, so this one bumps).
+  no units reads no `Cntlr` or `CnConf` at all; gives every side of the
+  clone's group, legs and spares, back as `DrainSpSlice` gives a popped
+  group's: per DISTINCT DN the group's `ext_cnt` back, pointer out,
+  capacity, one `DnRev` bump, a DN whose record is gone skipped, and a
+  clone with no group giving nothing back; a `SpRev` bump (the SP outlives
+  the clone, so this one bumps).
 
 MD7. **`ErrPrecondition`.** A struct carrying the op and the reason;
 returned from inside the STM callback, it aborts without commit (EU4). An
@@ -1067,32 +1122,32 @@ an unknown cluster.
 
 A revision worker runs per rev key (a cluster id and an object id): it
 pushes revisions to the agent(s) and health-checks them; for the sp role it
-is a coordinator with one child goroutine per side and per cntlr. An
-**object** is a DN, a CN, a side or a cntlr — the unit of one `Check*`
-stream and one goroutine; a **round** is one `Check*` request and reply
-exchange on an object's stream; the **handle** is the mutable part of a rev
-value, `addr_port` for a node and `sp_name` for an SP (`architecture.md`,
-Revision keys and the sync fan-out).
+is a coordinator with one child goroutine per side of the SP's slices and
+per cntlr (RW14). An **object** is a DN, a CN, a side or a cntlr — the unit
+of one `Check*` stream and one goroutine; a **round** is one `Check*`
+request and reply exchange on an object's stream; the **handle** is the
+mutable part of a rev value, `addr_port` for a node and `sp_name` for an SP
+(`architecture.md`, Revision keys and the sync fan-out).
 
 ### The per-object loop
 
 RW1. **One goroutine per object** — one per DN (dn role), per CN (cn role),
-per side and per cntlr (sp role). The goroutine alone owns the object's
-`Check*` stream, its `Syncup*` calls and the loop's own state, which is what
-makes the "one `Syncup*` at a time per object" of `architecture.md`, Common
-agent rules, and the "one stream per object" of `architecture.md`, Check
-streams, hold by construction. A parent does not wait for the stop of a
-child it replaces (RW11), so a worker started for an object whose previous
-worker is still stopping drives nothing until that stop has returned: a
-restart never puts two loops on one object. Three deliberate carve-outs
-share the object: the `Push*Bitmap` calls run on the pusher's own
-goroutines (BM3 — one in flight per migration or clone, concurrently with
-this loop); `lastInfo` is published by the stream's pump goroutine under a
-mutex so the sp coordinator can snapshot it (AR1); and the sp coordinator's
-pass, under a mutex of each side and cntlr child's health monitor, reads
-the count of the monitor's own writes before its load and offers the child
-its record's `err_epoch` after it, which only the child's own goroutine
-folds into the memo, before its next verdict (HL3).
+per side of an SP's slices and per cntlr (sp role). The goroutine alone
+owns the object's `Check*` stream, its `Syncup*` calls and the loop's own
+state, which is what makes the "one `Syncup*` at a time per object" of
+`architecture.md`, Common agent rules, and the "one stream per object" of
+`architecture.md`, Check streams, hold by construction. A parent does not
+wait for the stop of a child it replaces (RW11), so a worker started for an
+object whose previous worker is still stopping drives nothing until that
+stop has returned: a restart never puts two loops on one object. Three
+deliberate carve-outs share the object: the `Push*Bitmap` calls run on the
+pusher's own goroutines (BM3 — one in flight per migration or clone,
+concurrently with this loop); `lastInfo` is published by the stream's pump
+goroutine under a mutex so the sp coordinator can snapshot it (AR1); and
+the sp coordinator's pass, under a mutex of each side and cntlr child's
+health monitor, reads the count of the monitor's own writes before its load
+and offers the child its record's `err_epoch` after it, which only the
+child's own goroutine folds into the memo, before its next verdict (HL3).
 
 RW2. **State**: the desired revision plus the inputs the request is built
 from, the stream, `lastInfo` (the last `*Info` received, on a dn loop with
@@ -1206,8 +1261,8 @@ outside the bounds of the dn agent's side conf gate (`dnagent.md` DN8) —
 and converged nothing (`dnagent.md`, Names and constants in `common`).
 `SyncupDn`, `SyncupSide` and `SyncupCntlr` can return it, and the same
 values are checked on this side first — `extent_size` by RW9's gate, the
-SP's `bdev_conf` and every group's length to zero by RW14's — so a request
-this worker sends should never provoke it. From a live agent, a
+SP's `bdev_conf` and every slice group's length to zero by RW14's — so a
+request this worker sends should never provoke it. From a live agent, a
 `ReplyCodeInvalidConf` to `SyncupDn` or `SyncupCntlr` means the agent's
 copy of those rules and `model`'s have drifted apart (`dnagent.md`, Shared
 mechanism — package `agent`); one to `SyncupSide` means a stored group
@@ -1491,15 +1546,19 @@ and health per HL1.
 
 RW14. The SP revision worker is a **coordinator**. On every desired change
 (an `SpRev` put: `revision` plus `sp_name`) it loads the SP with
-`model.LoadSp` (MD3), resolves every side's `dn_id` (through `DnByAddr` by
-the side's `addr_port`) and every cntlr's `cn_id`, builds every
-`SyncupSideRequest` and `SyncupCntlrRequest` once (RW15, RW16), keeping
+`model.LoadSp` (MD3), resolves the `dn_id` of every side of the SP's
+slices (through `DnByAddr` by the side's `addr_port`) and every cntlr's
+`cn_id`, builds every such side's `SyncupSideRequest` and every
+`SyncupCntlrRequest` once (RW15, RW16), keeping
 with each side's plan the side's `err_epoch` as that same load read it, for
 the sides-first hold (below), and diffs
-its **children**: one per side — the sp id, leg id and side id, spare legs'
-sides included — and one per cntlr. New: start; gone: stop (RW11), without
-waiting for the stop; a child whose endpoint changed is restarted at the
-new one, the new child driving nothing until the old one has stopped (RW1);
+its **children**: one per side of the SP's slices — the sp id, leg id and
+side id, spare legs' sides included — and one per cntlr. A side of a clone
+meta group gets no plan, no request and no child, so nothing drives it
+(`architecture.md`, Terminology and object model). New: start; gone: stop
+(RW11), without waiting for the stop; a child whose endpoint changed is
+restarted at the new one, the new child driving nothing until the old one
+has stopped (RW1);
 every remaining child receives its new request as a desired change (RW6). A
 child whose **request** changed while the `SpRev` revision did not — a
 re-resolution tick that altered a standby list — is restarted too, because
@@ -1644,10 +1703,11 @@ one `cntlr_interval` after the sides.
 
 Between the load and the plan the fan-out validates the SP's stored
 `bdev_conf` with `model.ValidateBdevConf` (`architecture.md`, Common
-validation), and then every group's length to zero (RW15): a group from
-whose stored block counts `model.SideZeroBytes` derives no length is
-refused the same way, because its sides would otherwise be sent a length
-the dn agent refuses (`dnagent.md` DN8). That geometry is what RW16's
+validation), and then the length to zero of every group of the SP's
+slices (RW15): such a group from whose stored block counts
+`model.SideZeroBytes` derives no length is refused the same way, because
+its sides would otherwise be sent a length the dn agent refuses
+(`dnagent.md` DN8). That geometry is what RW16's
 request carries verbatim and what RW15's side request derives values from
 — every side's `zero_bytes` and the migration destination's `block_size`.
 `dm_raid0_conf.stripe_size` is used as a value by no worker
@@ -1897,11 +1957,14 @@ the cache resolves nothing, because `CreateCluster` made every defaultable
 member concrete when it wrote the key (`architecture.md`, Common
 validation), so a zero read back here is corruption or foreign data, not an
 omission. Each reader validates the snapshot with
-`model.ValidateClusterConf` and **refuses** rather than guessing a geometry
-the rest of the cluster may not agree with; the cache validates nothing
-itself, because its four readers refuse differently — idle the loop (RW9),
-keep the tick cadence and skip the pass (AR1), fail the DN health write
-(HL1) — and a validating get would either hide that or log it four times.
+`model.ValidateClusterConf`, the clone drain's final step through the model
+op it hands the snapshot to (CLD7), and **refuses** rather than guessing a
+geometry the rest of the cluster may not agree with; the cache validates
+nothing itself, because its five readers refuse differently — idle the loop
+(RW9), keep the tick cadence and skip the pass (AR1), fail the DN health
+write (HL1), fail the clone drain's final step, which the next pass runs
+again (CLD7) — and a validating get would either hide that or log it five
+times.
 An invalid conf is deliberately still **cached**: dropping it would make a
 cluster whose conf went bad indistinguishable from a deleted one and send
 the operator chasing a phantom deletion that never happened. A cluster
@@ -2214,8 +2277,9 @@ through the model ops — `GrowSlice` charges DNs and every cntlr CN,
 — and so do the sp drain, whose D1 credits every cntlr CN and whose D2
 batches credit every DN they touch (`model/drain.go`), and the clone
 drain's final STM, which gives a clone's metadata units back to every
-cntlr CN (CLD9) — but that is allocation bookkeeping, not health.) An
-unreachable DN is therefore marked
+cntlr CN and its clone meta group's extents back to their DNs (CLD9) — but
+that is allocation bookkeeping, not health.) An unreachable DN is therefore
+marked
 on `DnConf` by its dn-role owner and on the `Side` records of its sides by
 each sp-role owner, independently.
 
@@ -2426,15 +2490,15 @@ reusing the fan-out's: AR6 reads `low_water_mark_pct` and `data_block_size`
 straight off it and sizes a meta grow with the cluster's `extent_size`,
 while the DN scans of AR6 and AR8 walk the bin ladder and every allocating
 reaction takes its oversampling batch from `alloc_conf`. A third gate
-follows the `bdev_conf` one: every group must give a length to zero
-(`model.SideZeroBytes`), the check RW14's fan-out makes. No reaction
-reads a length to zero, but the pass must not commit a reaction the fan-out
-cannot deliver, and the fan-out builds no request for an SP with a group
-that gives none: a failover, say, would take the old primary out of the
-discovery records at its commit, while the new one's promotion waits on
-the refused fan-out. A failure of any gate refuses the pass with one
-`invalid stored conf` record (Log records, once per distinct error) and
-no reaction runs: no candidate scan, no reaction `model` op, no
+follows the `bdev_conf` one: every group of the SP's slices must give a
+length to zero (`model.SideZeroBytes`), the check RW14's fan-out makes. No
+reaction reads a length to zero, but the pass must not commit a reaction
+the fan-out cannot deliver, and the fan-out builds no request for an SP
+with a slice's group that gives none: a failover, say, would take the old
+primary out of the discovery records at its commit, while the new one's
+promotion waits on the refused fan-out. A failure of any gate refuses the
+pass with one `invalid stored conf` record (Log records, once per distinct
+error) and no reaction runs: no candidate scan, no reaction `model` op, no
 `reaction applied` and no `reaction skipped`. Neither drain sits behind
 every gate: the clone drain's steps (CLD7) run first of all, ahead of the
 cluster-conf lookup and of every validation, and a latched SP's drain
@@ -2446,8 +2510,10 @@ drain. The ticker keeps running — the pass cadence falls back to
 own, because a coordinator that stopped ticking would stop retrying the
 fan-out and the pass forever, and those two are where the refusal is
 already recorded. A cluster missing from the cache stops the pass the same
-way, silently — after the clone drain's steps, which read no cluster conf,
-and before an sp drain step, which does: its children log
+way, silently — after the clone drain's steps, whose batches read no
+cluster conf and whose final step reads it from the cache itself (CLD7),
+and before an sp drain step, which reads it behind the pass's gate: its
+children log
 `cluster conf missing` for the idle period (RW9).
 
 AR2. **One action per SP per pass** — "action" meaning a *reaction*
@@ -2761,23 +2827,23 @@ never grow that kind again: a breach of that kind that is not pending logs
 
 AR7. When a cntlr has `err_epoch` set, `now` minus it at least
 `cntlr_unhealthy`, this coordinator's own latest verdict on it unhealthy
-(AR10), `disabled` false, and either `primary` false or it is the primary
-and **no failover candidate exists** (AR5 found none — the sole-cntlr SP,
-or every other cntlr unhealthy or disabled): the candidates are
+(AR10), `disabled` false, and either `primary` false or it is the primary and
+**no failover candidate exists** (AR5 found none — the sole-cntlr SP, or every
+other cntlr unhealthy or disabled): the candidates are
 `FindCnCandidatesAntiAffine` with the SP footprint (the sum of `ext_cnt` over
-all groups), a candidate count of `cn_batch_size`, a black list of the old
-cntlr's `addr_port`, the SP's other cntlrs' endpoints as the SP's CN endpoints
-and those CNs' locations excluded — the locations out of the pass's own
-snapshot (MD3; a CN missing from it contributes none), the old cntlr adding
-none of its own because it is the one leaving, so its domain is excluded only
-when a survivor shares it (unlike AR8 step 3, whose spare also avoids the
-failing leg's domain: excluding the old cntlr's domain here would empty tier 1
-in a two-domain cluster the SP's cntlrs already span, and the tier-2 rescan
-could then put the replacement in a survivor's domain), and the tier 2 of
-`architecture.md`, Per-operation allocation, rescanning without them when tier
-1 finds no CN; pick one; an internal `ReplaceCntlr` of the old cntlr, the
-pick, those endpoints and the old cntlr's `primary` as the new one's — the
-same `cntlid_slot`, `primary` true and `settling` true only in the
+all groups of its slices), a candidate count of `cn_batch_size`, a black list
+of the old cntlr's `addr_port`, the SP's other cntlrs' endpoints as the SP's
+CN endpoints and those CNs' locations excluded — the locations out of the
+pass's own snapshot (MD3; a CN missing from it contributes none), the old
+cntlr adding none of its own because it is the one leaving, so its domain is
+excluded only when a survivor shares it (unlike AR8 step 3, whose spare also
+avoids the failing leg's domain: excluding the old cntlr's domain here would
+empty tier 1 in a two-domain cluster the SP's cntlrs already span, and the
+tier-2 rescan could then put the replacement in a survivor's domain), and the
+tier 2 of `architecture.md`, Per-operation allocation, rescanning without them
+when tier 1 finds no CN; pick one; an internal `ReplaceCntlr` of the old
+cntlr, the pick, those endpoints and the old cntlr's `primary` as the new
+one's — the same `cntlid_slot`, `primary` true and `settling` true only in the
 sole-primary variant, `disabled` false, `err_epoch` zero (HL2: a primary
 replacement is created settling, as a promoted primary is, and AR5 judges it
 by the settling threshold until it reports its stack built and clean as
@@ -2857,7 +2923,8 @@ Like AR5's refusals these read a report, which no STM sees, so
 
 ### Leg repair
 
-AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
+AR8. **Triggers.** A leg in the `leg_list` of a slice's group needs repair
+when either
 
 * **Case 1** — `Leg.err_epoch` is set, `now` minus it is at least
   `leg_unhealthy`, and this coordinator's own latest verdict on the leg is
@@ -2967,9 +3034,11 @@ precondition that let it be latched means it holds no td, subsystem, clone,
 transfer or migration; a spare leg it may still hold is a leg and goes with
 its group), and it does delete a `Clone` a `DeleteClone` has LATCHED — its
 chunk keys in batches, then the record together with its
-`clone_name_list` entry — which is the clone drain and not a reaction
-(CLD8, CLD9). Both drains finish a deletion a user began with the latch and
-neither ever starts one; the list above is what no reaction touches.
+`clone_name_list` entry and with its clone meta group, whose sides, the
+spares' included, go back to their DNs — which is the clone drain and not
+a reaction (CLD8, CLD9). Both drains finish a deletion a user began with
+the latch and neither ever starts one; the list above is what no reaction
+touches.
 
 ### The sp drain
 
@@ -2985,8 +3054,10 @@ SPD1. **The allocator's real group shape is a named constant.**
 `MaxAllocLegPerGrp`, the allocator's per-group leg count (`architecture.md`,
 Cardinality limits), is CITED from all three places that choose a leg count
 — `legCntOf` in `gateway/alloc.go` and in `model/ops.go`, `legCnt` in
-`worker/reaction.go` — and from the SPD14 tripwire, so widening the shape
-fails a test instead of a deployment.
+`worker/reaction.go` — and from the SPD14 tripwire, the tripwire of the
+clone drain's final transaction (CLD11) and `CreateClone`'s (`gateway.md`,
+Constants this document owns), so widening the shape fails a test instead
+of a deployment.
 
 SPD2. **Load and refuse, never skip.** Each drain op loads the `SpConf`
 inside its OWN STM and returns an `ErrPrecondition` — never a silent skip —
@@ -3153,8 +3224,8 @@ contribute one DN apiece because a latched SP has no migrations and
 therefore no two-side legs. D1, D3 and the latch are trivially legal. SPD14
 is the tripwire pair that keeps it so. This batch is one of the bounded
 transactions above etcd's default cap — the created flip's transaction
-(RW19) and the cntlr replacement's (MD6) are the others — and not the one
-`EtcdMaxTxnOps` is sized by: that is
+(RW19), the clone flip's and the cntlr replacement's (MD6) are the others
+— and not the one `EtcdMaxTxnOps` is sized by: that is
 `CreateStoragePool`'s widest shape
 (`gateway.md`, Constants this document owns).
 
@@ -3213,9 +3284,11 @@ that never clears.
 CLD5. **Exclusion is the teardown.** From the first post-latch fan-out the
 deleting clone is absent from every cntlr's `clone_list` and from the
 primary's chunk-push plans (BM4 targets), at every `sp_level`; the cn
-agent's sweep (`cnagent.md` CN21) is the whole physical teardown, so there
-are ZERO agent changes: to an agent this is indistinguishable from a
-post-delete syncup. Full absence is deliberately distinct from level
+agent's sweep (`cnagent.md` CN21) tears the clone's stack down, and
+CLD9's transaction takes the pointers of the clone meta group's sides out of
+their DNs' records, where no dn agent has built anything for them (RW14), so
+there are ZERO agent changes: to an agent either is indistinguishable from
+a post-delete syncup. Full absence is deliberately distinct from level
 suppression, under which the cn agent keeps a clone's local chunk files for
 a later rebuild (`cnagent.md` CN21). The teardown's disconnect of the source
 runs off the pass (`cnagent.md` CN10), so until a later pass finds the
@@ -3245,11 +3318,15 @@ gate in front of them, and it evaluates no reaction and re-seeds no health
 memo, because a batch calls no agent (CLD10) and a pass would evaluate
 every reaction again for each batch; the reactions and the health memos
 keep their `cntlr_interval` pass (AR1, HL3). A doomed clone drains at any
-`sp_level`; the drain reads no geometry and no cluster conf (unlike the sp
-drain's D2, which maintains DN capacity keys and therefore stays behind the
-ladder's gate — the final STM rewrites only CN capacity values, which carry
-no bin); and a gate that could stop it would strand a latched clone
-permanently, the latch being one-way. The derivation, from the snapshot of
+`sp_level`; the drain reads no geometry; its batches read no cluster conf;
+and a gate that could stop it would strand a latched clone permanently, the
+latch being one-way. Its final STM maintains DN capacity keys, as the sp
+drain's D2 does, so it needs the ladder: the step takes the cluster conf
+from the worker's cache itself, and the STM refuses an unusable one at its
+top (MD6), so a cluster missing from the cache, or a conf that does not
+validate, fails that one step — logged as `clone drain failed` and run
+again by the next pass or wake-up (CLD10) — and stops no batch and no
+other clone's step. The derivation, from the snapshot of
 the pass or of the wake-up's load alone: surviving chunk keys in the
 state's `CloneBmIdx` mean one batch on the LOWEST `MaxDelBmPerTxn` of them
 in `(src_slice_idx, bm_idx)` order; none means the final STM. No other
@@ -3277,12 +3354,16 @@ there, harmlessly (CLD5).
 
 CLD9. **The final STM.** Delete the `Clone` key, put the `SpConf` with the
 name removed from `clone_name_list`, give the clone's metadata units back on
-the CN of every cntlr of the SP, `BumpSpRev` — the two removals together
-and never separately, and the release with them, in the transaction that
-removes the record the units are read from, so they are given back exactly
-once (`architecture.md`, Metadata units; MD6's `FinishCloneDelete` says
-how: once per cntlr, stopping at zero, with no `CnRev` bump). A listed
-`Cntlr` whose key is missing refuses the STM by CLD2's rule, since that
+the CN of every cntlr of the SP, give every side of its clone meta group
+back to its DN, `BumpSpRev` — the two removals together and never
+separately, and both releases with them, in the transaction that removes
+the record the units and the group are read from, so each is given back
+exactly once (`architecture.md`, Metadata units; MD6's `FinishCloneDelete`
+says how: the units once per cntlr, stopping at zero, with no `CnRev` bump;
+the sides as an sp drain batch gives a popped group's back, with one `DnRev`
+bump per DN, which takes them out of their dn agents' syncups, CLD5). The
+STM is handed the cluster conf and refuses an unusable one first (CLD7). A
+listed `Cntlr` whose key is missing refuses the STM by CLD2's rule, since that
 record names the CN to give the units back to: the refusal repeats every
 pass as `clone drain failed` until the key is back, and the clone stays
 latched meanwhile. It is invoked only when the derivation's
@@ -3340,14 +3421,21 @@ WROTE, so a batch costs `MaxDelBmPerTxn` compares plus a constant few for the
 `SpConf` and the `Clone` — the bound, and independent of every ceiling
 constant. The final STM is a constant few plus, for a clone that
 holds metadata units, a few per cntlr — the `Cntlr`, its CN's record and
-that record's capacity key — so `MaxCntlrCntPerSp` bounds it; the latch is
+that record's capacity key — so `MaxCntlrCntPerSp` bounds that part, plus
+a few per distinct DN of its clone meta group — the DN's record and
+revision read, and the record, its capacity key's delete and put and the
+revision written — and a clone meta group has at most `MaxAllocLegPerGrp`
+legs and `MaxSpareLegPerGrp` spares of one side each, its legs never being
+migrated, so those two bound the rest (SPD1); a tripwire asserts that
+arithmetic from the named constants and a maximum-shape final STM is
+committed against a real etcd, as SPD14 does for the sp drain. The latch is
 strictly smaller than a sweep of the whole rectangle in one transaction. A
 batch and the final STM also fit etcd's DEFAULT cap, which asks no
 deployment change: the requirement is `EtcdMaxTxnOps` for the transactions
 that do NOT fit it, such as `CreateStoragePool`'s maximum shape, which is
 what that number is sized by (`gateway.md`, Constants this document owns),
-the sp drain's D2 batch (SPD13), the created flip's transaction (RW19) and
-the cntlr replacement's (MD6).
+the sp drain's D2 batch (SPD13), the created flip's transaction (RW19), the
+clone flip's and the cntlr replacement's (MD6).
 
 ## Log records
 
@@ -3465,8 +3553,9 @@ with no terminal-failure state when its transaction did not commit (SPD6);
 final STM whose call succeeded (CLD8, CLD9, CLD10), so no step record
 carries a final step; `clone drain failed` a clone-drain step whose call
 failed, run again with no terminal-failure state when its transaction did
-not commit (CLD10). The two step records are non-normative — they name no
-decision — but the worker suite counts them: they are the only records that
+not commit (CLD10), and a final step not called because the cache holds no
+conf of the cluster (CLD7). The two step records are non-normative — they
+name no decision — but the worker suite counts them: they are the only records that
 show a multi-batch drain advancing.
 
 ## Integration test plan
@@ -3608,8 +3697,9 @@ revision gate being per object and not per cluster.
   `SpRev`, so the pool's revision moves once for the latch and once for the
   last step (CLD12), reaches the CN as an exclusion and in its last step
   gives the clone's metadata units back on every cntlr's CN, record and
-  capacity value alike, and both resume from etcd alone after a restart of
-  the fleet;
+  capacity value alike, and the sides of its clone meta group back to their
+  DNs, extents, pointers and capacity keys, with one `DnRev` bump each
+  (CLD9), and both resume from etcd alone after a restart of the fleet;
 * vote — every shard has exactly one owner through a join, a crash, a
   graceful stop and a self-fence, and every request names its sender;
 * handoff — a killed owner's shards are re-driven at the same revision with
@@ -3734,15 +3824,18 @@ paragraph says of a `workerctl` write holds of the library call behind it.
 Where the gateway's writes carry more than the record, its own are raw, so a
 case plants exactly the state it means to — save the node bookkeeping of the
 copies it plants: `put-clone` charges the clone's metadata units to the CN
-of every cntlr of the pool and `put-migr` charges its destination DN the
-side's extents and the migration's units, as the gateway's creates do but
-never refusing for room (`architecture.md`, Metadata units), so that a
+of every cntlr of the pool and the extents of its clone meta group, which
+it places where the case says, to the DNs of the group's sides, and
+`put-migr` charges its destination DN the side's extents and the
+migration's units, as the gateway's creates do but never refusing a node
+past its metadata area (`architecture.md`, Metadata units), so that a
 later release, the clone drain's among them, finds what it gives back.
 `put-migr` sets the migration's `cutover_pending` only when a case asks
 for it, which a case that means to stage what `CreateMigration` writes
 does. Its
 `set-epoch` is raw in the
-same way: it plants one `err_epoch`, on a cntlr, a leg or a side, and touches
+same way: it plants one `err_epoch`, on a cntlr, or on a leg or a side of a
+slice or of a clone's clone meta group, and touches
 neither a revision nor a `CdcEntry` nor a `settling` flag, so a case can
 stage the epoch an earlier owner or another observer would have left (AR10).
 
