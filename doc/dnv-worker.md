@@ -78,9 +78,11 @@ deadline and its budget per plain operation and per whole transaction, every
 retry included (EU1, EU5); `DefaultEtcdKeepaliveTime` and
 `DefaultEtcdKeepaliveTimeout`, how long a connection of the etcd client
 carries no read before the client pings it and how long the client waits for
-the answer before it closes the connection (EU1); `EtcdMaxTxnOps`, the
-`--max-txn-ops` requirement on every etcd serving dnv, a constant the block
-holds for the gateway
+the answer before it closes the connection (EU1); `DefaultEtcdWatchSilence`,
+how long a watch may hear nothing from etcd, neither an event nor a progress
+notification, before the etcd client ends it with an error (EU3);
+`EtcdMaxTxnOps`, the `--max-txn-ops` requirement on every etcd serving dnv,
+a constant the block holds for the gateway
 (`gateway.md`, Constants this document owns) because the transaction it
 is sized by is `CreateStoragePool` at its widest shape, while the sp drain's
 slice batch (SPD13, SPD14), the created flip's transaction (RW19) and the
@@ -209,6 +211,39 @@ the caller rescans (SW4, VW3), which `IsCompacted` lets it recognize without
 importing the etcd rpc types itself. When the ctx ends both channels close
 without an error. There is no untyped watch: every dnv prefix holds one
 message type.
+
+The watch asks etcd for progress notifications, and a watch that hears
+nothing from etcd, neither an event nor a notification, for
+`DefaultEtcdWatchSilence` ends the same way, with an error that names the
+silence: etcd can stop serving one watch while its connection lives, and
+nothing else would notice. The open counts toward the silence and never
+blocks the caller, because an open hangs on a dead connection. The
+threshold must exceed twice etcd's notification interval with that
+interval's jitter, since etcd skips the first notification after an event,
+and the deployment bounds that interval to fit (`architecture.md`,
+Components: invocation reference). Every caller rescans on any watch error
+(SW4, VW3, RW21; `cdc.md` WV4), and the record of its restart carries the
+error. etcd sends no notification to a watch whose
+start revision lies past the store's revision until the store reaches it,
+and every dnv watch starts at its scan's revision plus one: a worker's
+registration puts move the store, but a cdc that runs alone on an etcd
+nothing writes to restarts its watch once per threshold, each time with a
+rescan, which is accepted because a rescan that finds nothing changed
+impacts no host (`cdc.md` WV4).
+
+Every watch of a process rides one gRPC stream of the etcd client, because
+no caller puts outgoing gRPC metadata on the contexts it watches with, and
+the client keeps one stream per distinct set of that metadata. A dead
+connection, a member cut off from the leader or a stalled stream therefore
+stops the events of a worker's registry watches and of the revision watches
+of its shards together, and the registry echo check (VW8 (b)) stands for
+the latter: when it fences the worker, every shard worker stops, and a
+shard is driven again only from a fresh scan (SW2), by the worker's next
+incarnation or by a peer. The `ClusterConf` watch (RW21) loses its events
+with them too, but it belongs to the process rather than to an
+incarnation, so no fence restarts it (Known limits). A context with
+outgoing metadata would get a stream of its own, which the echo check
+would no longer cover.
 
 EU4. **STM.** Two runners over the etcd client's STM with
 serializable-snapshot isolation: `RunSTM`, read/write, which the etcd client
@@ -3808,6 +3843,16 @@ which no suite case sets, so no suite case runs RW13's count compare.
   threshold reaction firing on it before the owner's own verdict reads the
   object unhealthy (AR10), and within a `nodeRecordMaxAge` and a round for a
   DN or a CN, a stamped node being out of allocation meanwhile (MD4).
+* **A watch that etcd stops serving is found late.** A shard's revision
+  watch that etcd stops serving while the registry watch of its role goes
+  on is not caught by VW8 (b). No fence restarts the `ClusterConf` watch
+  (RW21), not even one VW8 (b) made for the fault that stopped its events
+  (EU3). Such a watch finds the fault itself only after
+  `DefaultEtcdWatchSilence` (EU3), unless a restart, or for a revision
+  watch a fence or a shard release, ends it first, and until then what it
+  follows stays frozen on that worker, with no record. A watch that goes on
+  hearing progress notifications while it loses events is not found at
+  all.
 * **Overlap and gap at every ownership change** (VW7): a few seconds of double
   driving or of no driving per shard per change. Accepted.
 * **Undriven windows**: a fresh worker's first grace window; twice the vote

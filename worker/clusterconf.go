@@ -93,8 +93,8 @@ func (c *confCache) run(ctx context.Context) {
 }
 
 // watch consumes one watch generation. It returns true when the caller must
-// rescan (the watch was cancelled by the server, ErrCompacted above all) and
-// false when ctx ended.
+// rescan — a compaction or any other watch error, a silence (EU3) among
+// them — and false when ctx ended.
 func (c *confCache) watch(
 	ctx context.Context,
 	evCh <-chan etcdutil.Event,

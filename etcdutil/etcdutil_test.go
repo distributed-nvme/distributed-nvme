@@ -118,8 +118,32 @@ func startEtcd(bin string) (string, *os.Process, func(), error) {
 	return "", nil, nil, errors.Join(errs...)
 }
 
+// progressNotifyFlag returns the name under which the etcd at bin takes its
+// progress notification interval, read from its help text. etcd 3.6 renamed
+// the flag and marks the old name for removal, while 3.5, which the
+// deployment allows (architecture.md, Components: invocation reference),
+// knows only the old name, and an etcd stops at a flag it does not know.
+func progressNotifyFlag(bin string) (string, error) {
+	cmd := exec.Command(bin, "--help")
+	stderr := &etcdStderr{}
+	cmd.Stderr = stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", stderr.wrap(fmt.Errorf("%s --help: %w", bin, err))
+	}
+	const flag = "--watch-progress-notify-interval"
+	if bytes.Contains(out, []byte("\n  "+flag+" ")) {
+		return flag, nil
+	}
+	return "--experimental-watch-progress-notify-interval", nil
+}
+
 // startEtcdOnce is one start of startEtcd.
 func startEtcdOnce(bin string) (string, *os.Process, func(), error) {
+	notifyFlag, err := progressNotifyFlag(bin)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	dir, err := os.MkdirTemp(
 		"", fmt.Sprintf("%s%d-", etcdDirPrefix, os.Getpid()),
 	)
@@ -168,6 +192,10 @@ func startEtcdOnce(bin string) (string, *os.Process, func(), error) {
 		// every slice of a pool at the widest shape, and below the put
 		// TestPutAboveTheClientDefault sends.
 		"--max-request-bytes", strconv.Itoa(common.EtcdMaxRequestBytes),
+		// A progress notification every second instead of every ten
+		// minutes, so that a test can watch the notifications keep a quiet
+		// watch open within seconds (watchsilence_test.go).
+		notifyFlag, watchProgressInterval.String(),
 		"--log-level", "error",
 		"--log-outputs", "stderr",
 	)

@@ -219,7 +219,12 @@ across commands is the host's GENCTR re-read protocol, as the specs intend.
 DS10. **Staleness.** Through etcd outages `dnv-cdc` keeps serving its last
 known state (WV5): stale-but-consistent beats unavailable, though a stale
 instance also keeps listing an old primary a failover has taken out of the
-entries (`architecture.md` [D18]; `architecture.md`, Known limits).
+entries (`architecture.md` [D18]; `architecture.md`, Known limits). So
+does an instance whose watch etcd stops serving while etcd still answers:
+the cdc has no check like the worker's registry echo check (`dnv-worker.md`
+VW8 (b)), so only its silence threshold (`dnv-worker.md` EU3) or a restart
+of the instance ends such a watch, and that threshold never ends a watch that
+goes on hearing progress notifications while it loses events.
 Recovery rescans diff against the held state — each re-renders every active
 host and impacts, by the DS6 rule, the hosts whose view moved (WV4) — so
 changes missed during the outage still AEN. A last known state

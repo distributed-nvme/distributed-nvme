@@ -596,6 +596,15 @@ const (
 	// it.
 	DefaultEtcdKeepaliveTime    = 10
 	DefaultEtcdKeepaliveTimeout = 5
+	// Seconds a watch may hear nothing from etcd, neither an event nor a
+	// progress notification, before the etcd client ends it with an error
+	// (EU3): three times etcd's default --watch-progress-notify-interval of
+	// 10 minutes. etcd draws each stream's interval up to a tenth longer and
+	// skips the first notification after an event, so a live watch hears
+	// something at least every 2.2 intervals; the deployment requirement
+	// (architecture.md, Components: invocation reference) keeps the server's
+	// interval at most a third of this.
+	DefaultEtcdWatchSilence = 30 * 60
 	// EtcdMaxTxnOps is a DEPLOYMENT REQUIREMENT, not a client setting: every
 	// etcd serving dnv MUST run with --max-txn-ops=1024 or higher; etcd's
 	// default is 128. etcd caps on max(len(Compare), len(Success), …), and

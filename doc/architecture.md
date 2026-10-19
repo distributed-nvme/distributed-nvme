@@ -5217,9 +5217,14 @@ owns, the second and the transaction that sizes it. etcd also runs with
 automatic compaction of its history (`--auto-compaction-retention`):
 nothing in dnv compacts it, every write keeps the old value in etcd's
 history, and etcd refuses writes once its database reaches its storage
-quota. What runs while etcd does not answer, how it is backed up and
-restored, and how dnv is upgraded are Running without the control plane,
-etcd backup and restore and Upgrade in lockstep.
+quota. Its release is 3.5.13 or later, the release that fixed the missing
+progress notification for a watch that saw no event, and its watch progress
+notification interval is at most a third of `DefaultEtcdWatchSilence`,
+which etcd's default interval satisfies, because the etcd client ends a
+watch that hears nothing for that long (`dnv-worker.md` EU3). What runs
+while etcd does not answer, how it is backed up and restored, and how dnv
+is upgraded are Running without the control plane, etcd backup and restore
+and Upgrade in lockstep.
 
 **md assembly.** Only the agent assembles dnv arrays, so every node that
 runs a dnv agent masks udev's incremental assembly of them — a DN too, the
@@ -5919,11 +5924,12 @@ that component's document and only pointed to here.
   dnv runs no check of its own.
 * **A stale discovery view keeps a withdrawn path.** A cdc twin that has
   lost etcd keeps serving its last known records (dnv-cdc; `cdc.md` DS10),
-  a failed-over primary's address among them, and nvme-stas keeps a path
-  for as long as any discovery controller it reads still lists it
-  (`cdc.md` DS2). A host running nvme-stas whose discovery connections
-  include such a twin keeps the old primary's path past the fence
-  (Failover).
+  a failed-over primary's address among them. So does a twin whose watch
+  etcd stops serving while etcd still answers (`cdc.md` DS10).
+  nvme-stas keeps a path for as long as any discovery controller it reads
+  still lists it (`cdc.md` DS2). A host running nvme-stas whose discovery
+  connections include such a twin keeps the old primary's path past the
+  fence (Failover).
 * **A path that nothing following the discovery log manages is never
   dropped.** A path connected by hand on a host that runs no nvme-stas or
   equivalent, or a controller named in nvme-stas's own configuration

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
@@ -40,6 +41,7 @@ const (
 // methods (EU1); a process creates one and shares it.
 type Client struct {
 	cli *clientv3.Client
+	tmo timeouts
 }
 
 // New builds the client (EU1). No dnv gRPC interceptor is attached: etcd logging
@@ -81,12 +83,14 @@ func New(
 }
 
 // timeouts are the client's settings a test of the package may set: the
-// keepalive time and timeout of EU1. New uses prodTimeouts. gRPC raises a
-// keepalive time below its floor for a client to that floor, which is the
-// production time, so of the two only the timeout gets shorter in a test.
+// keepalive time and timeout of EU1 and the silence threshold of a watch
+// (EU3). New uses prodTimeouts. gRPC raises a keepalive time below its floor
+// for a client to that floor, which is the production time, so of the two
+// keepalive settings only the timeout gets shorter in a test.
 type timeouts struct {
 	keepaliveTime    time.Duration
 	keepaliveTimeout time.Duration
+	watchSilence     time.Duration
 }
 
 // prodTimeouts are the production values of timeouts.
@@ -94,6 +98,7 @@ func prodTimeouts() timeouts {
 	return timeouts{
 		keepaliveTime:    common.DefaultEtcdKeepaliveTime * time.Second,
 		keepaliveTimeout: common.DefaultEtcdKeepaliveTimeout * time.Second,
+		watchSilence:     common.DefaultEtcdWatchSilence * time.Second,
 	}
 }
 
@@ -123,7 +128,7 @@ func newClient(
 	if err != nil {
 		return nil, fmt.Errorf("etcd client: %w", err)
 	}
-	return &Client{cli: cli}, nil
+	return &Client{cli: cli, tmo: tmo}, nil
 }
 
 // Close releases the underlying client (EU1).
@@ -432,6 +437,10 @@ func IsCompacted(err error) bool {
 	return errors.Is(err, rpctypes.ErrCompacted)
 }
 
+// errWatchSilent is the error of a watch that heard nothing from etcd for its
+// silence threshold (EU3).
+var errWatchSilent = errors.New("no event and no progress notification")
+
 // WatchTyped opens one prefix watch starting at fromRev (EU3). Every event is
 // delivered in order on the event channel, decoded with newMsg() for puts, and
 // logged as "etcd watch event". The etcd client reconnects transparently; a
@@ -439,6 +448,14 @@ func IsCompacted(err error) bool {
 // reported once on the error channel, after which BOTH channels close. When
 // ctx ends both channels close without an error. There is no untyped watch:
 // every dnv prefix holds exactly one message type.
+//
+// The watch asks etcd for progress notifications, and one that hears nothing
+// from etcd, neither an event nor a notification, for
+// common.DefaultEtcdWatchSilence seconds ends the same way, with an error
+// that wraps errWatchSilent: etcd can stop serving one watch while the
+// connection lives, and nothing else would notice. The open counts toward
+// the silence, because an open hangs on a dead connection: it runs in the
+// goroutine the threshold times, so WatchTyped itself never blocks.
 func (c *Client) WatchTyped(
 	ctx context.Context,
 	prefix string,
@@ -449,29 +466,57 @@ func (c *Client) WatchTyped(
 	// Buffered: the single error is reported even if nobody is receiving yet.
 	errCh := make(chan error, 1)
 	// The watch gets its own cancellable ctx so that EVERY return path of the
-	// goroutine below — a server cancellation, a decode failure, the caller's
-	// ctx ending — tears the clientv3 substream down. Without it a watch that
-	// ends on anything other than ctx would leak its substream for the life
-	// of the client, and a worker that rescans after each ErrCompacted (SW4,
-	// VW3) would accumulate one per rescan.
+	// goroutine below — a server cancellation, a decode failure, a silence,
+	// the caller's ctx ending — tears the clientv3 substream down. Without it
+	// a watch that ends on anything other than ctx would leak its substream
+	// for the life of the client, and a worker that rescans after each
+	// ErrCompacted (SW4, VW3) would accumulate one per rescan.
 	wctx, cancel := context.WithCancel(ctx)
-	watchCh := c.cli.Watch(
-		wctx, prefix,
-		clientv3.WithPrefix(),
-		clientv3.WithRev(fromRev),
-	)
+	silence := c.tmo.watchSilence
+	// silent is set when the threshold passes with nothing heard; the same
+	// timer cancels the watch, which ends an open that hangs as well as a
+	// watch that is open.
+	var silent atomic.Bool
+	timer := time.AfterFunc(silence, func() {
+		silent.Store(true)
+		cancel()
+	})
+	silentErr := func() error {
+		return fmt.Errorf("etcd watch %s: %w for %v", prefix, errWatchSilent,
+			silence)
+	}
 	go func() {
 		defer cancel()
 		defer close(errCh)
 		defer close(eventCh)
+		defer timer.Stop()
+		watchCh := c.cli.Watch(
+			wctx, prefix,
+			clientv3.WithPrefix(),
+			clientv3.WithRev(fromRev),
+			clientv3.WithProgressNotify(),
+		)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case resp, ok := <-watchCh:
 				if !ok {
-					// The client closed the watch: ctx ended, or Close was
-					// called. No error to report (EU3).
+					// The client closed the watch: the threshold passed,
+					// ctx ended or Close was called. Only the first is an
+					// error to report (EU3).
+					if silent.Load() && ctx.Err() == nil {
+						errCh <- silentErr()
+					}
+					return
+				}
+				// Something was heard. The timer stops while the response
+				// is handled, so that a slow reader of the events is not
+				// taken for a silent etcd, and starts again after it.
+				if !timer.Stop() {
+					if ctx.Err() == nil {
+						errCh <- silentErr()
+					}
 					return
 				}
 				if err := resp.Err(); err != nil {
@@ -490,6 +535,7 @@ func (c *Client) WatchTyped(
 						return
 					}
 				}
+				timer.Reset(silence)
 			}
 		}
 	}()
