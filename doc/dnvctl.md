@@ -114,7 +114,8 @@ zero. A leaf value that can be malformed is parsed before the dial — by
 pflag, with the command line, for the flags declared as pflag numbers or
 booleans, and by dnvctl's own parsers for the id flags, `--ids`, `--slots`,
 `--bm-hex`, `--level` and `--redund`, which are declared as strings
-(Conventions, CT8) — so text that does not fit is exit 2 with no RPC issued.
+(Conventions, CT8) — so text that does not fit its field is exit 2 with no
+RPC issued.
 `--timeout`, the one numeric env-backed global flag, is parsed from whichever
 carrier supplied it: `DNVCTL_TIMEOUT` holding text that is not a number, or
 such text under the `timeout` key of the config file, is a usage error (exit
@@ -311,9 +312,14 @@ with `--nqn`; `ns` with `--nqn` and `--idx`; `spare` with `--grp`, plus
 same spelling as the `cntlr` group's, as in gatewayctl: the RPC, not the
 flag, says what the id means.
 
-**Value types.** An id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`,
-`--spare`, `--target` — is declared as a string and parsed by dnvctl with
-Go's base-0 rule, so a `0x` prefix is accepted. `--slots` and `--ids` are
+**Value types.** A number that fills a request field is parsed at the width
+of that field: every value the field holds parses, and a value past either
+end of the field fails to parse, a usage error. A wider parse would cut
+such a value and send a number nobody typed; a narrower one would refuse
+values the gateway should judge, the client-side check CT8 forbids. An
+id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`, `--spare`,
+`--target` — is declared as a string and parsed by dnvctl with Go's base-0
+rule, so a `0x` prefix is accepted. `--slots` and `--ids` are
 comma-separated numeric lists; `--hosts` and the selector flags are
 comma-separated string lists. A list flag replaces its value on each
 occurrence rather than accumulating, which is why the lists are plain string

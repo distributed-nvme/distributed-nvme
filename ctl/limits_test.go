@@ -1,16 +1,17 @@
 // The limits of a dnvctl command line (dnvctl.md CT8, CT5, CT4).
 //
 // dnvctl checks one limit itself: a number must parse at the width of the
-// request field it fills, so text that does not fit the field is a usage
-// error (exit 2, no RPC issued) and every value that fits is sent as typed.
-// Two walks pin it: one over the flags declared as pflag numbers, which
-// pflag parses with the command line, and one over the flags declared as
-// strings that dnvctl parses as numbers itself — the ids, the id and slot
-// lists, the level and the global --rev. Every other limit is the gateway's
-// (architecture.md, Common validation), the bounds on a count or a size and
-// the lengths of a name or an NQN alike, and dnvctl forwards the value
-// without looking at it (CT8): an accepted value comes back as the CT4
-// document and exit 0, a refused one as the CT5 failure line and exit 1.
+// request field it fills (dnvctl.md, Conventions, Value types), so text that
+// does not fit the field is a usage error (exit 2, no RPC issued) and every
+// value that fits is sent as typed. Two walks pin it: one over the flags
+// declared as pflag numbers, which pflag parses with the command line, and
+// one over the flags declared as strings that dnvctl parses as numbers
+// itself — the ids, the id and slot lists, the level and the global --rev.
+// Every other limit is the gateway's (architecture.md, Common validation),
+// the bounds on a count or a size and the lengths of a name or an NQN alike,
+// and dnvctl forwards the value without looking at it (CT8): an accepted
+// value comes back as the CT4 document and exit 0, a refused one as the CT5
+// failure line and exit 1.
 //
 // The gateway here is the recording client with an answer function, judging
 // the request it received against the same constants of common. A refusal

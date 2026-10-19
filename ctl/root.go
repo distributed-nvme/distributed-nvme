@@ -24,9 +24,10 @@
 //     else (CT9): a token, a force or a name is typed per command, and a
 //     leaf value is parsed before the dial — by pflag, or by the readers
 //     below and spParseLevel/spRedundConf for the flags pflag holds as
-//     strings — so text that does not fit is exit 2, never a cast that reads
-//     back as zero. The comma-split list flags below stay plain strings for
-//     the replace-on-each-occurrence rule (dnvctl.md, Conventions), which
+//     strings — so text that does not fit its field is exit 2, never a cast
+//     that reads back as zero (dnvctl.md, Conventions, Value types). The
+//     comma-split list flags below stay plain strings for the
+//     replace-on-each-occurrence rule (dnvctl.md, Conventions), which
 //     pflag's own slice flags do not follow (they append).
 package ctl
 
