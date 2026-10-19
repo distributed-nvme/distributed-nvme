@@ -472,7 +472,9 @@ type mint struct {
 // mintClusterId allocates one id and one shard code (GW12; architecture.md,
 // Globals: id allocation + shard buckets): the id is
 // next_id (never reused), the shard code is the index of the smallest bucket
-// value — the first index on ties — and that bucket is incremented.
+// value — the first index on ties — and that bucket is incremented. A
+// next_id at the largest 64-bit value has no id left and is refused
+// FAILED_PRECONDITION, after the count gate.
 //
 // sum(bucket) before the increment is the cluster's live object count, which
 // is why the Max*CntPerCluster gate needs no range query. A bucket of the
@@ -507,6 +509,17 @@ func mintClusterId(
 		// must never mint the 0 that every id-valued result reserves for
 		// "none".
 		nextId = 1
+	}
+	if nextId == math.MaxUint64 {
+		// The largest value is never an id (architecture.md, Globals: id
+		// allocation + shard buckets): the counter cannot store the value
+		// past it, and a counter that wrapped would hand out the lowest ids
+		// again while live objects hold them.
+		return mint{}, errPrecondition(
+			"the cluster has no %s id left: its next_id %d is the "+
+				"largest 64-bit value, which is never an id",
+			what, nextId,
+		)
 	}
 	sized[best]++
 	return mint{
@@ -559,25 +572,39 @@ func zeroBucket() []uint32 {
 // A minter is created inside the STM closure and thrown away with it, so a
 // retried attempt re-reads next_id and mints exactly the same ids.
 type spIdMinter struct {
-	next uint64
+	first uint64
+	cnt   uint64
 }
 
 // newSpIdMinter starts minting at the SP's next_id, clamped past the reserved
 // 0 exactly as model.SpNextId does.
 func newSpIdMinter(conf *pb.SpConf) *spIdMinter {
-	return &spIdMinter{next: model.SpNextId(conf)}
+	return &spIdMinter{first: model.SpNextId(conf)}
 }
 
-// mint returns the next per-SP id.
+// mint returns the next per-SP id. An id minted past the counter's last one
+// never reaches etcd: commit refuses the run, and the closure's error discards
+// the whole transaction (dnv-worker.md, EU4).
 func (m *spIdMinter) mint() uint64 {
-	id := m.next
-	m.next++
+	id := m.first + m.cnt
+	m.cnt++
 	return id
 }
 
-// commit writes the advanced counter back into the SpConf being stored.
-func (m *spIdMinter) commit(conf *pb.SpConf) {
-	conf.NextId = m.next
+// commit takes the minted run from the SpConf being stored, the one the
+// minter was created on, through model.TakeSpIds, which advances its next_id
+// past the run. A pool whose counter has fewer ids left than were minted is
+// FAILED_PRECONDITION (architecture.md, Globals: id allocation + shard
+// buckets: the largest value is never an id), and the caller returns it from
+// its closure, so nothing is written.
+func (m *spIdMinter) commit(conf *pb.SpConf, op string) error {
+	if _, err := model.TakeSpIds(conf, op, m.cnt); err != nil {
+		return errPrecondition(
+			"%v: the storage pool's next_id %d leaves fewer ids than the "+
+				"%d this call takes",
+			err, m.first, m.cnt)
+	}
+	return nil
 }
 
 // nextDevId draws one thin-device dev_id from SpConf.next_dev_id

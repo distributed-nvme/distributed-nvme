@@ -66,7 +66,8 @@ watch or convergence logic, which is the worker's job.
 The gateway's surface is `service Gateway` in `pb/schema.proto`. It adds no
 etcd key kind: it writes only kinds of `architecture.md`, Key table, and
 nothing that describes itself (GW1). The `model` exports it rests on are
-stated beside the rules that call them — `SpNextId` (GW12, GW19), the
+stated beside the rules that call them — `SpNextId` (GW12, GW19) and
+`TakeSpIds` (GW12), the
 revision bump helpers and the expected revision of the three shared
 mutations (GW6), the list-range prefixes (GW10), and the conf resolvers and
 stored-conf validators (GW11); `model` itself is `dnv-worker.md`'s (MD1 to
@@ -334,8 +335,10 @@ uncommitted (`dnv-worker.md` EU4).
   `model.ErrPrecondition` with any reason but the three below included — the
   meta ladder cap among them, `GrowSlice`'s `MaxGrpCntPerSlice` group
   ceiling (`architecture.md`, GrowSlice), a counter the id step cannot move
-  without wrapping (GW19), and a pool that has spent every thin id
-  (`architecture.md`, Thin devices).
+  without wrapping (GW19), a `next_id` with fewer ids left than the call
+  takes (`architecture.md`, Globals: id allocation + shard buckets; GW12),
+  and a pool that has spent every thin id (`architecture.md`, Thin
+  devices).
 * `RESOURCE_EXHAUSTED`: a global's `shard_bucket` sum at `Max*CntPerCluster`;
   the per-SP and per-group count ceilings — `cntlr_id_list` at
   `MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at
@@ -542,15 +545,18 @@ GW12. **Id minting.** Cluster-scoped ids follow `architecture.md`, Globals:
 id allocation + shard buckets, inside the STM: `mintClusterId`, which
 `CreateDiskNode`, `CreateControllerNode` and `CreateStoragePool` run on the
 global they read, draws the id and the shard code and applies the
-`Max*CntPerCluster` gate; `releaseShard`, which `DeleteDiskNode` and
-`DeleteControllerNode` run, gives the bucket entry back (the sp drain gives
-an SP's back from the worker, `dnv-worker.md` SPD12). Per-SP ids come from
-`model.SpNextId`, the per-SP id read: it returns `SpConf.next_id` clamped
-to `SpFirstId` and mutates nothing, so every caller advances and persists
-`next_id` itself — the gateway through a `spIdMinter`, created inside the
-STM closure on the `SpConf` being written and committed back into it once,
-so a retried attempt mints the same ids; the `model` ops advance it
-themselves. A thin device's `dev_id` comes from `SpConf.next_dev_id`
+`Max*CntPerCluster` gate, then the refusal of a `next_id` with no id left
+(`architecture.md`, Globals: id allocation + shard buckets);
+`releaseShard`, which `DeleteDiskNode` and `DeleteControllerNode` run,
+gives the bucket entry back (the sp drain gives an SP's back from the
+worker, `dnv-worker.md` SPD12). Per-SP ids come from `SpConf.next_id`:
+`model.SpNextId` reads it clamped to `SpFirstId` and mutates nothing, and
+`model.TakeSpIds` takes a run of ids from it, advancing it past the run,
+and refuses a run the counter has too few ids left for — the gateway
+through a `spIdMinter`, created inside the STM closure on the `SpConf`
+being written, whose commit takes the minted run once, so a retried
+attempt mints the same ids; the `model` ops take theirs directly. A thin
+device's `dev_id` comes from `SpConf.next_dev_id`
 through `nextDevId`, advanced once per device. The id step moves the
 counters this rule draws from (GW19).
 
@@ -704,9 +710,10 @@ delete, get, list, update-disabled and inspect.
   GW11), the overflow of `init_ext_cnt` times that conf's `extent_size`,
   the same merge and resolution the STM makes below, which gives the scans
   their leg count (`legCntOf`) and which `validateMergedBdevConf` judges,
-  and `validatePrimaryThreshold`; then come the name (`spNameUnused`) and
-  the pool count ceiling (`spCntBelowCeiling`), each on a plain read of its
-  own. Then the DN scan per group
+  and `validatePrimaryThreshold`; then come the name (`spNameUnused`) on a
+  plain read of its own, and on another of `SpGlobal` the pool count
+  ceiling and then whether its id counter has an id left
+  (`spCntBelowCeiling`). Then the DN scan per group
   (`pickDns`) and the CN scan per cntlr (`pickCn`) of `architecture.md`,
   Per-operation allocation, which owns the growing black list, the random
   pick and the two CN tiers — neither asks for metadata units, since a new
@@ -917,7 +924,7 @@ position, and a re-run of the STM closure on the same picks and reads
   writing nothing: while a clone hydrates, a snapshot of its destination
   would capture only the regions hydrated so far; a `next_dev_id` above
   `MaxThinDevId` is `FAILED_PRECONDITION`, writing nothing
-  (`architecture.md`, Thin devices); mint `td_id` (`SpNextId`), the
+  (`architecture.md`, Thin devices); mint `td_id` (GW12), the
   `dev_id` from `next_dev_id`, and `ori_id` as the origin's `dev_id` or
   zero; put the `ThinDevice` with `created` false; append to
   `td_name_list`; `BumpSpRev`. Reply `td_id` and `dev_id`.
@@ -1406,8 +1413,9 @@ validation, through the validator's own functions (GW4). The pool count is the
 one exception to the real creates: the case that runs in every mode plants the
 pool count for its race and its refusals, which keeps it fast enough for every
 run; only outside `go test -short` do real creates fill the count in full, and
-the next create is then refused. The id counters at the id step's last values
-are planted too, since no run of calls reaches them in a test. Each of these
+the next create is then refused. The id counters at the id step's last values,
+and one below their top, are planted too, since no run of calls reaches
+them in a test. Each of these
 count ceilings is also raced at its last place by two token-less creates, the
 second run to its end inside the first at the moment the first has read the
 counted record — a log handler on the etcd read record (`volReadHook`) is the

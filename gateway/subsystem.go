@@ -199,7 +199,9 @@ func (s *Server) CreateSubsystem(
 				NvmeTrConfList: model.CdcTrConfList(cntlrs),
 				AllowedHosts:   req.GetAllowedHosts(),
 			})
-		minter.commit(conf)
+		if err := minter.commit(conf, opCreateSubsystem); err != nil {
+			return err
+		}
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), conf)
 		return bumpSp(stm, opCreateSubsystem, sc)
 	})
@@ -481,7 +483,9 @@ func (s *Server) CreateNamespace(
 		})
 		stm.Put(
 			model.SubsystemKey(sc.Cid, sc.SpId(), req.GetNqn()), subsystem)
-		minter.commit(sc.Conf)
+		if err := minter.commit(sc.Conf, opCreateNamespace); err != nil {
+			return err
+		}
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
 		return bumpSp(stm, opCreateNamespace, sc)
 	})

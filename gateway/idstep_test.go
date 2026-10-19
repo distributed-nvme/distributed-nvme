@@ -23,7 +23,9 @@ import (
 // fixture of handler_sp_test.go, and its two counter moves, advanceNextId and
 // advanceDevId, on their own. It also holds the top of a pool's thin ids,
 // past which CreateThinDevice refuses (architecture.md, Thin devices) and at
-// which the step leaves next_dev_id.
+// which the step leaves next_dev_id, and the two id minters (gateway.md,
+// GW12) on their own at the top of their counters, past which every create
+// refuses (architecture.md, Globals: id allocation + shard buckets).
 //
 // The handler tests assert on the store: the exact set of keys the step
 // rewrites, each counter at exactly its old value plus its stride, and every
@@ -166,7 +168,7 @@ func TestAdvanceClusterIdsMovesEveryCounter(t *testing.T) {
 // plus the stride. The five creates draw from all five counters, through
 // mintClusterId for the three globals (CreateDiskNode, CreateControllerNode,
 // CreateStoragePool), the gateway's per-SP minter and nextDevId
-// (CreateThinDevice), and model.SpNextId in a model op (GrowSlice).
+// (CreateThinDevice), and model.TakeSpIds in a model op (GrowSlice).
 func TestAdvanceClusterIdsNewIdsLandAboveEveryOld(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	env.createSp(sptSmallSpec("pool-a"))
@@ -518,4 +520,75 @@ func TestCreateThinDeviceRefusesPastTheThinIdRange(t *testing.T) {
 			got, top)
 	}
 	refuse("a create past the top after an id step")
+}
+
+// TestMintClusterIdAtTheTop is the cluster minter (gateway.md, GW12) at its
+// top (architecture.md, Globals: id allocation + shard buckets): one below the
+// largest 64-bit value it mints that id and moves next_id onto the largest
+// value; at the largest value it is FAILED_PRECONDITION, after the count
+// gate, whose RESOURCE_EXHAUSTED a full cluster still hears first.
+func TestMintClusterIdAtTheTop(t *testing.T) {
+	const top = uint64(math.MaxUint64)
+	bucket := zeroBucket()
+	got, err := mintClusterId(top-1, bucket, 4, "disk node")
+	if err != nil {
+		t.Fatalf("the last id: %v", err)
+	}
+	if got.Id != top-1 || got.NextId != top {
+		t.Errorf("the last id: id %d and next_id %d, want %d and %d",
+			got.Id, got.NextId, top-1, top)
+	}
+	_, err = mintClusterId(top, bucket, 4, "disk node")
+	bndWantMsg(t, err, codes.FailedPrecondition, "no disk node id left",
+		"no id left")
+	full := zeroBucket()
+	full[0] = 4
+	_, err = mintClusterId(top, full, 4, "disk node")
+	wantCode(t, err, codes.ResourceExhausted, "a full cluster with no id left")
+}
+
+// TestSpIdMinterAtTheTop is the per-SP minter (gateway.md, GW12) at its top:
+// a run that ends one below the largest 64-bit value commits and leaves
+// next_id on the largest value; a run one id longer, or any run from the
+// largest value, is FAILED_PRECONDITION and leaves the SpConf's next_id as it
+// was.
+func TestSpIdMinterAtTheTop(t *testing.T) {
+	const top = uint64(math.MaxUint64)
+	for _, tc := range []struct {
+		name   string
+		nextId uint64
+		n      int
+		ok     bool
+	}{
+		{name: "the last two ids", nextId: top - 2, n: 2, ok: true},
+		{name: "two ids with one left", nextId: top - 1, n: 2},
+		{name: "one id with none left", nextId: top, n: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := &pb.SpConf{NextId: tc.nextId}
+			minter := newSpIdMinter(conf)
+			for idx := 0; idx < tc.n; idx++ {
+				if id := minter.mint(); tc.ok && id != tc.nextId+uint64(idx) {
+					t.Errorf("id %d: got %d, want %d", idx, id,
+						tc.nextId+uint64(idx))
+				}
+			}
+			err := minter.commit(conf, "TestOp")
+			if !tc.ok {
+				bndWantMsg(t, err, codes.FailedPrecondition,
+					model.ReasonNoIdLeft, "the commit")
+				if conf.GetNextId() != tc.nextId {
+					t.Errorf("the refused commit moved next_id from %d to %d",
+						tc.nextId, conf.GetNextId())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if conf.GetNextId() != top {
+				t.Errorf("next_id %d, want %d", conf.GetNextId(), top)
+			}
+		})
+	}
 }

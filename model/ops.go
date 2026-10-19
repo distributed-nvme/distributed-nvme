@@ -149,6 +149,35 @@ func SpNextId(conf *pb.SpConf) uint64 {
 	return SpFirstId
 }
 
+// ReasonNoIdLeft is the Reason TakeSpIds refuses with: the pool's next_id has
+// fewer ids left than the caller takes. It is exported because the gateway's
+// per-SP minter takes its ids through TakeSpIds too, so a test of either
+// layer can name the one refusal both give.
+const ReasonNoIdLeft = "no id left"
+
+// TakeSpIds takes n consecutive per-SP ids from SpConf.next_id, returns the
+// first and advances the counter in conf past them, which the caller then
+// stores (architecture.md, Globals: id allocation + shard buckets). Every id
+// a GrowSlice, a ReplaceCntlr or a CreateSpareLeg mints, and every run the
+// gateway's per-SP minter commits, is taken here.
+//
+// The largest 64-bit value is never an id, because the counter cannot store
+// the value past it: a counter at that value has no id left, and a counter
+// below it has every id from its own value up to the one before the largest.
+// Fewer than n left is an
+// ErrPrecondition with ReasonNoIdLeft and conf is left as it was. A counter
+// that wrapped instead would hand out the lowest ids again while live objects
+// hold them, and a run that wrapped would hand out the 0 every id-valued
+// result reserves for "none" (SpFirstId).
+func TakeSpIds(conf *pb.SpConf, op string, n uint64) (uint64, error) {
+	first := SpNextId(conf)
+	if n > math.MaxUint64-first {
+		return 0, fail(op, ReasonNoIdLeft)
+	}
+	conf.NextId = first + n
+	return first, nil
+}
+
 // ---------------------------------------------------------------------------
 // Cluster-scoped shard buckets (GW12; architecture.md, Globals: id
 // allocation + shard buckets)
@@ -1505,7 +1534,8 @@ func Failover(
 // capacity key and DnRev; the budget, capacity key and CnRev of the CN of
 // EVERY cntlr of the SP — a new group is stacked by all of them, so all of
 // them reserve it; the Slice, the SpConf whose next_id fed the ids, and one
-// SpRev bump.
+// SpRev bump. The ids are one run TakeSpIds takes, the group's and a leg and a
+// side per pick, and a pool with fewer left refuses with ReasonNoIdLeft.
 func GrowSlice(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1587,9 +1617,13 @@ func GrowSlice(
 		if err != nil {
 			return fail(opGrowSlice, err.Error())
 		}
-		// Ids are consumed in one run so that a retried attempt, which
-		// re-reads next_id, produces exactly the same ones.
-		nextId := SpNextId(conf)
+		// Ids are taken in one run, the group's and a leg and a side per
+		// pick, so that a retried attempt, which re-reads next_id, produces
+		// exactly the same ones; a pool with fewer left refuses here.
+		nextId, err := TakeSpIds(conf, opGrowSlice, 1+2*uint64(len(legs)))
+		if err != nil {
+			return err
+		}
 		grpId = nextId
 		nextId++
 		grp := &pb.Group{
@@ -1641,7 +1675,6 @@ func GrowSlice(
 		} else {
 			slice.DataGrpList = append(slice.DataGrpList, grp)
 		}
-		conf.NextId = nextId
 		s.Put(sliceKey, slice)
 		s.Put(SpConfKey(cid, spName), conf)
 		return BumpSpRev(s, opGrowSlice, shard, cid, spId)
@@ -1867,8 +1900,9 @@ func chargeSpCns(
 // Effects: the old Cntlr key is deleted and, if its CN record still exists,
 // that CN gets its pointer removed, the SP footprint back, the SP's clone
 // units back (stopping at zero, ReleaseMetaUnits), its capacity key
-// maintained and its CnRev bumped; the new Cntlr is written with
-// cntlr_id = SpConf.next_id++ and settling iff asPrimary, and its CN charged
+// maintained and its CnRev bumped; the new Cntlr is written with the one id
+// TakeSpIds takes from SpConf.next_id, a pool with none left refused ahead of
+// every effect, and settling iff asPrimary, and its CN charged
 // the same way, footprint and clone units; every CdcEntry of the SP that
 // exists is rewritten by the listing rule (architecture.md [D18]), which
 // drops the old cntlr and lists the new one, and a missing one stays missing
@@ -1976,6 +2010,10 @@ func ReplaceCntlr(
 		if !s.Get(capKey, &pb.CnCapacity{}) {
 			return fail(opReplaceCntlr, ReasonCandidateChanged)
 		}
+		newId, err = TakeSpIds(conf, opReplaceCntlr, 1)
+		if err != nil {
+			return err
+		}
 		// --- effects ---
 		s.Del(oldKey)
 		err = releaseCn(
@@ -1985,8 +2023,6 @@ func ReplaceCntlr(
 		if err != nil {
 			return err
 		}
-		newId = SpNextId(conf)
-		conf.NextId = newId + 1
 		// A primary replacement is created settling, as Failover's new
 		// primary is (HL2).
 		s.Put(CntlrKey(cid, spId, newId), &pb.Cntlr{
@@ -2267,6 +2303,9 @@ func spConfById(
 // the gap AR2 and dnv-worker.md, Known limits, accept. A group still keeps
 // up to MaxSpareLegPerGrp spares of standby capacity: a create planned from
 // a snapshot that holds every spare of the group commits.
+//
+// The spare's leg_id and side_id are the two ids TakeSpIds takes, and a pool
+// with fewer left refuses with ReasonNoIdLeft.
 func CreateSpareLeg(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -2338,11 +2377,11 @@ func CreateSpareLeg(
 		if err != nil {
 			return err
 		}
-		nextId := SpNextId(conf)
-		legId = nextId
-		nextId++
-		sideId := nextId
-		nextId++
+		legId, err = TakeSpIds(conf, opCreateSpareLeg, 2)
+		if err != nil {
+			return err
+		}
+		sideId := legId + 1
 		grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
 			LegId:  legId,
 			LegIdx: nextLegIdx(grp),
@@ -2362,7 +2401,6 @@ func CreateSpareLeg(
 		if err != nil {
 			return err
 		}
-		conf.NextId = nextId
 		s.Put(sliceKey, slice)
 		s.Put(SpConfKey(cid, spName), conf)
 		return BumpSpRev(s, opCreateSpareLeg, shard, cid, spId)

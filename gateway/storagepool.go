@@ -109,8 +109,9 @@ func spNameUnused(
 // (GW9): a plain read of the cluster's SpGlobal, whose shard_bucket sum is
 // the live pool count, refused at MaxSpCntPerCluster by mintClusterId's own
 // check, so a cluster at the ceiling hears the ceiling and not that no node
-// is free. The deciding STM mints from the SpGlobal it reads and so checks
-// the ceiling again, for a pool committed since.
+// is free; a cluster with no pool id left hears that the same way, from the
+// same call. The deciding STM mints from the SpGlobal it reads and so checks
+// both again, for a pool committed since.
 func spCntBelowCeiling(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -375,11 +376,12 @@ func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 // geometry of the request merged over it, and the primary threshold against
 // its cntlr_interval — judged before the scans so that a request that breaks
 // one is INVALID_ARGUMENT even on a cluster too short of nodes for them.
-// Plain reads of the pool's SpConf key and of SpGlobal then answer the name
-// and the pool count ceiling before the scans as well, in the STM's order
-// (spNameUnused, spCntBelowCeiling, GW9). The in-STM read is authoritative
-// and judges the conf gate, the two rules, the name and the ceiling again,
-// and model.GroupBlocks the overflow; when it yields a different cluster_id
+// Plain reads of the pool's SpConf key and of SpGlobal then answer the name,
+// the pool count ceiling and a pool id counter with no id left before the
+// scans as well, in the STM's order (spNameUnused, spCntBelowCeiling, GW9).
+// The in-STM read is authoritative and judges the conf gate, the two rules,
+// the name, the ceiling and the counter again, and model.GroupBlocks the
+// overflow; when it yields a different cluster_id
 // — the cluster was deleted and re-created under the scan — or a different
 // leg count, every pick was drawn for a different SP shape and the unit
 // re-plans.
@@ -523,9 +525,9 @@ func (s *Server) CreateStoragePool(
 		); err != nil {
 			return err
 		}
-		// The name, then the pool count ceiling, after every check of the
-		// request itself and before the scans (GW9), in the order the
-		// deciding STM judges them.
+		// The name, then the pool count ceiling and the pool id counter,
+		// after every check of the request itself and before the scans
+		// (GW9), in the order the deciding STM judges them.
 		if err := spNameUnused(
 			ctx, s.cli, scanCid, req.GetSpName(),
 		); err != nil {
@@ -774,7 +776,9 @@ func (s *Server) CreateStoragePool(
 			for idx, cntlr := range builtCntlrs {
 				stm.Put(model.CntlrKey(cid, spId, cntlrIds[idx]), cntlr)
 			}
-			minter.commit(conf)
+			if err := minter.commit(conf, opCreateStoragePool); err != nil {
+				return err
+			}
 			stm.Put(confKey, conf)
 			stm.Put(model.SpNameKey(cid, spId),
 				&pb.SpName{SpName: req.GetSpName()})

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -151,5 +152,159 @@ func TestGrowSliceNeverMintsIdZero(t *testing.T) {
 	// One grp_id plus a leg_id/side_id pair per leg.
 	if got := env.spConf().GetNextId(); got != SpFirstId+5 {
 		t.Errorf("next_id: got %d, want %d", got, SpFirstId+5)
+	}
+}
+
+// TestTakeSpIdsAtTheTop pins the top of a pool's counter (architecture.md,
+// Globals: id allocation + shard buckets): the largest 64-bit value is never
+// an id, so a counter one below it has one id left and a counter at it has
+// none. A run that fits leaves next_id just past it, at most at the largest
+// value; a run that does not is ReasonNoIdLeft and leaves the conf as it was.
+func TestTakeSpIdsAtTheTop(t *testing.T) {
+	const top = uint64(math.MaxUint64)
+	for _, tc := range []struct {
+		name   string
+		nextId uint64
+		n      uint64
+		ok     bool
+	}{
+		{name: "the last id", nextId: top - 1, n: 1, ok: true},
+		{name: "the last two ids", nextId: top - 2, n: 2, ok: true},
+		{name: "two ids with one left", nextId: top - 1, n: 2},
+		{name: "one id with none left", nextId: top, n: 1},
+		{name: "nothing with none left", nextId: top, n: 0, ok: true},
+		{name: "a run past the top", nextId: top - 5, n: top},
+		{name: "an unset counter", nextId: 0, n: 3, ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := &pb.SpConf{NextId: tc.nextId}
+			first, err := TakeSpIds(conf, "TestOp", tc.n)
+			if !tc.ok {
+				precondition := wantPrecondition(t, err, "TestOp")
+				if precondition.Reason != ReasonNoIdLeft {
+					t.Errorf("Reason: got %q, want %q",
+						precondition.Reason, ReasonNoIdLeft)
+				}
+				if conf.GetNextId() != tc.nextId {
+					t.Errorf("the refusal moved next_id from %d to %d",
+						tc.nextId, conf.GetNextId())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("TakeSpIds: %v", err)
+			}
+			want := SpNextId(&pb.SpConf{NextId: tc.nextId})
+			if first != want {
+				t.Errorf("first id: got %d, want %d", first, want)
+			}
+			if got := conf.GetNextId(); got != want+tc.n {
+				t.Errorf("next_id: got %d, want %d", got, want+tc.n)
+			}
+		})
+	}
+}
+
+// storeRev is the etcd store's revision. No test of this package runs in
+// parallel with another, so an op that leaves it where it was has committed
+// nothing at all.
+func (e *opsEnv) storeRev() int64 {
+	e.t.Helper()
+	_, rev, err := e.cli.RangeKeys(e.ctx, SpConfKey(e.cid, opsSpName))
+	if err != nil {
+		e.t.Fatalf("RangeKeys: %v", err)
+	}
+	return rev
+}
+
+// TestOpsTakeTheirIdsUpToTheTop is the same rule at the three ops that mint
+// ids (dnv-worker.md, MD6): with exactly the ids an op takes left below the
+// largest 64-bit value, the op commits them, its first id the counter's, and
+// leaves next_id at that value; with one fewer left it is refused with
+// ReasonNoIdLeft and writes nothing.
+func TestOpsTakeTheirIdsUpToTheTop(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		op    string
+		n     uint64
+		setup func(env *opsEnv)
+		run   func(env *opsEnv) (uint64, error)
+	}{
+		{
+			// One grp_id plus a leg_id/side_id pair per leg.
+			name: "GrowSlice", op: opGrowSlice, n: 5,
+			run: func(env *opsEnv) (uint64, error) {
+				legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
+				return GrowSlice(
+					env.ctx, env.cli, env.cid, opsShard, opsSpId,
+					opsSpName, noExpectRev, opsSliceId, false,
+					opsNotPending, env.cc, legs,
+				)
+			},
+		},
+		{
+			name: "ReplaceCntlr", op: opReplaceCntlr, n: 1,
+			setup: func(env *opsEnv) {
+				env.setCntlrErr(opsCntlrB, 1000)
+			},
+			run: func(env *opsEnv) (uint64, error) {
+				now := uint64(1000 + common.DefaultCntlrUnhealthy)
+				return ReplaceCntlr(
+					env.ctx, env.cli, env.cid, opsShard, opsSpId,
+					opsSpName, opsCntlrB, env.cnCand(opsCnC),
+					[]string{opsCnA}, false, now,
+				)
+			},
+		},
+		{
+			// The spare's leg_id and its side's side_id.
+			name: "CreateSpareLeg", op: opCreateSpareLeg, n: 2,
+			run: func(env *opsEnv) (uint64, error) {
+				return CreateSpareLeg(
+					env.ctx, env.cli, env.cid, opsShard, opsSpId,
+					opsSpName, noExpectRev, opsSliceId, opsDataGrpId,
+					env.dnCand(opsDnC), env.grpDnAddrs(opsDataGrpId),
+					env.cc,
+				)
+			},
+		},
+	} {
+		t.Run(tc.name+"/the last ids", func(t *testing.T) {
+			env := newOpsEnv(t)
+			first := uint64(math.MaxUint64) - tc.n
+			resetNextId(env, first)
+			if tc.setup != nil {
+				tc.setup(env)
+			}
+			id, err := tc.run(env)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.op, err)
+			}
+			if id != first {
+				t.Errorf("first id: got %d, want %d", id, first)
+			}
+			if got := env.spConf().GetNextId(); got != math.MaxUint64 {
+				t.Errorf("next_id: got %d, want %d", got,
+					uint64(math.MaxUint64))
+			}
+		})
+		t.Run(tc.name+"/one id short", func(t *testing.T) {
+			env := newOpsEnv(t)
+			resetNextId(env, uint64(math.MaxUint64)-tc.n+1)
+			if tc.setup != nil {
+				tc.setup(env)
+			}
+			before := env.storeRev()
+			_, err := tc.run(env)
+			precondition := wantPrecondition(t, err, tc.op)
+			if precondition.Reason != ReasonNoIdLeft {
+				t.Errorf("Reason: got %q, want %q",
+					precondition.Reason, ReasonNoIdLeft)
+			}
+			if got := env.storeRev(); got != before {
+				t.Errorf("the refusal wrote: store revision %d, want %d",
+					got, before)
+			}
+		})
 	}
 }

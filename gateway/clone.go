@@ -231,7 +231,9 @@ func (s *Server) CreateClone(
 		}
 		sc.Conf.CloneNameList = append(
 			sc.Conf.CloneNameList, req.GetCloneName())
-		minter.commit(sc.Conf)
+		if err := minter.commit(sc.Conf, opCreateClone); err != nil {
+			return err
+		}
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
 		return bumpSp(stm, opCreateClone, sc)
 	})

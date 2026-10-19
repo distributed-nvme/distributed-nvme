@@ -475,7 +475,9 @@ func (s *Server) CreateMigration(
 			minter := newSpIdMinter(sc.Conf)
 			migrId = minter.mint()
 			dstSideId := minter.mint()
-			minter.commit(sc.Conf)
+			if err := minter.commit(sc.Conf, opCreateMigration); err != nil {
+				return err
+			}
 			loc.Leg.SideList = append(loc.Leg.GetSideList(), &pb.Side{
 				SideId:      dstSideId,
 				AddrPort:    cand.AddrPort,

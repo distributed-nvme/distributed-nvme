@@ -22,7 +22,9 @@ import (
 // This file is the boundary tests of the gateway (gateway.md, Integration
 // test plan): count ceilings of architecture.md, Cardinality limits, and the
 // size edges of architecture.md, Size → extents and Group on-leg layout, and
-// of the transport service id, each named by its case and reached through
+// of the transport service id, and the id counters at their top
+// (architecture.md, Globals: id allocation + shard buckets), each named by
+// its case and reached through
 // the real handlers against the package's etcd. A count ceiling is filled by
 // real creates, the create that takes the last place is accepted, and the
 // one after it is refused and writes nothing; a size bound is accepted at its
@@ -1520,7 +1522,7 @@ func TestCreateStoragePoolOverflowBeforeTheScan(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The id step at its last value
+// The id counters at their top: the id step's last value and the last id
 // ---------------------------------------------------------------------------
 
 // bndPlantLastIds plants every id counter of the cluster and of pool-a at the
@@ -1580,32 +1582,38 @@ func TestIdStepAtItsLastValue(t *testing.T) {
 	}
 }
 
-// TestIdCounterAtItsLastValueIsNotReused asserts the rule of architecture.md,
-// Globals: id allocation + shard buckets, that ids are never reused, on
-// counters at math.MaxUint64, where TestIdStepAtItsLastValue shows the id
-// step can leave them: the create that takes that last id is followed by no
-// create that hands out an id the cluster or the pool has handed out before.
-// The counters are planted there directly, with the pool's next thin id left
-// low, so that the pool's second create is not refused for want of a thin id
-// first.
+// TestIdCounterAtItsLastValueIsNotReused pins the rule of architecture.md,
+// Globals: id allocation + shard buckets, that no next_id hands out the
+// largest 64-bit value, on counters planted one below it, the last id they
+// hold. For the cluster's disk node counter (mintClusterId) and for a pool's
+// counter (the per-SP minter's commit), the create there gets that id and
+// leaves next_id at the largest value, and the create after it is
+// FAILED_PRECONDITION and writes nothing. A create that takes two ids,
+// CreateMigration's migration id and its new side's, is refused the same way
+// while one id is left. The pool's next thin id is left low, so that no pool
+// create is refused for want of a thin id first.
 func TestIdCounterAtItsLastValueIsNotReused(t *testing.T) {
-	t.Skip("an id counter at math.MaxUint64 wraps to zero at the next " +
-		"create, and the create after it hands out id 1 again " +
-		"(mintClusterId, spIdMinter)")
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
-	env.createSp(sptSmallSpec("pool-a"))
+	env.createSp(sptSmallSpec(sptSpName))
+	last := uint64(math.MaxUint64) - 1
 	dnG, _, _ := env.idStepGlobals()
-	dnG.NextId = math.MaxUint64
+	dnG.NextId = last
 	mustPut(t, env.cli, model.DnGlobalKey(env.cid), dnG)
-	planted := env.spConf("pool-a")
-	planted.NextId = math.MaxUint64
-	mustPut(t, env.cli, model.SpConfKey(env.cid, "pool-a"), planted)
-	handed := map[uint64]bool{math.MaxUint64: true}
-	for idx := 0; idx < sptDnCnt; idx++ {
-		handed[uint64(idx)+1] = true
+	planted := env.spConf(sptSpName)
+	planted.NextId = last
+	mustPut(t, env.cli, model.SpConfKey(env.cid, sptSpName), planted)
+	// refused runs one create that must be FAILED_PRECONDITION, its message
+	// naming msg, and fails the test if the create wrote anything at all.
+	refused := func(label string, msg string, create func() error) {
+		t.Helper()
+		before := env.dumpAll()
+		bndWantMsg(t, create(), codes.FailedPrecondition, msg, label)
+		if changed := idStepChanged(before, env.dumpAll()); len(changed) != 0 {
+			t.Errorf("%s wrote %q", label, changed)
+		}
 	}
-	for idx := 0; idx < 2; idx++ {
-		addr := fakeAddrPort(t, "wrap")
+	createDn := func() (uint64, error) {
+		addr := fakeAddrPort(t, "top")
 		startFakeAgent(t, addr, 16<<30)
 		reply, err := env.srv.CreateDiskNode(env.ctx,
 			&pb.CreateDiskNodeRequest{
@@ -1613,43 +1621,49 @@ func TestIdCounterAtItsLastValueIsNotReused(t *testing.T) {
 				AddrPort:    addr,
 				NvmeTrConf:  testTrConf(addr),
 			})
-		if idx == 0 {
-			if err != nil || reply.GetDnId() != math.MaxUint64 {
-				t.Fatalf("the create at the last id: %v, dn_id %d", err,
-					reply.GetDnId())
-			}
-			continue
-		}
-		if err == nil && handed[reply.GetDnId()] {
-			t.Errorf("the create after the last id handed out dn_id %d "+
-				"again", reply.GetDnId())
-		}
+		return reply.GetDnId(), err
 	}
-	conf := env.spConf("pool-a")
-	used := map[uint64]bool{}
-	for _, id := range append(conf.GetCntlrIdList(), conf.GetSliceIdList()...) {
-		used[id] = true
-	}
-	for idx := 0; idx < 2; idx++ {
+	createTd := func(name string) (uint64, error) {
 		reply, err := env.srv.CreateThinDevice(env.ctx,
 			&pb.CreateThinDeviceRequest{
 				ClusterName: env.name,
-				SpName:      "pool-a",
-				TdName:      fmt.Sprintf("wrap-%d", idx),
+				SpName:      sptSpName,
+				TdName:      name,
 				Size:        uint64(common.DefaultDmRaid0StripeSize),
 			})
-		if idx == 0 {
-			if err != nil || reply.GetTdId() != math.MaxUint64 {
-				t.Fatalf("the create at the last pool id: %v, td_id %d",
-					err, reply.GetTdId())
-			}
-			continue
-		}
-		if err == nil && used[reply.GetTdId()] {
-			t.Errorf("the create after the last pool id handed out td_id "+
-				"%d again", reply.GetTdId())
-		}
+		return reply.GetTdId(), err
 	}
+
+	if dnId, err := createDn(); err != nil || dnId != last {
+		t.Fatalf("the create at the last dn id: %v, dn_id %d", err, dnId)
+	}
+	if dnG, _, _ = env.idStepGlobals(); dnG.GetNextId() != math.MaxUint64 {
+		t.Errorf("dn_global next_id %d, want %d", dnG.GetNextId(),
+			uint64(math.MaxUint64))
+	}
+	refused("the create after the last dn id", "no disk node id left",
+		func() error {
+			_, err := createDn()
+			return err
+		})
+
+	side := env.walkSides(env.spConf(sptSpName))[0]
+	refused("a migration, two ids with one left", model.ReasonNoIdLeft,
+		func() error {
+			return bndCreateMigr(env.ctx, env, "top", side.SideId, nil)
+		})
+	if tdId, err := createTd("top-0"); err != nil || tdId != last {
+		t.Fatalf("the create at the last pool id: %v, td_id %d", err, tdId)
+	}
+	if got := env.spConf(sptSpName).GetNextId(); got != math.MaxUint64 {
+		t.Errorf("the pool's next_id %d, want %d", got,
+			uint64(math.MaxUint64))
+	}
+	refused("the create after the last pool id", model.ReasonNoIdLeft,
+		func() error {
+			_, err := createTd("top-1")
+			return err
+		})
 }
 
 // ---------------------------------------------------------------------------

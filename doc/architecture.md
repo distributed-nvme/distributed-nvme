@@ -1211,6 +1211,19 @@ are the cluster's **id counters**. After a restore the id step,
 out since the backup unless a counter handed out more than the step moves
 it by, as a pool's thin ids can (Clusters).
 
+No `next_id` hands out the largest 64-bit value, because the counter cannot
+store the value past it. A call that needs more ids than its `next_id` has
+left below that value is refused `FAILED_PRECONDITION` and writes nothing,
+and the worker's grow, cntlr replacement and leg repair, whose spare takes
+a leg id and a side id, fail the same precondition inside their
+transaction and write nothing either. A pool whose counter is spent still
+serves, fails over and drains, since none of those takes an id. A counter
+the id step moved onto the largest value refuses every create that draws
+from it from then on, and only a restore moves it back. The refusal sits
+at the create and not in the id step, because every create moves a counter
+and a raw etcd write can set one; a counter that wrapped instead would hand
+out the lowest ids again while live objects hold them.
+
 ### Revision keys and the sync fan-out
 
 The rev keys are addressed by **id**:
@@ -1908,7 +1921,11 @@ field; `ABORTED` per UNEXPECTED_ERROR → `ABORTED`; `ABORTED` "stale
 revision" whenever the request **carries** a `DnRev`, `CnRev` or `SpRev`
 token whose revision mismatches the stored one — omitting the token
 message skips that check entirely (Revision keys and the sync fan-out;
-`gateway.md` GW6). `cluster_name` defaults to `DefaultClusterName` for
+`gateway.md` GW6); and, in every RPC that takes new ids — `GrowSlice` and
+every create but `CreateCluster` — `FAILED_PRECONDITION` when a `next_id`
+it draws from has fewer ids left than it takes (Globals: id allocation +
+shard buckets).
+`cluster_name` defaults to `DefaultClusterName` for
 every RPC that takes one. Every RPC except `CreateCluster` and
 `ListClusters` starts by reading the `ClusterConf` of its `cluster_name`
 (`NOT_FOUND` if absent) — not only as an existence check, but because the
@@ -2191,9 +2208,11 @@ Action:
    that its pool exists, and last before the scan, a plain read of
    `SpGlobal` whose `shard_bucket` sum is at `MaxSpCntPerCluster` is
    `RESOURCE_EXHAUSTED`, a count ceiling answered ahead of the scan
-   (`gateway.md` GW9). The STM's own checks of the name
-   and the count below still decide, since only they see a pool created
-   after these reads. In the STM, in this order:
+   (`gateway.md` GW9), and one whose sum is below it but whose `next_id`
+   has no id left is `FAILED_PRECONDITION` (Globals: id allocation + shard
+   buckets). The STM's own checks of the name, the count and the counter
+   below still decide, since only they see a pool created after these
+   reads. In the STM, in this order:
    merge and resolve `bdev_conf` against the `ClusterConf` this
    transaction read, **before any id is minted**, and refuse the picks
    right there if the leg count or the `cluster_id` moved since the scan;
@@ -2202,8 +2221,9 @@ Action:
    repeats the pre-read's verdict, but this read is the authoritative
    one), and the primary threshold against that `ClusterConf`; the
    `sp_conf` existence check; allocate `sp_id` and `shard_code`
-   from `SpGlobal`, whose `shard_bucket` sum this read holds to
-   `MaxSpCntPerCluster` once more; validate that `ClusterConf` (Common
+   from `SpGlobal`, this read judging once more its `shard_bucket` sum
+   against `MaxSpCntPerCluster` and whether its `next_id` has an id left;
+   validate that `ClusterConf` (Common
    validation) and
    compute every group's `meta_blocks` and `data_blocks` (Group on-leg
    layout: meta region, data region, health block) from the resolved

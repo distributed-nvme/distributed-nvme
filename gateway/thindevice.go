@@ -226,7 +226,9 @@ func (s *Server) CreateThinDevice(
 			Created: false,
 		})
 		sc.Conf.TdNameList = append(sc.Conf.GetTdNameList(), req.GetTdName())
-		minter.commit(sc.Conf)
+		if err := minter.commit(sc.Conf, opCreateThinDevice); err != nil {
+			return err
+		}
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
 		return bumpSp(stm, opCreateThinDevice, sc)
 	})

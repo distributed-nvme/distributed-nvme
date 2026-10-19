@@ -439,7 +439,11 @@ are resolved inside from `SpConf.event_threshold` with the defaults of
 non-zero the STM re-checks `SpRev.revision` against it first
 (`ErrPrecondition` with `ReasonStaleRevision` on mismatch); zero skips the
 check — the caller's opt-out, which `gateway.md` GW6 defines for the public
-RPCs; this worker's reaction path passes zero.
+RPCs; this worker's reaction path passes zero. The three ops that mint ids
+— `GrowSlice`, `ReplaceCntlr`, `CreateSpareLeg` — take them through
+`TakeSpIds` and require the pool's `next_id` to have every id they take
+left (`ReasonNoIdLeft` otherwise; `architecture.md`, Globals: id
+allocation + shard buckets).
 
 * `SetDnErrEpoch` and `SetCnErrEpoch` require the record to exist. With a
   non-zero epoch they set it only when the stored value is zero (the threshold

@@ -135,7 +135,9 @@ func (s *Server) CreateTransfer(
 			AutoSuspend:  req.GetAutoSuspend(),
 		})
 		conf.XferNameList = append(conf.GetXferNameList(), req.GetXferName())
-		minter.commit(conf)
+		if err := minter.commit(conf, opCreateTransfer); err != nil {
+			return err
+		}
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), conf)
 		return bumpSp(stm, opCreateTransfer, sc)
 	})

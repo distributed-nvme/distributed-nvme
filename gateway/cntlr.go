@@ -377,7 +377,9 @@ func (s *Server) CreateCntlr(
 			if err := syncCdcEntries(stm, sc); err != nil {
 				return err
 			}
-			minter.commit(conf)
+			if err := minter.commit(conf, opCreateCntlr); err != nil {
+				return err
+			}
 			stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), conf)
 			return bumpSp(stm, opCreateCntlr, sc)
 		})
