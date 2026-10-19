@@ -607,8 +607,8 @@ func fillerTable(t *testing.T, size int) *pb.DnDiskTable {
 // (DnTableSlotSize, architecture.md, Disk node). Side records of real calls
 // cannot fill it in a test: at MaxSideCntPerDn sides of one extent run each
 // the table is tens of KiB (TestFakeWorkerConvergesAFullDiskNode), and
-// filling 16 MiB takes hundreds of thousands of extent runs, a disk of
-// millions of extents fragmented by as many allocations. So the table is
+// filling 16 MiB takes about two million extent runs, a disk of millions of
+// extents fragmented by as many allocations. So the table is
 // planted through the agent's own save, and the real allocation then lands
 // exactly at the room the slot leaves after its envelope: written, and read
 // back from the disk as the newest table. One byte more is refused before any
