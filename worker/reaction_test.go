@@ -817,6 +817,26 @@ func (h *reactHarness) wantSkipped(kind string, reason string) {
 	)
 }
 
+// wantSkippedBy asserts one `reaction skipped` record with that kind and
+// reason whose op attribute names op, the model op that refused inside its
+// transaction, or, op empty, that has none: the pass's own check refused.
+func (h *reactHarness) wantSkippedBy(kind string, reason string, op string) {
+	h.t.Helper()
+	for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+		if rec["kind"] != kind || rec["reason"] != reason {
+			continue
+		}
+		got, has := rec["op"]
+		if (op == "" && !has) || (op != "" && got == op) {
+			return
+		}
+	}
+	h.t.Fatalf(
+		"no `reaction skipped` kind=%s reason=%s op=%q; got %v",
+		kind, reason, op, h.logs.withMsg(msgReactionSkipped),
+	)
+}
+
 // wantNoSkip asserts that no `reaction skipped` record was emitted at all.
 func (h *reactHarness) wantNoSkip() {
 	h.t.Helper()
@@ -2051,7 +2071,8 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 		if !calls[0].isMeta {
 			t.Fatalf("grow = %+v, want the meta grow", calls[0])
 		}
-		h.wantSkipped(reactionGrowData, reasonGrowPending)
+		// The pass's own check found it pending: the record names no op.
+		h.wantSkippedBy(reactionGrowData, reasonGrowPending, "")
 		h.wantApplied(reactionGrowMeta)
 	})
 
@@ -2177,7 +2198,7 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 
 // TestReactionPreconditionSkips checks AR2's other half: an op that raises
 // model.ErrPrecondition logs `reaction skipped` with the precondition's own
-// reason, and the pass ends there.
+// reason and the op's name, and the pass ends there.
 func TestReactionPreconditionSkips(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
@@ -2187,7 +2208,7 @@ func TestReactionPreconditionSkips(t *testing.T) {
 	h.pass()
 	h.wantOps("failover")
 	h.wantApplied()
-	h.wantSkipped(reactionFailover, "old cntlr is not primary")
+	h.wantSkippedBy(reactionFailover, "old cntlr is not primary", "Failover")
 }
 
 // ---------------------------------------------------------------------------
@@ -2921,7 +2942,8 @@ func TestReactionLegRepairSmallestLegId(t *testing.T) {
 // RedundNone group, a leg with two sides, a full spare list and a spare still
 // unprovisioned (step 2's wait for a pending spare is
 // TestReactionSpareReadiness's) — and the in-STM refusal of that last one,
-// which is what a second owner meets and which logs the same way.
+// which is what a second owner meets and which logs the same reason with the
+// op's name on it.
 func TestReactionLegRepairSkips(t *testing.T) {
 	t.Run("redund none", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
@@ -2996,14 +3018,15 @@ func TestReactionLegRepairSkips(t *testing.T) {
 		if got := len(h.rops.allQueries()); got != 0 {
 			t.Fatalf("scans = %d, want 0", got)
 		}
-		h.wantSkipped(reactionSpareCreate, reasonSpareUnprovisioned)
+		h.wantSkippedBy(reactionSpareCreate, reasonSpareUnprovisioned, "")
 	})
 
 	// Two owners planning from one snapshot: the one whose STM lands second
 	// finds the first one's spare unprovisioned. Its refusal is a `reaction
 	// skipped` carrying the model's reason — the string the hold above logs
-	// — and, like every ErrPrecondition, it ends the pass (AR2): the data
-	// group's leg is not tried after the meta group's.
+	// — and the op's name, which the hold's record lacks, and, like every
+	// ErrPrecondition, it ends the pass (AR2): the data group's leg is not
+	// tried after the meta group's.
 	t.Run("second owner refused in the STM", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
@@ -3018,7 +3041,8 @@ func TestReactionLegRepairSkips(t *testing.T) {
 			t.Fatalf("create_spare = %+v, want the meta group", calls[0])
 		}
 		h.wantApplied()
-		h.wantSkipped(reactionSpareCreate, reasonSpareUnprovisioned)
+		h.wantSkippedBy(reactionSpareCreate, reasonSpareUnprovisioned,
+			"CreateSpareLeg")
 	})
 }
 

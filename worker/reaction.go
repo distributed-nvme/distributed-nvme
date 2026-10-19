@@ -85,7 +85,8 @@ const (
 	reasonSameError = "same_error"
 	// reasonGrowPending is AR6's stateless pending rule. It is model's
 	// string: the same reason reaches this record from the pass's pre-check
-	// and from a GrowSlice whose STM found the grow pending (AR2).
+	// and from a GrowSlice whose STM found the grow pending, whose record
+	// also names the op (AR2).
 	reasonGrowPending = model.ReasonGrowPending
 	// reasonSparePending is AR8 step 2: a spare is on its way.
 	reasonSparePending = "spare_pending"
@@ -2252,8 +2253,10 @@ func (w *spWorker) reactionSkipped(
 
 // reactionFailed turns one op error into a `reaction skipped` record (AR2): a
 // model.ErrPrecondition contributes the precondition that did not hold, which
-// is not a failure at all — the next pass re-evaluates — and anything else is
-// a transient failure that additionally carries the error text.
+// is not a failure at all — the next pass re-evaluates — and the op that
+// refused, whose name tells its refusal, which ends the pass, from the same
+// reason found by the pass's own check; anything else is a transient failure
+// that additionally carries the error text.
 func (w *spWorker) reactionFailed(
 	ctx context.Context,
 	kind string,
@@ -2262,7 +2265,9 @@ func (w *spWorker) reactionFailed(
 ) {
 	var pre *model.ErrPrecondition
 	if errors.As(err, &pre) {
-		w.reactionSkipped(ctx, kind, pre.Reason, ids...)
+		w.reactionSkipped(ctx, kind, pre.Reason,
+			withAttr(ids, slog.String("op", pre.Op))...,
+		)
 		return
 	}
 	w.reactionSkipped(ctx, kind, reasonOpFailed,

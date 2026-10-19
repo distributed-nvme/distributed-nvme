@@ -18,7 +18,8 @@ import (
 // check found the grow applicable, so the refusal ends the pass, though it
 // carries a reason that the same check would let the pass go on past
 // (TestReactionPendingGrowDoesNotBlockThePass): the leg repair that is due
-// in the same pass does not run.
+// in the same pass does not run. The record names the op, which tells it
+// from the same reason found by the pass's own check.
 func TestReactionGrowRefusedInsideItsTransactionEndsThePass(t *testing.T) {
 	for _, reason := range []string{model.ReasonGrowPending, model.ReasonGrpListFull} {
 		t.Run(reason, func(t *testing.T) {
@@ -31,7 +32,7 @@ func TestReactionGrowRefusedInsideItsTransactionEndsThePass(t *testing.T) {
 			h.rops.opErr = &model.ErrPrecondition{Op: "GrowSlice", Reason: reason}
 			h.pass()
 			h.wantOps("grow")
-			h.wantSkipped(reactionGrowData, reason)
+			h.wantSkippedBy(reactionGrowData, reason, "GrowSlice")
 			h.wantApplied()
 		})
 	}

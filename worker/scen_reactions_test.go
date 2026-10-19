@@ -678,11 +678,11 @@ func TestScenGrowNeedsAnOkParsablePoolRow(t *testing.T) {
 // TestScenGrowStaysPendingWhileItsSidesZeroSlowly pins AR6's pending rule and
 // half of AR2's rule on a refused grow: once a data grow commits, its new
 // sides zero slowly and the pool reports the old total, so every pass finds
-// the grow pending in its own check, logs `reaction skipped` (grow_pending),
-// grows nothing more — and goes on: a standby due for replacement is
-// replaced in such a pass. When the sides are provisioned and the pool
-// reports the grown total, the grow is no longer pending: a breach of that
-// total grows the slice once more.
+// the grow pending in its own check, logs `reaction skipped` (grow_pending)
+// with no op on it, grows nothing more — and goes on: a standby due for
+// replacement is replaced in such a pass. When the sides are provisioned and
+// the pool reports the grown total, the grow is no longer pending: a breach
+// of that total grows the slice once more.
 func TestScenGrowStaysPendingWhileItsSidesZeroSlowly(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
@@ -720,8 +720,16 @@ func TestScenGrowStaysPendingWhileItsSidesZeroSlowly(t *testing.T) {
 			t.Fatalf("new side %d while it zeroes: found %t, %v", ids[1], ok, side)
 		}
 	}
-	h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 3,
+	pending := h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 3,
 		reactionIs(reactionGrowData, reasonGrowPending))
+	// Each came from the pass's own check, so none names an op: only a
+	// GrowSlice that refuses inside its transaction does (AR2).
+	for _, rec := range pending {
+		if op := rec.str("op"); op != "" {
+			t.Errorf("a pass logged the pending grow as refused by %s, "+
+				"want the pass's own check", op)
+		}
+	}
 
 	for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
 		for _, ids := range sides {
@@ -811,8 +819,9 @@ func TestScenGrowWithNoDnEndsThePass(t *testing.T) {
 // `reaction skipped` (no candidate). An operator's GrowSlice lands between
 // the worker's scan for its own grow and that grow's transaction, which then
 // finds the grow pending and refuses: that pass ends, with no AR7 record in
-// it. The next pass finds the grow pending in its own check and goes on: its
-// AR7 record is there.
+// it, and its record names the op, GrowSlice. The next pass finds the grow
+// pending in its own check and goes on: its AR7 record is there, and its grow
+// record names no op.
 func TestScenGrowRefusedInsideItsTransactionEndsThePass(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{keepWire: true})
@@ -859,6 +868,12 @@ func TestScenGrowRefusedInsideItsTransactionEndsThePass(t *testing.T) {
 			return rec.traceId != refused.traceId && rec.at.After(refused.at) &&
 				reactionIs(reactionGrowData, reasonGrowPending)(rec)
 		})
+	if op := refused.str("op"); op != "GrowSlice" {
+		t.Errorf("the in-transaction refusal names op %q, want GrowSlice", op)
+	}
+	if op := next.str("op"); op != "" {
+		t.Errorf("the pass's own check names op %q, want none", op)
+	}
 	h.waitRecord(t, 20*time.Second, w, msgReactionSkipped,
 		and(replaceSkip, inPass(next.traceId)))
 	if n := h.countRecs(w, msgReactionSkipped,

@@ -2450,12 +2450,13 @@ bound at all, and step 3's hold on a spare whose DN failed while it zeroed
 has none either. Everything else ends the pass: every `ErrPrecondition`,
 every empty allocator scan and every transient op failure — `GrowSlice`'s
 refusal from inside its transaction among them, though it carries the
-`grow_pending` or `grp_list_full` of the pass's own check: that check found
-the grow applicable on the pass's snapshot, so the slice gained a group
-after the snapshot was read — another owner's grow (VW7) or an operator's
-`GrowSlice` — and the pass applies nothing more from a snapshot the store
-has overtaken; the next pass reads the slice afresh, and its own check then
-finds the grow pending or the list full and goes on. Two owners
+`grow_pending` or `grp_list_full` of the pass's own check (its record names
+the op, Log records): that check found the grow applicable on the pass's
+snapshot, so the slice gained a group after the snapshot was read — another
+owner's grow (VW7) or an operator's `GrowSlice` — and the pass applies
+nothing more from a snapshot the store has overtaken; the next pass reads
+the slice afresh, and its own check then finds the grow pending or the list
+full and goes on. Two owners
 overlapping on one SP (VW7) cannot apply an action twice — the second STM
 fails its precondition — with one exception, a spare create, and that only
 in a narrow case. A group may hold several spares and nothing records which
@@ -3398,7 +3399,10 @@ reply has no code to report and must not be logged as a `bitmap pushed` with
 an invented zero.
 
 **Reactions and drains.** `reaction applied` a committed reaction and
-`reaction skipped` a reaction the pass does not take, with its reason (AR2);
+`reaction skipped` a reaction the pass does not take, with its reason (AR2),
+and with the op's name as `op` when a `model` op refused it
+(`ErrPrecondition`, MD7): one reason can come from the pass's own check or
+from the op, and only the op's refusal always ends the pass (AR2);
 `sp drain step` every committed D1 and D2 step and `sp drained` the D3 that
 ends the drain (SPD12), so no step record carries a final phase;
 `sp drain failed` a drain step whose call failed, retried on the next tick
