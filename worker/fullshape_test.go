@@ -962,7 +962,17 @@ func TestFullShapeWidestPool(t *testing.T) {
 	}
 
 	// Drained: emptied as the gateway requires before it latches a pool
-	// (SPD4), latched, and taken apart by the worker's drain.
+	// (SPD4), latched, and taken apart by the worker's drain. A bitmap chunk
+	// appended first to the finished migration and to a cancelled one, as
+	// AppendMigrationBitmap appends, shows that the finish and the cancel
+	// delete it.
+	for _, migr := range []wideMigr{cut, notCut} {
+		if _, err := plant.PutMigrBitmap(ctx, h.cli, wp.cl, wp.sp.Ref, plant.MigrBitmapSpec{
+			Migr: migr.Name, BmIdx: 0, Data: []byte{0xff},
+		}); err != nil {
+			t.Fatalf("append a bitmap chunk to %s: %v", migr.Name, err)
+		}
+	}
 	drainStart := time.Now()
 	wp.drainClones(t)
 	wp.dropChildren(t, cut.Name)
@@ -1122,9 +1132,16 @@ const wideTdsPerTxn = common.EtcdMaxTxnOps / 2
 // gateway's DeleteTransfer, DeleteNamespace and DeleteSubsystem,
 // DeleteThinDevice, FinishMigration and CancelMigration write
 // (architecture.md, Transfers; Subsystems, namespaces; Thin devices;
-// Migrations): one transaction per kind, the thin devices in batches and the
-// migrations one each, each bumping SpRev once. The worker's tests do not
-// import the gateway, and no worker path removes these.
+// Migrations), but grouped otherwise and with one write of its own. The
+// grouping: one transaction per kind, the thin devices in batches and the
+// migrations one each, each bumping SpRev once. The transfer delete is
+// DeleteTransfer's forced form, which leaves the origin namespace's
+// suspended flag as it is. The write of its own: a subsystem goes together
+// with its namespaces in one transaction, where the gateway deletes the
+// namespaces first, by DeleteNamespace, and refuses DeleteSubsystem while
+// the subsystem still has one. The worker's tests do not import the gateway,
+// and no worker path removes these; the writes stay in this file, not in
+// integtest/plant, until a second case empties a pool.
 func (wp *widePool) dropChildren(t *testing.T, finished string) {
 	t.Helper()
 	ref, cid := wp.sp.Ref, wp.cl.Id
@@ -1186,8 +1203,8 @@ func (wp *widePool) dropChildren(t *testing.T, finished string) {
 // dropChildren's STM: the source side, or the new one, leaves the leg, its
 // disk node gets its extents back and loses its pointer, with its capacity
 // key and revision moved; the new side's disk node gets the migration's
-// metadata units back; and the record and its name go (architecture.md,
-// Migrations; Metadata units).
+// metadata units back; and the record, every chunk of its bitmap and its
+// name go (architecture.md, Migrations; Metadata units).
 func (wp *widePool) endMigration(
 	s etcdutil.STM,
 	conf *pb.SpConf,
@@ -1270,6 +1287,11 @@ func (wp *widePool) endMigration(
 		model.MaintainDnCapacity(s, cid, dstAddr, wp.cl.Conf, oldDst, newDst)
 	}
 	s.Put(sliceKey, slice)
+	// The chunks go one key at a time below the record's bm_cnt, as the
+	// gateway's dropMigration deletes them: an STM cannot range.
+	for idx := uint32(0); idx < record.GetBmCnt(); idx++ {
+		s.Del(model.MigrBitmapKey(cid, wp.sp.Ref.Id, migr.Name, idx))
+	}
 	s.Del(model.MigrationKey(cid, wp.sp.Ref.Id, migr.Name))
 	conf.MigrNameList = slices.DeleteFunc(slices.Clone(conf.GetMigrNameList()),
 		func(name string) bool { return name == migr.Name })
