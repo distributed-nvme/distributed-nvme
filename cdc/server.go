@@ -39,8 +39,8 @@ type server struct {
 	mu    sync.Mutex
 	conns map[*conn]struct{}
 	// cntlIdSeq is the round-robin dynamic CNTLID counter of NP5. It walks
-	// [1, common.CdcCntlIdMax]; ids are never reused before the whole range
-	// has been, which keeps a reconnecting host from seeing its own old id.
+	// [1, common.CdcCntlIdMax] and wraps to 1 whether or not a live
+	// connection still holds an id; NP5 gives the reason for both.
 	cntlIdSeq uint32
 }
 

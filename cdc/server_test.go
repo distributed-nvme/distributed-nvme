@@ -43,9 +43,9 @@ func srvDisconnects(t *testing.T, logs *logCapture) map[string]string {
 }
 
 // TestCntlIdIsDynamicAndRoundRobin proves NP5's controller ids: every
-// connection gets its own out of [1, common.CdcCntlIdMax], two live
-// connections never share one, and the counter wraps rather than running off
-// the end of the range.
+// connection gets one out of [1, common.CdcCntlIdMax], connections made one
+// after another get the next id each, and the counter wraps rather than
+// running off the end of the range.
 func TestCntlIdIsDynamicAndRoundRobin(t *testing.T) {
 	ts := startServer(t)
 	a := ts.dial()

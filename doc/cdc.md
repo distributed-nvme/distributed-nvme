@@ -386,6 +386,18 @@ and returned, the connection registers under its hostnqn (DS7), and
 validated, because this controller is dynamic: it assigns the id and
 returns it, and every conforming host asks for the dynamic controller
 there; only a host asking for a static CNTLID could observe the difference.
+The counter walks round robin so that a host that reconnects to a running
+instance does not get its old id back before the counter has walked the
+whole range. A restarted instance starts the walk again, because nothing
+persists (DS11), so after a restart a host may get its old id back. Past
+the wrap the counter hands out the next id whether or not a live
+connection still holds it, and it withholds no id. NP5 makes this choice
+itself, so the mirror rule (NP14) does not decide it. A Linux host never
+refuses a controller over a shared id, because it gives every controller of
+the well-known discovery NQN a subsystem of its own and compares controller
+ids only within one subsystem. The records of one
+connection are joined by the trace id it gets at accept (`grpc.md`, T4),
+not by its CNTLID.
 
 NP6. **Properties.** Property Get: CAP (MQES one below
 `CdcMaxAdminSqSize`, contiguous queues required, the smallest doorbell

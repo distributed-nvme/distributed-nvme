@@ -931,16 +931,16 @@ func TestLogOfExactlyOnePageAndOneMore(t *testing.T) {
 // The CNTLID counter's wrap (NP5)
 // ---------------------------------------------------------------------------
 
-// TestCntlIdWrapsWhileOldConnectionsLive pins NP5's counter as the code has
-// it: round robin over [1, common.CdcCntlIdMax], wrapping to 1 whether or
-// not a live connection still holds 1, which NP5 does not rule on. A host's
-// first connection gets 1; the counter is moved to the top of its range,
-// as if every other id had been handed out and given back; another host gets
-// the top id, and the first host's second connection gets 1 again. Both
-// connections with id 1 are served on their own: each Identify carries the
-// id its own Connect returned, which the Linux host checks, both get the AEN
-// of one change, and the end of one leaves the other and the host's state
-// in place (DS7).
+// TestCntlIdWrapsWhileOldConnectionsLive pins the wrap of NP5's counter: it
+// walks [1, common.CdcCntlIdMax] round robin and, past the wrap, hands out 1
+// again while a live connection still holds 1, because NP5's counter
+// withholds no id. A host's first connection gets 1; the counter is moved to
+// one below the top of its range, as if every other id had been handed out
+// and given back; another host gets the top id, and the first host's second
+// connection gets 1 again. Both connections with id 1 are served on their
+// own: each Identify carries the id its own Connect returned, which the
+// Linux host checks, both get the AEN of one change, and the end of one
+// leaves the other and the host's state in place (DS7).
 func TestCntlIdWrapsWhileOldConnectionsLive(t *testing.T) {
 	logs := captureLogs(t)
 	cli := newTestClient(t)
