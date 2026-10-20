@@ -907,7 +907,7 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 // class holds the td's own rows — its thin rows, its raid0 and its dm-error —
 // and every row of an object that exists for it alone — the ns-dev and the
 // nvmet namespace of each of its namespaces, the three rows of a transfer out
-// of one of them, the three of a clone onto it. The pool lives on the SP's legs,
+// of one of them, the two of a clone onto it. The pool lives on the SP's legs,
 // so whichever cntlr holds the primary role reads the same rows, and no
 // failover or replacement brings the td, or anything over it, back: an
 // operator does (architecture.md, Known limits).
@@ -1029,14 +1029,18 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // source is not connected, has a fault (an endpoint with no live controller,
 // or no namespace) or could not be read this pass (CN18), so a primary
 // showing one stays settling, held to cntlr_unhealthy, until it clears — for
-// as long as a clone's source stays unconnected, faulty or unread. A
-// clone the cn agent finds no free run for in its CN's metadata area reads
-// PROVISIONING on clone_id_to_meta and clone_id_to_dm_clone (CN18;
-// architecture.md, Metadata units) and holds its primary settling the same
-// way, for as long as it waits for room — on a CN a cntlr replacement charged
-// past its area's ceiling, say, or one whose free units are not contiguous.
-// Neither row is an ERROR, so the wait sets no err_epoch and fails nothing
-// over. Leg
+// as long as a clone's source stays unconnected, faulty or unread. Below
+// SP_LEVEL_NO_CLONE, where a clone's rows do not read the level (CN19), so
+// does a clone with no dm-clone while its clone meta group is not ready, its
+// dm-clone row MISSING (CN18), for as long as that lasts; a converge that
+// could not assemble the group reports the group's own row ERROR, which sets
+// err_epoch, and a background read in between reports an md array that is
+// not there MISSING "", as it does a slice's group above. Below that level
+// too, a clone whose destination or clone meta group still provisions reads
+// PROVISIONING on clone_id_to_target and clone_id_to_dm_clone (CN18) and
+// holds its primary settling the same way, for as long as those sides zero;
+// neither of its two rows is an ERROR then, so that wait sets no err_epoch
+// and fails nothing over. Leg
 // rows are left out: a spare whose side is still zeroing reads PROVISIONING
 // there for as long as it zeroes. So are path rows, in no map HL2 judges: a
 // migration's dst side reads PROVISIONING there while it zeroes. So are group
@@ -1047,7 +1051,11 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // Nothing else needs them: a new SP has one group per list (the gateway's
 // planSpGroups), so a group of its that is still provisioning defers its
 // whole slice, whose pool rows say so, and a group a converge could not
-// assemble leaves the pool rows over it ERROR or MISSING. A leg that a forced
+// assemble leaves the pool rows over it ERROR or MISSING. A clone meta group
+// has no pool over it: below SP_LEVEL_NO_CLONE its clone's rows show it,
+// PROVISIONING while its sides zero and the dm-clone row MISSING while it is
+// not ready and no dm-clone is there (CN18), and at that level and above no
+// layer over it is wanted. A leg that a forced
 // FinishMigration left with an unprovisioned destination as its only side —
 // possible only for a Migration whose record carries no cutover_pending
 // (architecture.md, Upgrade in lockstep), as a finish is refused while the

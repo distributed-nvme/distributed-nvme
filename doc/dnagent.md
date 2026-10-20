@@ -87,7 +87,8 @@ decodes have parsers there — `ParseDmName` for the dm device names (every
 of the name helpers have no inverse: the `/dev` and local-store paths, the
 tmpfs paths and the md names are formatted only — an md array is attributed
 by its members' dm names instead (`cnagent.md` CN21) — and the hashed forms
-(`DnNsIdentity`, `NvmeHostId`, `CnMdDevName`'s short id) could not have one.
+(`DnNsIdentity`, `NvmeHostId`, the short ids of `CnMdDevName` and
+`CnCloneMdDevName`) could not have one.
 Parsing is strict: a name that does not decode exactly is "not a dnv name",
 never a half-decoded one, because the caller's next move is a removal.
 
@@ -225,8 +226,8 @@ because rule ids never shift: code comments cite them.) A role server MAY
 run goroutines outside any RPC: the DN8 retry of a migration destination
 (so nicknamed for the DN8-gated converge it re-runs; the retry loop itself
 is specified in DN13), the DN12 fence timer, the DN9 side-zeroing workers,
-the background reads the check rounds start (SH29), the cn's connect retry
-and clone-metadata retry, the CN11 leg probers and the cn sweep's
+the background reads the check rounds start (SH29), the cn's connect retry,
+the CN11 leg probers and the cn sweep's
 background `nvme disconnect` (`cnagent.md` CN10, CN18). Every one of them
 derives its ctx from the server's **`rootCtx`** — the process-lifetime ctx
 captured at `Reconcile`, which `Serve` derives from its own ctx and cancels
@@ -269,8 +270,8 @@ shutdown forever — cancelling is the whole contract there. Nor is the child
 of the cn sweep's background `nvme disconnect` joined (`cnagent.md` CN10):
 it holds nothing a restarted agent needs, a delete already in the kernel
 finishes whether or not anybody waits for it, and a join could hold shutdown
-for the kernel's whole admin timeout. Nor are the cn's connect retry and
-clone-metadata retry (`cnagent.md` CN10, CN18): an attempt of either runs
+for the kernel's whole admin timeout. Nor is the cn's connect retry
+(`cnagent.md` CN10, CN18): an attempt of it runs
 the bounded commands of an ordinary pass, which the cancellation of
 `rootCtx` ends, and nothing waits for them. Nor are the cn's background
 reads (SH29): a read runs bounded commands too, which the same
@@ -461,8 +462,8 @@ but a check round and an info read (SH12) — `SyncupSide`/`SyncupCntlr`,
 `Push*Bitmap`, the cn's `Get*Bm` bitmap reads — the background read of a
 side or a cntlr (SH29), and every background converge attempt (the dn's connect retry — DN13; DN1's and
 SH27's "DN8 retry" — and DN12 fence timer, which share `reconvergeSide`,
-and the cn's connect retry and clone-metadata retry, which share
-`reconvergeCntlr` — the SH27 background tasks that converge; `cnagent.md`
+and the cn's connect retry, which runs `reconvergeCntlr` — the SH27
+background tasks that converge; `cnagent.md`
 CN1). Each takes the object's lock only once it has found the object, or
 its gates have admitted the request, under the node read lock (Concurrency
 — `locks.go`): a call refused for an object the agent does not hold takes
@@ -678,8 +679,8 @@ rebuild, or — `dirMtime`'s — with a clean verdict or a re-sent `SyncupCn`:
 * `CloneMeta.Mounted` and `CloneMeta.FileSize` (`cnagent.md` CN5: the two
   `findmnt` calls of the tmpfs probe, whose "absent" is answered with a
   `mount`, which over the live clone-metadata arena stacks a second, empty
-  tmpfs that hides it — a fresh arena file and a second loop device follow,
-  and every clone on the CN is rebuilt — and the "stat" of the arena file,
+  tmpfs that hides it — a fresh arena file and a second loop device follow
+  — and the "stat" of the arena file,
   whose "absent" is answered with a `truncate` of it to
   `CnCloneMetaAreaSize`: a no-op on the live arena file, which the converge
   only ever creates at that size, but a resize in place of one of any
@@ -942,7 +943,7 @@ fully-skippable-region to `blkdiscard` range computation (`SkipRanges`,
 source geometry, are the cn agent's (`cnagent.md`, Files). The single
 wire-convention inversion
 (**wire 1 = unwritten/skippable**) is *not* here: the one place that reads
-the "written/copied = 1" side of the convention is the thin-pool metadata
+the "written = 1" side of the convention is the thin-pool metadata
 reader in `agent/cnagent/thinbm.go`, so that is where it inverts, exactly
 once, and every chunk reaching this file is already in wire convention.
 The dn supplies only the positioning parameters (it shifts by the leg's
@@ -1006,8 +1007,8 @@ is `dnv-worker.md` HL7.
 
 The end of every converge stores an observation before its locks go: a
 syncup's, the startup reconcile's for each object it converges, a DN13
-retry attempt's, the DN12 fence timer's, and the cn's connect retry's and
-clone-metadata retry's (`cnagent.md` CN10, CN18). It holds the rows and the
+retry attempt's, the DN12 fence timer's, and the cn's connect retry's
+(`cnagent.md` CN10, CN18). It holds the rows and the
 code the converge's own reply carries, or would carry where no reply is
 sent, and the revision of the request it converged. A converge whose call
 was cut off stores none: every command after the cut fails at once, so
@@ -2771,8 +2772,8 @@ with no free run only where the free units lie in runs too short, or a
 run the count gave back has not been freed yet. That wait is the one
 above: the side zeroes nothing, its rows read `RES_STATUS_PROVISIONING`
 with the area's text, no health epoch is set, the source keeps serving,
-and the retry takes the run with no further request once one comes free —
-the dn twin of the cn arena's wait in `cnagent.md` CN18.
+and the retry takes the run with no further request once one comes
+free.
 
 DN14. Reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
@@ -3286,7 +3287,7 @@ else reported through `agent_reply` is still a protocol-level refusal.
   waits for the object's next revision or for a converge that comes for a
   reason of its own: a restart's startup reconcile (DN2; `cnagent.md`
   CN2), a DN13 retry attempt, the DN12 fence timer, or on a cn an attempt
-  of `cnagent.md` CN10's connect retry or CN18's clone-metadata retry.
+  of `cnagent.md` CN10's connect retry.
 * The dn sweep gates its removals on its `dmsetup ls` alone: an nvmet
   listing or a host walk that did not answer is named in the verdict, so
   the reply is not clean and the worker re-drives the pass, but it stops

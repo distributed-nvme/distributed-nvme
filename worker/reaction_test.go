@@ -1343,9 +1343,6 @@ func lostStackInfo(converge bool) *pb.CntlrInfo {
 		CloneIdToDmClone: map[uint64]*pb.ResInfo{
 			reactLostClone: resErr("clone", "x"),
 		},
-		CloneIdToMeta: map[uint64]*pb.ResInfo{
-			reactLostClone: resErr("clone-meta", "x"),
-		},
 		TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
 			reactLostTd: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
 				reactSliceId: thin,

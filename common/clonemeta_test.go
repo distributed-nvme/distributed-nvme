@@ -10,7 +10,7 @@ const (
 )
 
 // TestCloneMetaUnits pins the formula of architecture.md, Metadata units, on
-// the examples both agents state and on its edges: the base is one unit, each
+// worked examples and on its edges: the base is one unit, each
 // whole block adds one byte, a partial block adds nothing, and a block size
 // of zero counts no region at all.
 func TestCloneMetaUnits(t *testing.T) {

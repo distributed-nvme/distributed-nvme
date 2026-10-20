@@ -874,7 +874,7 @@ func (s *DnAgentServer) ensureDmClone(
 	// no_discard_passdown is mandatory on every dnv dm-clone (DN13 step
 	// 4): `blkdiscard` on a dm-clone is this design's metadata-only "mark
 	// this region hydrated" primitive (architecture.md, Bitmap push protocol,
-	// raid0 bitmap math and Clone crash recovery), and dm-clone
+	// and raid0 bitmap math), and dm-clone
 	// turns passdown on by default whenever the destination's discard
 	// granularity is no larger than a region — which a dm-linear over a raw
 	// disk satisfies. The hazard is *after* the cutover (architecture.md,

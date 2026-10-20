@@ -1076,9 +1076,9 @@ func TestCloneDrainOpsRefuseALiveClone(t *testing.T) {
 // meta group on that group's DNs (TestFinishCloneDeleteGivesTheGroupBack).
 // So no DN of the slice moves, no CN's free extents or revision move, the
 // SP's own inventory is untouched but for the one name the final STM
-// removes, and its revision moves once, for that final STM (CLD12). The run
-// behind the metadata wrapper is agent-local, freed by the cn agent's sweep
-// (cnagent.md CN21).
+// removes, and its revision moves once, for that final STM (CLD12). No CN
+// holds a run of its arena for the clone, which keeps its dm-clone metadata
+// on its clone meta group (cnagent.md CN18).
 func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()

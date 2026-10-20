@@ -269,10 +269,11 @@ func (s *CnAgentServer) lookupSubsys(
 // CN10 — leg side connections and the leg wrapper
 // ---------------------------------------------------------------------------
 
-// ensureLegs converges every leg of every group of every slice — spare legs
-// included, both roles. It reports which legs are **available** (cnagent.md
-// CN12), which is what the assembly needs, records each leg's ResInfo and a
-// two-sided leg's path rows (legPathRows), and says
+// ensureLegs converges every leg of every group of every slice and of every
+// clone's clone meta group — spare legs included, both roles. It reports
+// which legs are **available** (cnagent.md CN12), which is what the assembly
+// needs, records each leg's ResInfo and a two-sided leg's path rows
+// (legPathRows), and says
 // whether any leg failed to converge — its connect, a controller's address
 // read that did not answer, its multipath namespace or its wrapper — which
 // registers the cntlr for the background retry (build registers it too for a
@@ -477,8 +478,8 @@ func (s *CnAgentServer) connectWithin(
 // fails fails the leg with its own error. A clone source passes CN18's step
 // 1 on it, since that step reads no number: the source's number is first
 // read in step 3, for the dm-clone's table, so a read that fails there fails
-// step 3, and its error leads the dm-clone's and the wrapper's rows that
-// are not OK, never the source's row (CN18).
+// step 3, and its error leads the dm-clone's row when that row is not OK,
+// never the source's row (CN18).
 //
 // Only a connect made in this pass is waited for: a subsystem that was
 // already connected is judged on the one read, whatever it shows — no head,
@@ -914,30 +915,25 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// CN10/CN18 background connect retry and CN18's clone-metadata retry (the
-// DN13 pattern)
+// CN10/CN18 background connect retry (the DN13 pattern)
 // ---------------------------------------------------------------------------
 
 // startConnectRetry registers a cntlr for the CN10 background retry: a leg or
-// a clone source failed to converge (CN10/CN18), a clone recovery's
-// destination bitmaps were not applied or another later step of a clone
-// failed (CN18 says which), a group's leg_list holds a member that is not
-// available (CN12), the build failed to move the ANA group of a namespace
-// or a transfer (CN16, CN17), or the build left the device of a namespace
-// or a transfer whose desired group is optimized off what the desired state
-// wants — held off its td's raid0 (CN18), waiting on the dm-error, or after
-// a failed step — whatever the cause (CN16, CN17), but for its clone's room
-// in the arena alone (waitsForRoom). A goroutine
-// re-runs the whole converge every CnConnectRetryInterval seconds under the
-// CN1 locks until a pass registers none of these (build's stopConnectRetry)
-// or the cntlr is torn down. The RPC itself retries a connect, or waits for
-// its namespace head, only as far as the pass's CnConnectPassBudget allows:
-// an in-pass retry, or a step of that wait, starts only while the budget
-// still covers its pause (connectWithin, awaitNsHead). An arena that has no
-// free run for a clone's metadata is not one of its causes: that clone, and
-// a namespace of its destination td that waits only for it, wait for CN18's
-// slower clone-metadata retry (startCloneMetaRetry), and a run larger than
-// the whole arena registers neither retry.
+// a clone source failed to converge (CN10/CN18), a clone's clone meta group
+// was not ready while no dm-clone of the clone served or a later step of a
+// clone stopped the build (CN18 says which), a group's leg_list holds a
+// member that is not available (CN12), the build failed to move the ANA
+// group of a namespace or a transfer (CN16, CN17), or the build left the
+// device of a namespace or a transfer whose desired group is optimized off
+// what the desired state wants — held off its td's raid0 (CN18), waiting on
+// the dm-error, or after a failed step — whatever the cause (CN16, CN17). A
+// goroutine re-runs the whole converge every CnConnectRetryInterval seconds
+// under the CN1 locks until a pass registers none of these (build's
+// stopConnectRetry) or the cntlr is torn down. The RPC itself retries a
+// connect, or waits for its namespace head, only as far as the pass's
+// CnConnectPassBudget allows: an in-pass retry, or a step of that wait,
+// starts only while the budget still covers its pause (connectWithin,
+// awaitNsHead).
 func (s *CnAgentServer) startConnectRetry(
 	st *cntlrState,
 	plan *cntlrPlan,
@@ -967,62 +963,9 @@ func (s *CnAgentServer) stopConnectRetry(st *cntlrState) {
 	}
 }
 
-// startCloneMetaRetry registers a cntlr for CN18's clone-metadata retry: one
-// of its clones found the arena with no free run for its metadata (CN18 step
-// 2), so both of the clone's rows read PROVISIONING and nothing of it is
-// built until a run comes free. A run comes free when a clone of another
-// cntlr of the node goes, which no request of this cntlr says, so the cntlr
-// asks again itself. A goroutine re-runs the whole converge every
-// metaRetryInterval (CnCloneMetaRetryInterval seconds) under the CN1 locks
-// until a pass leaves no clone waiting (build's stopCloneMetaRetry: the clone
-// was built, left clone_list, or is suppressed by the level or a demotion),
-// the cntlr is disabled (SP_LEVEL_DISABLE) or it is torn down
-// (dropCntlrState). It runs through connectRetryLoop, the one copy of the
-// DN13 pattern, and it is not the CN10 retry because of what each attempt
-// costs: a whole converge under the object lock, which holds the cntlr's
-// reads off while it runs (dnagent.md SH30), so at the CN10 pace a large
-// pool's attempts would follow one another with hardly a gap for a round to
-// start a read in, and its rounds would answer from an observation as old as
-// the attempt in progress (dnv-worker.md HL7) — and a clone that waits for
-// room is not broken, so the longer interval loses nothing. A namespace of
-// the clone's destination td that waits only for the clone registers no CN10
-// retry either: the attempt of this one that finds room builds the clone and
-// moves the namespace to optimized (CN16).
-// The two retries may run at once; each attempt is a whole converge, and a
-// second one in a row is harmless.
-func (s *CnAgentServer) startCloneMetaRetry(
-	st *cntlrState,
-	plan *cntlrPlan,
-) {
-	key := cntlrKey(plan.clusterId, plan.cnId, plan.spId, plan.cntlrId)
-	s.mu.Lock()
-	if st.metaRetrying {
-		s.mu.Unlock()
-		return
-	}
-	ctx, cancel := context.WithCancel(s.rootCtx)
-	st.metaRetrying = true
-	st.metaCancel = cancel
-	interval := s.metaRetryInterval
-	s.mu.Unlock()
-	go s.connectRetryLoop(ctx, key, st, interval)
-}
-
-func (s *CnAgentServer) stopCloneMetaRetry(st *cntlrState) {
-	s.mu.Lock()
-	cancel := st.metaCancel
-	st.metaCancel = nil
-	st.metaRetrying = false
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
-// connectRetryLoop is the loop of both background retries, the CN10 connect
-// retry and CN18's clone-metadata retry: each tick re-runs the cntlr's whole
-// converge (reconvergeCntlr), until ctx — the registration's own — is
-// cancelled.
+// connectRetryLoop is the loop of the CN10 background retry: each tick
+// re-runs the cntlr's whole converge (reconvergeCntlr), until ctx — the
+// registration's own — is cancelled.
 func (s *CnAgentServer) connectRetryLoop(
 	ctx context.Context,
 	key string,
@@ -1039,9 +982,9 @@ func (s *CnAgentServer) connectRetryLoop(
 		}
 		// The attempt runs on rootCtx, never on this loop's ctx, for the
 		// reason dnagent's migrRetryLoop carries in full: the pass that ends
-		// a retry calls stopConnectRetry or stopCloneMetaRetry, which cancels
-		// exactly that retry's loop's ctx, so an attempt running on it would
-		// cancel ITSELF and abandon the rest of the pass. The rule rests on
+		// the retry calls stopConnectRetry, which cancels exactly the
+		// retry's loop's ctx, so an attempt running on it would cancel
+		// ITSELF and abandon the rest of the pass. The rule rests on
 		// rootCtx alone, never on where a stop call happens to sit: this
 		// loop is written as the DN13 pattern, and the two agents must not
 		// differ in it.

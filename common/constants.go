@@ -205,22 +205,23 @@ const (
 
 	DefaultTmpfsPrefix = "/tmp/dnv-tmpfs"
 
-	// The CN clone-metadata arena ([D14], cnagent.md CN5/CN18): one sparse
-	// file (CnTmpFilePath) on the CN tmpfs, attached to a single loop
-	// device, carved into fixed units by the CN slot allocator whose
-	// registry is the kind-`cb` wrapper dm tables themselves. No LVM
-	// ([D14]).
+	// The CN clone-metadata arena (architecture.md, Controller node, common;
+	// cnagent.md CN5): one sparse file (CnTmpFilePath) on the CN tmpfs,
+	// attached to a single loop device. No LVM ([D14]). The control plane
+	// counts a CN's clone metadata in its units, though no clone keeps its
+	// metadata there: a clone's dm-clone keeps it on the clone's clone meta
+	// group (cnagent.md CN18).
 	// CnCloneMetaAreaSize is the `truncate` size of that file — and so the
-	// arena the slot allocator carves, 256 units. CnCloneMetaUnit is the
-	// allocation granularity, the cn twin of DnCloneMetaUnit; it is
-	// deliberately NOT called an "extent", which everywhere else in dnv
-	// means the 1 GiB DN/CN allocation unit (DefaultDnExtSize).
+	// arena, 256 units. CnCloneMetaUnit is the unit, the cn twin of
+	// DnCloneMetaUnit; it is deliberately NOT called an "extent", which
+	// everywhere else in dnv means the 1 GiB DN/CN allocation unit
+	// (DefaultDnExtSize).
 	CnCloneMetaAreaSize = 1 * 1024 * 1024 * 1024
 	CnCloneMetaUnit     = 4 * 1024 * 1024
-	// CnCloneMetaUnitCnt is that arena in units, one arena per CN shared by
-	// every clone of every cntlr on the node: the ceiling of a CN's
-	// used_meta_units, which CreateClone and CreateCntlr never pass and only
-	// ReplaceCntlr may (architecture.md, Metadata units).
+	// CnCloneMetaUnitCnt is that arena in units, one arena per CN whose count
+	// every clone of every cntlr on the node is charged to: the ceiling of a
+	// CN's used_meta_units, which CreateClone and CreateCntlr never pass and
+	// only ReplaceCntlr may (architecture.md, Metadata units).
 	CnCloneMetaUnitCnt = CnCloneMetaAreaSize / CnCloneMetaUnit
 	// CloneMetaBaseBytes is the dm-clone superblock budget of CloneMetaUnits,
 	// the part of a copy's metadata that does not grow with its regions. It
@@ -486,10 +487,7 @@ const (
 	// CN base state (architecture.md, Controller node, common): the tmpfs that
 	// carries the clone-metadata arena file, sized 2 × CnCloneMetaAreaSize so
 	// that even a fully materialized arena plus slack never hits ENOSPC on the
-	// mount.
-	// The file itself is sparse: pages appear as dm-clone writes metadata
-	// and are released again by the allocator's hole-punch discard
-	// (CN18).
+	// mount. The file itself is sparse.
 	DefaultCnTmpfsSize = 2 * 1024 * 1024 * 1024
 
 	// Seconds between two leg health-probe rounds (architecture.md, Group
@@ -511,14 +509,6 @@ const (
 	// of CN10's triggers (cnagent.md CN10); the cn twin of
 	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
-	// Seconds between background retries of a cn cntlr's converge while one
-	// of its clones waits for a free run in the node's metadata area
-	// (cnagent.md CN18). It is far slower than CnConnectRetryInterval
-	// because each attempt runs the cntlr's whole converge under its object
-	// lock and holds the cntlr's background reads off while it does
-	// (dnagent.md SH30), and a fast retry would let a large pool's
-	// observation age past the worker's bound (dnv-worker.md HL7).
-	CnCloneMetaRetryInterval = 60
 
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,
 	// CN18). A pass — one convergeCntlr, whether a SyncupCntlr, the startup

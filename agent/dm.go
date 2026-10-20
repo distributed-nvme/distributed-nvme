@@ -547,8 +547,7 @@ func (d *Dm) BlkDiscardRange(
 // none, the kernel writes the zeros itself.
 //
 // It must never be pointed at the CN clone-metadata arena: that arena is a
-// sparse tmpfs file and --zeroout would materialize it in RAM, which is why
-// the CN allocator uses the plain hole-punch discard instead (CN18).
+// sparse tmpfs file and --zeroout would materialize it in RAM.
 //
 // --zeroout is the first argument on purpose, so a `blkdiscard --offset` grep
 // keeps meaning dm-clone hydration marking only.

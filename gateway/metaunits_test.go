@@ -68,9 +68,8 @@ func volWantCnUnits(
 
 // TestCreateCloneChargesEveryCntlrCn pins CreateClone's charge: the clone's
 // units go to the CN of EVERY cntlr of the pool, the standby's as well as the
-// primary's and a disabled one's as well as an enabled one's, because a
-// failover or a cntlr replacement can make any of them the primary, which
-// builds every clone of the pool on its own CN. The record stores the units.
+// primary's and a disabled one's as well as an enabled one's
+// (architecture.md, Metadata units). The record stores the units.
 // Only the count moves on a CN — no extent, no pointer — so its record and
 // capacity value are rewritten and its revision is not bumped. A second clone
 // adds to the count rather than setting it.
@@ -180,9 +179,9 @@ func TestCreateCloneRefusesWhenACntlrCnLacksRoom(t *testing.T) {
 	}
 }
 
-// TestCreateCloneTooBigForTheArea pins the clone no node can ever hold: one
-// whose units exceed a whole metadata area is refused on CNs that hold
-// nothing at all, rather than created to wait for room that cannot come.
+// TestCreateCloneTooBigForTheArea pins the clone no CN count can ever admit:
+// one whose units exceed a whole metadata area is refused on CNs that are
+// charged nothing at all (architecture.md, Metadata units).
 func TestCreateCloneTooBigForTheArea(t *testing.T) {
 	env := newVolEnv(t)
 	const size = uint64(1) << 51
@@ -668,10 +667,9 @@ func sptWantCnUnits(
 
 // TestCreateCntlrChargesThePoolsCloneUnits pins CreateCntlr's charge: the new
 // cntlr's CN is charged the pool's whole clone sum along with the footprint,
-// under its one CnRev bump, since the cntlr may become the primary and build
-// every clone of the pool there. The latched clone counts too, because the
-// clone drain's final step gives its units back on the CN of every cntlr the
-// pool then has. No other CN moves.
+// under its one CnRev bump (architecture.md, Metadata units). The latched
+// clone counts too, because the clone drain's final step gives its units back
+// on the CN of every cntlr the pool then has. No other CN moves.
 func TestCreateCntlrChargesThePoolsCloneUnits(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	env.createMetaPool()

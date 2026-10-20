@@ -2904,15 +2904,15 @@ type CnConf struct {
 	CntlrPtrList []*CntlrPointer        `protobuf:"bytes,7,rep,name=cntlr_ptr_list,json=cntlrPtrList,proto3" json:"cntlr_ptr_list,omitempty"`
 	TotalExtCnt  uint64                 `protobuf:"varint,8,opt,name=total_ext_cnt,json=totalExtCnt,proto3" json:"total_ext_cnt,omitempty"`
 	FreeExtCnt   uint64                 `protobuf:"varint,9,opt,name=free_ext_cnt,json=freeExtCnt,proto3" json:"free_ext_cnt,omitempty"`
-	// The units of this node's metadata area held by clones: every clone of
-	// a pool is charged to the node of each cntlr of the pool
-	// (architecture.md, Metadata units). CreateClone charges it with the
-	// units it computes and stores in the clone's meta_units; CreateCntlr and
-	// ReplaceCntlr charge it, and FinishCloneDelete, DeleteCntlr and
-	// ReplaceCntlr release it, by reading each clone's meta_units. Only
-	// ReplaceCntlr may charge past CnCloneMetaUnitCnt. A write that changes
-	// only this count raises no revision, and a release stops at zero.
-	// Appended, never renumbered.
+	// The units of this node's metadata area charged for clones: every clone
+	// of a pool is charged to the node of each cntlr of the pool
+	// (architecture.md, Metadata units), though no clone keeps its metadata
+	// there. CreateClone charges it with the units it computes and stores in
+	// the clone's meta_units; CreateCntlr and ReplaceCntlr charge it, and
+	// FinishCloneDelete, DeleteCntlr and ReplaceCntlr release it, by reading
+	// each clone's meta_units. Only ReplaceCntlr may charge past
+	// CnCloneMetaUnitCnt. A write that changes only this count raises no
+	// revision, and a release stops at zero. Appended, never renumbered.
 	UsedMetaUnits uint64 `protobuf:"varint,10,opt,name=used_meta_units,json=usedMetaUnits,proto3" json:"used_meta_units,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3724,21 +3724,22 @@ type Clone struct {
 	// a renumbered field decodes silently into unknown fields rather than
 	// failing.
 	Deleting bool `protobuf:"varint,12,opt,name=deleting,proto3" json:"deleting,omitempty"`
-	// The metadata units this clone holds on the node of each cntlr of its
-	// pool (architecture.md, Metadata units): common.CloneMetaUnits of the
+	// The metadata units this clone is charged on the node of each cntlr of
+	// its pool (architecture.md, Metadata units): common.CloneMetaUnits of the
 	// destination td's size and the pool's data_block_size, set by
 	// CreateClone and never changed. Every later charge and release reads it
 	// here, so a release gives back exactly what was charged. The cn agent
-	// sizes its run with the same formula and does not read it. Appended,
-	// never renumbered.
+	// does not read it: the clone keeps its dm-clone metadata on its clone
+	// meta group (meta_grp). Appended, never renumbered.
 	MetaUnits uint64 `protobuf:"varint,13,opt,name=meta_units,json=metaUnits,proto3" json:"meta_units,omitempty"`
 	// The clone meta group (architecture.md, Terminology and object model):
 	// the one group the clone owns, one leg or the legs of an md-raid1 as
 	// the pool's redundancy gives a group, whose sides are charged to disk
 	// nodes and pointed at from their DnConf as a slice's sides are. Its
 	// group, leg and side ids come from SpConf.next_id with every other id
-	// of the pool. The clone drain's final transaction gives its sides back
-	// (dnv-worker.md CLD9). One group and not a list, so the
+	// of the pool. The primary's dm-clone of the clone keeps its metadata on
+	// it (cnagent.md CN18). The clone drain's final transaction gives its
+	// sides back (dnv-worker.md CLD9). One group and not a list, so the
 	// name keeps it apart from a slice's meta_grp_list. A record without it
 	// decodes as a clone with no group, which no clone-keyed op takes and
 	// the clone drain deletes all the same (dnv-worker.md MD6). Appended,

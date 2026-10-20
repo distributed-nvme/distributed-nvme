@@ -15,7 +15,7 @@ import (
 // A CheckCn or CheckCntlr round and a GetCnInfo or GetCntlrInfo answer from
 // the object's latest observation alone (answerCn, answerCntlr). The end of
 // every converge stores one — a syncup's, the startup reconcile's, a
-// connect-retry or clone-metadata-retry attempt's — and so does the
+// connect-retry attempt's — and so does the
 // background read a round starts (refreshCn, refreshCntlr), which holds the
 // CN1 locks a round once held and reads what a round once read. A syncup
 // marks its converge as it arrives and cancels the read before it waits for a

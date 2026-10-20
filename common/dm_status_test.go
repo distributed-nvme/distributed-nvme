@@ -90,7 +90,25 @@ func TestParseCloneStatus(t *testing.T) {
 			with(func(st *CloneStatus) {
 				st.HydratedRegions, st.TotalRegions = 1024, 1024
 				st.Threshold, st.BatchSize = 1, 1
+				st.MetadataMode = CloneMetadataReadWrite
 			})},
+		{"read-only metadata",
+			head + "0 4 hydration_threshold 1 hydration_batch_size 1 ro",
+			with(func(st *CloneStatus) {
+				st.Threshold, st.BatchSize = 1, 1
+				st.MetadataMode = CloneMetadataReadOnly
+			})},
+		{"a failed metadata mode after the lists",
+			head + "1 no_hydration 0 Fail",
+			with(func(st *CloneStatus) {
+				st.HydrationEnabled = false
+				st.MetadataMode = CloneMetadataFail
+			})},
+		{"a mode after an empty core list", head + "0 0 rw",
+			with(func(st *CloneStatus) {
+				st.MetadataMode = CloneMetadataReadWrite
+			})},
+		{"two arguments past the core list", head + "0 0 rw x", &on},
 		{"no_hydration among other features",
 			head + "2 no_discard_passdown no_hydration 0",
 			with(func(st *CloneStatus) { st.HydrationEnabled = false })},
@@ -182,6 +200,33 @@ func TestParseCloneStatus(t *testing.T) {
 		case tc.want != nil && *got != *tc.want:
 			t.Errorf("%s: %q = %+v, want %+v",
 				tc.name, tc.raw, *got, *tc.want)
+		}
+	}
+}
+
+// TestCloneFailed pins the line of a dm-clone in fail mode, which carries
+// the mode alone and which ParseCloneStatus does not parse.
+func TestCloneFailed(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"0 2048 clone Fail", true},
+		{"metadata failed\n0 2048 clone Fail", true},
+		{"0 2048 clone 8 1/1024 2048 4/10 0 0 0 Fail", false},
+		{"0 2048 clone Error", false},
+		{"0 2048 linear Fail", false},
+		{"0 2048 clone Fail\n0 2048 clone Fail", false},
+		{"Fail", false},
+		{"", false},
+	} {
+		if got := CloneFailed(tc.raw); got != tc.want {
+			t.Errorf("CloneFailed(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+		if tc.want {
+			if _, ok := ParseCloneStatus(tc.raw); ok {
+				t.Errorf("ParseCloneStatus(%q) parsed a failed line", tc.raw)
+			}
 		}
 	}
 }

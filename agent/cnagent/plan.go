@@ -35,7 +35,6 @@ const (
 	resKeyXferNsFmt    = "xfer_ns/%016x"
 	resKeyCloneTgtFmt  = "clone_target/%016x"
 	resKeyCloneDmFmt   = "clone_dm/%016x"
-	resKeyCloneMetaFmt = "clone_meta/%016x"
 )
 
 // detailsSpLevel is what a resource suppressed by the sp_level reports (CN19),
@@ -171,19 +170,6 @@ type cntlrPlan struct {
 	// tds above it (anySliceDeferred).
 	anyDeferred bool
 
-	// arena / arenaErr / arenaDone cache this pass's clone-metadata arena view
-	// ([D14], CN18 step 2), so a cntlr with N clones still issues one
-	// enumeration: the loop device is re-learned from `losetup --associated`
-	// in every converge and every read and never persisted. They, the sweep
-	// fact below and the reading and walks after it are the only fields here
-	// that are not a pure function of the request; these three are filled
-	// lazily by planArena, an allocation's own enumeration replaces them
-	// (ensureCloneMeta), and a failed allocation clears arenaDone so the
-	// clone's rows read the arena afresh (ensureClone).
-	arena     *cloneMetaArena
-	arenaErr  error
-	arenaDone bool
-
 	// cloneHold is what this pass's sweep tells the build phase that
 	// follows it (CN18, CN21): the raid0s a dm-clone the plan does not want
 	// may still write into after the sweep — on a pass that removes,
@@ -194,7 +180,9 @@ type cntlrPlan struct {
 	// (lingeringCloneHold). A dm-clone whose hydration is on goes on copying
 	// into its destination raid0 until L3 removes it. sweepCntlr sets it on
 	// a converge and nothing else does; the plan is built afresh for every
-	// pass, so it never outlives the pass that learned it.
+	// pass, so it never outlives the pass that learned it. It, the reading
+	// and the walks after it are the only fields here that are not a pure
+	// function of the request.
 	cloneHold cloneHold
 
 	// rd is the reading a cntlr's read took (CN28, readCntlr): the shared
@@ -256,13 +244,19 @@ type slicePlan struct {
 }
 
 // grpPlan is one group: a RedundNone dm-linear over its single leg's data
-// region, or a RedundMdRaid1 array over its member leg wrappers (CN12).
+// region, or a RedundMdRaid1 array over its member leg wrappers (CN12). It is
+// a slice's group, or a clone's clone meta group (architecture.md,
+// Terminology and object model), which the plan builds the same way.
 type grpPlan struct {
-	grpId  uint64
-	grp    *pb.Group
+	grpId uint64
+	grp   *pb.Group
+	// slice, isMeta and grpIdx place a slice's group in its slice's lists;
+	// clone is the clone whose clone meta group this is. Exactly one of
+	// slice and clone is set.
 	slice  *slicePlan
 	isMeta bool
 	grpIdx uint32
+	clone  *pb.Clone
 	raid1  bool
 	legs   []*legPlan // leg_list, ascending leg_idx — the md members
 	spares []*legPlan // spare_leg_list; connected and probed, never members
@@ -406,35 +400,40 @@ type nsPlan struct {
 	anaGrpId    int
 	// clone is the clone whose dm-clone rule 5 made backingName, and nil
 	// under every other rule. CN16 serves through that dm-clone only while
-	// its live status shows hydration on (nsDevNow).
+	// its live status shows hydration on and its metadata read-write
+	// (nsDevNow).
 	clone *clonePlan
-	// deferred mirrors td.deferred: the fourth conjunct of the CN16 ANA
-	// rule ([D15]). The ns-dev and the nvmet namespace still exist — over
-	// the td's permanent dm-error — but nothing under them can serve, so the
-	// namespace stays inaccessible and both rows report PROVISIONING.
+	// deferred mirrors td.deferred, or, below SP_LEVEL_NO_CLONE (levelClone),
+	// the deferral of a clone whose destination is the td: the fourth
+	// conjunct of the CN16 ANA rule ([D15]). The ns-dev and the nvmet
+	// namespace still exist — over the td's permanent dm-error — but nothing
+	// under them can serve, so the namespace stays inaccessible and both rows
+	// report PROVISIONING.
 	deferred bool
 }
 
-// clonePlan is one dm-clone stack: the metadata wrapper over its slot in the
-// volatile clone-metadata arena, the dm-clone itself and the source connection
+// clonePlan is one dm-clone stack: the source connection and the dm-clone
+// itself, whose metadata device is the clone's clone meta group's device
 // (CN18).
 type clonePlan struct {
-	cloneId    uint64
-	clone      *pb.Clone
-	dstTd      *tdPlan
-	finalName  string
-	metaDmName string
+	cloneId   uint64
+	clone     *pb.Clone
+	dstTd     *tdPlan
+	finalName string
+	// grp is the clone's clone meta group (buildCloneGrps), nil for a clone
+	// record that carries none, for which nothing is built (CN18).
+	grp *grpPlan
 
 	sectors       uint64
 	regionSectors uint64
 	regionCnt     uint64
-	metaUnits     uint64
-	metaSectors   uint64
 
 	// deferred means the destination td's backing chain is
-	// provisioning-deferred ([D15]): its raid0 does not exist, so the clone
-	// allocates no metadata slot, builds no dm-clone and connects to no
-	// source, and its rows read provisioning (reportCloneDeferred).
+	// provisioning-deferred, or the clone meta group is ([D15]): the
+	// destination's raid0 or the group's device (its md array, or its
+	// CnGrpName without redundancy) does not exist, so the clone builds no
+	// dm-clone and connects to no source, and below SP_LEVEL_NO_CLONE its
+	// rows read provisioning (reportCloneDeferred).
 	deferred bool
 }
 
@@ -507,9 +506,12 @@ func newCntlrPlan(
 		level >= pb.SpLevel_SP_LEVEL_READONLY
 
 	p.buildSlices()
-	// [D15]: the effective desired state is computed between the two, because
-	// buildTds (tdPlan.deferred), buildClones, buildSubsystems (the CN16 ANA
-	// rule) and buildXfers all read it.
+	p.buildCloneGrps()
+	// [D15]: the effective desired state is computed once every group is
+	// built, the clone meta groups included, since it defers a group by its
+	// legs, and before the rest, because buildTds (tdPlan.deferred),
+	// buildClones, buildSubsystems (the CN16 ANA rule) and buildXfers all
+	// read it.
 	p.computeEffective()
 	p.buildTds()
 	p.buildClones()
@@ -558,41 +560,89 @@ func (p *cntlrPlan) buildGrps(
 ) []*grpPlan {
 	out := make([]*grpPlan, 0, len(groups))
 	for grpIdx, grp := range groups {
-		gp := &grpPlan{
-			grpId:      grp.GetGrpId(),
-			grp:        grp,
-			slice:      sp,
-			isMeta:     isMeta,
-			grpIdx:     uint32(grpIdx),
-			raid1:      p.raid1,
-			metaBlocks: grp.GetMetaBlocks(),
-			dataBlocks: grp.GetDataBlocks(),
-		}
-		gp.dataSectors = grp.GetDataBlocks() * p.blockSize / agent.SectorSize
-		gp.dataOffsetSectors =
-			grp.GetMetaBlocks() * p.blockSize / agent.SectorSize
-		gp.dataOffsetKiB = grp.GetMetaBlocks() * p.blockSize / 1024
-		gp.bitmapChunkKiB = p.bitmapChunkBlocks * p.blockSize / 1024
+		gp := p.newGrpPlan(grp)
+		gp.slice = sp
+		gp.isMeta = isMeta
+		gp.grpIdx = uint32(grpIdx)
 		if p.raid1 {
 			gp.mdDevName = p.nf.CnMdDevName(p.clusterId, p.cnId, p.spId,
 				sp.sliceIdx, gp.grpIdx, isMeta)
 			gp.mdArrayName = p.nf.CnMdArrayName(
 				p.spId, sp.sliceIdx, gp.grpIdx, isMeta)
-			gp.devPath = p.nf.MdPath(gp.mdDevName)
-			gp.resName = gp.devPath
-		} else {
-			gp.dmName = p.nf.CnGrpName(
-				p.clusterId, p.cnId, p.spId, gp.grpId)
-			gp.devPath = p.nf.DmPath(gp.dmName)
-			gp.resName = gp.dmName
 		}
-		gp.legs = p.buildLegs(gp, grp.GetLegList(), false)
-		gp.spares = p.buildLegs(gp, grp.GetSpareLegList(), true)
+		p.addGrp(gp)
 		out = append(out, gp)
-		p.grps = append(p.grps, gp)
-		p.grpById[gp.grpId] = gp
 	}
 	return out
+}
+
+// buildCloneGrps builds the clone meta group of every clone in clone_list
+// (architecture.md, Terminology and object model) as buildGrps builds a
+// slice's group: its legs and spare legs, connected and wrapped on every
+// cntlr (CN10), and on the primary its md array or, without redundancy,
+// its CnGrpName dm-linear (CN12), under the md names of a clone meta group
+// (architecture.md, md names), since a slice's md names carry the group's
+// place in its slice. A clone with no group gets nothing. It runs before
+// computeEffective, which marks a leg provisioning and defers a group with a
+// provisioning leg_list leg ([D15]): built after it, a clone meta group
+// whose sides still zero would be converged as if they were exported, and
+// its leg and group rows would read ERROR, feeding health epochs and leg
+// repair, where they read PROVISIONING.
+func (p *cntlrPlan) buildCloneGrps() {
+	for _, clone := range p.req.GetCloneList() {
+		grp := clone.GetMetaGrp()
+		if grp == nil {
+			continue
+		}
+		gp := p.newGrpPlan(grp)
+		gp.clone = clone
+		if p.raid1 {
+			gp.mdDevName = p.nf.CnCloneMdDevName(
+				p.clusterId, p.cnId, p.spId, gp.grpId)
+			gp.mdArrayName = p.nf.CnCloneMdArrayName(p.spId)
+		}
+		p.addGrp(gp)
+	}
+}
+
+// newGrpPlan is the part of a group's plan that the group alone decides,
+// for a slice's group and a clone meta group alike: its ids, its redundancy
+// and its on-leg geometry (architecture.md, Group on-leg layout: meta
+// region, data region, health block). The caller places it and, for an md
+// group, names its array.
+func (p *cntlrPlan) newGrpPlan(grp *pb.Group) *grpPlan {
+	gp := &grpPlan{
+		grpId:      grp.GetGrpId(),
+		grp:        grp,
+		raid1:      p.raid1,
+		metaBlocks: grp.GetMetaBlocks(),
+		dataBlocks: grp.GetDataBlocks(),
+	}
+	gp.dataSectors = grp.GetDataBlocks() * p.blockSize / agent.SectorSize
+	gp.dataOffsetSectors =
+		grp.GetMetaBlocks() * p.blockSize / agent.SectorSize
+	gp.dataOffsetKiB = grp.GetMetaBlocks() * p.blockSize / 1024
+	gp.bitmapChunkKiB = p.bitmapChunkBlocks * p.blockSize / 1024
+	return gp
+}
+
+// addGrp finishes a group whose caller has placed it and named its md array:
+// the group device's path and row name, its legs and spare legs, and its
+// place in the plan's groups. A RedundNone group's device is CnGrpName,
+// unique in the pool by its group id alone.
+func (p *cntlrPlan) addGrp(gp *grpPlan) {
+	if p.raid1 {
+		gp.devPath = p.nf.MdPath(gp.mdDevName)
+		gp.resName = gp.devPath
+	} else {
+		gp.dmName = p.nf.CnGrpName(p.clusterId, p.cnId, p.spId, gp.grpId)
+		gp.devPath = p.nf.DmPath(gp.dmName)
+		gp.resName = gp.dmName
+	}
+	gp.legs = p.buildLegs(gp, gp.grp.GetLegList(), false)
+	gp.spares = p.buildLegs(gp, gp.grp.GetSpareLegList(), true)
+	p.grps = append(p.grps, gp)
+	p.grpById[gp.grpId] = gp
 }
 
 func (p *cntlrPlan) buildLegs(
@@ -735,8 +785,12 @@ func effectiveGrps(grps []*grpPlan) []*grpPlan {
 // effective reports whether a group is still one of its slice's concat
 // targets. It is not the negation of gp.deferred: [D15]'s deferral is a prefix
 // cut (effectiveGrps), so a group of its own is undeferred yet out of the
-// effective state whenever an earlier group of the same list is deferred.
+// effective state whenever an earlier group of the same list is deferred. A
+// clone meta group is in no slice and no concat.
 func (gp *grpPlan) effective() bool {
+	if gp.slice == nil {
+		return false
+	}
 	list := gp.slice.effDataGrps
 	if gp.isMeta {
 		list = gp.slice.effMetaGrps
@@ -823,30 +877,23 @@ func (p *cntlrPlan) buildClones() {
 			dstTd:   p.tdById[clone.GetDstTdId()],
 			finalName: p.nf.CnCloneFinalName(
 				p.clusterId, p.cnId, p.spId, clone.GetCloneId()),
-			metaDmName: p.nf.CnCloneMetaDmName(
-				p.clusterId, p.cnId, p.spId, clone.GetCloneId()),
+		}
+		if grp := clone.GetMetaGrp(); grp != nil {
+			if gp := p.grpById[grp.GetGrpId()]; gp != nil && gp.clone == clone {
+				cp.grp = gp
+			}
 		}
 		// [D15]: a clone whose destination td is missing entirely stays the CN18
-		// error below; one whose destination is merely still provisioning is
-		// deferred.
-		cp.deferred = cp.dstTd == nil || cp.dstTd.deferred
+		// error below; one whose destination or clone meta group is merely
+		// still provisioning is deferred.
+		cp.deferred = cp.dstTd == nil || cp.dstTd.deferred ||
+			(cp.grp != nil && cp.grp.deferred)
 		if cp.dstTd != nil {
 			cp.sectors = cp.dstTd.sectors
 			if p.blockSize != 0 {
 				cp.regionSectors = p.blockSize / agent.SectorSize
 				cp.regionCnt = cp.dstTd.td.GetSize() / p.blockSize
 			}
-			// The CN18 step 2 budget exists only for a clone that has a
-			// destination: region_cnt = 0 would fabricate a one-unit budget
-			// out of nothing, and the probe would then report a size mismatch
-			// against it that describes no resource on the node. It is the
-			// formula the gateway charges the node by (architecture.md,
-			// Metadata units), computed here from the td and the pool; the
-			// clone record's meta_units is the control plane's count and is
-			// never read here.
-			cp.metaUnits = common.CloneMetaUnits(
-				cp.dstTd.td.GetSize(), p.blockSize)
-			cp.metaSectors = cp.metaUnits * cnCloneMetaUnitSectors
 		}
 		p.clones = append(p.clones, cp)
 		p.cloneById[cp.cloneId] = cp
@@ -876,8 +923,18 @@ func (p *cntlrPlan) buildSubsystems() {
 			if np.td != nil {
 				np.sectors = np.td.sectors
 			}
-			// deferred is read by nsBacking, so it is assigned first.
+			// deferred is read by nsBacking, so it is assigned first. Below
+			// SP_LEVEL_NO_CLONE a clone whose clone meta group still
+			// provisions defers the namespaces of its destination td as a
+			// destination that still provisions does: rule 5's dm-clone
+			// cannot be built yet (CN18). At that level and above the level
+			// wins (CN9, CN19): no dm-clone is wanted, and rule 4 or an
+			// earlier one backs those namespaces whatever the group does.
 			np.deferred = np.td != nil && np.td.deferred
+			if cp := p.cloneByTd[ns.GetTdId()]; np.td != nil && cp != nil &&
+				cp.deferred && p.levelClone {
+				np.deferred = true
+			}
 			np.suspended = p.effectiveSuspend(ns)
 			np.backingName, np.flakey = p.nsBacking(np)
 			if cp := p.cloneByTd[ns.GetTdId()]; cp != nil &&
@@ -950,9 +1007,10 @@ func (p *cntlrPlan) nsBacking(np *nsPlan) (string, bool) {
 		return "", false
 	}
 	// 0. [D15]: the backing chain is provisioning-deferred — neither the raid0
-	// nor a clone over it exists yet. The ns-dev is built on the td's
-	// permanent dm-error, and the ANA rule above keeps the namespace
-	// inaccessible, so a host queues rather than erroring.
+	// nor a clone over it exists yet, or the clone's clone meta group does
+	// not. The ns-dev is built on the td's permanent dm-error, and the ANA
+	// rule above keeps the namespace inaccessible, so a host queues rather
+	// than erroring.
 	if np.deferred {
 		return np.td.errorName, false
 	}
@@ -975,8 +1033,8 @@ func (p *cntlrPlan) nsBacking(np *nsPlan) (string, bool) {
 		return np.td.errorName, false
 	}
 	// 5. the clone backing — which the ns-dev takes only while the dm-clone
-	// shows hydration on (nsDevNow); 6. the plain raid0 — 7. under dm-flakey
-	// when the level is read-only.
+	// shows hydration on and its metadata read-write (nsDevNow); 6. the
+	// plain raid0 — 7. under dm-flakey when the level is read-only.
 	if cloned {
 		return clone.finalName, p.readOnly
 	}
@@ -995,10 +1053,12 @@ func (p *cntlrPlan) buildXfers() {
 		}
 		if xp.ori != nil {
 			xp.sectors = xp.ori.sectors
-			// [D15]: the origin's raid0 does not exist while its backing chain
+			// [D15]: the origin td's raid0 does not exist while the td
 			// provisions, so the transfer device carries an error table and
-			// its namespace stays inaccessible.
-			xp.deferred = xp.ori.deferred
+			// its namespace stays inaccessible. The transfer maps that raid0
+			// and no dm-clone, so a clone meta group that still provisions,
+			// which defers the origin namespace (CN9), defers no transfer.
+			xp.deferred = xp.ori.td != nil && xp.ori.td.deferred
 		}
 		p.xfers = append(p.xfers, xp)
 		p.xferById[xp.xferId] = xp

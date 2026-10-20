@@ -10,10 +10,9 @@ import (
 //
 //   - Every Gateway/etcd/Push*Bitmap bitmap is "1 = unwritten/skippable";
 //     thin-pool metadata and the raid0 bitmap math formulas are
-//     "written/copied = 1". The inversion happens exactly once, where thin-pool
-//     metadata is read — so
-//     the chunks that reach an agent are already in wire convention and a set
-//     bit means "this region need not be copied".
+//     "written = 1". The inversion happens exactly once, where thin-pool
+//     metadata is read — so the chunks that reach an agent are already in
+//     wire convention and a set bit means "this region need not be copied".
 //   - Bits are addressed LSB-first inside each byte: bit i lives in
 //     bitmap[i/8] at mask 1<<(i%8). When the logical bit count is not a
 //     multiple of 8 the trailing pad bits of the last byte are 0.

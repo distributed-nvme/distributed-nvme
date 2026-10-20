@@ -20,16 +20,14 @@ import (
 // or deleted, and while a cntlr-* file does not load, neither is a chunk
 // whose cntlr is not loaded but whose loaded CN still names that cntlr —
 // converge every loaded CN's base state (architecture.md, Controller node,
-// common), tear down cntlrs
-// whose pointer left their CN's list, converge the rest — which, per CN18,
-// runs the recovery of architecture.md, Clone crash recovery, for
-// any clone whose metadata wrapper is gone or mismatched, whose dm-clone has
-// vanished, or whose dm-clone does not show hydration enabled (after a CN
-// reboot the tmpfs arena and the dm state are both empty; after a plain agent
-// restart both survive, and the converge re-applies a clone whose build had
-// enabled hydration as a no-op and recovers one the dead agent left short of
-// that) — and finally sweeps the kind-`cb` wrappers no stored cntlr's
-// clone_list names ([D14]). It runs under the node write lock with the caller's
+// common), tear down cntlrs whose pointer left their CN's list, run each CN's
+// node-level sweep, which removes every kind-`cb` wrapper ([D14]), none of
+// which any clone uses, and then converge the rest — which, per CN18,
+// re-creates over its clone meta group's metadata any clone whose dm-clone is
+// gone (after a CN reboot the group is assembled again first, CN12) and
+// finishes one whose dm-clone the dead agent left with hydration off; after a
+// plain agent restart a clone whose build had enabled hydration converges as
+// a no-op. It runs under the node write lock with the caller's
 // startup trace id (SH2), and fails only when the local store itself is
 // unreadable (SH3). Background retries (CN10/CN18) and probers (CN11) mint a
 // fresh trace id per attempt.
@@ -183,10 +181,11 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 			s.dropCntlrState(ctx, key, st)
 		}
 	}
-	// The node-level sweep, which also owns the kind-cb wrapper sweep. It can
-	// run before the cntlr converges because its wanted set comes from the
-	// stored REQUESTS, not from what happens to exist: a clone this pass is
-	// about to (re)build is named by its cntlr's clone_list already.
+	// The node-level sweep, which also removes every kind-cb wrapper, since
+	// no clone uses one (CN2). It can run before the cntlr converges because
+	// its wanted set comes from the stored REQUESTS, not from what happens to
+	// exist: the source of a clone this pass is about to (re)build is named
+	// by its cntlr's clone_list already.
 	//
 	// Each CN's observation is its converge's rows with the code of its
 	// node-level sweep, as a SyncupCn's reply would carry them, and each
@@ -296,9 +295,9 @@ func (s *CnAgentServer) convergeCn(
 	info.TmpFileInfo = t.FromErr(resKeyTmpFile, filePath, "",
 		s.ensureTmpFile(ctx, clusterId, cnId, filePath, tmpfsPath, tmpfsOk))
 
-	// The loop device is the whole of the clone-metadata arena: CN18 carves it
-	// into kind-`cb` wrapper linears and needs no volume manager on top
-	// ([D14]).
+	// The loop device is the whole of the clone-metadata arena, with no
+	// volume manager on top ([D14]); no clone keeps its metadata on it
+	// (CN18).
 	loopDev, loopErr := s.ensureLoopDev(ctx, filePath, tmpfsPath, tmpfsOk)
 	info.LoopDevInfo = t.FromErr(resKeyLoopDev, filePath, loopDev, loopErr)
 
@@ -332,8 +331,7 @@ func (s *CnAgentServer) ensureTmpfs(ctx context.Context, path string) error {
 }
 
 // ensureTmpFile creates the clone-metadata arena file sparse: tmpfs pages
-// materialize only as a dm-clone writes metadata through its wrapper, and the
-// allocator's hole-punch discard frees them again. As in ensureTmpfs, a `stat`
+// materialize only as something writes into it. As in ensureTmpfs, a `stat`
 // that did not answer, or whose answer is not a size, is asked once more in
 // the same pass, and when that one fails too it is the row's error and
 // truncates nothing (CN5). An absent file is created only when tmpfsOk says
@@ -346,7 +344,7 @@ func (s *CnAgentServer) ensureTmpfs(ctx context.Context, path string) error {
 // detached and the file is created afresh (recreateArenaFile); ensureLoopDev
 // then attaches a new loop device. While something uses it, or a read that
 // would tell does not answer, it is the row's error and nothing is touched:
-// replacing it would take the metadata of every clone on the CN with it.
+// replacing it would take what that user maps with it.
 func (s *CnAgentServer) ensureTmpFile(
 	ctx context.Context,
 	clusterId uint64,
@@ -407,7 +405,7 @@ func (s *CnAgentServer) arenaFileInUse(
 	devs []string,
 ) error {
 	slots, err := s.cmeta.Wrappers(
-		ctx, nil, s.nf.CnCloneMetaDmPrefix(clusterId, cnId), nil)
+		ctx, s.nf.CnCloneMetaDmPrefix(clusterId, cnId))
 	if err != nil {
 		return err
 	}
@@ -583,7 +581,6 @@ func (s *CnAgentServer) dropCntlrState(
 	st *cntlrState,
 ) {
 	s.stopConnectRetry(st)
-	s.stopCloneMetaRetry(st)
 	s.stopLegProbers(st, nil)
 	req := st.loadReq()
 	ptr := req.GetCntlrPointer()
@@ -640,12 +637,16 @@ type baseRedrive struct {
 // rest of what is there but not as wanted is left to its row: a filesystem
 // of another type at the path (and with it the arena file and loop device
 // the converge would not create on it), a file of another size that
-// something uses or whose use a read did not answer, and more than one loop
-// device, which the converge reports and leaves as they are, so a re-sent
-// SyncupCn could not cure them; and a transport attribute of the port that
-// differs, which nvmet refuses to rewrite while a subsystem is linked to the
-// port (EACCES), so that while one is every re-send would fail on it the
-// same way. None of those is returned.
+// something other than a clone-metadata wrapper uses or whose use a read did
+// not answer, and more than one loop device, which the converge reports and
+// leaves as they are, so a re-sent SyncupCn could not cure them; and a
+// transport attribute of the port that differs, which nvmet refuses to
+// rewrite while a subsystem is linked to the port (EACCES), so that while
+// one is every re-send would fail on it the same way. None of those is
+// returned. A wrapper that keeps the file is a leftover the node-level
+// verdict names (orphanCloneMetaNames), so the SyncupCn it brings removes
+// the wrapper while nothing holds it open, and the read after that names
+// the file while nothing else uses it (CN5).
 func (s *CnAgentServer) probeCn(
 	ctx context.Context,
 	st *cnState,

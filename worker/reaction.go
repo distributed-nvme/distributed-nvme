@@ -375,8 +375,9 @@ func (o *modelReactionOps) findCnCandidates(
 	// The tier bool is dropped, as in findDnCandidates. AR7's scan asks for
 	// no metadata units on purpose: model.ReplaceCntlr charges the new CN the
 	// SP's clone units even past its ceiling, so a CN whose area is full is
-	// still a replacement, and its clones wait there as provisioning
-	// (architecture.md, Metadata units; cnagent.md CN18).
+	// still a replacement, and its primary builds every clone all the same,
+	// since no clone takes a unit of its area (architecture.md, Metadata
+	// units; cnagent.md CN18).
 	cands, _, err := model.FindCnCandidatesAntiAffine(
 		ctx, o.cli, cid, candExt, 0, candCnt,
 		black, nil, spCnAddrs, excludeLocs,

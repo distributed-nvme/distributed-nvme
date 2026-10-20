@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -73,10 +74,9 @@ type fakeNode struct {
 	thinPools map[string]map[uint32]bool
 	// lsGhosts are names `dmsetup ls` reports that no longer exist. The
 	// listing is an inherently stale snapshot — another cntlr's sweep
-	// (CN21), at SP_LEVEL_DISABLE or otherwise, runs under the same node
-	// *read* lock and can remove a wrapper between the `ls` and the
-	// `dmsetup table` of that one name — and this is how the suite
-	// reproduces that window deterministically ([D14]). The whole-node
+	// (CN21), at SP_LEVEL_DISABLE or otherwise, can remove a device between
+	// the `ls` and the `dmsetup table` of that one name — and this is how
+	// the suite reproduces that window deterministically. The whole-node
 	// `dmsetup info` listing names them too, with no numbers, and the
 	// `dmsetup table --concise` listing does not: a device there at the
 	// reading's info listing and gone by its table listing.
@@ -105,15 +105,34 @@ type fakeNode struct {
 	nextMdMinor int
 	// superblocks is the set of member devices carrying md metadata.
 	superblocks map[string]bool
+	// memberArray is the array identity each member's md superblock names
+	// (fakeArray.uuid): mdCreate writes it on the members it creates the
+	// array over, an --add on the member it adds, and an assembly takes it
+	// from the members it starts. A member whose superblock a test stamped
+	// by hand has none until an assembly gives it one.
+	memberArray map[string]string
+	// nextMdUuid numbers the array identities mdCreate and an assembly mint.
+	nextMdUuid int
 	// assembleDrop models mdadm leaving a member out of an assembly for
 	// stale metadata (cnagent.md CN12, the stale-metadata re-add of case 2):
 	// the array starts without it and the agent has to re-add it.
 	assembleDrop map[string]bool
+	// cloneHydrated is the hydrated region count dm-clone's metadata holds,
+	// by the storage of the metadata device (cloneMetaKey): an md array's
+	// identity, or a dm device's name. It lives with the storage, not with a
+	// dm-clone, so a dm-clone created again over the same group reads the
+	// count the metadata held, as the kernel's loads it, and a change of the
+	// array's members — an --add, a --remove, an assembly that leaves a
+	// member out — keeps it, as md copies the array's blocks to the member
+	// it adds; an md --create over the members mints a new identity and so
+	// starts it again at zero, as dm-clone formats fresh metadata over a
+	// group whose first data block reads zero. A test moves it
+	// (setCloneHydrated).
+	cloneHydrated map[string]uint64
 
 	// the base state (architecture.md, Controller node, common): the
-	// clone-metadata arena is a plain file on a
-	// tmpfs mount behind one loop device, carved by kind-`cb` dm wrappers
-	// ([D14]) — no LVM state of any kind.
+	// clone-metadata arena is a plain file on a tmpfs mount behind one loop
+	// device ([D14]) — no LVM state of any kind.
 	mounts   map[string]string
 	loops    map[string][]string // backing file → loop devices
 	plain    map[string]uint64   // plain files → size
@@ -289,6 +308,10 @@ type fakeDm struct {
 	threshold         uint32
 	batchSize         uint32
 	discards          []string
+	// metaMode is the metadata mode a dm-clone's status ends with: "" reads
+	// "rw", common.CloneMetadataReadOnly "ro", and common.CloneMetadataFail
+	// prints "Fail" alone, as the kernel does in fail mode.
+	metaMode string
 	// thin-pool bookkeeping
 	thinIds  map[uint32]bool
 	snapshot bool
@@ -299,6 +322,10 @@ type fakeDm struct {
 type fakeArray struct {
 	name    string // the mdadm --name value
 	members []string
+	// uuid is the array's identity, which md writes into every member's
+	// superblock (fakeNode.memberArray). An array a test seeds or installs
+	// by hand has none.
+	uuid string
 	// devNo is the array's number, which /sys/block/{node}/dev publishes:
 	// the one mdadm's create or assembly gave it, set apart from
 	// fakeNode.devNo of its /dev/md/{name} link, so a test can point that
@@ -392,7 +419,9 @@ func newFakeNode() *fakeNode {
 		tableOmit:     make(map[string]bool),
 		arrays:        make(map[string]*fakeArray),
 		superblocks:   make(map[string]bool),
+		memberArray:   make(map[string]string),
 		assembleDrop:  make(map[string]bool),
+		cloneHydrated: make(map[string]uint64),
 		mounts:        make(map[string]string),
 		loops:         make(map[string][]string),
 		plain:         make(map[string]uint64),
@@ -1458,6 +1487,12 @@ func (f *fakeNode) newDevNo() string {
 	return fmt.Sprintf("253:%d", f.nextMinor)
 }
 
+// newMdUuid mints an md array identity (fakeArray.uuid).
+func (f *fakeNode) newMdUuid() string {
+	f.nextMdUuid++
+	return fmt.Sprintf("uuid-%d", f.nextMdUuid)
+}
+
 func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	dev := args[len(args)-1]
 	name := strings.TrimPrefix(dev, "/dev/mapper/")
@@ -1496,7 +1531,7 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 	case "ls":
 		// The real tool prints "{name}\t({major}:{minor})" per device and the
 		// literal "No devices found" — still exit 0 — on an empty node, which
-		// is what the allocator's prefix filter has to drop ([D14]).
+		// is what the wrapper enumeration's prefix filter has to drop (CN5).
 		names := make([]string, 0, len(f.dms)+len(f.lsGhosts))
 		for name := range f.dms {
 			names = append(names, name)
@@ -2138,11 +2173,22 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 				"queue_if_no_space - 1024\n",
 			sectors, fields[6], held), 0
 	case "clone":
+		if dm.metaMode == common.CloneMetadataFail {
+			return fmt.Sprintf("0 %s clone Fail\n", sectors), 0
+		}
 		regionSectors := fields[6]
 		regions := tableSectors(dm.table)
 		region, _ := strconv.ParseUint(regionSectors, 10, 64)
 		if region > 0 {
 			regions /= region
+		}
+		hydrated := f.cloneHydrated[f.cloneMetaKey(fields[3])]
+		if hydrated > regions {
+			hydrated = regions
+		}
+		mode := common.CloneMetadataReadWrite
+		if dm.metaMode != "" {
+			mode = dm.metaMode
 		}
 		var names []string
 		if dm.noHydration {
@@ -2156,10 +2202,10 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 			features += " " + strings.Join(names, " ")
 		}
 		return fmt.Sprintf(
-			"0 %s clone 8 1/1024 %s 0/%d 0 %s 4 hydration_threshold %d "+
-				"hydration_batch_size %d\n",
-			sectors, regionSectors, regions, features,
-			dm.threshold, dm.batchSize), 0
+			"0 %s clone 8 1/1024 %s %d/%d 0 %s 4 hydration_threshold %d "+
+				"hydration_batch_size %d %s\n",
+			sectors, regionSectors, hydrated, regions, features,
+			dm.threshold, dm.batchSize, mode), 0
 	}
 	return "", 1
 }
@@ -2235,6 +2281,42 @@ func mdMembers(args []string) []string {
 	return out
 }
 
+// cloneMetaKey is the storage a dm-clone's metadata device, named by its
+// number in the dm-clone's table, sits on (fakeNode.cloneHydrated): an md
+// array's identity (fakeArray.uuid), a dm device's name, or the number
+// itself for anything else.
+func (f *fakeNode) cloneMetaKey(metaNo string) string {
+	for _, array := range f.arrays {
+		if array.devNo == metaNo && array.uuid != "" {
+			return "md:" + array.uuid
+		}
+	}
+	for name := range f.dms {
+		if f.devNo["/dev/mapper/"+name] == metaNo {
+			return "dm:" + name
+		}
+	}
+	return "dev:" + metaNo
+}
+
+// setCloneHydrated sets the hydrated count the metadata of one dm-clone
+// holds, on the storage its table names (cloneMetaKey), as a copy that has
+// gone that far leaves it.
+func (f *fakeNode) setCloneHydrated(t *testing.T, name string, count uint64) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	dm := f.dms[name]
+	if dm == nil {
+		t.Fatalf("no dm-clone %s", name)
+	}
+	fields := strings.Fields(dm.table)
+	if len(fields) < 4 || fields[2] != "clone" {
+		t.Fatalf("%s is not a dm-clone: %q", name, dm.table)
+	}
+	f.cloneHydrated[f.cloneMetaKey(fields[3])] = count
+}
+
 func (f *fakeNode) mdCreate(args []string) (string, int) {
 	dev := mdFlagValue(args, "--create")
 	name := mdFlagValue(args, "--name")
@@ -2246,7 +2328,11 @@ func (f *fakeNode) mdCreate(args []string) (string, int) {
 		members = append(members, member)
 		f.superblocks[member] = true
 	}
-	f.installArray(dev, &fakeArray{name: name, members: members})
+	uuid := f.newMdUuid()
+	for _, member := range members {
+		f.memberArray[member] = uuid
+	}
+	f.installArray(dev, &fakeArray{name: name, members: members, uuid: uuid})
 	f.devNo[dev] = f.newDevNo()
 	f.arrays[dev].devNo = f.devNo[dev]
 	f.devSize[dev] = f.arraySize(members)
@@ -2270,7 +2356,23 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	if len(members) == 0 {
 		return "", 1
 	}
-	array := &fakeArray{name: name, members: members}
+	// The array is the one its started members' superblocks name. Only an
+	// assembly whose started members all carry a superblock a test stamped
+	// by hand mints a new identity; every member it starts takes the
+	// array's identity.
+	uuid := ""
+	for _, member := range members {
+		if uuid = f.memberArray[member]; uuid != "" {
+			break
+		}
+	}
+	if uuid == "" {
+		uuid = f.newMdUuid()
+	}
+	for _, member := range members {
+		f.memberArray[member] = uuid
+	}
+	array := &fakeArray{name: name, members: members, uuid: uuid}
 	f.installArray(dev, array)
 	f.devNo[dev] = f.newDevNo()
 	array.devNo = f.devNo[dev]
@@ -2302,6 +2404,9 @@ func (f *fakeNode) mdAdd(args []string) (string, int) {
 	delete(array.memberSlot, member)
 	delete(array.unbound, member)
 	f.superblocks[member] = true
+	if array.uuid != "" {
+		f.memberArray[member] = array.uuid
+	}
 	f.publishArray(array)
 	return "", 0
 }

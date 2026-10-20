@@ -7,8 +7,8 @@
 // tools only this role runs — mdadm and thin-provisioning-tools — are wrapped
 // here (md.go, thinbm.go) because a wrapper with a single role is role code
 // (the split rule of dnagent.md, Scope and placement). The base state of
-// architecture.md, Controller node, common, and the clone-metadata slot
-// allocator (cnagent.md CN18) live in clonemeta.go ([D14]).
+// architecture.md, Controller node, common, and the enumeration of the
+// clone-metadata wrappers over it (cnagent.md CN5) live in clonemeta.go.
 package cnagent
 
 import (
@@ -44,7 +44,7 @@ type CnAgentServer struct {
 
 	// mu guards the in-memory mirrors of the local store below — the two
 	// maps — and what mirrors nothing: in each cntlr's state the
-	// connect-retry, clone-metadata-retry and prober registries, in each
+	// connect-retry and prober registries, in each
 	// CN's and each cntlr's state its observation slot (obs), the converge
 	// marks (marks) and the CN10 disconnect registry. It does not guard the
 	// request each state holds, which is an atomic pointer (cnState.req,
@@ -79,32 +79,23 @@ type CnAgentServer struct {
 	// the whole `nvme disconnect`. It is a field so a test can shrink it.
 	disconnectSlots chan struct{}
 
-	// cloneMetaMu serializes the CN clone-metadata allocator ([D14]): the
-	// registry is the kernel's dm table set, and two cntlrs of the same CN
-	// converge concurrently under the node read lock, so enumerate → discard →
-	// create must be one critical section. Unlike `mu` it IS held across OS
-	// calls; it is a leaf lock, taken below every agent.LockSet lock and never
-	// held while another lock is acquired.
-	cloneMetaMu sync.Mutex
-
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the
-	// CN10/CN18 connect retries, CN18's clone-metadata retry, the CN10
-	// background disconnects, the CN11 probers and the background reads
-	// (SH29) hang off it, so shutdown cancels them.
+	// CN10/CN18 connect retries, the CN10 background disconnects, the CN11
+	// probers and the background reads (SH29) hang off it, so shutdown
+	// cancels them.
 	rootCtx context.Context
 
-	// probeInterval / probeStall / retryInterval / metaRetryInterval are
-	// fields rather than constants, and now and sleep — like probeIO above —
-	// are overridable, so tests can drive the CN11 prober on a short fake
-	// clock and off the real syscalls, run the two background retries'
-	// attempts by hand, and run a converge pass's CN10 connect budget
-	// (newPassBudget) on a fake clock too; nothing else changes them.
-	probeInterval     time.Duration
-	probeStall        time.Duration
-	retryInterval     time.Duration
-	metaRetryInterval time.Duration
-	now               func() time.Time
-	sleep             func(context.Context, time.Duration) error
+	// probeInterval / probeStall / retryInterval are fields rather than
+	// constants, and now and sleep — like probeIO above — are overridable,
+	// so tests can drive the CN11 prober on a short fake clock and off the
+	// real syscalls, run the background retry's attempts by hand, and run a
+	// converge pass's CN10 connect budget (newPassBudget) on a fake clock
+	// too; nothing else changes them.
+	probeInterval time.Duration
+	probeStall    time.Duration
+	retryInterval time.Duration
+	now           func() time.Time
+	sleep         func(context.Context, time.Duration) error
 }
 
 // cnState is one synced CN: its last accepted SyncupCnRequest as this process
@@ -113,9 +104,8 @@ type CnAgentServer struct {
 // (architecture.md, Controller node, common), and its latest observation.
 // The loop device carrying the clone-metadata arena is deliberately *not* a
 // field here: it is kernel-assigned state, re-learned from `losetup
-// --associated` on every converge and every read and never cached across
-// them (CN5, [D14]) — a cached path would only be as fresh as the
-// last SyncupCn, which a SyncupCntlr does not run.
+// --associated` on every converge and every read of the CN and never cached
+// across them (CN5).
 type cnState struct {
 	// req is read and written through loadReq and storeReq only. It is
 	// stored only under the node write lock, and every reader holds
@@ -208,11 +198,6 @@ type cntlrState struct {
 	// retrying/cancel drive the CN10/CN18 background connect retry.
 	retrying bool
 	cancel   context.CancelFunc
-	// metaRetrying/metaCancel drive CN18's clone-metadata retry, the slow
-	// one of a cntlr one of whose clones waits for a free run in the arena
-	// (startCloneMetaRetry).
-	metaRetrying bool
-	metaCancel   context.CancelFunc
 
 	// obs is the cntlr's latest observation and its running read
 	// (dnagent.md SH28, SH29), guarded by the server's mu.
@@ -255,19 +240,18 @@ func NewCnAgentServer(
 			TrAddr:  trConf.GetTrAddr(),
 			TrSvcId: trConf.GetTrSvcId(),
 		},
-		cns:               make(map[string]*cnState),
-		cntlrs:            make(map[string]*cntlrState),
-		marks:             agent.NewConvergeMarks(),
-		roundReads:        true,
-		disconnecting:     make(map[string]struct{}),
-		disconnectSlots:   make(chan struct{}, disconnectConcurrency),
-		rootCtx:           context.Background(),
-		probeInterval:     common.CnLegProbeInterval * time.Second,
-		probeStall:        common.CnLegProbeStallSeconds * time.Second,
-		retryInterval:     common.CnConnectRetryInterval * time.Second,
-		metaRetryInterval: common.CnCloneMetaRetryInterval * time.Second,
-		now:               time.Now,
-		sleep:             agent.SleepCtx,
+		cns:             make(map[string]*cnState),
+		cntlrs:          make(map[string]*cntlrState),
+		marks:           agent.NewConvergeMarks(),
+		roundReads:      true,
+		disconnecting:   make(map[string]struct{}),
+		disconnectSlots: make(chan struct{}, disconnectConcurrency),
+		rootCtx:         context.Background(),
+		probeInterval:   common.CnLegProbeInterval * time.Second,
+		probeStall:      common.CnLegProbeStallSeconds * time.Second,
+		retryInterval:   common.CnConnectRetryInterval * time.Second,
+		now:             time.Now,
+		sleep:           agent.SleepCtx,
 	}
 }
 

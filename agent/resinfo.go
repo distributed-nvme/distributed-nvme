@@ -175,10 +175,9 @@ func (t *ResTracker) ErrReason(
 // device, subsystem and namespace, all backed by an error table (cnagent.md
 // CN16, CN17); or, on the dn, it sits above a side device whose provisioning
 // gate is closed and is reported unprobed, whether or not it exists
-// (dnagent.md DN9, DN18); or it waits for a free run in its node's metadata
-// area — on the cn a clone's metadata wrapper and dm-clone (cnagent.md CN18),
-// on the dn a migration destination's side device and migration rows
-// (dnagent.md DN13) — with the details "waiting for metadata room: " and the
+// (dnagent.md DN9, DN18); or it waits for a free run in its DN's metadata
+// area, a migration destination's side device and migration rows
+// (dnagent.md DN13), with the details "waiting for metadata room: " and the
 // allocator's own text (architecture.md, Metadata units); or, on the dn, a
 // migration's rows wait for its cutover, the src side's migr_src_info rows
 // and the dst side's two migr_dst_info rows, which carry a reason as well

@@ -3,6 +3,7 @@ package cnagent
 import (
 	"context"
 	"path"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,20 @@ func awaitDisconnects(t *testing.T, srv *CnAgentServer) {
 // it replies, and only a later pass's own probe finds it gone.
 func cnSweepOnlyDisconnects(t *testing.T, reply *pb.AgentReply, label string) {
 	t.Helper()
+	cnSweepOnlyDisconnectsBut(t, reply, label)
+}
+
+// cnSweepOnlyDisconnectsBut is cnSweepOnlyDisconnects that also lets the
+// leftovers named in also through: a pass that removes a clone stops its
+// descent at the source's disconnect, so the clone's clone meta group below
+// that layer is the pass's leftover too, untouched (CN21; cloneGrpLeftovers).
+func cnSweepOnlyDisconnectsBut(
+	t *testing.T,
+	reply *pb.AgentReply,
+	label string,
+	also ...string,
+) {
+	t.Helper()
 	cnSweepAssertCode(t, reply, common.ReplyCodeLeftover, label)
 	_, names, ok := strings.Cut(reply.GetDetails(), "): ")
 	if !ok || strings.Contains(names, "; ") ||
@@ -208,10 +223,23 @@ func cnSweepOnlyDisconnects(t *testing.T, reply *pb.AgentReply, label string) {
 			label, reply.GetDetails())
 	}
 	for _, name := range strings.Split(names, ", ") {
+		if slices.Contains(also, name) {
+			continue
+		}
 		if !strings.HasPrefix(name, agent.LeftoverKindNvme+":") {
 			t.Fatalf("%s: %q is left over besides the disconnects (%q)",
 				label, name, reply.GetDetails())
 		}
+	}
+}
+
+// cloneGrpLeftovers are the dm leftovers of the fixture clone's clone meta
+// group without redundancy, its group device and its leg's wrapper, which a
+// pass that stops at the clone's source leaves (cnSweepOnlyDisconnectsBut).
+func cloneGrpLeftovers(srv *CnAgentServer) []string {
+	return []string{
+		agent.LeftoverKindDm + ":" + grpName(srv, testCloneGrp),
+		agent.LeftoverKindDm + ":" + legName(srv, testCloneLeg),
 	}
 }
 
@@ -1860,9 +1888,11 @@ func TestUnansweredListingStillSweepsCloneChunks(t *testing.T) {
 		t.Run(listing.name, func(t *testing.T) {
 			ctx := context.Background()
 			srv, node := newTestServer(t)
-			// A standby that carries the clone in its desired state.
-			syncupBoth(t, srv, reqOpts{
-				revision: 2, primary: false, clones: []*pb.Clone{cloneOf()}})
+			// A standby that carries the clone in its desired state, with
+			// no clone meta group, so the clone's chunk files are all the
+			// node holds of it.
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: false,
+				clones: []*pb.Clone{cloneOf()}, noCloneGrp: true})
 			pushBitmap(t, srv, hexBytes(t, testSkipHex))
 			bmPath := srv.nf.LocalCloneBmPath(
 				testCluster, testCn, testSp, testClone, 0, 0)
@@ -2223,10 +2253,11 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 					t.Fatalf("SyncupCntlr: %v", err)
 				}
 				// The clone's source goes with it: its disconnect runs off
-				// the pass (CN10), so the pass's only leftover is that
-				// connection, and the pass after it is clean.
-				cnSweepOnlyDisconnects(t, reply.GetAgentReply(),
-					"the pass whose listings answer")
+				// the pass (CN10), so the pass's leftovers are that
+				// connection and the clone meta group below it.
+				cnSweepOnlyDisconnectsBut(t, reply.GetAgentReply(),
+					"the pass whose listings answer",
+					cloneGrpLeftovers(srv)...)
 				for _, ns := range shape.want {
 					reload := "cmd dmsetup reload " +
 						nsDevName(srv, ns.nsId) + " --table "
@@ -2256,13 +2287,11 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 				if retrying(t, srv) {
 					t.Fatalf("the pass that held nothing kept the retry")
 				}
+				// The passes after the source's disconnect take the clone
+				// meta group down, its leg's disconnect last, and leave the
+				// node clean.
 				awaitDisconnects(t, srv)
-				reply, err = srv.SyncupCntlr(ctx, cntlrReq(shape.to))
-				if err != nil {
-					t.Fatalf("SyncupCntlr: %v", err)
-				}
-				cnSweepAssertCode(t, reply.GetAgentReply(), 0,
-					"the pass after the disconnect")
+				syncupCntlrUntilClean(t, srv, shape.to)
 			})
 		}
 	}
@@ -2483,8 +2512,8 @@ func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
-			cnSweepOnlyDisconnects(t, reply.GetAgentReply(),
-				"the pass after the fault")
+			cnSweepOnlyDisconnectsBut(t, reply.GetAgentReply(),
+				"the pass after the fault", cloneGrpLeftovers(srv)...)
 			if route.on == "clone" {
 				assertOrder(t, node, "cmd dmsetup reload "+nsDev+
 					" --table "+linear(on["error"]),
@@ -2620,9 +2649,11 @@ func TestUnremovedChunkFileIsRedriven(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			srv, node := newTestServer(t)
-			// A standby that carries the clone in its desired state.
-			syncupBoth(t, srv, reqOpts{
-				revision: 2, primary: false, clones: []*pb.Clone{cloneOf()}})
+			// A standby that carries the clone in its desired state, with
+			// no clone meta group, so the clone's chunk files are all the
+			// node holds of it.
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: false,
+				clones: []*pb.Clone{cloneOf()}, noCloneGrp: true})
 			pushBitmap(t, srv, hexBytes(t, testSkipHex))
 			bmPath := srv.nf.LocalCloneBmPath(
 				testCluster, testCn, testSp, testClone, 0, 0)

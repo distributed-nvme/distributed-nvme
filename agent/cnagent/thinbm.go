@@ -14,11 +14,11 @@ import (
 )
 
 // thinbm.go is the dm-thin metadata reader behind GetThinDeviceBm / GetLegBm
-// (CN25-CN27) and the geometry folds of architecture.md, raid0 bitmap math,
-// used by PushCloneBitmap (CN22) and by the clone recovery of
-// architecture.md, Clone crash recovery. thin-provisioning-tools has a single
-// role, so by the split rule of dnagent.md, Scope and placement, this wrapper
-// is role code.
+// (CN25-CN27) and CN14's thin id sweeps, and the geometry fold of
+// architecture.md, raid0 bitmap math, which applies the source chunks
+// PushCloneBitmap stores (CN22) to a dm-clone (CN18 step 4).
+// thin-provisioning-tools has a single role, so by the split rule of
+// dnagent.md, Scope and placement, this wrapper is role code.
 
 // ---------------------------------------------------------------------------
 // thin_dump XML
@@ -192,8 +192,7 @@ func (s *CnAgentServer) dumpThinMetadata(
 // root's own directory (mode 0755), and not in a world-writable temp
 // directory such as /tmp: there any local user could create the name first,
 // and ensureThinDumpDir, which checks and never repairs, would then fail every
-// dump on the node until an operator removed it — a clone recovery's
-// destination bitmaps included, which fail closed (CN18 step 4).
+// dump on the node until an operator removed it.
 const thinDumpDir = "/run/dnv-thin-dump"
 
 // thinDumpPath is where one pool's dump is written: the private directory,
@@ -211,8 +210,9 @@ func thinDumpPath(sp *slicePlan) string {
 // opens its output with a plain create-and-truncate, so under a fixed name in
 // a world-writable directory another local user could create the file first,
 // own it through the dump and rewrite the document before it is read back —
-// and a forged destination bitmap discards regions of a dm-clone that were
-// never copied. Nobody else can create or replace an entry of a 0700
+// and a forged dump forges the bitmaps GetThinDeviceBm and GetLegBm answer,
+// which mark regions of another pool's clone or of a migration copied that
+// never were. Nobody else can create or replace an entry of a 0700
 // directory, and only root can create, replace or rename an entry of /run,
 // its parent. `stat` reads the entry itself, not what a symlink names.
 // Anything else fails the dump: another user's directory, one others can
@@ -342,18 +342,6 @@ func clearBitRange(bitmap []byte, lo, hi uint64) {
 	}
 }
 
-func setBitRange(bitmap []byte, lo, hi uint64) {
-	for ; lo < hi && lo%8 != 0; lo++ {
-		bitmap[lo/8] |= 1 << (lo % 8)
-	}
-	for ; hi > lo && hi%8 != 0; hi-- {
-		bitmap[(hi-1)/8] |= 1 << ((hi - 1) % 8)
-	}
-	for b := lo / 8; b < hi/8; b++ {
-		bitmap[b] = 0xff
-	}
-}
-
 func setBit(bitmap []byte, idx uint64) {
 	if idx/8 < uint64(len(bitmap)) {
 		bitmap[idx/8] |= 1 << (idx % 8)
@@ -439,8 +427,7 @@ func legDataBitmap(
 }
 
 // ---------------------------------------------------------------------------
-// The raid0 fold of architecture.md, raid0 bitmap math (CN22 and the
-// recovery of architecture.md, Clone crash recovery)
+// The raid0 fold of architecture.md, raid0 bitmap math (CN22)
 // ---------------------------------------------------------------------------
 
 // sliceBitmap is one underlying device's bitmap in the fold, held as the
@@ -474,28 +461,9 @@ func (b sliceBitmap) skippable(idx uint64) bool {
 	return chunk[local/8]&(1<<(local%8)) != 0
 }
 
-// chunksOf cuts a whole slice bitmap into the C-sized chunks sliceBitmap
-// addresses. The recovery of architecture.md, Clone crash recovery, builds its
-// per-slice bitmaps locally rather
-// than receiving them as chunks, so it must split them here: handing the whole
-// bitmap over as chunk 0 would leave every bit past the first C bytes
-// unreachable, and unreachable reads as written — silently stopping the skip
-// at 1 MiB of bitmap on a large slice.
-func chunksOf(bitmap []byte) map[uint32][]byte {
-	const size = common.CloneBmChunkBytes
-	out := make(map[uint32][]byte, (len(bitmap)+size-1)/size)
-	for idx := 0; idx*size < len(bitmap); idx++ {
-		end := (idx + 1) * size
-		if end > len(bitmap) {
-			end = len(bitmap)
-		}
-		out[uint32(idx)] = bitmap[idx*size : end]
-	}
-	return out
-}
-
-// raid0Geometry is one side of the address mapping of architecture.md, raid0
-// bitmap math.
+// raid0Geometry is the source geometry A of architecture.md, raid0 bitmap
+// math: the raid0 whose address mapping a clone's source chunks are folded
+// through.
 type raid0Geometry struct {
 	sliceCnt   uint64
 	stripeSize uint64
@@ -636,58 +604,4 @@ func (s *CnAgentServer) applyCloneChunks(
 			slog.String("dm", cp.finalName),
 			slog.String("error", err.Error()))
 	}
-}
-
-// applyDstBitmaps is the recovery of architecture.md, Clone crash recovery,
-// B-side of architecture.md, raid0 bitmap math: read the
-// destination td's mapping bitmap from every slice pool and blkdiscard every
-// region the destination already owns. "Mapped ⇔ already copied" holds because
-// the dst td started empty ([D3]).
-//
-// It fails closed: every error is returned rather than logged, because a
-// partially applied destination bitmap is exactly the staleness hazard of
-// architecture.md, Clone crash recovery
-// — the caller must not let the dm-clone serve or hydrate after one.
-func (s *CnAgentServer) applyDstBitmaps(
-	ctx context.Context,
-	plan *cntlrPlan,
-	cp *clonePlan,
-) error {
-	geometry := raid0Geometry{
-		sliceCnt:   plan.sliceCnt,
-		stripeSize: plan.stripeSize,
-		blockSize:  plan.blockSize,
-	}
-	if cp.regionCnt == 0 || !geometry.valid() {
-		return fmt.Errorf("destination geometry is unusable")
-	}
-	slices := make([]sliceBitmap, plan.sliceCnt)
-	virtualBlocks := cp.dstTd.td.GetSize() / plan.sliceCnt / plan.blockSize
-	for _, sp := range plan.slices {
-		sb, err := s.dumpThinMetadata(ctx, sp)
-		if err != nil {
-			return fmt.Errorf("%s: %w", sp.poolFinalName, err)
-		}
-		extents, err := deviceMappings(sb, cp.dstTd.td.GetDevId())
-		if err != nil {
-			return fmt.Errorf("%s: %w", sp.poolFinalName, err)
-		}
-		mapped := make([]byte, bitmapBytes(virtualBlocks))
-		for _, extent := range extents {
-			lo, hi := clipRange(extent.origin, extent.origin+extent.length,
-				0, virtualBlocks)
-			if lo < hi {
-				setBitRange(mapped, lo, hi)
-			}
-		}
-		if uint64(sp.sliceIdx) >= plan.sliceCnt {
-			return fmt.Errorf("slice_idx %d is outside the slice set",
-				sp.sliceIdx)
-		}
-		slices[sp.sliceIdx] = sliceBitmap{chunks: chunksOf(mapped)}
-	}
-	folded := foldRegions(cp.regionCnt, plan.blockSize, geometry, slices)
-	ranges := agent.SkipRanges(folded, 0, cp.regionCnt, plan.blockSize)
-	return agent.ApplySkipRanges(
-		ctx, s.dm, s.nf.DmPath(cp.finalName), ranges)
 }

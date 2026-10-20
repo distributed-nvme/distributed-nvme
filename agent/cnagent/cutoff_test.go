@@ -189,7 +189,6 @@ func TestARestartKeepsTheThinIdOfACutOffPass(t *testing.T) {
 	// store survive.
 	st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp, testCntlr))
 	srv.stopConnectRetry(st)
-	srv.stopCloneMetaRetry(st)
 	node.Reset()
 	fresh := newCnServer(node)
 	reconcileForTest(t, fresh)

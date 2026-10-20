@@ -333,13 +333,15 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // cntlrInfoLocked derives CntlrInfo from the cntlr's last accepted request:
 // one row per object it named — per slice, per group (meta and data), per leg
 // AND per spare leg of every group, per td, per subsystem, per namespace, per
-// clone and per xfer — and, for each clone of its clone_list, a group row for
-// the clone's clone meta group and a leg row per leg and per spare leg of it,
-// as for a slice's group (dnv-worker.md, Integration test plan, The fake
-// agent). td_id_to_thin_info is filled only when the request's
-// cntlr.primary is true and the thin_ok lever says so (architecture.md, sp
-// role; cnagent CN14 "primary only"), minus any thin_missing_slices — the
-// created-flip negative of the worker suite's smoke case (RW19). The same
+// clone and per xfer, a clone's being its target row and its dm-clone row,
+// the kinds of row the cn agent reports for a clone (cnagent.md CN28) — and,
+// for each clone of its clone_list, a group row for the clone's clone meta
+// group and a leg row per leg and per spare leg of it, as for a slice's group
+// (dnv-worker.md, Integration test plan, The fake agent). td_id_to_thin_info
+// is filled only when the request's cntlr.primary is true and the thin_ok
+// lever says so (architecture.md, sp role; cnagent CN14 "primary only"),
+// minus any thin_missing_slices — the created-flip negative of the worker
+// suite's smoke case (RW19). The same
 // cntlr.primary gates every when_primary row override (resolveCntlrRow).
 //
 // side_id_to_path holds one row per side of every leg of a slice's group with
@@ -374,7 +376,6 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 		XferIdToNamespace: make(map[uint64]*pb.ResInfo),
 		CloneIdToTarget:   make(map[uint64]*pb.ResInfo),
 		CloneIdToDmClone:  make(map[uint64]*pb.ResInfo),
-		CloneIdToMeta:     make(map[uint64]*pb.ResInfo),
 		SideIdToPath:      make(map[uint64]*pb.ResInfo),
 	}
 	sliceIdList := sliceIdList(req)
@@ -448,8 +449,6 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 			key, primary, rowKey("clone_id_to_target", cloneId))
 		info.CloneIdToDmClone[cloneId] = a.resolveCntlrRow(
 			key, primary, rowKey("clone_id_to_dm_clone", cloneId))
-		info.CloneIdToMeta[cloneId] = a.resolveCntlrRow(
-			key, primary, rowKey("clone_id_to_meta", cloneId))
 	}
 	for _, xfer := range req.GetXferList() {
 		xferId := xfer.GetXferId()

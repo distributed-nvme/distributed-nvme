@@ -308,7 +308,6 @@ func infoRows(info *pb.CntlrInfo) map[string]*pb.ResInfo {
 	add("xfer_ns", info.GetXferIdToNamespace())
 	add("clone_tgt", info.GetCloneIdToTarget())
 	add("clone_dm", info.GetCloneIdToDmClone())
-	add("clone_meta", info.GetCloneIdToMeta())
 	for tdId, thin := range info.GetTdIdToThinInfo() {
 		add(fmt.Sprintf("thin[td %#x]", tdId), thin.GetSliceIdToDmThin())
 	}
@@ -504,38 +503,27 @@ func TestACntlrReadReadsTheNodeOnce(t *testing.T) {
 // device's table, which every dm row reads once its device is there — reads
 // ERROR with the listing's error, and the verdict names the listing. The
 // fixtures are two raid1 primaries, one serving a transfer and one holding a
-// clone. The clone metadata area takes its wrappers' names from the info
-// listing and their tables from the table listing, so with either listing
-// unanswered the area did not answer: the clone's metadata row reads ERROR
-// with the area's error, which wraps the listing's, and its dm-clone row
-// reads ERROR beside it (cloneMetaVerdict). The md group rows, read from the
-// md walk, the export rows, read from configfs, and the clone's source row,
-// read from the NVMe walk, read OK. Read as an empty, complete listing, the
-// info listing would turn every dm row MISSING, which sets no health epoch,
-// and a clean verdict would hide that the listing told the call nothing.
+// clone. The dm-clone's row takes the device's attrs from the info listing
+// and its status line from a read of its own, so it reads ERROR with the
+// info listing's error and OK beside an unanswered table listing. The md
+// group rows, a clone meta group's included, read from the md walk, the
+// export rows, read from configfs, and the clone's source row, read from the
+// NVMe walk, read OK. Read as an empty, complete listing, the info listing
+// would turn every dm row MISSING, which sets no health epoch, and a clean
+// verdict would hide that the listing told the call nothing.
 func TestUnansweredDmListingErrsEveryDeviceRow(t *testing.T) {
 	infoKey := strings.TrimPrefix(dmInfoListLine, "cmd ")
 	tableKey := strings.TrimPrefix(dmTableListLine, "cmd ")
 	// failed gives, by kind, the details a row the listing turns ERROR
-	// reads, from the listing's error: a dm row's are that error itself, the
-	// clone metadata row's are the area's error, which wraps it, and the
-	// dm-clone row's are the text of the clone's ERROR pair, which the
-	// dm-clone's status line follows on a line of its own when its own
-	// attrs answered (rowDetailsMatch).
+	// reads, from the listing's error: a dm row's are that error itself. The
+	// dm-clone row is one only beside the info listing (infoOnly).
 	same := func(want string) string { return want }
 	failed := map[string]func(want string) string{
 		"leg": same, "pool_meta": same, "pool_data": same, "pool": same,
 		"thin": same, "td_error": same, "raid0": same, "ns_dev": same,
-		"xfer_dm": same,
-		"clone_meta": func(want string) string {
-			return "clone-metadata arena unavailable: " + want
-		},
-		"clone_dm": func(string) string { return detailsCloneMetaMissing },
+		"xfer_dm": same, "clone_dm": same,
 	}
-	rowDetailsMatch := func(kind, details, want string) bool {
-		return details == want ||
-			(kind == "clone_dm" && strings.HasPrefix(details, want+"\n"))
-	}
+	infoOnly := map[string]bool{"clone_dm": true}
 	devRows := []string{"leg", "pool_meta", "pool_data", "pool", "thin",
 		"td_error", "raid0", "ns_dev"}
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn,
@@ -555,7 +543,7 @@ func TestUnansweredDmListingErrsEveryDeviceRow(t *testing.T) {
 		{"a built clone",
 			reqOpts{revision: 2, primary: true, raid1: true,
 				clones: []*pb.Clone{cloneOf()}},
-			append(slices.Clone(devRows), "clone_meta", "clone_dm", "grp",
+			append(slices.Clone(devRows), "clone_dm", "grp",
 				"ss", "ns", "clone_tgt")},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -609,10 +597,12 @@ func TestUnansweredDmListingErrsEveryDeviceRow(t *testing.T) {
 							kinds[kind] = true
 							details, status := row.GetDetails(),
 								row.GetStatus()
-							if wantOf, ok := failed[kind]; ok {
+							if wantOf, ok := failed[kind]; ok &&
+								(!infoOnly[kind] ||
+									tc.listing == "dmsetup info") {
 								want := wantOf(tc.want)
 								if status != pb.ResStatus_RES_STATUS_ERROR ||
-									!rowDetailsMatch(kind, details, want) {
+									details != want {
 									t.Errorf("%s: %s reads %v %q, want "+
 										"ERROR %q", label, key, status,
 										details, want)
@@ -795,119 +785,6 @@ func TestPartialDmListingStillAnswers(t *testing.T) {
 				"dm device "+thin+" is not there", label+" raid0")
 		}
 	})
-
-	// The wrapper's own read decides the clone metadata row. A read that
-	// answers finds the wrapper there, and the row reads OK, as the
-	// converge's `dmsetup ls` does. A read that did not answer leaves the
-	// clone metadata area unread: the row reads ERROR naming that read, and
-	// the dm-clone row reads ERROR beside it (cloneMetaVerdict), never the
-	// MISSING of a wrapper that is not there, which sets no health epoch.
-	t.Run("its clone metadata wrapper left out", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-			clones: []*pb.Clone{cloneOf()}})
-		assertOk(t, reply.GetCntlrInfo().GetCloneIdToMeta()[testClone],
-			"the converge's clone meta row")
-		wrapper := cloneMetaName(srv, testClone)
-		ownRead := dmNumberRead + wrapper
-		node.mu.Lock()
-		node.infoOmit[wrapper] = true
-		node.mu.Unlock()
-		for _, killed := range []bool{false, true} {
-			for _, entrance := range readEntrances {
-				label := entrance.name
-				if killed {
-					label += ", the wrapper's own read killed"
-					node.mu.Lock()
-					// One-shot: the call reads the wrapper on its own once.
-					node.killCmd[ownRead] = true
-					node.mu.Unlock()
-				}
-				node.Reset()
-				_, info := entrance.read(t, srv)
-				if got := countCalls(node, "cmd "+ownRead); got != 1 {
-					t.Errorf("%s read the wrapper on its own %d times, "+
-						"want 1", label, got)
-				}
-				meta := info.GetCloneIdToMeta()[testClone]
-				if !killed {
-					assertOk(t, meta, label+" clone meta row")
-					continue
-				}
-				node.mu.Lock()
-				armed := len(node.killCmd)
-				node.mu.Unlock()
-				if armed != 0 {
-					t.Fatalf("%s: the kill never fired", label)
-				}
-				want := "clone-metadata arena unavailable: " + ownRead +
-					": signal: killed"
-				if meta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-					meta.GetDetails() != want {
-					t.Errorf("%s: the clone meta row reads %v %q, want "+
-						"ERROR %q", label, meta.GetStatus(),
-						meta.GetDetails(), want)
-				}
-				assertErrorDetails(t,
-					info.GetCloneIdToDmClone()[testClone],
-					detailsCloneMetaMissing, label+" dm-clone row")
-			}
-		}
-	})
-}
-
-// TestACompleteListingReadsNoUnbuiltWrapper pins the rule for a clone
-// metadata wrapper this cntlr wants under a complete info listing
-// (Wrappers, CN28): a listing that lacks it answers it absent, with no read
-// of its own. TestPartialDmListingStillAnswers pins the partial listing.
-// The fixture's clone waits for room, so its wrapper is not built; a cntlr's
-// read takes the wrapper's absence from its reading,
-// names it in no command and no file read, and its clone rows read the
-// converge's PROVISIONING pair. Read on its own, the wrapper would cost one
-// more process in every read for as long as the clone waits.
-func TestACompleteListingReadsNoUnbuiltWrapper(t *testing.T) {
-	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
-	srv.metaRetryInterval = time.Hour
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-	// Another sp's wrapper fills the whole arena, as in
-	// TestCloneMetaNoRunIsProvisioning.
-	plantWrapper(t, srv, node, 0x999, 0, common.CnCloneMetaUnitCnt)
-	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
-		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
-	if err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
-	}
-	assertProvisioningDetails(t,
-		reply.GetCntlrInfo().GetCloneIdToMeta()[testClone],
-		waitingForTwoUnits, "the converge's clone meta row")
-	wrapper := cloneMetaName(srv, testClone)
-	node.mu.Lock()
-	_, built := node.dms[wrapper]
-	node.mu.Unlock()
-	if built {
-		t.Fatalf("fixture: the waiting clone's wrapper %s is built", wrapper)
-	}
-	if listing, err := srv.dm.ListInfo(context.Background()); err != nil ||
-		listing.Partial {
-		t.Fatalf("fixture: the info listing read (%v), want it complete",
-			err)
-	}
-	for _, entrance := range readEntrances {
-		node.Reset()
-		_, info := entrance.read(t, srv)
-		if got := countCalls(node, dmInfoListLine); got != 1 {
-			t.Fatalf("%s took %d info listings, want 1", entrance.name, got)
-		}
-		if calls := node.callsMatching(wrapper); len(calls) != 0 {
-			t.Errorf("%s read the unbuilt wrapper: %q", entrance.name,
-				calls)
-		}
-		assertProvisioningDetails(t, info.GetCloneIdToMeta()[testClone],
-			waitingForTwoUnits, entrance.name+" clone meta row")
-		assertProvisioningDetails(t, info.GetCloneIdToDmClone()[testClone],
-			waitingForTwoUnits, entrance.name+" dm-clone row")
-	}
 }
 
 // TestEmptyNodeListingIsAnAnswer pins the one output of a whole-node dm
@@ -1086,14 +963,13 @@ func TestUnansweredMdListingErrsTheGroupRows(t *testing.T) {
 }
 
 // TestACntlrReadTakesTheCloneFromTheReading pins the clone stack's part of
-// a cntlr's read (CN5, CN18, CN28): a primary with a built, hydrating clone
-// takes the dm-clone's attrs, the clone metadata wrappers' names and tables
-// and, in the verdict, the dm-clone's table for the source it maps, all
-// from the reading. It reads no device on its own with
-// `dmsetup info` or `dmsetup table`, runs no `dmsetup ls`, and its status
-// reads stay per device: the pool's, and the dm-clone's for its rows and
-// once more for the namespace it backs. Its one `losetup` finds the loop
-// device of the metadata area. Every row reads OK and the verdict is clean.
+// a cntlr's read (CN18, CN28): a primary with a built, hydrating clone takes
+// the dm-clone's attrs, its clone meta group's device and, in the verdict,
+// the dm-clone's table for the source it maps, all from the reading. It reads
+// no device on its own with `dmsetup info` or `dmsetup table`, runs no
+// `dmsetup ls` and no `losetup`, and its status reads stay per device: the
+// pool's, and the dm-clone's for its rows and once more for the namespace it
+// backs. Every row reads OK and the verdict is clean.
 func TestACntlrReadTakesTheCloneFromTheReading(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
@@ -1111,7 +987,7 @@ func TestACntlrReadTakesTheCloneFromTheReading(t *testing.T) {
 		for call, want := range map[string]int{
 			"cmd dmsetup status --noflush " + poolName(srv): 1,
 			"cmd dmsetup status " + clone:                   2,
-			"cmd losetup --associated ":                     1,
+			"cmd losetup":                                   0,
 			"cmd dmsetup status ":                           3,
 		} {
 			if got := callCnt(node, call); got != want {

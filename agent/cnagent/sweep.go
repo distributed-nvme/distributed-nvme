@@ -476,7 +476,12 @@ func (w *cnWanted) addNs(nqn string, nsid int) {
 //	c6 ns-dev + nvmet namespace   wantAny   (ensureNsDev / ensureSubsystem)
 //	host-facing nvmet subsystem   wantAny   (ensureSubsystem)
 //	c8 xfer + its subsystem/ns    wantAny   (ensureXfer)
-//	c7 clone + cb wrapper + :4:   wantClone (ensureClone)
+//	c7 clone + :4:                wantClone (ensureClone)
+//
+// The legs and groups are the plan's, a clone's clone meta group among them
+// (buildCloneGrps), so a clone meta group's legs and its array or group
+// linear are wanted under the same gates as a slice's, for as long as its
+// clone is in the request.
 func cntlrWanted(plan *cntlrPlan) *cnWanted {
 	w := newCnWanted()
 	if plan.wantLeg {
@@ -533,7 +538,7 @@ func cntlrWanted(plan *cntlrPlan) *cnWanted {
 	}
 	if plan.wantClone {
 		for _, cp := range plan.clones {
-			w.addDm(cp.finalName, cp.metaDmName)
+			w.addDm(cp.finalName)
 			w.hostNqns[cp.clone.GetSrcNqn()] = struct{}{}
 		}
 	}
@@ -730,20 +735,6 @@ func (s *CnAgentServer) removeDmVerified(
 	return dev == nil
 }
 
-// removeCloneMetaDmVerified is removeDmVerified under cloneMetaMu: removing a
-// kind-cb wrapper frees its units in the arena's next enumeration, so it is a
-// registry mutation (CN18) and may not race another cntlr's allocation. It
-// must never be called from a path that already holds the mutex
-// (ensureCloneMeta, reconcileCloneMeta), which call s.removeDm directly.
-func (s *CnAgentServer) removeCloneMetaDmVerified(
-	ctx context.Context,
-	name string,
-) bool {
-	s.cloneMetaMu.Lock()
-	defer s.cloneMetaMu.Unlock()
-	return s.removeDmVerified(ctx, name)
-}
-
 // removeExportVerified removes an nvmet subsystem and re-probes configfs for
 // it, so a killed `rmdir` cannot pass for a removal.
 func (s *CnAgentServer) removeExportVerified(
@@ -877,14 +868,12 @@ func (s *CnAgentServer) runChain(
 			},
 			report: func() { s.reportDms(res, chain.clones) },
 		},
-		{ // L4 — clone-metadata wrappers. The chunk FILES of a clone that
-			// left the request are swept separately, against the request
-			// itself (sweepCloneChunks): a standby has no wrapper to key
-			// them off.
+		{ // L4 — clone-metadata wrappers, none of which a clone uses
+			// (CN18): every one this sp holds is unwanted.
 			run: func() bool {
 				left := false
 				for _, name := range chain.cloneMeta {
-					if !s.removeCloneMetaDmVerified(ctx, name) {
+					if !s.removeDmVerified(ctx, name) {
 						res.Add(agent.LeftoverKindDm, name)
 						left = true
 					}
@@ -1461,16 +1450,15 @@ func (s *CnAgentServer) disconnectVerified(
 
 // sweepCloneChunks deletes the bitmap chunk files of every clone this cntlr
 // no longer carries (SH7). It is a sweep of the LOCAL STORE against the
-// request, not a side effect of removing the clone's wrapper: a standby
-// builds no wrapper at all, so keying the deletion off one would leave a
+// request, not a side effect of removing the clone's dm-clone: a standby
+// builds no dm-clone at all, so keying the deletion off one would leave a
 // deleted clone's chunks on disk for ever and the worker re-pushing them.
 //
 // A clone the role or the sp_level merely SUPPRESSES keeps its chunks
 // applied-by-file (CN19, CN22): deleting them on every standby converge would
 // make the worker re-push them every round, and would leave a promoted
-// standby's rebuild (architecture.md, Clone crash recovery) nothing to skip
-// with. The test is membership of
-// clone_list, which is exactly "the clone still exists".
+// standby's build of the dm-clone (CN18 step 4) no chunk to apply. The test
+// is membership of clone_list, which is exactly "the clone still exists".
 //
 // st.chunks mirrors the files, so a clone's entry goes only once its files
 // have. A removal that did not happen keeps them indexed, the converge that
@@ -1659,33 +1647,13 @@ func (s *CnAgentServer) unownedSrcNqns(
 	return out
 }
 
-// orphanCloneMetaNames is every kind-cb wrapper of this CN whose clone no
-// stored cntlr's clone_list names. It is reconcileCloneMeta's rule, computed
-// from the sweep's own snapshot so the verdict and the removal agree.
-func (s *CnAgentServer) orphanCloneMetaNames(
-	clusterId uint64,
-	cnId uint64,
-	actual *cnActual,
-) []string {
-	wanted := make(map[string]struct{})
-	for _, key := range s.cntlrKeysOf(clusterId, cnId) {
-		st := s.getCntlr(key)
-		if st == nil {
-			continue
-		}
-		req := st.loadReq()
-		spId := req.GetCntlrPointer().GetSpId()
-		for _, clone := range req.GetCloneList() {
-			wanted[s.nf.CnCloneMetaDmName(
-				clusterId, cnId, spId, clone.GetCloneId())] = struct{}{}
-		}
-	}
+// orphanCloneMetaNames is every kind-cb wrapper of this CN, none of which a
+// clone uses (CN18). It is reconcileCloneMeta's rule, computed from the
+// sweep's own snapshot so the verdict and the removal agree.
+func (s *CnAgentServer) orphanCloneMetaNames(actual *cnActual) []string {
 	var out []string
 	for name, dn := range actual.ours {
-		if dn.Kind != common.DmKindCnCloneMeta {
-			continue
-		}
-		if _, keep := wanted[name]; !keep {
+		if dn.Kind == common.DmKindCnCloneMeta {
 			out = append(out, name)
 		}
 	}
@@ -1872,7 +1840,6 @@ func cntlrResKeys(plan *cntlrPlan) map[string]struct{} {
 	for _, cp := range plan.clones {
 		add(resKeyOf(resKeyCloneTgtFmt, cp.cloneId))
 		add(resKeyOf(resKeyCloneDmFmt, cp.cloneId))
-		add(resKeyOf(resKeyCloneMetaFmt, cp.cloneId))
 	}
 	return keys
 }
@@ -2190,13 +2157,12 @@ func (s *CnAgentServer) sweepCn(
 		}
 	}
 	// The kind-cb wrappers are swept by reconcileCloneMeta, which enumerates
-	// the arena and removes every wrapper no stored cntlr's clone_list names.
-	// It is called from here and nowhere else, so the node write lock this
-	// pass holds is what makes its "every stored cntlr" set stable ([D14]).
+	// them and removes every one, since no clone uses one ([D14]). It is
+	// called from here and nowhere else.
 	if remove {
 		s.reconcileCloneMeta(ctx, clusterId, cnId)
 	}
-	for _, name := range s.orphanCloneMetaNames(clusterId, cnId, actual) {
+	for _, name := range s.orphanCloneMetaNames(actual) {
 		if remove {
 			// The snapshot predates reconcileCloneMeta, so the verdict is
 			// taken from a fresh probe rather than from it.

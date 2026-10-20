@@ -24,10 +24,10 @@ func CloneMetaBytes(copyBytes, blockSize uint64) uint64 {
 // to whole units, so a copy smaller than one block, and any copy when
 // blockSize is zero, needs one unit.
 //
-// It is the one formula the gateway charges by and both agents size their
-// runs by: copyBytes is the destination td's size for a clone and the moved
-// side's bytes for a migration, and blockSize is the pool's data_block_size
-// for both. One count serves both areas because CnCloneMetaUnit equals
+// It is the one formula the gateway charges by and the dn agent sizes a
+// migration's run by: copyBytes is the destination td's size for a clone's
+// charge and the moved side's bytes for a migration, and blockSize is the
+// pool's data_block_size for both. One count serves both areas because CnCloneMetaUnit equals
 // DnCloneMetaUnit, which TestCloneMetaUnitSizesAgree pins.
 func CloneMetaUnits(copyBytes, blockSize uint64) uint64 {
 	bytes := CloneMetaBytes(copyBytes, blockSize)

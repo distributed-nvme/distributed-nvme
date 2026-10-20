@@ -2212,9 +2212,10 @@ func chargeSpCns(
 // charged with no room check, even past common.CnCloneMetaUnitCnt: this is
 // the one charge allowed to pass the ceiling. A replacement restores the
 // whole SP, and refusing it for the clones would stop every volume of the SP
-// to keep a few copies waiting; the clones that find no room on the new CN
-// wait there as provisioning instead (cnagent.md CN18). The pick's room is
-// therefore no precondition here, and AR7's scan asks for no units.
+// to keep a count in bounds; the primary on the new CN builds every clone
+// all the same, since a clone keeps its metadata on its clone meta group
+// (cnagent.md CN18). The pick's room is therefore no precondition here, and
+// AR7's scan asks for no units.
 //
 // Effects: the old Cntlr key is deleted and, if its CN record still exists,
 // that CN gets its pointer removed, the SP footprint back, the SP's clone

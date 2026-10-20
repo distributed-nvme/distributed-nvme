@@ -229,9 +229,8 @@ func TestStoppedPassDemotesATransferWithADepartedOrigin(t *testing.T) {
 }
 
 // CN22/CN19: a clone the role or the level merely suppresses keeps its chunk
-// files. Deleting them made the worker re-push forever and left a promoted
-// standby's rebuild (architecture.md, Clone crash recovery) nothing to skip
-// with.
+// files. Deleting them would make the worker re-push forever and leave a
+// promoted standby's build of the dm-clone (CN18 step 4) no chunk to apply.
 func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 	srv, node := newTestServer(t)
 	// A standby that nonetheless carries the clone in its desired state.
@@ -267,104 +266,55 @@ func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 	}
 }
 
-// The recovery build of cnagent.md CN18 keys off missing dm-clone *metadata*,
-// not off the metadata wrapper: a
-// pass that created the wrapper and then failed to build the dm-clone leaves a
-// freshly discarded slot that dm-clone would format fresh, with nothing
-// hydrated.
-func TestCloneRecoveryWhenOnlyTheDmCloneVanished(t *testing.T) {
-	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{
-		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
-	loop := loopDev(t, srv, node)
+// TestADmCloneThatVanishedIsBuiltAgainOverItsMetadata: a dm-clone that is gone
+// while its clone meta group stays — removed behind the agent's back — is
+// created again over the group's device, and dm-clone finds the metadata the
+// group holds: the hydrated count is the one the copy had reached, the source
+// chunks are applied and hydration enabled again, and nothing reads the thin
+// pools' maps (CN18).
+func TestADmCloneThatVanishedIsBuiltAgainOverItsMetadata(t *testing.T) {
+	for _, raid1 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("raid1=%v", raid1), func(t *testing.T) {
+			srv, node := newTestServer(t)
+			opts := reqOpts{revision: 2, primary: true, raid1: raid1,
+				clones: []*pb.Clone{cloneOf()}}
+			syncupBoth(t, srv, opts)
+			pushBitmap(t, srv, hexBytes(t, testSkipHex))
+			clone := cloneName(srv, testClone)
+			node.setCloneHydrated(t, clone, 17)
+			removeCloneDevice(node, srv)
 
-	// The wrapper survives; the dm-clone does not.
-	removeCloneDevice(node, srv)
-
-	node.Reset()
-	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
-		revision: 3, primary: true,
-		clones: []*pb.Clone{cloneOf()}})); err != nil {
-		t.Fatalf("rebuild: %v", err)
+			node.Reset()
+			opts.revision = 3
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(opts))
+			if err != nil {
+				t.Fatalf("rebuild: %v", err)
+			}
+			assertOrder(t, node,
+				"cmd dmsetup create "+clone,
+				"cmd blkdiscard --offset 33554432 --length 33554432",
+				"cmd dmsetup message "+clone+" 0 enable_hydration",
+			)
+			assertNoCall(t, node, "reserve_metadata_snap")
+			assertNoCall(t, node, "cmd thin_dump")
+			assertNoCall(t, node, "cmd mdadm --create")
+			row := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
+			assertOk(t, row, "the dm-clone built again")
+			if !strings.Contains(row.GetDetails(), " 17/64 ") {
+				t.Fatalf("the dm-clone built again reads %q, want the 17 "+
+					"regions its metadata held", row.GetDetails())
+			}
+		})
 	}
-	pool := poolName(srv)
-	assertOrder(t, node,
-		"cmd dmsetup message "+pool+" 0 reserve_metadata_snap",
-		"cmd thin_dump --metadata-snap ",
-		"cmd dmsetup message "+pool+" 0 release_metadata_snap",
-		"cmd dmsetup message "+cloneName(srv, testClone)+
-			" 0 enable_hydration",
-	)
-	// A wrapper that is present and matches is reused as-is: "allocate"
-	// strictly means "a new unit range was chosen", so the surviving slot is
-	// never re-created and — decisively — never re-hole-punched, which would
-	// wipe the valid dm-clone superblock it carries (CN18).
-	assertNoCall(t, node, "cmd dmsetup create "+cloneMetaName(srv, testClone))
-	assertNoCall(t, node, "cmd blkdiscard --offset 0 --length 8388608 "+loop)
 }
 
-// removeCloneDevice drops the dm-clone behind the agent's back, the way a
-// crash between the wrapper's creation and `dmsetup create` leaves it.
+// removeCloneDevice drops the dm-clone behind the agent's back.
 func removeCloneDevice(node *fakeNode, srv *CnAgentServer) {
 	name := cloneName(srv, testClone)
 	delete(node.dms, name)
 	delete(node.devNo, "/dev/mapper/"+name)
 	delete(node.devSize, "/dev/mapper/"+name)
-}
-
-// architecture.md, Clone crash recovery: the destination bitmaps must be
-// applied in full before the dm-clone
-// handles any IO. A read that fails must therefore leave nothing able to serve
-// or hydrate — not enable hydration and report OK.
-func TestCloneRecoveryFailsClosed(t *testing.T) {
-	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{
-		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
-	removeCloneDevice(node, srv)
-
-	node.Reset()
-	node.failCmdAlways["thin_dump"] = "thin_dump: out of time"
-	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
-		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
-	if err != nil {
-		t.Fatalf("rebuild: %v", err)
-	}
-	// The dm-clone is gone, so its row reads MISSING, as the check round
-	// reads it, and the failure rides in its details (CN18, CN29).
-	info := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
-	if info.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
-		!strings.Contains(info.GetDetails(),
-			"destination bitmaps not applied: ") {
-		t.Fatalf("a failed destination-bitmap read reported %v/%q",
-			info.GetStatus(), info.GetDetails())
-	}
-	assertNoCall(t, node, "0 enable_hydration")
-	if _, ok := node.dms[cloneName(srv, testClone)]; ok {
-		t.Fatalf("the dm-clone was left able to serve and hydrate")
-	}
-	// Nothing serves the td: the ns-dev stays on the td's dm-error.
-	table := node.dms[nsDevName(srv, testNs)].table
-	errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
-	if !strings.Contains(table, "linear "+errNo) {
-		t.Fatalf("the ns-dev is not parked: %q", table)
-	}
-	// That park is where CN16 wants an ns-dev whose dm-clone does not exist
-	// (rule 5: absence shows no hydration), so its row reads OK in the
-	// converge and in the check round alike; the failure is the dm-clone
-	// row's.
-	assertOk(t, reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs], "ns-dev")
-	refreshTestCntlr(t, srv)
-	_, probed := srv.checkCntlrRound(context.Background(),
-		&pb.CheckCntlrRequest{
-			ClusterId: testCluster, CnId: testCn,
-			CntlrPointer: cntlrPtr(), Revision: 3,
-		}, nil)
-	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
-	if dm := probed.GetCloneIdToDmClone()[testClone]; dm.GetStatus() !=
-		pb.ResStatus_RES_STATUS_MISSING {
-		t.Fatalf("the probed dm-clone row is %v/%q, want MISSING",
-			dm.GetStatus(), dm.GetDetails())
-	}
 }
 
 // cnagent.md CN12 puts a single available member in case 2 (assemble, and
@@ -692,7 +642,7 @@ func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 }
 
 // TestSuppressedCloneReportsSpLevel: a clone in clone_list at a level that
-// suppresses clones reads its three rows MISSING / "sp_level" on both
+// suppresses clones reads its two rows MISSING / "sp_level" on both
 // channels (CN19) — at SP_LEVEL_NO_CLONE, CN18's staged gate, and at
 // SP_LEVEL_DISABLE, where reportSuppressed leaves the clones to the same
 // function. The worker's settle (dnv-worker.md HL2) is held by every other
@@ -732,21 +682,18 @@ func assertCloneSuppressed(t *testing.T, info *pb.CntlrInfo, label string) {
 		label+" clone_id_to_target")
 	assertMissingSpLevel(t, info.GetCloneIdToDmClone()[testClone],
 		label+" clone_id_to_dm_clone")
-	assertMissingSpLevel(t, info.GetCloneIdToMeta()[testClone],
-		label+" clone_id_to_meta")
 }
 
 // TestCloneWithUnresolvableDstTdAgrees: a clone whose dst_td_id is not in
-// td_list is the CN18 error the converge reports on all three rows, and the
-// probe must report the same. It must not fall through to the live-source /
-// dm-clone / wrapper probes: a MISSING (or an OK for a stack that outlived
-// the td), or — with region_cnt = 0 — a one-unit metadata budget and a size
-// mismatch that describes nothing on the node, would flip the rows and bump
-// their epochs on every interleaved converge and check round.
+// td_list is the CN18 error the converge reports on both rows, and the probe
+// must report the same. It must not fall through to the live-source and
+// dm-clone probes: a MISSING, or an OK for a stack that outlived the td,
+// would flip the rows and bump their epochs on every interleaved converge
+// and check round.
 func TestCloneWithUnresolvableDstTdAgrees(t *testing.T) {
 	srv, _ := newTestServer(t)
-	// Phase 1: the clone is built over its own destination td, so its metadata
-	// wrapper really exists when the td leaves td_list.
+	// Phase 1: the clone is built over its own destination td, so its
+	// dm-clone really exists when the td leaves td_list.
 	clone := cloneOfTd(testClone, testSrcNqn, testSnapTd)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: twoTds(),
 		clones: []*pb.Clone{clone}})
@@ -770,10 +717,10 @@ func TestCloneWithUnresolvableDstTdAgrees(t *testing.T) {
 	}
 	assertCloneRows(t, probe.GetCntlrInfo(), "probed", details)
 	// No flap: the epoch of a row whose status never changed must not move.
-	if got, want := probe.GetCntlrInfo().GetCloneIdToMeta()[testClone].
-		GetEpoch(), converged.GetCloneIdToMeta()[testClone].GetEpoch(); got !=
-		want {
-		t.Fatalf("clone_id_to_meta epoch moved %d -> %d", want, got)
+	if got, want := probe.GetCntlrInfo().GetCloneIdToDmClone()[testClone].
+		GetEpoch(), converged.GetCloneIdToDmClone()[testClone].
+		GetEpoch(); got != want {
+		t.Fatalf("clone_id_to_dm_clone epoch moved %d -> %d", want, got)
 	}
 }
 
@@ -787,7 +734,6 @@ func assertCloneRows(
 	for row, res := range map[string]*pb.ResInfo{
 		"clone_id_to_target":   info.GetCloneIdToTarget()[testClone],
 		"clone_id_to_dm_clone": info.GetCloneIdToDmClone()[testClone],
-		"clone_id_to_meta":     info.GetCloneIdToMeta()[testClone],
 	} {
 		if res.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
 			res.GetDetails() != details {

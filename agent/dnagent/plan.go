@@ -60,8 +60,7 @@ const (
 // metaRoomDetails is the detail of every row that waits for a free run in
 // the clone-metadata area (DN13): side_dev_info before the side zeroes, and
 // the two migr_dst_info rows where the level emits them. It is
-// tagMetaRoomWait followed by the allocator's own text, the same detail the
-// cn agent gives a clone that waits for room in its arena (cnagent.md CN18).
+// tagMetaRoomWait followed by the allocator's own text.
 func metaRoomDetails(err error) string {
 	return tagMetaRoomWait + ": " + err.Error()
 }

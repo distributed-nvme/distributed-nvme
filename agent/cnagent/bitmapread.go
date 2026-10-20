@@ -129,6 +129,14 @@ func (s *CnAgentServer) GetLegBm(
 			"unknown leg %d", req.GetLegId())
 	}
 	gp := lp.grp
+	if gp.clone != nil {
+		// CN27: a leg of a clone meta group backs no pool, so no thin
+		// mapping says which of its blocks are written. Its group has no
+		// slice for the span arithmetic below to read either.
+		return nil, status.Errorf(codes.Internal,
+			"leg %d is a leg of clone %d's clone meta group",
+			req.GetLegId(), gp.clone.GetCloneId())
+	}
 	if lp.provisioning || !gp.effective() {
 		// [D15]: a group that is not in the *effective* list is not in the
 		// pool-data concat at all, so it has no span to report — and that is

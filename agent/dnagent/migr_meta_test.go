@@ -60,7 +60,7 @@ func waitingDstReq(revision uint64, level pb.SpLevel) *pb.SyncupSideRequest {
 
 // metaRoomText is the detail of the fixture destination's rows while the
 // filled area has no run for it: the wait's words, then the allocator's own
-// text, the rule both agents share.
+// text (dnagent.md DN13).
 func metaRoomText() string {
 	return fmt.Sprintf("waiting for metadata room: allocating %d "+
 		"clone-metadata units: no contiguous run of %d units in the "+

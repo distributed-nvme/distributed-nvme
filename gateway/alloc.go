@@ -156,10 +156,9 @@ func pickDns(
 // no CN, so too few failure domains alone never make it refuse.
 //
 // metaUnits is the SP's clone units for CreateCntlr, whose new cntlr's CN is
-// charged every clone of the SP since the cntlr may become the primary and
-// build them there, and zero for CreateStoragePool, whose new SP has no
-// clone. An empty pick that the units' skip caused answers the "metadata
-// room" refusal, as in pickDns.
+// charged every clone of the SP (architecture.md, Metadata units), and zero
+// for CreateStoragePool, whose new SP has no clone. An empty pick that the
+// units' skip caused answers the "metadata room" refusal, as in pickDns.
 func pickCn(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -629,7 +628,7 @@ func (l *cnLedger) release(
 }
 
 // chargeUnits is dnLedger.chargeUnits' CN twin (architecture.md, Metadata
-// units): units more of the CN's metadata area are used, for a clone's run
+// units): units more of the CN's metadata area are used, for a clone
 // (CreateClone, once per cntlr of the SP) or for every clone of the SP
 // (CreateCntlr). A CN whose area lacks the room is RESOURCE_EXHAUSTED, the
 // message led by what. It marks no revision bump, and zero units read and

@@ -632,16 +632,47 @@ func cmdGetLegBm(args []string) {
 	emitBitmap(reply.GetBitmap())
 }
 
+// cloneSample reads one hydration sample out of the details of a clone's
+// clone_id_to_dm_clone row, the raw `dmsetup status` line the agent puts
+// there (common.ParseCloneStatus). ok is false while the details hold no line
+// that parses, as before the dm-clone is built. A dm-clone whose metadata is
+// not in read-write mode — read-only, failed, or a line that shows no mode —
+// is an error, naming the mode: the agent serves no namespace through such a
+// dm-clone (cnagent.md CN18), so no count it shows is one a stage may take
+// for a serving clone's.
+func cloneSample(raw string) (*common.CloneStatus, bool, error) {
+	if common.CloneFailed(raw) {
+		return nil, false, fmt.Errorf("the dm-clone's metadata is in %q mode",
+			common.CloneMetadataFail)
+	}
+	status, ok := common.ParseCloneStatus(raw)
+	if !ok {
+		return nil, false, nil
+	}
+	switch status.MetadataMode {
+	case common.CloneMetadataReadWrite:
+		return status, true, nil
+	case "":
+		return nil, false, fmt.Errorf("the dm-clone's status shows no " +
+			"metadata mode")
+	default:
+		return nil, false, fmt.Errorf("the dm-clone's metadata is in %q mode",
+			status.MetadataMode)
+	}
+}
+
 // cmdWaitHydrated polls the cntlr until the clone reports every region
 // hydrated, parsing the raw `dmsetup status` line the agent puts in
-// cntlr_info.clone_id_to_dm_clone[<clone>].details. Hydration moves in the
-// kernel with no converge, so an info read, which answers from memory, would
-// never see it move: the poll samples with CheckCntlr rounds on one stream,
-// which start the agent's reads (sampler), and its first sample is a fresh
-// one. --min-first asserts the bitmap jump: case C's first sample must
+// cntlr_info.clone_id_to_dm_clone[<clone>].details (cloneSample), and prints
+// each sample's metadata mode beside its count on stderr. Hydration moves in
+// the kernel with no converge, so an info read, which answers from memory,
+// would never see it move: the poll samples with CheckCntlr rounds on one
+// stream, which start the agent's reads (sampler), and its first sample is a
+// fresh one. --min-first asserts the bitmap jump: case C's first sample must
 // already show >= 32/64 (cnagent_integtest.md, Cases, clone_xfer), and
 // --sample-only stops right there, taking exactly one sample so the
-// mid-hydration probe never waits for the copy to finish.
+// mid-hydration probe never waits for the copy to finish. A sample whose
+// metadata is not in read-write mode ends the command with an error.
 func cmdWaitHydrated(args []string) {
 	var g globals
 	fs := flag.NewFlagSet("wait-hydrated", flag.ExitOnError)
@@ -704,7 +735,10 @@ func cmdWaitHydrated(args []string) {
 		}
 		raw = reply.(*pb.CheckCntlrReply).GetCntlrInfo().
 			GetCloneIdToDmClone()[uint64(clone)].GetDetails()
-		status, ok := common.ParseCloneStatus(raw)
+		status, ok, err := cloneSample(raw)
+		if err != nil {
+			die("clone %#x: %v (details %q)", uint64(clone), err, raw)
+		}
 		if !ok {
 			if *sampleOnly {
 				die("no dm-clone status for clone %#x (details %q)",
@@ -723,8 +757,9 @@ func cmdWaitHydrated(args []string) {
 			}
 		}
 		fmt.Fprintf(os.Stderr,
-			"cnagentctl: hydrated %d/%d\n",
-			status.HydratedRegions, status.TotalRegions)
+			"cnagentctl: hydrated %d/%d, metadata %s\n",
+			status.HydratedRegions, status.TotalRegions,
+			status.MetadataMode)
 		// The single sample of clone_xfer's stage 5 probe
 		// (cnagent_integtest.md, Cases, clone_xfer): --min-first is
 		// the assertion, the ratio is the observation the script logs
@@ -741,6 +776,7 @@ func cmdWaitHydrated(args []string) {
 				"total":          status.TotalRegions,
 				"first_hydrated": firstHydrated,
 				"first_total":    firstTotal,
+				"metadata_mode":  status.MetadataMode,
 				"samples":        sampleCnt,
 			})
 			fmt.Println(string(out))

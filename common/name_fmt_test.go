@@ -87,7 +87,8 @@ func TestDmNames(t *testing.T) {
 		"dnv-"+c+"-0000000000000005-c8-0000000000000011-0000000000000051")
 	// The three cn kinds of cnagent.md, Names and constants in `common`: the
 	// [D1] leg wrapper, the RedundNone group device, and the kind-`cb`
-	// clone-metadata wrapper over the arena ([D14]).
+	// clone-metadata wrapper over the arena (architecture.md, Controller
+	// node, common).
 	checkName(t, "CnLegName",
 		nf.CnLegName(testCluster, testCn, testSp, testLeg),
 		"dnv-"+c+"-0000000000000005-c9-0000000000000011-0000000000000015")
@@ -97,8 +98,9 @@ func TestDmNames(t *testing.T) {
 	checkName(t, "CnCloneMetaDmName",
 		nf.CnCloneMetaDmName(testCluster, testCn, testSp, testClone),
 		"dnv-"+c+"-0000000000000005-cb-0000000000000011-0000000000000041")
-	// The `dmsetup ls` filter that rebuilds the allocator's used-unit map
-	// must be a strict prefix of the wrapper names it selects.
+	// The `dmsetup ls` filter by which the cn agent's sweep finds every
+	// clone-metadata wrapper must be a strict prefix of the wrapper names it
+	// selects.
 	checkName(t, "CnCloneMetaDmPrefix",
 		nf.CnCloneMetaDmPrefix(testCluster, testCn),
 		"dnv-"+c+"-0000000000000005-cb-")
@@ -140,6 +142,89 @@ func TestMdNames(t *testing.T) {
 		nf.CnMdArrayName(testSp, 2, 1, false), "dnv-0000000000000011-02-01")
 	checkName(t, "CnMdArrayName(meta)",
 		nf.CnMdArrayName(testSp, 2, 1, true), "dnv-0000000000000011-82-01")
+
+	// A clone meta group's names: the short id folds the sp in as well,
+	// because the group id that follows is unique only in its pool.
+	h = fnv.New64a()
+	fmt.Fprintf(h, "%016x%016x%016x", testCluster, testCn, testSp)
+	cloneShortId := uint32(h.Sum64())
+	const testCloneGrp = uint64(0x61)
+	cloneName := nf.CnCloneMdDevName(testCluster, testCn, testSp, testCloneGrp)
+	checkName(t, "CnCloneMdDevName", cloneName,
+		fmt.Sprintf("%08x%016xffff", cloneShortId, testCloneGrp))
+	if !hex28.MatchString(cloneName) {
+		t.Errorf("clone md dev name %q is not 28 hex chars", cloneName)
+	}
+	if other := nf.CnCloneMdDevName(
+		testCluster, testCn, testSp+1, testCloneGrp); other == cloneName {
+		t.Error("clone md dev names of two sps collide on one group id")
+	}
+	if other := nf.CnCloneMdDevName(
+		testCluster, testCn+1, testSp, testCloneGrp); other == cloneName {
+		t.Error("clone md dev names of two cns collide")
+	}
+	checkName(t, "CnCloneMdArrayName",
+		nf.CnCloneMdArrayName(testSp), "dnv-0000000000000011-ff-ff")
+}
+
+// TestCloneMdNamesAtTheirLimits: a clone meta group's device name stays 28
+// hex chars at the largest group id, and its superblock name 26 chars with
+// the udev guard's "dnv-" prefix at the largest sp id (architecture.md, md
+// names).
+func TestCloneMdNamesAtTheirLimits(t *testing.T) {
+	nf := NewNameFmt("")
+	hex28 := regexp.MustCompile(`^[0-9a-f]{28}$`)
+	for _, grpId := range []uint64{0, 1, ^uint64(0)} {
+		name := nf.CnCloneMdDevName(^uint64(0), ^uint64(0), ^uint64(0), grpId)
+		if !hex28.MatchString(name) {
+			t.Errorf("clone md dev name %q of group %#x is not 28 hex chars",
+				name, grpId)
+		}
+	}
+	for _, spId := range []uint64{1, ^uint64(0)} {
+		name := nf.CnCloneMdArrayName(spId)
+		if len(name) != 26 || !strings.HasPrefix(name, DnvPrefix+"-") {
+			t.Errorf("clone md array name %q is not 26 chars under %q",
+				name, DnvPrefix+"-")
+		}
+	}
+}
+
+// TestCloneMdNamesNeverMatchASlicesNames is the tripwire of the clone form's
+// fixed tail (architecture.md, md names): every slice group's two md names
+// end in a slice field and a group field below cnCloneMdField, so no slice
+// group's name is ever a clone meta group's. Raising MaxSliceCntPerSp or
+// MaxGrpCntPerSlice until a field reaches it fails here.
+func TestCloneMdNamesNeverMatchASlicesNames(t *testing.T) {
+	nf := NewNameFmt("")
+	lastSlice := uint32(MaxSliceCntPerSp - 1)
+	lastIdx := uint32(MaxGrpCntPerSlice - 1)
+	if lastSlice|0x80 >= cnCloneMdField {
+		t.Fatalf("the last meta slice field %#x reaches the clone field %#x",
+			lastSlice|0x80, cnCloneMdField)
+	}
+	if lastIdx >= cnCloneMdField {
+		t.Fatalf("the last group index %#x reaches the clone field %#x",
+			lastIdx, cnCloneMdField)
+	}
+	cloneTail := fmt.Sprintf("%02x%02x", cnCloneMdField, cnCloneMdField)
+	cloneArray := nf.CnCloneMdArrayName(testSp)
+	for _, isMeta := range []bool{false, true} {
+		for _, sliceIdx := range []uint32{0, lastSlice} {
+			for _, grpIdx := range []uint32{0, lastIdx} {
+				devName := nf.CnMdDevName(testCluster, testCn, testSp,
+					sliceIdx, grpIdx, isMeta)
+				if strings.HasSuffix(devName, cloneTail) {
+					t.Errorf("slice md dev name %q ends in the clone tail %q",
+						devName, cloneTail)
+				}
+				if got := nf.CnMdArrayName(
+					testSp, sliceIdx, grpIdx, isMeta); got == cloneArray {
+					t.Errorf("slice md array name %q is the clone form", got)
+				}
+			}
+		}
+	}
 }
 
 // TestMdNamesAtTheGroupCeiling is the tripwire of MaxGrpCntPerSlice
@@ -224,9 +309,9 @@ func TestNqns(t *testing.T) {
 }
 
 // architecture.md, tmpfs / file names. dnv uses no LVM ([D13], [D14]): the DN
-// carries the [D13] disk format, and the CN's clone-metadata arena is a slot
-// allocator over one loop device whose kind-`cb` wrapper tables are its
-// registry, so there is no volume-group or logical-volume name to format.
+// carries the [D13] disk format, and the CN's clone-metadata arena is one
+// loop device over a sparse file on a tmpfs, so there is no volume-group or
+// logical-volume name to format.
 func TestTmpfsAndFileNames(t *testing.T) {
 	nf := NewNameFmt("")
 	const c = "ebada5168620c5fe"
@@ -239,8 +324,9 @@ func TestTmpfsAndFileNames(t *testing.T) {
 }
 
 // The CN clone-metadata arena must divide into whole units, and the tmpfs must
-// hold a fully materialized arena with slack (CN18's layout rule). The
-// dn twin of this layout assertion is diskmeta_test.go's DnCloneMeta* check.
+// hold a fully materialized arena with slack (cnagent.md, Names and constants
+// in `common`). The dn twin of this layout assertion is diskmeta_test.go's
+// DnCloneMeta* check.
 func TestCloneMetaArenaConstants(t *testing.T) {
 	if CnCloneMetaAreaSize%CnCloneMetaUnit != 0 {
 		t.Fatalf("arena %d is not a whole number of %d-byte units",

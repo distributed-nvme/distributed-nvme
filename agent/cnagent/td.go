@@ -99,19 +99,20 @@ func nsDevTable(np *nsPlan, devNo string) string {
 
 // nsDevNow is np with the backing CN16 installs on this node in this pass.
 // It is np itself under every rule but 5: a dm-clone may serve only once
-// CN18 step 5 has turned its hydration on, which follows step 4's bitmaps
-// and nothing before them (architecture.md, Clone crash recovery), so a
-// rule-5 ns-dev whose dm-clone's live status does not show hydration on — a
-// build or a recovery that has not finished, whatever stopped it — gets the
-// td's dm-error instead: the table of rule 1's park, live and never under
-// dm-flakey, while its namespace waits in the inaccessible group (build). A
-// dm-clone that does not exist shows no hydration either, so its td's ns-devs
-// park with their rows OK — whether a failed build removed it, its build has
-// not got that far, or its clone waits for room in the arena (CN18 step 2).
-// Nothing is remembered: the status is read on every call. A read that fails
-// or does not answer, of a dm-clone that is there or whose absence is not
-// confirmed (cloneHydrating), is an error, which licenses neither the move
-// onto the dm-clone nor a park — the ns-dev keeps the table it has.
+// CN18 step 5 has turned its hydration on, which follows step 4's source
+// chunks and nothing before them, and only while its metadata is read-write,
+// so a rule-5 ns-dev whose dm-clone's live status does not show both — a
+// build that has not finished, whatever stopped it, or a dm-clone whose
+// metadata went read-only or failed — gets the td's dm-error instead: the
+// table of rule 1's park, live and never under dm-flakey, while its namespace
+// waits in the inaccessible group (build). A dm-clone that does not exist
+// shows no hydration either, so its td's ns-devs park with their rows OK —
+// whether a sweep removed it, its build has not got that far, or its clone
+// meta group is not ready (CN18 step 2). Nothing is remembered: the status
+// is read on every call. A read that fails or does not answer, of a dm-clone
+// that is there or whose absence is not confirmed (cloneServes), is an
+// error, which licenses neither the move onto the dm-clone nor a park — the
+// ns-dev keeps the table it has.
 func (s *CnAgentServer) nsDevNow(
 	ctx context.Context,
 	np *nsPlan,
@@ -119,11 +120,11 @@ func (s *CnAgentServer) nsDevNow(
 	if np.clone == nil {
 		return np, nil
 	}
-	hydrating, err := s.cloneHydrating(ctx, np.clone)
+	serves, err := s.cloneServes(ctx, np.clone)
 	if err != nil {
 		return nil, err
 	}
-	if hydrating {
+	if serves {
 		return np, nil
 	}
 	parked := *np
@@ -181,23 +182,6 @@ func nsAnaMove(np *nsPlan, outcome nsDevOutcome) (int, bool) {
 		}
 	}
 	return nsAnaWanted(np, outcome.parked()), true
-}
-
-// waitsForRoom reports whether a namespace waits only for its clone's room in
-// the clone-metadata arena: its ns-dev step parked it by rule 5's fallback,
-// the dm-clone showing no hydration, in a pass whose CN18 step 2 room check
-// stopped the clone's build (roomStopped, cloneRoom). Such a namespace
-// registers no CN10 retry (build): a clone that waits for room has CN18's
-// clone-metadata retry, which re-drives the wait, and a run larger than the
-// whole arena changes only with a new revision, which comes with a
-// SyncupCntlr of its own.
-func waitsForRoom(
-	np *nsPlan,
-	outcome nsDevOutcome,
-	roomStopped map[uint64]bool,
-) bool {
-	return outcome == nsDevAwaiting && np.clone != nil &&
-		roomStopped[np.clone.cloneId]
 }
 
 // ensureNsDev converges one namespace's own dm-linear (architecture.md,
@@ -260,9 +244,8 @@ func (s *CnAgentServer) convergeNsDev(
 	if np.sectors == 0 {
 		return nsDevFailed, fmt.Errorf("namespace size is 0")
 	}
-	// A rule-5 ns-dev gets the park's table while its dm-clone does not show
-	// hydration on, and its namespace waits in the inaccessible group, as it
-	// does through a recovery's own park (CN18 step 2).
+	// A rule-5 ns-dev gets the park's table while its dm-clone does not
+	// serve, and its namespace waits in the inaccessible group.
 	now, err := s.nsDevNow(ctx, np)
 	if err != nil {
 		return nsDevFailed, err
@@ -442,15 +425,15 @@ const (
 	// the td's dm-error (failedNsDev).
 	nsDevFailedParked
 	// nsDevServing: the ns-dev maps its serving device in this pass — the
-	// raid0, or the dm-clone showing hydration on, under dm-flakey at the
-	// read-only level — put there or found there.
+	// raid0, or the dm-clone that serves, under dm-flakey at the read-only
+	// level — put there or found there.
 	nsDevServing
 	// nsDevOnError: the rules select the td's dm-error (CN16 rules 0-4), and
 	// the ns-dev maps it.
 	nsDevOnError
-	// nsDevAwaiting: rule 5's dm-clone does not show hydration on, so the
-	// ns-dev maps the td's dm-error instead (nsDevNow) — a clone build or
-	// recovery that has not finished.
+	// nsDevAwaiting: rule 5's dm-clone does not serve, so the ns-dev maps
+	// the td's dm-error instead (nsDevNow) — a clone build that has not
+	// finished, or a dm-clone whose metadata is read-only or failed.
 	nsDevAwaiting
 	// nsDevHeldServing: held (CN18) on a live table that maps data — the
 	// dm-clone the plan dropped, typically — so its namespace takes its
@@ -515,8 +498,8 @@ func onDevice(targets []common.DmTarget, devNo string) bool {
 
 // parkNsDev reloads one ns-dev onto its td's dm-error. It is CN9's
 // pre-step 2, the park of a planned ns-dev, which performs the old primary's
-// reload of architecture.md, Failover, and it is the park of a clone recovery
-// (CN18 step 2); the park of an unwanted ns-dev is CN21's P0, parkByTable.
+// reload of architecture.md, Failover; the park of an unwanted ns-dev is
+// CN21's P0, parkByTable.
 // Where a removal follows, the ns-dev must stop mapping whatever is about to
 // be removed under it, and the reload's own flushing suspend is what
 // completes the in-flight IO on the old table. The reload also resumes a
@@ -526,17 +509,14 @@ func onDevice(targets []common.DmTarget, devNo string) bool {
 //
 // A namespace whose desired group is optimized while its rules want its
 // ns-dev on a serving device — P2's park of an ns-dev mapping a device the
-// pass removes, and every recovery park — goes inaccessible before the
-// reload (CN16, CN18 step 2), and so does one whose ns-dev the park finds
-// parked already: a recovery after the level that removes the clone stacks
-// is lowered finds the ns-dev on the dm-error rule 4 selected, its namespace
-// optimized over it. Its hosts then queue their IO through the park rather
-// than read IO errors from an optimized path; the build moves it back
-// in the pass that puts the ns-dev on its serving device, or that finds it
-// still serving after a park whose load failed (CN18's hold). A move that fails
-// is logged and the park goes on: the park guards the data, the move only
-// spares the hosts IO errors. Rules 3 and 4 park onto the dm-error they
-// select, with no move.
+// pass removes — goes inaccessible before the reload (CN16), and so does one
+// whose ns-dev the park finds parked already. Its hosts then queue their IO
+// through the park rather than read IO errors from an optimized path; the
+// build moves it back in the pass that puts the ns-dev on its serving
+// device, or that finds it still serving after a park whose load failed
+// (CN18's hold). A move that fails is logged and the park goes on: the park
+// guards the data, the move only spares the hosts IO errors. Rules 3 and 4
+// park onto the dm-error they select, with no move.
 func (s *CnAgentServer) parkNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -744,8 +724,8 @@ func (s *CnAgentServer) probeNsDev(
 		return pb.ResStatus_RES_STATUS_ERROR, "namespace has no thin device"
 	}
 	// The backing the converge installs, read the same way (nsDevNow): a
-	// rule-5 ns-dev parked because its dm-clone does not show hydration on is
-	// where CN16 wants it, and reports as the converge did.
+	// rule-5 ns-dev parked because its dm-clone does not serve is where CN16
+	// wants it, and reports as the converge did.
 	np, err = s.nsDevNow(ctx, np)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()

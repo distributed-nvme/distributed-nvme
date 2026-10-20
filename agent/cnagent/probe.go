@@ -10,8 +10,8 @@ import (
 // The probe map of CN28: the rows of a cntlr's read (refreshCntlr), read
 // from the node's reading (readCntlr, takeReading) and from the reads that
 // stay outside it: the status of each thin pool and dm-clone; the configfs
-// of the exports; the clone metadata area's loop device and its number; the
-// attributes of the array the md walk matched to a group (Md.Detail) and
+// of the exports; the attributes of the array the md walk matched to a group
+// (Md.Detail) and
 // that array's number (mdDevNo); the entry of each NVMe subsystem a lookup
 // uses — its NQN once more, its namespace and its controllers
 // (lookupSubsys); the own read of a dm name that a partial info listing, or
@@ -23,10 +23,9 @@ import (
 // waits behind a commit already running on that pool; a dm-clone's still
 // makes the kernel commit the clone's metadata (dnagent.md SH17). In
 // particular `reserve_metadata_snap`, a pool message that commits the pool,
-// runs only inside `dumpThinMetadata` — the CN25 bitmap reads, CN14's thin id
-// sweeps (the activation sweep and the sweep after a failed delete) and the
-// dst-bitmap read of architecture.md, Clone crash recovery — never from here
-// (CN29).
+// runs only inside `dumpThinMetadata` — the CN25 bitmap reads and CN14's thin
+// id sweeps (the activation sweep and the sweep after a failed delete) —
+// never from here (CN29).
 
 // probeCntlr writes the rows of one read of the cntlr from plan, whose
 // reading readCntlr took (plan.rd, plan.walk, plan.mdWalks). It also returns
@@ -215,19 +214,22 @@ func (s *CnAgentServer) probeCntlr(
 		if cp.dstTd == nil {
 			// The same CN18 error the converge reports (reportCloneNoDst):
 			// there is nothing to clone onto, so the surviving stack is not
-			// probed and no metadata budget is invented from a zero region
-			// count.
+			// probed.
 			s.reportCloneNoDst(st, cp, info)
 			continue
 		}
-		// A clone whose dst is merely still provisioning is deferred and
-		// builds nothing ([D15]).
+		if cp.grp == nil {
+			// The same CN18 error the converge reports (reportCloneNoGrp).
+			s.reportCloneNoGrp(st, cp, info)
+			continue
+		}
+		// A clone whose dst or clone meta group is merely still provisioning
+		// is deferred and builds nothing ([D15]).
 		if cp.deferred {
 			s.reportCloneDeferred(st, cp, info)
 			continue
 		}
-		s.cloneRows(ctx, st, plan, cp, info,
-			s.readCloneSource(ctx, plan, cp),
+		s.cloneRows(st, cp, info, s.readCloneSource(ctx, plan, cp),
 			func() cloneDmRead { return s.probeCloneDm(ctx, plan.rd, cp) }, "")
 	}
 

@@ -415,7 +415,7 @@ func TestACutOffConvergeStoresNothing(t *testing.T) {
 // agent's answer time (dnagent.md SH25, SH28).
 func TestAnObjectWithNoObservationAnswersAZeroTime(t *testing.T) {
 	srv, _ := newTestServer(t)
-	srv.retryInterval, srv.metaRetryInterval = time.Hour, time.Hour
+	srv.retryInterval = time.Hour
 	clock := withClock(srv)
 	cnSyncup(t, srv, 1, true)
 	ctx, cancel := context.WithCancel(context.Background())

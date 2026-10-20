@@ -3,6 +3,7 @@ package cnagent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -371,14 +372,14 @@ func TestAHeldNsDevWithAnUnreadableDmErrorReadsTheSameOnBothChannels(
 	}
 }
 
-// TestCloneRecoveryAtAPromotionWaitsInaccessible pins that a clone recovery
-// makes hosts wait (cnagent.md CN16 rule 5, CN18): a promotion to a cntlr
-// that has to rebuild the clone's dm-clone, whose build stops short of
-// enabling hydration, leaves the namespace inaccessible with its ns-dev
-// parked — both rows OK on both channels — and registers the CN10 retry.
-// The attempt that enables hydration puts the ns-dev on the dm-clone and
-// only then moves the namespace optimized.
-func TestCloneRecoveryAtAPromotionWaitsInaccessible(t *testing.T) {
+// TestACloneBuildAtAPromotionWaitsInaccessible pins that a clone's build at a
+// promotion makes hosts wait (cnagent.md CN16 rule 5, CN18): a promotion to a
+// cntlr that builds the clone's dm-clone over its clone meta group, whose
+// build stops short of enabling hydration, leaves the namespace inaccessible
+// with its ns-dev parked — both rows OK on both channels — and registers the
+// CN10 retry. The attempt that enables hydration puts the ns-dev on the
+// dm-clone and only then moves the namespace optimized.
+func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
 	ctx := context.Background()
@@ -406,8 +407,8 @@ func TestCloneRecoveryAtAPromotionWaitsInaccessible(t *testing.T) {
 		t.Fatalf("the case is vacuous: the dm-clone is %+v", dm)
 	}
 	assertNoCall(t, node, ana)
-	assertAna(t, node, testNqn, "3", "the unfinished recovery")
-	assertParked(t, srv, node, testNs, testTd, "the unfinished recovery")
+	assertAna(t, node, testNqn, "3", "the unfinished build")
+	assertParked(t, srv, node, testNs, testTd, "the unfinished build")
 	info := reply.GetCntlrInfo()
 	assertOk(t, info.GetNsIdToDmLinear()[testNs], "the converge's ns-dev")
 	assertOk(t, info.GetNsIdToNamespace()[testNs], "the converge's namespace")
@@ -415,7 +416,7 @@ func TestCloneRecoveryAtAPromotionWaitsInaccessible(t *testing.T) {
 	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "the probed ns-dev")
 	assertOk(t, probed.GetNsIdToNamespace()[testNs], "the probed namespace")
 	if !retrying(t, srv) {
-		t.Fatalf("an unfinished recovery registered no retry")
+		t.Fatalf("an unfinished build registered no retry")
 	}
 
 	delete(node.failCmdAlways, enable)
@@ -425,28 +426,29 @@ func TestCloneRecoveryAtAPromotionWaitsInaccessible(t *testing.T) {
 	assertOrder(t, node, "cmd "+enable,
 		"cmd dmsetup reload "+nsDev+" --table "+nsDevTableOn(cloneNo),
 		ana+"1")
-	assertAna(t, node, testNqn, "1", "the finished recovery")
+	assertAna(t, node, testNqn, "1", "the finished build")
 	assertOk(t, probedCntlrInfo(t, srv).GetNsIdToNamespace()[testNs],
 		"the served namespace")
 	if retrying(t, srv) {
-		t.Fatalf("the retry outlived the recovery")
+		t.Fatalf("the retry outlived the build")
 	}
 }
 
-// TestCloneRecoveryOnARunningPrimaryMovesInaccessibleFirst pins the order
-// of a recovery's park on a primary that serves through the dm-clone (CN18
-// step 2): the namespace goes inaccessible before the reload that parks its
-// ns-dev, so a host queues through the park instead of reading IO errors.
-// A recovery that finishes in the pass puts the ns-dev on the new dm-clone
-// and only then moves the namespace optimized; one whose enable fails leaves
-// it inaccessible, with the retry registered, until an attempt finishes it.
-func TestCloneRecoveryOnARunningPrimaryMovesInaccessibleFirst(t *testing.T) {
+// TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished pins CN18's finish of a
+// dm-clone found with hydration off on a primary that serves through it: the
+// build applies the source chunks the node holds and enables hydration, with
+// no park and no removal, and the namespace stays optimized. When the enable
+// fails, the ns-dev parks off the dm-clone, its namespace moved inaccessible
+// before the reload, and the retry is registered; the attempt that enables
+// hydration puts the ns-dev back on the dm-clone and only then moves the
+// namespace optimized.
+func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// finishes: the recovery enables hydration in the pass.
+		// finishes: the enable succeeds in the pass.
 		finishes bool
 	}{
-		{"the recovery finishes", true},
+		{"the enable succeeds", true},
 		{"the enable fails", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -456,15 +458,17 @@ func TestCloneRecoveryOnARunningPrimaryMovesInaccessibleFirst(t *testing.T) {
 			opts := reqOpts{revision: 2, primary: true,
 				clones: []*pb.Clone{cloneOf()}}
 			syncupBoth(t, srv, opts)
+			pushBitmap(t, srv, hexBytes(t, testSkipHex))
 			clone := cloneName(srv, testClone)
 			nsDev := nsDevName(srv, testNs)
-			if node.dms[nsDev].table != nsDevTableOn(devNoOf(node, clone)) {
+			onClone := nsDevTableOn(devNoOf(node, clone))
+			if node.dms[nsDev].table != onClone {
 				t.Fatalf("the fixture ns-dev does not serve through the " +
 					"dm-clone")
 			}
 			assertAna(t, node, testNqn, "1", "the fixture")
-			// The dm-clone's hydration is off: an unfinished build, which
-			// CN18 step 2 recovers.
+			// The dm-clone's hydration is off: a build that stopped before
+			// CN18 step 5.
 			node.dms[clone].noHydration = true
 			enable := "dmsetup message " + clone + " 0 enable_hydration"
 			if !tc.finishes {
@@ -480,46 +484,57 @@ func TestCloneRecoveryOnARunningPrimaryMovesInaccessibleFirst(t *testing.T) {
 			if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
-			assertOrder(t, node, ana+"3", park, "cmd dmsetup remove "+clone)
-			if !tc.finishes {
-				assertNoCall(t, node, ana+"1")
-				assertAna(t, node, testNqn, "3", "the unfinished recovery")
-				if !retrying(t, srv) {
-					t.Fatalf("an unfinished recovery registered no retry")
+			assertNoCall(t, node, "cmd dmsetup remove "+clone)
+			assertNoCall(t, node, "cmd dmsetup create "+clone)
+			if tc.finishes {
+				assertOrder(t, node,
+					"cmd blkdiscard --offset 33554432 --length 33554432",
+					"cmd "+enable)
+				assertNoCall(t, node, park)
+				assertNoCall(t, node, ana)
+				assertAna(t, node, testNqn, "1", "the finished build")
+				if retrying(t, srv) {
+					t.Fatalf("a finished build registered the retry")
 				}
-				delete(node.failCmdAlways, enable)
-				node.Reset()
-				retryAttempt(t, srv)
+				return
 			}
-			cloneNo := devNoOf(node, clone)
+			assertOrder(t, node, "cmd "+enable, ana+"3", park)
+			assertNoCall(t, node, ana+"1")
+			assertAna(t, node, testNqn, "3", "the unfinished build")
+			if !retrying(t, srv) {
+				t.Fatalf("an unfinished build registered no retry")
+			}
+			delete(node.failCmdAlways, enable)
+			node.Reset()
+			retryAttempt(t, srv)
 			assertOrder(t, node, "cmd "+enable,
-				"cmd dmsetup reload "+nsDev+" --table "+
-					nsDevTableOn(cloneNo),
+				"cmd dmsetup reload "+nsDev+" --table "+onClone,
 				ana+"1")
-			assertAna(t, node, testNqn, "1", "the finished recovery")
+			assertAna(t, node, testNqn, "1", "the finished build")
 			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the recovery")
+				t.Fatalf("the retry outlived the build")
 			}
 		})
 	}
 }
 
-// TestARecoveryAfterTheNoCloneLevelMovesInaccessibleFirst pins the
-// recovery park of an ns-dev that is parked already (cnagent.md CN18 step
-// 2): at the level that removes the clone stacks, the ns-dev sits on the
-// td's dm-error with its namespace optimized over it on purpose (CN16 rule
-// 4); when the level is lowered, the dm-clone is gone and the converge runs
-// a recovery, whose park moves the namespace to inaccessible before any of
-// the recovery's steps, so its hosts wait through the recovery rather than
-// read IO errors. The namespace turns optimized in the pass that puts the
-// ns-dev on the hydrating dm-clone.
-func TestARecoveryAfterTheNoCloneLevelMovesInaccessibleFirst(t *testing.T) {
+// TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup pins a clone after
+// the level that removes the clone stacks (cnagent.md CN18, CN19): at that
+// level the dm-clone goes and its clone meta group stays, the ns-dev sits on
+// the td's dm-error with its namespace optimized over it on purpose (CN16
+// rule 4). When the level is lowered, the dm-clone is created again over the
+// group, with the hydrated count its metadata held, and the ns-dev moves
+// onto it in the pass, its namespace optimized throughout. When the enable
+// fails, the namespace goes inaccessible at the end of the pass, with its
+// ns-dev still parked, and turns optimized in the pass that puts the ns-dev
+// on the dm-clone.
+func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// finishes: the recovery enables hydration in the pass.
+		// finishes: the enable succeeds in the pass.
 		finishes bool
 	}{
-		{"the recovery finishes", true},
+		{"the enable succeeds", true},
 		{"the enable fails", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -529,14 +544,18 @@ func TestARecoveryAfterTheNoCloneLevelMovesInaccessibleFirst(t *testing.T) {
 			clones := []*pb.Clone{cloneOf()}
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 				clones: clones})
+			clone := cloneName(srv, testClone)
+			node.setCloneHydrated(t, clone, 23)
 			if _, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
 				revision: 3, primary: true, clones: clones,
 				level: pb.SpLevel_SP_LEVEL_NO_CLONE})); err != nil {
 				t.Fatalf("no clone: %v", err)
 			}
-			clone := cloneName(srv, testClone)
 			if _, ok := node.dms[clone]; ok {
 				t.Fatalf("the case is vacuous: the level kept the dm-clone")
+			}
+			if _, ok := node.dms[grpName(srv, testCloneGrp)]; !ok {
+				t.Fatalf("the level removed the clone meta group")
 			}
 			assertParked(t, srv, node, testNs, testTd, "the level")
 			assertAna(t, node, testNqn, "1", "the level")
@@ -549,30 +568,44 @@ func TestARecoveryAfterTheNoCloneLevelMovesInaccessibleFirst(t *testing.T) {
 			nsDev := nsDevName(srv, testNs)
 
 			node.Reset()
-			if _, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
-				revision: 4, primary: true, clones: clones})); err != nil {
+			reply, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
+				revision: 4, primary: true, clones: clones}))
+			if err != nil {
 				t.Fatalf("the level lowered: %v", err)
 			}
-			// The arena slot's hole punch is the recovery's first step.
-			assertOrder(t, node, ana+"3", "cmd blkdiscard",
-				"cmd dmsetup create "+clone)
+			assertNoCall(t, node, "cmd blkdiscard --offset 0")
 			if !tc.finishes {
+				assertOrder(t, node, "cmd dmsetup create "+clone,
+					"cmd "+enable, ana+"3")
 				assertNoCall(t, node, ana+"1")
-				assertAna(t, node, testNqn, "3", "the unfinished recovery")
+				assertAna(t, node, testNqn, "3", "the unfinished build")
+				assertParked(t, srv, node, testNs, testTd,
+					"the unfinished build")
 				if !retrying(t, srv) {
-					t.Fatalf("an unfinished recovery registered no retry")
+					t.Fatalf("an unfinished build registered no retry")
 				}
 				delete(node.failCmdAlways, enable)
 				node.Reset()
 				retryAttempt(t, srv)
+				assertOrder(t, node, "cmd "+enable,
+					"cmd dmsetup reload "+nsDev+" --table "+
+						nsDevTableOn(devNoOf(node, clone)),
+					ana+"1")
+			} else {
+				assertOrder(t, node, "cmd dmsetup create "+clone,
+					"cmd "+enable,
+					"cmd dmsetup reload "+nsDev+" --table "+
+						nsDevTableOn(devNoOf(node, clone)))
+				assertNoCall(t, node, ana)
+				row := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
+				if !strings.Contains(row.GetDetails(), " 23/64 ") {
+					t.Fatalf("the dm-clone built again reads %q, want the "+
+						"23 regions its metadata held", row.GetDetails())
+				}
 			}
-			assertOrder(t, node, "cmd "+enable,
-				"cmd dmsetup reload "+nsDev+" --table "+
-					nsDevTableOn(devNoOf(node, clone)),
-				ana+"1")
-			assertAna(t, node, testNqn, "1", "the finished recovery")
+			assertAna(t, node, testNqn, "1", "the finished build")
 			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the recovery")
+				t.Fatalf("the retry outlived the build")
 			}
 		})
 	}

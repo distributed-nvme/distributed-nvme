@@ -170,9 +170,9 @@ func (s *CnAgentServer) convergeCntlr(
 ) (*pb.CntlrInfo, *agent.SweepResult) {
 	// The same refusal (architecture.md, Common validation) as syncupCntlr's,
 	// for the entrances that do not come through it: the startup Reconcile,
-	// which converges from a file that may hold zeros, and the two background
-	// retries, the connect retry and CN18's clone-metadata retry, which
-	// re-enter with the request they already hold. Refusing before
+	// which converges from a file that may hold zeros, and the background
+	// connect retry, which re-enters with the request it already holds.
+	// Refusing before
 	// newCntlrPlan touches nothing at all: the sweep is name-driven and needs
 	// no plan of this cntlr to find its objects later.
 	req := st.loadReq()
@@ -220,10 +220,9 @@ func (s *CnAgentServer) convergeCntlr(
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
 		// cntlr-scoped object has just gone, but the store file and the
 		// in-memory desired state stay (CN19). What the sweep cannot do is
-		// stop the background retries or forget the resource histories,
-		// because none of them is an object on the node.
+		// stop the background retry or forget the resource histories,
+		// because neither is an object on the node.
 		s.stopConnectRetry(st)
-		s.stopCloneMetaRetry(st)
 		s.dropAllResKeys(st, plan)
 	}
 	s.build(ctx, st, plan, info, budget)
@@ -248,7 +247,6 @@ func newCntlrInfo() *pb.CntlrInfo {
 		XferIdToNamespace: make(map[uint64]*pb.ResInfo),
 		CloneIdToTarget:   make(map[uint64]*pb.ResInfo),
 		CloneIdToDmClone:  make(map[uint64]*pb.ResInfo),
-		CloneIdToMeta:     make(map[uint64]*pb.ResInfo),
 		SideIdToPath:      make(map[uint64]*pb.ResInfo),
 	}
 }
@@ -300,9 +298,6 @@ func (s *CnAgentServer) build(
 	budget *agent.WaitBudget,
 ) {
 	retryNeeded := false
-	// metaWait: a clone of this pass waits for a free run in the arena, the
-	// one cause of CN18's clone-metadata retry (startCloneMetaRetry).
-	metaWait := false
 
 	// Legs (CN10).
 	var available map[uint64]bool
@@ -502,22 +497,12 @@ func (s *CnAgentServer) build(
 		}
 	}
 
-	// Clones (CN18), then transfers (CN17). roomStopped: the clones whose
-	// build CN18 step 2's room check stopped in this pass, waiting for room
-	// in the arena or never to fit (cloneRoom).
-	roomStopped := make(map[uint64]bool, len(plan.clones))
+	// Clones (CN18), then transfers (CN17). A clone's build reads its clone
+	// meta group's row, which the group loop above wrote.
 	if plan.wantClone {
 		for _, cp := range plan.clones {
-			connectRetry, room := s.ensureClone(
-				ctx, st, plan, cp, info, budget)
-			if connectRetry {
+			if s.ensureClone(ctx, st, plan, cp, info, budget) {
 				retryNeeded = true
-			}
-			if room == cloneRoomWait {
-				metaWait = true
-			}
-			if room != cloneRoomOk {
-				roomStopped[cp.cloneId] = true
 			}
 		}
 	} else if plan.primary {
@@ -572,7 +557,7 @@ func (s *CnAgentServer) build(
 		// and 4 select (nsAnaMove). One whose ns-dev sits on the td's
 		// dm-error while its rules want a serving device — the stack of a
 		// promotion that came before the sides' switch-over not built yet
-		// ([D16]), a clone build or recovery not finished, a hold that parked
+		// ([D16]), a clone build not finished, a hold that parked
 		// it, a failed step that found it parked — goes inaccessible, and its
 		// hosts queue their IO rather than read IO errors. A held namespace
 		// that serves takes its desired group and goes on serving from the
@@ -587,7 +572,7 @@ func (s *CnAgentServer) build(
 				continue
 			}
 			outcome := outcomes[np.nsId]
-			if !outcome.onPlan() && !waitsForRoom(np, outcome, roomStopped) {
+			if !outcome.onPlan() {
 				// A namespace left short of its desired group waits, and
 				// nothing else is sure to re-drive the pass that ends the
 				// wait: the worker re-syncs on a revision or a reply code,
@@ -596,9 +581,7 @@ func (s *CnAgentServer) build(
 				// node from the read's own reading, clean. So it registers
 				// the CN10 retry, whose next attempt reads the node afresh,
 				// until the namespace serves — for as long as its cause
-				// lasts, a cause that never goes away included. One that
-				// waits only for its clone's room in the arena does not
-				// (waitsForRoom).
+				// lasts, a cause that never goes away included.
 				s.startConnectRetry(st, plan)
 				retryNeeded = true
 			}
@@ -666,13 +649,6 @@ func (s *CnAgentServer) build(
 
 	if !retryNeeded {
 		s.stopConnectRetry(st)
-	}
-	// The pass that leaves no clone waiting for room ends CN18's
-	// clone-metadata retry: the clone was built, left clone_list, or is
-	// suppressed by the level or a demotion, and a request that undoes any
-	// of those comes with a SyncupCntlr of its own.
-	if !metaWait {
-		s.stopCloneMetaRetry(st)
 	}
 }
 
@@ -913,8 +889,9 @@ func nsDevDetails(np *nsPlan) string {
 	return ""
 }
 
-// reportCloneDeferred fills the three rows of a clone whose destination td is
-// provisioning-deferred ([D15]), shared by the converge pass and the probe.
+// reportCloneDeferred fills the two rows of a clone whose destination td or
+// clone meta group is provisioning-deferred ([D15]), shared by the converge
+// pass and the probe.
 func (s *CnAgentServer) reportCloneDeferred(
 	st *cntlrState,
 	cp *clonePlan,
@@ -925,9 +902,6 @@ func (s *CnAgentServer) reportCloneDeferred(
 		detailsProvisioning)
 	info.CloneIdToDmClone[cp.cloneId] = st.tracker.Provisioning(
 		resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName,
-		detailsProvisioning)
-	info.CloneIdToMeta[cp.cloneId] = st.tracker.Provisioning(
-		resKeyOf(resKeyCloneMetaFmt, cp.cloneId), cp.metaDmName,
 		detailsProvisioning)
 }
 
@@ -941,9 +915,6 @@ func (s *CnAgentServer) reportCloneSuppressed(
 		detailsSpLevel)
 	info.CloneIdToDmClone[cp.cloneId] = st.tracker.Missing(
 		resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName, detailsSpLevel)
-	info.CloneIdToMeta[cp.cloneId] = st.tracker.Missing(
-		resKeyOf(resKeyCloneMetaFmt, cp.cloneId), cp.metaDmName,
-		detailsSpLevel)
 }
 
 // dropAllResKeys forgets every resource history of one shape, so a later
@@ -983,6 +954,5 @@ func (s *CnAgentServer) dropAllResKeys(st *cntlrState, plan *cntlrPlan) {
 	for _, cp := range plan.clones {
 		t.Drop(resKeyOf(resKeyCloneTgtFmt, cp.cloneId))
 		t.Drop(resKeyOf(resKeyCloneDmFmt, cp.cloneId))
-		t.Drop(resKeyOf(resKeyCloneMetaFmt, cp.cloneId))
 	}
 }

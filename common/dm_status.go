@@ -43,8 +43,9 @@ func ParseDmLines(out string) []DmTarget {
 
 // CloneStatus is the parsed `dmsetup status` line of a dm-clone device: the
 // region size in sectors, the hydration progress in regions, whether
-// hydration is on (no no_hydration feature argument), and the two hydration
-// knobs among its core arguments.
+// hydration is on (no no_hydration feature argument), the two hydration
+// knobs among its core arguments, and the metadata mode the line ends with,
+// one of the CloneMetadata modes, or "" when the line does not end with one.
 type CloneStatus struct {
 	RegionSectors    uint64
 	HydratedRegions  uint64
@@ -52,12 +53,35 @@ type CloneStatus struct {
 	HydrationEnabled bool
 	Threshold        uint32
 	BatchSize        uint32
+	MetadataMode     string
+}
+
+// The metadata modes the kernel prints at the end of a dm-clone's status
+// line (CloneStatus.MetadataMode). dm-clone leaves read-write mode for
+// read-only when a metadata operation fails, and for fail mode when it
+// cannot read its metadata at all; in fail mode it prints "Fail" alone in
+// place of the line (CloneFailed).
+const (
+	CloneMetadataReadWrite = "rw"
+	CloneMetadataReadOnly  = "ro"
+	CloneMetadataFail      = "Fail"
+)
+
+// CloneFailed reports whether raw holds the status of a dm-clone in fail
+// mode: one dm line, a dm-clone's, whose one argument is CloneMetadataFail.
+// ParseCloneStatus does not parse that line, since it carries no count.
+func CloneFailed(raw string) bool {
+	targets := ParseDmLines(raw)
+	return len(targets) == 1 && targets[0].Type == "clone" &&
+		len(targets[0].Args) == 1 &&
+		targets[0].Args[0] == CloneMetadataFail
 }
 
 // ParseCloneStatus reads the dm-clone status line:
 //
 //	<meta block size> <used>/<total> <region size> <hydrated>/<total>
 //	<hydrating> <#feature args> <feature args>* <#core args> <core args>*
+//	<metadata mode>
 //
 // It is the one Go reader of that format: both agents, both agent drivers and
 // the gateway's proof that a copy finished read the line here
@@ -67,7 +91,9 @@ type CloneStatus struct {
 // dm line, so the whole details of a row parse. A count that does not parse,
 // one past 64 bits included, reads as zero, so a caller that needs proof
 // refuses a total of zero, and a feature or core list whose count does not
-// fit the line is not read.
+// fit the line is not read. The metadata mode is the argument right after the
+// core list when it is the line's last; a line whose lists are not read, or
+// that ends elsewhere, reads no mode.
 //
 // The shell suites cannot import it. hyd_fraction (integtest/e2e_test.sh)
 // keeps its rule of one dm line, a dm-clone's with at least six arguments, by
@@ -120,6 +146,9 @@ func ParseCloneStatus(raw string) (*CloneStatus, bool) {
 		return st, true
 	}
 	core := rest[1 : 1+coreCnt]
+	if len(rest) == 2+coreCnt {
+		st.MetadataMode = rest[1+coreCnt]
+	}
 	for i := 0; i+1 < len(core); i += 2 {
 		value, convErr := strconv.ParseUint(core[i+1], 10, 32)
 		if convErr != nil {

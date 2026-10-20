@@ -1050,8 +1050,8 @@ func (w *revWorker) logSyncupRejected(
 // re-sync.
 // A background read only computes the observation's code and removes nothing
 // (dnagent.md SH29), and the agent registers nothing for a leftover: its
-// background converges (the cn's connect retry and clone-metadata retry, the
-// dn's connect retry and fence timer) sweep only while one is registered or
+// background converges (the cn's connect retry, the dn's connect retry and
+// fence timer) sweep only while one is registered or
 // armed for a reason of its own. So the sweep a leftover brings back is the
 // one in the re-sync RW4 step 5 issues on that code, and a leftover that
 // re-sync still finds is logged every round. One only a read's verdict names

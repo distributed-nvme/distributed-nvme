@@ -2525,9 +2525,8 @@ EOF
 	smoke_check_clone_dns "$dnBefore" "$cloneDns" 1 1 "after create-clone"
 	# The clone's units (architecture.md, Metadata units): the formula over
 	# t1's size at sp0's block size, stored on the record and charged to the
-	# CN of EVERY cntlr of sp0, the standby's too, since either may become the
-	# primary that builds the clone; the CN with no cntlr of sp0 is charged
-	# nothing.
+	# CN of EVERY cntlr of sp0, the standby's too; the CN with no cntlr of sp0
+	# is charged nothing.
 	local spBlock cloneUnits
 	spBlock=$(smoke_jq "$(sp_json sp0)" \
 		'.sp_conf.bdev_conf.dm_pool_conf.data_block_size')
@@ -2618,7 +2617,7 @@ EOF
 	assert_eq "$(key_count clone)" "1" "the clone key survives the latch"
 	assert_eq "$(key_count clone_bitmap)" "3" \
 		"every chunk key survives the latch"
-	# The latch gives no unit back: the clone's runs stay charged until the
+	# The latch gives no unit back: the clone's units stay charged until the
 	# drain's last step removes the record (architecture.md, Metadata units).
 	smoke_check_cn_units sp0 "$cloneUnits" "${cnRevBefore[@]}"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.clone_name_list | length')" \
@@ -5952,10 +5951,11 @@ case_restart() {
 # areas filled to their ceilings
 # ---------------------------------------------------------------------------
 #
-# The gateway charges every clone and every migration destination the units
-# a metadata area gives its copy (architecture.md, Metadata units), and it
-# refuses what a node has no room for instead of letting the node build it,
-# fail and report an error. This case fills both kinds of area to their
+# The gateway charges every migration destination the units its DN's
+# metadata area gives the copy, refusing what a DN has no room for instead of
+# letting the DN build it, fail and report an error, and charges every clone
+# units on the CN of every cntlr of its pool, which bound only what the
+# gateway admits (architecture.md, Metadata units). This case fills both kinds of area to their
 # ceilings with real calls — the suite may not plant a count through
 # workerctl (Integration test plan, The etcd verification) — and shows
 # clones accepted up to a CN's ceiling and refused past it, the node of a
@@ -6200,8 +6200,7 @@ case_ceiling() {
 	# -----------------------------------------------------------------
 	stage 4 "a standby's full CN refuses a clone the primary's CN has room for"
 	# -----------------------------------------------------------------
-	# A pool's clones are charged to the CN of EVERY cntlr, because any of
-	# them may become the primary that builds the clones (architecture.md,
+	# A pool's clones are charged to the CN of EVERY cntlr (architecture.md,
 	# Metadata units). spE3's primary is on cn2, which has room. A pool
 	# with no clone asks its cntlr scan for no units, so the standby added
 	# next lands on cn0 or cn1, both full: a full CN still takes work that
@@ -6245,9 +6244,8 @@ case_ceiling() {
 		"${src[@]}" >/dev/null
 	refresh_rev spE1
 	ceil_cn_used "$(cn_addr 2)" "$overUnits" "after cB"
-	# A new cntlr's CN is charged every clone of its pool, since the cntlr
-	# may become the primary and build them there, so a cntlr for spE0
-	# needs CN_META_UNITS units (architecture.md, Metadata units).
+	# A new cntlr's CN is charged every clone of its pool, so a cntlr for
+	# spE0 needs CN_META_UNITS units (architecture.md, Metadata units).
 	# cn0 and cn1 already hold spE0's cntlrs, which leaves cn2 as the one
 	# candidate, and cB's units leave it short.
 	refresh_rev spE0

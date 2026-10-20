@@ -292,6 +292,59 @@ func (nf *NameFmt) CnMdArrayName(
 	)
 }
 
+// cnCloneMdField is the slice field and the group field of a clone meta
+// group's two md names (architecture.md, md names). No slice group's names
+// carry it: their slice field is a slice index below MaxSliceCntPerSp, the
+// meta bit set or not, and their group field an index below
+// MaxGrpCntPerSlice (TestCloneMdNamesNeverMatchASlicesNames is the
+// tripwire).
+const cnCloneMdField = 0xff
+
+// getCloneShortId folds a cluster, a cn and an sp into 32 bits, as
+// getShortId folds the first two: the low half of the fnv64a hash of the
+// three ids, each rendered with IdKeyFmt.
+func getCloneShortId(clusterId, cnId, spId uint64) uint32 {
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%016x%016x%016x", clusterId, cnId, spId)
+	return uint32(h.Sum64())
+}
+
+// CnCloneMdDevName is the /dev/md/{name} of a clone meta group's array
+// (architecture.md, md names): the short id of the cluster, the cn and the
+// sp, then the group id, then cnCloneMdField twice — 28 hex chars, as
+// CnMdDevName's, so "md_" + name stays within DISK_NAME_LEN. A group id
+// needs 16 hex chars and is unique only in its pool, so the sp joins the
+// short id rather than taking 16 chars of its own.
+func (nf *NameFmt) CnCloneMdDevName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	grpId uint64,
+) string {
+	return fmt.Sprintf(
+		"%08x%016x%02x%02x",
+		getCloneShortId(clusterId, cnId, spId),
+		grpId,
+		cnCloneMdField,
+		cnCloneMdField,
+	)
+}
+
+// CnCloneMdArrayName is a clone meta group's superblock name (mdadm --name):
+// CnMdArrayName's form with cnCloneMdField in the slice and group fields,
+// one name for every clone meta group of the sp, since arrays are found by
+// their members and told apart by their UUIDs, never by this name
+// (architecture.md, md names).
+func (nf *NameFmt) CnCloneMdArrayName(spId uint64) string {
+	return fmt.Sprintf(
+		"%s-%016x-%02x-%02x",
+		DnvPrefix,
+		spId,
+		cnCloneMdField,
+		cnCloneMdField,
+	)
+}
+
 func (nf *NameFmt) CnPoolMetaName(
 	clusterId uint64,
 	cnId uint64,
@@ -485,13 +538,12 @@ func (nf *NameFmt) CnTmpFilePath(
 	)
 }
 
-// CnCloneMetaDmName wraps one clone's dm-clone metadata slot in the CN
-// clone-metadata arena ([D14], cnagent.md CN18): the slot is a unit range of
-// the single loop device over CnTmpFilePath, and the dm-clone target reads its
-// metadata device from sector 0 and takes no offset argument, so the slot needs
-// a dm-linear of its own — exactly the reason DnMigrMetaDmName exists on the dn
-// side. The wrapper's own table is the allocator's registry:
-// there is no on-file allocation table.
+// CnCloneMetaDmName is the name of a clone-metadata wrapper over the CN
+// clone-metadata arena (architecture.md, Controller node, common): a
+// dm-linear over a unit range of the single
+// loop device over CnTmpFilePath. No clone keeps its metadata there, so the
+// cn agent's sweeps remove every such wrapper they find (cnagent.md CN2,
+// CN21).
 func (nf *NameFmt) CnCloneMetaDmName(
 	clusterId uint64,
 	cnId uint64,
@@ -510,11 +562,11 @@ func (nf *NameFmt) CnCloneMetaDmName(
 }
 
 // CnCloneMetaDmPrefix is the `dmsetup ls` filter that enumerates this CN's
-// clone-metadata wrappers. Because the dm tables ARE the allocator's registry
-// (CN18), rebuilding the used-unit map means listing every kind-`cb`
-// device of this cluster and cn — so the prefix has to be built from the same
-// nf.dmPrefix and the same kind constant as CnCloneMetaDmName, never from an
-// ad-hoc literal in the role package.
+// clone-metadata wrappers. The cn agent's sweep removes every kind-`cb`
+// device of this cluster and cn (cnagent.md CN2) by that listing — so the
+// prefix has to be built from the same nf.dmPrefix and the same kind
+// constant as CnCloneMetaDmName, never from an ad-hoc literal in the role
+// package.
 func (nf *NameFmt) CnCloneMetaDmPrefix(
 	clusterId uint64,
 	cnId uint64,

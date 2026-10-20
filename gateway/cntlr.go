@@ -101,9 +101,8 @@ type cntlrPlan struct {
 // (architecture.md, Storage pools) — which is what one cntlr's CN reserves, so
 // the slices must be read to size the scan at all, and the SP's clone units —
 // Σ meta_units over every clone, latched ones included (spCloneMetaUnits) —
-// which the new cntlr's CN must have room for in its metadata area, since the
-// cntlr may become the primary and build every clone there (architecture.md,
-// Metadata units). The exclusion list is the
+// which the new cntlr's CN must have room for in its metadata area
+// (architecture.md, Metadata units). The exclusion list is the
 // addr_port of every CN that already hosts a cntlr of this SP
 // (architecture.md, Finding CN candidates), and the location of each of those
 // CNs is the tier-1 exclusion of architecture.md, Per-operation allocation

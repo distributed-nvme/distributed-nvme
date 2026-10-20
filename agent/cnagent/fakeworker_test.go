@@ -573,8 +573,8 @@ func TestFakeWorkerConvergesAFullControllerNode(t *testing.T) {
 // and MaxSpareLegPerGrp spares at RAID1, MaxMigrCntPerSp legs with a second
 // side, MaxTdCntPerSp thin devices, MaxSsCntPerSp subsystems of
 // MaxNsCntPerSs namespaces and MaxHostCntPerSs hosts, MaxCloneCntPerSp
-// clones of MaxCntlrCntPerSp source transports, and MaxXferCntPerSp
-// transfers.
+// clones of MaxCntlrCntPerSp source transports, each with a clone meta group
+// of a slice's group's legs and spares, and MaxXferCntPerSp transfers.
 type widestShape struct {
 	slices, grps, tds, clones, xfers, migrs int
 }
@@ -625,7 +625,10 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 		return next
 	}
 	migrs := shape.migrs
-	legsOf := func() ([]*pb.Leg, []*pb.Leg) {
+	// legsOf gives a slice's group its legs, the first MaxMigrCntPerSp of
+	// which a migration gives a second side, and with noMigr a clone meta
+	// group its legs, none of which a migration moves.
+	legsOf := func(noMigr bool) ([]*pb.Leg, []*pb.Leg) {
 		var legs, spares []*pb.Leg
 		for k := 0; k < common.MaxAllocLegPerGrp+common.MaxSpareLegPerGrp; k++ {
 			addr, svcId := testIp, testSvcId
@@ -639,7 +642,7 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 			if k < common.MaxAllocLegPerGrp {
 				// A migration's destination is on another disk node than
 				// its source.
-				if migrs > 0 {
+				if migrs > 0 && !noMigr {
 					migrs--
 					leg.SideList = append(leg.SideList,
 						sideOf(id(), otherAddr, otherSvcId))
@@ -654,7 +657,7 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 	grpsOf := func(extCnt, dataBlocks uint64) []*pb.Group {
 		var grps []*pb.Group
 		for g := 0; g < shape.grps; g++ {
-			legs, spares := legsOf()
+			legs, spares := legsOf(false)
 			grps = append(grps, &pb.Group{
 				GrpId: id(), ExtCnt: extCnt, MetaBlocks: 3,
 				DataBlocks: dataBlocks, LegList: legs, SpareLegList: spares,
@@ -718,6 +721,11 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 			clone.SrcTrConfList = append(clone.SrcTrConfList,
 				sideTrConf(testIp2, fmt.Sprintf("%d", 4300+k)))
 		}
+		legs, spares := legsOf(true)
+		clone.MetaGrp = &pb.Group{
+			GrpId: id(), ExtCnt: 1, MetaBlocks: 3, DataBlocks: 61,
+			LegList: legs, SpareLegList: spares,
+		}
 		req.CloneList = append(req.CloneList, clone)
 	}
 	req.XferList = nil
@@ -771,13 +779,14 @@ func TestFakeWorkerConvergesTheWidestCntlr(t *testing.T) {
 	t.Logf("%+v converged in %v", shape, time.Since(start))
 	settled := w.settledRound(srv, cntlrPtr(), 1)
 	info := settled.GetCntlrInfo()
-	legs := shape.slices * 2 * shape.grps *
-		(common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp)
+	// Every group of the pool: the slices' and a clone meta group per clone.
+	grps := shape.slices*2*shape.grps + shape.clones
+	legs := grps * (common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp)
 	for _, c := range []struct {
 		what      string
 		got, want int
 	}{
-		{"md arrays", len(info.GetGrpIdToMdRaid()), shape.slices * 2 * shape.grps},
+		{"md arrays", len(info.GetGrpIdToMdRaid()), grps},
 		{"legs", len(info.GetLegIdToLeg()), legs},
 		{"thin devices", len(info.GetTdIdToThinInfo()), shape.tds},
 		{"namespaces", len(info.GetNsIdToNamespace()),

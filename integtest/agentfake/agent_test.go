@@ -992,7 +992,9 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	wantKeys(t, "ns_id_to_dm_linear", info.GetNsIdToDmLinear(), 31, 32)
 	wantKeys(t, "clone_id_to_target", info.GetCloneIdToTarget(), 41)
 	wantKeys(t, "clone_id_to_dm_clone", info.GetCloneIdToDmClone(), 41)
-	wantKeys(t, "clone_id_to_meta", info.GetCloneIdToMeta(), 41)
+	// No clone_id_to_meta row, as the cn agent reports none (cnagent.md
+	// CN28).
+	wantKeys(t, "clone_id_to_meta", info.GetCloneIdToMeta())
 	wantKeys(t, "xfer_id_to_dm_linear", info.GetXferIdToDmLinear(), 51)
 	wantKeys(t, "xfer_id_to_subsystem", info.GetXferIdToSubsystem(), 51)
 	wantKeys(t, "xfer_id_to_namespace", info.GetXferIdToNamespace(), 51)

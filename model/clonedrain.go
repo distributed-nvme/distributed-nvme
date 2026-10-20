@@ -27,15 +27,16 @@ import (
 //     two ledgers. The clone's metadata units go back on the CN of every
 //     cntlr of the SP (architecture.md, Metadata units), at most four
 //     compares per cntlr — its Cntlr and its CN's record read, that record
-//     and its capacity key written — so MaxCntlrCntPerSp bounds them; the run
-//     behind the metadata wrapper on each CN is agent-local and freed by the
-//     cn agent's sweep (cnagent.md CN21), and the count is what the gateway
-//     charges new clones against. The sides of the clone's clone meta group
-//     go back to their DNs exactly as an sp drain batch gives a slice's
-//     back, at most six compares per distinct DN, and a clone meta group has
-//     at most MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares of one
-//     side each, so those bound them. The final STM is the one step that
-//     needs the cluster's stored conf, for the DN capacity keys' bins.
+//     and its capacity key written — so MaxCntlrCntPerSp bounds them; no CN
+//     holds a run of its arena for the clone, which keeps its dm-clone
+//     metadata on its clone meta group (cnagent.md CN18), so the count is
+//     only what the gateway charges new clones against. The sides of the
+//     clone's clone meta group go back to their DNs exactly as an sp drain
+//     batch gives a slice's back, at most six compares per distinct DN, and
+//     a clone meta group has at most MaxAllocLegPerGrp legs and
+//     MaxSpareLegPerGrp spares of one side each, so those bound them. The
+//     final STM is the one step that needs the cluster's stored conf, for
+//     the DN capacity keys' bins.
 //   - The SP OUTLIVES the clone, so the final STM bumps SpRev like every other
 //     mutator instead of deleting a stop signal.
 //   - The drain runs ALONGSIDE the SP's normal reaction pass rather than

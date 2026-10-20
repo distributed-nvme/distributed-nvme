@@ -3417,9 +3417,10 @@ nvmet_tree() {
 # and nothing else. That is the SAME pair of patterns install_udev_rule
 # writes into the mask (ENV{MD_NAME}=="dnv-*|*:dnv-*"), against the same udev
 # property — one reading of "the name" at both ends. It is
-# the name the cn agent gives every array it creates
-# (common.NameFmt.CnMdArrayName (common/name_fmt.go), passed as `--name`
-# by Md.Create (agent/cnagent/md.go) with `--homehost any`), so a guest's own
+# the dnv prefix of the name the cn agent gives every array it creates
+# (common.NameFmt.CnMdArrayName, or CnCloneMdArrayName for a clone meta
+# group's array (common/name_fmt.go), passed as `--name` by Md.Create
+# (agent/cnagent/md.go) with `--homehost any`), so a guest's own
 # root or data array is never touched — only an array minted by a dnv cn agent,
 # whether it was assembled here on purpose or by the stock udev rule behind our
 # back.
@@ -5791,9 +5792,7 @@ DIAG_MAX_DN_LOGS=6
 # the cn agent's check before an md create that no array runs under the
 # group's name, NameInUse (agent/cnagent/md.go); blkdiscard runs on
 # both — agent/dnagent/zeroing.go (BlkZeroout, side provisioning:
-# dnagent.md DN9),
-# agent/cnagent/clonemeta.go (BlkDiscardRange, the
-# clone-metadata arena), and ApplySkipRanges (agent/bitmap.go), which marks
+# dnagent.md DN9), and ApplySkipRanges (agent/bitmap.go), which marks
 # regions of a dm-clone hydrated on either role.
 # fallocate is the punch-hole probe below, not anything the run does.
 #
@@ -11825,7 +11824,11 @@ case_ops() {
 #      row that is not Ok
 #      (cloneTargetRow (agent/cnagent/clone.go)).
 #      A row that is still not RES_STATUS_OK $WAIT_SRC_CONNECT seconds after
-#      the clone was created is the "connect refused" case.
+#      the clone was created is the "connect refused" case. A clone that
+#      waits while its clone meta group's sides are being provisioned reads
+#      RES_STATUS_PROVISIONING in both rows (cnagent.md CN18), which is no
+#      fault of the source, so the wait for the source starts again while
+#      the row reads it.
 #   2. hydration froze. The dm-clone's `details` carries the raw `dmsetup
 #      status` line, on a line of its own (cloneDmRow and
 #      probeCloneDm (agent/cnagent/clone.go)), whose seventh field is
@@ -12128,7 +12131,7 @@ copy_xfer_host_linked() { # <cn v> <hostnqn>
 # — so a source fault and a device fault are distinguishable, and only the
 # first one routes to the fallback. The stall test is additionally gated on
 # the device being RES_STATUS_OK: a dm-clone that was never built is somebody
-# else's problem (the metadata arena, a missing raid0), and building a second
+# else's problem (its clone meta group, a missing raid0), and building a second
 # storage pool would not fix it. That case simply runs out $WAIT_HYDRATE and
 # dies with the last signature in the transcript.
 copy_clone_progress() { # <cntlr id> <clone id>
@@ -12158,11 +12161,17 @@ copy_clone_progress() { # <cntlr id> <clone id>
 	if hyd_complete "$frac"; then
 		return 0
 	fi
+	# A deferred clone connects no source while it waits for its clone meta
+	# group (cnagent.md CN18).
+	if [ "$tgt" = RES_STATUS_PROVISIONING ]; then
+		COPY_SRC_START=$SECONDS
+	fi
 	if [ "$tgt" != RES_STATUS_OK ] &&
 		[ "$((SECONDS - COPY_SRC_START))" -ge "$WAIT_SRC_CONNECT" ]; then
-		COPY_SRC_FAULT="the primary's clone_id_to_target row is still $tgt"
+		COPY_SRC_FAULT="the primary's clone_id_to_target row is $tgt"
 		COPY_SRC_FAULT="$COPY_SRC_FAULT ${WAIT_SRC_CONNECT}s after the clone"
-		COPY_SRC_FAULT="$COPY_SRC_FAULT was created (details: $tgtdet)"
+		COPY_SRC_FAULT="$COPY_SRC_FAULT was created or the row last read"
+		COPY_SRC_FAULT="$COPY_SRC_FAULT RES_STATUS_PROVISIONING (details: $tgtdet)"
 		return 0
 	fi
 	if [ "$dm" = RES_STATUS_OK ] &&
@@ -13331,10 +13340,9 @@ copy_clone_build() {
 # $TD_CLONE is REBUILT and not reused, and that is not tidiness: [D3] makes
 # "the destination td was never written before the clone" a contract the CP
 # cannot verify, since a region the source bitmaps skip reads the
-# destination's own blocks, and the recovery of architecture.md, Clone crash
-# recovery, equates "mapped in the destination thin pool" with "already
-# copied". A td that a failed clone partially hydrated
-# violates both. `td delete` also refuses while the clone still exists
+# destination's own blocks, which are zeros only in a td never written. A td
+# that a failed clone partially hydrated violates it. `td delete` also
+# refuses while the clone still exists
 # ("thin device %s is the destination of clone %s",
 # decideDeleteThinDevice (gateway/thindevice.go)), which is why the drain is
 # waited out first.

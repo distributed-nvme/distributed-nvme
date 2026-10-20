@@ -212,15 +212,15 @@ func TestThinDumpGoesThroughAFile(t *testing.T) {
 // thin_dump that opens its output with a plain create-and-truncate. Under a
 // fixed name in a world-writable directory another local user could create
 // that file first, own it through the dump, and rewrite the document before
-// the agent reads it back — and a destination bitmap read from a forged
-// document discards regions of a dm-clone that were never copied. So the file
-// lives in a directory the agent owns with mode 0700, checked before every
-// dump: one that is anything else — another user's directory, one others can
-// write, a symlink — fails the read before the pool is touched. That
-// directory sits in /run, which only root can write, not in the temp
-// directory: in /tmp any local user could create the name first, and the
-// check would then fail every dump on the node, a clone recovery's included,
-// until an operator removed it.
+// the agent reads it back — and a bitmap read from a forged document marks
+// regions of another pool's clone, or of a migration, copied that never were.
+// So the file lives in a directory the agent owns with mode 0700, checked
+// before every dump: one that is anything else — another user's directory,
+// one others can write, a symlink — fails the read before the pool is
+// touched. That directory sits in /run, which only root can write, not in the
+// temp directory: in /tmp any local user could create the name first, and
+// the check would then fail every dump on the node until an operator removed
+// it.
 func TestThinDumpDirIsPrivate(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -653,73 +653,4 @@ func TestAbsentMiddleChunkKeepsLaterChunksInPlace(t *testing.T) {
 	assertSkippable(t, b, 2*testChunkBits, true)
 	assertSkippable(t, b, 2*testChunkBits+7, true)
 	assertSkippable(t, b, 2*testChunkBits+8, false)
-}
-
-// TestChunksOfCutsAtChunkBoundaries covers the three shapes the recovery of
-// architecture.md, Clone crash recovery, hands chunksOf: shorter than C,
-// exactly C, and one byte past it.
-func TestChunksOfCutsAtChunkBoundaries(t *testing.T) {
-	const size = common.CloneBmChunkBytes
-	for _, tc := range []struct {
-		name    string
-		length  int
-		wantLen []int
-	}{
-		{"shorter than a chunk", 3, []int{3}},
-		{"exactly one chunk", size, []int{size}},
-		{"one byte past a chunk", size + 1, []int{size, 1}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			chunks := chunksOf(make([]byte, tc.length))
-			if len(chunks) != len(tc.wantLen) {
-				t.Fatalf("%d chunks, want %d", len(chunks), len(tc.wantLen))
-			}
-			for idx, want := range tc.wantLen {
-				got, ok := chunks[uint32(idx)]
-				if !ok || len(got) != want {
-					t.Fatalf("chunk %d is %d bytes/%v, want %d bytes",
-						idx, len(got), ok, want)
-				}
-			}
-		})
-	}
-	if got := chunksOf(nil); len(got) != 0 {
-		t.Fatalf("an empty bitmap yielded %d chunks", len(got))
-	}
-}
-
-// TestDstBitmapLongerThanAChunkIsSplit pins architecture.md, Clone crash
-// recovery: applyDst
-// Bitmaps builds its per-slice bitmaps locally, so it must cut them at C
-// before handing them to the fold. Wrapping the whole bitmap as chunk 0
-// instead leaves every bit past the first MiB addressed to a chunk that does
-// not exist — and unknown reads as written, silently stopping the skip at 1
-// MiB of bitmap on a large slice.
-func TestDstBitmapLongerThanAChunkIsSplit(t *testing.T) {
-	mapped := make([]byte, common.CloneBmChunkBytes+1)
-	for i := range mapped {
-		mapped[i] = 0xff
-	}
-	b := sliceBitmap{chunks: chunksOf(mapped)}
-	assertSkippable(t, b, 0, true)
-	assertSkippable(t, b, testChunkBits-1, true)
-	// The byte past C: only a split bitmap puts it in chunk 1, where the fold
-	// can reach it.
-	assertSkippable(t, b, testChunkBits, true)
-	assertSkippable(t, b, testChunkBits+7, true)
-	assertSkippable(t, b, testChunkBits+8, false)
-
-	// And through regionSkippable, the entry point foldRegions uses: with
-	// stripe = block = region = 1 MiB the region index IS the source bit
-	// index, so region 8C is the first region past the first chunk.
-	g := raid0Geometry{sliceCnt: 1, stripeSize: 1 << 20, blockSize: 1 << 20}
-	slices := []sliceBitmap{b}
-	if !regionSkippable(testChunkBits, 1<<20, g, slices) {
-		t.Fatalf("region %d is not skippable: the bitmap past the first "+
-			"chunk was not reachable", testChunkBits)
-	}
-	if regionSkippable(testChunkBits+8, 1<<20, g, slices) {
-		t.Fatalf("region %d is skippable past the end of the bitmap",
-			testChunkBits+8)
-	}
 }

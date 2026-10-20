@@ -2,7 +2,6 @@ package cnagent
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -593,22 +592,21 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 
 // TestTheCntlrReadMirrorsTheDisconnectGate pins the read-only half of
 // ensureCloneSource's registry gate. A converge whose clone source is still
-// being disconnected stops at CN18 step 1 and reports the dm-clone MISSING,
-// so the cntlr's read, which the Check round answers from (dnagent.md SH29),
-// must not judge the clone's step 2 — the arena verdict of
-// cloneMetaVerdict — however connected the source still looks: the two
-// channels would flip the row, and its epoch, against each other every
-// round. The arena is filled after the converge, so step 2 would find no
-// free run for this clone's slot the moment a probe reached it.
+// being disconnected stops at CN18 step 1 and reports the dm-clone MISSING
+// "source not connected", so the cntlr's read, which the Check round
+// answers from (dnagent.md SH29), must read the source as not ready too,
+// however connected it still looks, and name it ahead of the clone's step
+// 2: the two channels would flip the row, and its epoch, against each
+// other every round. The clone meta group is made not ready after the
+// converge, so a read that judged step 2 first would name the group.
 func TestTheCntlrReadMirrorsTheDisconnectGate(t *testing.T) {
 	srv, node := newTestServer(t)
-	// The failed step registers the connect retry; a retry pass would sweep
-	// the squatter below, which is of this sp.
+	// The failed step registers the connect retry, which the test runs by
+	// hand only.
 	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
-	loop := loopDev(t, srv, node)
 	disconnect := "cmd nvme disconnect --nqn " + testSrcNqn
 	node.blockCmd(disconnect)
 	t.Cleanup(func() { node.releaseCmd(disconnect) })
@@ -629,15 +627,12 @@ func TestTheCntlrReadMirrorsTheDisconnectGate(t *testing.T) {
 			"step 1", converged.GetStatus(), converged.GetDetails())
 	}
 
-	squatter := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x998)
-	node.mu.Lock()
-	node.dms[squatter] = &fakeDm{
-		table: fmt.Sprintf("0 %d linear %s 0",
-			common.CnCloneMetaUnitCnt*cnCloneMetaUnitSectors, node.devNo[loop]),
-		thinIds: map[uint32]bool{},
+	grp := second.GetMetaGrp()
+	if grp == nil {
+		grp = cloneGrpOf(second.GetCloneId(), false)
 	}
-	node.devNo["/dev/mapper/"+squatter] = "253:201"
-	node.mu.Unlock()
+	cloneGrpNotReady(srv, node, grp.GetGrpId(),
+		grp.GetLegList()[0].GetLegId())
 
 	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
@@ -645,7 +640,8 @@ func TestTheCntlrReadMirrorsTheDisconnectGate(t *testing.T) {
 		CntlrPointer: cntlrPtr(), Revision: 4,
 	}, nil)
 	dm := probed.GetCloneIdToDmClone()[testClone+1]
-	if dm.GetStatus() != converged.GetStatus() {
+	if dm.GetStatus() != converged.GetStatus() ||
+		dm.GetDetails() != "source not connected" {
 		t.Fatalf("the Check round reports the dm-clone %v/%q while its "+
 			"source disconnects, the converge %v/%q", dm.GetStatus(),
 			dm.GetDetails(), converged.GetStatus(), converged.GetDetails())
@@ -765,66 +761,6 @@ func TestTheBackgroundDisconnectsRunAFewAtATime(t *testing.T) {
 		t.Fatalf("%d slots still held once every disconnect returned", n)
 	}
 	cnSweepAssertCode(t, pass("the last re-sync"), 0, "the last re-sync")
-}
-
-// TestCloneMetaAllocatorSerialized pins the one cn lock that IS held across OS
-// calls (cloneMetaMu, [D14]). The clone-metadata registry is the kernel's dm
-// table set, and SyncupCntlr holds only the node *read* lock, so two cntlrs of
-// the same CN converge at once: without one critical section around
-// enumerate → discard → create both passes read the same run as free and,
-// because their wrappers have different names, neither `dmsetup create` fails
-// — two dm-clones would silently share one metadata range.
-func TestCloneMetaAllocatorSerialized(t *testing.T) {
-	srv, node := newTestServer(t)
-	ctx := context.Background()
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-	loop := loopDev(t, srv, node)
-
-	// Two plans of the same CN, one per SP, each wanting its own slot.
-	planA := newCntlrPlan(srv.nf, cntlrReq(reqOpts{
-		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}}))
-	cpA := planA.cloneById[testClone]
-	reqB := cntlrReq(reqOpts{revision: 2, primary: true,
-		clones: []*pb.Clone{cloneOfTd(testClone2, testSrcNqn2, testTd)}})
-	reqB.CntlrPointer = cntlrPtr2()
-	planB := newCntlrPlan(srv.nf, reqB)
-	cpB := planB.cloneById[testClone2]
-
-	gate := make(chan struct{})
-	node.gate["cmd dmsetup create "+cpA.metaDmName] = gate
-	firstDone := make(chan error, 1)
-	go func() { firstDone <- srv.ensureCloneMeta(ctx, planA, cpA) }()
-	waitFor(t, func() bool {
-		return node.hasCall("cmd dmsetup create " + cpA.metaDmName)
-	})
-
-	secondDone := make(chan error, 1)
-	go func() { secondDone <- srv.ensureCloneMeta(ctx, planB, cpB) }()
-	select {
-	case <-secondDone:
-		t.Fatalf("a second allocation ran inside the first's critical section")
-	case <-time.After(50 * time.Millisecond):
-	}
-	// In particular it has not hole-punched the run the first one is taking:
-	// that punch is what wipes a slot's previous contents.
-	if punches := node.callsMatching(
-		"cmd blkdiscard --offset 0 --length 8388608 " +
-			loop); len(punches) != 1 {
-		t.Fatalf("the free run was punched %d times: %v", len(punches), punches)
-	}
-
-	close(gate)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first allocation: %v", err)
-	}
-	if err := <-secondDone; err != nil {
-		t.Fatalf("second allocation: %v", err)
-	}
-	// The second enumeration saw the first wrapper, so the runs are disjoint.
-	if got, want := node.dms[cpB.metaDmName].table,
-		wrapperTable(node, loop, 2); got != want {
-		t.Fatalf("the second slot is %q, want %q", got, want)
-	}
 }
 
 func waitFor(t *testing.T, cond func() bool) {
@@ -1213,8 +1149,8 @@ func TestARefusedCallLeavesNoLockEntry(t *testing.T) {
 
 // TestABackgroundAttemptOnADroppedCntlrLeavesNoLockEntry: a background
 // attempt scheduled for a cntlr that a drop takes away before the attempt
-// gets the node read lock — a connect retry or a clone-metadata retry racing
-// the cntlr's pointer leaving its CN's list — creates no lock entry: the
+// gets the node read lock — a connect retry racing the cntlr's pointer
+// leaving its CN's list — creates no lock entry: the
 // attempt checks the cntlr under the node read lock, which the drop's write
 // lock excludes, before it takes the object lock (reconvergeCntlr).
 func TestABackgroundAttemptOnADroppedCntlrLeavesNoLockEntry(t *testing.T) {

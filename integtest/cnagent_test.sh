@@ -354,8 +354,8 @@ assert_thin_ok() { # json td slice label
 
 # assert_cn_info_ok covers the four base-state resources of CnInfo
 # (architecture.md, Controller node, common). The clone-metadata arena has
-# no row of its own: it is the loop device itself (loop_dev_info) plus the
-# kind-cb wrapper dm tables, and the proto keeps field 5 `reserved` ([D14]).
+# no row of its own: it is the loop device itself (loop_dev_info), and the
+# proto keeps field 5 `reserved`.
 assert_cn_info_ok() { # json label
 	local field
 	for field in port_info tmpfs_info tmp_file_info loop_dev_info; do
@@ -590,15 +590,6 @@ cn_host_nqn() { printf '%s:1:%s:%s' "$NQN_PREFIX" "$(hex16 "$1")" "$(hex16 "$2")
 xfer_nqn() { # cluster sp xfer
 	printf '%s:4:%s:%s:%s' "$NQN_PREFIX" \
 		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")"
-}
-
-# clone_meta_dm mirrors common.CnCloneMetaDmName (CN18): the
-# kind-cb dm-linear wrapper that carries one dm-clone's metadata, allocated out
-# of the loop-device arena. A wrapper is created by the agent with `dmsetup
-# create` and carries single dashes — none of the doubled-dash escaping of an
-# LVM node's `dnv--clone--vg-*` name.
-clone_meta_dm() { # cnidx sp clone
-	cn_dm_name cb "$1" "$2" "$3"
 }
 
 # host_dev is the host-side multipath node of a namespace. The ns uuids are
@@ -873,11 +864,13 @@ req_xfer() { # xferid ori_nqn ori_ns_idx allowed_hosts_json auto_suspend
 # The Clone record carries no chunk count (architecture.md, Clones): how many
 # chunks a clone holds is how many CloneBitmap keys it has. cnagentctl parses
 # this request with strict protojson, so a leftover "bm_cnt" key would fail
-# the call outright rather than being ignored.
-req_clone() { # cloneid src_nqn src_vm dst_tdid auto_resume
-	printf '{"clone_id": "%s", "src_tr_conf_list": [%s], "src_nqn": "%s", "src_ns_idx": 1, "src_slice_cnt": 1, "src_stripe_size": "%s", "src_block_size": "%s", "dst_td_id": "%s", "dm_clone_conf": {"hydration_threshold": 1, "hydration_batch_size": 1}, "auto_resume": %s}' \
+# the call outright rather than being ignored. meta_grp is the clone's clone
+# meta group (architecture.md, Terminology and object model), one req_grp
+# whose legs and sides the case provisions as it does a slice's.
+req_clone() { # cloneid src_nqn src_vm dst_tdid auto_resume grp_json
+	printf '{"clone_id": "%s", "src_tr_conf_list": [%s], "src_nqn": "%s", "src_ns_idx": 1, "src_slice_cnt": 1, "src_stripe_size": "%s", "src_block_size": "%s", "dst_td_id": "%s", "dm_clone_conf": {"hydration_threshold": 1, "hydration_batch_size": 1}, "auto_resume": %s, "meta_grp": %s}' \
 		"$(d16 "$1")" "$(req_tr "${IP[$3]}")" "$2" "$STRIPE_SIZE" \
-		"$BLOCK_SIZE" "$(d16 "$4")" "$5"
+		"$BLOCK_SIZE" "$(d16 "$4")" "$5" "$6"
 }
 
 join_json() {
@@ -1185,8 +1178,34 @@ dm_devno() {
 
 # dm_backing <name> — the device a single-target linear or flakey table points
 # at: `0 <len> linear <major:minor> <offset>` and `0 <len> flakey <major:minor>
-# …` both carry it in field 4.
+# …` both carry it in field 4. A dm-clone's table, `0 <len> clone <metadata
+# major:minor> <destination> <source> <region size> …`, carries its metadata
+# device there.
 dm_backing() { dm_table "$1" | awk '{print $4}'; }
+
+# dm_wsect <name> — the sectors written to one dm device since it was
+# created, field 7 of its /sys/block stat. It fails, saying so, when the
+# name is no dm device or the count does not read as a number.
+dm_wsect() {
+	local dmk wsect
+	dmk=$(readlink -f "/dev/mapper/$1" 2>/dev/null) || dmk=""
+	dmk=${dmk##*/}
+	case "$dmk" in
+	dm-*) ;;
+	*)
+		echo "dm_wsect: /dev/mapper/$1 is not a dm device" >&2
+		return 1
+		;;
+	esac
+	wsect=$(awk '{print $7}' "/sys/block/$dmk/stat") || return 1
+	case "$wsect" in
+	'' | *[!0-9]*)
+		echo "dm_wsect: $dmk's write sector count reads '$wsect'" >&2
+		return 1
+		;;
+	esac
+	echo "$wsect"
+}
 
 # open_rc <name> — the exit status of a bounded 512-byte read of one dm device,
 # after a cache drop so the read has to reach the target. 0 means the device
@@ -2011,8 +2030,9 @@ wait_writer_gone() {
 #
 # The agent stamps every record with the trace id of the request that caused
 # it, so an ordered event stream of one converge is exactly one trace id. The
-# startup reconcile and the CN11 probers mint their own ids, which is why the
-# recovery and restart assertions read a freshly rotated log with no filter.
+# startup reconcile and the CN11 probers mint their own ids, which is why
+# clone_xfer's rebuild and the restart case read a freshly rotated log with no
+# filter.
 #
 # Every reader below feeds an assertion on what it prints, most of them that a
 # record is absent, so each one FAILS — a line on stderr and a non-zero status
@@ -2161,7 +2181,8 @@ mutations() {
 # error text folded into it, and that line fails the assertion — a failure
 # that printed nothing would read as a clean node nobody had listed. The dm
 # pattern's [cd][0-9a-f] kind field covers the kind-cb clone-metadata wrappers
-# ([D14]), so a leaked arena allocation is caught here for free. An md array
+# (architecture.md, Controller node, common), so a leftover wrapper is caught
+# here for free. An md array
 # is named as well as its members: md_names by the array's own name,
 # md_member_names by its members' dm names, which carry the sp id too — the
 # one md route that still names an
@@ -2289,10 +2310,9 @@ dm_kind_names() {
 		'$4 == k && (n == "" || $3 == n)'
 }
 
-# clone_meta_wrappers [cn16] — the kind-cb clone-metadata dm-linears, which are
-# the arena's allocation registry itself (CN18: there is no
-# on-file allocation table, the dm tables are it). Empty output means every
-# unit of the arena is free.
+# clone_meta_wrappers [cn16] — the kind-cb clone-metadata dm-linears over the
+# arena's loop device. No clone uses one (cnagent.md CN5), so any one listed
+# is a leftover the agent's sweeps remove; empty output means none is left.
 clone_meta_wrappers() { dm_kind_names cb "${1:-}"; }
 
 # clone_bm_files <cluster16> <cn16> <sp16> <clone16> — the basenames of one
@@ -2508,18 +2528,17 @@ loop_devs() {
 }
 
 # wipe_cn simulates the CN reboot of clone_xfer's stage 6 (cnagent_integtest.md,
-# Cases, clone_xfer): every kernel object of one CN
-# goes, including the volatile clone-metadata arena, while the dn objects, the
-# shared port and $WORK/cn-store stay. The order is that of
-# cnagent_integtest.md, Teardown and cleanup, and the
-# dm-clone is removed while its :4: source connection is still up — a clone
-# flushes through its source on removal and blocks without it.
+# Cases, clone_xfer): every kernel object of one CN goes, the tmpfs arena
+# included, while the dn objects — the side of the clone's clone meta group
+# among them —, the shared port and $WORK/cn-store stay. The order is that of
+# cnagent_integtest.md, Teardown and cleanup, and the dm-clone is removed
+# while its :4: source connection and its clone meta group's leg connection
+# are still up: a clone flushes through its source on removal and blocks
+# without it, and its removal writes its last metadata to its group.
 #
-# Kind cb (the clone-metadata wrappers) joins the dm passes rather than
-# getting a teardown of its own.
-# It must come after kind c7: the dm-clone holds its wrapper open, and a
-# wrapper left behind holds the loop device open, wedging tmpfs_teardown's
-# `losetup -d` with EBUSY.
+# Kind cb, the clone-metadata wrapper that no clone uses (cnagent.md CN5),
+# joins the dm passes after kind c7, as a leftover one holds the loop device
+# open and would wedge tmpfs_teardown's `losetup -d` with EBUSY.
 wipe_cn() { # <cn16>
 	resume_suspended
 	drop_subsys_glob "$NQN_IT_PREFIX:*"
@@ -2591,9 +2610,8 @@ cleanup_phase2() { # <cn16> <dn16>
 	mdr_teardown >/dev/null
 	dm_remove_kind ca "$cn16"
 	dm_remove_kind c9 "$cn16"
-	# The clone-metadata wrappers, after their dm-clones went in phase 1: a
-	# leftover kind-cb holds the loop device open and wedges the `losetup -d`
-	# below with EBUSY.
+	# Any clone-metadata wrapper, which no clone uses: a leftover kind-cb
+	# holds the loop device open and wedges the `losetup -d` below with EBUSY.
 	dm_remove_kind cb "$cn16"
 	disconnect_prefix "$NQN_PREFIX:2:"
 
@@ -3000,9 +3018,9 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		# No LVM binaries: [D14] removed LVM from the CN entirely. thin_dump stays
-		# — it is the thin-metadata oracle of cnagent_integtest.md, Cases, thinbm,
-		# not an LVM command.
+		# No LVM binaries: the CN uses no LVM ([D14]). thin_dump stays — it is
+		# the thin-metadata oracle of cnagent_integtest.md, Cases, thinbm, not
+		# an LVM command.
 		# udevadm: install_udev_rule's and cleanup_phase2's `udevadm control
 		# --reload`, and md_stop_all's MD_NAME read — the first of its two
 		# name sources, and the only one that answers for an array whose
@@ -3498,17 +3516,10 @@ assert_no_residue() { # sp
 
 # event_line prints the 1-based position of the first event matching a regex,
 # or the empty string. The event stream of one trace id is the ordered record
-# of one converge, which is how the orderings of CN9, CN18 and
-# architecture.md, Clone crash recovery, are asserted.
+# of one converge, which is how the orderings of CN9 and CN18 are
+# asserted.
 event_line() { # stream regex
 	printf '%s\n' "$1" | grep -nE -- "$2" | head -1 | cut -d: -f1 || true
-}
-
-# event_last is event_line's twin for the LAST match: the anchor when an
-# earlier event of the same shape can belong to something else (case C stage
-# 6's destination-bitmap read against the pool's activation sweep).
-event_last() { # stream regex
-	printf '%s\n' "$1" | grep -nE -- "$2" | tail -1 | cut -d: -f1 || true
 }
 
 event_cnt() { # stream regex
@@ -5275,17 +5286,31 @@ case_thinbm() {
 # ---------------------------------------------------------------------------
 # Case C — clone_xfer (cnagent_integtest.md, Cases): the live move
 # (architecture.md, Transfer + clone = cross-SP live migration) and the
-# recovery (architecture.md, Clone crash recovery)
+# metadata kept across a wipe (architecture.md, Clone metadata durability)
 # ---------------------------------------------------------------------------
 #
 # 32 of the td's 64 MiB are written, so the pushed bitmap is 00000000ffffffff:
 # bits 32..63 = 1 = skippable ⇒ exactly one 32 MiB blkdiscard at offset 32 MiB
-# **on the clone device**. The same trace also carries an
-# earlier, unrelated blkdiscard on the arena loop device (the allocator's
-# recycled-unit hole punch), so every assertion here is scoped by target.
+# **on the clone device**, which is the only blkdiscard a cn agent issues
+# (ApplySkipRanges (agent/bitmap.go)).
+#
+# The clone's clone meta group (architecture.md, Terminology and object
+# model) has sp2's own shape of group: sp2 has no redundancy, so the group is
+# one leg with one side of one extent on DN2, and its group device is a
+# CnGrpName dm-linear over the leg's wrapper, the device the dm-clone keeps
+# its metadata on (cnagent.md CN18). The suite plays the worker for the group
+# as for a slice's: the side's pointer and its two-phase provisioning, zeroed
+# over a data group's side's length (architecture.md, Side provisioning
+# protocol), come before any request that names the clone
+# (cnagent_integtest.md, Conventions, Sides first).
 
 C_XFER=0xc
 C_CLONE=0xc
+# The clone meta group's ids, free in sp2 beside the S shape's 0x2..0xb and
+# the clone's 0xc.
+C_MGRP=0xd
+C_MLEG=0xe
+C_MSIDE=0xf
 
 case_clone_xfer() {
 	CASE=clone_xfer
@@ -5296,15 +5321,23 @@ case_clone_xfer() {
 	local uuid=33333333-3333-4333-8333-333333333333
 	local req1="$WORK/req-clone_xfer-cn1.json"
 	local req2="$WORK/req-clone_xfer-cn2.json"
-	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
-	local idx bmargs bmfiles nsdev2 err1 err2 hyd dump at upto from rsv rel deadline
-	local code details shape now tgt rows c1 k g c2
+	local sample_err="$WORK/clone_xfer-sample.err"
+	local out dev want got seq rev1 rev2 xnqn clonedm nsdev1 ctrl sample
+	local idx bmargs bmfiles nsdev2 err1 err2 hyd tot post deadline
+	local code details shape now tgt rows c1 k g c2 legdm grpdm legnqn raid0dm
+	local srcpass wsect bound w0 w1
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
 	xnqn=$(xfer_nqn "$CLUSTER" "$sp1" "$C_XFER")
 	clonedm=$(cn_dm_name c7 2 "$sp2" "$C_CLONE")
-	metadm=$(clone_meta_dm 2 "$sp2" "$C_CLONE")
+	# The clone meta group on CN2: the leg's wrapper (kind c9) and its
+	# connection to DN2's export of the side, and the group device (kind ca);
+	# and the destination td's raid0, the dm-clone's destination device.
+	legdm=$(cn_dm_name c9 2 "$sp2" "$C_MLEG")
+	grpdm=$(cn_dm_name ca 2 "$sp2" "$C_MGRP")
+	legnqn=$(side_to_cn_nqn "$CLUSTER" "$sp2" "$C_MLEG" "${CNID[2]}")
+	raid0dm=$(cn_dm_name c4 2 "$sp2" "$S_TD")
 	nsdev1=$(cn_dm_name c6 1 "$sp1" "$S_NS")
 	nsdev2=$(cn_dm_name c6 2 "$sp2" "$S_NS")
 	# The two tds' permanent dm-errors (kind c5): what an effectively suspended
@@ -5418,15 +5451,46 @@ case_clone_xfer() {
 	# CN2 (cnagent.md CN17).
 	host_refused "$hv" 1 "$xnqn" "clone_xfer: the xfer"
 
-	stage gate "stage 3: the clone is declared gated, then the chunk is pushed"
+	stage gate "stage 3: the clone's group is provisioned, the clone is declared gated, then the chunk is pushed"
+	# As for a slice's sides (cnagent_integtest.md, Conventions, Sides
+	# first), the suite gives the clone meta group's side its pointer on DN2
+	# and provisions it before any request names the clone, so the clone is
+	# never provisioning-deferred (cnagent.md CN9, CN18) and stage 4's one
+	# converge builds it. dn_pointers sends DN2's whole side list.
+	dn_pointers 2 "$sp2:$S_MLEG:$S_MSIDE" "$sp2:$S_DLEG:$S_DSIDE" \
+		"$sp2:$C_MLEG:$C_MSIDE"
+	dn_side 2 "$sp2" "$C_MLEG" "$C_MSIDE" 1 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[2]}"
 	req_set "$req2" ".sp_level = \"SP_LEVEL_NO_CLONE\"
-		| .clone_list = [$(req_clone "$C_CLONE" "$xnqn" 1 "$S_TD" true)]"
+		| .clone_list = [$(req_clone "$C_CLONE" "$xnqn" 1 "$S_TD" true \
+			"$(req_grp "$C_MGRP" 1 "$NONE_META_BLOCKS" "$NONE_EXT1_DATA" \
+				"$(req_leg "$C_MLEG" 0 "$(req_side "$C_MSIDE" 2)")")")]"
 	bump_cn_rev 2
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_suppressed "$out" \
 		".cntlr_info.clone_id_to_dm_clone[\"$(d16 "$C_CLONE")\"]" \
 		"clone_xfer gated clone"
+	# The level gates the dm-clone, not the clone meta group, which is a
+	# group like any other under the group and leg gates (cnagent.md CN19):
+	# the leg is connected and wrapped, its prober just started (CN11), and
+	# the group device is a dm-linear over the leg's wrapper (CN12), while no
+	# dm-clone exists.
+	assert_leg_pending "$out" "$C_MLEG" "clone_xfer gated clone's group"
+	assert_map_ok "$out" grp_id_to_md_raid "$C_MGRP" \
+		"clone_xfer gated clone's group"
+	assert_eq "$(helper 2 "dm_state $legdm")" live \
+		"clone_xfer: the clone meta group's leg wrapper"
+	assert_eq "$(helper 2 "dm_state $grpdm")" live \
+		"clone_xfer: the clone meta group's device"
+	assert_eq "$(helper 2 "dm_backing $grpdm")" \
+		"$(helper 2 "dm_devno $legdm")" \
+		"clone_xfer: the group device maps the leg's wrapper"
+	assert_eq "$(helper 2 "dm_state $clonedm")" missing \
+		"clone_xfer: the gate builds no dm-clone"
 	seq=$(helper 2 "cn_events $TRACE")
+	assert_before "$seq" "^dmsetup create $legdm( |\$)" \
+		"^dmsetup create $grpdm( |\$)" \
+		"clone_xfer: the leg's wrapper before the group device over it"
 	assert_eq "$(event_cnt "$seq" "^nvme connect .*$NQN_PREFIX:4:")" 0 \
 		"clone_xfer: the gate holds the source connection back (CN19)"
 	cnctl 2 push-clone-bm --sp "$sp2" --cntlr "$cntlr" \
@@ -5468,57 +5532,40 @@ case_clone_xfer() {
 	assert_eq "$(helper 2 "clone_bm_files $bmargs")" "$bmfiles" \
 		"clone_xfer: both chunk files are pair-named"
 
-	stage enable "stage 4: one converge builds the clone and flips the host"
+	stage enable "stage 4: one converge builds the dm-clone over its group and flips the host"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READWRITE"'
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" clone_id_to_target "$C_CLONE" clone_xfer
 	assert_map_ok "$out" clone_id_to_dm_clone "$C_CLONE" clone_xfer
-	assert_map_ok "$out" clone_id_to_meta "$C_CLONE" clone_xfer
+	assert_map_ok "$out" grp_id_to_md_raid "$C_MGRP" clone_xfer
 	seq=$(helper 2 "cn_events $TRACE")
-	# Two different blkdiscards share the verb in one trace,
-	# so every anchor below is scoped by target device: the allocator's
-	# arena hole punch on the loop device comes *first*, and the clone's
-	# hydration marking on /dev/mapper/{clone} after it.
-	#
-	# The arena range is punched before the wrapper is created — the
-	# recycled-unit guard, so a new dm-clone can never misparse the previous
-	# clone's still-valid superblock — and it is a plain discard: `--zeroout`
-	# would materialize the whole 1 GiB tmpfs arena in RAM and is forbidden
-	# here.
-	assert_eq "$(event_cnt "$seq" '^blkdiscard .*--zeroout')" 0 \
-		"clone_xfer: the clone-meta arena is never zeroed out"
-	assert_eq "$(event_cnt "$seq" '^blkdiscard .*/dev/loop[0-9]')" 1 \
-		"clone_xfer: exactly one arena discard"
-	assert_before "$seq" '^blkdiscard .*/dev/loop[0-9]' \
-		"^dmsetup create $metadm( |\$)" \
-		"clone_xfer: the arena range is discarded before the wrapper"
-	assert_before "$seq" "^dmsetup create $metadm( |\$)" \
-		"^dmsetup create $clonedm( |\$)" \
-		"clone_xfer: the metadata wrapper precedes the dm-clone"
+	# The group the gated stage built is kept as it is: lowering the level
+	# adds the dm-clone and its source connection to what the converge
+	# wants, and nothing of the group (cnagent.md CN18, CN19).
+	assert_absent "$seq" "^dmsetup create $grpdm( |\$)" \
+		"clone_xfer: the clone meta group is not built again"
+	# The dm-clone's metadata device is the clone meta group's device (CN18
+	# steps 2 and 3), which field 4 of its table names.
+	assert_eq "$(helper 2 "dm_backing $clonedm")" \
+		"$(helper 2 "dm_devno $grpdm")" \
+		"clone_xfer: the dm-clone's metadata device is its group's"
 	# The log-arithmetic proof that geometry and inversion are right: skip
-	# bits 32..63 coalesce into one 32 MiB range at 32 MiB.
-	assert_eq "$(event_cnt "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$")" 1 \
-		"clone_xfer: exactly one blkdiscard on the clone"
+	# bits 32..63 coalesce into one 32 MiB range at 32 MiB, the converge's
+	# one blkdiscard.
+	assert_eq "$(event_cnt "$seq" '^blkdiscard ')" 1 \
+		"clone_xfer: exactly one blkdiscard in the converge"
 	assert_eq "$(event_line "$seq" \
 		"^blkdiscard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$")" \
-		"$(event_line "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$")" \
-		"clone_xfer: the blkdiscard range"
+		"$(event_line "$seq" '^blkdiscard ')" \
+		"clone_xfer: the blkdiscard range, on the clone"
 	assert_before "$seq" "^dmsetup create $clonedm( |\$)" \
 		"^blkdiscard .*/dev/mapper/$clonedm\$" \
 		"clone_xfer: the chunk lands after the clone is created"
 	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
 		"clone_xfer: hydration is enabled after the chunk (CN18 step 5)"
-	# The wrapper's table IS the allocation record (CN18):
-	# a single linear over the arena loop device, whose offset and length are
-	# the units the allocator handed out.
-	assert_eq "$(helper 2 "dm_state $metadm")" live \
-		"clone_xfer: the clone-meta wrapper is live"
-	got=$(helper 2 "dm_table $metadm")
-	printf '%s\n' "$got" | grep -qE '^0 [0-9]+ linear [0-9]+:[0-9]+ [0-9]+$' ||
-		die "clone_xfer: the clone-meta wrapper is not a single linear: $got"
 	# CN18 step 3: every dnv dm-clone carries no_discard_passdown, without exception —
 	# it is what keeps the hydration blkdiscard above metadata-only instead of
 	# also erasing the destination.
@@ -5558,27 +5605,44 @@ case_clone_xfer() {
 	assert_eq "$(sha_range "$hv" "$dev" 1 31)" "$want" \
 		"clone_xfer read-through of MiB 31"
 
-	stage wipe "stage 6: CN2 loses its kernel state and rebuilds (architecture.md, Clone crash recovery)"
-	# The wipe-time sample (cnagent_integtest.md, Cases, clone_xfer and
-	# What a pass means): the recovery contract of architecture.md,
-	# Clone crash recovery, covers both a clone
-	# that was still hydrating when its CN lost its kernel state and one that
-	# had already finished, and which of the two this run wiped decides what
-	# the rebuilt clone has left to copy. It is recorded, never asserted — the
-	# race is the loop device's speed — and the sample is taken as late as
-	# possible, immediately before the kill. A missing or unparseable status is
-	# logged too rather than failing the suite; the one thing below that reads
-	# it, the destination's offset-0 discard, is then simply not required.
+	stage wipe "stage 6: CN2 loses its kernel state; the rebuilt clone keeps its copied regions (architecture.md, Clone metadata durability)"
+	# The clone's metadata is on its clone meta group, a side on DN2 that the
+	# wipe leaves, so the agent rebuilds the clone with no request from the
+	# suite: the startup reconcile, or the CN10 retry its pass registers when
+	# a step fails, connects the group's leg, builds the group device and
+	# creates the dm-clone over the metadata the group holds (cnagent.md CN2,
+	# CN18): the copy goes on from where it was.
+	#
+	# The wipe-time sample (cnagent_integtest.md, Cases, clone_xfer and What a
+	# pass means) is what the rebuilt clone is held to: whether it was still
+	# hydrating at the wipe or had finished is the loop device's race, so the
+	# sample is recorded, never asserted, and taken as late as possible,
+	# immediately before the kill. wipe_cn removes the dm-clone while its
+	# group is still connected, and the removal commits its metadata to the
+	# group, so the count the rebuilt dm-clone loads is at least the sample's.
+	# A missing or unparseable sample is logged rather than failing the
+	# suite; the two bounds that read it, here and in stage 7, are then not
+	# checked.
 	sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
 		--clone "$C_CLONE" --sample-only) || sample=""
 	hyd=""
+	tot=""
 	case "$sample" in
 	[0-9]*/[0-9]*)
 		hyd=${sample%%/*}
-		if [ "${sample%%/*}" -lt "${sample##*/}" ]; then
+		tot=${sample##*/}
+		if [ "$hyd" -lt "$tot" ]; then
 			log "clone_xfer: hydration was still running at wipe time ($sample)"
 		else
 			log "clone_xfer: hydration had already finished at wipe time ($sample)"
+		fi
+		# The chunk marks 32 regions at once (stage 5), so a sample of no
+		# more than that came before any region was copied: kept metadata and
+		# freshly formatted metadata then count and copy the same, and the
+		# two bounds below cannot tell them apart.
+		if [ "$hyd" -le 32 ]; then
+			log "clone_xfer: WARNING the wipe came before any region was" \
+				"copied ($sample): this run does not prove the metadata kept"
 		fi
 		;;
 	*)
@@ -5590,10 +5654,41 @@ case_clone_xfer() {
 	helper 2 "wipe_cn $(hex16 "${CNID[2]}")"
 	start_cn_agent 2
 	# The listener opens only after the reconcile returns, so the wait-up
-	# budget is the recovery's: a rebuilt clone re-connects, re-reads the
-	# destination bitmaps and re-applies the chunk before it answers.
+	# budget is the rebuild's: the legs and the source connect again, and
+	# the groups, the pool and the dm-clone are built and the chunk is
+	# applied again before it answers, unless a step fails and the pass
+	# leaves the rest to the CN10 retry (cnagent.md CN18).
 	out=$(cnctl 2 get-cn-size --wait 120)
 	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "clone_xfer cn2 size"
+	# The rebuilt clone's first sample, taken as soon as a dm-clone answers:
+	# a dm-clone over a freshly formatted metadata device would count only
+	# what the chunk marks, and climb from there. A sample that finds no
+	# dm-clone status is taken again, since the retry may build it; any
+	# other failure of the sample ends the case with the driver's words.
+	deadline=$((SECONDS + 30))
+	until post=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
+		--clone "$C_CLONE" --sample-only 2>"$sample_err"); do
+		grep -q "no dm-clone status" "$sample_err" ||
+			die "clone_xfer: the rebuilt clone's sample failed:" \
+				"$(cat "$sample_err")"
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: no dm-clone answered within 30 s of the" \
+				"rebuild: $(cat "$sample_err")"
+		sleep 0.5
+	done
+	case "$post" in
+	[0-9]*/[1-9]*) ;;
+	*) die "clone_xfer: no hydration sample after the rebuild: '$post'" ;;
+	esac
+	log "clone_xfer: the rebuilt clone's first sample is $post"
+	if [ -n "$hyd" ]; then
+		assert_eq "${post##*/}" "$tot" \
+			"clone_xfer: the rebuilt clone's region count"
+		[ "${post%%/*}" -ge "$hyd" ] ||
+			die "clone_xfer: the rebuilt clone counts ${post%%/*} regions" \
+				"hydrated, fewer than the $hyd it counted before the wipe:" \
+				"it did not load the metadata its group holds"
+	fi
 	# The restarted agent's probers start over, and cn2 is sp2's primary. The
 	# info read answers from the observation the poll saw clear, or a later
 	# one.
@@ -5601,69 +5696,27 @@ case_clone_xfer() {
 	out=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
 	assert_all_ok "$out" .cntlr_info "clone_xfer post-wipe cntlr"
 	# The reconcile mints its own trace id, so the freshly rotated log is the
-	# filter: it holds the recovery and nothing else.
+	# filter: it holds the rebuild and nothing else. The group's leg wrapper,
+	# then its device, then the dm-clone over it, then the source chunk
+	# again, before hydration is enabled (CN18 steps 2 to 5). dm-clone drops
+	# the discard of a region its metadata already counts as copied, so the
+	# chunk changes nothing here, and the agent applies it all the same.
 	seq=$(helper 2 cn_events)
-	# The destination-bitmap read is anchored on the LAST thin_dump, which must
-	# follow the dm-clone's create: the recovery reads the destination only
-	# once the clone exists (created with hydration off; architecture.md,
-	# Clone crash recovery), while the
-	# re-created pool's CN14 activation sweep dumps the same metadata through
-	# the same reserve → thin_dump → release helper before any clone does. A
-	# startup reconcile arms that sweep and skips it, so the fresh log holds
-	# one triplet; a first-match anchor would take the sweep's if it ever
-	# held two, and pass with no destination read at all.
-	dump=$(event_last "$seq" '^thin_dump ')
-	[ -n "$dump" ] || die "clone_xfer recovery: no thin_dump in the fresh log"
-	at=$(event_line "$seq" "^dmsetup create $clonedm( |\$)")
-	[ -n "$at" ] && [ "$at" -lt "$dump" ] ||
-		die "clone_xfer recovery: the last thin_dump (event $dump) does not" \
-			"follow the dm-clone's create (event ${at:-none}), so no destination" \
-			"bitmap was read for it"
-	# sed and tail both read to the end: a `head` here could close the pipe
-	# on printf, and under pipefail that SIGPIPE would end the run.
-	upto=$(printf '%s\n' "$seq" | sed -n "1,${dump}p")
-	from=$(printf '%s\n' "$seq" | tail -n "+$dump")
-	rsv=$(event_last "$upto" '^dmsetup message .* 0 reserve_metadata_snap$')
-	rel=$(event_last "$upto" '^dmsetup message .* 0 release_metadata_snap$')
-	[ -n "$rsv" ] && [ "${rel:-0}" -lt "$rsv" ] ||
-		die "clone_xfer recovery: the last thin_dump (event $dump) ran with no" \
-			"metadata snapshot reserved (reserve ${rsv:-none}, release ${rel:-none})"
-	assert_before "$from" '^thin_dump ' \
-		'^dmsetup message .* 0 release_metadata_snap$' \
-		"clone_xfer recovery: the snapshot is always released"
-	assert_before "$from" '^thin_dump ' \
-		"^dmsetup message $clonedm 0 enable_hydration\$" \
-		"clone_xfer recovery: the destination is read before hydration"
-	# Scoped to the clone device, because the rebuild re-allocates an arena
-	# unit and so emits its own earlier blkdiscard on the loop device.
+	assert_before "$seq" "^dmsetup create $legdm( |\$)" \
+		"^dmsetup create $grpdm( |\$)" \
+		"clone_xfer rebuild: the leg's wrapper before the group device"
+	assert_before "$seq" "^dmsetup create $grpdm( |\$)" \
+		"^dmsetup create $clonedm( |\$)" \
+		"clone_xfer rebuild: the group device before the dm-clone"
+	assert_before "$seq" "^dmsetup create $clonedm( |\$)" \
+		"^blkdiscard .*/dev/mapper/$clonedm\$" \
+		"clone_xfer rebuild: the chunk lands after the dm-clone is created"
 	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
-		"clone_xfer recovery: every bitmap lands before hydration"
-	# The destination's own contribution. Hydration copies regions upward from
-	# 0 and the pushed chunk skips 32..63, so a wipe-time sample above 32 means
-	# region 0 was already copied onto the destination: the dump maps it, and
-	# the recovery must discard from offset 0 on the clone — the re-applied
-	# source chunk never discards below 32 MiB, so it cannot stand in for it.
-	# At 32 or below, or with no sample, nothing needs to have been copied.
-	# Its length is left open: a clone still hydrating at the sample can go on
-	# copying until the wipe removes it, so the sample bounds the length only
-	# from below.
-	if [ -n "$hyd" ] && [ "$hyd" -gt 32 ]; then
-		assert_before "$from" '^thin_dump ' \
-			"^blkdiscard --offset 0 --length [0-9]+ /dev/mapper/$clonedm\$" \
-			"clone_xfer recovery: $hyd hydrated, the destination discards from 0"
-		assert_before "$from" \
-			"^blkdiscard --offset 0 --length [0-9]+ /dev/mapper/$clonedm\$" \
-			"^dmsetup message $clonedm 0 enable_hydration\$" \
-			"clone_xfer recovery: the destination bitmap lands before hydration"
-	else
-		log "clone_xfer: no region copied at the wipe (${sample:-no sample});" \
-			"the destination's offset-0 discard is not required"
-	fi
-	# The registry is the dm table set, so a rebuilt CN reconstructs exactly
-	# one allocation from an arena that was wiped along with the kernel state.
-	assert_eq "$(helper 2 "clone_meta_wrappers $(hex16 "${CNID[2]}")")" \
-		"$metadm" "clone_xfer recovery: exactly one kind-cb wrapper"
+		"clone_xfer rebuild: the chunk lands before hydration"
+	assert_eq "$(helper 2 "dm_backing $clonedm")" \
+		"$(helper 2 "dm_devno $grpdm")" \
+		"clone_xfer rebuild: the dm-clone's metadata device is its group's"
 	out=$(cn_syncup_cntlr 2 "$req2")
 	# The store was untouched by the wipe, so the reconcile rebuilt the
 	# applied set from the files — both pairs, decoded out of the persisted
@@ -5686,19 +5739,44 @@ case_clone_xfer() {
 	host_connect "$hv" 2 "$nqn"
 	host_wait_ana "$hv" "$nqn" 2 optimized 30
 
-	stage hydrate "stage 7: hydration runs to completion"
+	stage hydrate "stage 7: hydration runs to completion, copying no region copied before the wipe"
 	cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" --clone "$C_CLONE" \
 		--interval 0.5 --timeout 120 >/dev/null
+	# What the rebuilt dm-clone copied it wrote into its destination, the
+	# destination td's raid0, which the rebuild created after the wipe and
+	# nothing else has written since: the host has not written, and the
+	# chunk's discard does not pass down (CN18 step 3). So that device's write
+	# count is the rebuilt clone's copy. With its metadata kept it copies at
+	# most the regions, one block each, that the wipe-time sample had left;
+	# a dm-clone over freshly formatted metadata would copy the source's
+	# written half again. The verify stage's write through the same device is
+	# the count's positive control.
+	if [ -n "$hyd" ]; then
+		wsect=$(helper 2 "dm_wsect $raid0dm") ||
+			die "clone_xfer: the destination raid0's write count could not be read"
+		bound=$(((tot - hyd) * BLOCK_SIZE / 512))
+		log "clone_xfer: the rebuilt clone wrote $wsect sectors into its" \
+			"destination, at most $bound allowed"
+		[ "$wsect" -le "$bound" ] ||
+			die "clone_xfer: the rebuilt clone wrote $wsect sectors into its" \
+				"destination, more than the $((tot - hyd)) regions the" \
+				"wipe-time sample left to copy ($bound sectors): it copied" \
+				"regions again"
+	else
+		log "clone_xfer: no wipe-time sample, so what the rebuilt clone" \
+			"copied is not bounded"
+	fi
 
 	stage srcgone "stage 7b: the source loses its namespace; the clone's rows read one status on every channel"
 	# CN1's export of the transfer loses its namespace behind both agents'
 	# backs, the export and CN2's controller of it staying, and one rule
 	# judges the clone in a converge and in the agent's read (cnagent.md
-	# CN18, CN28): its three rows and its destination namespace's two read
-	# one status, with one epoch, on a converge, a fresh CheckCntlr round — a
-	# read made after that converge —, a GetCntlrInfo answering from the same
-	# observation or a later one, and a second converge. The source's row
-	# reads MISSING, which sets no health epoch, and the other four OK. What
+	# CN18, CN28): its two rows, its clone meta group's row and its
+	# destination namespace's two read one status, with one epoch, on a
+	# converge, a fresh CheckCntlr round — a read made after that converge —,
+	# a GetCntlrInfo answering from the same observation or a later one, and a
+	# second converge. The source's row reads MISSING, which sets no health
+	# epoch, and the other four OK. What
 	# serves is not the rows' to decide (CN16): the namespace keeps serving
 	# through the hydrated dm-clone, and the agent's read still proves the
 	# hydration the gateway's checks read.
@@ -5770,7 +5848,7 @@ case_clone_xfer() {
 	# follows what the walk read, the same thing subsys_shape read, and reads
 	# MISSING for each reading here: naming the missing namespace, for a
 	# subsystem entry the kernel keeps with no controller, and for no entry
-	# at all. The dm-clone's, its wrapper's and the namespace's rows read OK.
+	# at all. The dm-clone's, its group's and the namespace's rows read OK.
 	case "$shape" in
 	"1 1 0")
 		assert_map_status "$c1" clone_id_to_target "$C_CLONE" \
@@ -5789,7 +5867,7 @@ case_clone_xfer() {
 	esac
 	assert_map_ok "$c1" clone_id_to_dm_clone "$C_CLONE" \
 		"clone_xfer with no source namespace"
-	assert_map_ok "$c1" clone_id_to_meta "$C_CLONE" \
+	assert_map_ok "$c1" grp_id_to_md_raid "$C_MGRP" \
 		"clone_xfer with no source namespace"
 	assert_map_ok "$c1" ns_id_to_dm_linear "$S_NS" \
 		"clone_xfer with no source namespace"
@@ -5798,7 +5876,7 @@ case_clone_xfer() {
 	rows=$(printf '%s\n' \
 		".cntlr_info.clone_id_to_target[\"$(d16 "$C_CLONE")\"]" \
 		".cntlr_info.clone_id_to_dm_clone[\"$(d16 "$C_CLONE")\"]" \
-		".cntlr_info.clone_id_to_meta[\"$(d16 "$C_CLONE")\"]" \
+		".cntlr_info.grp_id_to_md_raid[\"$(d16 "$C_MGRP")\"]" \
 		".cntlr_info.ns_id_to_dm_linear[\"$(d16 "$S_NS")\"]" \
 		".cntlr_info.ns_id_to_namespace[\"$(d16 "$S_NS")\"]")
 	assert_rows_agree "clone_xfer with no source namespace" "$rows" \
@@ -5831,20 +5909,26 @@ case_clone_xfer() {
 		| .nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
-	# The source's disconnect runs off the sweep's locks (CN10), so a pass
-	# that still finds a controller of the :4: connection names it as a
-	# leftover (code 4), and the worker's re-send of the same request is clean
-	# once the disconnect has returned. It may find none: CN1's pass above
-	# unlinked the :4: subsystem from a port that keeps listening — it still
-	# carries sp1's subsystem — so cn2's controller lost its connection there,
-	# and its first reconnect, after the kernel's default 10 s reconnect delay,
-	# is refused with DNR and deletes the controller (cnagent_integtest.md,
-	# Lab facts), about 11 s
-	# after that unlink. A pass that lands later finds no controller, issues
-	# no disconnect and replies 0, and so does every pass after stage 7b
-	# dropped the whole export. Both endings are CN21's, and the stage takes
-	# whichever the timing gives it: --expect-code 4 names the usual one, and
-	# `|| true` keeps the printed reply of the other.
+	# The clone has left clone_list, so the sweep takes it down in layer
+	# order (cnagent.md CN18, CN21): the dm-clone (L3), its source connection
+	# (L5), then its clone meta group's device (L9) and its leg, whose
+	# connection is disconnected and whose wrapper goes (L10). Disconnects run
+	# off the sweep's locks (CN10), so a connection that still has a
+	# controller is a leftover (code 4) of the pass that sets its disconnect
+	# going, and the layers under L5 wait for a pass that finds the source's
+	# connection gone; the worker's re-send of the same request is clean once
+	# every disconnect has returned. The leg is connected, so the first pass
+	# always leaves something behind. It may find no source connection:
+	# CN1's pass above unlinked the :4: subsystem from a port that keeps
+	# listening — it still carries sp1's subsystem — so cn2's controller lost
+	# its connection there, and its first reconnect, after the kernel's
+	# default 10 s reconnect delay, is refused with DNR and deletes the
+	# controller (cnagent_integtest.md, Lab facts), about 11 s after that
+	# unlink; and every pass after stage 7b dropped the whole export finds
+	# none. That pass issues no disconnect of the source and goes on down to
+	# the group and its leg. Both are CN21's, and the stage takes whichever
+	# the timing gives it, telling them apart by whether the first reply names
+	# the source's connection.
 	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 || true)
 	[ -n "$out" ] ||
 		die "clone_xfer: the finalize printed no reply — the call never reached the agent"
@@ -5852,55 +5936,79 @@ case_clone_xfer() {
 	details=$(jq_of "$out" '.agent_reply.details // ""')
 	assert_map_ok "$out" td_id_to_raid0 "$S_TD" "clone_xfer finalized"
 	assert_map_ok "$out" ns_id_to_dm_linear "$S_NS" "clone_xfer finalized"
-	case "$code" in
-	4)
+	[ "$code" = 4 ] ||
+		die "clone_xfer: the finalize's first pass replied code $code" \
+			"($details), want 4: the clone meta group's leg was connected"
+	case "$details" in
+	*"$NQN_PREFIX:4:"*)
+		srcpass=1
+		log "clone_xfer: the finalize's first pass set the source's" \
+			"disconnect going"
+		# The layers under L5 wait for a pass that finds the source's
+		# connection gone, and report what they hold (CN21's stop rule): the
+		# first pass leaves the clone meta group's device in place.
 		case "$details" in
-		*"$NQN_PREFIX:4:"*) ;;
-		*) die "clone_xfer: the finalize leftover is not the source connection: $details" ;;
+		*"dm:$grpdm"*) ;;
+		*) die "clone_xfer: the finalize's first pass set the source's" \
+			"disconnect going and does not name the clone meta group's" \
+			"device as left: $details" ;;
 		esac
-		deadline=$((SECONDS + 30))
-		until out=$(cn_syncup_cntlr 2 "$req2" --expect-code 0 2>/dev/null); do
-			[ "$SECONDS" -lt "$deadline" ] ||
-				die "clone_xfer: the source connection outlived 30 s"
-			sleep 2
-		done
 		;;
-	0)
+	*"$legnqn"* | *"$legdm"* | *"$grpdm"*)
+		srcpass=0
 		log "clone_xfer: cn2's :4: controller was already gone — the export" \
 			"left CN1's port, by CN1's unlink or stage 7b's drop, and the" \
 			"reconnect was refused with DNR — so the finalize had no" \
-			"disconnect to issue"
+			"disconnect of the source to issue"
 		;;
-	*) die "clone_xfer: the finalize replied code $code ($details), want 0 or 4" ;;
+	*) die "clone_xfer: the finalize leftover is none of the clone's: $details" ;;
 	esac
+	deadline=$((SECONDS + 60))
+	until out=$(cn_syncup_cntlr 2 "$req2" --expect-code 0 2>/dev/null); do
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: the clone's connections outlived 60 s"
+		sleep 2
+	done
 	assert_eq "$(helper 2 "ctrl_of '$xnqn' '${IP[1]}'")" none \
 		"clone_xfer: cn2 holds no controller of the source connection"
+	assert_eq "$(helper 2 "ctrl_of '$legnqn' '${IP[2]}'")" none \
+		"clone_xfer: cn2 holds no controller of the clone meta group's leg"
 	seq=$(helper 2 "cn_events $TRACE")
 	assert_before "$seq" "^dmsetup reload $nsdev2 " "^dmsetup remove $clonedm\$" \
 		"clone_xfer: the ns-dev leaves the clone before the clone goes"
-	# CN18 teardown order: the dm-clone goes first,
-	# then its metadata wrapper — whose removal is what frees the arena units
-	# again — and only then the source connection, when there was one left to
-	# disconnect.
+	# The dm-clone goes before its clone meta group, which its removal writes
+	# its last metadata to (L3 before L9), the group device before its leg
+	# (L9 before L10), and the source connection, when one was left to
+	# disconnect, after the dm-clone (L5). A disconnect's record is written
+	# when the command returns, so the source's is not ordered against the
+	# group's removal here: the first reply's details above are what show
+	# the group waiting for it.
 	assert_before "$seq" "^dmsetup remove $clonedm\$" \
-		"^dmsetup remove $metadm\$" \
-		"clone_xfer: the metadata wrapper goes after the dm-clone"
-	if [ "$code" = 4 ]; then
-		assert_before "$seq" "^dmsetup remove $metadm\$" \
+		"^dmsetup remove $grpdm\$" \
+		"clone_xfer: the clone meta group's device goes after the dm-clone"
+	assert_before "$seq" "^dmsetup remove $grpdm\$" \
+		"^nvme disconnect .*$legnqn" \
+		"clone_xfer: the leg's connection goes after the group device"
+	assert_before "$seq" "^dmsetup remove $grpdm\$" \
+		"^dmsetup remove $legdm\$" \
+		"clone_xfer: the leg's wrapper goes after the group device"
+	if [ "$srcpass" = 1 ]; then
+		assert_before "$seq" "^dmsetup remove $clonedm\$" \
 			"^nvme disconnect .*$NQN_PREFIX:4:" \
-			"clone_xfer: the source connection dies last"
+			"clone_xfer: the source connection goes after the dm-clone"
 	else
 		assert_absent "$seq" "^nvme disconnect .*$NQN_PREFIX:4:" \
 			"clone_xfer: no disconnect of a source connection that was already gone"
 	fi
 	# CN16 rule 6: with the clone gone the ns-dev sits on the raid0 again.
 	assert_eq "$(helper 2 "dm_backing $nsdev2")" \
-		"$(helper 2 "dm_devno $(cn_dm_name c4 2 "$sp2" "$S_TD")")" \
+		"$(helper 2 "dm_devno $raid0dm")" \
 		"clone_xfer: the ns-dev is back on the raid0"
 	assert_eq "$(helper 2 "dm_state $clonedm")" missing "clone_xfer dm-clone gone"
-	got=$(helper 2 "clone_meta_wrappers $(hex16 "${CNID[2]}")")
-	[ -z "$got" ] ||
-		die "clone_xfer: the arena still holds kind-cb wrappers: $got"
+	assert_eq "$(helper 2 "dm_state $grpdm")" missing \
+		"clone_xfer: the clone meta group's device gone"
+	assert_eq "$(helper 2 "dm_state $legdm")" missing \
+		"clone_xfer: the clone meta group's leg wrapper gone"
 
 	stage verify "stage 9: the moved volume, read through the sp2 path"
 	drop_caches "$hv"
@@ -5915,7 +6023,18 @@ case_clone_xfer() {
 	assert_eq "$got" 00000000ffffffff "clone_xfer: blocks 32..63 never copied"
 	make_pattern "$hv" "$WORK/probe-c.bin" 1
 	want=$(sha_range "$hv" "$WORK/probe-c.bin" 1)
+	# The positive control of stage 7's bound: the probe's MiB, written
+	# through the ns-dev that sits on the destination raid0 again, moves that
+	# device's write count by at least as many sectors.
+	w0=$(helper 2 "dm_wsect $raid0dm") ||
+		die "clone_xfer: the destination raid0's write count could not be read"
 	write_range "$hv" "$WORK/probe-c.bin" "$dev" 1 40
+	w1=$(helper 2 "dm_wsect $raid0dm") ||
+		die "clone_xfer: the destination raid0's write count could not be read"
+	[ "$((w1 - w0))" -ge "$((1048576 / 512))" ] ||
+		die "clone_xfer: a 1 MiB write moved the destination raid0's write" \
+			"count by $((w1 - w0)) sectors, so stage 7's bound read a count" \
+			"that does not count writes"
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 1 40)" "$want" "clone_xfer write probe"
 
@@ -5930,22 +6049,17 @@ case_clone_xfer() {
 	dn_drop 1
 	dn_drop 2
 	# The closing base-state probe (cnagent_integtest.md, Cases, clone_xfer),
-	# case S's teardown probe run on both
-	# CNs: with its cntlr gone each CN must hold no dm device and no
-	# host-facing subsystem of its own, and the arena must be empty again —
-	# the kind-cb tables *are* the allocation registry (CN18), so
-	# reading them by name is what reports a leaked clone unit as an arena
-	# leak instead of as one more anonymous dm device. The four base resources
-	# (architecture.md, Controller node, common) must still probe OK afterwards,
-	# because a teardown that took
-	# the port, the tmpfs or the loop arena with it would satisfy every
-	# residue check above and still leave the CN unable to serve the next SP.
+	# case S's teardown probe run on both CNs: with its cntlr gone each CN
+	# must hold no dm device and no host-facing subsystem of its own, and the
+	# four base resources (architecture.md, Controller node, common) must
+	# still probe OK afterwards, because a teardown that took the port, the
+	# tmpfs or the loop arena with it would satisfy every residue check above
+	# and still leave the CN unable to serve the next SP. dn_drop 2 took the
+	# clone meta group's side with the pool's, and the residue checks cover
+	# both.
 	for idx in 1 2; do
 		got=$(helper "$idx" "cn_residue $(hex16 "${CNID[$idx]}")")
 		[ -z "$got" ] || die "clone_xfer: vm$idx still holds cn objects: $got"
-		got=$(helper "$idx" "clone_meta_wrappers $(hex16 "${CNID[$idx]}")")
-		[ -z "$got" ] ||
-			die "clone_xfer: vm$idx's arena still holds wrappers: $got"
 		out=$(cnctl "$idx" check-cn --fresh --revision "${CNSYNC[$idx]}")
 		assert_cn_info_ok "$out" "clone_xfer cn$idx base state after teardown"
 	done

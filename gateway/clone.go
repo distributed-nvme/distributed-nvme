@@ -76,10 +76,9 @@ func loadLiveClone(
 	return clone, nil
 }
 
-// cloneMetaUnitsOf is the metadata units a clone onto td takes in the metadata
-// area of a cntlr's CN (architecture.md, Metadata units):
-// common.CloneMetaUnits of the destination td's size and the SP's stored
-// data_block_size, the inputs the cn agent sizes the clone's run by. The
+// cloneMetaUnitsOf is the metadata units a clone onto td is charged on the CN
+// of each cntlr (architecture.md, Metadata units): common.CloneMetaUnits of
+// the destination td's size and the SP's stored data_block_size. The
 // stored bdev_conf is validated first and refused ABORTED (GW11): a zero block
 // size read back out of the store would size every clone at one unit.
 // CreateClone stores the count on the record, so every later charge and
@@ -253,19 +252,18 @@ func cloneCreateChecks(
 // destination td MUST be empty, freshly created and never written ([D3]): a
 // source chunk the cn agent discards marks its regions copied without a
 // copy, so each such region then reads the destination's own blocks, which
-// are zeros only in a thin device that was never written; and clone crash
-// recovery (architecture.md, Clone crash recovery) equates "mapped in the
-// destination thin pool" with "already copied". The CP cannot see whether a
-// td was written, so that stays a documented-unverifiable contract.
+// are zeros only in a thin device that was never written. The CP cannot see
+// whether a td was written, so that stays a documented-unverifiable
+// contract.
 //
 // The clone's metadata units (cloneMetaUnitsOf) are charged to the CN of
-// EVERY cntlr of the SP, disabled ones included, because a failover or a
-// cntlr replacement can make any of them the primary, which builds every
-// clone of the SP on its own CN (architecture.md, Metadata units). A CN short
-// of the room refuses the create RESOURCE_EXHAUSTED before anything is
-// written. The units are stored on the record, where every later charge and
-// release reads them. The charge changes only the CNs' used units, so it
-// rewrites each CN's record and capacity value and bumps no CnRev.
+// EVERY cntlr of the SP, disabled ones included (architecture.md, Metadata
+// units), though no CN takes a unit for the clone, which keeps its dm-clone
+// metadata on its clone meta group. A CN short of the room refuses the
+// create RESOURCE_EXHAUSTED before anything is written. The units are stored
+// on the record, where every later charge and release reads them. The charge
+// changes only the CNs' used units, so it rewrites each CN's record and
+// capacity value and bumps no CnRev.
 //
 // The clone meta group's sides are charged to their DNs through the DN
 // ledger, each DN written once with its pointer and its extents and bumped

@@ -13,12 +13,11 @@ import (
 
 // This file is architecture.md, Spare legs (gateway.md, Spare legs): the three
 // RPCs that give an md-raid1 group its standby capacity. A spare leg is a Leg
-// in the group's spare_leg_list. On a slice's group every cntlr connects to
-// its side and health-checks it (architecture.md, Primary cntlr, step 1), but
-// md never sees the leg until SwitchSpareLeg moves it into leg_list, so a
-// spare is pre-connected capacity and nothing more. On a clone meta group the
-// sp worker drives a spare's side as any side, and no cntlr connects to it
-// (architecture.md, Terminology and object model).
+// in the group's spare_leg_list. Every cntlr connects to its side and
+// health-checks it (architecture.md, Primary cntlr, step 1), on a slice's
+// group and on a clone meta group alike, but md never sees the leg until
+// SwitchSpareLeg moves it into leg_list, so a spare is pre-connected capacity
+// and nothing more.
 //
 // All three requests address a group by grp_id and carry NO slice id, so each
 // handler must first find what holds the group: a slice, or, when no slice
@@ -430,8 +429,8 @@ func (s *Server) DeleteSpareLeg(
 // SwitchSpareLeg is the SwitchSpareLeg of architecture.md, Spare legs, the
 // only way a spare becomes active: the spare takes the target's POSITION in
 // leg_list and the target is parked in spare_leg_list, never repaired again.
-// On a slice's group that position is the md member slot the array is
-// missing, and the parked leg stays connected and probed.
+// That position is the md member slot the array is missing, and the parked
+// leg stays connected and probed.
 //
 // The swap is model.SwitchSpareLeg, the same op the sp-worker's leg repair
 // (dnv-worker.md AR8) calls (gateway.md, Scope and

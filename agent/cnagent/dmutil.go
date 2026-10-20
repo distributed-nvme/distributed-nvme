@@ -205,11 +205,25 @@ type concatTarget struct {
 	offsetSectors uint64
 }
 
+// grpDevNo is the number a group's device is named by in a table over it, a
+// pool concat's (buildConcat) or a dm-clone's (ensureDmClone): an md group's
+// array's from /sys/block, of the array the pass's md walk matches by the
+// group's legs (mdDevNo), so the table and the group's row read one array; a
+// RedundNone group's dm-linear's from dmsetup info, with the pass's reading
+// (dmDevNo).
+func (s *CnAgentServer) grpDevNo(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+) (string, error) {
+	if gp.raid1 {
+		return s.mdDevNo(ctx, plan, gp)
+	}
+	return s.dmDevNo(ctx, plan.rd, gp.dmName)
+}
+
 // buildConcat is a concat's table and its targets, each group's device
-// named by its number: an md group's array's from /sys/block, of the array
-// the pass's md walk matches by the group's legs (mdDevNo), so the concat
-// rows and the group's row read one array; a RedundNone group's dm-linear's
-// from dmsetup info, with the pass's reading (dmDevNo).
+// named by its number (grpDevNo).
 func (s *CnAgentServer) buildConcat(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -223,13 +237,7 @@ func (s *CnAgentServer) buildConcat(
 			return "", nil, fmt.Errorf("concat segment %s has size 0",
 				seg.grp.resName)
 		}
-		var devNo string
-		var err error
-		if seg.grp.raid1 {
-			devNo, err = s.mdDevNo(ctx, plan, seg.grp)
-		} else {
-			devNo, err = s.dmDevNo(ctx, plan.rd, seg.grp.dmName)
-		}
+		devNo, err := s.grpDevNo(ctx, plan, seg.grp)
 		if err != nil {
 			return "", nil, err
 		}

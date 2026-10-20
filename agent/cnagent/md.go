@@ -1135,12 +1135,17 @@ func (s *CnAgentServer) assembleGroup(
 		// ([D15]); and ids are never reused — so a superblock-free leg can
 		// only be a freshly provisioned side — short of a read that failed
 		// after the path's failfast, which mdadm answers the same way
-		// (HasSuperblock). Only a meta group's members are zeroed whole; a
-		// data group's are zeroed no further than their first data block,
-		// and the rest may differ between them, which a clean create does not
-		// resync: nothing dnv stacks on the array reads such a block before
-		// writing it through the array, because dm-thin writes a block whole
-		// before anything reads it ([D15]). But that argument covers the legs
+		// (HasSuperblock). Only a slice's meta group's members are zeroed
+		// whole; a data group's and a clone meta group's are zeroed no
+		// further than their first data block, and the rest may differ
+		// between them, which a clean create does not resync: nothing dnv
+		// stacks on a data group's array reads such a block before writing
+		// it through the array, because dm-thin writes a block whole before
+		// anything reads it ([D15]); and the dm-clone over a clone meta
+		// group's array finds the zeroed first data block, where its
+		// superblock goes, formats its metadata there and reads only
+		// metadata blocks it has written through the array (CN18). But that
+		// argument covers the legs
 		// actually examined. An unavailable member may be the one carrying
 		// the group's data (its DN rebooting, its path mid-ANA-move), and
 		// creating over the survivors would resync the data away. cnagent.md
