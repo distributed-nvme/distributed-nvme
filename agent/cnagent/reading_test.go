@@ -236,7 +236,7 @@ func TestDmDevNoSameOnBothChannels(t *testing.T) {
 }
 
 // TestBlockDevNoReadsTheSysBlockNumber pins blockDevNo, where the number of
-// an md array, an NVMe multipath head and a loop device comes from: its
+// an md array and an NVMe multipath head comes from: its
 // /sys/block/<kname>/dev, one read. A device whose file is not there and a
 // value that is not a device number are errors, and so is a read that failed
 // or was cut off: never an absence, never a number.
@@ -791,9 +791,9 @@ func TestPartialDmListingStillAnswers(t *testing.T) {
 // listing that holds no device: "No devices found" with exit status 0, which
 // every dmsetup form prints on a node with no dm device. It is an empty
 // node, not a listing that did not answer: a cntlr synced at
-// SP_LEVEL_DISABLE from its first request builds nothing, the base state's
-// loop device is no dm device, and the verdict of its read, which its check
-// round and its info read answer, is clean, naming no dmsetup listing.
+// SP_LEVEL_DISABLE from its first request builds nothing, and the verdict of
+// its read, which its check round and its info read answer, is clean,
+// naming no dmsetup listing.
 func TestEmptyNodeListingIsAnAnswer(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
@@ -967,7 +967,7 @@ func TestUnansweredMdListingErrsTheGroupRows(t *testing.T) {
 // the dm-clone's attrs, its clone meta group's device and, in the verdict,
 // the dm-clone's table for the source it maps, all from the reading. It reads
 // no device on its own with `dmsetup info` or `dmsetup table`, runs no
-// `dmsetup ls` and no `losetup`, and its status reads stay per device: the
+// `dmsetup ls`, and its status reads stay per device: the
 // pool's, and the dm-clone's for its rows and once more for the namespace it
 // backs. Every row reads OK and the verdict is clean.
 func TestACntlrReadTakesTheCloneFromTheReading(t *testing.T) {
@@ -987,7 +987,6 @@ func TestACntlrReadTakesTheCloneFromTheReading(t *testing.T) {
 		for call, want := range map[string]int{
 			"cmd dmsetup status --noflush " + poolName(srv): 1,
 			"cmd dmsetup status " + clone:                   2,
-			"cmd losetup":                                   0,
 			"cmd dmsetup status ":                           3,
 		} {
 			if got := callCnt(node, call); got != want {

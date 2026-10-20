@@ -619,16 +619,13 @@ func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
 }
 
 // cnObservation applies the HL1 table to one CheckCn/SyncupCn reply. The
-// ERROR sources are port_info, tmpfs_info, tmp_file_info and loop_dev_info.
+// ERROR source is port_info, the one row a CnInfo carries.
 func cnObservation(code uint32, info *pb.CnInfo) (healthObs, string) {
 	if !accepted(code) {
 		return healthNone, ""
 	}
 	if resName, bad := firstErrorRow(
 		row{"port_info", info.GetPortInfo()},
-		row{"tmpfs_info", info.GetTmpfsInfo()},
-		row{"tmp_file_info", info.GetTmpFileInfo()},
-		row{"loop_dev_info", info.GetLoopDevInfo()},
 	); bad {
 		return healthErrorRow, resName
 	}
@@ -656,12 +653,7 @@ func markCnUnknown(info *pb.CnInfo) {
 	if info == nil {
 		return
 	}
-	markUnknown(
-		info.GetPortInfo(),
-		info.GetTmpfsInfo(),
-		info.GetTmpFileInfo(),
-		info.GetLoopDevInfo(),
-	)
+	markUnknown(info.GetPortInfo())
 }
 
 // ---------------------------------------------------------------------------
@@ -830,7 +822,6 @@ func cntlrHealthMaps(info *pb.CntlrInfo) []cntlrRowMap {
 		{"xfer_id_to_namespace", info.GetXferIdToNamespace()},
 		{"clone_id_to_target", info.GetCloneIdToTarget()},
 		{"clone_id_to_dm_clone", info.GetCloneIdToDmClone()},
-		{"clone_id_to_meta", info.GetCloneIdToMeta()},
 	}
 	for _, tdId := range sortedKeys(info.GetTdIdToThinInfo()) {
 		maps = append(maps, cntlrRowMap{
@@ -990,7 +981,7 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 	case "xfer_id_to_dm_linear", "xfer_id_to_subsystem",
 		"xfer_id_to_namespace":
 		ids = s.xfer
-	case "clone_id_to_target", "clone_id_to_dm_clone", "clone_id_to_meta":
+	case "clone_id_to_target", "clone_id_to_dm_clone":
 		ids = s.clone
 	default:
 		return 0, false
@@ -1177,7 +1168,6 @@ func markCntlrUnknown(info *pb.CntlrInfo) {
 		info.GetXferIdToNamespace(),
 		info.GetCloneIdToTarget(),
 		info.GetCloneIdToDmClone(),
-		info.GetCloneIdToMeta(),
 		info.GetSideIdToPath(),
 	}
 	for _, rows := range maps {

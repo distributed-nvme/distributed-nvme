@@ -396,7 +396,7 @@ func TestACutOffConvergeStoresNothing(t *testing.T) {
 		ctx, cancel := context.WithCancel(traced("cut"))
 		defer cancel()
 		node.mu.Lock()
-		node.cancelCmd["cmd findmnt"] = cancel
+		node.cancelCmd[portProbeLine] = cancel
 		node.mu.Unlock()
 		if _, err := srv.SyncupCn(ctx, cnReq(3, true)); err != nil {
 			t.Fatalf("SyncupCn: %v", err)
@@ -483,7 +483,7 @@ func TestARoundBesideAConvergeAnswersFromMemory(t *testing.T) {
 						testCluster, testCn, testSp, testCntlr)))
 				return 2
 			}},
-		{"a SyncupCn", func(*CnAgentServer) string { return "cmd findmnt" },
+		{"a SyncupCn", func(*CnAgentServer) string { return portProbeLine },
 			func(t *testing.T, srv *CnAgentServer) uint64 {
 				if _, err := srv.SyncupCn(traced("syncup"),
 					cnReq(3, true)); err != nil {
@@ -660,13 +660,13 @@ func TestARoundStartsOneRead(t *testing.T) {
 		syncupBoth(t, srv, reqOpts{revision: 2})
 		syncup := latestCnObs(t, srv)
 		srv.roundReads = true
-		// The first of the probe's two findmnt runs, once per read.
-		const findmnt = "cmd findmnt --noheadings --output FSTYPE --target"
-		release := openGate(t, node, findmnt)
+		// The port probe's first read, once per read.
+		probe := portProbeLine
+		release := openGate(t, node, probe)
 		node.Reset()
 
 		roundCn(srv, "round-1", 2)
-		waitFor(t, func() bool { return node.hasCall(findmnt) })
+		waitFor(t, func() bool { return node.hasCall(probe) })
 		roundCn(srv, "round-2", 2)
 		cnInfoNow(t, srv)
 		if !cnReadRuns(t, srv) {
@@ -674,8 +674,8 @@ func TestARoundStartsOneRead(t *testing.T) {
 		}
 		release()
 		joinReads(t, srv)
-		if got := len(node.callsMatching(findmnt)); got != 1 {
-			t.Errorf("%d findmnt runs for two rounds beside one read, "+
+		if got := len(node.callsMatching(probe)); got != 1 {
+			t.Errorf("%d port probes for two rounds beside one read, "+
 				"want 1", got)
 		}
 		read := latestCnObs(t, srv)
@@ -763,7 +763,7 @@ func TestACancelledReadStoresNothing(t *testing.T) {
 				st.obs.CancelReadLocked()
 			},
 			cntlrReadRuns},
-		{"a cn", "cmd findmnt",
+		{"a cn", portProbeLine,
 			func(srv *CnAgentServer, traceId string) {
 				roundCn(srv, traceId, 2)
 			},
@@ -847,7 +847,7 @@ func TestACutOffPassMovesNoEpoch(t *testing.T) {
 				return latestCntlrObs(t, srv).Info
 			}},
 		{"a cn read",
-			func(*CnAgentServer) string { return "cmd findmnt" },
+			func(*CnAgentServer) string { return portProbeLine },
 			func(t *testing.T, ctx context.Context, srv *CnAgentServer) {
 				srv.refreshCn(ctx, cnK, fixtureCnState(t, srv))
 			},
@@ -872,16 +872,16 @@ func TestACutOffPassMovesNoEpoch(t *testing.T) {
 				return latestCntlrObs(t, srv).Info
 			}},
 		{"a SyncupCn",
-			func(*CnAgentServer) string { return "cmd findmnt" },
+			func(*CnAgentServer) string { return portProbeLine },
 			func(t *testing.T, ctx context.Context, srv *CnAgentServer) {
 				reply, err := srv.SyncupCn(ctx, cnReq(3, true))
 				if err != nil {
 					t.Fatalf("SyncupCn: %v", err)
 				}
-				if got := reply.GetCnInfo().GetTmpfsInfo().GetStatus(); got !=
+				if got := reply.GetCnInfo().GetPortInfo().GetStatus(); got !=
 					pb.ResStatus_RES_STATUS_ERROR {
 					t.Fatalf("fixture is wrong: the cut-off converge's "+
-						"tmpfs row is %v", got)
+						"port row is %v", got)
 				}
 			},
 			func(t *testing.T, srv *CnAgentServer) proto.Message {
@@ -935,18 +935,17 @@ func TestANodeSyncupCancelsEveryRead(t *testing.T) {
 	syncupBoth(t, srv, reqOpts{revision: 2})
 	cntlrBefore := latestCntlrObs(t, srv)
 	srv.roundReads = true
-	const findmnt = "cmd findmnt"
 	releaseCntlr := openGate(t, node, dmTableListLine)
-	releaseCn := openGate(t, node, findmnt)
+	releaseCn := openGate(t, node, portProbeLine)
 	node.Reset()
 	roundCn(srv, "cn-round", 2)
 	roundCntlr(srv, "cntlr-round", 2)
 	waitFor(t, func() bool {
-		return node.hasCall(findmnt) && node.hasCall(dmTableListLine)
+		return node.hasCall(portProbeLine) && node.hasCall(dmTableListLine)
 	})
-	// The syncup's own converge runs findmnt too; only the read stays
+	// The syncup's own converge probes the port too; only the read stays
 	// parked in it.
-	dropGate(node, findmnt)
+	dropGate(node, portProbeLine)
 
 	within(t, "a SyncupCn behind two reads", func() {
 		reply, err := srv.SyncupCn(traced("syncup"), cnReq(3, true))
@@ -1057,7 +1056,7 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 		{"SyncupCntlr conf", confCntlr, common.ReplyCodeInvalidConf,
 			[]string{dmTableListLine}, cntlrRounds, cntlrStored},
 		{"SyncupCn", staleCn, common.ReplyCodeStaleRevision,
-			[]string{dmTableListLine, "cmd findmnt"},
+			[]string{dmTableListLine, portProbeLine},
 			map[string]func(*CnAgentServer, string){
 				"cntlr-round": cntlrRound,
 				"cn-round":    cnRound,
@@ -1188,7 +1187,6 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 func TestAReSentSyncupCnLetsCntlrReadsEnd(t *testing.T) {
 	cntlrK := cntlrKey(testCluster, testCn, testSp, testCntlr)
 	cnK := cnKey(testCluster, testCn)
-	const findmnt = "cmd findmnt"
 	// leftover builds a CN whose node holds a stray ns-dev of an sp no cntlr
 	// names while its removal keeps failing, so every SyncupCn at the held
 	// revision answers a leftover, and returns the re-send.
@@ -1241,15 +1239,16 @@ func TestAReSentSyncupCnLetsCntlrReadsEnd(t *testing.T) {
 			syncupId := fmt.Sprintf("syncup-%d", i)
 			node.Reset()
 			releaseCntlr := openGate(t, node, dmTableListLine)
-			releaseCn := openGate(t, node, findmnt)
+			releaseCn := openGate(t, node, portProbeLine)
 			roundCn(srv, fmt.Sprintf("cn-round-%d", i), 2)
 			roundCntlr(srv, cntlrId, 2)
 			waitFor(t, func() bool {
-				return node.hasCall(findmnt) && node.hasCall(dmTableListLine)
+				return node.hasCall(portProbeLine) &&
+					node.hasCall(dmTableListLine)
 			})
-			// The re-send's own converge runs findmnt too; only the CN's
-			// read stays parked in it.
-			dropGate(node, findmnt)
+			// The re-send's own converge probes the port too; only the
+			// CN's read stays parked in it.
+			dropGate(node, portProbeLine)
 			done := make(chan *pb.SyncupCnReply, 1)
 			go func() { done <- resend(syncupId) }()
 			waitFor(t, func() bool { return !cnReadRuns(t, srv) })
@@ -1296,10 +1295,10 @@ func TestAReSentSyncupCnLetsCntlrReadsEnd(t *testing.T) {
 	t.Run("a round meanwhile starts a read", func(t *testing.T) {
 		srv, node, resend := leftover(t)
 		node.Reset()
-		release := openGate(t, node, findmnt)
+		release := openGate(t, node, portProbeLine)
 		done := make(chan *pb.SyncupCnReply, 1)
 		go func() { done <- resend("syncup-1") }()
-		waitFor(t, func() bool { return node.hasCall(findmnt) })
+		waitFor(t, func() bool { return node.hasCall(portProbeLine) })
 		roundCntlr(srv, "cntlr-round", 2)
 		if !cntlrReadRuns(t, srv) {
 			t.Fatal("a cntlr round under the re-send started no read")

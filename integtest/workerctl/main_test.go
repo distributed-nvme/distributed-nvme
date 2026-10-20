@@ -574,21 +574,20 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
-// the others, for computed values). It prints eighteen keys, and the suites
-// read fifteen of them at preflight and stop there when one is missing.
+// the others, for computed values). It prints sixteen keys, and the suites
+// read thirteen of them at preflight and stop there when one is missing.
 // Every suite that starts an etcd — the worker, gateway, cdc and e2e suites —
 // launches it with EtcdMaxTxnOps and EtcdMaxRequestBytes. The e2e suite
 // cross-checks MaxAllocLegPerGrp. The gateway suite creates its stage-13
 // clone at MaxSliceCntPerSp, checks the health intervals a new cluster stores
-// against DefaultHealthCheckInterval, fills the metadata areas in its ceiling
-// case to CnCloneMetaUnitCnt and DnCloneMetaUnitCnt in units of
-// CnCloneMetaUnit, which it requires DnCloneMetaUnit to equal, and checks the
-// counters the id step moves against IdStepStride and ThinIdStepStride. The
+// against DefaultHealthCheckInterval, fills a DN's metadata area in its
+// ceiling case to DnCloneMetaUnitCnt in units of DnCloneMetaUnit, and checks
+// the counters the id step moves against IdStepStride and ThinIdStepStride. The
 // worker and e2e suites read DefaultHealthCheckInterval,
 // DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases.
 // The cdc suite's flood case fills the pending cap, CdcMaxPendingConnCnt, and
 // waits by the pre-Connect deadline, DefaultCdcPendingTmoMs. One of those
-// fifteen dropped or renamed here would otherwise surface only when a suite
+// thirteen dropped or renamed here would otherwise surface only when a suite
 // is run, at its preflight. No suite reads the other three, MaxDelGrpPerTxn,
 // MaxSpareLegPerGrp and MaxDelBmPerTxn; they are pinned as well, because a
 // case may size itself against them.
@@ -625,9 +624,7 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
 
-		"CnCloneMetaUnitCnt": common.CnCloneMetaUnitCnt,
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
-		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
 
 		"IdStepStride":     common.IdStepStride,
@@ -743,10 +740,10 @@ func captureStdout(
 }
 
 // TestMetaUnitsEmitsWhatTheSuitesRead pins `meta-units`, through which the
-// suites read the units a copy costs (architecture.md, Metadata units)
-// instead of re-deriving the formula: the two agents' own examples, a copy
-// under one block, and every copy the gateway suite's ceiling case, its smoke
-// case and the worker suite's drain case size by it. --block-size defaults to
+// suites read the units a migration costs (architecture.md, Metadata units)
+// instead of re-deriving the formula: the dn agent's own example, a copy
+// under one block, and every migration the gateway suite's ceiling case and
+// its smoke case size by it. --block-size defaults to
 // common.DefaultDmPoolDataBlockSize, and a zero for either input is refused.
 func TestMetaUnitsEmitsWhatTheSuitesRead(t *testing.T) {
 	const tib = uint64(1) << 40
@@ -757,39 +754,21 @@ func TestMetaUnitsEmitsWhatTheSuitesRead(t *testing.T) {
 		block uint64
 		units uint64
 	}{
-		{"the cn agent's example",
-			[]string{"--bytes", "1099511627776", "--block-size", "65536"},
-			tib, 64 << 10, 5},
 		{"the dn agent's example",
 			[]string{"--bytes", "1099511627776", "--block-size", "1048576"},
 			tib, 1 << 20, 2},
 		{"a copy under one block",
 			[]string{"--bytes", "65536", "--block-size", "1048576"},
 			64 << 10, 1 << 20, 1},
-		{"the ceiling case's clone too big for any CN",
-			[]string{"--bytes", "70368744177664", "--block-size", "65536"},
-			70368744177664, 64 << 10, 257},
 		{"the ceiling case's migration that fills a DN",
 			[]string{"--bytes", "12919261626368", "--block-size", "65536"},
 			12919261626368, 64 << 10, 48},
-		{"the ceiling case's clone of a quarter of a CN",
-			[]string{"--bytes", "17317308137472", "--block-size", "65536"},
-			17317308137472, 64 << 10, 64},
-		{"the ceiling case's two-unit clone",
-			[]string{"--bytes", "274877906944", "--block-size", "65536"},
-			274877906944, 64 << 10, 2},
 		{"the ceiling case's probe migration of one extent",
 			[]string{"--bytes", "1073741824", "--block-size", "65536"},
 			1 << 30, 64 << 10, 2},
-		{"the smoke case's clone",
-			[]string{"--bytes", "67108864", "--block-size", "1048576"},
-			64 << 20, 1 << 20, 2},
 		{"the smoke case's migration of two extents",
 			[]string{"--bytes", "2147483648", "--block-size", "1048576"},
 			2 << 30, 1 << 20, 2},
-		{"the worker suite's drain-case clone",
-			[]string{"--bytes", "10737418240", "--block-size", "1048576"},
-			10 << 30, 1 << 20, 2},
 		{"the default block size",
 			[]string{"--bytes", "1099511627776"},
 			tib, common.DefaultDmPoolDataBlockSize, 2},

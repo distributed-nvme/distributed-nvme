@@ -35,8 +35,8 @@ import (
 // its number for the helpers the converge and the probe share: from the
 // pass's reading when the pass took one, else from one dmsetup run of that
 // device. A dm device's number comes from dmsetup info (dmDevNo), and an md
-// array's, an NVMe multipath head's or a loop device's from
-// /sys/block/<kname>/dev (blockDevNo, mdDevNo); no number comes from lsblk.
+// array's or an NVMe multipath head's from /sys/block/<kname>/dev
+// (blockDevNo, mdDevNo); no number comes from lsblk.
 // ---------------------------------------------------------------------------
 
 // cnReading is what a cntlr's read takes of the node first (CN28): one
@@ -273,7 +273,7 @@ func errDmNotThere(name string) error {
 var blockDevNoPattern = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
 
 // blockDevNo is the number of the block device the kernel names kname — an
-// md array's node, an NVMe multipath head, a loop device — read from
+// md array's node or an NVMe multipath head — read from
 // /sys/block/<kname>/dev under the soft timeout (SH15). A read that failed
 // is its error and never an absence; a device whose file is not there, or a
 // value that is not a device number, is an error too.

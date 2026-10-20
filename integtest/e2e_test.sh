@@ -94,8 +94,7 @@
 #     linear holds it open too) and dn_cleanup grinds past CLEANUP_TIMEOUT.
 #     An unmasked DN VM collects dozens of stray arrays in a default-shape run.
 #  8. NEVER run this suite while any other dnv suite runs anywhere in the lab
-#     (E2E9). It occupies all ten guests, and its CN agents mount their tmpfs
-#     at /tmp/dnv-tmpfs — the very path cnagent_test.sh owns.
+#     (E2E9). It occupies all ten guests.
 #  9. NEVER edit this file while it is running: bash re-seeks the script by
 #     byte offset, so a length-changing edit kills the run with a bogus syntax
 #     error at an unrelated line.
@@ -192,15 +191,6 @@ WORK=/var/tmp/dnv-e2e
 HELPER=/var/tmp/dnv-e2e-helper.sh
 
 NVMET=/sys/kernel/config/nvmet
-
-# common.DefaultTmpfsPrefix (common/constants.go). A cn agent's tmpfs is
-# NOT derived from --local-store: NewNameFmt sets tmpfsPrefix unconditionally
-# and CnTmpfsPath returns <prefix>/<cluster_id>-<cn_id>, both %016x
-# (NewNameFmt and CnTmpfsPath (common/name_fmt.go)). No flag moves it. So CN
-# state lives BOTH under $WORK and here —
-# which is why the space guard and cleanup must both look here, and why rule 8
-# above forbids running while the cn suite (same path) runs.
-TMPFS_DIR=/tmp/dnv-tmpfs
 
 # ---------------------------------------------------------------------------
 # Constants: ports (E2E9; e2e_integtest.md, Topology and parameters)
@@ -1761,7 +1751,7 @@ derive_params() {
 	# RUN_SLACK_BYTES is everything else on the ten guests: the cp's etcd and
 	# four daemon logs, 183 agent logs and the agents' local stores, each dn
 	# agent's own on-disk metadata in its backing file, the shipped binaries
-	# and pattern, the host pattern files, the CN tmpfs arenas, the sides a
+	# and pattern, the host pattern files, the sides a
 	# case adds after the create (a grow, a spare leg, a migration
 	# destination, a clone's clone meta group, each zeroed as any side of its
 	# group), and every byte written into a data region: a host's writes, for
@@ -2695,7 +2685,6 @@ set -uo pipefail
 
 WORK="$WORK"
 NVMET="$NVMET"
-TMPFS_DIR="$TMPFS_DIR"
 NQN_PREFIX="$NQN_PREFIX"
 NQN_IT="$NQN_IT"
 # common.DmPrefix (common/constants.go): every dm device either agent
@@ -2921,11 +2910,7 @@ dir_bytes() { # <dir>
 	printf '%s' "$n"
 }
 
-# space reports this guest's three numbers (E2E5) as key=value lines. tmpfs is
-# reported everywhere and is 0 where no cn agent runs: $TMPFS_DIR is NOT under
-# $WORK (DefaultTmpfsPrefix (common/constants.go) fixes it at /tmp/dnv-tmpfs
-# and no flag moves it), so `rm -rf $WORK` never touches it and a guard that
-# only looked at $WORK would miss a CN's whole clone-metadata arena.
+# space reports this guest's two numbers (E2E5) as key=value lines.
 space() {
 	local free
 	free=$(df -Pk /var/tmp 2>/dev/null | awk 'NR==2{print $4}')
@@ -2934,7 +2919,6 @@ space() {
 	*) free=$((free * 1024)) ;;
 	esac
 	printf 'work=%s\n' "$(dir_bytes "$WORK")"
-	printf 'tmpfs=%s\n' "$(dir_bytes "$TMPFS_DIR")"
 	printf 'free=%s\n' "$free"
 	return 0
 }
@@ -2990,12 +2974,12 @@ HELPER_COMMON_EOF
 #      on any guest — resolve_jq builds one for the DRIVER — and
 #      disconnect_test_subsystems (cdc_test.sh) already does it from sysfs.
 #   b. dm_kind_names takes no node id. cnagent_test.sh passes one because both
-#      roles share a VM there; the kind now carries the role letter (c0…cb,
-#      d0…d5) so the roles no longer overlap, but the node id still scopes a
-#      pass to one of the two agents there. Here a DN VM runs only dn agents
-#      and a CN VM only the cn agent, so filtering by kind alone is both
-#      sufficient and what catches an instance whose ids the driver no longer
-#      knows.
+#      roles share a VM there; the kind carries the role letter (c0…ca,
+#      d0…d5), so the roles never overlap, but the node id scopes a pass to
+#      one of the two agents there. Here a DN VM runs only dn agents and a
+#      CN VM only the cn agent, so filtering by kind alone is both
+#      sufficient and what catches an instance whose ids the driver does not
+#      know.
 #   c. the nvmet port teardown goes through port_drop, which refuses a port
 #      outside this suite's service-id band; the cn and dn suites remove
 #      ports/1 unguarded, though in the same order (ana_groups 3 and 2
@@ -3077,7 +3061,7 @@ dm_names() {
 
 # dm_kind_names <kind>: the dm devices of one kind. A name is
 # dnv-<cluster>-<node>-<kind>-…, so the kind is field 4 under -F-; a kind is a
-# role letter plus a hex digit (c0…cb on a CN, d0…d5 on a DN).
+# role letter plus a hex digit (c0…ca on a CN, d0…d5 on a DN).
 dm_kind_names() { # <kind, e.g. c9 or d4>
 	dm_names | awk -F- -v k="$1" '$4 == k'
 	return 0
@@ -4037,23 +4021,6 @@ HELPER_DN_EOF
 helper_cn_source() {
 	cat <<'HELPER_CN_EOF'
 
-# tmpfs_teardown releases the cn agent's clone-metadata arena: the loop
-# devices over its tmpfs files first, then the mounts, then the directory.
-# Copied from tmpfs_teardown (integtest/cnagent_test.sh).
-tmpfs_teardown() {
-	local dev mnt
-	for dev in $(losetup -a 2>/dev/null | grep -F "$TMPFS_DIR/" | cut -d: -f1); do
-		timeout 15 losetup -d "$dev" >/dev/null 2>&1
-	done
-	for mnt in "$TMPFS_DIR"/*; do
-		[ -d "$mnt" ] || continue
-		timeout 15 umount "$mnt" >/dev/null 2>&1
-		rmdir "$mnt" 2>/dev/null
-	done
-	rmdir "$TMPFS_DIR" 2>/dev/null
-	return 0
-}
-
 # md_member_of <dm name> prints the md array node holding the dm device <dm
 # name> as a member and the member's kernel name, "<mdN> <dm-K>", found by
 # the member's directory under each array's md/; md_member_read <dm name>
@@ -4190,19 +4157,16 @@ cn_cleanup_phase2() { # [extra host nqn…]
 	drop_subsys_glob "$NQN_PREFIX:4:*"
 
 	# Top-down through the cn stack, then the arrays, then the leg and group
-	# wrappers, then the clone-metadata wrappers (kind cb holds the arena's
-	# loop device open and would wedge tmpfs_teardown's losetup -d with EBUSY).
+	# wrappers.
 	for kind in c5 c4 c3 c2 c1 c0; do
 		dm_remove_kind "$kind"
 	done
 	md_stop_all
 	dm_remove_kind ca
 	dm_remove_kind c9
-	dm_remove_kind cb
 	disconnect_prefix "$NQN_PREFIX:2:"
 	dm_remove_all
 
-	tmpfs_teardown
 	resume_suspended
 
 	hosts_drop "$@"
@@ -4247,8 +4211,6 @@ diag() {
 	nvmet_tree
 	echo "--- losetup -a ---"
 	losetup_list
-	echo "--- tmpfs mounts ---"
-	findmnt 2>/dev/null | grep -F "$TMPFS_DIR" || true
 	echo "--- df -h /var/tmp ---"
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
@@ -5724,11 +5686,11 @@ FREE_MIN_CP=$((2 << 30))
 #     long. On the CN carrying the stack it is disconnect_prefix
 #     over every side connection that CN holds (up to 128 in the default shape
 #     — 64 arrays x 2 legs — each a `timeout 30 nvme disconnect`), md_stop_all
-#     over the 64 arrays at `timeout 15` each, then nine dm kinds plus
+#     over the 64 arrays at `timeout 15` each, then eight dm kinds plus
 #     dm_remove_all, where a device that will not go costs dm_force_remove's
 #     10 + 10 + 15 s.
 # cn_cleanup_phase2's own `md_stop_all` sits between the top-of-stack dm kinds
-# and the kind ca/c9/cb wrappers precisely to unpin the LEG wrappers, which
+# and the kind ca and c9 wrappers precisely to unpin the LEG wrappers, which
 # under a live array (up to 128 in the default shape) would otherwise go the
 # long way round through dm_force_remove. Kind c9 and not kind ca: an md
 # member is a CnLegName (common/name_fmt.go) device, and CnGrpName is the
@@ -5837,8 +5799,8 @@ NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
 DN_TOOLS="$NODE_TOOLS truncate wipefs dd sha256sum mdadm udevadm"
 # mdadm: the cn agent's Md (agent/cnagent/md.go), md_stop_all, md_names and the
 # cn diag. udevadm: md_stop_all's and md_names' name reads, and the reloads of
-# install_udev_rule and remove_udev_rule. findmnt: the cn diag's tmpfs listing.
-CN_TOOLS="$NODE_TOOLS mdadm udevadm findmnt"
+# install_udev_rule and remove_udev_rule.
+CN_TOOLS="$NODE_TOOLS mdadm udevadm"
 # The hosts run no dnv binary at all. nvme: every connect and disconnect.
 # uuidgen: /etc/nvme/hostid when it is absent. systemctl: the nvmf-connect mask
 # and the stafd/stacd check. dd + sha256sum: the host IO helpers. udevadm is
@@ -5885,8 +5847,8 @@ modules_cmd() { # <module…>
 	printf ' mount -t configfs none /sys/kernel/config; true'
 }
 
-# space_field pulls one key out of the helper's `space` output (work=, tmpfs=,
-# free=), all three in bytes.
+# space_field pulls one key out of the helper's `space` output (work=,
+# free=), both in bytes.
 space_field() { # <space output> <key>
 	printf '%s\n' "$1" | sed -n "s/^$2=//p"
 }
@@ -7675,18 +7637,14 @@ dn_node_ready() { # <v> <k>
 		[ "$(jq_of "$CTL_OUT" '.dn_info.port_info.status')" = RES_STATUS_OK ]
 }
 
-# cn_node_ready is the CN twin. CnInfo's four rows are the base state of
-# architecture.md, Controller node, common: the tmpfs, the clone-metadata
-# file, its loop device and the nvmet port
+# cn_node_ready is the CN twin. CnInfo's one row is the base state of
+# architecture.md, Controller node, common: the nvmet port
 # (probeCn (agent/cnagent/syncup_cn.go)).
 cn_node_ready() { # <v>
 	if ! ctl_try cn inspect --addr "$(cn_addr "$1")"; then
 		return 1
 	fi
-	[ "$(jq_of "$CTL_OUT" '.cn_info.port_info.status')" = RES_STATUS_OK ] &&
-		[ "$(jq_of "$CTL_OUT" '.cn_info.tmpfs_info.status')" = RES_STATUS_OK ] &&
-		[ "$(jq_of "$CTL_OUT" '.cn_info.tmp_file_info.status')" = RES_STATUS_OK ] &&
-		[ "$(jq_of "$CTL_OUT" '.cn_info.loop_dev_info.status')" = RES_STATUS_OK ]
+	[ "$(jq_of "$CTL_OUT" '.cn_info.port_info.status')" = RES_STATUS_OK ]
 }
 
 # sp_sides_provisioned is setup step 7's first wait. It reports progress when
@@ -8445,7 +8403,7 @@ setup_register_nodes() {
 	done
 	for v in "${!CN[@]}"; do
 		wait_until "$WAIT_PROVISION" \
-			"cn$v ($(cn_addr "$v")) to report its tmpfs, arena file, loop device and nvmet port" \
+			"cn$v ($(cn_addr "$v")) to report its nvmet port" \
 			cn_node_ready "$v"
 		assert_field "$CTL_OUT" '.cn_info.port_info.res_name' "$CN_PORT_ID" \
 			"cn$v converged nvmet port $CN_PORT_ID (no --nvmet-port-id, so the default)"
@@ -9375,8 +9333,8 @@ setup() {
 # foreign for the rest of the run. Only a real dn_cleanup removes that header
 # — loop_teardown zeroes each loop's first 4 KiB, wipefs's it and detaches it,
 # and the `rm -rf $WORK` that follows takes the backing file and the agent's
-# --local-store with it — and only the two cn phases remove the CN's store and
-# its tmpfs arena. So the between-cases step is cleanup_all followed by a
+# --local-store with it — and only the two cn phases remove the CN's store.
+# So the between-cases step is cleanup_all followed by a
 # fresh setup_infra and a fresh setup_case, and the run pays for a second full
 # build per case. That build is the build window of the WAIT_BUILD comment,
 # paid once more per case.
@@ -9781,12 +9739,11 @@ case_residue() {
 	log "  every dn and cn guest is free of this sp's dm, md and nvmet objects"
 }
 
-# read_space fills the three globals from one guest's `space` verb. It exists
+# read_space fills the two globals from one guest's `space` verb. It exists
 # so that the numeric validation happens ONCE and in the PARENT shell: a die
 # inside a $( ) would end only the subshell, and `$((total + ""))` on an empty
 # answer is a syntax error rather than a readable failure.
 SPACE_WORK=0
-SPACE_TMPFS=0
 SPACE_FREE=0
 read_space() { # <helper wrapper> <index|""> <label>
 	local out key
@@ -9796,12 +9753,11 @@ read_space() { # <helper wrapper> <index|""> <label>
 		out=$("$1" space) || die "$3: the space verb failed"
 	fi
 	SPACE_WORK=$(space_field "$out" work)
-	SPACE_TMPFS=$(space_field "$out" tmpfs)
 	SPACE_FREE=$(space_field "$out" free)
-	for key in "$SPACE_WORK" "$SPACE_TMPFS" "$SPACE_FREE"; do
+	for key in "$SPACE_WORK" "$SPACE_FREE"; do
 		case "$key" in
 		'' | *[!0-9]*)
-			die "$3: the space verb answered '$out', which is not three byte counts"
+			die "$3: the space verb answered '$out', which is not two byte counts"
 			;;
 		esac
 	done
@@ -9827,12 +9783,7 @@ read_space() { # <helper wrapper> <index|""> <label>
 #                 since its backing file was created (a fresh one per case):
 #                 four of them, the pattern and the agent's own on-disk
 #                 metadata are already over it.
-#   RUN_CAP_BYTES everything this run wrote on all ten guests, $WORK plus
-#                 $TMPFS_DIR. The tmpfs is counted separately because it is NOT
-#                 under $WORK: CnTmpfsPath is fixed at common.DefaultTmpfsPrefix
-#                 and no flag moves it (NewNameFmt (common/name_fmt.go)), so
-#                 a guard that only looked at $WORK would miss a CN's whole
-#                 clone-metadata arena.
+#   RUN_CAP_BYTES everything this run wrote on all ten guests, under $WORK.
 #
 # The free-space floors are preflight's own: the statement worth making is
 # "the run left the guest as usable as preflight demanded it be", and one
@@ -9872,29 +9823,29 @@ case_space_guard() {
 
 	for v in "${!DN[@]}"; do
 		read_space helper_dn "$v" "dn$v"
-		total=$((total + SPACE_WORK + SPACE_TMPFS))
+		total=$((total + SPACE_WORK))
 		assert_bytes "$SPACE_FREE" \
 			"$((FREE_MIN_NODE + DNS_PER_VM * FREE_PER_DN))" \
 			"dn$v: free bytes under /var/tmp after the case"
-		log "  dn$v: work=$SPACE_WORK tmpfs=$SPACE_TMPFS free=$SPACE_FREE"
+		log "  dn$v: work=$SPACE_WORK free=$SPACE_FREE"
 	done
 	for v in "${!CN[@]}"; do
 		read_space helper_cn "$v" "cn$v"
-		total=$((total + SPACE_WORK + SPACE_TMPFS))
+		total=$((total + SPACE_WORK))
 		assert_bytes "$SPACE_FREE" "$FREE_MIN_NODE" \
 			"cn$v: free bytes under /var/tmp after the case"
-		log "  cn$v: work=$SPACE_WORK tmpfs=$SPACE_TMPFS free=$SPACE_FREE"
+		log "  cn$v: work=$SPACE_WORK free=$SPACE_FREE"
 	done
 	for v in "${!HOST[@]}"; do
 		read_space helper_host "$v" "host$v"
-		total=$((total + SPACE_WORK + SPACE_TMPFS))
-		log "  host$v: work=$SPACE_WORK tmpfs=$SPACE_TMPFS free=$SPACE_FREE"
+		total=$((total + SPACE_WORK))
+		log "  host$v: work=$SPACE_WORK free=$SPACE_FREE"
 	done
 	read_space helper_cp "" cp
-	total=$((total + SPACE_WORK + SPACE_TMPFS))
+	total=$((total + SPACE_WORK))
 	assert_bytes "$SPACE_FREE" "$FREE_MIN_CP" \
 		"cp: free bytes under /var/tmp after the case"
-	log "  cp: work=$SPACE_WORK tmpfs=$SPACE_TMPFS free=$SPACE_FREE"
+	log "  cp: work=$SPACE_WORK free=$SPACE_FREE"
 
 	assert_le "$total" "$RUN_CAP_BYTES" \
 		"allocated bytes this run holds on every guest"
@@ -11039,12 +10990,6 @@ ops_inspect() {
 	ctl_ok cn inspect --addr "$PRIMARY_ADDR"
 	assert_field "$CTL_OUT" '.cn_info.port_info.status' RES_STATUS_OK \
 		"cn$PRIMARY_CN port_info"
-	assert_field "$CTL_OUT" '.cn_info.tmpfs_info.status' RES_STATUS_OK \
-		"cn$PRIMARY_CN tmpfs_info"
-	assert_field "$CTL_OUT" '.cn_info.tmp_file_info.status' RES_STATUS_OK \
-		"cn$PRIMARY_CN tmp_file_info"
-	assert_field "$CTL_OUT" '.cn_info.loop_dev_info.status' RES_STATUS_OK \
-		"cn$PRIMARY_CN loop_dev_info"
 
 	ctl_ok cntlr inspect --id "$PRIMARY_CNTLR_ID"
 	assert_field "$CTL_OUT" '.cntlr_info | type' object \
@@ -17335,7 +17280,7 @@ case_cutoff() {
 # case_space_guard (in the ending every case shares, above) is the ASSERTION
 # half of E2E5 and runs
 # inside case_finish: per backing file `stat -c '%b %B'` <= $DN_CAP_BYTES
-# through the `alloc` verb, the sum of every guest's work= and tmpfs= <=
+# through the `alloc` verb, the sum of every guest's work= <=
 # $RUN_CAP_BYTES, and the free-space floors preflight used. This is the other
 # half — the totals printed in the run summary — and it is
 # deliberately a SEPARATE, read-only pass rather than an edit to that function:
@@ -17369,7 +17314,7 @@ SPACE_RUN_MAX_BACKING=0
 
 # space_note_case takes one reading of the whole lab. One `alloc` per DN VM
 # (every backing file of that VM in ONE ssh, as case_space_guard does) and one
-# `space` per guest through read_space, which validates all three numbers in
+# `space` per guest through read_space, which validates both numbers in
 # the parent shell.
 space_note_case() { # <case name>
 	local name=$1 total=0 worst=0 v k paths out bytes path row
@@ -17396,18 +17341,18 @@ space_note_case() { # <case name>
 			[ "$bytes" -le "$worst" ] || worst=$bytes
 		done < <(printf '%s\n' "$out")
 		read_space helper_dn "$v" "dn$v"
-		total=$((total + SPACE_WORK + SPACE_TMPFS))
+		total=$((total + SPACE_WORK))
 	done
 	for v in "${!CN[@]}"; do
 		read_space helper_cn "$v" "cn$v"
-		total=$((total + SPACE_WORK + SPACE_TMPFS))
+		total=$((total + SPACE_WORK))
 	done
 	for v in "${!HOST[@]}"; do
 		read_space helper_host "$v" "host$v"
-		total=$((total + SPACE_WORK + SPACE_TMPFS))
+		total=$((total + SPACE_WORK))
 	done
 	read_space helper_cp "" cp
-	total=$((total + SPACE_WORK + SPACE_TMPFS))
+	total=$((total + SPACE_WORK))
 
 	[ "$total" -le "$SPACE_RUN_MAX_TOTAL" ] || SPACE_RUN_MAX_TOTAL=$total
 	[ "$worst" -le "$SPACE_RUN_MAX_BACKING" ] || SPACE_RUN_MAX_BACKING=$worst
@@ -17415,8 +17360,8 @@ space_note_case() { # <case name>
 	row=$(printf '  %-8s allocated %14s bytes on all guests, largest backing file %11s bytes, run cap %s' \
 		"$name" "$total" "$worst" "$RUN_CAP_BYTES")
 	SPACE_CASE_ROWS+=("$row")
-	log "  space after $name: $total bytes under \$WORK + \$TMPFS_DIR on all" \
-		"guests, largest backing file $worst bytes"
+	log "  space after $name: $total bytes under \$WORK on all guests," \
+		"largest backing file $worst bytes"
 }
 
 # space_summary prints what was recorded. main calls it once, after the case
@@ -17495,7 +17440,7 @@ run_case() { # <case name>
 #     RES_STATUS_ERROR, and setup's meta_info wait would burn WAIT_PROVISION on
 #     each of them. Only dn_cleanup's loop_teardown (zero the first 4 KiB,
 #     wipefs, losetup -d) plus its `rm -rf $WORK` removes that header, and only
-#     the two cn phases remove a CN's store and its tmpfs arena — which is
+#     the two cn phases remove a CN's store — which is
 #     exactly cleanup_all, in exactly the order it already gets right. The price
 #     is a second full build per case — the build window of the WAIT_BUILD
 #     comment; the alternative is a suite that cannot run its second case.
@@ -17568,12 +17513,10 @@ log_topology() {
 	for v in "${!HOST[@]}"; do
 		log "  host$v:     ${HOST[$v]}  kernel nvme-tcp only, no dnv binary"
 	done
-	log "  paths:     $WORK on every guest, helper $HELPER," \
-		"cn tmpfs $TMPFS_DIR"
+	log "  paths:     $WORK on every guest, helper $HELPER"
 	log ""
 	log "  E2E9: this run occupies all" \
-		"$((1 + CN_CNT + DN_VM_CNT + ${#HOST[@]})) guests and its cn agents" \
-		"mount their tmpfs at $TMPFS_DIR, the path cnagent_test.sh owns."
+		"$((1 + CN_CNT + DN_VM_CNT + ${#HOST[@]})) guests."
 	log "  Do not start another dnv suite anywhere in the lab, and do not edit" \
 		"this file while it runs (bash re-seeks by byte offset)."
 }

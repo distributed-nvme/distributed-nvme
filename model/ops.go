@@ -960,33 +960,6 @@ func spFootprint(
 	return total, nil
 }
 
-// spCloneMetaUnits is the Σ meta_units over EVERY clone the SP lists in
-// clone_name_list, latched ones included: the units the CN of each cntlr of
-// the SP holds for the SP's clones in its metadata area (architecture.md,
-// Metadata units). A latched clone counts until FinishCloneDelete gives its
-// units back, which it does on the CNs of the cntlrs the SP has at that
-// moment, so a sum that left it out would strand its units on a CN the SP
-// has left and release them later from one that never held them. Clones are
-// read through the caller's STM; a listed clone that does not exist is a
-// precondition failure, for spFootprint's reason: a sum computed from a
-// partial clone list would move fewer units than were charged.
-func spCloneMetaUnits(
-	s etcdutil.STM,
-	op string,
-	cid uint64,
-	conf *pb.SpConf,
-) (uint64, error) {
-	total := uint64(0)
-	for _, cloneName := range conf.GetCloneNameList() {
-		clone := &pb.Clone{}
-		if !s.Get(CloneKey(cid, conf.GetSpId(), cloneName), clone) {
-			return 0, fail(op, "clone not found")
-		}
-		total += clone.GetMetaUnits()
-	}
-	return total, nil
-}
-
 // ---------------------------------------------------------------------------
 // err_epoch maintenance (MD6, HL1/HL2/HL3)
 // ---------------------------------------------------------------------------
@@ -2205,31 +2178,21 @@ func chargeSpCns(
 // CreateCntlr checks it: a cntlr that has left since frees room the scan did
 // not count on.
 //
-// The CN of every cntlr is charged the metadata units of every clone of the SP
-// (architecture.md, Metadata units), so the replacement moves the SP's clone
-// units — spCloneMetaUnits, latched clones included, and a listed clone whose
-// key is missing fails the op — from the old CN to the new one. The new CN is
-// charged with no room check, even past common.CnCloneMetaUnitCnt: this is
-// the one charge allowed to pass the ceiling. A replacement restores the
-// whole SP, and refusing it for the clones would stop every volume of the SP
-// to keep a count in bounds; the primary on the new CN builds every clone
-// all the same, since a clone keeps its metadata on its clone meta group
-// (cnagent.md CN18). The pick's room is therefore no precondition here, and
-// AR7's scan asks for no units.
+// The replacement reads no clone: a clone's dm-clone keeps its metadata on
+// the clone's clone meta group (cnagent.md CN18), on DNs, so a cntlr's CN is
+// charged its footprint alone and the primary on the new CN builds every
+// clone of the SP over its group.
 //
 // Effects: the old Cntlr key is deleted and, if its CN record still exists,
-// that CN gets its pointer removed, the SP footprint back, the SP's clone
-// units back (stopping at zero, ReleaseMetaUnits), its capacity key
+// that CN gets its pointer removed, the SP footprint back, its capacity key
 // maintained and its CnRev bumped; the new Cntlr is written with the one id
 // TakeSpIds takes from SpConf.next_id, a pool with none left refused ahead of
-// every effect, and settling iff asPrimary, and its CN charged
-// the same way, footprint and clone units; every CdcEntry of the SP that
-// exists is rewritten by the listing rule (architecture.md [D18]), which
-// drops the old cntlr and lists the new one, and a missing one stays missing
-// — unlike the gateway's DeleteCntlr and CreateCntlr, which rebuild it (see
-// rewriteCdcEntries); SpConf is rewritten and SpRev bumped once. Each CN's
-// one CnRev bump covers its units too: they move in the same write as its
-// pointer and its extents.
+// every effect, and settling iff asPrimary, and its CN charged the same
+// footprint; every CdcEntry of the SP that exists is rewritten by the
+// listing rule (architecture.md [D18]), which drops the old cntlr and lists
+// the new one, and a missing one stays missing — unlike the gateway's
+// DeleteCntlr and CreateCntlr, which rebuild it (see rewriteCdcEntries);
+// SpConf is rewritten and SpRev bumped once.
 func ReplaceCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -2312,10 +2275,6 @@ func ReplaceCntlr(
 		if err != nil {
 			return err
 		}
-		metaUnits, err := spCloneMetaUnits(s, opReplaceCntlr, cid, conf)
-		if err != nil {
-			return err
-		}
 		cn := &pb.CnConf{}
 		if !s.Get(CnConfKey(cid, newCn.AddrPort), cn) {
 			return fail(opReplaceCntlr, "cn not found")
@@ -2338,7 +2297,7 @@ func ReplaceCntlr(
 		s.Del(oldKey)
 		err = releaseCn(
 			s, opReplaceCntlr, cid, spId, oldId,
-			old.GetAddrPort(), footprint, metaUnits,
+			old.GetAddrPort(), footprint,
 		)
 		if err != nil {
 			return err
@@ -2360,10 +2319,6 @@ func ReplaceCntlr(
 			&pb.CntlrPointer{SpId: spId, CntlrId: newId},
 		)
 		newCnConf.FreeExtCnt -= footprint
-		// No room check, by design (above): the count may pass the ceiling,
-		// and the value MaintainCnCapacity writes then reads zero free
-		// units; the units neither move the key nor decide its presence.
-		newCnConf.UsedMetaUnits += metaUnits
 		s.Put(CnConfKey(cid, newCn.AddrPort), newCnConf)
 		MaintainCnCapacity(s, cid, newCn.AddrPort, cn, newCnConf)
 		if err := BumpCnRev(s, opReplaceCntlr, cid, newCnConf); err != nil {
@@ -2385,15 +2340,12 @@ func ReplaceCntlr(
 }
 
 // releaseCn returns one cntlr's reservation to its CN: the pointer comes out
-// of cntlr_ptr_list, the footprint goes back to free_ext_cnt, the SP's clone
-// units (metaUnits) leave used_meta_units, stopping at zero
-// (ReleaseMetaUnits; architecture.md, Metadata units), the capacity key
-// follows architecture.md, Capacity index keys, with its value, and CnRev is
-// bumped once (architecture.md, Cntlrs, DeleteCntlr).
+// of cntlr_ptr_list, the footprint goes back to free_ext_cnt, the capacity
+// key follows architecture.md, Capacity index keys, and CnRev is bumped once
+// (architecture.md, Cntlrs, DeleteCntlr).
 //
 // A CN record that does not exist any more is not an error: the cntlr key is
-// deleted either way, and there is nothing left to give the extents or the
-// units back to.
+// deleted either way, and there is nothing left to give the extents back to.
 func releaseCn(
 	s etcdutil.STM,
 	op string,
@@ -2402,7 +2354,6 @@ func releaseCn(
 	cntlrId uint64,
 	addrPort string,
 	footprint uint64,
-	metaUnits uint64,
 ) error {
 	key := CnConfKey(cid, addrPort)
 	cn := &pb.CnConf{}
@@ -2412,7 +2363,6 @@ func releaseCn(
 	newCn := proto.Clone(cn).(*pb.CnConf)
 	newCn.CntlrPtrList = removeCntlrPtr(newCn.GetCntlrPtrList(), spId, cntlrId)
 	newCn.FreeExtCnt += footprint
-	newCn.UsedMetaUnits = ReleaseMetaUnits(newCn.GetUsedMetaUnits(), metaUnits)
 	s.Put(key, newCn)
 	MaintainCnCapacity(s, cid, addrPort, cn, newCn)
 	return BumpCnRev(s, op, cid, newCn)

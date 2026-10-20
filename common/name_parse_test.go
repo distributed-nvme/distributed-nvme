@@ -53,8 +53,6 @@ func TestParseDmNameRoundTrip(t *testing.T) {
 			DmKindCnLeg, []uint64{testSp, testLeg}},
 		{"CnGrpName", nf.CnGrpName(testCluster, testCn, testSp, testGrp),
 			DmKindCnGrp, []uint64{testSp, testGrp}},
-		{"CnCloneMetaDmName", nf.CnCloneMetaDmName(testCluster, testCn, testSp, testClone),
-			DmKindCnCloneMeta, []uint64{testSp, testClone}},
 	}
 	for _, c := range cases {
 		dn, ok := ParseDmName(c.name)
@@ -120,7 +118,8 @@ func TestParseDmNameRejects(t *testing.T) {
 		{"upper-case id", "dnv-EBADA5168620C5FE-0000000000000005-c9-" +
 			"0000000000000011-0000000000000015"},
 		{"trailing dash", leg + "-"},
-		{"clone-meta prefix alone", nf.CnCloneMetaDmPrefix(testCluster, testCn)},
+		{"unknown kind cb", "dnv-ebada5168620c5fe-0000000000000005-cb-" +
+			"0000000000000011-0000000000000041"},
 	}
 	for _, c := range bad {
 		if dn, ok := ParseDmName(c.name); ok {

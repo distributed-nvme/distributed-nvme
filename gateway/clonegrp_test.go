@@ -268,13 +268,12 @@ func TestCreateCloneLandsOnThePoolsOwnDns(t *testing.T) {
 // the bound, with nothing written.
 //
 // The cluster's extent is the smallest a disk node may be formatted at, 64
-// MiB, so the bound sits below the controller nodes' metadata room. At the
-// fixture's 2 MiB block a 64 MiB group is 32 blocks, 3 of them the md layout
-// (one superblock, one bitmap block, the health block), so one side holds 29
-// blocks, 58 MiB, of data: the metadata may count 54 Mi regions past the 4
-// MiB base, and the largest destination is one byte short of 54 Mi + 1 whole
-// blocks. That size is created, laid out as 3 and 29 blocks; one byte more is
-// refused.
+// MiB. At the fixture's 2 MiB block a 64 MiB group is 32 blocks, 3 of them
+// the md layout (one superblock, one bitmap block, the health block), so one
+// side holds 29 blocks, 58 MiB, of data: the metadata may count 54 Mi regions
+// past the 4 MiB base, and the largest destination is one byte short of 54
+// Mi + 1 whole blocks. That size is created, laid out as 3 and 29 blocks;
+// one byte more is refused.
 func TestCreateCloneRefusesADestinationOverOneSide(t *testing.T) {
 	env := newVolEnv(t)
 	env.cc.DnBinConf.ExtentSize = common.MinDnExtSize

@@ -167,18 +167,13 @@ func (a *Agent) dnInfoLocked() *pb.DnInfo {
 	return info
 }
 
-// cnInfoLocked reports the four CnInfo rows — port, tmpfs, the sparse arena
-// file and its loop device (architecture.md, Controller node, common).
+// cnInfoLocked reports CnInfo's one row, its port's
+// (architecture.md, Controller node, common; cnagent.md CN5).
 func (a *Agent) cnInfoLocked() *pb.CnInfo {
 	if a.requestLocked(CnKey) == nil {
 		return nil
 	}
-	return &pb.CnInfo{
-		PortInfo:    a.resolveRow(CnKey, "port_info"),
-		TmpfsInfo:   a.resolveRow(CnKey, "tmpfs_info"),
-		TmpFileInfo: a.resolveRow(CnKey, "tmp_file_info"),
-		LoopDevInfo: a.resolveRow(CnKey, "loop_dev_info"),
-	}
+	return &pb.CnInfo{PortInfo: a.resolveRow(CnKey, "port_info")}
 }
 
 // sideInfoLocked derives SideInfo from the side's last accepted request: one

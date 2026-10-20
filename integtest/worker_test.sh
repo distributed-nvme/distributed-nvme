@@ -54,9 +54,8 @@ FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
 # (architecture.md, Storage pools); the sp drain's D2 batch (SPD10), a
-# created-flip transaction of MaxFlipCreatedPerTxn tds (RW19), a clone flip
-# over MaxCloneCntPerSp clones (MD6) and the cntlr replacement at the
-# ceilings (AR7) are four more.
+# created-flip transaction of MaxFlipCreatedPerTxn tds (RW19) and a clone
+# flip over MaxCloneCntPerSp clones (MD6) are three more.
 # Their compare counts, and the factors that multiply into them, are asserted
 # from the named constants in gateway/txnbudget_test.go, not restated here.
 # This suite runs no gateway — `wctl put-sp` plants its pools directly — so
@@ -64,8 +63,7 @@ FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 # family well below the ceiling — its widest slice is 21 groups over two DNs,
 # where a maximum batch touches a DN per leg and per spare of MaxDelGrpPerTxn
 # groups — and clone-drain batches, which fit etcd's default anyway (CLD11).
-# Its created flips carry one td each: no pool here holds a second. Its cntlr
-# replacements act on pools that hold no clone, so they read none.
+# Its created flips carry one td each: no pool here holds a second.
 ETCD_MAX_TXN_OPS=
 # common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
 # MUST run with (dnv-worker.md, Constants this document owns), read by
@@ -1003,10 +1001,10 @@ resolve_jq() {
 	log "driver json parser: $JQ (no system jq)"
 }
 
-# read_constants, read_geometry and meta_units are how this shell reads a Go
-# value instead of copying it. All three run workerctl LOCALLY, on the binary
-# preflight_driver has just built: `constants`, `geometry` and `meta-units`
-# open no etcd client and read no key, so none wants a server, an etcd or a
+# read_constants and read_geometry are how this shell reads a Go value
+# instead of copying it. Both run workerctl LOCALLY, on the binary
+# preflight_driver has just built: `constants` and `geometry` open no etcd
+# client and read no key, so neither wants a server, an etcd or a
 # --cluster. A workerctl too old to carry them exits 2 on `unknown
 # subcommand`, which is one thing the dies below report; the other is the
 # driver itself, since the binary they run is cross-built GOOS=linux
@@ -1044,21 +1042,6 @@ constant_of() { # <json> <Go identifier>
 		;;
 	esac
 	printf '%s' "$value"
-}
-
-# meta_units prints the units a metadata area gives one copy of <bytes> in a
-# pool whose block size is <block> (architecture.md, Metadata units), through
-# `workerctl meta-units`, the formula the gateway and `wctl put-clone` charge
-# by. A failed or non-numeric answer DIES.
-meta_units() { # <bytes> <block size>
-	local out units
-	out=$("$WORKERCTL_BIN" meta-units --bytes "$1" --block-size "$2") ||
-		die "\`workerctl meta-units --bytes $1 --block-size $2\` failed"
-	units=$(jq_of "$out" '.units')
-	case "$units" in
-	'' | 0 | *[!0-9]*) die "workerctl meta-units: units is '$units' in $out" ;;
-	esac
-	printf '%s' "$units"
 }
 
 # geometry_json prints `workerctl geometry`'s reply for one group of this
@@ -1271,9 +1254,6 @@ dn_rev() { ctl get-rev dn --id "$1" --shard 00 | "$JQ" -r .revision; }
 cn_rev() { ctl get-rev cn --id "$1" --shard 00 | "$JQ" -r .revision; }
 dn_free() { ctl get-dn --id "$1" | "$JQ" -r .free_ext_cnt; }
 cn_free() { ctl get-cn --id "$1" | "$JQ" -r .free_ext_cnt; }
-# cn_meta_used reads the used units of a CN's metadata area off its record
-# (architecture.md, Metadata units).
-cn_meta_used() { ctl get-cn --id "$1" | "$JQ" -r .used_meta_units; }
 dn_err_epoch() { ctl get-dn --id "$1" | "$JQ" -r .err_epoch; }
 cn_err_epoch() { ctl get-cn --id "$1" | "$JQ" -r .err_epoch; }
 
@@ -4498,38 +4478,10 @@ clone_gone() {
 	[ "$cnt" = 0 ]
 }
 
-# cap_meta_used reads the used units the VALUE of a node's capacity key
-# carries (architecture.md, Capacity index keys; Metadata units), the copy of
-# the record's count that a capacity scan reads. A failed read DIES, and so
-# does a node with no key or with two, which have no one value to read: an
-# absent key would otherwise read as nothing used.
-cap_meta_used() { # <dn_capacity|cn_capacity> <addr_port>
-	local keys cnt key
-	keys=$(ctl list-keys --prefix "$1") ||
-		die "cap_meta_used: \`workerctl list-keys --prefix $1\` failed"
-	cnt=$(printf '%s\n' "$keys" | awk -v a="$2" '$NF == a { n++ } END { print n + 0 }')
-	[ "$cnt" = 1 ] || die "cap_meta_used: $2 has $cnt $1 keys, want 1"
-	key=$(printf '%s\n' "$keys" | awk -v a="$2" '$NF == a && !seen { print; seen = 1 }')
-	jq_of "$(ctl get --key "$key")" '.used_meta_units'
-}
-
-# drain_assert_units is the metadata half of the clone drain's accounting
-# (architecture.md, Metadata units): sp3's clones are charged on cn 1 and
-# cn 2, the CNs of its two cntlrs, and each holds <units> on its record and
-# in its capacity value alike.
-drain_assert_units() { # <units> <label>
-	local i
-	for i in 1 2; do
-		assert_eq "$(cn_meta_used "$i")" "$1" "$2: cn $i used_meta_units"
-		assert_eq "$(cap_meta_used cn_capacity "$(cn_addr "$i")")" "$1" \
-			"$2: cn $i used_meta_units in its cn_capacity value"
-	done
-}
-
 # dn_cap_free reads the free extent count a DN's capacity KEY embeds
 # (architecture.md, Capacity index keys), in decimal: the copy of the
 # record's count that a capacity scan reads. A failed read DIES, and so does
-# a DN with no key or with two, for cap_meta_used's reason.
+# a DN with no key or with two, which have no one count to read.
 dn_cap_free() { # <addr_port>
 	local keys cnt hex
 	keys=$(ctl list-keys --prefix dn_capacity) ||
@@ -4540,7 +4492,7 @@ dn_cap_free() { # <addr_port>
 	printf '%d' "$((16#$hex))"
 }
 
-# drain_assert_clone_dns is the disk node half of a clone's accounting
+# drain_assert_clone_dns is a clone's accounting, all of it on disk nodes
 # (dnv-worker.md CLD9): sp3's clones place their clone meta group on dn 1 and
 # dn 2 (clone_meta_grp), and each of the two holds <free> extents on its
 # record and in its capacity key alike and <ptrs> side pointers, <held> of
@@ -4738,7 +4690,6 @@ case_drain() {
 	# the final STM, none for a batch (CLD8).
 	drain_put_sp sp3 4
 	ctl put-td --sp sp3 --name td0 --id "$TD_ID" --size 10737418240 >/dev/null
-	drain_assert_units 0 "before c0"
 	# sp3 leaves each DN 58 extents and four side pointers (stage 1).
 	local dn1_rev dn2_rev
 	dn1_rev=$(dn_rev 1)
@@ -4751,16 +4702,9 @@ case_drain() {
 	ctl put-clone --sp sp3 --name c0 --id "$CLONE_ID" --dst-td td0 \
 		--src-slice-cnt 5 "${CLONE_GRP[@]}" >/dev/null
 	# The planted clone is charged as CreateClone charges one
-	# (architecture.md, Metadata units; Clones): the formula over td0's size
-	# at the pool's block size, stored on the record and charged to the CN of
-	# each of sp3's cntlrs, and its clone meta group's sides, one extent
+	# (architecture.md, Clones): its clone meta group's sides, one extent
 	# each, on dn 1 and dn 2, each DN's pointer in and its revision bumped
 	# once. The drain's last step must give exactly that back.
-	local cloneUnits
-	cloneUnits=$(meta_units 10737418240 "$BLOCK_SIZE")
-	assert_eq "$(ctl get-sp --sp sp3 | "$JQ" -r '.clones.c0.meta_units')" \
-		"$cloneUnits" "c0 meta_units"
-	drain_assert_units "$cloneUnits" "after put-clone c0"
 	drain_assert_clone_dns 57 5 "$CLONE_GRP_ID" 1 \
 		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after put-clone c0"
 	# One ssh for all 65 puts: 65 round trips would dominate the case.
@@ -4826,10 +4770,8 @@ case_drain() {
 		"exactly one \`clone drained\` record"
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
 		"no clone drain step failed"
-	# The final STM gives c0's units back on both CNs, so each capacity value
-	# reads its whole area free again, and its clone meta group's sides back
-	# to dn 1 and dn 2, each DN's revision bumped once more (CLD9).
-	drain_assert_units 0 "after c0 drained"
+	# The final STM gives c0's clone meta group's sides back to dn 1 and
+	# dn 2, each DN's revision bumped once more (CLD9).
 	drain_assert_clone_dns 58 4 "$CLONE_GRP_ID" 0 \
 		"$((dn1_rev + 2))" "$((dn2_rev + 2))" "after c0 drained"
 	# CLD5, observed from the agent's side: the latched clone left every
@@ -4854,9 +4796,9 @@ case_drain() {
 			--argjson r "${dnRevs[$((i - 1))]}" --arg s "$c0Side"
 	done
 	# And the SP itself is untouched by any of it: its last step gives back
-	# only what the clone itself holds, the metadata units and the clone
-	# meta group's sides checked above, so each DN holds the slices' four
-	# sides and their extents again, and the SP outlives the clone.
+	# only what the clone itself holds, the clone meta group's sides checked
+	# above, so each DN holds the slices' four sides and their extents
+	# again, and the SP outlives the clone.
 	assert_eq "$(key_cnt slice)" "2" "sp3's slices are untouched"
 
 	stage 6 "a PARTIALLY drained clone resumes after a worker restart"
@@ -4876,7 +4818,6 @@ case_drain() {
 	clone_meta_grp "$c1Grp"
 	ctl put-clone --sp sp3 --name c1 --id "$((CLONE_ID + 1))" --dst-td td0 \
 		--src-slice-cnt 5 "${CLONE_GRP[@]}" >/dev/null
-	drain_assert_units "$cloneUnits" "after put-clone c1"
 	drain_assert_clone_dns 57 5 "$c1Grp" 1 \
 		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after put-clone c1"
 	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
@@ -4908,9 +4849,8 @@ case_drain() {
 	# count, and it is none (CLD8).
 	assert_eq "$(sp_rev_num 4)" "$rev_latch" \
 		"SpRev after one batch with the fleet stopped"
-	# A batch removes chunk keys only: the units and the clone meta group's
-	# extents stay charged until the final STM (CLD8).
-	drain_assert_units "$cloneUnits" "after the partial batch"
+	# A batch removes chunk keys only: the clone meta group's extents stay
+	# charged until the final STM (CLD8).
 	drain_assert_clone_dns 57 5 "$c1Grp" 1 \
 		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after the partial batch"
 	clone_steps_before=$(clone_drain_step_records)
@@ -4933,7 +4873,6 @@ case_drain() {
 		"c1 committed its own final STM"
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
 		"no clone drain step failed"
-	drain_assert_units 0 "after c1's resumed drain"
 	drain_assert_clone_dns 58 4 "$c1Grp" 0 \
 		"$((dn1_rev + 2))" "$((dn2_rev + 2))" "after c1's resumed drain"
 }

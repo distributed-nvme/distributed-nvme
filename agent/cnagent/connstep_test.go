@@ -110,7 +110,6 @@ func errorRows(info *pb.CntlrInfo) []string {
 	add("leg", info.GetLegIdToLeg())
 	add("clone_tgt", info.GetCloneIdToTarget())
 	add("clone_dm", info.GetCloneIdToDmClone())
-	add("clone_meta", info.GetCloneIdToMeta())
 	for tdId, thin := range info.GetTdIdToThinInfo() {
 		add(fmt.Sprintf("thin[td %#x]", tdId), thin.GetSliceIdToDmThin())
 	}

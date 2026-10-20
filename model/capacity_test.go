@@ -1109,28 +1109,14 @@ func TestMaintainCnCapacity(t *testing.T) {
 		t.Errorf("exhausted: puts = %v, dels = %v", s.puts, s.dels)
 	}
 
-	// Used units are no input of the presence rule: a change of them alone
-	// is one put of the same key, whose value carries the new count, and a
-	// node charged past its ceiling, as ReplaceCntlr may charge it, keeps
-	// its key (architecture.md, Metadata units).
-	withUsed := func(free uint64, used uint64) *pb.CnConf {
-		cn := withFree(free)
-		cn.UsedMetaUnits = used
-		return cn
-	}
-	for _, used := range []uint64{
-		7, common.CnCloneMetaUnitCnt, common.CnCloneMetaUnitCnt + 10,
-	} {
-		s = newFakeStm()
-		MaintainCnCapacity(s, cid, addrPort, withUsed(5, 3), withUsed(5, used))
-		if len(s.dels) != 0 || !equalStrings(s.puts, []string{key5}) {
-			t.Errorf("used %d: puts = %v, dels = %v", used, s.puts, s.dels)
-			continue
-		}
-		want := &pb.CnCapacity{Location: "rack1", UsedMetaUnits: used}
-		if !proto.Equal(s.vals[key5], want) {
-			t.Errorf("used %d: value = %v, want %v", used, s.vals[key5], want)
-		}
+	// The value is the location alone: a CN counts no metadata units
+	// (architecture.md, Capacity index keys).
+	s = newFakeStm()
+	MaintainCnCapacity(s, cid, addrPort, nil, withFree(5))
+	if want := (&pb.CnCapacity{Location: "rack1"}); !proto.Equal(
+		s.vals[key5], want,
+	) {
+		t.Errorf("value = %v, want %v", s.vals[key5], want)
 	}
 }
 
@@ -1138,44 +1124,28 @@ func TestMaintainCnCapacity(t *testing.T) {
 // Metadata units (architecture.md, Metadata units)
 // ---------------------------------------------------------------------------
 
-// TestFreeMetaUnits pins the free units of both node kinds, read from the
-// record and from the capacity value alike: the ceiling less the used
-// count, and zero, never a count wrapped around, once the count reaches or
-// passes the ceiling. A value with no used_meta_units reads as a whole free
-// area.
+// TestFreeMetaUnits pins a DN's free units, read from the record and from
+// the capacity value alike: the ceiling less the used count, and zero, never
+// a count wrapped around, once the count reaches or passes the ceiling. A
+// value with no used_meta_units reads as a whole free area.
 func TestFreeMetaUnits(t *testing.T) {
-	const dnCeiling = common.DnCloneMetaUnitCnt
-	const cnCeiling = common.CnCloneMetaUnitCnt
+	const ceiling = common.DnCloneMetaUnitCnt
 	cases := []struct {
 		name string
-		dn   bool
 		used uint64
 		want uint64
 	}{
-		{"dn nothing used", true, 0, dnCeiling},
-		{"dn some used", true, 5, dnCeiling - 5},
-		{"dn one unit left", true, dnCeiling - 1, 1},
-		{"dn at the ceiling", true, dnCeiling, 0},
-		{"dn past the ceiling", true, dnCeiling + 3, 0},
-		{"cn nothing used", false, 0, cnCeiling},
-		{"cn some used", false, 5, cnCeiling - 5},
-		{"cn one unit left", false, cnCeiling - 1, 1},
-		{"cn at the ceiling", false, cnCeiling, 0},
-		{"cn past the ceiling", false, cnCeiling + 40, 0},
+		{"nothing used", 0, ceiling},
+		{"some used", 5, ceiling - 5},
+		{"one unit left", ceiling - 1, 1},
+		{"at the ceiling", ceiling, 0},
+		{"past the ceiling", ceiling + 3, 0},
 	}
 	for _, tc := range cases {
-		var record, value uint64
-		if tc.dn {
-			record = DnFreeMetaUnits(&pb.DnConf{UsedMetaUnits: tc.used})
-			value = DnCapacityFreeMetaUnits(
-				&pb.DnCapacity{UsedMetaUnits: tc.used},
-			)
-		} else {
-			record = CnFreeMetaUnits(&pb.CnConf{UsedMetaUnits: tc.used})
-			value = CnCapacityFreeMetaUnits(
-				&pb.CnCapacity{UsedMetaUnits: tc.used},
-			)
-		}
+		record := DnFreeMetaUnits(&pb.DnConf{UsedMetaUnits: tc.used})
+		value := DnCapacityFreeMetaUnits(
+			&pb.DnCapacity{UsedMetaUnits: tc.used},
+		)
 		if record != tc.want || value != tc.want {
 			t.Errorf("%s: record %d, value %d, want %d",
 				tc.name, record, value, tc.want)
@@ -1185,11 +1155,6 @@ func TestFreeMetaUnits(t *testing.T) {
 		common.DnCloneMetaUnitCnt {
 		t.Errorf("a DN value with no count = %d free, want %d",
 			got, common.DnCloneMetaUnitCnt)
-	}
-	if got := CnCapacityFreeMetaUnits(&pb.CnCapacity{Location: "r0"}); got !=
-		common.CnCloneMetaUnitCnt {
-		t.Errorf("a CN value with no count = %d free, want %d",
-			got, common.CnCloneMetaUnitCnt)
 	}
 }
 
@@ -1217,8 +1182,9 @@ func TestReleaseMetaUnits(t *testing.T) {
 }
 
 // TestCapacityValues pins the value builders MaintainDnCapacity and
-// MaintainCnCapacity write: the record's location and its used units, and
-// nothing else of it (architecture.md, Capacity index keys; Metadata units).
+// MaintainCnCapacity write: a DN's location and its used units, a CN's
+// location alone, and nothing else of the record (architecture.md, Capacity
+// index keys; Metadata units).
 func TestCapacityValues(t *testing.T) {
 	dn := healthyDn()
 	dn.UsedMetaUnits = 12
@@ -1226,10 +1192,8 @@ func TestCapacityValues(t *testing.T) {
 	if got := DnCapacityValue(dn); !proto.Equal(got, wantDn) {
 		t.Errorf("DnCapacityValue = %v, want %v", got, wantDn)
 	}
-	cn := &pb.CnConf{
-		CnId: 2, Location: "rack1", FreeExtCnt: 5, UsedMetaUnits: 300,
-	}
-	wantCn := &pb.CnCapacity{Location: "rack1", UsedMetaUnits: 300}
+	cn := &pb.CnConf{CnId: 2, Location: "rack1", FreeExtCnt: 5}
+	wantCn := &pb.CnCapacity{Location: "rack1"}
 	if got := CnCapacityValue(cn); !proto.Equal(got, wantCn) {
 		t.Errorf("CnCapacityValue = %v, want %v", got, wantCn)
 	}

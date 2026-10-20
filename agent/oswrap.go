@@ -131,10 +131,9 @@ func (b *osBase) runOk(
 }
 
 // Cmd is the exported form of osBase for role packages that must wrap a tool
-// only *they* run — the cn role's mdadm wrapper (`md.go`), the CN base-state
-// and clone-metadata wrapper tooling of `clonemeta.go` (tmpfs, `truncate`,
-// `losetup`) and the thin-provisioning-tools reader (`thinbm.go`), i.e. the
-// file list of `cnagent.md`, Files. There is no LVM in that list, and none
+// only *they* run — the cn role's mdadm wrapper (`md.go`) and the
+// thin-provisioning-tools reader (`thinbm.go`), i.e. the file list of
+// `cnagent.md`, Files. There is no LVM in that list, and none
 // anywhere else in dnv ([D13], [D14]).
 // By the split rule of `cnagent.md`, Scope and placement, those wrappers stay
 // role code, but they still owe the

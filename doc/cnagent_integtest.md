@@ -29,8 +29,7 @@ area, which the cases together would overdraw.
 Beside the suite, the Go tests of `agent/cnagent` run a real cn agent the way
 the dn agent's run (`dnagent_integtest.md`, Goal and scope), driven by a fake
 worker over the package's own fake OS client, which answers the agent's dm,
-md, nvmet, nvme host, tmpfs and loop, thin-tool and local-store calls from
-memory, while a probe-IO double over the same model (`fakeProbeIO`) answers
+md, nvmet, nvme host, thin-tool and local-store calls from memory, while a probe-IO double over the same model (`fakeProbeIO`) answers
 its leg probers' block IO, which leaves the OS client (`osclient.md`, Exported
 raw helpers and the probe-IO carve-out). They prove a controller node of the
 most cntlrs one holds, every one converged with every round clean; the widest
@@ -186,7 +185,7 @@ its info-read commands are plain memory reads.
   first polling with rounds until no leg row reads pending, as a primary's
   legs do until their probers' first round (CN11). The teardown case runs no
   `CheckCntlr` round, since its cntlrs are gone; each of its stages ends with
-  the fresh `CheckCn` round per CN, code zero and the base-state rows OK.
+  the fresh `CheckCn` round per CN, code zero and the base-state row OK.
 * **Mutation-free.** The mutation reader lists every mutating command and every
   configfs or block write ("os write block" by name) in a cn agent log, whole
   or for one trace; the probers' "probe …" records fall outside it by
@@ -199,7 +198,7 @@ its info-read commands are plain memory reads.
 
 Setup proves each dn agent by its exact data area and a baseline `SyncupDn`
 (`dnagent.md` DN3, DN5), each cn agent by a `GetCnSize` echoing its capacity
-(`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with base rows OK (CN5).
+(`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with its base row OK (CN5).
 
 **smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
 a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the
@@ -210,8 +209,8 @@ host; revoked again, the connected host keeps its path and its next connect is
 refused; host IO; clean check rounds, the namespace identity included
 (`dnagent.md` SH17); the raw thin-pool status line the auto-grow parses (CN28);
 and a teardown by an empty pointer list, re-sent while it replies leftover
-(CN7, CN21), leaving the CN no dm device, clone-metadata wrapper (CN5) or
-host-facing subsystem and a fresh `CheckCn` round replying clean (CN30).
+(CN7, CN21), leaving the CN no dm device or host-facing subsystem and a
+fresh `CheckCn` round replying clean (CN30).
 
 **redund** first pins, with no agent and no NVMe-oF path, the refusal the
 cross-leg half of failover safety rests on (`architecture.md`, [D16]): on one
@@ -393,9 +392,7 @@ exports inside out, cn devices top-down and the dn objects in the dn suite's
 order (`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its
 source is still connected (`cnagent.md` L3), which makes the cleanup two phases
 across both VMs, every clone of either VM gone before any transfer, as a clone
-flushes through a source the other VM exports; any clone-metadata wrapper
-after the clones, as one left holds the arena's loop device; each disk's
-header block
+flushes through a source the other VM exports; each disk's header block
 zeroed (`architecture.md`, [D13]) and the udev mask removed last. Every
 suspended dnv device is resumed before anything over it is removed, as one
 wedges its removal, the namespace disable above it and any block scan
@@ -430,7 +427,7 @@ included; a clone meta group under md-raid1 or one that is not ready, and a
 dm-clone whose metadata is not in read-write mode, all of which the unit tests
 cover (CN18); a torn
 snapshot, which needs two slices, whose mark the unit tests cover (CN14);
-the lingering-clone hold's scope per thin device and the replacement of an
-arena file of another size, both left to the unit tests (CN18, CN5); the
+the lingering-clone hold's scope per thin device, left to the unit tests
+(CN18); the
 other states of the clone's shared row rule (CN18); and the lock entry a
 refused request must not leave (`dnagent.md`, Concurrency — `locks.go`).

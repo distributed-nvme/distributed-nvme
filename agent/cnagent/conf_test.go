@@ -323,10 +323,9 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 		node.Reset()
 		reconcileForTest(t, srv)
 
-		// The CN base state (architecture.md, Controller node, common) still
-		// converges — the mount, the arena
-		// file, the loop device and the port. The refusal is scoped to the
-		// cntlr, and every object a cntlr converge would build or sweep is
+		// The CN base state (architecture.md, Controller node, common), the
+		// port, still converges. The refusal is scoped to the cntlr, and
+		// every object a cntlr converge would build or sweep is
 		// named by one of these: its dm devices, its md arrays, its leg
 		// connections and everything under the nvmet subsystems tree, whose
 		// `ana_grpid` writes are the sweep's first pre-step.

@@ -582,12 +582,11 @@ type cnNsRef struct {
 type cnChain struct {
 	spId uint64
 
-	nvmetSs   []string  // host-facing and xfer subsystems
-	nvmetNs   []cnNsRef // namespaces under a subsystem that stays
-	nsDevs    []string  // c6
-	xferDms   []string  // c8
-	clones    []string  // c7
-	cloneMeta []string  // cb
+	nvmetSs []string  // host-facing and xfer subsystems
+	nvmetNs []cnNsRef // namespaces under a subsystem that stays
+	nsDevs  []string  // c6
+	xferDms []string  // c8
+	clones  []string  // c7
 	// srcNqns is evaluated at L5, not when the chain is built: a clone-source
 	// connection is unowned only once the dm-clone above it is GONE, and L3
 	// is what removes it. Deciding earlier would read the clone this very
@@ -643,7 +642,6 @@ func (s *CnAgentServer) buildChain(
 	chain.nsDevs = unwantedDms(common.DmKindCnNsDev)
 	chain.xferDms = unwantedDms(common.DmKindCnXferFinal)
 	chain.clones = unwantedDms(common.DmKindCnCloneFinal)
-	chain.cloneMeta = unwantedDms(common.DmKindCnCloneMeta)
 	chain.raid0s = unwantedDms(common.DmKindCnRaid0)
 	chain.tdErrors = unwantedDms(common.DmKindCnError)
 	chain.thins = unwantedDms(common.DmKindCnThinDev)
@@ -867,20 +865,6 @@ func (s *CnAgentServer) runChain(
 				return len(out.lingeringClones) > 0
 			},
 			report: func() { s.reportDms(res, chain.clones) },
-		},
-		{ // L4 — clone-metadata wrappers, none of which a clone uses
-			// (CN18): every one this sp holds is unwanted.
-			run: func() bool {
-				left := false
-				for _, name := range chain.cloneMeta {
-					if !s.removeDmVerified(ctx, name) {
-						res.Add(agent.LeftoverKindDm, name)
-						left = true
-					}
-				}
-				return left
-			},
-			report: func() { s.reportDms(res, chain.cloneMeta) },
 		},
 		{ // L5 — clone-source connections, once nothing maps them.
 			run: func() bool {
@@ -1647,20 +1631,6 @@ func (s *CnAgentServer) unownedSrcNqns(
 	return out
 }
 
-// orphanCloneMetaNames is every kind-cb wrapper of this CN, none of which a
-// clone uses (CN18). It is reconcileCloneMeta's rule, computed from the
-// sweep's own snapshot so the verdict and the removal agree.
-func (s *CnAgentServer) orphanCloneMetaNames(actual *cnActual) []string {
-	var out []string
-	for name, dn := range actual.ours {
-		if dn.Kind == common.DmKindCnCloneMeta {
-			out = append(out, name)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // ---------------------------------------------------------------------------
 // The two scopes
 // ---------------------------------------------------------------------------
@@ -2019,9 +1989,8 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 		res.Add(agent.LeftoverKindNvmet, nqn)
 	}
 	s.reportDms(res, chain.nsDevs, chain.xferDms, chain.clones,
-		chain.cloneMeta, chain.raid0s, chain.tdErrors, chain.thins,
-		chain.pools, chain.poolMetas, chain.poolDatas, chain.grpDms,
-		chain.legDms)
+		chain.raid0s, chain.tdErrors, chain.thins, chain.pools,
+		chain.poolMetas, chain.poolDatas, chain.grpDms, chain.legDms)
 	for _, nqn := range chain.srcNqnList() {
 		res.Add(agent.LeftoverKindNvme, nqn)
 	}
@@ -2155,22 +2124,6 @@ func (s *CnAgentServer) sweepCn(
 		if !s.disconnectVerified(ctx, nqn) {
 			res.Add(agent.LeftoverKindNvme, nqn)
 		}
-	}
-	// The kind-cb wrappers are swept by reconcileCloneMeta, which enumerates
-	// them and removes every one, since no clone uses one ([D14]). It is
-	// called from here and nowhere else.
-	if remove {
-		s.reconcileCloneMeta(ctx, clusterId, cnId)
-	}
-	for _, name := range s.orphanCloneMetaNames(actual) {
-		if remove {
-			// The snapshot predates reconcileCloneMeta, so the verdict is
-			// taken from a fresh probe rather than from it.
-			if dev, err := s.dm.Info(ctx, name); err == nil && dev == nil {
-				continue
-			}
-		}
-		res.Add(agent.LeftoverKindDm, name)
 	}
 	for _, piece := range redrive {
 		res.Fail(piece.what, piece.err)

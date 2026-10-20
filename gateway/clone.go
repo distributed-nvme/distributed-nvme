@@ -76,21 +76,6 @@ func loadLiveClone(
 	return clone, nil
 }
 
-// cloneMetaUnitsOf is the metadata units a clone onto td is charged on the CN
-// of each cntlr (architecture.md, Metadata units): common.CloneMetaUnits of
-// the destination td's size and the SP's stored data_block_size. The
-// stored bdev_conf is validated first and refused ABORTED (GW11): a zero block
-// size read back out of the store would size every clone at one unit.
-// CreateClone stores the count on the record, so every later charge and
-// release reads it there rather than computing it again.
-func cloneMetaUnitsOf(conf *pb.SpConf, td *pb.ThinDevice) (uint64, error) {
-	bdev := spBdevConf(conf)
-	if err := model.ValidateBdevConf(bdev); err != nil {
-		return 0, errAborted("%v", err)
-	}
-	return common.CloneMetaUnits(td.GetSize(), model.PoolBlockSize(bdev)), nil
-}
-
 // cloneGrpPlan is the shape of a new clone's clone meta group
 // (architecture.md, Clones): Legs legs, one per pick, each one side of
 // common.CloneMetaGrpExtCnt extents, laid out as MetaBlocks and DataBlocks
@@ -256,19 +241,11 @@ func cloneCreateChecks(
 // whether a td was written, so that stays a documented-unverifiable
 // contract.
 //
-// The clone's metadata units (cloneMetaUnitsOf) are charged to the CN of
-// EVERY cntlr of the SP, disabled ones included (architecture.md, Metadata
-// units), though no CN takes a unit for the clone, which keeps its dm-clone
-// metadata on its clone meta group. A CN short of the room refuses the
-// create RESOURCE_EXHAUSTED before anything is written. The units are stored
-// on the record, where every later charge and release reads them. The charge
-// changes only the CNs' used units, so it rewrites each CN's record and
-// capacity value and bumps no CnRev.
-//
 // The clone meta group's sides are charged to their DNs through the DN
 // ledger, each DN written once with its pointer and its extents and bumped
-// once, as CreateStoragePool charges a new group's; no CN is charged extents
-// for it, since no cntlr's footprint counts it. Its ids come from the pool's
+// once, as CreateStoragePool charges a new group's. No CN is read or charged:
+// the clone keeps its dm-clone metadata on its clone meta group, and no
+// cntlr's footprint counts the group. Its ids come from the pool's
 // counter after the clone's own, in GW15's order: the grp_id, then per pick
 // a leg_id and its side_id, so a re-run of the closure on the same picks
 // writes the same set (GW8).
@@ -370,27 +347,6 @@ func (s *Server) CreateClone(
 				// not building.
 				return errCandidateChanged
 			}
-			// The metadata room comes after every refusal of cloneCreateChecks,
-			// so a request that breaks a rule of its own hears that rule, and
-			// before any write: a CN short of room is RESOURCE_EXHAUSTED with
-			// nothing written (architecture.md, Metadata units). One charge per
-			// cntlr, each on the CN its record names, the ledger writing each
-			// CN once.
-			units, err := cloneMetaUnitsOf(sc.Conf, td)
-			if err != nil {
-				return err
-			}
-			cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
-			if err != nil {
-				return err
-			}
-			cnl := newCnLedger(stm, sc.Cid)
-			for _, cntlr := range cntlrs {
-				err := cnl.chargeUnits(cntlr.GetAddrPort(), units, what)
-				if err != nil {
-					return err
-				}
-			}
 			slots := sc.Conf.GetCntlidSlotList()
 			if len(slots) == 0 {
 				// CreateStoragePool stores a list and the slot list update
@@ -470,12 +426,8 @@ func (s *Server) CreateClone(
 					DstTdId:       td.GetTdId(),
 					DmCloneConf:   req.GetDmCloneConf(),
 					AutoResume:    req.GetAutoResume(),
-					MetaUnits:     units,
 					MetaGrp:       grp,
 				})
-			if err := cnl.flush(opCreateClone); err != nil {
-				return err
-			}
 			if err := dnl.flush(opCreateClone); err != nil {
 				return err
 			}

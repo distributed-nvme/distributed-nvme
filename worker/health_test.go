@@ -133,8 +133,8 @@ func TestHealthDnTable(t *testing.T) {
 	}
 }
 
-// TestHealthCnTable walks the HL1 table for a CN: port_info, tmpfs_info,
-// tmp_file_info and loop_dev_info are the ERROR sources.
+// TestHealthCnTable walks the HL1 table for a CN: port_info is the ERROR
+// source.
 func TestHealthCnTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -153,24 +153,6 @@ func TestHealthCnTable(t *testing.T) {
 			info:    &pb.CnInfo{PortInfo: resErr("port", "x")},
 			want:    healthErrorRow,
 			wantRes: "port",
-		},
-		{
-			name:    "tmpfs error",
-			info:    &pb.CnInfo{TmpfsInfo: resErr("tmpfs", "x")},
-			want:    healthErrorRow,
-			wantRes: "tmpfs",
-		},
-		{
-			name:    "tmp file error",
-			info:    &pb.CnInfo{TmpFileInfo: resErr("tmp_file", "x")},
-			want:    healthErrorRow,
-			wantRes: "tmp_file",
-		},
-		{
-			name:    "loop dev error",
-			info:    &pb.CnInfo{LoopDevInfo: resErr("loop", "x")},
-			want:    healthErrorRow,
-			wantRes: "loop",
 		},
 		{
 			name: "provisioning is not an ERROR row: a clean round",
@@ -912,7 +894,7 @@ func startOrphanCn(t *testing.T, h *revHarness) *orphanNode {
 			reply := &pb.CheckCnReply{Revision: req.GetRevision()}
 			if bad.Load() {
 				reply.CnInfo = &pb.CnInfo{
-					TmpfsInfo: resErr("tmpfs", "no space"),
+					PortInfo: resErr("port", "no listener"),
 				}
 			}
 			return reply
@@ -1135,9 +1117,9 @@ func TestHealthErrorRowCarriesResName(t *testing.T) {
 	logs := captureLogs(t)
 	d, _ := healthTestDeps(t)
 	monitor := newCnMonitor(d, 3, 4, func() string { return "cn0:9620" })
-	monitor.observe(context.Background(), healthErrorRow, "tmpfs")
+	monitor.observe(context.Background(), healthErrorRow, "port")
 	recs := logs.withMsg(msgHealthChanged)
-	if len(recs) != 1 || recs[0]["res_name"] != "tmpfs" ||
+	if len(recs) != 1 || recs[0]["res_name"] != "port" ||
 		recs[0]["reason"] != reasonErrorRow {
 		t.Fatalf("record = %v", recs)
 	}
@@ -1459,7 +1441,7 @@ func TestHealthMarkUnknownClearsStaleErrors(t *testing.T) {
 	if obs, _ := dnObservation(0, dn); obs != healthClean {
 		t.Fatalf("obs after markUnknown = %v, want clean", obs)
 	}
-	cn := &pb.CnInfo{TmpfsInfo: resErr("tmpfs", "x")}
+	cn := &pb.CnInfo{PortInfo: resErr("port", "x")}
 	markCnUnknown(cn)
 	if obs, _ := cnObservation(0, cn); obs != healthClean {
 		t.Fatalf("cn obs after markUnknown = %v", obs)

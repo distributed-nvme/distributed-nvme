@@ -1943,7 +1943,6 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 			Status:  pb.ResStatus_RES_STATUS_OK,
 			Details: "4420",
 		},
-		LoopDevInfo: &pb.ResInfo{ResName: "/dev/loop0"},
 	}
 	agent.setInfo(nil, nil, info, nil)
 

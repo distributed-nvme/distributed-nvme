@@ -485,9 +485,8 @@ func (s *Server) UpdateControllerNodeDisabled(
 }
 
 // InspectControllerNode is the InspectControllerNode of architecture.md,
-// Controller nodes: the node as its agent last observed it — port, tmpfs, tmp
-// file and loop device (architecture.md, `service ControllerNodeAgent`) — for
-// diagnostics.
+// Controller nodes: the node as its agent last observed it — its port
+// (architecture.md, `service ControllerNodeAgent`) — for diagnostics.
 //
 // The reply is the agent's, whole: `applied_revision` and `cn_info` both
 // come from the GetCnInfo reply (architecture.md, Controller nodes,

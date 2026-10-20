@@ -9,14 +9,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// ResTracker keys. Node-level resources of the CN (CN5) first, then the
+// ResTracker keys. The node-level resource of the CN (CN5) first, then the
 // per-cntlr ones — one format per CntlrInfo map, keyed by the map's own id so
 // the SH14 epochs follow a resource across converges.
 const (
-	resKeyPort    = "port"
-	resKeyTmpfs   = "tmpfs"
-	resKeyTmpFile = "tmp_file"
-	resKeyLoopDev = "loop_dev"
+	resKeyPort = "port"
 
 	resKeySubsysFmt    = "subsystem/%016x"
 	resKeyNamespaceFmt = "namespace/%016x"

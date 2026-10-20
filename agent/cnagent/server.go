@@ -6,9 +6,7 @@
 // nvmet / nvme-host wrappers, the bitmap store) comes from package agent; the
 // tools only this role runs — mdadm and thin-provisioning-tools — are wrapped
 // here (md.go, thinbm.go) because a wrapper with a single role is role code
-// (the split rule of dnagent.md, Scope and placement). The base state of
-// architecture.md, Controller node, common, and the enumeration of the
-// clone-metadata wrappers over it (cnagent.md CN5) live in clonemeta.go.
+// (the split rule of dnagent.md, Scope and placement).
 package cnagent
 
 import (
@@ -36,7 +34,6 @@ type CnAgentServer struct {
 	nvmet   *agent.Nvmet
 	host    *agent.NvmeHost
 	md      *Md
-	cmeta   *CloneMeta
 	locks   *agent.LockSet
 
 	capacity uint64
@@ -102,10 +99,6 @@ type CnAgentServer struct {
 // holds it (SH8) — a SyncupCn stores it once it has passed the revision gate,
 // before its converge runs — plus the ResInfo history of the base state
 // (architecture.md, Controller node, common), and its latest observation.
-// The loop device carrying the clone-metadata arena is deliberately *not* a
-// field here: it is kernel-assigned state, re-learned from `losetup
-// --associated` on every converge and every read of the CN and never cached
-// across them (CN5).
 type cnState struct {
 	// req is read and written through loadReq and storeReq only. It is
 	// stored only under the node write lock, and every reader holds
@@ -146,7 +139,7 @@ type cntlrState struct {
 	// request still claims a host-facing subsystem or a clone source
 	// (hostFacingClaim, srcNqnsInUse), and the node-level verdict of a CN's
 	// read reads every cntlr's host-facing subsystems and clone list
-	// (hostFacingClaim, orphanCloneMetaNames) —
+	// (hostFacingClaim, srcNqnsInUse) —
 	// cntlrKeysOf reads every cntlr's ids too. So it is an atomic pointer: a
 	// lock-free read cannot race the store, and taking no lock for it adds no
 	// lock order. A request is never modified once stored. reqFromRpc, which
@@ -230,7 +223,6 @@ func NewCnAgentServer(
 		nvmet:    agent.NewNvmet(oc),
 		host:     agent.NewNvmeHost(oc),
 		md:       NewMd(oc),
-		cmeta:    NewCloneMeta(oc),
 		locks:    agent.NewLockSet(),
 		capacity: capacity,
 		port: agent.PortConf{

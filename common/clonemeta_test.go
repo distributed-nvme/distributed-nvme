@@ -77,26 +77,13 @@ func TestCloneMetaBytes(t *testing.T) {
 		}
 		// The units are these bytes in whole units, rounded up.
 		units := CloneMetaUnits(tc.copyBytes, tc.blockSize)
-		if units*CnCloneMetaUnit < got ||
-			(units-1)*CnCloneMetaUnit >= got {
+		if units*DnCloneMetaUnit < got ||
+			(units-1)*DnCloneMetaUnit >= got {
 			t.Errorf("%s: CloneMetaUnits = %d units for %d bytes, want "+
 				"the bytes rounded up to whole units of %d", tc.name,
-				units, got, CnCloneMetaUnit)
+				units, got, DnCloneMetaUnit)
 		}
 	}
-}
-
-// oldCnCloneMetaUnits is the cn agent's own arithmetic that CloneMetaUnits
-// replaces: the regions of the clone's destination td at the pool's block
-// size, none when the block size is zero, and the 4 MiB base plus one byte
-// per region rounded up to whole CnCloneMetaUnit units.
-func oldCnCloneMetaUnits(tdSize, blockSize uint64) uint64 {
-	regionCnt := uint64(0)
-	if blockSize != 0 {
-		regionCnt = tdSize / blockSize
-	}
-	bytes := uint64(4*1024*1024) + regionCnt
-	return (bytes + CnCloneMetaUnit - 1) / CnCloneMetaUnit
 }
 
 // oldDnCloneMetaUnits is the dn agent's own arithmetic that CloneMetaUnits
@@ -120,32 +107,20 @@ func oldDnCloneMetaUnits(
 	return (bytes + DnCloneMetaUnit - 1) / DnCloneMetaUnit, sectors, true
 }
 
-// TestCloneMetaUnitsMatchesTheAgents compares CloneMetaUnits with the two
-// agents' arithmetic it replaces, over a grid of sizes.
+// TestCloneMetaUnitsMatchesTheAgents compares CloneMetaUnits with the dn
+// agent's arithmetic it replaces, over a grid of sizes.
 //
-// The cn arithmetic is the same function, so it must match at every block
-// size, zero included. The dn arithmetic floors twice, the side to whole
-// sectors and then the sectors to whole regions, so it must match wherever
-// the block size is a whole number of sectors, as every stored pool's is. It
-// must match whether the caller passes the side's bytes, as the gateway does,
-// or the side's whole sectors in bytes, and at extent sizes that are not a
-// whole number of sectors too, since the extent size is only bounds-checked.
+// The dn arithmetic floors twice, the side to whole sectors and then the
+// sectors to whole regions, so it must match wherever the block size is a
+// whole number of sectors, as every stored pool's is. It must match whether
+// the caller passes the side's bytes, as the gateway does, or the side's
+// whole sectors in bytes, and at extent sizes that are not a whole number of
+// sectors too, since the extent size is only bounds-checked.
 func TestCloneMetaUnitsMatchesTheAgents(t *testing.T) {
 	blockSizes := []uint64{
 		512, 4 * kib, 64 * kib, 128 * kib, mib, 2 * mib, 64 * mib, gib,
 		// Whole sectors that are no power of two.
 		3 * 512, 1000 * 512,
-	}
-	// The cn arithmetic is also checked at block sizes the dn refuses or no
-	// pool stores.
-	cnBlockSizes := append(
-		append([]uint64(nil), blockSizes...),
-		0, 1, 511, 1000, 64*kib+1,
-	)
-	tdSizes := []uint64{
-		0, 1, 511, 512, 64*kib - 1, 64 * kib, 64*kib + 1, mib - 1, mib,
-		mib + 1, gib, 10 * gib, 10*gib + 12345, tib - 1, tib, 16 * tib,
-		64 * tib, 256 * gib, 256*gib + 64*kib,
 	}
 	extentSizes := []uint64{
 		64 * mib, gib, 4 * gib, tib,
@@ -154,16 +129,6 @@ func TestCloneMetaUnitsMatchesTheAgents(t *testing.T) {
 	extCnts := []uint64{1, 2, 3, 7, 16, 100, 1000, 1024, 4096}
 
 	compared := 0
-	for _, blockSize := range cnBlockSizes {
-		for _, tdSize := range tdSizes {
-			got := CloneMetaUnits(tdSize, blockSize)
-			if want := oldCnCloneMetaUnits(tdSize, blockSize); got != want {
-				t.Errorf("cn: CloneMetaUnits(%d, %d) = %d, the cn "+
-					"arithmetic gives %d", tdSize, blockSize, got, want)
-			}
-			compared++
-		}
-	}
 	for _, blockSize := range blockSizes {
 		for _, extentSize := range extentSizes {
 			for _, extCnt := range extCnts {
@@ -190,39 +155,26 @@ func TestCloneMetaUnitsMatchesTheAgents(t *testing.T) {
 		}
 	}
 	// A list emptied by an edit would let the comparison pass vacuously.
-	want := len(cnBlockSizes)*len(tdSizes) +
-		2*len(blockSizes)*len(extentSizes)*len(extCnts)
+	want := 2 * len(blockSizes) * len(extentSizes) * len(extCnts)
 	if compared != want || want < 1000 {
 		t.Fatalf("compared %d cases, want %d and at least 1000",
 			compared, want)
 	}
 }
 
-// TestCloneMetaUnitSizesAgree pins what lets one count serve both areas: the
-// cn and the dn unit are one size, and the superblock budget is exactly one
-// unit (architecture.md, Metadata units).
-func TestCloneMetaUnitSizesAgree(t *testing.T) {
-	if CnCloneMetaUnit != DnCloneMetaUnit {
-		t.Fatalf("CnCloneMetaUnit %d != DnCloneMetaUnit %d: one unit count "+
-			"no longer serves both metadata areas",
-			CnCloneMetaUnit, DnCloneMetaUnit)
-	}
-	if CloneMetaBaseBytes != CnCloneMetaUnit {
+// TestCloneMetaBaseIsOneUnit pins that the superblock budget is exactly one
+// unit of a DN's metadata area (architecture.md, Metadata units).
+func TestCloneMetaBaseIsOneUnit(t *testing.T) {
+	if CloneMetaBaseBytes != DnCloneMetaUnit {
 		t.Errorf("CloneMetaBaseBytes %d is not one unit of %d",
-			CloneMetaBaseBytes, CnCloneMetaUnit)
+			CloneMetaBaseBytes, DnCloneMetaUnit)
 	}
 }
 
-// TestCloneMetaUnitCounts pins the two ceilings of architecture.md, Metadata
-// units: each count of units times its unit is its whole area, so the
-// ceiling counts no unit the area lacks and leaves no part of it uncounted.
+// TestCloneMetaUnitCounts pins the ceiling of architecture.md, Metadata
+// units: the count of units times the unit is the whole area, so the ceiling
+// counts no unit the area lacks and leaves no part of it uncounted.
 func TestCloneMetaUnitCounts(t *testing.T) {
-	if got := uint64(CnCloneMetaUnitCnt) * CnCloneMetaUnit; got !=
-		CnCloneMetaAreaSize {
-		t.Errorf("CnCloneMetaUnitCnt %d x CnCloneMetaUnit %d = %d, want "+
-			"CnCloneMetaAreaSize %d", CnCloneMetaUnitCnt, CnCloneMetaUnit,
-			got, CnCloneMetaAreaSize)
-	}
 	if got := uint64(DnCloneMetaUnitCnt) * DnCloneMetaUnit; got !=
 		DnCloneMetaSize {
 		t.Errorf("DnCloneMetaUnitCnt %d x DnCloneMetaUnit %d = %d, want "+

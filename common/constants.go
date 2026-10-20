@@ -203,30 +203,11 @@ const (
 	// role.
 	NvmeModel = "dnv"
 
-	DefaultTmpfsPrefix = "/tmp/dnv-tmpfs"
-
-	// The CN clone-metadata arena (architecture.md, Controller node, common;
-	// cnagent.md CN5): one sparse file (CnTmpFilePath) on the CN tmpfs,
-	// attached to a single loop device. No LVM ([D14]). The control plane
-	// counts a CN's clone metadata in its units, though no clone keeps its
-	// metadata there: a clone's dm-clone keeps it on the clone's clone meta
-	// group (cnagent.md CN18).
-	// CnCloneMetaAreaSize is the `truncate` size of that file — and so the
-	// arena, 256 units. CnCloneMetaUnit is the unit, the cn twin of
-	// DnCloneMetaUnit; it is deliberately NOT called an "extent", which
-	// everywhere else in dnv means the 1 GiB DN/CN allocation unit
-	// (DefaultDnExtSize).
-	CnCloneMetaAreaSize = 1 * 1024 * 1024 * 1024
-	CnCloneMetaUnit     = 4 * 1024 * 1024
-	// CnCloneMetaUnitCnt is that arena in units, one arena per CN whose count
-	// every clone of every cntlr on the node is charged to: the ceiling of a
-	// CN's used_meta_units, which CreateClone and CreateCntlr never pass and
-	// only ReplaceCntlr may (architecture.md, Metadata units).
-	CnCloneMetaUnitCnt = CnCloneMetaAreaSize / CnCloneMetaUnit
-	// CloneMetaBaseBytes is the dm-clone superblock budget of CloneMetaUnits,
-	// the part of a copy's metadata that does not grow with its regions. It
-	// is exactly one unit of either area, so a copy of one region or more
-	// needs two units or more (architecture.md, Metadata units).
+	// CloneMetaBaseBytes is the dm-clone superblock budget of CloneMetaBytes
+	// and CloneMetaUnits, the part of a copy's metadata that does not grow
+	// with its regions. It is exactly one DnCloneMetaUnit, so a copy of one
+	// region or more needs two units or more (architecture.md, Metadata
+	// units).
 	CloneMetaBaseBytes = 4 * 1024 * 1024
 	// CloneMetaGrpExtCnt is the ext_cnt of a clone meta group, the group a
 	// clone owns (architecture.md, Terminology and object model): one extent
@@ -484,12 +465,6 @@ const (
 	DnZeroConcurrency = 2
 	DnZeroKillBackoff = 2
 
-	// CN base state (architecture.md, Controller node, common): the tmpfs that
-	// carries the clone-metadata arena file, sized 2 × CnCloneMetaAreaSize so
-	// that even a fully materialized arena plus slack never hits ENOSPC on the
-	// mount. The file itself is sparse.
-	DefaultCnTmpfsSize = 2 * 1024 * 1024 * 1024
-
 	// Seconds between two leg health-probe rounds (architecture.md, Group
 	// on-leg layout: meta region, data region, health block) on a primary
 	// cntlr, and how long one probe IO may stay in flight before the leg
@@ -642,38 +617,36 @@ const (
 	// transaction is another, 2 x MaxFlipCreatedPerTxn + 2 = 514 COMPARES
 	// (dnv-worker.md RW19; TestFlipCreatedTxnBudget,
 	// TestFlipCreatedAtTheTdCeiling; see MaxFlipCreatedPerTxn below).
-	// ReplaceCntlr is a third (dnv-worker.md MD6): its STM reads every clone
-	// of the pool to move the clones' metadata units from the old cntlr's
-	// node to the new one (architecture.md, Metadata units), so at the
-	// ceilings it commits
-	//
-	//	19 + MaxCntlrCntPerSp + MaxSliceCntPerSp + 3 x MaxSsCntPerSp
-	//	   + MaxCloneCntPerSp = 131 COMPARES
-	//
-	// — 19 fixed keys, one read per cntlr, slice and clone, and a Subsystem
-	// read and a CdcEntry read and put per subsystem
-	// (gateway/txnbudget_test.go's TestReplaceCntlrTxnBudget; model's
-	// TestReplaceCntlrAtTheCeiling commits it). The gateway's CreateCntlr
-	// and DeleteCntlr read every clone of the pool too, for the units the
-	// cntlr's node is charged or given back, and stay under etcd's default:
-	// 124 COMPARES each at the ceilings, four short of it
-	// (TestCreateCntlrTxnBudget, TestDeleteCntlrTxnBudget); so do three
-	// more that read every clone — CreateClone, which also verifies and
-	// charges the DN of each leg of its clone meta group (101 COMPARES,
-	// TestCreateCloneTxnBudget), UpdateStoragePoolCntlidSlotList (105,
-	// TestUpdateCntlidSlotListTxnBudget) and DeleteSpareLeg of a clone meta
-	// group's spare (107, TestDeleteSpareLegTxnBudget). The clone flip,
-	// the provisioned flip of the sides of clone meta groups, is a fourth
-	// (dnv-worker.md MD6): one STM reads and writes every Clone its refs
-	// name, so a flip over every clone of a pool commits
+	// The clone flip, the provisioned flip of the sides of clone meta groups,
+	// is a third (dnv-worker.md MD6): one STM reads and writes every Clone
+	// its refs name, so a flip over every clone of a pool commits
 	//
 	//	2 x MaxCloneCntPerSp + 2 = 130 COMPARES
 	//
 	// (gateway/txnbudget_test.go's TestFlipCloneProvisionedTxnBudget; model's
 	// TestFlipCloneProvisionedAtTheCloneCeiling commits it).
 	//
-	// DeleteThinDevice stays below all five — the create, D2, the two flips
-	// and ReplaceCntlr — whatever the td count: its deciding STM commits having
+	// Three transactions that read every clone of the pool stay under etcd's
+	// default: CreateClone, which also verifies and charges the DN of each
+	// leg of its clone meta group (85 COMPARES, TestCreateCloneTxnBudget),
+	// UpdateStoragePoolCntlidSlotList (105,
+	// TestUpdateCntlidSlotListTxnBudget) and DeleteSpareLeg of a clone meta
+	// group's spare (107, TestDeleteSpareLegTxnBudget). The cntlr mutators
+	// read no clone, since a clone charges no CN: the gateway's CreateCntlr
+	// and DeleteCntlr commit 60 COMPARES each at the ceilings
+	// (TestCreateCntlrTxnBudget, TestDeleteCntlrTxnBudget), and the worker's
+	// ReplaceCntlr (dnv-worker.md MD6)
+	//
+	//	19 + MaxCntlrCntPerSp + MaxSliceCntPerSp + 3 x MaxSsCntPerSp
+	//	   = 67 COMPARES
+	//
+	// — 19 fixed keys, one read per cntlr and slice, and a Subsystem read
+	// and a CdcEntry read and put per subsystem
+	// (gateway/txnbudget_test.go's TestReplaceCntlrTxnBudget; model's
+	// TestReplaceCntlrAtTheCeiling commits it).
+	//
+	// DeleteThinDevice stays below all four — the create, D2 and the two
+	// flips — whatever the td count: its deciding STM commits having
 	// read the fixed resolution and token keys, the target td and one key per
 	// subsystem and per clone of the SP, so with its three writes it is
 	// 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the ceilings
@@ -685,8 +658,8 @@ const (
 	// one compare per td and put a delete from a full pool past the budget.
 	//
 	// The clone drain's batches, MaxDelBmPerTxn + 2 ops each, fit the default,
-	// and so does its final transaction, which gives a clone's metadata units
-	// and its clone meta group's sides back (dnv-worker.md CLD11).
+	// and so does its final transaction, which gives a clone meta group's
+	// sides back (dnv-worker.md CLD11).
 	//
 	// The Go test etcd launchers pass it from here; the shell suites that
 	// start an etcd cannot import common, so they read it at preflight from

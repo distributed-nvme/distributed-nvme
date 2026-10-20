@@ -352,15 +352,10 @@ assert_thin_ok() { # json td slice label
 		"$4 thin[$2][$3]"
 }
 
-# assert_cn_info_ok covers the four base-state resources of CnInfo
-# (architecture.md, Controller node, common). The clone-metadata arena has
-# no row of its own: it is the loop device itself (loop_dev_info), and the
-# proto keeps field 5 `reserved`.
+# assert_cn_info_ok covers the one base-state resource of CnInfo, the port
+# (architecture.md, Controller node, common; cnagent.md CN5).
 assert_cn_info_ok() { # json label
-	local field
-	for field in port_info tmpfs_info tmp_file_info loop_dev_info; do
-		assert_ok "$1" ".cn_info.$field.status" "$2 $field"
-	done
+	assert_ok "$1" ".cn_info.port_info.status" "$2 port_info"
 }
 
 # assert_all_ok fails on any ResInfo under a reply subtree whose status is not
@@ -571,7 +566,7 @@ d16() { printf '%u' "$(($1))"; }
 # with the kind fields of architecture.md, dm device names — every cn kind is
 # the role letter `c` and one hex digit: c0 pool-meta, c1 pool-data,
 # c2 pool-final, c3 thin, c4 raid0, c5 error, c6 ns-dev, c7 clone-final,
-# c8 xfer-final, c9 leg, ca group, cb clone-meta.
+# c8 xfer-final, c9 leg, ca group.
 cn_dm_name() { # kind cnidx id…
 	local kind=$1 cn=$2 id
 	shift 2
@@ -995,7 +990,6 @@ NVMET=/sys/kernel/config/nvmet
 NQN_PREFIX=nqn.2024-01.io.dnv
 NQN_IT_PREFIX=nqn.2024-01.io.dnv-it
 UDEV_RULE=/etc/udev/rules.d/63-dnv-md.rules
-TMPFS_DIR=/tmp/dnv-tmpfs
 # TR_SVC_ID mirrors the driver's constant of the same name: the nvme-tcp port
 # every agent listens on, and so the only port the partition stages block
 # (case T's S4, case A's degrade).
@@ -2134,8 +2128,8 @@ cn_requests_since() {
 # issues neither, and the probers' `ReadBlockDirectAt` logs nothing
 # (osclient.md, Exported raw helpers and the probe-IO carve-out).
 # Probe commands (lsblk, dmsetup info|table|status|ls, the `ls` of configfs,
-# findmnt, stat, losetup --associated, mdadm --examine, nvme list-subsys) are
-# expected and deliberately not in the list. Every other directory listing,
+# stat, mdadm --examine, nvme list-subsys) are expected and deliberately not
+# in the list. Every other directory listing,
 # of sysfs or of the local store, is an `os read dir` record, a read and never
 # a mutation. The cn agent reads md state from sysfs and never runs
 # `mdadm --detail`, which is a read too.
@@ -2160,8 +2154,7 @@ mutations() {
 	        or (.cmd == "mdadm" and ($a | any(IN("--create","--assemble",
 	              "--add","--fail","--remove","--stop","--zero-superblock"))))
 	        or (.cmd == "nvme" and ($a[0] | IN("connect","disconnect")))
-	        or (.cmd == "losetup" and (($a | index("--associated")) | not))
-	        or (.cmd | IN("blkdiscard","mount","umount","truncate",
+	        or (.cmd | IN("blkdiscard","mount","umount","truncate","losetup",
 	              "mkdir","rmdir","ln","rm"))
 	      )
 	    | .cmd + " " + ($a | join(" "))' "$log" || return 1
@@ -2179,11 +2172,8 @@ mutations() {
 # output, so neither `dmsetup ls` nor the `ls` of the nvmet subsystems may
 # print nothing when it fails: each prints one line saying so instead, its
 # error text folded into it, and that line fails the assertion — a failure
-# that printed nothing would read as a clean node nobody had listed. The dm
-# pattern's [cd][0-9a-f] kind field covers the kind-cb clone-metadata wrappers
-# (architecture.md, Controller node, common), so a leftover wrapper is caught
-# here for free. An md array
-# is named as well as its members: md_names by the array's own name,
+# that printed nothing would read as a clean node nobody had listed. An md
+# array is named as well as its members: md_names by the array's own name,
 # md_member_names by its members' dm names, which carry the sp id too — the
 # one md route that still names an
 # `inactive` array whose members neither udev nor mdadm can read. The member
@@ -2302,18 +2292,13 @@ dnv_dm_cnt() {
 
 # dm_kind_names <kind> [node16] — the dm devices of one kind, optionally of one
 # node only. Both roles name their devices dnv-{cluster}-{node}-{kind}-…, and
-# the kind carries the role letter (c0…cb, d0…d5), so it never overlaps
+# the kind carries the role letter (c0…ca, d0…d5), so it never overlaps
 # between the roles; the node id scopes a teardown pass to one of the two
 # agents sharing this VM.
 dm_kind_names() {
 	agent_dm_names | awk -F- -v k="$1" -v n="${2:-}" \
 		'$4 == k && (n == "" || $3 == n)'
 }
-
-# clone_meta_wrappers [cn16] — the kind-cb clone-metadata dm-linears over the
-# arena's loop device. No clone uses one (cnagent.md CN5), so any one listed
-# is a leftover the agent's sweeps remove; empty output means none is left.
-clone_meta_wrappers() { dm_kind_names cb "${1:-}"; }
 
 # clone_bm_files <cluster16> <cn16> <sp16> <clone16> — the basenames of one
 # clone's bitmap chunk files in the cn store, sorted. A clone chunk is
@@ -2506,20 +2491,6 @@ md_member_names() {
 	return 0
 }
 
-tmpfs_teardown() {
-	local dev mnt
-	for dev in $(losetup -a 2>/dev/null | grep "$TMPFS_DIR/" | cut -d: -f1); do
-		timeout 15 losetup -d "$dev" >/dev/null 2>&1
-	done
-	for mnt in "$TMPFS_DIR"/*; do
-		[ -d "$mnt" ] || continue
-		timeout 15 umount "$mnt" >/dev/null 2>&1
-		rmdir "$mnt" 2>/dev/null
-	done
-	rmdir "$TMPFS_DIR" 2>/dev/null
-	return 0
-}
-
 loop_devs() {
 	{
 		losetup -j "$WORK/backing.img" 2>/dev/null | cut -d: -f1
@@ -2528,17 +2499,13 @@ loop_devs() {
 }
 
 # wipe_cn simulates the CN reboot of clone_xfer's stage 6 (cnagent_integtest.md,
-# Cases, clone_xfer): every kernel object of one CN goes, the tmpfs arena
-# included, while the dn objects — the side of the clone's clone meta group
-# among them —, the shared port and $WORK/cn-store stay. The order is that of
+# Cases, clone_xfer): every kernel object of one CN goes, while the dn
+# objects — the side of the clone's clone meta group among them —, the
+# shared port and $WORK/cn-store stay. The order is that of
 # cnagent_integtest.md, Teardown and cleanup, and the dm-clone is removed
 # while its :4: source connection and its clone meta group's leg connection
 # are still up: a clone flushes through its source on removal and blocks
 # without it, and its removal writes its last metadata to its group.
-#
-# Kind cb, the clone-metadata wrapper that no clone uses (cnagent.md CN5),
-# joins the dm passes after kind c7, as a leftover one holds the loop device
-# open and would wedge tmpfs_teardown's `losetup -d` with EBUSY.
 wipe_cn() { # <cn16>
 	resume_suspended
 	drop_subsys_glob "$NQN_IT_PREFIX:*"
@@ -2548,11 +2515,10 @@ wipe_cn() { # <cn16>
 	disconnect_prefix "$NQN_PREFIX:4:"
 	disconnect_prefix "$NQN_PREFIX:2:"
 	local kind
-	for kind in c5 c4 c3 c2 c1 c0 ca c9 cb; do
+	for kind in c5 c4 c3 c2 c1 c0 ca c9; do
 		dm_remove_kind "$kind" "$1"
 	done
 	md_stop_all
-	tmpfs_teardown
 	echo wiped
 }
 
@@ -2610,12 +2576,8 @@ cleanup_phase2() { # <cn16> <dn16>
 	mdr_teardown >/dev/null
 	dm_remove_kind ca "$cn16"
 	dm_remove_kind c9 "$cn16"
-	# Any clone-metadata wrapper, which no clone uses: a leftover kind-cb
-	# holds the loop device open and wedges the `losetup -d` below with EBUSY.
-	dm_remove_kind cb "$cn16"
 	disconnect_prefix "$NQN_PREFIX:2:"
 
-	tmpfs_teardown
 	resume_suspended
 
 	# The dn suite's sequence (dnagent_integtest.md, Teardown and cleanup), now
@@ -2668,7 +2630,7 @@ cleanup_phase2() { # <cn16> <dn16>
 # NOT part of a run: only the driver's --wipe reaches it.
 #
 # Why it exists at all: every teardown verb above removes dm devices BY KIND,
-# and the kind literals they pass are the role-lettered ones (c0…cb, d0…d5).
+# and the kind literals they pass are the role-lettered ones (c0…ca, d0…d5).
 # Residue on a shared lab VM whose name carries no such kind — a bare-digit
 # kind field, or an LVM `dnv--clone--vg-*` node — is walked straight past by
 # those verbs and stays there forever, pinning loop devices and nvmet objects
@@ -2788,7 +2750,7 @@ lab_wipe() {
 	# a cleanup nobody can trust, which is the same rule the sweep this suite
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
-	# devices, the tmpfs, the udev rule, the nvmet port — belongs to the
+	# devices, the udev rule, the nvmet port — belongs to the
 	# ordinary cleanup that runs after it and is not counted here.
 	local dm_left nvmet_left md_left
 	dm_left=$(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv/ {print $1}' | tr '\n' ' ')
@@ -2857,14 +2819,10 @@ diag() {
 	diag_cmd cat /proc/mdstat
 	echo "--- mdadm --detail --scan ---"
 	diag_cmd mdadm --detail --scan
-	echo "--- clone-meta wrappers (kind cb) ---"
-	diag_cmd bash "$0" clone_meta_wrappers
 	echo "--- losetup -a ---"
 	diag_cmd losetup -a
 	echo "--- the md-refusal stage's loop devices ---"
 	diag_cmd bash "$0" mdr_diag
-	echo "--- tmpfs mounts ---"
-	diag_cmd bash -c 'findmnt | grep dnv-tmpfs'
 	echo "--- nvmet configfs ---"
 	diag_cmd ls -R "$NVMET/ports" "$NVMET/subsystems"
 	echo "--- nvme list-subsys ---"
@@ -2893,8 +2851,8 @@ ship_helper() {
 # for cleanup_all's reason: a subsystem on one VM backs a connection on the
 # other, so the shorter the window the better. `--wipe` is its only caller and
 # it always runs the ordinary start-of-run cleanup afterwards, which takes
-# what the wipe deliberately leaves — $WORK, the loop devices, the tmpfs, the
-# udev rule and the nvmet port.
+# what the wipe deliberately leaves — $WORK, the loop devices, the udev rule
+# and the nvmet port.
 #
 # EACH VM'S STATUS IS READ, because the two VMs' output interleaves and a
 # missing report does not stand out.
@@ -3029,7 +2987,7 @@ preflight_vms() {
 		# silent no-op. Note this list is reached
 		# AFTER the start-of-run cleanup_all and not at all under
 		# --cleanup-only, so those sweeps run unchecked.
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm truncate stat findmnt thin_dump; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm stat thin_dump; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# The agents hardcode the configfs path and neither mount nor
 		# modprobe; the harness does both here and nothing else.
@@ -3689,9 +3647,6 @@ case_smoke() {
 	dn_drop "$dn"
 	got=$(helper "$cn" "cn_residue $(hex16 "${CNID[$cn]}")")
 	[ -z "$got" ] || die "smoke: vm$cn still holds cn objects: $got"
-	got=$(helper "$cn" "clone_meta_wrappers $(hex16 "${CNID[$cn]}")")
-	[ -z "$got" ] ||
-		die "smoke: the clone-metadata arena still holds wrappers: $got"
 	out=$(cnctl "$cn" check-cn --fresh --revision "${CNSYNC[$cn]}")
 	assert_cn_info_ok "$out" "smoke base state after teardown"
 	assert_no_residue "$sp"
@@ -4670,12 +4625,11 @@ teardown_shape() { # sp nqn uuid req1 req2 hostvm
 # with, in one place because five copies of it would drift: nothing of the sp
 # may be left on either VM in dm, nvmet or md — which covers the DN's side
 # devices and :2: exports as well as the CN's stack — neither CN may hold a dm
-# device or a host-facing subsystem of its own, the clone arena must be empty,
-# and both CNs must still serve their four base-state resources
-# (architecture.md, Controller node, common). That last
-# one is not redundant: a teardown that took the port, the tmpfs or the loop
-# arena with it would satisfy every residue check above and still leave the CN
-# unable to build the next SP.
+# device or a host-facing subsystem of its own, and both CNs must still serve
+# their base state, the port (architecture.md, Controller node, common). That
+# last one is not redundant: a teardown that took the port with it would
+# satisfy every residue check above and still leave the CN unable to build
+# the next SP.
 #
 # A fresh check-cn answers from a read the agent made after the call began,
 # whose verdict is the node-level one (cnagent.md CN30), and cnagentctl
@@ -4688,9 +4642,6 @@ teardown_assert_clean() { # sp label
 	for idx in 1 2; do
 		got=$(helper "$idx" "cn_residue $(hex16 "${CNID[$idx]}")")
 		[ -z "$got" ] || die "$2: vm$idx still holds cn objects: $got"
-		got=$(helper "$idx" "clone_meta_wrappers $(hex16 "${CNID[$idx]}")")
-		[ -z "$got" ] ||
-			die "$2: vm$idx's clone arena still holds wrappers: $got"
 		out=$(cnctl "$idx" check-cn --fresh --revision "${CNSYNC[$idx]}")
 		assert_cn_info_ok "$out" "$2 cn$idx base state"
 	done
@@ -6051,10 +6002,10 @@ case_clone_xfer() {
 	# The closing base-state probe (cnagent_integtest.md, Cases, clone_xfer),
 	# case S's teardown probe run on both CNs: with its cntlr gone each CN
 	# must hold no dm device and no host-facing subsystem of its own, and the
-	# four base resources (architecture.md, Controller node, common) must
-	# still probe OK afterwards, because a teardown that took the port, the
-	# tmpfs or the loop arena with it would satisfy every residue check above
-	# and still leave the CN unable to serve the next SP. dn_drop 2 took the
+	# base state, the port (architecture.md, Controller node, common), must
+	# still probe OK afterwards, because a teardown that took the port with
+	# it would satisfy every residue check above and still leave the CN
+	# unable to serve the next SP. dn_drop 2 took the
 	# clone meta group's side with the pool's, and the residue checks cover
 	# both.
 	for idx in 1 2; do

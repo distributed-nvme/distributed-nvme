@@ -248,14 +248,6 @@ func TestCloneGroupWritesThroughModel(t *testing.T) {
 // of them — and in a two-rack cluster where only the survivor's rack has room,
 // the one-tier scan would leave AR7 skipping with "no candidate" on every pass
 // instead of replacing.
-//
-// The adapter also asks for no metadata units (architecture.md, Metadata
-// units): model.ReplaceCntlr charges the pick the SP's clone units even past
-// its ceiling, so a CN whose metadata area is full is still a replacement.
-// Both CNs the scans below must find carry a capacity value that reads no
-// free unit — one at the ceiling, one past it — and a scan of the same index
-// that asks for one unit finds neither, so it is the adapter's zero that
-// keeps them.
 func TestReactionCnScanThroughModel(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
@@ -270,15 +262,14 @@ func TestReactionCnScanThroughModel(t *testing.T) {
 		addr     string
 		free     uint64
 		location string
-		used     uint64
 	}{
-		{cnSurvivor, 50, "rack0", 0},
-		{cnOld, 45, "rack1", 0},
-		{cnRackMate, 40, "rack0", common.CnCloneMetaUnitCnt + 9},
-		{cnOther, 30, "rack1", common.CnCloneMetaUnitCnt},
+		{cnSurvivor, 50, "rack0"},
+		{cnOld, 45, "rack1"},
+		{cnRackMate, 40, "rack0"},
+		{cnOther, 30, "rack1"},
 	} {
 		err := cli.Put(ctx, model.CnCapacityKey(cid, cn.free, cn.addr),
-			&pb.CnCapacity{Location: cn.location, UsedMetaUnits: cn.used})
+			&pb.CnCapacity{Location: cn.location})
 		if err != nil {
 			t.Fatalf("seed %s: %v", cn.addr, err)
 		}
@@ -311,18 +302,6 @@ func TestReactionCnScanThroughModel(t *testing.T) {
 	got := scan([]string{cnSurvivor, cnOther}, []string{"rack0", "rack1"})
 	if len(got) != 1 || got[0] != cnRackMate {
 		t.Errorf("tier 2 = %v, want [%s]", got, cnRackMate)
-	}
-	// The control: asked for one unit, the same index offers neither full
-	// CN, in either tier.
-	cands, _, err := model.FindCnCandidatesAntiAffine(
-		ctx, cli, cid, 20, 1, 10, []string{cnOld}, nil,
-		[]string{cnSurvivor}, []string{"rack0"},
-	)
-	if err != nil {
-		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
-	}
-	if len(cands) != 0 {
-		t.Errorf("a scan asking for a unit = %v, want no full CN", cands)
 	}
 }
 

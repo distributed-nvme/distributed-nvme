@@ -61,15 +61,6 @@ func (e *opsEnv) clone(name string) *pb.Clone {
 	return clone
 }
 
-// setCloneMetaUnits gives a planted clone its meta_units, as CreateClone
-// writes them (architecture.md, Metadata units). No node is charged here.
-func (e *opsEnv) setCloneMetaUnits(name string, units uint64) {
-	e.t.Helper()
-	clone := e.clone(name)
-	clone.MetaUnits = units
-	mustPut(e.t, e.cli, CloneKey(e.cid, opsSpId, name), clone)
-}
-
 // drainCloneChunkCnt counts the surviving chunk keys of the fixture clone.
 func (e *opsEnv) drainCloneChunkCnt() int {
 	e.t.Helper()
@@ -320,10 +311,9 @@ func TestDrainCloneBmReadsNoRevision(t *testing.T) {
 // and CLD8's idempotent pop — run for real: two goroutines drive the
 // same clone's drain to the end at the same time, and the clone must end up
 // gone with neither reporting a failure that is not one of the named benign
-// races. The clone's metadata units and the extents of its clone meta group
-// come back exactly once: the loser of the final STM finds the clone gone,
-// so a second release, which would take other units off each CN and credit
-// each DN twice, never happens. And the pool's revision moves exactly
+// races. The extents of its clone meta group come back exactly once: the
+// loser of the final STM finds the clone gone, so a second release, which
+// would credit each DN twice, never happens. And the pool's revision moves exactly
 // once over the whole drain, for the final STM (CLD12): ten or more batches
 // from two drivers bump nothing (CLD8).
 //
@@ -341,10 +331,6 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 		pairs = append(pairs, [2]uint32{uint32(idx / 8), uint32(idx % 8)})
 	}
 	env.putDrainClone(true, pairs)
-	// 3 units of the clone and 5 of another SP on each cntlr's CN.
-	env.setCloneMetaUnits(drainCloneName, 3)
-	env.setCnUsed(opsCnA, 3+5)
-	env.setCnUsed(opsCnB, 3+5)
 	grp := opsCloneGrp(true)
 	env.setCloneGrp(drainCloneName, grp)
 	env.chargeGrp(grp)
@@ -439,12 +425,6 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 		len(conf.GetTdNameList()) != 2 {
 		t.Errorf("the concurrent drain damaged the SpConf: %v", conf)
 	}
-	for _, addrPort := range []string{opsCnA, opsCnB} {
-		if got := env.cn(addrPort).GetUsedMetaUnits(); got != 5 {
-			t.Errorf("%s used_meta_units: got %d, want exactly 5 — the "+
-				"clone's 3 given back once", addrPort, got)
-		}
-	}
 	for addrPort, rev := range dnRevs {
 		dn := env.dn(addrPort)
 		if dn.GetFreeExtCnt() != opsDnFree || len(dn.GetSidePtrList()) != 0 {
@@ -498,258 +478,66 @@ func (e *opsEnv) finishDrainClone() error {
 		opsSpName, drainCloneName, drainCloneId, e.cc)
 }
 
-// TestFinishCloneDeleteReleasesMetaUnits pins the units ledger the clone
-// drain moves (architecture.md, Metadata units): the final STM gives the
-// clone's meta_units back on the CN of every cntlr of the SP, and the counts
-// other clones charged stay. The capacity values follow the records. Only a
-// count moves, so no CN's free extents, pointers or revision move. The clone
-// has no group here, so no DN key is touched at all; the DN ledger is
-// TestFinishCloneDeleteGivesTheGroupBack's.
-func TestFinishCloneDeleteReleasesMetaUnits(t *testing.T) {
+// TestFinishCloneDeleteReadsNoCn: a clone charges no CN, so the final STM
+// reads no Cntlr and no CN at all, the clone's group given back all the same.
+// A lost Cntlr key does not stop it, and no CN record, capacity key or
+// revision moves.
+func TestFinishCloneDeleteReadsNoCn(t *testing.T) {
 	env := newOpsEnv(t)
-	env.chargeFixture()
 	env.putDrainClone(true, nil)
-	env.setCloneMetaUnits(drainCloneName, 3)
-	env.putMetaClone("other", 0x901, 5, false)
-	env.setCnUsed(opsCnA, 3+5)
-	env.setCnUsed(opsCnB, 3+5)
-	type node struct {
-		cn  *pb.CnConf
-		rev uint64
+	grp := opsCloneGrp(true)
+	env.setCloneGrp(drainCloneName, grp)
+	env.chargeGrp(grp)
+	type cnState struct {
+		conf, capKey, rev int64
 	}
-	cns := map[string]node{}
+	cns := map[string]cnState{}
 	for _, addrPort := range []string{opsCnA, opsCnB} {
-		cns[addrPort] = node{env.cn(addrPort), env.cnRev(addrPort)}
+		cn := env.cn(addrPort)
+		cns[addrPort] = cnState{
+			env.modRev(CnConfKey(env.cid, addrPort)),
+			env.modRev(CnCapacityKey(
+				env.cid, cn.GetFreeExtCnt(), addrPort)),
+			env.modRev(CnRevKey(cn.GetShardCode(), env.cid, cn.GetCnId())),
+		}
 	}
-	dns := map[string]*pb.DnConf{}
-	dnRevs := map[string]uint64{}
-	for _, addrPort := range []string{opsDnA, opsDnB} {
-		dns[addrPort] = env.dn(addrPort)
-		dnRevs[addrPort] = env.dnRev(addrPort)
-	}
+	env.delKey(CntlrKey(env.cid, opsSpId, opsCntlrB))
 
 	if err := env.finishDrainClone(); err != nil {
-		t.Fatalf("FinishCloneDelete: %v", err)
+		t.Fatalf("FinishCloneDelete with a lost cntlr key: %v", err)
+	}
+	if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
+		t.Errorf("the clone key survived")
 	}
 	for addrPort, before := range cns {
 		cn := env.cn(addrPort)
-		if cn.GetUsedMetaUnits() != 5 {
-			t.Errorf("%s used_meta_units: got %d, want 5 (the other "+
-				"clone's)", addrPort, cn.GetUsedMetaUnits())
+		after := cnState{
+			env.modRev(CnConfKey(env.cid, addrPort)),
+			env.modRev(CnCapacityKey(
+				env.cid, cn.GetFreeExtCnt(), addrPort)),
+			env.modRev(CnRevKey(cn.GetShardCode(), env.cid, cn.GetCnId())),
 		}
-		if got := env.cnCapValue(addrPort).GetUsedMetaUnits(); got != 5 {
-			t.Errorf("%s capacity value: got %d used, want 5", addrPort, got)
-		}
-		// Everything but the count is as it was.
-		want := proto.Clone(before.cn).(*pb.CnConf)
-		want.UsedMetaUnits = 5
-		if !proto.Equal(cn, want) {
-			t.Errorf("%s: got %v, want only the count moved: %v",
-				addrPort, cn, want)
-		}
-		if got := env.cnRev(addrPort); got != before.rev {
-			t.Errorf("%s rev: got %d, want %d (a count raises no revision)",
-				addrPort, got, before.rev)
+		if after != before {
+			t.Errorf("%s was written by the clone drain: mod_revisions "+
+				"%+v, want %+v", addrPort, after, before)
 		}
 	}
-	for addrPort, before := range dns {
-		if got := env.dn(addrPort); !proto.Equal(got, before) {
-			t.Errorf("%s moved: %v", addrPort, got)
-		}
-		if got := env.dnRev(addrPort); got != dnRevs[addrPort] {
-			t.Errorf("%s rev: got %d, want %d", addrPort, got,
-				dnRevs[addrPort])
-		}
-	}
-	if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
-		t.Errorf("the clone key survived")
-	}
-}
-
-// TestFinishCloneDeleteReleaseStopsAtZero pins the release's floor: a CN
-// that holds fewer units than the clone's ends at zero, never at a count
-// wrapped around, and a CN already at zero has nothing to give back and is
-// not written at all.
-func TestFinishCloneDeleteReleaseStopsAtZero(t *testing.T) {
-	env := newOpsEnv(t)
-	env.putDrainClone(true, nil)
-	env.setCloneMetaUnits(drainCloneName, 3)
-	env.setCnUsed(opsCnA, 1)
-	cnBRev := env.modRev(CnConfKey(env.cid, opsCnB))
-
-	if err := env.finishDrainClone(); err != nil {
-		t.Fatalf("FinishCloneDelete: %v", err)
-	}
-	if got := env.cn(opsCnA).GetUsedMetaUnits(); got != 0 {
-		t.Errorf("cn-a used_meta_units: got %d, want 0", got)
-	}
-	if got := env.cnCapValue(opsCnA).GetUsedMetaUnits(); got != 0 {
-		t.Errorf("cn-a capacity value: got %d used, want 0", got)
-	}
-	if got := env.modRev(CnConfKey(env.cid, opsCnB)); got != cnBRev {
-		t.Errorf("cn-b, already at zero, was rewritten: mod_revision %d, "+
-			"want %d", got, cnBRev)
-	}
-}
-
-// TestFinishCloneDeleteSkipsALostCn is releaseSpCns's stance on a RECEIVING
-// ledger: a CN record that is gone has nothing left to give the units back
-// to, so the release skips it — without writing it back into existence — and
-// the clone still goes, its other CN credited.
-func TestFinishCloneDeleteSkipsALostCn(t *testing.T) {
-	env := newOpsEnv(t)
-	env.putDrainClone(true, nil)
-	env.setCloneMetaUnits(drainCloneName, 3)
-	env.setCnUsed(opsCnA, 3)
-	env.delKey(CnConfKey(env.cid, opsCnB))
-
-	if err := env.finishDrainClone(); err != nil {
-		t.Fatalf("FinishCloneDelete over a lost cn_conf: %v", err)
-	}
-	if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
-		t.Errorf("the clone key survived")
-	}
-	if got := env.cn(opsCnA).GetUsedMetaUnits(); got != 0 {
-		t.Errorf("cn-a used_meta_units: got %d, want 0", got)
-	}
-	if env.exists(CnConfKey(env.cid, opsCnB)) {
-		t.Errorf("the lost cn_conf was written back")
-	}
-}
-
-// TestFinishCloneDeleteRefusesALostCntlr is the DESCRIBING key's side of the
-// same asymmetry, DrainSpCntlrs's: a listed Cntlr whose key is missing is
-// what would say which CN holds the clone's units, so the release cannot be
-// made exact and the op refuses, writing nothing — the clone stays latched,
-// still listed, and every CN keeps its count.
-func TestFinishCloneDeleteRefusesALostCntlr(t *testing.T) {
-	env := newOpsEnv(t)
-	env.putDrainClone(true, nil)
-	env.setCloneMetaUnits(drainCloneName, 3)
-	env.setCnUsed(opsCnA, 3)
-	env.setCnUsed(opsCnB, 3)
-	env.delKey(CntlrKey(env.cid, opsSpId, opsCntlrB))
-	revBefore := env.spRev()
-
-	err := env.finishDrainClone()
-	precondition := wantPrecondition(t, err, opFinishCloneDelete)
-	if precondition.Reason != "cntlr not found" {
-		t.Errorf("Reason: got %q, want %q", precondition.Reason,
-			"cntlr not found")
-	}
-	if !env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
-		t.Errorf("a refused final STM deleted the clone key")
-	}
-	if got := env.spConf().GetCloneNameList(); len(got) != 1 {
-		t.Errorf("clone_name_list: got %v, want the name kept", got)
-	}
-	for _, addrPort := range []string{opsCnA, opsCnB} {
-		if got := env.cn(addrPort).GetUsedMetaUnits(); got != 3 {
-			t.Errorf("%s used_meta_units: got %d, want 3", addrPort, got)
-		}
-	}
-	if got := env.spRev(); got != revBefore {
-		t.Errorf("SpRev: got %d, want %d", got, revBefore)
-	}
-}
-
-// TestFinishCloneDeleteReleasesTwiceOnASharedCn: two cntlrs of one SP on one
-// CN — a shape architecture.md, Finding CN candidates, forbids but nothing in
-// the store enforces — were each charged the clone, so the CN gets the units
-// back twice, in its one write, and still no revision.
-func TestFinishCloneDeleteReleasesTwiceOnASharedCn(t *testing.T) {
-	env := newOpsEnv(t)
-	cntlr := env.cntlr(opsCntlrB)
-	cntlr.AddrPort = opsCnA
-	cntlr.NvmeTrConf = opsTrConf(opsCnA)
-	mustPut(t, env.cli, CntlrKey(env.cid, opsSpId, opsCntlrB), cntlr)
-	env.putDrainClone(true, nil)
-	env.setCloneMetaUnits(drainCloneName, 3)
-	env.setCnUsed(opsCnA, 2*3+5)
-	cnARev := env.cnRev(opsCnA)
-	cnBMod := env.modRev(CnConfKey(env.cid, opsCnB))
-
-	if err := env.finishDrainClone(); err != nil {
-		t.Fatalf("FinishCloneDelete: %v", err)
-	}
-	if got := env.cn(opsCnA).GetUsedMetaUnits(); got != 5 {
-		t.Errorf("cn-a used_meta_units: got %d, want 5 (the clone's 3 back "+
-			"once per cntlr)", got)
-	}
-	if got := env.cnCapValue(opsCnA).GetUsedMetaUnits(); got != 5 {
-		t.Errorf("cn-a capacity value: got %d used, want 5", got)
-	}
-	if got := env.cnRev(opsCnA); got != cnARev {
-		t.Errorf("cn-a rev: got %d, want %d", got, cnARev)
-	}
-	if got := env.modRev(CnConfKey(env.cid, opsCnB)); got != cnBMod {
-		t.Errorf("cn-b, hosting no cntlr of the SP, was rewritten")
-	}
-}
-
-// TestFinishCloneDeleteWithoutUnitsReadsNoCn: a clone that holds no units — a
-// record written before the counts existed reads zero — has nothing to give
-// back, so the final STM reads no Cntlr and no CN at all. A lost Cntlr key,
-// which a release would refuse over, does not stop it, and no CN record is
-// rewritten.
-func TestFinishCloneDeleteWithoutUnitsReadsNoCn(t *testing.T) {
-	env := newOpsEnv(t)
-	env.putDrainClone(true, nil)
-	env.setCnUsed(opsCnA, 4)
-	cnMods := map[string]int64{}
-	for _, addrPort := range []string{opsCnA, opsCnB} {
-		cnMods[addrPort] = env.modRev(CnConfKey(env.cid, addrPort))
-	}
-	env.delKey(CntlrKey(env.cid, opsSpId, opsCntlrB))
-
-	if err := env.finishDrainClone(); err != nil {
-		t.Fatalf("FinishCloneDelete of a clone with no units: %v", err)
-	}
-	if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) {
-		t.Errorf("the clone key survived")
-	}
-	for addrPort, mod := range cnMods {
-		if got := env.modRev(CnConfKey(env.cid, addrPort)); got != mod {
-			t.Errorf("%s was rewritten for a clone with no units", addrPort)
-		}
-	}
-	if got := env.cn(opsCnA).GetUsedMetaUnits(); got != 4 {
-		t.Errorf("cn-a used_meta_units: got %d, want 4", got)
+	if got := env.dn(opsDnC).GetFreeExtCnt(); got != opsDnFree {
+		t.Errorf("dn-c free_ext_cnt: got %d, want the group's extent back "+
+			"(%d)", got, opsDnFree)
 	}
 }
 
 // TestFinishCloneDeleteAtTheCeiling commits the final STM at its widest
 // shape against the real etcd this package runs with
-// --max-txn-ops=common.EtcdMaxTxnOps: MaxCntlrCntPerSp cntlrs, each on a CN
-// of its own, so every units release is a read of the Cntlr and of the CN
-// and a write of the CN and of its capacity key; and a clone meta group of
+// --max-txn-ops=common.EtcdMaxTxnOps: a clone meta group of
 // MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares, each side on a DN of
 // its own, so every side given back is a read and a write of its DN, of its
-// DnRev, and a delete and a put of its capacity key. Every CN and DN is
-// credited, and the whole release is one transaction with the clone's
-// removal.
+// DnRev, and a delete and a put of its capacity key. Every DN is credited,
+// and the whole release is one transaction with the clone's removal.
 func TestFinishCloneDeleteAtTheCeiling(t *testing.T) {
 	env := newOpsEnv(t)
-	conf := env.spConf()
-	addrs := []string{opsCnA, opsCnB}
-	for idx := len(conf.GetCntlrIdList()); idx < common.MaxCntlrCntPerSp; idx++ {
-		addrPort := fmt.Sprintf("ceil-cn-%d:9000", idx)
-		cntlrId := opsCntlrB + uint64(idx)
-		env.putCn(addrPort, uint64(810+idx), uint32(idx), opsCnFree)
-		mustPut(t, env.cli, CntlrKey(env.cid, opsSpId, cntlrId), &pb.Cntlr{
-			AddrPort:   addrPort,
-			NvmeTrConf: opsTrConf(addrPort),
-			CntlidSlot: uint32(idx),
-		})
-		conf.CntlrIdList = append(conf.CntlrIdList, cntlrId)
-		addrs = append(addrs, addrPort)
-	}
-	mustPut(t, env.cli, SpConfKey(env.cid, opsSpName), conf)
 	env.putDrainClone(true, nil)
-	env.setCloneMetaUnits(drainCloneName, 3)
-	for _, addrPort := range addrs {
-		env.setCnUsed(addrPort, 3+5)
-	}
 	var dnAddrs []string
 	for idx := 0; idx < common.MaxAllocLegPerGrp+common.MaxSpareLegPerGrp; idx++ {
 		addrPort := fmt.Sprintf("ceil-dn-%d:9000", idx)
@@ -763,20 +551,10 @@ func TestFinishCloneDeleteAtTheCeiling(t *testing.T) {
 	env.chargeGrp(grp)
 
 	if err := env.finishDrainClone(); err != nil {
-		t.Fatalf("a maximum-shape FinishCloneDelete (%d cntlrs on as many "+
-			"CNs, %d sides on as many DNs) did not commit: %v",
-			common.MaxCntlrCntPerSp, len(dnAddrs), err)
+		t.Fatalf("a maximum-shape FinishCloneDelete (%d sides on as many "+
+			"DNs) did not commit: %v", len(dnAddrs), err)
 	}
 	rev := env.modRev(SpConfKey(env.cid, opsSpName))
-	for _, addrPort := range addrs {
-		if got := env.cn(addrPort).GetUsedMetaUnits(); got != 5 {
-			t.Errorf("%s used_meta_units: got %d, want 5", addrPort, got)
-		}
-		if got := env.modRev(CnConfKey(env.cid, addrPort)); got != rev {
-			t.Errorf("%s: mod_revision %d, want the op's %d",
-				addrPort, got, rev)
-		}
-	}
 	for _, addrPort := range dnAddrs {
 		dn := env.dn(addrPort)
 		if dn.GetFreeExtCnt() != opsDnFree || len(dn.GetSidePtrList()) != 0 {
@@ -1071,21 +849,16 @@ func TestCloneDrainOpsRefuseALiveClone(t *testing.T) {
 // batches are ledger-free — clone chunks are not budgeted to any node, and a
 // batch bumps no SpRev, which is what makes it MaxDelBmPerTxn plus two
 // compares whatever the ceilings become — and its final STM moves only what
-// the clone itself was charged: its metadata units on its cntlrs' CNs
-// (TestFinishCloneDeleteReleasesMetaUnits) and the extents of its own clone
-// meta group on that group's DNs (TestFinishCloneDeleteGivesTheGroupBack).
-// So no DN of the slice moves, no CN's free extents or revision move, the
-// SP's own inventory is untouched but for the one name the final STM
-// removes, and its revision moves once, for that final STM (CLD12). No CN
-// holds a run of its arena for the clone, which keeps its dm-clone metadata
-// on its clone meta group (cnagent.md CN18).
+// the clone itself was charged: the extents of its own clone meta group on
+// that group's DNs (TestFinishCloneDeleteGivesTheGroupBack). So no DN of the
+// slice moves, no CN's free extents or revision move, the SP's own inventory
+// is untouched but for the one name the final STM removes, and its revision
+// moves once, for that final STM (CLD12). No CN holds the clone's metadata,
+// which is on its clone meta group (cnagent.md CN18).
 func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()
 	chunks := env.putDrainClone(true, [][2]uint32{{0, 0}, {2, 1}})
-	env.setCloneMetaUnits(drainCloneName, 3)
-	env.setCnUsed(opsCnA, 3)
-	env.setCnUsed(opsCnB, 3)
 	grp := opsCloneGrp(true)
 	env.setCloneGrp(drainCloneName, grp)
 	env.chargeGrp(grp)
@@ -1133,11 +906,7 @@ func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	if got := env.slice(); !proto.Equal(got, before.slice) {
 		t.Errorf("the clone drain changed the slice: %v", got)
 	}
-	// The two charges the clone itself held come back.
-	if got := env.cn(opsCnA).GetUsedMetaUnits(); got != 0 {
-		t.Errorf("cn-a used_meta_units: got %d, want the clone's 3 back",
-			got)
-	}
+	// The one charge the clone itself held comes back.
 	if got := env.dn(opsDnC).GetFreeExtCnt(); got != opsDnFree {
 		t.Errorf("dn-c free_ext_cnt: got %d, want the group's extent back "+
 			"(%d)", got, opsDnFree)

@@ -34,7 +34,6 @@ const (
 	DmKindCnXferFinal  DmKind = "c8"
 	DmKindCnLeg        DmKind = "c9"
 	DmKindCnGrp        DmKind = "ca"
-	DmKindCnCloneMeta  DmKind = "cb"
 )
 
 // DmRoleCn and DmRoleDn are the role letters of DmKind.
@@ -45,7 +44,7 @@ const (
 
 // dmKindIdCnt is how many 16-hex-digit id fields a name of each kind carries
 // (architecture.md, dm device names; cnagent.md, Names and constants in `common`, for
-// c9 to cb). ParseDmName enforces it, so a name whose shape does not match
+// c9 and ca). ParseDmName enforces it, so a name whose shape does not match
 // its kind is "not a dnv dm name" rather than a half-decoded one.
 var dmKindIdCnt = map[DmKind]int{
 	DmKindDnError:     3,
@@ -66,7 +65,6 @@ var dmKindIdCnt = map[DmKind]int{
 	DmKindCnXferFinal:  2,
 	DmKindCnLeg:        2,
 	DmKindCnGrp:        2,
-	DmKindCnCloneMeta:  2,
 }
 
 // NqnKind is the kind field of a dnv NVMe qualified name. Unlike DmKind it
@@ -99,14 +97,11 @@ const (
 	localStorKindCntlr   = "cntlr"
 	localStorKindMigrBm  = "migr-bm"
 	localStorKindCloneBm = "clone-bm"
-
-	tmpFileName = "tmp-file"
 )
 
 type NameFmt struct {
 	dmPrefix        string
 	nqnPrefix       string
-	tmpfsPrefix     string
 	localStorPrefix string
 }
 
@@ -120,7 +115,6 @@ func NewNameFmt(localStorPrefix string) *NameFmt {
 	return &NameFmt{
 		dmPrefix:        DmPrefix,
 		nqnPrefix:       NqnPrefix,
-		tmpfsPrefix:     DefaultTmpfsPrefix,
 		localStorPrefix: localStorPrefix,
 	}
 }
@@ -508,75 +502,6 @@ func (nf *NameFmt) CnGrpName(
 		DmKindCnGrp,
 		spId,
 		grpId,
-	)
-}
-
-func (nf *NameFmt) CnTmpfsPath(
-	clusterId uint64,
-	cnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s/%016x-%016x",
-		nf.tmpfsPrefix,
-		clusterId,
-		cnId,
-	)
-}
-
-func (nf *NameFmt) CnTmpFileName() string {
-	return tmpFileName
-}
-
-func (nf *NameFmt) CnTmpFilePath(
-	clusterId uint64,
-	cnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s/%s",
-		nf.CnTmpfsPath(clusterId, cnId),
-		nf.CnTmpFileName(),
-	)
-}
-
-// CnCloneMetaDmName is the name of a clone-metadata wrapper over the CN
-// clone-metadata arena (architecture.md, Controller node, common): a
-// dm-linear over a unit range of the single
-// loop device over CnTmpFilePath. No clone keeps its metadata there, so the
-// cn agent's sweeps remove every such wrapper they find (cnagent.md CN2,
-// CN21).
-func (nf *NameFmt) CnCloneMetaDmName(
-	clusterId uint64,
-	cnId uint64,
-	spId uint64,
-	cloneId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s-%016x-%016x-%s-%016x-%016x",
-		nf.dmPrefix,
-		clusterId,
-		cnId,
-		DmKindCnCloneMeta,
-		spId,
-		cloneId,
-	)
-}
-
-// CnCloneMetaDmPrefix is the `dmsetup ls` filter that enumerates this CN's
-// clone-metadata wrappers. The cn agent's sweep removes every kind-`cb`
-// device of this cluster and cn (cnagent.md CN2) by that listing — so the
-// prefix has to be built from the same nf.dmPrefix and the same kind
-// constant as CnCloneMetaDmName, never from an ad-hoc literal in the role
-// package.
-func (nf *NameFmt) CnCloneMetaDmPrefix(
-	clusterId uint64,
-	cnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s-%016x-%016x-%s-",
-		nf.dmPrefix,
-		clusterId,
-		cnId,
-		DmKindCnCloneMeta,
 	)
 }
 

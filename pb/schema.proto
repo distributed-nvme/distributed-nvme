@@ -278,9 +278,11 @@ message DnInfo {
 
 message CnInfo {
     ResInfo port_info = 1;
-    ResInfo tmpfs_info = 2;
-    ResInfo tmp_file_info = 3;
-    ResInfo loop_dev_info = 4;
+    // Retired with their numbers, never reused: a field renumbered onto one
+    // would decode an older agent's row as itself, silently; the names go
+    // with them.
+    reserved 2, 3, 4;
+    reserved "tmpfs_info", "tmp_file_info", "loop_dev_info";
     reserved 5;  // retired, never reused: a field renumbered onto it would decode silently
 }
 
@@ -332,7 +334,11 @@ message CntlrInfo {
     map<uint64, ResInfo> xfer_id_to_namespace = 14;
     map<uint64, ResInfo> clone_id_to_target = 15;
     map<uint64, ResInfo> clone_id_to_dm_clone = 16;
-    map<uint64, ResInfo> clone_id_to_meta = 17;
+    reserved 17;
+    reserved "clone_id_to_meta";  // retired with its number, never reused:
+                                  // a map renumbered onto 17 would decode an
+                                  // older agent's rows as its own,
+                                  // silently; the name goes with it.
     // One row per side of each leg whose side_list holds two sides, keyed by
     // side id: whether this node holds a live NVMe controller to that side's
     // address (cnagent.md CN28). Every cntlr reports it, on both channels;
@@ -454,16 +460,11 @@ message CnConf {
     repeated CntlrPointer cntlr_ptr_list = 7;
     uint64 total_ext_cnt = 8;
     uint64 free_ext_cnt = 9;
-    // The units of this node's metadata area charged for clones: every clone
-    // of a pool is charged to the node of each cntlr of the pool
-    // (architecture.md, Metadata units), though no clone keeps its metadata
-    // there. CreateClone charges it with the units it computes and stores in
-    // the clone's meta_units; CreateCntlr and ReplaceCntlr charge it, and
-    // FinishCloneDelete, DeleteCntlr and ReplaceCntlr release it, by reading
-    // each clone's meta_units. Only ReplaceCntlr may charge past
-    // CnCloneMetaUnitCnt. A write that changes only this count raises no
-    // revision, and a release stops at zero. Appended, never renumbered.
-    uint64 used_meta_units = 10;
+    reserved 10;
+    reserved "used_meta_units";  // retired with its number, never reused: a
+                                 // varint field renumbered onto 10 would
+                                 // decode a stored record's count as
+                                 // itself, silently; the name goes with it.
 }
 
 // {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
@@ -482,14 +483,11 @@ message DnCapacity {
 // {dnv_prefix} cn_capacity {cluster_id} {free_ext_cnt} {addr_port}
 message CnCapacity {
     string location = 1;
-    // A copy of the node's CnConf.used_meta_units (architecture.md,
-    // Metadata units): every transaction that writes the key writes it, and
-    // every transaction that changes the count rewrites the key, so it
-    // follows the record. A scan reads the node's free units from it,
-    // CnCloneMetaUnitCnt less this and never below zero, and skips a node
-    // short of what it needs; a value without the field reads as nothing
-    // used. Appended, never renumbered.
-    uint64 used_meta_units = 2;
+    reserved 2;
+    reserved "used_meta_units";  // retired with its number, never reused: a
+                                 // varint field renumbered onto 2 would
+                                 // decode a stored value's count as itself,
+                                 // silently; the name goes with it.
 }
 
 // {dnv_prefix} cdc {cluster_id} {shard_code} {sp_id} {ss_id}
@@ -601,14 +599,11 @@ message Clone {
     // a renumbered field decodes silently into unknown fields rather than
     // failing.
     bool deleting = 12;
-    // The metadata units this clone is charged on the node of each cntlr of
-    // its pool (architecture.md, Metadata units): common.CloneMetaUnits of the
-    // destination td's size and the pool's data_block_size, set by
-    // CreateClone and never changed. Every later charge and release reads it
-    // here, so a release gives back exactly what was charged. The cn agent
-    // does not read it: the clone keeps its dm-clone metadata on its clone
-    // meta group (meta_grp). Appended, never renumbered.
-    uint64 meta_units = 13;
+    reserved 13;
+    reserved "meta_units";  // retired with its number, never reused: a
+                            // varint field renumbered onto 13 would decode
+                            // a stored record's count as itself, silently;
+                            // the name goes with it.
     // The clone meta group (architecture.md, Terminology and object model):
     // the one group the clone owns, one leg or the legs of an md-raid1 as
     // the pool's redundancy gives a group, whose sides are charged to disk

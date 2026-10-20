@@ -171,36 +171,47 @@ func TestDeleteCloneLatchesOnly(t *testing.T) {
 	}
 }
 
-// TestCloneDrainGivesTheUnitsAndTheExtentsBack pins where a clone's two
-// charges come back (architecture.md, Metadata units; architecture.md,
-// Clones): CreateClone charged its metadata units to the CN of every cntlr of
-// the pool and its clone meta group's sides to their DNs, the latch leaves
-// both where they are — the clone is still a clone of the pool until the
-// drain's final step, and a cntlr created meanwhile is charged its units too
-// — and model.FinishCloneDelete gives both back in the step that removes the
-// record. Another clone's units and sides stay, the capacity values follow
-// the counts, and no CN revision moves at any point, since only units change
-// there. A DN of the drained group ends with the record it had before the
-// clone was created, at the revision two bumps later — the charge and the
-// release — so a clone made and deleted leaves no charge behind.
-func TestCloneDrainGivesTheUnitsAndTheExtentsBack(t *testing.T) {
+// TestCloneDrainGivesTheExtentsBack pins where a clone's one charge comes
+// back (architecture.md, Clones): CreateClone charged its clone meta group's
+// sides to their DNs, the latch leaves them where they are — the clone is
+// still a clone of the pool until the drain's final step — and
+// model.FinishCloneDelete gives them back in the step that removes the
+// record. Another clone's sides stay, and the capacity values follow the
+// records. No CN record or revision moves at any point, since a clone
+// charges no CN. A DN of the drained group ends with the record it had
+// before the clone was created, at the revision two bumps later — the charge
+// and the release — so a clone made and deleted leaves no charge behind.
+func TestCloneDrainGivesTheExtentsBack(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst-a", 900, 7, 0, true)
 	env.putTd("dst-b", 901, 8, 0, true)
 	dnBefore := volDnSnapshot(env)
+	cnBefore := map[string]*pb.CnConf{}
+	cnRevBefore := map[string]uint64{}
+	for _, addrPort := range []string{volCnA, volCnB} {
+		cnBefore[addrPort] = env.cn(addrPort)
+		cnRevBefore[addrPort] = env.cnRev(addrPort)
+	}
+	wantCnsUntouched := func(stage string) {
+		t.Helper()
+		for addrPort, was := range cnBefore {
+			if got := env.cn(addrPort); !proto.Equal(got, was) {
+				t.Errorf("%s moved %s: %v", addrPort, stage, got)
+			}
+			if got := env.cnRev(addrPort); got != cnRevBefore[addrPort] {
+				t.Errorf("%s rev %s: got %d, want %d", addrPort, stage,
+					got, cnRevBefore[addrPort])
+			}
+		}
+	}
 	volCreateClone(env, "clone-a", "dst-a")
 	grpA := volCloneGrpOf(env, "clone-a")
 	volCreateClone(env, "clone-b", "dst-b")
 	grpB := volCloneGrpOf(env, "clone-b")
-	both := 2 * volCloneUnits
-	for _, addrPort := range []string{volCnA, volCnB} {
-		volWantCnUnits(t, env, addrPort, both, 1)
-	}
+	wantCnsUntouched("on the creates")
 
 	volLatchClone(env, "clone-a")
-	for _, addrPort := range []string{volCnA, volCnB} {
-		volWantCnUnits(t, env, addrPort, both, 1)
-	}
+	wantCnsUntouched("on the latch")
 	latched := volDnSnapshot(env)
 	for addrPort, was := range latched {
 		if got := env.dn(addrPort); !proto.Equal(got, was.conf) {
@@ -212,9 +223,7 @@ func TestCloneDrainGivesTheUnitsAndTheExtentsBack(t *testing.T) {
 	if env.exists(model.CloneKey(env.cid, volSpId, "clone-a"), &pb.Clone{}) {
 		t.Fatalf("the clone key survived the drain")
 	}
-	for _, addrPort := range []string{volCnA, volCnB} {
-		volWantCnUnits(t, env, addrPort, volCloneUnits, 1)
-	}
+	wantCnsUntouched("on the drain")
 	// Every DN ends as clone-b alone would have left it: clone-a's sides,
 	// legs and spares alike, are gone from it, clone-b's stay.
 	sidesOf := func(grp *pb.Group) map[string]*pb.SidePointer {

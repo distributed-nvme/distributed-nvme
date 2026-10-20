@@ -4257,33 +4257,6 @@ func (e *sptEnv) setCnFree(addrPort string, freeExt uint64) {
 	)
 }
 
-// setCnUsed sets one CN's used_meta_units as a write that changes only the
-// count leaves the store (architecture.md, Metadata units): the record and
-// its capacity value carry the new count, the key stays where the free count
-// puts it, and no revision moves. It is how a test fills a CN's metadata area
-// without the clones that would.
-func (e *sptEnv) setCnUsed(addrPort string, used uint64) {
-	e.t.Helper()
-	cn := e.cnConf(addrPort)
-	cn.UsedMetaUnits = used
-	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), cn)
-	mustPut(
-		e.t, e.cli,
-		model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
-		model.CnCapacityValue(cn),
-	)
-}
-
-// cnCapValue is the value of the capacity key one CN's record implies, which
-// a test reads the CN's used metadata units back from as the scans do.
-func (e *sptEnv) cnCapValue(addrPort string) *pb.CnCapacity {
-	e.t.Helper()
-	value := &pb.CnCapacity{}
-	e.get(model.CnCapacityKey(
-		e.cid, e.cnConf(addrPort).GetFreeExtCnt(), addrPort), value)
-	return value
-}
-
 // setCnBatchSize stores a cn_batch_size in the cluster's conf. At 1 every CN
 // scan returns only the fullest eligible CN, so every pick is forced.
 func (e *sptEnv) setCnBatchSize(size uint32) {

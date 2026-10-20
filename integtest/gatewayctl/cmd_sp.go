@@ -344,10 +344,8 @@ func setupGrowSlice(fs *flag.FlagSet) job {
 // --slot is the cntlid_slot the new controller takes; it must be in the SP's
 // cntlid_slot_list and unused, else the gateway refuses the request. Every
 // create-cntlr of the gateway suite takes a free slot, and
-// TestCreateCntlrRefusals pins both refusals as INVALID_ARGUMENT; the suite's
-// ceiling case also sends one whose only candidate CN lacks the metadata room
-// for the pool's clones (architecture.md, Metadata units). --cn-black and
-// --cn-white fill cn_selector; the gateway suite passes neither.
+// TestCreateCntlrRefusals pins both refusals as INVALID_ARGUMENT. --cn-black
+// and --cn-white fill cn_selector; the gateway suite passes neither.
 func setupCreateCntlr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint

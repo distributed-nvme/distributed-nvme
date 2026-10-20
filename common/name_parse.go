@@ -14,8 +14,8 @@ import (
 
 // DmName is a dnv dm device name decoded into its fields. Which object each
 // Ids position names depends on the kind (architecture.md, dm device names;
-// cnagent.md, Names and constants in `common`, for c9 to cb); for every kind of both
-// roles Ids[0] is the sp id.
+// cnagent.md, Names and constants in `common`, for c9 and ca); for every kind
+// of both roles Ids[0] is the sp id.
 type DmName struct {
 	ClusterId uint64
 	NodeId    uint64

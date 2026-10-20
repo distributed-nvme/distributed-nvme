@@ -24,7 +24,7 @@ import (
 )
 
 // fakeNode is an in-memory model of the slice of the OS the cn agent drives:
-// device-mapper, md, the tmpfs/loop base state, the nvmet configfs tree,
+// device-mapper, md, the nvmet configfs tree,
 // the sysfs nvme-subsystem tree the leg probe walks, thin-provisioning-tools
 // and the local store. It backs common.FakeOsClient, records every call, and
 // lets tests assert command sequences, probe-first idempotency and teardown
@@ -44,8 +44,8 @@ type fakeNode struct {
 	// production (log.md R5); "" for a ctx without one.
 	traced map[string][]string
 
-	// block devices, by /dev path. The number of an md array, an NVMe
-	// multipath head and a loop device is published in sysfs too, at
+	// block devices, by /dev path. The number of an md array and an NVMe
+	// multipath head is published in sysfs too, at
 	// /sys/block/<kname>/dev, which the agent reads it from (blockDevNo):
 	// publishBlockDev and dropBlockDev keep the two in step, and an md
 	// array's comes from its own fakeArray.devNo (publishArray).
@@ -129,23 +129,6 @@ type fakeNode struct {
 	// group whose first data block reads zero. A test moves it
 	// (setCloneHydrated).
 	cloneHydrated map[string]uint64
-
-	// the base state (architecture.md, Controller node, common): the
-	// clone-metadata arena is a plain file on a tmpfs mount behind one loop
-	// device ([D14]) — no LVM state of any kind.
-	mounts   map[string]string
-	loops    map[string][]string // backing file → loop devices
-	plain    map[string]uint64   // plain files → size
-	nextLoop int
-	// loopHolders are holders of a loop device, keyed by its /dev path, that
-	// its sysfs holders directory shows beside the dm devices whose tables
-	// map it: an md array, or a dm device the fake does not model.
-	loopHolders map[string][]string
-	// loopOpen marks a loop device that something holds open without
-	// stacking on it (a process with an fd): no holder shows, and a detach
-	// only marks it to go when the last user closes it, so it stays
-	// attached and listed.
-	loopOpen map[string]bool
 
 	// configfs / sysfs / directories
 	dirs  map[string]bool
@@ -272,7 +255,9 @@ type fakeNode struct {
 	// with the given error text, and changes nothing — a configfs store
 	// handler that answered no.
 	failWriteAlways map[string]string
-	// gate blocks a command until the channel is closed (lock tests).
+	// gate blocks a command until the channel is closed (lock tests). It, and
+	// hardGate and cancelCmd below, also match an mtime read by its line
+	// (readMtime).
 	gate map[string]chan struct{}
 	// hardGate blocks a command until the channel is closed and — unlike gate
 	// — ignores ctx cancellation, modelling the real child of
@@ -422,11 +407,6 @@ func newFakeNode() *fakeNode {
 		memberArray:   make(map[string]string),
 		assembleDrop:  make(map[string]bool),
 		cloneHydrated: make(map[string]uint64),
-		mounts:        make(map[string]string),
-		loops:         make(map[string][]string),
-		plain:         make(map[string]uint64),
-		loopHolders:   make(map[string][]string),
-		loopOpen:      make(map[string]bool),
 		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
 		files:         make(map[string]string),
 		links:         make(map[string]string),
@@ -605,10 +585,10 @@ func (f *fakeNode) SysfsNoDeadline() []string {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "list ", "mtime ", "cmd lsblk ", "cmd stat ", "cmd findmnt ",
+	"cmd ls ", "list ", "mtime ", "cmd lsblk ", "cmd stat ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	"cmd dmsetup ls", "cmd nvme list-subsys",
-	"cmd losetup --associated", "cmd mdadm --detail", "cmd mdadm --examine",
+	"cmd mdadm --detail", "cmd mdadm --examine",
 	"cmd thin_dump ", "read ", "readproto ", "readblock ", "readblockdirect ",
 }
 
@@ -774,8 +754,7 @@ func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 }
 
 // dirAnswer is what the listing line of path answers: a hook's failure, the
-// holders of a loop device, the directory's entries, or not there. Called
-// with f.mu held.
+// directory's entries, or not there. Called with f.mu held.
 func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
 	if err := f.inProcessHookErr(line, &fs.PathError{
 		Op: "readdirent", Path: path, Err: syscall.EIO}); err != nil {
@@ -785,9 +764,6 @@ func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
 		// SH18: the nvmet configfs tree is listed by `ls` alone. A listing
 		// of it here took the wrong path, and it does not answer.
 		return nil, context.DeadlineExceeded
-	}
-	if dev, ok := f.loopOfHoldersDir(path); ok {
-		return f.holdersOfLoop(dev), nil
 	}
 	if !f.dirs[path] {
 		return nil, fmt.Errorf("no such directory: %s: %w", path,
@@ -803,7 +779,10 @@ func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
 // fixed time. It records "mtime <path>", and the command hooks match that
 // line as they match a listing's: a fail hook answers an I/O error and a
 // kill hook a read the soft timeout cut off, both never a missing
-// directory, which only the model says.
+// directory, which only the model says. The gate, hardGate and cancelCmd
+// hooks match it as they match a command's line: it is the first OS call
+// of every converge and every read of a CN (the port probe, cnagent.md
+// CN5), and a test parks or cuts off such a pass there (portProbeLine).
 func (f *fakeNode) readMtime(
 	ctx context.Context, path string,
 ) (time.Time, error) {
@@ -811,13 +790,31 @@ func (f *fakeNode) readMtime(
 		return time.Time{}, err
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	line := "mtime " + path
 	f.record("%s", line)
 	f.recordTrace(ctx, line)
 	if _, ok := ctx.Deadline(); !ok && strings.HasPrefix(path, "/sys/") {
 		// SH15, as for readFile.
 		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
+	}
+	gate, hard, cancel := f.parksOf(line)
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return time.Time{}, ctx.Err()
+		}
+	}
+	if hard != nil {
+		<-hard
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if cancel != nil {
+		// The read ran, and its caller's ctx went while it did.
+		cancel()
+		return time.Time{}, ctx.Err()
 	}
 	if err := f.inProcessHookErr(line, &fs.PathError{
 		Op: "lstat", Path: path, Err: syscall.EIO}); err != nil {
@@ -828,6 +825,35 @@ func (f *fakeNode) readMtime(
 			Op: "lstat", Path: path, Err: syscall.ENOENT}
 	}
 	return fakeDirMtime, nil
+}
+
+// parksOf is the gate and the hard gate whose key line matches, and the
+// cancelCmd hook it takes, as runCommand finds them. Called with f.mu held.
+func (f *fakeNode) parksOf(
+	line string,
+) (chan struct{}, chan struct{}, context.CancelFunc) {
+	var gate, hard chan struct{}
+	for key, ch := range f.gate {
+		if strings.Contains(line, key) {
+			gate = ch
+			break
+		}
+	}
+	for key, ch := range f.hardGate {
+		if strings.Contains(line, key) {
+			hard = ch
+			break
+		}
+	}
+	var cancel context.CancelFunc
+	for key, fn := range f.cancelCmd {
+		if strings.Contains(line, key) {
+			delete(f.cancelCmd, key)
+			cancel = fn
+			break
+		}
+	}
+	return gate, hard, cancel
 }
 
 // fakeDirMtime is the one time readMtime answers for every directory.
@@ -1236,16 +1262,8 @@ func (f *fakeNode) dispatch(
 		return f.cmdNvme(args)
 	case "mdadm":
 		return f.cmdMdadm(args)
-	case "mount":
-		return f.cmdMount(args)
-	case "findmnt":
-		return f.cmdFindmnt(args)
 	case "stat":
 		return f.cmdStat(args)
-	case "truncate":
-		return f.cmdTruncate(args)
-	case "losetup":
-		return f.cmdLosetup(args)
 	case "thin_dump":
 		return f.cmdThinDump(args)
 	}
@@ -1335,7 +1353,6 @@ func (f *fakeNode) cmdRm(args []string) (string, int) {
 		delete(f.files, path)
 		delete(f.links, path)
 		delete(f.protos, path)
-		delete(f.plain, path)
 	}
 	return "", 0
 }
@@ -1531,7 +1548,7 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 	case "ls":
 		// The real tool prints "{name}\t({major}:{minor})" per device and the
 		// literal "No devices found" — still exit 0 — on an empty node, which
-		// is what the wrapper enumeration's prefix filter has to drop (CN5).
+		// the sweep's strict listing reads as no device (Dm.List).
 		names := make([]string, 0, len(f.dms)+len(f.lsGhosts))
 		for name := range f.dms {
 			names = append(names, name)
@@ -2795,167 +2812,21 @@ func (f *fakeNode) seedArray(dev, name string, members ...string) {
 	f.publishArray(array)
 }
 
-// ---------------------------------------------------------------------------
-// tmpfs / loop
-// ---------------------------------------------------------------------------
-
-// cmdMount mounts a fresh tmpfs at the path. Over a path that already carries
-// one, the new mount STACKS, as the kernel's does: the earlier tmpfs stays
-// mounted underneath with everything on it, and the path now shows an empty
-// filesystem. So a file under the path is gone from `stat`, and `losetup
-// --associated` stops listing the loop device it backs — losetup matches a
-// loop by the backing file's inode, and a file created there afterwards is a
-// new one — while the loop device itself stays. That is what a converge that
-// read a killed `findmnt` as "nothing mounted" does to the live arena (CN5),
-// and it is modelled so that such a read shows what follows on a node:
-// a fresh `truncate` and a second loop device.
-func (f *fakeNode) cmdMount(args []string) (string, int) {
-	path := args[len(args)-1]
-	if _, stacked := f.mounts[path]; stacked {
-		for file := range f.plain {
-			if strings.HasPrefix(file, path+"/") {
-				delete(f.plain, file)
-				delete(f.loops, file)
-			}
-		}
-	}
-	f.mounts[path] = "tmpfs"
-	f.dirs[path] = true
-	return "", 0
-}
-
-func (f *fakeNode) cmdFindmnt(args []string) (string, int) {
-	path := args[len(args)-1]
-	fsType, ok := f.mounts[path]
-	if !ok {
-		return "", 1
-	}
-	if contains(args, "TARGET") {
-		return path + "\n", 0
-	}
-	return fsType + "\n", 0
-}
-
+// cmdStat answers the `stat --format "%u %a %F"` of a directory: its owner
+// uid, octal mode and file type (dirStat, or a private directory of the
+// agent's own user).
 func (f *fakeNode) cmdStat(args []string) (string, int) {
 	path := args[len(args)-1]
-	if contains(args, "%u %a %F") {
-		if answer, ok := f.dirStat[path]; ok {
-			return answer + "\n", 0
-		}
-		if f.dirs[path] {
-			return fmt.Sprintf("%d 700 directory\n", os.Geteuid()), 0
-		}
+	if !contains(args, "%u %a %F") {
 		return "", 1
 	}
-	size, ok := f.plain[path]
-	if !ok {
-		return "", 1
+	if answer, ok := f.dirStat[path]; ok {
+		return answer + "\n", 0
 	}
-	return fmt.Sprintf("%d\n", size), 0
-}
-
-func (f *fakeNode) cmdTruncate(args []string) (string, int) {
-	path := args[len(args)-1]
-	size, _ := strconv.ParseUint(mdFlagValue(args, "--size"), 10, 64)
-	f.plain[path] = size
-	return "", 0
-}
-
-func (f *fakeNode) cmdLosetup(args []string) (string, int) {
-	if contains(args, "--associated") {
-		path := args[len(args)-1]
-		devs := f.loops[path]
-		// util-linux answers "nothing is attached" with exit 0 and no output;
-		// only a real failure of the tool exits non-zero, which is the whole
-		// distinction LoopDevices now makes.
-		if len(devs) == 0 {
-			return "", 0
-		}
-		var sb strings.Builder
-		for _, dev := range devs {
-			fmt.Fprintf(&sb, "%s: 0 %s\n", dev, path)
-		}
-		return sb.String(), 0
-	}
-	if contains(args, "--find") {
-		path := args[len(args)-1]
-		dev := fmt.Sprintf("/dev/loop%d", f.nextLoop)
-		f.nextLoop++
-		f.loops[path] = append(f.loops[path], dev)
-		f.devNo[dev] = f.newDevNo()
-		f.devSize[dev] = f.plain[path]
-		f.publishBlockDev(strings.TrimPrefix(dev, "/dev/"))
-		return dev + "\n", 0
-	}
-	if contains(args, "--detach") {
-		dev := args[len(args)-1]
-		file := f.fileOfLoop(dev)
-		if file == "" {
-			f.dispatchStderr = "losetup: " + dev +
-				": detach failed: No such device or address"
-			return "", 1
-		}
-		// The kernel detaches a loop device in use only when its last user
-		// closes it: the detach succeeds and the device stays attached.
-		if f.loopOpen[dev] || len(f.holdersOfLoop(dev)) > 0 {
-			return "", 0
-		}
-		devs := f.loops[file]
-		for i, attached := range devs {
-			if attached == dev {
-				f.loops[file] = append(devs[:i:i], devs[i+1:]...)
-				break
-			}
-		}
-		f.dropBlockDev(dev)
-		return "", 0
+	if f.dirs[path] {
+		return fmt.Sprintf("%d 700 directory\n", os.Geteuid()), 0
 	}
 	return "", 1
-}
-
-// fileOfLoop is the backing file of an attached loop device, "" for none.
-func (f *fakeNode) fileOfLoop(dev string) string {
-	for file, devs := range f.loops {
-		if contains(devs, dev) {
-			return file
-		}
-	}
-	return ""
-}
-
-// loopOfHoldersDir resolves a sysfs holders directory,
-// /sys/block/{name}/holders, to the attached loop device it belongs to.
-func (f *fakeNode) loopOfHoldersDir(path string) (string, bool) {
-	rest, ok := strings.CutPrefix(path, sysfsBlockDir+"/")
-	if !ok {
-		return "", false
-	}
-	name, ok := strings.CutSuffix(rest, "/holders")
-	if !ok || strings.Contains(name, "/") {
-		return "", false
-	}
-	dev := "/dev/" + name
-	return dev, f.fileOfLoop(dev) != ""
-}
-
-// holdersOfLoop is what a loop device's sysfs holders directory lists, sorted:
-// every dm device whose live table maps it, and its loopHolders entries.
-func (f *fakeNode) holdersOfLoop(dev string) []string {
-	devNo := f.devNo[dev]
-	var out []string
-	for name, dm := range f.dms {
-		for _, line := range dmTargets(dm.table) {
-			fields := strings.Fields(line)
-			if len(fields) > 3 && devNo != "" &&
-				contains(fields[3:], devNo) {
-				out = append(out, name)
-				break
-			}
-		}
-	}
-	out = append(out, f.loopHolders[dev]...)
-	sort.Strings(out)
-	return out
 }
 
 // cmdThinDump answers with the scripted document, or a synthesized one. With

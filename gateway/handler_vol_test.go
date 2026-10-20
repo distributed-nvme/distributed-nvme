@@ -346,13 +346,11 @@ func (e *volEnv) putDn(
 }
 
 // putCn writes one CnConf, its capacity key and its CnRev. No RPC of this file
-// charges a CN extents — a thin device, a subsystem, a clone, a transfer, a
+// charges a CN anything — a thin device, a subsystem, a clone, a transfer, a
 // migration destination and a spare leg all leave every cntlr's footprint
-// unchanged (architecture.md, Storage pools, Cntlrs and Spare legs). A clone
-// does take metadata units on the CN of every cntlr, which CreateClone charges
-// and the clone drain gives back without bumping the CN (architecture.md,
-// Metadata units); every other record of these exists only to be asserted
-// UNTOUCHED.
+// unchanged (architecture.md, Storage pools, Cntlrs and Spare legs), and a
+// clone takes no metadata unit on a CN (architecture.md, Metadata units) —
+// so these records exist only to be asserted UNTOUCHED.
 func (e *volEnv) putCn(addrPort string, cnId uint64, shard uint32) {
 	e.t.Helper()
 	cn := &pb.CnConf{
@@ -529,16 +527,6 @@ func (e *volEnv) dnCapValue(addrPort string) *pb.DnCapacity {
 	return value
 }
 
-// cnCapValue is dnCapValue for a CN.
-func (e *volEnv) cnCapValue(addrPort string) *pb.CnCapacity {
-	e.t.Helper()
-	value := &pb.CnCapacity{}
-	key := model.CnCapacityKey(
-		e.cid, e.cn(addrPort).GetFreeExtCnt(), addrPort)
-	e.get(key, value)
-	return value
-}
-
 // setDnUsed sets one DN's used_meta_units as a write that changes only the
 // count leaves the store (architecture.md, Metadata units): the record and
 // its capacity value carry the new count, the key stays where the free count
@@ -551,17 +539,6 @@ func (e *volEnv) setDnUsed(addrPort string, used uint64) {
 	mustPut(e.t, e.cli, model.DnConfKey(e.cid, addrPort), dn)
 	mustPut(e.t, e.cli, e.dnCapKey(addrPort, dn.GetFreeExtCnt()),
 		model.DnCapacityValue(dn))
-}
-
-// setCnUsed is setDnUsed for a CN.
-func (e *volEnv) setCnUsed(addrPort string, used uint64) {
-	e.t.Helper()
-	cn := e.cn(addrPort)
-	cn.UsedMetaUnits = used
-	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), cn)
-	mustPut(e.t, e.cli,
-		model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
-		model.CnCapacityValue(cn))
 }
 
 // setDnBatchSize stores a dn_batch_size in the cluster's conf. At 1 every DN
@@ -3134,27 +3111,17 @@ func volCreateClone(
 	return reply
 }
 
-// volCloneUnits is what a clone onto a volTdSize thin device takes in a
-// metadata area (architecture.md, Metadata units): 1 GiB over 2 MiB pool
-// blocks is 512 regions, so one unit for the superblock budget and one for
-// the regions' bytes. volMigrUnits is a migration destination of the
-// fixture's data group: 4 extents of 4 GiB over the same blocks is 8192
-// regions, two units as well. Both are pinned against the formula by
-// TestVolFixtureUnits.
-const (
-	volCloneUnits = uint64(2)
-	volMigrUnits  = uint64(2)
-)
+// volMigrUnits is what a migration destination of the fixture's data group
+// takes in its DN's metadata area (architecture.md, Metadata units): 4
+// extents of 4 GiB over 2 MiB pool blocks is 8192 regions, so one unit for
+// the superblock budget and one for the regions' bytes. It is pinned against
+// the formula by TestVolFixtureUnits.
+const volMigrUnits = uint64(2)
 
-// TestVolFixtureUnits pins volCloneUnits and volMigrUnits against
-// common.CloneMetaUnits, so a change of the formula fails here by name rather
-// than as a count off by one in every test that charges units.
+// TestVolFixtureUnits pins volMigrUnits against common.CloneMetaUnits, so a
+// change of the formula fails here by name rather than as a count off by one
+// in every test that charges units.
 func TestVolFixtureUnits(t *testing.T) {
-	if got := common.CloneMetaUnits(volTdSize, volPoolBlock); got !=
-		volCloneUnits {
-		t.Errorf("a clone onto a volTdSize td: %d units, want %d", got,
-			volCloneUnits)
-	}
 	if got := common.CloneMetaUnits(
 		volDataExtCnt*volExtSize, volPoolBlock,
 	); got != volMigrUnits {
@@ -3168,9 +3135,8 @@ func TestVolFixtureUnits(t *testing.T) {
 // resolved to its td_id, so a renamed or recreated device can never silently
 // become the destination (an id is never reused). The record carries no chunk
 // count — the source bitmap is a pure optimization that may arrive later, and
-// what a clone holds is the set of its chunk keys. It does carry its metadata
-// units, which every later charge and release reads (architecture.md,
-// Metadata units), and its clone meta group: one leg per leg the pool's
+// what a clone holds is the set of its chunk keys. It does carry its clone
+// meta group: one leg per leg the pool's
 // redundancy gives a group, each one side of one extent, laid out as the
 // pool's one-extent meta groups are, on distinct DNs, and charged to them as
 // a new group's sides are (volWantCloneGrp). The ids come from next_id in
@@ -3202,7 +3168,6 @@ func TestCreateCloneWritesRecord(t *testing.T) {
 		DstTdId:       900,
 		DmCloneConf:   &pb.DmCloneConf{HydrationThreshold: 2},
 		AutoResume:    true,
-		MetaUnits:     volCloneUnits,
 	}
 	got := env.clone("clone-a")
 	gotNoGrp := proto.Clone(got).(*pb.Clone)
@@ -3890,10 +3855,6 @@ func TestCreateMigrationChargesDestination(t *testing.T) {
 		if got := env.cnRev(addrPort); got != 1 {
 			t.Errorf("%s rev: got %d, want 1 (no CN is charged)",
 				addrPort, got)
-		}
-		if got := env.cn(addrPort).GetUsedMetaUnits(); got != 0 {
-			t.Errorf("%s used_meta_units: got %d, want 0 (a migration's "+
-				"run is on its destination DN)", addrPort, got)
 		}
 	}
 	conf := env.spConf()

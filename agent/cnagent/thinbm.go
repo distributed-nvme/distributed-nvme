@@ -20,6 +20,17 @@ import (
 // thin-provisioning-tools has a single role, so by the split rule of
 // dnagent.md, Scope and placement, this wrapper is role code.
 
+// firstNonEmpty is the first of values that is not blank, trimmed: what a
+// failed tool's error names, its stderr before its stdout before the error.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if text := strings.TrimSpace(value); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 // ---------------------------------------------------------------------------
 // thin_dump XML
 // ---------------------------------------------------------------------------

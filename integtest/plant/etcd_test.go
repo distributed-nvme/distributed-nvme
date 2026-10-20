@@ -561,10 +561,10 @@ func TestPutSpReadsBack(t *testing.T) {
 // TestPutSubObjectsReadBack pins what PutTds, PutSs, PutClone, PutXfer,
 // PutMigr and the two bitmap calls store, as model.LoadSp reads it: the ids
 // they take for a zero, one pool revision bump per transaction, the CdcEntry
-// of a subsystem, the units of a clone on every cntlr's CN, a clone's clone
-// meta group laid out, its sides on the DNs it names and charged there, a
-// clone planted without one, those units of a migration on its destination
-// DN, and a migration's second side on its leg.
+// of a subsystem, a clone's clone meta group laid out, its sides on the DNs
+// it names and charged there and no CN charged, a clone planted without one,
+// the units of a migration on its destination DN, and a migration's second
+// side on its leg.
 func TestPutSubObjectsReadBack(t *testing.T) {
 	ctx := testCtx(t)
 	c := plantSmallCluster(t, ctx, true)
@@ -630,7 +630,11 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	// c0's group takes ids below its own, so the ids every later zero takes
 	// are the ones a clone with no group would leave: legs on dn 1, which
 	// holds the pool's sides too, and on dn 5, the spare on dn 3, the
-	// pool's spare's DN.
+	// pool's spare's DN. No CN is charged for a clone.
+	cnsBefore := map[uint64]*pb.CnConf{}
+	for cnId := uint64(1); cnId <= 2; cnId++ {
+		cnsBefore[cnId] = c.cnConf(t, ctx, cnId)
+	}
 	clone, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
 		Name: "c0", Id: 40, DstTd: "td0", SrcSliceCnt: 1,
 		SrcNqn: "nqn.2024-01.io.dnv-it:src",
@@ -645,12 +649,8 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 		t.Fatalf("PutClone: %v", err)
 	}
 	nextRev(t, "PutClone", clone.SpRev)
-	units := common.CloneMetaUnits(1<<30, blockSize)
-	if clone.Id != 40 || clone.DstTdId != 20 || clone.MetaUnits != units ||
-		len(clone.Charged) != 2 || clone.Charged[cnAddr(1)] != units ||
-		clone.Charged[cnAddr(2)] != units {
-		t.Fatalf("PutClone = %+v, want %d units on cn 1 and cn 2", clone,
-			units)
+	if clone.Id != 40 || clone.DstTdId != 20 {
+		t.Fatalf("PutClone = %+v, want clone 40 onto td 20", clone)
 	}
 	metaBlocks, dataBlocks, err := model.GroupBlocks(
 		common.CloneMetaGrpExtCnt, common.MinDnExtSize,
@@ -690,21 +690,17 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	}
 	nextRev(t, "PutClone", byId.SpRev)
 	if byId.Id != 41 || byId.DstTdId != 21 ||
-		byId.MetaUnits != common.CloneMetaUnits(2<<30, blockSize) ||
 		byId.GrpId != 0 || len(byId.LegIds) != 0 ||
 		len(byId.DnRevisions) != 0 {
-		t.Fatalf("PutClone by td_id = %+v, want td1's size and no group",
+		t.Fatalf("PutClone by td_id = %+v, want td1's id and no group",
 			byId)
 	}
-	for cnId := uint64(1); cnId <= 2; cnId++ {
-		cn := c.cnConf(t, ctx, cnId)
-		if cn.GetUsedMetaUnits() != clone.MetaUnits+byId.MetaUnits {
-			t.Errorf("cn %d uses %d units, want %d", cnId,
-				cn.GetUsedMetaUnits(), clone.MetaUnits+byId.MetaUnits)
+	for cnId, before := range cnsBefore {
+		if cn := c.cnConf(t, ctx, cnId); !proto.Equal(cn, before) {
+			t.Errorf("a clone moved cn %d: %v, want %v", cnId, cn, before)
 		}
 		if rev := c.cnRev(t, ctx, cnId); rev != 2 {
-			t.Errorf("a clone's units moved cn %d's revision to %d", cnId,
-				rev)
+			t.Errorf("a clone moved cn %d's revision to %d", cnId, rev)
 		}
 	}
 
@@ -865,7 +861,7 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	if state.DnByAddr[dnAddr(5)].GetDnId() != 5 {
 		t.Fatalf("the load holds no record of dn 5, which holds c0's side")
 	}
-	if state.Clones["c0"].GetMetaUnits() != units ||
+	if state.Clones["c0"].GetCloneId() != 40 ||
 		state.Xfers["x0"].GetOriNsIdx() != 1 ||
 		state.Migrs["m0"].GetBmCnt() != 2 ||
 		!state.Migrs["m0"].GetCutoverPending() ||
@@ -1192,11 +1188,10 @@ func TestSettersReadBack(t *testing.T) {
 // TestDrainsGiveBackWhatPlantCharged pins the two latches and the two
 // drains: a latch bumps the pool's revision once and a second one nothing, a
 // drain of one step leaves the object, and a drain to the end removes it and
-// gives back exactly what the plants charged — the clone's units on every
-// CN; its clone meta group's extents, pointers and capacity keys on the DNs
-// of its legs and its spare, with one DnRev bump each, a DN it shares with
-// the pool keeping the pool's sides; the pool's extents and pointers on
-// every node.
+// gives back exactly what the plants charged — the clone's clone meta
+// group's extents, pointers and capacity keys on the DNs of its legs and its
+// spare, with one DnRev bump each, a DN it shares with the pool keeping the
+// pool's sides; the pool's extents and pointers on every node.
 func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 	ctx := testCtx(t)
 	c := plantSmallCluster(t, ctx, true)
@@ -1218,9 +1213,6 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("PutClone: %v", err)
-	}
-	if clone.MetaUnits == 0 {
-		t.Fatalf("the clone took no units")
 	}
 	if clone.GrpId != clone.Id+1 || len(clone.LegIds) != 3 ||
 		len(clone.SideIds) != 3 {
@@ -1272,11 +1264,6 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 		t.Fatalf("DrainClone to the end = %+v, %v", done, err)
 	}
 	mustAbsent(t, ctx, c.cli, model.CloneKey(cid, ref.Id, "c0"), &pb.Clone{})
-	for cnId := uint64(1); cnId <= 2; cnId++ {
-		if used := c.cnConf(t, ctx, cnId).GetUsedMetaUnits(); used != 0 {
-			t.Errorf("cn %d still uses %d units after the drain", cnId, used)
-		}
-	}
 	// The final step gave every side of the group back, the spare's too,
 	// each DN with one more DnRev bump, and took only the clone's pointer
 	// off dn 1. The DNs the clone never used kept their revisions.
@@ -1759,7 +1746,6 @@ func TestWidestPoolPlants(t *testing.T) {
 			t.Fatalf("PutSs %d: %v", s, err)
 		}
 	}
-	cloneUnits := uint64(0)
 	for i := 0; i < common.MaxCloneCntPerSp; i++ {
 		cloneSpec := CloneSpec{
 			Name: fmt.Sprintf("c%d", i), DstTd: tds[i].Name,
@@ -1770,11 +1756,9 @@ func TestWidestPoolPlants(t *testing.T) {
 				Spare: l >= common.MaxAllocLegPerGrp,
 			})
 		}
-		clone, err := PutClone(ctx, cli, cl, ref, cloneSpec)
-		if err != nil {
+		if _, err := PutClone(ctx, cli, cl, ref, cloneSpec); err != nil {
 			t.Fatalf("PutClone %d: %v", i, err)
 		}
-		cloneUnits += clone.MetaUnits
 	}
 	for i := 0; i < common.MaxXferCntPerSp; i++ {
 		if _, err := PutXfer(ctx, cli, cl, ref, XferSpec{
@@ -1844,11 +1828,9 @@ func TestWidestPoolPlants(t *testing.T) {
 		}
 	}
 	for addr, cn := range state.CnByAddr {
-		if cn.GetUsedMetaUnits() != cloneUnits ||
-			cn.GetFreeExtCnt() != free-sp.Footprint {
-			t.Fatalf("cn %s uses %d units with %d free, want %d and %d",
-				addr, cn.GetUsedMetaUnits(), cn.GetFreeExtCnt(), cloneUnits,
-				free-sp.Footprint)
+		if cn.GetFreeExtCnt() != free-sp.Footprint {
+			t.Fatalf("cn %s has %d free, want %d", addr,
+				cn.GetFreeExtCnt(), free-sp.Footprint)
 		}
 	}
 	// dn 1 holds a side of every group of every slice and of every clone.

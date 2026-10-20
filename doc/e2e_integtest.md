@@ -295,7 +295,7 @@ E2E11. **Each case starts from an empty etcd and a freshly built pool.** An
 etcd reset is not enough: a recreated cluster mints new cluster and disk-node
 ids (`architecture.md`, cluster_id derivation), the dn agent refuses a disk
 whose header names the old ones (`dnagent.md` DN5), and only the cleanup zeroes
-the headers and removes the controller nodes' stores and arenas. So between
+the headers and removes the controller nodes' stores. So between
 cases the suite runs the whole cleanup and its start gate, then the
 infrastructure and the whole of setup, which clears every id the last case
 read; that rebuild is also where the next case's thresholds take effect.

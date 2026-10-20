@@ -546,9 +546,6 @@ func (d *Dm) BlkDiscardRange(
 // optional). It needs no zeroing support in the disk: where the disk has
 // none, the kernel writes the zeros itself.
 //
-// It must never be pointed at the CN clone-metadata arena: that arena is a
-// sparse tmpfs file and --zeroout would materialize it in RAM.
-//
 // --zeroout is the first argument on purpose, so a `blkdiscard --offset` grep
 // keeps meaning dm-clone hydration marking only.
 //

@@ -546,55 +546,6 @@ func (e *opsEnv) grpDnAddrs(grpId uint64) []string {
 	return addrs
 }
 
-// putMetaClone plants one clone of the fixture SP holding units metadata
-// units, latched or not, and lists its name in clone_name_list. No node is
-// charged: the tests that need the charge put it with setCnUsed.
-func (e *opsEnv) putMetaClone(
-	name string,
-	cloneId uint64,
-	units uint64,
-	deleting bool,
-) {
-	e.t.Helper()
-	conf := e.spConf()
-	if !slices.Contains(conf.GetCloneNameList(), name) {
-		conf.CloneNameList = append(conf.GetCloneNameList(), name)
-		mustPut(e.t, e.cli, SpConfKey(e.cid, opsSpName), conf)
-	}
-	mustPut(e.t, e.cli, CloneKey(e.cid, opsSpId, name), &pb.Clone{
-		CloneId:   cloneId,
-		SrcNqn:    "nqn.2024-01.io.dnv:src",
-		DstTdId:   601,
-		Deleting:  deleting,
-		MetaUnits: units,
-	})
-}
-
-// setCnUsed sets a CN's used metadata units, in its record and in its
-// capacity value alike, as the charges and releases of architecture.md,
-// Metadata units, leave the two.
-func (e *opsEnv) setCnUsed(addrPort string, used uint64) {
-	e.t.Helper()
-	cn := e.cn(addrPort)
-	cn.UsedMetaUnits = used
-	mustPut(e.t, e.cli, CnConfKey(e.cid, addrPort), cn)
-	if CnAllocatable(cn) {
-		mustPut(e.t, e.cli,
-			CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
-			CnCapacityValue(cn))
-	}
-}
-
-// cnCapValue is the value of the capacity key a CN's record implies, which
-// must be there.
-func (e *opsEnv) cnCapValue(addrPort string) *pb.CnCapacity {
-	e.t.Helper()
-	cn := e.cn(addrPort)
-	value := &pb.CnCapacity{}
-	e.get(CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort), value)
-	return value
-}
-
 // wantPrecondition asserts that err is an *ErrPrecondition raised by op. It
 // also asserts the EU4 contract: the error wraps etcdutil.ErrNoCommit, which
 // is what aborts the transaction without commit and without retry.
@@ -3199,23 +3150,6 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			now:    now,
 			reason: "sp deleting",
 		},
-		{
-			// A listed clone with no key: the units it holds cannot be
-			// moved exactly, for spFootprint's reason.
-			name: "clone not found",
-			setup: func(env *opsEnv) Cand {
-				env.setCntlrErr(opsCntlrB, 1000)
-				env.putMetaClone("c0", 901, 3, false)
-				env.setCnUsed(opsCnB, 3)
-				conf := env.spConf()
-				conf.CloneNameList = append(conf.GetCloneNameList(), "lost")
-				mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
-				return env.cnCand(opsCnC)
-			},
-			oldId:  opsCntlrB,
-			now:    now,
-			reason: "clone not found",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newOpsEnv(t)
@@ -3246,7 +3180,7 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			if got := env.spRev(); got != revBefore {
 				t.Errorf("SpRev: got %d, want %d", got, revBefore)
 			}
-			// Neither CN moved: not the extents, not the units.
+			// Neither CN moved.
 			if got := env.cn(opsCnB); !proto.Equal(got, cnB) {
 				t.Errorf("cn-b moved on a refusal: %v", got)
 			}
@@ -3296,145 +3230,58 @@ func replaceStandbyB(t *testing.T, env *opsEnv) uint64 {
 	return newId
 }
 
-// TestReplaceCntlrMovesCloneMetaUnits pins the units half of ReplaceCntlr
-// (architecture.md, Metadata units). The CN of every cntlr is charged every
-// clone of the SP, so the replacement moves the SP's clone sum off the old CN
-// and onto the new one, in the same writes as the footprint. A latched clone
-// counts: FinishCloneDelete gives its units back on the CNs of the cntlrs
-// the SP has when it runs, which after this op is the new CN. Counts other
-// SPs charged stay where they are, the capacity values follow the records,
-// the clones themselves are not rewritten, and each CN still gets exactly one
-// CnRev bump, the surviving cntlr's CN none.
-func TestReplaceCntlrMovesCloneMetaUnits(t *testing.T) {
+// TestReplaceCntlrReadsNoClone pins that a replacement leaves the SP's
+// clones out (architecture.md, Cntlrs): a CN is charged a cntlr's footprint
+// alone, since a clone keeps its metadata on its clone meta group, on DNs. A
+// listed clone whose key is missing does not stop the op, the clone that
+// exists is not rewritten, and each CN's record moves by the pointer and the
+// footprint and nothing else.
+func TestReplaceCntlrReadsNoClone(t *testing.T) {
 	env := newOpsEnv(t)
-	env.putMetaClone("c0", 901, 3, false)
-	env.putMetaClone("c1", 902, 5, true) // latched, still charged
-	const sum = 3 + 5
-	// Every CN also holds units of another SP, which no step here touches.
-	env.setCnUsed(opsCnA, sum+2)
-	env.setCnUsed(opsCnB, sum+4)
-	env.setCnUsed(opsCnC, 6)
+	conf := env.spConf()
+	conf.CloneNameList = append(conf.GetCloneNameList(), "c0", "lost")
+	mustPut(t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+	mustPut(t, env.cli, CloneKey(env.cid, opsSpId, "c0"), &pb.Clone{
+		CloneId: 901,
+		SrcNqn:  "nqn.2024-01.io.dnv:src",
+		DstTdId: 601,
+	})
 	before := struct {
-		cnA                    *pb.CnConf
-		c0, c1                 *pb.Clone
-		cnARev, cnBRev, cnCRev uint64
-	}{
-		env.cn(opsCnA), env.clone("c0"), env.clone("c1"),
-		env.cnRev(opsCnA), env.cnRev(opsCnB), env.cnRev(opsCnC),
-	}
+		c0       *pb.Clone
+		cnB, cnC *pb.CnConf
+	}{env.clone("c0"), env.cn(opsCnB), env.cn(opsCnC)}
 
-	replaceStandbyB(t, env)
+	newId := replaceStandbyB(t, env)
 
-	if got := env.cn(opsCnB).GetUsedMetaUnits(); got != 4 {
-		t.Errorf("cn-b used_meta_units: got %d, want 4 (the SP's %d gone)",
-			got, sum)
-	}
-	if got := env.cn(opsCnC).GetUsedMetaUnits(); got != 6+sum {
-		t.Errorf("cn-c used_meta_units: got %d, want %d (6 plus the SP's "+
-			"%d)", got, 6+sum, sum)
-	}
-	for _, tc := range []struct {
-		addrPort string
-		used     uint64
-	}{{opsCnB, 4}, {opsCnC, 6 + sum}} {
-		value := env.cnCapValue(tc.addrPort)
-		if value.GetUsedMetaUnits() != tc.used ||
-			value.GetLocation() != tc.addrPort {
-			t.Errorf("%s capacity value: got %v, want location %s and "+
-				"%d used", tc.addrPort, value, tc.addrPort, tc.used)
-		}
-	}
-	if got := env.cn(opsCnA); !proto.Equal(got, before.cnA) {
-		t.Errorf("cn-a, the surviving cntlr's CN, moved: %v", got)
-	}
 	if got := env.clone("c0"); !proto.Equal(got, before.c0) {
 		t.Errorf("clone c0 rewritten: %v", got)
 	}
-	if got := env.clone("c1"); !proto.Equal(got, before.c1) {
-		t.Errorf("clone c1 rewritten: %v", got)
+	wantB := proto.Clone(before.cnB).(*pb.CnConf)
+	wantB.CntlrPtrList = nil
+	wantB.FreeExtCnt += opsFootprint
+	if got := env.cn(opsCnB); !proto.Equal(got, wantB) {
+		t.Errorf("cn-b: got %v, want %v (the pointer out, the footprint "+
+			"back, nothing else)", got, wantB)
 	}
-	for _, tc := range []struct {
-		addrPort string
-		rev      uint64
-	}{
-		{opsCnA, before.cnARev},
-		{opsCnB, before.cnBRev + 1},
-		{opsCnC, before.cnCRev + 1},
-	} {
-		if got := env.cnRev(tc.addrPort); got != tc.rev {
-			t.Errorf("%s rev: got %d, want %d", tc.addrPort, got, tc.rev)
-		}
-	}
-}
-
-// TestReplaceCntlrChargesPastTheCeiling is the one charge allowed to pass a
-// CN's ceiling (architecture.md, Metadata units): a replacement restores the
-// whole SP, so the pick's room is no precondition. cn-c starts one unit below
-// common.CnCloneMetaUnitCnt and ends past it, and keeps its capacity key —
-// units never decide the key's presence — with a value that reads no free
-// unit, so a scan that asks for units skips it from now on.
-func TestReplaceCntlrChargesPastTheCeiling(t *testing.T) {
-	env := newOpsEnv(t)
-	env.putMetaClone("c0", 901, 5, false)
-	env.setCnUsed(opsCnB, 5)
-	env.setCnUsed(opsCnC, common.CnCloneMetaUnitCnt-1)
-
-	replaceStandbyB(t, env)
-
-	cn := env.cn(opsCnC)
-	if want := uint64(common.CnCloneMetaUnitCnt - 1 + 5); cn.GetUsedMetaUnits() !=
-		want {
-		t.Errorf("cn-c used_meta_units: got %d, want %d",
-			cn.GetUsedMetaUnits(), want)
-	}
-	if got := CnFreeMetaUnits(cn); got != 0 {
-		t.Errorf("cn-c free units: got %d, want 0 past the ceiling", got)
-	}
-	if !env.exists(CnCapacityKey(env.cid, opsCnFree-opsFootprint, opsCnC)) {
-		t.Fatalf("cn-c lost its capacity key: units must not decide it")
-	}
-	value := env.cnCapValue(opsCnC)
-	if value.GetUsedMetaUnits() != cn.GetUsedMetaUnits() {
-		t.Errorf("cn-c capacity value: got %d used, want the record's %d",
-			value.GetUsedMetaUnits(), cn.GetUsedMetaUnits())
-	}
-	if got := CnCapacityFreeMetaUnits(value); got != 0 {
-		t.Errorf("cn-c capacity value: %d free units, want 0", got)
-	}
-}
-
-// TestReplaceCntlrReleaseStopsAtZero pins the release's floor (architecture.md,
-// Metadata units): an old CN holding fewer units than the SP's sum ends at
-// zero, never at a count wrapped around to one that would refuse every later
-// charge, and the new CN is still charged the whole sum.
-func TestReplaceCntlrReleaseStopsAtZero(t *testing.T) {
-	env := newOpsEnv(t)
-	env.putMetaClone("c0", 901, 5, false)
-	env.setCnUsed(opsCnB, 2)
-
-	replaceStandbyB(t, env)
-
-	if got := env.cn(opsCnB).GetUsedMetaUnits(); got != 0 {
-		t.Errorf("cn-b used_meta_units: got %d, want 0", got)
-	}
-	if got := env.cnCapValue(opsCnB).GetUsedMetaUnits(); got != 0 {
-		t.Errorf("cn-b capacity value: got %d used, want 0", got)
-	}
-	if got := env.cn(opsCnC).GetUsedMetaUnits(); got != 5 {
-		t.Errorf("cn-c used_meta_units: got %d, want the SP's 5", got)
+	wantC := proto.Clone(before.cnC).(*pb.CnConf)
+	wantC.CntlrPtrList = append(wantC.CntlrPtrList,
+		&pb.CntlrPointer{SpId: opsSpId, CntlrId: newId})
+	wantC.FreeExtCnt -= opsFootprint
+	if got := env.cn(opsCnC); !proto.Equal(got, wantC) {
+		t.Errorf("cn-c: got %v, want %v (the pointer in, the footprint "+
+			"charged, nothing else)", got, wantC)
 	}
 }
 
 // TestReplaceCntlrAtTheCeiling commits one maximum-shape ReplaceCntlr against
 // the real etcd this package runs with --max-txn-ops=common.EtcdMaxTxnOps:
 // MaxCntlrCntPerSp cntlrs on as many CNs, MaxSliceCntPerSp slices for the
-// footprint, MaxSsCntPerSp subsystems whose CdcEntry the listing rule
-// rewrites, and MaxCloneCntPerSp clones, each read once for the units the op
-// moves. That shape is past etcd's own default limit (the EtcdMaxTxnOps
-// comment counts it), so this is where a read added to the op, or a change
-// in how etcdutil builds the txn, would show up as "too many operations in
-// txn request" once it passes the requirement. Every key the op writes
-// carries one mod_revision: it is one transaction.
+// footprint and MaxSsCntPerSp subsystems whose CdcEntry the listing rule
+// rewrites. TestReplaceCntlrTxnBudget counts that shape below etcd's own
+// default limit and is the test that pins it there; this commits it, so a
+// change in how etcdutil builds the txn shows up here as "too many
+// operations in txn request" once the shape passes EtcdMaxTxnOps. Every key
+// the op writes carries one mod_revision: it is one transaction.
 func TestReplaceCntlrAtTheCeiling(t *testing.T) {
 	env := newOpsEnv(t)
 	const newCnAddr = "ceil-cn-new:9000"
@@ -3489,22 +3336,7 @@ func TestReplaceCntlrAtTheCeiling(t *testing.T) {
 		cdcKeys = append(cdcKeys, key)
 	}
 
-	// The clones, every third one latched.
-	sum := uint64(0)
-	for idx := 0; idx < common.MaxCloneCntPerSp; idx++ {
-		name := fmt.Sprintf("ceil-clone-%02d", idx)
-		units := uint64(1 + idx%3)
-		mustPut(t, env.cli, CloneKey(env.cid, opsSpId, name), &pb.Clone{
-			CloneId:   uint64(9000 + idx),
-			DstTdId:   601,
-			Deleting:  idx%3 == 0,
-			MetaUnits: units,
-		})
-		conf.CloneNameList = append(conf.CloneNameList, name)
-		sum += units
-	}
 	mustPut(t, env.cli, SpConfKey(env.cid, opsSpName), conf)
-	env.setCnUsed(opsCnB, sum)
 
 	env.setCntlrErr(opsCntlrB, 1000)
 	now := uint64(1000 + common.DefaultCntlrUnhealthy)
@@ -3515,23 +3347,17 @@ func TestReplaceCntlrAtTheCeiling(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("a maximum-shape ReplaceCntlr (%d cntlrs, %d slices, %d "+
-			"subsystems, %d clones) did not commit: %v (a \"too many "+
-			"operations in txn request\" here means common.EtcdMaxTxnOps no "+
-			"longer covers it)", common.MaxCntlrCntPerSp,
-			common.MaxSliceCntPerSp, common.MaxSsCntPerSp,
-			common.MaxCloneCntPerSp, err)
+			"subsystems) did not commit: %v (a \"too many operations in "+
+			"txn request\" here means common.EtcdMaxTxnOps no longer "+
+			"covers it)", common.MaxCntlrCntPerSp, common.MaxSliceCntPerSp,
+			common.MaxSsCntPerSp, err)
 	}
 
 	if got := len(env.spConf().GetCntlrIdList()); got != common.MaxCntlrCntPerSp {
 		t.Errorf("cntlr_id_list: %d cntlrs, want %d", got,
 			common.MaxCntlrCntPerSp)
 	}
-	oldCn, newCn := env.cn(opsCnB), env.cn(newCnAddr)
-	if oldCn.GetUsedMetaUnits() != 0 || newCn.GetUsedMetaUnits() != sum {
-		t.Errorf("used_meta_units: cn-b %d, new cn %d, want 0 and the "+
-			"sum %d over every clone", oldCn.GetUsedMetaUnits(),
-			newCn.GetUsedMetaUnits(), sum)
-	}
+	newCn := env.cn(newCnAddr)
 	if newCn.GetFreeExtCnt() != 4*opsCnFree-footprint {
 		t.Errorf("new cn free_ext_cnt: got %d, want %d",
 			newCn.GetFreeExtCnt(), 4*opsCnFree-footprint)

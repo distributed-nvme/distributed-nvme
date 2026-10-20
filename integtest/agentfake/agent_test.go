@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -992,9 +993,6 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	wantKeys(t, "ns_id_to_dm_linear", info.GetNsIdToDmLinear(), 31, 32)
 	wantKeys(t, "clone_id_to_target", info.GetCloneIdToTarget(), 41)
 	wantKeys(t, "clone_id_to_dm_clone", info.GetCloneIdToDmClone(), 41)
-	// No clone_id_to_meta row, as the cn agent reports none (cnagent.md
-	// CN28).
-	wantKeys(t, "clone_id_to_meta", info.GetCloneIdToMeta())
 	wantKeys(t, "xfer_id_to_dm_linear", info.GetXferIdToDmLinear(), 51)
 	wantKeys(t, "xfer_id_to_subsystem", info.GetXferIdToSubsystem(), 51)
 	wantKeys(t, "xfer_id_to_namespace", info.GetXferIdToNamespace(), 51)
@@ -1505,11 +1503,14 @@ func TestDnAndCnInfoRows(t *testing.T) {
 		t.Fatalf("GetCnInfo: %v", err)
 	}
 	cn := cnInfo.GetCnInfo()
-	if cn.GetPortInfo().GetResName() != "port_info" ||
-		cn.GetTmpfsInfo().GetResName() != "tmpfs_info" ||
-		cn.GetTmpFileInfo().GetResName() != "tmp_file_info" ||
-		cn.GetLoopDevInfo().GetResName() != "loop_dev_info" {
-		t.Errorf("cn_info = %v", cn)
+	set := 0
+	cn.ProtoReflect().Range(
+		func(protoreflect.FieldDescriptor, protoreflect.Value) bool {
+			set++
+			return true
+		})
+	if cn.GetPortInfo().GetResName() != "port_info" || set != 1 {
+		t.Errorf("cn_info = %v, want the port row alone", cn)
 	}
 }
 

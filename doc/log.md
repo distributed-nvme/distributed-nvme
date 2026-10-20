@@ -271,11 +271,10 @@ logs for the same thing.
   still to zero and no zeroing goroutine that is not a migration
   destination waiting for a free run in the clone-metadata area
   (`dnagent.md` DN16), or, on the cn, a piece of the node's base state
-  that the CN's background read found absent, an arena file it found of
-  another size, or an ANA group it found in a state other than its fixed
-  one, in each case only where a `SyncupCn` would build, replace or
-  rewrite it (`cnagent.md` CN30) — each rendered "what: error" and joined
-  by "; ".
+  that the CN's background read found absent, or an ANA group it found in
+  a state other than its fixed one, in each case only where a `SyncupCn`
+  would build or rewrite it (`cnagent.md` CN30) — each rendered "what:
+  error" and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`
   (the one the request carried) and `details` (the agent's own leftover

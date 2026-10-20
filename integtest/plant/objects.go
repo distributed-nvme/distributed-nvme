@@ -395,18 +395,14 @@ func (spec CloneSpec) Check() error {
 	return nil
 }
 
-// Clone is one planted clone: its id, its destination td's id, the units it
-// stored and the units it charged each CN, keyed by the CN's endpoint, and
-// its clone meta group's — the group's id, its legs' ids and their sides',
-// both in the spec's order, its geometry and the revision each DN it charged
-// went to, keyed by the DN's endpoint. A clone with no group has zero and
-// empty ones.
+// Clone is one planted clone: its id, its destination td's id, and its clone
+// meta group's — the group's id, its legs' ids and their sides', both in the
+// spec's order, its geometry and the revision each DN it charged went to,
+// keyed by the DN's endpoint. A clone with no group has zero and empty ones.
 type Clone struct {
 	Name        string
 	Id          uint64
 	DstTdId     uint64
-	MetaUnits   uint64
-	Charged     map[string]uint64
 	GrpId       uint64
 	LegIds      []uint64
 	SideIds     []uint64
@@ -422,24 +418,16 @@ const opPutClone = "PutClone"
 // PutClone writes one Clone and its SpConf.clone_name_list entry
 // (architecture.md, Clones), then bumps SpRev once.
 //
-// It charges the clone's metadata units as CreateClone does (architecture.md,
-// Metadata units): common.CloneMetaUnits of the destination td's size at the
-// pool's block size, stored on the Clone record and charged to the CN of
-// every cntlr of the pool (chargeCloneCns). Unlike CreateClone it never
-// refuses a CN past its area: the library plants whatever shape a case
-// needs, and the worker's cntlr replacement can leave a CN past its ceiling
-// anyway. A DstTd id that no td of the pool carries is planted with no
-// units, as there is no size to charge for.
-//
 // It writes the clone's clone meta group with the placement the spec gives
 // (putCloneGrp) and charges its DNs as CreateClone charges a clone's
 // (architecture.md, Clones): a group of common.CloneMetaGrpExtCnt extents
 // laid out by model.GroupBlocks, every side unprovisioned, and each DN
 // charged once through chargeDn, its pointer in, the extents off, its
 // capacity key moved and its DnRev bumped, and no metadata unit, which a
-// clone meta side never takes. The clone drain's last step,
-// model.FinishCloneDelete, gives back exactly the units and the sides, so a
-// planted clone that drains leaves its nodes' counts where it found them.
+// clone meta side never takes. No CN is charged, as CreateClone charges
+// none. The clone drain's last step, model.FinishCloneDelete, gives back
+// exactly the sides, so a planted clone that drains leaves its nodes' counts
+// where it found them.
 // The zero ids are taken as CreateClone mints them: the clone's, the
 // group's, then each leg's before its side's, in the spec's order of legs.
 func PutClone(
@@ -480,22 +468,13 @@ func PutClone(
 		if containsName(conf.GetCloneNameList(), spec.Name) {
 			return fmt.Errorf("clone %q already exists", spec.Name)
 		}
-		var td *pb.ThinDevice
-		out.DstTdId, td, err = plantedCloneTd(s, cid, conf, spec.DstTd)
+		out.DstTdId, err = plantedCloneTd(s, cid, conf, spec.DstTd)
 		if err != nil {
 			return err
-		}
-		out.MetaUnits, err = plantedCloneUnits(conf, td)
-		if err != nil {
-			return fmt.Errorf("storage pool %q: %w", target.Name, err)
 		}
 		key := model.CloneKey(cid, target.Id, spec.Name)
 		if s.Get(key, &pb.Clone{}) {
 			return fmt.Errorf("%q already exists", key)
-		}
-		out.Charged, err = chargeCloneCns(s, cid, conf, out.MetaUnits)
-		if err != nil {
-			return err
 		}
 		if out.Id, err = takeId(conf, opPutClone, spec.Id); err != nil {
 			return err
@@ -512,7 +491,6 @@ func PutClone(
 			SrcStripeSize: spec.SrcStripeSize,
 			SrcBlockSize:  spec.SrcBlockSize,
 			DstTdId:       out.DstTdId,
-			MetaUnits:     out.MetaUnits,
 			MetaGrp:       grp,
 		})
 		conf.CloneNameList = append(conf.CloneNameList, spec.Name)
@@ -546,14 +524,13 @@ func PutClone(
 // applies, or a DN for being disabled: the library plants whatever shape a
 // case needs.
 //
-// It reads every slice and every clone of the pool for the id check, so at
-// the widest pool PutClone's STM is past etcd's default number of operations
-// per transaction, far below common.EtcdMaxTxnOps, which every etcd the
-// suites and the Go cases start runs with: MaxSliceCntPerSp slices and
-// MaxCloneCntPerSp - 1 clones read, beside the few keys of the pool and the
-// clone, the cntlrs and CNs of the units' charge, and six compares per DN of
-// the group, its record and its revision read and written and its capacity
-// key moved.
+// It reads every slice and every clone of the pool for the id check, so
+// PutClone's STM grows with the pool: at the widest pool, MaxSliceCntPerSp
+// slices and MaxCloneCntPerSp - 1 clones read, beside the few keys of the
+// pool and the clone, and six compares per DN of the group, its record and
+// its revision read and written and its capacity key moved. That stays far
+// below common.EtcdMaxTxnOps, which every etcd the suites and the Go cases
+// start runs with.
 func putCloneGrp(
 	s etcdutil.STM,
 	cl Cluster,
@@ -735,102 +712,24 @@ func (ids poolIds) claim(kind string, id uint64) error {
 	return nil
 }
 
-// plantedCloneTd resolves PutClone's DstTd inside its STM: a td name first,
-// else a td_id, which is looked up among the pool's tds so the clone can be
-// sized. A td_id that no td of the pool carries resolves to itself with a nil
-// td, and PutClone plants that clone with no units.
+// plantedCloneTd resolves PutClone's DstTd inside its STM to a td_id: a td
+// name first, so a td named like an id is that td, else the text as a td_id
+// in decimal or 0x form, which need not name a td of the pool.
 func plantedCloneTd(
 	s etcdutil.STM,
 	cid uint64,
 	conf *pb.SpConf,
 	dstTd string,
-) (uint64, *pb.ThinDevice, error) {
+) (uint64, error) {
 	td := &pb.ThinDevice{}
 	if s.Get(model.ThinDeviceKey(cid, conf.GetSpId(), dstTd), td) {
-		return td.GetTdId(), td, nil
+		return td.GetTdId(), nil
 	}
 	tdId, err := strconv.ParseUint(strings.TrimSpace(dstTd), 0, 64)
 	if err != nil {
-		return 0, nil, fmt.Errorf("destination td %q: no such td", dstTd)
+		return 0, fmt.Errorf("destination td %q: no such td", dstTd)
 	}
-	for _, tdName := range conf.GetTdNameList() {
-		candidate := &pb.ThinDevice{}
-		if !s.Get(model.ThinDeviceKey(cid, conf.GetSpId(), tdName), candidate) {
-			continue
-		}
-		if candidate.GetTdId() == tdId {
-			return tdId, candidate, nil
-		}
-	}
-	return tdId, nil, nil
-}
-
-// plantedCloneUnits is the units CreateClone stores on a clone of td
-// (architecture.md, Metadata units): common.CloneMetaUnits of the td's size
-// at the pool's block size, behind the ValidateBdevConf gate that every
-// model.PoolBlockSize caller sits behind. A nil td has no size and gets no
-// units.
-func plantedCloneUnits(conf *pb.SpConf, td *pb.ThinDevice) (uint64, error) {
-	if td == nil {
-		return 0, nil
-	}
-	bdev := conf.GetBdevConf()
-	if err := model.ValidateBdevConf(bdev); err != nil {
-		return 0, err
-	}
-	return common.CloneMetaUnits(td.GetSize(), model.PoolBlockSize(bdev)), nil
-}
-
-// chargeCloneCns charges a planted clone's units, inside PutClone's STM, to
-// the CN of every cntlr of the pool, as CreateClone charges them
-// (architecture.md, Metadata units): once per cntlr, summed per CN, so each
-// CN is written once, in the order the cntlrs first name it, and a CN that
-// hosts two cntlrs of the pool is charged twice in that one write — exactly
-// what model.FinishCloneDelete later gives back. The capacity value follows
-// the record (model.MaintainCnCapacity) and no CnRev is bumped, since a write
-// that changes only units raises no revision. Nothing is refused for room.
-//
-// Every Cntlr is read before any write, and a listed one that is missing
-// refuses: the record is what names the CN to charge. A CnConf that is gone
-// is skipped, as the release skips it, since there is nothing to charge. Zero
-// units read nothing. The result maps each CN it writes to the units it
-// charges that CN.
-func chargeCloneCns(
-	s etcdutil.STM,
-	cid uint64,
-	conf *pb.SpConf,
-	units uint64,
-) (map[string]uint64, error) {
-	charged := make(map[string]uint64)
-	if units == 0 {
-		return charged, nil
-	}
-	var order []string
-	perCn := make(map[string]uint64)
-	for _, cntlrId := range conf.GetCntlrIdList() {
-		cntlr := &pb.Cntlr{}
-		if !s.Get(model.CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
-			return nil, fmt.Errorf("cntlr %#x not found", cntlrId)
-		}
-		addrPort := cntlr.GetAddrPort()
-		if _, seen := perCn[addrPort]; !seen {
-			order = append(order, addrPort)
-		}
-		perCn[addrPort] += units
-	}
-	for _, addrPort := range order {
-		key := model.CnConfKey(cid, addrPort)
-		cn := &pb.CnConf{}
-		if !s.Get(key, cn) {
-			continue
-		}
-		newCn := proto.Clone(cn).(*pb.CnConf)
-		newCn.UsedMetaUnits += perCn[addrPort]
-		s.Put(key, newCn)
-		model.MaintainCnCapacity(s, cid, addrPort, cn, newCn)
-		charged[addrPort] = perCn[addrPort]
-	}
-	return charged, nil
+	return tdId, nil
 }
 
 // ---------------------------------------------------------------------------

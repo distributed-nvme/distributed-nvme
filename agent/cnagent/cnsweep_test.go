@@ -155,8 +155,8 @@ func cnSweepAssertNoRemoval(t *testing.T, node *fakeNode) {
 }
 
 // cnSweepNoDmLeft is the assertion every whole-sp teardown ends with: the
-// fake node holds no dm device at all. The base state (tmpfs, arena file,
-// loop device) is not device-mapper and outlives every cntlr.
+// fake node holds no dm device at all. The base state, the port, is not
+// device-mapper and outlives every cntlr.
 func cnSweepNoDmLeft(t *testing.T, node *fakeNode) {
 	t.Helper()
 	for name := range node.dms {

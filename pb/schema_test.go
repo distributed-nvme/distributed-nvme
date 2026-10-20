@@ -123,10 +123,10 @@ func TestDnInfoDiskCountsNumbers(t *testing.T) {
 }
 
 // TestCloneMetaGrpNumber pins the clone's group: one Group, not a list, at
-// number 14, the number after the metadata units. It is appended: a field
-// renumbered onto a stored record's number decodes that value into the wrong
-// field, or into unknown fields, with no error, and a list in its place would
-// decode an old record's group as a list of one.
+// number 14, the number after the retired metadata units. It is appended: a
+// field renumbered onto a stored record's number decodes that value into the
+// wrong field, or into unknown fields, with no error, and a list in its place
+// would decode an old record's group as a list of one.
 func TestCloneMetaGrpNumber(t *testing.T) {
 	md := (&pb.Clone{}).ProtoReflect().Descriptor()
 	grp := (&pb.Group{}).ProtoReflect().Descriptor()
@@ -142,5 +142,55 @@ func TestCloneMetaGrpNumber(t *testing.T) {
 	if fd.Message() != grp {
 		t.Errorf("%s.meta_grp is a %v, want %s", md.FullName(),
 			fd.Message().FullName(), grp.FullName())
+	}
+}
+
+// TestRetiredCnMetadataFieldsStayReserved pins the reservations of the
+// retired fields of a controller node's clone metadata: the clone's units,
+// the node's used units on its record and its capacity value, the node's
+// tmpfs, file and loop rows, and the cntlr's clone metadata row. Each keeps its
+// number and its name reserved, so no field takes either: a field on a
+// retired number would decode a stored record or an older agent's row as its
+// own value, silently. The test reads the descriptors and decodes nothing.
+func TestRetiredCnMetadataFieldsStayReserved(t *testing.T) {
+	for _, tc := range []struct {
+		md     protoreflect.MessageDescriptor
+		name   protoreflect.Name
+		number protoreflect.FieldNumber
+	}{
+		{(&pb.Clone{}).ProtoReflect().Descriptor(), "meta_units", 13},
+		{(&pb.CnConf{}).ProtoReflect().Descriptor(), "used_meta_units", 10},
+		{(&pb.CnCapacity{}).ProtoReflect().Descriptor(), "used_meta_units", 2},
+		{(&pb.CnInfo{}).ProtoReflect().Descriptor(), "tmpfs_info", 2},
+		{(&pb.CnInfo{}).ProtoReflect().Descriptor(), "tmp_file_info", 3},
+		{(&pb.CnInfo{}).ProtoReflect().Descriptor(), "loop_dev_info", 4},
+		{(&pb.CntlrInfo{}).ProtoReflect().Descriptor(), "clone_id_to_meta", 17},
+	} {
+		if !tc.md.ReservedRanges().Has(tc.number) {
+			t.Errorf("%s does not reserve field number %d",
+				tc.md.FullName(), tc.number)
+		}
+		if fd := tc.md.Fields().ByNumber(tc.number); fd != nil {
+			t.Errorf("%s has field %s at the reserved number %d",
+				tc.md.FullName(), fd.Name(), tc.number)
+		}
+		if !tc.md.ReservedNames().Has(tc.name) {
+			t.Errorf("%s does not reserve the name %s",
+				tc.md.FullName(), tc.name)
+		}
+		if fd := tc.md.Fields().ByName(tc.name); fd != nil {
+			t.Errorf("%s has a field named %s at %d",
+				tc.md.FullName(), tc.name, fd.Number())
+		}
+	}
+	// The disk node keeps its units for the migrations: only the controller
+	// node's half is retired.
+	for _, md := range []protoreflect.MessageDescriptor{
+		(&pb.DnConf{}).ProtoReflect().Descriptor(),
+		(&pb.DnCapacity{}).ProtoReflect().Descriptor(),
+	} {
+		if md.Fields().ByName("used_meta_units") == nil {
+			t.Errorf("%s has no field used_meta_units", md.FullName())
+		}
 	}
 }

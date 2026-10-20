@@ -24,9 +24,9 @@
 // has just built and before it ships anything. They are how a shell suite
 // reads a Go constant, the group geometry formula (architecture.md, Group
 // on-leg layout: meta region, data region, health block), a side's length to
-// zero (architecture.md, Side provisioning protocol) and the units a metadata
-// area gives a copy (architecture.md, Metadata units) instead of hand-copying
-// any of them.
+// zero (architecture.md, Side provisioning protocol) and the units a DN's
+// metadata area gives a migration (architecture.md, Metadata units) instead
+// of hand-copying any of them.
 //
 // Conventions the script relies on:
 //
@@ -1072,7 +1072,7 @@ func cmdPing(g *globals, args []string) {
 // cmdConstants prints, as one JSON object, the common package's constants a
 // shell suite reads instead of typing: the request size every etcd serving
 // dnv is started with, transaction budgets and their factors, the slice
-// ceiling, the health timers, the two metadata areas, the strides of the id
+// ceiling, the health timers, a DN's metadata area, the strides of the id
 // step and the cdc's pending cap and pre-Connect deadline. It exists because
 // a shell suite cannot import common: every shell suite that starts an etcd
 // has to launch it with --max-txn-ops=common.EtcdMaxTxnOps and
@@ -1091,10 +1091,9 @@ func cmdPing(g *globals, args []string) {
 // its health and failover waits by: the default check interval a cluster
 // created without one stores, the default primary threshold a pool created
 // without one reads, and the demotion hold's wait (dnv-worker.md RW22). The
-// next four are the metadata areas (architecture.md, Metadata units): the
-// ceiling of a CN's and of a DN's used units, and the unit of each area. The
-// gateway suite's ceiling case fills both areas to those ceilings and sizes
-// its copies in that unit, which it requires to be one size for both areas.
+// next two are a DN's metadata area (architecture.md, Metadata units): the
+// ceiling of a DN's used units and the unit. The gateway suite's ceiling case
+// fills a DN's area to that ceiling with a migration it sizes in that unit.
 // The next two, IdStepStride and ThinIdStepStride, are the strides of the id
 // step (architecture.md, Clusters), which the gateway suite's smoke case
 // checks every counter the step moves against. The last two are the cdc's
@@ -1121,9 +1120,7 @@ func cmdConstants(g *globals, args []string) {
 		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
 
-		"CnCloneMetaUnitCnt": common.CnCloneMetaUnitCnt,
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
-		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
 
 		"IdStepStride":     common.IdStepStride,
@@ -1209,16 +1206,15 @@ func cmdGeometry(g *globals, args []string) {
 	})
 }
 
-// cmdMetaUnits prints the units a metadata area gives one copy
-// (architecture.md, Metadata units) — what CreateClone charges a clone of a
-// thin device of --bytes and CreateMigration a destination of a side of
-// --bytes, in a pool whose block size is --block-size — by calling
-// common.CloneMetaUnits, the one implementation of the formula. A suite sizes
-// its copies by it and checks the units the gateway stored against it, rather
-// than re-deriving either.
+// cmdMetaUnits prints the units a DN's metadata area gives one copy
+// (architecture.md, Metadata units) — what CreateMigration charges a
+// destination of a side of --bytes, in a pool whose block size is
+// --block-size — by calling common.CloneMetaUnits, the one implementation of
+// the formula. A suite sizes its migrations by it and checks the units the
+// gateway stored against it, rather than re-deriving either.
 //
-// --bytes is a thin device's size for a clone and the moved group's ext_cnt ×
-// extent_size for a migration. --block-size is the pool's data_block_size and
+// --bytes is the moved group's ext_cnt × extent_size. --block-size is the
+// pool's data_block_size and
 // defaults to common.DefaultDmPoolDataBlockSize, as geometry's does. Zero is
 // refused for both: no copy is empty and no stored pool has a zero block
 // size, so a zero is a script that read nothing.
@@ -1799,10 +1795,9 @@ func cmdPutSs(g *globals, args []string) {
 	})
 }
 
-// cmdPutClone writes one Clone with its clone meta group and charges both
-// through plant.PutClone (architecture.md, Clones; Metadata units): the units
-// to the CN of every cntlr of the pool, the group's extents to the DNs its
-// --side flags name. --dst-td accepts either a td name or a td_id. The
+// cmdPutClone writes one Clone with its clone meta group and charges the
+// group's extents to the DNs its --side flags name, through plant.PutClone
+// (architecture.md, Clones). --dst-td accepts either a td name or a td_id. The
 // group is required, as every clone CreateClone writes has one: --grp, and
 // one --leg per leg with the --side that places it (cloneLegsOf). The legs
 // are active ones; a spare a Go caller plants through the library.
@@ -1872,8 +1867,6 @@ func cmdPutClone(g *globals, args []string) {
 		"clone_name":   clone.Name,
 		"clone_id":     idHex(clone.Id),
 		"dst_td_id":    idHex(clone.DstTdId),
-		"meta_units":   clone.MetaUnits,
-		"charged_cns":  clone.Charged,
 		"grp_id":       idHex(clone.GrpId),
 		"leg_id_list":  idHexList(clone.LegIds),
 		"side_id_list": idHexList(clone.SideIds),

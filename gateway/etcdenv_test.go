@@ -191,17 +191,16 @@ func startEtcdOnce(bin string) (string, func(), error) {
 		// document owns, not a tuning knob: CreateStoragePool's maximum
 		// shape — the transaction the number is SIZED by — the sp drain's
 		// D2 batch (SPD13), a created-flip transaction of
-		// MaxFlipCreatedPerTxn tds (RW19), a clone flip over every clone of
-		// the SP (MD6) and ReplaceCntlr at the ceilings (MD6) all exceed
-		// etcd's default cap (gateway/txnbudget_test.go derives their
-		// compare counts), so a test etcd without the flag would fail
-		// transactions the deployment runs fine; the clone drain's batches
-		// fit the default. All five are COMMITTED against a real etcd: the
-		// create in this package's TestCreateStoragePoolAtTheCeiling, the sp
-		// batch in model's TestDrainSpSliceAtTheCeiling, the created flip in
-		// model's TestFlipCreatedAtTheTdCeiling, the clone flip in model's
-		// TestFlipCloneProvisionedAtTheCloneCeiling and the replacement in
-		// model's TestReplaceCntlrAtTheCeiling.
+		// MaxFlipCreatedPerTxn tds (RW19) and a clone flip over every clone
+		// of the SP (MD6) all exceed etcd's default cap
+		// (gateway/txnbudget_test.go derives their compare counts), so a
+		// test etcd without the flag would fail transactions the deployment
+		// runs fine; the clone drain's batches and the cntlr replacement fit
+		// the default. All four are COMMITTED against a real etcd: the create
+		// in this package's TestCreateStoragePoolAtTheCeiling, the sp batch
+		// in model's TestDrainSpSliceAtTheCeiling, the created flip in
+		// model's TestFlipCreatedAtTheTdCeiling and the clone flip in
+		// model's TestFlipCloneProvisionedAtTheCloneCeiling.
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		// The request-size requirement of dnv-worker.md, Constants this
 		// document owns, passed for the same reason: the server's own

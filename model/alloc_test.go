@@ -53,7 +53,7 @@ func putDnCapUsed(
 	)
 }
 
-// putCnCap writes one CN capacity key, with no used_meta_units in its value.
+// putCnCap writes one CN capacity key, with the location as its value.
 func putCnCap(
 	t *testing.T,
 	cli *etcdutil.Client,
@@ -67,25 +67,6 @@ func putCnCap(
 		t, cli,
 		CnCapacityKey(cid, freeExt, addrPort),
 		&pb.CnCapacity{Location: location},
-	)
-}
-
-// putCnCapUsed is putCnCap with a value whose used_meta_units is used, built
-// the way MaintainCnCapacity builds it.
-func putCnCapUsed(
-	t *testing.T,
-	cli *etcdutil.Client,
-	cid uint64,
-	freeExt uint64,
-	addrPort string,
-	location string,
-	used uint64,
-) {
-	t.Helper()
-	mustPut(
-		t, cli,
-		CnCapacityKey(cid, freeExt, addrPort),
-		CnCapacityValue(&pb.CnConf{Location: location, UsedMetaUnits: used}),
 	)
 }
 
@@ -477,7 +458,7 @@ func TestFindCnCandidates(t *testing.T) {
 	// cn-b already hosts a cntlr of this SP; cn-c repeats cn-a's location;
 	// cn-e is below candExt and ends the scan.
 	cands, err := FindCnCandidates(
-		ctx, cli, cid, 20, 0, 10, nil, nil, []string{"cn-b:9000"}, nil,
+		ctx, cli, cid, 20, 10, nil, nil, []string{"cn-b:9000"}, nil,
 	)
 	if err != nil {
 		t.Fatalf("FindCnCandidates: %v", err)
@@ -491,7 +472,7 @@ func TestFindCnCandidates(t *testing.T) {
 	}
 
 	cands, err = FindCnCandidates(
-		ctx, cli, cid, 10, 0, 10,
+		ctx, cli, cid, 10, 10,
 		[]string{"cn-a:9000"},
 		[]string{"cn-a:9000", "cn-b:9000", "cn-e:9000"},
 		nil, nil,
@@ -527,7 +508,7 @@ func TestFindCnCandidatesAntiAffine(t *testing.T) {
 	spCn := []string{"cn-a:9000"}
 
 	plain, err := FindCnCandidates(
-		ctx, cli, cid, 20, 0, 10, nil, nil, spCn, nil,
+		ctx, cli, cid, 20, 10, nil, nil, spCn, nil,
 	)
 	if err != nil {
 		t.Fatalf("FindCnCandidates: %v", err)
@@ -538,7 +519,7 @@ func TestFindCnCandidatesAntiAffine(t *testing.T) {
 
 	// Tier 1 has the one CN a pick needs: the other domain's, alone.
 	cands, tier2, err := FindCnCandidatesAntiAffine(
-		ctx, cli, cid, 20, 0, 10, nil, nil, spCn, []string{"rack0"},
+		ctx, cli, cid, 20, 10, nil, nil, spCn, []string{"rack0"},
 	)
 	if err != nil {
 		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
@@ -551,7 +532,7 @@ func TestFindCnCandidatesAntiAffine(t *testing.T) {
 	// 2 places anyway — in a domain the SP uses, but never on one of its CNs
 	// and never on a black-listed one.
 	cands, tier2, err = FindCnCandidatesAntiAffine(
-		ctx, cli, cid, 20, 0, 10,
+		ctx, cli, cid, 20, 10,
 		[]string{"cn-d:9000"}, nil,
 		[]string{"cn-a:9000", "cn-c:9000"}, []string{"rack0", "rack1"},
 	)
@@ -568,7 +549,7 @@ func TestFindCnCandidatesAntiAffine(t *testing.T) {
 	// the operator's cn_selector because every CN inside it sat in an
 	// excluded domain.
 	cands, tier2, err = FindCnCandidatesAntiAffine(
-		ctx, cli, cid, 20, 0, 10,
+		ctx, cli, cid, 20, 10,
 		nil, []string{"cn-a:9000", "cn-b:9000", "cn-d:9000"},
 		spCn, []string{"rack0", "rack1"},
 	)
@@ -584,7 +565,7 @@ func TestFindCnCandidatesAntiAffine(t *testing.T) {
 	// No exclusion: tier 1 is the plain scan, byte for byte, and an empty one
 	// stays empty — a second identical scan would find nothing new.
 	cands, tier2, err = FindCnCandidatesAntiAffine(
-		ctx, cli, cid, 20, 0, 10, nil, nil, spCn, nil,
+		ctx, cli, cid, 20, 10, nil, nil, spCn, nil,
 	)
 	if err != nil {
 		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
@@ -594,7 +575,7 @@ func TestFindCnCandidatesAntiAffine(t *testing.T) {
 			cands, tier2, plain)
 	}
 	cands, tier2, err = FindCnCandidatesAntiAffine(
-		ctx, cli, cid, 100, 0, 10, nil, nil, spCn, nil,
+		ctx, cli, cid, 100, 10, nil, nil, spCn, nil,
 	)
 	if err != nil {
 		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
@@ -684,77 +665,11 @@ func TestFindDnCandidatesAntiAffineKeepsTheUnitFloor(t *testing.T) {
 	}
 }
 
-// TestFindCnCandidatesMetaUnits is TestFindDnCandidatesMetaUnits on the CN
-// walk, with cn-a charged past its ceiling, which only ReplaceCntlr does: it
-// reads as no free unit, so only a scan that asks for none offers it.
-func TestFindCnCandidatesMetaUnits(t *testing.T) {
-	cli := newTestClient(t)
-	ctx := context.Background()
-	cid := testCid(t)
-	const ceiling = common.CnCloneMetaUnitCnt
-	putCnCapUsed(t, cli, cid, 50, "cn-a:9000", "rack0", ceiling+10)
-	putCnCapUsed(t, cli, cid, 40, "cn-b:9000", "rack0", ceiling-3)
-	putCnCap(t, cli, cid, 30, "cn-c:9000", "rack1")
-
-	cases := []struct {
-		name      string
-		candUnits uint64
-		want      []string
-	}{
-		{"no units asked", 0, []string{"cn-a:9000", "cn-c:9000"}},
-		{"one unit", 1, []string{"cn-b:9000", "cn-c:9000"}},
-		{"exactly cn-b's room", 3, []string{"cn-b:9000", "cn-c:9000"}},
-		{"one more than cn-b's room", 4, []string{"cn-c:9000"}},
-		{"a whole area", ceiling, []string{"cn-c:9000"}},
-		{"more than an area", ceiling + 1, nil},
-	}
-	for _, tc := range cases {
-		cands, err := FindCnCandidates(
-			ctx, cli, cid, 20, tc.candUnits, 10, nil, nil, nil, nil,
-		)
-		if err != nil {
-			t.Fatalf("%s: FindCnCandidates: %v", tc.name, err)
-		}
-		if !equalStrings(addrsOf(cands), tc.want) {
-			t.Errorf("%s: candidates = %v, want %v",
-				tc.name, addrsOf(cands), tc.want)
-		}
-	}
-}
-
-// TestFindCnCandidatesAntiAffineKeepsTheUnitFloor is the CN twin of
-// TestFindDnCandidatesAntiAffineKeepsTheUnitFloor: cn-a hosts a cntlr of the
-// SP, cn-b and cn-c have no free unit, and cn-d, in cn-a's domain, is the one
-// CN with room. A tier 1 without the floor would answer cn-c, and a tier 2
-// without it cn-b and cn-c.
-func TestFindCnCandidatesAntiAffineKeepsTheUnitFloor(t *testing.T) {
-	cli := newTestClient(t)
-	ctx := context.Background()
-	cid := testCid(t)
-	const ceiling = common.CnCloneMetaUnitCnt
-	putCnCap(t, cli, cid, 50, "cn-a:9000", "rack0")
-	putCnCapUsed(t, cli, cid, 40, "cn-b:9000", "rack0", ceiling)
-	putCnCapUsed(t, cli, cid, 30, "cn-c:9000", "rack1", ceiling+10)
-	putCnCap(t, cli, cid, 20, "cn-d:9000", "rack0")
-
-	cands, tier2, err := FindCnCandidatesAntiAffine(
-		ctx, cli, cid, 20, 1, 10, nil, nil,
-		[]string{"cn-a:9000"}, []string{"rack0"},
-	)
-	if err != nil {
-		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
-	}
-	if !tier2 || !equalStrings(addrsOf(cands), []string{"cn-d:9000"}) {
-		t.Errorf("candidates = %v (tier2 %v), want [cn-d:9000] from tier 2",
-			addrsOf(cands), tier2)
-	}
-}
-
 // TestScansTakeCandExtBeforeCandUnits pins the order of the two uint64
-// arguments the four scans take, candExt and then candUnits: a call that
-// swapped them would compile and pick by the wrong numbers. dn-a and cn-a
-// have the extents asked for and too few units for the swapped reading;
-// dn-b and cn-b have the units and too few extents for the right one.
+// arguments the two DN scans take, candExt and then candUnits: a call that
+// swapped them would compile and pick by the wrong numbers. dn-a has the
+// extents asked for and too few units for the swapped reading; dn-b has the
+// units and too few extents for the right one.
 func TestScansTakeCandExtBeforeCandUnits(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
@@ -762,12 +677,9 @@ func TestScansTakeCandExtBeforeCandUnits(t *testing.T) {
 	putDnCapUsed(t, cli, cid, 1, 40, "dn-a:9000", "rack0",
 		common.DnCloneMetaUnitCnt-5)
 	putDnCap(t, cli, cid, 1, 20, "dn-b:9000", "rack1")
-	putCnCapUsed(t, cli, cid, 40, "cn-a:9000", "rack0",
-		common.CnCloneMetaUnitCnt-5)
-	putCnCap(t, cli, cid, 20, "cn-b:9000", "rack1")
 	cc := testClusterConf()
-	// 30 extents and 3 units: only the a nodes qualify. Read the other way
-	// round, 3 extents and 30 units, only the b nodes would.
+	// 30 extents and 3 units: only dn-a qualifies. Read the other way round,
+	// 3 extents and 30 units, only dn-b would.
 	const ext, units = 30, 3
 	check := func(what string, cands []Cand, err error, want string) {
 		t.Helper()
@@ -787,25 +699,13 @@ func TestScansTakeCandExtBeforeCandUnits(t *testing.T) {
 		ctx, cli, cid, cc, ext, units, 10, 1, nil, nil, nil,
 	)
 	check("FindDnCandidatesAntiAffine", cands, err, "dn-a:9000")
-	cands, err = FindCnCandidates(
-		ctx, cli, cid, ext, units, 10, nil, nil, nil, nil,
-	)
-	check("FindCnCandidates", cands, err, "cn-a:9000")
-	cands, _, err = FindCnCandidatesAntiAffine(
-		ctx, cli, cid, ext, units, 10, nil, nil, nil, nil,
-	)
-	check("FindCnCandidatesAntiAffine", cands, err, "cn-a:9000")
 
-	// The fixture tells the two readings apart: swapped, the scans answer
-	// the b nodes.
+	// The fixture tells the two readings apart: swapped, the scan answers
+	// dn-b.
 	cands, err = FindDnCandidates(
 		ctx, cli, cid, cc, units, ext, 10, nil, nil, nil,
 	)
 	check("swapped FindDnCandidates", cands, err, "dn-b:9000")
-	cands, err = FindCnCandidates(
-		ctx, cli, cid, units, ext, 10, nil, nil, nil, nil,
-	)
-	check("swapped FindCnCandidates", cands, err, "cn-b:9000")
 }
 
 // tieDraws is how many scans a test of the draw among equals runs against one
@@ -987,7 +887,7 @@ func TestFindCnCandidatesKeepsKeyOrderAmongEquals(t *testing.T) {
 
 	for i := 0; i < tieDraws; i++ {
 		cands, err := FindCnCandidates(
-			ctx, cli, cid, 20, 0, 10, nil, nil, nil, nil,
+			ctx, cli, cid, 20, 10, nil, nil, nil, nil,
 		)
 		if err != nil {
 			t.Fatalf("FindCnCandidates: %v", err)

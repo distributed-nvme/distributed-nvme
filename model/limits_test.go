@@ -113,7 +113,6 @@ func widestCounts() map[protoreflect.FullName]int {
 		"CntlrInfo.xfer_id_to_namespace":         common.MaxXferCntPerSp,
 		"CntlrInfo.clone_id_to_target":           common.MaxCloneCntPerSp,
 		"CntlrInfo.clone_id_to_dm_clone":         common.MaxCloneCntPerSp,
-		"CntlrInfo.clone_id_to_meta":             common.MaxCloneCntPerSp,
 		// A path row per side of each leg with two sides: at most
 		// MaxMigrCntPerSp migrations, two sides each.
 		"CntlrInfo.side_id_to_path":     2 * common.MaxMigrCntPerSp,
@@ -172,7 +171,6 @@ func widestRowNames() map[protoreflect.FullName]int {
 		"CntlrInfo.xfer_id_to_namespace":         nsRow,
 		"CntlrInfo.clone_id_to_target":           nqnRow,
 		"CntlrInfo.clone_id_to_dm_clone":         dmNameMax,
-		"CntlrInfo.clone_id_to_meta":             dmNameMax,
 		// A path row is named by its side's address, tr_addr:tr_svc_id
 		// (legPathRows), each part a name of at most MaxStrSize.
 		"CntlrInfo.side_id_to_path": pathRow,

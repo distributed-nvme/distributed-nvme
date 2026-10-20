@@ -215,10 +215,9 @@ the method set is exactly the following, each taking the caller's ctx:
   that failed cannot prove a node holds nothing. `Dm.List` goes one step
   further and treats every non-zero exit as an error: `dmsetup ls` exits
   zero and prints "No devices found" on an empty node, so a failure there
-  is never an empty listing. `CloneMeta.LoopDevices` does the same for
-  `losetup --associated`, which exits zero with no output when nothing is
-  attached. Unlike `Dm.List`, the two whole-node listings that a cntlr's
-  background read takes — `Dm.ListInfo`, each device's number and attr
+  is never an empty listing. Unlike `Dm.List`, the two whole-node
+  listings that a cntlr's background read takes — `Dm.ListInfo`, each
+  device's number and attr
   flags, and `Dm.ListTables`, each device's live table — answer with the
   devices they name even when `dmsetup` exits above zero, as it does when a
   device goes away during the listing. Such a listing is

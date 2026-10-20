@@ -124,8 +124,7 @@ func hexBytes(t *testing.T, text string) []byte {
 // or its CnGrpName linear built first (CN12), then the source is connected,
 // the dm-clone is created over the group's device with hydration off and
 // discard passdown off, the source chunk the node holds is applied, hydration
-// is enabled, and the ns-dev moves onto the dm-clone. No arena slot is
-// allocated or punched, and the dm-clone's two rows read OK.
+// is enabled, and the ns-dev moves onto the dm-clone, whose two rows read OK.
 func TestCloneBuild(t *testing.T) {
 	for _, raid1 := range []bool{false, true} {
 		t.Run(fmt.Sprintf("raid1=%v", raid1), func(t *testing.T) {
@@ -186,7 +185,7 @@ func TestCloneBuild(t *testing.T) {
 				"cmd dmsetup reload "+nsDevName(srv, testNs),
 			)
 			// The dm-clone's metadata device is the clone meta group's
-			// device, by its number, and no arena slot is involved.
+			// device, by its number.
 			metaNo := node.devNo[grpDev]
 			if raid1 {
 				_, array := node.arrayByDev(grpDev)
@@ -201,9 +200,6 @@ func TestCloneBuild(t *testing.T) {
 					"device %s (%s) as its metadata device",
 					node.dms[clone].table, grpDev, metaNo)
 			}
-			assertNoCall(t, node, "cmd dmsetup create "+
-				cloneMetaName(srv, testClone))
-			assertNoCall(t, node, "cmd losetup")
 			// The table is created with hydration off, always — and with
 			// discard passdown off, without which every `blkdiscard` below
 			// would be remapped to the destination raid0 (CN18 step 3).
@@ -230,9 +226,6 @@ func TestCloneBuild(t *testing.T) {
 			info := reply.GetCntlrInfo()
 			assertOk(t, info.GetCloneIdToTarget()[testClone], "clone target")
 			assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
-			if rows := info.GetCloneIdToMeta(); len(rows) != 0 {
-				t.Fatalf("clone_id_to_meta rows %v, want none", rows)
-			}
 			assertOk(t, info.GetGrpIdToMdRaid()[testCloneGrp],
 				"clone meta group")
 
@@ -802,69 +795,6 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 			t.Error("the pass the read stopped registered no retry")
 		}
 	})
-}
-
-// TestCloneMetaWrappersSwept: no clone keeps its metadata in the arena
-// (CN18), so every kind-`cb` wrapper is a leftover, one named after a clone
-// the request still carries included. A cntlr's sweep removes the wrappers of
-// its sp at L4, and the node-level sweep every wrapper of the CN (CN2, CN21);
-// the clone's dm-clone, over its clone meta group, serves on.
-func TestCloneMetaWrappersSwept(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		pass func(t *testing.T, srv *CnAgentServer)
-	}{
-		{"a cntlr's sweep", func(t *testing.T, srv *CnAgentServer) {
-			syncupCntlrUntilClean(t, srv, reqOpts{revision: 2,
-				primary: true, clones: []*pb.Clone{cloneOf()}})
-		}},
-		{"the node's sweep", func(t *testing.T, srv *CnAgentServer) {
-			if _, err := srv.SyncupCn(
-				context.Background(), cnReq(3, true)); err != nil {
-				t.Fatalf("SyncupCn: %v", err)
-			}
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, node := newTestServer(t)
-			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-				clones: []*pb.Clone{cloneOf()}})
-			loop := loopDev(t, srv, node)
-			wrappers := []string{
-				srv.nf.CnCloneMetaDmName(
-					testCluster, testCn, testSp, testClone),
-				srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999),
-			}
-			for i, name := range wrappers {
-				node.dms[name] = &fakeDm{
-					table: fmt.Sprintf("0 16384 linear %s %d",
-						node.devNo[loop], i*16384),
-					thinIds: map[uint32]bool{},
-				}
-				node.devNo["/dev/mapper/"+name] = node.newDevNo()
-			}
-			clone := cloneName(srv, testClone)
-			serving := node.dms[nsDevName(srv, testNs)].table
-
-			node.Reset()
-			tc.pass(t, srv)
-			for _, name := range wrappers {
-				if !node.hasCall("cmd dmsetup remove " + name) {
-					t.Fatalf("the sweep did not remove %s:\n%s", name,
-						strings.Join(node.Calls(), "\n"))
-				}
-				if _, ok := node.dms[name]; ok {
-					t.Fatalf("the wrapper %s survived the sweep", name)
-				}
-			}
-			if _, ok := node.dms[clone]; !ok {
-				t.Fatalf("the sweep removed the clone's dm-clone")
-			}
-			if got := node.dms[nsDevName(srv, testNs)].table; got != serving {
-				t.Fatalf("the ns-dev moved to %q, want %q", got, serving)
-			}
-		})
-	}
 }
 
 // ---------------------------------------------------------------------------

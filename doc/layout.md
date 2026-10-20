@@ -79,9 +79,8 @@ The worker, gateway and dnvctl suites need no root. The drivers and fakes are
 test drivers only, never linked into a `cmd/` binary. The end-to-end suite
 adds no driver of its own and drives the shipped `dnvctl` for every
 control-plane call (`e2e_integtest.md` E2E2). One dnv suite runs at a time
-in the lab: the suites share guests, a run's cleanup cannot tell its own
-dnv processes and devices from another run's, and the end-to-end suite's
-cn agents use the tmpfs path the cn agent suite owns. What each suite
+in the lab: the suites share guests, and a run's cleanup cannot tell its
+own dnv processes and devices from another run's. What each suite
 proves is its document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
 `e2e_integtest.md`, and the Integration test plan of `dnv-worker.md`,
 `cdc.md`, `gateway.md` and `dnvctl.md`.

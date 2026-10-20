@@ -5,13 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
-	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -21,8 +17,7 @@ import (
 // whose cntlr is not loaded but whose loaded CN still names that cntlr —
 // converge every loaded CN's base state (architecture.md, Controller node,
 // common), tear down cntlrs whose pointer left their CN's list, run each CN's
-// node-level sweep, which removes every kind-`cb` wrapper ([D14]), none of
-// which any clone uses, and then converge the rest — which, per CN18,
+// node-level sweep, and then converge the rest — which, per CN18,
 // re-creates over its clone meta group's metadata any clone whose dm-clone is
 // gone (after a CN reboot the group is assembled again first, CN12) and
 // finishes one whose dm-clone the dead agent left with hydration off; after a
@@ -181,10 +176,9 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 			s.dropCntlrState(ctx, key, st)
 		}
 	}
-	// The node-level sweep, which also removes every kind-cb wrapper, since
-	// no clone uses one (CN2). It can run before the cntlr converges because
-	// its wanted set comes from the stored REQUESTS, not from what happens to
-	// exist: the source of a clone this pass is about to (re)build is named
+	// The node-level sweep (CN2). It can run before the cntlr converges
+	// because its wanted set comes from the stored REQUESTS, not from what
+	// happens to exist: the source of a clone this pass is about to (re)build is named
 	// by its cntlr's clone_list already.
 	//
 	// Each CN's observation is its converge's rows with the code of its
@@ -258,9 +252,8 @@ func (s *CnAgentServer) syncupCn(
 }
 
 // convergeCn builds the once-per-CN base state of architecture.md, Controller
-// node, common, probe-first (CN5),
-// recording each resource's outcome as it goes. A failed resource never aborts
-// the pass (CN29).
+// node, common, probe-first (CN5): the agent's nvmet port, whose outcome is
+// the CnInfo row. A failure is that row's and never aborts the pass (CN29).
 //
 // CN6: QoS is accepted and not enforced (architecture.md, Controller node,
 // common, and Known limits): an `io.max` written from any agent-created cgroup
@@ -272,236 +265,10 @@ func (s *CnAgentServer) convergeCn(
 	ctx context.Context,
 	st *cnState,
 ) *pb.CnInfo {
-	req := st.loadReq()
 	// A row made after the call is cut off moves no epoch, through a view of
 	// its own, as the CN's read writes (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
-	info := &pb.CnInfo{}
-	clusterId := req.GetClusterId()
-	cnId := req.GetCnId()
-
-	tmpfsPath := s.nf.CnTmpfsPath(clusterId, cnId)
-	tmpfsErr := s.ensureTmpfs(ctx, tmpfsPath)
-	info.TmpfsInfo = t.FromErr(resKeyTmpfs, tmpfsPath, "", tmpfsErr)
-
-	// The file and the loop device are created only on a tmpfs this pass
-	// found or mounted at the path. Without one the mountpoint may be a bare
-	// directory — left in a /tmp a reboot kept, or made by the `mkdir -p` of
-	// a refused mount — and the file would land on the filesystem that holds
-	// it, the loop on that file; the next converge's mount would hide the
-	// file, and a fresh one and a second loop would follow (CN5).
-	tmpfsOk := tmpfsErr == nil
-	filePath := s.nf.CnTmpFilePath(clusterId, cnId)
-	info.TmpFileInfo = t.FromErr(resKeyTmpFile, filePath, "",
-		s.ensureTmpFile(ctx, clusterId, cnId, filePath, tmpfsPath, tmpfsOk))
-
-	// The loop device is the whole of the clone-metadata arena, with no
-	// volume manager on top ([D14]); no clone keeps its metadata on it
-	// (CN18).
-	loopDev, loopErr := s.ensureLoopDev(ctx, filePath, tmpfsPath, tmpfsOk)
-	info.LoopDevInfo = t.FromErr(resKeyLoopDev, filePath, loopDev, loopErr)
-
-	info.PortInfo = s.ensurePort(ctx, t)
-	return info
-}
-
-// ensureTmpfs mounts the arena's tmpfs when the probe answers that nothing is
-// mounted there. A probe that did not answer is run once more, from its first
-// call, in the same pass: all a caller learns from a kill is that it must ask
-// again (agent.Reported), and an answer to the second asking is as good as
-// one to the first — a tmpfs that really is absent, after a reboot, is then
-// mounted by this pass. When the second does not answer either, it is the
-// row's error and nothing is mounted: a mount over the live arena would stack
-// a second tmpfs on it (CN5).
-func (s *CnAgentServer) ensureTmpfs(ctx context.Context, path string) error {
-	mounted, fsType, err := s.cmeta.Mounted(ctx, path)
-	if err != nil {
-		mounted, fsType, err = s.cmeta.Mounted(ctx, path)
-	}
-	if err != nil {
-		return err
-	}
-	if mounted {
-		if fsType != "tmpfs" {
-			return fmt.Errorf("%s carries %s, want tmpfs", path, fsType)
-		}
-		return nil
-	}
-	return s.cmeta.MountTmpfs(ctx, path, common.DefaultCnTmpfsSize)
-}
-
-// ensureTmpFile creates the clone-metadata arena file sparse: tmpfs pages
-// materialize only as something writes into it. As in ensureTmpfs, a `stat`
-// that did not answer, or whose answer is not a size, is asked once more in
-// the same pass, and when that one fails too it is the row's error and
-// truncates nothing (CN5). An absent file is created only when tmpfsOk says
-// the tmpfs step found or mounted a tmpfs at tmpfsPath; otherwise it is the
-// row's error, and a file that is there is still probed and reported.
-//
-// A file of another size is replaced on such a tmpfs while nothing uses it
-// (arenaFileInUse): no clone's metadata lives in it then, and left as it is
-// its ERROR row would stay for as long as the file does. Its loop devices are
-// detached and the file is created afresh (recreateArenaFile); ensureLoopDev
-// then attaches a new loop device. While something uses it, or a read that
-// would tell does not answer, it is the row's error and nothing is touched:
-// replacing it would take what that user maps with it.
-func (s *CnAgentServer) ensureTmpFile(
-	ctx context.Context,
-	clusterId uint64,
-	cnId uint64,
-	path string,
-	tmpfsPath string,
-	tmpfsOk bool,
-) error {
-	size, exists, err := s.cmeta.FileSize(ctx, path)
-	if err != nil {
-		size, exists, err = s.cmeta.FileSize(ctx, path)
-	}
-	if err != nil {
-		return err
-	}
-	if exists {
-		if size == common.CnCloneMetaAreaSize {
-			return nil
-		}
-		wrong := fmt.Sprintf("%s is %d bytes, want %d",
-			path, size, common.CnCloneMetaAreaSize)
-		if !tmpfsOk {
-			return errors.New(wrong)
-		}
-		devs, err := s.cmeta.LoopDevices(ctx, path)
-		if err == nil {
-			err = s.arenaFileInUse(ctx, clusterId, cnId, devs)
-		}
-		if err != nil {
-			return fmt.Errorf("%s; not replaced: %w", wrong, err)
-		}
-		if err := s.recreateArenaFile(ctx, path, devs); err != nil {
-			return fmt.Errorf("%s; replacing it: %w", wrong, err)
-		}
-		return nil
-	}
-	if !tmpfsOk {
-		return fmt.Errorf("%s is absent and not created: no tmpfs is "+
-			"confirmed at %s", path, tmpfsPath)
-	}
-	return s.cmeta.Truncate(ctx, path, common.CnCloneMetaAreaSize)
-}
-
-// arenaFileInUse says why the clone-metadata arena file of a CN may not be
-// replaced, and is nil when it may: a clone-metadata wrapper of the CN maps
-// one of the file's loop devices (devs); or a wrapper has a table that is
-// not a run of the arena, counted as using it since what it maps is unknown;
-// or something holds one of those loop devices open from above, a dm table
-// or an md array, as its sysfs holders show; or a read that would tell did
-// not answer. Both channels judge the file by it: the converge replaces a
-// file of another size only on nil (ensureTmpFile), and the node-level
-// verdict names such a file only on nil (probeCn), so the verdict names only
-// what a SyncupCn cures (CN30).
-func (s *CnAgentServer) arenaFileInUse(
-	ctx context.Context,
-	clusterId uint64,
-	cnId uint64,
-	devs []string,
-) error {
-	slots, err := s.cmeta.Wrappers(
-		ctx, s.nf.CnCloneMetaDmPrefix(clusterId, cnId))
-	if err != nil {
-		return err
-	}
-	devOf := make(map[string]string, len(devs))
-	for _, dev := range devs {
-		devNo, err := s.blockDevNo(ctx, path.Base(dev))
-		if err != nil {
-			return err
-		}
-		devOf[devNo] = dev
-	}
-	names := make([]string, 0, len(slots))
-	for name := range slots {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		slot := slots[name]
-		if slot.devNo == "" {
-			return fmt.Errorf("clone metadata wrapper %s has a table "+
-				"that is not a run of the arena", name)
-		}
-		if dev, ok := devOf[slot.devNo]; ok {
-			return fmt.Errorf("clone metadata wrapper %s maps %s", name, dev)
-		}
-	}
-	for _, dev := range devs {
-		holders, err := s.cmeta.LoopHolders(ctx, dev)
-		if err != nil {
-			return err
-		}
-		if len(holders) > 0 {
-			return fmt.Errorf("%s is held by %s",
-				dev, strings.Join(holders, " "))
-		}
-	}
-	return nil
-}
-
-// recreateArenaFile replaces the arena file at path, which arenaFileInUse
-// found unused, with an empty sparse one of CnCloneMetaAreaSize: it detaches
-// every loop device of the file (devs), confirms from a fresh listing that
-// none is left — the kernel keeps a loop device something has open attached
-// until it is closed — and only then removes the file and truncates it
-// afresh. A detached loop device left over would hold the old file, and the
-// new one would get a second.
-func (s *CnAgentServer) recreateArenaFile(
-	ctx context.Context,
-	path string,
-	devs []string,
-) error {
-	if len(devs) > 0 {
-		for _, dev := range devs {
-			if err := s.cmeta.LoopDetach(ctx, dev); err != nil {
-				return err
-			}
-		}
-		left, err := s.cmeta.LoopDevices(ctx, path)
-		if err != nil {
-			return err
-		}
-		if len(left) > 0 {
-			return fmt.Errorf("%s still attached after the detach",
-				strings.Join(left, " "))
-		}
-	}
-	if err := s.cmeta.RemoveFile(ctx, path); err != nil {
-		return err
-	}
-	return s.cmeta.Truncate(ctx, path, common.CnCloneMetaAreaSize)
-}
-
-// ensureLoopDev attaches the one loop device to the arena file when none
-// backs it, and, like ensureTmpFile, only on a confirmed tmpfs (tmpfsOk).
-func (s *CnAgentServer) ensureLoopDev(
-	ctx context.Context,
-	path string,
-	tmpfsPath string,
-	tmpfsOk bool,
-) (string, error) {
-	devs, err := s.cmeta.LoopDevices(ctx, path)
-	if err != nil {
-		return "", err
-	}
-	switch len(devs) {
-	case 0:
-		if !tmpfsOk {
-			return "", fmt.Errorf("no loop device backs %s and none is "+
-				"attached: no tmpfs is confirmed at %s", path, tmpfsPath)
-		}
-		return s.cmeta.LoopAttach(ctx, path)
-	case 1:
-		return devs[0], nil
-	}
-	return devs[0], fmt.Errorf(
-		"%d loop devices back %s, want 1", len(devs), path)
+	return &pb.CnInfo{PortInfo: s.ensurePort(ctx, t)}
 }
 
 // ensurePort converges this agent's single nvmet port — s.port.PortId, the
@@ -601,141 +368,44 @@ func (s *CnAgentServer) dropCntlrState(
 // CN28 — the node-level probe map
 // ---------------------------------------------------------------------------
 
-// errBaseStateAbsent, errAnaStateDiffers and errArenaFileSize are the
-// failures the node-level verdict records for what the read's probe read of
-// the base state that a SyncupCn would cure (CN30): a piece of it absent, an
-// ANA group of the port in a state other than its fixed one, or an arena file
-// of another size that nothing uses (arenaFileInUse).
+// errBaseStateAbsent and errAnaStateDiffers are the failures the node-level
+// verdict records for what the read's probe read of the base state that a
+// SyncupCn would cure (CN30): a piece of it absent, or an ANA group of the
+// port in a state other than its fixed one.
 var (
 	errBaseStateAbsent = errors.New("absent")
 	errAnaStateDiffers = errors.New("differs")
-	errArenaFileSize   = errors.New("of another size")
 )
 
 // baseRedrive is one piece of the base state (architecture.md, Controller
-// node, common) that a probe read absent,
-// or an ANA group it read in a state other than its fixed one, in the words
-// the node-level verdict reports it with (sweepCn).
+// node, common) that a probe read absent, or an ANA group it read in a state
+// other than its fixed one, in the words the node-level verdict reports it
+// with (sweepCn).
 type baseRedrive struct {
 	what string
 	err  error
 }
 
 // probeCn reads the base state (architecture.md, Controller node, common) into
-// its rows, and also returns what of
-// it the probe read wrong in a way a SyncupCn's converge would cure (CN30):
-// an absent tmpfs, which convergeCn mounts; an absent arena file or loop
-// device, which it creates only on a tmpfs it found or mounted, so only
-// while this probe read the tmpfs either there or absent; an arena file of
-// another size on a tmpfs this probe read there, while the loop listing
-// answers and nothing uses the file (arenaFileInUse), which it replaces
-// (ensureTmpFile); an absent port directory or ANA group, which EnsurePort
-// makes; and an ANA group in a state other than its fixed one on a port
-// whose transport attributes all match, which EnsurePort rewrites, since
-// nvmet takes an ana_state write whatever is linked to the port. A probe
-// that did not answer proves nothing, and the next read asks again. The
-// rest of what is there but not as wanted is left to its row: a filesystem
-// of another type at the path (and with it the arena file and loop device
-// the converge would not create on it), a file of another size that
-// something other than a clone-metadata wrapper uses or whose use a read did
-// not answer, and more than one loop device, which the converge reports and
-// leaves as they are, so a re-sent SyncupCn could not cure them; and a
-// transport attribute of the port that differs, which nvmet refuses to
-// rewrite while a subsystem is linked to the port (EACCES), so that while
-// one is every re-send would fail on it the same way. None of those is
-// returned. A wrapper that keeps the file is a leftover the node-level
-// verdict names (orphanCloneMetaNames), so the SyncupCn it brings removes
-// the wrapper while nothing holds it open, and the read after that names
-// the file while nothing else uses it (CN5).
+// its rows, and also returns what of it the probe read wrong in a way a
+// SyncupCn's converge would cure (CN30): an absent port directory or ANA
+// group, which EnsurePort makes; and an ANA group in a state other than its
+// fixed one on a port whose transport attributes all match, which EnsurePort
+// rewrites, since nvmet takes an ana_state write whatever is linked to the
+// port. A probe that did not answer proves nothing, and the next read asks
+// again. A transport attribute of the port that differs is left to its row
+// and not returned: nvmet refuses to rewrite it while a subsystem is linked
+// to the port (EACCES), so that while one is every re-send would fail on it
+// the same way.
 func (s *CnAgentServer) probeCn(
 	ctx context.Context,
 	st *cnState,
 ) (*pb.CnInfo, []baseRedrive) {
-	req := st.loadReq()
 	// A row made after the read is cancelled moves no epoch
 	// (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
 	info := &pb.CnInfo{}
 	var redrive []baseRedrive
-	clusterId := req.GetClusterId()
-	cnId := req.GetCnId()
-
-	tmpfsPath := s.nf.CnTmpfsPath(clusterId, cnId)
-	// arenaWanted is the converge's tmpfsOk as this probe can foresee it:
-	// the file and the loop device are created on a tmpfs the converge
-	// found, or on one it mounts where none was (CN5). tmpfsFound says this
-	// probe read a tmpfs there: only on one does the converge replace a file
-	// of another size, since where none is mounted its mount hides the file
-	// the path shows now.
-	arenaWanted, tmpfsFound := false, false
-	mounted, fsType, err := s.cmeta.Mounted(ctx, tmpfsPath)
-	switch {
-	case err != nil:
-		info.TmpfsInfo = t.Err(resKeyTmpfs, tmpfsPath, err.Error())
-	case !mounted:
-		info.TmpfsInfo = t.Missing(resKeyTmpfs, tmpfsPath, "")
-		redrive = append(redrive,
-			baseRedrive{"tmpfs " + tmpfsPath, errBaseStateAbsent})
-		arenaWanted = true
-	case fsType != "tmpfs":
-		info.TmpfsInfo = t.Err(resKeyTmpfs, tmpfsPath,
-			fmt.Sprintf("filesystem is %s, want tmpfs", fsType))
-	default:
-		info.TmpfsInfo = t.Ok(resKeyTmpfs, tmpfsPath, "")
-		arenaWanted, tmpfsFound = true, true
-	}
-
-	filePath := s.nf.CnTmpFilePath(clusterId, cnId)
-	// wrongSize: the file is there with another size, which the converge
-	// replaces on a tmpfs it found while nothing uses the file (below).
-	wrongSize := false
-	size, exists, err := s.cmeta.FileSize(ctx, filePath)
-	switch {
-	case err != nil:
-		info.TmpFileInfo = t.Err(resKeyTmpFile, filePath, err.Error())
-	case !exists:
-		info.TmpFileInfo = t.Missing(resKeyTmpFile, filePath, "")
-		if arenaWanted {
-			redrive = append(redrive, baseRedrive{
-				"clone metadata arena file " + filePath,
-				errBaseStateAbsent})
-		}
-	case size != common.CnCloneMetaAreaSize:
-		info.TmpFileInfo = t.Err(resKeyTmpFile, filePath,
-			fmt.Sprintf("size is %d, want %d",
-				size, common.CnCloneMetaAreaSize))
-		wrongSize = true
-	default:
-		info.TmpFileInfo = t.Ok(resKeyTmpFile, filePath, "")
-	}
-
-	devs, loopErr := s.cmeta.LoopDevices(ctx, filePath)
-	switch {
-	case loopErr != nil:
-		info.LoopDevInfo = t.Err(resKeyLoopDev, filePath, loopErr.Error())
-	case len(devs) == 0:
-		info.LoopDevInfo = t.Missing(resKeyLoopDev, filePath, "")
-		if arenaWanted {
-			redrive = append(redrive, baseRedrive{
-				"loop device of " + filePath, errBaseStateAbsent})
-		}
-	case len(devs) != 1:
-		info.LoopDevInfo = t.Err(resKeyLoopDev, filePath,
-			fmt.Sprintf("%d loop devices, want 1", len(devs)))
-	default:
-		info.LoopDevInfo = t.Ok(resKeyLoopDev, filePath, devs[0])
-	}
-	// The converge's test before it replaces a file of another size
-	// (ensureTmpFile), read the same way, so the verdict names the file only
-	// where a SyncupCn would replace it.
-	if wrongSize && tmpfsFound && loopErr == nil &&
-		s.arenaFileInUse(ctx, clusterId, cnId, devs) == nil {
-		redrive = append(redrive, baseRedrive{
-			"clone metadata arena file " + filePath,
-			fmt.Errorf("%w: %d bytes, want %d", errArenaFileSize,
-				size, common.CnCloneMetaAreaSize)})
-	}
-
 	portName := fmt.Sprintf("%d", s.port.PortId)
 	portState, details, err := s.nvmet.ProbePortState(
 		ctx, s.port.PortId, s.port)

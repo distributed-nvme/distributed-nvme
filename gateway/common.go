@@ -58,10 +58,9 @@ func errPrecondition(format string, args ...any) error {
 // errExhausted is GW7's RESOURCE_EXHAUSTED, whose cases are count ceilings,
 // "too few candidates" (architecture.md, Per-operation allocation) and
 // capacity shortfalls. Metadata units are capacity like extents
-// (architecture.md, Metadata units): a clone create that the metadata area
-// of a CN holding a cntlr of the pool has no room for, a cntlr create or a
-// migration create that finds no candidate node with room, and the ledgers'
-// chargeUnits shortfall all answer it, each message saying "metadata room".
+// (architecture.md, Metadata units): a migration create that finds no
+// candidate DN with room and the DN ledger's chargeUnits shortfall answer it,
+// each message saying "metadata room".
 // GW7's dividing line: RESOURCE_EXHAUSTED is capacity or quota that could be
 // freed or extended, FAILED_PRECONDITION the object's own state forbidding
 // the operation — which is why the meta ladder cap is an errPrecondition, not
@@ -156,7 +155,7 @@ func mapModelErr(err error) error {
 
 // errCandidateChanged is the sentinel an allocating STM closure returns when
 // one pick's exact capacity key — the key the scan outside the transaction saw
-// — is no longer there, when the pick's node no longer has the free metadata
+// — is no longer there, when the pick's DN no longer has the free metadata
 // units the round needs (verifyPick reads them from the node's record, since
 // a write that changes only units leaves the key where it is;
 // architecture.md, Metadata units), or when what the scan was planned from

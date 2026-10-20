@@ -20,11 +20,10 @@ import (
 // step 2).
 //
 // The key proves only that the node's free extents have not moved since the
-// scan. A write that changes only a node's used metadata units rewrites the
+// scan. A write that changes only a DN's used metadata units rewrites the
 // value under the same key, so a pick that needs units is re-checked against
-// the free units of the record its transaction reads (DnFreeMetaUnits,
-// CnFreeMetaUnits; architecture.md, Metadata units). Cand itself carries no
-// units.
+// the free units of the record its transaction reads (DnFreeMetaUnits;
+// architecture.md, Metadata units). Cand itself carries no units.
 type Cand struct {
 	AddrPort string
 	Location string
@@ -340,17 +339,16 @@ func FindDnCandidatesAntiAffine(
 }
 
 // FindCnCandidates walks the CN capacity index for candCnt CNs with at least
-// candExt free extents and candUnits free metadata units each (MD5;
-// architecture.md, Finding CN candidates, verbatim).
+// candExt free extents each (MD5; architecture.md, Finding CN candidates,
+// verbatim).
 //
-// It is the DN walk (architecture.md, Finding DN candidates) without bins and
-// without the draw among equals: one descending range over the single
-// cn_capacity prefix that takes the first CN it meets in each location. The
-// draw spreads a machine's disks, and a controller node has none. The walk
-// keeps the same metadata-room skip (CnCapacityFreeMetaUnits), a continue
-// placed before the location is recorded, and adds one filter: spCnAddrs
-// names the CNs that already host a cntlr of the SP being served, and a
-// second cntlr of one SP never lands on the same CN. excludeLocs seeds the
+// It is the DN walk (architecture.md, Finding DN candidates) without bins,
+// without the draw among equals and without the metadata-room skip: one
+// descending range over the single cn_capacity prefix that takes the first
+// CN it meets in each location. The draw spreads a machine's disks, and a
+// controller node has none; a CN counts no metadata units. The walk adds one
+// filter: spCnAddrs names the CNs that already host a cntlr of the SP being
+// served, and a second cntlr of one SP never lands on the same CN. excludeLocs seeds the
 // location set before the walk exactly as in FindDnCandidates; for a cntlr
 // pick it is the failure domains of the SP's other cntlrs — for a
 // replacement, the surviving ones (tier 1 of architecture.md, Per-operation
@@ -362,7 +360,6 @@ func FindCnCandidates(
 	cli *etcdutil.Client,
 	cid uint64,
 	candExt uint64,
-	candUnits uint64,
 	candCnt int,
 	black []string,
 	white []string,
@@ -405,11 +402,6 @@ func FindCnCandidates(
 		if err := cli.Decode(ctx, kv, capacity); err != nil {
 			return nil, err
 		}
-		if CnCapacityFreeMetaUnits(capacity) < candUnits {
-			// As in FindDnCandidates: never a break, and before the
-			// location is recorded.
-			continue
-		}
 		location := capacity.GetLocation()
 		if _, ok := locSet[location]; ok {
 			continue
@@ -435,9 +427,9 @@ func FindCnCandidates(
 //
 // It is FindDnCandidatesAntiAffine with requiredCnt fixed at one — every
 // cntlr pick places exactly one CN — so "short" means "empty", and tier 2 has
-// no tier-1 entry to merge behind. The black and white lists, spCnAddrs and
-// candUnits apply to both tiers: tier 2 relaxes the failure domain and nothing
-// else, so two cntlrs of one SP still never share a CN. An empty excludeLocs
+// no tier-1 entry to merge behind. The black and white lists and spCnAddrs
+// apply to both tiers: tier 2 relaxes the failure domain and nothing else, so
+// two cntlrs of one SP still never share a CN. An empty excludeLocs
 // makes tier 1 the plain scan, and tier 2 — which would repeat it exactly — is
 // skipped.
 //
@@ -451,7 +443,6 @@ func FindCnCandidatesAntiAffine(
 	cli *etcdutil.Client,
 	cid uint64,
 	candExt uint64,
-	candUnits uint64,
 	candCnt int,
 	black []string,
 	white []string,
@@ -459,7 +450,7 @@ func FindCnCandidatesAntiAffine(
 	excludeLocs []string,
 ) ([]Cand, bool, error) {
 	cands, err := FindCnCandidates(
-		ctx, cli, cid, candExt, candUnits, candCnt,
+		ctx, cli, cid, candExt, candCnt,
 		black, white, spCnAddrs, excludeLocs,
 	)
 	if err != nil {
@@ -473,7 +464,7 @@ func FindCnCandidatesAntiAffine(
 	// allocation). The same-domain placement
 	// is visible in the stored topology and is not logged separately.
 	cands, err = FindCnCandidates(
-		ctx, cli, cid, candExt, candUnits, candCnt,
+		ctx, cli, cid, candExt, candCnt,
 		black, white, spCnAddrs, nil,
 	)
 	if err != nil {

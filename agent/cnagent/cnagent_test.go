@@ -730,26 +730,6 @@ func cloneName(srv *CnAgentServer, cloneId uint64) string {
 		testCluster, testCn, testSp, cloneId)
 }
 
-// cloneMetaName is the kind-`cb` wrapper name a clone's id gives
-// (CnCloneMetaDmName), which no build creates (CN18).
-func cloneMetaName(srv *CnAgentServer, cloneId uint64) string {
-	return names(srv).CnCloneMetaDmName(
-		testCluster, testCn, testSp, cloneId)
-}
-
-// loopDev is the single loop device the CN5 base state attached to the arena
-// file; the CN5 converge and every read of the CN re-learn it from `losetup
-// --associated`, so the tests read it the same way rather than assuming
-// /dev/loop0.
-func loopDev(t *testing.T, srv *CnAgentServer, node *fakeNode) string {
-	t.Helper()
-	devs := node.loops[srv.nf.CnTmpFilePath(testCluster, testCn)]
-	if len(devs) != 1 {
-		t.Fatalf("%d loop devices back the arena file, want 1", len(devs))
-	}
-	return devs[0]
-}
-
 // dropDm takes a dm device away behind the agent's back.
 func dropDm(node *fakeNode, name string) {
 	node.mu.Lock()
@@ -770,6 +750,13 @@ func xferName(srv *CnAgentServer, xferId uint64) string {
 func portPathOf(portId int) string {
 	return fmt.Sprintf("%s/ports/%d", agent.NvmetRoot, portId)
 }
+
+// portProbeLine is the recorded line of the first OS call of every converge
+// and every read of a CN on the default port, which newTestServer builds: the
+// port probe's read of the time of its port's directory (cnagent.md CN5,
+// CN28). The fake's gate, hardGate and cancelCmd hooks match it, so a test
+// parks or cuts off such a pass there.
+var portProbeLine = "mtime " + portPathOf(common.NvmetPortId)
 
 // mentionsPort reports whether one recorded call names portPath. The path
 // has to end where the call's next separator begins, which for this fake is
@@ -831,20 +818,13 @@ func TestFreshSyncupCn(t *testing.T) {
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
-	file := srv.nf.CnTmpFilePath(testCluster, testCn)
-
 	assertOrder(t, node,
 		// The cn file carries the pointer list the node-level sweep
 		// removes against, so it is persisted BEFORE anything is converged or
 		// swept — a crash in the middle is then a startup sweep rather than a
 		// rebuild against the previous list.
 		"writeproto "+srv.nf.LocalCnPath(testCluster, testCn),
-		"cmd findmnt", "cmd mkdir -p "+tmpfs, "cmd mount -t tmpfs",
-		"cmd stat --format %s "+file,
-		"cmd truncate --size 1073741824 "+file,
-		"cmd losetup --associated "+file,
-		"cmd losetup --find --show "+file,
+		portProbeLine,
 		"writedirect "+portPathOf(common.NvmetPortId)+"/addr_trtype",
 		"cmd mkdir -p "+portPathOf(common.NvmetPortId)+"/ana_groups/2",
 		"cmd mkdir -p "+portPathOf(common.NvmetPortId)+"/ana_groups/3",
@@ -853,12 +833,13 @@ func TestFreshSyncupCn(t *testing.T) {
 		"writedirect "+portPathOf(common.NvmetPortId)+
 			"/ana_groups/3/ana_state",
 	)
-	// [D14]: the CN runs no LVM — CN5 stops at the loop device. This is the
-	// unit-test form of the repo-wide "no LVM command anywhere" acceptance
-	// grep.
+	// [D14]: the CN runs no LVM, and CN5's base state is the port alone.
+	// This is the unit-test form of the repo-wide "no LVM command anywhere"
+	// acceptance grep.
 	for _, verb := range []string{
 		"cmd pvcreate", "cmd vgcreate", "cmd vgs", "cmd lvcreate",
 		"cmd lvremove", "cmd lvs", "cmd lvchange", "cmd pvs",
+		"cmd mount", "cmd losetup", "cmd truncate",
 	} {
 		assertNoCall(t, node, verb)
 	}
@@ -871,9 +852,6 @@ func TestFreshSyncupCn(t *testing.T) {
 		}
 	}
 
-	assertOk(t, reply.GetCnInfo().GetTmpfsInfo(), "tmpfs")
-	assertOk(t, reply.GetCnInfo().GetTmpFileInfo(), "tmp_file")
-	assertOk(t, reply.GetCnInfo().GetLoopDevInfo(), "loop_dev")
 	assertOk(t, reply.GetCnInfo().GetPortInfo(), "port")
 }
 
@@ -1014,385 +992,6 @@ func assertPortLink(t *testing.T, node *fakeNode, portPath, nqn string) {
 	}
 }
 
-// TestFailedLosetupNeverAttachesASecondLoop: `losetup --associated` failing is
-// not the same fact as "no loop is associated". Treating the two alike lets
-// a single timed-out probe attach a *second* loop to the arena file, and from
-// then on every pass reports "2 loop devices …, want 1" until an operator
-// runs `losetup -d` (CN5: a **single** loop device, re-learned every
-// converge).
-func TestFailedLosetupNeverAttachesASecondLoop(t *testing.T) {
-	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-	file := srv.nf.CnTmpFilePath(testCluster, testCn)
-
-	node.Reset()
-	node.failCmd["losetup --associated"] =
-		"losetup: cannot open /dev/loop-control"
-	reply, err := srv.SyncupCn(context.Background(), cnReq(3, true))
-	if err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	loopInfo := reply.GetCnInfo().GetLoopDevInfo()
-	if loopInfo.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
-		t.Fatalf("loop_dev_info is %v/%q, want ERROR",
-			loopInfo.GetStatus(), loopInfo.GetDetails())
-	}
-	assertNoCall(t, node, "cmd losetup --find")
-	if devs := node.loops[file]; len(devs) != 1 {
-		t.Fatalf("%d loop devices back the arena file, want 1: %v",
-			len(devs), devs)
-	}
-}
-
-// arenaKill is how a base-state probe goes unanswered in the tests below:
-// "once" kills only the first run of it, so the converge's second asking
-// answers; "every time" kills every run, so neither does (CN5).
-type arenaKill struct {
-	name   string
-	always bool
-}
-
-var arenaKills = []arenaKill{{"once", false}, {"every time", true}}
-
-func (k arenaKill) arm(node *fakeNode, probe string) {
-	if k.always {
-		node.killCmdAlways[probe] = true
-		return
-	}
-	node.killCmd[probe] = true
-}
-
-// TestKilledFindmntDoesNotRemountTheArena: a `findmnt` the soft timeout
-// killed did not answer, and "did not answer" is not "nothing is mounted
-// there" (CN5, SH15). Read as absence, it sends the converge into `mount`,
-// and a mount over the live arena stacks a second, empty tmpfs on it: the
-// arena file drops out of sight, the converge truncates a fresh one and
-// attaches a second loop device to it while the first stays attached to the
-// hidden file, all for one probe that did not answer. Either of Mounted's
-// two calls can be the one killed. The converge runs the probe once more,
-// from its first call, and only once: killed once, the second asking answers
-// and tmpfs_info reads OK; killed every time, tmpfs_info says which probe did
-// not answer.
-// Either way it mounts nothing, truncates nothing and keeps the one loop
-// device. The CN's read, which a check round answers from (dnagent.md
-// SH29), does not ask again: a kill there reads ERROR, never MISSING.
-func TestKilledFindmntDoesNotRemountTheArena(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		probe string
-	}{
-		{"the type probe",
-			"findmnt --noheadings --output FSTYPE --target"},
-		{"the mountpoint probe",
-			"findmnt --noheadings --output TARGET --mountpoint"},
-	} {
-		for _, kill := range arenaKills {
-			t.Run(tc.name+" killed "+kill.name, func(t *testing.T) {
-				srv, node := newTestServer(t)
-				syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-				probe := tc.probe + " " +
-					srv.nf.CnTmpfsPath(testCluster, testCn)
-				loop := loopDev(t, srv, node)
-
-				node.Reset()
-				kill.arm(node, probe)
-				reply, err := srv.SyncupCn(context.Background(),
-					cnReq(3, true))
-				if err != nil {
-					t.Fatalf("SyncupCn: %v", err)
-				}
-				if got := node.callsMatching("cmd mount "); len(got) != 0 {
-					t.Errorf("a tmpfs was mounted over the live arena: %v",
-						got)
-				}
-				if got := node.callsMatching("cmd truncate "); len(got) != 0 {
-					t.Errorf("the arena file was truncated: %v", got)
-				}
-				if got := loopDev(t, srv, node); got != loop {
-					t.Errorf("the arena file is behind %s now, was %s",
-						got, loop)
-				}
-				if n := callCnt(node, "cmd "+probe); n != 2 {
-					t.Errorf("%q ran %d times in the converge, want 2: "+
-						"the one killed and one more asking", probe, n)
-				}
-				info := reply.GetCnInfo()
-				if kill.always {
-					assertErrorDetails(t, info.GetTmpfsInfo(), probe, "tmpfs")
-				} else {
-					assertOk(t, info.GetTmpfsInfo(), "tmpfs")
-				}
-				assertOk(t, info.GetTmpFileInfo(), "tmp_file")
-				assertOk(t, info.GetLoopDevInfo(), "loop_dev")
-
-				delete(node.killCmdAlways, probe)
-				node.Reset()
-				node.killCmd[probe] = true
-				refreshTestCn(t, srv)
-				check, _ := srv.checkCnRound(context.Background(),
-					&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
-						Revision: 3}, nil)
-				assertErrorDetails(t, check.GetCnInfo().GetTmpfsInfo(), probe,
-					"checked tmpfs")
-			})
-		}
-	}
-}
-
-// TestKilledStatDoesNotTruncateTheArenaFile is the backing file's half of the
-// same rule (CN5, SH15): a `stat` that did not answer is not "no such file",
-// and the converge must not answer it with a `truncate --size
-// CnCloneMetaAreaSize` of the live arena file — a no-op at that size, but a
-// resize in place of a file of any other size, which the converge otherwise
-// leaves alone while anything uses it.
-// The converge asks once more, and exactly once: killed once, tmp_file_info
-// reads OK; killed every time, it names the probe. The CN's read, which a
-// check round answers from, reads the same kill as ERROR, never MISSING.
-func TestKilledStatDoesNotTruncateTheArenaFile(t *testing.T) {
-	for _, kill := range arenaKills {
-		t.Run("killed "+kill.name, func(t *testing.T) {
-			srv, node := newTestServer(t)
-			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-			probe := "stat --format %s " +
-				srv.nf.CnTmpFilePath(testCluster, testCn)
-			loop := loopDev(t, srv, node)
-
-			node.Reset()
-			kill.arm(node, probe)
-			reply, err := srv.SyncupCn(context.Background(), cnReq(3, true))
-			if err != nil {
-				t.Fatalf("SyncupCn: %v", err)
-			}
-			if got := node.callsMatching("cmd truncate "); len(got) != 0 {
-				t.Errorf("the arena file was truncated: %v", got)
-			}
-			if got := loopDev(t, srv, node); got != loop {
-				t.Errorf("the arena file is behind %s now, was %s", got, loop)
-			}
-			if n := callCnt(node, "cmd "+probe); n != 2 {
-				t.Errorf("%q ran %d times in the converge, want 2: "+
-					"the one killed and one more asking", probe, n)
-			}
-			info := reply.GetCnInfo()
-			assertOk(t, info.GetTmpfsInfo(), "tmpfs")
-			if kill.always {
-				assertErrorDetails(t, info.GetTmpFileInfo(), probe, "tmp_file")
-			} else {
-				assertOk(t, info.GetTmpFileInfo(), "tmp_file")
-			}
-			assertOk(t, info.GetLoopDevInfo(), "loop_dev")
-
-			delete(node.killCmdAlways, probe)
-			node.Reset()
-			node.killCmd[probe] = true
-			refreshTestCn(t, srv)
-			check, _ := srv.checkCnRound(context.Background(),
-				&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
-					Revision: 3}, nil)
-			assertErrorDetails(t, check.GetCnInfo().GetTmpFileInfo(), probe,
-				"checked tmp_file")
-		})
-	}
-}
-
-// TestAskingAgainBuildsAnAbsentArena is the other side of the same asking
-// (CN5): the base state a probe asked about may really be absent, and the
-// converge that learns nothing from a kill must still build it once a second
-// asking answers. A check round that reads the absent object names it in its
-// verdict, and the worker re-sends the SyncupCn (CN30), but only a round
-// later — so a converge that stopped at the first kill would leave the CN
-// without a clone-metadata arena until then.
-//
-// After a reboot the tmpfs is gone while the cn file survives: the startup
-// reconcile whose first `findmnt` is killed mounts the tmpfs exactly once,
-// and the first read after it, and the check round answering from that read,
-// see the base state OK. On a fresh CN the arena
-// file is not there yet: the first SyncupCn whose first `stat` of it is
-// killed truncates it exactly once and attaches the one loop device.
-func TestAskingAgainBuildsAnAbsentArena(t *testing.T) {
-	t.Run("the tmpfs after a reboot", func(t *testing.T) {
-		node := newFakeNode()
-		node.dirs[agent.NvmetRoot] = true
-		srv := newCnServer(node)
-		if err := node.writeProto(context.Background(),
-			srv.nf.LocalCnPath(testCluster, testCn),
-			cnReq(2, false)); err != nil {
-			t.Fatalf("seeding the cn file: %v", err)
-		}
-		probe := "findmnt --noheadings --output FSTYPE --target " +
-			srv.nf.CnTmpfsPath(testCluster, testCn)
-		node.killCmd[probe] = true
-		reconcileForTest(t, srv)
-
-		if n := callCnt(node, "cmd mount "); n != 1 {
-			t.Fatalf("%d mounts at the startup reconcile, want exactly 1", n)
-		}
-		if n := callCnt(node, "cmd "+probe); n != 2 {
-			t.Errorf("%q ran %d times, want 2: the one killed and one "+
-				"more asking", probe, n)
-		}
-		node.Reset()
-		refreshTestCn(t, srv)
-		check, _ := srv.checkCnRound(context.Background(),
-			&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
-				Revision: 2}, nil)
-		if code := check.GetAgentReply().GetCode(); code != 0 {
-			t.Errorf("check round code %d (%q), want 0",
-				code, check.GetAgentReply().GetDetails())
-		}
-		info := check.GetCnInfo()
-		assertOk(t, info.GetTmpfsInfo(), "checked tmpfs")
-		assertOk(t, info.GetTmpFileInfo(), "checked tmp_file")
-		assertOk(t, info.GetLoopDevInfo(), "checked loop_dev")
-		if got := node.Mutations(); len(got) != 0 {
-			t.Errorf("the check round mutated: %v", got)
-		}
-	})
-
-	t.Run("the arena file on a fresh cn", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		probe := "stat --format %s " +
-			srv.nf.CnTmpFilePath(testCluster, testCn)
-		node.killCmd[probe] = true
-		reply, err := srv.SyncupCn(context.Background(), cnReq(2, false))
-		if err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		if n := callCnt(node, "cmd truncate "); n != 1 {
-			t.Fatalf("%d truncates of the arena file, want exactly 1", n)
-		}
-		if n := callCnt(node, "cmd "+probe); n != 2 {
-			t.Errorf("%q ran %d times, want 2: the one killed and one "+
-				"more asking", probe, n)
-		}
-		info := reply.GetCnInfo()
-		assertOk(t, info.GetTmpfsInfo(), "tmpfs")
-		assertOk(t, info.GetTmpFileInfo(), "tmp_file")
-		assertOk(t, info.GetLoopDevInfo(), "loop_dev")
-		loopDev(t, srv, node)
-	})
-}
-
-// TestUnconfirmedTmpfsCreatesNoArena: the arena file and its loop device are
-// created only on a tmpfs the converge found or mounted at the path (CN5).
-// Where it has neither — both askings of `findmnt` unanswered, or a refused
-// `mount` — the mountpoint may be a bare directory: after a reboot that kept
-// `/tmp`, or after the `mkdir -p` of that refused mount. A `stat` there
-// answers "absent", and a `truncate` would put the arena file on the
-// filesystem underneath and `losetup --find` attach the loop to it; the next
-// converge mounts over that file, truncates a fresh one and attaches a second
-// loop — the cascade a killed `findmnt` read as absence would cause. So the
-// pass creates neither: the file and loop rows read ERROR, and the next
-// SyncupCn, whose commands answer, builds all three exactly once.
-func TestUnconfirmedTmpfsCreatesNoArena(t *testing.T) {
-	assertNothingCreated := func(t *testing.T, node *fakeNode) {
-		t.Helper()
-		for _, verb := range []string{
-			"cmd truncate ", "cmd losetup --find",
-		} {
-			if got := node.callsMatching(verb); len(got) != 0 {
-				t.Errorf("without a confirmed tmpfs the pass ran %v", got)
-			}
-		}
-	}
-	assertBuiltOnce := func(
-		t *testing.T,
-		node *fakeNode,
-		reply *pb.SyncupCnReply,
-	) {
-		t.Helper()
-		for _, verb := range []string{
-			"cmd mount ", "cmd truncate ", "cmd losetup --find",
-		} {
-			if n := callCnt(node, verb); n != 1 {
-				t.Errorf("%q ran %d times, want exactly 1", verb, n)
-			}
-		}
-		info := reply.GetCnInfo()
-		assertOk(t, info.GetTmpfsInfo(), "tmpfs")
-		assertOk(t, info.GetTmpFileInfo(), "tmp_file")
-		assertOk(t, info.GetLoopDevInfo(), "loop_dev")
-	}
-
-	t.Run("both askings of findmnt killed after a reboot", func(t *testing.T) {
-		node := newFakeNode()
-		node.dirs[agent.NvmetRoot] = true
-		srv := newCnServer(node)
-		tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
-		file := srv.nf.CnTmpFilePath(testCluster, testCn)
-		node.dirs[tmpfs] = true
-		if err := node.writeProto(context.Background(),
-			srv.nf.LocalCnPath(testCluster, testCn),
-			cnReq(2, false)); err != nil {
-			t.Fatalf("seeding the cn file: %v", err)
-		}
-		probe := "findmnt --noheadings --output FSTYPE --target " + tmpfs
-		node.killCmdAlways[probe] = true
-		reconcileForTest(t, srv)
-		if got := node.callsMatching("cmd mount "); len(got) != 0 {
-			t.Errorf("the startup reconcile mounted: %v", got)
-		}
-		assertNothingCreated(t, node)
-		if _, ok := node.plain[file]; ok {
-			t.Errorf("the arena file %s exists under the bare mountpoint", file)
-		}
-
-		node.Reset()
-		reply, err := srv.SyncupCn(context.Background(), cnReq(2, false))
-		if err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		if got := node.callsMatching("cmd mount "); len(got) != 0 {
-			t.Errorf("the SyncupCn mounted: %v", got)
-		}
-		assertNothingCreated(t, node)
-		info := reply.GetCnInfo()
-		assertErrorDetails(t, info.GetTmpfsInfo(), probe, "tmpfs")
-		assertErrorDetails(t, info.GetTmpFileInfo(), "no tmpfs is confirmed",
-			"tmp_file")
-		assertErrorDetails(t, info.GetLoopDevInfo(), "no tmpfs is confirmed",
-			"loop_dev")
-
-		delete(node.killCmdAlways, probe)
-		node.Reset()
-		reply, err = srv.SyncupCn(context.Background(), cnReq(2, false))
-		if err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		assertBuiltOnce(t, node, reply)
-		loopDev(t, srv, node)
-	})
-
-	t.Run("a refused mount", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
-		node.failCmd["mount -t tmpfs"] = "mount: permission denied"
-		reply, err := srv.SyncupCn(context.Background(), cnReq(1, false))
-		if err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		if n := callCnt(node, "cmd mkdir -p "+tmpfs); n != 1 {
-			t.Errorf("mkdir of the mountpoint ran %d times, want 1", n)
-		}
-		assertNothingCreated(t, node)
-		info := reply.GetCnInfo()
-		assertErrorDetails(t, info.GetTmpfsInfo(), "permission denied",
-			"tmpfs")
-		assertErrorDetails(t, info.GetTmpFileInfo(), "no tmpfs is confirmed",
-			"tmp_file")
-		assertErrorDetails(t, info.GetLoopDevInfo(), "no tmpfs is confirmed",
-			"loop_dev")
-
-		node.Reset()
-		reply, err = srv.SyncupCn(context.Background(), cnReq(1, false))
-		if err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		assertBuiltOnce(t, node, reply)
-		loopDev(t, srv, node)
-	})
-}
-
 // refreshTestCn runs one read of the fixture CN (refreshCn) on a ctx of the
 // test's own, the read a round would start in the background (dnagent.md
 // SH29), so the next round or info read answers from what the node holds
@@ -1438,156 +1037,26 @@ func assertMissing(t *testing.T, info *pb.ResInfo, label string) {
 }
 
 // assertReDriven checks a node-level reply is the leftover code that makes
-// the worker re-send the SyncupCn, naming every one of names.
-func assertReDriven(
-	t *testing.T,
-	reply *pb.AgentReply,
-	label string,
-	names ...string,
-) {
+// the worker re-send the SyncupCn.
+func assertReDriven(t *testing.T, reply *pb.AgentReply, label string) {
 	t.Helper()
 	if reply.GetCode() != common.ReplyCodeLeftover {
 		t.Fatalf("%s: code %d (%q), want %d: nothing would re-send the "+
 			"SyncupCn that builds what is absent", label, reply.GetCode(),
 			reply.GetDetails(), common.ReplyCodeLeftover)
 	}
-	for _, name := range names {
-		if !strings.Contains(reply.GetDetails(), name+": absent") {
-			t.Errorf("%s: details %q do not name %q as absent",
-				label, reply.GetDetails(), name)
-		}
-	}
 }
 
 // TestAnAbsentBaseStateReDrivesTheSyncupCn pins the node-level half of CN30:
 // a CheckCn round that reads a piece of the CN's base state absent — the
-// clone-metadata arena's tmpfs, its file or its loop device, or the agent's
-// nvmet port or one of its ANA groups — answers a verdict that is not clean,
-// naming each, because only the converge of a SyncupCn builds them and the
-// worker re-sends a SyncupCn on a Check reply's code, never on its rows
-// (dnv-worker.md RW4). The rows alone read MISSING or ERROR, and a verdict
-// that stayed clean would leave the CN without the piece until its next
-// SyncupCn for some other reason or the agent's next start: after a reboot
-// whose mount was refused, no clone could be built on the CN meanwhile. Each
-// re-sent SyncupCn tries again, and the round after the one that builds the
-// piece is clean.
+// agent's nvmet port or one of its ANA groups — answers a verdict that is not
+// clean, naming it, because only the converge of a SyncupCn builds them and
+// the worker re-sends a SyncupCn on a Check reply's code, never on its rows
+// (dnv-worker.md RW4). The row alone reads ERROR, and a verdict that stayed
+// clean would leave the CN without the piece until its next SyncupCn for some
+// other reason or the agent's next start. The re-sent SyncupCn builds the
+// piece, and the round after it is clean.
 func TestAnAbsentBaseStateReDrivesTheSyncupCn(t *testing.T) {
-	t.Run("the arena after a reboot whose mount is refused",
-		func(t *testing.T) {
-			node := newFakeNode()
-			node.dirs[agent.NvmetRoot] = true
-			srv := newCnServer(node)
-			if err := node.writeProto(context.Background(),
-				srv.nf.LocalCnPath(testCluster, testCn),
-				cnReq(2, false)); err != nil {
-				t.Fatalf("seeding the cn file: %v", err)
-			}
-			tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
-			file := srv.nf.CnTmpFilePath(testCluster, testCn)
-			absent := []string{"tmpfs " + tmpfs,
-				"clone metadata arena file " + file,
-				"loop device of " + file}
-			node.failCmdAlways["mount -t tmpfs"] =
-				"mount: cannot allocate memory"
-			reconcileForTest(t, srv)
-			if n := callCnt(node, "cmd mount "); n != 1 {
-				t.Fatalf("%d mounts at the startup reconcile, want 1", n)
-			}
-
-			check := checkCnOnce(t, srv)
-			assertReDriven(t, check.GetAgentReply(), "check round",
-				absent...)
-			info := check.GetCnInfo()
-			assertMissing(t, info.GetTmpfsInfo(), "tmpfs")
-			assertMissing(t, info.GetTmpFileInfo(), "tmp_file")
-			assertMissing(t, info.GetLoopDevInfo(), "loop_dev")
-			got, err := srv.GetCnInfo(context.Background(),
-				&pb.GetCnInfoRequest{ClusterId: testCluster, CnId: testCn})
-			if err != nil {
-				t.Fatalf("GetCnInfo: %v", err)
-			}
-			assertReDriven(t, got.GetAgentReply(), "GetCnInfo", absent...)
-
-			// The re-sent SyncupCn meets the same refusal. Nothing is left
-			// that remembers the failure: the next round reads the arena
-			// absent again and re-drives again. The SyncupCn's own reply
-			// names nothing absent: its converge has just tried to build
-			// the arena, and its rows say how that went.
-			node.Reset()
-			reply, err := srv.SyncupCn(context.Background(), cnReq(2, false))
-			if err != nil {
-				t.Fatalf("SyncupCn: %v", err)
-			}
-			if got := reply.GetAgentReply(); got.GetCode() != 0 ||
-				strings.Contains(got.GetDetails(), ": absent") {
-				t.Errorf("the re-sent SyncupCn replied %v, want code 0 "+
-					"naming nothing absent", got)
-			}
-			if n := callCnt(node, "cmd mount "); n != 1 {
-				t.Fatalf("the re-sent SyncupCn mounted %d times, want 1", n)
-			}
-			assertReDriven(t, checkCnOnce(t, srv).GetAgentReply(),
-				"check round after a refused re-send", absent...)
-
-			// Once the mount answers, the re-sent SyncupCn builds the arena
-			// and the next round is clean.
-			delete(node.failCmdAlways, "mount -t tmpfs")
-			node.Reset()
-			if _, err := srv.SyncupCn(context.Background(),
-				cnReq(2, false)); err != nil {
-				t.Fatalf("SyncupCn: %v", err)
-			}
-			for _, verb := range []string{
-				"cmd mount ", "cmd truncate ", "cmd losetup --find",
-			} {
-				if n := callCnt(node, verb); n != 1 {
-					t.Errorf("%q ran %d times, want exactly 1", verb, n)
-				}
-			}
-			if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() !=
-				0 {
-				t.Errorf("check round after the build = %v, want code 0",
-					got)
-			}
-		})
-
-	// The file and the loop device are created on a tmpfs the converge
-	// finds as well as on one it mounts: under a live tmpfs they are
-	// re-driven alone, and the re-sent SyncupCn mounts nothing.
-	t.Run("the arena file and its loop device under a live tmpfs",
-		func(t *testing.T) {
-			srv, node := newTestServer(t)
-			cnSyncup(t, srv, 2, false)
-			file := srv.nf.CnTmpFilePath(testCluster, testCn)
-			node.mu.Lock()
-			delete(node.plain, file)
-			delete(node.loops, file)
-			node.mu.Unlock()
-
-			check := checkCnOnce(t, srv)
-			assertReDriven(t, check.GetAgentReply(), "check round",
-				"clone metadata arena file "+file, "loop device of "+file)
-			if details := check.GetAgentReply().GetDetails(); strings.Contains(
-				details, "tmpfs ") {
-				t.Errorf("details %q name the live tmpfs", details)
-			}
-
-			node.Reset()
-			cnSyncup(t, srv, 2, false)
-			for verb, want := range map[string]int{
-				"cmd mount ": 0, "cmd truncate ": 1, "cmd losetup --find": 1,
-			} {
-				if n := callCnt(node, verb); n != want {
-					t.Errorf("%q ran %d times, want %d", verb, n, want)
-				}
-			}
-			if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() !=
-				0 {
-				t.Errorf("check round after the build = %v, want code 0",
-					got)
-			}
-		})
-
 	for _, tc := range []struct {
 		name string
 		// dir is the configfs directory taken away, under the port.
@@ -1632,80 +1101,33 @@ func TestAnAbsentBaseStateReDrivesTheSyncupCn(t *testing.T) {
 
 // TestAnUnansweredBaseStateProbeDoesNotReDrive bounds the verdict above. A
 // probe that did not answer proves nothing absent, and the next round asks
-// again; a re-sent SyncupCn would not act on it either, since the converge
-// creates nothing on an unanswered probe (CN5). So an unanswered `findmnt`
-// after a reboot — the arena file and the loop device then read absent, but
-// the converge creates them only on a tmpfs it found or mounted — and a port
-// whose directory's time read, ANA group read or transport attribute read
-// was cut off read ERROR and leave the verdict clean. So does a mismatch the
-// verdict leaves to its row: a transport attribute of the port that differs,
-// which nvmet refuses to rewrite while a subsystem is linked to the port;
-// and an arena file of another size whose loop device something holds, a
-// second loop device, and a filesystem of another type mounted at the
-// arena's path, with no arena file and no loop device on it, which the
-// converge leaves as they are. TestAnArenaFileOfAnotherSizeIsReplaced
-// covers the rest of the file of another size.
+// again. So a port whose directory's time read, ANA group read or transport
+// attribute read was cut off reads ERROR and leaves the verdict clean. So
+// does a mismatch the verdict leaves to its row: a transport attribute of the
+// port that differs, which nvmet refuses to rewrite while a subsystem is
+// linked to the port.
 func TestAnUnansweredBaseStateProbeDoesNotReDrive(t *testing.T) {
-	t.Run("every findmnt of the arena killed after a reboot",
-		func(t *testing.T) {
-			node := newFakeNode()
-			node.dirs[agent.NvmetRoot] = true
-			srv := newCnServer(node)
-			if err := node.writeProto(context.Background(),
-				srv.nf.LocalCnPath(testCluster, testCn),
-				cnReq(2, false)); err != nil {
-				t.Fatalf("seeding the cn file: %v", err)
-			}
-			probe := "findmnt --noheadings --output FSTYPE --target " +
-				srv.nf.CnTmpfsPath(testCluster, testCn)
-			node.killCmdAlways[probe] = true
-			reconcileForTest(t, srv)
-
-			check := checkCnOnce(t, srv)
-			if got := check.GetAgentReply(); got.GetCode() != 0 {
-				t.Errorf("check round = %v, want code 0", got)
-			}
-			info := check.GetCnInfo()
-			assertErrorDetails(t, info.GetTmpfsInfo(), probe, "tmpfs")
-			assertMissing(t, info.GetTmpFileInfo(), "tmp_file")
-			assertMissing(t, info.GetLoopDevInfo(), "loop_dev")
-		})
-
 	portPath := agent.NvmetRoot + "/ports/1"
-	file := common.NewNameFmt(common.DefaultLocalStorPrefix).CnTmpFilePath(
-		testCluster, testCn)
-	portRow := (*pb.CnInfo).GetPortInfo
 	for _, tc := range []struct {
 		name string
 		arm  func(node *fakeNode)
-		// row is the CnInfo row that must read ERROR containing want.
-		row  func(*pb.CnInfo) *pb.ResInfo
+		// want is what the port row, which must read ERROR, contains.
 		want string
 	}{
 		{"the port directory's time read cut off", func(node *fakeNode) {
 			node.killCmdAlways["mtime "+portPath] = true
-		}, portRow, "mtime of " + portPath},
+		}, "mtime of " + portPath},
 		{"an ana group read cut off", func(node *fakeNode) {
 			node.killReadAlways[portPath+"/ana_groups/2/ana_state"] = true
-		}, portRow, portPath + "/ana_groups/2/ana_state"},
+		}, portPath + "/ana_groups/2/ana_state"},
 		{"a port transport attribute read cut off", func(node *fakeNode) {
 			node.killReadAlways[portPath+"/addr_trtype"] = true
-		}, portRow, portPath + "/addr_trtype"},
-		// The mismatches the verdict leaves to their rows: nvmet refuses an
-		// addr_* write while a subsystem is linked to the port, and the
-		// converge reports an arena file of another size whose loop device
-		// something holds, or a second loop device, and leaves it as it is.
+		}, portPath + "/addr_trtype"},
+		// The mismatch the verdict leaves to its row: nvmet refuses an
+		// addr_* write while a subsystem is linked to the port.
 		{"a port transport attribute that differs", func(node *fakeNode) {
 			node.files[portPath+"/addr_traddr"] = "192.168.10.99"
-		}, portRow, `addr_traddr is "192.168.10.99"`},
-		{"an arena file of another size whose loop device is held",
-			func(node *fakeNode) {
-				node.plain[file] = 4096
-				node.loopHolders[node.loops[file][0]] = []string{"md127"}
-			}, (*pb.CnInfo).GetTmpFileInfo, "size is 4096"},
-		{"a second loop device", func(node *fakeNode) {
-			node.loops[file] = append(node.loops[file], "/dev/loop99")
-		}, (*pb.CnInfo).GetLoopDevInfo, "2 loop devices"},
+		}, `addr_traddr is "192.168.10.99"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -1718,354 +1140,10 @@ func TestAnUnansweredBaseStateProbeDoesNotReDrive(t *testing.T) {
 			if got := check.GetAgentReply(); got.GetCode() != 0 {
 				t.Errorf("check round = %v, want code 0", got)
 			}
-			assertErrorDetails(t, tc.row(check.GetCnInfo()), tc.want,
+			assertErrorDetails(t, check.GetCnInfo().GetPortInfo(), tc.want,
 				tc.name)
 		})
 	}
-
-	t.Run("a tmpfs of another type", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		cnSyncup(t, srv, 2, false)
-		tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
-		file := srv.nf.CnTmpFilePath(testCluster, testCn)
-		node.mu.Lock()
-		node.mounts[tmpfs] = "ext4"
-		delete(node.plain, file)
-		delete(node.loops, file)
-		node.mu.Unlock()
-
-		check := checkCnOnce(t, srv)
-		if got := check.GetAgentReply(); got.GetCode() != 0 {
-			t.Errorf("check round = %v, want code 0", got)
-		}
-		info := check.GetCnInfo()
-		assertErrorDetails(t, info.GetTmpfsInfo(), "ext4", "tmpfs")
-		assertMissing(t, info.GetTmpFileInfo(), "tmp_file")
-		assertMissing(t, info.GetLoopDevInfo(), "loop_dev")
-	})
-}
-
-// arenaFileTouched lists the calls of a pass that replace the arena file or
-// detach a loop device of it.
-func arenaFileTouched(node *fakeNode, file string) []string {
-	var out []string
-	for _, fragment := range []string{
-		"cmd losetup --detach ", "cmd rm -f " + file, "cmd truncate ",
-		"cmd losetup --find ",
-	} {
-		out = append(out, node.callsMatching(fragment)...)
-	}
-	return out
-}
-
-// assertArenaFileNamed checks a node-level verdict names the arena file as of
-// another size, the leftover code that makes the worker re-send the SyncupCn
-// whose converge replaces it (CN30).
-func assertArenaFileNamed(t *testing.T, reply *pb.AgentReply, file string) {
-	t.Helper()
-	want := "clone metadata arena file " + file + ": of another size: " +
-		fmt.Sprintf("4096 bytes, want %d", common.CnCloneMetaAreaSize)
-	if reply.GetCode() != common.ReplyCodeLeftover ||
-		!strings.Contains(reply.GetDetails(), want) {
-		t.Fatalf("check round = %v, want code %d naming %q: nothing "+
-			"would re-send the SyncupCn that replaces the file", reply,
-			common.ReplyCodeLeftover, want)
-	}
-}
-
-// TestAnArenaFileOfAnotherSizeIsReplaced pins CN5's replacement of an arena
-// file of another size and the node-level verdict that drives it (CN30). Both
-// channels judge the file by one test (arenaFileInUse). While nothing uses
-// it, a check round names it, so the worker re-sends the SyncupCn, and that
-// converge detaches the file's loop device, confirms the detach, removes the
-// file, truncates it afresh and attaches a new loop device; the next round is
-// clean. While something uses it — a clone-metadata wrapper that maps any
-// of its loop devices, a wrapper whose table is not a run of the arena, a
-// device that holds a loop device — or a read that would tell does not
-// answer — the holders listing, the wrapper listing, the file's loop
-// listing or a loop device's number — no round names it and the converge
-// leaves it, the row saying why. A wrapper that keeps it is a leftover the
-// round names, so the SyncupCn that round brings removes the wrapper after
-// its converge, the round after names the file, and the next SyncupCn
-// replaces it. A loop device open without a holder is
-// named, and the converge that detaches it finds it still attached and
-// removes nothing. Off a confirmed tmpfs nothing is named or touched.
-func TestAnArenaFileOfAnotherSizeIsReplaced(t *testing.T) {
-	// setup builds the CN's base state, makes the arena file 4096 bytes and
-	// arms what the case wants under the fake's lock.
-	setup := func(
-		t *testing.T,
-		arm func(srv *CnAgentServer, node *fakeNode, loop string),
-	) (*CnAgentServer, *fakeNode, string, string) {
-		t.Helper()
-		srv, node := newTestServer(t)
-		cnSyncup(t, srv, 2, false)
-		file := srv.nf.CnTmpFilePath(testCluster, testCn)
-		loop := loopDev(t, srv, node)
-		node.mu.Lock()
-		node.plain[file] = 4096
-		arm(srv, node, loop)
-		node.mu.Unlock()
-		node.Reset()
-		return srv, node, file, loop
-	}
-	syncupCn := func(t *testing.T, srv *CnAgentServer) *pb.CnInfo {
-		t.Helper()
-		reply, err := srv.SyncupCn(context.Background(), cnReq(2, false))
-		if err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		return reply.GetCnInfo()
-	}
-
-	t.Run("nothing uses it", func(t *testing.T) {
-		srv, node, file, loop := setup(t,
-			func(*CnAgentServer, *fakeNode, string) {})
-
-		check := checkCnOnce(t, srv)
-		assertArenaFileNamed(t, check.GetAgentReply(), file)
-		assertErrorDetails(t, check.GetCnInfo().GetTmpFileInfo(),
-			"size is 4096", "checked tmp_file")
-
-		node.Reset()
-		info := syncupCn(t, srv)
-		assertOrder(t, node,
-			"cmd losetup --detach "+loop,
-			"cmd losetup --associated "+file,
-			"cmd rm -f "+file,
-			fmt.Sprintf("cmd truncate --size %d %s",
-				common.CnCloneMetaAreaSize, file),
-			"cmd losetup --find --show "+file)
-		if n := len(node.callsMatching("cmd rm -f " + file)); n != 1 {
-			t.Errorf("the file was removed %d times, want 1", n)
-		}
-		assertOk(t, info.GetTmpFileInfo(), "tmp_file")
-		assertOk(t, info.GetLoopDevInfo(), "loop_dev")
-		if got := node.plain[file]; got != common.CnCloneMetaAreaSize {
-			t.Errorf("the file is %d bytes, want %d", got,
-				common.CnCloneMetaAreaSize)
-		}
-		if got := loopDev(t, srv, node); got == loop {
-			t.Errorf("the file is still behind the old loop device %s", got)
-		}
-		if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() != 0 {
-			t.Errorf("check round after the replacement = %v, want code 0",
-				got)
-		}
-	})
-
-	for _, tc := range []struct {
-		name string
-		arm  func(srv *CnAgentServer, node *fakeNode, loop string)
-		// clean says the round has nothing else to name, so its code is 0;
-		// an orphan wrapper, or a dm listing that does not answer, is named
-		// by the sweep's own verdict.
-		clean bool
-		// why is what the converge's row says it left the file for, with
-		// {loop} standing for the loop device's kernel name.
-		why string
-		// wrapper says a clone-metadata wrapper alone keeps the file, so the
-		// SyncupCn's node-level sweep removes it and the next round names
-		// the file.
-		wrapper bool
-	}{
-		{"a clone metadata wrapper maps its loop device",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				name := srv.nf.CnCloneMetaDmName(
-					testCluster, testCn, testSp+1, testClone)
-				node.dms[name] = &fakeDm{
-					table: fmt.Sprintf("0 %d linear %s 0",
-						cnCloneMetaUnitSectors, node.devNo[loop]),
-					thinIds: map[uint32]bool{},
-				}
-				node.devNo["/dev/mapper/"+name] = node.newDevNo()
-			}, false, "maps /dev/loop", true},
-		{"a clone metadata wrapper maps its second loop device",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				const second = "/dev/loop99"
-				file := srv.nf.CnTmpFilePath(testCluster, testCn)
-				node.loops[file] = append(node.loops[file], second)
-				node.devNo[second] = node.newDevNo()
-				node.publishBlockDev(strings.TrimPrefix(second, "/dev/"))
-				name := srv.nf.CnCloneMetaDmName(
-					testCluster, testCn, testSp+1, testClone)
-				node.dms[name] = &fakeDm{
-					table: fmt.Sprintf("0 %d linear %s 0",
-						cnCloneMetaUnitSectors, node.devNo[second]),
-					thinIds: map[uint32]bool{},
-				}
-				node.devNo["/dev/mapper/"+name] = node.newDevNo()
-			}, false, "maps /dev/loop99", true},
-		{"the number of its loop device does not read",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				node.failReadAlways[sysfsBlockDir+"/"+
-					strings.TrimPrefix(loop, "/dev/")+"/dev"] = true
-			}, true, "read " + sysfsBlockDir + "/{loop}/dev: ", false},
-		{"a clone metadata wrapper is not a run of the arena",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				name := srv.nf.CnCloneMetaDmName(
-					testCluster, testCn, testSp+1, testClone)
-				node.dms[name] = &fakeDm{
-					table:   fmt.Sprintf("0 %d error", cnCloneMetaUnitSectors),
-					thinIds: map[uint32]bool{},
-				}
-				node.devNo["/dev/mapper/"+name] = node.newDevNo()
-			}, false, "is not a run of the arena", true},
-		{"a device holds its loop device",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				node.loopHolders[loop] = []string{"md127"}
-			}, true, "is held by md127", false},
-		{"the holders listing does not answer",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				node.killCmdAlways["list "+sysfsBlockDir+"/"+
-					strings.TrimPrefix(loop, "/dev/")+"/holders"] = true
-			}, true, "list " + sysfsBlockDir + "/{loop}/holders", false},
-		{"the wrapper listing does not answer",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				node.killCmdAlways["cmd dmsetup ls"] = true
-			}, false, "dmsetup ls", false},
-		// With no loop listing there is no loop device to match a wrapper
-		// or read holders of, so nothing else would stop the replacement
-		// under the wrapper that maps it.
-		{"the loop listing does not answer",
-			func(srv *CnAgentServer, node *fakeNode, loop string) {
-				name := srv.nf.CnCloneMetaDmName(
-					testCluster, testCn, testSp+1, testClone)
-				node.dms[name] = &fakeDm{
-					table: fmt.Sprintf("0 %d linear %s 0",
-						cnCloneMetaUnitSectors, node.devNo[loop]),
-					thinIds: map[uint32]bool{},
-				}
-				node.devNo["/dev/mapper/"+name] = node.newDevNo()
-				node.killCmdAlways["losetup --associated"] = true
-			}, false, "losetup --associated", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, node, file, loop := setup(t, tc.arm)
-			why := strings.ReplaceAll(tc.why, "{loop}",
-				strings.TrimPrefix(loop, "/dev/"))
-
-			check := checkCnOnce(t, srv)
-			reply := check.GetAgentReply()
-			if strings.Contains(reply.GetDetails(),
-				"clone metadata arena file") {
-				t.Errorf("check round %v names the arena file: a re-sent "+
-					"SyncupCn would leave it as it is", reply)
-			}
-			if tc.clean && reply.GetCode() != 0 {
-				t.Errorf("check round = %v, want code 0", reply)
-			}
-			assertErrorDetails(t, check.GetCnInfo().GetTmpFileInfo(),
-				"size is 4096", "checked tmp_file")
-
-			node.Reset()
-			info := syncupCn(t, srv)
-			if touched := arenaFileTouched(node, file); len(touched) != 0 {
-				t.Errorf("the converge touched the arena file: %q", touched)
-			}
-			assertErrorDetails(t, info.GetTmpFileInfo(), "not replaced: ",
-				"tmp_file")
-			assertErrorDetails(t, info.GetTmpFileInfo(), why, "tmp_file")
-			if got := node.plain[file]; got != 4096 {
-				t.Errorf("the file is %d bytes, want it left at 4096", got)
-			}
-			if !tc.wrapper {
-				return
-			}
-
-			name := srv.nf.CnCloneMetaDmName(
-				testCluster, testCn, testSp+1, testClone)
-			if !strings.Contains(reply.GetDetails(), name) {
-				t.Errorf("check round %v does not name the wrapper %s",
-					reply, name)
-			}
-			node.mu.Lock()
-			_, left := node.dms[name]
-			node.mu.Unlock()
-			if left {
-				t.Fatalf("the SyncupCn left the wrapper %s", name)
-			}
-			assertArenaFileNamed(t, checkCnOnce(t, srv).GetAgentReply(), file)
-			info = syncupCn(t, srv)
-			assertOk(t, info.GetTmpFileInfo(), "tmp_file")
-			assertOk(t, info.GetLoopDevInfo(), "loop_dev")
-			if got := node.plain[file]; got != common.CnCloneMetaAreaSize {
-				t.Errorf("the file is %d bytes, want %d", got,
-					common.CnCloneMetaAreaSize)
-			}
-		})
-	}
-
-	t.Run("its loop device is open without a holder", func(t *testing.T) {
-		srv, node, file, loop := setup(t,
-			func(_ *CnAgentServer, node *fakeNode, loop string) {
-				node.loopOpen[loop] = true
-			})
-
-		assertArenaFileNamed(t, checkCnOnce(t, srv).GetAgentReply(), file)
-
-		node.Reset()
-		info := syncupCn(t, srv)
-		assertOrder(t, node,
-			"cmd losetup --detach "+loop,
-			"cmd losetup --associated "+file)
-		for _, fragment := range []string{
-			"cmd rm -f " + file, "cmd truncate ", "cmd losetup --find ",
-		} {
-			assertNoCall(t, node, fragment)
-		}
-		assertErrorDetails(t, info.GetTmpFileInfo(),
-			"replacing it: "+loop+" still attached after the detach",
-			"tmp_file")
-		if got := node.plain[file]; got != 4096 {
-			t.Errorf("the file is %d bytes, want it left at 4096", got)
-		}
-		if got := loopDev(t, srv, node); got != loop {
-			t.Errorf("the file is behind %s, want %s still", got, loop)
-		}
-	})
-
-	t.Run("no tmpfs mounted", func(t *testing.T) {
-		srv, _, file, _ := setup(t,
-			func(srv *CnAgentServer, node *fakeNode, _ string) {
-				delete(node.mounts, srv.nf.CnTmpfsPath(testCluster, testCn))
-			})
-
-		// The tmpfs is named absent; the file the bare path shows is not
-		// named, since the converge's mount hides it.
-		reply := checkCnOnce(t, srv).GetAgentReply()
-		assertReDriven(t, reply, "check round",
-			"tmpfs "+srv.nf.CnTmpfsPath(testCluster, testCn))
-		if strings.Contains(reply.GetDetails(),
-			"clone metadata arena file "+file) {
-			t.Errorf("check round %v names the file the mount hides", reply)
-		}
-	})
-
-	t.Run("off a confirmed tmpfs", func(t *testing.T) {
-		srv, node, file, _ := setup(t,
-			func(srv *CnAgentServer, node *fakeNode, _ string) {
-				node.mounts[srv.nf.CnTmpfsPath(testCluster, testCn)] = "ext4"
-			})
-
-		check := checkCnOnce(t, srv)
-		if got := check.GetAgentReply(); got.GetCode() != 0 {
-			t.Errorf("check round = %v, want code 0", got)
-		}
-
-		node.Reset()
-		info := syncupCn(t, srv)
-		if touched := arenaFileTouched(node, file); len(touched) != 0 {
-			t.Errorf("the converge touched the arena file: %q", touched)
-		}
-		assertErrorDetails(t, info.GetTmpFileInfo(),
-			fmt.Sprintf("%s is 4096 bytes, want %d", file,
-				common.CnCloneMetaAreaSize), "tmp_file")
-		if strings.Contains(info.GetTmpFileInfo().GetDetails(), "replac") {
-			t.Errorf("tmp_file %q: off a confirmed tmpfs the converge "+
-				"does not try", info.GetTmpFileInfo().GetDetails())
-		}
-	})
 }
 
 // TestAWrongAnaGroupStateReDrivesTheSyncupCn pins the one piece of the base
@@ -3381,9 +2459,9 @@ func TestGroupProbeWalksOnce(t *testing.T) {
 
 // seedNonArrayEntries puts more of the block devices a CN really has beside
 // its arrays at the top of the fake's /sys/block, which otherwise holds the
-// arrays and the NVMe heads and loop devices the fake publishes a number
-// for, so a reader that stopped filtering for array nodes has dm devices, a
-// controller path and a disk to list too. dm-0 is given an md/ directory it
+// arrays and the NVMe heads the fake publishes a number for, so a reader
+// that stopped filtering for array nodes has dm devices, a controller path,
+// a disk and a loop device to list too. dm-0 is given an md/ directory it
 // never has on a real node, which a missing filter would list and record as
 // an array.
 func seedNonArrayEntries(node *fakeNode) []string {
@@ -5062,7 +4140,6 @@ func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
 		info.GetGrpIdToMdRaid(), info.GetXferIdToDmLinear(),
 		info.GetXferIdToSubsystem(), info.GetXferIdToNamespace(),
 		info.GetCloneIdToTarget(), info.GetCloneIdToDmClone(),
-		info.GetCloneIdToMeta(),
 	}
 	for _, thin := range info.GetTdIdToThinInfo() {
 		rows = append(rows, thin.GetSliceIdToDmThin())
@@ -7544,16 +6621,9 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 	for name := range node.dms {
 		t.Fatalf("dm device %s survived the teardown", name)
 	}
-	// The base state outlives every cntlr: the tmpfs mount and its single
-	// loop device stay, and the loop above already showed that every dm
-	// device — the kind-`cb` wrappers included — is gone.
-	if got := node.mounts[srv.nf.CnTmpfsPath(testCluster, testCn)]; got !=
-		"tmpfs" {
-		t.Fatalf("the teardown unmounted the tmpfs (%q)", got)
-	}
-	if devs := node.loops[srv.nf.CnTmpFilePath(
-		testCluster, testCn)]; len(devs) != 1 {
-		t.Fatalf("the teardown detached the arena loop device: %v", devs)
+	// The base state outlives every cntlr: the port stays.
+	if portPath := portPathOf(srv.port.PortId); !node.dirs[portPath] {
+		t.Fatalf("the teardown removed the port %s", portPath)
 	}
 }
 

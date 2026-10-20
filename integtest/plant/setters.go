@@ -758,9 +758,10 @@ type Latch struct {
 // That precondition is also what lets the sp drain give back no metadata
 // units and no clone meta group (architecture.md, Metadata units; Clones): a
 // pool that still has a clone or a migration cannot be deleted. A pool
-// latched here while it still holds a planted clone or migration therefore
-// leaves their units charged on its nodes once it has drained, and a clone's
-// clone meta group charged on its DNs, its sides' pointers with it.
+// latched here while it still holds a planted migration therefore leaves its
+// units charged on its destination DN once it has drained, and a planted
+// clone leaves its clone meta group charged on its DNs, its sides' pointers
+// with it.
 func SetDeleting(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -958,16 +959,10 @@ type CloneDrain struct {
 // that clone, and every step of the clone before it, is the real
 // coordinator's.
 //
-// Its last step, model.FinishCloneDelete, gives the clone's metadata units
-// back on the CN of every cntlr of the pool (architecture.md, Metadata
-// units). Each of those CNs holds them: CreateClone and PutClone charge the
-// CNs of the cntlrs the pool has at the time, and CreateCntlr, like the
-// worker's cntlr replacement, charges the CN it places a later cntlr on the
-// pool's whole clone sum. The same step gives the sides of the clone's clone
-// meta group back to their DNs (dnv-worker.md CLD9), which moves their
+// Its last step, model.FinishCloneDelete, gives the sides of the clone's
+// clone meta group back to their DNs (dnv-worker.md CLD9), which moves their
 // capacity keys, so it is handed the cluster's stored conf, cl.Conf, as
-// DrainSp's slice batches are. Both suites read both releases after a
-// drain.
+// DrainSp's slice batches are. Both suites read that release after a drain.
 //
 // A clone that was never there is a caller error, not a finished drain:
 // Deleted must mean "this call, or an earlier one, removed it", so the

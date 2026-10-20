@@ -318,11 +318,9 @@ type reactionOps interface {
 		chunks []model.BmChunk,
 	) (int, error)
 	// finishCloneDelete is the clone drain's final STM (CLD9): the Clone key
-	// and its clone_name_list entry, together, the clone's metadata units
-	// given back on the CN of every cntlr of the SP (architecture.md,
-	// Metadata units), and the sides of its clone meta group given back to
-	// their DNs, under the cluster's stored conf cc, which the STM refuses
-	// when it is unusable (CLD7).
+	// and its clone_name_list entry, together, and the sides of its clone
+	// meta group given back to their DNs, under the cluster's stored conf cc,
+	// which the STM refuses when it is unusable (CLD7).
 	finishCloneDelete(
 		ctx context.Context,
 		cid uint64,
@@ -372,14 +370,9 @@ func (o *modelReactionOps) findCnCandidates(
 	spCnAddrs []string,
 	excludeLocs []string,
 ) ([]model.Cand, error) {
-	// The tier bool is dropped, as in findDnCandidates. AR7's scan asks for
-	// no metadata units on purpose: model.ReplaceCntlr charges the new CN the
-	// SP's clone units even past its ceiling, so a CN whose area is full is
-	// still a replacement, and its primary builds every clone all the same,
-	// since no clone takes a unit of its area (architecture.md, Metadata
-	// units; cnagent.md CN18).
+	// The tier bool is dropped, as in findDnCandidates.
 	cands, _, err := model.FindCnCandidatesAntiAffine(
-		ctx, o.cli, cid, candExt, 0, candCnt,
+		ctx, o.cli, cid, candExt, candCnt,
 		black, nil, spCnAddrs, excludeLocs,
 	)
 	return cands, err
@@ -1600,10 +1593,7 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	// The footprint is what one cntlr's CN reserves for the whole SP
 	// (architecture.md, Cntlrs), and it is what model.ReplaceCntlr re-computes
 	// inside its STM: the scan has to ask for the same number or the pick would
-	// fail there. The SP's clone units are deliberately not asked for: the op
-	// moves them onto the pick even past its metadata area's ceiling
-	// (architecture.md, Metadata units), so a full area does not stop a
-	// replacement of the whole SP.
+	// fail there.
 	footprint := spFootprint(p.state)
 	batch := int(p.cc.GetAllocConf().GetCnBatchSize())
 	// AR7: the old CN is black-listed even when the node itself is healthy —

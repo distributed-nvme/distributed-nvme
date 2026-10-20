@@ -1240,7 +1240,7 @@ cleanup() {
 # reaches it.
 #
 # Why it exists at all: every teardown verb above removes dm devices BY KIND,
-# and the kind literals they pass are the role-lettered ones (c0…cb, d0…d5).
+# and the kind literals they pass are the role-lettered ones (c0…ca, d0…d5).
 # Residue on a shared lab VM whose name carries no such kind — a bare-digit
 # kind field, or an LVM `dnv--clone--vg-*` node — is walked straight past by
 # those verbs and stays there forever, pinning loop devices and nvmet objects

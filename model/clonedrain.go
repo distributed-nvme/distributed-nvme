@@ -3,8 +3,6 @@ package model
 import (
 	"context"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -24,19 +22,14 @@ import (
 //     bumps the `sp_rev` key (CLD8): it reads the SpConf and the Clone and
 //     deletes its chunks, which is what makes it a constant MaxDelBmPerTxn
 //     plus two compares whatever the ceilings become. The final STM moves
-//     two ledgers. The clone's metadata units go back on the CN of every
-//     cntlr of the SP (architecture.md, Metadata units), at most four
-//     compares per cntlr — its Cntlr and its CN's record read, that record
-//     and its capacity key written — so MaxCntlrCntPerSp bounds them; no CN
-//     holds a run of its arena for the clone, which keeps its dm-clone
-//     metadata on its clone meta group (cnagent.md CN18), so the count is
-//     only what the gateway charges new clones against. The sides of the
-//     clone's clone meta group go back to their DNs exactly as an sp drain
-//     batch gives a slice's back, at most six compares per distinct DN, and
-//     a clone meta group has at most MaxAllocLegPerGrp legs and
-//     MaxSpareLegPerGrp spares of one side each, so those bound them. The
-//     final STM is the one step that needs the cluster's stored conf, for
-//     the DN capacity keys' bins.
+//     one ledger: the sides of the clone's clone meta group go back to their
+//     DNs exactly as an sp drain batch gives a slice's back, at most six
+//     compares per distinct DN, and a clone meta group has at most
+//     MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares of one side each,
+//     so those bound them. No CN is touched: a CN holds no clone's metadata,
+//     which is on the clone's clone meta group (cnagent.md CN18), and is
+//     charged nothing for a clone. The final STM is the one step that needs
+//     the cluster's stored conf, for the DN capacity keys' bins.
 //   - The SP OUTLIVES the clone, so the final STM bumps SpRev like every other
 //     mutator instead of deleting a stop signal.
 //   - The drain runs ALONGSIDE the SP's normal reaction pass rather than
@@ -205,21 +198,15 @@ func DrainCloneBm(
 // (CLD12). After the commit the name is reusable and `DeleteStoragePool`'s
 // clone precondition no longer sees it.
 //
-// The same STM gives the clone's two charges back, both here, in the step
-// that removes the record they are read from, so each is given back exactly
-// once:
-//
-//   - the metadata units (architecture.md, Metadata units;
-//     releaseCloneMetaUnits): its meta_units leave the used_meta_units of the
-//     CN of every cntlr the SP has now, once per cntlr and stopping at zero,
-//     with the capacity value rewritten and no CnRev bumped, since only a
-//     count moves;
-//   - the clone meta group: every side of its legs and its spares goes back
-//     through the DN ledger exactly as DrainSpSlice gives a popped group's
-//     back — per distinct DN once, the pointer out, the group's ext_cnt back,
-//     the capacity key maintained and one DnRev bump. A DnConf that is gone
-//     is skipped, there being nothing left to credit, and a clone with no
-//     group gives nothing back, so a drain is never stranded on one.
+// The same STM gives the clone's one charge back, here, in the step that
+// removes the record it is read from, so it is given back exactly once: every
+// side of the clone meta group's legs and spares goes back through the DN
+// ledger exactly as DrainSpSlice gives a popped group's back — per distinct
+// DN once, the pointer out, the group's ext_cnt back, the capacity key
+// maintained and one DnRev bump. A DnConf that is gone is skipped, there
+// being nothing left to credit, and a clone with no group gives nothing back,
+// so a drain is never stranded on one. No CN is read or written: a clone
+// charges none.
 //
 // The pointer's removal and the DnRev bump take a side out of its dn agent's
 // next SyncupDn, which tears down the side the sp worker drove until this
@@ -251,11 +238,6 @@ func FinishCloneDelete(
 		if err != nil {
 			return err
 		}
-		err = releaseCloneMetaUnits(
-			s, opFinishCloneDelete, cid, conf, clone.GetMetaUnits())
-		if err != nil {
-			return err
-		}
 		rel := newDnReleaser(s, cid, cc)
 		grp := clone.GetMetaGrp()
 		for _, leg := range legsOf(grp) {
@@ -274,79 +256,6 @@ func FinishCloneDelete(
 		}
 		return BumpSpRev(s, opFinishCloneDelete, shard, cid, spId)
 	})
-}
-
-// releaseCloneMetaUnits gives one clone's units back on the CN of every cntlr
-// of the SP, inside the caller's STM (architecture.md, Metadata units): every
-// one of those CNs was charged the clone's units, by CreateClone or, for a
-// cntlr created or placed later, by CreateCntlr or ReplaceCntlr, which charge
-// the SP's whole clone sum.
-//
-// The release is once per cntlr, so a CN hosting two cntlrs of one SP — a
-// shape architecture.md, Finding CN candidates, forbids but nothing in the
-// store enforces — gives the units back twice, in one write, as
-// releaseSpCns credits the footprint. Each release stops at zero
-// (ReleaseMetaUnits). The capacity value follows (MaintainCnCapacity; the key
-// itself does not move, since units are no input of the presence rule), and
-// no CnRev is bumped: a write that changes only units raises no revision, as
-// a health write raises none, because nothing a CN is sent depends on the
-// count.
-//
-// A listed Cntlr whose key is missing is a REFUSAL, for DrainSpCntlrs's
-// reason: the record is what says which CN holds the units, so without it the
-// release cannot be made exact; the clone then stays latched and the refusal
-// repeats on every pass as `clone drain failed`, reason "cntlr not found",
-// until the key is restored. A CnConf that is gone is skipped, as
-// releaseSpCns skips it: there is nothing left to give the units back to. A
-// clone with zero units reads nothing at all.
-func releaseCloneMetaUnits(
-	s etcdutil.STM,
-	op string,
-	cid uint64,
-	conf *pb.SpConf,
-	units uint64,
-) error {
-	if units == 0 {
-		return nil
-	}
-	// Every Cntlr first, so a refusal returns before a write is staged.
-	addrs := make([]string, 0, len(conf.GetCntlrIdList()))
-	for _, cntlrId := range conf.GetCntlrIdList() {
-		cntlr := &pb.Cntlr{}
-		if !s.Get(CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
-			return fail(op, "cntlr not found")
-		}
-		addrs = append(addrs, cntlr.GetAddrPort())
-	}
-	var order []string
-	old := make(map[string]*pb.CnConf)
-	cur := make(map[string]*pb.CnConf)
-	for _, addrPort := range addrs {
-		newCn, ok := cur[addrPort]
-		if !ok {
-			stored := &pb.CnConf{}
-			if !s.Get(CnConfKey(cid, addrPort), stored) {
-				continue
-			}
-			old[addrPort] = stored
-			newCn = proto.Clone(stored).(*pb.CnConf)
-			cur[addrPort] = newCn
-			order = append(order, addrPort)
-		}
-		newCn.UsedMetaUnits = ReleaseMetaUnits(newCn.GetUsedMetaUnits(), units)
-	}
-	// First-touch order, so one transaction's writes are deterministic. A CN
-	// whose count was already zero has nothing to give back and is not
-	// written.
-	for _, addrPort := range order {
-		newCn := cur[addrPort]
-		if newCn.GetUsedMetaUnits() == old[addrPort].GetUsedMetaUnits() {
-			continue
-		}
-		s.Put(CnConfKey(cid, addrPort), newCn)
-		MaintainCnCapacity(s, cid, addrPort, old[addrPort], newCn)
-	}
-	return nil
 }
 
 // removeName drops one entry from a name list, preserving the order of the

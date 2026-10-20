@@ -101,11 +101,7 @@ func loadSpConfForDrain(
 // It deliberately skips DeleteCntlr's disabled-first and non-primary
 // preconditions: those exist to protect host IO and discovery, and a deletable
 // SP has an empty nqn_list — no subsystems, hence no CdcEntry keys, no host
-// paths and no CDC bookkeeping to drop. For the same reason no metadata units
-// move (architecture.md, Metadata units): a deletable SP also has an empty
-// clone_name_list, so its cntlrs' CNs hold none of its units, and each CnConf
-// is rewritten from a copy of the stored record, so the count other SPs
-// charged stays as it is, in the record and in its capacity value.
+// paths and no CDC bookkeeping to drop.
 //
 // Budget: at most MaxCntlrCntPerSp = 4 CNs, well under EtcdMaxTxnOps even though
 // the footprint calculation re-reads every slice.

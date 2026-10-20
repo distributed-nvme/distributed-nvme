@@ -414,11 +414,10 @@ func DnBinIdx(freeExt uint64, conf *pb.DnBinConf) (uint32, bool) {
 // true. A nil dn — a record that was just deleted, or one that never existed —
 // is not allocatable.
 //
-// The node's metadata units are no input of it, here or in CnAllocatable
-// (architecture.md, Metadata units): a node whose area is full still takes
-// work that needs no units, such as a new pool's legs and cntlrs or the
-// worker's cntlr replacement, so it keeps its key, and only a scan that asks
-// for units skips it.
+// The node's metadata units are no input of it (architecture.md, Metadata
+// units): a DN whose area is full still takes work that needs no units, such
+// as a new pool's legs or a clone meta group's sides, so it keeps its key,
+// and only a scan that asks for units skips it.
 func DnAllocatable(dn *pb.DnConf, conf *pb.DnBinConf) bool {
 	if dn == nil {
 		return false
@@ -479,14 +478,6 @@ func DnFreeMetaUnits(dn *pb.DnConf) uint64 {
 	return freeMetaUnits(common.DnCloneMetaUnitCnt, dn.GetUsedMetaUnits())
 }
 
-// CnFreeMetaUnits is DnFreeMetaUnits for a CN, under
-// common.CnCloneMetaUnitCnt. A CN that ReplaceCntlr charged past that
-// ceiling, the one charge allowed to pass it, has zero free units, never a
-// count wrapped around.
-func CnFreeMetaUnits(cn *pb.CnConf) uint64 {
-	return freeMetaUnits(common.CnCloneMetaUnitCnt, cn.GetUsedMetaUnits())
-}
-
 // DnCapacityFreeMetaUnits is DnFreeMetaUnits read from a DN's capacity value,
 // which carries a copy of the record's used units, and is what the scans
 // filter on (architecture.md, Metadata units). A value with no
@@ -494,12 +485,6 @@ func CnFreeMetaUnits(cn *pb.CnConf) uint64 {
 // free.
 func DnCapacityFreeMetaUnits(c *pb.DnCapacity) uint64 {
 	return freeMetaUnits(common.DnCloneMetaUnitCnt, c.GetUsedMetaUnits())
-}
-
-// CnCapacityFreeMetaUnits is DnCapacityFreeMetaUnits for a CN, under
-// common.CnCloneMetaUnitCnt.
-func CnCapacityFreeMetaUnits(c *pb.CnCapacity) uint64 {
-	return freeMetaUnits(common.CnCloneMetaUnitCnt, c.GetUsedMetaUnits())
 }
 
 // ReleaseMetaUnits is a node's used count after it gives back units
@@ -558,13 +543,11 @@ func DnCapacityValue(dn *pb.DnConf) *pb.DnCapacity {
 	}
 }
 
-// CnCapacityValue is DnCapacityValue for a CN, which MaintainCnCapacity
-// writes.
+// CnCapacityValue is the value of the capacity key a CnConf implies
+// (architecture.md, Capacity index keys): the node's location alone, which
+// spares a scan a point read per node ([D5]). MaintainCnCapacity writes it.
 func CnCapacityValue(cn *pb.CnConf) *pb.CnCapacity {
-	return &pb.CnCapacity{
-		Location:      cn.GetLocation(),
-		UsedMetaUnits: cn.GetUsedMetaUnits(),
-	}
+	return &pb.CnCapacity{Location: cn.GetLocation()}
 }
 
 // MaintainDnCapacity brings a DN's capacity key in line with the presence rule
@@ -628,10 +611,9 @@ func MaintainDnCapacity(
 }
 
 // MaintainCnCapacity is MaintainDnCapacity for a CN (MD4), with
-// CnCapacityValue(newCn) as the value; it too is called whenever a node's
-// used units change. It takes no ClusterConf: CN capacity keys carry no bin
-// index, so nothing about them depends on dn_bin_conf (architecture.md,
-// Finding CN candidates).
+// CnCapacityValue(newCn) as the value. It takes no ClusterConf: CN capacity
+// keys carry no bin index, so nothing about them depends on dn_bin_conf
+// (architecture.md, Finding CN candidates).
 func MaintainCnCapacity(
 	s etcdutil.STM,
 	cid uint64,

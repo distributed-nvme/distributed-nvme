@@ -876,8 +876,8 @@ func (wp *widePool) waitWideConverged(t *testing.T, what string) convergence {
 // requires before a delete (SPD4) — the clones by the worker's own clone
 // drain (CLD7, CLD9), which gives their clone meta groups back to their disk
 // nodes — the pool drains to its end (SPD8 to SPD12): every key of it is
-// gone, every node's free extent count and metadata units are back, and
-// every node's fake is told it holds nothing (SPD13).
+// gone, every node's free extent count and every disk node's metadata units
+// are back, and every node's fake is told it holds nothing (SPD13).
 func TestFullShapeWidestPool(t *testing.T) {
 	t.Parallel()
 	skipFullShape(t)
@@ -1137,10 +1137,9 @@ func (wp *widePool) assertCutoverTold(t *testing.T, cut wideMigr) {
 
 // drainClones latches every clone as DeleteClone does (CLD4) and waits for
 // the worker's clone drain to remove each (CLD9): the clone records and
-// names go, every CN gets the clones' metadata units back, and every disk
-// node of the clone meta groups gets their extents, pointers and capacity
-// key back, its revision moved once by each clone's put and once by its
-// drain's final step.
+// names go, and every disk node of the clone meta groups gets their extents,
+// pointers and capacity key back, its revision moved once by each clone's
+// put and once by its drain's final step.
 func (wp *widePool) drainClones(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -1155,11 +1154,6 @@ func (wp *widePool) drainClones(t *testing.T) {
 		}
 		return true, ""
 	})
-	for id := uint64(1); id <= wideCnCnt; id++ {
-		if units := wp.cnConf(t, id).GetUsedMetaUnits(); units != 0 {
-			t.Errorf("cn %d holds %d metadata units after the clone drain", id, units)
-		}
-	}
 	for id, before := range wp.preClone {
 		want := before
 		want.rev += 2 * uint64(len(wp.clones))
@@ -1388,10 +1382,10 @@ func (wp *widePool) assertDrained(t *testing.T, w *harnessWorker) {
 	for id := uint64(1); id <= wideCnCnt; id++ {
 		conf := wp.cnConf(t, id)
 		if conf.GetFreeExtCnt() != wideNodeFree || len(conf.GetCntlrPtrList()) != 0 ||
-			conf.GetUsedMetaUnits() != 0 || conf.GetErrEpoch() != 0 {
-			t.Errorf("cn %d after the drain: free %d of %d, %d cntlrs, %d units, err_epoch %d",
+			conf.GetErrEpoch() != 0 {
+			t.Errorf("cn %d after the drain: free %d of %d, %d cntlrs, err_epoch %d",
 				id, conf.GetFreeExtCnt(), wideNodeFree, len(conf.GetCntlrPtrList()),
-				conf.GetUsedMetaUnits(), conf.GetErrEpoch())
+				conf.GetErrEpoch())
 		}
 	}
 	fullShapeWait(t, 30*time.Second, "every node's fake told it holds nothing",

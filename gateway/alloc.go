@@ -18,7 +18,7 @@ import (
 // that makes a scan outside a transaction safe (GW9), and the DN/CN
 // bookkeeping ledgers that keep "one write and at most one revision bump per
 // node per STM" (architecture.md, Revision keys and the sync fan-out) true
-// however many sides, cntlrs or clones one transaction touches. A node whose
+// however many sides, cntlrs or clones one transaction touches. A DN whose
 // only change is its used metadata units is written and re-indexed but not
 // bumped (architecture.md, Metadata units).
 
@@ -146,26 +146,19 @@ func pickDns(
 	return picks, nil
 }
 
-// pickCn draws exactly one CN with extCnt free extents and metaUnits free
-// metadata units (architecture.md, Per-operation allocation; Metadata units).
-// spCnAddrs names the CNs already hosting a cntlr
+// pickCn draws exactly one CN with extCnt free extents (architecture.md,
+// Per-operation allocation). spCnAddrs names the CNs already hosting a cntlr
 // of this SP, which model excludes so that two cntlrs of one SP never share a
 // CN (architecture.md, Finding CN candidates). excludeLocs is the
 // two-tier half of the rule: tier 1 keeps the pick out of the locations the
 // SP's other cntlrs occupy, and tier 2 drops that exclusion when tier 1 finds
 // no CN, so too few failure domains alone never make it refuse.
-//
-// metaUnits is the SP's clone units for CreateCntlr, whose new cntlr's CN is
-// charged every clone of the SP (architecture.md, Metadata units), and zero
-// for CreateStoragePool, whose new SP has no clone. An empty pick that the
-// units' skip caused answers the "metadata room" refusal, as in pickDns.
 func pickCn(
 	ctx context.Context,
 	cli *etcdutil.Client,
 	cid uint64,
 	cc *pb.ClusterConf,
 	extCnt uint64,
-	metaUnits uint64,
 	selector *pb.NodeSelector,
 	black []string,
 	spCnAddrs []string,
@@ -180,40 +173,20 @@ func pickCn(
 	scanBlack := append(
 		append([]string(nil), selector.GetBlackList()...), black...)
 	// The tier bool is dropped, as in pickDns.
-	scan := func(units uint64) ([]model.Cand, error) {
-		cands, _, err := model.FindCnCandidatesAntiAffine(
-			ctx, cli, cid,
-			extCnt,
-			units,
-			batch,
-			scanBlack,
-			selector.GetWhiteList(),
-			spCnAddrs,
-			excludeLocs,
-		)
-		if err != nil {
-			return nil, errAborted("%v", err)
-		}
-		return cands, nil
-	}
-	cands, err := scan(metaUnits)
+	cands, _, err := model.FindCnCandidatesAntiAffine(
+		ctx, cli, cid,
+		extCnt,
+		batch,
+		scanBlack,
+		selector.GetWhiteList(),
+		spCnAddrs,
+		excludeLocs,
+	)
 	if err != nil {
-		return model.Cand{}, err
+		return model.Cand{}, errAborted("%v", err)
 	}
 	picks := model.PickRandom(cands, 1)
 	if len(picks) < 1 {
-		if metaUnits > 0 {
-			byExtents, err := scan(0)
-			if err != nil {
-				return model.Cand{}, err
-			}
-			if len(byExtents) > 0 {
-				return model.Cand{}, errExhausted(
-					"%s: no controller node with %d free extents has "+
-						"metadata room for %d units",
-					what, extCnt, metaUnits)
-			}
-		}
 		return model.Cand{}, errExhausted(
 			"%s: no controller node with %d free extents", what, extCnt)
 	}
@@ -500,10 +473,8 @@ func (l *dnLedger) flush(op string) error {
 // maintenance and at most one CnRev bump per CN per transaction
 // (architecture.md, Revision keys and the sync fan-out; architecture.md,
 // Capacity index keys). Its bump set holds the CNs a cntlr was charged to or
-// released from; a CN whose only change is its used metadata units — every
-// CN CreateClone charges — is written and re-indexed but not bumped
-// (architecture.md, Metadata units). It takes no ClusterConf — CN capacity
-// keys carry no bin index (architecture.md, Finding CN candidates).
+// released from. It takes no ClusterConf — CN capacity keys carry no bin
+// index (architecture.md, Finding CN candidates).
 type cnLedger struct {
 	s     etcdutil.STM
 	cid   uint64
@@ -551,14 +522,10 @@ func (l *cnLedger) get(addrPort string) (*pb.CnConf, error) {
 }
 
 // verifyPick is GW9 for a CN pick. CN capacity keys carry no bin field, so the
-// key is rebuilt from the free count the scan saw. As in dnLedger.verifyPick,
-// the key proves the free extents and nothing about the units, so the
-// metaUnits a cntlr's CN must hold for the SP's clones are checked on the
-// record (model.CnFreeMetaUnits; architecture.md, Metadata units).
+// key is rebuilt from the free count the scan saw.
 func (l *cnLedger) verifyPick(
 	cand model.Cand,
 	extCnt uint64,
-	metaUnits uint64,
 ) (*pb.CnConf, error) {
 	// Deleted between the scan and here is a moved candidate, not a refusal
 	// (GW9) — see dnLedger.verifyPick.
@@ -574,9 +541,6 @@ func (l *cnLedger) verifyPick(
 	}
 	capKey := model.CnCapacityKey(l.cid, cand.FreeExt, cand.AddrPort)
 	if !l.s.Get(capKey, &pb.CnCapacity{}) {
-		return nil, errCandidateChanged
-	}
-	if model.CnFreeMetaUnits(cn) < metaUnits {
 		return nil, errCandidateChanged
 	}
 	return cn, nil
@@ -627,54 +591,9 @@ func (l *cnLedger) release(
 	return nil
 }
 
-// chargeUnits is dnLedger.chargeUnits' CN twin (architecture.md, Metadata
-// units): units more of the CN's metadata area are used, for a clone
-// (CreateClone, once per cntlr of the SP) or for every clone of the SP
-// (CreateCntlr). A CN whose area lacks the room is RESOURCE_EXHAUSTED, the
-// message led by what. It marks no revision bump, and zero units read and
-// write nothing.
-func (l *cnLedger) chargeUnits(
-	addrPort string,
-	units uint64,
-	what string,
-) error {
-	if units == 0 {
-		return nil
-	}
-	cn, err := l.get(addrPort)
-	if err != nil {
-		return err
-	}
-	if free := model.CnFreeMetaUnits(cn); free < units {
-		return errExhausted(
-			"%s: controller node %q has no metadata room: "+
-				"%d free metadata units, need %d",
-			what, addrPort, free, units)
-	}
-	cn.UsedMetaUnits += units
-	return nil
-}
-
-// releaseUnits is chargeUnits' reverse, dnLedger.releaseUnits' CN twin: the
-// CN's used units drop by units and stop at zero (model.ReleaseMetaUnits),
-// with no revision bump marked, and zero units read and write nothing.
-func (l *cnLedger) releaseUnits(addrPort string, units uint64) error {
-	if units == 0 {
-		return nil
-	}
-	cn, err := l.get(addrPort)
-	if err != nil {
-		return err
-	}
-	cn.UsedMetaUnits = model.ReleaseMetaUnits(cn.GetUsedMetaUnits(), units)
-	return nil
-}
-
-// flush writes every touched CN once and maintains its capacity key, the value
-// carrying the CN's used metadata units, and bumps the revision of every CN a
-// cntlr was charged to or released from, once. A CN whose only change is its
-// used units is written and re-indexed but not bumped (architecture.md,
-// Metadata units).
+// flush writes every touched CN once and maintains its capacity key, and
+// bumps the revision of every CN a cntlr was charged to or released from,
+// once.
 func (l *cnLedger) flush(op string) error {
 	for _, addrPort := range l.order {
 		cur := l.cur[addrPort]
@@ -737,10 +656,9 @@ func loadCntlrs(
 // loadClones reads every clone the SpConf lists, in list order, latched ones
 // included. A listed clone whose key is missing is an ABORTED
 // (architecture.md, UNEXPECTED_ERROR → `ABORTED`), as a listed slice's is in
-// loadSlices: a unit sum computed from a partial list would charge a node
-// less, or give it back less, than the SP's clones hold there, and a walk of
-// the clones' clone meta groups over a partial list would miss a group, a
-// leg or a side the pool holds.
+// loadSlices: a walk of the clones' clone meta groups over a partial list
+// would miss a group, a leg or a side the pool holds, and answer a lookup
+// of one as if the pool had none.
 func loadClones(
 	s etcdutil.STM,
 	cid uint64,
@@ -787,24 +705,6 @@ func spFootprint(slices []*pb.Slice) uint64 {
 		for _, grp := range allGroups(slice) {
 			total += grp.GetExtCnt()
 		}
-	}
-	return total
-}
-
-// spCloneMetaUnits is Σ meta_units over EVERY clone of the SP, latched ones
-// included: what the CN of each cntlr of the SP holds in its metadata area for
-// the SP's clones, and so what CreateCntlr charges the new cntlr's CN and
-// DeleteCntlr gives the old one back (architecture.md, Metadata units). A
-// latched clone counts until model.FinishCloneDelete releases its units on
-// the CN of every cntlr the SP has at that moment: a sum that left it out
-// would give that release units a new cntlr's CN was never charged, and
-// strand on a deleted cntlr's CN units nothing gives back. It is the gateway
-// twin of model's sum, as spFootprint is, with the gateway's own refusal of a
-// missing clone in loadClones.
-func spCloneMetaUnits(clones []*pb.Clone) uint64 {
-	total := uint64(0)
-	for _, clone := range clones {
-		total += clone.GetMetaUnits()
 	}
 	return total
 }

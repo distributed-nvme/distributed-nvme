@@ -199,7 +199,7 @@ func TestCnRoleHealthFromInfo(t *testing.T) {
 		checkReply: func(req *pb.CheckCnRequest) *pb.CheckCnReply {
 			return &pb.CheckCnReply{
 				Revision: req.GetRevision(),
-				CnInfo:   &pb.CnInfo{TmpfsInfo: resErr("tmpfs", "no space")},
+				CnInfo:   &pb.CnInfo{PortInfo: resErr("port", "no listener")},
 			}
 		},
 	}
@@ -220,7 +220,7 @@ func TestCnRoleHealthFromInfo(t *testing.T) {
 		t.Fatalf("health write = %+v", write)
 	}
 	recs := h.logs.withMsg(msgHealthChanged)
-	if len(recs) != 1 || recs[0]["res_name"] != "tmpfs" {
+	if len(recs) != 1 || recs[0]["res_name"] != "port" {
 		t.Fatalf("health changed = %v", recs)
 	}
 }
@@ -250,8 +250,7 @@ func TestCnDriverInfoIsRaceFree(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 500; i++ {
 			d.fold(&pb.AgentReply{}, uint64(i), &pb.CnInfo{
-				TmpfsInfo: resErr("tmpfs", "no space"),
-				PortInfo:  resOk("port"),
+				PortInfo: resErr("port", "no listener"),
 			}, testStamp(), nil)
 		}
 	}()

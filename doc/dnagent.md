@@ -84,8 +84,8 @@ sweep has to look at a name the kernel hands back and say whether it is
 ours, of which kind and of which sp, so the two name shapes the sweep
 decodes have parsers there — `ParseDmName` for the dm device names (every
 `DmKind`) and `ParseNqn` for the dnv-format NQNs (every `NqnKind`). The rest
-of the name helpers have no inverse: the `/dev` and local-store paths, the
-tmpfs paths and the md names are formatted only — an md array is attributed
+of the name helpers have no inverse: the `/dev` and local-store paths and
+the md names are formatted only — an md array is attributed
 by its members' dm names instead (`cnagent.md` CN21) — and the hashed forms
 (`DnNsIdentity`, `NvmeHostId`, the short ids of `CnMdDevName` and
 `CnCloneMdDevName`) could not have one.
@@ -244,8 +244,8 @@ the SH11 or SH12 locks for that one read.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
-retry's, the DN12 fence timer's, the cn connect retry's and clone-metadata
-retry's), so do the background reads, whose probes run commands (SH17),
+retry's, the DN12 fence timer's and the cn connect retry's), so do the
+background reads, whose probes run commands (SH17),
 and the cn sweep's background `nvme disconnect` is one.
 Such a child must not outlive the agent — the cn sweep's background
 `nvme disconnect` (below) is allowed to — so the dn server registers every
@@ -647,9 +647,8 @@ hands the verdict back as `answered`, so DN9's zeroing loop can tell a batch
 the soft timeout killed from one the tool refused.
 
 These primitives must honour it, because each one's caller answers an
-"absent" with a removal, with a decision that can destroy data, with —
-`CloneMeta.Mounted`'s — a mount that sends every clone on the CN into a
-rebuild, or — `dirMtime`'s — with a clean verdict or a re-sent `SyncupCn`:
+"absent" with a removal, with a decision that can destroy data, or —
+`dirMtime`'s — with a clean verdict or a re-sent `SyncupCn`:
 
 * `Dm.Info`, whose "absent" answer gates `FreeSide` and `FreeCloneMeta`
   (DN6's record rule);
@@ -675,27 +674,12 @@ rebuild, or — `dirMtime`'s — with a clean verdict or a re-sent `SyncupCn`:
 * `Md.NameInUse` (`cnagent.md` CN12: an `lsblk` of the array's node under
   "/dev/md" whose "not in use" is what lets `assembleGroup` run
   `mdadm --create --assume-clean` beside an array already running under
-  that name);
-* `CloneMeta.Mounted` and `CloneMeta.FileSize` (`cnagent.md` CN5: the two
-  `findmnt` calls of the tmpfs probe, whose "absent" is answered with a
-  `mount`, which over the live clone-metadata arena stacks a second, empty
-  tmpfs that hides it — a fresh arena file and a second loop device follow
-  — and the "stat" of the arena file,
-  whose "absent" is answered with a `truncate` of it to
-  `CnCloneMetaAreaSize`: a no-op on the live arena file, which the converge
-  only ever creates at that size, but a resize in place of one of any
-  other size — on a shrink, the loss of its tail — where the converge
-  otherwise leaves a file of another size alone while anything uses it,
-  and replaces it whole, with a new loop device, only while nothing
-  does).
+  that name).
 
-`CloneMeta.LoopDevices` (`cnagent.md` CN5) honours it without the split:
-`losetup --associated` answers "none attached" with exit zero and no output,
-so every failure of it is an error — a "none" read off a failure would
-attach a second loop device to the arena file. `NvmeHost.readTrimmed`
-follows the same rule from the other side of the fence: it reads sysfs
-rather than running a tool, so **only** a not-exist error is "absent" and
-every other read failure is an error — the nvme class directories under
+`NvmeHost.readTrimmed` follows the same rule from the other side of the
+fence: it reads sysfs rather than running a tool, so **only** a not-exist
+error is "absent" and every other read failure is an error — the nvme
+class directories under
 "/sys/class" can stall while a controller is mid-reset, and a stalled read
 taken as absence would report a live subsystem as not connected (SH20); in
 the cn's lookups, a subsystem whose "subsysnqn" read failed, passed over as
@@ -723,7 +707,7 @@ let the sweep disconnect a leg under a live array).
 
 The listings the agent makes in its own process honour the file-read half
 of the same rule (`osclient.md`, RunCommand): `Cmd.ListDir`, through which
-the md walk (`cnagent.md` CN12) and `CloneMeta.LoopHolders` list sysfs, and
+the md walk (`cnagent.md` CN12) lists sysfs, and
 `NvmeHost`'s listings of the nvme class directories, which its walk makes
 beside the `NvmeHost.readTrimmed` reads.
 
