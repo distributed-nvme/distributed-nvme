@@ -19,8 +19,8 @@ safety rests on, the refusal before redund builds its pool and the kick in
 its late flip (`architecture.md`, [D16]). It proves the happy path; error
 paths are out of scope but for the stale probe, the dead leg, the promotion
 that outruns the sides' flip, md's refusal to start an array from one clean
-leg, the clone's lost source, and the leftover, an accepted request reporting
-residue (`cnagent.md` CN20). The cases
+leg, the clone's source lost and given back, and the leftover, an accepted
+request reporting residue (`cnagent.md` CN20). The cases
 run in a fixed order, fail-fast — smoke, redund, teardown, thinbm, clone_xfer,
 restart — each under pool ids of its own and each leaving nothing of its pools,
 a teardown per case and per stage that also keeps the run inside a DN's data
@@ -66,8 +66,9 @@ agent does, then checks each module loaded or built in; the tools, no LVM one
 among them (`architecture.md`, [D13], [D14]); nvmet configfs, md support,
 native multipath and the udev rule the md mask needs; and the free space and
 punch-hole support of the work directory's filesystem and the free memory.
-iptables is left to the partition stages, so a VM without it fails in the
-stage that needs it rather than a run that might never reach one.
+iptables and tc are left to the stages that use them, the partition stages
+and clone_xfer's slowed copy, so a VM without one fails in the stage that
+needs it rather than a run that might never reach one.
 
 ## Lab facts
 
@@ -111,7 +112,32 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   data-leg bitmap check is positional; the contract is the count of zero bits.
 * A dm device counts the sectors written to it from its creation, so the
   write count of a destination raid0 a rebuild has just created is what a
-  rebuilt dm-clone copied into it, as long as no host writes there.
+  rebuilt dm-clone copied into it, as long as no host writes there. A
+  region's copy writes one block, and a dm-clone counts the region copied
+  once that write has ended, so while one region at most is in flight and no
+  copy fails, a destination that only the copy writes into holds one whole
+  block for each region copied, beside at most part of the one in flight. A
+  copy that fails can leave part of its block written, the region uncounted:
+  dm-clone copies through dm-kcopyd, which splits a region larger than its
+  sub-job into pieces and writes each piece whose own read succeeded,
+  whatever the other pieces' reads do, so a source that goes between the
+  reads of one region leaves part of a block that the region's next copy
+  writes again whole. A copy whose reads all fail writes nothing.
+* A new dm-clone is read through its source at once, as udev probes the
+  device, and a discard on it waits for those reads, so over a slowed source
+  the chunk's discard can outlast the agent's command timeout and be killed.
+  clone_xfer therefore slows its copy on the write side: a VM's cn agent
+  reaches the sides of the dn agent beside it over the loopback device, and
+  a token bucket there, kept to the nvme-tcp port, slows what its legs send
+  those sides, the copy's writes into the destination among them, and none
+  of the source's reads.
+* A source that fails every read holds a dm-clone's copy at a fixed count,
+  its metadata read-write: the region in flight ends, and no other is copied
+  while the source fails. A namespace removed from the source's export takes
+  the destination's multipath head with it, though the dm-clone holds it
+  open, so a namespace that comes back does so under a new device number,
+  which the dm-clone does not read until it is reloaded onto it. clone_xfer
+  measures both rather than assume them.
 
 ## The driver: `cnagentctl`
 
@@ -154,15 +180,20 @@ its info-read commands are plain memory reads.
   error row compares against error, never "not OK", and a suppressed one also
   reads the level's details. A failed read taken for an absence passes every
   negative on it (`cnagent.md` CN21): a residue check's failed dm or nvmet
-  listing prints a failing line, a status-less check reply fails, the
+  listing prints a failing line, and so does a failed listing of clone_xfer's
+  token bucket once it is removed, a status-less check reply fails, the
   agent-log readers fail their stage on a log that is missing or cannot be
   read, thinbm's checks, clone_xfer's enable and finalize checks that a
   converge ran no such command and the late flip's check that its promotion
   wrote no optimized group fail when that converge logged nothing at all,
   the long-dead stage counts a path absent only once the same read saw it
   live, an admission refusal needs nvmet's own refusal record behind a fresh
-  mark, the park's open check, the dead-leg "no mdadm" and the bound on what
-  a rebuilt clone copies carry positive controls, and in
+  mark, the park's open check, the dead-leg "no mdadm", the bound on what
+  a rebuilt clone copies, and clone_xfer's checks that its agent's restart
+  over the held copy mutated nothing and that the source's return created no
+  dm-clone carry positive controls, the reads of the dm-clone by the
+  restart's reconcile and by two connect retry attempts after it, each under
+  a trace id of its own, and the reload in the same reading, and in
   redund's md-refusal stage the checks that no array holds a leg and that no
   loop device is left fail on a read that fails and have the running array
   and the listed loops as their positive controls. Other negatives pass on a
@@ -191,8 +222,9 @@ its info-read commands are plain memory reads.
   or for one trace; the probers' "probe …" records fall outside it by
   construction (`osclient.md`, Exported raw helpers and the probe-IO
   carve-out). Records no stage RPC caused carry trace ids of their own
-  (`cnagent.md` CN2), so clone_xfer's rebuild checks and restart's checks
-  read a fresh log.
+  (`cnagent.md` CN2), so clone_xfer's restart and rebuild checks and the
+  restart case's checks read a fresh log, and clone_xfer's check of the
+  source's return reads the log after a mark.
 
 ## Cases
 
@@ -322,14 +354,41 @@ and no-discard-passdown pair, and lands the chunk as one discard at its skip
 range before hydration is enabled (CN18's metadata, dm-clone, bitmap and
 hydration steps); the first hydration sample, a fresh one, already counts the
 skipped half, and the last region the source wrote reads back right, through
-read-through if need be. With no request, the startup reconcile, or the
-connect retry its pass registers when a step fails, rebuilds a wiped
-destination CN, the group's leg and device before the dm-clone over them and
-the chunk again before hydration (CN2, CN10, CN18), its dead host path
-replaced by device as the pools share the NQN. The rebuilt clone's first sample counts at
-least the regions the wipe-time sample did, and until hydration completes it
-writes into the destination at most the regions that sample left to copy, as a
-dm-clone that loaded the metadata its group holds does. The hydrated clone's
+read-through if need be. The copy runs slowed, the destination CN's writes
+to the sides on its own VM held to a low rate (Lab facts), so that the case
+acts in its middle. Once the copy has passed the chunk, the source loses its
+namespace behind both agents' backs, as it does again once the copy is whole
+(below), and the copy holds at a count past the chunk's (Lab facts). The
+destination's agent then restarts over the held copy and leaves it as it is
+(CN2, CN18): the count reads the held one, the dm-clone, its group's device
+and its leg's wrapper keep their device numbers and tables, the fresh log,
+read once a second attempt of the connect retry the restart registers has
+begun, so that it holds the whole first attempt, holds no mutation, the
+source's row reads missing and the dm-clone's and the group's ok. The source
+gets its namespace back from the transfer's own converge of a re-sent
+request (CN17), under a new device number on the destination, and with no
+request to the destination the connect retry, which a source with no
+namespace keeps registered, reloads the dm-clone onto that number in place,
+lands the chunk again and enables hydration (CN10, CN18),
+its count at least the held one, and the copy goes on. With no request, the
+startup reconcile, or the connect retry its pass registers when a step fails,
+rebuilds a destination CN wiped in the middle of that copy, the group's leg
+and device before the dm-clone over them and the chunk again before
+hydration (CN2, CN10, CN18), its dead host path replaced by device as the
+pools share the NQN. The wipe-time sample counts more than the held count,
+and between the destination raid0's write count read while the copy held,
+which holds any part of a block that a copy failing as the source went
+left, and one read between two samples that read the same count, the copy
+alone wrote one whole block for each region copied past the held count and
+no more (Lab facts): no region was copied twice, so the reload loaded the
+metadata its group holds, where a reload over metadata formatted anew would
+copy the regions before the hold again, whatever the
+timing of its first sample; the rebuilt clone's first sample counts at least
+the regions that sample did, and until hydration completes the clone writes
+into the destination at most the regions that sample left to copy, fewer
+than the source's written half: a dm-clone that loaded the metadata its
+group holds does so, while one over freshly formatted metadata copies that
+half whole. The hydrated clone's
 source then loses its namespace behind both agents' backs, the transfer's
 export and the destination CN's controller of it staying: the clone's two
 rows, its group's row and its destination namespace's two read one status,
@@ -366,18 +425,20 @@ normal reply (`dnagent.md` SH8, SH9; CN4).
 **What a pass means.** Exit status zero and PASS mean every assertion held in a
 run that stops at the first failure: data checked against patterns the agents
 never see, removals proved by the nodes' own listings, every stop a case makes
-confirmed; the races a loop device usually wins — the provisioning and
-read-through windows, hydration at the wipe — are logged, the last deciding
-only how much the rebuilt clone may still copy, and a wipe that comes before
-any region is copied, which kept and freshly formatted metadata pass alike,
-logged as no proof of the kept metadata.
+confirmed; the race a loop device usually wins, the provisioning window, is
+logged, while clone_xfer's copy, which a loop device would finish at once, is
+slowed, so its read-through window, logged too, is open when its probe reads,
+and the case fails unless the copy holds once its source goes and the wipe
+comes in the middle of it.
 
 ## Teardown and cleanup
 
 Cleanup runs unconditionally at the start of every run and at its end only on
 success; a failing run leaves its debris and dumps the agents' logs, both VMs'
 dm, md, nvmet and host state, each read bounded, and the failing stage's trace
-id. A cleanup-only run does the scrub alone. It takes every `dnv-agent` and
+id, but for clone_xfer's token bucket, which it removes, as the bucket would
+slow any suite that runs on the VMs before the next cleanup. A cleanup-only
+run does the scrub alone. It takes every `dnv-agent` and
 every dnv dm device, md array and nvmet subsystem on the node, of either
 role, which is why one dnv suite runs at a
 time in the lab (`layout.md`, Directory tree) — but for two blind spots the
@@ -386,8 +447,9 @@ md stop skips an inactive array over unreadable members, which neither udev nor
 mdadm names. Each step is best-effort, and the order is load-bearing on one
 principle, a holder goes before what it holds, across both VMs at once: the
 agents, their retries and probers with them, before the devices; the fault
-injections unconditionally, as each outlives its stage and would pass for
-another fault next run; host connections before the subsystems they hold,
+injections and clone_xfer's token bucket unconditionally, as each outlives
+its stage and would pass for another fault next run; host connections before
+the subsystems they hold,
 exports inside out, cn devices top-down and the dn objects in the dn suite's
 order (`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its
 source is still connected (`cnagent.md` L3), which makes the cleanup two phases

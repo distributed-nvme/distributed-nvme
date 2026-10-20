@@ -344,8 +344,9 @@ delete its request and its chunks for want of a list that could not be
 read. The node-level sweep (CN21) keeps a skipped cntlr's sp stacks
 while its pointer is in the list; but its request-derived set — the clone
 sources some request names (CN21) — is read from the cntlrs in memory
-alone, so a skipped cntlr's clone source survives a sweep whose listings
-answered only while a live dm-clone maps it: the source reads as in use.
+alone, so a skipped cntlr's clone source that the sweep judges at all, a
+transfer of this cluster (CN21), survives a sweep whose listings answered
+only while a live dm-clone maps it: the source reads as in use.
 Nor is anything hidden: with none of it in memory, the CN and
 each of those cntlrs answer their Check rounds `ReplyCodeUnknownObject`
 (`dnagent.md` SH25), and the worker re-sends each `Syncup*` (`dnv-worker.md` RW4). The
@@ -2177,8 +2178,10 @@ on it; a later pass — the retry's — finishes the build.
 **Removing a clone** is not a step of its own: it is the CN21 sweep
 finding the clone's objects unwanted and taking them in layer order,
 which is exactly the order this stack needs. A clone that left
-`clone_list` loses its dm-clone, its source connection, and its clone
-meta group's array or group device and legs; one the role or the level
+`clone_list` loses its dm-clone, its source connection when the source is
+a transfer of this cluster (CN21; a source of any other kind stays
+connected, Known limits), and its clone meta group's array or group
+device and legs; one the role or the level
 merely suppresses loses its dm-clone, and of its clone meta group only
 what the role and the level take from any group — a standby has no array
 or group device (CN12), and the level takes the array or group device
@@ -2241,8 +2244,9 @@ dm-clone tables), and a suppressed clone is still in that list.
   before its clone meta group goes, since the dm-clone's removal writes
   its last metadata through the group.
 * L5 disconnects the source subsystem — the one a clone that has left
-  `clone_list` loses beside its clone meta group (by NQN is safe here:
-  every path of it is going). The disconnect runs off the pass (CN10), so
+  `clone_list` loses beside its clone meta group when its NQN is a
+  transfer NQN of this cluster (CN21); by NQN is safe here, as every path
+  of it is going. The disconnect runs off the pass (CN10), so
   the connection is that pass's leftover until a later pass finds it
   gone, and a clone created on the same source meanwhile waits for it
   rather than adopt it (step 1). The set of unowned sources is computed
@@ -2298,7 +2302,8 @@ that level and above:
   level-blind (CN21: a source is in use while any stored cntlr's
   `clone_list` names it, which `sp_level` does not shorten, or a live
   dm-clone table maps it), so it is disconnected only once the clone
-  leaves `clone_list` or the cntlr's stored state goes; the ns-devs of
+  leaves `clone_list` or the cntlr's stored state goes, and then only
+  when its NQN is a transfer NQN of this cluster (CN21); the ns-devs of
   clone-target tds go on `CnErrorName` (CN16 rule 4), so an `auto_resume`
   clone's destination namespace stays exported and optimized and its
   host takes IO errors instead of queueing (CN16). A clone's clone meta
@@ -2469,11 +2474,17 @@ array with a foreign, unparsable or differently-owned member is silently
 skipped and never stopped, which is what leaves a co-hosted dn agent's
 udev-assembled array alone. A side-export host connection is ours by the
 cn id inside the NQN, which is how it is told from one another CN of this
-cluster holds. A clone-source connection of our cluster belongs to no sp
+cluster holds. A host connection is a clone source of ours only when its
+NQN is a transfer NQN of our cluster (`XferNqn`), the one kind of NQN that
+says a clone of this cluster dials it. Such a connection belongs to no sp
 — its NQN names the source sp, not the cntlr that dials it — so the only
 test there is is "does somebody here still want it": it is in use iff
 some cntlr this process holds names it as a clone's `src_nqn` or a live
-dm-clone table maps its namespace device, and unowned otherwise. A
+dm-clone table maps its namespace device, and unowned otherwise. A clone
+source under any other NQN — another pool's subsystem, whose NQN its user
+chose, or a transfer of another cluster — names no owner here, and the
+sweep reads no other mark of who made a connection, so no sweep ever
+judges it and it stays connected once its clone has gone (Known limits). A
 subsystem in the nvmet tree whose NQN is dnv-format says whose it is
 outright: a transfer subsystem of our cluster is the transfer export of
 the sp its NQN names, and an NQN that carries the dnv prefix but decodes
@@ -2538,7 +2549,8 @@ the source on removal (CN18).
 
 There is no layer L4: the id is retired and never reused.
 
-L5. clone-source connections that nothing maps any more. The set is
+L5. clone-source connections of our cluster's transfers (attribution,
+above) that nothing maps any more. The set is
 evaluated here, not when the chain was built: a snapshot taken before L3
 still shows the dm-clone this pass is removing mapping its own source,
 and deciding early would never disconnect it. Their disconnects run off
@@ -3356,15 +3368,19 @@ sp-less clone-source connections below. Neither reports the other's sp
 chain, because each drives its own `Syncup*`: reporting a cntlr's chain
 leftover on `CheckCn` would re-issue a `SyncupCn` that builds no chain
 for that sp at all (CN21: an sp in the pointer list gets none). One kind
-of object both verdicts can name: an unowned clone-source connection. It
-belongs to no sp at all, so both scopes enumerate it node-wide (CN21),
-the cntlr-level L5 set being the same "no stored cntlr names it as a
-clone's `src_nqn` and no live dm-clone table maps it" set the node-level
-pass uses. The same NQN is therefore reported by `CheckCn` and by every
+of object both verdicts can name: an unowned clone-source connection,
+which by the attribution of CN21 is a connection to one of our cluster's
+transfers. It belongs to no sp at all, so both scopes enumerate it
+node-wide (CN21), the cntlr-level L5 set being the same set the
+node-level pass uses: our cluster's transfer connections that no stored
+cntlr names as a clone's `src_nqn` and no live dm-clone table maps. Such
+an NQN is therefore reported by `CheckCn` and by every
 `CheckCntlr` of this node until it goes, and re-driven by both
 `SyncupCn` and each cntlr's `SyncupCntlr` — one round of work more than
 the minimum, and never a round less, which is the safe direction for a
-verdict whose only job is to make somebody try again. A cntlr whose stored
+verdict whose only job is to make somebody try again. A clone source
+under any other NQN is in neither set, so neither verdict names it
+(Known limits). A cntlr whose stored
 conf the gate refuses has no verdict either — it converged nothing and
 enumerated nothing, and naming objects this agent is not allowed to remove
 would be a leftover report no `Syncup*` could ever clear.
@@ -3709,6 +3725,19 @@ would be a leftover report no `Syncup*` could ever clear.
   underneath. Reads of regions not yet hydrated then fail until a later
   converge of that cntlr connects the source afresh and reloads the
   table. The window runs from that read to the registration.
+* A clone source that is not a transfer of this cluster stays connected
+  after its clone has gone: the sweep judges a clone-source connection only
+  when its NQN is a transfer NQN of this cluster (CN21), so a connection to
+  another pool's subsystem, or to a transfer of another cluster, stays on
+  every CN whose build of the clone connected it — a controller per source
+  endpoint and the source's namespace head — until an operator disconnects
+  it or the node reboots. That includes a primary whose build stopped
+  before the dm-clone, since CN18 connects the source in step 1, ahead of
+  the clone meta group's check and the dm-clone. A clone created after it
+  on the same source adopts it (CN18
+  step 1). Like every connection the agent makes it has no controller-loss
+  timeout (`dnagent.md` SH20), so once the source's export goes its
+  controller can go on reconnecting for as long as it stays.
 * The sweep's check that a removed connection is gone walks
   "/sys/class/nvme-subsystem" once per connection: the probe behind CN10's
   disconnect registry — for L10's legs, L5's clone sources and the

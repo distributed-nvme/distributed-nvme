@@ -760,10 +760,13 @@ func cmdWaitHydrated(args []string) {
 			"cnagentctl: hydrated %d/%d, metadata %s\n",
 			status.HydratedRegions, status.TotalRegions,
 			status.MetadataMode)
-		// The single sample of clone_xfer's stage 5 probe
-		// (cnagent_integtest.md, Cases, clone_xfer): --min-first is
-		// the assertion, the ratio is the observation the script logs
-		// as the read-through window HIT or missed.
+		// --sample-only prints the one sample of each of clone_xfer's
+		// one-sample reads (cnagent_integtest.md, Cases, clone_xfer):
+		// the bitmap jump, which --min-first asserts and whose ratio
+		// the script logs as the read-through window HIT or missed,
+		// the counts the case compares while its copy holds and
+		// across the restart, the reload and the wipe, and the whole
+		// count it reads once the source has lost its namespace again.
 		if *sampleOnly {
 			fmt.Printf("%d/%d\n",
 				status.HydratedRegions, status.TotalRegions)

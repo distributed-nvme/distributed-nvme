@@ -3342,8 +3342,9 @@ so each DN's agent tears its side down as it does any side whose pointer
 left; there are ZERO agent changes: to an agent either is
 indistinguishable from a post-delete syncup. Full absence is deliberately
 distinct from level suppression, under which the cn agent keeps a clone's local chunk files for
-a later rebuild (`cnagent.md` CN21). The teardown's disconnect of the source
-runs off the pass (`cnagent.md` CN10), so until a later pass finds the
+a later rebuild (`cnagent.md` CN21). The teardown's disconnect of a source
+that is a transfer of the cluster (`cnagent.md` CN21) runs off the pass
+(`cnagent.md` CN10), so until a later pass finds the
 source gone the converge answers `ReplyCodeLeftover` (RW5). No push of the
 clone is submitted once the exclusion has reached the primary's child, which
 is when the RW14 sides-first hold the latch's fan-out lands in releases the

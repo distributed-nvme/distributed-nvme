@@ -12,12 +12,15 @@
 # Cases (cnagent_integtest.md, Cases): smoke, redund, teardown, thinbm,
 # clone_xfer, restart; `teardown`, the teardown-by-sweep case, injects the
 # faults (a pinned dm device, an iptables partition of the nvme-tcp port, a
-# background writer); case A's `degrade` stage reuses the partition. Cleanup
+# background writer); case A's `degrade` stage reuses the partition, and
+# `clone_xfer` slows its copy with a token bucket on what the clone's node
+# sends to its own nvme-tcp port. Cleanup
 # runs unconditionally at the start and, on success only, at the end: a
 # failing run leaves every dm/md/nvmet object and all four agent logs in place
 # and dumps diagnostics (cnagent_integtest.md, Teardown and cleanup).
 # cleanup_phase1 releases every fault injector
-# unconditionally, so a failed run of either case cannot poison the next one.
+# unconditionally, so a failed run of any of those cases cannot poison the
+# next one.
 #
 # The uutils dd rule (dnagent_integtest.md, Assumptions and preflight checks)
 # is absolute: this script never passes iflag= or
@@ -60,6 +63,14 @@ DATA_SIZE=1879048192
 # --capacity: an arbitrary exact value GetCnSize must echo back (CN-CM1;
 # cnagent_integtest.md, Cases, the setup paragraph).
 CN_CAPACITY=1099511627776
+
+# clone_xfer's slowed copy (cnagent_integtest.md, Cases, clone_xfer): the
+# rate at which the clone's node writes to its own sides, the copy's writes
+# into the destination among them (throttle_to), about two seconds a region,
+# and how long a hydrated count must stay the same to count as held
+# (copy_held).
+COPY_RATE=4mbit
+HOLD_SECS=4
 
 # Bdev parameters, everywhere.
 BLOCK_SIZE=1048576
@@ -164,6 +175,10 @@ TRACE="it-setup"
 STAGE="(startup)"
 SETUP_DONE=0
 DIAG_CNTLRS=()
+# The VM on which clone_xfer slows what is sent to its own nvme-tcp port
+# (throttle_to), 0 while none is: on_exit takes the throttle off even when a
+# run fails.
+THROTTLED=0
 
 CASES=(smoke redund teardown thinbm clone_xfer restart)
 
@@ -432,6 +447,13 @@ on_exit() {
 		log ""
 		log "########## diagnostics (cnagent_integtest.md, Teardown and cleanup) ##########"
 		diagnostics || true
+		# The one injector a failed run does not leave in place: the next
+		# run's cleanup would remove it, but the VMs are shared, and another
+		# suite run before that would find its traffic slowed
+		# (cnagent_integtest.md, Teardown and cleanup).
+		if [ "$THROTTLED" -ne 0 ]; then
+			helper_ok "$THROTTLED" unthrottle >&2
+		fi
 		log ""
 		log "debris left in place on both VMs; failing stage '$STAGE'"
 		log "pull records with: jq 'select(.trace_id==\"$TRACE\")' $CN_LOG"
@@ -1465,6 +1487,99 @@ wait_no_ctrl() {
 	done
 	echo "a controller of $1 is still here after $2s (shape $got)" >&2
 	return 1
+}
+
+# --- the slowed clone copy (cnagent_integtest.md, Cases, clone_xfer) --------
+#
+# A copy over loop devices ends in well under a second, too soon for a stage
+# to take the source away in the middle of it. throttle_to slows what this
+# node sends to one nvme-tcp port, and nothing else: a root prio qdisc whose
+# map sends every packet to the bands the stock pfifo_fast uses, beside a
+# fourth band that only a filter reaches, with a token bucket under it. On
+# the clone's node, aimed at its own port, it slows what the node's legs
+# send their sides over the loopback device, the copy's writes into the
+# destination among them, and none of the reads from the clone's source: a
+# new dm-clone is read through its source by udev's probe, and the chunk's
+# discard waits for that probe, so a slowed source can leave the discard to
+# the command timeout (cnagent_integtest.md, Lab facts). The bucket's
+# queue is bounded in time, so a
+# metadata or keep-alive write of a leg waits behind the copy's data for a
+# fraction of a second at most, and its burst holds the loopback device's
+# largest packet. The qdisc carries a handle of its own, so unthrottle takes
+# only this suite's, and the cleanup takes it unconditionally
+# (cnagent_integtest.md, Teardown and cleanup): a bucket left behind would
+# slow every later suite on the VM.
+THROTTLE_HANDLE=4200
+
+# tc_bin resolves the binary, or prints nothing, for iptables_bin's reason.
+tc_bin() {
+	if command -v tc >/dev/null 2>&1; then
+		echo tc
+	elif [ -x /usr/sbin/tc ]; then
+		echo /usr/sbin/tc
+	else
+		echo ""
+	fi
+}
+
+# nic_to <ip> — the interface this node sends to <ip> through.
+nic_to() {
+	ip route get "$1" 2>/dev/null |
+		awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+}
+
+# throttle_to <ip> <rate> — limits what this node sends to the nvme-tcp port
+# of <ip> to <rate> (a tc rate such as 4mbit) and prints "throttled", or
+# prints "failed" when a step fails, leaving no qdisc of this suite's behind.
+throttle_to() {
+	local tc nic
+	tc=$(tc_bin)
+	nic=$(nic_to "$1")
+	if [ -n "$tc" ] && [ -n "$nic" ] &&
+		"$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": prio \
+			bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 \
+			>/dev/null 2>&1 &&
+		"$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 tbf \
+			rate "$2" burst 128kb latency 100ms >/dev/null 2>&1 &&
+		"$tc" filter add dev "$nic" parent "$THROTTLE_HANDLE": protocol ip \
+			prio 1 u32 match ip dst "$1"/32 match ip dport "$TR_SVC_ID" 0xffff \
+			flowid "$THROTTLE_HANDLE":4 >/dev/null 2>&1; then
+		echo throttled
+	else
+		unthrottle >/dev/null
+		echo failed
+	fi
+}
+
+# throttle_rules — this suite's root qdisc on any interface of the node, one
+# line per interface, empty when there is none. Reading it after unthrottle
+# is what turns "we ran the delete" into "the qdisc is gone", so a listing
+# that fails prints one line saying so, for residue's reason.
+throttle_rules() {
+	local tc out nl=$'\n'
+	tc=$(tc_bin)
+	if [ -z "$tc" ]; then
+		echo "no tc on this node, the throttle is unknown"
+	elif out=$("$tc" qdisc show 2>&1); then
+		printf '%s\n' "$out" |
+			grep -E "^qdisc prio $THROTTLE_HANDLE: dev [^ ]+ root" || true
+	else
+		echo "tc qdisc show failed, the throttle is unknown: ${out//$nl/; }"
+	fi
+}
+
+# unthrottle — removes this suite's root qdisc from every interface that
+# carries it, whoever left it there, which gives the interface the kernel's
+# default root qdisc, and prints "unthrottled".
+unthrottle() {
+	local tc nic
+	tc=$(tc_bin)
+	if [ -n "$tc" ]; then
+		for nic in $(throttle_rules | awk '$1 == "qdisc" {print $5}'); do
+			"$tc" qdisc del dev "$nic" root >/dev/null 2>&1
+		done
+	fi
+	echo unthrottled
 }
 
 # --- redund's md-refusal stage (cnagent_integtest.md, Cases) -----------------
@@ -2531,16 +2646,19 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	kill_role cn >/dev/null
 	kill_role dn >/dev/null
 
-	# The fault injectors (case T's three, and the partition case A's
-	# degrade stage reuses), first and unconditionally. Each of them
-	# outlives the stage that installed it and each would be diagnosed as
-	# something else entirely: a pin makes the dm passes below fail on a
-	# device nothing is testing, a partition rule black-holes the next run's
-	# legs, and a writer holds a namespace open across the disconnects. None
-	# of the three may be conditional on this run having used them — the run
-	# that leaves them behind is by definition the one that failed.
+	# The fault injectors (case T's three, the partition case A's degrade
+	# stage reuses, and clone_xfer's throttle), first and unconditionally.
+	# Each of them outlives the stage that installed it and each would be
+	# diagnosed as something else entirely: a pin makes the dm passes below
+	# fail on a device nothing is testing, a partition rule black-holes the
+	# next run's legs, a writer holds a namespace open across the
+	# disconnects, and a token bucket slows every later suite's traffic to
+	# the port. None of the four may be conditional on this run having used
+	# them — the run that leaves them behind is by definition the one that
+	# failed.
 	stop_writer >/dev/null
 	unpin_all
+	unthrottle >/dev/null
 	[ -z "${2:-}" ] || unpartition_from "$2" >/dev/null
 
 	# Nothing may stay suspended from here on (see resume_suspended).
@@ -3167,18 +3285,15 @@ dn_side() { # dnidx sp leg side ext_cnt zero_bytes primary_cn [standby_cn]
 		# The provisioning window, observed and never asserted
 		# (cnagent_integtest.md, Cases, What a pass means; the dn suite's twin is
 		# dnagent_integtest.md, Conventions, "Observed, never asserted"): phase 1
-		# only *starts* the background zeroing
-		# goroutine, so a sample taken here normally still catches the side
-		# mid-flight, which is what makes the gate assertions above a reading
-		# of a genuinely closed gate rather than of an already-finished one.
-		# On a loop device the kernel maps Write Zeroes onto fallocate, so a
-		# side's zeroing can also finish before this line runs: a miss is
-		# timing, not a fault, and the hard proof stays the wait-zeroed below
-		# plus the phase-2 OK statuses. A failed call
-		# degrades to a miss for the same reason — under `set -euo pipefail`
-		# an unguarded one-shot RPC would turn a transient dial error into a
-		# suite abort, and this helper runs on every first converge of every
-		# side. The sample is a fresh round, since the zeroing loop stores no
+		# only *starts* the background zeroing goroutine, so a sample taken
+		# here can catch the side mid-flight. On a loop device the kernel maps
+		# Write Zeroes onto fallocate, so a side's zeroing usually finishes
+		# before this line runs: a miss is timing, not a fault, and the hard
+		# proof stays the wait-zeroed below plus the phase-2 OK statuses. A
+		# failed call degrades to a miss for the same reason — under
+		# `set -euo pipefail` an unguarded one-shot RPC would turn a transient
+		# dial error into a suite abort, and this helper runs on every first
+		# converge of every side. The sample is a fresh round, since the zeroing loop stores no
 		# observation and only a read shows its progress; check-side prints
 		# the reply it takes before it checks the reply code, so only a call
 		# that never reached the agent or found no fresh reply leaves nothing
@@ -5237,7 +5352,8 @@ case_thinbm() {
 # ---------------------------------------------------------------------------
 # Case C — clone_xfer (cnagent_integtest.md, Cases): the live move
 # (architecture.md, Transfer + clone = cross-SP live migration) and the
-# metadata kept across a wipe (architecture.md, Clone metadata durability)
+# metadata kept across an agent restart over a held copy and across a wipe
+# (architecture.md, Clone metadata durability)
 # ---------------------------------------------------------------------------
 #
 # 32 of the td's 64 MiB are written, so the pushed bitmap is 00000000ffffffff:
@@ -5263,6 +5379,66 @@ C_MGRP=0xd
 C_MLEG=0xe
 C_MSIDE=0xf
 
+# clone_sample <sp> <cntlr> — one hydration sample of the case's clone on
+# cn2, "<hydrated>/<total>", from a fresh round (cnagent_integtest.md, The
+# driver: `cnagentctl`). It fails, with the driver's words, when no dm-clone
+# answers or its metadata is not in read-write mode.
+clone_sample() {
+	cnctl 2 wait-hydrated --sp "$1" --cntlr "$2" --clone "$C_CLONE" \
+		--sample-only
+}
+
+# clone_sample_checked <sp> <cntlr> — clone_sample for the two loops below,
+# which run inside a command substitution, where bash turns errexit off: it
+# fails the stage itself when the sample fails or does not read as
+# "<hydrated>/<total>", so no loop takes a failed sample for a count.
+clone_sample_checked() {
+	local got
+	got=$(clone_sample "$1" "$2") ||
+		die "clone_xfer: the hydration sample failed"
+	[[ $got =~ ^[0-9]+/[0-9]+$ ]] ||
+		die "clone_xfer: the hydration sample reads '$got'"
+	echo "$got"
+}
+
+# copied_past <sp> <cntlr> <hydrated> <secs> — samples until the clone counts
+# more than <hydrated> regions, and prints that sample; it fails the stage
+# after <secs>, or on a sample that fails.
+copied_past() {
+	local deadline=$((SECONDS + $4)) got
+	while :; do
+		got=$(clone_sample_checked "$1" "$2") || exit 1
+		[ "${got%%/*}" -le "$3" ] || break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: after $4 s the copy counts $got, not more" \
+				"than $3 regions"
+		sleep 0.5
+	done
+	echo "$got"
+}
+
+# copy_held <sp> <cntlr> <secs> — samples until the clone has shown one count
+# for HOLD_SECS, and prints it; it fails the stage after <secs>, or on a
+# sample that fails. Once its source fails, a slowed copy finishes at most
+# the one region it was writing (cnagent_integtest.md, Lab facts), which
+# takes a few seconds at most.
+copy_held() {
+	local deadline=$((SECONDS + $3)) got last="" since=$SECONDS
+	while :; do
+		got=$(clone_sample_checked "$1" "$2") || exit 1
+		if [ "$got" != "$last" ]; then
+			last=$got
+			since=$SECONDS
+		elif [ $((SECONDS - since)) -ge "$HOLD_SECS" ]; then
+			break
+		fi
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: after $3 s the copy still moves: $got"
+		sleep 0.5
+	done
+	echo "$last"
+}
+
 case_clone_xfer() {
 	CASE=clone_xfer
 	DIAG_CNTLRS=()
@@ -5276,7 +5452,8 @@ case_clone_xfer() {
 	local out dev want got seq rev1 rev2 xnqn clonedm nsdev1 ctrl sample
 	local idx bmargs bmfiles nsdev2 err1 err2 hyd tot post deadline
 	local code details shape now tgt rows c1 k g c2 legdm grpdm legnqn raid0dm
-	local srcpass wsect bound w0 w1
+	local srcpass wsect bound w0 w1 held dm before i muts mark src0 src1 cmds
+	local ids again wbase
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -5483,7 +5660,16 @@ case_clone_xfer() {
 	assert_eq "$(helper 2 "clone_bm_files $bmargs")" "$bmfiles" \
 		"clone_xfer: both chunk files are pair-named"
 
-	stage enable "stage 4: one converge builds the dm-clone over its group and flips the host"
+	stage enable "stage 4: the copy slowed, one converge builds the dm-clone over its group and flips the host"
+	# A copy over loop devices ends in well under a second, so cn2's writes
+	# to its own sides, the copy's into the destination among them, are
+	# slowed first, to a rate at which the copy takes about a minute
+	# (throttle_to): stage 5b takes the source away in its middle, and the
+	# throttle stays until stage 7, after the rebuild of stage 6.
+	# Nothing the converge does waits on it but a few small metadata writes.
+	THROTTLED=2
+	assert_eq "$(helper 2 "throttle_to '${IP[2]}' $COPY_RATE")" throttled \
+		"clone_xfer: cn2's writes to its sides slowed"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READWRITE"'
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
@@ -5556,7 +5742,178 @@ case_clone_xfer() {
 	assert_eq "$(sha_range "$hv" "$dev" 1 31)" "$want" \
 		"clone_xfer read-through of MiB 31"
 
-	stage wipe "stage 6: CN2 loses its kernel state; the rebuilt clone keeps its copied regions (architecture.md, Clone metadata durability)"
+	stage hold "stage 5b: the source loses its namespace in the middle of the copy, which then holds"
+	# The copy runs slowed (stage 4). Once it has copied a region past the
+	# chunk's 32, a count that kept metadata shows and freshly formatted
+	# metadata does not, CN1's export of the transfer loses its namespace
+	# behind both agents' backs, as in stage 7b, and the copy stops at a
+	# count that holds while the dm-clone stays in read-write mode
+	# (cnagent_integtest.md, Lab facts). The namespace node goes from cn2
+	# with it, though the dm-clone holds it open: the source's namespace
+	# then comes back under a new device number (stage 5d), which the stage
+	# measures rather than assumes. The rest of the case reads the held count
+	# against what the clone does next.
+	sample=$(copied_past "$sp2" "$cntlr" 32 60)
+	log "clone_xfer: the copy has reached $sample when the source goes"
+	assert_eq "$(helper 2 "subsys_shape '$xnqn'")" "1 1 1" \
+		"clone_xfer: controllers, live ones and namespace nodes of the source on cn2"
+	assert_eq "$(helper 1 "drop_namespaces '$xnqn'")" dropped \
+		"clone_xfer: the transfer's namespace dropped"
+	assert_eq "$(helper 2 "shape_after '$xnqn' '1 1 1' 10")" "1 1 0" \
+		"clone_xfer: the source's shape on cn2 once its namespace is gone"
+	held=$(copy_held "$sp2" "$cntlr" 60)
+	hyd=${held%%/*}
+	tot=${held##*/}
+	log "clone_xfer: the copy holds at $held"
+	[ "$hyd" -gt 32 ] && [ "$hyd" -lt "$tot" ] ||
+		die "clone_xfer: the copy holds at $held, want more than the" \
+			"chunk's 32 regions and fewer than all $tot"
+
+	stage restart "stage 5c: cn2's agent restarts over the held copy and leaves it as it is"
+	# The kernel keeps the stack while the agent is down, and the startup
+	# reconcile converges it as it is (cnagent.md CN2): the source has no
+	# namespace, so CN18 step 1 ends the clone's pass before the dm-clone is
+	# touched, and the dm-clone that serves serves on (CN16 rule 5). With
+	# the copy held, the count it shows after the restart is the held count
+	# exactly, not merely at least it; the dm-clone, its clone meta group's
+	# device and that group's leg wrapper keep their device numbers and their
+	# tables; and the fresh log holds no mutation at all, read once it holds
+	# a whole attempt of the CN10 retry as well, which the failed step 1
+	# keeps registered. Each pass reads the dm-clone for its rows (CN18), the
+	# reconcile under its own trace id and each retry attempt under one of
+	# its own (CN2), each under the CN1 locks, which let one pass of the
+	# cntlr run at a time, while the samples' reads carry the stage's. Reads
+	# of the dm-clone under three trace ids other than the stage's are
+	# therefore the reconcile, a first retry attempt and a second one, whose
+	# read comes only once the first has let the locks go: the log then
+	# holds the whole first attempt, and those reads are the positive
+	# control.
+	before=()
+	for dm in "$clonedm" "$grpdm" "$legdm"; do
+		before+=("$(helper 2 "dm_devno $dm") $(helper 2 "dm_table $dm")")
+	done
+	assert_eq "$(helper 2 "kill_role cn")" stopped "clone_xfer: cn2 stopped"
+	sshv 2 "mv $CN_LOG $WORK/cn-agent.pre-held-restart.log"
+	start_cn_agent 2
+	out=$(cnctl 2 get-cn-size --wait 60)
+	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" \
+		"clone_xfer cn2 size after the restart"
+	assert_eq "$(clone_sample "$sp2" "$cntlr")" "$held" \
+		"clone_xfer: the hydrated count after the restart"
+	i=0
+	for dm in "$clonedm" "$grpdm" "$legdm"; do
+		assert_eq "$(helper 2 "dm_devno $dm") $(helper 2 "dm_table $dm")" \
+			"${before[$i]}" \
+			"clone_xfer: $dm's device number and table across the restart"
+		i=$((i + 1))
+	done
+	deadline=$((SECONDS + 30))
+	while :; do
+		ids=$(helper 2 "cn_cmds_since 0 'dmsetup '" | awk -v t="$TRACE" \
+			-v dm="$clonedm" '$1 != t && ($3 == "status" || $3 == "table") &&
+				$NF == dm && !seen[$1]++ {n++} END {print n + 0}')
+		[ "$ids" -lt 3 ] || break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: 30 s after the restart the log reads the" \
+				"dm-clone under $ids trace id(s) besides $TRACE, not the" \
+				"reconcile's and two retry attempts'"
+		sleep 0.5
+	done
+	log "clone_xfer: the restarted agent's log reads the dm-clone under $ids" \
+		"trace ids besides $TRACE"
+	muts=$(helper 2 mutations)
+	[ -z "$muts" ] ||
+		die "clone_xfer: cn2 mutated after the restart:"$'\n'"$muts"
+	# The rows of a source with no namespace (CN18, CN28): the source's
+	# MISSING, which sets no health epoch, and the dm-clone's and its
+	# group's OK, as the dm-clone serves. The info read answers from the
+	# sample's fresh round or a later one.
+	out=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
+	assert_map_status "$out" clone_id_to_target "$C_CLONE" \
+		RES_STATUS_MISSING "no namespace" "clone_xfer after the restart"
+	assert_map_ok "$out" clone_id_to_dm_clone "$C_CLONE" \
+		"clone_xfer after the restart"
+	assert_map_ok "$out" grp_id_to_md_raid "$C_MGRP" \
+		"clone_xfer after the restart"
+	assert_eq "$(host_ana "$hv" "$nqn" 2)" optimized \
+		"clone_xfer: the host's path to cn2 across the restart"
+
+	stage giveback "stage 5d: the source gets its namespace back; cn2's retry reloads the dm-clone onto it and the copy goes on"
+	# CN1 gets its request again at the revision it stored, as the worker
+	# re-sends one, and the transfer's converge builds the namespace it lost
+	# (cnagent.md CN17). On cn2 the namespace comes back under a new
+	# multipath head (stage 5b), so the dm-clone still names the source's
+	# old device number and reads nothing from it. cn2 gets no request: the
+	# CN10 retry reads the source ready again, and its pass reloads the
+	# dm-clone onto the source's new number, the one positional argument
+	# that differs, with hydration off, lands the chunk again and enables
+	# hydration (CN18 steps 1, 3, 4 and 5). The reload suspends the
+	# dm-clone first, which commits its metadata to the group, so the
+	# reloaded dm-clone loads the held count. One over metadata formatted
+	# anew would count the chunk's 32 and climb from there, copying the
+	# regions copied before the hold once more, so a first sample taken a
+	# few seconds after the retry's enable could read the held count on
+	# such a dm-clone too: the check here is a quick one, and stage 6's
+	# write count is what tells the two apart whatever the timing. The copy
+	# then goes on, slowed still, and stage 6 wipes cn2 in the middle of it.
+	#
+	# Stage 6 counts what the copy writes into the destination raid0 from
+	# here on, so the write count is read first, while the copy still
+	# holds: no write of the copy is in flight, as every copy the dm-clone
+	# starts while its source fails every read writes nothing, and a region
+	# whose copy failed as the source went has left in it whatever part of
+	# its block it wrote (cnagent_integtest.md, Lab facts).
+	wbase=$(helper 2 "dm_wsect $raid0dm") ||
+		die "clone_xfer: the destination raid0's write count could not" \
+			"be read before the source came back"
+	log "clone_xfer: the destination raid0 holds $wbase sectors written" \
+		"when the source comes back"
+	mark=$(helper 2 cn_log_lines)
+	src0=$(helper 2 "dm_table $clonedm" | awk '{print $6}')
+	[ -n "$src0" ] || die "clone_xfer: the dm-clone's table could not be read"
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" xfer_id_to_namespace "$C_XFER" \
+		"clone_xfer: the transfer's namespace back"
+	deadline=$((SECONDS + 30))
+	until src1=$(helper 2 "dm_table $clonedm" | awk '{print $6}') &&
+		[ -n "$src1" ] && [ "$src1" != "$src0" ]; do
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: 30 s after the source's namespace came back" \
+				"the dm-clone still names its old device $src0"
+		sleep 0.5
+	done
+	log "clone_xfer: the dm-clone's source moved from $src0 to $src1"
+	sample=$(clone_sample "$sp2" "$cntlr")
+	[ "${sample##*/}" = "$tot" ] && [ "${sample%%/*}" -ge "$hyd" ] ||
+		die "clone_xfer: the reloaded dm-clone counts $sample, fewer than" \
+			"the held $held: it did not load the metadata its group holds"
+	sample=$(copied_past "$sp2" "$cntlr" "$hyd" 60)
+	log "clone_xfer: the copy goes on: $sample"
+	assert_eq "$(helper 2 "dm_devno $clonedm")" "${before[0]%% *}" \
+		"clone_xfer: the dm-clone's device number across the reload"
+	assert_eq "$(helper 2 "dm_backing $clonedm")" \
+		"$(helper 2 "dm_devno $grpdm")" \
+		"clone_xfer: the reloaded dm-clone's metadata device is its group's"
+	# Who did it: every command cn2 ran since the mark, each with its trace
+	# id. The reload, the chunk and the enable are the retry's, under a
+	# trace id of its own, and cn2 saw no SyncupCntlr.
+	cmds=$(helper 2 "cn_cmds_since $mark ''")
+	seq=$(printf '%s\n' "$cmds" | cut -d' ' -f2-)
+	assert_absent "$seq" "^dmsetup create $clonedm( |\$)" \
+		"clone_xfer giveback: no new dm-clone"
+	assert_before "$seq" "^dmsetup reload $clonedm .* $src1 " \
+		"^blkdiscard .*/dev/mapper/$clonedm\$" \
+		"clone_xfer giveback: the chunk lands after the reload"
+	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
+		"^dmsetup message $clonedm 0 enable_hydration\$" \
+		"clone_xfer giveback: the chunk lands before hydration"
+	[ "$(printf '%s\n' "$cmds" | grep -cE "^$TRACE dmsetup reload ")" = 0 ] ||
+		die "clone_xfer giveback: the reload ran under the stage's own" \
+			"trace $TRACE: $cmds"
+	assert_eq "$(helper 2 "cn_requests_since $mark SyncupCntlr $(d16 "$sp2") $(d16 "$cntlr")")" \
+		0 "clone_xfer giveback: SyncupCntlr requests on cn2 since the source came back"
+
+	stage wipe "stage 6: CN2 loses its kernel state in the middle of the copy; the rebuilt clone keeps its copied regions (architecture.md, Clone metadata durability)"
 	# The clone's metadata is on its clone meta group, a side on DN2 that the
 	# wipe leaves, so the agent rebuilds the clone with no request from the
 	# suite: the startup reconcile, or the CN10 retry its pass registers when
@@ -5564,42 +5921,60 @@ case_clone_xfer() {
 	# creates the dm-clone over the metadata the group holds (cnagent.md CN2,
 	# CN18): the copy goes on from where it was.
 	#
-	# The wipe-time sample (cnagent_integtest.md, Cases, clone_xfer and What a
-	# pass means) is what the rebuilt clone is held to: whether it was still
-	# hydrating at the wipe or had finished is the loop device's race, so the
-	# sample is recorded, never asserted, and taken as late as possible,
-	# immediately before the kill. wipe_cn removes the dm-clone while its
-	# group is still connected, and the removal commits its metadata to the
-	# group, so the count the rebuilt dm-clone loads is at least the sample's.
-	# A missing or unparseable sample is logged rather than failing the
-	# suite; the two bounds that read it, here and in stage 7, are then not
-	# checked.
-	sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
-		--clone "$C_CLONE" --sample-only) || sample=""
-	hyd=""
-	tot=""
-	case "$sample" in
-	[0-9]*/[0-9]*)
-		hyd=${sample%%/*}
-		tot=${sample##*/}
-		if [ "$hyd" -lt "$tot" ]; then
-			log "clone_xfer: hydration was still running at wipe time ($sample)"
-		else
-			log "clone_xfer: hydration had already finished at wipe time ($sample)"
-		fi
-		# The chunk marks 32 regions at once (stage 5), so a sample of no
-		# more than that came before any region was copied: kept metadata and
-		# freshly formatted metadata then count and copy the same, and the
-		# two bounds below cannot tell them apart.
-		if [ "$hyd" -le 32 ]; then
-			log "clone_xfer: WARNING the wipe came before any region was" \
-				"copied ($sample): this run does not prove the metadata kept"
-		fi
-		;;
-	*)
-		log "clone_xfer: WARNING no hydration sample before the wipe"
-		;;
-	esac
+	# The wipe-time sample (cnagent_integtest.md, Cases, clone_xfer) is what
+	# the rebuilt clone is held to. The copy is still slowed, so the wipe
+	# falls in its middle: the sample, taken immediately before the kill,
+	# counts more than the held count and fewer than every region, which the
+	# stage asserts. wipe_cn removes the dm-clone while its group is still
+	# connected, and the removal commits its metadata to the group, so the
+	# count the rebuilt dm-clone loads is at least the sample's.
+	#
+	# The sample comes with the write count of the destination raid0 that
+	# stage 1 built, which only the copy has written into: the host has only
+	# read, and the chunk's discards do not pass down (CN18 step 3). What the
+	# copy wrote there since the source came back is that count less the
+	# one stage 5d read while the copy held: until 5d's reload the dm-clone
+	# reads its old source, which fails every read, so a copy that fails in
+	# between writes nothing. A region's copy writes one block, one region
+	# in flight at most, so between two samples that read the same count,
+	# no region having ended in between, what it wrote holds exactly one
+	# whole block for each region the count has copied past the held count,
+	# beside at most part of the one in flight (cnagent_integtest.md, Lab
+	# facts). A dm-clone that stage 5d reloaded over metadata formatted anew
+	# would have copied the regions copied before the hold once more, one at
+	# least as the held count is past the chunk's 32, and shows more whole
+	# blocks, whatever the timing of 5d's first sample; fewer would mean the
+	# write count does not see the copy, which makes the check its own
+	# control, as the sample counts more than the held count.
+	deadline=$((SECONDS + 60))
+	while :; do
+		sample=$(clone_sample "$sp2" "$cntlr")
+		wsect=$(helper 2 "dm_wsect $raid0dm") ||
+			die "clone_xfer: the destination raid0's write count could not" \
+				"be read before the wipe"
+		again=$(clone_sample "$sp2" "$cntlr")
+		[ "$again" != "$sample" ] || break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: for 60 s no two samples around the write count" \
+				"read the same count, the last $sample and $again"
+	done
+	hyd=${sample%%/*}
+	[ "${sample##*/}" = "$tot" ] && [ "$hyd" -gt "${held%%/*}" ] &&
+		[ "$hyd" -lt "$tot" ] ||
+		die "clone_xfer: the wipe-time sample is $sample, want more than" \
+			"the held $held and fewer than all $tot regions"
+	log "clone_xfer: the copy is at $sample when cn2 is wiped, its" \
+		"destination written $wsect sectors, $((wsect - wbase)) of them" \
+		"since the source came back"
+	[ "$(((wsect - wbase) / (BLOCK_SIZE / 512)))" -eq \
+		"$((hyd - ${held%%/*}))" ] ||
+		die "clone_xfer: the copy wrote $((wsect - wbase)) sectors into" \
+			"the destination since the source came back," \
+			"$(((wsect - wbase) / (BLOCK_SIZE / 512))) whole regions," \
+			"while the count $sample has copied $((hyd - ${held%%/*}))" \
+			"past the held $held: more is a region copied twice, so stage" \
+			"5d's reload did not load the metadata its group holds; fewer" \
+			"is a write count that does not see the copy"
 	assert_eq "$(helper 2 "kill_role cn")" stopped "clone_xfer: cn2 stopped"
 	sshv 2 "mv $CN_LOG $WORK/cn-agent.pre-wipe.log"
 	helper 2 "wipe_cn $(hex16 "${CNID[2]}")"
@@ -5613,12 +5988,11 @@ case_clone_xfer() {
 	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "clone_xfer cn2 size"
 	# The rebuilt clone's first sample, taken as soon as a dm-clone answers:
 	# a dm-clone over a freshly formatted metadata device would count only
-	# what the chunk marks, and climb from there. A sample that finds no
-	# dm-clone status is taken again, since the retry may build it; any
+	# what the chunk marks, and climb from there, slowed. A sample that finds
+	# no dm-clone status is taken again, since the retry may build it; any
 	# other failure of the sample ends the case with the driver's words.
 	deadline=$((SECONDS + 30))
-	until post=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
-		--clone "$C_CLONE" --sample-only 2>"$sample_err"); do
+	until post=$(clone_sample "$sp2" "$cntlr" 2>"$sample_err"); do
 		grep -q "no dm-clone status" "$sample_err" ||
 			die "clone_xfer: the rebuilt clone's sample failed:" \
 				"$(cat "$sample_err")"
@@ -5632,14 +6006,12 @@ case_clone_xfer() {
 	*) die "clone_xfer: no hydration sample after the rebuild: '$post'" ;;
 	esac
 	log "clone_xfer: the rebuilt clone's first sample is $post"
-	if [ -n "$hyd" ]; then
-		assert_eq "${post##*/}" "$tot" \
-			"clone_xfer: the rebuilt clone's region count"
-		[ "${post%%/*}" -ge "$hyd" ] ||
-			die "clone_xfer: the rebuilt clone counts ${post%%/*} regions" \
-				"hydrated, fewer than the $hyd it counted before the wipe:" \
-				"it did not load the metadata its group holds"
-	fi
+	assert_eq "${post##*/}" "$tot" \
+		"clone_xfer: the rebuilt clone's region count"
+	[ "${post%%/*}" -ge "$hyd" ] ||
+		die "clone_xfer: the rebuilt clone counts ${post%%/*} regions" \
+			"hydrated, fewer than the $hyd it counted before the wipe:" \
+			"it did not load the metadata its group holds"
 	# The restarted agent's probers start over, and cn2 is sp2's primary. The
 	# info read answers from the observation the poll saw clear, or a later
 	# one.
@@ -5691,6 +6063,13 @@ case_clone_xfer() {
 	host_wait_ana "$hv" "$nqn" 2 optimized 30
 
 	stage hydrate "stage 7: hydration runs to completion, copying no region copied before the wipe"
+	# The copy runs at full speed from here: the throttle goes, and the
+	# reading after its removal is what shows it gone.
+	assert_eq "$(helper 2 unthrottle)" unthrottled \
+		"clone_xfer: cn2's writes to its sides at full speed again"
+	assert_eq "$(helper 2 throttle_rules)" "" \
+		"clone_xfer: no throttle left on cn2"
+	THROTTLED=0
 	cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" --clone "$C_CLONE" \
 		--interval 0.5 --timeout 120 >/dev/null
 	# What the rebuilt dm-clone copied it wrote into its destination, the
@@ -5698,25 +6077,21 @@ case_clone_xfer() {
 	# nothing else has written since: the host has not written, and the
 	# chunk's discard does not pass down (CN18 step 3). So that device's write
 	# count is the rebuilt clone's copy. With its metadata kept it copies at
-	# most the regions, one block each, that the wipe-time sample had left;
-	# a dm-clone over freshly formatted metadata would copy the source's
-	# written half again. The verify stage's write through the same device is
-	# the count's positive control.
-	if [ -n "$hyd" ]; then
-		wsect=$(helper 2 "dm_wsect $raid0dm") ||
-			die "clone_xfer: the destination raid0's write count could not be read"
-		bound=$(((tot - hyd) * BLOCK_SIZE / 512))
-		log "clone_xfer: the rebuilt clone wrote $wsect sectors into its" \
-			"destination, at most $bound allowed"
-		[ "$wsect" -le "$bound" ] ||
-			die "clone_xfer: the rebuilt clone wrote $wsect sectors into its" \
-				"destination, more than the $((tot - hyd)) regions the" \
-				"wipe-time sample left to copy ($bound sectors): it copied" \
-				"regions again"
-	else
-		log "clone_xfer: no wipe-time sample, so what the rebuilt clone" \
-			"copied is not bounded"
-	fi
+	# most the regions, one block each, that the wipe-time sample had left,
+	# fewer than the chunk's 32 as the sample counts more than the held
+	# count; a dm-clone over freshly formatted metadata would copy the
+	# source's written half again, all 32. The verify stage's write through
+	# the same device is the count's positive control.
+	wsect=$(helper 2 "dm_wsect $raid0dm") ||
+		die "clone_xfer: the destination raid0's write count could not be read"
+	bound=$(((tot - hyd) * BLOCK_SIZE / 512))
+	log "clone_xfer: the rebuilt clone wrote $wsect sectors into its" \
+		"destination, at most $bound allowed"
+	[ "$wsect" -le "$bound" ] ||
+		die "clone_xfer: the rebuilt clone wrote $wsect sectors into its" \
+			"destination, more than the $((tot - hyd)) regions the" \
+			"wipe-time sample left to copy ($bound sectors): it copied" \
+			"regions again"
 
 	stage srcgone "stage 7b: the source loses its namespace; the clone's rows read one status on every channel"
 	# CN1's export of the transfer loses its namespace behind both agents'

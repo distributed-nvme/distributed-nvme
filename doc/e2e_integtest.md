@@ -13,7 +13,7 @@ facts the suites driving real agents share.
 One storage pool at the widest shape the tree builds, on real guests with no
 fakes, driven end to end through the shipped operator CLI while two real kernel
 NVMe hosts read and write its namespaces. A green run at the default shape is
-seven statements; a smaller shape proves no ceiling, and one without redundancy
+eight statements; a smaller shape proves no ceiling, and one without redundancy
 no leg repair:
 
 * **The ceiling is real.** `MaxSliceCntPerSp` slices with md-raid1, every side
@@ -30,6 +30,12 @@ no leg repair:
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, through
   slice grows and the level ladder, failovers, a leg repair and all between.
+* **A clone's copy survives a failover of its primary** (`architecture.md`,
+  Clone metadata durability). A primary disabled in the middle of a slowed
+  copy hands the copy to the new primary, which loads the metadata the
+  clone's clone meta group holds on disk nodes: it goes on from at least the
+  count read before the failover, copies at most what that count left, and
+  ends with a destination equal to the whole source.
 * **The four reactions fire on real faults** (`dnv-worker.md` AR5 to AR8), on
   a pool of at most `REACT_SLICE_CAP` slices (Topology and parameters): a
   killed cn agent moves the primary role and then loses its cntlr, a killed dn
@@ -73,10 +79,11 @@ two usable controllers (Known limits). Auto-grow, cntlr replacement, leg
 repair and a failover after the primary's cn agent is killed, on a pool at
 the ceiling (`dnv-worker.md` AR5 to AR8), as react's pool has at most
 `REACT_SLICE_CAP` slices (Known limits); the cutoff case's failover, after
-that agent is stopped, runs at the run's slice count. A failover of a primary
-that still answers: the two failovers the cases cause lose an agent that
-answers nothing, one killed and one stopped, so neither shows a demotion hold
-that the old primary's report ends early (`dnv-worker.md` RW22).
+that agent is stopped, runs at the run's slice count. A demotion hold that
+the old primary's report ends early (`dnv-worker.md` RW22): react's and
+cutoff's failovers lose an agent that answers nothing, one killed and one
+stopped, and copy's disabled primary answers, but the case only logs which
+of the two ended its hold, the report or the timer.
 
 ## Topology and parameters
 
@@ -151,9 +158,11 @@ many disk-node guests it needs.
 **Event thresholds.** Only a pool's create sets its thresholds, so each case's
 set is chosen just before its pool is built, and a case without one dies rather
 than defaulting. smoke, ops and copy build under a quiet set longer than any
-wait, a wide margin rather than a proof, as a failover or a spare leg
-mid-operation would invalidate their absolute counts and digests; under it such
-a reaction is a finding about the lab. react builds under the short reacting
+wait, a wide margin rather than a proof, as a failover or a spare leg they did
+not ask for would invalidate their absolute counts and the steps they wait on;
+under it such a reaction is a finding about the lab, and copy's one failover is
+the disable it makes itself, which waits out no threshold (`dnv-worker.md`
+AR5). react builds under the short reacting
 set, as cntlr replacement and leg repair wait out thresholds whose defaults lie
 beyond any wait the suite could afford (`dnv-worker.md` AR7, AR8). cutoff
 builds under the cutoff set, as its failover must come within seconds of the
@@ -226,7 +235,9 @@ start and the between-cases sweeps, `cleanup_start_gate` stops the run when any
 verb never printed its sentinel, naming guest, verb and status. The end
 cleanup's verdict is the exit status: a run whose end cleanup left a verb
 unfinished or one of the suite's own nvmet ports standing fails, after
-cleaning, while a run that fails an assertion removes nothing.
+cleaning, while a run that fails an assertion removes nothing but the copy
+case's throttle, which it takes off the controller node that carries it, as
+a slowed port would slow every suite that runs before the next cleanup.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every write is
@@ -283,13 +294,15 @@ after. A host discovers through the cdc wherever the subsystem has a
 in the log first waits until each is listed, as a standby whose health epoch
 is set is out of the records until its next clean round. Two connects are
 direct by necessity: to the transfer, which has no `CdcEntry`; and to the copy
-case's fallback source, where discovery would also bring in a namespace whose
-uuid host1 already holds. After react's failover host0 reconnects through the
-cdc, whose records leave the dead cntlr out: the failover's own transaction
-rewrote them, and nothing clears the dead cntlr's health epoch. Every
-connect the suite makes sits between an export gate and a connect verdict, as
-the discovery log runs ahead of the data plane and nvme-cli can exit zero
-having connected nothing.
+case's second pool, the fallback's source and the source of the failover in
+the middle of a copy, where discovery would also connect host1 to the case's
+own subsystem, which no other step gives host1 a path to, and for the
+fallback would bring in a namespace whose uuid host1 already holds. After
+react's failover host0 reconnects through the cdc, whose records leave the
+dead cntlr out: the failover's own transaction rewrote them, and nothing
+clears the dead cntlr's health epoch. Every connect the suite makes sits
+between an export gate and a connect verdict, as the discovery log runs ahead
+of the data plane and nvme-cli can exit zero having connected nothing.
 
 E2E11. **Each case starts from an empty etcd and a freshly built pool.** An
 etcd reset is not enough: a recreated cluster mints new cluster and disk-node
@@ -380,7 +393,8 @@ and a disabled disk node and controller node, invisible to the agents, each
 proved by a refused allocation that writes nothing (`architecture.md`,
 Capacity index keys).
 
-**copy** proves the four RPC groups that move bytes. A transfer, auto-suspended,
+**copy** proves the four RPC groups that move bytes, and that a clone's copy
+survives a failover. A transfer, auto-suspended,
 parks the origin namespace and carries its identity, so host1, the only host
 connected to it, reads the origin through it (`architecture.md`, Transfers;
 `cnagent.md` CN17). A clone pulls the origin through the transfer into a fresh
@@ -431,6 +445,45 @@ the case relying on leg repair leaving a two-sided leg alone
 connected by both cntlrs and switched in, the replaced leg parked and then
 deleted, md's rebuild onto it judged by the array's state words rather than
 its OK status (`architecture.md`, Spare legs; `cnagent.md` CN10, CN12, CN28).
+Last, a second clone's copy survives a failover of the primary in its middle
+(`architecture.md`, Clone metadata durability). Its source is a second
+pool's, on a controller node with no cntlr of the case's pool, so the
+failover moves the clone and not its source; host1 writes a few MiB at the
+source's start, which keeps its pool below the mark of auto-grow
+(`dnv-worker.md` AR6), and no bitmap chunk is pushed, so every region is
+copied and no discard on the dm-clone waits for reads of the slowed source
+(`cnagent_integtest.md`, Lab facts). A copy of a few MiB over the lab's network ends in well under a
+second, so a token bucket on the source's controller node, kept to the
+source's address and port, slows what the source sends to a rate at which
+the copy takes about the same time at every slice count, one region in
+flight. Over the slowed source a device-mapper command after which udev
+reads the dm-clone, its create or the resume of a namespace device above it,
+can outlast the agent's command timeout, as it waits for udev's reads, which
+go through the source; the agent's retry then finishes the build
+(`cnagent.md` CN16, CN18), so the case waits for the dm-clone to serve
+before it reads a count. The destination's namespace exists, suspended,
+before the clone, as in a live migration (`architecture.md`, Transfer +
+clone = cross-SP live migration), and the case logs the host's wait at the
+clone's creation: the time from the create to host0 reading that namespace
+optimized, and within it, when a poll sees it first, the time to every side
+of the clone meta group provisioned, with no limit on either; such a
+command lengthens that wait by the retry. Once a quarter of the copy's
+regions are copied the primary is disabled, which fails it over at once
+(`dnv-worker.md` AR5). The new primary's first count is at least the last
+count read on the old one and leaves a region to copy; with the throttle
+gone and the copy whole, the new primary's destination raid0, which its
+promotion created, has had at most the regions the old primary's last count
+left written into it, where a dm-clone over new metadata would copy every
+region again, and at least the regions the new primary's first count left,
+which a write count that sees the copy reads; the clone's unforced delete is
+accepted, and the whole destination reads the whole source's digest, which
+host1 read before the clone. The worker logs that one failover, the old
+primary returns as a standby once enabled, both cntlrs are listed again, and
+host0 still reads its data. Both controller nodes keep their connection to
+the source after the clone has gone, as the cn agent disconnects only a
+clone source that is a transfer of its own cluster (`cnagent.md` CN21, Known
+limits), so the removal of the second pool, here as after the fallback,
+drops it on every controller node before the pool's subsystem goes.
 
 **react** proves the four reactions on real faults, on a pool of the run's
 slice count but at most `REACT_SLICE_CAP` slices (Topology and parameters),
@@ -571,8 +624,10 @@ state; a cleanup-only run does neither. Preflight dies on the first failure,
 naming the guest and the fix. It proves that the driver has its tools, the
 binaries, the tree's constants (E2E12) and a pinned etcd release; that every
 guest answers passwordless ssh; that a node guest has what the sweeps and the
-agents need — sudo, the tools of both roles, the modules and the nvmet tree,
-native multipath on a disk node too, where a migration destination reads ANA
+agents need — sudo, the tools of both roles and, on a controller node when
+the copy case is in the run, those of its throttle, the modules and the
+nvmet tree, native multipath on a disk node too, where a migration
+destination reads ANA
 through it, md support and a stock md assembly rule the mask can switch off
 (`architecture.md`, Components: invocation reference), hole punching, memory
 and free space, none of this run's ports listening, and no conflicting nvmet
@@ -623,7 +678,10 @@ node, as its stacks sit on the disk nodes' sides, in the cn agent suite's order
 (`cnagent_integtest.md`, Teardown and cleanup) and in two phases across all of
 them, so that every clone final is gone, removed while its transfer source is
 connected, before any transfer goes, as a dm-clone flushes through its source
-(`cnagent.md` L3). On a disk-node guest every dnv md array goes before any dm
+(`cnagent.md` L3). The first phase takes the copy case's throttle off first,
+whether or not this run set it, so that no removal waits on a slowed source,
+and does not finish while a reading still shows it. On a disk-node guest
+every dnv md array goes before any dm
 device, as an array assembled from the controller node's superblocks pins the
 device under it (Known limits), each loop device's header is zeroed before it
 is detached, and the mask goes once no device exposes a dnv superblock. The
@@ -671,7 +729,8 @@ namespace and a live path from a retrying one; each guest's kernel, device,
 nvmet and log state follows, a host's with its nvme-stas state, configuration
 and journal and the cutoff case's write-loop records, and a controller node's
 with its recorded agent's process state, which shows an agent the cutoff case
-left stopped; the failure line ends with the filter that pulls the stage's
+left stopped, and the copy case's throttle; the failure line ends with the
+filter that pulls the stage's
 records. When the stage connected, the host's kernel log is the record of what
 the connect attempted.
 
@@ -682,6 +741,10 @@ the connect attempted.
   target for the same bytes is the lab kernel's property, so a source that
   never connects or stops hydrating routes to a fallback pool on another
   controller node, which proves the same assertions against its own pattern.
+* **The copy case's failover moves the clone, never its source.** The
+  source is a second pool's, on a controller node outside the case's pool,
+  so a failover of a pool whose own transfer is the source, which moves the
+  source with the clone, is not exercised.
 * **A standby's namespaces are inaccessible, never non-optimized**
   (`cnagent.md` CN16), so a host holds one usable path per namespace, and ANA
   path selection across two usable controllers is not exercised.

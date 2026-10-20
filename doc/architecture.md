@@ -2882,8 +2882,9 @@ cntlr's `clone_list` and from the primary's chunk-push plans, so the cn
 agent's sweep (Teardown by sweep) removes its stack, the array or group
 device and the legs of its clone meta group included, and its
 `LocalCloneBmPath` files by
-name and disconnects a source no other clone on the node uses
-(`dnv-worker.md` CLD5), while the worker deletes the
+name and disconnects a source no other clone on the node uses when the
+source is a transfer of the cluster (`cnagent.md` CN21; `dnv-worker.md`
+CLD5), while the worker deletes the
 chunk keys in batches and then the `Clone` key together with its
 `clone_name_list` entry, giving the sides of its clone meta group back to
 their DNs in that transaction, which takes their pointers out of the DNs'

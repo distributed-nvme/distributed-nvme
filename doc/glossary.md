@@ -410,7 +410,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **quiesce, snapshot pre-pass** — The primary's suspension of a thin device's raid0 around the pool messages that create its snapshot in every slice, so the slices of a snapshot one pass creates whole are consistent with each other; a snapshot a later pass finishes is torn (see torn snapshot).
 
-**quiet set, reacting set, cutoff set** — The event thresholds the e2e suite builds each case's pool under: the quiet set, longer than any wait, so that no reaction fires mid-case; the short reacting set under which the react case waits out cntlr replacement and leg repair; and the cutoff set of the cutoff case, whose primary threshold is the shortest the gateway accepts on the suite's cluster while the other three are long, so that its failover comes fast and no other threshold reaction fires within the case.
+**quiet set, reacting set, cutoff set** — The event thresholds the e2e suite builds each case's pool under: the quiet set, longer than any wait, so that no threshold reaction fires mid-case; the short reacting set under which the react case waits out cntlr replacement and leg repair; and the cutoff set of the cutoff case, whose primary threshold is the shortest the gateway accepts on the suite's cluster while the other three are long, so that its failover comes fast and no other threshold reaction fires within the case.
 
 **raid0** — The dm-striped device over a thin device's per-slice thin volumes (`CnRaid0Name`), the block device a namespace, a clone or a transfer is built on, striped by the pool's geometry.
 
@@ -486,7 +486,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **slice** — `Slice`, a vertical shard of a storage pool: one thin pool on the primary, built from the slice's own meta and data groups; every thin device of the pool is striped across all slices.
 
-**source connection** — The nvme host connection a dm-clone reads its source through: a migration destination's connection to the source side's export, or a clone's connection to its external source, the clone-source connection, which belongs to no pool. A sweep removes it only after the dm-clone above it.
+**source connection** — The nvme host connection a dm-clone reads its source through: a migration destination's connection to the source side's export, or a clone's connection to its external source, the clone-source connection, which belongs to no pool. A sweep removes it only after the dm-clone above it, and a clone-source connection only when its NQN is a transfer NQN of the agent's own cluster (see `cnagent.md` CN21).
 
 **space guard** — The e2e suite's allocation caps, asserted after every case: one per backing file, which bounds everything written into it, and one for everything the run allocated on every guest, at what the pool's zeroing and the suite's patterns write plus slack (see `e2e_integtest.md` E2E5).
 

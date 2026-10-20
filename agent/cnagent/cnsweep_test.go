@@ -1201,6 +1201,60 @@ func TestACloneSourceWhoseNumberDidNotReadIsKept(t *testing.T) {
 	assertNoCall(t, node, "cmd nvme disconnect --nqn "+mapped)
 }
 
+// TestACloneSourceOfAnotherKindOutlivesItsClone pins the edge of the same
+// rule (cnagent.md CN21, Known limits): only a transfer NQN of this cluster
+// says that a clone here dials the connection, so the source of a clone that
+// reads from another pool's subsystem, whose NQN its user chose, or from a
+// transfer of another cluster is never judged. The clone's removal takes its
+// dm-clone and its clone meta group down as for any clone, and neither the
+// cntlr-level pass nor the node-level one disconnects that source.
+// TestCloneTeardownOrder is the control: there the source is a transfer of
+// this cluster, and the same removal disconnects it.
+func TestACloneSourceOfAnotherKindOutlivesItsClone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		nqn  func(srv *CnAgentServer) string
+	}{
+		{"another pool's subsystem", func(*CnAgentServer) string {
+			return "nqn.2024-01.io.dnv-it:s:another-pool"
+		}},
+		{"a transfer of another cluster", func(srv *CnAgentServer) string {
+			return srv.nf.XferNqn(testCluster+1, testSp, 0xc)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			src := tc.nqn(srv)
+			clone := cloneOf()
+			clone.SrcNqn = src
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, clones: []*pb.Clone{clone}})
+			if _, ok := node.subsystems[src]; !ok {
+				t.Fatalf("the clone's source %s was never connected", src)
+			}
+			if _, ok := node.dms[cloneName(srv, testClone)]; !ok {
+				t.Fatalf("the clone's dm-clone was never built")
+			}
+
+			node.Reset()
+			syncupCntlrUntilClean(t, srv, reqOpts{revision: 3, primary: true})
+			reply := cnSweepSyncup(t, srv, 3, true)
+			cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
+
+			for _, name := range []string{cloneName(srv, testClone),
+				grpName(srv, testCloneGrp), legName(srv, testCloneLeg)} {
+				if _, ok := node.dms[name]; ok {
+					t.Fatalf("%s survived the clone", name)
+				}
+			}
+			if _, ok := node.subsystems[src]; !ok {
+				t.Fatalf("the source %s was disconnected", src)
+			}
+			assertNoCall(t, node, "cmd nvme disconnect --nqn "+src)
+		})
+	}
+}
+
 // TestHostFacingSubsystemAttributedByDevicePath pins the other half of that
 // rule: a host-facing subsystem's NQN is chosen by the user and carries
 // nothing of ours, so once no stored cntlr names it the only thing left that
