@@ -29,7 +29,8 @@ no leg repair:
   proved by its effect, which is what the suite observes.
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, through
-  slice grows and the level ladder, failovers, a leg repair and all between.
+  slice grows and the level ladder, failovers, a leg repair, an operator's
+  repair and all between.
 * **A clone's copy survives a failover of its primary** (`architecture.md`,
   Clone metadata durability). A primary disabled in the middle of a slowed
   copy hands the copy to the new primary, which loads the metadata the
@@ -71,8 +72,9 @@ listings of clusters, disk nodes and controller nodes and the id step
 (`architecture.md`, Clusters): the gateway suite covers the node deletions and
 the id step, and this run discards the whole cluster between cases.
 Error paths, beyond the few refusals the ops case asserts on purpose, the
-`NOT_FOUND` reads after the copy case's deletions and the read the cutoff case
-sees refused while etcd is down; validation and CLI semantics are the gateway
+copy case's refused abort and cancel of a started repair, the `NOT_FOUND`
+reads after the copy case's deletions and the read the cutoff case sees
+refused while etcd is down; validation and CLI semantics are the gateway
 and dnvctl suites'. Concurrency: one dnvctl call and one case
 at a time, and never a revision token, since a present token changes what the
 gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection between
@@ -160,10 +162,11 @@ many disk-node guests it needs.
 set is chosen just before its pool is built, and a case without one dies rather
 than defaulting. smoke, ops and copy build under a quiet set longer than any
 wait, a wide margin rather than a proof, as a failover or a spare leg they did
-not ask for would invalidate their absolute counts and the steps they wait on;
-under it such a reaction is a finding about the lab, and copy's one failover is
-the disable it makes itself, which waits out no threshold (`dnv-worker.md`
-AR5). react builds under the short reacting
+not ask for would invalidate their absolute counts and the steps they wait on,
+and copy's repair needs its dead leg left to the operator (`dnv-worker.md`
+AR8); under it such a reaction is a finding about the lab, and copy's one
+failover is the disable it makes itself, which waits out no threshold
+(`dnv-worker.md` AR5). react builds under the short reacting
 set, as cntlr replacement and leg repair wait out thresholds whose defaults lie
 beyond any wait the suite could afford (`dnv-worker.md` AR7, AR8). cutoff
 builds under the cutoff set, as its failover must come within seconds of the
@@ -207,12 +210,13 @@ value above the per-kernel cap is a die naming the guest count the shape needs.
 E2E4. **Every dn agent of a guest registers that guest as its location**, so
 groups straddle guests and no two sides of a leg share a kernel — by headroom,
 not by structure. Guest distinctness is asserted after the create and every
-grow. A migration destination or a spare leg excludes the group's locations
-only at the allocator's first tier (`architecture.md`, Per-operation
-allocation), and beside its source the side export's NQN, which names no disk
-node, would collide on one kernel (`architecture.md`, NQNs); so those
-placements, a leg repair's included, are asserted guest-distinct only when
-there are more disk-node guests than legs per group, the skip logged otherwise.
+grow. A migration destination, a spare leg or a repair's new leg excludes the
+group's locations only at the allocator's first tier (`architecture.md`,
+Per-operation allocation), and beside its source the side export's NQN, which
+names no disk node, would collide on one kernel (`architecture.md`, NQNs); so
+those placements, a leg repair's included, are asserted guest-distinct only
+when there are more disk-node guests than legs per group, the skip logged
+otherwise.
 
 E2E5. **Sparse backing files and allocation caps.**
 Backing files are created sparse but for the backing pattern, one random
@@ -394,8 +398,9 @@ and a disabled disk node and controller node, invisible to the agents, each
 proved by a refused allocation that writes nothing (`architecture.md`,
 Capacity index keys).
 
-**copy** proves the four RPC groups that move bytes, and that a clone's copy
-survives a failover. A transfer, auto-suspended,
+**copy** proves the five RPC groups that move bytes, among them an operator's
+repair of a leg whose disk node died, and that a clone's copy survives a
+failover. A transfer, auto-suspended,
 parks the origin namespace and carries its identity, so host1, the only host
 connected to it, reads the origin through it (`architecture.md`, Transfers;
 `cnagent.md` CN17). A clone pulls the origin through the transfer into a fresh
@@ -446,6 +451,32 @@ the case relying on leg repair leaving a two-sided leg alone
 connected by both cntlrs and switched in, the replaced leg parked and then
 deleted, md's rebuild onto it judged by the array's state words rather than
 its OK status (`architecture.md`, Spare legs; `cnagent.md` CN10, CN12, CN28).
+An operator's repair (raid1 only) then replaces a leg of the same group whose
+disk node dies (`architecture.md`, Repairs, Repair, Retired legs). That disk
+node carries no other side of the pool, and the pool holds no repair, retired
+leg or clone yet, whose sides `sp get` would not show; it dies as in react,
+its agent killed and its nvmet port removed, and once the primary's probe has
+given the leg a health epoch, which a create requires, the repair is created
+with a fresh new leg, which lands outside the group's disk nodes (E2E4). The
+repair must reach STARTED, read through `repair get` alone, as the worker
+follows the primary's report (`dnv-worker.md` AR11; `cnagent.md` CN12,
+CN28); its abort and its cancel are refused, naming its stage; and its finish
+must put the new leg in the bad leg's place, with the bad leg's `leg_idx`,
+and keep the bad leg as the pool's one retired leg, listed with its side,
+which stays in the dead disk node's record. md must then hold the group whole
+on the primary, by the array's state words and by the whole flag and
+in-sync list the primary reports beside its rows, and no cntlr may hold the
+retired leg. host0 reads its data while the leg is dead, once the group is
+whole and at the end, and its kernel log, marked before the disk node dies,
+must report no failed IO, as md fails a member whose IO errs and serves the
+read from the other (`cnagent.md` CN12). The retired leg's delete must take its side out of the
+disk node's record with the group's extents; the disk node then returns, its
+agent removes the side no record names (`dnagent.md` DN6) until its counts
+agree with its record (`dnagent.md` DN18), and the primary holds every leg
+again, with no failover meanwhile. The quiet thresholds keep the worker's own
+leg repair off the dead leg (`dnv-worker.md` AR8) and the retire timer
+deletes only an old retired leg (`dnv-worker.md` AR12), so the worker only
+moves the repair's stage and every other step is the operator's.
 Last, a second clone's copy survives a failover of the primary in its middle
 (`architecture.md`, Clone metadata durability). Its source is a second
 pool's, on a controller node with no cntlr of the case's pool, so the
@@ -647,13 +678,15 @@ port, as a configfs port does not listen until a subsystem is linked and an
 agent would adopt and rewrite an existing port of its id (`dnagent.md` SH19);
 that a host is a clean initiator — sudo, nvme-tcp and multipath, its identity
 files, generated if absent and never overwritten, nvme-stas inactive and the
-masked autoconnector (E2E10); that host0, when the cutoff case is in the run,
-has the tools of the case's write loop and kernel-log witness and nvme-stas 2.x
-installed, both its units known to systemd, as a 1.x one would fail later and
-silently, never connecting, nvme-stas being a package the suite never
-installs; and that the control-plane guest has its tools, its ports free and
-the free-space floor the space guard holds it to, and needs no sudo: the
-closing trim is the one root command tried there and may be refused.
+masked autoconnector (E2E10); that host0, when the copy case runs with
+md-raid1, has the tool of the kernel-log witness its repair reads; that host0,
+when the cutoff case is in the run, has the tools of the case's write loop and
+kernel-log witness and nvme-stas 2.x installed, both its units known to
+systemd, as a 1.x one would fail later and silently, never connecting,
+nvme-stas being a package the suite never installs; and that the
+control-plane guest has its tools, its ports free and the free-space floor the
+space guard holds it to, and needs no sudo: the closing trim is the one root
+command tried there and may be refused.
 The tool check covers only the sweeps after it: the start sweep runs before it
 and a cleanup-only run skips it, so on a guest missing mdadm or udevadm their
 md stop can silently leave dnv arrays standing.
@@ -764,7 +797,8 @@ the connect attempted.
   pass discards through**; elsewhere the host's free space shrinks by each
   run's real writes.
 * **Without redundancy the suite is smaller**: ops' leg bitmap read, copy's
-  forced drop and spare stage and react's two leg repair stages are skipped.
+  forced drop, spare stage and repair stage and react's two leg repair stages
+  are skipped.
 * **A disk node holds the controller node's md superblocks**
   (`architecture.md`, Components: invocation reference), as the primary's
   per-CN linear maps the side itself, and an unmasked disk-node guest's stock

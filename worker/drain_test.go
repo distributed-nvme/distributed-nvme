@@ -2,7 +2,11 @@ package worker
 
 import (
 	"context"
+	"reflect"
+	"slices"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -29,6 +33,48 @@ func (h *reactHarness) drainTick() {
 	h.w.drainTick(context.Background())
 }
 
+// The fixture's repairs and retired legs for the SPD15 phases: two of the
+// data group's slice, and one of a clone, so that a batch cut by the parent
+// of the first listed record leaves the clone's out.
+const (
+	reactRepA     = "rep-a"
+	reactRepB     = "rep-b"
+	reactRepClone = "rep-c"
+
+	reactRetiredA     = uint64(300)
+	reactRetiredB     = uint64(301)
+	reactRetiredClone = uint64(302)
+
+	reactRepCloneNm = "clone-r"
+)
+
+// listRepairs lists the fixture's three repairs in the SpConf, the clone's
+// second, and holds their records in the state, as LoadSp leaves them.
+func (h *reactHarness) listRepairs() {
+	h.t.Helper()
+	h.state.Conf.RepairNameList = []string{reactRepA, reactRepClone, reactRepB}
+	h.state.Repairs = map[string]*pb.Repair{
+		reactRepA: {RepId: 400, GrpId: reactDataGrp, SliceId: reactSliceId},
+		reactRepB: {RepId: 401, GrpId: reactMetaGrp, SliceId: reactSliceId},
+		reactRepClone: {
+			RepId: 402, GrpId: 403, CloneName: reactRepCloneNm,
+		},
+	}
+}
+
+// listRetiredLegs is listRepairs for the retired legs.
+func (h *reactHarness) listRetiredLegs() {
+	h.t.Helper()
+	h.state.Conf.RetiredLegIdList = []uint64{
+		reactRetiredA, reactRetiredClone, reactRetiredB,
+	}
+	h.state.RetiredLegs = map[uint64]*pb.RetiredLeg{
+		reactRetiredA:     {GrpId: reactDataGrp, SliceId: reactSliceId},
+		reactRetiredB:     {GrpId: reactMetaGrp, SliceId: reactSliceId},
+		reactRetiredClone: {GrpId: 403, CloneName: reactRepCloneNm},
+	}
+}
+
 // drainPaths are the two ways a drain step is reached: the reaction pass and
 // the drain's own wake-up (SPD6, CLD7). A test of what a step does runs
 // through both, so a step that behaves on one path and not on the other
@@ -41,23 +87,68 @@ var drainPaths = []struct {
 	{"wake-up", (*reactHarness).drainTick},
 }
 
-// TestDrainDerivation is SPD8, all four states, in the order the derivation
+// TestDrainDerivation is SPD8, all six states, in the order the derivation
 // takes them. The phases are asserted through the OP SEQUENCE rather than
 // through the log, because the sequence is what an owner actually commits:
-// cntlrs first, then one slice at a time, then the final keys.
+// cntlrs first, then the repairs and the retired legs (SPD15), then one slice
+// at a time, then the final keys. Each state still lists every later phase's
+// records, so a derivation that took a later phase first fails.
 //
-// The fourth state — not latched — is the control. Without it every row here
+// The sixth state — not latched — is the control. Without it every row here
 // would still pass on a pass that ran the drain unconditionally, which would
 // tear down every healthy SP in the cluster.
 func TestDrainDerivation(t *testing.T) {
 	t.Run("cntlrs remain", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.latch()
+		h.listRepairs()
+		h.listRetiredLegs()
 		h.rops.drainCntlrCnt = 2
 		h.pass()
 		h.wantOps("drain_cntlrs")
 		h.wantApplied()
 		h.wantNoSkip()
+	})
+
+	// The batch is the one model cuts from the loaded records: the repairs
+	// of the first listed one's parent, in list order, so the clone's repair
+	// listed between the slice's two is left for a later batch.
+	t.Run("repairs remain", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.latch()
+		h.state.Conf.CntlrIdList = nil
+		h.listRepairs()
+		h.listRetiredLegs()
+		h.rops.drainRepCnt = 2
+		h.pass()
+		calls := h.wantOps("drain_repairs")
+		if !slices.Equal(calls[0].repNames, []string{reactRepA, reactRepB}) {
+			t.Errorf("batch = %v, want the slice's two repairs [%s %s]",
+				calls[0].repNames, reactRepA, reactRepB)
+		}
+		if !proto.Equal(calls[0].cc, reactClusterConf()) {
+			t.Errorf("the batch was handed %v, want the cache's conf",
+				calls[0].cc)
+		}
+	})
+
+	t.Run("retired legs remain", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.latch()
+		h.state.Conf.CntlrIdList = nil
+		h.listRetiredLegs()
+		h.rops.drainRetiredCnt = 2
+		h.pass()
+		calls := h.wantOps("drain_retired_legs")
+		if !slices.Equal(calls[0].legIds,
+			[]uint64{reactRetiredA, reactRetiredB}) {
+			t.Errorf("batch = %v, want the slice's two retired legs [%d %d]",
+				calls[0].legIds, reactRetiredA, reactRetiredB)
+		}
+		if !proto.Equal(calls[0].cc, reactClusterConf()) {
+			t.Errorf("the batch was handed %v, want the cache's conf",
+				calls[0].cc)
+		}
 	})
 
 	t.Run("slices remain", func(t *testing.T) {
@@ -248,6 +339,94 @@ func TestDrainStepRecordsProgress(t *testing.T) {
 	}
 }
 
+// TestDrainSpd15StepRecords pins the records of the two SPD15 phases
+// (dnv-worker.md, Log records): a batch whose call succeeded logs
+// `sp drain step` with its own phase, the batch it was handed and how many
+// records it removed; a batch whose call failed logs `sp drain failed` with
+// the same phase and batch, the refusal's reason and the error, and no step
+// record. Each row runs through the pass and through the wake-up.
+func TestDrainSpd15StepRecords(t *testing.T) {
+	refusal := &model.ErrPrecondition{Op: "DrainSp", Reason: "group not found"}
+	for _, tc := range []struct {
+		name    string
+		prepare func(h *reactHarness)
+		phase   string
+		batch   string
+		batchOf any
+		cnt     string
+	}{
+		{"repairs", func(h *reactHarness) {
+			h.listRepairs()
+			h.rops.drainRepCnt = 2
+		}, drainPhaseRepairs, "rep_names",
+			[]any{reactRepA, reactRepB}, "rep_cnt"},
+		{"retired legs", func(h *reactHarness) {
+			h.listRetiredLegs()
+			h.rops.drainRetiredCnt = 2
+		}, drainPhaseRetiredLegs, "leg_ids",
+			[]any{float64(reactRetiredA), float64(reactRetiredB)},
+			"retired_leg_cnt"},
+	} {
+		for _, via := range drainPaths {
+			t.Run(tc.name+"/"+via.name+"/step", func(t *testing.T) {
+				h := newReactHarness(t, reactFixture(t))
+				h.latch()
+				h.state.Conf.CntlrIdList = nil
+				tc.prepare(h)
+				via.run(h)
+				recs := h.logs.withMsg(msgSpDrainStep)
+				if len(recs) != 1 {
+					t.Fatalf("%q records = %d, want 1", msgSpDrainStep,
+						len(recs))
+				}
+				if recs[0]["phase"] != tc.phase {
+					t.Errorf("phase = %v, want %q", recs[0]["phase"], tc.phase)
+				}
+				if !reflect.DeepEqual(recs[0][tc.batch], tc.batchOf) {
+					t.Errorf("%s = %v, want %v", tc.batch, recs[0][tc.batch],
+						tc.batchOf)
+				}
+				if recs[0][tc.cnt] != float64(2) {
+					t.Errorf("%s = %v, want 2", tc.cnt, recs[0][tc.cnt])
+				}
+				if got := h.logs.withMsg(msgSpDrainFailed); len(got) != 0 {
+					t.Errorf("%q records = %v, want none", msgSpDrainFailed,
+						got)
+				}
+			})
+			t.Run(tc.name+"/"+via.name+"/failed", func(t *testing.T) {
+				h := newReactHarness(t, reactFixture(t))
+				h.latch()
+				h.state.Conf.CntlrIdList = nil
+				tc.prepare(h)
+				h.rops.drainErr = refusal
+				via.run(h)
+				recs := h.logs.withMsg(msgSpDrainFailed)
+				if len(recs) != 1 {
+					t.Fatalf("%q records = %d, want 1", msgSpDrainFailed,
+						len(recs))
+				}
+				if recs[0]["phase"] != tc.phase {
+					t.Errorf("phase = %v, want %q", recs[0]["phase"], tc.phase)
+				}
+				if !reflect.DeepEqual(recs[0][tc.batch], tc.batchOf) {
+					t.Errorf("%s = %v, want %v", tc.batch, recs[0][tc.batch],
+						tc.batchOf)
+				}
+				if recs[0]["reason"] != refusal.Reason ||
+					recs[0]["error"] == nil {
+					t.Errorf("reason = %v, error = %v, want %q and the "+
+						"error text", recs[0]["reason"], recs[0]["error"],
+						refusal.Reason)
+				}
+				if got := h.logs.withMsg(msgSpDrainStep); len(got) != 0 {
+					t.Errorf("a failed batch logged %q", msgSpDrainStep)
+				}
+			})
+		}
+	}
+}
+
 // TestDrainArmsItsOwnTick is SPD6's self-tick: a step whose call succeeded and
 // that moved the SP posts the drain's wake-up AT ONCE, instead of waiting for
 // the cntlr_interval ticker.
@@ -317,6 +496,26 @@ func TestDrainStepArmsOnlyOnProgress(t *testing.T) {
 		}, true},
 		{"D1 removed nothing", func(h *reactHarness) {
 			h.rops.drainCntlrCnt = 0
+		}, false},
+		{"a repair batch removed repairs", func(h *reactHarness) {
+			h.state.Conf.CntlrIdList = nil
+			h.listRepairs()
+			h.rops.drainRepCnt = 2
+		}, true},
+		{"a repair batch removed nothing", func(h *reactHarness) {
+			h.state.Conf.CntlrIdList = nil
+			h.listRepairs()
+			h.rops.drainRepCnt = 0
+		}, false},
+		{"a retired-leg batch removed retired legs", func(h *reactHarness) {
+			h.state.Conf.CntlrIdList = nil
+			h.listRetiredLegs()
+			h.rops.drainRetiredCnt = 2
+		}, true},
+		{"a retired-leg batch removed nothing", func(h *reactHarness) {
+			h.state.Conf.CntlrIdList = nil
+			h.listRetiredLegs()
+			h.rops.drainRetiredCnt = 0
 		}, false},
 		{"D2 removed groups", func(h *reactHarness) {
 			h.state.Conf.CntlrIdList = nil

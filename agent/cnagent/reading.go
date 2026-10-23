@@ -100,7 +100,8 @@ func (rd *cnReading) mdWalks() *mdWalkOnce {
 // plan and one reading, then the rows (probeCntlr), then the verdict
 // (sweepCntlr with nothing removed), both from that reading, so the verdict
 // judges the node the rows read. The verdict also names the md members the
-// rows show the converge would put back or add (putBackNames, CN30).
+// rows show the converge would put back, add or remove for a repair
+// (putBackNames, CN30).
 //
 // A stored conf the gate refuses (architecture.md, Common validation) takes
 // no reading: its rows are empty, what a cntlr with nothing provable looks

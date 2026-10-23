@@ -9,8 +9,8 @@
 #   bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@ip
 #
 # The plan's cases, in order, each in its own cluster `it-<case>` and each
-# after a fleet restart: smoke, revision, health, bitmap, reaction, failover,
-# hold, drain, vote, handoff. Cleanup runs unconditionally at the start and,
+# after a fleet restart: smoke, revision, health, bitmap, reaction, repair,
+# failover, hold, drain, vote, handoff. Cleanup runs unconditionally at the start and,
 # on success only, at the end: a failing run leaves etcd's data, every log and
 # every behavior file in place and dumps the diagnostics.
 #
@@ -181,7 +181,7 @@ CLONE_GRP_ID=0x31
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it
 
-CASES=(smoke revision health bitmap reaction failover hold drain vote handoff)
+CASES=(smoke revision health bitmap reaction repair failover hold drain vote handoff)
 
 DN_DIRS=(dn0 dn1 dn2 dn3)
 CN_DIRS=(cn0 cn1 cn2)
@@ -3301,6 +3301,232 @@ EOF
 
 	log "  12.6: clean up"
 	clear_behavior cn1
+}
+
+# ---------------------------------------------------------------------------
+# Case: an operator's repair (architecture.md, Repair; dnv-worker.md, AR11,
+# AR12)
+# ---------------------------------------------------------------------------
+
+# repairs_json prints `workerctl list-repairs` for an SP: its repairs by name
+# and its retired legs by leg id, in the key spelling (architecture.md, Key
+# grammar).
+repairs_json() { # <sp>
+	ctl list-repairs --sp "$1"
+}
+
+repair_json() { # <sp> <rep name>
+	repairs_json "$1" | "$JQ" -c --arg r "$2" '.repairs[$r] // empty'
+}
+
+repair_stage_is() { # <sp> <rep name> <REP_STAGE_*>
+	local got
+	got=$(repairs_json "$1" | "$JQ" -r --arg r "$2" '.repairs[$r].rep_stage // "none"') ||
+		return 1
+	[ "$got" = "$3" ]
+}
+
+repair_gone() { # <sp> <rep name>
+	repairs_json "$1" | "$JQ" -e --arg r "$2" '.repairs | has($r) | not' >/dev/null
+}
+
+repair_side_provisioned() { # <sp> <rep name>
+	local got
+	got=$(repairs_json "$1" | "$JQ" -r --arg r "$2" \
+		'.repairs[$r].new_leg_list[0].side_list[0].provisioned // false') ||
+		return 1
+	[ "$got" = true ]
+}
+
+retired_leg_listed() { # <sp> <leg id>
+	repairs_json "$1" | "$JQ" -e --arg l "$(printf '%016x' "$2")" \
+		'.retired_legs | has($l)' >/dev/null
+}
+
+retired_leg_gone() { # <sp> <leg id>
+	repairs_json "$1" | "$JQ" -e --arg l "$(printf '%016x' "$2")" \
+		'.retired_legs | has($l) | not' >/dev/null
+}
+
+stage_moved_cnt() { # <rep name> <REP_STAGE_*>
+	wcount 'select(.msg == "repair stage moved") | select(.rep_name == $r and .stage == $s)' \
+		--arg r "$1" --arg s "$2"
+}
+
+retired_rec_cnt() { # <msg> <leg id> [reason]
+	wcount 'select(.msg == $m) | select((.leg_id | tostring) == $l)
+		| select($why == "" or .reason == $why)' \
+		--arg m "$1" --arg l "$2" --arg why "${3:-}"
+}
+
+retired_rec_ge() { # <n> <msg> <leg id> [reason]
+	local n=$1
+	shift
+	count_ge "$n" retired_rec_cnt "$@"
+}
+
+# repair_levers writes the levers of sp0's primary cntlr, C1 on cn 1 (fake
+# cn0): row overrides, the verdicts on repairs by rep_name, and the readings
+# of groups by grp_id (dnv-worker.md, Integration test plan, The fake agent),
+# each a list of JSON members. A behavior file replaces every lever of its
+# fake, so each write names all three.
+repair_levers() { # <rows> <repairs> <grps>
+	set_behavior cn0 <<EOF
+{"objects": {"cntlr 1:1": {"rows": {$1}, "repairs": {$2}, "grps": {$3}}}}
+EOF
+}
+
+# leg_down is the row override that fails the primary's probe of one leg, so
+# the worker stamps the leg's err_epoch (HL2), as CreateRepair wants of a bad
+# leg.
+leg_down() { # <leg id>
+	printf '"leg_id_to_leg.%d": {"status": "ERROR", "details": "probe io error"}' "$1"
+}
+
+case_repair() {
+	CASE=repair
+
+	stage 1 "the repair fixture: three DNs, two CNs, sp0 on dn 1 and dn 2"
+	new_cluster repair
+	local i
+	for i in 1 2 3; do put_dn "$i" 8; done
+	for i in 1 2; do put_cn "$i" 64; done
+	# leg_unhealthy is long beside the operator's steps, so leg repair (AR8)
+	# never races a create below; side_unhealthy sits under it, as the
+	# gateway requires of a stored pool (architecture.md, Common validation).
+	ctl put-sp --name sp0 --id 1 --shard 00 --slots 0,1,2 --level 0 \
+		--thresholds 2,4,20,30 --lwm "$LWM" \
+		--cntlr 1:1:0:true --cntlr 2:2:1:false \
+		--slice 1:0 \
+		--group 1:1:meta:1:raid1 --group 1:2:data:2:raid1 \
+		--leg 1:1:0 --leg 1:2:1 --leg 2:3:0 --leg 2:4:1 \
+		--side 1:1:1:0 --side 2:2:2:0 --side 3:3:1:0 --side 4:4:2:0
+	wait_until "$WAIT_SYNCUP" "every side of slice 1 provisioned" \
+		all_provisioned sp0 1
+	local dn1_free dn3_free
+	dn1_free=$(dn_free 1)
+	dn3_free=$(dn_free 3)
+	assert_eq "$dn3_free" 8 "dn 3 holds nothing of sp0"
+
+	stage 2 "an operator's repair, from its create to its finish"
+	repair_levers "$(leg_down 3)" '' ''
+	wait_until "$WAIT_SHORT" "leg 3's err_epoch set" leg_epoch_set sp0 1 3
+	local created rep_id new_leg new_side
+	created=$(ctl create-repair --sp sp0 --name r0 --grp 2 --bad-leg 3 --dn 3)
+	rep_id=$((16#$(jq_of "$created" .rep_id)))
+	new_leg=$((16#$(jq_of "$created" .new_leg_id)))
+	new_side=$(repair_json sp0 r0 | "$JQ" -r '.new_leg_list[0].side_list[0].side_id')
+	log "  r0: rep_id $rep_id, new leg $new_leg, new side $new_side on dn 3"
+	assert_field "$(repair_json sp0 r0)" .rep_stage REP_STAGE_CREATED \
+		"r0 after its create"
+	assert_eq "$(dn_free 3)" $((dn3_free - 2)) "dn 3 charged r0's new side"
+	# The new leg's side is driven as a side of the pool: its disk node zeroes
+	# it and the worker's flip marks it provisioned in the repair (RW15,
+	# RW18).
+	wait_until "$WAIT_SHORT" "dn2: SyncupSide for r0's new side" \
+		req_ge 1 dn2 SyncupSide '(.side_pointer.side_id | tostring) == $s' \
+		--arg s "$new_side"
+	wait_until "$WAIT_SYNCUP" "r0's new side provisioned" \
+		repair_side_provisioned sp0 r0
+	# Every cntlr is carried the repair (RW16).
+	wait_until "$WAIT_SHORT" "cn0: SyncupCntlr carrying r0" \
+		req_ge 1 cn0 SyncupCntlr '.name_to_repair.r0 != null'
+	wait_until "$WAIT_SHORT" "cn1: SyncupCntlr carrying r0" \
+		req_ge 1 cn1 SyncupCntlr '.name_to_repair.r0 != null'
+	# Once leg 3 is due, leg repair leaves the group to its repair, on every
+	# pass (AR8): no spare, and two skips naming the group's own reason.
+	wait_until $((30 + WAIT_SYNCUP)) "two passes skipping the group: grp_has_repair" \
+		reaction_skip_ge 2 spare_create grp_has_repair
+	assert_eq "$(spare_count sp0 1 data 2)" 0 "spares of a group with a repair"
+	# The primary reports the new leg holding a place in the array: the worker
+	# moves r0 to STARTED (AR11).
+	repair_levers "$(leg_down 3)" '"r0": {"started": true}' ''
+	wait_until "$WAIT_SHORT" "r0 at REP_STAGE_STARTED" \
+		repair_stage_is sp0 r0 REP_STAGE_STARTED
+	assert_eq "$(stage_moved_cnt r0 REP_STAGE_STARTED)" 1 \
+		"one \`repair stage moved\` record for r0"
+	# The operator finishes it: the new leg takes leg 3's place, and leg 3 is
+	# a retired leg whose side keeps its extents on dn 1.
+	local finished rev
+	finished=$(ctl finish-repair --sp sp0 --name r0)
+	assert_eq "$((16#$(jq_of "$finished" .retired_leg_id)))" 3 \
+		"the leg r0 retired"
+	clear_behavior cn0
+	repair_gone sp0 r0 || die "r0 outlived its finish"
+	retired_leg_listed sp0 3 || die "leg 3 is not listed retired after the finish"
+	leg_in_list sp0 1 data 2 "$new_leg" ||
+		die "r0's new leg $new_leg is not in the data group's leg_list"
+	assert_eq "$(dn_free 1)" "$dn1_free" "dn 1 keeps the retired side's extents"
+	# The retired side keeps a request on its disk node, provisioned, from the
+	# finish's revision on (RW15), and no cntlr is carried a repair.
+	rev=$(sp_rev_num 1)
+	wait_until "$WAIT_SHORT" "dn0: a provisioned SyncupSide for the retired side" \
+		req_ge 1 dn0 SyncupSide '(.side_pointer.side_id | tostring) == "3"
+			and ((.revision | tonumber) >= ($r | tonumber))
+			and .side_conf.provisioned == true' --arg r "$rev"
+	wait_until "$WAIT_SHORT" "cn0: a SyncupCntlr carrying no repair" \
+		req_ge 1 cn0 SyncupCntlr '((.revision | tonumber) >= ($r | tonumber))
+			and ((.name_to_repair // {}) | length) == 0' --arg r "$rev"
+
+	stage 3 "an operator's repair, aborted and cancelled"
+	repair_levers "$(leg_down 1)" '' ''
+	wait_until "$WAIT_SHORT" "leg 1's err_epoch set" leg_epoch_set sp0 1 1
+	dn3_free=$(dn_free 3)
+	ctl create-repair --sp sp0 --name r1 --grp 1 --bad-leg 1 --dn 3 >/dev/null
+	assert_eq "$(dn_free 3)" $((dn3_free - 1)) "dn 3 charged r1's new side"
+	ctl abort-repair --sp sp0 --name r1 >/dev/null
+	assert_field "$(repair_json sp0 r1)" .try_to_abort true "r1's abort flag"
+	# The flag reaches the primary first: it confirms the abort, and the
+	# worker moves r1 to ABORTED (AR11).
+	repair_levers "$(leg_down 1)" '"r1": {"abort_confirmed": true}' ''
+	wait_until "$WAIT_SHORT" "r1 at REP_STAGE_ABORTED" \
+		repair_stage_is sp0 r1 REP_STAGE_ABORTED
+	assert_eq "$(stage_moved_cnt r1 REP_STAGE_ABORTED)" 1 \
+		"one \`repair stage moved\` record for r1"
+	# Leg 1 reads healthy again before the cancel, so no leg repair follows.
+	clear_behavior cn0
+	wait_until "$WAIT_SHORT" "leg 1's err_epoch cleared" leg_epoch_clear sp0 1 1
+	ctl cancel-repair --sp sp0 --name r1 >/dev/null
+	repair_gone sp0 r1 || die "r1 outlived its cancel"
+	assert_eq "$(dn_free 3)" "$dn3_free" "dn 3 got r1's new side back"
+
+	stage 4 "the retired leg listed, then deleted"
+	retired_leg_listed sp0 3 || die "leg 3 is not listed retired before its delete"
+	ctl delete-retired-leg --sp sp0 --leg 3 >/dev/null
+	retired_leg_gone sp0 3 || die "leg 3 outlived its delete"
+	assert_eq "$(dn_free 1)" $((dn1_free + 2)) \
+		"dn 1 got the retired side's extents back"
+	# dn 1's agent is then sent a side list without the side
+	# (architecture.md, Teardown by sweep).
+	rev=$(dn_rev 1)
+	wait_until "$WAIT_SHORT" "dn0: a SyncupDn without side 3" \
+		req_ge 1 dn0 SyncupDn '((.revision | tonumber) >= ($r | tonumber))
+			and (any(.side_pointer_list[]?; (.side_id | tostring) == "3") | not)' \
+		--arg r "$rev"
+
+	stage 5 "the retire timer deletes an old retired leg once its group reads whole"
+	local max_age
+	max_age=$(constant_of "$("$WORKERCTL_BIN" constants)" RetiredLegMaxAge)
+	# The primary reads the meta group not whole, and a retired leg of it is
+	# older than the timer's age: the timer keeps it (AR12).
+	repair_levers '' '' '"1": {"whole": false}'
+	ctl put-retired-leg --sp sp0 --id 0x40 --side 0x41 --grp 1 --leg-idx 2 \
+		--dn 3 --slot 0 --age $((max_age + 60)) >/dev/null
+	dn3_free=$(dn_free 3)
+	wait_until $((2 * WAIT_SHORT)) "two passes keeping the retired leg: grp_not_whole" \
+		retired_rec_ge 2 "retired leg kept" 64 grp_not_whole
+	retired_leg_listed sp0 64 ||
+		die "the timer deleted a retired leg of a group not whole"
+	assert_eq "$(retired_rec_cnt "retired leg deleted" 64)" 0 \
+		"\`retired leg deleted\` records while the group is not whole"
+	# The primary reads the group whole, its row OK, every leg in sync and no
+	# leg unhealthy: the next pass deletes the retired leg.
+	clear_behavior cn0
+	wait_until "$WAIT_SHORT" "retired leg deleted" \
+		retired_rec_ge 1 "retired leg deleted" 64
+	retired_leg_gone sp0 64 || die "the retired leg outlived the timer's delete"
+	assert_eq "$(dn_free 3)" $((dn3_free + 1)) \
+		"dn 3 got the retired side's extents back"
 }
 
 reaction_skip_ge() { # <n> <kind> <reason>

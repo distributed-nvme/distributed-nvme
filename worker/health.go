@@ -141,6 +141,42 @@ type healthWriter interface {
 		sideId uint64,
 		epoch uint64,
 	) error
+	// setRepairLegErrEpoch and setRepairSideErrEpoch are setLegErrEpoch and
+	// setSideErrEpoch for a repair's new leg and its side, whose record is
+	// the repair's, named by its name and proved by its rep_id; and
+	// setRetiredSideErrEpoch is setSideErrEpoch for a retired leg's side,
+	// whose record is the retired leg's, named by its leg id (MD6;
+	// architecture.md, Repair). The three take the pool's name, which keys
+	// the pool record their transactions check.
+	setRepairLegErrEpoch(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		spName string,
+		repName string,
+		repId uint64,
+		legId uint64,
+		epoch uint64,
+	) error
+	setRepairSideErrEpoch(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		spName string,
+		repName string,
+		repId uint64,
+		sideId uint64,
+		epoch uint64,
+	) error
+	setRetiredSideErrEpoch(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		spName string,
+		legId uint64,
+		sideId uint64,
+		epoch uint64,
+	) error
 }
 
 // modelHealthWriter is the production healthWriter (HL1/HL2 -> MD6).
@@ -227,6 +263,50 @@ func (w *modelHealthWriter) setCloneSideErrEpoch(
 ) error {
 	return model.SetCloneSideErrEpoch(
 		ctx, w.cli, cid, spId, cloneName, cloneId, sideId, epoch,
+	)
+}
+
+func (w *modelHealthWriter) setRepairLegErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	legId uint64,
+	epoch uint64,
+) error {
+	return model.SetRepairLegErrEpoch(
+		ctx, w.cli, cid, spId, spName, repName, repId, legId, epoch,
+	)
+}
+
+func (w *modelHealthWriter) setRepairSideErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	return model.SetRepairSideErrEpoch(
+		ctx, w.cli, cid, spId, spName, repName, repId, sideId, epoch,
+	)
+}
+
+func (w *modelHealthWriter) setRetiredSideErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	legId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	return model.SetRetiredSideErrEpoch(
+		ctx, w.cli, cid, spId, spName, legId, sideId, epoch,
 	)
 }
 
@@ -791,6 +871,99 @@ func newCloneSideMonitor(
 		write: func(ctx context.Context, epoch uint64, _ bool) error {
 			return d.health.setCloneSideErrEpoch(
 				ctx, cid, spId, cloneName, cloneId, sideId, epoch,
+			)
+		},
+	}
+}
+
+// newRepairLegMonitor is newLegMonitor for a repair's new leg, whose record
+// is the repair's until the finish makes it a leg of the group (HL2;
+// architecture.md, Repair): the same rules, written through the repair's
+// leg epoch write, which proves the record by repId. A new leg that moves to
+// another record gets a new monitor (spWorker.applyPlan).
+func newRepairLegMonitor(
+	d *deps,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	legId uint64,
+) *healthMonitor {
+	return &healthMonitor{
+		deps:   d,
+		role:   common.WorkerRoleSp,
+		record: healthRecordLeg,
+		cid:    cid,
+		attrs: []slog.Attr{
+			slog.Uint64("sp_id", spId),
+			slog.String("rep_name", repName),
+			slog.Uint64("rep_id", repId),
+			slog.Uint64("leg_id", legId),
+		},
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
+			return d.health.setRepairLegErrEpoch(
+				ctx, cid, spId, spName, repName, repId, legId, epoch,
+			)
+		},
+	}
+}
+
+// newRepairSideMonitor is newSideMonitor for the side of a repair's new leg,
+// written through the repair's side epoch write (HL2).
+func newRepairSideMonitor(
+	d *deps,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	sideId uint64,
+) *healthMonitor {
+	return &healthMonitor{
+		deps:   d,
+		role:   common.WorkerRoleSp,
+		record: healthRecordSide,
+		cid:    cid,
+		attrs: []slog.Attr{
+			slog.Uint64("sp_id", spId),
+			slog.String("rep_name", repName),
+			slog.Uint64("rep_id", repId),
+			slog.Uint64("side_id", sideId),
+		},
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
+			return d.health.setRepairSideErrEpoch(
+				ctx, cid, spId, spName, repName, repId, sideId, epoch,
+			)
+		},
+	}
+}
+
+// newRetiredSideMonitor is newSideMonitor for a retired leg's side, written
+// through the retired leg's side epoch write (HL2). That epoch is what
+// CreateRepair reads before it takes the leg back (architecture.md,
+// Repairs).
+func newRetiredSideMonitor(
+	d *deps,
+	cid uint64,
+	spId uint64,
+	spName string,
+	legId uint64,
+	sideId uint64,
+) *healthMonitor {
+	return &healthMonitor{
+		deps:   d,
+		role:   common.WorkerRoleSp,
+		record: healthRecordSide,
+		cid:    cid,
+		attrs: []slog.Attr{
+			slog.Uint64("sp_id", spId),
+			slog.Uint64("retired_leg_id", legId),
+			slog.Uint64("side_id", sideId),
+		},
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
+			return d.health.setRetiredSideErrEpoch(
+				ctx, cid, spId, spName, legId, sideId, epoch,
 			)
 		},
 	}

@@ -46,6 +46,8 @@ const (
 	kindTransfer    = "transfer"
 	kindMigration   = "migration"
 	kindMigrBitmap  = "migration_bitmap"
+	kindRepair      = "repair"
+	kindRetiredLeg  = "retired_leg"
 	kindSpName      = "sp_id_to_name"
 	kindWorkerReg   = "worker"
 )
@@ -398,6 +400,39 @@ func MigrBitmapPrefix(cid uint64, spId uint64, migrName string) string {
 	return prefixOf(
 		common.DnvPrefix, kindMigrBitmap,
 		idField(cid), idField(spId), migrName,
+	)
+}
+
+// RepairKey is the key of one repair of an SP (MD2).
+func RepairKey(cid uint64, spId uint64, repName string) string {
+	return joinKey(
+		common.DnvPrefix, kindRepair,
+		idField(cid), idField(spId), repName,
+	)
+}
+
+// RepairPrefix is the prefix LoadSp ranges to read every repair of an SP in
+// one read (MD3).
+func RepairPrefix(cid uint64, spId uint64) string {
+	return prefixOf(
+		common.DnvPrefix, kindRepair, idField(cid), idField(spId),
+	)
+}
+
+// RetiredLegKey is the key of one retired leg of an SP (MD2), addressed by
+// the leg id it kept.
+func RetiredLegKey(cid uint64, spId uint64, legId uint64) string {
+	return joinKey(
+		common.DnvPrefix, kindRetiredLeg,
+		idField(cid), idField(spId), idField(legId),
+	)
+}
+
+// RetiredLegPrefix is the prefix LoadSp ranges to read every retired leg of
+// an SP in one read (MD3).
+func RetiredLegPrefix(cid uint64, spId uint64) string {
+	return prefixOf(
+		common.DnvPrefix, kindRetiredLeg, idField(cid), idField(spId),
 	)
 }
 

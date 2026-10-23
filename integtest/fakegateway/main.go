@@ -1084,6 +1084,54 @@ func (g *fakeGateway) SwitchSpareLeg(
 	return serve[*pb.SwitchSpareLegReply](g, ctx, "SwitchSpareLeg", req)
 }
 
+func (g *fakeGateway) CreateRepair(
+	ctx context.Context, req *pb.CreateRepairRequest,
+) (*pb.CreateRepairReply, error) {
+	return serve[*pb.CreateRepairReply](g, ctx, "CreateRepair", req)
+}
+
+func (g *fakeGateway) FinishRepair(
+	ctx context.Context, req *pb.FinishRepairRequest,
+) (*pb.FinishRepairReply, error) {
+	return serve[*pb.FinishRepairReply](g, ctx, "FinishRepair", req)
+}
+
+func (g *fakeGateway) CancelRepair(
+	ctx context.Context, req *pb.CancelRepairRequest,
+) (*pb.CancelRepairReply, error) {
+	return serve[*pb.CancelRepairReply](g, ctx, "CancelRepair", req)
+}
+
+func (g *fakeGateway) TryToAbortRepair(
+	ctx context.Context, req *pb.TryToAbortRepairRequest,
+) (*pb.TryToAbortRepairReply, error) {
+	return serve[*pb.TryToAbortRepairReply](g, ctx, "TryToAbortRepair", req)
+}
+
+func (g *fakeGateway) GetRepair(
+	ctx context.Context, req *pb.GetRepairRequest,
+) (*pb.GetRepairReply, error) {
+	return serve[*pb.GetRepairReply](g, ctx, "GetRepair", req)
+}
+
+func (g *fakeGateway) ListRepairs(
+	ctx context.Context, req *pb.ListRepairsRequest,
+) (*pb.ListRepairsReply, error) {
+	return serve[*pb.ListRepairsReply](g, ctx, "ListRepairs", req)
+}
+
+func (g *fakeGateway) ListRetiredLegs(
+	ctx context.Context, req *pb.ListRetiredLegsRequest,
+) (*pb.ListRetiredLegsReply, error) {
+	return serve[*pb.ListRetiredLegsReply](g, ctx, "ListRetiredLegs", req)
+}
+
+func (g *fakeGateway) DeleteRetiredLeg(
+	ctx context.Context, req *pb.DeleteRetiredLegRequest,
+) (*pb.DeleteRetiredLegReply, error) {
+	return serve[*pb.DeleteRetiredLegReply](g, ctx, "DeleteRetiredLeg", req)
+}
+
 func (g *fakeGateway) GetThinDeviceBitmap(
 	ctx context.Context, req *pb.GetThinDeviceBitmapRequest,
 ) (*pb.GetThinDeviceBitmapReply, error) {

@@ -3,7 +3,11 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -327,6 +331,8 @@ func TestLoadSpMissing(t *testing.T) {
 	ctx := context.Background()
 	cid := testCid(t)
 	conf := fixtureSpConf()
+	conf.RepairNameList = []string{"rep0"}
+	conf.RetiredLegIdList = []uint64{56}
 	// Nothing but the SpConf and one cntlr exists.
 	mustPut(t, cli, SpConfKey(cid, fixtureSpName), conf)
 	mustPut(t, cli, CntlrKey(cid, fixtureSpId, 21), &pb.Cntlr{
@@ -346,6 +352,8 @@ func TestLoadSpMissing(t *testing.T) {
 		CloneKey(cid, fixtureSpId, "clone0"),
 		TransferKey(cid, fixtureSpId, "xfer0"),
 		MigrationKey(cid, fixtureSpId, "migr0"),
+		RepairKey(cid, fixtureSpId, "rep0"),
+		RetiredLegKey(cid, fixtureSpId, 56),
 		CnConfKey(cid, fixtureCnAddrA),
 	}
 	// The absent SpRev key is not a listed sub-object: no Missing entry,
@@ -568,5 +576,332 @@ func TestLoadSpReadsCloneGroupNodes(t *testing.T) {
 	if state.Clones["clone1"].GetMetaGrp() != nil {
 		t.Errorf("clone1 = %v, want a clone with no group",
 			state.Clones["clone1"])
+	}
+}
+
+// TestLoadSpReadsRepairsAndRetiredLegs pins the loader's reads of repairs and
+// retired legs (MD3): each kept only where the SpConf lists it, and the DN of
+// every new leg's side and of every retired side read after the slices' and
+// the clones' in list order, so a lost record of such a DN lands in Missing
+// after theirs. TestLoadRepairsReadsAtTheSnapshotsRevision pins the ranges'
+// revision.
+func TestLoadSpReadsRepairsAndRetiredLegs(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	writeSp(t, cli, cid)
+	conf := fixtureSpConf()
+	conf.RepairNameList = []string{"rep0"}
+	conf.RetiredLegIdList = []uint64{57, 58}
+	mustPut(t, cli, SpConfKey(cid, fixtureSpName), conf)
+	const dnE, dnF, dnG = "dn-e:9000", "dn-f:9000", "dn-g:9000"
+	const dnY = "dn-y:9000"
+	rep := &pb.Repair{
+		RepId: 95, GrpId: 42, BadLegIdList: []uint64{52}, SliceId: 31,
+		NewLegList: []*pb.Leg{{
+			LegId:    96,
+			SideList: []*pb.Side{{SideId: 97, AddrPort: dnE}},
+		}},
+	}
+	mustPut(t, cli, RepairKey(cid, fixtureSpId, "rep0"), rep)
+	// A key no list names: no writer leaves one, and the load skips it.
+	mustPut(t, cli, RepairKey(cid, fixtureSpId, "stray"), &pb.Repair{
+		RepId: 98,
+		NewLegList: []*pb.Leg{{
+			LegId:    99,
+			SideList: []*pb.Side{{SideId: 100, AddrPort: "dn-x:9000"}},
+		}},
+	})
+	retired57 := &pb.RetiredLeg{
+		GrpId: 42, Side: &pb.Side{SideId: 157, AddrPort: dnF}, SliceId: 31,
+	}
+	retired58 := &pb.RetiredLeg{
+		GrpId: 41, Side: &pb.Side{SideId: 158, AddrPort: dnG}, SliceId: 31,
+	}
+	mustPut(t, cli, RetiredLegKey(cid, fixtureSpId, 57), retired57)
+	mustPut(t, cli, RetiredLegKey(cid, fixtureSpId, 58), retired58)
+	// The same for a retired leg: its DN exists, so a read of it would land
+	// in DnByAddr rather than in Missing.
+	mustPut(t, cli, RetiredLegKey(cid, fixtureSpId, 59), &pb.RetiredLeg{
+		GrpId: 42, Side: &pb.Side{SideId: 159, AddrPort: dnY}, SliceId: 31,
+	})
+	mustPut(t, cli, DnConfKey(cid, dnE), &pb.DnConf{DnId: 5})
+	mustPut(t, cli, DnConfKey(cid, dnG), &pb.DnConf{DnId: 7})
+	mustPut(t, cli, DnConfKey(cid, dnY), &pb.DnConf{DnId: 9})
+	if err := cli.Delete(ctx, DnConfKey(cid, fixtureDnAddrD)); err != nil {
+		t.Fatalf("Delete dn-d: %v", err)
+	}
+
+	state, err := LoadSp(ctx, cli, cid, fixtureSpName)
+	if err != nil {
+		t.Fatalf("LoadSp: %v", err)
+	}
+	if len(state.Repairs) != 1 || !proto.Equal(state.Repairs["rep0"], rep) {
+		t.Errorf("Repairs = %v, want only rep0", state.Repairs)
+	}
+	if len(state.RetiredLegs) != 2 ||
+		!proto.Equal(state.RetiredLegs[57], retired57) ||
+		!proto.Equal(state.RetiredLegs[58], retired58) {
+		t.Errorf("RetiredLegs = %v", state.RetiredLegs)
+	}
+	want := []string{DnConfKey(cid, fixtureDnAddrD), DnConfKey(cid, dnF)}
+	if !equalStrings(state.Missing, want) {
+		t.Errorf("Missing = %v, want %v: the clone's DN first, then the "+
+			"retired leg's", state.Missing, want)
+	}
+	for _, addrPort := range []string{dnE, dnG} {
+		if state.DnByAddr[addrPort] == nil {
+			t.Errorf("DnByAddr has no %s", addrPort)
+		}
+	}
+	if _, ok := state.DnByAddr["dn-x:9000"]; ok {
+		t.Errorf("DnByAddr reached the stray repair's side")
+	}
+	if _, ok := state.RetiredLegs[59]; ok {
+		t.Errorf("RetiredLegs kept the stray retired leg")
+	}
+	if _, ok := state.DnByAddr[dnY]; ok {
+		t.Errorf("DnByAddr reached the stray retired leg's side")
+	}
+}
+
+// TestLoadRepairsReadsAtTheSnapshotsRevision pins the revision of the two
+// ranges (MD3): loadRepairs reads at SpState.Rev, not at the latest
+// revision, so a repair rewritten and a retired leg deleted after the
+// snapshot still load as the snapshot held them, with nothing missing.
+func TestLoadRepairsReadsAtTheSnapshotsRevision(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	writeSp(t, cli, cid)
+	conf := fixtureSpConf()
+	conf.RepairNameList = []string{"rep0"}
+	conf.RetiredLegIdList = []uint64{57}
+	mustPut(t, cli, SpConfKey(cid, fixtureSpName), conf)
+	rep := &pb.Repair{
+		RepId: 95, GrpId: 42, BadLegIdList: []uint64{52}, SliceId: 31,
+		NewLegList: []*pb.Leg{{
+			LegId:    96,
+			SideList: []*pb.Side{{SideId: 97, AddrPort: fixtureDnAddrA}},
+		}},
+	}
+	retired := &pb.RetiredLeg{
+		GrpId: 42, SliceId: 31,
+		Side: &pb.Side{SideId: 157, AddrPort: fixtureDnAddrB},
+	}
+	mustPut(t, cli, RepairKey(cid, fixtureSpId, "rep0"), rep)
+	mustPut(t, cli, RetiredLegKey(cid, fixtureSpId, 57), retired)
+	state, err := LoadSp(ctx, cli, cid, fixtureSpName)
+	if err != nil {
+		t.Fatalf("LoadSp: %v", err)
+	}
+
+	newer := proto.Clone(rep).(*pb.Repair)
+	newer.RepId = 195
+	mustPut(t, cli, RepairKey(cid, fixtureSpId, "rep0"), newer)
+	if err := cli.Delete(ctx, RetiredLegKey(cid, fixtureSpId, 57)); err != nil {
+		t.Fatalf("Delete the retired leg: %v", err)
+	}
+	again := newSpState()
+	again.Conf = state.Conf
+	again.Rev = state.Rev
+	if err := loadRepairs(ctx, cli, cid, again); err != nil {
+		t.Fatalf("loadRepairs at the snapshot's revision: %v", err)
+	}
+	if !proto.Equal(again.Repairs["rep0"], rep) {
+		t.Errorf("Repairs[rep0] = %v, want the snapshot's %v",
+			again.Repairs["rep0"], rep)
+	}
+	if !proto.Equal(again.RetiredLegs[57], retired) {
+		t.Errorf("RetiredLegs[57] = %v, want the snapshot's %v",
+			again.RetiredLegs[57], retired)
+	}
+	if len(again.Missing) != 0 {
+		t.Errorf("Missing = %v, want none at the snapshot's revision",
+			again.Missing)
+	}
+}
+
+// TestLoadNodesReadsAtTheSnapshotsRevision pins the revision of the node
+// read (MD3): loadNodesAt reads at SpState.Rev, not at the latest revision,
+// so a DnConf and a CnConf rewritten and another of each deleted after the
+// snapshot still load as the snapshot held them, with nothing missing.
+// The DN records are named by a slice's side, a repair's new side and a
+// retired side, the CN records by the cntlrs.
+func TestLoadNodesReadsAtTheSnapshotsRevision(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	writeSp(t, cli, cid)
+	const dnRep, dnRetired = "dn-rep:9000", "dn-ret:9000"
+	for i, addrPort := range []string{dnRep, dnRetired} {
+		mustPut(t, cli, DnConfKey(cid, addrPort), &pb.DnConf{
+			DnId: uint64(11 + i), Location: "rack-r", FreeExtCnt: 100,
+		})
+	}
+	conf := fixtureSpConf()
+	conf.RepairNameList = []string{"rep0"}
+	conf.RetiredLegIdList = []uint64{57}
+	mustPut(t, cli, SpConfKey(cid, fixtureSpName), conf)
+	mustPut(t, cli, RepairKey(cid, fixtureSpId, "rep0"), &pb.Repair{
+		RepId: 95, GrpId: 42, BadLegIdList: []uint64{52}, SliceId: 31,
+		NewLegList: []*pb.Leg{{
+			LegId:    96,
+			SideList: []*pb.Side{{SideId: 97, AddrPort: dnRep}},
+		}},
+	})
+	mustPut(t, cli, RetiredLegKey(cid, fixtureSpId, 57), &pb.RetiredLeg{
+		GrpId: 42, SliceId: 31,
+		Side: &pb.Side{SideId: 157, AddrPort: dnRetired},
+	})
+	state, err := LoadSp(ctx, cli, cid, fixtureSpName)
+	if err != nil {
+		t.Fatalf("LoadSp: %v", err)
+	}
+	if len(state.Missing) != 0 {
+		t.Fatalf("LoadSp: Missing = %v, want none", state.Missing)
+	}
+	for _, addrPort := range []string{
+		fixtureDnAddrA, fixtureDnAddrB, dnRep, dnRetired,
+	} {
+		if state.DnByAddr[addrPort] == nil {
+			t.Fatalf("LoadSp did not read the DnConf of %s", addrPort)
+		}
+	}
+
+	for _, addrPort := range []string{fixtureDnAddrA, dnRep} {
+		newer := proto.Clone(state.DnByAddr[addrPort]).(*pb.DnConf)
+		newer.FreeExtCnt++
+		mustPut(t, cli, DnConfKey(cid, addrPort), newer)
+	}
+	newerCn := proto.Clone(state.CnByAddr[fixtureCnAddrA]).(*pb.CnConf)
+	newerCn.FreeExtCnt++
+	mustPut(t, cli, CnConfKey(cid, fixtureCnAddrA), newerCn)
+	for _, key := range []string{
+		DnConfKey(cid, fixtureDnAddrB), DnConfKey(cid, dnRetired),
+		CnConfKey(cid, fixtureCnAddrB),
+	} {
+		if err := cli.Delete(ctx, key); err != nil {
+			t.Fatalf("Delete %s: %v", key, err)
+		}
+	}
+	again := newSpState()
+	again.Conf = state.Conf
+	again.Cntlrs = state.Cntlrs
+	again.Slices = state.Slices
+	again.Clones = state.Clones
+	again.Repairs = state.Repairs
+	again.RetiredLegs = state.RetiredLegs
+	again.Rev = state.Rev
+	if err := loadNodesAt(ctx, cli, cid, again); err != nil {
+		t.Fatalf("loadNodesAt at the snapshot's revision: %v", err)
+	}
+	if len(again.DnByAddr) != len(state.DnByAddr) {
+		t.Errorf("DnByAddr holds %d records, want the snapshot's %d",
+			len(again.DnByAddr), len(state.DnByAddr))
+	}
+	for addrPort, want := range state.DnByAddr {
+		if !proto.Equal(again.DnByAddr[addrPort], want) {
+			t.Errorf("DnByAddr[%s] = %v, want the snapshot's %v", addrPort,
+				again.DnByAddr[addrPort], want)
+		}
+	}
+	if len(again.CnByAddr) != len(state.CnByAddr) {
+		t.Errorf("CnByAddr holds %d records, want the snapshot's %d",
+			len(again.CnByAddr), len(state.CnByAddr))
+	}
+	for addrPort, want := range state.CnByAddr {
+		if !proto.Equal(again.CnByAddr[addrPort], want) {
+			t.Errorf("CnByAddr[%s] = %v, want the snapshot's %v", addrPort,
+				again.CnByAddr[addrPort], want)
+		}
+	}
+	if len(again.Missing) != 0 {
+		t.Errorf("Missing = %v, want none at the snapshot's revision",
+			again.Missing)
+	}
+}
+
+// TestLoadSpAtAWideShape loads a pool whose slice holds MaxGrpCntPerSlice
+// data groups, each with a repair and MaxRetiredLegPerGrp retired legs: the
+// two ranges read every record in one read each, at the snapshot's revision,
+// and the records' sides name a handful of DNs, each read once.
+func TestLoadSpAtAWideShape(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	conf := &pb.SpConf{SpId: fixtureSpId, SliceIdList: []uint64{31}}
+	dns := []string{"wide-a:9000", "wide-b:9000", "wide-c:9000"}
+	slice := &pb.Slice{}
+	puts := map[string]proto.Message{}
+	nextId := uint64(1000)
+	take := func() uint64 { nextId++; return nextId }
+	for idx := 0; idx < common.MaxGrpCntPerSlice; idx++ {
+		grp := &pb.Group{GrpId: take(), ExtCnt: 1}
+		repName := fmt.Sprintf("rep-%03d", idx)
+		grp.RepName = repName
+		conf.RepairNameList = append(conf.RepairNameList, repName)
+		puts[RepairKey(cid, fixtureSpId, repName)] = &pb.Repair{
+			RepId: take(), GrpId: grp.GetGrpId(), SliceId: 31,
+			NewLegList: []*pb.Leg{{
+				LegId:    take(),
+				SideList: []*pb.Side{{SideId: take(), AddrPort: dns[0]}},
+			}},
+		}
+		for r := 0; r < common.MaxRetiredLegPerGrp; r++ {
+			legId := take()
+			grp.RetiredLegIdList = append(grp.RetiredLegIdList, legId)
+			conf.RetiredLegIdList = append(conf.RetiredLegIdList, legId)
+			puts[RetiredLegKey(cid, fixtureSpId, legId)] = &pb.RetiredLeg{
+				GrpId: grp.GetGrpId(), SliceId: 31,
+				Side: &pb.Side{SideId: take(), AddrPort: dns[1+r%2]},
+			}
+		}
+		slice.DataGrpList = append(slice.DataGrpList, grp)
+	}
+	puts[SpConfKey(cid, fixtureSpName)] = conf
+	puts[SliceKey(cid, fixtureSpId, 31)] = slice
+	for i, addrPort := range dns {
+		puts[DnConfKey(cid, addrPort)] = &pb.DnConf{DnId: uint64(i + 1)}
+	}
+	mustPutAll(t, cli, puts)
+
+	state, err := LoadSp(ctx, cli, cid, fixtureSpName)
+	if err != nil {
+		t.Fatalf("LoadSp: %v", err)
+	}
+	if len(state.Missing) != 0 {
+		t.Errorf("Missing = %v", state.Missing)
+	}
+	if got, want := len(state.Repairs), common.MaxGrpCntPerSlice; got != want {
+		t.Errorf("%d repairs, want %d", got, want)
+	}
+	if got, want := len(state.RetiredLegs),
+		common.MaxGrpCntPerSlice*common.MaxRetiredLegPerGrp; got != want {
+		t.Errorf("%d retired legs, want %d", got, want)
+	}
+	if len(state.DnByAddr) != len(dns) {
+		t.Errorf("DnByAddr = %v, want %v", state.DnByAddr, dns)
+	}
+}
+
+// mustPutAll writes every key of puts, a few hundred to a transaction.
+func mustPutAll(t *testing.T, cli *etcdutil.Client, puts map[string]proto.Message) {
+	t.Helper()
+	keys := make([]string, 0, len(puts))
+	for key := range puts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for start := 0; start < len(keys); start += 500 {
+		batch := keys[start:min(start+500, len(keys))]
+		if err := cli.RunSTM(context.Background(), func(s etcdutil.STM) error {
+			for _, key := range batch {
+				s.Put(key, puts[key])
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("put %d keys: %v", len(batch), err)
+		}
 	}
 }

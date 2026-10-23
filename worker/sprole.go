@@ -2,9 +2,10 @@
 //
 // The sp revision worker is not a per-object loop but a COORDINATOR: on every
 // desired change (an SpRev put: revision + sp_name) it loads the whole SP with
-// model.LoadSp, builds one SyncupSideRequest per side — spare legs' sides
-// included — and one SyncupCntlrRequest per cntlr (RW15/RW16), and diffs those
-// against its running children. Each child is an ordinary revision worker
+// model.LoadSp, builds one SyncupSideRequest per side — spare legs' sides,
+// the sides of repairs' new legs and the retired sides included — and one
+// SyncupCntlrRequest per cntlr (RW15/RW16), and diffs those against its
+// running children. Each child is an ordinary revision worker
 // (RW1-RW12) with the side resp. cntlr driver below, so "one goroutine, one
 // Check* stream, one round timer per object" (RW1) holds for sides and cntlrs
 // exactly as it does for DNs and CNs.
@@ -13,8 +14,9 @@
 // the two flips (RW18/RW19) and a migration's cutover beside the first, which
 // read the reports of a side and of the primary cntlr together, the Leg health
 // rows — which the PRIMARY cntlr reports but which are written on the record
-// that holds the leg, a SLICE or a clone's clone meta group, so only the
-// coordinator knows where they go (HL2) — and the reaction pass (AR1-AR10).
+// that holds the leg, a SLICE, a clone's clone meta group or a repair whose
+// new leg it is, so only the coordinator knows where they go (HL2) — and the
+// reaction pass (AR1-AR12).
 package worker
 
 import (
@@ -73,6 +75,9 @@ const (
 	// msgSpSidesIdle is RW15's side_conf completeness gate: no side of the SP
 	// can be driven while the SP's cntlr set is not fully resolved.
 	msgSpSidesIdle = "sp sides idle"
+	// msgSpGrpMissing is a repair or a retired leg whose group the load does
+	// not hold (logGrpMissing): its sides get no request.
+	msgSpGrpMissing = "sp group missing"
 )
 
 // The records the sp coordinator emits when a hold ends by its timer (RW14,
@@ -139,6 +144,17 @@ type spOps interface {
 		spId uint64,
 		sides []model.CloneSideRef,
 	) ([]model.CloneSideRef, uint64, error)
+	// flipRepairProvisioned is RW18's flip for the side of a repair's new
+	// leg (MD6's FlipRepairProvisioned): one side per call. It returns
+	// whether it wrote and the revision its STM committed.
+	flipRepairProvisioned(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		ref model.RepairSideRef,
+	) (bool, uint64, error)
 	// flipCreated is RW19/MD6; it returns the tds it actually wrote.
 	flipCreated(
 		ctx context.Context,
@@ -196,6 +212,19 @@ func (o *modelSpOps) flipCloneProvisioned(
 	return model.FlipCloneProvisioned(ctx, o.cli, cid, shard, spId, sides)
 }
 
+func (o *modelSpOps) flipRepairProvisioned(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref model.RepairSideRef,
+) (bool, uint64, error) {
+	return model.FlipRepairProvisioned(
+		ctx, o.cli, cid, shard, spId, spName, ref,
+	)
+}
+
 func (o *modelSpOps) flipCreated(
 	ctx context.Context,
 	cid uint64,
@@ -246,10 +275,22 @@ type sidePlan struct {
 	// pointer, which its health writes and RW18's clone flip take (MD6's
 	// clone-keyed twins).
 	clone *model.CloneSideRef
-	// cloneDeleting is set for a side of a clone being deleted, which its
-	// child drives and judges like any side until the clone drain's final
-	// transaction takes it from its DN (CLD5, CLD9), and never reports for
-	// RW18's flip: the clone flip skips a clone being deleted (MD6).
+	// repair is set only for the side of a repair's new leg: the repair
+	// whose record holds the side, by its name and its rep_id, and the
+	// side's pointer, which its health writes and RW18's repair flip take
+	// (MD6's repair ops; architecture.md, Repair).
+	repair *model.RepairSideRef
+	// retired is set only for a retired side, whose record is the retired
+	// leg the key's leg id names: its request says provisioned, so it is
+	// never reported for a flip, and no cntlr connects it, so RW14's
+	// sides-first hold never waits for it (awaitedSides).
+	retired bool
+	// cloneDeleting is set for a side of a clone being deleted — a leg's
+	// or a spare's, or the side of its group's repair's new leg or of a
+	// retired leg of its group — which its child drives and judges like any
+	// side until the clone drain's final transaction takes it from its DN
+	// (CLD5, CLD9), and never reports for RW18's flip: the clone flip and the
+	// repair flip skip a clone being deleted (MD6).
 	cloneDeleting bool
 	req           *pb.SyncupSideRequest
 	// errEpoch is the side record's err_epoch in the load the fan-out builds
@@ -263,6 +304,35 @@ type sidePlan struct {
 	migrName string
 	migrId   uint64
 	chunks   []model.BmChunk
+}
+
+// sideOwner names the record a side's health writes go to (HL2): its slice,
+// its clone, the repair whose new leg holds it, or, for a retired side, the
+// retired leg the side's key names. A side keeps its leg id and side id when
+// it moves to another record — at a finish, a cancel or the reuse of a
+// retired leg (architecture.md, Repair) — so the diff compares owners too,
+// and a side whose owner changed is restarted with a fresh monitor
+// (applyPlan).
+type sideOwner struct {
+	sliceId   uint64
+	cloneName string
+	cloneId   uint64
+	repName   string
+	repId     uint64
+	retired   bool
+}
+
+// owner is the plan's sideOwner.
+func (p *sidePlan) owner() sideOwner {
+	switch {
+	case p.clone != nil:
+		return sideOwner{cloneName: p.clone.CloneName, cloneId: p.clone.CloneId}
+	case p.repair != nil:
+		return sideOwner{repName: p.repair.RepName, repId: p.repair.RepId}
+	case p.retired:
+		return sideOwner{retired: true}
+	}
+	return sideOwner{sliceId: p.ref.SliceId}
 }
 
 // clonePlan is one clone's bitmap source for the primary cntlr (BM1): chunks
@@ -297,11 +367,13 @@ type spPlan struct {
 	sides  map[sideKey]*sidePlan
 	cntlrs map[uint64]*cntlrPlan
 	// legSlice maps every leg of the SP's slices — spares included — to the
-	// slice its record lives in, and legClone every leg of a clone meta group
-	// — spares included — to the clone whose record holds it: together they
-	// are what lets the coordinator write the PRIMARY's leg rows (HL2).
-	legSlice map[uint64]uint64
-	legClone map[uint64]cloneOwner
+	// slice its record lives in, legClone every leg of a clone meta group
+	// — spares included — to the clone whose record holds it, and legRepair
+	// every new leg of a repair to that repair: together they are what lets
+	// the coordinator write the PRIMARY's leg rows (HL2).
+	legSlice  map[uint64]uint64
+	legClone  map[uint64]cloneOwner
+	legRepair map[uint64]repairOwner
 	// tdRefs are the tds whose created flag is still false, keyed by td_id:
 	// the only candidates RW19 may flip.
 	tdRefs map[uint64]model.TdRef
@@ -322,6 +394,45 @@ type spPlan struct {
 type cloneOwner struct {
 	name string
 	id   uint64
+}
+
+// repairOwner names the repair whose record holds a new leg: the name that
+// keys the record and the rep_id that proves it is still the one loaded,
+// which MD6's repair epoch writes take.
+type repairOwner struct {
+	name string
+	id   uint64
+}
+
+// legOwner names the record a leg's health writes go to (HL2): its slice,
+// its clone, or the repair whose new leg it is. A new leg keeps its leg id
+// when its finish moves it into its group's record, so the coordinator
+// compares owners and builds a fresh monitor for a leg whose owner changed
+// (applyPlan).
+type legOwner struct {
+	sliceId uint64
+	clone   cloneOwner
+	repair  repairOwner
+}
+
+// legOwnerOf is the owner of legId in one plan's indexes, and whether the
+// plan holds the leg at all.
+func legOwnerOf(
+	legSlice map[uint64]uint64,
+	legClone map[uint64]cloneOwner,
+	legRepair map[uint64]repairOwner,
+	legId uint64,
+) (legOwner, bool) {
+	if sliceId, ok := legSlice[legId]; ok {
+		return legOwner{sliceId: sliceId}, true
+	}
+	if owner, ok := legClone[legId]; ok {
+		return legOwner{clone: owner}, true
+	}
+	if owner, ok := legRepair[legId]; ok {
+		return legOwner{repair: owner}, true
+	}
+	return legOwner{}, false
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +481,9 @@ type spReport struct {
 	// cloneProvisioned is provisioned for a side of a clone meta group, which
 	// RW18's clone flip writes.
 	cloneProvisioned *model.CloneSideRef
+	// repairProvisioned is provisioned for the side of a repair's new leg,
+	// which RW18's repair flip writes.
+	repairProvisioned *model.RepairSideRef
 	// createdTdIds are the td_ids one cntlr reply completed (RW19
 	// conditions 1-4); the coordinator keeps those its loaded state still
 	// shows created == false.
@@ -479,13 +593,17 @@ type spWorker struct {
 	after <-chan struct{}
 
 	// Everything below is owned by the run goroutine.
-	desired  desiredState
-	sides    map[sideKey]*sideChild
-	cntlrs   map[uint64]*cntlrChild
-	legs     map[uint64]*healthMonitor
-	legSlice map[uint64]uint64
-	legClone map[uint64]cloneOwner
-	tdRefs   map[uint64]model.TdRef
+	desired desiredState
+	sides   map[sideKey]*sideChild
+	cntlrs  map[uint64]*cntlrChild
+	legs    map[uint64]*healthMonitor
+	// legOwners is the record each monitor of legs writes to, as the plan
+	// that built it indexed the leg (legOwnerOf).
+	legOwners map[uint64]legOwner
+	legSlice  map[uint64]uint64
+	legClone  map[uint64]cloneOwner
+	legRepair map[uint64]repairOwner
+	tdRefs    map[uint64]model.TdRef
 	// cutovers are the latest fan-out's spPlan.cutovers, less those a
 	// cutover started since.
 	cutovers  []model.CutoverRef
@@ -503,7 +621,7 @@ type spWorker struct {
 	// reaction pass each refused on, so a steady bad conf costs one Error
 	// record rather than one per tick.
 	confRefusal spConfRefusal
-	// react is the reaction half of the coordinator (AR1-AR10): the model
+	// react is the reaction half of the coordinator (AR1-AR12): the model
 	// surface of the automatic reactions, the little memo their log records
 	// need, and the records AR5 and AR7 decide by, of the last failover and the
 	// last replacement of a primary it applied (reaction.go).
@@ -543,8 +661,10 @@ func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
 		sides:     make(map[sideKey]*sideChild),
 		cntlrs:    make(map[uint64]*cntlrChild),
 		legs:      make(map[uint64]*healthMonitor),
+		legOwners: make(map[uint64]legOwner),
 		legSlice:  make(map[uint64]uint64),
 		legClone:  make(map[uint64]cloneOwner),
+		legRepair: make(map[uint64]repairOwner),
 		tdRefs:    make(map[uint64]model.TdRef),
 		react:     newReactor(&modelReactionOps{cli: p.deps.cli}),
 		verdicts:  newVerdictMemo(),
@@ -808,11 +928,12 @@ func (w *spWorker) buildPlan(
 ) *spPlan {
 	conf := state.Conf
 	plan := &spPlan{
-		sides:    make(map[sideKey]*sidePlan),
-		cntlrs:   make(map[uint64]*cntlrPlan),
-		legSlice: make(map[uint64]uint64),
-		legClone: make(map[uint64]cloneOwner),
-		tdRefs:   make(map[uint64]model.TdRef),
+		sides:     make(map[sideKey]*sidePlan),
+		cntlrs:    make(map[uint64]*cntlrPlan),
+		legSlice:  make(map[uint64]uint64),
+		legClone:  make(map[uint64]cloneOwner),
+		legRepair: make(map[uint64]repairOwner),
+		tdRefs:    make(map[uint64]model.TdRef),
 	}
 	for i, td := range state.Tds {
 		if td.GetCreated() {
@@ -922,6 +1043,12 @@ func (w *spWorker) buildPlan(
 	}
 	w.buildSidePlans(ctx, plan, state, primaryCnId, standby, sideReason == "")
 	w.buildCloneSidePlans(
+		ctx, plan, state, primaryCnId, standby, sideReason == "",
+	)
+	w.buildRepairSidePlans(
+		ctx, plan, state, primaryCnId, standby, sideReason == "",
+	)
+	w.buildRetiredSidePlans(
 		ctx, plan, state, primaryCnId, standby, sideReason == "",
 	)
 	w.buildCntlrPlans(ctx, plan, state, cnIds)
@@ -1057,14 +1184,50 @@ func cloneMetaGrps(state *model.SpState) []*pb.Group {
 
 // judgedGrps is every group of one load whose legs and sides the
 // coordinator's monitors judge (HL2): every group of the loaded slices and
-// every clone's clone meta group. HL3's re-seed and AR10's memo keep the legs
-// and sides it holds.
+// every clone's clone meta group.
 func judgedGrps(state *model.SpState) []*pb.Group {
 	var grps []*pb.Group
 	for _, slice := range state.Slices {
 		grps = append(grps, allGroups(slice)...)
 	}
 	return append(grps, cloneMetaGrps(state)...)
+}
+
+// judgedObjs is every leg and side of one load that the coordinator's
+// monitors judge (HL2): the legs and spares of judgedGrps with their sides,
+// the new legs of the repairs with theirs, and the retired sides. HL3's
+// re-seed and AR10's memo keep the objects it holds, so the coordinator's own
+// verdicts on new legs, their sides and retired sides survive each pass as
+// those on legs and sides do (architecture.md, Repair).
+func judgedObjs(
+	state *model.SpState,
+) (map[uint64]*pb.Leg, map[sideKey]*pb.Side) {
+	legs := make(map[uint64]*pb.Leg)
+	sides := make(map[sideKey]*pb.Side)
+	addLegs := func(list []*pb.Leg) {
+		for _, leg := range list {
+			legs[leg.GetLegId()] = leg
+			for _, side := range leg.GetSideList() {
+				sides[sideKey{
+					legId:  leg.GetLegId(),
+					sideId: side.GetSideId(),
+				}] = side
+			}
+		}
+	}
+	for _, grp := range judgedGrps(state) {
+		addLegs(grp.GetLegList())
+		addLegs(grp.GetSpareLegList())
+	}
+	for _, rep := range state.Repairs {
+		addLegs(rep.GetNewLegList())
+	}
+	for legId, retired := range state.RetiredLegs {
+		if side := retired.GetSide(); side != nil {
+			sides[sideKey{legId: legId, sideId: side.GetSideId()}] = side
+		}
+	}
+	return legs, sides
 }
 
 // buildSidePlans walks every side of the SP's slices — both group lists of
@@ -1308,6 +1471,292 @@ func (w *spWorker) buildCloneSidePlan(
 	}
 }
 
+// parentGrp is the group of a repair or of a retired leg as one load holds
+// it, found through the parent the record names (architecture.md,
+// Repairs): the group, its sides' length to zero (RW15), and whether its
+// parent is a clone being deleted.
+type parentGrp struct {
+	grp       *pb.Group
+	zeroBytes uint64
+	zeroErr   error
+	deleting  bool
+}
+
+// findParentGrp looks the group grpId up in the parent a repair or a retired
+// leg records, its slice by sliceId or its clone by cloneName, exactly one of
+// the two set, and computes the length every side of the group is sent:
+// model.SideZeroBytes by the slice's list the group is in, or
+// model.CloneMetaSideZeroBytes for a clone meta group. It reports false when
+// the record names no single parent, or the load holds no such parent or the
+// parent no such group.
+func findParentGrp(
+	state *model.SpState,
+	sliceId uint64,
+	cloneName string,
+	grpId uint64,
+) (parentGrp, bool) {
+	blockSize := dataBlockSize(state.Conf.GetBdevConf())
+	switch {
+	case sliceId != 0 && cloneName == "":
+		slice, ok := state.Slices[sliceId]
+		if !ok {
+			return parentGrp{}, false
+		}
+		for _, list := range grpListsOf(slice) {
+			for _, grp := range list.grps {
+				if grp.GetGrpId() != grpId {
+					continue
+				}
+				zeroBytes, err := model.SideZeroBytes(
+					grp, list.isMeta, blockSize)
+				return parentGrp{
+					grp: grp, zeroBytes: zeroBytes, zeroErr: err,
+				}, true
+			}
+		}
+	case sliceId == 0 && cloneName != "":
+		clone, ok := state.Clones[cloneName]
+		if !ok || clone.GetMetaGrp() == nil ||
+			clone.GetMetaGrp().GetGrpId() != grpId {
+			return parentGrp{}, false
+		}
+		zeroBytes, err := model.CloneMetaSideZeroBytes(
+			clone.GetMetaGrp(), blockSize)
+		return parentGrp{
+			grp:       clone.GetMetaGrp(),
+			zeroBytes: zeroBytes,
+			zeroErr:   err,
+			deleting:  clone.GetDeleting(),
+		}, true
+	}
+	return parentGrp{}, false
+}
+
+// logGrpMissing reports a repair or a retired leg whose group the load does
+// not hold: it builds no side request, since its side's request takes the
+// group's ext_cnt and length to zero (RW15), and the repair is left out of
+// the cntlr requests.
+func (w *spWorker) logGrpMissing(ctx context.Context, ids ...slog.Attr) {
+	attrs := []any{
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+	}
+	for _, attr := range ids {
+		attrs = append(attrs, attr)
+	}
+	slog.InfoContext(ctx, msgSpGrpMissing, attrs...)
+}
+
+// sideRequest is RW15's request for one side whose group has extCnt extents
+// and sends zeroBytes, the side's provisioned flag being provisioned: the
+// request buildSidePlan and buildCloneSidePlan build, with no migration conf.
+// It is built from scalars and a copied list alone, so it shares no
+// sub-message of the loaded state with any other child's.
+func (w *spWorker) sideRequest(
+	state *model.SpState,
+	dnId uint64,
+	key sideKey,
+	side *pb.Side,
+	extCnt uint64,
+	zeroBytes uint64,
+	provisioned bool,
+	primaryCnId uint64,
+	standby []uint64,
+) *pb.SyncupSideRequest {
+	return &pb.SyncupSideRequest{
+		ClusterId: w.cid,
+		DnId:      dnId,
+		SidePointer: &pb.SidePointer{
+			SpId:   state.Conf.GetSpId(),
+			LegId:  key.legId,
+			SideId: key.sideId,
+		},
+		Revision: w.desired.revision,
+		SideConf: &pb.SyncupSideRequest_SideConf{
+			ExtCnt:        extCnt,
+			CntlidSlot:    side.GetCntlidSlot(),
+			PrimaryCnId:   primaryCnId,
+			StandbyIdList: append([]uint64(nil), standby...),
+			SpLevel:       state.Conf.GetSpLevel(),
+			Provisioned:   provisioned,
+			ZeroBytes:     zeroBytes,
+		},
+	}
+}
+
+// buildRepairSidePlans builds RW15's request for the side of every repair's
+// new leg, in repair_name_list order, at any stage (architecture.md,
+// Repair): the side is driven as a side of its group, its ext_cnt and its
+// length to zero the group's, provisioned from the side, as a spare's side
+// is, so its zeroing and RW18's flip run as a spare's do. A new leg has one
+// side and no migration conf (CreateMigration refuses a repair's legs). The
+// sides of a deleting clone's repair keep their requests until the clone
+// drain's final transaction gives them back (CLD5, CLD9), and are never
+// reported for the flip. A repair whose group the load does not hold builds
+// none and is logged.
+//
+// withRequests is buildSidePlans's: false, the walk only indexes the new
+// legs, so that the coordinator keeps placing the PRIMARY's leg rows on
+// their repair (HL2).
+func (w *spWorker) buildRepairSidePlans(
+	ctx context.Context,
+	plan *spPlan,
+	state *model.SpState,
+	primaryCnId uint64,
+	standby []uint64,
+	withRequests bool,
+) {
+	for _, repName := range state.Conf.GetRepairNameList() {
+		rep, ok := state.Repairs[repName]
+		if !ok {
+			continue
+		}
+		owner := repairOwner{name: repName, id: rep.GetRepId()}
+		for _, leg := range rep.GetNewLegList() {
+			plan.legRepair[leg.GetLegId()] = owner
+		}
+		if !withRequests {
+			continue
+		}
+		parent, ok := findParentGrp(
+			state, rep.GetSliceId(), rep.GetCloneName(), rep.GetGrpId())
+		if !ok {
+			w.logGrpMissing(ctx,
+				slog.String("rep_name", repName),
+				slog.Uint64("rep_id", rep.GetRepId()),
+				slog.Uint64("grp_id", rep.GetGrpId()),
+			)
+			continue
+		}
+		if parent.zeroErr != nil {
+			// fanOut's gate (checkSideZeroBytes) refuses the plan of an SP
+			// with such a group, as for the group's own sides.
+			continue
+		}
+		for _, leg := range rep.GetNewLegList() {
+			for _, side := range leg.GetSideList() {
+				key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
+				dn, ok := state.DnByAddr[side.GetAddrPort()]
+				if !ok {
+					plan.unresolved++
+					w.logUnresolved(ctx, side.GetAddrPort(),
+						slog.String("rep_name", repName),
+						slog.Uint64("leg_id", key.legId),
+						slog.Uint64("side_id", key.sideId),
+					)
+					continue
+				}
+				plan.sides[key] = &sidePlan{
+					addr: side.GetAddrPort(),
+					dnId: dn.GetDnId(),
+					repair: &model.RepairSideRef{
+						RepName: repName,
+						RepId:   rep.GetRepId(),
+						LegId:   key.legId,
+						SideId:  key.sideId,
+					},
+					cloneDeleting: parent.deleting,
+					req: w.sideRequest(
+						state, dn.GetDnId(), key, side,
+						parent.grp.GetExtCnt(), parent.zeroBytes,
+						side.GetProvisioned(), primaryCnId, standby,
+					),
+					errEpoch: side.GetErrEpoch(),
+				}
+			}
+		}
+	}
+}
+
+// buildRetiredSidePlans builds RW15's request for every retired side, in
+// retired_leg_id_list order (architecture.md, Repair): provisioned, with its
+// group's ext_cnt and its group's exact length to zero, so its DN zeroes
+// nothing, and with exports for the pool's current cntlrs, none of which
+// connects it. Reason: a disk node's sweep removes what its wanted set lacks
+// (architecture.md, Teardown by sweep), so a side nobody names is a
+// leftover, and exports kept current make a reuse instant. A deleting
+// clone's retired sides keep their requests until the clone drain's final
+// transaction gives them back (CLD5, CLD9). A retired leg whose group the
+// load does not hold builds none and is logged.
+func (w *spWorker) buildRetiredSidePlans(
+	ctx context.Context,
+	plan *spPlan,
+	state *model.SpState,
+	primaryCnId uint64,
+	standby []uint64,
+	withRequests bool,
+) {
+	if !withRequests {
+		return
+	}
+	for _, legId := range state.Conf.GetRetiredLegIdList() {
+		retired, ok := state.RetiredLegs[legId]
+		if !ok || retired.GetSide() == nil {
+			continue
+		}
+		side := retired.GetSide()
+		parent, ok := findParentGrp(state, retired.GetSliceId(),
+			retired.GetCloneName(), retired.GetGrpId())
+		if !ok {
+			w.logGrpMissing(ctx,
+				slog.Uint64("retired_leg_id", legId),
+				slog.Uint64("grp_id", retired.GetGrpId()),
+			)
+			continue
+		}
+		if parent.zeroErr != nil {
+			continue
+		}
+		key := sideKey{legId: legId, sideId: side.GetSideId()}
+		dn, ok := state.DnByAddr[side.GetAddrPort()]
+		if !ok {
+			plan.unresolved++
+			w.logUnresolved(ctx, side.GetAddrPort(),
+				slog.Uint64("retired_leg_id", legId),
+				slog.Uint64("side_id", key.sideId),
+			)
+			continue
+		}
+		plan.sides[key] = &sidePlan{
+			addr:          side.GetAddrPort(),
+			dnId:          dn.GetDnId(),
+			retired:       true,
+			cloneDeleting: parent.deleting,
+			req: w.sideRequest(
+				state, dn.GetDnId(), key, side, parent.grp.GetExtCnt(),
+				parent.zeroBytes, true, primaryCnId, standby,
+			),
+			errEpoch: side.GetErrEpoch(),
+		}
+	}
+}
+
+// cntlrRepairs is the name_to_repair every cntlr request carries (RW16): the
+// pool's repairs by name, at every stage, less the repair of a deleting
+// clone's group, which the clone drain gives back with the group, as the
+// clone is absent from clone_list (CLD5), and less a repair whose group the
+// load does not hold, which no group of the request names. nil when none is
+// left.
+func cntlrRepairs(state *model.SpState) map[string]*pb.Repair {
+	var out map[string]*pb.Repair
+	for _, repName := range state.Conf.GetRepairNameList() {
+		rep, ok := state.Repairs[repName]
+		if !ok {
+			continue
+		}
+		parent, ok := findParentGrp(
+			state, rep.GetSliceId(), rep.GetCloneName(), rep.GetGrpId())
+		if !ok || parent.deleting {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]*pb.Repair)
+		}
+		out[repName] = rep
+	}
+	return out
+}
+
 // addMigrConf adds RW15's migr_src_conf / migr_dst_conf when a Migration of
 // the SP names this side. Only a leg with TWO sides can carry a migration: one
 // side is the source, the other the destination (architecture.md, Migration).
@@ -1456,6 +1905,10 @@ func (w *spWorker) buildCntlrPlans(
 			xfers = append(xfers, xfer)
 		}
 	}
+	// architecture.md, Repair: the worker carries every repair to every
+	// cntlr, the only component that talks to them, which finds a group's
+	// repair through Group.rep_name.
+	repairs := cntlrRepairs(state)
 	for _, cntlrId := range conf.GetCntlrIdList() {
 		cntlr, ok := state.Cntlrs[cntlrId]
 		if !ok {
@@ -1488,6 +1941,7 @@ func (w *spWorker) buildCntlrPlans(
 				NqnToSubsystem: state.Subsystems,
 				CloneList:      clones,
 				XferList:       xfers,
+				NameToRepair:   repairs,
 			},
 			sliceIds: sliceIds,
 		}
@@ -1552,11 +2006,13 @@ func (w *spWorker) holdCntlrs(plan *spPlan) {
 
 // awaitedSides is the set of sides RW14's barrier waits for, out of the side
 // plans of one fan-out: those whose record had no err_epoch in that fan-out's
-// load (HL2). A side already unhealthy is not waited for.
+// load (HL2). A side already unhealthy is not waited for, nor is a retired
+// side, which no cntlr connects (architecture.md, Repair); the side of a
+// repair's new leg is, as a spare's side is.
 func awaitedSides(sides map[sideKey]*sidePlan) map[sideKey]bool {
 	out := make(map[sideKey]bool, len(sides))
 	for key, p := range sides {
-		if p.errEpoch == 0 {
+		if p.errEpoch == 0 && !p.retired {
 			out[key] = true
 		}
 	}
@@ -1841,7 +2297,11 @@ func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
 // applyPlan is RW14's child diff: new => start; gone => stop (RW11), off the
 // coordinator's goroutine (childStops); a child whose ENDPOINT changed is
 // restarted at the new one, the new child waiting for the old one's stop
-// (RW1); every remaining child receives its new request as a desired change
+// (RW1), and so is a side child whose side moved to another record — a
+// finish, a cancel or the reuse of a retired leg keeps the side's ids
+// (architecture.md, Repair) — so its fresh monitor writes to the record the
+// new plan names (sideOwner); every remaining child receives its new
+// request as a desired change
 // (RW6, immediate syncup) — a side at once, a cntlr once the sides the barrier
 // waits for hold the revision (holdCntlrs). A fan-out that demotes a primary,
 // or that arrives while RW22's demotion hold is pending, hands the demoted
@@ -1855,7 +2315,7 @@ func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
 func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 	for key, child := range w.sides {
 		next, ok := plan.sides[key]
-		if ok && keepChild(
+		if ok && child.plan.owner() == next.owner() && keepChild(
 			child.plan.addr, next.addr, child.plan.req, next.req,
 		) {
 			continue
@@ -1894,13 +2354,17 @@ func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 
 	w.legSlice = plan.legSlice
 	w.legClone = plan.legClone
+	w.legRepair = plan.legRepair
 	w.tdRefs = plan.tdRefs
 	w.cutovers = plan.cutovers
+	// A leg monitor goes with its leg, and with its owner: a new leg that its
+	// finish moved into its group's record gets a fresh monitor on its next
+	// row, which writes to that record (observeLeg).
 	for legId := range w.legs {
-		_, inSlice := w.legSlice[legId]
-		_, inClone := w.legClone[legId]
-		if !inSlice && !inClone {
+		owner, ok := legOwnerOf(w.legSlice, w.legClone, w.legRepair, legId)
+		if !ok || owner != w.legOwners[legId] {
 			delete(w.legs, legId)
+			delete(w.legOwners, legId)
 		}
 	}
 	w.idleCnt = plan.unresolved
@@ -2066,7 +2530,8 @@ func (w *spWorker) logUnresolved(
 // the primary of the plan the coordinator last decided (recordsLegRows). Its
 // path rows count for a cutover under the same rule, the cntlr also not
 // disabled (countsPaths), the newest report of the drain for each cntlr, and
-// the cutovers run after the two provisioned flips, the slices' first.
+// the cutovers run after the provisioned flips: the slices' first, then the
+// clones', then the repairs', one STM per side.
 func (w *spWorker) handleReports(first spReport) {
 	ctx := newTraceCtx(w.ctx, w.seed)
 	reports := []spReport{first}
@@ -2081,6 +2546,7 @@ func (w *spWorker) handleReports(first spReport) {
 	}
 	var sides []model.SideRef
 	var cloneSides []model.CloneSideRef
+	var repairSides []model.RepairSideRef
 	seenSide := make(map[sideKey]bool)
 	var tds []model.TdRef
 	// tdIdx is each candidate's index in tds.
@@ -2110,6 +2576,13 @@ func (w *spWorker) handleReports(first spReport) {
 			if !seenSide[key] {
 				seenSide[key] = true
 				cloneSides = append(cloneSides, *ref)
+			}
+		}
+		if ref := rep.repairProvisioned; ref != nil {
+			key := sideKey{legId: ref.LegId, sideId: ref.SideId}
+			if !seenSide[key] {
+				seenSide[key] = true
+				repairSides = append(repairSides, *ref)
 			}
 		}
 		var torn map[uint64]bool
@@ -2153,34 +2626,41 @@ func (w *spWorker) handleReports(first spReport) {
 	w.releaseHeld(ctx)
 	w.applyProvisionedFlip(ctx, sides)
 	w.applyCloneFlip(ctx, cloneSides)
+	w.applyRepairFlips(ctx, repairSides)
 	w.applyCutovers(ctx, paths)
 	w.applyCreatedFlip(ctx, tds)
 }
 
 // observeLeg writes one leg's health (HL2). The row came from the PRIMARY
-// cntlr's reply but the record lives on the leg's SLICE, or on the clone
-// whose clone meta group holds the leg, which is why this is the
-// coordinator's job; a leg the current state does not list is ignored.
+// cntlr's reply but the record lives on the leg's SLICE, on the clone whose
+// clone meta group holds the leg, or on the repair whose new leg it is
+// (architecture.md, Repair), which is why this is the coordinator's job; a
+// leg the current state does not list is ignored.
 func (w *spWorker) observeLeg(ctx context.Context, row legRow) {
-	sliceId, inSlice := w.legSlice[row.legId]
-	owner, inClone := w.legClone[row.legId]
-	if !inSlice && !inClone {
+	owner, ok := legOwnerOf(w.legSlice, w.legClone, w.legRepair, row.legId)
+	if !ok {
 		return
 	}
 	monitor, ok := w.legs[row.legId]
 	if !ok {
-		if inSlice {
-			monitor = newLegMonitor(w.deps, w.cid, w.spId, sliceId, row.legId)
-		} else {
-			monitor = newCloneLegMonitor(
-				w.deps, w.cid, w.spId, owner.name, owner.id, row.legId,
-			)
+		switch {
+		case owner.sliceId != 0:
+			monitor = newLegMonitor(
+				w.deps, w.cid, w.spId, owner.sliceId, row.legId)
+		case owner.clone.name != "":
+			monitor = newCloneLegMonitor(w.deps, w.cid, w.spId,
+				owner.clone.name, owner.clone.id, row.legId)
+		default:
+			monitor = newRepairLegMonitor(w.deps, w.cid, w.spId,
+				w.desired.handle, owner.repair.name, owner.repair.id,
+				row.legId)
 		}
 		memo, legId := w.verdicts, row.legId
 		monitor.verdict = func(unhealthy bool) {
 			memo.noteLeg(legId, unhealthy)
 		}
 		w.legs[row.legId] = monitor
+		w.legOwners[row.legId] = owner
 	}
 	monitor.observe(ctx, row.obs, row.resName)
 }
@@ -2210,9 +2690,10 @@ func (w *spWorker) healthSeqs() map[*healthMonitor]uint64 {
 // the write count healthSeqs read before the load, which the child folds in on
 // its own goroutine before it judges its next reply or missed round (RW1),
 // and the leg monitors, which are the coordinator's own, are re-seeded at
-// once. The legs and sides are those of the SP's slices and of its clones'
-// clone meta groups. A record the load did not find leaves its memo as it is,
-// and so does a child the count was not read for.
+// once. The legs and sides are those judgedObjs lists: of the SP's slices and
+// of its clones' clone meta groups, the repairs' new legs and their sides,
+// and the retired sides. A record the load did not find leaves its memo as
+// it is, and so does a child the count was not read for.
 func (w *spWorker) reseedHealth(
 	state *model.SpState,
 	seqs map[*healthMonitor]uint64,
@@ -2228,25 +2709,7 @@ func (w *spWorker) reseedHealth(
 		}
 		child.driver.health.offerRecord(cntlr.GetErrEpoch(), seq)
 	}
-	legs := make(map[uint64]*pb.Leg)
-	sides := make(map[sideKey]*pb.Side)
-	for _, grp := range judgedGrps(state) {
-		for _, list := range [][]*pb.Leg{
-			grp.GetLegList(),
-			grp.GetSpareLegList(),
-		} {
-			for _, leg := range list {
-				legs[leg.GetLegId()] = leg
-				for _, side := range leg.GetSideList() {
-					key := sideKey{
-						legId:  leg.GetLegId(),
-						sideId: side.GetSideId(),
-					}
-					sides[key] = side
-				}
-			}
-		}
-	}
+	legs, sides := judgedObjs(state)
 	for key, child := range w.sides {
 		side, ok := sides[key]
 		if !ok || child.driver == nil {
@@ -2345,6 +2808,50 @@ func (w *spWorker) applyCloneFlip(
 			slog.Uint64("sp_id", w.spId),
 			slog.String("clone_name", ref.CloneName),
 			slog.Uint64("clone_id", ref.CloneId),
+			slog.Uint64("leg_id", ref.LegId),
+			slog.Uint64("side_id", ref.SideId),
+			slog.Uint64("revision", revision),
+		)
+	}
+}
+
+// applyRepairFlips is RW18's repair flip: model.FlipRepairProvisioned once
+// per side of a repair's new leg the drain reported, each in an STM of its
+// own after the clone flip's and before the cutovers and the created flip,
+// with one "flip applied" record per side it wrote, naming the side's repair
+// by its name and rep_id, and the revision its own STM committed. A repair
+// finished, cancelled or created again under the name, or a side already
+// flipped, is skipped by the op (MD6) and gets no record.
+func (w *spWorker) applyRepairFlips(
+	ctx context.Context,
+	sides []model.RepairSideRef,
+) {
+	for _, ref := range sides {
+		flipped, revision, err := w.ops.flipRepairProvisioned(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle, ref,
+		)
+		if err != nil {
+			slog.InfoContext(ctx, msgSpFlipFailed,
+				slog.String("kind", flipKindProvisioned),
+				slog.Uint64("cluster_id", w.cid),
+				slog.Uint64("sp_id", w.spId),
+				slog.String("rep_name", ref.RepName),
+				slog.Uint64("rep_id", ref.RepId),
+				slog.Uint64("leg_id", ref.LegId),
+				slog.Uint64("side_id", ref.SideId),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		if !flipped {
+			continue
+		}
+		slog.InfoContext(ctx, msgFlipApplied,
+			slog.String("kind", flipKindProvisioned),
+			slog.Uint64("cluster_id", w.cid),
+			slog.Uint64("sp_id", w.spId),
+			slog.String("rep_name", ref.RepName),
+			slog.Uint64("rep_id", ref.RepId),
 			slog.Uint64("leg_id", ref.LegId),
 			slog.Uint64("side_id", ref.SideId),
 			slog.Uint64("revision", revision),
@@ -2577,11 +3084,20 @@ func newSideDriver(
 		addr:   p.addr,
 		plan:   p,
 	}
-	if c := p.clone; c != nil {
+	switch {
+	case p.clone != nil:
+		c := p.clone
 		d.health = newCloneSideMonitor(
 			w.deps, w.cid, w.spId, c.CloneName, c.CloneId, c.SideId,
 		)
-	} else {
+	case p.repair != nil:
+		r := p.repair
+		d.health = newRepairSideMonitor(w.deps, w.cid, w.spId,
+			w.desired.handle, r.RepName, r.RepId, r.SideId)
+	case p.retired:
+		d.health = newRetiredSideMonitor(w.deps, w.cid, w.spId,
+			w.desired.handle, d.ptr.GetLegId(), d.ptr.GetSideId())
+	default:
 		d.health = newSideMonitor(
 			w.deps, w.cid, w.spId, p.ref.SliceId, p.ref.SideId,
 		)
@@ -2806,9 +3322,11 @@ func sideAwaitsCutover(info *pb.SideInfo) bool {
 // reportProvisioned is RW18: a side whose request carried provisioned == false
 // and whose agent reports its zeroing done — zeroed_bytes equal to a non-zero
 // zero_bytes — is handed to the coordinator, which runs the flip, the clone
-// flip for a side of a clone meta group. A zero_bytes of zero names no length
-// at all, so it is never a side that is done. A side of a clone being deleted
-// is never handed over: the clone flip would skip it (MD6).
+// flip for a side of a clone meta group and the repair flip for the side of a
+// repair's new leg. A zero_bytes of zero names no length at all, so it is
+// never a side that is done. A side of a clone being deleted is never handed
+// over: the clone flip and the repair flip would skip it (MD6). A retired
+// side's request always says provisioned, so it is never handed over.
 //
 // The condition reads the request this child is driving rather than a
 // remembered "synced" one. The two can never disagree in a way that matters:
@@ -2830,13 +3348,18 @@ func (d *sideDriver) reportProvisioned(
 	if zeroBytes == 0 || info.GetZeroedBytes() != zeroBytes {
 		return
 	}
-	if plan.clone != nil {
+	switch {
+	case plan.clone != nil:
 		ref := *plan.clone
 		d.send(ctx, spReport{cloneProvisioned: &ref})
-		return
+	case plan.repair != nil:
+		ref := *plan.repair
+		d.send(ctx, spReport{repairProvisioned: &ref})
+	case plan.retired:
+	default:
+		ref := plan.ref
+		d.send(ctx, spReport{provisioned: &ref})
 	}
-	ref := plan.ref
-	d.send(ctx, spReport{provisioned: &ref})
 }
 
 // reportSynced hands the coordinator the revision this side's agent reports
@@ -2967,8 +3490,8 @@ type cntlrDriver struct {
 	// infoRev is the revision of the observation lastInfo reports: the
 	// revision of the reply that carried it, or of a later round's reply
 	// that left its info out as unchanged from the stream's (noteUnchanged).
-	// AR8 step 1's gate holds a switch while it is older than the pass's
-	// snapshot (grpRowHold).
+	// AR8 step 1's gate holds a switch, and the retire timer a delete,
+	// while it is older than the pass's snapshot (grpRowHold).
 	infoRev uint64
 	// streamInfo is the CntlrInfo the open CheckCntlr stream last carried:
 	// what a round's reply that leaves its info out as unchanged repeats,

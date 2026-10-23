@@ -1,14 +1,14 @@
 // client_test.go is the other half of the argv → request tests'
-// recordingClient: one method per RPC of `service Gateway`, all 60 of them,
+// recordingClient: one method per RPC of `service Gateway`, all 68 of them,
 // each a single call into rpcCall.
 //
 // They are uniform on purpose. A method that did anything of its own would be
 // a place for a test to accidentally assert against the stub instead of
 // against dnvctl, and the whole value of the recorder is that it records and
 // nothing else. The list is also a second, independent census of the service:
-// if pb ever grows a 61st RPC, this type stops satisfying pb.GatewayClient
+// if pb ever grows a 69th RPC, this type stops satisfying pb.GatewayClient
 // through its own methods and falls through to the embedded nil — which
-// the CT1 test's len(Methods) == 60 pin catches first, at the same commit.
+// the CT1 test's len(Methods) == 68 pin catches first, at the same commit.
 package ctl
 
 import (
@@ -597,6 +597,86 @@ func (c *recordingClient) SwitchSpareLeg(
 	return rpcCall(
 		c, "SwitchSpareLeg", in,
 		&pb.SwitchSpareLegReply{})
+}
+
+func (c *recordingClient) CreateRepair(
+	_ context.Context,
+	in *pb.CreateRepairRequest,
+	_ ...grpc.CallOption,
+) (*pb.CreateRepairReply, error) {
+	return rpcCall(
+		c, "CreateRepair", in,
+		&pb.CreateRepairReply{})
+}
+
+func (c *recordingClient) FinishRepair(
+	_ context.Context,
+	in *pb.FinishRepairRequest,
+	_ ...grpc.CallOption,
+) (*pb.FinishRepairReply, error) {
+	return rpcCall(
+		c, "FinishRepair", in,
+		&pb.FinishRepairReply{})
+}
+
+func (c *recordingClient) CancelRepair(
+	_ context.Context,
+	in *pb.CancelRepairRequest,
+	_ ...grpc.CallOption,
+) (*pb.CancelRepairReply, error) {
+	return rpcCall(
+		c, "CancelRepair", in,
+		&pb.CancelRepairReply{})
+}
+
+func (c *recordingClient) TryToAbortRepair(
+	_ context.Context,
+	in *pb.TryToAbortRepairRequest,
+	_ ...grpc.CallOption,
+) (*pb.TryToAbortRepairReply, error) {
+	return rpcCall(
+		c, "TryToAbortRepair", in,
+		&pb.TryToAbortRepairReply{})
+}
+
+func (c *recordingClient) GetRepair(
+	_ context.Context,
+	in *pb.GetRepairRequest,
+	_ ...grpc.CallOption,
+) (*pb.GetRepairReply, error) {
+	return rpcCall(
+		c, "GetRepair", in,
+		&pb.GetRepairReply{})
+}
+
+func (c *recordingClient) ListRepairs(
+	_ context.Context,
+	in *pb.ListRepairsRequest,
+	_ ...grpc.CallOption,
+) (*pb.ListRepairsReply, error) {
+	return rpcCall(
+		c, "ListRepairs", in,
+		&pb.ListRepairsReply{})
+}
+
+func (c *recordingClient) ListRetiredLegs(
+	_ context.Context,
+	in *pb.ListRetiredLegsRequest,
+	_ ...grpc.CallOption,
+) (*pb.ListRetiredLegsReply, error) {
+	return rpcCall(
+		c, "ListRetiredLegs", in,
+		&pb.ListRetiredLegsReply{})
+}
+
+func (c *recordingClient) DeleteRetiredLeg(
+	_ context.Context,
+	in *pb.DeleteRetiredLegRequest,
+	_ ...grpc.CallOption,
+) (*pb.DeleteRetiredLegReply, error) {
+	return rpcCall(
+		c, "DeleteRetiredLeg", in,
+		&pb.DeleteRetiredLegReply{})
 }
 
 func (c *recordingClient) GetThinDeviceBitmap(

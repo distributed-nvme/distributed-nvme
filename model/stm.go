@@ -68,6 +68,12 @@ type SpState struct {
 	Clones map[string]*pb.Clone
 	Xfers  map[string]*pb.Transfer
 	Migrs  map[string]*pb.Migration
+	// Repairs is keyed by rep_name, from Conf.repair_name_list, and
+	// RetiredLegs by leg_id, from Conf.retired_leg_id_list. Each is read by
+	// one range of its prefix at Rev rather than a read per key, and only
+	// the keys a list names are kept.
+	Repairs     map[string]*pb.Repair
+	RetiredLegs map[uint64]*pb.RetiredLeg
 	// CloneBmIdx and MigrBmIdx are keyed by clone / migration name. A
 	// clone's entries carry the (SliceIdx, Idx) pair of every chunk key
 	// found, in ascending pair order; a migration's carry the append
@@ -75,8 +81,9 @@ type SpState struct {
 	CloneBmIdx map[string][]BmChunk
 	MigrBmIdx  map[string][]BmChunk
 	// DnByAddr holds one record per distinct Side.addr_port of the SP,
-	// spare legs and the sides of every clone meta group included; CnByAddr
-	// one per distinct Cntlr.addr_port.
+	// spare legs, the sides of every clone meta group, the new legs of the
+	// repairs and the retired sides included; CnByAddr one per distinct
+	// Cntlr.addr_port.
 	DnByAddr map[string]*pb.DnConf
 	CnByAddr map[string]*pb.CnConf
 	// Missing lists the keys the SpConf pointed at that did not exist.
@@ -87,16 +94,18 @@ type SpState struct {
 // never has to nil-check one.
 func newSpState() *SpState {
 	return &SpState{
-		Cntlrs:     make(map[uint64]*pb.Cntlr),
-		Slices:     make(map[uint64]*pb.Slice),
-		Subsystems: make(map[string]*pb.Subsystem),
-		Clones:     make(map[string]*pb.Clone),
-		Xfers:      make(map[string]*pb.Transfer),
-		Migrs:      make(map[string]*pb.Migration),
-		CloneBmIdx: make(map[string][]BmChunk),
-		MigrBmIdx:  make(map[string][]BmChunk),
-		DnByAddr:   make(map[string]*pb.DnConf),
-		CnByAddr:   make(map[string]*pb.CnConf),
+		Cntlrs:      make(map[uint64]*pb.Cntlr),
+		Slices:      make(map[uint64]*pb.Slice),
+		Subsystems:  make(map[string]*pb.Subsystem),
+		Clones:      make(map[string]*pb.Clone),
+		Xfers:       make(map[string]*pb.Transfer),
+		Migrs:       make(map[string]*pb.Migration),
+		Repairs:     make(map[string]*pb.Repair),
+		RetiredLegs: make(map[uint64]*pb.RetiredLeg),
+		CloneBmIdx:  make(map[string][]BmChunk),
+		MigrBmIdx:   make(map[string][]BmChunk),
+		DnByAddr:    make(map[string]*pb.DnConf),
+		CnByAddr:    make(map[string]*pb.CnConf),
 	}
 }
 
@@ -122,29 +131,33 @@ func appendAddr(
 	return append(list, addrPort)
 }
 
-// sideAddrs walks the slices of the SP in Conf.slice_id_list order and then the
-// clones in Conf.clone_name_list order, and returns every distinct
-// Side.addr_port — both groups of a slice and the clone meta group of a clone,
-// a latched clone's included, since its sides stay pointed at from their DNs
-// until the clone drain's final transaction; and both the active legs and the
-// spare legs of a group, because a spare's side sits on its DN exactly like an
-// active one's (architecture.md, Spare legs). The clones come after the slices
-// so that one load's node reads keep a fixed order; a clone with no group adds
-// nothing.
-func sideAddrs(
-	conf *pb.SpConf,
-	slices map[uint64]*pb.Slice,
-	clones map[string]*pb.Clone,
-) []string {
+// sideAddrs walks the slices of the SP in Conf.slice_id_list order, the
+// clones in Conf.clone_name_list order, the repairs in Conf.repair_name_list
+// order and the retired legs in Conf.retired_leg_id_list order, and returns
+// every distinct Side.addr_port — both groups of a slice and the clone meta
+// group of a clone, a latched clone's included, since its sides stay pointed
+// at from their DNs until the clone drain's final transaction; both the
+// active legs and the spare legs of a group, because a spare's side sits on
+// its DN exactly like an active one's (architecture.md, Spare legs); the new
+// legs of every repair, which live in the repair until it is finished; and
+// every retired leg's side, which keeps its place on its DN. The walk keeps
+// that order so that one load's node reads keep a fixed order; a clone with
+// no group adds nothing.
+func sideAddrs(state *SpState) []string {
+	conf := state.Conf
 	var addrs []string
 	seen := make(map[string]struct{})
-	addGrp := func(grp *pb.Group) {
-		for _, leg := range legsOf(grp) {
+	addLegs := func(legs []*pb.Leg) {
+		for _, leg := range legs {
 			for _, side := range leg.GetSideList() {
 				addrs = appendAddr(addrs, seen, side.GetAddrPort())
 			}
 		}
 	}
+	addGrp := func(grp *pb.Group) {
+		addLegs(legsOf(grp))
+	}
+	slices, clones := state.Slices, state.Clones
 	for _, sliceId := range conf.GetSliceIdList() {
 		slice, ok := slices[sliceId]
 		if !ok {
@@ -167,6 +180,17 @@ func sideAddrs(
 		}
 		addGrp(clone.GetMetaGrp())
 	}
+	for _, repName := range conf.GetRepairNameList() {
+		if rep, ok := state.Repairs[repName]; ok {
+			addLegs(rep.GetNewLegList())
+		}
+	}
+	for _, legId := range conf.GetRetiredLegIdList() {
+		if retired, ok := state.RetiredLegs[legId]; ok {
+			addrs = appendAddr(
+				addrs, seen, retired.GetSide().GetAddrPort())
+		}
+	}
 	return addrs
 }
 
@@ -185,9 +209,11 @@ func cntlrAddrs(conf *pb.SpConf, cntlrs map[uint64]*pb.Cntlr) []string {
 	return addrs
 }
 
-// loadSpConf reads the SpConf and every sub-object it lists into a fresh
-// SpState. It is the body of the MD3 snapshot; the bitmap indexes are not part
-// of it, because an STM cannot range.
+// loadSpConf reads the SpConf and every sub-object it lists by a key of its
+// own into a fresh SpState. It is the first part of the MD3 snapshot; the
+// repairs, the retired legs and the bitmap indexes are not part of it,
+// because an STM cannot range, and the node records follow the repairs and
+// the retired legs, whose sides name nodes too (loadNodes).
 func loadSpConf(
 	s etcdutil.STM,
 	cid uint64,
@@ -272,12 +298,94 @@ func loadSpConf(
 		}
 		state.Migrs[migrName] = migr
 	}
-	// The node records come last: their addresses are embedded in the
-	// slices, clones and cntlrs read above. They are part of the same
-	// snapshot because a side's request resolves its DN's endpoint and a
-	// cntlr's its CN's (dnv-worker.md RW14), and leg repair excludes the
-	// locations of a group's DNs (dnv-worker.md AR8).
-	for _, addrPort := range sideAddrs(conf, state.Slices, state.Clones) {
+	return state, nil
+}
+
+// loadRepairs reads every repair and every retired leg of the SP by one range
+// of each prefix at the snapshot's revision (MD3) and keeps the records the
+// SpConf lists, in Conf.repair_name_list and Conf.retired_leg_id_list order;
+// a listed key the range did not find lands in Missing, in that order. A
+// key under the prefixes that no list names is not kept: no writer leaves
+// one, and nothing could reach it.
+func loadRepairs(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	state *SpState,
+) error {
+	spId := state.Conf.GetSpId()
+	ranged := func(prefix string) (map[string]etcdutil.KV, error) {
+		kvs, err := cli.RangeAtRev(ctx, prefix, state.Rev)
+		if err != nil {
+			return nil, fmt.Errorf("load %s: %w", prefix, err)
+		}
+		byKey := make(map[string]etcdutil.KV, len(kvs))
+		for _, kv := range kvs {
+			byKey[kv.Key] = kv
+		}
+		return byKey, nil
+	}
+	repairs, err := ranged(RepairPrefix(cid, spId))
+	if err != nil {
+		return err
+	}
+	for _, repName := range state.Conf.GetRepairNameList() {
+		key := RepairKey(cid, spId, repName)
+		kv, ok := repairs[key]
+		if !ok {
+			state.miss(key)
+			continue
+		}
+		rep := &pb.Repair{}
+		if err := cli.Decode(ctx, kv, rep); err != nil {
+			return err
+		}
+		state.Repairs[repName] = rep
+	}
+	retiredLegs, err := ranged(RetiredLegPrefix(cid, spId))
+	if err != nil {
+		return err
+	}
+	for _, legId := range state.Conf.GetRetiredLegIdList() {
+		key := RetiredLegKey(cid, spId, legId)
+		kv, ok := retiredLegs[key]
+		if !ok {
+			state.miss(key)
+			continue
+		}
+		retired := &pb.RetiredLeg{}
+		if err := cli.Decode(ctx, kv, retired); err != nil {
+			return err
+		}
+		state.RetiredLegs[legId] = retired
+	}
+	return nil
+}
+
+// loadNodesAt reads the node records of the SP into state (loadNodes) in a
+// snapshot pinned to SpState.Rev, the revision of the load's first snapshot
+// (MD3), as loadRepairs pins its two ranges.
+func loadNodesAt(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	state *SpState,
+) error {
+	return cli.SnapshotAtRev(ctx, state.Rev, func(s etcdutil.STM) error {
+		loadNodes(s, cid, state)
+		return nil
+	})
+}
+
+// loadNodes reads the node records of the SP into state, at the snapshot's
+// revision (MD3). They come last: their addresses are embedded in the
+// slices, clones, repairs, retired legs and cntlrs read before. They are
+// part of the same snapshot because a side's request resolves its DN's
+// endpoint and a cntlr's its CN's (dnv-worker.md RW14), and leg repair
+// excludes the locations of a group's DNs (dnv-worker.md AR8).
+func loadNodes(s etcdutil.STM, cid uint64, state *SpState) {
+	conf := state.Conf
+	for _, addrPort := range sideAddrs(state) {
 		key := DnConfKey(cid, addrPort)
 		dn := &pb.DnConf{}
 		if !s.Get(key, dn) {
@@ -295,7 +403,6 @@ func loadSpConf(
 		}
 		state.CnByAddr[addrPort] = cn
 	}
-	return state, nil
 }
 
 // bmKeyParser decodes one scanned bitmap key into the chunk address it carries
@@ -342,15 +449,21 @@ func loadBmIdx(
 
 // LoadSp reads one SP's whole desired state (MD3).
 //
-// Everything but the bitmap indexes is read in ONE etcdutil snapshot, so the
-// SpConf and every sub-object it lists come from the same store revision and
-// can never disagree. The bitmap indexes are then two keys-only scans per
-// clone / migration, run OUTSIDE that snapshot but pinned to the very
-// revision it was served at (SpState.Rev): an STM cannot range, and MD3
-// accepts the split because the pin is what keeps the two reads consistent —
-// neither key set is append-only: the clone drain deletes chunk keys (CLD8)
-// and FinishMigration/CancelMigration delete a migration's whole run
-// (architecture.md, Migrations), so a newer view could disagree with the snapshot.
+// Everything is read at ONE store revision, so the SpConf and every
+// sub-object it lists can never disagree. An etcdutil snapshot reads the
+// SpConf and every sub-object it lists by a key of its own and fixes the
+// revision (SpState.Rev). The repairs and the retired legs are then one range
+// of each prefix pinned to that revision: a pool holds up to one repair and
+// common.MaxRetiredLegPerGrp retired legs per group, too many for a point
+// read each in the load's time budget. The node records follow in a snapshot
+// pinned to the same revision, since the repairs' new legs and the retired
+// legs name nodes too. The bitmap indexes are last, two keys-only scans per
+// clone / migration pinned the same way: an STM cannot range, and MD3
+// accepts the split because the pin is what keeps the reads consistent —
+// none of the ranged key sets is append-only: the clone drain deletes chunk
+// keys (CLD8), FinishMigration/CancelMigration delete a migration's whole run
+// (architecture.md, Migrations), and repairs and retired legs come and go,
+// so a newer view could disagree with the snapshot.
 //
 // A missing SpConf returns ErrNotFound (the SP is being deleted; the delete of
 // its rev key follows). Every other listed key that is absent lands in
@@ -374,6 +487,12 @@ func LoadSp(
 		return nil, err
 	}
 	state.Rev = rev
+	if err := loadRepairs(ctx, cli, cid, state); err != nil {
+		return nil, err
+	}
+	if err := loadNodesAt(ctx, cli, cid, state); err != nil {
+		return nil, err
+	}
 	spId := state.Conf.GetSpId()
 	for _, cloneName := range state.Conf.GetCloneNameList() {
 		if _, ok := state.Clones[cloneName]; !ok {

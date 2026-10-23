@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,24 @@ type Row struct {
 type ChunkId struct {
 	SrcSliceIdx uint32
 	BmIdx       uint32
+}
+
+// RepairVerdict is the primary's verdict on one repair that a cntlr's reply
+// carries in rep_id_to_repair_info (architecture.md, Repair): Started, the
+// new leg holds a place in the group's array, or AbortConfirmed, the abort
+// of a repair whose flag is set is confirmed.
+type RepairVerdict struct {
+	Started        bool
+	AbortConfirmed bool
+}
+
+// GrpReading overrides a primary's reading of one group's running array in
+// grp_id_to_grp_info (architecture.md, Repair): Whole, whether the array is
+// whole, and InSync, the leg ids md holds in sync. A nil field keeps the
+// default reading: whole, with every leg of the group's leg_list in sync.
+type GrpReading struct {
+	Whole  *bool
+	InSync *[]uint64
 }
 
 // DiskCounts are the disk counts a dn reports (dnagent.md DN18), the lever
@@ -146,6 +165,16 @@ type Object struct {
 
 	// DiskCounts, on the dn alone, are the disk counts DnInfo carries.
 	DiskCounts *DiskCounts
+
+	// Repairs, on a cntlr alone, are the verdicts its replies carry, by the
+	// rep_name of a repair its last accepted request names, keyed in the
+	// reply by that repair's rep_id, while the request makes the cntlr the
+	// primary; a repair with no entry gets no verdict. Grps, on a cntlr
+	// alone, override its reading of a group by grp_id (GrpReading), which
+	// the fake reports for every group of its request while it is the
+	// primary.
+	Repairs map[string]RepairVerdict
+	Grps    map[uint64]GrpReading
 }
 
 // Behavior is the whole set of levers of one agent: the behavior file's
@@ -203,6 +232,21 @@ func (ob *Object) clone() *Object {
 		counts.SideRecsMatch = clonePtr(ob.DiskCounts.SideRecsMatch)
 		out.DiskCounts = &counts
 	}
+	out.Repairs = maps.Clone(ob.Repairs)
+	if ob.Grps != nil {
+		out.Grps = make(map[uint64]GrpReading, len(ob.Grps))
+		for grpId, reading := range ob.Grps {
+			reading.Whole = clonePtr(reading.Whole)
+			if reading.InSync != nil {
+				list := slices.Clone(*reading.InSync)
+				if list == nil {
+					list = []uint64{}
+				}
+				reading.InSync = &list
+			}
+			out.Grps[grpId] = reading
+		}
+	}
 	return &out
 }
 
@@ -249,6 +293,12 @@ func (ob *Object) validate(where, key string) error {
 		return fmt.Errorf("%s: disk_counts on an object that is not %q",
 			where, DnKey)
 	}
+	if ob.Repairs != nil && !cntlr {
+		return fmt.Errorf("%s: repairs on a non-cntlr object", where)
+	}
+	if ob.Grps != nil && !cntlr {
+		return fmt.Errorf("%s: grps on a non-cntlr object", where)
+	}
 	return nil
 }
 
@@ -269,6 +319,8 @@ func (ob *Object) validateDefault() error {
 		{"obs_none", ob.ObsNone},
 		{"syncup_revision", ob.SyncupRevision != nil},
 		{"leftover_rounds", ob.LeftoverRounds != 0},
+		{"repairs", ob.Repairs != nil},
+		{"grps", ob.Grps != nil},
 	} {
 		if lever.set {
 			return fmt.Errorf(
@@ -412,6 +464,18 @@ type rowJSON struct {
 	WhenPrimary bool    `json:"when_primary,omitempty"`
 }
 
+// repairVerdictJSON is one entry of the behavior file's "repairs" map.
+type repairVerdictJSON struct {
+	Started        bool `json:"started,omitempty"`
+	AbortConfirmed bool `json:"abort_confirmed,omitempty"`
+}
+
+// grpReadingJSON is one entry of the behavior file's "grps" map.
+type grpReadingJSON struct {
+	Whole  *bool     `json:"whole,omitempty"`
+	InSync *[]uint64 `json:"in_sync,omitempty"`
+}
+
 // diskCountsJSON is the behavior file's disk_counts.
 type diskCountsJSON struct {
 	TotalExtCnt   uint64  `json:"total_ext_cnt"`
@@ -444,6 +508,9 @@ type objectJSON struct {
 	SyncupRevision    *uint64             `json:"syncup_revision,omitempty"`
 	LeftoverRounds    uint32              `json:"leftover_rounds,omitempty"`
 	DiskCounts        *diskCountsJSON     `json:"disk_counts,omitempty"`
+	// Repairs is keyed by rep_name, Grps by grp_id in decimal or 0x hex.
+	Repairs map[string]*repairVerdictJSON `json:"repairs,omitempty"`
+	Grps    map[string]*grpReadingJSON    `json:"grps,omitempty"`
 }
 
 // behaviorJSON is the whole behavior file.
@@ -574,6 +641,31 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 			SideRecCnt:    dc.SideRecCnt,
 			SideRecsMatch: dc.SideRecsMatch,
 		}
+	}
+	for repName, rj := range oj.Repairs {
+		if rj == nil {
+			continue
+		}
+		if ob.Repairs == nil {
+			ob.Repairs = make(map[string]RepairVerdict)
+		}
+		ob.Repairs[repName] = RepairVerdict{
+			Started:        rj.Started,
+			AbortConfirmed: rj.AbortConfirmed,
+		}
+	}
+	for key, gj := range oj.Grps {
+		if gj == nil {
+			continue
+		}
+		grpId, err := strconv.ParseUint(strings.TrimSpace(key), 0, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: grps: %q is not a grp_id", where, key)
+		}
+		if ob.Grps == nil {
+			ob.Grps = make(map[uint64]GrpReading)
+		}
+		ob.Grps[grpId] = GrpReading{Whole: gj.Whole, InSync: gj.InSync}
 	}
 	return ob, nil
 }

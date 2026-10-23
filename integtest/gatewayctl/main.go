@@ -181,7 +181,8 @@ func (l *u32List) Set(s string) error {
 	return nil
 }
 
-// idList is u32List for the uint64 id lists (find-sp-names --ids).
+// idList is u32List for the uint64 id lists (find-sp-names --ids,
+// create-repair --bad-legs).
 type idList []uint64
 
 func (l *idList) String() string {
@@ -500,6 +501,16 @@ var commands = []command{
 	{"create-spare", setupCreateSpare},
 	{"delete-spare", setupDeleteSpare},
 	{"switch-spare", setupSwitchSpare},
+	// repair
+	{"create-repair", setupCreateRepair},
+	{"finish-repair", setupFinishRepair},
+	{"cancel-repair", setupCancelRepair},
+	{"abort-repair", setupAbortRepair},
+	{"get-repair", setupGetRepair},
+	{"list-repairs", setupListRepairs},
+	// retired leg
+	{"list-retired-legs", setupListRetiredLegs},
+	{"delete-retired-leg", setupDeleteRetiredLeg},
 	// bitmap
 	{"get-td-bm", setupGetTdBm},
 	{"get-leg-bm", setupGetLegBm},

@@ -149,6 +149,18 @@ message Group {
     uint64 data_blocks = 4;
     repeated Leg leg_list = 5;
     repeated Leg spare_leg_list = 6;
+    // The name of the group's open repair, empty while it has none: one
+    // repair per group, checked in the transaction that creates one without
+    // a scan, and the link a cntlr finds the group's repair by in its
+    // request. CreateRepair sets it, and FinishRepair, CancelRepair and the
+    // drains clear it with the Repair key. Appended, never renumbered.
+    string rep_name = 7;
+    // The leg ids of the group's retired legs, at most MaxRetiredLegPerGrp;
+    // a reader that needs the oldest compares retired_epoch. Every
+    // transaction that puts or deletes a RetiredLeg key changes this list and
+    // SpConf.retired_leg_id_list with it, so an operation reads a group's
+    // retired legs without a scan. Appended, never renumbered.
+    repeated uint64 retired_leg_id_list = 8;
 }
 
 message Namespace {
@@ -318,6 +330,22 @@ message CntlrInfo {
         // Appended, never renumbered.
         bool torn = 2;
     }
+    // The primary's verdict on one repair: whether the repair's new leg
+    // holds a place in the group's array, copying or in sync, and whether the
+    // abort of a repair whose flag is set is confirmed, the new leg being no
+    // member. Fields, not rows: no health rule reads them.
+    message RepairInfo {
+        bool started = 1;
+        bool abort_confirmed = 2;
+    }
+    // What the primary reads of one group's running array: whether it is
+    // whole, every place holding a member in sync, and the leg ids, of
+    // leg_list legs and of repairs' new legs, whose members md holds in sync.
+    // Fields, not rows: no health rule reads them.
+    message GrpInfo {
+        bool whole = 1;
+        repeated uint64 in_sync_leg_id_list = 2;
+    }
     map<uint64, ResInfo> ss_id_to_subsystem = 1;
     map<uint64, ResInfo> ns_id_to_namespace = 2;
     map<uint64, ResInfo> ns_id_to_dm_linear = 3;
@@ -346,6 +374,10 @@ message CntlrInfo {
     // reads the primary's row for a migration's dst side (dnv-worker.md
     // RW18). Appended, never renumbered.
     map<uint64, ResInfo> side_id_to_path = 18;
+    // The verdicts by rep_id and the group readings by grp_id. Appended,
+    // never renumbered.
+    map<uint64, RepairInfo> rep_id_to_repair_info = 19;
+    map<uint64, GrpInfo> grp_id_to_grp_info = 20;
 }
 
 // One clone bitmap chunk's address: the source slice the chunk describes and
@@ -515,6 +547,12 @@ message SpConf {
     repeated string clone_name_list = 14;
     repeated string xfer_name_list = 15;
     repeated string migr_name_list = 16;
+    // The names of the pool's repairs and the leg ids of its retired legs:
+    // the lists LoadSp checks the Repair and RetiredLeg keys against, each
+    // changed in the transaction that puts or deletes the key it names.
+    // Appended, never renumbered.
+    repeated string repair_name_list = 17;
+    repeated uint64 retired_leg_id_list = 18;
 }
 
 // {dnv_prefix} cntlr {cluster_id} {sp_id} {cntlr_id}
@@ -662,6 +700,66 @@ message Migration {
 // {dnv_prefix} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx}
 message MigrBitmap {
     bytes bitmap = 1;
+}
+
+// The stage of a repair. CreateRepair writes CREATED; the sp worker moves a
+// CREATED repair to STARTED once the primary reports that the new leg holds
+// a place in the group's array, and to ABORTED once the abort flag is set and
+// the primary confirms the abort. FinishRepair takes a STARTED repair,
+// CancelRepair an ABORTED one, and TryToAbortRepair a CREATED one. Appended
+// values only, never renumbered.
+enum RepStage {
+    REP_STAGE_CREATED = 0;
+    REP_STAGE_STARTED = 1;
+    REP_STAGE_ABORTED = 2;
+}
+
+// {dnv_prefix} repair {cluster_id} {sp_id} {rep_name}
+message Repair {
+    uint64 rep_id = 1;
+    // The group the repair repairs, found in the parent the two fields
+    // below name. A group never moves to another parent, so they stay true
+    // for the repair's life.
+    uint64 grp_id = 2;
+    RepStage rep_stage = 3;
+    // The legs that take the bad legs' places at FinishRepair: full Leg
+    // records, each with its one side, which live here until then. A leg
+    // taken from a retired leg keeps its leg id, leg_idx and side; a fresh
+    // one takes ids from SpConf.next_id and the next free leg_idx of the
+    // group.
+    repeated Leg new_leg_list = 4;
+    // The leg ids of the group's leg_list legs the repair replaces. They
+    // stay in leg_list until FinishRepair, so the record keeps only their
+    // ids.
+    repeated uint64 bad_leg_id_list = 5;
+    // Set by TryToAbortRepair on a CREATED repair, and never cleared.
+    bool try_to_abort = 6;
+    // The parent of the group: the slice that holds it, zero for a clone
+    // meta group, and the clone that holds it, empty for a slice's group.
+    // Exactly one is set.
+    uint64 slice_id = 7;
+    string clone_name = 8;
+    // The retired_epoch of each new leg taken from a retired leg, keyed by
+    // its leg id: CancelRepair turns such a leg back into its retired leg
+    // with this time. A fresh new leg has no entry.
+    map<uint64, uint64> new_leg_id_to_retired_epoch = 9;
+}
+
+// {dnv_prefix} retired_leg {cluster_id} {sp_id} {leg_id}
+message RetiredLeg {
+    // The group the leg left and its leg_idx there.
+    uint64 grp_id = 1;
+    uint32 leg_idx = 2;
+    // The leg's one side, which keeps its extents, its place in its disk
+    // node's side_ptr_list and the data as it was when the leg left. Its
+    // err_epoch is the side's health.
+    Side side = 3;
+    // The time FinishRepair retires the leg at, in unix seconds as
+    // err_epoch is; the retire timer measures the leg's age from it.
+    uint64 retired_epoch = 4;
+    // The parent of the group, as Repair.slice_id and Repair.clone_name.
+    uint64 slice_id = 5;
+    string clone_name = 6;
 }
 
 // {dnv_prefix} sp_id_to_name {cluster_id} {sp_id}
@@ -1381,6 +1479,98 @@ message SwitchSpareLegReply {
     uint64 curr_spare_leg_id = 2;
 }
 
+message CreateRepairRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    string rep_name = 4;
+    uint64 grp_id = 5;
+    repeated uint64 bad_leg_id_list = 6;
+    // The retired leg of the group the new leg is taken from; zero: a fresh
+    // leg, placed by dn_selector.
+    uint64 retired_leg_id = 7;
+    NodeSelector dn_selector = 8;
+}
+
+message CreateRepairReply {
+    uint64 rep_id = 1;
+    uint64 new_leg_id = 2;
+}
+
+message FinishRepairRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    string rep_name = 4;
+}
+
+message FinishRepairReply {
+    uint64 rep_id = 1;
+    uint64 retired_leg_id = 2;
+}
+
+message CancelRepairRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    string rep_name = 4;
+}
+
+message CancelRepairReply {
+    uint64 rep_id = 1;
+}
+
+message TryToAbortRepairRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    string rep_name = 4;
+}
+
+message TryToAbortRepairReply {
+    uint64 rep_id = 1;
+}
+
+message GetRepairRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string rep_name = 3;
+}
+
+message GetRepairReply {
+    string rep_name = 1;
+    Repair repair = 2;
+}
+
+message ListRepairsRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message ListRepairsReply {
+    map<string, Repair> name_to_repair = 1;
+}
+
+message ListRetiredLegsRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message ListRetiredLegsReply {
+    map<uint64, RetiredLeg> leg_id_to_retired_leg = 1;
+}
+
+message DeleteRetiredLegRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    uint64 leg_id = 4;
+}
+
+message DeleteRetiredLegReply {
+    uint64 leg_id = 1;
+}
+
 message GetThinDeviceBitmapRequest {
     string cluster_name = 1;
     string sp_name = 2;
@@ -1478,6 +1668,15 @@ service Gateway {
     rpc CreateSpareLeg(CreateSpareLegRequest) returns (CreateSpareLegReply) {}
     rpc DeleteSpareLeg(DeleteSpareLegRequest) returns (DeleteSpareLegReply) {}
     rpc SwitchSpareLeg(SwitchSpareLegRequest) returns (SwitchSpareLegReply) {}
+
+    rpc CreateRepair(CreateRepairRequest) returns (CreateRepairReply) {}
+    rpc FinishRepair(FinishRepairRequest) returns (FinishRepairReply) {}
+    rpc CancelRepair(CancelRepairRequest) returns (CancelRepairReply) {}
+    rpc TryToAbortRepair(TryToAbortRepairRequest) returns (TryToAbortRepairReply) {}
+    rpc GetRepair(GetRepairRequest) returns (GetRepairReply) {}
+    rpc ListRepairs(ListRepairsRequest) returns (ListRepairsReply) {}
+    rpc ListRetiredLegs(ListRetiredLegsRequest) returns (ListRetiredLegsReply) {}
+    rpc DeleteRetiredLeg(DeleteRetiredLegRequest) returns (DeleteRetiredLegReply) {}
 
     rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns (GetThinDeviceBitmapReply) {}
     rpc GetLegBitmap(GetLegBitmapRequest) returns (GetLegBitmapReply) {}
@@ -1697,6 +1896,9 @@ message SyncupCntlrRequest {
                            // renumbered onto 13 would decode a stored
                            // request's migrations as its own value,
                            // silently; the name goes with it.
+    // The pool's repairs by name. The cntlr finds a group's repair through
+    // Group.rep_name. Appended, never renumbered.
+    map<string, Repair> name_to_repair = 14;
 }
 
 message SyncupCntlrReply {

@@ -112,10 +112,10 @@ Reading leaf values off the command line also keeps viper's silent numeric
 casts out of every request: text that is not a number never reads back as
 zero. A leaf value that can be malformed is parsed before the dial — by
 pflag, with the command line, for the flags declared as pflag numbers or
-booleans, and by dnvctl's own parsers for the id flags, `--ids`, `--slots`,
-`--bm-hex`, `--level` and `--redund`, which are declared as strings
-(Conventions, CT8) — so text that does not fit its field is exit 2 with no
-RPC issued.
+booleans, and by dnvctl's own parsers for the id flags, `--ids`,
+`--bad-legs`, `--slots`, `--bm-hex`, `--level` and `--redund`, which are
+declared as strings (Conventions, CT8) — so text that does not fit its
+field is exit 2 with no RPC issued.
 `--timeout`, the one numeric env-backed global flag, is parsed from whichever
 carrier supplied it: `DNVCTL_TIMEOUT` holding text that is not a number, or
 such text under the `timeout` key of the config file, is a usage error (exit
@@ -197,28 +197,28 @@ The message of a usage error is cobra's or pflag's (an unknown command or
 flag, a value pflag cannot parse), viper's (a `--config` file it cannot
 read) or dnvctl's own: a missing `--gateway-address`; `dnvctl` or a group
 typed without a verb; an "invalid --flag" message for a value dnvctl parses
-itself — an id, `--ids`, `--slots`, `--bm-hex`, `--level`, `--redund`,
-`--rev`, a `--timeout` from the environment or the config file, a NaN or
-infinite `--timeout` from any carrier; and, for a `--rev` on a command whose
-request carries no token, whatever its value, an "invalid --rev" message
-naming the command as one that takes no revision token. CODE is the gRPC
-code in its UPPER_SNAKE wire spelling — NOT_FOUND, ABORTED,
-DEADLINE_EXCEEDED, UNAVAILABLE and the rest — from the `codeNames` table,
-because the code's own string form is CamelCase and operators grep for the
-wire spelling; message is the status message verbatim, such as
-"stale revision". A dial that cannot resolve, or is refused, maps to
-whatever code gRPC reports — UNAVAILABLE for a refused connection; dnvctl
-adds no translation layer.
+itself — an id, `--ids`, `--bad-legs`, `--slots`, `--bm-hex`, `--level`,
+`--redund`, `--rev`, a `--timeout` from the environment or the config
+file, a NaN or infinite `--timeout` from any carrier; and, for a `--rev` on
+a command whose request carries no token, whatever its value, an
+"invalid --rev" message naming the command as one that takes no revision
+token. CODE is the gRPC code in its UPPER_SNAKE wire spelling —
+NOT_FOUND, ABORTED, DEADLINE_EXCEEDED, UNAVAILABLE and the rest — from the
+`codeNames` table, because the code's own string form is CamelCase and
+operators grep for the wire spelling; message is the status message
+verbatim, such as "stale revision". A dial that cannot resolve, or is
+refused, maps to whatever code gRPC reports — UNAVAILABLE for a refused
+connection; dnvctl adds no translation layer.
 
 ## Revision tokens
 
 CT3. **Revision tokens.** A request that carries a token carries one of
 three messages: `dn_rev` on `DeleteDiskNode` and `UpdateDiskNodeDisabled`,
 `cn_rev` on their two controller-node mirrors, and `sp_rev` on every
-SP-scoped mutator — every create, delete, update, append, finish, cancel and
-switch under a pool, and `GrowSlice`. Reads carry none; an operator reads
-the tokens with `dn get`, `cn get` and `sp get`. dnvctl sends exactly what
-was typed:
+SP-scoped mutator — every create, delete, update, append, finish, cancel,
+switch and abort under a pool, and `GrowSlice`. Reads carry none; an
+operator reads the tokens with `dn get`, `cn get` and `sp get`. dnvctl
+sends exactly what was typed:
 
 * `--rev` not given: the token field is absent, a nil message.
 * `--rev` with a value, parsed with Go's base-0 rule, so decimal and
@@ -250,13 +250,13 @@ The check itself — made only when the token message is present — is
 
 **Groups and leaves.** The tree is noun-grouped, "dnvctl <group> <verb>",
 one group per resource — `cluster`, `dn`, `cn`, `sp`, `cntlr`, `td`, `ss`,
-`ns`, `clone`, `xfer`, `migr` and `spare` — and it reuses gatewayctl's verb
-and flag vocabulary. The leaves are the RPCs of `service Gateway`, one leaf
-per RPC and nothing else (CT1): no convenience verbs, no compound commands,
-and cobra's stock `help` and `completion` are the only subcommands that are
-not RPCs. The RPCs without a group of their own are homed in a group:
-`GrowSlice`, `InspectSide`, `FindStoragePoolNames` and
-`UpdateStoragePoolCntlidSlotList` under `sp`, `GetThinDeviceBitmap` and
+`ns`, `clone`, `xfer`, `migr`, `spare`, `repair` and `retired-leg` — and it
+reuses gatewayctl's verb and flag vocabulary. The leaves are the RPCs of
+`service Gateway`, one leaf per RPC and nothing else (CT1): no convenience
+verbs, no compound commands, and cobra's stock `help` and `completion` are
+the only subcommands that are not RPCs. The RPCs without a group of their
+own are homed in a group: `GrowSlice`, `InspectSide`, `FindStoragePoolNames`
+and `UpdateStoragePoolCntlidSlotList` under `sp`, `GetThinDeviceBitmap` and
 `GetLegBitmap` under `td`, `AppendCloneBitmap` under `clone` and
 `AppendMigrationBitmap` under `migr`. A group issues no RPC: typed without a
 verb, or with a verb it lacks, it is a usage error (CT5), never a help
@@ -274,7 +274,8 @@ that hosts the object, out of that agent's latest observation of it, not
 from etcd. The bitmap RPCs are `get-bm`, `get-leg-bm` and `append-bm`;
 every other leaf keeps its RPC's verb (`cluster advance-ids`,
 `sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
-`spare switch`).
+`spare switch`), save one: `repair abort` is `TryToAbortRepair`, the one
+leaf whose verb is not its RPC's (`repair` — `ctl/repair.go`).
 
 **Fields and flags.** Every request field maps to exactly one flag, with
 these exceptions:
@@ -306,11 +307,12 @@ with their types and defaults, are the code's, and `--help` lists them.
 
 **Identity flags.** Each group names its object with identity flags: `cluster` with `--name`; `dn` and `cn` with
 `--addr`, because a node's name is its ip:port; `sp` with the global `--sp`;
-`cntlr` with `--id`; `td`, `clone`, `xfer` and `migr` with `--name`; `ss`
-with `--nqn`; `ns` with `--nqn` and `--idx`; `spare` with `--grp`, plus
-`--leg` on delete and `--spare` and `--target` on switch. `sp inspect-side` takes its side id as `--id`, deliberately the
-same spelling as the `cntlr` group's, as in gatewayctl: the RPC, not the
-flag, says what the id means.
+`cntlr` with `--id`; `td`, `clone`, `xfer`, `migr` and `repair` with
+`--name`; `ss` with `--nqn`; `ns` with `--nqn` and `--idx`; `spare` with
+`--grp`, plus `--leg` on delete and `--spare` and `--target` on switch;
+`retired-leg` with `--leg`. `sp inspect-side` takes its side id as `--id`,
+deliberately the same spelling as the `cntlr` group's, as in gatewayctl:
+the RPC, not the flag, says what the id means.
 
 **Value types.** A number that fills a request field is parsed at the width
 of that field: every value the field holds parses, and a value past either
@@ -318,13 +320,13 @@ end of the field fails to parse, a usage error. A wider parse would cut
 such a value and send a number nobody typed; a narrower one would refuse
 values the gateway should judge, the client-side check CT8 forbids. An
 id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`, `--spare`,
-`--target` — is declared as a string and parsed by dnvctl with Go's base-0
-rule, so a `0x` prefix is accepted. `--slots` and `--ids` are
-comma-separated numeric lists; `--hosts` and the selector flags are
-comma-separated string lists. An empty list flag is the empty list. Any
-other value is split at each comma: a string list sends every item as
-typed, spaces and empty items included, and a numeric list trims each item
-and parses it, so an empty item is a usage error. No item is dropped,
+`--target`, `--retired-leg` — is declared as a string and parsed by dnvctl
+with Go's base-0 rule, so a `0x` prefix is accepted. `--slots`, `--ids` and
+`--bad-legs` are comma-separated numeric lists; `--hosts` and the selector
+flags are comma-separated string lists. An empty list flag is the empty
+list. Any other value is split at each comma: a string list sends every
+item as typed, spaces and empty items included, and a numeric list trims
+each item and parses it, so an empty item is a usage error. No item is dropped,
 because a comma list whose items are all unset shell variables, such as
 `$A,$B`, would otherwise shrink to nothing and revoke every host of a
 subsystem (`architecture.md`, Primary cntlr) or drop a white list
@@ -562,6 +564,28 @@ has not started is refused with `--force` or without, and `migr cancel` is
 the way out (`architecture.md`, Migrations). `migr get` prints the record
 as stored, its `cutover_pending` included (CT4), which tells whether a
 finish can succeed yet.
+
+### `repair` — `ctl/repair.go`
+
+`repair abort`, the one exception to the verb rule (Conventions), sends
+`TryToAbortRepair`, which only sets the repair's abort flag, and the
+primary's answer moves the repair to ABORTED, or to STARTED when it had
+already added the new leg (`architecture.md`, Repair), so the leaf keeps
+the operator's short verb and `repair get` shows the outcome.
+`repair create` sends `--bad-legs` as the list it is, so a count other
+than one reaches the gateway, which refuses it (CT8), and its new leg is
+the retired leg `--retired-leg` names or, when that is zero or not given,
+a fresh leg the `--dn-black` and `--dn-white` selector steers. dnvctl
+checks no stage: a call the repair's stage does not allow is the gateway's
+refusal, which names the stage (`architecture.md`, Repairs). `repair list`
+is not paged.
+
+### `retired-leg` — `ctl/retiredleg.go`
+
+`retired-leg delete` names the retired leg by its own leg id, `--leg`; a
+retired leg is taken back by `repair create --retired-leg` rather than by
+a leaf of this group (`architecture.md`, Retired legs). `retired-leg list`
+is not paged.
 
 ## Integration test plan
 

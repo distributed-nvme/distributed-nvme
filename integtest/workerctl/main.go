@@ -1,23 +1,29 @@
 // Command workerctl is the etcd driver of the dnv-worker integration test
 // (dnv-worker.md, Integration test plan, The driver): "the etcd driver that
 // plays the gateway". It is a front over the planting library,
-// integtest/plant, which holds every write it makes: this program parses its
-// flags and their string specs into the library's typed specs, calls the
-// library, and prints what the library wrote. It reads keys back as protojson
-// on its own.
+// integtest/plant, which holds every write it makes but those of the
+// operator's repair calls (below): this program parses its flags and their
+// string specs into the library's typed specs, calls the library, and prints
+// what the library wrote. It reads keys back as protojson on its own.
 //
 // Every subcommand that reaches etcd runs ON THE TEST SERVER, where etcd
 // listens on localhost, and is invoked over ssh by two suites:
 // integtest/worker_test.sh, whose fake gateway it is (dnv-worker.md,
 // Integration test plan, The driver), and integtest/gateway_test.sh, which
-// reads etcd back through it as ground truth and writes through exactly the
-// five worker-role stand-ins — set-created, set-provisioned, start-cutover,
-// drain-sp and drain-clone — of gateway.md, Integration test plan, The etcd
-// verification.
+// reads etcd back through it as ground truth and writes through the
+// worker-role stand-ins — set-created, set-provisioned, start-cutover,
+// set-epoch, set-repair-stage, drain-sp and drain-clone — of gateway.md,
+// Integration test plan, The etcd verification.
 // It never dials an agent and never sleeps: it is the gateway's write path
 // with explicit placement (dnv-worker.md, Integration test plan, The driver).
 // Every mutation is one etcdutil.RunSTM of the library, so the state it
 // leaves behind is exactly the state a real gateway STM would have produced.
+// Of the operator's repair calls, create-repair, finish-repair, cancel-repair
+// and delete-retired-leg do not go through the library: each runs the model
+// operation the gateway's handler runs (architecture.md, Repairs; Retired
+// legs), with no revision token; abort-repair runs it through
+// plant.SetRepairAbort. So the worker suite drives an operator's repair as a
+// gateway would.
 //
 // `constants`, `geometry` and `meta-units` are the exceptions: they open no
 // client and read no key, so a suite runs them on the DRIVER, on the binary it
@@ -786,6 +792,14 @@ var kinds = map[string]kindInfo{
 		newMsg:        func() proto.Message { return &pb.MigrBitmap{} },
 		clusterScoped: true,
 	},
+	"repair": {
+		newMsg:        func() proto.Message { return &pb.Repair{} },
+		clusterScoped: true,
+	},
+	"retired_leg": {
+		newMsg:        func() proto.Message { return &pb.RetiredLeg{} },
+		clusterScoped: true,
+	},
 	"sp_id_to_name": {
 		newMsg:        func() proto.Message { return &pb.SpName{} },
 		clusterScoped: true,
@@ -952,6 +966,14 @@ var commands = []command{
 	{"drain-sp", cmdDrainSp},
 	{"set-clone-deleting", cmdSetCloneDeleting},
 	{"drain-clone", cmdDrainClone},
+	{"set-repair-stage", cmdSetRepairStage},
+	{"create-repair", cmdCreateRepair},
+	{"finish-repair", cmdFinishRepair},
+	{"cancel-repair", cmdCancelRepair},
+	{"abort-repair", cmdAbortRepair},
+	{"delete-retired-leg", cmdDeleteRetiredLeg},
+	{"list-repairs", cmdListRepairs},
+	{"put-retired-leg", cmdPutRetiredLeg},
 	{"get", cmdGet},
 	{"get-dn", cmdGetDn},
 	{"get-cn", cmdGetCn},
@@ -1087,10 +1109,12 @@ func cmdPing(g *globals, args []string) {
 // SPD13/CLD11 budgets a suite may want to size a case against, and
 // MaxSliceCntPerSp is the slice ceiling — CreateClone's src_slice_cnt bound —
 // that the gateway suite creates a clone at, which is why that suite must
-// read it rather than type it. The next three are the timers a suite sizes
-// its health and failover waits by: the default check interval a cluster
-// created without one stores, the default primary threshold a pool created
-// without one reads, and the demotion hold's wait (dnv-worker.md RW22). The
+// read it rather than type it. The next four are the timers a suite sizes
+// its waits by: the default check interval a cluster created without one
+// stores, the default primary threshold a pool created without one reads,
+// the demotion hold's wait (dnv-worker.md RW22), and the age at which the
+// retire timer deletes a retired leg (dnv-worker.md AR12), which the worker
+// suite's repair case plants a retired leg older than. The
 // next two are a DN's metadata area (architecture.md, Metadata units): the
 // ceiling of a DN's used units and the unit. The gateway suite's ceiling case
 // fills a DN's area to that ceiling with a migration it sizes in that unit.
@@ -1119,6 +1143,7 @@ func cmdConstants(g *globals, args []string) {
 		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
 		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
+		"RetiredLegMaxAge":           common.RetiredLegMaxAge,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
@@ -2319,12 +2344,14 @@ func plantedEpoch(
 // Playing the worker (gateway.md, Integration test plan, The etcd verification)
 // ---------------------------------------------------------------------------
 //
-// set-created, set-provisioned and start-cutover, with the drains below, are
-// the ONLY writes the gateway integration suite performs through workerctl
-// (gateway.md, Integration test plan, The etcd verification). Each is a
-// library call that goes through the very model op the worker calls, except
-// set-provisioned --clone, which goes through that op's clone-keyed twin
-// (dnv-worker.md MD6).
+// set-created, set-provisioned, start-cutover, set-epoch and
+// set-repair-stage, with the drains below, are the ONLY writes the gateway
+// integration suite performs through workerctl (gateway.md, Integration test
+// plan, The etcd verification). Each is a library call that goes through the
+// very model op the worker calls, except set-provisioned --clone, which goes
+// through that op's clone-keyed twin (dnv-worker.md MD6), and set-epoch,
+// whose raw write (cmdSetEpoch) stands in for the sp worker's health
+// monitor.
 
 // cmdSetCreated flips ThinDevice.created through plant.SetCreated
 // (dnv-worker.md RW19).
@@ -2577,6 +2604,403 @@ func cmdDrainClone(g *globals, args []string) {
 		// grp_side_cnt is the sides of the clone meta group this drain's
 		// final step gave back, 0 when it ran none.
 		"grp_side_cnt": drain.GrpSideCnt,
+	})
+}
+
+// cmdSetRepairStage moves a CREATED repair to STARTED or ABORTED through
+// plant.SetRepairStage, the stage move the worker makes from the primary's
+// verdict (dnv-worker.md AR11), with the rep_id the stored repair carries.
+func cmdSetRepairStage(g *globals, args []string) {
+	fs := newFlagSet("set-repair-stage", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	name := fs.String("name", "", "rep_name (required)")
+	stageSpec := fs.String("stage", "", "started or aborted (required)")
+	fs.Parse(args)
+
+	if strings.TrimSpace(*name) == "" {
+		usageDie("--name is required")
+	}
+	stage, err := parseRepStage(*stageSpec)
+	if err != nil {
+		usageDie("set-repair-stage: %v", err)
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+
+	repId, spRev, err := plant.SetRepairStage(
+		ctx, cli, cl, target, *name, stage)
+	if err != nil {
+		die("set-repair-stage: %v", err)
+	}
+	emit(map[string]any{
+		"rep_name":  *name,
+		"rep_id":    idHex(repId),
+		"rep_stage": stage.String(),
+		"sp_rev":    spRev,
+	})
+}
+
+// parseRepStage reads set-repair-stage's --stage: one of the two stages a
+// stage move reaches, by its short spelling or its enum name, case
+// insensitively.
+func parseRepStage(spec string) (pb.RepStage, error) {
+	key := strings.ToUpper(strings.TrimSpace(spec))
+	key = strings.TrimPrefix(key, "REP_STAGE_")
+	switch key {
+	case "STARTED":
+		return pb.RepStage_REP_STAGE_STARTED, nil
+	case "ABORTED":
+		return pb.RepStage_REP_STAGE_ABORTED, nil
+	}
+	return 0, fmt.Errorf("--stage %q: want started or aborted", spec)
+}
+
+// ---------------------------------------------------------------------------
+// An operator's repair (architecture.md, Repairs; Retired legs)
+// ---------------------------------------------------------------------------
+//
+// These run the model operations the gateway's repair handlers run, with no
+// revision token: the worker suite plays the operator's calls through them,
+// and the worker moves the stages and runs the retire timer (dnv-worker.md
+// AR11, AR12).
+
+// findRepairGrp finds the group grpId among a load's slices and then its
+// clones, as the gateway looks a repair's group up (architecture.md,
+// Repairs), and returns its parent and the group.
+func findRepairGrp(
+	state *model.SpState,
+	grpId uint64,
+) (model.GrpParent, *pb.Group, bool) {
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		slice := state.Slices[sliceId]
+		for _, list := range [][]*pb.Group{
+			slice.GetMetaGrpList(), slice.GetDataGrpList(),
+		} {
+			for _, grp := range list {
+				if grp.GetGrpId() == grpId {
+					return model.GrpParent{SliceId: sliceId}, grp, true
+				}
+			}
+		}
+	}
+	for _, cloneName := range state.Conf.GetCloneNameList() {
+		grp := state.Clones[cloneName].GetMetaGrp()
+		if grp != nil && grp.GetGrpId() == grpId {
+			return model.GrpParent{CloneName: cloneName}, grp, true
+		}
+	}
+	return model.GrpParent{}, nil, false
+}
+
+// repairGrpDnAddrs is the plan a fresh new leg is placed against: the disk
+// node of every side of the group's legs and spares, as CreateSpareLeg's
+// plan names them (architecture.md, Per-operation allocation).
+func repairGrpDnAddrs(grp *pb.Group) []string {
+	var addrs []string
+	for _, list := range [][]*pb.Leg{
+		grp.GetLegList(), grp.GetSpareLegList(),
+	} {
+		for _, leg := range list {
+			for _, side := range leg.GetSideList() {
+				addrs = append(addrs, side.GetAddrPort())
+			}
+		}
+	}
+	return addrs
+}
+
+// dnPick is the candidate a fresh new leg is placed on: the disk node dnId
+// as its record and its capacity key name it (architecture.md, Capacity
+// index keys), which the operation checks against both.
+func dnPick(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl plant.Cluster,
+	dnId uint64,
+) model.Cand {
+	addr, err := plant.DnAddr(ctx, cli, cl, dnId)
+	if err != nil {
+		die("%v", err)
+	}
+	dn := &pb.DnConf{}
+	found, err := cli.Get(ctx, model.DnConfKey(cl.Id, addr), dn)
+	if err != nil {
+		die("%v", err)
+	}
+	if !found {
+		die("dn %#x at %s has no record", dnId, addr)
+	}
+	binIdx, ok := model.DnBinIdx(dn.GetFreeExtCnt(), cl.Conf.GetDnBinConf())
+	if !ok {
+		die("dn %#x has no bin: %d free extents", dnId, dn.GetFreeExtCnt())
+	}
+	return model.Cand{
+		AddrPort: addr,
+		Location: dn.GetLocation(),
+		FreeExt:  dn.GetFreeExtCnt(),
+		BinIdx:   binIdx,
+	}
+}
+
+// cmdCreateRepair creates an operator's repair through model.CreateRepair:
+// of the group --grp, looked up among the slices and then the clones, for
+// the bad leg --bad-leg, with its new leg taken from the retired leg
+// --retired-leg or placed fresh on the disk node --dn.
+func cmdCreateRepair(g *globals, args []string) {
+	fs := newFlagSet("create-repair", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	name := fs.String("name", "", "rep_name (required)")
+	var grpId, badLeg, retiredLeg, dnId hexUint
+	fs.Var(&grpId, "grp", "grp_id of the repaired group (required)")
+	fs.Var(&badLeg, "bad-leg", "leg_id of the bad leg (required)")
+	fs.Var(&retiredLeg, "retired-leg",
+		"leg_id of a retired leg of the group the new leg is taken from")
+	fs.Var(&dnId, "dn", "dn_id a fresh new leg is placed on")
+	fs.Parse(args)
+
+	if strings.TrimSpace(*name) == "" {
+		usageDie("--name is required")
+	}
+	if uint64(grpId) == 0 || uint64(badLeg) == 0 {
+		usageDie("--grp and --bad-leg are required")
+	}
+	if (uint64(retiredLeg) == 0) == (uint64(dnId) == 0) {
+		usageDie("create-repair: exactly one of --retired-leg and --dn " +
+			"is required")
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	state, err := model.LoadSp(ctx, cli, cl.Id, target.Name)
+	if err != nil {
+		die("create-repair: %v", err)
+	}
+	parent, grp, ok := findRepairGrp(state, uint64(grpId))
+	if !ok {
+		die("create-repair: group %#x is in no slice or clone of %q",
+			uint64(grpId), target.Name)
+	}
+	newLeg := model.RepairNewLeg{RetiredLegId: uint64(retiredLeg)}
+	if uint64(dnId) != 0 {
+		newLeg.Dn = dnPick(ctx, cli, cl, uint64(dnId))
+		newLeg.GrpDnAddrs = repairGrpDnAddrs(grp)
+	}
+	repId, newLegId, err := model.CreateRepair(ctx, cli, cl.Id, target.Shard,
+		target.Id, target.Name, 0, *name, parent, uint64(grpId),
+		uint64(badLeg), newLeg, cl.Conf)
+	if err != nil {
+		die("create-repair: %v", err)
+	}
+	spRev, err := plant.SpRevision(ctx, cli, cl, target)
+	if err != nil {
+		die("create-repair: %v", err)
+	}
+	emit(map[string]any{
+		"rep_name":   *name,
+		"rep_id":     idHex(repId),
+		"new_leg_id": idHex(newLegId),
+		"sp_rev":     spRev,
+	})
+}
+
+// repairNameCmd is the opening the commands on one named repair share:
+// their flags, the etcd client, the cluster and the pool.
+func repairNameCmd(
+	g *globals,
+	cmd string,
+	args []string,
+) (context.Context, func(), *etcdutil.Client, plant.Cluster, plant.SpRef,
+	string,
+) {
+	fs := newFlagSet(cmd, g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	name := fs.String("name", "", "rep_name (required)")
+	fs.Parse(args)
+	if strings.TrimSpace(*name) == "" {
+		usageDie("--name is required")
+	}
+	ctx, done, cli := g.open()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	return ctx, done, cli, cl, target, *name
+}
+
+// cmdFinishRepair finishes a STARTED repair through model.FinishRepair, at
+// this host's clock, as the gateway takes its own.
+func cmdFinishRepair(g *globals, args []string) {
+	ctx, done, cli, cl, target, name := repairNameCmd(
+		g, "finish-repair", args)
+	defer done()
+	repId, retiredId, err := model.FinishRepair(ctx, cli, cl.Id,
+		target.Shard, target.Id, target.Name, 0, name,
+		uint64(time.Now().Unix()))
+	if err != nil {
+		die("finish-repair: %v", err)
+	}
+	spRev, err := plant.SpRevision(ctx, cli, cl, target)
+	if err != nil {
+		die("finish-repair: %v", err)
+	}
+	emit(map[string]any{
+		"rep_name":       name,
+		"rep_id":         idHex(repId),
+		"retired_leg_id": idHex(retiredId),
+		"sp_rev":         spRev,
+	})
+}
+
+// cmdCancelRepair cancels an ABORTED repair through model.CancelRepair.
+func cmdCancelRepair(g *globals, args []string) {
+	ctx, done, cli, cl, target, name := repairNameCmd(
+		g, "cancel-repair", args)
+	defer done()
+	repId, err := model.CancelRepair(ctx, cli, cl.Id, target.Shard,
+		target.Id, target.Name, 0, name, cl.Conf)
+	if err != nil {
+		die("cancel-repair: %v", err)
+	}
+	spRev, err := plant.SpRevision(ctx, cli, cl, target)
+	if err != nil {
+		die("cancel-repair: %v", err)
+	}
+	emit(map[string]any{
+		"rep_name": name,
+		"rep_id":   idHex(repId),
+		"sp_rev":   spRev,
+	})
+}
+
+// cmdAbortRepair sets a CREATED repair's abort flag through
+// plant.SetRepairAbort, which runs model.SetRepairAbort, the operation of the
+// gateway's TryToAbortRepair.
+func cmdAbortRepair(g *globals, args []string) {
+	ctx, done, cli, cl, target, name := repairNameCmd(
+		g, "abort-repair", args)
+	defer done()
+	repId, spRev, err := plant.SetRepairAbort(ctx, cli, cl, target, name)
+	if err != nil {
+		die("abort-repair: %v", err)
+	}
+	emit(map[string]any{
+		"rep_name": name,
+		"rep_id":   idHex(repId),
+		"sp_rev":   spRev,
+	})
+}
+
+// cmdDeleteRetiredLeg deletes a retired leg through model.DeleteRetiredLeg,
+// which gives its side back to its disk node.
+func cmdDeleteRetiredLeg(g *globals, args []string) {
+	fs := newFlagSet("delete-retired-leg", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	var leg hexUint
+	fs.Var(&leg, "leg", "leg_id of the retired leg (required)")
+	fs.Parse(args)
+	if uint64(leg) == 0 {
+		usageDie("--leg is required")
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	if err := model.DeleteRetiredLeg(ctx, cli, cl.Id, target.Shard,
+		target.Id, target.Name, 0, uint64(leg), cl.Conf); err != nil {
+		die("delete-retired-leg: %v", err)
+	}
+	spRev, err := plant.SpRevision(ctx, cli, cl, target)
+	if err != nil {
+		die("delete-retired-leg: %v", err)
+	}
+	emit(map[string]any{
+		"leg_id": idHex(uint64(leg)),
+		"sp_rev": spRev,
+	})
+}
+
+// cmdPutRetiredLeg plants one retired leg through plant.PutRetiredLeg, as a
+// finish leaves the leg it retires, retired --age seconds before now: the
+// worker suite plants a leg older than the retire timer's age, which a finish
+// at the suite's own time could not give (dnv-worker.md AR12).
+func cmdPutRetiredLeg(g *globals, args []string) {
+	fs := newFlagSet("put-retired-leg", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	var legId, sideId, grpId, dnId hexUint
+	fs.Var(&legId, "id", "leg_id of the retired leg (required)")
+	fs.Var(&sideId, "side", "side_id of its side (required)")
+	fs.Var(&grpId, "grp", "grp_id of the group it left (required)")
+	fs.Var(&dnId, "dn", "dn_id that hosts its side (required)")
+	legIdx := fs.Uint("leg-idx", 0, "its leg_idx in the group")
+	slot := fs.Uint("slot", 0, "its side's cntlid_slot")
+	age := fs.Uint64("age", 0, "seconds before now it was retired")
+	fs.Parse(args)
+	for _, required := range []struct {
+		name string
+		id   hexUint
+	}{{"--id", legId}, {"--side", sideId}, {"--grp", grpId}, {"--dn", dnId}} {
+		if uint64(required.id) == 0 {
+			usageDie("%s is required", required.name)
+		}
+	}
+	now := uint64(time.Now().Unix())
+	if *age >= now {
+		usageDie("--age %d reaches back to the unix epoch", *age)
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	retired, err := plant.PutRetiredLeg(ctx, cli, cl, target,
+		plant.RetiredLegSpec{
+			LegId:  uint64(legId),
+			SideId: uint64(sideId),
+			GrpId:  uint64(grpId),
+			LegIdx: uint32(*legIdx),
+			Dn:     uint64(dnId),
+			Slot:   uint32(*slot),
+			Epoch:  now - *age,
+		})
+	if err != nil {
+		die("put-retired-leg: %v", err)
+	}
+	emit(map[string]any{
+		"leg_id":        idHex(retired.LegId),
+		"side_id":       idHex(retired.SideId),
+		"grp_id":        idHex(retired.GrpId),
+		"retired_epoch": now - *age,
+		"sp_rev":        retired.SpRev,
+	})
+}
+
+// cmdListRepairs prints the pool's repairs by name and its retired legs by
+// leg id, as one load reads them (MD3), with the pool's revision.
+func cmdListRepairs(g *globals, args []string) {
+	fs := newFlagSet("list-repairs", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	fs.Parse(args)
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	state, err := model.LoadSp(ctx, cli, cl.Id, target.Name)
+	if err != nil {
+		die("list-repairs: %v", err)
+	}
+	repairs := make(map[string]any, len(state.Repairs))
+	for repName, rep := range state.Repairs {
+		repairs[repName] = pbToAny(rep)
+	}
+	retired := make(map[string]any, len(state.RetiredLegs))
+	for legId, leg := range state.RetiredLegs {
+		retired[idHex(legId)] = pbToAny(leg)
+	}
+	emit(map[string]any{
+		"sp_name":      target.Name,
+		"repairs":      repairs,
+		"retired_legs": retired,
+		"sp_rev":       state.SpRevision,
 	})
 }
 

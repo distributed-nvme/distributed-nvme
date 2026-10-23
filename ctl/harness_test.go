@@ -88,7 +88,7 @@ type recordingClient struct {
 	answer func(req proto.Message) (proto.Message, error)
 }
 
-// rpcCall is the body every one of the 60 methods shares.
+// rpcCall is the body every one of the 68 methods shares.
 func rpcCall[Req proto.Message, Reply proto.Message](
 	c *recordingClient, name string, in Req, canned Reply,
 ) (Reply, error) {

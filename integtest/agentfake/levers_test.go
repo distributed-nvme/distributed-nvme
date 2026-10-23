@@ -867,3 +867,112 @@ func TestLeversSafeUnderConcurrentUse(t *testing.T) {
 	})
 	wg.Wait()
 }
+
+// TestCntlrInfoRepairsAndReadings pins what a cntlr reports of a repair and
+// of a group (dnv-worker.md, Integration test plan, The fake agent;
+// architecture.md, Repair): a leg row per new leg of every repair its request
+// carries, on a primary and a standby alike; on a primary, the repairs
+// lever's verdict on a repair by its rep_name, keyed by the repair's rep_id,
+// and no verdict for a repair the lever does not name; and on a primary, a
+// reading of every group of the request, whole with every leg_list leg in
+// sync unless the grps lever says otherwise, half by half. A standby reports
+// neither verdicts nor readings.
+func TestCntlrInfoRepairsAndReadings(t *testing.T) {
+	const behavior = `{"objects": {"cntlr 1:1": {
+	  "repairs": {"r0": {"started": true}, "gone": {"abort_confirmed": true}},
+	  "grps": {"12": {"whole": false}, "0x15": {"in_sync": []},
+	           "71": {"whole": false, "in_sync": [712]}}}}}`
+	for _, primary := range []bool{true, false} {
+		name := "standby"
+		if primary {
+			name = "primary"
+		}
+		t.Run(name, func(t *testing.T) {
+			agent := newTestAgent(t)
+			_, cnClient := startAgent(t, agent)
+			setBehavior(t, agent, behavior)
+			ctx := context.Background()
+			if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+				ClusterId: 1, CnId: 1, Revision: 1,
+				CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
+			}); err != nil {
+				t.Fatalf("SyncupCn: %v", err)
+			}
+			req := cntlrFixture(primary)
+			req.NameToRepair = map[string]*pb.Repair{
+				"r0": {RepId: 9, GrpId: 12, NewLegList: []*pb.Leg{
+					{LegId: 105},
+				}},
+				"r1": {RepId: 10, GrpId: 21, NewLegList: []*pb.Leg{
+					{LegId: 203},
+				}},
+			}
+			reply, err := cnClient.SyncupCntlr(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			info := reply.GetCntlrInfo()
+			wantKeys(t, "leg_id_to_leg", info.GetLegIdToLeg(),
+				101, 102, 103, 104, 105, 201, 202, 203, 711, 712, 713)
+			if !primary {
+				wantKeys(t, "rep_id_to_repair_info",
+					info.GetRepIdToRepairInfo())
+				wantKeys(t, "grp_id_to_grp_info", info.GetGrpIdToGrpInfo())
+				return
+			}
+			wantKeys(t, "rep_id_to_repair_info",
+				info.GetRepIdToRepairInfo(), 9)
+			if v := info.GetRepIdToRepairInfo()[9]; !v.GetStarted() ||
+				v.GetAbortConfirmed() {
+				t.Errorf("verdict on rep 9 = %v, want started", v)
+			}
+			wantKeys(t, "grp_id_to_grp_info", info.GetGrpIdToGrpInfo(),
+				11, 12, 21, 71)
+			for _, tc := range []struct {
+				grpId  uint64
+				whole  bool
+				inSync []uint64
+			}{
+				{11, true, []uint64{101}},
+				{12, false, []uint64{103, 104}},
+				{21, true, nil},
+				{71, false, []uint64{712}},
+			} {
+				got := info.GetGrpIdToGrpInfo()[tc.grpId]
+				if got.GetWhole() != tc.whole ||
+					fmt.Sprint(got.GetInSyncLegIdList()) !=
+						fmt.Sprint(tc.inSync) {
+					t.Errorf("group %d reading = %v, want whole %v in sync %v",
+						tc.grpId, got, tc.whole, tc.inSync)
+				}
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{"repairs on a side",
+			`{"objects": {"side 1:3:5": {"repairs": {"r0": {}}}}}`},
+		{"grps on the dn", `{"objects": {"dn": {"grps": {"1": {}}}}}`},
+		{"repairs in default", `{"default": {"repairs": {"r0": {}}}}`},
+		{"grps in default", `{"default": {"grps": {"1": {}}}}`},
+		{"a grp key that is no id",
+			`{"objects": {"cntlr 1:1": {"grps": {"g1": {}}}}}`},
+		{"an unknown verdict key",
+			`{"objects": {"cntlr 1:1": {"repairs": {"r0": {"done": true}}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseBehavior([]byte(tc.data)); err == nil {
+				t.Fatalf("ParseBehavior(%s) succeeded, want an error", tc.data)
+			}
+		})
+	}
+	err := newTestAgent(t).Update(SideKey(1, 3, 5), func(o *Object) {
+		o.Grps = map[uint64]GrpReading{1: {}}
+	})
+	if err == nil {
+		t.Fatalf("Update set grps on a side")
+	}
+}

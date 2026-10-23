@@ -348,6 +348,17 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // "provisioning" for one that is not, the side the real agent connects to
 // only once it is provisioned. A
 // row override, keyed "side_id_to_path.<side_id>", holds a path down.
+//
+// A cntlr also reports a leg row per new leg of every repair its request
+// carries in name_to_repair, as the cn agent connects, wraps and probes a
+// new leg as it does a spare (architecture.md, Repair). While its request
+// makes it the primary it reports, for every group of the request, a
+// reading in grp_id_to_grp_info — whole, with every leg of the group's
+// leg_list in sync, unless the grps lever says otherwise — and, for each
+// repair of the request the repairs lever names, that lever's verdict in
+// rep_id_to_repair_info under the repair's rep_id. A standby reports
+// neither, as the real cn agent reads no array as a standby (cnagent.md
+// CN12).
 func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
 	if req == nil {
@@ -373,6 +384,10 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 		CloneIdToDmClone:  make(map[uint64]*pb.ResInfo),
 		SideIdToPath:      make(map[uint64]*pb.ResInfo),
 	}
+	if primary {
+		info.RepIdToRepairInfo = make(map[uint64]*pb.CntlrInfo_RepairInfo)
+		info.GrpIdToGrpInfo = make(map[uint64]*pb.CntlrInfo_GrpInfo)
+	}
 	sliceIdList := sliceIdList(req)
 	for _, sliceId := range sliceIdList {
 		info.SliceIdToDmPool[sliceId] = a.resolveCntlrRow(
@@ -396,6 +411,7 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 			a.grpRowsLocked(info, key, primary, grp, false)
 		}
 	}
+	a.repairRowsLocked(info, key, primary, req)
 	thinOk := false
 	var thinMissing map[uint64]bool
 	if ob := a.objLocked(key); ob != nil {
@@ -460,12 +476,16 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 // grpRowsLocked derives one group's rows into info (cntlrInfoLocked): its
 // group row and a leg row per leg and per spare leg, and, with paths, the
 // path rows of every leg with two sides. A clone meta group is walked without
-// paths: no migration gives its legs a second side.
+// paths: no migration gives its legs a second side. On a primary it adds the
+// group's reading (grpReadingLocked).
 func (a *Agent) grpRowsLocked(
 	info *pb.CntlrInfo, key string, primary bool, grp *pb.Group, paths bool,
 ) {
 	info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveCntlrRow(
 		key, primary, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
+	if primary {
+		info.GrpIdToGrpInfo[grp.GetGrpId()] = a.grpReadingLocked(key, grp)
+	}
 	legList := make([]*pb.Leg, 0,
 		len(grp.GetLegList())+len(grp.GetSpareLegList()))
 	legList = append(legList, grp.GetLegList()...)
@@ -479,6 +499,60 @@ func (a *Agent) grpRowsLocked(
 		for _, side := range leg.GetSideList() {
 			info.SideIdToPath[side.GetSideId()] =
 				a.pathRowLocked(key, primary, side)
+		}
+	}
+}
+
+// grpReadingLocked is a primary's reading of one group (cntlrInfoLocked):
+// whole, with every leg of its leg_list in sync, each half overridden by the
+// grps lever's entry for the group. The list is built afresh, so a reply the
+// grpc codec touches cannot reach back into the levers.
+func (a *Agent) grpReadingLocked(key string, grp *pb.Group) *pb.CntlrInfo_GrpInfo {
+	reading := &pb.CntlrInfo_GrpInfo{Whole: true}
+	for _, leg := range grp.GetLegList() {
+		reading.InSyncLegIdList = append(
+			reading.InSyncLegIdList, leg.GetLegId())
+	}
+	ob := a.objLocked(key)
+	if ob == nil {
+		return reading
+	}
+	lever, ok := ob.Grps[grp.GetGrpId()]
+	if !ok {
+		return reading
+	}
+	if lever.Whole != nil {
+		reading.Whole = *lever.Whole
+	}
+	if lever.InSync != nil {
+		reading.InSyncLegIdList = slices.Clone(*lever.InSync)
+	}
+	return reading
+}
+
+// repairRowsLocked derives what a cntlr reports of the repairs of its request
+// (cntlrInfoLocked): a leg row per new leg of every repair, on a primary and
+// a standby alike, and, on a primary, the verdict the repairs lever gives a
+// repair, keyed by the repair's rep_id.
+func (a *Agent) repairRowsLocked(
+	info *pb.CntlrInfo, key string, primary bool, req *pb.SyncupCntlrRequest,
+) {
+	ob := a.objLocked(key)
+	for repName, rep := range req.GetNameToRepair() {
+		for _, leg := range rep.GetNewLegList() {
+			info.LegIdToLeg[leg.GetLegId()] = a.resolveCntlrRow(
+				key, primary, rowKey("leg_id_to_leg", leg.GetLegId()))
+		}
+		if !primary || ob == nil {
+			continue
+		}
+		verdict, ok := ob.Repairs[repName]
+		if !ok {
+			continue
+		}
+		info.RepIdToRepairInfo[rep.GetRepId()] = &pb.CntlrInfo_RepairInfo{
+			Started:        verdict.Started,
+			AbortConfirmed: verdict.AbortConfirmed,
 		}
 	}
 }

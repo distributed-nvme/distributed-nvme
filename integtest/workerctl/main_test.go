@@ -4,9 +4,11 @@
 // here rather than land garbage in a key: these cover every tuple form of its
 // flags and the typed spec of the planting library each one becomes, the 0x
 // hex ids, the bitmap payload, the key kind → message mapping of `get`
-// (architecture.md, Key table), the three printers that touch no etcd, and
-// set-epoch's value. What the library does with a spec is the library's own
-// tests' (integtest/plant).
+// (architecture.md, Key table), the three printers that touch no etcd,
+// set-epoch's value, and set-repair-stage's stage and create-repair's look-up
+// of its group and its plan. What the library does with a spec is the
+// library's own tests' (integtest/plant), and what a model operation does
+// with its arguments the model's.
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/integtest/plant"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -500,6 +503,12 @@ func TestMessageForKey(t *testing.T) {
 			"dnv migration_bitmap ebada5168620c5fe 0000000000000001 m0 01",
 			&pb.MigrBitmap{},
 		},
+		{"dnv repair ebada5168620c5fe 0000000000000001 r0", &pb.Repair{}},
+		{
+			"dnv retired_leg ebada5168620c5fe 0000000000000001 " +
+				"0000000000000002",
+			&pb.RetiredLeg{},
+		},
 		{
 			"dnv sp_id_to_name ebada5168620c5fe 0000000000000001",
 			&pb.SpName{},
@@ -554,7 +563,8 @@ func TestKindsCoverKeyTable(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"dn_conf", "cn_conf", "dn_capacity",
-		"cn_capacity", "sp_conf", "cntlr", "slice", "cdc"} {
+		"cn_capacity", "sp_conf", "cntlr", "slice", "cdc", "repair",
+		"retired_leg"} {
 		if !kinds[name].clusterScoped {
 			t.Errorf("kind %q must be cluster scoped", name)
 		}
@@ -623,6 +633,7 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
 		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
+		"RetiredLegMaxAge":           common.RetiredLegMaxAge,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
@@ -888,5 +899,88 @@ func TestPlantedEpoch(t *testing.T) {
 				"want %d", tc.age, tc.ageGiven, tc.clearEpoch, got, err,
 				tc.want)
 		}
+	}
+}
+
+// TestParseRepStage pins set-repair-stage's --stage: the two stages a stage
+// move reaches (dnv-worker.md AR11), by either spelling, and nothing else —
+// CREATED is no move.
+func TestParseRepStage(t *testing.T) {
+	cases := []struct {
+		in   string
+		want pb.RepStage
+	}{
+		{"started", pb.RepStage_REP_STAGE_STARTED},
+		{"ABORTED", pb.RepStage_REP_STAGE_ABORTED},
+		{" REP_STAGE_STARTED ", pb.RepStage_REP_STAGE_STARTED},
+		{"rep_stage_aborted", pb.RepStage_REP_STAGE_ABORTED},
+	}
+	for _, tc := range cases {
+		got, err := parseRepStage(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("parseRepStage(%q) = %v, %v; want %v", tc.in, got, err,
+				tc.want)
+		}
+	}
+	for _, bad := range []string{"", "created", "REP_STAGE_CREATED", "1"} {
+		if _, err := parseRepStage(bad); err == nil {
+			t.Errorf("parseRepStage(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+// TestFindRepairGrp pins create-repair's look-up of its group: the slices
+// first, either list, then the clones' clone meta groups (architecture.md,
+// Repairs), and the plan of a fresh new leg, the disk node of every side of
+// the group's legs and spares.
+func TestFindRepairGrp(t *testing.T) {
+	side := func(addr string) []*pb.Side {
+		return []*pb.Side{{AddrPort: addr}}
+	}
+	cloneGrp := &pb.Group{GrpId: 30, LegList: []*pb.Leg{
+		{LegId: 31, SideList: side("dn3")},
+	}}
+	state := &model.SpState{
+		Conf: &pb.SpConf{
+			SliceIdList:   []uint64{1},
+			CloneNameList: []string{"c0", "bare"},
+		},
+		Slices: map[uint64]*pb.Slice{1: {
+			MetaGrpList: []*pb.Group{{GrpId: 10}},
+			DataGrpList: []*pb.Group{{
+				GrpId: 20,
+				LegList: []*pb.Leg{
+					{LegId: 21, SideList: side("dn1")},
+					{LegId: 22, SideList: side("dn2")},
+				},
+				SpareLegList: []*pb.Leg{{LegId: 23, SideList: side("dn4")}},
+			}},
+		}},
+		Clones: map[string]*pb.Clone{
+			"c0":   {MetaGrp: cloneGrp},
+			"bare": {},
+		},
+	}
+	for _, tc := range []struct {
+		grpId  uint64
+		parent model.GrpParent
+	}{
+		{10, model.GrpParent{SliceId: 1}},
+		{20, model.GrpParent{SliceId: 1}},
+		{30, model.GrpParent{CloneName: "c0"}},
+	} {
+		parent, grp, ok := findRepairGrp(state, tc.grpId)
+		if !ok || parent != tc.parent || grp.GetGrpId() != tc.grpId {
+			t.Errorf("findRepairGrp(%d) = %+v, %v, %v; want %+v", tc.grpId,
+				parent, grp, ok, tc.parent)
+		}
+	}
+	if _, _, ok := findRepairGrp(state, 99); ok {
+		t.Errorf("findRepairGrp found a group no slice or clone holds")
+	}
+	_, grp, _ := findRepairGrp(state, 20)
+	got := strings.Join(repairGrpDnAddrs(grp), ",")
+	if got != "dn1,dn2,dn4" {
+		t.Errorf("plan = %s, want every side of the legs and the spare", got)
 	}
 }

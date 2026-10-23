@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 60 invocations
+// argv for argv. The integration suite asserts the same 68 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -586,9 +586,67 @@ var sweepRows = []sweepRow{
 			SpareLegId:  6,
 			TargetLegId: 4,
 		}},
+
+	// ---- repair ----
+	{61, "CreateRepair",
+		[]string{"repair", "create", "--name", "r0", "--grp", "1",
+			"--bad-legs", "2", "--dn-white", itDnAddr, "--rev", "7"},
+		&pb.CreateRepairRequest{
+			ClusterName:  itCluster,
+			SpName:       itSp,
+			SpRev:        wantSpRev(itRevValue),
+			RepName:      "r0",
+			GrpId:        1,
+			BadLegIdList: []uint64{2},
+			DnSelector:   &pb.NodeSelector{WhiteList: []string{itDnAddr}},
+		}},
+	{62, "FinishRepair",
+		[]string{"repair", "finish", "--name", "r0", "--rev", "7"},
+		&pb.FinishRepairRequest{
+			ClusterName: itCluster,
+			SpName:      itSp,
+			SpRev:       wantSpRev(itRevValue),
+			RepName:     "r0",
+		}},
+	{63, "CancelRepair",
+		[]string{"repair", "cancel", "--name", "r0", "--rev", "7"},
+		&pb.CancelRepairRequest{
+			ClusterName: itCluster,
+			SpName:      itSp,
+			SpRev:       wantSpRev(itRevValue),
+			RepName:     "r0",
+		}},
+	{64, "TryToAbortRepair",
+		[]string{"repair", "abort", "--name", "r0", "--rev", "7"},
+		&pb.TryToAbortRepairRequest{
+			ClusterName: itCluster,
+			SpName:      itSp,
+			SpRev:       wantSpRev(itRevValue),
+			RepName:     "r0",
+		}},
+	{65, "GetRepair",
+		[]string{"repair", "get", "--name", "r0"},
+		&pb.GetRepairRequest{
+			ClusterName: itCluster, SpName: itSp, RepName: "r0"}},
+	{66, "ListRepairs",
+		[]string{"repair", "list"},
+		&pb.ListRepairsRequest{ClusterName: itCluster, SpName: itSp}},
+
+	// ---- retired-leg ----
+	{67, "ListRetiredLegs",
+		[]string{"retired-leg", "list"},
+		&pb.ListRetiredLegsRequest{ClusterName: itCluster, SpName: itSp}},
+	{68, "DeleteRetiredLeg",
+		[]string{"retired-leg", "delete", "--leg", "3", "--rev", "7"},
+		&pb.DeleteRetiredLegRequest{
+			ClusterName: itCluster,
+			SpName:      itSp,
+			SpRev:       wantSpRev(itRevValue),
+			LegId:       3,
+		}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 60 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 68 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -599,12 +657,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 60 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 68 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 59 that remain.
+// be green over the 67 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 60 {
-		t.Errorf("sweepRows has %d rows, want 60", len(sweepRows))
+	if len(sweepRows) != 68 {
+		t.Errorf("sweepRows has %d rows, want 68", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -630,7 +688,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 59 of the 60, sp_name in 41. It reads the field off
+// fill: cluster_name in 67 of the 68, sp_name in 49. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -649,11 +707,11 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 59 {
-		t.Errorf("%d requests carry cluster_name, want 59", clusterFields)
+	if clusterFields != 67 {
+		t.Errorf("%d requests carry cluster_name, want 67", clusterFields)
 	}
-	if spFields != 41 {
-		t.Errorf("%d requests carry sp_name, want 41", spFields)
+	if spFields != 49 {
+		t.Errorf("%d requests carry sp_name, want 49", spFields)
 	}
 }
 
@@ -793,8 +851,8 @@ func TestTokenCarriersMatchCT3(t *testing.T) {
 			}
 		})
 	}
-	if carriers != 34 {
-		t.Errorf("%d requests carry a revision token, want 34", carriers)
+	if carriers != 39 {
+		t.Errorf("%d requests carry a revision token, want 39", carriers)
 	}
 }
 
@@ -846,8 +904,8 @@ func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
 			}
 		})
 	}
-	if tokenless != 26 {
-		t.Errorf("%d requests carry no revision token, want 26", tokenless)
+	if tokenless != 29 {
+		t.Errorf("%d requests carry no revision token, want 29", tokenless)
 	}
 }
 

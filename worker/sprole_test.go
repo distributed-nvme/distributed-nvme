@@ -268,20 +268,22 @@ func spFixture() *model.SpState {
 // the golden-request tests.
 func spTestWorker(d *deps) *spWorker {
 	return &spWorker{
-		deps:     d,
-		ctx:      context.Background(),
-		shard:    testShard,
-		cid:      testCid,
-		spId:     testSpId,
-		seed:     seedOf(3),
-		desired:  desiredState{revision: testSpRev, handle: testSpName},
-		sides:    make(map[sideKey]*sideChild),
-		cntlrs:   make(map[uint64]*cntlrChild),
-		legs:     make(map[uint64]*healthMonitor),
-		legSlice: make(map[uint64]uint64),
-		legClone: make(map[uint64]cloneOwner),
-		tdRefs:   make(map[uint64]model.TdRef),
-		reportCh: make(chan spReport, 8),
+		deps:      d,
+		ctx:       context.Background(),
+		shard:     testShard,
+		cid:       testCid,
+		spId:      testSpId,
+		seed:      seedOf(3),
+		desired:   desiredState{revision: testSpRev, handle: testSpName},
+		sides:     make(map[sideKey]*sideChild),
+		cntlrs:    make(map[uint64]*cntlrChild),
+		legs:      make(map[uint64]*healthMonitor),
+		legOwners: make(map[uint64]legOwner),
+		legSlice:  make(map[uint64]uint64),
+		legClone:  make(map[uint64]cloneOwner),
+		legRepair: make(map[uint64]repairOwner),
+		tdRefs:    make(map[uint64]model.TdRef),
+		reportCh:  make(chan spReport, 8),
 	}
 }
 
@@ -1867,9 +1869,10 @@ func TestSpUnresolvedCntlrLeavesEverySideIdle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := captureLogs(t)
 			state := spFixture()
-			// The sides of a clone meta group are left idle with the
-			// slices' (RW14).
+			// The sides of a clone meta group, and of a repair's new leg,
+			// are left idle with the slices' (RW14).
 			withCloneGrp(state)
+			withSpRepair(state, true)
 			tc.unhinge(state)
 			w := spTestWorker(nil)
 			plan := w.buildPlan(context.Background(), state)
@@ -1905,6 +1908,13 @@ func TestSpUnresolvedCntlrLeavesEverySideIdle(t *testing.T) {
 			if plan.legClone[spCloneLegB] != want {
 				t.Fatalf("legClone = %v, want the clone's legs still "+
 					"indexed", plan.legClone)
+			}
+			// And so does the leg -> repair index of a repair's new leg,
+			// whose rows a dying new leg's health epoch is written from.
+			wantRep := repairOwner{name: spRepName, id: spRepId}
+			if plan.legRepair[spRepNewLeg] != wantRep {
+				t.Fatalf("legRepair = %v, want the repair's new leg still "+
+					"indexed", plan.legRepair)
 			}
 		})
 	}
@@ -2597,16 +2607,21 @@ type fakeSpOps struct {
 	loads       int
 	provisioned [][]model.SideRef
 	// cloneProvisioned records every flipCloneProvisioned call, as
-	// provisioned records flipProvisioned's.
-	cloneProvisioned [][]model.CloneSideRef
-	created          [][]model.TdRef
+	// provisioned records flipProvisioned's, and repairProvisioned every
+	// flipRepairProvisioned call, one side each; repairFlipErr, when set, is
+	// what each of those returns.
+	cloneProvisioned  [][]model.CloneSideRef
+	repairProvisioned []model.RepairSideRef
+	repairFlipErr     error
+	created           [][]model.TdRef
 	// applySides / applyCloneSides / applyTds decide what the STM reports
 	// back as WRITTEN. nil means "everything the caller listed"; a set
 	// restricts it, which is how the tests reproduce a candidate another
 	// owner flipped first.
-	applySides      map[model.SideRef]bool
-	applyCloneSides map[model.CloneSideRef]bool
-	applyTds        map[model.TdRef]bool
+	applySides       map[model.SideRef]bool
+	applyCloneSides  map[model.CloneSideRef]bool
+	applyRepairSides map[model.RepairSideRef]bool
+	applyTds         map[model.TdRef]bool
 	// onLoad, when set, sees every state a load returns, on the loader's
 	// goroutine and before the loader does.
 	onLoad func(state *model.SpState)
@@ -2713,6 +2728,33 @@ func (o *fakeSpOps) flipCloneProvisioned(
 		return nil, 0, nil
 	}
 	return applied, o.provisionedRev, nil
+}
+
+func (o *fakeSpOps) flipRepairProvisioned(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref model.RepairSideRef,
+) (bool, uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.order = append(o.order, "repair_provisioned")
+	o.repairProvisioned = append(o.repairProvisioned, ref)
+	if o.repairFlipErr != nil {
+		return false, 0, o.repairFlipErr
+	}
+	if o.applyRepairSides != nil && !o.applyRepairSides[ref] {
+		return false, 0, nil
+	}
+	return true, o.provisionedRev, nil
+}
+
+func (o *fakeSpOps) repairProvisionedCalls() []model.RepairSideRef {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]model.RepairSideRef(nil), o.repairProvisioned...)
 }
 
 func (o *fakeSpOps) flipCreated(
@@ -5628,10 +5670,12 @@ func TestSidesFirstHoldAfterADemotionTakesTheNewestPlans(t *testing.T) {
 // the block probe (architecture.md, Group on-leg layout: meta region, data
 // region, health block) AR8 step 1 needs. Inside the hold the pass must read no
 // primary info, so AR8 waits for the spare rather than switching it in on the
-// standby's row; once the release has handed the child the primary plan and
-// the promotion's reply reports the group's array running, the pass reads its
-// info again and the spare is switched in. The window between the hand-over
-// and that reply is TestReactionSpareSwitchNeedsTheGroupRunning's.
+// standby's row: with no report, no leg of the group is held in sync, so
+// AR8's healthy-leg test holds the group before it asks after the spare;
+// once the release has handed the child the primary plan and the promotion's
+// reply reports the group's array running, the pass reads its info again and
+// the spare is switched in. The window between the hand-over and that reply
+// is TestReactionSpareSwitchNeedsTheGroupRunning's.
 func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
 	const spareLegId = uint64(700)
 	state := reactFixture(t)
@@ -5685,7 +5729,7 @@ func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
 	}
 	h.pass()
 	h.wantOps()
-	h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+	h.wantSkipped(reactionSpareCreate, reasonNoHealthyLeg)
 
 	// The release hands both children their new plans, and the promotion's
 	// reply reports the new primary's probe of the spare and its running

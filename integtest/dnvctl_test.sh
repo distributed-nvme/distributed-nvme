@@ -23,7 +23,7 @@
 # needed on the VM — both binaries are built here and scp'd.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 60 commands marshals its argv into exactly the intended request
+# of the 68 commands marshals its argv into exactly the intended request
 # proto, asserted FIELD FOR FIELD against the fake's state.json — a
 # whole-object comparison, so an unexpected key fails as loudly as a wrong
 # value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
@@ -49,7 +49,7 @@
 #
 # Round trips: ctl_exec does ONE ssh per dnvctl invocation and brings back five
 # things — state.json before, the exit code, stderr, stdout, state.json after.
-# That is what keeps a 60-step sweep to 60 ssh calls, and it is why every
+# That is what keeps a 68-step sweep to 68 ssh calls, and it is why every
 # ctl_ok/ctl_fail/ctl_usage MUST run in the PARENT shell: the five results land
 # in globals, and a subshell would drop them (and would swallow a die).
 #
@@ -910,8 +910,8 @@ EOF
 	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
 	# TestClusterCreateExtentSize says the same, and also carries the "no
 	# --extent-size sends no dn_bin_conf" half).
-	# The step keeps its number because the audit below pins 60 steps over
-	# 60 distinct RPCs.
+	# The step keeps its number because the audit below pins 68 steps over
+	# 68 distinct RPCs.
 	sweep_step 01 CreateCluster \
 		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
 		cluster create --name c1 --extent-size 67108864
@@ -1233,13 +1233,54 @@ EOF
 		  \"spare_leg_id\":\"6\",\"target_leg_id\":\"4\"}" \
 		spare switch --grp 1 --spare 6 --target 4 --rev 7
 
+	# --- `repair` — `ctl/repair.go` ------------------------------------
+	# --bad-legs is a list flag, so the one bad leg id is a one-element list
+	# of uint64 strings; no --retired-leg leaves retired_leg_id at zero, a
+	# fresh new leg, and the fake records no key for it.
+	sweep_step 61 CreateRepair \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\",
+		  \"grp_id\":\"1\",\"bad_leg_id_list\":[\"2\"],
+		  \"dn_selector\":{\"white_list\":[\"$DN_ADDR\"]}}" \
+		repair create --name r0 --grp 1 --bad-legs 2 --dn-white "$DN_ADDR" \
+		--rev 7
+	sweep_step 62 FinishRepair \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\"}" \
+		repair finish --name r0 --rev 7
+	sweep_step 63 CancelRepair \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\"}" \
+		repair cancel --name r0 --rev 7
+	# The one leaf whose verb is not its RPC's (Conventions, Verbs).
+	sweep_step 64 TryToAbortRepair \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\"}" \
+		repair abort --name r0 --rev 7
+	sweep_step 65 GetRepair \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"rep_name\":\"r0\"}" \
+		repair get --name r0
+	sweep_step 66 ListRepairs \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
+		repair list
+
+	# --- `retired-leg` — `ctl/retiredleg.go` ---------------------------
+	sweep_step 67 ListRetiredLegs \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
+		retired-leg list
+	sweep_step 68 DeleteRetiredLeg \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"leg_id\":\"3\"}" \
+		retired-leg delete --leg 3 --rev 7
+
 	# -------------------------------------------------------------------
-	stage audit "all 60 steps left one request record under their trace id"
+	stage audit "all 68 steps left one request record under their trace id"
 	# -------------------------------------------------------------------
 	# CT1's completeness claim, made on the WIRE rather than from a table:
-	# 60 distinct RPCs, 60 distinct trace ids, one interceptor record each.
-	# One log read serves all 60 assertions.
-	assert_eq "${#SWEEP_TRACES[@]}" "60" "the sweep ran 60 steps"
+	# 68 distinct RPCs, 68 distinct trace ids, one interceptor record each.
+	# One log read serves all 68 assertions.
+	assert_eq "${#SWEEP_TRACES[@]}" "68" "the sweep ran 68 steps"
 	local records idx want
 	records=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request") | .trace_id + " " + .method')
@@ -1250,7 +1291,7 @@ EOF
 	done
 	local distinct
 	distinct=$(printf '%s\n' "${SWEEP_RPCS[@]}" | sort -u | grep -c . || true)
-	assert_eq "$distinct" "60" "the 60 steps drove 60 DISTINCT RPCs"
+	assert_eq "$distinct" "68" "the 68 steps drove 68 DISTINCT RPCs"
 }
 
 # ---------------------------------------------------------------------------

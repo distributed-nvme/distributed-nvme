@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 )
 
 // The whole-worker scenario cases of the two drains (dnv-worker.md, The sp
-// drain, SPD1 to SPD14, and The clone drain, CLD1 to CLD12). A pool that is
+// drain, SPD1 to SPD15, and The clone drain, CLD1 to CLD12). A pool that is
 // drained is planted without its thin device and subsystem, as
 // DeleteStoragePool latches only a pool that holds none (SPD4).
 
@@ -142,6 +143,48 @@ func TestScenPoolDrainDoesNotWaitForAgents(t *testing.T) {
 			return len(req.GetCntlrPointerList()) == 0,
 				fmt.Sprintf("it lists %v", req.GetCntlrPointerList())
 		})
+}
+
+// TestScenPoolDrainTakesRepairsThenRetiredLegs pins SPD8's order over
+// SPD15's phases on a whole worker: a pool whose data group holds a repair,
+// its fresh new leg on dn 3, and a retired leg, its side on dn 3 as well, is
+// latched before the worker starts; the drain takes the cntlrs, then the
+// repair, then the retired leg, then the slice, one step each, and ends in
+// one `sp drained` with no failed step. Every node's budget is back, dn 3's
+// two sides included (SPD13).
+func TestScenPoolDrainTakesRepairsThenRetiredLegs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantScen(t, scenShape{noTdSs: true})
+	if _, err := plant.PutRetiredLeg(ctx, h.cli, c.cl, c.sp.Ref,
+		plant.RetiredLegSpec{
+			GrpId: stdDataGrpId, LegIdx: 1, Dn: 3, Slot: 2, Epoch: 1,
+		}); err != nil {
+		t.Fatalf("PutRetiredLeg: %v", err)
+	}
+	if _, err := plant.PutRepair(ctx, h.cli, c.cl, c.sp.Ref, plant.RepairSpec{
+		Name: "rep0", GrpId: stdDataGrpId, BadLegId: 7, Dn: 3, Slot: 2,
+		Provisioned: true,
+	}); err != nil {
+		t.Fatalf("PutRepair: %v", err)
+	}
+	c.latchStd(t)
+	w := h.startWorker(t, "w1")
+	c.waitDrained(t, 20*time.Second)
+	h.waitRecord(t, 10*time.Second, w, msgSpDrainDone, nil)
+	c.drainEnds(t)
+	var phases []string
+	for _, rec := range h.records(w, msgSpDrainStep) {
+		phases = append(phases, rec.str("phase"))
+	}
+	want := []string{
+		drainPhaseCntlrs, drainPhaseRepairs, drainPhaseRetiredLegs,
+		drainPhaseSlice,
+	}
+	if !slices.Equal(phases, want) {
+		t.Errorf("the drain's steps ran %v, want %v", phases, want)
+	}
 }
 
 // TestScenPoolDrainFinalStepLogsItsEndOnce pins the end of SPD12's last step

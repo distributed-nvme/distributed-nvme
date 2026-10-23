@@ -1169,6 +1169,91 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 				infoReqs[0].GetSidePointer(), fx.cid, dnId, wantPointer)
 		}
 	})
+
+	// The side of a repair's new leg, and a retired side, are found once
+	// neither a slice nor a clone holds the id, and the agent is asked for
+	// each by the pointer its DN keys it by: the new leg's id, and the
+	// retired leg's own (architecture.md, Repair). The records are planted
+	// as CreateRepair and FinishRepair write them, on a fake DN; the look-up
+	// reads nothing else of them, which is why the fixture's RedundNone pool
+	// serves.
+	for _, tc := range []struct {
+		name  string
+		legId uint64
+		plant func(t *testing.T, fx *spFixture, side *pb.Side)
+	}{
+		{"repair side", 9001, func(
+			t *testing.T, fx *spFixture, side *pb.Side,
+		) {
+			agentpathPut(t, fx.cli,
+				model.RepairKey(fx.cid, fx.conf.GetSpId(), "rep-a"),
+				&pb.Repair{
+					RepId: 9000,
+					NewLegList: []*pb.Leg{{
+						LegId: 9001, SideList: []*pb.Side{side},
+					}},
+				})
+			fx.conf.RepairNameList = []string{"rep-a"}
+		}},
+		{"retired side", 9101, func(
+			t *testing.T, fx *spFixture, side *pb.Side,
+		) {
+			agentpathPut(t, fx.cli,
+				model.RetiredLegKey(fx.cid, fx.conf.GetSpId(), 9101),
+				&pb.RetiredLeg{Side: side})
+			fx.conf.RetiredLegIdList = []uint64{9101}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newSpFixture(t)
+			var addrPort string
+			for addr := range fx.fakes {
+				addrPort = addr
+				break
+			}
+			sideId := tc.legId + 1
+			tc.plant(t, fx, &pb.Side{
+				SideId:      sideId,
+				AddrPort:    addrPort,
+				NvmeTrConf:  agentpathTrConf(addrPort),
+				Provisioned: true,
+			})
+			agentpathPut(t, fx.cli, model.SpConfKey(fx.cid, fx.spName),
+				fx.conf)
+			reply, err := fx.srv.InspectSide(
+				context.Background(), &pb.InspectSideRequest{
+					ClusterName: fx.cluster,
+					SpName:      fx.spName,
+					SideId:      sideId,
+				})
+			if err != nil {
+				t.Fatalf("InspectSide: %v", err)
+			}
+			if !proto.Equal(reply.GetSideInfo(), wantSideInfo) {
+				t.Errorf("side_info = %v, want the agent's %v",
+					reply.GetSideInfo(), wantSideInfo)
+			}
+			fake := fx.fakes[addrPort]
+			fake.mu.Lock()
+			infoReqs := append(
+				[]*pb.GetSideInfoRequest(nil), fake.sideInfoReqs...)
+			fake.mu.Unlock()
+			if len(infoReqs) != 1 {
+				t.Fatalf("GetSideInfo calls = %d, want 1", len(infoReqs))
+			}
+			wantPointer := &pb.SidePointer{
+				SpId:   fx.conf.GetSpId(),
+				LegId:  tc.legId,
+				SideId: sideId,
+			}
+			if infoReqs[0].GetDnId() != fx.dnIds[addrPort] ||
+				!proto.Equal(infoReqs[0].GetSidePointer(), wantPointer) {
+				t.Errorf("GetSideInfo asked for (%d, %v), want (%d, %v)",
+					infoReqs[0].GetDnId(), infoReqs[0].GetSidePointer(),
+					fx.dnIds[addrPort], wantPointer)
+			}
+		})
+	}
 }
 
 // TestAgentPathForwardsTraceIdToAgent pins T3 / AG2: the mandatory client

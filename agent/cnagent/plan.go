@@ -255,13 +255,20 @@ type grpPlan struct {
 	grpIdx uint32
 	clone  *pb.Clone
 	raid1  bool
-	legs   []*legPlan // leg_list, ascending leg_idx — the md members
+	// legs are leg_list, ascending leg_idx; with an open repair's new legs
+	// they are the md members (memberNames).
+	legs   []*legPlan
 	spares []*legPlan // spare_leg_list; connected and probed, never members
+	// rep is the group's repair, the one its rep_name names in the request's
+	// name_to_repair (architecture.md, Repair), and nil while it has none.
+	// Its new legs are connected, wrapped and probed as spares are, and join
+	// the array only by CN12's rules for a repair.
+	rep *repPlan
 
 	// deferred is the [D15] group gate: some leg of leg_list is provisioning, so
 	// the group builds no md array and no CnGrpName, and is left out of the
-	// pool concats and of the pool sizing. A provisioning *spare* never defers
-	// a group — spares are not members (architecture.md, Spare legs).
+	// pool concats and of the pool sizing. A provisioning *spare* or new leg
+	// never defers a group (CN9).
 	deferred bool
 
 	// dmName is set for RedundNone only; mdDevName/mdArrayName for
@@ -283,17 +290,43 @@ type grpPlan struct {
 	dataOffsetKiB     uint64
 }
 
-// legNames are the dm names of the group's leg_list wrappers — the key
-// Md.Detail finds the group's array by. Spares are left out: a spare is never
-// a member (architecture.md, Spare legs), and a leg switched out into the
-// spare list is an extra that reconcileMembers removes once CN12's in-sync
-// guard lets it (inSyncGuard), found through the leg_list member that stays.
-func (gp *grpPlan) legNames() []string {
-	out := make([]string, 0, len(gp.legs))
+// memberNames are the dm names of the wrappers the group's array may hold as
+// members (CN12): the leg_list wrappers and the new legs of an open repair
+// (repPlan.open). They are the key Md.Detail finds the group's array by, so
+// an array a whole new leg started alone is found too, and the members
+// reconcileMembers keeps. Spares are left out: a spare is never a member
+// (architecture.md, Spare legs), and a leg switched out into the spare list
+// is an extra that reconcileMembers removes once CN12's in-sync guard lets it
+// (inSyncGuard), found through the leg_list member that stays. So is an
+// aborted repair's new leg.
+func (gp *grpPlan) memberNames() []string {
+	out := make([]string, 0, len(gp.legs)+1)
 	for _, lp := range gp.legs {
 		out = append(out, lp.name)
 	}
+	if rp := gp.openRep(); rp != nil {
+		for _, lp := range rp.newLegs {
+			out = append(out, lp.name)
+		}
+	}
 	return out
+}
+
+// openRep is the group's repair while it is open, CREATED or STARTED, and
+// nil otherwise.
+func (gp *grpPlan) openRep() *repPlan {
+	if gp.rep != nil && gp.rep.open() {
+		return gp.rep
+	}
+	return nil
+}
+
+// isBadLeg reports whether a leg is a bad leg of the group's open repair:
+// one that no add, no put-back and no verdict name takes back into the array
+// while the repair is open (CN12).
+func (gp *grpPlan) isBadLeg(legId uint64) bool {
+	rp := gp.openRep()
+	return rp != nil && rp.badLegIds[legId]
 }
 
 // hasLateMember reports whether a group's leg_list holds a member this pass
@@ -319,12 +352,23 @@ func (gp *grpPlan) legNames() []string {
 // nothing back, so when that member is the only one that stays nothing brings
 // it back in sync and the guard does not let go by itself (cnagent.md CN12,
 // Known limits). Spares are not
-// members (architecture.md, Spare legs), so a spare is never late. A
+// members (architecture.md, Spare legs), so a spare is never late, and
+// neither is a repair's new leg. Nor is an open repair's bad leg while
+// running says the pass found the group's array running (ensureGroup): no
+// converge adds it back to a running array while the repair is open (CN12),
+// so a retry for it would bring converges that change nothing. While the
+// array does not run, the bad leg is late as any other leg_list member is:
+// the assembly takes it once it is available (assembleGroup), and mdadm may
+// refuse to start the array without it. A
 // provisioning leg defers its whole group ([D15]), so the build never asks
 // about one; it is excluded all the same rather than trusting the caller.
-func (gp *grpPlan) hasLateMember(available map[uint64]bool) bool {
+func (gp *grpPlan) hasLateMember(
+	available map[uint64]bool,
+	running bool,
+) bool {
 	for _, lp := range gp.legs {
-		if !lp.provisioning && !available[lp.legId] {
+		if !lp.provisioning && !available[lp.legId] &&
+			!(running && gp.isBadLeg(lp.legId)) {
 			return true
 		}
 	}
@@ -353,6 +397,42 @@ type legPlan struct {
 	// on-leg layout: meta region, data region, health block).
 	sectors      uint64
 	healthOffset uint64
+}
+
+// repPlan is a group's repair as the cntlr's request carries it
+// (architecture.md, Repair): its record, its new legs, which buildLegs puts
+// among the plan's legs, and its bad legs, which stay in the group's
+// leg_list until the finish.
+type repPlan struct {
+	repId     uint64
+	rep       *pb.Repair
+	newLegs   []*legPlan
+	badLegIds map[uint64]bool
+}
+
+// open reports whether the repair is CREATED or STARTED, the stages in which
+// its new legs are members the group keeps and its bad legs stay out of every
+// add (CN12).
+func (rp *repPlan) open() bool {
+	stage := rp.rep.GetRepStage()
+	return stage == pb.RepStage_REP_STAGE_CREATED ||
+		stage == pb.RepStage_REP_STAGE_STARTED
+}
+
+// mayAdd reports whether the converge may add the repair's new legs under
+// CN12's conditions for an add: a CREATED repair whose abort flag the
+// request does not carry.
+func (rp *repPlan) mayAdd() bool {
+	return rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_CREATED &&
+		!rp.rep.GetTryToAbort()
+}
+
+// aborting reports whether the repair is CREATED with its abort flag in the
+// request: the converge never adds its new legs and removes one md holds
+// without a place (CN12).
+func (rp *repPlan) aborting() bool {
+	return rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_CREATED &&
+		rp.rep.GetTryToAbort()
 }
 
 // tdPlan is one thin device: its per-slice thin volumes, its raid0 and its
@@ -580,15 +660,15 @@ func (p *cntlrPlan) buildGrps(
 
 // buildCloneGrps builds the clone meta group of every clone in clone_list
 // (architecture.md, Terminology and object model) as buildGrps builds a
-// slice's group: its legs and spare legs, connected and wrapped on every
-// cntlr (CN10), and on the primary its md array or, without redundancy,
-// its CnGrpName dm-linear (CN12), under the md names of a clone meta group
-// (architecture.md, md names), since a slice's md names carry the group's
-// place in its slice. A clone with no group gets nothing. It runs before
-// computeEffective, which marks a leg provisioning and defers a group with a
-// provisioning leg_list leg ([D15]): built after it, a clone meta group
-// whose sides still zero would be converged as if they were exported, and
-// its leg and group rows would read ERROR, feeding health epochs and leg
+// slice's group: its legs, spare legs and repair's new legs, connected and
+// wrapped on every cntlr (CN10), and on the primary its md array or, without
+// redundancy, its CnGrpName dm-linear (CN12), under the md names of a clone
+// meta group (architecture.md, md names), since a slice's md names carry the
+// group's place in its slice. A clone with no group gets nothing. It runs
+// before computeEffective, which marks a leg provisioning and defers a group
+// with a provisioning leg_list leg ([D15]): built after it, a clone meta
+// group whose sides still zero would be converged as if they were exported,
+// and its leg and group rows would read ERROR, feeding health epochs and leg
 // repair, where they read PROVISIONING.
 func (p *cntlrPlan) buildCloneGrps() {
 	for _, clone := range p.req.GetCloneList() {
@@ -629,8 +709,8 @@ func (p *cntlrPlan) newGrpPlan(grp *pb.Group) *grpPlan {
 }
 
 // addGrp finishes a group whose caller has placed it and named its md array:
-// the group device's path and row name, its legs and spare legs, and its
-// place in the plan's groups. A RedundNone group's device is CnGrpName,
+// the group device's path and row name, its legs, spare legs and repair, and
+// its place in the plan's groups. A RedundNone group's device is CnGrpName,
 // unique in the pool by its group id alone.
 func (p *cntlrPlan) addGrp(gp *grpPlan) {
 	if p.raid1 {
@@ -643,8 +723,37 @@ func (p *cntlrPlan) addGrp(gp *grpPlan) {
 	}
 	gp.legs = p.buildLegs(gp, gp.grp.GetLegList(), false)
 	gp.spares = p.buildLegs(gp, gp.grp.GetSpareLegList(), true)
+	gp.rep = p.buildRep(gp)
 	p.grps = append(p.grps, gp)
 	p.grpById[gp.grpId] = gp
+}
+
+// buildRep is the group's repair, found through its rep_name in the
+// request's name_to_repair, the link the cntlr finds it by (architecture.md,
+// Repair). A name the request holds no repair under, or a repair of another
+// group, is no repair of this group. Every stage's new legs are built into
+// the plan's legs with the group, so each cntlr connects, wraps, probes and
+// reports them, and the sweep keeps them, as a spare's (CN10, CN21), until
+// the finish or the cancel takes them out of the request.
+func (p *cntlrPlan) buildRep(gp *grpPlan) *repPlan {
+	name := gp.grp.GetRepName()
+	if name == "" {
+		return nil
+	}
+	rep := p.req.GetNameToRepair()[name]
+	if rep == nil || rep.GetGrpId() != gp.grpId {
+		return nil
+	}
+	rp := &repPlan{
+		repId:     rep.GetRepId(),
+		rep:       rep,
+		badLegIds: make(map[uint64]bool, len(rep.GetBadLegIdList())),
+	}
+	for _, legId := range rep.GetBadLegIdList() {
+		rp.badLegIds[legId] = true
+	}
+	rp.newLegs = p.buildLegs(gp, rep.GetNewLegList(), false)
+	return rp
 }
 
 func (p *cntlrPlan) buildLegs(
@@ -702,7 +811,8 @@ func (p *cntlrPlan) buildLegs(
 //     no CnGrpName, out of the pool concats and out of the pool sizing;
 //   - a deferred group defers every group *after* it in the same list, because
 //     the list order is the concat's physical order (effectiveGrps);
-//   - an unprovisioned spare defers only itself (spares never assemble);
+//   - an unprovisioned spare or new leg of a repair defers only itself
+//     (neither defers its group's assembly, CN9);
 //   - a slice with no effective group on one of its two sides is deferred
 //     whole, because an empty concat is an error and not a shape;
 //   - a deferred slice defers every td (the raid0 spans all slices) and so,
@@ -712,7 +822,7 @@ func (p *cntlrPlan) computeEffective() {
 		lp.provisioning = legProvisioning(lp.sides)
 	}
 	for _, gp := range p.grps {
-		for _, lp := range gp.legs { // leg_list only — never gp.spares
+		for _, lp := range gp.legs { // leg_list only — no spare, no new leg
 			if lp.provisioning {
 				gp.deferred = true
 				p.anyDeferred = true

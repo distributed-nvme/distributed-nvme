@@ -1206,6 +1206,194 @@ func TestSnapshotPropagatesCallbackError(t *testing.T) {
 	}
 }
 
+// TestRangeAtRevReadsOneRevision pins the revision of RangeAtRev and
+// RangeKeysAtRev, the scans MD3's load runs at its snapshot's revision (EU2):
+// a key rewritten, deleted or added after the revision changes nothing they
+// return.
+func TestRangeAtRevReadsOneRevision(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	prefix := testPrefix(t)
+	keys := []string{prefix + "a", prefix + "b", prefix + "c"}
+	for i, key := range keys {
+		err := cli.Put(ctx, key, &pb.WorkerReg{Epoch: uint64(i + 1)})
+		if err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	before, rev, err := cli.Range(ctx, prefix)
+	if err != nil {
+		t.Fatalf("Range: %v", err)
+	}
+	// After rev: b is rewritten, c deleted and d added.
+	if err := cli.Put(ctx, keys[1], &pb.WorkerReg{Epoch: 22}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := cli.Delete(ctx, keys[2]); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := cli.Put(ctx, prefix+"d", &pb.WorkerReg{Epoch: 4}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	capture := captureLogs(t)
+
+	kvs, err := cli.RangeAtRev(ctx, prefix, rev)
+	if err != nil {
+		t.Fatalf("RangeAtRev: %v", err)
+	}
+	if len(kvs) != len(keys) {
+		t.Fatalf("want the %d keys of rev %d, got %v", len(keys), rev, kvs)
+	}
+	for i, kv := range kvs {
+		if kv.Key != keys[i] || kv.ModRev != before[i].ModRev {
+			t.Fatalf("key %d: want %q at mod revision %d, got %q at %d",
+				i, keys[i], before[i].ModRev, kv.Key, kv.ModRev)
+		}
+		reg := &pb.WorkerReg{}
+		if err := cli.Decode(ctx, kv, reg); err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		if reg.GetEpoch() != uint64(i+1) {
+			t.Fatalf("key %q: want the value of rev %d, epoch %d, got %d",
+				kv.Key, rev, i+1, reg.GetEpoch())
+		}
+	}
+	recs := capture.withMsg(t, "etcd range")
+	if len(recs) != 1 || recs[0]["count"] != float64(len(keys)) {
+		t.Fatalf("want one range record with count %d, got %v",
+			len(keys), recs)
+	}
+	if _, ok := recs[0]["value"]; ok {
+		t.Fatalf("a range record must never carry values: %v", recs[0])
+	}
+
+	keyRevs, err := cli.RangeKeysAtRev(ctx, prefix, rev)
+	if err != nil {
+		t.Fatalf("RangeKeysAtRev: %v", err)
+	}
+	if len(keyRevs) != len(keys) {
+		t.Fatalf("want the %d keys of rev %d, got %v", len(keys), rev, keyRevs)
+	}
+	for i, keyRev := range keyRevs {
+		if keyRev.Key != keys[i] || keyRev.ModRev != before[i].ModRev {
+			t.Fatalf("key %d: want %q at mod revision %d, got %q at %d",
+				i, keys[i], before[i].ModRev, keyRev.Key, keyRev.ModRev)
+		}
+	}
+}
+
+// TestSnapshotAtRevReadsTheGivenRevision pins SnapshotAtRev (EU4): every read
+// is served at the caller's revision, the first one included, and f runs once.
+func TestSnapshotAtRevReadsTheGivenRevision(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	prefix := testPrefix(t)
+	keyA, keyB := prefix+"a", prefix+"b"
+	if err := cli.Put(ctx, keyA, &pb.WorkerReg{Epoch: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	before, rev, err := cli.Range(ctx, prefix)
+	if err != nil {
+		t.Fatalf("Range: %v", err)
+	}
+	// After rev: a is rewritten and b added.
+	if err := cli.Put(ctx, keyA, &pb.WorkerReg{Epoch: 11}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := cli.Put(ctx, keyB, &pb.WorkerReg{Epoch: 2}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	runs := 0
+	var gotA uint64
+	var foundB bool
+	var modRevA int64
+	err = cli.SnapshotAtRev(ctx, rev, func(s STM) error {
+		runs++
+		regA := &pb.WorkerReg{}
+		if !s.Get(keyA, regA) {
+			return errors.New("keyA must exist")
+		}
+		gotA = regA.GetEpoch()
+		foundB = s.Get(keyB, &pb.WorkerReg{})
+		modRevA = s.Rev(keyA)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SnapshotAtRev: %v", err)
+	}
+	if runs != 1 {
+		t.Fatalf("a snapshot must not retry, ran %d times", runs)
+	}
+	if gotA != 1 || foundB || modRevA != before[0].ModRev {
+		t.Fatalf("every read must be served at rev %d: a=%d at mod revision "+
+			"%d (want 1 at %d), b found=%v", rev, gotA, modRevA,
+			before[0].ModRev, foundB)
+	}
+
+	for _, bad := range []int64{0, -1} {
+		runs = 0
+		err := cli.SnapshotAtRev(ctx, bad, func(s STM) error {
+			runs++
+			return nil
+		})
+		if err == nil || runs != 0 {
+			t.Fatalf("revision %d must be refused before f runs: err=%v "+
+				"runs=%d", bad, err, runs)
+		}
+	}
+}
+
+// TestAtRevReadsRefuseACompactedRevision pins the error of every pinned read
+// at a revision the store has compacted away (EU2, EU4): none is served from a
+// newer revision instead.
+func TestAtRevReadsRefuseACompactedRevision(t *testing.T) {
+	cli := newTestClient(t)
+	base := context.Background()
+	prefix := testPrefix(t)
+	key := prefix + "a"
+	if err := cli.Put(base, key, &pb.WorkerReg{Epoch: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	_, oldRev, err := cli.Range(base, prefix)
+	if err != nil {
+		t.Fatalf("Range: %v", err)
+	}
+	if err := cli.Put(base, key, &pb.WorkerReg{Epoch: 2}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	_, newRev, err := cli.Range(base, prefix)
+	if err != nil {
+		t.Fatalf("Range: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(base, 30*time.Second)
+	defer cancel()
+	if _, err := cli.cli.Compact(
+		ctx, newRev, clientv3.WithCompactPhysical(),
+	); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if kvs, err := cli.RangeAtRev(ctx, prefix, oldRev); !IsCompacted(err) {
+		t.Fatalf("RangeAtRev: want an ErrCompacted error, got %v and %v",
+			err, kvs)
+	}
+	if keys, err := cli.RangeKeysAtRev(ctx, prefix, oldRev); !IsCompacted(err) {
+		t.Fatalf("RangeKeysAtRev: want an ErrCompacted error, got %v and %v",
+			err, keys)
+	}
+	runs := 0
+	err = cli.SnapshotAtRev(ctx, oldRev, func(s STM) error {
+		runs++
+		s.Get(key, &pb.WorkerReg{})
+		return nil
+	})
+	if !IsCompacted(err) || runs != 1 {
+		t.Fatalf("SnapshotAtRev: want one run and an ErrCompacted error, "+
+			"got runs=%d err=%v", runs, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // EU5/EU6 — timeouts and wrapped errors, no etcd needed
 // ---------------------------------------------------------------------------

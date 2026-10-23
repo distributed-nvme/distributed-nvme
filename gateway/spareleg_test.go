@@ -418,3 +418,36 @@ func TestCreateSpareLegReplansAroundADnDisabledOrDeleted(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateSpareLegRefusesAGroupWithARepair pins the refusal of a group that
+// has a repair: a spare leg and the repair's new leg would race for one place
+// in the group's array, so CreateSpareLeg answers FAILED_PRECONDITION naming
+// the repair before it scans, and writes nothing. The repair's name is put on
+// the group directly, which is all the refusal reads.
+func TestCreateSpareLegRefusesAGroupWithARepair(t *testing.T) {
+	env := newVolEnv(t)
+	slice := env.slice()
+	volGrpOf(t, slice, volDataGrpId).RepName = "rep-a"
+	env.putSlice(slice)
+	revBefore := env.spRev()
+	_, err := env.srv.CreateSpareLeg(env.ctx, &pb.CreateSpareLegRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		SpRev:       env.token(),
+		GrpId:       volDataGrpId,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FAILED_PRECONDITION", err)
+	}
+	want := fmt.Sprintf("group %d has the repair %q: a spare leg and the "+
+		"repair would race for one place in its array", volDataGrpId, "rep-a")
+	if got := status.Convert(err).Message(); got != want {
+		t.Errorf("message: got %q, want %q", got, want)
+	}
+	if got := volGrpOf(t, env.slice(), volDataGrpId).GetSpareLegList(); len(got) != 0 {
+		t.Errorf("spare_leg_list = %v, want none", got)
+	}
+	if rev := env.spRev(); rev != revBefore {
+		t.Errorf("sp_rev: got %d, want %d", rev, revBefore)
+	}
+}

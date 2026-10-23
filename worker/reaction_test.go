@@ -235,8 +235,19 @@ type reactionCall struct {
 	// The plan a spare create was scanned against (AR8 step 3's black
 	// list), which the op holds the group's DNs against.
 	grpDn []string
-	// The cluster conf the clone drain's final STM was handed (CLD7).
+	// The cluster conf the clone drain's final STM (CLD7) or an SPD15
+	// batch was handed.
 	cc *pb.ClusterConf
+	// The batch an SPD15 drain step was handed: the repairs' names, or the
+	// retired legs' ids.
+	repNames []string
+	legIds   []uint64
+	// A stage move's repair and stage (AR11), and the retire timer's delete
+	// (AR12): its leg in legIds, with the revision it expected.
+	repName   string
+	repId     uint64
+	stage     pb.RepStage
+	expectRev uint64
 }
 
 // candQuery is one allocator scan a pass ran.
@@ -264,10 +275,12 @@ type fakeReactionOps struct {
 	// opErr so a test can fail a drain step without failing every reaction —
 	// the two never run in the same pass (SPD6), and keeping them apart is
 	// what lets a drain test reuse a fixture that sets opErr.
-	drainCntlrCnt int
-	drainGrpCnt   int
-	drainDone     bool
-	drainErr      error
+	drainCntlrCnt   int
+	drainRepCnt     int
+	drainRetiredCnt int
+	drainGrpCnt     int
+	drainDone       bool
+	drainErr        error
 	// The clone drain's canned returns (clonedrain.go). cloneDrainErr is
 	// separate again, so a clone-drain test can fail its step while the sp
 	// drain and the reactions of the same pass stay healthy — CLD7 runs them
@@ -277,6 +290,20 @@ type fakeReactionOps struct {
 	// newCntlrIds are the cntlr_ids replaceCntlr hands out, one per call in
 	// order; 555 once they run out.
 	newCntlrIds []uint64
+	// stageErr and retireErr fail the stage moves (AR11) and the retire
+	// timer's deletes (AR12), apart from opErr, so a test can fail either
+	// pass step while the reactions of the same pass stay healthy.
+	stageErr  error
+	retireErr error
+	// spRev is the SpRev revision as the ops see it: the harness sets it to
+	// the snapshot's SpRevision before each pass, and a stage move, a clone
+	// drain's final step and a retired leg's delete that succeed bump it,
+	// as model.SetRepairStage, model.FinishCloneDelete and
+	// model.DeleteRetiredLeg bump SpRev. deleteRetiredLeg refuses an
+	// expected revision that differs, as model's revision check does, so a
+	// pass that bumped SpRev before its retire timer sees the delete
+	// refused (AR12).
+	spRev uint64
 }
 
 func (o *fakeReactionOps) record(call reactionCall) error {
@@ -479,9 +506,63 @@ func (o *fakeReactionOps) switchCloneSpareLeg(
 	})
 }
 
-// The three sp-drain ops (SPD9/SPD10/SPD12). They record like every other
-// mutation — wantOps() therefore pins the drain's phase order exactly as it
-// pins a reaction's — and report the harness's canned counts.
+// The two pass steps of a repair (AR11, AR12) record like every other
+// mutation and fail with their own canned errors.
+
+func (o *fakeReactionOps) setRepairStage(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	stage pb.RepStage,
+) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, reactionCall{
+		op: "set_repair_stage", repName: repName, repId: repId,
+		stage: stage,
+	})
+	if o.stageErr != nil {
+		return o.stageErr
+	}
+	o.spRev++
+	return nil
+}
+
+func (o *fakeReactionOps) deleteRetiredLeg(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	legId uint64,
+	cc *pb.ClusterConf,
+) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, reactionCall{
+		op: "delete_retired_leg", legIds: []uint64{legId},
+		expectRev: expectRev, cc: cc,
+	})
+	if o.retireErr != nil {
+		return o.retireErr
+	}
+	if expectRev != o.spRev {
+		return &model.ErrPrecondition{
+			Op: "DeleteRetiredLeg", Reason: model.ReasonStaleRevision,
+		}
+	}
+	o.spRev++
+	return nil
+}
+
+// The five sp-drain ops (SPD9, SPD15, SPD10, SPD12). They record like every
+// other mutation — wantOps() therefore pins the drain's phase order exactly
+// as it pins a reaction's — and report the harness's canned counts.
 
 func (o *fakeReactionOps) drainSpCntlrs(
 	ctx context.Context,
@@ -493,6 +574,50 @@ func (o *fakeReactionOps) drainSpCntlrs(
 	o.mu.Lock()
 	o.calls = append(o.calls, reactionCall{op: "drain_cntlrs"})
 	cnt, err := o.drainCntlrCnt, o.drainErr
+	o.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return cnt, nil
+}
+
+func (o *fakeReactionOps) drainSpRepairs(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	repNames []string,
+	cc *pb.ClusterConf,
+) (int, error) {
+	o.mu.Lock()
+	o.calls = append(o.calls, reactionCall{
+		op: "drain_repairs", repNames: append([]string(nil), repNames...),
+		cc: cc,
+	})
+	cnt, err := o.drainRepCnt, o.drainErr
+	o.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return cnt, nil
+}
+
+func (o *fakeReactionOps) drainSpRetiredLegs(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	legIds []uint64,
+	cc *pb.ClusterConf,
+) (int, error) {
+	o.mu.Lock()
+	o.calls = append(o.calls, reactionCall{
+		op: "drain_retired_legs", legIds: append([]uint64(nil), legIds...),
+		cc: cc,
+	})
+	cnt, err := o.drainRetiredCnt, o.drainErr
 	o.mu.Unlock()
 	if err != nil {
 		return 0, err
@@ -576,6 +701,9 @@ func (o *fakeReactionOps) finishCloneDelete(
 		op: "finish_clone", cloneName: cloneName, cloneId: cloneId, cc: cc,
 	})
 	err := o.cloneDrainErr
+	if err == nil {
+		o.spRev++
+	}
 	o.mu.Unlock()
 	return err
 }
@@ -615,6 +743,17 @@ type reactHarness struct {
 	// judgeStored is the AR10 shortcut described above; true unless a test
 	// turns it off.
 	judgeStored bool
+	// inSyncAll is the shortcut of AR8's healthy-leg test: unless a test
+	// turns it off, every pass first gives the snapshot's primary an info
+	// of its own when no child of it holds one — an empty report, as of a
+	// primary that has answered — and gives each primary child's info a
+	// reading of each group of the state that the info does not read yet:
+	// every leg of its leg_list held in sync and the array whole
+	// (grp_id_to_grp_info), as the report of a primary whose arrays are whole
+	// would. The tests of the other rules then need no reading of their own,
+	// and the tests of the in-sync rule, of the retire timer and of a pass
+	// with no report set theirs or turn it off.
+	inSyncAll bool
 }
 
 func newReactHarness(t *testing.T, state *model.SpState) *reactHarness {
@@ -639,6 +778,7 @@ func newReactHarness(t *testing.T, state *model.SpState) *reactHarness {
 	h := &reactHarness{
 		t: t, logs: logs, clk: clk, store: store, deps: d,
 		state: state, ops: ops, rops: rops, w: w, judgeStored: true,
+		inSyncAll: true,
 	}
 	ops.onLoad = func(loaded *model.SpState) {
 		if h.judgeStored {
@@ -714,10 +854,84 @@ func (h *reactHarness) ago(seconds uint64) uint64 {
 	return h.now() - seconds
 }
 
-// pass runs one reaction pass.
+// pass runs one reaction pass, the fake ops' SpRev at the snapshot's
+// revision.
 func (h *reactHarness) pass() {
 	h.t.Helper()
+	if h.inSyncAll {
+		h.fillGrpInfo()
+	}
+	h.ops.mu.Lock()
+	if h.ops.state != nil {
+		h.rops.mu.Lock()
+		h.rops.spRev = h.ops.state.SpRevision
+		h.rops.mu.Unlock()
+	}
+	h.ops.mu.Unlock()
 	h.w.reactionPass(context.Background())
+}
+
+// fillGrpInfo is inSyncAll's reading: the snapshot's primary gets an empty
+// info when it has no child, and on every primary child, each group of the
+// state the pass loads that the info holds no reading of reads whole with
+// every leg_list leg in sync.
+func (h *reactHarness) fillGrpInfo() {
+	h.ops.mu.Lock()
+	state := h.ops.state
+	h.ops.mu.Unlock()
+	if state == nil {
+		return
+	}
+	for _, cntlrId := range sortedIds(state.Conf.GetCntlrIdList()) {
+		if !state.Cntlrs[cntlrId].GetPrimary() {
+			continue
+		}
+		if _, ok := h.w.cntlrs[cntlrId]; !ok {
+			h.setPrimaryInfo(cntlrId, &pb.CntlrInfo{})
+		}
+		break
+	}
+	for _, child := range h.w.cntlrs {
+		if child.plan == nil || !child.plan.primary || child.driver == nil {
+			continue
+		}
+		info := child.driver.lastInfo
+		if info == nil {
+			continue
+		}
+		if info.GrpIdToGrpInfo == nil {
+			info.GrpIdToGrpInfo = map[uint64]*pb.CntlrInfo_GrpInfo{}
+		}
+		for _, grp := range judgedGrps(state) {
+			if _, ok := info.GrpIdToGrpInfo[grp.GetGrpId()]; ok {
+				continue
+			}
+			reading := &pb.CntlrInfo_GrpInfo{Whole: true}
+			for _, leg := range grp.GetLegList() {
+				reading.InSyncLegIdList = append(
+					reading.InSyncLegIdList, leg.GetLegId())
+			}
+			info.GrpIdToGrpInfo[grp.GetGrpId()] = reading
+		}
+	}
+}
+
+// setGrpInfo installs one group's reading (grp_id_to_grp_info) on the
+// primary: whether its array is whole and the legs md holds in sync.
+func (h *reactHarness) setGrpInfo(grpId uint64, whole bool, inSync ...uint64) {
+	h.t.Helper()
+	child, ok := h.w.cntlrs[reactCntlrA]
+	if !ok {
+		h.setPrimaryInfo(reactCntlrA, &pb.CntlrInfo{})
+		child = h.w.cntlrs[reactCntlrA]
+	}
+	info := child.driver.lastInfo
+	if info.GrpIdToGrpInfo == nil {
+		info.GrpIdToGrpInfo = map[uint64]*pb.CntlrInfo_GrpInfo{}
+	}
+	info.GrpIdToGrpInfo[grpId] = &pb.CntlrInfo_GrpInfo{
+		Whole: whole, InSyncLegIdList: inSync,
+	}
 }
 
 // setPrimaryInfo installs the CntlrInfo a cntlr's child last reported (AR1),
@@ -3363,6 +3577,9 @@ func TestReactionSpareReadiness(t *testing.T) {
 		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
 	})
 
+	// A primary that has reported no leg row of the spare: the harness's
+	// empty report stands for one (inSyncAll), and a spare no report names
+	// is not ready.
 	t.Run("no primary info", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
@@ -3372,6 +3589,9 @@ func TestReactionSpareReadiness(t *testing.T) {
 				SideId: spareSideId, AddrPort: reactDnC, Provisioned: true,
 			}},
 		})
+		if spareReady(h.legOf(spareLegId), nil) {
+			t.Fatalf("a spare is ready with no report")
+		}
 		h.dnCands(reactDnD)
 		h.pass()
 		h.wantOps()
@@ -3548,8 +3768,10 @@ func (h *reactHarness) wantOneSkip(
 // reason naming it, runs no op and no scan, and the scan goes on to the next
 // candidate leg (AR2). The row is the current primary's: from a failover's
 // hand-over until the promotion's reply the pass reads the new primary's
-// standby report, which holds no group row, and never the old primary's last
-// report. Step 3's create is not gated.
+// standby report, which holds no group row and no reading of a group, so the
+// healthy-leg test holds the switch ahead of the gate, and never the old
+// primary's last report. Step 3's create is not held by the gate: a running
+// array whose row reads ERROR gets one.
 func TestReactionSpareSwitchNeedsTheGroupRunning(t *testing.T) {
 	const spareLegId = uint64(700)
 	const spareSideId = uint64(800)
@@ -3667,20 +3889,67 @@ func TestReactionSpareSwitchNeedsTheGroupRunning(t *testing.T) {
 			reactMetaGrp, reactMetaLegA, spareLegId)
 	})
 
-	// Step 3 stays ungated: a spare on a stopped group costs only space, and
-	// one ready shortens the repair once the array runs.
+	// Step 3 is not held by the gate (AR8). Two groups reach it while the
+	// gate would hold: one whose row reads UNKNOWN because the primary's
+	// stream died, which marks only the rows (markCntlrUnknown) and leaves
+	// the in-sync list as the last report had it, and one whose OK row is in a
+	// report older than the snapshot. A spare made for either costs only
+	// space, and one ready shortens the repair once the row reads OK again.
+	// A group whose row reads ERROR has no in-sync list in a real report
+	// (cnagent.md CN28), so the healthy-leg test holds it first.
 	t.Run("the create is not gated", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			setup func(h *reactHarness)
+		}{
+			{"a row marked unknown", func(h *reactHarness) {
+				h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+				h.setGrpInfo(reactDataGrp, true, reactDataLegA, reactDataLegB)
+				markCntlrUnknown(h.w.cntlrs[reactCntlrA].driver.lastInfo)
+			}},
+			{"a report older than the snapshot", func(h *reactHarness) {
+				h.state.SpRevision = 20
+				h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+				h.w.cntlrs[reactCntlrA].driver.infoRev = 19
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := newReactHarness(t, reactFixture(t))
+				h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+				tc.setup(h)
+				if reason := grpRowHold(&spPass{
+					state:   h.state,
+					info:    h.w.cntlrs[reactCntlrA].driver.lastInfo,
+					infoRev: h.w.cntlrs[reactCntlrA].driver.infoRev,
+				}, reactDataGrp); reason == "" {
+					t.Fatal("the gate would not hold this group")
+				}
+				h.dnCands(reactDnD)
+				h.pass()
+				calls := h.wantOps("create_spare")
+				if calls[0].grpId != reactDataGrp {
+					t.Fatalf("create_spare = %+v, want the data group",
+						calls[0])
+				}
+				h.wantApplied(reactionSpareCreate)
+				h.wantNoSkip()
+			})
+		}
+	})
+
+	// A group whose row reads ERROR, its report holding no in-sync list of
+	// it, as a real primary's does not, gets no spare: the healthy-leg test
+	// holds it before step 3 (AR8).
+	t.Run("an error row gets no spare", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
+		h.inSyncAll = false
 		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
 		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_ERROR)
 		h.dnCands(reactDnD)
 		h.pass()
-		calls := h.wantOps("create_spare")
-		if calls[0].grpId != reactDataGrp {
-			t.Fatalf("create_spare = %+v, want the data group", calls[0])
-		}
-		h.wantApplied(reactionSpareCreate)
-		h.wantNoSkip()
+		h.wantOps()
+		h.wantOneSkip(reactionSpareCreate, reasonNoHealthyLeg,
+			reactDataGrp, reactDataLegA, 0)
 	})
 
 	t.Run("a clone meta group", func(t *testing.T) {
@@ -3709,14 +3978,16 @@ func TestReactionSpareSwitchNeedsTheGroupRunning(t *testing.T) {
 	// The failover has committed and the release has handed cntlr B the
 	// primary plan, but the promotion has not answered: B's latest report is
 	// its standby's last, whose leg row of the spare reads OK (a live path)
-	// and which holds no group row (cnagent.md CN12). The old primary's last
-	// report, group row OK, is still held by its child; the pass must never
-	// read it.
+	// and which holds no group row and no reading of a group (cnagent.md
+	// CN12), so the healthy-leg test holds the switch ahead of step 1's
+	// gate. The old primary's last report, group row OK and leg B held in
+	// sync, is still held by its child; a pass that read it would switch.
 	t.Run("a report absent after a failover", func(t *testing.T) {
 		state := reactFixture(t)
 		state.Cntlrs[reactCntlrA].Primary = false
 		state.Cntlrs[reactCntlrB].Primary = true
 		h := newReactHarness(t, state)
+		h.inSyncAll = false
 		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
 		readySpare(h.dataGrp(), spareLegId, spareSideId)
 		h.dnCands(reactDnD)
@@ -3727,6 +3998,14 @@ func TestReactionSpareSwitchNeedsTheGroupRunning(t *testing.T) {
 					reactDataGrp: resOk("md"),
 				},
 				LegIdToLeg: map[uint64]*pb.ResInfo{spareLegId: resOk("leg")},
+				GrpIdToGrpInfo: map[uint64]*pb.CntlrInfo_GrpInfo{
+					reactDataGrp: {
+						Whole: true,
+						InSyncLegIdList: []uint64{
+							reactDataLegA, reactDataLegB,
+						},
+					},
+				},
 			}
 		}
 		h.w.cntlrs[reactCntlrA] = &cntlrChild{
@@ -3742,10 +4021,11 @@ func TestReactionSpareSwitchNeedsTheGroupRunning(t *testing.T) {
 		h.w.cntlrs[reactCntlrB] = promoted
 		h.pass()
 		h.wantOps()
-		h.wantOneSkip(reactionSpareSwitch, reasonGrpRowAbsent,
-			reactDataGrp, reactDataLegA, spareLegId)
+		h.wantOneSkip(reactionSpareCreate, reasonNoHealthyLeg,
+			reactDataGrp, reactDataLegA, 0)
 
-		// The promotion answers: the new primary's array runs.
+		// The promotion answers: the new primary's array runs and holds
+		// leg B in sync.
 		promoted.driver.lastInfo = running()
 		h.pass()
 		calls := h.wantOps("switch_spare")
@@ -3815,9 +4095,20 @@ func TestReactionSecondSwitchWaitsForTheFirstReport(t *testing.T) {
 	state.SpRevision = switchRev + 1
 	h.legOf(reactDataLegB).ErrEpoch = h.ago(9000)
 
+	// The report from before the switch holds A and B in sync, not S, so
+	// the healthy-leg test already holds the second switch: S has no
+	// health epoch, but md may still be copying onto it (AR8).
 	h.pass()
 	h.wantOps("switch_spare")
-	h.wantApplied(reactionSpareSwitch)
+	h.wantOneSkip(reactionSpareCreate, reasonNoHealthyLeg,
+		reactDataGrp, reactDataLegB, 0)
+
+	// A reading that holds S in sync isolates the revision gate: the row
+	// still comes from a report older than the snapshot.
+	h.logs.buf.reset()
+	h.setGrpInfo(reactDataGrp, true, spareS, reactDataLegB)
+	h.pass()
+	h.wantOps("switch_spare")
 	h.wantOneSkip(reactionSpareSwitch, reasonGrpRowStale,
 		reactDataGrp, reactDataLegB, spareS2)
 
@@ -4376,16 +4667,20 @@ func TestVerdictMemoDropsWhatTheSnapshotDoesNotList(t *testing.T) {
 
 // TestReactionPassNeedsClusterConf checks that a pass whose cluster is not in
 // the RW21 cache does nothing at all: every allocating reaction needs its
-// extent_size and batch sizes.
+// extent_size and batch sizes, and the stage moves run after the pass's
+// gates (AR11), so a repair the primary reports started moves no stage.
 func TestReactionPassNeedsClusterConf(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	h.deps.conf.mu.Lock()
 	delete(h.deps.conf.entries, testCid)
 	h.deps.conf.mu.Unlock()
 	h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+	withReactRepair(h, pb.RepStage_REP_STAGE_CREATED, false)
+	h.setVerdict(reactRepId, true, false)
 	h.pass()
 	h.wantOps()
 	h.wantApplied()
+	h.wantNoRecord(msgRepairStageMoved)
 }
 
 // TestReactionPassRefusesAnInvalidConf checks the pass's gates (AR1;
@@ -4401,8 +4696,9 @@ func TestReactionPassNeedsClusterConf(t *testing.T) {
 // naming the field.
 //
 // The fixture is set up to WANT a reaction (an unhealthy primary, a breached
-// pool), so a pass that did nothing because there was nothing to do could not
-// be mistaken for a pass that refused.
+// pool) and a stage move (a repair the primary reports started), so a pass
+// that did nothing because there was nothing to do could not be mistaken for
+// a pass that refused; the stage moves run after the gates (AR11).
 func TestReactionPassRefusesAnInvalidConf(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -4441,11 +4737,14 @@ func TestReactionPassRefusesAnInvalidConf(t *testing.T) {
 				poolLine(1, 1000, total, total))
 			h.dnCands(reactDnC, reactDnD)
 			h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+			withReactRepair(h, pb.RepStage_REP_STAGE_CREATED, false)
+			h.setVerdict(reactRepId, true, false)
 			tc.corrupt(h)
 			h.pass()
 
 			h.wantOps()
 			h.wantApplied()
+			h.wantNoRecord(msgRepairStageMoved)
 			if got := len(h.rops.allQueries()); got != 0 {
 				t.Fatalf("%d candidate scans on a refused pass", got)
 			}

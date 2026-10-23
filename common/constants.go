@@ -97,6 +97,16 @@ const (
 	MaxSideCntPerDn      = 1024
 	MaxCntlrCntPerCn     = 256
 	MaxSpareLegPerGrp    = 2
+	// MaxRetiredLegPerGrp is the most retired legs a group holds: the kept
+	// sides of the legs its finished repairs replaced. A retired side keeps
+	// its extents and its place in its disk node's side_ptr_list, and the
+	// drains' transactions, which give a group's retired sides back, and the
+	// messages that carry the lists need a bound; two keeps the copies the
+	// group's last two repairs set aside. CreateRepair with a fresh new leg
+	// refuses a group at the bound, and from a retired leg it is allowed
+	// there, since FinishRepair then retires one leg and the repair took one,
+	// so FinishRepair never passes it.
+	MaxRetiredLegPerGrp = 2
 	// MaxGrpCntPerSlice is the most groups EACH of a slice's two group lists
 	// (meta_grp_list, data_grp_list) holds. A group's two md names carry its
 	// index in its list as two hex digits (%02x, architecture.md, md names), and
@@ -131,6 +141,26 @@ const (
 	//
 	// which gateway/txnbudget_test.go asserts from the named constants (SPD14).
 	MaxDelGrpPerTxn = 20
+	// MaxDelRepPerTxn is the most repairs ONE batch of the sp drain's
+	// repair phase deletes in a single transaction, and
+	// MaxDelRetiredLegPerTxn the most retired legs one batch of its
+	// retired-leg phase deletes (dnv-worker.md, The sp drain). Like
+	// MaxDelGrpPerTxn they bound transaction SIZE, not rate, and are package
+	// constants for that reason. A batch takes the repairs or the retired
+	// legs of one parent, a slice or a clone, and reads that parent for its
+	// groups' ext_cnt. Its fixed part is six compares, the SpConf, the parent
+	// and SpRev read and written, and each item costs its own key read and
+	// deleted plus the one side it gives back, at most six compares on a DN
+	// of its own: a repair has one new leg of one side, and a retired leg
+	// one side. So
+	//
+	//	6 + 8 x MaxDelRepPerTxn        <= EtcdMaxTxnOps
+	//	6 + 8 x MaxDelRetiredLegPerTxn <= EtcdMaxTxnOps
+	//
+	// which gateway/txnbudget_test.go asserts from the named constants, and
+	// model/repairdrain_test.go commits at the widest shape.
+	MaxDelRepPerTxn        = 64
+	MaxDelRetiredLegPerTxn = 64
 	// MaxDelBmPerTxn is the most clone-bitmap chunk keys ONE clone-drain batch
 	// deletes in a single transaction (dnv-worker.md CLD8). Like
 	// MaxDelGrpPerTxn it bounds transaction SIZE, not rate, and is a package
@@ -548,6 +578,11 @@ const (
 	// Seconds an observed membership transition must hold before it is
 	// committed into the effective membership (VW5).
 	DefaultVoteWorkerGraceTime = 60
+	// RetiredLegMaxAge is the age, in seconds from its retired_epoch, at
+	// which the sp worker's retire timer may delete a retired leg: seven
+	// days. The kept copy is stale by then, and the timer deletes one only
+	// while its group's array is whole, so its data exists twice elsewhere.
+	RetiredLegMaxAge = 7 * 24 * 3600
 	// Per-call deadlines of the worker's agent RPCs (RW5, BM3).
 	DefaultWorkerSyncupTimeout = 60
 	DefaultWorkerPushTimeout   = 60
@@ -617,8 +652,14 @@ const (
 	// transaction is another, 2 x MaxFlipCreatedPerTxn + 2 = 514 COMPARES
 	// (dnv-worker.md RW19; TestFlipCreatedTxnBudget,
 	// TestFlipCreatedAtTheTdCeiling; see MaxFlipCreatedPerTxn below).
+	// The sp drain's repair and retired-leg batches are two more:
+	// 6 + 8 x MaxDelRepPerTxn and 6 + 8 x MaxDelRetiredLegPerTxn, 518
+	// COMPARES each at the maximum shape (TestSpDrainRepairBatchBudget,
+	// TestSpDrainRetiredLegBatchBudget; model/repairdrain_test.go's
+	// TestDrainSpRepairsAtTheCeiling and TestDrainSpRetiredLegsAtTheCeiling
+	// commit them).
 	// The clone flip, the provisioned flip of the sides of clone meta groups,
-	// is a third (dnv-worker.md MD6): one STM reads and writes every Clone
+	// is another (dnv-worker.md MD6): one STM reads and writes every Clone
 	// its refs name, so a flip over every clone of a pool commits
 	//
 	//	2 x MaxCloneCntPerSp + 2 = 130 COMPARES
@@ -645,8 +686,9 @@ const (
 	// (gateway/txnbudget_test.go's TestReplaceCntlrTxnBudget; model's
 	// TestReplaceCntlrAtTheCeiling commits it).
 	//
-	// DeleteThinDevice stays below all four — the create, D2 and the two
-	// flips — whatever the td count: its deciding STM commits having
+	// DeleteThinDevice stays below all six — the create, D2, the sp drain's
+	// repair and retired-leg batches (dnv-worker.md SPD15) and the two flips
+	// — whatever the td count: its deciding STM commits having
 	// read the fixed resolution and token keys, the target td and one key per
 	// subsystem and per clone of the SP, so with its three writes it is
 	// 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the ceilings

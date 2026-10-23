@@ -111,6 +111,29 @@ func TestCreateCloneSpareLegNeverMintsIdZero(t *testing.T) {
 	}
 }
 
+// TestCreateRepairNeverMintsIdZero is the same rule at the repair's mint: a
+// fresh new leg takes the rep_id, its leg id and its side id from the same
+// counter, all above the floor, and the counter comes out past them.
+func TestCreateRepairNeverMintsIdZero(t *testing.T) {
+	env := newOpsEnv(t)
+	resetNextId(env, 0)
+
+	repId, legId := env.createRepair(func() RepairNewLeg {
+		return env.freshLeg(opsDnC)
+	})
+	if repId != SpFirstId || legId != SpFirstId+1 {
+		t.Fatalf("rep_id %d, leg_id %d, want %d and %d (0 is the none "+
+			"sentinel)", repId, legId, SpFirstId, SpFirstId+1)
+	}
+	side := env.repair(opsRepName).GetNewLegList()[0].GetSideList()[0]
+	if side.GetSideId() != SpFirstId+2 {
+		t.Errorf("side_id: got %d, want %d", side.GetSideId(), SpFirstId+2)
+	}
+	if got := env.spConf().GetNextId(); got != SpFirstId+3 {
+		t.Errorf("next_id: got %d, want %d", got, SpFirstId+3)
+	}
+}
+
 // TestReplaceCntlrNeverMintsIdZero is AR7's mint: a cntlr with id 0 would be
 // invisible to AR5's election (failoverCandidate returns 0 for "no candidate"
 // and worker/reaction.go tests the plan's candidate against 0), so a healthy,
@@ -247,8 +270,8 @@ func (e *opsEnv) storeRev() int64 {
 	return rev
 }
 
-// TestOpsTakeTheirIdsUpToTheTop is the same rule at the four ops that mint
-// ids (dnv-worker.md, MD6): with exactly the ids an op takes left below the
+// TestOpsTakeTheirIdsUpToTheTop is the same rule at the ops that mint ids
+// (dnv-worker.md, MD6): with exactly the ids an op takes left below the
 // largest 64-bit value, the op commits them, its first id the counter's, and
 // leaves next_id at that value; with one fewer left it is refused with
 // ReasonNoIdLeft and writes nothing.
@@ -312,6 +335,41 @@ func TestOpsTakeTheirIdsUpToTheTop(t *testing.T) {
 					opsCloneGrpId, env.dnCand(opsDnA),
 					env.cloneGrpDnAddrs(), env.cc,
 				)
+			},
+		},
+		{
+			// The rep_id, the fresh new leg's leg_id and its side's
+			// side_id.
+			name: "CreateRepair fresh", op: opCreateRepair, n: 3,
+			setup: func(env *opsEnv) {
+				env.setLegErr(opsDataLegB, opsBadEpoch)
+			},
+			run: func(env *opsEnv) (uint64, error) {
+				repId, _, err := CreateRepair(
+					env.ctx, env.cli, env.cid, opsShard, opsSpId,
+					opsSpName, noExpectRev, opsRepName, opsSliceParent,
+					opsDataGrpId, opsDataLegB, env.freshLeg(opsDnC),
+					env.cc,
+				)
+				return repId, err
+			},
+		},
+		{
+			// The rep_id alone: the retired leg keeps its ids.
+			name: "CreateRepair from a retired leg", op: opCreateRepair, n: 1,
+			setup: func(env *opsEnv) {
+				env.setLegErr(opsDataLegB, opsBadEpoch)
+				env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide,
+					opsDnC, 1, opsRetiredEpoch)
+			},
+			run: func(env *opsEnv) (uint64, error) {
+				repId, _, err := CreateRepair(
+					env.ctx, env.cli, env.cid, opsShard, opsSpId,
+					opsSpName, noExpectRev, opsRepName, opsSliceParent,
+					opsDataGrpId, opsDataLegB,
+					RepairNewLeg{RetiredLegId: opsRetiredLeg}, env.cc,
+				)
+				return repId, err
 			},
 		},
 	} {

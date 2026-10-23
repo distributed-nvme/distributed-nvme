@@ -270,16 +270,17 @@ func (s *CnAgentServer) lookupSubsys(
 // ---------------------------------------------------------------------------
 
 // ensureLegs converges every leg of every group of every slice and of every
-// clone's clone meta group — spare legs included, both roles. It reports
+// clone's clone meta group — spare legs and a repair's new legs included,
+// both roles. It reports
 // which legs are **available** (cnagent.md CN12), which is what the assembly
 // needs, records each leg's ResInfo and a two-sided leg's path rows
 // (legPathRows), and says
 // whether any leg failed to converge — its connect, a controller's address
 // read that did not answer, its multipath namespace or its wrapper — which
 // registers the cntlr for the background retry (build registers it too for a
-// group's leg_list member that is not available, CN12). budget is the pass's
-// one CN10 wait budget, shared by every leg and by the clone sources after
-// them.
+// group's leg_list member that is not available, other than an open repair's
+// bad leg while the group's array runs, CN12). budget is the pass's one CN10
+// wait budget, shared by every leg and by the clone sources after them.
 func (s *CnAgentServer) ensureLegs(
 	ctx context.Context,
 	st *cntlrState,
@@ -294,9 +295,11 @@ func (s *CnAgentServer) ensureLegs(
 			// [D15]: every side is still zeroing, so the DN exports nothing —
 			// there is no subsystem to connect to, no multipath namespace to
 			// wrap and no device to probe. Deliberate, healthy, no action.
-			// available is set explicitly, but the map's zero value reads the
-			// same: nothing consults this entry — a group with a provisioning
-			// leg_list leg is deferred, and a spare's flag is never read.
+			// available is set explicitly, though the map's zero value reads
+			// the same. A group with a provisioning leg_list leg is deferred
+			// and a spare's flag is never read, but a repair's new leg's is:
+			// the assembly and the add take a new leg only once it is
+			// available (CN12), so never a provisioning one.
 			info.LegIdToLeg[lp.legId] = st.tracker.Provisioning(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, detailsProvisioning)
 			s.legPathRows(ctx, st, plan, lp, nil, info)
@@ -922,11 +925,12 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 // a clone source failed to converge (CN10/CN18), a clone's clone meta group
 // was not ready while no dm-clone of the clone served or a later step of a
 // clone stopped the build (CN18 says which), a group's leg_list holds a
-// member that is not available (CN12), the build failed to move the ANA
-// group of a namespace or a transfer (CN16, CN17), or the build left the
-// device of a namespace or a transfer whose desired group is optimized off
-// what the desired state wants — held off its td's raid0 (CN18), waiting on
-// the dm-error, or after a failed step — whatever the cause (CN16, CN17). A
+// member that is not available, other than an open repair's bad leg while
+// the group's array runs (CN12), the build failed to move the ANA group of
+// a namespace or a transfer (CN16, CN17), or the build left the device of a
+// namespace or a transfer whose desired group is optimized off what the
+// desired state wants — held off its td's raid0 (CN18), waiting on the
+// dm-error, or after a failed step — whatever the cause (CN16, CN17). A
 // goroutine re-runs the whole converge every CnConnectRetryInterval seconds
 // under the CN1 locks until a pass registers none of these (build's
 // stopConnectRetry) or the cntlr is torn down. The RPC itself retries a

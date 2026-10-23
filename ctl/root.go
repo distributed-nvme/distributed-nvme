@@ -1,9 +1,9 @@
-// Package ctl is the dnv operator CLI (dnvctl.md). It exposes exactly the 60
+// Package ctl is the dnv operator CLI (dnvctl.md). It exposes exactly the 68
 // RPCs of `service Gateway`, one command per RPC, grouped by noun:
 //
 //	dnvctl <group> <verb> [flags]
 //
-// This file owns everything the twelve group files share: the cobra root and
+// This file owns everything the fourteen group files share: the cobra root and
 // its persistent flags, the viper binding (CT9), the dial block (CT2), the
 // per-invocation trace id (CT2), the result-emit pipeline (CT4), the error
 // rendering and the exit codes (CT5).
@@ -69,7 +69,7 @@ const envPrefix = "DNVCTL"
 const defaultTimeout = 10.0
 
 // job is one RPC invocation. It returns whatever should be rendered on
-// stdout: a reply message for 58 of the 60 commands, and a plain
+// stdout: a reply message for 66 of the 68 commands, and a plain
 // map[string]any for the two bitmap reads (CT4).
 type job func(ctx context.Context, client pb.GatewayClient) (any, error)
 
@@ -153,7 +153,7 @@ func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "dnvctl",
 		Short: "dnv operator CLI",
-		Long: "dnvctl issues the 60 RPCs of the dnv Gateway service, one " +
+		Long: "dnvctl issues the 68 RPCs of the dnv Gateway service, one " +
 			"command per RPC. It prints one canonical JSON document per " +
 			"invocation on stdout and never issues an RPC the operator did " +
 			"not type.",
@@ -189,6 +189,8 @@ func NewRootCmd() *cobra.Command {
 	registerXfer(root)
 	registerMigr(root)
 	registerSpare(root)
+	registerRepair(root)
+	registerRetiredLeg(root)
 	return root
 }
 
@@ -257,7 +259,7 @@ type dialFunc func(ctx context.Context, address string) (
 	pb.GatewayClient, func() error, error)
 
 // dial is the production dialFunc: the mandatory client block of grpc.md,
-// Wiring. Both chains are installed even though all 60 RPCs are unary,
+// Wiring. Both chains are installed even though all 68 RPCs are unary,
 // because grpc.md, Wiring, says both chains on every dnv connection. The
 // message limit is installed too: it lets the GetStoragePool reply of a pool
 // at the cardinality limits through.
@@ -338,7 +340,7 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 	return emit(result)
 }
 
-// leaf builds one RPC command. Every one of the 60 RPC leaves has this shape:
+// leaf builds one RPC command. Every one of the 68 RPC leaves has this shape:
 // a Use line, a one-line Short, no positional arguments, and a RunE that
 // defers to run.
 func leaf(use, short string, build func() (job, error)) *cobra.Command {
@@ -494,13 +496,13 @@ func timeoutOf() (time.Duration, error) {
 // line and nothing else — never through viper, which is what keeps
 // DNVCTL_<LEAF> and a config-file key of the same name out of every request
 // (CT9). It is package state for the reason viper is (one invocation per
-// process), and it spares the twelve group files' build closures a
+// process), and it spares the fourteen group files' build closures a
 // parameter.
 var invoked *pflag.FlagSet
 
 // revRead records that the command being run read its token: revToken sets
-// it and run clears it before each build. The 34 token carriers read --rev
-// in build, and the 26 commands whose request has no token field never do,
+// it and run clears it before each build. The 39 token carriers read --rev
+// in build, and the 29 commands whose request has no token field never do,
 // so a typed --rev left unread is how run knows it has nowhere to go (CT3).
 var revRead bool
 
@@ -576,9 +578,9 @@ func strListOf(name string) []string {
 	return strings.Split(raw, ",")
 }
 
-// idListOf is a comma-split base-0 numeric list (--ids). An empty flag is an
-// empty list; otherwise each item is trimmed and parsed, so an empty item is
-// a usage error (dnvctl.md, Conventions, Value types).
+// idListOf is a comma-split base-0 numeric list (--ids, --bad-legs). An
+// empty flag is an empty list; otherwise each item is trimmed and parsed, so
+// an empty item is a usage error (dnvctl.md, Conventions, Value types).
 func idListOf(name string) ([]uint64, error) {
 	raw := strOf(name)
 	if raw == "" {
@@ -633,7 +635,7 @@ func hexBytesOf(name string) ([]byte, error) {
 // The two scope global flags (dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
-// clusterOf fills `cluster_name`. It is the global --cluster for 55 of the 59
+// clusterOf fills `cluster_name`. It is the global --cluster for 63 of the 67
 // requests that carry the field; only the `cluster` group's own four
 // commands override it, through clusterNameOf. Like spOf it reads an
 // env-backed global flag, so it reads viper, where bindViper put the flag's
@@ -650,7 +652,7 @@ func clusterNameOf() string {
 	return clusterOf()
 }
 
-// spOf fills `sp_name` on the 41 requests that carry it, `sp create`
+// spOf fills `sp_name` on the 49 requests that carry it, `sp create`
 // included.
 func spOf() string { return viper.GetString("sp") }
 
@@ -687,7 +689,7 @@ func revToken() (uint64, bool, error) {
 	return value, true, nil
 }
 
-// spRev is the SpRev token of the 30 SP-scoped mutators, or nil when none was
+// spRev is the SpRev token of the 35 SP-scoped mutators, or nil when none was
 // typed. Only `revision` participates in the gateway's check, so the echoed
 // sp_name is deliberately left unset.
 func spRev() (*pb.SpRev, error) {

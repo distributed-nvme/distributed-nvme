@@ -156,6 +156,17 @@ func TestKeyGoldenStrings(t *testing.T) {
 				"migr0 01",
 		},
 		{
+			"RepairKey",
+			RepairKey(goldenCid, goldenSpId, "rep0"),
+			"dnv repair ebada5168620c5fe 0000000000000011 rep0",
+		},
+		{
+			"RetiredLegKey",
+			RetiredLegKey(goldenCid, goldenSpId, 22),
+			"dnv retired_leg ebada5168620c5fe 0000000000000011 " +
+				"0000000000000016",
+		},
+		{
 			"WorkerRegKey",
 			WorkerRegKey(common.WorkerRoleSp, "a1b2c3d4"),
 			"dnv worker sp a1b2c3d4",
@@ -208,6 +219,16 @@ func TestPrefixesEndInOneSpace(t *testing.T) {
 			MigrBitmapPrefix(goldenCid, goldenSpId, "migr0"),
 			"dnv migration_bitmap ebada5168620c5fe 0000000000000011 " +
 				"migr0 ",
+		},
+		{
+			"RepairPrefix",
+			RepairPrefix(goldenCid, goldenSpId),
+			"dnv repair ebada5168620c5fe 0000000000000011 ",
+		},
+		{
+			"RetiredLegPrefix",
+			RetiredLegPrefix(goldenCid, goldenSpId),
+			"dnv retired_leg ebada5168620c5fe 0000000000000011 ",
 		},
 		{
 			"WorkerRegPrefix",
@@ -270,6 +291,16 @@ func TestPrefixIsPrefixOfKey(t *testing.T) {
 			"migration_bitmap",
 			MigrBitmapPrefix(goldenCid, goldenSpId, "migr0"),
 			MigrBitmapKey(goldenCid, goldenSpId, "migr0", 2),
+		},
+		{
+			"repair",
+			RepairPrefix(goldenCid, goldenSpId),
+			RepairKey(goldenCid, goldenSpId, "rep0"),
+		},
+		{
+			"retired_leg",
+			RetiredLegPrefix(goldenCid, goldenSpId),
+			RetiredLegKey(goldenCid, goldenSpId, 22),
 		},
 		{
 			"worker",

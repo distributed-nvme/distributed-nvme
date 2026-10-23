@@ -54,12 +54,25 @@ var idKeyLen = len(fmt.Sprintf(common.IdKeyFmt, uint64(math.MaxUint64)))
 
 // widestCounts is the entry count of every list and map the three widest
 // messages reach: the cntlr syncup, the pool get reply and the cntlr report.
-func widestCounts() map[protoreflect.FullName]int {
+// A group holds one repair or MaxSpareLegPerGrp spare legs, never both: a
+// spare leg and a repair's new leg would race for one place in the array, so
+// each refuses a group that has the other. withRepairs gives every group of
+// the pool its repair and no spare; without it every group has its spares
+// and no repair. Both pools are built, since neither is the wider in every
+// message.
+func widestCounts(withRepairs bool) map[protoreflect.FullName]int {
 	// Every group of the pool: the slices' and one clone meta group per
 	// clone (Clone.meta_grp, which the builder fills as any group).
 	grpsPerSp := common.MaxSliceCntPerSp*2*common.MaxGrpCntPerSlice +
 		common.MaxCloneCntPerSp
-	legsPerGrp := common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
+	// A leg row per leg and per spare or new leg of every group, the wider
+	// of the two pools' counts.
+	legsPerGrp := common.MaxAllocLegPerGrp +
+		max(common.MaxSpareLegPerGrp, 1)
+	sparesPerGrp, repsPerSp := common.MaxSpareLegPerGrp, 0
+	if withRepairs {
+		sparesPerGrp, repsPerSp = 0, grpsPerSp
+	}
 	return map[protoreflect.FullName]int{
 		// The pool's state, as a cntlr syncup and a pool get reply carry it.
 		"SyncupCntlrRequest.id_to_slice":      common.MaxSliceCntPerSp,
@@ -67,12 +80,19 @@ func widestCounts() map[protoreflect.FullName]int {
 		"SyncupCntlrRequest.nqn_to_subsystem": common.MaxSsCntPerSp,
 		"SyncupCntlrRequest.clone_list":       common.MaxCloneCntPerSp,
 		"SyncupCntlrRequest.xfer_list":        common.MaxXferCntPerSp,
+		"SyncupCntlrRequest.name_to_repair":   repsPerSp,
 		"GetStoragePoolReply.cntlr_list":      common.MaxCntlrCntPerSp,
 		"GetStoragePoolReply.slice_list":      common.MaxSliceCntPerSp,
 		"Slice.meta_grp_list":                 common.MaxGrpCntPerSlice,
 		"Slice.data_grp_list":                 common.MaxGrpCntPerSlice,
 		"Group.leg_list":                      common.MaxAllocLegPerGrp,
-		"Group.spare_leg_list":                common.MaxSpareLegPerGrp,
+		"Group.spare_leg_list":                sparesPerGrp,
+		"Group.retired_leg_id_list":           common.MaxRetiredLegPerGrp,
+		// One bad leg and one new leg per repair, and the retired time of
+		// a new leg taken from a retired leg.
+		"Repair.new_leg_list":                1,
+		"Repair.bad_leg_id_list":             1,
+		"Repair.new_leg_id_to_retired_epoch": 1,
 		// One side per leg; withMigrationSides gives MaxMigrCntPerSp legs of
 		// the pool their second.
 		"Leg.side_list": 1,
@@ -94,6 +114,9 @@ func widestCounts() map[protoreflect.FullName]int {
 		"SpConf.clone_name_list":  common.MaxCloneCntPerSp,
 		"SpConf.xfer_name_list":   common.MaxXferCntPerSp,
 		"SpConf.migr_name_list":   common.MaxMigrCntPerSp,
+		"SpConf.repair_name_list": repsPerSp,
+		"SpConf.retired_leg_id_list": grpsPerSp *
+			common.MaxRetiredLegPerGrp,
 
 		// A cntlr report: a row per object of the pool the cntlr builds.
 		"CntlrInfo.ss_id_to_subsystem":           common.MaxSsCntPerSp,
@@ -117,6 +140,11 @@ func widestCounts() map[protoreflect.FullName]int {
 		// MaxMigrCntPerSp migrations, two sides each.
 		"CntlrInfo.side_id_to_path":     2 * common.MaxMigrCntPerSp,
 		"SyncupCntlrReply.bm_info_list": common.MaxCloneCntPerSp,
+		// A verdict per repair and a reading per group, which names the
+		// group's legs and its repair's new leg that md holds in sync.
+		"CntlrInfo.rep_id_to_repair_info":       repsPerSp,
+		"CntlrInfo.grp_id_to_grp_info":          grpsPerSp,
+		"CntlrInfo.GrpInfo.in_sync_leg_id_list": common.MaxAllocLegPerGrp + 1,
 		// A migration's list; a cntlr reports the bitmaps of clones only.
 		"BitmapInfo.bm_idx_list":   0,
 		"BitmapInfo.chunk_id_list": common.MaxSliceCntPerSp * common.MaxCloneBmCnt,
@@ -124,9 +152,15 @@ func widestCounts() map[protoreflect.FullName]int {
 }
 
 // widestStrLens is the length of every string field whose bound is not
-// MaxStrSize; a list of strings is named by its field.
-func widestStrLens() map[protoreflect.FullName]int {
+// MaxStrSize; a list of strings is named by its field. A group's rep_name is
+// empty in the pool without repairs (widestCounts).
+func widestStrLens(withRepairs bool) map[protoreflect.FullName]int {
+	repName := common.MaxStrSize
+	if !withRepairs {
+		repName = 0
+	}
 	return map[protoreflect.FullName]int{
+		"Group.rep_name":          repName,
 		"Subsystem.serial":        idKeyLen,
 		"Subsystem.model":         len(common.NvmeModel),
 		"Subsystem.allowed_hosts": common.MaxNqnLength,
@@ -144,6 +178,7 @@ func widestKeyLens() map[protoreflect.FullName]int {
 	return map[protoreflect.FullName]int{
 		"SyncupCntlrRequest.id_to_slice":      idKeyLen,
 		"SyncupCntlrRequest.nqn_to_subsystem": common.MaxNqnLength,
+		"SyncupCntlrRequest.name_to_repair":   common.MaxStrSize,
 	}
 }
 
@@ -196,11 +231,15 @@ type widestBuilder struct {
 	key uint64
 }
 
-func newWidestBuilder(t *testing.T, rowText int) *widestBuilder {
+func newWidestBuilder(
+	t *testing.T,
+	rowText int,
+	withRepairs bool,
+) *widestBuilder {
 	return &widestBuilder{
 		t:        t,
-		counts:   widestCounts(),
-		strLens:  widestStrLens(),
+		counts:   widestCounts(withRepairs),
+		strLens:  widestStrLens(withRepairs),
 		keyLens:  widestKeyLens(),
 		rowNames: widestRowNames(),
 		rowText:  rowText,
@@ -215,16 +254,25 @@ func (b *widestBuilder) build(m proto.Message) {
 	b.fillMessage(m.ProtoReflect(), "")
 }
 
-// unused lists the table entries no build has read.
-func (b *widestBuilder) unused() []string {
-	var out []string
-	for _, table := range []map[protoreflect.FullName]int{
-		b.counts, b.strLens, b.keyLens, b.rowNames,
-	} {
-		for name := range table {
-			if !b.used[name] {
-				out = append(out, string(name))
+// unusedByAll lists the table entries no build of any of the builders has
+// read.
+func unusedByAll(builders ...*widestBuilder) []string {
+	used := map[protoreflect.FullName]bool{}
+	names := map[protoreflect.FullName]bool{}
+	for _, b := range builders {
+		for _, table := range []map[protoreflect.FullName]int{
+			b.counts, b.strLens, b.keyLens, b.rowNames,
+		} {
+			for name := range table {
+				names[name] = true
+				used[name] = used[name] || b.used[name]
 			}
+		}
+	}
+	var out []string
+	for name := range names {
+		if !used[name] {
+			out = append(out, string(name))
 		}
 	}
 	sort.Strings(out)
@@ -458,13 +506,17 @@ func shapeOf(slices []*pb.Slice) sliceShape {
 
 // widestPoolShape is the shape of a pool's slices at the limits: every slice
 // of MaxSliceCntPerSp holds MaxGrpCntPerSlice groups in each of its two
-// lists, every group MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares of
-// one side each, and MaxMigrCntPerSp migrations add a side each. The clones'
-// groups are not in it; cloneGrpShape is theirs.
-func widestPoolShape() sliceShape {
+// lists, every group MaxAllocLegPerGrp legs of one side each and, in the pool
+// without repairs, MaxSpareLegPerGrp spares of one side each, and
+// MaxMigrCntPerSp migrations add a side each. The clones' groups are not in
+// it; cloneGrpShape is theirs.
+func widestPoolShape(withRepairs bool) sliceShape {
 	groups := common.MaxSliceCntPerSp * 2 * common.MaxGrpCntPerSlice
 	legs := groups * common.MaxAllocLegPerGrp
 	spares := groups * common.MaxSpareLegPerGrp
+	if withRepairs {
+		spares = 0
+	}
 	return sliceShape{
 		slices: common.MaxSliceCntPerSp,
 		groups: groups,
@@ -478,10 +530,13 @@ func widestPoolShape() sliceShape {
 // limits: one group per clone of MaxCloneCntPerSp, of the legs and spares of
 // a slice's group. No migration moves one of its legs, so each side is alone
 // on its leg.
-func cloneGrpShape() sliceShape {
+func cloneGrpShape(withRepairs bool) sliceShape {
 	groups := common.MaxCloneCntPerSp
 	legs := groups * common.MaxAllocLegPerGrp
 	spares := groups * common.MaxSpareLegPerGrp
+	if withRepairs {
+		spares = 0
+	}
 	return sliceShape{
 		groups: groups,
 		legs:   legs,
@@ -498,17 +553,38 @@ func mib(n int) string {
 // GrpcMaxMsgSize, the message limit of every dnv gRPC server and client
 // (grpc.md, Wiring): the cntlr syncup and the pool get reply of a pool at the
 // limits, and the report of a cntlr of that pool, with no row text and with
-// rowTextAllowance of text on every row. The first three fit with half the
-// limit to spare; the report with text fits. A row's text is the one part of
-// the report no limit bounds (architecture.md, Known limits).
+// rowTextAllowance of text on every row, each for the pool whose every group
+// has its spares and for the one whose every group has its repair
+// (widestCounts). The first three fit with half the limit to spare; the
+// report with text fits. A row's text is the one part of the report no limit
+// bounds (architecture.md, Known limits).
 func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 	if common.EtcdMaxRequestBytes > common.GrpcMaxMsgSize {
 		t.Errorf("EtcdMaxRequestBytes %d is above GrpcMaxMsgSize %d: a value "+
 			"etcd took could fail the message that carries it to an agent",
 			common.EtcdMaxRequestBytes, common.GrpcMaxMsgSize)
 	}
+	var builders []*widestBuilder
+	for _, withRepairs := range []bool{false, true} {
+		pool := "the pool with spares"
+		if withRepairs {
+			pool = "the pool with repairs"
+		}
+		t.Run(pool, func(t *testing.T) {
+			b := newWidestBuilder(t, 0, withRepairs)
+			builders = append(builders, b)
+			checkWidestMessages(t, b, withRepairs)
+		})
+	}
+	if unused := unusedByAll(builders...); len(unused) > 0 {
+		t.Errorf("table entries no field of the three messages reaches: %v",
+			unused)
+	}
+}
 
-	b := newWidestBuilder(t, 0)
+// checkWidestMessages builds the three messages of one pool with b and holds
+// them to their shapes and to GrpcMaxMsgSize.
+func checkWidestMessages(t *testing.T, b *widestBuilder, withRepairs bool) {
 	syncup := &pb.SyncupCntlrRequest{}
 	b.build(syncup)
 	withMigrationSides(slicesOf(syncup))
@@ -517,12 +593,8 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 	withMigrationSides(poolGet.GetSliceList())
 	noText := &pb.SyncupCntlrReply{}
 	b.build(noText)
-	if unused := b.unused(); len(unused) > 0 {
-		t.Errorf("table entries no field of the three messages reaches: %v",
-			unused)
-	}
 
-	want := widestPoolShape()
+	want := widestPoolShape(withRepairs)
 	for _, c := range []struct {
 		name   string
 		slices []*pb.Slice
@@ -534,7 +606,7 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 			t.Errorf("%s holds %+v, want the widest pool %+v", c.name, got, want)
 		}
 	}
-	clones := cloneGrpShape()
+	clones := cloneGrpShape(withRepairs)
 	var cloneGrps []*pb.Slice
 	for _, clone := range syncup.GetCloneList() {
 		cloneGrps = append(cloneGrps, &pb.Slice{
@@ -547,6 +619,10 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 		t.Errorf("the cntlr syncup's clones hold %+v, want the widest "+
 			"clone meta groups %+v", got, clones)
 	}
+	repairs := 0
+	if withRepairs {
+		repairs = want.groups + clones.groups
+	}
 	info := noText.GetCntlrInfo()
 	thinRows := 0
 	for _, thin := range info.GetTdIdToThinInfo() {
@@ -556,14 +632,20 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 	for _, bm := range noText.GetBmInfoList() {
 		chunkIds += len(bm.GetChunkIdList())
 	}
+	newLegs := 0
+	for _, rep := range syncup.GetNameToRepair() {
+		newLegs += len(rep.GetNewLegList())
+	}
 	for _, c := range []struct {
 		name      string
 		got, want int
 	}{
-		// A leg row per leg and spare of every group of the pool, the
-		// clones' groups included.
+		// A leg row per leg of every group of the pool, the clones' groups
+		// included, and per spare or new leg, as many as the pool with
+		// spares has spares.
 		{"leg rows", len(info.GetLegIdToLeg()),
-			want.legs + want.spares + clones.legs + clones.spares},
+			widestPoolShape(false).legs + widestPoolShape(false).spares +
+				cloneGrpShape(false).legs + cloneGrpShape(false).spares},
 		// Every side of a leg with two sides: twice the legs a migration
 		// gave a second side.
 		{"path rows", len(info.GetSideIdToPath()),
@@ -573,15 +655,22 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 		{"thin rows", thinRows, len(syncup.GetTdList()) * want.slices},
 		{"clone chunk ids", chunkIds,
 			len(syncup.GetCloneList()) * want.slices * common.MaxCloneBmCnt},
+		{"repairs in the syncup", len(syncup.GetNameToRepair()), repairs},
+		{"new legs of the repairs", newLegs, repairs},
+		{"repair names in the pool get reply",
+			len(poolGet.GetSpConf().GetRepairNameList()), repairs},
+		{"repair verdicts", len(info.GetRepIdToRepairInfo()), repairs},
+		{"group readings", len(info.GetGrpIdToGrpInfo()),
+			want.groups + clones.groups},
 	} {
 		if c.got != c.want {
-			t.Errorf("the cntlr report holds %d %s, want %d", c.got, c.name,
+			t.Errorf("the messages hold %d %s, want %d", c.got, c.name,
 				c.want)
 		}
 	}
 
 	withText := &pb.SyncupCntlrReply{}
-	newWidestBuilder(t, rowTextAllowance).build(withText)
+	newWidestBuilder(t, rowTextAllowance, withRepairs).build(withText)
 
 	for _, c := range []struct {
 		name string
@@ -619,7 +708,9 @@ func TestFlipProvisionedAtTheSliceCeiling(t *testing.T) {
 	const shard = uint32(7)
 	const spId = uint64(math.MaxUint64)
 
-	b := newWidestBuilder(t, 0)
+	// The pool with spares: a group's two spares are wider than its
+	// repair's name (widestCounts).
+	b := newWidestBuilder(t, 0, false)
 	slices := make([]*pb.Slice, common.MaxSliceCntPerSp)
 	for i := range slices {
 		slices[i] = &pb.Slice{}

@@ -637,12 +637,16 @@ func (s *Server) InspectCntlr(
 // inside the SP but carries no hint of which slice holds it (architecture.md,
 // Cntlrs); only when no slice holds it are the clones read and their clone
 // meta groups scanned the same way (findCloneSide), so the inspect of a
-// slice's side never depends on the clone keys. An id in neither is
+// slice's side never depends on the clone keys; and only when no clone holds
+// it are the pool's repairs and retired legs read (findRepairSide), whose
+// sides every dn agent hosts as it hosts a leg's: the side of a repair's new
+// leg and a retired side (architecture.md, Repair). An id in none of them is
 // NOT_FOUND.
 //
 // The agent request names the side by the full SidePointer, not by side_id
 // alone: the dn agent keys its objects by (sp_id, leg_id, side_id), so the
-// leg the scan found travels with the id. The DnConf is read for its `dn_id`
+// leg the scan found travels with the id — a new leg's own id, or a retired
+// leg's, which keys its record. The DnConf is read for its `dn_id`
 // alone and its absence is ABORTED for the same reason InspectCntlr's CnConf
 // is — DeleteDiskNode refuses a DN that still carries side pointers.
 //
@@ -682,20 +686,27 @@ func (s *Server) InspectSide(
 		if err != nil {
 			return err
 		}
-		var leg *pb.Leg
+		var legId uint64
 		var side *pb.Side
 		if loc, ok := findSide(sc.Conf, slices, req.GetSideId()); ok {
-			leg, side = loc.Leg, loc.Side
+			legId, side = loc.Leg.GetLegId(), loc.Side
 		} else {
 			clones, err := loadClones(stm, sc.Cid, sc.Conf)
 			if err != nil {
 				return err
 			}
 			cloneLoc, ok := findCloneSide(sc.Conf, clones, req.GetSideId())
-			if !ok {
-				return errNotFound("side %d not found", req.GetSideId())
+			if ok {
+				legId, side = cloneLoc.Leg.GetLegId(), cloneLoc.Side
+			} else {
+				legId, side, err = findRepairSide(stm, sc, req.GetSideId())
+				if err != nil {
+					return err
+				}
+				if side == nil {
+					return errNotFound("side %d not found", req.GetSideId())
+				}
 			}
-			leg, side = cloneLoc.Leg, cloneLoc.Side
 		}
 		dnKey := model.DnConfKey(sc.Cid, side.GetAddrPort())
 		dn := &pb.DnConf{}
@@ -707,7 +718,7 @@ func (s *Server) InspectSide(
 		addrPort = side.GetAddrPort()
 		pointer = &pb.SidePointer{
 			SpId:   sc.SpId(),
-			LegId:  leg.GetLegId(),
+			LegId:  legId,
 			SideId: req.GetSideId(),
 		}
 		return nil

@@ -19,11 +19,11 @@ safety rests on, the refusal before redund builds its pool and the kick in
 its late flip (`architecture.md`, [D16]). It proves the happy path; error
 paths are out of scope but for the stale probe, the dead leg, the promotion
 that outruns the sides' flip, md's refusal to start an array from one clean
-leg, the clone's source lost and given back, and the leftover, an accepted
-request reporting residue (`cnagent.md` CN20). The cases
-run in a fixed order, fail-fast — smoke, redund, teardown, thinbm, clone_xfer,
-restart — each under pool ids of its own and each leaving nothing of its pools,
-a teardown per case and per stage that also keeps the run inside a DN's data
+leg, a repair's bad leg that does not serve, the clone's source lost and given
+back, and the leftover, an accepted request reporting residue (`cnagent.md`
+CN20). The cases run in a fixed order, fail-fast — smoke, redund, repair,
+teardown, thinbm, clone_xfer, restart — each under pool ids of its own and
+each leaving nothing of its pools, a teardown per case and per stage that also keeps the run inside a DN's data
 area, which the cases together would overdraw.
 
 Beside the suite, the Go tests of `agent/cnagent` run a real cn agent the way
@@ -131,6 +131,13 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   a token bucket there, kept to the nvme-tcp port, slows what its legs send
   those sides, the copy's writes into the destination among them, and none
   of the source's reads.
+* md holds a member added to an array whose every place holds a member in
+  sync without a place, its "slot" none, and copies nothing onto it:
+  repair's abort stage gives the converge a new leg held without a place
+  that way, and asserts the slot rather than assume it. Its add stage rests
+  on the dead-leg fact above: md fails the bad leg, whose path no longer
+  serves the primary, only on an IO to it, so the stage takes the bad leg
+  in its place or out of it.
 * A source that fails every read holds a dm-clone's copy at a fixed count,
   its metadata read-write: the region in flight ends, and no other is copied
   while the source fails. A namespace removed from the source's export takes
@@ -200,8 +207,12 @@ its info-read commands are plain memory reads.
   read that failed, and so prove less: the partition stages' waits for a path
   to leave live and the finalize's checks for a controller of the clone's
   source or of its clone meta group's leg accept the "none" a failed listing
-  returns, and clone_xfer's checks that a dm-clone, a group device or a leg
-  wrapper is absent accept the "missing" a failed `dmsetup info` returns; so
+  returns, clone_xfer's checks that a dm-clone, a group device or a leg
+  wrapper is absent and repair's checks that a leg wrapper is absent
+  accept the "missing" a failed `dmsetup info` returns, and repair's
+  checks that md holds no new leg after the abort and no bad leg after the
+  add take a read that failed for a member md does not hold, beside the
+  converge's verdict and its commands; so
   do the no-path check after an admission refusal and the check that a
   subsystem lists no host, both backed by the refusal record; and the array counts redund's later stages and the teardown
   case read from /proc/mdstat, the standby's no-array check and the md part
@@ -299,6 +310,42 @@ assembles the arrays under its own trace ids, with no second `SyncupCntlr`,
 puts the ns-dev on the raid0 and moves the namespace optimized, then stops; and
 a block only the newer leg holds reads as that leg's, the stale member kicked
 (CN10, CN12; `architecture.md`, [D16]).
+
+**repair** proves on real md the cn agent's part of a repair
+(`architecture.md`, Repair; `cnagent.md` CN12, CN28, CN30), on a pool of its
+own shaped as redund's, md-raid1 meta and data groups across both DNs, whose
+data group's DN1 leg is the bad leg and whose new legs have their sides on DN1
+too. The primary reports beside its rows, for each group whose row reads OK,
+whether the array is whole and which legs md holds in sync, and a standby
+reports none.
+While the bad leg serves with an OK row, a CREATED repair waits: its new leg
+is connected, wrapped and probed on both cntlrs, the converge runs no mdadm
+against the array, and its repair verdict says neither started nor abort
+confirmed, while the standby gives no repair verdict. The abort: with the
+new leg added by hand to the whole array, where md holds it without a
+place, a converge whose
+request carries the abort flag removes it, adds and fails nothing, and
+confirms the abort; a converge after it, finding the new leg no member, adds
+nothing and confirms again; and the request without the repair, as a cancel
+leaves it, lets the new leg's wrapper and connection go, re-sent while it
+replies leftover. The add: a second repair's new leg, while the bad leg does
+not serve the primary — its side's optimized path moved to the standby, md
+usually still holding it in its place, with no IO to it — is added in the
+converge that first connects it, after the bad leg is failed and then
+removed, or removed alone when md has moved it out of its place already, and
+no other mdadm command; md copies the whole data region onto the new leg,
+which ends in sync, the array whole, and the repair verdict says started.
+The standby, sent each request of the add and of the move to STARTED as
+the worker's fan-out sends it, connects and wraps the new leg and gives no
+repair verdict, and the primary's converge of the STARTED repair runs no
+mdadm against the array. The assembly after a failover, the bad leg not
+available to the new primary, starts the data array from leg 2 and the new
+leg, each with a superblock, in that order and with no create; the data reads
+back, and reads back from the new leg alone with leg 2 failed by hand, which
+the verdict then names and the re-sent `SyncupCntlr` puts back. The finish's
+request, the new leg in the bad leg's place and the bad leg gone, lets the
+retired leg's wrapper and connection go on both cntlrs with no mdadm command,
+and the array stays whole with its two legs in sync.
 
 **teardown** proves `architecture.md`, Teardown by sweep, on a CN: a teardown
 finishes when what lies under it is gone, long gone, under load or unreachable,
@@ -473,7 +520,7 @@ any dm or nvmet residue fails it, since reporting it is not success.
 
 ## Out of scope
 
-Error paths beyond the six above; QoS, not enforced (`cnagent.md` CN6);
+Error paths beyond the seven above; QoS, not enforced (`cnagent.md` CN6);
 `GrowSlice`; spare legs; a leg gaining or losing a second side, which the dn
 suite's migrations prove, and the path rows of a leg with two sides
 (`cnagent.md` CN28), which the unit tests cover; levels but read-write,
@@ -487,7 +534,13 @@ beyond the partition, the pin, the writer and the lost source; provisioning
 deferral (`cnagent.md` CN9), a clone's for its clone meta group's sides
 included; a clone meta group under md-raid1 or one that is not ready, and a
 dm-clone whose metadata is not in read-write mode, all of which the unit tests
-cover (CN18); a torn
+cover (CN18); of a repair, the put-back of a new leg md has failed, a bad
+leg that md holds without a place once its repair has started in md, the
+add's wait for a member that keeps the data, a half-copied new leg after a
+failover, a new leg that is not available, which is no late member and no
+candidate of an assembly, a converge's read of the array again that fails or
+finds it not running, an aborted repair's new leg as an extra and a repair on
+a clone meta group, all of which the unit tests cover (CN12); a torn
 snapshot, which needs two slices, whose mark the unit tests cover (CN14);
 the lingering-clone hold's scope per thin device, left to the unit tests
 (CN18); the

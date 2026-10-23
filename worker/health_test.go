@@ -1496,11 +1496,19 @@ type cntlrRowField struct {
 	put func(info *pb.CntlrInfo, tdId uint64, key uint64, res *pb.ResInfo)
 }
 
+// cntlrNotRows are CntlrInfo's maps of fields that are not rows: the
+// primary's verdicts on the repairs and its readings of the groups' arrays,
+// which the worker reads as fields and no health rule judges.
+var cntlrNotRows = map[protoreflect.Name]bool{
+	"rep_id_to_repair_info": true,
+	"grp_id_to_grp_info":    true,
+}
+
 // cntlrRowFields walks CntlrInfo's descriptor rather than a hand-kept list,
 // so a map added to the proto is covered by the tests below the day it
 // lands: every field must be a uint64-keyed map of ResInfo, or of a message
 // whose every field is one, td_id_to_thin_info's torn mark aside, which is
-// no row (RW19 copies it; HL2 never judges it).
+// no row (RW19 copies it; HL2 never judges it), or one of cntlrNotRows.
 func cntlrRowFields(t *testing.T) []cntlrRowField {
 	t.Helper()
 	resInfo := (&pb.ResInfo{}).ProtoReflect().Descriptor().FullName()
@@ -1535,6 +1543,9 @@ func cntlrRowFields(t *testing.T) []cntlrRowField {
 		if !uint64Map(fd) {
 			t.Fatalf("CntlrInfo.%s is not a map of rows: teach this test",
 				fd.Name())
+		}
+		if cntlrNotRows[fd.Name()] {
+			continue
 		}
 		nested := fd.MapValue().Message().Fields()
 		for j := 0; j < nested.Len(); j++ {
@@ -1658,6 +1669,32 @@ func TestHealthCntlrTornMarkIsNoRow(t *testing.T) {
 	}
 	if !primaryShapeBuilt(info) {
 		t.Fatalf("a torn mark kept the primary's shape unbuilt")
+	}
+}
+
+// TestHealthCntlrRepairFieldsAreNoRows pins that the maps of cntlrNotRows
+// carry no row HL2 judges: a report with nothing else reads clean and shows
+// a primary's stack built.
+func TestHealthCntlrRepairFieldsAreNoRows(t *testing.T) {
+	info := &pb.CntlrInfo{
+		RepIdToRepairInfo: map[uint64]*pb.CntlrInfo_RepairInfo{
+			7: {Started: true, AbortConfirmed: true},
+		},
+		GrpIdToGrpInfo: map[uint64]*pb.CntlrInfo_GrpInfo{
+			8: {Whole: true, InSyncLegIdList: []uint64{9}},
+		},
+	}
+	if obs, res := cntlrObservation(0, info); obs != healthClean {
+		t.Fatalf("obs = %v (%q), want clean", obs, res)
+	}
+	if !primaryShapeBuilt(info) {
+		t.Fatalf("the repair fields kept the primary's shape unbuilt")
+	}
+	for name := range cntlrNotRows {
+		if (&pb.CntlrInfo{}).ProtoReflect().Descriptor().Fields().
+			ByName(name) == nil {
+			t.Errorf("cntlrNotRows names %s, which CntlrInfo lacks", name)
+		}
 	}
 }
 

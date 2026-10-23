@@ -796,6 +796,22 @@ func TestFinishSpDeleteRefusesWhileAnythingSurvives(t *testing.T) {
 			mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
 			env.seedSpGlobal()
 		}, "cntlrs remain"},
+		{"repairs remain", func(env *opsEnv) {
+			// Latched with the cntlrs and the slices gone, so only the
+			// repair guard can refuse it.
+			env.latchForDrain()
+			conf := env.spConf()
+			conf.SliceIdList = nil
+			conf.RepairNameList = []string{opsRepName}
+			mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+		}, "repairs remain"},
+		{"retired legs remain", func(env *opsEnv) {
+			env.latchForDrain()
+			conf := env.spConf()
+			conf.SliceIdList = nil
+			conf.RetiredLegIdList = []uint64{opsRetiredLeg}
+			mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+		}, "retired legs remain"},
 		{"slices remain", func(env *opsEnv) {
 			env.latchForDrain()
 		}, "slices remain"},
@@ -871,6 +887,25 @@ func TestDrainOpsRefuseAnUnlatchedSp(t *testing.T) {
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName)
 			return err
 		}, func(env *opsEnv) { env.chargeFixture(); env.setDeleting() }},
+		{"DrainSpRepairs", opDrainSpRepairs, func(env *opsEnv) error {
+			_, err := DrainSpRepairs(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, []string{opsRepName}, env.cc)
+			return err
+		}, func(env *opsEnv) {
+			env.createRepair(func() RepairNewLeg {
+				return env.freshLeg(opsDnC)
+			})
+			env.latchForDrain()
+		}},
+		{"DrainSpRetiredLegs", opDrainSpRetiredLegs, func(env *opsEnv) error {
+			_, err := DrainSpRetiredLegs(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, []uint64{opsRetiredLeg}, env.cc)
+			return err
+		}, func(env *opsEnv) {
+			env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide,
+				opsDnC, 1, opsRetiredEpoch)
+			env.latchForDrain()
+		}},
 		{"DrainSpSlice", opDrainSpSlice, func(env *opsEnv) error {
 			_, _, err := DrainSpSlice(env.ctx, env.cli, env.cid, opsShard,
 				opsSpId, opsSpName, opsSliceId, env.cc)

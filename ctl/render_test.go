@@ -212,6 +212,31 @@ var renderCases = []renderCase{
 		want: `{"sp_id_to_name":{"1":"sp1","2":"sp2"}}` + "\n",
 	},
 	{
+		// A repair as stored: its stage an enum rendered by name, a uint64
+		// map key and value quoted, and the empty new_leg_list an empty list
+		// rather than an absent key.
+		name: "repair get, the record",
+		rpc:  "GetRepair",
+		argv: []string{"repair", "get", "--name", "r0"},
+		reply: &pb.GetRepairReply{
+			RepName: "r0",
+			Repair: &pb.Repair{
+				RepId:                  9,
+				GrpId:                  2,
+				RepStage:               pb.RepStage_REP_STAGE_STARTED,
+				BadLegIdList:           []uint64{3},
+				TryToAbort:             true,
+				SliceId:                1,
+				NewLegIdToRetiredEpoch: map[uint64]uint64{4: 5},
+			},
+		},
+		want: `{"rep_name":"r0","repair":{"bad_leg_id_list":["3"],` +
+			`"clone_name":"","grp_id":"2",` +
+			`"new_leg_id_to_retired_epoch":{"4":"5"},"new_leg_list":[],` +
+			`"rep_id":"9","rep_stage":"REP_STAGE_STARTED","slice_id":"1",` +
+			`"try_to_abort":true}}` + "\n",
+	},
+	{
 		// An empty map renders as {} rather than null, and the reply's only
 		// field being empty does not make the document empty.
 		name:  "ss list, empty map",

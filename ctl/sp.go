@@ -18,7 +18,7 @@
 //     `sp create` — there is no SP yet to have a revision. `sp get` is where
 //     the operator read the number they pass back as --rev (CT3).
 //   - The two parse helpers below are prefixed `sp` because ctl/ is a single
-//     package and the twelve group files must not collide (dnvctl.md,
+//     package and the fourteen group files must not collide (dnvctl.md,
 //     Files).
 
 package ctl
@@ -262,7 +262,7 @@ func spDeleteCmd() *cobra.Command {
 
 // spGetCmd is GetStoragePool — the SpRev token source (CT3). Its reply carries
 // sp_rev.revision, which is the number an operator feeds back as --rev on the
-// 30 SP-scoped mutators.
+// 35 SP-scoped mutators.
 func spGetCmd() *cobra.Command {
 	return leaf("get", "read a storage pool (GetStoragePool)",
 		func() (job, error) {

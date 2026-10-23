@@ -1009,6 +1009,13 @@ func (s *Server) ListStoragePools(
 // the DN's nvmet subsystem exports it under (architecture.md, cntlid slots);
 // dropping a slot a side still names would make the SP undeployable, not
 // merely inconsistent.
+//
+// The sides of repairs' new legs and the retired sides are deliberately not
+// read, and architecture.md, Storage pools, says why: such a side took its
+// slot from the list when it was created, no agent checks a slot against the
+// list, and a slot only has to differ from the other side of its own leg,
+// which those sides do not have — while the repair and retired-leg keys
+// would not fit this one transaction beside the slices and the clones.
 func (s *Server) UpdateStoragePoolCntlidSlotList(
 	ctx context.Context,
 	req *pb.UpdateStoragePoolCntlidSlotListRequest,

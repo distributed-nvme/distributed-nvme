@@ -792,19 +792,24 @@ func SetDeleting(
 	return out, nil
 }
 
-// SpDrain is what DrainSp ran: its steps, the cntlrs and groups the steps
-// removed, the slices they finished, and whether the pool is gone.
+// SpDrain is what DrainSp ran: its steps, the cntlrs, repairs, retired legs
+// and groups the steps removed, the slices they finished, and whether the
+// pool is gone.
 type SpDrain struct {
-	Steps    int
-	CntlrCnt int
-	GrpCnt   int
-	SliceCnt int
-	Deleted  bool
+	Steps         int
+	CntlrCnt      int
+	RepairCnt     int
+	RetiredLegCnt int
+	GrpCnt        int
+	SliceCnt      int
+	Deleted       bool
 }
 
 // DrainSp runs a latched SP's drain to completion, or for maxSteps steps:
-// SPD8's derivation in a loop over the three model ops the sp coordinator
-// calls, with no pass and no wake-up.
+// SPD8's derivation in a loop over the five model ops of the sp drain, with
+// no pass and no wake-up. A batch of repairs or of retired legs is derived
+// from a load of the pool (model.SpDrainRepairBatch,
+// model.SpDrainRetiredLegBatch).
 //
 // It is the gateway suite's stand-in for the sp coordinator, which that suite
 // does not run — the same kind of worker-role write as SetProvisioned and
@@ -858,6 +863,30 @@ func DrainSp(
 				return out, fmt.Errorf("cntlrs: %w", err)
 			}
 			out.CntlrCnt += removed
+		case len(conf.GetRepairNameList()) > 0:
+			state, err := model.LoadSp(ctx, cli, cid, target.Name)
+			if err != nil {
+				return out, err
+			}
+			removed, err := model.DrainSpRepairs(
+				ctx, cli, cid, target.Shard, target.Id, target.Name,
+				model.SpDrainRepairBatch(state), cl.Conf)
+			if err != nil {
+				return out, fmt.Errorf("repairs: %w", err)
+			}
+			out.RepairCnt += removed
+		case len(conf.GetRetiredLegIdList()) > 0:
+			state, err := model.LoadSp(ctx, cli, cid, target.Name)
+			if err != nil {
+				return out, err
+			}
+			removed, err := model.DrainSpRetiredLegs(
+				ctx, cli, cid, target.Shard, target.Id, target.Name,
+				model.SpDrainRetiredLegBatch(state), cl.Conf)
+			if err != nil {
+				return out, fmt.Errorf("retired legs: %w", err)
+			}
+			out.RetiredLegCnt += removed
 		case len(conf.GetSliceIdList()) > 0:
 			removed, sliceDone, err := model.DrainSpSlice(
 				ctx, cli, cid, target.Shard, target.Id, target.Name,
@@ -938,8 +967,9 @@ func SetCloneDeleting(
 // CloneDrain is what DrainClone ran: its steps, the chunk KEYS it removed
 // (the Clone record carries no count of its own to confuse them with),
 // whether the clone is gone, and, when this call ran the final step, the
-// sides of the clone's clone meta group the record held as that step removed
-// it, which the step gave back to their DNs.
+// sides of the clone's clone meta group the records held as that step removed
+// them — its legs' and spares', its repair's new legs' and its retired
+// legs' — which the step gave back to their DNs.
 type CloneDrain struct {
 	Steps      int
 	ChunkCnt   int
@@ -1009,6 +1039,11 @@ func DrainClone(
 			batch = batch[:common.MaxDelBmPerTxn]
 		}
 		if len(batch) == 0 {
+			sideCnt, err := cloneGrpSideCnt(
+				ctx, cli, cid, target.Id, clone.GetMetaGrp())
+			if err != nil {
+				return out, err
+			}
 			err = model.FinishCloneDelete(ctx, cli, cid, target.Shard,
 				target.Id, target.Name, cloneName, clone.GetCloneId(),
 				cl.Conf)
@@ -1016,12 +1051,7 @@ func DrainClone(
 				return out, fmt.Errorf("final: %w", err)
 			}
 			out.Deleted = true
-			for _, leg := range append(
-				append([]*pb.Leg(nil), clone.GetMetaGrp().GetLegList()...),
-				clone.GetMetaGrp().GetSpareLegList()...,
-			) {
-				out.GrpSideCnt += len(leg.GetSideList())
-			}
+			out.GrpSideCnt = sideCnt
 		} else {
 			removed, err := model.DrainCloneBm(ctx, cli, cid,
 				target.Id, target.Name, cloneName, clone.GetCloneId(), batch)
@@ -1036,6 +1066,34 @@ func DrainClone(
 		}
 	}
 	return out, nil
+}
+
+// cloneGrpSideCnt counts the sides the clone drain's final step gives back
+// for grp: those of its legs and spares, of its repair's new legs and of its
+// retired legs. A record the group names that is missing counts nothing:
+// the final step refuses it.
+func cloneGrpSideCnt(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	grp *pb.Group,
+) (int, error) {
+	legs := append(
+		append([]*pb.Leg(nil), grp.GetLegList()...), grp.GetSpareLegList()...)
+	if repName := grp.GetRepName(); repName != "" {
+		rep := &pb.Repair{}
+		if _, err := cli.Get(
+			ctx, model.RepairKey(cid, spId, repName), rep); err != nil {
+			return 0, err
+		}
+		legs = append(legs, rep.GetNewLegList()...)
+	}
+	cnt := len(grp.GetRetiredLegIdList())
+	for _, leg := range legs {
+		cnt += len(leg.GetSideList())
+	}
+	return cnt, nil
 }
 
 // cloneChunks is MD3's keys-only scan of one clone's chunk prefix, in

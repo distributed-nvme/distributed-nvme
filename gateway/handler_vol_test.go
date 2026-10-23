@@ -5425,10 +5425,18 @@ func volSeedTokenFixture(env *volEnv) {
 	conf.XferNameList = []string{"xfer-a"}
 	conf.MigrNameList = []string{"migr-a"}
 	env.putSpConf(conf)
+	// The repair calls' objects (architecture.md, Repairs, Retired legs):
+	// the data group's leg A bad, so a repair of it can be created; a
+	// STARTED repair of the meta group, which a finish takes; and a retired
+	// leg of the data group, which a delete takes.
+	repSetLegEpoch(env, volDataGrpId, volDataLegA, repEpoch)
+	repPutRepair(env, "rep-s", volMetaGrpId, volMetaLegA,
+		pb.RepStage_REP_STAGE_STARTED, 811, volSide(812, volDnC))
+	repPutRetired(env, volDataGrpId, 910, volSide(911, volDnD), 22)
 }
 
 // volTokenCase is one SP-scoped mutator of architecture.md, Thin devices
-// through Spare legs, as the two GW6 tests
+// through Retired legs, as the two GW6 tests
 // below drive it: once with present tokens that cannot match the stored
 // revision (refused, every one of them), and once with no token message at all
 // (the revision comparison is skipped and the mutator is judged only by its own
@@ -5457,7 +5465,7 @@ type volTokenCase struct {
 }
 
 // volTokenCases is the mutator list both GW6 tests run: every SP-scoped
-// mutator of architecture.md, Thin devices through Spare legs, each written
+// mutator of architecture.md, Thin devices through Retired legs, each written
 // against the state volSeedTokenFixture
 // seeds — one shared seeding for the refusal test, a fresh one per case for the
 // bypass test. The two tests share this one list on purpose: a mutator added to
@@ -5786,11 +5794,81 @@ func volTokenCases() []volTokenCase {
 			bypassMsg: fmt.Sprintf(
 				"spare leg 1 not found in group %d", volDataGrpId),
 		},
+		{
+			name: "CreateRepair",
+			call: func(env *volEnv, rev *pb.SpRev) error {
+				_, err := env.srv.CreateRepair(
+					env.ctx, &pb.CreateRepairRequest{
+						ClusterName: env.cluster, SpName: volSpName,
+						SpRev: rev, RepName: "rep-x", GrpId: volDataGrpId,
+						BadLegIdList: []uint64{volDataLegA},
+						DnSelector:   volDnSelector(volDnC),
+					})
+				return err
+			},
+			bypassCode: codes.OK,
+		},
+		{
+			name: "FinishRepair",
+			call: func(env *volEnv, rev *pb.SpRev) error {
+				_, err := env.srv.FinishRepair(
+					env.ctx, &pb.FinishRepairRequest{
+						ClusterName: env.cluster, SpName: volSpName,
+						SpRev: rev, RepName: "rep-s",
+					})
+				return err
+			},
+			bypassCode: codes.OK,
+		},
+		{
+			name: "CancelRepair",
+			call: func(env *volEnv, rev *pb.SpRev) error {
+				_, err := env.srv.CancelRepair(
+					env.ctx, &pb.CancelRepairRequest{
+						ClusterName: env.cluster, SpName: volSpName,
+						SpRev: rev, RepName: "rep-s",
+					})
+				return err
+			},
+			// The seeded repair is STARTED, and a cancel takes an ABORTED
+			// one (architecture.md, Repair).
+			bypassCode: codes.FailedPrecondition,
+			bypassMsg: "CancelRepair: precondition failed: repair stage " +
+				"is REP_STAGE_STARTED",
+		},
+		{
+			name: "TryToAbortRepair",
+			call: func(env *volEnv, rev *pb.SpRev) error {
+				_, err := env.srv.TryToAbortRepair(
+					env.ctx, &pb.TryToAbortRepairRequest{
+						ClusterName: env.cluster, SpName: volSpName,
+						SpRev: rev, RepName: "rep-s",
+					})
+				return err
+			},
+			// The seeded repair is STARTED, and an abort takes a CREATED
+			// one (architecture.md, Repair).
+			bypassCode: codes.FailedPrecondition,
+			bypassMsg: "SetRepairAbort: precondition failed: repair stage " +
+				"is REP_STAGE_STARTED",
+		},
+		{
+			name: "DeleteRetiredLeg",
+			call: func(env *volEnv, rev *pb.SpRev) error {
+				_, err := env.srv.DeleteRetiredLeg(
+					env.ctx, &pb.DeleteRetiredLegRequest{
+						ClusterName: env.cluster, SpName: volSpName,
+						SpRev: rev, LegId: 910,
+					})
+				return err
+			},
+			bypassCode: codes.OK,
+		},
 	}
 }
 
 // TestVolumeMutatorsRefuseAPresentStaleToken is GW6 over every SP-scoped
-// mutator of architecture.md, Thin devices through Spare legs, for the half of
+// mutator of architecture.md, Thin devices through Retired legs, for the half of
 // the rule that refuses: a
 // request that DOES carry a token message is held to strict equality with the
 // stored revision, and every value that is not it — a revision left far behind,
@@ -5852,8 +5930,8 @@ func TestVolumeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 // exactly the outcome its own rules produce against volSeedTokenFixture
 // (architecture.md, `service Gateway` — RPC specifications): a clean run and a
 // single bump (architecture.md, Revision keys and the sync fan-out) for the
-// seventeen the fixture satisfies,
-// and that mutator's OWN code and sentence for the six it does not. What may
+// twenty the fixture satisfies,
+// and that mutator's OWN code and sentence for the eight it does not. What may
 // never come back is ABORTED "stale revision"; FinishMigration's case shows why
 // the message and not only the code has to be compared, since its precondition
 // speaks ABORTED too.

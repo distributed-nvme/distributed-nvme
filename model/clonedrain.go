@@ -25,8 +25,9 @@ import (
 //     one ledger: the sides of the clone's clone meta group go back to their
 //     DNs exactly as an sp drain batch gives a slice's back, at most six
 //     compares per distinct DN, and a clone meta group has at most
-//     MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares of one side each,
-//     so those bound them. No CN is touched: a CN holds no clone's metadata,
+//     MaxAllocLegPerGrp legs, MaxSpareLegPerGrp spares or one repair's new
+//     leg, and MaxRetiredLegPerGrp retired legs, of one side each, so those
+//     bound them. No CN is touched: a CN holds no clone's metadata,
 //     which is on the clone's clone meta group (cnagent.md CN18), and is
 //     charged nothing for a clone. The final STM is the one step that needs
 //     the cluster's stored conf, for the DN capacity keys' bins.
@@ -208,6 +209,14 @@ func DrainCloneBm(
 // so a drain is never stranded on one. No CN is read or written: a clone
 // charges none.
 //
+// The group's repair and its retired legs go in the same STM, while the
+// group's ext_cnt their sides give back is still at hand: the Repair the
+// group's rep_name names, with every new leg's side and its
+// repair_name_list entry, and every RetiredLeg its retired_leg_id_list
+// names, with its side and its entry in the pool's list. A named record
+// whose key is missing is refused, as the sp drain refuses one: the record
+// is what says which side to give back.
+//
 // The pointer's removal and the DnRev bump take a side out of its dn agent's
 // next SyncupDn, which tears down the side the sp worker drove until this
 // transaction (dnv-worker.md RW14), as it does any side whose pointer left,
@@ -247,6 +256,31 @@ func FinishCloneDelete(
 					side.GetSideId(), grp.GetExtCnt(),
 				)
 			}
+		}
+		if repName := grp.GetRepName(); repName != "" {
+			rep := &pb.Repair{}
+			if !s.Get(RepairKey(cid, spId, repName), rep) {
+				return fail(opFinishCloneDelete, "repair record missing")
+			}
+			for _, leg := range rep.GetNewLegList() {
+				releaseLeg(rel, spId, leg, grp.GetExtCnt())
+			}
+			s.Del(RepairKey(cid, spId, repName))
+			conf.RepairNameList = removeName(
+				conf.GetRepairNameList(), repName)
+		}
+		for _, legId := range grp.GetRetiredLegIdList() {
+			retired := &pb.RetiredLeg{}
+			if !s.Get(RetiredLegKey(cid, spId, legId), retired) {
+				return fail(opFinishCloneDelete,
+					"retired leg record missing")
+			}
+			side := retired.GetSide()
+			rel.release(side.GetAddrPort(), spId, side.GetSideId(),
+				grp.GetExtCnt())
+			s.Del(RetiredLegKey(cid, spId, legId))
+			conf.RetiredLegIdList = removeId(
+				conf.GetRetiredLegIdList(), legId)
 		}
 		s.Del(CloneKey(cid, spId, cloneName))
 		conf.CloneNameList = removeName(conf.GetCloneNameList(), cloneName)

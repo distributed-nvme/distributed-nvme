@@ -6,9 +6,10 @@
 # fake dn/cn agents of dnv-worker.md
 # (Integration test plan, The fake agent, `fakeagent`), driven from this
 # machine over ssh by integtest/gatewayctl (the gRPC driver) with etcd ground
-# truth read back through integtest/workerctl (read-only, plus the five
+# truth read back through integtest/workerctl (read-only, plus the
 # worker-role writes — the flips set-created/set-provisioned, the cutover
-# start-cutover and the drains drain-sp/drain-clone — of gateway.md,
+# start-cutover, a leg's health epoch set-epoch, the repair stage moves
+# set-repair-stage and the drains drain-sp/drain-clone — of gateway.md,
 # Integration test plan, The etcd verification, `workerctl`).
 #
 #   bash integtest/gateway_test.sh [--only <case>] [--cleanup-only] user@ip
@@ -23,7 +24,7 @@
 # creates lives under $WORK on the server, and cleanup removes exactly that.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 60 RPCs maintains exactly the etcd schema (architecture.md,
+# of the 68 RPCs maintains exactly the etcd schema (architecture.md,
 # etcd data model), verified against ground truth that never goes through the
 # code under test; (b) parallel gRPCs across instances are correct — disjoint
 # work all succeeds, contended work has exactly one winner and no partial
@@ -309,10 +310,14 @@ gwx() { # <UPPER_SNAKE code> <args…>
 # (Integration test plan, The etcd verification, `workerctl`): the raw decoded
 # etcd state, read back by a binary that is NOT the code under test. Its only
 # writes in this suite are the worker-role stand-ins named there —
-# set-created, set-provisioned, start-cutover, drain-sp and drain-clone; the
-# cutover lets `finish-migr` past its refusal of a migration whose cutover has
-# not started (play_cutover), and the drains finish the
-# teardowns the latching `delete-sp` and `delete-clone` start. Every sp drain
+# set-created, set-provisioned, start-cutover, set-epoch of a leg,
+# set-repair-stage, drain-sp and drain-clone; the cutover lets `finish-migr`
+# past its refusal of a migration whose cutover has not started
+# (play_cutover), a leg's health epoch lets `create-repair` past its refusal
+# of a healthy leg and moves no revision, the stage moves let `finish-repair`
+# and `cancel-repair` past their stage refusals and bump SpRev, and the
+# drains finish the teardowns the latching `delete-sp` and `delete-clone`
+# start. Every sp drain
 # step but the last, which deletes the SpRev key, bumps SpRev, and so does a
 # clone drain's final step, its batches bumping nothing (dnv-worker.md, CLD8,
 # CLD12); a case that holds a token must `refresh_rev` after a drain, exactly
@@ -435,7 +440,7 @@ assert_no_write() { # <label> <cmd…>
 }
 
 # key_count counts the keys under a prefix — the non-SP-scoped form of the
-# refusal bracket, and the "nothing left" audit of case S stage 18. A bare
+# refusal bracket, and the "nothing left" audit of case S stage 20. A bare
 # kind of architecture.md, Key table, is scoped to $CLUSTER by workerctl (all
 # but cluster_conf, worker and the three *_rev kinds, which are never scoped),
 # so a scoped read FAILS once the cluster is gone (`cluster "itgw" does not
@@ -1411,6 +1416,43 @@ smoke_check_clone_dns() { # <before> <dns> <held> <bumps> <label>
 	done
 }
 
+# smoke_check_dn_moves is the DN audit of the repair stages, whose sides — a
+# repair's new leg's and a retired leg's — live in their own records and not
+# in the slices, so smoke_check_dn, which walks the slices, cannot count
+# them: against <before>, the smoke_dn_ledgers lines read before the call,
+# the DN <addr> moved by <free> free extents, <sides> side pointers and
+# <revs> DnRev bumps, each signed, with its capacity key agreeing with its
+# record, and every other DN is exactly as <before> says. An empty <addr>
+# asserts that no DN moved at all.
+smoke_check_dn_moves() { # <before> <addr> <free> <sides> <revs> <label>
+	local before=$1 dn=$2 dFree=$3 dSides=$4 dRevs=$5 label=$6
+	local i addr free sides rev on
+	for i in 0 1 2 3; do
+		addr=$(dn_addr "$i")
+		read -r free sides rev <<<"$(sed -n "$((i + 1))p" <<<"$before")"
+		on=0
+		if [ "$addr" = "$dn" ]; then on=1; fi
+		assert_eq "$(dn_free "$addr")" "$((free + on * dFree))" \
+			"$label: $addr free_ext_cnt"
+		assert_eq "$(smoke_cap_free dn_capacity "$addr")" \
+			"$((free + on * dFree))" \
+			"$label: $addr free_ext_cnt embedded in the dn_capacity key"
+		assert_eq "$(smoke_jq "$(dn_json "$addr")" \
+			'(.side_ptr_list // []) | length')" "$((sides + on * dSides))" \
+			"$label: $addr side_ptr_list length"
+		assert_eq "$(dn_rev_of "$addr")" "$((rev + on * dRevs))" \
+			"$label: $addr dn_rev"
+	done
+}
+
+# smoke_dn_holds counts one side's pointer on one DN: 1 while the DN hosts the
+# side, 0 once it gave it back.
+smoke_dn_holds() { # <addr_port> <side_id>
+	smoke_jq "$(dn_json "$1")" \
+		'[ (.side_ptr_list // [])[] | select(.side_id == $s) ] | length' \
+		--arg s "$2"
+}
+
 # smoke_grp_addrs lists the distinct DN addr_ports one group occupies, active
 # and spare legs alike — the set whose DnRev a group-touching op bumps, and
 # the set a placement must stay out of (the black list of architecture.md,
@@ -1527,7 +1569,7 @@ smoke_listed_svcids() { # <sp>
 }
 
 # smoke_dn_free_sum is Σ free_ext_cnt over the four DNs — the aggregate the
-# teardown of step 18 must restore exactly, and the cross-check that no
+# teardown of step 20 must restore exactly, and the cross-check that no
 # per-DN assertion above quietly agreed with a wrong topology.
 smoke_dn_free_sum() {
 	local i total=0
@@ -2933,7 +2975,290 @@ EOF
 		"Σ DN free after the parked leg was released"
 
 	# -------------------------------------------------------------------
-	stage 16 "get-td-bm / get-leg-bm and the two inspects"
+	stage 16 "repairs: create, abort and cancel; create, start and finish"
+	# -------------------------------------------------------------------
+	# A repair replaces a bad leg of the group by a new leg (architecture.md,
+	# Repairs). No worker runs, so the suite plays the two worker writes a
+	# repair waits on (Integration test plan, The etcd verification,
+	# `workerctl`): the bad leg's health epoch, which only the sp worker's
+	# monitor sets and which bumps no revision, and the stage moves the sp
+	# worker makes from the primary's verdict (architecture.md, Repair),
+	# which bump SpRev. A repair's new side and a retired side live in their
+	# own records, outside the slices, so the DN audit here is
+	# smoke_check_dn_moves; smoke_check_dn holds again once stage 17 has
+	# deleted the last of them.
+	local spIdHex badLeg badSide badAddr badIdx repKey rep repId
+	local repLeg repSide repAddr dnBefore storeBefore
+	spIdHex=$(printf '%016x' "$spId")
+	badLeg=$(smoke_grp_leg_ids sp0 "$dataGrp" | sed -n 1p)
+	[ -n "$badLeg" ] || die "sp0's data group $dataGrp lists no leg"
+	badSide=$(smoke_leg_side_ids sp0 "$badLeg")
+	badAddr=$(smoke_side_field sp0 "$badSide" addr_port)
+	badIdx=$(smoke_jq "$(sp_json sp0)" '
+		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
+		  | .leg_list[]? | select(.leg_id == $l) | .leg_idx ][0]' \
+		--arg l "$badLeg")
+	grpBlack=$(smoke_grp_addrs sp0 "$dataGrp")
+	[ -n "$grpBlack" ] || die "sp0's data group $dataGrp lists no DN"
+	# A healthy leg is moved with a migration, not repaired, so the create
+	# is refused while the bad leg carries no health epoch.
+	assert_no_write "create-repair of a healthy leg" \
+		smoke_gwx_out FAILED_PRECONDITION create-repair --sp sp0 \
+		--rev "$SP_REV" --name r0 --grp "$dataGrp" --bad-legs "$badLeg"
+	assert_field "$SMOKE_OUT" '.message | test("use a migration")' "true" \
+		"the refusal of a healthy leg says to use a migration"
+	wctl set-epoch leg --sp sp0 --slice "$slice" --id "$badLeg" --age 60 \
+		>/dev/null
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "a health epoch bumps no SpRev"
+	# The first repair: created with a fresh new leg, aborted, cancelled.
+	dnBefore=$(smoke_dn_ledgers)
+	out=$(gw create-repair --sp sp0 --rev "$SP_REV" --name r0 \
+		--grp "$dataGrp" --bad-legs "$badLeg")
+	refresh_rev sp0
+	repId=$(jq_of "$out" '.rep_id')
+	repLeg=$(jq_of "$out" '.new_leg_id')
+	assert_ne "$repId" "0" "create-repair r0 rep_id"
+	repKey="$DNV_PREFIX repair $cidHex $spIdHex r0"
+	rep=$(raw_key "$repKey")
+	assert_field "$rep" '.rep_id' "$repId" "r0 rep_id"
+	assert_field "$rep" '.grp_id' "$dataGrp" "r0 grp_id"
+	assert_field "$rep" '.slice_id' "$slice" "r0 records its slice"
+	assert_field "$rep" '.clone_name' "" "r0 records no clone"
+	assert_field "$rep" '.rep_stage' "REP_STAGE_CREATED" "r0 rep_stage"
+	assert_field "$rep" '.try_to_abort' "false" "r0 try_to_abort"
+	assert_field "$rep" '.bad_leg_id_list | @json' "[\"$badLeg\"]" \
+		"r0 bad_leg_id_list"
+	assert_field "$rep" '.new_leg_list | length' "1" "r0 holds one new leg"
+	assert_field "$rep" '.new_leg_list[0].leg_id' "$repLeg" \
+		"r0's new leg is the reply's new_leg_id"
+	assert_field "$rep" '.new_leg_list[0].side_list | length' "1" \
+		"r0's new leg has one side"
+	repSide=$(jq_of "$rep" '.new_leg_list[0].side_list[0].side_id')
+	repAddr=$(jq_of "$rep" '.new_leg_list[0].side_list[0].addr_port')
+	# [D15]: a new side is written unprovisioned, as a spare's is.
+	assert_field "$rep" '.new_leg_list[0].side_list[0].provisioned' \
+		"false" "r0's new side is unprovisioned"
+	# Placed by the spare leg's rule (architecture.md, Per-operation
+	# allocation): off every DN the group occupies.
+	assert_eq "$(printf '%s\n' "$grpBlack" | grep -cx "$repAddr")" "0" \
+		"r0's new leg landed on a DN the group did not already occupy"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" rep_name)" "r0" \
+		"the group names its repair"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" \
+		'.sp_conf.repair_name_list | @json')" '["r0"]' \
+		"sp0 repair_name_list"
+	assert_eq "$(key_count repair)" "1" "repair keys after the create"
+	smoke_check_dn_moves "$dnBefore" "$repAddr" "-$grpExt" 1 1 \
+		"after create-repair r0"
+	assert_eq "$(smoke_dn_holds "$repAddr" "$repSide")" "1" \
+		"$repAddr holds r0's new side"
+	# A new leg holds no copy yet, so no metadata unit is charged.
+	smoke_check_dn_units "" 0
+	out=$(gw get-repair --sp sp0 --name r0)
+	assert_field "$out" '.rep_name' "r0" "get-repair rep_name"
+	assert_field "$out" '.repair.rep_id' "$repId" "get-repair rep_id"
+	assert_field "$out" '.repair.new_leg_list[0].side_list[0].side_id' \
+		"$repSide" "get-repair new side"
+	out=$(gw list-repairs --sp sp0)
+	assert_field "$out" '.name_to_repair | keys | @json' '["r0"]' \
+		"list-repairs names r0 alone"
+	assert_field "$out" '.name_to_repair.r0.rep_id' "$repId" \
+		"list-repairs r0 rep_id"
+	# The abort sets the flag; the primary's verdict, played below, moves
+	# the repair (architecture.md, Repair).
+	out=$(gw abort-repair --sp sp0 --rev "$SP_REV" --name r0)
+	refresh_rev sp0
+	assert_field "$out" '.rep_id' "$repId" "abort-repair reply rep_id"
+	rep=$(raw_key "$repKey")
+	assert_field "$rep" '.try_to_abort' "true" "r0 try_to_abort after abort"
+	assert_field "$rep" '.rep_stage' "REP_STAGE_CREATED" \
+		"r0 stays CREATED until the verdict"
+	# A repeated abort of a flagged repair writes nothing and bumps nothing
+	# (architecture.md, Repairs).
+	storeBefore=$(store_rev)
+	out=$(gw abort-repair --sp sp0 --rev "$SP_REV" --name r0)
+	assert_field "$out" '.rep_id' "$repId" "repeated abort-repair rep_id"
+	assert_eq "$(store_rev)" "$storeBefore" \
+		"a repeated abort-repair writes nothing"
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
+		"a repeated abort-repair bumps no SpRev"
+	out=$(wctl set-repair-stage --sp sp0 --name r0 --stage aborted)
+	refresh_rev sp0
+	assert_field "$out" '.rep_name' "r0" "set-repair-stage rep_name"
+	assert_field "$out" '.rep_id' "$(printf '%016x' "$repId")" \
+		"set-repair-stage rep_id"
+	assert_field "$out" '.rep_stage' "REP_STAGE_ABORTED" \
+		"set-repair-stage rep_stage"
+	assert_field "$out" '.sp_rev' "$SP_REV" \
+		"set-repair-stage sp_rev is the pool's revision after the move"
+	assert_field "$(raw_key "$repKey")" '.rep_stage' "REP_STAGE_ABORTED" \
+		"r0 rep_stage after the verdict"
+	# A finish takes a STARTED repair alone (architecture.md, Repair).
+	assert_no_write "finish-repair of an aborted repair" \
+		smoke_gwx_out FAILED_PRECONDITION finish-repair --sp sp0 \
+		--rev "$SP_REV" --name r0
+	assert_field "$SMOKE_OUT" '.message | test("REP_STAGE_ABORTED")' \
+		"true" "the refused finish names the stage"
+	dnBefore=$(smoke_dn_ledgers)
+	out=$(gw cancel-repair --sp sp0 --rev "$SP_REV" --name r0)
+	refresh_rev sp0
+	assert_field "$out" '.rep_id' "$repId" "cancel-repair reply rep_id"
+	assert_eq "$(key_count repair)" "0" "repair keys after the cancel"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" \
+		'.sp_conf.repair_name_list | length')" "0" \
+		"sp0 repair_name_list after the cancel"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" rep_name)" "" \
+		"the group names no repair after the cancel"
+	smoke_check_dn_moves "$dnBefore" "$repAddr" "$grpExt" -1 1 \
+		"after cancel-repair r0"
+	assert_eq "$(smoke_dn_holds "$repAddr" "$repSide")" "0" \
+		"$repAddr gave r0's new side back"
+	# The second repair: created, started by the verdict, finished.
+	dnBefore=$(smoke_dn_ledgers)
+	out=$(gw create-repair --sp sp0 --rev "$SP_REV" --name r1 \
+		--grp "$dataGrp" --bad-legs "$badLeg")
+	refresh_rev sp0
+	repId=$(jq_of "$out" '.rep_id')
+	repLeg=$(jq_of "$out" '.new_leg_id')
+	repKey="$DNV_PREFIX repair $cidHex $spIdHex r1"
+	rep=$(raw_key "$repKey")
+	repSide=$(jq_of "$rep" '.new_leg_list[0].side_list[0].side_id')
+	repAddr=$(jq_of "$rep" '.new_leg_list[0].side_list[0].addr_port')
+	assert_eq "$(printf '%s\n' "$grpBlack" | grep -cx "$repAddr")" "0" \
+		"r1's new leg landed on a DN the group did not already occupy"
+	smoke_check_dn_moves "$dnBefore" "$repAddr" "-$grpExt" 1 1 \
+		"after create-repair r1"
+	out=$(wctl set-repair-stage --sp sp0 --name r1 --stage started)
+	refresh_rev sp0
+	assert_field "$out" '.rep_stage' "REP_STAGE_STARTED" \
+		"set-repair-stage r1 rep_stage"
+	# An abort takes a CREATED repair alone: a started copy has no way back.
+	assert_no_write "abort-repair of a started repair" \
+		smoke_gwx_out FAILED_PRECONDITION abort-repair --sp sp0 \
+		--rev "$SP_REV" --name r1
+	assert_field "$SMOKE_OUT" '.message | test("REP_STAGE_STARTED")' \
+		"true" "the refused abort names the stage"
+	dnBefore=$(smoke_dn_ledgers)
+	out=$(gw finish-repair --sp sp0 --rev "$SP_REV" --name r1)
+	refresh_rev sp0
+	assert_field "$out" '.rep_id' "$repId" "finish-repair reply rep_id"
+	assert_field "$out" '.retired_leg_id' "$badLeg" \
+		"finish-repair retired the bad leg"
+	# The new leg takes the bad leg's position in leg_list and its leg_idx
+	# (architecture.md, Repairs).
+	assert_eq "$(smoke_grp_leg_ids sp0 "$dataGrp" | sed -n 1p)" "$repLeg" \
+		"the new leg took the bad leg's position in leg_list"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '
+		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
+		  | .leg_list[]? | select(.leg_id == $l) | .leg_idx ][0]' \
+		--arg l "$repLeg")" "$badIdx" "the new leg took the bad leg's leg_idx"
+	assert_eq "$(smoke_side_field sp0 "$repSide" addr_port)" "$repAddr" \
+		"the new leg's side is a side of the group now"
+	assert_eq "$(key_count repair)" "0" "repair keys after the finish"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" rep_name)" "" \
+		"the group names no repair after the finish"
+	# The bad leg is kept as a retired leg, its side on its DN as it was.
+	local retKey retired retiredEpoch
+	retKey="$DNV_PREFIX retired_leg $cidHex $spIdHex $(printf '%016x' "$badLeg")"
+	retired=$(raw_key "$retKey")
+	assert_field "$retired" '.grp_id' "$dataGrp" "the retired leg's grp_id"
+	assert_field "$retired" '.leg_idx' "$badIdx" "the retired leg's leg_idx"
+	assert_field "$retired" '.slice_id' "$slice" \
+		"the retired leg records its slice"
+	assert_field "$retired" '.side.side_id' "$badSide" \
+		"the retired leg keeps the bad leg's side"
+	assert_field "$retired" '.side.addr_port' "$badAddr" \
+		"the retired side stays on its DN"
+	retiredEpoch=$(jq_of "$retired" '.retired_epoch')
+	assert_ne "$retiredEpoch" "0" "the finish stamped a retired_epoch"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" \
+		'.sp_conf.retired_leg_id_list | @json')" "[\"$badLeg\"]" \
+		"sp0 retired_leg_id_list"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" retired_leg_id_list | \
+		"$JQ" -c .)" "[\"$badLeg\"]" "the group's retired_leg_id_list"
+	# A finish moves no DN: the bad side keeps its pointer and its extents.
+	smoke_check_dn_moves "$dnBefore" "" 0 0 0 "after finish-repair r1"
+	assert_eq "$(smoke_dn_holds "$badAddr" "$badSide")" "1" \
+		"$badAddr still holds the retired side"
+
+	# -------------------------------------------------------------------
+	stage 17 "retired legs: list, take one back and cancel, delete"
+	# -------------------------------------------------------------------
+	out=$(gw list-retired-legs --sp sp0)
+	assert_field "$out" '.leg_id_to_retired_leg | keys | @json' \
+		"[\"$badLeg\"]" "list-retired-legs names the bad leg alone"
+	assert_field "$out" ".leg_id_to_retired_leg[\"$badLeg\"].retired_epoch" \
+		"$retiredEpoch" "list-retired-legs retired_epoch"
+	# A repair of the group may take its retired leg back as its new leg
+	# (architecture.md, Repairs): the leg that r1 put in place is the bad
+	# leg now, and nothing is allocated.
+	wctl set-epoch leg --sp sp0 --slice "$slice" --id "$repLeg" --age 60 \
+		>/dev/null
+	dnBefore=$(smoke_dn_ledgers)
+	out=$(gw create-repair --sp sp0 --rev "$SP_REV" --name r2 \
+		--grp "$dataGrp" --bad-legs "$repLeg" --retired-leg "$badLeg")
+	refresh_rev sp0
+	assert_field "$out" '.new_leg_id' "$badLeg" \
+		"r2's new leg is the retired leg"
+	repId=$(jq_of "$out" '.rep_id')
+	repKey="$DNV_PREFIX repair $cidHex $spIdHex r2"
+	rep=$(raw_key "$repKey")
+	assert_field "$rep" '.new_leg_list[0].side_list[0].side_id' "$badSide" \
+		"r2's new leg keeps the retired side"
+	assert_field "$rep" ".new_leg_id_to_retired_epoch[\"$badLeg\"]" \
+		"$retiredEpoch" "r2 keeps the retired leg's time for a cancel"
+	assert_eq "$(key_count retired_leg)" "0" \
+		"retired_leg keys after the retired leg was taken"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" \
+		'.sp_conf.retired_leg_id_list | length')" "0" \
+		"sp0 retired_leg_id_list after the retired leg was taken"
+	smoke_check_dn_moves "$dnBefore" "" 0 0 0 "after create-repair r2"
+	out=$(gw abort-repair --sp sp0 --rev "$SP_REV" --name r2)
+	refresh_rev sp0
+	assert_field "$out" '.rep_id' "$repId" "abort-repair r2 rep_id"
+	wctl set-repair-stage --sp sp0 --name r2 --stage aborted >/dev/null
+	refresh_rev sp0
+	# The cancel never destroys the kept copy: the leg goes back as the
+	# retired leg it was, with its old time (architecture.md, Repairs).
+	out=$(gw cancel-repair --sp sp0 --rev "$SP_REV" --name r2)
+	refresh_rev sp0
+	assert_field "$out" '.rep_id' "$repId" "cancel-repair r2 rep_id"
+	assert_eq "$(smoke_jq "$(raw_key "$retKey")" '.' -S -c)" \
+		"$(smoke_jq "$retired" '.' -S -c)" \
+		"the cancel gave the retired leg back as it was"
+	assert_eq "$(key_count repair)" "0" "repair keys after the cancel of r2"
+	smoke_check_dn_moves "$dnBefore" "" 0 0 0 "after cancel-repair r2"
+	wctl set-epoch leg --sp sp0 --slice "$slice" --id "$repLeg" --clear \
+		>/dev/null
+	# The delete gives the retired side back to its DN (architecture.md,
+	# Retired legs), with one DnRev bump.
+	dnBefore=$(smoke_dn_ledgers)
+	out=$(gw delete-retired-leg --sp sp0 --rev "$SP_REV" --leg "$badLeg")
+	refresh_rev sp0
+	assert_field "$out" '.leg_id' "$badLeg" "delete-retired-leg reply leg_id"
+	assert_eq "$(key_count retired_leg)" "0" \
+		"retired_leg keys after the delete"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" \
+		'.sp_conf.retired_leg_id_list | length')" "0" \
+		"sp0 retired_leg_id_list after the delete"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" retired_leg_id_list | \
+		"$JQ" -c '. // [] | length')" "0" \
+		"the group's retired_leg_id_list after the delete"
+	smoke_check_dn_moves "$dnBefore" "$badAddr" "$grpExt" -1 1 \
+		"after delete-retired-leg"
+	assert_eq "$(smoke_dn_holds "$badAddr" "$badSide")" "0" \
+		"$badAddr gave the retired side back"
+	# No repair and no retired leg is left, so every side is a slice's again
+	# and smoke_check_dn's count holds on every DN.
+	for i in 0 1 2 3; do
+		addr=$(dn_addr "$i")
+		smoke_check_dn sp0 "$addr" "$(dn_rev_of "$addr")"
+	done
+	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - 12))" \
+		"Σ DN free after the repairs (the new leg took the bad leg's extents)"
+
+	# -------------------------------------------------------------------
+	stage 18 "get-td-bm / get-leg-bm and the two inspects"
 	# -------------------------------------------------------------------
 	# GW14: the agent's bytes travel verbatim, and this fake replies an
 	# empty bitmap, so the pass-through is an empty hex string of length 0.
@@ -3012,7 +3337,7 @@ EOF
 		"inspect-side zeroed_bytes is the seeded side_conf.zero_bytes"
 
 	# -------------------------------------------------------------------
-	stage 17 "advance-ids: every counter moves, no revision, new ids above"
+	stage 19 "advance-ids: every counter moves, no revision, new ids above"
 	# -------------------------------------------------------------------
 	# The id step (architecture.md, Clusters; gateway.md GW19): one
 	# transaction moves the three globals' next_id by IdStepStride, then one
@@ -3072,7 +3397,7 @@ EOF
 		"delete-td t9 reply td_id"
 
 	# -------------------------------------------------------------------
-	stage 18 "reverse teardown down to an empty store"
+	stage 20 "reverse teardown down to an empty store"
 	# -------------------------------------------------------------------
 	out=$(gw delete-ns --sp sp0 --rev "$SP_REV" --nqn "$nqn" --idx 1)
 	refresh_rev sp0
@@ -3163,7 +3488,7 @@ EOF
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" \
 		"SpGlobal Σbucket after the drain"
 	# GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id must
-	# never come back. It stands where stage 17's id step moved it.
+	# never come back. It stands where stage 19's id step moved it.
 	assert_field "$global" '.next_id' "$((2 + ID_STEP_STRIDE))" \
 		"SpGlobal next_id never rewinds"
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS))" \
@@ -4600,7 +4925,9 @@ faults_validation_battery() { # <the cluster's stored cntlr_interval>
 
 # faults_notfound_battery is stage 2 of case C (GW7): one probe per missing id —
 # cluster / sp / dn / cn / td / nqn / ns_idx / clone / xfer / migr / cntlr /
-# side — plus the two spare ids. Every other id a probe names exists, so its
+# side — plus the two spare ids, a repair's name on each call that takes one,
+# a retired leg id and a repair's group. Every other id a probe names exists,
+# so its
 # NOT_FOUND can only be the missing id's own — the cluster probe never
 # reaches an SP, the sp probe never reaches a td — which is what makes the
 # battery a statement about GW5's resolution order.
@@ -4643,6 +4970,19 @@ faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 		--grp "$grp" --leg 0xdead
 	gwx NOT_FOUND switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$grp" --spare 0xdead --target "$leg"
+
+	# The repair and retired-leg ids (architecture.md, Repairs, Retired
+	# legs). A name or a leg id the pool does not list is the model op's own
+	# exported reason on the four calls that run one, which the gateway
+	# answers NOT_FOUND (GW7); a group in neither a slice nor a clone is the
+	# create's planning read's.
+	gwx NOT_FOUND get-repair --sp sp0 --name nosuchrep
+	gwx NOT_FOUND finish-repair --sp sp0 --rev "$SP_REV" --name nosuchrep
+	gwx NOT_FOUND cancel-repair --sp sp0 --rev "$SP_REV" --name nosuchrep
+	gwx NOT_FOUND abort-repair --sp sp0 --rev "$SP_REV" --name nosuchrep
+	gwx NOT_FOUND delete-retired-leg --sp sp0 --rev "$SP_REV" --leg 0xdead
+	gwx NOT_FOUND create-repair --sp sp0 --rev "$SP_REV" --name r0 \
+		--grp 0xdead --bad-legs "$leg"
 }
 
 # faults_agent_battery is stage 4 of case C (AG2, AG3). It is one batch
@@ -4884,7 +5224,7 @@ case_faults() {
 	# is accepted, and the threshold is stored exactly as sent — the three
 	# members the request left at zero stay zero, resolved only when read
 	# (architecture.md, Common validation). The extra pool is then latched
-	# and drained, the way case S stage 18 tears sp0 down, and must give
+	# and drained, the way case S stage 20 tears sp0 down, and must give
 	# every node back exactly what its create took, so no later count of the
 	# case moves.
 	local nodesBefore nodesAfter thrRev
@@ -5023,7 +5363,7 @@ case_faults() {
 	# The fifteenth guard of this stage — an SP-level mutator refused
 	# because the SP is `deleting` — has no probe HERE on purpose: `delete-sp`
 	# sets the flag
-	# (gateway.md, Storage pools and GrowSlice), and step 18 of case S drives
+	# (gateway.md, Storage pools and GrowSlice), and step 20 of case S drives
 	# the gate for real. It cannot be driven here, because this stage's sp0
 	# must stay live for the rest of the battery and the latch is one-way.
 

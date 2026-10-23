@@ -159,8 +159,8 @@ func cntlrGates(
 //
 // The sweep derives its work from what the node actually holds, never from
 // the plan applied last time, so a removal that fails — and in a level
-// change, a spare switch or a finished migration the remote end is dead and
-// a removal DOES fail — is simply found again next pass.
+// change, a spare switch or a finished migration or repair the remote end is
+// dead and a removal DOES fail — is simply found again next pass.
 //
 // The CN's whole part in a migration is that a leg's side_list temporarily
 // holds two sides (CN10).
@@ -248,6 +248,8 @@ func newCntlrInfo() *pb.CntlrInfo {
 		CloneIdToTarget:   make(map[uint64]*pb.ResInfo),
 		CloneIdToDmClone:  make(map[uint64]*pb.ResInfo),
 		SideIdToPath:      make(map[uint64]*pb.ResInfo),
+		RepIdToRepairInfo: make(map[uint64]*pb.CntlrInfo_RepairInfo),
+		GrpIdToGrpInfo:    make(map[uint64]*pb.CntlrInfo_GrpInfo),
 	}
 }
 
@@ -328,10 +330,16 @@ func (s *CnAgentServer) build(
 					detailsProvisioning)
 				continue
 			}
-			err := s.ensureGroup(ctx, plan, gp, available, info.LegIdToLeg)
+			detail, running, err := s.ensureGroup(ctx, plan, gp,
+				available, info.LegIdToLeg)
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
-			if gp.hasLateMember(available) {
+			// CN28: the array's reading and the repair's verdict, from the
+			// array as the pass left it, for a group whose row reads OK.
+			if err == nil {
+				reportGrpReading(info, gp, detail)
+			}
+			if gp.hasLateMember(available, running) {
 				late = true
 			}
 		}
@@ -342,18 +350,19 @@ func (s *CnAgentServer) build(
 		}
 	}
 	if late {
-		// CN12: a group's leg_list member that is not available this pass is
-		// the same class of transient as a connect that failed — the side's
-		// ANA flip has not reached this CN's sysfs yet (the worker's
-		// sides-first hold is bounded, so a promotion's SyncupCntlr can still
-		// come before the sides' flips, [D16]), its DN is rebooting, its path
-		// is mid-reconnect — and the worker does not re-drive the converge
-		// that would assemble it, add it or build the pool over it: it
-		// re-syncs on a revision or a reply code, never on a row. So it
-		// registers the CN10 retry, which re-runs the whole converge until
-		// every such member is available. There is no record of its own: the
-		// rows already report it — a group's error, or "degraded" once a
-		// probe reads an md array, and the member's own leg row.
+		// CN12: a group's leg_list member that is not available this pass,
+		// other than an open repair's bad leg while the group's array runs
+		// (hasLateMember), is the same class of transient as a connect that
+		// failed — the side's ANA flip has not reached this CN's sysfs yet
+		// (the worker's sides-first hold is bounded, so a promotion's
+		// SyncupCntlr can still come before the sides' flips, [D16]), its DN
+		// is rebooting, its path is mid-reconnect — and the worker does not
+		// re-drive the converge that would assemble it, add it or build the
+		// pool over it: it re-syncs on a revision or a reply code, never on a
+		// row. So it registers the CN10 retry, which re-runs the whole
+		// converge until every such member is available. There is no record of
+		// its own: the rows already report it — a group's error, or "degraded"
+		// once a probe reads an md array, and the member's own leg row.
 		s.startConnectRetry(st, plan)
 		retryNeeded = true
 	}

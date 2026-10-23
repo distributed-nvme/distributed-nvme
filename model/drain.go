@@ -10,7 +10,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The sp drain (dnv-worker.md, The sp drain): the three worker-side ops
+// The sp drain (dnv-worker.md, The sp drain): the five worker-side ops
 // that tear a LATCHED storage pool down in bounded steps.
 //
 // DeleteStoragePool commits `deleting = true` plus one SpRev bump and returns
@@ -23,11 +23,19 @@ import (
 // same transaction that shrinks the describing key, so at every commit boundary
 // the keys and the budgets agree exactly (SPD13).
 //
-// The three phases, in the order SPD8 derives them from the SpConf alone:
+// The phases, in the order SPD8 derives them from the SpConf alone:
 //
-//	D1  DrainSpCntlrs   every cntlr, in one STM, BEFORE any slice work
-//	D2  DrainSpSlice    one batch of up to MaxDelGrpPerTxn groups of one slice
-//	D3  FinishSpDelete  sp_conf, sp_id_to_name, sp_rev and the shard bucket
+//	D1  DrainSpCntlrs       every cntlr, in one STM, BEFORE any slice work
+//	    DrainSpRepairs      one batch of up to MaxDelRepPerTxn repairs of one
+//	                        parent
+//	    DrainSpRetiredLegs  one batch of up to MaxDelRetiredLegPerTxn retired
+//	                        legs of one parent
+//	D2  DrainSpSlice        one batch of up to MaxDelGrpPerTxn groups of one
+//	                        slice
+//	D3  FinishSpDelete      sp_conf, sp_id_to_name, sp_rev and the shard bucket
+//
+// The repairs and the retired legs go before the slices because a side is
+// given back by its group's ext_cnt, which is gone once D2 pops the group.
 //
 // Cntlrs go first deliberately, inverting the naive slices-first order (SPD9):
 // every cntlr stacks the WHOLE SP on its CN and the coordinator keeps syncing
@@ -41,12 +49,14 @@ import (
 // outrun physical teardown; the DN orphan sweep and the CN wrapper sweep are the
 // crash-window backstops, exactly as for every other mutation.
 
-// The Op names of the three drain ops. They are the exported function names, so
+// The Op names of the five drain ops. They are the exported function names, so
 // that a log record names something greppable.
 const (
-	opDrainSpCntlrs  = "DrainSpCntlrs"
-	opDrainSpSlice   = "DrainSpSlice"
-	opFinishSpDelete = "FinishSpDelete"
+	opDrainSpCntlrs      = "DrainSpCntlrs"
+	opDrainSpRepairs     = "DrainSpRepairs"
+	opDrainSpRetiredLegs = "DrainSpRetiredLegs"
+	opDrainSpSlice       = "DrainSpSlice"
+	opFinishSpDelete     = "FinishSpDelete"
 )
 
 // loadSpConfForDrain is SPD2: the inverse of loadSpConfForOp's "sp deleting"
@@ -233,6 +243,263 @@ func releaseSpCns(
 }
 
 // ---------------------------------------------------------------------------
+// The repairs and the retired legs
+// ---------------------------------------------------------------------------
+
+// SpDrainRepairBatch is the next batch of the sp drain's repair phase, from
+// the caller's snapshot: the names of the repairs, in repair_name_list
+// order, that share the parent of the first listed one, at most
+// common.MaxDelRepPerTxn of them. A first listed repair the snapshot does
+// not hold is a batch of its own, which DrainSpRepairs refuses, so the lost
+// key is named on every step rather than skipped. It is nil when the list is
+// empty. It is exported because the worker's drain and the planting library's
+// mirror of it derive one batch the same way.
+func SpDrainRepairBatch(state *SpState) []string {
+	names := state.Conf.GetRepairNameList()
+	if len(names) == 0 {
+		return nil
+	}
+	first, ok := state.Repairs[names[0]]
+	if !ok {
+		return []string{names[0]}
+	}
+	parent := repairParent(first)
+	var batch []string
+	for _, name := range names {
+		rep, ok := state.Repairs[name]
+		if !ok || repairParent(rep) != parent {
+			continue
+		}
+		batch = append(batch, name)
+		if len(batch) == common.MaxDelRepPerTxn {
+			break
+		}
+	}
+	return batch
+}
+
+// SpDrainRetiredLegBatch is SpDrainRepairBatch for the retired-leg phase:
+// the leg ids, in retired_leg_id_list order, of the retired legs that share
+// the parent of the first listed one, at most common.MaxDelRetiredLegPerTxn
+// of them.
+func SpDrainRetiredLegBatch(state *SpState) []uint64 {
+	ids := state.Conf.GetRetiredLegIdList()
+	if len(ids) == 0 {
+		return nil
+	}
+	first, ok := state.RetiredLegs[ids[0]]
+	if !ok {
+		return []uint64{ids[0]}
+	}
+	parent := retiredParent(first)
+	var batch []uint64
+	for _, legId := range ids {
+		retired, ok := state.RetiredLegs[legId]
+		if !ok || retiredParent(retired) != parent {
+			continue
+		}
+		batch = append(batch, legId)
+		if len(batch) == common.MaxDelRetiredLegPerTxn {
+			break
+		}
+	}
+	return batch
+}
+
+// DrainSpRepairs deletes one batch of a latched SP's repairs in one STM and
+// returns how many it deleted (dnv-worker.md SPD15).
+//
+// repNames is the batch the caller derived from its snapshot
+// (SpDrainRepairBatch): at most common.MaxDelRepPerTxn names, which the STM
+// re-applies ("batch too large"), of repairs of ONE parent, the slice or the
+// clone that holds their groups ("batch spans two parents"). A name the
+// pool no longer lists is skipped: another owner's batch deleted it, and as
+// for DrainSpCntlrs an empty remainder is nothing to do. A listed repair
+// whose key is missing is refused, as DrainSpSlice refuses a missing slice:
+// the record is what says which side to give back.
+//
+// The parent is read once for its groups' ext_cnt. Every new leg's side goes
+// back to its disk node through the DN ledger, a leg taken from a retired leg
+// included, since the pool is going away; the group's rep_name is cleared;
+// the Repair key and its list entry go together; and SpRev is bumped. It
+// refuses while cntlrs remain, SPD8's order made a precondition as
+// DrainSpSlice makes it. cc is the cluster's stored conf, gated at the top
+// as DrainSpSlice gates it.
+func DrainSpRepairs(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	repNames []string,
+	cc *pb.ClusterConf,
+) (int, error) {
+	removed := 0
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		removed = 0
+		if err := ValidateClusterConf(cc); err != nil {
+			return fail(opDrainSpRepairs, err.Error())
+		}
+		conf, err := loadSpConfForDrain(
+			s, opDrainSpRepairs, cid, spName, spId)
+		if err != nil {
+			return err
+		}
+		if len(conf.GetCntlrIdList()) != 0 {
+			return fail(opDrainSpRepairs, "cntlrs not drained")
+		}
+		if len(repNames) > common.MaxDelRepPerTxn {
+			return fail(opDrainSpRepairs, "batch too large")
+		}
+		var names []string
+		reps := make(map[string]*pb.Repair)
+		for _, name := range repNames {
+			if !containsName(conf.GetRepairNameList(), name) ||
+				containsName(names, name) {
+				continue
+			}
+			rep := &pb.Repair{}
+			if !s.Get(RepairKey(cid, spId, name), rep) {
+				return fail(opDrainSpRepairs, "repair record missing")
+			}
+			names = append(names, name)
+			reps[name] = rep
+		}
+		if len(names) == 0 {
+			return nil
+		}
+		parent := repairParent(reps[names[0]])
+		holder, err := loadGrpHolder(s, opDrainSpRepairs, cid, spId, parent)
+		if err != nil {
+			return err
+		}
+		rel := newDnReleaser(s, cid, cc)
+		for _, name := range names {
+			rep := reps[name]
+			if repairParent(rep) != parent {
+				return fail(opDrainSpRepairs, "batch spans two parents")
+			}
+			grp := holder.group(rep.GetGrpId())
+			if grp == nil {
+				return fail(opDrainSpRepairs, "group not found")
+			}
+			for _, leg := range rep.GetNewLegList() {
+				releaseLeg(rel, spId, leg, grp.GetExtCnt())
+			}
+			if grp.GetRepName() == name {
+				grp.RepName = ""
+			}
+			s.Del(RepairKey(cid, spId, name))
+			conf.RepairNameList = removeName(conf.GetRepairNameList(), name)
+		}
+		holder.put(s)
+		s.Put(SpConfKey(cid, spName), conf)
+		if err := rel.flush(opDrainSpRepairs); err != nil {
+			return err
+		}
+		removed = len(names)
+		return BumpSpRev(s, opDrainSpRepairs, shard, cid, spId)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+// DrainSpRetiredLegs is DrainSpRepairs for the retired-leg phase: one batch
+// (SpDrainRetiredLegBatch) of at most common.MaxDelRetiredLegPerTxn retired
+// legs of one parent, each side given back by its group's ext_cnt, each
+// RetiredLeg key deleted with its entries in the group's and the pool's
+// lists, and one SpRev bump. It refuses while cntlrs or repairs remain, the
+// phases SPD8 derives before it.
+func DrainSpRetiredLegs(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	legIds []uint64,
+	cc *pb.ClusterConf,
+) (int, error) {
+	removed := 0
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		removed = 0
+		if err := ValidateClusterConf(cc); err != nil {
+			return fail(opDrainSpRetiredLegs, err.Error())
+		}
+		conf, err := loadSpConfForDrain(
+			s, opDrainSpRetiredLegs, cid, spName, spId)
+		if err != nil {
+			return err
+		}
+		if len(conf.GetCntlrIdList()) != 0 {
+			return fail(opDrainSpRetiredLegs, "cntlrs not drained")
+		}
+		if len(conf.GetRepairNameList()) != 0 {
+			return fail(opDrainSpRetiredLegs, "repairs not drained")
+		}
+		if len(legIds) > common.MaxDelRetiredLegPerTxn {
+			return fail(opDrainSpRetiredLegs, "batch too large")
+		}
+		var ids []uint64
+		retiredLegs := make(map[uint64]*pb.RetiredLeg)
+		for _, legId := range legIds {
+			if !containsId(conf.GetRetiredLegIdList(), legId) ||
+				containsId(ids, legId) {
+				continue
+			}
+			retired := &pb.RetiredLeg{}
+			if !s.Get(RetiredLegKey(cid, spId, legId), retired) {
+				return fail(opDrainSpRetiredLegs,
+					"retired leg record missing")
+			}
+			ids = append(ids, legId)
+			retiredLegs[legId] = retired
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		parent := retiredParent(retiredLegs[ids[0]])
+		holder, err := loadGrpHolder(
+			s, opDrainSpRetiredLegs, cid, spId, parent)
+		if err != nil {
+			return err
+		}
+		rel := newDnReleaser(s, cid, cc)
+		for _, legId := range ids {
+			retired := retiredLegs[legId]
+			if retiredParent(retired) != parent {
+				return fail(opDrainSpRetiredLegs, "batch spans two parents")
+			}
+			grp := holder.group(retired.GetGrpId())
+			if grp == nil {
+				return fail(opDrainSpRetiredLegs, "group not found")
+			}
+			side := retired.GetSide()
+			rel.release(side.GetAddrPort(), spId, side.GetSideId(),
+				grp.GetExtCnt())
+			grp.RetiredLegIdList = removeId(grp.GetRetiredLegIdList(), legId)
+			s.Del(RetiredLegKey(cid, spId, legId))
+			conf.RetiredLegIdList = removeId(
+				conf.GetRetiredLegIdList(), legId)
+		}
+		holder.put(s)
+		s.Put(SpConfKey(cid, spName), conf)
+		if err := rel.flush(opDrainSpRetiredLegs); err != nil {
+			return err
+		}
+		removed = len(ids)
+		return BumpSpRev(s, opDrainSpRetiredLegs, shard, cid, spId)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+// ---------------------------------------------------------------------------
 // D2 — DrainSpSlice (SPD10, SPD11)
 // ---------------------------------------------------------------------------
 
@@ -297,6 +564,14 @@ func DrainSpSlice(
 			// a caller that derived D2 from a stale snapshot must not start
 			// popping groups while cntlrs are still stacking the whole SP.
 			return fail(opDrainSpSlice, "cntlrs not drained")
+		}
+		// Nor while a repair or a retired leg survives: its side goes back
+		// by its group's ext_cnt, which the pop takes away.
+		if len(conf.GetRepairNameList()) != 0 {
+			return fail(opDrainSpSlice, "repairs not drained")
+		}
+		if len(conf.GetRetiredLegIdList()) != 0 {
+			return fail(opDrainSpSlice, "retired legs not drained")
 		}
 		if !containsId(conf.GetSliceIdList(), sliceId) {
 			// Another owner's batch already emptied and removed this slice.
@@ -488,10 +763,10 @@ func removeSidePtr(
 // `sp_id_to_name` and `sp_rev`, plus GW12's deletion half on the cluster's
 // SpGlobal so that DeleteCluster's bucket-sum gate stays exact.
 //
-// It refuses while any cntlr or any slice survives. That guard is what makes the
-// drain safe under the accepted two-owner overlap: an owner whose snapshot is
-// one step behind cannot skip to the end and strand the keys the other owner is
-// still popping.
+// It refuses while any cntlr, any repair, any retired leg or any slice
+// survives. That guard is what makes the drain safe under the accepted
+// two-owner overlap: an owner whose snapshot is one step behind cannot skip to
+// the end and strand the keys the other owner is still popping.
 //
 // It is the one drain STM that does NOT bump SpRev — it DELETES the key, and
 // that delete is already the shard worker's stop signal for the sp coordinator
@@ -513,6 +788,12 @@ func FinishSpDelete(
 		}
 		if len(conf.GetCntlrIdList()) != 0 {
 			return fail(opFinishSpDelete, "cntlrs remain")
+		}
+		if len(conf.GetRepairNameList()) != 0 {
+			return fail(opFinishSpDelete, "repairs remain")
+		}
+		if len(conf.GetRetiredLegIdList()) != 0 {
+			return fail(opFinishSpDelete, "retired legs remain")
 		}
 		if len(conf.GetSliceIdList()) != 0 {
 			return fail(opFinishSpDelete, "slices remain")

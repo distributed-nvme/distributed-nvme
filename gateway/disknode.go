@@ -232,7 +232,8 @@ func (s *Server) DeleteDiskNode(
 		if len(dn.GetSidePtrList()) != 0 {
 			return errPrecondition(
 				"disk node %q still hosts %d sides: delete or migrate the "+
-					"owning storage pools first",
+					"owning storage pools, or delete their retired legs "+
+					"(DeleteRetiredLeg), first",
 				req.GetAddrPort(), len(dn.GetSidePtrList()))
 		}
 		globalKey := model.DnGlobalKey(cid)

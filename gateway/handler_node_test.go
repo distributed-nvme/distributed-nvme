@@ -1427,6 +1427,7 @@ func TestDeleteDiskNodeReleasesTheShard(t *testing.T) {
 	})
 	wantCode(t, err, codes.FailedPrecondition, "DeleteDiskNode of a busy node")
 	hnodeWantMsg(t, err, "still hosts 1 sides", "DeleteDiskNode of a busy node")
+	hnodeWantMsg(t, err, "DeleteRetiredLeg", "DeleteDiskNode of a busy node")
 	if got := hnodeModRev(t, s, model.DnConfKey(cid, second)); got != confRev {
 		t.Errorf("the refused delete rewrote dn_conf: %d -> %d", confRev, got)
 	}

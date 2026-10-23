@@ -944,11 +944,16 @@ func TestReplaceCntlrTxnBudget(t *testing.T) {
 // TestFinishCloneDeleteTxnBudget is the tripwire of model.FinishCloneDelete,
 // the clone drain's final step (dnv-worker.md CLD9, CLD11): it gives every
 // side of the clone meta group back to its DN, through the DN ledger an sp
-// drain batch uses, and reads no cntlr and no CN. A clone meta group has at most MaxAllocLegPerGrp
-// legs and MaxSpareLegPerGrp spares, one side each — its legs are never
-// migrated — on as many distinct DNs (SPD1 cites MaxAllocLegPerGrp here).
+// drain batch uses, and reads no cntlr and no CN. A clone meta group has at
+// most MaxAllocLegPerGrp legs, MaxSpareLegPerGrp spares or one repair's new
+// leg, never both, and MaxRetiredLegPerGrp retired legs, one side each — its
+// legs are never migrated — on as many distinct DNs (SPD1 cites
+// MaxAllocLegPerGrp here). The spares are the widest: a repair's key read and
+// deleted and its new leg's DN cost eight compares, two spares' DNs twelve.
+// Each retired leg's key is read and deleted beside its DN.
 // model/clonedrain_test.go's TestFinishCloneDeleteAtTheCeiling commits this
-// shape against a real etcd.
+// shape against a real etcd, and model/repairdrain_test.go's
+// TestFinishCloneDeleteAtTheCeilingWithARepair the one with a repair.
 func TestFinishCloneDeleteTxnBudget(t *testing.T) {
 	txnShape{
 		name: "FinishCloneDelete",
@@ -961,11 +966,180 @@ func TestFinishCloneDeleteTxnBudget(t *testing.T) {
 			// The DnConf and DnRev read; the DnConf put, the dn_capacity
 			// delete and put, and the DnRev put.
 			{"dn", 6,
-				common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp, 4},
+				common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp +
+					common.MaxRetiredLegPerGrp, 6},
+			// The RetiredLeg read and delete.
+			{"retired leg", 2, common.MaxRetiredLegPerGrp, 2},
 		},
-		maxCompares: 30,
+		maxCompares: 46,
 		overDefault: false,
 	}.check(t)
+}
+
+// TestSpDrainRepairBatchBudget is the tripwire of model.DrainSpRepairs, one
+// batch of the sp drain's repair phase (dnv-worker.md, The sp drain), SPD14's
+// arithmetic half for it: the repairs of one parent, at most MaxDelRepPerTxn,
+// each with one new leg of one side on a DN of its own at the widest.
+// model/repairdrain_test.go's TestDrainSpRepairsAtTheCeiling commits this
+// shape against a real etcd.
+func TestSpDrainRepairBatchBudget(t *testing.T) {
+	txnShape{
+		name: "DrainSpRepairs",
+		stm:  "model.DrainSpRepairs's STM and the dnReleaser",
+		// SpConf, the parent and SpRev.
+		fixedReads: 3,
+		// The parent, SpConf and SpRev puts.
+		fixedWrites: 3,
+		terms: []txnTerm{
+			// The Repair read and delete; its new leg's DnConf and DnRev
+			// read, and its DnConf put, dn_capacity delete and put and DnRev
+			// put.
+			{"repair", 8, common.MaxDelRepPerTxn, 64},
+		},
+		maxCompares: 518,
+		overDefault: true,
+	}.check(t)
+}
+
+// TestSpDrainRetiredLegBatchBudget is TestSpDrainRepairBatchBudget for one
+// batch of the retired-leg phase, model.DrainSpRetiredLegs: at most
+// MaxDelRetiredLegPerTxn retired legs of one parent, each side on a DN of its
+// own at the widest. model/repairdrain_test.go's
+// TestDrainSpRetiredLegsAtTheCeiling commits this shape against a real etcd.
+func TestSpDrainRetiredLegBatchBudget(t *testing.T) {
+	txnShape{
+		name: "DrainSpRetiredLegs",
+		stm:  "model.DrainSpRetiredLegs's STM and the dnReleaser",
+		// SpConf, the parent and SpRev.
+		fixedReads: 3,
+		// The parent, SpConf and SpRev puts.
+		fixedWrites: 3,
+		terms: []txnTerm{
+			// The RetiredLeg read and delete; its side's DnConf and DnRev
+			// read, and its DnConf put, dn_capacity delete and put and DnRev
+			// put.
+			{"retired leg", 8, common.MaxDelRetiredLegPerTxn, 64},
+		},
+		maxCompares: 518,
+		overDefault: true,
+	}.check(t)
+}
+
+// TestRepairOpsTxnBudget is the tripwire of the repair operations
+// (model/repair.go): each reads the records of one repair or one retired leg,
+// the one parent that holds its group and at most one DN, whatever the
+// pool's shape, so no ceiling is a factor. A repair's parent is one slice or
+// one clone, which the operations read by the name the record keeps, never by
+// a walk. model/repair_test.go commits each against a real etcd.
+func TestRepairOpsTxnBudget(t *testing.T) {
+	for _, shape := range []txnShape{
+		{
+			name: "CreateRepair",
+			stm:  "model.CreateRepair's STM, placeFreshLeg and chargeDn",
+			// SpRev, SpConf, the new Repair key (absent), the parent, and
+			// for a fresh new leg the pick's DnConf, the scan's dn_capacity
+			// key and its DnRev. A new leg taken from a retired leg reads
+			// the RetiredLeg instead of the three and writes its delete
+			// instead of four: the narrower shape.
+			fixedReads: 7,
+			// The Repair, the parent and SpConf; the DnConf, the
+			// dn_capacity delete and put and the DnRev; SpRev.
+			fixedWrites: 8,
+			maxCompares: 15,
+		},
+		{
+			name: "FinishRepair",
+			stm:  "model.FinishRepair's STM",
+			// SpRev, SpConf, the Repair and the parent.
+			fixedReads: 4,
+			// The Repair delete, the RetiredLeg put, the parent, SpConf
+			// and SpRev.
+			fixedWrites: 5,
+			maxCompares: 9,
+		},
+		{
+			name: "CancelRepair",
+			stm:  "model.CancelRepair's STM and the dnReleaser",
+			// SpRev, SpConf, the Repair, the parent, and a fresh new leg's
+			// DnConf and DnRev. A new leg taken from a retired leg writes
+			// its RetiredLeg instead of the DN: the narrower shape.
+			fixedReads: 6,
+			// The Repair delete, the parent and SpConf; the DnConf, the
+			// dn_capacity delete and put and the DnRev; SpRev.
+			fixedWrites: 8,
+			maxCompares: 14,
+		},
+		{
+			name: "SetRepairAbort",
+			stm:  "model.SetRepairAbort's STM and loadRepairLive",
+			// SpRev, SpConf, the Repair and, for a clone meta group's
+			// repair, the Clone.
+			fixedReads: 4,
+			// The Repair and SpRev.
+			fixedWrites: 2,
+			maxCompares: 6,
+		},
+		{
+			name: "SetRepairStage",
+			stm:  "model.SetRepairStage's STM and loadRepairLive",
+			// SpConf, the Repair, the Clone of a clone meta group's repair
+			// and SpRev.
+			fixedReads: 4,
+			// The Repair and SpRev.
+			fixedWrites: 2,
+			maxCompares: 6,
+		},
+		{
+			name: "DeleteRetiredLeg",
+			stm:  "model.DeleteRetiredLeg's STM and the dnReleaser",
+			// SpRev, SpConf, the RetiredLeg, the parent, and the side's
+			// DnConf and DnRev.
+			fixedReads: 6,
+			// The RetiredLeg delete, the parent and SpConf; the DnConf, the
+			// dn_capacity delete and put and the DnRev; SpRev.
+			fixedWrites: 8,
+			maxCompares: 14,
+		},
+		{
+			name: "SetRepairLegErrEpoch",
+			stm:  "model.SetRepairLegErrEpoch's STM",
+			// SpConf and the Repair.
+			fixedReads: 2,
+			// The Repair.
+			fixedWrites: 1,
+			maxCompares: 3,
+		},
+		{
+			name: "SetRepairSideErrEpoch",
+			stm:  "model.SetRepairSideErrEpoch's STM",
+			// SpConf and the Repair.
+			fixedReads: 2,
+			// The Repair.
+			fixedWrites: 1,
+			maxCompares: 3,
+		},
+		{
+			name: "SetRetiredSideErrEpoch",
+			stm:  "model.SetRetiredSideErrEpoch's STM",
+			// SpConf and the RetiredLeg.
+			fixedReads: 2,
+			// The RetiredLeg.
+			fixedWrites: 1,
+			maxCompares: 3,
+		},
+		{
+			name: "FlipRepairProvisioned",
+			stm:  "model.FlipRepairProvisioned's STM and bumpSpRevTo",
+			// SpConf, the Repair, the Clone of a clone meta group's repair
+			// and SpRev.
+			fixedReads: 4,
+			// The Repair and SpRev.
+			fixedWrites: 2,
+			maxCompares: 6,
+		},
+	} {
+		t.Run(shape.name, func(t *testing.T) { shape.check(t) })
+	}
 }
 
 // TestFlipCloneProvisionedTxnBudget is the tripwire of

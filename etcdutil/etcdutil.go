@@ -857,6 +857,36 @@ func (c *Client) RangeKeysAtRev(
 	return keys, nil
 }
 
+// RangeAtRev is Range pinned to one store revision (EU2): the keys under
+// prefix with their values, in ascending key order. It exists for
+// model.LoadSp (MD3), which reads an SP's repairs and retired legs by one
+// prefix each at the revision its snapshot was read at, and an STM cannot
+// range. A compacted rev is an error, as for RangeKeysAtRev. Same "etcd
+// range" record as Range; each value is logged as its caller decodes it.
+func (c *Client) RangeAtRev(
+	ctx context.Context,
+	prefix string,
+	rev int64,
+) ([]KV, error) {
+	resp, err := c.scan(
+		ctx, prefix,
+		clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend),
+		clientv3.WithRev(rev),
+	)
+	if err != nil {
+		return nil, err
+	}
+	kvs := make([]KV, 0, len(resp.Kvs))
+	for _, kv := range resp.Kvs {
+		kvs = append(kvs, KV{
+			Key:    string(kv.Key),
+			Value:  kv.Value,
+			ModRev: kv.ModRevision,
+		})
+	}
+	return kvs, nil
+}
+
 // snapshotView implements STM as a set of reads all served at ONE store
 // revision, and — unlike concurrency.STM — reports that revision.
 //
@@ -977,13 +1007,41 @@ func (c *Client) SnapshotRev(
 	ctx context.Context,
 	f func(s STM) error,
 ) (int64, error) {
+	return c.snapshotAt(ctx, 0, f)
+}
+
+// SnapshotAtRev is SnapshotRev served at a revision the caller already holds
+// (EU4): every read of f is served at rev, the first one included, so a load
+// split around a scan an STM cannot perform reads one store state in all its
+// parts. model.LoadSp reads its node records this way, after the scans of
+// its repairs and retired legs (MD3). A compacted rev is an error, as for
+// RangeKeysAtRev; f runs exactly once, as for SnapshotRev.
+func (c *Client) SnapshotAtRev(
+	ctx context.Context,
+	rev int64,
+	f func(s STM) error,
+) error {
+	if rev <= 0 {
+		return fmt.Errorf("etcd snapshot at revision %d: not a revision", rev)
+	}
+	_, err := c.snapshotAt(ctx, rev, f)
+	return err
+}
+
+// snapshotAt runs f once over a snapshot view pinned at rev, or, for rev 0,
+// at the revision its first read is served at, and returns that revision.
+func (c *Client) snapshotAt(
+	ctx context.Context,
+	rev int64,
+	f func(s STM) error,
+) (int64, error) {
 	// One budget for the whole load, not one per key read (EU5): a snapshot is
 	// a single logical operation, and a per-read deadline would let a slow
 	// etcd stretch a many-key LoadSp without bound. A shorter caller ctx still
 	// wins, since WithTimeout keeps the earlier deadline.
 	octx, cancel := opCtx(ctx)
 	defer cancel()
-	view := &snapshotView{ctx: octx, c: c}
+	view := &snapshotView{ctx: octx, c: c, rev: rev}
 	callbackErr := f(view)
 	if view.err != nil {
 		// A read or misuse failure is the root cause; it wins over whatever

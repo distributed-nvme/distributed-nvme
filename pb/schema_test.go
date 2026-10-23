@@ -194,3 +194,103 @@ func TestRetiredCnMetadataFieldsStayReserved(t *testing.T) {
 		}
 	}
 }
+
+// TestRepairFieldNumbers pins the numbers, kinds and cardinalities of the
+// repair records and of the fields that carry them: the Repair and RetiredLeg
+// messages, which are stored, the group's and the pool's links to them, the
+// cntlr request's repairs and the cntlr report's verdicts and group
+// readings, which an agent stores or a worker keeps. Each is appended: a
+// renumbered field decodes an old value into the wrong field, or into unknown
+// fields, with no error. The stage's values are pinned too, since a stored
+// record carries them as numbers.
+func TestRepairFieldNumbers(t *testing.T) {
+	repair := (&pb.Repair{}).ProtoReflect().Descriptor()
+	retired := (&pb.RetiredLeg{}).ProtoReflect().Descriptor()
+	grp := (&pb.Group{}).ProtoReflect().Descriptor()
+	conf := (&pb.SpConf{}).ProtoReflect().Descriptor()
+	syncup := (&pb.SyncupCntlrRequest{}).ProtoReflect().Descriptor()
+	info := (&pb.CntlrInfo{}).ProtoReflect().Descriptor()
+	repInfo := (&pb.CntlrInfo_RepairInfo{}).ProtoReflect().Descriptor()
+	grpInfo := (&pb.CntlrInfo_GrpInfo{}).ProtoReflect().Descriptor()
+	for _, nested := range []protoreflect.MessageDescriptor{repInfo, grpInfo} {
+		if nested.Parent() != info {
+			t.Errorf("%s is not nested in %s", nested.FullName(),
+				info.FullName())
+		}
+	}
+	const (
+		single = protoreflect.Optional
+		list   = protoreflect.Repeated
+	)
+	for _, tc := range []struct {
+		md          protoreflect.MessageDescriptor
+		name        protoreflect.Name
+		number      protoreflect.FieldNumber
+		kind        protoreflect.Kind
+		cardinality protoreflect.Cardinality
+		isMap       bool
+	}{
+		{repair, "rep_id", 1, protoreflect.Uint64Kind, single, false},
+		{repair, "grp_id", 2, protoreflect.Uint64Kind, single, false},
+		{repair, "rep_stage", 3, protoreflect.EnumKind, single, false},
+		{repair, "new_leg_list", 4, protoreflect.MessageKind, list, false},
+		{repair, "bad_leg_id_list", 5, protoreflect.Uint64Kind, list, false},
+		{repair, "try_to_abort", 6, protoreflect.BoolKind, single, false},
+		{repair, "slice_id", 7, protoreflect.Uint64Kind, single, false},
+		{repair, "clone_name", 8, protoreflect.StringKind, single, false},
+		{repair, "new_leg_id_to_retired_epoch", 9,
+			protoreflect.MessageKind, list, true},
+		{retired, "grp_id", 1, protoreflect.Uint64Kind, single, false},
+		{retired, "leg_idx", 2, protoreflect.Uint32Kind, single, false},
+		{retired, "side", 3, protoreflect.MessageKind, single, false},
+		{retired, "retired_epoch", 4, protoreflect.Uint64Kind, single, false},
+		{retired, "slice_id", 5, protoreflect.Uint64Kind, single, false},
+		{retired, "clone_name", 6, protoreflect.StringKind, single, false},
+		{grp, "rep_name", 7, protoreflect.StringKind, single, false},
+		{grp, "retired_leg_id_list", 8, protoreflect.Uint64Kind, list, false},
+		{conf, "repair_name_list", 17, protoreflect.StringKind, list, false},
+		{conf, "retired_leg_id_list", 18, protoreflect.Uint64Kind, list,
+			false},
+		{syncup, "name_to_repair", 14, protoreflect.MessageKind, list, true},
+		{info, "rep_id_to_repair_info", 19, protoreflect.MessageKind, list,
+			true},
+		{info, "grp_id_to_grp_info", 20, protoreflect.MessageKind, list,
+			true},
+		{repInfo, "started", 1, protoreflect.BoolKind, single, false},
+		{repInfo, "abort_confirmed", 2, protoreflect.BoolKind, single, false},
+		{grpInfo, "whole", 1, protoreflect.BoolKind, single, false},
+		{grpInfo, "in_sync_leg_id_list", 2, protoreflect.Uint64Kind, list,
+			false},
+	} {
+		fd := tc.md.Fields().ByName(tc.name)
+		if fd == nil {
+			t.Errorf("%s has no field %s", tc.md.FullName(), tc.name)
+			continue
+		}
+		if fd.Number() != tc.number || fd.Kind() != tc.kind ||
+			fd.Cardinality() != tc.cardinality || fd.IsMap() != tc.isMap {
+			t.Errorf("%s.%s is %v %v (map %v) at %d, want %v %v (map %v) "+
+				"at %d", tc.md.FullName(), tc.name, fd.Cardinality(),
+				fd.Kind(), fd.IsMap(), fd.Number(), tc.cardinality, tc.kind,
+				tc.isMap, tc.number)
+		}
+	}
+	stage := repair.Fields().ByName("rep_stage").Enum()
+	for _, v := range []struct {
+		name   protoreflect.Name
+		number protoreflect.EnumNumber
+	}{
+		{"REP_STAGE_CREATED", 0},
+		{"REP_STAGE_STARTED", 1},
+		{"REP_STAGE_ABORTED", 2},
+	} {
+		ev := stage.Values().ByName(v.name)
+		if ev == nil || ev.Number() != v.number {
+			t.Errorf("%s.%s is %v, want the number %d",
+				stage.FullName(), v.name, ev, v.number)
+		}
+	}
+	if got := stage.Values().Len(); got != 3 {
+		t.Errorf("%s has %d values, want 3", stage.FullName(), got)
+	}
+}

@@ -655,18 +655,25 @@ func (s *fakeStore) has(key string) bool {
 // healthWrite is one recorded err_epoch write (HL3). settle is a cntlr
 // write's request to clear the record's settling flag too (HL2). A leg's or a
 // side's write names the slice that holds it in sliceId or, for a leg or a
-// side of a clone meta group, the clone in cloneName and cloneId.
+// side of a clone meta group, the clone in cloneName and cloneId; for a
+// repair's new leg or its side, the repair in repName and repId, and for a
+// retired side, the retired leg in retiredLegId. spName is the pool name the
+// repair and retired-leg writes take.
 type healthWrite struct {
-	record    string
-	cid       uint64
-	addr      string
-	spId      uint64
-	sliceId   uint64
-	cloneName string
-	cloneId   uint64
-	objId     uint64
-	epoch     uint64
-	settle    bool
+	record       string
+	cid          uint64
+	addr         string
+	spId         uint64
+	spName       string
+	sliceId      uint64
+	cloneName    string
+	cloneId      uint64
+	repName      string
+	repId        uint64
+	retiredLegId uint64
+	objId        uint64
+	epoch        uint64
+	settle       bool
 }
 
 // fakeHealthWriter records the MD6 ops health.go would have run.
@@ -793,6 +800,53 @@ func (w *fakeHealthWriter) setCloneSideErrEpoch(
 	})
 }
 
+func (w *fakeHealthWriter) setRepairLegErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	legId uint64,
+	epoch uint64,
+) error {
+	return w.record(healthWrite{
+		record: healthRecordLeg, cid: cid, spId: spId, spName: spName,
+		repName: repName, repId: repId, objId: legId, epoch: epoch,
+	})
+}
+
+func (w *fakeHealthWriter) setRepairSideErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	return w.record(healthWrite{
+		record: healthRecordSide, cid: cid, spId: spId, spName: spName,
+		repName: repName, repId: repId, objId: sideId, epoch: epoch,
+	})
+}
+
+func (w *fakeHealthWriter) setRetiredSideErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	legId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	return w.record(healthWrite{
+		record: healthRecordSide, cid: cid, spId: spId, spName: spName,
+		retiredLegId: legId, objId: sideId, epoch: epoch,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Log capture
 // ---------------------------------------------------------------------------
@@ -809,6 +863,14 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 	defer b.mu.Unlock()
 	b.data = append(b.data, p...)
 	return len(p), nil
+}
+
+// reset drops everything captured so far, so a case reads only what came
+// after it.
+func (b *syncBuffer) reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.data = nil
 }
 
 func (b *syncBuffer) String() string {

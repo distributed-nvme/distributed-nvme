@@ -939,14 +939,15 @@ const textProbe = "201"
 var textGlobals = []string{"cluster", "sp", "rev"}
 
 // textNumberNames are the flags declared as strings that dnvctl parses as
-// numbers: the ids (hexOf), --ids (idListOf), --slots (u32ListOf), --level
-// (spParseLevel) and --rev (revToken). The text walk must find a leaf flag of
+// numbers: the ids (hexOf), --ids and --bad-legs (idListOf), --slots
+// (u32ListOf), --level (spParseLevel) and --rev (revToken). The text walk
+// must find a leaf flag of
 // one of these names on every leaf that declares it, and the global --rev on
 // exactly the leaves whose request has a CT3 token field, which keeps the
 // walk from passing on a probe that finds nothing.
 var textNumberNames = []string{
 	"id", "slice", "leg", "grp", "spare", "target", "src-side",
-	"ids", "slots", "level", "rev",
+	"retired-leg", "ids", "bad-legs", "slots", "level", "rev",
 }
 
 // textNumberFlags types textProbe into every string flag of every leaf, and

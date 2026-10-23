@@ -28,11 +28,12 @@ import (
 // never from here (CN29).
 
 // probeCntlr writes the rows of one read of the cntlr from plan, whose
-// reading readCntlr took (plan.rd, plan.walk, plan.mdWalks). It also returns
-// the dm names of the md members the converge would put back or add, which
-// the verdict names (putBackNames, cnagent.md CN30): they are read from the
-// arrays and the leg rows the probe has just read, and from a lookup of each
-// such member's leg in the call's walk.
+// reading readCntlr took (plan.rd, plan.walk, plan.mdWalks), and beside them
+// what it reads of each group's running array (reportGrpReading). It also
+// returns the dm names of the md members the converge would put back, add or
+// remove for a repair, which the verdict names (putBackNames, cnagent.md
+// CN30): they are read from the arrays and the leg rows the probe has just
+// read, and from a lookup of each such member's leg in the call's walk.
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -88,6 +89,7 @@ func (s *CnAgentServer) probeCntlr(
 				key, gp.resName, status, details)
 			putBack = append(putBack, s.putBackNames(
 				ctx, plan, gp, detail, info.LegIdToLeg)...)
+			reportGrpReading(info, gp, detail)
 		case plan.primary:
 			info.GrpIdToMdRaid[gp.grpId] = t.Missing(
 				key, gp.resName, detailsSpLevel)

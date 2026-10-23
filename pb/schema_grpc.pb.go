@@ -77,6 +77,14 @@ const (
 	Gateway_CreateSpareLeg_FullMethodName                  = "/Gateway/CreateSpareLeg"
 	Gateway_DeleteSpareLeg_FullMethodName                  = "/Gateway/DeleteSpareLeg"
 	Gateway_SwitchSpareLeg_FullMethodName                  = "/Gateway/SwitchSpareLeg"
+	Gateway_CreateRepair_FullMethodName                    = "/Gateway/CreateRepair"
+	Gateway_FinishRepair_FullMethodName                    = "/Gateway/FinishRepair"
+	Gateway_CancelRepair_FullMethodName                    = "/Gateway/CancelRepair"
+	Gateway_TryToAbortRepair_FullMethodName                = "/Gateway/TryToAbortRepair"
+	Gateway_GetRepair_FullMethodName                       = "/Gateway/GetRepair"
+	Gateway_ListRepairs_FullMethodName                     = "/Gateway/ListRepairs"
+	Gateway_ListRetiredLegs_FullMethodName                 = "/Gateway/ListRetiredLegs"
+	Gateway_DeleteRetiredLeg_FullMethodName                = "/Gateway/DeleteRetiredLeg"
 	Gateway_GetThinDeviceBitmap_FullMethodName             = "/Gateway/GetThinDeviceBitmap"
 	Gateway_GetLegBitmap_FullMethodName                    = "/Gateway/GetLegBitmap"
 )
@@ -143,6 +151,14 @@ type GatewayClient interface {
 	CreateSpareLeg(ctx context.Context, in *CreateSpareLegRequest, opts ...grpc.CallOption) (*CreateSpareLegReply, error)
 	DeleteSpareLeg(ctx context.Context, in *DeleteSpareLegRequest, opts ...grpc.CallOption) (*DeleteSpareLegReply, error)
 	SwitchSpareLeg(ctx context.Context, in *SwitchSpareLegRequest, opts ...grpc.CallOption) (*SwitchSpareLegReply, error)
+	CreateRepair(ctx context.Context, in *CreateRepairRequest, opts ...grpc.CallOption) (*CreateRepairReply, error)
+	FinishRepair(ctx context.Context, in *FinishRepairRequest, opts ...grpc.CallOption) (*FinishRepairReply, error)
+	CancelRepair(ctx context.Context, in *CancelRepairRequest, opts ...grpc.CallOption) (*CancelRepairReply, error)
+	TryToAbortRepair(ctx context.Context, in *TryToAbortRepairRequest, opts ...grpc.CallOption) (*TryToAbortRepairReply, error)
+	GetRepair(ctx context.Context, in *GetRepairRequest, opts ...grpc.CallOption) (*GetRepairReply, error)
+	ListRepairs(ctx context.Context, in *ListRepairsRequest, opts ...grpc.CallOption) (*ListRepairsReply, error)
+	ListRetiredLegs(ctx context.Context, in *ListRetiredLegsRequest, opts ...grpc.CallOption) (*ListRetiredLegsReply, error)
+	DeleteRetiredLeg(ctx context.Context, in *DeleteRetiredLegRequest, opts ...grpc.CallOption) (*DeleteRetiredLegReply, error)
 	GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error)
 	GetLegBitmap(ctx context.Context, in *GetLegBitmapRequest, opts ...grpc.CallOption) (*GetLegBitmapReply, error)
 }
@@ -735,6 +751,86 @@ func (c *gatewayClient) SwitchSpareLeg(ctx context.Context, in *SwitchSpareLegRe
 	return out, nil
 }
 
+func (c *gatewayClient) CreateRepair(ctx context.Context, in *CreateRepairRequest, opts ...grpc.CallOption) (*CreateRepairReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateRepairReply)
+	err := c.cc.Invoke(ctx, Gateway_CreateRepair_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) FinishRepair(ctx context.Context, in *FinishRepairRequest, opts ...grpc.CallOption) (*FinishRepairReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FinishRepairReply)
+	err := c.cc.Invoke(ctx, Gateway_FinishRepair_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) CancelRepair(ctx context.Context, in *CancelRepairRequest, opts ...grpc.CallOption) (*CancelRepairReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelRepairReply)
+	err := c.cc.Invoke(ctx, Gateway_CancelRepair_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) TryToAbortRepair(ctx context.Context, in *TryToAbortRepairRequest, opts ...grpc.CallOption) (*TryToAbortRepairReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TryToAbortRepairReply)
+	err := c.cc.Invoke(ctx, Gateway_TryToAbortRepair_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) GetRepair(ctx context.Context, in *GetRepairRequest, opts ...grpc.CallOption) (*GetRepairReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRepairReply)
+	err := c.cc.Invoke(ctx, Gateway_GetRepair_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) ListRepairs(ctx context.Context, in *ListRepairsRequest, opts ...grpc.CallOption) (*ListRepairsReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRepairsReply)
+	err := c.cc.Invoke(ctx, Gateway_ListRepairs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) ListRetiredLegs(ctx context.Context, in *ListRetiredLegsRequest, opts ...grpc.CallOption) (*ListRetiredLegsReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRetiredLegsReply)
+	err := c.cc.Invoke(ctx, Gateway_ListRetiredLegs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) DeleteRetiredLeg(ctx context.Context, in *DeleteRetiredLegRequest, opts ...grpc.CallOption) (*DeleteRetiredLegReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteRetiredLegReply)
+	err := c.cc.Invoke(ctx, Gateway_DeleteRetiredLeg_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *gatewayClient) GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetThinDeviceBitmapReply)
@@ -817,6 +913,14 @@ type GatewayServer interface {
 	CreateSpareLeg(context.Context, *CreateSpareLegRequest) (*CreateSpareLegReply, error)
 	DeleteSpareLeg(context.Context, *DeleteSpareLegRequest) (*DeleteSpareLegReply, error)
 	SwitchSpareLeg(context.Context, *SwitchSpareLegRequest) (*SwitchSpareLegReply, error)
+	CreateRepair(context.Context, *CreateRepairRequest) (*CreateRepairReply, error)
+	FinishRepair(context.Context, *FinishRepairRequest) (*FinishRepairReply, error)
+	CancelRepair(context.Context, *CancelRepairRequest) (*CancelRepairReply, error)
+	TryToAbortRepair(context.Context, *TryToAbortRepairRequest) (*TryToAbortRepairReply, error)
+	GetRepair(context.Context, *GetRepairRequest) (*GetRepairReply, error)
+	ListRepairs(context.Context, *ListRepairsRequest) (*ListRepairsReply, error)
+	ListRetiredLegs(context.Context, *ListRetiredLegsRequest) (*ListRetiredLegsReply, error)
+	DeleteRetiredLeg(context.Context, *DeleteRetiredLegRequest) (*DeleteRetiredLegReply, error)
 	GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error)
 	GetLegBitmap(context.Context, *GetLegBitmapRequest) (*GetLegBitmapReply, error)
 	mustEmbedUnimplementedGatewayServer()
@@ -1002,6 +1106,30 @@ func (UnimplementedGatewayServer) DeleteSpareLeg(context.Context, *DeleteSpareLe
 }
 func (UnimplementedGatewayServer) SwitchSpareLeg(context.Context, *SwitchSpareLegRequest) (*SwitchSpareLegReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method SwitchSpareLeg not implemented")
+}
+func (UnimplementedGatewayServer) CreateRepair(context.Context, *CreateRepairRequest) (*CreateRepairReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateRepair not implemented")
+}
+func (UnimplementedGatewayServer) FinishRepair(context.Context, *FinishRepairRequest) (*FinishRepairReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method FinishRepair not implemented")
+}
+func (UnimplementedGatewayServer) CancelRepair(context.Context, *CancelRepairRequest) (*CancelRepairReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelRepair not implemented")
+}
+func (UnimplementedGatewayServer) TryToAbortRepair(context.Context, *TryToAbortRepairRequest) (*TryToAbortRepairReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method TryToAbortRepair not implemented")
+}
+func (UnimplementedGatewayServer) GetRepair(context.Context, *GetRepairRequest) (*GetRepairReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRepair not implemented")
+}
+func (UnimplementedGatewayServer) ListRepairs(context.Context, *ListRepairsRequest) (*ListRepairsReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRepairs not implemented")
+}
+func (UnimplementedGatewayServer) ListRetiredLegs(context.Context, *ListRetiredLegsRequest) (*ListRetiredLegsReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRetiredLegs not implemented")
+}
+func (UnimplementedGatewayServer) DeleteRetiredLeg(context.Context, *DeleteRetiredLegRequest) (*DeleteRetiredLegReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteRetiredLeg not implemented")
 }
 func (UnimplementedGatewayServer) GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetThinDeviceBitmap not implemented")
@@ -2074,6 +2202,150 @@ func _Gateway_SwitchSpareLeg_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Gateway_CreateRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRepairRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).CreateRepair(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_CreateRepair_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).CreateRepair(ctx, req.(*CreateRepairRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_FinishRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinishRepairRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).FinishRepair(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_FinishRepair_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).FinishRepair(ctx, req.(*FinishRepairRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_CancelRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelRepairRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).CancelRepair(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_CancelRepair_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).CancelRepair(ctx, req.(*CancelRepairRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_TryToAbortRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TryToAbortRepairRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).TryToAbortRepair(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_TryToAbortRepair_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).TryToAbortRepair(ctx, req.(*TryToAbortRepairRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_GetRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRepairRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).GetRepair(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_GetRepair_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).GetRepair(ctx, req.(*GetRepairRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_ListRepairs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRepairsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).ListRepairs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_ListRepairs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).ListRepairs(ctx, req.(*ListRepairsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_ListRetiredLegs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRetiredLegsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).ListRetiredLegs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_ListRetiredLegs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).ListRetiredLegs(ctx, req.(*ListRetiredLegsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_DeleteRetiredLeg_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRetiredLegRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).DeleteRetiredLeg(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_DeleteRetiredLeg_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).DeleteRetiredLeg(ctx, req.(*DeleteRetiredLegRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Gateway_GetThinDeviceBitmap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetThinDeviceBitmapRequest)
 	if err := dec(in); err != nil {
@@ -2348,6 +2620,38 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SwitchSpareLeg",
 			Handler:    _Gateway_SwitchSpareLeg_Handler,
+		},
+		{
+			MethodName: "CreateRepair",
+			Handler:    _Gateway_CreateRepair_Handler,
+		},
+		{
+			MethodName: "FinishRepair",
+			Handler:    _Gateway_FinishRepair_Handler,
+		},
+		{
+			MethodName: "CancelRepair",
+			Handler:    _Gateway_CancelRepair_Handler,
+		},
+		{
+			MethodName: "TryToAbortRepair",
+			Handler:    _Gateway_TryToAbortRepair_Handler,
+		},
+		{
+			MethodName: "GetRepair",
+			Handler:    _Gateway_GetRepair_Handler,
+		},
+		{
+			MethodName: "ListRepairs",
+			Handler:    _Gateway_ListRepairs_Handler,
+		},
+		{
+			MethodName: "ListRetiredLegs",
+			Handler:    _Gateway_ListRetiredLegs_Handler,
+		},
+		{
+			MethodName: "DeleteRetiredLeg",
+			Handler:    _Gateway_DeleteRetiredLeg_Handler,
 		},
 		{
 			MethodName: "GetThinDeviceBitmap",

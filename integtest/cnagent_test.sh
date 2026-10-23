@@ -9,8 +9,8 @@
 #   bash integtest/cnagent_test.sh [--only <case>] [--cleanup-only] \
 #       [--wipe] user1@ip1 user2@ip2
 #
-# Cases (cnagent_integtest.md, Cases): smoke, redund, teardown, thinbm,
-# clone_xfer, restart; `teardown`, the teardown-by-sweep case, injects the
+# Cases (cnagent_integtest.md, Cases): smoke, redund, repair, teardown,
+# thinbm, clone_xfer, restart; `teardown`, the teardown-by-sweep case, injects the
 # faults (a pinned dm device, an iptables partition of the nvme-tcp port, a
 # background writer); case A's `degrade` stage reuses the partition, and
 # `clone_xfer` slows its copy with a token bucket on what the clone's node
@@ -180,7 +180,7 @@ DIAG_CNTLRS=()
 # run fails.
 THROTTLED=0
 
-CASES=(smoke redund teardown thinbm clone_xfer restart)
+CASES=(smoke redund repair teardown thinbm clone_xfer restart)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -1361,6 +1361,18 @@ md_member_fail() {
 	read -r node dmk <<<"$where"
 	mdadm "/dev/$node" --fail "/dev/mapper/$1" >&2 || return 1
 	md_member_read "$1"
+}
+
+# md_member_add <held dm name> <dm name> — adds the dm device <dm name> by
+# hand, with md's failfast flag, to the array that holds <held dm name>,
+# then prints md_member_read's line of it. An array whose every place holds
+# a member in sync holds it without a place.
+md_member_add() {
+	local where node dmk
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	mdadm "/dev/$node" --add --failfast "/dev/mapper/$2" >&2 || return 1
+	md_member_read "$2"
 }
 
 # ctrl_of <nqn> <traddr> — the controller device backing one path, so a dead
@@ -4613,6 +4625,449 @@ case_redund() {
 	dn_drop 2
 	assert_no_residue "$sp"
 	sshv_ok "$hv" "rm -f $WORK/pattern-redund.bin $WORK/probe-redund.bin"
+}
+
+# ---------------------------------------------------------------------------
+# Case R — repair (cnagent_integtest.md, Cases, repair)
+# ---------------------------------------------------------------------------
+
+# req_repair renders one Repair of the A-shaped data group whose bad leg is
+# badleg (architecture.md, Repair): its stage, its abort flag and its new
+# leg, one req_leg.
+req_repair() { # repid stage abort newleg_json badleg
+	printf '{"rep_id": "%s", "grp_id": "%s", "rep_stage": "%s", "new_leg_list": [%s], "bad_leg_id_list": ["%s"], "try_to_abort": %s, "slice_id": "%s"}' \
+		"$(d16 "$1")" "$(d16 "$A_DGRP")" "$2" "$4" "$(d16 "$5")" "$3" \
+		"$(d16 "$A_SLICE")"
+}
+
+# repair_set puts one repair on the A-shaped data group of a request file,
+# named on the group and carried in name_to_repair as a worker's fan-out
+# carries it, or, with the file alone, takes the group's repair away, as a
+# finish or a cancel does.
+repair_set() { # file [name repid stage abort newleg_json badleg]
+	local grp
+	grp=".id_to_slice[\"$(hex16 "$A_SLICE")\"].data_grp_list[0]"
+	if [ $# -eq 1 ]; then
+		req_set "$1" "del($grp.rep_name) | del(.name_to_repair)"
+		return
+	fi
+	req_set "$1" "$grp.rep_name = \"$2\" | .name_to_repair = {\"$2\": $(req_repair "$3" "$4" "$5" "$6" "$7")}"
+}
+
+# rep_verdict prints a reply's verdict on one repair as "<started>
+# <abort_confirmed>", or "none" when the reply carries none (cnagent.md
+# CN28). protojson leaves a false field out, which reads false here.
+rep_verdict() { # json repid
+	jq_of "$1" "(.cntlr_info.rep_id_to_repair_info // {})[\"$(d16 "$2")\"] as \$v | if \$v == null then \"none\" else \"\(\$v.started // false) \(\$v.abort_confirmed // false)\" end"
+}
+
+# grp_reading prints a reply's reading of one group's array as "<whole>
+# <leg ids in sync, ascending, comma separated, in decimal>", or "none"
+# (cnagent.md CN28).
+grp_reading() { # json grpid
+	jq_of "$1" "(.cntlr_info.grp_id_to_grp_info // {})[\"$(d16 "$2")\"] as \$r | if \$r == null then \"none\" else \"\(\$r.whole // false) \((\$r.in_sync_leg_id_list // []) | join(\",\"))\" end"
+}
+
+case_repair() {
+	CASE=repair
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local sp=0x3b2 c1=0x1 c2=0x2 hv=2
+	local nqn="$NQN_IT_PREFIX:r:vol1"
+	local uuid=88888888-8888-4888-8888-888888888888
+	local req1="$WORK/req-repair-cn1.json" req2="$WORK/req-repair-cn2.json"
+	# Two new legs on DN1, the bad leg's DN: X for the aborted repair, Y for
+	# the one that is finished. Ids are never reused, so the second repair
+	# takes a fresh leg.
+	local xleg=0x11 xside=0x12 yleg=0x13 yside=0x14 xrep=0x15 yrep=0x16
+	local out dev want seq rev1 rev2 f grp md1 md1dev md2 bad xname yname
+	local leg2name mrd full wsect outplace want_cmds name vd deadline named
+	diag_cntlr 1 "$sp" "$c1"
+	diag_cntlr 2 "$sp" "$c2"
+	dev=$(host_dev "$uuid")
+	grp=".id_to_slice[\"$(hex16 "$A_SLICE")\"].data_grp_list[0]"
+
+	stage dn "the A-shaped pool's sides and both new legs' sides"
+	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" \
+		"$sp:${A_DLEG[1]}:${A_DSIDE[1]}" "$sp:$xleg:$xside" "$sp:$yleg:$yside"
+	dn_pointers 2 "$sp:${A_MLEG[2]}:${A_MSIDE[2]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "$xleg" "$xside" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "$yleg" "$yside" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+
+	stage cn "the pool with no repair: primary CN1, standby CN2"
+	bump_cn_sync 1
+	out=$(cnctl 1 syncup-cn --revision "${CNREV[1]}" --cntlr "$sp:$c1")
+	assert_cn_info_ok "$out" "repair syncup-cn 1"
+	bump_cn_sync 2
+	out=$(cnctl 2 syncup-cn --revision "${CNREV[2]}" --cntlr "$sp:$c2")
+	assert_cn_info_ok "$out" "repair syncup-cn 2"
+	req_raid1 "$req1" 1 "$sp" "$c1" 0 true "$nqn" "$uuid"
+	req_raid1 "$req2" 2 "$sp" "$c2" 1 false "$nqn" "$uuid"
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" "repair primary"
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair primary"
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "repair primary"
+	# The primary reports, beside its rows, the whole flag and in-sync
+	# list of each group whose row reads OK: the data array created
+	# clean, both legs in sync.
+	assert_eq "$(grp_reading "$out" "$A_DGRP")" \
+		"true $(d16 "${A_DLEG[1]}"),$(d16 "${A_DLEG[2]}")" \
+		"repair primary: the data array's reading"
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "repair standby"
+	assert_eq "$(grp_reading "$out" "$A_DGRP")" none \
+		"repair standby: a standby reads no array"
+	md1=$(cnctl 1 md-name --sp "$sp" --slice-idx 0 --grp-idx 0)
+	md1dev=$(jq_of "$md1" .dev_path)
+	bad=$(cn_dm_name c9 1 "$sp" "${A_DLEG[1]}")
+	leg2name=$(cn_dm_name c9 1 "$sp" "${A_DLEG[2]}")
+	xname=$(cn_dm_name c9 1 "$sp" "$xleg")
+	yname=$(cn_dm_name c9 1 "$sp" "$yleg")
+	host_connect "$hv" 1 "$nqn"
+	host_connect "$hv" 2 "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" 1 optimized 20
+	make_pattern "$hv" "$WORK/pattern-repair.bin" 8
+	want=$(sha_range "$hv" "$WORK/pattern-repair.bin" 8)
+	write_range "$hv" "$WORK/pattern-repair.bin" "$dev" 8
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" "repair readback"
+	wait_legs_probed 1 "$sp" "$c1" 20 "repair primary"
+
+	stage wait "a repair whose bad leg serves waits: its new leg connected, no member"
+	# CN12, A group's repair: every cntlr connects, wraps and probes the new
+	# leg as a spare's; the bad leg serves with an OK row, so the repair
+	# waits and the converge runs no mdadm against the data array.
+	for f in "$req1" "$req2"; do
+		repair_set "$f" rep-x "$xrep" REP_STAGE_CREATED false \
+			"$(req_leg "$xleg" 2 "$(req_side "$xside" 1)")" "${A_DLEG[1]}"
+	done
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair wait"
+	assert_leg_pending "$out" "$xleg" "repair wait: the new leg"
+	assert_eq "$(rep_verdict "$out" "$xrep")" "false false" \
+		"repair wait: the verdict"
+	assert_eq "$(helper 1 "dm_state $xname")" live \
+		"repair wait: the new leg's wrapper"
+	seq=$(helper 1 "cn_events $TRACE")
+	[ "$(event_cnt "$seq" "^dmsetup create $xname ")" != 0 ] ||
+		die "repair wait: no wrapper create of the new leg under this trace"
+	assert_eq "$(event_cnt "$seq" "^mdadm $md1dev ")" 0 \
+		"repair wait: mdadm commands against the data array"
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" leg_id_to_leg "$xleg" "repair wait: the standby's new leg"
+	assert_eq "$(rep_verdict "$out" "$xrep")" none \
+		"repair wait: a standby gives no verdict"
+	wait_legs_probed 1 "$sp" "$c1" 20 "repair wait"
+
+	stage abort "the abort: a new leg md holds without a place is removed, the abort confirmed"
+	# md holds the new leg without a place: added by hand to the whole
+	# array, it has no place to go. A converge whose request carries the
+	# abort flag removes a new leg md holds without a place, failed or not,
+	# before it confirms the abort (cnagent.md CN12).
+	mrd=$(helper 1 "md_member_add $leg2name $xname") ||
+		die "repair abort: adding the new leg by hand failed: $mrd"
+	assert_eq "$(member_field "$mrd" slot)" none \
+		"repair abort: the new leg added to the whole array holds a place: $mrd"
+	for f in "$req1" "$req2"; do
+		repair_set "$f" rep-x "$xrep" REP_STAGE_CREATED true \
+			"$(req_leg "$xleg" 2 "$(req_side "$xside" 1)")" "${A_DLEG[1]}"
+	done
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair abort"
+	assert_eq "$(rep_verdict "$out" "$xrep")" "false true" \
+		"repair abort: the verdict"
+	seq=$(helper 1 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" "^mdadm $md1dev --remove /dev/mapper/$xname\$")" 1 \
+		"repair abort: the new leg's removal"
+	assert_eq "$(event_cnt "$seq" "^mdadm $md1dev --(add|fail) ")" 0 \
+		"repair abort: the abort's converge added or failed a member"
+	# Backed by the verdict, which confirms only when md holds nothing on
+	# the new leg: a read here that fails passes for "not held".
+	if helper 1 "md_member_of $xname" >/dev/null 2>&1; then
+		die "repair abort: md still holds the new leg"
+	fi
+	# The flag first: a converge that finds the new leg no member adds
+	# nothing and confirms the abort again.
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_eq "$(rep_verdict "$out" "$xrep")" "false true" \
+		"repair abort: the verdict of a converge with the flag"
+	seq=$(helper 1 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" "^mdadm $md1dev --add ")" 0 \
+		"repair abort: a converge with the flag added a member"
+	# The cancel takes the repair away: the cntlrs let the new leg go. Its
+	# sweep's disconnect runs off the pass (cnagent.md CN10), so the request
+	# is re-sent while it replies leftover, as the worker re-sends it.
+	for f in "$req1" "$req2"; do repair_set "$f"; done
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	cn_syncup_cntlr 1 "$req1" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 1 "$sp" "$c1" "$rev1" "$req1" 60 "repair cancel cn1"
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 "repair cancel cn2"
+	assert_eq "$(helper 1 "dm_state $xname")" missing \
+		"repair cancel: the new leg's wrapper on cn1"
+
+	stage add "the add: the bad leg that does not serve is failed and removed, then the new leg added and copied onto"
+	# The bad leg stops serving CN1: its side's export moves its optimized
+	# path to CN2, and CN1's path to it reads non-optimized, so the leg is
+	# not available on CN1 (cnagent.md CN12). md learns of it only from an
+	# IO to the member, so it usually still holds the bad leg in its place;
+	# one md has moved out of its place is removed without a fail.
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	leg_wait_ana 1 "$sp" "${A_DLEG[1]}" "${CNID[1]}" 1 non-optimized 20
+	mrd=$(helper 1 "md_member_read $bad") ||
+		die "repair add: md does not hold the bad leg: $mrd"
+	log "  the bad leg before the add: $mrd"
+	outplace=0
+	want_cmds=3
+	if [ "$(member_field "$mrd" slot)" = none ]; then
+		outplace=1
+		want_cmds=2
+	fi
+	for f in "$req1" "$req2"; do
+		repair_set "$f" rep-y "$yrep" REP_STAGE_CREATED false \
+			"$(req_leg "$yleg" 2 "$(req_side "$yside" 1)")" "${A_DLEG[1]}"
+	done
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair add"
+	seq=$(helper 1 "cn_events $TRACE")
+	if [ "$outplace" = 0 ]; then
+		assert_before "$seq" "^mdadm $md1dev --fail /dev/mapper/$bad\$" \
+			"^mdadm $md1dev --remove /dev/mapper/$bad\$" \
+			"repair add: the bad leg failed, then removed"
+	fi
+	assert_before "$seq" "^mdadm $md1dev --remove /dev/mapper/$bad\$" \
+		"^mdadm $md1dev --add --failfast /dev/mapper/$yname\$" \
+		"repair add: the bad leg removed, then the new leg added"
+	assert_eq "$(event_cnt "$seq" "^mdadm $md1dev ")" "$want_cmds" \
+		"repair add: the converge's mdadm commands against the data array"
+	if helper 1 "md_member_of $bad" >/dev/null 2>&1; then
+		die "repair add: md still holds the bad leg"
+	fi
+	# The fan-out carries the repair to the standby too, which connects
+	# and wraps the new leg and gives no verdict (cnagent.md CN12), so it
+	# holds the new leg before the failover below.
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" leg_id_to_leg "$yleg" "repair add: the standby's new leg"
+	assert_eq "$(rep_verdict "$out" "$yrep")" none \
+		"repair add: a standby gives no verdict"
+	md_wait_clean 1 "$sp" "$c1" 120 "repair add" "$A_DGRP"
+	# A fresh new leg is copied whole: the sectors md wrote to it are at
+	# least the array's data region.
+	mrd=$(helper 1 "md_member_read $yname") ||
+		die "repair add: md does not hold the new leg: $mrd"
+	member_in_sync "$mrd" ||
+		die "repair add: the new leg reads $mrd after the copy, want in sync"
+	wsect=$(member_field "$mrd" wsect)
+	full=$((RAID1_EXT2_DATA * BLOCK_SIZE / 512))
+	log "  the copy wrote $wsect sectors to the new leg; the data region is $full"
+	[ "$wsect" -ge "$full" ] ||
+		die "repair add: the copy wrote $wsect sectors to the new leg, less" \
+			"than the data region's $full"
+	out=$(cnctl 1 check-cntlr --fresh --revision "$rev1" --show-info \
+		--sp "$sp" --cntlr "$c1")
+	assert_eq "$(rep_verdict "$out" "$yrep")" "true false" \
+		"repair add: the verdict once the new leg holds a place"
+	assert_eq "$(grp_reading "$out" "$A_DGRP")" \
+		"true $(d16 "${A_DLEG[2]}"),$(d16 "$yleg")" \
+		"repair add: the data array's reading after the copy"
+
+	stage started "the repair STARTED: no mdadm against the data array"
+	# The worker moves the repair to STARTED on that verdict. The stage's
+	# own trace id keeps the add's commands out of the count.
+	for f in "$req1" "$req2"; do
+		repair_set "$f" rep-y "$yrep" REP_STAGE_STARTED false \
+			"$(req_leg "$yleg" 2 "$(req_side "$yside" 1)")" "${A_DLEG[1]}"
+	done
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	seq=$(helper 1 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" "^mdadm $md1dev ")" 0 \
+		"repair started: mdadm commands against the data array"
+	assert_eq "$(rep_verdict "$out" "$yrep")" "true false" \
+		"repair started: the verdict"
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" leg_id_to_leg "$yleg" \
+		"repair started: the standby's new leg"
+	assert_eq "$(rep_verdict "$out" "$yrep")" none \
+		"repair started: a standby gives no verdict"
+
+	stage failover "a failover assembles the new leg beside leg 2, the bad leg serving neither cntlr"
+	# Host IO is quiesced from here until the new primary reports optimized.
+	req_set "$req1" '.cntlr.primary = false'
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "repair demoted"
+	# Every side moves its primary to CN2 but the bad leg's, which moves
+	# back to CN1: CN2's path to it reads non-optimized, so the bad leg is
+	# no candidate of CN2's assembly.
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 1 "$sp" "$yleg" "$yside" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	leg_wait_ana 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 optimized 20
+	leg_wait_ana 2 "$sp" "${A_MLEG[2]}" "${CNID[2]}" 2 optimized 20
+	leg_wait_ana 2 "$sp" "${A_DLEG[2]}" "${CNID[2]}" 2 optimized 20
+	leg_wait_ana 2 "$sp" "$yleg" "${CNID[2]}" 1 optimized 20
+	leg_wait_ana 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 non-optimized 20
+	req_set "$req2" '.cntlr.primary = true'
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" "repair promoted"
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair promoted"
+	seq=$(helper 2 "cn_events $TRACE")
+	md2=$(cnctl 2 md-name --sp "$sp" --slice-idx 0 --grp-idx 0)
+	# CN12: the candidates are the available leg_list legs with a
+	# superblock, then the open repair's new leg with one.
+	assert_eq "$(event_exact_cnt "$seq" "mdadm $(md_assemble_args \
+		"$(jq_of "$md2" .dev_path)" "$(jq_of "$md2" .array_name)" \
+		"/dev/mapper/$(cn_dm_name c9 2 "$sp" "${A_DLEG[2]}")" \
+		"/dev/mapper/$(cn_dm_name c9 2 "$sp" "$yleg")")")" 1 \
+		"repair promote: the data array started from leg 2 and the new leg"
+	assert_eq "$(event_cnt "$seq" '^mdadm --create ')" 0 \
+		"repair promote: no --create over existing superblocks"
+	assert_eq "$(rep_verdict "$out" "$yrep")" "true false" \
+		"repair promote: the verdict"
+	host_wait_ana "$hv" "$nqn" 2 optimized 30
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" "repair post-failover readback"
+	# The data is on the new leg: with leg 2 failed by hand the array reads
+	# from the new leg alone.
+	mrd=$(helper 2 "md_member_fail $(cn_dm_name c9 2 "$sp" "${A_DLEG[2]}")") ||
+		die "repair failover: failing leg 2 by hand failed: $mrd"
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
+		"repair failover: the readback from the new leg alone"
+	# The verdict names leg 2 once md has moved it out of its slot and the
+	# leg's row reads OK, and the re-sent SyncupCntlr puts it back
+	# (cnagent.md CN12, CN30). CN2's probers started at the promotion, and a
+	# leg row reads PENDING until a prober's first round (CN11): a round
+	# before that names nothing and reads clean, as does any round in which
+	# leg 2's row does not read OK. So a clean round proves no put-back, and
+	# the wait ends only once md holds leg 2 in a slot again, not faulty:
+	# each round that names leg 2 re-sends the SyncupCntlr, as the worker
+	# does (dnv-worker.md RW4), and CN2 runs no converge but those re-sends,
+	# so the put-back can only come from one of them.
+	name=$(cn_dm_name c9 2 "$sp" "${A_DLEG[2]}")
+	named=0
+	vd=""
+	deadline=$((SECONDS + 90))
+	while :; do
+		mrd=$(helper 2 "md_member_read $name" 2>/dev/null) || mrd="not held"
+		case "$mrd" in
+		"not held" | *" slot=none "* | *faulty*) ;;
+		*) break ;;
+		esac
+		vd=$(check_verdict 2 "$sp" "$c2" "$rev2")
+		case "$vd" in
+		"4 "*"md_member:$name"*)
+			named=1
+			cn_syncup_cntlr 2 "$req2" >/dev/null
+			;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "repair failover: after 90 s md holds leg 2 as '$mrd' and" \
+				"CN2's last check round reads '$vd'"
+		sleep 1
+	done
+	[ "$named" = 1 ] ||
+		die "repair failover: leg 2 is back in a slot ($mrd) with no check" \
+			"round naming md_member:$name"
+	md_wait_clean 2 "$sp" "$c2" 120 "repair put back" "$A_DGRP"
+	vd=$(check_verdict 2 "$sp" "$c2" "$rev2")
+	case "$vd" in
+	"0 "*) ;;
+	*) die "repair put back: CN2's check round reads '$vd' once the array" \
+		"is whole, want clean" ;;
+	esac
+
+	stage finish "the finish: the new leg in the bad leg's place, the retired leg let go"
+	# FinishRepair puts the new leg at the bad leg's leg_idx and keeps the
+	# bad leg as a retired leg, which no cntlr connects and whose side stays
+	# on DN1 (architecture.md, Repair). md holds nothing on it, so the
+	# converges let its connection and wrapper go and leave the array alone.
+	for f in "$req1" "$req2"; do
+		req_set "$f" "$grp.leg_list[0] = $(req_leg "$yleg" 0 "$(req_side "$yside" 1)")"
+		repair_set "$f"
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 "repair finish cn2"
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	cn_syncup_cntlr 1 "$req1" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 1 "$sp" "$c1" "$rev1" "$req1" 60 "repair finish cn1"
+	seq=$(helper 2 "cn_events $TRACE")
+	[ "$(event_cnt "$seq" '^dmsetup ')" != 0 ] ||
+		die "repair finish: no dmsetup command of cn2 under this trace"
+	assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
+		"repair finish: cn2's mdadm commands"
+	assert_eq "$(helper 2 "dm_state $(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")")" \
+		missing "repair finish: the retired leg's wrapper on cn2"
+	out=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --show-info \
+		--sp "$sp" --cntlr "$c2")
+	assert_eq "$(grp_reading "$out" "$A_DGRP")" \
+		"true $(d16 "${A_DLEG[2]}"),$(d16 "$yleg")" \
+		"repair finish: the data array's reading"
+	assert_eq "$(rep_verdict "$out" "$yrep")" none \
+		"repair finish: no verdict once the repair is gone"
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" "repair finish readback"
+
+	stage check "converge check rounds on both CNs"
+	converge_check 1 "$sp" "$c1" "$rev1"
+	converge_check 2 "$sp" "$c2" "$rev2"
+
+	stage teardown "empty cntlr lists, then empty side lists"
+	host_disconnect "$hv" "$nqn"
+	cn_drop 1
+	cn_drop 2
+	dn_drop 1
+	dn_drop 2
+	assert_no_residue "$sp"
+	sshv_ok "$hv" "rm -f $WORK/pattern-repair.bin"
 }
 
 # ---------------------------------------------------------------------------

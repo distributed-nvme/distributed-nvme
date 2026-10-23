@@ -1647,8 +1647,9 @@ func (s *CnAgentServer) unownedSrcNqns(
 // converge passes no reading and lists the node itself (enumerateCn).
 //
 // putBack are the md members the verdict names beside the leftovers, by dm
-// name, each a member the converge would put back or add (putBackNames,
-// CN30): what the call's probe read, so nothing here reads them again. A
+// name, each a member the converge would put back, add or remove for a
+// repair (putBackNames, CN30): what the call's probe read, so nothing here
+// reads them again. A
 // converge passes none: it has just tried to put them back, and its rows say
 // how that went.
 func (s *CnAgentServer) sweepCntlr(

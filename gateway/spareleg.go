@@ -44,20 +44,12 @@ import (
 // greppable.
 const opDeleteSpareLeg = "DeleteSpareLeg"
 
-// spareGrpLocation is where openGrpForSpareLeg found the group: in a slice,
-// with Clone nil, or as a clone's clone meta group, with Clone set and Slice
-// empty. Grp is the group either way.
-type spareGrpLocation struct {
-	Grp   *pb.Group
-	Slice sliceLocation
-	Clone *cloneLocation
-}
-
 // openGrpForSpareLeg is the opening the three spare-leg RPCs share: resolve
-// the cluster and the SP, check the token, then locate the group by id across
-// every slice of the SP (GW5 → GW6, in that order) and, only when no slice
-// holds it, across the clones' clone meta groups, so a slice's group never
-// depends on the clone keys. A clone being deleted refuses all three
+// the cluster and the SP, check the token, then locate the group by id
+// (locateGrp) across every slice of the SP (GW5 → GW6, in that order) and,
+// only when no slice holds it, across the clones' clone meta groups, so a
+// slice's group never depends on the clone keys. A clone being deleted
+// refuses all three
 // FAILED_PRECONDITION, as loadLiveClone refuses the clone RPCs that address
 // one (dnv-worker.md CLD1): its group goes back to its DNs in the clone drain's
 // final transaction, and a spare made, removed or switched in for it would
@@ -78,32 +70,19 @@ func openGrpForSpareLeg(
 	spName string,
 	tok *pb.SpRev,
 	grpId uint64,
-) (*spScope, spareGrpLocation, error) {
+) (*spScope, grpLocation, error) {
 	sc, err := openSp(stm, clusterName, spName, tok)
 	if err != nil {
-		return nil, spareGrpLocation{}, err
+		return nil, grpLocation{}, err
 	}
-	slices, err := loadSlices(stm, sc.Cid, sc.Conf)
+	loc, err := locateGrp(stm, sc, spName, grpId)
 	if err != nil {
-		return nil, spareGrpLocation{}, err
+		return nil, grpLocation{}, err
 	}
-	if loc, ok := findGrp(sc.Conf, slices, grpId); ok {
-		return sc, spareGrpLocation{Grp: loc.Grp, Slice: loc}, nil
+	if err := refuseDeletingClone(loc); err != nil {
+		return nil, grpLocation{}, err
 	}
-	clones, err := loadClones(stm, sc.Cid, sc.Conf)
-	if err != nil {
-		return nil, spareGrpLocation{}, err
-	}
-	cloneLoc, ok := findCloneGrp(sc.Conf, clones, grpId)
-	if !ok {
-		return nil, spareGrpLocation{}, errNotFound(
-			"group %d not found in storage pool %q", grpId, spName)
-	}
-	if cloneLoc.Clone.GetDeleting() {
-		return nil, spareGrpLocation{}, errPrecondition(
-			"clone %q is being deleted", cloneLoc.CloneName)
-	}
-	return sc, spareGrpLocation{Grp: cloneLoc.Grp, Clone: &cloneLoc}, nil
+	return sc, loc, nil
 }
 
 // snapshotGrpForSpareLeg runs openGrpForSpareLeg in a read-only snapshot: the
@@ -123,9 +102,9 @@ func (s *Server) snapshotGrpForSpareLeg(
 	spName string,
 	tok *pb.SpRev,
 	grpId uint64,
-) (*spScope, spareGrpLocation, error) {
+) (*spScope, grpLocation, error) {
 	var sc *spScope
-	var loc spareGrpLocation
+	var loc grpLocation
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 		var err error
 		sc, loc, err = openGrpForSpareLeg(
@@ -133,7 +112,7 @@ func (s *Server) snapshotGrpForSpareLeg(
 		return err
 	})
 	if err != nil {
-		return nil, spareGrpLocation{}, mapStmErr(err)
+		return nil, grpLocation{}, mapStmErr(err)
 	}
 	return sc, loc, nil
 }
@@ -203,13 +182,16 @@ func removeSpareLeg(list []*pb.Leg, legId uint64) []*pb.Leg {
 // mapModelErr and re-runs the whole unit, plan and scan included —
 // re-running only the op would re-validate the same dead pick for ever.
 //
-// The two refusals below the snapshot are checked twice on purpose: the model
-// op applies them again inside its STM, where they are authoritative, but a
-// group that is RedundNone or already full would otherwise pay for a
-// candidate scan whose result the op can only throw away. The pre-check is
-// also what gives them the codes of architecture.md, Spare legs —
-// INVALID_ARGUMENT and RESOURCE_EXHAUSTED — since model raises every one of
-// its own preconditions as FAILED_PRECONDITION. The full list is the one the
+// The three refusals below the snapshot are checked twice on purpose: the
+// model op applies them again inside its STM, where they are authoritative,
+// but a group that is RedundNone, has a repair or is already full would
+// otherwise pay for a candidate scan whose result the op can only throw
+// away. The pre-check is also what gives two of them the codes of
+// architecture.md, Spare legs — INVALID_ARGUMENT and RESOURCE_EXHAUSTED —
+// since model raises every one of its own preconditions as
+// FAILED_PRECONDITION, which is the code of the group with a repair: a spare
+// leg and the repair's new leg would race for one place in the group's
+// array, so a group has one of the two at a time. The full list is the one the
 // op's STM can still meet after the pre-check passed, when another create
 // fills it in between, and its reason, model.ReasonSpareListFull, is answered
 // RESOURCE_EXHAUSTED as well (GW7).
@@ -251,6 +233,12 @@ func (s *Server) CreateSpareLeg(
 				"group %d is RedundNone: there is no redundancy to repair",
 				req.GetGrpId())
 		}
+		if repName := loc.Grp.GetRepName(); repName != "" {
+			return errPrecondition(
+				"group %d has the repair %q: a spare leg and the repair "+
+					"would race for one place in its array",
+				req.GetGrpId(), repName)
+		}
 		if len(loc.Grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
 			return spareListFull(req.GetGrpId())
 		}
@@ -265,8 +253,10 @@ func (s *Server) CreateSpareLeg(
 		// tier 1 of architecture.md, Per-operation allocation, read outside
 		// every transaction because a location is immutable
 		// (architecture.md, Disk nodes).
-		planBlack := grpDnAddrs(loc.Grp)
-		excludeLocs, err := grpDnLocations(ctx, s.cli, sc.Cid, loc.Grp)
+		// The group has no repair here, the refusal above, so its DN set is
+		// its legs' and its spares'.
+		planBlack := grpDnAddrs(loc.Grp, nil)
+		excludeLocs, err := grpDnLocations(ctx, s.cli, sc.Cid, planBlack)
 		if err != nil {
 			return err
 		}

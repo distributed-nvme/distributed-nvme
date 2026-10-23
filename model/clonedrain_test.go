@@ -531,24 +531,32 @@ func TestFinishCloneDeleteReadsNoCn(t *testing.T) {
 // TestFinishCloneDeleteAtTheCeiling commits the final STM at its widest
 // shape against the real etcd this package runs with
 // --max-txn-ops=common.EtcdMaxTxnOps: a clone meta group of
-// MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares, each side on a DN of
-// its own, so every side given back is a read and a write of its DN, of its
-// DnRev, and a delete and a put of its capacity key. Every DN is credited,
-// and the whole release is one transaction with the clone's removal.
+// MaxAllocLegPerGrp legs, MaxSpareLegPerGrp spares and MaxRetiredLegPerGrp
+// retired legs, each side on a DN of its own, so every side given back is a
+// read and a write of its DN, of its DnRev, and a delete and a put of its
+// capacity key, and every retired leg a read and a delete of its key. Every
+// DN is credited, and the whole release is one transaction with the clone's
+// removal. A group with a repair has no spare, and its narrower shape is
+// TestFinishCloneDeleteAtTheCeilingWithARepair's.
 func TestFinishCloneDeleteAtTheCeiling(t *testing.T) {
 	env := newOpsEnv(t)
 	env.putDrainClone(true, nil)
 	var dnAddrs []string
-	for idx := 0; idx < common.MaxAllocLegPerGrp+common.MaxSpareLegPerGrp; idx++ {
+	for idx := 0; idx < common.MaxAllocLegPerGrp+common.MaxSpareLegPerGrp+
+		common.MaxRetiredLegPerGrp; idx++ {
 		addrPort := fmt.Sprintf("ceil-dn-%d:9000", idx)
 		env.putDn(addrPort, uint64(910+idx), uint32(idx), opsDnFree)
 		dnAddrs = append(dnAddrs, addrPort)
 	}
-	grp := cloneGrpAt(opsCloneGrpId, true, dnAddrs...)
+	legCnt := common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
+	grp := cloneGrpAt(opsCloneGrpId, true, dnAddrs[:legCnt]...)
 	grp.SpareLegList = grp.LegList[common.MaxAllocLegPerGrp:]
 	grp.LegList = grp.LegList[:common.MaxAllocLegPerGrp]
-	env.setCloneGrp(drainCloneName, grp)
 	env.chargeGrp(grp)
+	for idx, addrPort := range dnAddrs[legCnt:] {
+		env.putCloneRetired(grp, uint64(2011+2*idx), addrPort)
+	}
+	env.setCloneGrp(drainCloneName, grp)
 
 	if err := env.finishDrainClone(); err != nil {
 		t.Fatalf("a maximum-shape FinishCloneDelete (%d sides on as many "+

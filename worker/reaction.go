@@ -1,5 +1,7 @@
 // The automatic reactions of dnv-worker.md (AR1-AR10), run by the sp
-// coordinator (RW14) as one PASS per SP per cntlr_interval (AR1).
+// coordinator (RW14) as one PASS per SP per cntlr_interval (AR1), with the
+// two steps of the pass that follow a repair, its stage moves (AR11) and the
+// retire timer (AR12).
 //
 // A pass is stateless by construction, but for two records: it starts from a
 // fresh model.LoadSp snapshot, the in-memory CntlrInfo the PRIMARY cntlr's
@@ -38,6 +40,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,13 +107,15 @@ const (
 	// flight and is left alone".
 	reasonTwoSides = "leg_has_two_sides"
 	// reasonNoHealthyLeg is AR8's healthy-leg precondition, on every group:
-	// no other leg of the group's leg_list is free of a health epoch, so leg
-	// repair neither switches nor creates a spare for it.
+	// no other leg of the group's leg_list is free of a health epoch and
+	// held in sync by the current primary's latest report, so leg repair
+	// neither switches nor creates a spare for it.
 	reasonNoHealthyLeg = "no_healthy_leg"
-	// The grp_row_ reasons are AR8 step 1's gate: the group's row in the
-	// primary's latest report (grp_id_to_md_raid) does not read
-	// RES_STATUS_OK, the one status that says the group's array runs
-	// (cnagent.md CN28), and the switch waits. One
+	// The grp_row_ reasons are AR8 step 1's gate, which the retire timer
+	// reads as well (AR12): the group's row in the primary's latest report
+	// (grp_id_to_md_raid) does not read RES_STATUS_OK, the one status that
+	// says the group's array runs (cnagent.md CN28), and the switch, or the
+	// timer's delete, waits. One
 	// reason per status of the row, and grp_row_absent for a report that
 	// holds no row of the group — a standby's report, which the pass reads
 	// from a promotion's hand-over until its reply (primaryInfo), holds
@@ -124,8 +129,9 @@ const (
 	// reasonGrpRowStale is the same gate on a row that reads OK in a report
 	// from an observation older than the snapshot: the report's revision is
 	// below the snapshot's SpRevision, so the row may be from before the
-	// last change of the group's leg_list, and the switch waits for the
-	// primary's report of an observation made at that revision.
+	// last change of the group's leg_list, and the switch, or the timer's
+	// delete, waits for the primary's report of an observation made at
+	// that revision.
 	reasonGrpRowStale = "grp_row_stale"
 	// reasonMetaLadderCap is the dm-thin metadata ceiling of architecture.md,
 	// GrowSlice (model's metaSizeCap), reached before model.GrowSlice is even
@@ -142,6 +148,43 @@ const (
 	// not complete — as opposed to a precondition that did not hold. The
 	// record then carries an "error" attribute as well.
 	reasonOpFailed = "op_failed"
+	// reasonGrpHasRepair is AR8's skip of a group that has a repair: a spare
+	// and the repair's new leg would race for one place in the group's array
+	// (architecture.md, Repair). It is model's string, for the reason
+	// reasonGrowPending is: the spare creates refuse such a group with it.
+	reasonGrpHasRepair = model.ReasonGrpHasRepair
+)
+
+// The records of the two pass steps of a repair (dnv-worker.md, Repairs; Log
+// records): a stage move of a repair, and the retire timer's delete of a
+// retired leg. Neither is a reaction, so neither is logged as one.
+const (
+	msgRepairStageMoved   = "repair stage moved"
+	msgRepairStageSkipped = "repair stage skipped"
+	msgRetiredLegDeleted  = "retired leg deleted"
+	msgRetiredLegKept     = "retired leg kept"
+)
+
+// The "reason" attribute of `repair stage skipped` and `retired leg kept`,
+// beside a model.ErrPrecondition's own Reason with the op that refused, and
+// reasonOpFailed for any other failure of the op.
+const (
+	// reasonCloneDeleting is a repair or a retired leg of a deleting
+	// clone's group, which the clone drain's final transaction gives back
+	// with the group (CLD9) and every repair op refuses (MD6).
+	reasonCloneDeleting = "clone_deleting"
+	// reasonAbortFlagClear is a verdict of abort confirmed on a repair whose
+	// stored abort flag is clear, which SetRepairStage refuses (MD6).
+	reasonAbortFlagClear = "abort_flag_clear"
+	// reasonGrpNotFound is a retired leg whose group the pass's snapshot
+	// does not hold in the parent the record names.
+	reasonGrpNotFound = "grp_not_found"
+	// reasonGrpNotWhole is the retire timer's hold on a group whose whole
+	// flag the current primary's latest report does not set.
+	reasonGrpNotWhole = "grp_not_whole"
+	// reasonGrpLegUnhealthy is the retire timer's hold on a group a leg of
+	// whose leg_list, or that leg's side, has an err_epoch.
+	reasonGrpLegUnhealthy = "grp_leg_unhealthy"
 )
 
 // Non-normative records of the pass. The strings above (dnv-worker.md, Log
@@ -294,6 +337,33 @@ type reactionOps interface {
 		spareLegId uint64,
 		targetLegId uint64,
 	) error
+	// setRepairStage is the stage move of a repair (architecture.md, Repair;
+	// MD6's SetRepairStage): the CREATED repair repName that still carries
+	// repId, the rep_id the primary's verdict named, moves to stage, STARTED
+	// or ABORTED.
+	setRepairStage(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		repName string,
+		repId uint64,
+		stage pb.RepStage,
+	) error
+	// deleteRetiredLeg is the retire timer's delete (MD6's DeleteRetiredLeg)
+	// of the retired leg legId, which the op refuses unless the pool's
+	// SpRev still holds expectRev, the revision the pass's snapshot read.
+	deleteRetiredLeg(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		expectRev uint64,
+		legId uint64,
+		cc *pb.ClusterConf,
+	) error
 	// drainSpCntlrs is the sp drain's D1 (SPD9): every cntlr of a latched SP
 	// in one STM. It returns how many it removed.
 	drainSpCntlrs(
@@ -302,6 +372,29 @@ type reactionOps interface {
 		shard uint32,
 		spId uint64,
 		spName string,
+	) (int, error)
+	// drainSpRepairs is one batch of the sp drain's repair phase (SPD15):
+	// the repairs repNames, of one parent, which the caller cut from its
+	// snapshot (model.SpDrainRepairBatch). It returns how many it deleted.
+	drainSpRepairs(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		repNames []string,
+		cc *pb.ClusterConf,
+	) (int, error)
+	// drainSpRetiredLegs is one batch of the retired-leg phase (SPD15), cut
+	// by model.SpDrainRetiredLegBatch. It returns how many it deleted.
+	drainSpRetiredLegs(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		legIds []uint64,
+		cc *pb.ClusterConf,
 	) (int, error)
 	// drainSpSlice is one D2 batch (SPD10, SPD11): up to MaxDelGrpPerTxn
 	// groups of ONE slice. It returns how many groups it removed and whether
@@ -524,6 +617,36 @@ func (o *modelReactionOps) switchCloneSpareLeg(
 	)
 }
 
+func (o *modelReactionOps) setRepairStage(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	stage pb.RepStage,
+) error {
+	return model.SetRepairStage(
+		ctx, o.cli, cid, shard, spId, spName, repName, repId, stage,
+	)
+}
+
+func (o *modelReactionOps) deleteRetiredLeg(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	legId uint64,
+	cc *pb.ClusterConf,
+) error {
+	return model.DeleteRetiredLeg(
+		ctx, o.cli, cid, shard, spId, spName, expectRev, legId, cc,
+	)
+}
+
 func (o *modelReactionOps) drainSpCntlrs(
 	ctx context.Context,
 	cid uint64,
@@ -532,6 +655,34 @@ func (o *modelReactionOps) drainSpCntlrs(
 	spName string,
 ) (int, error) {
 	return model.DrainSpCntlrs(ctx, o.cli, cid, shard, spId, spName)
+}
+
+func (o *modelReactionOps) drainSpRepairs(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	repNames []string,
+	cc *pb.ClusterConf,
+) (int, error) {
+	return model.DrainSpRepairs(
+		ctx, o.cli, cid, shard, spId, spName, repNames, cc,
+	)
+}
+
+func (o *modelReactionOps) drainSpRetiredLegs(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	legIds []uint64,
+	cc *pb.ClusterConf,
+) (int, error) {
+	return model.DrainSpRetiredLegs(
+		ctx, o.cli, cid, shard, spId, spName, legIds, cc,
+	)
 }
 
 func (o *modelReactionOps) drainSpSlice(
@@ -591,7 +742,7 @@ func (o *modelReactionOps) finishCloneDelete(
 // The reactor: the little state a stateless pass still keeps
 // ---------------------------------------------------------------------------
 
-// reactor is the sp coordinator's reaction half (AR1-AR10): the model surface,
+// reactor is the sp coordinator's reaction half (AR1-AR12): the model surface,
 // plus the two memos that exist only to keep the log honest and the two records
 // AR5 and AR7 decide by. Apart from AR10's memo of the coordinator's own
 // verdicts (verdictMemo), which gates every threshold reaction, no other
@@ -758,8 +909,9 @@ type judgedSet struct {
 
 // snapshot copies the memo for one pass, after it has dropped every object
 // the pass's snapshot no longer lists — the legs and sides of its slices and
-// of its clones' clone meta groups are the ones it lists (judgedGrps): ids
-// are never reused within an SP, so such an entry could only grow the memo.
+// of its clones' clone meta groups, the new legs of its repairs with their
+// sides and its retired sides are the ones it lists (judgedObjs): ids are
+// never reused within an SP, so such an entry could only grow the memo.
 func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 	out := judgedSet{
 		cntlrs: make(map[uint64]bool),
@@ -770,24 +922,7 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 	if m == nil {
 		return out
 	}
-	legs := make(map[uint64]bool)
-	sides := make(map[sideKey]bool)
-	for _, grp := range judgedGrps(state) {
-		for _, list := range [][]*pb.Leg{
-			grp.GetLegList(),
-			grp.GetSpareLegList(),
-		} {
-			for _, leg := range list {
-				legs[leg.GetLegId()] = true
-				for _, side := range leg.GetSideList() {
-					sides[sideKey{
-						legId:  leg.GetLegId(),
-						sideId: side.GetSideId(),
-					}] = true
-				}
-			}
-		}
-	}
+	legs, sides := judgedObjs(state)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for cntlrId := range m.cntlrs {
@@ -805,14 +940,14 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 		out.runs[cntlrId] = run
 	}
 	for legId := range m.legs {
-		if !legs[legId] {
+		if _, ok := legs[legId]; !ok {
 			delete(m.legs, legId)
 			continue
 		}
 		out.legs[legId] = true
 	}
 	for key := range m.sides {
-		if !sides[key] {
+		if _, ok := sides[key]; !ok {
 			delete(m.sides, key)
 			continue
 		}
@@ -842,8 +977,8 @@ type spPass struct {
 	// info is the primary's latest CntlrInfo (pool usage for AR6, spare
 	// readiness and the group rows for AR8, HL2's row classes for AR5 and
 	// AR7); nil when its child has never reported one. infoRev is the
-	// revision of the observation it reports, which AR8 step 1's gate
-	// compares with the snapshot's SpRevision (grpRowHold).
+	// revision of the observation it reports, which AR8 step 1's gate and
+	// the retire timer compare with the snapshot's SpRevision (grpRowHold).
 	info    *pb.CntlrInfo
 	infoRev uint64
 	// failoverCand is AR5's election, computed once because AR7's
@@ -937,9 +1072,18 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		return
 	}
 	w.confRefusal.cc = ""
+	// dnv-worker.md AR11: the stage moves are a step of the pass, not
+	// reactions. They run after the gates and before AR3's suppression, so
+	// at every sp_level, since a move only follows the primary's report and
+	// an operator may need to finish a repair at a level where the operator
+	// is in charge (AR3); none of them is the pass's one action (AR2).
+	w.moveRepairStages(ctx, p)
 	if w.reactionSuppressed(ctx, p) {
 		return
 	}
+	// The retire timer runs only where reactions run (AR3), and is not the
+	// pass's one action either.
+	w.retireOldLeg(ctx, p)
 	// AR2: the first applicable reaction runs and the pass ends.
 	switch {
 	case w.tryFailover(ctx, p):
@@ -982,8 +1126,9 @@ func (w *spWorker) loadPassState(ctx context.Context) (*model.SpState, bool) {
 //
 // The CLUSTER's stored conf is checked before the pass is built
 // (architecture.md, Common validation), so an unusable ladder produces no
-// candidate scan and no model op. The sp drain needs it too — every D2 batch
-// maintains a DN capacity key, whose bin index comes from that ladder — so
+// candidate scan and no model op. The sp drain needs it too — every repair,
+// retired-leg and D2 batch maintains a DN capacity key, whose bin index
+// comes from that ladder — so
 // the gate sits ahead of both of the pass's branches. A conf that does not
 // validate is refused through refuseReactionConf. The callers clear that
 // refusal's memo once every gate of theirs has passed, and this gate never
@@ -1076,11 +1221,13 @@ func failoverEligible(cntlr *pb.Cntlr) bool {
 // block) AR8 step 1 reads as a spare's readiness. The test is on the plan the
 // child drives, not on its info: from the hand-over until the reply to the
 // promotion, the info is still the standby's last report — the promotion's
-// own round trip. That report holds no group row, a standby having no group
-// (cnagent.md CN12), so AR8 step 1's gate (grpRowHold) holds the switch
-// through that window too, whatever the standby's leg row of a spare reads;
+// own round trip. That report holds no group row and no reading of a group,
+// a standby having no group (cnagent.md CN12), so AR8's healthy-leg test
+// (otherLegHealthy) holds the switch through that window too, ahead of step
+// 1's gate (grpRowHold), whatever the standby's leg row of a spare reads;
 // and from the failover's commit on, the old primary's last report, whose
-// group rows may still read OK, is never the one the gate reads.
+// group rows and readings may still say the array runs, is never the one
+// the pass reads.
 //
 // It is a snapshot, not the live message: the child keeps folding replies into
 // its info on its own goroutine while the pass runs on the coordinator's.
@@ -1862,14 +2009,17 @@ func (t *repairTarget) ids() []slog.Attr {
 // with the smallest leg_id, across the slices' groups and the clone meta
 // groups alike. It reports whether the pass ends here.
 //
-// AR8's six holds — "the leg has exactly one side" (this leg), a group with
-// no other leg of its leg_list free of a health epoch, step 1's gate on the
+// AR8's seven holds — "the leg has exactly one side" (this leg), a group
+// that has a repair, a group with no other leg of its leg_list free of a
+// health epoch and held in sync, step 1's gate on the
 // group's row, step 2's wait for a pending spare, step 4's full spare list
 // and step 3's spare still unprovisioned (this group) — are part of the
 // candidate test, not reasons to end the pass. Each is a property of ONE leg
 // or ONE group, and each can hold for a very long time: a two-sided leg has
-// a user migration in flight (hours), a group whose other leg_list legs are
-// unhealthy stays so until one of them answers again, a group whose row
+// a user migration in flight (hours), a group with an operator's repair waits
+// for the operator to finish or cancel it, a group whose other leg_list legs
+// are unhealthy or not in sync stays so until one of them answers again and
+// md holds it in sync, a group whose row
 // does not read OK stays so until it does — its array stopped or broken
 // until its legs come back or an operator acts, or held by cnagent.md CN12's
 // in-sync guard — since the worker switches no spare into it, a row from a
@@ -1906,22 +2056,40 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			)
 			continue
 		}
-		if !otherLegHealthy(target) {
+		if repName := target.grp.GetRepName(); repName != "" {
+			// AR8: a group that has a repair is left to it, on every pass,
+			// which is the wait of an operator's open repair: a spare and
+			// the repair's new leg would race for one place in the array,
+			// so the group holds one of the two at a time (architecture.md,
+			// Repair), and the spare creates refuse it too (MD6). The worker
+			// drives no repair of its own here (AR11). The next candidate,
+			// in another group, may still be repairable.
+			w.reactionSkipped(ctx, reactionSpareCreate, reasonGrpHasRepair,
+				withAttr(ids, slog.String("rep_name", repName))...,
+			)
+			continue
+		}
+		if !otherLegHealthy(p, target) {
 			// AR8's healthy-leg precondition, on every group: every other
-			// leg of the group's leg_list has a health epoch, so a switch or
+			// leg of the group's leg_list has a health epoch or is not held
+			// in sync by the current primary's latest report, so a switch or
 			// a create would start replacing the last legs that may still
 			// hold what was written on the group with fresh spares holding
-			// none of it. md learns that a member is dead only from IO to
-			// it, so an idle array whose legs are all dead still runs and
-			// its row reads OK, which step 1's gate lets through; what the
-			// cn agent then does with such a switch is cnagent.md CN12's
-			// in-sync guard and its Known limits. The leg epochs come from
-			// the primary's probe of each leg, which runs with or without
-			// IO, so this test sees what the row does not; and a primary
-			// whose own network fails, which reads every leg unhealthy at
-			// once, leaves the group as it is too. The group waits until
-			// one of those legs answers again; the next candidate, in
-			// another group, may still be repairable.
+			// none of it. A leg with no health epoch can still be half
+			// copied — a spare switched in, a new leg finished while md
+			// copies — and switching out the only leg in sync loses the
+			// group at the next failover. md learns that a member is dead
+			// only from IO to it, so an idle array whose legs are all dead
+			// still runs and its row reads OK, which step 1's gate lets
+			// through; what the cn agent then does with such a switch is
+			// cnagent.md CN12's in-sync guard and its Known limits. The leg
+			// epochs come from the primary's probe of each leg, which runs
+			// with or without IO, so this test sees what the row does not;
+			// and a primary whose own network fails, which reads every leg
+			// unhealthy at once, leaves the group as it is too. The group
+			// waits until one of those legs answers again and md holds it
+			// in sync; the next candidate, in another group, may still be
+			// repairable.
 			w.reactionSkipped(
 				ctx, reactionSpareCreate, reasonNoHealthyLeg, ids...,
 			)
@@ -2068,13 +2236,19 @@ func repairCandidates(p *spPass) []*repairTarget {
 
 // otherLegHealthy is AR8's healthy-leg precondition, on a slice's group and
 // a clone meta group alike: a leg of the target's group's leg_list other
-// than the target has no health epoch. Spare legs do not count: nothing
-// written on the group reaches a leg while it is a spare. It reads the
-// health epochs alone, so a spare an earlier repair switched in counts from
-// the switch on, whether or not the group's data has been copied onto it.
-func otherLegHealthy(target *repairTarget) bool {
+// than the target has no health epoch and the current primary's latest
+// report holds it in sync (grp_id_to_grp_info's in_sync_leg_id_list;
+// architecture.md, Repair). Spare legs do not count: nothing written on the
+// group reaches a leg while it is a spare. A report that holds no reading
+// of the group — none at all, a standby's, or one of a group whose array
+// does not run — holds no leg in sync, so the group waits.
+func otherLegHealthy(p *spPass, target *repairTarget) bool {
+	inSync := p.info.GetGrpIdToGrpInfo()[target.grp.GetGrpId()].
+		GetInSyncLegIdList()
 	for _, leg := range target.grp.GetLegList() {
-		if leg.GetLegId() != target.leg.GetLegId() && leg.GetErrEpoch() == 0 {
+		if leg.GetLegId() != target.leg.GetLegId() &&
+			leg.GetErrEpoch() == 0 &&
+			slices.Contains(inSync, leg.GetLegId()) {
 			return true
 		}
 	}
@@ -2140,18 +2314,19 @@ func readySpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
 	return nil
 }
 
-// grpRowHold is AR8 step 1's gate on the target's group: "" when the group's
-// row (grp_id_to_md_raid) in p.info — the current primary's latest report,
-// the pass's only one (primaryInfo) — reads RES_STATUS_OK, so its array
-// runs, whole or degraded (cnagent.md CN28), and that report is of an
-// observation made at the snapshot's revision or later; otherwise the reason
-// the switch waits, naming the row's status, grp_row_absent for a report
-// that holds no row of the group, such as a standby's (cnagent.md CN12), or
-// grp_row_stale for an OK row of an older observation. The row is read with
-// its presence, since an absent row's status would read RES_STATUS_UNKNOWN.
-// A group id is unique in the SP, a clone meta group's included
-// (architecture.md, Terminology and object model), so one map serves both
-// kinds of group.
+// grpRowHold is AR8 step 1's gate on the target's group, which the retire
+// timer reads as well (retireHold): "" when the group's row
+// (grp_id_to_md_raid) in p.info — the current primary's latest report, the
+// pass's only one (primaryInfo) — reads RES_STATUS_OK, so its array runs,
+// whole or degraded (cnagent.md CN28), and that report is of an observation
+// made at the snapshot's revision or later; otherwise the reason the switch,
+// or the timer's delete, waits, naming the row's status, grp_row_absent for
+// a report that holds no row of the group, such as a standby's (cnagent.md
+// CN12), or grp_row_stale for an OK row of an older observation. The row is
+// read with its presence, since an absent row's status would read
+// RES_STATUS_UNKNOWN. A group id is unique in the SP, a clone meta group's
+// included (architecture.md, Terminology and object model), so one map
+// serves both kinds of group.
 //
 // The revision test keeps a second switch off a group before the primary
 // has reported a converge of the first. Every switch bumps SpRev (AR2), and
@@ -2167,7 +2342,10 @@ func readySpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
 // compares with the snapshot's SpRevision, not with the group's own last
 // change, which no record keeps, so every group waits after any bump until
 // the primary reports an observation made at that revision, which the
-// syncup the bump's fan-out sends brings (RW14, RW6).
+// syncup the bump's fan-out sends brings (RW14, RW6). The retire timer
+// waits for the same report: the whole flag of an older one may be the
+// old leg set's, read before a spare took a leg's place and while md has
+// not yet started to copy onto it (AR12).
 func grpRowHold(p *spPass, grpId uint64) string {
 	row, ok := p.info.GetGrpIdToMdRaid()[grpId]
 	if !ok {
@@ -2372,6 +2550,290 @@ func grpAddrs(grp *pb.Group) []string {
 		}
 	}
 	return addrs
+}
+
+// ---------------------------------------------------------------------------
+// The pass steps of a repair (dnv-worker.md, Repairs)
+// ---------------------------------------------------------------------------
+
+// repairIds are the attributes that name a repair in the records of its
+// stage moves: its name, its rep_id and its group.
+func repairIds(repName string, rep *pb.Repair) []slog.Attr {
+	return []slog.Attr{
+		slog.String("rep_name", repName),
+		slog.Uint64("rep_id", rep.GetRepId()),
+		slog.Uint64("grp_id", rep.GetGrpId()),
+	}
+}
+
+// moveRepairStages is the stage move of architecture.md, Repair: each
+// CREATED repair, in repair_name_list order, whose rep_id keys a verdict in
+// the current primary's latest report (rep_id_to_repair_info) moves to
+// STARTED when that verdict says started, whatever the abort flag says, and
+// otherwise to ABORTED when it says abort confirmed and the snapshot's
+// record has its flag set. Reason: the primary may add the new leg in the
+// round the flag was set, so the flag alone cannot tell which side of that
+// race the repair is on, and the verdict can; and the rep_id key ties the
+// verdict to one record, so a stale verdict of a repair finished or
+// cancelled and created again under the name moves nothing.
+// model.SetRepairStage checks the stage, the rep_id and the flag again in its
+// STM. The repair of a deleting clone's group, or of a clone the snapshot
+// does not hold, is skipped: the clone drain's final transaction gives it
+// back (CLD9). Each move logs `repair stage moved`; each verdict on a
+// CREATED repair that such a clone or a clear abort flag keeps from moving,
+// and each op that refuses or fails, logs `repair stage skipped` with its
+// reason; a verdict on a repair past CREATED, one that says neither, or one
+// under a rep_id no repair carries moves nothing and logs nothing. No move is the pass's one action (AR2), and a move's
+// SpRev bump re-fans the pool (RW14).
+func (w *spWorker) moveRepairStages(ctx context.Context, p *spPass) {
+	verdicts := p.info.GetRepIdToRepairInfo()
+	if len(verdicts) == 0 {
+		return
+	}
+	for _, repName := range p.state.Conf.GetRepairNameList() {
+		rep, ok := p.state.Repairs[repName]
+		if !ok || rep.GetRepStage() != pb.RepStage_REP_STAGE_CREATED {
+			continue
+		}
+		verdict, ok := verdicts[rep.GetRepId()]
+		if !ok {
+			continue
+		}
+		var stage pb.RepStage
+		switch {
+		case verdict.GetStarted():
+			stage = pb.RepStage_REP_STAGE_STARTED
+		case verdict.GetAbortConfirmed():
+			stage = pb.RepStage_REP_STAGE_ABORTED
+		default:
+			continue
+		}
+		ids := withAttr(repairIds(repName, rep),
+			slog.String("stage", stage.String()),
+			slog.Uint64("cntlr_id", p.primaryId),
+			slog.Uint64("report_revision", p.infoRev),
+		)
+		if repairCloneDeleting(p.state, rep) {
+			w.repairStageSkipped(ctx, reasonCloneDeleting, ids...)
+			continue
+		}
+		if stage == pb.RepStage_REP_STAGE_ABORTED && !rep.GetTryToAbort() {
+			w.repairStageSkipped(ctx, reasonAbortFlagClear, ids...)
+			continue
+		}
+		err := w.reactor().ops.setRepairStage(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			repName, rep.GetRepId(), stage,
+		)
+		if err != nil {
+			w.stepFailed(ctx, msgRepairStageSkipped, err, ids...)
+			continue
+		}
+		w.stepApplied(ctx, msgRepairStageMoved, ids...)
+	}
+}
+
+// repairCloneDeleting reports whether a repair's group is a clone meta group
+// whose clone is being deleted or is missing from the snapshot, which
+// every repair op refuses (MD6).
+func repairCloneDeleting(state *model.SpState, rep *pb.Repair) bool {
+	cloneName := rep.GetCloneName()
+	if cloneName == "" {
+		return false
+	}
+	clone, ok := state.Clones[cloneName]
+	return !ok || clone.GetDeleting()
+}
+
+// retireOldLeg is the retire timer (AR12), a step of the pass where
+// reactions run (AR3): at most one retired leg a pass, the oldest first by
+// retired_epoch, then by leg id, is deleted (model.DeleteRetiredLeg) when it
+// is at least common.RetiredLegMaxAge old, whoever's repair retired it, and
+// retireHold finds nothing to keep it. Its delete carries the
+// snapshot's SpRevision as its expected revision, so a pool changed since the
+// snapshot that judged the leg refuses it and the next pass judges again. A
+// leg younger than the age is passed over silently; an old one that a hold
+// keeps logs `retired leg kept` with the hold's reason on every pass. The
+// delete is not the pass's one action (AR2), and the data of the leg it
+// deletes is held twice elsewhere, so it is no reaction (AR9).
+func (w *spWorker) retireOldLeg(ctx context.Context, p *spPass) {
+	legIds := sortedIds(p.state.Conf.GetRetiredLegIdList())
+	sort.SliceStable(legIds, func(i, j int) bool {
+		return p.state.RetiredLegs[legIds[i]].GetRetiredEpoch() <
+			p.state.RetiredLegs[legIds[j]].GetRetiredEpoch()
+	})
+	for _, legId := range legIds {
+		retired, ok := p.state.RetiredLegs[legId]
+		if !ok || !reached(
+			p.now, retired.GetRetiredEpoch(), common.RetiredLegMaxAge,
+		) {
+			continue
+		}
+		ids := []slog.Attr{
+			slog.Uint64("leg_id", legId),
+			slog.Uint64("grp_id", retired.GetGrpId()),
+			slog.Uint64("retired_epoch", retired.GetRetiredEpoch()),
+		}
+		if reason := retireHold(p, retired); reason != "" {
+			w.stepSkipped(ctx, msgRetiredLegKept, reason, ids...)
+			continue
+		}
+		err := w.reactor().ops.deleteRetiredLeg(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			p.state.SpRevision, legId, p.cc,
+		)
+		if err != nil {
+			w.stepFailed(ctx, msgRetiredLegKept, err, ids...)
+			return
+		}
+		w.stepApplied(ctx, msgRetiredLegDeleted, ids...)
+		return
+	}
+}
+
+// retireHold is the retire timer's test of one old retired leg: "" when it
+// may be deleted, else the reason it is kept. Reason (AR12): its data
+// exists twice elsewhere only while the group is whole, so a group waiting
+// for its legs keeps its retired copies; md learns that a member is dead
+// only from IO, so an idle array over a dead leg still reads whole, while
+// the legs' and sides' err_epochs come from probes that run without IO; and
+// a row turns UNKNOWN when the primary's stream dies, while a plain field
+// such as the whole flag does not. So the leg is kept while
+// its group is not found or is a deleting clone's, which DeleteRetiredLeg
+// refuses; while the group has a repair (reasonGrpHasRepair); while the
+// group's row in the current primary's latest report reads anything but OK,
+// or that report is of an observation older than the snapshot, since it
+// then describes the group from before a change to its legs (AR8 step 1's
+// gate, grpRowHold, grp_row_stale included); while that report does not set
+// the group's whole flag; and while a leg of the group's leg_list or its
+// side has an err_epoch.
+func retireHold(p *spPass, retired *pb.RetiredLeg) string {
+	var grp *pb.Group
+	switch cloneName := retired.GetCloneName(); {
+	case cloneName != "":
+		clone, ok := p.state.Clones[cloneName]
+		if !ok || clone.GetMetaGrp().GetGrpId() != retired.GetGrpId() {
+			return reasonGrpNotFound
+		}
+		if clone.GetDeleting() {
+			return reasonCloneDeleting
+		}
+		grp = clone.GetMetaGrp()
+	default:
+		grp = findSliceGroup(p.state, retired.GetSliceId(), retired.GetGrpId())
+		if grp == nil {
+			return reasonGrpNotFound
+		}
+	}
+	if grp.GetRepName() != "" {
+		return reasonGrpHasRepair
+	}
+	grpId := grp.GetGrpId()
+	if reason := grpRowHold(p, grpId); reason != "" {
+		return reason
+	}
+	if !p.info.GetGrpIdToGrpInfo()[grpId].GetWhole() {
+		return reasonGrpNotWhole
+	}
+	for _, leg := range grp.GetLegList() {
+		if leg.GetErrEpoch() != 0 {
+			return reasonGrpLegUnhealthy
+		}
+		for _, side := range leg.GetSideList() {
+			if side.GetErrEpoch() != 0 {
+				return reasonGrpLegUnhealthy
+			}
+		}
+	}
+	return ""
+}
+
+// findSliceGroup is the group grpId of the slice sliceId in one snapshot,
+// or nil.
+func findSliceGroup(
+	state *model.SpState,
+	sliceId uint64,
+	grpId uint64,
+) *pb.Group {
+	slice, ok := state.Slices[sliceId]
+	if !ok {
+		return nil
+	}
+	for _, grp := range allGroups(slice) {
+		if grp.GetGrpId() == grpId {
+			return grp
+		}
+	}
+	return nil
+}
+
+// stepApplied logs the record of a pass step that wrote (msg is
+// msgRepairStageMoved or msgRetiredLegDeleted), with the SpRev its op
+// bumped, read back as reactionApplied reads it.
+func (w *spWorker) stepApplied(
+	ctx context.Context,
+	msg string,
+	ids ...slog.Attr,
+) {
+	attrs := []any{
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+	}
+	for _, id := range ids {
+		attrs = append(attrs, id)
+	}
+	attrs = append(attrs, slog.Uint64("revision", w.currentRevision(ctx)))
+	slog.InfoContext(ctx, msg, attrs...)
+}
+
+// stepSkipped logs the record of a pass step that did not write (msg is
+// msgRepairStageSkipped or msgRetiredLegKept), with its reason.
+func (w *spWorker) stepSkipped(
+	ctx context.Context,
+	msg string,
+	reason string,
+	ids ...slog.Attr,
+) {
+	attrs := []any{
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+		slog.String("reason", reason),
+	}
+	for _, id := range ids {
+		attrs = append(attrs, id)
+	}
+	slog.InfoContext(ctx, msg, attrs...)
+}
+
+// repairStageSkipped is stepSkipped for a stage move.
+func (w *spWorker) repairStageSkipped(
+	ctx context.Context,
+	reason string,
+	ids ...slog.Attr,
+) {
+	w.stepSkipped(ctx, msgRepairStageSkipped, reason, ids...)
+}
+
+// stepFailed turns one op error of a pass step into its skip record, as
+// reactionFailed does for a reaction: a model.ErrPrecondition contributes
+// its Reason and the op that refused, anything else reasonOpFailed and the
+// error text.
+func (w *spWorker) stepFailed(
+	ctx context.Context,
+	msg string,
+	err error,
+	ids ...slog.Attr,
+) {
+	var pre *model.ErrPrecondition
+	if errors.As(err, &pre) {
+		w.stepSkipped(ctx, msg, pre.Reason,
+			withAttr(ids, slog.String("op", pre.Op))...,
+		)
+		return
+	}
+	w.stepSkipped(ctx, msg, reasonOpFailed,
+		withAttr(ids, slog.String("error", err.Error()))...,
+	)
 }
 
 // ---------------------------------------------------------------------------

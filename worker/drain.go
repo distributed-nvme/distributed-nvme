@@ -1,5 +1,5 @@
 // The worker half of the sp drain (dnv-worker.md, The sp drain, rules
-// SPD1-SPD14).
+// SPD1-SPD15).
 //
 // DeleteStoragePool LATCHES the SP, committing `deleting = true` plus one
 // SpRev bump (SPD3/SPD4). The staged teardown that follows is the sp
@@ -57,24 +57,34 @@ const (
 	msgSpDrainDone   = "sp drained"
 )
 
-// The "phase" attribute of the three records: SPD8's D1 / D2 / D3.
+// The "phase" attribute of the three records: SPD8's D1, the two SPD15
+// batches, D2 and D3.
 const (
-	drainPhaseCntlrs = "cntlrs"
-	drainPhaseSlice  = "slice"
-	drainPhaseFinal  = "final"
+	drainPhaseCntlrs      = "cntlrs"
+	drainPhaseRepairs     = "repairs"
+	drainPhaseRetiredLegs = "retired_legs"
+	drainPhaseSlice       = "slice"
+	drainPhaseFinal       = "final"
 )
 
 // drainStep runs exactly ONE step of the drain of a latched SP (SPD6). The
 // pass's deleting branch and the drain's wake-up (drainTick) both call it,
 // each with the state it loaded and the cluster conf its gate let through,
-// which a D2 batch needs for the DN capacity keys it maintains.
+// which an SPD15 batch and a D2 batch need for the DN capacity keys they
+// maintain.
 //
 // SPD8's derivation, first match wins, from the freshly loaded SpConf alone:
 //
-//  1. `cntlr_id_list` non-empty  → D1, every cntlr at once;
-//  2. `slice_id_list` non-empty  → D2, one batch on the LOWEST listed slice id;
-//  3. otherwise                  → D3, the final keys.
+//  1. `cntlr_id_list` non-empty       → D1, every cntlr at once;
+//  2. `repair_name_list` non-empty    → one repair batch (SPD15);
+//  3. `retired_leg_id_list` non-empty → one retired-leg batch (SPD15);
+//  4. `slice_id_list` non-empty       → D2, one batch on the LOWEST listed
+//     slice id;
+//  5. otherwise                       → D3, the final keys.
 //
+// The list decides the phase; the SPD15 batch itself is cut from the
+// records the same load read (model.SpDrainRepairBatch,
+// model.SpDrainRetiredLegBatch), so that every caller cuts it the same way.
 // No other state is consulted. The accepted transient two-owner overlap is safe
 // for the usual reason: both owners run SPD2-guarded ops against whatever
 // remains and the loser's STM fails its compares, because a step is an
@@ -102,6 +112,36 @@ func (w *spWorker) drainStep(
 		}
 		w.drainStepped(ctx, drainPhaseCntlrs, removed > 0,
 			slog.Int("cntlr_cnt", removed),
+		)
+	case len(conf.GetRepairNameList()) > 0:
+		batch := model.SpDrainRepairBatch(state)
+		removed, err := ops.drainSpRepairs(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle, batch, cc,
+		)
+		if err != nil {
+			w.drainFailed(ctx, drainPhaseRepairs, err,
+				slog.Any("rep_names", batch),
+			)
+			return
+		}
+		w.drainStepped(ctx, drainPhaseRepairs, removed > 0,
+			slog.Any("rep_names", batch),
+			slog.Int("rep_cnt", removed),
+		)
+	case len(conf.GetRetiredLegIdList()) > 0:
+		batch := model.SpDrainRetiredLegBatch(state)
+		removed, err := ops.drainSpRetiredLegs(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle, batch, cc,
+		)
+		if err != nil {
+			w.drainFailed(ctx, drainPhaseRetiredLegs, err,
+				slog.Any("leg_ids", batch),
+			)
+			return
+		}
+		w.drainStepped(ctx, drainPhaseRetiredLegs, removed > 0,
+			slog.Any("leg_ids", batch),
+			slog.Int("retired_leg_cnt", removed),
 		)
 	case len(conf.GetSliceIdList()) > 0:
 		sliceId := sortedIds(conf.GetSliceIdList())[0]

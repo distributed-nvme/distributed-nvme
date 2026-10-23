@@ -126,21 +126,28 @@ func dropMigration(
 
 // migrSrcLocation locates a CreateMigration source side and asserts its leg
 // can still take a destination (the errors of architecture.md, Migrations,
-// on the source side: not found, a side of a clone meta group, a leg with two
-// sides).
+// on the source side: not found, a side of a clone meta group, a side of a
+// repair's bad leg, a leg with two sides). It also returns the group's open
+// repair, nil when it has none, whose new legs belong to the group's DN set
+// (grpDnAddrs).
 //
 // The same walk runs twice — once to plan the allocation and once inside the
 // deciding transaction — and shares one implementation so the two can never
 // disagree about what they refuse. findSide covers spare legs as well as
 // active ones, since architecture.md, Migrations, takes a side of any leg of
 // a slice, spare legs included: a spare's side sits on a disk node exactly
-// like an active one and can be moved off it.
+// like an active one and can be moved off it. It covers no repair's new leg
+// and no retired leg, so their sides are not found: a new leg is no leg of
+// its group before its finish, and a retired leg is no leg (architecture.md,
+// Repairs, Retired legs). A side of a repair's bad leg is refused
+// FAILED_PRECONDITION: the repair replaces that leg (architecture.md,
+// Repair).
 //
 // A side of a clone's clone meta group is refused FAILED_PRECONDITION
 // (architecture.md, Migrations): a clone is a copy in flight, moving a leg
 // of its group would need a clone-keyed twin of the whole migration path,
-// and a leg of an md-raid1 clone meta group is replaced through a spare
-// instead, by the spare leg calls (architecture.md, Clones). The clones are
+// and a leg of an md-raid1 clone meta group is replaced by a repair or
+// through a spare instead (architecture.md, Clones). The clones are
 // read only when no slice holds the side, so the migration of a slice's side
 // never depends on the clone keys.
 func migrSrcLocation(
@@ -149,27 +156,37 @@ func migrSrcLocation(
 	slices []*pb.Slice,
 	spName string,
 	srcSideId uint64,
-) (sliceLocation, error) {
+) (sliceLocation, *pb.Repair, error) {
 	loc, ok := findSide(sc.Conf, slices, srcSideId)
 	if !ok {
 		clones, err := loadClones(stm, sc.Cid, sc.Conf)
 		if err != nil {
-			return sliceLocation{}, err
+			return sliceLocation{}, nil, err
 		}
 		if cloneLoc, ok := findCloneSide(
 			sc.Conf, clones, srcSideId,
 		); ok {
-			return sliceLocation{}, errPrecondition(
+			return sliceLocation{}, nil, errPrecondition(
 				"side %d belongs to the clone meta group of clone %q, "+
 					"which no migration moves", srcSideId, cloneLoc.CloneName)
 		}
-		return sliceLocation{}, errNotFound(
+		return sliceLocation{}, nil, errNotFound(
 			"side %d is not in any leg of storage pool %q", srcSideId, spName)
 	}
-	if len(loc.Leg.GetSideList()) >= migrMaxLegSideCnt {
-		return sliceLocation{}, errMigrRunning(loc.Leg)
+	rep, err := grpRepair(stm, sc, loc.Grp)
+	if err != nil {
+		return sliceLocation{}, nil, err
 	}
-	return loc, nil
+	if containsId(rep.GetBadLegIdList(), loc.Leg.GetLegId()) {
+		return sliceLocation{}, nil, errPrecondition(
+			"side %d belongs to leg %d, the bad leg of the repair %q, "+
+				"which replaces it", srcSideId, loc.Leg.GetLegId(),
+			loc.Grp.GetRepName())
+	}
+	if len(loc.Leg.GetSideList()) >= migrMaxLegSideCnt {
+		return sliceLocation{}, nil, errMigrRunning(loc.Leg)
+	}
+	return loc, rep, nil
 }
 
 // migrMetaUnitsOf is the metadata units a migration destination's dm-clone
@@ -203,13 +220,13 @@ func migrMetaUnitsOf(
 // errMigrRunning is the FAILED_PRECONDITION for a leg that owns more than its
 // own side: a migration is running on it (architecture.md, Migrations).
 // CreateMigration raises it for a source leg that cannot take a second
-// destination, and DeleteSpareLeg and SwitchSpareLeg for a leg they would
-// release or move under that migration (architecture.md, Spare legs), so the
-// three RPCs name the refusal the same way. The one
-// exception is the re-check inside model.SwitchSpareLeg's STM: it refuses
-// only a token-less switch that raced a CreateMigration, and it keeps model's
-// own reason ("spare leg has no single side" / "target leg has no single
-// side").
+// destination, DeleteSpareLeg and SwitchSpareLeg for a leg they would
+// release or move under that migration (architecture.md, Spare legs), and
+// CreateRepair for a bad leg a migration holds (architecture.md, Repairs), so
+// the four RPCs name the refusal the same way. The one exception is the
+// re-check inside model.SwitchSpareLeg's STM: it refuses only a token-less
+// switch that raced a CreateMigration, and it keeps model's own reason
+// ("spare leg has no single side" / "target leg has no single side").
 func errMigrRunning(leg *pb.Leg) error {
 	return errPrecondition(
 		"leg %d already has %d sides: a migration is running on it",
@@ -332,7 +349,8 @@ func (s *Server) CreateMigration(
 		// in extents and in metadata units, and which disk nodes — and
 		// failure domains — it must avoid.
 		// grpDnAddrs names every DN the group already occupies through an
-		// active or a spare leg and seeds the black list; grpDnLocations
+		// active leg, a spare leg or its repair's new leg and seeds the
+		// black list; grpDnLocations
 		// turns the same set into the tier-1 exclusion of architecture.md,
 		// Per-operation allocation, so the
 		// destination leaves the failure domain the migration is meant to
@@ -347,6 +365,7 @@ func (s *Server) CreateMigration(
 			planExt   uint64
 			planUnits uint64
 			planGrp   *pb.Group
+			planRep   *pb.Repair
 		)
 		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 			// openSp, not openSpRead: this is a MUTATOR's planning read, so
@@ -374,7 +393,7 @@ func (s *Server) CreateMigration(
 			if err != nil {
 				return err
 			}
-			loc, err := migrSrcLocation(
+			loc, rep, err := migrSrcLocation(
 				stm, sc, slices, req.GetSpName(), req.GetSrcSideId())
 			if err != nil {
 				return err
@@ -388,15 +407,16 @@ func (s *Server) CreateMigration(
 			planExt = loc.Grp.GetExtCnt()
 			planUnits = units
 			planGrp = loc.Grp
+			planRep = rep
 			return nil
 		})
 		if err != nil {
 			return mapStmErr(err)
 		}
-		planBlack := grpDnAddrs(planGrp)
+		planBlack := grpDnAddrs(planGrp, planRep)
 		// Outside the snapshot, at no cost in coherence: a location cannot
 		// change (architecture.md, Disk nodes).
-		planLocs, err := grpDnLocations(ctx, s.cli, planCid, planGrp)
+		planLocs, err := grpDnLocations(ctx, s.cli, planCid, planBlack)
 		if err != nil {
 			return err
 		}
@@ -442,7 +462,7 @@ func (s *Server) CreateMigration(
 			if err != nil {
 				return err
 			}
-			loc, err := migrSrcLocation(
+			loc, rep, err := migrSrcLocation(
 				stm, sc, slices, req.GetSpName(), req.GetSrcSideId())
 			if err != nil {
 				return err
@@ -469,8 +489,8 @@ func (s *Server) CreateMigration(
 			// it: planBlack for the distinct-DN rule, and those DNs'
 			// locations for tier 1 (architecture.md, Per-operation
 			// allocation). A side hung off the group since —
-			// a migration of its other leg, a spare — is missing from that
-			// plan, so the pick may sit on that side's very DN, behind a
+			// a migration of its other leg, a spare, a repair's new leg — is
+			// missing from that plan, so the pick may sit on that side's very DN, behind a
 			// capacity key verifyPick still finds, or in its failure domain,
 			// and only the group as this transaction reads it can tell. A
 			// group that occupies a DN the plan's read of it did not is
@@ -484,7 +504,7 @@ func (s *Server) CreateMigration(
 			// count on, which GW9 never re-scans for. Only a token-less
 			// request gets here with a gained DN: the new side's SpRev bump
 			// fails a sent token at openSp above.
-			for _, addrPort := range grpDnAddrs(loc.Grp) {
+			for _, addrPort := range grpDnAddrs(loc.Grp, rep) {
 				if !containsName(planBlack, addrPort) {
 					return errCandidateChanged
 				}

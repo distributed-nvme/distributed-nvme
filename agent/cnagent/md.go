@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,9 +18,13 @@ import (
 // so by the split rule of dnagent.md, Scope and placement, this wrapper is
 // role code.
 //
-// The agent never runs `mdadm --zero-superblock`: a leg only ever leaves an
-// array into the spare list — where a stale superblock makes a later re-add
-// cheap — or out of existence together with its side (CN12).
+// The agent never runs `mdadm --zero-superblock`. A leg leaves an array only
+// into the spare list; as a repair's bad leg, which the finish keeps as a
+// retired leg and an abort leaves in leg_list; as a repair's new leg taken
+// from a retired leg, which a cancel gives back as that retired leg; or out
+// of existence together with its side. The superblock md left on it can make
+// a later re-add cheap, and keeps an assembly from taking it as in sync
+// (CN12).
 type Md struct {
 	cmd *agent.Cmd
 }
@@ -364,6 +369,14 @@ func (m MdMember) inSync() bool {
 	return mdFlagSet(m.State, "in_sync") && !mdFlagSet(m.State, "faulty")
 }
 
+// holdsPlace is a member that holds one of the array's places, copying or in
+// sync, which a repair's started verdict asks of its new leg (CN12): a slot
+// number, and not "faulty", since a member md has failed holds its slot only
+// while IO to it is pending.
+func (m MdMember) holdsPlace() bool {
+	return m.Slot != mdSlotNone && !mdFlagSet(m.State, "faulty")
+}
+
 // MdDetail is the live state of one array, read from /sys/block alone.
 type MdDetail struct {
 	Exists bool
@@ -487,6 +500,32 @@ func (m *Md) Refresh(ctx context.Context, w *MdWalk) error {
 	return nil
 }
 
+// RefreshArray walks again the one array node that dev, an MdDetail's Dev,
+// names, after the pass's own member changes to it: Refresh walks again only
+// a node whose recorded member directories went or changed, and an --add
+// makes a member directory no record holds, which its check cannot see. A
+// walk of the node that answers replaces its record, or drops it when its
+// md/ is gone, as Refresh does. One that does not answer is its error and
+// leaves the walk exactly as it was, unlike walkNode: the pass's other
+// groups and its pool concats share the walk (mdWalkOnce), and the node
+// recorded as unanswered would turn every concat row of the group's slice
+// ERROR, and fail every later group of the pass whose array is absent,
+// while the reconciliation itself went through.
+func (m *Md) RefreshArray(ctx context.Context, w *MdWalk, dev string) error {
+	node := strings.TrimPrefix(dev, "/dev/")
+	members, ok, err := m.memberDirs(ctx, mdDirOf(node))
+	if err != nil {
+		return err
+	}
+	delete(w.unanswered, node)
+	if !ok {
+		delete(w.arrays, node)
+		return nil
+	}
+	w.arrays[node] = members
+	return nil
+}
+
 // walkNode reads one array node's members (memberDirs) into a walk, the one
 // read of a node that Refresh and Scan share: a read that did not answer
 // records the node as unanswered, a md/ directory gone drops it, and members
@@ -535,8 +574,8 @@ func (m *Md) sameMembers(ctx context.Context, members []mdMemberDir) bool {
 }
 
 // Detail finds, in a walk, the one array whose members include any of
-// dmNames, a group's leg wrapper names (Match), and reads its state from
-// sysfs. It never runs mdadm and never resolves /dev/md/<name>.
+// dmNames, the wrapper names of a group's members (Match), and reads its
+// state from sysfs. It never runs mdadm and never resolves /dev/md/<name>.
 //
 // Detail runs no mdadm because `mdadm --detail`
 // opens a member device: it loads the superblock from the first member that
@@ -586,11 +625,12 @@ func (m *Md) Detail(
 }
 
 // Match is the array node a walk holds for a group (CN12's match): the one
-// array whose members include any of dmNames, the group's leg_list wrapper
-// names, so spares do not count. "" with no error when none matches and
-// every array answered; an error for two matches, or for no match beside an
-// array that did not answer, which may be the group's own. A degraded array
-// matches: one member the group names is enough.
+// array whose members include any of dmNames, the wrapper names of the
+// group's members (grpPlan.memberNames), so spares do not count. "" with no
+// error when none matches and every array answered; an error for two
+// matches, or for no match beside an array that did not answer, which may be
+// the group's own. A degraded array matches: one member the group names is
+// enough.
 func (w *MdWalk) Match(dmNames []string) (string, error) {
 	want := make(map[string]bool, len(dmNames))
 	for _, name := range dmNames {
@@ -649,7 +689,7 @@ func (s *CnAgentServer) mdDevNo(
 	if err != nil {
 		return "", fmt.Errorf("group %s: %w", gp.resName, err)
 	}
-	node, err := walk.Match(gp.legNames())
+	node, err := walk.Match(gp.memberNames())
 	if err != nil {
 		return "", fmt.Errorf("group %s: %w", gp.resName, err)
 	}
@@ -975,7 +1015,8 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // over its single leg's data region (ensureLinearGroup); a RedundMdRaid1
 // group instantiates the assembly cases of cnagent.md CN12 over the member
 // leg wrappers. Spare legs are never members
-// (architecture.md, Spare legs) — they stay connected, wrapped and probed.
+// (architecture.md, Spare legs) — they stay connected, wrapped and probed —
+// and a repair's new legs join only by CN12's rules for a repair.
 //
 // A provisioning-deferred group never gets here: the build phase reports it
 // PROVISIONING and skips it ([D15]). The leg-count check of ensureLinearGroup
@@ -983,52 +1024,91 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // empty member list whatever a future caller does.
 //
 // legRows are the pass's leg rows, which the member reconciliation's put-back
-// reads (reconcileMembers).
+// reads (reconcileMembers). For an md group whose array runs at the end of
+// the pass, the array is returned too, as read after the pass's own member
+// changes, for what the primary reports beside the group's row
+// (reportGrpReading): a pass that changed a member reads the array's node
+// again (Md.RefreshArray), since Md.Refresh does not see an added member. A
+// read again whose listing of the node fails returns no array and no error
+// and leaves the pass's walk as it was; one whose listing answers updates the
+// walk, and when it then cannot read the array, or finds it not running or
+// gone, it too returns no array and no error. Each way the group's row is the
+// reconciliation's, the pass reports no verdict and no reading for the
+// group, and the next read of the cntlr reports what it finds.
+//
+// running reports whether the pass found the md group's array running, as
+// it was or after its assembly, so that the member reconciliation ran over
+// it, whether or not that reconciliation went through; the late-member test
+// reads it (hasLateMember). A RedundNone group has no array and reports
+// false.
 func (s *CnAgentServer) ensureGroup(
 	ctx context.Context,
 	plan *cntlrPlan,
 	gp *grpPlan,
 	available map[uint64]bool,
 	legRows map[uint64]*pb.ResInfo,
-) error {
+) (detail *MdDetail, running bool, err error) {
 	if !gp.raid1 {
-		return s.ensureLinearGroup(ctx, gp, available)
+		return nil, false, s.ensureLinearGroup(ctx, gp, available)
 	}
 	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
-	detail, err := s.md.Detail(ctx, walk, gp.legNames())
+	detail, err = s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	if !detail.Exists {
 		if err := s.assembleGroup(ctx, gp, available); err != nil {
-			return err
+			return nil, false, err
 		}
 		if err := s.md.Refresh(ctx, walk); err != nil {
-			return err
+			return nil, false, err
 		}
-		detail, err = s.md.Detail(ctx, walk, gp.legNames())
+		detail, err = s.md.Detail(ctx, walk, gp.memberNames())
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		if !detail.Exists {
-			return fmt.Errorf("array %s did not start", gp.devPath)
+			return nil, false,
+				fmt.Errorf("array %s did not start", gp.devPath)
 		}
 	}
+	if err := runningArrayErr(detail); err != nil {
+		return nil, false, err
+	}
+	changed, err := s.reconcileMembers(ctx, gp, detail, available, legRows)
+	if err != nil {
+		return nil, true, err
+	}
+	if !changed {
+		return detail, true, nil
+	}
+	if err := s.md.RefreshArray(ctx, walk, detail.Dev); err != nil {
+		return nil, true, nil
+	}
+	detail, err = s.md.Detail(ctx, walk, gp.memberNames())
+	if err != nil || !detail.Exists || runningArrayErr(detail) != nil {
+		return nil, true, nil
+	}
+	return detail, true, nil
+}
+
+// runningArrayErr is the group's error for an array the member
+// reconciliation may not touch: one holding a foreign member, and one that
+// is not running — inactive, broken — which is left exactly as it is, since
+// member reconciliation is for a running mirror, and an --add, --fail or
+// --remove on an array that has not started could only change which members
+// an operator's start would find. Its state is the group's error.
+func runningArrayErr(detail *MdDetail) error {
 	if detail.Foreign {
 		return detail.foreignErr()
 	}
-	// An array that is not running — inactive, broken — is left exactly as
-	// it is: member reconciliation is for a running mirror, and an --add,
-	// --fail or --remove on an array that has not started could only change
-	// which members an operator's start would find. Its state is the group's
-	// error.
 	if !mdRunning(detail.State) {
 		return fmt.Errorf("array %s is %s", detail.Dev, detail.State)
 	}
-	return s.reconcileMembers(ctx, gp, detail, available, legRows)
+	return nil
 }
 
 // ensureLinearGroup converges a RedundNone group's dm-linear over its leg
@@ -1103,7 +1183,15 @@ func errNoAvailableLeg() error {
 
 // assembleGroup is the case selection of cnagent.md CN12: probe each
 // available member for an md superblock and either create the array or
-// assemble it from the members that have one.
+// assemble it from the members that have one. The candidates are the
+// available leg_list legs and the available new legs of an open repair: a
+// new leg that carries a superblock is handed to the assembly beside the
+// leg_list legs that carry one, after them, and mdadm and the kernel judge
+// its membership from the superblocks, so a half-copied new leg resumes its
+// copy and never starts the array alone, and a whole one can start it when
+// no leg_list leg is available, if md recorded the other legs as failed. A
+// new leg never counts toward case 1, whose create holds only when no
+// candidate carries a superblock, and is never one of its members.
 func (s *CnAgentServer) assembleGroup(
 	ctx context.Context,
 	gp *grpPlan,
@@ -1111,14 +1199,10 @@ func (s *CnAgentServer) assembleGroup(
 ) error {
 	var members []string
 	var withSuperblock []string
-	for _, lp := range gp.legs {
-		if !available[lp.legId] {
-			continue
-		}
-		members = append(members, lp.path)
-		// A probe that did not answer aborts the whole assembly: with no
-		// answer this pass cannot tell case 1 from case 2, and guessing case 1
-		// creates over live data.
+	// A probe that did not answer aborts the whole assembly: with no answer
+	// this pass cannot tell case 1 from case 2, and guessing case 1 creates
+	// over live data.
+	probe := func(lp *legPlan) error {
 		has, err := s.md.HasSuperblock(ctx, lp.path)
 		if err != nil {
 			return err
@@ -1126,8 +1210,28 @@ func (s *CnAgentServer) assembleGroup(
 		if has {
 			withSuperblock = append(withSuperblock, lp.path)
 		}
+		return nil
 	}
-	if len(members) == 0 {
+	for _, lp := range gp.legs {
+		if !available[lp.legId] {
+			continue
+		}
+		members = append(members, lp.path)
+		if err := probe(lp); err != nil {
+			return err
+		}
+	}
+	if rp := gp.openRep(); rp != nil {
+		for _, lp := range rp.newLegs {
+			if !available[lp.legId] {
+				continue
+			}
+			if err := probe(lp); err != nil {
+				return err
+			}
+		}
+	}
+	if len(members) == 0 && len(withSuperblock) == 0 {
 		return errNoAvailableLeg()
 	}
 	conf := MdCreateConf{
@@ -1169,19 +1273,20 @@ func (s *CnAgentServer) assembleGroup(
 				len(members), len(gp.legs))
 		}
 		// Nor while an array already runs under the group's name. Detail
-		// finds the array by its members, so one holding NONE of the leg_list
-		// wrappers — both legs switched out, and the parked ones released,
-		// while this cntlr was not converging — never reaches reconcile and
-		// lands here instead, with every fresh leg answering "no
-		// superblock". A create would put a second array under the name
-		// mdadm gives the group's array, and the guard keeps it from doing
-		// so. The pool's concat finds the group's array by its legs
-		// (mdDevNo), never by that name, so until the group has an array of
-		// its own the concat rows read an error rather than take the running
-		// array's number. The guard errs only towards refusing, and a false
-		// refusal needs a stale node of this very name: short of the case
-		// above, a group whose legs carry no superblock has never had an
-		// array that could have left one.
+		// finds the array by its members, so one holding NONE of the
+		// wrappers the group keeps (its leg_list wrappers and its open
+		// repair's new legs, grpPlan.memberNames) — both legs switched out,
+		// and the parked ones released, while this cntlr was not
+		// converging — never reaches reconcile and lands here instead,
+		// with every fresh leg answering "no superblock". A create would
+		// put a second array under the name mdadm gives the group's array,
+		// and the guard keeps it from doing so. The pool's concat finds the
+		// group's array by its legs (mdDevNo), never by that name, so until
+		// the group has an array of its own the concat rows read an error
+		// rather than take the running array's number. The guard errs only
+		// towards refusing, and a false refusal needs a stale node of this
+		// very name: short of the case above, a group whose legs carry no
+		// superblock has never had an array that could have left one.
 		inUse, err := s.md.NameInUse(ctx, gp.devPath)
 		if err != nil {
 			return err
@@ -1201,7 +1306,7 @@ func (s *CnAgentServer) assembleGroup(
 }
 
 // reconcileMembers covers SwitchSpareLeg with no extra mechanism (CN12): a
-// member the array holds that is no longer in leg_list is failed and removed,
+// member the array holds that the group does not keep is failed and removed,
 // but only while a member that stays keeps the data (inSyncGuard); an
 // available leg_list member the array lacks is added, and md then resyncs —
 // a bitmap catch-up for a briefly absent leg, a full rebuild for a promoted
@@ -1215,30 +1320,45 @@ func (s *CnAgentServer) assembleGroup(
 // agent's own process would make and which waits on md's lock for as long as
 // a superblock write is stuck on a member.
 //
+// A group's repair adds its own steps (CN12): the members the group keeps are
+// its leg_list wrappers and the new legs of its open repair
+// (grpPlan.memberNames); an open repair's bad leg is never added or put back,
+// and one md holds without a place leaves the array once the repair has
+// started, STARTED or every new leg holding a place (startedBadLegs); a new
+// leg md holds without a place leaves the array while its repair is CREATED
+// with the abort flag set (abortRemovals); a new leg md has failed is put back
+// as a leg_list member is, unless its repair is CREATED with that flag set
+// (putBackLegs); and the new legs are added last, the bad leg failed and
+// removed first when it cannot take a member, under CN12's conditions
+// (repSteps). It reports whether it ran an mdadm command against the array, so
+// the converge reads the array again for its report (ensureGroup).
+//
 // The held set is the dm names sysfs gave the array's members
-// (dev-*/block/dm/name), compared with the leg_list wrapper names — the key
-// Detail matched the array by — and each held member is addressed by its dm
-// path. Nothing here reads a device number: were the wanted set keyed by the
-// number of each leg_list wrapper, a number read that did not answer would
-// read as "not wanted" and fail and remove that wrapper's in-sync member. A
-// leg whose wrapper this pass could not build is never available, so the add
-// loop leaves it alone, and its member, if md still holds one, stays wanted
-// and held, failed or not.
+// (dev-*/block/dm/name), compared with the names of the wrappers the group
+// keeps — the key Detail matched the array by — and each held member is
+// addressed by its dm path. Nothing here reads a device number: were the
+// wanted set keyed by the number of each leg_list wrapper, a number read
+// that did not answer would read as "not wanted" and fail and remove that
+// wrapper's in-sync member. A leg whose wrapper this pass could not build is
+// never available, so the add loop leaves it alone, and its member, if md
+// still holds one, stays wanted and held, failed or not.
 // `mdadm --fail` and `--remove` open the member's path (open only, no IO) and
 // then act on its device number. `--remove` can sleep in md's suspend for as
 // long as a superblock write is stuck on the member — seconds after its side
 // dies with a write in flight — and the soft timeout then kills it with the
 // member still held: this pass fails before the add loop, so the promoted
-// spare is not added either. A remove or an add that fails is the group's
-// error for the pass, a row, which registers no background retry of its own.
-// What re-drives it is the read's verdict, which names a leg_list member
-// that this function would put back or add on a leg the read finds able to
-// take it (putBackNames, cnagent.md CN30), so the worker re-sends
-// the SyncupCntlr whose converge tries again; the CN10 retry tries again too
-// when the same pass registers it for something else, such as a leg that
-// failed to converge or any leg_list member of this cntlr that is not
-// available. The switched-out member itself has left leg_list and is never
-// named. Nothing here remembers the failure. A refusal of the in-sync guard
+// spare is not added either, nor, after a repair's bad leg, its new leg. A
+// remove or an add that fails is the group's error for the pass, a row, which
+// registers no background retry of its own. What re-drives it is the read's
+// verdict, which names a member this function would put back or add on a leg
+// the read finds able to take it, or remove for a repair (abortRemovals,
+// startedBadLegs; putBackNames, cnagent.md CN30), so the worker re-sends the
+// SyncupCntlr whose converge tries again; the CN10 retry tries again too when
+// the same pass registers it for something else, such as a leg that failed to
+// converge or a leg_list member of this cntlr that is not available, other
+// than an open repair's bad leg in a group whose array runs. The switched-out
+// member itself has left leg_list and is never named. Nothing here remembers
+// the failure. A refusal of the in-sync guard
 // is re-driven the same way once it clears: until then the read's row reads
 // ERROR too and its verdict names nothing for the group, and the first read
 // that finds a member that stays in sync on an available leg reads the row
@@ -1253,16 +1373,13 @@ func (s *CnAgentServer) reconcileMembers(
 	detail *MdDetail,
 	available map[uint64]bool,
 	legRows map[uint64]*pb.ResInfo,
-) error {
+) (bool, error) {
 	// A Foreign array never gets here (ensureGroup), so every member has a
 	// dm name.
-	held := make(map[string]MdMember, len(detail.Members))
-	for _, member := range detail.Members {
-		held[member.DmName] = member
-	}
-	wanted := make(map[string]bool, len(gp.legs))
-	for _, lp := range gp.legs {
-		wanted[lp.name] = true
+	held := heldMembers(detail)
+	kept := make(map[string]bool, len(gp.legs)+1)
+	for _, name := range gp.memberNames() {
+		kept[name] = true
 	}
 	// The in-sync guard comes before the first --fail, and its refusal
 	// leaves the array exactly as it is: no fail, no put-back and no add
@@ -1272,44 +1389,268 @@ func (s *CnAgentServer) reconcileMembers(
 	if leaver := inSyncGuard(gp, detail, func(lp *legPlan) bool {
 		return available[lp.legId]
 	}); leaver != "" {
-		return errInSyncGuard(leaver, detail.Dev)
+		return false, errInSyncGuard(leaver, detail.Dev)
+	}
+	changed := false
+	run := func(verb func(context.Context, string, string) error,
+		path string) error {
+		changed = true
+		return verb(ctx, gp.devPath, path)
 	}
 	// Extras leave before promotions arrive, so the array never briefly
 	// holds more members than `--raid-devices`.
 	for _, member := range detail.Members {
-		if wanted[member.DmName] {
+		if kept[member.DmName] {
 			continue
 		}
 		path := s.nf.DmPath(member.DmName)
-		if err := s.md.Fail(ctx, gp.devPath, path); err != nil {
-			return err
+		if err := run(s.md.Fail, path); err != nil {
+			return changed, err
 		}
-		if err := s.md.Remove(ctx, gp.devPath, path); err != nil {
-			return err
+		if err := run(s.md.Remove, path); err != nil {
+			return changed, err
 		}
 	}
-	// The put-back's remove. A removed member is no longer held, so the
-	// add loop below adds it in this same pass.
-	for _, lp := range gp.legs {
-		member, ok := held[lp.name]
-		if !ok || !member.failedOutOfSlot() ||
-			!legTakesMember(available[lp.legId], legRows[lp.legId]) {
-			continue
+	for _, lp := range append(abortRemovals(gp, held),
+		startedBadLegs(gp, held)...) {
+		if err := run(s.md.Remove, lp.path); err != nil {
+			return changed, err
 		}
-		if err := s.md.Remove(ctx, gp.devPath, lp.path); err != nil {
-			return err
+		delete(held, lp.name)
+	}
+	takes := func(lp *legPlan) bool {
+		return legTakesMember(available[lp.legId], legRows[lp.legId])
+	}
+	// The put-back's remove. A removed member is no longer held, so the
+	// add loops below add it in this same pass.
+	for _, lp := range putBackLegs(gp, held, takes) {
+		if err := run(s.md.Remove, lp.path); err != nil {
+			return changed, err
 		}
 		delete(held, lp.name)
 	}
 	for _, lp := range gp.legs {
-		if _, ok := held[lp.name]; ok || !available[lp.legId] {
+		if _, ok := held[lp.name]; ok || !available[lp.legId] ||
+			gp.isBadLeg(lp.legId) {
 			continue
 		}
-		if err := s.md.Add(ctx, gp.devPath, lp.path); err != nil {
-			return err
+		if err := run(s.md.Add, lp.path); err != nil {
+			return changed, err
 		}
 	}
-	return nil
+	step := repSteps(gp, held, func(lp *legPlan) bool {
+		return available[lp.legId]
+	}, takes)
+	for _, out := range step.out {
+		if out.fail {
+			if err := run(s.md.Fail, out.lp.path); err != nil {
+				return changed, err
+			}
+		}
+		if err := run(s.md.Remove, out.lp.path); err != nil {
+			return changed, err
+		}
+	}
+	for _, lp := range step.add {
+		if err := run(s.md.Add, lp.path); err != nil {
+			return changed, err
+		}
+	}
+	return changed, nil
+}
+
+// heldMembers is an array's members by dm name.
+func heldMembers(detail *MdDetail) map[string]MdMember {
+	held := make(map[string]MdMember, len(detail.Members))
+	for _, member := range detail.Members {
+		held[member.DmName] = member
+	}
+	return held
+}
+
+// abortRemovals are the new legs of the group's repair that md holds without
+// a place, its slot none, failed or not, while the repair is CREATED with its
+// abort flag in the request: the converge removes them, never adds one, and
+// the read's verdict names them, so that the primary can confirm the abort,
+// which needs md to hold nothing on the new leg (CN12, CN30). A new leg that
+// holds a place stays: the repair has started, and the verdict says so once
+// md holds nothing on the bad leg (startedBadLegs).
+func abortRemovals(gp *grpPlan, held map[string]MdMember) []*legPlan {
+	if gp.rep == nil || !gp.rep.aborting() {
+		return nil
+	}
+	var out []*legPlan
+	for _, lp := range gp.rep.newLegs {
+		if member, ok := held[lp.name]; ok && member.Slot == mdSlotNone {
+			out = append(out, lp)
+		}
+	}
+	return out
+}
+
+// startedBadLegs are the bad legs of the group's open repair that md holds
+// without a place once the repair has started in md: it is STARTED, or it is
+// CREATED, with or without its abort flag, and md holds every new leg in a
+// place (MdMember.holdsPlace). The converge removes them, and the read's
+// verdict names them (CN12, CN30). The primary reports started only once md
+// holds nothing on the bad leg (repairVerdict), so md holds one again only
+// from an assembly that took it back, as after a failover that comes before
+// or after the worker's move to STARTED. Left there, it would keep a CREATED
+// repair from being reported started, and, its new leg holding a place, from
+// having its abort confirmed, so the repair would never move on; and the
+// finish of a STARTED one would make it a retired leg, which no cntlr
+// connects, so the sweep would read an array holding it as unwanted and stop
+// it (CN21). A member without a place holds no data md reads, and md removes
+// it with no IO to it.
+func startedBadLegs(gp *grpPlan, held map[string]MdMember) []*legPlan {
+	rp := gp.openRep()
+	if rp == nil {
+		return nil
+	}
+	if rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_CREATED {
+		if len(rp.newLegs) == 0 {
+			return nil
+		}
+		for _, lp := range rp.newLegs {
+			if member, ok := held[lp.name]; !ok || !member.holdsPlace() {
+				return nil
+			}
+		}
+	}
+	var out []*legPlan
+	for _, lp := range gp.legs {
+		if member, ok := held[lp.name]; ok && rp.badLegIds[lp.legId] &&
+			member.Slot == mdSlotNone {
+			out = append(out, lp)
+		}
+	}
+	return out
+}
+
+// putBackLegs are the members the put-back removes, so that an add loop adds
+// them again (CN12): md has failed each and moved it out of its slot, on a
+// leg that can take it (takes), and each is a leg_list member other than an
+// open repair's bad leg, or a new leg of a repair that is STARTED, or
+// CREATED with no abort flag in the request.
+func putBackLegs(
+	gp *grpPlan,
+	held map[string]MdMember,
+	takes func(*legPlan) bool,
+) []*legPlan {
+	var out []*legPlan
+	check := func(lp *legPlan) {
+		if member, ok := held[lp.name]; ok && member.failedOutOfSlot() &&
+			takes(lp) {
+			out = append(out, lp)
+		}
+	}
+	for _, lp := range gp.legs {
+		if !gp.isBadLeg(lp.legId) {
+			check(lp)
+		}
+	}
+	if rp := gp.rep; rp != nil && (rp.mayAdd() ||
+		rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED) {
+		for _, lp := range rp.newLegs {
+			check(lp)
+		}
+	}
+	return out
+}
+
+// repStep is what CN12's add of a repair's new legs does in one converge:
+// the bad legs it takes out of the array first, each failed first when md
+// still holds it in a place, and the new legs it adds.
+type repStep struct {
+	out []repBadLeg
+	add []*legPlan
+}
+
+type repBadLeg struct {
+	lp   *legPlan
+	fail bool
+}
+
+// repSteps is CN12's add of the group's repair's new legs, decided from one
+// reading of the array, the members held after the pass's earlier removes:
+// the converge runs it with the leg's availability (avail) and the put-back's
+// test (takes, legTakesMember), and the read's verdict with the parts of them
+// a read can test, so the verdict names the new legs the converge would add.
+// A STARTED repair's new leg the array lacks is added once available, as a
+// leg_list member is. A CREATED repair with no abort flag in the request adds
+// its new legs that the array lacks and that are available — a provisioning
+// leg never is — only while another member keeps the data: one md marks in
+// sync, of a leg_list leg other than a bad leg, on a leg that can take a
+// member (keepsData). Then each bad leg md still holds goes out first: one
+// out of its place is removed; one in its place that cannot take a member is
+// failed and removed; one in its place that can take a member, serving with
+// an OK row, stays, and the repair waits, so the step does nothing at all.
+// So the bad leg is failed only in a pass whose add's conditions hold, so
+// that the new leg can follow at once; a remove or an add that md refuses
+// still leaves the new leg out of that pass (cnagent.md CN12). Any other
+// repair adds nothing.
+func repSteps(
+	gp *grpPlan,
+	held map[string]MdMember,
+	avail, takes func(*legPlan) bool,
+) repStep {
+	rp := gp.rep
+	if rp == nil {
+		return repStep{}
+	}
+	var step repStep
+	for _, lp := range rp.newLegs {
+		if _, ok := held[lp.name]; !ok && avail(lp) {
+			step.add = append(step.add, lp)
+		}
+	}
+	if len(step.add) == 0 {
+		return repStep{}
+	}
+	if rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED {
+		return step
+	}
+	if !rp.mayAdd() || !keepsData(gp, held, takes) {
+		return repStep{}
+	}
+	for _, lp := range gp.legs {
+		member, ok := held[lp.name]
+		if !ok || !rp.badLegIds[lp.legId] {
+			continue
+		}
+		switch {
+		case member.Slot == mdSlotNone:
+			step.out = append(step.out, repBadLeg{lp: lp})
+		case takes(lp):
+			return repStep{}
+		default:
+			step.out = append(step.out, repBadLeg{lp: lp, fail: true})
+		}
+	}
+	return step
+}
+
+// keepsData reports whether a member keeps the data while a repair's bad leg
+// leaves the array (repSteps): a leg_list member other than a bad leg of the
+// group's repair, which md marks in sync (MdMember.inSync), on a leg that
+// can take a member (takes). It is the in-sync guard's test (inSyncGuard)
+// with the leg row besides: md learns that a member is dead only from IO to
+// it, so on an idle array a dead member still reads in sync, and a copy onto
+// the new leg that reads a dead member breaks the array.
+func keepsData(
+	gp *grpPlan,
+	held map[string]MdMember,
+	takes func(*legPlan) bool,
+) bool {
+	for _, lp := range gp.legs {
+		if gp.rep != nil && gp.rep.badLegIds[lp.legId] {
+			continue
+		}
+		if member, ok := held[lp.name]; ok && member.inSync() && takes(lp) {
+			return true
+		}
+	}
+	return false
 }
 
 // legTakesMember is CN12's test of a leg whose member the reconciliation puts
@@ -1325,10 +1666,11 @@ func legTakesMember(serves bool, legRow *pb.ResInfo) bool {
 
 // inSyncGuard is CN12's in-sync guard over a group's running array, which
 // the converge (reconcileMembers) and the read (probeGroup) both apply: the
-// dm name of the first member the array holds that is no longer in leg_list,
-// when no member that stays in leg_list is in sync (MdMember.inSync) on a leg
-// that serves; "" when no member leaves, or when such a member keeps the
-// data. serves is the leg's availability as the caller can read it: the
+// dm name of the first member the array holds that the group does not keep
+// (grpPlan.memberNames: no longer in leg_list, nor a new leg of an open
+// repair), when no member that stays in leg_list is in sync (MdMember.inSync)
+// on a leg that serves; "" when no member leaves, or when such a member keeps
+// the data. serves is the leg's availability as the caller can read it: the
 // converge's available map, and for a read legServes, the part of it a read
 // can see, so the two report the same row short of what legServes does not
 // read (cnagent.md, Known limits). serves is called only for a
@@ -1336,11 +1678,11 @@ func legTakesMember(serves bool, legRow *pb.ResInfo) bool {
 // of a group no switch has touched makes no lookup for it.
 //
 // md answers a fail of the last in-sync member of a mirror by marking the
-// whole array broken (CN29), so a fail of a member that left leg_list needs
-// another to keep the data. That member must be one md marks in sync on an
-// available leg, because on an array with no IO md still marks a dead member
-// in sync: the fail would go through, the add after it would start a copy
-// that reads the dead member, and that read breaks the array. And it must
+// whole array broken (CN29), so a fail of a member the group no longer keeps
+// needs another to keep the data. That member must be one md marks in sync
+// on an available leg, because on an array with no IO md still marks a dead
+// member in sync: the fail would go through, the add after it would start a
+// copy that reads the dead member, and that read breaks the array. And it must
 // stay in leg_list, because a member that leaves is about to be failed too.
 // The guard holds whatever the leaving member's own state: with no such
 // member, the data sits only on a member that leaves, which the loop fails
@@ -1353,9 +1695,9 @@ func inSyncGuard(
 	detail *MdDetail,
 	serves func(lp *legPlan) bool,
 ) string {
-	wanted := make(map[string]bool, len(gp.legs))
-	for _, lp := range gp.legs {
-		wanted[lp.name] = true
+	wanted := make(map[string]bool, len(gp.legs)+1)
+	for _, name := range gp.memberNames() {
+		wanted[name] = true
 	}
 	leaver := ""
 	held := make(map[string]MdMember, len(detail.Members))
@@ -1380,28 +1722,35 @@ func inSyncGuard(
 // (inSyncGuard), one text for the converge and the read, naming the member
 // it keeps from being failed and the array.
 func errInSyncGuard(member, dev string) error {
-	return fmt.Errorf("member %s left leg_list but is not failed: "+
+	return fmt.Errorf("member %s left the group but is not failed: "+
 		"no other member of %s is in sync on an available leg of leg_list",
 		member, dev)
 }
 
 // putBackNames is what a cntlr's verdict names beside its leftovers for one
-// md group (cnagent.md CN30): the dm name of each leg_list member that the
-// converge's member reconciliation would put back or add (CN12) — one md has
-// failed and moved out of its slot, or one the running array lacks — on a leg
-// that can take it. detail is the group's running array as its row read it
+// md group (cnagent.md CN30): the dm name of each member that the converge's
+// member reconciliation would put back or add (CN12) — a leg_list member
+// other than an open repair's bad leg that md has failed and moved out of its
+// slot, or that the running array lacks, on a leg that can take it — then
+// each new leg of a CREATED repair whose abort flag the request carries,
+// and each bad leg of a repair that has started in md, that the converge
+// would remove (abortRemovals, startedBadLegs), and each new leg it would add,
+// after the put-back's removes, under the repair's conditions (repSteps).
+// detail is the group's running array as its row read it
 // OK, nil for any other row, the in-sync guard's ERROR among them
 // (probeGroup); legRows are the call's leg rows. legServes is what a
 // call can read of a leg's availability without building anything, so no
-// syncup is brought for a leg whose path is not live and optimized; a step
-// only the converge takes, the connect of a provisioned side that has no
-// controller, can still fail, and the member is then named again by every
-// read, and each round that answers from such a read brings the SyncupCntlr
-// again (cnagent.md, Known limits). A converge's code never names it
-// (convergeCntlr), so the round that answers from the re-send's observation
-// brings none for it. A member that still holds its slot, one being
-// recovered or a spare is never named. The late-member retry does not count
-// any of them (hasLateMember).
+// syncup is brought to put back or add a member on a leg whose path is not
+// live and optimized. A repair's removals are named whatever the leg's
+// path, since md removes a member that holds no place with no IO to it. A
+// step only the converge takes, the connect of a provisioned side that has
+// no controller, can still fail, and the member is then named again by
+// every read, and each round that answers from such a read brings the
+// SyncupCntlr again (cnagent.md, Known limits). A converge's code never
+// names it (convergeCntlr), so the round that answers from the re-send's
+// observation brings none for it. A member that still holds its slot, one being
+// recovered or a spare is never named, nor a new leg whose add waits for its
+// bad leg. The late-member retry does not count any of them (hasLateMember).
 func (s *CnAgentServer) putBackNames(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -1412,19 +1761,40 @@ func (s *CnAgentServer) putBackNames(
 	if detail == nil {
 		return nil
 	}
-	held := make(map[string]MdMember, len(detail.Members))
-	for _, member := range detail.Members {
-		held[member.DmName] = member
+	held := heldMembers(detail)
+	// takes is legTakesMember as a read can test it: the leg row first, and
+	// only then, once per leg, a lookup of its path.
+	tested := make(map[uint64]bool)
+	takes := func(lp *legPlan) bool {
+		ok, seen := tested[lp.legId]
+		if !seen {
+			ok = legRows[lp.legId].GetStatus() ==
+				pb.ResStatus_RES_STATUS_OK && s.legServes(ctx, plan, lp)
+			tested[lp.legId] = ok
+		}
+		return ok
 	}
 	var names []string
 	for _, lp := range gp.legs {
+		if gp.isBadLeg(lp.legId) {
+			continue
+		}
 		if member, ok := held[lp.name]; ok && !member.failedOutOfSlot() {
 			continue
 		}
-		if legRows[lp.legId].GetStatus() != pb.ResStatus_RES_STATUS_OK ||
-			!s.legServes(ctx, plan, lp) {
+		if !takes(lp) {
 			continue
 		}
+		names = append(names, lp.name)
+	}
+	for _, lp := range append(abortRemovals(gp, held),
+		startedBadLegs(gp, held)...) {
+		names = append(names, lp.name)
+	}
+	for _, lp := range putBackLegs(gp, held, takes) {
+		delete(held, lp.name)
+	}
+	for _, lp := range repSteps(gp, held, takes, takes).add {
 		names = append(names, lp.name)
 	}
 	return names
@@ -1448,7 +1818,8 @@ func (s *CnAgentServer) legServes(
 		view.available()
 }
 
-// probeGroup is the read-only CN28 view of a group: for RedundMdRaid1 a
+// probeGroup is the read-only CN28 view of a group: for RedundMdRaid1 the
+// array that holds any of its members (grpPlan.memberNames), and a
 // running array (degraded included) is OK with its mdStateLine in details,
 // read from sysfs alone (Md.Detail) — a dead member of an array that keeps
 // another in-sync member is the leg row's to report, never by itself a
@@ -1457,8 +1828,8 @@ func (s *CnAgentServer) legServes(
 // to the last in-sync member marks the array broken instead of failing the
 // member, and an array_state of "broken" is not running and reads ERROR
 // (CN29); for RedundNone the dm table decides. A running array holding a
-// member that left leg_list, which the converge would not fail, reads ERROR
-// with the converge's own text (inSyncGuard), so a read and a converge
+// member the group does not keep, which the converge would not fail, reads
+// ERROR with the converge's own text (inSyncGuard), so a read and a converge
 // report the same row. The array it read OK is returned too, for the
 // verdict, and nil whenever the row is not that: the verdict names no member
 // of a group the guard holds, whose converge would refuse again, so no
@@ -1485,7 +1856,7 @@ func (s *CnAgentServer) probeGroup(
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), nil
 	}
-	detail, err := s.md.Detail(ctx, walk, gp.legNames())
+	detail, err := s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), nil
 	}
@@ -1505,4 +1876,77 @@ func (s *CnAgentServer) probeGroup(
 			errInSyncGuard(leaver, detail.Dev).Error(), nil
 	}
 	return pb.ResStatus_RES_STATUS_OK, mdStateLine(detail), detail
+}
+
+// reportGrpReading writes, beside a group's rows, what the primary reads of
+// the group's running array (cnagent.md CN28): its reading, whether the
+// array is whole and which legs md holds in sync, and the verdict on the
+// group's repair (repairVerdict). detail is the array as the group's row read
+// it OK — a converge's after the pass's own member changes (ensureGroup) — and
+// nil for any other row: an absent, stopped or broken array, the in-sync
+// guard's ERROR and a RedundNone group give neither, since that a new leg is
+// no member of an array that does not run proves nothing about whether md
+// wrote to it (architecture.md, Repair). A group that builds no array at all
+// — a standby's, one the level suppresses, a deferred one — never gets here.
+//
+// Whole is md/degraded at zero: md counts a place with no member, a member
+// it has failed in its place and one it copies onto, and not a member
+// without a place. The legs held in sync are the group's leg_list legs and
+// its repair's new legs whose members md marks in sync (MdMember.inSync), in
+// ascending leg id, so a reading that does not change reads the same.
+func reportGrpReading(info *pb.CntlrInfo, gp *grpPlan, detail *MdDetail) {
+	if detail == nil {
+		return
+	}
+	held := heldMembers(detail)
+	reading := &pb.CntlrInfo_GrpInfo{Whole: detail.Degraded == 0}
+	legs := gp.legs
+	if gp.rep != nil {
+		legs = append(slices.Clone(gp.legs), gp.rep.newLegs...)
+	}
+	for _, lp := range legs {
+		if member, ok := held[lp.name]; ok && member.inSync() {
+			reading.InSyncLegIdList = append(reading.InSyncLegIdList, lp.legId)
+		}
+	}
+	slices.Sort(reading.InSyncLegIdList)
+	info.GrpIdToGrpInfo[gp.grpId] = reading
+	if gp.rep != nil {
+		info.RepIdToRepairInfo[gp.rep.repId] = repairVerdict(gp, held)
+	}
+}
+
+// repairVerdict is the primary's verdict on the group's repair from the
+// members its running array holds (CN12; architecture.md, Repair): started,
+// for an open repair, when every new leg holds a place (MdMember.holdsPlace),
+// copying or in sync, and md holds nothing on a bad leg; abort confirmed, for
+// a CREATED repair whose abort flag is in the cntlr's own request, when md
+// holds nothing on a new leg, the flag tying the confirmation to the flag the
+// sp worker set. The two never hold together, and an aborted repair has
+// neither. A repair with no new leg is never started.
+func repairVerdict(
+	gp *grpPlan,
+	held map[string]MdMember,
+) *pb.CntlrInfo_RepairInfo {
+	rp := gp.rep
+	started := rp.open() && len(rp.newLegs) > 0
+	confirmed := rp.aborting()
+	for _, lp := range rp.newLegs {
+		member, ok := held[lp.name]
+		if !ok || !member.holdsPlace() {
+			started = false
+		}
+		if ok {
+			confirmed = false
+		}
+	}
+	for _, lp := range gp.legs {
+		if _, ok := held[lp.name]; ok && rp.badLegIds[lp.legId] {
+			started = false
+		}
+	}
+	return &pb.CntlrInfo_RepairInfo{
+		Started:        started,
+		AbortConfirmed: confirmed,
+	}
 }

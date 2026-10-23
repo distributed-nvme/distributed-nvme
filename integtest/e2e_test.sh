@@ -360,7 +360,7 @@ SLOTS=0,1
 # leg_unhealthy <= side_unhealthy after the defaults are resolved. Nothing caps
 # them from above: ResolveEventThreshold's own comment (model/ops.go) says "No
 # upper bound applies: architecture.md, Common validation, only requires each
-# value to be >= 1". Copy step 6's one failover is the disable it makes
+# value to be >= 1". Copy step 7's one failover is the disable it makes
 # itself, which waits out no threshold (dnv-worker.md AR5), so these long
 # values do not hold it back.
 THR_QUIET_PRIMARY=1800
@@ -4094,7 +4094,7 @@ md_member_fail() {
 # --- the copy case's slowed source (e2e_integtest.md, The cases, copy) ------
 #
 # A clone's copy over the lab's network ends in well under a second, too soon
-# for copy step 6 to fail the primary over in the middle of it. throttle_from
+# for copy step 7 to fail the primary over in the middle of it. throttle_from
 # slows what this node sends from one address and port, and nothing else: a
 # root prio qdisc on the interface that reaches <peer ip>, whose map sends
 # every packet to the bands the stock pfifo_fast uses, beside a fourth band
@@ -4188,7 +4188,7 @@ unthrottle() {
 # clone_dst_wsect prints "<device number> <sectors>": the destination device
 # of this node's one dnv dm-clone, by the number the dm-clone's table names,
 # and the sectors written to that device since it was created, field 7 of
-# its stat. Copy step 6 reads it on a new primary, whose destination raid0 was
+# its stat. Copy step 7 reads it on a new primary, whose destination raid0 was
 # created with the promotion, so the count is what that primary's dm-clone
 # copied. It fails, saying so, unless exactly one dm-clone of this suite is on
 # the node and its table and the device's stat read.
@@ -4832,7 +4832,8 @@ kmsg_mark() { # <tag>
 
 # kmsg_errors is the second witness of the cutoff case's "no failed write",
 # because dd's own status alone proves less than it seems (the ops case's
-# READONLY rung says why): the count of kernel lines after the last <tag> that
+# READONLY rung says why), and the only one of the copy case's "no IO error
+# while a leg is repaired": the count of kernel lines after the last <tag> that
 # report a failed IO — the block layer's `<kind> error, dev …`, a buffered
 # write's `Buffer I/O error … lost async page write`, and multipath's `no
 # available path - failing I/O` — then up to twenty of them. The tag gone
@@ -5981,6 +5982,10 @@ CN_COPY_TOOLS="tc ip"
 # them for $WORK/sha-probe.err.
 HOST_TOOLS="nvme uuidgen systemctl udevadm dd sha256sum awk sed grep timeout"
 HOST_TOOLS="$HOST_TOOLS du df tail"
+# dmesg: the kernel-log witness (kmsg_mark, kmsg_errors) of the copy case's
+# repair step, which preflight_host asks of host0 only when that step runs, as
+# preflight_stas asks host0 for the cutoff case's own tools.
+HOST_KMSG_TOOLS="dmesg"
 # cp runs four unprivileged daemons and dnvctl. `ss` is what the helper's
 # `listening` predicate uses; pkill/pgrep are stop_all's fallback sweep.
 #
@@ -6459,6 +6464,17 @@ preflight_host() { # <h>
 	# this suite: a host without it fails here, naming the package.
 	if [ "$h" = 0 ] && run_has_case cutoff; then
 		preflight_stas "$h"
+	fi
+
+	# The copy case's repair step reads host0's kernel log for failed IO
+	# (host_kmsg_clean), so with md-raid1, where that step runs, host0 needs
+	# the witness's tool, as preflight_stas asks it for the cutoff case.
+	if [ "$h" = 0 ] && [ "$REDUND" = raid1 ] && run_has_case copy; then
+		missing=$(ssh_host "$h" "$(tools_cmd $HOST_KMSG_TOOLS)") ||
+			die "$label: listing the kernel-log witness's tools failed"
+		[ -z "$missing" ] ||
+			die "$label: missing tool(s) for the copy case's kernel-log" \
+				"witness: $(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
 	# Rule 6: the kernel's own autoconnector matches the discovery AEN this
@@ -7974,7 +7990,7 @@ cntlr_ns_exported() { # <cntlr id> <ss_id> <ns_id> [sp name]
 #
 #   * the cntlr's own build has ALREADY been waited out before the gate —
 #     setup's stage 10 (setup_wait_stack spends a WAIT_BUILD on both cntlrs)
-#     and copy's second pool, the fallback source or step 6's (its own stack
+#     and copy's second pool, the fallback source or step 7's (its own stack
 #     waits, and that pool is two sides rather than $SP_LEG_TOTAL legs), ops
 #     stage 03 and react stage 04 (a WAIT_BUILD on cntlr_legs_full_ready
 #     first), and cutoff's two gates of stage 08 (stages 05 and 06 each
@@ -9648,6 +9664,43 @@ check_sha0() { # <what just happened>
 	dev=$(host_dev "$UUID1")
 	host_wait_sha 0 "$dev" "$BASELINE_MIB" "$SHA0" "$WAIT_HOST" \
 		"host0 to read SHA0 back from $dev $1"
+}
+
+# host_kmsg_mark writes <tag> into host<h>'s kernel log, the marker the
+# kernel-log witness below counts from, and dies unless the helper read it
+# back (kmsg_mark): a log it cannot read must not pass for a clean one. The
+# copy case's repair step and the cutoff case mark host0 with a tag of their
+# own, minted per run from the cluster id.
+host_kmsg_mark() { # <h> <tag>
+	local out
+	out=$(helper_host "$1" kmsg_mark "$2") ||
+		die "host$1: the kmsg_mark verb failed"
+	assert_eq "$out" "kmsg=marked" \
+		"host$1: the kernel-log marker '$2' is written and read back"
+}
+
+# host_kmsg_clean is the kernel-log witness: no line reporting a failed IO
+# after the marker <tag> on host<h> (kmsg_errors). A marker the ring buffer no
+# longer holds is a die too, never a clean answer.
+host_kmsg_clean() { # <h> <tag> <when>
+	local out first
+	out=$(helper_host "$1" kmsg_errors "$2") ||
+		die "host$1: the kmsg_errors verb failed $3"
+	first=$(printf '%s\n' "$out" | sed -n 1p)
+	case "$first" in
+	kmsg_errors=0) ;;
+	kmsg_errors=unreadable)
+		die "host$1's kernel log no longer holds the marker" \
+			"'$2' $3, so its IO errors cannot be counted: the" \
+			"ring buffer wrapped. dmesg is in host$1's diagnostics below"
+		;;
+	*)
+		printf '%s\n' "$out" >&2
+		die "host$1's kernel log reports failed IO after the marker" \
+			"'$2' $3 ($first); the lines are above"
+		;;
+	esac
+	log "  host$1's kernel log $3: no failed IO after the marker"
 }
 
 # sp_gone is the drain's completion signal (c). NOT_FOUND is the ONLY answer
@@ -11862,18 +11915,20 @@ case_ops() {
 }
 
 # ---------------------------------------------------------------------------
-# Case: copy — transfer, clone, migration and spare
+# Case: copy — transfer, clone, migration, spare and repair
 # (e2e_integtest.md, The cases, copy)
 # ---------------------------------------------------------------------------
 #
-# The four RPC groups that move bytes between objects rather than creating
-# them: `xfer`, `clone`, `migr` and `spare` (architecture.md, Transfers,
-# Clones, Migrations and Spare legs).
+# The five RPC groups that move bytes between objects rather than creating
+# them: `xfer`, `clone`, `migr`, `spare` and `repair`, with `retired-leg`
+# beside the last (architecture.md, Transfers, Clones, Migrations, Spare
+# legs, Repairs and Retired legs).
 # Every one of them is exercised against the sp setup built, in the order the
 # dependencies force: the transfer exports $TD0, the clone copies that export
 # into a second thin device, the transfer is then aborted, the next two steps
-# move one leg's side between disk nodes, and the last fails the primary over
-# in the middle of a second clone's copy, from a second pool.
+# move one leg's side between disk nodes, the step after them replaces a leg
+# whose disk node died, and the last fails the primary over in the middle of
+# a second clone's copy, from a second pool.
 #
 # ===========================================================================
 # THREE CONSTRAINTS ON THIS CASE, AND WHY EACH IS FORCED
@@ -11967,7 +12022,7 @@ case_ops() {
 # faults, never a third attempt.
 #
 # The fallback needs two more disk nodes than sp0 took, as does the second
-# pool copy step 6 builds, and they are there
+# pool copy step 7 builds, and they are there
 # without changing --dns-per-vm: every DN is a $BACKING_SIZE loop device and a
 # side of sp0 costs it $INIT_EXT_CNT extents of $EXTENT_SIZE, so a DN that
 # already carries one still reports free_ext_cnt > 0 (`dn get`), and
@@ -11996,15 +12051,18 @@ case_ops() {
 #
 # $TD_CLONE must be a bare jq identifier for the same reason $TD0 is: `td
 # list` is keyed by td_name and every filter reaches a row as
-# `.name_to_td.<name>`. c0, m0, m1, x0 and k0 are this case's names; ops used
-# s0 and t1 and they died with its sp.
+# `.name_to_td.<name>`. c0, m0, m1, x0, k0 and r0 are this case's names; ops
+# used s0 and t1 and they died with its sp. r0 is copy step 6's repair, whose
+# rep_name follows the common name rule and avoids the reserved prefix
+# (architecture.md, Common validation).
 XFER0=x0
 CLONE0=k0
 TD_CLONE=c0
 MIGR0=m0
 MIGR1=m1
+COPY_REP=r0
 
-# The second pool's names, the fallback source's or copy step 6's (one at a
+# The second pool's names, the fallback source's or copy step 7's (one at a
 # time: each tears it down before the next builds it). $SP_SRC is a second
 # sp_name inside the
 # SAME cluster, so it needs no cluster of its own; $TD_SRC may repeat $TD0's
@@ -12072,10 +12130,10 @@ SP_BLOCK_SIZE=""
 
 # The clone source, whichever branch filled it. COPY_SRC_SHA is the digest of
 # the source's pattern, which copy step 3 holds the clone's destination to over
-# its first $BASELINE_MIB MiB; copy step 6 fills these again for its own
+# its first $BASELINE_MIB MiB; copy step 7 fills these again for its own
 # source and holds its destination to the whole source's digest instead.
 # COPY_SRC_SP and COPY_SRC_TD name the sp and thin device whose slice-0 bitmap
-# copy step 2 appends; copy step 6 appends none.
+# copy step 2 appends; copy step 7 appends none.
 COPY_SRC_BRANCH=""
 COPY_SRC_NQN=""
 COPY_SRC_IDX=1
@@ -12129,6 +12187,14 @@ COPY_QUIET_LAST=""
 # COPY_MEMBER_LAST is copy_member_in_sync's last state and slot, logged when
 # they change.
 COPY_MEMBER_LAST=""
+# Copy step 6's repair: the rep_id CreateRepair returned, the kernel-log
+# marker host0's witness counts from, minted per run from the cluster id, and
+# the last observation its predicates logged (copy_rep_leg_dead,
+# copy_rep_stage_is and copy_rep_whole share it, as no two of their waits
+# overlap).
+COPY_REP_ID=""
+COPY_REP_TAG=""
+COPY_REP_LAST=""
 MD_STATE_LAST=""
 SRC_STACK_LAST=""
 
@@ -12137,7 +12203,7 @@ SRC_STACK_LAST=""
 # no filter spells the walk twice, exactly as $SP_GRP_PATH is.
 COPY_GRP0='.slice_list[0].data_grp_list[0]'
 
-# --- copy step 6, the failover in the middle of a clone's copy --------------
+# --- copy step 7, the failover in the middle of a clone's copy --------------
 #
 # CLONE_FO and TD_FO are the step's clone and destination thin device, bare
 # jq identifiers like the case's other names. The step's two thin devices,
@@ -12973,7 +13039,7 @@ src_td_created() { # <sp name> <td name>
 #   * AR5 needs a failover candidate and this pool has exactly one cntlr;
 #   * AR6 would need its pool over the low water mark, and this pool holds
 #     one pattern host1 writes, $BASELINE_MIB MiB for the fallback and at most
-#     $COPY_FO_MIN_MIB MiB for copy step 6, with nothing else written into it,
+#     $COPY_FO_MIN_MIB MiB for copy step 7, with nothing else written into it,
 #     well below the mark of a data group of $INIT_EXT_CNT extent(s);
 #   * and it carries the QUIET threshold set anyway, because the copy case does.
 #
@@ -13207,7 +13273,7 @@ copy_src_self() {
 # places, named by <what> in its log lines: as the decided fallback, with the
 # defaults, only when copy_clone_build reported a source fault, where
 # COPY_SRC_SHA is the digest the destination is held to in place of SHA0;
-# and as copy step 6's source, which a failover of sp0 does not move, with a
+# and as copy step 7's source, which a failover of sp0 does not move, with a
 # pattern over its first COPY_FO_MIN_MIB MiB, where the destination is held
 # to the digest of the whole source instead.
 # SRC_CN is the --cn guest it lands on.
@@ -13310,7 +13376,7 @@ copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
 	'' | *[!0-9]* | 0) die "$SP_SRC ss create returned ss_id '$srcss'" ;;
 	esac
 	# host1 plus every CN: host1 writes the pattern, and whichever CN is sp0's
-	# primary reads it back as the clone's source, copy step 6's new primary
+	# primary reads it back as the clone's source, copy step 7's new primary
 	# among them.
 	ctl_ok --sp "$SP_SRC" ss set-hosts --nqn "$SS_SRC" \
 		--hosts "${HOST_NQN[1]},$CN_HOST_NQNS"
@@ -13335,7 +13401,7 @@ copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
 	# host1 to $SS0, which no other step of this suite gives host1 a path to.
 	# For the fallback it would do worse: $SS0's ns 1 carries $UUID1, the
 	# same identity the transfer's namespace host1 holds then, and both would
-	# land on one kernel. At step 6 host1 has let go of the transfer.
+	# land on one kernel. At step 7 host1 has let go of the transfer.
 	host_connect 1 "$SRC_TRADDR" "$SRC_TRSVCID" "$SS_SRC"
 	host_wait_ana 1 "$SS_SRC" "$SRC_TRADDR" "$UUID3" optimized
 	wait_dev 1 "$UUID3"
@@ -13379,7 +13445,7 @@ copy_src_released() { # <v…>
 }
 
 # copy_src_sp_teardown removes everything copy_src_sp_build made. It runs only
-# where that build ran — after the fallback, and at the end of copy step 6 —
+# where that build ran — after the fallback, and at the end of copy step 7 —
 # and it runs while the run is still healthy: on a failure nothing is removed
 # and the failure dump keeps it all.
 #
@@ -13396,7 +13462,7 @@ copy_src_released() { # <v…>
 # cluster (cnagent.md CN21, Known limits), and this subsystem is not one. With
 # no controller-loss timeout on the agent's connections, such a controller
 # would retry for as long as it stayed. Which CNs connected it differs between
-# the two callers — the fallback's primary, step 6's old and new primaries —
+# the two callers — the fallback's primary, step 7's old and new primaries —
 # so every --cn guest is told, and a guest with no such controller has nothing
 # to drop.
 copy_src_sp_teardown() {
@@ -14333,7 +14399,545 @@ copy_spare() {
 }
 
 # ---------------------------------------------------------------------------
-# Copy step 6 — a failover in the middle of a clone's copy
+# Copy step 6 — an operator's repair of a leg whose disk node died (raid1 only)
+# ---------------------------------------------------------------------------
+#
+# A repair replaces a bad leg of a raid1 group by a new leg: the primary adds
+# the new leg to the running array, the sp worker moves the repair to STARTED
+# once the primary reports the new leg holding a place in it, and the
+# operator's finish puts the new leg in the bad leg's place and keeps the bad
+# leg as a retired leg, whose side keeps its data on its disk node until it is
+# deleted (architecture.md, Repairs, Repair, Retired legs). This step runs one
+# on $COPY_GRP0 for a leg whose disk node dies. The suite skips it under
+# --redund none (e2e_integtest.md, Known limits), where CreateRepair refuses
+# the pool.
+#
+# THE GROUP AND THE LEG. $COPY_GRP0 is the group every placement step of this
+# case works on, and it holds the first stripe of $TD0, so check_sha0's reads
+# go through it while its leg is dead. Step 5 left it with no spare leg, which
+# CreateRepair would refuse (architecture.md, Repairs). The pool has no
+# repair, no retired leg and no clone here, which the step asserts: `sp get`
+# shows neither a repair's new leg nor a retired leg, and a clone's group
+# sits outside slice_list, so with none of them slice_list names every side of
+# the pool; and no second pool stands between step 3's teardown and step 7's
+# build. The bad leg is one whose single side sits on a disk node that
+# carries no other side (react_leg_alone): killing that disk node takes down
+# that one side, the retired leg's delete leaves the node's record with no
+# side at all, and the node's returning agent has exactly that side to
+# remove. The group's other leg stays healthy and in sync, which the
+# primary's add of the new leg needs (cnagent.md CN12).
+#
+# THE FAULT IS react's (react_kill_dn): the agent, then its nvmet port, as
+# kernel objects outlive their agent and only the port's removal fails the
+# primary's probe of the leg (cnagent.md CN11). That probe gives the leg the
+# health epoch CreateRepair requires of a bad leg, which is refused with "use
+# a migration" while healthy (architecture.md, Repairs); so the step first
+# waits for the leg to read healthy, and the epoch it then waits for is the
+# kill's. The quiet thresholds keep every reaction off the pool for longer
+# than the step runs: the worker's own leg repair waits side_unhealthy
+# ($THR_SIDE s) from the side's epoch and then skips a group with a repair
+# (dnv-worker.md AR8), and the retire timer deletes only a retired leg
+# RetiredLegMaxAge old (dnv-worker.md AR12), so the operator's delete is the
+# one that runs. No failover is expected, and none may happen: leg rows do
+# not count toward a cntlr's health (dnv-worker.md HL2).
+#
+# HOST IO. host0's kernel log is marked before the kill, and host0 reads SHA0
+# through the group while the leg is dead, once md holds the group whole, and
+# at the end. Every member carries md's failfast flag (cnagent.md CN12), so a
+# read that meets the dead member fails that member and md serves it from
+# the other: the host sees no error, and its kernel log since the mark must
+# report no failed IO (host_kmsg_clean). host1 holds no path to the pool
+# here: step 3 took it off the transfer.
+#
+# THE STAGE IS READ THROUGH `repair get` ALONE, as an operator reads it: the
+# record's rep_stage, which only the worker moves (dnv-worker.md AR11). A
+# STARTED repair takes neither an abort nor a cancel (architecture.md,
+# Repair), and the step asserts both refusals, which name the stage. The
+# finish runs as soon as the repair is STARTED, while md may still copy onto
+# the new leg; md's end of the copy is read from the primary afterwards
+# (copy_rep_whole).
+
+# copy_rep_leg_epoch is the step's wait on the bad leg's health epoch in `sp
+# get`: true once the leg at <position> of the group's leg_list, which must
+# still be <leg id>, reads healthy (zero) or dead (set). The primary's probe
+# of the leg sets it once the leg's disk node is gone (cnagent.md CN11;
+# dnv-worker.md HL2). The leg's and its side's epochs are logged as they
+# change; uint64 fields render as decimal strings, "0" while healthy
+# (dnvctl.md CT4).
+copy_rep_leg_epoch() { # <position> <leg id> <healthy|dead>
+	local id epoch sig
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	id=$(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$1].leg_id")
+	[ "$id" = "$2" ] ||
+		die "leg $2 left position $1 of slice 0's first data group for" \
+			"leg '$id' before its repair: under the quiet thresholds no" \
+			"reaction may move it (dnv-worker.md AR8)"
+	epoch=$(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$1].err_epoch")
+	sig="leg $2 err_epoch $epoch, its side's"
+	sig="$sig $(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$1].side_list[0].err_epoch")"
+	if [ "$sig" != "$COPY_REP_LAST" ]; then
+		COPY_REP_LAST=$sig
+		log "  $sig"
+	fi
+	case "$epoch" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	if [ "$3" = dead ]; then
+		[ "$epoch" != 0 ]
+	else
+		[ "$epoch" = 0 ]
+	fi
+}
+
+# copy_rep_stage_is is the stage wait, read through `repair get` alone: true
+# once the record's rep_stage is <stage>. The stage, the abort flag, the new
+# leg's health epoch and its side's provisioned flag and health epoch are
+# logged as they change, so a wait that runs out shows which part of the
+# repair stopped: the side's zeroing before the worker's provisioned flip
+# (architecture.md, Side provisioning protocol), or the primary's add
+# (cnagent.md CN12). A repair that reads ABORTED, or whose abort flag is set,
+# dies at once: this step never asks for an abort that could succeed, and the
+# worker aborts no repair (dnv-worker.md AR9).
+copy_rep_stage_is() { # <REP_STAGE_*>
+	local repstage abort lepoch prov sepoch sig
+	if ! ctl_try repair get --name "$COPY_REP"; then
+		return 1
+	fi
+	repstage=$(jq_of "$CTL_OUT" '.repair.rep_stage')
+	abort=$(jq_of "$CTL_OUT" '.repair.try_to_abort')
+	lepoch=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].err_epoch')
+	prov=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned')
+	sepoch=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].err_epoch')
+	sig="repair $COPY_REP $repstage, abort flag $abort; new leg err_epoch"
+	sig="$sig $lepoch, its side provisioned $prov, err_epoch $sepoch"
+	if [ "$sig" != "$COPY_REP_LAST" ]; then
+		COPY_REP_LAST=$sig
+		log "  $sig"
+	fi
+	if [ "$repstage" = REP_STAGE_ABORTED ] || [ "$abort" != false ]; then
+		die "repair $COPY_REP reads $repstage with its abort flag $abort," \
+			"which nothing in this step asked for"
+	fi
+	[ "$repstage" = "$1" ]
+}
+
+# copy_rep_whole is "md holds the group whole on the primary": grp_md_clean at
+# the finish's revision, the array's state words saying the copy ended, and
+# then the reading the primary reports beside its rows (cnagent.md CN28): the
+# whole flag set and the legs md holds in sync exactly <want>, the group's
+# leg_list ids sorted as a jq array literal. A pass whose read of the array
+# after its own changes failed reports no reading (cnagent.md CN12), so the
+# reading is polled, never asserted once.
+copy_rep_whole() { # <cntlr id> <grp id> <min applied revision> <want>
+	local whole insync sig
+	grp_md_clean "$1" "$2" "$3" || return 1
+	whole=$(jq_of "$CTL_OUT" ".cntlr_info.grp_id_to_grp_info[\"$2\"].whole")
+	insync=$(jq_of "$CTL_OUT" \
+		"(.cntlr_info.grp_id_to_grp_info[\"$2\"].in_sync_leg_id_list // [])
+		 | sort | tojson")
+	sig="group $2 on cntlr $1: whole $whole, legs in sync $insync (want $4)"
+	if [ "$sig" != "$COPY_REP_LAST" ]; then
+		COPY_REP_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$whole" = true ] && [ "$insync" = "$4" ]
+}
+
+# copy_rep_dropped is "the cntlr holds every leg and not the retired one": the
+# primary's whole stack (cntlr_full_ready) or a standby's legs
+# (cntlr_legs_full_ready), every row OK, and no row of <leg id> at all, as no
+# cntlr connects a retired leg (architecture.md, Repair). The row is needed as
+# well as the count: while the repair is open the new leg's OK row stands in
+# the count for the bad leg's failing one, so the count alone reads full
+# before the finish has reached the cntlr.
+copy_rep_dropped() { # <full|legs> <cntlr id> <leg id>
+	if [ "$1" = full ]; then
+		cntlr_full_ready "$2" || return 1
+	else
+		cntlr_legs_full_ready "$2" || return 1
+	fi
+	[ "$(jq_of "$CTL_OUT" "(.cntlr_info.leg_id_to_leg // {}) | has(\"$3\")")" = false ]
+}
+
+copy_repair() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== copy step 6 (operator repair) SKIPPED: --redund $REDUND." \
+			"A RedundNone group has one leg and no md array, and" \
+			"CreateRepair (gateway/repair.go) refuses its pool with" \
+			"INVALID_ARGUMENT."
+		return 0
+	fi
+	stage 06 "a disk node dies under slice 0's data group: repair create, start and finish, retired-leg list and delete"
+	local gid sliceid ext n i v pos bad badidx badside badaddr dnv dnk msg
+	local before_addrs before_vms before_primary before_failovers
+	local newleg newside newaddr newvm repstage rev want retired epoch
+	local dnsides dnfree dntotal after_sides after_free
+
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	# The primary this whole step must keep, and the count of failovers the
+	# worker has applied so far, which must not grow: both asserted at the end,
+	# as in react's step 05.
+	before_primary=$PRIMARY_CNTLR_ID
+	before_failovers=$(worker_failover_cnt)
+	gid=$(sp_field "$COPY_GRP0.grp_id")
+	# pb.Slice has no slice_id field; slice_list follows slice_id_list.
+	sliceid=$(sp_field '.sp_conf.slice_id_list[0]')
+	ext=$(sp_field "$COPY_GRP0.ext_cnt")
+	for v in "$gid" "$sliceid" "$ext"; do
+		case "$v" in
+		'' | *[!0-9]* | 0)
+			die "slice 0's data group read grp_id '$gid', slice id" \
+				"'$sliceid', ext_cnt '$ext': each must be a non-zero decimal"
+			;;
+		esac
+	done
+
+	# What the step's counts rest on (see the step's header).
+	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 0 \
+		"the group holds no spare leg: step 5 deleted the one it parked"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" "the group has no repair"
+	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | length" 0 \
+		"the group has no retired leg"
+	assert_field "$SP_JSON" '.sp_conf.repair_name_list | length' 0 \
+		"the pool has no repair, whose new leg \`sp get\` would leave out"
+	assert_field "$SP_JSON" '.sp_conf.retired_leg_id_list | length' 0 \
+		"the pool has no retired leg, which \`sp get\` would leave out"
+	assert_field "$SP_JSON" '.sp_conf.clone_name_list | length' 0 \
+		"the pool has no clone, whose group slice_list would leave out"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.leg_list[] | select((.side_list | length) != 1)] | length" 0 \
+		"every leg of the group has one side: no migration is in flight"
+	ctl_ok repair list
+	assert_field "$CTL_OUT" '.name_to_repair | length' 0 \
+		"ListRepairs on a pool with no repair"
+	ctl_ok retired-leg list
+	assert_field "$CTL_OUT" '.leg_id_to_retired_leg | length' 0 \
+		"ListRetiredLegs on a pool with no retired leg"
+
+	# THE BAD LEG: the first whose single side sits on a disk node that carries
+	# no other side of the pool (react_leg_alone).
+	n=$(sp_field "$COPY_GRP0.leg_list | length")
+	assert_eq "$n" "$LEGS" "slice 0's data group's leg count"
+	pos=-1
+	for ((i = 0; i < n; i++)); do
+		if react_leg_alone "$i"; then
+			pos=$i
+			break
+		fi
+	done
+	[ "$pos" -ge 0 ] ||
+		die "no leg of slice 0's first data group has a single side on a" \
+			"disk node that carries no other side of $SP. Killing a disk" \
+			"node with a second side would degrade a second group too, and" \
+			"the retired leg's delete would not leave the node empty, which" \
+			"the step's wait on its counts needs"
+	bad=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_id")
+	badidx=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_idx")
+	badside=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].side_id")
+	badaddr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].addr_port")
+	case "$bad" in
+	'' | *[!0-9]* | 0) die "the bad leg has leg_id '$bad'" ;;
+	esac
+	case "$badside" in
+	'' | *[!0-9]* | 0) die "the bad leg's side has side_id '$badside'" ;;
+	esac
+	case "$badidx" in
+	'' | *[!0-9]*) die "the bad leg has leg_idx '$badidx'" ;;
+	esac
+	dnv=$(dn_vm_of_addr "$badaddr")
+	dnk=$(dn_inst_of_addr "$badaddr")
+	assert_ne "$dnv" none \
+		"side $badside's addr_port $badaddr names a --dn guest"
+	assert_ne "$dnk" none \
+		"side $badside's addr_port $badaddr names a dn instance"
+	diag_note_dn "$dnv" "$dnk"
+	before_addrs=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
+	before_vms=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
+
+	# The leg reads healthy first, so the epoch waited for below is the kill's
+	# (see the step's header).
+	COPY_REP_LAST=""
+	wait_until "$WAIT_REACT" "leg $bad to read healthy before its disk node dies" \
+		copy_rep_leg_epoch "$pos" "$bad" healthy
+
+	COPY_REP_TAG="dnv-e2e-copy-repair-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$COPY_REP_TAG"
+	log "  killing dn$dnv instance $dnk ($badaddr), which carries side" \
+		"$badside of leg $bad (position $pos, leg_idx $badidx, of group" \
+		"$gid) and no other side of $SP; the group's legs are on" \
+		"$before_addrs"
+	react_kill_dn "$dnv" "$dnk"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_REACT" \
+		"the primary's probe to give leg $bad a health epoch (cnagent.md CN11)" \
+		copy_rep_leg_epoch "$pos" "$bad" dead
+	check_sha0 "through group $gid while leg $bad's disk node is dead"
+
+	# The create, with a fresh new leg: no --retired-leg, and no --dn-black or
+	# --dn-white, so the gateway places the new side by its own rule, outside
+	# the group's disk nodes and, at tier 1, their locations (architecture.md,
+	# Per-operation allocation).
+	ctl_ok repair create --name "$COPY_REP" --grp "$gid" --bad-legs "$bad"
+	COPY_REP_ID=$(jq_of "$CTL_OUT" '.rep_id')
+	newleg=$(jq_of "$CTL_OUT" '.new_leg_id')
+	for v in "$COPY_REP_ID" "$newleg"; do
+		case "$v" in
+		'' | *[!0-9]* | 0)
+			die "repair create returned rep_id '$COPY_REP_ID' and" \
+				"new_leg_id '$newleg': each must be a non-zero decimal"
+			;;
+		esac
+	done
+	case ",$(sp_field "[$COPY_GRP0.leg_list[].leg_id] | join(\",\")")," in
+	*",$newleg,"*)
+		die "CreateRepair's new leg $newleg is a leg of group $gid already"
+		;;
+	esac
+
+	ctl_ok repair get --name "$COPY_REP"
+	assert_field "$CTL_OUT" '.rep_name' "$COPY_REP" "GetRepairReply.rep_name"
+	assert_field "$CTL_OUT" '.repair.rep_id' "$COPY_REP_ID" \
+		"the stored rep_id is the one CreateRepair returned"
+	assert_field "$CTL_OUT" '.repair.grp_id' "$gid" \
+		"the repair names group $gid"
+	assert_field "$CTL_OUT" '.repair.slice_id' "$sliceid" \
+		"the repair names slice 0 as its group's parent"
+	assert_field "$CTL_OUT" '.repair.clone_name' "" "and no clone"
+	assert_field "$CTL_OUT" '.repair.bad_leg_id_list | join(",")' "$bad" \
+		"the repair's one bad leg is leg $bad"
+	assert_field "$CTL_OUT" '.repair.new_leg_list | length' 1 \
+		"the repair carries one new leg"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].leg_id' "$newleg" \
+		"and it is the leg CreateRepair returned"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list | length' 1 \
+		"the new leg has exactly one side"
+	assert_field "$CTL_OUT" '.repair.new_leg_id_to_retired_epoch | length' 0 \
+		"a fresh new leg keeps no retired time"
+	assert_field "$CTL_OUT" '.repair.try_to_abort' false \
+		"the repair's abort flag is clear"
+	repstage=$(jq_of "$CTL_OUT" '.repair.rep_stage')
+	case "$repstage" in
+	REP_STAGE_CREATED | REP_STAGE_STARTED) ;;
+	*) die "repair $COPY_REP reads stage '$repstage' right after its create" ;;
+	esac
+	newside=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].side_id')
+	newaddr=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].addr_port')
+	newvm=${newaddr%:*}
+	case "$newside" in
+	'' | *[!0-9]* | 0) die "the new leg's side has side_id '$newside'" ;;
+	esac
+	case ",$before_addrs," in
+	*",$newaddr,"*)
+		die "the new leg landed on $newaddr, a disk node the group already" \
+			"occupies; CreateRepair black-lists the group's disk nodes" \
+			"(architecture.md, Repairs)"
+		;;
+	esac
+	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
+		case ",$before_vms," in
+		*",$newvm,"*)
+			die "the new leg landed on a DN VM the group already occupies" \
+				"($before_vms). Tier 1 (architecture.md, Per-operation" \
+				"allocation) excludes the group's locations and relaxes" \
+				"only when no DN outside them can take the group's ext_cnt"
+			;;
+		esac
+	else
+		log "  $DN_VM_CNT DN VM(s) and $LEGS leg(s) per group: tier 1" \
+			"(architecture.md, Per-operation allocation) has nowhere" \
+			"anti-affine to go, so the new leg's VM is not asserted (E2E4)"
+	fi
+	log "  repair $COPY_REP (rep_id $COPY_REP_ID) reads $repstage; its new" \
+		"leg $newleg has side $newside on $newaddr"
+
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "$COPY_REP" \
+		"the group names its repair"
+	assert_field "$SP_JSON" '.sp_conf.repair_name_list | join(",")' "$COPY_REP" \
+		"the pool lists the one repair"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_id" "$bad" \
+		"the bad leg keeps its place in leg_list until the finish"
+	ctl_ok repair list
+	assert_field "$CTL_OUT" '.name_to_repair | length' 1 \
+		"ListRepairs holds the one repair"
+	assert_field "$CTL_OUT" ".name_to_repair[\"$COPY_REP\"].rep_id" \
+		"$COPY_REP_ID" "under its name"
+
+	COPY_REP_LAST=""
+	msg="the worker to move repair $COPY_REP to STARTED: the new leg's side"
+	msg="$msg zeroes and is flipped provisioned, and the primary adds the new"
+	msg="$msg leg to group $gid's array and reports it holding a place"
+	wait_until "$WAIT_PROVISION" "$msg" copy_rep_stage_is REP_STAGE_STARTED
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned' \
+		true "a STARTED repair's new side is provisioned"
+	ctl_fail_grep FAILED_PRECONDITION REP_STAGE_STARTED \
+		repair abort --name "$COPY_REP"
+	ctl_fail_grep FAILED_PRECONDITION REP_STAGE_STARTED \
+		repair cancel --name "$COPY_REP"
+	ctl_ok repair get --name "$COPY_REP"
+	assert_field "$CTL_OUT" '.repair.rep_stage' REP_STAGE_STARTED \
+		"the refused abort and cancel left the repair STARTED"
+	assert_field "$CTL_OUT" '.repair.try_to_abort' false \
+		"and its abort flag clear"
+
+	ctl_ok repair finish --name "$COPY_REP"
+	assert_field "$CTL_OUT" '.rep_id' "$COPY_REP_ID" "FinishRepairReply.rep_id"
+	assert_field "$CTL_OUT" '.retired_leg_id' "$bad" \
+		"FinishRepairReply.retired_leg_id"
+	ctl_fail NOT_FOUND repair get --name "$COPY_REP"
+	ctl_ok repair list
+	assert_field "$CTL_OUT" '.name_to_repair | length' 0 \
+		"the finish took the repair away"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
+		"the group still has $LEGS legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_id" "$newleg" \
+		"the new leg holds the bad leg's place in leg_list"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_idx" "$badidx" \
+		"with the bad leg's leg_idx"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].side_list | length" 1 \
+		"and its one side"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].side_list[0].side_id" \
+		"$newside" "the side the repair carried"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.leg_list[] | select(.leg_id == \"$bad\")] | length" 0 \
+		"the bad leg left leg_list"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" "the group names no repair"
+	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 0 \
+		"the group holds no spare leg"
+	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | join(\",\")" \
+		"$bad" "the group lists the bad leg as its one retired leg"
+	assert_field "$SP_JSON" '.sp_conf.repair_name_list | length' 0 \
+		"the pool lists no repair"
+	assert_field "$SP_JSON" '.sp_conf.retired_leg_id_list | join(",")' "$bad" \
+		"the pool lists the one retired leg"
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+
+	ctl_ok retired-leg list
+	assert_field "$CTL_OUT" '.leg_id_to_retired_leg | length' 1 \
+		"ListRetiredLegs holds the one retired leg"
+	retired=".leg_id_to_retired_leg[\"$bad\"]"
+	assert_field "$CTL_OUT" "$retired.grp_id" "$gid" \
+		"under the bad leg's id, naming group $gid"
+	assert_field "$CTL_OUT" "$retired.leg_idx" "$badidx" \
+		"and the leg_idx the leg left"
+	assert_field "$CTL_OUT" "$retired.side.side_id" "$badside" \
+		"the retired leg keeps the bad leg's side"
+	assert_field "$CTL_OUT" "$retired.side.addr_port" "$badaddr" \
+		"on the dead disk node"
+	assert_field "$CTL_OUT" "$retired.slice_id" "$sliceid" \
+		"its group's parent is slice 0"
+	assert_field "$CTL_OUT" "$retired.clone_name" "" "and no clone"
+	epoch=$(jq_of "$CTL_OUT" "$retired.retired_epoch")
+	case "$epoch" in
+	'' | *[!0-9]* | 0) die "the retired leg's retired_epoch reads '$epoch'" ;;
+	esac
+	log "  leg $newleg took leg $bad's place; leg $bad is retired at" \
+		"$epoch with side $badside on $badaddr"
+
+	# md's end of the copy onto the new leg, at the finish's revision, then
+	# host0's reads through the whole group, and its kernel log since the
+	# mark. Last, no cntlr holds the retired leg any more.
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group $gid whole,"
+	msg="$msg in sync on legs $want"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$gid" "$rev" "$want"
+	check_sha0 "once md held group $gid whole on the new leg $newleg"
+	host_kmsg_clean 0 "$COPY_REP_TAG" "once md held group $gid whole"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to hold every leg and no longer the retired leg $bad" \
+		copy_rep_dropped full "$PRIMARY_CNTLR_ID" "$bad"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the standby cntlr $STANDBY_CNTLR_ID to hold every leg and no longer the retired leg $bad" \
+		copy_rep_dropped legs "$STANDBY_CNTLR_ID" "$bad"
+
+	# The delete gives the side back to the dead disk node's record, which
+	# then carries no side: the pick made it carry this one alone.
+	ctl_ok dn get --addr "$badaddr"
+	dnsides=$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list | length')
+	dnfree=$(jq_of "$CTL_OUT" '.dn_conf.free_ext_cnt')
+	dntotal=$(jq_of "$CTL_OUT" '.dn_conf.total_ext_cnt')
+	for v in "$dnsides" "$dnfree" "$dntotal"; do
+		case "$v" in
+		'' | *[!0-9]*)
+			die "disk node $badaddr's record reads $dnsides side pointer(s)," \
+				"free_ext_cnt '$dnfree', total_ext_cnt '$dntotal'"
+			;;
+		esac
+	done
+	assert_field "$CTL_OUT" \
+		"[.dn_conf.side_ptr_list[] | select(.side_id == \"$badside\")] | length" 1 \
+		"the retired leg's side stays in its disk node's record (architecture.md, Repair)"
+	ctl_ok retired-leg delete --leg "$bad"
+	assert_field "$CTL_OUT" '.leg_id' "$bad" "DeleteRetiredLegReply.leg_id"
+	ctl_ok retired-leg list
+	assert_field "$CTL_OUT" '.leg_id_to_retired_leg | length' 0 \
+		"the deleted retired leg is no longer listed"
+	sp_refresh
+	assert_field "$SP_JSON" '.sp_conf.retired_leg_id_list | length' 0 \
+		"the pool lists no retired leg"
+	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | length" 0 \
+		"the group lists no retired leg"
+	ctl_ok dn get --addr "$badaddr"
+	after_sides=$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list | length')
+	after_free=$(jq_of "$CTL_OUT" '.dn_conf.free_ext_cnt')
+	assert_field "$CTL_OUT" \
+		"[.dn_conf.side_ptr_list[] | select(.side_id == \"$badside\")] | length" 0 \
+		"the retired side's pointer left disk node $badaddr's record"
+	assert_eq "$after_sides" "$((dnsides - 1))" \
+		"disk node $badaddr's side pointers after the delete"
+	assert_eq "$after_free" "$((dnfree + ext))" \
+		"disk node $badaddr's free extents after the delete, the group's ext_cnt $ext given back"
+	assert_eq "$after_sides" 0 \
+		"disk node $badaddr carries no side now, as the pick made it carry the retired side alone"
+	assert_eq "$after_free" "$dntotal" \
+		"disk node $badaddr's free extents equal its total again"
+	log "  disk node $badaddr's record: $dnsides side pointer(s) and" \
+		"$dnfree free extent(s) before the delete, $after_sides and" \
+		"$after_free of $dntotal after it"
+
+	# The disk node comes back. Its agent finds a side no record names and
+	# removes it (dnagent.md DN6), and its counts then agree with its record
+	# (dnagent.md DN18), both now empty.
+	react_return_dn "$dnv" "$dnk"
+	DN_COUNTS_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"dn$dnv instance $dnk to remove the deleted side and count its whole data area free, as its record does" \
+		dn_counts_agree "$dnv" "$dnk"
+	sp_refresh
+	sp_totals
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the primary to report all $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs again" \
+		cntlr_full_ready "$PRIMARY_CNTLR_ID"
+
+	sp_refresh
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary after the repair is the one the step started with (a dead leg must not fail the primary over)"
+	assert_eq "$(worker_failover_cnt)" "$before_failovers" \
+		"the worker's applied failovers across the step (a dead leg must not fail the primary over)"
+	check_sha0 "at the end of the repair step"
+	host_kmsg_clean 0 "$COPY_REP_TAG" "at the end of the repair step"
+}
+
+# ---------------------------------------------------------------------------
+# Copy step 7 — a failover in the middle of a clone's copy
 # ---------------------------------------------------------------------------
 #
 # A clone's dm-clone keeps its metadata on the clone's clone meta group, whose
@@ -14490,7 +15094,7 @@ copy_fo_served() {
 }
 
 copy_failover() {
-	stage 06 "a clone's copy, slowed, survives a failover of its primary in its middle"
+	stage 07 "a clone's copy, slowed, survives a failover of its primary in its middle"
 	local size mib regions min rate out dev old_id old_cn new_id new_cn new_traddr
 	local fo_before unsynced_before pre new_hyd wsect bound low t_dis t_moved
 	local t_new t_opt pat src_sha prov
@@ -14498,11 +15102,11 @@ copy_failover() {
 	sp_refresh
 	sp_read_roles
 	[ "$SPARE_CN" -ge 0 ] ||
-		die "copy step 6 needs a CN that carries no cntlr of $SP for its" \
+		die "copy step 7 needs a CN that carries no cntlr of $SP for its" \
 			"second pool's source, and every --cn guest carries one"
 	copy_cn_host_nqns
 	case "$SP_BLOCK_SIZE" in
-	'' | *[!0-9]* | 0) die "copy step 6 runs after stage 02 read $SP's block size" ;;
+	'' | *[!0-9]* | 0) die "copy step 7 runs after stage 02 read $SP's block size" ;;
 	esac
 
 	# The two thin devices' size: COPY_FO_MIN_MIB rounded up to a whole
@@ -14519,7 +15123,7 @@ copy_failover() {
 
 	pat=$COPY_FO_MIN_MIB
 	[ "$pat" -le "$mib" ] || pat=$mib
-	copy_src_sp_build "$size" "$pat" "copy step 6's"
+	copy_src_sp_build "$size" "$pat" "copy step 7's"
 	# The whole source, the pattern and the zeros after it, read through its
 	# own device; the destination is held to this digest once the copy ends.
 	dev=$(host_dev "$UUID3")
@@ -14772,6 +15376,7 @@ case_copy() {
 	copy_xfer_delete
 	copy_migration
 	copy_spare
+	copy_repair
 	copy_failover
 	case_finish
 }
@@ -15690,12 +16295,13 @@ react_spare_switched() { # <dead leg id>
 	[ "$act" = 0 ] && [ "$park" = 1 ]
 }
 
-# react_leg_alone is the disk-node rule of steps 5 and 6, read from $SP_JSON:
-# leg <i> of slice 0's first data group's leg_list has exactly one side, and
-# that side's disk node carries no other side of the sp, spare and parked
-# legs' sides counted (SP_ANY_SIDE_PATH). Killing that disk node then takes
-# down exactly the one side the step names; react_leg_repair says what a
-# second side there would do.
+# react_leg_alone is the disk-node rule of react steps 5 and 6 and of copy
+# step 6, read from $SP_JSON: leg <i> of slice 0's first data group's leg_list
+# has exactly one side, and that side's disk node carries no other side of
+# the sp, spare and parked legs' sides counted (SP_ANY_SIDE_PATH). Killing
+# that disk node then takes down exactly the one side the step names;
+# react_leg_repair says what a second side there would do, and copy_repair
+# why its pool has no other side `sp get` leaves out.
 react_leg_alone() { # <i>
 	local saddr hits
 	if [ "$(sp_field "$COPY_GRP0.leg_list[$1].side_list | length")" != 1 ]; then
@@ -15712,9 +16318,10 @@ react_leg_alone() { # <i>
 # away — nvmet objects outlive their agent, so without it the primary's leg
 # probe would keep succeeding and Leg.err_epoch would stay 0. The agent goes
 # first, as a live agent puts its port back at its next converge (dnagent.md
-# DN5, DN10), which is what react_return_dn relies on. Step 5 calls it; step
-# 6 calls its two halves, react_stop_dn_agent and react_drop_dn_port, each
-# over all of its disk nodes in turn (see step 6's header).
+# DN5, DN10), which is what react_return_dn relies on. React step 5 and copy
+# step 6 call it; react step 6 calls its two halves, react_stop_dn_agent and
+# react_drop_dn_port, each over all of its disk nodes in turn (see step 6's
+# header).
 react_kill_dn() { # <v> <k>
 	react_stop_dn_agent "$1" "$2"
 	react_drop_dn_port "$1" "$2"
@@ -17790,28 +18397,10 @@ cut_loop_check() { # <when>
 		"the longest ${CUT_MAX_MS} ms, the last ${CUT_IDLE_MS} ms ago"
 }
 
-# cut_kmsg_clean is the kernel-log witness: no line reporting a failed IO
-# after the marker on host0 (kmsg_errors). A marker the ring buffer no longer
-# holds is a die too, never a clean answer.
+# cut_kmsg_clean is the kernel-log witness on host0 after this case's marker
+# (host_kmsg_clean).
 cut_kmsg_clean() { # <when>
-	local out first
-	out=$(helper_host 0 kmsg_errors "$CUT_KMSG_TAG") ||
-		die "host0: the kmsg_errors verb failed $1"
-	first=$(printf '%s\n' "$out" | sed -n 1p)
-	case "$first" in
-	kmsg_errors=0) ;;
-	kmsg_errors=unreadable)
-		die "host0's kernel log no longer holds the marker" \
-			"'$CUT_KMSG_TAG' $1, so its IO errors cannot be counted: the" \
-			"ring buffer wrapped. dmesg is in host0's diagnostics below"
-		;;
-	*)
-		printf '%s\n' "$out" >&2
-		die "host0's kernel log reports failed IO after the marker" \
-			"'$CUT_KMSG_TAG' $1 ($first); the lines are above"
-		;;
-	esac
-	log "  host0's kernel log $1: no failed IO after the marker"
+	host_kmsg_clean 0 "$CUT_KMSG_TAG" "$1"
 }
 
 # cut_new_primary_ready is stage 05's rebuild wait: primary_stack_ready, which
@@ -18005,10 +18594,7 @@ cut_loop_start() {
 	local out
 
 	CUT_KMSG_TAG="dnv-e2e-cutoff-mark-$(hex16 "$CLUSTER_ID")"
-	out=$(helper_host 0 kmsg_mark "$CUT_KMSG_TAG") ||
-		die "host0: the kmsg_mark verb failed"
-	assert_eq "$out" "kmsg=marked" \
-		"host0: the kernel-log marker '$CUT_KMSG_TAG' is written and read back"
+	host_kmsg_mark 0 "$CUT_KMSG_TAG"
 	out=$(helper_host 0 wloop_start "$UUID2" "$CUT_PAT" "$CUT_SLOTS" \
 		"$CUT_LOOP_MAX") ||
 		die "host0: starting the write loop failed (its message is above)"

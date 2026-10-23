@@ -140,10 +140,11 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **extent** — The allocation unit for both DN space and CN budget, of
   `ClusterConf.dn_bin_conf.extent_size` bytes (default
   `DefaultDnExtSize`). Counts are always rounded **down**.
-* **SP, storage pool** — The unit of volume service. It owns cntlrs,
-  slices, thin devices, subsystems, clones, transfers and migrations, and
-  is identified by `sp_name` (user visible) and `sp_id` (internal, used in
-  device names and keys; reverse lookup through `sp_id_to_name`).
+* **SP, storage pool** — The unit of volume service. It owns cntlrs, slices,
+  thin devices, subsystems, clones, transfers, migrations, repairs and
+  retired legs, and is identified by `sp_name` (user visible) and `sp_id`
+  (internal, used in device names and keys; reverse lookup through
+  `sp_id_to_name`).
 * **cntlr** — One SP instance on one CN. Exactly one cntlr of an SP is
   **primary**: it runs the full device stack and serves IO. The others are
   **standby**: they keep the leg connections, export dm-error and are ANA
@@ -171,7 +172,9 @@ always means the SP's `DmPoolConf.data_block_size`.
   normally and by two sides while that leg is being migrated. A group may
   also carry up to `MaxSpareLegPerGrp` **spare legs**, which are not md
   members until a switch; spare legs are connected and health-checked
-  (Spare legs).
+  (Spare legs). A leg of an md-raid1 group is also replaced by a repair,
+  and the leg a finished repair replaced is kept as a retired leg (both
+  below).
 * **side** — The DN-resident part of a leg, charged to its DN in extents:
   one side device `DnSideName` (a dm-linear over the side's [D13] extent
   runs) plus, per cntlr, a dm-error, a dm-linear and an nvmet subsystem
@@ -210,10 +213,12 @@ always means the SP's `DmPoolConf.data_block_size`.
   reads, their check rounds and health epochs, and their `provisioned`
   flip — so each DN's agent builds, zeroes and exports its side like any
   side (`dnv-worker.md` RW14, RW15, RW18, HL2), and leg repair runs over
-  its legs, under the rules `dnv-worker.md` AR8 adds for one.
+  its legs, under the rules `dnv-worker.md` AR8 adds for one. A repair
+  takes it as it takes a slice's group (Repairs).
   The cn agent, whose cntlr request carries the clone with its group,
   builds it as it builds a slice's group: every cntlr connects and wraps
-  its legs, spare legs included, and the primary assembles its md array,
+  its legs, spare legs and its repair's new leg included, and the primary
+  assembles its md array,
   under md names of its own (md names), or builds its group device, so the
   primary reports the group's row and a row per leg, by which the worker
   judges its legs (`cnagent.md` CN10, CN12, CN28). The group's device is
@@ -222,7 +227,9 @@ always means the SP's `DmPoolConf.data_block_size`.
   holds, and the copy goes on from where it was (`cnagent.md` CN18; Clone
   metadata durability); the primary builds the clone only once every side
   of the group's `leg_list` is provisioned ([D15]). The clone drain's last
-  transaction gives its sides back with the clone (`dnv-worker.md` CLD9).
+  transaction gives its sides back with the clone, the sides of its
+  repair's new leg and of its retired legs included (`dnv-worker.md`
+  CLD9).
 * **transfer (xfer)** — The source-side counterpart of a clone: it exports
   a local namespace's raid0 over a dedicated subsystem so that another SP,
   possibly of another cluster, can clone from it. Fig. `100Transfer`
@@ -231,6 +238,27 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **migration (migr)** — The side-level live move of one leg's data from
   one DN to another through dm-clone on the destination DN. Fig.
   `080Migration` (Migration).
+* **repair** — The replacement of one leg of an md-raid1 group, its **bad
+  leg**, by a **new leg** that the primary adds to the group's running
+  array: a `Repair` record of its own, named by `rep_name`, that carries
+  the new leg, a full `Leg` with its side, until `FinishRepair` puts the
+  new leg in the bad leg's place. The bad leg stays in the group's
+  `leg_list` until then. A group has at most one repair, which its
+  `rep_name` names, and a repair has one bad leg and one new leg. Its
+  stage, `rep_stage`, moves from CREATED to STARTED or to ABORTED
+  (Repair). It records the parent of its group, the slice by `slice_id`
+  or the clone by `clone_name`, exactly one of the two, which stays true
+  for its life because a group never moves to another parent (Repairs).
+* **retired leg** — The leg a finished repair replaced: a `RetiredLeg`
+  record under the leg's own id, out of the group's `leg_list` and listed
+  in the group's `retired_leg_id_list` and the pool's. Its side stays on
+  its DN with its extents and the data as it was when the leg left the
+  array, a kept copy, save what md wrote on it while it was the new leg of
+  a repair that was then cancelled (Repair); its `retired_epoch` is the
+  time of the finish. It is no leg of the group: no cntlr connects it and
+  no migration moves it. A later repair of the same group may take it back
+  as its new leg; the retire timer, `DeleteRetiredLeg` or its pool's or
+  its clone's drain deletes it (Retired legs, Repair).
 * **shard code** — A uint32 below `ShardBucketSize`, formatted with
   `ShardCodeFmt`. Every DN, CN and SP gets one at creation; workers and the
   cdc split ownership by shard code.
@@ -292,6 +320,10 @@ ClusterConf
     ├── Clone(clone_name)                      (+ bitmap keys)
     │   └── meta_grp: Group ── leg_list: Leg ── side_list: Side
     │                       └─ spare_leg_list: Leg ── Side
+    ├── Repair(rep_name) ── new_leg_list: Leg ── side_list: Side
+    │                        (its Group's rep_name names it)
+    ├── RetiredLeg(leg_id) ── side: Side
+    │                        (its Group's retired_leg_id_list lists it)
     └── SpName (sp_id → sp_name reverse map), SpRev, CdcEntry per ss
 ```
 
@@ -313,7 +345,10 @@ their values:
   CN; `DnCloneMetaUnitCnt` units of a DN's clone-metadata area, which the
   control plane counts (Metadata units);
 * per group and slice: `MaxAllocLegPerGrp` legs, the allocator's per-group
-  leg count, `MaxSpareLegPerGrp` spare legs, and `MaxGrpCntPerSlice` groups
+  leg count; `MaxSpareLegPerGrp` spare legs or one repair, never both, a
+  repair having one bad leg and one new leg (Repairs);
+  `MaxRetiredLegPerGrp` retired legs (Retired legs); and
+  `MaxGrpCntPerSlice` groups
   in **each** of a slice's two group lists (md names, GrowSlice); a clone
   meta group has as many legs as the SP's redundancy gives every group of
   it, one or `MaxAllocLegPerGrp`, each side of `CloneMetaGrpExtCnt`
@@ -329,11 +364,14 @@ their values:
   `EtcdMaxRequestBytes` is the `--max-request-bytes` every etcd serving
   dnv must be started with, sized by the widest provisioned flip and
   pinned by a test (`dnv-worker.md`, Constants this document owns);
-  the sp drain's batch, the created flip's transaction and the clone
+  the sp drain's batches, the created flip's transaction and the clone
   flip's are bounded transactions over etcd's default `--max-txn-ops` too
   (`gateway.md`, Constants this document owns; `dnv-worker.md` SPD13,
-  RW19, MD6). `MaxDelGrpPerTxn` is the groups one sp
-  drain batch removes (`dnv-worker.md` SPD10), `MaxDelBmPerTxn` the clone
+  SPD15, RW19, MD6). `MaxDelGrpPerTxn` is the groups one sp
+  drain batch removes (`dnv-worker.md` SPD10), `MaxDelRepPerTxn` and
+  `MaxDelRetiredLegPerTxn` the repairs and the retired legs one batch of
+  its repair and retired-leg phases removes (`dnv-worker.md` SPD15),
+  `MaxDelBmPerTxn` the clone
   bitmap chunk keys one clone drain batch deletes (`dnv-worker.md` CLD8),
   and `MaxFlipCreatedPerTxn` the tds one created-flip transaction carries
   (sp role, `dnv-worker.md` RW19);
@@ -526,15 +564,14 @@ Per **side** (one per hosted leg replica):
 
     Only a **migration** ever gives a leg two sides, so the rule is a
     placement one, not an agent-flag one: register every DN of one kernel
-    under the same `location` and the first tier of Per-operation
-    allocation keeps a migration destination (and a spare leg) off the
-    source's kernel. Two things bound that. An omitted `location` defaults
-    to the node's own `addr_port` (Disk nodes), so agents left to the
-    default are separate failure domains and nothing keeps them apart at
-    all; and even under a shared `location` the second tier of
-    Per-operation allocation rescans without the exclusion rather than
-    refuse to place, so the guarantee holds only while some other domain
-    still has a free DN.
+    under the same `location` and the first tier of Per-operation allocation
+    keeps a migration destination (and a spare leg or a repair's new leg)
+    off the source's kernel. Two things bound that. An omitted `location`
+    defaults to the node's own `addr_port` (Disk nodes), so agents left to
+    the default are separate failure domains and nothing keeps them apart at
+    all; and even under a shared `location` the second tier of Per-operation
+    allocation rescans without the exclusion rather than refuse to place, so
+    the guarantee holds only while some other domain still has a free DN.
 
 ```mermaid
 flowchart BT
@@ -677,7 +714,8 @@ Bottom-up, everything below is created and owned by the cn agent when
 available"); its legs and groups are those of the SP's slices and of its
 clones' clone meta groups (Terminology and object model):
 
-1. **Legs.** For each provisioned side of each leg, spare legs included —
+1. **Legs.** For each provisioned side of each leg, spare legs and the
+   new legs of repairs included —
    a side whose `provisioned` is false exports nothing yet and is skipped
    (`cnagent.md` CN10): `nvme connect` to the `SideToCnNqn` of the
    cluster, sp, leg and this CN at `Side.nvme_tr_conf`, with the hostnqn
@@ -694,8 +732,9 @@ clones' clone meta groups (Terminology and object model):
    multipath namespace device, and it is what md and the group devices
    consume as the leg ([D1] gives the reasons).
    The agent runs the health-check IO of Group on-leg layout: meta region,
-   data region, health block, against every connected leg, spares too, and
-   reports per leg in `CntlrInfo.leg_id_to_leg` (`cnagent.md` CN10, CN11).
+   data region, health block, against every connected leg, spares and new
+   legs too, and reports per leg in `CntlrInfo.leg_id_to_leg` (`cnagent.md`
+   CN10, CN11).
 2. **Groups.** `RedundNone`: the group device is a dm-linear over the
    single leg's **data region**, at the offset `meta_blocks` times
    `block_size` (Group on-leg layout: meta region, data region, health
@@ -706,7 +745,8 @@ clones' clone meta groups (Terminology and object model):
    (create vs assemble vs add) are in "Make sure all groups are available".
    **Spare legs are not md members**: they stay connected, wrapped and
    health-checked, and are only added by an explicit `SwitchSpareLeg`
-   (Spare legs).
+   (Spare legs). A repair's new leg joins the array only under the rules
+   of Repair.
 3. **Per slice** (fig. `040Slice`): a dm-linear concat `CnPoolMetaName` over
    the slice's meta group devices (in `meta_grp_list` order) and a dm-linear
    concat `CnPoolDataName` over its data group devices; a dm thin-pool
@@ -915,7 +955,8 @@ The meta region must be large enough for the md superblock and the internal
 write-intent bitmap, **plus the health block used for the leg health
 check**: the last `LegHealthBlockSize` bytes of the last meta block. The
 **primary** cntlr's cn agent periodically writes and reads back this block
-through each connected leg device — spare legs included — (direct IO, a
+through each connected leg device — spare legs and repairs' new legs
+included — (direct IO, a
 magic, writer id and timestamp payload, [D6]) to decide whether the leg is
 healthy, covering the whole path CN → side → side device even when md would
 otherwise mask a member failure. A **standby** cntlr cannot run the block
@@ -1187,17 +1228,22 @@ this document relies on:
 | `Transfer` | {p} transfer {cluster_id} {sp_id} {xfer_name} | |
 | `Migration` | {p} migration {cluster_id} {sp_id} {migr_name} | carries `meta_units`, the destination's metadata units, written by `CreateMigration` (Metadata units), and `cutover_pending`, which `CreateMigration` writes set and only the sp worker's cutover clears (Migration) |
 | `MigrBitmap` | {p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx} | `bm_idx` is the append sequence from zero |
+| `Repair` | {p} repair {cluster_id} {sp_id} {rep_name} | its new leg embedded, with its side; listed in `SpConf.repair_name_list` and named by its group's `rep_name` (Repairs) |
+| `RetiredLeg` | {p} retired_leg {cluster_id} {sp_id} {leg_id} | keyed by the leg's own id, its side embedded; listed in `SpConf.retired_leg_id_list` and in its group's `retired_leg_id_list` (Retired legs) |
 | `SpName` | {p} sp_id_to_name {cluster_id} {sp_id} | reverse lookup for admin and log analysis; needed because `SpRev`, which also carries `sp_name`, can only be addressed with the SP's shard code [D10] |
 | `WorkerReg` | {p} worker {role} {seed} | the worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or by peers once committed dead (Membership and shard ownership; `dnv-worker.md` VW2, VW4, VW6 and CM5) |
 
 An **invariant key** is one the data model guarantees present while its
 parent exists: the rev keys, the globals, the record of every object a
-conf lists, and the node conf a stored side or cntlr names, which no node
-delete removes while the node hosts one. A read that reaches one through
+conf lists, the `Repair` and `RetiredLeg` records a group's `rep_name` and
+`retired_leg_id_list` name — every transaction that creates or deletes one
+of those keys changes the group's link and the pool's list with it —, and the
+node conf a stored side or cntlr names, which no node delete removes while
+the node hosts one. A read that reaches one through
 its parent and finds it absent has found a lost invariant: the gateway
 answers it `ABORTED` (UNEXPECTED_ERROR → `ABORTED`), or
-`FAILED_PRECONDITION` where one of the `model` mutations it shares with
-the worker made the read, and never `NOT_FOUND`, which is for an object
+`FAILED_PRECONDITION` where a `model` operation, the call's deciding STM,
+made the read, and never `NOT_FOUND`, which is for an object
 the request itself names (`gateway.md` GW7).
 
 ### Globals: id allocation + shard buckets
@@ -1220,12 +1266,15 @@ creation. Creating a DN, CN or SP inside the STM:
 
 `gateway.md` GW12 carries this out. Per-SP sub-object ids (`cntlr_id`,
 `slice_id`, `grp_id`, `leg_id`, `side_id`, `ss_id`, `ns_id`, `td_id`,
-`clone_id`, `xfer_id`, `migr_id`) all come from the single `SpConf.next_id`
-counter, which starts at `SpFirstId`. Thin-device `dev_id`s come from
+`clone_id`, `xfer_id`, `migr_id`, `rep_id`) all come from the single
+`SpConf.next_id` counter, which starts at `SpFirstId`. `CreateRepair` takes
+one id, the `rep_id`, for a new leg it takes from a retired leg, which keeps
+its leg id and side id, and three for a fresh new leg: the `rep_id`, the leg
+id and the side id, in that order (Repairs). Thin-device `dev_id`s come from
 `SpConf.next_dev_id`, which starts at one (an `ori_id` of zero means "no
-origin"), and are never reused, an etcd restore aside (below). A `dev_id`
-is also dm-thin's device id, whose width dm-thin limits: no pool hands out
-one above `MaxThinDevId` (Thin devices).
+origin"), and are never reused, an etcd restore aside (below). A `dev_id` is
+also dm-thin's device id, whose width dm-thin limits: no pool hands out one
+above `MaxThinDevId` (Thin devices).
 
 The three globals' `next_id` and each pool's `next_id` and `next_dev_id`
 are the cluster's **id counters**. After a restore the id step,
@@ -1358,9 +1407,12 @@ candidate lists) is prepared beforehand to keep transactions short.
 {p} cluster_conf {cluster_name} read is the first step **inside** the STM
 and every other key of the RPC is formatted from the `cluster_id` derived
 there. Doing it in-STM also makes the transaction fail correctly when the
-cluster is concurrently deleted or recreated. `GrowSlice`, `CreateSpareLeg`
-and `SwitchSpareLeg` are the exceptions: they make that read in a planning
-snapshot, `CreateSpareLeg` in a fresh one each round of its candidate unit
+cluster is concurrently deleted or recreated. `GrowSlice`, `CreateSpareLeg`,
+`SwitchSpareLeg` and the repair calls whose deciding STM is a `model`
+operation — `CreateRepair`, `FinishRepair`, `CancelRepair`,
+`TryToAbortRepair` and `DeleteRetiredLeg` — are the exceptions: they make
+that read in a planning snapshot, `CreateSpareLeg` and `CreateRepair` with
+a fresh new leg in a fresh one each round of their candidate unit
 (`gateway.md` GW5, GW9). `AdvanceClusterIds` commits one transaction for
 its cluster and then one per pool, which take the cluster id the first one
 derived (Clusters). Network calls to agents (`GetDnSize` and
@@ -1529,7 +1581,8 @@ counts no metadata units, since no copy keeps its metadata there.
   does (`gateway.md` GW9).
 * **CreateMigration** — one DN; `candExt` is the group's `ext_cnt` and
   `candUnits` the migration's metadata units (Metadata units); the
-  black list starts with the DNs of every leg and side of the group.
+  black list starts with the group's DNs, those of every leg and side of
+  the group (below).
   Placement is **two-tier**, because a black list of `addr_port`s excludes
   DNs and not failure domains: **tier 1** scans with the `location`s of
   those same DNs excluded as well (they seed `excludeLocs`, so a DN merely
@@ -1566,6 +1619,14 @@ counts no metadata units, since no copy keeps its metadata there.
   and when the pick was deleted, disabled or otherwise taken out of
   allocation, or left short of extents, since the scan (Spare legs;
   `gateway.md` GW9).
+* **CreateRepair** — a fresh new leg is one DN placed by CreateSpareLeg's
+  rule: the same black-list seeding, the same two tiers, no unit floor,
+  a plan from a fresh read of the group in every round, and a deciding
+  STM, `model.CreateRepair`, that drops the pick as candidate
+  changed on the same two grounds (Repairs; `gateway.md` GW9). A new leg
+  taken from a retired leg allocates nothing: its side keeps its extents
+  on its DN, which must hold no leg of the group but the bad leg, so that
+  the group's legs sit on different DNs after the finish.
 * **CreateCntlr** — one CN; `candExt` is the sum of every group's `ext_cnt`
   over the SP's slices; the CNs of the SP's cntlrs are excluded (Finding CN
   candidates)
@@ -1581,6 +1642,13 @@ counts no metadata units, since no copy keeps its metadata there.
   cntlr replacement holds the SP's surviving cntlrs to the plan of its own
   scan the same way (`dnv-worker.md` AR7). Both checks of the plan, like the
   in-STM re-validation of the pick itself, stay address-based.
+
+A group's DNs, the set those placements keep a new side out of and judge
+their gain check against, are the DNs of every side of its legs and spare
+legs and of the new leg of its repair, which its `rep_name` names;
+the model's checks that a group holds or gained a DN read the same set.
+Reason: a new leg becomes a leg of the group at its finish, and a group's
+legs must sit on different DNs after every finish (Repair).
 
 Free-extent bookkeeping happens in the same STM as the pick: each leg's DN
 loses the group's `ext_cnt` from its `free_ext_cnt`, and each cntlr's CN
@@ -1650,20 +1718,20 @@ them up.
 `used_meta_units` (Capacity index keys, [D5]), and a scan given a floor of
 free units passes over a DN whose value leaves it fewer — the ceiling less
 the used units, none once they reach it (Finding DN candidates). The
-gateway's `CreateMigration` asks for the migration's units; every other
-scan asks for none (Per-operation allocation). The capacity key proves a
-pick's free extents and nothing about its units, since a write that
-changes only units leaves the key where it is, so the deciding transaction
-checks the room again on the DN's record: a pick that has filled up since
-the scan is a changed candidate (`gateway.md` GW9), and the next round's
-scan passes it over. A call whose scan comes up short because of the floor
-— the same scan without it would have found enough DNs — is refused
-`RESOURCE_EXHAUSTED` with a message saying no node has metadata room.
-Units are no input of the presence rule: a full DN keeps its key, because
-it still takes work that needs no units — the legs of a new SP, a grow, a
-spare leg, a clone meta group. Reason: a refused node writes nothing, so a
-scan that read only free extents would pick it again in every round, and
-the index already carries what a scan needs.
+gateway's `CreateMigration` asks for the migration's units; every other scan
+asks for none (Per-operation allocation). The capacity key proves a pick's
+free extents and nothing about its units, since a write that changes only
+units leaves the key where it is, so the deciding transaction checks the
+room again on the DN's record: a pick that has filled up since the scan is a
+changed candidate (`gateway.md` GW9), and the next round's scan passes it
+over. A call whose scan comes up short because of the floor — the same scan
+without it would have found enough DNs — is refused `RESOURCE_EXHAUSTED`
+with a message saying no node has metadata room. Units are no input of the
+presence rule: a full DN keeps its key, because it still takes work that
+needs no units — the legs of a new SP, a grow, a spare leg, a repair's new
+leg, a clone meta group. Reason: a refused node writes nothing, so a scan
+that read only free extents would pick it again in every round, and the
+index already carries what a scan needs.
 
 **Contiguous runs.** A migration's units stay one contiguous run of its
 DN's area, taken first fit, so an area whose free units lie in runs too
@@ -1684,8 +1752,13 @@ harmless. A migration destination takes its run before it zeroes
 ## Common validation
 
 * At most `MaxStrSize` bytes for `cluster_name`, `addr_port`, `sp_name`,
-  `td_name`, `clone_name`, `xfer_name`, `migr_name`, `location` and the
-  `NvmeTrConf` members, each of which must also match `ValidStrPattern`.
+  `td_name`, `clone_name`, `xfer_name`, `migr_name`, `rep_name`,
+  `location` and the `NvmeTrConf` members, each of which must also match
+  `ValidStrPattern`.
+* `CreateRepair.rep_name` must in addition not start with the gateway's
+  reserved prefix, `repNameReservedPrefix`. Reason: the rule keeps the
+  prefix out of every name an operator gives, so the prefix stays free; no
+  repair carries it.
 * `NvmeTrConf.tr_svc_id` is in addition at most `MaxTrSvcIdLength` bytes:
   dnv-cdc copies a CN's verbatim into the TRSVCID field of a discovery log
   entry, which holds no more (`cdc.md` DS3), so a longer one could reach a
@@ -2071,7 +2144,9 @@ to `disabled` go through `UpdateDiskNodeDisabled` below (and
 
 **DeleteDiskNode** —
 Errors: `NOT_FOUND` cluster or dn; `FAILED_PRECONDITION` while
-`side_ptr_list` is not empty (delete or migrate the owning SPs first);
+`side_ptr_list` is not empty (delete or migrate the owning SPs first; a
+retired leg's side counts, and the message says that `DeleteRetiredLeg`
+frees one, Retired legs);
 `ABORTED` for a missing `DnGlobal` or a stale `DnRev` token.
 Action: one STM reads the `DnConf` (for the `dn_id` and `shard_code` the
 id-keyed `DnRev` key is built from), deletes the `DnRev` (the worker stops
@@ -2278,7 +2353,9 @@ takes it apart (`dnv-worker.md`, The sp drain).
 Errors: `FAILED_PRECONDITION` if any of `td_name_list`, `nqn_list`,
 `clone_name_list`, `xfer_name_list` and `migr_name_list` is non-empty
 (user-created objects first; cntlrs, slices, groups, legs and sides were
-created implicitly and are deleted implicitly). A delete of an SP whose
+created implicitly and are deleted implicitly, and the pool's repairs and
+retired legs are deleted by the drain too, their sides with them,
+Repair). A delete of an SP whose
 `deleting` is **already** true returns OK with no writes and no revision
 bump — the drain is running, and a second bump would only invalidate
 every client's token; a stale revision token is still `ABORTED` first
@@ -2291,8 +2368,10 @@ extent they charge survive the reply. Reply `sp_id`.
 The teardown itself is the sp worker's drain (`dnv-worker.md`, The sp
 drain), which the SP's next reaction pass starts and which then carries
 itself from one commit to the next in steps of a constant size — the
-cntlrs first, then one slice's groups at a time, then the SP's own keys
-(`dnv-worker.md` SPD9 to SPD12) — because no single transaction could be
+cntlrs first, then the repairs and then the retired legs, a batch of one
+parent's at a time, then one slice's groups at a time, then the SP's own
+keys (`dnv-worker.md` SPD9 to SPD12, SPD15) — because no single
+transaction could be
 proven legal for an SP whose slices `GrowSlice` grows. What one would
 guarantee — agreement between the node budgets and the keys that describe
 them — every step keeps by releasing budget in the transaction that
@@ -2307,7 +2386,10 @@ state: `GetStoragePool` shows `deleting` true and a shrinking inventory,
 
 **GetStoragePool** — one STM reads the `SpConf`, the `SpRev`, every
 `Cntlr` in `cntlr_id_list` and every `Slice` in `slice_id_list` (same
-order) into the reply; a missing listed key is `ABORTED`.
+order) into the reply; a missing listed key is `ABORTED`. The pool's
+repairs and retired legs are not in the reply beyond their names and ids
+in its `SpConf`: `ListRepairs` and `ListRetiredLegs` read them (Repairs,
+Retired legs).
 
 **ListStoragePools** — the `sp_conf` prefix of the `cluster_id`, returning
 the `sp_name`s (page_token; `gateway.md` GW10).
@@ -2315,8 +2397,12 @@ the `sp_name`s (page_token; `gateway.md` GW10).
 **UpdateStoragePoolCntlidSlotList** — Errors: `INVALID_ARGUMENT` for an
 empty list, duplicates, values at or above `CnCntlidSlotCnt`, or a list
 missing a slot in use by any cntlr or side of the SP, the sides of its
-clones' clone meta groups included. Action: STM write and `SpRev` bump.
-Reply `sp_id`.
+clones' clone meta groups included. The sides of repairs' new legs and the
+retired sides are not read: a new side takes its slot from the list when
+it is created, no agent checks a slot against the list, and a slot only
+has to differ from the other side of its own leg (cntlid slots), which
+those sides do not have; and reading those keys too would not fit one
+transaction. Action: STM write and `SpRev` bump. Reply `sp_id`.
 
 **UpdateStoragePoolLevel** — Action: an STM sets `SpConf.sp_level` and
 bumps `SpRev`; workers propagate it to every side and every cntlr of the
@@ -2347,7 +2433,8 @@ tail, by the drain of a deleting SP, `dnv-worker.md` SPD10 — the gateway
 answers it ahead of the candidate scan), or when `sp_level` is at
 or above `SP_LEVEL_NO_THINPOOL` (the model op's level gate refuses: pools
 are suppressed at those levels, so there is nothing to grow; the same gate
-guards `CreateSpareLeg` and `SwitchSpareLeg`, Spare legs);
+guards `CreateSpareLeg` and `SwitchSpareLeg`, Spare legs, and
+`CreateRepair`, Repairs);
 `RESOURCE_EXHAUSTED` when there are no DN
 candidates (Per-operation allocation) or when any cntlr's CN has a
 `free_ext_cnt` below the new group's `ext_cnt`. That last code is the
@@ -2474,11 +2561,14 @@ observation of the cntlr, to diff against the desired `SpRev` of
 the semantics of `InspectDiskNode`.
 
 **InspectSide** — locate the side by scanning the SP's slices in the STM
-(bounded by the SP's slices, groups and legs), and, when no slice holds
-it, the clone meta groups of the SP's clones, and get its DN; outside the
-STM call `DiskNodeAgent.GetSideInfo` with the `cluster_id`, the `dn_id`
-and the side pointer. Reply `applied_revision`, the `SideInfo`,
-`obs_stamp` and `obs_age`, as `InspectCntlr` replies. Both Inspect RPCs
+(bounded by the SP's slices, groups and legs), when no slice holds it the
+clone meta groups of the SP's clones, and when no clone holds it the new
+legs of the SP's repairs and then its retired legs, whose sides the DNs
+host as they host a leg's (Repair), and get its DN; outside the STM call
+`DiskNodeAgent.GetSideInfo` with the `cluster_id`, the `dn_id` and the side
+pointer, whose leg is the one the side was found in: a slice's or a clone's
+leg, a new leg, or the retired leg by its own id. Reply `applied_revision`,
+the `SideInfo`, `obs_stamp` and `obs_age`, as `InspectCntlr` replies. Both Inspect RPCs
 are the way to watch clone and migration hydration before `DeleteClone`
 and `FinishMigration`.
 
@@ -2743,7 +2833,8 @@ cross-SP live migration uses it. Reply `ns_id`.
 
 `DeleteClone` latches and the sp worker drains (`dnv-worker.md`, The clone
 drain). Every clone mutator but `DeleteClone` — `UpdateCloneTrConf`,
-`AppendCloneBitmap` and the spare leg calls on its clone meta group (Spare
+`AppendCloneBitmap`, and the spare leg calls, the repair calls that write
+and `DeleteRetiredLeg` on its clone meta group (Spare legs, Repairs, Retired
 legs) — fails `FAILED_PRECONDITION` when `Clone.deleting` is true
 (`dnv-worker.md` CLD1); `CreateClone` needs no check of its own, the
 surviving `Clone` key keeping same-name creation refused until the drain's
@@ -2881,13 +2972,13 @@ drain): from the first post-latch fan-out the clone is absent from every
 cntlr's `clone_list` and from the primary's chunk-push plans, so the cn
 agent's sweep (Teardown by sweep) removes its stack, the array or group
 device and the legs of its clone meta group included, and its
-`LocalCloneBmPath` files by
-name and disconnects a source no other clone on the node uses when the
-source is a transfer of the cluster (`cnagent.md` CN21; `dnv-worker.md`
-CLD5), while the worker deletes the
-chunk keys in batches and then the `Clone` key together with its
-`clone_name_list` entry, giving the sides of its clone meta group back to
-their DNs in that transaction, which takes their pointers out of the DNs'
+`LocalCloneBmPath` files by name and disconnects a source no other clone on
+the node uses when the source is a transfer of the cluster (`cnagent.md`
+CN21; `dnv-worker.md` CLD5), while the worker deletes the chunk keys in
+batches and then the `Clone` key together with its `clone_name_list` entry,
+giving the sides of its clone meta group back to their DNs in that
+transaction, the sides of the group's repair and retired legs with them, as
+it deletes their records, which takes their pointers out of the DNs'
 records. The sp worker drives those sides until then, and each DN's agent
 then sees its side's pointer disappear and tears the side down
 (`dnv-worker.md` CLD5, CLD9).
@@ -2898,9 +2989,9 @@ the leg bitmap read, which only a migration uses, refuses one of its legs
 the same way (Bitmap reads). Reason: a clone is a copy in flight, and
 moving a leg of its group by migration would need a clone-keyed twin of the
 whole migration path, while a leg of an md-raid1 clone meta group is
-replaced through a spare, by the spare leg calls (Spare legs). The spare
-leg calls take a clone meta group as they take a slice's, and refuse one
-whose clone is being deleted (Spare legs).
+replaced by a repair (Repairs) or through a spare, by the spare leg calls
+(Spare legs). Both take a clone meta group as they take a slice's, and
+refuse one whose clone is being deleted (Repairs, Spare legs).
 
 Consequences, all of them following from the `Clone` key and its
 `clone_name_list` entry surviving until the last transaction: `DeleteClone`
@@ -3049,8 +3140,11 @@ Migration.
 
 **CreateMigration** — Errors: `ALREADY_EXISTS` for a name already in
 `migr_name_list`; `NOT_FOUND` when `src_side_id` is in no leg of the SP,
-spare legs included; `FAILED_PRECONDITION` when it is a side of a clone
-meta group, which no migration moves (Clones); `RESOURCE_EXHAUSTED` at
+spare legs included — a repair's new leg is no leg of its group before
+its finish, and a retired leg is no leg, so their sides are not found
+(Repairs, Retired legs); `FAILED_PRECONDITION` when it is a side of a clone
+meta group, which no migration moves (Clones), or of the bad leg of a
+repair, which the repair replaces (Repair); `RESOURCE_EXHAUSTED` at
 `MaxMigrCntPerSp` or when no DN is a candidate (Per-operation allocation)
 — a DN without room in its clone-metadata area for the migration's units is
 no candidate, and a refusal for want of that room says no DN has metadata
@@ -3060,33 +3154,32 @@ has two sides (a migration is already running on it), or when
 slots: such an SP cannot migrate this leg at all; `gateway.md`,
 Migrations).
 
-Action: allocate one DN (Per-operation allocation). The deciding STM drops
-a pick when the group, as that STM reads it, occupies a DN the scan's read
-of the group did not, and the scan and the STM re-run as a unit from a
-fresh read of the group (`gateway.md` GW9): the scan's black list and
-tier-1 locations come from that earlier read, so a side hung off the group
-since — a migration of its other leg, a spare — could put the pick on its
-DN or in its failure domain. A pick whose DN's record no longer has room
-for the migration's units is dropped the same way (Metadata units). In
-the STM: `migr_id` and `dst_side_id` from
-`next_id`; a new `Side` appended to the leg's `side_list`, with a
-`cntlid_slot` from `cntlid_slot_list` different from the source side's —
-the only slot constraint sides have (cntlid slots) —, `addr_port` and
-`nvme_tr_conf` copied from the destination DN, and `provisioned` false
-([D15]); a `Migration` written with `migr_id`, `src_side_id`,
-`dst_side_id`, the request's `dm_clone_conf`, a zero `bm_cnt`, its
-`meta_units` and `cutover_pending` set, its name appended to
-`migr_name_list`; the destination DN's bookkeeping — the side in its
-`side_ptr_list`, the group's `ext_cnt` taken from its `free_ext_cnt`, the
-migration's units added to its `used_meta_units`, its capacity key per
-Capacity index keys, its `DnRev` bumped —; a `SpRev` bump. Reply
-`migr_id`. The destination side therefore takes its clone-metadata run and
-then provisions (Side provisioning protocol) before any migration
-machinery starts (Migration, Phase 0); until the sp worker's cutover,
-which comes only after it flips the destination provisioned,
-`migr_src_conf.dst_provisioned` false keeps the source side serving
-untouched (Migration, which carries the data-plane choreography). Only the
-cutover clears `cutover_pending`, and nothing sets it again.
+Action: allocate one DN (Per-operation allocation). The deciding STM drops a
+pick when the group, as that STM reads it, occupies a DN the scan's read of
+the group did not, and the scan and the STM re-run as a unit from a fresh
+read of the group (`gateway.md` GW9): the scan's black list and tier-1
+locations come from that earlier read, so a side hung off the group since —
+a migration of its other leg, a spare, a repair's new leg — could put the
+pick on its DN or in its failure domain. A pick whose DN's record no longer
+has room for the migration's units is dropped the same way (Metadata units).
+In the STM: `migr_id` and `dst_side_id` from `next_id`; a new `Side`
+appended to the leg's `side_list`, with a `cntlid_slot` from
+`cntlid_slot_list` different from the source side's — the only slot
+constraint sides have (cntlid slots) —, `addr_port` and `nvme_tr_conf`
+copied from the destination DN, and `provisioned` false ([D15]); a
+`Migration` written with `migr_id`, `src_side_id`, `dst_side_id`, the
+request's `dm_clone_conf`, a zero `bm_cnt`, its `meta_units` and
+`cutover_pending` set, its name appended to `migr_name_list`; the
+destination DN's bookkeeping — the side in its `side_ptr_list`, the group's
+`ext_cnt` taken from its `free_ext_cnt`, the migration's units added to its
+`used_meta_units`, its capacity key per Capacity index keys, its `DnRev`
+bumped —; a `SpRev` bump. Reply `migr_id`. The destination side therefore
+takes its clone-metadata run and then provisions (Side provisioning
+protocol) before any migration machinery starts (Migration, Phase 0); until
+the sp worker's cutover, which comes only after it flips the destination
+provisioned, `migr_src_conf.dst_provisioned` false keeps the source side
+serving untouched (Migration, which carries the data-plane choreography).
+Only the cutover clears `cutover_pending`, and nothing sets it again.
 
 **Admission.** The DN candidate scan covers extents and metadata units.
 The destination DN's [D13] clone-metadata area — `DnCloneMetaSize` bytes
@@ -3172,7 +3265,10 @@ both kinds of group, on a clone meta group with the rules `dnv-worker.md`
 AR8 adds for one.
 
 **CreateSpareLeg** — Errors: `NOT_FOUND` when `grp_id` is not in the SP;
-`INVALID_ARGUMENT` when the group is `RedundNone`; `RESOURCE_EXHAUSTED` at
+`INVALID_ARGUMENT` when the group is `RedundNone`; `FAILED_PRECONDITION`
+when the group has a repair (`model.ReasonGrpHasRepair`): a spare and the
+repair's new leg would race for one place in the group's array, so a
+group holds one of the two at a time (Repairs); `RESOURCE_EXHAUSTED` at
 `MaxSpareLegPerGrp` or when there is no DN (Per-operation allocation);
 `FAILED_PRECONDITION` at an `sp_level` at or above `SP_LEVEL_NO_THINPOOL`
 (the model op's level gate, as for GrowSlice), and while a spare of the
@@ -3224,6 +3320,158 @@ lists it and adds the promoted spare with failfast, and md rebuilds onto
 it — cheaply through the write-intent bitmap when the target was only
 briefly absent, but a fresh spare gets a full resync (`cnagent.md` CN12,
 member reconciliation). Reply the current active and spare leg ids.
+
+### Repairs
+
+A repair replaces the bad leg of an md-raid1 group by its new leg
+(Terminology and object model); its stages, what the primary and the sp
+worker do with it, its finish and its cancel are the procedure Repair. The
+calls take the group of a slice or a clone's clone meta group alike:
+`CreateRepair` looks `grp_id` up among the slices and then among the clones,
+as the spare leg calls do, and the repair records the parent it found, which
+every later call that writes the group reads, checking that it still holds
+the group; on a clone meta group the clone's record is written where a
+slice's would be. Reason: one call for both kinds of group is less to get
+right than a twin per kind, and a group never moves to another parent, so
+the record stays true for the repair's life. A clone being deleted is
+refused `FAILED_PRECONDITION` by every call that writes (`dnv-worker.md`
+CLD1): the clone drain's final transaction gives the group back with its
+repair. A deleting pool is refused by the same calls, by the rule of
+`service Gateway` — RPC specifications, and its drain deletes its repairs
+(`dnv-worker.md` SPD15). Only `CreateRepair` refuses a pool at an `sp_level`
+at or above `SP_LEVEL_NO_THINPOOL`, the levels where an operator is in
+charge, as `CreateSpareLeg` does (GrowSlice); the other calls take a pool at
+every level, so that an operator in charge there can still finish, abort or
+cancel a repair. A call that writes carries the revision token (`gateway.md`
+GW6). A call that the repair's stage does not allow is refused
+`FAILED_PRECONDITION` with the stage in its message (Repair).
+
+**CreateRepair** — inputs `rep_name`, `grp_id`, `bad_leg_id_list`, and
+for the new leg either `retired_leg_id`, a retired leg of the group, or,
+when that is zero, `dn_selector`, as `CreateSpareLeg` takes it. Errors, in
+the order a request meets them: `INVALID_ARGUMENT` when `rep_name` breaks
+Common validation, the reserved prefix included, or `bad_leg_id_list`
+holds other than one leg id; `FAILED_PRECONDITION` at an `sp_level` at or
+above `SP_LEVEL_NO_THINPOOL` (the model op's level gate, as for
+GrowSlice); `INVALID_ARGUMENT` when the pool is `RedundNone`, whose groups
+have no redundancy to repair; `ALREADY_EXISTS` for a name already in
+`repair_name_list`; `NOT_FOUND` when `grp_id` is in no group of the pool's
+slices or clones; `FAILED_PRECONDITION` when the group's clone is being
+deleted, when the group has a repair (`model.ReasonGrpHasRepair`) — one
+repair per group, which its `rep_name` lets the transaction check without
+a scan —, or when it has a spare leg: a spare and the new leg would race
+for one place in the array; `NOT_FOUND` when the bad leg is not in the
+group's `leg_list`; `FAILED_PRECONDITION` when the bad leg has two sides
+(a migration holds the leg), or when its `err_epoch` is zero, the message
+saying to use a migration: a healthy leg is moved, not repaired. Then,
+for a new leg from a retired leg: `NOT_FOUND` when `retired_leg_id` is
+not in `retired_leg_id_list`; `FAILED_PRECONDITION` when it is a retired
+leg of another group, when its side's `err_epoch` is set, or when its
+side's DN holds a leg of the group other than the bad leg, since the
+group's legs sit on different DNs after the finish. For a fresh new leg:
+`RESOURCE_EXHAUSTED` when the group holds `MaxRetiredLegPerGrp` retired
+legs, the message saying to delete one (Retired legs), or when no DN is a
+candidate (Per-operation allocation). The gateway sees no report, so the
+group's row cannot gate the create: a repair of a group whose array does
+not run waits in CREATED until it runs, and the operator aborts it if they
+change their mind (Repair).
+
+Action. A new leg from a retired leg allocates nothing: the retired leg's
+record and its entries in the group's and the pool's lists go, and its leg —
+its leg id, its `leg_idx` and its side, whose DN already holds the side's
+pointer and extents — becomes the new leg; the repair keeps the retired
+leg's `retired_epoch` in `new_leg_id_to_retired_epoch` for a cancel, and
+takes one id, its `rep_id`. That create is allowed while the group holds
+`MaxRetiredLegPerGrp` retired legs, since the finish then retires one leg as
+the create took one; so a finish never passes the bound, and a repair never
+waits in STARTED for room. A fresh new leg is one DN, planned in every round
+from a fresh read of the group (Per-operation allocation). As
+`CreateSpareLeg`'s does, the deciding STM refuses as candidate changed, so
+that the gateway plans the round again (`gateway.md` GW9), a group that
+holds a DN outside the plan and a pick gone stale since the scan. It takes
+three ids from `next_id`, the `rep_id`, the leg id and the side id in that
+order; the new `Leg` takes the next unused `leg_idx` of the group and one
+`Side` written `provisioned` false ([D15]) with the first slot of
+`cntlid_slot_list`; the DN's bookkeeping and `DnRev`. Either way the STM
+writes the `Repair`, `REP_STAGE_CREATED` with `try_to_abort` false and its
+parent's `slice_id` or `clone_name`, sets the group's `rep_name`, lists the
+name in `repair_name_list`, and bumps `SpRev`. A new leg takes no metadata
+units and no CN budget. Reply `rep_id` and `new_leg_id`.
+
+**FinishRepair** — Errors: `NOT_FOUND` for a name not in
+`repair_name_list`; `FAILED_PRECONDITION` for a stage other than
+`REP_STAGE_STARTED`, naming the stage, and when the group's clone is
+being deleted. Action: the STM, given the gateway's clock as the time, puts
+the new leg in the bad leg's position in `leg_list` with the bad leg's
+`leg_idx`, keeping its own leg id, side and `err_epoch`; puts the bad leg
+as a `RetiredLeg` under its own leg id, with its side as it is, the
+group's id, its `leg_idx`, the repair's parent and the time as its
+`retired_epoch`, and lists it in the group's and the pool's
+`retired_leg_id_list`; deletes the `Repair` and its `repair_name_list`
+entry; clears the group's `rep_name`; bumps `SpRev`. The bad leg's side
+stays on its DN, in its `side_ptr_list`, with its extents. Reply `rep_id`
+and the retired leg's id, `retired_leg_id`.
+
+**CancelRepair** — Errors: `NOT_FOUND` for a name not in
+`repair_name_list`; `FAILED_PRECONDITION` for a stage other than
+`REP_STAGE_ABORTED`, naming the stage, and when the group's clone is
+being deleted. Action: STM: a new leg taken from a retired leg goes back
+as that retired leg, with the `retired_epoch` the repair kept, its own
+`leg_idx`, its side as it is now and the repair's parent, listed again in
+the group's and the pool's lists — a cancel never destroys the kept copy,
+though md may have written on it while it was the repair's new leg
+(Repair); a fresh new leg's side gives its DN its bookkeeping back, as a
+spare's does when the spare is deleted; the `Repair` and its list entry
+go, the group's `rep_name` is cleared, and `SpRev` is bumped. Reply
+`rep_id`.
+
+**TryToAbortRepair** — Errors: `NOT_FOUND` for a name not in
+`repair_name_list`; `FAILED_PRECONDITION` when the group's clone is being
+deleted, and for a stage other than `REP_STAGE_CREATED`, naming the stage:
+a started copy has no way back, and an aborted repair is aborted. Action:
+STM: set `try_to_abort` and bump `SpRev`; the fan-out carries the flag to
+the cntlrs, and the primary's answer moves the repair to ABORTED, or to
+STARTED when it added the new leg first (Repair). A CREATED repair whose
+flag is already set is answered OK with no write and no bump, a token the
+request carried still being checked first (`gateway.md` GW6). Reply
+`rep_id`.
+
+**GetRepair** — STM read of the `Repair` named; `NOT_FOUND` for a name not
+in `repair_name_list`, and a listed name whose key is missing is `ABORTED`
+(Key table). Reply `rep_name` and the `Repair`.
+
+**ListRepairs** — one snapshot reads every `Repair` that
+`repair_name_list` names; a listed key that is missing is `ABORTED`.
+Reply `name_to_repair`.
+
+### Retired legs
+
+A retired leg is the leg a finished repair replaced (Terminology and object
+model): its side keeps the data the leg held when it left the array, save
+what md wrote on it while it was the new leg of a repair that was then
+cancelled (Repair), so a finish loses nothing. It ends when a repair of its
+group takes it back as the new leg, when the operator deletes it, when the
+sp worker's retire timer does, or when its pool's or its clone's drain
+deletes it (Repair, Deletes). It is no leg: no migration
+moves it (Migrations) and the leg bitmap read does not find it (Bitmap
+reads). A group holds at most `MaxRetiredLegPerGrp` of them: a retired
+side keeps its extents and its place in its DN's `side_ptr_list`, and the
+drains' transactions and the messages that carry the lists need a bound;
+the retire timer and `DeleteRetiredLeg` free room under the bound, and
+`CreateRepair` says how a repair stays within it.
+
+**ListRetiredLegs** — one snapshot reads every `RetiredLeg` that
+`retired_leg_id_list` names; a listed key that is missing is `ABORTED`.
+Reply `leg_id_to_retired_leg`.
+
+**DeleteRetiredLeg** — runs at every `sp_level`, as the delete of a spare
+does. Errors: `NOT_FOUND` when `leg_id` is not in
+`retired_leg_id_list`; `FAILED_PRECONDITION` when its group's clone is
+being deleted. Action: STM: the side gives its DN the group's `ext_cnt`
+and its pointer back, with the DN's capacity key and `DnRev`; the
+`RetiredLeg` and its entries in the group's and the pool's
+`retired_leg_id_list` go; `SpRev` is bumped. The DN's agent then tears the
+side down (Teardown by sweep). Reply `leg_id`.
 
 ### Bitmap reads
 
@@ -3456,18 +3704,18 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   Reply `agent_reply`, `revision`, `cn_info`, `obs_stamp` and
   `save_time`.
 * `SyncupCntlr` carries one `cntlr_pointer`, `revision`, `bdev_conf`
-  (`dm_pool_conf.low_water_mark_pct` included, Primary cntlr),
-  `sp_level`, `cntlr`, `id_to_slice` (keyed by the `slice_id` rendered
-  with `IdKeyFmt`), `td_list`, `nqn_to_subsystem`, `clone_list` and
-  `xfer_list`. It converges Primary cntlr or Standby
+  (`dm_pool_conf.low_water_mark_pct` included, Primary cntlr), `sp_level`,
+  `cntlr`, `id_to_slice` (keyed by the `slice_id` rendered with `IdKeyFmt`),
+  `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list` and
+  `name_to_repair`, the pool's repairs by name, save the repair of a
+  deleting clone's group (Repair). It converges Primary cntlr or Standby
   cntlr; a primary-to-standby or standby-to-primary flip follows Failover
   exactly, and a clone's dm-clone is created again over the metadata its
-  clone meta group holds by Clone metadata durability. Reply
-  `agent_reply`, `revision`, `cntlr_info`, `bm_info_list` (the applied
-  clone-bitmap chunks, one `BitmapInfo` per clone, its applied set carried
-  as `chunk_id_list` of `(src_slice_idx, bm_idx)` pairs, Bitmap push
-  protocol; `bm_idx_list` is for migrations only), `obs_stamp` and
-  `save_time`.
+  clone meta group holds by Clone metadata durability. Reply `agent_reply`,
+  `revision`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap chunks,
+  one `BitmapInfo` per clone, its applied set carried as `chunk_id_list` of
+  `(src_slice_idx, bm_idx)` pairs, Bitmap push protocol; `bm_idx_list` is
+  for migrations only), `obs_stamp` and `save_time`.
 * `PushCloneBitmap` delivers one `CloneBitmap` chunk (`cntlr_pointer`,
   `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap`) to the **primary**
   cntlr's agent, per Bitmap push protocol: persist the chunk at the
@@ -3503,7 +3751,17 @@ optional. Therefore **every side has the prefix its group needs zeroed
 before its first export**, tracked on disk as a byte count, gated by a
 CP-visible `provisioned` flag ([D15]). This holds for every new side:
 made with the pool, by a grow or an auto-grow, as a spare leg, as a
-migration destination, or with a clone's clone meta group (Clones).
+repair's fresh new leg, as a migration destination, or with a clone's
+clone meta group (Clones).
+
+**Repairs.** A fresh new leg's side is zeroed and flipped as a spare's
+is, the flip writing its `Repair` (`FlipRepairProvisioned`), and the
+primary adds the new leg to an array only once its side is provisioned
+(Repair). A retired side keeps its record and its zeroed count from its
+leg, and its side request says `provisioned` true with its group's length
+to zero, so its DN zeroes nothing and keeps the side exported to the
+pool's current cntlrs, none of which connects it; a retired leg a repair
+takes back keeps its side as it is, the flag included.
 
 **What is zeroed.** Every side of a group has the same length to zero
 from its start (Group on-leg layout: meta region, data region, health
@@ -3598,7 +3856,8 @@ silently re-allocating would present a fresh impostor as the data-bearing
 leg, so it is a hard resource error on `side_dev_info` that feeds
 `err_epoch` and the replacement flows (under raid1 the spare switch, which
 Automatic reactions performs after `leg_unhealthy`, on a clone meta group
-under the rules `dnv-worker.md` AR8 adds for one; under `RedundNone`
+under the rules `dnv-worker.md` AR8 adds for one, or an operator's repair,
+Repair; under `RedundNone`
 effectively delete-SP, or for a clone meta group the clone's delete).
 **The agent always trusts its own count over the flag** — the disk is
 authoritative ([D13]); the etcd flag is a gate, never evidence. A record
@@ -3741,6 +4000,14 @@ record's `free_ext_cnt` (dn / cn roles; `dnv-worker.md` RW13), nothing
 writes them to etcd, and `InspectDiskNode` returns them as the agent
 reports them, to set beside the record `GetDiskNode` returns (Disk
 nodes).
+
+`CntlrInfo` also carries two maps of fields that are no rows: the
+primary's verdict on each repair, keyed by `rep_id`
+(`rep_id_to_repair_info`), and, keyed by `grp_id` (`grp_id_to_grp_info`),
+whether each group's running array is whole and which legs md holds in
+sync, both only for a group whose row reads `OK`. No health rule reads
+them, so they set no `err_epoch`; the sp worker reads them as fields
+(Repair).
 
 ### Bitmap push protocol
 
@@ -4144,7 +4411,8 @@ An sp-role worker watches the `SpRev` keys of each owned shard
 (`SpRevPrefix`); the key yields `cluster_id` and `sp_id`, the value the
 revision and `sp_name` — the `SpConf` key suffix, so this path needs no
 `sp_id_to_name` lookup ([D10]). On a bump it loads the SP and fans out
-`SyncupSide` to **every side** of the SP and `SyncupCntlr` to
+`SyncupSide` to **every side** of the SP, the sides of repairs' new legs
+and the retired sides included (Repair), and `SyncupCntlr` to
 **every cntlr**, with the new revision; each request always carries the
 full desired state (Common agent rules), and each side's DN and each cntlr's CN
 is resolved by reading the `DnConf` or `CnConf` at the record's endpoint
@@ -4182,19 +4450,19 @@ BM3).
 
 The `Syncup*` replies and, continuously, the `CheckSide` and `CheckCntlr`
 streams the sp role keeps open to every side and every cntlr of its SPs
-(Check streams) feed health: `err_epoch` is set and
-cleared on the `Cntlr`, `Leg` and `Side` records accordingly, in STMs that
-bump no revision — a failing health block (Group on-leg layout: meta
-region, data region, health block) reported by the primary turns into
+(Check streams) feed health: `err_epoch` is set and cleared on the `Cntlr`,
+`Leg` and `Side` records accordingly, those of a repair's new leg in its
+`Repair` and a retired side's in its `RetiredLeg` (Repair), in STMs that
+bump no revision — a failing health block (Group on-leg layout: meta region,
+data region, health block) reported by the primary turns into
 `Leg.err_epoch`; a side's own stream and rows turn into `Side.err_epoch`
 (`dnv-worker.md` HL2). When a cntlr's write moves it into or out of the
 listing of [D18], the same STM rewrites the SP's discovery records, still
-bumping no revision: an enabled standby leaves them when its `err_epoch`
-is set and returns when it is cleared, while an enabled primary stays
-listed either way. `RES_STATUS_PROVISIONING` entries never set `err_epoch`
-on any of the three ([D15], Live-state reporting), and a
-`RES_STATUS_PENDING` leg row neither sets nor clears `Leg.err_epoch`
-(Live-state reporting).
+bumping no revision: an enabled standby leaves them when its `err_epoch` is
+set and returns when it is cleared, while an enabled primary stays listed
+either way. `RES_STATUS_PROVISIONING` entries never set `err_epoch` on any
+of the three ([D15], Live-state reporting), and a `RES_STATUS_PENDING` leg
+row neither sets nor clears `Leg.err_epoch` (Live-state reporting).
 
 **Provisioning gate** ([D15], Side provisioning protocol). The sp role
 fills `SideConf.provisioned` from the etcd `Side.provisioned`,
@@ -4293,10 +4561,18 @@ The four reactions:
   spare on its way and room for one, an internal
   `CreateSpareLeg` makes one first (Spare legs). On a clone meta group the
   two ops are their clone-keyed twins, under the rules AR8 adds for one.
+  A group that has a repair is left to it, the wait logged on every pass,
+  since a spare and the repair's new leg would race for one place in the
+  array (Repair).
   There is no migration reaction (`dnv-worker.md`, Automatic reactions —
   `worker/reaction.go`).
 
-The worker never deletes user data on its own (`dnv-worker.md` AR9).
+The worker never deletes user data on its own (`dnv-worker.md` AR9). The
+retire timer, which deletes a retired leg that has aged on a whole group,
+is no reaction: it is a step of the pass beside the stage moves of
+repairs, runs where reactions run, and is not the pass's one action; the
+data of the leg it deletes is held twice elsewhere (`dnv-worker.md`
+AR12).
 
 ## Procedures
 
@@ -4452,8 +4728,9 @@ available and none carries an md superblock — a leg without one can only
 be a freshly provisioned side, whose meta region Side provisioning
 protocol has zeroed, the superblock check being the evidence the CN
 actually has ([D15]) — and otherwise assembles the array from the legs
-that carry a superblock, adding an available leg the array left out once
-the array runs. The assemble leaves the degraded start to mdadm: a lone
+that carry a superblock, adding an available leg the array left out, other
+than the bad leg of a CREATED or STARTED repair (Repair), once the array
+runs. The assemble leaves the degraded start to mdadm: a lone
 survivor whose superblock still counts a clean full array is refused, and
 the group is then not available this pass. That refusal is the cross-leg
 half of failover safety ([D16]) — a stale leg cannot be started alone,
@@ -4463,7 +4740,10 @@ what makes a leg available are `cnagent.md` CN12. The health block (Group
 on-leg layout: meta region, data region, health block) is the ongoing
 liveness probe on top of this: an available leg whose probe IO fails is
 reported unhealthy and feeds the automatic reactions (Automatic
-reactions). Spare legs never participate in assembly (Spare legs).
+reactions). Spare legs never participate in assembly (Spare legs). The new
+leg of a repair that is CREATED or STARTED does: it joins the legs the
+array is assembled from when it carries a superblock, and the create
+holds only when it carries none either (Repair).
 
 ### Migration
 
@@ -4717,6 +4997,172 @@ the migration gap blocks on the primary, and why a read after that point
 can still block.
 `FinishMigration` and `CancelMigration` are specified under Migrations.
 
+### Repair
+
+A repair (Repairs) replaces the bad leg of a running md-raid1 group by its
+new leg. The operator creates it, with the calls of Repairs that
+`gateway.md`, Repairs and retired legs, carries out; the primary adds the
+new leg to the array once the conditions below hold, and md copies the
+data onto it; the operator finishes it, which puts the new leg in the bad
+leg's place and keeps the bad leg as a retired leg (Retired legs), whose
+side holds the data as it was. The control plane reads no agent report, so
+the stage moves come from the sp worker, which reads the primary's; and
+only the worker talks to the cntlrs, so it carries every repair to them.
+The operator drives every repair: the worker moves stages and runs the
+retire timer (`dnv-worker.md`, Repairs), and finishes, cancels and aborts
+nothing.
+
+**Stages.** `CreateRepair` writes `REP_STAGE_CREATED`. The sp worker moves
+a CREATED repair to `REP_STAGE_STARTED` once the current primary reports
+that the new leg holds a place in the array, copying or in sync, and to
+`REP_STAGE_ABORTED` once the abort flag is set and the primary confirms
+the abort. No stage follows those two: a finish ends a STARTED repair, a
+cancel an ABORTED one, and a drain a repair at any stage (Deletes,
+below). `FinishRepair` takes a STARTED repair, `CancelRepair` an
+ABORTED one and `TryToAbortRepair` a CREATED one, and nothing else
+(Repairs). Reason: a finish is harmless once the bad leg's data is kept,
+so the earliest safe moment is the right one, and a repair never waits in
+STARTED; a started copy has no way back; and an aborted repair is aborted.
+
+**The abort protocol.** `TryToAbortRepair` sets `try_to_abort`, which
+nothing clears, and bumps `SpRev`; the fan-out carries the flag to the
+cntlrs, and the primary answers in its report, per repair, with one of two
+verdicts: *started*, the new leg holds a place in the array, or *abort
+confirmed*, the new leg is no member of it, which the primary reports
+after it has removed a new leg md held without a place. The worker turns
+*started* into STARTED whatever the flag says, and *abort confirmed* into
+ABORTED. So the race has two orders, and both end well: when the primary
+adds the new leg in the round the flag is set, its report says started,
+the repair goes to STARTED with its flag set, and the operator finishes
+it; when the flag reaches the primary first, the primary never adds that
+new leg and confirms the abort. Reason: the primary may add the leg in the
+round the flag was set, so the flag alone cannot tell the worker which
+side of the race it is on, and the verdict can. The stage move,
+`SetRepairStage`, moves only a CREATED repair that still carries the
+`rep_id` the verdict named, and to ABORTED only while the stored flag is
+set, so a verdict moves only the repair it answers, and only once; it
+takes no revision token, the worker converging on what etcd holds.
+
+**What the primary does.** The md steps of a repair, their order, their
+error paths and their reasons are `cnagent.md` CN12's (A group's repair);
+the other parts rely on this much of them.
+
+* Every cntlr connects, wraps and probes a repair's new leg at every stage,
+  as it does a spare leg, and the primary reports a leg row for it
+  (Primary cntlr), so the sp worker judges a new leg as it judges a leg.
+* For a CREATED repair whose flag is clear, the primary adds the new leg to
+  the running array under the conditions of `cnagent.md` CN12, and it fails
+  the bad leg only in a pass where the new leg can follow at once. It never
+  fails a bad leg that still serves with an `OK` leg row, so such a repair
+  waits in CREATED (Known limits).
+* While the repair is CREATED or STARTED, no add and no put-back takes the
+  bad leg back into the array. An assembly can still take it in; md then
+  lets go of it only through the add, in the pass that adds the new leg,
+  or, once the repair has started in md, through the primary's removal of
+  a bad leg that md holds without a place (`cnagent.md` CN12).
+* An assembly takes the available `leg_list` legs and the available new
+  legs of a CREATED or STARTED repair that carry a superblock, and a fresh
+  array is created, over the `leg_list` legs alone, only when none of
+  either carries one ("Make sure all groups are available"; `cnagent.md`
+  CN12).
+* A step of a repair that fails is re-driven by the primary's read-only
+  verdict, which names the member a converge would add or remove for the
+  repair, so the sp worker sends the syncup again (`cnagent.md` CN30).
+
+**What the primary reports.** Beside its rows (Live-state reporting) the
+primary reports its verdict on each repair, *started* or *abort confirmed*
+(The abort protocol, above), keyed by `rep_id`. A verdict comes only from
+a running array whose group row reads `OK`; which group gives which
+verdict, and when, is `cnagent.md` CN28's. Reason: that a new leg is no
+member of an array that does not run proves nothing about whether md
+wrote to it; and no record keeps the revision at which a repair was
+created or its flag was set, so the report's revision cannot tie a verdict
+to one repair: the `rep_id` key ties it to one record across a finish or a
+cancel and a new create under the same name, and *abort confirmed*
+answers the flag in the cntlr's own request, which ties it to the flag.
+From the same arrays the primary reports, per group, whether the array is
+whole and which legs md holds in sync (`cnagent.md` CN28). Reason: the
+group row's text says degraded and how far a copy has come, but that text
+is for people and the suites, and the worker reads fields: the retire
+timer the first (`dnv-worker.md` AR12), the healthy-leg test the second
+(`dnv-worker.md` AR8).
+
+**What the sp worker does.** For every repair of a pool the worker
+carries the record in every cntlr's request (`name_to_repair`) and keeps
+the new legs' devices among what the cntlrs keep; drives the new leg's
+side as a side of the pool, with its own side request, its zeroing and its
+provisioned flip, as a spare's (Side provisioning protocol); drives every
+retired side as well, provisioned, with nothing to zero and with its
+exports to the pool's current cntlrs, none of which connects it; keeps the
+new leg's health epoch from the primary's leg rows, and the epochs of the
+new leg's side and of a retired side from their own rounds, in the
+`Repair` and the `RetiredLeg`; and moves the stage from the current
+primary's latest report (`dnv-worker.md` RW14 to RW18 and HL2 for the
+fan-out and the health epochs, AR11 for the stage moves). Reason for the
+retired sides: a disk node's sweep removes what its wanted set lacks, so a
+side nobody names is a leftover, and exports kept current make a reuse
+instant. Where the stage moves and the retire timer sit in the worker's
+pass, at which levels they run, and that neither is a reaction or the
+pass's one action, are `dnv-worker.md` AR2, AR3, AR11 and AR12's. The
+monitor of a side or a leg writes to the record that owns the side and
+starts afresh when the side moves to another record, at a finish, a cancel
+or the reuse of a retired leg; the coordinator's own verdicts on new legs,
+on their sides and on retired sides survive each pass as those on legs and
+sides do (`dnv-worker.md` AR10). The sides-first hold waits for a new
+leg's side as for a spare's, and never for a retired side, which no cntlr
+connects (sp role). A deleting clone's repair is left out of the fan-out,
+the flip and the stage moves skip it and the retire timer keeps that
+group's retired legs, while the sides of that group's new leg and retired
+legs keep their side requests until the clone drain's final transaction
+gives them back, as its legs' sides do (`dnv-worker.md` CLD5).
+
+**Finish.** `FinishRepair` puts the new leg in the bad leg's place in
+`leg_list`, with its `leg_idx`, and makes the bad leg a retired leg with
+its side as it is and the time of the finish; the repair's record goes and
+the group's `rep_name` is cleared (Repairs). The bad leg's side stays on
+its DN. Reason: the bad leg's data is kept, so the finish loses nothing,
+even while md still copies onto the new leg. A retired leg's md event
+count is behind the array's, since at the least its own failure or
+removal moves the count, and the array's superblocks record it as failed
+or without a place; an assembly takes a member's role from the freshest
+superblock when the member's count is behind (`cnagent.md` CN12), so one
+that is handed a retired leg never takes it as in sync. This holds for
+a leg a finish retires and for one a cancel gives back alike.
+
+**Cancel.** `CancelRepair` gives a fresh new leg's side back to its DN and
+puts a new leg taken from a retired leg back as that retired leg, with its
+old time (Repairs). Reason: a cancel must never destroy the kept copy. A
+retired leg that the primary added to md before the abort flag reached it,
+and that md then held without a place, comes back with the array's
+superblock and maybe part of a copy on it, no longer the copy it was when
+it left the array (Known limits).
+
+**Reuse.** A repair may take a retired leg of its own group as its new leg
+(Repairs). md catches it up from the write-intent bitmap only while the
+array has stayed degraded since the leg left; otherwise md copies it whole
+(Known limits).
+
+**The retire timer.** The sp worker deletes a retired leg
+(`DeleteRetiredLeg`) once it has aged on a whole, healthy group that has
+no repair, so a group waiting for its legs keeps its retired copies
+(`dnv-worker.md` AR12).
+
+**One mechanism per group.** A group has a repair or spare legs, never
+both: `CreateRepair` refuses a group with a spare leg, `CreateSpareLeg` a
+group with a repair, and the worker's leg repair skips a group with a
+repair. A repair's bad leg has one side, and `CreateMigration` refuses it;
+a new leg is no leg of the group before its finish, and a retired leg is
+none at all, so no migration moves either (Migrations). Reason: two
+mechanisms on one group would race for one place in its array.
+
+**Deletes.** The sp drain deletes a pool's repairs and then its retired
+legs, both before its slices, giving back the side of every new leg, a
+reused one included since the pool is going away, and every retired side:
+a side goes back by its group's `ext_cnt`, which is gone once the group is
+(`dnv-worker.md` SPD15). The clone drain's final transaction deletes a
+clone meta group's repair and retired legs with the group (`dnv-worker.md`
+CLD9).
+
 ### Transfer + clone = cross-SP live migration
 
 A clone's source can be *any* NVMe-oF namespace; when the source is a dnv
@@ -4862,44 +5308,43 @@ build moves its ns-dev onto the dm-clone, or, when the build does not
 finish, until the end of that pass, which moves the namespace
 inaccessible (`cnagent.md` CN16, CN19).
 
-**A group that cannot be assembled stops the clone.** The primary creates
-no dm-clone over a group whose row of the pass does not read `OK` (a
-degraded running array's row reads `OK`; `cnagent.md` CN18 says when the
-row of a running array does not): the group's row says what is wrong, the
-clone's dm-clone row reads `RES_STATUS_MISSING` while no dm-clone of the
-clone is up, naming the group once the source is ready (`cnagent.md`
-CN18), and, while no dm-clone of the clone serves, the destination td's
-namespaces stay parked and inaccessible, their hosts' IO queued, until a
-converge finds the group's row `OK` again — for a group no cntlr can
-assemble from the legs it has, not before a leg of its `leg_list` comes
-back (Known limits); the operator may delete the clone with `force`
-(Clones). A dm-clone an earlier pass built is left as it is, and one that
-serves goes on serving its namespaces over a group whose row is not `OK`
-(`cnagent.md` CN16, CN18). Reason: a dm-clone created over a device that
-is not the group's assembled array would format new metadata there and
-copy the source again over what the hosts wrote, a silent loss, while a
-stop with the source intact loses nothing. For the same reason leg repair
-switches no spare into a clone meta group while every leg of its
-`leg_list` has a health epoch, nor into one whose array does not run
-(`dnv-worker.md` AR8): where the one leg left is one mdadm will not start
-alone, the dead leg stays in the `leg_list`, so the group can be assembled
-again once it comes back, and the clone waits stopped meanwhile (Known
-limits). That holds except where leg repair parks a leg the group needs
-to be assembled again: when a leg that holds no full copy counts as the
-group's healthy leg — a spare still being copied, or a leg md has failed
-out of the array whose probe passes again — or when the leg that stays
-has just died and neither its health epoch nor the group's row shows it
-yet. The group can then stay down until an operator switches the parked
-leg back, or be started afresh without its data (`dnv-worker.md`, Known
-limits: "A spare still being copied counts as the group's healthy leg",
-"A leg md has failed out of the array counts as the group's healthy leg
-once its probe passes again" and "The gate can read a row that is about
-to turn"). A dm-clone leaves read-write mode when an operation on its
-metadata device fails; in read-only or failed metadata mode it reads
-`RES_STATUS_ERROR` and serves no namespace, and nothing the agent does
-takes it back (`cnagent.md` CN18): the error moves the primary
-role at its threshold, and the new primary assembles the group and creates
-a dm-clone of its own over it (`cnagent.md`, Known limits).
+**A group that cannot be assembled stops the clone.** The primary creates no
+dm-clone over a group whose row of the pass does not read `OK` (a degraded
+running array's row reads `OK`; `cnagent.md` CN18 says when the row of a
+running array does not): the group's row says what is wrong, the clone's
+dm-clone row reads `RES_STATUS_MISSING` while no dm-clone of the clone is
+up, naming the group once the source is ready (`cnagent.md` CN18), and,
+while no dm-clone of the clone serves, the destination td's namespaces stay
+parked and inaccessible, their hosts' IO queued, until a converge finds the
+group's row `OK` again — for a group no cntlr can assemble from the legs it
+has, not before a leg of its `leg_list` comes back, unless the new leg of
+its open repair is whole and md recorded the other legs as failed (Repair;
+Known limits); the operator may delete the clone with `force` (Clones). A
+dm-clone an earlier pass built is left as it is, and one that serves goes on
+serving its namespaces over a group whose row is not `OK` (`cnagent.md`
+CN16, CN18). Reason: a dm-clone created over a device that is not the
+group's assembled array would format new metadata there and copy the source
+again over what the hosts wrote, a silent loss, while a stop with the source
+intact loses nothing. For the same reason leg repair switches no spare into
+a clone meta group unless another leg of its `leg_list` has no health epoch
+and the primary's latest report holds it in sync, nor into one whose array
+does not run (`dnv-worker.md` AR8): where the one leg left is one mdadm
+will not start alone, the dead leg stays in the `leg_list`, so the group can
+be assembled again once it comes back, and the clone waits stopped
+meanwhile (Known limits). That holds except where leg repair parks a leg
+the group needs to be assembled again: when the leg that stays has just
+died and neither its health epoch, nor the group's row, nor the legs md
+holds in sync show it yet, or when the report that holds a leg in sync
+predates a copy onto that leg. The group can then stay down until an
+operator switches the parked leg back, or be started afresh without its
+data (`dnv-worker.md`, Known limits: "The gate can read a row that is about
+to turn" and "The in-sync half of the healthy-leg test reads md, which
+learns of a death only from IO"). A dm-clone leaves read-write mode when an
+operation on its metadata device fails; in read-only or failed metadata mode
+it reads `RES_STATUS_ERROR` and serves no namespace, and nothing the agent
+does takes it back (`cnagent.md` CN18): the error moves the primary role at
+its threshold, and the new primary assembles the group and creates a
+dm-clone of its own over it (`cnagent.md`, Known limits).
 
 **The durability rests on mdadm's degraded-assembly gate.** A clone meta
 group under `RedundMdRaid1` is assembled by the rules of "Make sure all
@@ -5114,7 +5559,8 @@ A restore loses or breaks what changed after the backup:
   frees every side the restored state does not name, so what was created
   after the backup is lost with its data.
 * A pool that gained groups after the backup by auto-grow, or whose legs a
-  migration or a leg repair moved, goes back to its old layout and breaks.
+  migration, a repair or a leg repair moved, goes back to its old layout
+  and breaks.
 * An object deleted after the backup comes back. One whose parts a node
   has freed reads as an error until it is deleted again: a side as "record
   missing" (`dnagent.md` DN9), a thin device as a lost thin id
@@ -5123,20 +5569,21 @@ A restore loses or breaks what changed after the backup:
   exported to its hosts again. The operator deletes each such object
   again.
 * A side the restored state names with another extent count or another
-  length to zero than its disk node's record shows an error row on its
-  side device (`dnagent.md` DN9): the conflict. To resolve it, empty that
-  node of every side the restored state puts on it: a migration moves its
-  other sides away, and the conflicting side itself goes with its pool's
-  delete or by a leg repair followed by a delete of the spare the replaced
-  leg becomes, since a migration of it never copies, its roles converging
-  only behind the gate that refuses it (`dnagent.md` DN9). Then delete the
-  disk node, which is refused while it holds a side; stop its agent; zero
-  the disk's header block by hand, since the agent formats only a disk
-  whose header carries no magic (`dnagent.md` DN5); delete the agent's
-  local store, start it, and add the node again. An agent started with its
-  old store formats the blank disk under the old node's identity
-  (`dnagent.md` DN2). A controller node holds no disk, so the conflict
-  never arises on one.
+  length to zero than its disk node's record shows an error row on its side
+  device (`dnagent.md` DN9): the conflict. To resolve it, empty that node of
+  every side the restored state puts on it: a migration moves its other
+  sides away, and the conflicting side itself goes with its pool's delete,
+  by a repair whose finish makes its leg a retired leg followed by a delete
+  of that retired leg, or by a leg repair followed by a delete of the spare
+  the replaced leg becomes, since a migration of it never copies, its roles
+  converging only behind the gate that refuses it (`dnagent.md` DN9). Then
+  delete the disk node, which is refused while it holds a side; stop its
+  agent; zero the disk's header block by hand, since the agent formats only
+  a disk whose header carries no magic (`dnagent.md` DN5); delete the
+  agent's local store, start it, and add the node again. An agent started
+  with its old store formats the blank disk under the old node's identity
+  (`dnagent.md` DN2). A controller node holds no disk, so the conflict never
+  arises on one.
 * A node added after the backup is not in the restored state, and what it
   built stays on it until removed by hand. Added again it takes a new id,
   so a disk node's agent refuses its disk, whose header names the old id,
@@ -5690,11 +6137,12 @@ document and the component documents cite it by its id.
   need. The
   sides-first hold then keeps back the cntlrs' requests until every side
   it waits for has reported the revision applied — every side the worker
-  drives but those the fan-out's load of the pool found unhealthy — for
-  one `cntlr_interval` at most (`dnv-worker.md` RW14), which mitigates
-  three races: a promotion outrunning the sides' ANA flips, a cntlr's
-  connect outrunning a new side's export, and a leg removal's disconnect on
-  a CN overlapping the disk node's unlink of that side's export. It leaves
+  drives but retired sides, which no cntlr connects, and those the
+  fan-out's load of the pool found unhealthy (`dnv-worker.md` RW14) — for
+  one `cntlr_interval` at most, which mitigates three races: a promotion
+  outrunning the sides' ANA flips, a cntlr's connect outrunning a new
+  side's export, and a leg removal's disconnect on a CN overlapping the
+  disk node's unlink of that side's export. It leaves
   out a side found unhealthy because waiting for one that does not answer
   would hold every change of the pool for the whole bound and let a
   failover fire inside the wait, while the wait only narrows; a side so
@@ -6039,6 +6487,49 @@ that component's document and only pointed to here.
   mismatches there. They are harmless, since neither the pool nor the
   dm-clone reads a block it has not written through the array
   (`cnagent.md` CN12), and dnv runs no check of its own.
+* **A repair waits while its array does not run or its bad leg serves.** The
+  gateway sees no report, so `CreateRepair` accepts a repair of a group
+  whose array is stopped or broken; such a repair, and one whose pool is
+  raised to a level that builds no group device, waits in CREATED until the
+  array runs, and an abort of it is confirmed only then, since only a
+  running array gives a verdict (Repair). A repair whose bad leg md still
+  holds in its place, serving with an `OK` leg row, waits in CREATED too,
+  until the operator aborts it. A bad leg that md holds out of its place,
+  as after md failed it, or does not hold, as after an assembly left it
+  out, holds the repair back in no way: the add removes it if md holds it
+  and adds the new leg, even when the bad leg reads healthy again
+  (`cnagent.md` CN12). Meanwhile a waiting repair is the group's one
+  repair, and the worker's leg repair skips the group, logging the wait on
+  every pass (`dnv-worker.md` AR8).
+* **A retired leg taken back is copied whole unless the array stayed
+  degraded.** md catches a returning member up from its write-intent
+  bitmap only while the array has stayed degraded since the member left;
+  when the array has been whole since, md copies a retired leg that a
+  repair takes back as it copies a fresh leg (Repair).
+* **A retired leg that a cancel gives back may not be the copy it was.**
+  When a repair takes a retired leg back, the primary can add it to md
+  before the abort flag reaches the primary: md writes the array's
+  superblock on it and may copy onto part of it. When md then holds it
+  without a place, failed during the copy or not yet in a place, the
+  primary removes it and confirms the abort, and `CancelRepair` lists it
+  again as that retired leg with its old time. Its side then holds the
+  array's superblock, and maybe the array's newer data where md copied, in
+  place of the data the leg held when it left the array; its record does
+  not say so (Repair).
+* **A whole new leg starts its array alone only where md recorded the
+  other legs as failed.** When both `leg_list` legs of a group are dead,
+  an assembly starts the array degraded from a repair's new leg that holds
+  the whole data only if md recorded those legs as failed; otherwise the
+  group waits for its legs, as a group whose survivor mdadm will not start
+  alone does ("Make sure all groups are available"; `cnagent.md` CN12).
+* **Retired legs keep their extents until a whole group lets them go.** A
+  retired side keeps its extents and its place in its DN's
+  `side_ptr_list`, and the retire timer deletes one only on a group whose
+  array is whole, with no repair and no leg health epoch, and only where
+  reactions run; so a group that does not come back whole keeps its
+  retired legs until the operator deletes them, and a repair with a fresh
+  new leg is refused on a group that holds `MaxRetiredLegPerGrp` of them
+  (Retired legs, Repair; `dnv-worker.md` AR12).
 * **A stale discovery view keeps a withdrawn path.** A cdc twin that has
   lost etcd keeps serving its last known records (dnv-cdc; `cdc.md` DS10),
   a failed-over primary's address among them. So does a twin whose watch
@@ -6084,9 +6575,10 @@ that component's document and only pointed to here.
   mdadm will not start alone — the primary builds no dm-clone, and while
   no dm-clone of the clone serves, the destination td's namespaces stay
   parked and inaccessible, their hosts' IO queued; leg repair switches no
-  spare in while every leg of the group's `leg_list` has a health epoch,
-  nor while the group's array does not run (`dnv-worker.md` AR8), so the
-  dead legs stay in that `leg_list`, except where leg repair parks a leg
+  spare in unless another leg of the group's `leg_list` has no health
+  epoch and the primary's latest report holds it in sync, nor while the
+  group's array does not run (`dnv-worker.md` AR8), so the dead legs stay
+  in that `leg_list`, except where leg repair parks a leg
   the group needs to be assembled again, after which the group can stay
   down until an operator switches that leg back, or be started afresh
   without its data (Clone metadata durability; `dnv-worker.md`, Known

@@ -33,8 +33,9 @@ const sptDrainSteps = 64
 //
 // It is SPD8's derivation in a loop, with no pass and no wake-up: read the
 // SpConf, take the first matching phase, commit it, repeat until the SpConf is
-// gone. Every step is one of the three model ops the worker calls, so what this
-// asserts about the END state is what the worker produces.
+// gone. Every step is one of the five model ops the worker calls, an SPD15
+// batch cut from a pool load as the worker cuts it, so what this asserts about
+// the END state is what the worker produces.
 //
 // A step that fails is fatal rather than retried: in a unit test there is no
 // "the world heals later" (SPD6), and a drain that cannot make progress is
@@ -59,6 +60,14 @@ func sptDrain(env *sptEnv, spName string) {
 		case len(conf.GetCntlrIdList()) > 0:
 			_, err = model.DrainSpCntlrs(
 				env.ctx, env.cli, env.cid, shard, spId, spName)
+		case len(conf.GetRepairNameList()) > 0:
+			_, err = model.DrainSpRepairs(
+				env.ctx, env.cli, env.cid, shard, spId, spName,
+				model.SpDrainRepairBatch(sptLoad(env, spName)), env.cc)
+		case len(conf.GetRetiredLegIdList()) > 0:
+			_, err = model.DrainSpRetiredLegs(
+				env.ctx, env.cli, env.cid, shard, spId, spName,
+				model.SpDrainRetiredLegBatch(sptLoad(env, spName)), env.cc)
 		case len(conf.GetSliceIdList()) > 0:
 			_, _, err = model.DrainSpSlice(
 				env.ctx, env.cli, env.cid, shard, spId, spName,
@@ -73,6 +82,16 @@ func sptDrain(env *sptEnv, spName string) {
 	}
 	env.t.Fatalf("sptDrain: %q did not finish in %d steps",
 		spName, sptDrainSteps)
+}
+
+// sptLoad is model.LoadSp of one SP, which an SPD15 batch is cut from.
+func sptLoad(env *sptEnv, spName string) *model.SpState {
+	env.t.Helper()
+	state, err := model.LoadSp(env.ctx, env.cli, env.cid, spName)
+	if err != nil {
+		env.t.Fatalf("LoadSp %q: %v", spName, err)
+	}
+	return state
 }
 
 // sptLowestId is SPD10's target rule: the LOWEST listed slice id, so that two

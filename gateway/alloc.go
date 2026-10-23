@@ -709,13 +709,17 @@ func spFootprint(slices []*pb.Slice) uint64 {
 	return total
 }
 
-// grpDnAddrs is every DN a group already occupies through an active leg or a
-// spare leg: the black-list seed of CreateMigration and CreateSpareLeg
-// (architecture.md, Per-operation allocation), and the plan each one's
-// deciding transaction checks the group against for a DN it gained since.
-func grpDnAddrs(grp *pb.Group) []string {
+// grpDnAddrs is every DN a group occupies: through an active leg, a spare
+// leg, or a new leg of rep, the group's open repair, nil when it has none —
+// the group's DN set of architecture.md, Per-operation allocation, since a
+// new leg becomes a leg of the group at its finish. It is the black-list seed
+// of CreateMigration, CreateSpareLeg and CreateRepair, and the plan each
+// one's deciding transaction checks the group against for a DN it gained
+// since.
+func grpDnAddrs(grp *pb.Group, rep *pb.Repair) []string {
 	var addrs []string
-	for _, leg := range allLegs(grp) {
+	legs := append(allLegs(grp), rep.GetNewLegList()...)
+	for _, leg := range legs {
 		for _, side := range leg.GetSideList() {
 			addrs = append(addrs, side.GetAddrPort())
 		}
@@ -723,10 +727,11 @@ func grpDnAddrs(grp *pb.Group) []string {
 	return addrs
 }
 
-// grpDnLocations is the failure domain of every DN grpDnAddrs names: the tier-1
-// exclusion of CreateMigration and CreateSpareLeg (architecture.md,
-// Per-operation allocation), which is about LOCATIONS and not merely about the
-// DNs the black list already holds.
+// grpDnLocations is the failure domain of every DN of addrs, a group's DN set
+// as grpDnAddrs gives it: the tier-1 exclusion of CreateMigration,
+// CreateSpareLeg and CreateRepair (architecture.md, Per-operation
+// allocation), which is about LOCATIONS and not merely about the DNs the
+// black list already holds.
 //
 // One plain DnConf read per DISTINCT addr_port, outside every STM like the
 // capacity scan it feeds. Reading them before the transaction is sound because
@@ -741,9 +746,8 @@ func grpDnLocations(
 	ctx context.Context,
 	cli *etcdutil.Client,
 	cid uint64,
-	grp *pb.Group,
+	addrs []string,
 ) ([]string, error) {
-	addrs := grpDnAddrs(grp)
 	locs := make([]string, 0, len(addrs))
 	seen := make(map[string]struct{}, len(addrs))
 	for _, addrPort := range addrs {
@@ -910,6 +914,69 @@ func findGrp(
 		}
 	}
 	return sliceLocation{}, false
+}
+
+// grpLocation is where locateGrp found a group: in a slice, with Clone nil,
+// or as a clone's clone meta group, with Clone set and Slice empty. Grp is
+// the group either way.
+type grpLocation struct {
+	Grp   *pb.Group
+	Slice sliceLocation
+	Clone *cloneLocation
+}
+
+// parent is the record that holds the group, in the form the repair
+// operations of model take it.
+func (loc grpLocation) parent() model.GrpParent {
+	if loc.Clone != nil {
+		return model.GrpParent{CloneName: loc.Clone.CloneName}
+	}
+	return model.GrpParent{SliceId: loc.Slice.SliceId}
+}
+
+// locateGrp finds a group of the SP by id: across every slice first, and only
+// when no slice holds it across the clones' clone meta groups, so a slice's
+// group never depends on the clone keys. A grp_id is unique in the SP, so a
+// hit in either walk is the group (architecture.md, Terminology and object
+// model); one in neither is NOT_FOUND. A clone being deleted is found like
+// any other: each caller refuses it at the place its RPC's error order puts
+// that refusal.
+func locateGrp(
+	stm etcdutil.STM,
+	sc *spScope,
+	spName string,
+	grpId uint64,
+) (grpLocation, error) {
+	slices, err := loadSlices(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return grpLocation{}, err
+	}
+	if loc, ok := findGrp(sc.Conf, slices, grpId); ok {
+		return grpLocation{Grp: loc.Grp, Slice: loc}, nil
+	}
+	clones, err := loadClones(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return grpLocation{}, err
+	}
+	cloneLoc, ok := findCloneGrp(sc.Conf, clones, grpId)
+	if !ok {
+		return grpLocation{}, errNotFound(
+			"group %d not found in storage pool %q", grpId, spName)
+	}
+	return grpLocation{Grp: cloneLoc.Grp, Clone: &cloneLoc}, nil
+}
+
+// refuseDeletingClone refuses a group found in a clone being deleted, as
+// loadLiveClone refuses the clone RPCs that address one (dnv-worker.md CLD1):
+// its group goes back to its DNs in the clone drain's final transaction, with
+// its repair and its retired legs, so a call that changed the group would
+// change a group that is going away.
+func refuseDeletingClone(loc grpLocation) error {
+	if loc.Clone != nil && loc.Clone.Clone.GetDeleting() {
+		return errPrecondition(
+			"clone %q is being deleted", loc.Clone.CloneName)
+	}
+	return nil
 }
 
 // cloneLocation is where a clone walk found something: the clone, under the

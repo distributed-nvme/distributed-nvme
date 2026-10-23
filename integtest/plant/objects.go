@@ -649,10 +649,11 @@ func putCloneGrp(
 // and the clones of one pool use, as readPoolIds reads them.
 type poolIds map[string]map[uint64]bool
 
-// readPoolIds reads every slice and every clone of the pool inside the
-// caller's STM and collects their groups', legs' and sides' ids, spare legs
-// and a migration's second side included. A listed slice or clone whose key
-// is missing refuses: an id it held could no longer be told apart.
+// readPoolIds reads every slice, every clone, every repair and every retired
+// leg of the pool inside the caller's STM and collects their groups', legs'
+// and sides' ids, spare legs, a migration's second side, the repairs' new
+// legs and the retired legs included. A listed record whose key is missing
+// refuses: an id it held could no longer be told apart.
 func readPoolIds(
 	s etcdutil.STM,
 	cid uint64,
@@ -663,17 +664,18 @@ func readPoolIds(
 		"leg":   make(map[uint64]bool),
 		"side":  make(map[uint64]bool),
 	}
-	addGrp := func(grp *pb.Group) {
-		ids["group"][grp.GetGrpId()] = true
-		legLists := [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()}
-		for _, legList := range legLists {
-			for _, leg := range legList {
-				ids["leg"][leg.GetLegId()] = true
-				for _, side := range leg.GetSideList() {
-					ids["side"][side.GetSideId()] = true
-				}
+	addLegs := func(legs []*pb.Leg) {
+		for _, leg := range legs {
+			ids["leg"][leg.GetLegId()] = true
+			for _, side := range leg.GetSideList() {
+				ids["side"][side.GetSideId()] = true
 			}
 		}
+	}
+	addGrp := func(grp *pb.Group) {
+		ids["group"][grp.GetGrpId()] = true
+		addLegs(grp.GetLegList())
+		addLegs(grp.GetSpareLegList())
 	}
 	for _, sliceId := range conf.GetSliceIdList() {
 		key := model.SliceKey(cid, conf.GetSpId(), sliceId)
@@ -697,6 +699,23 @@ func readPoolIds(
 		if grp := clone.GetMetaGrp(); grp != nil {
 			addGrp(grp)
 		}
+	}
+	for _, repName := range conf.GetRepairNameList() {
+		key := model.RepairKey(cid, conf.GetSpId(), repName)
+		rep := &pb.Repair{}
+		if !s.Get(key, rep) {
+			return nil, fmt.Errorf("%q not found", key)
+		}
+		addLegs(rep.GetNewLegList())
+	}
+	for _, legId := range conf.GetRetiredLegIdList() {
+		key := model.RetiredLegKey(cid, conf.GetSpId(), legId)
+		retired := &pb.RetiredLeg{}
+		if !s.Get(key, retired) {
+			return nil, fmt.Errorf("%q not found", key)
+		}
+		ids["leg"][legId] = true
+		ids["side"][retired.GetSide().GetSideId()] = true
 	}
 	return ids, nil
 }

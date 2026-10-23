@@ -288,11 +288,19 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"CreateSpareLeg":                  "create-spare",
 		"DeleteSpareLeg":                  "delete-spare",
 		"SwitchSpareLeg":                  "switch-spare",
+		"CreateRepair":                    "create-repair",
+		"FinishRepair":                    "finish-repair",
+		"CancelRepair":                    "cancel-repair",
+		"TryToAbortRepair":                "abort-repair",
+		"GetRepair":                       "get-repair",
+		"ListRepairs":                     "list-repairs",
+		"ListRetiredLegs":                 "list-retired-legs",
+		"DeleteRetiredLeg":                "delete-retired-leg",
 		"GetThinDeviceBitmap":             "get-td-bm",
 		"GetLegBitmap":                    "get-leg-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 60 {
-		t.Fatalf("service Gateway has %d methods, want 60",
+	if len(pb.Gateway_ServiceDesc.Methods) != 68 {
+		t.Fatalf("service Gateway has %d methods, want 68",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
@@ -359,6 +367,13 @@ func (c *recordingClient) UpdateDiskNodeDisabled(
 	return &pb.UpdateDiskNodeDisabledReply{DnId: 1}, nil
 }
 
+func (c *recordingClient) CreateRepair(
+	ctx context.Context, in *pb.CreateRepairRequest, _ ...grpc.CallOption,
+) (*pb.CreateRepairReply, error) {
+	c.req = in
+	return &pb.CreateRepairReply{RepId: 1, NewLegId: 2}, nil
+}
+
 // runArgv parses argv through one subcommand's flag set and runs its job
 // against a recording client, returning the request that was built. It is the
 // same path both the command line and `race` take.
@@ -383,6 +398,34 @@ func runArgv(t *testing.T, name string, argv ...string) proto.Message {
 		t.Fatalf("%s built no request", name)
 	}
 	return client.req
+}
+
+// TestCreateRepairRequest pins the request create-repair builds: the bad leg
+// list as typed, the retired leg id, the selector, and a token message that
+// is present, a zero one when --rev is not given (GW6's always-stale probe).
+func TestCreateRepairRequest(t *testing.T) {
+	req := runArgv(t, "create-repair",
+		"--sp", "sp0", "--rev", "7", "--name", "r0", "--grp", "0x11",
+		"--bad-legs", "3,4", "--retired-leg", "5", "--dn-white", "a:1",
+	).(*pb.CreateRepairRequest)
+	want := &pb.CreateRepairRequest{
+		ClusterName:  defaultCluster,
+		SpName:       "sp0",
+		SpRev:        &pb.SpRev{Revision: 7},
+		RepName:      "r0",
+		GrpId:        0x11,
+		BadLegIdList: []uint64{3, 4},
+		RetiredLegId: 5,
+		DnSelector:   &pb.NodeSelector{WhiteList: []string{"a:1"}},
+	}
+	if !proto.Equal(req, want) {
+		t.Errorf("request:\n got %v\nwant %v", req, want)
+	}
+	bare := runArgv(t, "create-repair", "--sp", "sp0", "--name", "r0").(*pb.CreateRepairRequest)
+	if bare.SpRev == nil || bare.GetSpRev().GetRevision() != 0 {
+		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
+			bare.SpRev)
+	}
 }
 
 // TestCreateSpRequest pins the test-time shape the whole suite creates its SPs
