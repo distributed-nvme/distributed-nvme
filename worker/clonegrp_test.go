@@ -1043,13 +1043,16 @@ func TestReactionCloneLegRepairCreates(t *testing.T) {
 
 // TestReactionCloneLegRepairSwitches pins AR8 step 1 on a clone meta group: a
 // ready spare — provisioned, its row OK on the primary — is switched in for
-// the unhealthy leg through the clone-keyed switch.
+// the unhealthy leg through the clone-keyed switch while the group's array
+// runs (its row OK on the primary, step 1's gate; the gate's holds on a clone
+// meta group are TestReactionSpareSwitchNeedsTheGroupRunning's).
 func TestReactionCloneLegRepairSwitches(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	grp := withReactClone(t, h.state)
 	cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
 	withCloneSpare(grp, 107, 207, reactDnC, true)
 	h.setLegRow(107, pb.ResStatus_RES_STATUS_OK)
+	h.setGrpRow(reactCloneGrp, pb.ResStatus_RES_STATUS_OK)
 	h.pass()
 	calls := h.wantOps("switch_clone_spare")
 	got := calls[0]
@@ -1135,13 +1138,13 @@ func TestReactionCloneLegRepairHolds(t *testing.T) {
 	})
 }
 
-// TestReactionCloneLegRepairNeedsAHealthyLeg pins AR8's precondition of its
-// own on a clone meta group: a switch or a create runs only while another
-// leg of the group's leg_list has no health epoch. With every other leg
-// unhealthy the pass logs no_healthy_leg for the group, even with a ready
-// spare at hand or a pending one, neither counting, and the scan goes on to
-// the next group; a slice's group is repaired with its other leg unhealthy
-// too.
+// TestReactionCloneLegRepairNeedsAHealthyLeg pins AR8's healthy-leg
+// precondition on a clone meta group: a switch or a create runs only while
+// another leg of the group's leg_list has no health epoch. With every other
+// leg unhealthy the pass logs no_healthy_leg for the group, even with a
+// ready spare at hand and the group's array running, or a pending spare,
+// neither counting, and the scan goes on to the next group. A slice's group
+// takes the same precondition (TestReactionLegRepairNeedsAHealthyLeg).
 func TestReactionCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 	t.Run("every leg unhealthy, a ready spare at hand", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
@@ -1150,6 +1153,9 @@ func TestReactionCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 		cloneLegOf(t, grp, reactCloneLegB).ErrEpoch = h.ago(1)
 		withCloneSpare(grp, 107, 207, reactDnC, true)
 		h.setLegRow(107, pb.ResStatus_RES_STATUS_OK)
+		// The group's row still reads OK, as an idle array's does after its
+		// legs died, so step 1's gate would let the switch through.
+		h.setGrpRow(reactCloneGrp, pb.ResStatus_RES_STATUS_OK)
 		h.dnCands(reactDnD)
 		h.pass()
 		h.wantOps()
@@ -1204,10 +1210,9 @@ func TestReactionCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 		grp := withReactClone(t, h.state)
 		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
 		cloneLegOf(t, grp, reactCloneLegB).ErrEpoch = h.ago(1)
-		// The data group's leg has the larger leg_id and its other leg is
-		// unhealthy too: a slice's group takes no such precondition.
+		// The data group's leg has the larger leg_id, and its other leg is
+		// healthy.
 		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
-		h.legOf(reactDataLegB).ErrEpoch = h.ago(1)
 		h.dnCands(reactDnC)
 		h.pass()
 		calls := h.wantOps("create_spare")

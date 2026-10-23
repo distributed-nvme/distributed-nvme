@@ -1033,7 +1033,8 @@ dm-clone (CN18).
   path whose controller is lost. The flag also lets a short fault fail a
   member, such as an IO that reaches a migration's source in the moment
   after its export turns inaccessible (`architecture.md`, Known limits),
-  and the member reconciliation (below) puts such a member back. Assembly
+  and the member reconciliation (below) puts such a member back, unless
+  the in-sync guard (below) holds over the array. Assembly
   is the step of `architecture.md`, Failover, that makes every group
   available; its cases are these, decided by probing each available
   member for an md superblock (`mdadm --examine`):
@@ -1111,7 +1112,8 @@ dm-clone (CN18).
   groups (CN19); a deferred group (below) never counts, spares are not
   members, and a held member md has failed on a leg that is available is
   not late: while the array runs, the member reconciliation (below) puts
-  it back once md has moved it out of its slot and its leg can take it. A
+  it back once md has moved it out of its slot and its leg can take it,
+  unless the in-sync guard (below) holds over the array. A
   `RedundNone` group's leg counts too, and its dm-linear (above) is
   created or reloaded only over an available leg:
   the layers over it do IO through it, and a side that has not flipped to
@@ -1254,13 +1256,15 @@ dm-clone (CN18).
   what a converge does).
 
   **Member reconciliation** covers `SwitchSpareLeg` with no extra
-  mechanism, and puts back a member md has failed. A member the array
+  mechanism, and puts back a member md has failed, unless the in-sync
+  guard (below) holds. A member the array
   holds is compared by its "block/dm/name" with the names of the
   `leg_list` wrappers, never by device number, because a number read of
   a wanted wrapper that did not answer would otherwise read as "not
   wanted" and fail and remove an in-sync member. A held member that is
   no longer in `leg_list` is `--fail`ed and `--remove`d by the dm path
-  sysfs named; then a `leg_list` member md has failed and moved out of
+  sysfs named, while another member keeps the data (the in-sync guard,
+  below); then a `leg_list` member md has failed and moved out of
   its slot ("faulty" in its "state", its "slot" none), on a leg that can
   take it, is `--remove`d; then an available `leg_list` member the array
   lacks, one just removed included, is `--add --failfast`ed. md then
@@ -1271,6 +1275,50 @@ dm-clone (CN18).
   returns errors usually fails its probe too, and is then left to the
   leg repair (`dnv-worker.md` AR8) instead of being put back on every
   pass.
+
+  **The in-sync guard.** A member that is no longer in `leg_list` is
+  `--fail`ed only while another member keeps the data: one md marks in
+  sync ("in_sync" in its "state", and not "faulty"), whose wrapper is in
+  `leg_list` and whose leg is available this pass. With none, the
+  reconciliation leaves the array exactly as it is — no `--fail`, no
+  `--remove` and no `--add` for the group that pass, the put-back
+  included — and the group's error names the member and the array. The
+  test is made once, before the first `--fail` of the pass: the member
+  it asks for stays in `leg_list`, so it is never one the pass fails,
+  and the answer is the same for every member that leaves, whatever that
+  member's own state. Reason: md answers a fail of the last in-sync
+  member of a mirror by marking the whole array broken (CN29), so
+  without the guard a switch breaks the group whenever md still holds
+  the switched-out leg as the only copy. The member that keeps the data
+  must be on an available leg because md learns that a member is dead
+  only from IO to it: on an array with no IO a dead member still reads
+  in sync, the fail would go through, and the copy onto the added member
+  would read the dead member and break the array. And it must stay in
+  `leg_list` because a member that leaves is about to be failed as well.
+  And it must not read "faulty": md shows "faulty" beside "in_sync" for a
+  member whose bad blocks it has not yet acknowledged, and the member
+  that leaves may then hold the only good copy of those regions, which
+  its fail would lose. A read applies the same test to the running array it reads, with the
+  part of the leg's availability a read can see (CN28), so a converge and
+  a read report the same row, short of a step only the converge takes
+  (Known limits), and the read's verdict names no member of the group
+  (CN30). That row reads `RES_STATUS_ERROR`, which counts
+  toward the primary's health (`dnv-worker.md` HL2), so a guard that
+  holds for the primary-unhealthy threshold can fail the primary over
+  (Known limits). The guard lets go once a member that stays is in sync
+  on an available leg — its copy ends, or its path returns: the next
+  read then reads the row `OK` and names the member the array lacks once
+  that member's leg can take it (CN30), and the converge of the
+  `SyncupCntlr` that name brings finishes the switch. A `leg_list`
+  member md has failed is not put back while the guard holds, since the
+  put-back is part of what the guard leaves undone. On a leg that is
+  available it is not late either (above), and while its leg is not
+  available the CN10 background retry brings only converges the guard
+  refuses again, so nothing brings it back in sync: when such a member
+  is the only one that stays, the guard does not let go by itself, and
+  the group's row reads `ERROR` until an operator switches the parked
+  leg back into `leg_list`, or until that row fails the primary over,
+  which leaves the group down (Known limits).
 
   The put-back is a remove and then an add, run by mdadm. md keeps its
   claim on a failed member until the member is removed, so an `--add`
@@ -2007,8 +2055,9 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    pass. The group is ready when its row of the pass (`grp_id_to_md_raid`,
    CN28) reads `OK`. A running array's row reads `OK`, degraded or not,
    unless a read of the array fails, another array also holds legs of the
-   group, it holds a foreign member, or, on a converge, its member
-   reconciliation fails (CN12, CN28): each of these reports
+   group, it holds a foreign member, the in-sync guard holds over it, on
+   a converge and a read alike, or, on a converge, its member
+   reconciliation fails otherwise (CN12, CN28): each of these reports
    the group `ERROR`, and the group is not ready for that pass. A group that is not
    ready ends the pass for the clone: no dm-clone is created over it, and
    one an earlier pass built is left as it is. While the read of the
@@ -2152,9 +2201,9 @@ takes the role assembles the clone meta group and creates the dm-clone
 over the metadata it holds (steps 2 and 3). A clone meta group no cntlr
 can assemble leaves the clone's dm-clone row `MISSING` and its namespaces
 parked on each primary that has to build the dm-clone, wherever the role
-goes, at least until a leg of its `leg_list` comes back, where a leg that
-leg repair parked first does not count (`architecture.md`, Clone metadata
-durability; `dnv-worker.md` AR8); the operator may delete the clone. A
+goes, at least until a leg of its `leg_list` comes back, since leg repair
+switches no spare into a group whose array does not run (`dnv-worker.md`
+AR8); the operator may delete the clone. A
 dm-clone that serves and whose copy is whole serves on over such a group,
 since it writes no metadata (Known limits).
 
@@ -3074,13 +3123,23 @@ The rows, each with its `res_name` and what its probe checks:
   length of the path's failfast (CN12). A member md has failed is the
   leg row's to report while its leg does not serve, and the verdict's to
   name once the leg can take it back (CN12, CN30); the group's row reads
-  `OK`, degraded, either way. A running array (degraded included) ⇒ `OK`
+  `OK`, degraded, either way — unless the in-sync guard holds (below),
+  when the row reads `ERROR` and the verdict names no member of the
+  group. A
+  running array (degraded included) ⇒ `OK`
   with the "array_state" as the details, then the word degraded while "degraded"
   is non-zero, then the word of a sync that is running (recovering,
   resyncing, checking, repairing, reshaping; none while "sync_completed"
   reads none) followed by its done and total sectors in parentheses. The
   words follow mdadm's State line, and repairing is ours; the state and
-  the sectors are sysfs's. No answering array
+  the sectors are sysfs's. A running array that holds a member no longer
+  in `leg_list`, while no member that stays in `leg_list` is in sync on
+  a leg whose path the read finds serving — every controller's
+  "address" known, a multipath namespace and a path both live and
+  optimized — ⇒ `RES_STATUS_ERROR` with the converge's own words, which
+  name the member and the array: CN12's in-sync guard, which a read
+  applies as a converge does, so that the two report the same row. No
+  answering array
   holds the group's legs (none matched, or the match stopped between the
   walk and its read) and no array of the walk is unanswered, or an
   "array_state" of clear ⇒ `RES_STATUS_MISSING`; an array that is not
@@ -3212,7 +3271,9 @@ and so does CN12's reconciliation failing it out as an extra; until then
 the dead member does not count in "degraded"), and the fault is its leg
 row's, from the CN11 prober's own IO, until the leg can take the member
 back, when the verdict names it (CN30) and the converge puts it back
-(CN12). md does not fail the last in-sync
+(CN12). While CN12's in-sync guard holds over the array, the row reads
+`ERROR` instead, and the member is neither named nor put back (CN28,
+CN30). md does not fail the last in-sync
 member of a mirror (dnv never sets md's fail-last-device option): an
 error it charges to that member — a failed superblock or bitmap write,
 which array writes bring, is one — marks the array broken instead. The
@@ -3234,7 +3295,9 @@ match, which a `SyncupCn` would rewrite: the port row reads `ERROR` with
 the probe's words, and the verdict names it. And so does an md member
 that a cntlr's converge would put back or add (CN12) on a leg that can
 take it: its group's row reads `OK`, degraded, and a read's verdict
-names the member (CN30).
+names the member (CN30), unless CN12's in-sync guard holds over its
+array, whose row then reads `ERROR` and whose members the verdict does
+not name.
 
 ### The read-only verdict
 
@@ -3326,7 +3389,11 @@ them: its converge has just tried to put them back, and its group row
 says how that went. Nor does the observation a converge of the cntlr
 stores, so a member still out shows again on the next read. A member md
 keeps failing while its leg's probe passes is named again after each
-failure (Known limits).
+failure (Known limits). It names no member of a group whose row CN12's
+in-sync guard turns `ERROR` (CN28). Reason: the converge would leave
+that array as it is, so a name would bring a `SyncupCntlr` on every
+round for a converge that refuses again; the first read that finds the
+guard let go names the group's members again.
 
 No verdict is carried over: each read and each converge that takes one
 computes its own, which is kept only as the code of the object's
@@ -3391,7 +3458,8 @@ would be a leftover report no `Syncup*` could ever clear.
   again after every failure: md fails a member with the failfast flag on
   any read error from it (CN12), so one bad sector outside the health
   block is enough, while the CN11 probe, which reads the health block
-  alone, passes, and the leg can take the member back. Each failure then
+  alone, passes, and the leg can take the member back, unless CN12's
+  in-sync guard holds over its array. Each failure then
   costs one `SyncupCntlr` and one converge of the cntlr, which holds the
   cntlr's reads off while it runs (CN1), and a resync of what md's bitmap
   marks. Nothing limits how often, since a limit would need the agent to
@@ -3412,7 +3480,12 @@ would be a leftover report no `Syncup*` could ever clear.
   until the side connects or leaves the leg. A verdict that also asked
   for a controller on every provisioned side would not name the member
   when that connect succeeds, and that converge is the one that puts the
-  member back.
+  member back. CN12's in-sync guard meets the same gap: when such a leg
+  carries the only member that stays in sync, the converge reads the leg
+  not available and refuses the switch, while a read finds the leg
+  serving, reads the group's row `OK` and names the promoted spare the
+  array lacks, so each round that answers from such a read brings a
+  converge that refuses again.
 * A killed `--remove` leaves a spare switch half done: a switch applied
   within seconds of the switched-out leg's side dying can have its
   `--remove` killed at the soft timeout while a superblock write is stuck
@@ -3429,6 +3502,31 @@ would be a leftover report no `Syncup*` could ever clear.
   the next converge that comes: the one the verdict brings once the
   spare's row reads `OK`, or one for some other reason, such as a
   revision bump.
+* An in-sync guard that holds can move the role and leave the group
+  down, or without its data: while CN12's in-sync guard holds, the
+  group's row reads `ERROR`, on a read as on a converge (CN28), which
+  sets the primary's health epoch (`dnv-worker.md` HL2), so a guard that
+  holds past the primary-unhealthy threshold lets the failover reaction
+  fail the primary over (`dnv-worker.md` AR5). A guard that holds
+  because md has failed the member that stays holds that long unless an
+  operator acts first, since nothing puts that member back while the
+  guard holds (CN12). The new primary assembles the group from its
+  `leg_list` legs alone (CN12), which leave out the member the guard
+  kept, the one that holds the data. When the `leg_list` legs that carry
+  an md superblock cannot start the array — a member md was copying
+  onto, or one md has failed, cannot start it alone — the group reads
+  `ERROR` on the new primary too, and waits for an operator to switch
+  the parked leg, which holds the data, back into `leg_list`, and for
+  that leg to be available. When none carries one — every one a spare
+  that no converge added to the array — and every one is available, the
+  new primary creates a fresh empty array over them (CN12's assembly
+  case for legs with no superblock), without the data the parked leg
+  holds. Leg repair switches no
+  second spare into a group before the primary has reported a converge
+  of the first switch (`dnv-worker.md` AR8), but that converge leaves a
+  spare out of the array when its leg is not available, and an
+  operator's switches do not wait. The fail the guard refuses would have
+  broken the array at once.
 * An unanswered array can leave a group unassembled: a group with no
   answering array while another array of the walk did not answer is
   neither created nor assembled that pass (CN12), and the error is a
@@ -3501,10 +3599,13 @@ would be a leftover report no `Syncup*` could ever clear.
   with two sides (a migration in flight, which the repair leaves alone;
   it has no available path once the destination's DN is dead, or the
   source's before the destination's path is optimized,
-  `architecture.md`, Migration), a leg of a clone meta group while every
-  other leg of its `leg_list` carries a health epoch too (the repair logs
-  `no_healthy_leg` and switches and creates nothing for the group,
-  `dnv-worker.md` AR8),
+  `architecture.md`, Migration), a leg whose group, a slice's group or a
+  clone meta group alike, has a health epoch on every other leg of its
+  `leg_list` too (the repair logs `no_healthy_leg` and switches and
+  creates nothing for the group, `dnv-worker.md` AR8), a leg of a group
+  whose row in the primary's latest report does not read `OK` — its
+  array stopped or broken, or held by the in-sync guard (CN12) — since
+  the repair switches nothing into such a group (`dnv-worker.md` AR8),
   a full spare list, a spare of the group
   left unprovisioned on a DN that failed while it zeroed, an SP whose
   reactions are suppressed (`dnv-worker.md` AR3), no DN to place a spare on, or a pending
@@ -3622,8 +3723,8 @@ would be a leftover report no `Syncup*` could ever clear.
   the primary's threshold is what brings the clone back once its group
   can be assembled; one whose group cannot be assembled anywhere reads
   `MISSING` and waits at least until a leg of its `leg_list` returns,
-  where a leg that leg repair parked first does not count
-  (`architecture.md`, Clone metadata durability; `dnv-worker.md` AR8). A dm-clone whose copy
+  since leg repair switches no spare into a group whose array does not
+  run (`dnv-worker.md` AR8). A dm-clone whose copy
   is whole writes no metadata, so a group whose legs all fail under it
   leaves it in read-write mode and serving; the fault is then the group's
   and the legs' rows' alone.

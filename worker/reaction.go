@@ -103,10 +103,30 @@ const (
 	// reasonTwoSides is AR8's "a leg with two sides has a user migration in
 	// flight and is left alone".
 	reasonTwoSides = "leg_has_two_sides"
-	// reasonNoHealthyLeg is AR8's precondition of its own on a clone meta
-	// group: no other leg of the group's leg_list is free of a health epoch,
-	// so leg repair neither switches nor creates a spare for it.
+	// reasonNoHealthyLeg is AR8's healthy-leg precondition, on every group:
+	// no other leg of the group's leg_list is free of a health epoch, so leg
+	// repair neither switches nor creates a spare for it.
 	reasonNoHealthyLeg = "no_healthy_leg"
+	// The grp_row_ reasons are AR8 step 1's gate: the group's row in the
+	// primary's latest report (grp_id_to_md_raid) does not read
+	// RES_STATUS_OK, the one status that says the group's array runs
+	// (cnagent.md CN28), and the switch waits. One
+	// reason per status of the row, and grp_row_absent for a report that
+	// holds no row of the group — a standby's report, which the pass reads
+	// from a promotion's hand-over until its reply (primaryInfo), holds
+	// none (cnagent.md CN12).
+	reasonGrpRowError        = "grp_row_error"
+	reasonGrpRowMissing      = "grp_row_missing"
+	reasonGrpRowUnknown      = "grp_row_unknown"
+	reasonGrpRowProvisioning = "grp_row_provisioning"
+	reasonGrpRowPending      = "grp_row_pending"
+	reasonGrpRowAbsent       = "grp_row_absent"
+	// reasonGrpRowStale is the same gate on a row that reads OK in a report
+	// from an observation older than the snapshot: the report's revision is
+	// below the snapshot's SpRevision, so the row may be from before the
+	// last change of the group's leg_list, and the switch waits for the
+	// primary's report of an observation made at that revision.
+	reasonGrpRowStale = "grp_row_stale"
 	// reasonMetaLadderCap is the dm-thin metadata ceiling of architecture.md,
 	// GrowSlice (model's metaSizeCap), reached before model.GrowSlice is even
 	// called because the allocator has to search for the ladder's size first.
@@ -820,9 +840,12 @@ type spPass struct {
 	primaryId uint64
 	primary   *pb.Cntlr
 	// info is the primary's latest CntlrInfo (pool usage for AR6, spare
-	// readiness for AR8, HL2's row classes for AR5 and AR7); nil when its
-	// child has never reported one.
-	info *pb.CntlrInfo
+	// readiness and the group rows for AR8, HL2's row classes for AR5 and
+	// AR7); nil when its child has never reported one. infoRev is the
+	// revision of the observation it reports, which AR8 step 1's gate
+	// compares with the snapshot's SpRevision (grpRowHold).
+	info    *pb.CntlrInfo
+	infoRev uint64
 	// failoverCand is AR5's election, computed once because AR7's
 	// sole-primary variant is defined as "AR5 found none". 0 = none.
 	failoverCand uint64
@@ -1022,7 +1045,7 @@ func (w *spWorker) newPass(state *model.SpState, cc *pb.ClusterConf) *spPass {
 		}
 	}
 	if p.primary != nil {
-		p.info = w.primaryInfo(p.primaryId)
+		p.info, p.infoRev = w.primaryInfo(p.primaryId)
 	}
 	return p
 }
@@ -1036,12 +1059,14 @@ func failoverEligible(cntlr *pb.Cntlr) bool {
 }
 
 // primaryInfo is the latest CntlrInfo the PRIMARY cntlr's child reported
-// (AR1). AR6 reads the pool usage out of it and AR8 the spare readiness; a
-// cntlr whose child has not reported yet — or that has no child at all,
-// because its CN could not be resolved or a hold (RW22's demotion hold, then
-// RW14's sides-first barrier) has not started it yet, or whose child still
-// drives the standby plan because that hold has not handed it the promotion
-// yet — yields nil, and both reactions then wait rather than guess.
+// (AR1), with the revision of the observation it reports. AR6 reads the pool
+// usage out of it and AR8 the spare readiness and the group rows, with that
+// revision for step 1's gate; a cntlr whose child has not reported yet — or
+// that has no child at all, because its CN could not be resolved or a hold
+// (RW22's demotion hold, then RW14's sides-first barrier) has not started it
+// yet, or whose child still drives the standby plan because that hold has
+// not handed it the promotion yet — yields nil, and both reactions then wait
+// rather than guess.
 //
 // The plan test keeps a held promotion out of the pass. The snapshot the pass
 // loads names the new primary as soon as the failover commits, while that
@@ -1051,14 +1076,18 @@ func failoverEligible(cntlr *pb.Cntlr) bool {
 // block) AR8 step 1 reads as a spare's readiness. The test is on the plan the
 // child drives, not on its info: from the hand-over until the reply to the
 // promotion, the info is still the standby's last report — the promotion's
-// own round trip, as it was before the hold.
+// own round trip. That report holds no group row, a standby having no group
+// (cnagent.md CN12), so AR8 step 1's gate (grpRowHold) holds the switch
+// through that window too, whatever the standby's leg row of a spare reads;
+// and from the failover's commit on, the old primary's last report, whose
+// group rows may still read OK, is never the one the gate reads.
 //
 // It is a snapshot, not the live message: the child keeps folding replies into
 // its info on its own goroutine while the pass runs on the coordinator's.
-func (w *spWorker) primaryInfo(cntlrId uint64) *pb.CntlrInfo {
+func (w *spWorker) primaryInfo(cntlrId uint64) (*pb.CntlrInfo, uint64) {
 	child, ok := w.cntlrs[cntlrId]
 	if !ok || child.driver == nil || child.plan == nil || !child.plan.primary {
-		return nil
+		return nil, 0
 	}
 	return child.driver.infoSnapshot()
 }
@@ -1833,23 +1862,28 @@ func (t *repairTarget) ids() []slog.Attr {
 // with the smallest leg_id, across the slices' groups and the clone meta
 // groups alike. It reports whether the pass ends here.
 //
-// AR8's five holds — "the leg has exactly one side" (this leg), a clone meta
-// group with no other leg of its leg_list free of a health epoch, step 2's
-// wait for a pending spare, step 4's full spare list and step 3's spare still
-// unprovisioned (this group) — are part of the candidate test, not reasons
-// to end the pass. Each is a property of ONE leg or ONE group, and each can
-// hold for a very long time: a two-sided leg has a user migration in flight
-// (hours), a clone meta group whose other leg_list legs are unhealthy stays
-// so until one of them answers again, a spare that cannot be connected stays
-// pending until its leg has been unhealthy for leg_unhealthy (and one the
-// primary never reports stays pending for good), only DeleteSpareLeg by
-// an operator frees a spare slot (AR8 step 4), and a spare whose DN failed
-// while it zeroed stays unprovisioned until that DN finishes zeroing it or an
-// operator deletes it. Ending the pass on any of them would leave every OTHER
-// group of the SP degraded on a single md-raid1 member for exactly as long, so
-// a further failure there is data loss. Each is still recorded per leg for
-// visibility (AR8 step 4; the worker suite's reaction case greps
-// `reason=spare_list_full`) and the scan moves on.
+// AR8's six holds — "the leg has exactly one side" (this leg), a group with
+// no other leg of its leg_list free of a health epoch, step 1's gate on the
+// group's row, step 2's wait for a pending spare, step 4's full spare list
+// and step 3's spare still unprovisioned (this group) — are part of the
+// candidate test, not reasons to end the pass. Each is a property of ONE leg
+// or ONE group, and each can hold for a very long time: a two-sided leg has
+// a user migration in flight (hours), a group whose other leg_list legs are
+// unhealthy stays so until one of them answers again, a group whose row
+// does not read OK stays so until it does — its array stopped or broken
+// until its legs come back or an operator acts, or held by cnagent.md CN12's
+// in-sync guard — since the worker switches no spare into it, a row from a
+// report older than the snapshot waits for the primary's report of the
+// syncup the snapshot's revision brings (grpRowHold), a spare that
+// cannot be connected stays pending until its leg has been unhealthy for
+// leg_unhealthy (and one the primary never reports stays pending for good),
+// only DeleteSpareLeg by an operator frees a spare slot (AR8 step 4), and a
+// spare whose DN failed while it zeroed stays unprovisioned until that DN
+// finishes zeroing it or an operator deletes it. Ending the pass on any of
+// them would leave every OTHER group of the SP degraded on a single md-raid1
+// member for exactly as long, so a further failure there is data loss. Each
+// is still recorded per leg for visibility (AR8 step 4; the worker suite's
+// reaction case greps `reason=spare_list_full`) and the scan moves on.
 func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 	for _, target := range repairCandidates(p) {
 		ids := target.ids()
@@ -1872,34 +1906,74 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			)
 			continue
 		}
-		if target.clone != nil && !otherLegHealthy(target) {
-			// AR8's precondition of its own on a clone meta group: every
-			// other leg of the group's leg_list has a health epoch, so a
-			// switch or a create would start replacing the last legs that
-			// may still hold what was written on the group with fresh spares
-			// holding none of it. The group is left as it is until one of
-			// those legs answers again; the next candidate, in another
-			// group, may still be repairable.
+		if !otherLegHealthy(target) {
+			// AR8's healthy-leg precondition, on every group: every other
+			// leg of the group's leg_list has a health epoch, so a switch or
+			// a create would start replacing the last legs that may still
+			// hold what was written on the group with fresh spares holding
+			// none of it. md learns that a member is dead only from IO to
+			// it, so an idle array whose legs are all dead still runs and
+			// its row reads OK, which step 1's gate lets through; what the
+			// cn agent then does with such a switch is cnagent.md CN12's
+			// in-sync guard and its Known limits. The leg epochs come from
+			// the primary's probe of each leg, which runs with or without
+			// IO, so this test sees what the row does not; and a primary
+			// whose own network fails, which reads every leg unhealthy at
+			// once, leaves the group as it is too. The group waits until
+			// one of those legs answers again; the next candidate, in
+			// another group, may still be repairable.
 			w.reactionSkipped(
 				ctx, reactionSpareCreate, reasonNoHealthyLeg, ids...,
 			)
 			continue
 		}
 		if spare := readySpare(target.grp, p.info); spare != nil {
+			if reason := grpRowHold(p, target.grp.GetGrpId()); reason != "" {
+				// AR8 step 1's gate: the switch runs only while the group's
+				// row in the primary's latest report reads OK. An OK row
+				// means its array runs, whole or degraded (cnagent.md
+				// CN28); a running array can still read ERROR — a read of
+				// it that did not answer, a foreign member or a second
+				// array holding the group's legs, a member change the
+				// converge could not make, or CN12's in-sync guard — and
+				// no other status says the array runs, so every status
+				// but OK holds, and so does an OK row in a report older
+				// than the snapshot (grpRowHold). A switch into a group
+				// whose array does not run is where the hazards start —
+				// two legs dead together, both switched out, and a fresh
+				// array created over legs with no superblock (cnagent.md
+				// CN12); a leg that dies during the copy onto a
+				// switched-in spare and is switched out in its turn,
+				// leaving the half-copied spare the only leg md can
+				// assemble from — so a stopped array is left for its legs
+				// to come back or for an operator. The hold is THIS
+				// group's (AR2) and lasts as long as the row stays so, so
+				// the scan goes on; the group keeps its ready
+				// spare, so it gets no create here (step 3). The kind is
+				// the switch's, the step held, as step 2's. No STM sees a
+				// report, so the gate is the pass's alone: the operator's
+				// SwitchSpareLeg is not held by it.
+				w.reactionSkipped(ctx, reactionSpareSwitch, reason,
+					withAttr(ids, slog.Uint64("spare_leg_id", spare.GetLegId()))...,
+				)
+				continue
+			}
 			return w.switchSpare(ctx, target, spare, ids)
 		}
 		if spare := pendingSpare(p, target.grp); spare != nil {
 			// The kind names the step of the AR8 procedure that is being
 			// deferred: here the switch, which runs as soon as the spare is
-			// ready. Every other AR8 skip names the create — the step the
-			// procedure would otherwise have started with.
+			// ready, as in step 1's gate above. Every other AR8 skip names
+			// the create — the step the procedure would otherwise have
+			// started with.
 			//
 			// The wait holds THIS group only (AR2): a spare whose leg keeps
 			// reading ERROR stays pending for up to leg_unhealthy, and ending
 			// the pass would hold every other group's repair that long.
-			// Another unhealthy leg of the same group finds the same pending
-			// spare and waits too, so the scan cannot create a second spare
-			// for the group here.
+			// A second due leg of the same group never gets here: its
+			// partner then carries an err_epoch too, so the healthy-leg test
+			// above stops both legs with no_healthy_leg, and the scan cannot
+			// create a second spare for the group here either.
 			w.reactionSkipped(ctx, reactionSpareSwitch, reasonSparePending,
 				withAttr(ids, slog.Uint64("spare_leg_id", spare.GetLegId()))...,
 			)
@@ -1992,12 +2066,12 @@ func repairCandidates(p *spPass) []*repairTarget {
 	return found
 }
 
-// otherLegHealthy is AR8's precondition of its own on a clone meta group: a
-// leg of the target's group's leg_list other than the target has no health
-// epoch. Spare legs do not count: nothing written on the group reaches a leg
-// while it is a spare. It reads the health epochs alone, so a spare an
-// earlier repair switched in counts from the switch on, whether or not the
-// group's data has been copied onto it.
+// otherLegHealthy is AR8's healthy-leg precondition, on a slice's group and
+// a clone meta group alike: a leg of the target's group's leg_list other
+// than the target has no health epoch. Spare legs do not count: nothing
+// written on the group reaches a leg while it is a spare. It reads the
+// health epochs alone, so a spare an earlier repair switched in counts from
+// the switch on, whether or not the group's data has been copied onto it.
 func otherLegHealthy(target *repairTarget) bool {
 	for _, leg := range target.grp.GetLegList() {
 		if leg.GetLegId() != target.leg.GetLegId() && leg.GetErrEpoch() == 0 {
@@ -2064,6 +2138,60 @@ func readySpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
 		}
 	}
 	return nil
+}
+
+// grpRowHold is AR8 step 1's gate on the target's group: "" when the group's
+// row (grp_id_to_md_raid) in p.info — the current primary's latest report,
+// the pass's only one (primaryInfo) — reads RES_STATUS_OK, so its array
+// runs, whole or degraded (cnagent.md CN28), and that report is of an
+// observation made at the snapshot's revision or later; otherwise the reason
+// the switch waits, naming the row's status, grp_row_absent for a report
+// that holds no row of the group, such as a standby's (cnagent.md CN12), or
+// grp_row_stale for an OK row of an older observation. The row is read with
+// its presence, since an absent row's status would read RES_STATUS_UNKNOWN.
+// A group id is unique in the SP, a clone meta group's included
+// (architecture.md, Terminology and object model), so one map serves both
+// kinds of group.
+//
+// The revision test keeps a second switch off a group before the primary
+// has reported a converge of the first. Every switch bumps SpRev (AR2), and
+// a report of an older observation describes the array from before it. The
+// agent can make such a report after the switch: while the switch's syncup
+// waits for the cntlr's lock, a converge of the old leg_list can hold it,
+// as the CN10 retry of a late member does (cnagent.md CN10), and its
+// observation reads the array running with the old legs. A second switch
+// read off that row could take the group's last leg with an md superblock
+// out of leg_list before the primary has added the first spare to the
+// array, and a new primary can then create a fresh empty array over legs
+// none of which holds the data (cnagent.md CN12, Known limits). The test
+// compares with the snapshot's SpRevision, not with the group's own last
+// change, which no record keeps, so every group waits after any bump until
+// the primary reports an observation made at that revision, which the
+// syncup the bump's fan-out sends brings (RW14, RW6).
+func grpRowHold(p *spPass, grpId uint64) string {
+	row, ok := p.info.GetGrpIdToMdRaid()[grpId]
+	if !ok {
+		return reasonGrpRowAbsent
+	}
+	switch row.GetStatus() {
+	case pb.ResStatus_RES_STATUS_OK:
+		if p.infoRev < p.state.SpRevision {
+			return reasonGrpRowStale
+		}
+		return ""
+	case pb.ResStatus_RES_STATUS_ERROR:
+		return reasonGrpRowError
+	case pb.ResStatus_RES_STATUS_MISSING:
+		return reasonGrpRowMissing
+	case pb.ResStatus_RES_STATUS_PROVISIONING:
+		return reasonGrpRowProvisioning
+	case pb.ResStatus_RES_STATUS_PENDING:
+		return reasonGrpRowPending
+	default:
+		// RES_STATUS_UNKNOWN — an unreachable primary's rows, which its
+		// driver marks so (HL1) — and any status this build does not know.
+		return reasonGrpRowUnknown
+	}
 }
 
 // pendingSpare is AR8 step 2: a spare that is on its way — not ready yet,

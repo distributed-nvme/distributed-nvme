@@ -17,9 +17,9 @@ import (
 // The whole-worker scenario cases of a clone's clone meta group
 // (architecture.md, Terminology and object model): the sp coordinator drives
 // its sides as a slice's (dnv-worker.md RW14, RW15, RW18), leg repair runs on
-// it with its precondition of its own (AR8) and skips a clone being deleted,
-// and the clone drain's final step gives back the sides the coordinator
-// drove (CLD9). The clone is planted as CreateClone places one in the
+// it with the healthy-leg precondition of every group (AR8) and skips a clone
+// being deleted, and the clone drain's final step gives back the sides the
+// coordinator drove (CLD9). The clone is planted as CreateClone places one in the
 // standard RAID1 pool (putStdClone): its two legs on dn 1 and dn 2, dn 3
 // left for a spare. The fakes derive the rows of the clone's group and legs
 // on every cntlr whose request carries the clone, as for a slice's group
@@ -272,8 +272,8 @@ func TestScenCloneLegRepair(t *testing.T) {
 	c.waitConverged(t)
 }
 
-// TestScenCloneLegRepairNeedsAHealthyLeg pins AR8's precondition of its own on
-// a clone meta group: with both legs of the clone's group reported ERROR past
+// TestScenCloneLegRepairNeedsAHealthyLeg pins AR8's healthy-leg precondition
+// on a clone meta group: with both legs of the clone's group reported ERROR past
 // leg_unhealthy, every pass logs `reaction skipped` (no_healthy_leg) for each
 // of them, naming the clone, and neither creates nor switches a spare, so dn
 // 3 is never charged; once one leg reads OK again, the other is repaired, a

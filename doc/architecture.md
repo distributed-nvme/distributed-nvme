@@ -210,7 +210,7 @@ always means the SP's `DmPoolConf.data_block_size`.
   reads, their check rounds and health epochs, and their `provisioned`
   flip — so each DN's agent builds, zeroes and exports its side like any
   side (`dnv-worker.md` RW14, RW15, RW18, HL2), and leg repair runs over
-  its legs, with a precondition of its own (`dnv-worker.md` AR8).
+  its legs, under the rules `dnv-worker.md` AR8 adds for one.
   The cn agent, whose cntlr request carries the clone with its group,
   builds it as it builds a slice's group: every cntlr connects and wraps
   its legs, spare legs included, and the primary assembles its md array,
@@ -3207,22 +3207,23 @@ STM: remove the spare from `spare_leg_list`, give the DN its bookkeeping
 back, bump `SpRev`. Reply `leg_id`.
 
 **SwitchSpareLeg** — the only way a spare becomes active; users invoke it,
-and so does the sp worker's leg repair (Automatic reactions; `dnv-worker.md`
-AR8). Errors: `NOT_FOUND` for ids not in the group's lists;
-`FAILED_PRECONDITION` when the spare's side is not yet `provisioned` (a
-spare must never become an md member before its meta region, where md
-looks for a superblock, is zeroed, [D15]), when either leg has
-two sides (a migration is running on it and holds the leg until
+and so does the sp worker's leg repair (Automatic reactions;
+`dnv-worker.md` AR8). Errors: `NOT_FOUND` for ids not in the group's
+lists; `FAILED_PRECONDITION` when the spare's side is not yet
+`provisioned` (a spare must never become an md member before its meta
+region, where md looks for a superblock, is zeroed, [D15]), when either
+leg has two sides (a migration is running on it and holds the leg until
 `FinishMigration` or `CancelMigration` ends it, so a migrating leg is
 neither promoted nor parked), or at an `sp_level` at or above
 `SP_LEVEL_NO_THINPOOL` (the model op's level gate, as for GrowSlice).
-Action: STM swap: `spare_leg_id` moves to `leg_list`, taking
-the active role, and `target_leg_id` moves to `spare_leg_list`; bump
-`SpRev`. The primary then fails and removes the target if the array still
-lists it and adds the promoted spare with failfast, and md rebuilds onto it
-— cheaply through the write-intent bitmap when the target was only briefly
-absent, but a fresh spare gets a full resync (`cnagent.md` CN12, member
-reconciliation). Reply the current active and spare leg ids.
+Action: STM swap: `spare_leg_id` moves to `leg_list`, taking the active
+role, and `target_leg_id` moves to `spare_leg_list`; bump `SpRev`. The
+primary then reconciles the array's members under the in-sync guard
+(`cnagent.md` CN12): it fails and removes the target if the array still
+lists it and adds the promoted spare with failfast, and md rebuilds onto
+it — cheaply through the write-intent bitmap when the target was only
+briefly absent, but a fresh spare gets a full resync (`cnagent.md` CN12,
+member reconciliation). Reply the current active and spare leg ids.
 
 ### Bitmap reads
 
@@ -4864,33 +4865,41 @@ inaccessible (`cnagent.md` CN16, CN19).
 **A group that cannot be assembled stops the clone.** The primary creates
 no dm-clone over a group whose row of the pass does not read `OK` (a
 degraded running array's row reads `OK`; `cnagent.md` CN18 says when the
-row of a running array does not): the group's row says what is wrong,
-the clone's dm-clone row reads `RES_STATUS_MISSING` while no dm-clone of
-the clone is up, naming the group once the source is ready (`cnagent.md`
+row of a running array does not): the group's row says what is wrong, the
+clone's dm-clone row reads `RES_STATUS_MISSING` while no dm-clone of the
+clone is up, naming the group once the source is ready (`cnagent.md`
 CN18), and, while no dm-clone of the clone serves, the destination td's
 namespaces stay parked and inaccessible, their hosts' IO queued, until a
 converge finds the group's row `OK` again — for a group no cntlr can
 assemble from the legs it has, not before a leg of its `leg_list` comes
 back (Known limits); the operator may delete the clone with `force`
-(Clones). A dm-clone an earlier pass built is left as it is, and one
-that serves goes on serving its namespaces over a group whose row is
-not `OK` (`cnagent.md` CN16, CN18). Reason: a
-dm-clone created over a device that is not the group's assembled array
-would format new metadata there and copy the source again over what the
-hosts wrote, a silent loss, while a stop with the source intact loses
-nothing. For the same reason leg repair switches no spare into a clone
-meta group while every leg of its `leg_list` has a health epoch
-(`dnv-worker.md` AR8). Where the one leg left is one mdadm will not start
-alone and it carries no health epoch, leg repair parks the dead leg and
-switches a spare in: a fresh spare carries no superblock, so the next
-assembly is again from that one leg and is refused again, and the parked
-leg joins no assembly when it comes back, so the clone stays stopped
-(Known limits). A dm-clone leaves read-write mode when an operation on its
+(Clones). A dm-clone an earlier pass built is left as it is, and one that
+serves goes on serving its namespaces over a group whose row is not `OK`
+(`cnagent.md` CN16, CN18). Reason: a dm-clone created over a device that
+is not the group's assembled array would format new metadata there and
+copy the source again over what the hosts wrote, a silent loss, while a
+stop with the source intact loses nothing. For the same reason leg repair
+switches no spare into a clone meta group while every leg of its
+`leg_list` has a health epoch, nor into one whose array does not run
+(`dnv-worker.md` AR8): where the one leg left is one mdadm will not start
+alone, the dead leg stays in the `leg_list`, so the group can be assembled
+again once it comes back, and the clone waits stopped meanwhile (Known
+limits). That holds except where leg repair parks a leg the group needs
+to be assembled again: when a leg that holds no full copy counts as the
+group's healthy leg — a spare still being copied, or a leg md has failed
+out of the array whose probe passes again — or when the leg that stays
+has just died and neither its health epoch nor the group's row shows it
+yet. The group can then stay down until an operator switches the parked
+leg back, or be started afresh without its data (`dnv-worker.md`, Known
+limits: "A spare still being copied counts as the group's healthy leg",
+"A leg md has failed out of the array counts as the group's healthy leg
+once its probe passes again" and "The gate can read a row that is about
+to turn"). A dm-clone leaves read-write mode when an operation on its
 metadata device fails; in read-only or failed metadata mode it reads
 `RES_STATUS_ERROR` and serves no namespace, and nothing the agent does
-takes it back (`cnagent.md` CN18): the error moves the primary role at its
-threshold, and the new primary assembles the group and creates a dm-clone
-of its own over it (`cnagent.md`, Known limits).
+takes it back (`cnagent.md` CN18): the error moves the primary
+role at its threshold, and the new primary assembles the group and creates
+a dm-clone of its own over it (`cnagent.md`, Known limits).
 
 **The durability rests on mdadm's degraded-assembly gate.** A clone meta
 group under `RedundMdRaid1` is assembled by the rules of "Make sure all
@@ -6069,27 +6078,28 @@ that component's document and only pointed to here.
   waiting, its rows provisioning, until a run comes free (Metadata units;
   `dnagent.md` DN13); the source keeps serving and the migration does not
   start.
-* **A clone whose clone meta group is lost stops.** A clone's progress
-  is only on its clone meta group (Clone metadata durability): when no
-  cntlr can assemble the group — every leg of it dead, or only a leg left
-  that mdadm will not start alone — the primary builds no dm-clone, and
-  while no dm-clone of the clone serves, the destination td's namespaces
-  stay parked and inaccessible, their hosts' IO queued; leg repair
-  switches no spare in while every leg of the group's `leg_list` has a
-  health epoch (`dnv-worker.md` AR8). The clone waits at least until a
-  leg of that `leg_list` comes back, and a leg that comes back is not
-  always enough: where the one leg left is one mdadm will not start alone
-  and carries no health epoch, leg repair parks the dead leg and switches
-  a spare in; a fresh spare carries no superblock, so the assembly from
-  the one leg is refused again, the parked leg joins no assembly while it
-  is a spare, and nothing the control plane does on its own brings the
-  clone back. The source is
-  untouched, and the operator may delete the clone with `force` instead. A
-  dm-clone that an operation failing on its metadata device takes out of
-  read-write mode reads `RES_STATUS_ERROR` until the role moves, while a
-  dm-clone that serves and whose copy is whole writes no metadata, so it
-  serves on over a group whose legs have all failed, until it has to be
-  built again (`cnagent.md`, Known limits).
+* **A clone whose clone meta group is lost stops.** A clone's progress is
+  only on its clone meta group (Clone metadata durability): when no cntlr
+  can assemble the group — every leg of it dead, or only a leg left that
+  mdadm will not start alone — the primary builds no dm-clone, and while
+  no dm-clone of the clone serves, the destination td's namespaces stay
+  parked and inaccessible, their hosts' IO queued; leg repair switches no
+  spare in while every leg of the group's `leg_list` has a health epoch,
+  nor while the group's array does not run (`dnv-worker.md` AR8), so the
+  dead legs stay in that `leg_list`, except where leg repair parks a leg
+  the group needs to be assembled again, after which the group can stay
+  down until an operator switches that leg back, or be started afresh
+  without its data (Clone metadata durability; `dnv-worker.md`, Known
+  limits). The clone waits until enough
+  of them are back for a cntlr to assemble the group — at least one, and
+  more where mdadm will not start the one alone — and nothing the control
+  plane does on its own brings it back sooner. The source is untouched,
+  and the operator may delete the clone with `force` instead. A dm-clone
+  that an operation failing on its metadata device takes out of read-write
+  mode reads `RES_STATUS_ERROR` until the role moves, while a dm-clone
+  that serves and whose copy is whole writes no metadata, so it serves on
+  over a group whose legs have all failed, until it has to be built again
+  (`cnagent.md`, Known limits).
 * **A clone's drain can give its clone meta group back before the primary
   removes the dm-clone** (`dnv-worker.md`, Known limits): the drain's last
   transaction waits for no agent, so a DN can tear a side of the group

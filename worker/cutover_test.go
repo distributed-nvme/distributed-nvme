@@ -433,7 +433,7 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 	t.Run("a round's own info", func(t *testing.T) {
 		driver, w := setup(t, true)
 		info := pathInfo(spSideDst)
-		driver.storeInfo(info)
+		driver.storeInfo(info, 0)
 		driver.setStreamInfo(info)
 		got := paths(t, driver, w, &replyState{
 			revision: 7, infoPresent: true, fromRound: true,
@@ -449,7 +449,7 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 		// before a failover, say — holds one, and is the latest known.
 		driver.setStreamInfo(pathInfo())
 		stale := pathInfo(spSideDst)
-		driver.storeInfo(stale)
+		driver.storeInfo(stale, 0)
 		driver.syncupInfo = stale
 		got := paths(t, driver, w, &replyState{revision: 7, fromRound: true})
 		if got == nil || got.live(spSideDst) {
@@ -461,7 +461,7 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 	t.Run("a Syncup that carried no info", func(t *testing.T) {
 		driver, w := setup(t, true)
 		info := pathInfo(spSideDst)
-		driver.storeInfo(info)
+		driver.storeInfo(info, 0)
 		driver.setStreamInfo(info)
 		driver.syncupInfo = nil
 		if got := paths(t, driver, w, &replyState{revision: 7}); got != nil {
@@ -473,7 +473,7 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 		driver, w := setup(t, true)
 		driver.setStreamInfo(pathInfo())
 		info := pathInfo(spSideDst)
-		driver.storeInfo(info)
+		driver.storeInfo(info, 0)
 		driver.syncupInfo = info
 		got := paths(t, driver, w, &replyState{revision: 7, infoPresent: true})
 		if !got.live(spSideDst) {
@@ -484,7 +484,7 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 	t.Run("a standby", func(t *testing.T) {
 		driver, w := setup(t, false)
 		info := pathInfo(spSideDst)
-		driver.storeInfo(info)
+		driver.storeInfo(info, 0)
 		driver.setStreamInfo(info)
 		got := paths(t, driver, w, &replyState{
 			revision: 7, infoPresent: true, fromRound: true,
@@ -499,7 +499,7 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 		plan.req.Cntlr = &pb.Cntlr{Primary: true, Disabled: true}
 		driver, w := setupPlan(t, plan)
 		info := pathInfo(spSideDst)
-		driver.storeInfo(info)
+		driver.storeInfo(info, 0)
 		driver.setStreamInfo(info)
 		got := paths(t, driver, w, &replyState{
 			revision: 7, infoPresent: true, fromRound: true,

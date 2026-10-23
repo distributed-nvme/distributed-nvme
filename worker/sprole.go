@@ -2960,10 +2960,16 @@ type cntlrDriver struct {
 	addr string
 
 	// mu guards next (RW6), lastInfo, which fold writes from the stream's
-	// pump goroutine and the loop reads, and streamInfo.
+	// pump goroutine and the loop reads, infoRev and streamInfo.
 	mu       sync.Mutex
 	next     *cntlrPlan
 	lastInfo *pb.CntlrInfo
+	// infoRev is the revision of the observation lastInfo reports: the
+	// revision of the reply that carried it, or of a later round's reply
+	// that left its info out as unchanged from the stream's (noteUnchanged).
+	// AR8 step 1's gate holds a switch while it is older than the pass's
+	// snapshot (grpRowHold).
+	infoRev uint64
 	// streamInfo is the CntlrInfo the open CheckCntlr stream last carried:
 	// what a round's reply that leaves its info out as unchanged repeats,
 	// where lastInfo may hold a Syncup*'s since. AR10's run judges a round
@@ -3072,12 +3078,30 @@ func newCntlrDriver(
 	return d
 }
 
-// storeInfo remembers the latest CntlrInfo (HL5); info returns it. See
-// sideDriver.storeInfo for why the pointer is guarded.
-func (d *cntlrDriver) storeInfo(info *pb.CntlrInfo) {
+// storeInfo remembers the latest CntlrInfo (HL5) with the revision of the
+// reply that carried it; info returns the info. See sideDriver.storeInfo for
+// why the pointer is guarded.
+func (d *cntlrDriver) storeInfo(info *pb.CntlrInfo, revision uint64) {
 	d.mu.Lock()
 	d.lastInfo = info
+	d.infoRev = revision
 	d.mu.Unlock()
+}
+
+// noteUnchanged is a round's reply that left its info out as unchanged (HL5):
+// the observation it answers from, made under the request at revision
+// (architecture.md, Live-state reporting), holds the info the stream last
+// carried. While that info is still the latest known one — no Syncup* reply
+// has stored its own since — the latest known info is that observation's as
+// well, and its revision moves to the reply's. A reply that answers from an
+// older observation moves it back, so AR8 step 1's gate waits rather than
+// reads a report from before the revision it needs.
+func (d *cntlrDriver) noteUnchanged(revision uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastInfo != nil && d.lastInfo == d.streamInfo {
+		d.infoRev = revision
+	}
 }
 
 func (d *cntlrDriver) info() *pb.CntlrInfo {
@@ -3114,17 +3138,18 @@ func (d *cntlrDriver) ownInfo(r *replyState) *pb.CntlrInfo {
 }
 
 // infoSnapshot returns a COPY of the cntlr's latest info, taken under the
-// driver's lock. info() hands out the live message, which only the child's own
-// goroutine may read: the coordinator's reaction pass runs on ITS goroutine
-// (AR1) while this one keeps folding replies into the field and marking its
-// rows UNKNOWN, so the pass gets a copy or nothing.
-func (d *cntlrDriver) infoSnapshot() *pb.CntlrInfo {
+// driver's lock, with the revision of the observation it reports (infoRev).
+// info() hands out the live message, which only the child's own goroutine may
+// read: the coordinator's reaction pass runs on ITS goroutine (AR1) while
+// this one keeps folding replies into the field and marking its rows
+// UNKNOWN, so the pass gets a copy or nothing.
+func (d *cntlrDriver) infoSnapshot() (*pb.CntlrInfo, uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.lastInfo == nil {
-		return nil
+		return nil, 0
 	}
-	return proto.Clone(d.lastInfo).(*pb.CntlrInfo)
+	return proto.Clone(d.lastInfo).(*pb.CntlrInfo), d.infoRev
 }
 
 // install hands the child its newest request (RW6).
@@ -3467,7 +3492,7 @@ func (d *cntlrDriver) fold(
 	saveTime *timestamppb.Timestamp,
 ) *replyState {
 	if info != nil {
-		d.storeInfo(info)
+		d.storeInfo(info, revision)
 	}
 	return newReplyState(agentReply, revision, info != nil, stamp, saveTime)
 }
@@ -3499,6 +3524,8 @@ func (s *cntlrCheckStream) recv() (*replyState, error) {
 	}
 	if info := reply.GetCntlrInfo(); info != nil {
 		s.driver.setStreamInfo(info)
+	} else {
+		s.driver.noteUnchanged(reply.GetRevision())
 	}
 	return s.driver.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCntlrInfo(),

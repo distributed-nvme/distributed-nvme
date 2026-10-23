@@ -417,14 +417,19 @@ THR_CUT_SHOW="$THR_CUT_SHOW --thr-side $THR_CUT_SIDE --thr-leg $THR_CUT_LEG"
 
 # The ACTIVE set: the four numbers the sp now being built will carry, and the
 # argv that carries them. They exist as four variables and not as one opaque
-# string for two reasons, neither of which is arithmetic: setup_create_sp
-# asserts them back one FIELD at a time out of `sp get`, which is also the proof
-# that $THR split into eight words instead of arriving as one; and react's
-# progress messages name the individual threshold the operator is waiting on
-# (primary_unhealthy in step 3, cntlr_unhealthy in step 4, side/leg_unhealthy in
-# step 5). No wait bound in this file is computed from any of them — WAIT_REACT
-# is a flat number sized by hand against the reacting set — and one assertion
-# is: the cutoff case's bound on how soon its failover lands.
+# string for three reasons: setup_create_sp asserts them back one FIELD at a
+# time out of `sp get`, which is also the proof that $THR split into eight
+# words instead of arriving as one; react's progress messages name the
+# individual threshold the operator is waiting on (primary_unhealthy in step
+# 3, cntlr_unhealthy in step 4, side/leg_unhealthy in steps 5 and 6); and
+# three numbers are computed from them. Two are react step 6's, on a group
+# with no healthy leg: a wait, its watch for side_unhealthy plus a few
+# passes, which must outlast the threshold it proves AR8 holds through,
+# whatever the threshold is; and a margin, the part of side_unhealthy its
+# kills of the group's disk nodes may take, which it compares its kills
+# against and logs. Every other wait bound is a flat number, WAIT_REACT sized
+# by hand against the reacting set. The third is an assertion: the cutoff
+# case's bound on how soon its failover lands.
 # sp_thresholds is the only writer; the initial value is the quiet set so that
 # nothing is ever unset under `set -u`, and main overwrites it before the first
 # sp is created.
@@ -7536,8 +7541,9 @@ SP_SIDE_PATH="$SP_LEG_PATH | .side_list[]"
 # whose side is not provisioned ("spare side is not provisioned").
 # A poll over SP_SIDE_PATH alone would answer "nothing left to do" the instant
 # `spare create` returned and the switch would then be refused. The other is
-# react step 5's choice of a disk node that carries exactly one side of the
-# sp, spare and parked legs' sides included (react_leg_repair says why).
+# the disk-node rule of react steps 5 and 6 (react_leg_alone): a disk node
+# that carries exactly one side of the sp, spare and parked legs' sides
+# included (react_leg_repair says why).
 SP_ANY_SIDE_PATH="$SP_GRP_PATH | (.leg_list[], .spare_leg_list[]) | .side_list[]"
 
 # A side's DN VM. addr_port is "<ip>:<29900+k>" (dn_addr), and the suite only
@@ -12860,11 +12866,12 @@ copy_check_drop() { # <mark> <name>
 # in agent/cnagent/md.go; cnagent.md CN28):
 # md/array_state, then "degraded" while md/degraded is non-zero, then the
 # word of a sync that is running with its "(<done> / <total>)" sectors. A
-# running array of the group's own legs is RES_STATUS_OK, however degraded (a
-# foreign member or a second array holding the group's legs is
-# RES_STATUS_ERROR). So a rebuilding array is RES_STATUS_OK with a details of
-# "clean, degraded, recovering (32768 / 2093056)" — the status alone proves
-# nothing about the resync, which is why this reads the words.
+# running array of the group's own legs is RES_STATUS_OK, however degraded,
+# save the cases cnagent.md CN28 lists in which a running array reads
+# RES_STATUS_ERROR, CN12's in-sync guard among them. So a rebuilding array is
+# RES_STATUS_OK with a details of "clean, degraded, recovering (32768 /
+# 2093056)" — the status alone proves nothing about the resync, which is why
+# this reads the words.
 #
 # The three words below are mdadm's State-line words, which the composition
 # keeps: `degraded` while a member is missing, failed or still being rebuilt
@@ -15025,6 +15032,40 @@ REACT_DN_VM=-1
 REACT_DN_INST=-1
 REACT_SPARE_LEG=""
 
+# AR8 on a group with no healthy leg (step 6), the readings its outage's
+# predicates compare against. REACT_DEAD_LEGS is the group's leg_list ids in
+# order and REACT_DEAD_SPARES its spare leg ids sorted, each a jq array
+# literal read before the kills; REACT_DEAD_MARK the worker log's line count
+# at that moment, after which the step counts the worker's records
+# (worker_log_mark); REACT_DEAD_UNTIL the driver-clock instant the step's
+# watch past the thresholds ends. After the repair, REACT_DEAD_OLD is the
+# replaced legs' ids and REACT_DEAD_NEW the ids of the legs AR8 put in their
+# places, each a space-separated list, which react_dead_members reads.
+REACT_DEAD_LEGS=""
+REACT_DEAD_SPARES=""
+REACT_DEAD_MARK=0
+REACT_DEAD_UNTIL=0
+REACT_DEAD_OLD=""
+REACT_DEAD_NEW=""
+
+# The health epochs of the group's legs and of their sides as one line, the
+# form step 6 logs as they come and compares across its watch.
+REACT_DEAD_EPOCHS="[$COPY_GRP0.leg_list[] | \"leg \(.leg_id) \(.err_epoch)\",
+  (.side_list[] | \"side \(.side_id) \(.err_epoch)\")] | join(\", \")"
+
+# How many worker passes step 6 keeps watching its group past side_unhealthy,
+# counted from the first poll that saw every leg of the group's leg_list and
+# every side of those legs carry a health epoch (react_dead_epochs). That
+# poll comes no earlier than both sides' epochs and as a rule later: a leg's
+# epoch comes a fast IO fail timeout, a probe interval and a round after its
+# port goes, a side's once the worker's rounds to its dead agent fail. AR8
+# makes a leg a candidate side_unhealthy after its side's epoch
+# (dnv-worker.md AR8), so the watch runs at least this many passes past the
+# moment both legs are candidates. One pass runs per cntlr_interval
+# (dnv-worker.md AR1), so each pass is one more chance for AR8 to act on
+# each of them. A count of this suite's choosing, not a constant of the tree.
+REACT_DEAD_PASSES=3
+
 # The "last observation" scratch of this section's predicates, same discipline
 # as ANA_LAST / SHA_LAST / MIGR_HYD_LAST: each is logged from inside its own
 # predicate when the value CHANGES and is never interpolated into a wait_until
@@ -15034,6 +15075,8 @@ REACT_POOL_LAST=""
 REACT_ROLE_LAST=""
 REACT_SETTLE_LAST=""
 REACT_SPARE_LAST=""
+REACT_DEAD_LAST=""
+REACT_MEMBER_LAST=""
 
 # --- the shape this case starts from (see the header) -----------------------
 #
@@ -15396,6 +15439,62 @@ worker_demotion_unsynced_cnt() { # <cntlr id>
 	echo "${n:-0}"
 }
 
+# worker_log_mark prints how many lines the worker's log holds now: the mark
+# worker_grp_reaction_cnt counts after, so that a step's count holds only the
+# records written since its own baseline, never what the log held before it.
+# Fatal on a log it cannot read, as worker_failover_cnt is.
+worker_log_mark() {
+	local n
+	n=$(ssh_cp "wc -l < $WORK/worker/worker.log") ||
+		die "cannot count the lines of $WORK/worker/worker.log on $CP_IP"
+	case "$n" in
+	'' | *[!0-9]*) die "the worker log's line count read '$n'" ;;
+	esac
+	echo "$n"
+}
+
+# worker_grp_reaction_cnt counts the worker's records after line <mark>
+# (worker_log_mark) whose msg is <msg>, `reaction applied` or `reaction
+# skipped` (dnv-worker.md, Log records), whose kind or reason, as <field>
+# names, reads <value>, and whose grp_id is <grp id>; given a <leg id>, whose
+# leg_id is that one too. AR8's records name their target by grp_id and leg_id
+# as bare numbers (repairTarget.ids (worker/reaction.go)). The guest keeps the
+# lines after the mark that carry the msg as a fixed string, with awk, whose
+# status tells an unreadable log from an empty answer, and the driver parses
+# what is left, as worker_demotion_unsynced_cnt does; `fromjson?` drops a
+# line torn by a write still in progress. Fatal on a log it cannot read, as
+# worker_failover_cnt is. A msg or a value holding a quote or a backslash is
+# refused, as worker_msg_cnt refuses one: the log escapes them, and the
+# quoting below could not carry them.
+worker_grp_reaction_cnt() { # <mark> <msg> <kind|reason> <value> <grp id> [<leg id>]
+	local lines n sel
+	case "$2$4" in
+	*[\'\"\\]*) die "worker_grp_reaction_cnt cannot match '$2' with '$4'" ;;
+	esac
+	case "$3" in
+	kind | reason) ;;
+	*) die "worker_grp_reaction_cnt matches a kind or a reason, not '$3'" ;;
+	esac
+	case "$1:$5:${6:-0}" in
+	*[!0-9:]* | :* | *::*)
+		die "worker_grp_reaction_cnt takes decimal numbers, not" \
+			"mark '$1', grp '$5', leg '${6:-}'"
+		;;
+	esac
+	lines=$(ssh_cp "awk -v m=$1 -v p='\"msg\":\"$2\"' 'NR > m && index(\$0, p)' \
+		$WORK/worker/worker.log") ||
+		die "cannot read the '$2' records in $WORK/worker/worker.log on $CP_IP"
+	if [ -z "$lines" ]; then
+		echo 0
+		return 0
+	fi
+	sel=".$3 == \"$4\" and .grp_id == $5"
+	[ -z "${6:-}" ] || sel="$sel and .leg_id == $6"
+	n=$(printf '%s\n' "$lines" | "$JQ" -R -r \
+		"fromjson? // empty | select($sel) | .grp_id" | grep -c . || true)
+	echo "${n:-0}"
+}
+
 # react_primary_moved is AR5's whole observable: EXACTLY one cntlr is primary
 # and it is not the one whose agent was killed. The old record is deliberately
 # not required to be gone — AR5 rewrites the two cntlr records (model.Failover:
@@ -15573,6 +15672,9 @@ react_spare_cnt_reaches() { # <want>
 # spare_leg_list, keeping its err_epoch. So the test is
 # "the dead leg is no longer active AND is now parked" — both halves, because
 # either one alone is also what a half-applied transaction would look like.
+# It names no spare, so it holds whichever spare AR8 took, a ready one or
+# one it created first: steps 5 and 6 both wait on it for a leg of slice 0's
+# first data group.
 react_spare_switched() { # <dead leg id>
 	local act park
 	if ! ctl_try sp get; then
@@ -15586,6 +15688,224 @@ react_spare_switched() { # <dead leg id>
 	'' | *[!0-9]*) return 1 ;;
 	esac
 	[ "$act" = 0 ] && [ "$park" = 1 ]
+}
+
+# react_leg_alone is the disk-node rule of steps 5 and 6, read from $SP_JSON:
+# leg <i> of slice 0's first data group's leg_list has exactly one side, and
+# that side's disk node carries no other side of the sp, spare and parked
+# legs' sides counted (SP_ANY_SIDE_PATH). Killing that disk node then takes
+# down exactly the one side the step names; react_leg_repair says what a
+# second side there would do.
+react_leg_alone() { # <i>
+	local saddr hits
+	if [ "$(sp_field "$COPY_GRP0.leg_list[$1].side_list | length")" != 1 ]; then
+		return 1
+	fi
+	saddr=$(sp_field "$COPY_GRP0.leg_list[$1].side_list[0].addr_port")
+	hits=$(sp_field "[$SP_ANY_SIDE_PATH | select(.addr_port == \"$saddr\")] | length")
+	[ "$hits" = 1 ]
+}
+
+# react_kill_dn takes one dn instance down on both planes, which is what a
+# dead DN VM looks like (see the header): the agent first, by its pid file
+# (E2E8), then the instance's nvmet port, which is what takes the DATA path
+# away — nvmet objects outlive their agent, so without it the primary's leg
+# probe would keep succeeding and Leg.err_epoch would stay 0. The agent goes
+# first, as a live agent puts its port back at its next converge (dnagent.md
+# DN5, DN10), which is what react_return_dn relies on. Step 5 calls it; step
+# 6 calls its two halves, react_stop_dn_agent and react_drop_dn_port, each
+# over all of its disk nodes in turn (see step 6's header).
+react_kill_dn() { # <v> <k>
+	react_stop_dn_agent "$1" "$2"
+	react_drop_dn_port "$1" "$2"
+}
+
+# react_stop_dn_agent stops one dn instance's agent by its pid file (E2E8)
+# and checks that it is gone. [secs] is how long kill_pidfile waits after
+# SIGTERM before it sends SIGKILL, stop_dn_instance's own default when it is
+# left out. A SIGTERM alone does not make the worker's rounds fail at once:
+# the agent's gRPC server drains (Serve (agent/agent.go)) and answers the
+# worker's open check streams from its last observation until the worker
+# judges that observation too old and drops them (dnv-worker.md HL7), a few
+# seconds; only then does the agent exit. A SIGKILL breaks the streams, and
+# with them the rounds, the moment it lands. SIGCONT and SIGTERM still go
+# first whatever [secs] is (kill_pidfile).
+react_stop_dn_agent() { # <v> <k> [secs]
+	local out
+	out=$(stop_dn_instance "$@") ||
+		die "dn$1 instance $2: kill_pidfile failed"
+	printf '%s\n' "$out" >&2
+	case "$out" in
+	*STILL_RUNNING*)
+		die "dn$1 instance $2 survived SIGKILL: $out"
+		;;
+	esac
+	out=$(helper_dn "$1" alive "$(dn_pid_file "$2")") ||
+		die "dn$1: the alive verb failed"
+	assert_eq "$out" dead "dn$1 instance $2's agent after the kill"
+}
+
+# react_drop_dn_port removes one dn instance's nvmet port, whose agent
+# react_stop_dn_agent has stopped, and checks that the port was removed with
+# nothing refused or stuck.
+react_drop_dn_port() { # <v> <k>
+	local out hits
+	out=$(helper_dn "$1" port_drop "$(dn_port_id "$2")") ||
+		die "dn$1: the port_drop verb failed"
+	printf '%s\n' "$out" >&2
+	hits=$(printf '%s\n' "$out" | grep -cF -e REFUSED -e STUCK || true)
+	assert_eq "$hits" 0 \
+		"port_drop refused or could not remove nvmet port $(dn_port_id "$2")"
+	hits=$(printf '%s\n' "$out" | grep -cF " removed " || true)
+	assert_ne "$hits" 0 \
+		"port_drop removed the nvmet port of the instance it was told to"
+}
+
+# react_return_dn brings back a dn instance react_kill_dn, or its two halves,
+# took down.
+# start_dn_instance reuses the backing file and its loop device, so the data
+# is still there, and the agent recreates its own nvmet port, which is checked
+# by the port's id.
+react_return_dn() { # <v> <k>
+	start_dn_instance "$1" "$2"
+	wait_until "$WAIT_PROVISION" \
+		"dn$1 instance $2 to report disk, header and port OK again" \
+		dn_node_ready "$1" "$2"
+	assert_field "$CTL_OUT" '.dn_info.port_info.res_name' \
+		"$(dn_port_id "$2")" \
+		"the restarted agent recreated its OWN nvmet port, not ports/1"
+}
+
+# react_dead_grp_holds is the watch every poll of step 6's outage keeps on the
+# `sp get` reply in $CTL_OUT: slice 0's first data group still has the
+# leg_list it had before the kills, in the same order, and the same spare
+# legs. It dies the moment either moved, naming both readings: from the kills
+# on no leg of the group is healthy, so AR8 may neither switch a spare in nor
+# create one (dnv-worker.md AR8), and a wait that timed out later would hide
+# which act it was.
+react_dead_grp_holds() {
+	local legs spares
+	legs=$(jq_of "$CTL_OUT" "$COPY_GRP0 | [.leg_list[].leg_id] | tojson")
+	spares=$(jq_of "$CTL_OUT" \
+		"$COPY_GRP0 | [.spare_leg_list[].leg_id] | sort | tojson")
+	if [ "$legs" = "$REACT_DEAD_LEGS" ] && [ "$spares" = "$REACT_DEAD_SPARES" ]; then
+		return 0
+	fi
+	die "group $REACT_GRP_ID changed while none of its legs was healthy:" \
+		"leg_list $REACT_DEAD_LEGS -> $legs, spare legs" \
+		"$REACT_DEAD_SPARES -> $spares. AR8 repairs a leg only while another" \
+		"leg of its group has no err_epoch (dnv-worker.md AR8). If the kills" \
+		"took longer than the margin step 6 logged for them, the first leg's" \
+		"threshold may have run out while the last leg still read healthy"
+}
+
+# react_dead_epochs is step 6's first wait: every leg of slice 0's first data
+# group's leg_list, and every side of those legs, carries a health epoch in
+# `sp get` — the primary's probe of each leg has failed (cnagent.md CN11) and
+# the worker's rounds to each disk node have (dnv-worker.md HL2). The epochs
+# are logged as they change; uint64 fields render as decimal strings, "0"
+# while healthy (dnvctl.md CT4). The group is watched as on every poll of the
+# outage (react_dead_grp_holds).
+react_dead_epochs() {
+	local sig zero
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	react_dead_grp_holds
+	sig=$(jq_of "$CTL_OUT" "$REACT_DEAD_EPOCHS")
+	if [ "$sig" != "$REACT_DEAD_LAST" ]; then
+		REACT_DEAD_LAST=$sig
+		log "  group $REACT_GRP_ID health epochs: $sig"
+	fi
+	zero=$(jq_of "$CTL_OUT" \
+		"[$COPY_GRP0.leg_list[] | (.err_epoch, .side_list[].err_epoch)
+		  | select(. == \"0\")] | length")
+	[ "$zero" = 0 ]
+}
+
+# react_no_healthy_logged is step 6's second wait: the worker has logged
+# `reaction skipped` with reason no_healthy_leg for the group since the step's
+# mark (worker_grp_reaction_cnt), whatever the record's kind. It comes once
+# a leg's threshold has run out, at every pass, for each such leg. A count the
+# helper could not read has already died in its subshell, saying why, and
+# set -e does not reach a predicate wait_until runs as a condition, so the
+# exit is spelled out.
+react_no_healthy_logged() {
+	local n
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	react_dead_grp_holds
+	n=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction skipped" \
+		reason no_healthy_leg "$REACT_GRP_ID") || exit 1
+	[ "$n" -ge 1 ]
+}
+
+# react_dead_window is step 6's watch past the thresholds: true once the
+# driver's clock has reached REACT_DEAD_UNTIL, the group watched on every
+# poll until then (react_dead_grp_holds), so a switch or a create inside the
+# window fails the step the moment it shows.
+react_dead_window() {
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	react_dead_grp_holds
+	[ "$SECONDS" -ge "$REACT_DEAD_UNTIL" ]
+}
+
+# react_dead_members is step 6's proof that md made the group whole on the
+# legs AR8 put in, read on the primary itself (md_member_read): the member of
+# each leg in REACT_DEAD_NEW reads in_sync, and no array holds the member of
+# any leg in REACT_DEAD_OLD. grp_md_clean cannot tell this on the step's idle
+# array: md never saw a replaced leg die, so it still holds that member in
+# sync, and a converge at the switch's revision that never reached md would
+# leave the old pair reading clean, never degraded, at that revision
+# (grp_md_clean's header). The host read after it would pass too, as md
+# retries a failed read on the leg that came back. A replaced leg's member
+# counts as gone only on md_member_of's own words for it, which
+# md_member_read passes on: that its device is not a dm device, or that no
+# array holds it. A read that failed any other way is a false answer, which
+# the caller's wait_until asks again, as it does a member still copying.
+# wait_until raises QUIET while it polls, so what a replaced leg's read
+# prints on stderr is the guest's and ssh's alone, and a member still held
+# is named by its read's last line. Each member's state and slot are logged
+# when the reading changes, the write count left out.
+react_dead_members() {
+	local id name mrd state sig="" ok=0
+	for id in $REACT_DEAD_NEW; do
+		name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$id")
+		mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name" 2>/dev/null) ||
+			mrd="not in its array"
+		sig="$sig leg $id ${mrd% wsect=*};"
+		state=${mrd%% *}
+		case ",${state#state=}," in
+		*,in_sync,*) ;;
+		*) ok=1 ;;
+		esac
+	done
+	for id in $REACT_DEAD_OLD; do
+		name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$id")
+		if mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name" 2>&1); then
+			mrd=${mrd##*$'\n'}
+			sig="$sig replaced leg $id still held, ${mrd% wsect=*};"
+			ok=1
+			continue
+		fi
+		case "$mrd" in
+		*"no array holds"* | *"is not a dm device"*)
+			sig="$sig replaced leg $id in no array;"
+			;;
+		*)
+			sig="$sig replaced leg $id unread;"
+			ok=1
+			;;
+		esac
+	done
+	if [ "$sig" != "$REACT_MEMBER_LAST" ]; then
+		REACT_MEMBER_LAST=$sig
+		log "  group $REACT_GRP_ID's members on the primary:${sig%;}"
+	fi
+	return "$ok"
 }
 
 # --- step 0: the shape this case starts from --------------------------------
@@ -16453,7 +16773,7 @@ react_leg_repair() {
 		return 0
 	fi
 	stage 05 "AR8: a disk node dies and the worker spares its leg out"
-	local n i sideid saddr hits out rev grpid msg
+	local n i rev grpid msg
 	local before_addrs before_vms spareaddr sparevm
 	local before_spares before_spare_cnt before_sp_spares fresh
 	local before_primary before_failovers
@@ -16530,19 +16850,13 @@ react_leg_repair() {
 	esac
 	REACT_LEG_POS=-1
 	for ((i = 0; i < n; i++)); do
-		if [ "$(sp_field "$COPY_GRP0.leg_list[$i].side_list | length")" != 1 ]; then
-			continue
-		fi
-		sideid=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].side_id")
-		saddr=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].addr_port")
-		hits=$(sp_field "[$SP_ANY_SIDE_PATH | select(.addr_port == \"$saddr\")] | length")
-		if [ "$hits" != 1 ]; then
+		if ! react_leg_alone "$i"; then
 			continue
 		fi
 		REACT_LEG_POS=$i
 		REACT_LEG_ID=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
-		REACT_SIDE_ID=$sideid
-		REACT_SIDE_ADDR=$saddr
+		REACT_SIDE_ID=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].side_id")
+		REACT_SIDE_ADDR=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].addr_port")
 		break
 	done
 	msg="no leg of slice 0's first data group has a single side on a disk node"
@@ -16584,31 +16898,8 @@ react_leg_repair() {
 		"$REACT_LEG_ID (position $REACT_LEG_POS of group $REACT_GRP_ID);" \
 		"the group holds $before_addrs on VMs $before_vms"
 
-	# Both planes. The agent first, so the worker's side rounds start failing,
-	# then the port, which is what takes the DATA path away: nvmet objects
-	# outlive their agent, so without this the primary's leg probe would keep
-	# succeeding and Leg.err_epoch would stay 0.
-	out=$(stop_dn_instance "$REACT_DN_VM" "$REACT_DN_INST") ||
-		die "dn$REACT_DN_VM instance $REACT_DN_INST: kill_pidfile failed"
-	printf '%s\n' "$out" >&2
-	case "$out" in
-	*STILL_RUNNING*)
-		die "dn$REACT_DN_VM instance $REACT_DN_INST survived SIGKILL: $out"
-		;;
-	esac
-	out=$(helper_dn "$REACT_DN_VM" alive "$(dn_pid_file "$REACT_DN_INST")") ||
-		die "dn$REACT_DN_VM: the alive verb failed"
-	assert_eq "$out" dead \
-		"dn$REACT_DN_VM instance $REACT_DN_INST's agent after the kill"
-	out=$(helper_dn "$REACT_DN_VM" port_drop "$(dn_port_id "$REACT_DN_INST")") ||
-		die "dn$REACT_DN_VM: the port_drop verb failed"
-	printf '%s\n' "$out" >&2
-	hits=$(printf '%s\n' "$out" | grep -cF -e REFUSED -e STUCK || true)
-	assert_eq "$hits" 0 \
-		"port_drop refused or could not remove nvmet port $(dn_port_id "$REACT_DN_INST")"
-	hits=$(printf '%s\n' "$out" | grep -cF " removed " || true)
-	assert_ne "$hits" 0 \
-		"port_drop removed the nvmet port of the instance it was told to"
+	# Both planes, the agent first, then the port (react_kill_dn says why).
+	react_kill_dn "$REACT_DN_VM" "$REACT_DN_INST"
 
 	# AR8 step 3, then step 2's wait, then step 1 — one action per pass, so the
 	# create and the switch can never be the same pass and the create is
@@ -16729,7 +17020,7 @@ react_leg_repair() {
 	# legs), and RES_STATUS_OK alone proves nothing about it: probeGroup
 	# reports the
 	# array's sysfs state in mdadm's words, and a running array of the
-	# group's own legs is OK however degraded (grp_md_clean's header has the
+	# group's own legs is OK however degraded (cnagent.md CN28 has the
 	# ERROR cases), so a rebuilding one is OK with "clean, degraded,
 	# recovering (…)". grp_md_clean reads the words, and takes the SpRev the
 	# switch bumped to so that the array it reads is the new one.
@@ -16748,13 +17039,7 @@ react_leg_repair() {
 	# an extent on it, and only a live agent can retire that side when the
 	# teardown drains the sp — case_residue would otherwise wait out
 	# $WAIT_DELETE on a node that cannot answer.
-	start_dn_instance "$REACT_DN_VM" "$REACT_DN_INST"
-	wait_until "$WAIT_PROVISION" \
-		"dn$REACT_DN_VM instance $REACT_DN_INST to report disk, header and port OK again" \
-		dn_node_ready "$REACT_DN_VM" "$REACT_DN_INST"
-	assert_field "$CTL_OUT" '.dn_info.port_info.res_name' \
-		"$(dn_port_id "$REACT_DN_INST")" \
-		"the restarted agent recreated its OWN nvmet port, not ports/1"
+	react_return_dn "$REACT_DN_VM" "$REACT_DN_INST"
 	sp_refresh
 	sp_totals
 	stack_wait_reset
@@ -16782,9 +17067,393 @@ react_leg_repair() {
 }
 
 # --- step 6 -----------------------------------------------------------------
+#
+# AR8 on a group with NO healthy leg, on the group step 5 repaired: slice 0's
+# first data group, which holds the first stripe of $TD0, so check_sha0 proves
+# its data. Both legs of its leg_list lose their disk node, one right after
+# the other; past the thresholds the group must keep its legs and its spare
+# legs while the worker logs `reaction skipped` (no_healthy_leg) for it
+# (dnv-worker.md AR8). Then the disk node that died last comes back, and the
+# worker must repair the other leg until md has the group whole again.
+#
+# THE ARRAY IS IDLE, BY DESIGN. md learns of a dead member only from an IO to
+# it (cnagent_integtest.md, Lab facts), so with no host IO it sees neither
+# death: each member stays in_sync, neither superblock changes, and the group
+# row the primary reports keeps reading OK (cnagent.md CN28). That row then
+# cannot tell the worker the group is dead, and what holds the repair is
+# AR8's test that another leg of the group has no err_epoch: the legs' health
+# epochs come from the primary's own probe of each leg (cnagent.md CN11),
+# which runs whether or not the array has IO. Had md seen the deaths, one
+# disk node could not always bring the group back. Measured on a lab guest
+# (kernel 7.0.0-38, mdadm 4.5): when both members die with a write in flight
+# the array reads array_state broken while each superblock still lists both
+# members active, and mdadm then refuses to start the array from either one
+# alone; when one dies first and the other later, only the last to die
+# starts alone, degraded. So from the kills until md has the group whole
+# again the step makes no host IO at all — check_sha0 comes only after
+# grp_md_clean — since a host read of the group's data would be the very IO
+# that shows md both deaths.
+#
+# NO FAILOVER IS EXPECTED, and none is asserted across the step, as in step 5:
+# md sees no IO, so the group row and the pool rows on the primary stay OK,
+# and leg rows do not count toward a cntlr's health (dnv-worker.md HL2).
+#
+# THE KILLS ARE BACK TO BACK. AR8's case 2 makes the first leg a candidate
+# side_unhealthy after its side's health epoch, and from then on what holds
+# the repair is the LAST leg's own health epoch. Should the first leg's
+# threshold run out while the last leg still read healthy, AR8 would switch a
+# ready spare in for the first: the case of dnv-worker.md, Known limits ("The
+# gate can read a row that is about to turn"). What the cn agent does with
+# that switch is cnagent.md CN12's in-sync guard and its Known limits, which
+# can turn the group row ERROR and fail the primary over, where the step
+# expects no failover. The last leg's epoch can take a fast IO fail timeout,
+# a probe interval and a round after its port goes. So the step stops every
+# agent first and only then removes every port, and sends each agent SIGKILL right
+# behind its SIGTERM: on a SIGTERM alone the agent drains the worker's rounds
+# for a few seconds before it exits (react_stop_dn_agent), and two such drains
+# in a row could take the whole margin. The step logs how long its kills took,
+# from before the first signal to the last port's removal, against that margin
+# and shouts when none is left; the watch dies on the switch if it comes.
+#
+# WHICH DISK NODE RETURNS. Either would do on an idle array, where md holds
+# both members in sync. The step returns the one that died last: had md
+# failed the first member and recorded that on the last before the last port
+# went, only the last could carry the group alone. That case is narrow. An
+# IO sent to the first leg after its host saw the port go waits out the
+# failfast window (glossary.md) before md sees it fail. The two port
+# removals are much closer together than that, so md's record of the
+# failure would go to a dead member and the array would read broken. No
+# single disk node brings a broken array back, and the group-row assertion
+# before the return catches it. So returning the last never makes things
+# worse. The repair is AR8's ordinary one: once the primary reports the
+# returned leg OK its health epoch is cleared (dnv-worker.md HL2), the other
+# leg's stays, and the group row is OK, so AR8 switches a ready spare in —
+# most likely the leg step 5 parked, whose disk node is back and whose leg
+# the primary reports OK, and which md takes as a new member with a whole
+# copy, as it left the array before another member made the array whole
+# (measured on the same guest) — or creates one and switches it in later.
+# Then the disk node that died first comes back too: its leg is parked by
+# then, and only a live agent can retire its side when the teardown drains
+# the sp.
+react_dead_grp() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== react step 06 (AR8 with no healthy leg) SKIPPED: --redund" \
+			"$REDUND. A RedundNone group has one leg and no redundancy to" \
+			"re-home, so AR8 only logs it (reason=redund_none, in" \
+			"tryLegRepair (worker/reaction.go))."
+		return 0
+	fi
+	stage 06 "AR8: both disk nodes of a group die, and nothing is repaired until one returns"
+	local n i last grpid rev msg st det name mrd state cnt
+	local before_primary before_failovers before_rev
+	local t0 gap allowed seen left newleg skips
+	local ids=() vms=() insts=() addrs=()
+	# common.DefaultNvmeFastIoFailTmo: the fast IO fail timeout every CN
+	# connection to a leg is made with (NvmeHost.Connect (agent/nvmehost.go)).
+	local fast_io_fail=5
+	# common.CnLegProbeInterval: how often the primary probes each leg
+	# (cnagent.md CN11).
+	local probe_every=5
+
+	# The readings the step is judged against, all taken before the kills:
+	# the primary and the failovers applied so far (no failover may follow),
+	# the pool's revision (no op may run on the pool while the group has no
+	# healthy leg: a switch or a create bumps it, a health epoch never does,
+	# model.SetLegErrEpoch), the group's legs in order and its spare legs, and
+	# the worker log's mark the step's record counts start after.
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	before_primary=$PRIMARY_CNTLR_ID
+	before_failovers=$(worker_failover_cnt)
+	before_rev=$(sp_field '.sp_rev.revision')
+	case "$before_rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$before_rev'" ;;
+	esac
+	grpid=$(sp_field "$COPY_GRP0.grp_id")
+	assert_eq "$grpid" "$REACT_GRP_ID" \
+		"slice 0's first data group is still the one step 01 recorded"
+	n=$(sp_field "$COPY_GRP0.leg_list | length")
+	assert_eq "$n" "$LEGS" "slice 0's first data group's active legs"
+	REACT_DEAD_LEGS=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | tojson")
+	REACT_DEAD_SPARES=$(sp_field \
+		"$COPY_GRP0 | [.spare_leg_list[].leg_id] | sort | tojson")
+	REACT_DEAD_MARK=$(worker_log_mark)
+	log "  group $REACT_GRP_ID holds legs $REACT_DEAD_LEGS and spare legs" \
+		"$REACT_DEAD_SPARES (leg $REACT_LEG_ID is the one step 5 parked, its" \
+		"disk node back); $SP at revision $before_rev, primary cntlr" \
+		"$before_primary, $before_failovers failover(s) applied so far"
+
+	# Every leg of the group, by the disk-node rule of step 5
+	# (react_leg_alone): the kills must take down the group's own sides and
+	# nothing else.
+	for ((i = 0; i < n; i++)); do
+		ids[i]=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
+		case "${ids[$i]}" in
+		'' | *[!0-9]*) die "leg $i of the group carries leg_id '${ids[$i]}'" ;;
+		esac
+		if ! react_leg_alone "$i"; then
+			msg="leg ${ids[$i]} at position $i of slice 0's first data group"
+			msg="$msg does not have a single side on a disk node that carries"
+			msg="$msg exactly one side of $SP, spare and parked legs' sides"
+			msg="$msg counted. This step kills the disk node of every leg of"
+			msg="$msg the group, and a second side there would make a leg of"
+			msg="$msg another group unhealthy too, whose repair would move the"
+			msg="$msg revision the step asserts unchanged; a spare's side there"
+			msg="$msg could be one another group's repair is waiting for"
+			die "$msg"
+		fi
+		addrs[i]=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].addr_port")
+		vms[i]=$(dn_vm_of_addr "${addrs[$i]}")
+		insts[i]=$(dn_inst_of_addr "${addrs[$i]}")
+		assert_ne "${vms[$i]}" none \
+			"leg ${ids[$i]}'s addr_port ${addrs[$i]} names a --dn guest"
+		assert_ne "${insts[$i]}" none \
+			"leg ${ids[$i]}'s addr_port ${addrs[$i]} names a dn instance"
+		diag_note_dn "${vms[$i]}" "${insts[$i]}"
+	done
+	last=$((n - 1))
+
+	# The kills, in leg_list order and back to back: every agent, then every
+	# port. No host IO from here until md has the group whole again (see
+	# above).
+	t0=$SECONDS
+	for ((i = 0; i < n; i++)); do
+		log "  killing the agent of dn${vms[$i]} instance ${insts[$i]}" \
+			"(${addrs[$i]}), the disk node of leg ${ids[$i]}"
+		# 0: no wait between SIGTERM and SIGKILL, this step's own choice
+		# (THE KILLS ARE BACK TO BACK above), not a constant of the tree.
+		react_stop_dn_agent "${vms[$i]}" "${insts[$i]}" 0
+	done
+	for ((i = 0; i < n; i++)); do
+		log "  removing the nvmet port of dn${vms[$i]} instance ${insts[$i]}"
+		react_drop_dn_port "${vms[$i]}" "${insts[$i]}"
+	done
+	gap=$((SECONDS - t0 + 1))
+	# The first leg turns candidate side_unhealthy after its side's epoch,
+	# which comes no earlier than its agent's kill, so no earlier than t0; the
+	# last leg's epoch can come a fast IO fail timeout, a probe interval and
+	# one round, the cluster's cntlr_interval, after its port goes, the last
+	# act the gap counts. SECONDS counts whole seconds, hence the one second
+	# added to the gap.
+	allowed=$((THR_SIDE - fast_io_fail - probe_every - DEFAULT_HC_INTERVAL))
+	if [ "$gap" -ge "$allowed" ]; then
+		log "!!! the $n kills took up to ${gap}s. With side_unhealthy at" \
+			"${THR_SIDE}s, kills longer than ${allowed}s can let the first" \
+			"leg's threshold run out before the last leg's health epoch is" \
+			"written, and AR8 would then read that leg healthy and switch a" \
+			"spare in for the first one. The watch below dies if it does."
+	else
+		log "  the $n kills took up to ${gap}s, inside the ${allowed}s" \
+			"side_unhealthy (${THR_SIDE}s) leaves them"
+	fi
+
+	# The outage: every leg's and every side's health epoch first, then the
+	# worker's own record that it holds the repair, then a few more passes
+	# past side_unhealthy, the group watched on every poll. The watch's end is
+	# counted from the poll that saw the last epoch, which comes after it.
+	REACT_DEAD_LAST=""
+	msg="every leg of group $REACT_GRP_ID and its side to carry a health epoch"
+	msg="$msg (a leg's within the fast IO fail timeout of ${fast_io_fail}s, a"
+	msg="$msg probe interval and a round after its port went; a side's once"
+	msg="$msg the worker's rounds to its dead agent fail)"
+	wait_until "$WAIT_REACT" "$msg" react_dead_epochs
+	seen=$REACT_DEAD_LAST
+	REACT_DEAD_UNTIL=$((SECONDS + THR_SIDE + REACT_DEAD_PASSES * DEFAULT_HC_INTERVAL))
+	msg="the worker to log reaction skipped (no_healthy_leg) for group"
+	msg="$msg $REACT_GRP_ID (side_unhealthy ${THR_SIDE}s after its sides'"
+	msg="$msg health epochs, then the next pass)"
+	wait_until "$WAIT_REACT" "$msg" react_no_healthy_logged
+	left=$((REACT_DEAD_UNTIL - SECONDS))
+	[ "$left" -ge 0 ] || left=0
+	msg="the worker to keep group $REACT_GRP_ID as it is for side_unhealthy"
+	msg="$msg (${THR_SIDE}s) and $REACT_DEAD_PASSES passes of"
+	msg="$msg ${DEFAULT_HC_INTERVAL}s past the last health epoch of its legs"
+	msg="$msg and sides"
+	wait_until "$((left + WAIT_SHORT))" "$msg" react_dead_window
+
+	# What the watch proves, from one reading after it: the same legs in the
+	# same order, the same spare legs, the epochs the window counted from
+	# still the ones set (a moved value was cleared and set again, which
+	# restarts the count), no op on the pool and no switch or create in the
+	# worker's records, and no failover.
+	sp_refresh
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.leg_list[].leg_id]) == $REACT_DEAD_LEGS" \
+		"group $REACT_GRP_ID's leg_list holds the legs it held before the kills, in their order"
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.spare_leg_list[].leg_id] | sort) == $REACT_DEAD_SPARES" \
+		"group $REACT_GRP_ID's spare legs are the ones it held before the kills"
+	assert_eq "$(sp_field "$REACT_DEAD_EPOCHS")" "$seen" \
+		"group $REACT_GRP_ID's health epochs across the watch"
+	assert_eq "$(sp_field '.sp_rev.revision')" "$before_rev" \
+		"$SP's revision while no leg of group $REACT_GRP_ID was healthy (no op ran on the pool)"
+	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
+		kind spare_switch "$REACT_GRP_ID")
+	assert_eq "$cnt" 0 \
+		"the worker's applied spare switches on group $REACT_GRP_ID while no leg of it was healthy"
+	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
+		kind spare_create "$REACT_GRP_ID")
+	assert_eq "$cnt" 0 \
+		"the worker's applied spare creates for group $REACT_GRP_ID while no leg of it was healthy"
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary while no leg of group $REACT_GRP_ID was healthy (leg rows do not count toward a cntlr's health)"
+	cnt=$(worker_failover_cnt)
+	assert_eq "$cnt" "$before_failovers" \
+		"the worker's applied failovers while no leg of group $REACT_GRP_ID was healthy"
+	skips=""
+	for ((i = 0; i < n; i++)); do
+		cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction skipped" \
+			reason no_healthy_leg "$REACT_GRP_ID" "${ids[$i]}")
+		skips="$skips leg ${ids[$i]} $cnt,"
+	done
+	log "  the worker kept group $REACT_GRP_ID as it was; its no_healthy_leg" \
+		"records per leg:${skips%,}"
+
+	# The premise, read on the primary itself: md has seen neither death. The
+	# row is what the no-failover claim rests on — a broken array reads ERROR
+	# (cnagent.md CN28), which counts toward the cntlr's health — so it is
+	# asserted. The members' own md states are logged and not asserted: a
+	# member md failed between the kills either was recorded on the last
+	# member, which is the disk node that returns and carries the group
+	# alone, or left the array broken, which the row assertion just below
+	# fails (see WHICH DISK NODE RETURNS above).
+	ctl_ok cntlr inspect --id "$PRIMARY_CNTLR_ID"
+	st=$(jq_of "$CTL_OUT" \
+		".cntlr_info.grp_id_to_md_raid[\"$REACT_GRP_ID\"].status // \"absent\"")
+	det=$(jq_of "$CTL_OUT" \
+		".cntlr_info.grp_id_to_md_raid[\"$REACT_GRP_ID\"].details // \"\"")
+	assert_eq "$st" RES_STATUS_OK \
+		"group $REACT_GRP_ID's row on the primary with no leg serving [$det] (md saw no IO, so the array runs)"
+	copy_primary_cn_id
+	for ((i = 0; i < n; i++)); do
+		name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "${ids[$i]}")
+		mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name") ||
+			mrd="not in its array"
+		state=${mrd%% *}
+		case ",${state#state=}," in
+		*,in_sync,*)
+			log "  leg ${ids[$i]}'s member on the primary: ${mrd% wsect=*}"
+			;;
+		*)
+			log "!!! leg ${ids[$i]}'s member $name on the primary reads" \
+				"'$mrd': md saw an IO to it after all, which this step" \
+				"was built to avoid"
+			;;
+		esac
+	done
+
+	# The disk node that died last comes back (WHICH DISK NODE RETURNS above),
+	# and AR8 repairs the other leg.
+	log "  returning dn${vms[$last]} instance ${insts[$last]}, the disk node" \
+		"of leg ${ids[$last]}, which died last"
+	react_return_dn "${vms[$last]}" "${insts[$last]}"
+	for ((i = 0; i < last; i++)); do
+		msg="AR8 to switch a spare in for leg ${ids[$i]} (the primary must"
+		msg="$msg report leg ${ids[$last]} OK first, and the spare must be"
+		msg="$msg ready, or be created and zeroed)"
+		wait_until "$WAIT_PROVISION" "$msg" react_spare_switched "${ids[$i]}"
+	done
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
+		"the group still has $LEGS active leg(s)"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$last].leg_id" "${ids[$last]}" \
+		"leg ${ids[$last]}, whose disk node came back, keeps its place in leg_list"
+	REACT_DEAD_OLD=""
+	REACT_DEAD_NEW=""
+	for ((i = 0; i < last; i++)); do
+		newleg=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
+		case "$newleg" in
+		'' | *[!0-9]* | 0)
+			die "the leg in leg ${ids[$i]}'s place has leg_id '$newleg'"
+			;;
+		esac
+		assert_ne "$newleg" "${ids[$i]}" \
+			"the leg in leg ${ids[$i]}'s place is a different leg"
+		assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$i].side_list | length" 1 \
+			"leg $newleg, in leg ${ids[$i]}'s place, has exactly one side"
+		if [ "$newleg" = "$REACT_LEG_ID" ]; then
+			log "  leg $newleg, the one step 5 parked, took leg ${ids[$i]}'s place"
+		else
+			log "  leg $newleg took leg ${ids[$i]}'s place"
+		fi
+		REACT_DEAD_OLD="$REACT_DEAD_OLD ${ids[$i]}"
+		REACT_DEAD_NEW="$REACT_DEAD_NEW $newleg"
+	done
+	# THE SPARE SET AFTER THE REPAIR, derived rather than assumed, as in step 5:
+	# SwitchSpareLeg (model/ops.go) takes the spare out of spare_leg_list and
+	# parks the replaced leg there, and a spare AR8 created first was never in
+	# the step's before set. So the group's spare legs are the ones it held
+	# before the kills, plus the replaced legs, less the legs now in their
+	# places — whichever spare AR8 took.
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.spare_leg_list[].leg_id] | sort)
+		 == ((($REACT_DEAD_SPARES + ($REACT_DEAD_LEGS | .[0:$last]))
+		      - ($COPY_GRP0 | [.leg_list[0:$last][].leg_id])) | sort)" \
+		"group $REACT_GRP_ID's spare legs: those before the kills, plus the replaced legs, less their replacements"
+	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
+		kind spare_switch "$REACT_GRP_ID")
+	assert_eq "$cnt" "$last" \
+		"the worker's applied spare switches on group $REACT_GRP_ID across the step (one per leg replaced)"
+	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
+		kind spare_create "$REACT_GRP_ID")
+	log "  AR8 created $cnt spare leg(s) for group $REACT_GRP_ID on the way" \
+		"(none when a spare was ready)"
+
+	# md copies the group whole onto the new leg from the one that came back.
+	# The members on the primary come first, as on this idle array they are
+	# the only proof that the array is the new one (react_dead_members); a
+	# wait, as a new member reads in_sync only once md's copy onto it ends.
+	# Then grp_md_clean reads md's words at the revision the switch bumped
+	# to, as in step 5, and only then does host0 read the data.
+	REACT_MEMBER_LAST=""
+	msg="md on cn$PRIMARY_CN to hold leg(s)$REACT_DEAD_NEW in sync and"
+	msg="$msg leg(s)$REACT_DEAD_OLD in no array"
+	wait_until "$WAIT_PROVISION" "$msg" react_dead_members
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	MD_STATE_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to copy group"
+	msg="$msg $REACT_GRP_ID whole onto its new leg from leg ${ids[$last]}"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		grp_md_clean "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev"
+	check_sha0 "after AR8 repaired slice 0's data group from the one leg whose disk node came back"
+
+	# The disk node that died first comes back too, its leg now parked, for
+	# the teardown's drain (see above), and the primary connects that leg
+	# again.
+	for ((i = 0; i < last; i++)); do
+		react_return_dn "${vms[$i]}" "${insts[$i]}"
+	done
+	sp_refresh
+	sp_totals
+	stack_wait_reset
+	msg="the primary to report all $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs"
+	msg="$msg again, the newly parked one included"
+	wait_until "$WAIT_PROVISION" "$msg" cntlr_full_ready "$PRIMARY_CNTLR_ID"
+
+	# No failover across the whole step, for the reason above, asserted both
+	# ways as in step 5: the same primary at the end, and no failover record
+	# in between, which an even number of failovers would hide from the first.
+	sp_refresh
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary after the step is the one it started with (dead legs are no fault of the primary's)"
+	cnt=$(worker_failover_cnt)
+	assert_eq "$cnt" "$before_failovers" \
+		"the worker's applied failovers across the step (dead legs are no fault of the primary's)"
+	log "  no failover during the step: the worker applied $before_failovers" \
+		"before it and none since"
+}
+
+# --- step 7 -----------------------------------------------------------------
 
 react_drop_target() {
-	stage 06 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
+	stage 07 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
 	ctl_ok ns delete --nqn "$SS0" --idx 2
 	assert_field "$CTL_OUT" '.ns_id' "$REACT_NS2_ID" \
 		"DeleteNamespaceReply.ns_id"
@@ -16809,6 +17478,7 @@ case_react() {
 	react_failover
 	react_replace
 	react_leg_repair
+	react_dead_grp
 	react_drop_target
 	case_finish
 }

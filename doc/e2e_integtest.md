@@ -39,9 +39,10 @@ no leg repair:
 * **The four reactions fire on real faults** (`dnv-worker.md` AR5 to AR8), on
   a pool of at most `REACT_SLICE_CAP` slices (Topology and parameters): a
   killed cn agent moves the primary role and then loses its cntlr, a killed dn
-  agent with its nvmet port removed loses its leg to a spare, and strided
-  writes that push a thin pool past its low water mark gain its slice a data
-  group.
+  agent with its nvmet port removed loses its leg to a spare, a group whose
+  legs all lose their disk nodes keeps its legs until one comes back, and
+  strided writes that push a thin pool past its low water mark gain its slice
+  a data group.
 * **A primary cut off from the control plane fails over as a pause**
   (`architecture.md`, Failover; `dnv-worker.md` RW22). Its cn agent is
   stopped while every kernel object it built goes on serving host0, which
@@ -508,6 +509,17 @@ and its nvmet port removed, on a disk node with no other side of the pool, and
 the group must gain a spare outside its nodes, park the dead leg and rebuild
 md (`dnv-worker.md` AR8; `cnagent.md` CN11, CN28), with no failover
 meanwhile, proved by an unchanged count of the worker's failover records.
+Then the disk nodes of both of that group's legs die the same way, one right
+after the other, and no host IO runs until the group is whole again, as md
+learns of a dead member only from an IO to it (`cnagent_integtest.md`, Lab
+facts) and so keeps the array running for the leg that comes back: past the
+side threshold the group's legs and spare legs and the pool's revision must
+be unchanged and the worker must have logged that no leg of the group is
+healthy (`dnv-worker.md` AR8). With the disk node that died last back, the
+worker must replace the other leg, and md must hold the new leg in sync and
+the replaced one in no array (`cnagent.md` CN12), as on the idle array only
+md's members tell the new array from the old; then host0 reads its data,
+again with no failover.
 
 **cutoff** proves that a primary cut off from the control plane fails over as
 a pause for a host that follows the discovery log (`architecture.md`,
@@ -752,7 +764,7 @@ the connect attempted.
   pass discards through**; elsewhere the host's free space shrinks by each
   run's real writes.
 * **Without redundancy the suite is smaller**: ops' leg bitmap read, copy's
-  forced drop and spare stage and react's leg repair are skipped.
+  forced drop and spare stage and react's two leg repair stages are skipped.
 * **A disk node holds the controller node's md superblocks**
   (`architecture.md`, Components: invocation reference), as the primary's
   per-CN linear maps the side itself, and an unmasked disk-node guest's stock

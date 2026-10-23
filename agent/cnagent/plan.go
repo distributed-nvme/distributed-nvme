@@ -286,8 +286,8 @@ type grpPlan struct {
 // legNames are the dm names of the group's leg_list wrappers — the key
 // Md.Detail finds the group's array by. Spares are left out: a spare is never
 // a member (architecture.md, Spare legs), and a leg switched out into the
-// spare list is an extra
-// that reconcileMembers removes, found through the leg_list member that stays.
+// spare list is an extra that reconcileMembers removes once CN12's in-sync
+// guard lets it (inSyncGuard), found through the leg_list member that stays.
 func (gp *grpPlan) legNames() []string {
 	out := make([]string, 0, len(gp.legs))
 	for _, lp := range gp.legs {
@@ -313,7 +313,12 @@ func (gp *grpPlan) legNames() []string {
 // Only availability decides: a held member md has failed on a leg that is
 // available again is not late — the read's verdict names it once its
 // leg can take it, and the converge of the syncup the worker re-sends puts it
-// back (putBackNames, reconcileMembers; cnagent.md CN12). Spares are not
+// back (putBackNames, reconcileMembers; cnagent.md CN12) — unless CN12's
+// in-sync guard holds over its array (inSyncGuard): the read's row then reads
+// ERROR, its verdict names nothing for the group and the converge puts
+// nothing back, so when that member is the only one that stays nothing brings
+// it back in sync and the guard does not let go by itself (cnagent.md CN12,
+// Known limits). Spares are not
 // members (architecture.md, Spare legs), so a spare is never late. A
 // provisioning leg defers its whole group ([D15]), so the build never asks
 // about one; it is excluded all the same rather than trusting the caller.

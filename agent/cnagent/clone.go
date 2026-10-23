@@ -238,9 +238,11 @@ func cloneDmRow(
 // dm-clone (CN18 step 2): its row of this pass, which the build and the probe
 // both write before the clone's rows (CN12, CN28), reads OK. A running array
 // reads OK, degraded or not, unless a read of it failed, another array also
-// holds legs of the group (MdWalk.Match), it holds a foreign member, or, on a
-// converge, its member reconciliation failed (ensureGroup, probeGroup), each
-// of which writes the row ERROR; an array that is not assembled or not
+// holds legs of the group (MdWalk.Match), it holds a foreign member, CN12's
+// in-sync guard keeps a member that left leg_list from being failed, on a
+// converge and a read alike (inSyncGuard), or, on a converge, its member
+// reconciliation failed otherwise (ensureGroup, probeGroup), each of which
+// writes the row ERROR; an array that is not assembled or not
 // running, and a RedundNone group whose device is not the dm-linear the group
 // wants, do not read OK either.
 func cloneGrpReady(cp *clonePlan, info *pb.CntlrInfo) bool {

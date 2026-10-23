@@ -352,6 +352,18 @@ func (m MdMember) failedOutOfSlot() bool {
 	return mdFlagSet(m.State, "faulty") && m.Slot == mdSlotNone
 }
 
+// inSync is a member md counts as holding the whole data, which CN12's
+// in-sync guard looks for (inSyncGuard): "in_sync" in its state and not
+// "faulty". A member md is copying onto reads "spare" with a slot number
+// until the copy ends, so it never counts, nor does one md has failed. Nor
+// does one md shows faulty while it still marks it in sync: md prints
+// "faulty" beside "in_sync" for a member whose bad blocks it has not yet
+// acknowledged, so a member that leaves leg_list may hold the only good copy
+// of those regions, which its fail would lose.
+func (m MdMember) inSync() bool {
+	return mdFlagSet(m.State, "in_sync") && !mdFlagSet(m.State, "faulty")
+}
+
 // MdDetail is the live state of one array, read from /sys/block alone.
 type MdDetail struct {
 	Exists bool
@@ -1189,8 +1201,9 @@ func (s *CnAgentServer) assembleGroup(
 }
 
 // reconcileMembers covers SwitchSpareLeg with no extra mechanism (CN12): a
-// member the array holds that is no longer in leg_list is failed and removed;
-// an available leg_list member the array lacks is added, and md then resyncs —
+// member the array holds that is no longer in leg_list is failed and removed,
+// but only while a member that stays keeps the data (inSyncGuard); an
+// available leg_list member the array lacks is added, and md then resyncs —
 // a bitmap catch-up for a briefly absent leg, a full rebuild for a promoted
 // spare. And it puts a member md has failed back: a leg_list member md has
 // failed and moved out of its slot (MdMember.failedOutOfSlot), on a leg that
@@ -1225,7 +1238,15 @@ func (s *CnAgentServer) assembleGroup(
 // when the same pass registers it for something else, such as a leg that
 // failed to converge or any leg_list member of this cntlr that is not
 // available. The switched-out member itself has left leg_list and is never
-// named. Nothing here remembers the failure.
+// named. Nothing here remembers the failure. A refusal of the in-sync guard
+// is re-driven the same way once it clears: until then the read's row reads
+// ERROR too and its verdict names nothing for the group, and the first read
+// that finds a member that stays in sync on an available leg reads the row
+// OK and names the promoted spare the array lacks once its leg can take it.
+// The refusal skips the put-back too, so a leg_list member md has failed
+// stays out while the guard holds; when it is the only member that stays,
+// nothing brings it back in sync and the guard does not clear by itself
+// (cnagent.md CN12, Known limits).
 func (s *CnAgentServer) reconcileMembers(
 	ctx context.Context,
 	gp *grpPlan,
@@ -1242,6 +1263,16 @@ func (s *CnAgentServer) reconcileMembers(
 	wanted := make(map[string]bool, len(gp.legs))
 	for _, lp := range gp.legs {
 		wanted[lp.name] = true
+	}
+	// The in-sync guard comes before the first --fail, and its refusal
+	// leaves the array exactly as it is: no fail, no put-back and no add
+	// this pass. The test is the same for every member that leaves — the
+	// member it asks for stays in leg_list, which this loop never fails —
+	// so one test guards each fail of the loop.
+	if leaver := inSyncGuard(gp, detail, func(lp *legPlan) bool {
+		return available[lp.legId]
+	}); leaver != "" {
+		return errInSyncGuard(leaver, detail.Dev)
 	}
 	// Extras leave before promotions arrive, so the array never briefly
 	// holds more members than `--raid-devices`.
@@ -1292,12 +1323,75 @@ func legTakesMember(serves bool, legRow *pb.ResInfo) bool {
 	return serves && legRow.GetStatus() == pb.ResStatus_RES_STATUS_OK
 }
 
+// inSyncGuard is CN12's in-sync guard over a group's running array, which
+// the converge (reconcileMembers) and the read (probeGroup) both apply: the
+// dm name of the first member the array holds that is no longer in leg_list,
+// when no member that stays in leg_list is in sync (MdMember.inSync) on a leg
+// that serves; "" when no member leaves, or when such a member keeps the
+// data. serves is the leg's availability as the caller can read it: the
+// converge's available map, and for a read legServes, the part of it a read
+// can see, so the two report the same row short of what legServes does not
+// read (cnagent.md, Known limits). serves is called only for a
+// held, in-sync member of leg_list, and only once a member leaves, so a read
+// of a group no switch has touched makes no lookup for it.
+//
+// md answers a fail of the last in-sync member of a mirror by marking the
+// whole array broken (CN29), so a fail of a member that left leg_list needs
+// another to keep the data. That member must be one md marks in sync on an
+// available leg, because on an array with no IO md still marks a dead member
+// in sync: the fail would go through, the add after it would start a copy
+// that reads the dead member, and that read breaks the array. And it must
+// stay in leg_list, because a member that leaves is about to be failed too.
+// The guard holds whatever the leaving member's own state: with no such
+// member, the data sits only on a member that leaves, which the loop fails
+// too, or on a leg that does not serve, which the copy onto the added member
+// would read, or on a member md shows faulty beside in_sync, whose bad
+// blocks md has not yet acknowledged, so that the member that leaves may hold
+// the only good copy of those regions (MdMember.inSync).
+func inSyncGuard(
+	gp *grpPlan,
+	detail *MdDetail,
+	serves func(lp *legPlan) bool,
+) string {
+	wanted := make(map[string]bool, len(gp.legs))
+	for _, lp := range gp.legs {
+		wanted[lp.name] = true
+	}
+	leaver := ""
+	held := make(map[string]MdMember, len(detail.Members))
+	for _, member := range detail.Members {
+		held[member.DmName] = member
+		if leaver == "" && !wanted[member.DmName] {
+			leaver = member.DmName
+		}
+	}
+	if leaver == "" {
+		return ""
+	}
+	for _, lp := range gp.legs {
+		if member, ok := held[lp.name]; ok && member.inSync() && serves(lp) {
+			return ""
+		}
+	}
+	return leaver
+}
+
+// errInSyncGuard is the group's error while the in-sync guard holds
+// (inSyncGuard), one text for the converge and the read, naming the member
+// it keeps from being failed and the array.
+func errInSyncGuard(member, dev string) error {
+	return fmt.Errorf("member %s left leg_list but is not failed: "+
+		"no other member of %s is in sync on an available leg of leg_list",
+		member, dev)
+}
+
 // putBackNames is what a cntlr's verdict names beside its leftovers for one
 // md group (cnagent.md CN30): the dm name of each leg_list member that the
 // converge's member reconciliation would put back or add (CN12) — one md has
 // failed and moved out of its slot, or one the running array lacks — on a leg
-// that can take it. detail is the group's running array as its row read it,
-// nil for any other; legRows are the call's leg rows. legServes is what a
+// that can take it. detail is the group's running array as its row read it
+// OK, nil for any other row, the in-sync guard's ERROR among them
+// (probeGroup); legRows are the call's leg rows. legServes is what a
 // call can read of a leg's availability without building anything, so no
 // syncup is brought for a leg whose path is not live and optimized; a step
 // only the converge takes, the connect of a provisioned side that has no
@@ -1357,13 +1451,18 @@ func (s *CnAgentServer) legServes(
 // probeGroup is the read-only CN28 view of a group: for RedundMdRaid1 a
 // running array (degraded included) is OK with its mdStateLine in details,
 // read from sysfs alone (Md.Detail) — a dead member of an array that keeps
-// another in-sync member is the leg row's to report, never a reason for this
-// row to block or fail, and one md has failed on a leg that serves again is
-// the verdict's to name (putBackNames); an error md charges to the last
-// in-sync member marks the array broken instead of failing the member, and an
-// array_state of "broken" is not running and reads ERROR (CN29); for
-// RedundNone the dm table decides. The array it read OK is returned too, for
-// the verdict, and nil whenever the row is not that.
+// another in-sync member is the leg row's to report, never by itself a
+// reason for this row to block or fail, and one md has failed on a leg that
+// serves again is the verdict's to name (putBackNames); an error md charges
+// to the last in-sync member marks the array broken instead of failing the
+// member, and an array_state of "broken" is not running and reads ERROR
+// (CN29); for RedundNone the dm table decides. A running array holding a
+// member that left leg_list, which the converge would not fail, reads ERROR
+// with the converge's own text (inSyncGuard), so a read and a converge
+// report the same row. The array it read OK is returned too, for the
+// verdict, and nil whenever the row is not that: the verdict names no member
+// of a group the guard holds, whose converge would refuse again, so no
+// syncup comes for it on every round.
 //
 // Like ensureGroup it is only ever reached for a non-deferred group ([D15]), and
 // like ensureGroup it states the leg-count invariant rather than trusting the
@@ -1398,6 +1497,12 @@ func (s *CnAgentServer) probeGroup(
 	}
 	if !mdRunning(detail.State) {
 		return pb.ResStatus_RES_STATUS_ERROR, detail.State, nil
+	}
+	if leaver := inSyncGuard(gp, detail, func(lp *legPlan) bool {
+		return s.legServes(ctx, plan, lp)
+	}); leaver != "" {
+		return pb.ResStatus_RES_STATUS_ERROR,
+			errInSyncGuard(leaver, detail.Dev).Error(), nil
 	}
 	return pb.ResStatus_RES_STATUS_OK, mdStateLine(detail), detail
 }

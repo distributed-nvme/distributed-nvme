@@ -737,7 +737,7 @@ func TestStandbyCleanReplyBelowItsRevisionClearsNothing(t *testing.T) {
 		driver := newCntlrDriver(w, nil, settlePlan(primary, false))
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resOk("md")},
-		})
+		}, 0)
 		judged := func() bool {
 			return w.verdicts.snapshot(spFixture()).cntlrs[spCntlrPrimary]
 		}
@@ -780,7 +780,7 @@ func TestStandbyCleanReplyBelowItsRevisionClearsNothing(t *testing.T) {
 		driver, hw, judged := setup(t, false)
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resErr("md", "failed")},
-		})
+		}, 0)
 		driver.observe(ctx, &replyState{revision: 6, infoPresent: true})
 		if got := epochs(hw); len(got) != 1 || got[0] == 0 || !judged() {
 			t.Fatalf("an ERROR row at revision 6 wrote %v, judged %t; "+
@@ -852,7 +852,7 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 		// unchanged.
 		roundFrom := func(obs time.Time, info *pb.CntlrInfo) {
 			if info != nil {
-				driver.storeInfo(info)
+				driver.storeInfo(info, 0)
 				driver.setStreamInfo(info)
 			}
 			r := &replyState{
@@ -869,7 +869,7 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 		repeat := func() { roundFrom(last, nil) }
 		syncup := func(info *pb.CntlrInfo) {
 			synced = nextObsTime()
-			driver.storeInfo(info)
+			driver.storeInfo(info, 0)
 			r := &replyState{
 				revision: 7, infoPresent: true,
 				obsTime: synced, answerTime: synced,
@@ -1493,7 +1493,7 @@ func settleDriver(
 	driver := newCntlrDriver(spTestWorker(d), nil, plan)
 	driver.storeInfo(&pb.CntlrInfo{
 		GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resOk("md")},
-	})
+	}, 0)
 	return driver, hw, logs
 }
 
@@ -1617,7 +1617,7 @@ func TestSpCntlrSettle(t *testing.T) {
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: provisioning},
 			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: provisioning},
-		})
+		}, 0)
 		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
 		all := hw.all()
 		if len(all) != 1 || all[0].epoch != 0 || all[0].settle {
@@ -1632,7 +1632,7 @@ func TestSpCntlrSettle(t *testing.T) {
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: resErr("md", "boom")},
 			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: provisioning},
-		})
+		}, 0)
 		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
 		all = hw.all()
 		if len(all) != 2 || all[1].epoch == 0 || all[1].settle {
@@ -1656,7 +1656,7 @@ func TestSpCntlrSettle(t *testing.T) {
 				ResName: "spare",
 				Status:  pb.ResStatus_RES_STATUS_PROVISIONING,
 			}},
-		})
+		}, 0)
 		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
 		got := settleWrites(hw)
 		if len(got) != 1 || got[0].epoch != 0 {
@@ -1685,7 +1685,7 @@ func TestSpCntlrSettle(t *testing.T) {
 			SliceIdToData:   map[uint64]*pb.ResInfo{1: resErr("data", "x")},
 			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: resErr("pool", "x")},
 			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
-		})
+		}, 0)
 		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
 		missing := func(name string, details string) *pb.ResInfo {
 			return &pb.ResInfo{
@@ -1700,7 +1700,7 @@ func TestSpCntlrSettle(t *testing.T) {
 			SliceIdToData:   map[uint64]*pb.ResInfo{1: missing("data", "")},
 			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: missing("pool", "")},
 			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
-		})
+		}, 0)
 		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
 		all := hw.all()
 		if len(all) != 2 || all[0].epoch == 0 || all[1].epoch != 0 ||
@@ -1726,7 +1726,7 @@ func TestSpCntlrSettle(t *testing.T) {
 				1: missing("pool", "sp_level"),
 			},
 			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
-		})
+		}, 0)
 		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
 		if got := settleWrites(hw); len(got) != 1 || got[0].epoch != 0 {
 			t.Fatalf("settle writes on the suppressed reply = %+v, want one",
@@ -5628,8 +5628,10 @@ func TestSidesFirstHoldAfterADemotionTakesTheNewestPlans(t *testing.T) {
 // the block probe (architecture.md, Group on-leg layout: meta region, data
 // region, health block) AR8 step 1 needs. Inside the hold the pass must read no
 // primary info, so AR8 waits for the spare rather than switching it in on the
-// standby's row; once the release has handed the child the primary plan, the
-// pass reads its info again and the spare is switched in.
+// standby's row; once the release has handed the child the primary plan and
+// the promotion's reply reports the group's array running, the pass reads its
+// info again and the spare is switched in. The window between the hand-over
+// and that reply is TestReactionSpareSwitchNeedsTheGroupRunning's.
 func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
 	const spareLegId = uint64(700)
 	state := reactFixture(t)
@@ -5686,11 +5688,15 @@ func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
 	h.wantSkipped(reactionSpareSwitch, reasonSparePending)
 
 	// The release hands both children their new plans, and the promotion's
-	// reply reports the new primary's probe of the spare.
+	// reply reports the new primary's probe of the spare and its running
+	// array, the group's row OK (AR8 step 1's gate).
 	h.w.held = nil
 	demoted.plan = &cntlrPlan{cntlrId: reactCntlrA}
 	promoted.plan = &cntlrPlan{cntlrId: reactCntlrB, primary: true}
 	promoted.driver.lastInfo = spareOk()
+	promoted.driver.lastInfo.GrpIdToMdRaid = map[uint64]*pb.ResInfo{
+		reactDataGrp: {ResName: "md", Status: pb.ResStatus_RES_STATUS_OK},
+	}
 	h.pass()
 	calls := h.wantOps("switch_spare")
 	if calls[0].spareLegId != spareLegId ||
@@ -7650,4 +7656,75 @@ func TestLeftoverCodeIsAccepted(t *testing.T) {
 			return len(h.logs.withMsg(msgSyncupLeftover)) > 0
 		})
 	}))
+}
+
+// replayCntlrStream hands a cntlrCheckStream its replies in order.
+type replayCntlrStream struct {
+	grpc.BidiStreamingClient[pb.CheckCntlrRequest, pb.CheckCntlrReply]
+	replies []*pb.CheckCntlrReply
+}
+
+func (r *replayCntlrStream) Recv() (*pb.CheckCntlrReply, error) {
+	reply := r.replies[0]
+	r.replies = r.replies[1:]
+	return reply, nil
+}
+
+// TestCntlrInfoRevision pins the revision the cntlr driver keeps beside its
+// latest info, which AR8 step 1's gate compares with the pass's snapshot
+// (grpRowHold): the revision of the observation that info reports. A reply
+// that carries an info sets it; a round's reply that leaves its info out as
+// unchanged (HL5) moves it to its own revision only while the latest info is
+// the one the stream last carried, and moves it back as well as forward.
+func TestCntlrInfoRevision(t *testing.T) {
+	driver := &cntlrDriver{}
+	stream := &replayCntlrStream{}
+	check := &cntlrCheckStream{driver: driver, stream: stream}
+	round := func(revision uint64, info *pb.CntlrInfo) {
+		t.Helper()
+		stream.replies = append(stream.replies, &pb.CheckCntlrReply{
+			AgentReply: &pb.AgentReply{},
+			Revision:   revision,
+			CntlrInfo:  info,
+		})
+		if _, err := check.recv(); err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+	}
+	want := func(step string, info *pb.CntlrInfo, revision uint64) {
+		t.Helper()
+		gotInfo, gotRev := driver.infoSnapshot()
+		if !proto.Equal(gotInfo, info) || gotRev != revision {
+			t.Fatalf("%s: info %v at revision %d, want %v at %d",
+				step, gotInfo, gotRev, info, revision)
+		}
+	}
+	rows := func(status pb.ResStatus) *pb.CntlrInfo {
+		return &pb.CntlrInfo{GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+			7: {ResName: "md", Status: status},
+		}}
+	}
+	if info, rev := driver.infoSnapshot(); info != nil || rev != 0 {
+		t.Fatalf("a driver with no reply has info %v at %d", info, rev)
+	}
+	round(5, rows(pb.ResStatus_RES_STATUS_OK))
+	want("a round with its info", rows(pb.ResStatus_RES_STATUS_OK), 5)
+	round(6, nil)
+	want("a round left unchanged", rows(pb.ResStatus_RES_STATUS_OK), 6)
+
+	// A Syncup* reply stores its own info: a round left unchanged from the
+	// stream's info then says nothing of it.
+	driver.fold(&pb.AgentReply{}, 7, rows(pb.ResStatus_RES_STATUS_ERROR),
+		nil, nil)
+	want("a syncup with its info", rows(pb.ResStatus_RES_STATUS_ERROR), 7)
+	round(8, nil)
+	want("a round left unchanged after a syncup",
+		rows(pb.ResStatus_RES_STATUS_ERROR), 7)
+
+	// A round from an observation older than the one before it.
+	round(9, rows(pb.ResStatus_RES_STATUS_MISSING))
+	want("a newer round", rows(pb.ResStatus_RES_STATUS_MISSING), 9)
+	round(8, nil)
+	want("an older round left unchanged",
+		rows(pb.ResStatus_RES_STATUS_MISSING), 8)
 }

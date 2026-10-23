@@ -762,6 +762,23 @@ func (h *reactHarness) setLegRow(legId uint64, status pb.ResStatus) {
 	info.LegIdToLeg[legId] = &pb.ResInfo{ResName: "leg", Status: status}
 }
 
+// setGrpRow installs one group's row (grp_id_to_md_raid) on the primary. AR8
+// step 1's gate needs it OK before a switch, the one status that says the
+// group's array runs, whole or degraded (cnagent.md CN28).
+func (h *reactHarness) setGrpRow(grpId uint64, status pb.ResStatus) {
+	h.t.Helper()
+	child, ok := h.w.cntlrs[reactCntlrA]
+	if !ok {
+		h.setPrimaryInfo(reactCntlrA, &pb.CntlrInfo{})
+		child = h.w.cntlrs[reactCntlrA]
+	}
+	info := child.driver.lastInfo
+	if info.GrpIdToMdRaid == nil {
+		info.GrpIdToMdRaid = map[uint64]*pb.ResInfo{}
+	}
+	info.GrpIdToMdRaid[grpId] = &pb.ResInfo{ResName: "md", Status: status}
+}
+
 // slice is the fixture's one slice.
 func (h *reactHarness) slice() *pb.Slice {
 	return h.state.Slices[reactSliceId]
@@ -3259,7 +3276,10 @@ func TestReactionLegRepairWalksPastUnrepairableLegs(t *testing.T) {
 
 // TestReactionSpareReadiness pins AR8 steps 1 and 2: a spare is switched in
 // only when its side is provisioned AND the primary reports its leg OK;
-// anything short of that is a pending spare the pass waits for.
+// anything short of that is a pending spare the pass waits for. The data
+// group's array runs throughout, so step 1's gate on the group's row
+// (TestReactionSpareSwitchNeedsTheGroupRunning) lets a ready spare through
+// and these cases pin readiness alone.
 func TestReactionSpareReadiness(t *testing.T) {
 	const spareLegId = uint64(700)
 	const spareSideId = uint64(800)
@@ -3283,6 +3303,7 @@ func TestReactionSpareReadiness(t *testing.T) {
 		if status != pb.ResStatus_RES_STATUS_UNKNOWN {
 			h.setLegRow(spareLegId, status)
 		}
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
 		h.dnCands(reactDnD)
 		return h
 	}
@@ -3488,6 +3509,431 @@ func TestReactionSpareReadiness(t *testing.T) {
 		if calls[0].legs[0].AddrPort != reactDnD {
 			t.Fatalf("spare on %s", calls[0].legs[0].AddrPort)
 		}
+	})
+}
+
+// wantOneSkip asserts that the passes logged exactly one `reaction skipped`,
+// of that kind and reason, naming the slice's group and leg — and spare, when
+// spareLegId is not zero — and returns it.
+func (h *reactHarness) wantOneSkip(
+	kind string, reason string, grpId uint64, legId uint64, spareLegId uint64,
+) map[string]any {
+	h.t.Helper()
+	recs := h.logs.withMsg(msgReactionSkipped)
+	if len(recs) != 1 {
+		h.t.Fatalf("skips = %v, want one %s %s", recs, kind, reason)
+	}
+	rec := recs[0]
+	if rec["kind"] != kind || rec["reason"] != reason ||
+		rec["slice_id"] != float64(reactSliceId) ||
+		rec["grp_id"] != float64(grpId) || rec["leg_id"] != float64(legId) {
+		h.t.Fatalf("skip %v, want kind %s reason %s for leg %d of group %d",
+			rec, kind, reason, legId, grpId)
+	}
+	got, has := rec["spare_leg_id"]
+	if spareLegId != 0 && got != float64(spareLegId) {
+		h.t.Fatalf("skip %v, want spare_leg_id %d", rec, spareLegId)
+	}
+	if spareLegId == 0 && has {
+		h.t.Fatalf("skip %v names a spare", rec)
+	}
+	return rec
+}
+
+// TestReactionSpareSwitchNeedsTheGroupRunning pins AR8 step 1's gate: a ready
+// spare is switched in only while the group's row in the current primary's
+// latest report reads OK, the one status that says the group's array runs,
+// whole or degraded (cnagent.md CN28); a running array can still read ERROR.
+// Any other status, or a report without the row, holds the switch with a
+// reason naming it, runs no op and no scan, and the scan goes on to the next
+// candidate leg (AR2). The row is the current primary's: from a failover's
+// hand-over until the promotion's reply the pass reads the new primary's
+// standby report, which holds no group row, and never the old primary's last
+// report. Step 3's create is not gated.
+func TestReactionSpareSwitchNeedsTheGroupRunning(t *testing.T) {
+	const spareLegId = uint64(700)
+	const spareSideId = uint64(800)
+
+	// readySpare gives grp a ready spare: one side, provisioned. Its leg row
+	// is the test's to plant, on whichever cntlr reports it.
+	readySpare := func(grp *pb.Group, legId uint64, sideId uint64) {
+		grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
+			LegId:  legId,
+			LegIdx: 2,
+			SideList: []*pb.Side{{
+				SideId: sideId, AddrPort: reactDnC, Provisioned: true,
+			}},
+		})
+	}
+	// build makes the data group's first leg due for repair and gives the
+	// group a ready spare, its leg row OK on the primary; the group's row is
+	// the case's.
+	build := func(t *testing.T) *reactHarness {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		readySpare(h.dataGrp(), spareLegId, spareSideId)
+		h.setLegRow(spareLegId, pb.ResStatus_RES_STATUS_OK)
+		// A free DN, so that a wrong fall-through to step 3 would show.
+		h.dnCands(reactDnD)
+		return h
+	}
+
+	t.Run("row OK releases the switch", func(t *testing.T) {
+		h := build(t)
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+		h.pass()
+		calls := h.wantOps("switch_spare")
+		if calls[0].spareLegId != spareLegId ||
+			calls[0].targetLegId != reactDataLegA ||
+			calls[0].grpId != reactDataGrp {
+			t.Fatalf("switch = %+v", calls[0])
+		}
+		h.wantApplied(reactionSpareSwitch)
+		h.wantNoSkip()
+	})
+
+	for _, tc := range []struct {
+		status pb.ResStatus
+		reason string
+	}{
+		{pb.ResStatus_RES_STATUS_ERROR, reasonGrpRowError},
+		{pb.ResStatus_RES_STATUS_MISSING, reasonGrpRowMissing},
+		{pb.ResStatus_RES_STATUS_UNKNOWN, reasonGrpRowUnknown},
+		{pb.ResStatus_RES_STATUS_PROVISIONING, reasonGrpRowProvisioning},
+		{pb.ResStatus_RES_STATUS_PENDING, reasonGrpRowPending},
+	} {
+		t.Run("row "+tc.status.String()+" holds the switch", func(t *testing.T) {
+			h := build(t)
+			h.setGrpRow(reactDataGrp, tc.status)
+			h.pass()
+			// No switch, and no create: the group has a ready spare.
+			h.wantOps()
+			if got := len(h.rops.allQueries()); got != 0 {
+				t.Fatalf("scans = %d, want 0", got)
+			}
+			h.wantApplied()
+			h.wantOneSkip(reactionSpareSwitch, tc.reason,
+				reactDataGrp, reactDataLegA, spareLegId)
+		})
+	}
+
+	t.Run("a report without the row holds the switch", func(t *testing.T) {
+		h := build(t)
+		h.pass()
+		h.wantOps()
+		if got := len(h.rops.allQueries()); got != 0 {
+			t.Fatalf("scans = %d, want 0", got)
+		}
+		h.wantOneSkip(reactionSpareSwitch, reasonGrpRowAbsent,
+			reactDataGrp, reactDataLegA, spareLegId)
+	})
+
+	// The gate reads the target's own group: the meta group's array runs,
+	// the data group's does not.
+	t.Run("the target's own group", func(t *testing.T) {
+		h := build(t)
+		h.setGrpRow(reactMetaGrp, pb.ResStatus_RES_STATUS_OK)
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_ERROR)
+		h.pass()
+		h.wantOps()
+		h.wantOneSkip(reactionSpareSwitch, reasonGrpRowError,
+			reactDataGrp, reactDataLegA, spareLegId)
+
+		h = build(t)
+		h.setGrpRow(reactMetaGrp, pb.ResStatus_RES_STATUS_ERROR)
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+		h.pass()
+		h.wantOps("switch_spare")
+	})
+
+	// The hold is the group's own (AR2): the meta group's leg has the
+	// smaller leg_id, a ready spare and a stopped array; the data group's
+	// leg, with no spare, still gets its spare created in the same pass.
+	t.Run("the scan goes on to the next candidate", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
+		readySpare(h.metaGrp(), spareLegId, spareSideId)
+		h.setLegRow(spareLegId, pb.ResStatus_RES_STATUS_OK)
+		h.setGrpRow(reactMetaGrp, pb.ResStatus_RES_STATUS_ERROR)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.dnCands(reactDnD)
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactDataGrp {
+			t.Fatalf("create_spare = %+v, want the data group", calls[0])
+		}
+		h.wantApplied(reactionSpareCreate)
+		h.wantOneSkip(reactionSpareSwitch, reasonGrpRowError,
+			reactMetaGrp, reactMetaLegA, spareLegId)
+	})
+
+	// Step 3 stays ungated: a spare on a stopped group costs only space, and
+	// one ready shortens the repair once the array runs.
+	t.Run("the create is not gated", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_ERROR)
+		h.dnCands(reactDnD)
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactDataGrp {
+			t.Fatalf("create_spare = %+v, want the data group", calls[0])
+		}
+		h.wantApplied(reactionSpareCreate)
+		h.wantNoSkip()
+	})
+
+	t.Run("a clone meta group", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		grp := withReactClone(t, h.state)
+		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
+		withCloneSpare(grp, 107, 207, reactDnC, true)
+		h.setLegRow(107, pb.ResStatus_RES_STATUS_OK)
+		// The slice's groups run; the clone's group does not.
+		h.setGrpRow(reactMetaGrp, pb.ResStatus_RES_STATUS_OK)
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+		h.setGrpRow(reactCloneGrp, pb.ResStatus_RES_STATUS_ERROR)
+		h.dnCands(reactDnD)
+		h.pass()
+		h.wantOps()
+		recs := h.logs.withMsg(msgReactionSkipped)
+		if len(recs) != 1 || recs[0]["reason"] != reasonGrpRowError ||
+			recs[0]["kind"] != reactionSpareSwitch ||
+			recs[0]["spare_leg_id"] != float64(107) {
+			t.Fatalf("skips = %v, want one grp_row_error naming spare 107",
+				recs)
+		}
+		wantCloneRecord(t, recs[0], reactCloneLegA)
+	})
+
+	// The failover has committed and the release has handed cntlr B the
+	// primary plan, but the promotion has not answered: B's latest report is
+	// its standby's last, whose leg row of the spare reads OK (a live path)
+	// and which holds no group row (cnagent.md CN12). The old primary's last
+	// report, group row OK, is still held by its child; the pass must never
+	// read it.
+	t.Run("a report absent after a failover", func(t *testing.T) {
+		state := reactFixture(t)
+		state.Cntlrs[reactCntlrA].Primary = false
+		state.Cntlrs[reactCntlrB].Primary = true
+		h := newReactHarness(t, state)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		readySpare(h.dataGrp(), spareLegId, spareSideId)
+		h.dnCands(reactDnD)
+		running := func() *pb.CntlrInfo {
+			return &pb.CntlrInfo{
+				GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+					reactMetaGrp: resOk("md"),
+					reactDataGrp: resOk("md"),
+				},
+				LegIdToLeg: map[uint64]*pb.ResInfo{spareLegId: resOk("leg")},
+			}
+		}
+		h.w.cntlrs[reactCntlrA] = &cntlrChild{
+			plan:   &cntlrPlan{cntlrId: reactCntlrA},
+			driver: &cntlrDriver{lastInfo: running()},
+		}
+		promoted := &cntlrChild{
+			plan: &cntlrPlan{cntlrId: reactCntlrB, primary: true},
+			driver: &cntlrDriver{lastInfo: &pb.CntlrInfo{
+				LegIdToLeg: map[uint64]*pb.ResInfo{spareLegId: resOk("leg")},
+			}},
+		}
+		h.w.cntlrs[reactCntlrB] = promoted
+		h.pass()
+		h.wantOps()
+		h.wantOneSkip(reactionSpareSwitch, reasonGrpRowAbsent,
+			reactDataGrp, reactDataLegA, spareLegId)
+
+		// The promotion answers: the new primary's array runs.
+		promoted.driver.lastInfo = running()
+		h.pass()
+		calls := h.wantOps("switch_spare")
+		if calls[0].spareLegId != spareLegId ||
+			calls[0].targetLegId != reactDataLegA {
+			t.Fatalf("switch = %+v", calls[0])
+		}
+	})
+}
+
+// TestReactionSecondSwitchWaitsForTheFirstReport pins the revision test of
+// AR8 step 1's gate: an OK group row from a report older than the snapshot's
+// SpRevision holds the switch (grp_row_stale). The case is the one the test
+// exists for. Leg A is switched out for spare S; the switch bumps SpRevision,
+// and while its syncup waits for the cntlr's lock the primary's latest report
+// still describes the array with the old legs, its row OK. Leg B then reads
+// unhealthy and is due; S, which has no health epoch, counts as B's healthy
+// leg, and a second ready spare S2 is at hand. Read off that report, a
+// second switch would take B, the last leg md holds the data on, out of
+// leg_list before the primary has added S to the array. Once the primary
+// reports the switch's revision, the gate reads the row again.
+func TestReactionSecondSwitchWaitsForTheFirstReport(t *testing.T) {
+	const (
+		switchRev  = uint64(20)
+		spareS     = uint64(700)
+		spareSide  = uint64(800)
+		spareS2    = uint64(701)
+		spareSide2 = uint64(801)
+	)
+	state := reactFixture(t)
+	state.SpRevision = switchRev
+	h := newReactHarness(t, state)
+	grp := h.dataGrp()
+	for _, spare := range []struct {
+		legId  uint64
+		sideId uint64
+		addr   string
+	}{{spareS, spareSide, reactDnC}, {spareS2, spareSide2, reactDnD}} {
+		grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
+			LegId:  spare.legId,
+			LegIdx: 2,
+			SideList: []*pb.Side{{
+				SideId: spare.sideId, AddrPort: spare.addr, Provisioned: true,
+			}},
+		})
+		h.setLegRow(spare.legId, pb.ResStatus_RES_STATUS_OK)
+	}
+	h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+	driver := h.w.cntlrs[reactCntlrA].driver
+	driver.infoRev = switchRev
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+
+	h.pass()
+	calls := h.wantOps("switch_spare")
+	if calls[0].spareLegId != spareS || calls[0].targetLegId != reactDataLegA {
+		t.Fatalf("first switch = %+v, want S in for leg A", calls[0])
+	}
+
+	// The switch commits as SwitchSpareLeg writes it: S takes A's place in
+	// leg_list, A is parked with its health epoch, and SpRevision moves on.
+	// The primary's report is still the one from before the switch.
+	legA := grp.LegList[0]
+	spare := grp.SpareLegList[0]
+	spare.LegIdx = legA.GetLegIdx()
+	grp.LegList[0] = spare
+	grp.SpareLegList = []*pb.Leg{grp.SpareLegList[1], legA}
+	state.SpRevision = switchRev + 1
+	h.legOf(reactDataLegB).ErrEpoch = h.ago(9000)
+
+	h.pass()
+	h.wantOps("switch_spare")
+	h.wantApplied(reactionSpareSwitch)
+	h.wantOneSkip(reactionSpareSwitch, reasonGrpRowStale,
+		reactDataGrp, reactDataLegB, spareS2)
+
+	// The primary reports the converge of the switch's syncup: the gate
+	// reads its row.
+	driver.infoRev = switchRev + 1
+	h.pass()
+	calls = h.wantOps("switch_spare", "switch_spare")
+	if calls[1].spareLegId != spareS2 || calls[1].targetLegId != reactDataLegB {
+		t.Fatalf("second switch = %+v, want S2 in for leg B", calls[1])
+	}
+}
+
+// TestReactionLegRepairNeedsAHealthyLeg pins AR8's healthy-leg precondition
+// on a slice's group: a switch or a create runs only while another leg of
+// the group's leg_list has no health epoch. md learns that a member is dead
+// only from IO to it, so an idle array whose legs all died still runs and its
+// row reads OK, which step 1's gate lets through; the legs' health epochs
+// come from the primary's probe of each leg and see what the row does not.
+// With no healthy leg the pass logs no_healthy_leg, switches and creates
+// nothing for the group, and goes on to the next candidate; with one, the
+// repair proceeds. The clone meta group's twin is
+// TestReactionCloneLegRepairNeedsAHealthyLeg.
+func TestReactionLegRepairNeedsAHealthyLeg(t *testing.T) {
+	// build makes both legs of the data group unhealthy, the first due for
+	// repair, while the group's array still runs.
+	build := func(t *testing.T) *reactHarness {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.legOf(reactDataLegB).ErrEpoch = h.ago(1)
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+		h.dnCands(reactDnD)
+		return h
+	}
+
+	t.Run("no healthy leg, a ready spare at hand", func(t *testing.T) {
+		h := build(t)
+		h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList, &pb.Leg{
+			LegId:  700,
+			LegIdx: 2,
+			SideList: []*pb.Side{{
+				SideId: 800, AddrPort: reactDnC, Provisioned: true,
+			}},
+		})
+		h.setLegRow(700, pb.ResStatus_RES_STATUS_OK)
+		h.pass()
+		h.wantOps()
+		if got := len(h.rops.allQueries()); got != 0 {
+			t.Fatalf("scans = %d, want 0", got)
+		}
+		h.wantApplied()
+		h.wantOneSkip(reactionSpareCreate, reasonNoHealthyLeg,
+			reactDataGrp, reactDataLegA, 0)
+	})
+
+	t.Run("no healthy leg, no spare", func(t *testing.T) {
+		h := build(t)
+		h.pass()
+		h.wantOps()
+		if got := len(h.rops.allQueries()); got != 0 {
+			t.Fatalf("scans = %d, want 0", got)
+		}
+		h.wantOneSkip(reactionSpareCreate, reasonNoHealthyLeg,
+			reactDataGrp, reactDataLegA, 0)
+	})
+
+	// Both legs due: each is refused on its own, and neither is repaired.
+	t.Run("both legs due", func(t *testing.T) {
+		h := build(t)
+		h.legOf(reactDataLegB).ErrEpoch = h.ago(9000)
+		h.pass()
+		h.wantOps()
+		recs := h.logs.withMsg(msgReactionSkipped)
+		if len(recs) != 2 {
+			t.Fatalf("skips = %v, want one per leg", recs)
+		}
+		for idx, legId := range []uint64{reactDataLegA, reactDataLegB} {
+			if recs[idx]["reason"] != reasonNoHealthyLeg ||
+				recs[idx]["leg_id"] != float64(legId) {
+				t.Fatalf("skip %v, want no_healthy_leg for leg %d",
+					recs[idx], legId)
+			}
+		}
+	})
+
+	// The meta group's leg has the smaller leg_id and no healthy leg beside
+	// it; the data group's leg has one, and is repaired in the same pass.
+	t.Run("the scan goes on to another group", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
+		h.legOf(reactMetaLegB).ErrEpoch = h.ago(1)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.dnCands(reactDnD)
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactDataGrp {
+			t.Fatalf("create_spare = %+v, want the data group", calls[0])
+		}
+		h.wantApplied(reactionSpareCreate)
+		h.wantOneSkip(reactionSpareCreate, reasonNoHealthyLeg,
+			reactMetaGrp, reactMetaLegA, 0)
+	})
+
+	// Once the other leg reads healthy again, the repair proceeds: one
+	// spare is made.
+	t.Run("a leg healthy again", func(t *testing.T) {
+		h := build(t)
+		h.pass()
+		h.wantOps()
+		h.legOf(reactDataLegB).ErrEpoch = 0
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactDataGrp {
+			t.Fatalf("create_spare = %+v, want the data group", calls[0])
+		}
+		h.wantApplied(reactionSpareCreate)
 	})
 }
 
