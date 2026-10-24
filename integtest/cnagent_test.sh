@@ -4750,8 +4750,8 @@ case_repair() {
 
 	stage wait "a repair whose bad leg serves waits: its new leg connected, no member"
 	# CN12, A group's repair: every cntlr connects, wraps and probes the new
-	# leg as a spare's; the bad leg serves with an OK row, so the repair
-	# waits and the converge runs no mdadm against the data array.
+	# leg as it does the group's legs; the bad leg serves with an OK row, so
+	# the repair waits and the converge runs no mdadm against the data array.
 	for f in "$req1" "$req2"; do
 		repair_set "$f" rep-x "$xrep" REP_STAGE_CREATED false \
 			"$(req_leg "$xleg" 2 "$(req_side "$xside" 1)")" "${A_DLEG[1]}"

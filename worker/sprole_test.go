@@ -31,7 +31,7 @@ const (
 	testSpRev  = uint64(42)
 
 	// Four DNs: the meta side, the migration source, the migration
-	// destination and the spare leg's side.
+	// destination and the side of the data group's second leg, leg D.
 	spDnA = "spdn0:9520"
 	spDnB = "spdn1:9520"
 	spDnC = "spdn2:9520"
@@ -55,16 +55,16 @@ const (
 	spSliceA = uint64(10)
 	spSliceB = uint64(11)
 
-	spLegMeta  = uint64(1000)
-	spLegMigr  = uint64(1001)
-	spLegSpare = uint64(1002)
-	spLegB     = uint64(1010)
+	spLegMeta = uint64(1000)
+	spLegMigr = uint64(1001)
+	spLegD    = uint64(1002)
+	spLegB    = uint64(1010)
 
-	spSideMeta  = uint64(2000)
-	spSideSrc   = uint64(2001)
-	spSideDst   = uint64(2002)
-	spSideSpare = uint64(2003)
-	spSideB     = uint64(2010)
+	spSideMeta = uint64(2000)
+	spSideSrc  = uint64(2001)
+	spSideDst  = uint64(2002)
+	spSideD    = uint64(2003)
+	spSideB    = uint64(2010)
 
 	spCntlrPrimary  = uint64(1)
 	spCntlrStandby  = uint64(2)
@@ -102,8 +102,9 @@ func srcTrConf() *pb.NvmeTrConf {
 }
 
 // spFixture builds the SpState every sprole test drives: two slices, a meta
-// group, a data group whose leg carries a migration (two sides), a SPARE leg,
-// and three cntlrs of which one is disabled.
+// group, a data group whose first leg carries a migration (two sides) and
+// whose second leg, leg D, is still unprovisioned on dn D, and three cntlrs
+// of which one is disabled.
 func spFixture() *model.SpState {
 	state := &model.SpState{
 		Rev: 7,
@@ -190,11 +191,11 @@ func spFixture() *model.SpState {
 								CntlidSlot: 15000,
 							},
 						},
-					}},
-					SpareLegList: []*pb.Leg{{
-						LegId: spLegSpare,
+					}, {
+						LegId:  spLegD,
+						LegIdx: 1,
 						SideList: []*pb.Side{{
-							SideId:     spSideSpare,
+							SideId:     spSideD,
 							AddrPort:   spDnD,
 							CntlidSlot: 10000,
 						}},
@@ -302,8 +303,8 @@ const (
 	spDataZeroBytes = (5 + 1) * testBlockSize
 )
 
-// TestSpSideRequestGolden pins RW15: one request per side — spare legs
-// included — with the owning group's ext_cnt and length to zero, the primary's
+// TestSpSideRequestGolden pins RW15: one request per side with the owning
+// group's ext_cnt and length to zero, the primary's
 // cn_id, the standby list in cntlr_id_list order WITH the disabled cntlr
 // present, and the migration source / destination confs of the two-sided leg.
 // The destination's block_size is the SP's STORED data_block_size, forwarded
@@ -315,7 +316,7 @@ func TestSpSideRequestGolden(t *testing.T) {
 	plan := w.buildPlan(context.Background(), spFixture())
 
 	if len(plan.sides) != 5 {
-		t.Fatalf("%d side children, want 5 (spare included)", len(plan.sides))
+		t.Fatalf("%d side children, want 5", len(plan.sides))
 	}
 	standby := []uint64{spCnIdB, spCnIdC}
 
@@ -428,23 +429,23 @@ func TestSpSideRequestGolden(t *testing.T) {
 		t.Fatalf("dst side migration plan = %+v", dst)
 	}
 
-	// A spare leg's side is driven exactly like an active one (RW14).
-	spare := plan.sides[sideKey{legId: spLegSpare, sideId: spSideSpare}]
-	if spare == nil || spare.req.GetDnId() != spDnIdD {
-		t.Fatalf("no plan for the spare leg's side")
+	// Leg D's side, still unprovisioned, is driven like the others (RW14).
+	legD := plan.sides[sideKey{legId: spLegD, sideId: spSideD}]
+	if legD == nil || legD.req.GetDnId() != spDnIdD {
+		t.Fatalf("no plan for leg D's side")
 	}
-	if spare.req.GetSideConf().GetExtCnt() != 8 {
-		t.Fatalf("spare ext_cnt = %d, want the group's 8",
-			spare.req.GetSideConf().GetExtCnt())
+	if legD.req.GetSideConf().GetExtCnt() != 8 {
+		t.Fatalf("leg D ext_cnt = %d, want the group's 8",
+			legD.req.GetSideConf().GetExtCnt())
 	}
-	if got := spare.req.GetSideConf().GetZeroBytes(); got != spDataZeroBytes {
-		t.Fatalf("spare zero_bytes = %d, want the group's %d",
+	if got := legD.req.GetSideConf().GetZeroBytes(); got != spDataZeroBytes {
+		t.Fatalf("leg D zero_bytes = %d, want the group's %d",
 			got, spDataZeroBytes)
 	}
 
-	// The two sides of one DN are two children, and every leg — spares
-	// included — is mapped to its slice for the HL2 leg rows.
-	for _, legId := range []uint64{spLegMeta, spLegMigr, spLegSpare} {
+	// The two sides of one DN are two children, and every leg is mapped to
+	// its slice for the HL2 leg rows.
+	for _, legId := range []uint64{spLegMeta, spLegMigr, spLegD} {
 		if plan.legSlice[legId] != spSliceA {
 			t.Fatalf("leg %d maps to slice %d", legId, plan.legSlice[legId])
 		}
@@ -482,7 +483,7 @@ func TestSpSideRequestNoPrimary(t *testing.T) {
 // TestSpSideZeroBytes pins RW15's length to zero (model.SideZeroBytes) on every
 // kind of side of a slice's group the sp role drives: a meta group's side gets
 // its whole leg and a data group's side its meta region and first data block,
-// the same for the active leg, the spare and both sides of a migration,
+// the same for a leg of one side and both sides of a migration,
 // provisioned or not, with md-raid1 and without. A group whose stored counts
 // give no length gets no request at all, never one carrying a length of zero.
 // The sides of a clone meta group are TestSpCloneSideZeroBytes's.
@@ -492,11 +493,11 @@ func TestSpSideZeroBytes(t *testing.T) {
 		plan := spTestWorker(nil).buildPlan(
 			context.Background(), spFixture())
 		wantZeroBytes(t, plan, map[sideKey]uint64{
-			{legId: spLegMeta, sideId: spSideMeta}:   spMetaZeroBytes,
-			{legId: spLegMigr, sideId: spSideSrc}:    spDataZeroBytes,
-			{legId: spLegMigr, sideId: spSideDst}:    spDataZeroBytes,
-			{legId: spLegSpare, sideId: spSideSpare}: spDataZeroBytes,
-			{legId: spLegB, sideId: spSideB}:         spDataZeroBytes,
+			{legId: spLegMeta, sideId: spSideMeta}: spMetaZeroBytes,
+			{legId: spLegMigr, sideId: spSideSrc}:  spDataZeroBytes,
+			{legId: spLegMigr, sideId: spSideDst}:  spDataZeroBytes,
+			{legId: spLegD, sideId: spSideD}:       spDataZeroBytes,
+			{legId: spLegB, sideId: spSideB}:       spDataZeroBytes,
 		})
 	})
 	t.Run("redund_none", func(t *testing.T) {
@@ -507,13 +508,12 @@ func TestSpSideZeroBytes(t *testing.T) {
 			},
 		}
 		// model.GroupBlocks stores one meta block, the health block, for
-		// every group of a redund_none pool, and such a group has no spare
-		// (architecture.md, Spare legs).
+		// every group of a redund_none pool, and such a group has one leg.
 		for _, slice := range state.Slices {
 			for _, list := range grpListsOf(slice) {
 				for _, grp := range list.grps {
 					grp.MetaBlocks = 1
-					grp.SpareLegList = nil
+					grp.LegList = grp.LegList[:1]
 				}
 			}
 		}
@@ -537,7 +537,7 @@ func TestSpSideZeroBytes(t *testing.T) {
 			{legId: spLegMeta, sideId: spSideMeta}: spMetaZeroBytes,
 			{legId: spLegB, sideId: spSideB}:       spDataZeroBytes,
 		})
-		for _, legId := range []uint64{spLegMigr, spLegSpare} {
+		for _, legId := range []uint64{spLegMigr, spLegD} {
 			if plan.legSlice[legId] != spSliceA {
 				t.Errorf("leg %d maps to slice %d", legId,
 					plan.legSlice[legId])
@@ -681,16 +681,16 @@ func TestSpSidePlanCarriesTheErrEpoch(t *testing.T) {
 	captureLogs(t)
 	const epoch = uint64(1_700_000_000)
 	state := spFixture()
-	*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+	*sliceEpochField(state.Slices[spSliceA], 0, spSideD) = epoch
 	*sliceEpochField(state.Slices[spSliceA], spLegMeta, 0) = epoch + 1
 	plan := spTestWorker(nil).buildPlan(context.Background(), state)
 	if len(plan.sides) != 5 {
 		t.Fatalf("%d side plans, want 5", len(plan.sides))
 	}
-	spare := sideKey{legId: spLegSpare, sideId: spSideSpare}
+	legD := sideKey{legId: spLegD, sideId: spSideD}
 	for key, p := range plan.sides {
 		want := uint64(0)
-		if key == spare {
+		if key == legD {
 			want = epoch
 		}
 		if p.errEpoch != want {
@@ -699,12 +699,12 @@ func TestSpSidePlanCarriesTheErrEpoch(t *testing.T) {
 		}
 	}
 	awaited := awaitedSides(plan.sides)
-	if len(awaited) != 4 || awaited[spare] {
-		t.Fatalf("awaited = %v, want the four sides other than the spare's",
+	if len(awaited) != 4 || awaited[legD] {
+		t.Fatalf("awaited = %v, want the four sides other than leg D's",
 			awaited)
 	}
 	for key := range plan.sides {
-		if key != spare && !awaited[key] {
+		if key != legD && !awaited[key] {
 			t.Fatalf("side %d with no err_epoch is not waited for",
 				key.sideId)
 		}
@@ -1610,7 +1610,8 @@ func TestSpCntlrSettle(t *testing.T) {
 		// A new SP's primary reports its pools PROVISIONING until its sides
 		// are zeroed: clean, at the driven revision, and no proof of the
 		// build still to come (primaryShapeBuilt). Leg rows do not count: a
-		// spare that is still zeroing reads PROVISIONING there. Nor do group
+		// repair's new leg that is still zeroing reads PROVISIONING there.
+		// Nor do group
 		// rows: a grow's group reads PROVISIONING beside a serving pool.
 		driver, hw, logs := settleDriver(t, settlePlan(true, true))
 		provisioning := &pb.ResInfo{
@@ -1643,7 +1644,7 @@ func TestSpCntlrSettle(t *testing.T) {
 		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
 			t.Fatalf("%d cntlr settled records on a failed build", got)
 		}
-		// Built, with a grow's group and a spare's leg row still
+		// Built, with a grow's group and a new leg's leg row still
 		// PROVISIONING: settles, with the recovery in the same write.
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
@@ -1655,7 +1656,7 @@ func TestSpCntlrSettle(t *testing.T) {
 			},
 			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: resOk("pool")},
 			LegIdToLeg: map[uint64]*pb.ResInfo{9: {
-				ResName: "spare",
+				ResName: "new-leg",
 				Status:  pb.ResStatus_RES_STATUS_PROVISIONING,
 			}},
 		}, 0)
@@ -1814,7 +1815,7 @@ func TestSpUnresolvedEndpointLeavesChildIdle(t *testing.T) {
 	plan := w.buildPlan(context.Background(), state)
 
 	if _, ok := plan.sides[sideKey{
-		legId: spLegSpare, sideId: spSideSpare,
+		legId: spLegD, sideId: spSideD,
 	}]; ok {
 		t.Fatalf("a side with no DnConf was given a request")
 	}
@@ -2284,7 +2285,7 @@ func TestSpFlipBatchesOneStm(t *testing.T) {
 		SliceId: spSliceA, LegId: spLegMigr, SideId: spSideDst,
 	}
 	second := model.SideRef{
-		SliceId: spSliceA, LegId: spLegSpare, SideId: spSideSpare,
+		SliceId: spSliceA, LegId: spLegD, SideId: spSideD,
 	}
 	// Two more reports are already queued when the first is handled.
 	w.reportCh <- spReport{provisioned: &second}
@@ -2334,9 +2335,9 @@ func TestSpFlipRecordsOnlyAppliedRefs(t *testing.T) {
 		SliceId: spSliceA, LegId: spLegMigr, SideId: spSideDst,
 	}
 	skipped := model.SideRef{
-		SliceId: spSliceA, LegId: spLegSpare, SideId: spSideSpare,
+		SliceId: spSliceA, LegId: spLegD, SideId: spSideD,
 	}
-	// The other owner of the overlap got to the spare's side first, so the
+	// The other owner of the overlap got to leg D's side first, so the
 	// STM writes one of the two.
 	h.ops.applySides = map[model.SideRef]bool{applied: true}
 	w.reportCh <- spReport{provisioned: &skipped}
@@ -2934,9 +2935,8 @@ func (h *spHarness) advanceUntil(
 	advanceClockUntil(h.t, h.clk, what, step, cond)
 }
 
-// TestSpFanOutStartsOneChildPerObject checks RW14: one child per side — spare
-// legs included — and one per cntlr, each driven at its own endpoint with its
-// own request.
+// TestSpFanOutStartsOneChildPerObject checks RW14: one child per side and
+// one per cntlr, each driven at its own endpoint with its own request.
 func TestSpFanOutStartsOneChildPerObject(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
@@ -3297,10 +3297,10 @@ func TestSpChildRestartedOnEndpointChange(t *testing.T) {
 	})
 	before := len(h.cntlrs[spCnA].syncups())
 
-	// The spare leg's side moved to another DN, at a new revision.
+	// Leg D's side moved to another DN, at a new revision.
 	state := spFixture()
 	grp := state.Slices[spSliceA].GetDataGrpList()[0]
-	grp.GetSpareLegList()[0].GetSideList()[0].AddrPort = moved
+	grp.GetLegList()[1].GetSideList()[0].AddrPort = moved
 	state.DnByAddr[moved] = &pb.DnConf{DnId: 0xd9}
 	h.ops.setState(state)
 	w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
@@ -3310,7 +3310,7 @@ func TestSpChildRestartedOnEndpointChange(t *testing.T) {
 	})
 	req := movedStub.syncups()[0]
 	if req.GetDnId() != 0xd9 ||
-		req.GetSidePointer().GetSideId() != spSideSpare {
+		req.GetSidePointer().GetSideId() != spSideD {
 		t.Fatalf("moved side request = %v", req)
 	}
 	// The old endpoint was never told to delete anything (architecture.md, dn /
@@ -3361,7 +3361,7 @@ func TestSpChildStopDoesNotHoldTheCoordinator(t *testing.T) {
 	h.addFixtureAgents()
 	const moved = "spdn9:9520"
 	movedStub := h.addSide(moved)
-	// The spare leg's side answers no SyncupSide until it is released.
+	// Leg D's side answers no SyncupSide until it is released.
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
@@ -3381,12 +3381,12 @@ func TestSpChildStopDoesNotHoldTheCoordinator(t *testing.T) {
 			close(release)
 		}
 	})
-	waitClosed(t, "the spare side's first SyncupSide", entered)
+	waitClosed(t, "leg D's side's first SyncupSide", entered)
 
-	// The spare leg's side moved to another DN, at a new revision.
+	// Leg D's side moved to another DN, at a new revision.
 	state := spFixture()
 	grp := state.Slices[spSliceA].GetDataGrpList()[0]
-	grp.GetSpareLegList()[0].GetSideList()[0].AddrPort = moved
+	grp.GetLegList()[1].GetSideList()[0].AddrPort = moved
 	state.DnByAddr[moved] = &pb.DnConf{DnId: 0xd9}
 	h.ops.setState(state)
 	w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
@@ -3408,9 +3408,9 @@ func TestSpChildStopDoesNotHoldTheCoordinator(t *testing.T) {
 			"still inside its call", got)
 	}
 	if got := sideRecords(
-		h.logs, msgRevisionWorkerStarted, spSideSpare,
+		h.logs, msgRevisionWorkerStarted, spSideD,
 	); got != 1 {
-		t.Fatalf("%d spare side children started while the first was "+
+		t.Fatalf("%d leg D side children started while the first was "+
 			"still stopping, want only that first one", got)
 	}
 
@@ -3420,9 +3420,9 @@ func TestSpChildStopDoesNotHoldTheCoordinator(t *testing.T) {
 		return len(movedStub.syncups()) > 0
 	})
 	if got := sideRecords(
-		h.logs, msgRevisionWorkerStopped, spSideSpare,
+		h.logs, msgRevisionWorkerStopped, spSideD,
 	); got != 1 {
-		t.Fatalf("%d spare side children stopped before the new one "+
+		t.Fatalf("%d leg D side children stopped before the new one "+
 			"drove its endpoint, want the old one", got)
 	}
 }
@@ -3608,7 +3608,7 @@ func TestSpFanOutWaitsForItsRevision(t *testing.T) {
 func testSpFanOutWaitsForItsRevision(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
-	// The spare's DN has no DnConf: one idle side, so every tick re-fans.
+	// Leg D's DN has no DnConf: one idle side, so every tick re-fans.
 	state := spFixture()
 	delete(state.DnByAddr, spDnD)
 	h.ops.setState(state)
@@ -3785,7 +3785,7 @@ func TestSidesAreSyncedBeforeCntlrs(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if got := len(sides[testSpRev][spSideSpare]); got != 0 {
+	if got := len(sides[testSpRev][spSideD]); got != 0 {
 		t.Fatalf("the side whose agent held N already was sent %d SyncupSide "+
 			"at N, want none", got)
 	}
@@ -3832,7 +3832,7 @@ func TestSidesAreSyncedBeforeCntlrs(t *testing.T) {
 // being driven meanwhile: the bump reaches every live DN at once.
 func TestSidesFirstBarrierIsBounded(t *testing.T) {
 	h := newSpHarness(t)
-	// The spare's DN is down: nothing answers at spDnD.
+	// Leg D's DN is down: nothing answers at spDnD.
 	for _, addr := range []string{spDnA, spDnB, spDnC} {
 		h.addSide(addr)
 	}
@@ -3918,7 +3918,7 @@ func TestSidesFirstBarrierIsBounded(t *testing.T) {
 	for _, cntlrId := range sortedKeys(sentEarly) {
 		first := sentEarly[cntlrId][0]
 		t.Fatalf("cntlr %d was sent a SyncupCntlr at %d %v after the fan-out "+
-			"while the spare's DN never answered, want none before one "+
+			"while leg D's DN never answered, want none before one "+
 			"cntlr_interval (%v)",
 			cntlrId, first.revision, first.after, roundInterval)
 	}
@@ -3950,10 +3950,10 @@ func TestSidesFirstBarrierIsBounded(t *testing.T) {
 		t.Fatalf("released at revision %v, want %d", recs[0]["revision"], bump)
 	}
 	// A live side's report can still be on its way to the coordinator when
-	// the fake clock jumps, so the count is bounded below only: the spare's
+	// the fake clock jumps, so the count is bounded below only: leg D's
 	// side is always in it.
 	if cnt, _ := recs[0]["side_cnt"].(float64); cnt < 1 {
-		t.Fatalf("side_cnt = %v, want at least the spare's side",
+		t.Fatalf("side_cnt = %v, want at least leg D's side",
 			recs[0]["side_cnt"])
 	}
 }
@@ -4226,7 +4226,7 @@ func TestDemotionSupersedesASidesFirstHold(t *testing.T) {
 		bump  = testSpRev + 1
 		bump2 = testSpRev + 2
 	)
-	// The spare's DN never answers N+1, which keeps the barrier of the first
+	// Leg D's DN never answers N+1, which keeps the barrier of the first
 	// bump pending; it answers N+2.
 	gate := make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
@@ -4278,7 +4278,7 @@ func TestDemotionSupersedesASidesFirstHold(t *testing.T) {
 		return false
 	}
 
-	// N+1 changes no role: the live sides take it, the spare's side does
+	// N+1 changes no role: the live sides take it, leg D's side does
 	// not answer, and the cntlrs are held.
 	first := spFixture()
 	first.SpRevision = bump
@@ -4340,7 +4340,7 @@ func TestDemotionSupersedesASidesFirstHold(t *testing.T) {
 		}
 	}
 
-	// The old primary answers, and the spare's DN finishes N+1: the sides
+	// The old primary answers, and leg D's DN finishes N+1: the sides
 	// are sent N+2, then the cntlrs.
 	answerNow()
 	release()
@@ -4495,7 +4495,7 @@ func cntlrSentAt(stub *stubCntlrAgent, revision uint64) bool {
 // its demotion hold ends by its timer: the sides go, and the other cntlrs
 // then wait for them under RW14's sides-first hold, whose bound of one
 // cntlr_interval runs from the demotion hold's end — neither from the
-// failover's fan-out nor not at all. The spare's DN never answers the
+// failover's fan-out nor not at all. Leg D's DN never answers the
 // failover, so only that bound can release the cntlrs.
 func TestSidesFirstHoldFollowsTheDemotionHold(t *testing.T) {
 	h := newSpHarness(t)
@@ -4810,7 +4810,7 @@ func TestFurtherDemotionReArmsTheDemotionHold(t *testing.T) {
 // like any other cntlr, and a demotion hold left with no cntlr to wait for
 // ends". The old primary refuses its demotion, so nothing reports it, and the
 // fake clock never moves, so no timer ends the demotion hold. A bump that makes
-// it the primary again reaches every side at once. The spare's DN holds its
+// it the primary again reaches every side at once. Leg D's DN holds its
 // answer to that bump, so RW14's hold keeps every cntlr, the one made primary
 // again among them, until that DN answers.
 func TestRepromotedCntlrLeavesTheDemotionHold(t *testing.T) {
@@ -4879,7 +4879,7 @@ func TestRepromotedCntlrLeavesTheDemotionHold(t *testing.T) {
 	}
 	for _, addr := range []string{spCnA, spCnB, spCnC} {
 		if cntlrSentAt(h.cntlrs[addr], bump2) {
-			t.Fatalf("cntlr at %s was sent N+2 before the spare's DN "+
+			t.Fatalf("cntlr at %s was sent N+2 before leg D's DN "+
 				"answered it", addr)
 		}
 	}
@@ -5034,10 +5034,7 @@ func TestSidesFirstHoldWithEverySideUnhealthyHoldsNothing(t *testing.T) {
 	sides := 0
 	for _, slice := range state.Slices {
 		for _, grp := range allGroups(slice) {
-			for _, list := range [][]*pb.Leg{
-				grp.GetLegList(),
-				grp.GetSpareLegList(),
-			} {
+			for _, list := range [][]*pb.Leg{grp.GetLegList()} {
 				for _, leg := range list {
 					for _, side := range leg.GetSideList() {
 						side.ErrEpoch = epoch
@@ -5301,14 +5298,14 @@ func noCntlrSentAt(t *testing.T, stamps *cntlrStamps, revision uint64,
 
 // TestSidesFirstHoldLeavesOutAnUnhealthySide checks RW14's set of sides end
 // to end: the barrier waits for the sides whose record the fan-out's load
-// read with no err_epoch, and for no other. The spare's side has one and its
+// read with no err_epoch, and for no other. Leg D's side has one and its
 // DN never answers, and the fake clock never moves, so no timer releases
-// anything: the cntlrs are sent N without waiting for the spare's side, and
+// anything: the cntlrs are sent N without waiting for leg D's side, and
 // at the bump, while dn1 holds its answer, none is sent N+1 until that
 // answer comes.
 func TestSidesFirstHoldLeavesOutAnUnhealthySide(t *testing.T) {
 	h := newSpHarness(t)
-	// The spare's DN is down: nothing answers at spDnD.
+	// Leg D's DN is down: nothing answers at spDnD.
 	for _, addr := range []string{spDnA, spDnB, spDnC} {
 		h.addSide(addr)
 	}
@@ -5320,7 +5317,7 @@ func TestSidesFirstHoldLeavesOutAnUnhealthySide(t *testing.T) {
 	load := func(revision uint64) *model.SpState {
 		state := spFixture()
 		state.SpRevision = revision
-		*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+		*sliceEpochField(state.Slices[spSliceA], 0, spSideD) = epoch
 		return state
 	}
 	h.ops.setState(load(testSpRev))
@@ -5329,7 +5326,7 @@ func TestSidesFirstHoldLeavesOutAnUnhealthySide(t *testing.T) {
 	w := h.start()
 	t.Cleanup(release)
 
-	waitFor(t, "every cntlr sent N without the spare's side", func() bool {
+	waitFor(t, "every cntlr sent N without leg D's side", func() bool {
 		return len(stamps.at(testSpRev)) == 3
 	})
 	h.ops.setState(load(bump))
@@ -5351,7 +5348,7 @@ func TestSidesFirstHoldLeavesOutAnUnhealthySide(t *testing.T) {
 }
 
 // TestSidesFirstHoldRetakesItsSetAtABump checks that a fan-out of a newer
-// revision takes RW14's set of sides again, from its own load. The spare's DN
+// revision takes RW14's set of sides again, from its own load. Leg D's DN
 // never answers, and the start's load reads its side healthy, so the barrier
 // the start's fan-out begins waits for it. Half an interval in, a bump whose
 // load gives that side an err_epoch replaces the held plans: the barrier
@@ -5378,7 +5375,7 @@ func TestSidesFirstHoldRetakesItsSetAtABump(t *testing.T) {
 	h.clk.advance(half)
 	next := spFixture()
 	next.SpRevision = bump
-	*sliceEpochField(next.Slices[spSliceA], 0, spSideSpare) = h.clk.nowUnix()
+	*sliceEpochField(next.Slices[spSliceA], 0, spSideD) = h.clk.nowUnix()
 	h.ops.setState(next)
 	w.update(desiredState{revision: bump, handle: testSpName})
 	waitFor(t, "every cntlr sent N+1", func() bool {
@@ -5400,7 +5397,7 @@ func TestSidesFirstHoldRetakesItsSetAtABump(t *testing.T) {
 }
 
 // TestSidesFirstHoldKeepsItsSetAtAReFan checks that a re-fan at the held
-// revision keeps RW14's set of sides. The spare's DN has no DnConf, so its
+// revision keeps RW14's set of sides. Leg D's DN has no DnConf, so its
 // side is idle and every tick re-fans at the same revision (RW14); the
 // destination's side has an err_epoch throughout and its DN never answers,
 // so it is never waited for. At the bump, half an interval after the start,
@@ -5483,12 +5480,12 @@ func TestSidesFirstHoldKeepsItsSetAtAReFan(t *testing.T) {
 // TestSidesFirstHoldKeepsASideThatTurnsUnhealthy checks that a side RW14's
 // barrier waits for stays waited for once its own missed round has set its
 // err_epoch: the set is taken when the barrier begins, from the fan-out's
-// load, and no verdict or record read during the wait changes it. The
-// spare's DN never answers, so the cntlrs go at the barrier's bound, one
+// load, and no verdict or record read during the wait changes it. Leg D's
+// DN never answers, so the cntlrs go at the barrier's bound, one
 // cntlr_interval after the start's fan-out, and not before.
 func TestSidesFirstHoldKeepsASideThatTurnsUnhealthy(t *testing.T) {
 	h := newSpHarness(t)
-	// The spare's DN is down: nothing answers at spDnD.
+	// Leg D's DN is down: nothing answers at spDnD.
 	for _, addr := range []string{spDnA, spDnB, spDnC} {
 		h.addSide(addr)
 	}
@@ -5499,9 +5496,9 @@ func TestSidesFirstHoldKeepsASideThatTurnsUnhealthy(t *testing.T) {
 	stamps := stampCntlrs(h)
 	w := h.start()
 	h.reactWith(w, &fakeReactionOps{})
-	waitFor(t, "the spare's side err_epoch set by its missed round",
+	waitFor(t, "leg D's side err_epoch set by its missed round",
 		func() bool {
-			return h.ops.sliceErrEpoch(spSliceA, 0, spSideSpare) != 0
+			return h.ops.sliceErrEpoch(spSliceA, 0, spSideD) != 0
 		})
 	waitFor(t, "the live sides sent N", func() bool {
 		return sideIdsSentAt(h, testSpRev,
@@ -5510,7 +5507,7 @@ func TestSidesFirstHoldKeepsASideThatTurnsUnhealthy(t *testing.T) {
 	early := 250 * time.Millisecond
 	h.clk.advance(roundInterval - early)
 	noCntlrSentAt(t, stamps, testSpRev,
-		"before the barrier's bound, the spare's side never having answered")
+		"before the barrier's bound, leg D's side never having answered")
 	h.clk.advance(early)
 	waitFor(t, "every cntlr sent N", func() bool {
 		return len(stamps.at(testSpRev)) == 3
@@ -5527,13 +5524,13 @@ func TestSidesFirstHoldKeepsASideThatTurnsUnhealthy(t *testing.T) {
 			len(recs), msgSpSidesUnsynced)
 	}
 	if cnt, _ := recs[0]["side_cnt"].(float64); cnt < 1 {
-		t.Fatalf("side_cnt = %v, want at least the spare's side",
+		t.Fatalf("side_cnt = %v, want at least leg D's side",
 			recs[0]["side_cnt"])
 	}
 }
 
 // TestSidesFirstHoldAfterADemotionLeavesOutAnUnhealthySide checks the set
-// of sides of the barrier RW22's demotion hold hands on: the spare's side,
+// of sides of the barrier RW22's demotion hold hands on: leg D's side,
 // whose record has an err_epoch in every load and whose DN never answers, is
 // left out (TestSidesFirstHoldAfterADemotionTakesTheNewestPlans pins which of
 // the held plans the set comes from). The old primary answers its demotion
@@ -5550,11 +5547,11 @@ func TestSidesFirstHoldAfterADemotionLeavesOutAnUnhealthySide(t *testing.T) {
 	}
 	const bump = testSpRev + 1
 	epoch := h.clk.nowUnix()
-	unhealthySpare := func(state *model.SpState) *model.SpState {
-		*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+	unhealthyLegD := func(state *model.SpState) *model.SpState {
+		*sliceEpochField(state.Slices[spSliceA], 0, spSideD) = epoch
 		return state
 	}
-	h.ops.setState(unhealthySpare(spFixture()))
+	h.ops.setState(unhealthyLegD(spFixture()))
 	release := holdSyncupAt(h.sides[spDnB], bump)
 	stamps := stampCntlrs(h)
 	w := h.start()
@@ -5563,7 +5560,7 @@ func TestSidesFirstHoldAfterADemotionLeavesOutAnUnhealthySide(t *testing.T) {
 		return len(stamps.at(testSpRev)) == 3
 	})
 
-	h.ops.setState(unhealthySpare(failoverFixture(bump)))
+	h.ops.setState(unhealthyLegD(failoverFixture(bump)))
 	w.update(desiredState{revision: bump, handle: testSpName})
 	waitFor(t, "the old primary sent its demotion", func() bool {
 		_, ok := stamps.at(bump)[spCntlrPrimary]
@@ -5597,17 +5594,17 @@ func TestSidesFirstHoldAfterADemotionLeavesOutAnUnhealthySide(t *testing.T) {
 // TestSidesFirstHoldAfterADemotionTakesTheNewestPlans checks that the barrier
 // RW22's demotion hold hands on takes its set of sides from the newest side
 // plans the demotion hold kept (endDemotion), not from the failover's own
-// fan-out. The spare's DN never answers. The start's load reads its side
+// fan-out. Leg D's DN never answers. The start's load reads its side
 // unhealthy, so the first barrier does not wait for it; the failover's load
 // reads it healthy, and a bump inside the demotion hold reads it unhealthy
 // again. The old primary refuses its demotion, and a refusal reports
 // nothing, so the demotion hold lasts until its accepted reply to the bump;
 // the fake clock never moves, so no timer releases anything: the other
 // cntlrs are sent the bump once the live sides answer it, without waiting
-// for the spare's side, and never the failover it superseded.
+// for leg D's side, and never the failover it superseded.
 func TestSidesFirstHoldAfterADemotionTakesTheNewestPlans(t *testing.T) {
 	h := newSpHarness(t)
-	// The spare's DN is down: nothing answers at spDnD.
+	// Leg D's DN is down: nothing answers at spDnD.
 	for _, addr := range []string{spDnA, spDnB, spDnC} {
 		h.addSide(addr)
 	}
@@ -5619,11 +5616,11 @@ func TestSidesFirstHoldAfterADemotionTakesTheNewestPlans(t *testing.T) {
 		bump2 = testSpRev + 2
 	)
 	epoch := h.clk.nowUnix()
-	unhealthySpare := func(state *model.SpState) *model.SpState {
-		*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+	unhealthyLegD := func(state *model.SpState) *model.SpState {
+		*sliceEpochField(state.Slices[spSliceA], 0, spSideD) = epoch
 		return state
 	}
-	h.ops.setState(unhealthySpare(spFixture()))
+	h.ops.setState(unhealthyLegD(spFixture()))
 	stamps := stampCntlrs(h)
 	stamp := h.cntlrs[spCnA].syncupReply
 	h.cntlrs[spCnA].syncupReply = func(
@@ -5646,9 +5643,9 @@ func TestSidesFirstHoldAfterADemotionTakesTheNewestPlans(t *testing.T) {
 	waitFor(t, "the old primary sent its demotion", func() bool {
 		return cntlrSentAt(h.cntlrs[spCnA], bump)
 	})
-	h.ops.setState(unhealthySpare(failoverFixture(bump2)))
+	h.ops.setState(unhealthyLegD(failoverFixture(bump2)))
 	w.update(desiredState{revision: bump2, handle: testSpName})
-	waitFor(t, "every cntlr sent N+2 without the spare's side", func() bool {
+	waitFor(t, "every cntlr sent N+2 without leg D's side", func() bool {
 		return len(stamps.at(bump2)) == 3
 	})
 	if sent := stamps.at(bump); len(sent) != 0 {
@@ -5666,47 +5663,30 @@ func TestSidesFirstHoldAfterADemotionTakesTheNewestPlans(t *testing.T) {
 // sides-first hold. A failover's promotion is held with the other cntlrs'
 // requests, so the pass's snapshot already names the new primary while that
 // cntlr's child still drives the standby plan, and the child's info is a
-// standby's report: its leg rows are transport liveness and ana_state, not
-// the block probe (architecture.md, Group on-leg layout: meta region, data
-// region, health block) AR8 step 1 needs. Inside the hold the pass must read no
-// primary info, so AR8 waits for the spare rather than switching it in on the
-// standby's row: with no report, no leg of the group is held in sync, so
-// AR8's healthy-leg test holds the group before it asks after the spare;
-// once the release has handed the child the primary plan and the promotion's
-// reply reports the group's array running, the pass reads its info again and
-// the spare is switched in. The window between the hand-over and that reply
-// is TestReactionSpareSwitchNeedsTheGroupRunning's.
+// standby's report, which holds no group row (cnagent.md CN12). Inside the
+// hold the pass must read no primary info, so AR8's gate holds the create
+// (grp_row_absent), while the old primary's child, still on the primary
+// plan, holds a report of the group running; once the release has handed
+// the child the primary plan and the promotion's reply reports the group's
+// array running, the pass reads its info again and the repair is created.
+// The window between the hand-over and that reply is
+// TestLegRepairCreateNeedsTheGroupRunning's.
 func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
-	const spareLegId = uint64(700)
 	state := reactFixture(t)
 	state.Cntlrs[reactCntlrA].Primary = false
 	state.Cntlrs[reactCntlrB].Primary = true
 	h := newReactHarness(t, state)
 	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
-	h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList, &pb.Leg{
-		LegId:  spareLegId,
-		LegIdx: 2,
-		SideList: []*pb.Side{{
-			SideId:      800,
-			AddrPort:    reactDnC,
-			Provisioned: true,
-		}},
-	})
 	h.dnCands(reactDnD)
-	spareOk := func() *pb.CntlrInfo {
-		return &pb.CntlrInfo{LegIdToLeg: map[uint64]*pb.ResInfo{
-			spareLegId: {ResName: "leg", Status: pb.ResStatus_RES_STATUS_OK},
-		}}
-	}
 	// The old primary still drives the primary plan, and the promoted
-	// standby's last report reads its live path to the spare OK.
+	// standby's last report holds no group.
 	demoted := &cntlrChild{
 		plan:   &cntlrPlan{cntlrId: reactCntlrA, primary: true},
 		driver: &cntlrDriver{lastInfo: &pb.CntlrInfo{}},
 	}
 	promoted := &cntlrChild{
 		plan:   &cntlrPlan{cntlrId: reactCntlrB},
-		driver: &cntlrDriver{lastInfo: spareOk()},
+		driver: &cntlrDriver{lastInfo: &pb.CntlrInfo{}},
 	}
 	h.w.cntlrs[reactCntlrA] = demoted
 	h.w.cntlrs[reactCntlrB] = promoted
@@ -5729,23 +5709,22 @@ func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
 	}
 	h.pass()
 	h.wantOps()
-	h.wantSkipped(reactionSpareCreate, reasonNoHealthyLeg)
+	h.wantSkipped(reactionRepairCreate, reasonGrpRowAbsent)
 
 	// The release hands both children their new plans, and the promotion's
-	// reply reports the new primary's probe of the spare and its running
-	// array, the group's row OK (AR8 step 1's gate).
+	// reply reports the new primary's running array, the group's row OK.
 	h.w.held = nil
 	demoted.plan = &cntlrPlan{cntlrId: reactCntlrA}
 	promoted.plan = &cntlrPlan{cntlrId: reactCntlrB, primary: true}
-	promoted.driver.lastInfo = spareOk()
-	promoted.driver.lastInfo.GrpIdToMdRaid = map[uint64]*pb.ResInfo{
-		reactDataGrp: {ResName: "md", Status: pb.ResStatus_RES_STATUS_OK},
+	promoted.driver.lastInfo = &pb.CntlrInfo{
+		GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+			reactDataGrp: {ResName: "md", Status: pb.ResStatus_RES_STATUS_OK},
+		},
 	}
 	h.pass()
-	calls := h.wantOps("switch_spare")
-	if calls[0].spareLegId != spareLegId ||
-		calls[0].targetLegId != reactDataLegA {
-		t.Fatalf("switch = %+v", calls[0])
+	calls := h.wantOps("create_repair")
+	if calls[0].badLegId != reactDataLegA {
+		t.Fatalf("create = %+v", calls[0])
 	}
 }
 
@@ -5773,8 +5752,8 @@ func testSpProvisionedFlipReported(t *testing.T) {
 				ZeroedBytes: spDataZeroBytes, ZeroBytes: spDataZeroBytes,
 			}
 		},
-		// The spare is still zeroing.
-		spSideSpare: func() *pb.SideInfo {
+		// Leg D's side is still zeroing.
+		spSideD: func() *pb.SideInfo {
 			return &pb.SideInfo{
 				ZeroedBytes: 4 << 20, ZeroBytes: spDataZeroBytes,
 			}
@@ -5815,7 +5794,7 @@ func testSpProvisionedFlipReported(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			return len(h.ops.provisionedCalls()) > 0 &&
-				rounds[spSideSpare] > 1 && rounds[spSideMeta] > 1 &&
+				rounds[spSideD] > 1 && rounds[spSideMeta] > 1 &&
 				rounds[spSideB] > 1
 		})
 	for _, call := range h.ops.provisionedCalls() {
@@ -6040,8 +6019,8 @@ func TestSpLegRowsFromPrimaryOnly(t *testing.T) {
 			Revision: req.GetRevision(),
 			CntlrInfo: &pb.CntlrInfo{
 				LegIdToLeg: map[uint64]*pb.ResInfo{
-					spLegMeta:  resErr("leg-meta", "probe io error"),
-					spLegSpare: resOk("leg-spare"),
+					spLegMeta: resErr("leg-meta", "probe io error"),
+					spLegD:    resOk("leg-d"),
 				},
 			},
 		}
@@ -6054,7 +6033,7 @@ func TestSpLegRowsFromPrimaryOnly(t *testing.T) {
 			CntlrInfo: &pb.CntlrInfo{
 				LegIdToLeg: map[uint64]*pb.ResInfo{
 					// A standby's view of a leg the primary calls healthy.
-					spLegSpare: resErr("leg-spare", "ana not optimized"),
+					spLegD: resErr("leg-d", "ana not optimized"),
 				},
 			},
 		}
@@ -6075,7 +6054,7 @@ func TestSpLegRowsFromPrimaryOnly(t *testing.T) {
 		if write.record != healthRecordLeg {
 			continue
 		}
-		if write.objId == spLegSpare && write.epoch != 0 {
+		if write.objId == spLegD && write.epoch != 0 {
 			t.Fatalf("a standby's leg row was recorded: %+v", write)
 		}
 		if write.objId == spLegMeta {
@@ -6257,10 +6236,7 @@ func (o *fakeSpOps) sliceErrEpoch(
 // either list of either group; nil when the slice holds neither.
 func sliceEpochField(slice *pb.Slice, legId uint64, sideId uint64) *uint64 {
 	for _, grp := range allGroups(slice) {
-		for _, list := range [][]*pb.Leg{
-			grp.GetLegList(),
-			grp.GetSpareLegList(),
-		} {
+		for _, list := range [][]*pb.Leg{grp.GetLegList()} {
 			for _, leg := range list {
 				if sideId == 0 && leg.GetLegId() == legId {
 					return &leg.ErrEpoch
@@ -6490,7 +6466,7 @@ func epochWrites(
 // owner, whose rounds are clean, and another observer whose view differs — a
 // gRPC path broken while its etcd path works, say — which stamps an err_epoch
 // on records the owner sees healthy and then fences: the primary cntlr's, the
-// standby's, a side's, a spare leg's side's and a leg's. The owner's monitors
+// standby's, a side's, leg D's side's and a leg's. The owner's monitors
 // had written clean already and wrote only on a transition from what they had
 // written, so the orphaned epochs stayed: primary_unhealthy failed the
 // healthy primary over, and the demoted cntlr kept its epoch until AR7
@@ -6608,7 +6584,7 @@ func testOrphanedEpoch(t *testing.T, threshold uint32, age uint64) {
 	primarySet := []record{
 		cntlrRecord("the primary", spCntlrPrimary),
 		sliceRecord("the meta side", healthRecordSide, 0, spSideMeta),
-		sliceRecord("the spare side", healthRecordSide, 0, spSideSpare),
+		sliceRecord("leg D's side", healthRecordSide, 0, spSideD),
 		sliceRecord("the meta leg", healthRecordLeg, spLegMeta, 0),
 	}
 	standbySet := []record{cntlrRecord("the standby", spCntlrStandby)}
@@ -7715,7 +7691,7 @@ func (r *replayCntlrStream) Recv() (*pb.CheckCntlrReply, error) {
 }
 
 // TestCntlrInfoRevision pins the revision the cntlr driver keeps beside its
-// latest info, which AR8 step 1's gate compares with the pass's snapshot
+// latest info, which AR8's gate compares with the pass's snapshot
 // (grpRowHold): the revision of the observation that info reports. A reply
 // that carries an info sets it; a round's reply that leaves its info out as
 // unchanged (HL5) moves it to its own revision only while the latest info is

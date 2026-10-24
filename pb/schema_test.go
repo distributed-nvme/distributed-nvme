@@ -34,6 +34,31 @@ func TestSyncupCntlrRequestReservesMigrList(t *testing.T) {
 	}
 }
 
+// TestGroupReservesFieldSix pins the reservation of the group's field 6 and
+// of its name, spare_leg_list. A group is stored in its slice's and its
+// clone's records, so a field that took number 6 would read a stored group's
+// old entries as its own value, silently; the name is reserved with the
+// number, so no field takes it either. The test reads the descriptor and
+// decodes nothing, for TestSyncupCntlrRequestReservesMigrList's reason.
+func TestGroupReservesFieldSix(t *testing.T) {
+	md := (&pb.Group{}).ProtoReflect().Descriptor()
+	if !md.ReservedRanges().Has(6) {
+		t.Errorf("%s does not reserve field number 6", md.FullName())
+	}
+	if fd := md.Fields().ByNumber(6); fd != nil {
+		t.Errorf("%s has field %s at the reserved number 6",
+			md.FullName(), fd.Name())
+	}
+	if !md.ReservedNames().Has("spare_leg_list") {
+		t.Errorf("%s does not reserve the name spare_leg_list",
+			md.FullName())
+	}
+	if fd := md.Fields().ByName("spare_leg_list"); fd != nil {
+		t.Errorf("%s has a field named spare_leg_list at %d",
+			md.FullName(), fd.Number())
+	}
+}
+
 // TestRowReasonAndTornMarkNumbers pins the numbers and kinds of the row's
 // reason and of the two torn marks. Each is appended: a renumbered field
 // decodes an old value into the wrong field, or into unknown fields, with no
@@ -292,5 +317,39 @@ func TestRepairFieldNumbers(t *testing.T) {
 	}
 	if got := stage.Values().Len(); got != 3 {
 		t.Errorf("%s has %d values, want 3", stage.FullName(), got)
+	}
+}
+
+// TestFinishRepairReplyNumbers pins the numbers and kinds of FinishRepair's
+// reply. dnvctl and the gateway are separate binaries that need not be built
+// from one tree, and the reply's last field, the retired leg the finish gave
+// back, is appended: a renumbered field decodes the other side's value into
+// the wrong field, or into unknown fields, with no error, and an operator
+// would be told the wrong leg was given back, or none.
+func TestFinishRepairReplyNumbers(t *testing.T) {
+	md := (&pb.FinishRepairReply{}).ProtoReflect().Descriptor()
+	for _, tc := range []struct {
+		name   protoreflect.Name
+		number protoreflect.FieldNumber
+	}{
+		{"rep_id", 1},
+		{"retired_leg_id", 2},
+		{"given_back_leg_id", 3},
+	} {
+		fd := md.Fields().ByName(tc.name)
+		if fd == nil {
+			t.Errorf("%s has no field %s", md.FullName(), tc.name)
+			continue
+		}
+		if fd.Number() != tc.number ||
+			fd.Kind() != protoreflect.Uint64Kind ||
+			fd.Cardinality() != protoreflect.Optional {
+			t.Errorf("%s.%s is %v %v at %d, want a single uint64 at %d",
+				md.FullName(), tc.name, fd.Cardinality(), fd.Kind(),
+				fd.Number(), tc.number)
+		}
+	}
+	if got := md.Fields().Len(); got != 3 {
+		t.Errorf("%s has %d fields, want 3", md.FullName(), got)
 	}
 }

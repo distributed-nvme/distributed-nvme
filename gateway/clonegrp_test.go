@@ -19,9 +19,9 @@ import (
 // gateway.md, Clones), on the fixture of handler_vol_test.go: CreateClone
 // places the group's sides on DNs as a new group's, refuses fewer candidate
 // locations than legs and a destination whose metadata one side cannot hold,
-// and the calls that look an object up by id — the spare leg calls, the
-// cntlid slot list update, CreateMigration and GetLegBitmap — find a clone
-// meta group's legs and sides after the slices'.
+// and the calls that look an object up by id — the repair calls, the cntlid
+// slot list update, CreateMigration and GetLegBitmap — find a clone meta
+// group's legs and sides after the slices'.
 
 // volCloneMetaBlocks and volCloneDataBlocks are the layout of a one-extent
 // group at the fixture's geometry, the same as volSlice's meta group: a
@@ -77,7 +77,7 @@ func volSameAddrs(got []string, want ...string) bool {
 // the legs' addresses in leg order.
 //
 // The group: grp_id the id after the clone's, one extent, the one-extent
-// layout, MaxAllocLegPerGrp legs (the fixture is md-raid1) and no spare; leg
+// layout, MaxAllocLegPerGrp legs (the fixture is md-raid1); leg
 // idx i holds leg_id and side_id in GW15's order, on a DN no other leg of the
 // group uses, with the pool's first cntlid slot, the DN's transport and
 // provisioned false. Each such DN lost one extent and gained exactly that
@@ -104,10 +104,6 @@ func volWantCloneGrp(
 			grp.GetMetaBlocks(), grp.GetDataBlocks(), grpId,
 			common.CloneMetaGrpExtCnt, volCloneMetaBlocks,
 			volCloneDataBlocks)
-	}
-	if len(grp.GetSpareLegList()) != 0 {
-		t.Errorf("a new clone meta group has no spare: %v",
-			grp.GetSpareLegList())
 	}
 	if len(grp.GetLegList()) != common.MaxAllocLegPerGrp {
 		t.Fatalf("%d legs, want %d", len(grp.GetLegList()),
@@ -365,68 +361,77 @@ func TestCreateCloneReplansWhenAPickMoves(t *testing.T) {
 	}
 }
 
-// TestSpareLegCallsOnACloneGroup pins the three spare leg calls on a clone
-// meta group (architecture.md, Spare legs; gateway.md, Spare legs): the group
-// is found among the clones once no slice holds its id, a spare joins the
-// clone's group as it joins a slice's — its DN charged and bumped, the
-// clone's record rewritten, one SpRev bump each — a ready spare is switched
-// in, and the leg it parks is deleted with its DN given back. The slice is
-// never touched.
-func TestSpareLegCallsOnACloneGroup(t *testing.T) {
+// TestRepairCallsOnACloneGroup pins a repair's whole course on a clone meta
+// group (architecture.md, Repairs, Retired legs): the group is found among
+// the clones once no slice holds its id; the create charges the new leg's DN
+// and bumps it, and the repair records the clone as its parent; the finish
+// puts the new leg in the bad leg's place in the clone's group and keeps the
+// bad leg as a retired leg of the clone; and the delete of that retired leg
+// gives its DN back its extent and its pointer. Each call bumps the SpRev
+// once, and the slice is never touched.
+func TestRepairCallsOnACloneGroup(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
 	env.setDnBatchSize(1)
 	env.setDnFree(volDnC, volDnCFree)
 	env.setDnFree(volDnD, volDnCFree-1)
 	volCreateClone(env, "clone-a", "dst")
-	grp := volCloneGrpOf(env, "clone-a")
-	grpId := grp.GetGrpId()
-	target := grp.GetLegList()[0]
-	targetAddr := target.GetSideList()[0].GetAddrPort()
+	clone := env.clone("clone-a")
+	grpId := clone.GetMetaGrp().GetGrpId()
+	bad := clone.GetMetaGrp().GetLegList()[0]
+	bad.ErrEpoch = repEpoch
+	mustPut(t, env.cli, model.CloneKey(env.cid, volSpId, "clone-a"), clone)
+	badAddr := bad.GetSideList()[0].GetAddrPort()
 	slice := env.slice()
 	nextId := env.spConf().GetNextId()
 
-	// CreateSpareLeg on dn-a, which holds the slice's sides and no leg of
-	// the clone's group.
+	// CreateRepair with the new leg on dn-a, which holds the slice's sides
+	// and no leg of the clone's group: the rep_id, the new leg and its side
+	// take the next three ids.
 	dnABefore := env.dn(volDnA)
 	revBefore := env.spRev()
-	created, err := env.srv.CreateSpareLeg(env.ctx, &pb.CreateSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		GrpId:       grpId,
-		DnSelector:  volDnSelector(volDnA),
+	created, err := env.srv.CreateRepair(env.ctx, &pb.CreateRepairRequest{
+		ClusterName:  env.cluster,
+		SpName:       volSpName,
+		SpRev:        env.token(),
+		RepName:      "rep-a",
+		GrpId:        grpId,
+		BadLegIdList: []uint64{bad.GetLegId()},
+		DnSelector:   volDnSelector(volDnA),
 	})
 	if err != nil {
-		t.Fatalf("CreateSpareLeg: %v", err)
+		t.Fatalf("CreateRepair: %v", err)
 	}
-	spareId := created.GetLegId()
-	if spareId != nextId {
-		t.Errorf("leg_id: got %d, want %d", spareId, nextId)
+	newId := nextId + 1
+	if created.GetRepId() != nextId || created.GetNewLegId() != newId {
+		t.Errorf("reply: rep_id %d, new_leg_id %d, want %d and %d",
+			created.GetRepId(), created.GetNewLegId(), nextId, newId)
 	}
-	grp = volCloneGrpOf(env, "clone-a")
-	if len(grp.GetSpareLegList()) != 1 {
-		t.Fatalf("spare_leg_list: got %v, want one spare",
-			grp.GetSpareLegList())
-	}
-	wantSpare := &pb.Leg{
-		LegId:  spareId,
+	wantNew := &pb.Leg{
+		LegId:  newId,
 		LegIdx: uint32(common.MaxAllocLegPerGrp),
 		SideList: []*pb.Side{{
-			SideId:      spareId + 1,
+			SideId:      newId + 1,
 			AddrPort:    volDnA,
 			CntlidSlot:  volSlot,
 			NvmeTrConf:  volTrConf(volDnA),
 			Provisioned: false,
 		}},
 	}
-	if got := grp.GetSpareLegList()[0]; !proto.Equal(got, wantSpare) {
-		t.Errorf("spare: got %v, want %v", got, wantSpare)
+	rep := env.repair("rep-a")
+	if len(rep.GetNewLegList()) != 1 ||
+		!proto.Equal(rep.GetNewLegList()[0], wantNew) {
+		t.Errorf("new_leg_list: got %v, want [%v]", rep.GetNewLegList(),
+			wantNew)
+	}
+	if rep.GetCloneName() != "clone-a" || rep.GetSliceId() != 0 {
+		t.Errorf("parent: clone %q, slice %d, want clone %q, slice 0",
+			rep.GetCloneName(), rep.GetSliceId(), "clone-a")
 	}
 	wantDnA := proto.Clone(dnABefore).(*pb.DnConf)
 	wantDnA.FreeExtCnt -= common.CloneMetaGrpExtCnt
 	wantDnA.SidePtrList = append(wantDnA.SidePtrList, &pb.SidePointer{
-		SpId: volSpId, LegId: spareId, SideId: spareId + 1,
+		SpId: volSpId, LegId: newId, SideId: newId + 1,
 	})
 	if got := env.dn(volDnA); !proto.Equal(got, wantDnA) {
 		t.Errorf("dn-a: got %v, want %v", got, wantDnA)
@@ -435,129 +440,79 @@ func TestSpareLegCallsOnACloneGroup(t *testing.T) {
 		t.Errorf("dn-a rev: got %d, want 2", got)
 	}
 	if got := env.spRev(); got != revBefore+1 {
-		t.Errorf("sp_rev: got %d, want %d", got, revBefore+1)
+		t.Errorf("sp_rev after the create: got %d, want %d", got,
+			revBefore+1)
 	}
 
-	// The provisioned flag set on the record, as the clone flip
-	// (model.FlipCloneProvisioned) would set it, then the switch: the spare
-	// takes the target's place and the target is parked.
-	clone := env.clone("clone-a")
-	clone.GetMetaGrp().GetSpareLegList()[0].GetSideList()[0].Provisioned = true
-	mustPut(t, env.cli, model.CloneKey(env.cid, volSpId, "clone-a"), clone)
-	switched, err := env.srv.SwitchSpareLeg(env.ctx, &pb.SwitchSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		GrpId:       grpId,
-		SpareLegId:  spareId,
-		TargetLegId: target.GetLegId(),
-	})
-	if err != nil {
-		t.Fatalf("SwitchSpareLeg: %v", err)
-	}
-	if switched.GetCurrActiveLegId() != spareId ||
-		switched.GetCurrSpareLegId() != target.GetLegId() {
-		t.Errorf("reply: got %v", switched)
-	}
-	grp = volCloneGrpOf(env, "clone-a")
-	if grp.GetLegList()[0].GetLegId() != spareId ||
-		len(grp.GetSpareLegList()) != 1 ||
-		grp.GetSpareLegList()[0].GetLegId() != target.GetLegId() {
-		t.Fatalf("after the switch: legs %v, spares %v", grp.GetLegList(),
-			grp.GetSpareLegList())
-	}
-
-	// DeleteSpareLeg of the parked leg: its DN gets its extent and its
-	// pointer back.
-	targetDnBefore := env.dn(targetAddr)
-	targetRevBefore := env.dnRev(targetAddr)
+	// The finish, once the sp worker has moved the repair to STARTED: the
+	// new leg takes the bad leg's place and leg_idx, and the bad leg becomes
+	// a retired leg of the clone, its side still on its DN.
+	repMoveStage(env, "rep-a", pb.RepStage_REP_STAGE_STARTED)
 	revBefore = env.spRev()
-	if _, err := env.srv.DeleteSpareLeg(env.ctx, &pb.DeleteSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		GrpId:       grpId,
-		LegId:       target.GetLegId(),
-	}); err != nil {
-		t.Fatalf("DeleteSpareLeg: %v", err)
+	finished, err := repFinish(env, "rep-a")
+	if err != nil {
+		t.Fatalf("FinishRepair: %v", err)
 	}
-	grp = volCloneGrpOf(env, "clone-a")
-	if len(grp.GetSpareLegList()) != 0 || len(grp.GetLegList()) !=
-		common.MaxAllocLegPerGrp {
-		t.Errorf("after the delete: legs %v, spares %v", grp.GetLegList(),
-			grp.GetSpareLegList())
+	if finished.GetRetiredLegId() != bad.GetLegId() ||
+		finished.GetGivenBackLegId() != 0 {
+		t.Errorf("reply: retired_leg_id %d, given_back_leg_id %d, want %d "+
+			"and 0", finished.GetRetiredLegId(),
+			finished.GetGivenBackLegId(), bad.GetLegId())
 	}
-	targetDn := env.dn(targetAddr)
-	if targetDn.GetFreeExtCnt() !=
-		targetDnBefore.GetFreeExtCnt()+common.CloneMetaGrpExtCnt ||
-		len(targetDn.GetSidePtrList()) != 0 {
-		t.Errorf("%s after the delete: got %v, want one extent more and "+
-			"no side", targetAddr, targetDn)
+	grp := volCloneGrpOf(env, "clone-a")
+	wantNew.LegIdx = bad.GetLegIdx()
+	if len(grp.GetLegList()) != common.MaxAllocLegPerGrp ||
+		!proto.Equal(grp.GetLegList()[0], wantNew) {
+		t.Errorf("after the finish: legs %v, want the new leg %v first",
+			grp.GetLegList(), wantNew)
 	}
-	if got := env.dnRev(targetAddr); got != targetRevBefore+1 {
-		t.Errorf("%s rev: got %d, want %d", targetAddr, got,
-			targetRevBefore+1)
+	if grp.GetRepName() != "" || len(grp.GetRetiredLegIdList()) != 1 ||
+		grp.GetRetiredLegIdList()[0] != bad.GetLegId() {
+		t.Errorf("after the finish: rep_name %q, retired legs %v, want "+
+			"none and [%d]", grp.GetRepName(), grp.GetRetiredLegIdList(),
+			bad.GetLegId())
+	}
+	retired := env.retiredLeg(bad.GetLegId())
+	if retired.GetCloneName() != "clone-a" || retired.GetSliceId() != 0 ||
+		!proto.Equal(retired.GetSide(), bad.GetSideList()[0]) {
+		t.Errorf("retired leg: got %v, want clone %q and the bad leg's side",
+			retired, "clone-a")
 	}
 	if got := env.spRev(); got != revBefore+1 {
-		t.Errorf("sp_rev: got %d, want %d", got, revBefore+1)
+		t.Errorf("sp_rev after the finish: got %d, want %d", got,
+			revBefore+1)
+	}
+
+	// DeleteRetiredLeg of the retired leg: its DN gets its extent and its
+	// pointer back.
+	badDnBefore := env.dn(badAddr)
+	badRevBefore := env.dnRev(badAddr)
+	revBefore = env.spRev()
+	if _, err := repDeleteRetired(env, bad.GetLegId()); err != nil {
+		t.Fatalf("DeleteRetiredLeg: %v", err)
+	}
+	grp = volCloneGrpOf(env, "clone-a")
+	if len(grp.GetRetiredLegIdList()) != 0 {
+		t.Errorf("after the delete: retired legs %v, want none",
+			grp.GetRetiredLegIdList())
+	}
+	badDn := env.dn(badAddr)
+	if badDn.GetFreeExtCnt() !=
+		badDnBefore.GetFreeExtCnt()+common.CloneMetaGrpExtCnt ||
+		len(badDn.GetSidePtrList()) != 0 {
+		t.Errorf("%s after the delete: got %v, want one extent more and "+
+			"no side", badAddr, badDn)
+	}
+	if got := env.dnRev(badAddr); got != badRevBefore+1 {
+		t.Errorf("%s rev: got %d, want %d", badAddr, got, badRevBefore+1)
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("sp_rev after the delete: got %d, want %d", got,
+			revBefore+1)
 	}
 	if got := env.slice(); !proto.Equal(got, slice) {
 		t.Errorf("the slice moved: got %v, want %v", got, slice)
 	}
-}
-
-// TestSpareLegCallsRefuseADeletingClone pins the refusal of every mutation
-// of a deleting clone on its clone meta group (dnv-worker.md CLD1;
-// architecture.md, Spare legs): once DeleteClone has
-// latched a clone, none of the three spare leg calls changes its group —
-// each is FAILED_PRECONDITION naming the clone, with nothing written.
-func TestSpareLegCallsRefuseADeletingClone(t *testing.T) {
-	env := newVolEnv(t)
-	env.putTd("dst", 900, 7, 0, true)
-	volCreateClone(env, "clone-a", "dst")
-	grp := volCloneGrpOf(env, "clone-a")
-	legA := grp.GetLegList()[0].GetLegId()
-	legB := grp.GetLegList()[1].GetLegId()
-	volLatchClone(env, "clone-a")
-	before := env.dump()
-	for name, call := range map[string]func() error{
-		"CreateSpareLeg": func() error {
-			_, err := env.srv.CreateSpareLeg(env.ctx,
-				&pb.CreateSpareLegRequest{
-					ClusterName: env.cluster,
-					SpName:      volSpName,
-					GrpId:       grp.GetGrpId(),
-				})
-			return err
-		},
-		"DeleteSpareLeg": func() error {
-			_, err := env.srv.DeleteSpareLeg(env.ctx,
-				&pb.DeleteSpareLegRequest{
-					ClusterName: env.cluster,
-					SpName:      volSpName,
-					GrpId:       grp.GetGrpId(),
-					LegId:       legA,
-				})
-			return err
-		},
-		"SwitchSpareLeg": func() error {
-			_, err := env.srv.SwitchSpareLeg(env.ctx,
-				&pb.SwitchSpareLegRequest{
-					ClusterName: env.cluster,
-					SpName:      volSpName,
-					GrpId:       grp.GetGrpId(),
-					SpareLegId:  legA,
-					TargetLegId: legB,
-				})
-			return err
-		},
-	} {
-		msg := volWantCode(t, call(), codes.FailedPrecondition)
-		if want := `clone "clone-a" is being deleted`; msg != want {
-			t.Errorf("%s: message %q, want %q", name, msg, want)
-		}
-	}
-	env.wantNoWrite("the refused spare leg calls", before)
 }
 
 // TestUpdateCntlidSlotListRefusesASlotACloneSideUses pins the slot list

@@ -148,7 +148,11 @@ message Group {
     uint64 meta_blocks = 3;
     uint64 data_blocks = 4;
     repeated Leg leg_list = 5;
-    repeated Leg spare_leg_list = 6;
+    reserved 6;
+    reserved "spare_leg_list";  // retired with its number, never reused: a
+                                // list of legs renumbered onto 6 would decode
+                                // a stored group's old entries as its own,
+                                // silently; the name goes with it.
     // The name of the group's open repair, empty while it has none: one
     // repair per group, checked in the transaction that creates one without
     // a scan, and the link a cntlr finds the group's repair by in its
@@ -1441,44 +1445,6 @@ message AppendMigrationBitmapReply {
     uint64 migr_id = 1;
 }
 
-message CreateSpareLegRequest {
-    string cluster_name = 1;
-    string sp_name = 2;
-    SpRev sp_rev = 3;
-    uint64 grp_id = 4;
-    NodeSelector dn_selector = 5;
-}
-
-message CreateSpareLegReply {
-    uint64 leg_id = 1;
-}
-
-message DeleteSpareLegRequest {
-    string cluster_name = 1;
-    string sp_name = 2;
-    SpRev sp_rev = 3;
-    uint64 grp_id = 4;
-    uint64 leg_id = 5;
-}
-
-message DeleteSpareLegReply {
-    uint64 leg_id = 1;
-}
-
-message SwitchSpareLegRequest {
-    string cluster_name = 1;
-    string sp_name = 2;
-    SpRev sp_rev = 3;
-    uint64 grp_id = 4;
-    uint64 spare_leg_id = 5;
-    uint64 target_leg_id = 6;
-}
-
-message SwitchSpareLegReply {
-    uint64 curr_active_leg_id = 1;
-    uint64 curr_spare_leg_id = 2;
-}
-
 message CreateRepairRequest {
     string cluster_name = 1;
     string sp_name = 2;
@@ -1507,6 +1473,11 @@ message FinishRepairRequest {
 message FinishRepairReply {
     uint64 rep_id = 1;
     uint64 retired_leg_id = 2;
+    // The group's oldest retired leg, which the finish of a worker's repair
+    // deleted so that the group stays within MaxRetiredLegPerGrp, its side
+    // given back to its disk node; zero when the finish gave none back.
+    // Appended, never renumbered.
+    uint64 given_back_leg_id = 3;
 }
 
 message CancelRepairRequest {
@@ -1664,10 +1635,6 @@ service Gateway {
     rpc CancelMigration(CancelMigrationRequest) returns (CancelMigrationReply) {}
     rpc GetMigration(GetMigrationRequest) returns (GetMigrationReply) {}
     rpc AppendMigrationBitmap(AppendMigrationBitmapRequest) returns (AppendMigrationBitmapReply) {}
-
-    rpc CreateSpareLeg(CreateSpareLegRequest) returns (CreateSpareLegReply) {}
-    rpc DeleteSpareLeg(DeleteSpareLegRequest) returns (DeleteSpareLegReply) {}
-    rpc SwitchSpareLeg(SwitchSpareLegRequest) returns (SwitchSpareLegReply) {}
 
     rpc CreateRepair(CreateRepairRequest) returns (CreateRepairReply) {}
     rpc FinishRepair(FinishRepairRequest) returns (FinishRepairReply) {}

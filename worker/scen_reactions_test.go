@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,8 +17,9 @@ import (
 )
 
 // The whole-worker scenario cases of the reactions other than the failover:
-// cntlr replacement (dnv-worker.md, AR7), leg repair (AR8) and thin-pool
-// auto-grow (AR6), with AR2's pass rules, each played through the fakes of one
+// cntlr replacement (dnv-worker.md, AR7), the helpers of leg repair (AR8,
+// whose cases are scen_legrepair_test.go's) and thin-pool auto-grow (AR6),
+// with AR2's pass rules, each played through the fakes of one
 // planted cluster under one whole worker. A pass, the worker's evaluation of
 // one pool's reactions, runs once a cntlr_interval, one second here; every
 // "for a while" a case holds is two passes or more, counted by records or by
@@ -277,60 +277,6 @@ func (c *stdCluster) failLeg(t *testing.T, legId uint64) {
 		rowLever(pb.ResStatus_RES_STATUS_ERROR, "", true))
 }
 
-// spareIds are the leg and side ids AR8's create takes next (CreateSpareLeg
-// takes the pool's next free id for the leg and the one after for its side).
-func (c *stdCluster) spareIds(t *testing.T) (uint64, uint64) {
-	t.Helper()
-	next := c.nextSpId(t)
-	return next, next + 1
-}
-
-// spareShape is the standard cluster with a fourth DN. The group's legs sit
-// on dn 1 and dn 2, so dn 3 and dn 4 are both outside it: after the first
-// spare takes one of them, a second spare still has a DN to go to, and a
-// case's count of spare creates can catch one.
-var spareShape = scenShape{extraDns: 1}
-
-// spareDns are the DNs outside the group in spareShape.
-var spareDns = []uint64{3, 4}
-
-// spareDnOf is the DN of spareDns that a spare create record names, or 0.
-func spareDnOf(rec logRecord) uint64 {
-	for _, id := range spareDns {
-		if rec.str("addr_port") == stdDnAddr(id) {
-			return id
-		}
-	}
-	return 0
-}
-
-// waitOneSpare waits, as waitCount does, for n records of w with msg that
-// match accepts, and fails as soon as a second spare create is applied
-// meanwhile (while names the moment for the message). A second spare can be
-// ready at once and switched in, which ends the records waited for, so the
-// count is checked inside the wait, where a failure names the second spare
-// rather than a timeout.
-func (h *workerHarness) waitOneSpare(
-	t *testing.T,
-	timeout time.Duration,
-	w *harnessWorker,
-	msg string,
-	n int,
-	match func(logRecord) bool,
-	while string,
-) {
-	t.Helper()
-	h.waitUntil(t, timeout, fmt.Sprintf("%d %q records", n, msg),
-		func() (bool, string) {
-			spares := h.countRecs(w, msgReactionApplied, reactionIs(reactionSpareCreate, ""))
-			if spares != 1 {
-				t.Fatalf("%d spares created %s, want 1", spares, while)
-			}
-			got := h.countRecs(w, msg, match)
-			return got >= n, fmt.Sprintf("%d so far", got)
-		})
-}
-
 // slowZeroing holds a side's zeroing at none done, or lets it finish.
 func slowZeroing(t *testing.T, agent *agentfake.Agent, key string, slow bool) {
 	t.Helper()
@@ -341,252 +287,6 @@ func slowZeroing(t *testing.T, agent *agentfake.Agent, key string, slow bool) {
 			o.ZeroedBytes = nil
 		}
 	})
-}
-
-// waitSwitched waits for AR8 step 1's switch of spare into leg's place and
-// checks that the group then holds the spare in its leg list and the old leg
-// parked in its spare list.
-func (c *stdCluster) waitSwitched(t *testing.T, w *harnessWorker, legId, spareLegId uint64) {
-	t.Helper()
-	c.h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(reactionIs(reactionSpareSwitch, ""), and(numIs("leg_id", legId),
-			numIs("spare_leg_id", spareLegId))))
-	grp := c.dataGrp(t)
-	if !slices.Contains(legIds(grp.GetLegList()), spareLegId) ||
-		!slices.Contains(legIds(grp.GetSpareLegList()), legId) {
-		t.Errorf("after the switch the group has legs %v and spares %v, want "+
-			"leg %d in and leg %d parked", legIds(grp.GetLegList()),
-			legIds(grp.GetSpareLegList()), spareLegId, legId)
-	}
-}
-
-// TestScenLegRepairWaitsForASlowSpare pins AR8 steps 3, 2 and 1: a data leg
-// the primary reports ERROR past leg_unhealthy gets one spare on a DN outside
-// its group; while the spare's side zeroes, every pass waits for it
-// (`reaction skipped`, spare_pending) and creates no second one, though
-// another DN outside the group has room for it; once its zeroing ends the
-// side is flipped provisioned (RW18) and the next pass switches the spare in
-// and parks the leg.
-func TestScenLegRepairWaitsForASlowSpare(t *testing.T) {
-	t.Parallel()
-	h := newWorkerHarness(t, harnessOpts{})
-	c := h.plantScen(t, spareShape)
-	w := h.startWorker(t, "w1")
-	h.waitOwnsAll(t, w)
-	c.waitConverged(t)
-
-	spareLeg, spareSide := c.spareIds(t)
-	spareKey := agentfake.SideKey(stdSpId, spareLeg, spareSide)
-	for _, id := range spareDns {
-		slowZeroing(t, c.dnAgent(id), spareKey, true)
-	}
-	c.failLeg(t, 6)
-	created := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(reactionIs(reactionSpareCreate, ""), numIs("leg_id", 6)))
-	spareDn := spareDnOf(created)
-	if created.num("spare_leg_id") != spareLeg || spareDn == 0 {
-		t.Fatalf("the spare is leg %d at %s, want leg %d on dn 3 or dn 4",
-			created.num("spare_leg_id"), created.str("addr_port"), spareLeg)
-	}
-	// Three passes that find the spare zeroing: each waits for it.
-	pending := and(reactionIs(reactionSpareSwitch, reasonSparePending),
-		numIs("spare_leg_id", spareLeg))
-	h.waitOneSpare(t, 20*time.Second, w, msgReactionSkipped, 3, pending,
-		"while one zeroes")
-	if _, _, side, ok := c.sideOf(t, spareSide); !ok || side.GetProvisioned() {
-		t.Fatalf("the spare's side while it zeroes: found %t, %v", ok, side)
-	}
-
-	slowZeroing(t, c.dnAgent(spareDn), spareKey, false)
-	c.waitSwitched(t, w, 6, spareLeg)
-	if n := h.countRecs(w, msgReactionApplied, reactionIs(reactionSpareCreate, "")); n != 1 {
-		t.Errorf("%d spares created for one repair, want 1", n)
-	}
-}
-
-// TestScenLegRepairHoldsASpareWhoseDnDiesWhileZeroing pins AR8 step 3's hold
-// (Known limits): a spare whose DN stops while the spare zeroes is no pending
-// spare any more (its side's health epoch is set) and still unprovisioned,
-// so every pass logs `reaction skipped` (spare_unprovisioned) and creates no
-// second spare, though another DN outside the group is up and has room for
-// it; once that DN is back and finishes the zeroing, the spare is switched in.
-func TestScenLegRepairHoldsASpareWhoseDnDiesWhileZeroing(t *testing.T) {
-	t.Parallel()
-	h := newWorkerHarness(t, harnessOpts{})
-	c := h.plantScen(t, spareShape)
-	w := h.startWorker(t, "w1")
-	h.waitOwnsAll(t, w)
-	c.waitConverged(t)
-
-	spareLeg, spareSide := c.spareIds(t)
-	spareKey := agentfake.SideKey(stdSpId, spareLeg, spareSide)
-	for _, id := range spareDns {
-		slowZeroing(t, c.dnAgent(id), spareKey, true)
-	}
-	c.failLeg(t, 6)
-	created := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(reactionIs(reactionSpareCreate, ""), numIs("spare_leg_id", spareLeg)))
-	spareDn := spareDnOf(created)
-	if spareDn == 0 {
-		t.Fatalf("the spare went to %s, want dn 3 or dn 4", created.str("addr_port"))
-	}
-	h.waitRecord(t, 20*time.Second, w, msgReactionSkipped,
-		and(reactionIs(reactionSpareSwitch, reasonSparePending),
-			numIs("spare_leg_id", spareLeg)))
-
-	dn := c.dnAgent(spareDn)
-	dn.Stop()
-	h.waitUntil(t, 20*time.Second, "the spare's side to carry a health epoch",
-		func() (bool, string) {
-			_, _, side, ok := c.sideOf(t, spareSide)
-			return ok && side.GetErrEpoch() != 0, fmt.Sprintf("%v", side)
-		})
-	held := and(reactionIs(reactionSpareCreate, reasonSpareUnprovisioned),
-		numIs("spare_leg_id", spareLeg))
-	h.waitOneSpare(t, 20*time.Second, w, msgReactionSkipped, 2, held,
-		"while the first one's DN is down")
-
-	slowZeroing(t, dn, spareKey, false)
-	if err := dn.Start(agentfake.KeepStore); err != nil {
-		t.Fatalf("restart dn %d: %v", spareDn, err)
-	}
-	c.waitSwitched(t, w, 6, spareLeg)
-	if n := h.countRecs(w, msgReactionApplied, reactionIs(reactionSpareCreate, "")); n != 1 {
-		t.Errorf("%d spares created for one repair, want 1", n)
-	}
-}
-
-// TestScenLegRepairWithTheSpareListFull pins AR8 step 4: a group whose spare
-// list already holds MaxSpareLegPerGrp legs, both dead (the primary reports
-// them ERROR past leg_unhealthy, as legs parked by earlier repairs), gets no
-// spare and no switch for its failing leg; every pass logs
-// `reaction skipped` (spare_list_full), since only an operator frees a slot.
-func TestScenLegRepairWithTheSpareListFull(t *testing.T) {
-	t.Parallel()
-	h := newWorkerHarness(t, harnessOpts{})
-	c := h.plantScen(t, scenShape{
-		extraDns: 1,
-		spares: []struct{ legId, sideId, dnId uint64 }{
-			{legId: 12, sideId: 13, dnId: 3},
-			{legId: 14, sideId: 15, dnId: 4},
-		},
-	})
-	if common.MaxSpareLegPerGrp != 2 {
-		t.Fatalf("the shape plants 2 spares, MaxSpareLegPerGrp is %d",
-			common.MaxSpareLegPerGrp)
-	}
-	c.failLeg(t, 12)
-	c.failLeg(t, 14)
-	w := h.startWorker(t, "w1")
-	h.waitOwnsAll(t, w)
-	// The two spares are parked legs: provisioned, and dead by their leg's
-	// epoch, older than leg_unhealthy, before the active leg fails.
-	h.waitUntil(t, 30*time.Second, "both spares provisioned and past leg_unhealthy",
-		func() (bool, string) {
-			now := uint64(time.Now().Unix())
-			for _, spare := range c.dataGrp(t).GetSpareLegList() {
-				side := singleSide(spare)
-				if side == nil || !side.GetProvisioned() {
-					return false, fmt.Sprintf("spare %d not provisioned", spare.GetLegId())
-				}
-				if !reached(now, spare.GetErrEpoch(), c.spec.threshold.GetLegUnhealthy()) {
-					return false, fmt.Sprintf("spare %d err_epoch %d",
-						spare.GetLegId(), spare.GetErrEpoch())
-				}
-			}
-			return true, ""
-		})
-	c.failLeg(t, 6)
-	full := and(reactionIs(reactionSpareCreate, reasonSpareListFull), numIs("leg_id", 6))
-	h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 3, full)
-	if n := h.countRecs(w, msgReactionApplied, nil); n != 0 {
-		t.Errorf("%d reactions applied with the spare list full, want 0", n)
-	}
-	if n := h.countRecs(w, msgReactionSkipped, reactionIs(reactionSpareSwitch, reasonSparePending)); n != 0 {
-		t.Errorf("%d passes waited for a dead parked leg", n)
-	}
-	grp := c.dataGrp(t)
-	if got := legIds(grp.GetSpareLegList()); len(got) != 2 {
-		t.Errorf("the spare list is %v, want the two planted spares", got)
-	}
-}
-
-// TestScenLegRepairWaitsForADnWithRoom pins AR8 step 3's scan: with the one
-// DN outside the group full (the group's DNs are black-listed), the repair
-// finds no candidate and logs `reaction skipped` (no candidate) on every
-// pass; once that DN has room, the next pass creates the spare there and it is
-// switched in.
-func TestScenLegRepairWaitsForADnWithRoom(t *testing.T) {
-	t.Parallel()
-	h := newWorkerHarness(t, harnessOpts{})
-	c := h.plantStd(t, nil)
-	ctx := context.Background()
-	if _, _, err := plant.SetDnFree(ctx, h.cli, c.cl, 3, 0); err != nil {
-		t.Fatalf("SetDnFree: %v", err)
-	}
-	w := h.startWorker(t, "w1")
-	h.waitOwnsAll(t, w)
-	c.waitConverged(t)
-
-	c.failLeg(t, 6)
-	noRoom := and(reactionIs(reactionSpareCreate, reasonNoCandidate), numIs("leg_id", 6))
-	h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 2, noRoom)
-	if n := h.countRecs(w, msgReactionApplied, nil); n != 0 {
-		t.Fatalf("%d reactions applied with no DN for a spare, want 0", n)
-	}
-
-	if _, _, err := plant.SetDnFree(ctx, h.cli, c.cl, 3, c.spec.nodeFree); err != nil {
-		t.Fatalf("SetDnFree: %v", err)
-	}
-	created := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		reactionIs(reactionSpareCreate, ""))
-	if got := created.str("addr_port"); got != stdDnAddr(3) {
-		t.Errorf("the spare went to %s, want dn 3", got)
-	}
-	c.waitSwitched(t, w, 6, created.num("spare_leg_id"))
-}
-
-// TestScenLegRepairWaitsForASpareThePrimaryNeverReports pins AR8 step 2's
-// wait with no bound: the primary's syncups are held, so it never learns of
-// the spare and reports no row of it; the spare is provisioned and carries no
-// health epoch, so it stays pending, and every pass waits for it past
-// leg_unhealthy without creating a second spare on the other DN outside the
-// group; once the primary takes its syncup and reports the spare OK, the
-// spare is switched in.
-func TestScenLegRepairWaitsForASpareThePrimaryNeverReports(t *testing.T) {
-	t.Parallel()
-	h := newWorkerHarness(t, harnessOpts{})
-	c := h.plantScen(t, spareShape)
-	w := h.startWorker(t, "w1")
-	h.waitOwnsAll(t, w)
-	c.waitConverged(t)
-
-	primary, primaryKey := c.cntlrAgent(t, 1)
-	setLever(t, primary, primaryKey, func(o *agentfake.Object) { o.HangSyncup = true })
-	defer setLever(t, primary, primaryKey, func(o *agentfake.Object) { o.HangSyncup = false })
-	spareLeg, spareSide := c.spareIds(t)
-	c.failLeg(t, 6)
-	h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(reactionIs(reactionSpareCreate, ""), numIs("spare_leg_id", spareLeg)))
-	h.waitUntil(t, 20*time.Second, "the spare's side provisioned",
-		func() (bool, string) {
-			_, _, side, ok := c.sideOf(t, spareSide)
-			return ok && side.GetProvisioned(), fmt.Sprintf("%v", side)
-		})
-	pending := and(reactionIs(reactionSpareSwitch, reasonSparePending),
-		numIs("spare_leg_id", spareLeg))
-	from := h.countRecs(w, msgReactionSkipped, pending)
-	// leg_unhealthy plus two passes, every one of them waiting: a spare with
-	// no report has no bound.
-	waits := int(c.spec.threshold.GetLegUnhealthy()) + 2
-	h.waitOneSpare(t, 30*time.Second, w, msgReactionSkipped, from+waits, pending,
-		"while the primary never reports the first")
-	if grp := c.dataGrp(t); !slices.Contains(legIds(grp.GetLegList()), 6) {
-		t.Fatalf("leg 6 left the leg list before the primary reported its spare")
-	}
-
-	setLever(t, primary, primaryKey, func(o *agentfake.Object) { o.HangSyncup = false })
-	c.waitSwitched(t, w, 6, spareLeg)
 }
 
 // ---------------------------------------------------------------------------
@@ -716,7 +416,7 @@ func TestScenGrowStaysPendingWhileItsSidesZeroSlowly(t *testing.T) {
 			pendingInPass)
 	}
 	for _, ids := range sides {
-		if _, _, side, ok := c.sideOf(t, ids[1]); !ok || side.GetProvisioned() {
+		if _, side, ok := c.sideOf(t, ids[1]); !ok || side.GetProvisioned() {
 			t.Fatalf("new side %d while it zeroes: found %t, %v", ids[1], ok, side)
 		}
 	}
@@ -739,7 +439,7 @@ func TestScenGrowStaysPendingWhileItsSidesZeroSlowly(t *testing.T) {
 	h.waitUntil(t, 20*time.Second, "the new sides provisioned",
 		func() (bool, string) {
 			for _, ids := range sides {
-				if _, _, side, ok := c.sideOf(t, ids[1]); !ok || !side.GetProvisioned() {
+				if _, side, ok := c.sideOf(t, ids[1]); !ok || !side.GetProvisioned() {
 					return false, fmt.Sprintf("side %d: %v", ids[1], side)
 				}
 			}

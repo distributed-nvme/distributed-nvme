@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 68 invocations
+// argv for argv. The integration suite asserts the same 65 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -557,38 +557,8 @@ var sweepRows = []sweepRow{
 			Bitmap:      []byte{0xa5, 0xa5},
 		}},
 
-	// ---- spare ----
-	{58, "CreateSpareLeg",
-		[]string{"spare", "create", "--grp", "1", "--rev", "7"},
-		&pb.CreateSpareLegRequest{
-			ClusterName: itCluster,
-			SpName:      itSp,
-			SpRev:       wantSpRev(itRevValue),
-			GrpId:       1,
-		}},
-	{59, "DeleteSpareLeg",
-		[]string{"spare", "delete", "--grp", "1", "--leg", "2", "--rev", "7"},
-		&pb.DeleteSpareLegRequest{
-			ClusterName: itCluster,
-			SpName:      itSp,
-			SpRev:       wantSpRev(itRevValue),
-			GrpId:       1,
-			LegId:       2,
-		}},
-	{60, "SwitchSpareLeg",
-		[]string{"spare", "switch", "--grp", "1", "--spare", "6",
-			"--target", "4", "--rev", "7"},
-		&pb.SwitchSpareLegRequest{
-			ClusterName: itCluster,
-			SpName:      itSp,
-			SpRev:       wantSpRev(itRevValue),
-			GrpId:       1,
-			SpareLegId:  6,
-			TargetLegId: 4,
-		}},
-
 	// ---- repair ----
-	{61, "CreateRepair",
+	{58, "CreateRepair",
 		[]string{"repair", "create", "--name", "r0", "--grp", "1",
 			"--bad-legs", "2", "--dn-white", itDnAddr, "--rev", "7"},
 		&pb.CreateRepairRequest{
@@ -600,7 +570,7 @@ var sweepRows = []sweepRow{
 			BadLegIdList: []uint64{2},
 			DnSelector:   &pb.NodeSelector{WhiteList: []string{itDnAddr}},
 		}},
-	{62, "FinishRepair",
+	{59, "FinishRepair",
 		[]string{"repair", "finish", "--name", "r0", "--rev", "7"},
 		&pb.FinishRepairRequest{
 			ClusterName: itCluster,
@@ -608,7 +578,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{63, "CancelRepair",
+	{60, "CancelRepair",
 		[]string{"repair", "cancel", "--name", "r0", "--rev", "7"},
 		&pb.CancelRepairRequest{
 			ClusterName: itCluster,
@@ -616,7 +586,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{64, "TryToAbortRepair",
+	{61, "TryToAbortRepair",
 		[]string{"repair", "abort", "--name", "r0", "--rev", "7"},
 		&pb.TryToAbortRepairRequest{
 			ClusterName: itCluster,
@@ -624,19 +594,19 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{65, "GetRepair",
+	{62, "GetRepair",
 		[]string{"repair", "get", "--name", "r0"},
 		&pb.GetRepairRequest{
 			ClusterName: itCluster, SpName: itSp, RepName: "r0"}},
-	{66, "ListRepairs",
+	{63, "ListRepairs",
 		[]string{"repair", "list"},
 		&pb.ListRepairsRequest{ClusterName: itCluster, SpName: itSp}},
 
 	// ---- retired-leg ----
-	{67, "ListRetiredLegs",
+	{64, "ListRetiredLegs",
 		[]string{"retired-leg", "list"},
 		&pb.ListRetiredLegsRequest{ClusterName: itCluster, SpName: itSp}},
-	{68, "DeleteRetiredLeg",
+	{65, "DeleteRetiredLeg",
 		[]string{"retired-leg", "delete", "--leg", "3", "--rev", "7"},
 		&pb.DeleteRetiredLegRequest{
 			ClusterName: itCluster,
@@ -646,7 +616,7 @@ var sweepRows = []sweepRow{
 		}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 68 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 65 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -657,12 +627,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 68 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 65 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 67 that remain.
+// be green over the 64 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 68 {
-		t.Errorf("sweepRows has %d rows, want 68", len(sweepRows))
+	if len(sweepRows) != 65 {
+		t.Errorf("sweepRows has %d rows, want 65", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -688,7 +658,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 67 of the 68, sp_name in 49. It reads the field off
+// fill: cluster_name in 64 of the 65, sp_name in 46. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -707,11 +677,11 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 67 {
-		t.Errorf("%d requests carry cluster_name, want 67", clusterFields)
+	if clusterFields != 64 {
+		t.Errorf("%d requests carry cluster_name, want 64", clusterFields)
 	}
-	if spFields != 49 {
-		t.Errorf("%d requests carry sp_name, want 49", spFields)
+	if spFields != 46 {
+		t.Errorf("%d requests carry sp_name, want 46", spFields)
 	}
 }
 
@@ -851,8 +821,8 @@ func TestTokenCarriersMatchCT3(t *testing.T) {
 			}
 		})
 	}
-	if carriers != 39 {
-		t.Errorf("%d requests carry a revision token, want 39", carriers)
+	if carriers != 36 {
+		t.Errorf("%d requests carry a revision token, want 36", carriers)
 	}
 }
 
@@ -1757,14 +1727,14 @@ func TestIdFlagsAcceptBase0(t *testing.T) {
 		t.Errorf("--leg 0xff sent %d, want 255", leg.LegId)
 	}
 
-	sw := runArgv(t, "SwitchSpareLeg", "spare", "switch", "--grp", "0x1",
-		"--spare", "0x6", "--target", "4").(*pb.SwitchSpareLegRequest)
-	wantRequest(t, sw, &pb.SwitchSpareLegRequest{
-		ClusterName: itCluster,
-		SpName:      itSp,
-		GrpId:       1,
-		SpareLegId:  6,
-		TargetLegId: 4,
+	rep := runArgv(t, "CreateRepair", "repair", "create", "--grp", "0x1",
+		"--bad-legs", "0x2", "--retired-leg", "6").(*pb.CreateRepairRequest)
+	wantRequest(t, rep, &pb.CreateRepairRequest{
+		ClusterName:  itCluster,
+		SpName:       itSp,
+		GrpId:        1,
+		BadLegIdList: []uint64{2},
+		RetiredLegId: 6,
 	})
 
 	migr := runArgv(t, "CreateMigration", "migr", "create", "--name", "m0",

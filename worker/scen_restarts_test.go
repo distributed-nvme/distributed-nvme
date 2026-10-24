@@ -38,7 +38,7 @@ func (c *stdCluster) waitDn1Down(t *testing.T) {
 				if side.dnId != 1 {
 					continue
 				}
-				if _, _, s, ok := c.sideOf(t, side.sideId); !ok || s.GetErrEpoch() == 0 {
+				if _, s, ok := c.sideOf(t, side.sideId); !ok || s.GetErrEpoch() == 0 {
 					return false, fmt.Sprintf("side %d has no health epoch", side.sideId)
 				}
 			}

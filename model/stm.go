@@ -80,10 +80,9 @@ type SpState struct {
 	// sequence in Idx alone, with SliceIdx 0.
 	CloneBmIdx map[string][]BmChunk
 	MigrBmIdx  map[string][]BmChunk
-	// DnByAddr holds one record per distinct Side.addr_port of the SP,
-	// spare legs, the sides of every clone meta group, the new legs of the
-	// repairs and the retired sides included; CnByAddr one per distinct
-	// Cntlr.addr_port.
+	// DnByAddr holds one record per distinct Side.addr_port of the SP, the
+	// sides of every clone meta group, the new legs of the repairs and the
+	// retired sides included; CnByAddr one per distinct Cntlr.addr_port.
 	DnByAddr map[string]*pb.DnConf
 	CnByAddr map[string]*pb.CnConf
 	// Missing lists the keys the SpConf pointed at that did not exist.
@@ -136,10 +135,8 @@ func appendAddr(
 // order and the retired legs in Conf.retired_leg_id_list order, and returns
 // every distinct Side.addr_port — both groups of a slice and the clone meta
 // group of a clone, a latched clone's included, since its sides stay pointed
-// at from their DNs until the clone drain's final transaction; both the
-// active legs and the spare legs of a group, because a spare's side sits on
-// its DN exactly like an active one's (architecture.md, Spare legs); the new
-// legs of every repair, which live in the repair until it is finished; and
+// at from their DNs until the clone drain's final transaction; the new legs
+// of every repair, which live in the repair until it is finished; and
 // every retired leg's side, which keeps its place on its DN. The walk keeps
 // that order so that one load's node reads keep a fixed order; a clone with
 // no group adds nothing.
@@ -155,7 +152,7 @@ func sideAddrs(state *SpState) []string {
 		}
 	}
 	addGrp := func(grp *pb.Group) {
-		addLegs(legsOf(grp))
+		addLegs(grp.GetLegList())
 	}
 	slices, clones := state.Slices, state.Clones
 	for _, sliceId := range conf.GetSliceIdList() {
@@ -382,7 +379,8 @@ func loadNodesAt(
 // slices, clones, repairs, retired legs and cntlrs read before. They are
 // part of the same snapshot because a side's request resolves its DN's
 // endpoint and a cntlr's its CN's (dnv-worker.md RW14), and leg repair
-// excludes the locations of a group's DNs (dnv-worker.md AR8).
+// places a repair's new leg away from the locations of a group's DNs
+// (dnv-worker.md AR8).
 func loadNodes(s etcdutil.STM, cid uint64, state *SpState) {
 	conf := state.Conf
 	for _, addrPort := range sideAddrs(state) {

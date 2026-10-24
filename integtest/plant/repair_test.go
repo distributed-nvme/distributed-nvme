@@ -28,14 +28,14 @@ func TestPutRepairAndRetiredLegReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutRetiredLeg: %v", err)
 	}
-	if retired.LegId != 14 || retired.SideId != 15 || retired.SliceId != 1 ||
+	if retired.LegId != 12 || retired.SideId != 13 || retired.SliceId != 1 ||
 		retired.CloneName != "" || retired.ExtCnt != 1 ||
 		retired.SpRev != revBefore+1 {
-		t.Errorf("PutRetiredLeg = %+v, want ids 14 and 15 from next_id in "+
+		t.Errorf("PutRetiredLeg = %+v, want ids 12 and 13 from next_id in "+
 			"slice 1, one extent, one bump", retired)
 	}
 	c.dnHolds(t, ctx, 4, nodeFree-1, nodeFree, []*pb.SidePointer{
-		{SpId: ref.Id, LegId: 14, SideId: 15},
+		{SpId: ref.Id, LegId: 12, SideId: 13},
 	}, retired.DnRevision)
 
 	rep, err := PutRepair(ctx, c.cli, c.cl, ref, RepairSpec{
@@ -44,24 +44,24 @@ func TestPutRepairAndRetiredLegReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutRepair: %v", err)
 	}
-	if rep.Id != 16 || rep.LegId != 17 || rep.SideId != 18 ||
+	if rep.Id != 14 || rep.LegId != 15 || rep.SideId != 16 ||
 		rep.SliceId != 1 || rep.Addr != dnAddr(5) {
-		t.Errorf("PutRepair = %+v, want ids 16, 17 and 18 on dn 5", rep)
+		t.Errorf("PutRepair = %+v, want ids 14, 15 and 16 on dn 5", rep)
 	}
 	c.dnHolds(t, ctx, 5, nodeFree-1, nodeFree, []*pb.SidePointer{
-		{SpId: ref.Id, LegId: 17, SideId: 18},
+		{SpId: ref.Id, LegId: 15, SideId: 16},
 	}, rep.DnRevision)
 
 	state := c.load(t, ctx)
-	gotRetired := state.RetiredLegs[14]
+	gotRetired := state.RetiredLegs[12]
 	if gotRetired.GetGrpId() != 2 || gotRetired.GetLegIdx() != 1 ||
 		gotRetired.GetRetiredEpoch() != 5000 ||
 		gotRetired.GetSide().GetAddrPort() != dnAddr(4) ||
 		!gotRetired.GetSide().GetProvisioned() {
-		t.Errorf("retired leg 14 = %v", gotRetired)
+		t.Errorf("retired leg 12 = %v", gotRetired)
 	}
 	gotRep := state.Repairs["rep0"]
-	if gotRep.GetRepId() != 16 ||
+	if gotRep.GetRepId() != 14 ||
 		gotRep.GetRepStage() != pb.RepStage_REP_STAGE_CREATED ||
 		len(gotRep.GetNewLegList()) != 1 ||
 		gotRep.GetNewLegList()[0].GetLegIdx() != 2 ||
@@ -70,7 +70,7 @@ func TestPutRepairAndRetiredLegReadBack(t *testing.T) {
 		t.Errorf("repair rep0 = %v", gotRep)
 	}
 	grp := state.Slices[1].GetMetaGrpList()[0]
-	if grp.GetRepName() != "rep0" || !equalU64(grp.GetRetiredLegIdList(), 14) {
+	if grp.GetRepName() != "rep0" || !equalU64(grp.GetRetiredLegIdList(), 12) {
 		t.Errorf("group 2 = %v", grp)
 	}
 	for _, id := range []uint64{4, 5} {
@@ -88,16 +88,16 @@ func TestPutRepairAndRetiredLegReadBack(t *testing.T) {
 	}{
 		{"a side id the repair holds", func() error {
 			_, err := PutRetiredLeg(ctx, c.cli, c.cl, ref, RetiredLegSpec{
-				GrpId: 5, SideId: 18, Dn: 4,
+				GrpId: 5, SideId: 16, Dn: 4,
 			})
 			return err
-		}, "side id 0x12 is already used"},
+		}, "side id 0x10 is already used"},
 		{"a leg id the retired leg holds", func() error {
 			_, err := PutRetiredLeg(ctx, c.cli, c.cl, ref, RetiredLegSpec{
-				GrpId: 5, LegId: 14, Dn: 4,
+				GrpId: 5, LegId: 12, Dn: 4,
 			})
 			return err
-		}, "leg id 0xe is already used"},
+		}, "leg id 0xc is already used"},
 		{"a second repair of the group", func() error {
 			_, err := PutRepair(ctx, c.cli, c.cl, ref, RepairSpec{
 				Name: "rep1", GrpId: 2, BadLegId: 3, Dn: 4,
@@ -112,10 +112,10 @@ func TestPutRepairAndRetiredLegReadBack(t *testing.T) {
 		}, "already exists"},
 		{"a bad leg the group does not hold", func() error {
 			_, err := PutRepair(ctx, c.cli, c.cl, ref, RepairSpec{
-				Name: "rep1", GrpId: 5, BadLegId: 12, Dn: 4,
+				Name: "rep1", GrpId: 5, BadLegId: 3, Dn: 4,
 			})
 			return err
-		}, "no leg 0xc in its leg_list"},
+		}, "no leg 0x3 in its leg_list"},
 	} {
 		err := tc.put()
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -123,39 +123,39 @@ func TestPutRepairAndRetiredLegReadBack(t *testing.T) {
 		}
 	}
 
-	if old, err := SetRepairLegEpoch(ctx, c.cli, c.cl, ref, "rep0", 17,
+	if old, err := SetRepairLegEpoch(ctx, c.cli, c.cl, ref, "rep0", 15,
 		7); err != nil || old != 0 {
 		t.Errorf("SetRepairLegEpoch = %d, %v", old, err)
 	}
-	if old, err := SetRepairSideEpoch(ctx, c.cli, c.cl, ref, "rep0", 18,
+	if old, err := SetRepairSideEpoch(ctx, c.cli, c.cl, ref, "rep0", 16,
 		8); err != nil || old != 0 {
 		t.Errorf("SetRepairSideEpoch = %d, %v", old, err)
 	}
-	if old, err := SetRetiredSideEpoch(ctx, c.cli, c.cl, ref, 14,
+	if old, err := SetRetiredSideEpoch(ctx, c.cli, c.cl, ref, 12,
 		9); err != nil || old != 0 {
 		t.Errorf("SetRetiredSideEpoch = %d, %v", old, err)
 	}
-	if _, err := SetRepairSideEpoch(ctx, c.cli, c.cl, ref, "rep0", 15,
+	if _, err := SetRepairSideEpoch(ctx, c.cli, c.cl, ref, "rep0", 13,
 		9); err == nil {
 		t.Errorf("SetRepairSideEpoch of a side the repair does not hold " +
 			"succeeded")
 	}
 	flipped, spRev, err := SetRepairProvisioned(ctx, c.cli, c.cl, ref,
-		"rep0", 17, 18)
+		"rep0", 15, 16)
 	if err != nil || !flipped || spRev != c.spRev(t, ctx) {
 		t.Errorf("SetRepairProvisioned = %v, %d, %v", flipped, spRev, err)
 	}
 	if again, _, err := SetRepairProvisioned(ctx, c.cli, c.cl, ref, "rep0",
-		17, 18); err != nil || again {
+		15, 16); err != nil || again {
 		t.Errorf("a second SetRepairProvisioned = %v, %v", again, err)
 	}
 	repId, _, err := SetRepairAbort(ctx, c.cli, c.cl, ref, "rep0")
-	if err != nil || repId != 16 {
+	if err != nil || repId != 14 {
 		t.Errorf("SetRepairAbort = %d, %v", repId, err)
 	}
 	repId, spRev, err = SetRepairStage(ctx, c.cli, c.cl, ref, "rep0",
 		pb.RepStage_REP_STAGE_ABORTED)
-	if err != nil || repId != 16 || spRev != c.spRev(t, ctx) {
+	if err != nil || repId != 14 || spRev != c.spRev(t, ctx) {
 		t.Errorf("SetRepairStage = %d, %d, %v", repId, spRev, err)
 	}
 	state = c.load(t, ctx)
@@ -167,7 +167,7 @@ func TestPutRepairAndRetiredLegReadBack(t *testing.T) {
 		!newLeg.GetSideList()[0].GetProvisioned() {
 		t.Errorf("repair rep0 after the setters = %v", gotRep)
 	}
-	if got := state.RetiredLegs[14].GetSide().GetErrEpoch(); got != 9 {
+	if got := state.RetiredLegs[12].GetSide().GetErrEpoch(); got != 9 {
 		t.Errorf("retired side epoch %d, want 9", got)
 	}
 	mustGet(t, ctx, c.cli, model.RepairKey(cid, ref.Id, "rep0"), &pb.Repair{})

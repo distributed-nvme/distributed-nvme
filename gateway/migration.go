@@ -133,23 +133,20 @@ func dropMigration(
 //
 // The same walk runs twice — once to plan the allocation and once inside the
 // deciding transaction — and shares one implementation so the two can never
-// disagree about what they refuse. findSide covers spare legs as well as
-// active ones, since architecture.md, Migrations, takes a side of any leg of
-// a slice, spare legs included: a spare's side sits on a disk node exactly
-// like an active one and can be moved off it. It covers no repair's new leg
-// and no retired leg, so their sides are not found: a new leg is no leg of
-// its group before its finish, and a retired leg is no leg (architecture.md,
-// Repairs, Retired legs). A side of a repair's bad leg is refused
-// FAILED_PRECONDITION: the repair replaces that leg (architecture.md,
-// Repair).
+// disagree about what they refuse. findSide covers every leg of a slice's
+// groups, since architecture.md, Migrations, takes a side of any leg of a
+// slice. It covers no repair's new leg and no retired leg, so their sides are
+// not found: a new leg is no leg of its group before its finish, and a retired
+// leg is no leg (architecture.md, Repairs, Retired legs). A side of a repair's
+// bad leg is refused FAILED_PRECONDITION: the repair replaces that leg
+// (architecture.md, Repair).
 //
 // A side of a clone's clone meta group is refused FAILED_PRECONDITION
-// (architecture.md, Migrations): a clone is a copy in flight, moving a leg
-// of its group would need a clone-keyed twin of the whole migration path,
-// and a leg of an md-raid1 clone meta group is replaced by a repair or
-// through a spare instead (architecture.md, Clones). The clones are
-// read only when no slice holds the side, so the migration of a slice's side
-// never depends on the clone keys.
+// (architecture.md, Migrations): a clone is a copy in flight, moving a leg of
+// its group would need a clone-keyed twin of the whole migration path, and a
+// leg of an md-raid1 clone meta group is replaced by a repair instead
+// (architecture.md, Clones). The clones are read only when no slice holds the
+// side, so the migration of a slice's side never depends on the clone keys.
 func migrSrcLocation(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -220,13 +217,8 @@ func migrMetaUnitsOf(
 // errMigrRunning is the FAILED_PRECONDITION for a leg that owns more than its
 // own side: a migration is running on it (architecture.md, Migrations).
 // CreateMigration raises it for a source leg that cannot take a second
-// destination, DeleteSpareLeg and SwitchSpareLeg for a leg they would
-// release or move under that migration (architecture.md, Spare legs), and
-// CreateRepair for a bad leg a migration holds (architecture.md, Repairs), so
-// the four RPCs name the refusal the same way. The one exception is the
-// re-check inside model.SwitchSpareLeg's STM: it refuses only a token-less
-// switch that raced a CreateMigration, and it keeps model's own reason
-// ("spare leg has no single side" / "target leg has no single side").
+// destination and CreateRepair for a bad leg a migration holds
+// (architecture.md, Repairs), so the two RPCs name the refusal the same way.
 func errMigrRunning(leg *pb.Leg) error {
 	return errPrecondition(
 		"leg %d already has %d sides: a migration is running on it",
@@ -345,20 +337,18 @@ func (s *Server) CreateMigration(
 	}
 	var migrId uint64
 	err := candidateUnit(ctx, func() error {
-		// The plan: which cluster to scan, how big the destination must be
-		// in extents and in metadata units, and which disk nodes — and
-		// failure domains — it must avoid.
-		// grpDnAddrs names every DN the group already occupies through an
-		// active leg, a spare leg or its repair's new leg and seeds the
-		// black list; grpDnLocations
-		// turns the same set into the tier-1 exclusion of architecture.md,
-		// Per-operation allocation, so the
-		// destination leaves the failure domain the migration is meant to
-		// leave, and a cluster with no other domain still places through
-		// tier 2 rather than refusing. It is read afresh every round, never
-		// once for the unit: the deciding STM refuses a round whose group
-		// has gained a DN since this read, and a plan read only once would
-		// be refused that way every round until the unit gave up.
+		// The plan: which cluster to scan, how big the destination must be in
+		// extents and in metadata units, and which disk nodes — and failure
+		// domains — it must avoid. grpDnAddrs names every DN the group already
+		// occupies through a leg or its repair's new leg and seeds the black
+		// list; grpDnLocations turns the same set into the tier-1 exclusion of
+		// architecture.md, Per-operation allocation, so the destination leaves
+		// the failure domain the migration is meant to leave, and a cluster
+		// with no other domain still places through tier 2 rather than
+		// refusing. It is read afresh every round, never once for the unit:
+		// the deciding STM refuses a round whose group has gained a DN since
+		// this read, and a plan read only once would be refused that way every
+		// round until the unit gave up.
 		var (
 			planCid   uint64
 			planCc    *pb.ClusterConf
@@ -486,24 +476,23 @@ func (s *Server) CreateMigration(
 				return err
 			}
 			// The pick was scanned against the group as the round's plan read
-			// it: planBlack for the distinct-DN rule, and those DNs'
-			// locations for tier 1 (architecture.md, Per-operation
-			// allocation). A side hung off the group since —
-			// a migration of its other leg, a spare, a repair's new leg — is
-			// missing from that plan, so the pick may sit on that side's very DN, behind a
-			// capacity key verifyPick still finds, or in its failure domain,
-			// and only the group as this transaction reads it can tell. A
-			// group that occupies a DN the plan's read of it did not is
-			// therefore a changed candidate, not a refusal (GW9): the next
-			// round plans from the group as it now stands. A pick on a DN the
-			// group occupies always fails this: the scan excluded planBlack,
-			// so that DN is a gain. Only a gain is checked: when the group
-			// has left a DN since the plan, the pick is still off every DN
-			// the group occupies, and the room the departure frees is like a
-			// DN that joins after the scan — a candidate the round did not
-			// count on, which GW9 never re-scans for. Only a token-less
-			// request gets here with a gained DN: the new side's SpRev bump
-			// fails a sent token at openSp above.
+			// it: planBlack for the distinct-DN rule, and those DNs' locations
+			// for tier 1 (architecture.md, Per-operation allocation). A side
+			// hung off the group since — a migration of its other leg, a
+			// repair's new leg — is missing from that plan, so the pick may
+			// sit on that side's very DN, behind a capacity key verifyPick
+			// still finds, or in its failure domain, and only the group as
+			// this transaction reads it can tell. A group that occupies a DN
+			// the plan's read of it did not is therefore a changed candidate,
+			// not a refusal (GW9): the next round plans from the group as it
+			// now stands. A pick on a DN the group occupies always fails this:
+			// the scan excluded planBlack, so that DN is a gain. Only a gain
+			// is checked: when the group has left a DN since the plan, the
+			// pick is still off every DN the group occupies, and the room the
+			// departure frees is like a DN that joins after the scan — a
+			// candidate the round did not count on, which GW9 never re-scans
+			// for. Only a token-less request gets here with a gained DN: the
+			// new side's SpRev bump fails a sent token at openSp above.
 			for _, addrPort := range grpDnAddrs(loc.Grp, rep) {
 				if !containsName(planBlack, addrPort) {
 					return errCandidateChanged

@@ -10,11 +10,13 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Repairs and retired legs: the model operations of an operator's repair of
-// an md-raid1 group's leg (architecture.md, Repairs; Retired legs; Repair).
-// The gateway's calls run them as their deciding STMs; the sp worker runs
-// the stage move, the retire timer's delete, the epoch writes and the
-// provisioned flip (dnv-worker.md MD6).
+// Repairs and retired legs: the model operations of a repair of an md-raid1
+// group's leg, an operator's or the sp worker's own (architecture.md,
+// Repairs; Retired legs; Repair). The gateway's calls run them as their
+// deciding STMs. The sp worker runs CreateRepair, FinishRepair, CancelRepair
+// and SetRepairAbort on its own repairs only (dnv-worker.md AR8), and the
+// stage move, the retire timer's delete, the epoch writes and the
+// provisioned flip on every repair (dnv-worker.md MD6).
 //
 // A repair is a record of its own (RepairKey) that names one bad leg of the
 // group's leg_list and carries one new leg, a full Leg with its side, until
@@ -31,13 +33,19 @@ import (
 // that one record and checks that it holds the group. One operation serves
 // both kinds of group: what differs is the key the parent is written under.
 //
-// Each operation names the check of the pool it makes. CreateRepair keeps
-// CreateSpareLeg's refusal at the levels where an operator is in charge
-// (loadSpConfForOp), for CreateSpareLeg's reason. The others take a pool at
-// any level, so an operator can finish, abort, cancel and delete while the
-// arrays still run, and refuse a pool being deleted, whose drain removes its
-// repairs and retired legs (loadSpConfAnyLevel); the epoch writes refuse
-// only a pool that is gone or another one (loadSpConfForHealth).
+// A repair whose name carries common.RepNameReservedPrefix is the sp
+// worker's own; any other name is an operator's. Three rules tell them
+// apart: the level gate of the create (CreateRepairLevelGate), the create's
+// new leg, always fresh and allowed at the retired-leg bound for the
+// worker's, and the finish of the worker's, which gives back the group's
+// oldest retired leg at the bound.
+//
+// Each operation names the check of the pool it makes. CreateRepair takes a
+// pool that is not being deleted below its level gate. The others take a
+// pool at any level, so an operator can finish, abort, cancel and delete
+// while the arrays still run, and refuse a pool being deleted, whose drain
+// removes its repairs and retired legs (loadSpConfAnyLevel); the epoch writes
+// refuse only a pool that is gone or another one (loadSpConfForHealth).
 
 // The Op names of the repair operations, the exported function names as
 // everywhere else in this package.
@@ -73,19 +81,66 @@ const ReasonRepairNotFound = "repair not found"
 const ReasonRetiredLegNotFound = "retired leg not found"
 
 // ReasonRetiredListFull is the Reason CreateRepair carries when it would take
-// a fresh new leg for a group that already holds common.MaxRetiredLegPerGrp
-// retired legs. It is exported because the gateway answers it with the
-// count-ceiling code, RESOURCE_EXHAUSTED, and a message that says to delete
-// a retired leg (gateway.md GW7): a create reaches it when a finish retired
-// a leg of the group after the gateway's own check.
+// a fresh new leg, under an operator's name, for a group that already holds
+// common.MaxRetiredLegPerGrp retired legs. It is exported because the gateway
+// answers it with the count-ceiling code, RESOURCE_EXHAUSTED, and a message
+// that says to delete a retired leg (gateway.md GW7): a create reaches it
+// when a finish retired a leg of the group after the gateway's own check.
 const ReasonRetiredListFull = "retired leg list full"
 
-// ReasonGrpHasRepair is the Reason CreateRepair, CreateSpareLeg and
-// CreateCloneSpareLeg carry for a group that has a repair: a group has one
-// repair at a time, and a spare leg and a repair would race for the same
-// place in its array. It is exported for the reason ReasonGrowPending is:
-// the sp worker's leg repair logs the SAME `reaction skipped reason=` string
-// when its pass holds a group on that rule.
+// The level refusals of CreateRepair (CreateRepairLevelGate): a worker's
+// repair at a level where reactions stop, and an operator's at a level that
+// builds no group array.
+const (
+	reasonRepairLevelReactions = "sp level suppresses reactions"
+	reasonRepairLevelNoArray   = "sp level builds no group array"
+)
+
+// reasonReservedNameRetiredLeg is CreateRepair's refusal of a new leg taken
+// from a retired leg under a name with the reserved prefix: the sp worker's
+// repair always takes a fresh leg, since md writes onto the new leg, so taking
+// a retired leg back writes over its kept copy, and only an operator's repair
+// makes that choice (architecture.md, Retired legs).
+const reasonReservedNameRetiredLeg = "a reserved name takes a fresh leg"
+
+// CreateRepairLevelGate is the lowest sp_level at which CreateRepair refuses
+// a repair named repName (architecture.md, Repairs). A name with
+// common.RepNameReservedPrefix, the sp worker's repair, is refused from
+// SP_LEVEL_NO_THINPOOL up: its create is a reaction, and reactions stay off
+// the levels where an operator is in charge (dnv-worker.md AR3). Any other
+// name, an operator's, is refused from SP_LEVEL_NO_REDUND up, where no group
+// array is built for the new leg to join: an operator's own call is no
+// reaction, which lets an operator take a group over from the worker
+// (architecture.md, Repairs).
+func CreateRepairLevelGate(repName string) pb.SpLevel {
+	if common.HasRepNameReservedPrefix(repName) {
+		return pb.SpLevel_SP_LEVEL_NO_THINPOOL
+	}
+	return pb.SpLevel_SP_LEVEL_NO_REDUND
+}
+
+// checkCreateRepairLevel refuses conf's level when it is at or above
+// CreateRepairLevelGate for repName, with the reason of the name's kind.
+func checkCreateRepairLevel(conf *pb.SpConf, repName string) error {
+	if conf.GetSpLevel() < CreateRepairLevelGate(repName) {
+		return nil
+	}
+	if common.HasRepNameReservedPrefix(repName) {
+		return fail(opCreateRepair, reasonRepairLevelReactions)
+	}
+	return fail(opCreateRepair, reasonRepairLevelNoArray)
+}
+
+// ReasonGrpHasRepair is the Reason CreateRepair carries for a group that
+// already has a repair under another name: a group has one repair at a time,
+// and two would race for the same place in its array (architecture.md,
+// Repairs). A create under the name of the group's own repair meets
+// ReasonRepairExists instead, since CreateRepair checks the name first. It
+// is exported for the reason ReasonGrowPending is: the sp worker's leg
+// repair logs the SAME `reaction skipped reason=` string when its pass holds
+// a group that has a repair, an operator's or its own, which keeps the worker
+// from creating another for the group until its finish or its cancel
+// (dnv-worker.md AR8).
 const ReasonGrpHasRepair = "grp_has_repair"
 
 // GrpParent names the record that holds a group: a slice by its id, or a
@@ -203,10 +258,11 @@ func loadGrpOf(
 
 // loadSpConfAnyLevel is loadSpConfForOp without its sp_level refusal: the
 // SP exists, it is the one the caller addressed, and it is not being
-// deleted. Every repair operation but CreateRepair loads its pool through
-// it, so an operator can finish, abort, cancel and delete at the levels
-// where the operator is in charge; the sp drain removes a deleting pool's
-// repairs and retired legs itself (dnv-worker.md, The sp drain).
+// deleted. Every repair operation loads its pool through it, so an operator
+// can finish, abort, cancel and delete at the levels where the operator is in
+// charge, and CreateRepair applies its own level gate after it
+// (CreateRepairLevelGate); the sp drain removes a deleting pool's repairs and
+// retired legs itself (dnv-worker.md, The sp drain).
 func loadSpConfAnyLevel(
 	s etcdutil.STM,
 	op string,
@@ -293,7 +349,9 @@ func stageReason(rep *pb.Repair) string {
 // RepairNewLeg says where CreateRepair's new leg comes from: the retired leg
 // of the group whose leg id RetiredLegId is, or, when it is zero, a fresh leg
 // on the disk node Dn, which the caller picked by a scan planned against
-// GrpDnAddrs, as CreateSpareLeg takes its pick and its plan.
+// GrpDnAddrs: the disk node of every side of the group as the caller's
+// snapshot held them, which the scan black-listed and whose locations it
+// excluded at its first tier (architecture.md, Per-operation allocation).
 type RepairNewLeg struct {
 	RetiredLegId uint64
 	Dn           Cand
@@ -304,34 +362,53 @@ type RepairNewLeg struct {
 // holds, for the bad leg badLegId, and returns the repair's rep_id and its
 // new leg's leg id.
 //
-// The group must be an md-raid1 group of a pool that is not being deleted,
-// at a level below the ones where an operator is in charge, the checks
-// CreateSpareLeg makes (loadSpConfForOp). The name must be free in the pool,
+// The group must be an md-raid1 group of a pool that is not being deleted
+// (loadSpConfAnyLevel), at a level below the name's level gate
+// (CreateRepairLevelGate): SP_LEVEL_NO_THINPOOL for a name with
+// common.RepNameReservedPrefix, the sp worker's repair, and
+// SP_LEVEL_NO_REDUND for an operator's. The name must be free in the pool,
 // list and key both (ReasonRepairExists). The group must hold no repair
-// (ReasonGrpHasRepair) and no spare leg: a spare and a repair would race for
-// the same place in the array. A clone being deleted is refused. The bad leg
+// (ReasonGrpHasRepair). A clone being deleted is refused. The bad leg
 // must be in the group's leg_list, with exactly one side — a second one is a
 // migration's destination, and a migration holds its leg — and an err_epoch
 // set: a healthy leg is moved with a migration, not repaired.
 //
 // The new leg comes from newLeg. A retired leg of the group is taken as it
-// is: its record must be in the pool's and the group's lists, of this group,
-// with a side whose err_epoch is clear and whose disk node holds no leg of
-// the group other than the bad one, since the group's legs sit on different
-// disk nodes after the finish. It keeps its leg id, its leg_idx and its
-// side, whose disk node already holds its pointer and its extents, and the
-// repair keeps its retired_epoch for CancelRepair. Its record and its list
-// entries go in the same transaction, and the repair takes one id, its
+// is, and only under an operator's name: the worker's repair always takes a
+// fresh leg. Its record must be in the pool's and the group's lists, of this
+// group, with a side whose err_epoch is clear and whose disk node holds no
+// leg of the group other than the bad one, since the group's legs sit on
+// different disk nodes after the finish. It keeps its leg id, its leg_idx
+// and its side, whose disk node already holds its pointer and its extents,
+// and the repair keeps its retired_epoch for CancelRepair. Its record and its
+// list entries go in the same transaction, and the repair takes one id, its
 // rep_id. It is allowed while the group holds common.MaxRetiredLegPerGrp
 // retired legs, since the finish then retires one leg and the repair took
-// one. A fresh leg is refused for a group that holds that many
-// (ReasonRetiredListFull), and is placed as CreateSpareLeg places a spare:
-// the plan's gain check ahead of the address check, and the pick re-validated
-// with checkDnPick's vanishedIsChanged, each for CreateSpareLeg's reasons. It
-// takes three ids through TakeSpIds — the rep_id, its leg id and its side id
-// in that order — the group's ext_cnt from its disk node, which gets its
-// pointer, the slot every new side takes, and the next free leg_idx of the
-// group; its side is unprovisioned until the sp worker's provisioned flip.
+// one. A fresh leg under an operator's name is refused for a group that
+// holds that many (ReasonRetiredListFull); under the worker's name it is
+// allowed there, since the worker cannot wait for an operator, and the
+// finish gives back the group's oldest retired leg (FinishRepair).
+//
+// A fresh leg is checked against the plan before the pick. A disk node of the
+// group outside newLeg.GrpDnAddrs joined the group after the caller's
+// snapshot, a migration's destination say, so the pick may sit in its
+// failure domain or be that very node, and the op fails with
+// ReasonCandidateChanged: the caller plans again from a snapshot that holds
+// it. Only a gain is checked: a node that left the group frees room the scan
+// did not count on. That check runs ahead of the address-based refusal of a
+// disk node that already holds a side of the group (grpHostsAddr), so the
+// refusal fires only for a pick inside the caller's own plan, a node its
+// scan black-listed, and stays a hard error for a caller that hands one.
+// Neither check is the failure-domain rule, which the scan's second tier
+// relaxes when the cluster has no other domain to offer. The pick itself is
+// re-validated with checkDnPick's vanishedIsChanged: a disk node deleted,
+// disabled or short of extents since the scan answers ReasonCandidateChanged,
+// as a moved capacity key does, so the caller plans again instead of
+// failing. A fresh leg takes three ids through TakeSpIds — the rep_id, its
+// leg id and its side id in that order — the group's ext_cnt from its disk
+// node, which gets its pointer, the slot every new side takes, and the next
+// free leg_idx of the group; its side is unprovisioned until the sp worker's
+// provisioned flip.
 //
 // It writes the Repair, CREATED with its flag clear, the parent with the
 // group's rep_name set, the SpConf with the name listed and next_id moved,
@@ -355,6 +432,7 @@ func CreateRepair(
 	for _, addrPort := range newLeg.GrpDnAddrs {
 		planned[addrPort] = struct{}{}
 	}
+	reserved := common.HasRepNameReservedPrefix(repName)
 	repId, newLegId := uint64(0), uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		repId, newLegId = 0, 0
@@ -363,8 +441,11 @@ func CreateRepair(
 		); err != nil {
 			return err
 		}
-		conf, err := loadSpConfForOp(s, opCreateRepair, cid, spName, spId)
+		conf, err := loadSpConfAnyLevel(s, opCreateRepair, cid, spName, spId)
 		if err != nil {
+			return err
+		}
+		if err := checkCreateRepairLevel(conf, repName); err != nil {
 			return err
 		}
 		if !isMdRaid1(conf) {
@@ -382,9 +463,6 @@ func CreateRepair(
 		}
 		if grp.GetRepName() != "" {
 			return fail(opCreateRepair, ReasonGrpHasRepair)
-		}
-		if len(grp.GetSpareLegList()) != 0 {
-			return fail(opCreateRepair, "group has a spare leg")
 		}
 		badIdx := legIdxIn(grp.GetLegList(), badLegId)
 		if badIdx < 0 {
@@ -406,6 +484,9 @@ func CreateRepair(
 			CloneName:    parent.CloneName,
 		}
 		if newLeg.RetiredLegId != 0 {
+			if reserved {
+				return fail(opCreateRepair, reasonReservedNameRetiredLeg)
+			}
 			leg, epoch, err := takeRetiredLeg(
 				s, cid, conf, grp, badLegId, newLeg.RetiredLegId)
 			if err != nil {
@@ -419,7 +500,7 @@ func CreateRepair(
 			rep.NewLegIdToRetiredEpoch = map[uint64]uint64{newLegId: epoch}
 		} else {
 			leg, err := placeFreshLeg(
-				s, cid, spId, conf, grp, planned, newLeg.Dn, cc)
+				s, cid, spId, conf, grp, planned, newLeg.Dn, cc, reserved)
 			if err != nil {
 				return err
 			}
@@ -488,9 +569,9 @@ func takeRetiredLeg(
 }
 
 // placeFreshLeg is CreateRepair's fresh new leg: it applies the retired-leg
-// bound and CreateSpareLeg's placement checks to the pick, takes the three
-// ids, charges the disk node and returns the new leg, whose leg id is the
-// rep_id plus one.
+// bound, which reserved, the worker's name, lifts, and the placement checks
+// CreateRepair describes to the pick, takes the three ids, charges the disk
+// node and returns the new leg, whose leg id is the rep_id plus one.
 func placeFreshLeg(
 	s etcdutil.STM,
 	cid uint64,
@@ -500,12 +581,16 @@ func placeFreshLeg(
 	planned map[string]struct{},
 	dn Cand,
 	cc *pb.ClusterConf,
+	reserved bool,
 ) (*pb.Leg, error) {
-	if len(grp.GetRetiredLegIdList()) >= common.MaxRetiredLegPerGrp {
+	if !reserved &&
+		len(grp.GetRetiredLegIdList()) >= common.MaxRetiredLegPerGrp {
 		return nil, fail(opCreateRepair, ReasonRetiredListFull)
 	}
-	// The plan first, as in CreateSpareLeg. The group has no repair here,
-	// so its disk-node set is its legs'.
+	// The plan first: a disk node the group gained since the snapshot is a
+	// stale plan, which the caller plans again, not a refusal, even when it
+	// is the pick's own node. The group has no repair here, so its
+	// disk-node set is its legs'.
 	if grpGainedDn(grp, nil, planned) {
 		return nil, fail(opCreateRepair, ReasonCandidateChanged)
 	}
@@ -550,8 +635,17 @@ func placeFreshLeg(
 	return leg, nil
 }
 
+// FinishRepairResult is what FinishRepair did: the finished repair's rep_id,
+// the leg id of the leg it retired, and the leg id of the retired leg it gave
+// back to make room for that one, zero when it gave none back.
+type FinishRepairResult struct {
+	RepId          uint64
+	RetiredLegId   uint64
+	GivenBackLegId uint64
+}
+
 // FinishRepair finishes the STARTED repair repName at now, the caller's unix
-// seconds, and returns its rep_id and the leg id of the leg it retired.
+// seconds, and returns what it did.
 //
 // It takes a pool at any level that is not being deleted
 // (loadSpConfAnyLevel), and a repair whose group its parent still holds,
@@ -569,9 +663,23 @@ func placeFreshLeg(
 // the group's id, its leg_idx, the parent and now as its retired_epoch; the
 // bad leg's own err_epoch goes with the leg. The Repair key and its list
 // entry go, the group's rep_name is cleared, the retired leg joins the
-// group's and the pool's lists, and SpRev is bumped. The group's retired
-// legs never pass common.MaxRetiredLegPerGrp here: a fresh new leg was
-// refused at the bound, and a new leg taken from a retired leg left a place.
+// group's and the pool's lists, and SpRev is bumped.
+//
+// The group's retired legs never pass common.MaxRetiredLegPerGrp here. An
+// operator's repair finds room: its fresh new leg was refused at the bound,
+// and a new leg taken from a retired leg left a place. The sp worker's
+// repair, whose name carries common.RepNameReservedPrefix, took a fresh leg
+// at the bound, so when its group holds that many retired legs the finish
+// first gives back the group's oldest one (oldestRetiredLeg), as
+// DeleteRetiredLeg gives one back: its side returns the group's ext_cnt and
+// its pointer to its disk node, with the node's capacity key and DnRev,
+// through the DN ledger the drains use, and its record and its two list
+// entries go. The group keeps its in-sync leg and its newest retired copy,
+// and a cancelled repair costs no retired copy, since only the finish gives
+// one back. An operator's repair never gives one back.
+//
+// cc is the cluster's stored conf, gated at the top of the STM as the drains
+// gate it, for the bins of the capacity keys the give-back maintains.
 func FinishRepair(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -582,10 +690,14 @@ func FinishRepair(
 	expectRev uint64,
 	repName string,
 	now uint64,
-) (uint64, uint64, error) {
-	repId, retiredId := uint64(0), uint64(0)
+	cc *pb.ClusterConf,
+) (FinishRepairResult, error) {
+	var res FinishRepairResult
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		repId, retiredId = 0, 0
+		res = FinishRepairResult{}
+		if err := ValidateClusterConf(cc); err != nil {
+			return fail(opFinishRepair, err.Error())
+		}
 		if err := checkSpRev(
 			s, opFinishRepair, shard, cid, spId, expectRev,
 		); err != nil {
@@ -625,6 +737,23 @@ func FinishRepair(
 		if len(bad.GetSideList()) != 1 {
 			return fail(opFinishRepair, "bad leg has no single side")
 		}
+		var rel *dnReleaser
+		givenBack := uint64(0)
+		if common.HasRepNameReservedPrefix(repName) &&
+			len(grp.GetRetiredLegIdList()) >= common.MaxRetiredLegPerGrp {
+			oldestId, oldest, err := oldestRetiredLeg(s, cid, conf, grp)
+			if err != nil {
+				return err
+			}
+			rel = newDnReleaser(s, cid, cc)
+			side := oldest.GetSide()
+			rel.release(
+				side.GetAddrPort(), spId, side.GetSideId(), grp.GetExtCnt())
+			s.Del(RetiredLegKey(cid, spId, oldestId))
+			grp.RetiredLegIdList = removeId(grp.GetRetiredLegIdList(), oldestId)
+			conf.RetiredLegIdList = removeId(conf.GetRetiredLegIdList(), oldestId)
+			givenBack = oldestId
+		}
 		newLeg := proto.Clone(rep.GetNewLegList()[0]).(*pb.Leg)
 		newLeg.LegIdx = bad.GetLegIdx()
 		grp.LegList[badIdx] = newLeg
@@ -643,13 +772,56 @@ func FinishRepair(
 		conf.RepairNameList = removeName(conf.GetRepairNameList(), repName)
 		conf.RetiredLegIdList = append(conf.RetiredLegIdList, badLegId)
 		s.Put(SpConfKey(cid, spName), conf)
-		repId, retiredId = rep.GetRepId(), badLegId
+		if rel != nil {
+			if err := rel.flush(opFinishRepair); err != nil {
+				return err
+			}
+		}
+		res = FinishRepairResult{
+			RepId:          rep.GetRepId(),
+			RetiredLegId:   badLegId,
+			GivenBackLegId: givenBack,
+		}
 		return BumpSpRev(s, opFinishRepair, shard, cid, spId)
 	})
 	if err != nil {
-		return 0, 0, err
+		return FinishRepairResult{}, err
 	}
-	return repId, retiredId, nil
+	return res, nil
+}
+
+// oldestRetiredLeg is the retired leg FinishRepair gives back for the
+// worker's repair at the bound: of the retired legs grp lists, read inside the
+// caller's STM, the one with the smallest retired_epoch, and of those the
+// smallest leg id, so the choice depends on the records alone and never on
+// the order of the list. Each listed id must be in the pool's list with its
+// record (loadRetiredLeg), and its record must name the group. The caller
+// gives a group at the bound, so the list holds at least one leg
+// (TestRepairReasonsAreDistinct keeps the bound above zero).
+func oldestRetiredLeg(
+	s etcdutil.STM,
+	cid uint64,
+	conf *pb.SpConf,
+	grp *pb.Group,
+) (uint64, *pb.RetiredLeg, error) {
+	bestId := uint64(0)
+	var best *pb.RetiredLeg
+	for _, legId := range grp.GetRetiredLegIdList() {
+		retired, err := loadRetiredLeg(s, opFinishRepair, cid, conf, legId)
+		if err != nil {
+			return 0, nil, err
+		}
+		if retired.GetGrpId() != grp.GetGrpId() {
+			return 0, nil, fail(opFinishRepair, "retired leg of another group")
+		}
+		if best == nil ||
+			retired.GetRetiredEpoch() < best.GetRetiredEpoch() ||
+			(retired.GetRetiredEpoch() == best.GetRetiredEpoch() &&
+				legId < bestId) {
+			bestId, best = legId, retired
+		}
+	}
+	return bestId, best, nil
 }
 
 // CancelRepair cancels the ABORTED repair repName and returns its rep_id.
@@ -665,9 +837,9 @@ func FinishRepair(
 // kept, its own leg_idx, its side as it is now and the repair's parent,
 // listed again in the group's and the pool's lists. A fresh new leg's sides
 // give their disk nodes back the group's ext_cnt and their pointers, through
-// the DN ledger the drains use, as a spare leg's side goes back when the
-// spare is deleted. The Repair key and its list entry go, the group's
-// rep_name is cleared and SpRev is bumped.
+// the DN ledger the drains use, with each node's capacity key and DnRev. The
+// Repair key and its list entry go, the group's rep_name is cleared and
+// SpRev is bumped.
 //
 // cc is the cluster's stored conf, gated at the top of the STM as the drains
 // gate it, for the bins of the capacity keys the release maintains.
@@ -791,7 +963,8 @@ func loadRepairLive(
 }
 
 // SetRepairAbort sets the abort flag of the CREATED repair repName and
-// returns its rep_id; TryToAbortRepair is this operation. The fan-out the
+// returns its rep_id; TryToAbortRepair is this operation, and so is the sp
+// worker's try-to-abort of its own repair (dnv-worker.md AR8). The fan-out the
 // SpRev bump starts carries the flag to the cntlrs, and the primary answers
 // with its verdict: the worker moves the repair to STARTED when the new leg
 // holds a place whatever the flag says, and to ABORTED when the primary
@@ -913,7 +1086,9 @@ func SetRepairStage(
 // transaction gives that one back. The side gives its disk node back the
 // group's ext_cnt and its pointer, through the DN ledger the drains use; the
 // RetiredLeg key and its two list entries go, and SpRev is bumped. The
-// operator's delete and the sp worker's retire timer run it alike.
+// operator's delete and the sp worker's retire timer run it alike, and
+// FinishRepair gives a retired leg back the same way for the sp worker's
+// repair at the bound.
 //
 // cc is the cluster's stored conf, gated at the top of the STM as the drains
 // gate it.

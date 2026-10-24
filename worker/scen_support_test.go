@@ -27,20 +27,17 @@ import (
 
 // scenShape is the standard cluster (plantStd) with what a scenario adds to
 // it: fakes built with a config of their own, disk nodes past the standard
-// three, spare legs in the data group, and a pool without its thin device
-// and subsystem, as a pool DeleteStoragePool latches holds none.
+// three, and a pool without its thin device and subsystem, as a pool
+// DeleteStoragePool latches holds none.
 type scenShape struct {
 	// edit changes the standard spec first, as plantStd's edit does.
 	edit func(*stdSpec)
 	// extraDns are disk nodes planted past the spec's dnCnt, numbered on
-	// from it; they hold nothing unless a spare names them.
+	// from it; they hold nothing of the pool when it is planted.
 	extraDns int
 	// dnCfg and cnCfg are the fake configs of some nodes, by node id.
 	dnCfg map[uint64]agentfake.Config
 	cnCfg map[uint64]agentfake.Config
-	// spares are spare legs of the data group: leg, side and the dn holding
-	// the side, planted unprovisioned (plant.LegSpec).
-	spares []struct{ legId, sideId, dnId uint64 }
 	// noTdSs leaves the thin device and the subsystem out.
 	noTdSs bool
 }
@@ -116,15 +113,6 @@ func (h *workerHarness) plantScen(t *testing.T, shape scenShape) *stdCluster {
 	for _, side := range stdSides {
 		spSpec.Sides = append(spSpec.Sides, plant.SideSpec{
 			LegId: side.legId, SideId: side.sideId, DnId: side.dnId,
-		})
-	}
-	for idx, spare := range shape.spares {
-		spSpec.Legs = append(spSpec.Legs, plant.LegSpec{
-			GrpId: stdDataGrpId, LegId: spare.legId,
-			LegIdx: uint32(2 + idx), Spare: true,
-		})
-		spSpec.Sides = append(spSpec.Sides, plant.SideSpec{
-			LegId: spare.legId, SideId: spare.sideId, DnId: spare.dnId,
 		})
 	}
 	if c.sp, err = plant.PutSp(ctx, h.cli, cl, spSpec); err != nil {
@@ -209,27 +197,37 @@ func (c *stdCluster) nextSpId(t *testing.T) uint64 {
 }
 
 // sideOf finds a side of the pool by its id, in a slice's group or a clone's
-// clone meta group (poolGrps): its leg, whether that leg is a spare, and the
-// side; ok is false when the pool holds no such side.
-func (c *stdCluster) sideOf(t *testing.T, sideId uint64) (*pb.Leg, bool, *pb.Side, bool) {
+// clone meta group (poolGrps), or as the side of a repair's new leg: its leg
+// and the side; ok is false when the pool holds no such side.
+func (c *stdCluster) sideOf(t *testing.T, sideId uint64) (*pb.Leg, *pb.Side, bool) {
 	t.Helper()
-	for _, grp := range poolGrps(c.load(t)) {
-		for _, leg := range grp.GetLegList() {
+	state := c.load(t)
+	lists := [][]*pb.Leg{}
+	for _, grp := range poolGrps(state) {
+		lists = append(lists, grp.GetLegList())
+	}
+	for _, repName := range state.Conf.GetRepairNameList() {
+		lists = append(lists, state.Repairs[repName].GetNewLegList())
+	}
+	for _, list := range lists {
+		for _, leg := range list {
 			for _, side := range leg.GetSideList() {
 				if side.GetSideId() == sideId {
-					return leg, false, side, true
-				}
-			}
-		}
-		for _, leg := range grp.GetSpareLegList() {
-			for _, side := range leg.GetSideList() {
-				if side.GetSideId() == sideId {
-					return leg, true, side, true
+					return leg, side, true
 				}
 			}
 		}
 	}
-	return nil, false, nil, false
+	return nil, nil, false
+}
+
+// singleSide returns a leg's one side, or nil when it does not have exactly
+// one.
+func singleSide(leg *pb.Leg) *pb.Side {
+	if len(leg.GetSideList()) != 1 {
+		return nil
+	}
+	return leg.GetSideList()[0]
 }
 
 // dataGrp is the standard data group as the pool's record holds it now.

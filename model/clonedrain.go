@@ -24,12 +24,13 @@ import (
 //     plus two compares whatever the ceilings become. The final STM moves
 //     one ledger: the sides of the clone's clone meta group go back to their
 //     DNs exactly as an sp drain batch gives a slice's back, at most six
-//     compares per distinct DN, and a clone meta group has at most
-//     MaxAllocLegPerGrp legs, MaxSpareLegPerGrp spares or one repair's new
-//     leg, and MaxRetiredLegPerGrp retired legs, of one side each, so those
-//     bound them. No CN is touched: a CN holds no clone's metadata,
-//     which is on the clone's clone meta group (cnagent.md CN18), and is
-//     charged nothing for a clone. The final STM is the one step that needs
+//     compares per distinct DN. A clone meta group has at most
+//     MaxAllocLegPerGrp legs, one repair with one new leg, and
+//     MaxRetiredLegPerGrp retired legs, each leg of one side, and the STM
+//     reads and deletes the repair's key and every retired leg's beside
+//     their DNs, so those bound it. No CN is touched: a CN holds no clone's
+//     metadata, which is on the clone's clone meta group (cnagent.md CN18),
+//     and is charged nothing for a clone. The final STM is the one step that needs
 //     the cluster's stored conf, for the DN capacity keys' bins.
 //   - The SP OUTLIVES the clone, so the final STM bumps SpRev like every other
 //     mutator instead of deleting a stop signal.
@@ -201,7 +202,7 @@ func DrainCloneBm(
 //
 // The same STM gives the clone's one charge back, here, in the step that
 // removes the record it is read from, so it is given back exactly once: every
-// side of the clone meta group's legs and spares goes back through the DN
+// side of the clone meta group's legs goes back through the DN
 // ledger exactly as DrainSpSlice gives a popped group's back — per distinct
 // DN once, the pointer out, the group's ext_cnt back, the capacity key
 // maintained and one DnRev bump. A DnConf that is gone is skipped, there
@@ -249,7 +250,7 @@ func FinishCloneDelete(
 		}
 		rel := newDnReleaser(s, cid, cc)
 		grp := clone.GetMetaGrp()
-		for _, leg := range legsOf(grp) {
+		for _, leg := range grp.GetLegList() {
 			for _, side := range leg.GetSideList() {
 				rel.release(
 					side.GetAddrPort(), spId,

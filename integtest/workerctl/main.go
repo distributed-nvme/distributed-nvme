@@ -1105,7 +1105,7 @@ func cmdPing(g *globals, args []string) {
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
 // that reads it. The table opens with the two etcd request caps,
-// EtcdMaxTxnOps and EtcdMaxRequestBytes. Four more are the factors of the
+// EtcdMaxTxnOps and EtcdMaxRequestBytes. Three more are the factors of the
 // SPD13/CLD11 budgets a suite may want to size a case against, and
 // MaxSliceCntPerSp is the slice ceiling — CreateClone's src_slice_cnt bound —
 // that the gateway suite creates a clone at, which is why that suite must
@@ -1136,7 +1136,6 @@ func cmdConstants(g *globals, args []string) {
 
 		"MaxDelGrpPerTxn":   common.MaxDelGrpPerTxn,
 		"MaxAllocLegPerGrp": common.MaxAllocLegPerGrp,
-		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
 		"MaxDelBmPerTxn":    common.MaxDelBmPerTxn,
 		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
 
@@ -1824,8 +1823,8 @@ func cmdPutSs(g *globals, args []string) {
 // group's extents to the DNs its --side flags name, through plant.PutClone
 // (architecture.md, Clones). --dst-td accepts either a td name or a td_id. The
 // group is required, as every clone CreateClone writes has one: --grp, and
-// one --leg per leg with the --side that places it (cloneLegsOf). The legs
-// are active ones; a spare a Go caller plants through the library.
+// one --leg per leg with the --side that places it (cloneLegsOf), each a leg
+// of the group's leg_list.
 func cmdPutClone(g *globals, args []string) {
 	fs := newFlagSet("put-clone", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2695,17 +2694,14 @@ func findRepairGrp(
 }
 
 // repairGrpDnAddrs is the plan a fresh new leg is placed against: the disk
-// node of every side of the group's legs and spares, as CreateSpareLeg's
-// plan names them (architecture.md, Per-operation allocation).
+// node of every side of the group's legs (architecture.md, Per-operation
+// allocation, CreateRepair). The group has no repair when one is created,
+// so no new leg adds to it.
 func repairGrpDnAddrs(grp *pb.Group) []string {
 	var addrs []string
-	for _, list := range [][]*pb.Leg{
-		grp.GetLegList(), grp.GetSpareLegList(),
-	} {
-		for _, leg := range list {
-			for _, side := range leg.GetSideList() {
-				addrs = append(addrs, side.GetAddrPort())
-			}
+	for _, leg := range grp.GetLegList() {
+		for _, side := range leg.GetSideList() {
+			addrs = append(addrs, side.GetAddrPort())
 		}
 	}
 	return addrs
@@ -2834,9 +2830,9 @@ func cmdFinishRepair(g *globals, args []string) {
 	ctx, done, cli, cl, target, name := repairNameCmd(
 		g, "finish-repair", args)
 	defer done()
-	repId, retiredId, err := model.FinishRepair(ctx, cli, cl.Id,
+	res, err := model.FinishRepair(ctx, cli, cl.Id,
 		target.Shard, target.Id, target.Name, 0, name,
-		uint64(time.Now().Unix()))
+		uint64(time.Now().Unix()), cl.Conf)
 	if err != nil {
 		die("finish-repair: %v", err)
 	}
@@ -2846,8 +2842,8 @@ func cmdFinishRepair(g *globals, args []string) {
 	}
 	emit(map[string]any{
 		"rep_name":       name,
-		"rep_id":         idHex(repId),
-		"retired_leg_id": idHex(retiredId),
+		"rep_id":         idHex(res.RepId),
+		"retired_leg_id": idHex(res.RetiredLegId),
 		"sp_rev":         spRev,
 	})
 }

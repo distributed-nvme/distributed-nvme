@@ -503,7 +503,7 @@ func (e *sptEnv) walkSides(conf *pb.SpConf) []sptSideWalk {
 	for _, sliceId := range conf.GetSliceIdList() {
 		slice := e.slice(conf.GetSpId(), sliceId)
 		for _, grp := range allGroups(slice) {
-			for _, leg := range allLegs(grp) {
+			for _, leg := range grp.GetLegList() {
 				for _, side := range leg.GetSideList() {
 					out = append(out, sptSideWalk{
 						AddrPort: side.GetAddrPort(),
@@ -722,10 +722,6 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 				t.Errorf("group %d: %d/%d blocks, want %d/%d",
 					grp.GetGrpId(), grp.GetMetaBlocks(), grp.GetDataBlocks(),
 					sptMetaBlocks, want.dataBlocks)
-			}
-			if len(grp.GetSpareLegList()) != 0 {
-				t.Errorf("group %d: a new group has no spare leg",
-					grp.GetGrpId())
 			}
 			// md-raid1 is two legs (architecture.md, Per-operation allocation).
 			if len(grp.GetLegList()) != 2 {
@@ -1777,7 +1773,7 @@ func TestCreateStoragePoolValidation(t *testing.T) {
 // Both expectations are computed from the constant, never from the literal 2,
 // and so is the FIXTURE: at the file's stock sptDnCnt a
 // DefaultSliceCntPerSp of 4 would make this test die RESOURCE_EXHAUSTED in
-// the DN scan instead of reporting a moved expectation. The one spare slice's
+// the DN scan instead of reporting a moved expectation. The one extra slice's
 // worth of nodes is what makes a handler that substitutes one slice too many
 // fail on an assertion here rather than starve that same scan.
 //
@@ -2415,7 +2411,8 @@ func TestDeleteStoragePoolUnknown(t *testing.T) {
 //
 // DeleteStoragePool is no release path — it latches, and the sp drain
 // releases the budgets (architecture.md, Storage pools) — so each row drives
-// the widest user of the ledger it is about: DeleteSpareLeg for the DN half,
+// the widest user of the ledger it is about: CancelMigration for the DN half,
+// which gives back a destination side's extents and its metadata units, and
 // DeleteCntlr for the CN half. The drain's own answer to the same lost key is
 // deliberately the
 // opposite one, and TestDrainToleratesALostNodeRecord in model/drain_test.go
@@ -2424,7 +2421,7 @@ func TestDeleteStoragePoolUnknown(t *testing.T) {
 func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
 	t.Run("a side's dn_conf", func(t *testing.T) {
 		env := newVolEnv(t)
-		legId := volCreateSpareLeg(env)
+		volCreateMigration(env, "migr-a")
 		// Only a corrupted store is ever in this state, so the key goes out
 		// through the raw client: no RPC deletes a node an SP uses.
 		if err := env.cli.Delete(
@@ -2435,12 +2432,12 @@ func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
 		before := env.spConf()
 		beforeRev := env.spRev()
 		sliceBefore := env.slice()
-		_, err := env.srv.DeleteSpareLeg(env.ctx, &pb.DeleteSpareLegRequest{
+		migrBefore := env.migration("migr-a")
+		_, err := env.srv.CancelMigration(env.ctx, &pb.CancelMigrationRequest{
 			ClusterName: env.cluster,
 			SpName:      volSpName,
 			SpRev:       &pb.SpRev{Revision: beforeRev},
-			GrpId:       volDataGrpId,
-			LegId:       legId,
+			MigrName:    "migr-a",
 		})
 		volWantCode(t, err, codes.Aborted)
 		// The ledger's ABORTED, not GW6's token refusal — the other way this
@@ -2454,6 +2451,9 @@ func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
 		env.wantUntouched(before, beforeRev)
 		if got := env.slice(); !proto.Equal(got, sliceBefore) {
 			t.Errorf("the aborted release moved the slice: %v", got)
+		}
+		if got := env.migration("migr-a"); !proto.Equal(got, migrBefore) {
+			t.Errorf("the aborted release moved the migration: %v", got)
 		}
 	})
 
@@ -3663,15 +3663,15 @@ func TestCreateCntlrRefusals(t *testing.T) {
 			for _, id := range env.spConf(sptSpName).GetCntlrIdList() {
 				used[env.cntlr(spId, id).GetAddrPort()] = true
 			}
-			spare := ""
+			idleCn := ""
 			for _, addrPort := range env.cnAddrs {
 				if !used[addrPort] {
-					spare = addrPort
+					idleCn = addrPort
 				}
 			}
 			// This SP's footprint is one meta plus one data extent, so a
 			// single free extent is one short.
-			env.reserveCn(spare, sptCnFree-1, nil)
+			env.reserveCn(idleCn, sptCnFree-1, nil)
 			_, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
 				ClusterName: env.name,
 				SpName:      sptSpName,

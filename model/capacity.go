@@ -591,14 +591,15 @@ func MaintainDnCapacity(
 	// ladder names a key nothing ever wrote and leaves the live one behind.
 	// The gates that do that are, in the gateway, CreateDiskNode,
 	// DeleteDiskNode, UpdateDiskNodeDisabled and newDnLedger (the constructor
-	// the six handlers that keep their own DN bookkeeping share); in model,
-	// GrowSlice's, DrainSpSlice's and FinishCloneDelete's own gates and, for
-	// CreateSpareLeg and CreateCloneSpareLeg, their callers'; in the worker,
-	// newDnMonitor's per-write re-validation. The
-	// callers with no gate are integtest/plant's PutDn and PutDns, MoveDn,
-	// PutMigr and SetDnFree, which plant records on purpose for
-	// integtest/workerctl and the worker's Go tests; plant's PutSp validates
-	// the cluster conf it is handed like the gateway does.
+	// the five handlers that keep their own DN bookkeeping share); in model,
+	// the own gates of GrowSlice, DrainSpSlice, DrainSpRepairs,
+	// DrainSpRetiredLegs, FinishCloneDelete, FinishRepair, CancelRepair and
+	// DeleteRetiredLeg and, for CreateRepair, its callers'; in the worker,
+	// newDnMonitor's per-write re-validation. The callers with no gate are
+	// integtest/plant's PutDn and PutDns, MoveDn, PutMigr and SetDnFree,
+	// which plant records on purpose for integtest/workerctl and the
+	// worker's Go tests; plant's PutSp validates the cluster conf it is
+	// handed like the gateway does.
 	conf := cc.GetDnBinConf()
 	oldKey := dnCapacityKeyOf(cid, addrPort, conf, oldDn)
 	newKey := dnCapacityKeyOf(cid, addrPort, conf, newDn)

@@ -497,10 +497,6 @@ var commands = []command{
 	{"cancel-migr", setupCancelMigr},
 	{"get-migr", setupGetMigr},
 	{"append-migr-bm", setupAppendMigrBm},
-	// spare
-	{"create-spare", setupCreateSpare},
-	{"delete-spare", setupDeleteSpare},
-	{"switch-spare", setupSwitchSpare},
 	// repair
 	{"create-repair", setupCreateRepair},
 	{"finish-repair", setupFinishRepair},

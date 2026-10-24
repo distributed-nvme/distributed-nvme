@@ -67,28 +67,15 @@ func (g GroupSpec) String() string {
 		g.SliceId, g.GrpId, kind, g.ExtCnt, redund)
 }
 
-// LegSpec is one leg of a group. A Spare leg goes to the group's
-// spare_leg_list with its sides unprovisioned, as CreateSpareLeg writes one
-// (architecture.md, Spare legs), and needs md-raid1 groups; its leg_idx shares
-// the group's index space with the active legs. Two or more Spare legs in one
-// group, all unprovisioned, is a shape no gateway writes: CreateSpareLeg
-// refuses a new spare while a spare of the group still has an unprovisioned
-// side (model.UnprovisionedSpare). A case that wants a shape the gateway can
-// reach flips, with SetProvisioned, the sides of every spare of the group but
-// at most one before it relies on the shape.
+// LegSpec is one leg of a group's leg_list.
 type LegSpec struct {
 	GrpId  uint64
 	LegId  uint64
 	LegIdx uint32
-	Spare  bool
 }
 
 func (l LegSpec) String() string {
-	spare := ""
-	if l.Spare {
-		spare = ":spare"
-	}
-	return fmt.Sprintf("%#x:%#x:%d%s", l.GrpId, l.LegId, l.LegIdx, spare)
+	return fmt.Sprintf("%#x:%#x:%d", l.GrpId, l.LegId, l.LegIdx)
 }
 
 // SideSpec places one side of a leg on a DN, with its cntlid slot.
@@ -336,12 +323,6 @@ func newSpPlan(spec SpSpec) (*spPlan, error) {
 				"leg %s: no group with id %#x", leg, leg.GrpId,
 			)
 		}
-		if leg.Spare && !plan.raid1 {
-			return nil, fmt.Errorf(
-				"leg %s: a spare leg needs md-raid1 groups "+
-					"(architecture.md, Spare legs)", leg,
-			)
-		}
 		if legIdx[leg.GrpId] == nil {
 			legIdx[leg.GrpId] = make(map[uint32]uint64)
 		}
@@ -352,18 +333,14 @@ func newSpPlan(spec SpSpec) (*spPlan, error) {
 			)
 		}
 		legIdx[leg.GrpId][leg.LegIdx] = leg.LegId
-		if !leg.Spare {
-			grpLegCnt[leg.GrpId]++
-		}
+		grpLegCnt[leg.GrpId]++
 		plan.grpOfLeg[leg.LegId] = leg.GrpId
 		plan.extOfLeg[leg.LegId] = grp.ExtCnt
 		plan.legs = append(plan.legs, leg)
 	}
 	for _, grp := range plan.groups {
 		if grpLegCnt[grp.GrpId] == 0 {
-			return nil, fmt.Errorf(
-				"group %#x has no leg that is not a spare", grp.GrpId,
-			)
+			return nil, fmt.Errorf("group %#x has no leg", grp.GrpId)
 		}
 	}
 
@@ -440,14 +417,13 @@ type Sp struct {
 // by the spec's lists: SpConf (next_id past every id used, next_dev_id 1,
 // bdev_conf inherited from ClusterConf, event_threshold, cntlid_slot_list,
 // sp_level, deleting = false, every id list filled), SpName, one Cntlr per
-// cntlr, one Slice per slice with its groups → legs and spare legs → sides
+// cntlr, one Slice per slice with its groups → legs → sides
 // (provisioned = false, [D15]), the SpRev key with revision = 1, SpGlobal,
 // and the DN/CN bookkeeping: every DN gains its side pointers, loses the
 // group's ext_cnt per side, has its capacity key maintained (architecture.md,
 // Capacity index keys) and its DnRev bumped ONCE; every CN gains its cntlr
 // pointer, loses the SP footprint, and likewise. It writes no CdcEntry;
-// PutSs does. It plants every spare of a group unprovisioned, which for two
-// or more spares in one group no gateway does (LegSpec).
+// PutSs does.
 //
 // The whole pool is one transaction, as CreateStoragePool's is, so a pool
 // whose sides sit on more DNs than etcd's limit on operations per
@@ -638,11 +614,7 @@ func PutSp(
 			leg := &pb.Leg{LegId: l.LegId, LegIdx: l.LegIdx}
 			legs[l.LegId] = leg
 			grp := grps[l.GrpId]
-			if l.Spare {
-				grp.SpareLegList = append(grp.SpareLegList, leg)
-			} else {
-				grp.LegList = append(grp.LegList, leg)
-			}
+			grp.LegList = append(grp.LegList, leg)
 		}
 		for _, sd := range plan.sides {
 			addr := dnAddr[sd.DnId]

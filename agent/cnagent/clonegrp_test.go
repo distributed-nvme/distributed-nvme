@@ -27,13 +27,13 @@ import (
 // The clone meta group's ids: their own, above the fixture's slice ids and
 // below manySliceBase.
 const (
-	testCloneGrp       = uint64(0x61)
-	testCloneLeg       = uint64(0x62)
-	testCloneSide      = uint64(0x63)
-	testCloneLeg2      = uint64(0x64)
-	testCloneSide2     = uint64(0x65)
-	testCloneSpareLeg  = uint64(0x66)
-	testCloneSpareSide = uint64(0x67)
+	testCloneGrp     = uint64(0x61)
+	testCloneLeg     = uint64(0x62)
+	testCloneSide    = uint64(0x63)
+	testCloneLeg2    = uint64(0x64)
+	testCloneSide2   = uint64(0x65)
+	testCloneNewLeg  = uint64(0x66)
+	testCloneNewSide = uint64(0x67)
 )
 
 // cloneGrpBase and cloneGrpStride place the clone meta group of a clone
@@ -116,12 +116,25 @@ func cloneWithGrp(raid1 bool) *pb.Clone {
 	return clone
 }
 
-// cloneSpareLeg is a spare leg for the clone meta group, on testIp2.
-func cloneSpareLeg() *pb.Leg {
-	spare := legOf(testCloneSpareLeg,
-		sideOf(testCloneSpareSide, testIp2, testSvcId2))
-	spare.LegIdx = 2
-	return spare
+// withCloneRepair gives a clone's clone meta group a CREATED repair, whose
+// bad leg is testCloneLeg and whose new leg, testCloneNewLeg on testIp2, is
+// provisioned as asked, and returns the request's name_to_repair
+// (reqOpts.repairs). Its bad leg serves with its row OK on a fixture whose
+// legs are probed, so the repair waits (cnagent.md CN12).
+func withCloneRepair(clone *pb.Clone, provisioned bool) map[string]*pb.Repair {
+	newLeg := legOf(testCloneNewLeg,
+		sideOf(testCloneNewSide, testIp2, testSvcId2))
+	newLeg.LegIdx = 2
+	newLeg.SideList[0].Provisioned = provisioned
+	clone.MetaGrp.RepName = repName
+	return map[string]*pb.Repair{repName: {
+		RepId:        repId,
+		GrpId:        testCloneGrp,
+		RepStage:     pb.RepStage_REP_STAGE_CREATED,
+		NewLegList:   []*pb.Leg{newLeg},
+		BadLegIdList: []uint64{testCloneLeg},
+		CloneName:    "clone-1",
+	}}
 }
 
 // cloneMdPath is the /dev/md/{name} of the fixture clone meta group's array.
@@ -369,8 +382,8 @@ func TestACloneWithNoGroupBuildsNone(t *testing.T) {
 // leg_list legs still provisions is deferred as a slice's group is (CN9,
 // CN12): no superblock probe and no array, the group and that leg reading
 // PROVISIONING, its provisioned leg connected and wrapped. Once the side is
-// provisioned the next converge creates the array. A spare that provisions
-// defers only itself.
+// provisioned the next converge creates the array. A repair's new leg that
+// provisions defers only itself.
 func TestCloneMetaGroupWaitsForItsSides(t *testing.T) {
 	srv, node := newTestServer(t)
 	clone := cloneWithGrp(true)
@@ -404,18 +417,18 @@ func TestCloneMetaGroupWaitsForItsSides(t *testing.T) {
 	// The side's flip arrives as a new revision: the group is built.
 	node.Reset()
 	clone = cloneWithGrp(true)
-	clone.MetaGrp.SpareLegList = []*pb.Leg{cloneSpareLeg()}
-	clone.MetaGrp.SpareLegList[0].SideList[0].Provisioned = false
 	reply = syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true,
-		raid1: true, clones: []*pb.Clone{clone}})
+		raid1: true, clones: []*pb.Clone{clone},
+		repairs: withCloneRepair(clone, false)})
 	info = reply.GetCntlrInfo()
 	if !node.hasCall("cmd mdadm --create " + mdPath) {
 		t.Fatalf("the provisioned group was not created:\n%s",
 			strings.Join(node.Calls(), "\n"))
 	}
 	assertOk(t, info.GetGrpIdToMdRaid()[testCloneGrp], "clone meta group")
-	assertProvisioning(t, info.GetLegIdToLeg()[testCloneSpareLeg],
-		"provisioning spare")
+	assertProvisioning(t, info.GetLegIdToLeg()[testCloneNewLeg],
+		"provisioning new leg")
+	assertNoCall(t, node, "--nqn "+legNqn(srv, testCloneNewLeg))
 }
 
 // TestCloneMetaGroupFollowsTheGroupGate: the clone meta group's array follows
@@ -543,61 +556,10 @@ func TestCloneMetaGroupSweptWithItsClone(t *testing.T) {
 	}
 }
 
-// TestCloneMetaGroupSpareSwitch: the member reconciliation of CN12 carries a
-// switch on a clone meta group as on a slice's: the spare is connected and
-// wrapped but no member, and once it is switched in the leg it replaces is
-// failed and removed and the spare added. The dm-clone over the array stays
-// and reads the hydrated count its metadata held before the switch.
-func TestCloneMetaGroupSpareSwitch(t *testing.T) {
-	srv, node := newTestServer(t)
-	clone := cloneWithGrp(true)
-	clone.MetaGrp.SpareLegList = []*pb.Leg{cloneSpareLeg()}
-	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-		raid1: true, clones: []*pb.Clone{clone}})
-	mdPath := cloneMdPath(srv)
-	spareWrapper := srv.nf.DmPath(legName(srv, testCloneSpareLeg))
-	if _, ok := node.dms[legName(srv, testCloneSpareLeg)]; !ok {
-		t.Fatalf("the clone meta group's spare was not wrapped")
-	}
-	for _, call := range node.callsMatching("cmd mdadm --create " + mdPath) {
-		if strings.Contains(call, spareWrapper) {
-			t.Fatalf("a spare leg became an md member: %s", call)
-		}
-	}
-	assertPending(t, reply.GetCntlrInfo().GetLegIdToLeg()[testCloneSpareLeg],
-		"the spare on the primary")
-	dmClone := cloneName(srv, testClone)
-	node.setCloneHydrated(t, dmClone, 37)
-
-	node.Reset()
-	switched := cloneWithGrp(true)
-	member := switched.MetaGrp.LegList[0]
-	spare := cloneSpareLeg()
-	spare.LegIdx = member.GetLegIdx()
-	switched.MetaGrp.LegList[0] = spare
-	switched.MetaGrp.SpareLegList = []*pb.Leg{member}
-	reply = syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true,
-		raid1: true, clones: []*pb.Clone{switched}})
-	assertOrder(t, node,
-		"cmd mdadm "+mdPath+" --fail "+
-			srv.nf.DmPath(legName(srv, testCloneLeg)),
-		"cmd mdadm "+mdPath+" --remove "+
-			srv.nf.DmPath(legName(srv, testCloneLeg)),
-		"cmd mdadm "+mdPath+" --add --failfast "+spareWrapper,
-	)
-	assertNoCall(t, node, "--remove "+
-		srv.nf.DmPath(legName(srv, testCloneLeg2)))
-	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testCloneGrp],
-		"the clone meta group after the switch")
-	assertNoCall(t, node, "cmd dmsetup create "+dmClone)
-	assertNoCall(t, node, "cmd dmsetup reload "+dmClone)
-	row := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
-	assertOk(t, row, "the dm-clone after the switch")
-	assertHydrated(t, row, 37, "the dm-clone after the switch")
-}
-
 // TestAFailedReconciliationUnderACloneMetaGroup: a converge whose member
-// reconciliation of a clone meta group fails reads the group ERROR, so the
+// reconciliation of a clone meta group fails — here a repair's add, whose
+// --add of the new leg mdadm refuses after the bad leg, which does not serve,
+// was failed and removed — reads the group ERROR, so the
 // group is not ready for that pass (CN18 step 2). A dm-clone an earlier pass
 // built over the running array is left as it is and serves on: its row OK,
 // the namespace optimized over it, and, as for a slice's group, the failure
@@ -624,30 +586,33 @@ func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 			srv.retryInterval = time.Hour
 			clone := cloneWithGrp(true)
 			clone.AutoResume = !tc.suspended
-			clone.MetaGrp.SpareLegList = []*pb.Leg{cloneSpareLeg()}
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 				raid1: true, suspended: tc.suspended,
 				clones: []*pb.Clone{clone}})
+			probeAllLegs(t, srv)
 			dmClone := cloneName(srv, testClone)
 			if !tc.serving {
 				removeCloneDevice(node, srv)
 			}
-			spareWrapper := srv.nf.DmPath(legName(srv, testCloneSpareLeg))
+			node.setCtrlState(legNqn(srv, testCloneLeg), testIp, testSvcId,
+				"connecting")
+			newLeg := srv.nf.DmPath(legName(srv, testCloneNewLeg))
 			node.failCmdAlways["mdadm "+cloneMdPath(srv)+
-				" --add --failfast "+spareWrapper] = "mdadm: add refused"
+				" --add --failfast "+newLeg] = "mdadm: add refused"
 
 			node.Reset()
-			switched := cloneWithGrp(true)
-			switched.AutoResume = !tc.suspended
-			member := switched.MetaGrp.LegList[0]
-			spare := cloneSpareLeg()
-			spare.LegIdx = member.GetLegIdx()
-			switched.MetaGrp.LegList[0] = spare
-			switched.MetaGrp.SpareLegList = []*pb.Leg{member}
+			repaired := cloneWithGrp(true)
+			repaired.AutoResume = !tc.suspended
 			reply := syncupCntlrAt(t, srv, reqOpts{revision: 3,
 				primary: true, raid1: true, suspended: tc.suspended,
-				clones: []*pb.Clone{switched}})
+				clones:  []*pb.Clone{repaired},
+				repairs: withCloneRepair(repaired, true)})
 			info := reply.GetCntlrInfo()
+			if !node.hasCall("cmd mdadm " + cloneMdPath(srv) + " --remove " +
+				srv.nf.DmPath(legName(srv, testCloneLeg))) {
+				t.Fatalf("the repair's add did not take the bad leg out; " +
+					"the case is vacuous")
+			}
 			assertErrorDetails(t, info.GetGrpIdToMdRaid()[testCloneGrp],
 				"add refused", "the clone meta group")
 			assertNoCall(t, node, "cmd dmsetup create "+dmClone)
@@ -711,21 +676,22 @@ func TestGetLegBmRefusesACloneMetaLeg(t *testing.T) {
 }
 
 // TestCloneMetaLegsAreProbedOnThePrimary: the primary runs the CN11 health
-// probe on every leg of a clone meta group, its spare included, at the tail
-// of the leg's meta region, and a read reports each such leg OK once its
-// probe has completed a round.
+// probe on every leg of a clone meta group, its repair's new leg included,
+// at the tail of the leg's meta region, and a read reports each such leg OK
+// once its probe has completed a round. The repair waits, its bad leg
+// serving with an OK row, so no mdadm command runs against the group's
+// array (CN12).
 func TestCloneMetaLegsAreProbedOnThePrimary(t *testing.T) {
 	srv, node := newTestServer(t)
 	withClock(srv)
 	clone := cloneWithGrp(true)
-	clone.MetaGrp.SpareLegList = []*pb.Leg{cloneSpareLeg()}
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, raid1: true,
-		clones: []*pb.Clone{clone}})
+		clones: []*pb.Clone{clone}, repairs: withCloneRepair(clone, true)})
 	st := legState(t, srv)
 	// The clone meta group's three meta blocks end in the health block.
 	wantOffset := 3*testBlockSize - common.LegHealthBlockSize
 	for _, legId := range []uint64{
-		testCloneLeg, testCloneLeg2, testCloneSpareLeg} {
+		testCloneLeg, testCloneLeg2, testCloneNewLeg} {
 		prober := st.probers[legId]
 		if prober == nil {
 			t.Fatalf("the primary started no prober for clone leg %#x",
@@ -749,12 +715,21 @@ func TestCloneMetaLegsAreProbedOnThePrimary(t *testing.T) {
 	)
 
 	probeAllLegs(t, srv)
+	node.Reset()
 	probed := checkRound(t, srv, 2)
 	for _, legId := range []uint64{
-		testCloneLeg, testCloneLeg2, testCloneSpareLeg} {
+		testCloneLeg, testCloneLeg2, testCloneNewLeg} {
 		assertOk(t, probed.GetLegIdToLeg()[legId], "probed clone leg")
 	}
 	assertOk(t, probed.GetGrpIdToMdRaid()[testCloneGrp], "clone meta group")
+	node.Reset()
+	syncupCntlrAt(t, srv, reqOpts{revision: 2, primary: true, raid1: true,
+		clones: []*pb.Clone{clone}, repairs: withCloneRepair(clone, true)})
+	if got := node.callsMatching("cmd mdadm " + cloneMdPath(srv) +
+		" "); len(got) != 0 {
+		t.Fatalf("the waiting repair ran %q against the clone meta "+
+			"group's array", got)
+	}
 }
 
 // assertHydrated fails unless a dm-clone row carries a status line that
@@ -774,8 +749,9 @@ func assertHydrated(t *testing.T, row *pb.ResInfo, count uint64, label string) {
 // rows and its destination's namespace rows PROVISIONING on both channels,
 // the namespace inaccessible over the td's dm-error, and no retry. The
 // provisioned flip, a new revision, builds the group and the clone in one
-// pass and moves the namespace optimized. A spare that zeroes defers
-// nothing.
+// pass and moves the namespace optimized. At raid1, where a repair can
+// replace a leg (architecture.md, Repairs), a repair's new leg that zeroes
+// defers nothing.
 func TestACloneWaitsForItsCloneMetaGroup(t *testing.T) {
 	for _, raid1 := range []bool{false, true} {
 		t.Run(fmt.Sprintf("raid1=%v", raid1), func(t *testing.T) {
@@ -812,11 +788,13 @@ func TestACloneWaitsForItsCloneMetaGroup(t *testing.T) {
 
 			node.Reset()
 			clone = cloneWithGrp(raid1)
-			spare := cloneSpareLeg()
-			spare.SideList[0].Provisioned = false
-			clone.MetaGrp.SpareLegList = []*pb.Leg{spare}
+			var repairs map[string]*pb.Repair
+			if raid1 {
+				repairs = withCloneRepair(clone, false)
+			}
 			reply = syncupCntlrAt(t, srv, reqOpts{revision: 3,
-				primary: true, raid1: raid1, clones: []*pb.Clone{clone}})
+				primary: true, raid1: raid1, clones: []*pb.Clone{clone},
+				repairs: repairs})
 			info = reply.GetCntlrInfo()
 			assertOrder(t, node,
 				"--nqn "+legNqn(srv, zeroing.GetLegId())+" --hostnqn",

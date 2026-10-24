@@ -1268,14 +1268,15 @@ func TestTakeoverInACutoverWait(t *testing.T) {
 	}
 }
 
-// TestTakeoverInASpareWait pins AR8 step 2 across a takeover: the primary
-// reports a leg failed, the owner creates a spare on the free disk node,
-// whose agent holds the node syncup that introduces the spare's side, so the
-// side is refused as unknown and the spare stays pending; the owner waits for
-// it and crashes. The worker that takes the pool's shard over finds the
-// pending spare from etcd and its own reports, waits for it in turn, creates
-// no second spare, and switches it in once it is provisioned.
-func TestTakeoverInASpareWait(t *testing.T) {
+// TestTakeoverInARepairWait pins AR8's drive step across a takeover: the
+// primary reports a leg failed, the owner creates a worker's repair with its
+// new leg on the free disk node, whose agent holds the node syncup that
+// introduces the new leg's side, so the side is refused as unknown and stays
+// unprovisioned, and every pass holds the leg's group; the owner crashes.
+// The worker that takes the pool's shard over finds the repair in etcd,
+// holds the group in turn, creates no second repair, and finishes the repair
+// once its side is provisioned and the primary reports it started.
+func TestTakeoverInARepairWait(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
 	c := h.plantStd(t, nil)
@@ -1289,16 +1290,15 @@ func TestTakeoverInASpareWait(t *testing.T) {
 	})
 
 	created := h.waitRecord(t, 20*time.Second, owner, msgReactionApplied,
-		func(rec logRecord) bool { return rec.str("kind") == reactionSpareCreate })
-	spareId := created.num("spare_leg_id")
+		func(rec logRecord) bool { return rec.str("kind") == reactionRepairCreate })
+	repName := created.str("rep_name")
+	newLeg := created.num("new_leg_id")
 	if created.num("leg_id") != 3 || created.str("addr_port") != stdDnAddr(3) {
-		t.Fatalf("the spare: for leg %d on %s, want for leg 3 on dn 3",
+		t.Fatalf("the repair: for leg %d on %s, want for leg 3 on dn 3",
 			created.num("leg_id"), created.str("addr_port"))
 	}
 	isWait := func(rec logRecord) bool {
-		return rec.str("kind") == reactionSpareSwitch &&
-			rec.str("reason") == reasonSparePending &&
-			rec.num("leg_id") == 3 && rec.num("spare_leg_id") == spareId
+		return rec.str("kind") == reactionRepairCreate && rec.num("leg_id") == 3
 	}
 	h.waitRecord(t, 10*time.Second, owner, msgReactionSkipped, isWait)
 	crashedAt := time.Now()
@@ -1307,29 +1307,34 @@ func TestTakeoverInASpareWait(t *testing.T) {
 	foWaitTakesPool(t, h, peer, crashedAt)
 	h.waitRecord(t, 20*time.Second, peer, msgReactionSkipped, isWait)
 	foLever(t, dn3, agentfake.DnKey, func(o *agentfake.Object) { o.HangSyncup = false })
-	switched := h.waitRecord(t, 20*time.Second, peer, msgReactionApplied,
-		func(rec logRecord) bool { return rec.str("kind") == reactionSpareSwitch })
-	if switched.num("leg_id") != 3 || switched.num("spare_leg_id") != spareId {
-		t.Errorf("the switch: leg %d for spare %d, want leg 3 for spare %d",
-			switched.num("leg_id"), switched.num("spare_leg_id"), spareId)
+	h.waitUntil(t, 20*time.Second, "the new leg's side provisioned",
+		func() (bool, string) {
+			side := c.repair(t, repName).GetNewLegList()[0].GetSideList()[0]
+			return side.GetProvisioned(), "not yet"
+		})
+	c.setVerdictLever(t, repName, agentfake.RepairVerdict{Started: true})
+	finished := h.waitRecord(t, 20*time.Second, peer, msgReactionApplied,
+		func(rec logRecord) bool {
+			return rec.str("kind") == reactionRepairFinish &&
+				rec.str("rep_name") == repName
+		})
+	if finished.num("retired_leg_id") != 3 {
+		t.Errorf("the finish %v, want leg 3 retired", finished.attrs)
 	}
-	t.Logf("the new owner switched the spare in %v after the crash",
-		switched.at.Sub(crashedAt).Round(time.Millisecond))
-	if n := len(foReactions(h, nil, reactionSpareCreate)); n != 1 {
-		t.Errorf("%d spares created, want the one the owner created", n)
+	t.Logf("the new owner finished the repair %v after the crash",
+		finished.at.Sub(crashedAt).Round(time.Millisecond))
+	if n := len(foReactions(h, nil, reactionRepairCreate)); n != 1 {
+		t.Errorf("%d repairs created, want the one the owner created", n)
 	}
-	slice := c.load(t).Slices[stdSliceId]
-	for _, grp := range slice.GetMetaGrpList() {
-		var legs, spares []uint64
-		for _, leg := range grp.GetLegList() {
-			legs = append(legs, leg.GetLegId())
-		}
-		for _, leg := range grp.GetSpareLegList() {
-			spares = append(spares, leg.GetLegId())
-		}
-		if !slices.Contains(legs, spareId) || !slices.Contains(spares, 3) {
-			t.Errorf("the meta group holds legs %v and spares %v, want spare "+
-				"%d in the array and leg 3 parked", legs, spares, spareId)
+	state := c.load(t)
+	if _, ok := state.RetiredLegs[3]; !ok {
+		t.Errorf("leg 3 is no retired leg after the finish")
+	}
+	for _, grp := range state.Slices[stdSliceId].GetMetaGrpList() {
+		legs := legIds(grp.GetLegList())
+		if !slices.Contains(legs, newLeg) || slices.Contains(legs, 3) {
+			t.Errorf("the meta group holds legs %v, want %d in place of 3",
+				legs, newLeg)
 		}
 	}
 }

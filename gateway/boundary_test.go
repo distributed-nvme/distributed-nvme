@@ -1070,62 +1070,8 @@ func TestMigrationCountLimit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Per group and slice: spare legs and groups; per migration: bitmap chunks
+// Per slice: groups; per migration: bitmap chunks
 // ---------------------------------------------------------------------------
-
-// bndCreateSpare is a token-less CreateSpareLeg on the fixture's data group.
-func bndCreateSpare(ctx context.Context, env *volEnv) error {
-	_, err := env.srv.CreateSpareLeg(ctx, &pb.CreateSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		GrpId:       volDataGrpId,
-	})
-	return err
-}
-
-// TestSpareLegCountLimit is MaxSpareLegPerGrp through CreateSpareLeg: the
-// first spare of a group accepted, its side flipped provisioned as the worker
-// does, and the last place raced. The second create runs inside the first's
-// planning snapshot, so the first passes the gateway's own check of the list
-// and meets the model op's check in its STM, which answers the ceiling with
-// the code GW7 lists, RESOURCE_EXHAUSTED, and the words of the gateway's
-// check. The next spare is refused by that check, writing nothing.
-func TestSpareLegCountLimit(t *testing.T) {
-	env := newVolEnv(t)
-	if err := bndCreateSpare(env.ctx, env); err != nil {
-		t.Fatalf("the first spare: %v", err)
-	}
-	slice := env.slice()
-	for _, spare := range volGrpOf(t, slice, volDataGrpId).GetSpareLegList() {
-		for _, side := range spare.GetSideList() {
-			side.Provisioned = true
-		}
-	}
-	env.putSlice(slice)
-	errA, errB := bndRaceAtRead(t,
-		model.SliceKey(env.cid, volSpId, volSliceId),
-		func(ctx context.Context) error { return bndCreateSpare(ctx, env) },
-		func() error { return bndCreateSpare(env.ctx, env) })
-	bndWantOneWinner(t, errA, errB, codes.ResourceExhausted, "spare legs")
-	grp := volGrpOf(t, env.slice(), volDataGrpId)
-	if got := len(grp.GetSpareLegList()); got != common.MaxSpareLegPerGrp {
-		t.Fatalf("%d spare legs, want %d", got, common.MaxSpareLegPerGrp)
-	}
-	before, beforeRev := env.spConf(), env.spRev()
-	slice = env.slice()
-	over := bndCreateSpare(env.ctx, env)
-	bndWantMsg(t, over, codes.ResourceExhausted, "spare legs",
-		"one over the ceiling")
-	if got, want := status.Convert(errA).Message(),
-		status.Convert(over).Message(); got != want {
-		t.Errorf("the ceiling has two refusals: %q in the STM, %q before "+
-			"the scan", got, want)
-	}
-	env.wantUntouched(before, beforeRev)
-	if !proto.Equal(env.slice(), slice) {
-		t.Errorf("the refusal rewrote the slice")
-	}
-}
 
 // bndGrowData is a token-less data grow of one slice.
 func bndGrowData(

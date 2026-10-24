@@ -327,11 +327,11 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 
 // cntlrInfoLocked derives CntlrInfo from the cntlr's last accepted request:
 // one row per object it named — per slice, per group (meta and data), per leg
-// AND per spare leg of every group, per td, per subsystem, per namespace, per
+// of every group, per td, per subsystem, per namespace, per
 // clone and per xfer, a clone's being its target row and its dm-clone row,
 // the kinds of row the cn agent reports for a clone (cnagent.md CN28) — and,
 // for each clone of its clone_list, a group row for the clone's clone meta
-// group and a leg row per leg and per spare leg of it, as for a slice's group
+// group and a leg row per leg of it, as for a slice's group
 // (dnv-worker.md, Integration test plan, The fake agent). td_id_to_thin_info
 // is filled only when the request's cntlr.primary is true and the thin_ok
 // lever says so (architecture.md, sp role; cnagent CN14 "primary only"),
@@ -351,8 +351,8 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 //
 // A cntlr also reports a leg row per new leg of every repair its request
 // carries in name_to_repair, as the cn agent connects, wraps and probes a
-// new leg as it does a spare (architecture.md, Repair). While its request
-// makes it the primary it reports, for every group of the request, a
+// new leg as it does a leg of the group (architecture.md, Repair). While its
+// request makes it the primary it reports, for every group of the request, a
 // reading in grp_id_to_grp_info — whole, with every leg of the group's
 // leg_list in sync, unless the grps lever says otherwise — and, for each
 // repair of the request the repairs lever names, that lever's verdict in
@@ -474,7 +474,7 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 }
 
 // grpRowsLocked derives one group's rows into info (cntlrInfoLocked): its
-// group row and a leg row per leg and per spare leg, and, with paths, the
+// group row and a leg row per leg, and, with paths, the
 // path rows of every leg with two sides. A clone meta group is walked without
 // paths: no migration gives its legs a second side. On a primary it adds the
 // group's reading (grpReadingLocked).
@@ -486,11 +486,7 @@ func (a *Agent) grpRowsLocked(
 	if primary {
 		info.GrpIdToGrpInfo[grp.GetGrpId()] = a.grpReadingLocked(key, grp)
 	}
-	legList := make([]*pb.Leg, 0,
-		len(grp.GetLegList())+len(grp.GetSpareLegList()))
-	legList = append(legList, grp.GetLegList()...)
-	legList = append(legList, grp.GetSpareLegList()...)
-	for _, leg := range legList {
+	for _, leg := range grp.GetLegList() {
 		info.LegIdToLeg[leg.GetLegId()] = a.resolveCntlrRow(
 			key, primary, rowKey("leg_id_to_leg", leg.GetLegId()))
 		if !paths || len(leg.GetSideList()) != 2 {

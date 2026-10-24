@@ -201,10 +201,10 @@ func (s *Server) GetThinDeviceBitmap(
 // to AppendMigrationBitmap.
 //
 // It is GetThinDeviceBitmap's shape with the object named differently. The
-// leg is located by the bounded slice scan of findLeg — every slice, every
-// meta and data group, active legs and spare legs alike — because a leg_id is
-// unique inside the SP but carries no hint of which slice holds it
-// (architecture.md, Cntlrs: InspectSide); an unknown id is NOT_FOUND. No
+// leg is located by the bounded slice scan of findLeg — every leg of every
+// meta and data group of every slice — because a leg_id is unique inside the
+// SP but carries no hint of which slice holds it (architecture.md, Cntlrs:
+// InspectSide); an unknown id is NOT_FOUND. No
 // slice_idx is taken: the agent derives the owning slice from the leg itself,
 // then walks that slice's pool metadata down through the group geometry to
 // this leg's data region.

@@ -527,7 +527,7 @@ per-side. The exclusions:
   provisioning; and an empty `side_list` stays the malformed-request error
   it already is (CN10), never a healthy `PROVISIONING` row that would hide
   it.
-* a group whose non-spare `leg_list` contains a provisioning leg is
+* a group whose `leg_list` contains a provisioning leg is
   deferred: no md array, no `CnGrpName`, and the group is excluded from
   the pool-meta and pool-data concat targets and from pool sizing (CN12,
   CN13).
@@ -569,12 +569,10 @@ per-side. The exclusions:
   above no dm-clone is wanted, so the level wins and CN16 rule 4 or an
   earlier one backs them (CN19). A transfer of such a namespace maps the
   td's raid0, not the dm-clone, and is not deferred with it (CN17).
-* an unprovisioned spare leg, or an unprovisioned new leg of a repair,
-  defers only itself — spares never assemble (`architecture.md`, Spare
-  legs), and a new leg is a candidate of the assembly only once it is
-  available (CN12), so the group's own assembly is unaffected — and
-  `leg_id_to_leg` reports it `RES_STATUS_PROVISIONING` like any other
-  provisioning leg (CN10).
+* an unprovisioned new leg of a repair defers only itself — a new leg is
+  a candidate of the assembly only once it is available (CN12), so the
+  group's own assembly is unaffected — and `leg_id_to_leg` reports it
+  `RES_STATUS_PROVISIONING` like any other provisioning leg (CN10).
 * bitmap reads follow the effective state as well: CN27's data-group span
   walks the effective `data_grp_list` (leaving a deferred group in the
   walk would silently shift every later group's offset), and `GetLegBm`
@@ -602,8 +600,8 @@ One converge pass has two phases, and the phase order is what implements
   now", with the applied plan overwritten whether or not the removals
   worked, forgets a removal that failed together with the plan that named
   it — and the flows in which the remote end is dead and a removal does
-  fail (a level change, a spare switch, a finished migration or repair, a
-  failover) are exactly those. The layer order, the verification rule and
+  fail (a level change, a finished migration or repair, a failover) are
+  exactly those. The layer order, the verification rule and
   the stop rule are CN21's; the pre-steps below are this pass's.
 * **Build phase, bottom-up** — legs (CN10) → groups (CN12) → per-slice
   pools (CN13) → thin volumes (CN14) → raid0 and error (CN15) → clones
@@ -636,14 +634,17 @@ no thin volume left to stripe over (CN19) — a standby keeps only what
 that list gives it, which is what makes a primary-to-standby flip nothing
 but a smaller wanted set.
 
-The legs are every leg the plan builds: each group's `leg_list`, its
-spare legs and the new legs of its repair, at every stage of the repair
-(CN10, CN12). An md array is wanted only while every member is a wrapper
-of the legs of one group the plan wants. A retired leg is no leg of any
-cntlr's request (`architecture.md`, Repair), so the finish that retires a
-leg makes its wrapper and its connection unwanted (CN21's L10), and an
-array that still held it would be unwanted and stopped (CN21's L9). That
-is why the bad leg leaves md before its repair can start (CN12).
+The legs are every leg the plan builds: each group's `leg_list` and the
+new legs of its repair, at every stage of the repair (CN10, CN12). An md
+array is wanted only while every member is a wrapper of the legs of one
+group the plan wants, so an array that holds an aborted repair's new leg
+stays while the request still carries the repair, and the member
+reconciliation takes that leg out (CN12). A retired
+leg is no leg of any cntlr's request (`architecture.md`, Repair), so the
+finish that retires a leg makes its wrapper and its connection unwanted
+(CN21's L10), and an array that still held it would be unwanted and
+stopped (CN21's L9). That is why the bad leg leaves md before its repair
+can start (CN12).
 
 **Pre-steps**: the transitions derived from the plan and the live tables
 (`architecture.md`, Teardown by sweep, whose attribution and derivation
@@ -716,9 +717,9 @@ request names no migration.
 
 CN10. Legs (`leg.go`; every leg of every group of every slice in
 `id_to_slice` and of the clone meta group of every clone in `clone_list`
-(`architecture.md`, Terminology and object model), `spare_leg_list` and
-the new legs of the group's repair included (CN12), both roles; a clone
-record without a group adds none). Per side
+(`architecture.md`, Terminology and object model), the new legs of the
+group's repair included, at every stage of the repair (CN12), both roles;
+a clone record without a group adds none). Per side
 in the leg's `side_list`: `nvme connect` to the `SideToCnNqn` of the cluster,
 sp, leg and this cn at the side's `nvme_tr_conf`, with the host NQN
 `CnHostNqn` (`dnagent.md` SH20 flags). A side with `provisioned` false is skipped: the
@@ -982,19 +983,19 @@ attempt in flight longer than `CnLegProbeStallSeconds` ⇒
 `RES_STATUS_ERROR` "health probe stalled"; else the last completed
 outcome; before any completion — or before a prober is registered — ⇒
 `RES_STATUS_PENDING` "health probe pending" when the wrapper exists.
-`PENDING` rather than `OK` there, because an `OK` clears
-`Leg.err_epoch`: a dead leg's would be cleared at every promotion, whose
-probers start over, and an unprobed spare would read ready to the
-worker's leg repair (`dnv-worker.md` HL2, AR8). For a registered prober
-the window is one `CnLegProbeInterval` tick plus the probe itself, and a
-fresh wrapper, a promotion and an agent restart each open it. A leg whose
-wrapper exists but whose converge fails before its prober registers — on
-a promoted or restarted primary whose connect is refused, say — reads
-`PENDING` in every read until a converge registers one, while each
-failing converge marks the leg `RES_STATUS_ERROR` (CN10). A standby (and
-spare legs on it) reports the transport probe instead: the sysfs walk
-(CN10) shows a live controller per desired (provisioned) side and, for a
-leg with exactly one desired side, an "ana_state" of optimized or
+`PENDING` rather than `OK` there, because an `OK` clears `Leg.err_epoch`:
+a dead leg's would be cleared at every promotion, whose probers start
+over, a repair's new leg's among them, whose health epoch the worker's leg
+repair reads (`dnv-worker.md` HL2, AR8). For a registered prober the
+window is one `CnLegProbeInterval` tick plus the probe itself, and a fresh
+wrapper, a promotion and an agent restart each open it. A leg whose
+wrapper exists but whose converge fails before its prober registers — on a
+promoted or restarted primary whose connect is refused, say — reads
+`PENDING` in every read until a converge registers one, while each failing
+converge marks the leg `RES_STATUS_ERROR` (CN10). A standby
+reports the transport probe instead: the sysfs walk (CN10) shows a live
+controller per desired (provisioned) side and, for a leg with exactly one
+desired side, an "ana_state" of optimized or
 non-optimized — non-optimized is a standby path's designed steady state
 (the DN grants the optimized group to the primary CN alone) and optimized
 the pre-promote window after the DN's flip, while inaccessible, or any
@@ -1027,7 +1028,7 @@ Terminology and object model). Every rule here holds for a clone meta
 group as for a slice's group, its md names aside: its array takes their
 clone form (`CnCloneMdDevName`, `CnCloneMdArrayName`; `architecture.md`, md
 names), since a slice's md names carry the group's place in its slice.
-Reason: the group has legs, an array and spares as a slice's group has, and
+Reason: the group has legs, an array and a repair as a slice's group has, and
 one set of rules for both is one set to get right. A clone meta group is
 in no concat (CN13): its device is the metadata device of its clone's
 dm-clone (CN18).
@@ -1041,10 +1042,9 @@ dm-clone (CN18).
   `meta_blocks` and the block size, every member `--failfast`,
   `--homehost any`), whose members are the leg wrappers of `leg_list`,
   and those of an open repair's new legs once the repair's add has run
-  (A group's repair, below), never of `spare_leg_list`
-  (`architecture.md`, Spare legs). Every member
-  carries md's failfast flag, from its create or its add, so that an IO
-  error on a member fails that member at once, with no retry. Reason: a
+  (A group's repair, below). Every member carries md's failfast flag, from
+  its create or its add, so that an IO error on a member fails that member
+  at once, with no retry. Reason: a
   disk node that stays connected but never completes IO then costs the
   array that member instead of hanging the whole array; the fast IO fail
   timeout every connection is made with (`dnagent.md` SH20) covers only a
@@ -1069,12 +1069,11 @@ dm-clone (CN18).
      refuses the create this pass, like a killed `--examine` below): the
      array is found by its members (below), so one that runs under the
      group's name holding none of the wrappers the group keeps (its
-     `leg_list` wrappers and its open repair's new legs) — both legs
-     switched out, parked or released, while this cntlr was not
-     converging — reads as absent and reaches case 1 with fresh legs,
-     where a create would put a second array under the name mdadm gives
-     the group's array ("an array runs under … holding none of the
-     group's legs"). The guard keeps that second array from being
+     `leg_list` wrappers and its open repair's new legs) reads as absent,
+     and with legs that carry no superblock it reaches case 1, where a
+     create would put a second array under the name mdadm gives the
+     group's array ("an array runs under … holding none of the group's
+     legs"). The guard keeps that second array from being
      created; the pool's concat finds the group's array by its legs as
      well (below), never by that name. The guard errs only towards
      refusing, and a false refusal
@@ -1133,8 +1132,8 @@ dm-clone (CN18).
   re-syncs on a revision or a reply code, never on a row. Only
   availability counts, and only for a wanted group's members: a standby
   wants no group, nor does a primary whose `sp_level` suppresses its
-  groups (CN19); a deferred group (below) never counts, spares are not
-  members, and a held member md has failed on a leg that is available is
+  groups (CN19); a deferred group (below) never counts, and a held member
+  md has failed on a leg that is available is
   not late: while the array runs, the member reconciliation (below) puts
   it back once md has moved it out of its slot and its leg can take it,
   unless the in-sync guard (below) holds over the array. Nor is a
@@ -1234,10 +1233,10 @@ dm-clone (CN18).
   `Md.Detail` takes from the walk the one array whose members include a
   wrapper of a member the group keeps: of its `leg_list`, or a new leg of
   its open repair (A group's repair, below), so that an array a whole new
-  leg started alone is found. Spares are not keys: a leg switched out into
-  `spare_leg_list` is an extra, found through the member that stays, as is
-  an aborted repair's new leg. No such array is "absent" and runs the
-  assembly above — unless an array of the walk is unanswered, which may be
+  leg started alone is found. An aborted repair's new leg is no key: one
+  md holds is an extra, found through the member that stays. No such array
+  is "absent" and runs the assembly above — unless an array of the walk is
+  unanswered, which may be
   the group's own: then no answering array proves absence, the group's error
   names the unanswered array, and nothing is created or assembled. Only a
   listing of an array's "md" directory that failed with anything but ENOENT,
@@ -1260,10 +1259,11 @@ dm-clone (CN18).
   answering arrays are an error; a member with no dm name (a foreign member)
   of the matched array is an error. Of that array it reads "array_state"
   first and then, for a running array only, "degraded", "sync_action" and
-  "sync_completed" — an inactive array has none of the three, and its
-  members read a bare spare — and each member's "state" (a flag list,
-  in_sync and failfast on a healthy dnv member), "slot" (its place number in
-  the array, or none for a member that holds no place) and "block/dev".
+  "sync_completed" — an inactive array has none of the three, and each of
+  its members' "state" reads md's bare "spare" — and each member's "state"
+  (a flag list, in_sync and failfast on a healthy dnv member), "slot" (its
+  place number in the array, or none for a member that holds no place) and
+  "block/dev".
   Running means "array_state" is clean, active, active-idle, write-pending,
   readonly or read-auto; an array in any other state (inactive, broken, …)
   is left exactly as it is and its state is the group's error. A read of the
@@ -1288,14 +1288,16 @@ dm-clone (CN18).
   "/sys/block" — gives its concat no number (CN28 states its rows, CN13
   what a converge does).
 
-  **Member reconciliation** covers `SwitchSpareLeg` with no extra mechanism,
-  and puts back a member md has failed, unless the in-sync guard (below)
-  holds. A member the array holds is compared by its "block/dm/name" with
-  the names of the wrappers the group keeps — its `leg_list` wrappers and
+  **Member reconciliation** takes out a member the array holds that the
+  group does not keep, adds a `leg_list` member the array lacks, and puts
+  back a member md has failed, unless the in-sync guard (below) holds. A
+  member the array holds is compared by its "block/dm/name" with the names
+  of the wrappers the group keeps — its `leg_list` wrappers and
   the new legs of its open repair (A group's repair, below) — never by
   device number, because a number read of a wanted wrapper that did not
   answer would otherwise read as "not wanted" and fail and remove an in-sync
-  member. A held member the group does not keep is `--fail`ed and
+  member. A held member the group does not keep — such as an aborted
+  repair's new leg (A group's repair, below) — is `--fail`ed and
   `--remove`d by the dm path sysfs named, while another member keeps the
   data (the in-sync guard, below); then a repair's removals; then a
   `leg_list` member md has failed and moved out of its slot ("faulty" in its
@@ -1304,8 +1306,8 @@ dm-clone (CN18).
   is `--add --failfast`ed, an open repair's bad leg in neither of these two
   steps; then a repair's new legs are added (below). md then resyncs: a
   bitmap catch-up for a briefly absent leg or a member put back, a full
-  rebuild for a promoted spare or a repair's new leg, short of a retired
-  leg taken back while the array has stayed degraded (`architecture.md`,
+  copy for a repair's new leg, short of a retired leg taken back while the
+  array has stayed degraded (`architecture.md`,
   Repair). A leg **can
   take** a member back when it is available and its own leg row reads `OK`,
   which on the primary is the CN11 probe's last result. Reason: a leg whose
@@ -1325,9 +1327,9 @@ dm-clone (CN18).
   group's repair, below), and the answer is the same for every member
   that leaves, whatever that member's own state. Reason: md answers a
   fail of the last in-sync member of a mirror by marking the whole array
-  broken (CN29), so without the guard a switch breaks the group whenever
-  md still holds the switched-out leg as the only copy. The member that
-  keeps the data
+  broken (CN29), so without the guard the fail of a member the group does
+  not keep breaks the group whenever that member is md's only copy. The
+  member that keeps the data
   must be on an available leg because md learns that a member is dead
   only from IO to it: on an array with no IO a dead member still reads
   in sync, the fail would go through, and the copy onto the added member
@@ -1347,16 +1349,12 @@ dm-clone (CN18).
   on an available leg — its copy ends, or its path returns: the next
   read then reads the row `OK` and names the member the array lacks once
   that member's leg can take it (CN30), and the converge of the
-  `SyncupCntlr` that name brings finishes the switch. A `leg_list`
+  `SyncupCntlr` that name brings finishes the reconciliation. A `leg_list`
   member md has failed is not put back while the guard holds, since the
   put-back is part of what the guard leaves undone. On a leg that is
   available it is not late either (above), and while its leg is not
   available the CN10 background retry brings only converges the guard
-  refuses again, so nothing brings it back in sync: when such a member
-  is the only one that stays, the guard does not let go by itself, and
-  the group's row reads `ERROR` until an operator switches the parked
-  leg back into `leg_list`, or until that row fails the primary over,
-  which leaves the group down (Known limits).
+  refuses again, so nothing brings it back in sync while the guard holds.
 
   The put-back is a remove and then an add, run by mdadm. md keeps its
   claim on a failed member until the member is removed, so an `--add`
@@ -1389,24 +1387,26 @@ dm-clone (CN18).
   superblock write is stuck on that member, sleeps in md's suspend until the
   write fails at the path's error recovery, so it can be killed at the soft
   timeout with the member still held: that pass reports the group `ERROR`
-  and does not reach the promoted spare's `--add --failfast` either, because
-  extras leave before promotions arrive. A remove or an add that fails or is
+  and does not reach the `--add --failfast` that would follow either — of
+  a `leg_list` member, since extras leave before any member is added, or
+  of a repair's new leg, since its bad leg goes out first. A remove or an
+  add that fails or is
   killed is the group's error for that pass, a row, not a reply code (CN29),
   and registers no CN10 background retry. What re-drives it is the read-only
   verdict of the cntlr's read, which names each `leg_list` member the
   reconciliation would put back or add, on a leg the read reads as able to
   take it (CN30): on the round that answers from that read the worker
   re-sends the `SyncupCntlr` (`dnv-worker.md` RW4), whose converge tries
-  again. So a switch whose `--remove` was killed is finished by the converge
-  the named spare brings, or, while the promoted spare is not available, by
-  the CN10 retry that a `leg_list` member that is not available registers
-  (above), cntlr-wide; while the spare is available but its leg row does not
-  read `OK`, neither comes (Known limits). The switched-out member itself
-  has left `leg_list` and is never named. Nothing remembers the failure.
+  again. So work whose `--remove` was killed is finished by the converge
+  that the named member brings, or, for a `leg_list` member that is not
+  available, by the CN10 retry its lateness registers (above), cntlr-wide;
+  a repair's new leg is never late, so while it is available but its leg
+  row does not read `OK`, neither comes (Known limits). A member the group
+  does not keep is never named itself. Nothing remembers the failure.
 
   The cn agent never runs mdadm --zero-superblock. A leg leaves an array
-  only into the spare list; as a repair's bad leg, which the finish keeps
-  as a retired leg and an abort leaves in `leg_list`; as a repair's new
+  only as a repair's bad leg, which the finish keeps as a retired leg and
+  an abort leaves in `leg_list`; as a repair's new
   leg taken from a retired leg, which a cancel gives back as that retired
   leg; or out of existence with its side. Its superblock stays as md left
   it: that can make a later re-add cheap, and an assembly handed the leg
@@ -1419,9 +1419,10 @@ dm-clone (CN18).
   The cntlr finds a group's repair through the group's `rep_name` in the
   request's `name_to_repair`; a name the request holds no repair under, or a
   repair of another group, is none. Every cntlr connects, wraps, probes and
-  reports the repair's new legs as it does spare legs, at every stage (CN10,
-  CN11, CN28), and the sweep keeps them (CN9); a new leg never defers its
-  group (CN9) and is never a late member, nor is an open repair's bad leg
+  reports the repair's new legs as it does the group's legs, at every stage
+  (CN10, CN11, CN28), and the sweep keeps them (CN9); a new leg never
+  defers its group (CN9) and is never a late member, nor is an open
+  repair's bad leg
   while the group's array runs (above). A repair is open while it is CREATED
   or STARTED. While it is open its new legs are members the group keeps —
   keys of the match and never extras — and its bad leg is never added and
@@ -1517,15 +1518,14 @@ dm-clone (CN18).
   is: the read's verdict names the new leg the converge would add, or the
   member it would remove (CN30).
 
-  A group whose non-spare `leg_list` holds a provisioning leg (CN9) is
+  A group whose `leg_list` holds a provisioning leg (CN9) is
   **deferred**: none of `--examine`, `--create`, `--assemble`, `--add`,
   `--fail` or `--remove` runs, no `CnGrpName` is built, and
   `grp_id_to_md_raid` reports `RES_STATUS_PROVISIONING`. The assembly
   cases above are evaluated only once every `leg_list` leg of the group is
-  provisioned. (Neither an unprovisioned spare nor an unprovisioned new
-  leg of a repair defers the group (CN9): spares are not members,
-  `architecture.md`, Spare legs, and a new leg joins only once it is
-  available.) Deferral here is decided by
+  provisioned. (An unprovisioned new leg of a repair does not defer the
+  group (CN9): a new leg joins only once it is available.) Deferral here is
+  decided by
   the group's own legs only: a group that CN9's prefix truncation keeps
   out of its slice's concat because an earlier group is deferred still
   assembles its array normally — it is the concat that waits, not the md
@@ -1842,7 +1842,7 @@ crash between creation and sweep waits for the next sweep of the pool's
 ids that gets through. A
 delete message that fails, refused or unanswered, runs the same sweep of
 that pool in the same pass, on the same condition — the request the pass
-converges came by the revision-gated RPC — and that sweep spares every id
+converges came by the revision-gated RPC — and that sweep keeps every id
 that a thin volume of the sp the pass lists still maps in that pool, read
 from the volume's live table, since such an id is no stray; a volume
 whose table names a device the pass's listing does not resolve keeps its
@@ -1896,8 +1896,8 @@ backing state machine, evaluated in this order (first match wins;
    over a dm-clone only once the dm-clone copies and records what it has
    copied; and a dm-clone whose metadata is read-only or failed cannot
    record a copy, so a write to a region it has not copied fails, and a
-   namespace over it would hand its hosts IO errors that a wait spares
-   them. While it does not serve — a build that has not
+   namespace over it would hand its hosts IO errors that a wait avoids.
+   While it does not serve — a build that has not
    finished, whatever stopped it; a dm-clone whose metadata is read-only
    or failed; and a dm-clone that does not exist, whether a sweep removed
    it, the build has not reached it, or its clone meta group is not ready
@@ -2059,7 +2059,7 @@ start of the first pass after the level is lowered, which builds no
 dm-clone. A
 move that fails is logged
 and the park goes on, since the park guards the data and the move only
-spares the hosts IO errors. An ns-dev step that fails, whatever read or command
+saves the hosts IO errors. An ns-dev step that fails, whatever read or command
 failed — the number of a raid0 not built yet included, which is how the
 step fails at a promotion that came before the sides' ANA flips
 (`architecture.md`, [D16]) — reads the ns-dev's live table afterwards, and
@@ -2351,9 +2351,10 @@ takes the role assembles the clone meta group and creates the dm-clone
 over the metadata it holds (steps 2 and 3). A clone meta group no cntlr
 can assemble leaves the clone's dm-clone row `MISSING` and its namespaces
 parked on each primary that has to build the dm-clone, wherever the role
-goes, at least until a leg of its `leg_list` comes back, since leg repair
-switches no spare into a group whose array does not run (`dnv-worker.md`
-AR8); the operator may delete the clone. A
+goes, at least until a leg of its `leg_list` comes back, since a repair
+adds its new leg only to a running array (CN12) and leg repair creates no
+repair for a group whose array does not run (`dnv-worker.md` AR8); the
+operator may delete the clone. A
 dm-clone that serves and whose copy is whole serves on over such a group,
 since it writes no metadata (Known limits).
 
@@ -3067,9 +3068,9 @@ span within the `CnPoolDataName` starts at the summed `data_blocks` of
 the preceding `data_grp_list` groups; leg data-region block k is
 pool-data block span start plus k; bit k is one iff no thin device of
 the pool maps that pool-data block (every member leg of the group mirrors
-it, so the leg identity beyond its group never enters the math; a spare
-leg, which is no member, and a repair's new leg are answered with their
-group's bitmap all the same, which costs copies at most). Windowed
+it, so the leg identity beyond its group never enters the math; a
+repair's new leg is answered with its group's bitmap all the same, which
+costs copies at most). Windowed
 from `start_block` for `block_cnt` blocks over the group's
 `data_blocks`, a zero `block_cnt` ⇒ to the end. Same wire encoding as
 CN26 (LSB-first, zero-padded); the CN22 clone-chunk fold uses it too.
@@ -3306,10 +3307,10 @@ The rows, each with its `res_name` and what its probe checks:
   sp's array that did not answer must not turn this row `ERROR`).
   `RedundNone`: `dmsetup table`. A deferred group (CN9) reports
   `RES_STATUS_PROVISIONING` and no mdadm command runs.
-* `leg_id_to_leg`, named by the `CnLegName`, a row per leg, per spare
-  leg and per new leg of a repair of every group, a clone meta group's
-  included (CN10): the wrapper table plus, on the primary, the CN11
-  prober outcome (`RES_STATUS_PENDING` until its prober's first completed
+* `leg_id_to_leg`, named by the `CnLegName`, a row per leg and per new
+  leg of a repair of every group, a clone meta group's included (CN10):
+  the wrapper table plus, on the primary, the CN11 prober outcome
+  (`RES_STATUS_PENDING` until its prober's first completed
   round, CN11), or, on a standby, the
   transport per desired side, from sysfs,
   plus an "ana_state" of optimized or non-optimized on single-sided legs
@@ -3392,7 +3393,7 @@ The rows, each with its `res_name` and what its probe checks:
   (`architecture.md`, Live-state reporting — hydration progress;
   `DeleteClone`'s hydration check, which `force` skips, reads it).
 * A clone reports these two rows and no other: its clone meta group
-  reports in `grp_id_to_md_raid` and its legs, spare legs and new legs in
+  reports in `grp_id_to_md_raid` and its legs and its repair's new legs in
   `leg_id_to_leg`, as a slice's group does (CN12), and none of its legs
   has a second side, so none has a path row.
 
@@ -3659,7 +3660,9 @@ would be a leftover report no `Syncup*` could ever clear.
   as the agent's leftover record naming the same member after each
   failure, each followed by the worker's re-sent `SyncupCntlr` (`log.md`,
   Leftovers). The leg repair does not act on it, since the leg's row
-  reads `OK` (`dnv-worker.md` AR8); an operator's spare switch ends it.
+  reads `OK` (`dnv-worker.md` AR8), nor can an operator's repair, which
+  refuses a bad leg with no health epoch and points the operator to a
+  migration of the leg's side instead (`architecture.md`, Repairs).
 * A member can be named on every read on a leg whose converge fails:
   the verdict tests only the parts of the leg's availability a read can
   read (CN30). A leg with two sides, a migration in flight, whose path
@@ -3674,55 +3677,29 @@ would be a leftover report no `Syncup*` could ever clear.
   when that connect succeeds, and that converge is the one that puts the
   member back. CN12's in-sync guard meets the same gap: when such a leg
   carries the only member that stays in sync, the converge reads the leg
-  not available and refuses the switch, while a read finds the leg
-  serving, reads the group's row `OK` and names the promoted spare the
-  array lacks, so each round that answers from such a read brings a
-  converge that refuses again.
-* A killed `--remove` leaves a spare switch half done: a switch applied
-  within seconds of the switched-out leg's side dying can have its
-  `--remove` killed at the soft timeout while a superblock write is stuck
-  on that member (CN12). The pass reports the group `ERROR` and does not
-  add the promoted spare, and the array runs on its surviving member
-  until the next converge: the one the `SyncupCntlr` brings that the
-  worker re-sends once a read's verdict names the spare (CN30),
-  or, while the spare is not available, an attempt of the CN10 retry its
-  lateness registers (CN12). A promoted spare that is available while
-  its leg row does not read `OK` — its probe fails, or has not yet
-  completed — brings neither: the verdict does not name it and it is not
-  late. An operator's `SwitchSpareLeg` can promote such a spare: the
-  switch does not read the spare's health. The switch then waits for
-  the next converge that comes: the one the verdict brings once the
-  spare's row reads `OK`, or one for some other reason, such as a
-  revision bump. A repair's add whose `--remove` of the bad leg was
-  killed is left the same way: no new leg is added and the array runs on
-  its other member until the verdict names the new leg, once the new
-  leg's row reads `OK` (CN30), since a new leg is never late (CN12).
-* An in-sync guard that holds can move the role and leave the group
-  down, or without its data: while CN12's in-sync guard holds, the
-  group's row reads `ERROR`, on a read as on a converge (CN28), which
-  sets the primary's health epoch (`dnv-worker.md` HL2), so a guard that
-  holds past the primary-unhealthy threshold lets the failover reaction
-  fail the primary over (`dnv-worker.md` AR5). A guard that holds
-  because md has failed the member that stays holds that long unless an
-  operator acts first, since nothing puts that member back while the
-  guard holds (CN12). The new primary assembles the group from its
-  `leg_list` legs and an open repair's new legs (CN12), which leave out
-  the member the guard kept, the one that holds the data. When the legs
-  that carry an md superblock cannot start the array — a member md was
-  copying onto, or one md has failed, cannot start it alone — the group reads
-  `ERROR` on the new primary too, and waits for an operator to switch
-  the parked leg, which holds the data, back into `leg_list`, and for
-  that leg to be available. When none of them carries one — every
-  `leg_list` leg a spare that no converge added to the array, and no
-  available new leg carrying one either — and every `leg_list` leg is
-  available, the new primary creates a fresh empty array over the
-  `leg_list` legs (CN12's assembly case for legs with no superblock),
-  without the data the parked leg holds. Leg repair switches out no other
-  leg of a group while the spare it switched in is not held in sync
-  (`dnv-worker.md` AR8, the healthy-leg test), and a leg that md holds in
-  sync carries a superblock, so only an operator's switches, which wait
-  for nothing, can leave a `leg_list` of spares that md never took in.
-  The fail the guard refuses would have broken the array at once.
+  not available and refuses to fail the member the group does not keep,
+  while a read finds the leg serving, reads the group's row `OK` and names
+  a `leg_list` member the array lacks whose leg can take it, so each round
+  that answers from such a read brings a converge that refuses again.
+* A killed `--remove` leaves a repair's add half done: an add that runs
+  within seconds of the bad leg's side dying can have its `--remove` of
+  the bad leg killed at the soft timeout while a superblock write is
+  stuck on that member (CN12). The pass reports the group `ERROR` and adds
+  no new leg, and the array runs on its other member until the next
+  converge: the one the `SyncupCntlr` brings that the worker re-sends once
+  a read's verdict names the new leg (CN30). A new leg is never late
+  (CN12), so one that is available while its leg row does not read `OK` —
+  its probe fails, or has not yet completed — brings neither the verdict's
+  name nor the CN10 retry, and the add waits for the next converge that
+  comes: the one the verdict brings once the new leg's row reads `OK`, or
+  one for some other reason, such as a revision bump.
+* An in-sync guard that holds can move the role: while CN12's in-sync
+  guard holds, the group's row reads `ERROR`, on a read as on a converge
+  (CN28), which sets the primary's health epoch (`dnv-worker.md` HL2),
+  so a guard that holds past the primary-unhealthy threshold lets the
+  failover reaction fail the primary over (`dnv-worker.md` AR5). The new
+  primary assembles the group from its `leg_list` legs and an open
+  repair's new legs (CN12), which leave out the member the guard kept.
 * An unanswered array can leave a group unassembled: a group with no
   answering array while another array of the walk did not answer is
   neither created nor assembled that pass (CN12), and the error is a
@@ -3798,33 +3775,29 @@ would be a leftover report no `Syncup*` could ever clear.
   cntlr until every `leg_list` member is available, an open repair's bad
   leg aside while its group's array runs. On members that are
   genuinely dead that lasts until the worker's leg repair
-  (`dnv-worker.md` AR8) has switched the last of them out of `leg_list`,
+  (`dnv-worker.md` AR8) has created a repair for the last of them, whose
+  bad leg is then no late member while the group's array runs (CN12),
   since the retry is cntlr-wide and the leg repair takes one step per
-  pass of the SP (`dnv-worker.md` AR2): for a dead DN, the side-unhealthy threshold,
-  then, for each of the SP's `leg_list` legs on that DN, a spare create
-  (unless its group has a ready or pending spare already) and a switch,
-  at least one pass each. It has no bound when the leg repair does not
-  switch a late member: a `RedundNone` leg (the repair only logs for one,
-  and the gateway's `CreateSpareLeg` refuses its group a spare), a leg
-  with two sides (a migration in flight, which the repair leaves alone;
-  it has no available path once the destination's DN is dead, or the
+  pass of the SP (`dnv-worker.md` AR2): for a dead DN, the side-unhealthy
+  threshold, then, for each of the SP's `leg_list` legs on that DN, a
+  repair's create, at least one pass each. It has no bound when the leg
+  repair creates no repair for a late member: a `RedundNone` leg (a
+  repair needs an md-raid1 group, `architecture.md`, Repairs), a leg with
+  two sides (a migration in flight, which a repair refuses as its bad
+  leg; it has no available path once the destination's DN is dead, or the
   source's before the destination's path is optimized,
   `architecture.md`, Migration), a leg whose group, a slice's group or a
   clone meta group alike, has no other leg of its `leg_list` free of a
   health epoch and held in sync in the primary's latest report (the
-  repair logs `no_healthy_leg` and switches and creates nothing for the
-  group, `dnv-worker.md` AR8), a leg of a group
-  whose row in the primary's latest report does not read `OK` — its
-  array stopped or broken, or held by the in-sync guard (CN12) — since
-  the repair switches nothing into such a group (`dnv-worker.md` AR8),
-  a leg of a group that has a repair, an open repair's bad leg among
-  them while the group's array does not run, since the leg repair skips
-  that group (`architecture.md`, Repair),
-  a full spare list, a spare of the group
-  left unprovisioned on a DN that failed while it zeroed, an SP whose
-  reactions are suppressed (`dnv-worker.md` AR3), no DN to place a spare on, or a pending
-  spare the repair keeps waiting for (one the primary never reports). The
-  retry then runs until the DN returns or an operator acts. Each attempt
+  healthy-leg test, `dnv-worker.md` AR8), a leg of a group whose row in
+  the primary's latest report does not read `OK` — its array stopped or
+  broken, or held by the in-sync guard (CN12) — since the leg repair
+  creates no repair for such a group (`dnv-worker.md` AR8), a leg of a
+  group that has a repair, an open repair's bad leg among them while the
+  group's array does not run, since a group has at most one repair
+  (`architecture.md`, Repairs), an SP whose reactions are suppressed
+  (`dnv-worker.md` AR3), or no DN to place the new leg on. The retry then
+  runs until the DN returns or an operator acts. Each attempt
   is a full converge of a built cntlr — probes, the sweep's enumerations,
   no creates — the profile the connect retry already has while a side's
   connect fails (a leg's controller is connected with no controller-loss
@@ -3937,8 +3910,9 @@ would be a leftover report no `Syncup*` could ever clear.
   the primary's threshold is what brings the clone back once its group
   can be assembled; one whose group cannot be assembled anywhere reads
   `MISSING` and waits at least until a leg of its `leg_list` returns,
-  since leg repair switches no spare into a group whose array does not
-  run (`dnv-worker.md` AR8). A dm-clone whose copy
+  since a repair adds its new leg only to a running array (CN12) and leg
+  repair creates no repair for a group whose array does not run
+  (`dnv-worker.md` AR8). A dm-clone whose copy
   is whole writes no metadata, so a group whose legs all fail under it
   leaves it in read-write mode and serving; the fault is then the group's
   and the legs' rows' alone.

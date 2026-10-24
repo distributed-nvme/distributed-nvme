@@ -93,7 +93,10 @@ func repairCreateCmd() *cobra.Command {
 }
 
 // repairFinishCmd is FinishRepair: the new leg takes the bad leg's place and
-// the bad leg is kept as a retired leg.
+// the bad leg is kept as a retired leg. The reply names the retired leg and,
+// for a worker's repair whose group held the most retired legs it may hold,
+// the oldest retired leg the finish gave back (given_back_leg_id, zero when
+// none).
 func repairFinishCmd() *cobra.Command {
 	cmd := leaf(
 		"finish",

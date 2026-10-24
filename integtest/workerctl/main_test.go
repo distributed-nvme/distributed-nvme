@@ -585,7 +585,8 @@ func TestKeyPrefix(t *testing.T) {
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
 // the others, for computed values). It prints sixteen keys, and the suites
-// read thirteen of them at preflight and stop there when one is missing.
+// read fourteen of them and stop when one is missing: thirteen at preflight,
+// and RetiredLegMaxAge, which the worker suite's repair case reads.
 // Every suite that starts an etcd — the worker, gateway, cdc and e2e suites —
 // launches it with EtcdMaxTxnOps and EtcdMaxRequestBytes. The e2e suite
 // cross-checks MaxAllocLegPerGrp. The gateway suite creates its stage-13
@@ -597,10 +598,10 @@ func TestKeyPrefix(t *testing.T) {
 // DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases.
 // The cdc suite's flood case fills the pending cap, CdcMaxPendingConnCnt, and
 // waits by the pre-Connect deadline, DefaultCdcPendingTmoMs. One of those
-// thirteen dropped or renamed here would otherwise surface only when a suite
-// is run, at its preflight. No suite reads the other three, MaxDelGrpPerTxn,
-// MaxSpareLegPerGrp and MaxDelBmPerTxn; they are pinned as well, because a
-// case may size itself against them.
+// fourteen dropped or renamed here would otherwise surface only when a suite
+// is run, at its preflight or in that case. No suite reads the other two,
+// MaxDelGrpPerTxn and MaxDelBmPerTxn; they are pinned as well, because a case
+// may size itself against them.
 func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 	read, write, err := os.Pipe()
 	if err != nil {
@@ -626,7 +627,6 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 
 		"MaxDelGrpPerTxn":   common.MaxDelGrpPerTxn,
 		"MaxAllocLegPerGrp": common.MaxAllocLegPerGrp,
-		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
 		"MaxDelBmPerTxn":    common.MaxDelBmPerTxn,
 		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
 
@@ -932,7 +932,7 @@ func TestParseRepStage(t *testing.T) {
 // TestFindRepairGrp pins create-repair's look-up of its group: the slices
 // first, either list, then the clones' clone meta groups (architecture.md,
 // Repairs), and the plan of a fresh new leg, the disk node of every side of
-// the group's legs and spares.
+// the group's legs.
 func TestFindRepairGrp(t *testing.T) {
 	side := func(addr string) []*pb.Side {
 		return []*pb.Side{{AddrPort: addr}}
@@ -953,7 +953,6 @@ func TestFindRepairGrp(t *testing.T) {
 					{LegId: 21, SideList: side("dn1")},
 					{LegId: 22, SideList: side("dn2")},
 				},
-				SpareLegList: []*pb.Leg{{LegId: 23, SideList: side("dn4")}},
 			}},
 		}},
 		Clones: map[string]*pb.Clone{
@@ -980,7 +979,7 @@ func TestFindRepairGrp(t *testing.T) {
 	}
 	_, grp, _ := findRepairGrp(state, 20)
 	got := strings.Join(repairGrpDnAddrs(grp), ",")
-	if got != "dn1,dn2,dn4" {
-		t.Errorf("plan = %s, want every side of the legs and the spare", got)
+	if got != "dn1,dn2" {
+		t.Errorf("plan = %s, want every side of the legs", got)
 	}
 }

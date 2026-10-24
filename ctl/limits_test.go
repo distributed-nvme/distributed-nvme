@@ -946,8 +946,8 @@ var textGlobals = []string{"cluster", "sp", "rev"}
 // exactly the leaves whose request has a CT3 token field, which keeps the
 // walk from passing on a probe that finds nothing.
 var textNumberNames = []string{
-	"id", "slice", "leg", "grp", "spare", "target", "src-side",
-	"retired-leg", "ids", "bad-legs", "slots", "level", "rev",
+	"id", "slice", "leg", "grp", "src-side", "retired-leg", "ids",
+	"bad-legs", "slots", "level", "rev",
 }
 
 // textNumberFlags types textProbe into every string flag of every leaf, and

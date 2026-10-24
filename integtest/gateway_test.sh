@@ -24,7 +24,7 @@
 # creates lives under $WORK on the server, and cleanup removes exactly that.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 68 RPCs maintains exactly the etcd schema (architecture.md,
+# of the 65 RPCs maintains exactly the etcd schema (architecture.md,
 # etcd data model), verified against ground truth that never goes through the
 # code under test; (b) parallel gRPCs across instances are correct — disjoint
 # work all succeeds, contended work has exactly one winner and no partial
@@ -440,7 +440,7 @@ assert_no_write() { # <label> <cmd…>
 }
 
 # key_count counts the keys under a prefix — the non-SP-scoped form of the
-# refusal bracket, and the "nothing left" audit of case S stage 20. A bare
+# refusal bracket, and the "nothing left" audit of case S stage 19. A bare
 # kind of architecture.md, Key table, is scoped to $CLUSTER by workerctl (all
 # but cluster_conf, worker and the three *_rev kinds, which are never scoped),
 # so a scoped read FAILS once the cluster is gone (`cluster "itgw" does not
@@ -777,7 +777,7 @@ play_cutover() { # <sp> <migr name>
 	where=$(printf '%s' "$json" | "$JQ" -r --arg d "$dst" '
 		[ .slices | to_entries[] | .key as $s | .value
 		  | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?) | .leg_id as $l
+		  | .leg_list[]? | .leg_id as $l
 		  | .side_list[]? | select(.side_id == $d)
 		  | "0x\($s) \($l)" ][0] // empty')
 	[ -n "$where" ] || die "play_cutover: side $dst of $2 is in no leg of $1"
@@ -1234,12 +1234,12 @@ smoke_sp_footprint() { # <sp>
 
 # smoke_dn_charge is what one DN owes this SP: the ext_cnt of the GROUP each
 # of its sides belongs to, summed over its sides
-# (architecture.md, Capacity index keys — a side is charged its group's size,
-# and a spare leg's side is charged exactly like an active one).
+# (architecture.md, Capacity index keys — a side is charged its group's
+# size).
 smoke_dn_charge() { # <sp> <addr_port>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | . as $grp | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?
+		  | . as $grp | .leg_list[]? | .side_list[]?
 		  | select(.addr_port == $a) | ($grp.ext_cnt | tonumber) ]
 		| add // 0' --arg a "$2"
 }
@@ -1250,7 +1250,7 @@ smoke_dn_charge() { # <sp> <addr_port>
 smoke_dn_sides() { # <sp> <addr_port>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?
+		  | .leg_list[]? | .side_list[]?
 		  | select(.addr_port == $a) ] | length' --arg a "$2"
 }
 
@@ -1296,12 +1296,12 @@ smoke_cap_free() { # <dn_capacity|cn_capacity> <addr_port>
 	printf '%d' "$((16#$hex))"
 }
 
-# smoke_check_dn is the per-DN half of the write-set audit (gateway.md,
-# Storage pools and GrowSlice; architecture.md, Capacity index keys), in one
-# place because the smoke case's create-sp, grow-slice, migration and
-# spare-leg stages all owe exactly these four facts: free = total − what the
-# SP's groups charge, one pointer per side, a capacity key that agrees with
-# the record, and the DnRev the ledger's flush left.
+# smoke_check_dn is the per-DN half of the write-set audit (gateway.md, Storage
+# pools and GrowSlice; architecture.md, Capacity index keys), in one place
+# because the smoke case's create-sp, grow-slice and migration stages all owe
+# exactly these four facts: free = total − what the SP's groups charge, one
+# pointer per side, a capacity key that agrees with the record, and the DnRev
+# the ledger's flush left.
 smoke_check_dn() { # <sp> <addr_port> <want dn_rev>
 	local sp=$1 addr=$2 wantRev=$3 charge sides free
 	charge=$(smoke_dn_charge "$sp" "$addr")
@@ -1453,10 +1453,9 @@ smoke_dn_holds() { # <addr_port> <side_id>
 		--arg s "$2"
 }
 
-# smoke_grp_addrs lists the distinct DN addr_ports one group occupies, active
-# and spare legs alike — the set whose DnRev a group-touching op bumps, and
-# the set a placement must stay out of (the black list of architecture.md,
-# Per-operation allocation).
+# smoke_grp_addrs lists the distinct DN addr_ports the legs of one group occupy
+# — the set whose DnRev a group-touching op bumps, and the set a placement must
+# stay out of (the black list of architecture.md, Per-operation allocation).
 #
 # A failed read DIES, as key_count's does: jq on empty input prints nothing
 # and exits 0, so a read that did not answer would otherwise come back as an
@@ -1472,7 +1471,7 @@ smoke_grp_addrs() { # <sp> <grp_id>
 	smoke_jq "$json" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
 		  | select(.grp_id == $g)
-		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?.addr_port ]
+		  | .leg_list[]? | .side_list[]?.addr_port ]
 		| unique[]' --arg g "$2"
 }
 
@@ -1497,7 +1496,7 @@ smoke_side_field() { # <sp> <side_id> <field>
 			"a read that did not answer is not an empty field"
 	smoke_jq "$json" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?
+		  | .leg_list[]? | .side_list[]?
 		  | select(.side_id == $s) ][0] | .[$f]' --arg s "$2" --arg f "$3"
 }
 
@@ -1508,24 +1507,17 @@ smoke_side_field() { # <sp> <side_id> <field>
 smoke_leg_side_ids() { # <sp> <leg_id>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?) | select(.leg_id == $l)
+		  | .leg_list[]? | select(.leg_id == $l)
 		  | .side_list[]?.side_id ] | .[]' --arg l "$2"
 }
 
-# smoke_grp_leg_ids lists a group's ACTIVE leg ids in position order — the md
-# member slots, which is what step 15 asserts the switch swapped in place.
+# smoke_grp_leg_ids lists a group's leg ids in position order — the md member
+# slots, which is how stage 15 asserts that the finish put the new leg in the
+# bad leg's place.
 smoke_grp_leg_ids() { # <sp> <grp_id>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
 		  | select(.grp_id == $g) | .leg_list[]?.leg_id ] | .[]' --arg g "$2"
-}
-
-# smoke_grp_spare_ids is its spare_leg_list twin.
-smoke_grp_spare_ids() { # <sp> <grp_id>
-	smoke_jq "$(sp_json "$1")" '
-		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | select(.grp_id == $g) | .spare_leg_list[]?.leg_id ] | .[]'  \
-		--arg g "$2"
 }
 
 # smoke_ns prints one stored namespace as JSON. A namespace is a field of its
@@ -1569,7 +1561,7 @@ smoke_listed_svcids() { # <sp>
 }
 
 # smoke_dn_free_sum is Σ free_ext_cnt over the four DNs — the aggregate the
-# teardown of step 20 must restore exactly, and the cross-check that no
+# teardown of stage 19 must restore exactly, and the cross-check that no
 # per-DN assertion above quietly agreed with a wrong topology.
 smoke_dn_free_sum() {
 	local i total=0
@@ -2516,7 +2508,7 @@ EOF
 	clone=$(smoke_jq "$(sp_json sp0)" '.clones.cl0 | @json')
 	assert_field "$clone" '.clone_id' "$cloneId" "clone clone_id"
 	# Its clone meta group (architecture.md, Clones): sp0's own leg count,
-	# one side of one extent per leg, no spare, every side unprovisioned and
+	# one side of one extent per leg, every side unprovisioned and
 	# on a DN of its own — the DNs here sit in four locations — each of
 	# those DNs charged its extent and its pointer with one DnRev bump.
 	local grpLegs cloneDns
@@ -2525,8 +2517,6 @@ EOF
 	assert_field "$clone" '.meta_grp.ext_cnt' "1" "clone meta group ext_cnt"
 	assert_field "$clone" '.meta_grp.leg_list | length' "$grpLegs" \
 		"clone meta group legs, as many as sp0's groups have"
-	assert_field "$clone" '(.meta_grp.spare_leg_list // []) | length' "0" \
-		"clone meta group spares"
 	assert_field "$clone" \
 		'[.meta_grp.leg_list[].side_list | length] | unique | @json' '[1]' \
 		"one side per leg of the clone meta group"
@@ -2879,103 +2869,7 @@ EOF
 		"the source DN's side pointer went with the released side"
 
 	# -------------------------------------------------------------------
-	stage 15 "spare legs: create, the unprovisioned refusal, switch, delete"
-	# -------------------------------------------------------------------
-	local spareLeg spareSide spareAddr targetLeg targetPos targetAddr
-	grpBlack=$(smoke_grp_addrs sp0 "$dataGrp")
-	[ -n "$grpBlack" ] || die "sp0's data group $dataGrp lists no DN"
-	out=$(gw create-spare --sp sp0 --rev "$SP_REV" --grp "$dataGrp")
-	refresh_rev sp0
-	spareLeg=$(jq_of "$out" '.leg_id')
-	assert_ne "$spareLeg" "0" "create-spare leg_id"
-	assert_eq "$(smoke_grp_spare_ids sp0 "$dataGrp")" "$spareLeg" \
-		"the group's spare_leg_list holds exactly the new leg"
-	spareSide=$(smoke_leg_side_ids sp0 "$spareLeg")
-	spareAddr=$(smoke_side_field sp0 "$spareSide" addr_port)
-	# [D15] again: a fresh spare is unprovisioned, which is exactly why it
-	# cannot be switched in yet.
-	assert_eq "$(smoke_side_field sp0 "$spareSide" provisioned)" "false" \
-		"the spare's side is unprovisioned"
-	# The spare exists to survive the loss of a DN the group already uses, so
-	# its scan is black-listed off every one of them (architecture.md,
-	# Per-operation allocation).
-	assert_eq "$(printf '%s\n' "$grpBlack" | grep -cx "$spareAddr")" "0" \
-		"the spare landed on a DN the group did not already occupy"
-	for i in 0 1 2 3; do
-		addr=$(dn_addr "$i")
-		want=${beforeRev[i]}
-		[ "$addr" != "$spareAddr" ] || want=$((want + 1))
-		smoke_check_dn sp0 "$addr" "$want"
-		beforeRev[i]=$want
-	done
-	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - 12 - grpExt))" \
-		"Σ DN free after the spare was charged (a spare occupies a DN like an active leg)"
-	# Extents only: a spare's side holds no copy, so its DN is charged no
-	# metadata units (architecture.md, Metadata units).
-	smoke_check_dn_units "" 0
-	targetLeg=$(smoke_jq "$(sp_json sp0)" '
-		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | select(.grp_id == $g) | .leg_list[]?.leg_id ][0]' \
-		--arg g "$dataGrp")
-	targetPos=$(smoke_jq "$(sp_json sp0)" '
-		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | select(.grp_id == $g) | .leg_list[]?.leg_id ] | index($l) // -1' \
-		--arg g "$dataGrp" --arg l "$targetLeg")
-	targetAddr=$(smoke_side_field sp0 \
-		"$(smoke_leg_side_ids sp0 "$targetLeg")" addr_port)
-	# A spare whose side is not yet provisioned must never become an md member
-	# (architecture.md, Spare legs), so the switch is refused, and the refusal
-	# must write nothing.
-	assert_no_write "switch-spare with an unprovisioned spare" \
-		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
-		--grp "$dataGrp" --spare "$spareLeg" --target "$targetLeg"
-	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "SpRev after the refused switch"
-	# Playing the worker again (Integration test plan,
-	# The etcd verification, `workerctl`): FlipProvisioned is the same model op
-	# the sp-worker calls once the dn agent reports the side's zeroing done,
-	# and it bumps SpRev, so the cached token has to be refreshed.
-	out=$(wctl set-provisioned --sp sp0 --slice "$slice" --leg "$spareLeg" \
-		--side "$spareSide")
-	assert_field "$out" '.flipped' "true" "set-provisioned flipped the spare's side"
-	refresh_rev sp0
-	assert_eq "$(smoke_side_field sp0 "$spareSide" provisioned)" "true" \
-		"the spare's side is provisioned"
-	out=$(gw switch-spare --sp sp0 --rev "$SP_REV" --grp "$dataGrp" \
-		--spare "$spareLeg" --target "$targetLeg")
-	refresh_rev sp0
-	assert_field "$out" '.curr_active_leg_id' "$spareLeg" \
-		"switch-spare reply curr_active_leg_id"
-	assert_field "$out" '.curr_spare_leg_id' "$targetLeg" \
-		"switch-spare reply curr_spare_leg_id"
-	# The spare takes the target's POSITION in leg_list (architecture.md,
-	# Spare legs) — the md member slot the array is missing — and the target
-	# is parked, not deleted.
-	assert_eq "$(smoke_grp_leg_ids sp0 "$dataGrp" | sed -n "$((targetPos + 1))p")" \
-		"$spareLeg" "the spare took the target's position in leg_list"
-	assert_eq "$(smoke_grp_spare_ids sp0 "$dataGrp")" "$targetLeg" \
-		"the replaced leg is parked in spare_leg_list"
-	# A switch moves no extents: both legs already own their DN's space.
-	for i in 0 1 2 3; do smoke_check_dn sp0 "$(dn_addr "$i")" "${beforeRev[i]}"; done
-	out=$(gw delete-spare --sp sp0 --rev "$SP_REV" --grp "$dataGrp" \
-		--leg "$targetLeg")
-	refresh_rev sp0
-	assert_field "$out" '.leg_id' "$targetLeg" "delete-spare reply leg_id"
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '
-		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | select(.grp_id == $g) | .spare_leg_list[]? ] | length' \
-		--arg g "$dataGrp")" "0" "the group has no spare leg left"
-	for i in 0 1 2 3; do
-		addr=$(dn_addr "$i")
-		want=${beforeRev[i]}
-		[ "$addr" != "$targetAddr" ] || want=$((want + 1))
-		smoke_check_dn sp0 "$addr" "$want"
-		beforeRev[i]=$want
-	done
-	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - 12))" \
-		"Σ DN free after the parked leg was released"
-
-	# -------------------------------------------------------------------
-	stage 16 "repairs: create, abort and cancel; create, start and finish"
+	stage 15 "repairs: create, abort and cancel; create, start and finish"
 	# -------------------------------------------------------------------
 	# A repair replaces a bad leg of the group by a new leg (architecture.md,
 	# Repairs). No worker runs, so the suite plays the two worker writes a
@@ -2985,7 +2879,7 @@ EOF
 	# worker makes from the primary's verdict (architecture.md, Repair),
 	# which bump SpRev. A repair's new side and a retired side live in their
 	# own records, outside the slices, so the DN audit here is
-	# smoke_check_dn_moves; smoke_check_dn holds again once stage 17 has
+	# smoke_check_dn_moves; smoke_check_dn holds again once stage 16 has
 	# deleted the last of them.
 	local spIdHex badLeg badSide badAddr badIdx repKey rep repId
 	local repLeg repSide repAddr dnBefore storeBefore
@@ -3035,11 +2929,11 @@ EOF
 		"r0's new leg has one side"
 	repSide=$(jq_of "$rep" '.new_leg_list[0].side_list[0].side_id')
 	repAddr=$(jq_of "$rep" '.new_leg_list[0].side_list[0].addr_port')
-	# [D15]: a new side is written unprovisioned, as a spare's is.
+	# [D15]: a new side is written unprovisioned.
 	assert_field "$rep" '.new_leg_list[0].side_list[0].provisioned' \
 		"false" "r0's new side is unprovisioned"
-	# Placed by the spare leg's rule (architecture.md, Per-operation
-	# allocation): off every DN the group occupies.
+	# Placed by architecture.md, Per-operation allocation, CreateRepair: off
+	# every DN the group occupies.
 	assert_eq "$(printf '%s\n' "$grpBlack" | grep -cx "$repAddr")" "0" \
 		"r0's new leg landed on a DN the group did not already occupy"
 	assert_eq "$(smoke_grp_field sp0 "$dataGrp" rep_name)" "r0" \
@@ -3144,6 +3038,10 @@ EOF
 	assert_field "$out" '.rep_id' "$repId" "finish-repair reply rep_id"
 	assert_field "$out" '.retired_leg_id' "$badLeg" \
 		"finish-repair retired the bad leg"
+	# The group held no retired leg, so the finish gave none back
+	# (architecture.md, Repairs, FinishRepair).
+	assert_field "$out" '.given_back_leg_id' "0" \
+		"finish-repair gave no retired leg back"
 	# The new leg takes the bad leg's position in leg_list and its leg_idx
 	# (architecture.md, Repairs).
 	assert_eq "$(smoke_grp_leg_ids sp0 "$dataGrp" | sed -n 1p)" "$repLeg" \
@@ -3182,7 +3080,7 @@ EOF
 		"$badAddr still holds the retired side"
 
 	# -------------------------------------------------------------------
-	stage 17 "retired legs: list, take one back and cancel, delete"
+	stage 16 "retired legs: list, take one back and cancel, delete"
 	# -------------------------------------------------------------------
 	out=$(gw list-retired-legs --sp sp0)
 	assert_field "$out" '.leg_id_to_retired_leg | keys | @json' \
@@ -3258,7 +3156,7 @@ EOF
 		"Σ DN free after the repairs (the new leg took the bad leg's extents)"
 
 	# -------------------------------------------------------------------
-	stage 18 "get-td-bm / get-leg-bm and the two inspects"
+	stage 17 "get-td-bm / get-leg-bm and the two inspects"
 	# -------------------------------------------------------------------
 	# GW14: the agent's bytes travel verbatim, and this fake replies an
 	# empty bitmap, so the pass-through is an empty hex string of length 0.
@@ -3337,7 +3235,7 @@ EOF
 		"inspect-side zeroed_bytes is the seeded side_conf.zero_bytes"
 
 	# -------------------------------------------------------------------
-	stage 19 "advance-ids: every counter moves, no revision, new ids above"
+	stage 18 "advance-ids: every counter moves, no revision, new ids above"
 	# -------------------------------------------------------------------
 	# The id step (architecture.md, Clusters; gateway.md GW19): one
 	# transaction moves the three globals' next_id by IdStepStride, then one
@@ -3397,7 +3295,7 @@ EOF
 		"delete-td t9 reply td_id"
 
 	# -------------------------------------------------------------------
-	stage 20 "reverse teardown down to an empty store"
+	stage 19 "reverse teardown down to an empty store"
 	# -------------------------------------------------------------------
 	out=$(gw delete-ns --sp sp0 --rev "$SP_REV" --nqn "$nqn" --idx 1)
 	refresh_rev sp0
@@ -3488,7 +3386,7 @@ EOF
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" \
 		"SpGlobal Σbucket after the drain"
 	# GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id must
-	# never come back. It stands where stage 19's id step moved it.
+	# never come back. It stands where stage 18's id step moved it.
 	assert_field "$global" '.next_id' "$((2 + ID_STEP_STRIDE))" \
 		"SpGlobal next_id never rewinds"
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS))" \
@@ -4735,7 +4633,7 @@ faults_nonprimary_cntlr() { # <sp name>
 }
 
 # faults_side_addr prints the addr_port of one side of the SP by side_id,
-# searching active and spare legs of both group kinds. CreateMigration
+# searching the legs of both group kinds. CreateMigration
 # appends its destination to the SOURCE side's leg (architecture.md,
 # Migrations), so this is the
 # only way to learn which DN the gateway picked for it.
@@ -4743,7 +4641,7 @@ faults_side_addr() { # <sp name> <side_id, decimal>
 	jq_of "$(sp_json "$1")" "
 		[ .slices[]
 		  | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?)
+		  | .leg_list[]?
 		  | .side_list[]?
 		  | select((.side_id | tostring) == \"$2\")
 		  | .addr_port ][0]"
@@ -4923,14 +4821,13 @@ faults_validation_battery() { # <the cluster's stored cntlr_interval>
 		"the refusal names primary_unhealthy $low and cntlr_interval $interval"
 }
 
-# faults_notfound_battery is stage 2 of case C (GW7): one probe per missing id —
-# cluster / sp / dn / cn / td / nqn / ns_idx / clone / xfer / migr / cntlr /
-# side — plus the two spare ids, a repair's name on each call that takes one,
-# a retired leg id and a repair's group. Every other id a probe names exists,
-# so its
-# NOT_FOUND can only be the missing id's own — the cluster probe never
-# reaches an SP, the sp probe never reaches a td — which is what makes the
-# battery a statement about GW5's resolution order.
+# faults_notfound_battery is stage 2 of case C (GW7): one probe per missing id
+# — cluster / sp / dn / cn / td / nqn / ns_idx / clone / xfer / migr / cntlr /
+# side — plus a repair's name on each call that takes one, a retired leg id, a
+# repair's group and its bad leg. Every other id a probe names exists, so its
+# NOT_FOUND can only be the missing id's own — the cluster probe never reaches
+# an SP, the sp probe never reaches a td — which is what makes the battery a
+# statement about GW5's resolution order.
 faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 	local ssNqn=$1 grp=$2 leg=$3
 
@@ -4962,20 +4859,14 @@ faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 	gwx NOT_FOUND inspect-cntlr --sp sp0 --id 0xdead
 	gwx NOT_FOUND inspect-side --sp sp0 --id 0xdead
 
-	# The spare ids, both of them. architecture.md, Spare legs, makes
-	# SwitchSpareLeg check leg membership in its own pre-read precisely so an
-	# unknown id is NOT_FOUND here rather than the FAILED_PRECONDITION
-	# model.SwitchSpareLeg would raise for it.
-	gwx NOT_FOUND delete-spare --sp sp0 --rev "$SP_REV" \
-		--grp "$grp" --leg 0xdead
-	gwx NOT_FOUND switch-spare --sp sp0 --rev "$SP_REV" \
-		--grp "$grp" --spare 0xdead --target "$leg"
-
 	# The repair and retired-leg ids (architecture.md, Repairs, Retired
 	# legs). A name or a leg id the pool does not list is the model op's own
 	# exported reason on the four calls that run one, which the gateway
-	# answers NOT_FOUND (GW7); a group in neither a slice nor a clone is the
-	# create's planning read's.
+	# answers NOT_FOUND (GW7); a group in neither a slice nor a clone, and a
+	# bad leg the group's leg_list does not hold, are the create's planning
+	# read's, which checks the bad leg's membership in its own read so that
+	# an unknown id is NOT_FOUND rather than the FAILED_PRECONDITION
+	# model.CreateRepair would raise for it.
 	gwx NOT_FOUND get-repair --sp sp0 --name nosuchrep
 	gwx NOT_FOUND finish-repair --sp sp0 --rev "$SP_REV" --name nosuchrep
 	gwx NOT_FOUND cancel-repair --sp sp0 --rev "$SP_REV" --name nosuchrep
@@ -4983,6 +4874,8 @@ faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 	gwx NOT_FOUND delete-retired-leg --sp sp0 --rev "$SP_REV" --leg 0xdead
 	gwx NOT_FOUND create-repair --sp sp0 --rev "$SP_REV" --name r0 \
 		--grp 0xdead --bad-legs "$leg"
+	gwx NOT_FOUND create-repair --sp sp0 --rev "$SP_REV" --name r0 \
+		--grp "$grp" --bad-legs 0xdead
 }
 
 # faults_agent_battery is stage 4 of case C (AG2, AG3). It is one batch
@@ -5054,9 +4947,9 @@ case_faults() {
 	CASE=faults
 
 	local ssNqn="$NQN_PREFIX:ss0"
-	local out spId slice dataGrp dataLeg metaLeg srcSide dstSide
+	local out spId slice dataGrp dataLeg metaGrp metaLeg srcSide dstSide
 	local primary cntlrId cnAddr cnDir cnId cloneId migrId
-	local dnAddr dnDir dnId spare nonPrimary
+	local dnAddr dnDir dnId nonPrimary
 	local forceCloneId forceMigrId forceDstSide forceDnAddr forceDnDir
 
 	# -----------------------------------------------------------------
@@ -5139,10 +5032,10 @@ case_faults() {
 	assert_eq "$(smoke_jq "$out" '.clone_bm_idx.cl0 | @json')" '[]' \
 		"cl0: no source bitmap chunks yet"
 
-	# One migration on the META group's first leg. Meta is deliberate: it
-	# leaves the data group's DN set free for the spare leg below, and
-	# grpDnAddrs black-lists the whole group either way (architecture.md,
-	# Per-operation allocation).
+	# One migration on the META group's first leg: step 3's create-migr and
+	# create-repair of a leg that already carries two sides name it, and the
+	# data group stays whole for the repair probes of step 2.
+	metaGrp=$(sp_grp_id sp0 meta 0)
 	metaLeg=$(sp_leg_id sp0 meta 0 0)
 	srcSide=$(sp_side_id sp0 meta 0 0)
 	gw create-migr --sp sp0 --rev "$SP_REV" --name m0 \
@@ -5167,26 +5060,9 @@ case_faults() {
 		"get-migr read-back: cutover_pending"
 	assert_ne "$dstSide" "$srcSide" "m0: the destination is a new side"
 
-	# One spare leg on the data group — step 3's unprovisioned switch.
-	# CreateSpareLeg (architecture.md, Spare legs) writes it parked and
-	# unprovisioned, which is exactly the state SwitchSpareLeg must refuse to
-	# activate (architecture.md, Side provisioning protocol).
+	# The data group and its first leg, which step 2's repair probes name.
 	dataGrp=$(sp_grp_id sp0 data 0)
 	dataLeg=$(sp_leg_id sp0 data 0 0)
-	# The reply is captured into a variable of its own rather than read
-	# inline: a `$( )` nested in an argument swallows the exit status, and a
-	# MUTATION that failed must abort the case rather than yield an empty id.
-	out=$(gw create-spare --sp sp0 --rev "$SP_REV" --grp "$dataGrp")
-	refresh_rev sp0
-	spare=$(jq_of "$out" '.leg_id')
-	assert_ne "$spare" "0" "create-spare returned a leg_id"
-	out=$(sp_json sp0)
-	assert_field "$out" \
-		'.slices | to_entries[0].value.data_grp_list[0].spare_leg_list | length' \
-		"1" "the data group holds one spare leg"
-	assert_field "$out" \
-		'.slices | to_entries[0].value.data_grp_list[0].spare_leg_list[0].side_list[0].provisioned' \
-		"false" "the spare's side is unprovisioned ([D15])"
 
 	spId=$(sp_id_of sp0)
 	slice=$(sp_first_slice sp0)
@@ -5224,7 +5100,7 @@ case_faults() {
 	# is accepted, and the threshold is stored exactly as sent — the three
 	# members the request left at zero stay zero, resolved only when read
 	# (architecture.md, Common validation). The extra pool is then latched
-	# and drained, the way case S stage 20 tears sp0 down, and must give
+	# and drained, the way case S stage 19 tears sp0 down, and must give
 	# every node back exactly what its create took, so no later count of the
 	# case moves.
 	local nodesBefore nodesAfter thrRev
@@ -5354,16 +5230,21 @@ case_faults() {
 		'.message | test("the cutover has not started")' "true" \
 		"m0: force does not lift the cutover refusal"
 
-	# A spare whose side is not yet provisioned must never become an md member
-	# (architecture.md, Spare legs).
-	assert_no_write "switch-spare with an unprovisioned spare" \
-		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
-		--grp "$dataGrp" --spare "$spare" --target "$dataLeg"
+	# A repair replaces a leg with one side: a leg a migration holds keeps
+	# its two sides until the migration ends (architecture.md, Repairs), and
+	# the create refuses it in its planning read, before the leg's health is
+	# judged, with CreateMigration's own words.
+	assert_no_write "create-repair of a leg a migration holds" \
+		faults_gwx_out FAILED_PRECONDITION create-repair --sp sp0 \
+		--rev "$SP_REV" --name r0 --grp "$metaGrp" --bad-legs "$metaLeg"
+	assert_field "$FAULTS_OUT" \
+		'.message | test("a migration is running on it")' "true" \
+		"the refused repair names the running migration"
 
 	# The fifteenth guard of this stage — an SP-level mutator refused
 	# because the SP is `deleting` — has no probe HERE on purpose: `delete-sp`
 	# sets the flag
-	# (gateway.md, Storage pools and GrowSlice), and step 20 of case S drives
+	# (gateway.md, Storage pools and GrowSlice), and stage 19 of case S drives
 	# the gate for real. It cannot be driven here, because this stage's sp0
 	# must stay live for the rest of the battery and the latch is one-way.
 
@@ -5692,15 +5573,13 @@ restart_bucket_sum() { # <dn_global|cn_global|sp_global>
 # restart_sp_dn_use prints "<dn addr_port> <extents>" once per stored Side of
 # one SP. A side occupies its GROUP's ext_cnt on the DN it names — that is the
 # quantity gateway.md, Storage pools and GrowSlice, debits per leg — so the
-# group has to be carried into the side iteration. Spare legs are walked too
-# even though CreateStoragePool mints none, so the helper stays honest if a
-# later stage ever adds one.
+# group has to be carried into the side iteration.
 restart_sp_dn_use() { # <sp name>
 	jq_of "$(sp_json "$1")" '
 		.slices[]
 		| (.meta_grp_list[]?, .data_grp_list[]?)
 		| . as $grp
-		| ($grp.leg_list[]?, $grp.spare_leg_list[]?)
+		| $grp.leg_list[]?
 		| .side_list[]?
 		| "\(.addr_port) \($grp.ext_cnt)"'
 }
@@ -6350,7 +6229,7 @@ ceil_bound() { # <label>
 ceil_side_addr() { # <sp> <side_id, decimal>
 	ceil_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?
+		  | .leg_list[]? | .side_list[]?
 		  | select((.side_id | tostring) == $s) | .addr_port ][0]' \
 		--arg s "$2"
 }
@@ -6390,7 +6269,7 @@ case_ceiling() {
 	efill=$(((DN_META_UNITS - 1) * META_UNIT * CEIL_BLOCK / ext))
 	assert_eq "$(meta_units "$((efill * ext))" "$CEIL_BLOCK")" \
 		"$DN_META_UNITS" "a migration of $efill extents fills a DN's area"
-	# A big node holds that group with DN_EXTENTS extents to spare: on a DN
+	# A big node holds that group with DN_EXTENTS extents left over: on a DN
 	# for the one-extent legs of spE0 and of cFit's clone meta group, on a
 	# CN for spE0's footprint next to spE2's.
 	bigext=$((efill + DN_EXTENTS))

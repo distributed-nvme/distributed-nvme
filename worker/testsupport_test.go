@@ -865,14 +865,6 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// reset drops everything captured so far, so a case reads only what came
-// after it.
-func (b *syncBuffer) reset() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.data = nil
-}
-
 func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()

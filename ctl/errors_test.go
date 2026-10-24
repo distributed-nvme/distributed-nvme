@@ -80,8 +80,8 @@ func TestRpcFailureLines(t *testing.T) {
 			"DEADLINE_EXCEEDED: context deadline exceeded"},
 		{codes.Unavailable, "connection refused",
 			"UNAVAILABLE: connection refused"},
-		{codes.ResourceExhausted, "no spare slot",
-			"RESOURCE_EXHAUSTED: no spare slot"},
+		{codes.ResourceExhausted, "no disk node has room",
+			"RESOURCE_EXHAUSTED: no disk node has room"},
 		// An empty message still produces a well-formed line rather than a
 		// truncated one.
 		{codes.Internal, "", "INTERNAL: "},
@@ -204,7 +204,7 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 		{"malformed --id",
 			[]string{"cntlr", "delete", "--id", "cntlr0"}},
 		{"malformed --grp",
-			[]string{"spare", "create", "--grp", "grp0"}},
+			[]string{"repair", "create", "--grp", "grp0"}},
 		{"malformed --level",
 			[]string{"sp", "set-level", "--level", "bogus"}},
 		{"malformed --redund",

@@ -48,11 +48,11 @@ func fixtureSpConf() *pb.SpConf {
 	}
 }
 
-// writeSp writes the whole fixture: one slice with a meta group, a data group
-// and a spare leg, so that the loader's side walk has to reach a spare's side
-// to find dn-c, and one clone whose clone meta group has a leg on dn-d, which
-// only the walk over the clones finds, and a spare on dn-a, which the slice
-// already holds.
+// writeSp writes the whole fixture: one slice with a meta group and a data
+// group, whose second leg alone is on dn-c, so that the loader's side walk
+// has to reach every leg of a group, and one clone whose clone meta group has
+// a leg on dn-d, which only the walk over the clones finds, and a leg on
+// dn-a, which the slice already holds.
 func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	t.Helper()
 	conf := fixtureSpConf()
@@ -89,8 +89,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 					SideId:   62,
 					AddrPort: fixtureDnAddrB,
 				}},
-			}},
-			SpareLegList: []*pb.Leg{{
+			}, {
 				LegId:  53,
 				LegIdx: 1,
 				SideList: []*pb.Side{{
@@ -120,8 +119,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 					SideId:   64,
 					AddrPort: fixtureDnAddrD,
 				}},
-			}},
-			SpareLegList: []*pb.Leg{{
+			}, {
 				LegId:  55,
 				LegIdx: 1,
 				SideList: []*pb.Side{{
@@ -293,10 +291,10 @@ func TestLoadSpHappyPath(t *testing.T) {
 				chunk.SliceIdx, chunk.Idx)
 		}
 	}
-	// The spare leg's side counts: dn-c is only reachable through
-	// spare_leg_list. So does the clone meta group's: dn-d is only
-	// reachable through the clone, and dn-a, which both the slice and the
-	// clone's spare hold, is one record.
+	// The data group's second leg counts: dn-c is only reachable through
+	// it. So does the clone meta group's: dn-d is only reachable through
+	// the clone, and dn-a, which both the slice and the clone's second leg
+	// hold, is one record.
 	if len(state.DnByAddr) != 4 ||
 		state.DnByAddr[fixtureDnAddrC].GetDnId() != 3 ||
 		state.DnByAddr[fixtureDnAddrD].GetDnId() != 4 {

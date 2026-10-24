@@ -12,14 +12,17 @@ import (
 )
 
 // This file is architecture.md, Repairs and Retired legs (gateway.md, Repairs
-// and retired legs): the eight RPCs of an operator's repair of an md-raid1
-// group's leg. A repair is a record of its own that names one bad leg of the
-// group's leg_list and carries one new leg; the primary adds the new leg to
-// the running array and the sp worker moves the repair's stage from the
-// primary's report, so the gateway only ever writes the record and reads it
-// back (architecture.md, Repair). A finished repair keeps the bad leg as a
-// retired leg, whose side keeps its data on its DN until it is deleted or a
-// repair of the group takes it back.
+// and retired legs): the eight RPCs of a repair of an md-raid1 group's leg.
+// CreateRepair creates an operator's repair only, since it refuses the
+// reserved prefix of the sp worker's own repairs (validateRepName); the calls
+// that address a repair by its name take both kinds, so an operator can
+// drive a repair the worker created. A repair is a record of its own that
+// names one bad leg of the group's leg_list and carries one new leg; the
+// primary adds the new leg to the running array and the sp worker moves the
+// repair's stage from the primary's report, so the gateway only ever writes
+// the record and reads it back (architecture.md, Repair). A finished repair
+// keeps the bad leg as a retired leg, whose side keeps its data on its DN
+// until it is deleted or a repair of the group takes it back.
 //
 // The five calls that write run the repair operations of model (gateway.md,
 // Scope and placement: reused, never duplicated), each behind a planning
@@ -32,9 +35,9 @@ import (
 // TryToAbortRepair and DeleteRetiredLeg: openSp — the resolution, the
 // deleting gate and the token check, in that order (GW5, GW6) — in a
 // read-only snapshot. Its scope hands the model op the cluster id, the
-// shard, the sp id and, for CancelRepair and DeleteRetiredLeg, the stored
-// ClusterConf, which those ops take from their caller and never read
-// themselves (architecture.md, STM discipline).
+// shard, the sp id and, for FinishRepair, CancelRepair and DeleteRetiredLeg,
+// the stored ClusterConf, which those ops take from their caller and never
+// read themselves (architecture.md, STM discipline).
 // Everything else the call decides on, the op reads in its own STM.
 func (s *Server) repairOpenSp(
 	ctx context.Context,
@@ -54,13 +57,15 @@ func (s *Server) repairOpenSp(
 	return sc, nil
 }
 
-// releaseConfGate is GW11's gate of CancelRepair and DeleteRetiredLeg, which
-// give a side back to its DN and so move the capacity key the STORED ladder
-// names: a stored ClusterConf that is not concrete is a lost invariant,
-// ABORTED here from the planning read's copy, as newDnLedger refuses it for
-// the gateway's own releases. The op checks the same conf again in its STM,
-// where it could answer only FAILED_PRECONDITION; it is handed this copy, so
-// through the gateway that check never fires.
+// releaseConfGate is GW11's gate of FinishRepair, CancelRepair and
+// DeleteRetiredLeg, which give a side back to its DN — FinishRepair the side
+// of the retired leg it gives back for the sp worker's repair at the bound —
+// and so move the capacity key the STORED ladder names: a stored ClusterConf
+// that is not concrete is a lost invariant, ABORTED here from the planning
+// read's copy, as newDnLedger refuses it for the gateway's own releases. The
+// op checks the same conf again in its STM, at the top whether it releases a
+// side or not, where it could answer only FAILED_PRECONDITION; it is handed
+// this copy, so through the gateway that check never fires.
 func releaseConfGate(sc *spScope) error {
 	if err := model.ValidateClusterConf(sc.Cc); err != nil {
 		return errAborted("%v", err)
@@ -212,29 +217,28 @@ func modelReason(err error) string {
 //
 // The pure checks come first: the rep_name rule with its reserved prefix and
 // exactly one bad leg id, INVALID_ARGUMENT. Then a GW9 candidate unit, each
-// round of which plans from its own snapshot, as CreateSpareLeg's does. The
-// snapshot makes every refusal of architecture.md, Repairs, in the order a
-// request meets them there, behind openSp's resolution, deleting gate and
-// token: the sp_level gate, a RedundNone pool, a name in use, the group's
-// look-up — slices first, then clones (locateGrp) — a clone being deleted, a
-// group with a repair or a spare leg, the bad leg's membership, its two sides
-// and its health, and then the new leg's own checks. model.CreateRepair makes
-// all of them again in its STM, where they are authoritative, but model
-// raises every precondition as FAILED_PRECONDITION, so the snapshot is what
-// gives the INVALID_ARGUMENT, ALREADY_EXISTS, NOT_FOUND and
-// RESOURCE_EXHAUSTED answers their codes; of those, the op's STM can still
-// meet a name taken, a retired leg gone and the retired list filled after
-// the snapshot, and their exported reasons are answered with the same
-// refusals. The snapshot also keeps a create that cannot commit from paying
-// for a candidate scan.
+// round of which plans from its own snapshot. The snapshot makes every refusal
+// of architecture.md, Repairs, in the order a request meets them there, behind
+// openSp's resolution, deleting gate and token: the sp_level gate of an
+// operator's name, a RedundNone pool, a name in use, the group's look-up —
+// slices first, then clones (locateGrp) — a clone being deleted, a group with
+// a repair, the bad leg's membership, its two sides and its health, and then
+// the new leg's own checks. model.CreateRepair makes all of them again in its
+// STM, where they are authoritative, but model raises every precondition as
+// FAILED_PRECONDITION, so the snapshot is what gives the INVALID_ARGUMENT,
+// ALREADY_EXISTS, NOT_FOUND and RESOURCE_EXHAUSTED answers their codes; of
+// those, the op's STM can still meet a name taken, a retired leg gone and the
+// retired list filled after the snapshot, and their exported reasons are
+// answered with the same refusals. The snapshot also keeps a create that
+// cannot commit from paying for a candidate scan.
 //
-// A fresh new leg is placed as a spare is (architecture.md, Per-operation
-// allocation): the group's DN set — its legs and spares, since it has no
-// repair yet — as the black list, their locations as tier 1, one DN of
-// room for the group's ext_cnt. The op refuses as candidate changed a group
-// that gained a DN outside that plan and a pick gone stale, and the unit runs
-// the round again from a fresh snapshot (GW9). A new leg taken from a retired
-// leg allocates nothing, so its round is the unit's only one.
+// A fresh new leg is placed as architecture.md, Per-operation allocation,
+// places a repair's: the group's DN set — its legs, since it has no repair yet
+// — as the black list, their locations as tier 1, one DN of room for the
+// group's ext_cnt and no metadata units. The op refuses as candidate changed a
+// group that gained a DN outside that plan and a pick gone stale, and the unit
+// runs the round again from a fresh snapshot (GW9). A new leg taken from a
+// retired leg allocates nothing, so its round is the unit's only one.
 func (s *Server) CreateRepair(
 	ctx context.Context,
 	req *pb.CreateRepairRequest,
@@ -276,8 +280,8 @@ func (s *Server) CreateRepair(
 		newLeg := model.RepairNewLeg{RetiredLegId: req.GetRetiredLegId()}
 		if newLeg.RetiredLegId == 0 {
 			// The group has no repair, the snapshot's refusal, so its DN
-			// set is its legs' and its spares'; the scan black-lists it and
-			// the op checks the group against it for a DN it gained since.
+			// set is its legs'; the scan black-lists it and the op checks
+			// the group against it for a DN it gained since.
 			newLeg.GrpDnAddrs = grpDnAddrs(loc.Grp, nil)
 			excludeLocs, err := grpDnLocations(
 				ctx, s.cli, sc.Cid, newLeg.GrpDnAddrs)
@@ -341,16 +345,20 @@ func repairCreateChecks(
 	if err != nil {
 		return nil, grpLocation{}, err
 	}
-	// CreateSpareLeg's level gate, for its reason: at these levels the
-	// operator is in charge, and the op refuses them too (architecture.md,
-	// Repairs).
-	if level := sc.Conf.GetSpLevel(); level >= pb.SpLevel_SP_LEVEL_NO_THINPOOL {
+	// The op's level gate for the request's name (model.CreateRepairLevelGate,
+	// architecture.md, Repairs). validateRepName has refused the reserved
+	// prefix, so the name is an operator's and the gate is
+	// SP_LEVEL_NO_REDUND: no group array is built from there up, and below
+	// it an operator's create is no reaction, so the levels where the
+	// operator is in charge take it.
+	level := sc.Conf.GetSpLevel()
+	if level >= model.CreateRepairLevelGate(req.GetRepName()) {
 		return nil, grpLocation{}, errPrecondition(
 			"storage pool %q is at %s, where no repair is created",
 			spName, level)
 	}
 	// Redundancy is an SP-wide property the group only inherits, so the
-	// test is the SP's STORED bdev_conf, as CreateSpareLeg's is.
+	// test is the SP's STORED bdev_conf.
 	if !isMdRaid1(spBdevConf(sc.Conf)) {
 		return nil, grpLocation{}, errInvalid(
 			"storage pool %q is RedundNone: there is no redundancy to repair",
@@ -372,13 +380,8 @@ func repairCreateChecks(
 			"group %d has the repair %q: a group has one repair at a time",
 			grpId, repName)
 	}
-	if n := len(grp.GetSpareLegList()); n != 0 {
-		return nil, grpLocation{}, errPrecondition(
-			"group %d has %d spare legs: a spare leg and the repair's new "+
-				"leg would race for one place in its array", grpId, n)
-	}
 	badLegId := req.GetBadLegIdList()[0]
-	bad := activeLegOf(grp, badLegId)
+	bad := grpLegOf(grp, badLegId)
 	if bad == nil {
 		return nil, grpLocation{}, errNotFound(
 			"leg %d not found in the leg_list of group %d", badLegId, grpId)
@@ -435,11 +438,17 @@ func repairCreateChecks(
 // FinishRepair is the FinishRepair of architecture.md, Repairs: the new leg
 // takes the bad leg's place in leg_list, and the bad leg becomes a retired
 // leg whose side stays on its DN. The planning read resolves and checks the
-// token; model.FinishRepair, given the gateway's clock as the retired leg's
-// retired_epoch, makes every other check — a name the pool does not list is
-// model.ReasonRepairNotFound, NOT_FOUND here, and a stage other than STARTED
-// or a deleting clone FAILED_PRECONDITION naming the stage or the clone's
-// state (GW7).
+// token, and gates the stored ClusterConf (releaseConfGate);
+// model.FinishRepair, given the gateway's clock as the retired leg's
+// retired_epoch and that conf, makes every other check — a name the pool
+// does not list is model.ReasonRepairNotFound, NOT_FOUND here, and a stage
+// other than STARTED or a deleting clone FAILED_PRECONDITION naming the
+// stage or the clone's state (GW7). The name passes the common name rule
+// alone (validateRepairRef), so an operator can finish a repair the sp
+// worker created; that finish gives back the group's oldest retired leg when
+// the group holds MaxRetiredLegPerGrp of them, and the reply names that leg
+// in given_back_leg_id, zero when the finish gave none back, so the operator
+// learns which kept copy went.
 func (s *Server) FinishRepair(
 	ctx context.Context,
 	req *pb.FinishRepairRequest,
@@ -454,10 +463,13 @@ func (s *Server) FinishRepair(
 	if err != nil {
 		return nil, err
 	}
-	repId, retiredId, err := model.FinishRepair(
+	if err := releaseConfGate(sc); err != nil {
+		return nil, err
+	}
+	res, err := model.FinishRepair(
 		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
 		req.GetSpRev().GetRevision(), req.GetRepName(),
-		uint64(time.Now().Unix()),
+		uint64(time.Now().Unix()), sc.Cc,
 	)
 	if modelReason(err) == model.ReasonRepairNotFound {
 		return nil, errRepairNotFound(req.GetRepName())
@@ -465,7 +477,11 @@ func (s *Server) FinishRepair(
 	if err != nil {
 		return nil, mapModelErr(err)
 	}
-	return &pb.FinishRepairReply{RepId: repId, RetiredLegId: retiredId}, nil
+	return &pb.FinishRepairReply{
+		RepId:          res.RepId,
+		RetiredLegId:   res.RetiredLegId,
+		GivenBackLegId: res.GivenBackLegId,
+	}, nil
 }
 
 // CancelRepair is the CancelRepair of architecture.md, Repairs: an ABORTED

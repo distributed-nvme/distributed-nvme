@@ -264,7 +264,8 @@ func healthBlockPayload(cnId uint64, unixNano int64) []byte {
 // promotion and an agent restart start a fresh one, whatever an earlier
 // prober reported). Before any completion it is never OK: an OK row clears
 // Leg.err_epoch (HL2), so a promotion's fresh probers would clear a dead
-// leg's err_epoch and an unprobed spare would read ready to AR8.
+// leg's err_epoch, a repair's new leg's among them, whose health epoch leg
+// repair reads (AR8).
 func (s *CnAgentServer) legProbeOutcome(
 	st *cntlrState,
 	lp *legPlan,

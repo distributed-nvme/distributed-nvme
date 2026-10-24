@@ -48,8 +48,6 @@ const (
 	opsMetaSideB = uint64(432)
 	opsDataSideA = uint64(441)
 	opsDataSideB = uint64(442)
-	opsSpareLeg  = uint64(451)
-	opsSpareSide = uint64(452)
 	opsNextId    = uint64(1000)
 	opsSlot      = uint32(3)
 	// opsNotPending is a reported pool total no slice of this fixture can
@@ -514,33 +512,17 @@ func (e *opsEnv) modRev(key string) int64 {
 	return 0
 }
 
-// addSpare appends one spare leg to the fixture's data group.
-func (e *opsEnv) addSpare(provisioned bool) {
-	slice := e.slice()
-	grp := findGroup(slice, opsDataGrpId)
-	grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
-		LegId:    opsSpareLeg,
-		LegIdx:   2,
-		SideList: []*pb.Side{opsSide(opsSpareSide, opsDnC, provisioned)},
-	})
-	mustPut(e.t, e.cli, SliceKey(e.cid, opsSpId, opsSliceId), slice)
-}
-
-// grpDnAddrs is the plan a caller of CreateSpareLeg scans against, read now:
-// the DN of every side of every leg and every spare of the group, as the
+// grpDnAddrs is the plan a caller of CreateRepair scans a fresh new leg
+// against, read now: the DN of every side of every leg of the group, as the
 // worker's grpAddrs and the gateway's grpDnAddrs build it. A group the slice
 // does not hold has none.
 func (e *opsEnv) grpDnAddrs(grpId uint64) []string {
 	e.t.Helper()
 	grp := findGroup(e.slice(), grpId)
 	var addrs []string
-	for _, legList := range [][]*pb.Leg{
-		grp.GetLegList(), grp.GetSpareLegList(),
-	} {
-		for _, leg := range legList {
-			for _, side := range leg.GetSideList() {
-				addrs = append(addrs, side.GetAddrPort())
-			}
+	for _, leg := range grp.GetLegList() {
+		for _, side := range leg.GetSideList() {
+			addrs = append(addrs, side.GetAddrPort())
 		}
 	}
 	return addrs
@@ -1191,7 +1173,6 @@ func TestSetCntlrErrEpochSettle(t *testing.T) {
 
 func TestSetLegErrEpoch(t *testing.T) {
 	env := newOpsEnv(t)
-	env.addSpare(false)
 	revBefore := env.spRev()
 	// An active leg of the data group.
 	if err := SetLegErrEpoch(
@@ -1210,16 +1191,6 @@ func TestSetLegErrEpoch(t *testing.T) {
 	}
 	if got := findLeg(env.slice(), opsMetaLegB).GetErrEpoch(); got != 1100 {
 		t.Errorf("meta leg err_epoch: got %d, want 1100", got)
-	}
-	// A SPARE leg is found too (architecture.md, Spare legs: spares are probed
-	// like active legs).
-	if err := SetLegErrEpoch(
-		env.ctx, env.cli, env.cid, opsSpId, opsSliceId, opsSpareLeg, 1200,
-	); err != nil {
-		t.Fatalf("SetLegErrEpoch spare: %v", err)
-	}
-	if got := findLeg(env.slice(), opsSpareLeg).GetErrEpoch(); got != 1200 {
-		t.Errorf("spare leg err_epoch: got %d, want 1200", got)
 	}
 	// No restart, then clear.
 	if err := SetLegErrEpoch(
@@ -1253,7 +1224,6 @@ func TestSetLegErrEpoch(t *testing.T) {
 
 func TestSetSideErrEpoch(t *testing.T) {
 	env := newOpsEnv(t)
-	env.addSpare(false)
 	revBefore := env.spRev()
 	if err := SetSideErrEpoch(
 		env.ctx, env.cli, env.cid, opsSpId, opsSliceId, opsDataSideB, 1000,
@@ -1263,13 +1233,14 @@ func TestSetSideErrEpoch(t *testing.T) {
 	if got := findSide(env.slice(), opsDataSideB).GetErrEpoch(); got != 1000 {
 		t.Errorf("side err_epoch: got %d, want 1000", got)
 	}
+	// A side of the META group is found too.
 	if err := SetSideErrEpoch(
-		env.ctx, env.cli, env.cid, opsSpId, opsSliceId, opsSpareSide, 1100,
+		env.ctx, env.cli, env.cid, opsSpId, opsSliceId, opsMetaSideA, 1100,
 	); err != nil {
-		t.Fatalf("SetSideErrEpoch spare: %v", err)
+		t.Fatalf("SetSideErrEpoch meta: %v", err)
 	}
-	if got := findSide(env.slice(), opsSpareSide).GetErrEpoch(); got != 1100 {
-		t.Errorf("spare side err_epoch: got %d, want 1100", got)
+	if got := findSide(env.slice(), opsMetaSideA).GetErrEpoch(); got != 1100 {
+		t.Errorf("meta side err_epoch: got %d, want 1100", got)
 	}
 	if err := SetSideErrEpoch(
 		env.ctx, env.cli, env.cid, opsSpId, opsSliceId, opsDataSideB, 9000,
@@ -2255,9 +2226,8 @@ func TestGrowSliceData(t *testing.T) {
 			grp.GetMetaBlocks(), grp.GetDataBlocks(), wantMeta, wantData,
 		)
 	}
-	if len(grp.GetLegList()) != 2 || len(grp.GetSpareLegList()) != 0 {
-		t.Fatalf("legs: got %d active, %d spare",
-			len(grp.GetLegList()), len(grp.GetSpareLegList()))
+	if len(grp.GetLegList()) != 2 {
+		t.Fatalf("legs: got %d, want 2", len(grp.GetLegList()))
 	}
 	for legIdx, leg := range grp.GetLegList() {
 		if leg.GetLegIdx() != uint32(legIdx) {
@@ -2368,8 +2338,7 @@ func TestGrowSliceData(t *testing.T) {
 
 // TestGrowSliceRefusesASecondGrowForOneBreach is AR2's "two owners overlapping
 // on one SP cannot apply an action twice — the second STM fails its
-// precondition", applied to GrowSlice's STM (CreateSpareLeg's is
-// TestCreateSpareLegRefusesWhileASpareIsPending's).
+// precondition", applied to GrowSlice's STM.
 //
 // Both owners evaluate the SAME pre-grow snapshot during an accepted
 // shard-handoff overlap (VW7): both find AR6's pending rule false, both
@@ -2667,8 +2636,8 @@ func TestGrowSlicePreconditions(t *testing.T) {
 		},
 		{
 			// GrowSlice keeps checkDnPick's named refusals: unlike
-			// CreateSpareLeg it does not read a vanished pick as a stale
-			// plan.
+			// CreateRepair's fresh new leg it does not read a vanished pick
+			// as a stale plan.
 			name: "dn not allocatable",
 			setup: func(env *opsEnv) []Cand {
 				legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
@@ -3383,682 +3352,5 @@ func TestReplaceCntlrAtTheCeiling(t *testing.T) {
 			!proto.Equal(list[len(list)-1], opsTrConf(newCnAddr)) {
 			t.Errorf("%s: %v, want the new cntlr listed last", key, list)
 		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Spare legs
-// ---------------------------------------------------------------------------
-
-func TestCreateSpareLeg(t *testing.T) {
-	env := newOpsEnv(t)
-	before := struct{ spRev, dnCRev uint64 }{env.spRev(), env.dnRev(opsDnC)}
-	legId, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnC),
-		env.grpDnAddrs(opsDataGrpId), env.cc,
-	)
-	if err != nil {
-		t.Fatalf("CreateSpareLeg: %v", err)
-	}
-	if legId != opsNextId {
-		t.Errorf("leg_id: got %d, want %d (from next_id)", legId, opsNextId)
-	}
-	if got := env.spConf().GetNextId(); got != opsNextId+2 {
-		t.Errorf("next_id: got %d, want %d", got, opsNextId+2)
-	}
-	grp := findGroup(env.slice(), opsDataGrpId)
-	if len(grp.GetLegList()) != 2 {
-		t.Errorf("the active list must be untouched")
-	}
-	if len(grp.GetSpareLegList()) != 1 {
-		t.Fatalf("spares: got %d, want 1", len(grp.GetSpareLegList()))
-	}
-	spare := grp.GetSpareLegList()[0]
-	if spare.GetLegIdx() != 2 {
-		t.Errorf("leg_idx: got %d, want 1 + max over both lists = 2",
-			spare.GetLegIdx())
-	}
-	if len(spare.GetSideList()) != 1 {
-		t.Fatalf("sides: got %d, want 1", len(spare.GetSideList()))
-	}
-	side := spare.GetSideList()[0]
-	if side.GetSideId() != opsNextId+1 {
-		t.Errorf("side_id: got %d, want %d", side.GetSideId(), opsNextId+1)
-	}
-	if side.GetProvisioned() {
-		t.Errorf("a new spare side must be unprovisioned ([D15])")
-	}
-	if side.GetCntlidSlot() != opsSlot {
-		t.Errorf("cntlid_slot: got %d, want %d", side.GetCntlidSlot(), opsSlot)
-	}
-	if side.GetAddrPort() != opsDnC ||
-		!proto.Equal(side.GetNvmeTrConf(), opsTrConf(opsDnC)) {
-		t.Errorf("the side must carry the DN's endpoint: %v", side)
-	}
-	dn := env.dn(opsDnC)
-	if dn.GetFreeExtCnt() != opsDnFree-opsDataExtCnt {
-		t.Errorf("dn-c free_ext_cnt: got %d, want %d",
-			dn.GetFreeExtCnt(), opsDnFree-opsDataExtCnt)
-	}
-	if len(dn.GetSidePtrList()) != 1 ||
-		dn.GetSidePtrList()[0].GetLegId() != legId {
-		t.Errorf("dn-c must point at the new leg: %v", dn.GetSidePtrList())
-	}
-	if got := env.dnRev(opsDnC); got != before.dnCRev+1 {
-		t.Errorf("dn-c rev: got %d, want %d", got, before.dnCRev+1)
-	}
-	if got := env.spRev(); got != before.spRev+1 {
-		t.Errorf("SpRev: got %d, want %d", got, before.spRev+1)
-	}
-	// A second spare on a different DN fills the list once the first one's
-	// side is provisioned (an unprovisioned spare holds the next create
-	// back); a third is refused. Each create is planned after the one
-	// before it, so its plan holds every spare the group has.
-	if _, _, err := FlipProvisioned(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		[]SideRef{{
-			SliceId: opsSliceId, LegId: legId, SideId: side.GetSideId(),
-		}},
-	); err != nil {
-		t.Fatalf("FlipProvisioned: %v", err)
-	}
-	if _, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnD),
-		env.grpDnAddrs(opsDataGrpId), env.cc,
-	); err != nil {
-		t.Fatalf("CreateSpareLeg second: %v", err)
-	}
-	env.putDn("dn-e:9000", 704, 4, opsDnFree)
-	_, err = CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand("dn-e:9000"),
-		env.grpDnAddrs(opsDataGrpId), env.cc,
-	)
-	precondition := wantPrecondition(t, err, opCreateSpareLeg)
-	if precondition.Reason != "spare list full" {
-		t.Errorf("Reason: got %q", precondition.Reason)
-	}
-}
-
-// overlapSpareCreate is AR2's spare-create overlap up to the first commit:
-// two owners overlapping on one SP plan a spare for the same repair from ONE
-// snapshot, in which the group has none — one plan, the group's DNs — and
-// each picks a DN of its own. Owner A's create commits. It returns the plan,
-// owner B's pick and owner A's new spare.
-func overlapSpareCreate(t *testing.T, env *opsEnv) ([]string, Cand, *pb.Leg) {
-	t.Helper()
-	plan := env.grpDnAddrs(opsDataGrpId)
-	ownerA := env.dnCand(opsDnC)
-	ownerB := env.dnCand(opsDnD)
-	legId, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, ownerA, plan, env.cc,
-	)
-	if err != nil {
-		t.Fatalf("CreateSpareLeg (owner A): %v", err)
-	}
-	spare := findLeg(env.slice(), legId)
-	if spare == nil {
-		t.Fatalf("owner A's spare %d is not in the slice", legId)
-	}
-	return plan, ownerB, spare
-}
-
-// spareRefusal is what a refused CreateSpareLeg must leave as it found it:
-// the SP's revision and conf, the picked DN's record and revision, and the
-// group's spare list.
-type spareRefusal struct {
-	addrPort string
-	spRev    uint64
-	conf     *pb.SpConf
-	dn       *pb.DnConf
-	dnRev    uint64
-	spares   []*pb.Leg
-}
-
-// witnessSpareRefusal records the state a refused create on addrPort must
-// not move.
-func (e *opsEnv) witnessSpareRefusal(addrPort string) spareRefusal {
-	e.t.Helper()
-	return spareRefusal{
-		addrPort: addrPort,
-		spRev:    e.spRev(),
-		conf:     e.spConf(),
-		dn:       e.dn(addrPort),
-		dnRev:    e.dnRev(addrPort),
-		spares:   findGroup(e.slice(), opsDataGrpId).GetSpareLegList(),
-	}
-}
-
-// check asserts that nothing the witness recorded moved.
-func (w spareRefusal) check(t *testing.T, env *opsEnv) {
-	t.Helper()
-	if got := env.spRev(); got != w.spRev {
-		t.Errorf("SpRev: got %d, want %d", got, w.spRev)
-	}
-	if got := env.spConf(); !proto.Equal(got, w.conf) {
-		t.Errorf("SpConf moved on a refusal: %v", got)
-	}
-	if got := env.dn(w.addrPort); !proto.Equal(got, w.dn) {
-		t.Errorf("%s moved on a refusal: %v", w.addrPort, got)
-	}
-	if got := env.dnRev(w.addrPort); got != w.dnRev {
-		t.Errorf("%s rev: got %d, want %d", w.addrPort, got, w.dnRev)
-	}
-	spares := findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
-	if len(spares) != len(w.spares) {
-		t.Fatalf("spares: got %d, want %d", len(spares), len(w.spares))
-	}
-	for idx := range spares {
-		if !proto.Equal(spares[idx], w.spares[idx]) {
-			t.Errorf("spare %d moved on a refusal: %v", idx, spares[idx])
-		}
-	}
-}
-
-// TestCreateSpareLegRefusesWhileASpareIsPending pins AR8 step 3's hold inside
-// the STM (AR2): of two owners that planned one repair from one snapshot,
-// the second must fail its precondition while the first one's spare is still
-// unprovisioned, and write nothing, rather than add a second spare no failure
-// asked for.
-func TestCreateSpareLegRefusesWhileASpareIsPending(t *testing.T) {
-	env := newOpsEnv(t)
-	plan, ownerB, spare := overlapSpareCreate(t, env)
-	witness := env.witnessSpareRefusal(opsDnD)
-	_, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, ownerB, plan, env.cc,
-	)
-	precondition := wantPrecondition(t, err, opCreateSpareLeg)
-	if precondition.Reason != ReasonSpareUnprovisioned {
-		t.Errorf("Reason: got %q, want %q",
-			precondition.Reason, ReasonSpareUnprovisioned)
-	}
-	witness.check(t, env)
-	spares := findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
-	if len(spares) != 1 || spares[0].GetLegId() != spare.GetLegId() {
-		t.Fatalf("spares: got %v, want owner A's leg %d alone",
-			spares, spare.GetLegId())
-	}
-}
-
-// TestCreateSpareLegRefusesASecondOwnerAfterTheFlip is the same overlap once
-// RW18 has flipped the first owner's spare, which lifts the hold above: a
-// group may keep MaxSpareLegPerGrp spares of standby capacity, and nothing
-// records which repair a spare was made for. The gain check closes that gap
-// for two plans read from one snapshot, as here; AR2 names the one case it
-// leaves open. The second owner's plan, read before the first create, does
-// not hold the first spare's DN, so its STM finds the group has gained a DN
-// and fails with ReasonCandidateChanged, writing nothing; its next pass
-// plans from a snapshot that holds the spare, which AR8 switches in or
-// waits for. A create planned after the flip, from a plan that holds the
-// spare, still commits.
-func TestCreateSpareLegRefusesASecondOwnerAfterTheFlip(t *testing.T) {
-	env := newOpsEnv(t)
-	plan, ownerB, spare := overlapSpareCreate(t, env)
-	if _, _, err := FlipProvisioned(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		[]SideRef{{
-			SliceId: opsSliceId,
-			LegId:   spare.GetLegId(),
-			SideId:  spare.GetSideList()[0].GetSideId(),
-		}},
-	); err != nil {
-		t.Fatalf("FlipProvisioned: %v", err)
-	}
-	witness := env.witnessSpareRefusal(opsDnD)
-	_, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, ownerB, plan, env.cc,
-	)
-	precondition := wantPrecondition(t, err, opCreateSpareLeg)
-	if precondition.Reason != ReasonCandidateChanged {
-		t.Errorf("Reason: got %q, want %q",
-			precondition.Reason, ReasonCandidateChanged)
-	}
-	witness.check(t, env)
-	// Planned again, from the group as it is now, the same DN commits.
-	if _, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnD),
-		env.grpDnAddrs(opsDataGrpId), env.cc,
-	); err != nil {
-		t.Fatalf("CreateSpareLeg from a fresh plan: %v", err)
-	}
-	spares := findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
-	if len(spares) != 2 {
-		t.Errorf("spares after the fresh plan: got %d, want 2", len(spares))
-	}
-}
-
-// TestCreateSpareLegPreconditions is the op's refusals, each writing nothing.
-// The plan a row hands the op is read after its setup unless planBefore is
-// set: a plan read before the setup is the snapshot a caller planned from
-// when the setup's change landed between its scan and its STM.
-//
-// The rows split three ways. A DN the group gained since the plan, even the
-// pick's own, and a pick gone stale since the scan — its capacity key moved,
-// its DnConf deleted, the DN disabled or short of extents — are all
-// ReasonCandidateChanged, on which the caller plans again. A pick inside
-// the caller's own plan stays the hard "dn already in the group": no caller
-// that black-lists its plan can hand one. The rest are the op's own
-// refusals.
-func TestCreateSpareLegPreconditions(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		grpId      uint64
-		planBefore bool
-		setup      func(env *opsEnv) Cand
-		reason     string
-	}{
-		{
-			name:   "group not found",
-			grpId:  9999,
-			setup:  func(env *opsEnv) Cand { return env.dnCand(opsDnC) },
-			reason: "group not found",
-		},
-		{
-			name:   "dn already in the group",
-			grpId:  opsDataGrpId,
-			setup:  func(env *opsEnv) Cand { return env.dnCand(opsDnA) },
-			reason: "dn already in the group",
-		},
-		{
-			// Provisioned, or the unprovisioned-spare refusal would answer
-			// first. The plan holds the spare, so this is a pick inside it.
-			name:  "dn already a spare of the group",
-			grpId: opsDataGrpId,
-			setup: func(env *opsEnv) Cand {
-				env.addSpare(true)
-				return env.dnCand(opsDnC)
-			},
-			reason: "dn already in the group",
-		},
-		{
-			// A spare committed after the plan, on a DN of its own: the
-			// pick may share its failure domain, which only the plan can
-			// tell.
-			name:       "a spare the plan did not hold",
-			grpId:      opsDataGrpId,
-			planBefore: true,
-			setup: func(env *opsEnv) Cand {
-				env.addSpare(true)
-				return env.dnCand(opsDnD)
-			},
-			reason: ReasonCandidateChanged,
-		},
-		{
-			// A migration's destination, the second side of an active leg,
-			// is a gain too, and the unprovisioned-spare hold, which reads
-			// spares only, does not see it.
-			name:       "a migration destination the plan did not hold",
-			grpId:      opsDataGrpId,
-			planBefore: true,
-			setup: func(env *opsEnv) Cand {
-				slice := env.slice()
-				leg := findLeg(slice, opsDataLegB)
-				leg.SideList = append(leg.SideList,
-					opsSide(opsDataSideB+100, opsDnD, false))
-				mustPut(env.t, env.cli,
-					SliceKey(env.cid, opsSpId, opsSliceId), slice)
-				return env.dnCand(opsDnC)
-			},
-			reason: ReasonCandidateChanged,
-		},
-		{
-			// The gain on the pick's own DN is a stale plan as well, and
-			// the gain check comes before "dn already in the group", so the
-			// caller plans again instead of reading a refusal.
-			name:       "a gain the plan did not hold on the pick's dn",
-			grpId:      opsDataGrpId,
-			planBefore: true,
-			setup: func(env *opsEnv) Cand {
-				env.addSpare(true)
-				return env.dnCand(opsDnC)
-			},
-			reason: ReasonCandidateChanged,
-		},
-		{
-			name:       "the pick's dn_conf deleted",
-			grpId:      opsDataGrpId,
-			planBefore: true,
-			setup: func(env *opsEnv) Cand {
-				cand := env.dnCand(opsDnC)
-				env.delKey(DnConfKey(env.cid, opsDnC))
-				return cand
-			},
-			reason: ReasonCandidateChanged,
-		},
-		{
-			name:       "the pick disabled",
-			grpId:      opsDataGrpId,
-			planBefore: true,
-			setup: func(env *opsEnv) Cand {
-				cand := env.dnCand(opsDnC)
-				dn := env.dn(opsDnC)
-				dn.Disabled = true
-				mustPut(env.t, env.cli, DnConfKey(env.cid, opsDnC), dn)
-				return cand
-			},
-			reason: ReasonCandidateChanged,
-		},
-		{
-			// A migration off a spare gives it a second side, unprovisioned
-			// until the destination is zeroed: ANY side of a spare counts.
-			name:  "a spare's second side is unprovisioned",
-			grpId: opsDataGrpId,
-			setup: func(env *opsEnv) Cand {
-				env.addSpare(true)
-				slice := env.slice()
-				spare := findLeg(slice, opsSpareLeg)
-				spare.SideList = append(spare.SideList,
-					opsSide(opsSpareSide+1, opsDnD, false))
-				mustPut(env.t, env.cli,
-					SliceKey(env.cid, opsSpId, opsSliceId), slice)
-				env.putDn("dn-e:9000", 704, 4, opsDnFree)
-				return env.dnCand("dn-e:9000")
-			},
-			reason: ReasonSpareUnprovisioned,
-		},
-		{
-			name:  "group is not md-raid1",
-			grpId: opsDataGrpId,
-			setup: func(env *opsEnv) Cand {
-				conf := env.spConf()
-				conf.BdevConf.RedundConf = &pb.RedundConf{
-					RedunKind: &pb.RedundConf_RedundNone{
-						RedundNone: &pb.RedundNone{},
-					},
-				}
-				mustPut(env.t, env.cli,
-					SpConfKey(env.cid, opsSpName), conf)
-				return env.dnCand(opsDnC)
-			},
-			reason: "group is not md-raid1",
-		},
-		{
-			name:  "candidate changed",
-			grpId: opsDataGrpId,
-			setup: func(env *opsEnv) Cand {
-				cand := env.dnCand(opsDnC)
-				env.delKey(DnCapacityKey(
-					env.cid, mustBin(env.t, env, opsDnFree),
-					opsDnFree, opsDnC,
-				))
-				env.putDn(opsDnC, 702, 2, opsDnFree-1)
-				return cand
-			},
-			reason: ReasonCandidateChanged,
-		},
-		{
-			// A pick whose key still matches but whose free count is below
-			// the group's ext_cnt is stale all the same: a rescan never
-			// offers it.
-			name:  "the pick short of extents",
-			grpId: opsDataGrpId,
-			setup: func(env *opsEnv) Cand {
-				env.putDn(opsDnC, 702, 2, 2)
-				return env.dnCand(opsDnC)
-			},
-			reason: ReasonCandidateChanged,
-		},
-		{
-			name:  "sp level suppresses reactions",
-			grpId: opsDataGrpId,
-			setup: func(env *opsEnv) Cand {
-				cand := env.dnCand(opsDnC)
-				env.setLevel(pb.SpLevel_SP_LEVEL_NO_THINPOOL)
-				return cand
-			},
-			reason: "sp level suppresses reactions",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newOpsEnv(t)
-			var plan []string
-			if tc.planBefore {
-				plan = env.grpDnAddrs(tc.grpId)
-			}
-			cand := tc.setup(env)
-			if !tc.planBefore {
-				plan = env.grpDnAddrs(tc.grpId)
-			}
-			revBefore := env.spRev()
-			nextBefore := env.spConf().GetNextId()
-			spareBefore := len(
-				findGroup(env.slice(), opsDataGrpId).GetSpareLegList(),
-			)
-			_, err := CreateSpareLeg(
-				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-				opsSliceId, tc.grpId, cand, plan, env.cc,
-			)
-			precondition := wantPrecondition(t, err, opCreateSpareLeg)
-			if precondition.Reason != tc.reason {
-				t.Errorf(
-					"Reason: got %q, want %q",
-					precondition.Reason, tc.reason,
-				)
-			}
-			spareAfter := len(
-				findGroup(env.slice(), opsDataGrpId).GetSpareLegList(),
-			)
-			if spareAfter != spareBefore {
-				t.Errorf("the spare list must be untouched")
-			}
-			if got := env.spConf().GetNextId(); got != nextBefore {
-				t.Errorf("next_id: got %d, want %d", got, nextBefore)
-			}
-			if got := env.spRev(); got != revBefore {
-				t.Errorf("SpRev: got %d, want %d", got, revBefore)
-			}
-		})
-	}
-}
-
-// TestCreateSpareLegChecksOnlyAGain is the other half of the gain check, as
-// TestReplaceCntlrChecksOnlyAGain is ReplaceCntlr's: a DN the plan held that
-// has left the group since is no reason to plan again. The pick is still off
-// every DN and out of every location the group's sides hold, which were all
-// in the plan, and the room the departure freed is a candidate the scan did
-// not count on, like a DN that joins after it.
-func TestCreateSpareLegChecksOnlyAGain(t *testing.T) {
-	env := newOpsEnv(t)
-	// The plan names dn-d, which no side of the group holds any more.
-	plan := append(env.grpDnAddrs(opsDataGrpId), opsDnD)
-	legId, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnC), plan, env.cc,
-	)
-	if err != nil {
-		t.Fatalf("CreateSpareLeg: %v", err)
-	}
-	spare := findLeg(env.slice(), legId)
-	if spare == nil || singleSideAddr(spare) != opsDnC {
-		t.Errorf("spare: got %v, want leg %d on %s", spare, legId, opsDnC)
-	}
-}
-
-// singleSideAddr is the DN of a leg's one side, or "" when it has not
-// exactly one.
-func singleSideAddr(leg *pb.Leg) string {
-	if len(leg.GetSideList()) != 1 {
-		return ""
-	}
-	return leg.GetSideList()[0].GetAddrPort()
-}
-
-func TestSwitchSpareLeg(t *testing.T) {
-	env := newOpsEnv(t)
-	env.addSpare(true)
-	// Park the target's err_epoch so that the parked leg can be checked.
-	if err := SetLegErrEpoch(
-		env.ctx, env.cli, env.cid, opsSpId, opsSliceId, opsDataLegB, 1234,
-	); err != nil {
-		t.Fatalf("SetLegErrEpoch: %v", err)
-	}
-	revBefore := env.spRev()
-	if err := SwitchSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, opsSpareLeg, opsDataLegB,
-	); err != nil {
-		t.Fatalf("SwitchSpareLeg: %v", err)
-	}
-	grp := findGroup(env.slice(), opsDataGrpId)
-	if len(grp.GetLegList()) != 2 || len(grp.GetSpareLegList()) != 1 {
-		t.Fatalf("lists: got %d active, %d spare",
-			len(grp.GetLegList()), len(grp.GetSpareLegList()))
-	}
-	if grp.GetLegList()[0].GetLegId() != opsDataLegA {
-		t.Errorf("the untouched leg must keep its position")
-	}
-	if grp.GetLegList()[1].GetLegId() != opsSpareLeg {
-		t.Errorf("the spare must take the target's position: got %d",
-			grp.GetLegList()[1].GetLegId())
-	}
-	if grp.GetLegList()[1].GetLegIdx() != 2 {
-		t.Errorf("the spare keeps its own leg_idx: got %d",
-			grp.GetLegList()[1].GetLegIdx())
-	}
-	parked := grp.GetSpareLegList()[0]
-	if parked.GetLegId() != opsDataLegB {
-		t.Errorf("the target must be parked: got %d", parked.GetLegId())
-	}
-	if parked.GetErrEpoch() != 1234 {
-		t.Errorf("a parked leg keeps its err_epoch: got %d",
-			parked.GetErrEpoch())
-	}
-	if got := env.spRev(); got != revBefore+1 {
-		t.Errorf("SpRev: got %d, want %d", got, revBefore+1)
-	}
-	// Re-running is refused: the spare is now an active leg.
-	err := SwitchSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, opsSpareLeg, opsDataLegB,
-	)
-	precondition := wantPrecondition(t, err, opSwitchSpareLeg)
-	if precondition.Reason != "spare leg not found" {
-		t.Errorf("Reason: got %q", precondition.Reason)
-	}
-}
-
-func TestSwitchSpareLegPreconditions(t *testing.T) {
-	// addMigrDst gives one leg the second side a CreateMigration hangs off
-	// it (architecture.md, Migrations): an unprovisioned destination on dn-d, the
-	// one DN no leg of the fixture uses.
-	addMigrDst := func(env *opsEnv, legId uint64) {
-		slice := env.slice()
-		leg := findLeg(slice, legId)
-		leg.SideList = append(leg.SideList, opsSide(461, opsDnD, false))
-		mustPut(env.t, env.cli, SliceKey(env.cid, opsSpId, opsSliceId), slice)
-	}
-	for _, tc := range []struct {
-		name     string
-		setup    func(env *opsEnv)
-		grpId    uint64
-		spareId  uint64
-		targetId uint64
-		reason   string
-	}{
-		{
-			name:     "spare side is not provisioned",
-			setup:    func(env *opsEnv) { env.addSpare(false) },
-			grpId:    opsDataGrpId,
-			spareId:  opsSpareLeg,
-			targetId: opsDataLegB,
-			reason:   "spare side is not provisioned",
-		},
-		{
-			name: "spare leg under migration",
-			setup: func(env *opsEnv) {
-				env.addSpare(true)
-				addMigrDst(env, opsSpareLeg)
-			},
-			grpId:    opsDataGrpId,
-			spareId:  opsSpareLeg,
-			targetId: opsDataLegB,
-			reason:   "spare leg has no single side",
-		},
-		{
-			// AR8 leaves a migrating leg alone, and the STM re-checks it:
-			// a migration may start after the worker's pass read the leg.
-			name: "target leg under migration",
-			setup: func(env *opsEnv) {
-				env.addSpare(true)
-				addMigrDst(env, opsDataLegB)
-			},
-			grpId:    opsDataGrpId,
-			spareId:  opsSpareLeg,
-			targetId: opsDataLegB,
-			reason:   "target leg has no single side",
-		},
-		{
-			name:     "spare leg not found",
-			setup:    func(env *opsEnv) { env.addSpare(true) },
-			grpId:    opsDataGrpId,
-			spareId:  9999,
-			targetId: opsDataLegB,
-			reason:   "spare leg not found",
-		},
-		{
-			name:     "target leg not found",
-			setup:    func(env *opsEnv) { env.addSpare(true) },
-			grpId:    opsDataGrpId,
-			spareId:  opsSpareLeg,
-			targetId: 9999,
-			reason:   "target leg not found",
-		},
-		{
-			name:     "target must be active, not a spare",
-			setup:    func(env *opsEnv) { env.addSpare(true) },
-			grpId:    opsDataGrpId,
-			spareId:  opsSpareLeg,
-			targetId: opsSpareLeg,
-			reason:   "target leg not found",
-		},
-		{
-			name:     "group not found",
-			setup:    func(env *opsEnv) { env.addSpare(true) },
-			grpId:    9999,
-			spareId:  opsSpareLeg,
-			targetId: opsDataLegB,
-			reason:   "group not found",
-		},
-		{
-			name: "sp deleting",
-			setup: func(env *opsEnv) {
-				env.addSpare(true)
-				env.setDeleting()
-			},
-			grpId:    opsDataGrpId,
-			spareId:  opsSpareLeg,
-			targetId: opsDataLegB,
-			reason:   "sp deleting",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newOpsEnv(t)
-			tc.setup(env)
-			revBefore := env.spRev()
-			err := SwitchSpareLeg(
-				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-				opsSliceId, tc.grpId, tc.spareId, tc.targetId,
-			)
-			precondition := wantPrecondition(t, err, opSwitchSpareLeg)
-			if precondition.Reason != tc.reason {
-				t.Errorf(
-					"Reason: got %q, want %q",
-					precondition.Reason, tc.reason,
-				)
-			}
-			grp := findGroup(env.slice(), opsDataGrpId)
-			if grp.GetLegList()[1].GetLegId() != opsDataLegB {
-				t.Errorf("the active list must be untouched")
-			}
-			if got := env.spRev(); got != revBefore {
-				t.Errorf("SpRev: got %d, want %d", got, revBefore)
-			}
-		})
 	}
 }

@@ -91,9 +91,9 @@ func dnAddr(id uint64) string { return fmt.Sprintf("10.0.0.1:%d", 29600+id) }
 func cnAddr(id uint64) string { return fmt.Sprintf("10.0.0.1:%d", 29700+id) }
 
 // smallCluster is one planted cluster of five DNs and three CNs, each in a
-// location of its own, with the smoke pool on it: smokeSpec plus a spare leg
-// of the data group on dn 3. dn 4 holds nothing; dn 5 holds nothing and is
-// the one a case may move.
+// location of its own, with the smoke pool on it: smokeSpec on smokeShard.
+// dn 3 and dn 4 hold nothing; dn 5 holds nothing and is the one a case may
+// move.
 type smallCluster struct {
 	cli *etcdutil.Client
 	cl  Cluster
@@ -106,10 +106,6 @@ type smallCluster struct {
 func smallSpec() SpSpec {
 	spec := smokeSpec()
 	spec.Shard = smokeShard
-	spec.Legs = append(spec.Legs,
-		LegSpec{GrpId: 5, LegId: 12, LegIdx: 2, Spare: true})
-	spec.Sides = append(spec.Sides,
-		SideSpec{LegId: 12, SideId: 13, DnId: 3, Slot: 0})
 	return spec
 }
 
@@ -332,7 +328,7 @@ func TestPutClusterReadsBack(t *testing.T) {
 }
 
 // TestPutSpReadsBack pins PutSp's transaction as model reads it: the pool's
-// records, its slice tree with the spare leg on the spare list, the geometry
+// records, its slice tree, the geometry
 // model.GroupBlocks gives, and the bookkeeping of every node it names — the
 // extents and pointers, the capacity key, and one revision bump — while a
 // node it does not name is left alone.
@@ -344,7 +340,7 @@ func TestPutSpReadsBack(t *testing.T) {
 
 	conf := state.Conf
 	if conf.GetSpId() != 1 || conf.GetShardCode() != smokeShard ||
-		conf.GetNextId() != 14 || conf.GetNextDevId() != 1 ||
+		conf.GetNextId() != 12 || conf.GetNextDevId() != 1 ||
 		conf.GetDeleting() || conf.GetSpLevel() != 0 {
 		t.Fatalf("SpConf = %v", conf)
 	}
@@ -411,7 +407,7 @@ func TestPutSpReadsBack(t *testing.T) {
 	}
 	extentSize := c.cl.Conf.GetDnBinConf().GetExtentSize()
 	checkGroup := func(grp *pb.Group, id, extCnt uint64,
-		legs map[uint64]uint64, spares map[uint64]uint64) {
+		legs map[uint64]uint64) {
 		t.Helper()
 		metaBlocks, dataBlocks, err := model.GroupBlocks(
 			extCnt, extentSize, bdev)
@@ -424,44 +420,39 @@ func TestPutSpReadsBack(t *testing.T) {
 			t.Errorf("group %#x = %v, want ext_cnt %d, %d+%d blocks",
 				id, grp, extCnt, metaBlocks, dataBlocks)
 		}
-		checkLegs := func(list []*pb.Leg, want map[uint64]uint64,
-			what string) {
-			t.Helper()
-			if len(list) != len(want) {
-				t.Errorf("group %#x has %d %s, want %d", id, len(list),
-					what, len(want))
+		list := grp.GetLegList()
+		if len(list) != len(legs) {
+			t.Errorf("group %#x has %d legs, want %d", id, len(list),
+				len(legs))
+		}
+		for _, leg := range list {
+			dnId, ok := legs[leg.GetLegId()]
+			if !ok || len(leg.GetSideList()) != 1 {
+				t.Errorf("group %#x leg %v", id, leg)
+				continue
 			}
-			for _, leg := range list {
-				dnId, ok := want[leg.GetLegId()]
-				if !ok || len(leg.GetSideList()) != 1 {
-					t.Errorf("group %#x %s %v", id, what, leg)
-					continue
-				}
-				side := leg.GetSideList()[0]
-				if side.GetAddrPort() != dnAddr(dnId) ||
-					side.GetProvisioned() || side.GetErrEpoch() != 0 ||
-					!proto.Equal(side.GetNvmeTrConf(),
-						c.dns[dnId].Conf.GetNvmeTrConf()) {
-					t.Errorf("group %#x side %v, want unprovisioned on dn %d",
-						id, side, dnId)
-				}
+			side := leg.GetSideList()[0]
+			if side.GetAddrPort() != dnAddr(dnId) ||
+				side.GetProvisioned() || side.GetErrEpoch() != 0 ||
+				!proto.Equal(side.GetNvmeTrConf(),
+					c.dns[dnId].Conf.GetNvmeTrConf()) {
+				t.Errorf("group %#x side %v, want unprovisioned on dn %d",
+					id, side, dnId)
 			}
 		}
-		checkLegs(grp.GetLegList(), legs, "legs")
-		checkLegs(grp.GetSpareLegList(), spares, "spare legs")
 	}
 	checkGroup(slice.GetMetaGrpList()[0], 2, 1,
-		map[uint64]uint64{3: 1, 4: 2}, nil)
+		map[uint64]uint64{3: 1, 4: 2})
 	checkGroup(slice.GetDataGrpList()[0], 5, 2,
-		map[uint64]uint64{6: 1, 7: 2}, map[uint64]uint64{12: 3})
+		map[uint64]uint64{6: 1, 7: 2})
 	if len(c.sp.Groups) != 2 || c.sp.Groups[1].GrpId != 5 ||
 		c.sp.Groups[1].DataBlocks !=
 			slice.GetDataGrpList()[0].GetDataBlocks() {
 		t.Errorf("PutSp returned the geometry %v", c.sp.Groups)
 	}
 
-	// The DNs: dn 1 and dn 2 hold a meta and a data side, dn 3 the spare's
-	// side; dn 4 holds nothing.
+	// The DNs: dn 1 and dn 2 hold a meta and a data side; dn 3 and dn 4 hold
+	// nothing.
 	for dnId, want := range map[uint64]struct {
 		charge uint64
 		ptrs   []*pb.SidePointer
@@ -472,7 +463,6 @@ func TestPutSpReadsBack(t *testing.T) {
 		2: {3, []*pb.SidePointer{
 			{SpId: 1, LegId: 4, SideId: 9}, {SpId: 1, LegId: 7, SideId: 11},
 		}},
-		3: {2, []*pb.SidePointer{{SpId: 1, LegId: 12, SideId: 13}}},
 	} {
 		dn := c.dnConf(t, ctx, dnId)
 		if dn.GetFreeExtCnt() != nodeFree-want.charge ||
@@ -495,9 +485,12 @@ func TestPutSpReadsBack(t *testing.T) {
 				dnId, rev, c.sp.DnRevisions[dnAddr(dnId)])
 		}
 	}
-	if dn := c.dnConf(t, ctx, 4); dn.GetFreeExtCnt() != nodeFree ||
-		len(dn.GetSidePtrList()) != 0 || c.dnRev(t, ctx, 4) != 1 {
-		t.Errorf("dn 4, which the pool does not name, changed: %v", dn)
+	for _, dnId := range []uint64{3, 4} {
+		if dn := c.dnConf(t, ctx, dnId); dn.GetFreeExtCnt() != nodeFree ||
+			len(dn.GetSidePtrList()) != 0 || c.dnRev(t, ctx, dnId) != 1 {
+			t.Errorf("dn %d, which the pool does not name, changed: %v",
+				dnId, dn)
+		}
 	}
 
 	// The CNs: each cntlr's CN pays the footprint, the sum of every group.
@@ -629,8 +622,8 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 
 	// c0's group takes ids below its own, so the ids every later zero takes
 	// are the ones a clone with no group would leave: legs on dn 1, which
-	// holds the pool's sides too, and on dn 5, the spare on dn 3, the
-	// pool's spare's DN. No CN is charged for a clone.
+	// holds the pool's sides too, and on dn 5. No CN is charged for a
+	// clone.
 	cnsBefore := map[uint64]*pb.CnConf{}
 	for cnId := uint64(1); cnId <= 2; cnId++ {
 		cnsBefore[cnId] = c.cnConf(t, ctx, cnId)
@@ -642,7 +635,6 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 		Legs: []CloneLegSpec{
 			{LegId: 34, LegIdx: 0, SideId: 35, DnId: 1, Slot: 0},
 			{LegId: 36, LegIdx: 1, SideId: 37, DnId: 5, Slot: 1},
-			{LegId: 38, LegIdx: 2, SideId: 39, DnId: 3, Slot: 2, Spare: true},
 		},
 	})
 	if err != nil {
@@ -658,15 +650,14 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GroupBlocks: %v", err)
 	}
-	if clone.GrpId != 33 || !equalU64(clone.LegIds, 34, 36, 38) ||
-		!equalU64(clone.SideIds, 35, 37, 39) ||
+	if clone.GrpId != 33 || !equalU64(clone.LegIds, 34, 36) ||
+		!equalU64(clone.SideIds, 35, 37) ||
 		clone.MetaBlocks != metaBlocks || clone.DataBlocks != dataBlocks ||
-		len(clone.DnRevisions) != 3 || clone.DnRevisions[dnAddr(1)] != 3 ||
-		clone.DnRevisions[dnAddr(3)] != 3 ||
+		len(clone.DnRevisions) != 2 || clone.DnRevisions[dnAddr(1)] != 3 ||
 		clone.DnRevisions[dnAddr(5)] != 2 {
-		t.Fatalf("PutClone's group = %+v, want group 33 of legs 34, 36 "+
-			"and 38 at %d and %d blocks, dn 1 and dn 3 at revision 3, "+
-			"dn 5 at 2", clone, metaBlocks, dataBlocks)
+		t.Fatalf("PutClone's group = %+v, want group 33 of legs 34 and 36 "+
+			"at %d and %d blocks, dn 1 at revision 3, dn 5 at 2", clone,
+			metaBlocks, dataBlocks)
 	}
 	// One extent off each DN of the group, its pointer after the ones the
 	// DN held, the capacity key moved and one DnRev bump.
@@ -675,9 +666,6 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	}
 	c.dnHolds(t, ctx, 1, nodeFree-4, nodeFree-3, []*pb.SidePointer{
 		cloneSide(3, 8), cloneSide(6, 10), cloneSide(34, 35),
-	}, 3)
-	c.dnHolds(t, ctx, 3, nodeFree-3, nodeFree-2, []*pb.SidePointer{
-		cloneSide(12, 13), cloneSide(38, 39),
 	}, 3)
 	c.dnHolds(t, ctx, 5, nodeFree-1, nodeFree, []*pb.SidePointer{
 		cloneSide(36, 37),
@@ -843,12 +831,6 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 				NvmeTrConf: trOf(5),
 			}}},
 		},
-		SpareLegList: []*pb.Leg{
-			{LegId: 38, LegIdx: 2, SideList: []*pb.Side{{
-				SideId: 39, AddrPort: dnAddr(3), CntlidSlot: 2,
-				NvmeTrConf: trOf(3),
-			}}},
-		},
 	}
 	if got := state.Clones["c0"].GetMetaGrp(); !proto.Equal(got, wantGrp) {
 		t.Fatalf("c0's clone meta group %v, want %v", got, wantGrp)
@@ -978,20 +960,20 @@ func TestSettersReadBack(t *testing.T) {
 		old != 1234 {
 		t.Fatalf("SetCntlrEpoch clear = %d, %v; want the old 1234", old, err)
 	}
-	if _, err := SetLegEpoch(ctx, c.cli, c.cl, ref, 1, 12, 99); err != nil {
-		t.Fatalf("SetLegEpoch on the spare: %v", err)
+	if _, err := SetLegEpoch(ctx, c.cli, c.cl, ref, 1, 4, 99); err != nil {
+		t.Fatalf("SetLegEpoch on the meta group's second leg: %v", err)
 	}
-	if _, err := SetSideEpoch(ctx, c.cli, c.cl, ref, 1, 13, 77); err != nil {
-		t.Fatalf("SetSideEpoch on the spare's side: %v", err)
+	if _, err := SetSideEpoch(ctx, c.cli, c.cl, ref, 1, 9, 77); err != nil {
+		t.Fatalf("SetSideEpoch on that leg's side: %v", err)
 	}
 	if _, err := SetSideEpoch(ctx, c.cli, c.cl, ref, 1, 99, 77); err == nil ||
 		!strings.Contains(err.Error(), "holds no side") {
 		t.Fatalf("SetSideEpoch on no side = %v, want a refusal", err)
 	}
-	spare := c.load(t, ctx).Slices[1].GetDataGrpList()[0].GetSpareLegList()[0]
-	if spare.GetErrEpoch() != 99 ||
-		spare.GetSideList()[0].GetErrEpoch() != 77 {
-		t.Fatalf("the spare %v, want epochs 99 and 77", spare)
+	second := c.load(t, ctx).Slices[1].GetMetaGrpList()[0].GetLegList()[1]
+	if second.GetLegId() != 4 || second.GetErrEpoch() != 99 ||
+		second.GetSideList()[0].GetErrEpoch() != 77 {
+		t.Fatalf("leg 4 %v, want epochs 99 and 77", second)
 	}
 	if got := c.spRev(t, ctx); got != rev {
 		t.Fatalf("the epochs moved the pool's revision to %d", got)
@@ -1106,7 +1088,6 @@ func TestSettersReadBack(t *testing.T) {
 		Legs: []CloneLegSpec{
 			{LegIdx: 0, DnId: 1},
 			{LegIdx: 1, DnId: 2},
-			{LegIdx: 2, DnId: 3, Spare: true},
 		},
 	})
 	if err != nil {
@@ -1114,8 +1095,8 @@ func TestSettersReadBack(t *testing.T) {
 	}
 	rev = c.spRev(t, ctx)
 	if old, err := SetCloneLegEpoch(ctx, c.cli, c.cl, ref, "c0",
-		clone.LegIds[2], 99); err != nil || old != 0 {
-		t.Fatalf("SetCloneLegEpoch on the spare = %d, %v", old, err)
+		clone.LegIds[1], 99); err != nil || old != 0 {
+		t.Fatalf("SetCloneLegEpoch on the second leg = %d, %v", old, err)
 	}
 	if old, err := SetCloneSideEpoch(ctx, c.cli, c.cl, ref, "c0",
 		clone.SideIds[0], 77); err != nil || old != 0 {
@@ -1137,35 +1118,36 @@ func TestSettersReadBack(t *testing.T) {
 		t.Fatalf("SetCloneLegEpoch on a clone never planted succeeded")
 	}
 	grp := c.load(t, ctx).Clones["c0"].GetMetaGrp()
-	if grp.GetSpareLegList()[0].GetErrEpoch() != 99 ||
+	if grp.GetLegList()[1].GetErrEpoch() != 99 ||
 		grp.GetLegList()[0].GetSideList()[0].GetErrEpoch() != 0 ||
 		grp.GetLegList()[0].GetErrEpoch() != 0 {
-		t.Fatalf("c0's group %v, want only the spare's epoch at 99", grp)
+		t.Fatalf("c0's group %v, want only the second leg's epoch at 99",
+			grp)
 	}
 	if got := c.spRev(t, ctx); got != rev {
 		t.Fatalf("the clone epochs moved the pool's revision to %d", got)
 	}
 	cloneId, flipped, spRev, err := SetCloneProvisioned(ctx, c.cli, c.cl,
-		ref, "c0", clone.LegIds[2], clone.SideIds[2])
+		ref, "c0", clone.LegIds[1], clone.SideIds[1])
 	if err != nil || !flipped || cloneId != clone.Id || spRev != rev+1 ||
 		spRev != c.spRev(t, ctx) {
 		t.Fatalf("SetCloneProvisioned = %d, %t at %d, %v; want clone %d "+
 			"flipped at %d", cloneId, flipped, spRev, err, clone.Id, rev+1)
 	}
 	if _, flipped, _, err := SetCloneProvisioned(ctx, c.cli, c.cl, ref,
-		"c0", clone.LegIds[2], clone.SideIds[2]); err != nil || flipped {
+		"c0", clone.LegIds[1], clone.SideIds[1]); err != nil || flipped {
 		t.Fatalf("a second SetCloneProvisioned = %t, %v; want no flip",
 			flipped, err)
 	}
 	if _, _, _, err := SetCloneProvisioned(ctx, c.cli, c.cl, ref, "nosuch",
-		clone.LegIds[2], clone.SideIds[2]); err == nil {
+		clone.LegIds[1], clone.SideIds[1]); err == nil {
 		t.Fatalf("SetCloneProvisioned of a clone never planted succeeded")
 	}
 	grp = c.load(t, ctx).Clones["c0"].GetMetaGrp()
-	if !grp.GetSpareLegList()[0].GetSideList()[0].GetProvisioned() ||
+	if !grp.GetLegList()[1].GetSideList()[0].GetProvisioned() ||
 		grp.GetLegList()[0].GetSideList()[0].GetProvisioned() {
-		t.Fatalf("c0's group %v, want only the spare's side provisioned",
-			grp)
+		t.Fatalf("c0's group %v, want only the second leg's side "+
+			"provisioned", grp)
 	}
 
 	// The level, after the cutover, which a level of NO_MIGRATION and
@@ -1189,9 +1171,9 @@ func TestSettersReadBack(t *testing.T) {
 // drains: a latch bumps the pool's revision once and a second one nothing, a
 // drain of one step leaves the object, and a drain to the end removes it and
 // gives back exactly what the plants charged — the clone's clone meta
-// group's extents, pointers and capacity keys on the DNs of its legs and its
-// spare, with one DnRev bump each, a DN it shares with the pool keeping the
-// pool's sides; the pool's extents and pointers on every node.
+// group's extents, pointers and capacity keys on the DNs of its legs, with
+// one DnRev bump each, a DN it shares with the pool keeping the pool's
+// sides; the pool's extents and pointers on every node.
 func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 	ctx := testCtx(t)
 	c := plantSmallCluster(t, ctx, true)
@@ -1202,21 +1184,20 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 		t.Fatalf("PutTd: %v", err)
 	}
 	// The group's legs on dn 1, beside the pool's sides 8 and 10, and on
-	// dn 4, its spare on dn 5; every id a zero takes.
+	// dn 4; every id a zero takes.
 	clone, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
 		Name: "c0", DstTd: "td0",
 		Legs: []CloneLegSpec{
 			{LegIdx: 0, DnId: 1},
 			{LegIdx: 1, DnId: 4},
-			{LegIdx: 2, DnId: 5, Spare: true},
 		},
 	})
 	if err != nil {
 		t.Fatalf("PutClone: %v", err)
 	}
-	if clone.GrpId != clone.Id+1 || len(clone.LegIds) != 3 ||
-		len(clone.SideIds) != 3 {
-		t.Fatalf("PutClone = %+v, want a group of three legs taking the "+
+	if clone.GrpId != clone.Id+1 || len(clone.LegIds) != 2 ||
+		len(clone.SideIds) != 2 {
+		t.Fatalf("PutClone = %+v, want a group of two legs taking the "+
 			"ids after the clone's", clone)
 	}
 	poolSides := []*pb.SidePointer{
@@ -1231,8 +1212,6 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 		append(append([]*pb.SidePointer(nil), poolSides...), cloneSide(0)), 3)
 	c.dnHolds(t, ctx, 4, nodeFree-1, nodeFree,
 		[]*pb.SidePointer{cloneSide(1)}, 2)
-	c.dnHolds(t, ctx, 5, nodeFree-1, nodeFree,
-		[]*pb.SidePointer{cloneSide(2)}, 2)
 	for idx := uint32(0); idx < 3; idx++ {
 		if _, err := PutCloneBitmap(ctx, c.cli, c.cl, ref, CloneBitmapSpec{
 			Clone: "c0", BmIdx: idx, Data: []byte{byte(idx)},
@@ -1260,20 +1239,20 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 		[]*pb.SidePointer{cloneSide(1)}, 2)
 	done, err := DrainClone(ctx, c.cli, c.cl, ref, "c0", 4096)
 	if err != nil || !done.Deleted || done.ChunkCnt != 0 ||
-		done.GrpSideCnt != 3 {
+		done.GrpSideCnt != 2 {
 		t.Fatalf("DrainClone to the end = %+v, %v", done, err)
 	}
 	mustAbsent(t, ctx, c.cli, model.CloneKey(cid, ref.Id, "c0"), &pb.Clone{})
-	// The final step gave every side of the group back, the spare's too,
-	// each DN with one more DnRev bump, and took only the clone's pointer
-	// off dn 1. The DNs the clone never used kept their revisions.
+	// The final step gave every side of the group back, each DN with one
+	// more DnRev bump, and took only the clone's pointer off dn 1. The DNs
+	// the clone never used kept their revisions: PutSp's for dn 2, the
+	// planted one for dn 3 and dn 5.
 	c.dnHolds(t, ctx, 1, nodeFree-3, nodeFree-4, poolSides, 4)
 	c.dnHolds(t, ctx, 4, nodeFree, nodeFree-1, nil, 3)
-	c.dnHolds(t, ctx, 5, nodeFree, nodeFree-1, nil, 3)
-	for _, dnId := range []uint64{2, 3} {
-		if got := c.dnRev(t, ctx, dnId); got != 2 {
+	for dnId, want := range map[uint64]uint64{2: 2, 3: 1, 5: 1} {
+		if got := c.dnRev(t, ctx, dnId); got != want {
 			t.Errorf("dn %d is at revision %d after the clone's drain, "+
-				"want PutSp's 2", dnId, got)
+				"want %d", dnId, got, want)
 		}
 	}
 	if _, err := DrainClone(ctx, c.cli, c.cl, ref, "c0", 4096); err == nil {
@@ -1329,8 +1308,7 @@ func TestDrainsGiveBackWhatPlantCharged(t *testing.T) {
 // TestPutCloneRefusals pins what PutClone refuses inside its STM, each
 // before anything is written: a group, leg or side id a slice or another
 // clone of the pool already uses for its kind, a slot outside the pool's
-// list, a DN short of an extent, and a spare in a pool whose groups are not
-// md-raid1. An id of another kind may meet one of the pool's, as PutSp lets
+// list, and a DN short of an extent. An id of another kind may meet one of the pool's, as PutSp lets
 // it. PutMigr takes no side of a clone meta group as its source, nor a clone
 // meta side's id for its destination.
 func TestPutCloneRefusals(t *testing.T) {
@@ -1436,41 +1414,6 @@ func TestPutCloneRefusals(t *testing.T) {
 		two("cKinds", 8, 10, 2, 53, 54, 0)); err != nil {
 		t.Fatalf("PutClone with ids of other kinds: %v", err)
 	}
-
-	// A pool of redund_none groups takes no spare.
-	none, err := PutSp(ctx, c.cli, c.cl, SpSpec{
-		Name: "sp1", Id: 2, Shard: smokeShard, Slots: []uint32{0},
-		Cntlrs: []CntlrSpec{{CntlrId: 1, CnId: 3, Slot: 0, Primary: true}},
-		Slices: []SliceSpec{{SliceId: 1, SliceIdx: 0}},
-		Groups: []GroupSpec{
-			{SliceId: 1, GrpId: 2, Meta: true, ExtCnt: 1},
-			{SliceId: 1, GrpId: 3, ExtCnt: 1},
-		},
-		Legs: []LegSpec{{GrpId: 2, LegId: 4}, {GrpId: 3, LegId: 5}},
-		Sides: []SideSpec{
-			{LegId: 4, SideId: 6, DnId: 3},
-			{LegId: 5, SideId: 7, DnId: 3},
-		},
-	})
-	if err != nil {
-		t.Fatalf("PutSp sp1: %v", err)
-	}
-	if _, err := PutTd(ctx, c.cli, c.cl, none.Ref,
-		TdSpec{Name: "td0", Size: 1 << 30}); err != nil {
-		t.Fatalf("PutTd: %v", err)
-	}
-	_, err = PutClone(ctx, c.cli, c.cl, none.Ref, CloneSpec{
-		Name: "cSpare", DstTd: "td0",
-		Legs: []CloneLegSpec{
-			{LegIdx: 0, DnId: 4},
-			{LegIdx: 1, DnId: 5, Spare: true},
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "needs md-raid1") {
-		t.Fatalf("a spare in a redund_none pool = %v, want a refusal", err)
-	}
-	mustAbsent(t, ctx, c.cli, model.CloneKey(cid, none.Ref.Id, "cSpare"),
-		&pb.Clone{})
 }
 
 // TestNodeListsTakeIds pins PutDns and PutCns at the per-cluster ceilings,
@@ -1631,18 +1574,17 @@ func TestNodeListsTakeIds(t *testing.T) {
 	}
 }
 
-// TestWidestPoolPlants plants the widest pool the limits allow:
+// TestWidestPoolPlants plants a pool at the limit of every object it plants:
 // common.MaxSliceCntPerSp slices of a meta and a data group, each of
-// common.MaxAllocLegPerGrp legs and common.MaxSpareLegPerGrp spare legs,
-// common.MaxCntlrCntPerSp cntlrs, common.MaxSsCntPerSp subsystems of
-// common.MaxNsCntPerSs namespaces, common.MaxTdCntPerSp thin devices,
-// common.MaxCloneCntPerSp clones, each with a clone meta group of the
-// widest shape, common.MaxXferCntPerSp transfers and common.MaxMigrCntPerSp
-// migrations, and reads it back through model.LoadSp. The last clones' puts
-// read every slice and every other clone of the pool in one transaction
-// (putCloneGrp). Its spares stay unprovisioned, a shape no gateway writes
-// (LegSpec), which is enough for a case that reads the planting back. It is
-// a full shape, so it is skipped under -short.
+// common.MaxAllocLegPerGrp legs, common.MaxCntlrCntPerSp cntlrs,
+// common.MaxSsCntPerSp subsystems of common.MaxNsCntPerSs namespaces,
+// common.MaxTdCntPerSp thin devices, common.MaxCloneCntPerSp clones, each
+// with a clone meta group of the widest shape, common.MaxXferCntPerSp
+// transfers and common.MaxMigrCntPerSp migrations, and reads it back through
+// model.LoadSp. It plants no repair and no retired leg; the widest messages,
+// which hold both, are model's (widestCounts). The last clones' puts read
+// every slice and every other clone of the pool in one transaction
+// (putCloneGrp). It is a full shape, so it is skipped under -short.
 func TestWidestPoolPlants(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a full shape; skipped under -short")
@@ -1658,7 +1600,7 @@ func TestWidestPoolPlants(t *testing.T) {
 	}
 	const (
 		sliceCnt = common.MaxSliceCntPerSp
-		legCnt   = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
+		legCnt   = common.MaxAllocLegPerGrp
 		migrCnt  = common.MaxMigrCntPerSp
 		free     = 1 << 20
 	)
@@ -1708,7 +1650,6 @@ func TestWidestPoolPlants(t *testing.T) {
 				legId, sideId := next(), next()
 				spec.Legs = append(spec.Legs, LegSpec{
 					GrpId: grpId, LegId: legId, LegIdx: uint32(l),
-					Spare: l >= common.MaxAllocLegPerGrp,
 				})
 				spec.Sides = append(spec.Sides, SideSpec{
 					LegId: legId, SideId: sideId, DnId: uint64(l + 1),
@@ -1753,7 +1694,6 @@ func TestWidestPoolPlants(t *testing.T) {
 		for l := 0; l < legCnt; l++ {
 			cloneSpec.Legs = append(cloneSpec.Legs, CloneLegSpec{
 				LegIdx: uint32(l), DnId: uint64(l + 1),
-				Spare: l >= common.MaxAllocLegPerGrp,
 			})
 		}
 		if _, err := PutClone(ctx, cli, cl, ref, cloneSpec); err != nil {
@@ -1801,10 +1741,9 @@ func TestWidestPoolPlants(t *testing.T) {
 	for _, slice := range state.Slices {
 		for _, grp := range append(append([]*pb.Group(nil),
 			slice.GetMetaGrpList()...), slice.GetDataGrpList()...) {
-			if len(grp.GetLegList()) != common.MaxAllocLegPerGrp ||
-				len(grp.GetSpareLegList()) != common.MaxSpareLegPerGrp {
-				t.Fatalf("group %#x has %d legs and %d spares", grp.GetGrpId(),
-					len(grp.GetLegList()), len(grp.GetSpareLegList()))
+			if len(grp.GetLegList()) != common.MaxAllocLegPerGrp {
+				t.Fatalf("group %#x has %d legs", grp.GetGrpId(),
+					len(grp.GetLegList()))
 			}
 			if len(grp.GetLegList()[0].GetSideList()) == 2 {
 				moved++
@@ -1821,10 +1760,9 @@ func TestWidestPoolPlants(t *testing.T) {
 	}
 	for name, clone := range state.Clones {
 		grp := clone.GetMetaGrp()
-		if len(grp.GetLegList()) != common.MaxAllocLegPerGrp ||
-			len(grp.GetSpareLegList()) != common.MaxSpareLegPerGrp {
-			t.Fatalf("clone %s's group has %d legs and %d spares", name,
-				len(grp.GetLegList()), len(grp.GetSpareLegList()))
+		if len(grp.GetLegList()) != common.MaxAllocLegPerGrp {
+			t.Fatalf("clone %s's group has %d legs", name,
+				len(grp.GetLegList()))
 		}
 	}
 	for addr, cn := range state.CnByAddr {

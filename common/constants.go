@@ -96,16 +96,17 @@ const (
 	MaxMigrCntPerSp      = 4
 	MaxSideCntPerDn      = 1024
 	MaxCntlrCntPerCn     = 256
-	MaxSpareLegPerGrp    = 2
 	// MaxRetiredLegPerGrp is the most retired legs a group holds: the kept
 	// sides of the legs its finished repairs replaced. A retired side keeps
 	// its extents and its place in its disk node's side_ptr_list, and the
 	// drains' transactions, which give a group's retired sides back, and the
 	// messages that carry the lists need a bound; two keeps the copies the
-	// group's last two repairs set aside. CreateRepair with a fresh new leg
-	// refuses a group at the bound, and from a retired leg it is allowed
-	// there, since FinishRepair then retires one leg and the repair took one,
-	// so FinishRepair never passes it.
+	// group's last two repairs set aside. An operator's CreateRepair with a
+	// fresh new leg refuses a group at the bound, and from a retired leg it
+	// is allowed there, since FinishRepair then retires one leg and the
+	// repair took one. The sp worker's repair takes a fresh leg at the bound,
+	// and its FinishRepair gives back the group's oldest retired leg before
+	// it retires one, so FinishRepair never passes the bound.
 	MaxRetiredLegPerGrp = 2
 	// MaxGrpCntPerSlice is the most groups EACH of a slice's two group lists
 	// (meta_grp_list, data_grp_list) holds. A group's two md names carry its
@@ -134,10 +135,12 @@ const (
 	// slice in a single transaction (dnv-worker.md SPD10). It bounds
 	// transaction SIZE, not rate — strictly sequential batches are the
 	// pacing — and it is a package constant rather than configuration for
-	// exactly that reason. The SPD13 arithmetic it must satisfy is
+	// exactly that reason. A batch runs only once the pool's repairs and
+	// retired legs are gone (MaxDelRepPerTxn below), so a popped group gives
+	// back its legs' sides alone, at most six compares on a DN of its own,
+	// and the SPD13 arithmetic it must satisfy is
 	//
-	//	6 + 6 x MaxDelGrpPerTxn x (MaxAllocLegPerGrp + MaxSpareLegPerGrp)
-	//	    <= EtcdMaxTxnOps
+	//	6 + 6 x MaxDelGrpPerTxn x MaxAllocLegPerGrp <= EtcdMaxTxnOps
 	//
 	// which gateway/txnbudget_test.go asserts from the named constants (SPD14).
 	MaxDelGrpPerTxn = 20
@@ -181,7 +184,7 @@ const (
 	// deployment requirement stays EtcdMaxTxnOps for the transactions that do
 	// NOT fit 128, such as
 	// CreateStoragePool's 967-compare maximum shape, the sp drain's
-	// 486-compare D2 batch and the created flip's 514-compare transaction
+	// 246-compare D2 batch and the created flip's 514-compare transaction
 	// (see EtcdMaxTxnOps and MaxFlipCreatedPerTxn below).
 	MaxDelBmPerTxn = 64
 
@@ -644,7 +647,7 @@ const (
 	//
 	// Other bounded transactions exceed etcd's default 128 too, without
 	// sizing this number. The sp drain's D2 batch is one:
-	// 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) = 486
+	// 6 + 6·MaxDelGrpPerTxn·MaxAllocLegPerGrp = 246
 	// COMPARES at the maximum shape — SPD13's arithmetic, asserted at the
 	// named constants by gateway/txnbudget_test.go's SPD14 tripwire and
 	// committed against a real etcd by model/drain_test.go's
@@ -667,12 +670,11 @@ const (
 	// (gateway/txnbudget_test.go's TestFlipCloneProvisionedTxnBudget; model's
 	// TestFlipCloneProvisionedAtTheCloneCeiling commits it).
 	//
-	// Three transactions that read every clone of the pool stay under etcd's
+	// Two transactions that read every clone of the pool stay under etcd's
 	// default: CreateClone, which also verifies and charges the DN of each
 	// leg of its clone meta group (85 COMPARES, TestCreateCloneTxnBudget),
-	// UpdateStoragePoolCntlidSlotList (105,
-	// TestUpdateCntlidSlotListTxnBudget) and DeleteSpareLeg of a clone meta
-	// group's spare (107, TestDeleteSpareLegTxnBudget). The cntlr mutators
+	// and UpdateStoragePoolCntlidSlotList (105,
+	// TestUpdateCntlidSlotListTxnBudget). The cntlr mutators
 	// read no clone, since a clone charges no CN: the gateway's CreateCntlr
 	// and DeleteCntlr commit 60 COMPARES each at the ceilings
 	// (TestCreateCntlrTxnBudget, TestDeleteCntlrTxnBudget), and the worker's
@@ -716,7 +718,7 @@ const (
 	// It is SIZED by the provisioned flip (dnv-worker.md RW18) over every
 	// slice of a pool at the widest shape: FlipProvisioned writes each slice
 	// it touches once, in one transaction, and MaxSliceCntPerSp widest slices
-	// are about 25.5 MiB. model's TestFlipProvisionedAtTheSliceCeiling commits
+	// are about 14.5 MiB. model's TestFlipProvisionedAtTheSliceCeiling commits
 	// it; the Go test launchers pass it, and the shell suites read it from
 	// `workerctl constants`.
 	EtcdMaxRequestBytes = 32 * 1024 * 1024

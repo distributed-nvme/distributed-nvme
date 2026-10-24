@@ -1170,7 +1170,7 @@ func poolGrps(state *model.SpState) []*pb.Group {
 func (c *stdCluster) sideAgent(t *testing.T, sideId uint64) (*agentfake.Agent, string) {
 	t.Helper()
 	for _, grp := range poolGrps(c.load(t)) {
-		for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
+		for _, leg := range grp.GetLegList() {
 			for _, side := range leg.GetSideList() {
 				if side.GetSideId() == sideId {
 					return c.h.fleet.Agent(side.GetAddrPort()),
@@ -1421,7 +1421,7 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 	state := c.load(t)
 	conv.spRev = state.SpRevision
 	for _, grp := range poolGrps(state) {
-		for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
+		for _, leg := range grp.GetLegList() {
 			if leg.GetErrEpoch() != 0 {
 				note("leg %d: err_epoch %d", leg.GetLegId(), leg.GetErrEpoch())
 			}

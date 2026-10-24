@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -306,8 +307,9 @@ func TestReactionCnScanThroughModel(t *testing.T) {
 }
 
 // TestReactionDnScanThroughModel checks that the DN scan of AR6's grow and
-// AR8's spare asks for no metadata units below the reactionOps seam: a grown
-// group's sides and a spare's side hold none of a DN's metadata area, which
+// AR8's create asks for no metadata units below the reactionOps seam: a grown
+// group's sides and a repair's new leg's side hold none of a DN's metadata
+// area, which
 // only a migration's destination uses (architecture.md, Metadata units), so a
 // DN whose area is full is still a candidate. The same index scanned for one
 // unit offers only the DN with room, so it is the adapter's zero that keeps
@@ -366,16 +368,19 @@ func TestReactionDnScanThroughModel(t *testing.T) {
 	}
 }
 
-// TestReactionSpareCreateThroughModel checks AR8 step 3's op below the
-// reactionOps seam, against real etcd: the production adapter hands
-// model.CreateSpareLeg the plan createSpare gave it, the group's DNs its scan
-// black-listed (MD6). The fake of the reaction tests only records the
-// argument, so an adapter that dropped the plan — every create then refused,
-// since the group's own DNs are outside an empty plan — or one that read the
-// group afresh in its place — every gain then missed — would pass all of
-// them. Both directions are checked: a plan missing a DN the group holds is
-// `candidate changed`, and the group's own DNs commit.
-func TestReactionSpareCreateThroughModel(t *testing.T) {
+// TestReactionRepairOpsThroughModel checks AR8's four ops below the
+// reactionOps seam, against real etcd. The create: the production adapter
+// hands model.CreateRepair the plan createRepair gave it, the group's DNs
+// its scan black-listed (MD6), under the worker's name. The fake of the
+// reaction tests only records the argument, so an adapter that dropped the
+// plan — every create then refused, since the group's own DNs are outside an
+// empty plan — or one that read the group afresh in its place — every gain
+// then missed — would pass all of them. Both directions are checked: a plan
+// missing a DN the group holds is `candidate changed`, and the group's own
+// DNs commit. Then the drive: the try-to-abort sets the flag, the cancel of
+// the aborted repair gives the new leg's extents back, and a second repair,
+// started, is finished and retires the bad leg.
+func TestReactionRepairOpsThroughModel(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
 	cid := testClusterId()
@@ -383,9 +388,10 @@ func TestReactionSpareCreateThroughModel(t *testing.T) {
 	const (
 		shard   = uint32(5)
 		spId    = uint64(0x200)
-		spName  = "spare-pool"
+		spName  = "repair-pool"
 		sliceId = uint64(31)
 		grpId   = uint64(41)
+		badLeg  = uint64(50)
 		dnA     = "sdn0:9520"
 		dnB     = "sdn1:9520"
 		dnC     = "sdn2:9520" // the pick
@@ -411,13 +417,14 @@ func TestReactionSpareCreateThroughModel(t *testing.T) {
 	grp := &pb.Group{GrpId: grpId, ExtCnt: 1, MetaBlocks: 3, DataBlocks: 253}
 	for idx, addrPort := range []string{dnA, dnB} {
 		grp.LegList = append(grp.LegList, &pb.Leg{
-			LegId:  uint64(50 + idx),
+			LegId:  badLeg + uint64(idx),
 			LegIdx: uint32(idx),
 			SideList: []*pb.Side{{
 				SideId: uint64(60 + idx), AddrPort: addrPort, Provisioned: true,
 			}},
 		})
 	}
+	grp.LegList[0].ErrEpoch = 1
 	put(model.SliceKey(cid, spId, sliceId), &pb.Slice{
 		DataGrpList: []*pb.Group{grp},
 	})
@@ -435,35 +442,117 @@ func TestReactionSpareCreateThroughModel(t *testing.T) {
 	put(model.DnRevKey(shard, cid, 70), &pb.DnRev{AddrPort: dnC, Revision: 1})
 	put(model.DnCapacityKey(cid, binIdx, dnFree, dnC),
 		&pb.DnCapacity{Location: dnC})
-	pick := model.Cand{
-		AddrPort: dnC, Location: dnC, FreeExt: dnFree, BinIdx: binIdx,
+	pick := func() model.Cand {
+		t.Helper()
+		dn := &pb.DnConf{}
+		if _, err := cli.Get(ctx, model.DnConfKey(cid, dnC), dn); err != nil {
+			t.Fatalf("get dn: %v", err)
+		}
+		free := dn.GetFreeExtCnt()
+		bin, ok := model.DnBinIdx(free, cc.GetDnBinConf())
+		if !ok {
+			t.Fatalf("no bin for %d free extents", free)
+		}
+		return model.Cand{
+			AddrPort: dnC, Location: dnC, FreeExt: free, BinIdx: bin,
+		}
 	}
 	ops := &modelReactionOps{cli: cli}
+	parent := model.GrpParent{SliceId: sliceId}
+	repName := common.WorkerRepName(spId, grpId, 1)
+	create := func(name string, plan []string) (uint64, error) {
+		t.Helper()
+		repId, _, err := ops.createRepair(
+			ctx, cid, shard, spId, spName, name, parent, grpId, badLeg,
+			model.RepairNewLeg{Dn: pick(), GrpDnAddrs: plan}, cc,
+		)
+		return repId, err
+	}
+	loadRepair := func(name string) *pb.Repair {
+		t.Helper()
+		rep := &pb.Repair{}
+		found, err := cli.Get(ctx, model.RepairKey(cid, spId, name), rep)
+		if err != nil {
+			t.Fatalf("get repair: %v", err)
+		}
+		if !found {
+			return nil
+		}
+		return rep
+	}
 
-	_, err := ops.createSpareLeg(
-		ctx, cid, shard, spId, spName, sliceId, grpId, pick,
-		[]string{dnA}, cc,
-	)
+	_, err := create(repName, []string{dnA})
 	var pre *model.ErrPrecondition
 	if !errors.As(err, &pre) || pre.Reason != model.ReasonCandidateChanged {
 		t.Fatalf("a plan missing %s: err = %v, want %q", dnB, err,
 			model.ReasonCandidateChanged)
 	}
-	legId, err := ops.createSpareLeg(
-		ctx, cid, shard, spId, spName, sliceId, grpId, pick,
-		[]string{dnA, dnB}, cc,
+	repId, err := create(repName, []string{dnA, dnB})
+	if err != nil {
+		t.Fatalf("createRepair with the group's own plan: %v", err)
+	}
+	rep := loadRepair(repName)
+	if rep.GetRepId() != repId || len(rep.GetNewLegList()) != 1 ||
+		rep.GetNewLegList()[0].GetSideList()[0].GetAddrPort() != dnC ||
+		!slices.Equal(rep.GetBadLegIdList(), []uint64{badLeg}) {
+		t.Fatalf("repair = %v, want rep_id %d, a new leg on %s, bad leg %d",
+			rep, repId, dnC, badLeg)
+	}
+
+	// The try-to-abort, the primary's confirmation (the stage move), and
+	// the cancel, which gives dn C its extents back.
+	if _, err := ops.setRepairAbort(
+		ctx, cid, shard, spId, spName, repName,
+	); err != nil {
+		t.Fatalf("setRepairAbort: %v", err)
+	}
+	if !loadRepair(repName).GetTryToAbort() {
+		t.Fatalf("the try-to-abort set no flag")
+	}
+	if err := model.SetRepairStage(ctx, cli, cid, shard, spId, spName,
+		repName, repId, pb.RepStage_REP_STAGE_ABORTED); err != nil {
+		t.Fatalf("SetRepairStage ABORTED: %v", err)
+	}
+	if _, err := ops.cancelRepair(
+		ctx, cid, shard, spId, spName, repName, cc,
+	); err != nil {
+		t.Fatalf("cancelRepair: %v", err)
+	}
+	if loadRepair(repName) != nil {
+		t.Fatalf("the repair outlived its cancel")
+	}
+	if got := pick().FreeExt; got != dnFree {
+		t.Fatalf("dn C holds %d free extents after the cancel, want %d",
+			got, dnFree)
+	}
+
+	// A second repair, started by the primary, is finished: the bad leg is
+	// retired.
+	repName = common.WorkerRepName(spId, grpId, 2)
+	repId, err = create(repName, []string{dnA, dnB})
+	if err != nil {
+		t.Fatalf("second createRepair: %v", err)
+	}
+	if err := model.SetRepairStage(ctx, cli, cid, shard, spId, spName,
+		repName, repId, pb.RepStage_REP_STAGE_STARTED); err != nil {
+		t.Fatalf("SetRepairStage STARTED: %v", err)
+	}
+	res, err := ops.finishRepair(
+		ctx, cid, shard, spId, spName, repName, 1234, cc,
 	)
 	if err != nil {
-		t.Fatalf("createSpareLeg with the group's own plan: %v", err)
+		t.Fatalf("finishRepair: %v", err)
 	}
-	slice := &pb.Slice{}
-	if _, err := cli.Get(ctx, model.SliceKey(cid, spId, sliceId), slice); err != nil {
-		t.Fatalf("get slice: %v", err)
+	if res.RepId != repId || res.RetiredLegId != badLeg ||
+		res.GivenBackLegId != 0 {
+		t.Fatalf("finish = %+v, want rep_id %d retiring leg %d", res, repId,
+			badLeg)
 	}
-	spares := slice.GetDataGrpList()[0].GetSpareLegList()
-	if len(spares) != 1 || spares[0].GetLegId() != legId ||
-		spares[0].GetSideList()[0].GetAddrPort() != dnC {
-		t.Fatalf("spares = %v, want leg %d on %s", spares, legId, dnC)
+	retired := &pb.RetiredLeg{}
+	if found, err := cli.Get(ctx, model.RetiredLegKey(cid, spId, badLeg),
+		retired); err != nil || !found || retired.GetRetiredEpoch() != 1234 {
+		t.Fatalf("retired leg = %v (found %t, err %v), want leg %d retired "+
+			"at 1234", retired, found, err, badLeg)
 	}
 }
 

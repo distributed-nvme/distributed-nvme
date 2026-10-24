@@ -853,8 +853,8 @@ func TestForcedReplyCodeRejects(t *testing.T) {
 
 // cntlrFixture is a SyncupCntlrRequest shaped like worker_test.sh's cases,
 // which the derivation tests assert against: two slices, a meta and a data
-// group with a spare leg each, two tds, one subsystem with two namespaces, one
-// clone with a clone meta group of two legs and a spare, and one xfer.
+// group of two legs each, two tds, one subsystem with two namespaces, one
+// clone with a clone meta group of three legs, and one xfer.
 func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
 	return &pb.SyncupCntlrRequest{
 		ClusterId:    1,
@@ -866,10 +866,10 @@ func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
 			fmt.Sprintf(common.IdKeyFmt, 1): {
 				SliceIdx: 0,
 				MetaGrpList: []*pb.Group{{
-					GrpId:   11,
-					ExtCnt:  1,
-					LegList: []*pb.Leg{{LegId: 101, LegIdx: 0}},
-					SpareLegList: []*pb.Leg{
+					GrpId:  11,
+					ExtCnt: 1,
+					LegList: []*pb.Leg{
+						{LegId: 101, LegIdx: 0},
 						{LegId: 102, LegIdx: 1},
 					},
 				}},
@@ -885,10 +885,12 @@ func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
 			fmt.Sprintf(common.IdKeyFmt, 2): {
 				SliceIdx: 1,
 				DataGrpList: []*pb.Group{{
-					GrpId:        21,
-					ExtCnt:       2,
-					LegList:      []*pb.Leg{{LegId: 201, LegIdx: 0}},
-					SpareLegList: []*pb.Leg{{LegId: 202, LegIdx: 1}},
+					GrpId:  21,
+					ExtCnt: 2,
+					LegList: []*pb.Leg{
+						{LegId: 201, LegIdx: 0},
+						{LegId: 202, LegIdx: 1},
+					},
 				}},
 			},
 		},
@@ -918,8 +920,6 @@ func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
 					{LegId: 712, LegIdx: 1, SideList: []*pb.Side{
 						{SideId: 7121, Provisioned: true},
 					}},
-				},
-				SpareLegList: []*pb.Leg{
 					{LegId: 713, LegIdx: 2, SideList: []*pb.Side{
 						{SideId: 7131},
 					}},
@@ -981,9 +981,8 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	// The clone's clone meta group, 71, has its rows as a slice's group has
 	// (dnv-worker.md, Integration test plan, The fake agent).
 	wantKeys(t, "grp_id_to_md_raid", info.GetGrpIdToMdRaid(), 11, 12, 21, 71)
-	// One row per leg AND per SPARE leg of every group: 102 and 202 are the
-	// spares, and worker_test.sh case D step 7 reads exactly them; 711 to 713
-	// are the clone meta group's.
+	// One row per leg of every group; 711 to 713 are the clone meta
+	// group's.
 	wantKeys(t, "leg_id_to_leg", info.GetLegIdToLeg(),
 		101, 102, 103, 104, 201, 202, 711, 712, 713)
 	wantKeys(t, "td_id_to_raid0", info.GetTdIdToRaid0(), 7, 8)

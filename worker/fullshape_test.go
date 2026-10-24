@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -432,18 +433,24 @@ func assertMostNodeRevisions(
 // The widest pool's shape (architecture.md, Cardinality limits): every
 // per-pool maximum at once, with one meta group and one data group per
 // slice as CreateStoragePool builds a pool, and a clone meta group of the
-// same legs and spares for every clone. Every group's legs sit on
-// wideGrpDnCnt disk nodes, one leg of each group on each, and each
-// migration's new side goes to a disk node of its own past them. The
-// placement is the case's free choice, because the worker does not care how
-// many disk nodes carry a pool. etcd's cap on operations per transaction is
-// no reason for it: PutSp writes the pool in one transaction, but the
-// gateway's own spread, a disk node of its own for each leg a new pool is
-// created with, would fit that one transaction too, with the spares on
-// those same disk nodes.
+// same legs for every clone; every group, a clone's too, has an operator's
+// repair, its fresh new leg provisioned, and holds MaxRetiredLegPerGrp
+// retired legs, the widest a group grows. Every group's legs, its repair's
+// new leg and its retired legs sit on wideGrpDnCnt disk nodes, one of each
+// group on each, and each migration's new side goes to a disk node of its
+// own past them. The placement is the case's free choice, because the
+// worker does not care how many disk nodes carry a pool. etcd's cap on
+// operations per transaction is no reason for it: PutSp writes the pool in
+// one transaction, but the gateway's own spread, a disk node of its own for
+// each leg a new pool is created with, would fit that one transaction too.
+// The repairs are an operator's, so the worker's leg repair drives none of
+// them, and no primary reports a verdict on one, so none moves a stage.
 const (
-	wideLegCnt   = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
-	wideGrpDnCnt = wideLegCnt
+	wideLegCnt = common.MaxAllocLegPerGrp
+	// wideNewLegDn is the disk node of every repair's new leg, and the
+	// retired legs follow it, one disk node each.
+	wideNewLegDn = wideLegCnt + 1
+	wideGrpDnCnt = wideNewLegDn + common.MaxRetiredLegPerGrp
 	wideDnCnt    = wideGrpDnCnt + common.MaxMigrCntPerSp
 	wideCnCnt    = common.MaxCntlrCntPerSp
 	// wideNodeFree is every node's free extent count before the pool.
@@ -494,9 +501,9 @@ type widePool struct {
 }
 
 // plantWide adds the fakes and plants the widest pool: the cluster, the
-// nodes, the pool with the first spare of every group provisioned, every
-// thin device, subsystem, clone with its clone meta group, its first spare
-// provisioned too, every transfer and migration, and the levers:
+// nodes, the pool, every group's repair and retired legs (plantGrpRepair),
+// every thin device, subsystem, clone with its clone meta group, its repair
+// and its retired legs, every transfer and migration, and the levers:
 // thin rows reported OK on every cntlr while it is primary, and the path row
 // of every migration's new side held at PROVISIONING on every cntlr, so no
 // cutover starts (RW18).
@@ -563,7 +570,9 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 			CntlrId: take(), CnId: i, Slot: uint32(i - 1), Primary: i == 1,
 		})
 	}
-	var firstSpares []model.SideRef
+	// grpLeg1s maps every group of the slices to its second leg, the bad leg
+	// of its repair.
+	grpLeg1s := map[uint64]uint64{}
 	// dataLeg0Sides[i] is the side of slice i's first data leg.
 	var dataLeg0Sides []uint64
 	for idx := uint32(0); idx < common.MaxSliceCntPerSp; idx++ {
@@ -580,17 +589,14 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 			})
 			for legIdx := uint32(0); legIdx < wideLegCnt; legIdx++ {
 				legId, sideId := take(), take()
-				spare := legIdx >= common.MaxAllocLegPerGrp
 				spSpec.Legs = append(spSpec.Legs, plant.LegSpec{
-					GrpId: grpId, LegId: legId, LegIdx: legIdx, Spare: spare,
+					GrpId: grpId, LegId: legId, LegIdx: legIdx,
 				})
 				spSpec.Sides = append(spSpec.Sides, plant.SideSpec{
 					LegId: legId, SideId: sideId, DnId: uint64(legIdx) + 1,
 				})
-				if legIdx == common.MaxAllocLegPerGrp {
-					firstSpares = append(firstSpares, model.SideRef{
-						SliceId: sliceId, LegId: legId, SideId: sideId,
-					})
+				if legIdx == 1 {
+					grpLeg1s[grpId] = legId
 				}
 				if !meta && legIdx == 0 {
 					dataLeg0Sides = append(dataLeg0Sides, sideId)
@@ -601,13 +607,8 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 	if wp.sp, err = plant.PutSp(ctx, h.cli, cl, spSpec); err != nil {
 		t.Fatalf("PutSp: %v", err)
 	}
-	// Every spare of a group but one provisioned: the gateway never leaves
-	// two unprovisioned spares in one group (LegSpec), and the worker
-	// provisions the other.
-	for _, ref := range firstSpares {
-		if ok, _, err := plant.SetProvisioned(ctx, h.cli, cl, wp.sp.Ref, ref); err != nil || !ok {
-			t.Fatalf("provision spare side %d: flipped %t, %v", ref.SideId, ok, err)
-		}
+	for _, grpId := range slices.Sorted(maps.Keys(grpLeg1s)) {
+		wp.plantGrpRepair(t, grpId, grpLeg1s[grpId])
 	}
 
 	tdSpecs := make([]plant.TdSpec, 0, common.MaxTdCntPerSp)
@@ -637,10 +638,9 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 		}
 		wp.sss = append(wp.sss, ss)
 	}
-	// Every clone's clone meta group has a pool group's legs and spares,
-	// one on each of the groups' disk nodes, its ids the pool's next, and
-	// its first spare provisioned, so that no group of the pool holds two
-	// unprovisioned spares.
+	// Every clone's clone meta group has a pool group's legs, one on each of
+	// the groups' first disk nodes, its ids the pool's next, and a repair
+	// and retired legs as a pool group has.
 	wp.preClone = make(map[uint64]dnLedger, wideGrpDnCnt)
 	for id := uint64(1); id <= wideGrpDnCnt; id++ {
 		wp.preClone[id] = wp.dnLedgerOf(t, id)
@@ -658,20 +658,13 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 		for legIdx := uint32(0); legIdx < wideLegCnt; legIdx++ {
 			spec.Legs = append(spec.Legs, plant.CloneLegSpec{
 				LegIdx: legIdx, DnId: uint64(legIdx) + 1,
-				Spare: legIdx >= common.MaxAllocLegPerGrp,
 			})
 		}
 		clone, err := plant.PutClone(ctx, h.cli, cl, wp.sp.Ref, spec)
 		if err != nil {
 			t.Fatalf("PutClone %d: %v", i, err)
 		}
-		spare := common.MaxAllocLegPerGrp
-		if _, ok, _, err := plant.SetCloneProvisioned(ctx, h.cli, cl,
-			wp.sp.Ref, clone.Name, clone.LegIds[spare],
-			clone.SideIds[spare]); err != nil || !ok {
-			t.Fatalf("provision %s's spare side %d: flipped %t, %v",
-				clone.Name, clone.SideIds[spare], ok, err)
-		}
+		wp.plantGrpRepair(t, clone.GrpId, clone.LegIds[1])
 		tdIdx++
 		wp.clones = append(wp.clones, clone)
 	}
@@ -722,6 +715,32 @@ func plantWide(t *testing.T, h *workerHarness) *widePool {
 		}
 	}
 	return wp
+}
+
+// plantGrpRepair gives the group grpId, a slice's or a clone's, an
+// operator's repair of its leg badLegId with a fresh, provisioned new leg on
+// wideNewLegDn, and MaxRetiredLegPerGrp retired legs, one on each disk node
+// after it, retired a moment ago so that the retire timer keeps them.
+func (wp *widePool) plantGrpRepair(t *testing.T, grpId uint64, badLegId uint64) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := plant.PutRepair(ctx, wp.h.cli, wp.cl, wp.sp.Ref,
+		plant.RepairSpec{
+			Name: fmt.Sprintf("r%x", grpId), GrpId: grpId, BadLegId: badLegId,
+			Dn: wideNewLegDn, Provisioned: true,
+		}); err != nil {
+		t.Fatalf("PutRepair of group %d: %v", grpId, err)
+	}
+	now := uint64(time.Now().Unix())
+	for idx := range common.MaxRetiredLegPerGrp {
+		if _, err := plant.PutRetiredLeg(ctx, wp.h.cli, wp.cl, wp.sp.Ref,
+			plant.RetiredLegSpec{
+				GrpId: grpId, LegIdx: uint32(wideNewLegDn + idx),
+				Dn: uint64(wideNewLegDn + 1 + idx), Epoch: now,
+			}); err != nil {
+			t.Fatalf("PutRetiredLeg %d of group %d: %v", idx, grpId, err)
+		}
+	}
 }
 
 // wideKeys is every key etcd holds but the worker registrations, which come
@@ -791,11 +810,19 @@ func (wp *widePool) assertWideShape(t *testing.T) {
 	}
 	for _, grp := range grps {
 		if len(grp.GetLegList()) != common.MaxAllocLegPerGrp ||
-			len(grp.GetSpareLegList()) != common.MaxSpareLegPerGrp {
-			t.Errorf("group %d holds %d legs and %d spares, want %d and %d",
-				grp.GetGrpId(), len(grp.GetLegList()), len(grp.GetSpareLegList()),
-				common.MaxAllocLegPerGrp, common.MaxSpareLegPerGrp)
+			grp.GetRepName() == "" ||
+			len(grp.GetRetiredLegIdList()) != common.MaxRetiredLegPerGrp {
+			t.Errorf("group %d holds %d legs, repair %q and %d retired legs, "+
+				"want %d, one and %d", grp.GetGrpId(), len(grp.GetLegList()),
+				grp.GetRepName(), len(grp.GetRetiredLegIdList()),
+				common.MaxAllocLegPerGrp, common.MaxRetiredLegPerGrp)
 		}
+	}
+	if len(state.Repairs) != len(grps) ||
+		len(state.RetiredLegs) != len(grps)*common.MaxRetiredLegPerGrp {
+		t.Errorf("the pool holds %d repairs and %d retired legs, want %d "+
+			"and %d", len(state.Repairs), len(state.RetiredLegs), len(grps),
+			len(grps)*common.MaxRetiredLegPerGrp)
 	}
 }
 
@@ -865,10 +892,10 @@ func (wp *widePool) waitWideConverged(t *testing.T, what string) convergence {
 
 // TestFullShapeWidestPool pins the per-pool maximums under one whole worker:
 // a pool of MaxSliceCntPerSp slices, MaxCntlrCntPerSp cntlrs, RAID1 groups of
-// MaxAllocLegPerGrp legs and MaxSpareLegPerGrp spares, MaxSsCntPerSp
-// subsystems of MaxNsCntPerSs namespaces, MaxTdCntPerSp thin devices,
-// MaxCloneCntPerSp clones, each with a clone meta group of the same legs and
-// spares, MaxXferCntPerSp transfers and MaxMigrCntPerSp
+// MaxAllocLegPerGrp legs, each with a repair and MaxRetiredLegPerGrp retired
+// legs, MaxSsCntPerSp subsystems of MaxNsCntPerSs namespaces, MaxTdCntPerSp
+// thin devices, MaxCloneCntPerSp clones, each with a clone meta group of the
+// same shape, MaxXferCntPerSp transfers and MaxMigrCntPerSp
 // migrations. It converges (waitConverged's meaning); a disabled primary
 // fails over to a standby (AR5); one migration runs to its cutover by the
 // worker's own path once the new primary reports a live path to its new
@@ -1041,16 +1068,28 @@ type wideLegSide struct {
 	side *pb.Side
 }
 
-// wideSides lists every side of a load, spare legs' included, the clones'
-// clone meta groups' too (poolGrps).
+// wideSides lists every side of a load: its groups' legs', the clones'
+// clone meta groups' too (poolGrps), its repairs' new legs' and its retired
+// legs', a retired side under a leg of the retired leg's id.
 func wideSides(state *model.SpState) []wideLegSide {
 	var out []wideLegSide
+	lists := [][]*pb.Leg{}
 	for _, grp := range poolGrps(state) {
-		for _, leg := range append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...) {
+		lists = append(lists, grp.GetLegList())
+	}
+	for _, repName := range state.Conf.GetRepairNameList() {
+		lists = append(lists, state.Repairs[repName].GetNewLegList())
+	}
+	for _, list := range lists {
+		for _, leg := range list {
 			for _, side := range leg.GetSideList() {
 				out = append(out, wideLegSide{leg, side})
 			}
 		}
+	}
+	for _, legId := range state.Conf.GetRetiredLegIdList() {
+		side := state.RetiredLegs[legId].GetSide()
+		out = append(out, wideLegSide{&pb.Leg{LegId: legId}, side})
 	}
 	return out
 }

@@ -17,11 +17,11 @@ import (
 // The whole-worker scenario cases of a clone's clone meta group
 // (architecture.md, Terminology and object model): the sp coordinator drives
 // its sides as a slice's (dnv-worker.md RW14, RW15, RW18), leg repair runs on
-// it with the healthy-leg precondition of every group (AR8) and skips a clone
+// it with the healthy-leg test of every group (AR8) and skips a clone
 // being deleted, and the clone drain's final step gives back the sides the
 // coordinator drove (CLD9). The clone is planted as CreateClone places one in the
 // standard RAID1 pool (putStdClone): its two legs on dn 1 and dn 2, dn 3
-// left for a spare. The fakes derive the rows of the clone's group and legs
+// left for a repair's new leg. The fakes derive the rows of the clone's group and legs
 // on every cntlr whose request carries the clone, as for a slice's group
 // (dnv-worker.md, Integration test plan, The fake agent).
 
@@ -202,13 +202,14 @@ func TestScenCloneMetaGroupDrivenAndFlipped(t *testing.T) {
 }
 
 // TestScenCloneLegRepair pins AR8 on a clone meta group: a leg of the clone's
-// group the primary reports ERROR past leg_unhealthy gets a spare on dn 3,
-// the one DN outside the group, through the clone-keyed create, which
-// charges dn 3 one extent and its pointer; the coordinator drives the
-// spare's side to provisioned and flips it through the clone flip; the next
-// pass switches the spare in through the clone-keyed switch and parks the
-// leg; every record names the clone and no slice. Once the parked leg reads
-// OK again the pool converges.
+// group the primary reports ERROR past leg_unhealthy gets a worker's repair
+// whose new leg goes to dn 3, the one DN outside the group, which the create
+// charges one extent and its pointer; the coordinator drives the new leg's
+// side to provisioned and flips it in the repair; the primary's verdict
+// started moves the repair to STARTED and the drive step finishes it, the
+// new leg taking the leg's place in the clone's group and the leg kept as a
+// retired leg of it; the create's record names the clone and no slice, and
+// the drive step's finish names the repair and its group.
 func TestScenCloneLegRepair(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
@@ -220,64 +221,59 @@ func TestScenCloneLegRepair(t *testing.T) {
 	c.waitConverged(t)
 
 	before := c.dnLedgerOf(t, 3)
-	spareLeg, spareSide := c.spareIds(t)
+	repId, newLeg, newSide := c.nextRepairIds(t)
 	legA := clone.LegIds[0]
 	c.failLegs(t, legA)
-	created := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(reactionIs(reactionSpareCreate, ""), numIs("leg_id", legA)))
+	created := h.waitCreated(t, w, legA)
+	repName := created.str("rep_name")
 	if !ofClone(clone)(created) || created.num("grp_id") != clone.GrpId ||
-		created.num("spare_leg_id") != spareLeg ||
+		created.num("rep_id") != repId || created.num("new_leg_id") != newLeg ||
 		created.str("addr_port") != stdDnAddr(3) {
-		t.Fatalf("the spare create %v, want spare %d of clone %s's group %d "+
-			"on dn 3", created.attrs, spareLeg, clone.Name, clone.GrpId)
+		t.Fatalf("the create %v, want repair %d of clone %s's group %d with "+
+			"new leg %d on dn 3", created.attrs, repId, clone.Name,
+			clone.GrpId, newLeg)
 	}
-	switched := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(reactionIs(reactionSpareSwitch, ""), numIs("leg_id", legA)))
-	if !ofClone(clone)(switched) ||
-		switched.num("spare_leg_id") != spareLeg {
-		t.Fatalf("the switch %v, want spare %d of clone %s", switched.attrs,
-			spareLeg, clone.Name)
-	}
-	grp := c.cloneGrp(t, "c0")
-	if !slices.Contains(legIds(grp.GetLegList()), spareLeg) ||
-		!slices.Contains(legIds(grp.GetSpareLegList()), legA) {
-		t.Fatalf("after the switch the group has legs %v and spares %v, "+
-			"want leg %d in and leg %d parked", legIds(grp.GetLegList()),
-			legIds(grp.GetSpareLegList()), spareLeg, legA)
-	}
-	flipped := h.countRecs(w, msgFlipApplied, and(ofClone(clone),
-		numIs("side_id", spareSide)))
-	if flipped != 1 {
-		t.Errorf("%d clone flip records of the spare's side %d, want 1",
-			flipped, spareSide)
-	}
+	h.waitRecord(t, 20*time.Second, w, msgFlipApplied,
+		func(rec logRecord) bool {
+			return rec.str("rep_name") == repName &&
+				rec.num("side_id") == newSide
+		})
 	after := c.dnLedgerOf(t, 3)
 	if after.free != before.free-1 || after.ptrs == before.ptrs ||
 		!after.keyed || after.rev != before.rev+1 {
-		t.Errorf("dn 3 after the spare: %+v, before %+v; want one extent "+
+		t.Errorf("dn 3 after the create: %+v, before %+v; want one extent "+
 			"and one pointer more, keyed, one bump", after, before)
 	}
+
+	finished := c.finishByVerdict(t, w, repName)
+	if finished.num("retired_leg_id") != legA {
+		t.Fatalf("the finish %v, want leg %d retired", finished.attrs, legA)
+	}
+	grp := c.cloneGrp(t, "c0")
+	if !slices.Contains(legIds(grp.GetLegList()), newLeg) ||
+		slices.Contains(legIds(grp.GetLegList()), legA) ||
+		!slices.Contains(grp.GetRetiredLegIdList(), legA) {
+		t.Fatalf("after the finish the group has legs %v and retired legs "+
+			"%v, want leg %d in and leg %d retired",
+			legIds(grp.GetLegList()), grp.GetRetiredLegIdList(), newLeg, legA)
+	}
 	for _, rec := range h.records(w, msgReactionApplied) {
-		if rec.str("kind") != reactionSpareCreate &&
-			rec.str("kind") != reactionSpareSwitch {
-			t.Errorf("a reaction other than the repair: %v", rec.attrs)
+		if !ofClone(clone)(rec) && rec.str("kind") != reactionRepairFinish {
+			t.Errorf("a reaction record names no clone: %v", rec.attrs)
 		}
 	}
-	if n := h.countRecs(w, msgReactionApplied,
-		reactionIs(reactionSpareCreate, "")); n != 1 {
-		t.Errorf("%d spares created for one repair, want 1", n)
+	if n := h.creates(w); n != 1 {
+		t.Errorf("%d repairs created for one leg, want 1", n)
 	}
-
-	c.healLeg(t, legA)
 	c.waitConverged(t)
 }
 
-// TestScenCloneLegRepairNeedsAHealthyLeg pins AR8's healthy-leg precondition
-// on a clone meta group: with both legs of the clone's group reported ERROR past
+// TestScenCloneLegRepairNeedsAHealthyLeg pins AR8's healthy-leg test on a
+// clone meta group: with both legs of the clone's group reported ERROR past
 // leg_unhealthy, every pass logs `reaction skipped` (no_healthy_leg) for each
-// of them, naming the clone, and neither creates nor switches a spare, so dn
-// 3 is never charged; once one leg reads OK again, the other is repaired, a
-// spare created on dn 3 and switched in.
+// of them, naming the clone, and creates nothing, so dn 3 is never charged;
+// once one leg reads OK again, the other gets its repair, its new leg on
+// dn 3.
 func TestScenCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
@@ -293,7 +289,7 @@ func TestScenCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 	c.failLegs(t, legA, legB)
 	for _, legId := range []uint64{legA, legB} {
 		h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 3,
-			and(and(reactionIs(reactionSpareCreate, reasonNoHealthyLeg),
+			and(and(reactionIs(reactionRepairCreate, reasonNoHealthyLeg),
 				numIs("leg_id", legId)), ofClone(clone)))
 	}
 	if n := h.countRecs(w, msgReactionApplied, nil); n != 0 {
@@ -305,18 +301,14 @@ func TestScenCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 			got, before)
 	}
 
-	spareLeg, _ := c.spareIds(t)
+	_, newLeg, _ := c.nextRepairIds(t)
 	c.healLeg(t, legB)
-	created := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(reactionIs(reactionSpareCreate, ""), numIs("leg_id", legA)))
-	if !ofClone(clone)(created) || created.num("spare_leg_id") != spareLeg ||
+	created := h.waitCreated(t, w, legA)
+	if !ofClone(clone)(created) || created.num("new_leg_id") != newLeg ||
 		created.str("addr_port") != stdDnAddr(3) {
-		t.Fatalf("the spare create %v, want spare %d of clone %s on dn 3",
-			created.attrs, spareLeg, clone.Name)
+		t.Fatalf("the create %v, want new leg %d of clone %s on dn 3",
+			created.attrs, newLeg, clone.Name)
 	}
-	h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		and(and(reactionIs(reactionSpareSwitch, ""), numIs("leg_id", legA)),
-			numIs("spare_leg_id", spareLeg)))
 }
 
 // TestScenDeletingCloneIsNotRepaired pins AR8's skip of a clone being deleted
@@ -326,8 +318,8 @@ func TestScenCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 // while the leg keeps its epoch and its verdict. The drain's final step is
 // held for the case by taking dn 2's revision key away, which its
 // transaction refuses ("dn rev not found"), so every pass logs `clone drain
-// failed` and the clone stays latched past leg_unhealthy: no pass creates or
-// switches a spare for it, no record of a reaction names it, and dn 3 is not
+// failed` and the clone stays latched past leg_unhealthy: no pass creates a
+// repair for it, no record of a reaction names it, and dn 3 is not
 // charged. With the key back, the drain gives the group back and the pool
 // converges. The leg's threshold is longer than the standard one, so that the
 // latch lands well inside it on a loaded machine.
@@ -442,7 +434,7 @@ func TestScenCloneDrainGivesBackDrivenSides(t *testing.T) {
 	keys := make([]string, len(clone.SideIds))
 	for i, sideId := range clone.SideIds {
 		keys[i] = agentfake.SideKey(stdSpId, clone.LegIds[i], sideId)
-		_, _, side, ok := c.sideOf(t, sideId)
+		_, side, ok := c.sideOf(t, sideId)
 		if !ok || !side.GetProvisioned() {
 			t.Fatalf("clone side %d before the latch: found %t, %v, want "+
 				"provisioned", sideId, ok, side)

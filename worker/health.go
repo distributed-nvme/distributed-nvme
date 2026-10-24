@@ -1205,8 +1205,8 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // holds its primary settling the same way, for as long as those sides zero;
 // neither of its two rows is an ERROR then, so that wait sets no err_epoch
 // and fails nothing over. Leg
-// rows are left out: a spare whose side is still zeroing reads PROVISIONING
-// there for as long as it zeroes. So are path rows, in no map HL2 judges: a
+// rows are left out: a repair's new leg whose side is still zeroing reads
+// PROVISIONING there for as long as it zeroes. So are path rows, in no map HL2 judges: a
 // migration's dst side reads PROVISIONING there while it zeroes. So are group
 // rows, for a grow: its new
 // groups are appended to their lists and stay out of the live concat while
@@ -1294,9 +1294,10 @@ func sideObservation(code uint32, info *pb.SideInfo) (healthObs, string) {
 
 // legObservation applies the HL2 leg row: the PRIMARY cntlr's probe
 // (architecture.md, Group on-leg layout: meta region, data region, health
-// block) of one leg (spares included). ERROR sets, OK clears, everything else —
-// and a leg the primary did not report at all — neither sets nor clears. A
-// STANDBY's leg row is logged by its caller, never passed in here (HL2).
+// block) of one leg (a repair's new leg included). ERROR sets, OK clears,
+// everything else — and a leg the primary did not report at all — neither
+// sets nor clears. A STANDBY's leg row is logged by its caller, never passed
+// in here (HL2).
 func legObservation(
 	code uint32,
 	info *pb.CntlrInfo,

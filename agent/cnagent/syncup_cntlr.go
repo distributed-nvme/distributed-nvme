@@ -159,8 +159,8 @@ func cntlrGates(
 //
 // The sweep derives its work from what the node actually holds, never from
 // the plan applied last time, so a removal that fails — and in a level
-// change, a spare switch or a finished migration or repair the remote end is
-// dead and a removal DOES fail — is simply found again next pass.
+// change or a finished migration or repair the remote end is dead and a
+// removal DOES fail — is simply found again next pass.
 //
 // The CN's whole part in a migration is that a leg's side_list temporarily
 // holds two sides (CN10).

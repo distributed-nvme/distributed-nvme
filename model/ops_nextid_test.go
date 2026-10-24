@@ -43,74 +43,6 @@ func TestSpNextIdReservesZero(t *testing.T) {
 	}
 }
 
-// TestCreateSpareLegNeverMintsIdZero is the same rule at the op that mints leg
-// and side ids: an SpConf whose next_id is the proto3 zero must still produce
-// ids >= 1, and the counter must come out past them.
-func TestCreateSpareLegNeverMintsIdZero(t *testing.T) {
-	env := newOpsEnv(t)
-	resetNextId(env, 0)
-
-	legId, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnC),
-		env.grpDnAddrs(opsDataGrpId), env.cc,
-	)
-	if err != nil {
-		t.Fatalf("CreateSpareLeg: %v", err)
-	}
-	if legId < SpFirstId {
-		t.Fatalf("leg_id: got %d, want >= %d (0 is the none sentinel)",
-			legId, SpFirstId)
-	}
-	grp := findGroup(env.slice(), opsDataGrpId)
-	spares := grp.GetSpareLegList()
-	if len(spares) != 1 {
-		t.Fatalf("spares: got %d, want 1", len(spares))
-	}
-	sides := spares[0].GetSideList()
-	if len(sides) != 1 {
-		t.Fatalf("sides: got %d, want 1", len(sides))
-	}
-	if sides[0].GetSideId() < SpFirstId {
-		t.Errorf("side_id: got %d, want >= %d",
-			sides[0].GetSideId(), SpFirstId)
-	}
-	// Two ids were consumed, both above the floor.
-	if got := env.spConf().GetNextId(); got != SpFirstId+2 {
-		t.Errorf("next_id: got %d, want %d", got, SpFirstId+2)
-	}
-}
-
-// TestCreateCloneSpareLegNeverMintsIdZero is the same rule at the clone-keyed
-// twin, which takes its two ids from the same counter.
-func TestCreateCloneSpareLegNeverMintsIdZero(t *testing.T) {
-	env := newOpsEnv(t)
-	env.putGrpClone(opsCloneName, opsCloneId, opsCloneGrp(true), false)
-	resetNextId(env, 0)
-
-	legId, err := CreateCloneSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsCloneName, opsCloneId, opsCloneGrpId, env.dnCand(opsDnA),
-		env.cloneGrpDnAddrs(), env.cc,
-	)
-	if err != nil {
-		t.Fatalf("CreateCloneSpareLeg: %v", err)
-	}
-	if legId != SpFirstId {
-		t.Fatalf("leg_id: got %d, want %d (0 is the none sentinel)",
-			legId, SpFirstId)
-	}
-	spare := findCloneLeg(env.clone(opsCloneName), legId)
-	if spare == nil || len(spare.GetSideList()) != 1 ||
-		spare.GetSideList()[0].GetSideId() != SpFirstId+1 {
-		t.Errorf("spare: got %v, want leg %d with side %d", spare,
-			SpFirstId, SpFirstId+1)
-	}
-	if got := env.spConf().GetNextId(); got != SpFirstId+2 {
-		t.Errorf("next_id: got %d, want %d", got, SpFirstId+2)
-	}
-}
-
 // TestCreateRepairNeverMintsIdZero is the same rule at the repair's mint: a
 // fresh new leg takes the rep_id, its leg id and its side id from the same
 // counter, all above the floor, and the counter comes out past them.
@@ -306,34 +238,6 @@ func TestOpsTakeTheirIdsUpToTheTop(t *testing.T) {
 					env.ctx, env.cli, env.cid, opsShard, opsSpId,
 					opsSpName, opsCntlrB, env.cnCand(opsCnC),
 					[]string{opsCnA}, false, now,
-				)
-			},
-		},
-		{
-			// The spare's leg_id and its side's side_id.
-			name: "CreateSpareLeg", op: opCreateSpareLeg, n: 2,
-			run: func(env *opsEnv) (uint64, error) {
-				return CreateSpareLeg(
-					env.ctx, env.cli, env.cid, opsShard, opsSpId,
-					opsSpName, noExpectRev, opsSliceId, opsDataGrpId,
-					env.dnCand(opsDnC), env.grpDnAddrs(opsDataGrpId),
-					env.cc,
-				)
-			},
-		},
-		{
-			// The clone-keyed twin's two ids, as the slice spare's.
-			name: "CreateCloneSpareLeg", op: opCreateCloneSpareLeg, n: 2,
-			setup: func(env *opsEnv) {
-				env.putGrpClone(opsCloneName, opsCloneId,
-					opsCloneGrp(true), false)
-			},
-			run: func(env *opsEnv) (uint64, error) {
-				return CreateCloneSpareLeg(
-					env.ctx, env.cli, env.cid, opsShard, opsSpId,
-					opsSpName, noExpectRev, opsCloneName, opsCloneId,
-					opsCloneGrpId, env.dnCand(opsDnA),
-					env.cloneGrpDnAddrs(), env.cc,
 				)
 			},
 		},

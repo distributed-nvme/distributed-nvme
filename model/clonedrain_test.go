@@ -531,29 +531,29 @@ func TestFinishCloneDeleteReadsNoCn(t *testing.T) {
 // TestFinishCloneDeleteAtTheCeiling commits the final STM at its widest
 // shape against the real etcd this package runs with
 // --max-txn-ops=common.EtcdMaxTxnOps: a clone meta group of
-// MaxAllocLegPerGrp legs, MaxSpareLegPerGrp spares and MaxRetiredLegPerGrp
-// retired legs, each side on a DN of its own, so every side given back is a
-// read and a write of its DN, of its DnRev, and a delete and a put of its
-// capacity key, and every retired leg a read and a delete of its key. Every
-// DN is credited, and the whole release is one transaction with the clone's
-// removal. A group with a repair has no spare, and its narrower shape is
-// TestFinishCloneDeleteAtTheCeilingWithARepair's.
+// MaxAllocLegPerGrp legs, a repair whose new leg is on a DN of its own and
+// MaxRetiredLegPerGrp retired legs, each side on a DN of its own, so every
+// side given back is a read and a write of its DN, of its DnRev, and a
+// delete and a put of its capacity key, the repair a read and a delete of
+// its key, and every retired leg a read and a delete of its key. Every DN is
+// credited, and the whole release is one transaction with the clone's
+// removal.
 func TestFinishCloneDeleteAtTheCeiling(t *testing.T) {
 	env := newOpsEnv(t)
 	env.putDrainClone(true, nil)
 	var dnAddrs []string
-	for idx := 0; idx < common.MaxAllocLegPerGrp+common.MaxSpareLegPerGrp+
+	for idx := 0; idx < common.MaxAllocLegPerGrp+1+
 		common.MaxRetiredLegPerGrp; idx++ {
 		addrPort := fmt.Sprintf("ceil-dn-%d:9000", idx)
 		env.putDn(addrPort, uint64(910+idx), uint32(idx), opsDnFree)
 		dnAddrs = append(dnAddrs, addrPort)
 	}
-	legCnt := common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
-	grp := cloneGrpAt(opsCloneGrpId, true, dnAddrs[:legCnt]...)
-	grp.SpareLegList = grp.LegList[common.MaxAllocLegPerGrp:]
-	grp.LegList = grp.LegList[:common.MaxAllocLegPerGrp]
+	grp := cloneGrpAt(opsCloneGrpId, true,
+		dnAddrs[:common.MaxAllocLegPerGrp]...)
 	env.chargeGrp(grp)
-	for idx, addrPort := range dnAddrs[legCnt:] {
+	rest := dnAddrs[common.MaxAllocLegPerGrp:]
+	env.putCloneRepairOf(grp, "rep1", 2001, rest[0])
+	for idx, addrPort := range rest[1:] {
 		env.putCloneRetired(grp, uint64(2011+2*idx), addrPort)
 	}
 	env.setCloneGrp(drainCloneName, grp)
@@ -574,27 +574,26 @@ func TestFinishCloneDeleteAtTheCeiling(t *testing.T) {
 				addrPort, got, rev)
 		}
 	}
+	if env.exists(RepairKey(env.cid, opsSpId, "rep1")) {
+		t.Errorf("the repair key survived")
+	}
 }
 
 // TestFinishCloneDeleteGivesTheGroupBack pins the DN ledger of the final STM
-// (dnv-worker.md CLD9): every side of the clone meta group, legs and spares,
-// goes back to its DN as a slice drain batch gives a group's back — the
-// pointer out, the group's ext_cnt back, the capacity key moved with the free
-// count it embeds, one DnRev bump per DN — in the transaction that removes
-// the clone. Only the clone's own pointers leave: the slice's sides on the
-// same DN, and another SP's pointer that shares a side_id, stay. A DN the
-// group does not use is not touched.
+// (dnv-worker.md CLD9): every side of the clone meta group's legs goes back
+// to its DN as a slice drain batch gives a group's back — the pointer out,
+// the group's ext_cnt back, the capacity key moved with the free count it
+// embeds, one DnRev bump per DN — in the transaction that removes the clone.
+// Only the clone's own pointers leave: the slice's sides on the same DN, and
+// another SP's pointer that shares a side_id, stay. A DN the group does not
+// use is not touched.
 func TestFinishCloneDeleteGivesTheGroupBack(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()
 	env.putDrainClone(true, nil)
-	grp := opsCloneGrp(true)
-	// A spare on dn-a, which carries the slice's two sides of that DN.
-	grp.SpareLegList = []*pb.Leg{{
-		LegId:    opsCloneSpareLeg,
-		LegIdx:   2,
-		SideList: []*pb.Side{opsSide(opsCloneSpareSide, opsDnA, true)},
-	}}
+	// A leg on dn-c and a leg on dn-a, which carries the slice's two sides
+	// of that DN.
+	grp := cloneGrpAt(opsCloneGrpId, true, opsDnC, opsDnA)
 	env.setCloneGrp(drainCloneName, grp)
 	env.chargeGrp(grp)
 	// A pointer of ANOTHER sp that collides on side_id, for
@@ -624,7 +623,6 @@ func TestFinishCloneDeleteGivesTheGroupBack(t *testing.T) {
 	}{
 		opsDnA: {before[opsDnA].dn.GetSidePtrList()[:2]},
 		opsDnC: {[]*pb.SidePointer{foreign}},
-		opsDnD: {nil},
 	} {
 		dn := env.dn(addrPort)
 		wantFree := before[addrPort].dn.GetFreeExtCnt() +
@@ -660,11 +658,14 @@ func TestFinishCloneDeleteGivesTheGroupBack(t *testing.T) {
 				addrPort)
 		}
 	}
-	if got := env.dn(opsDnB); !proto.Equal(got, before[opsDnB].dn) {
-		t.Errorf("dn-b, outside the group, moved: %v", got)
-	}
-	if got := env.dnRev(opsDnB); got != before[opsDnB].rev {
-		t.Errorf("dn-b rev: got %d, want %d", got, before[opsDnB].rev)
+	for _, addrPort := range []string{opsDnB, opsDnD} {
+		if got := env.dn(addrPort); !proto.Equal(got, before[addrPort].dn) {
+			t.Errorf("%s, outside the group, moved: %v", addrPort, got)
+		}
+		if got := env.dnRev(addrPort); got != before[addrPort].rev {
+			t.Errorf("%s rev: got %d, want %d", addrPort, got,
+				before[addrPort].rev)
+		}
 	}
 	// The clone meta group is in no cntlr's footprint, so no CN extent
 	// moves for it.

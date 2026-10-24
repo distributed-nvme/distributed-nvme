@@ -1,6 +1,5 @@
-// The copy half of the driver's subcommand table: clones, migrations, spare
-// legs and the two bitmap reads (architecture.md, Clones, Migrations,
-// Spare legs and Bitmap reads).
+// The copy half of the driver's subcommand table: clones, migrations and the
+// two bitmap reads (architecture.md, Clones, Migrations and Bitmap reads).
 //
 // Everything here is SP-scoped, so every mutator carries the SP's revision
 // token as `--rev` and every reader carries none — the read RPCs take no token
@@ -59,11 +58,11 @@ func dmCloneConfFlags(fs *flag.FlagSet) func() *pb.DmCloneConf {
 }
 
 // dnSelectorFlags registers the NodeSelector of the two RPCs that allocate a
-// fresh DN side — CreateMigration's destination and CreateSpareLeg's spare —
-// and returns their accessor. Both lists are comma-separated addr:port lists
-// (architecture.md, Finding DN candidates). An entirely empty selector is sent
-// as nil, so "no preference" and "an empty black list" stay the same request
-// the gateway's own callers make.
+// fresh DN side — CreateMigration's destination and CreateRepair's fresh new
+// leg — and returns their accessor. Both lists are comma-separated addr:port
+// lists (architecture.md, Finding DN candidates). An entirely empty selector
+// is sent as nil, so "no preference" and "an empty black list" stay the same
+// request the gateway's own callers make.
 func dnSelectorFlags(fs *flag.FlagSet) func() *pb.NodeSelector {
 	var black, white stringList
 	fs.Var(&black, "dn-black",
@@ -421,90 +420,6 @@ func setupAppendMigrBm(fs *flag.FlagSet) job {
 				MigrName:    *migrName,
 				Bitmap:      bitmapArg(*bmHex),
 			})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// spare leg (architecture.md, Spare legs)
-// ---------------------------------------------------------------------------
-
-// setupCreateSpare drives CreateSpareLeg: it allocates one extra leg for a
-// raid1 group, parked and unprovisioned, ready to be switched in. --grp is the
-// group id the leg joins, and the selector steers the DN the spare lands on
-// away from the ones the group's active legs already use.
-func setupCreateSpare(fs *flag.FlagSet) job {
-	spName := fs.String("sp", "", "sp_name")
-	var rev hexUint
-	fs.Var(&rev, "rev", "sp_rev token")
-	var grp hexUint
-	fs.Var(&grp, "grp", "grp_id the spare leg joins")
-	dnSelector := dnSelectorFlags(fs)
-	return func(
-		ctx context.Context,
-		client pb.GatewayClient,
-		g *globals,
-	) (any, error) {
-		return client.CreateSpareLeg(ctx, &pb.CreateSpareLegRequest{
-			ClusterName: g.cluster,
-			SpName:      *spName,
-			SpRev:       &pb.SpRev{Revision: uint64(rev)},
-			GrpId:       uint64(grp),
-			DnSelector:  dnSelector(),
-		})
-	}
-}
-
-// setupDeleteSpare drives DeleteSpareLeg. Both ids are given: --grp says which
-// group holds the spare list and --leg which entry of it goes away, which is
-// how case S stage 15 releases the leg a switch parked.
-func setupDeleteSpare(fs *flag.FlagSet) job {
-	spName := fs.String("sp", "", "sp_name")
-	var rev hexUint
-	fs.Var(&rev, "rev", "sp_rev token")
-	var grp, leg hexUint
-	fs.Var(&grp, "grp", "grp_id holding the spare leg")
-	fs.Var(&leg, "leg", "leg_id of the spare leg to delete")
-	return func(
-		ctx context.Context,
-		client pb.GatewayClient,
-		g *globals,
-	) (any, error) {
-		return client.DeleteSpareLeg(ctx, &pb.DeleteSpareLegRequest{
-			ClusterName: g.cluster,
-			SpName:      *spName,
-			SpRev:       &pb.SpRev{Revision: uint64(rev)},
-			GrpId:       uint64(grp),
-			LegId:       uint64(leg),
-		})
-	}
-}
-
-// setupSwitchSpare drives SwitchSpareLeg, the swap: --spare is the parked leg
-// that becomes active and --target the active leg it replaces, which is then
-// parked in the spare list. Naming both sides explicitly is what lets case S
-// stage 15 assert the reply's curr_active_leg_id / curr_spare_leg_id pair
-// rather than infer which way the swap went.
-func setupSwitchSpare(fs *flag.FlagSet) job {
-	spName := fs.String("sp", "", "sp_name")
-	var rev hexUint
-	fs.Var(&rev, "rev", "sp_rev token")
-	var grp, spare, target hexUint
-	fs.Var(&grp, "grp", "grp_id holding both legs")
-	fs.Var(&spare, "spare", "spare_leg_id, the parked leg switched in")
-	fs.Var(&target, "target", "target_leg_id, the active leg switched out")
-	return func(
-		ctx context.Context,
-		client pb.GatewayClient,
-		g *globals,
-	) (any, error) {
-		return client.SwitchSpareLeg(ctx, &pb.SwitchSpareLegRequest{
-			ClusterName: g.cluster,
-			SpName:      *spName,
-			SpRev:       &pb.SpRev{Revision: uint64(rev)},
-			GrpId:       uint64(grp),
-			SpareLegId:  uint64(spare),
-			TargetLegId: uint64(target),
-		})
 	}
 }
 

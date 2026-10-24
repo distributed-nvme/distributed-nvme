@@ -285,9 +285,6 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"CancelMigration":                 "cancel-migr",
 		"GetMigration":                    "get-migr",
 		"AppendMigrationBitmap":           "append-migr-bm",
-		"CreateSpareLeg":                  "create-spare",
-		"DeleteSpareLeg":                  "delete-spare",
-		"SwitchSpareLeg":                  "switch-spare",
 		"CreateRepair":                    "create-repair",
 		"FinishRepair":                    "finish-repair",
 		"CancelRepair":                    "cancel-repair",
@@ -299,8 +296,8 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"GetThinDeviceBitmap":             "get-td-bm",
 		"GetLegBitmap":                    "get-leg-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 68 {
-		t.Fatalf("service Gateway has %d methods, want 68",
+	if len(pb.Gateway_ServiceDesc.Methods) != 65 {
+		t.Fatalf("service Gateway has %d methods, want 65",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {

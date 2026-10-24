@@ -78,22 +78,19 @@ func validateOptionalName(field string, value string) error {
 	return nil
 }
 
-// repNameReservedPrefix is the prefix architecture.md, Common validation,
-// keeps out of every name an operator gives a repair, so that the prefix
-// stays free; no repair carries it.
-const repNameReservedPrefix = "__internal__"
-
 // validateRepName is CreateRepair's rep_name rule (architecture.md, Common
 // validation): a name as validateName checks one, which does not start with
-// repNameReservedPrefix. The other repair calls address an existing repair,
-// whatever its name, and check the name with validateName alone.
+// common.RepNameReservedPrefix, the prefix of the sp worker's own repairs,
+// so that no operator's repair carries it. The other repair calls address an
+// existing repair, whatever its name, the worker's included, and check the
+// name with validateName alone.
 func validateRepName(value string) error {
 	if err := validateName("rep_name", value); err != nil {
 		return err
 	}
-	if strings.HasPrefix(value, repNameReservedPrefix) {
+	if common.HasRepNameReservedPrefix(value) {
 		return errInvalid("rep_name %q starts with the reserved prefix %q",
-			value, repNameReservedPrefix)
+			value, common.RepNameReservedPrefix)
 	}
 	return nil
 }

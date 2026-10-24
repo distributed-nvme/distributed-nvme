@@ -61,8 +61,8 @@ FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 # This suite runs no gateway — `wctl put-sp` plants its pools directly — so
 # the create never happens here, and case G commits batches of the drain
 # family well below the ceiling — its widest slice is 21 groups over two DNs,
-# where a maximum batch touches a DN per leg and per spare of MaxDelGrpPerTxn
-# groups — and clone-drain batches, which fit etcd's default anyway (CLD11).
+# where a maximum batch touches a DN per leg of MaxDelGrpPerTxn groups — and
+# clone-drain batches, which fit etcd's default anyway (CLD11).
 # Its created flips carry one td each: no pool here holds a second.
 ETCD_MAX_TXN_OPS=
 # common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
@@ -1272,14 +1272,14 @@ clone_meta_grp() { # <grp id>
 }
 
 # clone_provisioned reports whether every side of one clone's clone meta
-# group, its spares' included, is provisioned: the sp worker drives those
+# group is provisioned: the sp worker drives those
 # sides as it drives a slice's and flips each through the clone flip once its
 # fake reports the zeroing done (dnv-worker.md RW14, RW18). A clone that is
 # not there, or has no side, is not.
 clone_provisioned() { # <sp> <clone name>
 	local got
 	got=$(ctl get-sp --sp "$1" | "$JQ" -r --arg c "$2" '
-		[ .clones[$c].meta_grp | (.leg_list[]?, .spare_leg_list[]?)
+		[ .clones[$c].meta_grp | .leg_list[]?
 		  | .side_list[]? | .provisioned ] | (length > 0 and all)') || return 1
 	[ "$got" = true ]
 }
@@ -1297,15 +1297,13 @@ slice_json() { ctl get-slice --sp "$1" --id "$2"; }
 # leg_epoch / side_epoch read one Leg's / Side's err_epoch out of a Slice.
 leg_epoch() { # <sp> <slice> <leg id>
 	slice_json "$1" "$2" | "$JQ" -r --arg l "$3" '
-		[ (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?)
+		[ (.meta_grp_list[]?, .data_grp_list[]?) | .leg_list[]?
 		  | select((.leg_id | tostring) == $l) | .err_epoch ] | first // "none"'
 }
 
 side_epoch() { # <sp> <slice> <side id>
 	slice_json "$1" "$2" | "$JQ" -r --arg s "$3" '
-		[ (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?
+		[ (.meta_grp_list[]?, .data_grp_list[]?) | .leg_list[]? | .side_list[]?
 		  | select((.side_id | tostring) == $s) | .err_epoch ] | first // "none"'
 }
 
@@ -1966,7 +1964,7 @@ EOF
 	stage 8 "the SP object table: cntlr, leg and side err_epochs"
 	# The thresholds are deliberately NOT the suite's reaction values here: this
 	# case injects the very ERROR rows case D uses as reaction triggers, and
-	# an AR5 failover or an AR8 spare would bump SpRev — which step 8 asserts
+	# an AR5 failover or an AR8 repair would bump SpRev — which step 8 asserts
 	# never happens ("health never bumps"). Case D is where the small
 	# thresholds belong.
 	put_dn 2 8
@@ -1981,7 +1979,7 @@ EOF
 	wait_until "$WAIT_SYNCUP" "every side of slice 1 provisioned" \
 		all_provisioned sp0 1
 	# "a clean state" is EVERY err_epoch of the snapshot, at any depth (the
-	# slice's groups, legs, spare legs and sides) plus every cntlr's — not the
+	# slice's groups, legs and sides) plus every cntlr's — not the
 	# three objects the injections below happen to touch.
 	assert_eq "$(nonzero_epochs "$(slice_json sp0 1)")" 0 \
 		"slice 1: non-zero err_epochs before the injections"
@@ -2475,14 +2473,6 @@ last_grp() { # <sp> <slice> <meta|data>  -> the newest group as JSON
 	slice_json "$1" "$2" | "$JQ" -c ".${3}_grp_list | last"
 }
 
-spare_count() { # <sp> <slice> <meta|data> <grp id>
-	slice_json "$1" "$2" | "$JQ" -r --arg g "$4" "
-		[ .${3}_grp_list[] | select((.grp_id | tostring) == \$g)
-		  | (.spare_leg_list // []) | length ] | first // 0"
-}
-
-spare_count_is() { [ "$(spare_count "$1" "$2" "$3" "$4")" = "$5" ]; }
-
 # active_legs prints "<leg_id> <side_id> <addr_port>" for a group's leg_list.
 active_legs() { # <sp> <slice> <meta|data> <grp id>
 	slice_json "$1" "$2" | "$JQ" -r --arg g "$4" "
@@ -2490,40 +2480,27 @@ active_legs() { # <sp> <slice> <meta|data> <grp id>
 		| \"\\(.leg_id) \\(.side_list[0].side_id) \\(.side_list[0].addr_port)\""
 }
 
-spare_legs() { # <sp> <slice> <meta|data> <grp id>
+# grp_rep_name prints the rep_name of one group of a slice: the name of its
+# repair, empty while it has none (architecture.md, Repairs).
+grp_rep_name() { # <sp> <slice> <meta|data> <grp id>
 	slice_json "$1" "$2" | "$JQ" -r --arg g "$4" "
-		.${3}_grp_list[] | select((.grp_id | tostring) == \$g)
-		| (.spare_leg_list // [])[]
-		| \"\\(.leg_id) \\(.side_list[0].side_id) \\(.side_list[0].addr_port) \\(.err_epoch)\""
+		[ .${3}_grp_list[] | select((.grp_id | tostring) == \$g)
+		  | (.rep_name // \"\") ] | first // \"\""
 }
 
-# group_legs lists EVERY leg of a group — leg_list and spare_leg_list together —
-# as "leg_id side_id addr_port". A leg repair moves legs between the two lists
-# (AR8 step 1 switches the spare in and parks the old leg), so an assertion that
-# wants "the leg this pass created" must find it by id across both, never by
-# position in one of them.
-group_legs() { # <sp> <slice> <meta|data> <grp id>
-	slice_json "$1" "$2" | "$JQ" -r --arg g "$4" "
-		.${3}_grp_list[] | select((.grp_id | tostring) == \$g)
-		| ((.leg_list // []) + (.spare_leg_list // []))[]
-		| \"\\(.leg_id) \\(.side_list[0].side_id) \\(.side_list[0].addr_port)\""
+# repair_rec_cnt counts the `reaction applied` records of one kind of leg
+# repair (dnv-worker.md AR8) that name the repair <rep name> and pass the jq
+# test <filter>, over every worker log of the case.
+repair_rec_cnt() { # <kind> <rep name> <filter>
+	wcount "select(.msg == \"reaction applied\")
+		| select(.kind == \$k and .rep_name == \$r) | select($3)" \
+		--arg k "$1" --arg r "$2"
 }
 
-# new_group_leg prints the one leg of a group whose id is absent from the
-# space-separated <before> set — i.e. the leg the pass under test created.
-new_group_leg() { # <sp> <slice> <meta|data> <grp id> <before ids>
-	local before=" $5 " line id
-	group_legs "$1" "$2" "$3" "$4" | while read -r line; do
-		id=$(printf '%s' "$line" | awk '{ print $1 }')
-		case "$before" in
-		*" $id "*) ;;
-		*) printf '%s\n' "$line" ;;
-		esac
-	done
-}
-
-group_has_new_leg() { # <sp> <slice> <meta|data> <grp id> <before ids>
-	[ -n "$(new_group_leg "$1" "$2" "$3" "$4" "$5")" ]
+repair_rec_ge() { # <n> <kind> <rep name> <filter>
+	local n=$1
+	shift
+	count_ge "$n" repair_rec_cnt "$@"
 }
 
 # pool_behavior writes the primary cntlr's dm-pool status row on the fake that
@@ -2876,24 +2853,16 @@ EOF
 	assert_none_for 3 "a data grow at lwm 101" reaction_ge $((grows + 1)) grow_data
 	assert_eq "$(reaction_cnt grow_meta)" "$metagrows" "meta grows at lwm 101"
 
-	stage 7 "AR8 leg repair, case 1 (the long leg threshold)"
+	stage 7 "AR8 leg repair, case 1 (the long leg threshold): the worker's repair to its finish"
 	# The pool row goes away with the grows: from here the primary reports
 	# only leg rows, so AR6 has nothing to parse and AR8 owns the pass.
-	# Exactly one DN outside G2 is eligible for a two-extent spare.
+	# Exactly one DN outside G2 is eligible for a two-extent new leg.
 	ctl set-free dn --id 3 --free-ext 8
 	ctl set-free dn --id 4 --free-ext 0
 	ctl set-free dn --id 1 --free-ext 0
 	ctl set-free dn --id 2 --free-ext 0
-	local creates switches legs_before
-	creates=$(reaction_cnt spare_create)
-	switches=$(reaction_cnt spare_switch)
-	# The leg ids G2 holds BEFORE the repair, across both lists. The new spare
-	# is identified against this set rather than by reading spare_leg_list[0]:
-	# the fakes provision instantly and the primary reports the spare OK by
-	# default, so AR8's switch step can land before the assertion runs, and
-	# spare_leg_list[0] is then the PARKED OLD LEG (the switch step of AR8
-	# parks it there), not the spare.
-	legs_before=$(group_legs sp0 1 data 2 | awk '{ print $1 }' | sort -n | tr '\n' ' ')
+	local creates
+	creates=$(reaction_cnt repair_create)
 	set_behavior "$prim_dir" <<EOF
 {"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {"leg_id_to_leg.3":
   {"status": "ERROR", "details": "no healthy path"}}}}}
@@ -2902,198 +2871,161 @@ EOF
 	local l3_epoch
 	l3_epoch=$(leg_epoch sp0 1 3)
 	# As in step 2: the wait is met by a failed read too, and an unstamped 0
-	# would pass the compare below for any spare_create.
+	# would pass the compare below for any repair_create.
 	case "$l3_epoch" in
 	'' | 0 | *[!0-9]*) die "L3's err_epoch read back as '$l3_epoch'" ;;
 	esac
 	# The live negative is short BECAUSE it is timed from when this poll saw
 	# the epoch, not from when the worker stamped it: every poll costs a full
 	# ssh (SSH_OPTS has no ControlMaster), so the observation can lag a second
-	# or more and a legitimate spare at err_epoch + 6 s would land inside a
+	# or more and a legitimate create at err_epoch + 6 s would land inside a
 	# longer window. "Not before the 6 s leg threshold" is asserted right
 	# after, against the epoch the worker itself stamped.
-	assert_none_for 3 "a spare before the 6s leg threshold" \
-		reaction_ge $((creates + 1)) spare_create
-	wait_until $((6 + WAIT_SHORT)) "reaction applied kind=spare_create on G2" \
-		reaction_ge $((creates + 1)) spare_create
+	assert_none_for 3 "a repair before the 6s leg threshold" \
+		reaction_ge $((creates + 1)) repair_create
+	wait_until $((6 + WAIT_SHORT)) "reaction applied kind=repair_create on G2" \
+		reaction_ge $((creates + 1)) repair_create
 	local l3_create_at
-	l3_create_at=$(reaction_epochs spare_create | sed -n "$((creates + 1))p")
-	[ -n "$l3_create_at" ] || die "no spare_create record to time"
+	l3_create_at=$(reaction_epochs repair_create | sed -n "$((creates + 1))p")
+	[ -n "$l3_create_at" ] || die "no repair_create record to time"
 	ts_ge "$l3_create_at" $((l3_epoch + 6)) ||
-		die "the G2 spare_create ran at $l3_create_at, before L3's err_epoch $l3_epoch + the 6s leg threshold"
-	wait_until "$WAIT_SHORT" "G2 to hold a leg it did not have before" \
-		group_has_new_leg sp0 1 data 2 "$legs_before"
-	local spare spare_leg spare_side spare_addr spare_dir
-	spare=$(new_group_leg sp0 1 data 2 "$legs_before")
-	spare_leg=$(printf '%s' "$spare" | awk '{ print $1 }')
-	spare_side=$(printf '%s' "$spare" | awk '{ print $2 }')
-	spare_addr=$(printf '%s' "$spare" | awk '{ print $3 }')
-	spare_dir=$(dir_of_addr "$spare_addr")
-	assert_eq "$spare_addr" "$(dn_addr 3)" "the spare's DN (the only eligible one)"
-	wait_until "$WAIT_SHORT" "the first SyncupSide for the spare's side" \
-		req_ge 1 "$spare_dir" SyncupSide \
-		'(.side_pointer.side_id | tostring) == $s' --arg s "$spare_side"
-	assert_eq "$(first_side_provisioned "$spare_dir" "$spare_side")" false \
-		"the spare's side was created with provisioned false"
-	wait_until "$WAIT_SYNCUP" "RW18 to flip the spare's side" \
-		side_provisioned sp0 1 "$spare_side"
-	wait_until $((6 + WAIT_SHORT)) "reaction applied kind=spare_switch" \
-		reaction_ge $((switches + 1)) spare_switch
-	wait_until "$WAIT_SHORT" "the spare to take L3's place in leg_list" \
-		leg_in_list sp0 1 data 2 "$spare_leg"
-	assert_eq "$(active_legs sp0 1 data 2 | awk 'NR==1 { print $1 }')" "$spare_leg" \
-		"the spare sits at L3's POSITION in leg_list (MD6 SwitchSpareLeg swaps list slots; the stored leg_idx is assigned at creation and is deliberately not renumbered)"
-	assert_eq "$(spare_legs sp0 1 data 2 | awk '{ print $1 }')" 3 \
-		"L3 is parked in spare_leg_list"
-	# Sampled into a variable, so that a failed read stops the run under
-	# `set -e`: compared in place, the substitution is an argument, whose
-	# status nothing checks, and the empty output of a dropped ssh is not 0.
-	local l3_parked_epoch
-	l3_parked_epoch=$(spare_legs sp0 1 data 2 | awk '$1 == 3 { print $4 }')
-	case "$l3_parked_epoch" in
-	'' | 0 | *[!0-9]*) die "the parked L3 keeps its err_epoch: got '$l3_parked_epoch'" ;;
+		die "the G2 repair_create ran at $l3_create_at, before L3's err_epoch $l3_epoch + the 6s leg threshold"
+	# The worker's repair: a name with the reserved prefix, linked from G2,
+	# CREATED, its bad leg L3 and its fresh new leg on dn 3.
+	local g2_rep g2_new_leg g2_new_side g2_new_addr g2_new_dir
+	g2_rep=$(grp_rep_name sp0 1 data 2)
+	case "$g2_rep" in
+	__internal__*) ;;
+	*) die "G2's repair is named '$g2_rep', want the reserved prefix" ;;
 	esac
-	wait_until "$WAIT_SHORT" "SyncupSide for the spare's side carries primary_cn_id" \
-		req_ge 1 "$spare_dir" SyncupSide \
+	assert_field "$(repair_json sp0 "$g2_rep")" .rep_stage REP_STAGE_CREATED \
+		"the worker's repair of L3 after its create"
+	assert_field "$(repair_json sp0 "$g2_rep")" '.bad_leg_id_list[0] | tostring' 3 \
+		"the bad leg of the worker's repair"
+	g2_new_leg=$(repair_json sp0 "$g2_rep" | "$JQ" -r '.new_leg_list[0].leg_id')
+	g2_new_side=$(repair_json sp0 "$g2_rep" | "$JQ" -r '.new_leg_list[0].side_list[0].side_id')
+	g2_new_addr=$(repair_json sp0 "$g2_rep" | "$JQ" -r '.new_leg_list[0].side_list[0].addr_port')
+	g2_new_dir=$(dir_of_addr "$g2_new_addr")
+	assert_eq "$g2_new_addr" "$(dn_addr 3)" "the new leg's DN (the only eligible one)"
+	wait_until "$WAIT_SHORT" "the first SyncupSide for the new leg's side" \
+		req_ge 1 "$g2_new_dir" SyncupSide \
+		'(.side_pointer.side_id | tostring) == $s' --arg s "$g2_new_side"
+	assert_eq "$(first_side_provisioned "$g2_new_dir" "$g2_new_side")" false \
+		"the new leg's side was created with provisioned false"
+	wait_until "$WAIT_SYNCUP" "RW18 to flip the new leg's side" \
+		repair_side_provisioned sp0 "$g2_rep"
+	# The primary reports the new leg holding a place in the array: the stage
+	# moves to STARTED (AR11), and the next pass's drive step finishes the
+	# repair (AR8).
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {"leg_id_to_leg.3":
+  {"status": "ERROR", "details": "no healthy path"}},
+  "repairs": {"$g2_rep": {"started": true}}}}}
+EOF
+	wait_until "$WAIT_SHORT" "reaction applied kind=repair_finish of the worker's repair" \
+		repair_rec_ge 1 repair_finish "$g2_rep" '(.retired_leg_id | tostring) == "3"'
+	assert_eq "$(stage_moved_cnt "$g2_rep" REP_STAGE_STARTED)" 1 \
+		"one \`repair stage moved\` record for the worker's repair"
+	repair_gone sp0 "$g2_rep" || die "the worker's repair outlived its finish"
+	retired_leg_listed sp0 3 || die "L3 is not listed retired after the finish"
+	assert_eq "$(active_legs sp0 1 data 2 | awk 'NR==1 { print $1 }')" "$g2_new_leg" \
+		"the new leg sits at L3's POSITION in leg_list (FinishRepair puts it in the bad leg's place)"
+	wait_until "$WAIT_SHORT" "SyncupSide for the new leg's side carries primary_cn_id" \
+		req_ge 1 "$g2_new_dir" SyncupSide \
 		'(.side_pointer.side_id | tostring) == $s and (.side_conf.primary_cn_id | tostring) != "0"' \
-		--arg s "$spare_side"
-	# "No further repair of L3" is every AR8 step, not only the switch: a
-	# worker that kept allocating spares for the parked leg — or parked a
-	# second one — would sail through a switch-only check.
-	switches=$(reaction_cnt spare_switch)
-	creates=$(reaction_cnt spare_create)
-	local g2_spares
-	g2_spares=$(spare_count sp0 1 data 2)
-	assert_none_for 4 "a further repair of the parked L3" \
-		g2_repair_progressed "$switches" "$creates" "$g2_spares"
+		--arg s "$g2_new_side"
+	# L3 is a retired leg now, no leg of G2: no further repair of it.
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true}}}
+EOF
+	creates=$(reaction_cnt repair_create)
+	assert_none_for 4 "a further repair of the retired L3" \
+		reaction_ge $((creates + 1)) repair_create
 
 	stage 8 "AR8 leg repair, case 2 (leg AND side, the short threshold)"
 	# The negative first: a side error alone must never repair anything.
 	ctl set-free dn --id 4 --free-ext 8
 	ctl set-free dn --id 3 --free-ext 0
-	creates=$(reaction_cnt spare_create)
-	# BOTH counters are baselined BEFORE the trigger. spare_create and
-	# spare_switch land about a second apart (the fakes provision instantly
-	# and the primary reports the fresh spare OK by default), so a baseline
-	# taken after the create — with several ssh round trips in between — is
-	# taken after the SWITCH as well, and the wait below would then be asking
-	# for a second switch that never comes.
-	switches=$(reaction_cnt spare_switch)
-	# G1's leg ids before the repair, across BOTH lists — the new spare is
-	# found against this set, not by reading spare_leg_list[0], which after
-	# AR8 step 1's switch holds the PARKED OLD LEG (see stage 7).
-	local g1_legs_before
-	g1_legs_before=$(group_legs sp0 1 meta 1 | awk '{ print $1 }' | sort -n | tr '\n' ' ')
+	creates=$(reaction_cnt repair_create)
 	set_behavior dn0 <<'EOF'
 {"objects": {"side 1:1:1": {"rows": {"side_dev_info":
   {"status": "ERROR", "details": "dn is gone"}}}}}
 EOF
 	wait_until "$WAIT_SHORT" "S1 err_epoch set" side_epoch_set sp0 1 1
-	assert_none_for 5 "a spare from a side error with a healthy leg" \
-		reaction_ge $((creates + 1)) spare_create
+	assert_none_for 5 "a repair from a side error with a healthy leg" \
+		reaction_ge $((creates + 1)) repair_create
 	# Now the leg row too: case 2 fires at the 3s side threshold, and the
 	# whole point of the case is that it fires BEFORE the 6s leg threshold —
 	# which a 3 + WAIT_SHORT = 8 s budget cannot express, since a worker that
 	# ignored the combined leg+side rule and waited for the plain leg
 	# threshold would fit inside it. So the server clock is stamped before the
-	# row is written and the spare_create record's OWN time has to be less
+	# row is written and the repair_create record's OWN time has to be less
 	# than 6 s after that reading: the leg's err_epoch cannot precede the row,
 	# so the leg-threshold-only worker could not react before it either.
 	local leg_row_at
 	leg_row_at=$(server_now)
 	set_behavior "$prim_dir" <<EOF
 {"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {
-  "leg_id_to_leg.3": {"status": "ERROR", "details": "no healthy path"},
   "leg_id_to_leg.1": {"status": "ERROR", "details": "no healthy path"}}}}}
 EOF
 	wait_until "$WAIT_SHORT" "L1 err_epoch set" leg_epoch_set sp0 1 1
-	wait_until $((3 + WAIT_SHORT)) "reaction applied kind=spare_create on G1" \
-		reaction_ge $((creates + 1)) spare_create
+	wait_until $((3 + WAIT_SHORT)) "reaction applied kind=repair_create on G1" \
+		reaction_ge $((creates + 1)) repair_create
 	local g1_create_at g1_deadline
-	g1_create_at=$(reaction_epochs spare_create | sed -n "$((creates + 1))p")
-	[ -n "$g1_create_at" ] || die "no spare_create record to time"
+	g1_create_at=$(reaction_epochs repair_create | sed -n "$((creates + 1))p")
+	[ -n "$g1_create_at" ] || die "no repair_create record to time"
 	g1_deadline=$(awk -v t="$(ts_epoch "$leg_row_at")" 'BEGIN { printf "%.3f", t + 6 }')
 	ts_lt "$g1_create_at" "$g1_deadline" ||
-		die "the G1 spare_create ran at $g1_create_at, not before the 6s leg threshold at $g1_deadline (leg row written at $leg_row_at)"
-	wait_until "$WAIT_SHORT" "G1 to hold a leg it did not have before" \
-		group_has_new_leg sp0 1 meta 1 "$g1_legs_before"
-	local g1_spare g1_leg g1_side g1_addr g1_dir
-	g1_spare=$(new_group_leg sp0 1 meta 1 "$g1_legs_before")
-	g1_leg=$(printf '%s' "$g1_spare" | awk '{ print $1 }')
-	g1_side=$(printf '%s' "$g1_spare" | awk '{ print $2 }')
-	g1_addr=$(printf '%s' "$g1_spare" | awk '{ print $3 }')
-	g1_dir=$(dir_of_addr "$g1_addr")
-	assert_eq "$g1_addr" "$(dn_addr 4)" "the G1 spare's DN (the only eligible one)"
-	wait_until "$WAIT_SYNCUP" "RW18 to flip the G1 spare's side" \
-		side_provisioned sp0 1 "$g1_side"
-	wait_until $((3 + WAIT_SHORT)) "reaction applied kind=spare_switch on G1" \
-		reaction_ge $((switches + 1)) spare_switch
-	wait_until "$WAIT_SHORT" "the G1 spare to take L1's place" \
-		leg_in_list sp0 1 meta 1 "$g1_leg"
-	clear_behavior dn0
+		die "the G1 repair_create ran at $g1_create_at, not before the 6s leg threshold at $g1_deadline (leg row written at $leg_row_at)"
+	local g1_rep g1_new_side g1_new_addr
+	g1_rep=$(grp_rep_name sp0 1 meta 1)
+	case "$g1_rep" in
+	__internal__*) ;;
+	*) die "G1's repair is named '$g1_rep', want the reserved prefix" ;;
+	esac
+	g1_new_side=$(repair_json sp0 "$g1_rep" | "$JQ" -r '.new_leg_list[0].side_list[0].side_id')
+	g1_new_addr=$(repair_json sp0 "$g1_rep" | "$JQ" -r '.new_leg_list[0].side_list[0].addr_port')
+	assert_eq "$g1_new_addr" "$(dn_addr 4)" "the G1 new leg's DN (the only eligible one)"
+	wait_until "$WAIT_SYNCUP" "RW18 to flip the G1 new leg's side" \
+		repair_side_provisioned sp0 "$g1_rep"
+	assert_field "$(repair_json sp0 "$g1_rep")" .rep_stage REP_STAGE_CREATED \
+		"G1's repair while the primary reports no verdict"
 
-	stage 9 "AR8 spare_list_full: only an operator frees a slot"
-	# Park a second leg by repairing G1's surviving original leg L2 (its side
-	# S2 lives on dn 2), then fail an active leg with the list full.
-	ctl set-free dn --id 3 --free-ext 8
-	ctl set-free dn --id 4 --free-ext 0
-	creates=$(reaction_cnt spare_create)
-	switches=$(reaction_cnt spare_switch)
-	# G1's leg ids before this second repair, so the fresh spare is found by
-	# id rather than by excluding the two ORIGINAL leg ids: by now the group
-	# also holds stage 8's spare (switched in) and its parked leg, so an
-	# id-exclusion filter is ambiguous the moment a third repair is added.
-	local g1_legs_before2
-	g1_legs_before2=$(group_legs sp0 1 meta 1 | awk '{ print $1 }' | sort -n | tr '\n' ' ')
-	set_behavior dn1 <<'EOF'
-{"objects": {"side 1:2:2": {"rows": {"side_dev_info":
-  {"status": "ERROR", "details": "dn is gone"}}}}}
-EOF
+	stage 9 "AR8 try-to-abort: the bad leg returns before the copy starts"
+	# L1's leg row and S1's side row read OK again while the repair is still
+	# CREATED: the next pass sets its abort flag (AR8), the primary confirms
+	# the abort, the stage moves to ABORTED (AR11) and the drive step cancels
+	# the repair, giving dn 4 its new leg's extents back.
+	local aborts
+	aborts=$(repair_rec_cnt repair_abort "$g1_rep" '.trigger == "bad_leg_healthy"')
+	clear_behavior dn0
 	set_behavior "$prim_dir" <<EOF
-{"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {
-  "leg_id_to_leg.3": {"status": "ERROR", "details": "no healthy path"},
-  "leg_id_to_leg.1": {"status": "ERROR", "details": "no healthy path"},
-  "leg_id_to_leg.2": {"status": "ERROR", "details": "no healthy path"}}}}}
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true}}}
 EOF
-	wait_until "$WAIT_SHORT" "L2 err_epoch set" leg_epoch_set sp0 1 2
-	wait_until $((3 + WAIT_SHORT)) "a second spare_create on G1" \
-		reaction_ge $((creates + 1)) spare_create
-	wait_until "$WAIT_SHORT" "G1 to hold a leg it did not have before" \
-		group_has_new_leg sp0 1 meta 1 "$g1_legs_before2"
-	local g1_spare2 g1_side2
-	g1_spare2=$(new_group_leg sp0 1 meta 1 "$g1_legs_before2")
-	[ -n "$g1_spare2" ] || die "no fresh spare in G1's spare_leg_list"
-	g1_side2=$(printf '%s' "$g1_spare2" | awk '{ print $2 }')
-	wait_until "$WAIT_SYNCUP" "RW18 to flip the second G1 spare's side" \
-		side_provisioned sp0 1 "$g1_side2"
-	wait_until $((3 + WAIT_SHORT)) "a second spare_switch on G1" \
-		reaction_ge $((switches + 1)) spare_switch
-	wait_until "$WAIT_SHORT" "G1 to hold two parked legs" \
-		spare_count_is sp0 1 meta 1 2
-	# Both slots are taken: failing an active leg can only be skipped now.
-	local active fail_leg fail_side fail_dir fulls
-	active=$(active_legs sp0 1 meta 1 | sed -n 1p)
-	fail_leg=$(printf '%s' "$active" | awk '{ print $1 }')
-	fail_side=$(printf '%s' "$active" | awk '{ print $2 }')
-	fail_dir=$(dir_of_addr "$(printf '%s' "$active" | awk '{ print $3 }')")
-	creates=$(reaction_cnt spare_create)
-	fulls=$(reaction_skip_cnt spare_create spare_list_full)
-	set_behavior "$fail_dir" <<EOF
-{"objects": {"side 1:$fail_leg:$fail_side": {"rows": {"side_dev_info":
-  {"status": "ERROR", "details": "dn is gone"}}}}}
-EOF
+	wait_until "$WAIT_SHORT" "L1's err_epoch cleared" leg_epoch_clear sp0 1 1
+	wait_until "$WAIT_SHORT" "reaction applied kind=repair_abort trigger=bad_leg_healthy" \
+		repair_rec_ge $((aborts + 1)) repair_abort "$g1_rep" '.trigger == "bad_leg_healthy"'
+	assert_field "$(repair_json sp0 "$g1_rep")" .try_to_abort true \
+		"the abort flag of G1's repair"
+	assert_field "$(repair_json sp0 "$g1_rep")" .rep_stage REP_STAGE_CREATED \
+		"G1's repair before the primary confirms"
 	set_behavior "$prim_dir" <<EOF
-{"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {
-  "leg_id_to_leg.3": {"status": "ERROR", "details": "no healthy path"},
-  "leg_id_to_leg.1": {"status": "ERROR", "details": "no healthy path"},
-  "leg_id_to_leg.2": {"status": "ERROR", "details": "no healthy path"},
-  "leg_id_to_leg.$fail_leg": {"status": "ERROR", "details": "no healthy path"}}}}}
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true,
+  "repairs": {"$g1_rep": {"abort_confirmed": true}}}}}
 EOF
-	wait_until $((6 + WAIT_SHORT)) "reaction skipped reason=spare_list_full" \
-		reaction_skip_ge $((fulls + 1)) spare_create spare_list_full
-	assert_eq "$(reaction_cnt spare_create)" "$creates" \
-		"spare allocations while spare_leg_list is full"
-	assert_eq "$(spare_count sp0 1 meta 1)" 2 "G1 spare_leg_list length"
+	wait_until "$WAIT_SHORT" "reaction applied kind=repair_cancel of G1's repair" \
+		repair_rec_ge 1 repair_cancel "$g1_rep" 'true'
+	assert_eq "$(stage_moved_cnt "$g1_rep" REP_STAGE_ABORTED)" 1 \
+		"one \`repair stage moved\` record for G1's repair"
+	repair_gone sp0 "$g1_rep" || die "G1's repair outlived its cancel"
+	assert_eq "$(dn_free 4)" 8 "dn 4 got the new leg's extents back"
+	assert_eq "$(grp_rep_name sp0 1 meta 1)" "" "G1's repair name after the cancel"
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true}}}
+EOF
+	creates=$(reaction_cnt repair_create)
+	assert_none_for 4 "a repair of L1 once it reads healthy" \
+		reaction_ge $((creates + 1)) repair_create
 
 	stage 10 "AR3 suppression: sp_level and a disabled cntlr"
 	prim=$(sp_primary sp0)
@@ -3433,11 +3365,14 @@ case_repair() {
 		req_ge 1 cn0 SyncupCntlr '.name_to_repair.r0 != null'
 	wait_until "$WAIT_SHORT" "cn1: SyncupCntlr carrying r0" \
 		req_ge 1 cn1 SyncupCntlr '.name_to_repair.r0 != null'
-	# Once leg 3 is due, leg repair leaves the group to its repair, on every
-	# pass (AR8): no spare, and two skips naming the group's own reason.
+	# Once leg 3 is due, leg repair leaves the group to the operator's
+	# repair on every pass, since a group has one repair at a time (AR8):
+	# no repair of the worker's, and two skips naming the group's own reason.
 	wait_until $((30 + WAIT_SYNCUP)) "two passes skipping the group: grp_has_repair" \
-		reaction_skip_ge 2 spare_create grp_has_repair
-	assert_eq "$(spare_count sp0 1 data 2)" 0 "spares of a group with a repair"
+		reaction_skip_ge 2 repair_create grp_has_repair
+	assert_eq "$(reaction_cnt repair_create)" 0 \
+		"worker's repairs of a group with an operator's repair"
+	assert_eq "$(grp_rep_name sp0 1 data 2)" r0 "the data group's repair"
 	# The primary reports the new leg holding a place in the array: the worker
 	# moves r0 to STARTED (AR11).
 	repair_levers "$(leg_down 3)" '"r0": {"started": true}' ''
@@ -3533,21 +3468,10 @@ reaction_skip_ge() { # <n> <kind> <reason>
 	count_ge "$1" reaction_skip_cnt "$2" "$3"
 }
 
-# g2_repair_progressed reports whether ANY further AR8 step ran on sp0's data
-# group G2 — another switch, another allocation, or another parked leg. The
-# "no further repair of L3" of case D step 7 is all three.
-g2_repair_progressed() { # <spare_switch cnt> <spare_create cnt> <spare cnt>
-	if count_gt "$1" reaction_cnt spare_switch; then return 0; fi
-	if count_gt "$2" reaction_cnt spare_create; then return 0; fi
-	if [ "$(spare_count sp0 1 data 2)" != "$3" ]; then return 0; fi
-	return 1
-}
-
 side_provisioned() { # <sp> <slice> <side id>
 	local got
 	got=$(slice_json "$1" "$2" | "$JQ" -r --arg s "$3" '
-		[ (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?
+		[ (.meta_grp_list[]?, .data_grp_list[]?) | .leg_list[]? | .side_list[]?
 		  | select((.side_id | tostring) == $s) | .provisioned ] | first // false') || return 1
 	[ "$got" = true ]
 }

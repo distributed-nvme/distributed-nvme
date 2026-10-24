@@ -138,8 +138,8 @@ const (
 	// touch, and spDrainMaxCompares the worst-case compare count the factors
 	// above produce at it. Separate assertions, for the clone tripwire's
 	// reason: a ceiling change and a retyped factor must not fail alike.
-	spDrainMaxDns      = 80
-	spDrainMaxCompares = 486
+	spDrainMaxDns      = 40
+	spDrainMaxCompares = 246
 )
 
 // TestSpDrainBatchBudget is SPD14's arithmetic tripwire: the worst-case D2
@@ -153,13 +153,16 @@ const (
 //	reads    = spDrainReadsFixed  + spDrainReadsPerDn  x D
 //	writes   = spDrainWritesFixed + spDrainWritesPerDn x D
 //	compares = their sum,
-//	D <= MaxDelGrpPerTxn x (MaxAllocLegPerGrp + MaxSpareLegPerGrp)
+//	D <= MaxDelGrpPerTxn x MaxAllocLegPerGrp
 //
-// Every constant is NAMED (SPD1): widening the allocator's group shape, the
-// spare ceiling or the batch size past the budget fails here, at once, instead
-// of as an "etcd: too many operations in txn request" out of a drain in the
-// field. Sides contribute one DN each because a deletable SP has no migrations
-// and therefore no two-side legs.
+// Every constant is NAMED (SPD1): widening the allocator's group shape or the
+// batch size past the budget fails here, at once, instead of as an "etcd: too
+// many operations in txn request" out of a drain in the field. Sides
+// contribute one DN each because a deletable SP has no migrations and
+// therefore no two-side legs, and a group gives back its legs' sides alone:
+// DrainSpSlice refuses while a repair or a retired leg survives, so the
+// earlier phases have already given back every repair's new leg and every
+// retired side (TestSpDrainRepairBatchBudget, TestSpDrainRetiredLegBatchBudget).
 //
 // TestDrainSpSliceAtTheCeiling in model/drain_test.go is what this arithmetic
 // cannot be, because nothing here reads the STM: it commits a maximum-shape
@@ -168,22 +171,19 @@ const (
 // only once the true count passes EtcdMaxTxnOps, and spDrainMaxCompares
 // leaves slack that neither test will notice.
 func TestSpDrainBatchBudget(t *testing.T) {
-	const legs = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
-	const dns = common.MaxDelGrpPerTxn * legs
+	const dns = common.MaxDelGrpPerTxn * common.MaxAllocLegPerGrp
 	const perDn = spDrainReadsPerDn + spDrainWritesPerDn
 	const budget = spDrainReadsFixed + spDrainWritesFixed + perDn*dns
 
-	// The CEILINGS, exactly: all three of them at once, since only the
-	// combination MaxDelGrpPerTxn x (MaxAllocLegPerGrp + MaxSpareLegPerGrp)
-	// enters the budget.
+	// The CEILINGS, exactly: both of them at once, since only the product
+	// MaxDelGrpPerTxn x MaxAllocLegPerGrp enters the budget.
 	if dns != spDrainMaxDns {
 		t.Errorf(
 			"the sp-drain DN dimension moved: MaxDelGrpPerTxn %d x "+
-				"(MaxAllocLegPerGrp %d + MaxSpareLegPerGrp %d) = %d DNs, "+
-				"want the pinned %d. Re-pin spDrainMaxDns and "+
-				"spDrainMaxCompares together",
-			common.MaxDelGrpPerTxn, common.MaxAllocLegPerGrp,
-			common.MaxSpareLegPerGrp, dns, spDrainMaxDns)
+				"MaxAllocLegPerGrp %d = %d DNs, want the pinned %d. Re-pin "+
+				"spDrainMaxDns and spDrainMaxCompares together",
+			common.MaxDelGrpPerTxn, common.MaxAllocLegPerGrp, dns,
+			spDrainMaxDns)
 	}
 	// The TRANSCRIPTION, evaluated at the PINNED DN count so that a ceiling
 	// change cannot reach it: it fires when one of the four factors above is
@@ -208,12 +208,12 @@ func TestSpDrainBatchBudget(t *testing.T) {
 	if budget > common.EtcdMaxTxnOps {
 		t.Errorf(
 			"one sp drain batch is %d compares (fixed %d + per DN %d x %d "+
-				"groups x (%d legs + %d spares)), over the %d dnv requires "+
-				"etcd to allow: lower MaxDelGrpPerTxn or raise EtcdMaxTxnOps "+
-				"and the --max-txn-ops of every etcd that serves dnv",
+				"groups x %d legs), over the %d dnv requires etcd to allow: "+
+				"lower MaxDelGrpPerTxn or raise EtcdMaxTxnOps and the "+
+				"--max-txn-ops of every etcd that serves dnv",
 			budget, spDrainReadsFixed+spDrainWritesFixed, perDn,
 			common.MaxDelGrpPerTxn, common.MaxAllocLegPerGrp,
-			common.MaxSpareLegPerGrp, common.EtcdMaxTxnOps)
+			common.EtcdMaxTxnOps)
 	}
 }
 
@@ -791,30 +791,6 @@ func TestCreateCloneTxnBudget(t *testing.T) {
 	}.check(t)
 }
 
-// TestDeleteSpareLegTxnBudget is DeleteSpareLeg's tripwire at its widest, a
-// spare of a clone meta group: the group is looked up in every slice first
-// and only then in every clone (openGrpForSpareLeg), and the spare's one side
-// gives its DN back its extent through the DN ledger. A spare of a slice's
-// group reads no clone and is the narrower shape. A spare never has a
-// second side here, since a spare under migration is refused.
-func TestDeleteSpareLegTxnBudget(t *testing.T) {
-	txnShape{
-		name: "DeleteSpareLeg",
-		stm:  "spareleg.go's DeleteSpareLeg, openGrpForSpareLeg and dnLedger",
-		// ClusterConf, SpConf, SpRev, and the spare's DnConf and DnRev.
-		fixedReads: 5,
-		// The Clone, the DnConf, the dn_capacity delete and put, the DnRev
-		// and the SpRev.
-		fixedWrites: 6,
-		terms: []txnTerm{
-			{"slice", 1, common.MaxSliceCntPerSp, 32},
-			{"clone", 1, common.MaxCloneCntPerSp, 64},
-		},
-		maxCompares: 107,
-		overDefault: false,
-	}.check(t)
-}
-
 // TestUpdateCntlidSlotListTxnBudget is UpdateStoragePoolCntlidSlotList's
 // tripwire: a slot may leave the list only when no cntlr and no side uses
 // it, so its STM reads every cntlr, every slice and every clone of the pool,
@@ -944,16 +920,13 @@ func TestReplaceCntlrTxnBudget(t *testing.T) {
 // TestFinishCloneDeleteTxnBudget is the tripwire of model.FinishCloneDelete,
 // the clone drain's final step (dnv-worker.md CLD9, CLD11): it gives every
 // side of the clone meta group back to its DN, through the DN ledger an sp
-// drain batch uses, and reads no cntlr and no CN. A clone meta group has at
-// most MaxAllocLegPerGrp legs, MaxSpareLegPerGrp spares or one repair's new
-// leg, never both, and MaxRetiredLegPerGrp retired legs, one side each — its
-// legs are never migrated — on as many distinct DNs (SPD1 cites
-// MaxAllocLegPerGrp here). The spares are the widest: a repair's key read and
-// deleted and its new leg's DN cost eight compares, two spares' DNs twelve.
-// Each retired leg's key is read and deleted beside its DN.
-// model/clonedrain_test.go's TestFinishCloneDeleteAtTheCeiling commits this
-// shape against a real etcd, and model/repairdrain_test.go's
-// TestFinishCloneDeleteAtTheCeilingWithARepair the one with a repair.
+// drain batch uses, and reads no cntlr and no CN. At its widest the group has
+// MaxAllocLegPerGrp legs, one repair, whose key is read and deleted and whose
+// one new leg sits on a DN of its own, and MaxRetiredLegPerGrp retired legs,
+// one side each — its legs are never migrated — on as many distinct DNs
+// (SPD1 cites MaxAllocLegPerGrp here). Each retired leg's key is read and
+// deleted beside its DN. model/clonedrain_test.go's
+// TestFinishCloneDeleteAtTheCeiling commits this shape against a real etcd.
 func TestFinishCloneDeleteTxnBudget(t *testing.T) {
 	txnShape{
 		name: "FinishCloneDelete",
@@ -964,14 +937,16 @@ func TestFinishCloneDeleteTxnBudget(t *testing.T) {
 		fixedWrites: 3,
 		terms: []txnTerm{
 			// The DnConf and DnRev read; the DnConf put, the dn_capacity
-			// delete and put, and the DnRev put.
+			// delete and put, and the DnRev put: one DN per leg, one for
+			// the repair's new leg and one per retired leg.
 			{"dn", 6,
-				common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp +
-					common.MaxRetiredLegPerGrp, 6},
+				common.MaxAllocLegPerGrp + 1 + common.MaxRetiredLegPerGrp, 5},
+			// The Repair read and delete; a group has one repair at most.
+			{"repair", 2, 1, 1},
 			// The RetiredLeg read and delete.
 			{"retired leg", 2, common.MaxRetiredLegPerGrp, 2},
 		},
-		maxCompares: 46,
+		maxCompares: 42,
 		overDefault: false,
 	}.check(t)
 }
@@ -1028,9 +1003,13 @@ func TestSpDrainRetiredLegBatchBudget(t *testing.T) {
 // TestRepairOpsTxnBudget is the tripwire of the repair operations
 // (model/repair.go): each reads the records of one repair or one retired leg,
 // the one parent that holds its group and at most one DN, whatever the
-// pool's shape, so no ceiling is a factor. A repair's parent is one slice or
-// one clone, which the operations read by the name the record keeps, never by
-// a walk. model/repair_test.go commits each against a real etcd.
+// pool's shape, so no ceiling of the pool is a factor. The one factor is the
+// group's retired legs, which FinishRepair reads to pick the one it gives
+// back for the sp worker's repair at the bound. A repair's parent is one
+// slice or one clone, which the operations read by the name the record
+// keeps, never by a walk. model/repair_test.go commits each against a real
+// etcd, FinishRepair at its widest in
+// TestFinishRepairGivesBackTheOldestRetiredLeg.
 func TestRepairOpsTxnBudget(t *testing.T) {
 	for _, shape := range []txnShape{
 		{
@@ -1049,13 +1028,22 @@ func TestRepairOpsTxnBudget(t *testing.T) {
 		},
 		{
 			name: "FinishRepair",
-			stm:  "model.FinishRepair's STM",
-			// SpRev, SpConf, the Repair and the parent.
-			fixedReads: 4,
-			// The Repair delete, the RetiredLeg put, the parent, SpConf
-			// and SpRev.
-			fixedWrites: 5,
-			maxCompares: 9,
+			stm:  "model.FinishRepair's STM, oldestRetiredLeg and the dnReleaser",
+			// SpRev, SpConf, the Repair and the parent; for the worker's
+			// repair at the bound, the given-back side's DnConf and DnRev.
+			// A finish that gives nothing back reads neither, nor the
+			// retired legs: the narrower shape.
+			fixedReads: 6,
+			// The Repair delete, the bad leg's RetiredLeg put, the parent,
+			// SpConf and SpRev; for the give-back, the given-back RetiredLeg
+			// delete, its DnConf put, the dn_capacity delete and put and the
+			// DnRev put.
+			fixedWrites: 10,
+			terms: []txnTerm{
+				// Every RetiredLeg the group lists, read to pick the oldest.
+				{"retired leg", 1, common.MaxRetiredLegPerGrp, 2},
+			},
+			maxCompares: 18,
 		},
 		{
 			name: "CancelRepair",

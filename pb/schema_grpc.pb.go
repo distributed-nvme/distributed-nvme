@@ -74,9 +74,6 @@ const (
 	Gateway_CancelMigration_FullMethodName                 = "/Gateway/CancelMigration"
 	Gateway_GetMigration_FullMethodName                    = "/Gateway/GetMigration"
 	Gateway_AppendMigrationBitmap_FullMethodName           = "/Gateway/AppendMigrationBitmap"
-	Gateway_CreateSpareLeg_FullMethodName                  = "/Gateway/CreateSpareLeg"
-	Gateway_DeleteSpareLeg_FullMethodName                  = "/Gateway/DeleteSpareLeg"
-	Gateway_SwitchSpareLeg_FullMethodName                  = "/Gateway/SwitchSpareLeg"
 	Gateway_CreateRepair_FullMethodName                    = "/Gateway/CreateRepair"
 	Gateway_FinishRepair_FullMethodName                    = "/Gateway/FinishRepair"
 	Gateway_CancelRepair_FullMethodName                    = "/Gateway/CancelRepair"
@@ -148,9 +145,6 @@ type GatewayClient interface {
 	CancelMigration(ctx context.Context, in *CancelMigrationRequest, opts ...grpc.CallOption) (*CancelMigrationReply, error)
 	GetMigration(ctx context.Context, in *GetMigrationRequest, opts ...grpc.CallOption) (*GetMigrationReply, error)
 	AppendMigrationBitmap(ctx context.Context, in *AppendMigrationBitmapRequest, opts ...grpc.CallOption) (*AppendMigrationBitmapReply, error)
-	CreateSpareLeg(ctx context.Context, in *CreateSpareLegRequest, opts ...grpc.CallOption) (*CreateSpareLegReply, error)
-	DeleteSpareLeg(ctx context.Context, in *DeleteSpareLegRequest, opts ...grpc.CallOption) (*DeleteSpareLegReply, error)
-	SwitchSpareLeg(ctx context.Context, in *SwitchSpareLegRequest, opts ...grpc.CallOption) (*SwitchSpareLegReply, error)
 	CreateRepair(ctx context.Context, in *CreateRepairRequest, opts ...grpc.CallOption) (*CreateRepairReply, error)
 	FinishRepair(ctx context.Context, in *FinishRepairRequest, opts ...grpc.CallOption) (*FinishRepairReply, error)
 	CancelRepair(ctx context.Context, in *CancelRepairRequest, opts ...grpc.CallOption) (*CancelRepairReply, error)
@@ -721,36 +715,6 @@ func (c *gatewayClient) AppendMigrationBitmap(ctx context.Context, in *AppendMig
 	return out, nil
 }
 
-func (c *gatewayClient) CreateSpareLeg(ctx context.Context, in *CreateSpareLegRequest, opts ...grpc.CallOption) (*CreateSpareLegReply, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CreateSpareLegReply)
-	err := c.cc.Invoke(ctx, Gateway_CreateSpareLeg_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *gatewayClient) DeleteSpareLeg(ctx context.Context, in *DeleteSpareLegRequest, opts ...grpc.CallOption) (*DeleteSpareLegReply, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DeleteSpareLegReply)
-	err := c.cc.Invoke(ctx, Gateway_DeleteSpareLeg_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *gatewayClient) SwitchSpareLeg(ctx context.Context, in *SwitchSpareLegRequest, opts ...grpc.CallOption) (*SwitchSpareLegReply, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SwitchSpareLegReply)
-	err := c.cc.Invoke(ctx, Gateway_SwitchSpareLeg_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *gatewayClient) CreateRepair(ctx context.Context, in *CreateRepairRequest, opts ...grpc.CallOption) (*CreateRepairReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateRepairReply)
@@ -910,9 +874,6 @@ type GatewayServer interface {
 	CancelMigration(context.Context, *CancelMigrationRequest) (*CancelMigrationReply, error)
 	GetMigration(context.Context, *GetMigrationRequest) (*GetMigrationReply, error)
 	AppendMigrationBitmap(context.Context, *AppendMigrationBitmapRequest) (*AppendMigrationBitmapReply, error)
-	CreateSpareLeg(context.Context, *CreateSpareLegRequest) (*CreateSpareLegReply, error)
-	DeleteSpareLeg(context.Context, *DeleteSpareLegRequest) (*DeleteSpareLegReply, error)
-	SwitchSpareLeg(context.Context, *SwitchSpareLegRequest) (*SwitchSpareLegReply, error)
 	CreateRepair(context.Context, *CreateRepairRequest) (*CreateRepairReply, error)
 	FinishRepair(context.Context, *FinishRepairRequest) (*FinishRepairReply, error)
 	CancelRepair(context.Context, *CancelRepairRequest) (*CancelRepairReply, error)
@@ -1097,15 +1058,6 @@ func (UnimplementedGatewayServer) GetMigration(context.Context, *GetMigrationReq
 }
 func (UnimplementedGatewayServer) AppendMigrationBitmap(context.Context, *AppendMigrationBitmapRequest) (*AppendMigrationBitmapReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppendMigrationBitmap not implemented")
-}
-func (UnimplementedGatewayServer) CreateSpareLeg(context.Context, *CreateSpareLegRequest) (*CreateSpareLegReply, error) {
-	return nil, status.Error(codes.Unimplemented, "method CreateSpareLeg not implemented")
-}
-func (UnimplementedGatewayServer) DeleteSpareLeg(context.Context, *DeleteSpareLegRequest) (*DeleteSpareLegReply, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteSpareLeg not implemented")
-}
-func (UnimplementedGatewayServer) SwitchSpareLeg(context.Context, *SwitchSpareLegRequest) (*SwitchSpareLegReply, error) {
-	return nil, status.Error(codes.Unimplemented, "method SwitchSpareLeg not implemented")
 }
 func (UnimplementedGatewayServer) CreateRepair(context.Context, *CreateRepairRequest) (*CreateRepairReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateRepair not implemented")
@@ -2148,60 +2100,6 @@ func _Gateway_AppendMigrationBitmap_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Gateway_CreateSpareLeg_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateSpareLegRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServer).CreateSpareLeg(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Gateway_CreateSpareLeg_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServer).CreateSpareLeg(ctx, req.(*CreateSpareLegRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Gateway_DeleteSpareLeg_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteSpareLegRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServer).DeleteSpareLeg(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Gateway_DeleteSpareLeg_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServer).DeleteSpareLeg(ctx, req.(*DeleteSpareLegRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Gateway_SwitchSpareLeg_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SwitchSpareLegRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServer).SwitchSpareLeg(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Gateway_SwitchSpareLeg_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServer).SwitchSpareLeg(ctx, req.(*SwitchSpareLegRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _Gateway_CreateRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateRepairRequest)
 	if err := dec(in); err != nil {
@@ -2608,18 +2506,6 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AppendMigrationBitmap",
 			Handler:    _Gateway_AppendMigrationBitmap_Handler,
-		},
-		{
-			MethodName: "CreateSpareLeg",
-			Handler:    _Gateway_CreateSpareLeg_Handler,
-		},
-		{
-			MethodName: "DeleteSpareLeg",
-			Handler:    _Gateway_DeleteSpareLeg_Handler,
-		},
-		{
-			MethodName: "SwitchSpareLeg",
-			Handler:    _Gateway_SwitchSpareLeg_Handler,
 		},
 		{
 			MethodName: "CreateRepair",

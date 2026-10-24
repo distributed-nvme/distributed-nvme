@@ -1,14 +1,14 @@
 // client_test.go is the other half of the argv → request tests'
-// recordingClient: one method per RPC of `service Gateway`, all 68 of them,
+// recordingClient: one method per RPC of `service Gateway`, all 65 of them,
 // each a single call into rpcCall.
 //
 // They are uniform on purpose. A method that did anything of its own would be
 // a place for a test to accidentally assert against the stub instead of
 // against dnvctl, and the whole value of the recorder is that it records and
 // nothing else. The list is also a second, independent census of the service:
-// if pb ever grows a 69th RPC, this type stops satisfying pb.GatewayClient
+// if pb ever grows a 66th RPC, this type stops satisfying pb.GatewayClient
 // through its own methods and falls through to the embedded nil — which
-// the CT1 test's len(Methods) == 68 pin catches first, at the same commit.
+// the CT1 test's len(Methods) == 65 pin catches first, at the same commit.
 package ctl
 
 import (
@@ -567,36 +567,6 @@ func (c *recordingClient) AppendMigrationBitmap(
 	return rpcCall(
 		c, "AppendMigrationBitmap", in,
 		&pb.AppendMigrationBitmapReply{})
-}
-
-func (c *recordingClient) CreateSpareLeg(
-	_ context.Context,
-	in *pb.CreateSpareLegRequest,
-	_ ...grpc.CallOption,
-) (*pb.CreateSpareLegReply, error) {
-	return rpcCall(
-		c, "CreateSpareLeg", in,
-		&pb.CreateSpareLegReply{})
-}
-
-func (c *recordingClient) DeleteSpareLeg(
-	_ context.Context,
-	in *pb.DeleteSpareLegRequest,
-	_ ...grpc.CallOption,
-) (*pb.DeleteSpareLegReply, error) {
-	return rpcCall(
-		c, "DeleteSpareLeg", in,
-		&pb.DeleteSpareLegReply{})
-}
-
-func (c *recordingClient) SwitchSpareLeg(
-	_ context.Context,
-	in *pb.SwitchSpareLegRequest,
-	_ ...grpc.CallOption,
-) (*pb.SwitchSpareLegReply, error) {
-	return rpcCall(
-		c, "SwitchSpareLeg", in,
-		&pb.SwitchSpareLegReply{})
 }
 
 func (c *recordingClient) CreateRepair(

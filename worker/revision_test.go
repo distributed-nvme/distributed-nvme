@@ -1237,8 +1237,8 @@ func TestEveryCheckStreamSendsTheRoundTraceId(t *testing.T) {
 // its Check reply (RW4 step 3). Nothing in this test advances the fake clock,
 // so the round timer never fires — the loop must pick the change up out of the
 // round itself, not after it. RW9 lets the wait be an hour and RW5 adds a
-// syncup timeout on top, so an SpRev bump from a failover (AR5) or a spare
-// switch (AR8) would otherwise reach a mid-round agent about a minute late,
+// syncup timeout on top, so an SpRev bump from a failover (AR5) or a
+// repair's create (AR8) would otherwise reach a mid-round agent about a minute late,
 // preceded by one request built from the superseded revision.
 //
 // It also pins RW6's order: the given-up round's stream is dropped BEFORE the

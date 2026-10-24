@@ -2,8 +2,8 @@
 //
 // The sp revision worker is not a per-object loop but a COORDINATOR: on every
 // desired change (an SpRev put: revision + sp_name) it loads the whole SP with
-// model.LoadSp, builds one SyncupSideRequest per side — spare legs' sides,
-// the sides of repairs' new legs and the retired sides included — and one
+// model.LoadSp, builds one SyncupSideRequest per side — the sides of
+// repairs' new legs and the retired sides included — and one
 // SyncupCntlrRequest per cntlr (RW15/RW16), and diffs those against its
 // running children. Each child is an ordinary revision worker
 // (RW1-RW12) with the side resp. cntlr driver below, so "one goroutine, one
@@ -285,9 +285,9 @@ type sidePlan struct {
 	// never reported for a flip, and no cntlr connects it, so RW14's
 	// sides-first hold never waits for it (awaitedSides).
 	retired bool
-	// cloneDeleting is set for a side of a clone being deleted — a leg's
-	// or a spare's, or the side of its group's repair's new leg or of a
-	// retired leg of its group — which its child drives and judges like any
+	// cloneDeleting is set for a side of a clone being deleted — a leg's,
+	// or the side of its group's repair's new leg or of a retired leg of
+	// its group — which its child drives and judges like any
 	// side until the clone drain's final transaction takes it from its DN
 	// (CLD5, CLD9), and never reports for RW18's flip: the clone flip and the
 	// repair flip skip a clone being deleted (MD6).
@@ -366,9 +366,9 @@ type cntlrPlan struct {
 type spPlan struct {
 	sides  map[sideKey]*sidePlan
 	cntlrs map[uint64]*cntlrPlan
-	// legSlice maps every leg of the SP's slices — spares included — to the
-	// slice its record lives in, legClone every leg of a clone meta group
-	// — spares included — to the clone whose record holds it, and legRepair
+	// legSlice maps every leg of the SP's slices to the slice its record
+	// lives in, legClone every leg of a clone meta group to the clone whose
+	// record holds it, and legRepair
 	// every new leg of a repair to that repair: together they are what lets
 	// the coordinator write the PRIMARY's leg rows (HL2).
 	legSlice  map[uint64]uint64
@@ -1090,30 +1090,25 @@ func migrLegOf(
 			continue
 		}
 		for _, grp := range allGroups(slice) {
-			for _, list := range [][]*pb.Leg{
-				grp.GetLegList(),
-				grp.GetSpareLegList(),
-			} {
-				for _, leg := range list {
-					if len(leg.GetSideList()) != 2 {
-						continue
-					}
-					dst := sideOfLeg(leg, migr.GetDstSideId())
-					src := sideOfLeg(leg, migr.GetSrcSideId())
-					if dst == nil || src == nil {
-						continue
-					}
-					if !dst.GetProvisioned() {
-						return model.CutoverRef{}, false
-					}
-					return model.CutoverRef{
-						MigrId:    migr.GetMigrId(),
-						SliceId:   sliceId,
-						LegId:     leg.GetLegId(),
-						SrcSideId: migr.GetSrcSideId(),
-						DstSideId: migr.GetDstSideId(),
-					}, true
+			for _, leg := range grp.GetLegList() {
+				if len(leg.GetSideList()) != 2 {
+					continue
 				}
+				dst := sideOfLeg(leg, migr.GetDstSideId())
+				src := sideOfLeg(leg, migr.GetSrcSideId())
+				if dst == nil || src == nil {
+					continue
+				}
+				if !dst.GetProvisioned() {
+					return model.CutoverRef{}, false
+				}
+				return model.CutoverRef{
+					MigrId:    migr.GetMigrId(),
+					SliceId:   sliceId,
+					LegId:     leg.GetLegId(),
+					SrcSideId: migr.GetSrcSideId(),
+					DstSideId: migr.GetDstSideId(),
+				}, true
 			}
 		}
 	}
@@ -1194,7 +1189,7 @@ func judgedGrps(state *model.SpState) []*pb.Group {
 }
 
 // judgedObjs is every leg and side of one load that the coordinator's
-// monitors judge (HL2): the legs and spares of judgedGrps with their sides,
+// monitors judge (HL2): the legs of judgedGrps with their sides,
 // the new legs of the repairs with theirs, and the retired sides. HL3's
 // re-seed and AR10's memo keep the objects it holds, so the coordinator's own
 // verdicts on new legs, their sides and retired sides survive each pass as
@@ -1217,7 +1212,6 @@ func judgedObjs(
 	}
 	for _, grp := range judgedGrps(state) {
 		addLegs(grp.GetLegList())
-		addLegs(grp.GetSpareLegList())
 	}
 	for _, rep := range state.Repairs {
 		addLegs(rep.GetNewLegList())
@@ -1230,10 +1224,11 @@ func judgedObjs(
 	return legs, sides
 }
 
-// buildSidePlans walks every side of the SP's slices — both group lists of
-// every slice, both the active legs and the SPARE legs (RW14; architecture.md,
-// Spare legs) — and builds its request. The sides of the clone meta groups
-// are buildCloneSidePlans's.
+// buildSidePlans walks every side of the SP's slices — every leg of both
+// group lists of every slice (RW14) — and builds its request. The sides of
+// the clone meta groups are buildCloneSidePlans's, those of the repairs' new
+// legs buildRepairSidePlans's and the retired sides
+// buildRetiredSidePlans's.
 //
 // withRequests is false while the SP's cntlr set is unresolved: the walk then
 // only indexes the legs, which is what lets the coordinator keep placing the
@@ -1257,28 +1252,22 @@ func (w *spWorker) buildSidePlans(
 		for _, list := range grpListsOf(slice) {
 			for _, grp := range list.grps {
 				// RW15: one length to zero per group, shared by every side
-				// of it — a spare's and a migration's two included. fanOut's
+				// of it — a migration's two included. fanOut's
 				// gate (checkSideZeroBytes) refuses the plan of an SP with a
 				// group that has none, so an error here drives no side of
 				// the group rather than send it a length of zero.
 				zeroBytes, zeroErr := model.SideZeroBytes(
 					grp, list.isMeta, blockSize)
-				legLists := [][]*pb.Leg{
-					grp.GetLegList(),
-					grp.GetSpareLegList(),
-				}
-				for _, legList := range legLists {
-					for _, leg := range legList {
-						plan.legSlice[leg.GetLegId()] = sliceId
-						if !withRequests || zeroErr != nil {
-							continue
-						}
-						for _, side := range leg.GetSideList() {
-							w.buildSidePlan(
-								ctx, plan, state, sliceId, grp, leg, side,
-								primaryCnId, standby, spId, zeroBytes,
-							)
-						}
+				for _, leg := range grp.GetLegList() {
+					plan.legSlice[leg.GetLegId()] = sliceId
+					if !withRequests || zeroErr != nil {
+						continue
+					}
+					for _, side := range leg.GetSideList() {
+						w.buildSidePlan(
+							ctx, plan, state, sliceId, grp, leg, side,
+							primaryCnId, standby, spId, zeroBytes,
+						)
 					}
 				}
 			}
@@ -1351,9 +1340,9 @@ func (w *spWorker) buildSidePlan(
 }
 
 // buildCloneSidePlans is buildSidePlans for the clone meta groups: it walks
-// every side of every clone's clone meta group, in clone_name_list order after
-// the slices' sides, both the active legs and the SPARE legs, and builds its
-// request (RW14, RW15). A clone being deleted keeps its sides driven until the
+// every side of every leg of every clone's clone meta group, in
+// clone_name_list order after the slices' sides, and builds its request
+// (RW14, RW15). A clone being deleted keeps its sides driven until the
 // clone drain's final transaction takes them from their DNs (CLD5, CLD9); a
 // clone with no group has no side. Every side of a clone meta group is sent
 // the group's length to zero, the data-group length
@@ -1386,22 +1375,16 @@ func (w *spWorker) buildCloneSidePlans(
 		// it; fanOut's gate refuses the plan of an SP with a clone meta
 		// group that has none, as for a slice's group.
 		zeroBytes, zeroErr := model.CloneMetaSideZeroBytes(grp, blockSize)
-		legLists := [][]*pb.Leg{
-			grp.GetLegList(),
-			grp.GetSpareLegList(),
-		}
-		for _, legList := range legLists {
-			for _, leg := range legList {
-				plan.legClone[leg.GetLegId()] = owner
-				if !withRequests || zeroErr != nil {
-					continue
-				}
-				for _, side := range leg.GetSideList() {
-					w.buildCloneSidePlan(
-						ctx, plan, state, owner, clone.GetDeleting(), grp,
-						leg, side, primaryCnId, standby, spId, zeroBytes,
-					)
-				}
+		for _, leg := range grp.GetLegList() {
+			plan.legClone[leg.GetLegId()] = owner
+			if !withRequests || zeroErr != nil {
+				continue
+			}
+			for _, side := range leg.GetSideList() {
+				w.buildCloneSidePlan(
+					ctx, plan, state, owner, clone.GetDeleting(), grp,
+					leg, side, primaryCnId, standby, spId, zeroBytes,
+				)
 			}
 		}
 	}
@@ -1587,8 +1570,9 @@ func (w *spWorker) sideRequest(
 // buildRepairSidePlans builds RW15's request for the side of every repair's
 // new leg, in repair_name_list order, at any stage (architecture.md,
 // Repair): the side is driven as a side of its group, its ext_cnt and its
-// length to zero the group's, provisioned from the side, as a spare's side
-// is, so its zeroing and RW18's flip run as a spare's do. A new leg has one
+// length to zero the group's, provisioned from the side, as any new side of
+// the group is, so its zeroing and RW18's repair flip run as a grown group's
+// sides' do. A new leg has one
 // side and no migration conf (CreateMigration refuses a repair's legs). The
 // sides of a deleting clone's repair keep their requests until the clone
 // drain's final transaction gives them back (CLD5, CLD9), and are never
@@ -2008,7 +1992,7 @@ func (w *spWorker) holdCntlrs(plan *spPlan) {
 // plans of one fan-out: those whose record had no err_epoch in that fan-out's
 // load (HL2). A side already unhealthy is not waited for, nor is a retired
 // side, which no cntlr connects (architecture.md, Repair); the side of a
-// repair's new leg is, as a spare's side is.
+// repair's new leg is, since every cntlr connects it.
 func awaitedSides(sides map[sideKey]*sidePlan) map[sideKey]bool {
 	out := make(map[sideKey]bool, len(sides))
 	for key, p := range sides {
@@ -3490,7 +3474,7 @@ type cntlrDriver struct {
 	// infoRev is the revision of the observation lastInfo reports: the
 	// revision of the reply that carried it, or of a later round's reply
 	// that left its info out as unchanged from the stream's (noteUnchanged).
-	// AR8 step 1's gate holds a switch, and the retire timer a delete,
+	// AR8's gate holds a repair's create, and the retire timer a delete,
 	// while it is older than the pass's snapshot (grpRowHold).
 	infoRev uint64
 	// streamInfo is the CntlrInfo the open CheckCntlr stream last carried:
@@ -3617,8 +3601,8 @@ func (d *cntlrDriver) storeInfo(info *pb.CntlrInfo, revision uint64) {
 // carried. While that info is still the latest known one — no Syncup* reply
 // has stored its own since — the latest known info is that observation's as
 // well, and its revision moves to the reply's. A reply that answers from an
-// older observation moves it back, so AR8 step 1's gate waits rather than
-// reads a report from before the revision it needs.
+// older observation moves it back, so AR8's gate waits rather than reads a
+// report from before the revision it needs.
 func (d *cntlrDriver) noteUnchanged(revision uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -3926,8 +3910,8 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 }
 
 // legRows is the PRIMARY's probe (architecture.md, Group on-leg layout: meta
-// region, data region, health block) of every leg it reported, spares
-// included (HL2). ERROR sets the leg's err_epoch, OK clears it, everything
+// region, data region, health block) of every leg it reported, the new legs
+// of repairs included (HL2). ERROR sets the leg's err_epoch, OK clears it, everything
 // else neither.
 func (d *cntlrDriver) legRows(info *pb.CntlrInfo) []legRow {
 	rows := make([]legRow, 0, len(info.GetLegIdToLeg()))

@@ -258,7 +258,7 @@ func TestCreateMigrationReplansWhenItsDnFillsUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMigration: %v", err)
 	}
-	leg := activeLegOf(volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
+	leg := grpLegOf(volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
 	if got := leg.GetSideList()[1].GetAddrPort(); got != volDnD {
 		t.Errorf("destination on %s, want %s", got, volDnD)
 	}

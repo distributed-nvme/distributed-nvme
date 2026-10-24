@@ -22,7 +22,8 @@ import (
 
 // This file is the handler tests (gateway.md GW5 to GW12) for the volume half
 // of the API, in architecture.md: Thin devices; Subsystems, namespaces; Clones;
-// Transfers; Migrations; and Spare legs.
+// Transfers; and Migrations. The repair calls are repair_test.go's, on the
+// same fixture.
 //
 // Every test drives a real Server over the shared etcd of etcdenv_test.go and
 // then asserts the EXACT store state — keys, ids, name lists, capacity keys
@@ -184,7 +185,7 @@ func volSide(sideId uint64, addrPort string) *pb.Side {
 
 // volSlice is the fixture's single slice: one meta group and one data group,
 // each an md-raid1 pair on dn-a and dn-b. dn-c and dn-d are therefore the only
-// destinations a migration or a spare leg of either group can land on
+// destinations a migration or a repair's new leg of either group can land on
 // (architecture.md, Per-operation allocation),
 // which is what makes the allocating tests below deterministic.
 //
@@ -270,8 +271,8 @@ func newVolEnv(t *testing.T) *volEnv {
 		cid:     model.ClusterId(name, epoch),
 		// What CreateCluster would have stored, concrete throughout
 		// (architecture.md, Common validation): the
-		// migration and spare-leg RPCs below read the bin ladder and the batch
-		// sizes as stored and refuse a zero.
+		// migration and repair RPCs read the bin ladder and the batch sizes as
+		// stored and refuse a zero.
 		cc: testStoredClusterConf(epoch, volExtSize, volPoolBlock),
 	}
 	mustPut(t, cli, model.ClusterConfKey(name), env.cc)
@@ -346,9 +347,9 @@ func (e *volEnv) putDn(
 }
 
 // putCn writes one CnConf, its capacity key and its CnRev. No RPC of this file
-// charges a CN anything — a thin device, a subsystem, a clone, a transfer, a
-// migration destination and a spare leg all leave every cntlr's footprint
-// unchanged (architecture.md, Storage pools, Cntlrs and Spare legs), and a
+// charges a CN anything — a thin device, a subsystem, a clone, a transfer and
+// a migration destination all leave every cntlr's footprint unchanged
+// (architecture.md, Storage pools, Cntlrs), and a
 // clone takes no metadata unit on a CN (architecture.md, Metadata units) —
 // so these records exist only to be asserted UNTOUCHED.
 func (e *volEnv) putCn(addrPort string, cnId uint64, shard uint32) {
@@ -799,11 +800,11 @@ const volDnCFree = volDnFree * 2
 // back first.
 //
 // The default dn_batch_size (16) is left alone on purpose: the tier-2 trigger
-// is RequiredCnt — one DN for both of these RPCs — and not the oversampled
-// candCnt, so tier 1 finding its single candidate is enough to settle the
-// placement. That single candidate is also what makes the assertion exact:
-// dn-a and dn-b are black-listed, dn-c shares dn-a's domain, so PickRandom
-// draws dn-d out of a one-entry list.
+// is RequiredCnt — one DN for CreateMigration and for CreateRepair's fresh new
+// leg alike — and not the oversampled candCnt, so tier 1 finding its single
+// candidate is enough to settle the placement. That single candidate is also
+// what makes the assertion exact: dn-a and dn-b are black-listed, dn-c shares
+// dn-a's domain, so PickRandom draws dn-d out of a one-entry list.
 func volTwoDomainEnv(t *testing.T) *volEnv {
 	t.Helper()
 	env := newVolEnv(t)
@@ -812,8 +813,8 @@ func volTwoDomainEnv(t *testing.T) *volEnv {
 	return env
 }
 
-// volTier1DrawCnt is how often the two tier-1 assertions below re-run against a
-// FRESH fixture. At the gateway the requiredCnt of architecture.md,
+// volTier1DrawCnt is how often a tier-1 assertion re-runs against a FRESH
+// fixture. At the gateway the requiredCnt of architecture.md,
 // Per-operation allocation, is observed only through
 // the pick, and PickRandom draws uniformly, so the exact regression the
 // requiredCnt trigger exists to refuse — handing FindDnCandidatesAntiAffine the
@@ -3786,7 +3787,7 @@ func TestCreateMigrationChargesDestination(t *testing.T) {
 		t.Errorf("migration: got %v, want %v", got, wantMigr)
 	}
 	grp := volGrpOf(t, env.slice(), volDataGrpId)
-	leg := activeLegOf(grp, volDataLegA)
+	leg := grpLegOf(grp, volDataLegA)
 	if leg == nil || len(leg.GetSideList()) != 2 {
 		t.Fatalf("leg %d must own two sides: %v", volDataLegA, leg)
 	}
@@ -3886,7 +3887,7 @@ func volMigrationDst(env *volEnv) (string, error) {
 		}); err != nil {
 		return "", err
 	}
-	leg := activeLegOf(volGrpOf(env.t, env.slice(), volDataGrpId), volDataLegA)
+	leg := grpLegOf(volGrpOf(env.t, env.slice(), volDataGrpId), volDataLegA)
 	if leg == nil || len(leg.GetSideList()) != 2 {
 		env.t.Fatalf("leg %d must own two sides: %v", volDataLegA, leg)
 	}
@@ -4031,7 +4032,7 @@ func volRaceMigrationA(t *testing.T, env *volEnv, actor func() error) string {
 	if err != nil {
 		t.Fatalf("CreateMigration migr-a: %v", err)
 	}
-	leg := activeLegOf(volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
+	leg := grpLegOf(volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
 	if leg == nil || len(leg.GetSideList()) != 2 {
 		t.Fatalf("leg %d must own two sides: %v", volDataLegA, leg)
 	}
@@ -4052,24 +4053,12 @@ func volMigrateLegB(env *volEnv) error {
 	return err
 }
 
-// volSpareOnDnC is an interleaved request for volRaceMigrationA: a token-less
-// spare of the data group on dn-c. The spare leg takes the SP's next_id.
-func volSpareOnDnC(env *volEnv) error {
-	_, err := env.srv.CreateSpareLeg(env.ctx, &pb.CreateSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		GrpId:       volDataGrpId,
-		DnSelector:  volDnSelector(volDnC),
-	})
-	return err
-}
-
 // TestCreateMigrationRefusesADnTheGroupAlreadyUses pins the deciding STM's own
 // check of the round's plan against the group (architecture.md, Migrations;
 // GW9). A round plans its
 // black list and its tier-1 locations from the group as its snapshot read it,
-// so a side another request hangs off the group after that read — a migration
-// of the group's OTHER leg, or a spare — is missing from that plan: the scan
+// so a side another request hangs off the group after that read — here a
+// migration of the group's OTHER leg — is missing from that plan: the scan
 // may hand back that side's very DN, behind a capacity key the pick's re-check
 // still finds, or a DN in that side's failure domain. Only the group as the
 // deciding STM reads it shows the change: the round is a changed candidate,
@@ -4080,13 +4069,14 @@ func volSpareOnDnC(env *volEnv) error {
 // finishing both migrations would leave it for good; two legs in one failure
 // domain is what tier 1 exists to avoid while the cluster has another.
 //
-// In the two disk-node cases every draw is forced: dn-d shares dn-c's failure
+// In the disk-node case every draw is forced: dn-d shares dn-c's failure
 // domain and holds less, so the first scan offers dn-c alone (one DN per
 // domain, fullest first, architecture.md, Finding DN candidates), and the
 // second — dn-c black-listed and its domain excluded — offers dn-d alone,
-// through tier 2 (architecture.md, Per-operation allocation). The spare case
-// is there because a check that walks only the group's active legs still
-// passes the other one.
+// through tier 2 (architecture.md, Per-operation allocation). A repair's new
+// leg on the disk node is TestCreateMigrationReplansAroundARepairsNewLeg's
+// case, since a check that walks only the group's leg_list still passes this
+// one.
 //
 // The failure-domain case is a draw: dn-c and dn-d share a domain at the same
 // free count, and dn-e has a domain of its own. Once the other migration has
@@ -4102,11 +4092,10 @@ func TestCreateMigrationRefusesADnTheGroupAlreadyUses(t *testing.T) {
 		name  string
 		actor func(env *volEnv) error
 		// actorLegId is the leg of the side the interleaved request puts on
-		// dn-c: leg B, or the spare leg.
+		// dn-c.
 		actorLegId uint64
 	}{
 		{"other leg's migration on the disk node", volMigrateLegB, volDataLegB},
-		{"spare on the disk node", volSpareOnDnC, volNextId},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newVolEnv(t)
@@ -4121,7 +4110,7 @@ func TestCreateMigrationRefusesADnTheGroupAlreadyUses(t *testing.T) {
 			}
 			grp := volGrpOf(t, env.slice(), volDataGrpId)
 			legOf := make(map[string]uint64)
-			for _, leg := range allLegs(grp) {
+			for _, leg := range grp.GetLegList() {
 				for _, side := range leg.GetSideList() {
 					addrPort := side.GetAddrPort()
 					other, ok := legOf[addrPort]
@@ -4315,7 +4304,7 @@ func TestFinishMigrationReleasesSource(t *testing.T) {
 		t.Errorf("reply migr_id: got %d, want %d",
 			reply.GetMigrId(), created.GetMigrId())
 	}
-	leg := activeLegOf(volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
+	leg := grpLegOf(volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
 	if len(leg.GetSideList()) != 1 {
 		t.Fatalf("the leg must be back to one side: %v", leg.GetSideList())
 	}
@@ -4604,7 +4593,7 @@ func TestFinishMigrationRefusesAPendingCutover(t *testing.T) {
 				t.Errorf("GetSideInfo calls: got %d, want %d",
 					got, wantCalls)
 			}
-			leg := activeLegOf(
+			leg := grpLegOf(
 				volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
 			if len(leg.GetSideList()) != 1 ||
 				leg.GetSideList()[0].GetAddrPort() != addr {
@@ -4933,465 +4922,6 @@ func TestGetMigration(t *testing.T) {
 		MigrName:    "nope",
 	}); volWantCode(t, err, codes.NotFound) == "" {
 		t.Errorf("a NOT_FOUND must carry a message")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// architecture.md, Spare legs
-// ---------------------------------------------------------------------------
-
-// volCreateSpareLeg parks one spare on dn-c for the fixture's data group and
-// returns its leg_id.
-func volCreateSpareLeg(env *volEnv) uint64 {
-	env.t.Helper()
-	reply, err := env.srv.CreateSpareLeg(env.ctx, &pb.CreateSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		GrpId:       volDataGrpId,
-		DnSelector:  volDnSelector(volDnC),
-	})
-	if err != nil {
-		env.t.Fatalf("CreateSpareLeg: %v", err)
-	}
-	return reply.GetLegId()
-}
-
-// TestCreateSpareLegAppendsStandbyCapacity pins the allocation of
-// architecture.md, Spare legs: the spare
-// joins the EXISTING group and inherits its geometry unchanged, so its side is
-// charged the group's ext_cnt on a DN the group does not already occupy, its
-// leg_idx is the next unused member slot, and its side is provisioned = false
-// ([D15]) — which is exactly why a fresh spare cannot be switched in at once.
-func TestCreateSpareLegAppendsStandbyCapacity(t *testing.T) {
-	env := newVolEnv(t)
-	legId := volCreateSpareLeg(env)
-	if legId != volNextId {
-		t.Fatalf("reply leg_id: got %d, want %d", legId, volNextId)
-	}
-	grp := volGrpOf(t, env.slice(), volDataGrpId)
-	if len(grp.GetLegList()) != 2 {
-		t.Errorf("the active legs must not move: %v", grp.GetLegList())
-	}
-	want := &pb.Leg{
-		LegId:  volNextId,
-		LegIdx: 2,
-		SideList: []*pb.Side{{
-			SideId:      volNextId + 1,
-			AddrPort:    volDnC,
-			CntlidSlot:  volSlot,
-			NvmeTrConf:  volTrConf(volDnC),
-			Provisioned: false,
-		}},
-	}
-	if len(grp.GetSpareLegList()) != 1 ||
-		!proto.Equal(grp.GetSpareLegList()[0], want) {
-		t.Fatalf("spare_leg_list: got %v, want [%v]",
-			grp.GetSpareLegList(), want)
-	}
-	dn := env.dn(volDnC)
-	if dn.GetFreeExtCnt() != volDnFree-volDataExtCnt {
-		t.Errorf("dn-c free_ext_cnt: got %d, want %d",
-			dn.GetFreeExtCnt(), volDnFree-volDataExtCnt)
-	}
-	if len(dn.GetSidePtrList()) != 1 {
-		t.Errorf("dn-c side_ptr_list: got %v", dn.GetSidePtrList())
-	}
-	if got := env.dnRev(volDnC); got != 2 {
-		t.Errorf("dn-c rev: got %d, want 2", got)
-	}
-	if got := dn.GetUsedMetaUnits(); got != 0 {
-		t.Errorf("dn-c used_meta_units: got %d, want 0 (a spare holds no "+
-			"dm-clone run)", got)
-	}
-	for _, addrPort := range []string{volCnA, volCnB} {
-		if got := env.cnRev(addrPort); got != 1 {
-			t.Errorf("%s rev: got %d, want 1 (a spare charges no CN)",
-				addrPort, got)
-		}
-	}
-	conf := env.spConf()
-	if conf.GetNextId() != volNextId+2 {
-		t.Errorf("next_id: got %d, want %d (leg_id then side_id)",
-			conf.GetNextId(), volNextId+2)
-	}
-	if rev := env.spRev(); rev != 2 {
-		t.Errorf("sp_rev: got %d, want 2", rev)
-	}
-}
-
-// volSpareLegDst runs CreateSpareLeg on the data group with NO NodeSelector at
-// all and returns the addr_port the spare's single side landed on.
-func volSpareLegDst(env *volEnv) (string, error) {
-	env.t.Helper()
-	if _, err := env.srv.CreateSpareLeg(
-		env.ctx, &pb.CreateSpareLegRequest{
-			ClusterName: env.cluster,
-			SpName:      volSpName,
-			SpRev:       env.token(),
-			GrpId:       volDataGrpId,
-		}); err != nil {
-		return "", err
-	}
-	grp := volGrpOf(env.t, env.slice(), volDataGrpId)
-	if len(grp.GetSpareLegList()) != 1 ||
-		len(grp.GetSpareLegList()[0].GetSideList()) != 1 {
-		env.t.Fatalf("spare_leg_list = %v", grp.GetSpareLegList())
-	}
-	return grp.GetSpareLegList()[0].GetSideList()[0].GetAddrPort(), nil
-}
-
-// TestCreateSpareLegPrefersAnotherFailureDomain pins the two tiers of
-// architecture.md, Per-operation allocation, on the scan of architecture.md,
-// Spare legs: a spare in the failure domain of the leg it exists to replace
-// dies with it, so tier 1 excludes the group's domains — dn-c is skipped for
-// sharing dn-a's, not for carrying a side — while tier 2 still creates the
-// spare when the cluster has no other domain to offer, because no spare at all
-// is the worse outcome.
-func TestCreateSpareLegPrefersAnotherFailureDomain(t *testing.T) {
-	t.Run("tier 1 avoids the group's domains", func(t *testing.T) {
-		// One draw proves nothing here — see volTier1DrawCnt.
-		for draw := 0; draw < volTier1DrawCnt; draw++ {
-			env := volTwoDomainEnv(t)
-			got, err := volSpareLegDst(env)
-			if err != nil {
-				t.Fatalf("CreateSpareLeg: %v", err)
-			}
-			if got != volDnD {
-				t.Fatalf(
-					"draw %d: spare on %s, want %s (dn-c is in dn-a's "+
-						"domain, and tier 2 must not have run)",
-					draw, got, volDnD)
-			}
-		}
-	})
-
-	t.Run("tier 2 places in an occupied domain", func(t *testing.T) {
-		env := volTwoDomainEnv(t)
-		env.dropDn(volDnD)
-		got, err := volSpareLegDst(env)
-		if err != nil {
-			t.Fatalf("CreateSpareLeg: %v (tier 2 must place, never "+
-				"RESOURCE_EXHAUSTED)", err)
-		}
-		if got != volDnC {
-			t.Errorf("spare on %s, want %s", got, volDnC)
-		}
-		if got := env.dn(volDnC).GetFreeExtCnt(); got !=
-			volDnCFree-volDataExtCnt {
-			t.Errorf("dn-c free_ext_cnt: got %d, want %d",
-				got, volDnCFree-volDataExtCnt)
-		}
-	})
-}
-
-// TestCreateSpareLegRefusals pins the three pre-checks of architecture.md,
-// Spare legs, that give this
-// RPC its own codes: model raises every one of its preconditions as
-// FAILED_PRECONDITION, so a RedundNone group and a full spare list have to be
-// judged before the op is called if they are to be INVALID_ARGUMENT and
-// RESOURCE_EXHAUSTED. A spare of the group still unprovisioned is left to the
-// op, and reaches the client as exactly that FAILED_PRECONDITION.
-func TestCreateSpareLegRefusals(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		setup func(env *volEnv)
-		grpId uint64
-		want  codes.Code
-		// msg, when set, is a reason the refusal's message must carry.
-		msg string
-	}{
-		{
-			name: "the SP has no redundancy to repair",
-			setup: func(env *volEnv) {
-				conf := env.spConf()
-				conf.BdevConf.RedundConf = &pb.RedundConf{
-					RedunKind: &pb.RedundConf_RedundNone{
-						RedundNone: &pb.RedundNone{},
-					},
-				}
-				env.putSpConf(conf)
-			},
-			grpId: volDataGrpId,
-			want:  codes.InvalidArgument,
-		},
-		{
-			name: "the spare list is full",
-			setup: func(env *volEnv) {
-				slice := env.slice()
-				grp := volGrpOf(env.t, slice, volDataGrpId)
-				for idx := 0; idx < common.MaxSpareLegPerGrp; idx++ {
-					grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
-						LegId:  uint64(500 + idx),
-						LegIdx: uint32(2 + idx),
-						SideList: []*pb.Side{{
-							SideId:   uint64(510 + idx),
-							AddrPort: volDnD,
-						}},
-					})
-				}
-				env.putSlice(slice)
-			},
-			grpId: volDataGrpId,
-			want:  codes.ResourceExhausted,
-		},
-		{
-			name: "a spare of the group is still unprovisioned",
-			setup: func(env *volEnv) {
-				slice := env.slice()
-				grp := volGrpOf(env.t, slice, volDataGrpId)
-				grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
-					LegId:  500,
-					LegIdx: 2,
-					SideList: []*pb.Side{{
-						SideId:   510,
-						AddrPort: volDnD,
-					}},
-				})
-				env.putSlice(slice)
-			},
-			grpId: volDataGrpId,
-			want:  codes.FailedPrecondition,
-			msg:   model.ReasonSpareUnprovisioned,
-		},
-		{
-			name:  "unknown group",
-			grpId: 999999,
-			want:  codes.NotFound,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newVolEnv(t)
-			if tc.setup != nil {
-				tc.setup(env)
-			}
-			before := env.spConf()
-			beforeRev := env.spRev()
-			sliceBefore := env.slice()
-			_, err := env.srv.CreateSpareLeg(
-				env.ctx, &pb.CreateSpareLegRequest{
-					ClusterName: env.cluster,
-					SpName:      volSpName,
-					SpRev:       &pb.SpRev{Revision: beforeRev},
-					GrpId:       tc.grpId,
-					DnSelector:  volDnSelector(volDnC),
-				})
-			msg := volWantCode(t, err, tc.want)
-			if !strings.Contains(msg, tc.msg) {
-				t.Errorf("message %q does not carry %q", msg, tc.msg)
-			}
-			env.wantUntouched(before, beforeRev)
-			if got := env.slice(); !proto.Equal(got, sliceBefore) {
-				t.Errorf("the slice moved on a refusal: %v", got)
-			}
-			if got := env.dnRev(volDnC); got != 1 {
-				t.Errorf("dn-c rev: got %d, want 1", got)
-			}
-		})
-	}
-}
-
-// TestDeleteSpareLegReturnsCapacity pins the delete of architecture.md,
-// Spare legs: the spare leaves spare_leg_list and its side gives the DN back
-// exactly what it took — one DnConf write, one capacity key and one DnRev bump
-// (architecture.md, Revision keys and the sync fan-out, and Capacity index keys)
-// — under one SpRev bump. No CN is touched: a spare leg changes no group's
-// ext_cnt.
-func TestDeleteSpareLegReturnsCapacity(t *testing.T) {
-	env := newVolEnv(t)
-	sliceBefore := env.slice()
-	dnBefore := env.dn(volDnC)
-	legId := volCreateSpareLeg(env)
-	reply, err := env.srv.DeleteSpareLeg(env.ctx, &pb.DeleteSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		GrpId:       volDataGrpId,
-		LegId:       legId,
-	})
-	if err != nil {
-		t.Fatalf("DeleteSpareLeg: %v", err)
-	}
-	if reply.GetLegId() != legId {
-		t.Errorf("reply leg_id: got %d, want %d", reply.GetLegId(), legId)
-	}
-	if got := env.slice(); !proto.Equal(got, sliceBefore) {
-		t.Errorf("slice: got %v, want the fixture back", got)
-	}
-	if got := env.dn(volDnC); !proto.Equal(got, dnBefore) {
-		t.Errorf("dn-c: got %v, want %v", got, dnBefore)
-	}
-	if !env.exists(env.dnCapKey(volDnC, volDnFree), &pb.DnCapacity{}) {
-		t.Errorf("dn-c's original capacity key must be back")
-	}
-	if got := env.dnRev(volDnC); got != 3 {
-		t.Errorf("dn-c rev: got %d, want 3 (charge then release)", got)
-	}
-	if rev := env.spRev(); rev != 3 {
-		t.Errorf("sp_rev: got %d, want 3", rev)
-	}
-}
-
-// TestDeleteSpareLegNeverTouchesAnActiveLeg pins the reason DeleteSpareLeg
-// searches spare_leg_list alone: a mistyped id must never name the ACTIVE leg,
-// the one leg that must not be released.
-func TestDeleteSpareLegNeverTouchesAnActiveLeg(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		legId uint64
-	}{
-		{name: "an active leg id", legId: volDataLegA},
-		{name: "an unknown leg id", legId: 999999},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newVolEnv(t)
-			sliceBefore := env.slice()
-			before := env.spConf()
-			beforeRev := env.spRev()
-			_, err := env.srv.DeleteSpareLeg(
-				env.ctx, &pb.DeleteSpareLegRequest{
-					ClusterName: env.cluster,
-					SpName:      volSpName,
-					SpRev:       &pb.SpRev{Revision: beforeRev},
-					GrpId:       volDataGrpId,
-					LegId:       tc.legId,
-				})
-			volWantCode(t, err, codes.NotFound)
-			env.wantUntouched(before, beforeRev)
-			if got := env.slice(); !proto.Equal(got, sliceBefore) {
-				t.Errorf("the slice moved on a refusal: %v", got)
-			}
-			if got := env.dn(volDnA).GetFreeExtCnt(); got != volDnFree {
-				t.Errorf("dn-a free_ext_cnt: got %d, want %d", got, volDnFree)
-			}
-		})
-	}
-}
-
-// TestSwitchSpareLegRefusesAnUnprovisionedSpare pins the precondition of
-// architecture.md, Spare legs, the one a caller meets in practice: a spare
-// whose side has not finished zeroing (architecture.md, Side provisioning
-// protocol) never becomes an md member, so the switch is FAILED_PRECONDITION
-// until the sp-worker has flipped `provisioned` — and it leaves the group
-// exactly as it was.
-func TestSwitchSpareLegRefusesAnUnprovisionedSpare(t *testing.T) {
-	env := newVolEnv(t)
-	legId := volCreateSpareLeg(env)
-	sliceBefore := env.slice()
-	before := env.spConf()
-	beforeRev := env.spRev()
-	_, err := env.srv.SwitchSpareLeg(env.ctx, &pb.SwitchSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       &pb.SpRev{Revision: beforeRev},
-		GrpId:       volDataGrpId,
-		SpareLegId:  legId,
-		TargetLegId: volDataLegA,
-	})
-	msg := volWantCode(t, err, codes.FailedPrecondition)
-	if !strings.Contains(msg, "provisioned") {
-		t.Errorf("message %q must name the zeroing precondition", msg)
-	}
-	env.wantUntouched(before, beforeRev)
-	if got := env.slice(); !proto.Equal(got, sliceBefore) {
-		t.Errorf("the slice moved on a refusal: %v", got)
-	}
-}
-
-// TestSwitchSpareLegSwapsPositions pins the swap of architecture.md, Spare legs:
-// the spare takes the
-// target's POSITION in leg_list — the md member slot the array is missing —
-// and the target is parked in spare_leg_list, still connected and probed but
-// never repaired again. The reply is the two request ids exchanged.
-func TestSwitchSpareLegSwapsPositions(t *testing.T) {
-	env := newVolEnv(t)
-	legId := volCreateSpareLeg(env)
-	// Play the sp-worker: the zeroing of architecture.md, Side provisioning
-	// protocol, has finished. A direct put, so
-	// the SP's revision — and therefore the token below — does not move.
-	slice := env.slice()
-	spare := spareLegOf(volGrpOf(t, slice, volDataGrpId), legId)
-	spare.GetSideList()[0].Provisioned = true
-	env.putSlice(slice)
-
-	beforeRev := env.spRev()
-	reply, err := env.srv.SwitchSpareLeg(env.ctx, &pb.SwitchSpareLegRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       &pb.SpRev{Revision: beforeRev},
-		GrpId:       volDataGrpId,
-		SpareLegId:  legId,
-		TargetLegId: volDataLegA,
-	})
-	if err != nil {
-		t.Fatalf("SwitchSpareLeg: %v", err)
-	}
-	if reply.GetCurrActiveLegId() != legId ||
-		reply.GetCurrSpareLegId() != volDataLegA {
-		t.Errorf("reply: got active %d spare %d, want %d and %d",
-			reply.GetCurrActiveLegId(), reply.GetCurrSpareLegId(),
-			legId, volDataLegA)
-	}
-	grp := volGrpOf(t, env.slice(), volDataGrpId)
-	if len(grp.GetLegList()) != 2 ||
-		grp.GetLegList()[0].GetLegId() != legId {
-		t.Errorf("leg_list: got %v, want the spare in position 0",
-			grp.GetLegList())
-	}
-	if grp.GetLegList()[1].GetLegId() != volDataLegB {
-		t.Errorf("the other active leg must not move: %v", grp.GetLegList())
-	}
-	if len(grp.GetSpareLegList()) != 1 ||
-		grp.GetSpareLegList()[0].GetLegId() != volDataLegA {
-		t.Errorf("spare_leg_list: got %v, want the parked target",
-			grp.GetSpareLegList())
-	}
-	if got := env.spRev(); got != beforeRev+1 {
-		t.Errorf("sp_rev: got %d, want %d", got, beforeRev+1)
-	}
-	if got := env.dnRev(volDnC); got != 2 {
-		t.Errorf("dn-c rev: got %d, want 2 (a switch moves no capacity)", got)
-	}
-}
-
-// TestSwitchSpareLegUnknownIds pins the NOT_FOUND of architecture.md,
-// Spare legs: the pre-read checks
-// both ids for membership in the right list, so an id that is in neither is a
-// NOT_FOUND rather than the FAILED_PRECONDITION model would raise for it.
-func TestSwitchSpareLegUnknownIds(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		spare  bool
-		target bool
-	}{
-		{name: "unknown spare leg", spare: false, target: true},
-		{name: "unknown target leg", spare: true, target: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newVolEnv(t)
-			legId := volCreateSpareLeg(env)
-			spareId := uint64(999999)
-			if tc.spare {
-				spareId = legId
-			}
-			targetId := uint64(999999)
-			if tc.target {
-				targetId = volDataLegA
-			}
-			before := env.spConf()
-			beforeRev := env.spRev()
-			_, err := env.srv.SwitchSpareLeg(
-				env.ctx, &pb.SwitchSpareLegRequest{
-					ClusterName: env.cluster,
-					SpName:      volSpName,
-					SpRev:       &pb.SpRev{Revision: beforeRev},
-					GrpId:       volDataGrpId,
-					SpareLegId:  spareId,
-					TargetLegId: targetId,
-				})
-			volWantCode(t, err, codes.NotFound)
-			env.wantUntouched(before, beforeRev)
-		})
 	}
 }
 
@@ -5746,53 +5276,6 @@ func volTokenCases() []volTokenCase {
 				return err
 			},
 			bypassCode: codes.OK,
-		},
-		{
-			name: "CreateSpareLeg",
-			call: func(env *volEnv, rev *pb.SpRev) error {
-				_, err := env.srv.CreateSpareLeg(
-					env.ctx, &pb.CreateSpareLegRequest{
-						ClusterName: env.cluster, SpName: volSpName,
-						SpRev: rev, GrpId: volDataGrpId,
-						DnSelector: volDnSelector(volDnC),
-					})
-				return err
-			},
-			bypassCode: codes.OK,
-		},
-		{
-			name: "DeleteSpareLeg",
-			call: func(env *volEnv, rev *pb.SpRev) error {
-				_, err := env.srv.DeleteSpareLeg(
-					env.ctx, &pb.DeleteSpareLegRequest{
-						ClusterName: env.cluster, SpName: volSpName,
-						SpRev: rev, GrpId: volDataGrpId, LegId: volDataLegA,
-					})
-				return err
-			},
-			// leg_a is an ACTIVE leg of the group, never a spare, so the lookup
-			// of architecture.md, Spare legs, in spare_leg_list misses it.
-			bypassCode: codes.NotFound,
-			bypassMsg: fmt.Sprintf(
-				"spare leg %d not found in group %d",
-				volDataLegA, volDataGrpId),
-		},
-		{
-			name: "SwitchSpareLeg",
-			call: func(env *volEnv, rev *pb.SpRev) error {
-				_, err := env.srv.SwitchSpareLeg(
-					env.ctx, &pb.SwitchSpareLegRequest{
-						ClusterName: env.cluster, SpName: volSpName,
-						SpRev: rev, GrpId: volDataGrpId,
-						SpareLegId: 1, TargetLegId: volDataLegA,
-					})
-				return err
-			},
-			// Spare id 1 is nothing the fixture ever wrote, so the lookup of
-			// architecture.md, Spare legs, in spare_leg_list misses it.
-			bypassCode: codes.NotFound,
-			bypassMsg: fmt.Sprintf(
-				"spare leg 1 not found in group %d", volDataGrpId),
 		},
 		{
 			name: "CreateRepair",

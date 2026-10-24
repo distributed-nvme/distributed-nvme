@@ -59,33 +59,27 @@ const (
 	opFailover         = "Failover"
 	opGrowSlice        = "GrowSlice"
 	opReplaceCntlr     = "ReplaceCntlr"
-	opCreateSpareLeg   = "CreateSpareLeg"
-	opSwitchSpareLeg   = "SwitchSpareLeg"
-	// The clone-keyed twins of the five slice-keyed ops above that reach a
+	// The clone-keyed twins of the three slice-keyed ops above that reach a
 	// group's legs and sides: the same rules on a clone's clone meta group.
 	opSetCloneLegErrEpoch  = "SetCloneLegErrEpoch"
 	opSetCloneSideErrEpoch = "SetCloneSideErrEpoch"
 	opFlipCloneProvisioned = "FlipCloneProvisioned"
-	opCreateCloneSpareLeg  = "CreateCloneSpareLeg"
-	opSwitchCloneSpareLeg  = "SwitchCloneSpareLeg"
 )
 
 // ReasonCandidateChanged is the one reason string MD5 pins: a pick whose
 // capacity key is no longer the one the scan saw, or a pick scanned against a
 // plan the SP has moved past — for ReplaceCntlr a surviving cntlr the plan did
-// not hold, for CreateSpareLeg, its clone twin and CreateRepair's fresh new
-// leg a DN the group gained since the plan. For those three it also covers a
-// pick that has gone stale in any other way since the scan: its DnConf
-// deleted, the DN no longer allocatable — disabled, say — or short of free
-// extents (checkDnPick's vanishedIsChanged). The caller rescans and retries
-// the scan + STM as one unit (architecture.md, Storage pools,
-// CreateStoragePool step 2).
+// not hold, for CreateRepair's fresh new leg a DN the group gained since the
+// plan. For CreateRepair it also covers a pick that has gone stale in any
+// other way since the scan: its DnConf deleted, the DN no longer allocatable
+// — disabled, say — or short of free extents (checkDnPick's
+// vanishedIsChanged). The caller rescans and retries the scan + STM as one
+// unit (architecture.md, Storage pools, CreateStoragePool step 2).
 //
 // It is exported for the same reason ReasonStaleRevision is: the gateway calls
-// GrowSlice, CreateSpareLeg, CreateCloneSpareLeg and CreateRepair from inside
-// its own candidate unit (gateway.md GW9) and must tell "rescan and retry"
-// apart from every other ErrPrecondition, which is a FAILED_PRECONDITION for
-// the client.
+// GrowSlice and CreateRepair from inside its own candidate unit (gateway.md
+// GW9) and must tell "rescan and retry" apart from every other
+// ErrPrecondition, which is a FAILED_PRECONDITION for the client.
 const ReasonCandidateChanged = "candidate changed"
 
 // ReasonGrowPending is the Reason a GrowSlice carries when the AR6 pending
@@ -95,14 +89,6 @@ const ReasonCandidateChanged = "candidate changed"
 // not two.
 const ReasonGrowPending = "grow_pending"
 
-// ReasonSpareUnprovisioned is the Reason a CreateSpareLeg, or its clone-keyed
-// twin CreateCloneSpareLeg, carries when a spare of the group still has an
-// unprovisioned side (UnprovisionedSpare). It is exported for the reason
-// ReasonGrowPending is: worker/reaction.go logs the SAME `reaction skipped
-// reason=` string when its pass holds the group on that rule before it would
-// call the op.
-const ReasonSpareUnprovisioned = "spare_unprovisioned"
-
 // ReasonGrpListFull is the Reason a GrowSlice carries when the slice's group
 // list of that kind already holds common.MaxGrpCntPerSlice groups
 // (GrpListFull). It is exported for the reason ReasonGrowPending is:
@@ -110,19 +96,10 @@ const ReasonSpareUnprovisioned = "spare_unprovisioned"
 // pass finds the list full before it would scan for a grow.
 const ReasonGrpListFull = "grp_list_full"
 
-// ReasonSpareListFull is the Reason a CreateSpareLeg, or its clone-keyed twin
-// CreateCloneSpareLeg, carries when the group's spare_leg_list already holds
-// common.MaxSpareLegPerGrp spares. It is exported because the gateway answers
-// it with the count-ceiling code its error table lists for that limit
-// (gateway.md GW7), not with the FAILED_PRECONDITION every other
-// ErrPrecondition maps to: a gateway create reaches it when another create
-// filled the list after the gateway's own pre-check.
-const ReasonSpareListFull = "spare list full"
-
 // ReasonStaleRevision is the Reason the ops the gateway shares with the
-// worker — GrowSlice, the two spare ops and their clone-keyed twins, and the
-// repair operations a gateway call runs: CreateRepair, FinishRepair,
-// CancelRepair, SetRepairAbort and DeleteRetiredLeg — carry when their
+// worker — GrowSlice and the repair operations CreateRepair, FinishRepair,
+// CancelRepair, SetRepairAbort and DeleteRetiredLeg (dnv-worker.md MD6) —
+// carry when their
 // expectRev argument does not match the stored SpRev.revision (gateway.md
 // GW6). The gateway maps exactly this reason to ABORTED "stale
 // revision" (GW7); every other ErrPrecondition reason is a
@@ -171,9 +148,8 @@ const ReasonNoIdLeft = "no id left"
 // TakeSpIds takes n consecutive per-SP ids from SpConf.next_id, returns the
 // first and advances the counter in conf past them, which the caller then
 // stores (architecture.md, Globals: id allocation + shard buckets). Every id
-// a GrowSlice, a ReplaceCntlr, a CreateSpareLeg, a CreateCloneSpareLeg or a
-// CreateRepair mints, and every run the gateway's per-SP minter commits, is
-// taken here.
+// a GrowSlice, a ReplaceCntlr or a CreateRepair mints, and every run the
+// gateway's per-SP minter commits, is taken here.
 //
 // The largest 64-bit value is never an id, because the counter cannot store
 // the value past it: a counter at that value has no id left, and a counter
@@ -663,10 +639,11 @@ func applyErrEpoch(stored uint64, epoch uint64) (uint64, bool) {
 	return epoch, true
 }
 
-// allLegs returns every leg of a slice — both group lists, and both the active
-// and the spare list of every group — in a stable order. The MD6 err_epoch ops
-// look a leg or a side up in all of them: a spare's leg and side are
-// health-checked exactly like an active one (architecture.md, Spare legs).
+// allLegs returns every leg of a slice — the leg_list of every group of both
+// group lists — in a stable order. The MD6 err_epoch ops look a leg or a side
+// up in all of them. A repair's new leg is not among them: it lives in its
+// Repair until FinishRepair, and its own epoch writes find it there
+// (SetRepairLegErrEpoch, SetRepairSideErrEpoch).
 func allLegs(slice *pb.Slice) []*pb.Leg {
 	grpLists := [][]*pb.Group{
 		slice.GetMetaGrpList(),
@@ -676,7 +653,6 @@ func allLegs(slice *pb.Slice) []*pb.Leg {
 	for _, grpList := range grpLists {
 		for _, grp := range grpList {
 			legs = append(legs, grp.GetLegList()...)
-			legs = append(legs, grp.GetSpareLegList()...)
 		}
 	}
 	return legs
@@ -723,8 +699,8 @@ func findSideOfLeg(slice *pb.Slice, legId uint64, sideId uint64) *pb.Side {
 }
 
 // findGroup returns the group with grpId, searching the meta list and then the
-// data list of the slice (architecture.md, Spare legs: a spare may be created
-// on either kind).
+// data list of the slice: a group of either kind may be repaired
+// (architecture.md, Repairs) and grown beside.
 func findGroup(slice *pb.Slice, grpId uint64) *pb.Group {
 	grpLists := [][]*pb.Group{
 		slice.GetMetaGrpList(),
@@ -742,14 +718,14 @@ func findGroup(slice *pb.Slice, grpId uint64) *pb.Group {
 
 // The clone-keyed twins of the four finders above. A clone owns exactly one
 // group, its clone meta group (Clone.meta_grp), so they search that group's
-// leg_list and spare_leg_list and nothing else; a clone with no group holds
-// no leg and no side. They are separate functions, as every clone-keyed path
-// is, so no slice-keyed path ever walks a clone.
+// leg_list and nothing else; a clone with no group holds no leg and no side.
+// They are separate functions, as every clone-keyed path is, so no
+// slice-keyed path ever walks a clone.
 
-// cloneLegs returns every leg of the clone's group, active legs first and
-// spares after, as allLegs does for a slice.
+// cloneLegs returns every leg of the clone's group, as allLegs does for a
+// slice.
 func cloneLegs(clone *pb.Clone) []*pb.Leg {
-	return legsOf(clone.GetMetaGrp())
+	return clone.GetMetaGrp().GetLegList()
 }
 
 // findCloneLeg returns the leg with legId in the clone's group, or nil.
@@ -812,8 +788,7 @@ func findCloneGroup(clone *pb.Clone, grpId uint64) *pb.Group {
 // clone with no group has no leg or side to act on, so no clone-keyed op
 // takes one; the clone drain takes it all the same, so its drain is never
 // stranded (dnv-worker.md MD6). The deleting flag is each op's own: the
-// spare ops refuse a deleting clone, the epoch writes do not look at it, and
-// the flip skips it.
+// epoch writes do not look at it, and the flip skips it.
 func loadCloneForTwin(
 	s etcdutil.STM,
 	op string,
@@ -876,8 +851,9 @@ func firstCntlidSlot(conf *pb.SpConf, op string) (uint32, error) {
 // vanishedIsChanged makes every one of those refusals `candidate changed`: a
 // DN deleted, disabled or otherwise taken out of allocation since the scan, or
 // one short of extCnt, is a pick gone stale, which a rescan replaces.
-// CreateSpareLeg passes true, so its caller plans again (architecture.md,
-// Spare legs). GrowSlice passes false and keeps the three named refusals.
+// CreateRepair passes true for a fresh new leg, so its caller plans again
+// (architecture.md, Repairs). GrowSlice passes false and keeps the three
+// named refusals.
 func checkDnPick(
 	s etcdutil.STM,
 	op string,
@@ -1089,11 +1065,9 @@ func SetCntlrErrEpoch(
 }
 
 // SetLegErrEpoch sets or clears one leg's err_epoch (MD6, HL2). The leg is
-// looked up in EVERY group of the slice — meta and data — and in both the
-// leg_list and the spare_leg_list, because the primary probes a spare's leg
-// exactly like an active one (architecture.md, Spare legs). Legs are embedded
-// in the Slice, so the
-// whole Slice is rewritten; nothing bumps a revision.
+// looked up in the leg_list of EVERY group of the slice, meta and data
+// (allLegs). Legs are embedded in the Slice, so the whole Slice is rewritten;
+// nothing bumps a revision.
 func SetLegErrEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1124,7 +1098,7 @@ func SetLegErrEpoch(
 }
 
 // SetSideErrEpoch sets or clears one side's err_epoch (MD6, HL2), looking the
-// side up in every group and in both leg lists like SetLegErrEpoch. Side ids
+// side up in every group like SetLegErrEpoch. Side ids
 // come from SpConf.next_id and are unique within the SP, so the slice id and
 // the side id address it.
 func SetSideErrEpoch(
@@ -1157,10 +1131,10 @@ func SetSideErrEpoch(
 }
 
 // SetCloneLegErrEpoch is SetLegErrEpoch's clone-keyed twin (MD6, HL2): it sets
-// or clears the err_epoch of one leg of a clone's clone meta group, an active
-// leg or a spare, by the same rule. The clone is addressed by its name and
-// proved by its clone_id (loadCloneForTwin); the leg is looked up in the
-// group's leg_list and spare_leg_list. A deleting clone is written all the
+// or clears the err_epoch of one leg of a clone's clone meta group by the
+// same rule. The clone is addressed by its name and proved by its clone_id
+// (loadCloneForTwin); the leg is looked up in the group's leg_list. A
+// deleting clone is written all the
 // same: its legs stay in its record, with their health epochs, until the clone
 // drain's final transaction removes them. Legs are embedded in the Clone, so
 // the whole Clone is rewritten; nothing bumps a revision.
@@ -2517,343 +2491,19 @@ func spConfById(
 }
 
 // ---------------------------------------------------------------------------
-// Spare legs (MD6, AR8; architecture.md, Spare legs)
+// A group's disk-node set (architecture.md, Per-operation allocation)
 // ---------------------------------------------------------------------------
 
-// CreateSpareLeg appends one spare leg to a group and returns its leg_id (MD6,
-// AR8 step 3; architecture.md, Spare legs). The spare is pre-connected
-// standby capacity: every cntlr
-// connects to and probes its side, but md never sees it until SwitchSpareLeg
-// puts it in the active list.
-//
-// The group is addressed by grp_id across BOTH the meta and the data list of
-// the slice, and it must be a RedundMdRaid1 group — a RedundNone group has no
-// redundancy to repair (AR8). No geometry (architecture.md, Group on-leg
-// layout: meta region, data region, health block) is computed: the spare
-// joins an existing Group and inherits its ext_cnt, meta_blocks and
-// data_blocks unchanged.
-//
-// grpDnAddrs is the plan the pick was scanned against: the DN of every side
-// of every leg and every spare of the group as the caller's snapshot held
-// them, which the caller black-listed and whose locations it excluded as
-// tier 1 of architecture.md, Per-operation allocation. A DN of the group
-// outside that list joined the group after the snapshot — a spare, or a
-// migration's destination — so the pick may sit in its failure domain or be
-// that very DN, and the op fails with ReasonCandidateChanged: the caller
-// plans again from a snapshot that holds it. A location never goes stale
-// (architecture.md, Disk nodes), but the group's list of DNs does, and that
-// list is what the scan's exclusions were built from. Only a gain is checked,
-// as ReplaceCntlr checks it: a DN that has left the group since frees room
-// the scan did not count on.
-//
-// The gain check runs ahead of the ADDRESS-based refusal of a DN that already
-// carries a leg or a spare of the group (grpHostsAddr), so that refusal fires
-// only for a pick inside the caller's own plan — a DN its scan black-listed —
-// and stays a hard error for a caller that hands one. Neither check is the
-// failure-domain rule: tier 2 relaxes that rule when the cluster has no
-// second domain to offer, so a legitimate spare can land in an occupied
-// domain and this op must still accept it. The pick itself is re-validated
-// with checkDnPick's vanishedIsChanged: a DN deleted, disabled or short of
-// extents since the scan answers ReasonCandidateChanged, as a moved capacity
-// key does, so the caller plans again instead of failing.
-//
-// A group that has a repair is refused (ReasonGrpHasRepair): a spare and the
-// repair's new leg would race for the same place in the group's array.
-//
-// No spare of the group may still have an unprovisioned side
-// (UnprovisionedSpare). The full-list check, that re-validation and the gain
-// check give two owners overlapping on one SP (AR2) one spare for one repair
-// rather than two when both planned the create from snapshots that held the
-// same DNs in the group, and the second STM fails on whichever of them comes
-// first. When the first owner's new spare filled the spare list, it fails
-// with ReasonSpareListFull. Otherwise, while that spare is still
-// unprovisioned, it fails with ReasonSpareUnprovisioned, and once RW18 has
-// flipped it, it finds the group holding a DN the plan did not — the first
-// owner's spare's — and fails with ReasonCandidateChanged. In each case the
-// second owner's next plan holds that spare, which AR8 switches in or waits
-// for (steps 1 and 2). The gain check compares DNs, not sides, so it misses
-// the first owner's spare when the second owner's snapshot holds a DN that
-// is out of the group when the first owner's create commits and that spare
-// lands on that DN: the DN leaves the group, through an operator's
-// FinishMigration, CancelMigration or DeleteSpareLeg, before the first
-// owner plans, or joins it after and leaves the same way before that
-// create. The second create can then commit a spare no failure asked for:
-// the gap AR2 and dnv-worker.md, Known limits, accept. A group still keeps
-// up to MaxSpareLegPerGrp spares of standby capacity: a create planned from
-// a snapshot that holds every spare of the group commits.
-//
-// The spare's leg_id and side_id are the two ids TakeSpIds takes, and a pool
-// with fewer left refuses with ReasonNoIdLeft.
-func CreateSpareLeg(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	shard uint32,
-	spId uint64,
-	spName string,
-	expectRev uint64,
-	sliceId uint64,
-	grpId uint64,
-	dn Cand,
-	grpDnAddrs []string,
-	cc *pb.ClusterConf,
-) (uint64, error) {
-	planned := make(map[string]struct{}, len(grpDnAddrs))
-	for _, addrPort := range grpDnAddrs {
-		planned[addrPort] = struct{}{}
-	}
-	legId := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		legId = 0
-		if err := checkSpRev(
-			s, opCreateSpareLeg, shard, cid, spId, expectRev,
-		); err != nil {
-			return err
-		}
-		conf, err := loadSpConfForOp(s, opCreateSpareLeg, cid, spName, spId)
-		if err != nil {
-			return err
-		}
-		if !isMdRaid1(conf) {
-			return fail(opCreateSpareLeg, "group is not md-raid1")
-		}
-		sliceKey := SliceKey(cid, spId, sliceId)
-		slice := &pb.Slice{}
-		if !s.Get(sliceKey, slice) {
-			return fail(opCreateSpareLeg, "slice not found")
-		}
-		grp := findGroup(slice, grpId)
-		if grp == nil {
-			return fail(opCreateSpareLeg, "group not found")
-		}
-		if grp.GetRepName() != "" {
-			return fail(opCreateSpareLeg, ReasonGrpHasRepair)
-		}
-		if len(grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
-			return fail(opCreateSpareLeg, ReasonSpareListFull)
-		}
-		if UnprovisionedSpare(grp) != nil {
-			return fail(opCreateSpareLeg, ReasonSpareUnprovisioned)
-		}
-		// The plan first: a DN the group gained since the snapshot is a
-		// stale plan, which the caller re-plans, not a refusal — even when
-		// it is the pick's own DN. The group has no repair here, so its
-		// disk-node set is its legs' and spares'.
-		if grpGainedDn(grp, nil, planned) {
-			return fail(opCreateSpareLeg, ReasonCandidateChanged)
-		}
-		if grpHostsAddr(grp, nil, dn.AddrPort) {
-			return fail(opCreateSpareLeg, "dn already in the group")
-		}
-		slot, err := firstCntlidSlot(conf, opCreateSpareLeg)
-		if err != nil {
-			return err
-		}
-		extCnt := grp.GetExtCnt()
-		if extCnt == 0 {
-			return fail(opCreateSpareLeg, "group is empty")
-		}
-		dnConf, err := checkDnPick(
-			s, opCreateSpareLeg, cid, cc, dn, extCnt, true,
-		)
-		if err != nil {
-			return err
-		}
-		legId, err = TakeSpIds(conf, opCreateSpareLeg, 2)
-		if err != nil {
-			return err
-		}
-		sideId := legId + 1
-		grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
-			LegId:  legId,
-			LegIdx: nextLegIdx(grp),
-			SideList: []*pb.Side{{
-				SideId:      sideId,
-				AddrPort:    dn.AddrPort,
-				CntlidSlot:  slot,
-				NvmeTrConf:  dnConf.GetNvmeTrConf(),
-				ErrEpoch:    0,
-				Provisioned: false,
-			}},
-		})
-		ptr := &pb.SidePointer{SpId: spId, LegId: legId, SideId: sideId}
-		err = chargeDn(
-			s, opCreateSpareLeg, cid, cc, dn.AddrPort, dnConf, ptr, extCnt,
-		)
-		if err != nil {
-			return err
-		}
-		s.Put(sliceKey, slice)
-		s.Put(SpConfKey(cid, spName), conf)
-		return BumpSpRev(s, opCreateSpareLeg, shard, cid, spId)
-	})
-	if err != nil {
-		return 0, err
-	}
-	return legId, nil
-}
-
-// CreateCloneSpareLeg is CreateSpareLeg's clone-keyed twin (MD6, AR8;
-// architecture.md, Spare legs): it appends one spare leg to a clone's clone
-// meta group and returns its leg_id. The clone is addressed by its name and
-// proved by its clone_id, it must have a group (loadCloneForTwin), and grpId
-// must be that group's id. Every other check and every effect is
-// CreateSpareLeg's, in the same order — the expected revision first, the SP
-// checks, md-raid1, no repair, the spare list's room, no spare still
-// unprovisioned, the gain check ahead of the address check, the pick
-// re-validated with vanishedIsChanged — and for the same reasons; the spare
-// inherits the group's ext_cnt, meta_blocks and data_blocks, takes two ids
-// through TakeSpIds, and charges its one DN; the Clone and the SpConf are put
-// and SpRev is bumped. No CN is charged: the clone meta group counts in no
-// cntlr's footprint.
-//
-// One check is its own: a clone being deleted is refused ("clone deleting"),
-// as loadSpConfForOp refuses a pool being deleted. Its group goes back to
-// the disk nodes in the clone drain's final transaction (dnv-worker.md CLD9),
-// and a spare made for it would spend an extent for nothing.
-func CreateCloneSpareLeg(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	shard uint32,
-	spId uint64,
-	spName string,
-	expectRev uint64,
-	cloneName string,
-	cloneId uint64,
-	grpId uint64,
-	dn Cand,
-	grpDnAddrs []string,
-	cc *pb.ClusterConf,
-) (uint64, error) {
-	planned := make(map[string]struct{}, len(grpDnAddrs))
-	for _, addrPort := range grpDnAddrs {
-		planned[addrPort] = struct{}{}
-	}
-	legId := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		legId = 0
-		if err := checkSpRev(
-			s, opCreateCloneSpareLeg, shard, cid, spId, expectRev,
-		); err != nil {
-			return err
-		}
-		conf, err := loadSpConfForOp(
-			s, opCreateCloneSpareLeg, cid, spName, spId,
-		)
-		if err != nil {
-			return err
-		}
-		if !isMdRaid1(conf) {
-			return fail(opCreateCloneSpareLeg, "group is not md-raid1")
-		}
-		clone, err := loadCloneForTwin(
-			s, opCreateCloneSpareLeg, cid, spId, cloneName, cloneId,
-		)
-		if err != nil {
-			return err
-		}
-		if clone.GetDeleting() {
-			return fail(opCreateCloneSpareLeg, "clone deleting")
-		}
-		grp := findCloneGroup(clone, grpId)
-		if grp == nil {
-			return fail(opCreateCloneSpareLeg, "group not found")
-		}
-		if grp.GetRepName() != "" {
-			return fail(opCreateCloneSpareLeg, ReasonGrpHasRepair)
-		}
-		if len(grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
-			return fail(opCreateCloneSpareLeg, ReasonSpareListFull)
-		}
-		if UnprovisionedSpare(grp) != nil {
-			return fail(opCreateCloneSpareLeg, ReasonSpareUnprovisioned)
-		}
-		// The plan first, as in CreateSpareLeg.
-		if grpGainedDn(grp, nil, planned) {
-			return fail(opCreateCloneSpareLeg, ReasonCandidateChanged)
-		}
-		if grpHostsAddr(grp, nil, dn.AddrPort) {
-			return fail(opCreateCloneSpareLeg, "dn already in the group")
-		}
-		slot, err := firstCntlidSlot(conf, opCreateCloneSpareLeg)
-		if err != nil {
-			return err
-		}
-		extCnt := grp.GetExtCnt()
-		if extCnt == 0 {
-			return fail(opCreateCloneSpareLeg, "group is empty")
-		}
-		dnConf, err := checkDnPick(
-			s, opCreateCloneSpareLeg, cid, cc, dn, extCnt, true,
-		)
-		if err != nil {
-			return err
-		}
-		legId, err = TakeSpIds(conf, opCreateCloneSpareLeg, 2)
-		if err != nil {
-			return err
-		}
-		sideId := legId + 1
-		grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
-			LegId:  legId,
-			LegIdx: nextLegIdx(grp),
-			SideList: []*pb.Side{{
-				SideId:      sideId,
-				AddrPort:    dn.AddrPort,
-				CntlidSlot:  slot,
-				NvmeTrConf:  dnConf.GetNvmeTrConf(),
-				ErrEpoch:    0,
-				Provisioned: false,
-			}},
-		})
-		ptr := &pb.SidePointer{SpId: spId, LegId: legId, SideId: sideId}
-		err = chargeDn(
-			s, opCreateCloneSpareLeg, cid, cc, dn.AddrPort, dnConf, ptr,
-			extCnt,
-		)
-		if err != nil {
-			return err
-		}
-		s.Put(CloneKey(cid, spId, cloneName), clone)
-		s.Put(SpConfKey(cid, spName), conf)
-		return BumpSpRev(s, opCreateCloneSpareLeg, shard, cid, spId)
-	})
-	if err != nil {
-		return 0, err
-	}
-	return legId, nil
-}
-
-// UnprovisionedSpare is the first spare of the group, in spare_leg_list
-// order, that has a side still unprovisioned — any side, so a spare with a
-// migration's second side counts while that side is unprovisioned — or nil.
-//
-// It lives here, not in worker/reaction.go, because AR8 step 3 applies it
-// both in the ops and in the pass: CreateSpareLeg and its clone-keyed twin
-// CreateCloneSpareLeg as the precondition AR2 requires them to re-validate
-// inside their STMs, and the pass as the hold that keeps a spare stuck
-// unprovisioned — its DN gone while it zeroed — from ending every pass on the
-// op's refusal. One rule, one implementation, so the ops and the pass cannot
-// disagree.
-func UnprovisionedSpare(grp *pb.Group) *pb.Leg {
-	for _, spare := range grp.GetSpareLegList() {
-		for _, side := range spare.GetSideList() {
-			if !side.GetProvisioned() {
-				return spare
-			}
-		}
-	}
-	return nil
-}
-
 // grpDnLegs is every leg whose sides make the group's disk-node set: its
-// leg_list, its spare_leg_list and the new legs of rep, the group's open
-// repair, nil when it has none. A new leg becomes a leg of the group at
-// FinishRepair, and the group's legs must sit on different disk nodes after
-// every finish, so the placement checks count it already.
+// leg_list and the new legs of rep, the group's open repair, nil when it has
+// none. A new leg becomes a leg of the group at FinishRepair, and the group's
+// legs must sit on different disk nodes after every finish, so the placement
+// checks count it already. A retired leg is not a leg of the group, so its
+// side is not in the set.
 func grpDnLegs(grp *pb.Group, rep *pb.Repair) []*pb.Leg {
-	legs := legsOf(grp)
+	legs := make([]*pb.Leg, 0,
+		len(grp.GetLegList())+len(rep.GetNewLegList()))
+	legs = append(legs, grp.GetLegList()...)
 	return append(legs, rep.GetNewLegList()...)
 }
 
@@ -2871,8 +2521,8 @@ func grpHostsAddr(grp *pb.Group, rep *pb.Repair, addrPort string) bool {
 }
 
 // grpGainedDn reports whether the group's disk-node set (grpDnLegs) holds a
-// DN that planned does not hold: the gain check of CreateSpareLeg and of
-// CreateRepair's fresh new leg, over the same sides grpHostsAddr walks.
+// DN that planned does not hold: the gain check of CreateRepair's fresh new
+// leg, over the same sides grpHostsAddr walks.
 func grpGainedDn(
 	grp *pb.Group,
 	rep *pb.Repair,
@@ -2888,195 +2538,23 @@ func grpGainedDn(
 	return false
 }
 
-// nextLegIdx is 1 + the largest leg_idx over BOTH lists of the group, the
-// next unused index in the group (architecture.md, Spare legs), so an active
-// leg and a spare never share one — the idx names the md member slot.
+// nextLegIdx is 1 + the largest leg_idx of the group's leg_list, the next
+// unused index in the group, which a repair's fresh new leg takes
+// (architecture.md, Repairs), so it never shares one with a leg of the group
+// while the repair is open — the idx names the md member slot.
 func nextLegIdx(grp *pb.Group) uint32 {
-	legLists := [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()}
 	maxIdx := uint32(0)
 	found := false
-	for _, legList := range legLists {
-		for _, leg := range legList {
-			if !found || leg.GetLegIdx() > maxIdx {
-				maxIdx = leg.GetLegIdx()
-				found = true
-			}
+	for _, leg := range grp.GetLegList() {
+		if !found || leg.GetLegIdx() > maxIdx {
+			maxIdx = leg.GetLegIdx()
+			found = true
 		}
 	}
 	if !found {
 		return 0
 	}
 	return maxIdx + 1
-}
-
-// SwitchSpareLeg makes a ready spare active and parks the leg it replaces
-// (MD6, AR8 step 1; architecture.md, Spare legs). The spare takes the target's
-// POSITION in leg_list
-// — the md member slot the array is missing — and inherits nothing else: it
-// keeps its own leg_id, leg_idx, side and err_epoch. The target is appended to
-// spare_leg_list keeping its err_epoch, where it stays parked for the operator
-// (AR8 step 4): still connected and probed, never repaired again.
-//
-// The spare's single side must be provisioned (architecture.md, Side
-// provisioning protocol): switching to a side that
-// has not finished zeroing would put an unwritten member into the array.
-//
-// Both legs must own exactly one side. A second one is a migration's
-// destination (architecture.md, Migrations), and the migration holds its leg
-// until Finish or Cancel
-// ends it, so a migrating leg is neither promoted nor parked. AR8's pass and
-// the gateway's pre-read turn such a leg away already. This re-check is what
-// catches a migration that started after either of them read the leg; for
-// the gateway, only when the request carried no token (expectRev == 0).
-// Otherwise checkSpRev, which runs before anything else in the STM, refuses
-// the switch with ReasonStaleRevision, because CreateMigration bumped SpRev.
-func SwitchSpareLeg(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	shard uint32,
-	spId uint64,
-	spName string,
-	expectRev uint64,
-	sliceId uint64,
-	grpId uint64,
-	spareLegId uint64,
-	targetLegId uint64,
-) error {
-	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		if err := checkSpRev(
-			s, opSwitchSpareLeg, shard, cid, spId, expectRev,
-		); err != nil {
-			return err
-		}
-		if _, err := loadSpConfForOp(
-			s, opSwitchSpareLeg, cid, spName, spId,
-		); err != nil {
-			return err
-		}
-		sliceKey := SliceKey(cid, spId, sliceId)
-		slice := &pb.Slice{}
-		if !s.Get(sliceKey, slice) {
-			return fail(opSwitchSpareLeg, "slice not found")
-		}
-		grp := findGroup(slice, grpId)
-		if grp == nil {
-			return fail(opSwitchSpareLeg, "group not found")
-		}
-		spareIdx := legIdxIn(grp.GetSpareLegList(), spareLegId)
-		if spareIdx < 0 {
-			return fail(opSwitchSpareLeg, "spare leg not found")
-		}
-		targetIdx := legIdxIn(grp.GetLegList(), targetLegId)
-		if targetIdx < 0 {
-			return fail(opSwitchSpareLeg, "target leg not found")
-		}
-		spare := grp.GetSpareLegList()[spareIdx]
-		if len(spare.GetSideList()) != 1 {
-			return fail(opSwitchSpareLeg, "spare leg has no single side")
-		}
-		target := grp.GetLegList()[targetIdx]
-		if len(target.GetSideList()) != 1 {
-			return fail(opSwitchSpareLeg, "target leg has no single side")
-		}
-		if !spare.GetSideList()[0].GetProvisioned() {
-			return fail(opSwitchSpareLeg, "spare side is not provisioned")
-		}
-		grp.LegList[targetIdx] = spare
-		grp.SpareLegList = append(
-			append(
-				grp.SpareLegList[:spareIdx:spareIdx],
-				grp.SpareLegList[spareIdx+1:]...,
-			),
-			target,
-		)
-		s.Put(sliceKey, slice)
-		return BumpSpRev(s, opSwitchSpareLeg, shard, cid, spId)
-	})
-}
-
-// SwitchCloneSpareLeg is SwitchSpareLeg's clone-keyed twin (MD6, AR8;
-// architecture.md, Spare legs): it makes a ready spare of a clone's clone
-// meta group active and parks the leg it replaces. The clone is addressed by
-// its name and proved by its clone_id, it must have a group
-// (loadCloneForTwin), it must not be deleting ("clone deleting", for
-// CreateCloneSpareLeg's reason), and grpId must be its group's id. Every
-// other check and every effect is SwitchSpareLeg's: the expected revision
-// first, the SP checks, the spare in spare_leg_list and the target in
-// leg_list, each with exactly one side, the spare's side provisioned; the
-// spare takes the target's position, the target is appended to the spares,
-// the Clone is put and SpRev is bumped. The one-side checks keep the mirror,
-// though a clone meta leg never gets a migration's second side.
-func SwitchCloneSpareLeg(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	shard uint32,
-	spId uint64,
-	spName string,
-	expectRev uint64,
-	cloneName string,
-	cloneId uint64,
-	grpId uint64,
-	spareLegId uint64,
-	targetLegId uint64,
-) error {
-	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		if err := checkSpRev(
-			s, opSwitchCloneSpareLeg, shard, cid, spId, expectRev,
-		); err != nil {
-			return err
-		}
-		if _, err := loadSpConfForOp(
-			s, opSwitchCloneSpareLeg, cid, spName, spId,
-		); err != nil {
-			return err
-		}
-		clone, err := loadCloneForTwin(
-			s, opSwitchCloneSpareLeg, cid, spId, cloneName, cloneId,
-		)
-		if err != nil {
-			return err
-		}
-		if clone.GetDeleting() {
-			return fail(opSwitchCloneSpareLeg, "clone deleting")
-		}
-		grp := findCloneGroup(clone, grpId)
-		if grp == nil {
-			return fail(opSwitchCloneSpareLeg, "group not found")
-		}
-		spareIdx := legIdxIn(grp.GetSpareLegList(), spareLegId)
-		if spareIdx < 0 {
-			return fail(opSwitchCloneSpareLeg, "spare leg not found")
-		}
-		targetIdx := legIdxIn(grp.GetLegList(), targetLegId)
-		if targetIdx < 0 {
-			return fail(opSwitchCloneSpareLeg, "target leg not found")
-		}
-		spare := grp.GetSpareLegList()[spareIdx]
-		if len(spare.GetSideList()) != 1 {
-			return fail(opSwitchCloneSpareLeg, "spare leg has no single side")
-		}
-		target := grp.GetLegList()[targetIdx]
-		if len(target.GetSideList()) != 1 {
-			return fail(opSwitchCloneSpareLeg,
-				"target leg has no single side")
-		}
-		if !spare.GetSideList()[0].GetProvisioned() {
-			return fail(opSwitchCloneSpareLeg,
-				"spare side is not provisioned")
-		}
-		grp.LegList[targetIdx] = spare
-		grp.SpareLegList = append(
-			append(
-				grp.SpareLegList[:spareIdx:spareIdx],
-				grp.SpareLegList[spareIdx+1:]...,
-			),
-			target,
-		)
-		s.Put(CloneKey(cid, spId, cloneName), clone)
-		return BumpSpRev(s, opSwitchCloneSpareLeg, shard, cid, spId)
-	})
 }
 
 // legIdxIn is the position of legId in the list, or -1.

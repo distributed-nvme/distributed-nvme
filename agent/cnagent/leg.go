@@ -270,8 +270,8 @@ func (s *CnAgentServer) lookupSubsys(
 // ---------------------------------------------------------------------------
 
 // ensureLegs converges every leg of every group of every slice and of every
-// clone's clone meta group — spare legs and a repair's new legs included,
-// both roles. It reports
+// clone's clone meta group — a repair's new legs included, at every stage
+// of the repair, both roles. It reports
 // which legs are **available** (cnagent.md CN12), which is what the assembly
 // needs, records each leg's ResInfo and a two-sided leg's path rows
 // (legPathRows), and says
@@ -296,10 +296,10 @@ func (s *CnAgentServer) ensureLegs(
 			// there is no subsystem to connect to, no multipath namespace to
 			// wrap and no device to probe. Deliberate, healthy, no action.
 			// available is set explicitly, though the map's zero value reads
-			// the same. A group with a provisioning leg_list leg is deferred
-			// and a spare's flag is never read, but a repair's new leg's is:
-			// the assembly and the add take a new leg only once it is
-			// available (CN12), so never a provisioning one.
+			// the same. A group with a provisioning leg_list leg is deferred,
+			// but a repair's new leg's flag is read: the assembly and the add
+			// take a new leg only once it is available (CN12), so never a
+			// provisioning one.
 			info.LegIdToLeg[lp.legId] = st.tracker.Provisioning(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, detailsProvisioning)
 			s.legPathRows(ctx, st, plan, lp, nil, info)

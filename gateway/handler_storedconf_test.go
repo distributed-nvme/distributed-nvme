@@ -155,7 +155,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // capacity key from one — the RPCs that take DN capacity as well as the ones
 // that give it back.
 //
-// The thirteen cases are seven different gates:
+// The twelve cases are seven different gates:
 //
 //   - CreateDiskNode and CreateControllerNode check inside their own STM,
 //     immediately above the division that turns the node's byte count into
@@ -165,16 +165,17 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     ladder, so that model.MetaLadderExtCnt's "false" can keep meaning the
 //     dm-thin metadata cap and nothing else;
 //   - the five allocating RPCs — CreateStoragePool, GrowSlice, CreateCntlr,
-//     CreateSpareLeg and CreateMigration, i.e. every caller of pickDns or
-//     pickCn but CreateClone, whose own gate below answers first — reach the
+//     CreateRepair with a fresh new leg and CreateMigration, i.e. every
+//     caller of pickDns or pickCn but CreateClone, whose own gate below
+//     answers first — reach the
 //     check through the scan (architecture.md,
 //     Per-operation allocation), which refuses rather than scan with a batch
 //     size of zero: a zero width finds no candidate
 //     and would report a cluster full of free extents as RESOURCE_EXHAUSTED.
 //     CreateStoragePool runs that gate itself as well, just before its scans
 //     and ahead of the merged geometry it judges there, so its refusal comes
-//     from that copy. CreateCntlr and CreateSpareLeg carry no conf gate of
-//     their own (nor does model.CreateSpareLeg), so those two are the cases
+//     from that copy. CreateCntlr and CreateRepair carry no conf gate of
+//     their own (nor does model.CreateRepair), so those two are the cases
 //     that pin the allocator's;
 //   - CreateMigration's plan computes the destination's metadata units from
 //     the extent size before it scans (migrMetaUnitsOf, architecture.md,
@@ -184,11 +185,13 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     before it scans (planCloneGrp, architecture.md, Clones), so its refusal
 //     comes from that gate, which runs the same predicate, ahead of
 //     pickDns's;
-//   - DeleteSpareLeg, FinishMigration and CancelMigration reach newDnLedger's
-//     gate: those three are every handler that RELEASES DN capacity through a
-//     ledger and has no conf gate of its own, and all three are driven here
-//     rather than one standing for the rest, so moving any of them off the
-//     shared constructor is caught. DeleteStoragePool is a latch and releases
+//   - FinishMigration and CancelMigration reach newDnLedger's gate: those two
+//     are every handler that RELEASES DN capacity through a ledger and has no
+//     conf gate of its own, and both are driven here rather than one standing
+//     for the other, so moving either of them off the shared constructor is
+//     caught. The repair calls that give a side back carry a gate of their
+//     own (releaseConfGate), which TestRepairCallsRefuseAnInvalidStoredConf
+//     pins. DeleteStoragePool is a latch and releases
 //     nothing (architecture.md, Storage pools); the release's gate is
 //     model.DrainSpSlice's, which needs the same ladder for the same
 //     MaintainDnCapacity reason, and it is pinned by
@@ -205,7 +208,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     wrong one.
 //
 // Each gate validates the WHOLE stored conf rather than the member it is
-// about to use, which is why one zeroed member reaches all thirteen. Two are
+// about to use, which is why one zeroed member reaches all twelve. Two are
 // planted in turn: `dn_bin_conf.extent_size`, the fixture's member and the
 // one a gateway that lost its gate would divide by, and
 // `alloc_conf.dn_batch_size`, which nothing divides by — so the second row
@@ -222,7 +225,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // whose planCloneGrp runs it in its plan and its STM, with pickDns and
 // newDnLedger between and after.
 //
-// The five release cases come FIRST in the list, because scReplay runs the
+// The four release cases come FIRST in the list, because scReplay runs the
 // cases in order against the repaired conf: an allocating case replayed
 // earlier could place a side on the very disk node DeleteDiskNode is about,
 // and turn its replay into a FAILED_PRECONDITION about sides.
@@ -233,7 +236,6 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	sliceId := conf.GetSliceIdList()[0]
 	slice := env.slice(spId, sliceId)
 	dataGrp := slice.GetDataGrpList()[0]
-	grpId := dataGrp.GetGrpId()
 	// The source of the migration below: one side of the data group, whose
 	// leg holds exactly one, so the "a migration is already running on this
 	// leg" precondition (architecture.md, Migrations) cannot stand in for the
@@ -249,29 +251,27 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 		}); err != nil {
 		t.Fatalf("CreateThinDevice for the CreateClone case: %v", err)
 	}
-	// What the three ledger cases release, built while the conf is still
+	// What the two ledger cases release, built while the conf is still
 	// healthy, each on an object of its own so that no case's own preconditions
 	// (architecture.md, `service Gateway` — RPC specifications) can stand in for
 	// the conf refusal:
 	//
-	//   - a spare leg on the META group, not the data group the CreateSpareLeg
-	//     case below adds one to, so neither can fill the other's slot
-	//     (architecture.md, Spare legs);
 	//   - a migration on the data group's SECOND leg, which FinishMigration
 	//     ends, leaving leg 0 free for the CreateMigration case;
 	//   - a migration on the meta group's first leg, which CancelMigration
 	//     rolls back.
+	//
+	// The CreateRepair case repairs the meta group's SECOND leg, which holds
+	// one side, so a migration running on the bad leg (architecture.md,
+	// Repairs) cannot stand in for the conf refusal either; its health epoch
+	// is planted here, as the sp worker's monitor writes one, since a healthy
+	// bad leg is refused. A repair of the meta group keeps the data group's
+	// leg 0 free of a repair for the CreateMigration case's replay.
 	metaGrp := slice.GetMetaGrpList()[0]
 	metaGrpId := metaGrp.GetGrpId()
-	spareReply, err := env.srv.CreateSpareLeg(env.ctx,
-		&pb.CreateSpareLegRequest{
-			ClusterName: env.name,
-			SpName:      sptSpName,
-			GrpId:       metaGrpId,
-		})
-	if err != nil {
-		t.Fatalf("CreateSpareLeg for the DeleteSpareLeg case: %v", err)
-	}
+	repBadLegId := metaGrp.GetLegList()[1].GetLegId()
+	metaGrp.GetLegList()[1].ErrEpoch = 1700000000
+	mustPut(t, env.cli, model.SliceKey(env.cid, spId, sliceId), slice)
 	finMigrName := "sc-fin-migr"
 	if _, err := env.srv.CreateMigration(env.ctx, &pb.CreateMigrationRequest{
 		ClusterName: env.name,
@@ -324,16 +324,6 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	}
 
 	cases := []scCase{
-		{"DeleteSpareLeg", func() error {
-			_, err := env.srv.DeleteSpareLeg(env.ctx,
-				&pb.DeleteSpareLegRequest{
-					ClusterName: env.name,
-					SpName:      sptSpName,
-					GrpId:       metaGrpId,
-					LegId:       spareReply.GetLegId(),
-				})
-			return err
-		}},
 		{"FinishMigration", func() error {
 			// force: the hydration proof of architecture.md, Migrations, is a
 			// GetSideInfo on the destination DN's agent, which this fixture has no
@@ -433,12 +423,14 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 			})
 			return err
 		}},
-		{"CreateSpareLeg", func() error {
-			_, err := env.srv.CreateSpareLeg(env.ctx,
-				&pb.CreateSpareLegRequest{
-					ClusterName: env.name,
-					SpName:      sptSpName,
-					GrpId:       grpId,
+		{"CreateRepair", func() error {
+			_, err := env.srv.CreateRepair(env.ctx,
+				&pb.CreateRepairRequest{
+					ClusterName:  env.name,
+					SpName:       sptSpName,
+					RepName:      "sc-rep",
+					GrpId:        metaGrpId,
+					BadLegIdList: []uint64{repBadLegId},
 				})
 			return err
 		}},

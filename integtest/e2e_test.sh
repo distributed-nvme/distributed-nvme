@@ -304,7 +304,7 @@ STRIPE_SIZE=1048576
 INIT_EXT_CNT=1
 
 # `sp create --cntlr-cnt`: one primary and one standby, on two of the three CN
-# VMs. The third CN is deliberately spare, so AR7 has somewhere to put a
+# VMs. The third CN deliberately carries none, so AR7 has somewhere to put a
 # replacement (cn placement dedupes by location the same way dn placement does,
 # FindCnCandidates (model/alloc.go)).
 CNTLR_CNT=2
@@ -349,9 +349,9 @@ SLOTS=0,1
 # LONG value, passed explicitly, at create.
 #
 # THE QUIET SET — smoke, ops and copy. These three cases test operations, and
-# a failover or a spare leg one of them did not ask for is noise that
-# invalidates its assertions (an absolute side count, a "no spare leg yet", a
-# digest read through a controller that is no longer the primary). So every
+# a failover or a repair of the worker's one of them did not ask for is noise
+# that invalidates its assertions (an absolute side count, a "no repair yet",
+# a digest read through a controller that is no longer the primary). So every
 # threshold here is longer than any build can run: 1800 s is several times the
 # longest build window the lab produces (see WAIT_BUILD for what that window
 # is and is not), on a shape that is already the widest this tree can build;
@@ -374,9 +374,10 @@ THR_QUIET_LEG=3600
 # neither is observable inside any bound this
 # suite could sanely wait out. react therefore builds under the reacting set
 # (e2e_integtest.md, Topology and parameters, Event thresholds) and
-# pays for it: its OWN build can produce a failover and a spare before the
-# case starts, which is why every react assertion is written against a shape
-# snapshot rather than against a count (see the react section's header).
+# pays for it: its OWN build can produce a failover and a repair of the
+# worker's before the case starts, which is why every react assertion is
+# written against a shape snapshot rather than against a count (see the react
+# section's header).
 THR_REACT_PRIMARY=5
 THR_REACT_CNTLR=20
 THR_REACT_SIDE=20
@@ -463,8 +464,8 @@ WORKER_ROLES="dn cn sp"
 # a data side or a side of a clone meta group its meta region and first data
 # block (architecture.md, Side provisioning protocol). The rest of a data side
 # allocates only as it is written — a host's writes through dm-thin, which
-# writes every block it provisions whole, md's rebuild onto a spare, a
-# migration's copy — and a fresh file also carries the backing pattern below.
+# writes every block it provisions whole, md's copy onto a repair's new leg,
+# a migration's copy — and a fresh file also carries the backing pattern below.
 # The E2E5 caps count all of it.
 BACKING_SIZE=2G
 
@@ -584,7 +585,7 @@ WAIT_PROVISION=600     # an incremental convergence on something that already
 WAIT_DELETE=900        # `sp delete` to drain to NOT_FOUND. The drain is the
                        # build run backwards on the same CN — 32 pools,
                        # 64 arrays and 128 legs torn down and every side
-                       # retired on its DN — so it is sized against the build
+                       # removed from its DN — so it is sized against the build
                        # window, not against an incremental one
 WAIT_REACT=120         # an automatic reaction to land after its threshold.
                        # It is threshold + a few worker passes, one per
@@ -1317,7 +1318,7 @@ roles (repeatable flags; nothing is positional, nothing is hardcoded):
   --cp    exactly 1   etcd + dnv-gateway + dnv-worker + dnv-cdc + dnvctl
                       (no sudo needed)
   --cn    at least 3  one \`dnv-agent cn\` each; $CNTLR_CNT carry the sp's
-                      cntlrs and the rest is the spare AR7 lands on
+                      cntlrs and the rest carry none, where AR7 lands
                       (passwordless sudo)
   --dn    at least LEGS (2 for raid1, 1 for none), and in practice 4:
                       \$DNS_PER_VM \`dnv-agent dn\` instances each
@@ -1656,15 +1657,28 @@ derive_params() {
 	# two. CAP is what keeps the bound from over-charging raid1 on exactly two
 	# DN VMs.
 	#
-	# WHAT THIS BOUND IS NOT DERIVED FROM. react's AR6 grow and AR8 spare leg
+	# WHAT THIS BOUND IS NOT DERIVED FROM. react's AR6 grow and AR8 repairs
 	# add sides of their own, and AR8 wants a DN carrying exactly one side of
-	# the sp; copy's migration and spare-leg stages want a DN on a VM outside
-	# the group. None of those needs a SIDE-LESS DN — an occupied DN still
-	# reports free_ext_cnt > 0 — so none of them enters the count above, and
-	# each states and checks its own precondition. They are not INDEPENDENT of
-	# the bound either: the headroom it leaves is what keeps E2E4's tier-2
-	# relaxation out of reach, which is why a sub-bound value warns about them
-	# too.
+	# the sp; copy's migration and repair stages want a DN on a VM outside
+	# the group. Those need no SIDE-LESS DN — an occupied DN still reports
+	# free_ext_cnt > 0. Copy step 6 does: it needs step 5's fresh new leg on
+	# a DN that carries no other side, so that killing that DN takes down the
+	# new leg alone. The bound does not derive that either, as the side-less
+	# DNs it leaves on LEGS VMs can be on the group's own. The gateway draws
+	# step 5's new leg at random among one DN of each location (pickDns,
+	# model.PickRandom; architecture.md, Finding DN candidates): the first DN
+	# of that location with room for the leg that the scan meets, a draw
+	# among ties, as the scan reads the bins from the fullest up and puts the
+	# most free first only inside one bin. Tier 1 draws from the guests
+	# outside the group's. Tier 2 draws from every guest when none of those
+	# has room, as on exactly LEGS DN guests. So the pick is side-less for
+	# certain only while every location in the draw still holds a side-less
+	# DN and no occupied DN with room for the leg in a bin the scan reads
+	# before that DN's, and the step checks it itself. So none of them enters
+	# the count above, and each states and checks its own precondition. They
+	# are not INDEPENDENT of the bound either: the headroom it leaves keeps
+	# E2E4's tier-2 relaxation out of reach and makes a side-less DN outside
+	# the group likely, which is why a sub-bound value warns about them too.
 	local divisor=$((DN_VM_CNT - LEGS + 1))
 	local cap=$LEGS
 	[ "$divisor" -ge "$LEGS" ] || cap=$divisor
@@ -1687,8 +1701,8 @@ derive_params() {
 			# the create's bound a simulation of the real algorithm fails about
 			# four creates in five at LEGS*GRP_CNT/V per VM (32 for the default
 			# shape), and a create that does succeed there leaves every VM at
-			# zero free DNs, so every later migration destination and spare leg
-			# has nowhere anti-affine to go:
+			# zero free DNs, so every later migration destination and
+			# repair's new leg has nowhere anti-affine to go:
 			# FindDnCandidatesAntiAffine (model/alloc.go) then RELAXES and can
 			# put both sides of one leg on one kernel, where
 			# SideToCnNqn (common/name_fmt.go) — which carries no dn_id —
@@ -1698,13 +1712,16 @@ derive_params() {
 			log "         $SLICE_CNT slices and $REDUND. The ops case's step" \
 				"8 needs $LEGS side-less disk nodes on"
 			log "         $LEGS different VMs after its two grows, and it" \
-				"DIES without them."
+				"DIES without them. The copy case's step 6"
+			log "         needs step 5's new leg on a side-less disk node;" \
+				"below the bound nothing makes the"
+			log "         scan pick one, and step 6 DIES on an occupied one."
 			if [ "$DNS_PER_VM" -lt "$create_bound" ]; then
 				log "         It is also below the create's own bound" \
 					"$create_bound, so \`sp create\` may itself fail"
 				log "         RESOURCE_EXHAUSTED, and a create that succeeds" \
 					"may leave no DN for a migration or"
-				log "         spare leg, which lets the allocator put two" \
+				log "         a repair's new leg, which lets the allocator put two" \
 					"sides of one leg on one kernel."
 			fi
 		fi
@@ -1767,10 +1784,10 @@ derive_params() {
 	# four daemon logs, 183 agent logs and the agents' local stores, each dn
 	# agent's own on-disk metadata in its backing file, the shipped binaries
 	# and pattern, the host pattern files, the sides a
-	# case adds after the create (a grow, a spare leg, a migration
+	# case adds after the create (a grow, a repair's new leg, a migration
 	# destination, a clone's clone meta group, each zeroed as any side of its
 	# group), and every byte written into a data region: a host's writes, for
-	# which dm-thin writes whole blocks, md's rebuild onto a spare, a
+	# which dm-thin writes whole blocks, md's copy onto a repair's new leg, a
 	# migration's copy, a clone's hydration. The CN thin metadata, the md
 	# superblocks and bitmaps and the health blocks cost nothing more here:
 	# they land in bytes the zeroing has already allocated, a meta side whole
@@ -4091,6 +4108,47 @@ md_member_fail() {
 	md_member_read "$1"
 }
 
+# md_sync_read <dm name> prints the copy state of the array that holds the
+# dm device <dm name> as a member, the copy case's repair steps' reading
+# (e2e_integtest.md, The cases, copy): "node=<mdN> action=<a> done=<d>
+# degraded=<n> min=<m> max=<x>", from the array's md/sync_action,
+# md/sync_completed, md/degraded, md/sync_speed_min and md/sync_speed_max,
+# each value with its spaces taken out, so "512 / 131072" reads
+# "512/131072" and "1000 (system)" reads "1000(system)". md_sync_speed
+# <dm name> <min> <max> writes the array's md/sync_speed_min and
+# md/sync_speed_max, each a speed in KiB per second or the word system, and
+# prints md_sync_read's line. Each fails, saying so, on a device or an array
+# that is not there and on a read or a write that fails.
+md_sync_read() {
+	local where node dmk dir a c d mn mx
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	dir=/sys/block/$node/md
+	a=$(cat "$dir/sync_action") || return 1
+	c=$(cat "$dir/sync_completed") || return 1
+	d=$(cat "$dir/degraded") || return 1
+	mn=$(cat "$dir/sync_speed_min") || return 1
+	mx=$(cat "$dir/sync_speed_max") || return 1
+	echo "node=$node action=${a// /} done=${c// /} degraded=${d// /}" \
+		"min=${mn// /} max=${mx// /}"
+}
+
+md_sync_speed() {
+	local where node dmk dir
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	dir=/sys/block/$node/md
+	echo "$2" >"$dir/sync_speed_min" || {
+		echo "md_sync_speed: writing '$2' to $dir/sync_speed_min failed" >&2
+		return 1
+	}
+	echo "$3" >"$dir/sync_speed_max" || {
+		echo "md_sync_speed: writing '$3' to $dir/sync_speed_max failed" >&2
+		return 1
+	}
+	md_sync_read "$1"
+}
+
 # --- the copy case's slowed source (e2e_integtest.md, The cases, copy) ------
 #
 # A clone's copy over the lab's network ends in well under a second, too soon
@@ -4832,8 +4890,8 @@ kmsg_mark() { # <tag>
 
 # kmsg_errors is the second witness of the cutoff case's "no failed write",
 # because dd's own status alone proves less than it seems (the ops case's
-# READONLY rung says why), and the only one of the copy case's "no IO error
-# while a leg is repaired": the count of kernel lines after the last <tag> that
+# READONLY rung says why), and the only one of the copy and react cases' "no
+# IO error while a leg is repaired": the count of kernel lines after the last <tag> that
 # report a failed IO — the block layer's `<kind> error, dev …`, a buffered
 # write's `Buffer I/O error … lost async page write`, and multipath's `no
 # available path - failing I/O` — then up to twenty of them. The tag gone
@@ -5982,9 +6040,10 @@ CN_COPY_TOOLS="tc ip"
 # them for $WORK/sha-probe.err.
 HOST_TOOLS="nvme uuidgen systemctl udevadm dd sha256sum awk sed grep timeout"
 HOST_TOOLS="$HOST_TOOLS du df tail"
-# dmesg: the kernel-log witness (kmsg_mark, kmsg_errors) of the copy case's
-# repair step, which preflight_host asks of host0 only when that step runs, as
-# preflight_stas asks host0 for the cutoff case's own tools.
+# dmesg: the kernel-log witness (kmsg_mark, kmsg_errors) of the copy and
+# react cases' repair steps, which preflight_host asks of host0 only when
+# those steps run, as preflight_stas asks host0 for the cutoff case's own
+# tools.
 HOST_KMSG_TOOLS="dmesg"
 # cp runs four unprivileged daemons and dnvctl. `ss` is what the helper's
 # `listening` predicate uses; pkill/pgrep are stop_all's fallback sweep.
@@ -6466,14 +6525,16 @@ preflight_host() { # <h>
 		preflight_stas "$h"
 	fi
 
-	# The copy case's repair step reads host0's kernel log for failed IO
-	# (host_kmsg_clean), so with md-raid1, where that step runs, host0 needs
-	# the witness's tool, as preflight_stas asks it for the cutoff case.
-	if [ "$h" = 0 ] && [ "$REDUND" = raid1 ] && run_has_case copy; then
+	# The copy and react cases' repair steps read host0's kernel log for
+	# failed IO (host_kmsg_clean), so with md-raid1, where those steps run,
+	# host0 needs the witness's tool, as preflight_stas asks it for the cutoff
+	# case.
+	if [ "$h" = 0 ] && [ "$REDUND" = raid1 ] &&
+		{ run_has_case copy || run_has_case react; }; then
 		missing=$(ssh_host "$h" "$(tools_cmd $HOST_KMSG_TOOLS)") ||
 			die "$label: listing the kernel-log witness's tools failed"
 		[ -z "$missing" ] ||
-			die "$label: missing tool(s) for the copy case's kernel-log" \
+			die "$label: missing tool(s) for the repair steps' kernel-log" \
 				"witness: $(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
@@ -7499,12 +7560,12 @@ STANDBY_TRADDR=""
 STANDBY_TRSVCID=""
 STANDBY_CN=-1
 
-# The CN VMs carrying no cntlr — the spare of e2e_integtest.md, Topology and
+# The CN VMs carrying no cntlr — the rest of e2e_integtest.md, Topology and
 # parameters, where AR7 lands and where ops step 3's `cntlr create --slot 2
-# --cn-white <cn2 addr>` points. SPARE_CN is the first of them, or -1 if
+# --cn-white <cn2 addr>` points. IDLE_CN is the first of them, or -1 if
 # every CN carries one.
-SPARE_CN_LIST=()
-SPARE_CN=-1
+IDLE_CN_LIST=()
+IDLE_CN=-1
 
 # The host-facing subsystem and the thin device setup builds. Both names are
 # bare jq identifiers ON PURPOSE: `td list`'s reply is keyed by td_name and
@@ -7541,26 +7602,15 @@ DISC_JSON=""
 #
 # SP_GRP_PATH walks the slices outermost and, within each slice, meta groups
 # before data groups — the order allGroups (gateway/alloc.go) uses for one
-# slice. SP_LEG_PATH is leg_list
-# ONLY — spare_leg_list is deliberately a separate fragment, because md
-# members come from leg_list alone (doc/cnagent.md CN12; doc/architecture.md,
-# Spare legs).
+# slice. SP_LEG_PATH is each group's leg_list, the legs md takes its members
+# from (doc/cnagent.md CN12). `sp get` holds no other leg of the pool: a
+# repair's new leg lives in its repair until the finish and a retired leg in
+# its own record, which `repair get|list` and `retired-leg list` read
+# (doc/architecture.md, Repairs, Retired legs); a group names them only by
+# its rep_name and its retired_leg_id_list.
 SP_GRP_PATH='.slice_list[] | (.meta_grp_list[], .data_grp_list[])'
 SP_LEG_PATH="$SP_GRP_PATH | .leg_list[]"
-SP_SPARE_LEG_PATH="$SP_GRP_PATH | .spare_leg_list[]"
 SP_SIDE_PATH="$SP_LEG_PATH | .side_list[]"
-
-# Every side of the sp's slices, PARKED AND SPARE LEGS INCLUDED. It exists
-# for two things. One is the "is anything still zeroing?" poll below: a spare
-# leg's side is created provisioned = false like any other and only the
-# sp-worker flips it, and model.SwitchSpareLeg (model/ops.go) refuses a spare
-# whose side is not provisioned ("spare side is not provisioned").
-# A poll over SP_SIDE_PATH alone would answer "nothing left to do" the instant
-# `spare create` returned and the switch would then be refused. The other is
-# the disk-node rule of react steps 5 and 6 (react_leg_alone): a disk node
-# that carries exactly one side of the sp, spare and parked legs' sides
-# included (react_leg_repair says why).
-SP_ANY_SIDE_PATH="$SP_GRP_PATH | (.leg_list[], .spare_leg_list[]) | .side_list[]"
 
 # A side's DN VM. addr_port is "<ip>:<29900+k>" (dn_addr), and the suite only
 # ever forms IPv4 endpoints — parse_args takes the address from `--dn user@ip`
@@ -7571,10 +7621,10 @@ SP_SIDE_VM='.addr_port | split(":") | .[0]'
 
 # How many sides are not provisioned yet (setup step 7's poll). `provisioned`
 # is a proto3 bool and EmitUnpopulated keeps the false visible, so `not` is a
-# real test and not a null probe. It walks SP_ANY_SIDE_PATH for the reason
-# given there; at setup, where no spare exists, that is the same set as
-# SP_SIDE_PATH.
-SP_UNPROV_CNT="[$SP_ANY_SIDE_PATH | select(.provisioned | not)] | length"
+# real test and not a null probe. It walks the legs' sides alone: a repair's
+# new side is waited for through its repair, whose STARTED needs it
+# provisioned (doc/architecture.md, Repair).
+SP_UNPROV_CNT="[$SP_SIDE_PATH | select(.provisioned | not)] | length"
 
 # The four CntlrInfo row counts setup step 7 waits on. Maps are keyed by
 # decimal-string ids (dnvctl.md CT4), so `[ .map[] | select(...) ] | length`
@@ -7599,7 +7649,7 @@ CNTLR_OK_RAID0="[(.cntlr_info.td_id_to_raid0 // {})[]$CNTLR_OK_TAIL"
 # Address <-> index (the inverse of dn_addr / cn_addr)
 # ---------------------------------------------------------------------------
 #
-# The cases' migration, spare and AR8 steps all start from a side's `addr_port`
+# The cases' migration, repair and AR8 steps all start from a side's `addr_port`
 # and have to reach the guest it names. These three are the only place that
 # inversion happens. Each answers a named sentinel rather than "" so an
 # assert_eq failure says which fault it was.
@@ -7658,7 +7708,7 @@ sp_field() { # <filter>
 }
 
 # sp_read_roles resolves SP_JSON into the arrays and the PRIMARY_*/STANDBY_*/
-# SPARE_CN globals. Call it after every sp_refresh whose answer a case is
+# IDLE_CN globals. Call it after every sp_refresh whose answer a case is
 # about to act on — AR5 moves the primary, AR7 moves a whole cntlr to another
 # CN, and both leave the previous values pointing at the wrong guest.
 #
@@ -7738,14 +7788,14 @@ sp_read_roles() {
 	assert_ne "$STANDBY_CN" none \
 		"the standby's addr_port $STANDBY_ADDR names one of the --cn guests"
 
-	# The spare CNs: every --cn guest carrying no cntlr of this sp. cn
+	# The idle CNs: every --cn guest carrying no cntlr of this sp. cn
 	# placement dedupes by location in FindCnCandidates (model/alloc.go), and
 	# an omitted location becomes the node's own addr_port in
 	# CreateControllerNode (gateway/controllernode.go), so with one cn agent
 	# per VM the CNTLR_CNT cntlrs are on CNTLR_CNT different VMs and the rest
-	# are spare.
-	SPARE_CN_LIST=()
-	SPARE_CN=-1
+	# carry none.
+	IDLE_CN_LIST=()
+	IDLE_CN=-1
 	for v in "${!CN[@]}"; do
 		addr=$(cn_addr "$v")
 		local used=0 j
@@ -7755,13 +7805,13 @@ sp_read_roles() {
 			fi
 		done
 		if [ "$used" -eq 0 ]; then
-			SPARE_CN_LIST+=("$v")
-			[ "$SPARE_CN" -ge 0 ] || SPARE_CN=$v
+			IDLE_CN_LIST+=("$v")
+			[ "$IDLE_CN" -ge 0 ] || IDLE_CN=$v
 		fi
 	done
 	log "  primary cntlr $PRIMARY_CNTLR_ID on cn$PRIMARY_CN ($PRIMARY_ADDR)," \
 		"standby $STANDBY_CNTLR_ID on cn$STANDBY_CN ($STANDBY_ADDR)," \
-		"spare cn(s): ${SPARE_CN_LIST[*]:-none}"
+		"cn(s) with no cntlr: ${IDLE_CN_LIST[*]:-none}"
 }
 
 # ---------------------------------------------------------------------------
@@ -7850,13 +7900,12 @@ sp_sides_provisioned() {
 	if [ "$left" != "$SIDES_LEFT" ]; then
 		SIDES_LEFT=$left
 		# The denominator comes out of the SAME reply the count did, and not
-		# from GRP_CNT x LEGS: three of the four callers run after the sp has
-		# grown (ops step 2 adds two groups, copy's spare adds a leg, react's
-		# AR6 adds a group), and a total smaller than the count is exactly the
-		# number an operator reads while deciding whether a long wait is
-		# stuck. SP_ANY_SIDE_PATH is the same set SP_UNPROV_CNT filters, so
-		# the two numbers are always commensurable.
-		total=$(jq_of "$CTL_OUT" "[$SP_ANY_SIDE_PATH] | length")
+		# from GRP_CNT x LEGS: callers run after the sp has grown (ops step 2
+		# adds two groups, react's AR6 adds a group), and a total smaller than
+		# the count is exactly the number an operator reads while deciding
+		# whether a long wait is stuck. SP_SIDE_PATH is the same set
+		# SP_UNPROV_CNT filters, so the two numbers are always commensurable.
+		total=$(jq_of "$CTL_OUT" "[$SP_SIDE_PATH] | length")
 		log "  sides still provisioning: $left of $total"
 	fi
 	[ "$left" = 0 ]
@@ -7864,13 +7913,14 @@ sp_sides_provisioned() {
 
 # SETUP WAITS ON THE LIVE SHAPE, NOT ON THE FRESH-SP CONSTANT. A predicate
 # that took its expected leg count from GRP_CNT x LEGS — the shape a FRESH sp
-# has — would wait for ever once a `spare create`, a `sp grow-slice` or an
-# automatic reaction made the real count higher, because CN10 walks
-# spare_leg_list too: AR8 can create a spare during setup step 7, and such a
-# wait would sit one leg over its target until its budget ran out. So setup
-# uses the same live-shape predicates every case uses — cntlr_full_ready and
-# cntlr_legs_full_ready, which re-read [$SP_LEG_PATH] plus [$SP_SPARE_LEG_PATH]
-# on every poll. Three facts about the counts those predicates compare:
+# has — would wait for ever once a `sp grow-slice` or an automatic reaction
+# made the real count higher, because every cntlr also connects the new leg
+# of each repair (cnagent.md CN12): the worker's leg repair can create a
+# repair during setup step 7, and such a wait would sit one leg over its
+# target until its budget ran out. So setup uses the same live-shape
+# predicates every case uses — cntlr_full_ready and cntlr_legs_full_ready,
+# which re-read [$SP_LEG_PATH] and the pool's repairs on every poll (sp_totals).
+# Three facts about the counts those predicates compare:
 #
 #   * the three counts are what doc/cnagent.md CN10/CN12/CN13 say a primary
 #     holds at READWRITE — one leg row per leg of every group (both roles), one
@@ -8765,8 +8815,10 @@ setup_create_sp() {
 	assert_jq "$SP_JSON" \
 		"[$SP_LEG_PATH | select((.side_list | length) != 1)] | length == 0" \
 		"every leg has exactly one side at create (a second side is a migration)"
-	assert_field "$SP_JSON" "[$SP_SPARE_LEG_PATH] | length" 0 \
-		"a fresh sp has no spare legs"
+	assert_field "$SP_JSON" '.sp_conf.repair_name_list | length' 0 \
+		"a fresh sp has no repair"
+	assert_field "$SP_JSON" '.sp_conf.retired_leg_id_list | length' 0 \
+		"and no retired leg"
 
 	# architecture.md, Per-operation allocation: the DN black list starts as the
 	# request's and grows with every pick
@@ -8934,13 +8986,14 @@ setup_assert_standby() { # <the standby's cntlr inspect reply>
 	assert_field "$doc" '.cntlr_info.td_id_to_thin_info | length' 0 \
 		"CN14: a standby builds no thin volumes"
 	# The LIVE leg total, not GRP_CNT x LEGS. A build under the reacting
-	# threshold set can leave a spare leg behind (react's), CN10 walks
-	# spare_leg_list as well as leg_list, and the fresh-sp constant would then be
-	# one short of what the agent correctly reports. The winning poll's own
-	# sp_totals_poll ran in this same shell (wait_until does not fork), so these
-	# are the numbers the reply in $doc was judged against.
+	# threshold set can leave a repair of the worker's open (react's), every
+	# cntlr connects its new leg as well as the leg_list legs (cnagent.md
+	# CN12), and the fresh-sp constant would then be one short of what the
+	# agent correctly reports. The winning poll's own sp_totals_poll ran in
+	# this same shell (wait_until does not fork), so these are the numbers the
+	# reply in $doc was judged against.
 	assert_field "$doc" '.cntlr_info.leg_id_to_leg | length' \
-		"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
+		"$((SP_LEG_TOTAL + SP_REPAIR_TOTAL))" \
 		"CN10: a standby connects every leg, so leg_id_to_leg is full"
 }
 
@@ -8964,8 +9017,8 @@ setup_wait_stack() {
 	sp_read_roles
 	# THE TARGET OF THE TWO WAITS BELOW IS THE LIVE SHAPE. A wait against the
 	# fresh-sp constant GRP_CNT x LEGS could never pass, however long it was
-	# given, once a spare leg created by AR8 while the wait ran made the agent
-	# report one leg row more than the target. primary_stack_ready and
+	# given, once a repair the worker created while the wait ran made the
+	# agent report one leg row more than the target. primary_stack_ready and
 	# standby_shape_ready both go
 	# through sp_totals_poll, which re-reads the totals on every poll and shouts
 	# when the shape moves — the only form that can both finish and say what
@@ -9037,7 +9090,7 @@ setup_wait_stack() {
 		assert_field "$CTL_OUT" "$CNTLR_OK_POOLS" "$SLICE_CNT" \
 			"every thin pool of the primary is RES_STATUS_OK"
 		assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" \
-			"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
+			"$((SP_LEG_TOTAL + SP_REPAIR_TOTAL))" \
 			"every leg of the primary is RES_STATUS_OK"
 		# applied_revision is the revision of the cntlr's latest observation on
 		# the agent, that of the request the agent held while the converge or
@@ -9065,11 +9118,11 @@ setup_wait_stack() {
 
 		stack_wait_reset
 		wait_until "$WAIT_BUILD" \
-			"the standby of $SP (cntlr $STANDBY_CNTLR_ID on cn$STANDBY_CN as this wait begins) to connect its $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs and hold no group or pool" \
+			"the standby of $SP (cntlr $STANDBY_CNTLR_ID on cn$STANDBY_CN as this wait begins) to connect its $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs and hold no group or pool" \
 			standby_shape_ready
 		setup_assert_standby "$CTL_OUT"
 		assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" \
-			"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
+			"$((SP_LEG_TOTAL + SP_REPAIR_TOTAL))" \
 			"every leg of the standby is RES_STATUS_OK (CN11's transport probe)"
 
 		# THE EXIT CONDITION, and it is not "the same cntlr is still primary".
@@ -9103,14 +9156,16 @@ setup_wait_stack() {
 	done
 	# The shape this build actually produced, said out loud. Under the quiet set
 	# it must be the fresh-sp shape; under react's set it may already carry a
-	# spare, and every later assertion of that case is written against THIS
-	# number rather than against GRP_CNT x LEGS.
-	if [ "$SP_SPARE_TOTAL" != 0 ] ||
+	# repair of the worker's, open or finished, and every later assertion of
+	# that case is written against THIS shape rather than against GRP_CNT x
+	# LEGS.
+	if [ "$SP_REPAIR_TOTAL" != 0 ] || [ "$SP_RETIRED_TOTAL" != 0 ] ||
 		[ "$SP_LEG_TOTAL" != "$((GRP_CNT * LEGS))" ]; then
 		log "!!! this build did not produce the fresh-sp shape:" \
-			"$SP_LEG_TOTAL legs and $SP_SPARE_TOTAL spare leg(s) against" \
-			"$((GRP_CNT * LEGS)) legs and 0 spares. A reaction fired during" \
-			"setup; the sp carries the $THR_SET threshold set ($THR)."
+			"$SP_LEG_TOTAL legs, $SP_REPAIR_TOTAL repair(s) and" \
+			"$SP_RETIRED_TOTAL retired leg(s) against $((GRP_CNT * LEGS))" \
+			"legs and none. A reaction fired during setup; the sp carries" \
+			"the $THR_SET threshold set ($THR)."
 	fi
 }
 
@@ -9323,10 +9378,10 @@ setup_connect_host0() {
 # thin pools keep their metadata on the meta groups, and host0 has only read.
 #
 # A build that reacted may hold a leg whose side the create did not build —
-# a spare's, placed anywhere and rebuilt by md — so when the pool holds a
-# spare leg, or a side count other than the create's, the disk-node half is
-# skipped with a log line. Only the reacting thresholds let a build repair a
-# leg.
+# a repair's new leg, placed anywhere and copied by md — so when the pool
+# holds a repair or a retired leg, or a side count other than the create's,
+# the disk-node half is skipped with a log line. Only the reacting thresholds
+# let a build repair a leg.
 setup_zeroing_scope() {
 	stage 11 "what side zeroing reached: $TD0 reads zero, data legs keep the backing pattern"
 	local dev mib zero got v ip kind ids id hx sphex args out key g
@@ -9347,12 +9402,13 @@ setup_zeroing_scope() {
 
 	sp_refresh
 	sp_totals
-	if [ "$SP_SPARE_TOTAL" != 0 ] ||
+	if [ "$SP_REPAIR_TOTAL" != 0 ] || [ "$SP_RETIRED_TOTAL" != 0 ] ||
 		[ "$SP_SIDE_TOTAL" != "$((GRP_CNT * LEGS))" ]; then
-		log "  the disk-node half SKIPPED: $SP holds $SP_SIDE_TOTAL side(s) and" \
-			"$SP_SPARE_TOTAL spare leg(s), not the create's $((GRP_CNT * LEGS))" \
-			"and none, so its build reacted, and a leg's side may not be one the" \
-			"create placed at extent 0"
+		log "  the disk-node half SKIPPED: $SP holds $SP_SIDE_TOTAL side(s)," \
+			"$SP_REPAIR_TOTAL repair(s) and $SP_RETIRED_TOTAL retired leg(s)," \
+			"not the create's $((GRP_CNT * LEGS)) and none, so its build" \
+			"reacted, and a leg's side may not be one the create placed at" \
+			"extent 0"
 		return 0
 	fi
 	sphex=$(hex16 "$SP_ID") || die "sp_id '$SP_ID' is not a decimal id"
@@ -9669,8 +9725,8 @@ check_sha0() { # <what just happened>
 # host_kmsg_mark writes <tag> into host<h>'s kernel log, the marker the
 # kernel-log witness below counts from, and dies unless the helper read it
 # back (kmsg_mark): a log it cannot read must not pass for a clean one. The
-# copy case's repair step and the cutoff case mark host0 with a tag of their
-# own, minted per run from the cluster id.
+# copy case's repair steps, react's repair stages and the cutoff case mark
+# host0 with a tag of their own, minted per run from the cluster id.
 host_kmsg_mark() { # <h> <tag>
 	local out
 	out=$(helper_host "$1" kmsg_mark "$2") ||
@@ -10002,8 +10058,9 @@ read_space() { # <helper wrapper> <index|""> <label>
 #                 its file whether or not anything writes it — a meta side
 #                 its whole extent, a data side or a clone meta group's side
 #                 its meta region and first data block — and every byte
-#                 written into a data side allocates too, which a spare's
-#                 full rebuild takes to the side's whole extent. Nothing in
+#                 written into a data side allocates too, which md's whole
+#                 copy onto a repair's new leg takes to the side's whole
+#                 extent. Nothing in
 #                 the dn agent discards a freed side's extents. The cap — four
 #                 64 MiB extents — thus bounds, in effect, how many extents'
 #                 worth one DN has zeroed or had written through its sides
@@ -10176,16 +10233,19 @@ case_smoke() {
 	assert_field "$SP_JSON" '.sp_conf.sp_id' "$SP_ID" \
 		"\`sp get\` still answers for the sp setup created"
 	assert_field "$SP_JSON" '.slice_list | length' "$SLICE_CNT" "slices"
-	# THESE TWO ABSOLUTES ARE DELIBERATE, and they carry a second statement as
+	# THESE ABSOLUTES ARE DELIBERATE, and they carry a second statement as
 	# well as the first. smoke's sp is built
 	# with the QUIET set, so no reaction can fire during or after its build: a
-	# side count that is not GRP_CNT x LEGS, or a spare leg at all, means one
-	# did — which is a finding about the lab, not a shape to accommodate. This
-	# is the opposite choice from the react case's, for the opposite reason.
+	# side count that is not GRP_CNT x LEGS, or a repair or a retired leg at
+	# all, means one did — which is a finding about the lab, not a shape to
+	# accommodate. This is the opposite choice from the react case's, for the
+	# opposite reason.
 	assert_field "$SP_JSON" "[$SP_SIDE_PATH] | length" "$((GRP_CNT * LEGS))" \
 		"sides (nothing has grown the sp, and the quiet thresholds let nothing react)"
-	assert_field "$SP_JSON" "[$SP_SPARE_LEG_PATH] | length" 0 \
-		"spare legs (the quiet thresholds mean AR8 cannot have created one)"
+	assert_field "$SP_JSON" '.sp_conf.repair_name_list | length' 0 \
+		"repairs (the quiet thresholds mean AR8 cannot have created one)"
+	assert_field "$SP_JSON" '.sp_conf.retired_leg_id_list | length' 0 \
+		"retired legs (no repair has finished)"
 	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE "sp_level"
 	check_sha0 "before the teardown"
 	case_finish
@@ -10207,12 +10267,22 @@ TD1=t1
 
 # The current shape of the sp, recomputed from a `sp get` rather than from
 # GRP_CNT. Step 2 grows two slices, so from that point on the constants setup
-# asserted against are stale; a spare leg or an automatic reaction moves them
+# asserted against are stale; a repair or an automatic reaction moves them
 # too. Setup uses these same general forms, for the reason the note above
 # cntlr_raid0_ready gives.
+#
+# SP_REPAIR_TOTAL is the pool's repairs, read off sp_conf.repair_name_list.
+# It stands for their new legs, as every repair carries exactly one
+# (architecture.md, Repairs, CreateRepair) and every cntlr connects, wraps
+# and reports a repair's new leg at every stage of the repair as it does a
+# leg of the group (cnagent.md CN12), so a cntlr's leg rows number
+# SP_LEG_TOTAL + SP_REPAIR_TOTAL. SP_RETIRED_TOTAL is the pool's retired legs,
+# which no cntlr connects (architecture.md, Repair); it is read for the
+# shouts that say a build reacted.
 SP_GRP_TOTAL=0
 SP_LEG_TOTAL=0
-SP_SPARE_TOTAL=0
+SP_REPAIR_TOTAL=0
+SP_RETIRED_TOTAL=0
 SP_SIDE_TOTAL=0
 
 sp_totals() {
@@ -10226,10 +10296,12 @@ sp_totals() {
 sp_totals_of() { # <sp get reply> <what>
 	SP_GRP_TOTAL=$(jq_of "$1" "[$SP_GRP_PATH] | length")
 	SP_LEG_TOTAL=$(jq_of "$1" "[$SP_LEG_PATH] | length")
-	SP_SPARE_TOTAL=$(jq_of "$1" "[$SP_SPARE_LEG_PATH] | length")
+	SP_REPAIR_TOTAL=$(jq_of "$1" '.sp_conf.repair_name_list | length')
+	SP_RETIRED_TOTAL=$(jq_of "$1" '.sp_conf.retired_leg_id_list | length')
 	SP_SIDE_TOTAL=$(jq_of "$1" "[$SP_SIDE_PATH] | length")
 	local n
-	for n in "$SP_GRP_TOTAL" "$SP_LEG_TOTAL" "$SP_SPARE_TOTAL" "$SP_SIDE_TOTAL"; do
+	for n in "$SP_GRP_TOTAL" "$SP_LEG_TOTAL" "$SP_REPAIR_TOTAL" \
+		"$SP_RETIRED_TOTAL" "$SP_SIDE_TOTAL"; do
 		case "$n" in
 		'' | *[!0-9]*)
 			die "sp_totals read '$n' out of \`sp get\`; $2 is not an sp"
@@ -10244,17 +10316,18 @@ sp_totals_of() { # <sp get reply> <what>
 #
 # WHY IT CANNOT BE READ ONCE. A leg target read once — from the CONSTANT
 # GRP_CNT x LEGS, or from a `sp_totals` reading made before the wait began —
-# goes stale when a spare leg appears. If AR8 creates one while such a wait
-# runs (the reacting thresholds let it), the agent correctly reports one leg
-# row more, because CN10 walks spare_leg_list as well as leg_list, and the
-# target does not move. At the default shape the wait then logs, for example,
+# goes stale when a repair appears. If the worker creates one while such a
+# wait runs (the reacting thresholds let it), the agent correctly reports one
+# leg row more, because every cntlr connects the repair's new leg beside the
+# group's leg_list (cnagent.md CN12), and the target does not move. At the
+# default shape the wait then logs, for example,
 #
 #     cntlr 1: pools 21/32, groups 49/64, legs 129/128
 #
 # and no amount of time can make that poll pass: the sp really does hold
-# 128 legs and exactly one spare, and the agent's leg_id_to_leg holds exactly
-# those 129 ids. A wait whose target cannot be reached is not a slow wait, it is
-# a hang with a stopwatch on it.
+# 128 legs and exactly one repair, and the agent's leg_id_to_leg holds
+# exactly those 128 ids and the new leg's. A wait whose target cannot be
+# reached is not a slow wait, it is a hang with a stopwatch on it.
 #
 # So the predicates below re-read the totals on EVERY poll, with one extra
 # `sp get` per poll as the price, and they SHOUT when the shape moves under
@@ -10265,7 +10338,7 @@ sp_totals_of() { # <sp get reply> <what>
 # when none should have, and that is a finding about the run, not a hiccup to
 # absorb.
 
-# The "<legs>+<spares>" of the last live reading, per wait. stack_wait_reset
+# The "<legs>+<repairs>" of the last live reading, per wait. stack_wait_reset
 # clears it at the start of every such wait, so the baseline is that wait's own
 # first poll and never a number a previous step left behind.
 SP_SHAPE_LAST=""
@@ -10289,7 +10362,7 @@ sp_totals_poll() {
 		return 1
 	fi
 	sp_totals_of "$CTL_OUT" "the \`sp get\` of a shape poll"
-	local sig="$SP_LEG_TOTAL legs + $SP_SPARE_TOTAL spare leg(s)"
+	local sig="$SP_LEG_TOTAL legs + $SP_REPAIR_TOTAL repair(s)"
 	if [ -n "$SP_SHAPE_LAST" ] && [ "$sig" != "$SP_SHAPE_LAST" ]; then
 		log "!!! $SP's shape MOVED while a wait was running:" \
 			"$SP_SHAPE_LAST -> $sig."
@@ -10303,9 +10376,12 @@ sp_totals_poll() {
 
 # cntlr_stack_matches is the comparison itself: one thin-pool row per slice, one
 # group row per group, one leg row per leg, all RES_STATUS_OK. The leg count
-# includes the SPARE legs because CN10 walks spare_leg_list too. It ASSUMES the
-# SP_*_TOTAL globals were refreshed by the caller's own sp_totals_poll in this
-# same poll, which is why it is not called from anywhere else.
+# includes each repair's new leg, which every cntlr connects (SP_REPAIR_TOTAL
+# says why), so while a repair whose bad leg is dead is open the count stays
+# one short: every connected leg must read OK, as a leg of the group must.
+# It ASSUMES the SP_*_TOTAL globals were refreshed by the caller's own
+# sp_totals_poll in this same poll, which is why it is not called from
+# anywhere else.
 cntlr_stack_matches() { # <cntlr id>
 	local pools grps legs want sig
 	if ! ctl_try cntlr inspect --id "$1"; then
@@ -10314,7 +10390,7 @@ cntlr_stack_matches() { # <cntlr id>
 	pools=$(jq_of "$CTL_OUT" "$CNTLR_OK_POOLS")
 	grps=$(jq_of "$CTL_OUT" "$CNTLR_OK_GRPS")
 	legs=$(jq_of "$CTL_OUT" "$CNTLR_OK_LEGS")
-	want=$((SP_LEG_TOTAL + SP_SPARE_TOTAL))
+	want=$((SP_LEG_TOTAL + SP_REPAIR_TOTAL))
 	sig="pools $pools/$SLICE_CNT, groups $grps/$SP_GRP_TOTAL, legs $legs/$want"
 	if [ "$sig" != "$STACK_LAST" ]; then
 		STACK_LAST=$sig
@@ -10432,7 +10508,7 @@ cntlr_legs_match() { # <cntlr id>
 		return 1
 	fi
 	legs=$(jq_of "$CTL_OUT" "$CNTLR_OK_LEGS")
-	want=$((SP_LEG_TOTAL + SP_SPARE_TOTAL))
+	want=$((SP_LEG_TOTAL + SP_REPAIR_TOTAL))
 	sig="legs $legs/$want"
 	if [ "$sig" != "$STACK_LAST" ]; then
 		STACK_LAST=$sig
@@ -10459,7 +10535,10 @@ cntlr_legs_full_ready() { # <cntlr id>
 # primary, plus the two EMPTINESS rules setup_assert_standby then asserts: CN12
 # gives a standby no group devices and CN13 no pool, so grp_id_to_md_raid and
 # slice_id_to_dm_pool are empty maps rather than maps of MISSING rows
-# (setup_assert_standby's header has the four code shapes).
+# (setup_assert_standby's header has the four code shapes). A reply from
+# before a repair finish's converge can still hold the retired leg's row
+# beside the new leg's, so the row count setup_assert_standby asserts is
+# waited on as well as the OK count.
 #
 # THE EMPTINESS IS WHY IT WAITS AT ALL. A standby is not always a controller
 # that was BORN one. If AR5 fired during this build — react's threshold set
@@ -10494,7 +10573,7 @@ STANDBY_SHAPE_LAST=""
 STANDBY_WAIT_ID=""
 
 standby_shape_ready() {
-	local roles prim stby grps pools sig
+	local roles prim stby rows grps pools sig
 	if ! sp_totals_poll; then
 		return 1
 	fi
@@ -10541,6 +10620,19 @@ standby_shape_ready() {
 	fi
 	# $CTL_OUT is that cntlr's inspect reply; `// {}` because InspectCntlr
 	# answers a NULL cntlr_info for a controller the agent does not know yet.
+	rows=$(jq_of "$CTL_OUT" '(.cntlr_info.leg_id_to_leg // {}) | length')
+	case "$rows" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	if [ "$rows" != "$((SP_LEG_TOTAL + SP_REPAIR_TOTAL))" ]; then
+		sig="$rows leg row(s), want $((SP_LEG_TOTAL + SP_REPAIR_TOTAL))"
+		if [ "$sig" != "$STANDBY_SHAPE_LAST" ]; then
+			STANDBY_SHAPE_LAST=$sig
+			log "  cntlr $stby: the OK legs match, but it holds $sig —" \
+				"a reply from before a repair finish's converge"
+		fi
+		return 1
+	fi
 	grps=$(jq_of "$CTL_OUT" '(.cntlr_info.grp_id_to_md_raid // {}) | length')
 	pools=$(jq_of "$CTL_OUT" '(.cntlr_info.slice_id_to_dm_pool // {}) | length')
 	case "$grps$pools" in
@@ -10878,7 +10970,7 @@ ops_grow() {
 # ctl_fail_msg cannot express it.
 ops_slots() {
 	stage 03 "sp set-cntlid-slots, then a third cntlr in the new slot"
-	local spare spareaddr c3 pos traddr3 ctrl3
+	local idle idleaddr c3 pos traddr3 ctrl3
 
 	# Everything below is written for a fixed two-slot list. Deriving the
 	# three literals from $SLOTS would hide, not remove, that dependency.
@@ -10898,16 +10990,16 @@ ops_slots() {
 	assert_jq "$SP_JSON" '.sp_conf.cntlid_slot_list == [0, 1, 2]' \
 		"a refused set-cntlid-slots changed nothing"
 
-	if [ "$SPARE_CN" -lt 0 ]; then
+	if [ "$IDLE_CN" -lt 0 ]; then
 		log "  every --cn guest already carries a cntlr of $SP;" \
-			"skipping the third-cntlr half of step 3 (it needs a spare CN)"
+			"skipping the third-cntlr half of step 3 (it needs a CN that carries no cntlr)"
 		check_sha0 "after set-cntlid-slots"
 		return 0
 	fi
-	spare=$SPARE_CN
-	spareaddr=$(cn_addr "$spare")
+	idle=$IDLE_CN
+	idleaddr=$(cn_addr "$idle")
 
-	ctl_ok cntlr create --slot 2 --cn-white "$spareaddr"
+	ctl_ok cntlr create --slot 2 --cn-white "$idleaddr"
 	c3=$(jq_of "$CTL_OUT" '.cntlr_id')
 	case "$c3" in
 	'' | *[!0-9]* | 0) die "cntlr create returned cntlr_id '$c3'" ;;
@@ -10918,19 +11010,19 @@ ops_slots() {
 		"the sp now has one more cntlr"
 	assert_jq "$SP_JSON" \
 		"[.cntlr_list[]
-		  | select(.addr_port == \"$spareaddr\" and .cntlid_slot == 2)]
+		  | select(.addr_port == \"$idleaddr\" and .cntlid_slot == 2)]
 		 | length == 1" \
-		"the third cntlr took cntlid_slot 2 on cn$spare ($spareaddr)"
+		"the third cntlr took cntlid_slot 2 on cn$idle ($idleaddr)"
 	assert_jq "$SP_JSON" \
-		"[.cntlr_list[] | select(.addr_port == \"$spareaddr\" and .primary)]
+		"[.cntlr_list[] | select(.addr_port == \"$idleaddr\" and .primary)]
 		 | length == 0" \
 		"a cntlr is created as a standby, never primary (gateway/cntlr.go's CreateCntlr)"
 	assert_jq "$SP_JSON" \
-		"[.cntlr_list[] | select(.addr_port == \"$spareaddr\" and .disabled)]
+		"[.cntlr_list[] | select(.addr_port == \"$idleaddr\" and .disabled)]
 		 | length == 0" \
 		"and enabled from birth, which is what puts its CN in the CdcEntry"
 
-	pos=$(cntlr_pos_of_addr "$spareaddr")
+	pos=$(cntlr_pos_of_addr "$idleaddr")
 	assert_ne "$pos" -1 "the new cntlr's position in cntlr_list"
 	traddr3=${CNTLR_TRADDRS[$pos]}
 
@@ -10940,7 +11032,7 @@ ops_slots() {
 	# fresh nvme-tcp connections on a CN that held none — the standby half of
 	# a from-nothing build, not an incremental convergence.
 	wait_until "$WAIT_BUILD" \
-		"the third cntlr $c3 on cn$spare to connect every leg as a standby" \
+		"the third cntlr $c3 on cn$idle to connect every leg as a standby" \
 		cntlr_legs_full_ready "$c3"
 	assert_field "$CTL_OUT" '.cntlr_info | type' object \
 		"the third cntlr's InspectCntlr reply carries a CntlrInfo"
@@ -10976,7 +11068,7 @@ ops_slots() {
 	# half of it, and it is what makes the wait below a wait for `live` rather
 	# than a wait for a controller that was never made.
 	connect_added_ctrl 0 "$SS0" "$traddr3"
-	wait_until "$WAIT_HOST" "host0's third path, to cn$spare ($traddr3), to go live" \
+	wait_until "$WAIT_HOST" "host0's third path, to cn$idle ($traddr3), to go live" \
 		host_path_live 0 "$SS0" "$traddr3"
 	# The WITNESS for the wait at the end of this step, taken here because here
 	# is where the path is live. host_wait_path_not_live's header says why it
@@ -11021,7 +11113,7 @@ ops_slots() {
 	sp_refresh
 	sp_read_roles
 	assert_jq "$SP_JSON" \
-		"[.cntlr_list[] | select(.addr_port == \"$spareaddr\" and .disabled)]
+		"[.cntlr_list[] | select(.addr_port == \"$idleaddr\" and .disabled)]
 		 | length == 1" \
 		"the third cntlr is disabled"
 	# A disabled cntlr's address leaves every CdcEntry at the same instant
@@ -11044,7 +11136,7 @@ ops_slots() {
 		"the sp is back to its $CNTLR_CNT cntlrs"
 	# WHAT THE HOST OWES AFTER A `cntlr delete`, and it is NOT that the
 	# controller object disappears. What the guests hold once the delete has
-	# converged: the record gone, the sp back to two cntlrs, cn$spare's
+	# converged: the record gone, the sp back to two cntlrs, cn$idle's
 	# /sys/kernel/config/nvmet/subsystems/ AND .../ports/1/subsystems/ both
 	# EMPTY — the agent has retired the host-facing subsystem exactly as it
 	# should — and host0 still holding the controller in state `connecting`.
@@ -11060,7 +11152,7 @@ ops_slots() {
 	# So what the delete owes host0 is that this path stops carrying IO, and a
 	# controller that is not `live` carries none. host_wait_path_not_live
 	# accepts `none` as well, deliberately: a CN whose port still held another
-	# subsystem — which is not what cn$spare holds in this case, but is not
+	# subsystem — which is not what cn$idle holds in this case, but is not
 	# something this step can assert about a lab it shares — would answer the
 	# reconnect with DNR and the kernel would delete the controller. Both
 	# endings satisfy what this step is actually about.
@@ -11071,13 +11163,13 @@ ops_slots() {
 	# kernel-side transition that follows it — wait_ns_exported's header makes
 	# the same split for the same reason, in the build direction.
 	host_wait_path_not_live 0 "$SS0" "$traddr3" "$ctrl3" \
-		"cntlr $c3 is gone from the sp and its agent on cn$spare has to retire the host-facing subsystem that was carrying this path" \
+		"cntlr $c3 is gone from the sp and its agent on cn$idle has to retire the host-facing subsystem that was carrying this path" \
 		"$WAIT_PROVISION"
 	# THE READING THE WITNESS CANNOT TAKE. The witness was captured before the
 	# disable, so it rules out arguments that name nothing — but not host0
 	# losing every controller for $SS0 in between, which reads `none` on this
 	# wait's first poll and passes it. That is exactly the shape of a delete
-	# that tore down more than the spare's export, so the surviving
+	# that tore down more than the third cntlr's export, so the surviving
 	# path is re-read here, after the wait, and it is the same assertion this
 	# step already makes before the delete. $PRIMARY_TRADDR was re-read from
 	# `sp get` above, so it names whichever cntlr is primary NOW — a
@@ -11804,7 +11896,7 @@ ops_pick_free_dns() {
 
 ops_disabled() {
 	stage 08 "dn set-disabled and cn set-disabled, each proven by a refusal"
-	local victim white gslice spare spareaddr v k before_grps before_cntlrs
+	local victim white gslice idle idleaddr v k before_grps before_cntlrs
 
 	sp_refresh
 	sp_read_roles
@@ -11850,26 +11942,26 @@ ops_disabled() {
 	assert_field "$CTL_OUT" '.dn_conf.disabled' false \
 		"dn$v instance $k is stored enabled again"
 
-	# The CN mirror. The spare CN carries no cntlr of this sp, so disabling it
+	# The CN mirror. The idle CN carries no cntlr of this sp, so disabling it
 	# takes nothing out of service, and `cntlr create` white-listing it is then
 	# the one allocation that can only be answered by that node. pickCn draws
 	# exactly one candidate and answers "<op>: no controller node with %d free
 	# extents" when it cannot (pickCn (gateway/alloc.go)).
-	if [ "$SPARE_CN" -lt 0 ]; then
+	if [ "$IDLE_CN" -lt 0 ]; then
 		log "  every --cn guest carries a cntlr of $SP; skipping the cn half of step 8"
 	else
-		spare=$SPARE_CN
-		spareaddr=$(cn_addr "$spare")
-		ctl_ok cn set-disabled --addr "$spareaddr" --disabled
-		ctl_ok cn get --addr "$spareaddr"
+		idle=$IDLE_CN
+		idleaddr=$(cn_addr "$idle")
+		ctl_ok cn set-disabled --addr "$idleaddr" --disabled
+		ctl_ok cn get --addr "$idleaddr"
 		assert_field "$CTL_OUT" '.cn_conf.disabled' true \
-			"cn$spare is stored disabled"
+			"cn$idle is stored disabled"
 		ctl_fail_grep RESOURCE_EXHAUSTED "no controller node" \
-			cntlr create --slot 2 --cn-white "$spareaddr"
-		ctl_ok cn set-disabled --addr "$spareaddr" --disabled=false
-		ctl_ok cn get --addr "$spareaddr"
+			cntlr create --slot 2 --cn-white "$idleaddr"
+		ctl_ok cn set-disabled --addr "$idleaddr" --disabled=false
+		ctl_ok cn get --addr "$idleaddr"
 		assert_field "$CTL_OUT" '.cn_conf.disabled' false \
-			"cn$spare is stored enabled again"
+			"cn$idle is stored enabled again"
 	fi
 
 	# Neither refusal may have changed the sp: a RESOURCE_EXHAUSTED from
@@ -11915,23 +12007,25 @@ case_ops() {
 }
 
 # ---------------------------------------------------------------------------
-# Case: copy — transfer, clone, migration, spare and repair
+# Case: copy — transfer, clone, migration and repairs
 # (e2e_integtest.md, The cases, copy)
 # ---------------------------------------------------------------------------
 #
-# The five RPC groups that move bytes between objects rather than creating
-# them: `xfer`, `clone`, `migr`, `spare` and `repair`, with `retired-leg`
-# beside the last (architecture.md, Transfers, Clones, Migrations, Spare
-# legs, Repairs and Retired legs).
+# The four RPC groups that move bytes between objects rather than creating
+# them: `xfer`, `clone`, `migr` and `repair`, with `retired-leg` beside the
+# last (architecture.md, Transfers, Clones, Migrations, Repairs and Retired
+# legs).
 # Every one of them is exercised against the sp setup built, in the order the
 # dependencies force: the transfer exports $TD0, the clone copies that export
-# into a second thin device, the transfer is then aborted, the next two steps
-# move one leg's side between disk nodes, the step after them replaces a leg
-# whose disk node died, and the last fails the primary over in the middle of
-# a second clone's copy, from a second pool.
+# into a second thin device, the transfer is then aborted, the next step
+# moves one leg's side between disk nodes, the two after it replace a leg
+# whose disk node died and then, when the leg that replaced it dies during
+# md's copy, take the replaced leg back from the retired legs, and the last
+# fails the primary over in the middle of a second clone's copy, from a
+# second pool.
 #
 # ===========================================================================
-# THREE CONSTRAINTS ON THIS CASE, AND WHY EACH IS FORCED
+# TWO CONSTRAINTS ON THIS CASE, AND WHY EACH IS FORCED
 # ===========================================================================
 #
 #  a. No host0 IO while the origin namespace is parked, which it is from
@@ -11964,13 +12058,6 @@ case_ops() {
 #     CN17 gives the transfer's namespace the ORIGIN namespace's `uuid` and
 #     `nguid`, so $XNQN's ns 1 and $SS0's ns 1 are two namespaces of two
 #     subsystems carrying one identity. They are never put on one kernel here.
-#
-#  c. `spare switch` and `spare delete` need `--grp`, as `spare create` does:
-#     ctl/spare.go declares `--grp` on ALL THREE leaves (create:
-#     --grp; delete: --grp --leg; switch: --grp --spare --target), because
-#     CreateSpareLegRequest/DeleteSpareLegRequest/SwitchSpareLegRequest each
-#     carry grp_id and the handlers locate the slice from it
-#     (openGrpForSpareLeg).
 #
 # ===========================================================================
 # THE SAME-SP SOURCE AND ITS FALLBACK, WHICH IS A REAL BRANCH AND NOT A COMMENT
@@ -12044,23 +12131,25 @@ case_ops() {
 #  * That a grown sp still puts every side on a distinct DN. GrowSlice passes
 #    a nil black list (GrowSlice (gateway/storagepool.go)) — but nothing in this
 #    case grows the sp, so the create-time property still holds and the
-#    per-group rule is what the migration and spare steps check.
+#    per-group rule is what the migration and repair steps check.
 # ---------------------------------------------------------------------------
 
 # --- the objects this case creates ------------------------------------------
 #
 # $TD_CLONE must be a bare jq identifier for the same reason $TD0 is: `td
 # list` is keyed by td_name and every filter reaches a row as
-# `.name_to_td.<name>`. c0, m0, m1, x0, k0 and r0 are this case's names; ops
-# used s0 and t1 and they died with its sp. r0 is copy step 6's repair, whose
-# rep_name follows the common name rule and avoids the reserved prefix
-# (architecture.md, Common validation).
+# `.name_to_td.<name>`. c0, m0, m1, x0, k0, r0 and r1 are this case's names;
+# ops used s0 and t1 and they died with its sp. r0 is copy step 5's repair
+# and r1 copy step 6's, whose rep_names follow the common name rule and avoid
+# the reserved prefix (architecture.md, Common validation), as an operator's
+# must.
 XFER0=x0
 CLONE0=k0
 TD_CLONE=c0
 MIGR0=m0
 MIGR1=m1
 COPY_REP=r0
+COPY_REP1=r1
 
 # The second pool's names, the fallback source's or copy step 7's (one at a
 # time: each tears it down before the next builds it). $SP_SRC is a second
@@ -12187,14 +12276,55 @@ COPY_QUIET_LAST=""
 # COPY_MEMBER_LAST is copy_member_in_sync's last state and slot, logged when
 # they change.
 COPY_MEMBER_LAST=""
-# Copy step 6's repair: the rep_id CreateRepair returned, the kernel-log
-# marker host0's witness counts from, minted per run from the cluster id, and
-# the last observation its predicates logged (copy_rep_leg_dead,
-# copy_rep_stage_is and copy_rep_whole share it, as no two of their waits
-# overlap).
+# Copy steps 5 and 6, the two repairs, and what step 5 hands step 6
+# (copy_repair says what each is): the rep_ids CreateRepair returned; the
+# kernel-log marker host0's witness counts from across both steps, minted per
+# run from the cluster id; the group, its slice id and ext_cnt; the position
+# in leg_list the two repairs work on; the leg step 5 repairs, its leg_idx,
+# its side, that side's disk node and the --dn guest and instance behind it,
+# and its retired_epoch once step 5 has retired it; the new leg step 5 puts
+# in its place, its side and that side's disk node; the leg of the group
+# that stays in sync throughout and its md member's name on the primary,
+# by which the group's array is found; the array's copy speed limits as they
+# read before step 5 slowed md's copy; and the primary and the failover
+# count the two steps must keep. COPY_REP_LAST is the last observation the
+# predicates logged (copy_rep_leg_epoch, copy_rep_stage_is, copy_rep_copying,
+# copy_rep_degraded, copy_rep_whole and copy_ret_side_healthy share it, as no
+# two of their waits overlap).
 COPY_REP_ID=""
+COPY_REP1_ID=""
 COPY_REP_TAG=""
 COPY_REP_LAST=""
+COPY_REP_GID=""
+COPY_REP_SLICE=""
+COPY_REP_EXT=""
+COPY_REP_POS=-1
+COPY_REP_BAD=""
+COPY_REP_BADIDX=""
+COPY_REP_BADSIDE=""
+COPY_REP_BADADDR=""
+COPY_REP_DNV=-1
+COPY_REP_DNK=-1
+COPY_REP_EPOCH=""
+COPY_REP_NEW=""
+COPY_REP_NEWSIDE=""
+COPY_REP_NEWADDR=""
+COPY_REP_STAY=""
+COPY_REP_STAY_NAME=""
+COPY_REP_SPEED_MIN=""
+COPY_REP_SPEED_MAX=""
+COPY_REP_PRIMARY=""
+COPY_REP_FAILOVERS=""
+# COPY_REP_SLOW_KIB is the copy speed, in KiB per second, that copy step 5
+# holds md's copy onto its new leg to, so that the copy is still running when
+# copy step 6 kills that leg's disk node: at this speed the copy of a group of
+# INIT_EXT_CNT extents of EXTENT_SIZE lasts several times longer than the two
+# steps take to get there. md holds a copy to its sync_speed_max only while
+# the copy runs faster than its sync_speed_min, so step 5 lowers both, the
+# minimum to COPY_REP_SLOW_MIN, the least value md takes. Counts of this
+# suite's choosing, not constants of the tree.
+COPY_REP_SLOW_KIB=64
+COPY_REP_SLOW_MIN=1
 MD_STATE_LAST=""
 SRC_STACK_LAST=""
 
@@ -12925,7 +13055,8 @@ copy_check_drop() { # <mark> <name>
 		"converge put it back"
 }
 
-# grp_md_clean is "md has finished rebuilding onto the promoted spare".
+# grp_md_clean is "md holds the group's array clean": no copy runs on it and
+# no place of it is degraded.
 #
 # WHAT THE ROW ACTUALLY CARRIES: probeGroup composes the details of
 # grp_id_to_md_raid from sysfs, not from mdadm's State line (mdStateLine
@@ -12934,41 +13065,42 @@ copy_check_drop() { # <mark> <name>
 # word of a sync that is running with its "(<done> / <total>)" sectors. A
 # running array of the group's own legs is RES_STATUS_OK, however degraded,
 # save the cases cnagent.md CN28 lists in which a running array reads
-# RES_STATUS_ERROR, CN12's in-sync guard among them. So a rebuilding array is
-# RES_STATUS_OK with a details of "clean, degraded, recovering (32768 /
-# 2093056)" — the status alone proves nothing about the resync, which is why
-# this reads the words.
+# RES_STATUS_ERROR, CN12's in-sync guard among them. So an array md copies
+# onto a new member is RES_STATUS_OK with a details of "clean, degraded,
+# recovering (32768 / 2093056)" — the status alone proves nothing about the
+# copy, which is why this reads the words.
 #
 # The three words below are mdadm's State-line words, which the composition
-# keeps: `degraded` while a member is missing, failed or still being rebuilt
-# (md/degraded counts all three), `recovering` while one is rebuilt,
+# keeps: `degraded` while a member is missing, failed or still being copied
+# onto (md/degraded counts all three), `recovering` while md copies onto one,
 # `resyncing` while the array re-reads itself. Absence of all three plus
 # RES_STATUS_OK is the array whole.
 #
 # The final non-empty test is not decoration either: an EMPTY details means
 # the row carried no state at all, and "we could not read the state" must
-# never pass for "the rebuild finished". It is only reachable under raid1,
+# never pass for "the copy finished". It is only reachable under raid1,
 # which is the only arm that calls this.
 #
 # THE REVISION ARGUMENT IS WHAT MAKES THIS A WAIT AND NOT A COIN FLIP.
-# `spare switch` changes WHICH legs the group has, not HOW MANY, so in the
-# window between the RPC returning and the CN converging the array is still
-# the old, whole pair and reports "clean". A bare md-state test would pass
-# there and prove nothing. InspectCntlr's applied_revision is the revision of
-# the cntlr's latest observation on the agent (gateway/cntlr.go's
-# InspectCntlr copies the agent's own GetCntlrInfo reply revision): a
+# A change of the group's legs, such as a repair's finish, changes WHICH legs
+# the group has, not HOW MANY, so in the window between the RPC returning and
+# the CN converging the array the agent last read can be the old pair, which
+# reports "clean". A bare md-state test would pass there and prove nothing.
+# InspectCntlr's applied_revision is the revision of the cntlr's latest
+# observation on the agent (gateway/cntlr.go's InspectCntlr copies the
+# agent's own GetCntlrInfo reply revision): a
 # SyncupCntlr's converge stores its observation, at its request's revision,
 # only as it ends, and no read starts while it runs (dnagent.md SH28, SH30),
 # so a reply at a revision is never one from before or inside the converge
 # of that revision. The worker builds
 # that request with the SP's current SpRev (buildCntlrPlans in
 # worker/sprole.go, handed to the cntlr child by releaseCntlrs). So
-# "applied_revision >= the SpRev the switch bumped to" is the proof that the
+# "applied_revision >= the SpRev the change bumped to" is the proof that the
 # array being read is the NEW one, except after a converge whose call was cut
 # off: it stores no observation, but the agent already holds its request, so
 # the reads after it answer at its revision with the node as it left it
 # (dnagent.md SH28 and Known limits). The group row finds the array by any
-# member it names, so if the cut came before the switch reached md, this
+# member it names, so if the cut came before the change reached md, this
 # check reads the old, whole pair at the new revision and passes. It does
 # not guard against that case.
 grp_md_clean() { # <cntlr id> <grp id> <min applied revision>
@@ -13030,12 +13162,12 @@ src_td_created() { # <sp name> <td name>
 # IT IS THE ONE SHAPE TARGET IN THIS FILE THAT IS STILL A CONSTANT, and that is
 # safe here rather than an oversight. $SP_SRC is built by copy_src_sp_build,
 # with one slice, --redund none and ONE cntlr, and nothing in this file grows
-# it, spares it or fails it over:
+# it, repairs it or fails it over:
 #
-#   * a spare needs raid1 — CreateSpareLeg (gateway/spareleg.go) and AR8
-#     (tryLegRepair (worker/reaction.go)) both refuse a RedundNone group
-#     ("there is no redundancy to repair"; reason=redund_none), so no
-#     spare_leg_list entry can appear and the leg count cannot move;
+#   * a repair needs raid1 — CreateRepair refuses a RedundNone pool
+#     (architecture.md, Repairs) and AR8 only logs a RedundNone group
+#     (dnv-worker.md AR8), so no repair's new leg can appear and the leg
+#     count cannot move;
 #   * AR5 needs a failover candidate and this pool has exactly one cntlr;
 #   * AR6 would need its pool over the low water mark, and this pool holds
 #     one pattern host1 writes, $BASELINE_MIB MiB for the fallback and at most
@@ -13280,7 +13412,7 @@ copy_src_self() {
 copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
 	local size=${1:-$TD0_SIZE} mib=${2:-$BASELINE_MIB}
 	local what=${3:-the fallback} cnv addr dev pat unit srcss srcns
-	cnv=$SPARE_CN
+	cnv=$IDLE_CN
 	if [ "$cnv" -lt 0 ]; then
 		# Every CN already carries a cntlr of sp0. The STANDBY's CN is still
 		# the right pick for the fallback: its point is that the clone's
@@ -13453,8 +13585,8 @@ copy_src_released() { # <v…>
 # first UNDER the live controller (the one direction wait_dev_gone means
 # something), host1 and every CN let go before the subsystem is unlinked (a
 # subsystem unlinked under a live controller kills it with DNR, or leaves it
-# retrying when the subsystem is its port's last, as on a spare CN), and only
-# then the subsystem, the thin device and the pool.
+# retrying when the subsystem is its port's last, as on a CN with no cntlr),
+# and only then the subsystem, the thin device and the pool.
 #
 # THE CNs LET GO TOO. Each CN whose build of a clone connected this source
 # still holds its controller to it after the clone has gone: the cn agent's
@@ -13897,9 +14029,9 @@ copy_xfer_delete() {
 # proof is the PRIMARY CN's own view of its path (cn_wait_ana).
 #
 # The worker will not interfere, and that holds for a reason that does not
-# depend on a number: AR8 skips a leg with two sides outright ("two sides means
-# a user migration is in flight on this leg", tryLegRepair (worker/reaction.go)),
-# so the whole window is invisible to leg repair however long it lasts. The copy
+# depend on a number: AR8 leaves a leg with two sides alone outright, as a
+# leg with two sides has a user migration in flight (dnv-worker.md AR8), so
+# the whole window is invisible to leg repair however long it lasts. The copy
 # case's sp also carries the QUIET threshold set (leg_unhealthy $THR_LEG s), so
 # nothing here is even close to a threshold — but the migration would be safe at
 # the reacting set too, which is why the two-sides rule is the argument and the
@@ -14232,174 +14364,7 @@ copy_migration() {
 }
 
 # ---------------------------------------------------------------------------
-# Copy step 5 — spare legs (raid1 only)
-# ---------------------------------------------------------------------------
-#
-# A spare leg is a leg of a raid1 group that every cntlr connects to and
-# health-checks but that md never sees, until SwitchSpareLeg trades it for an
-# active one (architecture.md, Spare legs). The suite skips this step under
-# --redund none (e2e_integtest.md, Known limits), and the gateway would
-# refuse it anyway: CreateSpareLeg (gateway/spareleg.go) answers
-# INVALID_ARGUMENT "group %d is RedundNone: there is no redundancy to repair".
-#
-# THE LEG-ROW ARITHMETIC IS WHY cntlr_full_ready EXISTS. CN10 walks
-# spare_leg_list as well as leg_list, so a spare adds a leg_id_to_leg row on
-# every cntlr, and a target taken from the fresh-sp constant GRP_CNT x LEGS
-# would be one short for ever. cntlr_full_ready computes the number from the
-# CURRENT `sp get` on every poll, which is what this step — and setup itself —
-# uses.
-#
-# THE SWITCH IS A FULL REBUILD, not a bitmap-scoped repair: a fresh spare has
-# never been an md member, so md recovers the whole group onto it
-# (architecture.md, Spare legs: "a fresh spare gets a full resync"). At
-# $INIT_EXT_CNT x $EXTENT_SIZE per group that is 64 MiB at the default shape.
-copy_spare() {
-	if [ "$REDUND" != raid1 ]; then
-		log ""
-		log "=== copy step 5 (spare legs) SKIPPED: --redund $REDUND." \
-			"A RedundNone group has one leg and no md array, and" \
-			"CreateSpareLeg (gateway/spareleg.go) refuses it with" \
-			"INVALID_ARGUMENT."
-		return 0
-	fi
-	stage 05 "spare create, spare switch and spare delete on slice 0's data group"
-	local gid target spare spareaddr sparevm before_addrs before_vms rev
-
-	sp_refresh
-	sp_read_roles
-	sp_totals
-	gid=$(sp_field "$COPY_GRP0.grp_id")
-	target=$(sp_field "$COPY_GRP0.leg_list[0].leg_id")
-	case "$gid$target" in
-	'' | *[!0-9]*) die "slice 0's data group carried a non-decimal id" ;;
-	esac
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 0 \
-		"the group has no spare leg yet"
-	before_addrs=$(sp_field \
-		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
-	before_vms=$(sp_field \
-		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
-
-	ctl_ok spare create --grp "$gid"
-	spare=$(jq_of "$CTL_OUT" '.leg_id')
-	case "$spare" in
-	'' | *[!0-9]* | 0) die "spare create returned leg_id '$spare'" ;;
-	esac
-
-	sp_refresh
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 1 \
-		"the group holds one spare leg"
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list[0].leg_id" "$spare" \
-		"and it is the leg CreateSpareLeg minted"
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list[0].side_list | length" 1 \
-		"a spare leg has exactly one side"
-	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
-		"the ACTIVE leg list is unchanged: a spare is not an md member"
-	spareaddr=$(sp_field "$COPY_GRP0.spare_leg_list[0].side_list[0].addr_port")
-	sparevm=${spareaddr%:*}
-	case ",$before_addrs," in
-	*",$spareaddr,"*)
-		die "the spare landed on $spareaddr, a disk node the group already" \
-			"occupies; grpDnAddrs (gateway/alloc.go) seeds the black list" \
-			"of CreateSpareLeg (gateway/spareleg.go)"
-		;;
-	esac
-	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
-		case ",$before_vms," in
-		*",$sparevm,"*)
-			die "the spare landed on a DN VM the group already occupies" \
-				"($before_vms). Tier 1 (architecture.md, Per-operation" \
-				"allocation) excludes the group's locations" \
-				"(CreateSpareLeg (gateway/spareleg.go)) and relaxes only when no DN" \
-				"outside them can take the group's ext_cnt"
-			;;
-		esac
-	else
-		log "  $DN_VM_CNT DN VM(s) and $LEGS leg(s) per group: tier 1" \
-			"(architecture.md, Per-operation allocation)" \
-			"has nowhere anti-affine to go, so the spare's VM is not asserted"
-	fi
-	log "  spare leg $spare on $spareaddr; the group's active legs are" \
-		"on $before_addrs"
-
-	# A spare's side is created provisioned = false and only the sp-worker
-	# flips it, after the DN has zeroed what a side of its group must read as
-	# zeros — here, a data group's, its meta region and first data block
-	# (architecture.md, Side provisioning protocol; [D15]) — which is
-	# exactly why model.SwitchSpareLeg (model/ops.go) refuses an unprovisioned
-	# spare ("spare side is not provisioned"). So the wait is a
-	# precondition of the next call, not a nicety — and it is the reason
-	# SP_UNPROV_CNT walks SP_ANY_SIDE_PATH: a poll over the active legs alone
-	# would answer 0 the instant `spare create` returned.
-	SIDES_LEFT=-1
-	wait_until "$WAIT_PROVISION" "the spare leg's side to be provisioned" \
-		sp_sides_provisioned
-	SP_JSON=$CTL_OUT
-	sp_totals
-	assert_eq "$SP_SPARE_TOTAL" 1 "the sp holds exactly one spare leg"
-	stack_wait_reset
-	wait_until "$WAIT_PROVISION" \
-		"the primary cntlr $PRIMARY_CNTLR_ID to connect the spare leg too" \
-		cntlr_full_ready "$PRIMARY_CNTLR_ID"
-	stack_wait_reset
-	wait_until "$WAIT_PROVISION" \
-		"the standby cntlr $STANDBY_CNTLR_ID to connect the spare leg too" \
-		cntlr_legs_full_ready "$STANDBY_CNTLR_ID"
-
-	# The swap. Naming both sides explicitly is what lets the reply be
-	# asserted: curr_active_leg_id is the spare and curr_spare_leg_id the
-	# target, read back from the request by the handler
-	# (SwitchSpareLeg (gateway/spareleg.go)).
-	ctl_ok spare switch --grp "$gid" --spare "$spare" --target "$target"
-	assert_field "$CTL_OUT" '.curr_active_leg_id' "$spare" \
-		"SwitchSpareLegReply.curr_active_leg_id"
-	assert_field "$CTL_OUT" '.curr_spare_leg_id' "$target" \
-		"SwitchSpareLegReply.curr_spare_leg_id"
-	sp_refresh
-	assert_jq "$SP_JSON" \
-		"($COPY_GRP0
-		  | [.leg_list[] | select(.leg_id == \"$spare\")] | length) == 1" \
-		"the promoted spare is in the group's ACTIVE leg list"
-	assert_jq "$SP_JSON" \
-		"($COPY_GRP0 | [.spare_leg_list[] | .leg_id]) == [\"$target\"]" \
-		"and the leg it replaced is the one parked in spare_leg_list"
-	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
-		"the group still has $LEGS active legs"
-
-	# md rebuilds onto the promoted spare. grp_md_clean reads the state words
-	# out of the row's details, because RES_STATUS_OK alone is true
-	# throughout a recovery — and it is given the SpRev the switch bumped
-	# to, because the leg COUNT did not change and the pre-switch array also
-	# reads "clean".
-	rev=$(sp_field '.sp_rev.revision')
-	case "$rev" in
-	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
-	esac
-	MD_STATE_LAST=""
-	wait_until "$WAIT_PROVISION" \
-		"cn$PRIMARY_CN to apply revision $rev and md to finish rebuilding group $gid onto leg $spare" \
-		grp_md_clean "$PRIMARY_CNTLR_ID" "$gid" "$rev"
-	check_sha0 "after a spare leg was switched in and md rebuilt onto it"
-
-	# Releasing the parked leg. DeleteSpareLeg names both ids: --grp says
-	# which group holds the spare list and --leg which entry goes away, and a
-	# leg a switch just parked is exactly what it is for (ctl/spare.go).
-	ctl_ok spare delete --grp "$gid" --leg "$target"
-	assert_field "$CTL_OUT" '.leg_id' "$target" "DeleteSpareLegReply.leg_id"
-	sp_refresh
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 0 \
-		"the group holds no spare leg again"
-	sp_totals
-	assert_eq "$SP_SPARE_TOTAL" 0 "the sp holds no spare leg"
-	stack_wait_reset
-	wait_until "$WAIT_PROVISION" \
-		"the primary cntlr $PRIMARY_CNTLR_ID to drop the released leg's row" \
-		cntlr_full_ready "$PRIMARY_CNTLR_ID"
-	check_sha0 "after the parked leg was released"
-}
-
-# ---------------------------------------------------------------------------
-# Copy step 6 — an operator's repair of a leg whose disk node died (raid1 only)
+# Copy step 5 — an operator's repair of a leg whose disk node died (raid1 only)
 # ---------------------------------------------------------------------------
 #
 # A repair replaces a bad leg of a raid1 group by a new leg: the primary adds
@@ -14408,24 +14373,24 @@ copy_spare() {
 # operator's finish puts the new leg in the bad leg's place and keeps the bad
 # leg as a retired leg, whose side keeps its data on its disk node until it is
 # deleted (architecture.md, Repairs, Repair, Retired legs). This step runs one
-# on $COPY_GRP0 for a leg whose disk node dies. The suite skips it under
-# --redund none (e2e_integtest.md, Known limits), where CreateRepair refuses
-# the pool.
+# on $COPY_GRP0 for a leg whose disk node dies, with a fresh new leg, and
+# finishes it while md still copies onto that leg; step 6 goes on from there.
+# The suite skips both steps under --redund none (e2e_integtest.md, Known
+# limits), where CreateRepair refuses the pool.
 #
 # THE GROUP AND THE LEG. $COPY_GRP0 is the group every placement step of this
 # case works on, and it holds the first stripe of $TD0, so check_sha0's reads
-# go through it while its leg is dead. Step 5 left it with no spare leg, which
-# CreateRepair would refuse (architecture.md, Repairs). The pool has no
+# go through it while its legs die and md copies onto them. The pool has no
 # repair, no retired leg and no clone here, which the step asserts: `sp get`
 # shows neither a repair's new leg nor a retired leg, and a clone's group
 # sits outside slice_list, so with none of them slice_list names every side of
 # the pool; and no second pool stands between step 3's teardown and step 7's
 # build. The bad leg is one whose single side sits on a disk node that
 # carries no other side (react_leg_alone): killing that disk node takes down
-# that one side, the retired leg's delete leaves the node's record with no
-# side at all, and the node's returning agent has exactly that side to
-# remove. The group's other leg stays healthy and in sync, which the
-# primary's add of the new leg needs (cnagent.md CN12).
+# that one side, and the node's returning agent in step 6 has exactly that
+# side to keep. The group's other leg stays healthy and in sync through both
+# steps, which every add of a new leg needs (cnagent.md CN12), and the steps
+# find the group's array on the primary by that leg's md member.
 #
 # THE FAULT IS react's (react_kill_dn): the agent, then its nvmet port, as
 # kernel objects outlive their agent and only the port's removal fails the
@@ -14434,33 +14399,44 @@ copy_spare() {
 # a migration" while healthy (architecture.md, Repairs); so the step first
 # waits for the leg to read healthy, and the epoch it then waits for is the
 # kill's. The quiet thresholds keep every reaction off the pool for longer
-# than the step runs: the worker's own leg repair waits side_unhealthy
-# ($THR_SIDE s) from the side's epoch and then skips a group with a repair
-# (dnv-worker.md AR8), and the retire timer deletes only a retired leg
-# RetiredLegMaxAge old (dnv-worker.md AR12), so the operator's delete is the
-# one that runs. No failover is expected, and none may happen: leg rows do
-# not count toward a cntlr's health (dnv-worker.md HL2).
+# than the two steps run: the worker's own leg repair waits side_unhealthy
+# ($THR_SIDE s) from a side's epoch and leaves a group with an operator's
+# repair alone (dnv-worker.md AR8), so it cannot race the operator's creates,
+# and the retire timer deletes only a retired leg RetiredLegMaxAge old
+# (dnv-worker.md AR12), so the retired legs stay the operator's. No failover
+# is expected, and none may happen: leg rows do not count toward a cntlr's
+# health (dnv-worker.md HL2).
+#
+# MD'S COPY IS SLOWED. Step 6 needs md's copy onto this step's new leg still
+# running when it kills that leg's disk node. So before the create this step
+# lowers the array's copy speed on the primary to COPY_REP_SLOW_KIB
+# (md_sync_speed), and it reads that the copy runs once the repair has
+# started and again after the finish (copy_rep_copying). Step 6 puts the
+# speed back once the new leg's disk node has died. The speed is the array's
+# own setting and goes with the array, so a failed run needs nothing more:
+# the next cleanup stops every array.
 #
 # HOST IO. host0's kernel log is marked before the kill, and host0 reads SHA0
-# through the group while the leg is dead, once md holds the group whole, and
-# at the end. Every member carries md's failfast flag (cnagent.md CN12), so a
-# read that meets the dead member fails that member and md serves it from
-# the other: the host sees no error, and its kernel log since the mark must
-# report no failed IO (host_kmsg_clean). host1 holds no path to the pool
-# here: step 3 took it off the transfer.
+# through the group while the leg is dead and while md copies onto the new
+# leg; step 6 goes on reading and checks the same log. Every member carries
+# md's failfast flag (cnagent.md CN12), so a read that meets a dead member
+# fails that member and md serves it from the other: the host sees no error,
+# and its kernel log since the mark must report no failed IO
+# (host_kmsg_clean). host1 holds no path to the pool here: step 3 took it off
+# the transfer.
 #
 # THE STAGE IS READ THROUGH `repair get` ALONE, as an operator reads it: the
 # record's rep_stage, which only the worker moves (dnv-worker.md AR11). A
 # STARTED repair takes neither an abort nor a cancel (architecture.md,
 # Repair), and the step asserts both refusals, which name the stage. The
-# finish runs as soon as the repair is STARTED, while md may still copy onto
-# the new leg; md's end of the copy is read from the primary afterwards
-# (copy_rep_whole).
+# finish runs as soon as the repair is STARTED, while md still copies onto
+# the new leg, and the primary must then report the group degraded with only
+# the leg that stayed in sync (copy_rep_degraded).
 
-# copy_rep_leg_epoch is the step's wait on the bad leg's health epoch in `sp
-# get`: true once the leg at <position> of the group's leg_list, which must
-# still be <leg id>, reads healthy (zero) or dead (set). The primary's probe
-# of the leg sets it once the leg's disk node is gone (cnagent.md CN11;
+# copy_rep_leg_epoch is the steps' wait on a leg's health epoch in `sp get`:
+# true once the leg at <position> of the group's leg_list, which must still
+# be <leg id>, reads healthy (zero) or dead (set). The primary's probe of the
+# leg sets it once the leg's disk node is gone (cnagent.md CN11;
 # dnv-worker.md HL2). The leg's and its side's epochs are logged as they
 # change; uint64 fields render as decimal strings, "0" while healthy
 # (dnvctl.md CT4).
@@ -14492,17 +14468,18 @@ copy_rep_leg_epoch() { # <position> <leg id> <healthy|dead>
 }
 
 # copy_rep_stage_is is the stage wait, read through `repair get` alone: true
-# once the record's rep_stage is <stage>. The stage, the abort flag, the new
-# leg's health epoch and its side's provisioned flag and health epoch are
-# logged as they change, so a wait that runs out shows which part of the
-# repair stopped: the side's zeroing before the worker's provisioned flip
-# (architecture.md, Side provisioning protocol), or the primary's add
-# (cnagent.md CN12). A repair that reads ABORTED, or whose abort flag is set,
-# dies at once: this step never asks for an abort that could succeed, and the
-# worker aborts no repair (dnv-worker.md AR9).
-copy_rep_stage_is() { # <REP_STAGE_*>
+# once the record of repair <rep name> reads rep_stage <stage>. The stage,
+# the abort flag, the new leg's health epoch and its side's provisioned flag
+# and health epoch are logged as they change, so a wait that runs out shows
+# which part of the repair stopped: the side's zeroing before the worker's
+# provisioned flip (architecture.md, Side provisioning protocol), or the
+# primary's add (cnagent.md CN12). A repair that reads ABORTED, or whose
+# abort flag is set, dies at once: these steps never ask for an abort that
+# could succeed, and the worker aborts no operator's repair (dnv-worker.md
+# AR9).
+copy_rep_stage_is() { # <rep name> <REP_STAGE_*>
 	local repstage abort lepoch prov sepoch sig
-	if ! ctl_try repair get --name "$COPY_REP"; then
+	if ! ctl_try repair get --name "$1"; then
 		return 1
 	fi
 	repstage=$(jq_of "$CTL_OUT" '.repair.rep_stage')
@@ -14510,17 +14487,110 @@ copy_rep_stage_is() { # <REP_STAGE_*>
 	lepoch=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].err_epoch')
 	prov=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned')
 	sepoch=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].err_epoch')
-	sig="repair $COPY_REP $repstage, abort flag $abort; new leg err_epoch"
+	sig="repair $1 $repstage, abort flag $abort; new leg err_epoch"
 	sig="$sig $lepoch, its side provisioned $prov, err_epoch $sepoch"
 	if [ "$sig" != "$COPY_REP_LAST" ]; then
 		COPY_REP_LAST=$sig
 		log "  $sig"
 	fi
 	if [ "$repstage" = REP_STAGE_ABORTED ] || [ "$abort" != false ]; then
-		die "repair $COPY_REP reads $repstage with its abort flag $abort," \
+		die "repair $1 reads $repstage with its abort flag $abort," \
 			"which nothing in this step asked for"
 	fi
-	[ "$repstage" = "$1" ]
+	[ "$repstage" = "$2" ]
+}
+
+# kv_of prints the value of <key> in a line of space-separated key=value
+# words, as md_sync_read prints one, or nothing when the line has no such
+# word.
+kv_of() { # <line> <key>
+	local w
+	for w in $1; do
+		case "$w" in
+		"$2="*)
+			printf '%s' "${w#"$2="}"
+			return 0
+			;;
+		esac
+	done
+	return 0
+}
+
+# copy_rep_copying is "md copies onto leg <leg id> on the primary", read on
+# the primary itself: the leg's md member holds a place in the array (a slot
+# number) and its state is neither in_sync nor faulty, and the array's copy
+# runs: md/sync_action reads recover and md/sync_completed has sectors left
+# (md_sync_read, on the array that holds the member of the leg that stays).
+# The member and the array are logged as they change, the write count left
+# out.
+copy_rep_copying() { # <leg id>
+	local name mrd sync state slot rest action prog left total sig
+	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$1")
+	mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name" 2>/dev/null) ||
+		mrd="not in its array"
+	sync=$(helper_cn "$PRIMARY_CN" md_sync_read "$COPY_REP_STAY_NAME" \
+		2>/dev/null) || sync="unread"
+	sig="leg $1's member ${mrd% wsect=*}; its array $sync"
+	if [ "$sig" != "$COPY_REP_LAST" ]; then
+		COPY_REP_LAST=$sig
+		log "  $sig"
+	fi
+	read -r state slot rest <<<"$mrd"
+	state=${state#state=}
+	slot=${slot#slot=}
+	case ",$state," in
+	*,in_sync,* | *,faulty,*) return 1 ;;
+	esac
+	case "$slot" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	action=$(kv_of "$sync" action)
+	prog=$(kv_of "$sync" done)
+	[ "$action" = recover ] || return 1
+	left=${prog%%/*}
+	total=${prog#*/}
+	case "$left:$total" in
+	*[!0-9:]* | :* | *:) return 1 ;;
+	esac
+	[ "$left" -lt "$total" ]
+}
+
+# copy_rep_degraded is the primary's reading of the group while md copies
+# onto a new leg, at the finish's revision or later (grp_md_clean says why
+# the revision): the group's row RES_STATUS_OK with md's word of a running
+# copy in its details, and beside the rows (cnagent.md CN28) the whole flag
+# clear and the legs md holds in sync exactly <want>, a sorted jq array
+# literal: a leg md still copies onto is not in sync (architecture.md,
+# Repair). A pass whose read of the array after its own changes failed
+# reports no reading (cnagent.md CN12), so the reading is polled.
+copy_rep_degraded() { # <cntlr id> <grp id> <min applied revision> <want>
+	local rev st det whole insync sig
+	if ! ctl_try cntlr inspect --id "$1"; then
+		return 1
+	fi
+	rev=$(jq_of "$CTL_OUT" '.applied_revision')
+	st=$(jq_of "$CTL_OUT" ".cntlr_info.grp_id_to_md_raid[\"$2\"].status // \"absent\"")
+	det=$(jq_of "$CTL_OUT" ".cntlr_info.grp_id_to_md_raid[\"$2\"].details // \"\"")
+	whole=$(jq_of "$CTL_OUT" ".cntlr_info.grp_id_to_grp_info[\"$2\"].whole")
+	insync=$(jq_of "$CTL_OUT" \
+		"(.cntlr_info.grp_id_to_grp_info[\"$2\"].in_sync_leg_id_list // [])
+		 | sort | tojson")
+	sig="group $2 on cntlr $1: applied_revision $rev (want >= $3), md $st"
+	sig="$sig [$det], whole $whole, legs in sync $insync (want $4)"
+	if [ "$sig" != "$COPY_REP_LAST" ]; then
+		COPY_REP_LAST=$sig
+		log "  $sig"
+	fi
+	case "$rev" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$rev" -ge "$3" ] || return 1
+	[ "$st" = RES_STATUS_OK ] || return 1
+	case "$det" in
+	*recovering*) ;;
+	*) return 1 ;;
+	esac
+	[ "$whole" = false ] && [ "$insync" = "$4" ]
 }
 
 # copy_rep_whole is "md holds the group whole on the primary": grp_md_clean at
@@ -14529,7 +14599,8 @@ copy_rep_stage_is() { # <REP_STAGE_*>
 # whole flag set and the legs md holds in sync exactly <want>, the group's
 # leg_list ids sorted as a jq array literal. A pass whose read of the array
 # after its own changes failed reports no reading (cnagent.md CN12), so the
-# reading is polled, never asserted once.
+# reading is polled, never asserted once. Copy step 6 and react's repair
+# stages wait on it.
 copy_rep_whole() { # <cntlr id> <grp id> <min applied revision> <want>
 	local whole insync sig
 	grp_md_clean "$1" "$2" "$3" || return 1
@@ -14549,9 +14620,9 @@ copy_rep_whole() { # <cntlr id> <grp id> <min applied revision> <want>
 # primary's whole stack (cntlr_full_ready) or a standby's legs
 # (cntlr_legs_full_ready), every row OK, and no row of <leg id> at all, as no
 # cntlr connects a retired leg (architecture.md, Repair). The row is needed as
-# well as the count: while the repair is open the new leg's OK row stands in
-# the count for the bad leg's failing one, so the count alone reads full
-# before the finish has reached the cntlr.
+# well as the count: an observation from before the finish holds the new
+# leg's OK row in place of the retired leg's failing one, so the count alone
+# reads full against the post-finish want until the finish reaches the cntlr.
 copy_rep_dropped() { # <full|legs> <cntlr id> <leg id>
 	if [ "$1" = full ]; then
 		cntlr_full_ready "$2" || return 1
@@ -14564,26 +14635,26 @@ copy_rep_dropped() { # <full|legs> <cntlr id> <leg id>
 copy_repair() {
 	if [ "$REDUND" != raid1 ]; then
 		log ""
-		log "=== copy step 6 (operator repair) SKIPPED: --redund $REDUND." \
+		log "=== copy step 5 (operator repair) SKIPPED: --redund $REDUND." \
 			"A RedundNone group has one leg and no md array, and" \
-			"CreateRepair (gateway/repair.go) refuses its pool with" \
-			"INVALID_ARGUMENT."
+			"CreateRepair refuses its pool with INVALID_ARGUMENT" \
+			"(architecture.md, Repairs)."
 		return 0
 	fi
-	stage 06 "a disk node dies under slice 0's data group: repair create, start and finish, retired-leg list and delete"
+	stage 05 "a disk node dies under slice 0's data group: repair create with a fresh leg, start, and finish while md copies onto it"
 	local gid sliceid ext n i v pos bad badidx badside badaddr dnv dnk msg
-	local before_addrs before_vms before_primary before_failovers
-	local newleg newside newaddr newvm repstage rev want retired epoch
-	local dnsides dnfree dntotal after_sides after_free
+	local before_addrs before_vms stay sync
+	local newleg newside newaddr newvm repstage rev retired epoch
 
 	sp_refresh
 	sp_read_roles
 	sp_totals
-	# The primary this whole step must keep, and the count of failovers the
-	# worker has applied so far, which must not grow: both asserted at the end,
-	# as in react's step 05.
-	before_primary=$PRIMARY_CNTLR_ID
-	before_failovers=$(worker_failover_cnt)
+	copy_primary_cn_id
+	# The primary both repair steps must keep, and the count of failovers the
+	# worker has applied so far, which must not grow: both asserted at the
+	# end of step 6, as in react's stage 05.
+	COPY_REP_PRIMARY=$PRIMARY_CNTLR_ID
+	COPY_REP_FAILOVERS=$(worker_failover_cnt)
 	gid=$(sp_field "$COPY_GRP0.grp_id")
 	# pb.Slice has no slice_id field; slice_list follows slice_id_list.
 	sliceid=$(sp_field '.sp_conf.slice_id_list[0]')
@@ -14597,9 +14668,7 @@ copy_repair() {
 		esac
 	done
 
-	# What the step's counts rest on (see the step's header).
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 0 \
-		"the group holds no spare leg: step 5 deleted the one it parked"
+	# What the steps' counts rest on (see the step's header).
 	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" "the group has no repair"
 	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | length" 0 \
 		"the group has no retired leg"
@@ -14633,9 +14702,7 @@ copy_repair() {
 	[ "$pos" -ge 0 ] ||
 		die "no leg of slice 0's first data group has a single side on a" \
 			"disk node that carries no other side of $SP. Killing a disk" \
-			"node with a second side would degrade a second group too, and" \
-			"the retired leg's delete would not leave the node empty, which" \
-			"the step's wait on its counts needs"
+			"node with a second side would degrade a second group too"
 	bad=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_id")
 	badidx=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_idx")
 	badside=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].side_id")
@@ -14649,6 +14716,12 @@ copy_repair() {
 	case "$badidx" in
 	'' | *[!0-9]*) die "the bad leg has leg_idx '$badidx'" ;;
 	esac
+	# The leg that stays: the group's first other leg, whose md member on the
+	# primary names the group's array to md_sync_read and md_sync_speed.
+	stay=$(sp_field "[$COPY_GRP0.leg_list[] | select(.leg_id != \"$bad\")][0].leg_id")
+	case "$stay" in
+	'' | *[!0-9]* | 0) die "the group's other leg has leg_id '$stay'" ;;
+	esac
 	dnv=$(dn_vm_of_addr "$badaddr")
 	dnk=$(dn_inst_of_addr "$badaddr")
 	assert_ne "$dnv" none \
@@ -14660,6 +14733,21 @@ copy_repair() {
 		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
 	before_vms=$(sp_field \
 		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
+	COPY_REP_GID=$gid
+	COPY_REP_SLICE=$sliceid
+	COPY_REP_EXT=$ext
+	COPY_REP_POS=$pos
+	COPY_REP_BAD=$bad
+	COPY_REP_BADIDX=$badidx
+	COPY_REP_BADSIDE=$badside
+	COPY_REP_BADADDR=$badaddr
+	COPY_REP_DNV=$dnv
+	COPY_REP_DNK=$dnk
+	COPY_REP_STAY=$stay
+	COPY_REP_STAY_NAME=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$stay")
+	case "$COPY_REP_STAY_NAME" in
+	*notanid-*) die "cn_leg_name produced '$COPY_REP_STAY_NAME'" ;;
+	esac
 
 	# The leg reads healthy first, so the epoch waited for below is the kill's
 	# (see the step's header).
@@ -14679,6 +14767,27 @@ copy_repair() {
 		"the primary's probe to give leg $bad a health epoch (cnagent.md CN11)" \
 		copy_rep_leg_epoch "$pos" "$bad" dead
 	check_sha0 "through group $gid while leg $bad's disk node is dead"
+
+	# md's copy slowed for the two steps (see the step's header): the array's
+	# limits as they read now are kept for step 6 to put back, a word of the
+	# form "<KiB/s>(system)" or "<KiB/s>(local)" each.
+	sync=$(helper_cn "$PRIMARY_CN" md_sync_read "$COPY_REP_STAY_NAME") ||
+		die "reading group $gid's array on cn$PRIMARY_CN by leg $stay's" \
+			"member $COPY_REP_STAY_NAME failed: $sync"
+	COPY_REP_SPEED_MIN=$(kv_of "$sync" min)
+	COPY_REP_SPEED_MAX=$(kv_of "$sync" max)
+	case "$COPY_REP_SPEED_MIN:$COPY_REP_SPEED_MAX" in
+	[0-9]*"("*")":[0-9]*"("*")") ;;
+	*) die "group $gid's array on cn$PRIMARY_CN reads '$sync'" ;;
+	esac
+	sync=$(helper_cn "$PRIMARY_CN" md_sync_speed "$COPY_REP_STAY_NAME" \
+		"$COPY_REP_SLOW_MIN" "$COPY_REP_SLOW_KIB") ||
+		die "slowing group $gid's array on cn$PRIMARY_CN failed: $sync"
+	assert_eq "$(kv_of "$sync" min):$(kv_of "$sync" max)" \
+		"$COPY_REP_SLOW_MIN(local):$COPY_REP_SLOW_KIB(local)" \
+		"group $gid's array copy speed limits on cn$PRIMARY_CN after md_sync_speed"
+	log "  md's copy on group $gid's array slowed: $sync (it read" \
+		"min=$COPY_REP_SPEED_MIN max=$COPY_REP_SPEED_MAX)"
 
 	# The create, with a fresh new leg: no --retired-leg, and no --dn-black or
 	# --dn-white, so the gateway places the new side by its own rule, outside
@@ -14754,6 +14863,9 @@ copy_repair() {
 			"(architecture.md, Per-operation allocation) has nowhere" \
 			"anti-affine to go, so the new leg's VM is not asserted (E2E4)"
 	fi
+	COPY_REP_NEW=$newleg
+	COPY_REP_NEWSIDE=$newside
+	COPY_REP_NEWADDR=$newaddr
 	log "  repair $COPY_REP (rep_id $COPY_REP_ID) reads $repstage; its new" \
 		"leg $newleg has side $newside on $newaddr"
 
@@ -14774,9 +14886,14 @@ copy_repair() {
 	msg="the worker to move repair $COPY_REP to STARTED: the new leg's side"
 	msg="$msg zeroes and is flipped provisioned, and the primary adds the new"
 	msg="$msg leg to group $gid's array and reports it holding a place"
-	wait_until "$WAIT_PROVISION" "$msg" copy_rep_stage_is REP_STAGE_STARTED
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_stage_is "$COPY_REP" REP_STAGE_STARTED
 	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned' \
 		true "a STARTED repair's new side is provisioned"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_SHORT" \
+		"md on cn$PRIMARY_CN to copy onto the new leg $newleg, slowed" \
+		copy_rep_copying "$newleg"
 	ctl_fail_grep FAILED_PRECONDITION REP_STAGE_STARTED \
 		repair abort --name "$COPY_REP"
 	ctl_fail_grep FAILED_PRECONDITION REP_STAGE_STARTED \
@@ -14791,6 +14908,11 @@ copy_repair() {
 	assert_field "$CTL_OUT" '.rep_id' "$COPY_REP_ID" "FinishRepairReply.rep_id"
 	assert_field "$CTL_OUT" '.retired_leg_id' "$bad" \
 		"FinishRepairReply.retired_leg_id"
+	COPY_REP_LAST=""
+	copy_rep_copying "$newleg" ||
+		die "md no longer copies onto the new leg $newleg right after the" \
+			"finish, slowed to ${COPY_REP_SLOW_KIB} KiB/s; step 6 needs the" \
+			"copy running when that leg's disk node dies"
 	ctl_fail NOT_FOUND repair get --name "$COPY_REP"
 	ctl_ok repair list
 	assert_field "$CTL_OUT" '.name_to_repair | length' 0 \
@@ -14810,8 +14932,6 @@ copy_repair() {
 		"[$COPY_GRP0.leg_list[] | select(.leg_id == \"$bad\")] | length" 0 \
 		"the bad leg left leg_list"
 	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" "the group names no repair"
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 0 \
-		"the group holds no spare leg"
 	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | join(\",\")" \
 		"$bad" "the group lists the bad leg as its one retired leg"
 	assert_field "$SP_JSON" '.sp_conf.repair_name_list | length' 0 \
@@ -14822,7 +14942,6 @@ copy_repair() {
 	case "$rev" in
 	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
 	esac
-	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
 
 	ctl_ok retired-leg list
 	assert_field "$CTL_OUT" '.leg_id_to_retired_leg | length' 1 \
@@ -14843,20 +14962,21 @@ copy_repair() {
 	case "$epoch" in
 	'' | *[!0-9]* | 0) die "the retired leg's retired_epoch reads '$epoch'" ;;
 	esac
-	log "  leg $newleg took leg $bad's place; leg $bad is retired at" \
-		"$epoch with side $badside on $badaddr"
+	COPY_REP_EPOCH=$epoch
+	log "  leg $newleg took leg $bad's place while md copies onto it; leg" \
+		"$bad is retired at $epoch with side $badside on $badaddr"
 
-	# md's end of the copy onto the new leg, at the finish's revision, then
-	# host0's reads through the whole group, and its kernel log since the
-	# mark. Last, no cntlr holds the retired leg any more.
-	MD_STATE_LAST=""
+	# The primary's reading at the finish's revision: md still copies onto
+	# the new leg, so only the leg that stayed is in sync and the group is not
+	# whole. Then host0's read through the degraded group, and its kernel log
+	# since the mark. Last, no cntlr holds the retired leg any more.
 	COPY_REP_LAST=""
-	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group $gid whole,"
-	msg="$msg in sync on legs $want"
+	msg="cn$PRIMARY_CN to apply revision $rev and report group $gid degraded,"
+	msg="$msg in sync on leg $stay alone while md copies onto leg $newleg"
 	wait_until "$WAIT_PROVISION" "$msg" \
-		copy_rep_whole "$PRIMARY_CNTLR_ID" "$gid" "$rev" "$want"
-	check_sha0 "once md held group $gid whole on the new leg $newleg"
-	host_kmsg_clean 0 "$COPY_REP_TAG" "once md held group $gid whole"
+		copy_rep_degraded "$PRIMARY_CNTLR_ID" "$gid" "$rev" "[\"$stay\"]"
+	check_sha0 "through group $gid while md copies onto the new leg $newleg"
+	host_kmsg_clean 0 "$COPY_REP_TAG" "while md copies onto the new leg"
 	stack_wait_reset
 	wait_until "$WAIT_PROVISION" \
 		"the primary cntlr $PRIMARY_CNTLR_ID to hold every leg and no longer the retired leg $bad" \
@@ -14866,25 +14986,367 @@ copy_repair() {
 		"the standby cntlr $STANDBY_CNTLR_ID to hold every leg and no longer the retired leg $bad" \
 		copy_rep_dropped legs "$STANDBY_CNTLR_ID" "$bad"
 
-	# The delete gives the side back to the dead disk node's record, which
-	# then carries no side: the pick made it carry this one alone.
+	# The retired side stays in the dead disk node's record (architecture.md,
+	# Repair), which carries that side alone: the pick made it so.
 	ctl_ok dn get --addr "$badaddr"
+	assert_field "$CTL_OUT" \
+		"[.dn_conf.side_ptr_list[] | select(.side_id == \"$badside\")] | length" 1 \
+		"the retired leg's side stays in its disk node's record (architecture.md, Repair)"
+	assert_field "$CTL_OUT" '.dn_conf.side_ptr_list | length' 1 \
+		"and disk node $badaddr carries no other side"
+	log "  step 6 goes on with leg $bad retired, its disk node dead, and md" \
+		"copying onto leg $newleg"
+}
+
+# ---------------------------------------------------------------------------
+# Copy step 6 — the new leg's disk node dies during md's copy, and an
+# operator's repair takes the retired leg back (raid1 only)
+# ---------------------------------------------------------------------------
+#
+# A repair may take a retired leg of its group back as its new leg; only an
+# operator's repair does, since md writes onto the new leg and so over the
+# retired leg's kept copy (architecture.md, Repairs, CreateRepair). This step
+# goes on from step 5: the leg step 5 retired, the old leg below, is on a
+# dead disk node, and md copies, slowed, onto the new leg that replaced it.
+# The old leg's disk node comes back, the new leg's disk node dies during the
+# copy, and the operator repairs the new leg with the old leg taken back. The
+# repair must reach STARTED and be finished, and md must then hold the group
+# whole on the old leg, as the step's assertions read it on the primary; the
+# new leg is then a retired leg, deleted, and its disk node comes back.
+#
+# WHY THE NEW LEG MUST DIE IN THE MIDDLE OF THE COPY. Had md finished copying
+# onto it, the group would be whole on it and the old leg would be an
+# ordinary stale leg. With the new leg never in sync, the group has stayed
+# degraded since the old leg left, so after the new leg's death the leg that
+# stayed holds the one whole copy, and the old leg holds every region but
+# those written since it left (architecture.md, Repair). The step reads that
+# the copy still runs just before it kills the new leg's disk node, and puts
+# md's copy speed back once the new leg's health epoch shows the death.
+#
+# THE OLD LEG BEFORE THE CREATE. CreateRepair refuses a retired leg whose
+# side has a health epoch (architecture.md, Repairs, CreateRepair), and the
+# side took one when its disk node died in step 5. The node's agent comes
+# back with the side, which the worker keeps for it as a retired side,
+# provisioned, and exported to the pool's cntlrs, though no cntlr connects it
+# (architecture.md, Repair); the worker clears the side's epoch from the
+# node's rows (dnv-worker.md HL2), which the step waits for.
+#
+# THE NEW LEG'S DISK NODE carries the new leg's side alone, which the step
+# reads in the node's record before it kills the node, as the gateway placed
+# the side by its own rule: the kill then takes down that one side, the
+# delete of the new leg at the end leaves the node's record with no side at
+# all, and the node's returning agent has exactly that side to remove
+# (dnagent.md DN6).
+#
+# HOW MD TAKES THE OLD LEG BACK IS LOGGED, NOT ASSERTED (e2e_integtest.md,
+# Known limits): md catches a returned member up from its write-intent
+# bitmap, or copies it whole when it took it as a new member, and the step
+# logs which, from mdadm's own word on the add and from the sectors written
+# to the old leg's member (copy_reuse_catchup). Either way the group must end
+# whole, host0 must read SHA0, and its kernel log since step 5's mark must
+# report no failed IO.
+
+# copy_ret_side_healthy is the wait on retired leg <leg id>'s side once its
+# disk node is back: `retired-leg list` holds the leg and its side's health
+# epoch reads zero. The epoch and the side's provisioned flag are logged as
+# they change.
+copy_ret_side_healthy() { # <leg id>
+	local epoch prov sig
+	if ! ctl_try retired-leg list; then
+		return 1
+	fi
+	epoch=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$1\"].side.err_epoch // \"absent\"")
+	prov=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$1\"].side.provisioned | tostring")
+	[ "$epoch" != absent ] ||
+		die "retired leg $1 left \`retired-leg list\` before step 6 took it back"
+	sig="retired leg $1's side: err_epoch $epoch, provisioned $prov"
+	if [ "$sig" != "$COPY_REP_LAST" ]; then
+		COPY_REP_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$epoch" = 0 ]
+}
+
+# copy_reuse_catchup logs how md took retired leg <leg id> back, judging
+# nothing. One reading is mdadm's own word on each add of the leg's md member
+# the primary's cn agent logged after line <mark>, as the agent logs every
+# command with what it wrote on stderr: `re-added` when md took the member
+# back into the place it held, which md then catches up from the array's
+# write-intent bitmap, and `added` when md took it as a new member, which md
+# copies whole. The other is how many sectors have been written to the
+# member's device on the primary since the primary connected the leg, the
+# write count md_member_read reads, against the sectors of the group's
+# extents: a catch-up from the bitmap writes only the regions the bitmap
+# marks, a whole copy every region. A log or a member it cannot read is a
+# logged line, never a failure.
+copy_reuse_catchup() { # <mark> <leg id>
+	local name lines adds mrd wsect total
+	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$2")
+	if lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$(($1 + 1)) $(cn_log) | \
+		grep -F '$name'; s=(\${PIPESTATUS[@]}); \
+		[ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]"); then
+		adds=$(printf '%s\n' "$lines" | "$JQ" -R -s -c \
+			--arg dev "/dev/mapper/$name" '
+			[split("\n")[] | fromjson? // empty
+			 | select(.msg == "os command" and .cmd == "mdadm"
+			     and ((.args // []) | join(" ")
+			          | endswith("--add --failfast " + $dev)))
+			 | {exit_code: .exit_code,
+			    stderr: ((.stderr // "") | gsub("\n"; " "))}]') ||
+			adds="(the records did not parse)"
+	else
+		adds="(the log could not be read)"
+	fi
+	log "  md's catch-up of leg $2: the primary's adds of its member $name" \
+		"since the create: $adds"
+	if mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name"); then
+		wsect=${mrd##*wsect=}
+		# The group's COPY_REP_EXT extents of EXTENT_SIZE bytes, in the
+		# 512-byte sectors /sys/block counts in.
+		total=$((COPY_REP_EXT * EXTENT_SIZE / 512))
+		log "  md's catch-up of leg $2: $wsect sector(s) written to its" \
+			"member on the primary since the primary connected it, against" \
+			"the $total sectors of the group's extents (a whole copy writes" \
+			"about all of them, a catch-up from the bitmap only what was" \
+			"written while the leg was away)"
+	else
+		log "  md's catch-up of leg $2: its member $name could not be read: $mrd"
+	fi
+}
+
+copy_reuse() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== copy step 6 (a retired leg taken back) SKIPPED: --redund" \
+			"$REDUND. Step 5 made no repair to go on from, and" \
+			"CreateRepair refuses a RedundNone pool (architecture.md," \
+			"Repairs)."
+		return 0
+	fi
+	stage 06 "the new leg's disk node dies during md's copy: repair create from the retired leg, start and finish, retired-leg delete"
+	local gid pos bad newleg newside newaddr nv nk msg rev want mark retired
+	local epoch sync min max v dnsides dnfree dntotal after_sides after_free
+	gid=$COPY_REP_GID
+	pos=$COPY_REP_POS
+	bad=$COPY_REP_BAD
+	newleg=$COPY_REP_NEW
+	newside=$COPY_REP_NEWSIDE
+	newaddr=$COPY_REP_NEWADDR
+
+	sp_refresh
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$COPY_REP_PRIMARY" \
+		"the primary is still the one whose array step 5 slowed"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_id" "$newleg" \
+		"leg $newleg still holds position $pos of group $gid"
+	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | join(\",\")" \
+		"$bad" "the group's one retired leg is still leg $bad"
+	COPY_REP_LAST=""
+	copy_rep_copying "$newleg" ||
+		die "md no longer copies onto leg $newleg, slowed to" \
+			"${COPY_REP_SLOW_KIB} KiB/s by step 5"
+
+	# The old leg's disk node comes back, and its side, kept as a retired
+	# side, loses the health epoch its death gave it.
+	react_return_dn "$COPY_REP_DNV" "$COPY_REP_DNK"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"retired leg $bad's side to read healthy with its disk node back (dnv-worker.md HL2)" \
+		copy_ret_side_healthy "$bad"
+
+	# The new leg's disk node, which must carry the new leg's side alone (see
+	# the step's header).
+	nv=$(dn_vm_of_addr "$newaddr")
+	nk=$(dn_inst_of_addr "$newaddr")
+	assert_ne "$nv" none "side $newside's addr_port $newaddr names a --dn guest"
+	assert_ne "$nk" none "side $newside's addr_port $newaddr names a dn instance"
+	ctl_ok dn get --addr "$newaddr"
+	assert_field "$CTL_OUT" '.dn_conf.side_ptr_list | length' 1 \
+		"disk node $newaddr carries one side, so killing it takes down no other"
+	assert_field "$CTL_OUT" '.dn_conf.side_ptr_list[0].side_id' "$newside" \
+		"and that side is leg $newleg's"
+	diag_note_dn "$nv" "$nk"
+
+	COPY_REP_LAST=""
+	copy_rep_copying "$newleg" ||
+		die "md finished, or stopped, its copy onto leg $newleg before its" \
+			"disk node could die in the middle of it"
+	log "  killing dn$nv instance $nk ($newaddr), which carries side" \
+		"$newside of leg $newleg while md copies onto it"
+	react_kill_dn "$nv" "$nk"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_REACT" \
+		"the primary's probe to give leg $newleg a health epoch (cnagent.md CN11)" \
+		copy_rep_leg_epoch "$pos" "$newleg" dead
+
+	# md's copy speed back as it read before step 5: a "(system)" value is
+	# put back as the word system, which hands the limit back to the kernel's
+	# own, and a "(local)" one as its number.
+	case "$COPY_REP_SPEED_MIN" in
+	*"(system)") min=system ;;
+	*) min=${COPY_REP_SPEED_MIN%%(*} ;;
+	esac
+	case "$COPY_REP_SPEED_MAX" in
+	*"(system)") max=system ;;
+	*) max=${COPY_REP_SPEED_MAX%%(*} ;;
+	esac
+	sync=$(helper_cn "$PRIMARY_CN" md_sync_speed "$COPY_REP_STAY_NAME" \
+		"$min" "$max") ||
+		die "putting group $gid's array copy speed back on cn$PRIMARY_CN" \
+			"failed: $sync"
+	assert_eq "$(kv_of "$sync" min):$(kv_of "$sync" max)" \
+		"$COPY_REP_SPEED_MIN:$COPY_REP_SPEED_MAX" \
+		"group $gid's array copy speed limits on cn$PRIMARY_CN, put back"
+	log "  md's copy speed on group $gid's array put back: $sync"
+	check_sha0 "through group $gid while leg $newleg's disk node is dead"
+
+	# The create, from the retired leg. The mark is where copy_reuse_catchup
+	# starts reading the primary's log for the add of the old leg's member.
+	mark=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") ||
+		die "cannot count the lines of $(cn_log) on cn$PRIMARY_CN"
+	case "$mark" in
+	'' | *[!0-9]*) die "the line count of $(cn_log) on cn$PRIMARY_CN reads '$mark'" ;;
+	esac
+	ctl_ok repair create --name "$COPY_REP1" --grp "$gid" \
+		--bad-legs "$newleg" --retired-leg "$bad"
+	COPY_REP1_ID=$(jq_of "$CTL_OUT" '.rep_id')
+	case "$COPY_REP1_ID" in
+	'' | *[!0-9]* | 0) die "repair create returned rep_id '$COPY_REP1_ID'" ;;
+	esac
+	assert_field "$CTL_OUT" '.new_leg_id' "$bad" \
+		"CreateRepairReply.new_leg_id is the retired leg taken back"
+	ctl_ok repair get --name "$COPY_REP1"
+	assert_field "$CTL_OUT" '.repair.rep_id' "$COPY_REP1_ID" \
+		"the stored rep_id is the one CreateRepair returned"
+	assert_field "$CTL_OUT" '.repair.grp_id' "$gid" "the repair names group $gid"
+	assert_field "$CTL_OUT" '.repair.slice_id' "$COPY_REP_SLICE" \
+		"the repair names slice 0 as its group's parent"
+	assert_field "$CTL_OUT" '.repair.bad_leg_id_list | join(",")' "$newleg" \
+		"the repair's one bad leg is leg $newleg"
+	assert_field "$CTL_OUT" '.repair.new_leg_list | length' 1 \
+		"the repair carries one new leg"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].leg_id' "$bad" \
+		"and it is leg $bad, under its own leg id"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list | length' 1 \
+		"with one side"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].side_id' \
+		"$COPY_REP_BADSIDE" "the side it kept as a retired leg"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].addr_port' \
+		"$COPY_REP_BADADDR" "on the disk node that came back"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned' \
+		true "a retired side is provisioned already, so nothing zeroes it"
+	assert_field "$CTL_OUT" '.repair.new_leg_id_to_retired_epoch | length' 1 \
+		"the repair keeps one retired time"
+	assert_field "$CTL_OUT" ".repair.new_leg_id_to_retired_epoch[\"$bad\"]" \
+		"$COPY_REP_EPOCH" \
+		"leg $bad's retired_epoch, which a cancel would give it back with"
+	assert_field "$CTL_OUT" '.repair.try_to_abort' false \
+		"the repair's abort flag is clear"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "$COPY_REP1" \
+		"the group names its repair"
+	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | length" 0 \
+		"leg $bad left the group's retired legs for the repair"
+	assert_field "$SP_JSON" '.sp_conf.retired_leg_id_list | length' 0 \
+		"and the pool's"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_id" "$newleg" \
+		"the bad leg $newleg keeps its place in leg_list until the finish"
+	ctl_ok retired-leg list
+	assert_field "$CTL_OUT" '.leg_id_to_retired_leg | length' 0 \
+		"ListRetiredLegs holds no retired leg while the repair carries leg $bad"
+
+	COPY_REP_LAST=""
+	msg="the worker to move repair $COPY_REP1 to STARTED: the primary takes"
+	msg="$msg leg $newleg out of group $gid's array and adds leg $bad back"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_stage_is "$COPY_REP1" REP_STAGE_STARTED
+	ctl_ok repair finish --name "$COPY_REP1"
+	assert_field "$CTL_OUT" '.rep_id' "$COPY_REP1_ID" "FinishRepairReply.rep_id"
+	assert_field "$CTL_OUT" '.retired_leg_id' "$newleg" \
+		"FinishRepairReply.retired_leg_id"
+	ctl_fail NOT_FOUND repair get --name "$COPY_REP1"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
+		"the group still has $LEGS legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_id" "$bad" \
+		"leg $bad holds position $pos again"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_idx" \
+		"$COPY_REP_BADIDX" "with the leg_idx it held before step 5"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].side_list[0].side_id" \
+		"$COPY_REP_BADSIDE" "and its own side"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" "the group names no repair"
+	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | join(\",\")" \
+		"$newleg" "the group lists leg $newleg as its one retired leg"
+	assert_field "$SP_JSON" '.sp_conf.repair_name_list | length' 0 \
+		"the pool lists no repair"
+	assert_field "$SP_JSON" '.sp_conf.retired_leg_id_list | join(",")' \
+		"$newleg" "the pool lists the one retired leg"
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+	ctl_ok retired-leg list
+	assert_field "$CTL_OUT" '.leg_id_to_retired_leg | length' 1 \
+		"ListRetiredLegs holds the one retired leg"
+	retired=".leg_id_to_retired_leg[\"$newleg\"]"
+	assert_field "$CTL_OUT" "$retired.grp_id" "$gid" \
+		"under leg $newleg's id, naming group $gid"
+	assert_field "$CTL_OUT" "$retired.leg_idx" "$COPY_REP_BADIDX" \
+		"and the leg_idx it held"
+	assert_field "$CTL_OUT" "$retired.side.side_id" "$newside" \
+		"the retired leg keeps leg $newleg's side"
+	assert_field "$CTL_OUT" "$retired.side.addr_port" "$newaddr" \
+		"on the dead disk node"
+	assert_field "$CTL_OUT" "$retired.slice_id" "$COPY_REP_SLICE" \
+		"its group's parent is slice 0"
+	epoch=$(jq_of "$CTL_OUT" "$retired.retired_epoch")
+	case "$epoch" in
+	'' | *[!0-9]* | 0) die "the retired leg's retired_epoch reads '$epoch'" ;;
+	esac
+	log "  leg $bad is back in its place; leg $newleg is retired at $epoch" \
+		"with side $newside on $newaddr"
+
+	# md holds the group whole on leg $bad, at the finish's revision; then how
+	# md took it back, host0's read and its kernel log since step 5's mark,
+	# and no cntlr holding leg $newleg any more.
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group $gid whole,"
+	msg="$msg in sync on legs $want"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$gid" "$rev" "$want"
+	copy_reuse_catchup "$mark" "$bad"
+	check_sha0 "once md held group $gid whole with leg $bad taken back"
+	host_kmsg_clean 0 "$COPY_REP_TAG" "once md held group $gid whole on leg $bad"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to hold every leg and no longer the retired leg $newleg" \
+		copy_rep_dropped full "$PRIMARY_CNTLR_ID" "$newleg"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the standby cntlr $STANDBY_CNTLR_ID to hold every leg and no longer the retired leg $newleg" \
+		copy_rep_dropped legs "$STANDBY_CNTLR_ID" "$newleg"
+
+	# The delete gives the new leg's side back to its dead disk node's
+	# record, which then carries no side: it carried that one alone.
+	ctl_ok dn get --addr "$newaddr"
 	dnsides=$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list | length')
 	dnfree=$(jq_of "$CTL_OUT" '.dn_conf.free_ext_cnt')
 	dntotal=$(jq_of "$CTL_OUT" '.dn_conf.total_ext_cnt')
 	for v in "$dnsides" "$dnfree" "$dntotal"; do
 		case "$v" in
 		'' | *[!0-9]*)
-			die "disk node $badaddr's record reads $dnsides side pointer(s)," \
+			die "disk node $newaddr's record reads $dnsides side pointer(s)," \
 				"free_ext_cnt '$dnfree', total_ext_cnt '$dntotal'"
 			;;
 		esac
 	done
 	assert_field "$CTL_OUT" \
-		"[.dn_conf.side_ptr_list[] | select(.side_id == \"$badside\")] | length" 1 \
+		"[.dn_conf.side_ptr_list[] | select(.side_id == \"$newside\")] | length" 1 \
 		"the retired leg's side stays in its disk node's record (architecture.md, Repair)"
-	ctl_ok retired-leg delete --leg "$bad"
-	assert_field "$CTL_OUT" '.leg_id' "$bad" "DeleteRetiredLegReply.leg_id"
+	ctl_ok retired-leg delete --leg "$newleg"
+	assert_field "$CTL_OUT" '.leg_id' "$newleg" "DeleteRetiredLegReply.leg_id"
 	ctl_ok retired-leg list
 	assert_field "$CTL_OUT" '.leg_id_to_retired_leg | length' 0 \
 		"the deleted retired leg is no longer listed"
@@ -14893,47 +15355,47 @@ copy_repair() {
 		"the pool lists no retired leg"
 	assert_field "$SP_JSON" "$COPY_GRP0.retired_leg_id_list | length" 0 \
 		"the group lists no retired leg"
-	ctl_ok dn get --addr "$badaddr"
+	ctl_ok dn get --addr "$newaddr"
 	after_sides=$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list | length')
 	after_free=$(jq_of "$CTL_OUT" '.dn_conf.free_ext_cnt')
 	assert_field "$CTL_OUT" \
-		"[.dn_conf.side_ptr_list[] | select(.side_id == \"$badside\")] | length" 0 \
-		"the retired side's pointer left disk node $badaddr's record"
+		"[.dn_conf.side_ptr_list[] | select(.side_id == \"$newside\")] | length" 0 \
+		"the retired side's pointer left disk node $newaddr's record"
 	assert_eq "$after_sides" "$((dnsides - 1))" \
-		"disk node $badaddr's side pointers after the delete"
-	assert_eq "$after_free" "$((dnfree + ext))" \
-		"disk node $badaddr's free extents after the delete, the group's ext_cnt $ext given back"
+		"disk node $newaddr's side pointers after the delete"
+	assert_eq "$after_free" "$((dnfree + COPY_REP_EXT))" \
+		"disk node $newaddr's free extents after the delete, the group's ext_cnt $COPY_REP_EXT given back"
 	assert_eq "$after_sides" 0 \
-		"disk node $badaddr carries no side now, as the pick made it carry the retired side alone"
+		"disk node $newaddr carries no side now, as it carried the retired side alone"
 	assert_eq "$after_free" "$dntotal" \
-		"disk node $badaddr's free extents equal its total again"
-	log "  disk node $badaddr's record: $dnsides side pointer(s) and" \
+		"disk node $newaddr's free extents equal its total again"
+	log "  disk node $newaddr's record: $dnsides side pointer(s) and" \
 		"$dnfree free extent(s) before the delete, $after_sides and" \
 		"$after_free of $dntotal after it"
 
-	# The disk node comes back. Its agent finds a side no record names and
-	# removes it (dnagent.md DN6), and its counts then agree with its record
-	# (dnagent.md DN18), both now empty.
-	react_return_dn "$dnv" "$dnk"
+	# The new leg's disk node comes back. Its agent finds a side no record
+	# names and removes it (dnagent.md DN6), and its counts then agree with its
+	# record (dnagent.md DN18), both now empty.
+	react_return_dn "$nv" "$nk"
 	DN_COUNTS_LAST=""
 	wait_until "$WAIT_PROVISION" \
-		"dn$dnv instance $dnk to remove the deleted side and count its whole data area free, as its record does" \
-		dn_counts_agree "$dnv" "$dnk"
+		"dn$nv instance $nk to remove the deleted side and count its whole data area free, as its record does" \
+		dn_counts_agree "$nv" "$nk"
 	sp_refresh
 	sp_totals
 	stack_wait_reset
 	wait_until "$WAIT_PROVISION" \
-		"the primary to report all $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs again" \
+		"the primary to report all $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs again" \
 		cntlr_full_ready "$PRIMARY_CNTLR_ID"
 
 	sp_refresh
 	sp_read_roles
-	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
-		"the primary after the repair is the one the step started with (a dead leg must not fail the primary over)"
-	assert_eq "$(worker_failover_cnt)" "$before_failovers" \
-		"the worker's applied failovers across the step (a dead leg must not fail the primary over)"
-	check_sha0 "at the end of the repair step"
-	host_kmsg_clean 0 "$COPY_REP_TAG" "at the end of the repair step"
+	assert_eq "$PRIMARY_CNTLR_ID" "$COPY_REP_PRIMARY" \
+		"the primary after the two repairs is the one step 5 started with (a dead leg must not fail the primary over)"
+	assert_eq "$(worker_failover_cnt)" "$COPY_REP_FAILOVERS" \
+		"the worker's applied failovers across the two repair steps (a dead leg must not fail the primary over)"
+	check_sha0 "at the end of the repair steps"
+	host_kmsg_clean 0 "$COPY_REP_TAG" "at the end of the repair steps"
 }
 
 # ---------------------------------------------------------------------------
@@ -15101,7 +15563,7 @@ copy_failover() {
 
 	sp_refresh
 	sp_read_roles
-	[ "$SPARE_CN" -ge 0 ] ||
+	[ "$IDLE_CN" -ge 0 ] ||
 		die "copy step 7 needs a CN that carries no cntlr of $SP for its" \
 			"second pool's source, and every --cn guest carries one"
 	copy_cn_host_nqns
@@ -15375,8 +15837,8 @@ case_copy() {
 	copy_clone
 	copy_xfer_delete
 	copy_migration
-	copy_spare
 	copy_repair
+	copy_reuse
 	copy_failover
 	case_finish
 }
@@ -15443,10 +15905,10 @@ case_copy() {
 #  the old id stays in cntlr_id_list at AR5 and leaves it at AR7. The COUNT
 #  changes at neither, since ReplaceCntlr swaps one id for another in one STM.
 #
-#  AR8 (leg repair). legNeedsRepair REQUIRES `Leg.err_epoch != 0` before either
-#  threshold is even looked at, and its own comment says why: "a side the
-#  worker cannot reach while the primary still sees the leg healthy triggers
-#  nothing" (legNeedsRepair (worker/reaction.go)). A leg's err_epoch comes
+#  AR8 (leg repair). Both of its triggers REQUIRE `Leg.err_epoch != 0`
+#  before either threshold is even looked at: "a side the worker cannot
+#  reach while the primary still sees the leg healthy triggers nothing"
+#  (dnv-worker.md AR8). A leg's err_epoch comes
 #  from the PRIMARY's CN11 probe, runLegProbe (agent/cnagent/healthcheck.go),
 #  which is a real write+O_DIRECT read of the leg's health block through the
 #  leg wrapper (CN28 in legProbeOutcome).
@@ -15454,7 +15916,7 @@ case_copy() {
 #  port and its dm-linear live in the KERNEL and outlive the process that
 #  created them, so with the agent dead the CN's probe IO still succeeds, the
 #  leg stays RES_STATUS_OK, err_epoch stays 0 and AR8 never fires: a case
-#  that killed one dn agent and then waited for the worker's spare
+#  that killed one dn agent and then waited for the worker's repair
 #  would simply run out its budget. This case therefore kills the agent AND
 #  drops that instance's nvmet port (the helper's `port_drop`, which is exactly
 #  what the start cleanup would do to it), which is what a dead DN VM looks
@@ -15499,10 +15961,11 @@ case_copy() {
 #  * That the old primary's namespace goes ANA-inaccessible after AR5. Nothing
 #    can make it: its agent is dead (see above). The failover is asserted on the
 #    record and on the NEW primary serving the data.
-#  * That the parked leg AR8 leaves behind is removed. `sp delete` does not
-#    list spare legs among its five blockers, and the drain releases them
-#    explicitly (legsOf (model/drain.go), "active legs first, spares
-#    after … both are released"), so case_residue's capacity check covers it.
+#  * That the retired legs AR8's repairs leave behind are deleted by the case.
+#    `sp delete` does not list retired legs among its blockers, and the sp
+#    drain deletes them and gives their sides back (dnv-worker.md SPD15), so
+#    case_residue's capacity check covers them; their disk nodes come back
+#    first, as only a live agent removes a side its record no longer names.
 #
 # ===========================================================================
 # THIS CASE'S OWN BUILD MAY HAVE REACTED BEFORE THE CASE STARTS
@@ -15521,12 +15984,13 @@ case_copy() {
 # WAIT_BUILD — and under that load its converges hold the reads of its cntlr
 # off until the observation its check rounds answer from is older than the
 # worker's bound (dnv-worker.md HL7). A build under this set can record, all
-# inside setup, a
-# `failover`, a `spare_create` and a `failover` back.
+# inside setup, a `failover` and a `failover` back; a repair of the worker's
+# inside setup is possible as well, though not measured.
 #
-# So when this case starts, the sp MAY already hold a spare leg it did not ask
-# for, and the primary MAY be a different controller than the one the create
-# elected. That is expected and it is not a bug. Every assertion below is
+# So when this case starts, the sp MAY already hold a repair of the worker's,
+# or the retired leg one left, that it did not ask for, and the primary MAY be
+# a different controller than the one the create elected. That is expected
+# and it is not a bug. Every assertion below is
 # therefore written against a SNAPSHOT of the shape the case actually starts
 # from (react_snapshot, and the per-step `before` readings each step takes for
 # itself), never against a count that assumes a pristine build:
@@ -15534,8 +15998,9 @@ case_copy() {
 #   * the primary is read through PRIMARY_CNTLR_ID after a fresh sp_read_roles,
 #     so which controller it is has never mattered here;
 #   * AR6's proof is "slice 0 gained one data group", not "slice 0 has two";
-#   * AR8's proof is "the group gained one spare and then parked the dead leg
-#     in it", not "the group holds exactly one spare".
+#   * AR8's proof is "the worker created a repair of the dead leg, under a
+#     name with the reserved prefix, and finished it, the dead leg retired",
+#     not "the pool holds exactly one retired leg".
 #
 # The one thing a snapshot cannot rescue is a build that never converges: if the
 # failover loop keeps handing the role back and forth, each new primary starts
@@ -15606,13 +16071,13 @@ REACT_OLD_STANDBY_ID=""
 # replacement must land, because a CN with a cntlr of this SP is excluded by
 # architecture.md, Finding CN candidates (otherCntlrAddrs), and the dead one
 # is black-listed by AR7 itself (tryReplaceCntlr (worker/reaction.go)).
-# REACT_SPARE_CN is the first of them, for the
-# log line; REACT_SPARE_ADDRS is the whole set as a ,-delimited string with
+# REACT_IDLE_CN is the first of them, for the
+# log line; REACT_IDLE_ADDRS is the whole set as a ,-delimited string with
 # leading and trailing commas, because with more than three --cn guests
 # model.PickRandom may take any of them and an equality against one would be a
 # false failure.
-REACT_SPARE_CN=-1
-REACT_SPARE_ADDRS=""
+REACT_IDLE_CN=-1
+REACT_IDLE_ADDRS=""
 
 # The cntlr AR5 elected in step 3. Steps 3 and 4 are both written about it —
 # step 3 waits for ITS rebuild and connects host0 to ITS transport, step 4
@@ -15627,7 +16092,10 @@ REACT_REPL_ID=""
 REACT_REPL_ADDR=""
 REACT_REPL_TRADDR=""
 
-# AR8: the leg this case kills, and the spare the worker puts in its place.
+# AR8: the leg this case kills, the repair the worker creates for it and the
+# new leg that repair puts in its place; REACT_REP_MARK is the worker log's
+# line count before the kill, after which the stage reads the worker's
+# records of that repair (worker_log_mark, worker_rep_started).
 REACT_GRP_ID=""
 REACT_LEG_ID=""
 REACT_LEG_POS=-1
@@ -15635,11 +16103,18 @@ REACT_SIDE_ID=""
 REACT_SIDE_ADDR=""
 REACT_DN_VM=-1
 REACT_DN_INST=-1
-REACT_SPARE_LEG=""
+REACT_REP_NAME=""
+REACT_REP_MARK=0
+REACT_NEW_LEG=""
+REACT_NEW_SIDE=""
+REACT_NEW_ADDR=""
+# The group's retired legs, each leg id to its retired_epoch, as
+# react_retired_read last read them.
+REACT_RETIRED=""
 
 # AR8 on a group with no healthy leg (step 6), the readings its outage's
 # predicates compare against. REACT_DEAD_LEGS is the group's leg_list ids in
-# order and REACT_DEAD_SPARES its spare leg ids sorted, each a jq array
+# order and REACT_DEAD_RETIRED its retired leg ids sorted, each a jq array
 # literal read before the kills; REACT_DEAD_MARK the worker log's line count
 # at that moment, after which the step counts the worker's records
 # (worker_log_mark); REACT_DEAD_UNTIL the driver-clock instant the step's
@@ -15647,7 +16122,7 @@ REACT_SPARE_LEG=""
 # replaced legs' ids and REACT_DEAD_NEW the ids of the legs AR8 put in their
 # places, each a space-separated list, which react_dead_members reads.
 REACT_DEAD_LEGS=""
-REACT_DEAD_SPARES=""
+REACT_DEAD_RETIRED=""
 REACT_DEAD_MARK=0
 REACT_DEAD_UNTIL=0
 REACT_DEAD_OLD=""
@@ -15671,6 +16146,14 @@ REACT_DEAD_EPOCHS="[$COPY_GRP0.leg_list[] | \"leg \(.leg_id) \(.err_epoch)\",
 # each of them. A count of this suite's choosing, not a constant of the tree.
 REACT_DEAD_PASSES=3
 
+# common.MaxRetiredLegPerGrp — the most retired legs a group holds
+# (architecture.md, Retired legs). React's repair stages hold the group's
+# retired legs after each finish to the list the finish's rule gives: below
+# this bound the replaced leg joins them, and at it a worker's finish first
+# gives back the group's oldest retired leg (architecture.md, Repairs,
+# FinishRepair; react_retired_given).
+MAX_RETIRED_LEG_PER_GRP=2
+
 # The "last observation" scratch of this section's predicates, same discipline
 # as ANA_LAST / SHA_LAST / MIGR_HYD_LAST: each is logged from inside its own
 # predicate when the value CHANGES and is never interpolated into a wait_until
@@ -15679,9 +16162,13 @@ REACT_CHUNK_LAST=""
 REACT_POOL_LAST=""
 REACT_ROLE_LAST=""
 REACT_SETTLE_LAST=""
-REACT_SPARE_LAST=""
+REACT_REP_LAST=""
 REACT_DEAD_LAST=""
 REACT_MEMBER_LAST=""
+REACT_NO_REP_LAST=""
+# The driver-clock instant react_wait_no_repair stops waiting for the pool's
+# repairs to end and dies naming them.
+REACT_NO_REP_UNTIL=0
 
 # --- the shape this case starts from (see the header) -----------------------
 #
@@ -15690,17 +16177,17 @@ REACT_MEMBER_LAST=""
 # reacting threshold set is not necessarily the fresh-sp shape.
 #
 # WHAT READS THEM, exactly — because "every later assertion is written against
-# the snapshot" would be the wrong sentence. ONE of the five is read by a later
-# assertion: REACT_BASE_SLICE0_DATA, by step 01. The other four are recorded for
+# the snapshot" would be the wrong sentence. ONE of the six is read by a later
+# assertion: REACT_BASE_SLICE0_DATA, by step 01. The other five are recorded for
 # the log line and for react_snapshot's own `!!!` fresh-shape shout, and nothing
 # else touches them. Every step that is judged on a DELTA takes its own `before`
 # reading immediately before the act it judges — react_grow's before_grps and
-# before_data, react_leg_repair's before_spares/before_spare_cnt/before_sp_spares
-# — because the shape can move between stage 00 and that act under this case's
-# thresholds, and a delta measured from stage 00 would then be a delta against
-# the wrong baseline.
+# before_data, react_leg_repair's before_retired — because the shape can move
+# between stage 00 and that act under this case's thresholds, and a delta
+# measured from stage 00 would then be a delta against the wrong baseline.
 #
-# REACT_BASE_SPARE_TOTAL   spare legs in the WHOLE sp (log and shout only)
+# REACT_BASE_REPAIR_TOTAL  repairs in the WHOLE sp (log and shout only)
+# REACT_BASE_RETIRED_TOTAL retired legs in the WHOLE sp (log and shout only)
 # REACT_BASE_GRP_TOTAL     groups in the whole sp (log and shout only)
 # REACT_BASE_LEG_TOTAL     active legs in the whole sp (log and shout only)
 # REACT_BASE_PRIMARY_ID    the cntlr that is primary when the case starts. It is
@@ -15712,7 +16199,8 @@ REACT_MEMBER_LAST=""
 # REACT_BASE_SLICE0_DATA   slice 0's data-group count, i.e. the index the group
 #                          AR6 appends will occupy (GrowSlice appends). The one
 #                          value a later step asserts against (step 01).
-REACT_BASE_SPARE_TOTAL=0
+REACT_BASE_REPAIR_TOTAL=0
+REACT_BASE_RETIRED_TOTAL=0
 REACT_BASE_GRP_TOTAL=0
 REACT_BASE_LEG_TOTAL=0
 REACT_BASE_PRIMARY_ID=""
@@ -16045,8 +16533,9 @@ worker_demotion_unsynced_cnt() { # <cntlr id>
 }
 
 # worker_log_mark prints how many lines the worker's log holds now: the mark
-# worker_grp_reaction_cnt counts after, so that a step's count holds only the
-# records written since its own baseline, never what the log held before it.
+# worker_grp_reaction_cnt and worker_rep_started read after, so that a step's
+# count holds only the records written since its own baseline, never what the
+# log held before it.
 # Fatal on a log it cannot read, as worker_failover_cnt is.
 worker_log_mark() {
 	local n
@@ -16063,7 +16552,8 @@ worker_log_mark() {
 # skipped` (dnv-worker.md, Log records), whose kind or reason, as <field>
 # names, reads <value>, and whose grp_id is <grp id>; given a <leg id>, whose
 # leg_id is that one too. AR8's records name their target by grp_id and leg_id
-# as bare numbers (repairTarget.ids (worker/reaction.go)). The guest keeps the
+# as bare numbers, the fields the worker's code gives them (dnv-worker.md,
+# Log records). The guest keeps the
 # lines after the mark that carry the msg as a fixed string, with awk, whose
 # status tells an unreadable log from an empty answer, and the driver parses
 # what is left, as worker_demotion_unsynced_cnt does; `fromjson?` drops a
@@ -16242,73 +16732,343 @@ react_cn_has_no_cntlr() { # <cn addr_port>
 	[ "$n" = 0 ]
 }
 
-# react_spare_cnt_reaches is the wait for AR8's create: true once the group
-# holds AT LEAST <want> spare legs. At least, and not exactly, so that a double
-# create fails on the assertion that names it and not as a timeout: if AR8
-# ever creates two spares for one repair (pendingSpare in worker/reaction.go
-# guards against it) and the wait's FIRST grown reading lands
-# after both, the count goes from before straight to before + 2, and an
-# equality wait burns its whole WAIT_REACT and dies naming the wait instead of
-# the fault. That is defensive rather than observed: the creates are separate
-# passes at least one cntlr_interval apart (AR2) and this wait polls from before
-# the first, so only a poll stalled for more than a pass gets there. Stopping at
-# the first grown count hands the verdict to the assertions after it, "exactly
-# one spare leg is new since AR8 started" and the parked-set comparison after
-# the switch, which exist to catch that fault.
-react_spare_cnt_reaches() { # <want>
-	local n
-	if ! ctl_try sp get; then
-		return 1
-	fi
-	n=$(jq_of "$CTL_OUT" "$COPY_GRP0.spare_leg_list | length")
-	case "$n" in
-	'' | *[!0-9]*) return 1 ;;
+# worker_rep_started prints the rep_name of every repair of group <grp id>
+# the worker moved to STARTED after line <mark> of its log (worker_log_mark),
+# one line per record, in log order, so a caller counts records and not
+# names: its `repair stage moved` records with stage REP_STAGE_STARTED
+# (dnv-worker.md AR11, Log records), which name the repair by rep_name,
+# rep_id and grp_id, the ids as bare numbers. The guest keeps
+# the lines after the mark that carry the msg as a fixed string, with awk,
+# whose status tells an unreadable log from an empty answer, and the driver
+# parses what is left; `fromjson?` drops a line torn by a write still in
+# progress. Fatal on a log it cannot read, as worker_failover_cnt is.
+worker_rep_started() { # <mark> <grp id>
+	local lines
+	case "$1:$2" in
+	*[!0-9:]* | :* | *:)
+		die "worker_rep_started takes decimal numbers, not mark '$1'," \
+			"grp '$2'"
+		;;
 	esac
-	if [ "$n" != "$REACT_SPARE_LAST" ]; then
-		REACT_SPARE_LAST=$n
-		log "  group $REACT_GRP_ID holds $n spare leg(s)"
-	fi
-	[ "$n" -ge "$1" ]
+	lines=$(ssh_cp "awk -v m=$1 -v p='\"msg\":\"repair stage moved\"' \
+		'NR > m && index(\$0, p)' $WORK/worker/worker.log") ||
+		die "cannot read the 'repair stage moved' records in" \
+			"$WORK/worker/worker.log on $CP_IP"
+	[ -n "$lines" ] || return 0
+	printf '%s\n' "$lines" | "$JQ" -R -s -r --argjson g "$2" '
+		split("\n")[] | fromjson? // empty
+		| select(.stage == "REP_STAGE_STARTED" and .grp_id == $g)
+		| .rep_name' ||
+		die "worker_rep_started: jq failed on the 'repair stage moved'" \
+			"records of $WORK/worker/worker.log"
 }
 
-# react_spare_switched is AR8 step 1 seen from the record:
-# SwitchSpareLeg (model/ops.go) puts
-# the spare in the target's POSITION in leg_list and parks the target in
-# spare_leg_list, keeping its err_epoch. So the test is
-# "the dead leg is no longer active AND is now parked" — both halves, because
-# either one alone is also what a half-applied transaction would look like.
-# It names no spare, so it holds whichever spare AR8 took, a ready one or
-# one it created first: steps 5 and 6 both wait on it for a leg of slice 0's
-# first data group.
-react_spare_switched() { # <dead leg id>
-	local act park
+# react_rep_name_ok dies unless <rep name> is a name the worker gives a
+# repair of slice 0's first data group: common.RepNameReservedPrefix, then
+# the pool id and the group id, each as hex16 renders it and each followed by
+# an underscore, as common.WorkerRepName writes them (architecture.md, Common
+# validation). The time of the create, which WorkerRepName writes last, is
+# logged and never asserted.
+react_rep_name_ok() { # <rep name>
+	local want
+	want="__internal__$(hex16 "$SP_ID")_$(hex16 "$REACT_GRP_ID")_"
+	case "$1" in
+	"$want"*) ;;
+	*)
+		die "the repair of group $REACT_GRP_ID is named '$1', which does" \
+			"not start with '$want': the worker names its repairs with the" \
+			"reserved prefix, the pool id and the group id (architecture.md," \
+			"Common validation)"
+		;;
+	esac
+	log "  the worker's repair of group $REACT_GRP_ID is $1, made at" \
+		"${1#"$want"} (hex unix seconds, not asserted)"
+}
+
+# react_rep_open is AR8's create seen from the record, a repair stage's
+# first wait: true once slice 0's first data group names a repair by its
+# rep_name, which it keeps in REACT_REP_NAME, or once leg <leg id> is
+# already one of the group's retired legs, a repair the poll missed whole,
+# whose name the stage then reads from the worker's log. While nothing has
+# happened the leg must still hold <position> of the group's leg_list.
+# What it reads is logged as it changes.
+react_rep_open() { # <position> <leg id>
+	local rep inret id sig
 	if ! ctl_try sp get; then
 		return 1
 	fi
-	act=$(jq_of "$CTL_OUT" \
-		"[$COPY_GRP0.leg_list[] | select(.leg_id == \"$1\")] | length")
-	park=$(jq_of "$CTL_OUT" \
-		"[$COPY_GRP0.spare_leg_list[] | select(.leg_id == \"$1\")] | length")
-	case "$act$park" in
-	'' | *[!0-9]*) return 1 ;;
+	rep=$(jq_of "$CTL_OUT" "$COPY_GRP0.rep_name")
+	inret=$(jq_of "$CTL_OUT" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$2\")] | length")
+	id=$(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$1].leg_id")
+	sig="group $REACT_GRP_ID: repair '$rep', leg $2 retired $inret,"
+	sig="$sig position $1 holds leg $id"
+	if [ "$sig" != "$REACT_REP_LAST" ]; then
+		REACT_REP_LAST=$sig
+		log "  $sig"
+	fi
+	if [ -n "$rep" ]; then
+		REACT_REP_NAME=$rep
+		return 0
+	fi
+	[ "$inret" = 1 ] && return 0
+	[ "$id" = "$2" ] ||
+		die "leg $2 left position $1 of group $REACT_GRP_ID for leg '$id'" \
+			"with no repair named and without being retired"
+	return 1
+}
+
+# react_rep_done is a repair stage's second wait: true once the group names
+# no repair and leg <leg id> is one of its retired legs, the record a finish
+# leaves, and only a STARTED repair takes a finish (architecture.md,
+# Repairs, FinishRepair). The repair's stage, abort flag and new leg are
+# logged as they change, read through `repair get` while the group still
+# names it. It dies when the group names a repair other than REACT_REP_NAME,
+# set by the first wait, and when the repair is gone with the leg not
+# retired: the worker cancelled it after an abort (dnv-worker.md, Leg
+# repair), which nothing in these stages leads to.
+react_rep_done() { # <leg id>
+	local rep inret sig
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	rep=$(jq_of "$CTL_OUT" "$COPY_GRP0.rep_name")
+	inret=$(jq_of "$CTL_OUT" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$1\")] | length")
+	if [ -z "$rep" ]; then
+		[ "$inret" = 1 ] && return 0
+		die "repair '$REACT_REP_NAME' of group $REACT_GRP_ID went away and" \
+			"leg $1 is not retired: the worker aborted and cancelled it" \
+			"(dnv-worker.md, Leg repair), which nothing here leads to"
+	fi
+	[ -z "$REACT_REP_NAME" ] || [ "$rep" = "$REACT_REP_NAME" ] ||
+		die "group $REACT_GRP_ID names repair '$rep' after" \
+			"'$REACT_REP_NAME': a group holds one repair at a time" \
+			"(architecture.md, Repairs), so the first went away unfinished"
+	if ctl_try repair get --name "$rep"; then
+		sig="repair $rep $(jq_of "$CTL_OUT" '.repair.rep_stage'), abort flag"
+		sig="$sig $(jq_of "$CTL_OUT" '.repair.try_to_abort'); new leg"
+		sig="$sig $(jq_of "$CTL_OUT" '.repair.new_leg_list[0].leg_id'), its"
+		sig="$sig err_epoch $(jq_of "$CTL_OUT" '.repair.new_leg_list[0].err_epoch'),"
+		sig="$sig its side provisioned"
+		sig="$sig $(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned')"
+	else
+		sig="repair $rep unread: ${CTL_ERR:-dnvctl exit code $CTL_RC}"
+	fi
+	if [ "$sig" != "$REACT_REP_LAST" ]; then
+		REACT_REP_LAST=$sig
+		log "  $sig"
+	fi
+	return 1
+}
+
+# react_rep_read reads the worker's open repair REACT_REP_NAME through
+# `repair get` and asserts what the worker's create writes (architecture.md,
+# Repairs, CreateRepair): group REACT_GRP_ID, the one bad leg <leg id>, one
+# new leg with one side, taken fresh, so with no retired time kept and with
+# a leg id that is neither a leg of the group nor one of <retired ids>, a jq
+# array literal. It fills REACT_NEW_LEG, REACT_NEW_SIDE and REACT_NEW_ADDR
+# from the record, or leaves them empty when the repair is gone already, a
+# finish between the polls, which it logs: the stage then reads the new leg
+# from the place it took in leg_list.
+react_rep_read() { # <leg id> <retired ids>
+	REACT_NEW_LEG=""
+	REACT_NEW_SIDE=""
+	REACT_NEW_ADDR=""
+	if ! ctl_try repair get --name "$REACT_REP_NAME"; then
+		case "$CTL_ERR" in
+		*NOT_FOUND*)
+			log "  repair $REACT_REP_NAME was finished before it could be" \
+				"read; its new leg is read from leg_list"
+			return 0
+			;;
+		esac
+		die "repair get --name $REACT_REP_NAME failed:" \
+			"${CTL_ERR:-dnvctl exit code $CTL_RC}"
+	fi
+	assert_field "$CTL_OUT" '.repair.grp_id' "$REACT_GRP_ID" \
+		"the worker's repair names group $REACT_GRP_ID"
+	assert_field "$CTL_OUT" '.repair.bad_leg_id_list | join(",")' "$1" \
+		"its one bad leg is leg $1"
+	assert_field "$CTL_OUT" '.repair.new_leg_list | length' 1 \
+		"it carries one new leg"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list | length' 1 \
+		"the new leg has exactly one side"
+	assert_field "$CTL_OUT" '.repair.new_leg_id_to_retired_epoch | length' 0 \
+		"the worker's repair takes a fresh leg, so it keeps no retired time"
+	REACT_NEW_LEG=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].leg_id')
+	REACT_NEW_SIDE=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].side_id')
+	REACT_NEW_ADDR=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].addr_port')
+	case "$REACT_NEW_LEG:$REACT_NEW_SIDE" in
+	*[!0-9:]* | :* | *: | 0:* | *:0)
+		die "the worker's repair carries new leg '$REACT_NEW_LEG' with side" \
+			"'$REACT_NEW_SIDE'"
+		;;
 	esac
-	[ "$act" = 0 ] && [ "$park" = 1 ]
+	assert_jq "$2" "([\"$REACT_NEW_LEG\"] - .) | length == 1" \
+		"the new leg $REACT_NEW_LEG is none of the group's retired legs"
+	log "  repair $REACT_REP_NAME reads" \
+		"$(jq_of "$CTL_OUT" '.repair.rep_stage'): bad leg $1, new leg" \
+		"$REACT_NEW_LEG with side $REACT_NEW_SIDE on $REACT_NEW_ADDR"
+}
+
+# react_retired_read fills REACT_RETIRED with the retired legs of slice 0's
+# first data group as a jq object literal, each leg id to its retired_epoch:
+# the ids the group's retired_leg_id_list in $SP_JSON names, the times from
+# `retired-leg list`, whose reply it leaves in CTL_OUT. It dies when a listed
+# leg has no record there, or one that names another group or carries no
+# retired_epoch. The times are what a finish's give-back orders the retired
+# legs by (react_retired_given).
+react_retired_read() {
+	local ids bad
+	ids=$(sp_field "$COPY_GRP0 | [.retired_leg_id_list[]] | tojson")
+	ctl_ok retired-leg list
+	bad=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg as \$m
+		| [$ids[] | select((\$m[.].grp_id // \"\") != \"$REACT_GRP_ID\"
+			or ((\$m[.].retired_epoch // \"\") | test(\"^[1-9][0-9]*\$\") | not))]
+		| join(\",\")")
+	[ -z "$bad" ] ||
+		die "group $REACT_GRP_ID lists retired leg(s) $bad, which" \
+			"\`retired-leg list\` holds with no record, with another group" \
+			"or with no retired_epoch"
+	REACT_RETIRED=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg as \$m
+		| [$ids[] | {key: ., value: \$m[.].retired_epoch}] | from_entries
+		| tojson")
+}
+
+# react_retired_given prints the retired leg a finish of the worker's repair
+# gives back from a group that holds the retired legs <retired>, a jq object
+# literal from react_retired_read, or nothing when it gives none back. At
+# common.MaxRetiredLegPerGrp retired legs the finish first gives back the
+# oldest, the one with the smallest retired_epoch and, among equal times,
+# the smallest leg id; below it the finish gives none back (architecture.md,
+# Repairs, FinishRepair). Ids and times are decimal strings (dnvctl.md CT4)
+# with no leading zero, so each compares by its length first.
+react_retired_given() { # <retired>
+	jq_of "$1" "to_entries
+		| if length >= $MAX_RETIRED_LEG_PER_GRP
+		  then sort_by([(.value | length), .value, (.key | length), .key])
+		       | .[0].key
+		  else \"\" end"
+}
+
+# react_retired_want prints the group's retired leg ids, sorted, as a jq
+# array literal, that a finish of the worker's repair of <leg id> leaves the
+# group that held the retired legs <retired>, a jq object literal from
+# react_retired_read: the ones it held, less the one the finish gave back
+# (react_retired_given), plus the leg the repair replaced.
+react_retired_want() { # <retired> <leg id>
+	local given
+	given=$(react_retired_given "$1")
+	jq_of "$1" "[keys[] | select(. != \"$given\")] + [\"$2\"] | sort | tojson"
+}
+
+# react_new_leg_placed asserts where the new leg <leg id> at <position> of
+# the group's leg_list landed, from $SP_JSON after the finish: one side, on
+# a disk node that is none of <addrs>, the disk nodes the group's legs held
+# before the kill, a ,-joined list; and, where the allocator's first tier has
+# somewhere anti-affine to go, on a DN VM that is none of <vms>
+# (architecture.md, Per-operation allocation; E2E4). When react_rep_read
+# filled REACT_NEW_SIDE, the side must be that one.
+react_new_leg_placed() { # <position> <leg id> <addrs> <vms>
+	local side addr vm
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$1].side_list | length" 1 \
+		"the new leg $2 has exactly one side"
+	side=$(sp_field "$COPY_GRP0.leg_list[$1].side_list[0].side_id")
+	addr=$(sp_field "$COPY_GRP0.leg_list[$1].side_list[0].addr_port")
+	vm=${addr%:*}
+	if [ -n "$REACT_NEW_SIDE" ]; then
+		assert_eq "$side" "$REACT_NEW_SIDE" \
+			"the new leg $2 keeps the side the repair carried"
+	fi
+	case ",$3," in
+	*",$addr,"*)
+		die "the new leg $2 landed on $addr, a disk node the group held;" \
+			"a repair's fresh leg is placed outside the group's disk nodes" \
+			"(architecture.md, Per-operation allocation)"
+		;;
+	esac
+	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
+		case ",$4," in
+		*",$vm,"*)
+			die "the new leg $2 landed on a DN VM the group occupies ($4)." \
+				"Tier 1 (architecture.md, Per-operation allocation) excludes" \
+				"the group's locations and relaxes only when no DN outside" \
+				"them can take the group's ext_cnt"
+			;;
+		esac
+	else
+		log "  $DN_VM_CNT DN VM(s) and $LEGS leg(s) per group: tier 1" \
+			"(architecture.md, Per-operation allocation) has nowhere" \
+			"anti-affine to go, so the new leg's VM is not asserted (E2E4)"
+	fi
+	log "  leg $2 on $addr took position $1 of group $REACT_GRP_ID"
+}
+
+# react_wait_no_repair is the first act of react steps 5 and 6, ahead of
+# their readings and of their pick of legs: it waits until the pool holds no
+# repair at all, sp_conf.repair_name_list empty in `sp get`, logs every
+# repair it sees meanwhile, and dies naming the ones still there after
+# $WAIT_PROVISION. Two things need it. `sp get` leaves out a repair's new
+# leg, which every cntlr connects at every stage of the repair (cnagent.md
+# CN12), so the disk-node rule (react_leg_alone) cannot see whether such a
+# leg sits on a disk node the step kills. And every stage move, provisioned
+# flip, finish, abort or cancel of a repair bumps the pool's revision, which
+# step 6 holds unchanged across its watch. This case's build may leave a
+# repair of the worker's open (see the section header), and this wait lets
+# it end.
+react_wait_no_repair() {
+	REACT_NO_REP_LAST=""
+	REACT_NO_REP_UNTIL=$((SECONDS + WAIT_PROVISION))
+	wait_until "$((WAIT_PROVISION + WAIT_SHORT))" \
+		"$SP to hold no repair (sp_conf.repair_name_list empty)" \
+		react_no_repair
+}
+
+# react_no_repair is react_wait_no_repair's predicate: true once `sp get`
+# lists no repair of the pool. The repairs it reads are logged as they
+# change; past REACT_NO_REP_UNTIL it dies naming them.
+react_no_repair() {
+	local names
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	names=$(jq_of "$CTL_OUT" '(.sp_conf.repair_name_list // []) | join(",")')
+	if [ "$names" != "$REACT_NO_REP_LAST" ]; then
+		if [ -n "$names" ]; then
+			log "  $SP holds repair(s) $names; the step waits until it holds none"
+		elif [ -n "$REACT_NO_REP_LAST" ]; then
+			log "  $SP holds no repair any more"
+		fi
+		REACT_NO_REP_LAST=$names
+	fi
+	[ -n "$names" ] || return 0
+	[ "$SECONDS" -lt "$REACT_NO_REP_UNTIL" ] ||
+		die "$SP still holds repair(s) $names after ${WAIT_PROVISION}s." \
+			"The step's disk-node rule (react_leg_alone) cannot see a" \
+			"repair's new leg, which \`sp get\` leaves out, and a repair's" \
+			"stage moves and finish bump the revision step 6 holds"
+	return 1
 }
 
 # react_leg_alone is the disk-node rule of react steps 5 and 6 and of copy
-# step 6, read from $SP_JSON: leg <i> of slice 0's first data group's leg_list
+# step 5, read from $SP_JSON: leg <i> of slice 0's first data group's leg_list
 # has exactly one side, and that side's disk node carries no other side of
-# the sp, spare and parked legs' sides counted (SP_ANY_SIDE_PATH). Killing
-# that disk node then takes down exactly the one side the step names;
-# react_leg_repair says what a second side there would do, and copy_repair
-# why its pool has no other side `sp get` leaves out.
+# the sp's legs (SP_SIDE_PATH). Killing that disk node then takes down
+# exactly the one leg the step names. `sp get` leaves out two kinds of side:
+# a repair's new leg, which every cntlr connects, and a retired leg's side,
+# which no cntlr connects (architecture.md, Repair). The two react steps
+# first wait until the pool holds no repair (react_wait_no_repair), so only
+# retired sides are left out, and a retired side on the node moves nothing a
+# step asserts; react_leg_repair says what a second side there would do, and
+# copy_repair why its pool has no side `sp get` leaves out.
 react_leg_alone() { # <i>
 	local saddr hits
 	if [ "$(sp_field "$COPY_GRP0.leg_list[$1].side_list | length")" != 1 ]; then
 		return 1
 	fi
 	saddr=$(sp_field "$COPY_GRP0.leg_list[$1].side_list[0].addr_port")
-	hits=$(sp_field "[$SP_ANY_SIDE_PATH | select(.addr_port == \"$saddr\")] | length")
+	hits=$(sp_field "[$SP_SIDE_PATH | select(.addr_port == \"$saddr\")] | length")
 	[ "$hits" = 1 ]
 }
 
@@ -16319,9 +17079,9 @@ react_leg_alone() { # <i>
 # probe would keep succeeding and Leg.err_epoch would stay 0. The agent goes
 # first, as a live agent puts its port back at its next converge (dnagent.md
 # DN5, DN10), which is what react_return_dn relies on. React step 5 and copy
-# step 6 call it; react step 6 calls its two halves, react_stop_dn_agent and
-# react_drop_dn_port, each over all of its disk nodes in turn (see step 6's
-# header).
+# steps 5 and 6 call it; react step 6 calls its two halves,
+# react_stop_dn_agent and react_drop_dn_port, each over all of its disk nodes
+# in turn (see step 6's header).
 react_kill_dn() { # <v> <k>
 	react_stop_dn_agent "$1" "$2"
 	react_drop_dn_port "$1" "$2"
@@ -16385,25 +17145,28 @@ react_return_dn() { # <v> <k>
 
 # react_dead_grp_holds is the watch every poll of step 6's outage keeps on the
 # `sp get` reply in $CTL_OUT: slice 0's first data group still has the
-# leg_list it had before the kills, in the same order, and the same spare
-# legs. It dies the moment either moved, naming both readings: from the kills
-# on no leg of the group is healthy, so AR8 may neither switch a spare in nor
-# create one (dnv-worker.md AR8), and a wait that timed out later would hide
-# which act it was.
+# leg_list it had before the kills, in the same order, the same retired legs,
+# and no repair. It dies the moment any of them moved, naming the readings:
+# from the kills on no leg of the group is healthy, so AR8 may create no
+# repair of it (dnv-worker.md AR8), and a wait that timed out later would
+# hide which act it was.
 react_dead_grp_holds() {
-	local legs spares
+	local legs retired rep
 	legs=$(jq_of "$CTL_OUT" "$COPY_GRP0 | [.leg_list[].leg_id] | tojson")
-	spares=$(jq_of "$CTL_OUT" \
-		"$COPY_GRP0 | [.spare_leg_list[].leg_id] | sort | tojson")
-	if [ "$legs" = "$REACT_DEAD_LEGS" ] && [ "$spares" = "$REACT_DEAD_SPARES" ]; then
+	retired=$(jq_of "$CTL_OUT" \
+		"$COPY_GRP0 | [.retired_leg_id_list[]] | sort | tojson")
+	rep=$(jq_of "$CTL_OUT" "$COPY_GRP0.rep_name")
+	if [ "$legs" = "$REACT_DEAD_LEGS" ] &&
+		[ "$retired" = "$REACT_DEAD_RETIRED" ] && [ -z "$rep" ]; then
 		return 0
 	fi
 	die "group $REACT_GRP_ID changed while none of its legs was healthy:" \
-		"leg_list $REACT_DEAD_LEGS -> $legs, spare legs" \
-		"$REACT_DEAD_SPARES -> $spares. AR8 repairs a leg only while another" \
-		"leg of its group has no err_epoch (dnv-worker.md AR8). If the kills" \
-		"took longer than the margin step 6 logged for them, the first leg's" \
-		"threshold may have run out while the last leg still read healthy"
+		"leg_list $REACT_DEAD_LEGS -> $legs, retired legs" \
+		"$REACT_DEAD_RETIRED -> $retired, repair '$rep'. AR8 repairs a leg" \
+		"only while another leg of its group has no err_epoch and is held in" \
+		"sync (dnv-worker.md AR8). If the kills took longer than the margin" \
+		"step 6 logged for them, the first leg's threshold may have run out" \
+		"while the last leg still read healthy"
 }
 
 # react_dead_epochs is step 6's first wait: every leg of slice 0's first data
@@ -16450,7 +17213,7 @@ react_no_healthy_logged() {
 
 # react_dead_window is step 6's watch past the thresholds: true once the
 # driver's clock has reached REACT_DEAD_UNTIL, the group watched on every
-# poll until then (react_dead_grp_holds), so a switch or a create inside the
+# poll until then (react_dead_grp_holds), so a repair created inside the
 # window fails the step the moment it shows.
 react_dead_window() {
 	if ! ctl_try sp get; then
@@ -16465,7 +17228,7 @@ react_dead_window() {
 # each leg in REACT_DEAD_NEW reads in_sync, and no array holds the member of
 # any leg in REACT_DEAD_OLD. grp_md_clean cannot tell this on the step's idle
 # array: md never saw a replaced leg die, so it still holds that member in
-# sync, and a converge at the switch's revision that never reached md would
+# sync, and a converge at the finish's revision that never reached md would
 # leave the old pair reading clean, never degraded, at that revision
 # (grp_md_clean's header). The host read after it would pass too, as md
 # retries a failed read on the leg that came back. A replaced leg's member
@@ -16521,13 +17284,14 @@ react_dead_members() {
 # Everything below compares against these numbers rather than against the
 # fresh-sp constants, for the reason the section header gives: this case's own
 # build runs under the reacting threshold set and may have produced a failover
-# or a spare before the case begins.
+# or a repair of the worker's before the case begins.
 react_snapshot() {
 	stage 00 "the shape this case starts from (its build ran under the ${THR_SET} thresholds)"
 	sp_refresh
 	sp_read_roles
 	sp_totals
-	REACT_BASE_SPARE_TOTAL=$SP_SPARE_TOTAL
+	REACT_BASE_REPAIR_TOTAL=$SP_REPAIR_TOTAL
+	REACT_BASE_RETIRED_TOTAL=$SP_RETIRED_TOTAL
 	REACT_BASE_GRP_TOTAL=$SP_GRP_TOTAL
 	REACT_BASE_LEG_TOTAL=$SP_LEG_TOTAL
 	REACT_BASE_PRIMARY_ID=$PRIMARY_CNTLR_ID
@@ -16540,17 +17304,19 @@ react_snapshot() {
 		;;
 	esac
 	log "  $SP starts this case with $REACT_BASE_GRP_TOTAL groups," \
-		"$REACT_BASE_LEG_TOTAL active legs and" \
-		"$REACT_BASE_SPARE_TOTAL spare leg(s); slice 0 has" \
+		"$REACT_BASE_LEG_TOTAL legs, $REACT_BASE_REPAIR_TOTAL repair(s) and" \
+		"$REACT_BASE_RETIRED_TOTAL retired leg(s); slice 0 has" \
 		"$REACT_BASE_SLICE0_DATA data group(s); the primary is cntlr" \
 		"$REACT_BASE_PRIMARY_ID on cn$PRIMARY_CN"
-	if [ "$REACT_BASE_SPARE_TOTAL" != 0 ] ||
+	if [ "$REACT_BASE_REPAIR_TOTAL" != 0 ] ||
+		[ "$REACT_BASE_RETIRED_TOTAL" != 0 ] ||
 		[ "$REACT_BASE_LEG_TOTAL" != "$((GRP_CNT * LEGS))" ] ||
 		[ "$REACT_BASE_SLICE0_DATA" != 1 ]; then
 		log "!!! that is NOT the fresh-sp shape ($((GRP_CNT * LEGS)) legs," \
-			"0 spares, 1 data group in slice 0): a reaction fired during this" \
-			"case's own build, which the reacting threshold set allows." \
-			"Every assertion below is written against the numbers above."
+			"no repair and no retired leg, 1 data group in slice 0): a" \
+			"reaction fired during this case's own build, which the" \
+			"reacting threshold set allows. Every assertion below is" \
+			"written against the numbers above."
 	fi
 }
 
@@ -16850,8 +17616,7 @@ react_grow() {
 	assert_field "$SP_JSON" "$REACT_GRP1.ext_cnt" "$ext0" "$msg"
 	assert_field "$SP_JSON" "$REACT_GRP1.leg_list | length" "$LEGS" \
 		"the new group has $LEGS leg(s)"
-	assert_field "$SP_JSON" "$REACT_GRP1.spare_leg_list | length" 0 \
-		"and no spare leg"
+	assert_field "$SP_JSON" "$REACT_GRP1.rep_name" "" "and no repair"
 	assert_jq "$SP_JSON" \
 		"[$REACT_GRP1.leg_list[] | select((.side_list | length) != 1)] | length == 0" \
 		"every leg of the new group has exactly one side"
@@ -16920,7 +17685,7 @@ react_grow() {
 
 react_failover() {
 	stage 03 "AR5: kill the primary's cn agent and watch the standby be elected"
-	local out dev2 msg spare hits
+	local out dev2 msg idle hits
 
 	sp_refresh
 	sp_read_roles
@@ -16932,11 +17697,11 @@ react_failover() {
 	REACT_OLD_PRIMARY_CN=$PRIMARY_CN
 	REACT_OLD_STANDBY_ID=$STANDBY_CNTLR_ID
 	REACT_OLD_PRIMARY_SLOT=$(sp_field ".cntlr_list[$PRIMARY_POS].cntlid_slot")
-	REACT_SPARE_CN=$SPARE_CN
-	REACT_SPARE_ADDRS=","
-	for spare in "${SPARE_CN_LIST[@]:-}"; do
-		[ -n "$spare" ] || continue
-		REACT_SPARE_ADDRS="$REACT_SPARE_ADDRS$(cn_addr "$spare"),"
+	REACT_IDLE_CN=$IDLE_CN
+	REACT_IDLE_ADDRS=","
+	for idle in "${IDLE_CN_LIST[@]:-}"; do
+		[ -n "$idle" ] || continue
+		REACT_IDLE_ADDRS="$REACT_IDLE_ADDRS$(cn_addr "$idle"),"
 	done
 	case "$REACT_OLD_PRIMARY_SLOT" in
 	'' | *[!0-9]*)
@@ -16948,14 +17713,14 @@ react_failover() {
 	# Finding CN candidates, so the SP needs a CN carrying no cntlr. That is the
 	# third CN, and e2e_integtest.md, Topology and parameters, requires at least
 	# three --cn guests for exactly this.
-	[ "$REACT_SPARE_CN" -ge 0 ] ||
+	[ "$REACT_IDLE_CN" -ge 0 ] ||
 		die "every --cn guest carries a cntlr of $SP, so AR7 would have no" \
 			"controller node to replace the dead cntlr on. The suite wants" \
 			"cntlr_cnt $CNTLR_CNT and at least three --cn guests"
 	log "  primary cntlr $REACT_OLD_PRIMARY_ID is on cn$REACT_OLD_PRIMARY_CN" \
 		"($REACT_OLD_PRIMARY_ADDR), cntlid_slot $REACT_OLD_PRIMARY_SLOT;" \
 		"the standby is $REACT_OLD_STANDBY_ID on cn$STANDBY_CN;" \
-		"carrying no cntlr:${REACT_SPARE_ADDRS//,/ }"
+		"carrying no cntlr:${REACT_IDLE_ADDRS//,/ }"
 
 	# THE HOST LETS GO FIRST (e2e_integtest.md, The cases, react).
 	# Killing the agent does not remove the nvmet subsystem,
@@ -17087,7 +17852,7 @@ react_failover() {
 	stack_wait_reset
 	msg="the new primary cntlr $PRIMARY_CNTLR_ID on cn$PRIMARY_CN to build"
 	msg="$msg $SLICE_CNT pools, $SP_GRP_TOTAL groups and"
-	msg="$msg $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs"
+	msg="$msg $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs"
 	# WAIT_BUILD: this is a WHOLE stack, built from nothing on a node that had
 	# only legs — the same piece of work setup pays for, at the
 	# scale of the WAIT_BUILD comment, and the reason the failover
@@ -17255,12 +18020,12 @@ react_replace() {
 	# excludes the CNs of the sp's other cntlrs, so those are the only
 	# candidates. The test is membership and not
 	# equality, because with more than one such CN model.PickRandom chooses.
-	case "$REACT_SPARE_ADDRS" in
+	case "$REACT_IDLE_ADDRS" in
 	*",$REACT_REPL_ADDR,"*) ;;
 	*)
 		die "the replacement cntlr $REACT_REPL_ID landed on $REACT_REPL_ADDR," \
 			"which carried a cntlr of $SP when the kill happened." \
-			"The CNs that carried none were ${REACT_SPARE_ADDRS//,/ }"
+			"The CNs that carried none were ${REACT_IDLE_ADDRS//,/ }"
 		;;
 	esac
 	assert_ne "$REACT_REPL_ID" "$REACT_OLD_PRIMARY_ID" \
@@ -17280,7 +18045,7 @@ react_replace() {
 	sp_totals
 	stack_wait_reset
 	msg="the replacement cntlr $REACT_REPL_ID to connect all"
-	msg="$msg $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs as a standby"
+	msg="$msg $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs as a standby"
 	# WAIT_BUILD, for the same reason ops step 3's third cntlr gets it: a cntlr
 	# born now holds nothing, so this is every leg connected from scratch.
 	wait_until "$WAIT_BUILD" "$msg" cntlr_legs_full_ready "$REACT_REPL_ID"
@@ -17361,73 +18126,88 @@ react_replace() {
 # --- step 5 -----------------------------------------------------------------
 #
 # AR8, on slice 0's FIRST data group — the one that carries the first stripe of
-# every thin device, so the md rebuild covers the bytes check_sha0 reads.
+# every thin device, so md's copy onto the new leg covers the bytes check_sha0
+# reads.
 #
 # THE TRIGGER IS BOTH PLANES (see the header): the agent is killed, which makes
 # the SIDE unhealthy (the worker's gRPC rounds fail), and the instance's nvmet
 # port is dropped, which makes the LEG unhealthy (the primary's CN11 probe IO
-# fails). legNeedsRepair looks at side_unhealthy only AFTER Leg.err_epoch is
-# non-zero, so the kill alone — which leaves the kernel's nvmet objects serving
-# — would trigger nothing at all.
+# fails). AR8 looks at side_unhealthy only AFTER Leg.err_epoch is non-zero
+# (dnv-worker.md AR8), so the kill alone — which leaves the kernel's nvmet
+# objects serving — would trigger nothing at all.
+#
+# THE REMEDY IS THE WORKER'S OWN REPAIR (dnv-worker.md, Leg repair): once the
+# leg is due, the worker creates a repair of the group under a name with the
+# reserved prefix (architecture.md, Common validation), whose new leg is a
+# fresh leg on a disk node outside the group's; the primary adds the new leg
+# to the running array (cnagent.md CN12), the worker moves the repair to
+# STARTED (dnv-worker.md AR11) and finishes it, and the dead leg becomes a
+# retired leg (architecture.md, Repair). The stage reads it all through
+# `sp get`, `repair get|list` and `retired-leg list`: the repair's name and
+# record while it is open, the finish's result once it is gone. The stage
+# move and the finish come in passes one cntlr_interval apart, so a poll can
+# miss STARTED; the finish proves it, as only a STARTED repair takes one
+# (architecture.md, Repairs, FinishRepair), and the worker's own `repair
+# stage moved` record of it is counted besides.
+#
+# HOST IO. host0's kernel log is marked before the kill; host0 reads SHA0 once
+# md holds the group whole, and the log since the mark must report no failed
+# IO (host_kmsg_clean), as md fails a member whose IO errs and serves the read
+# from the other (cnagent.md CN12).
 
 react_leg_repair() {
 	if [ "$REDUND" != raid1 ]; then
 		log ""
 		log "=== react step 05 (AR8 leg repair) SKIPPED: --redund $REDUND." \
 			"A RedundNone group has no redundancy to re-home, so AR8 only" \
-			"logs it (reason=redund_none, in tryLegRepair (worker/reaction.go)) and" \
-			"an operator moves the data."
+			"logs it (dnv-worker.md AR8) and an operator moves the data."
 		return 0
 	fi
-	stage 05 "AR8: a disk node dies and the worker spares its leg out"
-	local n i rev grpid msg
-	local before_addrs before_vms spareaddr sparevm
-	local before_spares before_spare_cnt before_sp_spares fresh
-	local before_primary before_failovers
+	stage 05 "AR8: a disk node dies and the worker repairs its leg with a fresh leg"
+	local n i rev grpid msg want tag cnt started epoch retired legidx sliceid
+	local before_addrs before_vms before_retired before_epochs given
+	local want_retired before_primary before_failovers
 
+	# No repair anywhere in the pool before the readings and the pick
+	# (react_wait_no_repair says why).
+	react_wait_no_repair
 	sp_refresh
 	sp_read_roles
 	sp_totals
+	copy_primary_cn_id
 	# The primary this whole stage must keep, and the count of failovers the
 	# worker has applied so far, which must not grow (both asserted at its
 	# end). A dead member is a LEG fault: the primary's md row reads it from
-	# sysfs as OK (degraded once md or the spare switch has failed the
-	# member; cnagent.md CN28), never through `mdadm --detail`, which could
-	# block on the dead member past the probe's timeout, read ERROR and have
-	# AR5 fail the primary over.
+	# sysfs as OK (degraded once md has failed the member; cnagent.md CN28),
+	# never through `mdadm --detail`, which could block on the dead member
+	# past the probe's timeout, read ERROR and have AR5 fail the primary over.
 	before_primary=$PRIMARY_CNTLR_ID
 	before_failovers=$(worker_failover_cnt)
 	grpid=$(sp_field "$COPY_GRP0.grp_id")
 	assert_eq "$grpid" "$REACT_GRP_ID" \
 		"slice 0's first data group is still the one step 01 recorded"
+	sliceid=$(sp_field '.sp_conf.slice_id_list[0]')
 
-	# THE SPARE READING THIS WHOLE STEP IS JUDGED AGAINST. It is a snapshot and
-	# not a literal 0: this case's build runs under the reacting threshold set,
-	# so a spare_create during setup is ordinary (see the section
-	# header). Asserting "the group holds no spare leg" would fail a run that
-	# behaved exactly as designed — and, worse, an exact `== 1` wait below, on
-	# a group that ALREADY held one, would return true on its first poll and
-	# pass this step without AR8 having done anything at all.
-	#
-	# before_spares is a jq array literal of the group's spare leg ids, sorted,
-	# so the assertions after the switch can be set comparisons. `tojson` on an
-	# empty list gives `[]`, which is a valid filter fragment too.
-	before_spares=$(sp_field \
-		"$COPY_GRP0 | [.spare_leg_list[].leg_id] | sort | tojson")
-	before_spare_cnt=$(sp_field "$COPY_GRP0.spare_leg_list | length")
-	before_sp_spares=$SP_SPARE_TOTAL
-	case "$before_spare_cnt$before_sp_spares" in
-	'' | *[!0-9]*)
-		die "the spare counts read '$before_spare_cnt' (group) and" \
-			"'$before_sp_spares' (sp), which are not numbers"
-		;;
-	esac
-	if [ "$before_spare_cnt" != 0 ] || [ "$before_sp_spares" != 0 ]; then
-		log "!!! AR8 starts with spare legs already present:" \
-			"$before_spare_cnt in group $REACT_GRP_ID (ids $before_spares)," \
-			"$before_sp_spares in the sp. This case's build may create one" \
-			"(the $THR_SET threshold set); every assertion below is a delta" \
-			"on these numbers."
+	# THE READINGS THIS STAGE IS JUDGED AGAINST. The group must hold no
+	# repair: a group holds one at a time (architecture.md, Repairs), so an
+	# open one would be the stage's subject in place of the kill's. Its
+	# retired legs are a snapshot and not a literal empty list: this case's
+	# build runs under the reacting threshold set, so a repair during setup,
+	# and the retired leg its finish left, are ordinary (see the section
+	# header). before_retired is a jq array literal of the group's retired
+	# leg ids, sorted, `[]` for none; before_epochs maps each of them to its
+	# retired_epoch, which orders the give-back a finish at the bound makes
+	# (react_retired_given).
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"group $REACT_GRP_ID has no repair before the kill"
+	before_retired=$(sp_field "$COPY_GRP0 | [.retired_leg_id_list[]] | sort | tojson")
+	react_retired_read
+	before_epochs=$REACT_RETIRED
+	if [ "$before_retired" != "[]" ]; then
+		log "!!! AR8 starts with retired legs already in group" \
+			"$REACT_GRP_ID: $before_retired. This case's build may repair a" \
+			"leg (the $THR_SET threshold set); every assertion below is a" \
+			"delta on them."
 	fi
 
 	# THE LEG TO KILL: one whose single side sits on a disk node that carries
@@ -17436,21 +18216,12 @@ react_leg_repair() {
 	# and this step could not name in advance which one the worker takes. Every
 	# side of the sp is on a distinct DN at create (architecture.md,
 	# Per-operation allocation), but AR6's grow black-lists nothing, so its new
-	# group MAY have landed on an occupied node —
-	# hence the count rather than an assumption.
-	#
-	# The count walks SP_ANY_SIDE_PATH, SPARE AND PARKED LEGS INCLUDED, so the
-	# kill takes down exactly the one side this step names. A spare or parked
-	# leg on that node is always ANOTHER group's: this case never creates a
-	# spare itself, so every one is AR8's, and createSpare black-lists every DN
-	# of the group's own legs and spares (grpAddrs (worker/reaction.go)).
-	# AR8 never repairs a spare either
-	# (repairCandidates walks leg_list only), so an idle one going down moves
-	# none of the deltas below. The one it can move is a spare that another
-	# group's repair is still waiting for: pendingSpare reads a spare whose
-	# side has an err_epoch as dead, AR8 can then create that group a second
-	# one, and the sp-wide count asserted below at before + 1 would end at
-	# before + 2.
+	# group MAY have landed on an occupied node — hence the count rather than an
+	# assumption. The count walks the legs `sp get` holds: a retired side on
+	# that node is no leg of any group and no cntlr connects it
+	# (architecture.md, Repair), so its death moves none of the deltas below;
+	# and the pool holds no repair here (react_wait_no_repair), whose new leg
+	# `sp get` would leave out too.
 	n=$(sp_field "$COPY_GRP0.leg_list | length")
 	case "$n" in
 	'' | *[!0-9]*) die "slice 0's data group has leg_list length '$n'" ;;
@@ -17464,20 +18235,18 @@ react_leg_repair() {
 		REACT_LEG_ID=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
 		REACT_SIDE_ID=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].side_id")
 		REACT_SIDE_ADDR=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].addr_port")
+		legidx=$(sp_field "$COPY_GRP0.leg_list[$i].leg_idx")
 		break
 	done
 	msg="no leg of slice 0's first data group has a single side on a disk node"
-	msg="$msg that carries exactly one side of $SP, spare and parked legs'"
-	msg="$msg sides counted. A second active side there would give AR8 two"
-	msg="$msg legs to repair, smallest leg_id first, which this step could not"
-	msg="$msg name in advance; a spare's side there could be one another"
-	msg="$msg group's repair is waiting for, which AR8 would replace with a"
-	msg="$msg second create"
+	msg="$msg that carries exactly one side of $SP. A second side there would"
+	msg="$msg give AR8 two legs to repair, smallest leg_id first, which this"
+	msg="$msg step could not name in advance"
 	[ "$REACT_LEG_POS" -ge 0 ] || die "$msg"
-	case "$REACT_LEG_ID$REACT_SIDE_ID" in
+	case "$REACT_LEG_ID$REACT_SIDE_ID$legidx" in
 	'' | *[!0-9]*)
 		die "the leg to repair carried a non-decimal id" \
-			"(leg '$REACT_LEG_ID', side '$REACT_SIDE_ID')"
+			"(leg '$REACT_LEG_ID', side '$REACT_SIDE_ID', leg_idx '$legidx')"
 		;;
 	esac
 	REACT_DN_VM=$(dn_vm_of_addr "$REACT_SIDE_ADDR")
@@ -17487,175 +18256,166 @@ react_leg_repair() {
 	assert_ne "$REACT_DN_INST" none \
 		"side $REACT_SIDE_ID's addr_port $REACT_SIDE_ADDR names a dn instance"
 	diag_note_dn "$REACT_DN_VM" "$REACT_DN_INST"
-	# The group's occupied DNs and VMs, SPARE LEGS INCLUDED. That is not caution,
-	# it is what the code black-lists: grpAddrs (worker/reaction.go) walks
-	# GetLegList() and GetSpareLegList() and grpLocations resolves
-	# a location for every address grpAddrs names. A `before` set
-	# taken over the active legs alone would be a weaker statement than the one
-	# AR8 actually makes, and on a group that already carries a spare it would
-	# be the wrong set.
+	# The group's occupied DNs and VMs, which a repair's fresh leg is placed
+	# outside: the disk nodes of the group's legs, and at the allocator's first
+	# tier their locations (architecture.md, Per-operation allocation).
 	before_addrs=$(sp_field \
-		"$COPY_GRP0 | [(.leg_list[], .spare_leg_list[]) | .side_list[] | .addr_port]
-		 | unique | join(\",\")")
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
 	before_vms=$(sp_field \
-		"$COPY_GRP0 | [(.leg_list[], .spare_leg_list[]) | .side_list[] | $SP_SIDE_VM]
-		 | unique | join(\",\")")
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
+	REACT_REP_MARK=$(worker_log_mark)
+	tag="dnv-e2e-react-repair-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$tag"
 	log "  killing dn$REACT_DN_VM instance $REACT_DN_INST" \
 		"($REACT_SIDE_ADDR), which carries side $REACT_SIDE_ID of leg" \
-		"$REACT_LEG_ID (position $REACT_LEG_POS of group $REACT_GRP_ID);" \
-		"the group holds $before_addrs on VMs $before_vms"
+		"$REACT_LEG_ID (position $REACT_LEG_POS, leg_idx $legidx, of group" \
+		"$REACT_GRP_ID); the group holds $before_addrs on VMs $before_vms"
 
 	# Both planes, the agent first, then the port (react_kill_dn says why).
 	react_kill_dn "$REACT_DN_VM" "$REACT_DN_INST"
 
-	# AR8 step 3, then step 2's wait, then step 1 — one action per pass, so the
-	# create and the switch can never be the same pass and the create is
-	# observable on its own.
-	REACT_SPARE_LAST=""
-	msg="AR8 to create a spare leg for group $REACT_GRP_ID (side_unhealthy"
-	msg="$msg ${THR_SIDE}s or leg_unhealthy ${THR_LEG}s, and the leg's err_epoch"
-	msg="$msg only starts when the primary's probe fails)"
-	# ONE MORE than the group had, so a group that already carried a spare
-	# cannot satisfy this on the first poll.
+	# The create, then the finish: the stage moves and the finish are the
+	# worker's, a pass apart (see the stage's header).
+	REACT_REP_NAME=""
+	REACT_REP_LAST=""
+	msg="AR8 to create a repair of group $REACT_GRP_ID for leg $REACT_LEG_ID"
+	msg="$msg (side_unhealthy ${THR_SIDE}s or leg_unhealthy ${THR_LEG}s, and"
+	msg="$msg the leg's err_epoch only starts when the primary's probe fails)"
 	wait_until "$WAIT_REACT" "$msg" \
-		react_spare_cnt_reaches "$((before_spare_cnt + 1))"
-	SP_JSON=$CTL_OUT
-	# `fresh` is the spare AR8 just minted: the entries whose leg_id was not in
-	# the before set. Naming it that way rather than by index is what makes the
-	# two assertions below about AR8's spare and not about whichever entry
-	# happens to sit at position 0.
-	#
-	# ONE HONEST LIMIT, and it is the same one the previous form had: AR8 takes
-	# at most one action per pass, so the create and the switch are different
-	# passes — but if the poll that wins happens to land after BOTH, the entry
-	# that is "new since AR8 started" is the DEAD leg the switch parked, not the
-	# spare it promoted. The two assertions below hold either way (exactly one
-	# new entry, with exactly one side); only the log line would name the dead
-	# leg. The promotion itself is proved after the switch, from the POSITION in
-	# leg_list, which is where REACT_SPARE_LEG is read.
-	#
-	# The test is jq's ARRAY DIFFERENCE and not `index`: in `A | index(.leg_id)`
-	# the argument is evaluated against A, so `.leg_id` would be read off the
-	# array rather than off the leg. `[.leg_id] - <before>` is empty exactly
-	# when the id was already there, and it needs no jq variable — which also
-	# keeps a `$` out of a double-quoted shell string.
-	fresh="[$COPY_GRP0.spare_leg_list[]
-	        | select((([.leg_id] - $before_spares) | length) == 1)]"
-	assert_jq "$SP_JSON" "($fresh | length) == 1" \
-		"exactly one spare leg of group $REACT_GRP_ID is new since AR8 started"
-	assert_field "$SP_JSON" "$fresh[0].side_list | length" 1 \
-		"the new spare leg has exactly one side"
-	log "  group $REACT_GRP_ID now holds a new spare leg" \
-		"$(sp_field "$fresh[0].leg_id") on" \
-		"$(sp_field "$fresh[0].side_list[0].addr_port")"
+		react_rep_open "$REACT_LEG_POS" "$REACT_LEG_ID"
+	REACT_NEW_LEG=""
+	REACT_NEW_SIDE=""
+	REACT_NEW_ADDR=""
+	if [ -n "$REACT_REP_NAME" ]; then
+		react_rep_name_ok "$REACT_REP_NAME"
+		react_rep_read "$REACT_LEG_ID" "$before_retired"
+	fi
+	REACT_REP_LAST=""
+	msg="the worker to move repair ${REACT_REP_NAME:-of group $REACT_GRP_ID}"
+	msg="$msg to STARTED and finish it: the new leg's side zeroes and is"
+	msg="$msg flipped provisioned, the primary adds the new leg to the array,"
+	msg="$msg and leg $REACT_LEG_ID becomes a retired leg"
+	wait_until "$WAIT_PROVISION" "$msg" react_rep_done "$REACT_LEG_ID"
 
-	msg="AR8 to switch that spare in for the dead leg $REACT_LEG_ID (its side"
-	msg="$msg must zero and the primary must report the leg OK first)"
-	wait_until "$WAIT_PROVISION" "$msg" react_spare_switched "$REACT_LEG_ID"
+	# The worker's own record of STARTED, which also names a repair the first
+	# wait missed whole.
+	started=$(worker_rep_started "$REACT_REP_MARK" "$REACT_GRP_ID")
+	if [ -z "$REACT_REP_NAME" ]; then
+		REACT_REP_NAME=${started%%$'\n'*}
+		[ -n "$REACT_REP_NAME" ] ||
+			die "leg $REACT_LEG_ID is retired, but the worker's log holds" \
+				"no repair of group $REACT_GRP_ID moved to STARTED since the kill"
+		react_rep_name_ok "$REACT_REP_NAME"
+	fi
+	cnt=$(printf '%s\n' "$started" | grep -cxF -- "$REACT_REP_NAME" || true)
+	assert_eq "$cnt" 1 \
+		"the worker's repair stage moved records of $REACT_REP_NAME to STARTED since the kill (dnv-worker.md AR11)"
+	log "  the worker's repairs of group $REACT_GRP_ID moved to STARTED since" \
+		"the kill: ${started//$'\n'/ }"
+
+	# What the finish wrote (architecture.md, Repairs, FinishRepair): the new
+	# leg in the dead leg's place with its leg_idx, the dead leg retired with
+	# its side, and no repair left on the group.
 	sp_refresh
 	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
-		"the group still has $LEGS active leg(s)"
-	# THE SET AFTER THE SWITCH, derived rather than assumed:
-	# SwitchSpareLeg (model/ops.go) takes the new spare OUT of spare_leg_list and
-	# puts the dead leg IN, so the group's spare set is exactly what it was
-	# before AR8 plus the dead leg — and its size is unchanged by the switch,
-	# which is why the sp-wide count below is before + 1 and not before + 2.
-	assert_jq "$SP_JSON" \
-		"($COPY_GRP0 | [.spare_leg_list[].leg_id] | sort)
-		 == (($before_spares + [\"$REACT_LEG_ID\"]) | sort)" \
-		"group $REACT_GRP_ID's parked legs are the ones it started with plus the dead leg $REACT_LEG_ID"
-	sp_totals
-	assert_eq "$SP_SPARE_TOTAL" "$((before_sp_spares + 1))" \
-		"the sp holds one more parked leg than when AR8 started"
-
-	# THE PROMOTED LEG IS READ OUT OF leg_list AFTER THE SWITCH, not out of
-	# spare_leg_list before it: SwitchSpareLeg (model/ops.go) puts the spare in
-	# the target's POSITION and parks the target in its place, so
-	# after the switch spare_leg_list holds the DEAD leg and only the position
-	# names the promotion. Reading it here also makes the step independent of
-	# how fast the two AR8 passes followed each other.
-	REACT_SPARE_LEG=$(sp_field "$COPY_GRP0.leg_list[$REACT_LEG_POS].leg_id")
-	case "$REACT_SPARE_LEG" in
-	'' | *[!0-9]* | 0)
-		die "the promoted leg has leg_id '$REACT_SPARE_LEG'"
-		;;
+		"the group still has $LEGS leg(s)"
+	want=$(sp_field "$COPY_GRP0.leg_list[$REACT_LEG_POS].leg_id")
+	case "$want" in
+	'' | *[!0-9]* | 0) die "the leg in the dead leg's place has leg_id '$want'" ;;
 	esac
-	assert_ne "$REACT_SPARE_LEG" "$REACT_LEG_ID" \
+	assert_ne "$want" "$REACT_LEG_ID" \
 		"the leg in the dead leg's position is a different leg"
-	assert_field "$SP_JSON" \
-		"$COPY_GRP0.leg_list[$REACT_LEG_POS].side_list | length" 1 \
-		"the promoted leg has exactly one side"
-	spareaddr=$(sp_field \
-		"$COPY_GRP0.leg_list[$REACT_LEG_POS].side_list[0].addr_port")
-	sparevm=${spareaddr%:*}
-	assert_ne "$spareaddr" "$REACT_SIDE_ADDR" \
-		"the spare did not land on the disk node that just died"
-	# createSpare black-lists every DN of every leg and every spare of the
-	# group (grpAddrs) and, as tier 1 of architecture.md, Per-operation
-	# allocation, their locations (grpLocations).
-	# Tier 2 relaxes the LOCATION rule when tier 1 finds nobody, so the VM
-	# assertion is made only where tier 1 has somewhere anti-affine to go —
-	# the same guard copy's migration and spare steps use.
-	case ",$before_addrs," in
-	*",$spareaddr,"*)
-		die "the spare landed on $spareaddr, a disk node the group already" \
-			"occupies; grpAddrs (worker/reaction.go) seeds AR8's" \
-			"black list"
-		;;
-	esac
-	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
-		case ",$before_vms," in
-		*",$sparevm,"*)
-			die "the spare landed on a DN VM the group already occupies" \
-				"($before_vms). AR8 passes grpLocations as the tier-1" \
-				"exclusion of architecture.md, Per-operation allocation" \
-				"(createSpare (worker/reaction.go)), and tier 2 relaxes" \
-				"it only when no DN outside those domains can take the" \
-				"group's ext_cnt"
-			;;
-		esac
-	else
-		log "  $DN_VM_CNT DN VM(s) and $LEGS leg(s) per group: tier 1" \
-			"(architecture.md, Per-operation allocation) has" \
-			"nowhere anti-affine to go, so the spare's VM is not asserted"
+	if [ -n "$REACT_NEW_LEG" ]; then
+		assert_eq "$want" "$REACT_NEW_LEG" \
+			"the leg in the dead leg's position is the repair's new leg"
 	fi
-	log "  leg $REACT_SPARE_LEG on $spareaddr took the dead leg's place;" \
-		"$REACT_LEG_ID is parked"
+	REACT_NEW_LEG=$want
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$REACT_LEG_POS].leg_idx" \
+		"$legidx" "the new leg takes the dead leg's leg_idx"
+	assert_jq "$before_retired" "([\"$REACT_NEW_LEG\"] - .) | length == 1" \
+		"the new leg $REACT_NEW_LEG is none of the group's retired legs: the worker's repair takes a fresh leg"
+	react_new_leg_placed "$REACT_LEG_POS" "$REACT_NEW_LEG" \
+		"$before_addrs" "$before_vms"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the finish"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$REACT_LEG_ID\")] | length" \
+		1 "the dead leg $REACT_LEG_ID is one of the group's retired legs"
+	# The retired legs exactly: the ones the group held plus the dead leg,
+	# less the oldest when it held MAX_RETIRED_LEG_PER_GRP of them, which the
+	# worker's finish gives back first; below that bound it gives none back
+	# (architecture.md, Repairs, FinishRepair). No other call touches the
+	# group's retired legs inside the stage: the retire timer's age is far
+	# past any run (dnv-worker.md AR12), and react_rep_done dies on a second
+	# repair of the group.
+	given=$(react_retired_given "$before_epochs")
+	want_retired=$(react_retired_want "$before_epochs" "$REACT_LEG_ID")
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.retired_leg_id_list[]] | sort) == $want_retired" \
+		"the group's retired legs are the ones it had plus the dead leg, less the oldest when it held $MAX_RETIRED_LEG_PER_GRP (architecture.md, Repairs, FinishRepair)"
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0.retired_leg_id_list | length) <= $MAX_RETIRED_LEG_PER_GRP" \
+		"the group holds at most $MAX_RETIRED_LEG_PER_GRP retired legs (architecture.md, Retired legs)"
+	ctl_ok repair list
+	assert_field "$CTL_OUT" \
+		"[.name_to_repair[] | select(.grp_id == \"$REACT_GRP_ID\")] | length" 0 \
+		"ListRepairs holds no repair of group $REACT_GRP_ID"
+	ctl_ok retired-leg list
+	if [ -n "$given" ]; then
+		assert_field "$CTL_OUT" ".leg_id_to_retired_leg | has(\"$given\")" \
+			false "ListRetiredLegs no longer holds leg $given, the oldest retired leg the finish gave back"
+		log "  the finish gave back leg $given, the group's oldest retired leg"
+	fi
+	retired=".leg_id_to_retired_leg[\"$REACT_LEG_ID\"]"
+	assert_field "$CTL_OUT" "$retired.grp_id" "$REACT_GRP_ID" \
+		"ListRetiredLegs holds the dead leg, naming group $REACT_GRP_ID"
+	assert_field "$CTL_OUT" "$retired.leg_idx" "$legidx" \
+		"and the leg_idx it left"
+	assert_field "$CTL_OUT" "$retired.side.side_id" "$REACT_SIDE_ID" \
+		"the retired leg keeps the dead leg's side"
+	assert_field "$CTL_OUT" "$retired.side.addr_port" "$REACT_SIDE_ADDR" \
+		"on the dead disk node"
+	assert_field "$CTL_OUT" "$retired.slice_id" "$sliceid" \
+		"its group's parent is slice 0"
+	epoch=$(jq_of "$CTL_OUT" "$retired.retired_epoch")
+	case "$epoch" in
+	'' | *[!0-9]* | 0) die "the retired leg's retired_epoch reads '$epoch'" ;;
+	esac
+	log "  leg $REACT_NEW_LEG took leg $REACT_LEG_ID's place; leg" \
+		"$REACT_LEG_ID is retired at $epoch"
 
-	# md rebuilds onto the promoted spare. A fresh spare has never been an md
-	# member, so this is a FULL recovery of the group (architecture.md, Spare
-	# legs), and RES_STATUS_OK alone proves nothing about it: probeGroup
-	# reports the
-	# array's sysfs state in mdadm's words, and a running array of the
-	# group's own legs is OK however degraded (cnagent.md CN28 has the
-	# ERROR cases), so a rebuilding one is OK with "clean, degraded,
-	# recovering (…)". grp_md_clean reads the words, and takes the SpRev the
-	# switch bumped to so that the array it reads is the new one.
+	# md copies the group onto the fresh leg, whole, as it was never a member
+	# (architecture.md, Repair): the group whole at the finish's revision,
+	# then host0's read and its kernel log since the mark, then no cntlr
+	# holding the retired leg.
 	rev=$(sp_field '.sp_rev.revision')
 	case "$rev" in
 	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
 	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
 	MD_STATE_LAST=""
-	msg="cn$PRIMARY_CN to apply revision $rev and md to finish rebuilding"
-	msg="$msg group $REACT_GRP_ID onto leg $REACT_SPARE_LEG"
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group"
+	msg="$msg $REACT_GRP_ID whole, in sync on legs $want"
 	wait_until "$WAIT_PROVISION" "$msg" \
-		grp_md_clean "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev"
-	check_sha0 "after AR8 rebuilt slice 0's data group onto a spare leg"
-
-	# The disk node comes back. It has to: the parked leg's side still occupies
-	# an extent on it, and only a live agent can retire that side when the
-	# teardown drains the sp — case_residue would otherwise wait out
-	# $WAIT_DELETE on a node that cannot answer.
-	react_return_dn "$REACT_DN_VM" "$REACT_DN_INST"
-	sp_refresh
-	sp_totals
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
+	check_sha0 "after AR8 repaired slice 0's data group with a fresh leg"
+	host_kmsg_clean 0 "$tag" "once md held group $REACT_GRP_ID whole"
 	stack_wait_reset
-	msg="the primary to report all $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs"
-	msg="$msg again, the parked one included"
-	wait_until "$WAIT_PROVISION" "$msg" cntlr_full_ready "$PRIMARY_CNTLR_ID"
-	log "  the parked leg $REACT_LEG_ID is connected again; the sp drain at" \
-		"teardown is what releases its extent (popGrps (model/drain.go)" \
-		"releases spare legs with the active ones)"
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to hold every leg and no longer the retired leg $REACT_LEG_ID" \
+		copy_rep_dropped full "$PRIMARY_CNTLR_ID" "$REACT_LEG_ID"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the standby cntlr $STANDBY_CNTLR_ID to hold every leg and no longer the retired leg $REACT_LEG_ID" \
+		copy_rep_dropped legs "$STANDBY_CNTLR_ID" "$REACT_LEG_ID"
+
+	# The disk node comes back. It has to: the retired leg's side still
+	# occupies an extent on it, and only a live agent can remove that side
+	# when the teardown's drain gives it back (dnv-worker.md SPD15) —
+	# case_residue would otherwise wait out $WAIT_DELETE on a node that
+	# cannot answer.
+	react_return_dn "$REACT_DN_VM" "$REACT_DN_INST"
 
 	# No failover during the stage: the dead disk node took one leg, which
 	# AR8 repaired, and nothing about it is the primary's fault. Both are
@@ -17678,10 +18438,11 @@ react_leg_repair() {
 # AR8 on a group with NO healthy leg, on the group step 5 repaired: slice 0's
 # first data group, which holds the first stripe of $TD0, so check_sha0 proves
 # its data. Both legs of its leg_list lose their disk node, one right after
-# the other; past the thresholds the group must keep its legs and its spare
-# legs while the worker logs `reaction skipped` (no_healthy_leg) for it
-# (dnv-worker.md AR8). Then the disk node that died last comes back, and the
-# worker must repair the other leg until md has the group whole again.
+# the other; past the thresholds the group must keep its legs, no repair of
+# it may be created, and the worker logs `reaction skipped` (no_healthy_leg)
+# for it (dnv-worker.md AR8). Then the disk node that died last comes back,
+# and the worker must repair the other leg with a fresh leg until md has the
+# group whole again.
 #
 # THE ARRAY IS IDLE, BY DESIGN. md learns of a dead member only from an IO to
 # it (cnagent_integtest.md, Lab facts), so with no host IO it sees neither
@@ -17698,7 +18459,7 @@ react_leg_repair() {
 # alone; when one dies first and the other later, only the last to die
 # starts alone, degraded. So from the kills until md has the group whole
 # again the step makes no host IO at all — check_sha0 comes only after
-# grp_md_clean — since a host read of the group's data would be the very IO
+# copy_rep_whole — since a host read of the group's data would be the very IO
 # that shows md both deaths.
 #
 # NO FAILOVER IS EXPECTED, and none is asserted across the step, as in step 5:
@@ -17708,19 +18469,20 @@ react_leg_repair() {
 # THE KILLS ARE BACK TO BACK. AR8's case 2 makes the first leg a candidate
 # side_unhealthy after its side's health epoch, and from then on what holds
 # the repair is the LAST leg's own health epoch. Should the first leg's
-# threshold run out while the last leg still read healthy, AR8 would switch a
-# ready spare in for the first: the case of dnv-worker.md, Known limits ("The
-# gate can read a row that is about to turn"). What the cn agent does with
-# that switch is cnagent.md CN12's in-sync guard and its Known limits, which
-# can turn the group row ERROR and fail the primary over, where the step
-# expects no failover. The last leg's epoch can take a fast IO fail timeout,
-# a probe interval and a round after its port goes. So the step stops every
-# agent first and only then removes every port, and sends each agent SIGKILL right
-# behind its SIGTERM: on a SIGTERM alone the agent drains the worker's rounds
-# for a few seconds before it exits (react_stop_dn_agent), and two such drains
-# in a row could take the whole margin. The step logs how long its kills took,
-# from before the first signal to the last port's removal, against that margin
-# and shouts when none is left; the watch dies on the switch if it comes.
+# threshold run out while the last leg still read healthy, AR8 would create a
+# repair for the first, and the primary would add its new leg while the last
+# leg is dying, the race of a row that is about to turn (dnv-worker.md, Known
+# limits): the copy onto the new leg reads the dying leg, which breaks the
+# array, turns the group row ERROR and can fail the primary over, where the
+# step expects no failover. The last leg's epoch can take a fast IO fail
+# timeout, a probe interval and a round after its port goes. So the step
+# stops every agent first and only then removes every port, and sends each
+# agent SIGKILL right behind its SIGTERM: on a SIGTERM alone the agent drains
+# the worker's rounds for a few seconds before it exits (react_stop_dn_agent),
+# and two such drains in a row could take the whole margin. The step logs how
+# long its kills took, from before the first signal to the last port's
+# removal, against that margin and shouts when none is left; the watch dies
+# on the repair if it comes.
 #
 # WHICH DISK NODE RETURNS. Either would do on an idle array, where md holds
 # both members in sync. The step returns the one that died last: had md
@@ -17734,28 +18496,26 @@ react_leg_repair() {
 # before the return catches it. So returning the last never makes things
 # worse. The repair is AR8's ordinary one: once the primary reports the
 # returned leg OK its health epoch is cleared (dnv-worker.md HL2), the other
-# leg's stays, and the group row is OK, so AR8 switches a ready spare in —
-# most likely the leg step 5 parked, whose disk node is back and whose leg
-# the primary reports OK, and which md takes as a new member with a whole
-# copy, as it left the array before another member made the array whole
-# (measured on the same guest) — or creates one and switches it in later.
-# Then the disk node that died first comes back too: its leg is parked by
-# then, and only a live agent can retire its side when the teardown drains
-# the sp.
+# leg's stays, the group row is OK and md still holds the returned leg in
+# sync, so the worker creates a repair of the other leg with a fresh leg,
+# never a retired leg (dnv-worker.md, Leg repair), which md copies whole from
+# the leg that came back, and finishes it. Then the disk node that died first
+# comes back too: its leg is retired by then, and only a live agent can
+# remove its side when the teardown's drain gives it back.
 react_dead_grp() {
 	if [ "$REDUND" != raid1 ]; then
 		log ""
 		log "=== react step 06 (AR8 with no healthy leg) SKIPPED: --redund" \
 			"$REDUND. A RedundNone group has one leg and no redundancy to" \
-			"re-home, so AR8 only logs it (reason=redund_none, in" \
-			"tryLegRepair (worker/reaction.go))."
+			"re-home, so AR8 only logs it (dnv-worker.md AR8)."
 		return 0
 	fi
-	stage 06 "AR8: both disk nodes of a group die, and nothing is repaired until one returns"
-	local n i last grpid rev msg st det name mrd state cnt
+	stage 06 "AR8: both disk nodes of a group die, and no repair is created until one returns"
+	local n i last grpid rev msg st det name mrd state cnt tag want
 	local before_primary before_failovers before_rev
-	local t0 gap allowed seen left newleg skips
-	local ids=() vms=() insts=() addrs=()
+	local t0 gap allowed seen left newleg skips started
+	local epochs cur given want_retired retired
+	local ids=() vms=() insts=() addrs=() idxs=() sides=()
 	# common.DefaultNvmeFastIoFailTmo: the fast IO fail timeout every CN
 	# connection to a leg is made with (NvmeHost.Connect (agent/nvmehost.go)).
 	local fast_io_fail=5
@@ -17763,15 +18523,19 @@ react_dead_grp() {
 	# (cnagent.md CN11).
 	local probe_every=5
 
-	# The readings the step is judged against, all taken before the kills:
-	# the primary and the failovers applied so far (no failover may follow),
-	# the pool's revision (no op may run on the pool while the group has no
-	# healthy leg: a switch or a create bumps it, a health epoch never does,
-	# model.SetLegErrEpoch), the group's legs in order and its spare legs, and
-	# the worker log's mark the step's record counts start after.
+	# The readings the step is judged against, all taken before the kills
+	# and after the pool holds no repair (react_wait_no_repair): the primary
+	# and the failovers applied so far (no failover may follow), the pool's
+	# revision (no op may run on the pool while the group has no healthy
+	# leg: a repair's create bumps it, a health epoch never does,
+	# model.SetLegErrEpoch), the group's legs in order and its retired legs
+	# with their retired_epoch, and the worker log's mark the step's record
+	# counts start after.
+	react_wait_no_repair
 	sp_refresh
 	sp_read_roles
 	sp_totals
+	copy_primary_cn_id
 	before_primary=$PRIMARY_CNTLR_ID
 	before_failovers=$(worker_failover_cnt)
 	before_rev=$(sp_field '.sp_rev.revision')
@@ -17782,14 +18546,18 @@ react_dead_grp() {
 	assert_eq "$grpid" "$REACT_GRP_ID" \
 		"slice 0's first data group is still the one step 01 recorded"
 	n=$(sp_field "$COPY_GRP0.leg_list | length")
-	assert_eq "$n" "$LEGS" "slice 0's first data group's active legs"
+	assert_eq "$n" "$LEGS" "slice 0's first data group's legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"group $REACT_GRP_ID has no repair before the kills"
 	REACT_DEAD_LEGS=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | tojson")
-	REACT_DEAD_SPARES=$(sp_field \
-		"$COPY_GRP0 | [.spare_leg_list[].leg_id] | sort | tojson")
+	REACT_DEAD_RETIRED=$(sp_field \
+		"$COPY_GRP0 | [.retired_leg_id_list[]] | sort | tojson")
+	react_retired_read
+	epochs=$REACT_RETIRED
 	REACT_DEAD_MARK=$(worker_log_mark)
-	log "  group $REACT_GRP_ID holds legs $REACT_DEAD_LEGS and spare legs" \
-		"$REACT_DEAD_SPARES (leg $REACT_LEG_ID is the one step 5 parked, its" \
-		"disk node back); $SP at revision $before_rev, primary cntlr" \
+	log "  group $REACT_GRP_ID holds legs $REACT_DEAD_LEGS and retired legs" \
+		"$REACT_DEAD_RETIRED (leg $REACT_LEG_ID is the one step 5 retired," \
+		"its disk node back); $SP at revision $before_rev, primary cntlr" \
 		"$before_primary, $before_failovers failover(s) applied so far"
 
 	# Every leg of the group, by the disk-node rule of step 5
@@ -17797,21 +18565,24 @@ react_dead_grp() {
 	# nothing else.
 	for ((i = 0; i < n; i++)); do
 		ids[i]=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
-		case "${ids[$i]}" in
-		'' | *[!0-9]*) die "leg $i of the group carries leg_id '${ids[$i]}'" ;;
+		idxs[i]=$(sp_field "$COPY_GRP0.leg_list[$i].leg_idx")
+		case "${ids[$i]}:${idxs[$i]}" in
+		*[!0-9:]* | :* | *:)
+			die "leg $i of the group carries leg_id '${ids[$i]}'," \
+				"leg_idx '${idxs[$i]}'"
+			;;
 		esac
 		if ! react_leg_alone "$i"; then
 			msg="leg ${ids[$i]} at position $i of slice 0's first data group"
 			msg="$msg does not have a single side on a disk node that carries"
-			msg="$msg exactly one side of $SP, spare and parked legs' sides"
-			msg="$msg counted. This step kills the disk node of every leg of"
-			msg="$msg the group, and a second side there would make a leg of"
-			msg="$msg another group unhealthy too, whose repair would move the"
-			msg="$msg revision the step asserts unchanged; a spare's side there"
-			msg="$msg could be one another group's repair is waiting for"
+			msg="$msg exactly one side of $SP. This step kills the disk node of"
+			msg="$msg every leg of the group, and a second side there would make"
+			msg="$msg a leg of another group unhealthy too, whose repair would"
+			msg="$msg move the revision the step asserts unchanged"
 			die "$msg"
 		fi
 		addrs[i]=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].addr_port")
+		sides[i]=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].side_id")
 		vms[i]=$(dn_vm_of_addr "${addrs[$i]}")
 		insts[i]=$(dn_inst_of_addr "${addrs[$i]}")
 		assert_ne "${vms[$i]}" none \
@@ -17821,6 +18592,8 @@ react_dead_grp() {
 		diag_note_dn "${vms[$i]}" "${insts[$i]}"
 	done
 	last=$((n - 1))
+	tag="dnv-e2e-react-dead-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$tag"
 
 	# The kills, in leg_list order and back to back: every agent, then every
 	# port. No host IO from here until md has the group whole again (see
@@ -17849,8 +18622,8 @@ react_dead_grp() {
 		log "!!! the $n kills took up to ${gap}s. With side_unhealthy at" \
 			"${THR_SIDE}s, kills longer than ${allowed}s can let the first" \
 			"leg's threshold run out before the last leg's health epoch is" \
-			"written, and AR8 would then read that leg healthy and switch a" \
-			"spare in for the first one. The watch below dies if it does."
+			"written, and AR8 would then read that leg healthy and create a" \
+			"repair for the first one. The watch below dies if it does."
 	else
 		log "  the $n kills took up to ${gap}s, inside the ${allowed}s" \
 			"side_unhealthy (${THR_SIDE}s) leaves them"
@@ -17881,29 +18654,28 @@ react_dead_grp() {
 	wait_until "$((left + WAIT_SHORT))" "$msg" react_dead_window
 
 	# What the watch proves, from one reading after it: the same legs in the
-	# same order, the same spare legs, the epochs the window counted from
-	# still the ones set (a moved value was cleared and set again, which
-	# restarts the count), no op on the pool and no switch or create in the
-	# worker's records, and no failover.
+	# same order, the same retired legs, no repair of the group, the epochs
+	# the window counted from still the ones set (a moved value was cleared
+	# and set again, which restarts the count), no op on the pool, which a
+	# repair created and cancelled in the window would also show, and no
+	# failover.
 	sp_refresh
 	assert_jq "$SP_JSON" \
 		"($COPY_GRP0 | [.leg_list[].leg_id]) == $REACT_DEAD_LEGS" \
 		"group $REACT_GRP_ID's leg_list holds the legs it held before the kills, in their order"
 	assert_jq "$SP_JSON" \
-		"($COPY_GRP0 | [.spare_leg_list[].leg_id] | sort) == $REACT_DEAD_SPARES" \
-		"group $REACT_GRP_ID's spare legs are the ones it held before the kills"
+		"($COPY_GRP0 | [.retired_leg_id_list[]] | sort) == $REACT_DEAD_RETIRED" \
+		"group $REACT_GRP_ID's retired legs are the ones it held before the kills"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"group $REACT_GRP_ID names no repair while none of its legs is healthy"
+	ctl_ok repair list
+	assert_field "$CTL_OUT" \
+		"[.name_to_repair[] | select(.grp_id == \"$REACT_GRP_ID\")] | length" 0 \
+		"ListRepairs holds no repair of group $REACT_GRP_ID while none of its legs is healthy"
 	assert_eq "$(sp_field "$REACT_DEAD_EPOCHS")" "$seen" \
 		"group $REACT_GRP_ID's health epochs across the watch"
 	assert_eq "$(sp_field '.sp_rev.revision')" "$before_rev" \
 		"$SP's revision while no leg of group $REACT_GRP_ID was healthy (no op ran on the pool)"
-	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
-		kind spare_switch "$REACT_GRP_ID")
-	assert_eq "$cnt" 0 \
-		"the worker's applied spare switches on group $REACT_GRP_ID while no leg of it was healthy"
-	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
-		kind spare_create "$REACT_GRP_ID")
-	assert_eq "$cnt" 0 \
-		"the worker's applied spare creates for group $REACT_GRP_ID while no leg of it was healthy"
 	sp_read_roles
 	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
 		"the primary while no leg of group $REACT_GRP_ID was healthy (leg rows do not count toward a cntlr's health)"
@@ -17934,7 +18706,6 @@ react_dead_grp() {
 		".cntlr_info.grp_id_to_md_raid[\"$REACT_GRP_ID\"].details // \"\"")
 	assert_eq "$st" RES_STATUS_OK \
 		"group $REACT_GRP_ID's row on the primary with no leg serving [$det] (md saw no IO, so the array runs)"
-	copy_primary_cn_id
 	for ((i = 0; i < n; i++)); do
 		name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "${ids[$i]}")
 		mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name") ||
@@ -17953,24 +18724,36 @@ react_dead_grp() {
 	done
 
 	# The disk node that died last comes back (WHICH DISK NODE RETURNS above),
-	# and AR8 repairs the other leg.
+	# and AR8 repairs the other leg, one repair at a time, each with a fresh
+	# leg (dnv-worker.md, Leg repair). epochs carries the group's retired
+	# legs from one repair to the next, each finish judged against the ones
+	# the group held before it (react_retired_want).
 	log "  returning dn${vms[$last]} instance ${insts[$last]}, the disk node" \
 		"of leg ${ids[$last]}, which died last"
 	react_return_dn "${vms[$last]}" "${insts[$last]}"
-	for ((i = 0; i < last; i++)); do
-		msg="AR8 to switch a spare in for leg ${ids[$i]} (the primary must"
-		msg="$msg report leg ${ids[$last]} OK first, and the spare must be"
-		msg="$msg ready, or be created and zeroed)"
-		wait_until "$WAIT_PROVISION" "$msg" react_spare_switched "${ids[$i]}"
-	done
-	sp_refresh
-	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
-		"the group still has $LEGS active leg(s)"
-	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$last].leg_id" "${ids[$last]}" \
-		"leg ${ids[$last]}, whose disk node came back, keeps its place in leg_list"
 	REACT_DEAD_OLD=""
 	REACT_DEAD_NEW=""
 	for ((i = 0; i < last; i++)); do
+		REACT_REP_NAME=""
+		REACT_REP_LAST=""
+		msg="AR8 to create a repair of group $REACT_GRP_ID for leg ${ids[$i]}"
+		msg="$msg (the primary must report leg ${ids[$last]} OK and in sync"
+		msg="$msg first)"
+		wait_until "$WAIT_PROVISION" "$msg" react_rep_open "$i" "${ids[$i]}"
+		REACT_NEW_LEG=""
+		REACT_NEW_SIDE=""
+		REACT_NEW_ADDR=""
+		cur=$(jq_of "$epochs" 'keys | tojson')
+		if [ -n "$REACT_REP_NAME" ]; then
+			react_rep_name_ok "$REACT_REP_NAME"
+			react_rep_read "${ids[$i]}" "$cur"
+		fi
+		REACT_REP_LAST=""
+		msg="the worker to move the repair of leg ${ids[$i]} to STARTED and"
+		msg="$msg finish it: its fresh leg zeroes, the primary adds it to the"
+		msg="$msg array, and leg ${ids[$i]} becomes a retired leg"
+		wait_until "$WAIT_PROVISION" "$msg" react_rep_done "${ids[$i]}"
+		sp_refresh
 		newleg=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
 		case "$newleg" in
 		'' | *[!0-9]* | 0)
@@ -17979,42 +18762,71 @@ react_dead_grp() {
 		esac
 		assert_ne "$newleg" "${ids[$i]}" \
 			"the leg in leg ${ids[$i]}'s place is a different leg"
-		assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$i].side_list | length" 1 \
-			"leg $newleg, in leg ${ids[$i]}'s place, has exactly one side"
-		if [ "$newleg" = "$REACT_LEG_ID" ]; then
-			log "  leg $newleg, the one step 5 parked, took leg ${ids[$i]}'s place"
-		else
-			log "  leg $newleg took leg ${ids[$i]}'s place"
+		if [ -n "$REACT_NEW_LEG" ]; then
+			assert_eq "$newleg" "$REACT_NEW_LEG" \
+				"the leg in leg ${ids[$i]}'s place is the repair's new leg"
 		fi
+		assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$i].leg_idx" \
+			"${idxs[$i]}" "leg $newleg takes leg ${ids[$i]}'s leg_idx"
+		assert_jq "$cur" "([\"$newleg\"] - .) | length == 1" \
+			"leg $newleg is none of the group's retired legs: the worker's repair takes a fresh leg"
+		react_new_leg_placed "$i" "$newleg" "$(IFS=,; echo "${addrs[*]}")" \
+			"$(for a in "${addrs[@]}"; do printf '%s,' "${a%:*}"; done)"
+		assert_field "$SP_JSON" \
+			"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"${ids[$i]}\")] | length" \
+			1 "leg ${ids[$i]} is one of the group's retired legs"
+		# The retired legs exactly, as step 5 holds them: the ones the group
+		# held before this repair plus the leg it replaced, less the oldest
+		# when it held MAX_RETIRED_LEG_PER_GRP of them (architecture.md,
+		# Repairs, FinishRepair).
+		given=$(react_retired_given "$epochs")
+		want_retired=$(react_retired_want "$epochs" "${ids[$i]}")
+		assert_jq "$SP_JSON" \
+			"($COPY_GRP0 | [.retired_leg_id_list[]] | sort) == $want_retired" \
+			"the group's retired legs are the ones it had plus leg ${ids[$i]}, less the oldest when it held $MAX_RETIRED_LEG_PER_GRP (architecture.md, Repairs, FinishRepair)"
+		assert_jq "$SP_JSON" \
+			"($COPY_GRP0.retired_leg_id_list | length) <= $MAX_RETIRED_LEG_PER_GRP" \
+			"the group holds at most $MAX_RETIRED_LEG_PER_GRP retired legs (architecture.md, Retired legs)"
+		# The retired record, read with every retired leg's time for the
+		# next repair; react_retired_read leaves `retired-leg list` in CTL_OUT.
+		react_retired_read
+		epochs=$REACT_RETIRED
+		if [ -n "$given" ]; then
+			assert_field "$CTL_OUT" ".leg_id_to_retired_leg | has(\"$given\")" \
+				false "ListRetiredLegs no longer holds leg $given, the oldest retired leg the finish gave back"
+			log "  the finish gave back leg $given, the group's oldest retired leg"
+		fi
+		retired=".leg_id_to_retired_leg[\"${ids[$i]}\"]"
+		assert_field "$CTL_OUT" "$retired.grp_id" "$REACT_GRP_ID" \
+			"ListRetiredLegs holds leg ${ids[$i]}, naming group $REACT_GRP_ID"
+		assert_field "$CTL_OUT" "$retired.leg_idx" "${idxs[$i]}" \
+			"and the leg_idx it left"
+		assert_field "$CTL_OUT" "$retired.side.side_id" "${sides[$i]}" \
+			"the retired leg keeps leg ${ids[$i]}'s side"
+		assert_field "$CTL_OUT" "$retired.side.addr_port" "${addrs[$i]}" \
+			"on its dead disk node"
 		REACT_DEAD_OLD="$REACT_DEAD_OLD ${ids[$i]}"
 		REACT_DEAD_NEW="$REACT_DEAD_NEW $newleg"
 	done
-	# THE SPARE SET AFTER THE REPAIR, derived rather than assumed, as in step 5:
-	# SwitchSpareLeg (model/ops.go) takes the spare out of spare_leg_list and
-	# parks the replaced leg there, and a spare AR8 created first was never in
-	# the step's before set. So the group's spare legs are the ones it held
-	# before the kills, plus the replaced legs, less the legs now in their
-	# places — whichever spare AR8 took.
-	assert_jq "$SP_JSON" \
-		"($COPY_GRP0 | [.spare_leg_list[].leg_id] | sort)
-		 == ((($REACT_DEAD_SPARES + ($REACT_DEAD_LEGS | .[0:$last]))
-		      - ($COPY_GRP0 | [.leg_list[0:$last][].leg_id])) | sort)" \
-		"group $REACT_GRP_ID's spare legs: those before the kills, plus the replaced legs, less their replacements"
-	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
-		kind spare_switch "$REACT_GRP_ID")
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
+		"the group still has $LEGS leg(s)"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$last].leg_id" "${ids[$last]}" \
+		"leg ${ids[$last]}, whose disk node came back, keeps its place in leg_list"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the finish"
+	started=$(worker_rep_started "$REACT_DEAD_MARK" "$REACT_GRP_ID")
+	cnt=$(printf '%s\n' "$started" | grep -c . || true)
 	assert_eq "$cnt" "$last" \
-		"the worker's applied spare switches on group $REACT_GRP_ID across the step (one per leg replaced)"
-	cnt=$(worker_grp_reaction_cnt "$REACT_DEAD_MARK" "reaction applied" \
-		kind spare_create "$REACT_GRP_ID")
-	log "  AR8 created $cnt spare leg(s) for group $REACT_GRP_ID on the way" \
-		"(none when a spare was ready)"
+		"the worker's repairs of group $REACT_GRP_ID moved to STARTED across the step (one per leg replaced, dnv-worker.md AR11)"
+	log "  the worker's repairs of group $REACT_GRP_ID across the step:" \
+		"${started//$'\n'/ }"
 
 	# md copies the group whole onto the new leg from the one that came back.
 	# The members on the primary come first, as on this idle array they are
 	# the only proof that the array is the new one (react_dead_members); a
 	# wait, as a new member reads in_sync only once md's copy onto it ends.
-	# Then grp_md_clean reads md's words at the revision the switch bumped
-	# to, as in step 5, and only then does host0 read the data.
+	# Then copy_rep_whole reads md's words and the primary's reading at the
+	# revision the finish bumped to, and only then does host0 read the data.
 	REACT_MEMBER_LAST=""
 	msg="md on cn$PRIMARY_CN to hold leg(s)$REACT_DEAD_NEW in sync and"
 	msg="$msg leg(s)$REACT_DEAD_OLD in no array"
@@ -18023,24 +18835,26 @@ react_dead_grp() {
 	case "$rev" in
 	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
 	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
 	MD_STATE_LAST=""
-	msg="cn$PRIMARY_CN to apply revision $rev and md to copy group"
-	msg="$msg $REACT_GRP_ID whole onto its new leg from leg ${ids[$last]}"
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group"
+	msg="$msg $REACT_GRP_ID whole, in sync on legs $want"
 	wait_until "$WAIT_PROVISION" "$msg" \
-		grp_md_clean "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev"
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
 	check_sha0 "after AR8 repaired slice 0's data group from the one leg whose disk node came back"
+	host_kmsg_clean 0 "$tag" "once md held group $REACT_GRP_ID whole"
 
-	# The disk node that died first comes back too, its leg now parked, for
-	# the teardown's drain (see above), and the primary connects that leg
-	# again.
+	# The disk node that died first comes back too, its leg now retired, for
+	# the teardown's drain (see above); the primary holds every leg.
 	for ((i = 0; i < last; i++)); do
 		react_return_dn "${vms[$i]}" "${insts[$i]}"
 	done
 	sp_refresh
 	sp_totals
 	stack_wait_reset
-	msg="the primary to report all $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs"
-	msg="$msg again, the newly parked one included"
+	msg="the primary to report all $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs"
+	msg="$msg OK, no retired leg among them"
 	wait_until "$WAIT_PROVISION" "$msg" cntlr_full_ready "$PRIMARY_CNTLR_ID"
 
 	# No failover across the whole step, for the reason above, asserted both
@@ -18739,7 +19553,7 @@ cut_resume() {
 	# WAIT_BUILD: a whole stack from nothing, on a node that had only legs —
 	# react's stage 03 says why, and its wait is this one's model.
 	wait_until "$WAIT_BUILD" \
-		"the new primary cntlr $CUT_NEW_ID on cn$CUT_NEW_CN to build $SLICE_CNT pools, $SP_GRP_TOTAL groups and $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs and settle" \
+		"the new primary cntlr $CUT_NEW_ID on cn$CUT_NEW_CN to build $SLICE_CNT pools, $SP_GRP_TOTAL groups and $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs and settle" \
 		cut_new_primary_ready "$CUT_NEW_ID"
 	wait_until "$WAIT_PROVISION" \
 		"the new primary to build the raid0 of $TD0 and $TD_CUT" \
@@ -18951,7 +19765,7 @@ cut_reading() {
 		ctl_try cn get --addr "$(cn_addr "$v")" || return 1
 		CUT_READ+="cn$v $CTL_OUT"$'\n'
 	done
-	addrs=$(jq_of "$sp" "[$SP_ANY_SIDE_PATH | .addr_port] | unique | .[]")
+	addrs=$(jq_of "$sp" "[$SP_SIDE_PATH | .addr_port] | unique | .[]")
 	[ -n "$addrs" ] || return 1
 	for addr in $addrs; do
 		ctl_try dn get --addr "$addr" || return 1

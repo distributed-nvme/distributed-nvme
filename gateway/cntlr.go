@@ -632,16 +632,15 @@ func (s *Server) InspectCntlr(
 // Migrations).
 //
 // It is InspectCntlr's shape with the object named differently. The side is
-// located by the bounded slice scan of findSide — every slice, every meta and
-// data group, active legs and spare legs alike — because a side_id is unique
-// inside the SP but carries no hint of which slice holds it (architecture.md,
-// Cntlrs); only when no slice holds it are the clones read and their clone
-// meta groups scanned the same way (findCloneSide), so the inspect of a
-// slice's side never depends on the clone keys; and only when no clone holds
-// it are the pool's repairs and retired legs read (findRepairSide), whose
-// sides every dn agent hosts as it hosts a leg's: the side of a repair's new
-// leg and a retired side (architecture.md, Repair). An id in none of them is
-// NOT_FOUND.
+// located by the bounded slice scan of findSide — every leg of every meta and
+// data group of every slice — because a side_id is unique inside the SP but
+// carries no hint of which slice holds it (architecture.md, Cntlrs); only when
+// no slice holds it are the clones read and their clone meta groups scanned
+// the same way (findCloneSide), so the inspect of a slice's side never depends
+// on the clone keys; and only when no clone holds it are the pool's repairs
+// and retired legs read (findRepairSide), whose sides every dn agent hosts as
+// it hosts a leg's: the side of a repair's new leg and a retired side
+// (architecture.md, Repair). An id in none of them is NOT_FOUND.
 //
 // The agent request names the side by the full SidePointer, not by side_id
 // alone: the dn agent keys its objects by (sp_id, leg_id, side_id), so the

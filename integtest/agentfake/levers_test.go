@@ -933,7 +933,7 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 				whole  bool
 				inSync []uint64
 			}{
-				{11, true, []uint64{101}},
+				{11, true, []uint64{101, 102}},
 				{12, false, []uint64{103, 104}},
 				{21, true, nil},
 				{71, false, []uint64{712}},

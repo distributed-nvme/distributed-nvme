@@ -27,10 +27,20 @@ const (
 	opsBadEpoch     = uint64(4000)
 	opsRetiredEpoch = uint64(5000)
 	opsFinishNow    = uint64(9000)
+	// opsWorkerEpoch is the time in the name of the sp worker's repair.
+	opsWorkerEpoch = uint64(8000)
+	// opsDnE is a fifth DN, outside the fixture, for a fresh new leg while
+	// dn-c and dn-d hold the group's retired sides.
+	opsDnE = "dn-e:9000"
 )
 
 // opsSliceParent is the parent of the fixture slice's groups.
 var opsSliceParent = GrpParent{SliceId: opsSliceId}
+
+// opsWorkerRepName is the name of the sp worker's repair of the data group,
+// which carries the reserved prefix.
+var opsWorkerRepName = common.WorkerRepName(
+	opsSpId, opsDataGrpId, opsWorkerEpoch)
 
 // setLegErr stamps one slice leg's err_epoch directly, bypassing the op.
 func (e *opsEnv) setLegErr(legId uint64, epoch uint64) {
@@ -126,14 +136,23 @@ func (e *opsEnv) freshLeg(addrPort string) RepairNewLeg {
 // leg's id.
 func (e *opsEnv) createRepair(newLeg func() RepairNewLeg) (uint64, uint64) {
 	e.t.Helper()
+	return e.createRepairNamed(opsRepName, newLeg)
+}
+
+// createRepairNamed is createRepair under the name repName.
+func (e *opsEnv) createRepairNamed(
+	repName string,
+	newLeg func() RepairNewLeg,
+) (uint64, uint64) {
+	e.t.Helper()
 	e.setLegErr(opsDataLegB, opsBadEpoch)
 	repId, legId, err := CreateRepair(
 		e.ctx, e.cli, e.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsRepName, opsSliceParent, opsDataGrpId, opsDataLegB, newLeg(),
+		repName, opsSliceParent, opsDataGrpId, opsDataLegB, newLeg(),
 		e.cc,
 	)
 	if err != nil {
-		e.t.Fatalf("CreateRepair: %v", err)
+		e.t.Fatalf("CreateRepair %s: %v", repName, err)
 	}
 	return repId, legId
 }
@@ -389,9 +408,6 @@ func TestCreateRepairPreconditions(t *testing.T) {
 			mustPut(env.t, env.cli,
 				SliceKey(env.cid, opsSpId, opsSliceId), slice)
 		}, ReasonGrpHasRepair},
-		{"a group with a spare leg", func(env *opsEnv, _ *repairCall) {
-			env.addSpare(true)
-		}, "group has a spare leg"},
 		{"bad leg not found", func(_ *opsEnv, call *repairCall) {
 			call.badLeg = opsMetaLegB
 		}, "bad leg not found"},
@@ -457,14 +473,10 @@ func TestCreateRepairPreconditions(t *testing.T) {
 					opsDnA, 1, opsRetiredEpoch)
 				call.newLeg = RepairNewLeg{RetiredLegId: opsRetiredLeg}
 			}, "retired side shares a dn with the group"},
-		{"a fresh leg at the retired-leg bound",
+		{"an operator's fresh leg at the retired-leg bound",
 			func(env *opsEnv, call *repairCall) {
-				env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide,
-					opsDnC, 1, opsRetiredEpoch)
-				env.putRetired(opsDataGrpId, opsRetiredLeg2,
-					opsRetiredSide2, opsDnD, 1, opsRetiredEpoch)
-				env.putDn("dn-e:9000", 704, 4, opsDnFree)
-				call.newLeg = env.freshLeg("dn-e:9000")
+				env.putRetiredBound()
+				call.newLeg = env.freshLeg(opsDnE)
 			}, ReasonRetiredListFull},
 		{"a gain the plan did not hold", func(env *opsEnv, _ *repairCall) {
 			// A migration's destination on the leg that stays.
@@ -487,10 +499,29 @@ func TestCreateRepairPreconditions(t *testing.T) {
 		{"the pick's dn_conf deleted", func(env *opsEnv, _ *repairCall) {
 			env.delKey(DnConfKey(env.cid, opsDnC))
 		}, ReasonCandidateChanged},
-		{"sp level suppresses reactions", func(env *opsEnv, _ *repairCall) {
-			env.setLevel(pb.SpLevel_SP_LEVEL_NO_THINPOOL)
-		}, "sp level suppresses reactions"},
+		{"an operator's name where no group array is built",
+			func(env *opsEnv, _ *repairCall) {
+				env.setLevel(pb.SpLevel_SP_LEVEL_NO_REDUND)
+			}, reasonRepairLevelNoArray},
+		{"a reserved name where reactions stop",
+			func(env *opsEnv, call *repairCall) {
+				env.setLevel(pb.SpLevel_SP_LEVEL_NO_THINPOOL)
+				call.name = opsWorkerRepName
+			}, reasonRepairLevelReactions},
+		{"a reserved name with a retired leg",
+			func(env *opsEnv, call *repairCall) {
+				env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide,
+					opsDnC, 1, opsRetiredEpoch)
+				call.name = opsWorkerRepName
+				call.newLeg = RepairNewLeg{RetiredLegId: opsRetiredLeg}
+			}, reasonReservedNameRetiredLeg},
 		{"sp deleting", func(env *opsEnv, _ *repairCall) {
+			env.setDeleting()
+		}, "sp deleting"},
+		// The deleting gate (loadSpConfAnyLevel) comes before the level
+		// gate (checkCreateRepairLevel).
+		{"sp deleting at a level that refuses", func(env *opsEnv, _ *repairCall) {
+			env.setLevel(pb.SpLevel_SP_LEVEL_DISABLE)
 			env.setDeleting()
 		}, "sp deleting"},
 		{"stale revision", func(_ *opsEnv, call *repairCall) {
@@ -514,6 +545,177 @@ func TestCreateRepairPreconditions(t *testing.T) {
 	}
 }
 
+// putRetiredBound fills the data group's retired list to the bound with two
+// retired legs, opsRetiredLeg on dn-c and opsRetiredLeg2 on dn-d one second
+// younger, and adds dn-e for a fresh new leg.
+func (e *opsEnv) putRetiredBound() {
+	e.t.Helper()
+	if common.MaxRetiredLegPerGrp != 2 {
+		e.t.Fatalf("the fixture plants 2 retired legs, the bound is %d",
+			common.MaxRetiredLegPerGrp)
+	}
+	e.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide, opsDnC, 1,
+		opsRetiredEpoch)
+	e.putRetired(opsDataGrpId, opsRetiredLeg2, opsRetiredSide2, opsDnD, 1,
+		opsRetiredEpoch+1)
+	e.putDn(opsDnE, 704, 4, opsDnFree)
+}
+
+// TestCreateRepairLevelGate pins the level gate by the kind of name
+// (CreateRepairLevelGate) at each boundary: an operator's name is taken at
+// SP_LEVEL_NO_THINPOOL and refused from SP_LEVEL_NO_REDUND up, where no group
+// array is built; the sp worker's name, with the reserved prefix, is taken at
+// SP_LEVEL_NO_CLONE and refused from SP_LEVEL_NO_THINPOOL up, where reactions
+// stop. A create that is taken writes the repair; one that is refused writes
+// nothing.
+func TestCreateRepairLevelGate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		repName string
+		level   pb.SpLevel
+		reason  string
+	}{
+		{"an operator's name at NO_THINPOOL", opsRepName,
+			pb.SpLevel_SP_LEVEL_NO_THINPOOL, ""},
+		{"an operator's name at NO_REDUND", opsRepName,
+			pb.SpLevel_SP_LEVEL_NO_REDUND, reasonRepairLevelNoArray},
+		{"an operator's name at DISABLE", opsRepName,
+			pb.SpLevel_SP_LEVEL_DISABLE, reasonRepairLevelNoArray},
+		{"a reserved name at READWRITE", opsWorkerRepName,
+			pb.SpLevel_SP_LEVEL_READWRITE, ""},
+		{"a reserved name at NO_CLONE", opsWorkerRepName,
+			pb.SpLevel_SP_LEVEL_NO_CLONE, ""},
+		{"a reserved name at NO_THINPOOL", opsWorkerRepName,
+			pb.SpLevel_SP_LEVEL_NO_THINPOOL, reasonRepairLevelReactions},
+		{"a reserved name at NO_REDUND", opsWorkerRepName,
+			pb.SpLevel_SP_LEVEL_NO_REDUND, reasonRepairLevelReactions},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			env.setLegErr(opsDataLegB, opsBadEpoch)
+			env.setLevel(tc.level)
+			call := &repairCall{
+				name:   tc.repName,
+				parent: opsSliceParent,
+				grpId:  opsDataGrpId,
+				badLeg: opsDataLegB,
+				newLeg: env.freshLeg(opsDnC),
+			}
+			before := env.storeRev()
+			err := call.run(env)
+			if tc.reason != "" {
+				env.wantNoWrite(err, opCreateRepair, tc.reason, before)
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateRepair at %s: %v", tc.level, err)
+			}
+			if got := findGroup(env.slice(), opsDataGrpId).GetRepName(); got !=
+				tc.repName {
+				t.Errorf("rep_name: got %q, want %q", got, tc.repName)
+			}
+			if got := env.repair(tc.repName).GetRepStage(); got !=
+				pb.RepStage_REP_STAGE_CREATED {
+				t.Errorf("stage: got %v, want CREATED", got)
+			}
+		})
+	}
+	for repName, want := range map[string]pb.SpLevel{
+		opsRepName:       pb.SpLevel_SP_LEVEL_NO_REDUND,
+		opsWorkerRepName: pb.SpLevel_SP_LEVEL_NO_THINPOOL,
+	} {
+		if got := CreateRepairLevelGate(repName); got != want {
+			t.Errorf("CreateRepairLevelGate(%q) = %v, want %v",
+				repName, got, want)
+		}
+	}
+}
+
+// TestCreateRepairReservedNameAtTheRetiredBound: the sp worker's repair takes
+// a fresh new leg while its group holds MaxRetiredLegPerGrp retired legs,
+// which an operator's create refuses (TestCreateRepairPreconditions). It
+// writes what every fresh create writes — three ids, the new leg on the
+// pick with the next leg_idx and an unprovisioned side, the group's rep_name,
+// the pool's list, the pick charged, one DnRev and one SpRev bump — and
+// leaves the retired legs, their lists and their DNs as they were: nothing
+// is given back before the finish.
+func TestCreateRepairReservedNameAtTheRetiredBound(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putRetiredBound()
+	retired := []*pb.RetiredLeg{
+		env.retired(opsRetiredLeg), env.retired(opsRetiredLeg2),
+	}
+	dnC, dnD := env.dn(opsDnC), env.dn(opsDnD)
+	dnCRev, dnDRev := env.dnRev(opsDnC), env.dnRev(opsDnD)
+	spRev, dnERev := env.spRev(), env.dnRev(opsDnE)
+
+	repId, legId := env.createRepairNamed(opsWorkerRepName,
+		func() RepairNewLeg { return env.freshLeg(opsDnE) })
+	if repId != opsNextId || legId != opsNextId+1 {
+		t.Errorf("rep_id %d, new leg %d, want %d and %d from next_id",
+			repId, legId, opsNextId, opsNextId+1)
+	}
+	want := &pb.Repair{
+		RepId:    opsNextId,
+		GrpId:    opsDataGrpId,
+		RepStage: pb.RepStage_REP_STAGE_CREATED,
+		NewLegList: []*pb.Leg{{
+			LegId:    opsNextId + 1,
+			LegIdx:   2,
+			SideList: []*pb.Side{opsSide(opsNextId+2, opsDnE, false)},
+		}},
+		BadLegIdList: []uint64{opsDataLegB},
+		SliceId:      opsSliceId,
+	}
+	if got := env.repair(opsWorkerRepName); !proto.Equal(got, want) {
+		t.Errorf("repair: got %v, want %v", got, want)
+	}
+	wantRetired := []uint64{opsRetiredLeg, opsRetiredLeg2}
+	grp := findGroup(env.slice(), opsDataGrpId)
+	if grp.GetRepName() != opsWorkerRepName ||
+		!equalIds(grp.GetRetiredLegIdList(), wantRetired) ||
+		len(grp.GetLegList()) != 2 ||
+		grp.GetLegList()[1].GetLegId() != opsDataLegB {
+		t.Errorf("group: rep_name %q, retired legs %v, legs %v",
+			grp.GetRepName(), grp.GetRetiredLegIdList(), grp.GetLegList())
+	}
+	conf := env.spConf()
+	if !equalStrings(conf.GetRepairNameList(), []string{opsWorkerRepName}) ||
+		!equalIds(conf.GetRetiredLegIdList(), wantRetired) ||
+		conf.GetNextId() != opsNextId+3 {
+		t.Errorf("pool: repairs %v, retired legs %v, next_id %d",
+			conf.GetRepairNameList(), conf.GetRetiredLegIdList(),
+			conf.GetNextId())
+	}
+	for i, legId := range wantRetired {
+		if got := env.retired(legId); !proto.Equal(got, retired[i]) {
+			t.Errorf("retired leg %d: got %v, want %v", legId, got,
+				retired[i])
+		}
+	}
+	dnE := env.dn(opsDnE)
+	wantPtr := &pb.SidePointer{
+		SpId: opsSpId, LegId: opsNextId + 1, SideId: opsNextId + 2,
+	}
+	if dnE.GetFreeExtCnt() != opsDnFree-opsDataExtCnt ||
+		len(dnE.GetSidePtrList()) != 1 ||
+		!proto.Equal(dnE.GetSidePtrList()[0], wantPtr) {
+		t.Errorf("dn-e: free %d, pointers %v, want %d and %v",
+			dnE.GetFreeExtCnt(), dnE.GetSidePtrList(),
+			opsDnFree-opsDataExtCnt, wantPtr)
+	}
+	if got := env.dnRev(opsDnE); got != dnERev+1 {
+		t.Errorf("dn-e rev: got %d, want %d", got, dnERev+1)
+	}
+	if !proto.Equal(env.dn(opsDnC), dnC) || !proto.Equal(env.dn(opsDnD), dnD) ||
+		env.dnRev(opsDnC) != dnCRev || env.dnRev(opsDnD) != dnDRev {
+		t.Errorf("a retired side's DN moved at the create")
+	}
+	if got := env.spRev(); got != spRev+1 {
+		t.Errorf("SpRev: got %d, want %d", got, spRev+1)
+	}
+}
+
 // TestFinishRepair: the new leg takes the bad leg's place in leg_list and its
 // leg_idx; the bad leg becomes a RetiredLeg under its leg id with its side,
 // the time the caller gives and the parent; the repair and its name go, the
@@ -530,14 +732,15 @@ func TestFinishRepair(t *testing.T) {
 	badSide := findLeg(env.slice(), opsDataLegB).GetSideList()[0]
 	dnB, revBefore := env.dn(opsDnB), env.spRev()
 
-	gotRep, gotRetired, err := FinishRepair(env.ctx, env.cli, env.cid,
-		opsShard, opsSpId, opsSpName, noExpectRev, opsRepName, opsFinishNow)
+	res, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		opsSpName, noExpectRev, opsRepName, opsFinishNow, env.cc)
 	if err != nil {
 		t.Fatalf("FinishRepair: %v", err)
 	}
-	if gotRep != repId || gotRetired != opsDataLegB {
-		t.Errorf("FinishRepair = %d, %d, want %d, %d", gotRep, gotRetired,
-			repId, opsDataLegB)
+	if want := (FinishRepairResult{
+		RepId: repId, RetiredLegId: opsDataLegB,
+	}); res != want {
+		t.Errorf("FinishRepair = %+v, want %+v", res, want)
 	}
 	grp := findGroup(env.slice(), opsDataGrpId)
 	wantLeg := proto.Clone(newLeg).(*pb.Leg)
@@ -583,6 +786,281 @@ func TestFinishRepair(t *testing.T) {
 	}
 }
 
+// opsRetiredPlant is one retired leg of the data group a give-back case
+// plants, in the order of the group's list.
+type opsRetiredPlant struct {
+	legId  uint64
+	sideId uint64
+	addr   string
+	epoch  uint64
+}
+
+// startWorkerRepair creates the sp worker's repair of leg B with a fresh new
+// leg on dn-e and moves it to STARTED; it returns its rep_id.
+func (e *opsEnv) startWorkerRepair() uint64 {
+	e.t.Helper()
+	repId, _ := e.createRepairNamed(opsWorkerRepName,
+		func() RepairNewLeg { return e.freshLeg(opsDnE) })
+	e.toStage(opsWorkerRepName, repId, pb.RepStage_REP_STAGE_STARTED)
+	return repId
+}
+
+// TestFinishRepairGivesBackTheOldestRetiredLeg: the finish of the sp
+// worker's repair whose group holds MaxRetiredLegPerGrp retired legs gives
+// back the oldest one in the same transaction — the smallest retired_epoch,
+// then the smallest leg id, whatever the order of the list — and names it in
+// its result. Its record and its two list entries go and its side goes back
+// to its DN as DeleteRetiredLeg gives one back: the pointer out, the group's
+// ext_cnt back, the capacity key moved, one DnRev bump. The other retired leg
+// and its DN stay as they were; the bad leg joins the lists after it, as
+// every finish retires it; one SpRev bump.
+func TestFinishRepairGivesBackTheOldestRetiredLeg(t *testing.T) {
+	c := opsRetiredPlant{opsRetiredLeg, opsRetiredSide, opsDnC, 0}
+	d := opsRetiredPlant{opsRetiredLeg2, opsRetiredSide2, opsDnD, 0}
+	at := func(p opsRetiredPlant, epoch uint64) opsRetiredPlant {
+		p.epoch = epoch
+		return p
+	}
+	if c.legId >= d.legId {
+		t.Fatalf("the cases need dn-c's retired leg %d below dn-d's %d",
+			c.legId, d.legId)
+	}
+	for _, tc := range []struct {
+		name   string
+		plants []opsRetiredPlant
+		gone   opsRetiredPlant
+		kept   opsRetiredPlant
+	}{
+		{"the older one listed second, with the larger leg id",
+			[]opsRetiredPlant{at(c, 6000), at(d, 5000)},
+			at(d, 5000), at(c, 6000)},
+		{"the older one listed first, with the larger leg id",
+			[]opsRetiredPlant{at(d, 5000), at(c, 6000)},
+			at(d, 5000), at(c, 6000)},
+		{"equal times: the smaller leg id, listed second",
+			[]opsRetiredPlant{at(d, 5000), at(c, 5000)},
+			at(c, 5000), at(d, 5000)},
+		{"equal times: the smaller leg id, listed first",
+			[]opsRetiredPlant{at(c, 5000), at(d, 5000)},
+			at(c, 5000), at(d, 5000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			for _, p := range tc.plants {
+				env.putRetired(opsDataGrpId, p.legId, p.sideId, p.addr, 1,
+					p.epoch)
+			}
+			env.putDn(opsDnE, 704, 4, opsDnFree)
+			repId := env.startWorkerRepair()
+			newLeg := env.repair(opsWorkerRepName).GetNewLegList()[0]
+			badSide := findLeg(env.slice(), opsDataLegB).GetSideList()[0]
+			kept := env.retired(tc.kept.legId)
+			charged := opsDnFree - opsDataExtCnt
+			keptDn, keptRev := env.dn(tc.kept.addr), env.dnRev(tc.kept.addr)
+			goneRev := env.dnRev(tc.gone.addr)
+			dnB, dnE := env.dn(opsDnB), env.dn(opsDnE)
+			spRev := env.spRev()
+
+			res, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, noExpectRev, opsWorkerRepName,
+				opsFinishNow, env.cc)
+			if err != nil {
+				t.Fatalf("FinishRepair: %v", err)
+			}
+			if want := (FinishRepairResult{
+				RepId: repId, RetiredLegId: opsDataLegB,
+				GivenBackLegId: tc.gone.legId,
+			}); res != want {
+				t.Errorf("FinishRepair = %+v, want %+v", res, want)
+			}
+			if env.exists(RetiredLegKey(env.cid, opsSpId, tc.gone.legId)) {
+				t.Errorf("the given-back retired leg %d survived",
+					tc.gone.legId)
+			}
+			if got := env.retired(tc.kept.legId); !proto.Equal(got, kept) {
+				t.Errorf("the kept retired leg: got %v, want %v", got, kept)
+			}
+			wantBad := &pb.RetiredLeg{
+				GrpId: opsDataGrpId, LegIdx: 1, Side: badSide,
+				RetiredEpoch: opsFinishNow, SliceId: opsSliceId,
+			}
+			if got := env.retired(opsDataLegB); !proto.Equal(got, wantBad) {
+				t.Errorf("the retired bad leg: got %v, want %v", got,
+					wantBad)
+			}
+			wantList := []uint64{tc.kept.legId, opsDataLegB}
+			grp := findGroup(env.slice(), opsDataGrpId)
+			wantLeg := proto.Clone(newLeg).(*pb.Leg)
+			wantLeg.LegIdx = 1
+			if len(grp.GetLegList()) != 2 ||
+				grp.GetLegList()[0].GetLegId() != opsDataLegA ||
+				!proto.Equal(grp.GetLegList()[1], wantLeg) ||
+				grp.GetRepName() != "" ||
+				!equalIds(grp.GetRetiredLegIdList(), wantList) {
+				t.Errorf("group: legs %v, rep_name %q, retired legs %v, "+
+					"want leg A then %v, none and %v", grp.GetLegList(),
+					grp.GetRepName(), grp.GetRetiredLegIdList(), wantLeg,
+					wantList)
+			}
+			conf := env.spConf()
+			if len(conf.GetRepairNameList()) != 0 ||
+				!equalIds(conf.GetRetiredLegIdList(), wantList) {
+				t.Errorf("pool: repairs %v, retired legs %v, want none "+
+					"and %v", conf.GetRepairNameList(),
+					conf.GetRetiredLegIdList(), wantList)
+			}
+			if env.exists(RepairKey(env.cid, opsSpId, opsWorkerRepName)) {
+				t.Errorf("the repair survived its finish")
+			}
+			gone := env.dn(tc.gone.addr)
+			if gone.GetFreeExtCnt() != opsDnFree ||
+				len(gone.GetSidePtrList()) != 0 {
+				t.Errorf("%s: free %d with pointers %v, want %d and none",
+					tc.gone.addr, gone.GetFreeExtCnt(),
+					gone.GetSidePtrList(), opsDnFree)
+			}
+			if env.exists(DnCapacityKey(env.cid, mustBin(t, env, charged),
+				charged, tc.gone.addr)) ||
+				!env.exists(DnCapacityKey(env.cid,
+					mustBin(t, env, opsDnFree), opsDnFree, tc.gone.addr)) {
+				t.Errorf("%s: the capacity key did not move back to %d",
+					tc.gone.addr, opsDnFree)
+			}
+			if got := env.dnRev(tc.gone.addr); got != goneRev+1 {
+				t.Errorf("%s rev: got %d, want %d", tc.gone.addr, got,
+					goneRev+1)
+			}
+			if !proto.Equal(env.dn(tc.kept.addr), keptDn) ||
+				env.dnRev(tc.kept.addr) != keptRev {
+				t.Errorf("%s, the kept retired side's DN, moved",
+					tc.kept.addr)
+			}
+			if !proto.Equal(env.dn(opsDnB), dnB) ||
+				!proto.Equal(env.dn(opsDnE), dnE) {
+				t.Errorf("the bad side's or the new side's DN moved")
+			}
+			if got := env.spRev(); got != spRev+1 {
+				t.Errorf("SpRev: got %d, want %d", got, spRev+1)
+			}
+		})
+	}
+}
+
+// TestFinishRepairGivesBackOnlyAtTheBound: the sp worker's repair below the
+// bound, and an operator's repair whatever its group holds, finish without
+// giving a retired leg back: the bad leg joins the lists and every retired
+// leg, with its DN, stays. An operator's repair meets a group at the bound
+// only in a planted state, since its create refuses one or takes a retired
+// leg from it; the case pins that an operator's kept copies never go by a
+// finish.
+func TestFinishRepairGivesBackOnlyAtTheBound(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		finish  func(env *opsEnv) string
+		retired []uint64
+	}{
+		{"the worker's repair below the bound", func(env *opsEnv) string {
+			env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide,
+				opsDnC, 1, opsRetiredEpoch)
+			env.putDn(opsDnE, 704, 4, opsDnFree)
+			env.startWorkerRepair()
+			return opsWorkerRepName
+		}, []uint64{opsRetiredLeg}},
+		{"an operator's repair at the bound", func(env *opsEnv) string {
+			env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide,
+				opsDnC, 1, opsRetiredEpoch)
+			env.putDn(opsDnE, 704, 4, opsDnFree)
+			repId, _ := env.createRepair(func() RepairNewLeg {
+				return env.freshLeg(opsDnE)
+			})
+			env.putRetired(opsDataGrpId, opsRetiredLeg2, opsRetiredSide2,
+				opsDnD, 1, opsRetiredEpoch+1)
+			env.toStage(opsRepName, repId, pb.RepStage_REP_STAGE_STARTED)
+			return opsRepName
+		}, []uint64{opsRetiredLeg, opsRetiredLeg2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			repName := tc.finish(env)
+			before := map[uint64]*pb.RetiredLeg{}
+			for _, legId := range tc.retired {
+				before[legId] = env.retired(legId)
+			}
+			dnC, dnD := env.dn(opsDnC), env.dn(opsDnD)
+			res, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, noExpectRev, repName, opsFinishNow,
+				env.cc)
+			if err != nil {
+				t.Fatalf("FinishRepair: %v", err)
+			}
+			if res.GivenBackLegId != 0 || res.RetiredLegId != opsDataLegB {
+				t.Errorf("FinishRepair = %+v, want leg %d retired and none "+
+					"given back", res, opsDataLegB)
+			}
+			for legId, want := range before {
+				if got := env.retired(legId); !proto.Equal(got, want) {
+					t.Errorf("retired leg %d: got %v, want %v", legId, got,
+						want)
+				}
+			}
+			wantList := append(append([]uint64{}, tc.retired...), opsDataLegB)
+			if got := findGroup(env.slice(), opsDataGrpId).
+				GetRetiredLegIdList(); !equalIds(got, wantList) {
+				t.Errorf("the group's retired legs: got %v, want %v", got,
+					wantList)
+			}
+			if got := env.spConf().GetRetiredLegIdList(); !equalIds(
+				got, wantList) {
+				t.Errorf("the pool's retired legs: got %v, want %v", got,
+					wantList)
+			}
+			if !proto.Equal(env.dn(opsDnC), dnC) ||
+				!proto.Equal(env.dn(opsDnD), dnD) {
+				t.Errorf("a retired side's DN moved")
+			}
+		})
+	}
+}
+
+// TestFinishRepairGiveBackRefusals: the give-back reads each retired leg the
+// group lists, so a listed record that is missing, or one that names another
+// group, refuses the finish, which writes nothing.
+func TestFinishRepairGiveBackRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(env *opsEnv)
+		reason string
+	}{
+		{"a listed retired leg's record missing", func(env *opsEnv) {
+			env.delKey(RetiredLegKey(env.cid, opsSpId, opsRetiredLeg2))
+		}, "retired leg record missing"},
+		{"a listed retired leg the pool does not list", func(env *opsEnv) {
+			conf := env.spConf()
+			conf.RetiredLegIdList = removeId(
+				conf.GetRetiredLegIdList(), opsRetiredLeg2)
+			mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+		}, ReasonRetiredLegNotFound},
+		{"a listed retired leg of another group", func(env *opsEnv) {
+			retired := env.retired(opsRetiredLeg2)
+			retired.GrpId = opsMetaGrpId
+			mustPut(env.t, env.cli,
+				RetiredLegKey(env.cid, opsSpId, opsRetiredLeg2), retired)
+		}, "retired leg of another group"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			env.putRetiredBound()
+			env.startWorkerRepair()
+			tc.setup(env)
+			before := env.storeRev()
+			_, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, noExpectRev, opsWorkerRepName,
+				opsFinishNow, env.cc)
+			env.wantNoWrite(err, opFinishRepair, tc.reason, before)
+		})
+	}
+}
+
 // TestRepairOpsAtAnyLevel: every repair and retired-leg operation but the
 // create takes a pool at a level where the operator is in charge, where the
 // arrays still run (loadSpConfAnyLevel): the finish, the cancel, the abort,
@@ -600,8 +1078,9 @@ func TestRepairOpsAtAnyLevel(t *testing.T) {
 			})
 			env.toStage(opsRepName, repId, pb.RepStage_REP_STAGE_STARTED)
 			disable(env)
-			_, _, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
-				opsSpId, opsSpName, noExpectRev, opsRepName, opsFinishNow)
+			_, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, noExpectRev, opsRepName, opsFinishNow,
+				env.cc)
 			return err
 		}},
 		{"CancelRepair", func(env *opsEnv) error {
@@ -720,6 +1199,11 @@ func TestFinishRepairPreconditions(t *testing.T) {
 		{name: "sp deleting", stage: pb.RepStage_REP_STAGE_STARTED,
 			setup:  func(env *opsEnv) { env.setDeleting() },
 			reason: "sp deleting"},
+		// The stored conf is gated whether the finish gives a side back
+		// or not, as CancelRepair gates it.
+		{name: "an invalid stored conf", stage: pb.RepStage_REP_STAGE_STARTED,
+			setup:  func(env *opsEnv) { env.cc.DnBinConf.ExtentSize = 0 },
+			reason: "invalid stored conf: dn_bin_conf.extent_size is zero"},
 		{name: "stale revision", stage: pb.RepStage_REP_STAGE_STARTED,
 			expect: 99, reason: ReasonStaleRevision},
 	} {
@@ -739,8 +1223,8 @@ func TestFinishRepairPreconditions(t *testing.T) {
 				name = tc.repN
 			}
 			before := env.storeRev()
-			_, _, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
-				opsSpId, opsSpName, tc.expect, name, opsFinishNow)
+			_, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, tc.expect, name, opsFinishNow, env.cc)
 			env.wantNoWrite(err, opFinishRepair, tc.reason, before)
 		})
 	}
@@ -831,6 +1315,77 @@ func TestCancelRepairKeepsTheRetiredLeg(t *testing.T) {
 	}
 	if got := env.dnRev(opsDnC); got != dnCRev {
 		t.Errorf("dn-c rev: got %d, want %d", got, dnCRev)
+	}
+}
+
+// TestCancelRepairOfAWorkersRepairKeepsTheRetiredLegs: the cancel of the sp
+// worker's repair, aborted while its group holds MaxRetiredLegPerGrp retired
+// legs, gives its fresh new leg back to dn-e as every cancel does and keeps
+// every retired leg — the records, the group's and the pool's lists and the
+// DNs of their sides — since only the finish gives one back
+// (architecture.md, Repair, The worker's repairs).
+func TestCancelRepairOfAWorkersRepairKeepsTheRetiredLegs(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putRetiredBound()
+	repId, _ := env.createRepairNamed(opsWorkerRepName,
+		func() RepairNewLeg { return env.freshLeg(opsDnE) })
+	env.toStage(opsWorkerRepName, repId, pb.RepStage_REP_STAGE_ABORTED)
+	wantRetired := []uint64{opsRetiredLeg, opsRetiredLeg2}
+	retired := []*pb.RetiredLeg{
+		env.retired(opsRetiredLeg), env.retired(opsRetiredLeg2),
+	}
+	dnC, dnD := env.dn(opsDnC), env.dn(opsDnD)
+	dnCRev, dnDRev := env.dnRev(opsDnC), env.dnRev(opsDnD)
+	charged := opsDnFree - opsDataExtCnt
+	dnERev := env.dnRev(opsDnE)
+
+	got, err := CancelRepair(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		opsSpName, noExpectRev, opsWorkerRepName, env.cc)
+	if err != nil {
+		t.Fatalf("CancelRepair: %v", err)
+	}
+	if got != repId {
+		t.Errorf("CancelRepair = %d, want %d", got, repId)
+	}
+	for i, legId := range wantRetired {
+		if got := env.retired(legId); !proto.Equal(got, retired[i]) {
+			t.Errorf("retired leg %d: got %v, want %v", legId, got,
+				retired[i])
+		}
+	}
+	grp := findGroup(env.slice(), opsDataGrpId)
+	if got := grp.GetRetiredLegIdList(); !equalIds(got, wantRetired) {
+		t.Errorf("the group's retired_leg_id_list: got %v, want %v", got,
+			wantRetired)
+	}
+	if got := env.spConf().GetRetiredLegIdList(); !equalIds(
+		got, wantRetired) {
+		t.Errorf("the pool's retired_leg_id_list: got %v, want %v", got,
+			wantRetired)
+	}
+	if !proto.Equal(env.dn(opsDnC), dnC) || !proto.Equal(env.dn(opsDnD), dnD) ||
+		env.dnRev(opsDnC) != dnCRev || env.dnRev(opsDnD) != dnDRev {
+		t.Errorf("a retired side's DN moved at the cancel")
+	}
+	dnE := env.dn(opsDnE)
+	if dnE.GetFreeExtCnt() != opsDnFree || len(dnE.GetSidePtrList()) != 0 {
+		t.Errorf("dn-e: free %d with pointers %v, want %d and none",
+			dnE.GetFreeExtCnt(), dnE.GetSidePtrList(), opsDnFree)
+	}
+	if env.exists(DnCapacityKey(
+		env.cid, mustBin(t, env, charged), charged, opsDnE)) {
+		t.Errorf("dn-e: the charged capacity key survived")
+	}
+	if got := env.dnRev(opsDnE); got != dnERev+1 {
+		t.Errorf("dn-e rev: got %d, want %d", got, dnERev+1)
+	}
+	if env.exists(RepairKey(env.cid, opsSpId, opsWorkerRepName)) {
+		t.Errorf("the repair survived its cancel")
+	}
+	if grp.GetRepName() != "" || len(grp.GetLegList()) != 2 ||
+		grp.GetLegList()[1].GetLegId() != opsDataLegB {
+		t.Errorf("group: rep_name %q, legs %v", grp.GetRepName(),
+			grp.GetLegList())
 	}
 }
 
@@ -1395,8 +1950,9 @@ func TestRepairOfACloneMetaGroup(t *testing.T) {
 		t.Fatalf("FlipRepairProvisioned: %v, %v", flipped, err)
 	}
 	env.toStage(opsRepName, repId, pb.RepStage_REP_STAGE_STARTED)
-	if _, _, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
-		opsSpId, opsSpName, noExpectRev, opsRepName, opsFinishNow); err != nil {
+	if _, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, noExpectRev, opsRepName, opsFinishNow,
+		env.cc); err != nil {
 		t.Fatalf("FinishRepair: %v", err)
 	}
 	grp := env.clone(opsCloneName).GetMetaGrp()
@@ -1453,29 +2009,6 @@ func (e *opsEnv) setLegErrClone(legId uint64, epoch uint64) {
 	mustPut(e.t, e.cli, CloneKey(e.cid, opsSpId, opsCloneName), clone)
 }
 
-// TestSpareOpsRefuseAGroupWithARepair: a group has one mechanism at a time,
-// so the spare creates refuse a group that has a repair, with nothing
-// written.
-func TestSpareOpsRefuseAGroupWithARepair(t *testing.T) {
-	env := newOpsEnv(t)
-	env.createRepair(func() RepairNewLeg { return env.freshLeg(opsDnC) })
-	before := env.storeRev()
-	_, err := CreateSpareLeg(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, opsSliceId, opsDataGrpId, env.dnCand(opsDnD),
-		env.grpDnAddrs(opsDataGrpId), env.cc)
-	env.wantNoWrite(err, opCreateSpareLeg, ReasonGrpHasRepair, before)
-
-	env.putGrpClone(opsCloneName, opsCloneId, opsCloneGrp(true), false)
-	clone := env.clone(opsCloneName)
-	clone.MetaGrp.RepName = "rep1"
-	mustPut(t, env.cli, CloneKey(env.cid, opsSpId, opsCloneName), clone)
-	before = env.storeRev()
-	_, err = CreateCloneSpareLeg(env.ctx, env.cli, env.cid, opsShard,
-		opsSpId, opsSpName, noExpectRev, opsCloneName, opsCloneId,
-		opsCloneGrpId, env.dnCand(opsDnA), env.cloneGrpDnAddrs(), env.cc)
-	env.wantNoWrite(err, opCreateCloneSpareLeg, ReasonGrpHasRepair, before)
-}
-
 // TestGrpDnLegsCountTheRepairsNewLegs pins the placement helpers' disk-node
 // set: a repair's new leg is in it, for the gain check and the address check
 // alike, since it becomes a leg of the group at the finish.
@@ -1500,8 +2033,8 @@ func TestRepairReasonsAreDistinct(t *testing.T) {
 	seen := map[string]bool{}
 	for _, reason := range []string{
 		ReasonRepairExists, ReasonRepairNotFound, ReasonRetiredLegNotFound,
-		ReasonRetiredListFull, ReasonGrpHasRepair, ReasonSpareListFull,
-		ReasonStaleRevision, ReasonCandidateChanged, ReasonNoIdLeft,
+		ReasonRetiredListFull, ReasonGrpHasRepair, ReasonStaleRevision,
+		ReasonCandidateChanged, ReasonNoIdLeft,
 	} {
 		if seen[reason] {
 			t.Errorf("reason %q is used twice", reason)
@@ -1539,8 +2072,8 @@ func TestRepairOpsRefuseADeletingClone(t *testing.T) {
 			CloneName: opsCloneName,
 		})
 	before := env.storeRev()
-	_, _, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, "started", opsFinishNow)
+	_, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		opsSpName, noExpectRev, "started", opsFinishNow, env.cc)
 	env.wantNoWrite(err, opFinishRepair, "clone deleting", before)
 	rep.RepStage = pb.RepStage_REP_STAGE_ABORTED
 	mustPut(t, env.cli, RepairKey(env.cid, opsSpId, "started"), rep)

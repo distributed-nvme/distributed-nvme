@@ -1337,13 +1337,13 @@ func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 // the write fails instead.
 //
 // This is not the only worker STM write that takes a ClusterConf — the sp
-// role's model.GrowSlice, model.CreateSpareLeg and its clone-keyed twin
-// model.CreateCloneSpareLeg, and model.DrainSpSlice take one too
-// (reaction.go, drain.go) — but each of those is handed the conf the pass's
+// role's model.GrowSlice, the leg repair ops model.CreateRepair,
+// model.FinishRepair and model.CancelRepair, and model.DrainSpSlice take one
+// too (reaction.go, drain.go) — but each of those is handed the conf the pass's
 // cluster-conf gate validated (passClusterConf), in the reaction pass or,
-// for DrainSpSlice, in the drain's wake-up too, and GrowSlice (both confs)
-// and DrainSpSlice (the cluster one) re-check at the top of their own STMs
-// besides. The clone drain's model.FinishCloneDelete takes one as well, read
+// for DrainSpSlice, in the drain's wake-up too, and GrowSlice (both confs),
+// and DrainSpSlice, FinishRepair and CancelRepair (the cluster one) re-check
+// at the top of their own STMs besides. The clone drain's model.FinishCloneDelete takes one as well, read
 // from the cache ahead of every gate of the pass, and refuses an unusable
 // one at the top of its own STM (clonedrain.go, CLD7). The monitor's write
 // re-reads the conf from the RW21 cache per
@@ -1722,7 +1722,7 @@ func TestHealthMarkCntlrUnknownCoversEveryMap(t *testing.T) {
 // CntlrInfo itself: a PROVISIONING row, or a MISSING row whose details are
 // not CN19's "sp_level", in any map HL2 judges a cntlr by, the per-td thin
 // maps included, except grp_id_to_md_raid, where a grow's group reads
-// PROVISIONING beside a serving pool; never a leg row (a zeroing spare) nor a
+// PROVISIONING beside a serving pool; never a leg row (a zeroing new leg) nor a
 // path row (a migration's zeroing dst side); and never a row of any other
 // status, or a MISSING "sp_level" one, in any map.
 func TestPrimaryShapeBuilt(t *testing.T) {

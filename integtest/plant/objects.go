@@ -280,32 +280,21 @@ func PutSs(
 // ---------------------------------------------------------------------------
 
 // CloneLegSpec places one leg of a clone's clone meta group and the leg's
-// one side on a DN, with the side's cntlid slot. A Spare leg goes to the
-// group's spare_leg_list and needs a pool of md-raid1 groups, its leg_idx
-// sharing the group's index space with the active legs. Every side is
-// planted unprovisioned, so two or more spares in one group make a shape no
-// gateway writes, for LegSpec's reason: model.CreateCloneSpareLeg refuses a
-// new spare while a spare of the group still has an unprovisioned side. A
-// case that wants a shape the gateway can reach flips, with
-// SetCloneProvisioned, the sides of every spare of the group but at most one.
+// one side on a DN, with the side's cntlid slot. Every side is planted
+// unprovisioned.
 type CloneLegSpec struct {
 	// LegId and SideId are the leg's and its side's ids; 0 takes the pool's
 	// next free one.
 	LegId  uint64
 	LegIdx uint32
-	Spare  bool
 	SideId uint64
 	DnId   uint64
 	Slot   uint32
 }
 
 func (l CloneLegSpec) String() string {
-	spare := ""
-	if l.Spare {
-		spare = ":spare"
-	}
-	return fmt.Sprintf("%#x:%d:%#x:%#x:%d%s",
-		l.LegId, l.LegIdx, l.SideId, l.DnId, l.Slot, spare)
+	return fmt.Sprintf("%#x:%d:%#x:%#x:%d",
+		l.LegId, l.LegIdx, l.SideId, l.DnId, l.Slot)
 }
 
 // CloneSpec is one clone to plant, with its clone meta group
@@ -334,8 +323,8 @@ type CloneSpec struct {
 
 // Check refuses a clone no key could be written for, and a clone meta group
 // placed in a way no gateway places one: a leg on dn 0, a leg id, a side id
-// or a leg_idx used twice, no leg that is not a spare, or two legs on one DN,
-// which leave the group no redundancy. A GrpId with no leg is refused too:
+// or a leg_idx used twice, or two legs on one DN, which leave the group no
+// redundancy. A GrpId with no leg is refused too:
 // it names a group the clone would not get.
 func (spec CloneSpec) Check() error {
 	if spec.Name == "" {
@@ -355,7 +344,6 @@ func (spec CloneSpec) Check() error {
 	sideIds := make(map[uint64]bool, len(spec.Legs))
 	legIdxs := make(map[uint32]bool, len(spec.Legs))
 	dnIds := make(map[uint64]bool, len(spec.Legs))
-	active := 0
 	for _, leg := range spec.Legs {
 		switch {
 		case leg.DnId == 0:
@@ -384,13 +372,6 @@ func (spec CloneSpec) Check() error {
 		}
 		legIdxs[leg.LegIdx] = true
 		dnIds[leg.DnId] = true
-		if !leg.Spare {
-			active++
-		}
-	}
-	if active == 0 {
-		return fmt.Errorf("clone %q: the group has no leg that is not a spare",
-			spec.Name)
 	}
 	return nil
 }
@@ -510,10 +491,8 @@ func PutClone(
 // the endpoints of the legs' DNs, in the spec's order.
 //
 // It refuses, before anything is written, what no gateway could have
-// written and what would make the clone drain go wrong: a spare in a pool
-// whose groups are not md-raid1 (the pool's stored redund_conf decides, a
-// group having no redundancy of its own), a slot outside the pool's
-// cntlid_slot_list, a DN short of the group's extents, and a group, leg or
+// written and what would make the clone drain go wrong: a slot outside the
+// pool's cntlid_slot_list, a DN short of the group's extents, and a group, leg or
 // side id that a slice or another clone of the pool already uses for its
 // own kind (poolIds). The side id above all: the clone drain takes a side's
 // pointer out of its DN by the pool and the side id alone
@@ -544,13 +523,7 @@ func putCloneGrp(
 		return nil, nil
 	}
 	cid, cc := cl.Id, cl.Conf
-	raid1 := conf.GetBdevConf().GetRedundConf().GetRedundMdRaid1() != nil
 	for _, leg := range spec.Legs {
-		if leg.Spare && !raid1 {
-			return nil, fmt.Errorf(
-				"clone %q: leg %s: a spare leg needs md-raid1 groups "+
-					"(architecture.md, Spare legs)", spec.Name, leg)
-		}
 		if !slices.Contains(conf.GetCntlidSlotList(), leg.Slot) {
 			return nil, fmt.Errorf(
 				"clone %q: leg %s: cntlid slot %d is not in the slot list "+
@@ -630,11 +603,7 @@ func putCloneGrp(
 				Provisioned: false,
 			}},
 		}
-		if l.Spare {
-			grp.SpareLegList = append(grp.SpareLegList, leg)
-		} else {
-			grp.LegList = append(grp.LegList, leg)
-		}
+		grp.LegList = append(grp.LegList, leg)
 		out.LegIds = append(out.LegIds, legId)
 		out.SideIds = append(out.SideIds, sideId)
 		out.DnRevisions[addrs[i]] = revision
@@ -651,8 +620,8 @@ type poolIds map[string]map[uint64]bool
 
 // readPoolIds reads every slice, every clone, every repair and every retired
 // leg of the pool inside the caller's STM and collects their groups', legs'
-// and sides' ids, spare legs, a migration's second side, the repairs' new
-// legs and the retired legs included. A listed record whose key is missing
+// and sides' ids, a migration's second side, the repairs' new legs and the
+// retired legs included. A listed record whose key is missing
 // refuses: an id it held could no longer be told apart.
 func readPoolIds(
 	s etcdutil.STM,
@@ -675,7 +644,6 @@ func readPoolIds(
 	addGrp := func(grp *pb.Group) {
 		ids["group"][grp.GetGrpId()] = true
 		addLegs(grp.GetLegList())
-		addLegs(grp.GetSpareLegList())
 	}
 	for _, sliceId := range conf.GetSliceIdList() {
 		key := model.SliceKey(cid, conf.GetSpId(), sliceId)

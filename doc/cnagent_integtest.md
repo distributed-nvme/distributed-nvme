@@ -521,8 +521,8 @@ any dm or nvmet residue fails it, since reporting it is not success.
 ## Out of scope
 
 Error paths beyond the seven above; QoS, not enforced (`cnagent.md` CN6);
-`GrowSlice`; spare legs; a leg gaining or losing a second side, which the dn
-suite's migrations prove, and the path rows of a leg with two sides
+`GrowSlice`; a leg gaining or losing a second side, which the dn suite's
+migrations prove, and the path rows of a leg with two sides
 (`cnagent.md` CN28), which the unit tests cover; levels but read-write,
 read-only and the no-clone gate; more than one slice; several namespaces per
 subsystem; snapshots of snapshots; `UpdateNamespaceDev`; a host-facing

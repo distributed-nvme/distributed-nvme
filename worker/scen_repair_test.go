@@ -67,7 +67,8 @@ func (c *stdCluster) setVerdictLever(
 // revision (RW14, RW16), and once the operator finishes it, the new leg's
 // side is driven as a side of its slice and the bad leg's side, retired,
 // keeps its request on its disk node, provisioned, with no cntlr connecting
-// it; the group's due leg gets no spare while the repair is open (AR8).
+// it; the group's due leg gets no repair of the worker's while the
+// operator's is open, since a group has one repair at a time (AR8).
 func TestScenOperatorRepairToFinish(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
@@ -109,7 +110,7 @@ func TestScenOperatorRepairToFinish(t *testing.T) {
 	setRow(t, agent, key, fmt.Sprintf("leg_id_to_leg.%d", 6),
 		rowLever(pb.ResStatus_RES_STATUS_ERROR, "probe io error", true))
 	h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 2,
-		reactionIs(reactionSpareCreate, reasonGrpHasRepair))
+		reactionIs(reactionRepairCreate, reasonGrpHasRepair))
 
 	c.setVerdictLever(t, stdRepName, agentfake.RepairVerdict{Started: true})
 	h.waitRecord(t, 20*time.Second, w, msgRepairStageMoved,
@@ -148,13 +149,14 @@ func TestScenOperatorRepairToFinish(t *testing.T) {
 
 	// The operator finishes the repair.
 	clearRow(t, agent, key, fmt.Sprintf("leg_id_to_leg.%d", 6))
-	_, retiredId, err := model.FinishRepair(ctx, h.cli, c.cl.Id, stdSpShard,
-		stdSpId, c.sp.Ref.Name, 0, stdRepName, uint64(time.Now().Unix()))
+	res, err := model.FinishRepair(ctx, h.cli, c.cl.Id, stdSpShard,
+		stdSpId, c.sp.Ref.Name, 0, stdRepName, uint64(time.Now().Unix()),
+		c.cl.Conf)
 	if err != nil {
 		t.Fatalf("FinishRepair: %v", err)
 	}
-	if retiredId != 6 {
-		t.Fatalf("retired leg %d, want the bad leg 6", retiredId)
+	if res.RetiredLegId != 6 {
+		t.Fatalf("retired leg %d, want the bad leg 6", res.RetiredLegId)
 	}
 	c.waitConverged(t)
 	state := c.load(t)

@@ -34,8 +34,6 @@ const (
 	testDataLeg2   = uint64(0x17)
 	testDataSide2  = uint64(0x18)
 	testDataGrp2   = uint64(0x26)
-	testSpareLeg   = uint64(0x27)
-	testSpareSide  = uint64(0x28)
 	testDataGrp3   = uint64(0x36)
 	testDataLeg3   = uint64(0x37)
 	testDataSide3  = uint64(0x38)
@@ -216,6 +214,9 @@ type reqOpts struct {
 	clones     []*pb.Clone
 	noCloneGrp bool
 	xfers      []*pb.Transfer
+	// repairs are the request's name_to_repair; a group names its repair
+	// through its rep_name, which the caller sets (cnagent.md CN12).
+	repairs map[string]*pb.Repair
 	// extraSide adds a second side to every leg (a migrating leg, [D1]).
 	extraSide bool
 	// twoLegs gives the data group a second leg, so the assembly cases of
@@ -225,9 +226,6 @@ type reqOpts struct {
 	// provisioned = false, which defers the group and — since it is the
 	// slice's only data group — the whole slice ([D15]).
 	unprovisionedDataLeg bool
-	// unprovisionedSpare gives the data group a spare leg whose sides are
-	// unprovisioned. A spare defers only itself.
-	unprovisionedSpare bool
 	// unprovisionedExtraSide makes only the *second* side of each leg
 	// unprovisioned — the mid-migration shape, where the leg keeps serving
 	// through its provisioned side.
@@ -288,7 +286,7 @@ func manySlices(
 		metaGrp, dataGrp := sliceId+1, sliceId+8
 		out[fmt.Sprintf(common.IdKeyFmt, sliceId)] = sliceOf(uint32(i),
 			metaGrp, legsOf(metaGrp+1),
-			dataGrp, legsOf(dataGrp+1), nil,
+			dataGrp, legsOf(dataGrp+1),
 			metaBlocks, dataBlocksMeta, dataBlocksData)
 	}
 	return out
@@ -334,7 +332,6 @@ func sliceOf(
 	metaLegs []*pb.Leg,
 	dataGrpId uint64,
 	dataLegs []*pb.Leg,
-	dataSpares []*pb.Leg,
 	metaBlocks uint64,
 	dataBlocksMeta uint64,
 	dataBlocksData uint64,
@@ -349,12 +346,11 @@ func sliceOf(
 			LegList:    metaLegs,
 		}},
 		DataGrpList: []*pb.Group{{
-			GrpId:        dataGrpId,
-			ExtCnt:       2,
-			MetaBlocks:   metaBlocks,
-			DataBlocks:   dataBlocksData,
-			LegList:      dataLegs,
-			SpareLegList: dataSpares,
+			GrpId:      dataGrpId,
+			ExtCnt:     2,
+			MetaBlocks: metaBlocks,
+			DataBlocks: dataBlocksData,
+			LegList:    dataLegs,
 		}},
 	}
 }
@@ -396,13 +392,6 @@ func cntlrReq(o reqOpts) *pb.SyncupCntlrRequest {
 		second.LegIdx = 1
 		dataLegs = append(dataLegs, second)
 	}
-	var dataSpares []*pb.Leg
-	if o.unprovisionedSpare {
-		spare := legOf(testSpareLeg,
-			unprovisionedSideOf(testSpareSide, testIp2, testSvcId2))
-		spare.LegIdx = 1
-		dataSpares = []*pb.Leg{spare}
-	}
 	tds := o.tds
 	if tds == nil {
 		tds = defaultTds()
@@ -416,7 +405,7 @@ func cntlrReq(o reqOpts) *pb.SyncupCntlrRequest {
 	idToSlice := map[string]*pb.Slice{
 		fmt.Sprintf(common.IdKeyFmt, testSlice): sliceOf(0,
 			testMetaGrp, []*pb.Leg{legOf(testMetaLeg, metaSides...)},
-			testDataGrp, dataLegs, dataSpares,
+			testDataGrp, dataLegs,
 			metaBlocks, dataBlocksMeta, dataBlocksData),
 	}
 	if o.twoSlices {
@@ -425,7 +414,7 @@ func cntlrReq(o reqOpts) *pb.SyncupCntlrRequest {
 				sideOf(testMetaSideB, testIp2, testSvcId2))},
 			testDataGrpB, []*pb.Leg{legOf(testDataLegB,
 				sideOf(testDataSideB, testIp2, testSvcId2))},
-			nil, metaBlocks, dataBlocksMeta, dataBlocksData)
+			metaBlocks, dataBlocksMeta, dataBlocksData)
 	}
 	if o.slices > 0 {
 		idToSlice = manySlices(o.slices, o.raid1,
@@ -457,6 +446,7 @@ func cntlrReq(o reqOpts) *pb.SyncupCntlrRequest {
 		NqnToSubsystem: subsys,
 		CloneList:      withCloneGrps(o.clones, o.raid1, o.noCloneGrp),
 		XferList:       o.xfers,
+		NameToRepair:   o.repairs,
 	}
 }
 
@@ -1684,49 +1674,71 @@ func TestGroupFoundByItsHigherLeg(t *testing.T) {
 	assertNoCall(t, node, "cmd mdadm --assemble")
 }
 
-// TestSwitchSpareLeg is the CN12 member reconciliation: a leg_list swapped
-// with a spare is failed, removed and the promoted spare added — never
-// zero-superblocked. The group is the product's two-leg mirror and one leg is
-// switched, which is what SwitchSpareLeg does: the array is found through the
-// leg that stays (Md.Detail keys on leg_list), and the switched-out leg is
-// the extra it still holds.
+// plantAbortedExtra plants the shape of a member the group does not keep
+// (cnagent.md CN12): the fixture repair, aborted while md held its new leg in
+// leg 1's place. It converges the repair CREATED with its abort flag at
+// revision 3, so the cntlr connects and wraps the new leg, and then has md
+// hold the new leg, in sync, and no longer leg 1. Once the repair reads
+// ABORTED (abortedReq) the array holds a member the group does not keep, the
+// aborted repair's new leg, and lacks a leg_list member, leg 1, which is no
+// bad leg once its repair is aborted. The sweep keeps that array: every member
+// is a leg the plan builds for the group (cntlrWanted).
+func (f *repFix) plantAbortedExtra(t *testing.T) {
+	t.Helper()
+	f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, true))
+	f.node.mu.Lock()
+	f.node.mdRemove([]string{f.mdDev, "--remove", f.leg1})
+	f.node.mdAdd([]string{f.mdDev, "--add", "--failfast", f.newLegDev})
+	f.node.mu.Unlock()
+}
+
+// abortedReq is repairReq with the fixture repair ABORTED: its new leg is no
+// member the group keeps, and its bad leg is a leg_list member like any other
+// (cnagent.md CN12).
+func abortedReq(revision uint64) *pb.SyncupCntlrRequest {
+	return repairReq(revision, pb.RepStage_REP_STAGE_ABORTED, true)
+}
+
+// TestMemberReconciliationRemovesAnExtra is CN12's member reconciliation of a
+// member the group does not keep (plantAbortedExtra): the array is found
+// through the leg_list member that stays (Md.Detail keys on the members the
+// group keeps), the aborted repair's new leg it still holds is failed and
+// removed, and the leg_list member the array lacks is added after it — never
+// zero-superblocked, and with no mdadm --detail.
 //
-// The switched-out member is taken the ways md holds it. In sync, as an
-// operator's switch finds it; and faulty — md marks a member whose side died
-// "faulty,failfast" on its first IO that errors yet still lists it under
-// dev-*, so the extras loop, which walks every member sysfs lists, must take
-// it whatever its state: an extra left in the array would have the promoted
-// spare added beside it, where extras leave before promotions arrive. (The
-// held set counting a faulty leg_list member is
-// TestGroupHeldFaultyMemberStaysHeld's.) AR8's own shape is the faulty
-// member whose leg is unavailable too — its side is dead, so its path is not
-// both live and optimized (the controller reads connecting and keeps its
-// last-known optimized ana_state), or its connect fails, as when the side's
-// nvmet port is gone: a parked member is an extra whatever its leg's
-// availability, unlike a leg_list member
-// (TestGroupUnavailableLegMemberStaysWanted).
-func TestSwitchSpareLeg(t *testing.T) {
-	connecting := func(srv *CnAgentServer, node *fakeNode) {
-		node.setCtrlState(srv.nf.SideToCnNqn(testCluster, testSp,
-			testDataLeg, testCn), testIp, testSvcId, "connecting")
+// The extra is taken the ways md holds it. In sync; and faulty — md marks a
+// member whose side died "faulty,failfast" on its first IO that errors yet
+// still lists it under dev-*, so the extras loop, which walks every member
+// sysfs lists, must take it whatever its state: an extra left in the array
+// would have the leg_list member added beside it, where extras leave before
+// any member is added. (The held set counting a faulty leg_list member is
+// TestGroupHeldFaultyMemberStaysHeld's.) A faulty extra's leg can be
+// unavailable too — its side is dead, so its path is not both live and
+// optimized (the controller reads connecting and keeps its last-known
+// optimized ana_state), or its connect fails, as when the side's nvmet port is
+// gone: an extra is failed and removed whatever its leg's availability, unlike
+// a leg_list member (TestGroupUnavailableLegMemberStaysWanted).
+func TestMemberReconciliationRemovesAnExtra(t *testing.T) {
+	connecting := func(f *repFix) {
+		f.legDead(repNewLeg, testIp, testSvcId)
 	}
-	connectFails := func(srv *CnAgentServer, node *fakeNode) {
-		nqn := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg, testCn)
-		node.mu.Lock()
-		defer node.mu.Unlock()
-		subsys := node.subsystems[nqn]
+	connectFails := func(f *repFix) {
+		nqn := legNqn(f.srv, repNewLeg)
+		f.node.mu.Lock()
+		defer f.node.mu.Unlock()
+		subsys := f.node.subsystems[nqn]
 		for _, ctrl := range slices.Clone(subsys.ctrls) {
-			node.dropCtrl(subsys, ctrl)
+			f.node.dropCtrl(subsys, ctrl)
 		}
-		node.failCmdAlways["--nqn "+nqn+" --hostnqn"] =
+		f.node.failCmdAlways["--nqn "+nqn+" --hostnqn"] =
 			"nvme connect: Connection refused"
 	}
 	for _, tc := range []struct {
 		name  string
-		state string // the switched-out member's dev-*/state; "" is in_sync
-		// unavail makes the switched-out leg unavailable; nil leaves its
-		// path live and optimized.
-		unavail func(srv *CnAgentServer, node *fakeNode)
+		state string // the extra's dev-*/state; "" is in_sync
+		// unavail makes the extra's leg unavailable; nil leaves its path
+		// live and optimized.
+		unavail func(f *repFix)
 	}{
 		{"in sync", "", nil},
 		{"faulty", "faulty,failfast", nil},
@@ -1734,98 +1746,46 @@ func TestSwitchSpareLeg(t *testing.T) {
 		{"faulty, connect fails", "faulty,failfast", connectFails},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, node := newTestServer(t)
-			ctx := context.Background()
-			if _, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil {
-				t.Fatalf("SyncupCn: %v", err)
-			}
-			if _, err := srv.SyncupCntlr(
-				ctx, switchSpareReq(2, false)); err != nil {
-				t.Fatalf("SyncupCntlr: %v", err)
-			}
-			// A spare is connected, wrapped and probed but never an md
-			// member.
-			if !node.hasCall(
-				"cmd dmsetup create " + legName(srv, switchSpareLeg)) {
-				t.Fatalf("the spare leg was not wrapped")
-			}
-			for _, call := range node.callsMatching("cmd mdadm --create") {
-				if strings.Contains(call, legName(srv, switchSpareLeg)) {
-					t.Fatalf("a spare leg became an md member: %s", call)
-				}
-			}
+			f := newRepFix(t, allLegs...)
+			f.plantAbortedExtra(t)
 			if tc.state != "" {
-				mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
-					testCluster, testCn, testSp, 0, 0, false))
-				node.setMdSync(mdDev, 1, "idle", "none")
-				node.setMemberState(mdDev,
-					srv.nf.DmPath(legName(srv, testDataLeg)), tc.state)
+				f.node.setMdSync(f.mdDev, 1, "idle", "none")
+				f.node.setMemberState(f.mdDev, f.newLegDev, tc.state)
 			}
 			if tc.unavail != nil {
-				tc.unavail(srv, node)
+				tc.unavail(f)
 			}
 
-			node.Reset()
-			reply, err := srv.SyncupCntlr(ctx, switchSpareReq(3, true))
-			if err != nil {
-				t.Fatalf("SwitchSpareLeg: %v", err)
+			f.node.Reset()
+			info := f.syncup(t, abortedReq(4))
+			assertOrder(t, f.node,
+				f.fail(f.newLegDev), f.remove(f.newLegDev), f.add(f.leg1))
+			assertNoCall(t, f.node, "--zero-superblock")
+			assertNoCall(t, f.node, "cmd mdadm --detail")
+			assertNoCall(t, f.node, f.remove(f.leg2))
+			assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp],
+				"grp data once the extra left")
+			if got, want := f.members(), slices.Sorted(slices.Values(
+				[]string{f.leg1, f.leg2})); !slices.Equal(got, want) {
+				t.Fatalf("the array holds %v, want %v", got, want)
 			}
-			assertOrder(t, node,
-				"--fail "+srv.nf.DmPath(legName(srv, testDataLeg)),
-				"--remove "+srv.nf.DmPath(legName(srv, testDataLeg)),
-				"--add --failfast "+
-					srv.nf.DmPath(legName(srv, switchSpareLeg)),
-			)
-			assertNoCall(t, node, "--zero-superblock")
-			assertNoCall(t, node, "cmd mdadm --detail")
-			assertNoCall(t, node,
-				"--remove "+srv.nf.DmPath(legName(srv, testDataLeg2)))
-			assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
-				"grp data after the switch")
 		})
 	}
 }
 
-// switchSpareLeg / switchSpareSide are the spare of switchSpareReq.
-const (
-	switchSpareLeg  = uint64(0x77)
-	switchSpareSide = uint64(0x78)
-)
-
-// switchSpareReq is the two-leg raid1 request with a spare leg, before the
-// switch (the spare in spare_leg_list) or after it (the spare promoted into
-// testDataLeg's place, testDataLeg parked in spare_leg_list).
-func switchSpareReq(revision uint64, promoted bool) *pb.SyncupCntlrRequest {
-	req := cntlrReq(reqOpts{revision: revision, primary: true,
-		raid1: true, twoLegs: true})
-	slice := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)]
-	grp := slice.GetDataGrpList()[0]
-	member := grp.GetLegList()[0]
-	spare := legOf(switchSpareLeg, sideOf(switchSpareSide, testIp2,
-		testSvcId2))
-	spare.LegIdx = 2
-	if promoted {
-		grp.LegList[0] = spare
-		grp.SpareLegList = []*pb.Leg{member}
-	} else {
-		grp.SpareLegList = []*pb.Leg{spare}
-	}
-	return req
-}
-
-// TestSwitchSpareLegKilledVerb pins CN12's killed-verb rule for the switch:
-// a `--fail`, `--remove` or `--add` that did not answer leaves the group row
-// ERROR with the kill's error, whether the kernel completed the command or
-// the tool was killed before touching anything. A killed `--fail` or
-// `--remove` leaves the pass before the add loop — extras leave before
-// promotions arrive, so the promoted spare is never added beside a member md
-// may still hold — and the next converge completes the switch. An error
-// swallowed here would read the row OK over a half-done switch. What brings
-// that converge is the check round's verdict: once the promoted spare's row
-// reads OK it names the spare the array lacks (CN12, CN30), unless the
-// killed command was an `--add` the kernel completed, which left nothing to
-// add.
-func TestSwitchSpareLegKilledVerb(t *testing.T) {
+// TestMemberReconciliationKilledVerb pins CN12's killed-verb rule for the
+// member reconciliation (plantAbortedExtra's shape): a `--fail`, `--remove`
+// or `--add` that did not answer leaves the group row ERROR with the kill's
+// error, whether the kernel completed the command or the tool was killed
+// before touching anything. A killed `--fail` or `--remove` of the extra
+// leaves the pass before the add loops — extras leave before any member is
+// added, so the leg_list member the array lacks is never added beside a
+// member md may still hold — and the next converge finishes the work. An
+// error swallowed here would read the row OK over half-done work. What brings
+// that converge is the check round's verdict: once the lacking member's row
+// reads OK it names that member (CN12, CN30), unless the killed command was
+// an `--add` the kernel completed, which left nothing to add.
+func TestMemberReconciliationKilledVerb(t *testing.T) {
 	for _, verb := range []string{" --fail ", " --remove ", " --add "} {
 		for _, noEffect := range []bool{true, false} {
 			name := strings.TrimSpace(verb) + ", completed"
@@ -1833,52 +1793,44 @@ func TestSwitchSpareLegKilledVerb(t *testing.T) {
 				name = strings.TrimSpace(verb) + ", no effect"
 			}
 			t.Run(name, func(t *testing.T) {
-				srv, node := newTestServer(t)
-				ctx := context.Background()
-				if _, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil {
-					t.Fatalf("SyncupCn: %v", err)
-				}
-				if _, err := srv.SyncupCntlr(
-					ctx, switchSpareReq(2, false)); err != nil {
-					t.Fatalf("SyncupCntlr: %v", err)
-				}
-				mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
-					testCluster, testCn, testSp, 0, 0, false))
+				f := newRepFix(t, allLegs...)
+				f.plantAbortedExtra(t)
 
-				node.mu.Lock()
+				f.node.mu.Lock()
 				if noEffect {
-					node.killCmdNoEffectAlways[verb] = true
+					f.node.killCmdNoEffectAlways[verb] = true
 				} else {
-					node.killCmdAlways[verb] = true
+					f.node.killCmdAlways[verb] = true
 				}
-				node.mu.Unlock()
-				node.Reset()
-				reply, err := srv.SyncupCntlr(ctx, switchSpareReq(3, true))
+				f.node.mu.Unlock()
+				f.node.Reset()
+				reply, err := f.srv.SyncupCntlr(f.ctx, abortedReq(4))
 				if err != nil {
-					t.Fatalf("SwitchSpareLeg: %v", err)
+					t.Fatalf("SyncupCntlr: %v", err)
 				}
 				row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
 				if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
 					!strings.Contains(row.GetDetails(), "killed") {
-					t.Fatalf("the switch with %s killed read %v %q, "+
-						"want ERROR with the kill", strings.TrimSpace(verb),
-						row.GetStatus(), row.GetDetails())
+					t.Fatalf("the reconciliation with %s killed read %v "+
+						"%q, want ERROR with the kill",
+						strings.TrimSpace(verb), row.GetStatus(),
+						row.GetDetails())
 				}
-				if !node.hasCall("cmd mdadm " + mdDev + verb) {
-					t.Fatalf("the switch ran no %s; the case is vacuous",
-						strings.TrimSpace(verb))
+				if !f.node.hasCall("cmd mdadm " + f.mdDev + verb) {
+					t.Fatalf("the reconciliation ran no %s; the case is "+
+						"vacuous", strings.TrimSpace(verb))
 				}
 				if verb != " --add " {
-					assertNoCall(t, node, "--add --failfast")
+					assertNoCall(t, f.node, "--add --failfast")
 				}
-				assertNoCall(t, node, "cmd mdadm --detail")
+				assertNoCall(t, f.node, "cmd mdadm --detail")
 
-				node.mu.Lock()
-				clear(node.killCmdNoEffectAlways)
-				clear(node.killCmdAlways)
-				node.mu.Unlock()
-				probeAllLegs(t, srv)
-				verdict := checkCntlrVerdict(t, srv, 3)
+				f.node.mu.Lock()
+				clear(f.node.killCmdNoEffectAlways)
+				clear(f.node.killCmdAlways)
+				f.node.mu.Unlock()
+				probeAllLegs(t, f.srv)
+				verdict := checkCntlrVerdict(t, f.srv, 4)
 				if verb == " --add " && !noEffect {
 					if verdict.GetCode() != 0 {
 						t.Fatalf("the check round after a completed --add: "+
@@ -1886,24 +1838,16 @@ func TestSwitchSpareLegKilledVerb(t *testing.T) {
 					}
 				} else {
 					assertNamesOnly(t, verdict, "the check round after "+
-						"the half-done switch", legName(srv, switchSpareLeg))
+						"the half-done reconciliation",
+						legName(f.srv, testDataLeg))
 				}
-				node.Reset()
-				if reply, err = srv.SyncupCntlr(
-					ctx, switchSpareReq(4, true)); err != nil {
-					t.Fatalf("SyncupCntlr: %v", err)
-				}
-				assertOk(t,
-					reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+				f.node.Reset()
+				info := f.syncup(t, abortedReq(5))
+				assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp],
 					"grp data after the next converge")
-				assertNoCall(t, node, "cmd mdadm --detail")
-				got := slices.Sorted(slices.Values(
-					node.arrays[mdDev].members))
-				want := slices.Sorted(slices.Values([]string{
-					srv.nf.DmPath(legName(srv, testDataLeg2)),
-					srv.nf.DmPath(legName(srv, switchSpareLeg)),
-				}))
-				if !slices.Equal(got, want) {
+				assertNoCall(t, f.node, "cmd mdadm --detail")
+				if got, want := f.members(), slices.Sorted(slices.Values(
+					[]string{f.leg1, f.leg2})); !slices.Equal(got, want) {
 					t.Fatalf("after the next converge the array holds %v, "+
 						"want %v", got, want)
 				}
@@ -1912,170 +1856,145 @@ func TestSwitchSpareLegKilledVerb(t *testing.T) {
 	}
 }
 
-// switchBothLeg / switchBothSide are the second new leg of
-// switchBothReq.
+// repNewLeg2 / repNewSide2 are the second new leg of the aborted repair of
+// TestMemberReconciliationInSyncGuard's case where two members leave.
 const (
-	switchBothLeg  = uint64(0x79)
-	switchBothSide = uint64(0x7a)
+	repNewLeg2  = uint64(0x79)
+	repNewSide2 = uint64(0x7a)
 )
 
-// switchBothReq is switchSpareReq after a switch of both legs: the spare in
-// testDataLeg's place and a new leg in testDataLeg2's, both old legs parked in
-// spare_leg_list.
-func switchBothReq(revision uint64) *pb.SyncupCntlrRequest {
-	req := switchSpareReq(revision, true)
-	slice := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)]
-	grp := slice.GetDataGrpList()[0]
-	leaving := grp.GetLegList()[1]
-	added := legOf(switchBothLeg, sideOf(switchBothSide, testIp, testSvcId))
-	added.LegIdx = 3
-	grp.LegList[1] = added
-	grp.SpareLegList = append(grp.SpareLegList, leaving)
-	return req
-}
-
-// TestSwitchSpareLegInSyncGuard pins CN12's in-sync guard: a member that left
-// leg_list is failed only while another member, one that stays in leg_list,
-// is in sync on an available leg. md answers a fail of the last in-sync
-// member by marking the whole array broken (CN29), and on an array with no IO
-// it still marks a dead member in sync, so the guard asks for availability
-// too; a member that leaves as well is about to be failed and does not count.
-// While the guard holds, the converge leaves the array exactly as it is — no
-// --fail, no --remove and no --add for the group, the put-back included — and
-// its row reads ERROR naming the member and the array; a check round's read
-// reads the same row (probeGroup), and its verdict names no member of the
-// group, so the worker does not re-send a syncup whose converge would refuse
-// again (CN30).
+// TestMemberReconciliationInSyncGuard pins CN12's in-sync guard: a member the
+// group does not keep is failed only while another member, one that stays in
+// leg_list, is in sync on an available leg. md answers a fail of the last
+// in-sync member by marking the whole array broken (CN29), and on an array
+// with no IO it still marks a dead member in sync, so the guard asks for
+// availability too; a member that leaves as well is about to be failed and
+// does not count. While the guard holds, the converge leaves the array
+// exactly as it is — no --fail, no --remove and no --add for the group, the
+// put-back included — and its row reads ERROR naming the member and the
+// array; a check round's read reads the same row (probeGroup), and its
+// verdict names no member of the group, so the worker does not re-send a
+// syncup whose converge would refuse again (CN30).
 //
-// The cases are the ways leg 2 can fail to keep the data while leg 1, the
-// only member in sync, is switched out: md copying onto it (in md's words a
-// spare that holds a slot), failed out of its slot or in it, marked in sync
-// while md shows it faulty (bad blocks not yet acknowledged), in sync on a
-// leg whose path is connecting, as a dead side looks on an array with no IO,
-// and leaving leg_list together with leg 1. One case has md fail leg 1 as
-// well, with leg 2 in sync on a connecting path: the guard holds whatever
-// state the member that leaves is in, so a guard that looked only at an
-// in-sync leaver would let that switch through. "leg 2 in sync" is the switch
-// the guard lets through. The fake does not model the broken array, so each
-// case asserts on the calls. A case with a release then gives leg 2 the data
-// back: the next read reads the row OK and names the promoted spare the
-// array lacks, and the converge that brings switches. A failed leg 2 has no
-// release: the refusal skips its put-back too, so nothing gives it the data
-// back while the guard holds (cnagent.md CN12).
-func TestSwitchSpareLegInSyncGuard(t *testing.T) {
-	leg2Nqn := func(srv *CnAgentServer) string {
-		return srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg2, testCn)
+// The extra is plantAbortedExtra's, the only member in sync, and the cases
+// are the ways leg 2 can fail to keep the data: md copying onto it (its
+// state "spare" beside a slot number), failed out of its slot or in it, marked
+// in sync while md shows it faulty (bad blocks not yet acknowledged), and in
+// sync on a leg whose path is connecting, as a dead side looks on an array
+// with no IO. One case has md fail the extra as well, with leg 2 in sync on a
+// connecting path: the guard holds whatever state the member that leaves is
+// in, so a guard that looked only at an in-sync leaver would let that fail
+// through. One case has two members leave, through a repair with two new
+// legs, which the model never makes but the agent's plan takes as a list:
+// the second leaver, in sync, does not keep the data either. "leg 2 in sync"
+// is the reconciliation the guard lets through. The fake does not model the
+// broken array, so each case asserts on the calls. A case with a release
+// then gives leg 2 the data back: the next read reads the row OK and names
+// the leg_list member the array lacks, and the converge that brings fails and
+// removes the extra and adds that member. A failed leg 2 has no release: the
+// refusal skips its put-back too, so nothing gives it the data back while the
+// guard holds (cnagent.md CN12).
+func TestMemberReconciliationInSyncGuard(t *testing.T) {
+	inSyncAgain := func(f *repFix) {
+		f.node.setMemberState(f.mdDev, f.leg2, "in_sync,failfast")
+		f.node.setMemberSlot(f.mdDev, f.leg2, "0")
+		f.node.setMdSync(f.mdDev, 0, "idle", "none")
 	}
-	inSyncAgain := func(srv *CnAgentServer, node *fakeNode, mdDev,
-		leg2 string) {
-		node.setMemberState(mdDev, leg2, "in_sync,failfast")
-		node.setMemberSlot(mdDev, leg2, "1")
-		node.setMdSync(mdDev, 0, "idle", "none")
+	leg2Live := func(f *repFix) {
+		f.node.setCtrlState(legNqn(f.srv, testDataLeg2), testIp2, testSvcId2,
+			"live")
 	}
-	leg2Live := func(srv *CnAgentServer, node *fakeNode, mdDev,
-		leg2 string) {
-		node.setCtrlState(leg2Nqn(srv), testIp2, testSvcId2, "live")
+	leg2Connecting := func(f *repFix) {
+		f.legDead(testDataLeg2, testIp2, testSvcId2)
+	}
+	// twoLeave gives the aborted repair a second new leg, so the syncups
+	// connect and wrap that leg from revision 3 on.
+	twoLeave := func(req *pb.SyncupCntlrRequest) {
+		second := legOf(repNewLeg2, sideOf(repNewSide2, testIp2, testSvcId2))
+		second.LegIdx = 3
+		rep := req.GetNameToRepair()[repName]
+		rep.NewLegList = append(rep.NewLegList, second)
 	}
 	for _, tc := range []struct {
 		name string
-		// set puts leg 2 in the case's shape on the converged primary.
-		set func(srv *CnAgentServer, node *fakeNode, mdDev, leg2 string)
-		// both switches leg 2 out too (switchBothReq).
-		both    bool
+		// set puts the array in the case's shape after plantAbortedExtra.
+		set func(f *repFix)
+		// two gives the repair a second new leg (twoLeave).
+		two     bool
 		refused bool
 		// release gives leg 2 the data back after a refusal; nil runs none.
-		release func(srv *CnAgentServer, node *fakeNode, mdDev, leg2 string)
+		release func(f *repFix)
 	}{
-		{"leg 2 recovering", func(srv *CnAgentServer, node *fakeNode,
-			mdDev, leg2 string) {
-			node.setMdSync(mdDev, 1, "recover", "100 / 200")
-			node.setMemberState(mdDev, leg2, "spare,failfast")
+		{"leg 2 recovering", func(f *repFix) {
+			f.node.setMdSync(f.mdDev, 1, "recover", "100 / 200")
+			f.node.setMemberState(f.mdDev, f.leg2, "spare,failfast")
 		}, false, true, inSyncAgain},
-		{"leg 2 failed out of its slot", func(srv *CnAgentServer,
-			node *fakeNode, mdDev, leg2 string) {
-			failOutOfSlot(node, mdDev, leg2)
+		{"leg 2 failed out of its slot", func(f *repFix) {
+			failOutOfSlot(f.node, f.mdDev, f.leg2)
 		}, false, true, nil},
-		{"leg 2 failed in its slot", func(srv *CnAgentServer,
-			node *fakeNode, mdDev, leg2 string) {
-			node.setMdSync(mdDev, 1, "idle", "none")
-			node.setMemberState(mdDev, leg2, "faulty,failfast")
+		{"leg 2 failed in its slot", func(f *repFix) {
+			f.node.setMdSync(f.mdDev, 1, "idle", "none")
+			f.node.setMemberState(f.mdDev, f.leg2, "faulty,failfast")
 		}, false, true, nil},
 		// md prints "faulty" beside "in_sync" for a member whose bad
 		// blocks are not yet acknowledged (MdMember.inSync).
-		{"leg 2 in sync but faulty", func(srv *CnAgentServer,
-			node *fakeNode, mdDev, leg2 string) {
-			node.setMemberState(mdDev, leg2,
+		{"leg 2 in sync but faulty", func(f *repFix) {
+			f.node.setMemberState(f.mdDev, f.leg2,
 				"faulty,in_sync,blocked,failfast")
 		}, false, true, inSyncAgain},
-		{"leg 2 in sync, its leg unavailable", func(srv *CnAgentServer,
-			node *fakeNode, mdDev, leg2 string) {
-			node.setCtrlState(leg2Nqn(srv), testIp2, testSvcId2,
-				"connecting")
-		}, false, true, leg2Live},
+		{"leg 2 in sync, its leg unavailable", leg2Connecting,
+			false, true, leg2Live},
 		// The guard holds whatever state the member that leaves is in: here
-		// md has failed leg 1 already, and leg 2, the member that stays, is
-		// in sync on a path that does not serve.
-		{"leg 1 failed, leg 2 in sync, its leg unavailable", func(
-			srv *CnAgentServer, node *fakeNode, mdDev, leg2 string) {
-			failOutOfSlot(node, mdDev,
-				srv.nf.DmPath(legName(srv, testDataLeg)))
-			node.setCtrlState(leg2Nqn(srv), testIp2, testSvcId2,
-				"connecting")
-		}, false, true, leg2Live},
-		// The promoted spare is held without a place, which keeps the array
-		// matched by leg_list, and both old legs are in sync.
-		{"leg 2 leaves too", func(srv *CnAgentServer, node *fakeNode,
-			mdDev, leg2 string) {
-			spare := srv.nf.DmPath(legName(srv, switchSpareLeg))
-			node.mu.Lock()
-			node.mdAdd([]string{mdDev, "--add", "--failfast", spare})
-			node.mu.Unlock()
-			node.setMemberState(mdDev, spare, "spare,failfast")
-			node.setMemberSlot(mdDev, spare, mdSlotNone)
+		// md has failed the extra already, and leg 2, the member that
+		// stays, is in sync on a path that does not serve.
+		{"the extra failed, leg 2 in sync, its leg unavailable",
+			func(f *repFix) {
+				failOutOfSlot(f.node, f.mdDev, f.newLegDev)
+				leg2Connecting(f)
+			}, false, true, leg2Live},
+		// md holds the second new leg in sync in leg 2's place, and holds
+		// leg 1 again without a place, which keeps the array matched by
+		// leg_list.
+		{"two members leave", func(f *repFix) {
+			second := f.srv.nf.DmPath(legName(f.srv, repNewLeg2))
+			f.node.mu.Lock()
+			f.node.mdRemove([]string{f.mdDev, "--remove", f.leg2})
+			f.node.mdAdd([]string{f.mdDev, "--add", "--failfast", second})
+			f.node.mdAdd([]string{f.mdDev, "--add", "--failfast", f.leg1})
+			f.node.mu.Unlock()
+			f.node.setMemberState(f.mdDev, f.leg1, "spare,failfast")
+			f.node.setMemberSlot(f.mdDev, f.leg1, mdSlotNone)
 		}, true, true, nil},
-		{"leg 2 in sync", func(srv *CnAgentServer, node *fakeNode,
-			mdDev, leg2 string) {
-		}, false, false, nil},
+		{"leg 2 in sync", func(f *repFix) {}, false, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
-			ctx := context.Background()
-			if _, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil {
-				t.Fatalf("SyncupCn: %v", err)
-			}
-			if _, err := srv.SyncupCntlr(
-				ctx, switchSpareReq(2, false)); err != nil {
-				t.Fatalf("SyncupCntlr: %v", err)
-			}
-			probeAllLegs(t, srv)
-			mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
-				testCluster, testCn, testSp, 0, 0, false))
-			leg1 := srv.nf.DmPath(legName(srv, testDataLeg))
-			leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
-			spare := srv.nf.DmPath(legName(srv, switchSpareLeg))
-			tc.set(srv, node, mdDev, leg2)
-			req := func(revision uint64) *pb.SyncupCntlrRequest {
-				if tc.both {
-					return switchBothReq(revision)
+			f := newRepFix(t, allLegs...)
+			req := func(revision uint64,
+				stage pb.RepStage) *pb.SyncupCntlrRequest {
+				r := repairReq(revision, stage, true)
+				if tc.two {
+					twoLeave(r)
 				}
-				return switchSpareReq(revision, true)
+				return r
 			}
+			// plantAbortedExtra, with the second new leg connected and
+			// wrapped too when the case has one.
+			f.syncup(t, req(3, pb.RepStage_REP_STAGE_CREATED))
+			f.node.mu.Lock()
+			f.node.mdRemove([]string{f.mdDev, "--remove", f.leg1})
+			f.node.mdAdd([]string{f.mdDev, "--add", "--failfast", f.newLegDev})
+			f.node.mu.Unlock()
+			probeAllLegs(t, f.srv)
+			tc.set(f)
 			// The read of the fixture cntlr a check round answers from:
 			// its group row and its verdict.
 			read := func(revision uint64) (*pb.ResInfo, *pb.AgentReply) {
-				refreshTestCntlr(t, srv)
-				reply, info := srv.checkCntlrRound(ctx,
-					&pb.CheckCntlrRequest{
-						ClusterId: testCluster, CnId: testCn,
-						CntlrPointer: cntlrPtr(), Revision: revision,
-					}, nil)
-				return info.GetGrpIdToMdRaid()[testDataGrp],
-					reply.GetAgentReply()
+				info, reply := f.read(t, revision)
+				return info.GetGrpIdToMdRaid()[testDataGrp], reply
 			}
 			members := func() []MdMember {
-				detail, err := mdLookup(ctx, srv.md, legName(srv,
-					testDataLeg))
+				detail, err := mdLookup(f.ctx, f.srv.md, legName(f.srv,
+					testDataLeg), legName(f.srv, testDataLeg2))
 				if err != nil || !detail.Exists {
 					t.Fatalf("read the array: %v %v", detail, err)
 				}
@@ -2083,38 +2002,36 @@ func TestSwitchSpareLegInSyncGuard(t *testing.T) {
 			}
 			before := members()
 
-			node.Reset()
-			reply, err := srv.SyncupCntlr(ctx, req(3))
+			f.node.Reset()
+			reply, err := f.srv.SyncupCntlr(f.ctx,
+				req(4, pb.RepStage_REP_STAGE_ABORTED))
 			if err != nil {
-				t.Fatalf("SwitchSpareLeg: %v", err)
+				t.Fatalf("SyncupCntlr: %v", err)
 			}
-			// The probers of new legs start with the converge: one round
-			// each reads their rows OK, so a verdict that named the group's
-			// members would name a lacking one here.
-			probeAllLegs(t, srv)
 			row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
-			readRow, verdict := read(3)
+			readRow, verdict := read(4)
 			if !tc.refused {
-				assertOrder(t, node, "--fail "+leg1, "--remove "+leg1,
-					"--add --failfast "+spare)
-				assertOk(t, row, "grp data after the switch")
-				assertOk(t, readRow, "grp data read after the switch")
+				assertOrder(t, f.node, f.fail(f.newLegDev),
+					f.remove(f.newLegDev), f.add(f.leg1))
+				assertOk(t, row, "grp data once the extra left")
+				assertOk(t, readRow, "grp data read once the extra left")
 				if verdict.GetCode() != 0 {
-					t.Fatalf("the read after the switch: %v, want a "+
+					t.Fatalf("the read once the extra left: %v, want a "+
 						"clean verdict", verdict)
 				}
 				return
 			}
-			if got := node.callsMatching("cmd mdadm"); len(got) != 0 {
-				t.Fatalf("the refused switch ran %v, want no mdadm", got)
+			if got := f.node.callsMatching("cmd mdadm"); len(got) != 0 {
+				t.Fatalf("the refused reconciliation ran %v, want no mdadm",
+					got)
 			}
 			if after := members(); !slices.Equal(after, before) {
 				t.Fatalf("the array's members changed to %v, want %v",
 					after, before)
 			}
-			leavers := []string{legName(srv, testDataLeg)}
-			if tc.both {
-				leavers = append(leavers, legName(srv, testDataLeg2))
+			leavers := []string{legName(f.srv, repNewLeg)}
+			if tc.two {
+				leavers = append(leavers, legName(f.srv, repNewLeg2))
 			}
 			names := func(details string) bool {
 				for _, leaver := range leavers {
@@ -2126,10 +2043,10 @@ func TestSwitchSpareLegInSyncGuard(t *testing.T) {
 			}
 			if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
 				!names(row.GetDetails()) ||
-				!strings.Contains(row.GetDetails(), node.mdNode(mdDev)) {
-				t.Fatalf("the refused switch's row: %v %q, want ERROR "+
-					"naming one of %v and %s", row.GetStatus(),
-					row.GetDetails(), leavers, node.mdNode(mdDev))
+				!strings.Contains(row.GetDetails(), f.node.mdNode(f.mdDev)) {
+				t.Fatalf("the refused reconciliation's row: %v %q, want "+
+					"ERROR naming one of %v and %s", row.GetStatus(),
+					row.GetDetails(), leavers, f.node.mdNode(f.mdDev))
 			}
 			if readRow.GetStatus() != row.GetStatus() ||
 				readRow.GetDetails() != row.GetDetails() {
@@ -2145,49 +2062,43 @@ func TestSwitchSpareLegInSyncGuard(t *testing.T) {
 				return
 			}
 
-			tc.release(srv, node, mdDev, leg2)
-			readRow, verdict = read(3)
+			tc.release(f)
+			readRow, verdict = read(4)
 			assertOk(t, readRow, "grp data read once leg 2 keeps the data")
 			assertNamesOnly(t, verdict, "the read once leg 2 keeps the data",
-				legName(srv, switchSpareLeg))
-			node.Reset()
-			if reply, err = srv.SyncupCntlr(ctx, req(4)); err != nil {
-				t.Fatalf("SyncupCntlr: %v", err)
-			}
-			assertOrder(t, node, "--fail "+leg1, "--remove "+leg1,
-				"--add --failfast "+spare)
-			assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
-				"grp data after the released switch")
+				legName(f.srv, testDataLeg))
+			f.node.Reset()
+			info := f.syncup(t, req(5, pb.RepStage_REP_STAGE_ABORTED))
+			assertOrder(t, f.node, f.fail(f.newLegDev),
+				f.remove(f.newLegDev), f.add(f.leg1))
+			assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp],
+				"grp data once the guard let go")
 		})
 	}
 }
 
-// TestGroupNeverCreatesBesideARunningArray is the both-legs-replaced shape
-// (CN12): an array runs under the group's name holding none of the wrappers
-// leg_list now names — both legs switched out while this cntlr was not
-// converging, parked in spare_leg_list or already released. Md.Detail
-// finds an array by its leg_list members only, so it reads the group as
-// absent and the assembly runs; the fresh legs carry no superblock, which is
-// case 1, and the create guard keeps a second array from being created under
-// the name mdadm gives the group's array. The pool's concat finds the
+// TestGroupNeverCreatesBesideARunningArray pins CN12's create guard: an
+// array runs under the group's name holding none of the wrappers leg_list
+// names — the request's leg_list names two fresh legs, and the legs the array
+// holds nowhere. Md.Detail finds an array by the members the group keeps
+// only, so it reads the group as absent and the assembly runs; the fresh
+// legs carry no superblock, which is case 1, and the create guard keeps a
+// second array from being created under the name mdadm gives the group's
+// array. The pool's concat finds the
 // group's array by its legs as well (mdDevNo), so its rows read an error
 // rather than take the running array's number, which
 // TestConcatNumberComesFromTheMatchedArray pins. The outcome must be an
 // error that touches nothing: no create, and no fail, remove or add against
-// the running array — which a Detail keyed on the parked spares too would
-// have reached, failing and removing the only members holding the group's
-// data. The refusal holds when the lsblk that asks whether an array runs
-// under the name did not answer, too: read as "no", a kill would create
-// beside the running array.
+// the running array, whose members hold the group's data. The refusal holds
+// when the lsblk that asks whether an array runs under the name did not
+// answer, too: read as "no", a kill would create beside the running array.
 func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
-		parked        bool
 		killNameProbe bool
 	}{
-		{"parked", true, false},
-		{"released", false, false},
-		{"name probe killed", true, true},
+		{"array holds no leg the request names", false},
+		{"name probe killed", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -2204,12 +2115,6 @@ func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 			fresh := legOf(0x71, sideOf(0x72, testIp, testSvcId))
 			fresh2 := legOf(0x73, sideOf(0x74, testIp2, testSvcId2))
 			fresh2.LegIdx = 1
-			if tc.parked {
-				grp.SpareLegList = grp.GetLegList()
-				for i, leg := range grp.SpareLegList {
-					leg.LegIdx = uint32(2 + i)
-				}
-			}
 			grp.LegList = []*pb.Leg{fresh, fresh2}
 			// The guard's lsblk of the name's node is the cn agent's one
 			// lsblk: a dm device's number comes from `dmsetup info`, an
@@ -2400,17 +2305,17 @@ func TestConcatNumberComesFromTheMatchedArray(t *testing.T) {
 		srv, node := newTestServer(t)
 		syncupBoth(t, srv, opts)
 		dataMd := mdDevOf(srv, false)
-		// TestGroupNeverCreatesBesideARunningArray's shape: both legs
-		// switched out and parked, so the array that runs under the
-		// group's name holds none of the legs leg_list names.
+		// TestGroupNeverCreatesBesideARunningArray's shape: leg_list names
+		// two fresh legs and the request names the legs the array holds
+		// nowhere, so the array that runs under the group's name holds none
+		// of the legs leg_list names. The sweep finds that array and its
+		// members' wrappers and connections unwanted,
+		// and cannot remove them while the pool's concat maps the array, so
+		// the converge reports them as leftovers (CN21).
 		next := reqOpts{revision: 3, primary: true, raid1: true, twoLegs: true}
 		req := cntlrReq(next)
 		grp := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)].
 			GetDataGrpList()[0]
-		grp.SpareLegList = grp.GetLegList()
-		for i, leg := range grp.SpareLegList {
-			leg.LegIdx = uint32(2 + i)
-		}
 		fresh := legOf(0x71, sideOf(0x72, testIp, testSvcId))
 		fresh2 := legOf(0x73, sideOf(0x74, testIp2, testSvcId2))
 		fresh2.LegIdx = 1
@@ -2422,8 +2327,10 @@ func TestConcatNumberComesFromTheMatchedArray(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SyncupCntlr: %v", err)
 		}
-		if reply.GetAgentReply().GetCode() != 0 {
-			t.Fatalf("rejected: %v", reply.GetAgentReply())
+		if code := reply.GetAgentReply().GetCode(); code !=
+			common.ReplyCodeLeftover {
+			t.Fatalf("the converge answered %v, want the leftover code",
+				reply.GetAgentReply())
 		}
 		probed := checkRound(t, srv, 3)
 		sameConcatRows(t, reply.GetCntlrInfo(), probed, want)
@@ -3669,8 +3576,9 @@ func failOutOfSlot(node *fakeNode, mdDev, member string) {
 // verdict's half of CN12's put-back (cnagent.md CN30): a check round and an
 // info read name, with the leftover code, a leg_list member md has failed
 // and moved out of its slot, on a leg whose path is live and optimized and
-// whose row reads OK, and nothing else: no member still in its slot, no
-// spare without a slot, none on a leg whose row is not OK — in error or
+// whose row reads OK, and nothing else: no member still in its slot, none
+// md holds without a slot and has not failed, none on a leg whose row is not
+// OK — in error or
 // before its first probe — or whose path is not optimized, whose
 // controller's address is unknown or whose subsystem has no multipath
 // namespace, none being recovered, and none of a standby, which wants no
@@ -3720,11 +3628,12 @@ func TestCheckRoundNamesAFailedMemberOnlyWhenItCanBePutBack(t *testing.T) {
 			node.setMdSync(mdDev, 1, "recover", "100 / 200")
 			node.setMemberState(mdDev, leg2, "spare,failfast")
 		}, false, false},
-		// A spare md holds without a slot: right after an --add, before md
-		// gives it one, or one md cannot start recovering. The slot alone
-		// would name it; only the faulty flag keeps it out.
-		{"spare out of its slot", func(srv *CnAgentServer, node *fakeNode,
-			mdDev, leg2 string) {
+		// A member md holds without a slot and has not failed: right after
+		// an --add, before md gives it one, or one md cannot start copying
+		// onto. The slot alone would name it; only the faulty flag keeps it
+		// out.
+		{"held without a slot, not failed", func(srv *CnAgentServer,
+			node *fakeNode, mdDev, leg2 string) {
 			node.setMdSync(mdDev, 1, "idle", "none")
 			node.setMemberState(mdDev, leg2, "spare,failfast")
 			node.setMemberSlot(mdDev, leg2, mdSlotNone)
@@ -3990,7 +3899,8 @@ func TestConvergePutsAFailedMemberBack(t *testing.T) {
 // TestCheckRoundNamesALackingMemberAndTheConvergeAddsIt is the put-back's
 // other half (CN12, CN30): a running array that lacks a leg_list member on a
 // leg that serves with its row OK — a remove that went through before its
-// add failed, or a spare switch whose --remove was killed — is named by the
+// add failed, or an add a killed --remove of an extra kept from running — is
+// named by the
 // verdict, so the worker's re-sent syncup brings the converge that adds it;
 // nothing else re-drives it. Before its leg's first probe its row reads
 // PENDING and the verdict names nothing, though the converge's add, which
@@ -4846,7 +4756,7 @@ func TestARedundNoneGroupKeepsItsDeviceOverALateLeg(t *testing.T) {
 // (CN19): at NO_SIDE, where no leg is wanted, every member would otherwise
 // read unavailable. A deferred group builds no array at all ([D15]), even
 // when its leg_list holds a provisioned member that is unavailable, and a
-// spare is never a member (architecture.md, Spare legs).
+// repair's new leg is never a late member (CN12).
 func TestLateMemberRetryScope(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -4905,18 +4815,18 @@ func TestLateMemberRetryScope(t *testing.T) {
 			assertPending(t, info.GetLegIdToLeg()[testDataLeg2], "leg 2")
 			assertOk(t, info.GetGrpIdToMdRaid()[testMetaGrp], "grp meta")
 		}},
-		{"spare", func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
-			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
-				switchSpareLeg, testCn), testIp2, testSvcId2, "non-optimized")
+		{"new leg", func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+			node.setAnaState(legNqn(srv, repNewLeg), testIp, testSvcId,
+				"non-optimized")
 			cnSyncup(t, srv, 2, true)
 			reply, err := srv.SyncupCntlr(context.Background(),
-				switchSpareReq(2, false))
+				repairReq(2, pb.RepStage_REP_STAGE_CREATED, false))
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
 			if !node.hasCall(
-				"cmd dmsetup create " + legName(srv, switchSpareLeg)) {
-				t.Fatalf("the spare leg was not wrapped")
+				"cmd dmsetup create " + legName(srv, repNewLeg)) {
+				t.Fatalf("the new leg was not wrapped")
 			}
 			assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
 				"grp data")
@@ -5001,8 +4911,8 @@ func TestLateMemberRetryScopeWantedGroups(t *testing.T) {
 // TestFailedConnectRegistersTheRetryWithoutALateMember pins ensureLegs' own
 // registration (CN10): a leg whose connect fails registers the retry whether
 // or not it is a late member. Each case's failing leg is never one — a
-// standby wants no group, and a spare is never a member — so the retry is
-// ensureLegs' alone, and build must OR the late-member verdict into
+// standby wants no group, and a repair's new leg is never late — so the
+// retry is ensureLegs' alone, and build must OR the late-member verdict into
 // ensureLegs', not overwrite it.
 func TestFailedConnectRegistersTheRetryWithoutALateMember(t *testing.T) {
 	refuse := func(srv *CnAgentServer, node *fakeNode, legId uint64) {
@@ -5024,12 +4934,12 @@ func TestFailedConnectRegistersTheRetryWithoutALateMember(t *testing.T) {
 			return syncupBoth(t, srv, reqOpts{revision: 2, raid1: true,
 				twoLegs: true})
 		}},
-		{"spare", switchSpareLeg, func(t *testing.T, srv *CnAgentServer,
+		{"new leg", repNewLeg, func(t *testing.T, srv *CnAgentServer,
 			node *fakeNode) *pb.SyncupCntlrReply {
-			refuse(srv, node, switchSpareLeg)
+			refuse(srv, node, repNewLeg)
 			cnSyncup(t, srv, 2, true)
 			reply, err := srv.SyncupCntlr(context.Background(),
-				switchSpareReq(2, false))
+				repairReq(2, pb.RepStage_REP_STAGE_CREATED, false))
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
@@ -7430,7 +7340,7 @@ func concatDevNos(t *testing.T, node *fakeNode, name string) []string {
 // TestOutOfOrderGrowDefersEveryLaterGroup is the [D15] prefix rule: deferral cuts
 // a group list at the *first* deferred group instead of filtering deferred
 // groups out of the middle. Two GrowSlice appends whose sides finish zeroing
-// out of order are the reachable trigger — no spare and no worker involved.
+// out of order are the reachable trigger — no repair and no worker involved.
 //
 // An order-preserving filter would build the later group at the earlier one's
 // concat offset, so every pool-data block dm-thin allocated in that window
@@ -7518,8 +7428,7 @@ func TestOutOfOrderGrowDefersEveryLaterGroup(t *testing.T) {
 // TestConcatNeverShrinksWhenALiveGroupDefers is the other direction of the
 // same rule: [D15]'s deferral holds a *new* group out of the concat until it is
 // ready — it may never take a serving one out. A live group whose leg_list
-// gains an all-unprovisioned leg (the spare switch of architecture.md, Spare
-// legs, onto a fresh DN) must
+// holds an all-unprovisioned leg must
 // not shorten the pool-data concat under a live thin-pool: the concat's target
 // list is the physical home of every block the pool has already allocated, so
 // a shrink either remaps live data or leaves the pool suspended on a refused
@@ -7665,13 +7574,20 @@ func TestSpLevelBeatsProvisioning(t *testing.T) {
 		probed.GetLegIdToLeg()[testDataLeg], "probed leg data")
 }
 
-// TestUnprovisionedSpareDefersOnlyItself: spares never assemble
-// (architecture.md, Spare legs), so an
-// unprovisioned one holds nothing back.
-func TestUnprovisionedSpareDefersOnlyItself(t *testing.T) {
+// TestUnprovisionedNewLegDefersOnlyItself: a repair's new leg joins the
+// group's assembly only once it is available (CN12), so an unprovisioned one
+// holds nothing back (CN9): a pool's first converge with such a repair
+// creates the group's array over its leg_list legs and builds the pool and
+// the ns-dev over it, while nothing connects to the new leg, no wrapper is
+// built for it and its row reads PROVISIONING.
+func TestUnprovisionedNewLegDefersOnlyItself(t *testing.T) {
 	srv, node := newTestServer(t)
-	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-		raid1: true, unprovisionedSpare: true})
+	cnSyncup(t, srv, 2, true)
+	reply, err := srv.SyncupCntlr(context.Background(), repairReq(2,
+		pb.RepStage_REP_STAGE_CREATED, false, repOpts{unprovisioned: true}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
 
 	dataMd := srv.nf.MdPath(
 		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
@@ -7679,11 +7595,11 @@ func TestUnprovisionedSpareDefersOnlyItself(t *testing.T) {
 		t.Fatalf("the group did not assemble:\n%s",
 			strings.Join(node.Calls(), "\n"))
 	}
-	assertNoCall(t, node, "--nqn "+legNqn(srv, testSpareLeg))
-	assertNoCall(t, node, "cmd dmsetup create "+legName(srv, testSpareLeg))
+	assertNoCall(t, node, "--nqn "+legNqn(srv, repNewLeg))
+	assertNoCall(t, node, "cmd dmsetup create "+legName(srv, repNewLeg))
 
 	info := reply.GetCntlrInfo()
-	assertProvisioning(t, info.GetLegIdToLeg()[testSpareLeg], "spare leg")
+	assertProvisioning(t, info.GetLegIdToLeg()[repNewLeg], "new leg")
 	assertPending(t, info.GetLegIdToLeg()[testDataLeg], "member leg")
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	assertOk(t, info.GetSliceIdToData()[testSlice], "pool data")

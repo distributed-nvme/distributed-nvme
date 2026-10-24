@@ -1,6 +1,6 @@
 // Tests of the pool plan PutSp joins its five lists into: the wiring
 // validation that refuses every dangling reference and duplicate id, the
-// footprint and next_id it derives, and the spare-leg and slot-list rules.
+// footprint and next_id it derives, and the slot-list rules.
 // None of them needs etcd.
 package plant
 
@@ -94,27 +94,6 @@ func TestNewSpPlanSlotsDefaultToAll(t *testing.T) {
 			t.Fatalf("slots = %v, want 0 to %d in order", plan.slots,
 				common.CnCntlidSlotCnt-1)
 		}
-	}
-}
-
-// TestNewSpPlanSpareLegs pins a spare leg: it shares the group's leg_idx
-// space and costs its DN the group's extents like an active leg's side.
-func TestNewSpPlanSpareLegs(t *testing.T) {
-	spec := smokeSpec()
-	spec.Legs = append(spec.Legs,
-		LegSpec{GrpId: 5, LegId: 12, LegIdx: 2, Spare: true})
-	spec.Sides = append(spec.Sides,
-		SideSpec{LegId: 12, SideId: 13, DnId: 3, Slot: 0})
-	plan, err := newSpPlan(spec)
-	if err != nil {
-		t.Fatalf("newSpPlan failed: %v", err)
-	}
-	if plan.grpOfLeg[12] != 5 || plan.extOfLeg[12] != 2 {
-		t.Fatalf("the spare is in group %#x at %d extents, want 0x5 at 2",
-			plan.grpOfLeg[12], plan.extOfLeg[12])
-	}
-	if plan.nextId != 14 {
-		t.Fatalf("next_id = %d, want 14", plan.nextId)
 	}
 }
 
@@ -241,16 +220,6 @@ func TestNewSpPlanRejectsBadWiring(t *testing.T) {
 			want: "already used by leg",
 		},
 		{
-			name: "a spare's leg_idx taken by an active leg",
-			mutate: func(spec *SpSpec) {
-				spec.Legs = append(spec.Legs,
-					LegSpec{GrpId: 2, LegId: 20, LegIdx: 0, Spare: true})
-				spec.Sides = append(spec.Sides,
-					SideSpec{LegId: 20, SideId: 21, DnId: 3})
-			},
-			want: "already used by leg",
-		},
-		{
 			name: "duplicate slice_idx",
 			mutate: func(spec *SpSpec) {
 				spec.Slices = append(spec.Slices,
@@ -268,38 +237,12 @@ func TestNewSpPlanRejectsBadWiring(t *testing.T) {
 			want: "has no leg",
 		},
 		{
-			name: "group whose only leg is a spare",
-			mutate: func(spec *SpSpec) {
-				spec.Groups = append(spec.Groups, GroupSpec{
-					SliceId: 1, GrpId: 20, ExtCnt: 2, Raid1: true,
-				})
-				spec.Legs = append(spec.Legs,
-					LegSpec{GrpId: 20, LegId: 21, LegIdx: 0, Spare: true})
-				spec.Sides = append(spec.Sides,
-					SideSpec{LegId: 21, SideId: 22, DnId: 1})
-			},
-			want: "no leg that is not a spare",
-		},
-		{
 			name: "leg with no side",
 			mutate: func(spec *SpSpec) {
 				spec.Legs = append(spec.Legs,
 					LegSpec{GrpId: 2, LegId: 20, LegIdx: 2})
 			},
 			want: "has no side",
-		},
-		{
-			name: "spare leg in a redund_none pool",
-			mutate: func(spec *SpSpec) {
-				for i := range spec.Groups {
-					spec.Groups[i].Raid1 = false
-				}
-				spec.Legs = append(spec.Legs,
-					LegSpec{GrpId: 5, LegId: 20, LegIdx: 2, Spare: true})
-				spec.Sides = append(spec.Sides,
-					SideSpec{LegId: 20, SideId: 21, DnId: 3})
-			},
-			want: "a spare leg needs md-raid1",
 		},
 		{
 			name: "group of no extent",

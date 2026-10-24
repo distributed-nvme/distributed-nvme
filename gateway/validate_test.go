@@ -166,6 +166,49 @@ func TestValidateNameMessages(t *testing.T) {
 		validateName("td_name", "bad name"), common.ValidStrPattern)
 }
 
+// TestValidateRepNameAndTheWorkersName pins the reserved prefix of
+// CreateRepair's rep_name (architecture.md, Common validation) against the
+// sp worker's names. A name common.WorkerRepName builds passes the common
+// name rule, pattern and length, so the calls that address a repair by name
+// (validateRepairRef) take it at every id and time; and validateRepName
+// refuses a name that passes that rule exactly when
+// common.HasRepNameReservedPrefix says it carries the prefix, with the
+// prefix in its message, so the gateway never creates a repair the worker
+// would take for its own.
+func TestValidateRepNameAndTheWorkersName(t *testing.T) {
+	names := []string{
+		common.WorkerRepName(0, 0, 0),
+		common.WorkerRepName(^uint64(0), ^uint64(0), ^uint64(0)),
+		common.WorkerRepName(0x100, 0x1ab, 1700000000),
+		common.RepNameReservedPrefix,
+		common.RepNameReservedPrefix + "x",
+		"rep-a",
+		"_internal__x",
+		"__INTERNAL__x",
+		"x" + common.RepNameReservedPrefix,
+	}
+	for i, name := range names {
+		what := fmt.Sprintf("name %q", name)
+		if i < 3 {
+			validateWantCode(t, what+" by the common name rule",
+				validateName("rep_name", name), codes.OK)
+			validateWantCode(t, what+" by validateRepairRef",
+				validateRepairRef("", "pool", name), codes.OK)
+		}
+		if err := validateName("rep_name", name); err != nil {
+			t.Fatalf("%s breaks the common name rule: %v", what, err)
+		}
+		err := validateRepName(name)
+		if common.HasRepNameReservedPrefix(name) {
+			validateWantCode(t, what, err, codes.InvalidArgument)
+			validateWantMsg(t, what, err, "starts with the reserved prefix "+
+				fmt.Sprintf("%q", common.RepNameReservedPrefix))
+		} else {
+			validateWantCode(t, what, err, codes.OK)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // NQNs (architecture.md, Common validation)
 // ---------------------------------------------------------------------------

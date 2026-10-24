@@ -237,6 +237,31 @@ var renderCases = []renderCase{
 			`"try_to_abort":true}}` + "\n",
 	},
 	{
+		// The finish of a worker's repair at the bound of retired legs
+		// (architecture.md, Repairs, FinishRepair): the reply names the
+		// group's oldest retired leg, which the finish gave back, beside the
+		// bad leg it retired.
+		name: "repair finish, a retired leg given back",
+		rpc:  "FinishRepair",
+		argv: []string{"repair", "finish", "--name", "r0"},
+		reply: &pb.FinishRepairReply{
+			RepId: 9, RetiredLegId: 3, GivenBackLegId: 5,
+		},
+		want: `{"given_back_leg_id":"5","rep_id":"9",` +
+			`"retired_leg_id":"3"}` + "\n",
+	},
+	{
+		// A finish that gave nothing back still shows the field, as zero.
+		name: "repair finish, nothing given back",
+		rpc:  "FinishRepair",
+		argv: []string{"repair", "finish", "--name", "r0"},
+		reply: &pb.FinishRepairReply{
+			RepId: 9, RetiredLegId: 3,
+		},
+		want: `{"given_back_leg_id":"0","rep_id":"9",` +
+			`"retired_leg_id":"3"}` + "\n",
+	},
+	{
 		// An empty map renders as {} rather than null, and the reply's only
 		// field being empty does not make the document empty.
 		name:  "ss list, empty map",

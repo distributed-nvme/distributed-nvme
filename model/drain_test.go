@@ -525,43 +525,6 @@ func TestDrainSpSliceAccounting(t *testing.T) {
 	}
 }
 
-// TestDrainSpSliceReleasesSpareLegs pins that a spare leg's side is released
-// like an active one (architecture.md, Spare legs): it occupies a DN exactly
-// the same way, so a walk
-// that only visited leg_list would leak an extent per spare for ever.
-func TestDrainSpSliceReleasesSpareLegs(t *testing.T) {
-	env := newOpsEnv(t)
-	env.latchForDrain()
-	// The fixture slice plus a spare on dn-c, charged as CreateSpareLeg would
-	// have charged it.
-	env.addSpare(true)
-	env.chargeDn(opsDnC, []*pb.SidePointer{{
-		SpId: opsSpId, LegId: opsSpareLeg, SideId: opsSpareSide,
-	}}, opsDataExtCnt)
-	charged := opsDnFree - opsDataExtCnt
-	revBefore := env.dnRev(opsDnC)
-
-	if _, done, err := DrainSpSlice(env.ctx, env.cli, env.cid, opsShard,
-		opsSpId, opsSpName, opsSliceId, env.cc); err != nil || !done {
-		t.Fatalf("DrainSpSlice: done=%v err=%v", done, err)
-	}
-	dn := env.dn(opsDnC)
-	if dn.GetFreeExtCnt() != opsDnFree {
-		t.Errorf("dn-c: free_ext_cnt %d, want the spare's %d extents back "+
-			"(%d)", dn.GetFreeExtCnt(), opsDataExtCnt, opsDnFree)
-	}
-	if len(dn.GetSidePtrList()) != 0 {
-		t.Errorf("dn-c: side_ptr_list %v", dn.GetSidePtrList())
-	}
-	if got := env.dnRev(opsDnC); got != revBefore+1 {
-		t.Errorf("dn-c: revision %d, want %d", got, revBefore+1)
-	}
-	if env.exists(DnCapacityKey(
-		env.cid, mustBin(t, env, charged), charged, opsDnC)) {
-		t.Errorf("dn-c: the spare's capacity key survived")
-	}
-}
-
 // TestDrainSpSliceRefusesWhileCntlrsRemain is SPD8's order made a precondition
 // of the transaction: a caller that derived D2 from a stale snapshot must not
 // start popping groups while cntlrs are still stacking the whole SP.
@@ -648,10 +611,11 @@ func TestDrainSliceRefusesAnInvalidStoredConf(t *testing.T) {
 
 // TestDrainSpSliceAtTheCeiling is SPD14's PROOF, the half the arithmetic
 // tripwire in gateway/txnbudget_test.go cannot do: one MAXIMUM-shape batch —
-// MaxDelGrpPerTxn groups, each with MaxAllocLegPerGrp legs and
-// MaxSpareLegPerGrp spares, every side on a DN of its own, so the batch touches
-// the most distinct DNs a batch ever can — committed against the real etcd this
-// package runs with --max-txn-ops=common.EtcdMaxTxnOps.
+// MaxDelGrpPerTxn groups, each with MaxAllocLegPerGrp legs, every side on a DN
+// of its own, so the batch touches the most distinct DNs a batch ever can —
+// committed against the real etcd this package runs with
+// --max-txn-ops=common.EtcdMaxTxnOps. A group of a batch has no repair and no
+// retired leg: the batch refuses while the pool lists either.
 //
 // The tripwire counts the ops the transaction is BELIEVED to issue; only etcd
 // can say how many it actually receives, because the commit also carries one
@@ -665,7 +629,7 @@ func TestDrainSliceRefusesAnInvalidStoredConf(t *testing.T) {
 // TestCreateStoragePoolAtTheCeiling, with the least slack — and that is where
 // a change to how etcdutil builds a txn shows up first.
 func TestDrainSpSliceAtTheCeiling(t *testing.T) {
-	const legsPerGrp = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
+	const legsPerGrp = common.MaxAllocLegPerGrp
 	const dnCnt = common.MaxDelGrpPerTxn * legsPerGrp
 	env := newOpsEnv(t)
 	env.latchForDrain()
@@ -692,16 +656,11 @@ func TestDrainSpSliceAtTheCeiling(t *testing.T) {
 				LegId:  drainLegBase + sideId,
 				SideId: sideId,
 			}}, drainExtCnt)
-			leg := &pb.Leg{
+			grp.LegList = append(grp.LegList, &pb.Leg{
 				LegId:    drainLegBase + sideId,
 				LegIdx:   uint32(legIdx),
 				SideList: []*pb.Side{opsSide(sideId, addrPort, true)},
-			}
-			if legIdx < common.MaxAllocLegPerGrp {
-				grp.LegList = append(grp.LegList, leg)
-			} else {
-				grp.SpareLegList = append(grp.SpareLegList, leg)
-			}
+			})
 		}
 		slice.DataGrpList = append(slice.DataGrpList, grp)
 	}

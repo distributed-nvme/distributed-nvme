@@ -4,7 +4,7 @@
 // homes here rather than giving each a group of its own:
 // UpdateStoragePoolCntlidSlotList, FindStoragePoolNames, GrowSlice and
 // InspectSide. Everything else under an SP (cntlr, td, ss, ns, clone, xfer,
-// migr, spare) is its own group file.
+// migr, repair, retired-leg) is its own group file.
 //
 // Three group-wide notes:
 //
@@ -18,7 +18,7 @@
 //     `sp create` — there is no SP yet to have a revision. `sp get` is where
 //     the operator read the number they pass back as --rev (CT3).
 //   - The two parse helpers below are prefixed `sp` because ctl/ is a single
-//     package and the fourteen group files must not collide (dnvctl.md,
+//     package and the thirteen group files must not collide (dnvctl.md,
 //     Files).
 
 package ctl

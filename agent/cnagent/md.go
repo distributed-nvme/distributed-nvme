@@ -19,10 +19,10 @@ import (
 // role code.
 //
 // The agent never runs `mdadm --zero-superblock`. A leg leaves an array only
-// into the spare list; as a repair's bad leg, which the finish keeps as a
-// retired leg and an abort leaves in leg_list; as a repair's new leg taken
-// from a retired leg, which a cancel gives back as that retired leg; or out
-// of existence together with its side. The superblock md left on it can make
+// as a repair's bad leg, which the finish keeps as a retired leg and an abort
+// leaves in leg_list; as a repair's new leg taken from a retired leg, which a
+// cancel gives back as that retired leg; or out of existence together with
+// its side. The superblock md left on it can make
 // a later re-add cheap, and keeps an assembly from taking it as in sync
 // (CN12).
 type Md struct {
@@ -329,8 +329,8 @@ type MdMember struct {
 	State string
 	// Slot is dev-*/slot verbatim: the member's place number in the array,
 	// or "none" for a member that holds no place — one md has failed and
-	// moved out of its slot once no IO to it was pending, or a spare with
-	// no place to recover into.
+	// moved out of its slot once no IO to it was pending, or one md holds
+	// with no place to copy into.
 	Slot string
 }
 
@@ -626,7 +626,8 @@ func (m *Md) Detail(
 
 // Match is the array node a walk holds for a group (CN12's match): the one
 // array whose members include any of dmNames, the wrapper names of the
-// group's members (grpPlan.memberNames), so spares do not count. "" with no
+// group's members (grpPlan.memberNames), so an aborted repair's new leg does
+// not count. "" with no
 // error when none matches and every array answered; an error for two
 // matches, or for no match beside an array that did not answer, which may be
 // the group's own. A degraded array matches: one member the group names is
@@ -1014,9 +1015,8 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // ensureGroup converges one group device. A RedundNone group is a dm-linear
 // over its single leg's data region (ensureLinearGroup); a RedundMdRaid1
 // group instantiates the assembly cases of cnagent.md CN12 over the member
-// leg wrappers. Spare legs are never members
-// (architecture.md, Spare legs) — they stay connected, wrapped and probed —
-// and a repair's new legs join only by CN12's rules for a repair.
+// leg wrappers. A repair's new legs, connected, wrapped and probed at every
+// stage, join only by CN12's rules for a repair.
 //
 // A provisioning-deferred group never gets here: the build phase reports it
 // PROVISIONING and skips it ([D15]). The leg-count check of ensureLinearGroup
@@ -1275,18 +1275,16 @@ func (s *CnAgentServer) assembleGroup(
 		// Nor while an array already runs under the group's name. Detail
 		// finds the array by its members, so one holding NONE of the
 		// wrappers the group keeps (its leg_list wrappers and its open
-		// repair's new legs, grpPlan.memberNames) — both legs switched out,
-		// and the parked ones released, while this cntlr was not
-		// converging — never reaches reconcile and lands here instead,
-		// with every fresh leg answering "no superblock". A create would
-		// put a second array under the name mdadm gives the group's array,
-		// and the guard keeps it from doing so. The pool's concat finds the
-		// group's array by its legs (mdDevNo), never by that name, so until
-		// the group has an array of its own the concat rows read an error
-		// rather than take the running array's number. The guard errs only
-		// towards refusing, and a false refusal needs a stale node of this
-		// very name: short of the case above, a group whose legs carry no
-		// superblock has never had an array that could have left one.
+		// repair's new legs, grpPlan.memberNames) never reaches reconcile,
+		// and lands here when every leg answers "no superblock". A create
+		// would put a second array under the name mdadm gives the group's
+		// array, and the guard keeps it from doing so. The pool's concat
+		// finds the group's array by its legs (mdDevNo), never by that name,
+		// so until the group has an array of its own the concat rows read an
+		// error rather than take the running array's number. The guard errs
+		// only towards refusing, and a false refusal needs a stale node of
+		// this very name: short of the case above, a group whose legs carry
+		// no superblock has never had an array that could have left one.
 		inUse, err := s.md.NameInUse(ctx, gp.devPath)
 		if err != nil {
 			return err
@@ -1305,13 +1303,13 @@ func (s *CnAgentServer) assembleGroup(
 	return s.md.Assemble(ctx, gp.devPath, gp.mdArrayName, withSuperblock)
 }
 
-// reconcileMembers covers SwitchSpareLeg with no extra mechanism (CN12): a
-// member the array holds that the group does not keep is failed and removed,
-// but only while a member that stays keeps the data (inSyncGuard); an
-// available leg_list member the array lacks is added, and md then resyncs —
-// a bitmap catch-up for a briefly absent leg, a full rebuild for a promoted
-// spare. And it puts a member md has failed back: a leg_list member md has
-// failed and moved out of its slot (MdMember.failedOutOfSlot), on a leg that
+// reconcileMembers is CN12's member reconciliation: a member the array holds
+// that the group does not keep, such as an aborted repair's new leg, is
+// failed and removed, but only while a member that stays keeps the data
+// (inSyncGuard); an available leg_list member the array lacks is added, and
+// md then resyncs it, from its write-intent bitmap for a briefly absent leg.
+// And it puts a member md has failed back: a leg_list member md has failed
+// and moved out of its slot (MdMember.failedOutOfSlot), on a leg that
 // can take it (legTakesMember), is removed, and the add loop adds it again,
 // which mdadm turns into a re-add that md resyncs from its write-intent
 // bitmap. md keeps its claim on a failed member until the member is removed,
@@ -1346,8 +1344,9 @@ func (s *CnAgentServer) assembleGroup(
 // then act on its device number. `--remove` can sleep in md's suspend for as
 // long as a superblock write is stuck on the member — seconds after its side
 // dies with a write in flight — and the soft timeout then kills it with the
-// member still held: this pass fails before the add loop, so the promoted
-// spare is not added either, nor, after a repair's bad leg, its new leg. A
+// member still held: this pass fails before the add loops, so a leg_list
+// member the array lacks is not added either, nor, after a repair's bad leg,
+// its new leg. A
 // remove or an add that fails is the group's error for the pass, a row, which
 // registers no background retry of its own. What re-drives it is the read's
 // verdict, which names a member this function would put back or add on a leg
@@ -1356,17 +1355,15 @@ func (s *CnAgentServer) assembleGroup(
 // SyncupCntlr whose converge tries again; the CN10 retry tries again too when
 // the same pass registers it for something else, such as a leg that failed to
 // converge or a leg_list member of this cntlr that is not available, other
-// than an open repair's bad leg in a group whose array runs. The switched-out
-// member itself has left leg_list and is never named. Nothing here remembers
-// the failure. A refusal of the in-sync guard
+// than an open repair's bad leg in a group whose array runs. A member the
+// group does not keep is never named itself. Nothing here remembers the
+// failure. A refusal of the in-sync guard
 // is re-driven the same way once it clears: until then the read's row reads
 // ERROR too and its verdict names nothing for the group, and the first read
 // that finds a member that stays in sync on an available leg reads the row
-// OK and names the promoted spare the array lacks once its leg can take it.
+// OK and names the leg_list member the array lacks once its leg can take it.
 // The refusal skips the put-back too, so a leg_list member md has failed
-// stays out while the guard holds; when it is the only member that stays,
-// nothing brings it back in sync and the guard does not clear by itself
-// (cnagent.md CN12, Known limits).
+// stays out while the guard holds (cnagent.md CN12).
 func (s *CnAgentServer) reconcileMembers(
 	ctx context.Context,
 	gp *grpPlan,
@@ -1397,7 +1394,7 @@ func (s *CnAgentServer) reconcileMembers(
 		changed = true
 		return verb(ctx, gp.devPath, path)
 	}
-	// Extras leave before promotions arrive, so the array never briefly
+	// Extras leave before any member is added, so the array never briefly
 	// holds more members than `--raid-devices`.
 	for _, member := range detail.Members {
 		if kept[member.DmName] {
@@ -1667,18 +1664,19 @@ func legTakesMember(serves bool, legRow *pb.ResInfo) bool {
 // inSyncGuard is CN12's in-sync guard over a group's running array, which
 // the converge (reconcileMembers) and the read (probeGroup) both apply: the
 // dm name of the first member the array holds that the group does not keep
-// (grpPlan.memberNames: no longer in leg_list, nor a new leg of an open
-// repair), when no member that stays in leg_list is in sync (MdMember.inSync)
-// on a leg that serves; "" when no member leaves, or when such a member keeps
-// the data. serves is the leg's availability as the caller can read it: the
-// converge's available map, and for a read legServes, the part of it a read
-// can see, so the two report the same row short of what legServes does not
-// read (cnagent.md, Known limits). serves is called only for a
-// held, in-sync member of leg_list, and only once a member leaves, so a read
-// of a group no switch has touched makes no lookup for it.
+// (grpPlan.memberNames: neither in leg_list nor a new leg of an open
+// repair, such as an aborted repair's new leg), when no member that stays in
+// leg_list is in sync (MdMember.inSync) on a leg that serves; "" when no
+// member leaves, or when such a member keeps the data. serves is the leg's
+// availability as the caller can read it: the converge's available map, and
+// for a read legServes, the part of it a read can see, so the two report the
+// same row short of what legServes does not read (cnagent.md, Known limits).
+// serves is called only for a held, in-sync member of leg_list, and only
+// once a member leaves, so a read of a group whose array holds no such
+// member makes no lookup for it.
 //
 // md answers a fail of the last in-sync member of a mirror by marking the
-// whole array broken (CN29), so a fail of a member the group no longer keeps
+// whole array broken (CN29), so a fail of a member the group does not keep
 // needs another to keep the data. That member must be one md marks in sync
 // on an available leg, because on an array with no IO md still marks a dead
 // member in sync: the fail would go through, the add after it would start a
@@ -1748,9 +1746,12 @@ func errInSyncGuard(member, dev string) error {
 // every read, and each round that answers from such a read brings the
 // SyncupCntlr again (cnagent.md, Known limits). A converge's code never
 // names it (convergeCntlr), so the round that answers from the re-send's
-// observation brings none for it. A member that still holds its slot, one being
-// recovered or a spare is never named, nor a new leg whose add waits for its
-// bad leg. The late-member retry does not count any of them (hasLateMember).
+// observation brings none for it. Except for the repair's removals above
+// (abortRemovals, startedBadLegs), a member that still holds its slot, one
+// being recovered, or one md holds without a place and has not failed is
+// never named, nor a new leg whose add waits for its bad leg. The late-member
+// retry reads none of this: it counts a leg_list member by its leg's
+// availability, never by what md holds on it (hasLateMember).
 func (s *CnAgentServer) putBackNames(
 	ctx context.Context,
 	plan *cntlrPlan,

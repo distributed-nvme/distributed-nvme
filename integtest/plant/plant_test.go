@@ -82,8 +82,9 @@ func TestContainsNameAndAdvanceNextId(t *testing.T) {
 
 // TestCutoverRefOf pins how StartCutover names a migration for
 // model.StartCutover: the record's id and sides, and the slice and leg that
-// carry both sides — found among the spare legs and in a later slice too —
-// and a refusal for a name with no record and for sides that share no leg.
+// carry both sides — found past a group's first leg and in a later slice
+// too — and a refusal for a name with no record and for sides that share no
+// leg.
 func TestCutoverRefOf(t *testing.T) {
 	state := &model.SpState{
 		Conf: &pb.SpConf{SliceIdList: []uint64{1, 2}},
@@ -98,8 +99,7 @@ func TestCutoverRefOf(t *testing.T) {
 				LegList: []*pb.Leg{{
 					LegId:    21,
 					SideList: []*pb.Side{{SideId: 201}},
-				}},
-				SpareLegList: []*pb.Leg{{
+				}, {
 					LegId: 22,
 					SideList: []*pb.Side{
 						{SideId: 202}, {SideId: 203},
@@ -162,8 +162,8 @@ func TestStoredPrimary(t *testing.T) {
 }
 
 // TestSetSliceEpoch pins where SetLegEpoch and SetSideEpoch find a leg or a
-// side: in either group list and on an active or a spare leg, as the health
-// ops do, touching that one object and nothing else.
+// side: in either group list and on any leg of a group, as the health ops
+// do, touching that one object and nothing else.
 func TestSetSliceEpoch(t *testing.T) {
 	newSlice := func() *pb.Slice {
 		return &pb.Slice{
@@ -171,8 +171,7 @@ func TestSetSliceEpoch(t *testing.T) {
 				GrpId: 1,
 				LegList: []*pb.Leg{{
 					LegId: 1, SideList: []*pb.Side{{SideId: 11}},
-				}},
-				SpareLegList: []*pb.Leg{{
+				}, {
 					LegId: 2, ErrEpoch: 7,
 					SideList: []*pb.Side{{SideId: 12, ErrEpoch: 8}},
 				}},
@@ -194,13 +193,13 @@ func TestSetSliceEpoch(t *testing.T) {
 		read func(*pb.Slice) uint64
 	}{
 		{"leg", 2, 7, true, func(s *pb.Slice) uint64 {
-			return s.GetMetaGrpList()[0].GetSpareLegList()[0].GetErrEpoch()
+			return s.GetMetaGrpList()[0].GetLegList()[1].GetErrEpoch()
 		}},
 		{"leg", 3, 0, true, func(s *pb.Slice) uint64 {
 			return s.GetDataGrpList()[0].GetLegList()[0].GetErrEpoch()
 		}},
 		{"side", 12, 8, true, func(s *pb.Slice) uint64 {
-			return s.GetMetaGrpList()[0].GetSpareLegList()[0].
+			return s.GetMetaGrpList()[0].GetLegList()[1].
 				GetSideList()[0].GetErrEpoch()
 		}},
 		{"side", 13, 0, true, func(s *pb.Slice) uint64 {
@@ -288,7 +287,7 @@ func TestTakeId(t *testing.T) {
 }
 
 // TestSetGroupEpoch pins the group walk the clone setters share with
-// setSliceEpoch: a leg or a side of an active or a spare leg, the old value
+// setSliceEpoch: a leg or a side of any leg of the group, the old value
 // returned and nothing else touched; and a clone with no group, whose group
 // is nil, holds no object.
 func TestSetGroupEpoch(t *testing.T) {
@@ -297,8 +296,7 @@ func TestSetGroupEpoch(t *testing.T) {
 			GrpId: 61,
 			LegList: []*pb.Leg{{
 				LegId: 62, SideList: []*pb.Side{{SideId: 63}},
-			}},
-			SpareLegList: []*pb.Leg{{
+			}, {
 				LegId: 64, ErrEpoch: 5,
 				SideList: []*pb.Side{{SideId: 65, ErrEpoch: 6}},
 			}},
@@ -351,14 +349,10 @@ func TestCloneSpecCheck(t *testing.T) {
 		return CloneLegSpec{LegId: legId, LegIdx: idx, SideId: sideId,
 			DnId: dnId}
 	}
-	spare := func(l CloneLegSpec) CloneLegSpec {
-		l.Spare = true
-		return l
-	}
 	good := []CloneSpec{
 		base(),
 		base(leg(0, 0, 1, 0)),
-		base(leg(10, 11, 1, 0), leg(12, 13, 2, 1), spare(leg(14, 15, 3, 2))),
+		base(leg(10, 11, 1, 0), leg(12, 13, 2, 1)),
 		base(leg(0, 0, 1, 0), leg(0, 0, 2, 1)),
 	}
 	for i, spec := range good {
@@ -380,7 +374,6 @@ func TestCloneSpecCheck(t *testing.T) {
 		{base(leg(10, 11, 1, 0), leg(12, 11, 2, 1)), "side id 0xb is used twice"},
 		{base(leg(10, 11, 1, 0), leg(12, 13, 2, 0)), "leg_idx 0 is used twice"},
 		{base(leg(10, 11, 1, 0), leg(12, 13, 1, 1)), "carries two legs"},
-		{base(spare(leg(10, 11, 1, 0))), "no leg that is not a spare"},
 	}
 	for _, tc := range bad {
 		err := tc.spec.Check()

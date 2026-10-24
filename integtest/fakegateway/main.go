@@ -1066,24 +1066,6 @@ func (g *fakeGateway) AppendMigrationBitmap(
 	return serve[*pb.AppendMigrationBitmapReply](g, ctx, "AppendMigrationBitmap", req)
 }
 
-func (g *fakeGateway) CreateSpareLeg(
-	ctx context.Context, req *pb.CreateSpareLegRequest,
-) (*pb.CreateSpareLegReply, error) {
-	return serve[*pb.CreateSpareLegReply](g, ctx, "CreateSpareLeg", req)
-}
-
-func (g *fakeGateway) DeleteSpareLeg(
-	ctx context.Context, req *pb.DeleteSpareLegRequest,
-) (*pb.DeleteSpareLegReply, error) {
-	return serve[*pb.DeleteSpareLegReply](g, ctx, "DeleteSpareLeg", req)
-}
-
-func (g *fakeGateway) SwitchSpareLeg(
-	ctx context.Context, req *pb.SwitchSpareLegRequest,
-) (*pb.SwitchSpareLegReply, error) {
-	return serve[*pb.SwitchSpareLegReply](g, ctx, "SwitchSpareLeg", req)
-}
-
 func (g *fakeGateway) CreateRepair(
 	ctx context.Context, req *pb.CreateRepairRequest,
 ) (*pb.CreateRepairReply, error) {

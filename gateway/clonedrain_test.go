@@ -224,11 +224,11 @@ func TestCloneDrainGivesTheExtentsBack(t *testing.T) {
 		t.Fatalf("the clone key survived the drain")
 	}
 	wantCnsUntouched("on the drain")
-	// Every DN ends as clone-b alone would have left it: clone-a's sides,
-	// legs and spares alike, are gone from it, clone-b's stay.
+	// Every DN ends as clone-b alone would have left it: clone-a's sides are
+	// gone from it, clone-b's stay.
 	sidesOf := func(grp *pb.Group) map[string]*pb.SidePointer {
 		out := make(map[string]*pb.SidePointer)
-		for _, leg := range allLegs(grp) {
+		for _, leg := range grp.GetLegList() {
 			for _, side := range leg.GetSideList() {
 				out[side.GetAddrPort()] = &pb.SidePointer{
 					SpId:   volSpId,

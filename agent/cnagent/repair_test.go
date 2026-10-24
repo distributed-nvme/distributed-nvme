@@ -307,7 +307,8 @@ var allLegs = []uint64{testMetaLeg, testDataLeg, testDataLeg2}
 
 // TestRepairNewLegIsConnectedAndProbed pins how every cntlr carries a
 // repair's new leg (cnagent.md CN10, CN12): it is connected, wrapped,
-// probed and reported as a spare is, the sweep keeps it, it is no member
+// probed and reported as the group's legs are, the sweep keeps it, it is no
+// member
 // until the add's conditions hold, it never defers its group, and it is
 // never a late member. Here the bad leg serves with an OK row, so the
 // repair waits: no mdadm command runs against the array, and the verdict
@@ -358,7 +359,7 @@ func TestRepairNewLegIsConnectedAndProbed(t *testing.T) {
 }
 
 // TestRepairUnprovisionedNewLegDefersOnlyItself: a new leg whose side still
-// zeroes is provisioning, as a spare is (cnagent.md CN9): its row reads
+// zeroes is provisioning, as any leg is (cnagent.md CN9): its row reads
 // PROVISIONING, nothing connects to it, and the group is not deferred — its
 // row reads OK and the bad leg, though it does not serve, is not failed,
 // since no new leg can follow.
@@ -517,7 +518,109 @@ func TestRepairAddsTheNewLeg(t *testing.T) {
 	}
 }
 
-// TestRepairBadLegIsNotLate: an open repair's bad leg that does not serve
+// TestRepairAddKilledVerb pins CN12's killed-verb rule for a repair's add,
+// in TestRepairAddsTheNewLeg's "bad leg does not serve" shape: a `--fail` or
+// `--remove` of the bad leg that did not answer leaves the group row ERROR
+// with the kill's error, whether the kernel completed the command or the
+// tool was killed before touching anything, and the pass ends there. The
+// bad leg goes out first, so the new leg is never added beside a bad leg md
+// may still hold in its place; an error kept until the end of the pass would
+// add it, and an error swallowed would read the row OK over half-done work
+// as well. The converge reports no verdict, its row not reading OK. What
+// brings the next converge is the check round's verdict, which names the new
+// leg once its row reads OK (CN12, CN30), and that converge takes out what md
+// still holds of the bad leg, adds the new leg and reports the repair
+// started (cnagent.md, Known limits).
+func TestRepairAddKilledVerb(t *testing.T) {
+	for _, tc := range []struct {
+		verb     string
+		noEffect bool
+		// next builds the mdadm commands of the next converge: the rest of
+		// the bad leg's way out, as far as md still holds it, then the new
+		// leg's add. A completed --fail leaves the bad leg failed and out of
+		// its place, as md leaves a member with no IO pending.
+		next func(f *repFix) []string
+	}{
+		{" --fail ", true, func(f *repFix) []string {
+			return []string{f.fail(f.leg1), f.remove(f.leg1),
+				f.add(f.newLegDev)}
+		}},
+		{" --fail ", false, func(f *repFix) []string {
+			return []string{f.remove(f.leg1), f.add(f.newLegDev)}
+		}},
+		{" --remove ", true, func(f *repFix) []string {
+			return []string{f.remove(f.leg1), f.add(f.newLegDev)}
+		}},
+		{" --remove ", false, func(f *repFix) []string {
+			return []string{f.add(f.newLegDev)}
+		}},
+	} {
+		name := strings.TrimSpace(tc.verb) + ", completed"
+		if tc.noEffect {
+			name = strings.TrimSpace(tc.verb) + ", no effect"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newRepFix(t, allLegs...)
+			f.badLegDead()
+
+			f.node.mu.Lock()
+			if tc.noEffect {
+				f.node.killCmdNoEffectAlways[tc.verb] = true
+			} else {
+				f.node.killCmdAlways[tc.verb] = true
+			}
+			f.node.mu.Unlock()
+			f.node.Reset()
+			reply, err := f.srv.SyncupCntlr(f.ctx,
+				repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			info := reply.GetCntlrInfo()
+			row := info.GetGrpIdToMdRaid()[testDataGrp]
+			if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+				!strings.Contains(row.GetDetails(), "killed") {
+				t.Fatalf("the add with %s killed read %v %q, want ERROR "+
+					"with the kill", strings.TrimSpace(tc.verb),
+					row.GetStatus(), row.GetDetails())
+			}
+			if !f.node.hasCall("cmd mdadm " + f.mdDev + tc.verb + f.leg1) {
+				t.Fatalf("the add ran no %s of the bad leg; the case is "+
+					"vacuous", strings.TrimSpace(tc.verb))
+			}
+			assertNoCall(t, f.node, f.add(f.newLegDev))
+			assertNoCall(t, f.node, "cmd mdadm --detail")
+			if got := verdict(info); got != nil {
+				t.Fatalf("the half-done add reported a verdict: %v", got)
+			}
+
+			f.node.mu.Lock()
+			clear(f.node.killCmdNoEffectAlways)
+			clear(f.node.killCmdAlways)
+			f.node.mu.Unlock()
+			probeAllLegs(t, f.srv)
+			assertNamesOnly(t, checkCntlrVerdict(t, f.srv, 3),
+				"the check round after the half-done add",
+				legName(f.srv, repNewLeg))
+
+			f.node.Reset()
+			info = f.syncup(t,
+				repairReq(4, pb.RepStage_REP_STAGE_CREATED, false))
+			f.assertMdCalls(t, "the next converge", tc.next(f)...)
+			assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp],
+				"grp data after the next converge")
+			assertNoCall(t, f.node, "cmd mdadm --detail")
+			assertVerdict(t, info, "the next converge", true, false)
+			if got, want := f.members(), slices.Sorted(slices.Values(
+				[]string{f.leg2, f.newLegDev})); !slices.Equal(got, want) {
+				t.Fatalf("after the next converge the array holds %v, "+
+					"want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestRepairBadLegIsNotLate:an open repair's bad leg that does not serve
 // registers no late-member retry while the group's array runs, since no
 // converge adds it back to a running array while the repair is open, while
 // a dead leg_list leg that is no bad leg does, and so does the bad leg once
@@ -1421,7 +1524,8 @@ func TestRepairAssembly(t *testing.T) {
 // TestRepairOnACloneMetaGroup is the add on a clone's clone meta group,
 // which the cntlr builds as a slice's group (cnagent.md CN12): the bad leg
 // that does not serve is failed and removed and the new leg added to the
-// group's own array, while the dm-clone over that array is left as it is.
+// group's own array, while the dm-clone over that array is left as it is and
+// reads the hydrated count its metadata held before the add.
 func TestRepairOnACloneMetaGroup(t *testing.T) {
 	const cloneNewLeg, cloneNewSide = uint64(0x68), uint64(0x69)
 	// request is the pool with the clone, its clone meta group with or
@@ -1486,5 +1590,9 @@ func TestRepairOnACloneMetaGroup(t *testing.T) {
 	assertVerdict(t, info, "the clone meta group's repair", true, false)
 	assertNoCall(t, node, "cmd dmsetup create "+dmClone)
 	assertNoCall(t, node, "cmd dmsetup reload "+dmClone)
-	assertOk(t, info.GetCloneIdToDmClone()[testClone], "the dm-clone")
+	row := info.GetCloneIdToDmClone()[testClone]
+	assertOk(t, row, "the dm-clone")
+	assertHydrated(t, row, 37, "the dm-clone after the add")
+	assertPending(t, info.GetLegIdToLeg()[cloneNewLeg],
+		"the new leg on the primary")
 }

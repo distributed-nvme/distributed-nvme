@@ -21,16 +21,15 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	// The fixture clone's clone meta group (withCloneGrp): two legs of an
-	// md-raid1, one provisioned and one not, and a spare, on three of the
-	// fixture's DNs.
-	spCloneGrp       = uint64(120)
-	spCloneLegA      = uint64(1020)
-	spCloneLegB      = uint64(1021)
-	spCloneLegSpare  = uint64(1022)
-	spCloneSideA     = uint64(2020)
-	spCloneSideB     = uint64(2021)
-	spCloneSideSpare = uint64(2022)
+	// The fixture clone's clone meta group (withCloneGrp): three legs of an
+	// md-raid1, one provisioned and two not, on three of the fixture's DNs.
+	spCloneGrp   = uint64(120)
+	spCloneLegA  = uint64(1020)
+	spCloneLegB  = uint64(1021)
+	spCloneLegC  = uint64(1022)
+	spCloneSideA = uint64(2020)
+	spCloneSideB = uint64(2021)
+	spCloneSideC = uint64(2022)
 
 	// A second clone, being deleted, with a group of one leg
 	// (withDeletingClone).
@@ -51,14 +50,13 @@ const spCloneZeroBytes = (7 + 1) * testBlockSize
 
 // cloneMetaGrp is a clone meta group of one extent per side with the
 // fixture's block counts.
-func cloneMetaGrp(grpId uint64, legs []*pb.Leg, spares []*pb.Leg) *pb.Group {
+func cloneMetaGrp(grpId uint64, legs []*pb.Leg) *pb.Group {
 	return &pb.Group{
-		GrpId:        grpId,
-		ExtCnt:       1,
-		MetaBlocks:   7,
-		DataBlocks:   1017,
-		LegList:      legs,
-		SpareLegList: spares,
+		GrpId:      grpId,
+		ExtCnt:     1,
+		MetaBlocks: 7,
+		DataBlocks: 1017,
+		LegList:    legs,
 	}
 }
 
@@ -88,9 +86,7 @@ func withCloneGrp(state *model.SpState) {
 		[]*pb.Leg{
 			cloneLeg(spCloneLegA, spCloneSideA, spDnB, true),
 			cloneLeg(spCloneLegB, spCloneSideB, spDnC, false),
-		},
-		[]*pb.Leg{
-			cloneLeg(spCloneLegSpare, spCloneSideSpare, spDnD, false),
+			cloneLeg(spCloneLegC, spCloneSideC, spDnD, false),
 		},
 	)
 }
@@ -109,7 +105,6 @@ func withDeletingClone(state *model.SpState) {
 			[]*pb.Leg{
 				cloneLeg(spCloneGoneLeg, spCloneGoneSide, spDnA, false),
 			},
-			nil,
 		),
 	}
 }
@@ -120,8 +115,8 @@ func cloneSideKey(legId uint64, sideId uint64) sideKey {
 }
 
 // TestSpCloneSideRequestGolden pins RW14 and RW15 on the sides of clone meta
-// groups: every side of a clone's group — the spare's and a deleting clone's
-// included — gets a plan and a request of the same shape as a slice's side,
+// groups: every side of a clone's group — a deleting clone's included — gets
+// a plan and a request of the same shape as a slice's side,
 // its group's ext_cnt and length to zero, the primary's cn_id, the standby
 // list, the level and the side's provisioned flag, and no migration conf;
 // the plan names the side's clone, by name and id, where a slice's names its
@@ -186,7 +181,7 @@ func TestSpCloneSideRequestGolden(t *testing.T) {
 			false, 0},
 		{spCloneLegB, spCloneSideB, spCloneNm, spCloneId, spDnIdC, false,
 			false, 77},
-		{spCloneLegSpare, spCloneSideSpare, spCloneNm, spCloneId, spDnIdD,
+		{spCloneLegC, spCloneSideC, spCloneNm, spCloneId, spDnIdD,
 			false, false, 0},
 		{spCloneGoneLeg, spCloneGoneSide, spCloneGoneNm, spCloneGoneId,
 			spDnIdA, false, true, 0},
@@ -245,7 +240,7 @@ func TestSpCloneSideRequestGolden(t *testing.T) {
 		t.Fatalf("legClone = %v, want the four legs of the two groups",
 			plan.legClone)
 	}
-	for _, legId := range []uint64{spLegMeta, spLegMigr, spLegSpare, spLegB} {
+	for _, legId := range []uint64{spLegMeta, spLegMigr, spLegD, spLegB} {
 		if _, ok := plan.legSlice[legId]; !ok {
 			t.Fatalf("the slices' leg %d lost its slice", legId)
 		}
@@ -253,8 +248,8 @@ func TestSpCloneSideRequestGolden(t *testing.T) {
 }
 
 // TestSpCloneSideZeroBytes pins RW15's length to zero on the sides of a clone
-// meta group: the data-group length on every side, the active legs' and the
-// spare's, provisioned or not, with md-raid1 and without, never the whole leg
+// meta group: the data-group length on every side, provisioned or not, with
+// md-raid1 and without, never the whole leg
 // span of a slice's meta group. A group whose stored counts give no length
 // drives none of its sides, while its legs keep their clone for the leg rows
 // and nothing is counted for re-resolution.
@@ -262,11 +257,11 @@ func TestSpCloneSideZeroBytes(t *testing.T) {
 	captureLogs(t)
 	slicesAt := func(zeroBytes map[sideKey]uint64) map[sideKey]uint64 {
 		want := map[sideKey]uint64{
-			{legId: spLegMeta, sideId: spSideMeta}:   spMetaZeroBytes,
-			{legId: spLegMigr, sideId: spSideSrc}:    spDataZeroBytes,
-			{legId: spLegMigr, sideId: spSideDst}:    spDataZeroBytes,
-			{legId: spLegSpare, sideId: spSideSpare}: spDataZeroBytes,
-			{legId: spLegB, sideId: spSideB}:         spDataZeroBytes,
+			{legId: spLegMeta, sideId: spSideMeta}: spMetaZeroBytes,
+			{legId: spLegMigr, sideId: spSideSrc}:  spDataZeroBytes,
+			{legId: spLegMigr, sideId: spSideDst}:  spDataZeroBytes,
+			{legId: spLegD, sideId: spSideD}:       spDataZeroBytes,
+			{legId: spLegB, sideId: spSideB}:       spDataZeroBytes,
 		}
 		for key, bytes := range zeroBytes {
 			want[key] = bytes
@@ -278,14 +273,14 @@ func TestSpCloneSideZeroBytes(t *testing.T) {
 		withCloneGrp(state)
 		plan := spTestWorker(nil).buildPlan(context.Background(), state)
 		wantZeroBytes(t, plan, slicesAt(map[sideKey]uint64{
-			cloneSideKey(spCloneLegA, spCloneSideA):         spCloneZeroBytes,
-			cloneSideKey(spCloneLegB, spCloneSideB):         spCloneZeroBytes,
-			cloneSideKey(spCloneLegSpare, spCloneSideSpare): spCloneZeroBytes,
+			cloneSideKey(spCloneLegA, spCloneSideA): spCloneZeroBytes,
+			cloneSideKey(spCloneLegB, spCloneSideB): spCloneZeroBytes,
+			cloneSideKey(spCloneLegC, spCloneSideC): spCloneZeroBytes,
 		}))
 	})
 	t.Run("redund_none", func(t *testing.T) {
-		// One leg, one meta block (the health block), no spare: the shape
-		// a pool without redundancy gives every group.
+		// One leg, one meta block (the health block): the shape a pool
+		// without redundancy gives every group.
 		state := spFixture()
 		state.Clones[spCloneNm].MetaGrp = &pb.Group{
 			GrpId: spCloneGrp, ExtCnt: 1, MetaBlocks: 1, DataBlocks: 1023,
@@ -306,7 +301,7 @@ func TestSpCloneSideZeroBytes(t *testing.T) {
 		wantZeroBytes(t, plan, slicesAt(nil))
 		want := cloneOwner{name: spCloneNm, id: spCloneId}
 		for _, legId := range []uint64{
-			spCloneLegA, spCloneLegB, spCloneLegSpare,
+			spCloneLegA, spCloneLegB, spCloneLegC,
 		} {
 			if plan.legClone[legId] != want {
 				t.Errorf("leg %d maps to %+v", legId, plan.legClone[legId])
@@ -355,11 +350,11 @@ func TestSpUnresolvedCloneSideLeavesChildIdle(t *testing.T) {
 	state := spFixture()
 	withCloneGrp(state)
 	const unknown = "spdn9:9520"
-	state.Clones[spCloneNm].MetaGrp.SpareLegList[0].SideList[0].
+	state.Clones[spCloneNm].MetaGrp.LegList[2].SideList[0].
 		AddrPort = unknown
 	plan := spTestWorker(nil).buildPlan(context.Background(), state)
 	if _, ok := plan.sides[cloneSideKey(
-		spCloneLegSpare, spCloneSideSpare,
+		spCloneLegC, spCloneSideC,
 	)]; ok {
 		t.Fatalf("a clone's side with no DnConf was given a request")
 	}
@@ -437,7 +432,7 @@ func TestReportProvisionedOfACloneSide(t *testing.T) {
 // of a clone meta group whose request carried provisioned false and whose
 // agent reports its zeroing done is reported to the coordinator, which runs
 // FlipCloneProvisioned with the side's clone; a provisioned side reporting
-// the same, a spare still zeroing and the side of a clone being deleted are
+// the same, a side still zeroing and the side of a clone being deleted are
 // not, and no side of a clone reaches the slice flip.
 func TestSpCloneProvisionedFlipReported(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -455,7 +450,7 @@ func TestSpCloneProvisionedFlipReported(t *testing.T) {
 		infos := map[uint64]func() *pb.SideInfo{
 			spCloneSideB: done,
 			spCloneSideA: done,
-			spCloneSideSpare: func() *pb.SideInfo {
+			spCloneSideC: func() *pb.SideInfo {
 				return &pb.SideInfo{
 					ZeroedBytes: 4 << 20, ZeroBytes: spCloneZeroBytes,
 				}
@@ -491,7 +486,7 @@ func TestSpCloneProvisionedFlipReported(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			return len(h.ops.cloneProvisionedCalls()) > 0 &&
-				rounds[spCloneSideA] > 1 && rounds[spCloneSideSpare] > 1 &&
+				rounds[spCloneSideA] > 1 && rounds[spCloneSideC] > 1 &&
 				rounds[spCloneGoneSide] > 1
 		})
 		want := model.CloneSideRef{
@@ -529,7 +524,7 @@ func TestSpCloneFlipRecordsOnlyAppliedRefs(t *testing.T) {
 	}
 	skipped := model.CloneSideRef{
 		CloneName: spCloneNm, CloneId: spCloneId,
-		LegId: spCloneLegSpare, SideId: spCloneSideSpare,
+		LegId: spCloneLegC, SideId: spCloneSideC,
 	}
 	h.ops.applyCloneSides = map[model.CloneSideRef]bool{applied: true}
 	w.reportCh <- spReport{cloneProvisioned: &skipped}
@@ -573,7 +568,7 @@ func TestSpFlipOrder(t *testing.T) {
 		spTdOpen: {Name: "td0", TdId: spTdOpen},
 	}
 	slice := model.SideRef{
-		SliceId: spSliceA, LegId: spLegSpare, SideId: spSideSpare,
+		SliceId: spSliceA, LegId: spLegD, SideId: spSideD,
 	}
 	clone := model.CloneSideRef{
 		CloneName: spCloneNm, CloneId: spCloneId,
@@ -609,8 +604,8 @@ func TestSpCloneLegRowsFromPrimaryOnly(t *testing.T) {
 			Revision: req.GetRevision(),
 			CntlrInfo: &pb.CntlrInfo{
 				LegIdToLeg: map[uint64]*pb.ResInfo{
-					spCloneLegB:     resErr("clone-leg-b", "probe io error"),
-					spCloneLegSpare: resOk("clone-leg-spare"),
+					spCloneLegB: resErr("clone-leg-b", "probe io error"),
+					spCloneLegC: resOk("clone-leg-c"),
 				},
 			},
 		}
@@ -622,7 +617,7 @@ func TestSpCloneLegRowsFromPrimaryOnly(t *testing.T) {
 			Revision: req.GetRevision(),
 			CntlrInfo: &pb.CntlrInfo{
 				LegIdToLeg: map[uint64]*pb.ResInfo{
-					spCloneLegSpare: resErr("clone-leg-spare", "ana"),
+					spCloneLegC: resErr("clone-leg-c", "ana"),
 				},
 			},
 		}
@@ -642,7 +637,7 @@ func TestSpCloneLegRowsFromPrimaryOnly(t *testing.T) {
 		if write.record != healthRecordLeg {
 			continue
 		}
-		if write.objId == spCloneLegSpare && write.epoch != 0 {
+		if write.objId == spCloneLegC && write.epoch != 0 {
 			t.Fatalf("a standby's leg row was recorded: %+v", write)
 		}
 		if write.objId == spCloneLegB &&
@@ -693,7 +688,7 @@ func TestSpCloneSideHealthWritesTheClone(t *testing.T) {
 			continue
 		}
 		clone := slices.Contains([]uint64{
-			spCloneSideA, spCloneSideB, spCloneSideSpare,
+			spCloneSideA, spCloneSideB, spCloneSideC,
 		}, write.objId)
 		if clone && (write.cloneName != spCloneNm ||
 			write.cloneId != spCloneId || write.sliceId != 0) {
@@ -936,53 +931,16 @@ func withReactClone(t *testing.T, state *model.SpState) *pb.Group {
 	return grp
 }
 
-// cloneLegOf finds a leg of the fixture clone's group by id, in either list.
+// cloneLegOf finds a leg of the fixture clone's group by id.
 func cloneLegOf(t *testing.T, grp *pb.Group, legId uint64) *pb.Leg {
 	t.Helper()
-	for _, list := range [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()} {
-		for _, leg := range list {
-			if leg.GetLegId() == legId {
-				return leg
-			}
+	for _, leg := range grp.GetLegList() {
+		if leg.GetLegId() == legId {
+			return leg
 		}
 	}
 	t.Fatalf("leg %d not in the clone's group", legId)
 	return nil
-}
-
-// withCloneSpare adds a spare to the fixture clone's group: one side, on
-// addr, provisioned as asked.
-func withCloneSpare(
-	grp *pb.Group,
-	legId uint64,
-	sideId uint64,
-	addr string,
-	provisioned bool,
-) *pb.Leg {
-	spare := &pb.Leg{
-		LegId:  legId,
-		LegIdx: nextLegIdxOf(grp),
-		SideList: []*pb.Side{{
-			SideId:      sideId,
-			AddrPort:    addr,
-			Provisioned: provisioned,
-		}},
-	}
-	grp.SpareLegList = append(grp.SpareLegList, spare)
-	return spare
-}
-
-// nextLegIdxOf is one past the largest leg_idx of the group's two lists.
-func nextLegIdxOf(grp *pb.Group) uint32 {
-	idx := uint32(0)
-	for _, list := range [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()} {
-		for _, leg := range list {
-			if leg.GetLegIdx() >= idx {
-				idx = leg.GetLegIdx() + 1
-			}
-		}
-	}
-	return idx
 }
 
 // wantCloneRecord asserts that a record names the fixture clone, its group and
@@ -1001,10 +959,10 @@ func wantCloneRecord(t *testing.T, rec map[string]any, legId uint64) {
 	}
 }
 
-// TestReactionCloneLegRepairCreates pins AR8 step 3 on a clone meta group: an
-// unhealthy leg whose group has no spare gets one through the clone-keyed
-// create, scanned as a slice's group's spare is — the group's ext_cnt, the
-// stored batch, a black list of the group's DNs, which is the plan the op is
+// TestReactionCloneLegRepairCreates pins AR8's create on a clone meta group:
+// an unhealthy leg gets a worker's repair whose parent is the clone, by name,
+// scanned as a slice's group's is — the group's ext_cnt, the stored batch,
+// one DN, a black list of the group's DNs, which is the plan the op is
 // handed — and the record names the clone instead of a slice.
 func TestReactionCloneLegRepairCreates(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
@@ -1014,15 +972,15 @@ func TestReactionCloneLegRepairCreates(t *testing.T) {
 	)
 	h.dnCands(reactDnC)
 	h.pass()
-	calls := h.wantOps("create_clone_spare")
+	calls := h.wantOps("create_repair")
 	got := calls[0]
-	if got.cloneName != reactCloneNm || got.cloneId != reactCloneId ||
-		got.grpId != reactCloneGrp || got.sliceId != 0 {
-		t.Fatalf("create_clone_spare = %+v, want clone %s (%d) group %d",
-			got, reactCloneNm, reactCloneId, reactCloneGrp)
+	if got.cloneName != reactCloneNm || got.grpId != reactCloneGrp ||
+		got.sliceId != 0 || got.badLegId != reactCloneLegA {
+		t.Fatalf("create_repair = %+v, want clone %s group %d",
+			got, reactCloneNm, reactCloneGrp)
 	}
 	if got.legs[0].AddrPort != reactDnC {
-		t.Fatalf("spare on %s, want %s", got.legs[0].AddrPort, reactDnC)
+		t.Fatalf("new leg on %s, want %s", got.legs[0].AddrPort, reactDnC)
 	}
 	if !slices.Equal(got.grpDn, []string{reactDnA, reactDnB}) {
 		t.Fatalf("plan = %v, want the group's DNs", got.grpDn)
@@ -1034,127 +992,53 @@ func TestReactionCloneLegRepairCreates(t *testing.T) {
 		t.Fatalf("scan = %+v, want the group's ext_cnt, the stored batch, "+
 			"one DN and the group's DNs black-listed", query)
 	}
-	recs := h.wantApplied(reactionSpareCreate)
+	recs := h.wantApplied(reactionRepairCreate)
 	wantCloneRecord(t, recs[0], reactCloneLegA)
-	if recs[0]["spare_leg_id"] != float64(888) {
-		t.Fatalf("record %v without the new spare", recs[0])
+	if recs[0]["new_leg_id"] != float64(888) {
+		t.Fatalf("record %v without the new leg", recs[0])
 	}
 }
 
-// TestReactionCloneLegRepairSwitches pins AR8 step 1 on a clone meta group: a
-// ready spare — provisioned, its row OK on the primary — is switched in for
-// the unhealthy leg through the clone-keyed switch while the group's array
-// runs (its row OK on the primary, step 1's gate; the gate's holds on a clone
-// meta group are TestReactionSpareSwitchNeedsTheGroupRunning's).
-func TestReactionCloneLegRepairSwitches(t *testing.T) {
-	h := newReactHarness(t, reactFixture(t))
+// TestReactionCloneLegRepairRedundNone pins the first create condition on a
+// clone meta group: a pool without redundancy gives its clone meta group one
+// leg, so redund_none comes first and ends the pass, and the slice's
+// unhealthy leg after it is not tried.
+func TestReactionCloneLegRepairRedundNone(t *testing.T) {
+	state := reactFixture(t)
+	state.Conf.BdevConf.RedundConf = &pb.RedundConf{
+		RedunKind: &pb.RedundConf_RedundNone{
+			RedundNone: &pb.RedundNone{},
+		},
+	}
+	h := newReactHarness(t, state)
 	grp := withReactClone(t, h.state)
+	grp.LegList = grp.LegList[:1]
 	cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
-	withCloneSpare(grp, 107, 207, reactDnC, true)
-	h.setLegRow(107, pb.ResStatus_RES_STATUS_OK)
-	h.setGrpRow(reactCloneGrp, pb.ResStatus_RES_STATUS_OK)
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+	h.dnCands(reactDnC)
 	h.pass()
-	calls := h.wantOps("switch_clone_spare")
-	got := calls[0]
-	if got.cloneName != reactCloneNm || got.cloneId != reactCloneId ||
-		got.grpId != reactCloneGrp || got.spareLegId != 107 ||
-		got.targetLegId != reactCloneLegA {
-		t.Fatalf("switch_clone_spare = %+v, want spare 107 for leg %d of "+
-			"clone %s (%d)", got, reactCloneLegA, reactCloneNm, reactCloneId)
+	h.wantOps()
+	recs := h.logs.withMsg(msgReactionSkipped)
+	if len(recs) != 1 || recs[0]["reason"] != reasonRedundNone {
+		t.Fatalf("skips = %v, want one redund_none", recs)
 	}
-	recs := h.wantApplied(reactionSpareSwitch)
 	wantCloneRecord(t, recs[0], reactCloneLegA)
 }
 
-// TestReactionCloneLegRepairHolds pins the holds of AR8 that a clone meta
-// group shares with a slice's: a pending spare is waited for, a full spare
-// list and a spare still unprovisioned hold the group, each logged, with no
-// op, and a pool without redundancy ends the pass with redund_none.
-func TestReactionCloneLegRepairHolds(t *testing.T) {
-	t.Run("pending spare", func(t *testing.T) {
-		h := newReactHarness(t, reactFixture(t))
-		grp := withReactClone(t, h.state)
-		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
-		// Provisioned but never reported by the primary: on its way.
-		withCloneSpare(grp, 107, 207, reactDnC, true)
-		h.pass()
-		h.wantOps()
-		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
-	})
-
-	t.Run("spare list full", func(t *testing.T) {
-		h := newReactHarness(t, reactFixture(t))
-		grp := withReactClone(t, h.state)
-		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
-		for idx := 0; idx < common.MaxSpareLegPerGrp; idx++ {
-			parked := withCloneSpare(grp, uint64(107+idx), uint64(207+idx),
-				reactDnC, true)
-			parked.ErrEpoch = h.ago(9000)
-		}
-		h.dnCands(reactDnD)
-		h.pass()
-		h.wantOps()
-		h.wantSkipped(reactionSpareCreate, reasonSpareListFull)
-	})
-
-	t.Run("unprovisioned spare", func(t *testing.T) {
-		h := newReactHarness(t, reactFixture(t))
-		grp := withReactClone(t, h.state)
-		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
-		spare := withCloneSpare(grp, 107, 207, reactDnC, false)
-		spare.SideList[0].ErrEpoch = h.ago(1)
-		h.dnCands(reactDnD)
-		h.pass()
-		h.wantOps()
-		if got := len(h.rops.allQueries()); got != 0 {
-			t.Fatalf("scans = %d, want 0", got)
-		}
-		h.wantSkippedBy(reactionSpareCreate, reasonSpareUnprovisioned, "")
-	})
-
-	t.Run("redund none", func(t *testing.T) {
-		// A pool without redundancy gives its clone meta group one leg, so
-		// that leg has no other; redund_none comes first and ends the pass,
-		// so the slice's unhealthy leg after it is not tried.
-		state := reactFixture(t)
-		state.Conf.BdevConf.RedundConf = &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundNone{
-				RedundNone: &pb.RedundNone{},
-			},
-		}
-		h := newReactHarness(t, state)
-		grp := withReactClone(t, h.state)
-		grp.LegList = grp.LegList[:1]
-		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
-		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
-		h.dnCands(reactDnC)
-		h.pass()
-		h.wantOps()
-		recs := h.logs.withMsg(msgReactionSkipped)
-		if len(recs) != 1 || recs[0]["reason"] != reasonRedundNone {
-			t.Fatalf("skips = %v, want one redund_none", recs)
-		}
-		wantCloneRecord(t, recs[0], reactCloneLegA)
-	})
-}
-
-// TestReactionCloneLegRepairNeedsAHealthyLeg pins AR8's healthy-leg
-// precondition on a clone meta group: a switch or a create runs only while
-// another leg of the group's leg_list has no health epoch. With every other
-// leg unhealthy the pass logs no_healthy_leg for the group, even with a
-// ready spare at hand and the group's array running, or a pending spare,
-// neither counting, and the scan goes on to the next group. A slice's group
-// takes the same precondition (TestReactionLegRepairNeedsAHealthyLeg).
+// TestReactionCloneLegRepairNeedsAHealthyLeg pins AR8's healthy-leg test on a
+// clone meta group: a create runs only while another leg of the group's
+// leg_list has no health epoch and is held in sync. With every other leg
+// unhealthy the pass logs no_healthy_leg for the group, even with the
+// group's array running, and the scan goes on to the next group. A slice's
+// group takes the same test (TestLegRepairNeedsAHealthyLeg).
 func TestReactionCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
-	t.Run("every leg unhealthy, a ready spare at hand", func(t *testing.T) {
+	t.Run("every other leg unhealthy", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		grp := withReactClone(t, h.state)
 		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
 		cloneLegOf(t, grp, reactCloneLegB).ErrEpoch = h.ago(1)
-		withCloneSpare(grp, 107, 207, reactDnC, true)
-		h.setLegRow(107, pb.ResStatus_RES_STATUS_OK)
 		// The group's row still reads OK, as an idle array's does after its
-		// legs died, so step 1's gate would let the switch through.
+		// legs died, so the gate lets the create through.
 		h.setGrpRow(reactCloneGrp, pb.ResStatus_RES_STATUS_OK)
 		h.dnCands(reactDnD)
 		h.pass()
@@ -1164,7 +1048,7 @@ func TestReactionCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 		}
 		recs := h.logs.withMsg(msgReactionSkipped)
 		if len(recs) != 1 || recs[0]["reason"] != reasonNoHealthyLeg ||
-			recs[0]["kind"] != reactionSpareCreate {
+			recs[0]["kind"] != reactionRepairCreate {
 			t.Fatalf("skips = %v, want one no_healthy_leg", recs)
 		}
 		wantCloneRecord(t, recs[0], reactCloneLegA)
@@ -1191,20 +1075,6 @@ func TestReactionCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 		}
 	})
 
-	t.Run("a pending spare counts for nothing", func(t *testing.T) {
-		h := newReactHarness(t, reactFixture(t))
-		grp := withReactClone(t, h.state)
-		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
-		cloneLegOf(t, grp, reactCloneLegB).ErrEpoch = h.ago(1)
-		// Not provisioned, not reported and with no health epoch: AR8
-		// step 2's pending spare, outside the group's leg_list.
-		withCloneSpare(grp, 107, 207, reactDnC, false)
-		h.dnCands(reactDnD)
-		h.pass()
-		h.wantOps()
-		h.wantSkipped(reactionSpareCreate, reasonNoHealthyLeg)
-	})
-
 	t.Run("the scan goes on to the next group", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		grp := withReactClone(t, h.state)
@@ -1215,12 +1085,12 @@ func TestReactionCloneLegRepairNeedsAHealthyLeg(t *testing.T) {
 		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
 		h.dnCands(reactDnC)
 		h.pass()
-		calls := h.wantOps("create_spare")
+		calls := h.wantOps("create_repair")
 		if calls[0].grpId != reactDataGrp {
-			t.Fatalf("create_spare = %+v, want the data group", calls[0])
+			t.Fatalf("create_repair = %+v, want the data group", calls[0])
 		}
-		h.wantSkipped(reactionSpareCreate, reasonNoHealthyLeg)
-		h.wantApplied(reactionSpareCreate)
+		h.wantSkipped(reactionRepairCreate, reasonNoHealthyLeg)
+		h.wantApplied(reactionRepairCreate)
 	})
 }
 
@@ -1236,7 +1106,10 @@ func TestReactionCloneLegRepairOrder(t *testing.T) {
 		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
 		h.dnCands(reactDnC)
 		h.pass()
-		h.wantOps("create_clone_spare")
+		calls := h.wantOps("create_repair")
+		if calls[0].cloneName != reactCloneNm {
+			t.Fatalf("create_repair = %+v, want the clone's group", calls[0])
+		}
 	})
 
 	t.Run("slice leg first", func(t *testing.T) {
@@ -1246,15 +1119,15 @@ func TestReactionCloneLegRepairOrder(t *testing.T) {
 		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
 		h.dnCands(reactDnC)
 		h.pass()
-		calls := h.wantOps("create_spare")
+		calls := h.wantOps("create_repair")
 		if calls[0].grpId != reactMetaGrp {
-			t.Fatalf("create_spare = %+v, want the meta group", calls[0])
+			t.Fatalf("create_repair = %+v, want the meta group", calls[0])
 		}
 	})
 }
 
 // TestReactionDeletingCloneIsNotRepaired pins AR8 on a clone being deleted:
-// its legs are no candidates — no spare op, no record — so the scan reaches
+// its legs are no candidates — no create, no record — so the scan reaches
 // the slice's leg behind it, while its legs keep their monitors' verdicts.
 // The clone drain's final step runs in each pass ahead of the reactions
 // (CLD7); the fake leaves the clone in place, so it runs again.
@@ -1273,31 +1146,30 @@ func TestReactionDeletingCloneIsNotRepaired(t *testing.T) {
 
 	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
 	h.pass()
-	calls := h.wantOps("finish_clone", "finish_clone", "create_spare")
+	calls := h.wantOps("finish_clone", "finish_clone", "create_repair")
 	if calls[2].grpId != reactDataGrp {
-		t.Fatalf("create_spare = %+v, want the data group", calls[2])
+		t.Fatalf("create_repair = %+v, want the data group", calls[2])
 	}
 	if !h.w.verdicts.snapshot(h.state).legs[reactCloneLegA] {
 		t.Fatalf("the deleting clone's leg lost its verdict")
 	}
 }
 
-// TestReactionCloneSpareRefusalEndsThePass pins AR2 on the clone-keyed ops:
-// an ErrPrecondition from CreateCloneSpareLeg's transaction is a `reaction
-// skipped` naming the op, and it ends the pass, so the slice's leg behind
-// the clone's is not tried.
-func TestReactionCloneSpareRefusalEndsThePass(t *testing.T) {
+// TestReactionCloneRepairRefusalEndsThePass pins AR2 on a clone meta group's
+// create: an ErrPrecondition from CreateRepair's transaction, a clone
+// deleted since the snapshot, is a `reaction skipped` naming the op, and it
+// ends the pass, so the slice's leg behind the clone's is not tried.
+func TestReactionCloneRepairRefusalEndsThePass(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	grp := withReactClone(t, h.state)
 	cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
 	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
 	h.dnCands(reactDnC)
 	h.rops.opErr = &model.ErrPrecondition{
-		Op: "CreateCloneSpareLeg", Reason: "clone deleting",
+		Op: "CreateRepair", Reason: "clone deleting",
 	}
 	h.pass()
-	h.wantOps("create_clone_spare")
+	h.wantOps("create_repair")
 	h.wantApplied()
-	h.wantSkippedBy(reactionSpareCreate, "clone deleting",
-		"CreateCloneSpareLeg")
+	h.wantSkippedBy(reactionRepairCreate, "clone deleting", "CreateRepair")
 }

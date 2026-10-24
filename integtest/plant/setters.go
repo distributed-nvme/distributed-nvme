@@ -269,7 +269,7 @@ func SetCntlrEpoch(
 	return old, nil
 }
 
-// SetLegEpoch plants the err_epoch of one leg of a slice, active or spare.
+// SetLegEpoch plants the err_epoch of one leg of a slice.
 func SetLegEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -282,8 +282,7 @@ func SetLegEpoch(
 	return setSliceObjEpoch(ctx, cli, cl, target, "leg", sliceId, legId, epoch)
 }
 
-// SetSideEpoch plants the err_epoch of one side of a slice, on an active or a
-// spare leg.
+// SetSideEpoch plants the err_epoch of one side of a leg of a slice.
 func SetSideEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -335,8 +334,8 @@ func setSliceObjEpoch(
 }
 
 // setSliceEpoch sets the err_epoch of one leg, or of one side, of a slice —
-// in a meta or a data group, on an active or a spare leg, wherever the health
-// ops look them up (model.SetLegErrEpoch, model.SetSideErrEpoch) — and
+// in a meta or a data group, wherever the health ops look them up
+// (model.SetLegErrEpoch, model.SetSideErrEpoch) — and
 // returns the value it replaced; found is false when the slice holds no such
 // object.
 func setSliceEpoch(
@@ -355,17 +354,13 @@ func setSliceEpoch(
 }
 
 // setGroupEpoch is setSliceEpoch's walk of one group, which the clone setters
-// share: the err_epoch of one leg or one side of grp, on an active or a spare
-// leg, and the value it replaced; found is false when grp holds no such
-// object, and a nil grp holds none.
+// share: the err_epoch of one leg or one side of grp's leg_list, and the
+// value it replaced; found is false when grp holds no such object, and a nil
+// grp holds none.
 func setGroupEpoch(
 	grp *pb.Group, kind string, id uint64, epoch uint64,
 ) (old uint64, found bool) {
-	legs := append(
-		append([]*pb.Leg(nil), grp.GetLegList()...),
-		grp.GetSpareLegList()...,
-	)
-	for _, leg := range legs {
+	for _, leg := range grp.GetLegList() {
 		if kind == "leg" && leg.GetLegId() == id {
 			old = leg.GetErrEpoch()
 			leg.ErrEpoch = epoch
@@ -386,7 +381,7 @@ func setGroupEpoch(
 }
 
 // SetCloneLegEpoch plants the err_epoch of one leg of a clone's clone meta
-// group, active or spare, where model.SetCloneLegErrEpoch looks it up.
+// group, where model.SetCloneLegErrEpoch looks it up.
 func SetCloneLegEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -401,8 +396,7 @@ func SetCloneLegEpoch(
 }
 
 // SetCloneSideEpoch plants the err_epoch of one side of a clone's clone meta
-// group, on an active or a spare leg, where model.SetCloneSideErrEpoch looks
-// it up.
+// group, where model.SetCloneSideErrEpoch looks it up.
 func SetCloneSideEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -465,16 +459,16 @@ func setCloneObjEpoch(
 //
 // These, with the drains below, are the ONLY writes the gateway integration
 // suite performs through workerctl (gateway.md, Integration test plan, The
-// etcd verification). They exist because three gateway preconditions are
-// gated on a flag only the sp-worker ever moves — CreateThinDevice's snapshot
-// gate on ThinDevice.created (architecture.md, Thin devices),
-// SwitchSpareLeg's gate on Side.provisioned (architecture.md, Side
-// provisioning protocol) and FinishMigration's gate on
-// Migration.cutover_pending, which only the worker's cutover clears
-// (architecture.md, Migrations) — and that suite deliberately runs no
-// dnv-worker. All three go through the very model op the worker calls, so the
-// state they leave behind is exactly the state a converging worker would have
-// produced, including the single SpRev bump each owes.
+// etcd verification). They exist because two gateway preconditions are gated
+// on a flag only the sp-worker ever moves — CreateThinDevice's snapshot gate
+// on ThinDevice.created (architecture.md, Thin devices) and
+// FinishMigration's gate on Migration.cutover_pending, which only the
+// worker's cutover clears (architecture.md, Migrations), and that cutover
+// waits for the destination side's Side.provisioned (architecture.md, Side
+// provisioning protocol) — and that suite deliberately runs no dnv-worker.
+// The flips and the cutover go through the very model op the worker calls,
+// so the state they leave behind is exactly the state a converging worker
+// would have produced, including the single SpRev bump each owes.
 
 // SetCreated flips ThinDevice.created through model.FlipCreated: the
 // materialization the sp-worker performs once a cntlr has reported the td's
@@ -523,10 +517,10 @@ func SetCreated(
 // SetProvisioned flips one Side.provisioned through model.FlipProvisioned:
 // the provisioning completion (architecture.md, Side provisioning protocol)
 // the sp-worker records once the dn agent reports the side's zeroing done.
-// The gateway suite pulls it exactly where a gateway precondition demands it
-// — SwitchSpareLeg refuses an unprovisioned spare (architecture.md, Spare
-// legs). It returns whether the flip applied and the pool's revision after
-// it.
+// The gateway suite pulls it before a migration's cutover, which
+// model.StartCutover refuses while the destination side is unprovisioned
+// (architecture.md, Migrations). It returns whether the flip applied and the
+// pool's revision after it.
 func SetProvisioned(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -550,10 +544,8 @@ func SetProvisioned(
 // SetCloneProvisioned is SetProvisioned's twin for one side of a clone's
 // clone meta group, through model.FlipCloneProvisioned, the clone-keyed
 // twin of the provisioned flip (dnv-worker.md MD6). A case pulls it where it
-// needs a provisioned side of such a group: a spare the switch takes
-// (architecture.md, Spare legs), or a group with at most one unprovisioned
-// spare. It returns the clone's id, whether the flip applied and the pool's
-// revision after it.
+// needs a provisioned side of such a group. It returns the clone's id,
+// whether the flip applied and the pool's revision after it.
 //
 // The clone_id comes from the stored record rather than from the caller, for
 // SetCreated's reason: the op takes the clone's name and its id so that a
@@ -689,11 +681,7 @@ func cutoverRefOf(
 		grpList = append(grpList, slice.GetMetaGrpList()...)
 		grpList = append(grpList, slice.GetDataGrpList()...)
 		for _, grp := range grpList {
-			legList := make([]*pb.Leg, 0,
-				len(grp.GetLegList())+len(grp.GetSpareLegList()))
-			legList = append(legList, grp.GetLegList()...)
-			legList = append(legList, grp.GetSpareLegList()...)
-			for _, leg := range legList {
+			for _, leg := range grp.GetLegList() {
 				src, dst := false, false
 				for _, side := range leg.GetSideList() {
 					src = src || side.GetSideId() == ref.SrcSideId
@@ -968,8 +956,8 @@ func SetCloneDeleting(
 // (the Clone record carries no count of its own to confuse them with),
 // whether the clone is gone, and, when this call ran the final step, the
 // sides of the clone's clone meta group the records held as that step removed
-// them — its legs' and spares', its repair's new legs' and its retired
-// legs' — which the step gave back to their DNs.
+// them — its legs', its repair's new legs' and its retired legs' — which
+// the step gave back to their DNs.
 type CloneDrain struct {
 	Steps      int
 	ChunkCnt   int
@@ -1069,8 +1057,8 @@ func DrainClone(
 }
 
 // cloneGrpSideCnt counts the sides the clone drain's final step gives back
-// for grp: those of its legs and spares, of its repair's new legs and of its
-// retired legs. A record the group names that is missing counts nothing:
+// for grp: those of its legs, of its repair's new legs and of its retired
+// legs. A record the group names that is missing counts nothing:
 // the final step refuses it.
 func cloneGrpSideCnt(
 	ctx context.Context,
@@ -1079,8 +1067,7 @@ func cloneGrpSideCnt(
 	spId uint64,
 	grp *pb.Group,
 ) (int, error) {
-	legs := append(
-		append([]*pb.Leg(nil), grp.GetLegList()...), grp.GetSpareLegList()...)
+	legs := append([]*pb.Leg(nil), grp.GetLegList()...)
 	if repName := grp.GetRepName(); repName != "" {
 		rep := &pb.Repair{}
 		if _, err := cli.Get(

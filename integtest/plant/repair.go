@@ -78,14 +78,11 @@ func (g *plantedGrp) put(s etcdutil.STM) {
 	s.Put(g.key, g.clone)
 }
 
-// nextPlantedLegIdx is 1 + the largest leg_idx of the group's legs and
-// spares: the leg_idx CreateRepair gives a fresh new leg.
+// nextPlantedLegIdx is 1 + the largest leg_idx of the group's legs: the
+// leg_idx CreateRepair gives a fresh new leg.
 func nextPlantedLegIdx(grp *pb.Group) uint32 {
 	next := uint32(0)
-	for _, leg := range append(
-		append([]*pb.Leg(nil), grp.GetLegList()...),
-		grp.GetSpareLegList()...,
-	) {
+	for _, leg := range grp.GetLegList() {
 		if leg.GetLegIdx()+1 > next {
 			next = leg.GetLegIdx() + 1
 		}

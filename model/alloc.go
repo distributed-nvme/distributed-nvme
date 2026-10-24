@@ -311,8 +311,8 @@ func FindDnCandidatesAntiAffine(
 	if len(excludeLocs) == 0 || len(cands) >= requiredCnt {
 		return cands, false, nil
 	}
-	// Tier 2 is what keeps a two-rack cluster able to place a spare at all
-	// (architecture.md, Per-operation allocation). The resulting same-domain
+	// Tier 2 is what keeps a two-rack cluster able to place a repair's new
+	// leg at all (architecture.md, Per-operation allocation). The resulting same-domain
 	// placement is visible in the stored
 	// topology and is not logged separately.
 	relaxed, err := FindDnCandidates(

@@ -34,7 +34,7 @@ const repEpoch = uint64(1700000000)
 func repSetLegEpoch(env *volEnv, grpId uint64, legId uint64, epoch uint64) {
 	env.t.Helper()
 	slice := env.slice()
-	leg := activeLegOf(volGrpOf(env.t, slice, grpId), legId)
+	leg := grpLegOf(volGrpOf(env.t, slice, grpId), legId)
 	if leg == nil {
 		env.t.Fatalf("leg %d is not in group %d", legId, grpId)
 	}
@@ -335,27 +335,58 @@ func TestCreateRepairWritesTheRecord(t *testing.T) {
 	}
 }
 
-// TestCreateRepairPlacesTheNewLegOffTheGroup pins the placement of a fresh
-// new leg by the spare leg's rule (architecture.md, Per-operation
-// allocation): with no selector, the scan black-lists the group's DNs and
-// keeps out of their failure domains while another domain has room. dn-c
-// shares dn-a's domain and holds the most, so a scan without tier 1 would
-// hand it back first; the new leg lands on dn-d.
+// TestCreateRepairPlacesTheNewLegOffTheGroup pins the two tiers of a fresh
+// new leg's placement (architecture.md, Per-operation allocation,
+// CreateRepair): with no selector, the scan black-lists the group's DNs and
+// keeps out of their failure domains while another domain has room, since a
+// new leg in the domain of the leg it replaces dies with it. dn-c shares
+// dn-a's domain and holds the most, so a scan without tier 1 would hand it
+// back first; the new leg lands on dn-d. With dn-d gone, tier 2 still places
+// the new leg, on dn-c, because no repair at all is the worse outcome.
 func TestCreateRepairPlacesTheNewLegOffTheGroup(t *testing.T) {
-	for draw := 0; draw < volTier1DrawCnt; draw++ {
-		env := volTwoDomainEnv(t)
+	place := func(env *volEnv) (string, error) {
+		env.t.Helper()
 		repSetLegEpoch(env, volDataGrpId, volDataLegA, repEpoch)
 		req := repRequest(env)
 		req.DnSelector = nil
 		if _, err := env.srv.CreateRepair(env.ctx, req); err != nil {
-			t.Fatalf("CreateRepair: %v", err)
+			return "", err
 		}
 		side := env.repair("rep-a").GetNewLegList()[0].GetSideList()[0]
-		if side.GetAddrPort() != volDnD {
-			t.Fatalf("draw %d: the new leg on %s, want %s", draw,
-				side.GetAddrPort(), volDnD)
-		}
+		return side.GetAddrPort(), nil
 	}
+	t.Run("tier 1 avoids the group's domains", func(t *testing.T) {
+		// One draw proves nothing here — see volTier1DrawCnt.
+		for draw := 0; draw < volTier1DrawCnt; draw++ {
+			env := volTwoDomainEnv(t)
+			got, err := place(env)
+			if err != nil {
+				t.Fatalf("CreateRepair: %v", err)
+			}
+			if got != volDnD {
+				t.Fatalf("draw %d: the new leg on %s, want %s (dn-c is in "+
+					"dn-a's domain, and tier 2 must not have run)", draw,
+					got, volDnD)
+			}
+		}
+	})
+	t.Run("tier 2 places in an occupied domain", func(t *testing.T) {
+		env := volTwoDomainEnv(t)
+		env.dropDn(volDnD)
+		got, err := place(env)
+		if err != nil {
+			t.Fatalf("CreateRepair: %v (tier 2 must place, never "+
+				"RESOURCE_EXHAUSTED)", err)
+		}
+		if got != volDnC {
+			t.Errorf("the new leg on %s, want %s", got, volDnC)
+		}
+		if got := env.dn(volDnC).GetFreeExtCnt(); got !=
+			volDnCFree-volDataExtCnt {
+			t.Errorf("dn-c free_ext_cnt: got %d, want %d", got,
+				volDnCFree-volDataExtCnt)
+		}
+	})
 }
 
 // TestCreateRepairOnACloneMetaGroup pins the look-up of architecture.md,
@@ -530,8 +561,8 @@ func repRefusals() []repRefusal {
 	setLevel := func(env *volEnv, level pb.SpLevel) {
 		setConf(env, func(conf *pb.SpConf) { conf.SpLevel = level })
 	}
-	noThinpool := func(env *volEnv) {
-		setLevel(env, pb.SpLevel_SP_LEVEL_NO_THINPOOL)
+	noRedund := func(env *volEnv) {
+		setLevel(env, pb.SpLevel_SP_LEVEL_NO_REDUND)
 	}
 	metaRepair := func(env *volEnv) {
 		repPutRepair(env, "rep-a", volMetaGrpId, volMetaLegA,
@@ -541,18 +572,9 @@ func repRefusals() []repRefusal {
 		repPutRepair(env, "rep-b", volDataGrpId, volDataLegB,
 			pb.RepStage_REP_STAGE_CREATED, 801, volSide(802, volDnD))
 	}
-	spareLeg := func(env *volEnv) {
-		slice := env.slice()
-		grp := volGrpOf(env.t, slice, volDataGrpId)
-		grp.SpareLegList = []*pb.Leg{{
-			LegId: 800, LegIdx: 2,
-			SideList: []*pb.Side{volSide(801, volDnD)},
-		}}
-		env.putSlice(slice)
-	}
 	twoSides := func(env *volEnv) {
 		slice := env.slice()
-		leg := activeLegOf(volGrpOf(env.t, slice, volDataGrpId), volDataLegA)
+		leg := grpLegOf(volGrpOf(env.t, slice, volDataGrpId), volDataLegA)
 		leg.SideList = append(leg.SideList, volSide(801, volDnD))
 		env.putSlice(slice)
 	}
@@ -565,14 +587,12 @@ func repRefusals() []repRefusal {
 	}
 	repairMsg := fmt.Sprintf("group %d has the repair %q: a group has one "+
 		"repair at a time", volDataGrpId, "rep-b")
-	spareMsg := fmt.Sprintf("group %d has 1 spare legs: a spare leg and the "+
-		"repair's new leg would race for one place in its array",
-		volDataGrpId)
 	healthyMsg := fmt.Sprintf("leg %d is healthy: use a migration to move it",
 		volDataLegA)
 	boundMsg := fmt.Sprintf("group %d already holds the maximum of %d "+
 		"retired legs: delete one (DeleteRetiredLeg) first",
 		volDataGrpId, common.MaxRetiredLegPerGrp)
+	workerName := common.WorkerRepName(volSpId, volDataGrpId, repEpoch)
 	badSelector := &pb.NodeSelector{WhiteList: []string{"bad entry"}}
 	badSelectorMsg := fmt.Sprintf("dn_selector.white_list %q does not match %s",
 		"bad entry", common.ValidStrPattern)
@@ -609,6 +629,25 @@ func repRefusals() []repRefusal {
 			code: codes.InvalidArgument,
 			msg: fmt.Sprintf("rep_name %q starts with the reserved prefix %q",
 				"__internal__rep", "__internal__"),
+		},
+		{
+			name: "the worker's name",
+			setup: func(_ *volEnv, req *pb.CreateRepairRequest) {
+				req.RepName = workerName
+			},
+			code: codes.InvalidArgument,
+			msg: fmt.Sprintf("rep_name %q starts with the reserved prefix %q",
+				workerName, "__internal__"),
+		},
+		{
+			name: "the reserved prefix before the level gate",
+			setup: func(env *volEnv, req *pb.CreateRepairRequest) {
+				req.RepName = workerName
+				setLevel(env, pb.SpLevel_SP_LEVEL_DISABLE)
+			},
+			code: codes.InvalidArgument,
+			msg: fmt.Sprintf("rep_name %q starts with the reserved prefix %q",
+				workerName, "__internal__"),
 		},
 		{
 			name: "no bad leg",
@@ -652,11 +691,11 @@ func repRefusals() []repRefusal {
 			msg:  fmt.Sprintf("storage pool %q is being deleted", volSpName),
 		},
 		{
-			name:  "a level where the operator is in charge",
-			setup: func(env *volEnv, _ *pb.CreateRepairRequest) { noThinpool(env) },
+			name:  "a level that builds no group array",
+			setup: func(env *volEnv, _ *pb.CreateRepairRequest) { noRedund(env) },
 			code:  codes.FailedPrecondition,
 			msg: fmt.Sprintf("storage pool %q is at %s, where no repair is "+
-				"created", volSpName, pb.SpLevel_SP_LEVEL_NO_THINPOOL),
+				"created", volSpName, pb.SpLevel_SP_LEVEL_NO_REDUND),
 		},
 		{
 			name: "the highest level",
@@ -670,12 +709,12 @@ func repRefusals() []repRefusal {
 		{
 			name: "the level before RedundNone",
 			setup: func(env *volEnv, _ *pb.CreateRepairRequest) {
-				noThinpool(env)
+				noRedund(env)
 				redundNone(env)
 			},
 			code: codes.FailedPrecondition,
 			msg: fmt.Sprintf("storage pool %q is at %s, where no repair is "+
-				"created", volSpName, pb.SpLevel_SP_LEVEL_NO_THINPOOL),
+				"created", volSpName, pb.SpLevel_SP_LEVEL_NO_REDUND),
 		},
 		{
 			name:  "a RedundNone pool",
@@ -725,12 +764,6 @@ func repRefusals() []repRefusal {
 			msg:   repairMsg,
 		},
 		{
-			name:  "a group with a spare leg",
-			setup: func(env *volEnv, _ *pb.CreateRepairRequest) { spareLeg(env) },
-			code:  codes.FailedPrecondition,
-			msg:   spareMsg,
-		},
-		{
 			name: "a group with a repair before a missing bad leg",
 			setup: func(env *volEnv, req *pb.CreateRepairRequest) {
 				grpRepair(env)
@@ -738,15 +771,6 @@ func repRefusals() []repRefusal {
 			},
 			code: codes.FailedPrecondition,
 			msg:  repairMsg,
-		},
-		{
-			name: "a group with a spare leg before a missing bad leg",
-			setup: func(env *volEnv, req *pb.CreateRepairRequest) {
-				spareLeg(env)
-				req.BadLegIdList = []uint64{0xdead}
-			},
-			code: codes.FailedPrecondition,
-			msg:  spareMsg,
 		},
 		{
 			name: "a bad leg not in leg_list",
@@ -1222,12 +1246,13 @@ func TestRepairMutatorsCheckTheTokenInTheirOp(t *testing.T) {
 // slice and the gateway's clock as its retired_epoch, listed by the group
 // and the pool; the repair's record, its list entry and the group's rep_name
 // go; one SpRev bump. No DN moves: the bad leg's side keeps its pointer and
-// its extents on dn-a, and the new leg's side was charged at the create.
+// its extents on dn-a, and the new leg's side was charged at the create. The
+// group holds no retired leg before the finish, so the reply gives none back.
 func TestFinishRepairRetiresTheBadLeg(t *testing.T) {
 	env := newVolEnv(t)
 	repCreate(env, "rep-a", volDataLegA, volDnC)
 	repMoveStage(env, "rep-a", pb.RepStage_REP_STAGE_STARTED)
-	badSide := activeLegOf(volGrpOf(t, env.slice(), volDataGrpId),
+	badSide := grpLegOf(volGrpOf(t, env.slice(), volDataGrpId),
 		volDataLegA).GetSideList()[0]
 	newLeg := env.repair("rep-a").GetNewLegList()[0]
 	dnA, dnC := env.dn(volDnA), env.dn(volDnC)
@@ -1238,9 +1263,13 @@ func TestFinishRepairRetiresTheBadLeg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FinishRepair: %v", err)
 	}
-	if reply.GetRepId() != volNextId || reply.GetRetiredLegId() != volDataLegA {
-		t.Errorf("reply: rep_id %d, retired_leg_id %d, want %d and %d",
-			reply.GetRepId(), reply.GetRetiredLegId(), volNextId, volDataLegA)
+	if reply.GetRepId() != volNextId ||
+		reply.GetRetiredLegId() != volDataLegA ||
+		reply.GetGivenBackLegId() != 0 {
+		t.Errorf("reply: rep_id %d, retired_leg_id %d, given_back_leg_id "+
+			"%d, want %d, %d and 0", reply.GetRepId(),
+			reply.GetRetiredLegId(), reply.GetGivenBackLegId(), volNextId,
+			volDataLegA)
 	}
 	grp := volGrpOf(t, env.slice(), volDataGrpId)
 	wantLeg := proto.Clone(newLeg).(*pb.Leg)
@@ -1664,10 +1693,11 @@ func TestRepairCallsRefuseADeletingClone(t *testing.T) {
 }
 
 // TestRepairCallsRunAtEveryLevel pins the levels of architecture.md, Repairs:
-// only CreateRepair refuses the levels where an operator is in charge, so it
-// still creates a repair at SP_LEVEL_NO_CLONE, the highest level below them,
-// and at the highest level an operator still aborts, cancels and finishes a
-// repair and deletes a retired leg.
+// only CreateRepair refuses a level, from SP_LEVEL_NO_REDUND up for the
+// operator's names it takes, so it still creates a repair at
+// SP_LEVEL_NO_THINPOOL, the highest level below that, where the operator is
+// in charge; and at the highest level an operator still aborts, cancels and
+// finishes a repair and deletes a retired leg.
 func TestRepairCallsRunAtEveryLevel(t *testing.T) {
 	env := newVolEnv(t)
 	setLevel := func(level pb.SpLevel) {
@@ -1675,7 +1705,7 @@ func TestRepairCallsRunAtEveryLevel(t *testing.T) {
 		conf.SpLevel = level
 		env.putSpConf(conf)
 	}
-	setLevel(pb.SpLevel_SP_LEVEL_NO_CLONE)
+	setLevel(pb.SpLevel_SP_LEVEL_NO_THINPOOL)
 	repCreate(env, "rep-a", volDataLegA, volDnC)
 	setLevel(pb.SpLevel_SP_LEVEL_DISABLE)
 	if _, err := repAbort(env, "rep-a"); err != nil {
@@ -1695,6 +1725,123 @@ func TestRepairCallsRunAtEveryLevel(t *testing.T) {
 	}
 	if _, err := repDeleteRetired(env, finish.GetRetiredLegId()); err != nil {
 		t.Fatalf("DeleteRetiredLeg at DISABLE: %v", err)
+	}
+}
+
+// TestCreateRepairLevelGate pins CreateRepair's level gate at its boundary,
+// for both kinds of name (architecture.md, Repairs;
+// model.CreateRepairLevelGate). An operator's name is created at
+// SP_LEVEL_NO_THINPOOL and refused FAILED_PRECONDITION from
+// SP_LEVEL_NO_REDUND up, where no group array is built. The sp worker's name
+// is INVALID_ARGUMENT at every level, below the gate and above it alike: the
+// rep_name rule comes first, so the gateway never creates one.
+func TestCreateRepairLevelGate(t *testing.T) {
+	workerName := common.WorkerRepName(volSpId, volDataGrpId, repEpoch)
+	for _, tc := range []struct {
+		repName string
+		level   pb.SpLevel
+		code    codes.Code
+	}{
+		{"rep-a", pb.SpLevel_SP_LEVEL_NO_THINPOOL, codes.OK},
+		{"rep-a", pb.SpLevel_SP_LEVEL_NO_REDUND, codes.FailedPrecondition},
+		{"rep-a", pb.SpLevel_SP_LEVEL_NO_MIGRATION, codes.FailedPrecondition},
+		{workerName, pb.SpLevel_SP_LEVEL_READWRITE, codes.InvalidArgument},
+		{workerName, pb.SpLevel_SP_LEVEL_NO_CLONE, codes.InvalidArgument},
+		{workerName, pb.SpLevel_SP_LEVEL_NO_THINPOOL, codes.InvalidArgument},
+		{workerName, pb.SpLevel_SP_LEVEL_NO_REDUND, codes.InvalidArgument},
+	} {
+		t.Run(tc.repName+"/"+tc.level.String(), func(t *testing.T) {
+			env := newVolEnv(t)
+			repSetLegEpoch(env, volDataGrpId, volDataLegA, repEpoch)
+			conf := env.spConf()
+			conf.SpLevel = tc.level
+			env.putSpConf(conf)
+			req := repRequest(env)
+			req.RepName = tc.repName
+			before := env.dump()
+			_, err := env.srv.CreateRepair(env.ctx, req)
+			if tc.code == codes.OK {
+				if err != nil {
+					t.Fatalf("CreateRepair at %s: %v", tc.level, err)
+				}
+				if got := volGrpOf(t, env.slice(), volDataGrpId).
+					GetRepName(); got != tc.repName {
+					t.Errorf("the group names the repair %q, want %q", got,
+						tc.repName)
+				}
+				return
+			}
+			msg := volWantCode(t, err, tc.code)
+			want := fmt.Sprintf("storage pool %q is at %s, where no repair "+
+				"is created", volSpName, tc.level)
+			if tc.code == codes.InvalidArgument {
+				want = fmt.Sprintf("rep_name %q starts with the reserved "+
+					"prefix %q", tc.repName, common.RepNameReservedPrefix)
+			}
+			if msg != want {
+				t.Errorf("message:\n got %q\nwant %q", msg, want)
+			}
+			env.wantNoWrite("the refused CreateRepair", before)
+		})
+	}
+}
+
+// TestFinishRepairGivesBackForTheWorkersRepair pins FinishRepair on a repair
+// the sp worker created, which the call takes by its name (architecture.md,
+// Repairs): with its group at MaxRetiredLegPerGrp retired legs, the finish
+// gives back the oldest one, its record and list entries gone and its side
+// back on its DN with one DnRev bump, before the bad leg joins the lists. The
+// reply names the finished repair, the retired bad leg and the retired leg
+// given back, so an operator who finishes a worker's repair learns which kept
+// copy went; the stored conf the gateway hands the op prices the DN's
+// capacity key.
+func TestFinishRepairGivesBackForTheWorkersRepair(t *testing.T) {
+	env := newVolEnv(t)
+	if common.MaxRetiredLegPerGrp != 2 {
+		t.Fatalf("the case plants 2 retired legs, the bound is %d",
+			common.MaxRetiredLegPerGrp)
+	}
+	workerName := common.WorkerRepName(volSpId, volDataGrpId, repEpoch)
+	repPutRetired(env, volDataGrpId, 910, volSide(911, volDnD), 22)
+	repPutRetired(env, volDataGrpId, 900, volSide(901, volDnC), 11)
+	repPutRepair(env, workerName, volDataGrpId, volDataLegA,
+		pb.RepStage_REP_STAGE_STARTED, 801, volSide(802, volDnD))
+	freeC, revC := env.dn(volDnC).GetFreeExtCnt(), env.dnRev(volDnC)
+	dnD, revD := env.dn(volDnD), env.dnRev(volDnD)
+	kept := env.retiredLeg(910)
+	reply, err := repFinish(env, workerName)
+	if err != nil {
+		t.Fatalf("FinishRepair: %v", err)
+	}
+	if reply.GetRepId() != 800 || reply.GetRetiredLegId() != volDataLegA ||
+		reply.GetGivenBackLegId() != 900 {
+		t.Errorf("reply: rep_id %d, retired_leg_id %d, given_back_leg_id "+
+			"%d, want 800, %d and 900", reply.GetRepId(),
+			reply.GetRetiredLegId(), reply.GetGivenBackLegId(), volDataLegA)
+	}
+	if env.exists(model.RetiredLegKey(env.cid, volSpId, 900),
+		&pb.RetiredLeg{}) {
+		t.Errorf("the oldest retired leg survived the finish")
+	}
+	if got := env.retiredLeg(910); !proto.Equal(got, kept) {
+		t.Errorf("the younger retired leg: got %v, want %v", got, kept)
+	}
+	want := []uint64{910, volDataLegA}
+	grp := volGrpOf(t, env.slice(), volDataGrpId)
+	conf := env.spConf()
+	for what, list := range map[string][]uint64{
+		"group": grp.GetRetiredLegIdList(),
+		"pool":  conf.GetRetiredLegIdList(),
+	} {
+		if fmt.Sprint(list) != fmt.Sprint(want) {
+			t.Errorf("the %s's retired_leg_id_list: got %v, want %v",
+				what, list, want)
+		}
+	}
+	repWantDn(t, env, volDnC, freeC+volDataExtCnt, revC+1, 901, false)
+	if got := env.dn(volDnD); !proto.Equal(got, dnD) ||
+		env.dnRev(volDnD) != revD {
+		t.Errorf("dn-d, the younger retired side's DN, moved")
 	}
 }
 
@@ -1929,7 +2076,7 @@ func TestCreateMigrationKeepsOffARepairsNewLegsDomain(t *testing.T) {
 		if err != nil {
 			t.Fatalf("draw %d: CreateMigration: %v", draw, err)
 		}
-		leg := activeLegOf(volGrpOf(t, env.slice(), volDataGrpId),
+		leg := grpLegOf(volGrpOf(t, env.slice(), volDataGrpId),
 			volDataLegB)
 		if leg == nil || len(leg.GetSideList()) != 2 {
 			t.Fatalf("draw %d: leg %d must own two sides: %v", draw,
@@ -2038,6 +2185,32 @@ func TestRepairCallsRefuseAnInvalidStoredConf(t *testing.T) {
 	}
 }
 
+// TestFinishRepairRefusesAnInvalidStoredConf pins GW11's gate on
+// FinishRepair, which gives a retired leg's side back for the sp worker's
+// repair at the bound: a stored ClusterConf with a zero extent size is
+// ABORTED with the validator's sentence from the planning read, whether the
+// finish would give a side back or not, and nothing is written; with the
+// conf repaired the same request finishes the repair.
+func TestFinishRepairRefusesAnInvalidStoredConf(t *testing.T) {
+	env := newVolEnv(t)
+	repCreate(env, "rep-a", volDataLegA, volDnC)
+	repMoveStage(env, "rep-a", pb.RepStage_REP_STAGE_STARTED)
+	good := proto.Clone(env.cc).(*pb.ClusterConf)
+	bad := proto.Clone(env.cc).(*pb.ClusterConf)
+	bad.GetDnBinConf().ExtentSize = 0
+	mustPut(t, env.cli, model.ClusterConfKey(env.cluster), bad)
+	before := env.dump()
+	_, err := repFinish(env, "rep-a")
+	if msg := volWantCode(t, err, codes.Aborted); msg != scMsgExtentSize {
+		t.Errorf("message %q, want %q", msg, scMsgExtentSize)
+	}
+	env.wantNoWrite("the refused FinishRepair", before)
+	mustPut(t, env.cli, model.ClusterConfKey(env.cluster), good)
+	if _, err := repFinish(env, "rep-a"); err != nil {
+		t.Errorf("FinishRepair after the stored conf was repaired: %v", err)
+	}
+}
+
 // TestCreateRepairReplansAroundADnTheGroupGained pins the per-round plan of
 // a fresh new leg (architecture.md, Repairs, Per-operation allocation; GW9):
 // a round plans its black list and its tier-1 locations from the group as
@@ -2045,8 +2218,13 @@ func TestRepairCallsRefuseAnInvalidStoredConf(t *testing.T) {
 // that read is missing from the plan and the scan offers dn-c.
 // model.CreateRepair refuses the gain as candidate changed, and the next
 // round plans from the group as it now stands, so the new leg lands on dn-d,
-// through tier 2. Every draw is forced, as in
-// TestCreateSpareLegReplansAroundADnTheGroupGained.
+// through tier 2. A plan read once for the whole unit would be refused the
+// same way in every round until the round cap.
+//
+// Every draw is forced, as in TestCreateMigrationRefusesADnTheGroupAlreadyUses:
+// dn-d shares dn-c's failure domain and holds less, so the first scan offers
+// dn-c alone, and the second — dn-c black-listed and its domain excluded —
+// offers dn-d alone, through tier 2.
 func TestCreateRepairReplansAroundADnTheGroupGained(t *testing.T) {
 	env := newVolEnv(t)
 	env.relocateDn(volDnD, volDnC)
@@ -2083,6 +2261,93 @@ func TestCreateRepairReplansAroundADnTheGroupGained(t *testing.T) {
 	}
 	if rev := env.spRev(); rev != 3 {
 		t.Errorf("sp_rev: got %d, want 3 (one bump per request)", rev)
+	}
+}
+
+// TestCreateRepairReplansAroundADnDisabledOrDeleted pins model.CreateRepair's
+// reading of a pick gone stale (architecture.md, Per-operation allocation;
+// GW9): the DN the scan offered is disabled, or deleted, while the op's
+// transaction runs, and the op answers candidate changed rather than
+// refusing, so the next round scans again and the new leg lands on the other
+// DN. dn_batch_size is 1 and dn-c holds the most free extents, so the first
+// scan offers dn-c alone; the other writer runs inside the op's first read of
+// dn-c's record, whose transaction then fails its commit and reads the
+// record again as the other writer left it.
+func TestCreateRepairReplansAroundADnDisabledOrDeleted(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor func(env *volEnv) error
+	}{
+		{
+			name: "disabled",
+			actor: func(env *volEnv) error {
+				_, err := env.srv.UpdateDiskNodeDisabled(env.ctx,
+					&pb.UpdateDiskNodeDisabledRequest{
+						ClusterName: env.cluster,
+						AddrPort:    volDnC,
+						Disabled:    true,
+					})
+				return err
+			},
+		},
+		{
+			name: "deleted",
+			actor: func(env *volEnv) error {
+				env.dropDn(volDnC)
+				return nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.setDnBatchSize(1)
+			env.setDnFree(volDnC, volDnCFree)
+			repSetLegEpoch(env, volDataGrpId, volDataLegA, repEpoch)
+			var actorErr error
+			prev := slog.Default()
+			hook := &volReadHook{
+				Handler: prev.Handler(),
+				key:     model.DnConfKey(env.cid, volDnC),
+				actor:   func() { actorErr = tc.actor(env) },
+			}
+			slog.SetDefault(slog.New(hook))
+			defer slog.SetDefault(prev)
+			// Bounded twice over, so that a unit which never settles fails
+			// as ABORTED instead of hanging the package: GW9 retries until
+			// the round cap or the ctx's end, whichever comes first.
+			ctx, cancel := context.WithTimeout(
+				context.WithValue(env.ctx, volReadHookKey{}, true),
+				30*time.Second)
+			defer cancel()
+			req := repRequest(env)
+			req.SpRev = nil
+			req.DnSelector = nil
+			_, err := env.srv.CreateRepair(ctx, req)
+			if !hook.fired.Load() {
+				t.Fatalf("the request never read dn-c's record: the other " +
+					"writer never ran and nothing was raced")
+			}
+			if actorErr != nil {
+				t.Fatalf("the interleaved writer: %v", actorErr)
+			}
+			if err != nil {
+				t.Fatalf("CreateRepair: %v", err)
+			}
+			side := env.repair("rep-a").GetNewLegList()[0].GetSideList()[0]
+			if side.GetAddrPort() != volDnD {
+				t.Errorf("the new leg on %s, want %s", side.GetAddrPort(),
+					volDnD)
+			}
+			if free := env.dn(volDnD).GetFreeExtCnt(); free !=
+				volDnFree-volDataExtCnt {
+				t.Errorf("dn-d free_ext_cnt: got %d, want %d", free,
+					volDnFree-volDataExtCnt)
+			}
+			if rev := env.spRev(); rev != 2 {
+				t.Errorf("sp_rev: got %d, want 2 (the create's one bump)",
+					rev)
+			}
+		})
 	}
 }
 

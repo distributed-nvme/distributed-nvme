@@ -570,19 +570,19 @@ func TestFakeWorkerConvergesAFullControllerNode(t *testing.T) {
 // of one cntlr's request. At the limits every count is the one model's
 // TestWidestMessagesFitGrpcMaxMsgSize builds: MaxSliceCntPerSp slices of
 // MaxGrpCntPerSlice groups in each list, every group MaxAllocLegPerGrp legs
-// and MaxSpareLegPerGrp spares at RAID1, MaxMigrCntPerSp legs with a second
+// at RAID1 and a repair with one new leg, MaxMigrCntPerSp legs with a second
 // side, MaxTdCntPerSp thin devices, MaxSsCntPerSp subsystems of
 // MaxNsCntPerSs namespaces and MaxHostCntPerSs hosts, MaxCloneCntPerSp
 // clones of MaxCntlrCntPerSp source transports, each with a clone meta group
-// of a slice's group's legs and spares, and MaxXferCntPerSp transfers.
+// of a slice's group's legs and repair, and MaxXferCntPerSp transfers.
 type widestShape struct {
 	slices, grps, tds, clones, xfers, migrs int
 }
 
 // widestGrpsPerList is the groups per list of each slice the widest-cntlr
 // case builds, the one axis it cuts below its limit (MaxGrpCntPerSlice). The
-// cut keeps every run inside a full shape's bound with a quarter of it to
-// spare, since `go test ./...` runs this build beside every other package's
+// cut keeps every run inside a full shape's bound with a quarter of it left
+// over, since `go test ./...` runs this build beside every other package's
 // on a loaded machine. The build walks the host's subsystems again after
 // each connect (cnagent.md CN10, Known limits), and the fake lists a
 // directory by scanning every entry it holds, so the time grows faster than
@@ -616,7 +616,11 @@ func maxNqn(prefix, suffix string) string {
 // a name or an NQN, and each RAID1 group mirrors across the two disk node
 // addresses. Every NQN a user or the gateway may choose (a subsystem's, its
 // hosts', a clone source's, a transfer's hosts') is as long as an NQN may
-// be, as model's widest message holds them.
+// be, and so is every repair's name as long as a name may be, as model's
+// widest message holds them. Each repair is CREATED and its bad leg is its
+// group's first leg, which no migration moves and which serves with an OK
+// row once probed, so the repair waits and the cntlr adds no new leg
+// (cnagent.md CN12).
 func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 	req := cntlrReq(reqOpts{revision: revision, primary: true, raid1: true})
 	next := uint64(0x100000)
@@ -625,43 +629,66 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 		return next
 	}
 	migrs := shape.migrs
-	// legsOf gives a slice's group its legs, the first MaxMigrCntPerSp of
-	// which a migration gives a second side, and with noMigr a clone meta
-	// group its legs, none of which a migration moves.
-	legsOf := func(noMigr bool) ([]*pb.Leg, []*pb.Leg) {
-		var legs, spares []*pb.Leg
-		for k := 0; k < common.MaxAllocLegPerGrp+common.MaxSpareLegPerGrp; k++ {
-			addr, svcId := testIp, testSvcId
-			otherAddr, otherSvcId := testIp2, testSvcId2
+	// legsOf gives a group its legs and the new leg of its repair, on the
+	// next disk node address. A migration gives a second side to each leg
+	// of a slice's group but the first, its repair's bad leg, until the
+	// shape's migrations are used up; with noMigr, a clone meta group's,
+	// it gives none.
+	legsOf := func(noMigr bool) ([]*pb.Leg, *pb.Leg) {
+		var legs []*pb.Leg
+		addrOf := func(k int) (string, string, string, string) {
 			if k%2 == 1 {
-				addr, svcId, otherAddr, otherSvcId = otherAddr, otherSvcId,
-					addr, svcId
+				return testIp2, testSvcId2, testIp, testSvcId
 			}
+			return testIp, testSvcId, testIp2, testSvcId2
+		}
+		for k := 0; k < common.MaxAllocLegPerGrp; k++ {
+			addr, svcId, otherAddr, otherSvcId := addrOf(k)
 			leg := legOf(id(), sideOf(id(), addr, svcId))
 			leg.LegIdx = uint32(k)
-			if k < common.MaxAllocLegPerGrp {
-				// A migration's destination is on another disk node than
-				// its source.
-				if migrs > 0 && !noMigr {
-					migrs--
-					leg.SideList = append(leg.SideList,
-						sideOf(id(), otherAddr, otherSvcId))
-				}
-				legs = append(legs, leg)
-			} else {
-				spares = append(spares, leg)
+			// A migration's destination is on another disk node than its
+			// source, and a repair's bad leg has one side (architecture.md,
+			// Repair).
+			if k > 0 && migrs > 0 && !noMigr {
+				migrs--
+				leg.SideList = append(leg.SideList,
+					sideOf(id(), otherAddr, otherSvcId))
 			}
+			legs = append(legs, leg)
 		}
-		return legs, spares
+		addr, svcId, _, _ := addrOf(common.MaxAllocLegPerGrp)
+		newLeg := legOf(id(), sideOf(id(), addr, svcId))
+		newLeg.LegIdx = uint32(common.MaxAllocLegPerGrp)
+		return legs, newLeg
 	}
-	grpsOf := func(extCnt, dataBlocks uint64) []*pb.Group {
+	req.NameToRepair = map[string]*pb.Repair{}
+	// grpOf is one group with its legs and its repair, whose parent is the
+	// slice sliceId or the clone cloneName.
+	grpOf := func(extCnt, dataBlocks uint64, noMigr bool, sliceId uint64,
+		cloneName string) *pb.Group {
+		legs, newLeg := legsOf(noMigr)
+		suffix := fmt.Sprintf("-%d", len(req.NameToRepair))
+		name := "rep" + strings.Repeat("x",
+			common.MaxStrSize-len("rep")-len(suffix)) + suffix
+		grp := &pb.Group{
+			GrpId: id(), ExtCnt: extCnt, MetaBlocks: 3,
+			DataBlocks: dataBlocks, LegList: legs, RepName: name,
+		}
+		req.NameToRepair[name] = &pb.Repair{
+			RepId:        id(),
+			GrpId:        grp.GetGrpId(),
+			RepStage:     pb.RepStage_REP_STAGE_CREATED,
+			NewLegList:   []*pb.Leg{newLeg},
+			BadLegIdList: []uint64{legs[0].GetLegId()},
+			SliceId:      sliceId,
+			CloneName:    cloneName,
+		}
+		return grp
+	}
+	grpsOf := func(sliceId, extCnt, dataBlocks uint64) []*pb.Group {
 		var grps []*pb.Group
 		for g := 0; g < shape.grps; g++ {
-			legs, spares := legsOf(false)
-			grps = append(grps, &pb.Group{
-				GrpId: id(), ExtCnt: extCnt, MetaBlocks: 3,
-				DataBlocks: dataBlocks, LegList: legs, SpareLegList: spares,
-			})
+			grps = append(grps, grpOf(extCnt, dataBlocks, false, sliceId, ""))
 		}
 		return grps
 	}
@@ -670,8 +697,8 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 		sliceId := id()
 		req.IdToSlice[fmt.Sprintf(common.IdKeyFmt, sliceId)] = &pb.Slice{
 			SliceIdx:    uint32(s),
-			MetaGrpList: grpsOf(1, 61),
-			DataGrpList: grpsOf(2, 125),
+			MetaGrpList: grpsOf(sliceId, 1, 61),
+			DataGrpList: grpsOf(sliceId, 2, 125),
 		}
 	}
 	req.TdList = nil
@@ -721,11 +748,7 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 			clone.SrcTrConfList = append(clone.SrcTrConfList,
 				sideTrConf(testIp2, fmt.Sprintf("%d", 4300+k)))
 		}
-		legs, spares := legsOf(true)
-		clone.MetaGrp = &pb.Group{
-			GrpId: id(), ExtCnt: 1, MetaBlocks: 3, DataBlocks: 61,
-			LegList: legs, SpareLegList: spares,
-		}
+		clone.MetaGrp = grpOf(1, 61, true, 0, fmt.Sprintf("clone-%d", c))
 		req.CloneList = append(req.CloneList, clone)
 	}
 	req.XferList = nil
@@ -744,8 +767,8 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 // holds every list at its limit but one, the groups per slice, through the
 // CN's syncup and the cntlr's, then plays rounds until its probers have run:
 // every row it reports reads OK. MaxGrpCntPerSlice groups in both lists
-// of every slice are more than sixteen thousand md arrays over more than
-// sixty thousand leg connections, which no converge in this package's fake
+// of every slice are more than sixteen thousand md arrays over nearly
+// fifty thousand leg connections, which no converge in this package's fake
 // finishes inside the case's bound, so the case takes the most groups per
 // list that do.
 func TestFakeWorkerConvergesTheWidestCntlr(t *testing.T) {
@@ -779,15 +802,18 @@ func TestFakeWorkerConvergesTheWidestCntlr(t *testing.T) {
 	t.Logf("%+v converged in %v", shape, time.Since(start))
 	settled := w.settledRound(srv, cntlrPtr(), 1)
 	info := settled.GetCntlrInfo()
-	// Every group of the pool: the slices' and a clone meta group per clone.
+	// Every group of the pool: the slices' and a clone meta group per clone,
+	// each with its legs and its repair's new leg.
 	grps := shape.slices*2*shape.grps + shape.clones
-	legs := grps * (common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp)
+	legs := grps * (common.MaxAllocLegPerGrp + 1)
 	for _, c := range []struct {
 		what      string
 		got, want int
 	}{
 		{"md arrays", len(info.GetGrpIdToMdRaid()), grps},
 		{"legs", len(info.GetLegIdToLeg()), legs},
+		{"repair verdicts", len(info.GetRepIdToRepairInfo()), grps},
+		{"group readings", len(info.GetGrpIdToGrpInfo()), grps},
 		{"thin devices", len(info.GetTdIdToThinInfo()), shape.tds},
 		{"namespaces", len(info.GetNsIdToNamespace()),
 			common.MaxSsCntPerSp * common.MaxNsCntPerSs},

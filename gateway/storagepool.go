@@ -1063,7 +1063,7 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 		}
 		for _, slice := range slices {
 			for _, grp := range allGroups(slice) {
-				for _, leg := range allLegs(grp) {
+				for _, leg := range grp.GetLegList() {
 					for _, side := range leg.GetSideList() {
 						if wanted[side.GetCntlidSlot()] {
 							continue
@@ -1083,7 +1083,7 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 			return err
 		}
 		for idx, clone := range clones {
-			for _, leg := range allLegs(clone.GetMetaGrp()) {
+			for _, leg := range clone.GetMetaGrp().GetLegList() {
 				for _, side := range leg.GetSideList() {
 					if wanted[side.GetCntlidSlot()] {
 						continue

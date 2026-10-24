@@ -138,7 +138,7 @@ func TestScenMigrationDestinationThatNeverZeroes(t *testing.T) {
 	})
 	// Three rounds of the destination report it zeroing.
 	h.waitRounds(t, dn3, 3, m.dstKey)
-	if _, _, side, ok := c.sideOf(t, dstSide); !ok || side.GetProvisioned() {
+	if _, side, ok := c.sideOf(t, dstSide); !ok || side.GetProvisioned() {
 		t.Fatalf("the destination while it zeroes: found %t, %v", ok, side)
 	}
 	if n := h.countRecs(w, msgFlipApplied, isFlipOf(dstSide)) +
@@ -197,7 +197,7 @@ func TestScenCutoverWaitsOutAMissedDestinationRound(t *testing.T) {
 	defer setLever(t, dn3, m.dstKey, func(o *agentfake.Object) { o.Hang = false })
 	h.waitUntil(t, 20*time.Second, "a missed round of the destination",
 		func() (bool, string) {
-			_, _, side, ok := c.sideOf(t, dstSide)
+			_, side, ok := c.sideOf(t, dstSide)
 			return ok && side.GetErrEpoch() != 0, fmt.Sprintf("%v", side)
 		})
 	c.clearPathLever(t, 1, dstSide)

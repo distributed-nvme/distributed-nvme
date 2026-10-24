@@ -116,24 +116,21 @@ func mapStmErr(err error) error {
 	return errAborted("%v", err)
 }
 
-// mapModelErr maps an error returned by one of the model ops the gateway
-// runs as a deciding STM — GrowSlice, CreateSpareLeg, SwitchSpareLeg, the
-// clone-keyed twins of the last two, CreateCloneSpareLeg and
-// SwitchCloneSpareLeg, and the repair operations CreateRepair, FinishRepair,
-// CancelRepair, SetRepairAbort and DeleteRetiredLeg — each of which runs its
-// own STM, onto GW7. The repair handlers answer the reasons model exports for
-// the NOT_FOUND, ALREADY_EXISTS and RESOURCE_EXHAUSTED codes themselves
-// before they hand an error here (modelReason), as CreateSpareLeg answers
-// model.ReasonSpareListFull.
+// mapModelErr maps an error returned by one of the model ops the gateway runs
+// as a deciding STM — GrowSlice and the repair operations CreateRepair,
+// FinishRepair, CancelRepair, SetRepairAbort and DeleteRetiredLeg — each of
+// which runs its own STM, onto GW7. The repair handlers answer the reasons
+// model exports for the NOT_FOUND, ALREADY_EXISTS and RESOURCE_EXHAUSTED codes
+// themselves before they hand an error here (modelReason).
 //
 // ReasonStaleRevision is the token check the gateway asked the op to run and
 // is ABORTED; ReasonCandidateChanged never reaches a client (GW9: the caller
 // re-runs the whole candidate unit) and is reported to the caller of this
-// helper through isCandidateChanged instead — CreateSpareLeg's group, its
-// twin's or CreateRepair's, that gained a DN since the round's plan, and its
-// pick deleted, disabled or otherwise no longer allocatable, or short of
-// extents, since the scan, arrive that way; every other ErrPrecondition is a
-// documented public precondition and therefore FAILED_PRECONDITION.
+// helper through isCandidateChanged instead — CreateRepair's group that gained
+// a DN since the round's plan, and its pick deleted, disabled or otherwise no
+// longer allocatable, or short of extents, since the scan, arrive that way;
+// every other ErrPrecondition is a documented public precondition and
+// therefore FAILED_PRECONDITION.
 func mapModelErr(err error) error {
 	if err == nil {
 		return nil
@@ -161,20 +158,18 @@ func mapModelErr(err error) error {
 // errCandidateChanged is the sentinel an allocating STM closure returns when
 // one pick's exact capacity key — the key the scan outside the transaction saw
 // — is no longer there, when the pick's DN no longer has the free metadata
-// units the round needs (verifyPick reads them from the node's record, since
-// a write that changes only units leaves the key where it is;
-// architecture.md, Metadata units), or when what the scan was planned from
-// has moved under it: CreateStoragePool's and CreateClone's cluster_id or
-// leg count, CreateCntlr's SP, which as the closure reads it has a cntlr on a CN the
-// scan's read of its cntlrs did not, or CreateMigration's group, which as the
-// closure reads it occupies a DN the scan's read of it did not.
-// model.CreateSpareLeg, its clone twin and model.CreateRepair's fresh new
-// leg answer it, through mapModelErr, for the same gain on their group and
-// for a pick deleted, disabled or otherwise no longer allocatable, or short
-// of extents, since the scan. DeleteThinDevice's
-// deciding STM returns it too, for a stale plan:
-// another SP than the one the plan walked, or, for a token-less request, a
-// moved SpRev. It is never surfaced to a client (GW9).
+// units the round needs (verifyPick reads them from the node's record, since a
+// write that changes only units leaves the key where it is; architecture.md,
+// Metadata units), or when what the scan was planned from has moved under it:
+// CreateStoragePool's and CreateClone's cluster_id or leg count, CreateCntlr's
+// SP, which as the closure reads it has a cntlr on a CN the scan's read of its
+// cntlrs did not, or CreateMigration's group, which as the closure reads it
+// occupies a DN the scan's read of it did not. model.CreateRepair's fresh new
+// leg answers it, through mapModelErr, for the same gain on its group and for
+// a pick deleted, disabled or otherwise no longer allocatable, or short of
+// extents, since the scan. DeleteThinDevice's deciding STM returns it too, for
+// a stale plan: another SP than the one the plan walked, or, for a token-less
+// request, a moved SpRev. It is never surfaced to a client (GW9).
 var errCandidateChanged = errors.New("gateway: candidate changed")
 
 // isCandidateChanged reports whether err is that sentinel.
@@ -231,15 +226,13 @@ func clusterNameOf(name string) string {
 
 // resolveCluster is the first read of every STM but CreateCluster's and
 // ListClusters' (GW5; architecture.md, STM discipline), save the later
-// transactions of GrowSlice, CreateSpareLeg, SwitchSpareLeg and the five
-// repair calls that run a model op, which reuse the cid their planning
-// snapshot resolved here, and the pool transactions of
-// AdvanceClusterIds (GW19), which reuse the cid its first transaction
-// resolved here. ClusterConf is the only
-// name-keyed message, and cluster_id = fnv64a(name ‖ creation_epoch) is the
-// prefix of every other key the RPC will touch. Reading it INSIDE the
-// transaction is what makes an RPC fail correctly when the cluster is
-// concurrently deleted or recreated.
+// transactions of GrowSlice and the five repair calls that run a model op,
+// which reuse the cid their planning snapshot resolved here, and the pool
+// transactions of AdvanceClusterIds (GW19), which reuse the cid its first
+// transaction resolved here. ClusterConf is the only name-keyed message, and
+// cluster_id = fnv64a(name ‖ creation_epoch) is the prefix of every other key
+// the RPC will touch. Reading it INSIDE the transaction is what makes an RPC
+// fail correctly when the cluster is concurrently deleted or recreated.
 func resolveCluster(
 	s etcdutil.STM,
 	clusterName string,

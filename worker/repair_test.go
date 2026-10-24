@@ -388,7 +388,7 @@ func TestRepairStageMovesAtEveryLevel(t *testing.T) {
 // pass, which carries the snapshot's revision, is refused as stale, logged
 // with the op's refusal, and commits on the next pass.
 func TestRepairPassStepsAreNotTheOneAction(t *testing.T) {
-	// The clone meta group's leg A is due for a spare create.
+	// The clone meta group's leg A is due for a repair's create.
 	withDueCloneLeg := func(h *reactHarness) {
 		grp := withReactClone(t, h.state)
 		cloneLegOf(t, grp, reactCloneLegA).ErrEpoch = h.ago(9000)
@@ -410,14 +410,14 @@ func TestRepairPassStepsAreNotTheOneAction(t *testing.T) {
 		h.setVerdict(reactRepId, true, false)
 		withDueCloneLeg(h)
 		h.pass()
-		calls := h.wantOps("set_repair_stage", "create_clone_spare")
+		calls := h.wantOps("set_repair_stage", "create_repair")
 		if calls[1].grpId != reactCloneGrp {
 			t.Fatalf("the create went to group %d, want %d",
 				calls[1].grpId, reactCloneGrp)
 		}
 		h.wantStageRecord(msgRepairStageMoved,
 			pb.RepStage_REP_STAGE_STARTED, "")
-		h.wantApplied(reactionSpareCreate)
+		h.wantApplied(reactionRepairCreate)
 	})
 
 	t.Run("the timer's delete and a reaction", func(t *testing.T) {
@@ -425,7 +425,7 @@ func TestRepairPassStepsAreNotTheOneAction(t *testing.T) {
 		withOldRetired(h)
 		withDueCloneLeg(h)
 		h.pass()
-		calls := h.wantOps("delete_retired_leg", "create_clone_spare")
+		calls := h.wantOps("delete_retired_leg", "create_repair")
 		if calls[0].legIds[0] != retireLegA ||
 			calls[1].grpId != reactCloneGrp {
 			t.Fatalf("calls = %+v, want leg %d deleted and a create for "+
@@ -434,7 +434,7 @@ func TestRepairPassStepsAreNotTheOneAction(t *testing.T) {
 		if recs := h.logs.withMsg(msgRetiredLegDeleted); len(recs) != 1 {
 			t.Fatalf("deleted records = %v, want one", recs)
 		}
-		h.wantApplied(reactionSpareCreate)
+		h.wantApplied(reactionRepairCreate)
 	})
 
 	t.Run("a stage move makes the delete wait a pass", func(t *testing.T) {
@@ -610,6 +610,8 @@ func TestRetireTimer(t *testing.T) {
 			h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_UNKNOWN)
 		}, reasonGrpRowUnknown},
 		{"the report has no row", func(h *reactHarness) {
+			// The harness's reading would give the group a row again.
+			h.inSyncAll = false
 			delete(h.w.cntlrs[reactCntlrA].driver.lastInfo.GrpIdToMdRaid,
 				reactDataGrp)
 		}, reasonGrpRowAbsent},
@@ -650,39 +652,45 @@ func TestRetireTimer(t *testing.T) {
 		})
 	}
 
-	// A spare S took leg A's place in leg_list, and A is parked with its
-	// health epoch; the snapshot is one revision past the primary's latest
-	// report, which still reads the group whole with A and B in sync. md
-	// may not have started to copy onto S yet, so B may be the one leg in
-	// sync, and the whole flag of that report is the old leg set's: the
-	// leg waits for the primary's report of the switch's revision, and is
-	// deleted once the report shows S in sync.
-	t.Run("a switch the report does not show yet", func(t *testing.T) {
-		const spareS, spareSide = uint64(700), uint64(800)
+	// A finish put a new leg N in leg A's place and made A a retired leg;
+	// the snapshot is one revision past the primary's latest report, which
+	// still reads the group whole with A and B in sync, from before the
+	// repair began. md may still copy onto N, so B may be the one leg in
+	// sync, and the whole flag of that report is the old leg set's: the old
+	// retired leg waits for the primary's report of the finish's revision,
+	// and is deleted once the report shows N in sync.
+	t.Run("a finish the report does not show yet", func(t *testing.T) {
+		const newLeg, newSide = uint64(700), uint64(800)
 		h := retireCase(t)
 		grp := h.dataGrp()
 		legA := grp.LegList[0]
-		legA.ErrEpoch = h.ago(9000)
 		grp.LegList[0] = &pb.Leg{
-			LegId: spareS, LegIdx: legA.GetLegIdx(),
+			LegId: newLeg, LegIdx: legA.GetLegIdx(),
 			SideList: []*pb.Side{{
-				SideId: spareSide, AddrPort: reactDnC, Provisioned: true,
+				SideId: newSide, AddrPort: reactDnC, Provisioned: true,
 			}},
 		}
-		grp.SpareLegList = append(grp.SpareLegList, legA)
+		// A, retired now, is far younger than the age and passed over.
+		withReactRetired(h, grp, legA.GetLegId(),
+			legA.GetSideList()[0].GetSideId(), h.now())
 		h.state.SpRevision = reactRepSpRevision + 1
 		h.pass()
 		h.wantOps()
 		recs := h.logs.withMsg(msgRetiredLegKept)
-		if len(recs) != 1 || recs[0]["reason"] != reasonGrpRowStale {
-			t.Fatalf("kept records = %v, want one %s", recs,
-				reasonGrpRowStale)
+		if len(recs) != 1 || recs[0]["reason"] != reasonGrpRowStale ||
+			recs[0]["leg_id"] != float64(retireLegA) {
+			t.Fatalf("kept records = %v, want one %s for leg %d", recs,
+				reasonGrpRowStale, retireLegA)
 		}
 
 		h.w.cntlrs[reactCntlrA].driver.infoRev = reactRepSpRevision + 1
-		h.setGrpInfo(reactDataGrp, true, spareS, reactDataLegB)
+		h.setGrpInfo(reactDataGrp, true, newLeg, reactDataLegB)
 		h.pass()
-		h.wantOps("delete_retired_leg")
+		calls := h.wantOps("delete_retired_leg")
+		if !slices.Equal(calls[0].legIds, []uint64{retireLegA}) {
+			t.Fatalf("delete = %+v, want the old leg %d", calls[0],
+				retireLegA)
+		}
 	})
 
 	t.Run("no report", func(t *testing.T) {
@@ -814,109 +822,6 @@ func TestRetireTimerDeletesOneAPass(t *testing.T) {
 		h.rops.retireErr = errors.New("etcd unavailable")
 		h.pass()
 		h.wantOps("delete_retired_leg")
-	})
-}
-
-// TestLegRepairSkipsAGroupWithARepair pins AR8's skip of a group that has a
-// repair: its due leg gets no switch and no create, the pass logs `reaction
-// skipped` with the group's own reason on every pass, naming the repair, and
-// goes on to the next candidate, in another group, which is repaired in the
-// same pass. The repaired group's due leg comes first in leg-id order, so
-// the skip runs before the other group's create.
-func TestLegRepairSkipsAGroupWithARepair(t *testing.T) {
-	h := newReactHarness(t, reactFixture(t))
-	withReactRepairOf(h, h.metaGrp(), reactMetaLegA,
-		pb.RepStage_REP_STAGE_CREATED, false)
-	// A ready spare in the repaired group would be switched in but for the
-	// repair.
-	h.metaGrp().SpareLegList = append(h.metaGrp().SpareLegList, &pb.Leg{
-		LegId: 700, LegIdx: 3,
-		SideList: []*pb.Side{{
-			SideId: 800, AddrPort: reactDnD, Provisioned: true,
-		}},
-	})
-	h.setLegRow(700, pb.ResStatus_RES_STATUS_OK)
-	h.setGrpRow(reactMetaGrp, pb.ResStatus_RES_STATUS_OK)
-	// The data group, which has no repair, has a due leg after it.
-	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
-	h.dnCands(reactDnD)
-	var want []string
-	for pass := 1; pass <= 2; pass++ {
-		h.pass()
-		want = append(want, "create_spare")
-		calls := h.wantOps(want...)
-		if calls[pass-1].grpId != reactDataGrp {
-			t.Fatalf("pass %d: created for group %d, want %d", pass,
-				calls[pass-1].grpId, reactDataGrp)
-		}
-		recs := h.logs.withMsg(msgReactionSkipped)
-		if len(recs) != pass {
-			t.Fatalf("pass %d: skips = %v, want one a pass", pass, recs)
-		}
-		rec := recs[pass-1]
-		if rec["kind"] != reactionSpareCreate ||
-			rec["reason"] != reasonGrpHasRepair ||
-			rec["rep_name"] != reactRepName ||
-			rec["leg_id"] != float64(reactMetaLegA) {
-			t.Fatalf("pass %d: skip %v, want %s for leg %d naming %s",
-				pass, rec, reasonGrpHasRepair, reactMetaLegA, reactRepName)
-		}
-	}
-}
-
-// TestLegRepairCountsOnlyLegsInSync pins AR8's healthy-leg test: another leg
-// of the group's leg_list counts only when it has no err_epoch AND the
-// current primary's latest report holds it in sync. A healthy leg md still
-// copies, a report that holds only the due leg in sync, and a report with no
-// reading of the group all hold the group with no_healthy_leg, creating and
-// switching nothing; a leg in sync lets the repair go on.
-func TestLegRepairCountsOnlyLegsInSync(t *testing.T) {
-	cases := []struct {
-		name   string
-		inSync []uint64
-		read   bool
-		want   bool
-	}{
-		{"the other leg in sync", []uint64{reactDataLegA, reactDataLegB},
-			true, true},
-		{"the other leg still copying", []uint64{reactDataLegA}, true, false},
-		{"no leg in sync", nil, true, false},
-		{"no reading of the group", nil, false, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newReactHarness(t, reactFixture(t))
-			h.inSyncAll = false
-			h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
-			h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
-			if tc.read {
-				h.setGrpInfo(reactDataGrp, true, tc.inSync...)
-			}
-			h.dnCands(reactDnD)
-			h.pass()
-			if tc.want {
-				h.wantOps("create_spare")
-				return
-			}
-			h.wantOps()
-			h.wantOneSkip(reactionSpareCreate, reasonNoHealthyLeg,
-				reactDataGrp, reactDataLegA, 0)
-		})
-	}
-
-	// The report's in-sync list does not lift an err_epoch: a leg md holds
-	// in sync whose probe fails is no healthy leg.
-	t.Run("in sync with an err_epoch", func(t *testing.T) {
-		h := newReactHarness(t, reactFixture(t))
-		h.inSyncAll = false
-		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
-		h.legOf(reactDataLegB).ErrEpoch = h.ago(1)
-		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
-		h.setGrpInfo(reactDataGrp, true, reactDataLegA, reactDataLegB)
-		h.dnCands(reactDnD)
-		h.pass()
-		h.wantOps()
-		h.wantSkipped(reactionSpareCreate, reasonNoHealthyLeg)
 	})
 }
 

@@ -526,7 +526,7 @@ func TestCloneExclusionFromThePlans(t *testing.T) {
 			for _, key := range []sideKey{
 				cloneSideKey(spCloneLegA, spCloneSideA),
 				cloneSideKey(spCloneLegB, spCloneSideB),
-				cloneSideKey(spCloneLegSpare, spCloneSideSpare),
+				cloneSideKey(spCloneLegC, spCloneSideC),
 			} {
 				if side := plan.sides[key]; side == nil ||
 					!side.cloneDeleting {

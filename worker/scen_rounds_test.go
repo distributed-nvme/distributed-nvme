@@ -142,7 +142,7 @@ func (o roundObj) epoch(t *testing.T) uint64 {
 		return o.c.cntlr(t, o.id).GetErrEpoch()
 	case healthRecordSide:
 		for _, grp := range poolGrps(o.c.load(t)) {
-			legs := append(slices.Clone(grp.GetLegList()), grp.GetSpareLegList()...)
+			legs := grp.GetLegList()
 			for _, leg := range legs {
 				for _, side := range leg.GetSideList() {
 					if side.GetSideId() == o.id {

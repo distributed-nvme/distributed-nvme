@@ -247,17 +247,17 @@ type dnLedger struct {
 // validation), so the ledger refuses with the same errAborted the allocating
 // paths already give (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 //
-// Six handlers build a ledger — CreateStoragePool, CreateClone,
-// DeleteSpareLeg, and CreateMigration, FinishMigration and CancelMigration —
-// and each builds it before staging its first write, so a refusal here
-// returns having written nothing rather than relying on the transaction being
-// abandoned (EU4). DeleteStoragePool builds none: it latches, and the
-// worker's drain returns the extents (dnv-worker.md, The sp drain); nor does
-// DeleteClone, whose drain gives the clone meta group back (dnv-worker.md,
-// The clone drain). Three of the six reach a conf gate before this one
-// anyway (CreateStoragePool's own, CreateClone's in planCloneGrp,
-// CreateMigration's in its plan, through migrMetaUnitsOf and pickDns); the
-// other three have none, which is what this covers.
+// Five handlers build a ledger — CreateStoragePool, CreateClone, and
+// CreateMigration, FinishMigration and CancelMigration — and each builds it
+// before staging its first write, so a refusal here returns having written
+// nothing rather than relying on the transaction being abandoned (EU4).
+// DeleteStoragePool builds none: it latches, and the worker's drain returns
+// the extents (dnv-worker.md, The sp drain); nor does DeleteClone, whose
+// drain gives the clone meta group back (dnv-worker.md, The clone drain).
+// Three of the five reach a conf gate before this one anyway
+// (CreateStoragePool's own, CreateClone's in planCloneGrp, CreateMigration's
+// in its plan, through migrMetaUnitsOf and pickDns); the other two have none,
+// which is what this covers.
 func newDnLedger(
 	s etcdutil.STM,
 	cid uint64,
@@ -686,14 +686,14 @@ func allGroups(slice *pb.Slice) []*pb.Group {
 	return grps
 }
 
-// allLegs is every leg of a group, active legs first and spare legs after —
-// both carry sides that occupy a DN (architecture.md, Spare legs).
-func allLegs(grp *pb.Group) []*pb.Leg {
-	legs := make([]*pb.Leg, 0,
-		len(grp.GetLegList())+len(grp.GetSpareLegList()))
-	legs = append(legs, grp.GetLegList()...)
-	legs = append(legs, grp.GetSpareLegList()...)
-	return legs
+// grpLegOf is the leg of the group's leg_list with that id, or nil.
+func grpLegOf(grp *pb.Group, legId uint64) *pb.Leg {
+	for _, leg := range grp.GetLegList() {
+		if leg.GetLegId() == legId {
+			return leg
+		}
+	}
+	return nil
 }
 
 // spFootprint is Σ ext_cnt over ALL groups of ALL slices — meta and data
@@ -709,29 +709,28 @@ func spFootprint(slices []*pb.Slice) uint64 {
 	return total
 }
 
-// grpDnAddrs is every DN a group occupies: through an active leg, a spare
-// leg, or a new leg of rep, the group's open repair, nil when it has none —
-// the group's DN set of architecture.md, Per-operation allocation, since a
-// new leg becomes a leg of the group at its finish. It is the black-list seed
-// of CreateMigration, CreateSpareLeg and CreateRepair, and the plan each
-// one's deciding transaction checks the group against for a DN it gained
-// since.
+// grpDnAddrs is every DN a group occupies: through a leg of its leg_list or
+// a new leg of rep, the group's open repair, nil when it has none — the
+// group's DN set of architecture.md, Per-operation allocation, since a new
+// leg becomes a leg of the group at its finish. It is the black-list seed of
+// CreateMigration and CreateRepair, and the plan each one's deciding
+// transaction checks the group against for a DN it gained since.
 func grpDnAddrs(grp *pb.Group, rep *pb.Repair) []string {
 	var addrs []string
-	legs := append(allLegs(grp), rep.GetNewLegList()...)
-	for _, leg := range legs {
-		for _, side := range leg.GetSideList() {
-			addrs = append(addrs, side.GetAddrPort())
+	for _, legs := range [][]*pb.Leg{grp.GetLegList(), rep.GetNewLegList()} {
+		for _, leg := range legs {
+			for _, side := range leg.GetSideList() {
+				addrs = append(addrs, side.GetAddrPort())
+			}
 		}
 	}
 	return addrs
 }
 
 // grpDnLocations is the failure domain of every DN of addrs, a group's DN set
-// as grpDnAddrs gives it: the tier-1 exclusion of CreateMigration,
-// CreateSpareLeg and CreateRepair (architecture.md, Per-operation
-// allocation), which is about LOCATIONS and not merely about the DNs the
-// black list already holds.
+// as grpDnAddrs gives it: the tier-1 exclusion of CreateMigration and
+// CreateRepair (architecture.md, Per-operation allocation), which is about
+// LOCATIONS and not merely about the DNs the black list already holds.
 //
 // One plain DnConf read per DISTINCT addr_port, outside every STM like the
 // capacity scan it feeds. Reading them before the transaction is sound because
@@ -816,12 +815,11 @@ type sliceLocation struct {
 	Grp     *pb.Group
 	Leg     *pb.Leg
 	Side    *pb.Side
-	IsSpare bool
 }
 
-// findSide locates one side by id across every slice, group, leg and spare leg
-// of the SP (architecture.md, Cntlrs, InspectSide: the scan is bounded by the
-// SP's slices, groups and legs).
+// findSide locates one side by id across every slice, group and leg of the
+// SP (architecture.md, Cntlrs, InspectSide: the scan is bounded by the SP's
+// slices, groups and legs).
 func findSide(
 	conf *pb.SpConf,
 	slices []*pb.Slice,
@@ -842,27 +840,13 @@ func findSide(
 					}
 				}
 			}
-			for _, leg := range grp.GetSpareLegList() {
-				for _, side := range leg.GetSideList() {
-					if side.GetSideId() == sideId {
-						return sliceLocation{
-							SliceId: conf.GetSliceIdList()[idx],
-							Slice:   slice,
-							Grp:     grp,
-							Leg:     leg,
-							Side:    side,
-							IsSpare: true,
-						}, true
-					}
-				}
-			}
 		}
 	}
 	return sliceLocation{}, false
 }
 
-// findLeg locates one leg by id across every slice and group of the SP, in
-// both the active and the spare list.
+// findLeg locates one leg by id in the leg_list of every group of every
+// slice of the SP.
 func findLeg(
 	conf *pb.SpConf,
 	slices []*pb.Slice,
@@ -877,17 +861,6 @@ func findLeg(
 						Slice:   slice,
 						Grp:     grp,
 						Leg:     leg,
-					}, true
-				}
-			}
-			for _, leg := range grp.GetSpareLegList() {
-				if leg.GetLegId() == legId {
-					return sliceLocation{
-						SliceId: conf.GetSliceIdList()[idx],
-						Slice:   slice,
-						Grp:     grp,
-						Leg:     leg,
-						IsSpare: true,
 					}, true
 				}
 			}
@@ -988,7 +961,6 @@ type cloneLocation struct {
 	Grp       *pb.Group
 	Leg       *pb.Leg
 	Side      *pb.Side
-	IsSpare   bool
 }
 
 // The clone twins of the three slice walks above. A clone meta group belongs
@@ -1020,8 +992,8 @@ func findCloneGrp(
 	return cloneLocation{}, false
 }
 
-// findCloneLeg locates one leg by id among the clones' clone meta groups, in
-// both the active and the spare list.
+// findCloneLeg locates one leg by id in the leg_list of the clones' clone
+// meta groups.
 func findCloneLeg(
 	conf *pb.SpConf,
 	clones []*pb.Clone,
@@ -1032,7 +1004,7 @@ func findCloneLeg(
 		if grp == nil {
 			continue
 		}
-		for _, leg := range allLegs(grp) {
+		for _, leg := range grp.GetLegList() {
 			if leg.GetLegId() != legId {
 				continue
 			}
@@ -1041,15 +1013,14 @@ func findCloneLeg(
 				Clone:     clone,
 				Grp:       grp,
 				Leg:       leg,
-				IsSpare:   spareLegOf(grp, legId) != nil,
 			}, true
 		}
 	}
 	return cloneLocation{}, false
 }
 
-// findCloneSide locates one side by id among the clones' clone meta groups,
-// active legs and spare legs alike.
+// findCloneSide locates one side by id among the legs of the clones' clone
+// meta groups.
 func findCloneSide(
 	conf *pb.SpConf,
 	clones []*pb.Clone,
@@ -1060,7 +1031,7 @@ func findCloneSide(
 		if grp == nil {
 			continue
 		}
-		for _, leg := range allLegs(grp) {
+		for _, leg := range grp.GetLegList() {
 			for _, side := range leg.GetSideList() {
 				if side.GetSideId() != sideId {
 					continue
@@ -1071,7 +1042,6 @@ func findCloneSide(
 					Grp:       grp,
 					Leg:       leg,
 					Side:      side,
-					IsSpare:   spareLegOf(grp, leg.GetLegId()) != nil,
 				}, true
 			}
 		}

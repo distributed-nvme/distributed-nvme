@@ -518,9 +518,11 @@ func DrainSpRetiredLegs(
 // and the slice-final STM below is what keeps the SpConf's id list and the keys
 // it points at in step.
 //
-// For every removed group, each leg's and each spare leg's sides are released
-// through the DN ledger — per distinct DN once per STM: DnConf put with the
-// pointer gone and the extents back, dn_capacity del + put, one DnRev bump.
+// For every removed group, each leg's sides are released through the DN
+// ledger — per distinct DN once per STM: DnConf put with the pointer gone and
+// the extents back, dn_capacity del + put, one DnRev bump. A group has no
+// repair and no retired leg here: the batch refuses while the pool lists
+// either, so their sides went back in the phases before.
 //
 // If both group lists are empty after the pop, the SAME transaction deletes the
 // `slice` key and removes the id from slice_id_list; otherwise it puts the
@@ -617,10 +619,8 @@ func DrainSpSlice(
 }
 
 // popGrps removes up to budget groups from the TAIL of grps, releasing every
-// side of every active leg and every spare leg of each one through rel
-// (architecture.md, Spare legs: a spare occupies a DN exactly like an active
-// leg). It returns what is left of
-// the list, the budget that is left, and how many groups it popped.
+// side of every leg of each one through rel. It returns what is left of the
+// list, the budget that is left, and how many groups it popped.
 func popGrps(
 	rel *dnReleaser,
 	spId uint64,
@@ -630,7 +630,7 @@ func popGrps(
 	popped := 0
 	for budget > 0 && len(grps) > 0 {
 		grp := grps[len(grps)-1]
-		for _, leg := range legsOf(grp) {
+		for _, leg := range grp.GetLegList() {
 			for _, side := range leg.GetSideList() {
 				rel.release(
 					side.GetAddrPort(), spId,
@@ -643,15 +643,6 @@ func popGrps(
 		popped++
 	}
 	return grps, budget, popped
-}
-
-// legsOf is every leg of ONE group — active legs first, spares after. Both carry
-// sides that occupy a DN (architecture.md, Spare legs), so both are released.
-func legsOf(grp *pb.Group) []*pb.Leg {
-	legs := make([]*pb.Leg, 0,
-		len(grp.GetLegList())+len(grp.GetSpareLegList()))
-	legs = append(legs, grp.GetLegList()...)
-	return append(legs, grp.GetSpareLegList()...)
 }
 
 // dnReleaser is the release-only twin of the gateway's dnLedger: it accumulates

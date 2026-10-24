@@ -215,8 +215,8 @@ connection; dnvctl adds no translation layer.
 CT3. **Revision tokens.** A request that carries a token carries one of
 three messages: `dn_rev` on `DeleteDiskNode` and `UpdateDiskNodeDisabled`,
 `cn_rev` on their two controller-node mirrors, and `sp_rev` on every
-SP-scoped mutator — every create, delete, update, append, finish, cancel,
-switch and abort under a pool, and `GrowSlice`. Reads carry none; an
+SP-scoped mutator — every create, delete, update, append, finish, cancel
+and abort under a pool, and `GrowSlice`. Reads carry none; an
 operator reads the tokens with `dn get`, `cn get` and `sp get`. dnvctl
 sends exactly what was typed:
 
@@ -250,7 +250,7 @@ The check itself — made only when the token message is present — is
 
 **Groups and leaves.** The tree is noun-grouped, "dnvctl <group> <verb>",
 one group per resource — `cluster`, `dn`, `cn`, `sp`, `cntlr`, `td`, `ss`,
-`ns`, `clone`, `xfer`, `migr`, `spare`, `repair` and `retired-leg` — and it
+`ns`, `clone`, `xfer`, `migr`, `repair` and `retired-leg` — and it
 reuses gatewayctl's verb and flag vocabulary. The leaves are the RPCs of
 `service Gateway`, one leaf per RPC and nothing else (CT1): no convenience
 verbs, no compound commands, and cobra's stock `help` and `completion` are
@@ -273,9 +273,9 @@ the leaf is safe to script. An inspect RPC is an `inspect` leaf
 that hosts the object, out of that agent's latest observation of it, not
 from etcd. The bitmap RPCs are `get-bm`, `get-leg-bm` and `append-bm`;
 every other leaf keeps its RPC's verb (`cluster advance-ids`,
-`sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
-`spare switch`), save one: `repair abort` is `TryToAbortRepair`, the one
-leaf whose verb is not its RPC's (`repair` — `ctl/repair.go`).
+`sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`), save
+one: `repair abort` is `TryToAbortRepair`, the one leaf whose verb is not
+its RPC's (`repair` — `ctl/repair.go`).
 
 **Fields and flags.** Every request field maps to exactly one flag, with
 these exceptions:
@@ -308,9 +308,8 @@ with their types and defaults, are the code's, and `--help` lists them.
 **Identity flags.** Each group names its object with identity flags: `cluster` with `--name`; `dn` and `cn` with
 `--addr`, because a node's name is its ip:port; `sp` with the global `--sp`;
 `cntlr` with `--id`; `td`, `clone`, `xfer`, `migr` and `repair` with
-`--name`; `ss` with `--nqn`; `ns` with `--nqn` and `--idx`; `spare` with
-`--grp`, plus `--leg` on delete and `--spare` and `--target` on switch;
-`retired-leg` with `--leg`. `sp inspect-side` takes its side id as `--id`,
+`--name`; `ss` with `--nqn`; `ns` with `--nqn` and `--idx`; `retired-leg`
+with `--leg`. `sp inspect-side` takes its side id as `--id`,
 deliberately the same spelling as the `cntlr` group's, as in gatewayctl:
 the RPC, not the flag, says what the id means.
 
@@ -319,8 +318,8 @@ of that field: every value the field holds parses, and a value past either
 end of the field fails to parse, a usage error. A wider parse would cut
 such a value and send a number nobody typed; a narrower one would refuse
 values the gateway should judge, the client-side check CT8 forbids. An
-id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`, `--spare`,
-`--target`, `--retired-leg` — is declared as a string and parsed by dnvctl
+id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`, `--retired-leg` —
+is declared as a string and parsed by dnvctl
 with Go's base-0 rule, so a `0x` prefix is accepted. `--slots`, `--ids` and
 `--bad-legs` are comma-separated numeric lists; `--hosts` and the selector
 flags are comma-separated string lists. An empty list flag is the empty
@@ -577,8 +576,11 @@ than one reaches the gateway, which refuses it (CT8), and its new leg is
 the retired leg `--retired-leg` names or, when that is zero or not given,
 a fresh leg the `--dn-black` and `--dn-white` selector steers. dnvctl
 checks no stage: a call the repair's stage does not allow is the gateway's
-refusal, which names the stage (`architecture.md`, Repairs). `repair list`
-is not paged.
+refusal, which names the stage (`architecture.md`, Repairs).
+`repair finish` prints the reply as it is, `given_back_leg_id` included
+when it is zero (CT4), so the operator always sees whether the finish of a
+worker's repair gave a retired leg back (`architecture.md`, Repairs).
+`repair list` is not paged.
 
 ### `retired-leg` — `ctl/retiredleg.go`
 

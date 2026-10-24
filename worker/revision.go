@@ -632,7 +632,7 @@ func (w *revWorker) wait(d time.Duration, cc *pb.ClusterConf) bool {
 // applyDesired installs one desired change and, per RW6, issues its Syncup*
 // AT ONCE — from wherever in the loop the change was picked up, the round
 // included: RW9 lets an interval be an hour, so waiting for the round would
-// leave a failover's SpRev bump (AR5) or a spare switch (AR8) unapplied that
+// leave a failover's SpRev bump (AR5) or a repair's create (AR8) unapplied that
 // long. The round timer keeps running, so the cadence of RW8 is unaffected.
 //
 // cc is nil while the loop idles (RW9): the change is recorded, nothing is
