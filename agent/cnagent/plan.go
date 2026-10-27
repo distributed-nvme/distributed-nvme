@@ -34,11 +34,11 @@ const (
 	resKeyCloneDmFmt   = "clone_dm/%016x"
 )
 
-// detailsSpLevel is what a resource suppressed by the sp_level reports (CN19),
-// shared through common with the worker's settle (dnv-worker.md HL2);
-// detailsParked is the expected state of an effectively suspended ns-dev
-// (CN28): **live**, its table a dm-linear over the td's dm-error
-// (architecture.md, Namespace suspend semantics).
+// detailsSpLevel is the details of a resource suppressed by the sp_level
+// (CN19), text for people beside the reason the worker's settle reads
+// (suppressedRow; dnv-worker.md HL2); detailsParked is the expected state of
+// an effectively suspended ns-dev (CN28): **live**, its table a dm-linear
+// over the td's dm-error (architecture.md, Namespace suspend semantics).
 // detailsSuspended is what the generic single-device probes report for a device
 // they find dm-suspended on the table they want. A converge and a probe of one
 // cntlr take the same lock, so CN14's quiesce bracket is never observable from
@@ -50,7 +50,7 @@ const (
 // the suspend bit — unless the reload was only clearing a read-only flag. No
 // ns-dev is ever expected in it. None of the three details is a fault.
 const (
-	detailsSpLevel   = common.ResDetailsSpLevel
+	detailsSpLevel   = "sp_level"
 	detailsParked    = "parked"
 	detailsSuspended = "suspended"
 	// detailsProvisioning is what a provisioning-deferred resource reports:
@@ -152,7 +152,8 @@ type cntlrPlan struct {
 	// levelX is the level gate alone, without the role. The difference
 	// matters only in the report: a resource a *standby* simply does not
 	// have is left out of CntlrInfo, while one the level suppresses is
-	// reported RES_STATUS_MISSING with details = "sp_level" (CN19).
+	// reported RES_STATUS_MISSING with the level's reason (suppressedRow,
+	// CN19).
 	levelLeg   bool
 	levelGrp   bool
 	levelPool  bool

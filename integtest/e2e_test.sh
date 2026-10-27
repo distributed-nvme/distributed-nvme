@@ -9240,8 +9240,9 @@ setup_create_sp() {
 #                 pool metadata".
 #   CN15 (per-td) "primary builds both, standby only the error".
 #   CN19          a resource the sp_level suppresses is reported
-#                 RES_STATUS_MISSING with details = "sp_level"; a resource a
-#                 standby simply does not have is a DIFFERENT case.
+#                 RES_STATUS_MISSING with details = "sp_level" and the reason
+#                 RES_REASON_SP_LEVEL; a resource a standby simply does not
+#                 have is a DIFFERENT case.
 #
 # Which of those two a standby is, only the code says, and the answer is the
 # second — the row is LEFT OUT. The mechanism is not one shared arm, though,
@@ -11639,14 +11640,16 @@ ops_inspect() {
 #     wantGrp   = primary && level < NO_REDUND
 #     wantPool  = primary && level < NO_THINPOOL
 #     wantClone = primary && level < NO_CLONE
-#   what a gate that is false produces, on the PRIMARY
-#     legs       the leg loop      Missing(details "sp_level")
-#     groups     the group switch  Missing on the `case plan.primary` arm
+#   what a gate that is false produces, on the PRIMARY, each row through
+#   suppressedRow (agent/cnagent/syncup_cntlr.go): MISSING, details
+#   "sp_level", reason RES_REASON_SP_LEVEL
+#     legs       the leg loop      suppressedRow
+#     groups     the group switch  suppressedRow on the `case plan.primary` arm
 #     pools and both concats
-#                the slice loop    Missing, inside `if plan.primary`
-#     td raid0   the raid0 switch  Missing on the `case plan.primary` arm
+#                the slice loop    suppressedRow, inside `if plan.primary`
+#     td raid0   the raid0 switch  suppressedRow on the `case plan.primary` arm
 #     td dm-error
-#                the td loop       Missing on the `else` of `if plan.wantAny`,
+#                the td loop       suppressedRow on the `else` of `if plan.wantAny`,
 #                                  so DISABLE only — and its own comment says
 #                                  the row is reported MISSING rather than left
 #                                  out, because "omitted" and "never looked at"
@@ -11656,10 +11659,10 @@ ops_inspect() {
 #                                   reached only at DISABLE (!wantAny)
 #
 # So a suppressed row is PRESENT and RES_STATUS_MISSING with details
-# "sp_level" — CN19's own words — and never an absent row. (An absent row is
-# what a STANDBY produces for groups and pools, which is a different thing and
-# is why setup_assert_standby asserts emptiness there and this asserts
-# MISSING here.)
+# "sp_level" and the level's reason — CN19's own words — and never an absent
+# row. (An absent row is what a STANDBY produces for groups and pools, which
+# is a different thing and is why setup_assert_standby asserts emptiness
+# there and this asserts MISSING here.)
 #
 # READONLY's rows look exactly like READWRITE's (so do NO_CLONE's, in a case
 # with no clone): CN16 rule 7 reloads each user-facing ns-dev onto a dm-flakey
@@ -11847,6 +11850,12 @@ ops_set_level() { # <level, without the SP_LEVEL_ prefix>
 			"[(.cntlr_info.$map // {})[] | select(.details == \"sp_level\")] | length" \
 			"$total" \
 			"CN19: every suppressed row of $map reports details \"sp_level\" at SP_LEVEL_$lvl"
+		# The reason beside the text, the one the worker's settle reads
+		# (dnv-worker.md HL2).
+		assert_field "$CTL_OUT" \
+			"[(.cntlr_info.$map // {})[] | select(.reason == \"RES_REASON_SP_LEVEL\")] | length" \
+			"$total" \
+			"CN19: every suppressed row of $map carries the reason RES_REASON_SP_LEVEL at SP_LEVEL_$lvl"
 	done
 }
 

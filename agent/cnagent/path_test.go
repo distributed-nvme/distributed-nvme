@@ -44,6 +44,16 @@ type wantPath struct {
 	details string
 }
 
+// reason is the reason the row carries: the level's on a row the sp_level
+// suppresses (CN19), none on every other path row.
+func (w wantPath) reason() pb.ResReason {
+	if w.status == pb.ResStatus_RES_STATUS_MISSING &&
+		w.details == detailsSpLevel {
+		return pb.ResReason_RES_REASON_SP_LEVEL
+	}
+	return pb.ResReason_RES_REASON_NONE
+}
+
 func pathOk(name, details string) wantPath {
 	return wantPath{name, pb.ResStatus_RES_STATUS_OK, details}
 }
@@ -96,11 +106,11 @@ func readPathChannels(
 	}
 }
 
-// assert holds every channel to want: the same side ids, each row's
-// name, status and details, and a tracker's epoch. The three channels carry
-// the same rows, epochs included: nothing changed between them, so a row
-// that moved would be a row the converge and the probe disagree about, and
-// the two would trade it every round.
+// assert holds every channel to want: the same side ids, each row's name,
+// status, details and reason, and a tracker's epoch. The three channels
+// carry the same rows, epochs included: nothing changed between them, so a
+// row that moved would be a row the converge and the probe disagree about,
+// and the two would trade it every round.
 func (c pathChannels) assert(
 	t *testing.T,
 	label string,
@@ -132,9 +142,10 @@ func (c pathChannels) assert(
 				t.Fatalf("%s: the %s's path row of side %#x has no epoch",
 					label, ch.name, sideId)
 			}
-			if row.GetReason() != pb.ResReason_RES_REASON_NONE {
+			if row.GetReason() != w.reason() {
 				t.Fatalf("%s: the %s's path row of side %#x carries "+
-					"reason %v", label, ch.name, sideId, row.GetReason())
+					"reason %v, want %v", label, ch.name, sideId,
+					row.GetReason(), w.reason())
 			}
 		}
 	}
@@ -367,9 +378,10 @@ func TestPathRowsFollowTheController(t *testing.T) {
 }
 
 // TestPathRowsFollowTheLevel pins CN19 on the path rows: at a level that
-// suppresses legs every row reads MISSING "sp_level", on a standby as on a
-// primary, as the leg rows do; at a level below it, SP_LEVEL_NO_MIGRATION
-// among them, the cntlr holds its legs and reports their paths.
+// suppresses legs every row reads MISSING "sp_level" with the level's reason,
+// on a standby as on a primary, as the leg rows do; at a level below it,
+// SP_LEVEL_NO_MIGRATION among them, the cntlr holds its legs and reports
+// their paths, with no reason.
 func TestPathRowsFollowTheLevel(t *testing.T) {
 	suppressed := map[uint64]wantPath{}
 	for sideId, w := range allPathsOk() {

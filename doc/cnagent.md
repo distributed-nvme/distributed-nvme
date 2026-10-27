@@ -78,14 +78,6 @@ and comments `common/constants.go` holds:
   pause before each in-pass retry, and the steps of the wait for the
   namespace head after a connect this pass made, with a pause of its own
   while a picked head is not complete (CN10).
-* `ResDetailsSpLevel`, the details of a `CntlrInfo` row the `sp_level`
-  suppresses (CN19): `RES_STATUS_MISSING` that says the resource must not
-  exist, where every other `MISSING` the cn agent reports says it does not
-  exist yet or, on a clone's `clone_id_to_target`, that the clone's source
-  has a fault (CN18). The cn agent writes it and the worker's settle reads it
-  (`dnv-worker.md` HL2), so the two take it from one constant; a value
-  that drifted on one side would keep every primary whose level suppresses
-  a row the settle reads settling for as long as that level stands.
 
 Two dm kinds in the cn namespace are the cn's own — `DmKindCnLeg`, the
 leg wrapper; `DmKindCnGrp`, the `RedundNone` group device — with their
@@ -587,7 +579,7 @@ An initial `CreateStoragePool` in which every leg is still provisioning
 therefore converges to an empty-ish cntlr reporting `PROVISIONING`
 throughout: no error, no `err_epoch`, no failover flapping. Deferral is
 not CN19's `sp_level` suppression, and where both apply `sp_level` wins
-(`RES_STATUS_MISSING`, details `ResDetailsSpLevel`): the level is a state
+(`RES_STATUS_MISSING` with the level's reason): the level is a state
 the operator asked for, and claiming a resource "is coming" would
 contradict them.
 
@@ -2555,18 +2547,71 @@ same status, and a row's epoch moves only when the state does:
   on this node's own side, not the source's; `RES_STATUS_MISSING` with no
   subsystem entry, and for a fault of the source, which is an endpoint
   with no live controller, its details the path states, or no source
-  namespace; and `RES_STATUS_OK` with the path states otherwise;
+  namespace, each with the reason `RES_REASON_SOURCE_FAULT`, save a
+  namespace still to come after a connect of the pass (below); and
+  `RES_STATUS_OK` with the path states otherwise;
 * `clone_id_to_dm_clone`: `RES_STATUS_ERROR` when the dm-clone's read did
   not answer; `RES_STATUS_MISSING` when the dm-clone is absent, its
   details saying why — "source not connected", or "source unknown: …"
   when the walk or the lookup did not answer, while step 1 does not read
-  the source as connected, and "metadata group not ready" while the clone
-  meta group is not; `RES_STATUS_OK` with the raw status line while the
-  dm-clone serves, its hydration on and its metadata read-write; and
+  the source as connected, both with the reason `RES_REASON_SOURCE_FAULT`
+  while the clone meta group is ready, save in the state below that a
+  connect of the pass leaves, and with none while the group is not, and
+  "metadata group not ready" beside a source step 1 reads as connected
+  while the group is not, with no reason, as a `MISSING` with no details
+  has none; `RES_STATUS_OK` with the raw status line while the dm-clone
+  serves, its hydration on and its metadata read-write; and
   `RES_STATUS_ERROR`, followed by the line, when it does not: "metadata
   read-only" or "metadata failed" for its metadata mode, then "hydration
-  not enabled" for hydration off, and "metadata mode not read-write" for
-  a line that shows hydration on and no mode.
+  not enabled" for hydration off, and "metadata mode not read-write" for a
+  line that shows hydration on and no mode.
+
+The source's text on the dm-clone row carries no reason while the clone
+meta group is not ready. Reason: a group still to be assembled is a build
+in progress, and the worker's settle waits for a `MISSING` row with no
+reason but reads one with the source-fault reason as built (`dnv-worker.md`
+HL2), so a source this node does not read as ready must not hide that
+build from it. For the same reason, a converge whose step 1 ran a connect
+of the source in its own pass, and whose read after it finds a controller
+at every endpoint and no source namespace — the head wait ended with the
+budget spent, or a connect failed after the kernel made its controller
+(`dnagent.md` SH15) — writes the target row's "no namespace" and the
+dm-clone row's source text with no reason: step 1 connects only an
+endpoint its lookup found with no controller, so a controller found there
+after is one a connect made since that lookup — the pass's own, a failed
+one included, or, in a race, another cntlr's — and the kernel adds the
+namespace head after it makes the controller, so that namespace may be a
+scan still in progress, which the CN10 retry reads again; a controller
+whose "address" did not answer at that lookup, found there once it
+answers, reads the same way, on the side that holds the settle. A target
+row that reads an endpoint's controller not live keeps the reason, so in
+that state the dm-clone row alone holds the settle. A read gives that
+state the reason (below); the two channels then differ in the reason, and
+after a failed connect in the target row's details too, neither of which
+moves an epoch (`dnagent.md` SH14), and from the retry's pass on, which
+finds the source connected and connects nothing, a namespace not there
+carries the reason on both, whether it stays away or is still to come
+(below).
+
+**Only a pass that ran a connect can tell a source still coming up.** The
+agent reads the source at one moment and keeps nothing of it from one
+pass to the next, so a reading that connected nothing gives the rows of a
+source still coming up on this node the source-fault reason by the rule
+above, as it gives those of a source that is not ready. Such a reading is
+a read — of the state above, or, after a converge whose step 1 connected
+nothing because a sweep's disconnect of the source was in flight or a
+walk or a lookup did not answer (that converge's own target row reads
+`ERROR`), of a source with no subsystem entry until the CN10 retry's pass
+connects it — or a converge that finds at every endpoint a controller made
+before its step 1 looked, by an earlier pass of its own cntlr, as the CN10
+retry's pass after the state above finds one, by another clone's step 1 or
+by another cntlr's pass, before the kernel adds the namespace head. The
+worker's settle reads those rows as built (`dnv-worker.md` HL2), so it can
+judge a new primary settled a few seconds before the CN10 retry builds the
+rest of the clone, and that build is then judged as a settled primary's
+is. Reason: a rule that told those moments apart would have the agent
+remember its work from one pass to the next, or would keep a source that
+is not ready holding the settle, which the reason exists to end.
 
 A step that fails in a converge decides no status: the error of a failed
 connect leads the details of the source's row, and the error of step 3's
@@ -2594,28 +2639,32 @@ clone onto, or no metadata device to clone with.
 **A fault of the source does not itself move the role.** It reads
 `RES_STATUS_MISSING`, not `ERROR`, and a missing row sets no health epoch
 (`dnv-worker.md` HL2), so the row leads to no failover and no cntlr
-replacement. Reason: moving the primary cannot repair the source, and the
-worker cannot tell a fault in the primary's own path to the source from
-one at the source; the operator can move the role by disabling the
-primary cntlr (`dnv-worker.md` AR5). A fault that fails step 1 still
-keeps the CN10 retry running, whose attempts hold the primary's reads
-off while they run, so its observation can become too old, which the worker
-counts as a missed round, and missed rounds can move the role (Known
-limits). A dm-clone up with hydration off, or with its metadata read-only
-or failed, is this node's own fault and reads `ERROR`: the primary that
-takes the role assembles the clone meta group and creates the dm-clone
-over the metadata it holds (steps 2 and 3). A clone meta group no cntlr
-can assemble leaves the clone's dm-clone row `MISSING` and its namespaces
-parked on each primary that has to build the dm-clone, wherever the role
-goes, until enough of its legs are back for a cntlr to assemble it or an
-operator force-starts it from a leg that holds a full copy, a leg of its
-`leg_list` or a retired leg a repair of theirs takes back (CN12, the forced
-start; `architecture.md`, Known limits). Reason: a
-repair adds its new leg only to a running array (CN12), and leg repair
-creates no repair for a group whose array does not run (`dnv-worker.md`
-AR8). The operator may delete the clone instead. A dm-clone that serves
-and whose copy is whole serves on over such a group, since it writes no
-metadata (Known limits).
+replacement; nor does it keep a new primary settling, since the settle
+reads a row with the source-fault reason as built (`dnv-worker.md` HL2).
+Reason: moving the primary cannot repair the source, and the worker cannot
+tell a fault in the primary's own path to the source from one at the
+source; the operator can move the role by disabling the primary cntlr
+(`dnv-worker.md` AR5). The reason names what this node reads of the
+source, not a fault proven on the source's own node: a walk or a lookup
+of this node that did not answer leaves the dm-clone absent for the same
+cause, a source the pass cannot read as connected. A fault that fails
+step 1 still keeps the CN10 retry running, whose attempts hold the
+primary's reads off while they run, so its observation can become too
+old, which the worker counts as a missed round, and missed rounds can move
+the role (Known limits). A dm-clone up with hydration off, or with its
+metadata read-only or failed, is this node's own fault and reads `ERROR`:
+the primary that takes the role assembles the clone meta group and creates
+the dm-clone over the metadata it holds (steps 2 and 3). A clone meta group
+no cntlr can assemble leaves the clone's dm-clone row `MISSING` and its
+namespaces parked on each primary that has to build the dm-clone, wherever
+the role goes, until enough of its legs are back for a cntlr to assemble it
+or an operator force-starts it from a leg that holds a full copy, a leg of
+its `leg_list` or a retired leg a repair of theirs takes back (CN12, the
+forced start; `architecture.md`, Known limits). Reason: a repair adds its
+new leg only to a running array (CN12), and leg repair creates no repair for
+a group whose array does not run (`dnv-worker.md` AR8). The operator may
+delete the clone instead. A dm-clone that serves and whose copy is whole
+serves on over such a group, since it writes no metadata (Known limits).
 
 Any failure of step 1 registers the CN10 retry, and so do these later
 ones, each of which stops the build before the dm-clone serves: a clone
@@ -2742,12 +2791,13 @@ it, so the sweep phase takes the layers down; lowering it grows the set
 again and the build phase rebuilds them. There is no level-specific
 teardown code anywhere. Bitmap chunks stay applied-by-file throughout
 (`dnagent.md` SH21). A resource suppressed by the level is reported
-`RES_STATUS_MISSING` with the details `ResDetailsSpLevel` (Names and
-constants in `common`; the worker's settle reads it). A resource deferred by CN9's
-provisioning gate is a different thing — `RES_STATUS_PROVISIONING` with
-the details "provisioning", at every level — and where both apply, the
-level wins (CN9). The additional cn behavior per level, each holding at
-that level and above:
+`RES_STATUS_MISSING` with the reason `RES_REASON_SP_LEVEL`, on the
+converge and the read alike, which the worker's settle reads
+(`dnv-worker.md` HL2), and the details "sp_level", which are for people
+(CN29). A resource deferred by CN9's provisioning gate is a different
+thing — `RES_STATUS_PROVISIONING` with the details "provisioning", at
+every level — and where both apply, the level wins (CN9). The additional
+cn behavior per level, each holding at that level and above:
 
 * `SP_LEVEL_READONLY`: every user-facing ns-dev on the primary carries the
   dm-flakey error-writes table over its normal backing (CN16 rule 7) —
@@ -3593,18 +3643,18 @@ The rows, each with its `res_name` and what its probe checks:
   and none for a leg with one side, each saying whether this node holds a
   live controller to that side. Every cntlr reports them, primary and
   standby alike, on both channels, through one function, which reads a
-  row in this order: `RES_STATUS_MISSING` "sp_level" while the level
-  suppresses legs (CN19), as the leg row does; `RES_STATUS_PROVISIONING`
-  "provisioning" while the side is unprovisioned, since nothing is
-  exported for it (CN9); `RES_STATUS_ERROR` with the leg row's details
-  while a sweep's disconnect of the leg's subsystem is in flight (CN10's
-  disconnect registry); otherwise the leg's lookup in the walk:
-  `RES_STATUS_OK` when a live controller of the subsystem has the side's
-  address, `RES_STATUS_ERROR` when that controller is not live, both with
-  the controller's "state" and "ana_state" as the details, and
-  `RES_STATUS_MISSING` "no controller" when no controller has it. A walk
-  or a lookup that did not answer reads `RES_STATUS_ERROR` naming the
-  read, never `MISSING`, and so does a subsystem one of whose
+  row in this order: `RES_STATUS_MISSING` "sp_level" with the level's
+  reason while the level suppresses legs (CN19), as the leg row does;
+  `RES_STATUS_PROVISIONING` "provisioning" while the side is
+  unprovisioned, since nothing is exported for it (CN9); `RES_STATUS_ERROR`
+  with the leg row's details while a sweep's disconnect of the leg's
+  subsystem is in flight (CN10's disconnect registry); otherwise the leg's
+  lookup in the walk: `RES_STATUS_OK` when a live controller of the
+  subsystem has the side's address, `RES_STATUS_ERROR` when that controller
+  is not live, both with the controller's "state" and "ana_state" as the
+  details, and `RES_STATUS_MISSING` "no controller" when no controller has
+  it. A walk or a lookup that did not answer reads `RES_STATUS_ERROR` naming
+  the read, never `MISSING`, and so does a subsystem one of whose
   controllers' "address" read did not answer when no controller has the
   side's address, since that controller may be the side's (CN10). The
   ANA state does not count: while a migration's cutover is pending its
@@ -3640,9 +3690,9 @@ The rows, each with its `res_name` and what its probe checks:
 * `clone_id_to_target`, named by the clone's `src_nqn`: the sysfs walk of
   CN10 — the subsystem whose "subsysnqn" is `src_nqn`, each controller's
   "state" and the source namespace's device — not nvme list-subsys; its
-  status is CN18's shared rule's, `OK` with a live controller per
-  `src_tr_conf_list` entry and the source namespace there, and
-  `RES_STATUS_MISSING` with no subsystem entry or for a fault of the
+  status and its reason are CN18's shared rule's, `OK` with a live
+  controller per `src_tr_conf_list` entry and the source namespace there,
+  and `RES_STATUS_MISSING` with no subsystem entry or for a fault of the
   source. While a sweep's disconnect of `src_nqn` is in flight (CN10's
   disconnect registry) it is `RES_STATUS_ERROR` with the converge's own
   details, whatever the walk shows; otherwise a walk or a lookup that did
@@ -3652,11 +3702,11 @@ The rows, each with its `res_name` and what its probe checks:
   `dmsetup info` — the reading's in a read — then
   `dmsetup status` of a dm-clone that is there, and after a status read
   that failed the fresh `dmsetup info` of CN16 rule 5 and CN18 step 2; its
-  status is CN18's shared rule's, which reads the dm-clone's hydration
-  and its metadata mode from the status line, and the clone meta group's
-  row of the same read for a dm-clone that is absent. The details carry
-  the raw status line whenever it was read, whatever the row's status
-  (`architecture.md`, Live-state reporting — hydration progress;
+  status and its reason are CN18's shared rule's, which reads the
+  dm-clone's hydration and its metadata mode from the status line, and the
+  clone meta group's row of the same read for a dm-clone that is absent. The
+  details carry the raw status line whenever it was read, whatever the row's
+  status (`architecture.md`, Live-state reporting — hydration progress;
   `DeleteClone`'s hydration check, which `force` skips, reads it).
 * A clone reports these two rows and no other: its clone meta group
   reports in `grp_id_to_md_raid` and its legs and its repair's new legs in
@@ -3704,29 +3754,31 @@ CN29. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output
 in its details and the converge pass continues with the remaining
 resources. Two things qualify that. The details are for people: where
-the worker must tell one failure from another, the row says so in its
-reason (`architecture.md`, Live-state reporting), set from the command
-wrapper's typed error, never from the text (`dnagent.md`, OS wrappers —
-`dm.go`, `nvmet.go`, `nvmehost.go`); the one reason the cn agent sets is
-CN14's lost thin id. And a clone's two rows take their status from
-CN18's shared rule, from the live state, on a converge and a read
-alike, a failed command's output joining their details. Probes create,
-change and remove nothing — the
+the worker must tell one cause of a row's status from another, the row
+says so in its reason (`architecture.md`, Live-state reporting), never in
+the text. The cn agent sets three reasons: CN14's lost thin id, from the
+command wrapper's typed error (`dnagent.md`, OS wrappers — `dm.go`,
+`nvmet.go`, `nvmehost.go`); and, from its own pass's state, CN19's level,
+from the level the pass's plan reads, and CN18's source fault, which
+marks the clone rows this node keeps missing because it does not read the
+clone's source as ready, from step 1's reading of the source. And a
+clone's two rows take their status from CN18's shared rule, from the live
+state, on a converge and a read alike, a failed command's output joining
+their details. Probes create, change and remove nothing — the
 metadata-snapshot reserve runs only inside `dumpThinMetadata` (the CN25
 bitmap reads and CN14's sweeps of a pool's thin ids — the activation
 sweep and the sweep after a failed delete), never from `probe.go` —
 though a status read of a dm-clone makes the kernel commit the clone's
 metadata, where a thin pool's commits nothing (`dnagent.md` SH17).
 `RES_STATUS_PROVISIONING` is never produced by this path: it is assigned
-by the CN9 gate, not by a failed command; and
-`RES_STATUS_PENDING` is produced by the CN11 registry alone, never by a
-failed command. The group row's probe opens no md member device: it is
-CN12's sysfs read, so a dead member of an array that keeps another
-in-sync member does not turn the row `ERROR` — it reads `OK`, with
-degraded once md has failed the member (an IO to it that errors does,
-and so does CN12's reconciliation failing it out as an extra or as a
-repair's bad leg; until then
-the dead member does not count in "degraded"), and the fault is its leg
+by the CN9 gate, not by a failed command; and `RES_STATUS_PENDING` is
+produced by the CN11 registry alone, never by a failed command. The
+group row's probe opens no md member device: it is CN12's sysfs read, so
+a dead member of an array that keeps another in-sync member does not
+turn the row `ERROR` — it reads `OK`, with degraded once md has failed
+the member (an IO to it that errors does, and so does CN12's
+reconciliation failing it out as an extra or as a repair's bad leg; until
+then the dead member does not count in "degraded"), and the fault is its leg
 row's, from the CN11 prober's own IO, until the leg can take the member
 back, when the verdict names it (CN30) and the converge puts it back
 (CN12), unless it is an open repair's bad leg, which stays out while its
@@ -4309,48 +4361,49 @@ would be a leftover report no `Syncup*` could ever clear.
   is whole writes no metadata, so a group whose legs all fail under it
   leaves it in read-write mode and serving; the fault is then the group's
   and the legs' rows' alone.
-* A fault of a clone's source does not itself move the role: a source
-  with no live controller at one of its endpoints, or with no namespace,
-  reads `clone_id_to_target` `RES_STATUS_MISSING` on every converge and
-  every read alike (CN18's shared rule), as a source with no
-  subsystem entry does, and a missing row sets no health epoch, so the row
-  neither fails the primary over nor replaces it. The copy waits until the
-  source answers, and a host's read of a block not yet copied waits for
-  the source or fails. A fault in the primary's own path to the source
-  reads the same, though a new primary would not meet it: the operator can
-  move the role by disabling the primary cntlr (`dnv-worker.md` AR5), and
-  the new primary creates the dm-clone over the clone meta group's
-  metadata (CN18 step 3). A
-  fault that fails step 1 — no source namespace, or an endpoint with no
-  controller at all that step 1 then fails to connect — keeps the CN10
-  retry running for as long as it lasts (CN18), with the profile of the
-  late-member retry above: its attempts hold the cntlr's reads off, so
-  its observation can become too old, which counts as a missed round, and
-  missed rounds can fail the primary over. A source whose every
-  endpoint has a controller, live or not, and whose namespace is there
-  passes step 1, so its fault registers no retry. A clone that has
-  hydrated in full serves on through its dm-clone, its namespace
-  optimized, since serving follows the dm-clone's own status and not the
-  rows (CN16 rule 5); that rests on a dm-clone keeping hydration enabled
-  once it has hydrated in full, and one that turned it off would read
+* A fault of a clone's source does not itself move the role: a source with
+  no live controller at one of its endpoints, or with no namespace, reads
+  `clone_id_to_target` `RES_STATUS_MISSING` on every converge and every
+  read alike (CN18's shared rule), as a source with no subsystem entry
+  does, and a missing row sets no health epoch, so the row neither fails
+  the primary over nor replaces it; it carries the source-fault reason,
+  save the "no namespace" a converge writes when its own connect leaves the
+  namespace head still to come (CN18), so it keeps no new primary settling
+  past that converge either (`dnv-worker.md` HL2). The copy waits until the
+  source answers, and a host's read of a block not yet copied waits for the
+  source or fails. A fault in the primary's own path to the source reads
+  the same, though a new primary would not meet it: the operator can move
+  the role by disabling the primary cntlr (`dnv-worker.md` AR5), and the
+  new primary creates the dm-clone over the clone meta group's metadata
+  (CN18 step 3). A fault that fails step 1 — no source namespace, or an
+  endpoint with no controller at all that step 1 then fails to connect —
+  keeps the CN10 retry running for as long as it lasts (CN18), with the
+  profile of the late-member retry above: its attempts hold the cntlr's
+  reads off, so its observation can become too old, which counts as a
+  missed round, and missed rounds can fail the primary over. A source whose
+  every endpoint has a controller, live or not, and whose namespace is
+  there passes step 1, so its fault registers no retry. A clone that has
+  hydrated in full serves on through its dm-clone, its namespace optimized,
+  since serving follows the dm-clone's own status and not the rows (CN16
+  rule 5); that rests on a dm-clone keeping hydration enabled once it has
+  hydrated in full, and one that turned it off would read
   `RES_STATUS_ERROR` on every finished clone and park its namespaces. A
   dm-clone up with hydration off, by contrast, reads `RES_STATUS_ERROR`
   (above) and moves the role at the primary's threshold, and the new
   primary creates the dm-clone over the clone meta group's metadata and
-  finishes the build (CN18). The clone goes out of
-  service, even one that has hydrated in full, when its dm-clone must be
-  built again while a fault at the source lasts and that build fails
-  step 1 (CN18). A role move, a CN reboot, which takes the dm-clone and
-  the source's controllers together, and a level that suppresses the
-  clone, raised and lowered again (CN19), each need that build; it fails
-  on a CN with no controller at an endpoint that it then cannot connect,
-  and on any CN while the source has no namespace. CN16 rule 5 then parks
-  every ns-dev of the destination td on its `CnErrorName`, and a host
-  waits on the namespace, which stays inaccessible, until the source
-  comes back or the clone is deleted with `force`. Without `force`
-  the delete is refused: its hydration check reads the primary's
-  `clone_id_to_dm_clone`, which carries no status line (`architecture.md`,
-  Clones).
+  finishes the build (CN18). The clone goes out of service, even one that
+  has hydrated in full, when its dm-clone must be built again while a fault
+  at the source lasts and that build fails step 1 (CN18). A role move, a CN
+  reboot, which takes the dm-clone and the source's controllers together,
+  and a level that suppresses the clone, raised and lowered again (CN19),
+  each need that build; it fails on a CN with no controller at an endpoint
+  that it then cannot connect, and on any CN while the source has no
+  namespace. CN16 rule 5 then parks every ns-dev of the destination td on
+  its `CnErrorName`, and a host waits on the namespace, which stays
+  inaccessible, until the source comes back or the clone is deleted with
+  `force`. Without `force` the delete is refused: its hydration check reads
+  the primary's `clone_id_to_dm_clone`, which carries no status line
+  (`architecture.md`, Clones).
 * A controller delete whose target vanishes mid-delete waits out the
   kernel's admin timeout: when a disk node removes a side's export while
   this CN's `nvme disconnect` of the leg is mid-delete — the two ends of

@@ -300,10 +300,11 @@ func TestResTrackerEpoch(t *testing.T) {
 }
 
 // TestResTrackerReason pins the reason beside the epoch rule (architecture.md,
-// Live-state reporting): only ErrReason and SetReason name one, every other
-// helper gives RES_REASON_NONE, the tracker keeps the reason of the latest
-// outcome, and the reason never moves the epoch — only a status change does.
-// The returned row is a copy of the whole stored row, the reason included.
+// Live-state reporting): only ErrReason, MissingReason and SetReason name
+// one, every other helper gives RES_REASON_NONE, the tracker keeps the reason
+// of the latest outcome, and the reason never moves the epoch — only a status
+// change does. The returned row is a copy of the whole stored row, the reason
+// included.
 func TestResTrackerReason(t *testing.T) {
 	const lost = pb.ResReason_RES_REASON_THIN_ID_LOST
 	const none = pb.ResReason_RES_REASON_NONE
@@ -388,6 +389,52 @@ func TestResTrackerReason(t *testing.T) {
 		GetReason() != none || got.GetEpoch() != waiting.GetEpoch() {
 		t.Errorf("Set after SetReason = %v, want no reason at epoch %d",
 			got, waiting.GetEpoch())
+	}
+	// MissingReason names one on a MISSING row under the same rule: a row
+	// that gains it while it reads MISSING keeps its epoch, another reason
+	// keeps it too, Missing clears it, and the row goes back to the tracker
+	// whole.
+	const level = pb.ResReason_RES_REASON_SP_LEVEL
+	const source = pb.ResReason_RES_REASON_SOURCE_FAULT
+	now = 1100
+	absent := tracker.Missing("lvl", "dnv-pool", "")
+	now = 1200
+	suppressed := tracker.MissingReason("lvl", "dnv-pool", "sp_level", level)
+	wantSuppressed := &pb.ResInfo{
+		ResName: "dnv-pool",
+		Status:  pb.ResStatus_RES_STATUS_MISSING,
+		Details: "sp_level",
+		Epoch:   absent.GetEpoch(),
+		Reason:  level,
+	}
+	if !proto.Equal(suppressed, wantSuppressed) {
+		t.Errorf("MissingReason row = %v, want %v", suppressed, wantSuppressed)
+	}
+	if stored := tracker.hist.state["lvl"]; !proto.Equal(stored,
+		wantSuppressed) {
+		t.Errorf("stored MissingReason row = %v, want %v", stored,
+			wantSuppressed)
+	}
+	now = 1300
+	if got := tracker.MissingReason("lvl", "dnv-pool", "source not connected",
+		source); got.GetReason() != source ||
+		got.GetEpoch() != absent.GetEpoch() {
+		t.Errorf("MissingReason with another reason = %v, want it at "+
+			"epoch %d", got, absent.GetEpoch())
+	}
+	now = 1400
+	if got := tracker.Missing("lvl", "dnv-pool", ""); got.GetReason() !=
+		none || got.GetEpoch() != absent.GetEpoch() {
+		t.Errorf("Missing after MissingReason = %v, want no reason at "+
+			"epoch %d", got, absent.GetEpoch())
+	}
+	// From another status it is a status change like any other.
+	now = 1500
+	tracker.Ok("lvl", "dnv-pool", "")
+	now = 1600
+	if got := tracker.MissingReason("lvl", "dnv-pool", "sp_level",
+		level); got.GetEpoch() != 1600 || got.GetReason() != level {
+		t.Errorf("MISSING again = %v, want the reason at epoch 1600", got)
 	}
 	// The other helpers give no reason.
 	for name, row := range map[string]*pb.ResInfo{

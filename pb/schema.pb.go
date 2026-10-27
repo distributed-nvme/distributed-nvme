@@ -111,8 +111,13 @@ const (
 	// UNKNOWN means can't get response from dn/cn
 	ResStatus_RES_STATUS_UNKNOWN ResStatus = 0
 	// MISSING means dn/cn has not created it or, on a clone's
-	// clone_id_to_target row, that the clone's source has a fault
-	// (architecture.md, Live-state reporting)
+	// clone_id_to_target row, that this node reads the clone's source as
+	// not connected, not live or with no namespace; the row's reason marks
+	// a resource the sp_level suppresses, and a clone row this node keeps
+	// missing because it does not read the clone's source as ready
+	// (cnagent.md CN18 says which, and when a source still coming up reads
+	// so); the worker's settle waits for neither (architecture.md,
+	// Live-state reporting)
 	ResStatus_RES_STATUS_MISSING ResStatus = 1
 	// ERROR means dn/cn tried to create it but failed
 	ResStatus_RES_STATUS_ERROR ResStatus = 2
@@ -198,6 +203,24 @@ const (
 	// the two RES_STATUS_PROVISIONING rows of SideInfo.MigrDstInfo, and the
 	// worker's cutover reads it from target_info (dnv-worker.md RW18).
 	ResReason_RES_REASON_AWAITING_CUTOVER ResReason = 2
+	// The sp_level suppresses the resource: the cn agent sets it on every
+	// RES_STATUS_MISSING row its level suppresses, on both channels, beside
+	// the details "sp_level", which are for people (cnagent.md CN19, CN29),
+	// and the worker's settle reads such a row as built (dnv-worker.md HL2).
+	ResReason_RES_REASON_SP_LEVEL ResReason = 3
+	// This node does not read a clone's source as ready: the cn agent sets
+	// it on both channels, from its own reading of the source, on the
+	// RES_STATUS_MISSING rows CN18's shared rule gives a clone for that
+	// reading — its clone_id_to_target row, and its clone_id_to_dm_clone
+	// row that says the source is not connected or unknown while the clone
+	// meta group is ready — save the target row's "no namespace" and the
+	// dm-clone row's source text in the state CN18 names, where a connect
+	// of the converge's own pass leaves the namespace head still to come
+	// (cnagent.md CN18, CN29). It names this node's reading, not a fault
+	// proven on the source's own node. The rows of a clone the sp_level
+	// suppresses carry RES_REASON_SP_LEVEL instead. The worker's settle
+	// reads such a row as built (dnv-worker.md HL2).
+	ResReason_RES_REASON_SOURCE_FAULT ResReason = 4
 )
 
 // Enum value maps for ResReason.
@@ -206,11 +229,15 @@ var (
 		0: "RES_REASON_NONE",
 		1: "RES_REASON_THIN_ID_LOST",
 		2: "RES_REASON_AWAITING_CUTOVER",
+		3: "RES_REASON_SP_LEVEL",
+		4: "RES_REASON_SOURCE_FAULT",
 	}
 	ResReason_value = map[string]int32{
 		"RES_REASON_NONE":             0,
 		"RES_REASON_THIN_ID_LOST":     1,
 		"RES_REASON_AWAITING_CUTOVER": 2,
+		"RES_REASON_SP_LEVEL":         3,
+		"RES_REASON_SOURCE_FAULT":     4,
 	}
 )
 
@@ -17522,11 +17549,13 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x05*^\n" +
+	"\x12RES_STATUS_PENDING\x10\x05*\x94\x01\n" +
 	"\tResReason\x12\x13\n" +
 	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
 	"\x17RES_REASON_THIN_ID_LOST\x10\x01\x12\x1f\n" +
-	"\x1bRES_REASON_AWAITING_CUTOVER\x10\x02*O\n" +
+	"\x1bRES_REASON_AWAITING_CUTOVER\x10\x02\x12\x17\n" +
+	"\x13RES_REASON_SP_LEVEL\x10\x03\x12\x1b\n" +
+	"\x17RES_REASON_SOURCE_FAULT\x10\x04*O\n" +
 	"\bRepStage\x12\x15\n" +
 	"\x11REP_STAGE_CREATED\x10\x00\x12\x15\n" +
 	"\x11REP_STAGE_STARTED\x10\x01\x12\x15\n" +

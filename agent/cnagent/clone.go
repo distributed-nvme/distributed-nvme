@@ -106,6 +106,18 @@ type cloneSource struct {
 	// stepErr is a connect of the converge's CN18 step 1 that failed. The
 	// probe connects nothing and never has one.
 	stepErr error
+	// headPending: the converge's CN18 step 1 ran a connect of the source in
+	// this pass, and the read after it (the head wait, awaitNsHead, the
+	// budget spent; or the lookup after a connect that failed) finds a
+	// controller at every endpoint and no source namespace head
+	// (headToCome). The kernel adds the head after it made the controller,
+	// so it may be a scan still in progress, a build in progress the
+	// source-fault reason must not hide from the settle: the target row's
+	// "no namespace" and the dm-clone row's source text then carry no reason
+	// (cloneTargetRow, cloneDmRow). The probe connects nothing and never has
+	// it, nor does a converge whose step 1 connects nothing; each reads a
+	// head still to come with the reason, which CN18 states as a known limit.
+	headPending bool
 }
 
 // readCloneSource reads the source the way ensureCloneSource starts: the CN10
@@ -136,9 +148,23 @@ func (s *CnAgentServer) readCloneSource(
 // is not asked: the probe never has one, and ensureCloneSource stops step 1
 // on it itself.
 func (src cloneSource) ready(cp *clonePlan) bool {
+	return src.atEveryEndpoint(cp) && src.view.nsDev != ""
+}
+
+// headToCome reports whether this read is one ready would take but for the
+// source namespace head: what the read after a connect of the pass finds
+// while the kernel has made a controller and not yet added the head
+// (headPending).
+func (src cloneSource) headToCome(cp *clonePlan) bool {
+	return src.atEveryEndpoint(cp) && src.view.nsDev == ""
+}
+
+// atEveryEndpoint reports whether no sweep's disconnect of the source is in
+// flight, the lookup answered and found the subsystem, and every configured
+// endpoint has a controller, whatever its state.
+func (src cloneSource) atEveryEndpoint(cp *clonePlan) bool {
 	view := src.view
-	if src.inFlight || src.readErr != nil || view == nil || !view.found ||
-		view.nsDev == "" {
+	if src.inFlight || src.readErr != nil || view == nil || !view.found {
 		return false
 	}
 	for _, tr := range cp.clone.GetSrcTrConfList() {
@@ -152,6 +178,7 @@ func (src cloneSource) ready(cp *clonePlan) bool {
 // unready is the text of clone_id_to_dm_clone MISSING beside a source that is
 // not ready: unknown when the lookup did not answer (CN10), since the pass does
 // not know whether the source is connected, and not connected otherwise.
+// cloneDmRow says when the row carries RES_REASON_SOURCE_FAULT with it.
 func (src cloneSource) unready() string {
 	if errors.Is(src.readErr, errSubsysUnknown) {
 		return "source unknown: " + src.readErr.Error()
@@ -160,21 +187,30 @@ func (src cloneSource) unready() string {
 }
 
 // cloneTargetRow is the clone_id_to_target row of one read of the source
-// (CN28), the same for the converge and the probe. It reads ERROR only for
-// this node's own side: while a sweep's disconnect of the source is in flight,
-// or when the walk or the lookup did not answer. A fault of the source reads
-// MISSING, as a source with no subsystem entry does: a configured endpoint
-// with no live controller, its details the path states, or no source
-// namespace. A MISSING row sets no health epoch, so the row does not move the
-// role: moving the primary cannot repair the source, and the worker cannot
-// tell a fault in this node's own path to the source from one at the source
-// (CN18). A fault that fails CN18 step 1 still keeps the CN10 retry running,
-// whose attempts hold the cntlr's reads off while each runs (dnagent.md SH30;
-// cnagent.md, Known limits). The row reads OK, with the path states, while
-// every endpoint has a live controller and the namespace is there. A failed
-// connect of the converge's decides nothing and leads the details of a row
-// that is not OK.
-func cloneTargetRow(cp *clonePlan, src cloneSource) (pb.ResStatus, string) {
+// (CN28), the same for the converge and the probe: its status, details and
+// reason. It reads ERROR only for this node's own side: while a sweep's
+// disconnect of the source is in flight, or when the walk or the lookup did
+// not answer. A fault of the source reads MISSING, as a source with no
+// subsystem entry does: a configured endpoint with no live controller, its
+// details the path states, or no source namespace. A MISSING row sets no
+// health epoch, so the row does not move the role: moving the primary cannot
+// repair the source, and the worker cannot tell a fault in this node's own
+// path to the source from one at the source (CN18). Each MISSING the rule
+// gives carries RES_REASON_SOURCE_FAULT, which the worker's settle reads as
+// built (dnv-worker.md HL2), but the converge's "no namespace" after a
+// connect of its own pass, with a controller at every endpoint
+// (headPending): that head may be a scan still in progress, a build in
+// progress the settle waits for, and the CN10 retry reads it again. No other
+// row of it carries a reason. A fault that fails CN18 step 1 still keeps the
+// CN10 retry running, whose attempts hold the cntlr's reads off while each
+// runs (dnagent.md SH30; cnagent.md, Known limits). The row reads OK, with
+// the path states, while every endpoint has a live controller and the
+// namespace is there. A failed connect of the converge's decides no status
+// and leads the details of a row that is not OK.
+func cloneTargetRow(
+	cp *clonePlan,
+	src cloneSource,
+) (pb.ResStatus, string, pb.ResReason) {
 	nqn := cp.clone.GetSrcNqn()
 	note := ""
 	if src.stepErr != nil {
@@ -183,55 +219,77 @@ func cloneTargetRow(cp *clonePlan, src cloneSource) (pb.ResStatus, string) {
 	view := src.view
 	switch {
 	case src.inFlight:
-		return pb.ResStatus_RES_STATUS_ERROR, detailsDisconnectInFlight(nqn)
+		return pb.ResStatus_RES_STATUS_ERROR, detailsDisconnectInFlight(nqn),
+			pb.ResReason_RES_REASON_NONE
 	case src.readErr != nil:
 		return pb.ResStatus_RES_STATUS_ERROR,
-			withNote(note, src.readErr.Error())
+			withNote(note, src.readErr.Error()), pb.ResReason_RES_REASON_NONE
 	case view == nil || !view.found:
-		return pb.ResStatus_RES_STATUS_MISSING, note
+		return pb.ResStatus_RES_STATUS_MISSING, note,
+			pb.ResReason_RES_REASON_SOURCE_FAULT
 	case !cloneSourceLive(view, cp):
 		return pb.ResStatus_RES_STATUS_MISSING,
-			withNote(note, pathStates(view))
+			withNote(note, pathStates(view)),
+			pb.ResReason_RES_REASON_SOURCE_FAULT
 	case view.nsDev == "":
-		return pb.ResStatus_RES_STATUS_MISSING, withNote(note, fmt.Sprintf(
-			"no namespace %d on %s", cp.clone.GetSrcNsIdx(), nqn))
+		details := fmt.Sprintf("no namespace %d on %s",
+			cp.clone.GetSrcNsIdx(), nqn)
+		reason := pb.ResReason_RES_REASON_SOURCE_FAULT
+		if src.headPending {
+			reason = pb.ResReason_RES_REASON_NONE
+		}
+		return pb.ResStatus_RES_STATUS_MISSING, withNote(note, details),
+			reason
 	}
-	return pb.ResStatus_RES_STATUS_OK, pathStates(view)
+	return pb.ResStatus_RES_STATUS_OK, pathStates(view),
+		pb.ResReason_RES_REASON_NONE
 }
 
 // cloneDmRow is the clone_id_to_dm_clone row of one read of the dm-clone
-// (CN28), the same for the converge and the probe (cloneRows): ERROR when the
-// read did not answer; MISSING when the device is not there, saying why —
-// unready while the source is not ready, detailsCloneMetaGrpNotReady while
-// the clone meta group is not (grpReady) — and OK with the raw status line
-// while the dm-clone serves (cloneDmRead.serves), and ERROR naming what it
-// lacks (cloneDmRead.fault), followed by the line, when it does not. The raw
-// line rides in the details whenever the read took it, because the gateway's
-// hydration checks read it (architecture.md, Live-state reporting).
+// (CN28), the same for the converge and the probe (cloneRows): its status,
+// details and reason. It reads ERROR when the read did not answer; MISSING
+// when the device is not there, saying why — unready while the source is not
+// ready, with RES_REASON_SOURCE_FAULT, which the worker's settle reads as
+// built (dnv-worker.md HL2), since the dm-clone is absent because this node
+// does not read its source as ready; with no reason, though, while the clone
+// meta group is not ready (grpReady) or the source's head is pending
+// (headPending), since each is a build in progress the source's text must
+// not hide from the settle; detailsCloneMetaGrpNotReady beside a ready source
+// while the group is not, with no reason, as a MISSING with no details has
+// none — and OK with the raw status line while the dm-clone serves
+// (cloneDmRead.serves), and ERROR naming what it lacks (cloneDmRead.fault),
+// followed by the line, when it does not. The raw line rides in the details
+// whenever the read took it, because the gateway's hydration checks read it
+// (architecture.md, Live-state reporting).
 func cloneDmRow(
 	cp *clonePlan,
 	src cloneSource,
 	grpReady bool,
 	dm cloneDmRead,
-) (pb.ResStatus, string) {
+) (pb.ResStatus, string, pb.ResReason) {
+	const none = pb.ResReason_RES_REASON_NONE
 	switch {
 	case dm.err != nil:
-		return pb.ResStatus_RES_STATUS_ERROR, dm.err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, dm.err.Error(), none
 	case !dm.present:
 		if !src.ready(cp) {
-			return pb.ResStatus_RES_STATUS_MISSING, src.unready()
+			reason := none
+			if grpReady && !src.headPending {
+				reason = pb.ResReason_RES_REASON_SOURCE_FAULT
+			}
+			return pb.ResStatus_RES_STATUS_MISSING, src.unready(), reason
 		}
 		if !grpReady {
 			return pb.ResStatus_RES_STATUS_MISSING,
-				detailsCloneMetaGrpNotReady
+				detailsCloneMetaGrpNotReady, none
 		}
-		return pb.ResStatus_RES_STATUS_MISSING, ""
+		return pb.ResStatus_RES_STATUS_MISSING, "", none
 	}
 	if fault := dm.fault(); fault != "" {
 		return pb.ResStatus_RES_STATUS_ERROR,
-			agent.CloneStatusDetails(fault, dm.raw)
+			agent.CloneStatusDetails(fault, dm.raw), none
 	}
-	return pb.ResStatus_RES_STATUS_OK, dm.raw
+	return pb.ResStatus_RES_STATUS_OK, dm.raw, none
 }
 
 // cloneGrpReady reports whether the clone meta group of cp is ready for the
@@ -277,16 +335,18 @@ func (s *CnAgentServer) cloneRows(
 	note string,
 ) {
 	t := st.tracker
-	status, details := cloneTargetRow(cp, src)
-	info.CloneIdToTarget[cp.cloneId] = t.Set(
+	status, details, reason := cloneTargetRow(cp, src)
+	info.CloneIdToTarget[cp.cloneId] = t.SetReason(
 		resKeyOf(resKeyCloneTgtFmt, cp.cloneId), cp.clone.GetSrcNqn(),
-		status, details)
-	status, details = cloneDmRow(cp, src, cloneGrpReady(cp, info), readDm())
+		status, details, reason)
+	status, details, reason = cloneDmRow(
+		cp, src, cloneGrpReady(cp, info), readDm())
 	if status != pb.ResStatus_RES_STATUS_OK {
 		details = withNote(note, details)
 	}
-	info.CloneIdToDmClone[cp.cloneId] = t.Set(
-		resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName, status, details)
+	info.CloneIdToDmClone[cp.cloneId] = t.SetReason(
+		resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName, status, details,
+		reason)
 }
 
 // ensureClone runs the CN18 sequence for one clone and reports whether the
@@ -461,13 +521,21 @@ func (s *CnAgentServer) ensureClone(
 // head is complete (awaitNsHead). The step holds on a head that the budget
 // left picked but not complete, since the step reads no number: the number
 // is first read in step 3, and a read that fails there fails step 3
-// (ensureDmClone). A connect that fails ends the step, and the subsystem is
-// looked up once more, on a fresh walk, so the rows say what that connect left
-// behind.
-// CN10's unknown-controller guard is not applied: a source controller whose
-// address did not answer matches no entry, so an entry it alone serves is
-// connected again — a duplicate the host refuses while that controller lives
-// — and nothing is disconnected, since this step retires no path.
+// (ensureDmClone). A wait that ended with no head fails the step. A connect
+// that fails ends the step, and the subsystem is looked up once more, on a
+// fresh walk, so the rows say what that connect left behind. Either read
+// marks the source headPending when it finds a controller at every endpoint
+// and no head: the step connected only endpoints its lookup found with none,
+// so a controller found there after is one a connect made since that lookup
+// — the pass's own, a failed one too, whose kill landed after the kernel
+// made it (dnagent.md SH15), or, in a race, another cntlr's — whose head may
+// be still to come; one whose address did not answer at that lookup, found
+// once it answers, is marked the same way, on the side that holds the
+// settle. CN10's unknown-controller guard is not applied: a source
+// controller whose address did not answer matches no entry, so an entry it
+// alone serves is connected again — a duplicate the host refuses while that
+// controller lives — and nothing is disconnected, since this step retires
+// no path.
 //
 // Every cntlr of the node may connect a source, and another may have
 // connected this one since the pass's walk. So a source the walk holds no
@@ -518,10 +586,12 @@ func (s *CnAgentServer) ensureCloneSource(
 	switch {
 	case src.stepErr != nil:
 		src.view, src.readErr = s.lookupSubsys(ctx, plan.walk, nqn, nsIdx)
+		src.headPending = src.headToCome(cp)
 		return "", src, false
 	case connected:
 		src.view, src.readErr = s.awaitNsHead(
 			ctx, budget, plan.walk, nqn, nsIdx)
+		src.headPending = src.headToCome(cp)
 	}
 	if !src.ready(cp) {
 		return "", src, false

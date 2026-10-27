@@ -662,13 +662,16 @@ func assertPending(t *testing.T, info *pb.ResInfo, label string) {
 // assertMissingSpLevel is the CN19 row: the operator's level says the resource
 // must not exist, which is a stronger statement than [D15]'s "it is coming" — so
 // a resource that is both level-suppressed and provisioning-deferred reports
-// MISSING/"sp_level", never PROVISIONING.
+// MISSING/"sp_level", never PROVISIONING, with the level's reason, which the
+// worker's settle reads as built (dnv-worker.md HL2).
 func assertMissingSpLevel(t *testing.T, info *pb.ResInfo, label string) {
 	t.Helper()
 	if info.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
-		info.GetDetails() != detailsSpLevel {
-		t.Fatalf("%s: status %v, details %q, want MISSING/%q",
-			label, info.GetStatus(), info.GetDetails(), detailsSpLevel)
+		info.GetDetails() != detailsSpLevel ||
+		info.GetReason() != pb.ResReason_RES_REASON_SP_LEVEL {
+		t.Fatalf("%s: status %v, details %q, reason %v, want MISSING/%q/%v",
+			label, info.GetStatus(), info.GetDetails(), info.GetReason(),
+			detailsSpLevel, pb.ResReason_RES_REASON_SP_LEVEL)
 	}
 }
 
@@ -6653,11 +6656,8 @@ func TestSpLevelLadder(t *testing.T) {
 
 	reply := resync(pb.SpLevel_SP_LEVEL_NO_THINPOOL)
 	info := reply.GetCntlrInfo()
-	if got := info.GetSliceIdToDmPool()[testSlice]; got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_MISSING || got.GetDetails() != "sp_level" {
-		t.Fatalf("pool at NO_THINPOOL: %v/%q", got.GetStatus(),
-			got.GetDetails())
-	}
+	assertMissingSpLevel(t, info.GetSliceIdToDmPool()[testSlice],
+		"pool at NO_THINPOOL")
 	// Namespaces stay exported on error backing — a host sees IO errors,
 	// not a vanished device.
 	assertOk(t, info.GetNsIdToNamespace()[testNs], "namespace")

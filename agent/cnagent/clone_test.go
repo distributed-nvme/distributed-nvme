@@ -1217,6 +1217,24 @@ func TestCloneRowsAgreeBetweenConvergeAndCheck(t *testing.T) {
 			target: ok, dm: missing, targetHas: "paths: live",
 			dmHas: detailsCloneMetaGrpNotReady, same: true, noDm: true,
 		},
+		{
+			// Both at once: the source's text leads the dm row, and the
+			// group not ready keeps the source's reason off it, since the
+			// group is a build in progress the settle waits for (CN18).
+			name: "the clone meta group not ready, the dm-clone gone, the " +
+				"source lost",
+			arrange: func(_ *testing.T, srv *CnAgentServer, node *fakeNode) {
+				removeCloneDevice(node, srv)
+				grpNotReady(srv, node)
+				node.mu.Lock()
+				node.nvmeDisconnect([]string{"disconnect", "--nqn",
+					testSrcNqn})
+				node.mu.Unlock()
+				failConnects(node, testSrcNqn, testIp2, testSvcId2, 1000)
+			},
+			target: missing, dm: missing, targetHas: "connection refused",
+			dmHas: "source not connected", noDm: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -1242,16 +1260,26 @@ func TestCloneRowsAgreeBetweenConvergeAndCheck(t *testing.T) {
 				t.Fatalf("the check round mutated: %q", call)
 			}
 
+			// A MISSING target row, a source this node does not read as
+			// ready, carries the source-fault reason on both channels. The
+			// one case that leaves the dm-clone absent beside a source that
+			// is not ready leaves the clone meta group not ready too, so no
+			// dm row carries one (cloneDmRow).
+			targetReason := pb.ResReason_RES_REASON_NONE
+			if tc.target == missing {
+				targetReason = pb.ResReason_RES_REASON_SOURCE_FAULT
+			}
 			for _, row := range []struct {
-				label string
-				rows  func(*pb.CntlrInfo) map[uint64]*pb.ResInfo
-				want  pb.ResStatus
-				has   string
+				label  string
+				rows   func(*pb.CntlrInfo) map[uint64]*pb.ResInfo
+				want   pb.ResStatus
+				has    string
+				reason pb.ResReason
 			}{
 				{"clone_id_to_target", (*pb.CntlrInfo).GetCloneIdToTarget,
-					tc.target, tc.targetHas},
+					tc.target, tc.targetHas, targetReason},
 				{"clone_id_to_dm_clone", (*pb.CntlrInfo).GetCloneIdToDmClone,
-					tc.dm, tc.dmHas},
+					tc.dm, tc.dmHas, pb.ResReason_RES_REASON_NONE},
 			} {
 				got := row.rows(converged)[testClone]
 				if got.GetStatus() != row.want ||
@@ -1265,6 +1293,9 @@ func TestCloneRowsAgreeBetweenConvergeAndCheck(t *testing.T) {
 					t.Fatalf("checked %s is %v/%q, want %v", row.label,
 						checked.GetStatus(), checked.GetDetails(), row.want)
 				}
+				assertReason(t, got, row.reason, "converged "+row.label)
+				assertReason(t, row.rows(probed)[testClone], row.reason,
+					"checked "+row.label)
 				if tc.same && !proto.Equal(row.rows(probed)[testClone], got) {
 					t.Fatalf("the check round reports %s as %v, the "+
 						"converge as %v", row.label,
@@ -1316,7 +1347,11 @@ func TestCloneRowsAgreeBetweenConvergeAndCheck(t *testing.T) {
 // not OK. Only this node's own reading reads ERROR, a disconnect in flight or
 // a walk that did not answer. A source with no subsystem entry reads
 // MISSING, and so does a fault of the source, an endpoint with no live
-// controller or no namespace, which then sets no health epoch (CN18).
+// controller or no namespace, which then sets no health epoch (CN18); every
+// MISSING carries the source-fault reason the worker's settle reads as built
+// (dnv-worker.md HL2), but a converge's no namespace after a connect of its own
+// pass, a failed one included, that left a controller at every endpoint
+// (headPending), a build in progress, and no other row carries a reason.
 func TestCloneTargetRowRule(t *testing.T) {
 	cp := testClonePlan(t)
 	live := ctrlView{name: "nvme5", trAddr: testIp2, trSvcId: testSvcId2,
@@ -1324,67 +1359,85 @@ func TestCloneTargetRowRule(t *testing.T) {
 	connecting := live
 	connecting.state = "connecting"
 	refused := errors.New("connect refused")
+	killed := errors.New("signal: killed")
 	unknown := fmt.Errorf("subsystem %s %w: killed", testSrcNqn,
 		errSubsysUnknown)
 	withNs := func(ctrls ...ctrlView) *subsysView {
 		return &subsysView{found: true, nsDev: "/dev/nvme5n1", ctrls: ctrls}
 	}
 	noNs := &subsysView{found: true, ctrls: []ctrlView{live}}
+	const none = pb.ResReason_RES_REASON_NONE
+	const fault = pb.ResReason_RES_REASON_SOURCE_FAULT
 	for _, tc := range []struct {
 		name    string
 		src     cloneSource
 		status  pb.ResStatus
 		details string
+		reason  pb.ResReason
 	}{
 		{"a disconnect in flight", cloneSource{inFlight: true},
 			pb.ResStatus_RES_STATUS_ERROR,
-			detailsDisconnectInFlight(testSrcNqn)},
+			detailsDisconnectInFlight(testSrcNqn), none},
 		{"the walk unanswered", cloneSource{readErr: unknown},
-			pb.ResStatus_RES_STATUS_ERROR, unknown.Error()},
+			pb.ResStatus_RES_STATUS_ERROR, unknown.Error(), none},
 		{"the walk unanswered after a refused connect",
 			cloneSource{readErr: unknown, stepErr: refused},
 			pb.ResStatus_RES_STATUS_ERROR,
-			refused.Error() + "\n" + unknown.Error()},
+			refused.Error() + "\n" + unknown.Error(), none},
 		{"no read", cloneSource{},
-			pb.ResStatus_RES_STATUS_MISSING, ""},
+			pb.ResStatus_RES_STATUS_MISSING, "", fault},
 		{"no subsystem", cloneSource{view: &subsysView{}},
-			pb.ResStatus_RES_STATUS_MISSING, ""},
+			pb.ResStatus_RES_STATUS_MISSING, "", fault},
 		{"no subsystem after a refused connect",
 			cloneSource{view: &subsysView{}, stepErr: refused},
-			pb.ResStatus_RES_STATUS_MISSING, refused.Error()},
+			pb.ResStatus_RES_STATUS_MISSING, refused.Error(), fault},
 		{"no controller for the endpoint",
 			cloneSource{view: &subsysView{found: true, nsDev: "/dev/x"}},
-			pb.ResStatus_RES_STATUS_MISSING, "paths: "},
+			pb.ResStatus_RES_STATUS_MISSING, "paths: ", fault},
 		{"no controller for the endpoint after a refused connect",
 			cloneSource{view: &subsysView{found: true, nsDev: "/dev/x"},
 				stepErr: refused},
 			pb.ResStatus_RES_STATUS_MISSING,
-			refused.Error() + "\npaths: "},
+			refused.Error() + "\npaths: ", fault},
 		{"a path not live", cloneSource{view: withNs(connecting)},
-			pb.ResStatus_RES_STATUS_MISSING, "paths: connecting"},
+			pb.ResStatus_RES_STATUS_MISSING, "paths: connecting", fault},
 		{"a path not live after a refused connect",
 			cloneSource{view: withNs(connecting), stepErr: refused},
 			pb.ResStatus_RES_STATUS_MISSING,
-			refused.Error() + "\npaths: connecting"},
+			refused.Error() + "\npaths: connecting", fault},
 		{"no namespace", cloneSource{view: noNs},
 			pb.ResStatus_RES_STATUS_MISSING,
-			fmt.Sprintf("no namespace 1 on %s", testSrcNqn)},
+			fmt.Sprintf("no namespace 1 on %s", testSrcNqn), fault},
 		{"no namespace after a refused connect",
 			cloneSource{view: noNs, stepErr: refused},
 			pb.ResStatus_RES_STATUS_MISSING,
 			refused.Error() + fmt.Sprintf("\nno namespace 1 on %s",
-				testSrcNqn)},
+				testSrcNqn), fault},
+		{"no namespace yet after a connect of the pass",
+			cloneSource{view: noNs, headPending: true},
+			pb.ResStatus_RES_STATUS_MISSING,
+			fmt.Sprintf("no namespace 1 on %s", testSrcNqn), none},
+		{"no namespace yet after a killed connect of the pass",
+			cloneSource{view: noNs, stepErr: killed, headPending: true},
+			pb.ResStatus_RES_STATUS_MISSING,
+			killed.Error() + fmt.Sprintf("\nno namespace 1 on %s",
+				testSrcNqn), none},
+		{"a path not live beside a head still pending",
+			cloneSource{view: &subsysView{found: true,
+				ctrls: []ctrlView{connecting}}, headPending: true},
+			pb.ResStatus_RES_STATUS_MISSING, "paths: connecting", fault},
 		{"live with its namespace", cloneSource{view: withNs(live)},
-			pb.ResStatus_RES_STATUS_OK, "paths: live"},
+			pb.ResStatus_RES_STATUS_OK, "paths: live", none},
 		{"live after a refused connect, the note dropped",
 			cloneSource{view: withNs(live), stepErr: refused},
-			pb.ResStatus_RES_STATUS_OK, "paths: live"},
+			pb.ResStatus_RES_STATUS_OK, "paths: live", none},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, details := cloneTargetRow(cp, tc.src)
-			if status != tc.status || details != tc.details {
-				t.Fatalf("%v/%q, want %v/%q", status, details, tc.status,
-					tc.details)
+			status, details, reason := cloneTargetRow(cp, tc.src)
+			if status != tc.status || details != tc.details ||
+				reason != tc.reason {
+				t.Fatalf("%v/%q/%v, want %v/%q/%v", status, details, reason,
+					tc.status, tc.details, tc.reason)
 			}
 		})
 	}
@@ -1395,7 +1448,12 @@ func TestCloneTargetRowRule(t *testing.T) {
 // and then the clone meta group only say why a dm-clone that is not there is
 // not, and the raw status line rides along whenever the read took it. A
 // dm-clone serves, and reads OK, only with hydration on and its metadata
-// read-write; its metadata mode is named first, then hydration off.
+// read-write; its metadata mode is named first, then hydration off. Only an
+// absent dm-clone beside a source that is not ready, "source not connected"
+// or "source unknown", and a ready clone meta group, carries the source-fault
+// reason (CN18); the group not ready, beside a ready source or not, a source
+// head still pending after a connect of the pass, or nothing to say, is a
+// build in progress the worker's settle waits for (dnv-worker.md HL2).
 func TestCloneDmRowRule(t *testing.T) {
 	cp := testClonePlan(t)
 	ready := cloneSource{view: &subsysView{found: true, nsDev: "/dev/nvme5n1",
@@ -1409,6 +1467,8 @@ func TestCloneDmRowRule(t *testing.T) {
 	read := func(line string) cloneDmRead { return cloneDmReadOf(line) }
 	hydrating := cloneDmRead{present: true, raw: raw, hydrating: true,
 		mode: common.CloneMetadataReadWrite}
+	const none = pb.ResReason_RES_REASON_NONE
+	const fault = pb.ResReason_RES_REASON_SOURCE_FAULT
 	for _, tc := range []struct {
 		name     string
 		src      cloneSource
@@ -1416,64 +1476,84 @@ func TestCloneDmRowRule(t *testing.T) {
 		dm       cloneDmRead
 		status   pb.ResStatus
 		details  string
+		reason   pb.ResReason
 	}{
 		{"the read did not answer", ready, true, cloneDmRead{err: killed},
-			pb.ResStatus_RES_STATUS_ERROR, killed.Error()},
+			pb.ResStatus_RES_STATUS_ERROR, killed.Error(), none},
 		{"absent beside a ready source", ready, true, cloneDmRead{},
-			pb.ResStatus_RES_STATUS_MISSING, ""},
+			pb.ResStatus_RES_STATUS_MISSING, "", none},
 		{"absent beside a group not ready", ready, false, cloneDmRead{},
-			pb.ResStatus_RES_STATUS_MISSING, detailsCloneMetaGrpNotReady},
+			pb.ResStatus_RES_STATUS_MISSING, detailsCloneMetaGrpNotReady,
+			none},
 		{"absent beside an unconnected source",
 			cloneSource{view: &subsysView{}}, true, cloneDmRead{},
-			pb.ResStatus_RES_STATUS_MISSING, "source not connected"},
+			pb.ResStatus_RES_STATUS_MISSING, "source not connected", fault},
 		{"absent beside an unconnected source and a group not ready",
 			cloneSource{view: &subsysView{}}, false, cloneDmRead{},
-			pb.ResStatus_RES_STATUS_MISSING, "source not connected"},
+			pb.ResStatus_RES_STATUS_MISSING, "source not connected", none},
+		{"absent beside a walk unanswered and a group not ready",
+			cloneSource{readErr: unknown}, false, cloneDmRead{},
+			pb.ResStatus_RES_STATUS_MISSING,
+			"source unknown: " + unknown.Error(), none},
+		{"absent beside a source head still pending",
+			cloneSource{view: &subsysView{found: true,
+				ctrls: ready.view.ctrls}, headPending: true}, true,
+			cloneDmRead{}, pb.ResStatus_RES_STATUS_MISSING,
+			"source not connected", none},
+		{"absent beside a source head still pending after a killed connect",
+			cloneSource{view: &subsysView{found: true,
+				ctrls: ready.view.ctrls}, stepErr: killed,
+				headPending: true}, true,
+			cloneDmRead{}, pb.ResStatus_RES_STATUS_MISSING,
+			"source not connected", none},
 		{"absent beside a disconnect in flight",
 			cloneSource{inFlight: true}, true, cloneDmRead{},
-			pb.ResStatus_RES_STATUS_MISSING, "source not connected"},
+			pb.ResStatus_RES_STATUS_MISSING, "source not connected", fault},
 		{"absent beside a walk unanswered", cloneSource{readErr: unknown},
 			true, cloneDmRead{}, pb.ResStatus_RES_STATUS_MISSING,
-			"source unknown: " + unknown.Error()},
+			"source unknown: " + unknown.Error(), fault},
 		{"absent beside an endpoint with no controller",
 			cloneSource{view: &subsysView{found: true,
 				nsDev: "/dev/nvme5n1"}}, true,
 			cloneDmRead{}, pb.ResStatus_RES_STATUS_MISSING,
-			"source not connected"},
+			"source not connected", fault},
 		{"serving", ready, true, hydrating,
-			pb.ResStatus_RES_STATUS_OK, raw},
+			pb.ResStatus_RES_STATUS_OK, raw, none},
 		{"serving beside an unconnected source",
 			cloneSource{view: &subsysView{}}, true, hydrating,
-			pb.ResStatus_RES_STATUS_OK, raw},
+			pb.ResStatus_RES_STATUS_OK, raw, none},
 		{"serving beside a group not ready", ready, false, hydrating,
-			pb.ResStatus_RES_STATUS_OK, raw},
+			pb.ResStatus_RES_STATUS_OK, raw, none},
 		{"hydration off", ready, true, read(raw),
 			pb.ResStatus_RES_STATUS_ERROR,
-			detailsCloneNotHydrating + "\n" + raw},
+			detailsCloneNotHydrating + "\n" + raw, none},
 		{"hydration on, metadata read-only", ready, true,
 			read(strings.Replace(raw, "1 no_hydration 0 rw", "0 0 ro", 1)),
 			pb.ResStatus_RES_STATUS_ERROR, detailsCloneMetaReadOnly + "\n" +
-				strings.Replace(raw, "1 no_hydration 0 rw", "0 0 ro", 1)},
+				strings.Replace(raw, "1 no_hydration 0 rw", "0 0 ro", 1), none},
 		{"hydration off, metadata read-only", ready, true,
 			read(strings.Replace(raw, " rw", " ro", 1)),
 			pb.ResStatus_RES_STATUS_ERROR, detailsCloneMetaReadOnly + "\n" +
-				strings.Replace(raw, " rw", " ro", 1)},
+				strings.Replace(raw, " rw", " ro", 1), none},
 		{"metadata failed", ready, true, read(failLine),
 			pb.ResStatus_RES_STATUS_ERROR,
-			detailsCloneMetaFailed + "\n" + failLine},
+			detailsCloneMetaFailed + "\n" + failLine, none},
 		{"hydration on, no metadata mode", ready, true,
 			read(strings.Replace(raw, "1 no_hydration 0 rw", "0 0", 1)),
 			pb.ResStatus_RES_STATUS_ERROR, detailsCloneMetaModeUnknown +
-				"\n" + strings.Replace(raw, "1 no_hydration 0 rw", "0 0", 1)},
+				"\n" + strings.Replace(raw, "1 no_hydration 0 rw", "0 0", 1),
+			none},
 		{"not a dm-clone", ready, true, read("0 131072 linear 253:4 0"),
 			pb.ResStatus_RES_STATUS_ERROR,
-			detailsCloneNotHydrating + "\n0 131072 linear 253:4 0"},
+			detailsCloneNotHydrating + "\n0 131072 linear 253:4 0", none},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, details := cloneDmRow(cp, tc.src, tc.grpReady, tc.dm)
-			if status != tc.status || details != tc.details {
-				t.Fatalf("%v/%q, want %v/%q", status, details, tc.status,
-					tc.details)
+			status, details, reason := cloneDmRow(
+				cp, tc.src, tc.grpReady, tc.dm)
+			if status != tc.status || details != tc.details ||
+				reason != tc.reason {
+				t.Fatalf("%v/%q/%v, want %v/%q/%v", status, details, reason,
+					tc.status, tc.details, tc.reason)
 			}
 			if serves := tc.dm.serves(); serves !=
 				(status == pb.ResStatus_RES_STATUS_OK) {
@@ -1487,7 +1567,9 @@ func TestCloneDmRowRule(t *testing.T) {
 // TestCloneSourceReadyRule pins CN18 step 1's test on one read of the source
 // (cloneSource.ready), which decides on both channels whether the row of an
 // absent dm-clone names the source: every configured endpoint has a
-// controller, in whatever state, and the source namespace is there.
+// controller, in whatever state, and the source namespace is there. It pins
+// beside it the read that marks a source headPending after a connect of the
+// pass (cloneSource.headToCome): the same read, but with no namespace.
 func TestCloneSourceReadyRule(t *testing.T) {
 	cp := testClonePlan(t)
 	ctrl := func(state string) ctrlView {
@@ -1500,30 +1582,40 @@ func TestCloneSourceReadyRule(t *testing.T) {
 		return &subsysView{found: true, nsDev: nsDev, ctrls: ctrls}
 	}
 	for _, tc := range []struct {
-		name  string
-		src   cloneSource
-		ready bool
+		name              string
+		src               cloneSource
+		ready, headToCome bool
 	}{
 		{"a disconnect in flight", cloneSource{inFlight: true,
-			view: view("/dev/nvme5n1", ctrl("live"))}, false},
+			view: view("/dev/nvme5n1", ctrl("live"))}, false, false},
+		{"a disconnect in flight, no namespace", cloneSource{inFlight: true,
+			view: view("", ctrl("live"))}, false, false},
 		{"the walk unanswered", cloneSource{readErr: errSubsysUnknown},
-			false},
-		{"no read", cloneSource{}, false},
-		{"no subsystem", cloneSource{view: &subsysView{}}, false},
-		{"no namespace", cloneSource{view: view("", ctrl("live"))}, false},
+			false, false},
+		{"no read", cloneSource{}, false, false},
+		{"no subsystem", cloneSource{view: &subsysView{}}, false, false},
+		{"no namespace", cloneSource{view: view("", ctrl("live"))}, false,
+			true},
+		{"no namespace, a controller connecting",
+			cloneSource{view: view("", ctrl("connecting"))}, false, true},
+		{"no namespace, another endpoint's controller only",
+			cloneSource{view: view("", other)}, false, false},
 		{"another endpoint's controller only",
-			cloneSource{view: view("/dev/nvme5n1", other)}, false},
+			cloneSource{view: view("/dev/nvme5n1", other)}, false, false},
 		{"a controller connecting", cloneSource{
-			view: view("/dev/nvme5n1", ctrl("connecting"))}, true},
+			view: view("/dev/nvme5n1", ctrl("connecting"))}, true, false},
 		{"a failed connect beside a ready read", cloneSource{
 			view:    view("/dev/nvme5n1", ctrl("live")),
-			stepErr: errors.New("refused")}, true},
+			stepErr: errors.New("refused")}, true, false},
 		{"live", cloneSource{view: view("/dev/nvme5n1", ctrl("live"))},
-			true},
+			true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.src.ready(cp); got != tc.ready {
 				t.Fatalf("ready is %v, want %v", got, tc.ready)
+			}
+			if got := tc.src.headToCome(cp); got != tc.headToCome {
+				t.Fatalf("headToCome is %v, want %v", got, tc.headToCome)
 			}
 		})
 	}

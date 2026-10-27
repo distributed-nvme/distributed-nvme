@@ -1480,6 +1480,17 @@ path_reply_cnt() { # <agent> <side id> <RES_STATUS_*>
 	printf '%s' $((syncups + checks))
 }
 
+# clone_target_reply_cnt counts one fake's SyncupCntlr and CheckCntlr replies
+# that carry a clone's clone_id_to_target row and match <filter>, a jq test
+# over the reply in which $c is the clone id as protojson keys the row.
+clone_target_reply_cnt() { # <agent> <clone id> <filter>
+	local filter="(.cntlr_info.clone_id_to_target // {} | has(\$c)) and ($3)"
+	local syncups checks
+	syncups=$(replies "$1" SyncupCntlr "$filter" --arg c "$2") || return 1
+	checks=$(replies "$1" CheckCntlr "$filter" --arg c "$2") || return 1
+	printf '%s' $((syncups + checks))
+}
+
 health_changed_cnt() { # <record> <reason>
 	wcount 'select(.msg == "health changed") | select(.record == $rec and .reason == $rea)' \
 		--arg rec "$1" --arg rea "$2"
@@ -3233,6 +3244,94 @@ EOF
 
 	log "  12.6: clean up"
 	clear_behavior cn1
+
+	stage 13 "settling: a clone row with the source-fault reason does not hold the settle (HL2)"
+	# A fresh SP, sp3, on sp2's thresholds, with a td and a clone of it: C1 on
+	# cn 1 (fake cn0) primary, C2 on cn 2 (fake cn1) standby, one RedundNone
+	# data group on dn 4, and the clone meta group on dn 1 and dn 2
+	# (clone_meta_grp). The fake reports a clone's two rows for every clone a
+	# cntlr's request carries (dnv-worker.md, Integration test plan, The fake
+	# agent), and the settle reads a MISSING row with no reason as a build
+	# still to come and one with the source-fault reason as built (HL2).
+	#
+	# put-sp writes C1 settling, and its first clean round at the driven
+	# revision would settle it before the clone exists, so cn0's levers are
+	# written first: the pool row MISSING with no reason holds the creation
+	# settle while the td and the clone are put, and the clone's target row
+	# reads MISSING with no reason from the clone's first report on. A
+	# behavior file replaces every lever of its fake, and sp3's cntlrs are
+	# the only ones a lever of cn0 names in this stage.
+	local sp3_clone=$((CLONE_ID))
+	local tgt_missing='(.cntlr_info.clone_id_to_target[$c].status // "") == "RES_STATUS_MISSING"'
+	local tgt_none='(.cntlr_info.clone_id_to_target[$c].reason // "RES_REASON_NONE") == "RES_REASON_NONE"'
+	local tgt_fault='(.cntlr_info.clone_id_to_target[$c].reason // "") == "RES_REASON_SOURCE_FAULT"'
+	local pool_ok='(.cntlr_info.slice_id_to_dm_pool["1"].status // "") == "RES_STATUS_OK"'
+	ctl set-free cn --id 1 --free-ext 64
+	ctl set-free cn --id 2 --free-ext 64
+	ctl set-free dn --id 1 --free-ext 8
+	ctl set-free dn --id 2 --free-ext 8
+	ctl set-free dn --id 4 --free-ext 8
+	set_behavior cn0 <<EOF
+{"objects": {"cntlr 4:1": {"rows": {
+  "slice_id_to_dm_pool.1": {"status": "MISSING", "when_primary": true},
+  "clone_id_to_target.$sp3_clone": {"status": "MISSING",
+    "details": "no namespace 1 on $NQN_PREFIX:src", "when_primary": true}}}}}
+EOF
+	ctl put-sp --name sp3 --id 4 --shard 00 --slots 0,1 --level 0 \
+		--thresholds 2,15,3,6 --lwm "$LWM" \
+		--cntlr 1:1:0:true --cntlr 2:2:1:false \
+		--slice 1:0 \
+		--group 1:1:data:1:none \
+		--leg 1:1:0 \
+		--side 1:1:4:0
+	ctl put-td --sp sp3 --name td0 --id "$TD_ID" --size 1073741824
+	clone_meta_grp "$CLONE_GRP_ID"
+	ctl put-clone --sp sp3 --name c0 --id "$CLONE_ID" --dst-td td0 \
+		--src-slice-cnt 1 --src-nqn "$NQN_PREFIX:src" --src-ns-idx 1 \
+		"${CLONE_GRP[@]}"
+	wait_until "$WAIT_SYNCUP" "sp3: the side provisioned" all_provisioned sp3 1
+	wait_until "$WAIT_SYNCUP" "sp3: c0's clone meta group provisioned" \
+		clone_provisioned sp3 c0
+	wait_until "$WAIT_SHORT" "cn0: a reply of sp3 C1 with c0's target row MISSING" \
+		count_ge 1 clone_target_reply_cnt cn0 "$sp3_clone" "$tgt_missing"
+	assert_eq "$(settled_cnt 4 1)" 0 \
+		"cntlr settled records of sp3 C1 under its pool row MISSING with no reason"
+	assert_eq "$(cntlr_field sp3 1 settling)" true \
+		"sp3 C1 settling under its pool row MISSING with no reason"
+
+	log "  13.2: the pool built; c0's target row MISSING with no reason still holds the settle"
+	set_behavior cn0 <<EOF
+{"objects": {"cntlr 4:1": {"rows": {
+  "clone_id_to_target.$sp3_clone": {"status": "MISSING",
+    "details": "no namespace 1 on $NQN_PREFIX:src", "when_primary": true}}}}}
+EOF
+	wait_until "$WAIT_SHORT" "cn0: a reply of sp3 C1 with its pool OK and c0's target row MISSING with no reason" \
+		count_ge 1 clone_target_reply_cnt cn0 "$sp3_clone" \
+		"$pool_ok and $tgt_missing and $tgt_none"
+	assert_none_for 3 "cntlr settled for sp3 C1 over c0's target row MISSING with no reason" \
+		settled_ge 4 1 1
+	assert_eq "$(cntlr_field sp3 1 settling)" true \
+		"sp3 C1 settling over c0's target row MISSING with no reason"
+
+	log "  13.3: the same row with the source-fault reason: C1 settles, with no health epoch"
+	set_behavior cn0 <<EOF
+{"objects": {"cntlr 4:1": {"rows": {
+  "clone_id_to_target.$sp3_clone": {"status": "MISSING",
+    "details": "no namespace 1 on $NQN_PREFIX:src",
+    "reason": "SOURCE_FAULT", "when_primary": true}}}}}
+EOF
+	wait_until "$WAIT_SHORT" "cn0: a reply of sp3 C1 with c0's target row MISSING with the source-fault reason" \
+		count_ge 1 clone_target_reply_cnt cn0 "$sp3_clone" \
+		"$pool_ok and $tgt_missing and $tgt_fault"
+	wait_until "$WAIT_SHORT" "sp3: cntlr settled for C1 over c0's target row with the source-fault reason" \
+		settled_ge 4 1 1
+	assert_eq "$(cntlr_field sp3 1 settling)" false \
+		"sp3 C1 settling after its settle"
+	assert_eq "$(cntlr_field sp3 1 err_epoch)" 0 \
+		"sp3 C1 err_epoch under a MISSING target row (a missing row sets no health epoch)"
+
+	log "  13.4: clean up"
+	clear_behavior cn0
 }
 
 # ---------------------------------------------------------------------------

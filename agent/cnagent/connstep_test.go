@@ -1204,13 +1204,140 @@ func TestCloneSourceSharesThePassBudget(t *testing.T) {
 	info := reply.GetCntlrInfo()
 	assertMissingDetails(t, info.GetCloneIdToTarget()[testClone],
 		"connection refused", "clone target")
+	assertReason(t, info.GetCloneIdToTarget()[testClone],
+		pb.ResReason_RES_REASON_SOURCE_FAULT, "clone target")
 	if dm := info.GetCloneIdToDmClone()[testClone]; dm.GetStatus() !=
 		pb.ResStatus_RES_STATUS_MISSING ||
 		dm.GetDetails() != "source not connected" {
 		t.Fatalf("dm-clone row %v %q, want MISSING \"source not connected\"",
 			dm.GetStatus(), dm.GetDetails())
 	}
+	assertReason(t, info.GetCloneIdToDmClone()[testClone],
+		pb.ResReason_RES_REASON_SOURCE_FAULT, "dm-clone row")
 	if !retrying(t, srv) {
 		t.Fatalf("a source that did not connect registered no retry")
+	}
+}
+
+// TestCloneSourceHeadPendingCarriesNoReason pins the clone rows of a source
+// this pass connected whose head wait the legs' spent budget ended before any
+// head was listed (CN18): the kernel adds the head after the connect returns,
+// so a namespace not there yet is a build in progress, which the source-fault
+// reason must not hide. The meta leg spends the budget as in
+// TestCloneSourceSharesThePassBudget; the source connects at once and lists
+// no head in the pass, while the clone meta group is ready. The converge
+// writes the target row MISSING "no namespace" and the dm-clone row MISSING
+// "source not connected" with no reason, which hold the worker's settle
+// (dnv-worker.md HL2), and registers the retry. A read in between, which
+// connects nothing and cannot tell, gives that same state the source-fault
+// reason (CN18); the status and the epoch stay, only the reason moves. Once
+// the head is there and the meta leg connects, the retry's pass builds the
+// clone.
+func TestCloneSourceHeadPendingCarriesNoReason(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	withPassClock(srv, node)
+	failConnects(node, legNqn(srv, testMetaLeg), testIp, testSvcId, 1000)
+	stageNsHead(node, testSrcNqn, headStages{dir: neverInThePass,
+		nsid: neverInThePass, block: neverInThePass, ng: neverInThePass})
+	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+		clones: []*pb.Clone{cloneOf()}})
+
+	if got := connectsTo(node, testSrcNqn, testIp2, testSvcId2); got != 1 {
+		t.Fatalf("%d connects to the clone source, want 1", got)
+	}
+	info := reply.GetCntlrInfo()
+	assertOk(t, info.GetGrpIdToMdRaid()[testCloneGrp], "clone meta group")
+	noNs := fmt.Sprintf("no namespace 1 on %s", testSrcNqn)
+	tgt := info.GetCloneIdToTarget()[testClone]
+	dm := info.GetCloneIdToDmClone()[testClone]
+	assertMissingDetails(t, tgt, noNs, "clone target")
+	assertReason(t, tgt, pb.ResReason_RES_REASON_NONE, "clone target")
+	assertMissingDetails(t, dm, "source not connected", "dm-clone row")
+	assertReason(t, dm, pb.ResReason_RES_REASON_NONE, "dm-clone row")
+	if !retrying(t, srv) {
+		t.Fatalf("a source whose head is not there registered no retry")
+	}
+
+	probed := probedCntlrInfo(t, srv)
+	for label, row := range map[string]struct{ converged, read *pb.ResInfo }{
+		"clone target": {tgt, probed.GetCloneIdToTarget()[testClone]},
+		"dm-clone row": {dm, probed.GetCloneIdToDmClone()[testClone]},
+	} {
+		assertReason(t, row.read, pb.ResReason_RES_REASON_SOURCE_FAULT,
+			"read "+label)
+		if row.read.GetStatus() != row.converged.GetStatus() ||
+			row.read.GetEpoch() != row.converged.GetEpoch() {
+			t.Fatalf("read %s %v at %d, the converge's %v at %d", label,
+				row.read.GetStatus(), row.read.GetEpoch(),
+				row.converged.GetStatus(), row.converged.GetEpoch())
+		}
+	}
+
+	finishNsHead(t, node, testSrcNqn)
+	failConnects(node, legNqn(srv, testMetaLeg), testIp, testSvcId, 0)
+	retryAttempt(t, srv)
+	built := probedCntlrInfo(t, srv)
+	assertOk(t, built.GetCloneIdToTarget()[testClone],
+		"clone target, read by the retry's pass")
+	assertOk(t, built.GetCloneIdToDmClone()[testClone],
+		"dm-clone, built by the retry's pass")
+}
+
+// TestCloneSourceKilledConnectHeadPending pins the clone rows of a source
+// whose connect of the pass is killed (dnagent.md SH15) while the kernel adds
+// no head in the pass (CN18). The step fails either way, and the lookup after
+// it decides the reason. A connect killed after the kernel made the controller
+// left a controller at the endpoint the step found with none, and no head: a
+// build in progress, as after a connect that returned
+// (TestCloneSourceHeadPendingCarriesNoReason), so the target row's "no
+// namespace" and the dm-clone row's "source not connected" carry no reason. A
+// connect killed before it touched anything left no controller: a fault of
+// the source as this node reads it, with the source-fault reason on both.
+func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
+	const line = "nvme connect --transport tcp --traddr " + testIp2
+	noNs := fmt.Sprintf("no namespace 1 on %s", testSrcNqn)
+	for _, tc := range []struct {
+		name string
+		kill func(node *fakeNode)
+		// targetHas is a text the converge's target row carries.
+		targetHas string
+		reason    pb.ResReason
+	}{
+		{"killed after it made the controller",
+			func(node *fakeNode) { node.killCmd[line] = true },
+			noNs, pb.ResReason_RES_REASON_NONE},
+		{"killed before it touched anything",
+			func(node *fakeNode) { node.killCmdNoEffectAlways[line] = true },
+			"signal: killed", pb.ResReason_RES_REASON_SOURCE_FAULT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			withPassClock(srv, node)
+			stageNsHead(node, testSrcNqn, headStages{dir: neverInThePass,
+				nsid: neverInThePass, block: neverInThePass,
+				ng: neverInThePass})
+			node.mu.Lock()
+			tc.kill(node)
+			node.mu.Unlock()
+			reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}})
+
+			info := reply.GetCntlrInfo()
+			assertOk(t, info.GetGrpIdToMdRaid()[testCloneGrp],
+				"clone meta group")
+			tgt := info.GetCloneIdToTarget()[testClone]
+			dm := info.GetCloneIdToDmClone()[testClone]
+			assertMissingDetails(t, tgt, tc.targetHas, "clone target")
+			assertReason(t, tgt, tc.reason, "clone target")
+			assertMissingDetails(t, dm, "source not connected",
+				"dm-clone row")
+			assertReason(t, dm, tc.reason, "dm-clone row")
+			if !retrying(t, srv) {
+				t.Fatalf("a source whose connect was killed registered " +
+					"no retry")
+			}
+		})
 	}
 }

@@ -543,15 +543,6 @@ const (
 	CnNsScanPause       = 50 * time.Millisecond
 	CnNsHeadPause       = 5 * time.Millisecond
 
-	// ResDetailsSpLevel is the details of a CntlrInfo row the sp_level
-	// suppresses (cnagent.md CN19): RES_STATUS_MISSING that says the
-	// resource must not exist, where every other MISSING the cn agent reports
-	// says it does not exist yet or, on a clone's clone_id_to_target, that
-	// the clone's source has a fault (cnagent.md CN18). The cn agent writes
-	// it and the worker's settle reads it (dnv-worker.md HL2), so the two
-	// take it from here.
-	ResDetailsSpLevel = "sp_level"
-
 	// SuspendSeconds is the src-cutover grace window (architecture.md,
 	// Migration, src step 2): a migration
 	// source's per-CN dm-linears are held suspended for at least this long

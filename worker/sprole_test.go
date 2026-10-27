@@ -1678,7 +1678,8 @@ func TestSpCntlrSettle(t *testing.T) {
 		// — clean, at the driven revision, and no proof of the build the
 		// retry still has to do (primaryShapeBuilt). The rounds answer from
 		// that read's observation and probe nothing themselves. A row the
-		// sp_level suppresses reads MISSING "sp_level" and holds nothing.
+		// sp_level suppresses reads MISSING with the level's reason and holds
+		// nothing; the text "sp_level" alone, with no reason, holds.
 		driver, hw, logs := settleDriver(t, settlePlan(true, true))
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
@@ -1697,6 +1698,11 @@ func TestSpCntlrSettle(t *testing.T) {
 				Details: details,
 			}
 		}
+		suppressed := func(name string) *pb.ResInfo {
+			res := missing(name, "sp_level")
+			res.Reason = pb.ResReason_RES_REASON_SP_LEVEL
+			return res
+		}
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: missing("md", "")},
 			SliceIdToMeta:   map[uint64]*pb.ResInfo{1: missing("meta", "")},
@@ -1714,20 +1720,28 @@ func TestSpCntlrSettle(t *testing.T) {
 		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
 			t.Fatalf("%d cntlr settled records on the MISSING probe", got)
 		}
+		// The level's text with no reason: the settle reads the reason
+		// alone, so it holds.
+		levelText := func(name string) map[uint64]*pb.ResInfo {
+			return map[uint64]*pb.ResInfo{1: missing(name, "sp_level")}
+		}
+		driver.storeInfo(&pb.CntlrInfo{
+			GrpIdToMdRaid:   levelText("md"),
+			SliceIdToMeta:   levelText("meta"),
+			SliceIdToData:   levelText("data"),
+			SliceIdToDmPool: levelText("pool"),
+			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
+		}, 0)
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := settleWrites(hw); len(got) != 0 {
+			t.Fatalf("settled on the level's text with no reason: %+v", got)
+		}
 		// The level raised to suppress the md and the pools: settles.
 		driver.storeInfo(&pb.CntlrInfo{
-			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
-				1: missing("md", "sp_level"),
-			},
-			SliceIdToMeta: map[uint64]*pb.ResInfo{
-				1: missing("meta", "sp_level"),
-			},
-			SliceIdToData: map[uint64]*pb.ResInfo{
-				1: missing("data", "sp_level"),
-			},
-			SliceIdToDmPool: map[uint64]*pb.ResInfo{
-				1: missing("pool", "sp_level"),
-			},
+			GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: suppressed("md")},
+			SliceIdToMeta:   map[uint64]*pb.ResInfo{1: suppressed("meta")},
+			SliceIdToData:   map[uint64]*pb.ResInfo{1: suppressed("data")},
+			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: suppressed("pool")},
 			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
 		}, 0)
 		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
@@ -1737,6 +1751,81 @@ func TestSpCntlrSettle(t *testing.T) {
 		}
 		if got := len(logs.withMsg(msgCntlrSettled)); got != 1 {
 			t.Fatalf("%d cntlr settled records on the suppressed reply", got)
+		}
+	})
+
+	t.Run("a clone source this node does not read as ready", func(t *testing.T) {
+		// A built primary with a clone (cnagent.md CN18): a source this node
+		// does not read as ready reads the target row MISSING, and the
+		// dm-clone row MISSING while no dm-clone is there, with the source's
+		// reason, which reads as built; the same rows with no reason, and a
+		// dm-clone missing while its clone meta group is not ready, beside a
+		// ready source or a lost one, are a build in progress and hold.
+		driver, hw, logs := settleDriver(t, settlePlan(true, true))
+		missing := func(name, details string,
+			reason pb.ResReason) *pb.ResInfo {
+			return &pb.ResInfo{
+				ResName: name,
+				Status:  pb.ResStatus_RES_STATUS_MISSING,
+				Details: details,
+				Reason:  reason,
+			}
+		}
+		const (
+			none   = pb.ResReason_RES_REASON_NONE
+			source = pb.ResReason_RES_REASON_SOURCE_FAULT
+		)
+		withClone := func(target, dm *pb.ResInfo) *pb.CntlrInfo {
+			return &pb.CntlrInfo{
+				GrpIdToMdRaid:    map[uint64]*pb.ResInfo{1: resOk("md")},
+				SliceIdToDmPool:  map[uint64]*pb.ResInfo{1: resOk("pool")},
+				CloneIdToTarget:  map[uint64]*pb.ResInfo{1: target},
+				CloneIdToDmClone: map[uint64]*pb.ResInfo{1: dm},
+			}
+		}
+		for _, hold := range []struct {
+			label string
+			info  *pb.CntlrInfo
+		}{
+			{"a target row MISSING with no reason", withClone(
+				missing("src", "no namespace 1 on nqn", none),
+				resOk("clone"))},
+			{"a dm-clone row MISSING with no reason", withClone(
+				missing("src", "connect refused", source),
+				missing("clone", "source not connected", none))},
+			{"the clone meta group not ready", withClone(resOk("src"),
+				missing("clone", "metadata group not ready", none))},
+			{"the clone meta group not ready beside a source fault",
+				func() *pb.CntlrInfo {
+					info := withClone(
+						missing("src", "connect refused", source),
+						missing("clone", "source not connected", none))
+					info.GrpIdToMdRaid[2] = missing("cmg", "", none)
+					return info
+				}()},
+		} {
+			driver.storeInfo(hold.info, 0)
+			driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+			if got := settleWrites(hw); len(got) != 0 {
+				t.Fatalf("settled on %s: %+v", hold.label, got)
+			}
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
+			t.Fatalf("%d cntlr settled records before the clone's rows "+
+				"read built", got)
+		}
+		// The source not connected, both rows with its reason: settles.
+		driver.storeInfo(withClone(
+			missing("src", "connect refused", source),
+			missing("clone", "source not connected", source)), 0)
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := settleWrites(hw); len(got) != 1 || got[0].epoch != 0 {
+			t.Fatalf("settle writes on the source-fault reason = %+v, want one",
+				got)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 1 {
+			t.Fatalf("%d cntlr settled records on the source-fault reason",
+				got)
 		}
 	})
 

@@ -229,15 +229,15 @@ its info-read commands are plain memory reads.
   promotes first.
 * **Negatives are exact.** Provisioning and pending are healthy statuses, so an
   error row compares against error, never "not OK", and a suppressed one also
-  reads the level's details. A failed read taken for an absence passes every
-  negative on it (`cnagent.md` CN21): a residue check's failed dm or nvmet
-  listing prints a failing line, and so does a failed listing of clone_xfer's
-  token bucket once it is removed, a status-less check reply fails, the
-  agent-log readers fail their stage on a log that is missing or cannot be
-  read, thinbm's checks, clone_xfer's enable and finalize checks that a
-  converge ran no such command and the late flip's check that its promotion
-  wrote no optimized group fail when that converge logged nothing at all,
-  the long-dead stage counts a path absent only once the same read saw it
+  reads the level's details and its reason. A failed read taken for an absence
+  passes every negative on it (`cnagent.md` CN21): a residue check's failed dm
+  or nvmet listing prints a failing line, and so does a failed listing of
+  clone_xfer's token bucket once it is removed, a status-less check reply
+  fails, the agent-log readers fail their stage on a log that is missing or
+  cannot be read, thinbm's checks, clone_xfer's enable and finalize checks
+  that a converge ran no such command and the late flip's check that its
+  promotion wrote no optimized group fail when that converge logged nothing at
+  all, the long-dead stage counts a path absent only once the same read saw it
   live, an admission refusal needs nvmet's own refusal record behind a fresh
   mark, the park's open check, the dead-leg "no mdadm", the bound on what
   a rebuilt clone copies, and clone_xfer's checks that its agent's restart
@@ -478,15 +478,16 @@ emulated host, which its list does not name. The clone carries its clone meta
 group (`architecture.md`, Terminology and object model), whose one side on the
 destination's DN the suite provisions, over a data group's side's length,
 before any request names the clone (Conventions). Gated at the no-clone level
-(CN19), the group is built as any group is, its leg connected and wrapped and
-its device a dm-linear over the wrapper, while no dm-clone is, and two chunks
-of one source slice push race-free and prove the pair addressing (CN20, CN22).
-At read-write one converge keeps that group as it is, builds the dm-clone with
-the group's device as its metadata device and with exactly the no-hydration
-and no-discard-passdown pair, and lands the chunk as one discard at its skip
-range before hydration is enabled (CN18's metadata, dm-clone, bitmap and
-hydration steps); the first hydration sample, a fresh one, already counts the
-skipped half, and the last region the source wrote reads back right, through
+(CN19), the clone's two rows reading the level, the group is built as any
+group is, its leg connected and wrapped and its device a dm-linear over the
+wrapper, while no dm-clone is, and two chunks of one source slice push
+race-free and prove the pair addressing (CN20, CN22). At read-write one
+converge keeps that group as it is, builds the dm-clone with the group's
+device as its metadata device and with exactly the no-hydration and
+no-discard-passdown pair, and lands the chunk as one discard at its skip range
+before hydration is enabled (CN18's metadata, dm-clone, bitmap and hydration
+steps); the first hydration sample, a fresh one, already counts the skipped
+half, and the last region the source wrote reads back right, through
 read-through if need be. The copy runs slowed, the destination CN's writes
 to the sides on its own VM held to a low rate (Lab facts), so that the case
 acts in its middle. Once the copy has passed the chunk, the source loses its
@@ -497,16 +498,16 @@ destination's agent then restarts over the held copy and leaves it as it is
 and its leg's wrapper keep their device numbers and tables, the fresh log,
 read once a second attempt of the connect retry the restart registers has
 begun, so that it holds the whole first attempt, holds no mutation, the
-source's row reads missing and the dm-clone's and the group's ok. The source
-gets its namespace back from the transfer's own converge of a re-sent
-request (CN17), under a new device number on the destination, and with no
-request to the destination the connect retry, which a source with no
-namespace keeps registered, reloads the dm-clone onto that number in place,
-lands the chunk again and enables hydration (CN10, CN18),
-its count at least the held one, and the copy goes on. With no request, the
-startup reconcile, or the connect retry its pass registers when a step fails,
-rebuilds a destination CN wiped in the middle of that copy, the group's leg
-and device before the dm-clone over them and the chunk again before
+source's row reads missing with the source-fault reason (CN18) and the
+dm-clone's and the group's ok. The source gets its namespace back from the
+transfer's own converge of a re-sent request (CN17), under a new device number
+on the destination, and with no request to the destination the connect retry,
+which a source with no namespace keeps registered, reloads the dm-clone onto
+that number in place, lands the chunk again and enables hydration (CN10,
+CN18), its count at least the held one, and the copy goes on. With no request,
+the startup reconcile, or the connect retry its pass registers when a step
+fails, rebuilds a destination CN wiped in the middle of that copy, the group's
+leg and device before the dm-clone over them and the chunk again before
 hydration (CN2, CN10, CN18), its dead host path replaced by device as the
 pools share the NQN. The wipe-time sample counts more than the held count,
 and between the destination raid0's write count read while the copy held,
@@ -529,20 +530,21 @@ with one epoch, on a converge, in the observations a fresh round and then an
 info read report, each made after that converge by a read or by an attempt of
 the connect retry, which a clone whose source is not ready keeps registered,
 and on a second converge (`cnagent.md` CN10, CN18, CN28), the source's row
-missing, which sets no health epoch, and the other four ok, while the
-namespace serves on, optimized, through the hydrated dm-clone (CN16's clone
-rule) and the dm-clone's row still carries the status line the gateway's
-hydration check reads. The state compared is measured as the dn suite's lost
-source measures it (`dnagent_integtest.md`, Cases), and a reading that moves
-before the comparison ends fails the stage. The finalize takes the clone down
-in layer order, the clone, its source connection, then its group's device and
-its leg (`cnagent.md` L3, L5, L9, L10), leftover while the leg's disconnect
-runs and while the source's does, unless the source's controller was already
-gone, and the group waits for a pass that finds the source's connection gone.
-The half the source wrote reads back intact through the destination, which
-then takes a write, while the half it never wrote stays unmapped and zero
-there, the destination starting empty (`architecture.md`, [D3]); and at
-teardown both CNs pass smoke's per-CN check.
+missing with the source-fault reason, which sets no health epoch, and the
+other four ok, the dm-clone's with no reason, while the namespace serves on,
+optimized, through the hydrated dm-clone (CN16's clone rule) and the
+dm-clone's row still carries the status line the gateway's hydration check
+reads. The state compared is measured as the dn suite's lost source measures
+it (`dnagent_integtest.md`, Cases), and a reading that moves before the
+comparison ends fails the stage. The finalize takes the clone down in layer
+order, the clone, its source connection, then its group's device and its leg
+(`cnagent.md` L3, L5, L9, L10), leftover while the leg's disconnect runs and
+while the source's does, unless the source's controller was already gone, and
+the group waits for a pass that finds the source's connection gone. The half
+the source wrote reads back intact through the destination, which then takes a
+write, while the half it never wrote stays unmapped and zero there, the
+destination starting empty (`architecture.md`, [D3]); and at teardown both CNs
+pass smoke's per-CN check.
 
 **restart** proves persistence and an idempotent reconcile (`cnagent.md` CN2;
 `dnagent.md` SH1, SH4 to SH6): both cn agents restart over untouched kernel

@@ -641,6 +641,10 @@ func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 				t.Fatalf("the dm row's details are %q, want %q",
 					row.GetDetails(), detailsCloneMetaGrpNotReady)
 			}
+			// A build in progress: no reason, so the worker's settle waits
+			// for it (dnv-worker.md HL2).
+			assertReason(t, row, pb.ResReason_RES_REASON_NONE,
+				"the dm row with no dm-clone")
 			assertParked(t, srv, node, testNs, testTd,
 				"the namespace with no dm-clone")
 			assertAna(t, node, testNqn, "3",

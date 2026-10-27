@@ -309,8 +309,10 @@ always means the SP's `DmPoolConf.data_block_size`.
   created as one by a sole-primary replacement, or re-enabled by
   `UpdateCntlrEnabled` while still primary (Cntlrs) — until the worker
   first observes it clean in that role, enabled, at the revision it drives
-  and with its stack built, the rows its `sp_level` suppresses aside
-  (`dnv-worker.md` HL2 says which rows read as built), or until a failover
+  and with its stack built, the rows its `sp_level` suppresses and the
+  clone rows its node keeps missing because it does not read the clone's
+  source as ready aside (`cnagent.md` CN18 says which clone rows,
+  `dnv-worker.md` HL2 which rows read as built), or until a failover
   demotes it first. While it is set, the failover judges an unhealthy
   primary by `cntlr_unhealthy` instead of `primary_unhealthy` when that is
   the longer; a `disabled` one still fails over at once (`dnv-worker.md`
@@ -2725,13 +2727,13 @@ read that ends within an interval, that row shows within about two
 `cntlr_interval` of the reply.
 
 **Interaction with `SpLevel` and provisioning.** At an `sp_level` that
-suppresses pools the thin rows read `RES_STATUS_MISSING` with details
-`ResDetailsSpLevel` (`cnagent.md` CN19), so no td of that SP ever flips and
-every snapshot
-request is refused until the level is restored and a converge reports the
-rows `OK`. A td created while a slice is still provisioning-deferred
-([D15]) reads `RES_STATUS_PROVISIONING` in that slice and flips when the
-last slice clears. Both are the intended meaning of "not created yet".
+suppresses pools the thin rows read `RES_STATUS_MISSING` with the level's
+reason (`cnagent.md` CN19; Live-state reporting), so no td of that SP ever
+flips and every snapshot request is refused until the level is restored and
+a converge reports the rows `OK`. A td created while a slice is still
+provisioning-deferred ([D15]) reads `RES_STATUS_PROVISIONING` in that slice
+and flips when the last slice clears. Both are the intended meaning of "not
+created yet".
 
 **DeleteThinDevice** — Errors: `FAILED_PRECONDITION` if the `td_id` is
 referenced by any `Namespace.td_id` of any subsystem of the SP (read
@@ -4009,9 +4011,15 @@ with `ResStatus`:
 * `RES_STATUS_UNKNOWN` — no answer from the node, or one from an
   observation too old (`dnv-worker.md` HL7); set by *workers*, never by
   the agent itself.
-* `RES_STATUS_MISSING` — the agent has not created it; a clone's
-  `clone_id_to_target` row also reads it for a fault of the clone's source
-  (`cnagent.md` CN18).
+* `RES_STATUS_MISSING` — the agent has not created it, a build still to
+  come or a resource its pool's level suppresses (`cnagent.md` CN19); a
+  clone's `clone_id_to_target` row also reads it while the node reads the
+  clone's source as not connected, not live or with no namespace
+  (`cnagent.md` CN18). The row's reason marks a suppressed row, and a
+  clone row the node keeps missing because it does not read the clone's
+  source as ready (`cnagent.md` CN18 says which, and when a source still
+  coming up reads so); the settle of `dnv-worker.md` HL2 waits for
+  neither.
 * `RES_STATUS_ERROR` — tried and failed; `details` says why, or carries
   the command output — *needs intervention*.
 * `RES_STATUS_OK`.
@@ -4078,11 +4086,16 @@ read it (Clones, Migrations).
 `reason` (`ResReason`) is the cause of a row's status that a control-plane
 decision reads: `RES_REASON_NONE` on a row no rule gives a reason;
 `RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets on an `ERROR` row
-and `dnv-worker.md` HL2 reads; and `RES_REASON_AWAITING_CUTOVER`, which
+and `dnv-worker.md` HL2 reads; `RES_REASON_AWAITING_CUTOVER`, which
 `dnagent.md` DN13 sets on a migration destination's two `PROVISIONING`
-migration rows and `dnv-worker.md` RW18 reads. An agent sets a reason from
-what its own pass established, never from a row's text: `cnagent.md` CN29
-says how the cn agent does, `dnagent.md` DN13 how the dn agent does.
+migration rows and `dnv-worker.md` RW18 reads; `RES_REASON_SP_LEVEL`, which
+`cnagent.md` CN19 sets on every `MISSING` row its pool's level suppresses;
+and `RES_REASON_SOURCE_FAULT`, which `cnagent.md` CN18 sets on the clone
+rows the cn agent keeps `MISSING` because it does not read the clone's
+source as ready, CN18 saying which; the settle of `dnv-worker.md` HL2
+reads these two. An agent sets a reason from what its own pass
+established, never from a row's text: `cnagent.md` CN29 says how the cn
+agent does, `dnagent.md` DN13 how the dn agent does.
 
 `CntlrInfo.leg_id_to_leg` reflects the health check of Group on-leg
 layout: meta region, data region, health block — the block-probe IO on the

@@ -95,6 +95,9 @@ func TestRowReasonAndTornMarkNumbers(t *testing.T) {
 	}{
 		{"RES_REASON_NONE", 0},
 		{"RES_REASON_THIN_ID_LOST", 1},
+		{"RES_REASON_AWAITING_CUTOVER", 2},
+		{"RES_REASON_SP_LEVEL", 3},
+		{"RES_REASON_SOURCE_FAULT", 4},
 	} {
 		ev := reason.Values().ByName(v.name)
 		if ev == nil || ev.Number() != v.number {

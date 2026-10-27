@@ -752,6 +752,66 @@ func TestFailoverBackWaitsWhileTheNewPrimarySettles(t *testing.T) {
 	})
 }
 
+// TestFailoverNewPrimarySettlesOverACloneSourceFault pins HL2's settle on a
+// clone row with the source-fault reason (cnagent.md CN18): a new primary whose
+// clone_id_to_target row reads MISSING with no reason, a build still to
+// come, stays settling over clean rounds at the revision it is driven at;
+// the same row with the source-fault reason reads as built, and the primary
+// settles. A MISSING row sets no health epoch either way (HL2).
+func TestFailoverNewPrimarySettlesOverACloneSourceFault(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, nil)
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	clone := c.putStdClone(t, stdCloneSpec("c0"))
+	c.waitConverged(t)
+
+	newAgent, newKey := c.cntlrAgent(t, 2)
+	rowKey := fmt.Sprintf("clone_id_to_target.%d", clone.Id)
+	foLever(t, newAgent, newKey, func(o *agentfake.Object) {
+		foSetRow(o, rowKey, rowLever(pb.ResStatus_RES_STATUS_MISSING,
+			"no namespace 1 on nqn.2026-10.io.dnv-wh:src", true))
+	})
+	foSetDisabled(t, c, 1, true)
+	applied := foWaitFailover(t, h, w, 1, 2, 20*time.Second)
+	foWaitCntlrSynced(t, h, w, 2, applied.num("revision"), 20*time.Second)
+	// Clean rounds of the new primary at the driven revision: the row holds
+	// the settle.
+	h.waitRounds(t, newAgent, 3, newKey)
+	if cntlr := c.cntlr(t, 2); !cntlr.GetPrimary() || !cntlr.GetSettling() ||
+		cntlr.GetErrEpoch() != 0 {
+		t.Fatalf("cntlr 2 over a target row MISSING with no reason: primary "+
+			"%t, settling %t, err_epoch %d; want a settling primary with no "+
+			"health epoch", cntlr.GetPrimary(), cntlr.GetSettling(),
+			cntlr.GetErrEpoch())
+	}
+	for _, rec := range h.records(w, msgCntlrSettled) {
+		if foIsCntlr(2)(rec) {
+			t.Fatalf("cntlr 2 settled over a target row MISSING with no " +
+				"reason")
+		}
+	}
+
+	foLever(t, newAgent, newKey, func(o *agentfake.Object) {
+		row := rowLever(pb.ResStatus_RES_STATUS_MISSING,
+			"no namespace 1 on nqn.2026-10.io.dnv-wh:src", true)
+		reason := pb.ResReason_RES_REASON_SOURCE_FAULT
+		row.Reason = &reason
+		foSetRow(o, rowKey, row)
+	})
+	h.waitRecord(t, 10*time.Second, w, msgCntlrSettled, foIsCntlr(2))
+	h.waitUntil(t, 10*time.Second, "cntlr 2's settling cleared",
+		func() (bool, string) {
+			cntlr := c.cntlr(t, 2)
+			if cntlr.GetErrEpoch() != 0 {
+				t.Fatalf("cntlr 2's health epoch set over a MISSING row")
+			}
+			return !cntlr.GetSettling(), "still settling"
+		})
+}
+
 // TestFailoverNewPrimaryRefusingItsSyncup pins what a refused promotion
 // costs: the new primary's agent refuses every reply with a code, a refusal
 // gives no health verdict (HL1, HL2) and adds to no run (AR10), so the new

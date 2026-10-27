@@ -592,8 +592,11 @@ func TestProbeReportsAnOpenSubsystem(t *testing.T) {
 // "sp_level" rather than leaving it out, because "a worker cannot tell an
 // omitted resource from one the agent never looked at" (CN19) and because
 // show_info promises the complete current CntlrInfo (architecture.md, Check
-// streams). A probe that
-// returned early skipped seven row families the converge fills.
+// streams). A probe that returned early skipped seven row families the
+// converge fills. Each suppressed row of the converge carries the level's
+// reason itself, the pool, thin and raid0 rows the worker's settle reads
+// included (dnv-worker.md HL2), so a reason dropped on both channels at once
+// fails here and not only a reason the two channels disagree on.
 func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 	srv, _ := newTestServer(t)
 	xfers := []*pb.Transfer{{
@@ -610,7 +613,11 @@ func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 		t.Fatalf("disable: %v", err)
 	}
 	converged := reply.GetCntlrInfo()
-	for label, res := range map[string]*pb.ResInfo{
+	rows := map[string]*pb.ResInfo{
+		"pool meta":   converged.GetSliceIdToMeta()[testSlice],
+		"pool data":   converged.GetSliceIdToData()[testSlice],
+		"pool":        converged.GetSliceIdToDmPool()[testSlice],
+		"td raid0":    converged.GetTdIdToRaid0()[testTd],
 		"td dm-error": converged.GetTdIdToDmError()[testTd],
 		"ns-dev":      converged.GetNsIdToDmLinear()[testNs],
 		"namespace":   converged.GetNsIdToNamespace()[testNs],
@@ -618,12 +625,16 @@ func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 		"xfer dm":     converged.GetXferIdToDmLinear()[testXfer],
 		"xfer subsys": converged.GetXferIdToSubsystem()[testXfer],
 		"xfer ns":     converged.GetXferIdToNamespace()[testXfer],
-	} {
-		if res.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
-			res.GetDetails() != "sp_level" {
-			t.Fatalf("converged %s is %v/%q, want MISSING/sp_level",
-				label, res.GetStatus(), res.GetDetails())
-		}
+	}
+	thins := converged.GetTdIdToThinInfo()[testTd].GetSliceIdToDmThin()
+	if len(thins) == 0 {
+		t.Fatalf("the converge reports no thin row of td %#x", testTd)
+	}
+	for sliceId, res := range thins {
+		rows[fmt.Sprintf("thin slice %#x", sliceId)] = res
+	}
+	for label, res := range rows {
+		assertMissingSpLevel(t, res, "converged "+label)
 	}
 
 	refreshTestCntlr(t, srv)
@@ -642,12 +653,12 @@ func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 }
 
 // TestSuppressedCloneReportsSpLevel: a clone in clone_list at a level that
-// suppresses clones reads its two rows MISSING / "sp_level" on both
-// channels (CN19) — at SP_LEVEL_NO_CLONE, CN18's staged gate, and at
-// SP_LEVEL_DISABLE, where reportSuppressed leaves the clones to the same
-// function. The worker's settle (dnv-worker.md HL2) is held by every other
-// MISSING, so a clone row that lost its "sp_level" would keep a primary with a
-// clone settling for as long as the level stands.
+// suppresses clones reads its two rows MISSING / "sp_level" with the level's
+// reason on both channels (CN19) — at SP_LEVEL_NO_CLONE, CN18's staged gate,
+// and at SP_LEVEL_DISABLE, where reportSuppressed leaves the clones to the
+// same function. The worker's settle (dnv-worker.md HL2) is held by every
+// MISSING with no reason, so a clone row that lost the level's reason would
+// keep a primary with a clone settling for as long as the level stands.
 func TestSuppressedCloneReportsSpLevel(t *testing.T) {
 	srv, _ := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})

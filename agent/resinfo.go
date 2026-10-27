@@ -14,7 +14,7 @@ import (
 // architecture.md, Live-state reporting / dnagent.md SH14: epoch is the unix
 // second of the last *status* change — a change of the details or of the
 // reason alone does not bump it. The reason is RES_REASON_NONE unless the
-// caller names one through ErrReason or SetReason.
+// caller names one through ErrReason, MissingReason or SetReason.
 //
 // The agent emits MISSING/ERROR/OK/PROVISIONING, the cn agent also PENDING on a
 // primary's leg rows (cnagent.md CN11), and never UNKNOWN (that one is
@@ -157,14 +157,29 @@ func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 
 // ErrReason is Err with a reason, for a row whose cause a control-plane
 // decision reads in place of its details (architecture.md, Live-state
-// reporting); every helper but it and SetReason gives RES_REASON_NONE. A row
-// that keeps its status keeps its epoch when only its reason changes.
+// reporting); every helper but it, MissingReason and SetReason gives
+// RES_REASON_NONE. A row that keeps its status keeps its epoch when only its
+// reason changes.
 func (t *ResTracker) ErrReason(
 	key, resName, details string,
 	reason pb.ResReason,
 ) *pb.ResInfo {
 	return t.SetReason(
 		key, resName, pb.ResStatus_RES_STATUS_ERROR, details, reason)
+}
+
+// MissingReason is Missing with a reason, for a missing row whose cause a
+// control-plane decision reads in place of its details (architecture.md,
+// Live-state reporting): the worker's settle reads a missing row with the
+// level's or a clone source's reason as built, and one with no reason as a
+// build in progress (dnv-worker.md HL2). As for ErrReason, a row that keeps
+// its status keeps its epoch when only its reason changes.
+func (t *ResTracker) MissingReason(
+	key, resName, details string,
+	reason pb.ResReason,
+) *pb.ResInfo {
+	return t.SetReason(
+		key, resName, pb.ResStatus_RES_STATUS_MISSING, details, reason)
 }
 
 // Provisioning is the [D15] outcome (architecture.md, Live-state reporting):

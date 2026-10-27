@@ -426,16 +426,16 @@ inaccessible namespace, refused deletion while enabled, out of the discovery
 log once disabled, no usable path once deleted (`architecture.md`, Cntlrs);
 the level ladder down to disabled and back, each rung awaited on the primary's
 `applied_revision` (`dnv-worker.md` RW14) and showing exactly the suppressed
-rows missing with the level marker (`ResDetailsSpLevel`) as their details
-(`cnagent.md` CN19; `architecture.md`, SpLevel), the read-only rung reading
-the data and keeping a write off the media (`cnagent.md` CN16's read-only
-rule; `architecture.md`, [D11]); a snapshot and both bitmap reads, the thin
-bitmap clear at the block setup wrote (`architecture.md`, Bitmap reads;
-`cnagent.md` CN26, CN27); a namespace suspend that parks rather than removes,
-and a repoint there and back (`architecture.md`, Namespace suspend semantics);
-and a disabled disk node and controller node, invisible to the agents, each
-proved by a refused allocation that writes nothing (`architecture.md`,
-Capacity index keys).
+rows missing, each with the level's reason and the marker "sp_level" as its
+details (`cnagent.md` CN19; `architecture.md`, SpLevel), the read-only rung
+reading the data and keeping a write off the media (`cnagent.md` CN16's
+read-only rule; `architecture.md`, [D11]); a snapshot and both bitmap reads,
+the thin bitmap clear at the block setup wrote (`architecture.md`, Bitmap
+reads; `cnagent.md` CN26, CN27); a namespace suspend that parks rather than
+removes, and a repoint there and back (`architecture.md`, Namespace suspend
+semantics); and a disabled disk node and controller node, invisible to the
+agents, each proved by a refused allocation that writes nothing
+(`architecture.md`, Capacity index keys).
 
 **copy** proves the four RPC groups that move bytes, among them two of an
 operator's repairs on a group whose legs' disk nodes die, the second taking

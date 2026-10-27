@@ -329,13 +329,49 @@ assert_provisioning() { # json path label
 }
 
 # assert_suppressed reads a resource CN19 gated off: not OK, with "sp_level" as
-# the reason. The details check is what keeps it exact, because
+# its details and the level's reason, which the worker's settle reads
+# (dnv-worker.md HL2). The details check is what keeps it exact, because
 # RES_STATUS_PROVISIONING also satisfies "not OK" — a deferred resource reports
 # "provisioning", never "sp_level" (CN19; cnagent_integtest.md, Conventions,
 # Negatives are exact).
 assert_suppressed() { # json path label
 	assert_not_ok "$1" "$2.status" "$3"
 	assert_eq "$(jq_of "$1" "$2.details // \"ABSENT\"")" sp_level "$3 details"
+	assert_eq "$(jq_of "$1" "$2.reason // \"RES_REASON_NONE\"")" \
+		RES_REASON_SP_LEVEL "$3 reason"
+}
+
+# assert_source_fault reads the source-fault reason off a clone's rows
+# (cnagent.md CN18): on its clone_id_to_target row, which must read MISSING,
+# and on its clone_id_to_dm_clone row when that row is MISSING saying the
+# source is not connected or unknown beside an OK row of the clone's clone
+# meta group; any other dm-clone row carries no reason. No call reads a
+# converge that ran a connect of the source and then found a controller at
+# every endpoint, CN18's head-pending state, where the rows may carry no
+# reason: in srcgone's fallback the converges' connects are refused and
+# leave no controller. protojson leaves an unset reason out.
+assert_source_fault() { # json clone-id clone-meta-grp-id label
+	local key tgt dm st det grp why
+	key=$(d16 "$2")
+	tgt=".cntlr_info.clone_id_to_target[\"$key\"]"
+	dm=".cntlr_info.clone_id_to_dm_clone[\"$key\"]"
+	assert_eq "$(jq_of "$1" "$tgt.status // \"ABSENT\"")" RES_STATUS_MISSING \
+		"$4 clone_id_to_target[$2] status"
+	assert_eq "$(jq_of "$1" "$tgt.reason // \"RES_REASON_NONE\"")" \
+		RES_REASON_SOURCE_FAULT "$4 clone_id_to_target[$2] reason"
+	st=$(jq_of "$1" "$dm.status // \"ABSENT\"")
+	det=$(jq_of "$1" "$dm.details // \"\"")
+	grp=$(jq_of "$1" \
+		".cntlr_info.grp_id_to_md_raid[\"$(d16 "$3")\"].status // \"ABSENT\"")
+	why=RES_REASON_NONE
+	case "$st:$grp:$det" in
+	RES_STATUS_MISSING:RES_STATUS_OK:*"source not connected"* | \
+		RES_STATUS_MISSING:RES_STATUS_OK:*"source unknown"*)
+		why=RES_REASON_SOURCE_FAULT
+		;;
+	esac
+	assert_eq "$(jq_of "$1" "$dm.reason // \"RES_REASON_NONE\"")" "$why" \
+		"$4 clone_id_to_dm_clone[$2] reason ($st, '$det', group $grp)"
 }
 
 # assert_map_ok checks one entry of a CntlrInfo map<uint64, ResInfo>;
@@ -6502,7 +6538,7 @@ case_clone_xfer() {
 	local idx bmargs bmfiles nsdev2 err1 err2 hyd tot post deadline
 	local code details shape now tgt rows c1 k g c2 legdm grpdm legnqn raid0dm
 	local srcpass wsect bound w0 w1 held dm before i muts mark src0 src1 cmds
-	local ids again wbase
+	local ids again wbase json
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -6647,6 +6683,9 @@ case_clone_xfer() {
 	assert_suppressed "$out" \
 		".cntlr_info.clone_id_to_dm_clone[\"$(d16 "$C_CLONE")\"]" \
 		"clone_xfer gated clone"
+	assert_suppressed "$out" \
+		".cntlr_info.clone_id_to_target[\"$(d16 "$C_CLONE")\"]" \
+		"clone_xfer gated clone's source"
 	# The level gates the dm-clone, not the clone meta group, which is a
 	# group like any other under the group and leg gates (cnagent.md CN19):
 	# the leg is connected and wrapped, its prober just started (CN11), and
@@ -6880,6 +6919,8 @@ case_clone_xfer() {
 	out=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
 	assert_map_status "$out" clone_id_to_target "$C_CLONE" \
 		RES_STATUS_MISSING "no namespace" "clone_xfer after the restart"
+	assert_source_fault "$out" "$C_CLONE" "$C_MGRP" \
+		"clone_xfer after the restart"
 	assert_map_ok "$out" clone_id_to_dm_clone "$C_CLONE" \
 		"clone_xfer after the restart"
 	assert_map_ok "$out" grp_id_to_md_raid "$C_MGRP" \
@@ -7256,6 +7297,14 @@ case_clone_xfer() {
 		".cntlr_info.ns_id_to_namespace[\"$(d16 "$S_NS")\"]")
 	assert_rows_agree "clone_xfer with no source namespace" "$rows" \
 		"$c1" "$k" "$g" "$c2"
+	# And one reason: the source's on the target row in each of the four, and
+	# none on the dm-clone's row, which serves (cnagent.md CN18, CN29).
+	i=0
+	for json in "$c1" "$k" "$g" "$c2"; do
+		i=$((i + 1))
+		assert_source_fault "$json" "$C_CLONE" "$C_MGRP" \
+			"clone_xfer with no source namespace, reply $i"
+	done
 	# The dm-clone's row carries its status line whenever the device is
 	# there, so the agent's read still proves the hydration checkCloneHydrated
 	# (gateway/clone.go) reads; the sample is a fresh round's.

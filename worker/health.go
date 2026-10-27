@@ -1164,12 +1164,14 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 }
 
 // primaryShapeBuilt reports whether a primary's reply shows its stack built,
-// the rows its sp_level suppresses aside: no row of the maps HL2 judges a
-// cntlr by, grp_id_to_md_raid aside, reads RES_STATUS_PROVISIONING, or
-// RES_STATUS_MISSING with details other than CN19's "sp_level"
-// (common.ResDetailsSpLevel, the cn agent's own value). HL2's settle requires
-// it. A new SP's primary reports a slice's pool rows,
-// and the thin volumes in that pool, PROVISIONING until every leg of the
+// the rows its sp_level suppresses and the clone rows the cn agent keeps
+// missing because it does not read the clone's source as ready aside: no row
+// of the maps HL2 judges a cntlr by, grp_id_to_md_raid aside, reads
+// RES_STATUS_PROVISIONING, or RES_STATUS_MISSING with neither
+// RES_REASON_SP_LEVEL (CN19) nor RES_REASON_SOURCE_FAULT (CN18). It reads
+// the reason alone, never the details, which are for people. HL2's settle
+// requires it. A new SP's primary reports a slice's pool rows, and the thin
+// volumes in that pool, PROVISIONING until every leg of the
 // groups under it has a provisioned side, and its raid0s — with the ns-devs,
 // namespaces, clones and transfers over them — until no slice is deferred
 // (cnagent.md CN9, [D15]; the ns-devs, on the td's dm-error, their namespaces
@@ -1189,15 +1191,36 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // cntlr by (a td's raid0 row reads ERROR while its thins are absent; a leg row,
 // which is not judged, reads the CN11 prober, which fails on a path still
 // non-optimized). Every other MISSING
-// the cn agent reports is likewise a device not built, or a clone whose
-// source is not connected, has a fault (an endpoint with no live controller,
-// or no namespace) or could not be read this pass (CN18), so a primary
-// showing one stays settling, held to cntlr_unhealthy, until it clears — for
-// as long as a clone's source stays unconnected, faulty or unread. Below
-// SP_LEVEL_NO_CLONE, where a clone's rows do not read the level (CN19), so
-// does a clone with no dm-clone while its clone meta group is not ready, its
-// dm-clone row MISSING (CN18), for as long as that lasts; a converge that
-// could not assemble the group reports the group's own row ERROR, which sets
+// the cn agent reports with no reason is likewise a device not built, so a
+// primary showing one stays settling, held to cntlr_unhealthy, until it
+// clears. The cn agent writes MISSING with RES_REASON_SOURCE_FAULT on the
+// clone rows it keeps missing because it does not read the clone's source as
+// ready (CN18 says which): the clone_id_to_target row — no subsystem entry,
+// an endpoint with no live controller, no namespace — and the
+// clone_id_to_dm_clone row while no dm-clone is there because this node does
+// not read the source as connected, and then only beside a clone meta group
+// that is ready. Those rows hold nothing however long that lasts: what they
+// lack waits on the source, and that wait is not a build in progress. A
+// sweep's disconnect of the source in flight, and a walk or a lookup of the
+// source that did not answer, read the target row ERROR, which sets
+// err_epoch, so that reply settles nothing. A converge whose own connect of
+// the source leaves its namespace head still to come writes the target row's
+// "no namespace" and the dm-clone row with no reason, a build in progress
+// that holds the settle. Every other reading of a source still coming up
+// writes the source-fault reason, a known limit of CN18: a background read,
+// which connects nothing, of that state, or after a converge whose step 1
+// connected nothing (a disconnect in flight, a lookup that did not answer)
+// of a source with no subsystem entry yet; and a converge that finds at
+// every endpoint a controller made before its step 1 looked — by an earlier
+// pass of its own cntlr, as the CN10 retry's pass after that state finds
+// one, by another clone's step 1 or by another cntlr's pass — before the
+// namespace head is there. A round that answers from one of them can settle
+// the primary a few seconds before the CN10 retry builds the rest of the
+// clone. Below SP_LEVEL_NO_CLONE, where a clone's rows do not read the level
+// (CN19), a clone with no dm-clone while its clone meta group is not ready,
+// its dm-clone row MISSING with no reason whatever its source reads (CN18),
+// holds the settle for as long as that lasts; a converge that could not
+// assemble the group reports the group's own row ERROR, which sets
 // err_epoch, and a background read in between reports an md array that is
 // not there MISSING "", as it does a slice's group above. Below that level
 // too, a clone whose destination or clone meta group still provisions reads
@@ -1217,9 +1240,9 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // whole slice, whose pool rows say so, and a group a converge could not
 // assemble leaves the pool rows over it ERROR or MISSING. A clone meta group
 // has no pool over it: below SP_LEVEL_NO_CLONE its clone's rows show it,
-// PROVISIONING while its sides zero and the dm-clone row MISSING while it is
-// not ready and no dm-clone is there (CN18), and at that level and above no
-// layer over it is wanted. A leg that a forced
+// PROVISIONING while its sides zero and the dm-clone row MISSING with no
+// reason while it is not ready and no dm-clone is there (CN18), and at that
+// level and above no layer over it is wanted. A leg that a forced
 // FinishMigration left with an unprovisioned destination as its only side —
 // possible only for a Migration whose record carries no cutover_pending
 // (architecture.md, Upgrade in lockstep), as a finish is refused while the
@@ -1231,12 +1254,12 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // RW18 flip, and indefinitely if the side never finishes; in a later group,
 // one the pool's concat already spans, the concat under the thin-pool cannot
 // shrink and a pool row reads ERROR. A row the sp_level suppresses reads
-// MISSING "sp_level" (CN19) and holds nothing, so a primary does not wait for
-// the layers its level suppresses. Yet a primary whose level suppresses its
-// pools settles before the zeroing ends only at SP_LEVEL_DISABLE, or with no
-// namespace and no transfer: [D15]'s deferral does not depend on the level,
-// and its ns-devs, namespaces and transfers read PROVISIONING while a slice
-// is deferred.
+// MISSING with RES_REASON_SP_LEVEL (CN19) and holds nothing, so a primary
+// does not wait for the layers its level suppresses. Yet a primary whose
+// level suppresses its pools settles before the zeroing ends only at
+// SP_LEVEL_DISABLE, or with no namespace and no transfer: [D15]'s deferral
+// does not depend on the level, and its ns-devs, namespaces and transfers
+// read PROVISIONING while a slice is deferred.
 func primaryShapeBuilt(info *pb.CntlrInfo) bool {
 	for _, m := range cntlrHealthMaps(info) {
 		if m.label == "grp_id_to_md_raid" {
@@ -1247,7 +1270,9 @@ func primaryShapeBuilt(info *pb.CntlrInfo) bool {
 			case pb.ResStatus_RES_STATUS_PROVISIONING:
 				return false
 			case pb.ResStatus_RES_STATUS_MISSING:
-				if res.GetDetails() != common.ResDetailsSpLevel {
+				reason := res.GetReason()
+				if reason != pb.ResReason_RES_REASON_SP_LEVEL &&
+					reason != pb.ResReason_RES_REASON_SOURCE_FAULT {
 					return false
 				}
 			}

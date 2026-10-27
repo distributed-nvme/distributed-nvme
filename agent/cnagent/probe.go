@@ -57,7 +57,7 @@ func (s *CnAgentServer) probeCntlr(
 		// the operator has said the resource must not exist, which is a
 		// stronger statement than "it is coming".
 		if !plan.wantLeg {
-			info.LegIdToLeg[lp.legId] = t.Missing(key, lp.name, detailsSpLevel)
+			info.LegIdToLeg[lp.legId] = suppressedRow(t, key, lp.name)
 			continue
 		}
 		if lp.provisioning {
@@ -95,8 +95,7 @@ func (s *CnAgentServer) probeCntlr(
 			putBack = append(putBack, names...)
 			reportGrpReading(info, gp, detail, refusal)
 		case plan.primary:
-			info.GrpIdToMdRaid[gp.grpId] = t.Missing(
-				key, gp.resName, detailsSpLevel)
+			info.GrpIdToMdRaid[gp.grpId] = suppressedRow(t, key, gp.resName)
 		}
 	}
 
@@ -107,12 +106,12 @@ func (s *CnAgentServer) probeCntlr(
 		poolKey := resKeyOf(resKeyPoolFmt, sp.sliceId)
 		if !plan.wantPool {
 			if plan.primary {
-				info.SliceIdToMeta[sp.sliceId] = t.Missing(
-					metaKey, sp.poolMetaName, detailsSpLevel)
-				info.SliceIdToData[sp.sliceId] = t.Missing(
-					dataKey, sp.poolDataName, detailsSpLevel)
-				info.SliceIdToDmPool[sp.sliceId] = t.Missing(
-					poolKey, sp.poolFinalName, detailsSpLevel)
+				info.SliceIdToMeta[sp.sliceId] = suppressedRow(t,
+					metaKey, sp.poolMetaName)
+				info.SliceIdToData[sp.sliceId] = suppressedRow(t,
+					dataKey, sp.poolDataName)
+				info.SliceIdToDmPool[sp.sliceId] = suppressedRow(t,
+					poolKey, sp.poolFinalName)
 			}
 			continue
 		}
@@ -141,8 +140,8 @@ func (s *CnAgentServer) probeCntlr(
 		if !plan.primary {
 			continue
 		}
-		// The torn mark is the converge's (tornMark, CN14); the rows carry
-		// no reason (CN29): only a converge names a lost thin id.
+		// The torn mark is the converge's (tornMark, CN14); no row carries
+		// the lost thin id's reason (CN29): only a converge names one.
 		thinInfo := &pb.CntlrInfo_ThinInfo{
 			SliceIdToDmThin: make(map[uint64]*pb.ResInfo, len(plan.slices)),
 			Torn:            tornMark(st, tp),
@@ -151,8 +150,8 @@ func (s *CnAgentServer) probeCntlr(
 			key := thinResKey(tp.tdId, sp.sliceId)
 			name := plan.thinName(tp.tdId, sp.sliceId)
 			if !plan.wantPool {
-				thinInfo.SliceIdToDmThin[sp.sliceId] = t.Missing(
-					key, name, detailsSpLevel)
+				thinInfo.SliceIdToDmThin[sp.sliceId] = suppressedRow(t,
+					key, name)
 				continue
 			}
 			if sp.deferred {
@@ -181,9 +180,8 @@ func (s *CnAgentServer) probeCntlr(
 			// too — a row that disappears one read after being reported
 			// MISSING is exactly the omitted-vs-never-looked-at ambiguity
 			// CN19 forbids.
-			info.TdIdToDmError[tp.tdId] = t.Missing(
-				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName,
-				detailsSpLevel)
+			info.TdIdToDmError[tp.tdId] = suppressedRow(t,
+				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName)
 		}
 		raid0Key := resKeyOf(resKeyRaid0Fmt, tp.tdId)
 		switch {
@@ -202,8 +200,7 @@ func (s *CnAgentServer) probeCntlr(
 			info.TdIdToRaid0[tp.tdId] = t.Set(
 				raid0Key, tp.raid0Name, status, details)
 		case plan.primary:
-			info.TdIdToRaid0[tp.tdId] = t.Missing(
-				raid0Key, tp.raid0Name, detailsSpLevel)
+			info.TdIdToRaid0[tp.tdId] = suppressedRow(t, raid0Key, tp.raid0Name)
 		}
 	}
 

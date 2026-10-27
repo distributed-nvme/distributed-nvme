@@ -549,8 +549,8 @@ func parseResStatus(name string) (pb.ResStatus, error) {
 }
 
 // parseResReason accepts a ResReason by its short spelling ("NONE",
-// "THIN_ID_LOST", "AWAITING_CUTOVER") or its full proto enum name
-// ("RES_REASON_THIN_ID_LOST"), case-insensitively.
+// "THIN_ID_LOST", "AWAITING_CUTOVER", "SP_LEVEL", "SOURCE_FAULT") or its full
+// proto enum name ("RES_REASON_THIN_ID_LOST"), case-insensitively.
 func parseResReason(name string) (pb.ResReason, error) {
 	key := strings.ToUpper(strings.TrimSpace(name))
 	if !strings.HasPrefix(key, "RES_REASON_") {

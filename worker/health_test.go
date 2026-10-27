@@ -1719,12 +1719,13 @@ func TestHealthMarkCntlrUnknownCoversEveryMap(t *testing.T) {
 }
 
 // TestPrimaryShapeBuilt pins which rows keep HL2's settle waiting, against
-// CntlrInfo itself: a PROVISIONING row, or a MISSING row whose details are
-// not CN19's "sp_level", in any map HL2 judges a cntlr by, the per-td thin
-// maps included, except grp_id_to_md_raid, where a grow's group reads
-// PROVISIONING beside a serving pool; never a leg row (a zeroing new leg) nor a
-// path row (a migration's zeroing dst side); and never a row of any other
-// status, or a MISSING "sp_level" one, in any map.
+// CntlrInfo itself: a PROVISIONING row, or a MISSING row with neither the
+// level's reason (CN19) nor the clone source's (CN18), in any map HL2 judges
+// a cntlr by, the per-td thin maps included, except grp_id_to_md_raid, where
+// a grow's group reads PROVISIONING beside a serving pool; never a leg row (a
+// zeroing new leg) nor a path row (a migration's zeroing dst side); and never
+// a row of any other status, or a MISSING one with either reason, in any map.
+// The reason alone counts: a MISSING "sp_level" with no reason holds.
 func TestPrimaryShapeBuilt(t *testing.T) {
 	fields := cntlrRowFields(t)
 	notJudged := map[string]bool{
@@ -1733,42 +1734,67 @@ func TestPrimaryShapeBuilt(t *testing.T) {
 		"grp_id_to_md_raid": true,
 	}
 	status := func(s pb.ResStatus) *pb.ResInfo { return &pb.ResInfo{Status: s} }
-	missing := func(details string) *pb.ResInfo {
+	missingFor := func(details string, reason pb.ResReason) *pb.ResInfo {
 		return &pb.ResInfo{
 			Status: pb.ResStatus_RES_STATUS_MISSING, Details: details,
+			Reason: reason,
 		}
 	}
+	missing := func(details string) *pb.ResInfo {
+		return missingFor(details, pb.ResReason_RES_REASON_NONE)
+	}
+	const (
+		level  = pb.ResReason_RES_REASON_SP_LEVEL
+		source = pb.ResReason_RES_REASON_SOURCE_FAULT
+	)
 	ok := pb.ResStatus_RES_STATUS_OK
 	prov := pb.ResStatus_RES_STATUS_PROVISIONING
 	if !primaryShapeBuilt(&pb.CntlrInfo{}) {
 		t.Errorf("empty: not built")
 	}
 	// Every other status, in every map at once: built. MISSING is read with
-	// CN19's details, the one MISSING that says a row must not exist.
+	// each of the two reasons that say the stack is built: the level's, a
+	// row that must not exist, and the source-fault reason, a clone row this
+	// node keeps missing because it does not read the clone's source as
+	// ready (cnagent.md CN18).
 	values := prov.Descriptor().Values()
 	for i := 0; i < values.Len(); i++ {
 		s := pb.ResStatus(values.Get(i).Number())
 		if s == prov {
 			continue
 		}
-		info := &pb.CntlrInfo{}
-		for _, f := range fields {
-			res := func() *pb.ResInfo { return status(s) }
-			if s == pb.ResStatus_RES_STATUS_MISSING {
-				res = func() *pb.ResInfo { return missing("sp_level") }
-			}
-			f.put(info, 3, 1, res())
-			f.put(info, 5, 2, res())
+		rows := map[string]func() *pb.ResInfo{
+			s.String(): func() *pb.ResInfo { return status(s) },
 		}
-		if !primaryShapeBuilt(info) {
-			t.Errorf("%v in every map: not built", s)
+		if s == pb.ResStatus_RES_STATUS_MISSING {
+			rows = map[string]func() *pb.ResInfo{
+				"MISSING with the level's reason": func() *pb.ResInfo {
+					return missingFor("sp_level", level)
+				},
+				"MISSING with the source's reason": func() *pb.ResInfo {
+					return missingFor("source not connected", source)
+				},
+			}
+		}
+		for label, res := range rows {
+			info := &pb.CntlrInfo{}
+			for _, f := range fields {
+				f.put(info, 3, 1, res())
+				f.put(info, 5, 2, res())
+			}
+			if !primaryShapeBuilt(info) {
+				t.Errorf("%s in every map: not built", label)
+			}
 		}
 	}
 	// One holding row in each map in turn, the third of four keys — in the
 	// second td for a thin map — beside OK rows in every map: PROVISIONING,
-	// the probe's MISSING "" for a wanted device it finds absent, and a
-	// converge's MISSING with details of its own. Map order is random, so
-	// each reading is taken several times.
+	// the probe's MISSING "" for a wanted device it finds absent, a
+	// converge's MISSING with details of its own, a clone's dm-clone row
+	// while its clone meta group is not ready, the level's text with no
+	// reason, which the settle does not read, and a MISSING with a reason no
+	// rule gives that status. Map order is random, so each reading is taken
+	// several times.
 	holds := []struct {
 		label string
 		res   func() *pb.ResInfo
@@ -1777,6 +1803,15 @@ func TestPrimaryShapeBuilt(t *testing.T) {
 		{`MISSING ""`, func() *pb.ResInfo { return missing("") }},
 		{`MISSING "thin pool missing"`, func() *pb.ResInfo {
 			return missing("thin pool missing")
+		}},
+		{`MISSING "metadata group not ready"`, func() *pb.ResInfo {
+			return missing("metadata group not ready")
+		}},
+		{`MISSING "sp_level" with no reason`, func() *pb.ResInfo {
+			return missing("sp_level")
+		}},
+		{"MISSING with a reason of another rule", func() *pb.ResInfo {
+			return missingFor("", pb.ResReason_RES_REASON_THIN_ID_LOST)
 		}},
 	}
 	for _, hold := range holds {
@@ -1833,15 +1868,69 @@ func TestPrimaryShapeBuilt(t *testing.T) {
 	if primaryShapeBuilt(unbuilt) {
 		t.Errorf("a td-less primary's absent pools read built")
 	}
+	suppressedRow := func() *pb.ResInfo { return missingFor("sp_level", level) }
 	suppressed := &pb.CntlrInfo{
-		GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: missing("sp_level")},
-		SliceIdToMeta:   map[uint64]*pb.ResInfo{1: missing("sp_level")},
-		SliceIdToData:   map[uint64]*pb.ResInfo{1: missing("sp_level")},
-		SliceIdToDmPool: map[uint64]*pb.ResInfo{1: missing("sp_level")},
+		GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: suppressedRow()},
+		SliceIdToMeta:   map[uint64]*pb.ResInfo{1: suppressedRow()},
+		SliceIdToData:   map[uint64]*pb.ResInfo{1: suppressedRow()},
+		SliceIdToDmPool: map[uint64]*pb.ResInfo{1: suppressedRow()},
 		SsIdToSubsystem: map[uint64]*pb.ResInfo{1: status(ok)},
 	}
 	if !primaryShapeBuilt(suppressed) {
 		t.Errorf("a primary whose sp_level suppresses its pools reads " +
 			"unbuilt")
+	}
+	// The clone shapes of CN18 beside a built pool: a source with no
+	// namespace while the dm-clone serves, and a source not connected with no
+	// dm-clone, both built; the clone meta group not ready with no dm-clone,
+	// beside a ready source or a lost one, and a source head still to come
+	// after a connect of the converge's own pass, each a build in progress,
+	// the last held by its dm-clone row even where its target row reads a
+	// path not live with the source-fault reason.
+	clone := func(target, dm *pb.ResInfo) *pb.CntlrInfo {
+		return &pb.CntlrInfo{
+			SliceIdToDmPool:  map[uint64]*pb.ResInfo{1: status(ok)},
+			TdIdToRaid0:      map[uint64]*pb.ResInfo{1: status(ok)},
+			CloneIdToTarget:  map[uint64]*pb.ResInfo{1: target},
+			CloneIdToDmClone: map[uint64]*pb.ResInfo{1: dm},
+		}
+	}
+	// withGrp adds the clone meta group's row, which the settle leaves aside.
+	withGrp := func(info *pb.CntlrInfo, grp *pb.ResInfo) *pb.CntlrInfo {
+		info.GrpIdToMdRaid = map[uint64]*pb.ResInfo{2: grp}
+		return info
+	}
+	for _, tc := range []struct {
+		label string
+		info  *pb.CntlrInfo
+		built bool
+	}{
+		{"a source with no namespace beside a serving dm-clone",
+			clone(missingFor("no namespace 1 on nqn", source), status(ok)),
+			true},
+		{"a source not connected and no dm-clone",
+			clone(missingFor("connect refused", source),
+				missingFor("source not connected", source)), true},
+		{"a source unknown and no dm-clone",
+			clone(status(pb.ResStatus_RES_STATUS_ERROR),
+				missingFor("source unknown: killed", source)), true},
+		{"the clone meta group not ready and no dm-clone",
+			clone(status(ok), missing("metadata group not ready")), false},
+		{"a source with no namespace and no reason",
+			clone(missing("no namespace 1 on nqn"), status(ok)), false},
+		{"a source lost beside a clone meta group not ready",
+			withGrp(clone(missingFor("connect refused", source),
+				missing("source not connected")), missing("")), false},
+		{"a source head still to come and no dm-clone",
+			clone(missing("no namespace 1 on nqn"),
+				missing("source not connected")), false},
+		{"a path not live beside a source head still to come",
+			clone(missingFor("paths: connecting", source),
+				missing("source not connected")), false},
+	} {
+		if got := primaryShapeBuilt(tc.info); got != tc.built {
+			t.Errorf("%s: primaryShapeBuilt = %v, want %v", tc.label, got,
+				tc.built)
+		}
 	}
 }

@@ -703,13 +703,13 @@ func transportHealth(
 // Every cntlr writes them, primary and standby, on both channels, and this is
 // the one function that does: the converge after each leg's connect step
 // (ensureLegs, or the level's MISSING rows in build), the read in
-// probeCntlr. A row reads, in this order: MISSING "sp_level"
-// while the sp_level suppresses legs (CN19), as the leg row does;
-// PROVISIONING while its side is unprovisioned ([D15]: nothing is exported
-// for it, so its missing controller is the desired state); ERROR with the
-// leg row's details while a sweep's disconnect of the leg's subsystem is in
-// flight (CN10's disconnect registry); otherwise it is pathHealth's verdict
-// on the leg's view.
+// probeCntlr. A row reads, in this order: the level's MISSING row
+// (suppressedRow) while the sp_level suppresses legs (CN19), as the leg row
+// does; PROVISIONING while its side is unprovisioned ([D15]: nothing is
+// exported for it, so its missing controller is the desired state); ERROR
+// with the leg row's details while a sweep's disconnect of the leg's
+// subsystem is in flight (CN10's disconnect registry); otherwise it is
+// pathHealth's verdict on the leg's view.
 //
 // view is the leg's view the caller already holds — the converge's, from its
 // connect step — or nil, and the function then looks the leg up in the pass's
@@ -736,7 +736,7 @@ func (s *CnAgentServer) legPathRows(
 		name := fmt.Sprintf("%s:%s", tr.GetTrAddr(), tr.GetTrSvcId())
 		switch {
 		case !plan.wantLeg:
-			info.SideIdToPath[sideId] = t.Missing(key, name, detailsSpLevel)
+			info.SideIdToPath[sideId] = suppressedRow(t, key, name)
 			continue
 		case !side.GetProvisioned():
 			info.SideIdToPath[sideId] = t.Provisioning(

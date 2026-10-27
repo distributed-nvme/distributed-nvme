@@ -138,10 +138,10 @@ never by comparing the epoch with local time. `Cntlr.settling` is the flag
 HL2 clears and AR5 reads: true from the moment a cntlr becomes primary (or,
 still primary, is re-enabled) until the worker first observes it clean in
 that role with its stack built — no row outside `leg_id_to_leg`,
-`grp_id_to_md_raid` and `side_id_to_path` provisioning, or missing but for
-the level's — or a
-failover demotes it; AR5 holds a settling primary to `cntlr_unhealthy`
-instead of `primary_unhealthy` when that is the longer. A record that lacks
+`grp_id_to_md_raid` and `side_id_to_path` provisioning, or missing with
+neither the level's reason nor the source-fault reason — or a failover
+demotes it; AR5 holds a settling primary to `cntlr_unhealthy` instead of
+`primary_unhealthy` when that is the longer. A record that lacks
 the field decodes false, settled, and is judged by `primary_unhealthy` as
 any settled primary is. `Migration.cutover_pending` is the flag RW18's
 cutover clears: `CreateMigration` writes it set (`architecture.md`,
@@ -2342,8 +2342,9 @@ The rules are the same for every kind of record:
   the reply's `revision` equals the plan's, and the reply shows the stack
   built: no row of the maps this row is judged by (every map of rows but
   `leg_id_to_leg` and `side_id_to_path`), `grp_id_to_md_raid` aside, reads
-  `PROVISIONING`, or
-  `MISSING` with details other than `cnagent.md` CN19's "sp_level"; with the
+  `PROVISIONING`, or `MISSING` with neither `RES_REASON_SP_LEVEL`
+  (`cnagent.md` CN19) nor `RES_REASON_SOURCE_FAULT` (`cnagent.md` CN18) as
+  its reason — the settle reads the reason, never the details; with the
   `err_epoch` clear in one write, or in a write of its own when `err_epoch`
   is already zero.
 * `Leg.err_epoch` is set to now (if zero) when the **primary** cntlr's
@@ -2448,20 +2449,18 @@ reply at the driven revision from a cntlr that is primary and not disabled is
 a report of the primary shape; a disabled primary converges the standby shape
 (`cnagent.md` CN9), so its clean reply settles nothing. Nor does a reply whose
 stack is not built yet (`primaryShapeBuilt`): a `PROVISIONING` row, or a
-`MISSING` one whose details are not `ResDetailsSpLevel`, in a map the settle
-reads is clean and no proof of the build that follows, and settling on it
-would leave that build to `primary_unhealthy`. Which rows read `PROVISIONING`,
-`MISSING` or `ERROR` in which state — a slice deferred by its first zeroing, a
-member a converge found unavailable and left to the connect retry, a device a
-background read probes absent, a clone whose source is not connected, has an
-endpoint with no live controller or no namespace, or could not be read, a
-clone whose destination td or clone meta group still zeroes, whose two
-rows read `PROVISIONING` below `SP_LEVEL_NO_CLONE`, a clone with no
-dm-clone while its clone meta group is not ready, whose dm-clone row
-reads `MISSING` — is the cn
-agent's (`cnagent.md` CN9, CN10, CN16, CN17, CN18); a
+`MISSING` one with neither the level's reason nor the source-fault reason,
+in a map the settle reads is clean and no proof of the build that follows,
+and settling on it would leave that build to `primary_unhealthy`. Which rows
+read `PROVISIONING`, `MISSING` or `ERROR` in which state — a slice deferred
+by its first zeroing, a member a converge found unavailable and left to the
+connect retry, a device a background read probes absent, a clone whose
+destination td or clone meta group still zeroes, whose two rows read
+`PROVISIONING` below `SP_LEVEL_NO_CLONE`, a clone with no dm-clone while its
+clone meta group is not ready, whose dm-clone row reads `MISSING` with no
+reason — is the cn agent's (`cnagent.md` CN9, CN10, CN16, CN17, CN18); a
 primary showing such a row stays settling, held to the longer threshold, until
-it clears. Four kinds of row are left out of that test, each for one reason.
+it clears. Five kinds of row are left out of that test, each for one reason.
 Leg rows: a repair's new leg still zeroing reads `PROVISIONING` there for
 as long as it zeroes. Path rows: a migration's destination side reads `PROVISIONING` there
 for as long as it zeroes. Group rows: a grow appends its new groups to their
@@ -2472,31 +2471,39 @@ provisioning defers its whole slice, whose pool rows say so, and a group a
 converge could not assemble leaves the pool rows over it `ERROR` or `MISSING`;
 a clone meta group has no pool over it, and below `SP_LEVEL_NO_CLONE` its
 clone's rows show it, `PROVISIONING` while its sides zero and the dm-clone
-row `MISSING` while it is not ready and no dm-clone is there (`cnagent.md`
-CN18), while at that level and above no layer over it is wanted.
-Rows the
-`sp_level` suppresses: they read `MISSING` with `ResDetailsSpLevel`
-(`cnagent.md` CN19) and hold nothing, so a primary does not wait for a layer
-its level suppresses; the deferral of a slice does not depend on the level,
-though — its ns-dev, namespace and transfer rows read `PROVISIONING` while it
-is deferred (`cnagent.md` CN16, CN17) — so at a level that suppresses the
-pools a primary with a namespace or a transfer still settles only once the
-zeroing ends, and one with neither, or any primary at `SP_LEVEL_DISABLE`,
-settles on a reply that shows no pool built, possibly before its sides are
-even zeroed; AR3 suppresses AR5 at all of those levels, so the longer hold
-changes no reaction there. A primary of an SP still in its first zeroing
-therefore stays settling, judged by the longer threshold, until the build
-that follows reports its stack built and clean — indefinitely if a side never
-finishes, since a leg still provisioning never sets an `err_epoch` for AR8 to
-repair it by (Known limits). That settle is final — `UpdateStoragePoolLevel`
-re-arms nothing — so the build that follows a lowered level is judged by
-`primary_unhealthy`, as any settled primary's is. The child keeps a memo of
-the flag, seeded from the record in every plan it takes (RW14's plan copies
-it), so the settle is normally written once and logged as `cntlr settled`
-(Log records): a plan loaded after the settle write clears the memo; one
-loaded before it costs one redundant write that changes nothing and one extra
-`cntlr settled` record; a failed write keeps the memo and is retried on the
-next reply (RW12). The flag steers AR5 alone — and `Failover`, which
+row `MISSING` with no reason while it is not ready and no dm-clone is there
+(`cnagent.md` CN18), while at that level and above no layer over it is
+wanted. A clone's rows with the source-fault reason, the rows the cn
+agent keeps missing because it does not read the clone's source as ready
+(`cnagent.md` CN18 says which): they read `MISSING` and hold nothing,
+since what they lack waits on that source, and that wait is not a build
+in progress, so a primary whose stack is otherwise built settles, and is
+judged by `primary_unhealthy`, however long the wait lasts; a source still
+coming up that the agent's reading cannot tell from one that is not ready
+settles a primary the same way, a few seconds before the agent's connect
+retry builds the rest of the clone (`cnagent.md` CN18). Rows the
+`sp_level` suppresses: they read `MISSING` with the level's reason
+(`cnagent.md` CN19) and hold nothing, so a primary does not wait for a
+layer its level suppresses; the deferral of a slice does not depend on the
+level, though — its ns-dev, namespace and transfer rows read `PROVISIONING`
+while it is deferred (`cnagent.md` CN16, CN17) — so at a level that
+suppresses the pools a primary with a namespace or a transfer still
+settles only once the zeroing ends, and one with neither, or any primary at
+`SP_LEVEL_DISABLE`, settles on a reply that shows no pool built, possibly
+before its sides are even zeroed; AR3 suppresses AR5 at all of those levels,
+so the longer hold changes no reaction there. A primary of an SP still in its
+first zeroing therefore stays settling, judged by the longer threshold, until
+the build that follows reports its stack built and clean — indefinitely if a
+side never finishes, since a leg still provisioning never sets an `err_epoch`
+for AR8 to repair it by (Known limits). That settle is final —
+`UpdateStoragePoolLevel` re-arms nothing — so the build that follows a lowered
+level is judged by `primary_unhealthy`, as any settled primary's is. The child
+keeps a memo of the flag, seeded from the record in every plan it takes
+(RW14's plan copies it), so the settle is normally written once and logged as
+`cntlr settled` (Log records): a plan loaded after the settle write clears the
+memo; one loaded before it costs one redundant write that changes nothing and
+one extra `cntlr settled` record; a failed write keeps the memo and is retried
+on the next reply (RW12). The flag steers AR5 alone — and `Failover`, which
 re-validates AR5 in its STM — and is re-read from etcd on every pass: health
 bookkeeping of the same kind as `err_epoch`, not a memo of a failed step.
 
@@ -4388,11 +4395,14 @@ revision gate being per object and not per cluster.
   provisioned flip, and tells the source that its destination is
   provisioned only from the cutover's own revision on;
 * reaction — every automatic reaction fires on its trigger and holds on its
-  guard, and a settling primary is held to `cntlr_unhealthy`; leg repair's
-  repair of a leg due on case 1 is created with a fresh new leg, moved to
-  STARTED by the primary's verdict and finished, retiring the leg, and one
-  due on case 2 is tried to abort once its bad leg reads healthy again
-  before the copy starts, confirmed, moved to ABORTED and cancelled;
+  guard, and a settling primary is held to `cntlr_unhealthy`; a settling
+  primary whose clone's target row reads missing stays settling while the
+  row carries no reason and settles once it carries the source-fault
+  reason; leg repair's repair of a leg due on case 1 is created with a fresh
+  new leg, moved to STARTED by the primary's verdict and finished, retiring
+  the leg, and one due on case 2 is tried to abort once its bad leg reads
+  healthy again before the copy starts, confirmed, moved to ABORTED and
+  cancelled;
 * repair — an operator's repair, driven through the model operations the
   gateway runs: its new leg's side is driven, zeroed and flipped
   provisioned in the repair and the repair carried to every cntlr; leg
@@ -4988,15 +4998,13 @@ which no suite case sets, so no suite case runs RW13's count compare.
   before its RW18 flip and
   that never finishes zeroing while it is the only side of a leg in the first
   group of its list, which keeps that slice's pools and every td
-  `PROVISIONING` the same way, a clone whose source stays unconnected, or
-  keeps an endpoint with no live controller or no namespace, which keeps
-  its target row `MISSING` (HL2), or a clone whose clone meta group no
-  cntlr can assemble, which keeps its dm-clone row `MISSING`
-  (`cnagent.md` CN18; `architecture.md`, Known limits) — keeps the SP on
-  it that long once it is unhealthy, where a settled primary is judged by
-  `primary_unhealthy` alone; an old primary that recovered meanwhile gets the
-  role back only then, and not while the new primary fails only on rows it
-  failed on (AR5's same error).
+  `PROVISIONING` the same way, or a clone whose clone meta group no
+  cntlr can assemble, which keeps its dm-clone row `MISSING` with no
+  reason (HL2; `cnagent.md` CN18; `architecture.md`, Known limits) — keeps
+  the SP on it that long once it is unhealthy, where a settled primary is
+  judged by `primary_unhealthy` alone; an old primary that recovered
+  meanwhile gets the role back only then, and not while the new primary
+  fails only on rows it failed on (AR5's same error).
 * **Two missed rounds in a row fail over a primary that is only busy.** A
   failover on its threshold needs two unhealthy verdicts in a row from the
   primary's rounds (AR10), so one missed or slow round, or one whose
@@ -5178,29 +5186,30 @@ which no suite case sets, so no suite case runs RW13's count compare.
 * **A dm-clone left with hydration off moves the role of the clone's
   pool.** Its row reads `ERROR` in every observation, a background read's
   as much as a converge's (`cnagent.md` CN18, CN28). That is a row of the
-  primary's own (HL2), so its `err_epoch` stays set, and AR5 fails it over at its
-  threshold, or AR7 replaces it where there is no failover candidate; the
-  new primary creates the dm-clone over the metadata its clone meta group
-  holds and finishes the build (`cnagent.md` CN18). A dm-clone whose
-  metadata is read-only or failed reads `ERROR` and moves the role the
-  same way. A fault of the clone's source does not itself move the role
-  (`cnagent.md` CN18): a source with no live controller at an endpoint, or
-  with no namespace, reads `MISSING`, which sets no `err_epoch` (HL2), so
-  neither AR5 nor AR7 acts on that row, and a fault in the primary's own
-  path to the source reads the same; the operator can move the role by
-  disabling the primary cntlr (AR5). The cn agent's retry of a source it
-  cannot connect, or that has no namespace, holds the cntlr's reads off
-  while each attempt is in flight (`dnagent.md` SH30; `cnagent.md`, Known
-  limits), so an attempt that outlasts HL7's bound makes the primary's
-  rounds answer from an observation too old, and such rounds can fail it
-  over, as they can a primary that is only busy (above). A role that moves while a fault at the source
-  lasts can take even a clone that has hydrated in full out of service: a
-  new primary that cannot connect the
-  source, or finds no source namespace, cannot build the clone's dm-clone
-  while the fault lasts, so the clone's destination namespace waits
-  inaccessible, its hosts' IO queued, until the source comes back or the
-  clone is deleted with `force` (`cnagent.md` CN16).
-  What else those rows cost on the cn agent is `cnagent.md`, Known limits.
+  primary's own (HL2), so its `err_epoch` stays set, and AR5 fails it over
+  at its threshold, or AR7 replaces it where there is no failover
+  candidate; the new primary creates the dm-clone over the metadata its
+  clone meta group holds and finishes the build (`cnagent.md` CN18). A
+  dm-clone whose metadata is read-only or failed reads `ERROR` and moves
+  the role the same way. A fault of the clone's source does not itself move
+  the role: its row reads `MISSING` (`cnagent.md` CN18), which sets no
+  `err_epoch` (HL2), so neither AR5 nor AR7 acts on that row, and a fault
+  in the primary's own path to the source reads the same; which of the
+  clone's rows carry the source-fault reason, and so hold no settle (HL2),
+  is CN18's. The operator can move the role by disabling the primary cntlr
+  (AR5). The cn agent's retry of a source it cannot connect, or that has no
+  namespace, holds the cntlr's reads off while each attempt is in flight
+  (`dnagent.md` SH30; `cnagent.md`, Known limits), so an attempt that
+  outlasts HL7's bound makes the primary's rounds answer from an
+  observation too old, and such rounds can fail it over, as they can a
+  primary that is only busy (above). A role that moves while a fault at the
+  source lasts can take even a clone that has hydrated in full out of
+  service: a new primary that cannot connect the source, or finds no source
+  namespace, cannot build the clone's dm-clone while the fault lasts, so
+  the clone's destination namespace waits inaccessible, its hosts' IO
+  queued, until the source comes back or the clone is deleted with `force`
+  (`cnagent.md` CN16). What else those rows cost on the cn agent is
+  `cnagent.md`, Known limits.
 * **A clone's drain can give its clone meta group back before the primary
   removes the dm-clone.** CLD9's transaction waits for no agent (CLD10),
   so a DN can tear a side of the group down while the primary's dm-clone

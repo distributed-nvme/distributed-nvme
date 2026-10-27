@@ -319,8 +319,8 @@ func (s *CnAgentServer) build(
 		available, retryNeeded = s.ensureLegs(ctx, st, plan, info, budget)
 	} else {
 		for _, lp := range plan.legs {
-			info.LegIdToLeg[lp.legId] = st.tracker.Missing(
-				resKeyOf(resKeyLegFmt, lp.legId), lp.name, detailsSpLevel)
+			info.LegIdToLeg[lp.legId] = suppressedRow(st.tracker,
+				resKeyOf(resKeyLegFmt, lp.legId), lp.name)
 			s.legPathRows(ctx, st, plan, lp, nil, info)
 		}
 	}
@@ -358,8 +358,8 @@ func (s *CnAgentServer) build(
 		}
 	} else if plan.primary {
 		for _, gp := range plan.grps {
-			info.GrpIdToMdRaid[gp.grpId] = st.tracker.Missing(
-				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, detailsSpLevel)
+			info.GrpIdToMdRaid[gp.grpId] = suppressedRow(st.tracker,
+				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName)
 		}
 	}
 	if late {
@@ -422,15 +422,12 @@ func (s *CnAgentServer) build(
 		}
 	} else if plan.primary {
 		for _, sp := range plan.slices {
-			info.SliceIdToMeta[sp.sliceId] = st.tracker.Missing(
-				resKeyOf(resKeyPoolMetaFmt, sp.sliceId), sp.poolMetaName,
-				detailsSpLevel)
-			info.SliceIdToData[sp.sliceId] = st.tracker.Missing(
-				resKeyOf(resKeyPoolDataFmt, sp.sliceId), sp.poolDataName,
-				detailsSpLevel)
-			info.SliceIdToDmPool[sp.sliceId] = st.tracker.Missing(
-				resKeyOf(resKeyPoolFmt, sp.sliceId), sp.poolFinalName,
-				detailsSpLevel)
+			info.SliceIdToMeta[sp.sliceId] = suppressedRow(st.tracker,
+				resKeyOf(resKeyPoolMetaFmt, sp.sliceId), sp.poolMetaName)
+			info.SliceIdToData[sp.sliceId] = suppressedRow(st.tracker,
+				resKeyOf(resKeyPoolDataFmt, sp.sliceId), sp.poolDataName)
+			info.SliceIdToDmPool[sp.sliceId] = suppressedRow(st.tracker,
+				resKeyOf(resKeyPoolFmt, sp.sliceId), sp.poolFinalName)
 		}
 	}
 	// CN14: the snapshot-message pre-pass. Every needed slice's `create_snap`
@@ -477,8 +474,8 @@ func (s *CnAgentServer) build(
 			name := plan.thinName(tp.tdId, sp.sliceId)
 			switch {
 			case !plan.wantPool:
-				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Missing(
-					key, name, detailsSpLevel)
+				thinInfo.SliceIdToDmThin[sp.sliceId] = suppressedRow(
+					st.tracker, key, name)
 			case sp.deferred:
 				// [D15]: no pool, so no thin volume in this slice.
 				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Provisioning(
@@ -502,9 +499,8 @@ func (s *CnAgentServer) build(
 			info.TdIdToDmError[tp.tdId] = st.tracker.FromErr(
 				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName, "", err)
 		} else {
-			info.TdIdToDmError[tp.tdId] = st.tracker.Missing(
-				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName,
-				detailsSpLevel)
+			info.TdIdToDmError[tp.tdId] = suppressedRow(st.tracker,
+				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName)
 		}
 		switch {
 		case plan.wantPool && tp.deferred:
@@ -519,9 +515,8 @@ func (s *CnAgentServer) build(
 			info.TdIdToRaid0[tp.tdId] = st.tracker.FromErr(
 				resKeyOf(resKeyRaid0Fmt, tp.tdId), tp.raid0Name, "", err)
 		case plan.primary:
-			info.TdIdToRaid0[tp.tdId] = st.tracker.Missing(
-				resKeyOf(resKeyRaid0Fmt, tp.tdId), tp.raid0Name,
-				detailsSpLevel)
+			info.TdIdToRaid0[tp.tdId] = suppressedRow(st.tracker,
+				resKeyOf(resKeyRaid0Fmt, tp.tdId), tp.raid0Name)
 		}
 	}
 
@@ -856,9 +851,19 @@ func (s *CnAgentServer) suspendSnapOrigin(
 	return origin.raid0Name
 }
 
+// suppressedRow is the row of a resource the sp_level suppresses, on the
+// converge and the read alike (CN19, CN28): RES_STATUS_MISSING with the
+// details detailsSpLevel, for people, and RES_REASON_SP_LEVEL, which the
+// worker's settle reads (dnv-worker.md HL2). The reason comes from the level
+// the pass's plan reads, never from the text (CN29).
+func suppressedRow(t *agent.ResTracker, key, resName string) *pb.ResInfo {
+	return t.MissingReason(key, resName, detailsSpLevel,
+		pb.ResReason_RES_REASON_SP_LEVEL)
+}
+
 // reportSuppressed fills the CntlrInfo entries the SP_LEVEL_DISABLE branch of
 // the build phase skips, so every suppressed resource reads the same way
-// (CN19: RES_STATUS_MISSING, details = "sp_level").
+// (CN19: suppressedRow).
 func (s *CnAgentServer) reportSuppressed(
 	st *cntlrState,
 	plan *cntlrPlan,
@@ -867,24 +872,23 @@ func (s *CnAgentServer) reportSuppressed(
 	t := st.tracker
 	for _, xp := range plan.xfers {
 		nsName := nsResName(xp.nqn, int(xp.xfer.GetOriNsIdx()))
-		info.XferIdToDmLinear[xp.xferId] = t.Missing(
-			resKeyOf(resKeyXferDmFmt, xp.xferId), xp.finalName,
-			detailsSpLevel)
-		info.XferIdToSubsystem[xp.xferId] = t.Missing(
-			resKeyOf(resKeyXferSsFmt, xp.xferId), xp.nqn, detailsSpLevel)
-		info.XferIdToNamespace[xp.xferId] = t.Missing(
-			resKeyOf(resKeyXferNsFmt, xp.xferId), nsName, detailsSpLevel)
+		info.XferIdToDmLinear[xp.xferId] = suppressedRow(t,
+			resKeyOf(resKeyXferDmFmt, xp.xferId), xp.finalName)
+		info.XferIdToSubsystem[xp.xferId] = suppressedRow(t,
+			resKeyOf(resKeyXferSsFmt, xp.xferId), xp.nqn)
+		info.XferIdToNamespace[xp.xferId] = suppressedRow(t,
+			resKeyOf(resKeyXferNsFmt, xp.xferId), nsName)
 	}
 	for _, np := range plan.namespaces {
-		info.NsIdToDmLinear[np.nsId] = t.Missing(
-			resKeyOf(resKeyNsDevFmt, np.nsId), np.devName, detailsSpLevel)
-		info.NsIdToNamespace[np.nsId] = t.Missing(
+		info.NsIdToDmLinear[np.nsId] = suppressedRow(t,
+			resKeyOf(resKeyNsDevFmt, np.nsId), np.devName)
+		info.NsIdToNamespace[np.nsId] = suppressedRow(t,
 			resKeyOf(resKeyNamespaceFmt, np.nsId),
-			nsResName(np.ss.nqn, np.nsIdx), detailsSpLevel)
+			nsResName(np.ss.nqn, np.nsIdx))
 	}
 	for _, ssp := range plan.subsystems {
-		info.SsIdToSubsystem[ssp.ssId] = t.Missing(
-			resKeyOf(resKeySubsysFmt, ssp.ssId), ssp.nqn, detailsSpLevel)
+		info.SsIdToSubsystem[ssp.ssId] = suppressedRow(t,
+			resKeyOf(resKeySubsysFmt, ssp.ssId), ssp.nqn)
 	}
 }
 
@@ -938,11 +942,10 @@ func (s *CnAgentServer) reportCloneSuppressed(
 	cp *clonePlan,
 	info *pb.CntlrInfo,
 ) {
-	info.CloneIdToTarget[cp.cloneId] = st.tracker.Missing(
-		resKeyOf(resKeyCloneTgtFmt, cp.cloneId), cp.clone.GetSrcNqn(),
-		detailsSpLevel)
-	info.CloneIdToDmClone[cp.cloneId] = st.tracker.Missing(
-		resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName, detailsSpLevel)
+	info.CloneIdToTarget[cp.cloneId] = suppressedRow(st.tracker,
+		resKeyOf(resKeyCloneTgtFmt, cp.cloneId), cp.clone.GetSrcNqn())
+	info.CloneIdToDmClone[cp.cloneId] = suppressedRow(st.tracker,
+		resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName)
 }
 
 // dropAllResKeys forgets every resource history of one shape, so a later

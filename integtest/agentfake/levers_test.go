@@ -608,7 +608,11 @@ func TestParseBehaviorNewLevers(t *testing.T) {
 	  "cn": {"obs_none": true, "disk_counts": null},
 	  "cntlr 1:1": {"rows": {
 	    "td_id_to_thin_info.7.1": {"status": "ERROR", "reason": "thin_id_lost"},
-	    "leg_id_to_leg.3": {"reason": "RES_REASON_AWAITING_CUTOVER"}}}}}`))
+	    "leg_id_to_leg.3": {"reason": "RES_REASON_AWAITING_CUTOVER"},
+	    "clone_id_to_target.48": {"status": "MISSING",
+	                              "reason": "SOURCE_FAULT", "when_primary": true},
+	    "slice_id_to_dm_pool.1": {"status": "MISSING",
+	                              "reason": "RES_REASON_SP_LEVEL"}}}}}`))
 	if err != nil {
 		t.Fatalf("ParseBehavior: %v", err)
 	}
@@ -635,6 +639,16 @@ func TestParseBehaviorNewLevers(t *testing.T) {
 	if r := rows["leg_id_to_leg.3"].Reason; r == nil ||
 		*r != pb.ResReason_RES_REASON_AWAITING_CUTOVER {
 		t.Errorf("leg row reason = %v", r)
+	}
+	if row := rows["clone_id_to_target.48"]; row.Reason == nil ||
+		*row.Reason != pb.ResReason_RES_REASON_SOURCE_FAULT ||
+		row.Status == nil || *row.Status != pb.ResStatus_RES_STATUS_MISSING ||
+		!row.WhenPrimary {
+		t.Errorf("clone target row = %+v", row)
+	}
+	if r := rows["slice_id_to_dm_pool.1"].Reason; r == nil ||
+		*r != pb.ResReason_RES_REASON_SP_LEVEL {
+		t.Errorf("pool row reason = %v", r)
 	}
 
 	for _, tc := range []struct {
