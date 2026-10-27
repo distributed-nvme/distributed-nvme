@@ -111,12 +111,13 @@ var rpcToCmd = map[string]string{
 	"ListRetiredLegs":  "retired-leg list",
 	"DeleteRetiredLeg": "retired-leg delete",
 	// group
-	"ForceStartGroup": "group force-start",
+	"ForceStartGroup":             "group force-start",
+	"UpdateGroupOperatorInCharge": "group set-operator-in-charge",
 }
 
 // TestRpcToCmdMatchesServiceDesc is the two-way check of CT1: every RPC the
 // generated descriptor declares has a command, every command in the table
-// names a real RPC, and the count is pinned at 66 so that a *pair* of
+// names a real RPC, and the count is pinned at 67 so that a *pair* of
 // compensating edits — an RPC removed from the service and a row removed from
 // the table — still fails.
 func TestRpcToCmdMatchesServiceDesc(t *testing.T) {
@@ -124,11 +125,11 @@ func TestRpcToCmdMatchesServiceDesc(t *testing.T) {
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
 		methods[method.MethodName] = true
 	}
-	if len(methods) != 66 {
-		t.Errorf("service Gateway has %d methods, want 66", len(methods))
+	if len(methods) != 67 {
+		t.Errorf("service Gateway has %d methods, want 67", len(methods))
 	}
-	if len(rpcToCmd) != 66 {
-		t.Errorf("rpcToCmd has %d rows, want 66", len(rpcToCmd))
+	if len(rpcToCmd) != 67 {
+		t.Errorf("rpcToCmd has %d rows, want 67", len(rpcToCmd))
 	}
 	for name := range methods {
 		if _, ok := rpcToCmd[name]; !ok {
@@ -178,19 +179,19 @@ func TestCommandTreeMatchesTable(t *testing.T) {
 			t.Errorf("rpcToCmd names %q, which the tree does not have", path)
 		}
 	}
-	if len(leaves) != 66 {
-		t.Errorf("the tree has %d RPC leaves, want 66: %v",
+	if len(leaves) != 67 {
+		t.Errorf("the tree has %d RPC leaves, want 67: %v",
 			len(leaves), leaves)
 	}
 }
 
 // TestGroupsLeafCounts pins the leaf count of every group, so a leaf that moved between two groups (which keeps
-// the total at 66) names the two groups it moved between in the failure.
+// the total at 67) names the two groups it moved between in the failure.
 func TestGroupsLeafCounts(t *testing.T) {
 	want := map[string]int{
 		"cluster": 5, "dn": 6, "cn": 6, "sp": 9, "cntlr": 4, "td": 5,
 		"ss": 4, "ns": 4, "clone": 5, "xfer": 4, "migr": 5,
-		"repair": 6, "retired-leg": 2, "group": 1,
+		"repair": 6, "retired-leg": 2, "group": 2,
 	}
 	got := map[string]int{}
 	for _, path := range leafPaths(t, NewRootCmd()) {
@@ -335,7 +336,8 @@ var leafFlags = map[string][]string{
 	"retired-leg list":   {},
 	"retired-leg delete": {"leg"},
 	// group
-	"group force-start": {"grp", "leg", "cancel"},
+	"group force-start":            {"grp", "leg", "cancel"},
+	"group set-operator-in-charge": {"grp", "operator-in-charge"},
 }
 
 // TestLeafFlagsMatchTable pins the flag surface of every command. The
@@ -366,15 +368,15 @@ func TestLeafFlagsMatchTable(t *testing.T) {
 			t.Errorf("%q declares %v, want %v", path, got, wantSorted)
 		}
 	}
-	if len(leafFlags) != 66 {
-		t.Errorf("leafFlags has %d rows, want 66", len(leafFlags))
+	if len(leafFlags) != 67 {
+		t.Errorf("leafFlags has %d rows, want 67", len(leafFlags))
 	}
 }
 
 // TestRootPersistentFlags pins the global flags (dnvctl.md, Global flags,
 // env, config), and nothing else promoted to the root by accident. A local
 // flag that drifted onto the root would be silently accepted on every one of
-// the 66 commands.
+// the 67 commands.
 func TestRootPersistentFlags(t *testing.T) {
 	want := []string{"cluster", "config", "gateway-address", "rev", "sp",
 		"timeout", "trace-id"}

@@ -422,7 +422,7 @@ THR_CUT_SHOW="$THR_CUT_SHOW --thr-side $THR_CUT_SIDE --thr-leg $THR_CUT_LEG"
 # time out of `sp get`, which is also the proof that $THR split into eight
 # words instead of arriving as one; react's progress messages name the
 # individual threshold the operator is waiting on (primary_unhealthy in step
-# 3, cntlr_unhealthy in step 4, side/leg_unhealthy in steps 5 to 8); and
+# 3, cntlr_unhealthy in step 4, side/leg_unhealthy in steps 5 to 9); and
 # three numbers are computed from them. Two are react step 6's, on a group
 # with no healthy leg: a wait, its watch for side_unhealthy plus a few
 # passes, which must outlast the threshold it proves AR8 holds through,
@@ -882,13 +882,20 @@ on_exit() {
 		log ""
 		log "########## diagnostics ##########"
 		diagnostics || true
-		# The one injector a failed run does not leave in place (E2E6): the
-		# next run's cleanup would remove it, but a token bucket on a
-		# controller node's port would slow every suite run before that.
+		# The two injectors a failed run does not leave in place (E2E6): the
+		# next run's cleanup would remove them, but a token bucket on a
+		# controller node's port would slow every suite run before that, and
+		# a reject rule on one would refuse its connects to the disk nodes'
+		# ports. The diagnostics above have shown both.
 		if [ "${COPY_FO_THROTTLE_CN:--1}" -ge 0 ]; then
 			log ""
 			log "--- taking the copy case's throttle off cn$COPY_FO_THROTTLE_CN"
 			helper_cn "$COPY_FO_THROTTLE_CN" unthrottle >&2 || true
+		fi
+		if [ "${REACT_OIC_REJECT_CN:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the react case's reject rule off cn$REACT_OIC_REJECT_CN"
+			helper_cn "$REACT_OIC_REJECT_CN" unreject >&2 || true
 		fi
 		log ""
 		if [ "$dirty" -eq 1 ]; then
@@ -1661,9 +1668,12 @@ derive_params() {
 	# own, and AR8 wants a DN carrying exactly one side of the sp; copy's
 	# migration and repair stages want a DN on a VM outside the group. Those
 	# need no SIDE-LESS DN — an occupied DN still reports free_ext_cnt > 0.
-	# React steps 5 to 8 do: each steers its worker's repair's fresh leg onto
-	# an enabled side-less DN (react_steer), so that a later step can kill
-	# that leg's DN alone, and dies when none is left. Copy step 6 does too:
+	# React steps 5 to 9 do: each steers its worker's repair's fresh leg onto
+	# an enabled side-less DN (react_steer), and dies when none is left.
+	# Steps 5 to 8 steer so that a later step can kill that leg's DN alone;
+	# step 9 so that every DN the fresh leg can land on carries no side, and
+	# its reject rule lists them all and refuses no connect to a live side.
+	# Copy step 6 does too:
 	# it needs step 5's fresh new leg on a DN that carries no other side, so
 	# that killing that DN takes down the new leg alone. The bound does not
 	# derive these either, as the side-less
@@ -1719,7 +1729,7 @@ derive_params() {
 			log "         needs step 5's new leg on a side-less disk node;" \
 				"below the bound nothing makes the"
 			log "         scan pick one, and step 6 DIES on an occupied one." \
-				"React steps 5 to 8 need"
+				"React steps 5 to 9 need"
 			log "         a side-less disk node for each worker's repair's" \
 				"fresh leg, and DIE without one."
 			if [ "$DNS_PER_VM" -lt "$create_bound" ]; then
@@ -4368,6 +4378,158 @@ unthrottle() {
 	return 0
 }
 
+# --- the react case's reject rule (e2e_integtest.md, The cases, react) ------
+#
+# React step 9 holds a worker's repair CREATED by having the primary's node
+# refuse its own connects to every disk node the repair's fresh leg can land
+# on. reject_to puts one nftables table of this suite's own on the node,
+# whose one rule answers each TCP connect the node sends to a listed IPv4
+# address and port with a reset, so the connect fails at once; a packet of a
+# connection already made, and every address and port not listed, pass. The
+# list is one set of address and port pairs, never a set of addresses beside
+# a set of ports, whose product could take in the port of a live leg on a
+# guest that carries one. The table carries a name of its own, so unreject
+# takes only this suite's, and every cleanup takes it first
+# (cn_cleanup_phase1): a rule left behind would refuse every later suite's
+# connects to those ports.
+REJECT_TABLE=dnv_e2e_reject
+
+# nft_bin prints the nft binary, or nothing on a node without one.
+nft_bin() {
+	if command -v nft >/dev/null 2>&1; then
+		echo nft
+	elif [ -x /usr/sbin/nft ]; then
+		echo /usr/sbin/nft
+	else
+		echo ""
+	fi
+}
+
+# reject_to <addr:port>[,<addr:port>…] makes this node refuse its own TCP
+# connects to each listed IPv4 address and port, in one nft transaction that
+# replaces any table of this suite's, and prints "rejected <n>", the count of
+# pairs; when a step fails it prints "failed:" and that step's words, and
+# leaves no table of this suite's behind. The pairs reach it as one word, as
+# the driver's helper call hands the guest one command string.
+reject_to() {
+	local nft pair addr port elems="" n=0 err nl=$'\n'
+	local -a pairs
+	nft=$(nft_bin)
+	if [ -z "$nft" ]; then
+		unreject >/dev/null
+		echo "failed: no nft on this node"
+		return 0
+	fi
+	IFS=, read -r -a pairs <<<"${1:-}"
+	for pair in "${pairs[@]}"; do
+		addr=${pair%:*}
+		port=${pair##*:}
+		case "$addr" in
+		'' | *[!0-9.]* | .* | *. | *..*)
+			unreject >/dev/null
+			echo "failed: '$pair' names no IPv4 address"
+			return 0
+			;;
+		esac
+		case "$port" in
+		'' | *[!0-9]*)
+			unreject >/dev/null
+			echo "failed: '$pair' names no port"
+			return 0
+			;;
+		esac
+		elems="$elems${elems:+, }$addr . $port"
+		n=$((n + 1))
+	done
+	if [ "$n" -eq 0 ]; then
+		unreject >/dev/null
+		echo "failed: no address and port given"
+		return 0
+	fi
+	if err=$(printf '%s\n' \
+		"add table inet $REJECT_TABLE" \
+		"delete table inet $REJECT_TABLE" \
+		"table inet $REJECT_TABLE {" \
+		"	set dn_ports {" \
+		"		type ipv4_addr . inet_service" \
+		"		elements = { $elems }" \
+		"	}" \
+		"	chain connects {" \
+		"		type filter hook output priority 0; policy accept;" \
+		"		ip daddr . tcp dport @dn_ports tcp flags & (syn | ack) == syn counter reject with tcp reset" \
+		"	}" \
+		"}" | "$nft" -f - 2>&1); then
+		echo "rejected $n"
+	else
+		unreject >/dev/null
+		echo "failed: ${err//$nl/; }"
+	fi
+	return 0
+}
+
+# reject_rules prints this suite's table, its pairs and its rule's counter
+# included, on one line, and nothing when there is none. Reading it after
+# unreject is what turns "we ran the delete" into "the table is gone", so a
+# listing that fails prints one line saying so: an empty answer must mean
+# none. A node without nft prints nothing, as only nft puts the table there.
+reject_rules() {
+	local nft out hit nl=$'\n'
+	nft=$(nft_bin)
+	[ -n "$nft" ] || return 0
+	if ! out=$("$nft" list tables 2>&1); then
+		echo "nft list tables failed, the reject rule is unknown: ${out//$nl/; }"
+		return 0
+	fi
+	hit=$(printf '%s\n' "$out" | grep -cxF "table inet $REJECT_TABLE" || true)
+	[ "$hit" != 0 ] || return 0
+	if out=$("$nft" list table inet "$REJECT_TABLE" 2>&1); then
+		printf '%s\n' "$out" | tr -s ' \t\n' ' '
+		echo
+	else
+		echo "table inet $REJECT_TABLE stands, and its listing failed:" \
+			"${out//$nl/; }"
+	fi
+	return 0
+}
+
+# reject_count prints how many connects the rule has refused so far, the
+# packets its counter has seen, as each refused connect is one packet; it
+# fails, saying so, when the table is not there or the counter does not read.
+reject_count() {
+	local nft out n nl=$'\n'
+	nft=$(nft_bin)
+	if [ -z "$nft" ]; then
+		echo "reject_count: no nft on this node" >&2
+		return 1
+	fi
+	if ! out=$("$nft" list table inet "$REJECT_TABLE" 2>&1); then
+		echo "reject_count: listing table inet $REJECT_TABLE failed:" \
+			"${out//$nl/; }" >&2
+		return 1
+	fi
+	n=$(printf '%s\n' "$out" |
+		awk '{for (i = 1; i < NF; i++) if ($i == "packets") {print $(i + 1); exit}}')
+	case "$n" in
+	'' | *[!0-9]*)
+		echo "reject_count: the rule's counter reads '$n'" >&2
+		return 1
+		;;
+	esac
+	echo "$n"
+}
+
+# unreject removes this suite's table, whoever left it there, which gives
+# the node its own connects back, and prints "unrejected".
+unreject() {
+	local nft
+	nft=$(nft_bin)
+	if [ -n "$nft" ]; then
+		"$nft" delete table inet "$REJECT_TABLE" >/dev/null 2>&1 || true
+	fi
+	echo unrejected
+	return 0
+}
+
 # clone_dst_wsect prints "<device number> <sectors>": the destination device
 # of this node's one dnv dm-clone, by the number the dm-clone's table names,
 # and the sectors written to that device since it was created, field 7 of
@@ -4465,12 +4627,15 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 # The copy case's throttle goes first and unconditionally, whether or not
 # this run used it: a run killed before its exit path, or one whose exit path
 # could not reach the guest, leaves it behind, and a clone final removed
-# through a slowed source waits for the copy's region in flight. The reading
-# after the removal decides the sentinel, so a throttle still on leaves the
-# verb unfinished.
+# through a slowed source waits for the copy's region in flight. The react
+# case's reject rule goes with it, for the same reasons: left behind, it
+# refuses every later connect of this node to the ports it lists. The
+# readings after the removals decide the sentinel, so a throttle or a rule
+# still on leaves the verb unfinished.
 cn_cleanup_phase1() {
 	local left
 	unthrottle >/dev/null
+	unreject >/dev/null
 	kill_agents cn >/dev/null
 	resume_suspended
 
@@ -4486,6 +4651,11 @@ cn_cleanup_phase1() {
 	left=$(throttle_rules)
 	if [ -n "$left" ]; then
 		echo "cn_cleanup_phase1: the copy case's throttle is still on: $left" >&2
+		return 1
+	fi
+	left=$(reject_rules)
+	if [ -n "$left" ]; then
+		echo "cn_cleanup_phase1: the react case's reject rule is still on: $left" >&2
 		return 1
 	fi
 	echo phase1
@@ -4556,6 +4726,8 @@ diag() {
 	losetup_list
 	echo "--- the copy case's throttle (empty: none) ---"
 	throttle_rules
+	echo "--- the react case's reject rule (empty: none) ---"
+	reject_rules
 	echo "--- df -h /var/tmp ---"
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
@@ -6152,6 +6324,11 @@ CN_TOOLS="$NODE_TOOLS mdadm udevadm"
 # nvme-stas only when the cutoff case is. The cleanup's unthrottle needs them
 # only where the throttle can be, and a node without tc cannot carry it.
 CN_COPY_TOOLS="tc ip"
+# nft: the react case's reject rule (reject_to), which preflight_node asks of
+# a CN only when that case runs with md-raid1, where its take-over step runs.
+# The cleanup's unreject needs it only where the rule can be, and a node
+# without nft cannot carry it.
+CN_REACT_TOOLS="nft"
 # The hosts run no dnv binary at all. nvme: every connect and disconnect.
 # uuidgen: /etc/nvme/hostid when it is absent. systemctl: the nvmf-connect mask
 # and the stafd/stacd check. dd + sha256sum: the host IO helpers. udevadm is
@@ -6452,6 +6629,9 @@ preflight_node() { # <role: dn|cn> <index>
 		want_tools=$CN_TOOLS
 		if run_has_case copy; then
 			want_tools="$want_tools $CN_COPY_TOOLS"
+		fi
+		if run_has_case react && [ "$REDUND" = raid1 ]; then
+			want_tools="$want_tools $CN_REACT_TOOLS"
 		fi
 	fi
 
@@ -15971,8 +16151,9 @@ case_copy() {
 }
 
 # ---------------------------------------------------------------------------
-# Case: react — the four automatic reactions, AR5 to AR8, and two forced
-# starts (AR13, CN12)
+# Case: react — the four automatic reactions, AR5 to AR8, two forced
+# starts (AR13, CN12) and an operator's take-over of a group's repair from
+# the worker (architecture.md, Repairs)
 # (e2e_integtest.md, The cases, react)
 # ---------------------------------------------------------------------------
 #
@@ -16271,7 +16452,10 @@ REACT_DEAD_EPOCHS="[$COPY_GRP0.leg_list[] | \"leg \(.leg_id) \(.err_epoch)\",
 # (dnv-worker.md AR8), so the watch runs at least this many passes past the
 # moment both legs are candidates. One pass runs per cntlr_interval
 # (dnv-worker.md AR1), so each pass is one more chance for AR8 to act on
-# each of them. A count of this suite's choosing, not a constant of the tree.
+# each of them. Step 9 watches its group for as many passes past the
+# worker's first record that it holds its create for the group's flag
+# (react_oic_window), each one more chance for AR8 to create a repair the
+# flag forbids. A count of this suite's choosing, not a constant of the tree.
 REACT_DEAD_PASSES=3
 
 # common.MaxRetiredLegPerGrp — the most retired legs a group holds
@@ -16309,8 +16493,12 @@ REACT_FS_NEW=""
 # The addr_ports react_steer disabled, space-separated, which react_unsteer
 # enables again, and the count of enabled side-less disk nodes it left on a
 # guest outside the group's, "" before any steer (react_new_leg_placed).
+# REACT_STEER_FREE is the nvmet address and port, <tr_addr>:<tr_svc_id>, of
+# each enabled side-less disk node the last steer left, comma-separated,
+# which step 9's reject rule lists (reject_to).
 REACT_STEERED=""
 REACT_STEER_OUT=""
+REACT_STEER_FREE=""
 # What react_fs_mark hands the step: the revision of the forced-start mark,
 # as the call's reply gives it, and the two log marks taken just before the
 # call, the primary's cn agent log's line count and the worker log's, which
@@ -16349,6 +16537,29 @@ REACT_FS_REFUSAL=""
 REACT_FS_HOLD_ROUNDS=5
 REACT_FS_DOWN_SINCE=-1
 
+# Step 9's take-over of slice 0's first data group from the worker
+# (architecture.md, Repairs). REACT_OIC_REJECT_CN is the --cn guest whose
+# reject rule stands (reject_to), -1 while none does: react_reject_off takes
+# the rule off, and on_exit takes it off the guest of a run that failed with
+# it on (E2E6). It is set before the rule goes in, so a call that put the
+# rule in and then failed still leaves its guest named.
+REACT_OIC_REJECT_CN=-1
+# The name of step 9's operator's repair, a bare word like copy's, outside
+# the reserved prefix (architecture.md, Common validation) and free in this
+# case's own etcd.
+REACT_OIC_REP=o0
+# What step 9's watch of the worker's hold reads: the worker log's line
+# count once the worker's repair is gone, after which the step counts the
+# worker's holds of its create for the group (react_oic_hold_cnt); the
+# group's leg_list ids in order, a jq array literal, which the watch holds
+# unchanged; and the driver-clock instant the watch ends.
+REACT_OIC_MARK=0
+REACT_OIC_LEGS=""
+REACT_OIC_UNTIL=0
+# 1 once step 9's proof of the hold (react_oic_held) read the worker's
+# repair with its abort flag set, before the operator's abort, 0 otherwise.
+REACT_OIC_FIRST=0
+
 # The "last observation" scratch of this section's predicates, same discipline
 # as ANA_LAST / SHA_LAST / MIGR_HYD_LAST: each is logged from inside its own
 # predicate when the value CHANGES and is never interpolated into a wait_until
@@ -16362,6 +16573,7 @@ REACT_DEAD_LAST=""
 REACT_MEMBER_LAST=""
 REACT_NO_REP_LAST=""
 REACT_FS_LAST=""
+REACT_OIC_LAST=""
 # The driver-clock instant react_wait_no_repair stops waiting for the pool's
 # repairs to end and dies naming them.
 REACT_NO_REP_UNTIL=0
@@ -17051,7 +17263,7 @@ react_rep_open() { # <position> <leg id>
 # names it. It dies when the group names a repair other than REACT_REP_NAME,
 # set by the first wait, and when the repair is gone with the leg not
 # retired: the worker cancelled it after an abort (dnv-worker.md, Leg
-# repair), which nothing in these stages leads to.
+# repair), which nothing in the stages that wait on it leads to.
 react_rep_done() { # <leg id>
 	local rep inret sig
 	if ! ctl_try sp get; then
@@ -17238,7 +17450,7 @@ react_new_leg_placed() { # <position> <leg id> <addrs> <vms>
 	log "  leg $2 on $addr took position $1 of group $REACT_GRP_ID"
 }
 
-# react_wait_no_repair is the first act of react steps 5 to 8, ahead of
+# react_wait_no_repair is the first act of react steps 5 to 9, ahead of
 # their readings and of their pick of legs: it waits until the pool holds no
 # repair at all, sp_conf.repair_name_list empty in `sp get`, logs every
 # repair it sees meanwhile, and dies naming the ones still there after
@@ -17284,7 +17496,7 @@ react_no_repair() {
 	return 1
 }
 
-# react_leg_alone is the disk-node rule of react steps 5 to 8 and of copy
+# react_leg_alone is the disk-node rule of react steps 5 to 9 and of copy
 # step 5, read from $SP_JSON: leg <i> of slice 0's first data group's leg_list
 # has exactly one side, and that side's disk node carries no other side of
 # the sp's legs (SP_SIDE_PATH). Killing that disk node then takes down
@@ -17313,8 +17525,8 @@ react_leg_alone() { # <i>
 # away — nvmet objects outlive their agent, so without it the primary's leg
 # probe would keep succeeding and Leg.err_epoch would stay 0. The agent goes
 # first, as a live agent puts its port back at its next converge (dnagent.md
-# DN5, DN10), which is what react_return_dn relies on. React steps 5, 7 and
-# 8 and copy steps 5 and 6 call it; react step 6 calls its two halves,
+# DN5, DN10), which is what react_return_dn relies on. React steps 5, 7, 8
+# and 9 and copy steps 5 and 6 call it; react step 6 calls its two halves,
 # react_stop_dn_agent and react_drop_dn_port, each over all of its disk nodes
 # in turn (see step 6's header).
 react_kill_dn() { # <v> <k>
@@ -17546,7 +17758,9 @@ react_fs_pos() { # <leg id>
 # retired sides and a repair's new side included, so that the fresh leg of
 # the repair the worker creates next lands on a disk node that carries no
 # other side, as a later death of that leg's disk node needs
-# (react_leg_alone). React steps 5, 7 and 8 call it before the kill that
+# (react_leg_alone), and as step 9's reject rule needs, which lists every
+# disk node the fresh leg can land on and must list none that carries a
+# side. React steps 5, 7, 8 and 9 call it before the kill that
 # leads to the worker's repair, and step 6 before the return of the disk
 # node that died last, which leads to its first repair, and again between
 # its repairs; react_unsteer follows once the step's last repair exists.
@@ -17564,9 +17778,15 @@ react_fs_pos() { # <leg id>
 # side is left, and sets REACT_STEER_OUT to the count of those on a guest
 # outside <group vms>, a comma list of the group's guests: with none, the
 # steer itself pushes the pick to the allocator's second tier, which may
-# reuse a guest the group holds (react_new_leg_placed, E2E4).
+# reuse a guest the group holds (react_new_leg_placed, E2E4). It sets
+# REACT_STEER_FREE to the nvmet address and port of every enabled disk node
+# it left without a side, on any guest, from its record's nvme_tr_conf,
+# which is what a controller node connects to for a side there: every disk
+# node the worker's next fresh leg can land on in either tier, which step
+# 9's reject rule lists.
 react_steer() { # <group vms>
-	local v k a n free=0 out=0
+	local v k a n trp free=0 out=0
+	REACT_STEER_FREE=""
 	for ((v = 0; v < DN_VM_CNT; v++)); do
 		for ((k = 0; k < DNS_PER_VM; k++)); do
 			a=$(dn_addr "$v" "$k")
@@ -17575,6 +17795,9 @@ react_steer() { # <group vms>
 			n=$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list | length')
 			if [ "$n" = 0 ]; then
 				free=$((free + 1))
+				trp=$(jq_of "$CTL_OUT" \
+					'.dn_conf.nvme_tr_conf | "\(.tr_addr):\(.tr_svc_id)"')
+				REACT_STEER_FREE="$REACT_STEER_FREE${REACT_STEER_FREE:+,}$trp"
 				case ",$1," in
 				*",${a%:*},"*) ;;
 				*) out=$((out + 1)) ;;
@@ -18354,6 +18577,270 @@ react_fs_rep_aborted() { # <rep name>
 		;;
 	esac
 	return 1
+}
+
+# --- what the take-over of step 9 reads -------------------------------------
+#
+# Step 9 holds a worker's repair CREATED with a reject rule on the primary's
+# node (reject_to), put in before the kill that leads to the repair and taken
+# off once the repair is gone (react_reject_on, react_reject_off), so that
+# the operator can abort it. react_oic_held is the proof of the hold,
+# react_oic_rep_ended the abort's wait, and react_oic_hold_logged and
+# react_oic_window the watch that the worker creates no repair of the group
+# while its operator_in_charge flag stands (dnv-worker.md AR8).
+
+# react_reject_on makes the node of --cn guest <v> refuse its own TCP
+# connects to each nvmet address and port of <pairs>, a comma list of
+# <addr>:<port> (reject_to), and dies unless the rule went in over every
+# pair. REACT_OIC_REJECT_CN names the guest before the call, so a run that
+# fails from here on takes the rule off at its exit (on_exit, E2E6).
+react_reject_on() { # <v> <pairs>
+	local out
+	local -a pairs
+	IFS=, read -r -a pairs <<<"$2"
+	[ "${#pairs[@]}" -gt 0 ] ||
+		die "the reject rule for cn$1 lists no disk node"
+	REACT_OIC_REJECT_CN=$1
+	out=$(helper_cn "$1" reject_to "$2") ||
+		die "cn$1: the reject_to verb could not be run"
+	assert_eq "$out" "rejected ${#pairs[@]}" \
+		"cn$1: the reject rule over the ${#pairs[@]} disk node(s) the fresh leg can land on"
+	log "  cn$1 refuses its own connects to the nvmet ports of" \
+		"${#pairs[@]} disk node(s): ${2//,/ }"
+}
+
+# react_reject_off takes the reject rule off the guest REACT_OIC_REJECT_CN
+# names (unreject), checks that the guest's listing shows no table of this
+# suite's any more (reject_rules), and then names no guest. It does nothing
+# while no guest is named.
+react_reject_off() {
+	local v=$REACT_OIC_REJECT_CN out
+	[ "$v" -ge 0 ] || return 0
+	out=$(helper_cn "$v" unreject) ||
+		die "cn$v: the unreject verb could not be run"
+	assert_eq "$out" unrejected "cn$v: the reject rule taken off"
+	out=$(helper_cn "$v" reject_rules) ||
+		die "cn$v: the reject_rules verb could not be run"
+	assert_eq "$out" "" "cn$v: this suite's reject rule after unreject"
+	REACT_OIC_REJECT_CN=-1
+	log "  cn$v refuses none of its own connects any more"
+}
+
+# react_oic_held is step 9's proof of the hold: true once the worker's
+# repair <rep name> reads CREATED with its new leg's side provisioned,
+# flipped once the side has zeroed, from which on every cntlr connects it
+# (architecture.md, Side provisioning protocol), and the reject rule on the
+# primary's node has refused a connect: the primary has tried to connect the
+# new leg and could not, so it cannot add the leg to the array (cnagent.md
+# CN12). The stage, the flag, the flip and the rule's count are logged as
+# they change. A repair whose abort flag is set gives the same proof, on a
+# repair CREATED or ABORTED: the worker's own try-to-abort came first
+# (dnv-worker.md AR8), which the step means to come ahead of, and the step's
+# abort then meets the flag or the stage (architecture.md, Repairs,
+# TryToAbortRepair). REACT_OIC_FIRST then says so, and the step looks for the
+# worker's record of that abort. Any other stage dies, as the primary took
+# the new leg in after all, and so does a repair gone before the proof,
+# naming the worker's own records of an abort, a cancel and a finish of it
+# since the kill (react_oic_worker_ran), as one of those ended it.
+react_oic_held() { # <rep name>
+	local st flag prov n sig ab ca fin
+	if ! ctl_try repair get --name "$1"; then
+		case "$CTL_ERR" in
+		*NOT_FOUND*)
+			ab=$(react_oic_worker_ran "$1" repair_abort) || exit 1
+			ca=$(react_oic_worker_ran "$1" repair_cancel) || exit 1
+			fin=$(react_oic_worker_ran "$1" repair_finish) || exit 1
+			die "the worker's repair $1 is gone before the step saw it held" \
+				"with its side provisioned and a connect refused; since the" \
+				"kill the worker logged $ab abort(s), $ca cancel(s) and" \
+				"$fin finish(es) of it of its own (dnv-worker.md AR8)"
+			;;
+		esac
+		return 1
+	fi
+	st=$(jq_of "$CTL_OUT" '.repair.rep_stage')
+	flag=$(jq_of "$CTL_OUT" '.repair.try_to_abort')
+	prov=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned')
+	n=$(helper_cn "$REACT_OIC_REJECT_CN" reject_count 2>/dev/null) || n=unread
+	sig="repair $1 $st, abort flag $flag, its new side provisioned $prov;"
+	sig="$sig connects the rule on cn$REACT_OIC_REJECT_CN refused: $n"
+	if [ "$sig" != "$REACT_OIC_LAST" ]; then
+		REACT_OIC_LAST=$sig
+		log "  $sig"
+	fi
+	case "$st:$flag" in
+	REP_STAGE_CREATED:* | REP_STAGE_ABORTED:true) ;;
+	*)
+		die "the worker's repair $1 reads $st with its abort flag $flag" \
+			"while the reject rule on cn$REACT_OIC_REJECT_CN was to keep" \
+			"the primary from connecting its new leg, which holds a repair" \
+			"CREATED (cnagent.md CN12). The rule covers that node alone, so" \
+			"a failover to a cntlr on another node would let the new" \
+			"primary add the leg"
+		;;
+	esac
+	[ "$prov" = true ] || return 1
+	case "$n" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$n" -gt 0 ] || return 1
+	if [ "$flag" = true ]; then
+		REACT_OIC_FIRST=1
+		log "!!! the abort flag of the worker's repair $1 was set before" \
+			"the operator's abort: the worker's own try-to-abort" \
+			"(dnv-worker.md AR8) came first, so the step came later than it" \
+			"means to"
+	fi
+	return 0
+}
+
+# react_oic_rep_ended is the abort's wait: true once the worker's repair
+# <rep name> reads ABORTED, the stage the worker moves it to once the
+# primary confirms the abort its flag asks for (dnv-worker.md AR11), or is
+# gone with its bad leg <leg id> still at <position> of the group's
+# leg_list and none of its retired legs, as the worker's drive step cancels
+# an aborted repair of its own (dnv-worker.md AR8), which may come before
+# this poll. Its stage and flag are logged as they change. It dies when the
+# repair reads STARTED, as the primary then took its new leg in, and when
+# the repair is gone with its bad leg moved out of its place or retired, as
+# the drive step then finished it.
+react_oic_rep_ended() { # <rep name> <position> <leg id>
+	local st flag sig at inret
+	if ! ctl_try repair get --name "$1"; then
+		case "$CTL_ERR" in
+		*NOT_FOUND*)
+			if ! ctl_try sp get; then
+				return 1
+			fi
+			at=$(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$2].leg_id")
+			inret=$(jq_of "$CTL_OUT" \
+				"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$3\")] | length")
+			if [ "$at" != "$3" ] || [ "$inret" != 0 ]; then
+				die "the worker's repair $1 is gone and its bad leg $3 lost" \
+					"its place: leg_list[$2] of group $REACT_GRP_ID reads" \
+					"'$at', and $inret of the group's retired legs is leg $3." \
+					"The worker's drive step finished the repair" \
+					"(dnv-worker.md AR8) after the primary took its new leg" \
+					"in, which the reject rule on cn$REACT_OIC_REJECT_CN was" \
+					"to keep it from"
+			fi
+			sig="repair $1 is gone"
+			if [ "$sig" != "$REACT_OIC_LAST" ]; then
+				REACT_OIC_LAST=$sig
+				log "  $sig"
+			fi
+			return 0
+			;;
+		esac
+		return 1
+	fi
+	st=$(jq_of "$CTL_OUT" '.repair.rep_stage')
+	flag=$(jq_of "$CTL_OUT" '.repair.try_to_abort')
+	sig="repair $1 $st, abort flag $flag"
+	if [ "$sig" != "$REACT_OIC_LAST" ]; then
+		REACT_OIC_LAST=$sig
+		log "  $sig"
+	fi
+	case "$st" in
+	REP_STAGE_ABORTED) return 0 ;;
+	REP_STAGE_STARTED)
+		die "the worker's repair $1 reads STARTED with its abort flag" \
+			"$flag: the primary took its new leg into the array, which the" \
+			"reject rule on cn$REACT_OIC_REJECT_CN was to keep it from; the" \
+			"rule covers that node alone, so a failover to a cntlr on" \
+			"another node would let the new primary add the leg"
+		;;
+	esac
+	return 1
+}
+
+# react_oic_worker_ran prints how many `reaction applied` records of kind
+# <kind> the worker has logged for its repair <rep name> since
+# REACT_REP_MARK (dnv-worker.md, Log records): its own try-to-abort
+# (repair_abort), cancel (repair_cancel) or finish (repair_finish) of it,
+# which name the repair by rep_name. Its callers run it in a command
+# substitution, which does not keep set -e, so a log it cannot read, which
+# has already died in worker_grp_records' subshell saying why, ends it by an
+# exit spelled out, and the caller's own assignment fails with it.
+react_oic_worker_ran() { # <rep name> <kind>
+	local recs
+	recs=$(worker_grp_records "$REACT_REP_MARK" "reaction applied" \
+		"$REACT_GRP_ID") || exit 1
+	printf '%s\n' "$recs" | "$JQ" -s --arg n "$1" --arg k "$2" \
+		'[.[] | select(.rep_name == $n and .kind == $k)] | length' ||
+		die "react_oic_worker_ran: jq failed on the worker's records"
+}
+
+# react_oic_worker_did is true once the worker has logged one record of
+# kind <kind> for its repair <rep name> (react_oic_worker_ran).
+react_oic_worker_did() { # <rep name> <kind>
+	local n
+	n=$(react_oic_worker_ran "$1" "$2") || exit 1
+	[ "$n" -ge 1 ]
+}
+
+# react_oic_hold_cnt prints how many times the worker has held its create of
+# a repair for leg <leg id> of slice 0's first data group since
+# REACT_OIC_MARK: its `reaction skipped` records of kind repair_create with
+# reason grp_operator_in_charge that name the group and the leg
+# (dnv-worker.md AR8, Log records). It reads the log as react_oic_worker_ran
+# does.
+react_oic_hold_cnt() { # <leg id>
+	local recs
+	recs=$(worker_grp_records "$REACT_OIC_MARK" "reaction skipped" \
+		"$REACT_GRP_ID") || exit 1
+	printf '%s\n' "$recs" | "$JQ" -s --argjson l "$1" '
+		[.[] | select(.kind == "repair_create"
+			and .reason == "grp_operator_in_charge" and .leg_id == $l)]
+		| length' ||
+		die "react_oic_hold_cnt: jq failed on the worker's records"
+}
+
+# react_oic_grp_holds is the watch every poll of step 9's hold keeps on the
+# `sp get` reply in $CTL_OUT: slice 0's first data group still has the
+# leg_list REACT_OIC_LEGS names, in the same order, no repair, and its
+# operator_in_charge flag set. It dies the moment any of them moved, naming
+# the readings: while the flag stands the worker creates no repair of the
+# group (dnv-worker.md AR8), and nothing else in the step changes it.
+react_oic_grp_holds() {
+	local legs rep flag
+	legs=$(jq_of "$CTL_OUT" "$COPY_GRP0 | [.leg_list[].leg_id] | tojson")
+	rep=$(jq_of "$CTL_OUT" "$COPY_GRP0.rep_name")
+	flag=$(jq_of "$CTL_OUT" "$COPY_GRP0.operator_in_charge")
+	if [ "$legs" = "$REACT_OIC_LEGS" ] && [ -z "$rep" ] &&
+		[ "$flag" = true ]; then
+		return 0
+	fi
+	die "group $REACT_GRP_ID changed while its operator_in_charge flag" \
+		"stood: leg_list $REACT_OIC_LEGS -> $legs, repair '$rep', flag" \
+		"$flag. While the flag stands the worker creates no repair of the" \
+		"group (dnv-worker.md AR8)"
+}
+
+# react_oic_hold_logged is the first wait of step 9's watch: true once the
+# worker has held its create for leg <leg id> at least once since
+# REACT_OIC_MARK (react_oic_hold_cnt), the group watched on every poll
+# (react_oic_grp_holds). The bad leg is a candidate of AR8 at every pass, so
+# the record comes at every pass while the flag stands.
+react_oic_hold_logged() { # <leg id>
+	local n
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	react_oic_grp_holds
+	n=$(react_oic_hold_cnt "$1") || exit 1
+	[ "$n" -ge 1 ]
+}
+
+# react_oic_window is the second: true once the driver's clock has reached
+# REACT_OIC_UNTIL, the group watched on every poll until then, so a repair
+# the worker created inside the window fails the step the moment it shows.
+react_oic_window() {
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	react_oic_grp_holds
+	[ "$SECONDS" -ge "$REACT_OIC_UNTIL" ]
 }
 
 # --- step 0: the shape this case starts from --------------------------------
@@ -20650,9 +21137,476 @@ react_fs_restore() {
 }
 
 # --- step 9 -----------------------------------------------------------------
+#
+# AN OPERATOR TAKES THE GROUP'S REPAIR OVER FROM THE WORKER (architecture.md,
+# Repairs), on the group steps 5 to 8 repaired: slice 0's first data group,
+# which holds the first stripe of $TD0 and of $TD_REACT, so host0's reads go
+# through it. The pool stays at READWRITE throughout, which the step reads
+# at its start and at its end, as it changes no level: the group's
+# operator_in_charge flag is no level and stops the worker's create of a
+# repair of that group and nothing else, so failover and every other
+# reaction go on (architecture.md, Repairs). As in step 5, host0 makes no IO
+# from the kill until md holds the group whole (HOST IO below), so the step
+# proves the take-over at the level where the pool serves IO, not IO during
+# it.
+#
+# THE HOLD AT CREATED. One leg's disk node dies on both planes, as in step 5,
+# and the worker creates its repair with a fresh leg steered onto a side-less
+# disk node (react_steer). The take-over aborts that repair, which only a
+# CREATED repair takes (architecture.md, Repairs, TryToAbortRepair), and a
+# worker's repair is CREATED for a few passes only: its new side zeroes, is
+# flipped provisioned, and the primary adds the new leg. So before the kill
+# the primary's node refuses its own TCP connects to the nvmet port of every
+# disk node the fresh leg can land on, the enabled side-less ones the steer
+# leaves (reject_to). Those disk nodes and their agents stay up and answer,
+# so the worker still places the leg on one and flips its side, but the
+# primary cannot connect the leg, never adds it, and the repair stays
+# CREATED. Freezing those agents would not do: the worker marks a disk node
+# unhealthy at the first round it misses (dnv-worker.md HL1), and allocation
+# passes such a node over. The rule lists one address and port per disk
+# node, never a product of addresses and ports, so it refuses no connect to
+# a leg of the pool on the same guests; the standby, which builds no array
+# (cnagent.md CN12), connects the new leg as usual. The proof of the hold is
+# the repair still CREATED with its side provisioned once the rule has
+# refused a connect of the primary's, or ABORTED with the same proof should
+# the worker's own try-to-abort have come first (react_oic_held).
+#
+# THE TAKE-OVER. The group's flag is set, which `sp get` shows; the
+# operator aborts the worker's repair, which reads ABORTED once the primary
+# confirms the abort, and cancels it. The worker still drives a repair of
+# its own under the flag (dnv-worker.md AR8): its drive step cancels the
+# aborted repair at a pass that may come before the operator's cancel, which
+# then meets NOT_FOUND, and then the worker's own record of the cancel must
+# be in its log. Should the worker's try-to-abort have set the abort flag
+# first, the operator's abort answers a set flag as done, and should the
+# worker have gone on to abort and cancel the repair before the operator's
+# abort, the abort's refusal must be met by the worker's own record of its
+# abort; so must a flag the proof of the hold read set, which the abort
+# answers as done. The rule comes off once the repair is gone. The bad leg
+# is then a candidate of AR8 at every pass, and the worker must create no
+# repair of the group: for REACT_DEAD_PASSES passes from its first record
+# of the hold after the cancel, the group keeps its legs, no repair and its
+# flag, and the worker logs `reaction skipped` for the bad leg with reason
+# grp_operator_in_charge (dnv-worker.md AR8, Log records).
+#
+# THE OPERATOR'S REPAIR. The operator's own repair of the bad leg takes a
+# fresh leg, which CreateRepair gives an operator's repair only while the
+# group is below the retired-leg bound (architecture.md, Repairs,
+# CreateRepair), and steps 5 to 8 leave it at the bound; so the step first
+# deletes the group's oldest retired leg when it holds the bound. The repair
+# starts once the primary reports its new leg holding a place, and the
+# operator finishes it, the dead leg retired; md copies the group onto the
+# fresh leg whole, as the leg was never a member (architecture.md, Repair).
+# The flag is cleared after the finish.
+#
+# HOST IO. host0 reads SHA0 over ns 1 and step 3's pattern over ns 2 once
+# md holds the group whole, and its kernel log since the mark taken before
+# the kill must report no failed IO. No failover may happen across the
+# step. The dead disk node comes back at the end, as only a live agent
+# removes the side of the retired leg the pool's drain gives back.
+react_take_over() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== react step 09 (an operator's take-over of a group) SKIPPED:" \
+			"--redund $REDUND. A RedundNone group has no repair to take" \
+			"over, and UpdateGroupOperatorInCharge refuses its pool" \
+			"(architecture.md, Repairs)."
+		return 0
+	fi
+	stage 09 "an operator takes a group's repair over from the worker: the flag set, the worker's repair held CREATED, aborted and cancelled, no repair of the worker's while the flag stands, the operator's own repair finished, the flag cleared"
+	local n i pos bad legidx side addr vm inst stay given before_retired
+	local before_addrs before_vms before_primary before_failovers tag msg out
+	local rep_id pair who cnt orep_id newleg newside newaddr repstage rev
+	local want retired dev2
+
+	# The readings the step is judged against, after the pool holds no
+	# repair (react_wait_no_repair), as in steps 5 to 8.
+	react_wait_no_repair
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	copy_primary_cn_id
+	before_primary=$PRIMARY_CNTLR_ID
+	before_failovers=$(worker_failover_cnt)
+	assert_eq "$(sp_field "$COPY_GRP0.grp_id")" "$REACT_GRP_ID" \
+		"slice 0's first data group is still the one step 01 recorded"
+	n=$(sp_field "$COPY_GRP0.leg_list | length")
+	assert_eq "$n" "$LEGS" "slice 0's first data group's legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"group $REACT_GRP_ID has no repair before the step"
+	assert_field "$SP_JSON" "$COPY_GRP0.forced_start" null \
+		"group $REACT_GRP_ID carries no forced-start mark before the step"
+	assert_field "$SP_JSON" "$COPY_GRP0.operator_in_charge" false \
+		"group $REACT_GRP_ID's operator_in_charge flag before the step"
+	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE \
+		"sp_level before the take-over"
+
+	# The retired-leg bound (see the step's header). Every disk node is back
+	# since step 8, so the deleted leg's side goes back to a live agent.
+	react_retired_read
+	given=$(react_retired_given "$REACT_RETIRED")
+	if [ -n "$given" ]; then
+		log "  group $REACT_GRP_ID holds the retired legs $REACT_RETIRED, at" \
+			"the bound: deleting leg $given, the oldest, so that the" \
+			"operator's repair may take a fresh leg"
+		ctl_ok retired-leg delete --leg "$given"
+		assert_field "$CTL_OUT" '.leg_id' "$given" "DeleteRetiredLegReply.leg_id"
+		sp_refresh
+		assert_field "$SP_JSON" \
+			"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$given\")] | length" \
+			0 "the deleted leg $given is none of the group's retired legs"
+	fi
+	before_retired=$(sp_field \
+		"$COPY_GRP0 | [.retired_leg_id_list[]] | sort | tojson")
+	assert_jq "$before_retired" "length < $MAX_RETIRED_LEG_PER_GRP" \
+		"group $REACT_GRP_ID's retired legs $before_retired are below the bound of $MAX_RETIRED_LEG_PER_GRP (architecture.md, Retired legs)"
+
+	# The leg to kill: the first of the group's leg_list that sits alone on
+	# its disk node (react_leg_alone), as in step 5; the other leg keeps the
+	# data.
+	pos=-1
+	for ((i = 0; i < n; i++)); do
+		if react_leg_alone "$i"; then
+			pos=$i
+			break
+		fi
+	done
+	[ "$pos" -ge 0 ] ||
+		die "no leg of slice 0's first data group has a single side on a" \
+			"disk node that carries exactly one side of $SP, so no death of" \
+			"one disk node takes down exactly one leg of group $REACT_GRP_ID"
+	bad=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_id")
+	legidx=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_idx")
+	side=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].side_id")
+	addr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].addr_port")
+	stay=$(sp_field "[$COPY_GRP0.leg_list[].leg_id | select(. != \"$bad\")][0]")
+	case "$bad:$legidx:$side:$stay" in
+	*[!0-9:]* | :* | *: | *::* | 0:* | *:0)
+		die "the leg to kill reads leg '$bad', leg_idx '$legidx', side" \
+			"'$side', and the group's other leg '$stay'"
+		;;
+	esac
+	vm=$(dn_vm_of_addr "$addr")
+	inst=$(dn_inst_of_addr "$addr")
+	assert_ne "$vm" none "leg $bad's addr_port $addr names a --dn guest"
+	assert_ne "$inst" none "leg $bad's addr_port $addr names a dn instance"
+	diag_note_dn "$vm" "$inst"
+	# The group's disk nodes and guests, which a repair's fresh leg is
+	# placed outside (react_new_leg_placed).
+	before_addrs=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
+	before_vms=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
+	log "  group $REACT_GRP_ID: leg $bad (position $pos) dies and leg $stay" \
+		"keeps the data; primary cntlr $before_primary on cn$PRIMARY_CN," \
+		"$before_failovers failover(s) applied so far"
+
+	# The steer, then the rule over the disk nodes the steer leaves, both
+	# before the kill (see the step's header).
+	react_steer "$before_vms"
+	react_reject_on "$PRIMARY_CN" "$REACT_STEER_FREE"
+
+	tag="dnv-e2e-react-take-over-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$tag"
+	REACT_REP_MARK=$(worker_log_mark)
+	log "  killing dn$vm instance $inst ($addr), the disk node of leg $bad"
+	react_kill_dn "$vm" "$inst"
+	REACT_REP_NAME=""
+	REACT_REP_LAST=""
+	msg="AR8 to create a repair of group $REACT_GRP_ID for leg $bad"
+	msg="$msg (side_unhealthy ${THR_SIDE}s or leg_unhealthy ${THR_LEG}s, and"
+	msg="$msg the leg's err_epoch only starts when the primary's probe fails)"
+	wait_until "$WAIT_REACT" "$msg" react_rep_open "$pos" "$bad"
+	[ -n "$REACT_REP_NAME" ] ||
+		die "leg $bad is a retired leg already: the worker's repair of it" \
+			"started and was finished, so the reject rule on cn$PRIMARY_CN" \
+			"did not keep the primary from adding its new leg"
+	react_rep_name_ok "$REACT_REP_NAME"
+	react_rep_read "$bad" "$before_retired"
+	[ -n "$REACT_NEW_LEG" ] ||
+		die "the worker's repair $REACT_REP_NAME was finished before it" \
+			"could be read, so the reject rule on cn$PRIMARY_CN did not hold" \
+			"it CREATED"
+	ctl_ok repair get --name "$REACT_REP_NAME"
+	rep_id=$(jq_of "$CTL_OUT" '.repair.rep_id')
+	case "$rep_id" in
+	'' | *[!0-9]* | 0) die "repair $REACT_REP_NAME reads rep_id '$rep_id'" ;;
+	esac
+	# The fresh leg's disk node is one the rule lists.
+	ctl_ok dn get --addr "$REACT_NEW_ADDR"
+	pair=$(jq_of "$CTL_OUT" \
+		'.dn_conf.nvme_tr_conf | "\(.tr_addr):\(.tr_svc_id)"')
+	case ",$REACT_STEER_FREE," in
+	*",$pair,"*) ;;
+	*)
+		die "the worker's new leg $REACT_NEW_LEG landed on $REACT_NEW_ADDR," \
+			"whose nvmet port $pair the reject rule on cn$PRIMARY_CN does" \
+			"not list, while every disk node outside that list was disabled" \
+			"by the steer or before it, and allocation passes a disabled" \
+			"disk node over (architecture.md, Disk nodes," \
+			"UpdateDiskNodeDisabled)"
+		;;
+	esac
+	REACT_OIC_LAST=""
+	REACT_OIC_FIRST=0
+	msg="the worker to flip repair $REACT_REP_NAME's new side provisioned and"
+	msg="$msg the rule on cn$PRIMARY_CN to refuse the primary's connect to it,"
+	msg="$msg the repair still CREATED"
+	wait_until "$WAIT_PROVISION" "$msg" react_oic_held "$REACT_REP_NAME"
+	log "  the worker's repair $REACT_REP_NAME is held CREATED: the primary" \
+		"cannot connect its new leg $REACT_NEW_LEG on $REACT_NEW_ADDR"
+
+	# The take-over: the flag, the abort and the cancel (see the step's
+	# header).
+	ctl_ok group set-operator-in-charge --grp "$REACT_GRP_ID"
+	assert_field "$CTL_OUT" '.grp_id' "$REACT_GRP_ID" \
+		"UpdateGroupOperatorInChargeReply.grp_id"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.operator_in_charge" true \
+		"group $REACT_GRP_ID's operator_in_charge flag after the call"
+	if ctl_try repair abort --name "$REACT_REP_NAME"; then
+		assert_eq "$CTL_ERR" "" \
+			"stderr of: dnvctl repair abort --name $REACT_REP_NAME must be empty"
+		assert_parses "$CTL_OUT" "dnvctl repair abort --name $REACT_REP_NAME"
+		assert_field "$CTL_OUT" '.rep_id' "$rep_id" "TryToAbortRepairReply.rep_id"
+		log "  the operator's abort of the worker's repair $REACT_REP_NAME" \
+			"answered done"
+		if [ "$REACT_OIC_FIRST" = 1 ]; then
+			wait_until "$WAIT_SHORT" \
+				"the worker's record of its own abort of repair $REACT_REP_NAME, whose flag the proof of the hold read set before the operator's abort (dnv-worker.md AR8)" \
+				react_oic_worker_did "$REACT_REP_NAME" repair_abort
+		fi
+	else
+		case "$CTL_ERR" in
+		"dnvctl: NOT_FOUND: "* | \
+			"dnvctl: FAILED_PRECONDITION: "*REP_STAGE_ABORTED*) ;;
+		*)
+			die "the operator's abort of the worker's repair" \
+				"$REACT_REP_NAME failed: ${CTL_ERR:-dnvctl exit code $CTL_RC}"
+			;;
+		esac
+		cnt=$(react_oic_worker_ran "$REACT_REP_NAME" repair_abort)
+		[ "$cnt" -ge 1 ] ||
+			die "the operator's abort of the worker's repair" \
+				"$REACT_REP_NAME was refused ($CTL_ERR), and the worker" \
+				"logged no abort of it of its own"
+		log "!!! the worker aborted its repair $REACT_REP_NAME on its own" \
+			"before the operator's abort, which met: $CTL_ERR"
+	fi
+	REACT_OIC_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the worker's repair $REACT_REP_NAME to read ABORTED once the primary confirms the abort, or to be gone (dnv-worker.md AR8, AR11)" \
+		react_oic_rep_ended "$REACT_REP_NAME" "$pos" "$bad"
+	if ctl_try repair cancel --name "$REACT_REP_NAME"; then
+		assert_eq "$CTL_ERR" "" \
+			"stderr of: dnvctl repair cancel --name $REACT_REP_NAME must be empty"
+		assert_parses "$CTL_OUT" "dnvctl repair cancel --name $REACT_REP_NAME"
+		assert_field "$CTL_OUT" '.rep_id' "$rep_id" "CancelRepairReply.rep_id"
+		who="the operator"
+	else
+		case "$CTL_ERR" in
+		"dnvctl: NOT_FOUND: "*) ;;
+		*)
+			die "the operator's cancel of the worker's repair" \
+				"$REACT_REP_NAME failed: ${CTL_ERR:-dnvctl exit code $CTL_RC}"
+			;;
+		esac
+		wait_until "$WAIT_SHORT" \
+			"the worker's record of its own cancel of repair $REACT_REP_NAME (dnv-worker.md AR8)" \
+			react_oic_worker_did "$REACT_REP_NAME" repair_cancel
+		who="the worker's drive step"
+	fi
+	ctl_fail NOT_FOUND repair get --name "$REACT_REP_NAME"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the cancel"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_id" "$bad" \
+		"the bad leg $bad keeps its place in leg_list"
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.retired_leg_id_list[]] | sort) == $before_retired" \
+		"the cancel of a repair with a fresh leg leaves the group's retired legs as they were (architecture.md, Repairs, CancelRepair)"
+	assert_field "$SP_JSON" "$COPY_GRP0.operator_in_charge" true \
+		"group $REACT_GRP_ID's operator_in_charge flag stands after the cancel"
+	ctl_ok repair list
+	assert_field "$CTL_OUT" \
+		"[.name_to_repair[] | select(.grp_id == \"$REACT_GRP_ID\")] | length" 0 \
+		"ListRepairs holds no repair of group $REACT_GRP_ID"
+	cnt=$(react_oic_worker_ran "$REACT_REP_NAME" repair_abort)
+	log "  the worker's repair $REACT_REP_NAME is gone: $who cancelled it," \
+		"and the worker logged $cnt abort(s) of it of its own"
+
+	# The rule comes off, and the hold is watched (see the step's header).
+	out=$(helper_cn "$REACT_OIC_REJECT_CN" reject_count) ||
+		die "cn$REACT_OIC_REJECT_CN: reading the reject rule's count failed" \
+			"(reject_count says why above)"
+	log "  the rule on cn$REACT_OIC_REJECT_CN refused $out connect(s) of the" \
+		"primary's node"
+	react_reject_off
+	REACT_OIC_MARK=$(worker_log_mark)
+	REACT_OIC_LEGS=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | tojson")
+	REACT_OIC_UNTIL=0
+	wait_until "$WAIT_REACT" \
+		"the worker to log reaction skipped (grp_operator_in_charge) for leg $bad of group $REACT_GRP_ID (dnv-worker.md AR8)" \
+		react_oic_hold_logged "$bad"
+	REACT_OIC_UNTIL=$((SECONDS + REACT_DEAD_PASSES * DEFAULT_HC_INTERVAL))
+	wait_until "$((REACT_DEAD_PASSES * DEFAULT_HC_INTERVAL + WAIT_SHORT))" \
+		"$REACT_DEAD_PASSES more passes of the worker with no repair of group $REACT_GRP_ID while its flag stands" \
+		react_oic_window
+	cnt=$(react_oic_hold_cnt "$bad")
+	log "  the worker held its create of a repair for leg $bad $cnt time(s)" \
+		"since the cancel, and created none"
+
+	# The operator's repair, with a fresh leg (see the step's header).
+	ctl_ok repair create --name "$REACT_OIC_REP" --grp "$REACT_GRP_ID" \
+		--bad-legs "$bad"
+	orep_id=$(jq_of "$CTL_OUT" '.rep_id')
+	newleg=$(jq_of "$CTL_OUT" '.new_leg_id')
+	case "$orep_id:$newleg" in
+	*[!0-9:]* | :* | *: | 0:* | *:0)
+		die "repair create returned rep_id '$orep_id' and new_leg_id" \
+			"'$newleg': each must be a non-zero decimal"
+		;;
+	esac
+	# The create took the fresh leg's side, so allocation is over.
+	react_unsteer
+	ctl_ok repair get --name "$REACT_OIC_REP"
+	assert_field "$CTL_OUT" '.repair.rep_id' "$orep_id" \
+		"the stored rep_id is the one CreateRepair returned"
+	assert_field "$CTL_OUT" '.repair.grp_id' "$REACT_GRP_ID" \
+		"the repair names group $REACT_GRP_ID"
+	assert_field "$CTL_OUT" '.repair.bad_leg_id_list | join(",")' "$bad" \
+		"the repair's one bad leg is leg $bad"
+	assert_field "$CTL_OUT" '.repair.new_leg_list | length' 1 \
+		"the repair carries one new leg"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].leg_id' "$newleg" \
+		"and it is the leg CreateRepair returned"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list | length' 1 \
+		"the new leg has exactly one side"
+	assert_field "$CTL_OUT" '.repair.new_leg_id_to_retired_epoch | length' 0 \
+		"a fresh new leg keeps no retired time"
+	assert_field "$CTL_OUT" '.repair.try_to_abort' false \
+		"the repair's abort flag is clear"
+	repstage=$(jq_of "$CTL_OUT" '.repair.rep_stage')
+	case "$repstage" in
+	REP_STAGE_CREATED | REP_STAGE_STARTED) ;;
+	*) die "repair $REACT_OIC_REP reads stage '$repstage' right after its create" ;;
+	esac
+	newside=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].side_id')
+	newaddr=$(jq_of "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].addr_port')
+	case "$newside" in
+	'' | *[!0-9]* | 0) die "the new leg's side has side_id '$newside'" ;;
+	esac
+	assert_jq "$before_retired" "([\"$newleg\"] - .) | length == 1" \
+		"the new leg $newleg is none of the group's retired legs: the repair takes a fresh leg"
+	case ",$(sp_field "[$COPY_GRP0.leg_list[].leg_id] | join(\",\")")," in
+	*",$newleg,"*)
+		die "CreateRepair's new leg $newleg is a leg of group $REACT_GRP_ID already"
+		;;
+	esac
+	log "  repair $REACT_OIC_REP (rep_id $orep_id) reads $repstage; its new" \
+		"leg $newleg has side $newside on $newaddr"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "$REACT_OIC_REP" \
+		"the group names the operator's repair"
+	COPY_REP_LAST=""
+	msg="the worker to move repair $REACT_OIC_REP to STARTED: the new leg's"
+	msg="$msg side zeroes and is flipped provisioned, and the primary adds the"
+	msg="$msg new leg to group $REACT_GRP_ID's array and reports it holding a"
+	msg="$msg place"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_stage_is "$REACT_OIC_REP" REP_STAGE_STARTED
+	ctl_ok repair finish --name "$REACT_OIC_REP"
+	assert_field "$CTL_OUT" '.rep_id' "$orep_id" "FinishRepairReply.rep_id"
+	assert_field "$CTL_OUT" '.retired_leg_id' "$bad" \
+		"FinishRepairReply.retired_leg_id"
+	ctl_fail NOT_FOUND repair get --name "$REACT_OIC_REP"
+
+	# What the finish wrote (architecture.md, Repairs, FinishRepair): the new
+	# leg in the bad leg's place with its leg_idx, the bad leg retired with
+	# its side, no give-back below the bound, and no repair.
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
+		"the group still has $LEGS leg(s)"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_id" "$newleg" \
+		"the new leg holds the bad leg's place in leg_list"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_idx" "$legidx" \
+		"with the bad leg's leg_idx"
+	REACT_NEW_SIDE=$newside
+	react_new_leg_placed "$pos" "$newleg" "$before_addrs" "$before_vms"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the finish"
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.retired_leg_id_list[]] | sort) == ($before_retired + [\"$bad\"] | sort)" \
+		"the group's retired legs are the ones it had plus the bad leg $bad (architecture.md, Repairs, FinishRepair)"
+	ctl_ok retired-leg list
+	retired=".leg_id_to_retired_leg[\"$bad\"]"
+	assert_field "$CTL_OUT" "$retired.grp_id" "$REACT_GRP_ID" \
+		"ListRetiredLegs holds the bad leg, naming group $REACT_GRP_ID"
+	assert_field "$CTL_OUT" "$retired.leg_idx" "$legidx" \
+		"and the leg_idx it left"
+	assert_field "$CTL_OUT" "$retired.side.side_id" "$side" \
+		"the retired leg keeps the bad leg's side"
+	assert_field "$CTL_OUT" "$retired.side.addr_port" "$addr" \
+		"on the dead disk node"
+
+	# The flag is cleared: the operator gives the group back to the worker.
+	ctl_ok group set-operator-in-charge --grp "$REACT_GRP_ID" \
+		--operator-in-charge=false
+	assert_field "$CTL_OUT" '.grp_id' "$REACT_GRP_ID" \
+		"UpdateGroupOperatorInChargeReply.grp_id"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.operator_in_charge" false \
+		"group $REACT_GRP_ID's operator_in_charge flag after the clear"
+
+	# md copies the group onto the fresh leg whole: the group whole at the
+	# finish's revision, then host0's reads and its kernel log since the
+	# mark, then no cntlr holding the retired leg.
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group"
+	msg="$msg $REACT_GRP_ID whole, in sync on legs $want, the fresh leg $newleg"
+	msg="$msg copied whole"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
+	check_sha0 "after the operator took group $REACT_GRP_ID over from the worker and repaired it"
+	dev2=$(host_dev "$UUID2")
+	react_wait_chunks 0 "$dev2" "$BASELINE_MIB" 1 1 "$REACT_PAT2_SHA" \
+		"$WAIT_HOST" \
+		"host0 to read step 3's $BASELINE_MIB MiB back from ns 2 after the take-over"
+	host_kmsg_clean 0 "$tag" "across the take-over of group $REACT_GRP_ID"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to hold every leg and no longer the retired leg $bad" \
+		copy_rep_dropped full "$PRIMARY_CNTLR_ID" "$bad"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the standby cntlr $STANDBY_CNTLR_ID to hold every leg and no longer the retired leg $bad" \
+		copy_rep_dropped legs "$STANDBY_CNTLR_ID" "$bad"
+
+	# The dead disk node comes back (see the step's header).
+	react_return_dn "$vm" "$inst"
+
+	sp_refresh
+	sp_read_roles
+	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE \
+		"sp_level after the take-over"
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary after the take-over is the one the step started with"
+	assert_eq "$(worker_failover_cnt)" "$before_failovers" \
+		"the worker's applied failovers across the take-over of group $REACT_GRP_ID"
+	log "  no failover during the step: the worker applied $before_failovers" \
+		"before it and none since"
+}
+
+# --- step 10 ----------------------------------------------------------------
 
 react_drop_target() {
-	stage 09 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
+	stage 10 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
 	ctl_ok ns delete --nqn "$SS0" --idx 2
 	assert_field "$CTL_OUT" '.ns_id' "$REACT_NS2_ID" \
 		"DeleteNamespaceReply.ns_id"
@@ -20680,6 +21634,7 @@ case_react() {
 	react_dead_grp
 	react_fs_data_leg
 	react_fs_restore
+	react_take_over
 	react_drop_target
 	case_finish
 }

@@ -249,9 +249,10 @@ func TestLegRepairRedundNoneEndsThePass(t *testing.T) {
 }
 
 // TestLegRepairCreateConditionsInOrder pins the order of AR8's create
-// conditions: an md-raid1 pool, a leg with one side, no forced-start mark on
-// the group, the group's row OK in a report of the snapshot's revision or
-// later, the healthy-leg test, and no repair on the group. With every hold
+// conditions: an md-raid1 pool, a leg with one side, the group's
+// operator_in_charge flag clear, no forced-start mark on the group, the
+// group's row OK in a report of the snapshot's revision or later, the
+// healthy-leg test, and no repair on the group. With every hold
 // armed the first one is logged; each case lifts the hold the case before it
 // logged, so the next one shows, and the last case creates. Each hold runs
 // no scan and no op.
@@ -274,6 +275,10 @@ func TestLegRepairCreateConditionsInOrder(t *testing.T) {
 				SideId: 999, AddrPort: reactDnD,
 			})
 		}, reasonTwoSides},
+		{func(h *reactHarness) {
+			// An operator has taken the group's repair over.
+			h.dataGrp().OperatorInCharge = true
+		}, reasonGrpOperatorInCharge},
 		{func(h *reactHarness) {
 			// An operator's forced-start mark from leg B, which the
 			// primary's report has not caught up with.
@@ -324,8 +329,8 @@ func TestLegRepairCreateConditionsInOrder(t *testing.T) {
 // the meta group, whose leg has the smaller id, and the data group's leg is
 // still repaired in the same pass. Every one of them can last: a migration
 // for hours, a stopped array until its legs come back, a group with no
-// healthy leg until one answers again, an operator's repair or forced-start
-// mark until the operator acts.
+// healthy leg until one answers again, an operator's repair, forced-start
+// mark or operator_in_charge flag until the operator acts.
 func TestLegRepairCreateHoldsOnlyItsGroup(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
@@ -336,6 +341,9 @@ func TestLegRepairCreateHoldsOnlyItsGroup(t *testing.T) {
 			leg.SideList = append(leg.SideList, &pb.Side{
 				SideId: 999, AddrPort: reactDnD,
 			})
+		}},
+		{reasonGrpOperatorInCharge, func(h *reactHarness) {
+			h.metaGrp().OperatorInCharge = true
 		}},
 		{reasonGrpForcedStart, func(h *reactHarness) {
 			withMark(h.metaGrp(), reactMetaLegB)
@@ -886,10 +894,12 @@ func TestLegRepairCreateAtTheRetiredBound(t *testing.T) {
 // changed` when the group gained a DN since the snapshot or the pick went
 // stale, or the group given a repair by another owner's create, or that
 // owner's name taken when it built the same name in the same second. Like every
-// ErrPrecondition of a create it is a `reaction skipped` carrying the op's
-// reason and name that ends the pass, so no other group is tried; the next
-// pass plans again from its own snapshot, with a fresh scan whose black
-// list is the plan it hands over.
+// ErrPrecondition of a create but the refusal under the group's
+// operator_in_charge flag, which holds its group only
+// (TestLegRepairCreateRefusalUnderTheFlagHoldsOnlyItsGroup), it is a
+// `reaction skipped` carrying the op's reason and name that ends the pass, so
+// no other group is tried; the next pass plans again from its own snapshot,
+// with a fresh scan whose black list is the plan it hands over.
 func TestLegRepairCreateRefusalEndsThePass(t *testing.T) {
 	for _, reason := range []string{
 		model.ReasonCandidateChanged, model.ReasonGrpHasRepair,

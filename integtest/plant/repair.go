@@ -602,6 +602,32 @@ func SetRepairStage(
 	return rep.GetRepId(), spRev, nil
 }
 
+// plantedGrpParent is the parent of the group grpId, found in one STM read
+// as findPlantedGrp finds it, for the calls that hand a model op the parent
+// the gateway's look-up gives it.
+func plantedGrpParent(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl Cluster,
+	target SpRef,
+	grpId uint64,
+) (model.GrpParent, error) {
+	var parent model.GrpParent
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		conf, err := getSpConf(s, cl.Id, target)
+		if err != nil {
+			return err
+		}
+		g, err := findPlantedGrp(s, cl.Id, target, conf, grpId)
+		if err != nil {
+			return err
+		}
+		parent = g.parent
+		return nil
+	})
+	return parent, err
+}
+
 // ForceStartGroup writes the forced-start mark of the group grpId, naming
 // legId, through model.ForceStartGroup, the operation the gateway's
 // ForceStartGroup runs, which the worker suite drives with no gateway; with
@@ -619,19 +645,8 @@ func ForceStartGroup(
 	legId uint64,
 	cancel bool,
 ) (uint64, uint64, error) {
-	var parent model.GrpParent
-	if err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cl.Id, target)
-		if err != nil {
-			return err
-		}
-		g, err := findPlantedGrp(s, cl.Id, target, conf, grpId)
-		if err != nil {
-			return err
-		}
-		parent = g.parent
-		return nil
-	}); err != nil {
+	parent, err := plantedGrpParent(ctx, cli, cl, target, grpId)
+	if err != nil {
 		return 0, 0, err
 	}
 	revision, err := model.ForceStartGroup(ctx, cli, cl.Id, target.Shard,
@@ -644,6 +659,32 @@ func ForceStartGroup(
 		return 0, 0, err
 	}
 	return revision, spRev, nil
+}
+
+// SetOperatorInCharge sets the operator_in_charge flag of the group grpId to
+// on through model.SetGrpOperatorInCharge, the operation the gateway's
+// UpdateGroupOperatorInCharge runs, which the worker suite drives with no
+// gateway. The group is looked up among the pool's slices and then its
+// clones, as the gateway looks a group up (findPlantedGrp), and the op runs
+// with no revision token. It returns the pool's revision after it, which the
+// write leaves as it was (architecture.md, Repairs).
+func SetOperatorInCharge(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl Cluster,
+	target SpRef,
+	grpId uint64,
+	on bool,
+) (uint64, error) {
+	parent, err := plantedGrpParent(ctx, cli, cl, target, grpId)
+	if err != nil {
+		return 0, err
+	}
+	if err := model.SetGrpOperatorInCharge(ctx, cli, cl.Id, target.Shard,
+		target.Id, target.Name, 0, parent, grpId, on); err != nil {
+		return 0, err
+	}
+	return SpRevision(ctx, cli, cl, target)
 }
 
 // SetRepairProvisioned flips the side sideId of a repair's new leg legId

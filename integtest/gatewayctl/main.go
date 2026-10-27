@@ -509,6 +509,8 @@ var commands = []command{
 	{"delete-retired-leg", setupDeleteRetiredLeg},
 	// forced start
 	{"force-start-grp", setupForceStartGrp},
+	// operator in charge
+	{"set-grp-operator-in-charge", setupSetGrpOperatorInCharge},
 	// bitmap
 	{"get-td-bm", setupGetTdBm},
 	{"get-leg-bm", setupGetLegBm},

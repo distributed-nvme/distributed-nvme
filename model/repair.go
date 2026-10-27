@@ -13,10 +13,11 @@ import (
 // Repairs and retired legs: the model operations of a repair of an md-raid1
 // group's leg, an operator's or the sp worker's own (architecture.md,
 // Repairs; Retired legs; Repair). The gateway's calls run them as their
-// deciding STMs. The sp worker runs CreateRepair, FinishRepair, CancelRepair
-// and SetRepairAbort on its own repairs only (dnv-worker.md AR8), and the
-// stage move, the retire timer's delete, the epoch writes and the
-// provisioned flip on every repair (dnv-worker.md MD6).
+// deciding STMs, SetGrpOperatorInCharge, an operator's take-over of a group
+// from the sp worker, among them. The sp worker runs CreateRepair,
+// FinishRepair, CancelRepair and SetRepairAbort on its own repairs only
+// (dnv-worker.md AR8), and the stage move, the retire timer's delete, the
+// epoch writes and the provisioned flip on every repair (dnv-worker.md MD6).
 //
 // A repair is a record of its own (RepairKey) that names one bad leg of the
 // group's leg_list and carries one new leg, a full Leg with its side, until
@@ -34,18 +35,20 @@ import (
 // both kinds of group: what differs is the key the parent is written under.
 //
 // A repair whose name carries common.RepNameReservedPrefix is the sp
-// worker's own; any other name is an operator's. Three rules tell them
+// worker's own; any other name is an operator's. Four rules tell them
 // apart: the level gate of the create (CreateRepairLevelGate), the create's
-// new leg, always fresh and allowed at the retired-leg bound for the
-// worker's, and the finish of the worker's, which gives back the group's
-// oldest retired leg at the bound.
+// refusal of the worker's under the group's operator_in_charge flag
+// (ReasonGrpOperatorInCharge), the create's new leg, always fresh and
+// allowed at the retired-leg bound for the worker's, and the finish of the
+// worker's, which gives back the group's oldest retired leg at the bound.
 //
 // Each operation names the check of the pool it makes. CreateRepair takes a
 // pool that is not being deleted below its level gate. The others take a
 // pool at any level, so an operator can finish, abort, cancel and delete
-// while the arrays still run, and refuse a pool being deleted, whose drain
-// removes its repairs and retired legs (loadSpConfAnyLevel); the epoch writes
-// refuse only a pool that is gone or another one (loadSpConfForHealth).
+// while the arrays still run and set or clear the flag before lowering a
+// raised level, and refuse a pool being deleted, whose drain removes its
+// repairs and retired legs (loadSpConfAnyLevel); the epoch writes refuse
+// only a pool that is gone or another one (loadSpConfForHealth).
 
 // The Op names of the repair operations, the exported function names as
 // everywhere else in this package.
@@ -60,6 +63,7 @@ const (
 	opSetRepairSideErrEpoch  = "SetRepairSideErrEpoch"
 	opSetRetiredSideErrEpoch = "SetRetiredSideErrEpoch"
 	opFlipRepairProvisioned  = "FlipRepairProvisioned"
+	opSetGrpOperatorInCharge = "SetGrpOperatorInCharge"
 )
 
 // ReasonRepairExists is the Reason CreateRepair carries when the pool already
@@ -106,12 +110,11 @@ const reasonReservedNameRetiredLeg = "a reserved name takes a fresh leg"
 // CreateRepairLevelGate is the lowest sp_level at which CreateRepair refuses
 // a repair named repName (architecture.md, Repairs). A name with
 // common.RepNameReservedPrefix, the sp worker's repair, is refused from
-// SP_LEVEL_NO_THINPOOL up: its create is a reaction, and reactions stay off
-// the levels where an operator is in charge (dnv-worker.md AR3). Any other
-// name, an operator's, is refused from SP_LEVEL_NO_REDUND up, where no group
-// array is built for the new leg to join: an operator's own call is no
-// reaction, which lets an operator take a group over from the worker
-// (architecture.md, Repairs).
+// SP_LEVEL_NO_THINPOOL up, where reactions stop: its create is a reaction
+// (dnv-worker.md AR3). Any other name, an operator's, is refused from
+// SP_LEVEL_NO_REDUND up, where no group array is built for the new leg to
+// join: an operator's own call is no reaction, so an operator who has raised
+// the level still repairs a group there (architecture.md, Repairs).
 func CreateRepairLevelGate(repName string) pb.SpLevel {
 	if common.HasRepNameReservedPrefix(repName) {
 		return pb.SpLevel_SP_LEVEL_NO_THINPOOL
@@ -142,6 +145,18 @@ func checkCreateRepairLevel(conf *pb.SpConf, repName string) error {
 // from creating another for the group until its finish or its cancel
 // (dnv-worker.md AR8).
 const ReasonGrpHasRepair = "grp_has_repair"
+
+// ReasonGrpOperatorInCharge is the Reason CreateRepair carries for a name
+// with common.RepNameReservedPrefix, the sp worker's repair, while the
+// group's operator_in_charge flag is set: an operator has taken the group's
+// repair over from the worker (SetGrpOperatorInCharge; architecture.md,
+// Repairs), and an operator's name is never refused for it. The worker's
+// pass holds its create under the flag from its snapshot, so the refusal is
+// the second lock, for a pass built from a snapshot older than the flag. It
+// is exported for the reason ReasonGrpHasRepair is: the worker logs the SAME
+// `reaction skipped reason=` string for its hold and for this refusal, each
+// holding that group only (dnv-worker.md AR8).
+const ReasonGrpOperatorInCharge = "grp_operator_in_charge"
 
 // GrpParent names the record that holds a group: a slice by its id, or a
 // clone by its name, exactly one of the two set. A group never moves to
@@ -259,10 +274,10 @@ func loadGrpOf(
 // loadSpConfAnyLevel is loadSpConfForOp without its sp_level refusal: the
 // SP exists, it is the one the caller addressed, and it is not being
 // deleted. Every repair operation loads its pool through it, so an operator
-// can finish, abort, cancel and delete at the levels where the operator is in
-// charge, and CreateRepair applies its own level gate after it
-// (CreateRepairLevelGate); the sp drain removes a deleting pool's repairs and
-// retired legs itself (dnv-worker.md, The sp drain).
+// can finish, abort, cancel and delete at the levels where reactions stop,
+// and CreateRepair applies its own level gate (CreateRepairLevelGate) after
+// it; the sp drain removes a deleting pool's repairs and retired legs itself
+// (dnv-worker.md, The sp drain).
 func loadSpConfAnyLevel(
 	s etcdutil.STM,
 	op string,
@@ -367,11 +382,14 @@ type RepairNewLeg struct {
 // (CreateRepairLevelGate): SP_LEVEL_NO_THINPOOL for a name with
 // common.RepNameReservedPrefix, the sp worker's repair, and
 // SP_LEVEL_NO_REDUND for an operator's. The name must be free in the pool,
-// list and key both (ReasonRepairExists). The group must hold no repair
-// (ReasonGrpHasRepair). A clone being deleted is refused. The bad leg
-// must be in the group's leg_list, with exactly one side — a second one is a
-// migration's destination, and a migration holds its leg — and an err_epoch
-// set: a healthy leg is moved with a migration, not repaired.
+// list and key both (ReasonRepairExists). A clone being deleted is refused.
+// A name with the reserved prefix is refused while the group's
+// operator_in_charge flag is set (ReasonGrpOperatorInCharge), ahead of the
+// group's repair, since the flag is the lasting cause of the two. The group
+// must hold no repair (ReasonGrpHasRepair). The bad leg must be in the
+// group's leg_list, with exactly one side — a second one is a migration's
+// destination, and a migration holds its leg — and an err_epoch set: a
+// healthy leg is moved with a migration, not repaired.
 //
 // The new leg comes from newLeg. A retired leg of the group is taken as it
 // is, and only under an operator's name: the worker's repair always takes a
@@ -460,6 +478,9 @@ func CreateRepair(
 			s, opCreateRepair, cid, spId, parent, grpId)
 		if err != nil {
 			return err
+		}
+		if reserved && grp.GetOperatorInCharge() {
+			return fail(opCreateRepair, ReasonGrpOperatorInCharge)
 		}
 		if grp.GetRepName() != "" {
 			return fail(opCreateRepair, ReasonGrpHasRepair)
@@ -633,6 +654,64 @@ func placeFreshLeg(
 		return nil, err
 	}
 	return leg, nil
+}
+
+// SetGrpOperatorInCharge sets the operator_in_charge flag of the group grpId
+// held by parent to on: the body of the gateway's
+// UpdateGroupOperatorInCharge, an operator's take-over of the group's repair
+// from the sp worker (architecture.md, Repairs). While the flag is set the
+// worker creates no repair of the group and CreateRepair refuses a name with
+// the reserved prefix (ReasonGrpOperatorInCharge); the worker still drives a
+// repair of its own that exists, and every other reaction runs.
+//
+// It checks the token first (checkSpRev) and takes a pool at any level that
+// is not being deleted (loadSpConfAnyLevel): an operator sets the flag at a
+// level where reactions stop before lowering it, which leaves the worker no
+// pass to create its repair in, and at those levels the flag stops nothing.
+// The pool must be md-raid1, whose groups have repairs to take over, and the
+// group one its parent holds and not a deleting clone's (loadGrpOf). A group
+// whose flag already equals on is answered as done and written to not at
+// all. A write raises no revision: no agent reads the flag, and the worker
+// reads every record afresh each pass (dnv-worker.md AR1), so a caller's
+// token stays valid across the flag's writes.
+func SetGrpOperatorInCharge(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	parent GrpParent,
+	grpId uint64,
+	on bool,
+) error {
+	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		if err := checkSpRev(
+			s, opSetGrpOperatorInCharge, shard, cid, spId, expectRev,
+		); err != nil {
+			return err
+		}
+		conf, err := loadSpConfAnyLevel(
+			s, opSetGrpOperatorInCharge, cid, spName, spId)
+		if err != nil {
+			return err
+		}
+		if !isMdRaid1(conf) {
+			return fail(opSetGrpOperatorInCharge, "group is not md-raid1")
+		}
+		holder, grp, err := loadGrpOf(
+			s, opSetGrpOperatorInCharge, cid, spId, parent, grpId)
+		if err != nil {
+			return err
+		}
+		if grp.GetOperatorInCharge() == on {
+			return nil
+		}
+		grp.OperatorInCharge = on
+		holder.put(s)
+		return nil
+	})
 }
 
 // FinishRepairResult is what FinishRepair did: the finished repair's rep_id,
@@ -1057,10 +1136,10 @@ func SetRepairAbort(
 //
 // It takes a pool at any level that is not being deleted
 // (loadSpConfAnyLevel), since it only follows the primary's report and an
-// operator may need to finish a repair at a level where the operator is in
-// charge, and a repair that is not a deleting clone's. It writes the Repair
-// and bumps SpRev, since the cn agent acts on the stage. It takes no
-// expected revision: the worker converges on what etcd holds.
+// operator may need to finish a repair at a level where reactions stop, and
+// a repair that is not a deleting clone's. It writes the Repair and bumps
+// SpRev, since the cn agent acts on the stage. It takes no expected revision:
+// the worker converges on what etcd holds.
 func SetRepairStage(
 	ctx context.Context,
 	cli *etcdutil.Client,

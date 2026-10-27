@@ -383,3 +383,67 @@ func TestForceStartGroup(t *testing.T) {
 		t.Errorf("a leg of another group: %v", err)
 	}
 }
+
+// TestSetOperatorInCharge drives a group's operator_in_charge flag through
+// SetOperatorInCharge: the flag of a slice's group is set and cleared with
+// the pool's revision left as it was, a second set writes nothing, a clone's
+// group is found among the clones, and an unknown group is refused.
+func TestSetOperatorInCharge(t *testing.T) {
+	ctx := testCtx(t)
+	c := plantSmallCluster(t, ctx, true)
+	ref := c.sp.Ref
+	revBefore := c.spRev(t, ctx)
+	dataFlag := func() bool {
+		return c.load(t, ctx).Slices[1].GetDataGrpList()[0].
+			GetOperatorInCharge()
+	}
+	storeRev := func() int64 {
+		_, rev, err := c.cli.RangeKeys(ctx, model.SpConfKey(c.cl.Id, ref.Name))
+		if err != nil {
+			t.Fatalf("RangeKeys: %v", err)
+		}
+		return rev
+	}
+
+	for i, on := range []bool{true, true, false} {
+		storeBefore := storeRev()
+		spRev, err := SetOperatorInCharge(ctx, c.cli, c.cl, ref, 5, on)
+		if err != nil || spRev != revBefore {
+			t.Fatalf("SetOperatorInCharge(%t) = %d, %v; want the pool "+
+				"left at %d", on, spRev, err, revBefore)
+		}
+		if got := dataFlag(); got != on {
+			t.Fatalf("group 5's flag = %t, want %t", got, on)
+		}
+		if i == 1 && storeRev() != storeBefore {
+			t.Fatalf("the second set wrote")
+		}
+	}
+
+	if _, err := PutTd(ctx, c.cli, c.cl, ref,
+		TdSpec{Name: "td0", Size: 1 << 30}); err != nil {
+		t.Fatalf("PutTd: %v", err)
+	}
+	clone, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
+		Name: "c0", DstTd: "td0",
+		Legs: []CloneLegSpec{{LegIdx: 0, DnId: 1}, {LegIdx: 1, DnId: 3}},
+	})
+	if err != nil {
+		t.Fatalf("PutClone: %v", err)
+	}
+	if _, err := SetOperatorInCharge(ctx, c.cli, c.cl, ref, clone.GrpId,
+		true); err != nil {
+		t.Fatalf("SetOperatorInCharge of the clone's group: %v", err)
+	}
+	if !c.load(t, ctx).Clones["c0"].GetMetaGrp().GetOperatorInCharge() {
+		t.Fatalf("the clone's group carries no flag")
+	}
+	if dataFlag() {
+		t.Fatalf("the clone's flag reached group 5")
+	}
+
+	if _, err := SetOperatorInCharge(ctx, c.cli, c.cl, ref, 99,
+		true); err == nil || !strings.Contains(err.Error(), "no group") {
+		t.Errorf("an unknown group: %v", err)
+	}
+}

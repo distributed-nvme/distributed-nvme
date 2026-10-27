@@ -1008,9 +1008,9 @@ func TestSpDrainRetiredLegBatchBudget(t *testing.T) {
 // legs, which FinishRepair reads to pick the one it gives back for the sp
 // worker's repair at the bound. A repair's parent is one slice or one clone,
 // which the operations read by the name the record or the caller keeps,
-// never by a walk. model/repair_test.go and model/forcedstart_test.go commit
-// each against a real etcd, FinishRepair at its widest in
-// TestFinishRepairGivesBackTheOldestRetiredLeg.
+// never by a walk. model/repair_test.go, model/forcedstart_test.go and
+// model/operatorincharge_test.go commit each against a real etcd,
+// FinishRepair at its widest in TestFinishRepairGivesBackTheOldestRetiredLeg.
 func TestRepairOpsTxnBudget(t *testing.T) {
 	for _, shape := range []txnShape{
 		{
@@ -1089,6 +1089,16 @@ func TestRepairOpsTxnBudget(t *testing.T) {
 			// The parent and SpRev; a skipped ref writes neither.
 			fixedWrites: 2,
 			maxCompares: 5,
+		},
+		{
+			name: "SetGrpOperatorInCharge",
+			stm:  "model.SetGrpOperatorInCharge's STM and loadGrpOf",
+			// SpRev, SpConf and the parent.
+			fixedReads: 3,
+			// The parent, and no SpRev: no write of the flag raises it; a
+			// write of the value the group holds writes nothing.
+			fixedWrites: 1,
+			maxCompares: 4,
 		},
 		{
 			name: "SetRepairStage",

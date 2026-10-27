@@ -178,6 +178,12 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 		{"bool without =",
 			[]string{"cntlr", "set-enabled", "--id", "3", "--enabled",
 				"false"}},
+		// The same trap on the leaf whose default true is the deliberate
+		// act: `--operator-in-charge false`, typed to give a group back,
+		// must not reach the gateway as a take-over.
+		{"--operator-in-charge without =",
+			[]string{"group", "set-operator-in-charge", "--grp", "1",
+				"--operator-in-charge", "false"}},
 		{"malformed --rev",
 			[]string{"td", "create", "--name", "t0", "--rev", "zz"}},
 		{"negative --rev",

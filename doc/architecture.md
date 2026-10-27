@@ -271,6 +271,11 @@ always means the SP's `DmPoolConf.data_block_size`.
   and the `SpRev` revision its write committed until it is cleared or
   withdrawn, and the primary acts on it while it stands (Repairs,
   `ForceStartGroup`; Repair, Forced start).
+* **operator in charge** — An operator's take-over of an md-raid1 group's
+  repair from the sp worker: the group's flag, `Group.operator_in_charge`,
+  which the operator sets and clears, keeps the worker from creating a
+  repair of the group while it stands (Repairs,
+  `UpdateGroupOperatorInCharge`).
 * **shard code** — A uint32 below `ShardBucketSize`, formatted with
   `ShardCodeFmt`. Every DN, CN and SP gets one at creation; workers and the
   cdc split ownership by shard code.
@@ -1319,7 +1324,9 @@ suffix) and `SpRev.sp_name` (the `SpConf` key suffix) [D10]. Rules:
   agent needs to hear of either. Nor does a write that changes only a
   DN's `used_meta_units` (Metadata units): no agent reads the count, so a
   DN whose only change is its used units is written and its capacity key
-  rewritten, and its revision stays. Every `SpConf` or sub-object mutation of
+  rewritten, and its revision stays; nor does a write of a group's
+  `operator_in_charge` flag, which no agent reads either (Repairs,
+  UpdateGroupOperatorInCharge). Every `SpConf` or sub-object mutation of
   `service Gateway` — RPC specifications bumps `SpRev` unless the RPC's
   spec says otherwise.
 * The request-side `DnRev`, `CnRev` and `SpRev` fields are
@@ -1416,10 +1423,11 @@ and every other key of the RPC is formatted from the `cluster_id` derived
 there. Doing it in-STM also makes the transaction fail correctly when the
 cluster is concurrently deleted or recreated. `GrowSlice` and the repair
 calls whose deciding STM is a `model` operation — `CreateRepair`,
-`FinishRepair`, `CancelRepair`, `TryToAbortRepair`, `DeleteRetiredLeg` and
-`ForceStartGroup` — are the exceptions: they make that read in a planning
-snapshot, `CreateRepair` with a fresh new leg in a fresh one each round of
-its candidate unit (`gateway.md` GW5, GW9). `AdvanceClusterIds` commits one
+`FinishRepair`, `CancelRepair`, `TryToAbortRepair`, `DeleteRetiredLeg`,
+`ForceStartGroup` and `UpdateGroupOperatorInCharge` — are the exceptions:
+they make that read in a planning snapshot, `CreateRepair` with a fresh new
+leg in a fresh one each round of its candidate unit (`gateway.md` GW5,
+GW9). `AdvanceClusterIds` commits one
 transaction for its cluster and then one per pool, which take the cluster
 id the first one derived (Clusters). Network calls to agents (`GetDnSize` and
 `GetCnSize`, the `Get*Info` behind `Inspect*`, behind the `force` false
@@ -3272,8 +3280,9 @@ calls take the group of a slice or a clone's clone meta group alike:
 slices and then among the clones, and the repair records the parent it
 found, which every later call that writes the group reads, checking that
 it still holds the group; on a clone meta group the clone's record is
-written where a slice's would be. `ForceStartGroup`, which writes the
-group and no repair, looks its `grp_id` up the same way. Reason: one call
+written where a slice's would be. `ForceStartGroup` and
+`UpdateGroupOperatorInCharge`, which write the group and no repair, look
+their `grp_id` up the same way. Reason: one call
 for both kinds of group is less to get right than a twin per kind, and a
 group never moves to another parent, so the record stays true for the
 repair's life. A clone being deleted is refused `FAILED_PRECONDITION` by
@@ -3288,34 +3297,47 @@ allow is refused `FAILED_PRECONDITION` with the stage in its message
 
 A repair whose `rep_name` starts with the reserved prefix (Common
 validation) is the sp worker's repair; any other is an operator's repair.
-Three rules tell them apart. First, `CreateRepair`'s
+Four rules tell them apart. First, `CreateRepair`'s
 level gate: it refuses a worker's repair at an `sp_level` at or above
 `SP_LEVEL_NO_THINPOOL`, and an operator's only at or above
-`SP_LEVEL_NO_REDUND`. Reason: the worker's create is a reaction, and
-reactions stay off the levels where an operator is in charge (Automatic
-reactions); an operator's own call is no reaction, and it needs only a
-group array for the new leg to join, which every level below
-`SP_LEVEL_NO_REDUND` builds (SpLevel). So an operator takes a group over
-from the worker by raising the level to `SP_LEVEL_NO_THINPOOL`, aborting
-and cancelling the worker's repair, creating their own and lowering the
-level again: below that level the worker would create its repair again at
-once, and no call changes a pool's `event_threshold` once it is made.
-A worker's repair can still reach STARTED at that level, before the abort
-or in its race (Repair, The abort protocol), since the primary goes on
-adding a repair's new leg and the stage moves go on there (`cnagent.md`
-CN12, `dnv-worker.md` AR11). It then takes no abort and no cancel, and
-the operator finishes it instead.
-The take-over stops the IO of the whole pool until the level is lowered:
-at that level the cntlrs remove every thin pool of the pool and put every
-ns-dev on the dm-error, so a host gets IO errors from every namespace that
-is not effectively suspended and waits on one that is (`cnagent.md` CN16,
-CN19), and no failover or other reaction runs (`dnv-worker.md` AR3).
-Second, a worker's repair always takes a fresh new leg, and may take one
-while its group is at the retired-leg bound. Third, the finish of a
+`SP_LEVEL_NO_REDUND`. Reason: the worker's create is a reaction, and no
+reaction runs at the levels where reactions stop (Automatic reactions); an
+operator's own call is no reaction, and it needs only a group array for
+the new leg to join, which every level below `SP_LEVEL_NO_REDUND` builds
+(SpLevel). Second, `CreateRepair` refuses a worker's repair while its
+group's `operator_in_charge` flag is set (`model.ReasonGrpOperatorInCharge`),
+and never refuses an operator's repair for the flag. Reason: the sp
+worker's pass holds its create under the flag (`dnv-worker.md` AR8), and a
+pass built from a snapshot older than the flag must not slip through.
+Third, a worker's repair always takes a fresh new leg, and may take one
+while its group is at the retired-leg bound. Fourth, the finish of a
 worker's repair at that bound gives back the group's oldest retired leg
 (FinishRepair). The other calls that address a repair take a pool at
-every level and a repair of either kind, so that an operator in charge at a
-level where reactions stop can still finish, abort or cancel any repair.
+every level and a repair of either kind, so that an operator can still
+finish, abort or cancel any repair at the levels where reactions stop.
+
+An operator takes a group over from the worker with the group's
+`operator_in_charge` flag (UpdateGroupOperatorInCharge): they set the flag,
+abort and cancel the worker's repair, create their own, finish it, and
+clear the flag. The flag may be set before the worker's repair exists, and
+then the worker creates none, or after, and then the operator aborts the
+worker's repair while it is CREATED and cancels it once it is ABORTED.
+Reason: without the flag the worker would create its repair again at once
+after the cancel, and no call changes a pool's `event_threshold` once it is
+made; the flag is the group's, not a level or a flag of the pool, so that
+it stops that group's create and nothing else: failover, auto-grow and the
+other reactions run, the pool's IO goes on, and a level keeps its one
+meaning, the parts of the pool it switches off (SpLevel). The worker still
+drives a worker's repair that exists (`dnv-worker.md` AR8): its drive step
+may cancel the aborted repair first, which the operator's cancel then meets
+as `NOT_FOUND`, and a worker's repair can reach STARTED before the abort or
+in its race (Repair, The abort protocol), since the primary adds a repair's
+new leg once it can and the stage moves follow its report (`cnagent.md`
+CN12, `dnv-worker.md` AR11). Such a repair takes no abort and no cancel,
+and is finished, by the drive step or by the operator. An operator who has
+raised the level to where reactions stop, as for a forced start, sets the
+flag before lowering it again, which leaves the worker no pass in which to
+create its repair.
 
 **CreateRepair** — inputs `rep_name`, `grp_id`, `bad_leg_id_list`, and
 for the new leg either `retired_leg_id`, a retired leg of the group, or,
@@ -3330,7 +3352,10 @@ for a name the gateway passes is the operator's, `SP_LEVEL_NO_REDUND`;
 redundancy to repair; `ALREADY_EXISTS` for a name already in
 `repair_name_list`; `NOT_FOUND` when `grp_id` is in no group of the pool's
 slices or clones; `FAILED_PRECONDITION` when the group's clone is being
-deleted, or when the group has a repair (`model.ReasonGrpHasRepair`) —
+deleted, for a worker's repair while the group's `operator_in_charge` flag
+is set (`model.ReasonGrpOperatorInCharge`), which comes before the
+group's repair since the flag is the lasting cause of the two, or when the
+group has a repair (`model.ReasonGrpHasRepair`) —
 one repair per group, since two would race for one place in its array,
 which the group's `rep_name` lets the transaction check without a scan —;
 `NOT_FOUND` when the bad leg is not in the
@@ -3507,6 +3532,26 @@ checked first (`gateway.md` GW6). The mark rides to every cntlr in its
 group's record, which is why each write bumps `SpRev`. Reply `grp_id`, and
 `revision`, the mark's revision, zero for a cancel.
 
+**UpdateGroupOperatorInCharge** — inputs `grp_id` and `operator_in_charge`,
+the value the group's flag takes: set, it takes the group over from the
+worker, and cleared, it gives the group back (above). Errors, in the order
+a request meets them: `INVALID_ARGUMENT` when the pool is `RedundNone`,
+whose groups have no repair to take over; `NOT_FOUND` when `grp_id` is in
+no group of the pool's slices or clones; `FAILED_PRECONDITION` when the
+group's clone is being deleted. The call takes the pool at every
+`sp_level`, since an operator sets the flag at a level where reactions stop
+before lowering it, and at those levels the flag stops nothing. No finish,
+cancel or other step clears the flag, only this call: while it stands the
+worker creates no repair of the group, however long the operator leaves it.
+Action: STM: set the group's `operator_in_charge` to the request's value; a
+group that already holds that value is answered OK with no write, a token
+the request carried still being checked first (`gateway.md` GW6). The write
+does not bump `SpRev`. Reason: no agent reads the flag, and the sp worker
+reads every record afresh at the start of each pass (`dnv-worker.md` AR1),
+so its next pass sees the flag with no fan-out; the flag still rides to the
+cntlrs in its group's record at the pool's next bump, unread, and a token a
+caller holds stays valid across the flag's writes. Reply `grp_id`.
+
 **GetRepair** — STM read of the `Repair` named; `NOT_FOUND` for a name not
 in `repair_name_list`, and a listed name whose key is missing is `ABORTED`
 (Key table). Reply `rep_name` and the `Repair`.
@@ -3539,8 +3584,8 @@ the retire timer and `DeleteRetiredLeg` free room under the bound, and
 Reply `leg_id_to_retired_leg`.
 
 **DeleteRetiredLeg** — runs at every `sp_level`: a retired leg is a member
-of no array, and an operator in charge at a level where reactions stop
-must still be able to free room under the bound. Errors: `NOT_FOUND` when
+of no array, and an operator must still be able to free room under the
+bound at the levels where reactions stop. Errors: `NOT_FOUND` when
 `leg_id` is not in `retired_leg_id_list`; `FAILED_PRECONDITION` when its
 group's clone is being deleted. Action: STM: the side gives its DN the group's `ext_cnt`
 and its pointer back, with the DN's capacity key and `DnRev`; the
@@ -4639,8 +4684,9 @@ The four reactions:
   while its side has been unhealthy for `side_unhealthy`, gets a worker's
   repair (Repair) with a fresh new leg, by an internal `CreateRepair`, while
   the group's array runs, another leg of the group is healthy and held in
-  sync, the group has no repair, and no forced-start mark stands on it
-  (Repair, Forced start), since the operator is acting on the group then.
+  sync, the group has no repair, no forced-start mark stands on it (Repair,
+  Forced start) and its `operator_in_charge` flag is clear (Repairs), since
+  the operator is acting on the group then.
   The worker then drives its own repair:
   it finishes it once the primary has reported it started, tries to abort
   it while it is CREATED when its bad leg reads healthy again or its new leg
@@ -5102,20 +5148,22 @@ and runs the retire timer
 (`dnv-worker.md`, Repairs), and it finishes, cancels and tries to abort
 its own repairs (Automatic reactions; `dnv-worker.md` AR8). The operator
 finishes, cancels and tries to abort an operator's repair, and also a
-worker's repair at a level where reactions stop (The worker's repairs).
+worker's repair, under the group's `operator_in_charge` flag or at a level
+where reactions stop (The worker's repairs).
 
 **The worker's repairs.** Only the sp worker can create a repair whose
 name carries the reserved prefix: the gateway refuses the prefix in the
 name `CreateRepair` takes (Common validation), and the model refuses such
-a create at the levels where reactions stop (Repairs). Such a repair
+a create at the levels where reactions stop and while the group's
+`operator_in_charge` flag is set (Repairs). Such a repair
 always takes a fresh new leg, and is created even while its group holds
 `MaxRetiredLegPerGrp` retired legs; its finish on a group at that bound
 gives back the group's oldest retired leg in the same transaction
 (Repairs, FinishRepair). The give-back happens only at that finish, so a
 worker's repair that is aborted and cancelled costs the group no retired
-copy. At a level where reactions stop the operator drives a worker's
-repair with the gateway's calls, which address a repair by a name that may
-carry the prefix, and takes a group over from the worker as Repairs says.
+copy. The operator drives a worker's repair with the gateway's calls, which
+address a repair by a name that may carry the prefix, and takes a group
+over from the worker with the group's flag, as Repairs says.
 
 **Stages.** `CreateRepair` writes `REP_STAGE_CREATED`. The sp worker moves
 a CREATED repair to `REP_STAGE_STARTED` once the current primary reports

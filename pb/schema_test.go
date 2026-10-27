@@ -223,10 +223,10 @@ func TestRetiredCnMetadataFieldsStayReserved(t *testing.T) {
 // TestRepairFieldNumbers pins the numbers, kinds and cardinalities of the
 // repair records and of the fields that carry them: the Repair and RetiredLeg
 // messages, which are stored, the group's and the pool's links to them, the
-// group's forced-start mark, which etcd and the cn agent's stored request
-// carry, the cntlr request's repairs and the cntlr report's verdicts, the
-// take-back refusal among them, and group readings, which an agent stores
-// or a worker keeps. Each is appended: a
+// group's forced-start mark and its operator-in-charge flag, which etcd and
+// the cn agent's stored request carry, the cntlr request's repairs and the
+// cntlr report's verdicts, the take-back refusal among them, and group
+// readings, which an agent stores or a worker keeps. Each is appended: a
 // renumbered field decodes an old value into the wrong field, or into unknown
 // fields, with no error. The stage's values are pinned too, since a stored
 // record carries them as numbers.
@@ -277,6 +277,7 @@ func TestRepairFieldNumbers(t *testing.T) {
 		{grp, "rep_name", 7, protoreflect.StringKind, single, false},
 		{grp, "retired_leg_id_list", 8, protoreflect.Uint64Kind, list, false},
 		{grp, "forced_start", 9, protoreflect.MessageKind, single, false},
+		{grp, "operator_in_charge", 10, protoreflect.BoolKind, single, false},
 		{forced, "leg_id", 1, protoreflect.Uint64Kind, single, false},
 		{forced, "revision", 2, protoreflect.Uint64Kind, single, false},
 		{conf, "repair_name_list", 17, protoreflect.StringKind, list, false},

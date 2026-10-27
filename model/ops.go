@@ -483,8 +483,7 @@ const metaSizeCap = uint64(255) * (1<<14 - 64) * common.ThinMetaBlockSize
 // loadSpConfForOp reads an SP's configuration and applies the three checks
 // every SP mutation of MD6 shares (AR3): the SP exists and is the one the
 // caller addressed, it is not being deleted, and its sp_level has not reached
-// SP_LEVEL_NO_THINPOOL — the disaster-recovery levels where an operator is in
-// charge.
+// SP_LEVEL_NO_THINPOOL — the disaster-recovery levels where reactions stop.
 //
 // The sp_id check exists because the SpConf is name-keyed: an SP deleted and
 // re-created under the same name between the caller's snapshot and this STM

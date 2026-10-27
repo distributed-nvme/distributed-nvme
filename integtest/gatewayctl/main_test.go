@@ -294,11 +294,12 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"ListRetiredLegs":                 "list-retired-legs",
 		"DeleteRetiredLeg":                "delete-retired-leg",
 		"ForceStartGroup":                 "force-start-grp",
+		"UpdateGroupOperatorInCharge":     "set-grp-operator-in-charge",
 		"GetThinDeviceBitmap":             "get-td-bm",
 		"GetLegBitmap":                    "get-leg-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 66 {
-		t.Fatalf("service Gateway has %d methods, want 66",
+	if len(pb.Gateway_ServiceDesc.Methods) != 67 {
+		t.Fatalf("service Gateway has %d methods, want 67",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
@@ -377,6 +378,14 @@ func (c *recordingClient) ForceStartGroup(
 ) (*pb.ForceStartGroupReply, error) {
 	c.req = in
 	return &pb.ForceStartGroupReply{GrpId: in.GetGrpId(), Revision: 3}, nil
+}
+
+func (c *recordingClient) UpdateGroupOperatorInCharge(
+	ctx context.Context, in *pb.UpdateGroupOperatorInChargeRequest,
+	_ ...grpc.CallOption,
+) (*pb.UpdateGroupOperatorInChargeReply, error) {
+	c.req = in
+	return &pb.UpdateGroupOperatorInChargeReply{GrpId: in.GetGrpId()}, nil
 }
 
 // runArgv parses argv through one subcommand's flag set and runs its job
@@ -460,6 +469,43 @@ func TestForceStartGrpRequest(t *testing.T) {
 	if cancel.SpRev == nil || cancel.GetSpRev().GetRevision() != 0 {
 		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
 			cancel.SpRev)
+	}
+}
+
+// TestSetGrpOperatorInChargeRequest pins the request
+// set-grp-operator-in-charge builds: the group, the flag, true when the bare
+// flag or no flag is given and false only in the equals form, and a token
+// message that is present, a zero one when --rev is not given.
+func TestSetGrpOperatorInChargeRequest(t *testing.T) {
+	req := runArgv(t, "set-grp-operator-in-charge",
+		"--sp", "sp0", "--rev", "7", "--grp", "0x11",
+	).(*pb.UpdateGroupOperatorInChargeRequest)
+	want := &pb.UpdateGroupOperatorInChargeRequest{
+		ClusterName:      defaultCluster,
+		SpName:           "sp0",
+		SpRev:            &pb.SpRev{Revision: 7},
+		GrpId:            0x11,
+		OperatorInCharge: true,
+	}
+	if !proto.Equal(req, want) {
+		t.Errorf("request:\n got %v\nwant %v", req, want)
+	}
+	set := runArgv(t, "set-grp-operator-in-charge",
+		"--sp", "sp0", "--grp", "0x11", "--operator-in-charge",
+	).(*pb.UpdateGroupOperatorInChargeRequest)
+	if !set.GetOperatorInCharge() {
+		t.Errorf("--operator-in-charge built %v, want the flag set", set)
+	}
+	if set.SpRev == nil || set.GetSpRev().GetRevision() != 0 {
+		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
+			set.SpRev)
+	}
+	off := runArgv(t, "set-grp-operator-in-charge",
+		"--sp", "sp0", "--grp", "0x11", "--operator-in-charge=false",
+	).(*pb.UpdateGroupOperatorInChargeRequest)
+	if off.GetOperatorInCharge() {
+		t.Errorf("--operator-in-charge=false built %v, want the flag clear",
+			off)
 	}
 }
 

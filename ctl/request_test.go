@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 66 invocations
+// argv for argv. The integration suite asserts the same 67 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -626,9 +626,22 @@ var sweepRows = []sweepRow{
 			GrpId:       1,
 			LegId:       2,
 		}},
+	{67, "UpdateGroupOperatorInCharge",
+		[]string{"group", "set-operator-in-charge", "--grp", "1",
+			"--operator-in-charge", "--rev", "7"},
+		// --operator-in-charge typed with no value sends true, as the leaf
+		// without it does (dnvctl.md, `group` — `ctl/group.go`);
+		// TestBoolFlagDefaults pins that default and the =false spelling.
+		&pb.UpdateGroupOperatorInChargeRequest{
+			ClusterName:      itCluster,
+			SpName:           itSp,
+			SpRev:            wantSpRev(itRevValue),
+			GrpId:            1,
+			OperatorInCharge: true,
+		}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 66 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 67 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -639,12 +652,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 66 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 67 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 65 that remain.
+// be green over the 66 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 66 {
-		t.Errorf("sweepRows has %d rows, want 66", len(sweepRows))
+	if len(sweepRows) != 67 {
+		t.Errorf("sweepRows has %d rows, want 67", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -670,7 +683,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 65 of the 66, sp_name in 47. It reads the field off
+// fill: cluster_name in 66 of the 67, sp_name in 48. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -689,11 +702,11 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 65 {
-		t.Errorf("%d requests carry cluster_name, want 65", clusterFields)
+	if clusterFields != 66 {
+		t.Errorf("%d requests carry cluster_name, want 66", clusterFields)
 	}
-	if spFields != 47 {
-		t.Errorf("%d requests carry sp_name, want 47", spFields)
+	if spFields != 48 {
+		t.Errorf("%d requests carry sp_name, want 48", spFields)
 	}
 }
 
@@ -833,8 +846,8 @@ func TestTokenCarriersMatchCT3(t *testing.T) {
 			}
 		})
 	}
-	if carriers != 37 {
-		t.Errorf("%d requests carry a revision token, want 37", carriers)
+	if carriers != 38 {
+		t.Errorf("%d requests carry a revision token, want 38", carriers)
 	}
 }
 
@@ -1822,16 +1835,38 @@ func TestBitmapHexToBytes(t *testing.T) {
 	}
 }
 
-// TestBoolFlagDefaults pins the four booleans whose defaults differ from the
-// proto3 zero, because those are the ones an operator gets wrong: --enabled
-// and --suspended (on `ns set-suspended` only) default TRUE, while --disabled
-// and --suspended (on `ns create`) default FALSE.
+// TestBoolFlagDefaults pins the five booleans whose defaults an operator gets
+// wrong: --enabled, --suspended (on `ns set-suspended` only) and
+// --operator-in-charge default TRUE, while --disabled and --suspended (on
+// `ns create`) default FALSE.
 func TestBoolFlagDefaults(t *testing.T) {
 	enabled := runArgv(t, "UpdateCntlrEnabled",
 		"cntlr", "set-enabled", "--id", "3").(*pb.UpdateCntlrEnabledRequest)
 	if !enabled.Enabled {
 		t.Errorf("a bare cntlr set-enabled sent enabled=false, want true")
 	}
+
+	// The take-over is the deliberate act, so the bare leaf sets the flag
+	// and giving the group back is the =false spelling (dnvctl.md, `group` —
+	// `ctl/group.go`).
+	inCharge := runArgv(t, "UpdateGroupOperatorInCharge",
+		"group", "set-operator-in-charge", "--grp", "1",
+		"--rev", "7").(*pb.UpdateGroupOperatorInChargeRequest)
+	wantRequest(t, inCharge, &pb.UpdateGroupOperatorInChargeRequest{
+		ClusterName:      itCluster,
+		SpName:           itSp,
+		SpRev:            wantSpRev(itRevValue),
+		GrpId:            1,
+		OperatorInCharge: true,
+	})
+	givenBack := runArgv(t, "UpdateGroupOperatorInCharge",
+		"group", "set-operator-in-charge", "--grp", "1",
+		"--operator-in-charge=false").(*pb.UpdateGroupOperatorInChargeRequest)
+	wantRequest(t, givenBack, &pb.UpdateGroupOperatorInChargeRequest{
+		ClusterName: itCluster,
+		SpName:      itSp,
+		GrpId:       1,
+	})
 
 	suspended := runArgv(t, "UpdateNamespaceSuspended",
 		"ns", "set-suspended", "--nqn", itNqn, "--idx", "1").(*pb.UpdateNamespaceSuspendedRequest)

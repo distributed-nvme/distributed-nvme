@@ -36,9 +36,10 @@ The STM bodies of the public RPCs live in the per-resource files of
 `gateway/`. The `model` operations a handler runs as its deciding STM —
 `GrowSlice`, the repair operations `CreateRepair`, `FinishRepair`,
 `CancelRepair`, `SetRepairAbort` and `DeleteRetiredLeg`, which take the
-group of either kind through the parent it records, and `ForceStartGroup`,
-which takes it through the parent its caller found (`dnv-worker.md` MD6) —
-are reused, never duplicated (`dnv-worker.md` MD8).
+group of either kind through the parent it records, and `ForceStartGroup`
+and `SetGrpOperatorInCharge`, which take it through the parent their caller
+found (`dnv-worker.md` MD6) — are reused, never duplicated (`dnv-worker.md`
+MD8).
 
 The package's files follow `layout.md`, Directory tree: serving and the
 trace-id mint (GW1 to GW3); the shared handler helpers — resolution, the
@@ -256,11 +257,11 @@ STM is a `model` op; `openSpRead` — resolution without the gate and
 without the token check — opens every SP-scoped read-only RPC and
 `DeleteClone`'s phase 1 (Clones); `openSpFlags` is `openSp` with the gate
 selectable, and `DeleteStoragePool` is its one caller with the gate off
-(Storage pools and GrowSlice). `GrowSlice` and the six repair calls that
+(Storage pools and GrowSlice). `GrowSlice` and the seven repair calls that
 run a `model` op — `CreateRepair`, `FinishRepair`, `CancelRepair`,
-`TryToAbortRepair`, `DeleteRetiredLeg` and `ForceStartGroup` — resolve in
-their planning `Snapshot` only (Storage pools and GrowSlice, Repairs and
-retired legs) —
+`TryToAbortRepair`, `DeleteRetiredLeg`, `ForceStartGroup` and
+`UpdateGroupOperatorInCharge` — resolve in their planning `Snapshot` only
+(Storage pools and GrowSlice, Repairs and retired legs) —
 `CreateRepair` in a fresh one each round of its candidate unit (GW9): their
 later transactions — the deciding STM, which is their `model` op (Scope and
 placement), and `GrowSlice`'s CN-budget pre-check — take the cluster id, and
@@ -285,7 +286,8 @@ token message**; a mismatch is `ABORTED` with the message "stale revision".
 A request that carries no token message skips the comparison and proceeds
 with no optimistic-concurrency gate, everything else unchanged: the rev key
 is still read, the other preconditions still apply, and a successful
-mutation still bumps. AG4 says what the skipped check costs a two-phase RPC.
+mutation bumps as it does with a token. AG4 says what the skipped check
+costs a two-phase RPC.
 
 The rev key is read either way: it is an invariant key of
 `architecture.md`, Key table, whose absence is `ABORTED`
@@ -311,10 +313,10 @@ them — and the hydration check's agent call all come ahead of it (Clones).
 
 The `model` mutations the gateway runs (Scope and placement) — `GrowSlice`,
 `CreateRepair`, `FinishRepair`, `CancelRepair`, `SetRepairAbort`,
-`DeleteRetiredLeg` and `ForceStartGroup` — take an expected revision and
-re-check it first inside their own STM, zero skipping the check
-(`dnv-worker.md` MD6); a mismatch is
-an `ErrPrecondition` with `ReasonStaleRevision`. The gateway passes the
+`DeleteRetiredLeg`, `ForceStartGroup` and `SetGrpOperatorInCharge` — take
+an expected revision and re-check it first inside their own STM, zero
+skipping the check (`dnv-worker.md` MD6); a mismatch is an
+`ErrPrecondition` with `ReasonStaleRevision`. The gateway passes the
 token's revision, which is zero exactly when the request carried no token
 message — and zero means "skip" there just as absence does here, so the two
 layers agree by construction; what the worker's own calls pass is
@@ -331,14 +333,17 @@ maintenance never bump (`architecture.md`, Revision keys and the sync
 fan-out), and neither does a write that changes only a DN's
 `used_meta_units`: the DN ledger writes such a node and rewrites its
 capacity value, and bumps no revision for it (`architecture.md`, Metadata
-units).
+units). Nor does `UpdateGroupOperatorInCharge`, whose flag no agent reads
+(`architecture.md`, Revision keys and the sync fan-out, Repairs), so a
+token survives its writes.
 `AdvanceClusterIds`, the id step, bumps nothing either: no agent reads a
 counter (`architecture.md`, Clusters). A flag update that asks for the
 state the record already holds —
 `UpdateDiskNodeDisabled`, `UpdateControllerNodeDisabled`,
 `UpdateCntlrEnabled`, `TryToAbortRepair` on a CREATED repair whose flag
-is already set, and `ForceStartGroup`'s cancel of a group that carries no
-mark — writes nothing, bumps nothing and replies OK, a token the request
+is already set, `ForceStartGroup`'s cancel of a group that carries no
+mark, and `UpdateGroupOperatorInCharge` with the value the group's flag
+holds — writes nothing, bumps nothing and replies OK, a token the request
 carried still being checked first: a no-op that bumped would invalidate
 every client's token for nothing.
 
@@ -1150,11 +1155,11 @@ below name.
   cosmetic: a racing append could otherwise write a chunk key behind the
   drain, and the drain's final emptiness guard rests on "after the latch,
   no chunk key can ever appear again". `GetClone` and `DeleteClone`'s own
-  phase 1 keep using plain `loadClone`. The six repair calls that write,
+  phase 1 keep using plain `loadClone`. The seven repair calls that write,
   which change a clone meta group or its repair, refuse a deleting clone
-  the same way, in their `model` op, and `CreateRepair` and
-  `ForceStartGroup` first in their planning read (`refuseDeletingClone`;
-  Repairs and retired legs).
+  the same way, in their `model` op, and `CreateRepair`, `ForceStartGroup`
+  and `UpdateGroupOperatorInCharge` first in their planning read
+  (`refuseDeletingClone`; Repairs and retired legs).
 * **GetClone** — one STM read. Reply the `Clone`.
 * **UpdateCloneTrConf** — STM: resolve; token; the clone
   (`loadLiveClone`); replace `src_tr_conf_list`; `BumpSpRev`. Reply
@@ -1291,28 +1296,30 @@ rather than a candidate problem.
 
 ### Repairs and retired legs
 
-The codes are those of `architecture.md`, Repairs and Retired legs. The six
+The codes are those of `architecture.md`, Repairs and Retired legs. The seven
 calls that write run the `model` repair operations as their deciding STMs
 (Scope and placement), each behind a planning read in a read-only snapshot
 opened with `openSp` — resolution, the `deleting` gate, then the token
 (GW5, GW6) — whose scope hands the op the cluster id, the shard, the sp id
 and, where the op takes one, the stored `ClusterConf` (`repairOpenSp`,
-`repairCreateChecks` for the create and `forceStartChecks` for the forced
-start); the op makes every check again inside its own STM, the token's
-revision as its expected revision ahead of every other read (GW6), save
+`repairCreateChecks` for the create, `forceStartChecks` for the forced
+start and `operatorInChargeChecks` for the operator-in-charge flag); the op
+makes every check again inside its own STM, the token's revision as its
+expected revision ahead of every other read (GW6), save
 `ForceStartGroup`'s checks of the primary, which its planning read alone
 makes, and of the primary's report, which no transaction sees. `model`
 raises every refusal as an `ErrPrecondition`, which `mapModelErr` answers
 `FAILED_PRECONDITION` save a stale token and candidate changed (GW7), so
 the other codes come from the gateway's own checks — the pure checks
 (GW4), the planning read's resolution and token, `CreateRepair`'s own
-planning checks and its scan, and `ForceStartGroup`'s own planning checks
-— and from the four reasons `model` exports for them,
-`model.ReasonRepairExists`, `model.ReasonRepairNotFound`,
-`model.ReasonRetiredLegNotFound` and `model.ReasonRetiredListFull`, which a
-handler answers before `mapModelErr` (`modelReason`) with the code and the
-words the gateway's own check of the same refusal gives. `ForceStartGroup`
-alone reads an agent between its planning read and its op (Agent calls).
+planning checks and its scan, and the own planning checks of
+`ForceStartGroup` and `UpdateGroupOperatorInCharge` — and from the four
+reasons `model` exports for them, `model.ReasonRepairExists`,
+`model.ReasonRepairNotFound`, `model.ReasonRetiredLegNotFound` and
+`model.ReasonRetiredListFull`, which a handler answers before
+`mapModelErr` (`modelReason`) with the code and the words the gateway's own
+check of the same refusal gives. `ForceStartGroup` alone reads an agent
+between its planning read and its op (Agent calls).
 The three reads open with `openSpRead`, so a deleting pool's repairs and
 retired legs still answer.
 
@@ -1377,6 +1384,15 @@ retired legs still answer.
   stops the planning read after the clone, reads no agent, and the op
   answers a group with no mark with no write and no bump. Reply `grp_id`
   and `revision` as the op returns it.
+* **UpdateGroupOperatorInCharge** — the pure checks first (GW4): the names.
+  Then the planning read (`operatorInChargeChecks`) behind `openSp` makes
+  the refusals of `architecture.md`, Repairs, in its order, with no level
+  gate: a `RedundNone` pool, the group through `locateGrp`, a deleting
+  clone through `refuseDeletingClone`. Last `model.SetGrpOperatorInCharge`
+  with the group's parent and the request's value, which re-checks the
+  token, the pool, the group and its clone in its STM, answers a group whose
+  flag already holds the value with no write, and bumps no `SpRev` for a
+  write (GW6). Reply `grp_id`.
 * **GetRepair** — one snapshot: resolve, then the `Repair` through
   `repair_name_list` (`loadListedRepair`: a name not listed is `NOT_FOUND`, a
   listed key missing `ABORTED`). Reply `rep_name` and the record as stored.
@@ -1656,6 +1672,11 @@ gateway, never through `workerctl`.
   primary's report, seeded in the fake, shows running, then, with the
   report showing the array broken, written with the revision its own bump
   committed, replaced, and cancelled, a cancel of no mark writing nothing;
+  a group's operator-in-charge flag (`architecture.md`, Repairs) — set,
+  read back on the group's record and through the gateway's own read of
+  the pool, and cleared, at the level that stops group arrays too, no write
+  bumping `SpRev`, a repeated set and a repeated clear writing nothing, and
+  refused for an unknown group, an unknown pool and a stale token;
   and the sp latch with the refusals it brings, then its drain, after
   which every extent, metadata unit and capacity key is back and no dnv key
   is left. Before the case tears its

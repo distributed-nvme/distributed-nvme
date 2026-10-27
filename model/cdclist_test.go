@@ -732,7 +732,7 @@ func TestSetCntlrErrEpochRefusesAMissingSubsystem(t *testing.T) {
 
 // TestSetCntlrErrEpochAtASuppressedLevel: the rule holds at every sp_level.
 // The health write finds its SP by sp_id, not through loadSpConfForOp and its
-// AR3 refusals, so an SP an operator has taken charge of keeps discovery
+// AR3 refusals, so an SP at a level where reactions stop keeps discovery
 // records that follow its cntlrs' health.
 func TestSetCntlrErrEpochAtASuppressedLevel(t *testing.T) {
 	env := newOpsEnv(t)

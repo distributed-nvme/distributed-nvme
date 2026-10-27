@@ -13,12 +13,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The whole-worker scenario cases of an operator's repair and forced start
-// (architecture.md, Repair; dnv-worker.md, AR8, AR11, AR12, AR13), played
-// through the fakes of one planted cluster under one whole worker: the
-// fakes' repairs lever stands for the primary's verdict, their grps lever for
-// its reading of a group, and the model operations the gateway runs stand
-// for the operator's calls.
+// The whole-worker scenario cases of an operator's repair, forced start and
+// take-over of a group (architecture.md, Repair; Repairs; dnv-worker.md,
+// AR8, AR11, AR12, AR13), played through the fakes of one planted cluster
+// under one whole worker: the fakes' repairs lever stands for the primary's
+// verdict, their grps lever for its reading of a group, and the model
+// operations the gateway runs stand for the operator's calls.
 
 // stdRepName is the repair the cases plant on the standard data group: its
 // bad leg is leg 6, whose side 10 is on dn 1, and its fresh new leg goes to
@@ -411,6 +411,80 @@ func TestScenForcedStartHoldsLegRepairUntilItsClear(t *testing.T) {
 		}
 		return true, ""
 	})
+}
+
+// TestScenOperatorInChargeHoldsLegRepairUntilCleared pins an operator's
+// take-over of a group through a whole worker (architecture.md, Repairs):
+// while the data group's operator_in_charge flag, written by the operation
+// the gateway runs, stands, leg repair holds the group's due leg with
+// grp_operator_in_charge, creating no repair, though every other condition
+// of the create holds (AR8); once the operator clears the flag the worker
+// creates its repair of the leg. With the flag set again over that CREATED
+// repair, the drive step still runs: the bad leg reads healthy again, so the
+// worker tries to abort its repair, and once the primary confirms the abort
+// it cancels it, and no second repair is created.
+func TestScenOperatorInChargeHoldsLegRepairUntilCleared(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantScen(t, repairShape)
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	ctx := context.Background()
+	setFlag := func(on bool) {
+		t.Helper()
+		if _, err := plant.SetOperatorInCharge(ctx, h.cli, c.cl, c.sp.Ref,
+			stdDataGrpId, on); err != nil {
+			t.Fatalf("SetOperatorInCharge(%t): %v", on, err)
+		}
+		if got := c.dataGrp(t).GetOperatorInCharge(); got != on {
+			t.Fatalf("the data group's flag is %t, want %t", got, on)
+		}
+	}
+
+	// Leg 6 fails on the primary and is due: the pass's own hold, which
+	// names no op, holds its repair.
+	setFlag(true)
+	c.failLeg(t, 6)
+	h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 2,
+		and(reactionIs(reactionRepairCreate, reasonGrpOperatorInCharge),
+			and(numIs("leg_id", 6), func(rec logRecord) bool {
+				_, op := rec.attrs["op"]
+				return !op
+			})))
+	if n := h.creates(w); n != 0 {
+		t.Fatalf("%d repairs created while the flag stands", n)
+	}
+	if rep := c.dataGrp(t).GetRepName(); rep != "" {
+		t.Fatalf("the data group names the repair %s under the flag", rep)
+	}
+
+	// The operator gives the group back: the worker repairs leg 6.
+	setFlag(false)
+	created := h.waitCreated(t, w, 6)
+	repName := created.str("rep_name")
+
+	// The flag again, over the worker's CREATED repair: leg 6 reads healthy
+	// again, and the drive step tries to abort the repair and, once the
+	// primary confirms, cancels it.
+	setFlag(true)
+	c.healLeg(t, 6)
+	aborted := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool {
+			return rec.str("kind") == reactionRepairAbort &&
+				rec.str("rep_name") == repName
+		})
+	if aborted.str("trigger") != triggerBadLegHealthy {
+		t.Fatalf("the try-to-abort %v, want trigger %s", aborted.attrs,
+			triggerBadLegHealthy)
+	}
+	c.cancelByVerdict(t, w, repName)
+	if n := h.creates(w); n != 1 {
+		t.Errorf("%d repairs created, want 1", n)
+	}
+	if !c.dataGrp(t).GetOperatorInCharge() {
+		t.Errorf("the flag went with the cancel")
+	}
 }
 
 // TestScenTakeBackRefusalIsLogged pins AR11's record of the primary's refusal

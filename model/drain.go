@@ -71,9 +71,9 @@ const (
 // this op would remove are not there any more" is precisely the reasoning that
 // removes someone else's.
 //
-// sp_level is deliberately NOT consulted (SPD6): AR3's suppression exists so an
-// operator can take charge of a degraded SP, and a doomed SP must drain at any
-// level.
+// sp_level is deliberately NOT consulted (SPD6): the levels where reactions
+// stop (AR3) leave a degraded SP to the operator, and a doomed SP must drain
+// at any level.
 func loadSpConfForDrain(
 	s etcdutil.STM,
 	op string,

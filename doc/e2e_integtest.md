@@ -13,8 +13,8 @@ facts the suites driving real agents share.
 One storage pool at the widest shape the tree builds, on real guests with no
 fakes, driven end to end through the shipped operator CLI while two real kernel
 NVMe hosts read and write its namespaces. A green run at the default shape is
-nine statements; a smaller shape proves no ceiling, and one without redundancy
-no repair and no forced start:
+ten statements; a smaller shape proves no ceiling, and one without redundancy
+no repair, no forced start and no take-over:
 
 * **The ceiling is real.** `MaxSliceCntPerSp` slices with md-raid1, every side
   on a disk node of its own, every group's array and every slice's thin pool on
@@ -33,7 +33,8 @@ no repair and no forced start:
   operator's repairs, one of which takes a retired leg back, a forced start
   of a group's array from the leg that holds its data, a restore of the
   group from the older copy a retired leg kept, which brings back what that
-  leg holds, and all between.
+  leg holds, an operator's take-over of a group's repair from the worker,
+  and all between.
 * **A clone's copy survives a failover of its primary** (`architecture.md`,
   Clone metadata durability). A primary disabled in the middle of a slowed
   copy hands the copy to the new primary, which loads the metadata the
@@ -59,6 +60,14 @@ no repair and no forced start:
   takes back a retired leg holding newer data than the array is refused, not
   copied over (`dnv-worker.md` AR11). The worker clears each forced start's mark
   from the primary's report once the start is done (`dnv-worker.md` AR13).
+* **An operator takes a group's repair over from the worker at the
+  read-write level** (`architecture.md`, Repairs), on react's pool. With the
+  group's `operator_in_charge` flag set, the worker's repair of a dead leg,
+  held created, is aborted and cancelled, the worker creates no repair of the
+  group while the flag stands (`dnv-worker.md` AR8), and the operator's own
+  repair with a fresh leg is started, finished and copied whole; with the
+  flag cleared, the pool is still at the read-write level, host0 reads its
+  data unchanged with no failed IO, and no failover happens.
 * **A primary cut off from the control plane fails over as a pause**
   (`architecture.md`, Failover; `dnv-worker.md` RW22). Its cn agent is
   stopped while every kernel object it built goes on serving host0, which
@@ -96,18 +105,20 @@ suites'. Concurrency: one dnvctl call and one case at a time, and never a
 revision token, since a present token changes what the
 gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection between
 two usable controllers (Known limits). Auto-grow, cntlr replacement, leg
-repair, a failover after the primary's cn agent is killed and the forced
-start, on a pool at the ceiling (`dnv-worker.md` AR5 to AR8, AR13;
-`cnagent.md` CN12), as react's pool has at most `REACT_SLICE_CAP` slices
+repair, a failover after the primary's cn agent is killed, the forced
+start and the take-over of a group's repair, on a pool at the ceiling
+(`dnv-worker.md` AR5 to AR8, AR13; `cnagent.md` CN12; `architecture.md`,
+Repairs), as react's pool has at most `REACT_SLICE_CAP` slices
 (Known limits); the cutoff case's failover, after
 that agent is stopped, runs at the run's slice count. A demotion hold that
 the old primary's report ends early (`dnv-worker.md` RW22): react's and
 cutoff's failovers lose an agent that answers nothing, one killed and one
 stopped, and copy's disabled primary answers, but the case only logs which
-of the two ended its hold, the report or the timer. The worker's abort and
-cancel of a repair of its own (`dnv-worker.md`, Leg repair;
-`architecture.md`, Repair); and the retire timer, as no run waits out a
-retired leg's age (`dnv-worker.md` AR12).
+of the two ended its hold, the report or the timer. The worker's own
+try-to-abort of a repair of its own, and its cancel of one, which react's
+take-over sees only when it comes before the operator's (`dnv-worker.md`,
+Leg repair; `architecture.md`, Repair); and the retire timer, as no run
+waits out a retired leg's age (`dnv-worker.md` AR12).
 
 ## Topology and parameters
 
@@ -267,8 +278,9 @@ verb never printed its sentinel, naming guest, verb and status. The end
 cleanup's verdict is the exit status: a run whose end cleanup left a verb
 unfinished or one of the suite's own nvmet ports standing fails, after
 cleaning, while a run that fails an assertion removes nothing but the copy
-case's throttle, which it takes off the controller node that carries it, as
-a slowed port would slow every suite that runs before the next cleanup.
+case's throttle and the react case's reject rule, each of which it takes off
+the controller node that carries it, as a slowed port would slow, and a
+refused one fail, every suite that runs before the next cleanup.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every write is
@@ -555,8 +567,9 @@ clone source that is a transfer of its own cluster (`cnagent.md` CN21, Known
 limits), so the removal of the second pool, here as after the fallback,
 drops it on every controller node before the pool's subsystem goes.
 
-**react** proves the four reactions on real faults, and an operator's forced
-start of a group md will not start, on a pool of the run's slice count but at
+**react** proves the four reactions on real faults, an operator's forced
+start of a group md will not start, and an operator's take-over of a group's
+repair from the worker, on a pool of the run's slice count but at
 most `REACT_SLICE_CAP` slices (Topology and parameters), each by the record it
 writes, one action per pass making every wait a threshold plus a few passes
 (`dnv-worker.md` AR2); its own build may have reacted, so each reaction is
@@ -668,7 +681,46 @@ SH15), and neither member of the started array may hold an md bad block, which
 md serves as an IO error. No failover may happen across either, and host0's
 kernel log reports no failed IO. The dead legs' disk nodes come back in the
 end, as only a live agent removes the side of a retired leg the pool's drain
-gives back.
+gives back. Last, an operator takes the same group's repair over from the
+worker (raid1 only; `architecture.md`, Repairs), the pool at the read-write
+level when the stage starts and when it ends, as the stage changes no level.
+The group first goes below the retired-leg bound, its oldest retired leg
+deleted, as an operator's repair takes a fresh leg only below it
+(`architecture.md`, Repairs, CreateRepair).
+One of its legs then dies as in the leg repairs before, and the worker's
+repair, its fresh leg steered alone onto its disk node, must stay created:
+before the kill the primary's controller node refuses its own TCP connects to
+the nvmet port of every disk node that leg can land on, a reset answering
+each, so the primary cannot add the new leg (`cnagent.md` CN12), while those
+disk nodes stay healthy and answer, so the worker still places the leg there
+and flips its side provisioned. A worker's repair is otherwise created for a
+few passes only, and a frozen disk node would not hold it, as the worker marks
+a disk node unhealthy at the first round it misses (`dnv-worker.md` HL1) and
+allocation passes it over. The rule names each disk node's address and port,
+never a product of the two, so it refuses no connect to a leg of the pool, and
+it comes off once the worker's repair is gone; a failed run and every cleanup
+take it off too (E2E6). Once the rule has refused a connect, the repair must
+read created with its side provisioned, or aborted with its side provisioned
+should the worker's own abort have come first (`dnv-worker.md` AR8). With the
+group's `operator_in_charge` flag set, which `sp get` shows, the operator's
+abort of the worker's repair must be answered done, or refused as a repair the
+worker has already aborted or cancelled; the repair must then read aborted, or
+be gone with the dead leg still in its place, and the operator's cancel must
+take it away or find it gone, the worker's drive step having cancelled it
+first, which the worker's record of that cancel must show (`dnv-worker.md`
+AR8). A worker's own abort the case sees come first, as an abort flag already
+set when the repair reads held or as the refusal of the operator's abort, must
+likewise show in the worker's records. With the rule off, for several passes
+the group must keep its legs and get no repair, while the worker logs that it
+holds its create of a repair for the dead leg under the flag (`dnv-worker.md`
+AR8). The operator's own repair of the dead leg, with a fresh leg, must then
+start and be finished, the dead leg kept as a retired leg, the flag cleared, md
+must hold the group whole on the fresh leg, which it copies whole as it was
+never a member (`architecture.md`, Repair), host0 must read both namespaces'
+data unchanged with no failed IO in its kernel log, and no failover may happen
+across the take-over. As in the leg repairs before, host0 makes no IO from the
+kill until md holds the group whole, so the stage proves the take-over at the
+read-write level, not IO during it.
 
 **cutoff** proves that a primary cut off from the control plane fails over as
 a pause for a host that follows the discovery log (`architecture.md`,
@@ -785,15 +837,16 @@ state; a cleanup-only run does neither. Preflight dies on the first failure,
 naming the guest and the fix. It proves that the driver has its tools, the
 binaries, the tree's constants (E2E12) and a pinned etcd release; that every
 guest answers passwordless ssh; that a node guest has what the sweeps and the
-agents need — sudo, the tools of both roles and, on a controller node when
-the copy case is in the run, those of its throttle, the modules and the
-nvmet tree, native multipath on a disk node too, where a migration
-destination reads ANA
-through it, md support and a stock md assembly rule the mask can switch off
-(`architecture.md`, Components: invocation reference), hole punching, memory
-and free space, none of this run's ports listening, and no conflicting nvmet
-port, as a configfs port does not listen until a subsystem is linked and an
-agent would adopt and rewrite an existing port of its id (`dnagent.md` SH19);
+agents need — sudo, the tools of both roles (on a controller node, also those
+of the copy case's throttle when that case is in the run and the one of the
+react case's reject rule when that case runs with md-raid1), the modules and
+the nvmet tree, native multipath on a disk node too, where a migration
+destination reads ANA through it, md support and a stock md assembly rule the
+mask can switch off (`architecture.md`, Components: invocation reference), hole
+punching, memory and free space, none of this run's ports listening, and no
+conflicting nvmet port, as a configfs port does not listen until a subsystem is
+linked and an agent would adopt and rewrite an existing port of its id
+(`dnagent.md` SH19);
 that a host is a clean initiator — sudo, nvme-tcp and multipath, its identity
 files, generated if absent and never overwritten, nvme-stas inactive and the
 masked autoconnector (E2E10); that host0, when the copy or the react case
@@ -842,9 +895,10 @@ node, as its stacks sit on the disk nodes' sides, in the cn agent suite's order
 (`cnagent_integtest.md`, Teardown and cleanup) and in two phases across all of
 them, so that every clone final is gone, removed while its transfer source is
 connected, before any transfer goes, as a dm-clone flushes through its source
-(`cnagent.md` L3). The first phase takes the copy case's throttle off first,
-whether or not this run set it, so that no removal waits on a slowed source,
-and does not finish while a reading still shows it. On a disk-node guest
+(`cnagent.md` L3). The first phase takes the copy case's throttle and the
+react case's reject rule off first, whether or not this run set them, so
+that no removal waits on a slowed source and no later connect is refused,
+and does not finish while a reading still shows either. On a disk-node guest
 every dnv md array goes before any dm
 device, as an array assembled from the controller node's superblocks pins the
 device under it (Known limits), each loop device's header is zeroed before it
@@ -893,7 +947,8 @@ namespace and a live path from a retrying one; each guest's kernel, device,
 nvmet and log state follows, a host's with its nvme-stas state, configuration
 and journal and the cutoff case's write-loop records, and a controller node's
 with its recorded agent's process state, which shows an agent the cutoff case
-left stopped, and the copy case's throttle; the failure line ends with the
+left stopped, the copy case's throttle and the react case's reject rule; the
+failure line ends with the
 filter that pulls the stage's
 records. When the stage connected, the host's kernel log is the record of what
 the connect attempted.
@@ -916,8 +971,8 @@ the connect attempted.
   pass discards through**; elsewhere the host's free space shrinks by each
   run's real writes.
 * **Without redundancy the suite is smaller**: ops' leg bitmap read, copy's
-  forced drop and two repair stages and react's two leg repair stages and
-  two forced-start stages are skipped.
+  forced drop and two repair stages and react's two leg repair stages, two
+  forced-start stages and take-over stage are skipped.
 * **How md takes a retired leg back is logged, not asserted.** md catches a
   retired leg taken back up from its write-intent bitmap only while the
   array has stayed degraded since the leg left, and otherwise copies it
@@ -937,6 +992,15 @@ the connect attempted.
   the restore started, but nothing forces it; so the case reads both counts
   on the primary and fails on that premise, naming both, before it waits
   for the refusal.
+* **react's take-over holds the worker's repair created only on the
+  primary's controller node.** The reject rule refuses that node's connects
+  alone, so a failover inside the hold hands the group to a primary the
+  rule does not hold back, and the case then fails rather than passing on a
+  wrong premise. The operator's abort comes ahead of the
+  worker's own try-to-abort by the new leg's threshold (`dnv-worker.md`
+  AR8), which the case's waits keep well inside but nothing forces; a
+  worker's abort that comes first is logged and accepted, and the
+  operator's abort then meets a repair the worker is already aborting.
 * **A disk node holds the controller node's md superblocks**
   (`architecture.md`, Components: invocation reference), as the primary's
   per-CN linear maps the side itself, and an unmasked disk-node guest's stock

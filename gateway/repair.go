@@ -13,8 +13,10 @@ import (
 )
 
 // This file is architecture.md, Repairs and Retired legs (gateway.md, Repairs
-// and retired legs): the eight RPCs of a repair of an md-raid1 group's leg,
-// and ForceStartGroup, the forced start of a group's array from one leg.
+// and retired legs): the eight RPCs of a repair of an md-raid1 group's leg;
+// ForceStartGroup, the forced start of a group's array from one leg; and
+// UpdateGroupOperatorInCharge, an operator's take-over of a group's repair
+// from the sp worker.
 // CreateRepair creates an operator's repair only, since it refuses the
 // reserved prefix of the sp worker's own repairs (validateRepName); the calls
 // that address a repair by its name take both kinds, so an operator can
@@ -26,7 +28,7 @@ import (
 // keeps the bad leg as a retired leg, whose side keeps its data on its DN
 // until it is deleted or a repair of the group takes it back.
 //
-// The six calls that write run the repair operations of model (gateway.md,
+// The seven calls that write run the repair operations of model (gateway.md,
 // Scope and placement: reused, never duplicated), each behind a planning
 // snapshot: the snapshot resolves the cluster and the SP, checks the token
 // and makes the checks whose codes model cannot give, and the op re-checks
@@ -352,8 +354,8 @@ func repairCreateChecks(
 	// architecture.md, Repairs). validateRepName has refused the reserved
 	// prefix, so the name is an operator's and the gate is
 	// SP_LEVEL_NO_REDUND: no group array is built from there up, and below
-	// it an operator's create is no reaction, so the levels where the
-	// operator is in charge take it.
+	// it an operator's create is no reaction, so the levels where reactions
+	// stop take it.
 	level := sc.Conf.GetSpLevel()
 	if level >= model.CreateRepairLevelGate(req.GetRepName()) {
 		return nil, grpLocation{}, errPrecondition(
@@ -834,6 +836,85 @@ func checkGrpArrayDown(
 				"RES_STATUS_OK", grpId)
 	}
 	return nil
+}
+
+// UpdateGroupOperatorInCharge is the UpdateGroupOperatorInCharge of
+// architecture.md, Repairs: the operator_in_charge flag of an md-raid1
+// group, set to take the group's repair over from the sp worker and cleared
+// to give it back.
+//
+// The pure checks come first (GW4): the names. The planning snapshot
+// (operatorInChargeChecks) then makes the refusals of architecture.md,
+// Repairs, in their order, behind openSp's resolution, deleting gate and
+// token: a RedundNone pool, the group's look-up — slices first, then clones
+// (locateGrp) — and a clone being deleted. No level gate is among them: the
+// call takes the pool at every level, so that an operator sets the flag at a
+// level where reactions stop before lowering it. model.SetGrpOperatorInCharge,
+// the deciding STM, makes its own checks again, the token first (GW6), and
+// answers a group whose flag already holds the request's value with no
+// write. No write of the flag bumps SpRev, so a token the caller holds stays
+// valid across the call.
+func (s *Server) UpdateGroupOperatorInCharge(
+	ctx context.Context,
+	req *pb.UpdateGroupOperatorInChargeRequest,
+) (*pb.UpdateGroupOperatorInChargeReply, error) {
+	if err := validateOptionalName(
+		"cluster_name", req.GetClusterName(),
+	); err != nil {
+		return nil, err
+	}
+	if err := validateName("sp_name", req.GetSpName()); err != nil {
+		return nil, err
+	}
+	var sc *spScope
+	var loc grpLocation
+	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		var err error
+		sc, loc, err = operatorInChargeChecks(stm, req)
+		return err
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	err = model.SetGrpOperatorInCharge(
+		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
+		req.GetSpRev().GetRevision(), loc.parent(), req.GetGrpId(),
+		req.GetOperatorInCharge(),
+	)
+	if err != nil {
+		return nil, mapModelErr(err)
+	}
+	return &pb.UpdateGroupOperatorInChargeReply{GrpId: req.GetGrpId()}, nil
+}
+
+// operatorInChargeChecks is UpdateGroupOperatorInCharge's planning read
+// inside the caller's snapshot, its refusals in the order of
+// architecture.md, Repairs. It returns the scope and the group, whose parent
+// the op is handed.
+func operatorInChargeChecks(
+	stm etcdutil.STM,
+	req *pb.UpdateGroupOperatorInChargeRequest,
+) (*spScope, grpLocation, error) {
+	spName := req.GetSpName()
+	sc, err := openSp(stm, req.GetClusterName(), spName, req.GetSpRev())
+	if err != nil {
+		return nil, grpLocation{}, err
+	}
+	// Redundancy is an SP-wide property the group only inherits, so the
+	// test is the SP's STORED bdev_conf, as CreateRepair's is.
+	if !isMdRaid1(spBdevConf(sc.Conf)) {
+		return nil, grpLocation{}, errInvalid(
+			"storage pool %q is RedundNone: its groups have no repair to "+
+				"take over", spName)
+	}
+	loc, err := locateGrp(stm, sc, spName, req.GetGrpId())
+	if err != nil {
+		return nil, grpLocation{}, err
+	}
+	if err := refuseDeletingClone(loc); err != nil {
+		return nil, grpLocation{}, err
+	}
+	return sc, loc, nil
 }
 
 // GetRepair is the GetRepair of architecture.md, Repairs: one snapshot reads

@@ -24,7 +24,7 @@
 # creates lives under $WORK on the server, and cleanup removes exactly that.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 66 RPCs maintains exactly the etcd schema (architecture.md,
+# of the 67 RPCs maintains exactly the etcd schema (architecture.md,
 # etcd data model), verified against ground truth that never goes through the
 # code under test; (b) parallel gRPCs across instances are correct — disjoint
 # work all succeeds, contended work has exactly one winner and no partial
@@ -440,7 +440,7 @@ assert_no_write() { # <label> <cmd…>
 }
 
 # key_count counts the keys under a prefix — the non-SP-scoped form of the
-# refusal bracket, and the "nothing left" audit of case S stage 19. A bare
+# refusal bracket, and the "nothing left" audit of case S stage 20. A bare
 # kind of architecture.md, Key table, is scoped to $CLUSTER by workerctl (all
 # but cluster_conf, worker and the three *_rev kinds, which are never scoped),
 # so a scoped read FAILS once the cluster is gone (`cluster "itgw" does not
@@ -1561,7 +1561,7 @@ smoke_listed_svcids() { # <sp>
 }
 
 # smoke_dn_free_sum is Σ free_ext_cnt over the four DNs — the aggregate the
-# teardown of stage 19 must restore exactly, and the cross-check that no
+# teardown of stage 20 must restore exactly, and the cross-check that no
 # per-DN assertion above quietly agreed with a wrong topology.
 smoke_dn_free_sum() {
 	local i total=0
@@ -3343,7 +3343,91 @@ EOF
 	clear_behavior "$primaryDir"
 
 	# -------------------------------------------------------------------
-	stage 18 "advance-ids: every counter moves, no revision, new ids above"
+	stage 18 "set-grp-operator-in-charge: set, read back, repeat, clear"
+	# -------------------------------------------------------------------
+	# The operator-in-charge flag of a group (architecture.md, Repairs): one
+	# write of the group's record that bumps no SpRev, since no agent reads
+	# the flag, so the token the stage holds stays valid across every write
+	# of it; a write of the value the group already holds writes nothing;
+	# and the call takes the pool at every level, the one where no group
+	# array is built among them.
+	local oicMetaGrp oicStore oicGet
+	oicMetaGrp=$(sp_grp_id sp0 meta 0)
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "false" \
+		"the data group's flag starts clear"
+	oicStore=$(store_rev)
+	out=$(gw set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp")
+	assert_field "$out" '.grp_id' "$dataGrp" \
+		"set-grp-operator-in-charge reply grp_id"
+	assert_eq "$(store_rev)" "$((oicStore + 1))" \
+		"the set is one transaction"
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "the set bumps no SpRev"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "true" \
+		"the set put the data group's flag"
+	assert_eq "$(smoke_grp_field sp0 "$oicMetaGrp" operator_in_charge)" \
+		"false" "the set left the meta group's flag clear"
+	# The gateway's own read of the pool shows the flag as stored.
+	oicGet=$(gw get-sp --sp sp0)
+	assert_eq "$(smoke_jq "$oicGet" '[ .slice_list[]
+		| (.meta_grp_list[]?, .data_grp_list[]?)
+		| select(.grp_id == $g) ][0].operator_in_charge' \
+		--arg g "$dataGrp")" "true" "get-sp shows the data group's flag"
+	assert_no_write "a repeated set" \
+		gw set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp"
+	# The refusals, each writing nothing: an unknown group, an unknown pool,
+	# a stale token and a present zero one, which is what an omitted --rev
+	# sends.
+	assert_no_write "set-grp-operator-in-charge of an unknown group" \
+		gwx NOT_FOUND set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
+		--grp 0xdead
+	assert_no_write "set-grp-operator-in-charge on an unknown pool" \
+		gwx NOT_FOUND set-grp-operator-in-charge --sp nosuch \
+		--rev "$SP_REV" --grp "$dataGrp" --operator-in-charge=false
+	assert_no_write "set-grp-operator-in-charge with a stale token" \
+		smoke_gwx_out ABORTED set-grp-operator-in-charge --sp sp0 \
+		--rev "$((SP_REV + 9))" --grp "$dataGrp" --operator-in-charge=false
+	assert_field "$SMOKE_OUT" '.message' "stale revision" \
+		"the stale token's refusal"
+	assert_no_write "set-grp-operator-in-charge with no --rev" \
+		gwx ABORTED set-grp-operator-in-charge --sp sp0 --grp "$dataGrp" \
+		--operator-in-charge=false
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "true" \
+		"the refusals left the flag set"
+	# At SP_LEVEL_NO_REDUND, where no group array is built and the forced
+	# start is refused, the clear and a second set are taken, and a repeated
+	# clear writes nothing.
+	gw set-sp-level --sp sp0 --rev "$SP_REV" --level NO_REDUND >/dev/null
+	refresh_rev sp0
+	out=$(gw set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --operator-in-charge=false)
+	assert_field "$out" '.grp_id' "$dataGrp" "the clear's reply grp_id"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" \
+		"false" "the clear at SP_LEVEL_NO_REDUND cleared the flag"
+	assert_no_write "a repeated clear" \
+		gw set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --operator-in-charge=false
+	gw set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" >/dev/null
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "true" \
+		"the set at SP_LEVEL_NO_REDUND put the flag"
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
+		"the writes at SP_LEVEL_NO_REDUND bump no SpRev"
+	# The level's write leaves the group's record, and so the flag, as it
+	# was; then the flag is cleared under the token that write moved.
+	gw set-sp-level --sp sp0 --rev "$SP_REV" --level READWRITE >/dev/null
+	refresh_rev sp0
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "true" \
+		"the level's write left the flag as it was"
+	gw set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --operator-in-charge=false >/dev/null
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" \
+		"false" "the data group's flag ends clear"
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "the last clear bumps no SpRev"
+
+	# -------------------------------------------------------------------
+	stage 19 "advance-ids: every counter moves, no revision, new ids above"
 	# -------------------------------------------------------------------
 	# The id step (architecture.md, Clusters; gateway.md GW19): one
 	# transaction moves the three globals' next_id by IdStepStride, then one
@@ -3403,7 +3487,7 @@ EOF
 		"delete-td t9 reply td_id"
 
 	# -------------------------------------------------------------------
-	stage 19 "reverse teardown down to an empty store"
+	stage 20 "reverse teardown down to an empty store"
 	# -------------------------------------------------------------------
 	out=$(gw delete-ns --sp sp0 --rev "$SP_REV" --nqn "$nqn" --idx 1)
 	refresh_rev sp0
@@ -3494,7 +3578,7 @@ EOF
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" \
 		"SpGlobal Σbucket after the drain"
 	# GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id must
-	# never come back. It stands where stage 18's id step moved it.
+	# never come back. It stands where stage 19's id step moved it.
 	assert_field "$global" '.next_id' "$((2 + ID_STEP_STRIDE))" \
 		"SpGlobal next_id never rewinds"
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS))" \
@@ -4191,9 +4275,9 @@ case_parallel() {
 #     `create-cluster` and `create-dn` answer the losers `ALREADY_EXISTS`
 #     (GW7's "create finds the name key present" row) and, crucially, mint no
 #     id for them (GW12);
-#   * the SpRev token, for every SP-scoped mutator — GW6 checks it before any
-#     other state check, so the losers get `ABORTED` "stale revision" and
-#     nothing of theirs reaches etcd.
+#   * the SpRev token, for every SP-scoped mutator whose write bumps it — GW6
+#     checks it before any other state check, so the losers get `ABORTED`
+#     "stale revision" and nothing of theirs reaches etcd.
 #
 # Steps 3-5 use the token as a FENCE (one winner per token) and step 6 uses it
 # as a LIVENESS LOOP (the documented client retry protocol, driven by
@@ -5208,7 +5292,7 @@ case_faults() {
 	# is accepted, and the threshold is stored exactly as sent — the three
 	# members the request left at zero stay zero, resolved only when read
 	# (architecture.md, Common validation). The extra pool is then latched
-	# and drained, the way case S stage 19 tears sp0 down, and must give
+	# and drained, the way case S stage 20 tears sp0 down, and must give
 	# every node back exactly what its create took, so no later count of the
 	# case moves.
 	local nodesBefore nodesAfter thrRev
@@ -5352,7 +5436,7 @@ case_faults() {
 	# The fifteenth guard of this stage — an SP-level mutator refused
 	# because the SP is `deleting` — has no probe HERE on purpose: `delete-sp`
 	# sets the flag
-	# (gateway.md, Storage pools and GrowSlice), and stage 19 of case S drives
+	# (gateway.md, Storage pools and GrowSlice), and stage 20 of case S drives
 	# the gate for real. It cannot be driven here, because this stage's sp0
 	# must stay live for the rest of the battery and the latch is one-way.
 

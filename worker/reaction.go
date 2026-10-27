@@ -94,6 +94,15 @@ const (
 	// reasonTwoSides is AR8's "a leg with two sides has a user migration in
 	// flight and is left alone".
 	reasonTwoSides = "leg_has_two_sides"
+	// reasonGrpOperatorInCharge is AR8's hold on a group whose
+	// operator_in_charge flag is set (architecture.md, Repairs): an operator
+	// has taken the group's repair over from the worker, so leg repair
+	// creates no repair for it until the operator clears the flag. It is
+	// model's string, for the reason reasonGrowPending is: model.CreateRepair
+	// refuses the worker's create under the flag with it, the second lock for
+	// a pass built from a snapshot older than the flag, and that refusal
+	// holds the group only, as the pass's own hold does.
+	reasonGrpOperatorInCharge = model.ReasonGrpOperatorInCharge
 	// reasonGrpForcedStart is AR8's hold on a group that carries an
 	// operator's forced-start mark (architecture.md, Repair): the operator is
 	// acting on the group, so leg repair creates no repair for it until the
@@ -1128,8 +1137,8 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// dnv-worker.md AR11: the stage moves are a step of the pass, not
 	// reactions. They run after the gates and before AR3's suppression, so
 	// at every sp_level, since a move only follows the primary's report and
-	// an operator may need to finish a repair at a level where the operator
-	// is in charge (AR3); none of them is the pass's one action (AR2).
+	// an operator may need to finish a repair at the levels where reactions
+	// stop (AR3); none of them is the pass's one action (AR2).
 	w.moveRepairStages(ctx, p)
 	// dnv-worker.md AR13: the forced-start clear, a step of the pass at every
 	// sp_level too, since a clear only follows the primary's report and the
@@ -1295,7 +1304,7 @@ func (w *spWorker) primaryInfo(cntlrId uint64) (*pb.CntlrInfo, uint64) {
 }
 
 // reactionSuppressed is AR3: no reaction runs at
-// sp_level >= SP_LEVEL_NO_THINPOOL, where an operator is in charge
+// sp_level >= SP_LEVEL_NO_THINPOOL, the disaster-recovery levels
 // (architecture.md, SpLevel). The record is emitted on the transition only.
 //
 // A `deleting` SP is not suppressed, it drains (SPD6): reactionPass routes it
@@ -2075,15 +2084,17 @@ func (t *repairTarget) parent() model.GrpParent {
 // groups alike. It reports whether the pass ends here.
 //
 // The create's conditions run in AR8's order: an md-raid1 pool; a leg with
-// exactly one side; a group with no forced-start mark; the gate on the
-// group's row (grpRowHold); the healthy-leg test (otherLegHealthy); a group
-// with no repair. A clone being deleted is no candidate at all
-// (repairCandidates), and a pool being deleted runs its drain and no reaction
-// (SPD6), so neither needs a test here. Every condition after the first is a
-// property of ONE leg or ONE group that the pass reads in its snapshot, so it
-// is checked before any scan and holds only that group (AR2), and each can
-// hold for a very long time: a two-sided leg has a user migration in flight
-// (hours); a group with a forced-start mark waits until the mark goes — the
+// exactly one side; a group whose operator_in_charge flag is clear; a group
+// with no forced-start mark; the gate on the group's row (grpRowHold); the
+// healthy-leg test (otherLegHealthy); a group with no repair. A clone being
+// deleted is no candidate at all (repairCandidates), and a pool being
+// deleted runs its drain and no reaction (SPD6), so neither needs a test
+// here. Every condition after the first is a property of ONE leg or ONE
+// group that the pass reads in its snapshot, so it is checked before any
+// scan and holds only that group (AR2), and each can hold for a very long
+// time: a two-sided leg has a user migration in flight (hours); a group
+// whose flag is set waits until the operator clears it, however long that
+// is; a group with a forced-start mark waits until the mark goes — the
 // worker clears it once the primary reports the group's row OK with a
 // member in sync on a leg whose own row reads OK (AR13), the operator
 // withdraws it, or a finish of the group's repair withdraws a mark that
@@ -2099,6 +2110,8 @@ func (t *repairTarget) parent() model.GrpParent {
 // any of them would leave every OTHER group of the SP degraded on a single
 // md-raid1 member for exactly as long, so a further failure there is data
 // loss. Each is still recorded per leg for visibility, and the scan moves on.
+// So does model.CreateRepair's refusal of the create under the group's flag
+// (createRepair), the one refusal of the create that does not end the pass.
 func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 	if w.driveRepairs(ctx, p) {
 		return true
@@ -2122,6 +2135,23 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			// candidate may still be repairable.
 			w.reactionSkipped(
 				ctx, reactionRepairCreate, reasonTwoSides, ids...,
+			)
+			continue
+		}
+		if target.grp.GetOperatorInCharge() {
+			// AR8: an operator has taken the group's repair over from the
+			// worker (architecture.md, Repairs), so leg repair creates no
+			// repair for it until the operator clears the flag. Only the
+			// create is held: the drive step above still drives the
+			// worker's own repair of the group, and every other reaction
+			// runs. The hold comes before the forced-start hold, since the
+			// flag is the operator's own and lasts longer than a mark, so
+			// the record names the flag whenever both stand. The hold is
+			// THIS group's (AR2), so the scan goes on; a create from a
+			// snapshot older than the flag meets model.CreateRepair's
+			// refusal instead (createRepair).
+			w.reactionSkipped(ctx, reactionRepairCreate,
+				reasonGrpOperatorInCharge, ids...,
 			)
 			continue
 		}
@@ -2204,7 +2234,9 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			)
 			continue
 		}
-		return w.createRepair(ctx, p, target, ids)
+		if w.createRepair(ctx, p, target, ids) {
+			return true
+		}
 	}
 	return false
 }
@@ -2411,10 +2443,15 @@ func grpRowHold(p *spPass, grpId uint64) string {
 // the group holds a DN outside it — one that joined after this pass's
 // snapshot, whose domain the scan could not exclude — or when the pick
 // itself is gone, disabled or short of extents since the scan (MD6). Like
-// every ErrPrecondition, that ends the pass with `reaction skipped` (AR2),
-// and the next pass plans from a snapshot that holds what changed. A clone
-// meta group takes the same path with its own ext_cnt, model.CreateRepair
-// finding the group through its parent.
+// every ErrPrecondition but one, that ends the pass with `reaction skipped`
+// (AR2), and the next pass plans from a snapshot that holds what changed.
+// The one is the refusal under the group's operator_in_charge flag
+// (model.ReasonGrpOperatorInCharge), which a pass built from a snapshot older
+// than the flag meets: it is logged with the reason the pass's own hold logs,
+// beside the op's name, and holds that group only, so the scan goes on, as a
+// refusal of the drive step does (driveFailed). It reports whether the pass
+// ends here. A clone meta group takes the same path with its own ext_cnt,
+// model.CreateRepair finding the group through its parent.
 func (w *spWorker) createRepair(
 	ctx context.Context,
 	p *spPass,
@@ -2446,7 +2483,9 @@ func (w *spWorker) createRepair(
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionRepairCreate, err, ids...)
-		return true
+		var pre *model.ErrPrecondition
+		return !errors.As(err, &pre) ||
+			pre.Reason != model.ReasonGrpOperatorInCharge
 	}
 	w.reactionApplied(ctx, reactionRepairCreate,
 		withAttr(ids,
@@ -3296,9 +3335,11 @@ func (w *spWorker) reactionSkipped(
 // reactionFailed turns one op error into a `reaction skipped` record (AR2): a
 // model.ErrPrecondition contributes the precondition that did not hold, which
 // is not a failure at all — the next pass re-evaluates — and the op that
-// refused, whose name tells its refusal, which ends the pass, from the same
-// reason found by the pass's own check; anything else is a transient failure
-// that additionally carries the error text.
+// refused, whose name tells its refusal from the same reason found by the
+// pass's own check; anything else is a transient failure that additionally
+// carries the error text. Whether the pass ends is the caller's: AR2 ends it
+// on a refusal, save the drive step's (driveFailed) and the create's under
+// the group's operator_in_charge flag (createRepair).
 func (w *spWorker) reactionFailed(
 	ctx context.Context,
 	kind string,

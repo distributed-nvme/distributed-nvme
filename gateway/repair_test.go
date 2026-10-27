@@ -1112,8 +1112,8 @@ func TestCreateRepairAnswersTheOpsReasons(t *testing.T) {
 }
 
 // TestRepairMutatorsCheckTheTokenInTheirOp pins the second token check of
-// GW6 on five of the six repair calls that write (gateway.md, Repairs and
-// retired legs), the sixth's being TestForceStartGroupChecksTheTokenInItsOp:
+// GW6 on six of the seven repair calls that write (gateway.md, Repairs and
+// retired legs), the seventh's being TestForceStartGroupChecksTheTokenInItsOp:
 // each hands the model op its token's revision, which the op takes as its
 // expected revision before any other read. The planning read here
 // passes the token, a token-less TryToAbortRepair of another repair then
@@ -1202,6 +1202,18 @@ func TestRepairMutatorsCheckTheTokenInTheirOp(t *testing.T) {
 						SpRev:       tok,
 						LegId:       900,
 					})
+				return err
+			},
+		},
+		{
+			// The flag's write bumps no SpRev itself, but its op checks the
+			// token the request carried all the same.
+			name:  "UpdateGroupOperatorInCharge",
+			setup: func(*volEnv) {},
+			call: func(env *volEnv, ctx context.Context, tok *pb.SpRev) error {
+				req := oicRequest(env, true)
+				req.SpRev = tok
+				_, err := env.srv.UpdateGroupOperatorInCharge(ctx, req)
 				return err
 			},
 		},
@@ -1531,9 +1543,10 @@ func TestRepairCallsRefuseUnknownNames(t *testing.T) {
 
 // TestRepairCallsOnADeletingPool pins the deleting gate (architecture.md,
 // Repairs; GW5): every call that writes, ForceStartGroup's write and its
-// cancel among them, is FAILED_PRECONDITION on a pool being deleted, with
-// nothing written, and the three reads still answer, so an operator sees the
-// repairs and retired legs the drain is about to delete.
+// cancel and UpdateGroupOperatorInCharge's set and clear among them, is
+// FAILED_PRECONDITION on a pool being deleted, with nothing written, and the
+// three reads still answer, so an operator sees the repairs and retired legs
+// the drain is about to delete.
 func TestRepairCallsOnADeletingPool(t *testing.T) {
 	env := newVolEnv(t)
 	repCreate(env, "rep-a", volDataLegA, volDnC)
@@ -1573,6 +1586,16 @@ func TestRepairCallsOnADeletingPool(t *testing.T) {
 		},
 		"ForceStartGroup with cancel": func() error {
 			_, err := env.srv.ForceStartGroup(env.ctx, fsCancel(env))
+			return err
+		},
+		"UpdateGroupOperatorInCharge, a set": func() error {
+			_, err := env.srv.UpdateGroupOperatorInCharge(env.ctx,
+				oicRequest(env, true))
+			return err
+		},
+		"UpdateGroupOperatorInCharge, a clear": func() error {
+			_, err := env.srv.UpdateGroupOperatorInCharge(env.ctx,
+				oicRequest(env, false))
 			return err
 		},
 	} {
@@ -1639,11 +1662,12 @@ func repCloneRepair(env *volEnv) *pb.Group {
 // Repairs; dnv-worker.md CLD1), from model's own check — the clone drain's
 // final transaction gives the group back with its repair and its retired
 // legs — with nothing written. Each call meets the repair at the stage it
-// takes, so the clone's state is what refuses it. CreateRepair and
-// ForceStartGroup, whose planning reads refuse a deleting clone in the
-// gateway's words before their ops run, have theirs in
-// TestCreateRepairRefusesADeletingClonesGroup and, the write and the cancel,
-// TestForceStartGroupOnACloneMetaGroup.
+// takes, so the clone's state is what refuses it. CreateRepair,
+// ForceStartGroup and UpdateGroupOperatorInCharge, whose planning reads
+// refuse a deleting clone in the gateway's words before their ops run, have
+// theirs in TestCreateRepairRefusesADeletingClonesGroup, the write and the
+// cancel in TestForceStartGroupOnACloneMetaGroup, and the set and the clear
+// in TestUpdateGroupOperatorInChargeOnACloneMetaGroup.
 func TestRepairCallsRefuseADeletingClone(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1709,9 +1733,9 @@ func TestRepairCallsRefuseADeletingClone(t *testing.T) {
 // TestRepairCallsRunAtEveryLevel pins the levels of architecture.md, Repairs:
 // only CreateRepair refuses a level, from SP_LEVEL_NO_REDUND up for the
 // operator's names it takes, so it still creates a repair at
-// SP_LEVEL_NO_THINPOOL, the highest level below that, where the operator is
-// in charge; and at the highest level an operator still aborts, cancels and
-// finishes a repair and deletes a retired leg.
+// SP_LEVEL_NO_THINPOOL, the highest level below that and one of the levels
+// where reactions stop; and at the highest level an operator still aborts,
+// cancels and finishes a repair and deletes a retired leg.
 func TestRepairCallsRunAtEveryLevel(t *testing.T) {
 	env := newVolEnv(t)
 	setLevel := func(level pb.SpLevel) {

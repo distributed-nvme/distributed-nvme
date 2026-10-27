@@ -262,10 +262,12 @@ var renderCases = []renderCase{
 			`"retired_leg_id":"3"}` + "\n",
 	},
 	{
-		// A slice group's forced-start mark as stored (dnvctl.md, `group` —
-		// `ctl/group.go`): the named leg and the revision as strings on the
-		// group that carries one, and null on the group that carries none.
-		name: "sp get, a slice group's forced-start mark",
+		// A slice group's forced-start mark and operator-in-charge flag as
+		// stored (dnvctl.md, `group` — `ctl/group.go`): the named leg and the
+		// revision as strings and the flag true on the group that carries
+		// them, and null and false, both still visible, on the group that
+		// carries neither.
+		name: "sp get, a slice group's forced-start mark and flag",
 		rpc:  "GetStoragePool",
 		argv: []string{"sp", "get"},
 		reply: &pb.GetStoragePoolReply{
@@ -273,18 +275,20 @@ var renderCases = []renderCase{
 			SliceList: []*pb.Slice{{
 				MetaGrpList: []*pb.Group{{GrpId: 1}},
 				DataGrpList: []*pb.Group{{
-					GrpId:       2,
-					ForcedStart: &pb.ForcedStart{LegId: 5, Revision: 12},
+					GrpId:            2,
+					ForcedStart:      &pb.ForcedStart{LegId: 5, Revision: 12},
+					OperatorInCharge: true,
 				}},
 			}},
 		},
 		want: `{"cntlr_list":[],"slice_list":[{"data_grp_list":[` +
 			`{"data_blocks":"0","ext_cnt":"0",` +
 			`"forced_start":{"leg_id":"5","revision":"12"},"grp_id":"2",` +
-			`"leg_list":[],"meta_blocks":"0","rep_name":"",` +
-			`"retired_leg_id_list":[]}],"meta_grp_list":[` +
+			`"leg_list":[],"meta_blocks":"0","operator_in_charge":true,` +
+			`"rep_name":"","retired_leg_id_list":[]}],"meta_grp_list":[` +
 			`{"data_blocks":"0","ext_cnt":"0","forced_start":null,` +
-			`"grp_id":"1","leg_list":[],"meta_blocks":"0","rep_name":"",` +
+			`"grp_id":"1","leg_list":[],"meta_blocks":"0",` +
+			`"operator_in_charge":false,"rep_name":"",` +
 			`"retired_leg_id_list":[]}],"slice_idx":0}],"sp_conf":null,` +
 			`"sp_name":"sp0","sp_rev":null}` + "\n",
 	},
@@ -299,6 +303,16 @@ var renderCases = []renderCase{
 			GrpId: 2, Revision: 12,
 		},
 		want: `{"grp_id":"2","revision":"12"}` + "\n",
+	},
+	{
+		// The take-over's reply: the group alone, a uint64 string, with no
+		// revision beside it as the forced start's has (architecture.md,
+		// Repairs).
+		name:  "group set-operator-in-charge, the reply",
+		rpc:   "UpdateGroupOperatorInCharge",
+		argv:  []string{"group", "set-operator-in-charge", "--grp", "2"},
+		reply: &pb.UpdateGroupOperatorInChargeReply{GrpId: 2},
+		want:  `{"grp_id":"2"}` + "\n",
 	},
 	{
 		// An empty map renders as {} rather than null, and the reply's only

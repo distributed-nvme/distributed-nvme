@@ -341,8 +341,8 @@ leaf accepts.
 **Defaults.** dnvctl keeps a leaf-flag default of its own only where a spec
 names one: `sp create`'s redundancy (`sp` — `ctl/sp.go`), the transport flags
 wherever they appear, and the value flags of `sp set-level`,
-`cntlr set-enabled` and `ns set-suspended`. A flag default is not a hidden
-RPC (CT8).
+`cntlr set-enabled`, `ns set-suspended` and `group set-operator-in-charge`.
+A flag default is not a hidden RPC (CT8).
 
 **Shared flag helpers.** Each has one implementation, in `ctl/root.go`, and
 `--help` lists the flags it adds:
@@ -607,6 +607,20 @@ delete leaf's do, and the help says what a start from an older copy
 restores. The mark is a field of the group record, so `sp get`
 shows a slice group's mark as stored and `clone get` a clone meta group's
 (CT4); what ends a mark is `architecture.md`, Repair.
+
+`group set-operator-in-charge` sends `UpdateGroupOperatorInCharge`, which
+sets or clears the group's operator-in-charge flag, the operator's take-over
+of the group's repair from the sp worker (`architecture.md`, Repairs). It
+names the group by `--grp` alone, as `group force-start` does.
+`--operator-in-charge` defaults to true, so the leaf typed without it takes
+the group over and giving the group back is written
+`--operator-in-charge=false`: the take-over is the deliberate act and the
+give-back its undo, the reverse of `cntlr set-enabled`, whose default true
+is the undo. The leaf sends the value given, never a toggle (Conventions).
+The flag is a field of the group record too, so `sp get` shows a slice
+group's flag and `clone get` a clone meta group's, as they show the mark
+(CT4); what the flag stops, and why its write leaves the pool's revision as
+it is, are `architecture.md`, Repairs.
 
 ## Integration test plan
 

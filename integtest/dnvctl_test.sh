@@ -23,7 +23,7 @@
 # needed on the VM — both binaries are built here and scp'd.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 66 commands marshals its argv into exactly the intended request
+# of the 67 commands marshals its argv into exactly the intended request
 # proto, asserted FIELD FOR FIELD against the fake's state.json — a
 # whole-object comparison, so an unexpected key fails as loudly as a wrong
 # value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
@@ -49,7 +49,7 @@
 #
 # Round trips: ctl_exec does ONE ssh per dnvctl invocation and brings back five
 # things — state.json before, the exit code, stderr, stdout, state.json after.
-# That is what keeps a 66-step sweep to 66 ssh calls, and it is why every
+# That is what keeps a 67-step sweep to 67 ssh calls, and it is why every
 # ctl_ok/ctl_fail/ctl_usage MUST run in the PARENT shell: the five results land
 # in globals, and a subshell would drop them (and would swallow a die).
 #
@@ -910,8 +910,8 @@ EOF
 	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
 	# TestClusterCreateExtentSize says the same, and also carries the "no
 	# --extent-size sends no dn_bin_conf" half).
-	# The step keeps its number because the audit below pins 66 steps over
-	# 66 distinct RPCs.
+	# The step keeps its number because the audit below pins 67 steps over
+	# 67 distinct RPCs.
 	sweep_step 01 CreateCluster \
 		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
 		cluster create --name c1 --extent-size 67108864
@@ -1119,8 +1119,9 @@ EOF
 		  \"td_name\":\"t1\"}" \
 		ns set-dev --nqn "$NQN" --idx 1 --td t1 --rev 7
 	# The flag's default is TRUE here (`ns` — `ctl/ns.go`), so the bare form
-	# must send suspended = true — one of the two leaves where an unmentioned
-	# boolean is not false (`cntlr set-enabled`'s --enabled is the other).
+	# must send suspended = true — one of the three leaves where an
+	# unmentioned boolean is not false (`cntlr set-enabled`'s --enabled and
+	# `group set-operator-in-charge`'s --operator-in-charge are the others).
 	sweep_step 43 UpdateNamespaceSuspended \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
@@ -1268,14 +1269,23 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",\"leg_id\":\"2\"}" \
 		group force-start --grp 1 --leg 2 --rev 7
+	# The take-over of a group's repair: --operator-in-charge typed with no
+	# value reaches the wire as operator_in_charge true beside the token.
+	# The leaf without the flag, which sends the same true, and the =false
+	# spelling that gives the group back are behavior stage 9.
+	sweep_step 67 UpdateGroupOperatorInCharge \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",
+		  \"operator_in_charge\":true}" \
+		group set-operator-in-charge --grp 1 --operator-in-charge --rev 7
 
 	# -------------------------------------------------------------------
-	stage audit "all 66 steps left one request record under their trace id"
+	stage audit "all 67 steps left one request record under their trace id"
 	# -------------------------------------------------------------------
 	# CT1's completeness claim, made on the WIRE rather than from a table:
-	# 66 distinct RPCs, 66 distinct trace ids, one interceptor record each.
-	# One log read serves all 66 assertions.
-	assert_eq "${#SWEEP_TRACES[@]}" "66" "the sweep ran 66 steps"
+	# 67 distinct RPCs, 67 distinct trace ids, one interceptor record each.
+	# One log read serves all 67 assertions.
+	assert_eq "${#SWEEP_TRACES[@]}" "67" "the sweep ran 67 steps"
 	local records idx want
 	records=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request") | .trace_id + " " + .method')
@@ -1286,7 +1296,7 @@ EOF
 	done
 	local distinct
 	distinct=$(printf '%s\n' "${SWEEP_RPCS[@]}" | sort -u | grep -c . || true)
-	assert_eq "$distinct" "66" "the 66 steps drove 66 DISTINCT RPCs"
+	assert_eq "$distinct" "67" "the 67 steps drove 67 DISTINCT RPCs"
 }
 
 # ---------------------------------------------------------------------------
@@ -1410,6 +1420,31 @@ EOF
 	assert_req ForceStartGroup \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",\"cancel\":true}"
+
+	# -------------------------------------------------------------------
+	stage 9 "group set-operator-in-charge: bare sets the flag, =false clears it"
+	# -------------------------------------------------------------------
+	# --operator-in-charge defaults to true (`group` — `ctl/group.go`): the
+	# take-over is the deliberate act, so the leaf typed without the flag
+	# sends operator_in_charge true, and with no --rev no sp_rev key.
+	ctl_ok group set-operator-in-charge --grp 1
+	assert_count_delta UpdateGroupOperatorInCharge 1 "the bare leaf is one RPC"
+	assert_req UpdateGroupOperatorInCharge \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"grp_id\":\"1\",
+		  \"operator_in_charge\":true}"
+	# Giving the group back is the = spelling, which sends false: the fake
+	# records a false bool as no key at all.
+	ctl_ok group set-operator-in-charge --grp 1 --operator-in-charge=false \
+		--rev 7
+	assert_count_delta UpdateGroupOperatorInCharge 1 "the give-back is one RPC"
+	assert_req UpdateGroupOperatorInCharge \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\"}"
+	# `--operator-in-charge false`, the spelling an operator may type to
+	# give the group back, leaves `false` as a positional argument: a usage
+	# error that sends nothing, never a take-over.
+	ctl_usage UpdateGroupOperatorInCharge \
+		group set-operator-in-charge --grp 1 --operator-in-charge false
 }
 
 # ---------------------------------------------------------------------------

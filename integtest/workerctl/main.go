@@ -22,10 +22,12 @@
 // and delete-retired-leg do not go through the library: each runs the model
 // operation the gateway's handler runs (architecture.md, Repairs; Retired
 // legs), with no revision token; abort-repair runs it through
-// plant.SetRepairAbort, and force-start runs the operation of the gateway's
-// ForceStartGroup through plant.ForceStartGroup, with no revision token
-// either. So the worker suite drives an operator's repair, and a forced
-// start, as a gateway would.
+// plant.SetRepairAbort, force-start runs the operation of the gateway's
+// ForceStartGroup through plant.ForceStartGroup, and set-operator-in-charge
+// the one of its UpdateGroupOperatorInCharge through
+// plant.SetOperatorInCharge, with no revision token either. So the worker
+// suite drives an operator's repair, a forced start and an operator's
+// take-over of a group as a gateway would.
 //
 // `constants`, `geometry` and `meta-units` are the exceptions: they open no
 // client and read no key, so a suite runs them on the DRIVER, on the binary it
@@ -974,6 +976,7 @@ var commands = []command{
 	{"cancel-repair", cmdCancelRepair},
 	{"abort-repair", cmdAbortRepair},
 	{"force-start", cmdForceStart},
+	{"set-operator-in-charge", cmdSetOperatorInCharge},
 	{"delete-retired-leg", cmdDeleteRetiredLeg},
 	{"list-repairs", cmdListRepairs},
 	{"put-retired-leg", cmdPutRetiredLeg},
@@ -2925,6 +2928,42 @@ func cmdForceStart(g *globals, args []string) {
 		"cancel":   *cancel,
 		"revision": revision,
 		"sp_rev":   spRev,
+	})
+}
+
+// cmdSetOperatorInCharge sets the operator_in_charge flag of the group
+// --grp through plant.SetOperatorInCharge, which runs
+// model.SetGrpOperatorInCharge, the operation of the gateway's
+// UpdateGroupOperatorInCharge, with no revision token; the flag is set
+// unless --operator-in-charge=false clears it, as dnvctl's
+// group set-operator-in-charge spells it. It prints the pool's revision
+// after the write, which the write leaves as it was, so a case can check
+// that no fan-out follows it (architecture.md, Repairs).
+func cmdSetOperatorInCharge(g *globals, args []string) {
+	fs := newFlagSet("set-operator-in-charge", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	var grpId hexUint
+	fs.Var(&grpId, "grp", "grp_id of the group (required)")
+	on := fs.Bool("operator-in-charge", true,
+		"the flag's value; false gives the group back to the worker")
+	fs.Parse(args)
+
+	if uint64(grpId) == 0 {
+		usageDie("set-operator-in-charge: --grp is required")
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	spRev, err := plant.SetOperatorInCharge(ctx, cli, cl, target,
+		uint64(grpId), *on)
+	if err != nil {
+		die("set-operator-in-charge: %v", err)
+	}
+	emit(map[string]any{
+		"grp_id":             idHex(uint64(grpId)),
+		"operator_in_charge": *on,
+		"sp_rev":             spRev,
 	})
 }
 

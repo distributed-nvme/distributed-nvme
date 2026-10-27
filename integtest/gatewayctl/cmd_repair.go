@@ -1,6 +1,7 @@
 // The repair half of the driver's subcommand table: repairs and retired legs
 // (architecture.md, Repairs and Retired legs; gateway.md, Repairs and
-// retired legs), and the forced start of a group.
+// retired legs), the forced start of a group, and the group's
+// operator_in_charge flag.
 //
 // Every RPC here is SP-scoped, so each subcommand has the shape of
 // cmd_vol.go's: `--sp` names the pool, every mutator carries the `--rev`
@@ -209,5 +210,36 @@ func setupForceStartGrp(fs *flag.FlagSet) job {
 			LegId:       uint64(leg),
 			Cancel:      *cancel,
 		})
+	}
+}
+
+// setupSetGrpOperatorInCharge drives UpdateGroupOperatorInCharge. --grp is
+// the group's grp_id. --operator-in-charge defaults to true, as dnvctl's
+// does, because the set is the deliberate act and the clear the undo; the
+// flag package never consumes the next argument for a bool, so the script
+// must write `--operator-in-charge=false`, never `--operator-in-charge
+// false`.
+func setupSetGrpOperatorInCharge(fs *flag.FlagSet) job {
+	spName := fs.String("sp", "", "sp_name")
+	var rev hexUint
+	fs.Var(&rev, "rev", "sp_rev token")
+	var grp hexUint
+	fs.Var(&grp, "grp", "grp_id of the group")
+	on := fs.Bool("operator-in-charge", true,
+		"the value the group's flag takes; write --operator-in-charge=false "+
+			"to clear it")
+	return func(
+		ctx context.Context,
+		client pb.GatewayClient,
+		g *globals,
+	) (any, error) {
+		return client.UpdateGroupOperatorInCharge(ctx,
+			&pb.UpdateGroupOperatorInChargeRequest{
+				ClusterName:      g.cluster,
+				SpName:           *spName,
+				SpRev:            &pb.SpRev{Revision: uint64(rev)},
+				GrpId:            uint64(grp),
+				OperatorInCharge: *on,
+			})
 	}
 }

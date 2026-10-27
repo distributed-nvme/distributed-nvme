@@ -408,6 +408,58 @@ func TestCreateRepairPreconditions(t *testing.T) {
 			mustPut(env.t, env.cli,
 				SliceKey(env.cid, opsSpId, opsSliceId), slice)
 		}, ReasonGrpHasRepair},
+		{"a reserved name under the operator-in-charge flag",
+			func(env *opsEnv, call *repairCall) {
+				env.putOperatorInCharge(opsDataGrpId, "")
+				call.name = opsWorkerRepName
+			}, ReasonGrpOperatorInCharge},
+		// The flag is the lasting cause, so it is named ahead of the
+		// group's repair; an operator's name is never refused for it.
+		{"a reserved name under the flag, with a repair",
+			func(env *opsEnv, call *repairCall) {
+				env.putOperatorInCharge(opsDataGrpId, "other")
+				call.name = opsWorkerRepName
+			}, ReasonGrpOperatorInCharge},
+		{"an operator's name under the flag, with a repair",
+			func(env *opsEnv, _ *repairCall) {
+				env.putOperatorInCharge(opsDataGrpId, "other")
+			}, ReasonGrpHasRepair},
+		// The checks ahead of the flag's: the level gate, the name and the
+		// group's look-up with its deleting clone.
+		{"a reserved name under the flag where reactions stop",
+			func(env *opsEnv, call *repairCall) {
+				env.putOperatorInCharge(opsDataGrpId, "")
+				env.setLevel(pb.SpLevel_SP_LEVEL_NO_THINPOOL)
+				call.name = opsWorkerRepName
+			}, reasonRepairLevelReactions},
+		{"a listed reserved name under the flag",
+			func(env *opsEnv, call *repairCall) {
+				env.putOperatorInCharge(opsDataGrpId, "")
+				conf := env.spConf()
+				conf.RepairNameList = []string{opsWorkerRepName}
+				mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+				call.name = opsWorkerRepName
+			}, ReasonRepairExists},
+		{"a reserved name under a deleting clone's flag",
+			func(env *opsEnv, call *repairCall) {
+				grp := opsCloneGrp(true)
+				grp.OperatorInCharge = true
+				env.putGrpClone(opsCloneName, opsCloneId, grp, true)
+				call.name = opsWorkerRepName
+				call.parent = GrpParent{CloneName: opsCloneName}
+				call.grpId = opsCloneGrpId
+				call.badLeg = opsCloneLegB
+				call.newLeg = RepairNewLeg{
+					Dn: env.dnCand(opsDnA), GrpDnAddrs: env.cloneGrpDnAddrs(),
+				}
+			}, "clone deleting"},
+		// And the bad leg's checks come after it.
+		{"a reserved name under the flag, with a healthy bad leg",
+			func(env *opsEnv, call *repairCall) {
+				env.putOperatorInCharge(opsDataGrpId, "")
+				env.setLegErr(opsDataLegB, 0)
+				call.name = opsWorkerRepName
+			}, ReasonGrpOperatorInCharge},
 		{"bad leg not found", func(_ *opsEnv, call *repairCall) {
 			call.badLeg = opsMetaLegB
 		}, "bad leg not found"},
@@ -1062,12 +1114,13 @@ func TestFinishRepairGiveBackRefusals(t *testing.T) {
 }
 
 // TestRepairOpsAtAnyLevel: every repair and retired-leg operation but the
-// create takes a pool at a level where the operator is in charge, where the
-// arrays still run (loadSpConfAnyLevel): the finish, the cancel, the abort,
-// the delete of a retired leg, the provisioned flip, and the forced start's
-// cancel and clear each succeed at SP_LEVEL_DISABLE. TestSetRepairStage
-// holds the stage move's case, and TestForceStartGroupLevels the levels of
-// the forced start's write, which stops where no group array is built.
+// create takes a pool at every level, those where reactions stop included
+// (loadSpConfAnyLevel): the finish, the cancel, the abort, the delete of a
+// retired leg, the provisioned flip, and the forced start's cancel and clear
+// each succeed at SP_LEVEL_DISABLE. TestSetRepairStage holds the stage
+// move's case, TestForceStartGroupLevels the levels of the forced start's
+// write, which stops where no group array is built, and
+// TestSetGrpOperatorInChargeAtEveryLevel the flag's.
 func TestRepairOpsAtAnyLevel(t *testing.T) {
 	disable := func(env *opsEnv) { env.setLevel(pb.SpLevel_SP_LEVEL_DISABLE) }
 	for _, tc := range []struct {
@@ -2055,6 +2108,7 @@ func TestRepairReasonsAreDistinct(t *testing.T) {
 		ReasonRepairExists, ReasonRepairNotFound, ReasonRetiredLegNotFound,
 		ReasonRetiredListFull, ReasonGrpHasRepair, ReasonStaleRevision,
 		ReasonCandidateChanged, ReasonNoIdLeft, ReasonLegNotNamable,
+		ReasonGrpOperatorInCharge,
 	} {
 		if seen[reason] {
 			t.Errorf("reason %q is used twice", reason)

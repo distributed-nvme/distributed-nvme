@@ -3236,8 +3236,8 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case: an operator's repair and forced start (architecture.md, Repair;
-# dnv-worker.md, AR8, AR11, AR12, AR13)
+# Case: an operator's repair, forced start and take-over of a group
+# (architecture.md, Repair; Repairs; dnv-worker.md, AR8, AR11, AR12, AR13)
 # ---------------------------------------------------------------------------
 
 # repairs_json prints `workerctl list-repairs` for an SP: its repairs by name
@@ -3336,6 +3336,16 @@ grp_mark() { # <sp> <slice> <meta|data> <grp id>
 		[ .${3}_grp_list[] | select((.grp_id | tostring) == \$g)
 		  | .forced_start // empty | \"\\(.leg_id) \\(.revision)\" ]
 		| first // \"none\""
+}
+
+# grp_in_charge prints the operator_in_charge flag of one group of a slice,
+# "true" or "false", or "none" for a group the slice does not hold
+# (architecture.md, Repairs). get-slice prints the flag false too, so the
+# text never falls through to "none" for a group that is there.
+grp_in_charge() { # <sp> <slice> <meta|data> <grp id>
+	slice_json "$1" "$2" | "$JQ" -r --arg g "$4" "
+		[ .${3}_grp_list[] | select((.grp_id | tostring) == \$g)
+		  | .operator_in_charge | tostring ] | first // \"none\""
 }
 
 # REQ_MARK is the jq expression that reads, out of a logged SyncupCntlr
@@ -3669,6 +3679,65 @@ EOF
 		forced_rec_ge 1 "forced start cleared" 1 2 "$mark_rev"
 	assert_eq "$(grp_mark sp0 1 meta 1)" none \
 		"the meta group's mark after its clear at NO_THINPOOL"
+
+	stage 9 "an operator in charge of a group: no create while the flag stands, the worker's own repair still driven, the create once it is cleared"
+	# The operator sets the meta group's flag while the level stops
+	# reactions and lowers the level after, which leaves the worker no pass
+	# to create a repair in (architecture.md, Repairs). The write raises no
+	# revision: no agent reads the flag.
+	local rev_before flagged creates holds aborts cancels
+	rev_before=$(sp_rev_num 1)
+	flagged=$(ctl set-operator-in-charge --sp sp0 --grp 1)
+	assert_field "$flagged" .sp_rev "$rev_before" \
+		"the pool's revision after the flag's write"
+	assert_eq "$(grp_in_charge sp0 1 meta 1)" true "the meta group's flag"
+	creates=$(reaction_cnt repair_create)
+	holds=$(reaction_skip_cnt repair_create grp_operator_in_charge)
+	ctl set-level --sp sp0 --level 0 >/dev/null
+	# Leg 1 is due and the worker's repair of it, from stage 7, is CREATED:
+	# the flag holds the create on every pass, ahead of the group's repair
+	# (AR8).
+	wait_until "$WAIT_SHORT" "two passes holding leg 1: grp_operator_in_charge" \
+		reaction_skip_ge $((holds + 2)) repair_create grp_operator_in_charge
+	# Leg 1 reads healthy again: the drive step still runs under the flag,
+	# so the worker tries to abort its repair, and once the primary confirms
+	# the abort, the stage moves to ABORTED (AR11) and the drive step
+	# cancels the repair (AR8).
+	aborts=$(repair_rec_cnt repair_abort "$wrep" '.trigger == "bad_leg_healthy"')
+	cancels=$(repair_rec_cnt repair_cancel "$wrep" 'true')
+	clear_behavior cn0
+	wait_until "$WAIT_SHORT" "leg 1's err_epoch cleared" leg_epoch_clear sp0 1 1
+	wait_until "$WAIT_SHORT" "the worker's try-to-abort of $wrep under the flag" \
+		repair_rec_ge $((aborts + 1)) repair_abort "$wrep" '.trigger == "bad_leg_healthy"'
+	repair_levers '' "\"$wrep\": {\"abort_confirmed\": true}" ''
+	wait_until "$WAIT_SHORT" "the worker's cancel of $wrep under the flag" \
+		repair_rec_ge $((cancels + 1)) repair_cancel "$wrep" 'true'
+	repair_gone sp0 "$wrep" || die "$wrep outlived its cancel"
+	assert_eq "$(stage_moved_cnt "$wrep" REP_STAGE_ABORTED)" 1 \
+		"one \`repair stage moved\` record for $wrep"
+	# Leg 1 fails again and the group has no repair: once leg 1 is due the
+	# flag alone holds its create, on every pass.
+	holds=$(reaction_skip_cnt repair_create grp_operator_in_charge)
+	repair_levers "$(leg_down 1)" '' ''
+	wait_until "$WAIT_SHORT" "leg 1's err_epoch set" leg_epoch_set sp0 1 1
+	wait_until $((30 + WAIT_SYNCUP)) "two more passes holding leg 1: grp_operator_in_charge" \
+		reaction_skip_ge $((holds + 2)) repair_create grp_operator_in_charge
+	assert_eq "$(reaction_cnt repair_create)" "$creates" \
+		"worker's repairs while the flag stands"
+	assert_eq "$(grp_rep_name sp0 1 meta 1)" "" \
+		"the meta group's repair while the flag stands"
+	# The operator clears the flag, again with no revision, and the worker
+	# creates its repair of leg 1.
+	rev_before=$(sp_rev_num 1)
+	flagged=$(ctl set-operator-in-charge --sp sp0 --grp 1 --operator-in-charge=false)
+	assert_field "$flagged" .sp_rev "$rev_before" \
+		"the pool's revision after the flag's clear"
+	assert_eq "$(grp_in_charge sp0 1 meta 1)" false \
+		"the meta group's flag after its clear"
+	wait_until "$WAIT_SYNCUP" "the worker's repair of leg 1 created" \
+		reaction_ge $((creates + 1)) repair_create
+	[ -n "$(grp_rep_name sp0 1 meta 1)" ] ||
+		die "the meta group names no repair after the worker's create"
 }
 
 # state_rev_ge succeeds once a fake stores a request of one object at

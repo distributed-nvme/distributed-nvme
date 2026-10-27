@@ -262,7 +262,7 @@ func spDeleteCmd() *cobra.Command {
 
 // spGetCmd is GetStoragePool — the SpRev token source (CT3). Its reply carries
 // sp_rev.revision, which is the number an operator feeds back as --rev on the
-// 33 SP-scoped mutators.
+// 34 SP-scoped mutators.
 func spGetCmd() *cobra.Command {
 	return leaf("get", "read a storage pool (GetStoragePool)",
 		func() (job, error) {

@@ -1120,6 +1120,12 @@ func (g *fakeGateway) ForceStartGroup(
 	return serve[*pb.ForceStartGroupReply](g, ctx, "ForceStartGroup", req)
 }
 
+func (g *fakeGateway) UpdateGroupOperatorInCharge(
+	ctx context.Context, req *pb.UpdateGroupOperatorInChargeRequest,
+) (*pb.UpdateGroupOperatorInChargeReply, error) {
+	return serve[*pb.UpdateGroupOperatorInChargeReply](g, ctx, "UpdateGroupOperatorInCharge", req)
+}
+
 func (g *fakeGateway) GetThinDeviceBitmap(
 	ctx context.Context, req *pb.GetThinDeviceBitmapRequest,
 ) (*pb.GetThinDeviceBitmapReply, error) {
