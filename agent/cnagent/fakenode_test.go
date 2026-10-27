@@ -117,6 +117,32 @@ type fakeNode struct {
 	// stale metadata (cnagent.md CN12, the stale-metadata re-add of case 2):
 	// the array starts without it and the agent has to re-add it.
 	assembleDrop map[string]bool
+	// sbFacts are the superblock facts the human-readable `mdadm --examine`
+	// prints of a member that carries one (superblocks): its role, its
+	// recovery offset and its events count, scripted (setSuperblock). A
+	// member with no entry reads a full member at events zero. A zero of the
+	// superblock drops them with it.
+	sbFacts map[string]fakeSuperblock
+	// bblRefused are the members whose bad-block log the kernel refuses to
+	// import, as a stop of a broken array the member came back to can leave
+	// it (cnagent_integtest.md, Lab facts). An assembly that names one
+	// writes its superblock update first, as mdadm does — the new identity
+	// of an --update=uuid among them — and then fails with the lab mdadm's
+	// "failed to add"; one with --update=force-no-bbl drops the log, and the
+	// entry with it, and starts. With refusedLeaves the failed run leaves an
+	// inactive array at its node that holds the member and refusedLeavesAlso
+	// beside it, as an array the stock incremental rule assembled does: a
+	// device there that is no dm device makes that array foreign.
+	bblRefused        map[string]bool
+	refusedLeaves     bool
+	refusedLeavesAlso []string
+	// stopDeleting makes a successful `mdadm --stop` leave the array's
+	// /sys/block entry and its md/ directory, with no member in it and an
+	// array_state that reads EBUSY, until the first read of that
+	// array_state has its answer: the window from md marking a stopped
+	// array deleted until its md/ goes (cnagent.md CN12), which the stop's
+	// own verify then meets (leaveDeleted).
+	stopDeleting bool
 	// cloneHydrated is the hydrated region count dm-clone's metadata holds,
 	// by the storage of the metadata device (cloneMetaKey): an md array's
 	// identity, or a dm device's name. It lives with the storage, not with a
@@ -406,6 +432,8 @@ func newFakeNode() *fakeNode {
 		superblocks:   make(map[string]bool),
 		memberArray:   make(map[string]string),
 		assembleDrop:  make(map[string]bool),
+		sbFacts:       make(map[string]fakeSuperblock),
+		bblRefused:    make(map[string]bool),
 		cloneHydrated: make(map[string]uint64),
 		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
 		files:         make(map[string]string),
@@ -2236,9 +2264,15 @@ func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 	case contains(args, "--examine"):
 		dev := args[len(args)-1]
 		if !f.superblocks[dev] {
+			f.dispatchStderr = "mdadm: No md superblock detected on " + dev
 			return "", 1
 		}
-		return "MD_LEVEL=raid1\nMD_DEVICES=2\nMD_NAME=dnv-x\n", 0
+		if contains(args, "--export") {
+			return "MD_LEVEL=raid1\nMD_DEVICES=2\nMD_NAME=dnv-x\n", 0
+		}
+		return f.mdExamineText(dev), 0
+	case contains(args, "--zero-superblock"):
+		return f.mdZeroSuperblock(args[len(args)-1])
 	case contains(args, "--create"):
 		return f.mdCreate(args)
 	case contains(args, "--assemble"):
@@ -2266,6 +2300,9 @@ func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 		delete(f.arrays, key)
 		delete(f.devNo, key)
 		delete(f.devSize, key)
+		if f.stopDeleting {
+			f.leaveDeleted(array.node)
+		}
 		return "", 0
 	case contains(args, "--add"):
 		return f.mdAdd(args)
@@ -2344,6 +2381,7 @@ func (f *fakeNode) mdCreate(args []string) (string, int) {
 		}
 		members = append(members, member)
 		f.superblocks[member] = true
+		delete(f.sbFacts, member)
 	}
 	uuid := f.newMdUuid()
 	for _, member := range members {
@@ -2373,9 +2411,16 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	if len(members) == 0 {
 		return "", 1
 	}
+	// md starts no array from a half-copied member alone, --run and --force
+	// or not.
+	if len(members) == 1 && f.sbFacts[members[0]].recovery != "" {
+		f.dispatchStderr = "mdadm: Not enough devices to start the array."
+		return "", 1
+	}
 	// The array is the one its started members' superblocks name. Only an
 	// assembly whose started members all carry a superblock a test stamped
-	// by hand mints a new identity; every member it starts takes the
+	// by hand mints a new identity, and an assembly with --update=uuid,
+	// which gives the array a new one; every member it starts takes the
 	// array's identity.
 	uuid := ""
 	for _, member := range members {
@@ -2383,8 +2428,31 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 			break
 		}
 	}
-	if uuid == "" {
+	if uuid == "" || contains(args, "--update=uuid") {
 		uuid = f.newMdUuid()
+	}
+	if contains(args, "--update=force-no-bbl") {
+		for _, member := range members {
+			delete(f.bblRefused, member)
+		}
+	}
+	for _, member := range members {
+		if !f.bblRefused[member] {
+			continue
+		}
+		// mdadm has written its update into every member's superblock
+		// before the kernel refuses this one.
+		if contains(args, "--update=uuid") {
+			for _, member := range members {
+				f.memberArray[member] = uuid
+			}
+		}
+		f.dispatchStderr = "mdadm: failed to add " + member + " to " + dev +
+			": Invalid argument"
+		if f.refusedLeaves {
+			f.leaveInactive(dev, name, member)
+		}
+		return "", 1
 	}
 	for _, member := range members {
 		f.memberArray[member] = uuid
@@ -2395,6 +2463,131 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	array.devNo = f.devNo[dev]
 	f.devSize[dev] = f.arraySize(members)
 	f.publishArray(array)
+	return "", 0
+}
+
+// leaveInactive installs the inactive array a refused assembly leaves at dev
+// (refusedLeaves), holding member and refusedLeavesAlso.
+func (f *fakeNode) leaveInactive(dev, name, member string) {
+	members := append([]string{member}, f.refusedLeavesAlso...)
+	for _, held := range members {
+		if _, ok := f.devNo[held]; !ok {
+			f.devNo[held] = f.newDevNo()
+		}
+	}
+	array := &fakeArray{name: name, members: members,
+		arrayState: "inactive"}
+	f.installArray(dev, array)
+	f.devNo[dev] = f.newDevNo()
+	array.devNo = f.devNo[dev]
+	f.publishArray(array)
+}
+
+// leaveDeleted publishes what md leaves of a stopped array at node while it
+// has marked it deleted (stopDeleting): the node's /sys/block entry and its
+// md/ directory, with no member directory, and an array_state whose read
+// fails EBUSY. Both go once a read of that array_state has its answer.
+// Called with f.mu held.
+func (f *fakeNode) leaveDeleted(node string) {
+	root := sysfsBlockDir + "/" + node
+	state := root + "/md/array_state"
+	f.dirs[root] = true
+	f.dirs[root+"/md"] = true
+	f.errFiles[state] = &fs.PathError{Op: "read", Path: state,
+		Err: syscall.EBUSY}
+	f.afterRead[state] = func() {
+		delete(f.errFiles, state)
+		delete(f.dirs, root+"/md")
+		delete(f.dirs, root)
+	}
+}
+
+// fakeStampedUuid is the identity the human-readable `mdadm --examine`
+// prints of a member whose superblock a test stamped by hand, which names no
+// array of the fake's (fakeNode.memberArray).
+const fakeStampedUuid = "uuid-stamped"
+
+// fakeSuperblock is what the human-readable `mdadm --examine` prints of a
+// member's superblock beyond the fake's fixed lines (fakeNode.sbFacts).
+type fakeSuperblock struct {
+	// role is the "Device Role" line; "" reads "Active device 0".
+	role string
+	// recovery is the "Recovery Offset" line, "" for none: a half-copied
+	// member.
+	recovery string
+	events   uint64
+}
+
+// setSuperblock stamps a superblock on a member device with the facts the
+// human-readable `mdadm --examine` prints of it.
+func (f *fakeNode) setSuperblock(dev string, sb fakeSuperblock) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.superblocks[dev] = true
+	f.sbFacts[dev] = sb
+}
+
+// hasSuperblock reports whether a member device carries md metadata.
+func (f *fakeNode) hasSuperblock(dev string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.superblocks[dev]
+}
+
+// mdExamineText is the human-readable `mdadm --examine` of a member that
+// carries a superblock, in the lab mdadm's layout: "key : value" lines, the
+// key padded on its left; a "Recovery Offset" line only on a half-copied
+// member.
+func (f *fakeNode) mdExamineText(dev string) string {
+	sb := f.sbFacts[dev]
+	role := sb.role
+	if role == "" {
+		role = "Active device 0"
+	}
+	uuid := f.memberArray[dev]
+	if uuid == "" {
+		uuid = fakeStampedUuid
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s:\n", dev)
+	fmt.Fprintf(&b, "          Magic : a92b4efc\n")
+	fmt.Fprintf(&b, "        Version : 1.2\n")
+	fmt.Fprintf(&b, "    Feature Map : 0x1\n")
+	fmt.Fprintf(&b, "     Array UUID : %s\n", uuid)
+	fmt.Fprintf(&b, "     Raid Level : raid1\n")
+	fmt.Fprintf(&b, "   Raid Devices : 2\n")
+	fmt.Fprintf(&b, "    Data Offset : 6144 sectors\n")
+	if sb.recovery != "" {
+		fmt.Fprintf(&b, "Recovery Offset : %s\n", sb.recovery)
+	}
+	fmt.Fprintf(&b, "          State : clean\n")
+	fmt.Fprintf(&b, "         Events : %d\n", sb.events)
+	fmt.Fprintf(&b, "\n")
+	fmt.Fprintf(&b, "   Device Role : %s\n", role)
+	fmt.Fprintf(&b, "   Array State : AA "+
+		"('A' == active, '.' == missing, 'R' == replacing)\n")
+	return b.String()
+}
+
+// mdZeroSuperblock is `mdadm --zero-superblock`: refused for a member an
+// array holds, whatever the array's state, with mdadm's own exit status 2;
+// a device with no superblock answers success, as mdadm does; otherwise the
+// superblock and everything it said go.
+func (f *fakeNode) mdZeroSuperblock(dev string) (string, int) {
+	for _, array := range f.arrays {
+		if contains(array.members, dev) {
+			f.dispatchStderr = "mdadm: Couldn't open " + dev +
+				" for write - not zeroing"
+			return "", 2
+		}
+	}
+	if !f.superblocks[dev] {
+		f.dispatchStderr = "mdadm: Unrecognised md component device - " + dev
+		return "", 0
+	}
+	delete(f.superblocks, dev)
+	delete(f.memberArray, dev)
+	delete(f.sbFacts, dev)
 	return "", 0
 }
 
@@ -2420,6 +2613,8 @@ func (f *fakeNode) mdAdd(args []string) (string, int) {
 	delete(array.memberState, member)
 	delete(array.memberSlot, member)
 	delete(array.unbound, member)
+	// md writes the member's superblock as the array's own.
+	delete(f.sbFacts, member)
 	f.superblocks[member] = true
 	if array.uuid != "" {
 		f.memberArray[member] = array.uuid

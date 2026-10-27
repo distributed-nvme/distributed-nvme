@@ -308,9 +308,9 @@ var allLegs = []uint64{testMetaLeg, testDataLeg, testDataLeg2}
 // TestRepairNewLegIsConnectedAndProbed pins how every cntlr carries a
 // repair's new leg (cnagent.md CN10, CN12): it is connected, wrapped,
 // probed and reported as the group's legs are, the sweep keeps it, it is no
-// member
-// until the add's conditions hold, it never defers its group, and it is
-// never a late member. Here the bad leg serves with an OK row, so the
+// member until the add's conditions hold, it never defers its group, and,
+// with no forced-start mark standing, it is never a late member. Here the
+// bad leg serves with an OK row, so the
 // repair waits: no mdadm command runs against the array, and the verdict
 // says not started. A standby connects the new leg too and reports neither
 // a verdict nor a reading.

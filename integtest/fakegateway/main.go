@@ -1114,6 +1114,12 @@ func (g *fakeGateway) DeleteRetiredLeg(
 	return serve[*pb.DeleteRetiredLegReply](g, ctx, "DeleteRetiredLeg", req)
 }
 
+func (g *fakeGateway) ForceStartGroup(
+	ctx context.Context, req *pb.ForceStartGroupRequest,
+) (*pb.ForceStartGroupReply, error) {
+	return serve[*pb.ForceStartGroupReply](g, ctx, "ForceStartGroup", req)
+}
+
 func (g *fakeGateway) GetThinDeviceBitmap(
 	ctx context.Context, req *pb.GetThinDeviceBitmapRequest,
 ) (*pb.GetThinDeviceBitmapReply, error) {

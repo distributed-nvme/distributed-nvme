@@ -249,11 +249,12 @@ func TestLegRepairRedundNoneEndsThePass(t *testing.T) {
 }
 
 // TestLegRepairCreateConditionsInOrder pins the order of AR8's create
-// conditions: an md-raid1 pool, a leg with one side, the group's row OK in a
-// report of the snapshot's revision or later, the healthy-leg test, and no
-// repair on the group. With every hold armed the first one is logged; each
-// case lifts the hold the case before it logged, so the next one shows, and
-// the last case creates. Each hold runs no scan and no op.
+// conditions: an md-raid1 pool, a leg with one side, no forced-start mark on
+// the group, the group's row OK in a report of the snapshot's revision or
+// later, the healthy-leg test, and no repair on the group. With every hold
+// armed the first one is logged; each case lifts the hold the case before it
+// logged, so the next one shows, and the last case creates. Each hold runs
+// no scan and no op.
 func TestLegRepairCreateConditionsInOrder(t *testing.T) {
 	type hold struct {
 		arm    func(h *reactHarness)
@@ -273,6 +274,11 @@ func TestLegRepairCreateConditionsInOrder(t *testing.T) {
 				SideId: 999, AddrPort: reactDnD,
 			})
 		}, reasonTwoSides},
+		{func(h *reactHarness) {
+			// An operator's forced-start mark from leg B, which the
+			// primary's report has not caught up with.
+			withMark(h.dataGrp(), reactDataLegB)
+		}, reasonGrpForcedStart},
 		{func(h *reactHarness) {
 			h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_ERROR)
 		}, reasonGrpRowError},
@@ -318,8 +324,8 @@ func TestLegRepairCreateConditionsInOrder(t *testing.T) {
 // the meta group, whose leg has the smaller id, and the data group's leg is
 // still repaired in the same pass. Every one of them can last: a migration
 // for hours, a stopped array until its legs come back, a group with no
-// healthy leg until one answers again, an operator's repair until the
-// operator acts.
+// healthy leg until one answers again, an operator's repair or forced-start
+// mark until the operator acts.
 func TestLegRepairCreateHoldsOnlyItsGroup(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
@@ -330,6 +336,9 @@ func TestLegRepairCreateHoldsOnlyItsGroup(t *testing.T) {
 			leg.SideList = append(leg.SideList, &pb.Side{
 				SideId: 999, AddrPort: reactDnD,
 			})
+		}},
+		{reasonGrpForcedStart, func(h *reactHarness) {
+			withMark(h.metaGrp(), reactMetaLegB)
 		}},
 		{reasonGrpRowError, func(h *reactHarness) {
 			h.setGrpRow(reactMetaGrp, pb.ResStatus_RES_STATUS_ERROR)

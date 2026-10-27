@@ -3236,8 +3236,8 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case: an operator's repair (architecture.md, Repair; dnv-worker.md, AR11,
-# AR12)
+# Case: an operator's repair and forced start (architecture.md, Repair;
+# dnv-worker.md, AR8, AR11, AR12, AR13)
 # ---------------------------------------------------------------------------
 
 # repairs_json prints `workerctl list-repairs` for an SP: its repairs by name
@@ -3296,6 +3296,54 @@ retired_rec_ge() { # <n> <msg> <leg id> [reason]
 	shift
 	count_ge "$n" retired_rec_cnt "$@"
 }
+
+# refusal_rec_cnt counts the `repair stage skipped` records of one repair
+# that log the primary's refusal of a take-back with its text (dnv-worker.md
+# AR11).
+refusal_rec_cnt() { # <rep name> <refusal>
+	wcount 'select(.msg == "repair stage skipped")
+		| select(.rep_name == $r and .reason == "take_back_refused"
+			and .refusal == $t)' --arg r "$1" --arg t "$2"
+}
+
+refusal_rec_ge() { # <n> <rep name> <refusal>
+	local n=$1
+	shift
+	count_ge "$n" refusal_rec_cnt "$@"
+}
+
+# forced_rec_cnt counts the records <msg> of the forced-start clear
+# (dnv-worker.md AR13) that name the group and the leg of a mark, and the
+# mark's revision when one is given.
+forced_rec_cnt() { # <msg> <grp id> <leg id> [mark revision]
+	wcount 'select(.msg == $m)
+		| select((.grp_id | tostring) == $g and (.leg_id | tostring) == $l)
+		| select($rev == "" or (.mark_revision | tostring) == $rev)' \
+		--arg m "$1" --arg g "$2" --arg l "$3" --arg rev "${4:-}"
+}
+
+forced_rec_ge() { # <n> <msg> <grp id> <leg id> [mark revision]
+	local n=$1
+	shift
+	count_ge "$n" forced_rec_cnt "$@"
+}
+
+# grp_mark prints the forced-start mark of one group of a slice as "<leg id>
+# <revision>", or "none" while the group carries none (architecture.md,
+# Repair).
+grp_mark() { # <sp> <slice> <meta|data> <grp id>
+	slice_json "$1" "$2" | "$JQ" -r --arg g "$4" "
+		[ .${3}_grp_list[] | select((.grp_id | tostring) == \$g)
+		  | .forced_start // empty | \"\\(.leg_id) \\(.revision)\" ]
+		| first // \"none\""
+}
+
+# REQ_MARK is the jq expression that reads, out of a logged SyncupCntlr
+# request, the forced-start mark of the group $g as grp_mark prints one: the
+# mark rides to every cntlr in its group's slice (dnv-worker.md RW14).
+REQ_MARK='[ .id_to_slice[]? | (.meta_grp_list[]?, .data_grp_list[]?)
+	| select((.grp_id | tostring) == $g) | .forced_start // empty
+	| "\(.leg_id) \(.revision)" ] | first // "none"'
 
 # repair_levers writes the levers of sp0's primary cntlr, C1 on cn 1 (fake
 # cn0): row overrides, the verdicts on repairs by rep_name, and the readings
@@ -3462,6 +3510,185 @@ case_repair() {
 	retired_leg_gone sp0 64 || die "the retired leg outlived the timer's delete"
 	assert_eq "$(dn_free 3)" $((dn3_free + 1)) \
 		"dn 3 got the retired side's extents back"
+
+	stage 6 "a take-back the primary refuses, logged on every pass, then aborted and cancelled"
+	# A young retired leg of the data group, which the timer passes over
+	# (AR12), on dn 1, which holds no leg of the group since leg 3's delete,
+	# and an operator's repair r2 that takes it back as its new leg.
+	ctl put-retired-leg --sp sp0 --id 0x50 --side 0x51 --grp 2 --leg-idx 2 \
+		--dn 1 --slot 0 --age 0 >/dev/null
+	repair_levers "$(leg_down 4)" '' ''
+	wait_until "$WAIT_SHORT" "leg 4's err_epoch set" leg_epoch_set sp0 1 4
+	ctl create-repair --sp sp0 --name r2 --grp 2 --bad-leg 4 \
+		--retired-leg 0x50 >/dev/null
+	retired_leg_gone sp0 80 || die "leg 0x50 is still a retired leg in r2"
+	# The primary refuses to add the new leg, whose md events count is above
+	# the array's (cnagent.md CN12): the worker logs the refusal with its
+	# text on every pass and moves no stage (AR11).
+	local refusal="leg 0x50 taken from a retired leg holds newer data than the array"
+	repair_levers "$(leg_down 4)" "\"r2\": {\"refusal\": \"$refusal\"}" ''
+	wait_until $((2 * WAIT_SHORT)) "two passes logging r2's refusal" \
+		refusal_rec_ge 2 r2 "$refusal"
+	assert_field "$(repair_json sp0 r2)" .rep_stage REP_STAGE_CREATED \
+		"r2 while the primary refuses its new leg"
+	assert_eq "$(stage_moved_cnt r2 REP_STAGE_STARTED)" 0 \
+		"stage moves of a refused repair"
+	# The operator aborts and cancels it, which gives the leg back as a
+	# retired leg.
+	ctl abort-repair --sp sp0 --name r2 >/dev/null
+	repair_levers "$(leg_down 4)" '"r2": {"abort_confirmed": true}' ''
+	wait_until "$WAIT_SHORT" "r2 at REP_STAGE_ABORTED" \
+		repair_stage_is sp0 r2 REP_STAGE_ABORTED
+	clear_behavior cn0
+	wait_until "$WAIT_SHORT" "leg 4's err_epoch cleared" leg_epoch_clear sp0 1 4
+	ctl cancel-repair --sp sp0 --name r2 >/dev/null
+	repair_gone sp0 r2 || die "r2 outlived its cancel"
+	retired_leg_listed sp0 80 ||
+		die "leg 0x50 is no retired leg again after r2's cancel"
+
+	stage 7 "a forced start: cleared from the primary's report, holding leg repair while it stands"
+	# Every leg in sync and the group's row OK: the primary's first report
+	# of an observation at the mark's revision or later clears the mark
+	# (AR13), so the primary was carried it before the clear.
+	local marked mark_rev clear_rev
+	marked=$(ctl force-start --sp sp0 --grp 1 --leg 1)
+	mark_rev=$(jq_of "$marked" .revision)
+	log "  the mark on leg 1 of the meta group at revision $mark_rev"
+	wait_until "$WAIT_SHORT" "the mark on leg 1 cleared" \
+		forced_rec_ge 1 "forced start cleared" 1 1 "$mark_rev"
+	req_ge 1 cn0 SyncupCntlr "($REQ_MARK) == \$m" --arg g 1 \
+		--arg m "1 $mark_rev" ||
+		die "cn0 was carried no SyncupCntlr with the mark before its clear"
+	assert_eq "$(grp_mark sp0 1 meta 1)" none "the meta group's mark after its clear"
+	# Leg 1 fails on the primary, and the primary holds no leg in sync, so
+	# neither leg 1, the leg the next mark names, nor a leg that serves: the
+	# mark stands and rides to every cntlr, and once leg 1 is due leg repair
+	# holds the group on every pass and creates no repair (AR8). The group's
+	# row reads OK, so the gate on the row would let the create run, and the
+	# hold comes before the healthy-leg test, so no pass reaches that test's
+	# skip. The lever goes in before the mark, as the default reading, every
+	# leg in sync, would clear the mark at once (AR13); leg 1 may get its
+	# err_epoch before the mark, but it is due only leg_unhealthy after that,
+	# long after the mark is in.
+	local no_healthy
+	no_healthy=$(reaction_skip_cnt repair_create no_healthy_leg)
+	repair_levers "$(leg_down 1)" '' '"1": {"in_sync": []}'
+	marked=$(ctl force-start --sp sp0 --grp 1 --leg 1)
+	mark_rev=$(jq_of "$marked" .revision)
+	log "  the mark on leg 1 of the meta group at revision $mark_rev"
+	wait_until "$WAIT_SHORT" "leg 1's err_epoch set" leg_epoch_set sp0 1 1
+	assert_eq "$(grp_mark sp0 1 meta 1)" "1 $mark_rev" "the meta group's mark"
+	wait_until "$WAIT_SHORT" "cn0: SyncupCntlr carrying the mark" \
+		req_ge 1 cn0 SyncupCntlr "($REQ_MARK) == \$m" --arg g 1 \
+		--arg m "1 $mark_rev"
+	wait_until "$WAIT_SHORT" "cn1: SyncupCntlr carrying the mark" \
+		req_ge 1 cn1 SyncupCntlr "($REQ_MARK) == \$m" --arg g 1 \
+		--arg m "1 $mark_rev"
+	wait_until $((30 + WAIT_SYNCUP)) "two passes holding leg 1: grp_forced_start" \
+		reaction_skip_ge 2 repair_create grp_forced_start
+	assert_eq "$(reaction_cnt repair_create)" 0 \
+		"worker's repairs while the mark stands"
+	assert_eq "$(reaction_skip_cnt repair_create no_healthy_leg)" \
+		"$no_healthy" \
+		"passes that reached the healthy-leg test while the mark stands"
+	assert_eq "$(forced_rec_cnt "forced start cleared" 1 1 "$mark_rev")" 0 \
+		"clears while the primary holds no leg in sync"
+	assert_eq "$(grp_mark sp0 1 meta 1)" "1 $mark_rev" \
+		"the meta group's mark while its start is not done"
+	# The primary holds leg 2 in sync, on a leg whose row reads OK, and leg
+	# 1 still out of sync: the array runs on a member that serves, so the
+	# mark is cleared (AR13), its bump hands every cntlr the group without
+	# it, and leg repair creates its repair of leg 1.
+	repair_levers "$(leg_down 1)" '' '"1": {"in_sync": [2]}'
+	wait_until "$WAIT_SHORT" "the mark on leg 1 cleared" \
+		forced_rec_ge 1 "forced start cleared" 1 1 "$mark_rev"
+	assert_eq "$(grp_mark sp0 1 meta 1)" none "the meta group's mark after its clear"
+	clear_rev=$(sp_rev_num 1)
+	wait_until "$WAIT_SHORT" "cn0: a SyncupCntlr without the mark" \
+		req_ge 1 cn0 SyncupCntlr "((.revision | tonumber) >= (\$r | tonumber))
+			and ($REQ_MARK) == \"none\"" --arg g 1 --arg r "$clear_rev"
+	wait_until "$WAIT_SHORT" "cn1: a SyncupCntlr without the mark" \
+		req_ge 1 cn1 SyncupCntlr "((.revision | tonumber) >= (\$r | tonumber))
+			and ($REQ_MARK) == \"none\"" --arg g 1 --arg r "$clear_rev"
+	wait_until "$WAIT_SYNCUP" "the worker's repair of leg 1 created" \
+		reaction_ge 1 repair_create
+	# Its new side on dn 3 is zeroed and the worker's flip marks it
+	# provisioned (RW18). The flip raises the SP's revision, so it lands
+	# before the next stage reads that revision to time its hold lever.
+	local wrep
+	wrep=$(grp_rep_name sp0 1 meta 1)
+	[ -n "$wrep" ] || die "the meta group names no repair after the worker's create"
+	wait_until "$WAIT_SYNCUP" "the worker's repair's new side provisioned" \
+		repair_side_provisioned sp0 "$wrep"
+
+	stage 8 "a forced start at a level where reactions stop: no clear from an older report or a row not OK, then the clear"
+	# At NO_THINPOOL no reaction runs and the clear still does (AR3,
+	# AR13). The primary holds its syncups, so its reports stay of an
+	# observation older than the mark while they read the group's row OK
+	# and leg 2 in sync: the mark stands. The hold lever goes on only once
+	# cn0 has stored the SP's current revision, the level's or a later
+	# one: a syncup of the cntlr still in flight when the lever lands would
+	# be held in its place, and the worker sends the mark's syncup only
+	# after that one ends, at its own deadline.
+	ctl set-level --sp sp0 --level 48 >/dev/null
+	wait_until "$WAIT_SYNCUP" "cn0 stored the SP's current revision" \
+		state_at_sp_rev cn0 "cntlr 1:1" 1
+	set_behavior cn0 <<EOF
+{"objects": {"cntlr 1:1": {"rows": {$(leg_down 1)}, "hang_syncup": true}}}
+EOF
+	marked=$(ctl force-start --sp sp0 --grp 1 --leg 2)
+	mark_rev=$(jq_of "$marked" .revision)
+	log "  the mark on leg 2 of the meta group at revision $mark_rev"
+	wait_until "$WAIT_SHORT" "cn0: a held SyncupCntlr carrying the mark" \
+		req_ge 1 cn0 SyncupCntlr "($REQ_MARK) == \$m" --arg g 1 \
+		--arg m "2 $mark_rev"
+	assert_none_for 4 "a clear from a report older than the mark" \
+		forced_rec_ge 1 "forced start cleared" 1 2 "$mark_rev"
+	local held_rev
+	held_rev=$(state_revision cn0 "cntlr 1:1") ||
+		die "cn0's state.json could not be read"
+	want_number "$held_rev" "cn0's stored revision while it holds its syncups"
+	[ "$held_rev" -lt "$mark_rev" ] ||
+		die "cn0 stored revision $held_rev, the mark's or later, while it held its syncups"
+	# The primary applies the mark's syncup and reads the group's row
+	# ERROR: a report of the mark's revision whose row does not read OK
+	# clears nothing either.
+	set_behavior cn0 <<EOF
+{"objects": {"cntlr 1:1": {"rows": {$(leg_down 1),
+  "grp_id_to_md_raid.1": {"status": "ERROR", "details": "array broken"}}}}}
+EOF
+	wait_until "$WAIT_SYNCUP" "cn0 stored the mark's revision" \
+		state_rev_ge cn0 "cntlr 1:1" "$mark_rev"
+	assert_none_for 4 "a clear while the group's row reads ERROR" \
+		forced_rec_ge 1 "forced start cleared" 1 2 "$mark_rev"
+	assert_eq "$(grp_mark sp0 1 meta 1)" "2 $mark_rev" \
+		"the meta group's mark while its row reads ERROR"
+	# The row reads OK again: the clear runs at NO_THINPOOL.
+	repair_levers "$(leg_down 1)" '' ''
+	wait_until "$WAIT_SHORT" "the mark on leg 2 cleared at NO_THINPOOL" \
+		forced_rec_ge 1 "forced start cleared" 1 2 "$mark_rev"
+	assert_eq "$(grp_mark sp0 1 meta 1)" none \
+		"the meta group's mark after its clear at NO_THINPOOL"
+}
+
+# state_rev_ge succeeds once a fake stores a request of one object at
+# <revision> or later.
+state_rev_ge() { # <agent> <object key> <revision>
+	local got
+	got=$(state_revision "$1" "$2") || return 1
+	[ "$got" != none ] && [ "$got" -ge "$3" ]
+}
+
+# state_at_sp_rev succeeds once a fake stores a request of one cntlr at the
+# SP's SpRev as it reads at that call, or later: no syncup of the cntlr at an
+# older revision is in flight then.
+state_at_sp_rev() { # <agent> <object key> <sp id>
+	local rev
+	rev=$(sp_rev "$3") || return 1
+	case "$rev" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	state_rev_ge "$1" "$2" "$rev"
 }
 
 reaction_skip_ge() { # <n> <kind> <reason>

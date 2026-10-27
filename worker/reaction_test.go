@@ -249,6 +249,9 @@ type reactionCall struct {
 	repId     uint64
 	stage     pb.RepStage
 	expectRev uint64
+	// The mark the forced-start clear (AR13) was handed: the group's parent
+	// and id, and the mark's leg and revision as the snapshot read them.
+	mark model.ForcedStartRef
 }
 
 // candQuery is one allocator scan a pass ran.
@@ -296,6 +299,12 @@ type fakeReactionOps struct {
 	// pass step while the reactions of the same pass stay healthy.
 	stageErr  error
 	retireErr error
+	// markErr fails the forced-start clear (AR13) apart from opErr, as
+	// stageErr fails a stage move, and markSkip makes it skip the mark as
+	// one the store no longer holds, as model.ClearForcedStart skips a mark
+	// replaced or withdrawn since the snapshot.
+	markErr  error
+	markSkip bool
 	// repairErr fails the leg repair ops (AR8) on the repair they name,
 	// ahead of opErr, so a test can refuse the drive step on one repair
 	// while it drives another. finishRes is what a finish that commits
@@ -303,9 +312,10 @@ type fakeReactionOps struct {
 	repairErr map[string]error
 	finishRes model.FinishRepairResult
 	// spRev is the SpRev revision as the ops see it: the harness sets it to
-	// the snapshot's SpRevision before each pass, and a stage move, a clone
-	// drain's final step and a retired leg's delete that succeed bump it,
-	// as model.SetRepairStage, model.FinishCloneDelete and
+	// the snapshot's SpRevision before each pass, and a stage move, a
+	// forced-start clear, a clone drain's final step and a retired leg's
+	// delete that succeed bump it, as model.SetRepairStage,
+	// model.ClearForcedStart, model.FinishCloneDelete and
 	// model.DeleteRetiredLeg bump SpRev. deleteRetiredLeg refuses an
 	// expected revision that differs, as model's revision check does, so a
 	// pass that bumped SpRev before its retire timer sees the delete
@@ -520,8 +530,9 @@ func (o *fakeReactionOps) setRepairAbort(
 	return 0, err
 }
 
-// The two pass steps of a repair (AR11, AR12) record like every other
-// mutation and fail with their own canned errors.
+// The two pass steps of a repair (AR11, AR12) and the forced-start clear
+// (AR13) record like every other mutation and fail with their own canned
+// errors.
 
 func (o *fakeReactionOps) setRepairStage(
 	ctx context.Context,
@@ -544,6 +555,30 @@ func (o *fakeReactionOps) setRepairStage(
 	}
 	o.spRev++
 	return nil
+}
+
+func (o *fakeReactionOps) clearForcedStart(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref model.ForcedStartRef,
+) (bool, uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, reactionCall{
+		op: "clear_forced_start", sliceId: ref.Parent.SliceId,
+		cloneName: ref.Parent.CloneName, grpId: ref.GrpId, mark: ref,
+	})
+	if o.markErr != nil {
+		return false, 0, o.markErr
+	}
+	if o.markSkip {
+		return false, 0, nil
+	}
+	o.spRev++
+	return true, o.spRev, nil
 }
 
 func (o *fakeReactionOps) deleteRetiredLeg(
@@ -763,7 +798,8 @@ type reactHarness struct {
 	// of a primary that has answered — and gives each primary child's info
 	// a reading of each group of the state that the info does not read yet:
 	// every leg of its leg_list held in sync and the array whole
-	// (grp_id_to_grp_info), and a row OK for each group that has none
+	// (grp_id_to_grp_info), with a leg row OK for each of those legs that has
+	// none (leg_id_to_leg), and a row OK for each group that has none
 	// (grp_id_to_md_raid), as the report of a primary whose arrays run
 	// whole would. The tests of the other rules then need no reading of
 	// their own, and the tests of the gate, of the in-sync rule, of the
@@ -893,7 +929,8 @@ func (h *reactHarness) pass() {
 // fillGrpInfo is inSyncAll's reading: the snapshot's primary gets an empty
 // info when it has no child, and on every primary child, each group of the
 // state the pass loads that the info holds no reading of reads whole with
-// every leg_list leg in sync, and each group with no row reads OK.
+// every leg_list leg in sync, each of those legs with no row of its own
+// reading OK (leg_id_to_leg), and each group with no row reads OK.
 func (h *reactHarness) fillGrpInfo() {
 	h.ops.mu.Lock()
 	state := h.ops.state
@@ -935,6 +972,12 @@ func (h *reactHarness) fillGrpInfo() {
 			for _, leg := range grp.GetLegList() {
 				reading.InSyncLegIdList = append(
 					reading.InSyncLegIdList, leg.GetLegId())
+				if info.LegIdToLeg == nil {
+					info.LegIdToLeg = map[uint64]*pb.ResInfo{}
+				}
+				if _, ok := info.LegIdToLeg[leg.GetLegId()]; !ok {
+					info.LegIdToLeg[leg.GetLegId()] = resOk("leg")
+				}
 			}
 			info.GrpIdToGrpInfo[grp.GetGrpId()] = reading
 		}

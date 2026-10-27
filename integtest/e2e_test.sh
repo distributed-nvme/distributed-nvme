@@ -422,7 +422,7 @@ THR_CUT_SHOW="$THR_CUT_SHOW --thr-side $THR_CUT_SIDE --thr-leg $THR_CUT_LEG"
 # time out of `sp get`, which is also the proof that $THR split into eight
 # words instead of arriving as one; react's progress messages name the
 # individual threshold the operator is waiting on (primary_unhealthy in step
-# 3, cntlr_unhealthy in step 4, side/leg_unhealthy in steps 5 and 6); and
+# 3, cntlr_unhealthy in step 4, side/leg_unhealthy in steps 5 to 8); and
 # three numbers are computed from them. Two are react step 6's, on a group
 # with no healthy leg: a wait, its watch for side_unhealthy plus a few
 # passes, which must outlast the threshold it proves AR8 holds through,
@@ -1657,13 +1657,16 @@ derive_params() {
 	# two. CAP is what keeps the bound from over-charging raid1 on exactly two
 	# DN VMs.
 	#
-	# WHAT THIS BOUND IS NOT DERIVED FROM. react's AR6 grow and AR8 repairs
-	# add sides of their own, and AR8 wants a DN carrying exactly one side of
-	# the sp; copy's migration and repair stages want a DN on a VM outside
-	# the group. Those need no SIDE-LESS DN — an occupied DN still reports
-	# free_ext_cnt > 0. Copy step 6 does: it needs step 5's fresh new leg on
-	# a DN that carries no other side, so that killing that DN takes down the
-	# new leg alone. The bound does not derive that either, as the side-less
+	# WHAT THIS BOUND IS NOT DERIVED FROM. react's AR6 grow adds sides of its
+	# own, and AR8 wants a DN carrying exactly one side of the sp; copy's
+	# migration and repair stages want a DN on a VM outside the group. Those
+	# need no SIDE-LESS DN — an occupied DN still reports free_ext_cnt > 0.
+	# React steps 5 to 8 do: each steers its worker's repair's fresh leg onto
+	# an enabled side-less DN (react_steer), so that a later step can kill
+	# that leg's DN alone, and dies when none is left. Copy step 6 does too:
+	# it needs step 5's fresh new leg on a DN that carries no other side, so
+	# that killing that DN takes down the new leg alone. The bound does not
+	# derive these either, as the side-less
 	# DNs it leaves on LEGS VMs can be on the group's own. The gateway draws
 	# step 5's new leg at random among one DN of each location (pickDns,
 	# model.PickRandom; architecture.md, Finding DN candidates): the first DN
@@ -1715,7 +1718,10 @@ derive_params() {
 				"DIES without them. The copy case's step 6"
 			log "         needs step 5's new leg on a side-less disk node;" \
 				"below the bound nothing makes the"
-			log "         scan pick one, and step 6 DIES on an occupied one."
+			log "         scan pick one, and step 6 DIES on an occupied one." \
+				"React steps 5 to 8 need"
+			log "         a side-less disk node for each worker's repair's" \
+				"fresh leg, and DIE without one."
 			if [ "$DNS_PER_VM" -lt "$create_bound" ]; then
 				log "         It is also below the create's own bound" \
 					"$create_bound, so \`sp create\` may itself fail"
@@ -4147,6 +4153,125 @@ md_sync_speed() {
 		return 1
 	}
 	md_sync_read "$1"
+}
+
+# md_array_state <dm name> prints the md/array_state of the array that holds
+# the dm device <dm name> as a member, md's own word for whether the array
+# runs (cnagent.md CN12 names the states that do), or "none" when no array
+# holds it. react's forced-start steps wait on it for an array md no longer
+# runs. It reads sysfs alone, never the member device, so it answers while
+# the member's disk node is dead. It fails, saying so, on a device that is
+# not a dm device and on a read that fails.
+md_array_state() {
+	local where node dmk st
+	if ! where=$(md_member_of "$1" 2>&1); then
+		case "$where" in
+		*"no array holds"*)
+			echo none
+			return 0
+			;;
+		esac
+		echo "$where" >&2
+		return 1
+	fi
+	read -r node dmk <<<"$where"
+	st=$(cat "/sys/block/$node/md/array_state") || return 1
+	echo "$st"
+}
+
+# md_bad_blocks <dm name> prints the bad-block entries md holds for the dm
+# device <dm name> as a member of an array, from the member's md/bad_blocks
+# and md/unacknowledged_bad_blocks, as "bad_blocks=<entries>
+# unacknowledged=<entries>", each entry "<sector>+<length>" and the entries
+# comma-separated, or "none" when it holds none. md serves a region it holds
+# as bad on a member from no other copy, so a lone member's bad region reads
+# back as an IO error (cnagent.md, Known limits). It reads sysfs alone. It
+# fails, saying so, on a device or an array that is not there and on a read
+# that fails.
+md_bad_blocks() {
+	local where node dmk dir a u
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	dir=/sys/block/$node/md/dev-$dmk
+	a=$(awk '{printf "%s%s+%s", (NR > 1 ? "," : ""), $1, $2}' \
+		"$dir/bad_blocks") || return 1
+	u=$(awk '{printf "%s%s+%s", (NR > 1 ? "," : ""), $1, $2}' \
+		"$dir/unacknowledged_bad_blocks") || return 1
+	if [ -z "$a$u" ]; then
+		echo none
+		return 0
+	fi
+	echo "bad_blocks=${a:-none} unacknowledged=${u:-none}"
+}
+
+# md_examine <dm name> prints what the md superblock on the dm device <dm
+# name> records of that member, read with mdadm's human-readable --examine,
+# the one form that prints the member's role and recovery offset beside its
+# events count (cnagent.md CN12): "role=<r> recovery=<sectors|none>
+# events=<n>", the role with its spaces turned to underscores
+# ("Active_device_0", "spare"), and recovery none for a member whose
+# superblock records no copy in progress. A device with no superblock prints
+# "none". mdadm gives a read of the member that fails the same answer as a
+# member with no superblock, "No md superblock detected" with exit status 1
+# (cnagent.md CN12), so that answer prints none only once the member's
+# first blocks, where its superblock lies, read after a cache drop (E2E7):
+# clean pages alone, all a member device that nothing writes through the
+# cache can hold, and no sync, whose wait on other devices' writes nothing
+# bounds. It fails, saying so, on a device that is not there, on that
+# answer over a member whose first blocks do not read or a drop that fails,
+# on an examine that fails any other way and on an answer that lacks the
+# role or the events count. The examine reads the member device, so it is
+# for a member whose disk node serves.
+md_examine() {
+	local out rc rd role rec ev nl=$'\n'
+	if [ ! -b "/dev/mapper/$1" ]; then
+		echo "md_examine: /dev/mapper/$1 is not a block device" >&2
+		return 1
+	fi
+	out=$(mdadm --examine "/dev/mapper/$1" 2>&1) && rc=0 || rc=$?
+	case "$rc:$out" in
+	0:*) ;;
+	1:*"No md superblock detected"*)
+		if ! echo 3 >/proc/sys/vm/drop_caches; then
+			echo "md_examine: the cache drop before the read of" \
+				"/dev/mapper/$1 failed" >&2
+			return 1
+		fi
+		if ! rd=$(dd if="/dev/mapper/$1" of=/dev/null bs=4096 count=2 \
+			status=none 2>&1); then
+			echo "md_examine: mdadm finds no md superblock on" \
+				"/dev/mapper/$1, whose first blocks do not read:" \
+				"${rd//$nl/; }" >&2
+			return 1
+		fi
+		echo none
+		return 0
+		;;
+	*)
+		echo "md_examine: mdadm --examine /dev/mapper/$1 exited $rc:" \
+			"${out//$nl/; }" >&2
+		return 1
+		;;
+	esac
+	role=$(printf '%s\n' "$out" |
+		awk -F' : ' '$1 ~ /^ *Device Role$/ {print $2; exit}')
+	rec=$(printf '%s\n' "$out" |
+		awk -F' : ' '$1 ~ /^ *Recovery Offset$/ {print $2; exit}')
+	ev=$(printf '%s\n' "$out" |
+		awk -F' : ' '$1 ~ /^ *Events$/ {print $2; exit}')
+	rec=${rec%% *}
+	ev=${ev%% *}
+	case "$ev" in
+	'' | *[!0-9]*)
+		echo "md_examine: /dev/mapper/$1's events count reads '$ev'" >&2
+		return 1
+		;;
+	esac
+	if [ -z "$role" ]; then
+		echo "md_examine: /dev/mapper/$1's superblock names no role" >&2
+		return 1
+	fi
+	echo "role=${role// /_} recovery=${rec:-none} events=$ev"
 }
 
 # --- the copy case's slowed source (e2e_integtest.md, The cases, copy) ------
@@ -14448,8 +14573,9 @@ copy_rep_leg_epoch() { # <position> <leg id> <healthy|dead>
 	id=$(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$1].leg_id")
 	[ "$id" = "$2" ] ||
 		die "leg $2 left position $1 of slice 0's first data group for" \
-			"leg '$id' before its repair: under the quiet thresholds no" \
-			"reaction may move it (dnv-worker.md AR8)"
+			"leg '$id' while the step waited on its health epoch, where the" \
+			"step's thresholds or its level let no reaction move it" \
+			"(dnv-worker.md AR3, AR8)"
 	epoch=$(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$1].err_epoch")
 	sig="leg $2 err_epoch $epoch, its side's"
 	sig="$sig $(jq_of "$CTL_OUT" "$COPY_GRP0.leg_list[$1].side_list[0].err_epoch")"
@@ -15058,7 +15184,8 @@ copy_ret_side_healthy() { # <leg id>
 	epoch=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$1\"].side.err_epoch // \"absent\"")
 	prov=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$1\"].side.provisioned | tostring")
 	[ "$epoch" != absent ] ||
-		die "retired leg $1 left \`retired-leg list\` before step 6 took it back"
+		die "retired leg $1 left \`retired-leg list\` while the step waited" \
+			"for its side to read healthy"
 	sig="retired leg $1's side: err_epoch $epoch, provisioned $prov"
 	if [ "$sig" != "$COPY_REP_LAST" ]; then
 		COPY_REP_LAST=$sig
@@ -15844,7 +15971,8 @@ case_copy() {
 }
 
 # ---------------------------------------------------------------------------
-# Case: react — the four automatic reactions, AR5 to AR8
+# Case: react — the four automatic reactions, AR5 to AR8, and two forced
+# starts (AR13, CN12)
 # (e2e_integtest.md, The cases, react)
 # ---------------------------------------------------------------------------
 #
@@ -16154,6 +16282,73 @@ REACT_DEAD_PASSES=3
 # FinishRepair; react_retired_given).
 MAX_RETIRED_LEG_PER_GRP=2
 
+# The forced starts of steps 7 and 8 (architecture.md, Repair; cnagent.md
+# CN12; dnv-worker.md AR13), on slice 0's first data group, whose array each
+# step leaves md unable to start by itself. REACT_FS_DATA is the leg that
+# holds the group's data through both steps' faults, the leg step 7 starts
+# the array from; REACT_FS_OLD is the leg step 7's worker's repair retires,
+# whose side keeps the group's data from before step 8's write, and
+# REACT_FS_OLD_VM and REACT_FS_OLD_INST its disk node, which step 7 brings
+# back so that step 8 can take that leg back.
+REACT_FS_DATA=""
+REACT_FS_OLD=""
+REACT_FS_OLD_VM=-1
+REACT_FS_OLD_INST=-1
+# The disk node of REACT_FS_DATA as react_fs_break killed it, which step 7
+# brings back once its forced start has stopped the array, and step 8 only
+# at its end.
+REACT_FS_DATA_VM=-1
+REACT_FS_DATA_INST=-1
+# What react_fs_repair hands the step that calls it: the leg the worker's
+# repair replaced, that leg's disk node, and the fresh new leg the repair put
+# in its place, onto which md still copies, slowed.
+REACT_FS_BAD=""
+REACT_FS_BAD_VM=-1
+REACT_FS_BAD_INST=-1
+REACT_FS_NEW=""
+# The addr_ports react_steer disabled, space-separated, which react_unsteer
+# enables again, and the count of enabled side-less disk nodes it left on a
+# guest outside the group's, "" before any steer (react_new_leg_placed).
+REACT_STEERED=""
+REACT_STEER_OUT=""
+# What react_fs_mark hands the step: the revision of the forced-start mark,
+# as the call's reply gives it, and the two log marks taken just before the
+# call, the primary's cn agent log's line count and the worker log's, which
+# react_fs_proof and step 8's refusal reads count from.
+REACT_FS_MARK_REV=""
+REACT_FS_CN_MARK=0
+REACT_FS_WK_MARK=0
+# The names of step 8's two operator's repairs, bare words like copy's,
+# outside the reserved prefix (architecture.md, Common validation) and free
+# in this case's own etcd.
+REACT_FS_REP=f0
+REACT_FS_REP1=f1
+# Step 8's write over the first MiB of ns 1: the pattern file on host0 and
+# its digest. The bytes it overwrites are setup's, which the leg step 7
+# retires holds, so after step 8's restore from that leg check_sha0 reads
+# setup's bytes again.
+REACT_FS_PATX=""
+REACT_FS_PATX_SHA=""
+# The last md_examine line react_fs_examined read, and the refusal text
+# react_fs_refused read in the primary's verdict.
+REACT_FS_EXAMINE=""
+REACT_FS_REFUSAL=""
+# How many of the cluster's cntlr_interval react_fs_down holds the group's
+# array down for, on every poll in a row, before a forced-start step goes on,
+# and the driver-clock instant the hold under way began, -1 while none runs,
+# which each caller sets before its wait. While md retries a copy whose only
+# source is dead, the array reads write-pending and active between its reads
+# of broken, which cnagent.md CN12 counts as running, before it settles
+# broken (cnagent_integtest.md, Lab facts); a converge of the primary's in
+# that swing leaves the mark waiting (cnagent.md, Known limits). The hold
+# spans several of the primary's check rounds, as a cntlr's rounds come at
+# cntlr_interval.
+# A swing shorter than one poll can still fall between two polls: the hold
+# makes that unlikely and does not rule it out. A count of this suite's
+# choosing, not a constant of the tree.
+REACT_FS_HOLD_ROUNDS=5
+REACT_FS_DOWN_SINCE=-1
+
 # The "last observation" scratch of this section's predicates, same discipline
 # as ANA_LAST / SHA_LAST / MIGR_HYD_LAST: each is logged from inside its own
 # predicate when the value CHANGES and is never interpolated into a wait_until
@@ -16166,6 +16361,7 @@ REACT_REP_LAST=""
 REACT_DEAD_LAST=""
 REACT_MEMBER_LAST=""
 REACT_NO_REP_LAST=""
+REACT_FS_LAST=""
 # The driver-clock instant react_wait_no_repair stops waiting for the pool's
 # repairs to end and dies naming them.
 REACT_NO_REP_UNTIL=0
@@ -16590,6 +16786,35 @@ worker_grp_reaction_cnt() { # <mark> <msg> <kind|reason> <value> <grp id> [<leg 
 	echo "${n:-0}"
 }
 
+# worker_grp_records prints the worker's records after line <mark>
+# (worker_log_mark) whose msg is <msg> and whose grp_id is <grp id>, one
+# compact JSON object per line in log order, for a record that carries no
+# kind or reason to count by, as `forced start cleared` does not, and for a
+# caller that reads an attribute of the record, as react step 8 reads the
+# refusal text a `repair stage skipped` record carries (dnv-worker.md, Log
+# records). It reads the log as worker_grp_reaction_cnt does and refuses
+# what that one refuses.
+worker_grp_records() { # <mark> <msg> <grp id>
+	local lines
+	case "$2" in
+	'' | *[\'\"\\]*) die "worker_grp_records cannot match the msg '$2'" ;;
+	esac
+	case "$1:$3" in
+	*[!0-9:]* | :* | *:)
+		die "worker_grp_records takes decimal numbers, not mark '$1'," \
+			"grp '$3'"
+		;;
+	esac
+	lines=$(ssh_cp "awk -v m=$1 -v p='\"msg\":\"$2\"' 'NR > m && index(\$0, p)' \
+		$WORK/worker/worker.log") ||
+		die "cannot read the '$2' records in $WORK/worker/worker.log on $CP_IP"
+	[ -n "$lines" ] || return 0
+	printf '%s\n' "$lines" | "$JQ" -R -c --argjson g "$3" \
+		'fromjson? // empty | select(.grp_id == $g)' ||
+		die "worker_grp_records: jq failed on the '$2' records of" \
+			"$WORK/worker/worker.log"
+}
+
 # react_primary_moved is AR5's whole observable: EXACTLY one cntlr is primary
 # and it is not the one whose agent was killed. The old record is deliberately
 # not required to be gone — AR5 rewrites the two cntlr records (model.Failover:
@@ -16968,8 +17193,11 @@ react_retired_want() { # <retired> <leg id>
 # a disk node that is none of <addrs>, the disk nodes the group's legs held
 # before the kill, a ,-joined list; and, where the allocator's first tier has
 # somewhere anti-affine to go, on a DN VM that is none of <vms>
-# (architecture.md, Per-operation allocation; E2E4). When react_rep_read
-# filled REACT_NEW_SIDE, the side must be that one.
+# (architecture.md, Per-operation allocation; E2E4). The repair's steer
+# (react_steer) can leave tier 1 nowhere to go itself, when it left no
+# enabled side-less disk node outside <vms>; the VM is then logged, not
+# asserted. When react_rep_read filled REACT_NEW_SIDE, the side must be that
+# one.
 react_new_leg_placed() { # <position> <leg id> <addrs> <vms>
 	local side addr vm
 	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$1].side_list | length" 1 \
@@ -16988,7 +17216,12 @@ react_new_leg_placed() { # <position> <leg id> <addrs> <vms>
 			"(architecture.md, Per-operation allocation)"
 		;;
 	esac
-	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
+	if [ "$DN_VM_CNT" -gt "$LEGS" ] && [ "$REACT_STEER_OUT" = 0 ]; then
+		log "  the steer left no enabled side-less disk node on a guest" \
+			"outside the group's ($4), so tier 1 (architecture.md," \
+			"Per-operation allocation) had none to pick and the new leg's" \
+			"VM is not asserted (E2E4); it landed on $vm"
+	elif [ "$DN_VM_CNT" -gt "$LEGS" ]; then
 		case ",$4," in
 		*",$vm,"*)
 			die "the new leg $2 landed on a DN VM the group occupies ($4)." \
@@ -17005,7 +17238,7 @@ react_new_leg_placed() { # <position> <leg id> <addrs> <vms>
 	log "  leg $2 on $addr took position $1 of group $REACT_GRP_ID"
 }
 
-# react_wait_no_repair is the first act of react steps 5 and 6, ahead of
+# react_wait_no_repair is the first act of react steps 5 to 8, ahead of
 # their readings and of their pick of legs: it waits until the pool holds no
 # repair at all, sp_conf.repair_name_list empty in `sp get`, logs every
 # repair it sees meanwhile, and dies naming the ones still there after
@@ -17051,17 +17284,19 @@ react_no_repair() {
 	return 1
 }
 
-# react_leg_alone is the disk-node rule of react steps 5 and 6 and of copy
+# react_leg_alone is the disk-node rule of react steps 5 to 8 and of copy
 # step 5, read from $SP_JSON: leg <i> of slice 0's first data group's leg_list
 # has exactly one side, and that side's disk node carries no other side of
 # the sp's legs (SP_SIDE_PATH). Killing that disk node then takes down
 # exactly the one leg the step names. `sp get` leaves out two kinds of side:
 # a repair's new leg, which every cntlr connects, and a retired leg's side,
-# which no cntlr connects (architecture.md, Repair). The two react steps
-# first wait until the pool holds no repair (react_wait_no_repair), so only
-# retired sides are left out, and a retired side on the node moves nothing a
-# step asserts; react_leg_repair says what a second side there would do, and
-# copy_repair why its pool has no side `sp get` leaves out.
+# which no cntlr connects (architecture.md, Repair). The react steps first
+# wait until the pool holds no repair (react_wait_no_repair) and apply the
+# rule only while it holds none, before the worker's repair a step makes or
+# once it is finished, so only retired sides are left out, and
+# a retired side on the node moves nothing a step asserts; react_leg_repair
+# says what a second side there would do, and copy_repair why its pool has
+# no side `sp get` leaves out.
 react_leg_alone() { # <i>
 	local saddr hits
 	if [ "$(sp_field "$COPY_GRP0.leg_list[$1].side_list | length")" != 1 ]; then
@@ -17078,8 +17313,8 @@ react_leg_alone() { # <i>
 # away — nvmet objects outlive their agent, so without it the primary's leg
 # probe would keep succeeding and Leg.err_epoch would stay 0. The agent goes
 # first, as a live agent puts its port back at its next converge (dnagent.md
-# DN5, DN10), which is what react_return_dn relies on. React step 5 and copy
-# steps 5 and 6 call it; react step 6 calls its two halves,
+# DN5, DN10), which is what react_return_dn relies on. React steps 5, 7 and
+# 8 and copy steps 5 and 6 call it; react step 6 calls its two halves,
 # react_stop_dn_agent and react_drop_dn_port, each over all of its disk nodes
 # in turn (see step 6's header).
 react_kill_dn() { # <v> <k>
@@ -17276,6 +17511,849 @@ react_dead_members() {
 		log "  group $REACT_GRP_ID's members on the primary:${sig%;}"
 	fi
 	return "$ok"
+}
+
+# --- what the forced starts of steps 7 and 8 share --------------------------
+#
+# Both steps make the same double fault on slice 0's first data group and
+# then start its array from one leg (architecture.md, Repair; cnagent.md
+# CN12). react_fs_repair is the first fault, the worker's repair of one leg
+# finished while md's copy onto its new leg runs, slowed; react_fs_break is
+# the second, the death of the leg md holds in sync in the middle of that
+# copy, at the level where reactions stop; react_fs_mark is the operator's
+# forced start and react_fs_proof what the primary and the worker must have
+# done for it; react_fs_readwrite is the way back to the level that builds
+# the pools, and host0's reads there.
+
+# react_fs_pos prints the position of leg <leg id> in slice 0's first data
+# group's leg_list in $SP_JSON, and dies unless the group holds it exactly
+# once.
+react_fs_pos() { # <leg id>
+	local pos
+	pos=$(sp_field "[$COPY_GRP0.leg_list | to_entries[]
+		| select(.value.leg_id == \"$1\") | .key]
+		| if length == 1 then .[0] else \"none\" end")
+	case "$pos" in
+	'' | *[!0-9]*)
+		die "slice 0's first data group holds leg $1 at no single place" \
+			"of its leg_list ('$pos')"
+		;;
+	esac
+	echo "$pos"
+}
+
+# react_steer disables every enabled disk node whose record holds a side,
+# retired sides and a repair's new side included, so that the fresh leg of
+# the repair the worker creates next lands on a disk node that carries no
+# other side, as a later death of that leg's disk node needs
+# (react_leg_alone). React steps 5, 7 and 8 call it before the kill that
+# leads to the worker's repair, and step 6 before the return of the disk
+# node that died last, which leads to its first repair, and again between
+# its repairs; react_unsteer follows once the step's last repair exists.
+# The scan offers one disk node of each location outside the group's, the
+# first with room that it meets, as it reads the bins from the fullest up
+# and puts the most free first only inside one bin, and the worker draws one
+# of them at random (architecture.md, Finding DN candidates, Per-operation
+# allocation),
+# so a location with no side-less disk node the scan meets first offers one
+# that holds a side. A disabled disk node only leaves allocation, and its
+# sides keep serving (architecture.md, Disk nodes, UpdateDiskNodeDisabled).
+# It adds to REACT_STEERED, so a second call before react_unsteer takes in
+# the disk node of the side the first repair took, and leaves alone a disk
+# node someone else disabled. It dies when no enabled disk node without a
+# side is left, and sets REACT_STEER_OUT to the count of those on a guest
+# outside <group vms>, a comma list of the group's guests: with none, the
+# steer itself pushes the pick to the allocator's second tier, which may
+# reuse a guest the group holds (react_new_leg_placed, E2E4).
+react_steer() { # <group vms>
+	local v k a n free=0 out=0
+	for ((v = 0; v < DN_VM_CNT; v++)); do
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			a=$(dn_addr "$v" "$k")
+			ctl_ok dn get --addr "$a"
+			[ "$(jq_of "$CTL_OUT" '.dn_conf.disabled')" != true ] || continue
+			n=$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list | length')
+			if [ "$n" = 0 ]; then
+				free=$((free + 1))
+				case ",$1," in
+				*",${a%:*},"*) ;;
+				*) out=$((out + 1)) ;;
+				esac
+				continue
+			fi
+			ctl_ok dn set-disabled --addr "$a" --disabled
+			REACT_STEERED="$REACT_STEERED $a"
+		done
+	done
+	[ "$free" -gt 0 ] ||
+		die "every enabled disk node holds a side, so the worker's repair" \
+			"would put its fresh leg beside another side"
+	REACT_STEER_OUT=$out
+	log "  disabled the disk nodes that hold a side:$REACT_STEERED;" \
+		"$free enabled disk node(s) hold none, $out of them on a guest" \
+		"outside the group's ($1)"
+}
+
+# react_unsteer enables again the disk nodes react_steer disabled.
+react_unsteer() {
+	local a
+	for a in $REACT_STEERED; do
+		ctl_ok dn set-disabled --addr "$a" --disabled=false
+	done
+	REACT_STEERED=""
+}
+
+# react_fs_repair is the first fault. It slows md's copy on the group's array
+# through the member of <stay leg id> (md_sync_speed, at copy step 5's
+# speed), kills the disk node of <bad leg id> on both planes (react_kill_dn)
+# and waits for the worker's repair of that leg with a fresh leg, created,
+# started and finished as step 5 reads one (dnv-worker.md AR8, Leg repair),
+# and then for the primary to hold no row of the replaced leg, a retired leg
+# now (architecture.md, Repair). The worker finishes a STARTED repair at its
+# next pass (dnv-worker.md AR8), so at that speed md's copy onto the new leg
+# still runs after the finish, which the caller's second fault needs and
+# which this asserts. The copy speed limits are the array's own, and the
+# forced start the step leads to assembles a new array, on which
+# react_fs_speed_back writes md's own limits once it runs. It holds the
+# group's retired legs after the finish to the give-back rule, as step 5
+# does. Steps 5 and 6 fill them to the retired-leg bound and a worker's
+# finish at the bound keeps them there, so this finish gives back the group's
+# oldest retired leg first (architecture.md, Repairs, FinishRepair;
+# react_retired_want), and a group below the bound fails the step, as no
+# other step of the run is sure to reach that give-back. It fills
+# REACT_FS_BAD, its disk node's REACT_FS_BAD_VM and REACT_FS_BAD_INST,
+# REACT_FS_NEW and COPY_REP_STAY_NAME, the member copy_rep_copying finds the
+# array by. The caller has read the pool, the roles and the primary's cn_id,
+# at READWRITE, with no repair in the pool (react_wait_no_repair).
+react_fs_repair() { # <stay leg id> <bad leg id>
+	local stay=$1 bad=$2 pos addr sync before_retired started cnt newleg msg
+	local before_epochs given want_retired addrs vms
+	pos=$(react_fs_pos "$bad")
+	react_leg_alone "$pos" ||
+		die "leg $bad does not have a single side on a disk node that" \
+			"carries no other side of $SP, so its disk node's death would" \
+			"take down a leg of another group too"
+	addr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].addr_port")
+	# The group's disk nodes and guests, which the fresh leg is placed
+	# outside (react_new_leg_placed).
+	addrs=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
+	vms=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
+	REACT_FS_BAD=$bad
+	REACT_FS_BAD_VM=$(dn_vm_of_addr "$addr")
+	REACT_FS_BAD_INST=$(dn_inst_of_addr "$addr")
+	assert_ne "$REACT_FS_BAD_VM" none \
+		"leg $bad's addr_port $addr names a --dn guest"
+	assert_ne "$REACT_FS_BAD_INST" none \
+		"leg $bad's addr_port $addr names a dn instance"
+	diag_note_dn "$REACT_FS_BAD_VM" "$REACT_FS_BAD_INST"
+	before_retired=$(sp_field \
+		"$COPY_GRP0 | [.retired_leg_id_list[]] | sort | tojson")
+	react_retired_read
+	before_epochs=$REACT_RETIRED
+	given=$(react_retired_given "$before_epochs")
+	[ -n "$given" ] ||
+		die "group $REACT_GRP_ID holds the retired legs $before_retired," \
+			"below the retired-leg bound of $MAX_RETIRED_LEG_PER_GRP, before" \
+			"the worker's repair of leg $bad: the react steps before leave" \
+			"it at the bound, where a worker's finish gives back the group's" \
+			"oldest retired leg (architecture.md, Repairs, FinishRepair)"
+	log "  group $REACT_GRP_ID holds the retired legs $before_retired, at the" \
+		"bound: the finish of the worker's repair of leg $bad gives back" \
+		"leg $given, the oldest"
+
+	COPY_REP_STAY_NAME=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$stay")
+	sync=$(helper_cn "$PRIMARY_CN" md_sync_speed "$COPY_REP_STAY_NAME" \
+		"$COPY_REP_SLOW_MIN" "$COPY_REP_SLOW_KIB") ||
+		die "slowing group $REACT_GRP_ID's array on cn$PRIMARY_CN by leg" \
+			"$stay's member $COPY_REP_STAY_NAME failed: $sync"
+	assert_eq "$(kv_of "$sync" min):$(kv_of "$sync" max)" \
+		"$COPY_REP_SLOW_MIN(local):$COPY_REP_SLOW_KIB(local)" \
+		"group $REACT_GRP_ID's array copy speed limits on cn$PRIMARY_CN after md_sync_speed"
+	log "  md's copy on group $REACT_GRP_ID's array slowed: $sync"
+
+	react_steer "$vms"
+	REACT_REP_MARK=$(worker_log_mark)
+	log "  killing dn$REACT_FS_BAD_VM instance $REACT_FS_BAD_INST ($addr)," \
+		"the disk node of leg $bad (position $pos of group $REACT_GRP_ID)"
+	react_kill_dn "$REACT_FS_BAD_VM" "$REACT_FS_BAD_INST"
+	REACT_REP_NAME=""
+	REACT_REP_LAST=""
+	msg="AR8 to create a repair of group $REACT_GRP_ID for leg $bad"
+	msg="$msg (side_unhealthy ${THR_SIDE}s or leg_unhealthy ${THR_LEG}s, and"
+	msg="$msg the leg's err_epoch only starts when the primary's probe fails)"
+	wait_until "$WAIT_REACT" "$msg" react_rep_open "$pos" "$bad"
+	# The create took the fresh leg's side, so allocation is over.
+	react_unsteer
+	REACT_NEW_LEG=""
+	REACT_NEW_SIDE=""
+	REACT_NEW_ADDR=""
+	if [ -n "$REACT_REP_NAME" ]; then
+		react_rep_name_ok "$REACT_REP_NAME"
+		react_rep_read "$bad" "$before_retired"
+	fi
+	REACT_REP_LAST=""
+	msg="the worker to move repair ${REACT_REP_NAME:-of group $REACT_GRP_ID}"
+	msg="$msg to STARTED and finish it while md copies onto its new leg,"
+	msg="$msg leg $bad becoming a retired leg"
+	wait_until "$WAIT_PROVISION" "$msg" react_rep_done "$bad"
+	started=$(worker_rep_started "$REACT_REP_MARK" "$REACT_GRP_ID")
+	if [ -z "$REACT_REP_NAME" ]; then
+		REACT_REP_NAME=${started%%$'\n'*}
+		[ -n "$REACT_REP_NAME" ] ||
+			die "leg $bad is retired, but the worker's log holds no repair" \
+				"of group $REACT_GRP_ID moved to STARTED since the kill"
+		react_rep_name_ok "$REACT_REP_NAME"
+	fi
+	cnt=$(printf '%s\n' "$started" | grep -cxF -- "$REACT_REP_NAME" || true)
+	assert_eq "$cnt" 1 \
+		"the worker's repair stage moved records of $REACT_REP_NAME to STARTED since the kill (dnv-worker.md AR11)"
+
+	# What the finish wrote (architecture.md, Repairs, FinishRepair): a
+	# fresh leg in the bad leg's place, the bad leg retired, no repair.
+	sp_refresh
+	newleg=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_id")
+	case "$newleg" in
+	'' | *[!0-9]* | 0) die "the leg in leg $bad's place has leg_id '$newleg'" ;;
+	esac
+	assert_ne "$newleg" "$bad" "the leg in leg $bad's place is a different leg"
+	if [ -n "$REACT_NEW_LEG" ]; then
+		assert_eq "$newleg" "$REACT_NEW_LEG" \
+			"the leg in leg $bad's place is the repair's new leg"
+	fi
+	assert_jq "$before_retired" "([\"$newleg\"] - .) | length == 1" \
+		"the new leg $newleg is none of the group's retired legs: the worker's repair takes a fresh leg"
+	react_new_leg_placed "$pos" "$newleg" "$addrs" "$vms"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$bad\")] | length" \
+		1 "leg $bad is one of the group's retired legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the finish"
+	# The retired legs exactly, as step 5 holds them: the ones the group
+	# held, less the oldest the finish gave back, plus the bad leg
+	# (architecture.md, Repairs, FinishRepair). Nothing else touches them
+	# inside the stage (react_leg_repair says why).
+	want_retired=$(react_retired_want "$before_epochs" "$bad")
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.retired_leg_id_list[]] | sort) == $want_retired" \
+		"the group's retired legs are the ones it had plus leg $bad, less leg $given, the oldest (architecture.md, Repairs, FinishRepair)"
+	ctl_ok retired-leg list
+	assert_field "$CTL_OUT" ".leg_id_to_retired_leg | has(\"$given\")" \
+		false "ListRetiredLegs no longer holds leg $given, the oldest retired leg the finish gave back"
+	log "  the finish gave back leg $given, the group's oldest retired leg"
+	react_leg_alone "$pos" ||
+		die "the worker's new leg $newleg does not sit alone on its disk" \
+			"node, although every disk node that held a side was disabled" \
+			"while the worker picked it (react_steer)"
+	REACT_FS_NEW=$newleg
+	COPY_REP_LAST=""
+	copy_rep_copying "$newleg" ||
+		die "md no longer copies onto the new leg $newleg right after the" \
+			"worker's finish, slowed to ${COPY_REP_SLOW_KIB} KiB/s; the step" \
+			"needs the copy running when leg $stay's disk node dies"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to hold every leg and no longer the retired leg $bad" \
+		copy_rep_dropped full "$PRIMARY_CNTLR_ID" "$bad"
+	log "  leg $newleg took leg $bad's place while md copies onto it, slowed;" \
+		"leg $bad is a retired leg, its disk node dead"
+}
+
+# react_fs_speed_back writes the word system to both copy speed limits of the
+# array that holds leg <leg id>'s member on the primary, which hands them
+# back to the kernel's own, and checks that both read so. The array a forced
+# start assembles is a new one and should carry md's own limits already;
+# writing them makes sure that md's whole copy onto the zeroed leg is not
+# held to the speed react_fs_repair set on the old array.
+react_fs_speed_back() { # <leg id>
+	local sync
+	sync=$(helper_cn "$PRIMARY_CN" md_sync_speed \
+		"$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$1")" system system) ||
+		die "putting md's own copy speed on group $REACT_GRP_ID's array on" \
+			"cn$PRIMARY_CN by leg $1's member failed: $sync"
+	case "$(kv_of "$sync" min):$(kv_of "$sync" max)" in
+	*"(system):"*"(system)") ;;
+	*)
+		die "group $REACT_GRP_ID's array on cn$PRIMARY_CN reads '$sync'" \
+			"after its copy speed limits were handed back to the kernel"
+		;;
+	esac
+	log "  md's copy on group $REACT_GRP_ID's started array runs at md's own" \
+		"limits: $sync"
+}
+
+# react_fs_break is the second fault, made at the level where reactions
+# stop: md must still copy onto <new leg id>, the leg react_fs_repair put in,
+# when the disk node of <data leg id>, the one leg md holds in sync, dies on
+# both planes. md's copy reads that leg, and md fails no last in-sync member,
+# so it stops running the array; the wait (react_fs_down) holds md's state on
+# the primary and the group's row the primary reports, the row the forced
+# start's call reads (architecture.md, Repairs), down until md has settled
+# after its retries of the copy. The leg's health epoch is waited for first,
+# as an operator's repair names only a bad leg that has one (architecture.md,
+# Repairs, CreateRepair). It fills REACT_FS_DATA_VM and REACT_FS_DATA_INST
+# with the dead disk node.
+react_fs_break() { # <data leg id> <new leg id>
+	local pos addr name msg
+	sp_refresh
+	pos=$(react_fs_pos "$1")
+	react_leg_alone "$pos" ||
+		die "leg $1 does not have a single side on a disk node that" \
+			"carries no other side of $SP, so its disk node's death would" \
+			"take down a leg of another group too"
+	addr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].addr_port")
+	REACT_FS_DATA_VM=$(dn_vm_of_addr "$addr")
+	REACT_FS_DATA_INST=$(dn_inst_of_addr "$addr")
+	assert_ne "$REACT_FS_DATA_VM" none \
+		"leg $1's addr_port $addr names a --dn guest"
+	assert_ne "$REACT_FS_DATA_INST" none \
+		"leg $1's addr_port $addr names a dn instance"
+	diag_note_dn "$REACT_FS_DATA_VM" "$REACT_FS_DATA_INST"
+	COPY_REP_LAST=""
+	copy_rep_copying "$2" ||
+		die "md finished, or stopped, its copy onto leg $2 before leg $1's" \
+			"disk node could die in the middle of it"
+	log "  killing dn$REACT_FS_DATA_VM instance $REACT_FS_DATA_INST ($addr)," \
+		"the disk node of leg $1, the one leg md holds in sync, while md" \
+		"copies onto leg $2"
+	react_kill_dn "$REACT_FS_DATA_VM" "$REACT_FS_DATA_INST"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_REACT" \
+		"the primary's probe to give leg $1 a health epoch (cnagent.md CN11)" \
+		copy_rep_leg_epoch "$pos" "$1" dead
+	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$2")
+	REACT_FS_LAST=""
+	REACT_FS_DOWN_SINCE=-1
+	msg="md on cn$PRIMARY_CN to stop running group $REACT_GRP_ID's array"
+	msg="$msg once its copy fails to read leg $1, and the primary to report"
+	msg="$msg the group's row down, both held so for $REACT_FS_HOLD_ROUNDS"
+	msg="$msg of the cluster's cntlr_interval"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		react_fs_down "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$name"
+}
+
+# react_fs_down is true once md on the primary has read the array that holds
+# the dm device <member dm name> down, and cntlr <cntlr id>'s report the
+# group's row, on every poll for REACT_FS_HOLD_ROUNDS of the cluster's
+# cntlr_interval in a row, counted from REACT_FS_DOWN_SINCE, which the caller
+# sets to -1 before its wait. The array is down when it reads an array_state
+# md does not run in (cnagent.md CN12 names the ones it runs in), or when no
+# array holds that member; the row is down when it reads anything but
+# RES_STATUS_OK, as a broken array's row reads ERROR (cnagent.md CN28). One
+# poll that reads broken proves nothing while md still retries its copy (see
+# REACT_FS_HOLD_ROUNDS), so a poll that reads either up, or cannot read it,
+# starts the hold again. The array's state, the member's md state and slot,
+# which show whether md has failed it, and the row are logged as they change.
+react_fs_down() { # <cntlr id> <grp id> <member dm name>
+	local st mem row sig hold=$((REACT_FS_HOLD_ROUNDS * DEFAULT_HC_INTERVAL))
+	st=$(helper_cn "$PRIMARY_CN" md_array_state "$3" 2>/dev/null) ||
+		st=unread
+	mem=$(helper_cn "$PRIMARY_CN" md_member_read "$3" 2>/dev/null) ||
+		mem="state=unread"
+	if ctl_try cntlr inspect --id "$1"; then
+		row=$(jq_of "$CTL_OUT" ".cntlr_info.grp_id_to_md_raid[\"$2\"]
+			| if . == null then \"absent\" else \"\(.status) [\(.details)]\" end")
+	else
+		row=unread
+	fi
+	sig="group $2's array on cn$PRIMARY_CN reads $st, its member $3"
+	sig="$sig ${mem%% wsect=*}; its row on cntlr $1 reads $row"
+	if [ "$sig" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$sig
+		log "  $sig"
+	fi
+	case "$st" in
+	unread | clean | active | active-idle | write-pending | readonly | read-auto)
+		REACT_FS_DOWN_SINCE=-1
+		return 1
+		;;
+	esac
+	case "$row" in
+	unread | RES_STATUS_OK*)
+		REACT_FS_DOWN_SINCE=-1
+		return 1
+		;;
+	esac
+	[ "$REACT_FS_DOWN_SINCE" -ge 0 ] || REACT_FS_DOWN_SINCE=$SECONDS
+	[ $((SECONDS - REACT_FS_DOWN_SINCE)) -ge "$hold" ]
+}
+
+# react_fs_stopped is true once md on the primary holds no array of the dm
+# device <member dm name> and cntlr <cntlr id>'s report reads group <grp
+# id>'s row as anything but RES_STATUS_OK: the forced start's stop of the
+# array that does not run (cnagent.md CN12), which nothing assembles again
+# while the mark stands and the leg it names is dead, the forced start
+# waiting for that leg. A converge reports that wait as the row's error, a
+# read the absent array as missing (cnagent.md CN28), so the row is judged
+# by its status alone. The array's state and the row are logged as they
+# change.
+react_fs_stopped() { # <cntlr id> <grp id> <member dm name>
+	local st row sig
+	st=$(helper_cn "$PRIMARY_CN" md_array_state "$3" 2>/dev/null) ||
+		st=unread
+	if ctl_try cntlr inspect --id "$1"; then
+		row=$(jq_of "$CTL_OUT" ".cntlr_info.grp_id_to_md_raid[\"$2\"]
+			| if . == null then \"absent\" else \"\(.status) [\(.details)]\" end")
+	else
+		row=unread
+	fi
+	sig="group $2's array on cn$PRIMARY_CN reads $st, by its member $3;"
+	sig="$sig its row on cntlr $1 reads $row"
+	if [ "$sig" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$st" = none ] || return 1
+	case "$row" in
+	unread | absent | RES_STATUS_OK*) return 1 ;;
+	esac
+	return 0
+}
+
+# react_cn_log_mark prints how many lines the primary's cn agent log holds
+# now, the mark react_fs_proof reads after, as copy step 6 marks the same log
+# for copy_reuse_catchup.
+react_cn_log_mark() {
+	local n
+	n=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") ||
+		die "cannot count the lines of $(cn_log) on cn$PRIMARY_CN"
+	case "$n" in
+	'' | *[!0-9]*)
+		die "the line count of $(cn_log) on cn$PRIMARY_CN reads '$n'"
+		;;
+	esac
+	echo "$n"
+}
+
+# react_fs_mark_of prints the forced-start mark of slice 0's first data group
+# in the `sp get` reply <json> as "<leg_id>@<revision>", or "none" while the
+# group carries none: an unset message renders null (dnvctl.md CT4).
+react_fs_mark_of() { # <json>
+	jq_of "$1" "$COPY_GRP0.forced_start
+		| if . == null then \"none\" else \"\(.leg_id)@\(.revision)\" end"
+}
+
+# react_fs_try_start is react_fs_mark's call, polled: true once the forced
+# start of slice 0's first data group from <leg id> is accepted. The gateway
+# refuses the call while the primary's latest report reads the group's row
+# OK, a refusal that names the row's status, and while the primary's agent
+# does not answer or its report holds no row of the group, either of which
+# leaves the array not proven down (architecture.md, Repairs). The caller's
+# wait has held the row down already (react_fs_down), so each of the two is
+# a report or an answer that lags, retried as an
+# operator would retry it. Every other failure dies at once, any other
+# refusal included: the level, the leg's place and the primary that the
+# call's other refusals read do not change while the step waits. Each
+# refusal is logged as it changes.
+react_fs_try_start() { # <leg id>
+	if ctl_try group force-start --grp "$REACT_GRP_ID" --leg "$1"; then
+		return 0
+	fi
+	case "$CTL_ERR" in
+	"dnvctl: FAILED_PRECONDITION: "*RES_STATUS_OK* | \
+		"dnvctl: FAILED_PRECONDITION: "*"not proven down"*) ;;
+	*)
+		die "the forced start of group $REACT_GRP_ID from leg $1 failed:" \
+			"${CTL_ERR:-dnvctl exit code $CTL_RC}"
+		;;
+	esac
+	if [ "$CTL_ERR" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$CTL_ERR
+		log "  the forced start is refused, and retried: $CTL_ERR"
+	fi
+	return 1
+}
+
+# react_fs_mark is the operator's forced start of slice 0's first data group
+# from <leg id> (architecture.md, Repairs): the two log marks first, the
+# primary's cn agent log's and the worker log's, then the call
+# (react_fs_try_start), whose reply names the group and the revision of the
+# mark, then the mark as `sp get` shows it on the group, the named leg and
+# that revision. The worker clears a mark once the primary reports the array
+# running with a member in sync on a leg whose own row reads OK
+# (dnv-worker.md AR13), a converge and a
+# pass at the least, so the read right after the call finds it; should the
+# clear have come first, the worker's record of it must be in its log
+# instead. It fills REACT_FS_MARK_REV, REACT_FS_CN_MARK and REACT_FS_WK_MARK.
+react_fs_mark() { # <leg id>
+	local mark recs n
+	REACT_FS_CN_MARK=$(react_cn_log_mark)
+	REACT_FS_WK_MARK=$(worker_log_mark)
+	REACT_FS_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the gateway to accept the forced start of group $REACT_GRP_ID from leg $1" \
+		react_fs_try_start "$1"
+	assert_eq "$CTL_ERR" "" \
+		"stderr of: dnvctl group force-start --grp $REACT_GRP_ID --leg $1 must be empty"
+	assert_parses "$CTL_OUT" "dnvctl group force-start --grp $REACT_GRP_ID --leg $1"
+	assert_field "$CTL_OUT" '.grp_id' "$REACT_GRP_ID" \
+		"ForceStartGroupReply.grp_id"
+	REACT_FS_MARK_REV=$(jq_of "$CTL_OUT" '.revision')
+	case "$REACT_FS_MARK_REV" in
+	'' | *[!0-9]* | 0)
+		die "ForceStartGroupReply.revision reads '$REACT_FS_MARK_REV'"
+		;;
+	esac
+	sp_refresh
+	mark=$(react_fs_mark_of "$SP_JSON")
+	case "$mark" in
+	"$1@$REACT_FS_MARK_REV")
+		log "  group $REACT_GRP_ID carries the forced-start mark: leg $1" \
+			"at revision $REACT_FS_MARK_REV"
+		;;
+	none)
+		recs=$(worker_grp_records "$REACT_FS_WK_MARK" "forced start cleared" \
+			"$REACT_GRP_ID")
+		n=$(printf '%s\n' "$recs" | grep -c . || true)
+		[ "$n" -ge 1 ] ||
+			die "group $REACT_GRP_ID carries no forced-start mark right" \
+				"after the call, and the worker logged no clear of one"
+		log "  the worker cleared group $REACT_GRP_ID's mark before \`sp" \
+			"get\` read it: $recs"
+		;;
+	*)
+		die "group $REACT_GRP_ID carries the forced-start mark $mark after" \
+			"the call named leg $1, whose reply gave revision" \
+			"$REACT_FS_MARK_REV"
+		;;
+	esac
+}
+
+# react_fs_mark_gone is the wait for the worker's clear (dnv-worker.md AR13):
+# true once slice 0's first data group carries no forced-start mark in `sp
+# get`. The mark is logged as it changes; one that names anything but leg
+# <leg id> at revision <revision> dies, as nothing in these steps replaces
+# it.
+react_fs_mark_gone() { # <leg id> <revision>
+	local mark
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	mark=$(react_fs_mark_of "$CTL_OUT")
+	if [ "$mark" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$mark
+		log "  group $REACT_GRP_ID's forced-start mark: $mark"
+	fi
+	case "$mark" in
+	none) return 0 ;;
+	"$1@$2") return 1 ;;
+	esac
+	die "group $REACT_GRP_ID's forced-start mark reads $mark, not leg $1 at" \
+		"revision $2, and nothing in this step replaces it"
+}
+
+# react_fs_proof reads what the primary's cn agent did for the forced start
+# since react_fs_mark's mark, from its log, where the agent records every
+# command with its exit status and what it wrote on stderr (as
+# copy_reuse_catchup reads it), and what the worker logged since: the steps
+# of cnagent.md CN12 in their order. The proof of the start is the agent's
+# own `forced start` record for the group and <named leg id>, which it
+# writes only once the array runs and which must name <zeroed leg id> as
+# the one leg whose superblock the pass zeroed. An exit status is not that
+# proof: the agent runs mdadm under the soft timeout (dnagent.md SH15), and
+# it takes an assemble killed there that left the array running as a start
+# (cnagent.md CN12). The last assemble ahead of the record must be one from
+# <named leg id>'s member alone, the one leg member device it names, with
+# mdadm's run and force flags and the superblock update the record names,
+# and a superblock zero of the zeroed leg's member that answered must come
+# before that assemble. After the record comes an add of the zeroed member,
+# never one mdadm reports as a re-add, as a member with no superblock joins
+# as a new member, which md copies whole. The add need not have answered:
+# one killed at the soft timeout once it took effect is not run again, as
+# the next pass finds the member held, and the zeroed leg in sync, which the
+# caller's copy_rep_whole waited for, proves that it took effect; an add
+# that answered must carry mdadm's word for a new member. No superblock
+# zero of the named leg's member may run at all, and the worker must log
+# one `forced start cleared` record for the group (dnv-worker.md AR13). An
+# exit status other than zero of the assemble or of an add is logged and
+# judged by nothing, as are the agent's other commands, its examines aside,
+# which are not logged. Neither leg's member may hold an md bad block in
+# the started array (md_bad_blocks): md serves such a region as an IO error,
+# and a named leg that came back before its broken array was stopped can
+# bring real entries into the start (cnagent.md, Known limits).
+react_fs_proof() { # <named leg id> <zeroed leg id>
+	local named zeroed lines recs verdict wrecs n asm_rc update add_rcs id bb
+	case "$1:$2" in
+	*[!0-9:]* | :* | *:)
+		die "react_fs_proof takes decimal leg ids, not '$1' and '$2'"
+		;;
+	esac
+	named=/dev/mapper/$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$1")
+	zeroed=/dev/mapper/$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$2")
+	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$((REACT_FS_CN_MARK + 1)) $(cn_log) | \
+		grep -F -e '\"cmd\":\"mdadm\"' -e '\"msg\":\"forced start\"'; \
+		s=(\${PIPESTATUS[@]}); [ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]") ||
+		die "cannot read $(cn_log) on cn$PRIMARY_CN after line $REACT_FS_CN_MARK"
+	recs=$(printf '%s\n' "$lines" | "$JQ" -R -s -c '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "forced start"
+		     or (.msg == "os command" and .cmd == "mdadm"))
+		 | {msg: .msg, a: ((.args // []) | join(" ")), rc: .exit_code,
+		    err: ((.stderr // "") | gsub("\n"; " ")),
+		    grp_id: .grp_id, leg_id: .leg_id, zeroed: .zeroed,
+		    update: .update}]
+		| to_entries | map(.value + {i: .key})') ||
+		die "react_fs_proof: the records of $(cn_log) on cn$PRIMARY_CN do not parse"
+	log "  the primary's md commands since the forced start's call:" \
+		"$(printf '%s' "$recs" | "$JQ" -c '[.[]
+			| if .msg == "forced start"
+			  then {i: .i, forced_start: {grp_id: .grp_id, leg_id: .leg_id,
+			        zeroed: .zeroed, update: .update}}
+			  elif (.a | contains("--examine")) then empty
+			  else {i: .i, args: .a, rc: .rc, stderr: .err} end]')"
+	verdict=$(printf '%s' "$recs" | "$JQ" -r --arg n "$named" --arg z "$zeroed" \
+		--argjson g "$REACT_GRP_ID" --argjson l "$1" --argjson zl "$2" '
+		def word($w): (" " + .a + " ") | contains(" " + $w + " ");
+		def cmd: .msg == "os command";
+		def members: [.a | split(" ")[] | select(startswith("/dev/mapper/"))];
+		def forced: cmd and word("--assemble") and word("--run")
+			and word("--force")
+			and (word("--update=uuid") or word("--update=force-no-bbl"))
+			and members == [$n] and (.a | endswith(" " + $n));
+		(map(select(.msg == "forced start" and .grp_id == $g
+			and .leg_id == $l)) | first) as $fs
+		| (if $fs == null then -1 else $fs.i end) as $start
+		| (map(select(forced and .i < $start)) | last) as $asm
+		| [.[] | select(cmd and word("--zero-superblock")
+			and (.a | endswith(" " + $z)) and .rc == 0) | .i] as $zs
+		| [.[] | select(cmd and (.a | endswith("--add --failfast " + $z))
+			and .i > $start)] as $adds
+		| ([.[] | select(cmd and word("--zero-superblock")
+			and (.a | endswith(" " + $n)))] | length) as $nz
+		| if $fs == null then
+			"the agent logged no forced start of group \($g) from leg \($l), which it logs only once the array runs"
+		  elif $fs.zeroed != [$zl] then
+			"the forced start record names the zeroed legs \($fs.zeroed | tojson), not leg \($zl) alone"
+		  elif $asm == null then
+			"no assemble with the run and force flags and a uuid or force-no-bbl update, naming \($n) and no other member, ran before the forced start record"
+		  elif (($asm | word("--update=" + ($fs.update | tostring))) | not) then
+			"the last assemble before the forced start record ran \($asm.a), not the update \($fs.update) the record names"
+		  elif ([$zs[] | select(. < $asm.i)] | length) == 0 then
+			"no superblock zero of \($z) answered before the assemble"
+		  elif ($adds | length) == 0 then
+			"no add of \($z) ran after the forced start record"
+		  elif ([$adds[] | select(.err | contains("re-added"))] | length) != 0 then
+			"mdadm re-added \($z), which a zeroed member never is"
+		  elif ([$adds[] | select(.rc == 0 and (.err | contains("added") | not))]
+			| length) != 0 then
+			"an add of \($z) answered with no word added from mdadm"
+		  elif $nz != 0 then
+			"the named member \($n) was zeroed \($nz) time(s)"
+		  else
+			"ok \($asm.rc) \($fs.update) \([$adds[].rc | tostring] | join(","))"
+		  end') ||
+		die "react_fs_proof: jq failed on the primary's md commands"
+	case "$verdict" in
+	"ok "*) ;;
+	*)
+		die "the primary's commands for the forced start from leg $1 do not" \
+			"follow cnagent.md CN12: $verdict (the commands are above)"
+		;;
+	esac
+	read -r _ asm_rc update add_rcs <<<"$verdict"
+	log "  the primary zeroed leg $2's member, assembled the array from leg" \
+		"$1's alone with the $update update and added leg $2's back as a" \
+		"new member (cnagent.md CN12)"
+	[ "$asm_rc" = 0 ] ||
+		log "  the assemble that started the array exited $asm_rc, and the" \
+			"agent found the array running after it, which it takes as a" \
+			"start (cnagent.md CN12)"
+	[ -z "${add_rcs//[0,]/}" ] ||
+		log "  the adds of leg $2's member exited $add_rcs, and the leg is" \
+			"in sync in the array"
+	for id in "$1" "$2"; do
+		bb=$(helper_cn "$PRIMARY_CN" md_bad_blocks \
+			"$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$id")") ||
+			die "reading the bad blocks of leg $id's member on" \
+				"cn$PRIMARY_CN failed: $bb"
+		[ "$bb" = none ] ||
+			die "leg $id's member of the started array holds md bad" \
+				"blocks ($bb), which md serves as IO errors: the named leg" \
+				"brought a bad-block log into the start (cnagent.md, Known" \
+				"limits)"
+	done
+	log "  neither member of the started array holds an md bad block"
+	wrecs=$(worker_grp_records "$REACT_FS_WK_MARK" "forced start cleared" \
+		"$REACT_GRP_ID")
+	n=$(printf '%s\n' "$wrecs" | grep -c . || true)
+	assert_eq "$n" 1 \
+		"the worker's forced start cleared records of group $REACT_GRP_ID since the call (dnv-worker.md AR13)"
+	log "  the worker's clear of the mark: $wrecs"
+}
+
+# react_fs_cmds_on prints, as one compact JSON array, the md commands the
+# primary's cn agent ran after line <mark> of its log on the member of any
+# of the legs <leg id>…, its examines aside, each with its arguments and
+# exit status: `[]` when it ran none. Step 8 reads it for a take-back the
+# primary refuses, which adds nothing and takes no bad leg out (cnagent.md
+# CN12). The log is read as react_fs_proof reads it.
+react_fs_cmds_on() { # <mark> <leg id>…
+	local mark=$1 devs="" id lines
+	shift
+	for id in "$@"; do
+		devs="$devs /dev/mapper/$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$id")"
+	done
+	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$((mark + 1)) $(cn_log) | \
+		grep -F -e '\"cmd\":\"mdadm\"'; \
+		s=(\${PIPESTATUS[@]}); [ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]") ||
+		die "cannot read $(cn_log) on cn$PRIMARY_CN after line $mark"
+	printf '%s\n' "$lines" | "$JQ" -R -s -c --arg devs "$devs" '
+		($devs | split(" ") | map(select(. != ""))) as $d
+		| [split("\n")[] | fromjson? // empty
+		   | select(.msg == "os command" and .cmd == "mdadm")
+		   | ((.args // []) | join(" ")) as $a
+		   | select(($a | contains("--examine")) | not)
+		   | select([$d[] | . as $x | $a | endswith(" " + $x)] | any)
+		   | {args: $a, rc: .exit_code}]' ||
+		die "react_fs_cmds_on: the records of $(cn_log) on cn$PRIMARY_CN do not parse"
+}
+
+# react_fs_primary_clean is true once cntlr <cntlr id> reads err_epoch zero
+# in `sp get`, the worker's statement that it saw the cntlr clean again
+# (dnv-worker.md HL2). The epoch is logged as it changes.
+react_fs_primary_clean() { # <cntlr id>
+	local epoch sig
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	epoch=$(jq_of "$CTL_OUT" \
+		"[.sp_conf.cntlr_id_list, [.cntlr_list[].err_epoch]]
+		 | transpose | map(select(.[0] == \"$1\") | .[1]) | first
+		 // \"absent\"")
+	sig="cntlr $1's err_epoch $epoch"
+	if [ "$sig" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$epoch" = 0 ]
+}
+
+# react_fs_readwrite takes the pool back to READWRITE and reads host0's data
+# there, the first host IO since the pool left it. The primary first reads
+# healthy again: the broken array's ERROR row set its health epoch
+# (dnv-worker.md HL2), which stays until a clean report, and where reactions
+# run a settled primary whose epoch is primary_unhealthy old fails over
+# (dnv-worker.md AR5). Then ops_set_level, whose wait wants every leg row and
+# group row OK; then host0's ANA state optimized and the device node of each
+# of its two namespaces; then SHA0 over ns 1 and step 3's pattern over ns 2.
+react_fs_readwrite() { # <what happened>
+	local dev2
+	REACT_FS_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to read healthy again in \`sp get\` (dnv-worker.md HL2)" \
+		react_fs_primary_clean "$PRIMARY_CNTLR_ID"
+	ops_set_level READWRITE
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
+	wait_dev 0 "$UUID1"
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID2" optimized
+	wait_dev 0 "$UUID2"
+	check_sha0 "$1"
+	dev2=$(host_dev "$UUID2")
+	react_wait_chunks 0 "$dev2" "$BASELINE_MIB" 1 1 "$REACT_PAT2_SHA" \
+		"$WAIT_HOST" \
+		"host0 to read step 3's $BASELINE_MIB MiB back from ns 2 $1"
+}
+
+# react_fs_examined is step 8's wait for the primary to connect a repair's
+# new leg taken from a retired leg, which every cntlr connects and wraps at
+# every stage (architecture.md, Repair): true once md_examine reads an md
+# superblock on the leg's member device on the primary, the line kept in
+# REACT_FS_EXAMINE. A read that fails, as before the wrapper exists, is
+# polled again; each answer is logged as it changes.
+react_fs_examined() { # <leg id>
+	local name out
+	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$1")
+	out=$(helper_cn "$PRIMARY_CN" md_examine "$name" 2>/dev/null) ||
+		out=unread
+	if [ "$out" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$out
+		log "  leg $1's member on the primary: $out"
+	fi
+	case "$out" in
+	role=*" events="*)
+		REACT_FS_EXAMINE=$out
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# react_fs_refused is step 8's wait on the primary's verdict on a repair
+# that takes back a retired leg holding newer data than the array: true once
+# rep_id_to_repair_info in cntlr <cntlr id>'s report carries a refusal for
+# <rep id> (cnagent.md CN12), the text kept in REACT_FS_REFUSAL. The verdict
+# is logged as it changes; one that says started dies, as the primary then
+# took the leg in and md copies the array over its newer data.
+react_fs_refused() { # <cntlr id> <rep id>
+	local v started aborted refusal sig
+	if ! ctl_try cntlr inspect --id "$1"; then
+		return 1
+	fi
+	v=".cntlr_info.rep_id_to_repair_info[\"$2\"]"
+	started=$(jq_of "$CTL_OUT" "$v.started // false")
+	aborted=$(jq_of "$CTL_OUT" "$v.abort_confirmed // false")
+	refusal=$(jq_of "$CTL_OUT" "$v.refusal // \"\"")
+	sig="cntlr $1's verdict on rep_id $2: started $started, abort confirmed"
+	sig="$sig $aborted, refusal '$refusal'"
+	if [ "$sig" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$started" != true ] ||
+		die "the primary reports repair $2 started: it took the retired leg" \
+			"in, and md copies the array over that leg's newer data"
+	[ -n "$refusal" ] || return 1
+	REACT_FS_REFUSAL=$refusal
+}
+
+# react_fs_refusal_logged is true once the worker has logged `repair stage
+# skipped` with reason take_back_refused for group <grp id> since
+# REACT_FS_WK_MARK (dnv-worker.md AR11), which it logs on every pass while
+# the primary's verdict carries the refusal. A count the helper could not read
+# has already died in its subshell, saying why, and set -e does not reach a
+# predicate wait_until runs as a condition, so the exit is spelled out.
+react_fs_refusal_logged() { # <grp id>
+	local n
+	n=$(worker_grp_reaction_cnt "$REACT_FS_WK_MARK" "repair stage skipped" \
+		reason take_back_refused "$1") || exit 1
+	[ "$n" -ge 1 ]
+}
+
+# react_fs_rep_aborted is the abort path's stage wait, read through `repair
+# get` as copy_rep_stage_is reads one, which dies on an abort: true once
+# repair <rep name> reads REP_STAGE_ABORTED, the stage the worker moves it to
+# once the primary confirms the abort its flag asks for (dnv-worker.md AR11;
+# architecture.md, Repair). Its stage and flag are logged as they change. It
+# dies when the repair reads STARTED, as the primary then took its new leg
+# into the array, and when the repair is gone, as only the operator cancels
+# an operator's repair (dnv-worker.md AR9).
+react_fs_rep_aborted() { # <rep name>
+	local st flag sig
+	if ! ctl_try repair get --name "$1"; then
+		case "$CTL_ERR" in
+		*NOT_FOUND*)
+			die "repair $1 went away before it read ABORTED, and nothing" \
+				"but the operator cancels an operator's repair (dnv-worker.md AR9)"
+			;;
+		esac
+		return 1
+	fi
+	st=$(jq_of "$CTL_OUT" '.repair.rep_stage')
+	flag=$(jq_of "$CTL_OUT" '.repair.try_to_abort')
+	sig="repair $1 $st, abort flag $flag"
+	if [ "$sig" != "$REACT_FS_LAST" ]; then
+		REACT_FS_LAST=$sig
+		log "  $sig"
+	fi
+	case "$st" in
+	REP_STAGE_ABORTED) return 0 ;;
+	REP_STAGE_STARTED)
+		die "repair $1 reads STARTED with its abort flag $flag: the primary" \
+			"took its new leg into the array"
+		;;
+	esac
+	return 1
 }
 
 # --- step 0: the shape this case starts from --------------------------------
@@ -18271,6 +19349,10 @@ react_leg_repair() {
 		"$REACT_LEG_ID (position $REACT_LEG_POS, leg_idx $legidx, of group" \
 		"$REACT_GRP_ID); the group holds $before_addrs on VMs $before_vms"
 
+	# The worker's fresh leg is steered onto a disk node that holds no side,
+	# as step 6 kills the disk node of every leg of this group (react_steer).
+	react_steer "$before_vms"
+
 	# Both planes, the agent first, then the port (react_kill_dn says why).
 	react_kill_dn "$REACT_DN_VM" "$REACT_DN_INST"
 
@@ -18283,6 +19365,8 @@ react_leg_repair() {
 	msg="$msg the leg's err_epoch only starts when the primary's probe fails)"
 	wait_until "$WAIT_REACT" "$msg" \
 		react_rep_open "$REACT_LEG_POS" "$REACT_LEG_ID"
+	# The create took the fresh leg's side, so allocation is over.
+	react_unsteer
 	REACT_NEW_LEG=""
 	REACT_NEW_SIDE=""
 	REACT_NEW_ADDR=""
@@ -18336,6 +19420,11 @@ react_leg_repair() {
 		"the new leg $REACT_NEW_LEG is none of the group's retired legs: the worker's repair takes a fresh leg"
 	react_new_leg_placed "$REACT_LEG_POS" "$REACT_NEW_LEG" \
 		"$before_addrs" "$before_vms"
+	react_leg_alone "$REACT_LEG_POS" ||
+		die "the worker's new leg $REACT_NEW_LEG does not sit alone on its" \
+			"disk node, although every disk node that held a side was" \
+			"disabled while the worker picked it (react_steer); step 6" \
+			"kills it"
 	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
 		"the group names no repair after the finish"
 	assert_field "$SP_JSON" \
@@ -18514,7 +19603,7 @@ react_dead_grp() {
 	local n i last grpid rev msg st det name mrd state cnt tag want
 	local before_primary before_failovers before_rev
 	local t0 gap allowed seen left newleg skips started
-	local epochs cur given want_retired retired
+	local epochs cur given want_retired retired grpvms a
 	local ids=() vms=() insts=() addrs=() idxs=() sides=()
 	# common.DefaultNvmeFastIoFailTmo: the fast IO fail timeout every CN
 	# connection to a leg is made with (NvmeHost.Connect (agent/nvmehost.go)).
@@ -18728,6 +19817,10 @@ react_dead_grp() {
 	# leg (dnv-worker.md, Leg repair). epochs carries the group's retired
 	# legs from one repair to the next, each finish judged against the ones
 	# the group held before it (react_retired_want).
+	# The worker's fresh legs are steered onto disk nodes that hold no side,
+	# as step 7 kills the disk node of every leg of this group (react_steer).
+	grpvms=$(for a in "${addrs[@]}"; do printf '%s,' "${a%:*}"; done)
+	react_steer "$grpvms"
 	log "  returning dn${vms[$last]} instance ${insts[$last]}, the disk node" \
 		"of leg ${ids[$last]}, which died last"
 	react_return_dn "${vms[$last]}" "${insts[$last]}"
@@ -18740,6 +19833,13 @@ react_dead_grp() {
 		msg="$msg (the primary must report leg ${ids[$last]} OK and in sync"
 		msg="$msg first)"
 		wait_until "$WAIT_PROVISION" "$msg" react_rep_open "$i" "${ids[$i]}"
+		# The create took the fresh leg's side: allocation is over, and a
+		# next repair's steer takes in that side's disk node.
+		if ((i + 1 < last)); then
+			react_steer "$grpvms"
+		else
+			react_unsteer
+		fi
 		REACT_NEW_LEG=""
 		REACT_NEW_SIDE=""
 		REACT_NEW_ADDR=""
@@ -18771,7 +19871,12 @@ react_dead_grp() {
 		assert_jq "$cur" "([\"$newleg\"] - .) | length == 1" \
 			"leg $newleg is none of the group's retired legs: the worker's repair takes a fresh leg"
 		react_new_leg_placed "$i" "$newleg" "$(IFS=,; echo "${addrs[*]}")" \
-			"$(for a in "${addrs[@]}"; do printf '%s,' "${a%:*}"; done)"
+			"$grpvms"
+		react_leg_alone "$i" ||
+			die "the worker's new leg $newleg does not sit alone on its" \
+				"disk node, although every disk node that held a side was" \
+				"disabled while the worker picked it (react_steer); step 7" \
+				"kills it"
 		assert_field "$SP_JSON" \
 			"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"${ids[$i]}\")] | length" \
 			1 "leg ${ids[$i]} is one of the group's retired legs"
@@ -18872,9 +19977,682 @@ react_dead_grp() {
 }
 
 # --- step 7 -----------------------------------------------------------------
+#
+# A FORCED START FROM THE LEG THAT HOLDS THE DATA (architecture.md, Repair;
+# cnagent.md CN12), on the group steps 5 and 6 repaired: slice 0's first data
+# group, which holds the first stripe of $TD0 and of $TD_REACT, so host0's
+# reads go through it.
+#
+# THE FAULT. md copies, slowed, onto the fresh new leg of the worker's repair
+# of one leg of the group (react_fs_repair), and the group's other leg, the
+# one md holds in sync and so the one that holds the data, dies in the
+# middle of that copy (react_fs_break). md's copy reads the dying leg, so md
+# stops running the array, and once that leg is back md will not start the
+# array from either leg by itself: the new leg holds part of a copy, and the
+# leg that came back records fewer changes than the new leg does. Measured
+# on a lab guest (kernel 7.0.0-38, mdadm 4.5): a plain assemble of the two
+# then refuses, "0 drives and 1 rebuilding". That is the group a forced start
+# is for.
+#
+# THE LEVEL. Between the worker's finish and the second death the step raises
+# the pool's level to the one where reactions stop (dnv-worker.md AR3), while
+# every leg row and the group's row read OK, which ops_set_level's wait
+# wants. Two things need it. An array that does not run reads ERROR on the
+# group's row (cnagent.md CN28), which sets the primary's health epoch
+# (dnv-worker.md HL2), and under the reacting thresholds a failover would hand
+# the group to a primary that cannot start it either. And at that level the
+# pools are gone (cnagent.md CN19), so no pool's concat holds the broken array
+# open (cnagent.md CN13), which would keep the primary from stopping it; the
+# group's array stays. Every namespace sits on dm-error there, so host0 makes
+# no IO at all from the raise until the pool is back at READWRITE
+# (react_fs_readwrite).
+#
+# THE CALL. While the array still runs, the forced start is refused, as the
+# gateway reads the group's row OK in the primary's report (architecture.md,
+# Repairs); once the array does not run, and while the leg that holds the
+# data is still dead, the call writes the mark that `sp get` shows on the
+# group. The primary then stops the array that does not run, which leaves
+# that leg's superblock as md last wrote it: a stop with the leg back would
+# write md's record of the regions its copy could not read into it, a
+# bad-block log the start would bring into the restored array (cnagent.md,
+# Known limits). Its forced start then waits for the leg, and the CN10
+# retry that wait registers starts the array once the leg's disk node is
+# back: it zeroes the superblock of the other leg, assembles the array from
+# the named leg alone and adds the zeroed leg back as a new member, which
+# md copies whole (cnagent.md CN12); its cn agent's log of its commands shows
+# them in that order, and neither member then holds a bad block
+# (react_fs_proof). The worker clears the mark from the primary's report
+# once the forced start is done (dnv-worker.md AR13), which the step waits
+# for (react_fs_mark_gone); it then hands the new array's copy speed limits
+# back to the kernel (react_fs_speed_back), and the group must end whole on
+# both legs.
+#
+# HOST IO. Back at READWRITE host0 reads SHA0 over ns 1 and step 3's pattern
+# over ns 2, its data unchanged, and its kernel log since the mark taken
+# before the first death reports no failed IO. No failover may happen across
+# the step. The disk node of the retired leg comes back at the end, its side
+# healthy: step 8 takes that leg back, and only a live agent gives its side
+# back in the pool's drain.
+react_fs_data_leg() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== react step 07 (a forced start from the data leg) SKIPPED:" \
+			"--redund $REDUND. A RedundNone group has one leg and no md" \
+			"array to start, and ForceStartGroup refuses its pool" \
+			"(architecture.md, Repairs)."
+		return 0
+	fi
+	stage 07 "a forced start: the data leg dies during md's copy onto a repair's new leg, is named while dead, comes back, and the array starts from it alone"
+	local n i id data old new pos name exam msg rev want tag
+	local before_primary before_failovers
+
+	# The readings the step is judged against, after the pool holds no
+	# repair (react_wait_no_repair), as in steps 5 and 6.
+	react_wait_no_repair
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	copy_primary_cn_id
+	before_primary=$PRIMARY_CNTLR_ID
+	before_failovers=$(worker_failover_cnt)
+	assert_eq "$(sp_field "$COPY_GRP0.grp_id")" "$REACT_GRP_ID" \
+		"slice 0's first data group is still the one step 01 recorded"
+	n=$(sp_field "$COPY_GRP0.leg_list | length")
+	assert_eq "$n" "$LEGS" "slice 0's first data group's legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"group $REACT_GRP_ID has no repair before the step"
+	assert_field "$SP_JSON" "$COPY_GRP0.forced_start" null \
+		"group $REACT_GRP_ID carries no forced-start mark before the step"
+	# Both legs lose their disk node in the step, so each must pass step 5's
+	# disk-node rule (react_leg_alone).
+	for ((i = 0; i < n; i++)); do
+		if ! react_leg_alone "$i"; then
+			id=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
+			die "leg $id at position $i of slice 0's first data group does" \
+				"not have a single side on a disk node that carries exactly" \
+				"one side of $SP. Both legs of the group die in this step," \
+				"and a second side there would take down a leg of another" \
+				"group too"
+		fi
+	done
+	data=$(sp_field "$COPY_GRP0.leg_list[0].leg_id")
+	old=$(sp_field "$COPY_GRP0.leg_list[1].leg_id")
+	case "$data:$old" in
+	*[!0-9:]* | :* | *: | 0:* | *:0)
+		die "slice 0's first data group's legs read '$data' and '$old'"
+		;;
+	esac
+	REACT_FS_DATA=$data
+	REACT_FS_OLD=$old
+	log "  group $REACT_GRP_ID: leg $data holds the data through the step and" \
+		"leg $old dies first; primary cntlr $before_primary on" \
+		"cn$PRIMARY_CN, $before_failovers failover(s) applied so far"
+
+	# The forced start is refused while the array runs, and writes no mark
+	# (architecture.md, Repairs). The refusal names the row's status, which
+	# tells it from the call's other refusals.
+	ctl_fail_grep FAILED_PRECONDITION RES_STATUS_OK group force-start \
+		--grp "$REACT_GRP_ID" --leg "$data"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.forced_start" null \
+		"the refused forced start left no mark on group $REACT_GRP_ID"
+
+	# The first fault, at READWRITE, as the worker's repair needs: leg $old
+	# dies and the worker repairs it while md copies, slowed.
+	tag="dnv-e2e-react-fs-data-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$tag"
+	react_fs_repair "$data" "$old"
+	new=$REACT_FS_NEW
+	REACT_FS_OLD_VM=$REACT_FS_BAD_VM
+	REACT_FS_OLD_INST=$REACT_FS_BAD_INST
+
+	# The second, at the level where reactions stop (see the step's header).
+	ops_set_level NO_THINPOOL
+	react_fs_break "$data" "$new"
+
+	# The forced start, written while the data leg's disk node is still
+	# dead: the primary stops the array that does not run then, which leaves
+	# that leg's superblock as md last wrote it, and its forced start waits
+	# for the leg (see the step's header). The new leg's superblock is
+	# logged once the stop has let go of it, with the part of a copy it
+	# holds.
+	react_fs_mark "$data"
+	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$new")
+	REACT_FS_LAST=""
+	wait_until "$WAIT_REACT" \
+		"the primary to stop group $REACT_GRP_ID's array while leg $data is dead (cnagent.md CN12)" \
+		react_fs_stopped "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$name"
+	exam=$(helper_cn "$PRIMARY_CN" md_examine "$name") ||
+		die "examining leg $new's member on cn$PRIMARY_CN failed: $exam"
+	log "  leg $new's member on the primary: $exam"
+	sp_refresh
+	assert_eq "$(react_fs_mark_of "$SP_JSON")" "$data@$REACT_FS_MARK_REV" \
+		"group $REACT_GRP_ID's forced-start mark while leg $data is dead"
+
+	# The data leg's disk node comes back: the CN10 retry the forced start's
+	# wait registered brings the converge that starts the array from it
+	# (cnagent.md CN12); then the worker's clear, and the group whole on
+	# both legs at the clear's revision or later.
+	react_return_dn "$REACT_FS_DATA_VM" "$REACT_FS_DATA_INST"
+	sp_refresh
+	pos=$(react_fs_pos "$data")
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"leg $data to read healthy with its disk node back (dnv-worker.md HL2)" \
+		copy_rep_leg_epoch "$pos" "$data" healthy
+	REACT_FS_LAST=""
+	msg="the primary to start group $REACT_GRP_ID's array from leg $data and"
+	msg="$msg the worker to clear the mark (dnv-worker.md AR13)"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		react_fs_mark_gone "$data" "$REACT_FS_MARK_REV"
+	react_fs_speed_back "$data"
+	sp_refresh
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group"
+	msg="$msg $REACT_GRP_ID whole, in sync on legs $want, leg $new copied whole"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
+	react_fs_proof "$data" "$new"
+
+	react_fs_readwrite "after the forced start from leg $data, the leg that held the data"
+
+	# The retired leg's disk node comes back (see the step's header).
+	react_return_dn "$REACT_FS_OLD_VM" "$REACT_FS_OLD_INST"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"retired leg $old's side to read healthy with its disk node back (dnv-worker.md HL2)" \
+		copy_ret_side_healthy "$old"
+	host_kmsg_clean 0 "$tag" "across the forced start from leg $data"
+
+	sp_refresh
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary after the forced start is the one the step started with"
+	assert_eq "$(worker_failover_cnt)" "$before_failovers" \
+		"the worker's applied failovers across the forced start from leg $data"
+	log "  no failover during the step: the worker applied $before_failovers" \
+		"before it and none since"
+}
+
+# --- step 8 -----------------------------------------------------------------
+#
+# A FORCED START FROM A RETIRED LEG'S OLDER COPY (architecture.md, Repair;
+# cnagent.md CN12), then the refusal of a take-back of a newer retired leg,
+# on the group step 7 started again.
+#
+# THE WRITE. host0 first writes new bytes over the first MiB of ns 1, which
+# is slice 0's first chunk, a block setup provisioned in this group long
+# before step 7's retired leg left it: that leg holds the bytes setup wrote
+# there, and every leg the group has held since holds the new ones. A block
+# provisioned after that leg left would not be on it at all, so no other
+# write runs on the group in the step.
+#
+# THE FAULT is step 7's, but the leg that holds the data stays dead: the
+# worker repairs the group's other leg with a fresh leg, md copies onto it,
+# slowed, and the repair is finished, the replaced leg, which holds the new
+# bytes, a retired leg too; then, at the level where reactions stop, the leg
+# that holds the data dies in the middle of the copy. No leg the group keeps
+# holds a whole copy of its data any more.
+#
+# THE RESTORE. An operator's repair takes step 7's retired leg back in place
+# of the dead leg (architecture.md, Repairs, CreateRepair), and stays
+# CREATED, as the primary adds a new leg only to an array that runs
+# (cnagent.md CN12). The forced start names that repair's new leg: the
+# primary zeroes the half-copied fresh leg, starts the array from the
+# retired leg alone and adds the zeroed leg back, the repair then reads
+# started, and its finish retires the dead leg (architecture.md, Repairs,
+# FinishRepair). Back at READWRITE host0 reads SHA0 again: the bytes setup
+# wrote, which the retired leg kept, in place of the new ones.
+#
+# THE REFUSAL. The leg the second fault's repair retired holds the new bytes
+# and an md events count above the restored array's, as the old array went
+# through far more changes than the one the restore started. Its disk node
+# comes back, the level goes up again, and one leg of the group loses its
+# disk node, so that an operator's repair can name that leg bad and take the
+# newer leg back. md would take such a leg in as a new member and copy the
+# array over its newer bytes, with no error, so the primary keeps it out of
+# the array, says why in its verdict, and the worker logs the refusal and
+# moves no stage (cnagent.md CN12; dnv-worker.md AR11). The step logs both
+# events counts read on the primary and fails on the premise when the newer
+# leg's is not above, then reads the refusal in the primary's verdict and in
+# the worker's log, the repair still CREATED, the bad leg's member still in
+# the array, and no md command of the primary's on that member or on the
+# newer leg's since the create but the examines. The bad leg's md state is
+# logged, not asserted: the array is quiet, so md should still hold that leg
+# in sync, but md fails a member on its own whenever an IO to it fails, and
+# what the step judges is the primary's commands. The repair is aborted and
+# cancelled, which puts the newer leg back as a retired leg with its kept
+# time (architecture.md, Repairs, CancelRepair), and the bad leg's disk node
+# comes back.
+#
+# HOST IO, as in step 7: none at the raised level, the data read back at
+# READWRITE, no failed IO in host0's kernel log since the step's mark, and no
+# failover across the step. Every disk node is back at its end, the dead data
+# leg's included, a retired leg by then, for the pool's drain.
+react_fs_restore() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== react step 08 (a forced start from a retired leg) SKIPPED:" \
+			"--redund $REDUND. Step 07 made no retired leg to go on from," \
+			"and ForceStartGroup refuses a RedundNone pool" \
+			"(architecture.md, Repairs)."
+		return 0
+	fi
+	stage 08 "a forced start from a retired leg's older copy, then a take-back of a newer retired leg refused"
+	local n data old other fresh newer newer_vm newer_inst dpos didx
+	local oldside oldaddr freshaddr naddr oldep newep rep_id rep1_id
+	local cand pos side addr bad bpos bvm binst keeper nline kline nev kev
+	local recs mrd mst msg rev want tag dev1 before_primary before_failovers
+
+	react_wait_no_repair
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	copy_primary_cn_id
+	before_primary=$PRIMARY_CNTLR_ID
+	before_failovers=$(worker_failover_cnt)
+	data=$REACT_FS_DATA
+	old=$REACT_FS_OLD
+	[ -n "$data" ] && [ -n "$old" ] ||
+		die "step 07 left no data leg and no retired leg for step 08"
+	assert_eq "$(sp_field "$COPY_GRP0.grp_id")" "$REACT_GRP_ID" \
+		"slice 0's first data group is still the one step 01 recorded"
+	n=$(sp_field "$COPY_GRP0.leg_list | length")
+	assert_eq "$n" "$LEGS" "slice 0's first data group's legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"group $REACT_GRP_ID has no repair before the step"
+	assert_field "$SP_JSON" "$COPY_GRP0.forced_start" null \
+		"group $REACT_GRP_ID carries no forced-start mark before the step"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$old\")] | length" \
+		1 "step 07's leg $old is still one of the group's retired legs"
+	dpos=$(react_fs_pos "$data")
+	didx=$(sp_field "$COPY_GRP0.leg_list[$dpos].leg_idx")
+	other=$(sp_field \
+		"[$COPY_GRP0.leg_list[].leg_id | select(. != \"$data\")][0]")
+	case "$didx:$other" in
+	*[!0-9:]* | :* | *: | *:0)
+		die "leg $data's leg_idx reads '$didx', the group's other leg '$other'"
+		;;
+	esac
+
+	# The write (see the step's header), read back before anything dies.
+	dev1=$(host_dev "$UUID1")
+	REACT_FS_PATX="$WORK/pattern-react-x"
+	host_make_pattern 0 "$REACT_FS_PATX" 1
+	REACT_FS_PATX_SHA=$(host_sha_range 0 "$REACT_FS_PATX" 1) ||
+		die "host0: digesting the step's pattern failed"
+	assert_eq "${#REACT_FS_PATX_SHA}" 64 \
+		"the step's reference digest is 64 hex digits"
+	tag="dnv-e2e-react-fs-restore-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$tag"
+	host_write_range 0 "$REACT_FS_PATX" "$dev1" 1 0
+	react_wait_chunks 0 "$dev1" 1 1 0 "$REACT_FS_PATX_SHA" "$WAIT_HOST" \
+		"host0 to read back the MiB it wrote over the first of ns 1"
+
+	# The fault: the worker's repair of the other leg, then the data leg's
+	# death in the middle of md's copy, at the level where reactions stop.
+	react_fs_repair "$data" "$other"
+	newer=$REACT_FS_BAD
+	newer_vm=$REACT_FS_BAD_VM
+	newer_inst=$REACT_FS_BAD_INST
+	fresh=$REACT_FS_NEW
+	# react_fs_repair held the group's retired legs to the give-back rule
+	# (architecture.md, Repairs, FinishRepair); the restore needs step 07's
+	# among them, and the finish kept it, as it is newer than any other the
+	# group held before the step.
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$old\")] | length" \
+		1 "step 07's leg $old is still one of the group's retired legs after the worker's finish"
+	ops_set_level NO_THINPOOL
+	react_fs_break "$data" "$fresh"
+	log "  leg $data stays dead: no leg group $REACT_GRP_ID keeps holds a" \
+		"whole copy of its data, and its retired leg $old holds the copy" \
+		"from before the write"
+
+	# The restore. CreateRepair takes the retired leg back only while its
+	# side is healthy and its disk node holds no other leg of the group
+	# (architecture.md, Repairs, CreateRepair): step 7 brought that node
+	# back, and the fresh leg must not have landed there.
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"retired leg $old's side to read healthy (its disk node came back in step 07)" \
+		copy_ret_side_healthy "$old"
+	assert_field "$CTL_OUT" ".leg_id_to_retired_leg[\"$old\"].grp_id" \
+		"$REACT_GRP_ID" "retired leg $old names group $REACT_GRP_ID"
+	oldep=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$old\"].retired_epoch")
+	oldside=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$old\"].side.side_id")
+	oldaddr=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$old\"].side.addr_port")
+	case "$oldep:$oldside" in
+	*[!0-9:]* | :* | *: | 0:* | *:0)
+		die "retired leg $old reads retired_epoch '$oldep', side '$oldside'"
+		;;
+	esac
+	sp_refresh
+	pos=$(react_fs_pos "$fresh")
+	freshaddr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].addr_port")
+	assert_ne "$freshaddr" "$oldaddr" \
+		"the fresh leg $fresh's disk node (CreateRepair refuses a retired leg whose disk node holds another leg of the group)"
+	ctl_ok repair create --name "$REACT_FS_REP" --grp "$REACT_GRP_ID" \
+		--bad-legs "$data" --retired-leg "$old"
+	rep_id=$(jq_of "$CTL_OUT" '.rep_id')
+	case "$rep_id" in
+	'' | *[!0-9]* | 0) die "repair create returned rep_id '$rep_id'" ;;
+	esac
+	assert_field "$CTL_OUT" '.new_leg_id' "$old" \
+		"CreateRepairReply.new_leg_id is the retired leg taken back"
+	ctl_ok repair get --name "$REACT_FS_REP"
+	assert_field "$CTL_OUT" '.repair.rep_id' "$rep_id" \
+		"the stored rep_id is the one CreateRepair returned"
+	assert_field "$CTL_OUT" '.repair.grp_id' "$REACT_GRP_ID" \
+		"the repair names group $REACT_GRP_ID"
+	assert_field "$CTL_OUT" '.repair.bad_leg_id_list | join(",")' "$data" \
+		"the repair's one bad leg is the dead leg $data"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].leg_id' "$old" \
+		"its new leg is leg $old, under its own leg id"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].side_id' \
+		"$oldside" "with the side it kept as a retired leg"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].side_list[0].provisioned' \
+		true "a retired side is provisioned already"
+	assert_field "$CTL_OUT" ".repair.new_leg_id_to_retired_epoch[\"$old\"]" \
+		"$oldep" "leg $old's retired_epoch, kept for a cancel"
+	assert_field "$CTL_OUT" '.repair.try_to_abort' false \
+		"the repair's abort flag is clear"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "$REACT_FS_REP" \
+		"the group names its repair"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$old\")] | length" \
+		0 "leg $old left the group's retired legs for the repair"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$dpos].leg_id" "$data" \
+		"the dead leg $data keeps its place in leg_list until the finish"
+	# The primary connects the repair's new leg at every stage (architecture.md,
+	# Repair), and adds nothing to an array that does not run: once its
+	# member reads, the repair is still CREATED, and the superblock is the
+	# whole member's that the forced start names (cnagent.md CN12).
+	REACT_FS_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary to connect leg $old, the repair's new leg, and read its superblock" \
+		react_fs_examined "$old"
+	case "$REACT_FS_EXAMINE" in
+	"role=Active_device_"*" recovery=none "*) ;;
+	*)
+		die "leg $old's member reads '$REACT_FS_EXAMINE': a forced start" \
+			"names only a leg whose superblock records a whole member" \
+			"(cnagent.md CN12)"
+		;;
+	esac
+	ctl_ok repair get --name "$REACT_FS_REP"
+	assert_field "$CTL_OUT" '.repair.rep_stage' REP_STAGE_CREATED \
+		"repair $REACT_FS_REP stays CREATED while group $REACT_GRP_ID's array does not run (cnagent.md CN12)"
+
+	# The forced start from the repair's new leg, the repair's start and
+	# finish, the worker's clear, and the group whole on the retired leg
+	# taken back and the fresh leg.
+	react_fs_mark "$old"
+	COPY_REP_LAST=""
+	msg="the worker to move repair $REACT_FS_REP to STARTED once the primary"
+	msg="$msg reports leg $old holding a place in the array it started"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_stage_is "$REACT_FS_REP" REP_STAGE_STARTED
+	ctl_ok repair finish --name "$REACT_FS_REP"
+	assert_field "$CTL_OUT" '.rep_id' "$rep_id" "FinishRepairReply.rep_id"
+	assert_field "$CTL_OUT" '.retired_leg_id' "$data" \
+		"FinishRepairReply.retired_leg_id"
+	ctl_fail NOT_FOUND repair get --name "$REACT_FS_REP"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$dpos].leg_id" "$old" \
+		"leg $old holds the dead leg's place"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$dpos].leg_idx" "$didx" \
+		"with the dead leg's leg_idx"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$dpos].side_list[0].side_id" \
+		"$oldside" "and its own side"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$data\")] | length" \
+		1 "the dead leg $data is one of the group's retired legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the finish"
+	REACT_FS_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the worker to clear group $REACT_GRP_ID's mark (dnv-worker.md AR13)" \
+		react_fs_mark_gone "$old" "$REACT_FS_MARK_REV"
+	react_fs_speed_back "$old"
+	sp_refresh
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group"
+	msg="$msg $REACT_GRP_ID whole, in sync on legs $want, leg $fresh copied"
+	msg="$msg whole from leg $old"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
+	react_fs_proof "$old" "$fresh"
+	react_fs_readwrite "after the forced start from retired leg $old, which kept the bytes setup wrote under the step's write"
+	log "  ns 1's first MiB reads the bytes setup wrote again, the copy" \
+		"retired leg $old kept, in place of the step's write"
+
+	# The newer retired leg (see the step's header): its disk node back and
+	# its side healthy, a disk node that holds no leg of the pool.
+	react_return_dn "$newer_vm" "$newer_inst"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"retired leg $newer's side to read healthy with its disk node back (dnv-worker.md HL2)" \
+		copy_ret_side_healthy "$newer"
+	newep=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$newer\"].retired_epoch")
+	naddr=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg[\"$newer\"].side.addr_port")
+	case "$newep" in
+	'' | *[!0-9]* | 0) die "retired leg $newer reads retired_epoch '$newep'" ;;
+	esac
+	sp_refresh
+	assert_field "$SP_JSON" "[$SP_SIDE_PATH | select(.addr_port == \"$naddr\")] | length" \
+		0 "retired leg $newer's disk node $naddr holds no leg of $SP"
+	ops_set_level NO_THINPOOL
+
+	# The bad leg: of the fresh leg and the retired leg taken back, the first
+	# whose disk node carries its own side alone, so that its death takes
+	# down that one side; the other keeps the data.
+	bad=""
+	for cand in "$fresh" "$old"; do
+		pos=$(react_fs_pos "$cand")
+		side=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].side_id")
+		addr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].addr_port")
+		ctl_ok dn get --addr "$addr"
+		if [ "$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list | length')" = 1 ] &&
+			[ "$(jq_of "$CTL_OUT" '.dn_conf.side_ptr_list[0].side_id')" = "$side" ]; then
+			bad=$cand
+			bpos=$pos
+			break
+		fi
+		log "  leg $cand's disk node $addr carries sides" \
+			"$(jq_of "$CTL_OUT" '[.dn_conf.side_ptr_list[].side_id] | join(",")')," \
+			"not its own side $side alone"
+	done
+	[ -n "$bad" ] ||
+		die "neither leg $fresh nor leg $old has a disk node that carries its" \
+			"own side alone, so no death of one disk node takes down exactly" \
+			"one leg of group $REACT_GRP_ID"
+	keeper=$fresh
+	[ "$bad" != "$fresh" ] || keeper=$old
+	bvm=$(dn_vm_of_addr "$addr")
+	binst=$(dn_inst_of_addr "$addr")
+	assert_ne "$bvm" none "leg $bad's addr_port $addr names a --dn guest"
+	assert_ne "$binst" none "leg $bad's addr_port $addr names a dn instance"
+	diag_note_dn "$bvm" "$binst"
+	log "  killing dn$bvm instance $binst ($addr), the disk node of leg $bad;" \
+		"leg $keeper keeps the data"
+	react_kill_dn "$bvm" "$binst"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_REACT" \
+		"the primary's probe to give leg $bad a health epoch (cnagent.md CN11)" \
+		copy_rep_leg_epoch "$bpos" "$bad" dead
+
+	# The take-back of the newer leg.
+	REACT_FS_CN_MARK=$(react_cn_log_mark)
+	REACT_FS_WK_MARK=$(worker_log_mark)
+	ctl_ok repair create --name "$REACT_FS_REP1" --grp "$REACT_GRP_ID" \
+		--bad-legs "$bad" --retired-leg "$newer"
+	rep1_id=$(jq_of "$CTL_OUT" '.rep_id')
+	case "$rep1_id" in
+	'' | *[!0-9]* | 0) die "repair create returned rep_id '$rep1_id'" ;;
+	esac
+	assert_field "$CTL_OUT" '.new_leg_id' "$newer" \
+		"CreateRepairReply.new_leg_id is the newer retired leg taken back"
+	ctl_ok repair get --name "$REACT_FS_REP1"
+	assert_field "$CTL_OUT" '.repair.bad_leg_id_list | join(",")' "$bad" \
+		"the repair's one bad leg is leg $bad"
+	assert_field "$CTL_OUT" '.repair.new_leg_list[0].leg_id' "$newer" \
+		"its new leg is leg $newer"
+	assert_field "$CTL_OUT" ".repair.new_leg_id_to_retired_epoch[\"$newer\"]" \
+		"$newep" "leg $newer's retired_epoch, kept for a cancel"
+
+	# The premise: both events counts, read on the primary from the two
+	# superblocks, the newer leg's above the array's.
+	REACT_FS_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary to connect leg $newer, the repair's new leg, and read its superblock" \
+		react_fs_examined "$newer"
+	nline=$REACT_FS_EXAMINE
+	kline=$(helper_cn "$PRIMARY_CN" md_examine \
+		"$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$keeper")") ||
+		die "examining leg $keeper's member on cn$PRIMARY_CN failed: $kline"
+	nev=$(kv_of "$nline" events)
+	kev=$(kv_of "$kline" events)
+	case "$nev:$kev" in
+	*[!0-9:]* | :* | *:)
+		die "the events counts read '$nev' (leg $newer) and '$kev' (leg $keeper)"
+		;;
+	esac
+	log "  md events: leg $newer, taken back, $nev ($nline); leg $keeper, in" \
+		"sync in the array, $kev ($kline)"
+	[ "$nev" -gt "$kev" ] ||
+		die "leg $newer's md events count $nev is not above leg $keeper's" \
+			"$kev, the premise of the refusal: either the old array's changes" \
+			"did not outnumber the restored one's, or the primary added leg" \
+			"$newer before this read, its superblock then the array's"
+
+	# The refusal, in the primary's verdict and in the worker's log, with the
+	# repair still CREATED, the bad leg's member still in the array, and no
+	# command of the primary's since the create on that member or on the
+	# newer leg's but the examines: no add, and no fail or removal of the
+	# bad leg in a pass that adds nothing (cnagent.md CN12).
+	REACT_FS_LAST=""
+	REACT_FS_REFUSAL=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary's verdict on repair $REACT_FS_REP1 to carry the refusal of leg $newer (cnagent.md CN12)" \
+		react_fs_refused "$PRIMARY_CNTLR_ID" "$rep1_id"
+	log "  legs md holds in sync in group $REACT_GRP_ID's array:" \
+		"$(jq_of "$CTL_OUT" \
+			".cntlr_info.grp_id_to_grp_info[\"$REACT_GRP_ID\"].in_sync_leg_id_list // [] | join(\",\")")"
+	mrd=$(helper_cn "$PRIMARY_CN" md_member_read \
+		"$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$bad")") ||
+		die "leg $bad's member is in no array on cn$PRIMARY_CN: the refused" \
+			"take-back must take no bad leg out (cnagent.md CN12)"
+	# In sync is "in_sync" in the member's state and not "faulty", which md
+	# shows beside it for bad blocks it has not acknowledged (cnagent.md
+	# CN12).
+	mst=${mrd%% *}
+	case ",${mst#state=}," in
+	*,faulty,*) mst=out ;;
+	*,in_sync,*) mst=in ;;
+	*) mst=out ;;
+	esac
+	if [ "$mst" = in ]; then
+		log "  leg $bad's member on the primary: ${mrd% wsect=*}"
+	else
+		log "!!! leg $bad's member on the primary reads '${mrd% wsect=*}'," \
+			"not in sync or faulty: an IO to it failed after all, which the" \
+			"quiet array was to avoid; the primary's commands on it are" \
+			"checked next"
+	fi
+	recs=$(react_fs_cmds_on "$REACT_FS_CN_MARK" "$bad" "$newer")
+	assert_eq "$recs" "[]" \
+		"the primary's md commands on the members of legs $bad and $newer since the take-back's create, examines aside"
+	wait_until "$WAIT_REACT" \
+		"the worker to log repair stage skipped (take_back_refused) for group $REACT_GRP_ID (dnv-worker.md AR11)" \
+		react_fs_refusal_logged "$REACT_GRP_ID"
+	recs=$(worker_grp_records "$REACT_FS_WK_MARK" "repair stage skipped" \
+		"$REACT_GRP_ID")
+	log "  the primary's refusal: $REACT_FS_REFUSAL"
+	log "  the worker's last record of it:" \
+		"$(printf '%s\n' "$recs" | "$JQ" -c -s \
+			'[.[] | select(.reason == "take_back_refused")] | last | .refusal')"
+	ctl_ok repair get --name "$REACT_FS_REP1"
+	assert_field "$CTL_OUT" '.repair.rep_stage' REP_STAGE_CREATED \
+		"the refused take-back stays CREATED: the worker moves no stage on a refusal (dnv-worker.md AR11)"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$bpos].leg_id" "$bad" \
+		"the bad leg $bad keeps its place in leg_list"
+
+	# The abort and the cancel, which give the newer leg back its kept time
+	# (architecture.md, Repairs, CancelRepair).
+	ctl_ok repair abort --name "$REACT_FS_REP1"
+	REACT_FS_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the worker to move repair $REACT_FS_REP1 to ABORTED once the primary confirms the abort (dnv-worker.md AR11)" \
+		react_fs_rep_aborted "$REACT_FS_REP1"
+	ctl_ok repair cancel --name "$REACT_FS_REP1"
+	assert_field "$CTL_OUT" '.rep_id' "$rep1_id" "CancelRepairReply.rep_id"
+	ctl_fail NOT_FOUND repair get --name "$REACT_FS_REP1"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the cancel"
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$bpos].leg_id" "$bad" \
+		"the bad leg $bad still holds its place"
+	assert_field "$SP_JSON" \
+		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$newer\")] | length" \
+		1 "leg $newer is one of the group's retired legs again"
+	ctl_ok retired-leg list
+	assert_field "$CTL_OUT" ".leg_id_to_retired_leg[\"$newer\"].retired_epoch" \
+		"$newep" "leg $newer is retired again with the time it kept"
+
+	# The bad leg's disk node comes back, and the group must read whole at
+	# the cancel's revision, in sync on both legs, as md saw no IO to that
+	# leg while it was away. Then READWRITE, host0's reads, still the
+	# restored copy, and the dead data leg's disk node, for the drain.
+	react_return_dn "$bvm" "$binst"
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"leg $bad to read healthy with its disk node back (dnv-worker.md HL2)" \
+		copy_rep_leg_epoch "$bpos" "$bad" healthy
+	sp_refresh
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"cn$PRIMARY_CN to apply revision $rev and md to hold group $REACT_GRP_ID whole, in sync on legs $want" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
+	react_fs_readwrite "with the take-back of the newer retired leg $newer refused"
+	react_return_dn "$REACT_FS_DATA_VM" "$REACT_FS_DATA_INST"
+	host_kmsg_clean 0 "$tag" "across the restore from retired leg $old"
+
+	sp_refresh
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary after the restore is the one the step started with"
+	assert_eq "$(worker_failover_cnt)" "$before_failovers" \
+		"the worker's applied failovers across the restore from retired leg $old"
+	log "  no failover during the step: the worker applied $before_failovers" \
+		"before it and none since"
+}
+
+# --- step 9 -----------------------------------------------------------------
 
 react_drop_target() {
-	stage 07 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
+	stage 09 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
 	ctl_ok ns delete --nqn "$SS0" --idx 2
 	assert_field "$CTL_OUT" '.ns_id' "$REACT_NS2_ID" \
 		"DeleteNamespaceReply.ns_id"
@@ -18900,6 +20678,8 @@ case_react() {
 	react_replace
 	react_leg_repair
 	react_dead_grp
+	react_fs_data_leg
+	react_fs_restore
 	react_drop_target
 	case_finish
 }

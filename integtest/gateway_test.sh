@@ -24,7 +24,7 @@
 # creates lives under $WORK on the server, and cleanup removes exactly that.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 65 RPCs maintains exactly the etcd schema (architecture.md,
+# of the 66 RPCs maintains exactly the etcd schema (architecture.md,
 # etcd data model), verified against ground truth that never goes through the
 # code under test; (b) parallel gRPCs across instances are correct — disjoint
 # work all succeeds, contended work has exactly one winner and no partial
@@ -3156,7 +3156,7 @@ EOF
 		"Σ DN free after the repairs (the new leg took the bad leg's extents)"
 
 	# -------------------------------------------------------------------
-	stage 17 "get-td-bm / get-leg-bm and the two inspects"
+	stage 17 "get-td-bm / get-leg-bm, the two inspects, a forced start"
 	# -------------------------------------------------------------------
 	# GW14: the agent's bytes travel verbatim, and this fake replies an
 	# empty bitmap, so the pass-through is an empty hex string of length 0.
@@ -3233,6 +3233,114 @@ EOF
 		"inspect-side zero_bytes is the seeded side_conf.zero_bytes"
 	assert_field "$out" '.side_info.zeroed_bytes' "$metaZeroBytes" \
 		"inspect-side zeroed_bytes is the seeded side_conf.zero_bytes"
+	# The forced start of a group (architecture.md, Repairs; Repair): its
+	# write reads the primary's latest report between its planning read and
+	# its op (AG1) and is refused while the group's row reads OK. The
+	# primary's fake is seeded with the pool's slices, so it reports every
+	# group's row, OK by default, as over an array that runs; a row lever
+	# then reports the data group's array broken.
+	local fsLegA fsLegB fsMark
+	fsLegA=$(smoke_grp_leg_ids sp0 "$dataGrp" | sed -n 1p)
+	fsLegB=$(smoke_grp_leg_ids sp0 "$dataGrp" | sed -n 2p)
+	[ -n "$fsLegB" ] || die "sp0's data group $dataGrp lists fewer than two legs"
+	set_state "$primaryDir" <<EOF
+{"objects":{
+  "cn":{"revision":7,"request":{"cluster_id":"$CID","cn_id":"$primaryCnId",
+        "revision":"7","cntlr_pointer_list":[
+          {"sp_id":"$spId","cntlr_id":"$primaryId"}]}},
+  "cntlr $spId:$primaryId":{"revision":7,"request":{
+        "cluster_id":"$CID","cn_id":"$primaryCnId",
+        "cntlr_pointer":{"sp_id":"$spId","cntlr_id":"$primaryId"},
+        "revision":"7","cntlr":{"primary":true},
+        "id_to_slice":$(jq_of "$(sp_json sp0)" '.slices')}}}}
+EOF
+	out=$(gw inspect-cntlr --sp sp0 --id "$primaryId")
+	assert_field "$out" ".cntlr_info.grp_id_to_md_raid[\"$dataGrp\"].status" \
+		"RES_STATUS_OK" "the seeded primary reports the data group's row OK"
+	# The refusals, each writing nothing: a leg with the cancel flag, an
+	# unknown group, a leg the mark may not name, the level that stops group
+	# arrays, and an array that runs. The seeded report reads the data
+	# group's row OK and holds no row of an unknown group, so the group, leg
+	# and level cases also hold a fault of the report, which the handler
+	# reads only after those checks (architecture.md, Repairs): they pin
+	# that order.
+	assert_no_write "force-start-grp with a leg and --cancel" \
+		gwx INVALID_ARGUMENT force-start-grp --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --leg "$fsLegA" --cancel
+	assert_no_write "force-start-grp of an unknown group" \
+		gwx NOT_FOUND force-start-grp --sp sp0 --rev "$SP_REV" \
+		--grp 0xdead --leg "$fsLegA"
+	assert_no_write "force-start-grp from a leg of another group" \
+		gwx NOT_FOUND force-start-grp --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --leg "$metaLeg"
+	gw set-sp-level --sp sp0 --rev "$SP_REV" --level NO_REDUND >/dev/null
+	refresh_rev sp0
+	assert_no_write "force-start-grp at SP_LEVEL_NO_REDUND" \
+		smoke_gwx_out FAILED_PRECONDITION force-start-grp --sp sp0 \
+		--rev "$SP_REV" --grp "$dataGrp" --leg "$fsLegA"
+	assert_field "$SMOKE_OUT" \
+		'.message | test("where no group array is built")' "true" \
+		"the refusal at the level says no group array is built"
+	gw set-sp-level --sp sp0 --rev "$SP_REV" --level READWRITE >/dev/null
+	refresh_rev sp0
+	assert_no_write "force-start-grp of a group whose array runs" \
+		smoke_gwx_out FAILED_PRECONDITION force-start-grp --sp sp0 \
+		--rev "$SP_REV" --grp "$dataGrp" --leg "$fsLegA"
+	assert_field "$SMOKE_OUT" '.message | test("runs: the primary")' \
+		"true" "the refusal of a running array names the primary's report"
+	# The array broken: the write puts the mark with the revision its own
+	# transaction commits, in one bump.
+	set_behavior "$primaryDir" <<EOF
+{"objects":{"cntlr $spId:$primaryId":{"rows":{
+  "grp_id_to_md_raid.$dataGrp":{"status":"ERROR",
+  "details":"array_state broken"}}}}}
+EOF
+	spRevBefore=$SP_REV
+	out=$(gw force-start-grp --sp sp0 --rev "$SP_REV" --grp "$dataGrp" \
+		--leg "$fsLegA")
+	refresh_rev sp0
+	assert_eq "$SP_REV" "$((spRevBefore + 1))" \
+		"force-start-grp bumps SpRev exactly once"
+	assert_field "$out" '.grp_id' "$dataGrp" "force-start-grp reply grp_id"
+	assert_field "$out" '.revision' "$SP_REV" \
+		"force-start-grp reply revision is the one its write committed"
+	fsMark=$(smoke_grp_field sp0 "$dataGrp" forced_start)
+	assert_field "$fsMark" '.leg_id' "$fsLegA" "the mark names leg A"
+	assert_field "$fsMark" '.revision' "$SP_REV" \
+		"the mark carries the revision its write committed"
+	# A second call replaces the mark, at SP_LEVEL_NO_THINPOOL, the level
+	# where reactions stop and an operator writes one: the level gate
+	# refuses only from SP_LEVEL_NO_REDUND up.
+	gw set-sp-level --sp sp0 --rev "$SP_REV" --level NO_THINPOOL >/dev/null
+	refresh_rev sp0
+	spRevBefore=$SP_REV
+	out=$(gw force-start-grp --sp sp0 --rev "$SP_REV" --grp "$dataGrp" \
+		--leg "$fsLegB")
+	refresh_rev sp0
+	assert_eq "$SP_REV" "$((spRevBefore + 1))" \
+		"the replace at SP_LEVEL_NO_THINPOOL bumps SpRev exactly once"
+	fsMark=$(smoke_grp_field sp0 "$dataGrp" forced_start)
+	assert_field "$fsMark" '.leg_id' "$fsLegB" "the replaced mark names leg B"
+	assert_field "$fsMark" '.revision' "$SP_REV" \
+		"the replaced mark carries its own revision"
+	gw set-sp-level --sp sp0 --rev "$SP_REV" --level READWRITE >/dev/null
+	refresh_rev sp0
+	# The cancel withdraws it, and a cancel with no mark writes nothing.
+	spRevBefore=$SP_REV
+	out=$(gw force-start-grp --sp sp0 --rev "$SP_REV" --grp "$dataGrp" \
+		--cancel)
+	refresh_rev sp0
+	assert_eq "$SP_REV" "$((spRevBefore + 1))" \
+		"the cancel bumps SpRev exactly once"
+	assert_field "$out" '.revision' "0" "the cancel's reply revision"
+	assert_eq "$(smoke_grp_field sp0 "$dataGrp" forced_start)" "null" \
+		"the cancel withdrew the mark"
+	assert_no_write "a cancel of a group with no mark" \
+		gw force-start-grp --sp sp0 --rev "$SP_REV" --grp "$dataGrp" \
+		--cancel
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
+		"a cancel of a group with no mark bumps no SpRev"
+	clear_behavior "$primaryDir"
 
 	# -------------------------------------------------------------------
 	stage 18 "advance-ids: every counter moves, no revision, new ids above"

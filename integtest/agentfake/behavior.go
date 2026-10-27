@@ -52,10 +52,15 @@ type ChunkId struct {
 // RepairVerdict is the primary's verdict on one repair that a cntlr's reply
 // carries in rep_id_to_repair_info (architecture.md, Repair): Started, the
 // new leg holds a place in the group's array, or AbortConfirmed, the abort
-// of a repair whose flag is set is confirmed.
+// of a repair whose flag is set is confirmed; and Refusal, the text of the
+// primary's refusal of the add of a new leg taken from a retired leg that
+// holds newer data than the array (cnagent.md CN12), empty when it refuses
+// nothing. The fake reports each as the lever says, with no check that a
+// real primary would give that combination.
 type RepairVerdict struct {
 	Started        bool
 	AbortConfirmed bool
+	Refusal        string
 }
 
 // GrpReading overrides a primary's reading of one group's running array in
@@ -466,8 +471,9 @@ type rowJSON struct {
 
 // repairVerdictJSON is one entry of the behavior file's "repairs" map.
 type repairVerdictJSON struct {
-	Started        bool `json:"started,omitempty"`
-	AbortConfirmed bool `json:"abort_confirmed,omitempty"`
+	Started        bool   `json:"started,omitempty"`
+	AbortConfirmed bool   `json:"abort_confirmed,omitempty"`
+	Refusal        string `json:"refusal,omitempty"`
 }
 
 // grpReadingJSON is one entry of the behavior file's "grps" map.
@@ -652,6 +658,7 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 		ob.Repairs[repName] = RepairVerdict{
 			Started:        rj.Started,
 			AbortConfirmed: rj.AbortConfirmed,
+			Refusal:        rj.Refusal,
 		}
 	}
 	for key, gj := range oj.Grps {

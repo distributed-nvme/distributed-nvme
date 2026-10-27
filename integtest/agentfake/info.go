@@ -529,7 +529,7 @@ func (a *Agent) grpReadingLocked(key string, grp *pb.Group) *pb.CntlrInfo_GrpInf
 // repairRowsLocked derives what a cntlr reports of the repairs of its request
 // (cntlrInfoLocked): a leg row per new leg of every repair, on a primary and
 // a standby alike, and, on a primary, the verdict the repairs lever gives a
-// repair, keyed by the repair's rep_id.
+// repair, its refusal text included, keyed by the repair's rep_id.
 func (a *Agent) repairRowsLocked(
 	info *pb.CntlrInfo, key string, primary bool, req *pb.SyncupCntlrRequest,
 ) {
@@ -549,6 +549,7 @@ func (a *Agent) repairRowsLocked(
 		info.RepIdToRepairInfo[rep.GetRepId()] = &pb.CntlrInfo_RepairInfo{
 			Started:        verdict.Started,
 			AbortConfirmed: verdict.AbortConfirmed,
+			Refusal:        verdict.Refusal,
 		}
 	}
 }

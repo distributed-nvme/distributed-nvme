@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 65 invocations
+// argv for argv. The integration suite asserts the same 66 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -614,9 +614,21 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			LegId:       3,
 		}},
+
+	// ---- group ----
+	{66, "ForceStartGroup",
+		[]string{"group", "force-start", "--grp", "1", "--leg", "2",
+			"--rev", "7"},
+		&pb.ForceStartGroupRequest{
+			ClusterName: itCluster,
+			SpName:      itSp,
+			SpRev:       wantSpRev(itRevValue),
+			GrpId:       1,
+			LegId:       2,
+		}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 65 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 66 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -627,12 +639,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 65 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 66 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 64 that remain.
+// be green over the 65 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 65 {
-		t.Errorf("sweepRows has %d rows, want 65", len(sweepRows))
+	if len(sweepRows) != 66 {
+		t.Errorf("sweepRows has %d rows, want 66", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -658,7 +670,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 64 of the 65, sp_name in 46. It reads the field off
+// fill: cluster_name in 65 of the 66, sp_name in 47. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -677,11 +689,11 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 64 {
-		t.Errorf("%d requests carry cluster_name, want 64", clusterFields)
+	if clusterFields != 65 {
+		t.Errorf("%d requests carry cluster_name, want 65", clusterFields)
 	}
-	if spFields != 46 {
-		t.Errorf("%d requests carry sp_name, want 46", spFields)
+	if spFields != 47 {
+		t.Errorf("%d requests carry sp_name, want 47", spFields)
 	}
 }
 
@@ -821,8 +833,8 @@ func TestTokenCarriersMatchCT3(t *testing.T) {
 			}
 		})
 	}
-	if carriers != 36 {
-		t.Errorf("%d requests carry a revision token, want 36", carriers)
+	if carriers != 37 {
+		t.Errorf("%d requests carry a revision token, want 37", carriers)
 	}
 }
 
@@ -1747,6 +1759,49 @@ func TestIdFlagsAcceptBase0(t *testing.T) {
 	if slice.SliceId != 32 {
 		t.Errorf("--slice 0x20 sent %d, want 32", slice.SliceId)
 	}
+
+	start := runArgv(t, "ForceStartGroup", "group", "force-start",
+		"--grp", "0x11", "--leg", "0x2a").(*pb.ForceStartGroupRequest)
+	if start.GrpId != 17 || start.LegId != 42 {
+		t.Errorf("--grp 0x11 --leg 0x2a sent %d and %d, want 17 and 42",
+			start.GrpId, start.LegId)
+	}
+}
+
+// TestForceStartCancelIsSentAsTyped covers the form of `group force-start`
+// the sweep's one row per RPC leaves out (dnvctl.md, `group` —
+// `ctl/group.go`): --cancel sends cancel true and the token as typed, a leaf
+// without it sends cancel false, and the pairings the gateway refuses — a
+// --leg beside --cancel, a write with no --leg — are sent as typed for it to
+// refuse (CT8).
+func TestForceStartCancelIsSentAsTyped(t *testing.T) {
+	cancel := runArgv(t, "ForceStartGroup", "group", "force-start",
+		"--grp", "1", "--cancel", "--rev", "7")
+	wantRequest(t, cancel, &pb.ForceStartGroupRequest{
+		ClusterName: itCluster,
+		SpName:      itSp,
+		SpRev:       wantSpRev(itRevValue),
+		GrpId:       1,
+		Cancel:      true,
+	})
+
+	both := runArgv(t, "ForceStartGroup", "group", "force-start",
+		"--grp", "1", "--leg", "2", "--cancel")
+	wantRequest(t, both, &pb.ForceStartGroupRequest{
+		ClusterName: itCluster,
+		SpName:      itSp,
+		GrpId:       1,
+		LegId:       2,
+		Cancel:      true,
+	})
+
+	noLeg := runArgv(t, "ForceStartGroup", "group", "force-start",
+		"--grp", "1", "--cancel=false")
+	wantRequest(t, noLeg, &pb.ForceStartGroupRequest{
+		ClusterName: itCluster,
+		SpName:      itSp,
+		GrpId:       1,
+	})
 }
 
 // TestBitmapHexToBytes covers hexBytesOf's two accepted inputs: an EMPTY

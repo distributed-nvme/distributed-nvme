@@ -105,6 +105,16 @@ func (h *reactHarness) setVerdict(repId uint64, started, abortConfirmed bool) {
 	}
 }
 
+// setRefusal installs the primary's verdict on the repair repId that carries
+// its refusal of a take-back (cnagent.md CN12), as text, and says neither
+// started nor abort confirmed.
+func (h *reactHarness) setRefusal(repId uint64, text string) {
+	h.t.Helper()
+	h.setVerdict(repId, false, false)
+	h.w.cntlrs[reactCntlrA].driver.lastInfo.RepIdToRepairInfo[repId].Refusal =
+		text
+}
+
 // withReactRetired gives a group of the fixture's slice a retired leg, its
 // side on dn C, retired at epoch.
 func withReactRetired(
@@ -306,6 +316,59 @@ func TestRepairStageMovedFromTheVerdict(t *testing.T) {
 		h.wantOps("set_repair_stage")
 		h.wantStageRecord(msgRepairStageSkipped,
 			pb.RepStage_REP_STAGE_STARTED, reasonOpFailed)
+	})
+}
+
+// TestRepairStageSkippedOnATakeBackRefusal pins AR11 on a verdict that
+// carries the primary's refusal of a take-back: the repair moves no stage,
+// and every pass while the verdict stands logs `repair stage skipped` with
+// take_back_refused, naming the repair, the primary and its report, and
+// carrying the refusal's text; a verdict that says started beside a
+// refusal moves as any started does.
+func TestRepairStageSkippedOnATakeBackRefusal(t *testing.T) {
+	const refusal = "leg 0x385 taken from a retired leg holds newer data " +
+		"than the array"
+
+	t.Run("refused", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		withReactRepair(h, pb.RepStage_REP_STAGE_CREATED, false)
+		h.setRefusal(reactRepId, refusal)
+		h.pass()
+		h.pass()
+		h.wantOps()
+		recs := h.logs.withMsg(msgRepairStageSkipped)
+		if len(recs) != 2 {
+			t.Fatalf("skips = %v, want one a pass", recs)
+		}
+		for _, rec := range recs {
+			if rec["reason"] != reasonTakeBackRefused ||
+				rec["refusal"] != refusal ||
+				rec["rep_name"] != reactRepName ||
+				rec["rep_id"] != float64(reactRepId) ||
+				rec["grp_id"] != float64(reactDataGrp) ||
+				rec["cntlr_id"] != float64(reactCntlrA) {
+				t.Fatalf("skip %v, want %s of repair %s carrying %q", rec,
+					reasonTakeBackRefused, reactRepName, refusal)
+			}
+			if _, ok := rec["stage"]; ok {
+				t.Fatalf("skip %v names a stage no verdict asked for", rec)
+			}
+		}
+		h.wantNoRecord(msgRepairStageMoved)
+	})
+
+	t.Run("started beside a refusal", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		withReactRepair(h, pb.RepStage_REP_STAGE_CREATED, false)
+		h.setRefusal(reactRepId, refusal)
+		h.w.cntlrs[reactCntlrA].driver.lastInfo.
+			RepIdToRepairInfo[reactRepId].Started = true
+		h.pass()
+		calls := h.wantOps("set_repair_stage")
+		if calls[0].stage != pb.RepStage_REP_STAGE_STARTED {
+			t.Fatalf("moved to %s, want STARTED", calls[0].stage)
+		}
+		h.wantNoRecord(msgRepairStageSkipped)
 	})
 }
 

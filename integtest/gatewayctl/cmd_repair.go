@@ -1,13 +1,15 @@
 // The repair half of the driver's subcommand table: repairs and retired legs
 // (architecture.md, Repairs and Retired legs; gateway.md, Repairs and
-// retired legs).
+// retired legs), and the forced start of a group.
 //
-// Every RPC here is SP-scoped and pure etcd, so each subcommand has the shape
-// of cmd_vol.go's: `--sp` names the pool, every mutator carries the `--rev`
+// Every RPC here is SP-scoped, so each subcommand has the shape of
+// cmd_vol.go's: `--sp` names the pool, every mutator carries the `--rev`
 // token, always sent (a present zero when omitted, GW6's always-stale
 // probe), and the readers carry none. `--name` is rep_name, and `--leg` the
-// retired leg's id. abort-repair drives TryToAbortRepair, the spelling
-// dnvctl gives the same call (`repair abort`).
+// retired leg's id, or for force-start-grp the leg the group's array starts
+// from. abort-repair drives TryToAbortRepair, the spelling dnvctl gives the
+// same call (`repair abort`). All are pure etcd but force-start-grp, whose
+// gateway reads the primary's report on the way (gateway.md AG1).
 package main
 
 import (
@@ -176,6 +178,36 @@ func setupDeleteRetiredLeg(fs *flag.FlagSet) job {
 			SpName:      *spName,
 			SpRev:       &pb.SpRev{Revision: uint64(rev)},
 			LegId:       uint64(leg),
+		})
+	}
+}
+
+// setupForceStartGrp drives ForceStartGroup. --grp is the group's grp_id and
+// --leg the leg its array starts from; --cancel withdraws the group's mark
+// instead and is sent with --leg as typed, so the suite can send a leg with
+// a cancel and see it refused.
+func setupForceStartGrp(fs *flag.FlagSet) job {
+	spName := fs.String("sp", "", "sp_name")
+	var rev hexUint
+	fs.Var(&rev, "rev", "sp_rev token")
+	var grp, leg hexUint
+	fs.Var(&grp, "grp", "grp_id of the group")
+	fs.Var(&leg, "leg",
+		"leg_id the group's array starts from (0 with --cancel)")
+	cancel := fs.Bool("cancel", false,
+		"cancel — withdraw the group's forced-start mark")
+	return func(
+		ctx context.Context,
+		client pb.GatewayClient,
+		g *globals,
+	) (any, error) {
+		return client.ForceStartGroup(ctx, &pb.ForceStartGroupRequest{
+			ClusterName: g.cluster,
+			SpName:      *spName,
+			SpRev:       &pb.SpRev{Revision: uint64(rev)},
+			GrpId:       uint64(grp),
+			LegId:       uint64(leg),
+			Cancel:      *cancel,
 		})
 	}
 }

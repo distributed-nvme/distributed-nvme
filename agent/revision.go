@@ -50,8 +50,10 @@ func OkReply() *pb.AgentReply {
 // run in the clone-metadata area (dnagent.md DN16); on a cn a piece of the
 // node's base state that the CN's background read probed absent, or an ANA
 // group it read in a state other than its fixed one on a port whose
-// transport attributes match. Each arrives among the failures, rendered like
-// an enumeration that did not answer. One condition arrives among the
+// transport attributes match, and a forced-start mark of a cntlr's request
+// that no SyncupCntlr of the running agent has delivered (cnagent.md CN12,
+// CN30). Each arrives among the failures, rendered like an enumeration that
+// did not answer. One condition arrives among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background
 // read names as one its converge would put back or add, under
 // LeftoverKindMdMember (cnagent.md CN30). Only a read's verdict names these

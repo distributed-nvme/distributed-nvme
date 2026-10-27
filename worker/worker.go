@@ -3,7 +3,7 @@
 // (VW1-VW11), the shard workers that watch one revision prefix each (SW1-SW6),
 // the per-object revision workers that drive the agents through Syncup*/Check*
 // (RW1-RW23), the health bookkeeping (HL1-HL7), the bitmap pushes (BM1-BM6) and
-// the automatic reactions (AR1-AR12, SPD1-SPD15, CLD1-CLD12).
+// the automatic reactions (AR1-AR13, SPD1-SPD15, CLD1-CLD12).
 //
 // It talks to etcd only through etcdutil and to the agents only as a gRPC
 // client (layout.md, Dependency rules); it never serves gRPC and never talks to

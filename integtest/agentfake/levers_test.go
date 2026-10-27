@@ -870,16 +870,17 @@ func TestLeversSafeUnderConcurrentUse(t *testing.T) {
 
 // TestCntlrInfoRepairsAndReadings pins what a cntlr reports of a repair and
 // of a group (dnv-worker.md, Integration test plan, The fake agent;
-// architecture.md, Repair): a leg row per new leg of every repair its request
-// carries, on a primary and a standby alike; on a primary, the repairs
-// lever's verdict on a repair by its rep_name, keyed by the repair's rep_id,
-// and no verdict for a repair the lever does not name; and on a primary, a
-// reading of every group of the request, whole with every leg_list leg in
-// sync unless the grps lever says otherwise, half by half. A standby reports
-// neither verdicts nor readings.
+// architecture.md, Repair): a leg row per new leg of every repair its
+// request carries, on a primary and a standby alike; on a primary, the
+// repairs lever's verdict on a repair by its rep_name, keyed by the repair's
+// rep_id, its refusal text included, and no verdict for a repair the lever
+// does not name; and on a primary, a reading of every group of the request,
+// whole with every leg_list leg in sync unless the grps lever says
+// otherwise, half by half. A standby reports neither verdicts nor readings.
 func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 	const behavior = `{"objects": {"cntlr 1:1": {
-	  "repairs": {"r0": {"started": true}, "gone": {"abort_confirmed": true}},
+	  "repairs": {"r0": {"started": true}, "gone": {"abort_confirmed": true},
+	              "r2": {"refusal": "leg 0x2ca holds newer data"}},
 	  "grps": {"12": {"whole": false}, "0x15": {"in_sync": []},
 	           "71": {"whole": false, "in_sync": [712]}}}}}`
 	for _, primary := range []bool{true, false} {
@@ -906,6 +907,9 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 				"r1": {RepId: 10, GrpId: 21, NewLegList: []*pb.Leg{
 					{LegId: 203},
 				}},
+				"r2": {RepId: 11, GrpId: 71, NewLegList: []*pb.Leg{
+					{LegId: 714},
+				}},
 			}
 			reply, err := cnClient.SyncupCntlr(ctx, req)
 			if err != nil {
@@ -913,7 +917,7 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 			}
 			info := reply.GetCntlrInfo()
 			wantKeys(t, "leg_id_to_leg", info.GetLegIdToLeg(),
-				101, 102, 103, 104, 105, 201, 202, 203, 711, 712, 713)
+				101, 102, 103, 104, 105, 201, 202, 203, 711, 712, 713, 714)
 			if !primary {
 				wantKeys(t, "rep_id_to_repair_info",
 					info.GetRepIdToRepairInfo())
@@ -921,10 +925,15 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 				return
 			}
 			wantKeys(t, "rep_id_to_repair_info",
-				info.GetRepIdToRepairInfo(), 9)
+				info.GetRepIdToRepairInfo(), 9, 11)
 			if v := info.GetRepIdToRepairInfo()[9]; !v.GetStarted() ||
-				v.GetAbortConfirmed() {
+				v.GetAbortConfirmed() || v.GetRefusal() != "" {
 				t.Errorf("verdict on rep 9 = %v, want started", v)
+			}
+			if v := info.GetRepIdToRepairInfo()[11]; v.GetStarted() ||
+				v.GetAbortConfirmed() ||
+				v.GetRefusal() != "leg 0x2ca holds newer data" {
+				t.Errorf("verdict on rep 11 = %v, want the refusal alone", v)
 			}
 			wantKeys(t, "grp_id_to_grp_info", info.GetGrpIdToGrpInfo(),
 				11, 12, 21, 71)
@@ -962,6 +971,8 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 			`{"objects": {"cntlr 1:1": {"grps": {"g1": {}}}}}`},
 		{"an unknown verdict key",
 			`{"objects": {"cntlr 1:1": {"repairs": {"r0": {"done": true}}}}}`},
+		{"a refusal that is no text",
+			`{"objects": {"cntlr 1:1": {"repairs": {"r0": {"refusal": true}}}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := ParseBehavior([]byte(tc.data)); err == nil {

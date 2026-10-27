@@ -663,7 +663,10 @@ type FinishRepairResult struct {
 // the group's id, its leg_idx, the parent and now as its retired_epoch; the
 // bad leg's own err_epoch goes with the leg. The Repair key and its list
 // entry go, the group's rep_name is cleared, the retired leg joins the
-// group's and the pool's lists, and SpRev is bumped.
+// group's and the pool's lists, and SpRev is bumped. A forced-start mark of
+// the group that names the bad leg goes too, since the finish retires the
+// leg it names (forcedStartNames); one that names the new leg stays, the
+// leg keeping its id in its new place.
 //
 // The group's retired legs never pass common.MaxRetiredLegPerGrp here. An
 // operator's repair finds room: its fresh new leg was refused at the bound,
@@ -736,6 +739,9 @@ func FinishRepair(
 		bad := grp.GetLegList()[badIdx]
 		if len(bad.GetSideList()) != 1 {
 			return fail(opFinishRepair, "bad leg has no single side")
+		}
+		if forcedStartNames(grp, badLegId) {
+			grp.ForcedStart = nil
 		}
 		var rel *dnReleaser
 		givenBack := uint64(0)
@@ -962,6 +968,10 @@ func loadRepairLive(
 	return rep, nil
 }
 
+// reasonMarkNamesNewLeg is SetRepairAbort's refusal of a repair whose
+// group's forced-start mark names its new leg.
+const reasonMarkNamesNewLeg = "the group's forced-start mark names the new leg"
+
 // SetRepairAbort sets the abort flag of the CREATED repair repName and
 // returns its rep_id; TryToAbortRepair is this operation, and so is the sp
 // worker's try-to-abort of its own repair (dnv-worker.md AR8). The fan-out the
@@ -975,7 +985,13 @@ func loadRepairLive(
 // stage but CREATED is refused with the stage: a started copy has no exit,
 // and an aborted repair is aborted. A CREATED repair whose flag is already
 // set is answered as done and written to not at all, so a repeated request
-// raises no revision.
+// raises no revision. A flag not yet set is refused while the group's
+// forced-start mark names the repair's new leg (forcedStartNames): the flag
+// takes that leg out of the members the forced start keeps, and a forced
+// start that has zeroed the other members before an assembly that failed
+// leaves that leg the one full member, so the abort must not withdraw the
+// operator's mark as a side effect. The operator withdraws the mark first
+// (ForceStartGroup with cancel), or lets the forced start finish.
 func SetRepairAbort(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1009,6 +1025,16 @@ func SetRepairAbort(
 		repId = rep.GetRepId()
 		if rep.GetTryToAbort() {
 			return nil
+		}
+		_, grp, err := loadGrpOf(s, opSetRepairAbort, cid, spId,
+			repairParent(rep), rep.GetGrpId())
+		if err != nil {
+			return err
+		}
+		for _, leg := range rep.GetNewLegList() {
+			if forcedStartNames(grp, leg.GetLegId()) {
+				return fail(opSetRepairAbort, reasonMarkNamesNewLeg)
+			}
 		}
 		rep.TryToAbort = true
 		s.Put(RepairKey(cid, spId, repName), rep)

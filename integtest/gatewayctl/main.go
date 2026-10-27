@@ -507,6 +507,8 @@ var commands = []command{
 	// retired leg
 	{"list-retired-legs", setupListRetiredLegs},
 	{"delete-retired-leg", setupDeleteRetiredLeg},
+	// forced start
+	{"force-start-grp", setupForceStartGrp},
 	// bitmap
 	{"get-td-bm", setupGetTdBm},
 	{"get-leg-bm", setupGetLegBm},

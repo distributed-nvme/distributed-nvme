@@ -279,7 +279,9 @@ func (a *cnActual) dmsOfKind(
 // EVERY member is a kind-c9 leg wrapper of this cluster and cn, all naming
 // one sp. An array with a member that is not a dm device, or is a dm device
 // of somebody else, is not attributable and is never stopped — that rule is
-// what keeps a co-hosted dn agent's udev-assembled array untouched.
+// what keeps a co-hosted dn agent's udev-assembled array untouched. CN12's
+// forced start stops a group's array only under the same rule
+// (MdDetail.strangerErr).
 func arrayOwner(
 	clusterId uint64,
 	cnId uint64,
@@ -290,18 +292,29 @@ func arrayOwner(
 	}
 	var spId uint64
 	for i, member := range array.Members {
-		dn, ok := common.ParseDmName(member)
-		if !ok || dn.Kind != common.DmKindCnLeg ||
-			dn.ClusterId != clusterId || dn.NodeId != cnId {
+		legSp, ok := legWrapperSp(clusterId, cnId, member)
+		if !ok {
 			return 0, false
 		}
 		if i == 0 {
-			spId = dn.SpId()
-		} else if dn.SpId() != spId {
+			spId = legSp
+		} else if legSp != spId {
 			return 0, false
 		}
 	}
 	return spId, true
+}
+
+// legWrapperSp is the sp a dm name names when it is a kind-c9 leg wrapper of
+// this cluster and cn, and false for any other name: the member test of
+// arrayOwner.
+func legWrapperSp(clusterId, cnId uint64, name string) (uint64, bool) {
+	dn, ok := common.ParseDmName(name)
+	if !ok || dn.Kind != common.DmKindCnLeg ||
+		dn.ClusterId != clusterId || dn.NodeId != cnId {
+		return 0, false
+	}
+	return dn.SpId(), true
 }
 
 // nvmetOwner attributes one subsystem in the target's configfs tree. It is
@@ -1651,7 +1664,8 @@ func (s *CnAgentServer) unownedSrcNqns(
 // repair (putBackNames, CN30): what the call's probe read, so nothing here
 // reads them again. A
 // converge passes none: it has just tried to put them back, and its rows say
-// how that went.
+// how that went. The verdict also names each forced-start mark of a request
+// no SyncupCntlr of this process delivered (storedMarks; CN12, CN30).
 func (s *CnAgentServer) sweepCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -1746,6 +1760,9 @@ func (s *CnAgentServer) sweepCntlr(
 	}
 	for _, name := range putBack {
 		res.Add(agent.LeftoverKindMdMember, name)
+	}
+	if !converge && !st.reqFromRpc {
+		storedMarks(plan, res)
 	}
 	res.Log(ctx, s.cntlrIdAttrs(plan)...)
 	return res

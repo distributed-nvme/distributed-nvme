@@ -60,8 +60,9 @@ func (s *CnAgentServer) syncupCntlr(
 	// This request came through the revision gate, so GateRevision makes
 	// it the newest desired state this cntlr has ever accepted and its
 	// td_list is authoritative — the one copy CN14's thin id sweeps may
-	// delete against. Only this cntlr's converges read it, each under the
-	// object lock held here or the node write lock.
+	// delete against, and the one whose forced-start marks a converge acts
+	// on (CN12). Only this cntlr's converges and reads read it, each under
+	// the object lock held here or the node write lock.
 	st.reqFromRpc = true
 	s.putCntlr(key, st)
 
@@ -190,6 +191,17 @@ func (s *CnAgentServer) convergeCntlr(
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, req)
+	// CN12: a forced-start mark acts only from a request a SyncupCntlr of
+	// this process delivered. Until one has, the request is the stored copy
+	// the startup reconcile loaded, and the background retry converges from
+	// it too: it can still carry a mark the worker has cleared since, whose
+	// clear never reached this agent, and a start from that mark's leg would
+	// zero the member with the newest data. Such a pass converges every
+	// group as with no mark, and the cntlr's read names the mark, so the
+	// worker re-sends the SyncupCntlr (storedMarks).
+	if !st.reqFromRpc {
+		plan.dropForcedStartMarks()
+	}
 	// A row made after the call is cut off moves no epoch. Every converge of
 	// the cntlr holds its object lock or the node write lock, so the helpers
 	// write through st.tracker with this pass bound (agent.ResTracker.Bind).
@@ -330,16 +342,17 @@ func (s *CnAgentServer) build(
 					detailsProvisioning)
 				continue
 			}
-			detail, running, err := s.ensureGroup(ctx, plan, gp,
+			detail, running, refusal, err := s.ensureGroup(ctx, plan, gp,
 				available, info.LegIdToLeg)
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
 			// CN28: the array's reading and the repair's verdict, from the
 			// array as the pass left it, for a group whose row reads OK.
 			if err == nil {
-				reportGrpReading(info, gp, detail)
+				reportGrpReading(info, gp, detail, refusal)
 			}
-			if gp.hasLateMember(available, running) {
+			if gp.hasLateMember(available, running) ||
+				forcedStartRetries(err) {
 				late = true
 			}
 		}
@@ -362,7 +375,13 @@ func (s *CnAgentServer) build(
 		// row. So it registers the CN10 retry, which re-runs the whole
 		// converge until every such member is available. There is no record of
 		// its own: the rows already report it — a group's error, or "degraded"
-		// once a probe reads an md array, and the member's own leg row.
+		// once a probe reads an md array, and the member's own leg row. A
+		// forced start that ends the pass in an error registers it too, a wait
+		// for a member aside, which is the late member's, and so does a read
+		// of the group's array before it that fails while the mark stands
+		// (forcedStartRetries, markedErr), for the same reason: a read of an
+		// array that does not run names nothing and brings no reply code, so
+		// only the retry's converge tries the forced start again.
 		s.startConnectRetry(st, plan)
 		retryNeeded = true
 	}

@@ -13,11 +13,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The whole-worker scenario cases of an operator's repair (architecture.md,
-// Repair; dnv-worker.md, AR11, AR12), played through the fakes of one planted
-// cluster under one whole worker: the fakes' repairs lever stands for the
-// primary's verdict, their grps lever for its reading of a group, and the
-// model operations the gateway runs stand for the operator's calls.
+// The whole-worker scenario cases of an operator's repair and forced start
+// (architecture.md, Repair; dnv-worker.md, AR8, AR11, AR12, AR13), played
+// through the fakes of one planted cluster under one whole worker: the
+// fakes' repairs lever stands for the primary's verdict, their grps lever for
+// its reading of a group, and the model operations the gateway runs stand
+// for the operator's calls.
 
 // stdRepName is the repair the cases plant on the standard data group: its
 // bad leg is leg 6, whose side 10 is on dn 1, and its fresh new leg goes to
@@ -271,4 +272,199 @@ func TestScenRetireTimer(t *testing.T) {
 	if got := c.dnConf(t, 3).GetFreeExtCnt(); got != freeBefore {
 		t.Fatalf("dn 3 holds %d free extents, want %d back", got, freeBefore)
 	}
+}
+
+// requestMark is the forced-start mark of the group grpId in a cntlr's
+// request, among its slices' groups; nil when the request holds none.
+func requestMark(req *pb.SyncupCntlrRequest, grpId uint64) *pb.ForcedStart {
+	for _, slice := range req.GetIdToSlice() {
+		for _, grp := range allGroups(slice) {
+			if grp.GetGrpId() == grpId {
+				return grp.GetForcedStart()
+			}
+		}
+	}
+	return nil
+}
+
+// TestScenForcedStartHoldsLegRepairUntilItsClear pins an operator's forced
+// start through a whole worker: the mark the gateway's operation writes
+// reaches every cntlr in its group's slice at the mark's revision (RW14);
+// while the primary holds no leg in sync the mark stands, and leg repair
+// holds the group's due leg, the one the mark names, with grp_forced_start,
+// creating no repair, though the group's row reads OK, the hold coming
+// before the healthy-leg test (AR8); once the primary holds the other leg in
+// sync on a leg that serves, the named leg still out of sync, a report of an
+// observation after the mark's revision, the pool bumped in between, clears
+// the mark (AR13), the op handed the mark's own revision, whose bump hands
+// every cntlr the group without it, and leg repair then creates its repair
+// of the due leg.
+func TestScenForcedStartHoldsLegRepairUntilItsClear(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantScen(t, repairShape)
+	agent, key := c.cntlrAgent(t, 1)
+	// The primary holds no leg in sync, so a mark naming leg 6 stands.
+	setLever(t, agent, key, func(o *agentfake.Object) {
+		o.Grps = map[uint64]agentfake.GrpReading{
+			stdDataGrpId: {InSync: &[]uint64{}},
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	ctx := context.Background()
+
+	revision, spRev, err := plant.ForceStartGroup(ctx, h.cli, c.cl, c.sp.Ref,
+		stdDataGrpId, 6, false)
+	if err != nil {
+		t.Fatalf("ForceStartGroup: %v", err)
+	}
+	if revision == 0 || spRev != revision {
+		t.Fatalf("the mark at %d, the pool at %d: want the mark's own "+
+			"revision", revision, spRev)
+	}
+	h.waitUntil(t, 20*time.Second, "every cntlr carries the mark",
+		func() (bool, string) {
+			for cntlrId := uint64(1); cntlrId <= 2; cntlrId++ {
+				agent, key := c.cntlrAgent(t, cntlrId)
+				req, _ := agent.Stored(key).(*pb.SyncupCntlrRequest)
+				mark := requestMark(req, stdDataGrpId)
+				if mark.GetLegId() != 6 || mark.GetRevision() != revision {
+					return false, fmt.Sprintf("cntlr %d keeps %v", cntlrId,
+						mark)
+				}
+			}
+			return true, ""
+		})
+
+	// Leg 6 fails on the primary and is due: the mark holds its repair,
+	// ahead of the healthy-leg test, which leg 7 out of sync would hold.
+	c.failLeg(t, 6)
+	h.waitCount(t, 20*time.Second, w, msgReactionSkipped, 2,
+		and(reactionIs(reactionRepairCreate, reasonGrpForcedStart),
+			numIs("leg_id", 6)))
+	if n := h.creates(w); n != 0 {
+		t.Fatalf("%d repairs created while the mark stands", n)
+	}
+	if n := h.countRecs(w, msgReactionSkipped,
+		reactionIs(reactionRepairCreate, reasonNoHealthyLeg)); n != 0 {
+		t.Fatalf("%d passes reached the healthy-leg test while the mark "+
+			"stands", n)
+	}
+	if n := h.countRecs(w, msgForcedStartCleared, nil); n != 0 {
+		t.Fatalf("%d clears while the primary holds no leg in sync", n)
+	}
+	if mark := c.dataGrp(t).GetForcedStart(); mark.GetLegId() != 6 {
+		t.Fatalf("the data group's mark is %v while the start is not done",
+			mark)
+	}
+
+	// The pool's revision moves past the mark's before the primary holds
+	// leg 7 in sync, so the report that does is of a later revision than
+	// the mark's, which the clear's op must not be handed in its place.
+	bumped, err := plant.BumpRev(ctx, h.cli, c.cl, plant.RevSp,
+		stdSpShard, stdSpId)
+	if err != nil {
+		t.Fatalf("bump the pool: %v", err)
+	}
+	h.waitUntil(t, 20*time.Second, "the primary carries the bumped revision",
+		func() (bool, string) {
+			req, _ := agent.Stored(key).(*pb.SyncupCntlrRequest)
+			return req.GetRevision() >= bumped, fmt.Sprintf(
+				"the primary at revision %d", req.GetRevision())
+		})
+
+	// The primary holds leg 7 in sync, on a leg whose row reads OK, and leg
+	// 6 still out of sync: the array runs on a member that serves, so the
+	// mark is cleared, and leg 6 gets its repair.
+	setLever(t, agent, key, func(o *agentfake.Object) {
+		o.Grps = map[uint64]agentfake.GrpReading{
+			stdDataGrpId: {InSync: &[]uint64{7}},
+		}
+	})
+	cleared := h.waitRecord(t, 20*time.Second, w, msgForcedStartCleared,
+		and(numIs("grp_id", stdDataGrpId), numIs("leg_id", 6)))
+	if cleared.num("mark_revision") != revision ||
+		cleared.num("report_revision") < bumped ||
+		cleared.num("revision") <= bumped {
+		t.Fatalf("the clear %v, want the mark at %d cleared from a report "+
+			"at %d or after, at a revision of its own", cleared.attrs,
+			revision, bumped)
+	}
+	if mark := c.dataGrp(t).GetForcedStart(); mark != nil {
+		t.Fatalf("the mark %v outlived its clear", mark)
+	}
+	h.waitCreated(t, w, 6)
+	h.waitUntil(t, 20*time.Second, "every cntlr carries the group with no "+
+		"mark", func() (bool, string) {
+		for cntlrId := uint64(1); cntlrId <= 2; cntlrId++ {
+			agent, key := c.cntlrAgent(t, cntlrId)
+			req, _ := agent.Stored(key).(*pb.SyncupCntlrRequest)
+			if req.GetRevision() < cleared.num("revision") {
+				return false, fmt.Sprintf("cntlr %d at revision %d",
+					cntlrId, req.GetRevision())
+			}
+			if mark := requestMark(req, stdDataGrpId); mark != nil {
+				return false, fmt.Sprintf("cntlr %d keeps %v", cntlrId, mark)
+			}
+		}
+		return true, ""
+	})
+}
+
+// TestScenTakeBackRefusalIsLogged pins AR11's record of the primary's refusal
+// of a take-back through a whole worker: an operator's repair whose new leg
+// is a retired leg of its group, whose add the primary's verdict refuses,
+// stays CREATED, and every pass logs `repair stage skipped` with
+// take_back_refused and the verdict's text; once the verdict says started,
+// the repair moves to STARTED.
+func TestScenTakeBackRefusalIsLogged(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, nil)
+	ctx := context.Background()
+	retired, err := plant.PutRetiredLeg(ctx, h.cli, c.cl, c.sp.Ref,
+		plant.RetiredLegSpec{
+			GrpId: stdDataGrpId, LegIdx: 2, Dn: 3, Slot: 0,
+			Epoch: uint64(time.Now().Unix()),
+		})
+	if err != nil {
+		t.Fatalf("PutRetiredLeg: %v", err)
+	}
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	rep, err := plant.PutRepair(ctx, h.cli, c.cl, c.sp.Ref, plant.RepairSpec{
+		Name: stdRepName, GrpId: stdDataGrpId, BadLegId: 6,
+		RetiredLegId: retired.LegId,
+	})
+	if err != nil {
+		t.Fatalf("PutRepair: %v", err)
+	}
+	refusal := fmt.Sprintf("leg %#x taken from a retired leg holds newer "+
+		"data than the array", retired.LegId)
+	c.setVerdictLever(t, stdRepName, agentfake.RepairVerdict{Refusal: refusal})
+	h.waitCount(t, 20*time.Second, w, msgRepairStageSkipped, 2,
+		func(rec logRecord) bool {
+			return rec.str("rep_name") == stdRepName &&
+				rec.num("rep_id") == rep.Id &&
+				rec.str("reason") == reasonTakeBackRefused &&
+				rec.str("refusal") == refusal
+		})
+	if got := c.repair(t, stdRepName).GetRepStage(); got !=
+		pb.RepStage_REP_STAGE_CREATED {
+		t.Fatalf("a refused repair at %s", got)
+	}
+	if n := h.countRecs(w, msgRepairStageMoved, nil); n != 0 {
+		t.Fatalf("%d stage moves on a refused repair", n)
+	}
+
+	c.setVerdictLever(t, stdRepName, agentfake.RepairVerdict{Started: true})
+	h.waitRecord(t, 20*time.Second, w, msgRepairStageMoved,
+		func(rec logRecord) bool {
+			return rec.num("rep_id") == rep.Id &&
+				rec.str("stage") == pb.RepStage_REP_STAGE_STARTED.String()
+		})
 }

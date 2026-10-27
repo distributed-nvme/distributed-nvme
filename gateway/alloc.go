@@ -710,7 +710,7 @@ func spFootprint(slices []*pb.Slice) uint64 {
 }
 
 // grpDnAddrs is every DN a group occupies: through a leg of its leg_list or
-// a new leg of rep, the group's open repair, nil when it has none — the
+// a new leg of rep, the repair the group names, nil when it names none — the
 // group's DN set of architecture.md, Per-operation allocation, since a new
 // leg becomes a leg of the group at its finish. It is the black-list seed of
 // CreateMigration and CreateRepair, and the plan each one's deciding

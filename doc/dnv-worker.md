@@ -7,10 +7,10 @@ mutations the gateway's handlers share (MD1 to MD9); the `cmd/dnv-worker`
 command (CM1 to CM7); the vote worker (VW1 to VW11); the shard worker (SW1 to
 SW6); the revision worker with its dn, cn and sp role files (RW1 to RW23);
 health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM6); the automatic
-reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12),
-the sp drain (SPD1 to SPD15) and the clone drain (CLD1 to CLD12); the
-worker's log records; and the intent of the worker integration suite. It
-leans on `architecture.md` for the object model, the
+reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12) and
+the forced-start clear (AR13), the sp drain (SPD1 to SPD15) and the clone
+drain (CLD1 to CLD12); the worker's log records; and the intent of the worker
+integration suite. It leans on `architecture.md` for the object model, the
 etcd data model, allocation, common validation, the agent contracts, the
 cross-component procedures (failover, migration, teardown by sweep, the
 levels) and the decisions [D8], [D10], [D15], [D16], [D17] and [D18]; on
@@ -55,7 +55,8 @@ may import is `layout.md`, Dependency rules.
 
 Out of scope here: the gateway (request validation, the public RPCs, and
 the agent calls it makes: the `Get*Info` info reads, which serve its
-inspects and its hydration checks, and the `Get*Size` and `Get*Bm` calls),
+inspects, its hydration checks and its forced start's check of a group's
+array, and the `Get*Size` and `Get*Bm` calls),
 `dnv-cdc`, `dnvctl`. Where the
 worker performs an "internal" variant of a gateway mutation (Automatic
 reactions), the STM body lives in `model` and the gateway adds only
@@ -352,6 +353,7 @@ SP snapshot loader), `capacity.go` (the capacity keys), `alloc.go` (the
 allocator of `architecture.md`, Finding DN candidates, and `architecture.md`,
 Finding CN candidates), `ops.go` (the internal mutations of MD6),
 `repair.go` (MD6's repair and retired-leg ops, `architecture.md`, Repair),
+`forcedstart.go` (MD6's forced-start ops, `architecture.md`, Repair),
 `drain.go` (MD6's sp-drain ops, The sp drain), `clonedrain.go` (MD6's
 clone-drain ops, The clone drain). Unit tests are colocated.
 
@@ -514,8 +516,11 @@ are resolved inside from `SpConf.event_threshold` with the defaults of
 shared mutations this worker runs too: `GrowSlice` (AR6); the repair ops
 `CreateRepair`, `FinishRepair`, `CancelRepair` and `SetRepairAbort`, which
 it runs on its own repairs (AR8); and `DeleteRetiredLeg`, which its retire
-timer runs (AR12). They also take an expected revision: when non-zero the
-STM re-checks `SpRev.revision` against it first (`ErrPrecondition` with
+timer runs (AR12); save `ForceStartGroup`, the body of the gateway's call
+of that name, which this worker never runs: its clear of the mark that op
+writes is `ClearForcedStart` (AR13). The ops a gateway call runs take an
+expected revision: when non-zero the STM re-checks `SpRev.revision`
+against it first (`ErrPrecondition` with
 `ReasonStaleRevision` on mismatch); zero skips the check — the caller's
 opt-out, which `gateway.md` GW6 defines for the public RPCs; this worker's
 own calls pass zero, save where the worker's rule names
@@ -550,24 +555,31 @@ or the clone by its name, exactly one of the two (`GrpParent`).
 `CreateRepair` takes the parent from its caller's look-up, slices first and
 then clones; every later op that writes the group reads that one record,
 checks that it holds the group, and puts it back where it found it;
-`SetRepairAbort`, `SetRepairStage` and `FlipRepairProvisioned`, which
-write only the `Repair`, read a clone parent alone, for the refusal below,
-and the epoch writes read no parent. A group never moves to another
-parent, so the record stays true for the group's life, and no repair op
-walks the slices or the clones. Each names the check of the pool it makes.
+`SetRepairAbort` reads the parent of either kind, since it refuses while
+the group's forced-start mark names the repair's new leg (`architecture.md`,
+Repairs); `SetRepairStage`
+and `FlipRepairProvisioned`, which write only the `Repair`, read a clone
+parent alone, for the refusal below, and the epoch writes read no parent.
+The forced start's two ops take the group the same way: `ForceStartGroup`
+the parent from its caller's look-up, as `CreateRepair` does, and
+`ClearForcedStart` the parent the worker's pass found the group in
+(`ForcedStartRef`). A group never moves to another parent, so the record
+stays true for the group's life, and no repair op walks the slices or the
+clones. Each names the check of the pool it makes.
 Every op but the epoch writes makes the any-level SP checks: the SP exists
 with its id and is not `deleting`, at any `sp_level`, so that an operator
 can finish, abort, cancel and delete at the levels where the operator is
 in charge; the sp drain deletes a deleting pool's repairs and retired legs
 itself (SPD15). `CreateRepair` then applies its level gate, which depends
-on the name (`CreateRepairLevelGate`; `architecture.md`, Repairs). The
+on the name (`CreateRepairLevelGate`; `architecture.md`, Repairs), and
+`ForceStartGroup`'s write its own, the step that stops group arrays. The
 three epoch writes take an SP that exists with its id, at any level and
 while it is deleting, as the other epoch writes read their record whatever
 its pool's state. A clone parent being deleted is refused by every repair
 op, save the epoch writes, which accept it as their clone twins do, and
-the flip, which skips it: its group goes back with its repair and retired
-legs in CLD9's transaction. A repair or a retired leg the pool lists whose
-key is missing is refused ("repair record missing", "retired leg record
+the flip and `ClearForcedStart`, which skip it: its group goes back with
+its repair and retired legs in CLD9's transaction. A repair or a retired
+leg the pool lists whose key is missing is refused ("repair record missing", "retired leg record
 missing") by every op that reaches it through the pool's list, a lost
 invariant key (`architecture.md`, Key table), never `ReasonRepairNotFound`
 or `ReasonRetiredLegNotFound`, which name an object the pool does not
@@ -767,7 +779,9 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   repair's parent and `now` as its `retired_epoch` —, listed in the group's
   and the pool's `retired_leg_id_list`; the bad leg's own `err_epoch` goes
   with it. The `Repair` key and its list entry go, the group's `rep_name`
-  is cleared, and `SpRev` is bumped. For a repair whose name starts with
+  is cleared, and so is the group's forced-start mark when it names the
+  bad leg, which the finish retires, one that names the new leg staying;
+  and `SpRev` is bumped. For a repair whose name starts with
   the reserved prefix, on a group that holds `MaxRetiredLegPerGrp` retired
   legs, the same STM first gives back the group's oldest retired leg: the
   one with the smallest `retired_epoch` and then the smallest leg id among
@@ -798,9 +812,12 @@ list; the flip, which reads the repair's key alone, skips it as gone.
 * `SetRepairAbort`, the body of `TryToAbortRepair`, takes the name and
   requires the expected revision; the any-level SP checks; the repair
   listed and its key present; a clone parent existing and not `deleting`;
-  `REP_STAGE_CREATED`, any other stage refused with its name. It sets
-  `try_to_abort` and bumps `SpRev`, and returns the `rep_id`; a flag
-  already set is answered with no write and no bump.
+  `REP_STAGE_CREATED`, any other stage refused with its name; and, for a
+  flag not yet set, its parent holding its group and the group's
+  forced-start mark naming no new leg of the repair, which the flag would
+  take out of the members the forced start keeps (`architecture.md`,
+  Repairs). It sets `try_to_abort` and bumps `SpRev`, and returns the
+  `rep_id`; a flag already set is answered with no write and no bump.
 * `SetRepairStage` takes the name, the `rep_id` the primary's verdict named
   and the stage to move to, and no expected revision: the worker converges
   on what the store holds. It requires the any-level SP checks; the repair
@@ -839,6 +856,31 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   the revision its bump wrote. One side per call: a repair is a record of
   its own, so a flip over every repair of a pool would be as wide as the
   pool's groups.
+* `ForceStartGroup`, the body of the gateway's call of that name, takes the
+  group's parent and id, the leg and the cancel flag, and requires the
+  expected revision; the any-level SP checks; for a write, an `sp_level`
+  below `SP_LEVEL_NO_REDUND` ("sp level builds no group array"); the pool
+  `RedundMdRaid1`; the parent holding the group, a clone parent not
+  `deleting`. A write requires the leg to be one the mark may name
+  (`architecture.md`, Repair, Forced start), a leg of the group's
+  `leg_list` other than the bad leg of a STARTED repair, or a new leg of
+  the repair the group names while it is STARTED or is CREATED with its
+  abort flag clear (`ReasonLegNotNamable`), the repair read through the
+  pool's list as every op reads one whenever the group names one; it sets the
+  group's `forced_start` to the leg and the revision its own `SpRev` bump
+  writes,
+  replacing a mark that stands, and returns that revision. A cancel clears
+  the mark and bumps `SpRev` and returns zero, and a group with no mark is
+  answered with no write and no bump.
+* `ClearForcedStart` takes a `ForcedStartRef` — the group's parent and id,
+  and the leg and the revision of the mark the caller judged — and no
+  expected revision: the worker converges on what the store holds. It
+  requires the any-level SP checks. It skips, and fails nothing, a parent
+  or a group that is gone, a clone parent `deleting`, and a mark that is
+  gone or names another leg or revision, replaced or withdrawn since;
+  otherwise it clears the mark, bumps `SpRev` once, so the fan-out hands
+  every cntlr the group without it, and returns that it cleared and the
+  revision its bump wrote (AR13).
 * `DrainSpCntlrs` requires the drain checks of SPD2 (`SpConf` exists, `sp_id`
   unchanged, `deleting` true — `sp_level` is deliberately not consulted) and
   every listed `Cntlr` key to exist. It deletes every `Cntlr`; per DISTINCT CN
@@ -915,7 +957,8 @@ returned from inside the STM callback, it aborts without commit (EU4). An
 op never writes partially (`FlipCreated` is the exception: its STMs, RW19,
 each commit whole, and an error in one leaves those before it committed),
 never sleeps, and never retries a precondition failure — the caller logs
-`reaction skipped` (Log records) and re-evaluates on its next pass.
+the refusal with its reason (Log records) and re-evaluates on its next
+pass.
 
 MD8. **Gateway reuse.** This rule describes the gateway and names no decision
 of this document: the public RPCs of `architecture.md`, `service Gateway` —
@@ -2313,7 +2356,7 @@ on repairs and the groups' whole flags and in-sync lists, which a
 `grp_id_to_grp_info`), are no rows:
 they set and clear none of the three, the marking of a dead stream's info
 leaves them as they are, and the pass reads them as fields (AR8, AR11,
-AR12).
+AR12, AR13).
 
 `PROVISIONING`, `PENDING`, `MISSING` and a rejection code never set any of
 the three, and `Leg.err_epoch` clears on the primary's `RES_STATUS_OK`
@@ -2702,9 +2745,10 @@ repair — and no migration reaction: every condition that sets
 `side_unhealthy` and `leg_unhealthy` are instead the two triggers of one
 leg-repair procedure (AR8) — the shorter wait when the DN itself looks
 dead, the longer one when only the cntlr's path is bad. Beside the
-reactions the pass runs the two steps of the procedure Repair of
-`architecture.md` that are the worker's, a repair's stage moves (AR11) and
-the retire timer (AR12), which are no reactions.
+reactions the pass runs the three steps of the procedure Repair of
+`architecture.md` that are the worker's, a repair's stage moves (AR11), the
+retire timer (AR12) and the clear of a forced-start mark (AR13), which are
+no reactions.
 
 ### Pass, priority, suppression
 
@@ -2717,8 +2761,8 @@ and AR7's row classes attribute rows through its tds, subsystems,
 transfers and clones; AR11 and AR12 read its repairs and retired legs),
 plus the in-memory latest `CntlrInfo` of the **primary** cntlr
 (pool usage, group rows, AR5's and AR7's rows, and the verdicts on repairs
-and the groups' whole flags and in-sync lists (`GrpInfo`) AR8, AR11 and
-AR12 read)
+and the groups' whole flags and in-sync lists (`GrpInfo`) AR8, AR11, AR12
+and AR13 read)
 with the revision of the observation it reports (`architecture.md`,
 Live-state reporting), `now` (unix seconds),
 the two records kept from an earlier pass that a pass decides by — the
@@ -2733,14 +2777,15 @@ While a hold keeps a promotion from the child (RW22's demotion hold, then
 RW14's sides-first hold), the child's info is still a standby's report — a
 leg row there is transport liveness and ANA state, not the health-block
 probe — so the pass has none: AR6 grows nothing, AR8 creates no repair,
-AR11 moves no stage and AR12 deletes no retired leg, as when the primary
-has not reported yet. From the hand-over until the reply to the promotion,
-the info is still that standby report (Known limits, one-pass-old inputs),
-which holds no group row, a standby having no group (`cnagent.md` CN12),
-and no group's whole flag or in-sync list, so AR8's gate holds the create
-(`grp_row_absent`) until the reply reports the group's array running; and
-once the failover has committed, the old primary's last report, whose
-group rows may still read `OK`, is never the one read.
+AR11 moves no stage, AR12 deletes no retired leg and AR13 clears no
+forced-start mark, as when the primary has not reported yet. From the
+hand-over until the reply to the promotion, the info is still that standby
+report (Known limits, one-pass-old inputs), which holds no group row, a
+standby having no group (`cnagent.md` CN12), and no group's whole flag or
+in-sync list, so AR8's gate holds the create (`grp_row_absent`) until the
+reply reports the group's array running; and once the failover has
+committed, the old primary's last report, whose group rows may still read
+`OK`, is never the one read.
 
 **Both** stored confs are validated before the reactions are evaluated —
 the cluster's with `model.ValidateClusterConf`, the SP's `bdev_conf` with
@@ -2780,9 +2825,10 @@ children log
 
 The steps of a live SP's pass run in this order: the re-seed of the health
 memos (HL3), the clone drain's steps (CLD7), the three gates, AR11's stage
-moves at every `sp_level`, AR3's suppression, AR12's retire timer, and the
-reactions in AR2's priority. A latched SP runs its drain step behind the
-cluster-conf gate and neither of the two steps of a repair (SPD6).
+moves and AR13's forced-start clear at every `sp_level`, AR3's
+suppression, AR12's retire timer, and the reactions in AR2's priority. A
+latched SP runs its drain step behind the cluster-conf gate and neither the
+two steps of a repair nor the forced-start clear (SPD6).
 
 AR2. **One action per SP per pass** — "action" meaning a *reaction*
 throughout this rule — evaluated in this priority; the first applicable one
@@ -2798,12 +2844,13 @@ bump re-fans the SP (RW14), so the next pass sees the new state. Leg
 repair's actions are the finish, the cancel and the try-to-abort of a
 worker's repair and the create of one (AR8). The
 invariant is **at most one applied action per SP per pass**; the clone
-drain's steps, AR11's stage moves and AR12's retire timer are not actions in
-this sense and commit alongside one — a pass over a live SP can bump `SpRev`
-once per deleting clone whose final STM it commits (CLD9, CLD12), a batch
-bumping nothing (CLD8), once per stage move, once for the timer's delete —
-which an earlier bump of the same pass, a stage move's or a clone's final
-STM's, makes refuse as stale (AR12) — and once more for its reaction. A
+drain's steps, AR11's stage moves, AR12's retire timer and AR13's
+forced-start clear are not actions in this sense and commit alongside one —
+a pass over a live SP can bump `SpRev` once per deleting clone whose final
+STM it commits (CLD9, CLD12), a batch bumping nothing (CLD8), once per stage
+move, once per clear, once for the timer's delete — which an earlier bump
+of the same pass, a stage move's, a clear's or a clone's final STM's, makes
+refuse as stale (AR12) — and once more for its reaction. A
 `reaction skipped` that means "not applicable here, keep looking" does not
 end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
@@ -2817,11 +2864,14 @@ GrowSlice — and must not disable AR7 and AR8 for the duration); AR7's
 `shared_state` and `same_error`, which can hold as long as AR5's and move
 the scan to the next cntlr; AR8's refusal of a drive step by its op, which
 holds that repair's group and moves the walk to the next repair; and
-AR8's `leg_has_two_sides`, its gate on the group's row (`grp_row_error`,
-`grp_row_missing`, `grp_row_unknown`, `grp_row_provisioning`,
-`grp_row_pending`, `grp_row_absent` and `grp_row_stale`), `no_healthy_leg`
-and `grp_has_repair`, which move the scan to the next candidate leg — a
-group whose row does not read `OK` waits until it does (`cnagent.md` CN28),
+AR8's `leg_has_two_sides`, `grp_forced_start`, its gate on the group's row
+(`grp_row_error`, `grp_row_missing`, `grp_row_unknown`,
+`grp_row_provisioning`, `grp_row_pending`, `grp_row_absent` and
+`grp_row_stale`), `no_healthy_leg` and `grp_has_repair`, which move the
+scan to the next candidate leg — a group with a forced-start mark waits
+until the mark goes in one of the ways AR8 names, a try-to-abort of the
+group's repair not among them (MD6); a group
+whose row does not read `OK` waits until it does (`cnagent.md` CN28),
 for example while its array is stopped or broken, or while the in-sync
 guard holds over it (`cnagent.md` CN12), and one whose row reads `OK` in a
 report older than the snapshot waits for the primary's report of the
@@ -2853,7 +2903,10 @@ above `SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
 `architecture.md`, SpLevel, where an operator is in charge), and neither
 does AR12's retire timer; AR11's stage moves run at every level, since a
 move only follows the primary's report and the operator in charge there
-may need to finish a repair. Leg repair's drive step is a reaction, so the
+may need to finish a repair, and so does AR13's forced-start clear, since a
+clear only follows the primary's report too and the operator force-starts
+a group at the levels where reactions stop. Leg repair's drive step is a
+reaction, so the
 operator drives the worker's repairs there with the gateway's calls (AR8).
 An SP with `deleting` true is not suppressed
 here: it runs at most one DRAIN step per
@@ -3306,25 +3359,45 @@ skipped` with its reason:
    legs are no candidates at all, so nothing is logged, since its group
    goes back to its DNs in CLD9's transaction and `CreateRepair` refuses
    such a clone;
-4. the gate on the group's row (below), the `grp_row_` reasons otherwise;
-5. the healthy-leg test (below), `no_healthy_leg` otherwise;
-6. the group has no repair, an operator's or the worker's own:
+4. the group carries no forced-start mark (`architecture.md`, Repair):
+   `grp_forced_start` otherwise, naming the leg the mark names, since the
+   operator is acting on the group. The hold lasts until the mark goes:
+   the worker clears it from the primary's report (AR13), the operator
+   withdraws it, or a finish of the group's repair withdraws a mark that
+   names the bad leg it retires (MD6), the worker's own drive step's among
+   them, since the drive step reads no mark. The hold comes before the gate,
+   which already holds the group while its array does not run, so that the
+   record names the operator's hold whatever the row reads. The mark of
+   the pass's snapshot holds the create in the pass that clears it, and
+   the next pass reads the group without it. The hold is the
+   pass's alone, as the gate is, since no STM of the create reads the
+   mark: a create from a snapshot older than the mark, or an operator's
+   `CreateRepair`, is not held, and the primary then counts that repair's
+   new leg among the members its forced start keeps (`cnagent.md` CN12);
+5. the gate on the group's row (below), the `grp_row_` reasons otherwise;
+6. the healthy-leg test (below), `no_healthy_leg` otherwise;
+7. the group has no repair, an operator's or the worker's own:
    `grp_has_repair` otherwise, naming the repair, since a group has one
    repair at a time and its repair keeps the worker from creating another
    for the group until its finish or its cancel; the drive step moves the
    worker's own on, while an operator's waits for the operator (Known
    limits);
-7. the pool is not being deleted: a latched pool runs its drain and no
+8. the pool is not being deleted: a latched pool runs its drain and no
    reaction (SPD6), so this one needs no test of the pass's own.
 
-Conditions 2 to 6 are each one leg's or one group's, read in the pass's
+Conditions 2 to 7 are each one leg's or one group's, read in the pass's
 snapshot before any scan, and each holds that group only: the scan goes
 on to the next candidate leg (AR2). Each can hold for a long time — a user
-migration for hours, an array that does not run until its legs come back
-or an operator acts, a group with no healthy leg until one answers again,
-an operator's repair until the operator acts — and ending the pass on one
-would leave every other group of the SP degraded on one md member as long,
-where a further failure loses data.
+migration for hours, a forced-start mark until the mark goes in one of
+the three ways condition 4 names, an array that does not run until
+its legs come back or an operator acts, a group with no healthy leg until
+one answers again, an operator's repair until the operator acts — and
+ending the pass on one would leave every other group of the SP degraded on
+one md member as long, where a further failure loses data. The drive step
+reads no mark: the worker's own repair of a group with a mark moves on as
+any other does, save that `SetRepairAbort` refuses its try-to-abort while
+the mark names its new leg (MD6), a refusal that holds that group only, the
+next pass trying again while the trigger holds.
 
 The create then runs `FindDnCandidatesAntiAffine` with the group's
 `ext_cnt`, a candidate count of `dn_batch_size`, a required count of one
@@ -3452,9 +3525,10 @@ The worker's part of `architecture.md`, Repair, beside the fan-out's (RW14
 to RW18), the health bookkeeping's (HL2, HL3) and leg repair's, which
 creates, finishes, cancels and tries to abort the worker's own repairs
 (AR8): two steps of the pass that follow every repair, an operator's and
-the worker's own. Neither is a reaction, so neither is the pass's one
-action (AR2); the worker creates, finishes, cancels and tries to abort no
-operator's repair (AR9).
+the worker's own, and a third that ends an operator's forced start of a
+group, the clear of its mark (AR13). None is a reaction, so none is the
+pass's one action (AR2); the worker creates, finishes, cancels and tries to
+abort no operator's repair (AR9), and writes no forced-start mark.
 
 AR11. **Stage moves.** For a live SP, after the pass's gates and before
 AR3's suppression — so at every `sp_level` — the pass walks the SP's
@@ -3468,7 +3542,18 @@ confirmed and the snapshot's record carries the flag. The op is handed the
 the flag again in its STM (MD6). A verdict under another `rep_id` — one of
 a repair finished or cancelled and created again under its name — matches
 no repair and moves nothing, and neither does a verdict that says neither,
-a repair past CREATED, or a primary that has reported none. The repair of
+a repair past CREATED, or a primary that has reported none. A verdict on
+a CREATED repair that says neither and carries the primary's refusal of a
+take-back (`architecture.md`, Repair; `cnagent.md` CN12) moves nothing
+too, and logs `repair stage skipped` with the reason `take_back_refused`
+and the refusal's text, on every pass while it stands; every other verdict
+that says neither logs nothing, and so does a verdict on a repair past
+CREATED, even one that carries a refusal. Reason: the primary refuses to
+add a new leg taken from a retired leg whose md events count is above that
+of the member that keeps the data (what that count proves is
+`architecture.md`, Known limits), the repair then waits in CREATED with no
+row in error, and the record tells the operator why, so that they abort and
+cancel it. The repair of
 a deleting clone's group, or of a clone the snapshot does not hold, is
 skipped (`clone_deleting`): the clone drain's final transaction gives it
 back (CLD9), and the fan-out leaves it out of every cntlr's request
@@ -3515,11 +3600,61 @@ The first old leg nothing keeps is deleted, and the step ends. The delete
 carries the snapshot's `SpRev` revision as its expected revision (MD6), so
 a pool that changed since the snapshot the conditions were judged on
 refuses it, and the next pass judges again; an earlier bump of the same
-pass, a stage move's (AR11) or a clone's final STM's (CLD9), changes it
-too, so after one the delete is refused as stale and waits a pass. A refusal or a
+pass, a stage move's (AR11), a forced-start clear's (AR13) or a clone's
+final STM's (CLD9), changes it too, so after one the delete is refused as
+stale and waits a pass. A refusal or a
 failure logs `retired leg kept` with its reason, the op's own for a
 refusal (MD7), and ends the step as well. A delete logs `retired leg
 deleted`.
+
+AR13. **Forced-start clear.** For a live SP, right after AR11's stage
+moves and before AR3's suppression — so at every `sp_level` — the pass
+walks the SP's groups, the slices' in `slice_id_list` order, meta groups
+before data groups, then the clone meta groups in `clone_name_list` order,
+and clears each forced-start mark (`architecture.md`, Repair) that the
+current primary's latest report (the report AR1 takes) shows done: the
+group's row (`grp_id_to_md_raid`) reads `RES_STATUS_OK`, the group's
+in-sync list (`grp_id_to_grp_info`), which names a repair's new leg as it
+names a leg of the group's `leg_list` (`cnagent.md` CN28), holds a leg
+whose own row (`leg_id_to_leg`) in that report reads `RES_STATUS_OK`, the
+leg the mark names or another, and the report is of an observation made
+at the mark's revision or later. The revision is the mark's, not the
+snapshot's that AR8's gate reads: the mark carries the revision its own
+write committed,
+so a report of the array as it ran before the operator's call never clears
+it. The op, `model.ClearForcedStart`, is handed the group's parent and id
+and the mark's leg and revision, and clears only the mark they name,
+skipping a group that is gone, a deleting clone's, and a mark replaced or
+withdrawn since the snapshot (MD6); it takes no revision token and raises
+`SpRev`, so the fan-out hands every cntlr the group without its mark. A
+mark the report does not show done logs nothing, and neither does a
+primary that has reported none, nor a mark the op skips, which the next
+pass reads as it then stands. A due mark of a deleting clone's group is
+handed to no op and logs `forced start kept` with the reason
+`clone_deleting`; an op that refuses or fails logs `forced start kept`
+with its reason, the op's own for a refusal (MD7), and the next pass
+judges again. A clear logs `forced start cleared`, naming the group, the
+leg, the mark's revision, the primary, the revision of its report and the
+revision the op's own STM committed. Reasons: a mark that stayed would
+start the group's array again from the named leg at its next fault, from a
+leg that may be stale by then, and the operator uses the forced start at
+the levels where reactions stop. Reason for any leg: an array that runs
+on a member md holds in sync on a leg that serves needs no forced start,
+and the primary never stops a running array for one (`cnagent.md` CN12),
+while a mark left standing over it — its named leg dead after the start,
+or failed by md before a mark written over a row that did not read `OK` —
+would hold leg repair off the group (AR8) and start the array from that
+leg, stale by then, at its next stop. Reason for the leg's own row, the
+named leg's included: md keeps a dead member in sync while it retries a
+copy whose only source died, the array's state swinging back to running,
+and the named leg is that dead member when the mark is written while it is
+dead, as `architecture.md`, Known limits, advises; after a start the named
+leg serves, and its row reads `OK` once the primary's probe has passed on
+it (`cnagent.md` CN11). The clear is
+no reaction and not the pass's one action (AR2); its `SpRev` bump makes AR12's delete of the same
+pass wait a pass, as a stage move's does, and leg repair's create, which
+reads the mark in the pass's snapshot, still holds the group in that pass
+(AR8). A latched SP clears no mark: its drain deletes its groups.
 
 ### The sp drain
 
@@ -3566,11 +3701,11 @@ Storage pools and GrowSlice) — which is what makes SPD8's derivation total:
 a latched SP has exactly one future.
 
 SPD6. **Entry and cadence.** AR3 splits: a pass over an SP with `deleting`
-true runs at most ONE drain step, no reaction and neither of the two pass
-steps of a repair (AR11, AR12), regardless of `sp_level`
-suppression — "at most", because the gates ahead of the branch still
-apply: a pass whose `LoadSp` failed, or whose cluster conf is missing or
-unusable, runs nothing at all and retries on the next tick. (The SP's OWN
+true runs at most ONE drain step, no reaction, neither of the two pass steps
+of a repair (AR11, AR12) and no forced-start clear (AR13), regardless of
+`sp_level` suppression — "at most", because the gates ahead of the branch
+still apply: a pass whose `LoadSp` failed, or whose cluster conf is missing
+or unusable, runs nothing at all and retries on the next tick. (The SP's OWN
 gates, its `bdev_conf` and its groups' lengths (AR1), are deliberately NOT
 among them: the drain reads no geometry, and gating it there would make an
 SP whose stored geometry cannot be read permanently undeletable, the latch
@@ -4081,11 +4216,17 @@ error, and its transaction may still have committed, which the next pass
 reads from the stored state;
 `repair stage moved` a stage move whose call succeeded and `repair stage
 skipped` a move AR11 finds due and does not make, with its reason, the
-op's name as `op` when the op refused it, or its error (AR11);
+op's name as `op` when the op refused it, or its error, and a CREATED
+repair's verdict that carries the primary's refusal of a take-back, with
+`take_back_refused` and the refusal's text as `refusal` (AR11);
 `retired leg deleted` a retire timer's delete whose call succeeded and
 `retired leg kept` an old retired leg the timer keeps, with its reason, the
-op's name as `op` when the op refused the delete, or its error (AR12) —
-neither step is a reaction, so neither logs a reaction record;
+op's name as `op` when the op refused the delete, or its error (AR12);
+`forced start cleared` a clear of a forced-start mark whose call wrote,
+with the revision its own STM committed, and `forced start kept` a clear
+AR13 finds due and does not make, with its reason, the op's name as `op`
+when the op refused it, or its error (AR13) — none of these steps is a
+reaction, so none logs a reaction record;
 `sp drain step` every D1, repair, retired-leg and D2 step whose call
 succeeded (SPD8), each with its own phase, and `sp drained` a D3 whose call
 succeeded, the step that ends the drain (SPD12), so no step record carries
@@ -4111,7 +4252,8 @@ because the data plane is proven by the agent suites (`dnagent_integtest.md`,
 Goal and scope; `cnagent_integtest.md`, Goal and scope); what this suite
 proves is everything between etcd and the agent's gRPC surface: membership and
 ownership, revision propagation, health bookkeeping, the flips, the pushes,
-the reactions, the two pass steps of a repair, the two drains and handoff —
+the reactions, the two pass steps of a repair, the forced-start clear, the
+two drains and handoff —
 the happy paths plus every failure
 the worker is specified to handle; error paths of etcd itself (quorum loss,
 compaction races) are out of scope. It runs on one server as a plain user,
@@ -4225,9 +4367,24 @@ revision gate being per object and not per cluster.
   it to STARTED and the operator's finish retires its bad leg, whose side
   keeps a provisioned request on its disk node; a second repair is aborted,
   its abort confirmed, moved to ABORTED and cancelled, giving its new side
-  back; the retired leg is listed and deleted; and the retire timer keeps an
+  back; the retired leg is listed and deleted; the retire timer keeps an
   old retired leg while the primary reads its group not whole and deletes it
-  once the group reads whole;
+  once the group reads whole; a repair that takes a retired leg back, whose
+  add the primary's verdict refuses, stays CREATED while every pass logs
+  the refusal's text, and is aborted and cancelled, giving the leg back as
+  a retired leg; and the mark of an operator's forced start is cleared
+  once a report of an observation at or after its revision holds the named
+  leg in sync on a leg row that reads `OK`, the primary having been carried
+  the mark first; while a mark stands, it rides to every cntlr and holds
+  leg repair's create of its
+  leg, ahead of the healthy-leg test, as long as the primary holds no leg
+  in sync; once it holds the group's other leg in sync on a leg that
+  serves, the named leg still out of sync, the mark is cleared, the clear
+  hands every cntlr the group without the mark, and leg repair's create
+  runs in a later pass; and at a level where reactions stop a mark is
+  cleared too, though not while the primary's reports are of an observation older than
+  the mark, nor while its report of the mark's revision reads the group's
+  row other than `OK`;
 * failover — failovers at the shipped default timers: a standby that stops
   answering leaves the discovery records and returns once it answers again,
   each time in its health write's own transaction, with no revision bump and
@@ -4286,7 +4443,10 @@ health write (HL2) and in a failover on either trigger (MD6) by the failover
 case, which finds each in its writer's own transaction, and in a cntlr
 replacement (MD6) by the reaction case; BM1 to BM5 by the bitmap case; AR1
 to AR9, and AR11 on the worker's repairs, by the reaction case, AR8's skip
-of a group with an operator's repair, AR11 and AR12 by the repair case, and
+of a group with an operator's repair and its hold on a group with a
+forced-start mark, AR11, its record of a refused take-back included, AR12
+and AR13, its clear at a level where reactions stop included, by the
+repair case, and
 AR10 on the failover's threshold trigger,
 with AR5 at the default primary threshold (`architecture.md`, Common
 validation), by the failover case; SPD6 to SPD13, CLD5 and CLD7 to CLD12
@@ -4334,14 +4494,21 @@ across the pool and its skip of a clone being deleted, since no suite case
 fails a leg of one; AR8's healthy-leg test and its gate on the group's
 row, since no suite case leaves a group with no healthy leg, holds a leg
 out of a group's in-sync list or has a group's row read anything but `OK`
-while a leg of the group is due for repair; AR8's try-to-abort on the
+while a leg of the group is due for repair, but behind a forced-start
+mark, whose hold AR8 checks first; AR8's try-to-abort on the
 clocks of a new leg or of another leg of the group, the drive step's
 refusals and the finish's give-back at the retired-leg bound, since no
 suite case fails a new leg or a second leg of a group under repair or
 fills a group's retired legs; of AR11, a verdict that says started
 and abort confirmed at once, a stale verdict under another `rep_id`, and a
 deleting clone's repair; AR12's holds other than the whole flag's, its
-order and its one delete a pass; HL2's epoch writes into a `Repair` or a
+order and its one delete a pass; of AR13, its walk order, a mark on a clone
+meta group or on a repair's new leg, a deleting clone's mark, a mark the op
+skips, refuses or fails to clear, a primary that has reported none, and
+the wait a clear's bump gives the retire timer's delete of the same pass,
+since the repair case clears one slice's group's marks, each on a leg of
+its `leg_list`, from a primary that reports throughout, and holds no old
+retired leg then; HL2's epoch writes into a `Repair` or a
 `RetiredLeg`, since no suite case fails a repair's new leg, its side or a
 retired side; the restart of a side child whose side moves to another
 record (RW14, HL2), which the repair case's finish causes and none of its
@@ -4366,9 +4533,11 @@ suite case forces that code or sets `leftover_rounds`;
 `bitmap push failed`, for the reason given for BM6 above;
 `late observation`, since no suite case sets `obs_age_ms` or `obs_none`;
 `dn free count disagrees`, since no suite case sets `disk_counts`;
-`repair stage skipped`, since every stage move the repair and reaction
-cases stage commits; and `sp group missing`, since no suite case plants a
-repair or a retired leg whose group is missing.
+`forced start kept`, since every clear the repair case stages commits; and
+`sp group missing`, since no suite case plants a repair or a retired leg
+whose group is missing. `repair stage skipped` is staged only as the
+record of a refused take-back, every stage move the repair and reaction
+cases stage committing.
 
 Out of scope: real agents, and real hosts, whose drop of a path the discovery
 records withdraw is the e2e suite's to show (`e2e_integtest.md`, The cases);
@@ -4427,10 +4596,13 @@ same way: it plants one `err_epoch`, on a cntlr, or on a leg or a side of a
 slice or of a clone's clone meta group, and touches
 neither a revision nor a `CdcEntry` nor a `settling` flag, so a case can
 stage the epoch an earlier owner or another observer would have left (AR10).
-The operator's repair calls are not raw, and all but `abort-repair` bypass
-the library: `create-repair`, `finish-repair`, `cancel-repair`,
-`abort-repair` and `delete-retired-leg` run the model operations the
-gateway's repair handlers run, with no revision token,
+The operator's calls are not raw, and all but `abort-repair` and
+`force-start` bypass the library: `create-repair`, `finish-repair`,
+`cancel-repair`, `abort-repair` and `delete-retired-leg` run the model
+operations the gateway's repair handlers run, and `force-start` the one
+the gateway's `ForceStartGroup` runs, which writes a group's forced-start
+mark, or withdraws it with its cancel flag, and prints the revision the
+mark carries; all of them run with no revision token,
 `list-repairs` reads the pool's repairs and retired legs as one load does
 (MD3), and `put-retired-leg` plants a retired leg as a finish leaves one,
 at an age the case chooses, so that a case can stage a leg older than the
@@ -4472,7 +4644,9 @@ it means to whatever its own polls cost, `delay_rounds_ms` answers every
 round late, and `hang_syncup` leaves the object's `Syncup*` unanswered
 while it is set, as a stopped cn agent leaves its demotion (RW22), or as a
 side whose agent answers its rounds but never its syncup holds a
-sides-first hold to its bound (RW14); a call `hang` or `hang_syncup` holds
+sides-first hold to its bound (RW14), or as a primary whose rounds still
+answer from before a write it has not applied keeps a forced-start mark
+from its clear (AR13); a call `hang` or `hang_syncup` holds
 ends as soon as its lever is cleared or its caller gives up, and a round
 `hang_rounds` holds only when its caller gives up. Among the rows it
 derives, a migration destination whose request carries the side
@@ -4490,7 +4664,8 @@ carries, as the cn agent connects and probes a new leg as it does a leg of
 the group (`architecture.md`, Repair), and, while its request makes it the primary,
 every group of the request as whole, with every leg of its `leg_list`
 held in sync, and no verdict on a repair; the levers `repairs`,
-a verdict by a repair's name that the fake reports under the repair's
+a verdict by a repair's name, the text of a refused take-back included,
+that the fake reports under the repair's
 `rep_id`, and `grps`, a group's whole flag or in-sync list by `grp_id`,
 change what a primary reports, and a standby reports neither. It stamps
 every reply as an agent does
@@ -4668,15 +4843,25 @@ which no suite case sets, so no suite case runs RW13's count compare.
   in-sync guard holds over it (`cnagent.md` CN12), gets no repair either
   until its row reads `OK` again.
 * **A group whose only in-sync leg dies while md copies onto a finished
-  repair's new leg stays down.** A finish runs as soon as the primary
-  reports the new leg holding a place (AR8), and md may still be copying
-  onto it; the group's latest data is then on the leg that died, the new
-  leg holds part of it, and the bad leg the finish retired holds an older
-  copy. md will not start the array from the half-copied new leg, and the
-  group has no healthy leg, so no repair follows (AR8): the group stays
-  down until its legs return in a way md accepts (`cnagent.md` CN12 and
-  its Known limits), since no call starts a group's array from a leg an
-  operator names.
+  repair's new leg waits for an operator's forced start.** A finish runs as
+  soon as the primary reports the new leg holding a place (AR8), and md may
+  still be copying onto it; the group's latest data is then on the leg that
+  died, the new leg holds part of it, and the bad leg the finish retired
+  holds an older copy. md will not start the array from the half-copied new
+  leg, and the group has no healthy leg, so no repair follows (AR8): the
+  group stays down until its legs return in a way md accepts (`cnagent.md`
+  CN12 and its Known limits) or an operator force-starts it
+  (`architecture.md`, Repair) — from the leg that died, which holds the
+  latest data, the mark written while that leg is still dead so that the
+  start runs once it is back (`architecture.md`, Known limits), or, while
+  it stays dead, from the retired leg taken back by a repair, which brings
+  back the older copy. The worker's part is the clear of the mark once the
+  primary reports the group's row `OK` with a member in sync on a leg whose
+  own row reads `OK` (AR13), which a report from md's retries of the copy
+  can show with no start only while the dead member md holds in sync still
+  has a leg row that reads `OK`, before the primary's probe finds it dead
+  (`cnagent.md`, Known limits), and leg repair's hold on the group while
+  the mark stands (AR8); it never writes a mark of its own.
 * **The gate can read a row that is about to turn.** A leg that dies
   under a running array while it is the array's only in-sync member on a
   live leg, as when the group's other leg is the one due for repair,
@@ -4689,7 +4874,8 @@ which no suite case sets, so no suite case runs RW13's count compare.
   primary adds the new leg while the dying leg still reads `OK`
   (`cnagent.md` CN12), the copy reads the dying leg, and md breaks the
   array when it sees the death. The group then stays down until its legs
-  return in a way md accepts, whatever stage the repair has reached: a
+  return in a way md accepts, or an operator force-starts it
+  (`architecture.md`, Repair), whatever stage the repair has reached: a
   repair still CREATED stays so while the array does not run, since the
   primary gives no verdict on such an array (`cnagent.md` CN28), and one
   that reached STARTED is finished where reactions run (AR3, AR8), which
@@ -4722,6 +4908,17 @@ which no suite case sets, so no suite case runs RW13's count compare.
   holds it in sync, so leg repair does not repair the only leg md holds in
   sync while such a copy runs, save on a report that predates the copy
   (Reaction inputs are one pass old, below).
+* **The retire timer, or a give-back at the retired-leg bound, deletes a
+  retired leg that holds newer data than a restored copy.** After a forced
+  start from an older copy, a retired leg taken back by a repair
+  (`architecture.md`, Repair), the leg that held the newer data is a retired
+  leg once that repair is finished, and the timer deletes it as it deletes
+  any other, once it is `RetiredLegMaxAge` old on a whole group whose legs
+  are healthy (AR12); the finish of a worker's repair of the group gives it
+  back sooner, at any age, once it is the group's oldest retired leg and the
+  group is at the bound (AR8; `architecture.md`, Repairs, FinishRepair). No
+  setting keeps it, so its data is lost then unless an operator has brought
+  it back before.
 * **A primary that never settles is failed over or replaced no earlier than
   `cntlr_unhealthy`**, unless it is disabled (AR5, HL2) — nor failed over
   before `primary_unhealthy`, AR5 taking the longer of the two. A primary that

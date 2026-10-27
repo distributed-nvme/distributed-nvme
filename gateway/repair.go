@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -12,7 +13,8 @@ import (
 )
 
 // This file is architecture.md, Repairs and Retired legs (gateway.md, Repairs
-// and retired legs): the eight RPCs of a repair of an md-raid1 group's leg.
+// and retired legs): the eight RPCs of a repair of an md-raid1 group's leg,
+// and ForceStartGroup, the forced start of a group's array from one leg.
 // CreateRepair creates an operator's repair only, since it refuses the
 // reserved prefix of the sp worker's own repairs (validateRepName); the calls
 // that address a repair by its name take both kinds, so an operator can
@@ -24,12 +26,13 @@ import (
 // keeps the bad leg as a retired leg, whose side keeps its data on its DN
 // until it is deleted or a repair of the group takes it back.
 //
-// The five calls that write run the repair operations of model (gateway.md,
+// The six calls that write run the repair operations of model (gateway.md,
 // Scope and placement: reused, never duplicated), each behind a planning
 // snapshot: the snapshot resolves the cluster and the SP, checks the token
 // and makes the checks whose codes model cannot give, and the op re-checks
-// everything inside its own STM, the token first (GW6). The three reads are
-// one snapshot each over the pool's lists.
+// everything inside its own STM, the token first (GW6). ForceStartGroup alone
+// also reads the primary's report, between its snapshot and its op (AG1).
+// The three reads are one snapshot each over the pool's lists.
 
 // repairOpenSp is the planning read of FinishRepair, CancelRepair,
 // TryToAbortRepair and DeleteRetiredLeg: openSp — the resolution, the
@@ -73,10 +76,10 @@ func releaseConfGate(sc *spScope) error {
 	return nil
 }
 
-// grpRepair is the group's open repair, read inside the caller's STM through
-// the group's rep_name, or nil when the group has none. The Repair a group
-// names is an invariant key (architecture.md, Key table), so a missing one is
-// ABORTED.
+// grpRepair is the repair the group's rep_name names, at any stage, read
+// inside the caller's STM, or nil when the group names none. The Repair a
+// group names is an invariant key (architecture.md, Key table), so a missing
+// one is ABORTED.
 func grpRepair(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -550,6 +553,287 @@ func (s *Server) TryToAbortRepair(
 		return nil, mapModelErr(err)
 	}
 	return &pb.TryToAbortRepairReply{RepId: repId}, nil
+}
+
+// grpReportTarget is what ForceStartGroup's planning read carries into its
+// read of the primary's report: the primary cntlr's pointer and the CN that
+// hosts it. AG4 makes every field a hint: the op re-reads the pool and
+// re-checks the token in its own STM.
+type grpReportTarget struct {
+	ClusterId uint64
+	SpId      uint64
+	CntlrId   uint64
+	CnId      uint64
+	AddrPort  string
+}
+
+// ForceStartGroup is the ForceStartGroup of architecture.md, Repairs: the
+// forced-start mark of an md-raid1 group, which asks the group's primary to
+// start the array from the one leg the request names (architecture.md,
+// Repair), or, with cancel, its withdrawal.
+//
+// It is two-phase (AG4). The pure checks come first (GW4): the names, and a
+// leg_id that matches the flag, zero with cancel and named without it. The
+// planning snapshot then makes the refusals of architecture.md, Repairs, in
+// their order, behind openSp's resolution, deleting gate and token: the
+// level, a RedundNone pool, the group's look-up — slices first, then clones
+// (locateGrp) — a clone being deleted, the leg the mark may name
+// (forceStartLegChecks) and the primary. Outside any STM the primary's
+// report is read (checkGrpArrayDown), and model.ForceStartGroup, the deciding
+// STM, makes its own checks again, the token first (GW6); a leg a write took
+// away since the snapshot is its model.ReasonLegNotNamable, answered in the
+// gateway's words. A cancel names no leg and reads no report: it skips the
+// level, the leg, the primary and the read, so that a mark can be withdrawn
+// at every level, and a group with no mark is answered OK with no write and
+// no bump, a token the request carried still being checked first.
+func (s *Server) ForceStartGroup(
+	ctx context.Context,
+	req *pb.ForceStartGroupRequest,
+) (*pb.ForceStartGroupReply, error) {
+	if err := validateOptionalName(
+		"cluster_name", req.GetClusterName(),
+	); err != nil {
+		return nil, err
+	}
+	if err := validateName("sp_name", req.GetSpName()); err != nil {
+		return nil, err
+	}
+	if req.GetCancel() && req.GetLegId() != 0 {
+		return nil, errInvalid(
+			"leg_id %d is set with cancel: a cancel names no leg",
+			req.GetLegId())
+	}
+	if !req.GetCancel() && req.GetLegId() == 0 {
+		return nil, errInvalid(
+			"leg_id must name the leg the group's array starts from")
+	}
+	var sc *spScope
+	var loc grpLocation
+	var tgt grpReportTarget
+	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		var err error
+		sc, loc, tgt, err = forceStartChecks(stm, req)
+		return err
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	if !req.GetCancel() {
+		if err := checkGrpArrayDown(ctx, tgt, req.GetGrpId()); err != nil {
+			return nil, err
+		}
+	}
+	revision, err := model.ForceStartGroup(
+		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
+		req.GetSpRev().GetRevision(), loc.parent(), req.GetGrpId(),
+		req.GetLegId(), req.GetCancel(),
+	)
+	if modelReason(err) == model.ReasonLegNotNamable {
+		return nil, errPrecondition(
+			"leg %d is no leg the forced start of group %d may name any "+
+				"more: neither a leg of its leg_list, other than the bad "+
+				"leg of a started repair, nor a new leg of its repair "+
+				"while that repair is started or is created with its "+
+				"abort flag clear", req.GetLegId(), req.GetGrpId())
+	}
+	if err != nil {
+		return nil, mapModelErr(err)
+	}
+	return &pb.ForceStartGroupReply{
+		GrpId:    req.GetGrpId(),
+		Revision: revision,
+	}, nil
+}
+
+// forceStartChecks is ForceStartGroup's planning read inside the caller's
+// snapshot, its refusals in the order of architecture.md, Repairs. It returns
+// the scope and the group, which the op is handed, and, for a request that is
+// no cancel, the primary whose report the call reads.
+func forceStartChecks(
+	stm etcdutil.STM,
+	req *pb.ForceStartGroupRequest,
+) (*spScope, grpLocation, grpReportTarget, error) {
+	spName := req.GetSpName()
+	grpId := req.GetGrpId()
+	cancel := req.GetCancel()
+	sc, err := openSp(stm, req.GetClusterName(), spName, req.GetSpRev())
+	if err != nil {
+		return nil, grpLocation{}, grpReportTarget{}, err
+	}
+	// The level that stops group arrays is the step at which no group array
+	// is built, so no primary could start one; a cancel runs at every level,
+	// since a mark that stands acts once the level is lowered.
+	level := sc.Conf.GetSpLevel()
+	if !cancel && level >= pb.SpLevel_SP_LEVEL_NO_REDUND {
+		return nil, grpLocation{}, grpReportTarget{}, errPrecondition(
+			"storage pool %q is at %s, where no group array is built",
+			spName, level)
+	}
+	// Redundancy is an SP-wide property the group only inherits, so the
+	// test is the SP's STORED bdev_conf, as CreateRepair's is.
+	if !isMdRaid1(spBdevConf(sc.Conf)) {
+		return nil, grpLocation{}, grpReportTarget{}, errInvalid(
+			"storage pool %q is RedundNone: its groups have no array to "+
+				"start", spName)
+	}
+	loc, err := locateGrp(stm, sc, spName, grpId)
+	if err != nil {
+		return nil, grpLocation{}, grpReportTarget{}, err
+	}
+	if err := refuseDeletingClone(loc); err != nil {
+		return nil, grpLocation{}, grpReportTarget{}, err
+	}
+	if cancel {
+		return sc, loc, grpReportTarget{}, nil
+	}
+	if err := forceStartLegChecks(
+		stm, sc, loc.Grp, req.GetLegId(),
+	); err != nil {
+		return nil, grpLocation{}, grpReportTarget{}, err
+	}
+	cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return nil, grpLocation{}, grpReportTarget{}, err
+	}
+	cntlrId, cntlr, ok := primaryCntlr(sc.Conf, cntlrs)
+	if !ok {
+		return nil, grpLocation{}, grpReportTarget{}, errPrecondition(
+			"storage pool %q has no primary cntlr whose report could show "+
+				"that the array of group %d does not run", spName, grpId)
+	}
+	cn := &pb.CnConf{}
+	cnKey := model.CnConfKey(sc.Cid, cntlr.GetAddrPort())
+	if !stm.Get(cnKey, cn) {
+		// A live cntlr names its CN, and DeleteControllerNode refuses a CN
+		// that hosts one, so the CN's absence is a lost invariant key
+		// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
+		return nil, grpLocation{}, grpReportTarget{}, errAborted(
+			"cn_conf key %q is missing", cnKey)
+	}
+	return sc, loc, grpReportTarget{
+		ClusterId: sc.Cid,
+		SpId:      sc.SpId(),
+		CntlrId:   cntlrId,
+		CnId:      cn.GetCnId(),
+		AddrPort:  cntlr.GetAddrPort(),
+	}, nil
+}
+
+// forceStartLegChecks refuses a leg the forced-start mark may not name
+// (architecture.md, Repairs): one in neither the group's leg_list nor the
+// new legs of its repair is NOT_FOUND; a new leg of a repair whose abort
+// flag is set, an ABORTED one or a CREATED one, is FAILED_PRECONDITION,
+// since the abort takes that leg out of the members the forced start keeps,
+// the members the group keeps but the new legs of a CREATED repair whose
+// abort flag is set (architecture.md, Repair, Forced start; cnagent.md
+// CN12), while a STARTED repair's new leg may be named whatever its flag
+// says, since no abort takes a STARTED repair back; and so is the bad leg of
+// a STARTED repair, which left the array before md began copying onto the
+// new leg and which the finish retires. model.ForceStartGroup makes the same
+// tests in its own STM (model.ReasonLegNotNamable).
+func forceStartLegChecks(
+	stm etcdutil.STM,
+	sc *spScope,
+	grp *pb.Group,
+	legId uint64,
+) error {
+	rep, err := grpRepair(stm, sc, grp)
+	if err != nil {
+		return err
+	}
+	if grpLegOf(grp, legId) != nil {
+		if rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED &&
+			slices.Contains(rep.GetBadLegIdList(), legId) {
+			return errPrecondition(
+				"leg %d is the bad leg of the repair %q, which is "+
+					"REP_STAGE_STARTED: the leg left the array before md "+
+					"began copying onto the new leg, and the finish "+
+					"retires it, so the forced start of group %d may not "+
+					"name it",
+				legId, grp.GetRepName(), grp.GetGrpId())
+		}
+		return nil
+	}
+	for _, leg := range rep.GetNewLegList() {
+		if leg.GetLegId() != legId {
+			continue
+		}
+		if rep.GetRepStage() != pb.RepStage_REP_STAGE_STARTED &&
+			rep.GetTryToAbort() {
+			return errPrecondition(
+				"leg %d is the new leg of the repair %q, which is %s with "+
+					"its abort flag set: the forced start of group %d "+
+					"keeps no such member", legId,
+				grp.GetRepName(), rep.GetRepStage(), grp.GetGrpId())
+		}
+		return nil
+	}
+	return errNotFound(
+		"leg %d is neither in the leg_list of group %d nor a new leg of "+
+			"its repair", legId, grp.GetGrpId())
+}
+
+// checkGrpArrayDown is ForceStartGroup's agent call between its two phases
+// (AG1, AG3): a group whose row the primary's latest report reads OK has an
+// array that runs, and a forced start is for an array md will not start by
+// itself; the primary never stops a running array for one (cnagent.md CN12).
+// GetCntlrInfo answers from the agent's latest observation and reads nothing
+// of the node (architecture.md, Live-state reporting).
+//
+// The row is read whatever the reply's AgentReply code (AG3). An OK row
+// refuses, and so does a report with no row of the group: an absent row, or
+// a reply with no info, as the UnknownObject refusal of an agent that does
+// not hold the cntlr carries (cnagent.md CN23). Silence about the group
+// proves nothing about its array: the primary etcd names reports as a
+// standby, with no group row, from a failover's hand-over until its
+// promotion's reply, and a fresh primary of a replacement reports nothing
+// yet, while the old primary's array may still run; the new primary's node
+// holds no array of the group, so a mark would act there at once. A primary
+// that has built its groups reports each group's row, so the caller only
+// retries. A row in any other status lets the mark be written: the primary,
+// which waits while its array runs, is the guard that sees the node. An
+// agent that does not answer is FAILED_PRECONDITION, as the hydration checks
+// answer one (AG3): its silence proves nothing about the array either.
+func checkGrpArrayDown(
+	ctx context.Context,
+	tgt grpReportTarget,
+	grpId uint64,
+) error {
+	runs, absent := false, false
+	callErr := withCnAgent(ctx, tgt.AddrPort,
+		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
+			reply, err := client.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+				ClusterId: tgt.ClusterId,
+				CnId:      tgt.CnId,
+				CntlrPointer: &pb.CntlrPointer{
+					SpId:    tgt.SpId,
+					CntlrId: tgt.CntlrId,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			row, ok := reply.GetCntlrInfo().GetGrpIdToMdRaid()[grpId]
+			absent = !ok || row == nil
+			runs = row.GetStatus() == pb.ResStatus_RES_STATUS_OK
+			return nil
+		})
+	if callErr != nil {
+		return errPrecondition(
+			"group %d: its array is not proven down, controller node %q "+
+				"did not answer: %v", grpId, tgt.AddrPort, callErr)
+	}
+	if absent {
+		return errPrecondition(
+			"group %d: its array is not proven down, the primary's latest "+
+				"report holds no row of the group", grpId)
+	}
+	if runs {
+		return errPrecondition(
+			"group %d runs: the primary's latest report reads its row "+
+				"RES_STATUS_OK", grpId)
+	}
+	return nil
 }
 
 // GetRepair is the GetRepair of architecture.md, Repairs: one snapshot reads

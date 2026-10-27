@@ -602,6 +602,50 @@ func SetRepairStage(
 	return rep.GetRepId(), spRev, nil
 }
 
+// ForceStartGroup writes the forced-start mark of the group grpId, naming
+// legId, through model.ForceStartGroup, the operation the gateway's
+// ForceStartGroup runs, which the worker suite drives with no gateway; with
+// cancel it withdraws the mark instead, and legId is not read. The group is
+// looked up among the pool's slices and then its clones, as the gateway
+// looks a group up (findPlantedGrp), and the op runs with no revision token.
+// It returns the revision the mark carries, zero for a cancel, and the
+// pool's revision after it.
+func ForceStartGroup(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cl Cluster,
+	target SpRef,
+	grpId uint64,
+	legId uint64,
+	cancel bool,
+) (uint64, uint64, error) {
+	var parent model.GrpParent
+	if err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		conf, err := getSpConf(s, cl.Id, target)
+		if err != nil {
+			return err
+		}
+		g, err := findPlantedGrp(s, cl.Id, target, conf, grpId)
+		if err != nil {
+			return err
+		}
+		parent = g.parent
+		return nil
+	}); err != nil {
+		return 0, 0, err
+	}
+	revision, err := model.ForceStartGroup(ctx, cli, cl.Id, target.Shard,
+		target.Id, target.Name, 0, parent, grpId, legId, cancel)
+	if err != nil {
+		return 0, 0, err
+	}
+	spRev, err := SpRevision(ctx, cli, cl, target)
+	if err != nil {
+		return 0, 0, err
+	}
+	return revision, spRev, nil
+}
+
 // SetRepairProvisioned flips the side sideId of a repair's new leg legId
 // through model.FlipRepairProvisioned, as SetProvisioned flips a slice's
 // side, the rep_id from the stored record. It returns whether the flip

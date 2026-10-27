@@ -118,10 +118,12 @@ func mapStmErr(err error) error {
 
 // mapModelErr maps an error returned by one of the model ops the gateway runs
 // as a deciding STM — GrowSlice and the repair operations CreateRepair,
-// FinishRepair, CancelRepair, SetRepairAbort and DeleteRetiredLeg — each of
-// which runs its own STM, onto GW7. The repair handlers answer the reasons
-// model exports for the NOT_FOUND, ALREADY_EXISTS and RESOURCE_EXHAUSTED codes
-// themselves before they hand an error here (modelReason).
+// FinishRepair, CancelRepair, SetRepairAbort, DeleteRetiredLeg and
+// ForceStartGroup — each of which runs its own STM, onto GW7. The repair
+// handlers answer the reasons model exports for the NOT_FOUND,
+// ALREADY_EXISTS and RESOURCE_EXHAUSTED codes, and ForceStartGroup its leg
+// taken away since its planning read, themselves before they hand an error
+// here (modelReason).
 //
 // ReasonStaleRevision is the token check the gateway asked the op to run and
 // is ABORTED; ReasonCandidateChanged never reaches a client (GW9: the caller
@@ -226,7 +228,7 @@ func clusterNameOf(name string) string {
 
 // resolveCluster is the first read of every STM but CreateCluster's and
 // ListClusters' (GW5; architecture.md, STM discipline), save the later
-// transactions of GrowSlice and the five repair calls that run a model op,
+// transactions of GrowSlice and the six repair calls that run a model op,
 // which reuse the cid their planning snapshot resolved here, and the pool
 // transactions of AdvanceClusterIds (GW19), which reuse the cid its first
 // transaction resolved here. ClusterConf is the only name-keyed message, and

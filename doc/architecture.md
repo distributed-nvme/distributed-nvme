@@ -31,7 +31,9 @@ authenticates no user: the layer above authenticates its users and decides
 which storage pools, subsystems and hosts serve each of them. What dnv
 promises that layer is that the data of one storage pool is never readable
 from another storage pool, unless that layer exports it there itself, for
-example with a transfer (Transfers). The extents a pool frees can go to the
+example with a transfer (Transfers), or a caller's step breaks it: a leg
+bitmap read too early for a migration, or an operator's forced start from
+an older copy (Known limits). The extents a pool frees can go to the
 sides of any other pool with the bytes they hold, and dm-thin keeps those
 bytes from every host ([D15]): a host reads a pool only through its thin
 devices, a thin device reads a block it has not provisioned as zeros, and
@@ -88,11 +90,12 @@ through viper (Components: invocation reference):
 
 * `dnv-gateway` serves the `Gateway` gRPC service to users and CLIs. It
   reads and writes etcd, and calls agents only for `GetDnSize` and
-  `GetCnSize`, the `Get*Info` behind its `Inspect*` RPCs and behind the
+  `GetCnSize`, the `Get*Info` behind its `Inspect*` RPCs, behind the
   `force` false hydration checks of `DeleteClone` and `FinishMigration`
-  (Clones, Migrations), and the `Get*Bm` bitmap reads (Bitmap reads). The
-  worker never calls `Get*Info`: it watches through `Check*` (Check
-  streams, dn / cn roles). `gateway.md` owns it.
+  (Clones, Migrations) and behind `ForceStartGroup`'s check that the
+  group's array does not run (Repairs), and the `Get*Bm` bitmap reads
+  (Bitmap reads). The worker never calls `Get*Info`: it watches through
+  `Check*` (Check streams, dn / cn roles). `gateway.md` owns it.
 * `dnv-worker` is one binary with the roles `dn`, `cn` and `sp`, any subset
   per instance. It watches the revision keys in etcd, shards the work by
   shard code, drives agents through the unary `SyncupDn`, `SyncupSide`,
@@ -253,13 +256,21 @@ always means the SP's `DmPoolConf.data_block_size`.
   record under the leg's own id, out of the group's `leg_list` and listed
   in the group's `retired_leg_id_list` and the pool's. Its side stays on
   its DN with its extents and the data as it was when the leg left the
-  array, a kept copy, save what md wrote on it while it was the new leg of
-  a repair that was then cancelled (Repair); its `retired_epoch` is the
+  array, a kept copy, save what md wrote on it while it was the new leg of a
+  repair that was then cancelled, and a forced start's zero of its
+  superblock, when that forced start kept it and the leg left before md
+  added it (Repair; Known limits); its `retired_epoch` is the
   time of the finish. It is no leg of the group: no cntlr connects it and
   no migration moves it. A later operator's repair of the same group may
   take it back as its new leg; the retire timer, `DeleteRetiredLeg`, the
   finish of a worker's repair of the group at the bound, or its pool's or
   its clone's drain deletes it (Retired legs, Repair).
+* **forced start** — An operator's start of an md-raid1 group's array from
+  one leg they name, for an array md will not start by itself: the
+  group's **forced-start mark**, `Group.forced_start`, holds the named leg
+  and the `SpRev` revision its write committed until it is cleared or
+  withdrawn, and the primary acts on it while it stands (Repairs,
+  `ForceStartGroup`; Repair, Forced start).
 * **shard code** — A uint32 below `ShardBucketSize`, formatted with
   `ShardCodeFmt`. Every DN, CN and SP gets one at creation; workers and the
   cdc split ownership by shard code.
@@ -1405,14 +1416,15 @@ and every other key of the RPC is formatted from the `cluster_id` derived
 there. Doing it in-STM also makes the transaction fail correctly when the
 cluster is concurrently deleted or recreated. `GrowSlice` and the repair
 calls whose deciding STM is a `model` operation — `CreateRepair`,
-`FinishRepair`, `CancelRepair`, `TryToAbortRepair` and `DeleteRetiredLeg` —
-are the exceptions: they make that read in a planning snapshot,
-`CreateRepair` with a fresh new leg in a fresh one each round of its
-candidate unit (`gateway.md` GW5, GW9). `AdvanceClusterIds` commits one
+`FinishRepair`, `CancelRepair`, `TryToAbortRepair`, `DeleteRetiredLeg` and
+`ForceStartGroup` — are the exceptions: they make that read in a planning
+snapshot, `CreateRepair` with a fresh new leg in a fresh one each round of
+its candidate unit (`gateway.md` GW5, GW9). `AdvanceClusterIds` commits one
 transaction for its cluster and then one per pool, which take the cluster
 id the first one derived (Clusters). Network calls to agents (`GetDnSize` and
-`GetCnSize`, the `Get*Info` behind `Inspect*` and behind the `force` false
-hydration checks of Clones and Migrations, the bitmap reads) must happen
+`GetCnSize`, the `Get*Info` behind `Inspect*`, behind the `force` false
+hydration checks of Clones and Migrations and behind `ForceStartGroup`'s
+check of the group's array (Repairs), the bitmap reads) must happen
 **outside** the STM, before or after it; when such a call needs
 `cluster_id`, a plain pre-read of `ClusterConf` provides it and the in-STM
 read stays authoritative.
@@ -3260,10 +3272,12 @@ calls take the group of a slice or a clone's clone meta group alike:
 slices and then among the clones, and the repair records the parent it
 found, which every later call that writes the group reads, checking that
 it still holds the group; on a clone meta group the clone's record is
-written where a slice's would be. Reason: one call for both kinds of group
-is less to get right than a twin per kind, and a group never moves to
-another parent, so the record stays true for the repair's life. A clone
-being deleted is refused `FAILED_PRECONDITION` by every call that writes
+written where a slice's would be. `ForceStartGroup`, which writes the
+group and no repair, looks its `grp_id` up the same way. Reason: one call
+for both kinds of group is less to get right than a twin per kind, and a
+group never moves to another parent, so the record stays true for the
+repair's life. A clone being deleted is refused `FAILED_PRECONDITION` by
+every call that writes
 (`dnv-worker.md` CLD1): the clone drain's final transaction gives the
 group back with its repair. A deleting pool is refused by the same calls,
 by the rule of `service Gateway` — RPC specifications, and its drain
@@ -3299,9 +3313,9 @@ CN19), and no failover or other reaction runs (`dnv-worker.md` AR3).
 Second, a worker's repair always takes a fresh new leg, and may take one
 while its group is at the retired-leg bound. Third, the finish of a
 worker's repair at that bound gives back the group's oldest retired leg
-(FinishRepair). The other calls take a pool at every level and a repair of
-either kind, so that an operator in charge at a level where reactions stop
-can still finish, abort or cancel any repair.
+(FinishRepair). The other calls that address a repair take a pool at
+every level and a repair of either kind, so that an operator in charge at a
+level where reactions stop can still finish, abort or cancel any repair.
 
 **CreateRepair** — inputs `rep_name`, `grp_id`, `bad_leg_id_list`, and
 for the new leg either `retired_leg_id`, a retired leg of the group, or,
@@ -3336,10 +3350,10 @@ fresh new leg: `RESOURCE_EXHAUSTED` when the group holds
 message saying to delete one (Retired legs), or when no DN is a candidate
 (Per-operation allocation). A worker's repair takes its fresh new leg at
 that bound too: the worker cannot wait for an operator to free room, and
-its finish gives back the group's oldest retired leg (FinishRepair). The
-gateway sees no report, so the group's row cannot gate an operator's
-create: a repair of a group whose array does not run waits in CREATED
-until it runs, and the operator aborts it if they change their mind
+its finish gives back the group's oldest retired leg (FinishRepair).
+`CreateRepair` reads no report, so the group's row cannot gate an
+operator's create: a repair of a group whose array does not run waits in
+CREATED until it runs, and the operator aborts it if they change their mind
 (Repair).
 
 Action. A new leg from a retired leg allocates nothing: the retired leg's
@@ -3377,9 +3391,16 @@ bad leg as a `RetiredLeg` under its own leg id, with its side as it is,
 the group's id, its `leg_idx`, the repair's parent and the time as its
 `retired_epoch`, and lists it in the group's and the pool's
 `retired_leg_id_list`; deletes the `Repair` and its `repair_name_list`
-entry; clears the group's `rep_name`; bumps `SpRev`. The bad leg's side
-stays on its DN, in its `side_ptr_list`, with its extents. For a worker's
-repair whose group holds `MaxRetiredLegPerGrp` retired legs, the same STM
+entry; clears the group's `rep_name`, and its forced-start mark when the
+mark names the bad leg, which the finish retires; bumps `SpRev`. The bad
+leg's side stays on its DN, in its `side_ptr_list`, with its extents.
+Reason for the mark: one that names a leg the forced start no longer keeps
+(Repair, Forced start) can never be acted on, and while the group's array
+does not run no report clears it, so it would be the group's error on every
+pass and hold leg repair off the group (`dnv-worker.md` AR8) until the
+operator withdrew it; a mark that names the new leg stays, the leg keeping
+its id in its new place. For a worker's repair whose group holds
+`MaxRetiredLegPerGrp` retired legs, the same STM
 first gives back the group's oldest retired leg, the one with the
 smallest `retired_epoch` and, among equal times, the smallest leg id,
 chosen inside the transaction from the records the group lists, so the
@@ -3405,8 +3426,9 @@ being deleted. Action: STM: a new leg taken from a retired leg goes back
 as that retired leg, with the `retired_epoch` the repair kept, its own
 `leg_idx`, its side as it is now and the repair's parent, listed again in
 the group's and the pool's lists — a cancel never destroys the kept copy,
-though md may have written on it while it was the repair's new leg
-(Repair); a fresh new leg's side gives its DN the group's `ext_cnt` and
+though md may have written on it, and a forced start may have zeroed its
+superblock, while it was the repair's new leg (Repair); a fresh new leg's
+side gives its DN the group's `ext_cnt` and
 its pointer back, with the DN's capacity key and `DnRev`; the `Repair` and
 its list entry go, the group's `rep_name` is cleared, and `SpRev` is
 bumped. Reply `rep_id`.
@@ -3414,13 +3436,76 @@ bumped. Reply `rep_id`.
 **TryToAbortRepair** — Errors: `NOT_FOUND` for a name not in
 `repair_name_list`; `FAILED_PRECONDITION` when the group's clone is being
 deleted, and for a stage other than `REP_STAGE_CREATED`, naming the stage:
-a started copy has no way back, and an aborted repair is aborted. Action:
-STM: set `try_to_abort` and bump `SpRev`; the fan-out carries the flag to
-the cntlrs, and the primary's answer moves the repair to ABORTED, or to
-STARTED when it added the new leg first (Repair). A CREATED repair whose
-flag is already set is answered OK with no write and no bump, a token the
-request carried still being checked first (`gateway.md` GW6). Reply
-`rep_id`.
+a started copy has no way back, and an aborted repair is aborted;
+`FAILED_PRECONDITION` while the group's forced-start mark names the
+repair's new leg. Reason for the mark: the flag takes that leg out of the
+members the forced start keeps (Repair, Forced start), and a forced start
+from it zeroes the other members before its assembly, so once an assembly
+has failed that leg can be the group's one full member, which no mark could
+name after the flag; the operator withdraws the mark with
+`ForceStartGroup`'s cancel first, and an abort that withdrew it as a side
+effect would leave the group with no member to start it from (Known
+limits). Action: STM: set `try_to_abort` and bump `SpRev`; the fan-out
+carries the flag to the cntlrs, and the primary's answer moves the repair to
+ABORTED, or to STARTED when it added the new leg first (Repair). A CREATED
+repair whose flag is already set is answered OK with no write and no bump, a
+token the request carried still being checked first (`gateway.md` GW6).
+Reply `rep_id`.
+
+**ForceStartGroup** — inputs `grp_id`, `leg_id` and `cancel`: the forced
+start of the group's array from the leg `leg_id` names (Repair, Forced
+start), or, with `cancel`, the withdrawal of the group's mark. Errors, in
+the order a request meets them: `INVALID_ARGUMENT` when `leg_id` is set with
+`cancel`, or zero without it; `FAILED_PRECONDITION` at an `sp_level` at or
+above `SP_LEVEL_NO_REDUND`, where no group array is built, so no primary
+could start one; `INVALID_ARGUMENT` when the pool is `RedundNone`, whose
+groups have no array; `NOT_FOUND` when `grp_id` is in no group of the pool's
+slices or clones; `FAILED_PRECONDITION` when the group's clone is being
+deleted; `NOT_FOUND` when the leg is neither in the group's `leg_list` nor
+the new leg of the group's repair; `FAILED_PRECONDITION` when it is the new
+leg of a repair whose `try_to_abort` is set and that is not
+`REP_STAGE_STARTED`, which takes that leg out of the members the forced
+start keeps (Repair, Forced start); `FAILED_PRECONDITION`
+when it is the bad leg of a `REP_STAGE_STARTED` repair, which the mark may
+not name (Repair, Forced start); `FAILED_PRECONDITION`
+when the pool has no primary cntlr; `FAILED_PRECONDITION` when the
+primary's latest report reads the group's row `RES_STATUS_OK`, its array
+running, when that report holds no row of the group, or when the primary's
+agent does not answer; and
+`FAILED_PRECONDITION` when a write after the call's first read made the leg
+one the mark may not name, as a try-to-abort of the repair whose new leg it
+is or the stage move to STARTED of the repair whose bad leg it is does,
+which the deciding STM checks again (`model.ReasonLegNotNamable`). A
+request with `cancel` meets the first and only the `RedundNone`, group and
+clone refusals after it. Reasons: a forced start is for an array md will
+not start by itself, and the primary never stops an
+array that runs for one; the mark may name a repair's new leg so that an
+operator can take a retired leg back with a repair and start the array from
+it, which turns the loss of a group's latest leg into the restore of an
+older copy. The gateway reads the report with `GetCntlrInfo` outside its
+STMs, between its planning read and its deciding STM (`gateway.md` AG1,
+AG4), as its hydration checks read theirs. A row that reads `OK` refuses,
+and so do a report with no row of the group, a reply with no report among
+them, and an agent that does not answer, since silence about the group
+proves nothing about its array: from a failover's hand-over until the
+reply to its promotion the new primary reports as a standby, with no group
+row, and the fresh primary of a replacement reports nothing yet, while the
+old primary's array may still run; the new primary's node holds no array
+of the group, so a mark would act there at once. A primary that has built
+its groups reports each group's row, so the caller only retries. A row of
+any other status goes on, since the primary waits while its array runs and
+is the guard that sees the node. A cancel names no leg and reads no report,
+so it takes every level and a pool with no primary: a mark that stands acts
+once the level is lowered, so it must be possible to withdraw it where it
+cannot be written. No confirm flag guards the call: its name, and its help in
+`dnvctl`, say what it destroys, as for the delete calls. Action: STM:
+without `cancel`, set the group's `forced_start` to the leg's id and the
+`SpRev` revision the same STM's bump writes, replacing a mark that stands;
+with `cancel`, clear the mark and bump `SpRev`, and answer a group with no
+mark OK with no write and no bump, a token the request carried still being
+checked first (`gateway.md` GW6). The mark rides to every cntlr in its
+group's record, which is why each write bumps `SpRev`. Reply `grp_id`, and
+`revision`, the mark's revision, zero for a cancel.
 
 **GetRepair** — STM read of the `Repair` named; `NOT_FOUND` for a name not
 in `repair_name_list`, and a listed name whose key is missing is `ABORTED`
@@ -3435,7 +3520,9 @@ Reply `name_to_repair`.
 A retired leg is the leg a finished repair replaced (Terminology and object
 model): its side keeps the data the leg held when it left the array, save
 what md wrote on it while it was the new leg of a repair that was then
-cancelled (Repair), so a finish loses nothing. It ends when an operator's
+cancelled, and a forced start's zero of its superblock, when that forced
+start kept it and the leg left before md added it (Repair; Known limits),
+so a finish loses nothing. It ends when an operator's
 repair of its group takes it back as the new leg, when the operator
 deletes it, when the sp worker's retire timer does, when the finish of a
 worker's repair of its group gives it back as the group's oldest retired
@@ -3767,8 +3854,10 @@ block):
   RAID1, a stale md superblock in the meta region would put the group
   assembly, which creates the array clean over legs that carry no
   superblock, in the wrong case ("Make sure all groups are available"),
-  with no `--zero-superblock` escape. Without RAID1 the meta region is the
-  health block alone, but a node's udev and md tools look for a
+  with no `--zero-superblock` escape: the primary zeroes a superblock only
+  in an operator's forced start (Repair, Forced start). Without RAID1 the
+  meta region is the health block alone, but a node's udev and md tools
+  look for a
   superblock there all the same, and one rule for every data side costs
   one block. The first data block is the first block of the md array or,
   without RAID1, of the group device, and for a slice's first data group
@@ -3993,7 +4082,8 @@ nodes).
 
 `CntlrInfo` also carries two maps of fields that are no rows: the
 primary's verdict on each repair, keyed by `rep_id`
-(`rep_id_to_repair_info`), and, keyed by `grp_id` (`grp_id_to_grp_info`),
+(`rep_id_to_repair_info`), with the refusal of a take-back beside it,
+and, keyed by `grp_id` (`grp_id_to_grp_info`),
 whether each group's running array is whole and which legs md holds in
 sync, both only for a group whose row reads `OK`. No health rule reads
 them, so they set no `err_epoch`; the sp worker reads them as fields
@@ -4549,7 +4639,9 @@ The four reactions:
   while its side has been unhealthy for `side_unhealthy`, gets a worker's
   repair (Repair) with a fresh new leg, by an internal `CreateRepair`, while
   the group's array runs, another leg of the group is healthy and held in
-  sync, and the group has no repair. The worker then drives its own repair:
+  sync, the group has no repair, and no forced-start mark stands on it
+  (Repair, Forced start), since the operator is acting on the group then.
+  The worker then drives its own repair:
   it finishes it once the primary has reported it started, tries to abort
   it while it is CREATED when its bad leg reads healthy again or its new leg
   or another leg of the group stays unhealthy on the same clocks, and
@@ -4716,17 +4808,21 @@ accepted.
 
 The primary builds each `RedundMdRaid1` group from the legs that are
 available to it: it creates the array only when every leg of the group is
-available and none carries an md superblock — a leg without one can only
-be a freshly provisioned side, whose meta region Side provisioning
-protocol has zeroed, the superblock check being the evidence the CN
-actually has ([D15]) — and otherwise assembles the array from the legs
+available and none carries an md superblock — a leg without one is a
+freshly provisioned side, whose meta region Side provisioning protocol has
+zeroed, short of a member an operator's forced start zeroed that the member
+reconciliation has not added back yet (Known limits), the superblock check
+being the evidence the CN actually has ([D15]) — and otherwise assembles
+the array from the legs
 that carry a superblock, adding an available leg the array left out, other
 than the bad leg of a CREATED or STARTED repair (Repair), once the array
 runs. The assemble leaves the degraded start to mdadm: a lone
 survivor whose superblock still counts a clean full array is refused, and
 the group is then not available this pass. That refusal is the cross-leg
 half of failover safety ([D16]) — a stale leg cannot be started alone,
-and once both legs are back the event counts pick the newer one. The
+and once both legs are back the event counts pick the newer one. Only an
+operator's forced start overrides that arbitration, from the one leg the
+operator names, and only while its mark stands (Repair, Forced start). The
 cases, the guards around the create, the sysfs read of the members and
 what makes a leg available are `cnagent.md` CN12. The health block (Group
 on-leg layout: meta region, data region, health block) is the ongoing
@@ -4998,10 +5094,11 @@ leg repair creates its own, under a name with the reserved prefix (The
 worker's repairs, below); the primary adds the new leg to the array once
 the conditions below hold, and md copies the data onto it; the finish
 puts the new leg in the bad leg's place and keeps the bad leg as a retired
-leg (Retired legs), whose side holds the data as it was. The control plane reads no agent report, so the
-stage moves come from the sp worker, which reads the primary's; and only
-the worker talks to the cntlrs, so it carries every repair to them. The
-worker moves the stage of every repair and runs the retire timer
+leg (Retired legs), whose side holds the data as it was. The gateway reads
+no report to move a stage, so the stage moves come from the sp worker,
+which reads the primary's; and only the worker talks to the cntlrs, so it
+carries every repair to them. The worker moves the stage of every repair
+and runs the retire timer
 (`dnv-worker.md`, Repairs), and it finishes, cancels and tries to abort
 its own repairs (Automatic reactions; `dnv-worker.md` AR8). The operator
 finishes, cancels and tries to abort an operator's repair, and also a
@@ -5074,15 +5171,42 @@ the other parts rely on this much of them.
   legs of a CREATED or STARTED repair that carry a superblock, and a fresh
   array is created, over the `leg_list` legs alone, only when none of
   either carries one ("Make sure all groups are available"; `cnagent.md`
-  CN12).
+  CN12). A forced start is the one other way an array starts (Forced
+  start, below).
+* The add of a repair's new leg taken from a retired leg compares the
+  leg's md events count with that of the member md holds in sync, both
+  read from their superblocks, and refuses a leg whose count is above, at
+  every stage and in every pass: the leg is not added and the bad leg
+  stays where it is (`cnagent.md` CN12). Reason: such a leg holds newer
+  data than the array, as a leg that left the array before a forced start
+  from an older copy can, and a retired leg keeps its data so that a
+  take-back can use it, so the add refuses the leg rather than have md copy
+  the array over it with no error. The check sits on this add alone: a
+  forced start starts the array from one kept leg and zeroes every other
+  member it keeps but the open repair's bad leg, which is never added while
+  its repair is open and is retired at the finish, so while that repair
+  stands no leg of the `leg_list` the primary adds is newer than its array;
+  the move of the repair to ABORTED ends the open repair with the bad leg
+  still in the `leg_list`, and the primary adds it then as any member,
+  with no check, whether or not a cancel follows (Known limits). The
+  members a forced start zeroes include a repair's new leg taken from a
+  retired leg, so the forced start, unlike the add, loses what such a leg
+  held (Known limits).
 * A step of a repair that fails is re-driven by the primary's read-only
   verdict, which names the member a converge would add or remove for the
   repair, so the sp worker sends the syncup again (`cnagent.md` CN30).
 
 **What the primary reports.** Beside its rows (Live-state reporting) the
 primary reports its verdict on each repair, *started* or *abort confirmed*
-(The abort protocol, above), keyed by `rep_id`. A verdict comes only from
-a running array whose group row reads `OK`; which group gives which
+(The abort protocol, above), keyed by `rep_id`, and, for a repair whose
+new leg it refuses to add (What the primary does), the refusal, a text for
+people that is empty when there is none: the sp worker logs it on a
+CREATED repair and moves no stage on it (`dnv-worker.md` AR11). The refusal
+is no row and sets no row to error. Reason: an error row would set the cntlr's
+health epoch and fail the primary over for a refusal the next primary repeats;
+the operator
+aborts and cancels the repair instead (Known limits). A verdict comes only
+from a running array whose group row reads `OK`; which group gives which
 verdict, and when, is `cnagent.md` CN28's. Reason: that a new leg is no
 member of an array that does not run proves nothing about whether md
 wrote to it; and no record keeps the revision at which a repair was
@@ -5094,8 +5218,8 @@ From the same arrays the primary reports, per group, whether the array is
 whole and which legs md holds in sync (`cnagent.md` CN28). Reason: the
 group row's text says degraded and how far a copy has come, but that text
 is for people and the suites, and the worker reads fields: the retire
-timer the first (`dnv-worker.md` AR12), the healthy-leg test the second
-(`dnv-worker.md` AR8).
+timer the first (`dnv-worker.md` AR12), the healthy-leg test and the
+forced-start clear the second (`dnv-worker.md` AR8, AR13).
 
 **What the sp worker does.** Its leg repair creates the worker's repairs
 and finishes, cancels and tries to abort them, each step a reaction
@@ -5115,7 +5239,8 @@ retired sides: a disk node's sweep removes what its wanted set lacks, so a
 side nobody names is a leftover, and exports kept current make a reuse
 instant. Where the stage moves and the retire timer sit in the worker's
 pass, at which levels they run, and that neither is a reaction or the
-pass's one action, are `dnv-worker.md` AR2, AR3, AR11 and AR12's. The
+pass's one action, are `dnv-worker.md` AR2, AR3, AR11 and AR12's, and the
+same of the forced-start clear (Forced start, below) is AR13's. The
 monitor of a side or a leg writes to the record that owns the side and
 starts afresh when the side moves to another record, at a finish, a cancel
 or the reuse of a retired leg; the coordinator's own verdicts on new legs,
@@ -5136,26 +5261,126 @@ its DN. Reason: the bad leg's data is kept, so the finish loses nothing,
 even while md still copies onto the new leg. The finish of a worker's
 repair whose group is at the retired-leg bound first gives back the
 group's oldest retired leg, so the group keeps its newer retired copies
-(Repairs, FinishRepair). A retired leg's md event
-count is behind the array's, since at the least its own failure or
-removal moves the count, and the array's superblocks record it as failed
-or without a place; an assembly takes a member's role from the freshest
-superblock when the member's count is behind (`cnagent.md` CN12), so one
-that is handed a retired leg never takes it as in sync. This holds for
-a leg a finish retires and for one a cancel gives back alike.
+(Repairs, FinishRepair). A retired leg that left the array that runs has
+an md event count behind that array's, since at the least its own failure
+or removal moves the count, and the array's superblocks record it as
+failed or without a place; an assembly takes a member's role from the
+freshest superblock when the member's count is behind (`cnagent.md` CN12),
+so one that is handed such a leg never takes it as in sync. This holds for
+a leg a finish retires and for one a cancel gives back alike. A forced
+start ends that chain: a leg that left the array before it can hold newer
+data and a higher count than the array it starts, and the primary refuses
+to add one whose count is above (What the primary does). The forced start
+gives the array a new identity (Forced start, below), so such a leg is no
+member of the new array at all, and mdadm refuses an assembly handed it
+beside the new array's members (Known limits).
 
 **Cancel.** `CancelRepair` gives a fresh new leg's side back to its DN and
 puts a new leg taken from a retired leg back as that retired leg, with its
 old time (Repairs). Reason: a cancel must never destroy the kept copy. A
 retired leg that the primary added to md before the abort flag reached it,
 and that md then held without a place, comes back with the array's
-superblock and maybe part of a copy on it, no longer the copy it was when
-it left the array (Known limits).
+superblock and maybe part of a copy on it, and one a forced start that
+named another member zeroed before the abort flag reached the primary comes
+back with no superblock, so neither is the copy it was when it left the
+array (Known limits).
 
 **Reuse.** An operator's repair may take a retired leg of its own group as
 its new leg; a worker's repair always takes a fresh one (Repairs). md
 catches it up from the write-intent bitmap only while the array has stayed
 degraded since the leg left; otherwise md copies it whole (Known limits).
+A leg that left the array before a forced start is of the array's old
+history: the primary refuses its add while its events count is above that
+of the member md holds in sync, and otherwise md copies it whole, since the
+forced start gave the array a new identity (What the primary does; Known
+limits).
+
+**Forced start.** `ForceStartGroup` writes the group's forced-start mark,
+the leg it names and the `SpRev` revision its write committed, in the
+group's record, so the fan-out hands it to every cntlr; a new primary after
+a failover or a cntlr replacement acts on it as it finds its own node, which
+holds no array of the group until that primary builds one (Known limits). A
+primary acts on a mark only from a request a `SyncupCntlr` has delivered
+since its agent started, never from the copy its agent stored, and its
+agent's read asks the worker for that `SyncupCntlr` (`cnagent.md` CN12,
+CN30). Reason: the stored copy
+can carry a mark the worker has cleared since, when the fan-out of the
+clear did not reach the agent, and a start from that mark's leg, stale by
+then, would zero the member with the newest data. While the mark stands and
+no array of the group runs, the primary starts the array from the named leg
+alone: it stops a group array that does not run, zeroes the superblock of
+every other member the forced start keeps, the open repair's bad leg
+excepted, assembles the array from the named leg with mdadm's run and force
+flags, giving it a new identity, and its member reconciliation then adds
+the zeroed members as fresh members, which md copies whole. When mdadm
+wrote the new identity but could not start the leg, the primary starts it
+once more with the leg's bad-block log dropped, keeping the identity that
+first run wrote, so the array never starts under its old identity. A named
+leg that is not available or not a full member of the old array, or another
+member that is not available, is the group's error for the pass, before
+anything is zeroed. An array that runs the primary never stops: the mark
+waits. The steps, their order and their error rows are `cnagent.md` CN12's.
+The members the forced start keeps are the group's `leg_list` legs and the
+new legs of its open repair but those of a CREATED repair whose abort flag
+is set, the members the group keeps but the new legs the abort takes out of
+the group (`cnagent.md` CN12): the mark may not name a new leg of a CREATED
+repair whose flag is set, and nothing zeroes one. A STARTED repair's new leg
+is kept whatever the flag says. Reason: no abort takes a STARTED repair
+back, and its finish makes that leg a `leg_list` leg, so one left as it is
+would keep the superblock of the array's old identity beside the named
+leg's new one, which has mdadm refuse a later assembly handed both (Known
+limits), and the take-back check would refuse the add of one taken from a
+retired leg for the old identity's events count, which a half-copied leg
+carries though it holds no data newer than the array. The open repair's
+bad leg is the one the repair replaces, so no forced start that names another
+leg waits for it, and none zeroes it. The mark may name it while the repair is
+CREATED, but not once the repair is STARTED, and the primary refuses, as
+the group's error, a mark written before that stage move that names it.
+Reason: a STARTED repair's bad leg left the array before md began copying
+onto the new leg, so it is older than the array, and the finish, which the
+drive step makes of a worker's repair at its next pass where reactions run
+(`dnv-worker.md` AR8), retires it, so an array started from it alone would
+be left with no full member the group keeps. Reasons: the assembly is
+handed the named leg alone, so the array starts from that leg's data
+whatever the others hold; the zero makes each later add of another member a
+fresh add, which md copies whole from the array, so none comes back in sync
+with data of its own, and it keeps a member the pass zeroed but has not
+added yet out of a later assembly's candidates, where its superblock of the
+old identity beside the named leg's new one would have mdadm refuse the
+whole assembly (Known limits), at the price of a full copy of each, which a
+half-copied leg needed anyway; zeroing before the assembly keeps every
+pass whole, since a member zeroed in a pass that then ends comes back blank
+and is added fresh; and the new identity
+keeps md from taking a leg of the old history back from the bitmap as in
+sync while it holds other data. The sp worker clears the mark once the
+current primary's report, of an observation made at the mark's revision or
+later, reads the group's row `OK` with a leg md holds in sync whose own row
+in that report reads `OK`, the named leg or another, at every `sp_level`
+(`dnv-worker.md` AR13), and its clear raises `SpRev`, so every cntlr is
+handed the group without the mark.
+Reasons: a mark that stayed would start the array again from the named leg
+at the group's next fault, from a leg that may be stale by then; an array
+that runs on a member md holds in sync on a leg that serves needs no forced
+start, whether the named leg died after the start or the mark was written
+over a running array, and a mark left over it would also hold leg repair
+off the group (`dnv-worker.md` AR8); the leg's own row must read `OK`, the
+named leg's too, since md keeps a dead member in sync while it retries a
+copy whose only source died, and the named leg is that member when the
+mark is written while it is dead (Known limits); the revision keeps a
+report of an observation before the write from clearing it; and the
+operator uses the forced start at the
+levels where reactions stop, where no failover runs while the group is
+down. `FinishRepair` clears a mark that names the bad leg it retires, and
+`TryToAbortRepair` is refused while the mark names the repair's new leg,
+which its flag would take out of the members the forced start keeps
+(Repairs). A forced start loses whatever
+only the other members held: it is the operator's call for an array md will
+not start by itself, as when the leg with the latest data died while md
+copied onto a repair's new leg, a mark written while that leg is still dead
+starting the array from it once it is back (Known limits); and when that leg
+is gone for good, a repair that takes a retired leg back gives the mark a
+leg with an older full copy to start from, which restores that group alone
+and not the pool (Known limits).
 
 **The retire timer.** The sp worker deletes a retired leg
 (`DeleteRetiredLeg`) once it has aged on a whole, healthy group that has
@@ -5346,15 +5571,15 @@ does not run (`dnv-worker.md` AR8): where the one leg left is one mdadm
 will not start alone, the dead leg stays in the `leg_list`, so the group can
 be assembled again once it comes back, and the clone waits stopped
 meanwhile (Known limits). A repair created in one of two windows can still
-leave the group down until its legs return in a way md accepts: when the
-leg that stays has just died and neither its health epoch, nor the group's
-row, nor the legs md holds in sync show it yet, or when the report that
-holds a leg in sync predates a copy onto that leg (`dnv-worker.md`, Known
-limits: "The gate can read a row that is about to turn", "A group whose
-only in-sync leg dies while md copies onto a finished repair's new leg
-stays down" and "The in-sync half of the healthy-leg test reads md, which
-learns of a death only from IO"). A dm-clone leaves read-write mode when an
-operation on its metadata device fails; in read-only or failed metadata mode
+leave the group down until its legs return in a way md accepts or an
+operator force-starts it (Repair, Forced start): when the leg that stays
+has just died and neither its health epoch, nor the group's row, nor the
+legs md holds in sync show it yet, or when the report that holds a leg in
+sync predates a copy onto that leg (`dnv-worker.md`, Known limits: "The
+gate can read a row that is about to turn" and "The in-sync half of the
+healthy-leg test reads md, which learns of a death only from IO"). A
+dm-clone leaves read-write mode when an operation on its metadata device
+fails; in read-only or failed metadata mode
 it reads `RES_STATUS_ERROR` and serves no namespace, and nothing the agent
 does takes it back (`cnagent.md` CN18): the error moves the primary role at
 its threshold, and the new primary assembles the group and creates a
@@ -6074,7 +6299,9 @@ document and the component documents cite it by its id.
   What a recycled extent holds stays in a leg's data region, where no pool
   reads it, as long as every copy below the pool carries each block the
   pool has written: a migration skips only regions no pool block maps,
-  which is why Migration says when a caller may read its leg bitmap. Root
+  which is why Migration says when a caller may read its leg bitmap, and a
+  forced start from an older copy breaks the condition for its group
+  (Known limits). Root
   on a node can read those bytes from the raw leg, as it can read anything
   on its node, and the promise does not cover that (Known limits). Zeroing
   serves only the places where the design assumes zeros: a slice's meta
@@ -6487,7 +6714,14 @@ that component's document and only pointed to here.
   the stale one; on the lab's mdadm the cn suite asserts the refusal and
   that a block only the newer leg holds reads as that leg's
   (`cnagent_integtest.md`, Cases), and nothing checks the mdadm a deployed
-  node runs.
+  node runs. The forced start rests on md behaviour pinned in the lab
+  only as well (Repair, Forced start): an assembly from one member with
+  mdadm's run and force flags under a new identity, a run that writes the
+  new identity into the member before the kernel takes it, the role, the
+  recovery offset, the events count and the array's identity the examine
+  of a member prints, a
+  zeroed member that md adds as a fresh one, and an assembly that refuses
+  members of two identities (`cnagent.md` CN12).
 * **An md check of a RAID1 data group or clone meta group counts
   mismatches.** The legs of a data group or of a clone meta group are
   never zeroed past their first data block, so they may differ wherever
@@ -6496,12 +6730,13 @@ that component's document and only pointed to here.
   mismatches there. They are harmless, since neither the pool nor the
   dm-clone reads a block it has not written through the array
   (`cnagent.md` CN12), and dnv runs no check of its own.
-* **A repair waits while its array does not run or its bad leg serves.** The
-  gateway sees no report, so `CreateRepair` accepts a repair of a group
-  whose array is stopped or broken; such a repair, and one whose pool is
-  raised to a level that builds no group device, waits in CREATED until the
-  array runs, and an abort of it is confirmed only then, since only a
-  running array gives a verdict (Repair). A repair whose bad leg md still
+* **A repair waits while its array does not run or its bad leg serves.**
+  `CreateRepair` reads no report, so it accepts a repair of a group whose
+  array is stopped or broken; such a repair, and one whose pool is raised
+  to a level that builds no group device, waits in CREATED until the array
+  runs, which an operator's forced start can bring about (Repair, Forced
+  start), and an abort of it is confirmed only then, since only a running
+  array gives a verdict (Repair). A repair whose bad leg md still
   holds in its place, serving with an `OK` leg row, waits in CREATED too,
   until it is aborted: an operator's by the operator, and a worker's by the
   worker once the bad leg's health epoch clears (`dnv-worker.md` AR8). A
@@ -6517,6 +6752,133 @@ that component's document and only pointed to here.
   bitmap only while the array has stayed degraded since the member left;
   when the array has been whole since, md copies a retired leg that a
   repair takes back as it copies a fresh leg (Repair).
+* **After a forced start, a take-back of a leg of the old history can
+  lose data with no error.** The primary refuses to add a retired leg
+  whose md events count is above that of the member md holds in sync
+  (Repair). Once the restored array's count has passed the leg's, the
+  refusal does not hold the leg back: since the forced start gave the array
+  a new identity (Repair, Forced start), md adds the leg as a fresh member
+  and copies it whole, and the data only that leg held is lost.
+* **After a forced start from another leg, the open repair's bad leg can
+  keep the group down.** A forced start that names another leg neither
+  zeroes nor adds the bad leg (Repair, Forced start), so it keeps the
+  superblock of the array's old identity, and mdadm refuses
+  an assembly handed it beside the restored array's members. A
+  failover before the repair's finish, while that leg is available, leaves
+  the group down until another forced start or the finish, which retires
+  the leg.
+* **After a forced start, an abort can copy the array over the bad leg.**
+  The open repair's bad leg can hold data newer than the restored array, as
+  when it is the leg that died last, and a forced start from another leg
+  leaves it as it is (Repair, Forced start). Once its repair moves to
+  ABORTED, which the primary's confirmation of the abort brings at every
+  level (`dnv-worker.md` AR11), the open repair has ended and the leg is a
+  `leg_list` leg like any other, whether or not a cancel follows: the
+  primary adds it to the running array with no events check, as a fresh
+  member under the array's new identity, which md copies whole, and what
+  only that leg held is lost with no error.
+* **After a forced start, a refused take-back can keep the group down.** A
+  repair's new leg taken from a retired leg that left the array before a
+  forced start keeps the superblock of the array's old identity until md
+  adds it, and the primary refuses that add while the leg's md events count
+  is above that of the member md holds in sync (Repair, What the primary
+  does), so a leg it refuses stays the new leg of
+  a CREATED repair, with that superblock, until the operator aborts and
+  cancels the repair. An assembly takes the new legs of a CREATED repair
+  that carry a superblock, whatever its abort flag (Repair, What the primary
+  does), and mdadm refuses an assembly handed members of two identities, so,
+  while that repair stands and the leg is available, a failover, or a level
+  raised to where no group array is built and lowered again, leaves the
+  group down. Its abort is then not confirmed, since only a running array
+  gives a verdict, so no cancel can come, and another forced start brings
+  the array back. That forced start must come after the abort flag is set:
+  until then the new leg is a member the forced start keeps, which it zeroes
+  and md copies the array over, so the newer data the refusal kept is lost;
+  once the flag is set, the forced start leaves the leg as it is, the
+  running array confirms the abort, and the cancel gives the leg back as the
+  retired leg it was.
+* **A forced start that ends after its zero can leave legs that read as
+  fresh.** The forced start zeroes the superblock of every other member it
+  keeps before it assembles the array (Repair, Forced start), and nothing
+  but the add that follows marks such a member as one that holds data: its
+  data region stays as it was. When the mark goes before a start, as by the
+  operator's cancel, or a zeroed member dies before its add and comes back
+  while the array does not run, the primary reads that member as a freshly
+  provisioned side ("Make sure all groups are available"). Once every
+  `leg_list` leg of the group reads so, as when its other leg is one an
+  earlier forced start zeroed and that was never added back, while no leg
+  that carries a superblock is available, the primary creates the array
+  over them with no copy, and the array serves a mix of their data with no
+  error (`cnagent.md` CN12).
+* **An abort after a forced start from a repair's new leg can leave no
+  member to start the group from.** A forced start from a repair's new leg
+  zeroes the group's other members before its assembly (Repair, Forced
+  start), so after an assembly that fails that new leg can be the group's
+  one full member. `TryToAbortRepair` is refused while the mark names it
+  (Repairs), but once the operator cancels the mark and aborts the repair,
+  the flag takes the leg out of the members the forced start keeps, so no
+  mark may name it, the zeroed members read as no full member, and the
+  plain assembly does not start the array from that leg alone while its
+  superblock counts another member as working. While the repair's bad leg
+  is gone too, nothing starts the array, the abort is never confirmed,
+  since only a running array gives a verdict, so no cancel can come, and the
+  group stays down with its data on that leg, reachable only by hand with
+  mdadm.
+* **A forced start waits on a primary whose layers above hold the broken
+  array.** At a level that builds thin pools, a slice's group array that
+  does not run is held open by the devices its slice's pool is built over,
+  and at a level that builds clones, a clone meta group's array is held
+  open by the clone's dm-clone, which serves on or is left as it is over a
+  group that is not ready (`cnagent.md` CN18); so the primary cannot stop
+  it and the forced start waits on that primary until a failover or a cntlr
+  replacement moves the role or the level stops the pools, or the clones
+  (`cnagent.md` CN12). A
+  level where reactions stop lets the primary stop such an array, and
+  keeps failovers off while the group is down.
+* **A forced-start mark can stand over an array that runs.** The
+  gateway's read of the primary's report is of its latest observation
+  (Live-state reporting): a stale `OK` row refuses the call, which the
+  operator retries, and a row of another status, stale or not — a read
+  that did not answer, a member change the converge could not make, the
+  in-sync guard (`cnagent.md` CN12) — lets a mark be written for an array
+  that runs, which the primary leaves waiting. The sp worker clears such a
+  mark at the first report of the mark's revision or later that reads the
+  group's row `OK` with a leg md holds in sync whose own leg row in that
+  report reads `OK` (`dnv-worker.md` AR13), so an
+  operator who still wants the start calls again once the array is down;
+  until then, or the operator's cancel, the mark
+  holds leg repair off the group (`dnv-worker.md` AR8), and a mark that
+  meets neither acts once the array no longer runs, starting the array
+  from the named leg, which may be stale by then (Repairs,
+  `ForceStartGroup`; Repair, Forced start). A failover or a cntlr
+  replacement (`dnv-worker.md` AR5, AR7) while such a mark stands hands it
+  to a new primary whose node holds no array of the group, which acts on it
+  at its first converge, though the old primary's array ran.
+* **A forced start from a leg that came back before its array was stopped
+  can serve IO errors.** While md copies from the one leg it holds in sync
+  and that leg dies, md records each region it cannot read as bad on every
+  member it has not failed, that leg included; when the leg comes back
+  before the broken array is stopped, a superblock write, the stop's among
+  them, writes the record into its superblock, and a forced start from it
+  takes the record in, so the array
+  serves IO errors over those regions, though the leg holds their data,
+  and md marks them bad on each member it copies too (`cnagent.md`, Known
+  limits). A mark written while that leg is still dead has the primary
+  stop the array then, which leaves the leg's superblock as it was, and the
+  start waits for the leg (Repair, Forced start).
+* **A forced start from an older copy restores one group, not the pool.**
+  Each group is an array of its own under the pool, and the pool's meta
+  group, which holds dm-thin's metadata, is apart from its data groups
+  (`cnagent.md` CN13), so a forced start leaves the pool's other groups as
+  they are. After a data group starts from a leg that left its array
+  earlier, such as a retired leg taken back, each block the pool rewrote
+  in that group since the leg left reads the leg's older bytes, and each
+  block the pool first mapped there since reads what the leg holds at that
+  place, which the pool never wrote there and which may be another pool's
+  bytes ([D15]): the copy below the pool no longer carries every block the
+  pool has written. A meta group started from an older copy gives the
+  other mix inside the pool, older mappings over data groups that kept
+  their newer writes. Neither reads as an error (Repair, Forced start).
 * **A retired leg that a cancel gives back may not be the copy it was.**
   When a repair takes a retired leg back, the primary can add it to md
   before the abort flag reaches the primary: md writes the array's
@@ -6526,13 +6888,25 @@ that component's document and only pointed to here.
   again as that retired leg with its old time. Its side then holds the
   array's superblock, and maybe the array's newer data where md copied, in
   place of the data the leg held when it left the array; its record does
-  not say so (Repair).
+  not say so (Repair). A forced start that names another member before the
+  repair's abort flag reaches the primary zeroes the taken-back leg's
+  superblock
+  before its assembly (Repair, Forced start); when that pass ends before md
+  adds the leg, and the repair is then aborted and cancelled, the leg comes
+  back with its data as it was but no superblock, so a later take-back of it
+  is added with no refusal and copied whole, and a forced start from it is
+  refused, since it reads as no full member.
 * **A whole new leg starts its array alone only where md recorded the
   other legs as failed.** When both `leg_list` legs of a group are dead,
   an assembly starts the array degraded from a repair's new leg that holds
   the whole data only if md recorded those legs as failed; otherwise the
   group waits for its legs, as a group whose survivor mdadm will not start
-  alone does ("Make sure all groups are available"; `cnagent.md` CN12).
+  alone does ("Make sure all groups are available"; `cnagent.md` CN12). An
+  operator's forced start from that new leg waits as well, for the
+  `leg_list` leg that is not the repair's bad leg, since it starts the
+  array only while every other member it keeps is available; once that leg
+  is back, it can start the array from the new leg where md will not
+  (Repair, Forced start).
 * **Retired legs keep their extents until a whole group lets them go.** A
   retired side keeps its extents and its place in its DN's
   `side_ptr_list`, and the retire timer deletes one only on a group whose
@@ -6591,12 +6965,13 @@ that component's document and only pointed to here.
   and the primary's latest report holds it in sync, nor while the group's
   array does not run (`dnv-worker.md` AR8), so the dead legs stay in that
   `leg_list`; where a worker's repair was finished while md still copied
-  onto its new leg and the leg md held in sync then died, the group stays
-  down until its legs return in a way md accepts (`dnv-worker.md`, Known
-  limits). The clone waits until enough
-  of them are back for a cntlr to assemble the group — at least one, and
-  more where mdadm will not start the one alone — and nothing the control
-  plane does on its own brings it back sooner. The source is untouched,
+  onto its new leg and the leg md held in sync then died, md will not
+  start the group from its legs alone (`dnv-worker.md`, Known limits). The
+  clone waits until enough of them are back for a cntlr to assemble the
+  group — at least one, and more where mdadm will not start the one alone
+  — or until an operator force-starts the group from a leg that holds a
+  full copy (Repair, Forced start), and nothing the control plane does on
+  its own brings it back sooner. The source is untouched,
   and the operator may delete the clone with `force` instead. A dm-clone
   that an operation failing on its metadata device takes out of read-write
   mode reads `RES_STATUS_ERROR` until the role moves, while a dm-clone

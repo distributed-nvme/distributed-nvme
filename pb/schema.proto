@@ -165,6 +165,24 @@ message Group {
     // SpConf.retired_leg_id_list with it, so an operation reads a group's
     // retired legs without a scan. Appended, never renumbered.
     repeated uint64 retired_leg_id_list = 8;
+    // An operator's forced start of the group's array, unset while none
+    // stands: ForceStartGroup writes it and withdraws it on a cancel, the sp
+    // worker clears it once the primary reports the array running with a
+    // member in sync on a leg whose own row reads OK (dnv-worker.md AR13),
+    // FinishRepair clears one that names the bad leg it retires, and
+    // TryToAbortRepair is refused while one names the repair's new leg. It
+    // rides to every cntlr in the group's record (architecture.md, Repair).
+    // Appended, never renumbered.
+    ForcedStart forced_start = 9;
+}
+
+// The mark of a forced start (Group.forced_start): the leg the primary
+// starts the group's array from alone, a leg of its leg_list or the new leg
+// of its open repair, and the SpRev revision the write of the mark committed,
+// from which on a report can clear it (dnv-worker.md AR13).
+message ForcedStart {
+    uint64 leg_id = 1;
+    uint64 revision = 2;
 }
 
 message Namespace {
@@ -341,6 +359,13 @@ message CntlrInfo {
     message RepairInfo {
         bool started = 1;
         bool abort_confirmed = 2;
+        // Why the primary does not add the repair's new leg, taken from a
+        // retired leg, empty when nothing holds the add back: its md events
+        // count is above that of a member md holds in sync, so it holds
+        // newer data than the array (cnagent.md CN12). Text for people and
+        // for the sp worker's log; no rule reads it. Appended, never
+        // renumbered.
+        string refusal = 3;
     }
     // What the primary reads of one group's running array: whether it is
     // whole, every place holding a member in sync, and the leg ids, of
@@ -1542,6 +1567,24 @@ message DeleteRetiredLegReply {
     uint64 leg_id = 1;
 }
 
+message ForceStartGroupRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    uint64 grp_id = 4;
+    // The leg the group's array starts from; zero with cancel.
+    uint64 leg_id = 5;
+    // Withdraw the group's mark instead of writing one.
+    bool cancel = 6;
+}
+
+message ForceStartGroupReply {
+    uint64 grp_id = 1;
+    // The revision the mark carries (ForcedStart.revision); zero for a
+    // cancel.
+    uint64 revision = 2;
+}
+
 message GetThinDeviceBitmapRequest {
     string cluster_name = 1;
     string sp_name = 2;
@@ -1644,6 +1687,7 @@ service Gateway {
     rpc ListRepairs(ListRepairsRequest) returns (ListRepairsReply) {}
     rpc ListRetiredLegs(ListRetiredLegsRequest) returns (ListRetiredLegsReply) {}
     rpc DeleteRetiredLeg(DeleteRetiredLegRequest) returns (DeleteRetiredLegReply) {}
+    rpc ForceStartGroup(ForceStartGroupRequest) returns (ForceStartGroupReply) {}
 
     rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns (GetThinDeviceBitmapReply) {}
     rpc GetLegBitmap(GetLegBitmapRequest) returns (GetLegBitmapReply) {}

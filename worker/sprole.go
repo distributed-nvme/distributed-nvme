@@ -16,7 +16,7 @@
 // rows — which the PRIMARY cntlr reports but which are written on the record
 // that holds the leg, a SLICE, a clone's clone meta group or a repair whose
 // new leg it is, so only the coordinator knows where they go (HL2) — and the
-// reaction pass (AR1-AR12).
+// reaction pass (AR1-AR13).
 package worker
 
 import (
@@ -621,7 +621,7 @@ type spWorker struct {
 	// reaction pass each refused on, so a steady bad conf costs one Error
 	// record rather than one per tick.
 	confRefusal spConfRefusal
-	// react is the reaction half of the coordinator (AR1-AR12): the model
+	// react is the reaction half of the coordinator (AR1-AR13): the model
 	// surface of the automatic reactions, the little memo their log records
 	// need, and the records AR5 and AR7 decide by, of the last failover and the
 	// last replacement of a primary it applied (reaction.go).

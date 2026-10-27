@@ -412,7 +412,10 @@ func (b *widestBuilder) strLen(
 		}
 		b.used[in] = true
 		return n
-	case "ResInfo.details", "AgentReply.details":
+	case "ResInfo.details", "AgentReply.details",
+		"CntlrInfo.RepairInfo.refusal":
+		// A repair verdict's refusal is agent text beside the rows, which
+		// no limit cuts either (cnagent.md CN12).
 		return b.rowText
 	}
 	if n, ok := b.strLens[fd.FullName()]; ok {

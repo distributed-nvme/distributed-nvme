@@ -15,8 +15,11 @@ import (
 // that array's number (mdDevNo); the entry of each NVMe subsystem a lookup
 // uses — its NQN once more, its namespace and its controllers
 // (lookupSubsys); the own read of a dm name that a partial info listing, or
-// the table listing, lacks (cnReading); and the fresh `dmsetup info` that
-// confirms a device gone after its own status or table read failed. No
+// the table listing, lacks (cnReading); the fresh `dmsetup info` that
+// confirms a device gone after its own status or table read failed; and the
+// take-back check's `mdadm --examine` of a repair's new leg taken from a
+// retired leg and of the member that keeps the data (takeBackStep, through
+// putBackNames), which reads those member devices. No
 // function here creates, changes or removes an object of the node, as a
 // cntlr's background read must not (CN23; dnagent.md SH29). A thin pool's
 // `dmsetup status` carries the noflush flag and commits nothing, though it
@@ -87,9 +90,10 @@ func (s *CnAgentServer) probeCntlr(
 			status, details, detail := s.probeGroup(ctx, plan, gp)
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
-			putBack = append(putBack, s.putBackNames(
-				ctx, plan, gp, detail, info.LegIdToLeg)...)
-			reportGrpReading(info, gp, detail)
+			names, refusal := s.putBackNames(
+				ctx, plan, gp, detail, info.LegIdToLeg)
+			putBack = append(putBack, names...)
+			reportGrpReading(info, gp, detail, refusal)
 		case plan.primary:
 			info.GrpIdToMdRaid[gp.grpId] = t.Missing(
 				key, gp.resName, detailsSpLevel)

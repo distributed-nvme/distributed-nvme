@@ -216,9 +216,9 @@ CT3. **Revision tokens.** A request that carries a token carries one of
 three messages: `dn_rev` on `DeleteDiskNode` and `UpdateDiskNodeDisabled`,
 `cn_rev` on their two controller-node mirrors, and `sp_rev` on every
 SP-scoped mutator — every create, delete, update, append, finish, cancel
-and abort under a pool, and `GrowSlice`. Reads carry none; an
-operator reads the tokens with `dn get`, `cn get` and `sp get`. dnvctl
-sends exactly what was typed:
+and abort under a pool, `GrowSlice` and `ForceStartGroup`. Reads carry
+none; an operator reads the tokens with `dn get`, `cn get` and `sp get`.
+dnvctl sends exactly what was typed:
 
 * `--rev` not given: the token field is absent, a nil message.
 * `--rev` with a value, parsed with Go's base-0 rule, so decimal and
@@ -250,8 +250,8 @@ The check itself — made only when the token message is present — is
 
 **Groups and leaves.** The tree is noun-grouped, "dnvctl <group> <verb>",
 one group per resource — `cluster`, `dn`, `cn`, `sp`, `cntlr`, `td`, `ss`,
-`ns`, `clone`, `xfer`, `migr`, `repair` and `retired-leg` — and it
-reuses gatewayctl's verb and flag vocabulary. The leaves are the RPCs of
+`ns`, `clone`, `xfer`, `migr`, `repair`, `retired-leg` and `group` — and
+it reuses gatewayctl's verb and flag vocabulary. The leaves are the RPCs of
 `service Gateway`, one leaf per RPC and nothing else (CT1): no convenience
 verbs, no compound commands, and cobra's stock `help` and `completion` are
 the only subcommands that are not RPCs. The RPCs without a group of their
@@ -273,9 +273,9 @@ the leaf is safe to script. An inspect RPC is an `inspect` leaf
 that hosts the object, out of that agent's latest observation of it, not
 from etcd. The bitmap RPCs are `get-bm`, `get-leg-bm` and `append-bm`;
 every other leaf keeps its RPC's verb (`cluster advance-ids`,
-`sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`), save
-one: `repair abort` is `TryToAbortRepair`, the one leaf whose verb is not
-its RPC's (`repair` — `ctl/repair.go`).
+`sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
+`group force-start`), save one: `repair abort` is `TryToAbortRepair`, the
+one leaf whose verb is not its RPC's (`repair` — `ctl/repair.go`).
 
 **Fields and flags.** Every request field maps to exactly one flag, with
 these exceptions:
@@ -309,9 +309,9 @@ with their types and defaults, are the code's, and `--help` lists them.
 `--addr`, because a node's name is its ip:port; `sp` with the global `--sp`;
 `cntlr` with `--id`; `td`, `clone`, `xfer`, `migr` and `repair` with
 `--name`; `ss` with `--nqn`; `ns` with `--nqn` and `--idx`; `retired-leg`
-with `--leg`. `sp inspect-side` takes its side id as `--id`,
-deliberately the same spelling as the `cntlr` group's, as in gatewayctl:
-the RPC, not the flag, says what the id means.
+with `--leg`; `group` with `--grp`. `sp inspect-side` takes its side id as
+`--id`, deliberately the same spelling as the `cntlr` group's, as in
+gatewayctl: the RPC, not the flag, says what the id means.
 
 **Value types.** A number that fills a request field is parsed at the width
 of that field: every value the field holds parses, and a value past either
@@ -588,6 +588,25 @@ worker's repair gave a retired leg back (`architecture.md`, Repairs).
 retired leg is taken back by `repair create --retired-leg` rather than by
 a leaf of this group (`architecture.md`, Retired legs). `retired-leg list`
 is not paged.
+
+### `group` — `ctl/group.go`
+
+`group force-start` sends `ForceStartGroup`, the forced start of a raid1
+group's array (`architecture.md`, Repairs). It names the group by `--grp`
+alone, with no flag for the slice or clone that holds it, because the
+gateway finds the group's parent itself, and the leg the array starts from
+by `--leg`. With `--cancel` it withdraws the group's mark instead and names
+no leg. dnvctl checks neither pairing: a non-zero `--leg` beside `--cancel`,
+and a write with no `--leg`, reach the gateway, which refuses them (CT8).
+The forced start overwrites the other members it keeps, the open repair's
+bad leg excepted, with a full copy of the named leg (`architecture.md`,
+Repair, Forced start), and a start from an older copy restores that group
+alone, not the pool (`architecture.md`, Known limits). dnvctl asks for no
+confirmation: the leaf's name and its help say what it destroys, as a
+delete leaf's do, and the help says what a start from an older copy
+restores. The mark is a field of the group record, so `sp get`
+shows a slice group's mark as stored and `clone get` a clone meta group's
+(CT4); what ends a mark is `architecture.md`, Repair.
 
 ## Integration test plan
 

@@ -1112,9 +1112,10 @@ func TestCreateRepairAnswersTheOpsReasons(t *testing.T) {
 }
 
 // TestRepairMutatorsCheckTheTokenInTheirOp pins the second token check of
-// GW6 on the five repair calls that write (gateway.md, Repairs and retired
-// legs): each hands the model op its token's revision, which the op takes as
-// its expected revision before any other read. The planning read here
+// GW6 on five of the six repair calls that write (gateway.md, Repairs and
+// retired legs), the sixth's being TestForceStartGroupChecksTheTokenInItsOp:
+// each hands the model op its token's revision, which the op takes as its
+// expected revision before any other read. The planning read here
 // passes the token, a token-less TryToAbortRepair of another repair then
 // bumps SpRev before the op's STM runs, and the call must answer ABORTED
 // "stale revision" and write nothing. A handler that handed the op 0 would
@@ -1529,10 +1530,10 @@ func TestRepairCallsRefuseUnknownNames(t *testing.T) {
 }
 
 // TestRepairCallsOnADeletingPool pins the deleting gate (architecture.md,
-// Repairs; GW5): every call that writes is FAILED_PRECONDITION on a pool
-// being deleted, with nothing written, and the three reads still answer, so
-// an operator sees the repairs and retired legs the drain is about to
-// delete.
+// Repairs; GW5): every call that writes, ForceStartGroup's write and its
+// cancel among them, is FAILED_PRECONDITION on a pool being deleted, with
+// nothing written, and the three reads still answer, so an operator sees the
+// repairs and retired legs the drain is about to delete.
 func TestRepairCallsOnADeletingPool(t *testing.T) {
 	env := newVolEnv(t)
 	repCreate(env, "rep-a", volDataLegA, volDnC)
@@ -1563,6 +1564,15 @@ func TestRepairCallsOnADeletingPool(t *testing.T) {
 		},
 		"DeleteRetiredLeg": func() error {
 			_, err := repDeleteRetired(env, 900)
+			return err
+		},
+		"ForceStartGroup": func() error {
+			_, err := env.srv.ForceStartGroup(env.ctx,
+				fsRequest(env, volDataLegA))
+			return err
+		},
+		"ForceStartGroup with cancel": func() error {
+			_, err := env.srv.ForceStartGroup(env.ctx, fsCancel(env))
 			return err
 		},
 	} {
@@ -1624,12 +1634,16 @@ func repCloneRepair(env *volEnv) *pb.Group {
 	return grp
 }
 
-// TestRepairCallsRefuseADeletingClone pins the refusal of every call that
-// writes on a deleting clone's group (architecture.md, Repairs;
-// dnv-worker.md CLD1), from model's own check — the clone drain's final
-// transaction gives the group back with its repair and its retired legs —
-// with nothing written. Each call meets the repair at the stage it takes, so
-// the clone's state is what refuses it.
+// TestRepairCallsRefuseADeletingClone pins the refusal of the calls that
+// write a deleting clone's existing repair or retired leg (architecture.md,
+// Repairs; dnv-worker.md CLD1), from model's own check — the clone drain's
+// final transaction gives the group back with its repair and its retired
+// legs — with nothing written. Each call meets the repair at the stage it
+// takes, so the clone's state is what refuses it. CreateRepair and
+// ForceStartGroup, whose planning reads refuse a deleting clone in the
+// gateway's words before their ops run, have theirs in
+// TestCreateRepairRefusesADeletingClonesGroup and, the write and the cancel,
+// TestForceStartGroupOnACloneMetaGroup.
 func TestRepairCallsRefuseADeletingClone(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

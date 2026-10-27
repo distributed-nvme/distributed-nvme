@@ -473,6 +473,13 @@ type fakeAgent struct {
 	sideInfo  *pb.SideInfo
 	cnInfo    *pb.CnInfo
 	cntlrInfo *pb.CntlrInfo
+	// cntlrInfoReqs is every GetCntlrInfo request, in call order, so a test
+	// can check which cntlr the gateway asked about.
+	cntlrInfoReqs []*pb.GetCntlrInfoRequest
+	// cntlrReply is the AgentReply every GetCntlrInfo reply carries, nil for
+	// none, which reads as code OK: the UnknownObject refusal of an agent
+	// that does not hold the cntlr (cnagent.md CN23) is one a test installs.
+	cntlrReply *pb.AgentReply
 	// stamp is the ObsStamp every *Info reply carries: the agent answers
 	// from its latest observation (architecture.md, Live-state reporting),
 	// and every Inspect* reply passes the stamp on with its age.
@@ -548,6 +555,14 @@ func (f *fakeAgent) setInfo(
 	}
 }
 
+// setCntlrReply installs the AgentReply the GetCntlrInfo replies carry from
+// now on.
+func (f *fakeAgent) setCntlrReply(reply *pb.AgentReply) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cntlrReply = reply
+}
+
 // setStamp installs the ObsStamp the *Info replies carry from now on.
 func (f *fakeAgent) setStamp(stamp *pb.ObsStamp) {
 	f.mu.Lock()
@@ -569,6 +584,14 @@ func (f *fakeAgent) callCount(method string) int {
 		}
 	}
 	return count
+}
+
+// cntlrInfoReqList is every GetCntlrInfo request the fake answered, in call
+// order.
+func (f *fakeAgent) cntlrInfoReqList() []*pb.GetCntlrInfoRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*pb.GetCntlrInfoRequest(nil), f.cntlrInfoReqs...)
 }
 
 // traceIdList is every trace id the fake saw, in call order (T3).
@@ -681,10 +704,12 @@ func (f *fakeCnServer) GetCntlrInfo(
 	}
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
+	f.agent.cntlrInfoReqs = append(f.agent.cntlrInfoReqs, req)
 	return &pb.GetCntlrInfoReply{
-		Revision:  fakeAgentRevision,
-		CntlrInfo: f.agent.cntlrInfo,
-		ObsStamp:  f.agent.stamp,
+		AgentReply: f.agent.cntlrReply,
+		Revision:   fakeAgentRevision,
+		CntlrInfo:  f.agent.cntlrInfo,
+		ObsStamp:   f.agent.stamp,
 	}, nil
 }
 

@@ -983,3 +983,27 @@ func TestFindRepairGrp(t *testing.T) {
 		t.Errorf("plan = %s, want every side of the legs", got)
 	}
 }
+
+// TestForceStartIds pins force-start's check of its ids: a leg for a mark
+// and none for a cancel, the gateway's argument check of a ForceStartGroup
+// request (gateway.md GW4), and a group always, the driver's own.
+func TestForceStartIds(t *testing.T) {
+	for _, tc := range []struct {
+		grpId, legId uint64
+		cancel       bool
+		ok           bool
+	}{
+		{5, 7, false, true},
+		{5, 0, true, true},
+		{0, 7, false, false},
+		{0, 0, true, false},
+		{5, 0, false, false},
+		{5, 7, true, false},
+	} {
+		err := forceStartIds(tc.grpId, tc.legId, tc.cancel)
+		if (err == nil) != tc.ok {
+			t.Errorf("forceStartIds(%d, %d, %t) = %v, want ok %t", tc.grpId,
+				tc.legId, tc.cancel, err, tc.ok)
+		}
+	}
+}

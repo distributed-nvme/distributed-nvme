@@ -205,6 +205,8 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 			[]string{"cntlr", "delete", "--id", "cntlr0"}},
 		{"malformed --grp",
 			[]string{"repair", "create", "--grp", "grp0"}},
+		{"malformed --leg",
+			[]string{"group", "force-start", "--grp", "1", "--leg", "leg0"}},
 		{"malformed --level",
 			[]string{"sp", "set-level", "--level", "bogus"}},
 		{"malformed --redund",

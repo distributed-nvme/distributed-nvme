@@ -4755,8 +4755,9 @@ func TestARedundNoneGroupKeepsItsDeviceOverALateLeg(t *testing.T) {
 // state — and nor does a primary whose sp_level suppresses its groups
 // (CN19): at NO_SIDE, where no leg is wanted, every member would otherwise
 // read unavailable. A deferred group builds no array at all ([D15]), even
-// when its leg_list holds a provisioned member that is unavailable, and a
-// repair's new leg is never a late member (CN12).
+// when its leg_list holds a provisioned member that is unavailable, and,
+// with no forced-start mark standing, a repair's new leg is never a late
+// member (CN12).
 func TestLateMemberRetryScope(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -4911,7 +4912,8 @@ func TestLateMemberRetryScopeWantedGroups(t *testing.T) {
 // TestFailedConnectRegistersTheRetryWithoutALateMember pins ensureLegs' own
 // registration (CN10): a leg whose connect fails registers the retry whether
 // or not it is a late member. Each case's failing leg is never one — a
-// standby wants no group, and a repair's new leg is never late — so the
+// standby wants no group, and with no forced-start mark standing a repair's
+// new leg is never late — so the
 // retry is ensureLegs' alone, and build must OR the late-member verdict into
 // ensureLegs', not overwrite it.
 func TestFailedConnectRegistersTheRetryWithoutALateMember(t *testing.T) {

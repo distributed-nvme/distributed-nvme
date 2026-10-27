@@ -1001,14 +1001,15 @@ func TestSpDrainRetiredLegBatchBudget(t *testing.T) {
 }
 
 // TestRepairOpsTxnBudget is the tripwire of the repair operations
-// (model/repair.go): each reads the records of one repair or one retired leg,
-// the one parent that holds its group and at most one DN, whatever the
-// pool's shape, so no ceiling of the pool is a factor. The one factor is the
-// group's retired legs, which FinishRepair reads to pick the one it gives
-// back for the sp worker's repair at the bound. A repair's parent is one
-// slice or one clone, which the operations read by the name the record
-// keeps, never by a walk. model/repair_test.go commits each against a real
-// etcd, FinishRepair at its widest in
+// (model/repair.go) and the forced start's two (model/forcedstart.go): each
+// reads the records of one repair or one retired leg, the one parent that
+// holds its group and at most one DN, whatever the pool's shape, so no
+// ceiling of the pool is a factor. The one factor is the group's retired
+// legs, which FinishRepair reads to pick the one it gives back for the sp
+// worker's repair at the bound. A repair's parent is one slice or one clone,
+// which the operations read by the name the record or the caller keeps,
+// never by a walk. model/repair_test.go and model/forcedstart_test.go commit
+// each against a real etcd, FinishRepair at its widest in
 // TestFinishRepairGivesBackTheOldestRetiredLeg.
 func TestRepairOpsTxnBudget(t *testing.T) {
 	for _, shape := range []txnShape{
@@ -1059,13 +1060,35 @@ func TestRepairOpsTxnBudget(t *testing.T) {
 		},
 		{
 			name: "SetRepairAbort",
-			stm:  "model.SetRepairAbort's STM and loadRepairLive",
-			// SpRev, SpConf, the Repair and, for a clone meta group's
-			// repair, the Clone.
+			stm:  "model.SetRepairAbort's STM, loadRepairLive and loadGrpOf",
+			// SpRev, SpConf, the Repair and the parent: a clone meta
+			// group's repair reads its Clone in loadRepairLive and again in
+			// loadGrpOf, one key either way.
 			fixedReads: 4,
-			// The Repair and SpRev.
+			// The Repair and SpRev; a mark naming the repair's new leg
+			// refuses the op, which then writes nothing.
 			fixedWrites: 2,
 			maxCompares: 6,
+		},
+		{
+			name: "ForceStartGroup",
+			stm:  "model.ForceStartGroup's STM and forcedStartNamable",
+			// SpRev, SpConf, the parent and, when the group names a
+			// repair, the Repair, which the leg check reads for a new leg
+			// and for a leg_list leg alike (a STARTED repair's bad leg).
+			fixedReads: 4,
+			// The parent and SpRev; a cancel of no mark writes neither.
+			fixedWrites: 2,
+			maxCompares: 6,
+		},
+		{
+			name: "ClearForcedStart",
+			stm:  "model.ClearForcedStart's STM and bumpSpRevTo",
+			// SpConf, the parent and SpRev.
+			fixedReads: 3,
+			// The parent and SpRev; a skipped ref writes neither.
+			fixedWrites: 2,
+			maxCompares: 5,
 		},
 		{
 			name: "SetRepairStage",

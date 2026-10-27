@@ -264,6 +264,12 @@ type grpPlan struct {
 	// are, at every stage, and join the array only by CN12's rules for a
 	// repair.
 	rep *repPlan
+	// mark is the group's forced-start mark (architecture.md, Repair), nil
+	// while none stands: the leg CN12's forced start starts the array from
+	// alone while no array of the group runs. A converge of a request no
+	// SyncupCntlr of this process delivered holds none
+	// (dropForcedStartMarks).
+	mark *pb.ForcedStart
 
 	// deferred is the [D15] group gate: some leg of leg_list is provisioning, so
 	// the group builds no md array and no CnGrpName, and is left out of the
@@ -328,6 +334,62 @@ func (gp *grpPlan) isBadLeg(legId uint64) bool {
 	return rp != nil && rp.badLegIds[legId]
 }
 
+// forcedStartLegs are the legs CN12's forced start works on while the
+// group's mark stands: kept, the members the forced start keeps — the
+// group's leg_list legs, then the new legs of its open repair unless that
+// repair is CREATED with its abort flag in the request (repPlan.aborting) —
+// and named, the one of them the mark names. A new leg of an aborting repair
+// is a member the group keeps (memberNames), by which Md.Detail still finds
+// an array, but no member the forced start keeps, since the abort takes it
+// out of the group, so it is neither named nor zeroed. A STARTED repair's
+// new leg is kept whatever its flag says: a STARTED repair is never aborted,
+// and its finish makes that leg a leg_list leg, so one left unzeroed would
+// keep the old identity beside the named leg's new one. The bad leg of a
+// STARTED repair is kept, and never zeroed as the open repair's bad leg, but
+// the mark may not name it (isStartedBadLeg). named is nil when the mark
+// names a leg that kept does not hold or that it may not name, and both are
+// nil while no mark stands.
+func (gp *grpPlan) forcedStartLegs() (named *legPlan, kept []*legPlan) {
+	if gp.mark == nil {
+		return nil, nil
+	}
+	kept = append(kept, gp.legs...)
+	if rp := gp.openRep(); rp != nil && !rp.aborting() {
+		kept = append(kept, rp.newLegs...)
+	}
+	for _, lp := range kept {
+		if lp.legId == gp.mark.GetLegId() {
+			if gp.isStartedBadLeg(lp.legId) {
+				return nil, kept
+			}
+			return lp, kept
+		}
+	}
+	return nil, kept
+}
+
+// dropForcedStartMarks takes every group's forced-start mark out of the
+// plan, for a converge of a request no SyncupCntlr of this process
+// delivered (cntlrState.reqFromRpc): CN12 acts on a mark only from a
+// delivered request, and the group then converges as with no mark.
+func (p *cntlrPlan) dropForcedStartMarks() {
+	for _, gp := range p.grps {
+		gp.mark = nil
+	}
+}
+
+// isStartedBadLeg reports whether a leg is a bad leg of the group's repair
+// while it is STARTED, which CN12's forced start may not name: it left the
+// array before md began copying onto the new leg, so it is older than the
+// array, and the finish retires it, after which an array started from it
+// alone would hold no full member the group keeps (architecture.md, Repair,
+// Forced start).
+func (gp *grpPlan) isStartedBadLeg(legId uint64) bool {
+	return gp.rep != nil &&
+		gp.rep.rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED &&
+		gp.rep.badLegIds[legId]
+}
+
 // hasLateMember reports whether a group's leg_list holds a member this pass
 // may not use — not available (cnagent.md CN12: no path both live and
 // optimized, or its connect, its multipath namespace or its wrapper failed,
@@ -348,17 +410,26 @@ func (gp *grpPlan) isBadLeg(legId uint64) bool {
 // back (putBackNames, reconcileMembers; cnagent.md CN12) — unless CN12's
 // in-sync guard holds over its array (inSyncGuard): the read's row then reads
 // ERROR, its verdict names nothing for the group and the converge puts
-// nothing back while the guard holds (cnagent.md CN12). A repair's new leg
-// is never late: it is no leg_list member, and the read's verdict names it
-// once its add can run (CN30). Nor is an open repair's bad leg while
-// running says the pass found the group's array running (ensureGroup): no
-// converge adds it back to a running array while the repair is open (CN12),
-// so a retry for it would bring converges that change nothing. While the
-// array does not run, the bad leg is late as any other leg_list member is:
-// the assembly takes it once it is available (assembleGroup), and mdadm may
-// refuse to start the array without it. A
-// provisioning leg defers its whole group ([D15]), so the build never asks
-// about one; it is excluded all the same rather than trusting the caller.
+// nothing back while the guard holds (cnagent.md CN12). Short of a forced
+// start's wait (below), a repair's new leg is never late: it is no leg_list
+// member, and the read's verdict names it once its add can run (CN30). Nor
+// is an open repair's bad leg while running says the pass found the
+// group's array running (ensureGroup): no converge adds it back to a running
+// array while the repair is open (CN12), so a retry for it would bring
+// converges that change nothing. While the array does not run, the bad leg
+// is late as any other leg_list member is: the assembly takes it once it is
+// available (assembleGroup), and mdadm may refuse to start the array
+// without it. While the group's forced-start mark names a member the forced
+// start keeps and may name and the array does not run, a repair's new leg
+// that the forced start keeps is late too (forcedStartLegs): the forced
+// start waits for every member it keeps to be available, the open repair's
+// bad leg aside, which is late then as a leg_list member (CN12), and no
+// read's verdict names a member of a group whose array does not run, so
+// nothing else would bring the converge back for a new leg. A provisioning leg
+// defers its whole group ([D15]), so the build never asks about one; it is
+// excluded all the same rather than trusting the caller. A provisioning new
+// leg is excluded too: its side's provisioned flip raises the pool's
+// revision, whose fan-out converges the cntlr again (dnv-worker.md RW18).
 func (gp *grpPlan) hasLateMember(
 	available map[uint64]bool,
 	running bool,
@@ -366,6 +437,21 @@ func (gp *grpPlan) hasLateMember(
 	for _, lp := range gp.legs {
 		if !lp.provisioning && !available[lp.legId] &&
 			!(running && gp.isBadLeg(lp.legId)) {
+			return true
+		}
+	}
+	if running || !gp.raid1 {
+		return false
+	}
+	// The leg_list legs among kept were judged so above, the array not
+	// running, so only the repair's new legs the forced start keeps can
+	// change the answer here.
+	named, kept := gp.forcedStartLegs()
+	if named == nil {
+		return false
+	}
+	for _, lp := range kept {
+		if !lp.provisioning && !available[lp.legId] {
 			return true
 		}
 	}
@@ -425,10 +511,20 @@ func (rp *repPlan) mayAdd() bool {
 
 // aborting reports whether the repair is CREATED with its abort flag in the
 // request: the converge never adds its new legs and removes one md holds
-// without a place (CN12).
+// without a place, and the forced start keeps none of them
+// (forcedStartLegs; CN12).
 func (rp *repPlan) aborting() bool {
 	return rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_CREATED &&
 		rp.rep.GetTryToAbort()
+}
+
+// takenBack reports whether a new leg of the repair was taken from a retired
+// leg (architecture.md, Repair): the repair records the retired leg's time
+// for it, which a fresh new leg has none of. Its add passes CN12's take-back
+// check first (takeBackStep).
+func (rp *repPlan) takenBack(legId uint64) bool {
+	_, ok := rp.rep.GetNewLegIdToRetiredEpoch()[legId]
+	return ok
 }
 
 // tdPlan is one thin device: its per-slice thin volumes, its raid0 and its
@@ -684,15 +780,16 @@ func (p *cntlrPlan) buildCloneGrps() {
 }
 
 // newGrpPlan is the part of a group's plan that the group alone decides,
-// for a slice's group and a clone meta group alike: its ids, its redundancy
-// and its on-leg geometry (architecture.md, Group on-leg layout: meta
-// region, data region, health block). The caller places it and, for an md
-// group, names its array.
+// for a slice's group and a clone meta group alike: its ids, its redundancy,
+// its forced-start mark and its on-leg geometry (architecture.md, Group
+// on-leg layout: meta region, data region, health block). The caller places
+// it and, for an md group, names its array.
 func (p *cntlrPlan) newGrpPlan(grp *pb.Group) *grpPlan {
 	gp := &grpPlan{
 		grpId:      grp.GetGrpId(),
 		grp:        grp,
 		raid1:      p.raid1,
+		mark:       grp.GetForcedStart(),
 		metaBlocks: grp.GetMetaBlocks(),
 		dataBlocks: grp.GetDataBlocks(),
 	}

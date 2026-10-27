@@ -1,6 +1,6 @@
 // Package gateway is dnv-gateway's control-plane API server (gateway.md): the
-// 65 RPCs of `service Gateway`, implemented directly on etcd through
-// etcdutil's STM machinery, plus the ten agent calls of gateway.md, Agent
+// 66 RPCs of `service Gateway`, implemented directly on etcd through
+// etcdutil's STM machinery, plus the eleven agent calls of gateway.md, Agent
 // calls, that reach a dn or cn agent for a size, an *Info or a bitmap.
 //
 // It is stateless and active-active (GW1): no leader election, no
@@ -56,7 +56,7 @@ type Config struct {
 //
 // pb.UnimplementedGatewayServer is embedded because the generated code
 // requires it (mustEmbedUnimplementedGatewayServer); it is an empty struct and
-// carries no state. Every one of the 65 methods is overridden below, so it
+// carries no state. Every one of the 66 methods is overridden below, so it
 // never actually answers a request.
 type Server struct {
 	pb.UnimplementedGatewayServer

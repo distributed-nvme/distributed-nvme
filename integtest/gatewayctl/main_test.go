@@ -293,11 +293,12 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"ListRepairs":                     "list-repairs",
 		"ListRetiredLegs":                 "list-retired-legs",
 		"DeleteRetiredLeg":                "delete-retired-leg",
+		"ForceStartGroup":                 "force-start-grp",
 		"GetThinDeviceBitmap":             "get-td-bm",
 		"GetLegBitmap":                    "get-leg-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 65 {
-		t.Fatalf("service Gateway has %d methods, want 65",
+	if len(pb.Gateway_ServiceDesc.Methods) != 66 {
+		t.Fatalf("service Gateway has %d methods, want 66",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
@@ -371,6 +372,13 @@ func (c *recordingClient) CreateRepair(
 	return &pb.CreateRepairReply{RepId: 1, NewLegId: 2}, nil
 }
 
+func (c *recordingClient) ForceStartGroup(
+	ctx context.Context, in *pb.ForceStartGroupRequest, _ ...grpc.CallOption,
+) (*pb.ForceStartGroupReply, error) {
+	c.req = in
+	return &pb.ForceStartGroupReply{GrpId: in.GetGrpId(), Revision: 3}, nil
+}
+
 // runArgv parses argv through one subcommand's flag set and runs its job
 // against a recording client, returning the request that was built. It is the
 // same path both the command line and `race` take.
@@ -422,6 +430,36 @@ func TestCreateRepairRequest(t *testing.T) {
 	if bare.SpRev == nil || bare.GetSpRev().GetRevision() != 0 {
 		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
 			bare.SpRev)
+	}
+}
+
+// TestForceStartGrpRequest pins the request force-start-grp builds: the
+// group, the leg, the cancel flag, and a token message that is present, a
+// zero one when --rev is not given; a cancel carries the leg as typed, so
+// the suite can send the pair the gateway refuses.
+func TestForceStartGrpRequest(t *testing.T) {
+	req := runArgv(t, "force-start-grp",
+		"--sp", "sp0", "--rev", "7", "--grp", "0x11", "--leg", "0x12",
+	).(*pb.ForceStartGroupRequest)
+	want := &pb.ForceStartGroupRequest{
+		ClusterName: defaultCluster,
+		SpName:      "sp0",
+		SpRev:       &pb.SpRev{Revision: 7},
+		GrpId:       0x11,
+		LegId:       0x12,
+	}
+	if !proto.Equal(req, want) {
+		t.Errorf("request:\n got %v\nwant %v", req, want)
+	}
+	cancel := runArgv(t, "force-start-grp",
+		"--sp", "sp0", "--grp", "0x11", "--leg", "5", "--cancel",
+	).(*pb.ForceStartGroupRequest)
+	if !cancel.GetCancel() || cancel.GetLegId() != 5 {
+		t.Errorf("--cancel --leg 5 built %v, want cancel with leg 5", cancel)
+	}
+	if cancel.SpRev == nil || cancel.GetSpRev().GetRevision() != 0 {
+		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
+			cancel.SpRev)
 	}
 }
 

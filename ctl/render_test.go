@@ -262,6 +262,45 @@ var renderCases = []renderCase{
 			`"retired_leg_id":"3"}` + "\n",
 	},
 	{
+		// A slice group's forced-start mark as stored (dnvctl.md, `group` —
+		// `ctl/group.go`): the named leg and the revision as strings on the
+		// group that carries one, and null on the group that carries none.
+		name: "sp get, a slice group's forced-start mark",
+		rpc:  "GetStoragePool",
+		argv: []string{"sp", "get"},
+		reply: &pb.GetStoragePoolReply{
+			SpName: "sp0",
+			SliceList: []*pb.Slice{{
+				MetaGrpList: []*pb.Group{{GrpId: 1}},
+				DataGrpList: []*pb.Group{{
+					GrpId:       2,
+					ForcedStart: &pb.ForcedStart{LegId: 5, Revision: 12},
+				}},
+			}},
+		},
+		want: `{"cntlr_list":[],"slice_list":[{"data_grp_list":[` +
+			`{"data_blocks":"0","ext_cnt":"0",` +
+			`"forced_start":{"leg_id":"5","revision":"12"},"grp_id":"2",` +
+			`"leg_list":[],"meta_blocks":"0","rep_name":"",` +
+			`"retired_leg_id_list":[]}],"meta_grp_list":[` +
+			`{"data_blocks":"0","ext_cnt":"0","forced_start":null,` +
+			`"grp_id":"1","leg_list":[],"meta_blocks":"0","rep_name":"",` +
+			`"retired_leg_id_list":[]}],"slice_idx":0}],"sp_conf":null,` +
+			`"sp_name":"sp0","sp_rev":null}` + "\n",
+	},
+	{
+		// The forced start's reply: the group and the revision its mark
+		// carries, which a report must reach before the sp worker clears the
+		// mark (dnv-worker.md AR13), both uint64 strings.
+		name: "group force-start, the reply",
+		rpc:  "ForceStartGroup",
+		argv: []string{"group", "force-start", "--grp", "2", "--leg", "5"},
+		reply: &pb.ForceStartGroupReply{
+			GrpId: 2, Revision: 12,
+		},
+		want: `{"grp_id":"2","revision":"12"}` + "\n",
+	},
+	{
 		// An empty map renders as {} rather than null, and the reply's only
 		// field being empty does not make the document empty.
 		name:  "ss list, empty map",

@@ -926,11 +926,15 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 // was not ready while no dm-clone of the clone served or a later step of a
 // clone stopped the build (CN18 says which), a group's leg_list holds a
 // member that is not available, other than an open repair's bad leg while
-// the group's array runs (CN12), the build failed to move the ANA group of
-// a namespace or a transfer (CN16, CN17), or the build left the device of a
-// namespace or a transfer whose desired group is optimized off what the
-// desired state wants — held off its td's raid0 (CN18), waiting on the
-// dm-error, or after a failed step — whatever the cause (CN16, CN17). A
+// the group's array runs, a forced start waits for a member that is not
+// available, a forced start ends the pass in any other error, or a read of
+// a group's array before its forced start fails while the group's mark
+// stands (CN12),
+// the build failed to move the ANA group of a namespace or a transfer (CN16,
+// CN17), or the build left the device of a namespace or a transfer whose
+// desired group is optimized off what the desired state wants — held off
+// its td's raid0 (CN18), waiting on the dm-error, or after a failed step —
+// whatever the cause (CN16, CN17). A
 // goroutine re-runs the whole converge every CnConnectRetryInterval seconds
 // under the CN1 locks until a pass registers none of these (build's
 // stopConnectRetry) or the cntlr is torn down. The RPC itself retries a

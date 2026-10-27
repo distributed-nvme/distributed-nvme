@@ -1064,8 +1064,10 @@ func TestFinishRepairGiveBackRefusals(t *testing.T) {
 // TestRepairOpsAtAnyLevel: every repair and retired-leg operation but the
 // create takes a pool at a level where the operator is in charge, where the
 // arrays still run (loadSpConfAnyLevel): the finish, the cancel, the abort,
-// the delete of a retired leg and the provisioned flip each succeed at
-// SP_LEVEL_DISABLE. TestSetRepairStage holds the stage move's case.
+// the delete of a retired leg, the provisioned flip, and the forced start's
+// cancel and clear each succeed at SP_LEVEL_DISABLE. TestSetRepairStage
+// holds the stage move's case, and TestForceStartGroupLevels the levels of
+// the forced start's write, which stops where no group array is built.
 func TestRepairOpsAtAnyLevel(t *testing.T) {
 	disable := func(env *opsEnv) { env.setLevel(pb.SpLevel_SP_LEVEL_DISABLE) }
 	for _, tc := range []struct {
@@ -1124,6 +1126,24 @@ func TestRepairOpsAtAnyLevel(t *testing.T) {
 				})
 			if err == nil && !flipped {
 				env.t.Errorf("the flip skipped the side")
+			}
+			return err
+		}},
+		{"ForceStartGroup's cancel", func(env *opsEnv) error {
+			env.mustForceStart(opsDataGrpId, opsDataLegA)
+			disable(env)
+			_, err := env.forceStart(opsDataGrpId, 0, true)
+			if err == nil && env.mark(opsDataGrpId) != nil {
+				env.t.Errorf("the cancel left the mark")
+			}
+			return err
+		}},
+		{"ClearForcedStart", func(env *opsEnv) error {
+			env.mustForceStart(opsDataGrpId, opsDataLegA)
+			disable(env)
+			cleared, _, err := env.clearMark(env.clearRef(opsDataGrpId))
+			if err == nil && !cleared {
+				env.t.Errorf("the clear skipped the mark")
 			}
 			return err
 		}},
@@ -2034,7 +2054,7 @@ func TestRepairReasonsAreDistinct(t *testing.T) {
 	for _, reason := range []string{
 		ReasonRepairExists, ReasonRepairNotFound, ReasonRetiredLegNotFound,
 		ReasonRetiredListFull, ReasonGrpHasRepair, ReasonStaleRevision,
-		ReasonCandidateChanged, ReasonNoIdLeft,
+		ReasonCandidateChanged, ReasonNoIdLeft, ReasonLegNotNamable,
 	} {
 		if seen[reason] {
 			t.Errorf("reason %q is used twice", reason)

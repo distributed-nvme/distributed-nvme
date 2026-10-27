@@ -303,3 +303,83 @@ func TestDrainsGiveBackRepairsAndRetiredLegs(t *testing.T) {
 		}
 	}
 }
+
+// TestForceStartGroup drives the forced-start mark through ForceStartGroup:
+// a mark on a slice's group carries the revision its own write committed, a
+// second call replaces it, a clone's group is found among the clones, a
+// cancel withdraws the mark with one bump and a second cancel writes
+// nothing; an unknown group and a leg the mark may not name are refused.
+func TestForceStartGroup(t *testing.T) {
+	ctx := testCtx(t)
+	c := plantSmallCluster(t, ctx, true)
+	ref := c.sp.Ref
+	revBefore := c.spRev(t, ctx)
+	dataMark := func() *pb.ForcedStart {
+		return c.load(t, ctx).Slices[1].GetDataGrpList()[0].GetForcedStart()
+	}
+
+	revision, spRev, err := ForceStartGroup(ctx, c.cli, c.cl, ref, 5, 7,
+		false)
+	if err != nil || revision != revBefore+1 || spRev != revision {
+		t.Fatalf("ForceStartGroup = %d, %d, %v; want the mark at %d, the "+
+			"pool there too", revision, spRev, err, revBefore+1)
+	}
+	if got := dataMark(); got.GetLegId() != 7 || got.GetRevision() != revision {
+		t.Fatalf("group 5's mark = %v, want leg 7 at %d", got, revision)
+	}
+	revision, _, err = ForceStartGroup(ctx, c.cli, c.cl, ref, 5, 6, false)
+	if err != nil || revision != revBefore+2 {
+		t.Fatalf("a second ForceStartGroup = %d, %v", revision, err)
+	}
+	if got := dataMark(); got.GetLegId() != 6 || got.GetRevision() != revision {
+		t.Fatalf("group 5's mark = %v, want leg 6 at %d, replaced", got,
+			revision)
+	}
+
+	if _, err := PutTd(ctx, c.cli, c.cl, ref,
+		TdSpec{Name: "td0", Size: 1 << 30}); err != nil {
+		t.Fatalf("PutTd: %v", err)
+	}
+	clone, err := PutClone(ctx, c.cli, c.cl, ref, CloneSpec{
+		Name: "c0", DstTd: "td0",
+		Legs: []CloneLegSpec{{LegIdx: 0, DnId: 1}, {LegIdx: 1, DnId: 3}},
+	})
+	if err != nil {
+		t.Fatalf("PutClone: %v", err)
+	}
+	revision, _, err = ForceStartGroup(ctx, c.cli, c.cl, ref, clone.GrpId,
+		clone.LegIds[1], false)
+	if err != nil {
+		t.Fatalf("ForceStartGroup of the clone's group: %v", err)
+	}
+	if got := c.load(t, ctx).Clones["c0"].GetMetaGrp().GetForcedStart(); got.GetLegId() !=
+		clone.LegIds[1] || got.GetRevision() != revision {
+		t.Fatalf("the clone's mark = %v, want leg %d at %d", got,
+			clone.LegIds[1], revision)
+	}
+
+	revBefore = c.spRev(t, ctx)
+	revision, spRev, err = ForceStartGroup(ctx, c.cli, c.cl, ref, 5, 0, true)
+	if err != nil || revision != 0 || spRev != revBefore+1 {
+		t.Fatalf("a cancel = %d, %d, %v; want no mark and one bump",
+			revision, spRev, err)
+	}
+	if got := dataMark(); got != nil {
+		t.Fatalf("group 5's mark %v outlived its cancel", got)
+	}
+	if revision, spRev, err = ForceStartGroup(ctx, c.cli, c.cl, ref, 5, 0,
+		true); err != nil || revision != 0 || spRev != revBefore+1 {
+		t.Fatalf("a second cancel = %d, %d, %v; want no write", revision,
+			spRev, err)
+	}
+
+	if _, _, err := ForceStartGroup(ctx, c.cli, c.cl, ref, 99, 7,
+		false); err == nil || !strings.Contains(err.Error(), "no group") {
+		t.Errorf("an unknown group: %v", err)
+	}
+	if _, _, err := ForceStartGroup(ctx, c.cli, c.cl, ref, 5, 3,
+		false); err == nil ||
+		!strings.Contains(err.Error(), model.ReasonLegNotNamable) {
+		t.Errorf("a leg of another group: %v", err)
+	}
+}

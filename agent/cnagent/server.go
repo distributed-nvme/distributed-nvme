@@ -144,8 +144,8 @@ type cntlrState struct {
 	// lock-free read cannot race the store, and taking no lock for it adds no
 	// lock order. A request is never modified once stored. reqFromRpc, which
 	// changes with it, needs none of that: only this cntlr's own converges
-	// read it, and each holds this cntlr's object lock or the node write
-	// lock, either of which orders it after the store.
+	// and reads read it, and each holds this cntlr's object lock or the node
+	// write lock, either of which orders it after the store.
 	req     atomic.Pointer[pb.SyncupCntlrRequest]
 	tracker *agent.ResTracker
 
@@ -180,7 +180,12 @@ type cntlrState struct {
 	// the persisted copy, which a failed save lets lag the pool's true
 	// contents: syncupCntlr saves before convergeCntlr but only logs a Save
 	// that fails, and the converge runs on — the sweep deletes ids absent
-	// from td_list, so it only ever trusts an RPC-delivered one (CN14).
+	// from td_list, so it only ever trusts an RPC-delivered one (CN14). The
+	// persisted copy can also carry a forced-start mark the worker has
+	// cleared since, so a converge acts on a mark only while this is set,
+	// and a read names a mark while it is not (CN12; dropForcedStartMarks,
+	// storedMarks). The cntlr's reads read it too, each under this cntlr's
+	// object lock, which orders it after the store as well.
 	reqFromRpc bool
 
 	// probers are the CN11 leg health probers, keyed by leg_id. They hold no

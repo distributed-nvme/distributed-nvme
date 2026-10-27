@@ -22,10 +22,11 @@ logging; and on `layout.md` for package placement and the dependency rules.
 `dnv-gateway` serves the `Gateway` gRPC service to users and CLIs
 (`architecture.md`, System overview). It reads and writes etcd, and calls
 agents only for `GetDnSize` and `GetCnSize`, the `Get*Info` behind its
-`Inspect*` RPCs and behind the `force` false hydration checks of
-`DeleteClone` and `FinishMigration`, and the `Get*Bm` bitmap reads (Agent
-calls). It is one of the three co-located control-plane processes —
-gateway, worker, cdc — that any number of control-plane servers may run.
+`Inspect*` RPCs, behind the `force` false hydration checks of
+`DeleteClone` and `FinishMigration` and behind `ForceStartGroup`'s check
+of the group's array, and the `Get*Bm` bitmap reads (Agent calls). It is
+one of the three co-located control-plane processes — gateway, worker,
+cdc — that any number of control-plane servers may run.
 This document covers `gateway/` and `cmd/dnv-gateway` only: `dnvctl` is a
 separate component with its own document (`dnvctl.md`), and the integration
 suite drives the gateway with a dedicated test client, `gatewayctl`, not
@@ -33,9 +34,10 @@ with `dnvctl`.
 
 The STM bodies of the public RPCs live in the per-resource files of
 `gateway/`. The `model` operations a handler runs as its deciding STM —
-`GrowSlice` and the repair operations `CreateRepair`, `FinishRepair`,
+`GrowSlice`, the repair operations `CreateRepair`, `FinishRepair`,
 `CancelRepair`, `SetRepairAbort` and `DeleteRetiredLeg`, which take the
-group of either kind through the parent it records (`dnv-worker.md` MD6) —
+group of either kind through the parent it records, and `ForceStartGroup`,
+which takes it through the parent its caller found (`dnv-worker.md` MD6) —
 are reused, never duplicated (`dnv-worker.md` MD8).
 
 The package's files follow `layout.md`, Directory tree: serving and the
@@ -81,10 +83,11 @@ authoritative for their comments.
 
 `DefaultGatewayAgentTimeout` is the per-call budget, in seconds, of the
 gateway's agent RPCs — `GetDnSize` and `GetCnSize`, the `Get*Info` behind
-`Inspect*` and behind the `force` false checks of `DeleteClone` and
-`FinishMigration`, and the `Get*Bm` bitmap reads — applied as a timeout
-around each dial and call (AG2). It equals `DefaultEtcdOpTimeout`, so a hung
-agent and a hung etcd bound an RPC alike.
+`Inspect*`, behind the `force` false checks of `DeleteClone` and
+`FinishMigration` and behind `ForceStartGroup`'s check of the group's
+array, and the `Get*Bm` bitmap reads — applied as a timeout around each
+dial and call (AG2). It equals `DefaultEtcdOpTimeout`, so a hung agent and
+a hung etcd bound an RPC alike.
 
 `CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk and the
 quantum that positions it; the chunk rule it sizes is `architecture.md`,
@@ -119,10 +122,10 @@ held to its count by a test pair like the create's.
 etcd's default; so do
 `CreateCntlr`, `DeleteCntlr` and the worker's cntlr replacement
 (`dnv-worker.md` MD6, AR7), which read no clone, since a clone charges no
-CN. So do the repair operations, since each reads at most the one parent
-record of its group, never a walk of the slices or the clones, at most the
-group's retired legs, which `MaxRetiredLegPerGrp` bounds, and at most one
-DN.
+CN. So do the repair operations and the forced start's, since each reads
+at most the one parent record of its group, never a walk of the slices or
+the clones, at most one repair, at most the group's retired legs, which
+`MaxRetiredLegPerGrp` bounds, and at most one DN.
 Each of these is held to its count by a tripwire. `DeleteThinDevice` stays below
 all six — the create, the D2 batch, the two SPD15 batches and the two flips
 — whatever the td count: its deciding STM commits having read no td but its
@@ -253,10 +256,11 @@ STM is a `model` op; `openSpRead` — resolution without the gate and
 without the token check — opens every SP-scoped read-only RPC and
 `DeleteClone`'s phase 1 (Clones); `openSpFlags` is `openSp` with the gate
 selectable, and `DeleteStoragePool` is its one caller with the gate off
-(Storage pools and GrowSlice). `GrowSlice` and the five repair calls that
+(Storage pools and GrowSlice). `GrowSlice` and the six repair calls that
 run a `model` op — `CreateRepair`, `FinishRepair`, `CancelRepair`,
-`TryToAbortRepair` and `DeleteRetiredLeg` — resolve in their planning
-`Snapshot` only (Storage pools and GrowSlice, Repairs and retired legs) —
+`TryToAbortRepair`, `DeleteRetiredLeg` and `ForceStartGroup` — resolve in
+their planning `Snapshot` only (Storage pools and GrowSlice, Repairs and
+retired legs) —
 `CreateRepair` in a fresh one each round of its candidate unit (GW9): their
 later transactions — the deciding STM, which is their `model` op (Scope and
 placement), and `GrowSlice`'s CN-budget pre-check — take the cluster id, and
@@ -306,9 +310,10 @@ through `openSpRead`, which has no `deleting` gate, before its
 them — and the hydration check's agent call all come ahead of it (Clones).
 
 The `model` mutations the gateway runs (Scope and placement) — `GrowSlice`,
-`CreateRepair`, `FinishRepair`, `CancelRepair`, `SetRepairAbort` and
-`DeleteRetiredLeg` — take an expected revision and re-check it first inside
-their own STM, zero skipping the check (`dnv-worker.md` MD6); a mismatch is
+`CreateRepair`, `FinishRepair`, `CancelRepair`, `SetRepairAbort`,
+`DeleteRetiredLeg` and `ForceStartGroup` — take an expected revision and
+re-check it first inside their own STM, zero skipping the check
+(`dnv-worker.md` MD6); a mismatch is
 an `ErrPrecondition` with `ReasonStaleRevision`. The gateway passes the
 token's revision, which is zero exactly when the request carried no token
 message — and zero means "skip" there just as absence does here, so the two
@@ -331,10 +336,11 @@ units).
 counter (`architecture.md`, Clusters). A flag update that asks for the
 state the record already holds —
 `UpdateDiskNodeDisabled`, `UpdateControllerNodeDisabled`,
-`UpdateCntlrEnabled`, and `TryToAbortRepair` on a CREATED repair whose flag
-is already set — writes nothing, bumps nothing and replies OK, a token the
-request carried still being checked first: a no-op that bumped would
-invalidate every client's token for nothing.
+`UpdateCntlrEnabled`, `TryToAbortRepair` on a CREATED repair whose flag
+is already set, and `ForceStartGroup`'s cancel of a group that carries no
+mark — writes nothing, bumps nothing and replies OK, a token the request
+carried still being checked first: a no-op that bumped would invalidate
+every client's token for nothing.
 
 GW7. **Error mapping.** This is the gateway's single error table. Handlers
 return a gRPC status error straight from inside their STM closure:
@@ -1144,10 +1150,11 @@ below name.
   cosmetic: a racing append could otherwise write a chunk key behind the
   drain, and the drain's final emptiness guard rests on "after the latch,
   no chunk key can ever appear again". `GetClone` and `DeleteClone`'s own
-  phase 1 keep using plain `loadClone`. The five repair calls that write,
+  phase 1 keep using plain `loadClone`. The six repair calls that write,
   which change a clone meta group or its repair, refuse a deleting clone
-  the same way, in their `model` op and `CreateRepair` first in its
-  planning read (`refuseDeletingClone`; Repairs and retired legs).
+  the same way, in their `model` op, and `CreateRepair` and
+  `ForceStartGroup` first in their planning read (`refuseDeletingClone`;
+  Repairs and retired legs).
 * **GetClone** — one STM read. Reply the `Clone`.
 * **UpdateCloneTrConf** — STM: resolve; token; the clone
   (`loadLiveClone`); replace `src_tr_conf_list`; `BumpSpRev`. Reply
@@ -1284,26 +1291,30 @@ rather than a candidate problem.
 
 ### Repairs and retired legs
 
-The codes are those of `architecture.md`, Repairs and Retired legs. The five
+The codes are those of `architecture.md`, Repairs and Retired legs. The six
 calls that write run the `model` repair operations as their deciding STMs
-(Scope and placement), each behind a planning read in a read-only
-snapshot opened with `openSp` — resolution, the `deleting` gate, then the
-token (GW5, GW6) — whose scope hands the op the cluster id, the shard, the sp id and, where
-the op takes one, the stored `ClusterConf` (`repairOpenSp`, and
-`repairCreateChecks` for the create); the op makes every check again inside
-its own STM, the token's revision as its expected revision ahead of every
-other read (GW6). `model` raises every refusal as an `ErrPrecondition`,
-which `mapModelErr` answers `FAILED_PRECONDITION` save a stale token and
-candidate changed (GW7), so the other codes come from the gateway's own
-checks — the pure checks (GW4), the planning
-read's resolution and token, `CreateRepair`'s own planning checks and its
-scan — and from the four reasons `model` exports for them,
+(Scope and placement), each behind a planning read in a read-only snapshot
+opened with `openSp` — resolution, the `deleting` gate, then the token
+(GW5, GW6) — whose scope hands the op the cluster id, the shard, the sp id
+and, where the op takes one, the stored `ClusterConf` (`repairOpenSp`,
+`repairCreateChecks` for the create and `forceStartChecks` for the forced
+start); the op makes every check again inside its own STM, the token's
+revision as its expected revision ahead of every other read (GW6), save
+`ForceStartGroup`'s checks of the primary, which its planning read alone
+makes, and of the primary's report, which no transaction sees. `model`
+raises every refusal as an `ErrPrecondition`, which `mapModelErr` answers
+`FAILED_PRECONDITION` save a stale token and candidate changed (GW7), so
+the other codes come from the gateway's own checks — the pure checks
+(GW4), the planning read's resolution and token, `CreateRepair`'s own
+planning checks and its scan, and `ForceStartGroup`'s own planning checks
+— and from the four reasons `model` exports for them,
 `model.ReasonRepairExists`, `model.ReasonRepairNotFound`,
 `model.ReasonRetiredLegNotFound` and `model.ReasonRetiredListFull`, which a
 handler answers before `mapModelErr` (`modelReason`) with the code and the
-words the gateway's own check of the same refusal gives. The three reads
-open with `openSpRead`, so a deleting pool's repairs and retired legs still
-answer.
+words the gateway's own check of the same refusal gives. `ForceStartGroup`
+alone reads an agent between its planning read and its op (Agent calls).
+The three reads open with `openSpRead`, so a deleting pool's repairs and
+retired legs still answer.
 
 * **CreateRepair** — the pure checks first (GW4): `rep_name` by the common
   name rule and without the reserved prefix, `common.RepNameReservedPrefix`,
@@ -1344,7 +1355,28 @@ answer.
   op's reasons answer as FinishRepair's do. Reply `rep_id`.
 * **TryToAbortRepair** — the planning read; then `model.SetRepairAbort`,
   which answers a CREATED repair whose flag is already set with no write
-  and no bump; the op's reasons answer as FinishRepair's do. Reply `rep_id`.
+  and no bump, and refuses a flag not yet set while the group's
+  forced-start mark names the repair's new leg (`architecture.md`,
+  Repairs); the op's reasons answer as FinishRepair's do. Reply `rep_id`.
+* **ForceStartGroup** — two-phase (AG4). The pure checks first (GW4): the
+  names, and a `leg_id` that is set with `cancel` or zero without it.
+  Then the planning read (`forceStartChecks`) behind `openSp` makes the
+  refusals of `architecture.md`, Repairs, in its order: the level gate at
+  `SP_LEVEL_NO_REDUND`, a `RedundNone` pool, the group through
+  `locateGrp`, a deleting clone through `refuseDeletingClone`, the leg
+  through the group's `leg_list` and the repair it names (`grpRepair`;
+  `forceStartLegChecks`), and the primary, whose `CnConf` it reads for the
+  agent call, a primary's CN that is missing being `ABORTED` as in
+  `DeleteClone`. Outside any STM, `checkGrpArrayDown` reads the
+  primary's report (Agent calls). Last `model.ForceStartGroup` with the
+  group's parent, the leg and the flag, which writes the mark with the
+  revision its own bump commits and re-checks the token, the pool, the
+  group and the leg in its STM; its `model.ReasonLegNotNamable`, a leg a
+  write took away after the planning read, is answered
+  `FAILED_PRECONDITION` in the gateway's words (`modelReason`). A cancel
+  stops the planning read after the clone, reads no agent, and the op
+  answers a group with no mark with no write and no bump. Reply `grp_id`
+  and `revision` as the op returns it.
 * **GetRepair** — one snapshot: resolve, then the `Repair` through
   `repair_name_list` (`loadListedRepair`: a name not listed is `NOT_FOUND`, a
   listed key missing `ABORTED`). Reply `rep_name` and the record as stored.
@@ -1385,7 +1417,8 @@ bullets below name.
 AG1. **Placement.** Agent calls happen outside STMs (`architecture.md`, STM
 discipline); the matrix below places each one. A `DeleteClone` whose clone
 is ALREADY `deleting` answers in phase 1 and makes no agent call at all
-(Clones). The two pre-STM size calls take the cluster id from a plain
+(Clones), and neither does a `ForceStartGroup` with `cancel` (Repairs and
+retired legs). The two pre-STM size calls take the cluster id from a plain
 pre-read of `ClusterConf`, the in-STM read staying authoritative; the calls
 after resolution take it from the resolving transaction.
 
@@ -1402,18 +1435,28 @@ keeps no connection cache like the worker's (`dnv-worker.md` RW7).
 AG3. **Failure mapping.** A transport or non-OK status maps to the code the
 RPC's specification names: `ABORTED` everywhere except the `force` false
 checks of `DeleteClone` and `FinishMigration`, where an unreachable agent is
-`FAILED_PRECONDITION` (the caller cannot prove hydration is done). The
-agent-side `AgentReply.code` convention does not apply to `Get*Size`,
-`Get*Info` or `Get*Bm` beyond what their replies define.
+`FAILED_PRECONDITION` (the caller cannot prove hydration is done), and
+`ForceStartGroup`'s check of the group's array, where it is
+`FAILED_PRECONDITION` too (the caller cannot prove the array does not run).
+The agent-side `AgentReply.code` convention does not apply to `Get*Size`,
+`Get*Info` or `Get*Bm` beyond what their replies define: `ForceStartGroup`'s
+check reads the group's row whatever the reply's code, and a `GetCntlrInfo`
+reply with no info, as the `UnknownObject` refusal of an agent that does not
+hold the cntlr carries (`cnagent.md` CN23), reads to it as a report with no
+row for the group, which it refuses as it refuses an agent that does not
+answer (`architecture.md`, Repairs).
 
 AG4. **Two-phase rule.** Any handler with a mid-flight agent call re-runs
-**full resolution and the token check** in its deciding STM. No facts from
-phase 1 are trusted in phase 2 except as hints; for a request that carries
-a token, the token check makes any interleaved mutation visible as
-`ABORTED` ("stale revision"), which is what keeps such a two-phase RPC
-exactly as safe as a one-STM RPC. A **token-less** request keeps the full
-re-resolution but not that visibility — GW6 is presence-based, so an
-interleaved mutation it did not observe stays invisible to it. That is the
+**full resolution and the token check** in its deciding STM, save that one
+whose deciding STM is a `model` op — `ForceStartGroup` — re-reads the pool
+under the cluster id its planning snapshot resolved and never reads
+`ClusterConf` again (GW5). No facts from phase 1 are trusted in phase 2
+except as hints; for a request that carries a token, the token check makes
+any interleaved mutation visible as `ABORTED` ("stale revision"), which is
+what keeps such a two-phase RPC exactly as safe as a one-STM RPC. A
+**token-less** request keeps the re-resolution but not that visibility —
+GW6 is presence-based, so an interleaved mutation it did not observe stays
+invisible to it. That is the
 AG4 half of the token-less cost `architecture.md`, Revision keys and the
 sync fan-out, accepts.
 
@@ -1429,6 +1472,7 @@ The complete call matrix:
 | `InspectSide` | `GetSideInfo` | after the STM |
 | `DeleteClone` with `force` false | `GetCntlrInfo` | between the STMs |
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
+| `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
 | `GetThinDeviceBitmap` | `GetThinDeviceBm` | after the STM |
 | `GetLegBitmap` | `GetLegBm` | after the STM |
 
@@ -1606,7 +1650,13 @@ gateway, never through `workerctl`.
   listed,
   taken back as a third repair's new leg with nothing allocated and given
   back as it was by that repair's cancel, then deleted, its side given
-  back; and the sp latch with the refusals it brings, then its drain, after
+  back; a group's forced start (`architecture.md`, Repairs, Repair) —
+  refused for a leg sent with the cancel flag, an unknown group, a leg of
+  another group, the level that stops group arrays and an array the
+  primary's report, seeded in the fake, shows running, then, with the
+  report showing the array broken, written with the revision its own bump
+  committed, replaced, and cancelled, a cancel of no mark writing nothing;
+  and the sp latch with the refusals it brings, then its drain, after
   which every extent, metadata unit and capacity key is back and no dnv key
   is left. Before the case tears its
   pool down, the id step runs on the live pool: every counter moves by its

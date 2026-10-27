@@ -22,8 +22,10 @@
 // and delete-retired-leg do not go through the library: each runs the model
 // operation the gateway's handler runs (architecture.md, Repairs; Retired
 // legs), with no revision token; abort-repair runs it through
-// plant.SetRepairAbort. So the worker suite drives an operator's repair as a
-// gateway would.
+// plant.SetRepairAbort, and force-start runs the operation of the gateway's
+// ForceStartGroup through plant.ForceStartGroup, with no revision token
+// either. So the worker suite drives an operator's repair, and a forced
+// start, as a gateway would.
 //
 // `constants`, `geometry` and `meta-units` are the exceptions: they open no
 // client and read no key, so a suite runs them on the DRIVER, on the binary it
@@ -971,6 +973,7 @@ var commands = []command{
 	{"finish-repair", cmdFinishRepair},
 	{"cancel-repair", cmdCancelRepair},
 	{"abort-repair", cmdAbortRepair},
+	{"force-start", cmdForceStart},
 	{"delete-retired-leg", cmdDeleteRetiredLeg},
 	{"list-repairs", cmdListRepairs},
 	{"put-retired-leg", cmdPutRetiredLeg},
@@ -2885,6 +2888,61 @@ func cmdAbortRepair(g *globals, args []string) {
 		"rep_id":   idHex(repId),
 		"sp_rev":   spRev,
 	})
+}
+
+// cmdForceStart writes the forced-start mark of the group --grp, naming the
+// leg --leg, through plant.ForceStartGroup, which runs model.ForceStartGroup,
+// the operation of the gateway's ForceStartGroup, with no revision token;
+// with --cancel it withdraws the mark instead. It prints the revision the
+// mark carries, 0 for a cancel, beside the pool's revision after it, so a
+// case can wait for the primary's report of that revision and the worker's
+// clear (dnv-worker.md AR13).
+func cmdForceStart(g *globals, args []string) {
+	fs := newFlagSet("force-start", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	var grpId, legId hexUint
+	fs.Var(&grpId, "grp", "grp_id of the group (required)")
+	fs.Var(&legId, "leg", "leg_id the array starts from (required unless "+
+		"--cancel)")
+	cancel := fs.Bool("cancel", false, "withdraw the group's mark instead")
+	fs.Parse(args)
+
+	if err := forceStartIds(uint64(grpId), uint64(legId), *cancel); err != nil {
+		usageDie("force-start: %v", err)
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	revision, spRev, err := plant.ForceStartGroup(ctx, cli, cl, target,
+		uint64(grpId), uint64(legId), *cancel)
+	if err != nil {
+		die("force-start: %v", err)
+	}
+	emit(map[string]any{
+		"grp_id":   idHex(uint64(grpId)),
+		"leg_id":   idHex(uint64(legId)),
+		"cancel":   *cancel,
+		"revision": revision,
+		"sp_rev":   spRev,
+	})
+}
+
+// forceStartIds is force-start's check of its ids. A leg exactly when the
+// call is no cancel, since a cancel names no leg, is the gateway's argument
+// check of a ForceStartGroup request (gateway.md GW4); the required group is
+// the driver's own, so that a missing --grp is a usage error and not a
+// failed look-up of group zero.
+func forceStartIds(grpId uint64, legId uint64, cancel bool) error {
+	switch {
+	case grpId == 0:
+		return fmt.Errorf("--grp is required")
+	case cancel && legId != 0:
+		return fmt.Errorf("--cancel takes no --leg")
+	case !cancel && legId == 0:
+		return fmt.Errorf("--leg is required unless --cancel")
+	}
+	return nil
 }
 
 // cmdDeleteRetiredLeg deletes a retired leg through model.DeleteRetiredLeg,

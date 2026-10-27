@@ -4957,12 +4957,16 @@ func volSeedTokenFixture(env *volEnv) {
 	env.putSpConf(conf)
 	// The repair calls' objects (architecture.md, Repairs, Retired legs):
 	// the data group's leg A bad, so a repair of it can be created; a
-	// STARTED repair of the meta group, which a finish takes; and a retired
-	// leg of the data group, which a delete takes.
+	// STARTED repair of the meta group, which a finish takes; a retired leg
+	// of the data group, which a delete takes; and a forced-start mark of
+	// the data group naming leg B, which a cancel withdraws with no agent
+	// call, where a write would read the report of a primary this fixture
+	// cannot dial.
 	repSetLegEpoch(env, volDataGrpId, volDataLegA, repEpoch)
 	repPutRepair(env, "rep-s", volMetaGrpId, volMetaLegA,
 		pb.RepStage_REP_STAGE_STARTED, 811, volSide(812, volDnC))
 	repPutRetired(env, volDataGrpId, 910, volSide(911, volDnD), 22)
+	fsPutMark(env, volDataGrpId, volDataLegB)
 }
 
 // volTokenCase is one SP-scoped mutator of architecture.md, Thin devices
@@ -5347,6 +5351,18 @@ func volTokenCases() []volTokenCase {
 			},
 			bypassCode: codes.OK,
 		},
+		{
+			name: "ForceStartGroup",
+			call: func(env *volEnv, rev *pb.SpRev) error {
+				_, err := env.srv.ForceStartGroup(
+					env.ctx, &pb.ForceStartGroupRequest{
+						ClusterName: env.cluster, SpName: volSpName,
+						SpRev: rev, GrpId: volDataGrpId, Cancel: true,
+					})
+				return err
+			},
+			bypassCode: codes.OK,
+		},
 	}
 }
 
@@ -5414,7 +5430,7 @@ func TestVolumeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 // (architecture.md, `service Gateway` — RPC specifications): a clean run and a
 // single bump (architecture.md, Revision keys and the sync fan-out) for the
 // twenty the fixture satisfies,
-// and that mutator's OWN code and sentence for the eight it does not. What may
+// and that mutator's OWN code and sentence for the six it does not. What may
 // never come back is ABORTED "stale revision"; FinishMigration's case shows why
 // the message and not only the code has to be compared, since its precondition
 // speaks ABORTED too.
