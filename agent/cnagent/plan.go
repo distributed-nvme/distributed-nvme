@@ -426,11 +426,14 @@ func (gp *grpPlan) isStartedBadLeg(legId uint64) bool {
 // start waits for every member it keeps to be available, the open repair's
 // bad leg aside, which is late then as a leg_list member (CN12), and no
 // read's verdict names a member of a group whose array does not run, so
-// nothing else would bring the converge back for a new leg. A provisioning leg
-// defers its whole group ([D15]), so the build never asks about one; it is
-// excluded all the same rather than trusting the caller. A provisioning new
-// leg is excluded too: its side's provisioned flip raises the pool's
-// revision, whose fan-out converges the cntlr again (dnv-worker.md RW18).
+// nothing else would bring the converge back for a new leg. While the mark
+// stands over an array that runs and that no forced start of the pass
+// started, the pass registers the retry for the mark itself (markWaits),
+// whatever this test says. A provisioning leg defers its whole group
+// ([D15]), so the build never asks about one; it is excluded all the same
+// rather than trusting the caller. A provisioning new leg is excluded too:
+// its side's provisioned flip raises the pool's revision, whose fan-out
+// converges the cntlr again (dnv-worker.md RW18).
 func (gp *grpPlan) hasLateMember(
 	available map[uint64]bool,
 	running bool,
@@ -457,6 +460,37 @@ func (gp *grpPlan) hasLateMember(
 		}
 	}
 	return false
+}
+
+// markWaits reports whether the group's forced-start mark stands over an
+// array the pass found running and that no forced start of the pass
+// started: running is ensureGroup's, as hasLateMember reads it, and
+// forcedStarted says that this pass's forced start started the array
+// (forcedStartPass), which then runs from the named leg. The pass registers
+// the CN10 retry for such a mark (cnagent.md CN10, CN12), whose converge
+// reads the array again: one that reads it not running acts on the mark,
+// and one that reads it running registers the retry again, until a converge
+// acts on the mark no more and so registers nothing for it — that of a
+// request without the mark, which the sp worker's clear (dnv-worker.md
+// AR13), the operator's withdrawal of the mark or a finish of the group's
+// repair that retires the bad leg the mark names hands the agent
+// (architecture.md, Repair, Forced start), and that of a request by which
+// the cntlr builds no array of the group, a standby's or one at a level that
+// builds none (CN19). Reason: a broken array reads write-pending during each
+// superblock write md makes to the dead member while it keeps retrying a
+// copy onto a half-copied member (mdRunningStates), so a pass cannot tell
+// such an array from one that runs, and only a converge acts on the mark,
+// while a read of a group whose array does not run brings no converge back
+// (CN30). The cost is a converge every retry interval for as long as a mark
+// stands over an array that runs (cnagent.md, Known limits). A running array
+// that holds a member that is not a dm device is the group's error, running
+// false, and that error registers the retry instead (markedErr). The pass
+// that started the array registers nothing for the mark: the array runs
+// from the named leg, and the worker's clear follows the primary's report
+// of it. A converge of a request no SyncupCntlr of this process delivered
+// holds no mark (dropForcedStartMarks), so it registers nothing for one.
+func (gp *grpPlan) markWaits(running, forcedStarted bool) bool {
+	return gp.mark != nil && running && !forcedStarted
 }
 
 // legPlan is one leg: its side connections and the cn-local dm-linear wrapper

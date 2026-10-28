@@ -856,10 +856,12 @@ while no dm-clone of the clone serves,
 a forced start that ends its pass in an error other than a wait for a
 member (CN12), a read of a group's array before its forced start, the md
 walk's or the array's own, that fails while the group's forced-start mark
-stands (CN12), a member the forced start keeps — the named leg, or another
-but the open repair's bad leg — that is not available while the group's
-mark stands and its array does not run, a repair's new leg among them unless
-it is provisioning (CN12), a `leg_list`
+stands (CN12), a group's forced-start mark that stands over an array the
+pass finds running and that no forced start of the pass started (CN12), a
+member the forced start keeps — the named leg, or another but the open
+repair's bad leg — that is not available while the group's mark stands and
+its array does not run, a repair's new leg among them unless it is
+provisioning (CN12), a `leg_list`
 member of a group that is not available, but for an open repair's bad leg
 while the group's array runs (CN12: a
 promotion whose first converge reads its legs before the sides' ANA flips
@@ -1614,29 +1616,48 @@ dm-clone (CN18).
   that mark's leg, stale by then, would zero the member with the newest
   data. Each pass that acts on the mark, in this order:
 
-  1. An array of the group that runs leaves the mark waiting: the member
-     reconciliation runs over it as it does without a mark, and nothing
-     below runs; one that holds a member that is not a dm device is the
-     group's error, as it is without a mark (above). An array of the group
-     that does not run — broken, or inactive — is stopped, by the node
-     sysfs named, but only when every member it holds is a leg wrapper of
-     this cn naming the cntlr's sp, the test by which the sweep calls an
-     array ours (CN21); one that holds any other member — no dm device, or
-     a dm device of somebody else, such as a co-hosted dn agent's export
-     device in an array udev assembled — is the group's error, and nothing
-     stops it. The stop is verified as the sweep verifies one (`Md.Gone`);
-     a stop that fails is the group's error and ends the pass for the
-     group, and so is a verify that does not answer, though the stop may
-     have gone through: "array_state" reads EBUSY from the moment md marks
-     a stopped array deleted until its "md" directory goes (the md walk,
-     above). Reason: such an array serves nothing and holds its members,
-     so mdadm could neither zero them nor assemble the named leg, and a
-     forced assembly that fails can itself leave one that holds the named
-     leg. Reason for the member test: an array with a
-     member that is not ours may serve someone else, so the forced start
-     stops no array the sweep would leave alone, and the operator stops it.
-     Nothing stops an array that runs: the mark is for a group whose array
-     does not.
+  1. An array of the group that runs leaves the mark waiting, and the pass
+     registers the CN10 background retry: the member reconciliation runs
+     over it as it does without a mark, and nothing below runs; one that
+     holds a member that is not a dm device is the group's error, as it is
+     without a mark (above). Reason for the retry: md shows a broken
+     array's "array_state" as write-pending, a running state (above),
+     during each superblock write it makes to a dead member while it
+     retries a copy (`cnagent_integtest.md`, Lab facts), so a pass cannot
+     tell such an array from one that runs, and only a converge acts on
+     the mark, while a read of a group whose array does not run names
+     nothing for it (CN30); and an array that holds a member that is not a
+     dm device, read broken, meets the refusal below, which retries too.
+     The retry's converge reads the array again: one that reads it not
+     running runs the steps below, and one that reads it running registers
+     the retry again. A converge that acts on no mark registers nothing
+     for one: that of a request without the mark, which the worker's clear
+     (`dnv-worker.md` AR13), the operator's withdrawal of the mark
+     (`architecture.md`, Repairs, `ForceStartGroup`), or a finish of the
+     group's repair that retires the bad leg the mark names
+     (`architecture.md`, Repair, Forced start) hands the agent, and that of
+     a request by which the cntlr builds no array of the group, a standby's
+     or one at a level that builds none (CN19). The cost is a converge
+     every retry interval for as long as a mark stands over an array that
+     runs (Known limits). An array of the group that does not run — broken,
+     or inactive — is stopped, by the node sysfs named, but only when every
+     member it holds is a leg wrapper of this cn naming the cntlr's sp, the
+     test by which the sweep calls an array ours (CN21); one that holds any
+     other member — no dm device, or a dm device of somebody else, such as
+     a co-hosted dn agent's export device in an array udev assembled — is
+     the group's error, and nothing stops it. The stop is verified as the
+     sweep verifies one (`Md.Gone`); a stop that fails is the group's error
+     and ends the pass for the group, and so is a verify that does not
+     answer, though the stop may have gone through: "array_state" reads
+     EBUSY from the moment md marks a stopped array deleted until its "md"
+     directory goes (the md walk, above). Reason: such an array serves
+     nothing and holds its members, so mdadm could neither zero them nor
+     assemble the named leg, and a forced assembly that fails can itself
+     leave one that holds the named leg. Reason for the member test: an
+     array with a member that is not ours may serve someone else, so the
+     forced start stops no array the sweep would leave alone, and the
+     operator stops it. Nothing stops an array that runs: the mark is for a
+     group whose array does not.
   2. The named leg is a member the forced start keeps, it is available
      this pass, and its superblock, read with the human-readable
      `mdadm --examine`, shows a full member: the role of a place in the
@@ -1717,7 +1738,8 @@ dm-clone (CN18).
   step 1, the md walk's or the array's own, fails while the mark stands,
   as when it does not answer or finds two arrays that hold legs of the
   group, since that pass cannot tell whether the array runs; a retry over
-  an array that in fact runs finds it running, and the mark waits. Reason:
+  an array that in fact runs finds it running, and the mark waits with the
+  retry registered again (step 1). Reason:
   the worker re-syncs on a revision or a reply code, never on a row, and a
   read of a group whose array does not run names
   nothing for it (CN30), so no converge would come back to try again after
@@ -1726,7 +1748,10 @@ dm-clone (CN18).
   stop that went through unverified or a first assembly that left the old
   identity; an error that lasts, such as a named leg that is no full member
   or a stop a layer above refuses, retries at the retry interval for as
-  long as it lasts, as a member that stays dead does. At a level that
+  long as it lasts, as a member that stays dead does. A pass whose forced
+  start starts the array registers no retry for the mark: the array then
+  runs from the named leg, and the worker's clear follows the primary's
+  report of it. At a level that
   builds no group array the mark does nothing (CN19); and a layer above
   can hold an array of the group that does not run open, so that the stop
   of step 1 fails on that primary: at a level that builds thin pools the
@@ -4152,20 +4177,31 @@ would be a leftover report no `Syncup*` could ever clear.
   (`dnv-worker.md` AR5, AR7) moves the role to a cntlr that holds no array
   of the group, or the level takes the pools, or the clones, away.
 * A mark can meet md mid-retry: while md retries a copy whose only source
-  is dead, the array reads write-pending or active between its reads of
-  broken, both of which CN12 counts as running, so a pass that comes then
-  leaves the mark waiting, its row `OK`. md never fails its last in-sync
+  is dead, the array can read write-pending or active between its reads of
+  broken, both of which CN12 counts as running, for as long as the
+  half-copied member stays in the array (`cnagent_integtest.md`, Lab
+  facts), so a pass that comes then leaves the mark waiting, its row `OK`,
+  and registers the CN10 retry, whose converge acts on the mark once it
+  reads the array not running (CN12). md never fails its last in-sync
   member, so a report from that window reads the dead source in sync, and
   the worker's clear takes the forced start as done while that source's
   own leg row still reads `OK`, before the leg's probe finds it dead
   (`dnv-worker.md` AR13; CN11): the mark goes, and the array stays down
-  until the operator marks it again. Once md settles the array broken, no
-  reply code brings a converge, and the CN10 retry that a pass registers
-  while the array reads running comes only for a `leg_list` leg other than
-  the open repair's bad leg that is not available (CN12): a dead source
-  that is such a leg brings the converge, while one that is the bad leg or
-  a repair's new leg leaves the forced start waiting for a converge that
-  comes for another reason (`cnagent_integtest.md`, Lab facts).
+  until the operator marks it again.
+* A mark over an array that runs costs a converge every
+  `CnConnectRetryInterval` while the mark stands and the array runs: the
+  pass that finds the array running registers the CN10 retry for the mark
+  (CN12), and the worker clears the mark only from a report that shows the
+  start done (`dnv-worker.md` AR13). No report shows it while the group's
+  row does not read `OK` — as while the in-sync guard holds, a member
+  change fails, or the array holds a member that is not a dm device
+  (CN12) — or while every leg md holds in sync has a leg row that does not
+  read `OK`; the retry then runs until that ends and the clear comes, the
+  mark goes another way (`architecture.md`, Repairs, `ForceStartGroup`;
+  Repair, Forced start), a converge reads the array not running and runs
+  the forced start, or the cntlr builds the group's array no more (CN12),
+  each attempt holding the cntlr's reads off while it runs, as the
+  late-member retry's do (below).
 * A copy md ended on bad blocks reads as a full member: when the leg that
   kept the data comes back before its broken array is stopped, md can end
   the copy onto the new leg by recording each region it could not read as

@@ -449,29 +449,7 @@ func TestForcedStartCountsAStopTheKernelCompleted(t *testing.T) {
 // row names it, and the retry it registers stops it in its turn and starts
 // the array from the named leg.
 func TestForcedStartLeavesASecondArrayFoundAfterTheStop(t *testing.T) {
-	f := newRepFix(t, allLegs...)
-	f.syncup(t, quietLevel(3))
-	// A split mirror: the group's array holds leg 2 alone, and a second
-	// array holds leg 1.
-	f.node.mu.Lock()
-	array := f.node.arrays[f.mdDev]
-	array.members = slices.DeleteFunc(slices.Clone(array.members),
-		func(member string) bool { return member == f.leg1 })
-	array.degraded = 1
-	f.node.publishArray(array)
-	f.node.mu.Unlock()
-	f.node.setArrayState(f.mdDev, "broken")
-	node := f.node.mdNode(f.mdDev)
-	f.node.seedArray("/dev/md/split", "split", f.leg1)
-	f.node.setArrayState("/dev/md/split", "inactive")
-	split := f.node.mdNode("/dev/md/split")
-	// The sweep's listing of the second array's md/ answers, the build's
-	// walk's does not, and the walk after the stop answers again.
-	f.node.mu.Lock()
-	f.node.killCmdNth["list "+sysfsBlockDir+"/"+
-		strings.TrimPrefix(split, "/dev/")+"/md"] = 2
-	f.node.mu.Unlock()
-	f.node.Reset()
+	f, node, split := splitAfterTheStop(t, "inactive")
 	info := f.syncup(t, withMark(quietLevel(4), testDataLeg2))
 	if !f.node.hasCall("cmd mdadm --stop " + node) {
 		t.Fatalf("no stop of the broken array, which the first read " +
@@ -492,6 +470,66 @@ func TestForcedStartLeavesASecondArrayFoundAfterTheStop(t *testing.T) {
 		zeroOf(f.leg1),
 		f.forced(f.leg2, mdUpdateUuid),
 		f.add(f.leg1))
+}
+
+// splitAfterTheStop is TestForcedStartLeavesASecondArrayFoundAfterTheStop's
+// node, the second array in state: a split mirror, the group's broken array
+// holding leg 2 alone and the second array leg 1, the second array's md/
+// listing answering the sweep and the walk after the stop but not the
+// build's first walk. node and split are the two arrays' kernel nodes.
+func splitAfterTheStop(
+	t *testing.T,
+	state string,
+) (f *repFix, node, split string) {
+	t.Helper()
+	f = newRepFix(t, allLegs...)
+	f.syncup(t, quietLevel(3))
+	f.node.mu.Lock()
+	array := f.node.arrays[f.mdDev]
+	array.members = slices.DeleteFunc(slices.Clone(array.members),
+		func(member string) bool { return member == f.leg1 })
+	array.degraded = 1
+	f.node.publishArray(array)
+	f.node.mu.Unlock()
+	f.node.setArrayState(f.mdDev, "broken")
+	node = f.node.mdNode(f.mdDev)
+	f.node.seedArray("/dev/md/split", "split", f.leg1)
+	f.node.setArrayState("/dev/md/split", state)
+	split = f.node.mdNode("/dev/md/split")
+	f.node.mu.Lock()
+	f.node.killCmdNth["list "+sysfsBlockDir+"/"+
+		strings.TrimPrefix(split, "/dev/")+"/md"] = 2
+	f.node.mu.Unlock()
+	f.node.Reset()
+	return f, node, split
+}
+
+// TestForcedStartRetriesASecondArrayThatRuns is
+// TestForcedStartLeavesASecondArrayFoundAfterTheStop with the second array
+// running (forcedStartPass, grpPlan.markWaits; cnagent.md CN12): after the
+// stop of the broken array the read finds the running one, and the member
+// reconciliation runs over it as without a mark, nothing zeroed or
+// assembled beside it, its add of leg 2 failing here; the pass ran no
+// forced start, so it leaves the mark waiting and registers the retry, as a
+// pass whose first read finds the array running does, whether or not that
+// reconciliation goes through.
+func TestForcedStartRetriesASecondArrayThatRuns(t *testing.T) {
+	f, node, split := splitAfterTheStop(t, "clean")
+	f.syncup(t, withMark(quietLevel(4), testDataLeg2))
+	if !f.node.hasCall("cmd mdadm --stop " + node) {
+		t.Fatalf("no stop of the broken array, which the first read " +
+			"matched alone")
+	}
+	assertNoCall(t, f.node, "cmd mdadm --stop "+split)
+	assertNoCall(t, f.node, "--zero-superblock")
+	assertNoCall(t, f.node, "cmd mdadm --assemble")
+	if !f.node.hasCall(f.add(f.leg2)) {
+		t.Fatalf("no member reconciliation over the second array")
+	}
+	if !retrying(t, f.srv) {
+		t.Fatalf("the mark over the second array, which runs, registered " +
+			"no retry")
+	}
 }
 
 // TestForcedStartRetriesAReadBeforeIt pins the retry of a pass whose read of
@@ -598,6 +636,187 @@ func TestForcedStartRetriesAWalkBeforeIt(t *testing.T) {
 					"left the retry")
 			}
 		})
+	}
+}
+
+// assertMarkLeftWaiting checks that a converge acted on no mark: it
+// stopped, zeroed and assembled nothing, and did not examine the named leg,
+// the one member the forced start examines.
+func (f *repFix) assertMarkLeftWaiting(t *testing.T, named string) {
+	t.Helper()
+	assertNoCall(t, f.node, "cmd mdadm --stop ")
+	assertNoCall(t, f.node, "--zero-superblock")
+	assertNoCall(t, f.node, examineOf(named))
+	assertNoCall(t, f.node, "cmd mdadm --assemble")
+}
+
+// TestForcedStartRetriesAnArrayReadRunning pins the retry of a pass that
+// reads the marked group's array running and so runs no forced start
+// (grpPlan.markWaits; cnagent.md CN12, the forced start, step 1), in the
+// shape the e2e met: the open repair's bad leg, dead, is the one member md
+// holds in sync, leg 2 is the half-copied member md keeps retrying the copy
+// onto, and array_state reads write-pending, as md reads a broken array
+// during each superblock write it makes to the dead member. The marked
+// converge leaves the mark waiting, its group row OK with the dead bad leg
+// in sync, and registers the retry, though no member is late: the bad leg is
+// no late member while the array runs (hasLateMember). The retry's
+// converge, which reads the array broken, stops it and starts it from the
+// named leg, the repair's new leg taken from a retired leg, and registers
+// the retry no more.
+func TestForcedStartRetriesAnArrayReadRunning(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.syncup(t, quietLevel(3))
+	f.copying(f.leg2, "1")
+	f.badLegDead()
+	f.node.setArrayState(f.mdDev, "write-pending")
+	f.node.setSuperblock(f.newLegDev, fakeSuperblock{
+		role: "Active device 1", events: 40})
+	node := f.node.mdNode(f.mdDev)
+	f.node.Reset()
+	logs := captureLogs(t)
+	info := f.syncup(t, withMark(takenBackReq(4,
+		pb.RepStage_REP_STAGE_CREATED, false,
+		repOpts{level: pb.SpLevel_SP_LEVEL_NO_THINPOOL, noSubsys: true}),
+		repNewLeg))
+	f.assertMarkLeftWaiting(t, f.newLegDev)
+	f.assertMdCalls(t, "the converge over the array read running")
+	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+	assertReading(t, info, "the array read running", false, testDataLeg)
+	if !retrying(t, f.srv) {
+		t.Fatalf("the mark over the array read running registered no retry")
+	}
+
+	f.node.setArrayState(f.mdDev, "broken")
+	f.node.Reset()
+	retryAttempt(t, f.srv)
+	assertOrder(t, f.node,
+		"cmd mdadm --stop "+node,
+		examineOf(f.newLegDev),
+		zeroOf(f.leg2),
+		f.forced(f.newLegDev, mdUpdateUuid),
+		f.add(f.leg2))
+	assertNoCall(t, f.node, zeroOf(f.leg1))
+	assertNoCall(t, f.node, f.add(f.leg1))
+	assertForcedRecord(t, logs, repNewLeg, mdUpdateUuid, testDataLeg2)
+	if retrying(t, f.srv) {
+		t.Fatalf("the retry's converge that started the array left the " +
+			"retry")
+	}
+}
+
+// TestForcedStartRetriesUntilTheClear pins how long the retry of a mark
+// over an array that runs lasts (grpPlan.markWaits; cnagent.md CN10, CN12):
+// the marked converge of a clean array with every leg available reconciles
+// it as with no mark and registers the retry; the retry's converge, which
+// reads the array running again, acts on no mark either and registers the
+// retry again; and the converge of the request without the mark, the sp
+// worker's clear (dnv-worker.md AR13) that a SyncupCntlr delivers, ends it.
+// The startup reconcile of the stored marked request over the same running
+// array registers none, since it acts on no mark (dropForcedStartMarks), and
+// the SyncupCntlr that then delivers the mark registers it.
+func TestForcedStartRetriesUntilTheClear(t *testing.T) {
+	t.Run("the clear ends it", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		f.syncup(t, quietLevel(3))
+		f.node.Reset()
+		info := f.syncup(t, withMark(quietLevel(4), testDataLeg2))
+		f.assertMarkLeftWaiting(t, f.leg2)
+		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+		if !retrying(t, f.srv) {
+			t.Fatalf("the mark over the running array registered no retry")
+		}
+		f.node.Reset()
+		retryAttempt(t, f.srv)
+		f.assertMarkLeftWaiting(t, f.leg2)
+		if !retrying(t, f.srv) {
+			t.Fatalf("the retry's converge over the running array ended " +
+				"the retry")
+		}
+		f.syncup(t, quietLevel(5))
+		if retrying(t, f.srv) {
+			t.Fatalf("the converge of the clear left the retry")
+		}
+	})
+	t.Run("a stored mark", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		f.syncup(t, quietLevel(3))
+		req := withMark(quietLevel(4), testDataLeg2)
+		path := f.srv.nf.LocalCntlrPath(testCluster, testCn, testSp,
+			testCntlr)
+		if err := f.srv.store.Save(f.ctx, path, req); err != nil {
+			t.Fatalf("saving the marked request: %v", err)
+		}
+		f.node.Reset()
+		fresh := newCnServer(f.node)
+		fresh.retryInterval = time.Hour
+		reconcileForTest(t, fresh)
+		f.srv = fresh
+		f.assertMarkLeftWaiting(t, f.leg2)
+		if retrying(t, f.srv) {
+			t.Fatalf("the startup reconcile of a stored mark over the " +
+				"running array registered the retry")
+		}
+		f.syncup(t, req)
+		if !retrying(t, f.srv) {
+			t.Fatalf("the delivered mark over the running array " +
+				"registered no retry")
+		}
+	})
+}
+
+// TestForcedStartRetriesARunningArrayWithAForeignMember pins the retry of a
+// pass that reads the marked group's array running while it holds a member
+// that is not a dm device (markedErr; cnagent.md CN12, the forced start,
+// step 1): the array is the group's error, as without a mark, nothing is
+// stopped, zeroed or assembled, and the pass registers the retry, as a pass
+// that reads the same array broken does through the forced start's refusal
+// of it (MdDetail.strangerErr), so the retry does not depend on which state
+// md shows the pass. Once that member is out of the array and md reads it
+// broken, the retry's converge stops it, starts it from the named leg and
+// registers the retry no more.
+func TestForcedStartRetriesARunningArrayWithAForeignMember(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.syncup(t, levelReq(3, pb.SpLevel_SP_LEVEL_NO_THINPOOL))
+	f.node.mu.Lock()
+	array := f.node.arrays[f.mdDev]
+	members := slices.Clone(array.members)
+	name := array.name
+	f.node.mu.Unlock()
+	f.node.seedArray(f.mdDev, name,
+		append(slices.Clone(members), "/dev/sdb1")...)
+	f.node.setArrayState(f.mdDev, "write-pending")
+	f.node.Reset()
+	info := f.syncup(t, withMark(
+		levelReq(4, pb.SpLevel_SP_LEVEL_NO_THINPOOL), testDataLeg2))
+	assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
+		"holds a foreign member", "grp data")
+	f.assertMarkLeftWaiting(t, f.leg2)
+	if f.node.arrayGone(f.mdDev) {
+		t.Fatalf("the array that holds a member that is not ours is gone")
+	}
+	if !retrying(t, f.srv) {
+		t.Fatalf("the mark over the running array that holds a member " +
+			"that is no dm device registered no retry")
+	}
+
+	// The operator takes the member out, and md reads the array broken.
+	f.node.mu.Lock()
+	array = f.node.arrays[f.mdDev]
+	array.members = members
+	f.node.publishArray(array)
+	f.node.mu.Unlock()
+	f.node.setArrayState(f.mdDev, "broken")
+	node := f.node.mdNode(f.mdDev)
+	f.node.Reset()
+	retryAttempt(t, f.srv)
+	assertOrder(t, f.node,
+		"cmd mdadm --stop "+node,
+		zeroOf(f.leg1),
+		f.forced(f.leg2, mdUpdateUuid),
+		f.add(f.leg1))
+	if retrying(t, f.srv) {
+		t.Fatalf("the retry's converge that started the array left the " +
+			"retry")
 	}
 }
 
@@ -1134,8 +1353,9 @@ func TestForcedStartLevelBuildsNoGroup(t *testing.T) {
 // named leg or a member to zero, and a wait zeroes nothing, even a member
 // that comes before the missing one; a provisioning new leg it waits for
 // registers none, its provisioned flip bringing the converge (dnv-worker.md
-// RW18); with the array running it does not, the mark waiting for the
-// worker's clear.
+// RW18); with the array running the new leg is no late member, and the
+// retry the pass registers is the mark's, which waits over the running
+// array (grpPlan.markWaits; TestForcedStartRetriesUntilTheClear).
 func TestForcedStartLateMember(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1181,11 +1401,32 @@ func TestForcedStartLateMember(t *testing.T) {
 		f := newRepFix(t, allLegs...)
 		f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
 		f.legDead(repNewLeg, testIp, testSvcId)
-		f.syncup(t, withMark(
-			repairReq(4, pb.RepStage_REP_STAGE_CREATED, false,
-				repOpts{noSubsys: true}), testDataLeg2))
-		if retrying(t, f.srv) {
-			t.Fatalf("the waiting mark registered the retry")
+		req := withMark(repairReq(4, pb.RepStage_REP_STAGE_CREATED, false,
+			repOpts{noSubsys: true}), testDataLeg2)
+		f.syncup(t, req)
+		// The mark's own retry hides the late-member term over a running
+		// array, so the term is read off the converge's plan.
+		var gp *grpPlan
+		for _, g := range newCntlrPlan(f.srv.nf, req).grps {
+			if g.grpId == testDataGrp {
+				gp = g
+			}
+		}
+		if gp == nil {
+			t.Fatalf("the plan has no data group")
+		}
+		available := map[uint64]bool{testDataLeg: true, testDataLeg2: true}
+		if gp.hasLateMember(available, true) {
+			t.Fatalf("the new leg the forced start keeps is late over the " +
+				"running array")
+		}
+		if !gp.hasLateMember(available, false) {
+			t.Fatalf("the new leg the forced start keeps is not late with " +
+				"no array running")
+		}
+		if !retrying(t, f.srv) {
+			t.Fatalf("the mark waiting over the running array registered " +
+				"no retry")
 		}
 	})
 }

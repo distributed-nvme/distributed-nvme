@@ -16534,15 +16534,17 @@ REACT_FS_REFUSAL=""
 # array down for, on every poll in a row, before a forced-start step goes on,
 # and the driver-clock instant the hold under way began, -1 while none runs,
 # which each caller sets before its wait. While md retries a copy whose only
-# source is dead, the array reads write-pending and active between its reads
-# of broken, which cnagent.md CN12 counts as running, before it settles
-# broken (cnagent_integtest.md, Lab facts); a converge of the primary's in
-# that swing leaves the mark waiting (cnagent.md, Known limits). The hold
-# spans several of the primary's check rounds, as a cntlr's rounds come at
-# cntlr_interval.
-# A swing shorter than one poll can still fall between two polls: the hold
-# makes that unlikely and does not rule it out. A count of this suite's
-# choosing, not a constant of the tree.
+# source is dead, the array can read write-pending and active between its
+# reads of broken, which cnagent.md CN12 counts as running, for as long as
+# the half-copied member stays in the array (cnagent_integtest.md, Lab
+# facts); a converge of the primary's in that swing leaves the mark waiting
+# and registers the CN10 retry, whose converge runs the forced start once it
+# reads the array not running (cnagent.md CN12). The hold spans several of
+# the primary's check rounds, as a cntlr's rounds come at cntlr_interval,
+# and makes it likely that the mark's own converge runs the forced start;
+# the step's proof reads the agent's log from a line, not a trace id, so a
+# start the retry runs passes it too. A count of this suite's choosing, not
+# a constant of the tree.
 REACT_FS_HOLD_ROUNDS=5
 REACT_FS_DOWN_SINCE=-1
 

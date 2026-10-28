@@ -4976,10 +4976,14 @@ repair_forced_start() {
 	log "  the new leg mid-copy: $mrd"
 	# Y dies for CN2 alone: DN1's export of Y to CN2 errors every IO, while
 	# CN2's path to it stays live and optimized.
-	# md retries the copy from the dead Y for a while, the array reading
-	# write-pending and active between its reads of broken, which CN12
-	# counts as running; the stage waits until it reads broken ten seconds
-	# in a row (cnagent_integtest.md, Lab facts).
+	# md can retry the copy from the dead Y for as long as Z stays in the
+	# array, the array reading write-pending and active between its reads of
+	# broken, which CN12 counts as running; the stage waits until it reads
+	# broken ten seconds in a row (cnagent_integtest.md, Lab facts). A
+	# converge that read a running state would leave the mark to the CN10
+	# retry (cnagent.md CN12), whose attempts carry trace ids of their own,
+	# which the next stages' counts do not read: the hold makes that
+	# unlikely and does not rule it out.
 	assert_eq "$(helper 1 "dm_error_load $ylin")" loaded \
 		"repair copydeath: Y's export to cn2 erroring"
 	deadline=$((SECONDS + 180))

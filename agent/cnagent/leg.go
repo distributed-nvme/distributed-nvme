@@ -927,9 +927,11 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 // clone stopped the build (CN18 says which), a group's leg_list holds a
 // member that is not available, other than an open repair's bad leg while
 // the group's array runs, a forced start waits for a member that is not
-// available, a forced start ends the pass in any other error, or a read of
-// a group's array before its forced start fails while the group's mark
-// stands (CN12),
+// available, a forced start ends the pass in any other error, a read of a
+// group's array before its forced start fails while the group's mark
+// stands, or the group's mark stands over an array the pass found running
+// and that no forced start of the pass started (CN12, grpPlan.markWaits,
+// markedErr),
 // the build failed to move the ANA group of a namespace or a transfer (CN16,
 // CN17), or the build left the device of a namespace or a transfer whose
 // desired group is optimized off what the desired state wants — held off

@@ -342,8 +342,8 @@ func (s *CnAgentServer) build(
 					detailsProvisioning)
 				continue
 			}
-			detail, running, refusal, err := s.ensureGroup(ctx, plan, gp,
-				available, info.LegIdToLeg)
+			detail, running, forcedStarted, refusal, err := s.ensureGroup(
+				ctx, plan, gp, available, info.LegIdToLeg)
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
 			// CN28: the array's reading and the repair's verdict, from the
@@ -352,6 +352,7 @@ func (s *CnAgentServer) build(
 				reportGrpReading(info, gp, detail, refusal)
 			}
 			if gp.hasLateMember(available, running) ||
+				gp.markWaits(running, forcedStarted) ||
 				forcedStartRetries(err) {
 				late = true
 			}
@@ -381,7 +382,19 @@ func (s *CnAgentServer) build(
 		// of the group's array before it that fails while the mark stands
 		// (forcedStartRetries, markedErr), for the same reason: a read of an
 		// array that does not run names nothing and brings no reply code, so
-		// only the retry's converge tries the forced start again.
+		// only the retry's converge tries the forced start again. So does a
+		// mark that stands over an array the pass found running and that no
+		// forced start of the pass started (grpPlan.markWaits; markedErr for
+		// such an array that holds a member that is not a dm device): a
+		// broken array reads write-pending during each superblock write md
+		// makes to the dead member (mdRunningStates), so the pass cannot tell
+		// it from one that runs, and the retry's converge reads it again
+		// until a converge acts on the mark no more — that of a request
+		// without the mark, from the worker's clear (dnv-worker.md AR13), the
+		// operator's withdrawal or a repair's finish that retires the leg the
+		// mark names, or of one by which this cntlr builds no array of the
+		// group. The pass that started the array registers nothing for its
+		// mark.
 		s.startConnectRetry(st, plan)
 		retryNeeded = true
 	}

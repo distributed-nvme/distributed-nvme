@@ -152,12 +152,16 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   recovery offset only on a member md was copying onto, its events count
   and its array's identity; the export form prints no role and no recovery
   offset (`cnagent.md` CN12).
-* When the leg md copies from dies, md retries the copy a while, the array
-  reading write-pending and active between its reads of broken, then reads
-  broken; the half-copied member's recovery offset can then read the largest
-  sector number, once md has run the copy to its end over the regions it
-  could not read. A broken array holds its members, and mdadm refuses to
-  zero a member any array holds; nothing holding it open, it stops. Stopped
+* When the leg md copies from dies, md can retry the copy onto the
+  half-copied member for as long as that member stays in the array, and
+  writes its superblock to the dead member as it does: the array reads
+  broken only while it is otherwise clean, and write-pending during each
+  such write, active after one, so its state can keep moving between broken
+  and those running states until the array is stopped. The half-copied
+  member's recovery offset can read the largest sector number, once md has
+  run the copy to its end over the regions it could not read. A broken
+  array holds its members, and mdadm refuses to zero a member any array
+  holds; nothing holding it open, it stops. Stopped
   while the leg it copied from is still dead, the half-copied member keeps
   its recovery offset, and md starts no array from it alone. Once that leg
   is back before the stop, md can instead record each region it could not
