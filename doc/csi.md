@@ -1,9 +1,10 @@
 # csi.md — dnv-csi, the CSI driver, and its suite
 
-This document owns the Kubernetes side of dnv: dnv-csi, the driver that
+This document owns the Kubernetes side of dnv: `dnv-csi`, the driver that
 connects dnv to Kubernetes through the Container Storage Interface (CSI),
-the plugin API Kubernetes uses to create, attach and mount volumes, and the
-suite that proves it, `integtest/csi_test.sh`. It leans on
+the plugin API Kubernetes uses to create, attach and mount volumes, in
+`cmd/dnv-csi/` and `csi/`, and the suite that proves it,
+`integtest/csi_test.sh`. It leans on
 `architecture.md` for the object model and the API contract, on
 `gateway.md` for each call the driver makes, and on `cdc.md` for what a host
 must do to follow a pool's cntlrs.
@@ -50,6 +51,125 @@ subsystems it has staged, drops a path the cdc withdraws, and touches no
 other connection. It never talks to the gateway: the controller plugin
 hands it the subsystem NQN, the namespace uuid and the cdc addresses at
 attach time.
+
+## The driver
+
+dnv-csi is one program with one subcommand per plugin; the controller
+subcommand serves the identity service and the controller plugin, and the
+node subcommand the identity service and the node plugin. Each is a thin
+main over the library package `csi`: flags, a config file and the
+environment are one thing, bound under the prefix `DNV_CSI`, as for every
+daemon (`architecture.md`, Components: invocation reference). The controller
+plugin takes the socket to serve (`--csi-address`), the gateway's address
+(`--gateway-address`), the cdc addresses it hands to the node plugin at
+attach (`--cdc-addresses`) and the bound on one gateway call
+(`--gateway-timeout`); a cdc address is an IP literal and a port, since the
+node connects to it as the kernel's discovery address. The identity service
+reports the driver's name and version, and the controller plugin's identity
+advertises the controller service.
+
+CSI7. **The gateway is the controller plugin's only peer.** It holds one
+plaintext connection to the gateway under the shared client chain and the
+shared message limit (`grpc.md`, Wiring), and every gateway call is bounded
+by the configured timeout, which is kept below what the provisioner sidecar
+gives a whole create, since a create makes several calls. It never touches
+etcd and never talks to an agent or a node. A gateway code passes through
+to the CSI caller behind a message that names the call; a connection
+failure is UNAVAILABLE, which every sidecar retries.
+
+CSI8. **The CSI services take the driver's own interceptor.** The gRPC
+rules of the tree bind the dnv services only (`grpc.md`, Placement), and the
+shared server interceptor logs every message, so the CSI services get a
+chain of their own, under the shared message limit as every server of the
+tree: it mints a trace id for each call, since the kubelet
+and the sidecars send none, logs the method on the way in and the method,
+the code and the duration on the way out, and never logs a request or a
+reply, so nothing the kubelet may send as a secret reaches a log. The
+liveness probe's successes are left out of those records. The minted id
+travels to the gateway on the shared client chain, so the gateway's records
+of the calls a CSI call makes carry it.
+
+CSI9. **Create makes four objects in order, each step repeatable.** The
+pool, named as the volume: one slice, the class's redundancy and cntlr
+count, the cluster's defaults for the rest, and a first data group of one
+eighth of the volume rounded up to whole extents and at least one. The thin
+device, named as the volume, sized to the request rounded up to the pool's
+unit, the stripe size: the required bytes rounded up, or the limit rounded
+down when only a limit is given, or the driver's default when neither is,
+and OUT_OF_RANGE when no multiple of the unit fits the range. The
+subsystem with the volume's NQN and no host. The namespace at index one
+with the volume's uuid. A step that finds its object there reads it back
+and goes on when it matches; a thin device of another size is
+ALREADY_EXISTS, the spec's word for an incompatible volume of the same
+name; a namespace that is not the volume's is ALREADY_EXISTS too; a pool
+still being deleted under the name is ABORTED, so the caller retries once
+the drain has removed it. The create returns once the four records exist;
+the node plugin waits for the device. A delete marks the pool deleting and
+answers done; a pool that is absent or already deleting is done, and so is
+an id that names no volume of this driver. A create from a snapshot or
+another volume is refused.
+
+## Attach and detach
+
+CSI10. **Attach sets the host list to the node alone.** A node id is the
+node's host NQN, which the node plugin reports and the controller plugin
+checks the form of: an id of another form names no node of this driver,
+NOT_FOUND. Attach reads the volume's subsystem: the node already alone in
+the allowed hosts is done; an empty list is set to the node; another node in
+it is FAILED_PRECONDITION, the spec's word for a volume published elsewhere
+under single-node access, naming that node. The reply's publish context
+carries the subsystem NQN, the namespace uuid as the record holds it, and
+the cdc addresses joined by commas; the volume context of a create carries
+the NQN and the uuid as well. Detach takes the node out of the list, which
+empties it, or empties it outright when no node is named; a node not in the
+list, a subsystem or a pool that is gone, and an id of another form are all
+done.
+
+## Capacity
+
+CSI11. **Capacity is arithmetic over the cluster capacity call.** The
+available bytes are the smaller of two sides. The disk side is the free
+extents of the disk nodes that are enabled, healthy and below their side
+ceiling, times the extent size, divided by the legs a group has under the
+class's redundancy. The controller side is the free extents of the
+controller nodes that are enabled, healthy and below their cntlr ceiling,
+times the extent size, divided by the class's cntlr count, since every
+cntlr charges its controller node the pool's footprint. The largest volume
+is bounded by the disk node that would carry its last leg: the legs-th
+largest free count, less the meta group's extent, times the extent size,
+times eight, since the first data group is one eighth of the volume; and
+never above the available bytes. Both are estimates, as the capacity call's
+records are (`architecture.md`, Clusters), and the available bytes can be
+over-promised, since a volume reserves one eighth of itself (The volume
+model). A cluster the class names that does not exist is the class's error,
+INVALID_ARGUMENT.
+
+## Parameters and capabilities
+
+CSI12. **Three parameters, single-node access, two filesystems.** A storage
+class carries the cluster name, with the gateway's default when absent, the
+redundancy, RAID1 or none, with RAID1 when absent, and the cntlr count,
+with the gateway's default when absent; any other key is INVALID_ARGUMENT,
+so a typo never passes silently, except the keys Kubernetes reserves for
+itself, which are ignored, since the provisioner strips them from a create
+but hands them over whole with a capacity query. A volume capability is a
+single-node access mode, in every form the spec has for one node, and a
+block volume or a mount volume of ext4 or xfs, ext4 when no filesystem is
+named; a multi-node mode or another filesystem is INVALID_ARGUMENT on a
+create and leaves a validation unconfirmed with the reason. The controller
+plugin advertises create and delete, publish and unpublish, and get
+capacity, and nothing else; the volume list, snapshots, expansion and
+modification are not served.
+
+## Log records
+
+The controller plugin logs `csi controller starting` with its endpoint,
+gateway address, cdc addresses and version, `csi controller serving` once
+it listens, and `csi controller stopping` when it ends. Every CSI call but
+a successful probe logs `csi request` with the method and `csi reply` with
+the method, the code, the duration and, on a failure, the error, under the
+trace id the interceptor minted (CSI8). The gateway calls a CSI call makes
+are the shared client chain's records under the same id.
 
 ## The Kubernetes lab
 

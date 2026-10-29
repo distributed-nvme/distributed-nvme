@@ -12,7 +12,7 @@ contract that the choice of stream serves.
 
 All logging code is shared and lives in package `common`, in `common/log.go`.
 Every dnv binary (`dnv-gateway`, `dnv-worker`, `dnv-agent`, `dnv-cdc`,
-`dnvctl`) imports `common`, so its `init` installs the default logger before
+`dnv-csi`, `dnvctl`) imports `common`, so its `init` installs the default logger before
 any `main` runs. `NewTraceId` relies on `rand.Read` of `crypto/rand` never
 failing, a guarantee of the Go version `go.mod` pins; the protobuf rendering
 helper uses the protobuf module `go.mod` requires.
@@ -31,7 +31,7 @@ R2. The handler chain is `TraceIdHandler` wrapping a `slog.NewJSONHandler` on
     result a script pipes — and what it buys is that **stdout is the payload
     channel** of every dnv binary: dnvctl's one result document (`dnvctl.md`
     CT7), and nothing from a running daemon (cobra's own `--help` text is
-    all four ever put there). A consumer that reads stdout alone therefore
+    all five ever put there). A consumer that reads stdout alone therefore
     gets the result and never a log record. The etcd client's own logger is
     silenced (`zap.NewNop`, in `etcdutil`) so that stderr carries one JSON
     stream and it is dnv's — a daemon that exits on an error prints that
@@ -79,10 +79,10 @@ R5. The trace id is carried in the context under an unexported key and
     is nested inside that group rather than at the top level — see R12 — so
     a consumer that greps `trace_id` positionally must account for it.
 
-R6. Log levels per binary: the four daemons — `dnv-gateway`, `dnv-worker`,
-    `dnv-agent` in both roles and `dnv-cdc` — log at Info; `dnvctl` logs at
+R6. Log levels per binary: the five daemons — `dnv-gateway`, `dnv-worker`,
+    `dnv-agent` in both roles, `dnv-cdc` and `dnv-csi` — log at Info; `dnvctl` logs at
     Warn. Implemented with a package-level `slog.LevelVar`, whose zero value
-    is Info, plus `SetLogLevel`. The four daemons do nothing; `dnvctl` calls
+    is Info, plus `SetLogLevel`. The five daemons do nothing; `dnvctl` calls
     `SetLogLevel` with `slog.LevelWarn` as the first statement of its `main`.
     Because all the R8 logging points are Info, they are automatically
     silenced in dnvctl — this is intended.

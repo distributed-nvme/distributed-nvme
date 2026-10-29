@@ -16,9 +16,12 @@ three services (`Gateway`, `DiskNodeAgent`, `ControllerNodeAgent`), and on
 ## Placement
 
 The interceptors live in package `common`, in `common/interceptor.go`. They
-apply to dnv-internal gRPC only: the `Gateway` service (dnvctl and users to
-dnv-gateway) and the agent services (dnv-gateway and dnv-worker to
-dnv-agent). They are not attached to the etcd client, because a message
+apply to dnv-internal gRPC only: the `Gateway` service (dnvctl, dnv-csi and
+users to dnv-gateway) and the agent services (dnv-gateway and dnv-worker to
+dnv-agent). The CSI services dnv-csi serves to Kubernetes are not
+dnv-internal: they take an interceptor of dnv-csi's own, which logs no
+message (`csi.md` CSI8), while dnv-csi's connection to the gateway is a dnv
+connection and takes the client chain. They are not attached to the etcd client, because a message
 logger on etcd's own RPCs would log raw key and value bytes and violate the
 human-readable-data rule: etcd logging is implemented once, inside the
 central helpers of `etcdutil` (`log.md`, etcd), not at the call sites.
@@ -76,7 +79,9 @@ T3. Propagation is transitive end to end by construction: dnvctl sets an id
 T4. Minting trace ids is the entry points' job, never the interceptors':
     the shared interceptors only move an id that is already there between
     ctx and metadata (T1, T2). `dnvctl` mints one per CLI invocation unless
-    `--trace-id` supplies one (`dnvctl.md` CT2); `dnv-worker` the ones
+    `--trace-id` supplies one (`dnvctl.md` CT2); `dnv-csi` one per CSI call
+    it serves, in its own interceptor, since the kubelet and the sidecars
+    send none (`csi.md` CSI8); `dnv-worker` the ones
     `dnv-worker.md` RW10 names; `dnv-gateway` one for a request that
     arrived without one (`gateway.md` GW2), not in its handlers but in its
     entry-point mint, `ensureTraceIdUnary` and `ensureTraceIdStream`
@@ -177,6 +182,7 @@ Who is a server or a client of whom:
 | dnv-agent, dn and cn roles | its `DiskNodeAgent` or `ControllerNodeAgent` server | — |
 | dnvctl | — | its connection to the gateway (it mints a trace id per invocation unless `--trace-id` supplies one, T4) |
 | dnv-cdc | — | — (no dnv-internal gRPC: it talks to etcd and serves hosts over NVMe/TCP, `cdc.md`, Scope and placement) |
+| dnv-csi | — (its CSI services are not dnv-internal and take its own interceptor, `csi.md` CSI8) | its connection to the gateway (it mints a trace id per CSI call, T4) |
 
 Those dnv binaries (`log.md`, Placement) are the whole of the rule. The
 `integtest/` drivers are not dnv components; the conventions they follow

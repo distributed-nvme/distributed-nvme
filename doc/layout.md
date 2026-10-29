@@ -54,6 +54,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `agent/cnagent/` | the cn role's policy, the `ControllerNodeAgent` service: which leg connections, md arrays, thin pools, dm and nvmet objects a controller node builds, and when, with the wrappers of the tools only the cn runs (`cnagent.md`) |
 | `cdc/` | dnv-cdc: the etcd watcher of the `CdcEntry` keys, the per-host view registry, the discovery-log rendering and the NVMe/TCP discovery controller (`cdc.md`) |
 | `ctl/` | dnvctl: the cobra command tree, one file per noun group, and in `ctl/root.go` what the groups share — the viper binding, the dial, the result rendering and the exit codes (`dnvctl.md`) |
+| `csi/` | dnv-csi: the Container Storage Interface driver, served over a unix socket to Kubernetes: the identity service, the controller plugin, which is a gRPC client of the gateway, the volume naming and the capacity arithmetic (`csi.md`) |
 | `integtest/` | the integration suites, one shell script per suite, the runner `integtest/runner.sh` with its configuration file `integtest/runner.conf`, the script that fetches the etcd release the suites pin, `integtest/fetch_etcd.sh`, and the script that counts, in worker logs copied out of a run, the worker's failed check rounds by cause, the check streams it failed to open or to send a round on, its health changes to unreachable and its late observations, `integtest/round_counts.sh`, which no suite calls, beside the suites' drivers and fakes (below) |
 | `integtest/dnagentctl/` | the gRPC driver of a real dn agent, which both agent suites use |
 | `integtest/cnagentctl/` | the gRPC driver of the cn agent suite; the end-to-end suite runs it only as a host-id printer |
@@ -69,6 +70,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `cmd/dnv-agent/` | the `main` of `dnv-agent`, the node agent in its dn and cn roles |
 | `cmd/dnv-cdc/` | the `main` of `dnv-cdc`, the central discovery controller |
 | `cmd/dnvctl/` | the `main` of `dnvctl`, the operator CLI |
+| `cmd/dnv-csi/` | the `main` of `dnv-csi`, the CSI driver |
 | `doclint/` | a test-only package: the lint that holds the documents under `doc/` and `README.md` to the documentation rules |
 
 The integration suites are driven over ssh against remote hosts. The two
@@ -121,14 +123,15 @@ or copy has ended.
 | `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb`; the two role packages also `agent`, the shared mechanism they build on | gRPC server only; no etcd: agents never talk to etcd (`architecture.md`, System overview) |
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | gRPC client of the gateway; cobra, pflag and viper, because the dnvctl command tree and its viper binding (`dnvctl.md` CT9) live here, not in `cmd/dnvctl` (`dnvctl.md`, Files); no etcd |
-| each `cmd/` package | the matching top-level package and `common`. `cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes. `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: its main builds the role servers and their `NvmeTrConf` and registers each through `agent.Serve`. `cmd/dnvctl` imports only `common` and `ctl`. | cobra and viper live here, for the flag, config and environment parsing and the subcommand trees (`architecture.md`, Components: invocation reference; `dnagent.md` CM1), except for dnvctl, whose tree is `ctl`'s and whose main imports neither |
+| `csi` | `common`, `pb` | gRPC client of the gateway, under the shared client chain, and gRPC server of the CSI services, under an interceptor of its own (`csi.md` CSI8); the CSI spec module (`dependencies.md`, Direct dependencies); no etcd |
+| each `cmd/` package | the matching top-level package and `common`. `cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes. `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: its main builds the role servers and their `NvmeTrConf` and registers each through `agent.Serve`. `cmd/dnvctl` imports only `common` and `ctl`, and `cmd/dnv-csi` only `common` and `csi`. | cobra and viper live here, for the flag, config and environment parsing and the subcommand trees (`architecture.md`, Components: invocation reference; `dnagent.md` CM1), except for dnvctl, whose tree is `ctl`'s and whose main imports neither |
 | each `integtest/` driver | `common`, `pb`; `integtest/agentfake` for `fakeagent`; `model` and `etcdutil` for `workerctl`, which plays the gateway, and `cdcctl`, which plays the gateway and the worker for the `CdcEntry` keys; `integtest/plant` for `workerctl`, which writes through it | test drivers only, never linked into a `cmd/` binary |
 | `integtest/agentfake` | `common`, `pb`, `agent` (`CheckRoundCtx` and `Timestamp`, `dnagent.md` SH24, SH28) | a test library: imported by `fakeagent` and by the `_test.go` files of `worker`; the `_test.go` files of `gateway` and `cdc` MAY import it; no other package does, so it is never linked into a `cmd/` binary; gRPC server and client, over TCP or over in-memory connections |
 | `integtest/plant` | `common`, `pb`, `etcdutil`, `model` | the planting library, test code only: `workerctl` and the `_test.go` files of `worker` may import it, no other package does, and it is never linked into a `cmd/` binary |
 | `doclint` | — | test-only; reads the documents and the sources as files |
 
-Consequences worth stating: the agent and dnvctl binaries do not link the
-etcd client, and there are no import cycles because `common` and `pb` import
+Consequences worth stating: the agent, dnvctl and dnv-csi binaries do not
+link the etcd client, and there are no import cycles because `common` and `pb` import
 nothing internal. The central etcd helpers are a package of their own,
 `etcdutil`, rather than part of `common`, so that the etcd client is linked
 only into the binaries that use it. The dm line parser and the dm-clone

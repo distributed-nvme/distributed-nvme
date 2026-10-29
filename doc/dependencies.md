@@ -12,8 +12,9 @@ recording why it is allowed. The requirements `go.mod` marks indirect arrive
 with these modules and are not listed.
 
 * `google.golang.org/grpc` — the transport of the three dnv services,
-  `Gateway`, `DiskNodeAgent` and `ControllerNodeAgent`, and of the shared
-  interceptors every dnv connection and server chains (`grpc.md`, Placement).
+  `Gateway`, `DiskNodeAgent` and `ControllerNodeAgent`, of the shared
+  interceptors every dnv connection and server chains (`grpc.md`, Placement),
+  and of the CSI services `dnv-csi` serves to Kubernetes (`csi.md`).
 * `google.golang.org/protobuf` — the runtime of the code generated from
   `pb/schema.proto` (`layout.md`, Protobuf generation) and the encodings of
   its messages: etcd values and the agents' local store are binary protobuf,
@@ -33,6 +34,10 @@ with these modules and are not listed.
   environment: every daemon flag is also a config key and an environment
   variable (`architecture.md`, Components: invocation reference), and so is
   each env-backed dnvctl global flag (`dnvctl.md` CT9).
+* `github.com/container-storage-interface/spec` — the Container Storage
+  Interface: the generated Go code of the services `dnv-csi` serves to
+  Kubernetes and the messages they carry (`csi.md`, The driver). It needs
+  no module the tree does not already hold.
 * `go.etcd.io/etcd/client/v3` — the etcd client, its `concurrency` STM
   included, which `etcdutil` alone wraps (`dnv-worker.md` EU1 and EU4;
   `log.md`, etcd). The integration suites that run an etcd server run one of
@@ -48,6 +53,7 @@ with these modules and are not listed.
 
 The etcd client and the two modules that arrive with it are linked only into
 the three etcd-facing binaries, `dnv-worker`, `dnv-gateway` and `dnv-cdc`,
-always through `etcdutil`; the agents and dnvctl stay etcd-free (`layout.md`,
+always through `etcdutil`; the agents, dnvctl and dnv-csi stay etcd-free
+(`layout.md`,
 Dependency rules; `dnvctl.md` CT6). Of the integration-test drivers,
 `workerctl` and `cdcctl` link the client the same way.
