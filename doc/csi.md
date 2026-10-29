@@ -26,12 +26,17 @@ plugin; the lab runs it.
 
 Every Kubernetes volume is a storage pool of its own with one thin device,
 one subsystem and one namespace. The pool, the thin device and the
-subsystem's NQN carry the name Kubernetes gives the volume, the namespace
-uuid derives from that name, and the volume id Kubernetes stores names the
-cluster and the volume. So every object of a volume is found by one name,
-the per-pool limits on subsystems, namespaces and hosts never bind, and the
-tenant promise of dnv holds per volume (`architecture.md`, System
-overview).
+subsystem's NQN carry the volume's dnv name, the namespace uuid derives
+from it, and the volume id Kubernetes stores names the cluster and that
+name. The dnv name is the name Kubernetes gives the volume when dnv takes
+it as a name (`architecture.md`, Common validation) free of the id's
+separator; any other name, longer than dnv's names or with a character
+outside their set, which the spec lets a caller send, becomes its leading
+characters, each made acceptable, and a hash of the whole name, the same
+for the same name, so a repeated create finds its objects. So every object
+of a volume is found by one name, the per-pool limits on subsystems,
+namespaces and hosts never bind, and the tenant promise of dnv holds per
+volume (`architecture.md`, System overview).
 
 A storage class names one dnv cluster, the redundancy of every group and
 the cntlr count of every pool. A pool has one slice. Its first data group
@@ -65,8 +70,11 @@ plugin takes the socket to serve (`--csi-address`), the gateway's address
 attach (`--cdc-addresses`) and the bound on one gateway call
 (`--gateway-timeout`); a cdc address is an IP literal and a port, since the
 node connects to it as the kernel's discovery address. The identity service
-reports the driver's name and version, and the controller plugin's identity
-advertises the controller service.
+reports the driver's name and version and advertises the controller service
+from both plugins, since the capability describes the driver, not the
+process that answers: the conformance test reads it off the node plugin's
+socket before it drives a volume through the controller plugin, and the
+sidecars read it off the controller plugin's.
 
 CSI7. **The gateway is the controller plugin's only peer.** It holds one
 plaintext connection to the gateway under the shared client chain and the
@@ -104,10 +112,14 @@ ALREADY_EXISTS, the spec's word for an incompatible volume of the same
 name; a namespace that is not the volume's is ALREADY_EXISTS too; a pool
 still being deleted under the name is ABORTED, so the caller retries once
 the drain has removed it. The create returns once the four records exist;
-the node plugin waits for the device. A delete marks the pool deleting and
-answers done; a pool that is absent or already deleting is done, and so is
-an id that names no volume of this driver. A create from a snapshot or
-another volume is refused.
+the node plugin waits for the device. A delete removes the objects in the
+reverse order, each step repeatable: the namespace, the subsystem and the
+thin device, then the pool, whose delete the gateway refuses while a
+user-created object remains and answers done when the pool is already
+deleting; the worker drains the rest. An object already gone is done, a
+write the gateway refuses because the pool is already deleting is done,
+and so is an id that names no volume of this driver. A create from a
+snapshot or another volume is refused.
 
 ## Attach and detach
 
@@ -141,15 +153,18 @@ times eight, since the first data group is one eighth of the volume; and
 never above the available bytes. Both are estimates, as the capacity call's
 records are (`architecture.md`, Clusters), and the available bytes can be
 over-promised, since a volume reserves one eighth of itself (The volume
-model). A cluster the class names that does not exist is the class's error,
-INVALID_ARGUMENT.
+model). A cluster that does not exist has nothing free: the answer is zero,
+not an error, since Kubernetes asks the capacity of every class on a timer
+and a class may name a cluster still to be created; a create in it is the
+class's error (CSI12).
 
 ## Parameters and capabilities
 
 CSI12. **Three parameters, single-node access, two filesystems.** A storage
 class carries the cluster name, with the gateway's default when absent, the
 redundancy, RAID1 or none, with RAID1 when absent, and the cntlr count,
-with the gateway's default when absent; any other key is INVALID_ARGUMENT,
+with the gateway's default when absent; a cluster that does not exist is
+INVALID_ARGUMENT on a create, the class's error; any other key is INVALID_ARGUMENT,
 so a typo never passes silently, except the keys Kubernetes reserves for
 itself, which are ignored, since the provisioner strips them from a create
 but hands them over whole with a capacity query. A volume capability is a
@@ -229,6 +244,51 @@ and publish, the spec's word for a capability the volume does not support.
 The used-space report reads a mounted filesystem's totals in bytes and
 inodes through the OS client, and a block volume's size alone.
 
+## Deployment
+
+The driver ships as one container image and plain manifests in `deploy/`:
+one file per kind of Kubernetes object, and the Dockerfile beside them.
+The image is the Ubuntu release the lab runs with nvme-cli, the mount
+tools, blkid and the two filesystem makers, plus the one binary; the pod's
+command names the subcommand. The manifests name the image by the driver's
+version and pull it only when it is absent, so a lab imports it into every
+node under that name and a user who publishes it keeps the same files.
+
+CSI18. **The node pods run privileged on the host's network.** The kernel
+keeps an NVMe/TCP connection in the network namespace of the process that
+made it, so a connect from a pod's own namespace would die with the pod.
+The kubelet's pod and plugin directories are mounted both ways, so the
+mounts the plugin makes reach the host and the pods; the device and sysfs
+trees give the plugin the volumes' devices and the controllers' state; the
+host's nvme directory, read-only, gives it the node's identity. The
+registrar sidecar announces the socket to the kubelet, and the liveness
+probe sidecar answers the kubelet's health checks for both plugins.
+
+CSI19. **The controller pod runs anywhere and tolerates the control-plane
+taint.** It holds the plugin, the provisioner, the attacher and the
+liveness probe around one socket. The plugin reads the gateway address and
+the cdc addresses from a config map, as environment, so the manifests of a
+cluster differ from the examples in that map and in the storage classes
+alone, which name the operator's clusters. The driver object asks
+for attach, no pod information on mount, the persistent lifecycle and
+capacity tracking, since the plugin answers capacity; the provisioner polls
+it and owns the capacity objects.
+
+## The suite's dnv stack
+
+The suite deploys the dnv stack itself, as the e2e suite does, with its
+own copies of the deployment verbs: etcd, the gateway, the worker and the
+cdc on the control-plane guest as the login user, one dn agent per
+disk-node guest over a sparse loop device, one cn agent per controller-node
+guest, each guest its own location, and a cluster with every node
+registered; the hosts carry the mask of the kernel's own autoconnector for
+the run. The stack listens on a port block of its own, bound by no other
+suite. The suite never builds a pool: the driver does, one per volume, so
+a RAID1 pool of one slice takes four disk-node guests, which is the least
+the suite accepts, and the failover needs the second controller-node
+guest. The storage class of the cases names the suite's cluster, RAID1 and
+two cntlrs.
+
 ## Log records
 
 The controller plugin logs `csi controller starting` with its endpoint,
@@ -239,11 +299,12 @@ and `csi node stopping` the same way, and, since those are the moments the
 failover contract turns on, `csi path connected` and `csi path dropped`
 with the subsystem and the cntlr address, `csi discovery connection opened`
 and `csi discovery connection dropped` with the cdc address, and
-`csi follower sync error` with what failed when a follow could not finish. Every CSI call but
-a successful probe logs `csi request` with the method and `csi reply` with
-the method, the code, the duration and, on a failure, the error, under the
-trace id the interceptor minted (CSI8). The gateway calls a CSI call makes
-are the shared client chain's records under the same id.
+`csi follower sync error` with what failed when a follow could not finish.
+Every CSI call but a successful probe logs `csi request` with the method
+and `csi reply` with the method, the code, the duration and, on a failure,
+the error, under the trace id the interceptor minted (CSI8). The gateway
+calls a CSI call makes are the shared client chain's records under the same
+id.
 
 ## The Kubernetes lab
 
@@ -261,21 +322,25 @@ so test pods run on the hosts (CSI6).
 
 ### Purpose — what the suite proves
 
-The suite drives a real k3s cluster on three guests of the lab. Its one
-case proves the Kubernetes floor everything else stands on: the three
-guests are distinct machines, k3s is present at the pinned version or gets
+The suite drives a real k3s cluster on three guests of the lab and the dnv
+stack on all ten, with the driver deployed from its manifests. It first
+proves the Kubernetes floor everything else stands on: the three guests
+are distinct machines, k3s is present at the pinned version or gets
 installed, an image built on the driver reaches every node without a
 registry, and a pod runs from it on each host and is removed with its
-namespace.
+namespace. On that floor it proves the driver: a claim becomes a pool that
+a pod reads and writes on either host, as a filesystem and as a raw block
+device; a failover under IO loses no write; eight volumes live at once; the
+upstream conformance test passes; and every delete leaves nothing behind.
 
 ### Topology and parameters
 
-Every guest comes from the command line: one `--cp`, the k3s server, and
-exactly two `--host`, the k3s agents. Controller-node and disk-node guests
-are accepted for the dnv stack of the volume cases. Parameters: one case to
-run alone, a cleanup-only run that sweeps the three guests and stops, the
-slice count of the volume cases' pools, and a directory on the driver to
-keep the k3s journals in. The pinned k3s version is a constant of the suite.
+Every guest comes from the command line: one `--cp`, the k3s server and
+dnv's control plane, exactly two `--host`, the k3s agents, at least two
+`--cn` and at least four `--dn`, the dnv stack's nodes. Parameters: one
+case to run alone, a cleanup-only run that sweeps every guest and stops,
+a slice count the runner passes and every pool ignores, since a volume's
+pool has one slice, and a directory on the driver to keep the logs in. The pinned k3s version is a constant of the suite.
 The suite's work directory on every guest and its shipped helper are its
 own, named so that no other suite's is a prefix of them.
 
@@ -304,10 +369,13 @@ CSI4. **Images reach a node by import.** The suite builds its image on the
 driver, saves it and pipes it into the k3s image store of every node, and
 every pod it runs pulls nothing. No registry takes part.
 
-CSI5. **Cleanup removes what the suite started and nothing else.** Every
-Kubernetes object of a run lives in the suite's namespace, so the cleanup
-is one delete, waited for, plus the removal of the imported image from
-every node and of the work directories. Cleanup runs at the start of every
+CSI5. **Cleanup removes what the suite started and nothing else.** The
+test namespace and the driver's namespace are deleted and waited for, the
+driver's cluster-wide objects and the storage class with them; then the
+hosts' connections of the driver's and dnv's and the discovery connections
+to the suite's cdc go, then the controller nodes' and the disk nodes'
+devices, exports and agents, then the control plane's processes, the
+imported images and the work directories, holder first. Cleanup runs at the start of every
 run and, on success only, at its end; a failing run leaves everything in
 place and dumps diagnostics. k3s, the hostnames and the identity files
 stay.
@@ -318,21 +386,59 @@ host.
 
 ### The cases
 
+Every case runs on the suite's dnv stack with the driver deployed from the
+manifests, the config map and the storage class of the suite in place of
+the examples; the IO pods run the driver's own image, since it carries the
+tools they need and is already on every node. Each case that creates
+volumes ends with the check that nothing is left: no pool in the cluster,
+no dm device, array or export on a node, no connection of the driver's on
+a host.
+
 **k8s.** The suite writes a program that prints one line and sleeps, builds
 it static, wraps it in an image from scratch and imports it into every
-node. It applies the namespace and one pod per host, each pinned to its
-host by node selector and never pulling. Each pod is Running on its host,
-each log is the one line, and the namespace's delete removes both pods.
+node. It applies one pod per host, each pinned to its host by node selector
+and never pulling. Each pod is Running on its host, each log is the one
+line, and the pods go.
+
+**volume.** A filesystem claim becomes a pool of one slice and two cntlrs;
+a pod on host0 writes a pattern and its digest; the same claim under a pod
+on host1 checks the digest; a raw block claim is written and read back
+through the device by a pod on host0; then every delete, and nothing left.
+
+**failover.** A pod on host0 writes a pattern, then writes in a loop with
+fsync, counting failures and the longest write. The suite reads which
+controller node holds the volume's primary and stops that cn agent, as the
+e2e suite's cutoff case does, so that every kernel object it built goes on
+serving until the fence; the primary moves; the loop runs on against the
+new primary and is stopped; it has failed nothing, the longest write is
+reported, and the pattern checks out. The agent is given back, then every
+delete, and nothing left.
+
+**many.** Eight claims and eight pods at once, four per host, each writing
+a pattern and checking it; the cluster holds eight pools; then every
+delete, and nothing left.
+
+**sanity.** csi-sanity, the upstream conformance test, built on the driver
+from its pinned module in a module of its own, runs on host0 against both
+plugins started there as plain processes with the lab's gateway and cdc,
+after the driver's pods are taken down, since two node plugins on one host
+would follow each other's subsystems. The tests of capabilities the driver
+does not advertise skip on their own; a failure names its test. Then the
+plugins stop, and nothing is left.
 
 ### Preflight
 
-The driver's checks run first: its tools and a usable docker. Then the
-helper is shipped and the guest checks run: passwordless sudo on all three,
-the hostnames and machine-ids distinct (CSI2), native multipath and the
-memory floor on the hosts, and the hosts' identities present and
-different. Then the start cleanup, then k3s: present at the pin or
-installed (CSI1), every node Ready at the pin, the taint (CSI6), and the
-cluster's own name service available.
+The driver's checks run first: its tools and a usable docker, the build of
+the binaries, the tree's two etcd constants read from the worker's
+constants printer, and the pinned etcd release. Then the helper is shipped
+and the guest checks run: passwordless sudo on every guest; on the three
+Kubernetes guests the hostnames and machine-ids distinct (CSI2), native
+multipath and the memory floor on the hosts, and the hosts' identities
+present and different; on the node guests the agents' tools and modules
+and this suite's ports free. Then the start cleanup, then k3s: present at
+the pin or installed (CSI1), every node Ready at the pin, the taint (CSI6),
+and the cluster's own name service available. Then the dnv stack and the
+driver.
 
 ### Diagnostics on failure
 

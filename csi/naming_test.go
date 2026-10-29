@@ -36,6 +36,39 @@ func TestVolumeIdRoundTrips(t *testing.T) {
 	}
 }
 
+// TestDnvNameOf pins csi.md, The volume model: a name dnv takes is the dnv
+// name itself; any other, too long or with a character outside dnv's set or
+// the id's separator, becomes its acceptable leading bytes and a hash, one
+// dnv takes, the same for the same name and distinct for distinct names.
+func TestDnvNameOf(t *testing.T) {
+	if got := dnvNameOf(testVolume); got != testVolume {
+		t.Errorf("dnvNameOf(%q) = %q, want the name itself", testVolume, got)
+	}
+	long := strings.Repeat("v", 128)
+	longer := long + "w"
+	for _, name := range []string{long, longer, "a/b", "a b", "héllo", "x" + strings.Repeat("/", 70)} {
+		got := dnvNameOf(name)
+		if got == name {
+			t.Errorf("dnvNameOf(%q) kept a name dnv does not take", name)
+		}
+		if err := checkVolumeName(got); err != nil {
+			t.Errorf("dnvNameOf(%q) = %q, not a name dnv takes: %v", name, got, err)
+		}
+		if got != dnvNameOf(name) {
+			t.Errorf("dnvNameOf(%q) differs between two calls", name)
+		}
+		if nqn := subsystemNqnOf(got); len(nqn) > common.MaxNqnLength || !validNqn.MatchString(nqn) {
+			t.Errorf("the NQN of %q, %q, is not one the gateway accepts", got, nqn)
+		}
+	}
+	if dnvNameOf(long) == dnvNameOf(longer) {
+		t.Error("two long names share a dnv name")
+	}
+	if got := dnvNameOf(long); len(got) != common.MaxStrSize || !strings.HasPrefix(got, "vvv") {
+		t.Errorf("dnvNameOf(long) = %q, want the leading bytes and a hash at the limit", got)
+	}
+}
+
 // TestNamesAreTheGatewaysForms pins the subsystem NQN and the namespace
 // uuid: an NQN the gateway accepts, outside the dnv-owned prefix, and a
 // version-5 uuid in the dashed lower-case form, the same for the same name.

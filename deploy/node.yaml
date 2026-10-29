@@ -1,0 +1,105 @@
+# The node plugin (csi.md, Deployment): one pod per node, privileged and on
+# the host's network, since the kernel keeps an NVMe/TCP connection in the
+# network namespace of the process that made it. The kubelet's directories
+# are mounted both ways so the mounts the plugin makes reach the host and the
+# pods; the device and sysfs trees give it the volumes' devices and the
+# controllers' state; the host's nvme directory gives it the node's identity.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dnv-csi-node
+  namespace: dnv-csi
+spec:
+  selector:
+    matchLabels:
+      app: dnv-csi-node
+  template:
+    metadata:
+      labels:
+        app: dnv-csi-node
+    spec:
+      serviceAccountName: dnv-csi-node
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: dnv-csi
+          image: dnv-csi:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - node
+            - --csi-address=/csi/csi.sock
+          securityContext:
+            privileged: true
+          ports:
+            - name: healthz
+              containerPort: 9809
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: pods-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: plugins-dir
+              mountPath: /var/lib/kubelet/plugins
+              mountPropagation: Bidirectional
+            - name: dev
+              mountPath: /dev
+            - name: sys
+              mountPath: /sys
+            - name: nvme-etc
+              mountPath: /etc/nvme
+              readOnly: true
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.dnv.io/csi.sock
+            - --v=2
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.20.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --http-endpoint=:9809
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.dnv.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: pods-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: DirectoryOrCreate
+        - name: plugins-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins
+            type: DirectoryOrCreate
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: nvme-etc
+          hostPath:
+            path: /etc/nvme
+            type: Directory

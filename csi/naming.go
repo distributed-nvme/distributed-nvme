@@ -2,6 +2,7 @@ package csi
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"regexp"
@@ -33,6 +34,9 @@ const (
 	uuidNamespace = "9e2c4b7a-1f53-4d8e-a6c0-5b3d7e8f1a2c"
 	// nsIdx is the one namespace of a volume's subsystem.
 	nsIdx = 1
+	// nameHashLen is the hex digits of the hash a shortened dnv name ends
+	// in: 64 bits, enough that two volume names never meet.
+	nameHashLen = 16
 )
 
 var (
@@ -53,6 +57,38 @@ func checkVolumeName(name string) error {
 			"the volume name %q is not a name dnv accepts", name)
 	}
 	return nil
+}
+
+// dnvNameOf is the dnv name of a volume (csi.md, The volume model): the
+// name Kubernetes gives it when dnv takes that name as it is, else its
+// leading bytes, each made acceptable, and a hash of the whole name. The
+// spec lets a caller send names of 128 bytes, twice dnv's limit. The same
+// name always gives the same dnv name, so a repeated create finds its
+// objects, and the result is one dnv takes, so the volume id splits.
+func dnvNameOf(name string) string {
+	if checkVolumeName(name) == nil {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	hash := hex.EncodeToString(sum[:])[:nameHashLen]
+	keep := common.MaxStrSize - nameHashLen - 1
+	if len(name) < keep {
+		keep = len(name)
+	}
+	prefix := []byte(name[:keep])
+	for i, b := range prefix {
+		if !acceptableByte(b) {
+			prefix[i] = '-'
+		}
+	}
+	return string(prefix) + "-" + hash
+}
+
+// acceptableByte reports whether a byte may stand in a dnv name of this
+// driver's: the gateway's set less the volume id's separator.
+func acceptableByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' ||
+		b == '-' || b == '_' || b == '.' || b == ':'
 }
 
 // checkClusterName holds a cluster parameter to the gateway's rule for a

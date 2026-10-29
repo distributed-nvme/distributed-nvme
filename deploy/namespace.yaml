@@ -1,0 +1,5 @@
+# The namespace the driver's pods run in (csi.md, Deployment).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dnv-csi

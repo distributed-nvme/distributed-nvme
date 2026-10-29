@@ -303,6 +303,8 @@ func (g *fakeGateway) GetStoragePool(
 	}, nil
 }
 
+// DeleteStoragePool is the gateway's: refused while a user-created object
+// remains, done without a write when the pool is already deleting.
 func (g *fakeGateway) DeleteStoragePool(
 	ctx context.Context, req *pb.DeleteStoragePoolRequest,
 ) (*pb.DeleteStoragePoolReply, error) {
@@ -311,12 +313,97 @@ func (g *fakeGateway) DeleteStoragePool(
 	if err := g.enter("DeleteStoragePool"); err != nil {
 		return nil, err
 	}
+	p, err := g.livePool(req.GetClusterName(), req.GetSpName(), false)
+	if err != nil {
+		return nil, err
+	}
+	if p.deleting {
+		return &pb.DeleteStoragePoolReply{}, nil
+	}
+	if len(p.tds) != 0 || len(p.ss) != 0 {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"storage pool %q still holds %d thin devices and %d subsystems",
+			req.GetSpName(), len(p.tds), len(p.ss))
+	}
+	p.deleting = true
+	return &pb.DeleteStoragePoolReply{}, nil
+}
+
+func (g *fakeGateway) DeleteThinDevice(
+	ctx context.Context, req *pb.DeleteThinDeviceRequest,
+) (*pb.DeleteThinDeviceReply, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err := g.enter("DeleteThinDevice"); err != nil {
+		return nil, err
+	}
 	p, err := g.livePool(req.GetClusterName(), req.GetSpName(), true)
 	if err != nil {
 		return nil, err
 	}
-	p.deleting = true
-	return &pb.DeleteStoragePoolReply{}, nil
+	td := p.tds[req.GetTdName()]
+	if td == nil {
+		return nil, status.Errorf(codes.NotFound, "td %q not found", req.GetTdName())
+	}
+	for _, ss := range p.ss {
+		for _, ns := range ss.GetNsList() {
+			if ns.GetTdId() == td.GetTdId() {
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"td %q is used by a namespace", req.GetTdName())
+			}
+		}
+	}
+	delete(p.tds, req.GetTdName())
+	return &pb.DeleteThinDeviceReply{TdId: td.GetTdId()}, nil
+}
+
+func (g *fakeGateway) DeleteSubsystem(
+	ctx context.Context, req *pb.DeleteSubsystemRequest,
+) (*pb.DeleteSubsystemReply, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err := g.enter("DeleteSubsystem"); err != nil {
+		return nil, err
+	}
+	p, err := g.livePool(req.GetClusterName(), req.GetSpName(), true)
+	if err != nil {
+		return nil, err
+	}
+	ss := p.ss[req.GetNqn()]
+	if ss == nil {
+		return nil, status.Errorf(codes.NotFound, "ss %q not found", req.GetNqn())
+	}
+	if len(ss.GetNsList()) != 0 {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"ss %q still has namespaces", req.GetNqn())
+	}
+	delete(p.ss, req.GetNqn())
+	return &pb.DeleteSubsystemReply{SsId: ss.GetSsId()}, nil
+}
+
+func (g *fakeGateway) DeleteNamespace(
+	ctx context.Context, req *pb.DeleteNamespaceRequest,
+) (*pb.DeleteNamespaceReply, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err := g.enter("DeleteNamespace"); err != nil {
+		return nil, err
+	}
+	p, err := g.livePool(req.GetClusterName(), req.GetSpName(), true)
+	if err != nil {
+		return nil, err
+	}
+	ss := p.ss[req.GetNqn()]
+	if ss == nil {
+		return nil, status.Errorf(codes.NotFound, "ss %q not found", req.GetNqn())
+	}
+	for i, ns := range ss.GetNsList() {
+		if ns.GetNsIdx() == req.GetNsIdx() {
+			ss.NsList = append(ss.NsList[:i], ss.NsList[i+1:]...)
+			return &pb.DeleteNamespaceReply{NsId: ns.GetNsId()}, nil
+		}
+	}
+	return nil, status.Errorf(codes.NotFound, "ns_idx %d not found", req.GetNsIdx())
 }
 
 func (g *fakeGateway) CreateThinDevice(

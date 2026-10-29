@@ -170,10 +170,6 @@ func TestCreateVolumeRefuses(t *testing.T) {
 	}{
 		{"no name", func(r *csi.CreateVolumeRequest) { r.Name = "" },
 			codes.InvalidArgument},
-		{"a slash in the name", func(r *csi.CreateVolumeRequest) { r.Name = "a/b" },
-			codes.InvalidArgument},
-		{"a name dnv refuses", func(r *csi.CreateVolumeRequest) { r.Name = "a b" },
-			codes.InvalidArgument},
 		{"no capability", func(r *csi.CreateVolumeRequest) {
 			r.VolumeCapabilities = nil
 		}, codes.InvalidArgument},
@@ -251,9 +247,10 @@ func TestCreateVolumeSizes(t *testing.T) {
 	}
 }
 
-// TestDeleteVolume pins csi.md, The volume model: a delete marks the pool
-// deleting, and a pool that is absent, already deleting or named by an id
-// of another form is done; only an empty id is refused.
+// TestDeleteVolume pins csi.md, The volume model: a delete removes the
+// namespace, the subsystem and the thin device, then marks the pool
+// deleting; a pool that is absent, already deleting or named by an id of
+// another form is done; only an empty id is refused.
 func TestDeleteVolume(t *testing.T) {
 	c, g := newTestController(t)
 	ctx := t.Context()
@@ -262,8 +259,16 @@ func TestDeleteVolume(t *testing.T) {
 	id := reply.GetVolume().GetVolumeId()
 	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id})
 	wantCode(t, err, codes.OK, "delete")
-	if !g.pool(fakeClusterOne, testVolume).deleting {
-		t.Error("the pool is not marked deleting")
+	p := g.pool(fakeClusterOne, testVolume)
+	if !p.deleting || len(p.tds) != 0 || len(p.ss) != 0 {
+		t.Errorf("after the delete: deleting %v, %d thin devices, %d subsystems",
+			p.deleting, len(p.tds), len(p.ss))
+	}
+	want := []string{"DeleteNamespace", "DeleteSubsystem", "DeleteThinDevice",
+		"DeleteStoragePool"}
+	got := g.calls[len(g.calls)-4:]
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("delete calls %v, want %v", got, want)
 	}
 	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id})
 	wantCode(t, err, codes.OK, "delete while deleting")
@@ -464,10 +469,45 @@ func TestGetCapacity(t *testing.T) {
 		"pool": "sp0",
 	}})
 	wantCode(t, err, codes.InvalidArgument, "an unknown parameter")
-	_, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{Parameters: map[string]string{
+	// A cluster that does not exist has nothing free, and the answer is
+	// not an error, as Kubernetes asks on a timer; nor is a query with no
+	// parameters at all, which the spec allows.
+	reply, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{Parameters: map[string]string{
 		paramCluster: "nowhere",
 	}})
-	wantCode(t, err, codes.InvalidArgument, "a cluster that does not exist")
+	wantCode(t, err, codes.OK, "a cluster that does not exist")
+	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize() != nil {
+		t.Errorf("a cluster that does not exist answers %v, want nothing free", reply)
+	}
+	_, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{})
+	wantCode(t, err, codes.OK, "no parameters at all")
+}
+
+// TestCreateVolumeWithANameDnvDoesNotTake pins csi.md, The volume model: a
+// name longer than dnv's names, which the spec lets a caller send, becomes
+// a dnv name, the same on a repeat, and the volume id carries that name, so
+// a delete finds the objects.
+func TestCreateVolumeWithANameDnvDoesNotTake(t *testing.T) {
+	c, _ := newTestController(t)
+	ctx := t.Context()
+	long := strings.Repeat("v", 128)
+	first, err := c.CreateVolume(ctx, createReq(long, gib))
+	wantCode(t, err, codes.OK, "a 128-byte name")
+	cluster, name, err := parseVolumeId(first.GetVolume().GetVolumeId())
+	if err != nil || cluster != fakeClusterOne || name != dnvNameOf(long) || name == long {
+		t.Fatalf("volume id %q splits into %q, %q, %v",
+			first.GetVolume().GetVolumeId(), cluster, name, err)
+	}
+	second, err := c.CreateVolume(ctx, createReq(long, gib))
+	wantCode(t, err, codes.OK, "the same name again")
+	if second.GetVolume().GetVolumeId() != first.GetVolume().GetVolumeId() {
+		t.Errorf("a repeated create gave id %q, want %q",
+			second.GetVolume().GetVolumeId(), first.GetVolume().GetVolumeId())
+	}
+	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{
+		VolumeId: first.GetVolume().GetVolumeId(),
+	})
+	wantCode(t, err, codes.OK, "a delete by the id")
 }
 
 // TestControllerGetCapabilities pins the three capabilities advertised.

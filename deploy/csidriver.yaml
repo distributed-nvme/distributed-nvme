@@ -1,0 +1,16 @@
+# The driver object Kubernetes keeps for csi.dnv.io (csi.md, Deployment):
+# attach is required, since the controller plugin sets the subsystem's
+# allowed hosts; the node plugin needs no pod information; volumes are
+# persistent; and the provisioner tracks capacity, since the controller plugin
+# answers it.
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.dnv.io
+spec:
+  attachRequired: true
+  podInfoOnMount: false
+  fsGroupPolicy: File
+  storageCapacity: true
+  volumeLifecycleModes:
+    - Persistent

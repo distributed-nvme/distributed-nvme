@@ -104,7 +104,7 @@ func RunController(ctx context.Context, cfg Config) error {
 	ctl := newController(pb.NewGatewayClient(conn), cfg)
 	err = serve(ctx, cfg.Endpoint, msgControllerServing,
 		func(s grpc.ServiceRegistrar) {
-			csi.RegisterIdentityServer(s, newIdentity(true))
+			csi.RegisterIdentityServer(s, newIdentity())
 			csi.RegisterControllerServer(s, ctl)
 		})
 	slog.InfoContext(ctx, msgControllerStopping)
@@ -163,7 +163,7 @@ func RunNode(ctx context.Context, cfg Config) error {
 	}
 	err = serve(ctx, cfg.Endpoint, msgNodeServing,
 		func(s grpc.ServiceRegistrar) {
-			csi.RegisterIdentityServer(s, newIdentity(false))
+			csi.RegisterIdentityServer(s, newIdentity())
 			csi.RegisterNodeServer(s, n)
 		})
 	fcancel()

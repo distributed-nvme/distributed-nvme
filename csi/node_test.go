@@ -854,7 +854,11 @@ func TestRunNodeServesOverTheSocket(t *testing.T) {
 	caps, err := csi.NewIdentityClient(conn).GetPluginCapabilities(callCtx,
 		&csi.GetPluginCapabilitiesRequest{})
 	wantCode(t, err, codes.OK, "GetPluginCapabilities")
-	if len(caps.GetCapabilities()) != 0 {
+	// The capability describes the driver, so the node plugin advertises
+	// the controller service as the controller plugin does.
+	if len(caps.GetCapabilities()) != 1 ||
+		caps.GetCapabilities()[0].GetService().GetType() !=
+			csi.PluginCapability_Service_CONTROLLER_SERVICE {
 		t.Errorf("the node plugin advertises %v", caps)
 	}
 	cancel()

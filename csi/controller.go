@@ -165,10 +165,12 @@ func (c *controller) CreateVolume(
 	ctx context.Context,
 	req *csi.CreateVolumeRequest,
 ) (*csi.CreateVolumeResponse, error) {
-	name := req.GetName()
-	if err := checkVolumeName(name); err != nil {
-		return nil, err
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "the volume name is required")
 	}
+	// The volume's dnv name: the name as given when dnv takes it, else its
+	// acceptable form (csi.md, The volume model).
+	name := dnvNameOf(req.GetName())
 	if err := checkCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return nil, err
 	}
@@ -396,9 +398,14 @@ func namespaceOf(ss *pb.Subsystem) *pb.Namespace {
 	return nil
 }
 
-// DeleteVolume marks the volume's pool deleting; the worker drains it. A
-// pool that is absent or already deleting is done, and so is an id that
-// names no volume of this driver.
+// DeleteVolume removes the volume's objects in the reverse order of their
+// creation, each step repeatable: the namespace, the subsystem and the thin
+// device, then the pool, whose delete the gateway refuses while any
+// user-created object remains and answers done when the pool is already
+// deleting; the worker drains the rest. A pool, a subsystem or a thin
+// device that is already gone is done, and so is an id that names no
+// volume of this driver. A write refused because the pool is already
+// deleting is done too: the drain is running.
 func (c *controller) DeleteVolume(
 	ctx context.Context,
 	req *csi.DeleteVolumeRequest,
@@ -406,19 +413,74 @@ func (c *controller) DeleteVolume(
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "the volume id is required")
 	}
+	done := &csi.DeleteVolumeResponse{}
 	cluster, name, err := parseVolumeId(req.GetVolumeId())
 	if err != nil {
-		return &csi.DeleteVolumeResponse{}, nil
+		return done, nil
 	}
+	nqn := subsystemNqnOf(name)
+
 	gctx, cancel := c.gwCtx(ctx)
+	_, err = c.gw.DeleteNamespace(gctx, &pb.DeleteNamespaceRequest{
+		ClusterName: cluster,
+		SpName:      name,
+		Nqn:         nqn,
+		NsIdx:       nsIdx,
+	})
+	cancel()
+	switch codeOf(err) {
+	case codes.OK, codes.NotFound:
+	case codes.FailedPrecondition:
+		// The pool is already deleting: the drain is running.
+		return done, nil
+	default:
+		return nil, fromGateway("DeleteNamespace", err)
+	}
+
+	gctx, cancel = c.gwCtx(ctx)
+	_, err = c.gw.DeleteSubsystem(gctx, &pb.DeleteSubsystemRequest{
+		ClusterName: cluster,
+		SpName:      name,
+		Nqn:         nqn,
+	})
+	cancel()
+	switch codeOf(err) {
+	case codes.OK, codes.NotFound:
+	case codes.FailedPrecondition:
+		return nil, status.Errorf(codes.Aborted,
+			"volume %q: its subsystem still holds a namespace; retry later", name)
+	default:
+		return nil, fromGateway("DeleteSubsystem", err)
+	}
+
+	gctx, cancel = c.gwCtx(ctx)
+	_, err = c.gw.DeleteThinDevice(gctx, &pb.DeleteThinDeviceRequest{
+		ClusterName: cluster,
+		SpName:      name,
+		TdName:      name,
+	})
+	cancel()
+	switch codeOf(err) {
+	case codes.OK, codes.NotFound:
+	case codes.FailedPrecondition:
+		return nil, status.Errorf(codes.Aborted,
+			"volume %q: its thin device is still in use; retry later", name)
+	default:
+		return nil, fromGateway("DeleteThinDevice", err)
+	}
+
+	gctx, cancel = c.gwCtx(ctx)
 	defer cancel()
 	_, err = c.gw.DeleteStoragePool(gctx, &pb.DeleteStoragePoolRequest{
 		ClusterName: cluster,
 		SpName:      name,
 	})
 	switch codeOf(err) {
-	case codes.OK, codes.NotFound, codes.FailedPrecondition:
-		return &csi.DeleteVolumeResponse{}, nil
+	case codes.OK, codes.NotFound:
+		return done, nil
+	case codes.FailedPrecondition:
+		// Something else was created in the volume's pool by hand.
+		return nil, fromGateway("DeleteStoragePool", err)
 	default:
 		return nil, fromGateway("DeleteStoragePool", err)
 	}
@@ -629,9 +691,10 @@ func (c *controller) GetCapacity(
 	})
 	if err != nil {
 		if codeOf(err) == codes.NotFound {
-			return nil, status.Errorf(codes.InvalidArgument,
-				"parameter %s: cluster %q does not exist",
-				paramCluster, clusterNameOf(p.cluster))
+			// A cluster that does not exist has nothing free (csi.md,
+			// Capacity): Kubernetes asks on a timer, and a create is
+			// where a class that names a wrong cluster fails.
+			return &csi.GetCapacityResponse{}, nil
 		}
 		return nil, fromGateway("GetClusterCapacity", err)
 	}

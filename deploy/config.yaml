@@ -1,0 +1,12 @@
+# The addresses the controller plugin needs (csi.md, Deployment): the gateway
+# it calls and the cdc endpoints it hands to the node plugin at attach. The
+# values below are placeholders; put the addresses of the dnv control plane
+# that serves this cluster before applying.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dnv-csi-config
+  namespace: dnv-csi
+data:
+  gatewayAddress: "192.0.2.10:29527"
+  cdcAddresses: "192.0.2.10:8009"

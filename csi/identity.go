@@ -9,15 +9,14 @@ import (
 
 // identity is the CSI identity service both plugins serve (csi.md, The
 // driver): the driver's name and version, the plugin's capabilities and a
-// liveness probe. Only the controller plugin advertises the controller
-// service.
+// liveness probe. Both plugins advertise the controller service, since the
+// capability describes the driver, not the process that answers.
 type identity struct {
 	csi.UnimplementedIdentityServer
-	controller bool
 }
 
-func newIdentity(controller bool) *identity {
-	return &identity{controller: controller}
+func newIdentity() *identity {
+	return &identity{}
 }
 
 func (i *identity) GetPluginInfo(
@@ -34,17 +33,15 @@ func (i *identity) GetPluginCapabilities(
 	ctx context.Context,
 	req *csi.GetPluginCapabilitiesRequest,
 ) (*csi.GetPluginCapabilitiesResponse, error) {
-	reply := &csi.GetPluginCapabilitiesResponse{}
-	if i.controller {
-		reply.Capabilities = append(reply.Capabilities, &csi.PluginCapability{
+	return &csi.GetPluginCapabilitiesResponse{
+		Capabilities: []*csi.PluginCapability{{
 			Type: &csi.PluginCapability_Service_{
 				Service: &csi.PluginCapability_Service{
 					Type: csi.PluginCapability_Service_CONTROLLER_SERVICE,
 				},
 			},
-		})
-	}
-	return reply, nil
+		}},
+	}, nil
 }
 
 // Probe answers ready: a plugin that serves is a plugin that is ready, since

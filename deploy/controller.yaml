@@ -1,0 +1,92 @@
+# The controller plugin (csi.md, Deployment): one pod with the plugin, the
+# provisioner, the attacher and the liveness probe, sharing the plugin's
+# socket. It runs on any node and tolerates the control-plane taint.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dnv-csi-controller
+  namespace: dnv-csi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dnv-csi-controller
+  template:
+    metadata:
+      labels:
+        app: dnv-csi-controller
+    spec:
+      serviceAccountName: dnv-csi-controller
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: dnv-csi
+          image: dnv-csi:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - controller
+            - --csi-address=/csi/csi.sock
+          env:
+            - name: DNV_CSI_GATEWAY_ADDRESS
+              valueFrom:
+                configMapKeyRef:
+                  name: dnv-csi-config
+                  key: gatewayAddress
+            - name: DNV_CSI_CDC_ADDRESSES
+              valueFrom:
+                configMapKeyRef:
+                  name: dnv-csi-config
+                  key: cdcAddresses
+          ports:
+            - name: healthz
+              containerPort: 9808
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.4.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --v=2
+            - --enable-capacity
+            - --capacity-ownerref-level=2
+            - --capacity-poll-interval=1m
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.13.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --v=2
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.20.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --http-endpoint=:9808
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

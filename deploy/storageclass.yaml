@@ -1,0 +1,17 @@
+# An example storage class (csi.md, The volume model): one class names one
+# dnv cluster, the redundancy of every group and the cntlr count of every
+# pool. A claim of this class becomes one storage pool with one thin device
+# and one namespace. Volumes are thin: a claim reserves one eighth of its size
+# and grows as it is written, so the cluster can be over-committed.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: dnv
+provisioner: csi.dnv.io
+parameters:
+  cluster: default
+  redundancy: raid1
+  cntlrs: "2"
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
