@@ -7,20 +7,12 @@ the plugin API Kubernetes uses to create, attach and mount volumes, in
 `integtest/csi_test.sh`. It leans on
 `architecture.md` for the object model and the API contract, on
 `gateway.md` for each call the driver makes, and on `cdc.md` for what a host
-must do to follow a pool's cntlrs.
-
-## Words
-
-A CSI driver has two parts. The controller plugin runs once per Kubernetes
-cluster and talks to the gateway. The node plugin runs on every Kubernetes
-node that may mount a volume and talks to the kernel: it connects, finds the
-device, formats and mounts. A storage class is the Kubernetes object that
-names a driver and its settings. A persistent volume claim is a Kubernetes
-user's request for a volume of a storage class. Attach means Kubernetes
-binds a volume to one node, through the controller plugin; mount means the
-node plugin puts the device under a path for a pod. k3s is a one-binary
-Kubernetes distribution that bundles the container runtime and the network
-plugin; the lab runs it.
+must do to follow a pool's cntlrs. Its Kubernetes words are the glossary's:
+CSI driver, controller plugin, node plugin, storage class, persistent volume
+claim, attach, stage, publish, sidecar, capacity object, topology segment,
+dnv name, follower and k3s. Here "the driver" is dnv-csi, the machine a
+suite runs on is the suite's machine, and a stage is the node plugin's
+call, not a step of a suite case (`glossary.md`, driver, stage).
 
 ## The volume model
 
@@ -267,10 +259,10 @@ table straight from the device: a blank device is formatted with the
 capability's filesystem, ext4 when none is named, a device that carries
 that filesystem is mounted as it is, and a device that carries another, or
 a partition table and no filesystem, is FAILED_PRECONDITION, since
-formatting it would destroy data; a block volume is never formatted or mounted at stage. Publish
-bind-mounts the staging path at the target, read-only when asked, and for a
-block volume makes a file at the target and bind-mounts the device node
-onto it. Unpublish unmounts the target and removes it, a directory with a
+formatting it would destroy data; a block volume is never formatted or
+mounted at stage. Publish bind-mounts the staging path at the target,
+read-only when asked, and for a block volume makes a file at the target and
+bind-mounts the device node onto it. Unpublish unmounts the target and removes it, a directory with a
 plain rmdir, never recursively; unstage unmounts the staging path. Every
 step reads the mount table first, so a repeat is done, as the spec asks,
 and a capability the driver does not serve is FAILED_PRECONDITION at stage
@@ -281,7 +273,9 @@ inodes through the OS client, and a block volume's size alone.
 ## Deployment
 
 The driver ships as one container image and plain manifests in `deploy/`:
-one file per kind of Kubernetes object, and the Dockerfile beside them.
+one file per Kubernetes object, and the Dockerfile beside them. It promises
+Kubernetes 1.34 and newer; the lab proves it on the k3s release the suite
+pins, with the sidecar images the manifests name.
 The image is the Ubuntu release the lab runs with nvme-cli, the mount
 tools, blkid and the two filesystem makers, plus the one binary; the pod's
 command names the subcommand. The manifests name the image by the driver's
@@ -364,8 +358,8 @@ The suite drives a real k3s cluster on three guests of the lab and the dnv
 stack on all ten, with the driver deployed from its manifests. It first
 proves the Kubernetes floor everything else stands on: the three guests
 are distinct machines, k3s is present at the pinned version or gets
-installed, an image built on the driver reaches every node without a
-registry, and a pod runs from it on each host and is removed with its
+installed, an image built on the suite's machine reaches every node
+without a registry, and a pod runs from it on each host and is removed with its
 namespace. On that floor it proves the driver: a claim becomes a pool that
 a pod reads and writes on either host, as a filesystem and as a raw block
 device; a failover under IO loses no write; eight volumes live at once; the
@@ -377,8 +371,9 @@ Every guest comes from the command line: one `--cp`, the k3s server and
 dnv's control plane, exactly two `--host`, the k3s agents, at least two
 `--cn` and at least four `--dn`, the dnv stack's nodes. Parameters: one
 case to run alone, a cleanup-only run that sweeps every guest and stops,
-a slice count the runner passes and every pool ignores, since a volume's
-pool has one slice, and a directory on the driver to keep the logs in. The pinned k3s version is a constant of the suite.
+a slice count the suite accepts and every pool ignores, since a volume's
+pool has one slice, and a directory on the suite's machine to keep the logs
+in. The pinned k3s version is a constant of the suite.
 The suite's work directory on every guest and its shipped helper are its
 own, named so that no other suite's is a prefix of them.
 
@@ -396,25 +391,28 @@ scripts.
 CSI2. **The three guests are distinct machines.** Preflight reads each
 guest's hostname and machine-id and requires the three of each to differ.
 The hosts' identity files are generated if absent and never overwritten,
-as the e2e suite does (`e2e_integtest.md` E2E10), and the two hosts' host
-NQNs must differ; the fix is named, not applied.
+as the e2e suite's preflight does (`e2e_integtest.md`, Preflight), and the
+two hosts' host NQNs must differ; the fix is named, not applied.
 
 CSI3. **kubectl runs on the control-plane guest only**, as the k3s binary's
-subcommand over ssh, with every manifest piped from the driver. The driver
-machine installs nothing: it needs Go, ssh, scp and docker.
+subcommand over ssh, with every manifest piped from the suite's machine,
+which installs nothing: it needs Go, ssh, scp and docker.
 
-CSI4. **Images reach a node by import.** The suite builds its image on the
-driver, saves it and pipes it into the k3s image store of every node, and
-every pod it runs pulls nothing. No registry takes part.
+CSI4. **The suite's images reach a node by import.** The suite builds the
+driver's image and the smoke case's image on its machine, saves them and
+pipes them into the k3s image store of every node, so no pod pulls them and
+no registry of the suite's takes part. The sidecar images the manifests
+name come from their public registry, which each node pulls from once.
 
 CSI5. **Cleanup removes what the suite started and nothing else.** The
 test namespace and the driver's namespace are deleted and waited for, the
 driver's cluster-wide objects and the storage class with them; then the
 hosts' connections of the driver's and dnv's and the discovery connections
 to the suite's cdc go, then the controller nodes' and the disk nodes'
-devices, exports and agents, then the control plane's processes, the
-imported images and the work directories, holder first. Cleanup runs at the start of every
-run and, on success only, at its end; a failing run leaves everything in
+devices, exports and agents, with the controller nodes' nvmet entries of
+the two hosts that attaches made, then the control plane's processes, the
+imported images and the work directories, holder first. Cleanup runs at the
+start of every run and, on success only, at its end; a failing run leaves everything in
 place and dumps diagnostics. k3s, the hostnames and the identity files
 stay.
 
@@ -449,16 +447,17 @@ fsync, counting failures and the longest write. The suite reads which
 controller node holds the volume's primary and stops that cn agent, as the
 e2e suite's cutoff case does, so that every kernel object it built goes on
 serving until the fence; the primary moves; the loop runs on against the
-new primary and is stopped; it has failed nothing, the longest write is
-reported, and the pattern checks out. The agent is given back, then every
-delete, and nothing left.
+new primary and is stopped; it has failed nothing, and the longest write is
+reported. The pod goes, and a pod on host1 reads the pattern back through
+the new primary, since host0's page cache holds it. The agent is given
+back, then every delete, and nothing left.
 
 **many.** Eight claims and eight pods at once, four per host, each writing
 a pattern and checking it; the cluster holds eight pools; then every
 delete, and nothing left.
 
-**sanity.** csi-sanity, the upstream conformance test, built on the driver
-from its pinned module in a module of its own, runs on host0 against both
+**sanity.** csi-sanity, the upstream conformance test, built on the suite's
+machine from its pinned module in a module of its own, runs on host0 against both
 plugins started there as plain processes with the lab's gateway and cdc,
 after the driver's pods are taken down, since two node plugins on one host
 would follow each other's subsystems. The tests of capabilities the driver
@@ -467,21 +466,22 @@ plugins stop, and nothing is left.
 
 ### Preflight
 
-The driver's checks run first: its tools and a usable docker, the build of
-the binaries, the tree's two etcd constants read from the worker's
-constants printer, and the pinned etcd release. Then the helper is shipped
-and the guest checks run: passwordless sudo on every guest; on the three
-Kubernetes guests the hostnames and machine-ids distinct (CSI2), native
-multipath and the memory floor on the hosts, and the hosts' identities
-present and different; on the node guests the agents' tools and modules
-and this suite's ports free. Then the start cleanup, then k3s: present at
-the pin or installed (CSI1), every node Ready at the pin, the taint (CSI6),
-and the cluster's own name service available. Then the dnv stack and the
-driver.
+The suite's machine's checks run first: its tools and a usable docker,
+the build of the binaries, the tree's two etcd constants read from the
+worker's constants printer, and the pinned etcd release. Then the helper is
+shipped and the start cleanup runs, before any guest check, so that a port
+check never judges what a failed run left in place. Then the guest checks:
+passwordless sudo on every guest; on the three Kubernetes guests the
+hostnames and machine-ids distinct (CSI2), native multipath and the memory
+floor on the hosts, and the hosts' identities present and different; on the
+node guests the agents' tools and modules and this suite's ports free. Then
+k3s: present at the pin or installed (CSI1), every node Ready at the pin,
+the taint (CSI6), and the cluster's own name service available. Then the
+dnv stack and the driver.
 
 ### Diagnostics on failure
 
 A failing run prints the nodes, every pod, the pods and events of the
 suite's namespace, and from each guest its facts, its k3s state, its
 memory and the tail of its k3s journal. A run asked to keep its logs copies
-the k3s journal of each guest to the driver at its end.
+the k3s journal of each guest to the suite's machine at its end.

@@ -152,7 +152,7 @@ reaches the cdc at 127.0.0.1, where the all-in-one tutorial started it.
 The command below reads the machine's address off its default route.
 
 ```
-sudo k3s kubectl apply -f deploy/namespace.yaml -f deploy/csidriver.yaml -f deploy/rbac.yaml
+sudo k3s kubectl apply -f deploy/namespace.yaml -f deploy/csidriver.yaml -f deploy/controller-serviceaccount.yaml -f deploy/node-serviceaccount.yaml -f deploy/controller-clusterrole.yaml -f deploy/controller-clusterrolebinding.yaml
 sed "s/192.0.2.10:29527/$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p'):29527/; s/192.0.2.10:8009/127.0.0.1:8009/" deploy/config.yaml | sudo k3s kubectl apply -f -
 sudo k3s kubectl apply -f deploy/controller.yaml -f deploy/node.yaml
 ```
@@ -198,8 +198,9 @@ sudo k3s kubectl get csistoragecapacities -A -o custom-columns=CLASS:.storageCla
 
 It prints one row: the class `dnv`, a capacity of `18Gi` and a largest
 volume of `18Gi`. The four disk nodes hold 36 free extents of 1 GiB, and
-RAID1 writes every byte twice, so 18 GiB can be promised; a volume can be
-no larger than that.
+RAID1 writes every byte twice, so 18 GiB is free now; a new volume can be
+no larger than that. The number is free space, not a promise: it is not
+held for any volume.
 
 ## A volume
 
@@ -228,7 +229,10 @@ it a thin device of 8 GiB, a subsystem with no allowed host yet, and a
 namespace over the thin device. The worker then provisions the pool as in
 the all-in-one tutorial. The volume is thin: it reserves an eighth of its
 size, and auto-grow adds a data group of one extent whenever the pool
-fills up, until the data groups cover the volume.
+fills up, until the data groups cover the volume. So the volumes of a
+cluster can be larger, together, than its free space. When a pool needs
+another data group and the disk nodes have no room left for it, the writes
+in the pod stall and then fail, as for any full pool.
 
 Check: the claim is bound, the pool exists, and the worker has provisioned
 its four sides and made the cntlr the primary. Zeroing the meta sides takes

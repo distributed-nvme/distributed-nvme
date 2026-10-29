@@ -18,6 +18,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **applied set** — The bitmap chunks an agent reports as held for a migration or a clone, derived from the chunk files present in its local store (`bm_idx_list` for a migration, `chunk_id_list` for a clone). The worker pushes the chunks etcd holds that the applied set lacks.
 
+**attach, detach** — Kubernetes' binding of a volume to one node, and its undo, through the CSI driver's controller plugin, which sets the volume's subsystem's allowed hosts to that node's host NQN alone, and empties them (see `csi.md` CSI10).
+
 **attribution** — The sweep's test of which agent, cluster, node and storage pool a kernel object belongs to, by its parsed dm name or NQN, or for a nameless object by what it is built from. An object that is another agent's is foreign and is never touched; one nobody claims is unowned.
 
 **auto-grow, thin-pool auto-grow** — The sp worker's reaction that appends a data or meta group to a slice whose pool usage has crossed its low-water mark, a data group by the slice's original allocation and a meta group by the next rung of the meta ladder, the fixed sequence of sizes a slice's meta groups take. One grow of a kind stays pending until the reported pool total reflects it.
@@ -51,6 +53,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **candidate unit** — One scan-outside-plus-transaction round of an allocating RPC. A pick whose capacity key moved, a pick whose disk node no longer has the metadata units the round needs, or a plan the stored state has outgrown since the scan, fails the unit as "candidate changed" and the handler runs it again, for at most `MaxCandidateRoundCnt` rounds: past them, or once the request's deadline has passed, it answers that the allocation did not settle (see `gateway.md` GW9).
 
 **capacity key** — The index key a node holds exactly while it is allocatable, ordered by free extents (`DnCapacity`, `CnCapacity`). Its value carries a copy of the node's location and, on a disk node, of its used metadata units, from which a scan reads the free units without another read. Every transaction that changes an input of the presence rule rewrites it, every one that changes only a disk node's used units rewrites its value where it is, and the allocator scans nothing else (see `architecture.md`, Capacity index keys).
+
+**capacity object** — The Kubernetes object, one per storage class of the CSI driver, in which the provisioner sidecar keeps what the controller plugin answers for the class: its free space and its largest volume. It is the one place Kubernetes shows dnv's free space (see `csi.md` CSI11, CSI19).
 
 **case** — One scenario of an integration suite, run in a fixed order with the run stopping at the first failure. Each case is isolated: in the agent suites by pool ids of its own and a teardown, elsewhere by a wiped store and restarted processes before it starts.
 
@@ -98,6 +102,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **controller node, CN** — A machine that runs the volume logic of the cntlrs it hosts: it contributes no persistent storage and holds no clone's metadata — a clone's dm-clone keeps it on the clone's clone meta group — and offers a capacity budget in extents from which every cntlr's footprint is debited (`--capacity`). It runs one cn agent, never two on one kernel, and exports its namespaces over that agent's nvmet port.
 
+**controller plugin** — The part of the CSI driver that runs once per Kubernetes cluster and talks to the gateway alone: for each volume it creates and deletes one storage pool with one thin device, one subsystem and one namespace, attaches and detaches it, and answers the capacity of a storage class (see `csi.md`, The driver).
+
 **converge** — An agent's one pass that brings its node's state for an object to the request it holds: probe-first, bottom-up build, top-down removal by sweep, with every failure captured in a row rather than aborting the pass. A converge is idempotent and crash-restartable.
 
 **converge mark** — The agent's in-memory record that a converge of an object is in flight. A syncup marks its object as it arrives, before it cancels the object's background read and waits for its locks, unless a gate refuses it there, and a node syncup (`SyncupDn`, `SyncupCn`) can mark the node too; a background converge attempt marks its object before it waits for the object's lock and cancels nothing. A mark ends when its syncup or attempt returns, after any observation its converge stores. No background read of an object starts while a mark of the object or of its node stands, and the converge start a stamp carries is when the object's own marks began to stand without a break (see `dnagent.md` SH30 for which syncups mark and which reads each cancels and waits for).
@@ -109,6 +115,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **created, materialization** — The thin-device flag the sp worker sets once the primary has reported the device's thin volume OK in every slice, and never clears (`ThinDevice.created`). Only a created thin device can be snapshotted, an origin is not deleted while a snapshot of it is uncreated, and no converge sends a created thin device a create or snapshot message again, though one that leaves `td_list` is still sent the delete message (see `cnagent.md` CN14).
 
 **cross-SP live migration** — Moving a volume between storage pools, even across clusters: the destination pool serves a subsystem and namespace identical to the source's, so hosts aggregate both pools' exports into one device and follow the ANA flip, while a transfer exports the source volume over a subsystem of its own and a clone in the destination pool pulls it.
+
+**CSI driver, dnv-csi** — The program that connects dnv to Kubernetes through the Container Storage Interface (CSI), the plugin API Kubernetes uses to create, attach and mount volumes. It runs inside Kubernetes as two plugins, the controller plugin and the node plugin, and is the only dnv program that does; `csi.md` calls it the driver.
 
 **cutover** — The moment in a migration when the source side stops serving the leg and the destination side starts to serve it. The sp worker starts it with one write, which clears the migration's cutover pending flag, only once the destination side reports that it waits for it and the primary reports a live path to that side; the next syncups then have the source fence its paths and export its side device, and the destination connect to that export, build its dm-clone and serve (see `architecture.md`, Migration; `dnv-worker.md` RW18). A migration whose record carries no `cutover_pending` gets no such write: its record reads as a cutover that has started, so its source cuts its paths once the destination side is provisioned, with no wait for the primary's path (see `architecture.md`, Upgrade in lockstep).
 
@@ -148,13 +156,15 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **dnv disk format** — The self-describing layout a disk node writes on its `--disk` device: a checksummed header block, alternating checksummed volume-table slots, the clone-metadata area and the extent area. The on-disk table, not the local store, is authoritative for extent placement.
 
+**dnv name** — The name a CSI volume's storage pool, thin device and subsystem carry: the name Kubernetes gives the volume when dnv takes it as a name, else its leading characters made acceptable and a hash of the whole name, the same for the same name (see `csi.md`, The volume model).
+
 **dnvctl** — The operator CLI: a noun-grouped command tree with one leaf command per Gateway RPC, taking the cluster and pool names as global flags and a presence-based `--rev` token, and printing one canonical JSON result document on stdout.
 
 **drain, sp drain** — The sp worker's asynchronous teardown of a storage pool that `DeleteStoragePool` latched: every cntlr in one transaction, then the pool's repairs and then its retired legs, in bounded batches that never span two parents, then each slice in turn, its groups in bounded batches that never span two slices, then the final keys, each batch returning node budget in the transaction that shrinks the record describing it. A lost describing record wedges the drain for an operator rather than drifting the ledger.
 
 **drive step** — The first step of leg repair in each pass: the sp worker walks its own repairs, those whose name carries the reserved prefix, and drives the first one, in list order, that has a step due: a STARTED one it finishes, an ABORTED one it cancels, and a CREATED one a trigger asks for it tries to abort, passing over a deleting clone's repair and one whose stage the pass moved. The step that commits is the pass's one action, and a refusal holds only that repair's group (see try-to-abort; `dnv-worker.md` AR8).
 
-**driver** — A suite's test client outside the system under test: the agent suites' `dnagentctl` and `cnagentctl` speak the agent services, `gatewayctl` drives the gateway RPCs with a barrier runner, `workerctl` plays the gateway for the worker suite, and `cdcctl` writes the `CdcEntry` keys the cdc suite serves. Drivers are never linked into a shipped binary; the e2e suite also calls the machine it runs on the driver.
+**driver** — A suite's test client outside the system under test: the agent suites' `dnagentctl` and `cnagentctl` speak the agent services, `gatewayctl` drives the gateway RPCs with a barrier runner, `workerctl` plays the gateway for the worker suite, and `cdcctl` writes the `CdcEntry` keys the cdc suite serves. Drivers are never linked into a shipped binary; the e2e suite also calls the machine it runs on the driver. In `csi.md` the driver is dnv-csi, the CSI driver, and the machine a suite runs on is the suite's machine.
 
 **echo field** — The handle a revision token message carries beside its revision, the node's address in `DnRev` and `CnRev` and the pool's name in `SpRev`, which a get returns: the gateway ignores it, a message carrying nothing else is a present zero token and is refused, and dnvctl never sends it.
 
@@ -199,6 +209,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **fence-first window** — The time from the sides' fence of an old primary's legs until its agent applies its demotion, in which that primary answers host IO on its still-optimized path with target-internal errors (see `architecture.md`, Failover; `dnv-worker.md` RW14, RW22).
 
 **flip** — A one-way write of a readiness flag. The worker's two flips each write once the agents report it earned: the provisioned flip on a side whose zeroing is complete (`FlipProvisioned`), and the created flip on a thin device whose volume is OK in every slice (`FlipCreated`), which also writes the torn mark the report carries (see torn snapshot). For the sides of clone meta groups the provisioned flip runs through its twin, the clone flip (`FlipCloneProvisioned`), in a transaction of its own; it skips a clone that is gone, re-created under its name, without a group or being deleted (see `dnv-worker.md` RW18, MD6). For the side of a repair's new leg the provisioned flip runs through the repair flip (`FlipRepairProvisioned`), one side per transaction; it writes the `Repair`, and skips a repair that is gone or carries another `rep_id`, and one of a clone that is gone or being deleted (see `dnv-worker.md` RW18, MD6). Each flip bumps the pool's revision when it writes, so the next syncup carries the flag.
+
+**follower** — The node plugin's loop that keeps a node's paths to the volumes it has staged matching the cdcs' discovery logs: it connects every listed cntlr, drops a path no cdc lists any more, and drops nothing on a missing answer (see `csi.md` CSI15).
 
 **footprint** — The controller-node budget a cntlr reserves, the sum of the extents of every group of its pool's slices, a clone meta group counting in none: it is debited from the node's free extents when the cntlr is created and by each group a grow appends, and returned in the transaction that removes the cntlr.
 
@@ -267,6 +279,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **interceptor** — One of the four shared gRPC interceptors in `common` that every dnv client connection and server chains (`GrpcUnaryClientInterceptor` and its stream and server siblings): they move the trace id between context and gRPC metadata and log every request and reply message, and they never mint an id (see `grpc.md`, T1 to T4).
 
 **invariant key** — A key the data model guarantees present while its parent exists: the revision keys, the globals, the record of every object a conf lists, and the node record a stored side or cntlr names. A read that reaches one through its parent and finds it absent has found a lost invariant, which the gateway never answers `NOT_FOUND` (see `architecture.md`, Key table).
+
+**k3s** — A Kubernetes distribution in one binary that bundles the container runtime and the network plugin; the csi suite's lab and the CSI tutorial run it.
 
 **lab fact** — A behaviour of the lab guests' kernel or tools that a suite relies on, stated in its document apart from dnv's own rules — how the guests' dd handles direct IO, how IO behaves with no serving path, what a loop device's zero-out does — so that a reader can tell a suite's assumption from a design rule (see `dnagent_integtest.md`, Assumptions and preflight checks, and `cnagent_integtest.md`, Lab facts).
 
@@ -344,6 +358,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **ng device** — The generic character device, "ngXnY", that the kernel adds beside a multipath namespace device "nvmeXnY" in the same subsystem directory, named after that device, as the last step of adding it, once the device can be opened by its number. A lookup of the sysfs walk records whether the picked device's ng device is listed, from the listing alone, and the cn agent's wait after a connect counts the device complete only then (see `cnagent.md` CN10; `dnagent.md` SH20).
 
+**node plugin** — The part of the CSI driver that runs on every Kubernetes node that may mount a volume and talks to the kernel, never to the gateway: it connects the node to a volume's subsystem, follows the cdcs while the volume is staged, finds the device, formats and mounts it, and undoes all of that (see `csi.md`, The node plugin).
+
 **node selector, black list, white list** — The black list and white list an allocating request may carry (`NodeSelector`): a black-listed node is never picked, and a non-empty white list restricts picks to it.
 
 **not given** — dnvctl's convention for an optional sub-message: it is sent only when one of its flags holds a non-zero value, a zero meaning the member was not given. For `--rev`, given means typed on the command line.
@@ -390,6 +406,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **persistent discovery connection** — A host's long-lived connection to a cdc instance, which keeps its host state and receives the discovery-log-change AENs; a one-shot discover creates and drops its host state each time.
 
+**persistent volume claim, claim** — A Kubernetes user's request for a volume of a storage class, which the controller plugin turns into a storage pool of its own (see `csi.md`, The volume model). Not the claim rule.
+
 **placement bound** — The e2e suite's default count of dn agents per disk-node guest: the least count per guest that rules out, by counting, a pick starving for disk nodes in distinct locations, sized by the ops case (see `e2e_integtest.md` E2E3).
 
 **planning snapshot** — A read-only etcd snapshot (`Snapshot`) an RPC plans from before its deciding STM: `DeleteThinDevice` walks its thin devices in one, and `GrowSlice` and the repair calls whose deciding STM is a `model` operation read the cluster conf in theirs rather than in their deciding STM, `CreateRepair` in a fresh one each round of its candidate unit (see `architecture.md`, STM discipline; `gateway.md` GW5).
@@ -417,6 +435,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **probe-IO carve-out** — The one sanctioned bypass of the OS client: the leg health probers write and read their health block through `WriteBlockAt` and `ReadBlockDirectAt`, which take no context, hold no OS client slot and log nothing, so the probers log their own probe records (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
 **provisioned, zeroing** — The side flag the sp worker sets on a side once the disk node reports the side's zeroing complete (`provisioned`). Zeroing writes zeros from the start of a new side over the length the sp worker sends, the whole leg span for a side of a slice's meta group and the meta region and first data block for a side of a data group or of a clone meta group, as batched zero-out writes through the side device in the dn agent's background, tracked in the volume table as a count of bytes zeroed; a leg none of whose sides has the flag is deferred on the controller node, and so is a clone until every side of its clone meta group's leg list has it. A migration destination carries its own flag that gates the source export and the clone, and takes its clone-metadata slot before it zeroes, zeroing nothing while it has none (see `architecture.md`, Side provisioning protocol).
+
+**publish, unpublish** — The node plugin's calls that give a staged volume to one pod, a bind mount at the pod's path, and take it back. The publish context is what an attach hands the node: the subsystem NQN, the namespace uuid and the cdc addresses (see `csi.md` CSI10, CSI17).
 
 **QoS** — The cluster-wide ratio of size-proportional IO limits (`qos_ratio`) that every controller-node syncup carries; the cn agent persists it and enforces nothing.
 
@@ -504,6 +524,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **side** — `Side`, the disk-node-resident part of a leg, charged to its node in extents: runs of extents in the node's volume table, the side device over them (`DnSideName`, the dm-linear that zeroing writes through and the primary's per-CN linear maps), and one export stack per cntlr of the pool. It carries the provisioned flag and, while the leg migrates, a source or destination role.
 
+**sidecar** — One of the standard helper containers Kubernetes ships to drive a CSI driver; dnv's are the provisioner, the attacher, the node registrar and the liveness probe (see `csi.md`, Deployment).
+
 **sides first, sides-first hold** — The second wait of the hold, which every fan-out of a pool goes through: the cntlrs' syncups wait until every running side child, a retired side's aside, whose side had no health epoch in the load the wait took its sides from has reported the revision applied, or one cntlr interval has passed since that wait began, a timer release being logged (see hold; `dnv-worker.md` RW14). The wait takes its sides when it begins and again at a bump, a fan-out of a newer revision; a side that turns unhealthy in between is still waited for, so one whose agent stops answering can hold the cntlrs for the whole interval. It narrows the races of a cntlr outrunning its sides' exports and ANA flips, and is no correctness dependency.
 
 **skip bitmap** — The chunked bitmap of a clone's or a migration's source that the worker pushes, a set bit marking a source block as never written: the agent folds the chunks it holds through raid0 bitmap math and discards on the dm-clone every region all of whose source bits are set, so a missing chunk only costs extra copying; `architecture.md`, Migration, says when a caller may read a migration's.
@@ -514,13 +536,15 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **space guard** — The e2e suite's allocation caps, asserted after every case: one per backing file, which bounds everything written into it, and one for everything the run allocated on every guest, at what the pool's zeroing and the suite's patterns write plus slack (see `e2e_integtest.md` E2E5).
 
-**stage** — One step of a suite case, run under its own trace id, which every call the step makes carries into the records it causes; work the worker then does for it runs under the worker's own ids.
+**stage** — One step of a suite case, run under its own trace id, which every call the step makes carries into the records it causes; work the worker then does for it runs under the worker's own ids. In `csi.md`, also the node plugin's call that connects a node to a volume and, for a filesystem volume, formats it if blank and mounts it at a staging path the node's pods share; unstage undoes it (see `csi.md` CSI14 to CSI17).
 
 **stamp** — The part of an agent's reply to a check round, an info read or a syncup that says which observation the reply answers from (`ObsStamp`, `obs_stamp`): the observation's time and trace id, the agent's clock as it answers, and the start of a converge of the object in flight, unset when none is; the reply of a syncup that converged stamps the observation its converge stored, with no converge start, and an object the agent holds no observation of gets a stamp with no observation time (see `dnagent.md` SH28). The worker takes an observation's age from it, the answer time less the later of the observation time and the answer time of the first round after a pause in the worker's rounds of the object, all by the node's clock (see `dnv-worker.md` HL7); an inspect passes it through with the age of the observation alone, answer time less observation time.
 
 **standby** — A cntlr that is not primary: it keeps its connection to every leg of the pool's slices and of its clones' clone meta groups so a failover is fast, and exports every namespace over the dm-error in the inaccessible group, so the hosts the discovery records send to it hold its path and a failover only moves the stack. The records list an enabled standby only while its health epoch is zero (see listing rule), so hosts that follow them let go of an unhealthy standby's path until its next clean round lists it again.
 
 **STM** — The etcd software transaction (`RunSTM`) every mutation of the gateway and the worker runs in: reads are collected, the writes commit only if nothing read has changed, and the function is retried otherwise; the vote worker's registration writes are plain puts and deletes. A deciding STM re-validates its preconditions inside it.
+
+**storage class** — The Kubernetes object that names a CSI driver and its settings; a dnv storage class names one cluster, the redundancy of every group and the cntlr count of every pool (see `csi.md` CSI12).
 
 **storage pool, SP, sp** — `SpConf`, the unit of volume service: a set of cntlrs on controller nodes, slices made of groups of legs on disk nodes, and the thin devices, subsystems, clones, transfers and migrations it owns, with one conf, one level and one revision.
 
@@ -551,6 +575,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **token carrier** — A dnvctl leaf command whose request has a revision token field, the only kind that takes `--rev`; a `--rev` typed on any other leaf is a usage error (see `dnvctl.md` CT1, CT3).
 
 **token check** — The gateway's comparison of a mutator's revision token with the stored revision, made right after resolution and before any other state check, and only when the token message is present (see `gateway.md` GW6).
+
+**topology segment** — The labels a CSI node plugin reports for its node, from which Kubernetes learns where a volume can be reached. Every dnv node reports the same one, since a dnv volume is reachable from every node that runs the plugin (see `csi.md` CSI13).
 
 **torn snapshot** — A snapshot whose slices were taken at two different moments, because its slices' snapshot messages ran in two passes, the primary having stopped between them or a slice having been skipped or refused, and a later pass finished the rest. The cn agent reports it, the thin device record keeps it, and the only remedy is to delete and re-create the snapshot.
 

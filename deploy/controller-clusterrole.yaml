@@ -1,18 +1,6 @@
-# The accounts and the rights of the driver's pods (csi.md, Deployment). The
-# controller's sidecars, the provisioner and the attacher, watch and write the
-# volume objects; the node pod needs no right of its own.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: dnv-csi-controller
-  namespace: dnv-csi
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: dnv-csi-node
-  namespace: dnv-csi
----
+# The rights of the controller pod's sidecars (csi.md, Deployment): the
+# provisioner and the attacher watch and write the volume objects, and the
+# provisioner owns the capacity objects.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -60,16 +48,3 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: dnv-csi-controller
-subjects:
-  - kind: ServiceAccount
-    name: dnv-csi-controller
-    namespace: dnv-csi
-roleRef:
-  kind: ClusterRole
-  name: dnv-csi-controller
-  apiGroup: rbac.authorization.k8s.io

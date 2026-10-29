@@ -54,7 +54,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `agent/cnagent/` | the cn role's policy, the `ControllerNodeAgent` service: which leg connections, md arrays, thin pools, dm and nvmet objects a controller node builds, and when, with the wrappers of the tools only the cn runs (`cnagent.md`) |
 | `cdc/` | dnv-cdc: the etcd watcher of the `CdcEntry` keys, the per-host view registry, the discovery-log rendering and the NVMe/TCP discovery controller (`cdc.md`) |
 | `ctl/` | dnvctl: the cobra command tree, one file per noun group, and in `ctl/root.go` what the groups share — the viper binding, the dial, the result rendering and the exit codes (`dnvctl.md`) |
-| `csi/` | dnv-csi: the Container Storage Interface driver, served over a unix socket to Kubernetes: the identity service, the controller plugin, which is a gRPC client of the gateway, the volume naming and the capacity arithmetic (`csi.md`) |
+| `csi/` | dnv-csi: the Container Storage Interface driver, served over a unix socket to Kubernetes: the identity service; the controller plugin, which is a gRPC client of the gateway, with the volume naming and the capacity arithmetic; and the node plugin, with the follower, the node's NVMe connects, the mounts and the kernel's event socket (`csi.md`) |
 | `integtest/` | the integration suites, one shell script per suite, the runner `integtest/runner.sh` with its configuration file `integtest/runner.conf`, the script that fetches the etcd release the suites pin, `integtest/fetch_etcd.sh`, and the script that counts, in worker logs copied out of a run, the worker's failed check rounds by cause, the check streams it failed to open or to send a round on, its health changes to unreachable and its late observations, `integtest/round_counts.sh`, which no suite calls, beside the suites' drivers and fakes (below) |
 | `integtest/dnagentctl/` | the gRPC driver of a real dn agent, which both agent suites use |
 | `integtest/cnagentctl/` | the gRPC driver of the cn agent suite; the end-to-end suite runs it only as a host-id printer |
@@ -79,7 +79,7 @@ The integration suites are driven over ssh against remote hosts. The two
 agent suites need passwordless sudo, for real dm, md, nvmet and NVMe/TCP over
 loop devices; so does the cdc suite, for real nvmet and NVMe/TCP over
 dm-zero, the end-to-end suite on every guest but its control-plane one, and
-the Kubernetes suite on all three of its guests.
+the Kubernetes suite on every guest it uses.
 The worker, gateway and dnvctl suites need no root. The drivers and fakes are
 test drivers only, never linked into a `cmd/` binary. The end-to-end suite
 adds no driver of its own and drives the shipped `dnvctl` for every

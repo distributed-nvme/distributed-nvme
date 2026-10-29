@@ -36,9 +36,10 @@
 #     identity. The two hosts' identities must differ, or preflight dies.
 #  3. kubectl runs on the control-plane guest only, as the k3s binary's
 #     subcommand over ssh (CSI3). The driver machine installs nothing.
-#  4. Every image reaches a node by import into its k3s image store (CSI4),
-#     and the driver's pods pull nothing; the IO pods run the driver's own
-#     image, which carries the tools they need.
+#  4. The suite's images, the driver's and the smoke image, reach a node by
+#     import into its k3s image store (CSI4), and no pod pulls them; the IO
+#     pods run the driver's own image, which carries the tools they need.
+#     The sidecar images the manifests name come from their public registry.
 #  5. Every pkill lives in the helper FILE on the guest with a bracketed
 #     pattern; `pkill -f` matches the wrapping shell of the ssh command
 #     itself, so a pattern in an ssh command STRING kills its own shell
@@ -200,6 +201,7 @@ CLEANUP_DIRTY=0
 RUN_CASES=()
 CP_NAME=""
 HOST_NAME=()
+HOST_NQN=()
 SMOKE_DIR=""
 JQ=""
 CTL_RC=""
@@ -1000,7 +1002,7 @@ hosts_drop() { # [extra nqn…]
 		[ -d "$host" ] && rmdir "$host" 2>/dev/null
 	done
 	for extra in "$@"; do
-		[ -d "$NVMET/hosts/$extra" ] && rmdir "$NVMET/hosts/$extra" 2>/dev/null
+		[ -n "$extra" ] && [ -d "$NVMET/hosts/$extra" ] && rmdir "$NVMET/hosts/$extra" 2>/dev/null
 	done
 	return 0
 }
@@ -1593,7 +1595,8 @@ preflight_guests() {
 		[ -n "${HOST_NAME[$h]}" ] || die "host$h: empty hostname"
 		names="$names $(fact_of "$out" hostname)"
 		ids="$ids $(fact_of "$out" machine_id)"
-		nqns="$nqns $(fact_of "$out" hostnqn)"
+		HOST_NQN[$h]=$(fact_of "$out" hostnqn)
+		nqns="$nqns ${HOST_NQN[$h]}"
 		assert_eq "$(fact_of "$out" multipath)" Y "host$h: nvme_core.multipath"
 		mem=$(fact_of "$out" mem_total_kib)
 		assert_ge "$mem" 3000000 "host$h: MemTotal in KiB (raise the guest's memory)"
@@ -1962,7 +1965,8 @@ driver_up() {
 
 	stage 07 "deploy the driver: $DRIVER_NAME in $DRIVER_NS"
 	local f
-	for f in namespace csidriver rbac; do
+	for f in namespace csidriver controller-serviceaccount node-serviceaccount \
+		controller-clusterrole controller-clusterrolebinding; do
 		kc_apply <"$DEPLOY_DIR/$f.yaml" || die "applying $f.yaml failed"
 	done
 	kc_apply <<EOF || die "applying the config map failed"
@@ -2031,7 +2035,18 @@ driver_down() {
 	kc_ok delete csidriver "$DRIVER_NAME" --ignore-not-found >/dev/null 2>&1
 	kc_ok delete clusterrolebinding dnv-csi-controller --ignore-not-found >/dev/null 2>&1
 	kc_ok delete clusterrole dnv-csi-controller --ignore-not-found >/dev/null 2>&1
-	kc_ok delete csistoragecapacities -A --all --ignore-not-found >/dev/null 2>&1
+}
+
+# host_nqns reads the hosts' NQNs for the controller nodes' cleanup, which
+# drops the nvmet host entries an attach made for them; at the start cleanup
+# preflight has not read them yet. A host that does not answer is left out.
+host_nqns() {
+	local h out
+	for h in "${!HOST[@]}"; do
+		[ -n "${HOST_NQN[$h]:-}" ] && continue
+		out=$(helper_host_ok "$h" facts)
+		HOST_NQN[$h]=$(fact_of "$out" hostnqn)
+	done
 }
 
 # ---------------------------------------------------------------------------
@@ -2070,8 +2085,9 @@ cleanup_all() {
 	for h in "${!HOST[@]}"; do
 		cleanup_verb "host$h" cleaned ssh_host "$h" host_cleanup "$CP_IP" || true
 	done
+	host_nqns
 	for v in "${!CN[@]}"; do
-		cleanup_verb "cn$v" cleaned ssh_cn "$v" cn_cleanup || true
+		cleanup_verb "cn$v" cleaned ssh_cn "$v" cn_cleanup "${HOST_NQN[@]}" || true
 	done
 	for v in "${!DN[@]}"; do
 		cleanup_verb "dn$v" cleaned ssh_dn "$v" dn_cleanup || true
@@ -2503,13 +2519,19 @@ EOF
 	log "  writes: $count, failed: $fail, longest: $max ms"
 	assert_ge "$count" 1 "the write loop wrote"
 	assert_eq "$fail" 0 "writes failed during the failover"
-	assert_eq "$(kc_exec wf sh -c 'sha256sum -c /data/sha 2>&1')" "/data/pattern: OK" \
-		"the pattern survives the failover"
 
-	stage 03 "give the agent back, delete, and nothing left"
+	# host0's page cache holds the pattern, so the check reads it on host1,
+	# through the new primary, with the old one still stopped.
+	stage 03 "the pod goes, and a pod on host1 reads the pattern back"
+	delete_pod wf
+	run_pod rf f0 1 Filesystem "$(check_fs_script)" /tmp/marker
+	assert_eq "$(kc_exec rf cat /tmp/check)" "/data/pattern: OK" \
+		"the pattern survives the failover"
+	delete_pod rf
+
+	stage 04 "give the agent back, delete, and nothing left"
 	stat=$(helper_cn "$v" sig_pidfile "$WORK/cn/pid" CONT) || die "cn$v: sig_pidfile failed"
 	log "  cn$v agent $stat"
-	delete_pod wf
 	delete_claim f0
 	nothing_left
 	log "=== $CASE: PASS"
