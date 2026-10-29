@@ -46,6 +46,11 @@ each own a part:
 - [`doc/dependencies.md`](doc/dependencies.md) — the direct module dependencies and why each is allowed.
 - [`doc/csi.md`](doc/csi.md) — dnv-csi, the CSI driver for Kubernetes, and its suite.
 
+Two tutorials run the system on one machine, every command complete:
+[`tutorials/all_in_one.md`](tutorials/all_in_one.md) builds dnv and connects
+a host to a volume with nvme-stas, and [`tutorials/csi.md`](tutorials/csi.md)
+adds a one-node Kubernetes and mounts a claim in a pod through the CSI driver.
+
 The integration suites drive real binaries on lab VMs over ssh, one script
 under `integtest/` each; what a suite proves, its topology and its cleanup are
 its document's:

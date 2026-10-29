@@ -72,6 +72,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `cmd/dnvctl/` | the `main` of `dnvctl`, the operator CLI |
 | `cmd/dnv-csi/` | the `main` of `dnv-csi`, the CSI driver |
 | `deploy/` | the CSI driver's container image recipe and the plain manifests that deploy its two plugins with the Kubernetes sidecars (`csi.md`, Deployment) |
+| `tutorials/` | the two tutorials, user guides that run the system on one machine with every command complete: dnv alone, with a host connected over nvme-stas, and dnv under a one-node Kubernetes through the CSI driver |
 | `doclint/` | a test-only package: the lint that holds the documents under `doc/` and `README.md` to the documentation rules |
 
 The integration suites are driven over ssh against remote hosts. The two
