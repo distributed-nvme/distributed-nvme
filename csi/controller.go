@@ -754,6 +754,11 @@ func (c *controller) GetCapacity(
 		}
 		return nil, fromGateway("GetClusterCapacity", err)
 	}
+	// Every volume is a pool of its own, so a cluster at its pool ceiling
+	// has nothing free whatever its nodes hold.
+	if poolCntOf(cluster.GetSpGlobal()) >= common.MaxSpCntPerCluster {
+		return nothing, nil
+	}
 	// The largest volume is always set, zero included: an unset one means
 	// no bound per volume.
 	available, maxVolume := capacityOf(reply, p.legs(), p.cntlrCnt(),

@@ -33,7 +33,10 @@ type fakeGateway struct {
 }
 
 type fakeCluster struct {
-	conf  *pb.ClusterConf
+	conf *pb.ClusterConf
+	// spCnt is the pool count GetCluster reports, beside the pools the
+	// fake holds, to stand for a cluster at its ceiling.
+	spCnt uint32
 	pools map[string]*fakePool
 	dns   map[string]*pb.DnCapacityEntry
 	cns   map[string]*pb.CnCapacityEntry
@@ -226,6 +229,9 @@ func (g *fakeGateway) GetCluster(
 	return &pb.GetClusterReply{
 		ClusterName: clusterNameOf(req.GetClusterName()),
 		ClusterConf: proto.Clone(c.conf).(*pb.ClusterConf),
+		SpGlobal: &pb.SpGlobal{
+			ShardBucket: []uint32{uint32(len(c.pools)), c.spCnt},
+		},
 	}, nil
 }
 

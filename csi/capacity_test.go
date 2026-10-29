@@ -52,8 +52,9 @@ func TestCapacityOf(t *testing.T) {
 		t.Errorf("three disk nodes for four legs: available %d, maximum %d", avail, maxVol)
 	}
 	// With a fourth: 560 free disk extents over 2 legs. The meta group,
-	// placed first and at random, may take the two fullest disk nodes, so
-	// the data group is sure of the fourth largest, 10, times 8.
+	// placed first and at random, may take the two disk nodes with the
+	// most free extents, so the data group is sure of the fourth largest,
+	// 10, times 8.
 	reply.AddrPortToDn["d"] = dn(20)
 	avail, maxVol := capacityOf(reply, 2, 2, 1)
 	if want := 560 * fakeExtent / 2; avail != want {
@@ -96,6 +97,9 @@ func TestCapacityOf(t *testing.T) {
 	}
 	if avail, maxVol = capacityOf(&pb.GetClusterCapacityReply{}, 2, 2, 1); avail != 0 || maxVol != 0 {
 		t.Errorf("an empty reply gives %d and %d", avail, maxVol)
+	}
+	if poolCntOf(&pb.SpGlobal{ShardBucket: []uint32{3, 0, 4}}) != 7 || poolCntOf(nil) != 0 {
+		t.Error("poolCntOf does not sum the shard buckets")
 	}
 	if dnFloorOf(&pb.DnBinConf{Bin0Shift: 4}) != 16 || dnFloorOf(nil) != 1 {
 		t.Errorf("dnFloorOf: %d and %d", dnFloorOf(&pb.DnBinConf{Bin0Shift: 4}), dnFloorOf(nil))

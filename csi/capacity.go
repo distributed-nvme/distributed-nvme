@@ -39,6 +39,16 @@ func dnFloorOf(conf *pb.DnBinConf) uint64 {
 	return uint64(1) << shift
 }
 
+// poolCntOf is the pools a cluster holds, those being deleted included: the
+// sum of its shard buckets, which the gateway holds to its pool ceiling.
+func poolCntOf(global *pb.SpGlobal) uint64 {
+	var n uint64
+	for _, c := range global.GetShardBucket() {
+		n += uint64(c)
+	}
+	return n
+}
+
 // capacityOf turns the cluster capacity call's records into the two numbers
 // Kubernetes asks for (csi.md, Capacity). A disk node counts when it is
 // enabled, healthy, below its side ceiling and has dnFloor free extents; a
@@ -53,9 +63,10 @@ func dnFloorOf(conf *pb.DnBinConf) uint64 {
 // controller nodes that count, times the extent size, divided by the cntlr
 // count. The largest volume is the one whose first data group, one part in
 // volumeSteps of it, fits whichever disk nodes the meta group takes, since
-// the gateway places the meta group first and at random: at least legs of
-// the poolGrpCnt*legs fullest disk nodes stay free for the data group, so
-// the bound is the (poolGrpCnt*legs)-th largest free count. It also fits
+// the gateway places the meta group first and at random: of the
+// poolGrpCnt*legs disk nodes with the most free extents, at least legs stay
+// for the data group, so the bound is the (poolGrpCnt*legs)-th largest free
+// count, the worst case, which can be well below what a create builds. It also fits
 // the controller node that would carry the last cntlr, the cntlrs-th
 // largest free count less the meta group's extent; and it is never above
 // the available bytes. Both are estimates, as the capacity call itself is.

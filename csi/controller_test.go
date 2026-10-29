@@ -525,6 +525,19 @@ func TestGetCapacity(t *testing.T) {
 			reply.GetAvailableCapacity(), reply.GetMaximumVolumeSize().GetValue(), want,
 			10*fakeExtent*volumeSteps)
 	}
+	// A cluster at its pool ceiling has nothing free, whatever its nodes
+	// hold.
+	g.mu.Lock()
+	cl.spCnt = common.MaxSpCntPerCluster
+	g.mu.Unlock()
+	reply, err = c.GetCapacity(ctx, none)
+	wantCode(t, err, codes.OK, "capacity at the pool ceiling")
+	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize().GetValue() != 0 {
+		t.Errorf("a cluster at its pool ceiling answers %v, want nothing", reply)
+	}
+	g.mu.Lock()
+	cl.spCnt = 0
+	g.mu.Unlock()
 	// The cluster's smallest bin is 16 extents: the disk node with 10 is
 	// offered to no scan, and one is left.
 	g.mu.Lock()
