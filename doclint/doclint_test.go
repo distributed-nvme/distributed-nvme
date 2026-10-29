@@ -179,7 +179,7 @@ func TestNoSectionNumbers(t *testing.T) {
 // that is deleted stays here so that a code comment still citing it fails.
 var idPrefixes = []string{
 	"SPD", "CLD", "E2E", "CN", "SH", "RW", "DN", "CM", "NP", "GW", "VW", "DS",
-	"AR", "MD", "IR", "CT", "EU", "WV", "SW", "HL", "BM", "AG", "LG",
+	"AR", "MD", "IR", "CT", "EU", "WV", "SW", "HL", "BM", "AG", "LG", "CSI",
 	"L", "R", "N", "T", "U",
 }
 

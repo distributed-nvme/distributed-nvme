@@ -74,7 +74,8 @@ Unit tests are colocated `_test.go` files inside each package.
 The integration suites are driven over ssh against remote hosts. The two
 agent suites need passwordless sudo, for real dm, md, nvmet and NVMe/TCP over
 loop devices; so does the cdc suite, for real nvmet and NVMe/TCP over
-dm-zero, and the end-to-end suite on every guest but its control-plane one.
+dm-zero, the end-to-end suite on every guest but its control-plane one, and
+the Kubernetes suite on all three of its guests.
 The worker, gateway and dnvctl suites need no root. The drivers and fakes are
 test drivers only, never linked into a `cmd/` binary. The end-to-end suite
 adds no driver of its own and drives the shipped `dnvctl` for every
@@ -83,7 +84,7 @@ in the lab: the suites share guests, and a run's cleanup cannot tell its
 own dnv processes and devices from another run's. What each suite
 proves is its document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
 `e2e_integtest.md`, and the Integration test plan of `dnv-worker.md`,
-`cdc.md`, `gateway.md` and `dnvctl.md`.
+`cdc.md`, `gateway.md`, `dnvctl.md` and `csi.md`.
 
 **The runner.** `integtest/runner.sh` runs the suites one after another,
 never two at once, in the order its configuration file lists the runs, each

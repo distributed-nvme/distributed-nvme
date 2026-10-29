@@ -44,6 +44,7 @@ each own a part:
 - [`doc/osclient.md`](doc/osclient.md) — the `OsClient`, the one path to the operating system.
 - [`doc/layout.md`](doc/layout.md) — the directory tree, the dependency rules, protobuf generation.
 - [`doc/dependencies.md`](doc/dependencies.md) — the direct module dependencies and why each is allowed.
+- [`doc/csi.md`](doc/csi.md) — dnv-csi, the CSI driver for Kubernetes, and its suite.
 
 The integration suites drive real binaries on lab VMs over ssh, one script
 under `integtest/` each; what a suite proves, its topology and its cleanup are
@@ -56,6 +57,7 @@ its document's:
 - `integtest/gateway_test.sh` — [`doc/gateway.md`, Integration test plan](doc/gateway.md#integration-test-plan)
 - `integtest/cdc_test.sh` — [`doc/cdc.md`, Integration test plan](doc/cdc.md#integration-test-plan)
 - `integtest/dnvctl_test.sh` — [`doc/dnvctl.md`, Integration test plan](doc/dnvctl.md#integration-test-plan)
+- `integtest/csi_test.sh` — [`doc/csi.md`, Integration test plan](doc/csi.md#integration-test-plan)
 
 `integtest/runner.sh` runs the suites one after another, as listed in
 `integtest/runner.conf`, and ends with a summary of every run (`layout.md`,
