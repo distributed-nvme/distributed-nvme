@@ -9,8 +9,10 @@ import (
 
 // identity is the CSI identity service both plugins serve (csi.md, The
 // driver): the driver's name and version, the plugin's capabilities and a
-// liveness probe. Both plugins advertise the controller service, since the
-// capability describes the driver, not the process that answers.
+// liveness probe. Both plugins advertise the controller service and the
+// accessibility constraints, since a capability describes the driver, not
+// the process that answers; the constraints are the one topology segment
+// every node reports (csi.md, The node plugin).
 type identity struct {
 	csi.UnimplementedIdentityServer
 }
@@ -38,6 +40,12 @@ func (i *identity) GetPluginCapabilities(
 			Type: &csi.PluginCapability_Service_{
 				Service: &csi.PluginCapability_Service{
 					Type: csi.PluginCapability_Service_CONTROLLER_SERVICE,
+				},
+			},
+		}, {
+			Type: &csi.PluginCapability_Service_{
+				Service: &csi.PluginCapability_Service{
+					Type: csi.PluginCapability_Service_VOLUME_ACCESSIBILITY_CONSTRAINTS,
 				},
 			},
 		}},

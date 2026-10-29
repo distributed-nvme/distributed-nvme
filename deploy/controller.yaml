@@ -59,6 +59,7 @@ spec:
             - --enable-capacity
             - --capacity-ownerref-level=2
             - --capacity-poll-interval=1m
+            - --capacity-for-immediate-binding
           env:
             - name: POD_NAME
               valueFrom:

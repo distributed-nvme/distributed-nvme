@@ -851,16 +851,17 @@ func TestRunNodeServesOverTheSocket(t *testing.T) {
 	if info.GetNodeId() != testNodeA {
 		t.Errorf("node id %q, want the host NQN", info.GetNodeId())
 	}
+	// The one segment every node reports, the same everywhere.
+	if seg := info.GetAccessibleTopology().GetSegments(); len(seg) != 1 ||
+		seg[topologyKey] != topologyValue {
+		t.Errorf("accessible topology %v, want the one segment", seg)
+	}
 	caps, err := csi.NewIdentityClient(conn).GetPluginCapabilities(callCtx,
 		&csi.GetPluginCapabilitiesRequest{})
 	wantCode(t, err, codes.OK, "GetPluginCapabilities")
-	// The capability describes the driver, so the node plugin advertises
-	// the controller service as the controller plugin does.
-	if len(caps.GetCapabilities()) != 1 ||
-		caps.GetCapabilities()[0].GetService().GetType() !=
-			csi.PluginCapability_Service_CONTROLLER_SERVICE {
-		t.Errorf("the node plugin advertises %v", caps)
-	}
+	// A capability describes the driver, so the node plugin advertises
+	// what the controller plugin does.
+	wantPluginCapabilities(t, caps)
 	cancel()
 	select {
 	case err := <-done:

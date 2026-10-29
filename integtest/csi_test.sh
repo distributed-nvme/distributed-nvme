@@ -158,6 +158,7 @@ WAIT_AGENT=30
 WAIT_PROVISION=300
 WAIT_ROLLOUT=600 # the sidecar images are pulled on the first run
 WAIT_PVC=240
+WAIT_CAPACITY=180 # the provisioner polls the capacity every minute
 WAIT_POD=300
 WAIT_DRAIN=300
 WAIT_FAILOVER=180
@@ -2383,9 +2384,21 @@ EOF
 # case_volume: a claim, a pod on host0 that writes and reads, the pod on
 # host1 reading the data back, a raw block claim, then every delete and the
 # check that nothing remains (doc/csi.md, The cases).
+# capacity_published answers whether the provisioner holds a capacity object
+# of the suite's class with a capacity above zero (csi.md CSI19): the one
+# place Kubernetes shows dnv's free space, and the one the provisioner
+# deletes at once for a driver without a topology segment (CSI13).
+capacity_published() {
+	local out
+	out=$(kc get csistoragecapacities -A -o jsonpath="{range .items[?(@.storageClassName==\"$SC_NAME\")]}{.capacity}{\"\n\"}{end}" 2>/dev/null) || return 1
+	[ -n "$out" ] && ! printf '%s\n' "$out" | grep -qxE '0|'
+}
+
 case_volume() {
 	CASE=volume
 	stage 01 "a filesystem claim and a pod on host0 that writes a pattern"
+	wait_until "$WAIT_CAPACITY" "the capacity object of the class $SC_NAME" capacity_published
+	log "  capacity of $SC_NAME: $(kc_ok get csistoragecapacities -A -o jsonpath="{range .items[?(@.storageClassName==\"$SC_NAME\")]}{.capacity} (largest volume {.maximumVolumeSize}){end}" 2>/dev/null)"
 	claim v0 1Gi Filesystem
 	wait_until "$WAIT_PVC" "claim v0 Bound" pvc_bound v0
 	local pv

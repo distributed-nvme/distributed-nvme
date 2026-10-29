@@ -59,11 +59,26 @@ func readPublishContext(m map[string]string) (publishContext, error) {
 	return pc, nil
 }
 
+// The one topology segment every node reports (csi.md, The node plugin). A
+// dnv volume is reachable from every node, so the segment says nothing of
+// its own; it exists because the provisioner sidecar deletes a capacity
+// object whose node selector is empty as soon as it has made it, so a
+// driver without a segment has no capacity objects at all.
+const (
+	topologyKey   = "topology.csi.dnv.io/segment"
+	topologyValue = "all"
+)
+
 func (n *node) NodeGetInfo(
 	ctx context.Context,
 	req *csi.NodeGetInfoRequest,
 ) (*csi.NodeGetInfoResponse, error) {
-	return &csi.NodeGetInfoResponse{NodeId: n.id.hostNqn}, nil
+	return &csi.NodeGetInfoResponse{
+		NodeId: n.id.hostNqn,
+		AccessibleTopology: &csi.Topology{
+			Segments: map[string]string{topologyKey: topologyValue},
+		},
+	}, nil
 }
 
 func (n *node) NodeGetCapabilities(

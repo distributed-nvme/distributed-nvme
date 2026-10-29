@@ -71,10 +71,11 @@ attach (`--cdc-addresses`) and the bound on one gateway call
 (`--gateway-timeout`); a cdc address is an IP literal and a port, since the
 node connects to it as the kernel's discovery address. The identity service
 reports the driver's name and version and advertises the controller service
-from both plugins, since the capability describes the driver, not the
-process that answers: the conformance test reads it off the node plugin's
-socket before it drives a volume through the controller plugin, and the
-sidecars read it off the controller plugin's.
+and the accessibility constraints (CSI13) from both plugins, since a
+capability describes the driver, not the process that answers: the
+conformance test reads it off the node plugin's socket before it drives a
+volume through the controller plugin, and the sidecars read it off the
+controller plugin's.
 
 CSI7. **The gateway is the controller plugin's only peer.** It holds one
 plaintext connection to the gateway under the shared client chain and the
@@ -188,12 +189,20 @@ a command, the mount tools, blkid, the filesystem makers, the sysfs and
 mount table reads. Only the kernel's event socket is the plugin's own, since
 the OS client has no socket.
 
-CSI13. **The node id is the host NQN.** The plugin reads the node's identity
-files at start and refuses to start when either is missing, empty or not a
-host NQN, naming the file and the commands that generate the pair. Every
-connect carries both the host NQN and the host id, since the kernel keeps a
-one-to-one map between them. The files are the operator's; the plugin never
-writes them.
+CSI13. **The node id is the host NQN, and every node is in one topology
+segment.** The plugin reads the node's identity files at start and refuses
+to start when either is missing, empty or not a host NQN, naming the file
+and the commands that generate the pair. Every connect carries both the host
+NQN and the host id, since the kernel keeps a one-to-one map between them.
+The files are the operator's; the plugin never writes them. With its id the
+plugin reports one topology segment, the same on every node, since a dnv
+volume is reachable from every node that runs the plugin: the segment says
+nothing of its own, and it exists because the provisioner sidecar deletes a
+capacity object whose node selector is empty as soon as it has made it, so
+a driver without a segment has no capacity objects at all (CSI19). A create
+ignores the topology requirements it is sent, which can only name that
+segment, and names no accessible topology for the volume, which Kubernetes
+reads as every node.
 
 CSI14. **The plugin's own connect, with the kernel's defaults.** A node's
 path to a volume is made by nvme-cli with the node's identity and no
@@ -272,7 +281,9 @@ cluster differ from the examples in that map and in the storage classes
 alone, which name the operator's clusters. The driver object asks
 for attach, no pod information on mount, the persistent lifecycle and
 capacity tracking, since the plugin answers capacity; the provisioner polls
-it and owns the capacity objects.
+it and owns the capacity objects, for every class of the driver, those with
+immediate binding included, since no scheduler needs those but the capacity
+objects are the one place Kubernetes shows dnv's free space.
 
 ## The suite's dnv stack
 
@@ -400,10 +411,11 @@ node. It applies one pod per host, each pinned to its host by node selector
 and never pulling. Each pod is Running on its host, each log is the one
 line, and the pods go.
 
-**volume.** A filesystem claim becomes a pool of one slice and two cntlrs;
-a pod on host0 writes a pattern and its digest; the same claim under a pod
-on host1 checks the digest; a raw block claim is written and read back
-through the device by a pod on host0; then every delete, and nothing left.
+**volume.** The class's capacity object is published with a capacity above
+zero; a filesystem claim becomes a pool of one slice and two cntlrs; a pod
+on host0 writes a pattern and its digest; the same claim under a pod on
+host1 checks the digest; a raw block claim is written and read back through
+the device by a pod on host0; then every delete, and nothing left.
 
 **failover.** A pod on host0 writes a pattern, then writes in a loop with
 fsync, counting failures and the longest write. The suite reads which

@@ -76,11 +76,7 @@ func TestRunControllerServesOverTheSocket(t *testing.T) {
 	}
 	caps, err := identity.GetPluginCapabilities(callCtx, &csi.GetPluginCapabilitiesRequest{})
 	wantCode(t, err, codes.OK, "GetPluginCapabilities")
-	if len(caps.GetCapabilities()) != 1 ||
-		caps.GetCapabilities()[0].GetService().GetType() !=
-			csi.PluginCapability_Service_CONTROLLER_SERVICE {
-		t.Errorf("plugin capabilities %v", caps)
-	}
+	wantPluginCapabilities(t, caps)
 	probe, err := identity.Probe(callCtx, &csi.ProbeRequest{})
 	wantCode(t, err, codes.OK, "Probe")
 	if !probe.GetReady().GetValue() {
@@ -118,5 +114,21 @@ func TestRunControllerRefusesABadSocketDir(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("RunController accepted a socket in a missing directory")
+	}
+}
+
+// wantPluginCapabilities pins what both plugins' identity advertises
+// (csi.md, The driver): the controller service and the accessibility
+// constraints, and nothing else.
+func wantPluginCapabilities(t *testing.T, caps *csi.GetPluginCapabilitiesResponse) {
+	t.Helper()
+	got := map[csi.PluginCapability_Service_Type]bool{}
+	for _, c := range caps.GetCapabilities() {
+		got[c.GetService().GetType()] = true
+	}
+	if len(got) != 2 || !got[csi.PluginCapability_Service_CONTROLLER_SERVICE] ||
+		!got[csi.PluginCapability_Service_VOLUME_ACCESSIBILITY_CONSTRAINTS] {
+		t.Errorf("plugin capabilities %v, want the controller service and the "+
+			"accessibility constraints", caps)
 	}
 }
