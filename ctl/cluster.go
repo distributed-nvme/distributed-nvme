@@ -1,8 +1,8 @@
 // The cluster subcommands of dnvctl
-// (dnvctl.md, `cluster` — `ctl/cluster.go`): the five RPCs that address a
+// (dnvctl.md, `cluster` — `ctl/cluster.go`): the six RPCs that address a
 // cluster as a whole. This is the one group whose commands do not simply
-// take the global --cluster: `create`, `delete`, `get` and `advance-ids`
-// declare their own --name, which WINS when non-empty and falls back to the
+// take the global --cluster: `create`, `delete`, `get`, `get-capacity` and
+// `advance-ids` declare their own --name, which WINS when non-empty and falls back to the
 // global flag when empty (the field→flag rule of dnvctl.md, Conventions;
 // gatewayctl's clusterNameOf).
 // root.go's clusterNameOf implements that fallback; the flag itself is
@@ -43,11 +43,12 @@ func registerCluster(root *cobra.Command) {
 		clusterGetCmd(),
 		clusterListCmd(),
 		clusterAdvanceIdsCmd(),
+		clusterGetCapacityCmd(),
 	))
 }
 
 // clusterNameFlag declares the group's own identity flag. It is shared by the
-// four commands that carry cluster_name, and is named with this file's group
+// five commands that carry cluster_name, and is named with this file's group
 // prefix so it cannot collide with a sibling group file (dnvctl.md, Files).
 //
 // The default is empty rather than anything cluster-like precisely so that
@@ -198,6 +199,29 @@ func clusterAdvanceIdsCmd() *cobra.Command {
 				ctx context.Context, client pb.GatewayClient,
 			) (any, error) {
 				return client.AdvanceClusterIds(ctx, req)
+			}, nil
+		})
+	clusterNameFlag(cmd)
+	return cmd
+}
+
+// clusterGetCapacityCmd drives GetClusterCapacity, the capacity read of
+// architecture.md, Clusters: every node's recorded extent counts and flags,
+// for the layer above to sum. A read, so it carries no token (CT3); like
+// `cluster get` it names its cluster with --name and falls back to the
+// global --cluster.
+func clusterGetCapacityCmd() *cobra.Command {
+	cmd := leaf("get-capacity",
+		"read every node's recorded extent counts and flags "+
+			"(GetClusterCapacity)",
+		func() (job, error) {
+			req := &pb.GetClusterCapacityRequest{
+				ClusterName: clusterNameOf(),
+			}
+			return func(
+				ctx context.Context, client pb.GatewayClient,
+			) (any, error) {
+				return client.GetClusterCapacity(ctx, req)
 			}, nil
 		})
 	clusterNameFlag(cmd)

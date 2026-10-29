@@ -887,6 +887,42 @@ message AdvanceClusterIdsReply {
     uint32 sp_cnt = 2;
 }
 
+message GetClusterCapacityRequest {
+    string cluster_name = 1;
+}
+
+// DnCapacityEntry is one disk node's recorded counts and flags as
+// GetClusterCapacity reads them off its DnConf (architecture.md, Clusters):
+// no computed member, and the side pointers reduced to their count.
+// Appended, never renumbered.
+message DnCapacityEntry {
+    string location = 1;
+    bool disabled = 2;
+    uint64 err_epoch = 3;
+    uint64 total_ext_cnt = 4;
+    uint64 free_ext_cnt = 5;
+    uint32 side_cnt = 6;
+}
+
+// CnCapacityEntry is the controller-node twin of DnCapacityEntry, read off a
+// CnConf, its cntlr pointers reduced to their count. Appended, never
+// renumbered.
+message CnCapacityEntry {
+    string location = 1;
+    bool disabled = 2;
+    uint64 err_epoch = 3;
+    uint64 total_ext_cnt = 4;
+    uint64 free_ext_cnt = 5;
+    uint32 cntlr_cnt = 6;
+}
+
+message GetClusterCapacityReply {
+    string cluster_name = 1;
+    uint64 extent_size = 2;
+    map<string, DnCapacityEntry> addr_port_to_dn = 3;
+    map<string, CnCapacityEntry> addr_port_to_cn = 4;
+}
+
 message CreateDiskNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
@@ -1660,6 +1696,7 @@ service Gateway {
     rpc GetCluster(GetClusterRequest) returns (GetClusterReply) {}
     rpc ListClusters(ListClustersRequest) returns (ListClustersReply) {}
     rpc AdvanceClusterIds(AdvanceClusterIdsRequest) returns (AdvanceClusterIdsReply) {}
+    rpc GetClusterCapacity(GetClusterCapacityRequest) returns (GetClusterCapacityReply) {}
 
     rpc CreateDiskNode(CreateDiskNodeRequest) returns (CreateDiskNodeReply) {}
     rpc DeleteDiskNode(DeleteDiskNodeRequest) returns (DeleteDiskNodeReply) {}

@@ -1656,6 +1656,16 @@ case_smoke() {
 		"get-cluster dn_global bucket all zero"
 	assert_field "$out" '.cluster_conf.creation_epoch' \
 		"$(jq_of "$cc" '.creation_epoch')" "get-cluster echoes the stored epoch"
+	# The capacity read (architecture.md, Clusters) agrees with the store
+	# too: the resolved name, the stored extent size, and no node yet.
+	out=$(gw get-cluster-capacity)
+	assert_field "$out" '.cluster_name' "$CLUSTER" "get-cluster-capacity cluster_name"
+	assert_field "$out" '.extent_size' \
+		"$(jq_of "$cc" '.dn_bin_conf.extent_size')" "get-cluster-capacity extent_size"
+	assert_eq "$(jq_of "$out" '.addr_port_to_dn | length')" "0" \
+		"get-cluster-capacity: no disk node yet"
+	assert_eq "$(jq_of "$out" '.addr_port_to_cn | length')" "0" \
+		"get-cluster-capacity: no controller node yet"
 	# The name is the key (architecture.md, Clusters), so a second create is
 	# ALREADY_EXISTS and must not stamp a second epoch over the first.
 	assert_no_write "duplicate create-cluster" \
@@ -5154,9 +5164,27 @@ case_faults() {
 	# batteries that case describes.
 	new_cluster
 	make_nodes
+	# The capacity read (architecture.md, Clusters) sees every node as
+	# created: four disk nodes and three controller nodes, nothing charged.
+	out=$(gw get-cluster-capacity)
+	assert_eq "$(jq_of "$out" '.addr_port_to_dn | length')" "4" \
+		"capacity: four disk nodes"
+	assert_eq "$(jq_of "$out" '.addr_port_to_cn | length')" "3" \
+		"capacity: three controller nodes"
+	assert_eq "$(jq_of "$out" \
+		'[.addr_port_to_dn[] | select(.free_ext_cnt == .total_ext_cnt and .side_cnt == 0)] | length')" \
+		"4" "capacity: every disk node whole and without a side"
 	make_sp sp0
 	verify_sp sp0
 	assert_eq "$SP_REV" "1" "sp0: SpRev is 1 after create-sp"
+	# After the create the records show the charge: one meta and one data
+	# group per slice, each with two legs, and the pool's cntlrs on their
+	# controller nodes.
+	out=$(gw get-cluster-capacity)
+	assert_eq "$(jq_of "$out" '[.addr_port_to_dn[] | .side_cnt] | add')" \
+		"$((4 * SP_SLICE_CNT))" "capacity: the sides of sp0 are charged"
+	assert_eq "$(jq_of "$out" '[.addr_port_to_cn[] | .cntlr_cnt] | add')" \
+		"$SP_CNTLR_CNT" "capacity: the cntlrs of sp0 are charged"
 
 	# Four thin devices with three different roles. t0 is never flipped, so
 	# it is both the namespace's backing device and step 3's uncreated

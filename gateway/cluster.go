@@ -11,7 +11,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md, Clusters / gateway.md, Clusters: the five
+// This file is architecture.md, Clusters / gateway.md, Clusters: the six
 // cluster RPCs.
 //
 // The cluster is the one resource whose identity is derived rather than
@@ -391,4 +391,86 @@ func (s *Server) AdvanceClusterIds(
 		}
 	}
 	return &pb.AdvanceClusterIdsReply{ClusterId: cid, SpCnt: spCnt}, nil
+}
+
+// GetClusterCapacity is the GetClusterCapacity of architecture.md, Clusters:
+// the recorded counts and flags of every node of a cluster, for the layer
+// above to sum (csi.md, The volume model).
+//
+// It reads as the paged lists read (GW5, GW10): a plain `ClusterConf` read
+// for the cluster id, then two plain ranges, the DnConf prefix and the CnConf
+// prefix, outside any STM — a transaction cannot range, and the reply is a
+// capacity figure, not an invariant, so the two ranges may straddle a write
+// and a node created or deleted between them is the kind of change such a
+// read is allowed to straddle. Nothing is computed: each entry carries the
+// counts and flags its record holds, with the pointer list reduced to its
+// count. Each record is decoded through the etcd door, which logs it as it
+// logs every decoded value, so on a cluster at the node ceilings this is a
+// heavy read meant for an occasional poll.
+func (s *Server) GetClusterCapacity(
+	ctx context.Context,
+	req *pb.GetClusterCapacityRequest,
+) (*pb.GetClusterCapacityReply, error) {
+	if err := validateOptionalName(
+		"cluster_name", req.GetClusterName(),
+	); err != nil {
+		return nil, err
+	}
+	name := clusterNameOf(req.GetClusterName())
+	cc := &pb.ClusterConf{}
+	found, err := s.cli.Get(ctx, model.ClusterConfKey(name), cc)
+	if err != nil {
+		return nil, errAborted("%v", err)
+	}
+	if !found {
+		return nil, errNotFound("cluster %q not found", name)
+	}
+	cid := model.ClusterId(name, cc.GetCreationEpoch())
+	reply := &pb.GetClusterCapacityReply{
+		ClusterName:  name,
+		ExtentSize:   cc.GetDnBinConf().GetExtentSize(),
+		AddrPortToDn: map[string]*pb.DnCapacityEntry{},
+		AddrPortToCn: map[string]*pb.CnCapacityEntry{},
+	}
+	dnPrefix := model.DnConfPrefix(cid)
+	kvs, _, err := s.cli.Range(ctx, dnPrefix)
+	if err != nil {
+		return nil, errAborted("%v", err)
+	}
+	for _, kv := range kvs {
+		dn := &pb.DnConf{}
+		if err := s.cli.Decode(ctx, kv, dn); err != nil {
+			return nil, errAborted("%v", err)
+		}
+		reply.AddrPortToDn[strings.TrimPrefix(kv.Key, dnPrefix)] =
+			&pb.DnCapacityEntry{
+				Location:    dn.GetLocation(),
+				Disabled:    dn.GetDisabled(),
+				ErrEpoch:    dn.GetErrEpoch(),
+				TotalExtCnt: dn.GetTotalExtCnt(),
+				FreeExtCnt:  dn.GetFreeExtCnt(),
+				SideCnt:     uint32(len(dn.GetSidePtrList())),
+			}
+	}
+	cnPrefix := model.CnConfPrefix(cid)
+	kvs, _, err = s.cli.Range(ctx, cnPrefix)
+	if err != nil {
+		return nil, errAborted("%v", err)
+	}
+	for _, kv := range kvs {
+		cn := &pb.CnConf{}
+		if err := s.cli.Decode(ctx, kv, cn); err != nil {
+			return nil, errAborted("%v", err)
+		}
+		reply.AddrPortToCn[strings.TrimPrefix(kv.Key, cnPrefix)] =
+			&pb.CnCapacityEntry{
+				Location:    cn.GetLocation(),
+				Disabled:    cn.GetDisabled(),
+				ErrEpoch:    cn.GetErrEpoch(),
+				TotalExtCnt: cn.GetTotalExtCnt(),
+				FreeExtCnt:  cn.GetFreeExtCnt(),
+				CntlrCnt:    uint32(len(cn.GetCntlrPtrList())),
+			}
+	}
+	return reply, nil
 }

@@ -46,7 +46,7 @@ func newTestGateway(t *testing.T) *fakeGateway {
 }
 
 // startGateway serves fake on a bufconn and returns both a typed client and
-// the raw connection — the connection is what lets a test drive all 67
+// the raw connection — the connection is what lets a test drive all 68
 // methods in one loop through grpc's generic Invoke.
 func startGateway(
 	t *testing.T, fake *fakeGateway,
@@ -166,16 +166,16 @@ func fullMethod(method string) string {
 // ---------------------------------------------------------------------------
 
 // TestMethodTypeRegistryMatchesServiceDesc pins the registry against
-// pb.Gateway_ServiceDesc in both directions, with CT1's 67 RPCs spelled
+// pb.Gateway_ServiceDesc in both directions, with CT1's 68 RPCs spelled
 // out: the registry is what decodes behavior.json's `reply`, so a method it
 // misses would silently answer with the wrong message type.
 func TestMethodTypeRegistryMatchesServiceDesc(t *testing.T) {
-	if len(pb.Gateway_ServiceDesc.Methods) != 67 {
-		t.Fatalf("service Gateway has %d methods, want 67",
+	if len(pb.Gateway_ServiceDesc.Methods) != 68 {
+		t.Fatalf("service Gateway has %d methods, want 68",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
-	if len(gatewayMethodTypes) != 67 {
-		t.Fatalf("the registry has %d methods, want 67",
+	if len(gatewayMethodTypes) != 68 {
+		t.Fatalf("the registry has %d methods, want 68",
 			len(gatewayMethodTypes))
 	}
 	declared := make(map[string]bool, len(pb.Gateway_ServiceDesc.Methods))
@@ -216,8 +216,8 @@ func TestMethodTypeRegistryMatchesServiceDesc(t *testing.T) {
 // Default success (obligation "default success on every RPC")
 // ---------------------------------------------------------------------------
 
-// TestDefaultSuccessOnEveryRpc drives all 67 methods through the wire with no
-// behavior.json at all. Going through grpc's generic Invoke (rather than 67
+// TestDefaultSuccessOnEveryRpc drives all 68 methods through the wire with no
+// behavior.json at all. Going through grpc's generic Invoke (rather than 68
 // typed calls) is deliberate: it also proves every handler passes its OWN
 // method name to serve, because state.json is keyed by that string and the
 // loop asserts the key the ServiceDesc declares.
@@ -242,8 +242,8 @@ func TestDefaultSuccessOnEveryRpc(t *testing.T) {
 	}
 
 	state := readState(t, fake)
-	if len(state.Methods) != 67 {
-		t.Fatalf("state.json records %d methods, want 67",
+	if len(state.Methods) != 68 {
+		t.Fatalf("state.json records %d methods, want 68",
 			len(state.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {

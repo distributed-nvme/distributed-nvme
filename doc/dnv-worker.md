@@ -368,7 +368,7 @@ three globals (`DnGlobalKey` and its siblings); the rev keys per shard,
 `DnRevKey`, `DnRevPrefix` and `ParseDnRevKey` — likewise for `Cn*` and `Sp*`;
 `DnConfKey` and `CnConfKey` with `DnConfPrefix` and `CnConfPrefix`, the
 gateway's `ListDiskNodes` and `ListControllerNodes` page ranges (`gateway.md`
-GW10), scanned by no worker; `DnCapacityKey`, `DnCapacityPrefix` and
+GW10) and its `GetClusterCapacity` ranges, scanned by no worker; `DnCapacityKey`, `DnCapacityPrefix` and
 `ParseDnCapacityKey` — MD5's scan reads the candidate out of the key itself —
 and `CnCapacityKey`, `CnCapacityPrefix` and `ParseCnCapacityKey`;
 `CdcEntryKey`, `CdcEntryPrefix` and `ParseCdcEntryKey`, a prefix and parser

@@ -273,7 +273,7 @@ the leaf is safe to script. An inspect RPC is an `inspect` leaf
 that hosts the object, out of that agent's latest observation of it, not
 from etcd. The bitmap RPCs are `get-bm`, `get-leg-bm` and `append-bm`;
 every other leaf keeps its RPC's verb (`cluster advance-ids`,
-`sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
+`cluster get-capacity`, `sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
 `group force-start`), save one: `repair abort` is `TryToAbortRepair`, the
 one leaf whose verb is not its RPC's (`repair` — `ctl/repair.go`).
 
@@ -425,6 +425,11 @@ restore. It names its cluster with `--name`, as `cluster create`,
 `cluster delete` and `cluster get` do, and carries no token. Its RPC runs
 one transaction per pool of the cluster (`architecture.md`, Clusters), so on
 a cluster of many pools it needs a `--timeout` that covers them all.
+
+`cluster get-capacity` is the capacity read of `architecture.md`, Clusters:
+every node's recorded extent counts and flags, for the layer above to sum.
+It names its cluster with `--name`, falling back to the global `--cluster`,
+and carries no token, as every read does (CT3).
 
 ### `dn` — `ctl/dn.go`
 

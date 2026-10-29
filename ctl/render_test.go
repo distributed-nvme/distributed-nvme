@@ -64,7 +64,7 @@ var renderCases = []renderCase{
 		want: `{"cluster_id":"18446744073709551615","sp_cnt":3}` + "\n",
 	},
 	{
-		// The sweep golden for step 20: a revision on the wire is a uint64,
+		// The sweep golden for step 21: a revision on the wire is a uint64,
 		// and protojson renders it as a quoted string so that a value above
 		// 2^53 survives a JavaScript or jq consumer intact. This is the
 		// number an operator copies back into --rev.
@@ -326,7 +326,7 @@ var renderCases = []renderCase{
 	{
 		// CT4's one deviation: protojson would render `bitmap` as base64, so
 		// the two bitmap reads print a hex map instead. This is the sweep
-		// golden for step 34.
+		// golden for step 35.
 		name: "td get-bm, the hex map",
 		rpc:  "GetThinDeviceBitmap",
 		argv: []string{"td", "get-bm", "--name", "t0"},

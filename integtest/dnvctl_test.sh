@@ -23,7 +23,7 @@
 # needed on the VM — both binaries are built here and scp'd.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 67 commands marshals its argv into exactly the intended request
+# of the 68 commands marshals its argv into exactly the intended request
 # proto, asserted FIELD FOR FIELD against the fake's state.json — a
 # whole-object comparison, so an unexpected key fails as loudly as a wrong
 # value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
@@ -49,7 +49,7 @@
 #
 # Round trips: ctl_exec does ONE ssh per dnvctl invocation and brings back five
 # things — state.json before, the exit code, stderr, stdout, state.json after.
-# That is what keeps a 67-step sweep to 67 ssh calls, and it is why every
+# That is what keeps a 68-step sweep to 68 ssh calls, and it is why every
 # ctl_ok/ctl_fail/ctl_usage MUST run in the PARENT shell: the five results land
 # in globals, and a subshell would drop them (and would swallow a die).
 #
@@ -96,7 +96,7 @@ TD_SIZE=67108864
 
 # The sweep's goldens (Integration test plan, Cases). Step 03 pins
 # EmitUnpopulated + canonical key order against the fake's canned EMPTY reply;
-# step 20 pins uint64-as-string with an injected revision above 2^53, which a
+# step 21 pins uint64-as-string with an injected revision above 2^53, which a
 # JSON number could not carry intact; steps 34/35 pin the CT4 hex map, the one
 # place dnvctl does not emit a proto message.
 GOLD_CLUSTER_GET='{"cluster_conf":null,"cluster_id":"0","cluster_name":"","cn_global":null,"dn_global":null,"sp_global":null}'
@@ -910,8 +910,8 @@ EOF
 	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
 	# TestClusterCreateExtentSize says the same, and also carries the "no
 	# --extent-size sends no dn_bin_conf" half).
-	# The step keeps its number because the audit below pins 67 steps over
-	# 67 distinct RPCs.
+	# The step keeps its number because the audit below pins 68 steps over
+	# 68 distinct RPCs.
 	sweep_step 01 CreateCluster \
 		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
 		cluster create --name c1 --extent-size 67108864
@@ -936,53 +936,59 @@ EOF
 		'{"cluster_name":"c1"}' \
 		cluster advance-ids --name c1
 
+	# The capacity read (architecture.md, Clusters): no --name, so the
+	# group falls back to the global --cluster, and no token travels.
+	sweep_step 06 GetClusterCapacity \
+		"{\"cluster_name\":\"$CLUSTER\"}" \
+		cluster get-capacity
+
 	# --- `dn` — `ctl/dn.go` --------------------------------------------
-	sweep_step 06 CreateDiskNode \
+	sweep_step 07 CreateDiskNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\",
 		  \"location\":\"$DN_LOCATION\",
 		  \"nvme_tr_conf\":{\"tr_type\":\"tcp\",\"adr_fam\":\"ipv4\",
 		    \"tr_addr\":\"127.0.0.1\",\"tr_svc_id\":\"4420\"}}" \
 		dn create --addr "$DN_ADDR" --location "$DN_LOCATION"
-	sweep_step 07 DeleteDiskNode \
+	sweep_step 08 DeleteDiskNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\",
 		  \"dn_rev\":{\"revision\":\"7\"}}" \
 		dn delete --addr "$DN_ADDR" --rev 7
-	sweep_step 08 GetDiskNode \
+	sweep_step 09 GetDiskNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\"}" \
 		dn get --addr "$DN_ADDR"
-	sweep_step 09 ListDiskNodes \
+	sweep_step 10 ListDiskNodes \
 		"{\"cluster_name\":\"$CLUSTER\",\"count\":8}" \
 		dn list --count 8
-	sweep_step 10 UpdateDiskNodeDisabled \
+	sweep_step 11 UpdateDiskNodeDisabled \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\",
 		  \"dn_rev\":{\"revision\":\"7\"},\"disabled\":true}" \
 		dn set-disabled --addr "$DN_ADDR" --disabled --rev 7
-	sweep_step 11 InspectDiskNode \
+	sweep_step 12 InspectDiskNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\"}" \
 		dn inspect --addr "$DN_ADDR"
 
 	# --- `cn` — `ctl/cn.go`: the six dn mirrors, at $CN_ADDR / $CN_LOCATION --
-	sweep_step 12 CreateControllerNode \
+	sweep_step 13 CreateControllerNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\",
 		  \"location\":\"$CN_LOCATION\",
 		  \"nvme_tr_conf\":{\"tr_type\":\"tcp\",\"adr_fam\":\"ipv4\",
 		    \"tr_addr\":\"127.0.0.1\",\"tr_svc_id\":\"4420\"}}" \
 		cn create --addr "$CN_ADDR" --location "$CN_LOCATION"
-	sweep_step 13 DeleteControllerNode \
+	sweep_step 14 DeleteControllerNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\",
 		  \"cn_rev\":{\"revision\":\"7\"}}" \
 		cn delete --addr "$CN_ADDR" --rev 7
-	sweep_step 14 GetControllerNode \
+	sweep_step 15 GetControllerNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\"}" \
 		cn get --addr "$CN_ADDR"
-	sweep_step 15 ListControllerNodes \
+	sweep_step 16 ListControllerNodes \
 		"{\"cluster_name\":\"$CLUSTER\",\"count\":8}" \
 		cn list --count 8
-	sweep_step 16 UpdateControllerNodeDisabled \
+	sweep_step 17 UpdateControllerNodeDisabled \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\",
 		  \"cn_rev\":{\"revision\":\"7\"},\"disabled\":true}" \
 		cn set-disabled --addr "$CN_ADDR" --disabled --rev 7
-	sweep_step 17 InspectControllerNode \
+	sweep_step 18 InspectControllerNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\"}" \
 		cn inspect --addr "$CN_ADDR"
 
@@ -993,7 +999,7 @@ EOF
 	# because --bitmap-chunk-blocks was not given. --low-water-mark-pct alone
 	# builds dm_pool_conf with no data_block_size key (--block-size was not
 	# given); the mark is a uint32, so it is recorded as a bare JSON number.
-	sweep_step 18 CreateStoragePool \
+	sweep_step 19 CreateStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"bdev_conf\":{\"dm_pool_conf\":{\"low_water_mark_pct\":30},
 		                 \"redund_conf\":{\"redund_md_raid1\":{}}},
@@ -1001,74 +1007,74 @@ EOF
 		  \"init_ext_cnt\":\"2\"}" \
 		sp create --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 2 \
 		--slots 0,1 --low-water-mark-pct 30
-	sweep_step 19 DeleteStoragePool \
+	sweep_step 20 DeleteStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"}}" \
 		sp delete --rev 7
-	sweep_step 20 GetStoragePool \
+	sweep_step 21 GetStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		sp get
 	# Golden 2 of 4: the injected reply carries a revision above 2^53, so
 	# this is the assertion that would fail the day CT4's re-parse started
 	# decoding uint64 into a JSON number.
 	assert_eq "$CTL_OUT" "$GOLD_SP_GET" "golden: sp get (uint64 as string)"
-	sweep_step 21 ListStoragePools \
+	sweep_step 22 ListStoragePools \
 		"{\"cluster_name\":\"$CLUSTER\",\"count\":4}" \
 		sp list --count 4
-	sweep_step 22 UpdateStoragePoolCntlidSlotList \
+	sweep_step 23 UpdateStoragePoolCntlidSlotList \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"cntlid_slot_list\":[0,1,2]}" \
 		sp set-cntlid-slots --slots 0,1,2 --rev 7
-	sweep_step 23 UpdateStoragePoolLevel \
+	sweep_step 24 UpdateStoragePoolLevel \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"sp_level\":\"SP_LEVEL_READONLY\"}" \
 		sp set-level --level READONLY --rev 7
-	sweep_step 24 FindStoragePoolNames \
+	sweep_step 25 FindStoragePoolNames \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_id_list\":[\"1\",\"2\"]}" \
 		sp find-names --ids 1,2
-	sweep_step 25 GrowSlice \
+	sweep_step 26 GrowSlice \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"ext_cnt\":\"2\",
 		  \"dn_selector\":{\"white_list\":[\"$DN_ADDR\"]}}" \
 		sp grow-slice --slice 0 --ext 2 --dn-white "$DN_ADDR" --rev 7
-	sweep_step 26 InspectSide \
+	sweep_step 27 InspectSide \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"side_id\":\"5\"}" \
 		sp inspect-side --id 5
 
 	# --- `cntlr` — `ctl/cntlr.go` --------------------------------------
-	sweep_step 27 CreateCntlr \
+	sweep_step 28 CreateCntlr \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"cntlid_slot\":1}" \
 		cntlr create --slot 1 --rev 7
-	sweep_step 28 DeleteCntlr \
+	sweep_step 29 DeleteCntlr \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"cntlr_id\":\"3\"}" \
 		cntlr delete --id 3 --rev 7
 	# --enabled=false, the `=` spelling (Conventions, Value types):
 	# `--enabled false` would leave `false` as a positional and cobra.NoArgs
 	# would reject it.
-	sweep_step 29 UpdateCntlrEnabled \
+	sweep_step 30 UpdateCntlrEnabled \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"cntlr_id\":\"3\"}" \
 		cntlr set-enabled --id 3 --enabled=false --rev 7
-	sweep_step 30 InspectCntlr \
+	sweep_step 31 InspectCntlr \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"cntlr_id\":\"3\"}" \
 		cntlr inspect --id 3
 
 	# --- `td` — `ctl/td.go` --------------------------------------------
-	sweep_step 31 CreateThinDevice \
+	sweep_step 32 CreateThinDevice \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"td_name\":\"t0\",
 		  \"size\":\"$TD_SIZE\"}" \
 		td create --name t0 --size "$TD_SIZE" --rev 7
-	sweep_step 32 DeleteThinDevice \
+	sweep_step 33 DeleteThinDevice \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"td_name\":\"t0\"}" \
 		td delete --name t0 --rev 7
-	sweep_step 33 ListThinDevices \
+	sweep_step 34 ListThinDevices \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		td list
-	sweep_step 34 GetThinDeviceBitmap \
+	sweep_step 35 GetThinDeviceBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"td_name\":\"t0\",\"block_cnt\":\"64\"}" \
 		td get-bm --name t0 --slice-idx 0 --start 0 --cnt 64
@@ -1076,44 +1082,44 @@ EOF
 	# with the single byte 0xa5 here and 0xa5a5 for the leg below, and dnvctl
 	# must print both as hex, not base64.
 	assert_eq "$CTL_OUT" "$GOLD_TD_BM" "golden: td get-bm hex map"
-	sweep_step 35 GetLegBitmap \
+	sweep_step 36 GetLegBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"leg_id\":\"9\",\"block_cnt\":\"64\"}" \
 		td get-leg-bm --leg 9 --start 0 --cnt 64
 	assert_eq "$CTL_OUT" "$GOLD_LEG_BM" "golden: td get-leg-bm hex map"
 
 	# --- `ss` — `ctl/ss.go` --------------------------------------------
-	sweep_step 36 CreateSubsystem \
+	sweep_step 37 CreateSubsystem \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",
 		  \"allowed_hosts\":[\"$HOST0\"]}" \
 		ss create --nqn "$NQN" --hosts "$HOST0" --rev 7
-	sweep_step 37 DeleteSubsystem \
+	sweep_step 38 DeleteSubsystem \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\"}" \
 		ss delete --nqn "$NQN" --rev 7
-	sweep_step 38 ListSubsystems \
+	sweep_step 39 ListSubsystems \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		ss list
-	sweep_step 39 UpdateSubsystemHosts \
+	sweep_step 40 UpdateSubsystemHosts \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",
 		  \"allowed_hosts\":[\"a\",\"b\"]}" \
 		ss set-hosts --nqn "$NQN" --hosts a,b --rev 7
 
 	# --- `ns` — `ctl/ns.go` --------------------------------------------
-	sweep_step 40 CreateNamespace \
+	sweep_step 41 CreateNamespace \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
 		  \"dev_uuid\":\"$UUID\",\"dev_nguid\":\"$NGUID\",
 		  \"td_name\":\"t0\"}" \
 		ns create --nqn "$NQN" --idx 1 --td t0 \
 		--uuid "$UUID" --nguid "$NGUID" --rev 7
-	sweep_step 41 DeleteNamespace \
+	sweep_step 42 DeleteNamespace \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1}" \
 		ns delete --nqn "$NQN" --idx 1 --rev 7
-	sweep_step 42 UpdateNamespaceDev \
+	sweep_step 43 UpdateNamespaceDev \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
 		  \"td_name\":\"t1\"}" \
@@ -1122,14 +1128,14 @@ EOF
 	# must send suspended = true — one of the three leaves where an
 	# unmentioned boolean is not false (`cntlr set-enabled`'s --enabled and
 	# `group set-operator-in-charge`'s --operator-in-charge are the others).
-	sweep_step 43 UpdateNamespaceSuspended \
+	sweep_step 44 UpdateNamespaceSuspended \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
 		  \"suspended\":true}" \
 		ns set-suspended --nqn "$NQN" --idx 1 --rev 7
 
 	# --- `clone` — `ctl/clone.go` --------------------------------------
-	sweep_step 44 CreateClone \
+	sweep_step 45 CreateClone \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
 		  \"src_tr_conf\":[{\"tr_type\":\"tcp\",\"adr_fam\":\"ipv4\",
@@ -1140,16 +1146,16 @@ EOF
 		clone create --name cl0 --dst-td t1 --src-nqn "$SRC_NQN" \
 		--src-idx 0 --src-slices 1 --src-stripe 16384 \
 		--src-block 1048576 --rev 7
-	sweep_step 45 DeleteClone \
+	sweep_step 46 DeleteClone \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
 		  \"force\":true}" \
 		clone delete --name cl0 --force --rev 7
-	sweep_step 46 GetClone \
+	sweep_step 47 GetClone \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"clone_name\":\"cl0\"}" \
 		clone get --name cl0
-	sweep_step 47 UpdateCloneTrConf \
+	sweep_step 48 UpdateCloneTrConf \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
 		  \"src_tr_conf\":[{\"tr_type\":\"tcp\",\"adr_fam\":\"ipv4\",
@@ -1162,7 +1168,7 @@ EOF
 	# values would let a command that wired --bm-idx to src_slice_idx (or the
 	# reverse) pass. Same argv as row 48 of the unit tests' sweep table
 	# (`ctl/request_test.go`) — the two suites are one contract.
-	sweep_step 48 AppendCloneBitmap \
+	sweep_step 49 AppendCloneBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
 		  \"src_slice_idx\":1,\"bm_idx\":2,
@@ -1171,29 +1177,29 @@ EOF
 		--bm-hex a5 --rev 7
 
 	# --- `xfer` — `ctl/xfer.go` ----------------------------------------
-	sweep_step 49 CreateTransfer \
+	sweep_step 50 CreateTransfer \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"xfer_name\":\"x0\",
 		  \"ori_nqn\":\"$NQN\",\"ori_ns_idx\":1,
 		  \"allowed_hosts\":[\"$HOST0\"],\"auto_suspend\":true}" \
 		xfer create --name x0 --ori-nqn "$NQN" --ori-idx 1 \
 		--hosts "$HOST0" --auto-suspend --rev 7
-	sweep_step 50 DeleteTransfer \
+	sweep_step 51 DeleteTransfer \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"xfer_name\":\"x0\"}" \
 		xfer delete --name x0 --rev 7
-	sweep_step 51 GetTransfer \
+	sweep_step 52 GetTransfer \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"xfer_name\":\"x0\"}" \
 		xfer get --name x0
-	sweep_step 52 UpdateTransferHosts \
+	sweep_step 53 UpdateTransferHosts \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"xfer_name\":\"x0\",
 		  \"allowed_hosts\":[\"c\"]}" \
 		xfer set-hosts --name x0 --hosts c --rev 7
 
 	# --- `migr` — `ctl/migr.go` ----------------------------------------
-	sweep_step 53 CreateMigration \
+	sweep_step 54 CreateMigration \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\",
 		  \"src_side_id\":\"5\",
@@ -1201,19 +1207,19 @@ EOF
 		    \"hydration_batch_size\":4}}" \
 		migr create --name m0 --src-side 5 \
 		--hyd-threshold 8 --hyd-batch 4 --rev 7
-	sweep_step 54 FinishMigration \
+	sweep_step 55 FinishMigration \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\"}" \
 		migr finish --name m0 --rev 7
-	sweep_step 55 CancelMigration \
+	sweep_step 56 CancelMigration \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\"}" \
 		migr cancel --name m0 --rev 7
-	sweep_step 56 GetMigration \
+	sweep_step 57 GetMigration \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"migr_name\":\"m0\"}" \
 		migr get --name m0
-	sweep_step 57 AppendMigrationBitmap \
+	sweep_step 58 AppendMigrationBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\",
 		  \"bitmap\":\"$BM_A5A5_B64\"}" \
@@ -1223,39 +1229,39 @@ EOF
 	# --bad-legs is a list flag, so the one bad leg id is a one-element list
 	# of uint64 strings; no --retired-leg leaves retired_leg_id at zero, a
 	# fresh new leg, and the fake records no key for it.
-	sweep_step 58 CreateRepair \
+	sweep_step 59 CreateRepair \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\",
 		  \"grp_id\":\"1\",\"bad_leg_id_list\":[\"2\"],
 		  \"dn_selector\":{\"white_list\":[\"$DN_ADDR\"]}}" \
 		repair create --name r0 --grp 1 --bad-legs 2 --dn-white "$DN_ADDR" \
 		--rev 7
-	sweep_step 59 FinishRepair \
+	sweep_step 60 FinishRepair \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\"}" \
 		repair finish --name r0 --rev 7
-	sweep_step 60 CancelRepair \
+	sweep_step 61 CancelRepair \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\"}" \
 		repair cancel --name r0 --rev 7
 	# The one leaf whose verb is not its RPC's (Conventions, Verbs).
-	sweep_step 61 TryToAbortRepair \
+	sweep_step 62 TryToAbortRepair \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\"}" \
 		repair abort --name r0 --rev 7
-	sweep_step 62 GetRepair \
+	sweep_step 63 GetRepair \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"rep_name\":\"r0\"}" \
 		repair get --name r0
-	sweep_step 63 ListRepairs \
+	sweep_step 64 ListRepairs \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		repair list
 
 	# --- `retired-leg` — `ctl/retiredleg.go` ---------------------------
-	sweep_step 64 ListRetiredLegs \
+	sweep_step 65 ListRetiredLegs \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		retired-leg list
-	sweep_step 65 DeleteRetiredLeg \
+	sweep_step 66 DeleteRetiredLeg \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"leg_id\":\"3\"}" \
 		retired-leg delete --leg 3 --rev 7
@@ -1265,7 +1271,7 @@ EOF
 	# uint64 strings beside the token, and no cancel key, since the fake
 	# records a false bool as no key at all. The withdrawing form, --cancel,
 	# is behavior stage 8: the audit below pins one step per RPC.
-	sweep_step 66 ForceStartGroup \
+	sweep_step 67 ForceStartGroup \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",\"leg_id\":\"2\"}" \
 		group force-start --grp 1 --leg 2 --rev 7
@@ -1273,19 +1279,19 @@ EOF
 	# value reaches the wire as operator_in_charge true beside the token.
 	# The leaf without the flag, which sends the same true, and the =false
 	# spelling that gives the group back are behavior stage 9.
-	sweep_step 67 UpdateGroupOperatorInCharge \
+	sweep_step 68 UpdateGroupOperatorInCharge \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",
 		  \"operator_in_charge\":true}" \
 		group set-operator-in-charge --grp 1 --operator-in-charge --rev 7
 
 	# -------------------------------------------------------------------
-	stage audit "all 67 steps left one request record under their trace id"
+	stage audit "all 68 steps left one request record under their trace id"
 	# -------------------------------------------------------------------
 	# CT1's completeness claim, made on the WIRE rather than from a table:
-	# 67 distinct RPCs, 67 distinct trace ids, one interceptor record each.
-	# One log read serves all 67 assertions.
-	assert_eq "${#SWEEP_TRACES[@]}" "67" "the sweep ran 67 steps"
+	# 68 distinct RPCs, 68 distinct trace ids, one interceptor record each.
+	# One log read serves all 68 assertions.
+	assert_eq "${#SWEEP_TRACES[@]}" "68" "the sweep ran 68 steps"
 	local records idx want
 	records=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request") | .trace_id + " " + .method')
@@ -1296,7 +1302,7 @@ EOF
 	done
 	local distinct
 	distinct=$(printf '%s\n' "${SWEEP_RPCS[@]}" | sort -u | grep -c . || true)
-	assert_eq "$distinct" "67" "the 67 steps drove 67 DISTINCT RPCs"
+	assert_eq "$distinct" "68" "the 68 steps drove 68 DISTINCT RPCs"
 }
 
 # ---------------------------------------------------------------------------
@@ -1409,7 +1415,7 @@ EOF
 	# -------------------------------------------------------------------
 	stage 8 "group force-start --cancel: cancel true, and no leg_id key"
 	# -------------------------------------------------------------------
-	# The withdrawing form of the forced start, which sweep step 66 (the
+	# The withdrawing form of the forced start, which sweep step 67 (the
 	# write) has no room for: --cancel reaches the wire as cancel true
 	# beside the token, and a leaf typed with no --leg sends leg_id zero,
 	# which the fake records as no key. dnvctl checks no pairing (CT8): a

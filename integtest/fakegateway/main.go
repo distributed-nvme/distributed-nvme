@@ -766,6 +766,12 @@ func (g *fakeGateway) AdvanceClusterIds(
 	return serve[*pb.AdvanceClusterIdsReply](g, ctx, "AdvanceClusterIds", req)
 }
 
+func (g *fakeGateway) GetClusterCapacity(
+	ctx context.Context, req *pb.GetClusterCapacityRequest,
+) (*pb.GetClusterCapacityReply, error) {
+	return serve[*pb.GetClusterCapacityReply](g, ctx, "GetClusterCapacity", req)
+}
+
 func (g *fakeGateway) CreateDiskNode(
 	ctx context.Context, req *pb.CreateDiskNodeRequest,
 ) (*pb.CreateDiskNodeReply, error) {

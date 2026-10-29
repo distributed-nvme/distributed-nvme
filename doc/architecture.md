@@ -2140,6 +2140,30 @@ and the sync fan-out). A call that fails part-way leaves what it moved
 moved and is run again, which moves every counter once more. Reply the
 `cluster_id` and the number of pools moved.
 
+**GetClusterCapacity** — the capacity read of the layer above (`csi.md`, The
+volume model): what a cluster can still promise, as its records hold it.
+Errors: `NOT_FOUND` cluster.
+Action: no STM. A plain `ClusterConf` read derives `cluster_id`, then two
+plain ranges, the cluster's `dn_conf` prefix and its `cn_conf` prefix, run
+outside any STM, as the paged lists' ranges do (page_token): a transaction
+cannot range, and the reply is a figure, not an invariant, so the two ranges
+may straddle a write, and a node created or deleted between them is a
+change such a read is allowed to straddle. The reply carries `cluster_name`
+defaulted, the cluster's `extent_size`, and one entry per node keyed by
+`addr_port`: for a disk node its `location`, `disabled`, `err_epoch`,
+`total_ext_cnt`, `free_ext_cnt` and the count of its side pointers; for a
+controller node the same with the count of its cntlr pointers. Nothing is
+computed. `free_ext_cnt` is the ledger's count, which moves only with the
+node's pointers (Per-operation allocation), so a side charged but not yet
+provisioned, both sides of a migration, a repair's new leg, a retired leg
+and a side awaiting its drain step all count as used; a node at its pointer
+ceiling shows free extents no allocation can use, which the pointer count
+reveals; and a cntlr charges its controller node the pool's footprint, so a
+cluster's room is bounded by its controller nodes as well as its disk
+nodes. Each record is decoded through the etcd door, which logs it as it
+logs every decoded value, so on a cluster at the node ceilings this is a
+heavy read meant for an occasional poll, not a hot path.
+
 ### Disk nodes
 
 **CreateDiskNode** —

@@ -267,7 +267,9 @@ later transactions — the deciding STM, which is their `model` op (Scope and
 placement), and `GrowSlice`'s CN-budget pre-check — take the cluster id, and
 the `ClusterConf` where they use it, from that snapshot and never read
 `ClusterConf` themselves. The **paged** `List*` RPCs use plain
-reads, not an STM (`architecture.md`, page_token; GW10). `ListThinDevices`,
+reads, not an STM (`architecture.md`, page_token; GW10). So does
+`GetClusterCapacity`, whose two ranges follow the same plain `ClusterConf`
+read the cluster-scoped lists make (Clusters). `ListThinDevices`,
 `ListSubsystems`, `ListRepairs`, `ListRetiredLegs` and the single-object
 `Get*` RPCs are one-STM consistency reads (Thin devices, Subsystems and
 namespaces, Clones, Repairs and retired legs).
@@ -670,6 +672,12 @@ and field-level rules stay in the cited section of `architecture.md`,
   suffixes.
 * **AdvanceClusterIds** — validate the name (GW4); GW19's transactions.
   Reply the cluster id and the count of pools whose `SpConf` it moved.
+* **GetClusterCapacity** — validate the name (GW4); the plain `ClusterConf`
+  read of the cluster-scoped lists for the cluster id (GW5), then two plain
+  ranges, `DnConfPrefix` and `CnConfPrefix` of that id, outside any STM,
+  each record decoded and copied into its entry: the counts, the flags and
+  the pointer count, never the pointer list. Reply the defaulted name, the
+  extent size and the two entry maps (`architecture.md`, Clusters).
 
 GW19. **The id step.** `AdvanceClusterIds` runs the transactions of
 `architecture.md`, Clusters, which owns their order and their reasons. One

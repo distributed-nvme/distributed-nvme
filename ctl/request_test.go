@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 67 invocations
+// argv for argv. The integration suite asserts the same 68 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -110,8 +110,14 @@ var sweepRows = []sweepRow{
 		// the request has no token field.
 		&pb.AdvanceClusterIdsRequest{ClusterName: "c1"}},
 
+	{6, "GetClusterCapacity",
+		[]string{"cluster", "get-capacity"},
+		// No --name: the fallback to the global --cluster, as for
+		// `cluster get`; a read, so the request has no token field.
+		&pb.GetClusterCapacityRequest{ClusterName: itCluster}},
+
 	// ---- dn ----
-	{6, "CreateDiskNode",
+	{7, "CreateDiskNode",
 		[]string{"dn", "create", "--addr", itDnAddr, "--location", "rack0"},
 		&pb.CreateDiskNodeRequest{
 			ClusterName: itCluster,
@@ -119,20 +125,20 @@ var sweepRows = []sweepRow{
 			NvmeTrConf:  wantTrConf(),
 			Location:    "rack0",
 		}},
-	{7, "DeleteDiskNode",
+	{8, "DeleteDiskNode",
 		[]string{"dn", "delete", "--addr", itDnAddr, "--rev", "7"},
 		&pb.DeleteDiskNodeRequest{
 			ClusterName: itCluster,
 			AddrPort:    itDnAddr,
 			DnRev:       wantDnRev(itRevValue),
 		}},
-	{8, "GetDiskNode",
+	{9, "GetDiskNode",
 		[]string{"dn", "get", "--addr", itDnAddr},
 		&pb.GetDiskNodeRequest{ClusterName: itCluster, AddrPort: itDnAddr}},
-	{9, "ListDiskNodes",
+	{10, "ListDiskNodes",
 		[]string{"dn", "list", "--count", "8"},
 		&pb.ListDiskNodesRequest{ClusterName: itCluster, Count: 8}},
-	{10, "UpdateDiskNodeDisabled",
+	{11, "UpdateDiskNodeDisabled",
 		[]string{"dn", "set-disabled", "--addr", itDnAddr,
 			"--disabled", "--rev", "7"},
 		&pb.UpdateDiskNodeDisabledRequest{
@@ -141,13 +147,13 @@ var sweepRows = []sweepRow{
 			DnRev:       wantDnRev(itRevValue),
 			Disabled:    true,
 		}},
-	{11, "InspectDiskNode",
+	{12, "InspectDiskNode",
 		[]string{"dn", "inspect", "--addr", itDnAddr},
 		&pb.InspectDiskNodeRequest{
 			ClusterName: itCluster, AddrPort: itDnAddr}},
 
 	// ---- cn: the six dn mirrors ----
-	{12, "CreateControllerNode",
+	{13, "CreateControllerNode",
 		[]string{"cn", "create", "--addr", itCnAddr, "--location", "rack1"},
 		&pb.CreateControllerNodeRequest{
 			ClusterName: itCluster,
@@ -155,21 +161,21 @@ var sweepRows = []sweepRow{
 			NvmeTrConf:  wantTrConf(),
 			Location:    "rack1",
 		}},
-	{13, "DeleteControllerNode",
+	{14, "DeleteControllerNode",
 		[]string{"cn", "delete", "--addr", itCnAddr, "--rev", "7"},
 		&pb.DeleteControllerNodeRequest{
 			ClusterName: itCluster,
 			AddrPort:    itCnAddr,
 			CnRev:       wantCnRev(itRevValue),
 		}},
-	{14, "GetControllerNode",
+	{15, "GetControllerNode",
 		[]string{"cn", "get", "--addr", itCnAddr},
 		&pb.GetControllerNodeRequest{
 			ClusterName: itCluster, AddrPort: itCnAddr}},
-	{15, "ListControllerNodes",
+	{16, "ListControllerNodes",
 		[]string{"cn", "list", "--count", "8"},
 		&pb.ListControllerNodesRequest{ClusterName: itCluster, Count: 8}},
-	{16, "UpdateControllerNodeDisabled",
+	{17, "UpdateControllerNodeDisabled",
 		[]string{"cn", "set-disabled", "--addr", itCnAddr,
 			"--disabled", "--rev", "7"},
 		&pb.UpdateControllerNodeDisabledRequest{
@@ -178,13 +184,13 @@ var sweepRows = []sweepRow{
 			CnRev:       wantCnRev(itRevValue),
 			Disabled:    true,
 		}},
-	{17, "InspectControllerNode",
+	{18, "InspectControllerNode",
 		[]string{"cn", "inspect", "--addr", itCnAddr},
 		&pb.InspectControllerNodeRequest{
 			ClusterName: itCluster, AddrPort: itCnAddr}},
 
 	// ---- sp ----
-	{18, "CreateStoragePool",
+	{19, "CreateStoragePool",
 		[]string{"sp", "create", "--cntlr-cnt", "2", "--slice-cnt", "1",
 			"--init-ext-cnt", "2", "--slots", "0,1",
 			"--low-water-mark-pct", "30"},
@@ -208,21 +214,21 @@ var sweepRows = []sweepRow{
 			SliceCnt:       1,
 			InitExtCnt:     2,
 		}},
-	{19, "DeleteStoragePool",
+	{20, "DeleteStoragePool",
 		[]string{"sp", "delete", "--rev", "7"},
 		&pb.DeleteStoragePoolRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
 			SpRev:       wantSpRev(itRevValue),
 		}},
-	{20, "GetStoragePool",
+	{21, "GetStoragePool",
 		[]string{"sp", "get"},
 		&pb.GetStoragePoolRequest{ClusterName: itCluster, SpName: itSp}},
-	{21, "ListStoragePools",
+	{22, "ListStoragePools",
 		[]string{"sp", "list", "--count", "4"},
 		// No sp_name field: the global --sp is ignored.
 		&pb.ListStoragePoolsRequest{ClusterName: itCluster, Count: 4}},
-	{22, "UpdateStoragePoolCntlidSlotList",
+	{23, "UpdateStoragePoolCntlidSlotList",
 		[]string{"sp", "set-cntlid-slots", "--slots", "0,1,2", "--rev", "7"},
 		&pb.UpdateStoragePoolCntlidSlotListRequest{
 			ClusterName:    itCluster,
@@ -230,7 +236,7 @@ var sweepRows = []sweepRow{
 			SpRev:          wantSpRev(itRevValue),
 			CntlidSlotList: []uint32{0, 1, 2},
 		}},
-	{23, "UpdateStoragePoolLevel",
+	{24, "UpdateStoragePoolLevel",
 		[]string{"sp", "set-level", "--level", "READONLY", "--rev", "7"},
 		&pb.UpdateStoragePoolLevelRequest{
 			ClusterName: itCluster,
@@ -238,13 +244,13 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			SpLevel:     pb.SpLevel_SP_LEVEL_READONLY,
 		}},
-	{24, "FindStoragePoolNames",
+	{25, "FindStoragePoolNames",
 		[]string{"sp", "find-names", "--ids", "1,2"},
 		&pb.FindStoragePoolNamesRequest{
 			ClusterName: itCluster,
 			SpIdList:    []uint64{1, 2},
 		}},
-	{25, "GrowSlice",
+	{26, "GrowSlice",
 		[]string{"sp", "grow-slice", "--slice", "0", "--ext", "2",
 			"--dn-white", itDnAddr, "--rev", "7"},
 		&pb.GrowSliceRequest{
@@ -254,13 +260,13 @@ var sweepRows = []sweepRow{
 			ExtCnt:      2,
 			DnSelector:  &pb.NodeSelector{WhiteList: []string{itDnAddr}},
 		}},
-	{26, "InspectSide",
+	{27, "InspectSide",
 		[]string{"sp", "inspect-side", "--id", "5"},
 		&pb.InspectSideRequest{
 			ClusterName: itCluster, SpName: itSp, SideId: 5}},
 
 	// ---- cntlr ----
-	{27, "CreateCntlr",
+	{28, "CreateCntlr",
 		[]string{"cntlr", "create", "--slot", "1", "--rev", "7"},
 		&pb.CreateCntlrRequest{
 			ClusterName: itCluster,
@@ -268,7 +274,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			CntlidSlot:  1,
 		}},
-	{28, "DeleteCntlr",
+	{29, "DeleteCntlr",
 		[]string{"cntlr", "delete", "--id", "3", "--rev", "7"},
 		&pb.DeleteCntlrRequest{
 			ClusterName: itCluster,
@@ -276,7 +282,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			CntlrId:     3,
 		}},
-	{29, "UpdateCntlrEnabled",
+	{30, "UpdateCntlrEnabled",
 		[]string{"cntlr", "set-enabled", "--id", "3", "--enabled=false",
 			"--rev", "7"},
 		// The `=` spelling is the only one that turns a bool off (dnvctl.md,
@@ -288,13 +294,13 @@ var sweepRows = []sweepRow{
 			CntlrId:     3,
 			Enabled:     false,
 		}},
-	{30, "InspectCntlr",
+	{31, "InspectCntlr",
 		[]string{"cntlr", "inspect", "--id", "3"},
 		&pb.InspectCntlrRequest{
 			ClusterName: itCluster, SpName: itSp, CntlrId: 3}},
 
 	// ---- td ----
-	{31, "CreateThinDevice",
+	{32, "CreateThinDevice",
 		[]string{"td", "create", "--name", "t0", "--size", "67108864",
 			"--rev", "7"},
 		&pb.CreateThinDeviceRequest{
@@ -304,7 +310,7 @@ var sweepRows = []sweepRow{
 			TdName:      "t0",
 			Size:        itTdSize,
 		}},
-	{32, "DeleteThinDevice",
+	{33, "DeleteThinDevice",
 		[]string{"td", "delete", "--name", "t0", "--rev", "7"},
 		&pb.DeleteThinDeviceRequest{
 			ClusterName: itCluster,
@@ -312,10 +318,10 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			TdName:      "t0",
 		}},
-	{33, "ListThinDevices",
+	{34, "ListThinDevices",
 		[]string{"td", "list"},
 		&pb.ListThinDevicesRequest{ClusterName: itCluster, SpName: itSp}},
-	{34, "GetThinDeviceBitmap",
+	{35, "GetThinDeviceBitmap",
 		[]string{"td", "get-bm", "--name", "t0", "--slice-idx", "0",
 			"--start", "0", "--cnt", "64"},
 		&pb.GetThinDeviceBitmapRequest{
@@ -324,7 +330,7 @@ var sweepRows = []sweepRow{
 			TdName:      "t0",
 			BlockCnt:    64,
 		}},
-	{35, "GetLegBitmap",
+	{36, "GetLegBitmap",
 		[]string{"td", "get-leg-bm", "--leg", "9", "--start", "0",
 			"--cnt", "64"},
 		&pb.GetLegBitmapRequest{
@@ -335,7 +341,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- ss ----
-	{36, "CreateSubsystem",
+	{37, "CreateSubsystem",
 		[]string{"ss", "create", "--nqn", itNqn, "--hosts", itHostNqn,
 			"--rev", "7"},
 		&pb.CreateSubsystemRequest{
@@ -345,7 +351,7 @@ var sweepRows = []sweepRow{
 			Nqn:          itNqn,
 			AllowedHosts: []string{itHostNqn},
 		}},
-	{37, "DeleteSubsystem",
+	{38, "DeleteSubsystem",
 		[]string{"ss", "delete", "--nqn", itNqn, "--rev", "7"},
 		&pb.DeleteSubsystemRequest{
 			ClusterName: itCluster,
@@ -353,10 +359,10 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			Nqn:         itNqn,
 		}},
-	{38, "ListSubsystems",
+	{39, "ListSubsystems",
 		[]string{"ss", "list"},
 		&pb.ListSubsystemsRequest{ClusterName: itCluster, SpName: itSp}},
-	{39, "UpdateSubsystemHosts",
+	{40, "UpdateSubsystemHosts",
 		[]string{"ss", "set-hosts", "--nqn", itNqn, "--hosts", "a,b",
 			"--rev", "7"},
 		&pb.UpdateSubsystemHostsRequest{
@@ -368,7 +374,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- ns ----
-	{40, "CreateNamespace",
+	{41, "CreateNamespace",
 		[]string{"ns", "create", "--nqn", itNqn, "--idx", "1", "--td", "t0",
 			"--uuid", itUuid, "--nguid", itNguid, "--rev", "7"},
 		&pb.CreateNamespaceRequest{
@@ -381,7 +387,7 @@ var sweepRows = []sweepRow{
 			DevNguid:    itNguid,
 			TdName:      "t0",
 		}},
-	{41, "DeleteNamespace",
+	{42, "DeleteNamespace",
 		[]string{"ns", "delete", "--nqn", itNqn, "--idx", "1", "--rev", "7"},
 		&pb.DeleteNamespaceRequest{
 			ClusterName: itCluster,
@@ -390,7 +396,7 @@ var sweepRows = []sweepRow{
 			Nqn:         itNqn,
 			NsIdx:       1,
 		}},
-	{42, "UpdateNamespaceDev",
+	{43, "UpdateNamespaceDev",
 		[]string{"ns", "set-dev", "--nqn", itNqn, "--idx", "1", "--td", "t1",
 			"--rev", "7"},
 		&pb.UpdateNamespaceDevRequest{
@@ -401,7 +407,7 @@ var sweepRows = []sweepRow{
 			NsIdx:       1,
 			TdName:      "t1",
 		}},
-	{43, "UpdateNamespaceSuspended",
+	{44, "UpdateNamespaceSuspended",
 		[]string{"ns", "set-suspended", "--nqn", itNqn, "--idx", "1",
 			"--rev", "7"},
 		// --suspended defaults to TRUE on this command alone
@@ -416,7 +422,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- clone ----
-	{44, "CreateClone",
+	{45, "CreateClone",
 		[]string{"clone", "create", "--name", "cl0", "--dst-td", "t1",
 			"--src-nqn", itSrcNqn, "--src-idx", "0", "--src-slices", "1",
 			"--src-stripe", "16384", "--src-block", "1048576", "--rev", "7"},
@@ -432,7 +438,7 @@ var sweepRows = []sweepRow{
 			SrcBlockSize:  1048576,
 			DstTdName:     "t1",
 		}},
-	{45, "DeleteClone",
+	{46, "DeleteClone",
 		[]string{"clone", "delete", "--name", "cl0", "--force", "--rev", "7"},
 		&pb.DeleteCloneRequest{
 			ClusterName: itCluster,
@@ -441,11 +447,11 @@ var sweepRows = []sweepRow{
 			CloneName:   "cl0",
 			Force:       true,
 		}},
-	{46, "GetClone",
+	{47, "GetClone",
 		[]string{"clone", "get", "--name", "cl0"},
 		&pb.GetCloneRequest{
 			ClusterName: itCluster, SpName: itSp, CloneName: "cl0"}},
-	{47, "UpdateCloneTrConf",
+	{48, "UpdateCloneTrConf",
 		[]string{"clone", "set-tr", "--name", "cl0",
 			"--src-tr-addr", "127.0.0.1", "--rev", "7"},
 		&pb.UpdateCloneTrConfRequest{
@@ -458,7 +464,7 @@ var sweepRows = []sweepRow{
 	// The two indexes are given DISTINCT non-zero values: a chunk is
 	// addressed by the pair, and equal values would let a command that wired
 	// --bm-idx to src_slice_idx (or the reverse) pass.
-	{48, "AppendCloneBitmap",
+	{49, "AppendCloneBitmap",
 		[]string{"clone", "append-bm", "--name", "cl0",
 			"--src-slice-idx", "1", "--bm-idx", "2",
 			"--bm-hex", "a5", "--rev", "7"},
@@ -473,7 +479,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- xfer ----
-	{49, "CreateTransfer",
+	{50, "CreateTransfer",
 		[]string{"xfer", "create", "--name", "x0", "--ori-nqn", itNqn,
 			"--ori-idx", "1", "--hosts", itHostNqn, "--auto-suspend",
 			"--rev", "7"},
@@ -487,7 +493,7 @@ var sweepRows = []sweepRow{
 			AllowedHosts: []string{itHostNqn},
 			AutoSuspend:  true,
 		}},
-	{50, "DeleteTransfer",
+	{51, "DeleteTransfer",
 		[]string{"xfer", "delete", "--name", "x0", "--rev", "7"},
 		// No --force: the abort path is not taken.
 		&pb.DeleteTransferRequest{
@@ -496,11 +502,11 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			XferName:    "x0",
 		}},
-	{51, "GetTransfer",
+	{52, "GetTransfer",
 		[]string{"xfer", "get", "--name", "x0"},
 		&pb.GetTransferRequest{
 			ClusterName: itCluster, SpName: itSp, XferName: "x0"}},
-	{52, "UpdateTransferHosts",
+	{53, "UpdateTransferHosts",
 		[]string{"xfer", "set-hosts", "--name", "x0", "--hosts", "c",
 			"--rev", "7"},
 		&pb.UpdateTransferHostsRequest{
@@ -512,7 +518,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- migr ----
-	{53, "CreateMigration",
+	{54, "CreateMigration",
 		[]string{"migr", "create", "--name", "m0", "--src-side", "5",
 			"--hyd-threshold", "8", "--hyd-batch", "4", "--rev", "7"},
 		&pb.CreateMigrationRequest{
@@ -526,7 +532,7 @@ var sweepRows = []sweepRow{
 				HydrationBatchSize: 4,
 			},
 		}},
-	{54, "FinishMigration",
+	{55, "FinishMigration",
 		[]string{"migr", "finish", "--name", "m0", "--rev", "7"},
 		&pb.FinishMigrationRequest{
 			ClusterName: itCluster,
@@ -534,7 +540,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			MigrName:    "m0",
 		}},
-	{55, "CancelMigration",
+	{56, "CancelMigration",
 		[]string{"migr", "cancel", "--name", "m0", "--rev", "7"},
 		&pb.CancelMigrationRequest{
 			ClusterName: itCluster,
@@ -542,11 +548,11 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			MigrName:    "m0",
 		}},
-	{56, "GetMigration",
+	{57, "GetMigration",
 		[]string{"migr", "get", "--name", "m0"},
 		&pb.GetMigrationRequest{
 			ClusterName: itCluster, SpName: itSp, MigrName: "m0"}},
-	{57, "AppendMigrationBitmap",
+	{58, "AppendMigrationBitmap",
 		[]string{"migr", "append-bm", "--name", "m0", "--bm-hex", "a5a5",
 			"--rev", "7"},
 		&pb.AppendMigrationBitmapRequest{
@@ -558,7 +564,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- repair ----
-	{58, "CreateRepair",
+	{59, "CreateRepair",
 		[]string{"repair", "create", "--name", "r0", "--grp", "1",
 			"--bad-legs", "2", "--dn-white", itDnAddr, "--rev", "7"},
 		&pb.CreateRepairRequest{
@@ -570,7 +576,7 @@ var sweepRows = []sweepRow{
 			BadLegIdList: []uint64{2},
 			DnSelector:   &pb.NodeSelector{WhiteList: []string{itDnAddr}},
 		}},
-	{59, "FinishRepair",
+	{60, "FinishRepair",
 		[]string{"repair", "finish", "--name", "r0", "--rev", "7"},
 		&pb.FinishRepairRequest{
 			ClusterName: itCluster,
@@ -578,7 +584,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{60, "CancelRepair",
+	{61, "CancelRepair",
 		[]string{"repair", "cancel", "--name", "r0", "--rev", "7"},
 		&pb.CancelRepairRequest{
 			ClusterName: itCluster,
@@ -586,7 +592,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{61, "TryToAbortRepair",
+	{62, "TryToAbortRepair",
 		[]string{"repair", "abort", "--name", "r0", "--rev", "7"},
 		&pb.TryToAbortRepairRequest{
 			ClusterName: itCluster,
@@ -594,19 +600,19 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{62, "GetRepair",
+	{63, "GetRepair",
 		[]string{"repair", "get", "--name", "r0"},
 		&pb.GetRepairRequest{
 			ClusterName: itCluster, SpName: itSp, RepName: "r0"}},
-	{63, "ListRepairs",
+	{64, "ListRepairs",
 		[]string{"repair", "list"},
 		&pb.ListRepairsRequest{ClusterName: itCluster, SpName: itSp}},
 
 	// ---- retired-leg ----
-	{64, "ListRetiredLegs",
+	{65, "ListRetiredLegs",
 		[]string{"retired-leg", "list"},
 		&pb.ListRetiredLegsRequest{ClusterName: itCluster, SpName: itSp}},
-	{65, "DeleteRetiredLeg",
+	{66, "DeleteRetiredLeg",
 		[]string{"retired-leg", "delete", "--leg", "3", "--rev", "7"},
 		&pb.DeleteRetiredLegRequest{
 			ClusterName: itCluster,
@@ -616,7 +622,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- group ----
-	{66, "ForceStartGroup",
+	{67, "ForceStartGroup",
 		[]string{"group", "force-start", "--grp", "1", "--leg", "2",
 			"--rev", "7"},
 		&pb.ForceStartGroupRequest{
@@ -626,7 +632,7 @@ var sweepRows = []sweepRow{
 			GrpId:       1,
 			LegId:       2,
 		}},
-	{67, "UpdateGroupOperatorInCharge",
+	{68, "UpdateGroupOperatorInCharge",
 		[]string{"group", "set-operator-in-charge", "--grp", "1",
 			"--operator-in-charge", "--rev", "7"},
 		// --operator-in-charge typed with no value sends true, as the leaf
@@ -641,7 +647,7 @@ var sweepRows = []sweepRow{
 		}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 67 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 68 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -652,12 +658,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 67 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 68 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 66 that remain.
+// be green over the 67 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 67 {
-		t.Errorf("sweepRows has %d rows, want 67", len(sweepRows))
+	if len(sweepRows) != 68 {
+		t.Errorf("sweepRows has %d rows, want 68", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -683,7 +689,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 66 of the 67, sp_name in 48. It reads the field off
+// fill: cluster_name in 67 of the 68, sp_name in 48. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -702,8 +708,8 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 66 {
-		t.Errorf("%d requests carry cluster_name, want 66", clusterFields)
+	if clusterFields != 67 {
+		t.Errorf("%d requests carry cluster_name, want 67", clusterFields)
 	}
 	if spFields != 48 {
 		t.Errorf("%d requests carry sp_name, want 48", spFields)
@@ -899,8 +905,8 @@ func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
 			}
 		})
 	}
-	if tokenless != 29 {
-		t.Errorf("%d requests carry no revision token, want 29", tokenless)
+	if tokenless != 30 {
+		t.Errorf("%d requests carry no revision token, want 30", tokenless)
 	}
 }
 

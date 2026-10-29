@@ -126,6 +126,20 @@ func setupGetCluster(fs *flag.FlagSet) job {
 	}
 }
 
+// setupGetClusterCapacity drives GetClusterCapacity, the capacity read of
+// architecture.md, Clusters: the same --name override as get-cluster, no
+// other flag.
+func setupGetClusterCapacity(fs *flag.FlagSet) job {
+	name := clusterNameFlag(fs)
+	return func(
+		ctx context.Context, client pb.GatewayClient, g *globals,
+	) (any, error) {
+		return client.GetClusterCapacity(ctx, &pb.GetClusterCapacityRequest{
+			ClusterName: clusterNameOf(g, *name),
+		})
+	}
+}
+
 // setupListClusters drives ListClusters. The request is cluster-independent —
 // it is the one RPC of this file with no cluster_name field — so it takes only
 // the page flags; --page-token also carries the deliberately malformed '!!'

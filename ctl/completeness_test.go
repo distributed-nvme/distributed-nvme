@@ -33,11 +33,12 @@ import (
 // drives it, group by group.
 var rpcToCmd = map[string]string{
 	// cluster
-	"CreateCluster":     "cluster create",
-	"DeleteCluster":     "cluster delete",
-	"GetCluster":        "cluster get",
-	"ListClusters":      "cluster list",
-	"AdvanceClusterIds": "cluster advance-ids",
+	"CreateCluster":      "cluster create",
+	"DeleteCluster":      "cluster delete",
+	"GetCluster":         "cluster get",
+	"ListClusters":       "cluster list",
+	"AdvanceClusterIds":  "cluster advance-ids",
+	"GetClusterCapacity": "cluster get-capacity",
 	// dn
 	"CreateDiskNode":         "dn create",
 	"DeleteDiskNode":         "dn delete",
@@ -117,7 +118,7 @@ var rpcToCmd = map[string]string{
 
 // TestRpcToCmdMatchesServiceDesc is the two-way check of CT1: every RPC the
 // generated descriptor declares has a command, every command in the table
-// names a real RPC, and the count is pinned at 67 so that a *pair* of
+// names a real RPC, and the count is pinned at 68 so that a *pair* of
 // compensating edits — an RPC removed from the service and a row removed from
 // the table — still fails.
 func TestRpcToCmdMatchesServiceDesc(t *testing.T) {
@@ -125,11 +126,11 @@ func TestRpcToCmdMatchesServiceDesc(t *testing.T) {
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
 		methods[method.MethodName] = true
 	}
-	if len(methods) != 67 {
-		t.Errorf("service Gateway has %d methods, want 67", len(methods))
+	if len(methods) != 68 {
+		t.Errorf("service Gateway has %d methods, want 68", len(methods))
 	}
-	if len(rpcToCmd) != 67 {
-		t.Errorf("rpcToCmd has %d rows, want 67", len(rpcToCmd))
+	if len(rpcToCmd) != 68 {
+		t.Errorf("rpcToCmd has %d rows, want 68", len(rpcToCmd))
 	}
 	for name := range methods {
 		if _, ok := rpcToCmd[name]; !ok {
@@ -179,17 +180,17 @@ func TestCommandTreeMatchesTable(t *testing.T) {
 			t.Errorf("rpcToCmd names %q, which the tree does not have", path)
 		}
 	}
-	if len(leaves) != 67 {
-		t.Errorf("the tree has %d RPC leaves, want 67: %v",
+	if len(leaves) != 68 {
+		t.Errorf("the tree has %d RPC leaves, want 68: %v",
 			len(leaves), leaves)
 	}
 }
 
 // TestGroupsLeafCounts pins the leaf count of every group, so a leaf that moved between two groups (which keeps
-// the total at 67) names the two groups it moved between in the failure.
+// the total at 68) names the two groups it moved between in the failure.
 func TestGroupsLeafCounts(t *testing.T) {
 	want := map[string]int{
-		"cluster": 5, "dn": 6, "cn": 6, "sp": 9, "cntlr": 4, "td": 5,
+		"cluster": 6, "dn": 6, "cn": 6, "sp": 9, "cntlr": 4, "td": 5,
 		"ss": 4, "ns": 4, "clone": 5, "xfer": 4, "migr": 5,
 		"repair": 6, "retired-leg": 2, "group": 2,
 	}
@@ -244,11 +245,12 @@ func TestEveryLeafIsRunnable(t *testing.T) {
 // same defaults.
 var leafFlags = map[string][]string{
 	// cluster
-	"cluster create":      {"name", "extent-size"},
-	"cluster delete":      {"name"},
-	"cluster get":         {"name"},
-	"cluster list":        {"count", "page-token"},
-	"cluster advance-ids": {"name"},
+	"cluster create":       {"name", "extent-size"},
+	"cluster delete":       {"name"},
+	"cluster get":          {"name"},
+	"cluster list":         {"count", "page-token"},
+	"cluster advance-ids":  {"name"},
+	"cluster get-capacity": {"name"},
 	// dn — trConfFlags("") expands to the four unprefixed transport flags.
 	"dn create": {"addr", "location", "disabled",
 		"tr-type", "adr-fam", "tr-addr", "tr-svc-id"},
@@ -368,15 +370,15 @@ func TestLeafFlagsMatchTable(t *testing.T) {
 			t.Errorf("%q declares %v, want %v", path, got, wantSorted)
 		}
 	}
-	if len(leafFlags) != 67 {
-		t.Errorf("leafFlags has %d rows, want 67", len(leafFlags))
+	if len(leafFlags) != 68 {
+		t.Errorf("leafFlags has %d rows, want 68", len(leafFlags))
 	}
 }
 
 // TestRootPersistentFlags pins the global flags (dnvctl.md, Global flags,
 // env, config), and nothing else promoted to the root by accident. A local
 // flag that drifted onto the root would be silently accepted on every one of
-// the 67 commands.
+// the 68 commands.
 func TestRootPersistentFlags(t *testing.T) {
 	want := []string{"cluster", "config", "gateway-address", "rev", "sp",
 		"timeout", "trace-id"}

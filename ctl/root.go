@@ -1,4 +1,4 @@
-// Package ctl is the dnv operator CLI (dnvctl.md). It exposes exactly the 67
+// Package ctl is the dnv operator CLI (dnvctl.md). It exposes exactly the 68
 // RPCs of `service Gateway`, one command per RPC, grouped by noun:
 //
 //	dnvctl <group> <verb> [flags]
@@ -69,7 +69,7 @@ const envPrefix = "DNVCTL"
 const defaultTimeout = 10.0
 
 // job is one RPC invocation. It returns whatever should be rendered on
-// stdout: a reply message for 65 of the 67 commands, and a plain
+// stdout: a reply message for 66 of the 68 commands, and a plain
 // map[string]any for the two bitmap reads (CT4).
 type job func(ctx context.Context, client pb.GatewayClient) (any, error)
 
@@ -153,7 +153,7 @@ func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "dnvctl",
 		Short: "dnv operator CLI",
-		Long: "dnvctl issues the 67 RPCs of the dnv Gateway service, one " +
+		Long: "dnvctl issues the 68 RPCs of the dnv Gateway service, one " +
 			"command per RPC. It prints one canonical JSON document per " +
 			"invocation on stdout and never issues an RPC the operator did " +
 			"not type.",
@@ -259,7 +259,7 @@ type dialFunc func(ctx context.Context, address string) (
 	pb.GatewayClient, func() error, error)
 
 // dial is the production dialFunc: the mandatory client block of grpc.md,
-// Wiring. Both chains are installed even though all 67 RPCs are unary,
+// Wiring. Both chains are installed even though all 68 RPCs are unary,
 // because grpc.md, Wiring, says both chains on every dnv connection. The
 // message limit is installed too: it lets the GetStoragePool reply of a pool
 // at the cardinality limits through.
@@ -340,7 +340,7 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 	return emit(result)
 }
 
-// leaf builds one RPC command. Every one of the 67 RPC leaves has this shape:
+// leaf builds one RPC command. Every one of the 68 RPC leaves has this shape:
 // a Use line, a one-line Short, no positional arguments, and a RunE that
 // defers to run.
 func leaf(use, short string, build func() (job, error)) *cobra.Command {
