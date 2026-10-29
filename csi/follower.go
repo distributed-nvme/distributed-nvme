@@ -76,7 +76,11 @@ func newFollower(host *nvmeHost, period time.Duration, conf []endpoint) *followe
 // subsystems of the driver's own NQN prefix are staged. Its discovery
 // connections are those to the configured cdcs, which it knows from the
 // start, so a cdc that cannot be read holds the drops off after a restart
-// as before one.
+// as before one. A discovery connection under the node's host NQN to
+// another address is followed as well when its log lists a staged
+// subsystem: an attach named that cdc before the configuration changed.
+// Such a connection only adds a cdc that must answer; one whose log cannot
+// be read stays another tool's.
 func (f *follower) recover(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -87,6 +91,24 @@ func (f *follower) recover(ctx context.Context) error {
 	for _, c := range ctrls {
 		if strings.HasPrefix(c.subNqn, nqnPrefix) {
 			f.staged[c.subNqn] = true
+		}
+	}
+	for _, c := range ctrls {
+		if c.subNqn != common.NvmeDiscoveryNqn || c.hostNqn != f.host.id.hostNqn {
+			continue
+		}
+		if _, ok := f.cdcs[c.key()]; ok {
+			continue
+		}
+		entries, err := f.host.discoveryLog(ctx, c.name)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if f.staged[e.subNqn] {
+				f.cdcs[c.key()] = endpoint{trAddr: c.trAddr, trSvcId: c.trSvcId}
+				break
+			}
 		}
 	}
 	return nil

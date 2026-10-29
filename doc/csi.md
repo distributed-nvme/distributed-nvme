@@ -231,16 +231,15 @@ wait is UNAVAILABLE, and the kubelet calls again.
 
 CSI15. **The follower.** The plugin keeps the set of subsystems it has
 staged and the cdcs it follows, the configured ones and those the attaches
-named, holds one persistent
-discovery connection to each cdc, and on every trigger reads the discovery
-log through each of them, then for every staged subsystem connects a listed
-cntlr the node has no path to and drops, by controller, a path to a cntlr
-no cdc lists any more, which is the node's part of the failover contract
-(`architecture.md`, Host view). The triggers are a stage, the kernel's
-device events, read off its event socket, among them the
-discovery-log-change notification, and a timer as the safety net. A stage,
-an unstage, a pass and the stop's drop run one at a time, so an unstage
-that empties the set never forgets the cdcs under a stage of another
+named, holds one persistent discovery connection to each cdc, and on every
+trigger reads the discovery log through each of them, then for every staged
+subsystem connects a listed cntlr the node has no path to and drops, by
+controller, a path to a cntlr no cdc lists any more, which is the node's
+part of the failover contract (`architecture.md`, Host view). The triggers
+are a stage, the kernel's device events, read off its event socket, among
+them the discovery-log-change notification, and a timer as the safety net. A
+stage, an unstage, a pass and the stop's drop run one at a time, so an
+unstage that empties the set never forgets the cdcs under a stage of another
 volume. A cdc that cannot be reached, or whose log cannot be read, holds
 every drop off and leaves the connects to the others, since twins exist so
 that one can be down; a pass that read no log drops nothing: an answer that
@@ -248,11 +247,15 @@ is missing is not an answer that the cntlr is gone. The plugin's discovery
 connections are those under the node's host NQN to a cdc it follows, and it
 uses and drops no other; a connection another tool made to the same cdc
 under the same host NQN cannot be told apart from the plugin's. After a
-restart the plugin reads the staged subsystems back from sysfs, those of
-the driver's NQN prefix, and follows the configured cdcs from the start, so
-a configured cdc that cannot be read holds the drops off after a restart as
-before one, whichever shard codes each cdc serves. It touches no path of a
-subsystem that is not its own.
+restart the plugin reads the staged subsystems back from sysfs, those of the
+driver's NQN prefix, and follows the configured cdcs from the start, so a
+configured cdc that cannot be read holds the drops off after a restart as
+before one, whichever shard codes each cdc serves. A discovery connection
+under the node's host NQN to another address is followed as well when its
+log lists a staged subsystem, since an attach named that cdc before the
+configuration changed; it only adds a cdc that must answer, and one whose
+log cannot be read at the restart stays another tool's. It touches no path
+of a subsystem that is not its own.
 
 CSI16. **Nothing staged, nothing connected.** The last unstage drops the
 subsystem's paths and the persistent discovery connections with them, and

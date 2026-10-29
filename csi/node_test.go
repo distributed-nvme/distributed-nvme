@@ -764,7 +764,10 @@ func TestFollowerRecovers(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
 	nqn := subsystemNqnOf(testVolume)
-	const foreignCdc = "10.0.0.9:8009" // another storage's discovery service
+	const (
+		foreignCdc = "10.0.0.9:8009"   // another storage's discovery service
+		retiredCdc = "10.0.0.10:18030" // a cdc an attach named, since dropped from the configuration
+	)
 	foreignNqn := "nqn.2024-01.io.dnv-it:e2e:ss0"
 	n.follow = newFollower(n.host, time.Hour,
 		[]endpoint{mustEndpoint(fakeCdcA), mustEndpoint(fakeCdcB)})
@@ -772,6 +775,7 @@ func TestFollowerRecovers(t *testing.T) {
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA))
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcB))
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(foreignCdc))
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(retiredCdc))
 	f.addCtrlAs(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA), testNodeB)
 	f.addCtrl(nqn, mustEndpoint(fakeCn0))
 	f.addCtrl(nqn, mustEndpoint(fakeCn1))
@@ -781,6 +785,7 @@ func TestFollowerRecovers(t *testing.T) {
 		{subNqn: nqn, ep: mustEndpoint(fakeCn2)},
 	}
 	f.logs[fakeCdcB] = f.logs[fakeCdcA]
+	f.logs[retiredCdc] = f.logs[fakeCdcA]
 	f.logs[foreignCdc] = []logEntry{{subNqn: foreignNqn, ep: mustEndpoint(fakeCn1)}}
 	f.logFail[fakeCdcB] = true
 	f.mu.Unlock()
@@ -789,6 +794,11 @@ func TestFollowerRecovers(t *testing.T) {
 	}
 	if !n.follow.staged[nqn] || len(n.follow.staged) != 1 {
 		t.Errorf("staged %v, want the driver's subsystem alone", n.follow.staged)
+	}
+	// The retired cdc's log lists the staged subsystem: it is followed;
+	// the foreign one's lists none: it is not.
+	if _, ok := n.follow.cdcs[retiredCdc]; !ok || len(n.follow.cdcs) != 3 {
+		t.Errorf("cdcs %v, want the two configured and the retired one", n.follow.cdcs)
 	}
 	// The second cdc cannot be read: the new cntlr is connected, and cn1,
 	// which the readable cdc no longer lists, keeps its path.
@@ -808,9 +818,9 @@ func TestFollowerRecovers(t *testing.T) {
 	if got := f.paths(foreignNqn); len(got) != 1 {
 		t.Errorf("the foreign subsystem's path was touched: %v", got)
 	}
-	// The last unstage drops the follower's discovery connections and
-	// leaves the other tool's and the other host NQN's; the configured cdcs
-	// stay known.
+	// The last unstage drops the follower's discovery connections, the
+	// retired cdc's with them, and leaves the other tool's and the other
+	// host NQN's; the configured cdcs stay known.
 	if err := n.follow.unstage(ctx, nqn); err != nil {
 		t.Fatal(err)
 	}
