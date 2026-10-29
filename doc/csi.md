@@ -161,11 +161,85 @@ plugin advertises create and delete, publish and unpublish, and get
 capacity, and nothing else; the volume list, snapshots, expansion and
 modification are not served.
 
+## The node plugin
+
+The node subcommand runs on every Kubernetes node that may mount a volume.
+It takes the socket to serve (`--csi-address`), the two identity files
+(`--hostnqn-file`, `--hostid-file`), the bound on a stage's wait for the
+device (`--device-wait`) and the follower's period (`--sync-period`).
+Everything it does to the node goes through the OS client, the one path to
+the operating system (`osclient.md`): nvme-cli for what the kernel takes as
+a command, the mount tools, blkid, the filesystem makers, the sysfs and
+mount table reads. Only the kernel's event socket is the plugin's own, since
+the OS client has no socket.
+
+CSI13. **The node id is the host NQN.** The plugin reads the node's identity
+files at start and refuses to start when either is missing, empty or not a
+host NQN, naming the file and the commands that generate the pair. Every
+connect carries both the host NQN and the host id, since the kernel keeps a
+one-to-one map between them. The files are the operator's; the plugin never
+writes them.
+
+CSI14. **The plugin's own connect, with the kernel's defaults.** A node's
+path to a volume is made by nvme-cli with the node's identity and no
+timeout settings of its own, so the kernel's defaults hold; the agent's
+connect, which hard-codes dnv's settings for a cntlr's path to a leg, is
+not reused, and neither are its sysfs readers. A stage connects to every
+cntlr the cdcs list for the volume's subsystem, retrying a cntlr whose port
+does not listen yet inside the stage's wait, since the cdc lists a
+subsystem before its cntlrs have built it, and then waits for the volume's
+device link by uuid under the disk-by-id directory, which appears once a
+path is live and optimized. A volume whose link does not come within the
+wait is UNAVAILABLE, and the kubelet calls again.
+
+CSI15. **The follower.** The plugin keeps the set of subsystems it has
+staged and the cdc addresses their attaches named, holds one persistent
+discovery connection to each cdc, and on every trigger reads the discovery
+log through each of them, then for every staged subsystem connects a listed
+cntlr the node has no path to and drops, by controller, a path to a cntlr
+no cdc lists any more, which is the node's part of the failover contract
+(`architecture.md`, Host view). The triggers are a stage, the kernel's
+device events, read off its event socket, among them the
+discovery-log-change notification, and a timer as the safety net. A cdc
+whose log cannot be read holds every drop off: an answer that is missing is
+not an answer that the cntlr is gone. After a restart the plugin reads its
+state back from sysfs: the subsystems of the driver's NQN prefix are
+staged, and the discovery connections name the cdcs. It touches no path of
+a subsystem that is not its own.
+
+CSI16. **Nothing staged, nothing connected.** The last unstage drops the
+subsystem's paths and the persistent discovery connections with them, and
+so does a stop of the plugin with nothing staged; a stop with volumes staged
+leaves every connection in place, since the data path must outlive the
+plugin's pod.
+
+CSI17. **Format only what is blank, mount by binding, repeat for free.** A
+stage of a filesystem volume reads the device's filesystem: a blank device
+is formatted with the capability's filesystem, ext4 when none is named, a
+device that carries that filesystem is mounted as it is, and a device that
+carries another is FAILED_PRECONDITION, since reformatting would destroy
+data; a block volume is never formatted or mounted at stage. Publish
+bind-mounts the staging path at the target, read-only when asked, and for a
+block volume makes a file at the target and bind-mounts the device node
+onto it. Unpublish unmounts the target and removes it, a directory with a
+plain rmdir, never recursively; unstage unmounts the staging path. Every
+step reads the mount table first, so a repeat is done, as the spec asks,
+and a capability the driver does not serve is FAILED_PRECONDITION at stage
+and publish, the spec's word for a capability the volume does not support.
+The used-space report reads a mounted filesystem's totals in bytes and
+inodes through the OS client, and a block volume's size alone.
+
 ## Log records
 
 The controller plugin logs `csi controller starting` with its endpoint,
 gateway address, cdc addresses and version, `csi controller serving` once
-it listens, and `csi controller stopping` when it ends. Every CSI call but
+it listens, and `csi controller stopping` when it ends; the node plugin
+logs `csi node starting` with its endpoint and node id, `csi node serving`
+and `csi node stopping` the same way, and, since those are the moments the
+failover contract turns on, `csi path connected` and `csi path dropped`
+with the subsystem and the cntlr address, `csi discovery connection opened`
+and `csi discovery connection dropped` with the cdc address, and
+`csi follower sync error` with what failed when a follow could not finish. Every CSI call but
 a successful probe logs `csi request` with the method and `csi reply` with
 the method, the code, the duration and, on a failure, the error, under the
 trace id the interceptor minted (CSI8). The gateway calls a CSI call makes

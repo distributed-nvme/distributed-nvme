@@ -33,7 +33,9 @@ it.
   the dn's read of an nvmet subsystem directory's age, for both roles' read
   of whether their nvmet port's directory is there, for the dn's read of its
   disk's device number, and for persisting the `Local*Path` protobuf state
-  files. **All** OS command execution, directory listing, modification-time
+  files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
+  maker and mount commands, its sysfs and mount table reads and its read of
+  a volume's device link (`csi.md`, The node plugin). **All** OS command execution, directory listing, modification-time
   read, device-number read and disk file IO in production code goes
   through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile`, and never read a directory or stat a path,

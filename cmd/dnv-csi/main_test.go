@@ -75,8 +75,75 @@ func TestRootHasTheControllerSubcommand(t *testing.T) {
 	for _, c := range root.Commands() {
 		names = append(names, c.Name())
 	}
-	if !reflect.DeepEqual(names, []string{"controller"}) {
-		t.Errorf("subcommands %v, want [controller]", names)
+	if !reflect.DeepEqual(names, []string{"controller", "node"}) {
+		t.Errorf("subcommands %v, want [controller node]", names)
+	}
+}
+
+// nodeFlags is the node subcommand's flag set, verbatim.
+var nodeFlags = []string{
+	"config",
+	"csi-address",
+	"device-wait",
+	"hostid-file",
+	"hostnqn-file",
+	"sync-period",
+}
+
+func TestNodeFlagSetIsExactlyTheNodes(t *testing.T) {
+	cmd := newNodeCmd()
+	var got []string
+	cmd.Flags().VisitAll(func(f *pflag.Flag) { got = append(got, f.Name) })
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, nodeFlags) {
+		t.Errorf("flags %v, want %v", got, nodeFlags)
+	}
+}
+
+func TestNodeOptions(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	cmd := newNodeCmd()
+	if err := cmd.ParseFlags([]string{"--csi-address", "/csi/csi.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindViper(cmd); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := nodeOptionsFromViper()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := csi.Config{
+		Endpoint:    "/csi/csi.sock",
+		HostNqnPath: csi.DefaultHostNqnPath,
+		HostIdPath:  csi.DefaultHostIdPath,
+		DeviceWait:  csi.DefaultDeviceWait,
+		SyncPeriod:  csi.DefaultSyncPeriod,
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("config %+v, want %+v", cfg, want)
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{}, "--csi-address"},
+		{[]string{"--csi-address", "/csi/csi.sock", "--hostnqn-file", ""}, "--hostnqn-file"},
+		{[]string{"--csi-address", "/csi/csi.sock", "--device-wait", "0"}, "--device-wait"},
+		{[]string{"--csi-address", "/csi/csi.sock", "--sync-period", "-1"}, "--sync-period"},
+	} {
+		viper.Reset()
+		cmd := newNodeCmd()
+		if err := cmd.ParseFlags(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		if err := bindViper(cmd); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := nodeOptionsFromViper(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%v: error %v, want one containing %q", tc.args, err, tc.want)
+		}
 	}
 }
 

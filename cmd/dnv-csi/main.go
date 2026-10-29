@@ -1,8 +1,9 @@
 // Command dnv-csi is the Container Storage Interface driver of dnv (csi.md,
-// The driver): one cobra root with the controller subcommand, which
-// parses its flags through viper and hands off to csi.RunController. main
-// itself is thin (layout.md, `cmd/` wiring): it opens no socket and dials
-// nothing; the lifecycle records of csi.md, Log records, are the library's.
+// The driver): one cobra root with the controller and node subcommands,
+// each parsing its flags through viper and handing off to the library's
+// Run. main itself is thin (layout.md, `cmd/` wiring): it opens no socket
+// and dials nothing; the lifecycle records of csi.md, Log records, are the
+// library's.
 package main
 
 import (
@@ -46,8 +47,31 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newControllerCmd())
+	root.AddCommand(newControllerCmd(), newNodeCmd())
 	return root
+}
+
+func newNodeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "node",
+		Short: "serve the identity service and the node plugin",
+		Args:  cobra.NoArgs,
+		RunE:  runNode,
+	}
+	flags := cmd.Flags()
+	flags.String("csi-address", "",
+		"path of the unix socket to serve the CSI services on (required)")
+	flags.String("hostnqn-file", csi.DefaultHostNqnPath,
+		"file that holds the node's host NQN, its node id")
+	flags.String("hostid-file", csi.DefaultHostIdPath,
+		"file that holds the node's host id")
+	flags.Int("device-wait", int(csi.DefaultDeviceWait/time.Second),
+		"seconds a stage waits for the volume's device")
+	flags.Int("sync-period", int(csi.DefaultSyncPeriod/time.Second),
+		"seconds between two follows of the cdc, the safety net under the "+
+			"kernel's change notification")
+	flags.String("config", "", "optional viper config file")
+	return cmd
 }
 
 func newControllerCmd() *cobra.Command {
@@ -128,6 +152,39 @@ func controllerOptionsFromViper() (csi.Config, error) {
 	}, nil
 }
 
+// nodeOptionsFromViper reads and validates the node's values after the
+// binding. It performs no I/O and logs nothing; the identity files are read
+// by the library at start.
+func nodeOptionsFromViper() (csi.Config, error) {
+	endpoint := strings.TrimSpace(viper.GetString("csi-address"))
+	if endpoint == "" {
+		return csi.Config{}, errors.New("missing required flag: --csi-address")
+	}
+	nqnPath := strings.TrimSpace(viper.GetString("hostnqn-file"))
+	idPath := strings.TrimSpace(viper.GetString("hostid-file"))
+	if nqnPath == "" || idPath == "" {
+		return csi.Config{}, errors.New(
+			"--hostnqn-file and --hostid-file must name the identity files")
+	}
+	deviceWait := viper.GetInt("device-wait")
+	if deviceWait <= 0 {
+		return csi.Config{}, fmt.Errorf(
+			"--device-wait: %d is not a positive number of seconds", deviceWait)
+	}
+	syncPeriod := viper.GetInt("sync-period")
+	if syncPeriod <= 0 {
+		return csi.Config{}, fmt.Errorf(
+			"--sync-period: %d is not a positive number of seconds", syncPeriod)
+	}
+	return csi.Config{
+		Endpoint:    endpoint,
+		HostNqnPath: nqnPath,
+		HostIdPath:  idPath,
+		DeviceWait:  time.Duration(deviceWait) * time.Second,
+		SyncPeriod:  time.Duration(syncPeriod) * time.Second,
+	}, nil
+}
+
 // splitList parses one comma-separated flag value: entries are trimmed and
 // empty ones dropped. The flag is a plain string rather than a pflag string
 // slice on purpose: viper's GetStringSlice does not split a single
@@ -160,13 +217,27 @@ func checkCdcAddress(addr string) error {
 	return nil
 }
 
-// runController binds, validates, mints the startup trace id, arms the
-// signal handling and hands off to csi.RunController.
+// runController binds, validates and runs the controller plugin.
 func runController(cmd *cobra.Command, args []string) error {
+	return runPlugin(cmd, controllerOptionsFromViper, csi.RunController)
+}
+
+// runNode binds, validates and runs the node plugin.
+func runNode(cmd *cobra.Command, args []string) error {
+	return runPlugin(cmd, nodeOptionsFromViper, csi.RunNode)
+}
+
+// runPlugin is the startup path both subcommands share: bind, validate,
+// mint the startup trace id, arm the signal handling and hand off.
+func runPlugin(
+	cmd *cobra.Command,
+	options func() (csi.Config, error),
+	run func(context.Context, csi.Config) error,
+) error {
 	if err := bindViper(cmd); err != nil {
 		return err
 	}
-	cfg, err := controllerOptionsFromViper()
+	cfg, err := options()
 	if err != nil {
 		return err
 	}
@@ -180,7 +251,7 @@ func runController(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 	go watchSignals(ctx, cancel, sigCh, os.Exit)
-	return csi.RunController(ctx, cfg)
+	return run(ctx, cfg)
 }
 
 // watchSignals is the daemons' shared shape: the first SIGINT/SIGTERM cancels

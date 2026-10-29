@@ -1,8 +1,9 @@
 // Package csi is dnv-csi, the Container Storage Interface driver of dnv
-// (csi.md): the identity service and the controller plugin, served over a
-// unix socket to the kubelet and the CSI sidecars. The controller plugin is a
-// gRPC client of the gateway and of nothing else: it never touches etcd and
-// never talks to an agent. The node plugin is the node subcommand's work.
+// (csi.md): the identity service, the controller plugin and the node plugin,
+// served over a unix socket to the kubelet and the CSI sidecars. The
+// controller plugin is a gRPC client of the gateway and of nothing else: it
+// never touches etcd and never talks to an agent. The node plugin talks to
+// the node's kernel through the OS client and never to the gateway.
 package csi
 
 import (
@@ -12,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -43,6 +45,9 @@ const (
 	msgControllerStarting = "csi controller starting"
 	msgControllerServing  = "csi controller serving"
 	msgControllerStopping = "csi controller stopping"
+	msgNodeStarting       = "csi node starting"
+	msgNodeServing        = "csi node serving"
+	msgNodeStopping       = "csi node stopping"
 	msgRequest            = "csi request"
 	msgReply              = "csi reply"
 )
@@ -66,6 +71,18 @@ type Config struct {
 	// GatewayTimeout bounds one gateway call; zero takes
 	// DefaultGatewayTimeout.
 	GatewayTimeout time.Duration
+	// HostNqnPath and HostIdPath are the node's identity files (the node
+	// plugin); empty takes the defaults.
+	HostNqnPath string
+	HostIdPath  string
+	// DeviceWait bounds a stage's wait for the volume's device; zero takes
+	// DefaultDeviceWait.
+	DeviceWait time.Duration
+	// SyncPeriod is the follower's timer; zero takes DefaultSyncPeriod.
+	SyncPeriod time.Duration
+	// OsClient is the node plugin's one path to the operating system; nil
+	// takes a LimitedOsClient. The tests pass a fake.
+	OsClient common.OsClient
 }
 
 // RunController serves the identity service and the controller plugin on
@@ -91,6 +108,67 @@ func RunController(ctx context.Context, cfg Config) error {
 			csi.RegisterControllerServer(s, ctl)
 		})
 	slog.InfoContext(ctx, msgControllerStopping)
+	return err
+}
+
+// RunNode serves the identity service and the node plugin on cfg.Endpoint
+// until ctx ends. It refuses to start without the node's identity files
+// (csi.md CSI13), reads its state back from sysfs, runs the follower beside
+// the server, and stops both at the end: the follower drops the discovery
+// connections when nothing is staged and leaves every connection in place
+// otherwise.
+func RunNode(ctx context.Context, cfg Config) error {
+	oc := cfg.OsClient
+	if oc == nil {
+		oc = common.NewLimitedOsClient(0)
+	}
+	nqnPath, idPath := cfg.HostNqnPath, cfg.HostIdPath
+	if nqnPath == "" {
+		nqnPath = DefaultHostNqnPath
+	}
+	if idPath == "" {
+		idPath = DefaultHostIdPath
+	}
+	id, err := readIdentity(ctx, oc, nqnPath, idPath)
+	if err != nil {
+		return err
+	}
+	deviceWait := cfg.DeviceWait
+	if deviceWait <= 0 {
+		deviceWait = DefaultDeviceWait
+	}
+	slog.InfoContext(ctx, msgNodeStarting,
+		slog.String("endpoint", cfg.Endpoint),
+		slog.String("node_id", id.hostNqn),
+		slog.String("version", Version),
+	)
+	host := &nvmeHost{oc: oc, id: id}
+	follow := newFollower(host, cfg.SyncPeriod)
+	if err := follow.recover(ctx); err != nil {
+		return err
+	}
+	fctx, fcancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		follow.run(fctx)
+	}()
+	n := &node{
+		id:         id,
+		host:       host,
+		follow:     follow,
+		mnt:        &mounter{oc: oc},
+		deviceWait: deviceWait,
+	}
+	err = serve(ctx, cfg.Endpoint, msgNodeServing,
+		func(s grpc.ServiceRegistrar) {
+			csi.RegisterIdentityServer(s, newIdentity(false))
+			csi.RegisterNodeServer(s, n)
+		})
+	fcancel()
+	wg.Wait()
+	slog.InfoContext(ctx, msgNodeStopping)
 	return err
 }
 
