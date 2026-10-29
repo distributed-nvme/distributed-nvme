@@ -101,8 +101,10 @@ of the calls a CSI call makes carry it.
 
 CSI9. **Create makes four objects in order, each step repeatable.** The
 pool, named as the volume: one slice, the class's redundancy and cntlr
-count, the cluster's defaults for the rest, and a first data group of one
-eighth of the volume rounded up to whole extents and at least one. The thin
+count, a first data group of one eighth of the volume rounded up to whole
+extents and at least one, dnv's default auto-grow mark whatever the
+cluster stores, since a cluster's mark can switch auto-grow off and the
+volume model needs it on, and the cluster's defaults for the rest. The thin
 device, named as the volume, sized to the request rounded up to the pool's
 unit, the stripe size: the required bytes rounded up, or the limit rounded
 down when only a limit is given, or the driver's default when neither is,
@@ -116,9 +118,9 @@ still being deleted under the name is ABORTED, so the caller retries once
 the drain has removed it. The create returns once the four records exist;
 the node plugin waits for the device. A delete removes the objects in the
 reverse order, each step repeatable: the namespace, the subsystem and the
-thin device, then the pool, whose delete the gateway refuses while a
-user-created object remains and answers done when the pool is already
-deleting; the worker drains the rest. An object already gone is done, a
+thin device, then the pool, last since its delete is refused while a
+user-created object remains (`architecture.md`, Storage pools); the worker
+drains the rest (`dnv-worker.md`, The sp drain). An object already gone is done, a
 write the gateway refuses because the pool is already deleting is done,
 and so is an id that names no volume of this driver. A create from a
 snapshot or another volume is refused.
@@ -141,22 +143,31 @@ done.
 
 ## Capacity
 
-CSI11. **Capacity is arithmetic over the cluster capacity call.** The
-available bytes are the smaller of two sides. The disk side is the free
-extents of the disk nodes that are enabled, healthy and below their side
-ceiling, times the extent size, divided by the legs a group has under the
-class's redundancy. The controller side is the free extents of the
-controller nodes that are enabled, healthy and below their cntlr ceiling,
-times the extent size, divided by the class's cntlr count, since every
-cntlr charges its controller node the pool's footprint. The largest volume
-is bounded by the disk node that would carry its last leg: the legs-th
-largest free count, less the meta group's extent, times the extent size,
-times eight, since the first data group is one eighth of the volume; and
-never above the available bytes. Both are estimates, as the capacity call's
-records are (`architecture.md`, Clusters), and the available bytes can be
+CSI11. **Capacity is arithmetic over the cluster capacity call.** A node
+counts when it is enabled, healthy, below its ceiling and has an extent
+free. A pool puts every leg on a disk node of its own and every cntlr on a
+controller node of its own, charged with the pool's footprint
+(`architecture.md`, Per-operation allocation), so a class whose pool of a
+meta group and a data group needs more disk nodes, or whose cntlr count
+needs more controller nodes, than count has nothing available and a
+largest volume of zero. Otherwise the available bytes are the smaller of
+two sides. The disk side is the free extents of the disk nodes that count,
+times the extent size, divided by the legs a group has under the class's
+redundancy. The controller side is the free extents of the controller
+nodes that count, times the extent size, divided by the class's cntlr
+count. The largest volume is the one whose first data group, one eighth of
+it, fits both the disk node that would carry its last data leg, the
+legs-th largest free count, since the meta group's legs sit on other disk
+nodes, and the controller node that would carry its last cntlr, the
+cntlr-count-th largest free count less the meta group's extent; it is never
+above the available bytes, and it is always reported, zero included, since
+an absent one means no bound per volume. Locations are not counted, so a
+cluster whose disk nodes share few locations can answer more than a create
+builds. Both are estimates, as the capacity call's records are
+(`architecture.md`, Clusters), and the available bytes can be
 over-promised, since a volume reserves one eighth of itself (The volume
-model). A cluster that does not exist has nothing free: the answer is zero,
-not an error, since Kubernetes asks the capacity of every class on a timer
+model). A cluster that does not exist has nothing free: both answers are
+zero, not an error, since Kubernetes asks the capacity of every class on a timer
 and a class may name a cluster still to be created; a create in it is the
 class's error (CSI12).
 

@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -199,16 +200,23 @@ func (c *controller) CreateVolume(
 	}
 
 	// The pool, named as the volume: one slice, the class's redundancy and
-	// cntlr count, the cluster's defaults for the rest, and a first data
-	// group of one part in volumeSteps of the volume.
+	// cntlr count, a first data group of one part in volumeSteps of the
+	// volume, dnv's default auto-grow mark whatever the cluster stores,
+	// since the volume model needs auto-grow on, and the cluster's defaults
+	// for the rest.
 	gctx, cancel := c.gwCtx(ctx)
 	_, err = c.gw.CreateStoragePool(gctx, &pb.CreateStoragePoolRequest{
 		ClusterName: p.cluster,
 		SpName:      name,
-		BdevConf:    &pb.BdevConf{RedundConf: p.redundConf()},
-		CntlrCnt:    p.cntlrs,
-		SliceCnt:    1,
-		InitExtCnt:  initExtCnt(size, extent),
+		BdevConf: &pb.BdevConf{
+			RedundConf: p.redundConf(),
+			DmPoolConf: &pb.DmPoolConf{
+				LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
+			},
+		},
+		CntlrCnt:   p.cntlrs,
+		SliceCnt:   1,
+		InitExtCnt: initExtCnt(size, extent),
 	})
 	cancel()
 	if err != nil && codeOf(err) != codes.AlreadyExists {
@@ -694,16 +702,19 @@ func (c *controller) GetCapacity(
 			// A cluster that does not exist has nothing free (csi.md,
 			// Capacity): Kubernetes asks on a timer, and a create is
 			// where a class that names a wrong cluster fails.
-			return &csi.GetCapacityResponse{}, nil
+			return &csi.GetCapacityResponse{
+				MaximumVolumeSize: wrapperspb.Int64(0),
+			}, nil
 		}
 		return nil, fromGateway("GetClusterCapacity", err)
 	}
+	// The largest volume is always set, zero included: an unset one means
+	// no bound per volume.
 	available, maxVolume := capacityOf(reply, p.legs(), p.cntlrCnt())
-	resp := &csi.GetCapacityResponse{AvailableCapacity: int64(available)}
-	if maxVolume > 0 {
-		resp.MaximumVolumeSize = wrapperspb.Int64(int64(maxVolume))
-	}
-	return resp, nil
+	return &csi.GetCapacityResponse{
+		AvailableCapacity: int64(available),
+		MaximumVolumeSize: wrapperspb.Int64(int64(maxVolume)),
+	}, nil
 }
 
 // ControllerGetCapabilities advertises what the controller plugin does:

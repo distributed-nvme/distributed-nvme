@@ -9,6 +9,8 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
 const (
@@ -101,6 +103,12 @@ func TestCreateVolumeMakesTheFourObjects(t *testing.T) {
 		p.req.GetBdevConf().GetRedundConf().GetRedundMdRaid1() == nil {
 		t.Errorf("pool shape %v", p.req)
 	}
+	// dnv's default auto-grow mark, whatever the cluster stores.
+	if got := p.req.GetBdevConf().GetDmPoolConf().GetLowWaterMarkPct(); got !=
+		common.DefaultPoolLowWatermarkPct {
+		t.Errorf("low-water mark %d, want dnv's default %d", got,
+			common.DefaultPoolLowWatermarkPct)
+	}
 	// One eighth of 10 GiB is 1.25 GiB, which is 20 extents of 64 MiB.
 	if p.req.GetInitExtCnt() != 20 {
 		t.Errorf("init_ext_cnt %d, want 20", p.req.GetInitExtCnt())
@@ -147,6 +155,16 @@ func TestCreateVolumeIsRepeatable(t *testing.T) {
 	}
 	_, err = c.CreateVolume(ctx, createReq(testVolume, 20*gib))
 	wantCode(t, err, codes.AlreadyExists, "another size")
+	// A namespace at index one that is not the volume's.
+	ss := g.pool(fakeClusterOne, testVolume).ss[subsystemNqnOf(testVolume)]
+	g.mu.Lock()
+	namespaceOf(ss).DevUuid = "00000000-0000-0000-0000-000000000001"
+	g.mu.Unlock()
+	_, err = c.CreateVolume(ctx, createReq(testVolume, 10*gib))
+	wantCode(t, err, codes.AlreadyExists, "a namespace that is not the volume's")
+	g.mu.Lock()
+	namespaceOf(ss).DevUuid = namespaceUuidOf(testVolume)
+	g.mu.Unlock()
 
 	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{
 		VolumeId: first.GetVolume().GetVolumeId(),
@@ -157,6 +175,42 @@ func TestCreateVolumeIsRepeatable(t *testing.T) {
 	g.drain(fakeClusterOne, testVolume)
 	_, err = c.CreateVolume(ctx, createReq(testVolume, 10*gib))
 	wantCode(t, err, codes.OK, "create after the drain")
+}
+
+// TestCreateVolumeCompletesAHalfMadeVolume pins the repeat of csi.md CSI9:
+// a create that stopped after any of its first three objects is repeated
+// and makes only what is missing, with the reply a clean create gives.
+func TestCreateVolumeCompletesAHalfMadeVolume(t *testing.T) {
+	for _, step := range []string{"CreateThinDevice", "CreateSubsystem", "CreateNamespace"} {
+		t.Run(step, func(t *testing.T) {
+			c, g := newTestController(t)
+			ctx := t.Context()
+			g.mu.Lock()
+			g.fail[step] = codes.Unavailable
+			g.mu.Unlock()
+			_, err := c.CreateVolume(ctx, createReq(testVolume, 10*gib))
+			wantCode(t, err, codes.Unavailable, "a create that stops at "+step)
+			g.mu.Lock()
+			delete(g.fail, step)
+			g.mu.Unlock()
+			reply, err := c.CreateVolume(ctx, createReq(testVolume, 10*gib))
+			wantCode(t, err, codes.OK, "the repeated create")
+			if reply.GetVolume().GetVolumeId() != fakeClusterOne+"/"+testVolume ||
+				reply.GetVolume().GetCapacityBytes() != 10*gib {
+				t.Errorf("reply %v", reply)
+			}
+			p := g.pool(fakeClusterOne, testVolume)
+			ss := p.ss[subsystemNqnOf(testVolume)]
+			if len(p.tds) != 1 || len(p.ss) != 1 || ss == nil || len(ss.GetNsList()) != 1 {
+				t.Fatalf("thin devices %d, subsystems %d, subsystem %v",
+					len(p.tds), len(p.ss), ss)
+			}
+			if ns := namespaceOf(ss); ns.GetTdId() != p.tds[testVolume].GetTdId() ||
+				ns.GetDevUuid() != namespaceUuidOf(testVolume) {
+				t.Errorf("namespace %v", ns)
+			}
+		})
+	}
 }
 
 // TestCreateVolumeRefuses pins every refusal of a create.
@@ -426,9 +480,10 @@ func TestGetCapacity(t *testing.T) {
 	if reply.GetAvailableCapacity() != wantAvail {
 		t.Errorf("available %d, want %d", reply.GetAvailableCapacity(), wantAvail)
 	}
-	// The second-largest disk node holds 1000 extents; less the meta
-	// group's one, times 8, is above the available bytes, so the largest
-	// volume is the available bytes.
+	// The second-largest disk node holds 1000 extents and the
+	// second-largest controller node 900, less the meta group's one; times
+	// 8 either is above the available bytes, so the largest volume is the
+	// available bytes.
 	if reply.GetMaximumVolumeSize().GetValue() != wantAvail {
 		t.Errorf("maximum volume %d, want %d",
 			reply.GetMaximumVolumeSize().GetValue(), wantAvail)
@@ -445,15 +500,11 @@ func TestGetCapacity(t *testing.T) {
 	g.mu.Unlock()
 	reply, err = c.GetCapacity(ctx, req)
 	wantCode(t, err, codes.OK, "capacity with nodes dropped")
-	// Two disk nodes are left, with 10 and 1000 free: 1010 x 64 MiB / 2.
-	if want := int64(1010 * fakeExtent / 2); reply.GetAvailableCapacity() != want {
-		t.Errorf("available %d, want %d", reply.GetAvailableCapacity(), want)
-	}
-	// The second-largest is the one with 10 free: (10 - 1) x 64 MiB x 8,
-	// below the available bytes.
-	if want := int64(9 * fakeExtent * volumeSteps); reply.GetMaximumVolumeSize().GetValue() != want {
-		t.Errorf("maximum volume %d, want %d",
-			reply.GetMaximumVolumeSize().GetValue(), want)
+	// Two disk nodes are left, and a RAID1 pool takes four: nothing, with a
+	// largest volume of zero that is set, not left out.
+	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize() == nil ||
+		reply.GetMaximumVolumeSize().GetValue() != 0 {
+		t.Errorf("RAID1 over two disk nodes answers %v, want zero and zero", reply)
 	}
 
 	none := &csi.GetCapacityRequest{Parameters: map[string]string{
@@ -461,9 +512,12 @@ func TestGetCapacity(t *testing.T) {
 	}}
 	reply, err = c.GetCapacity(ctx, none)
 	wantCode(t, err, codes.OK, "capacity without redundancy")
-	if want := int64(1010 * fakeExtent); reply.GetAvailableCapacity() != want {
-		t.Errorf("available %d without redundancy, want %d",
-			reply.GetAvailableCapacity(), want)
+	// A pool without redundancy takes two disk nodes, with 10 and 1000
+	// free.
+	if want := int64(1010 * fakeExtent); reply.GetAvailableCapacity() != want ||
+		reply.GetMaximumVolumeSize().GetValue() != want {
+		t.Errorf("without redundancy: available %d, maximum %d, want %d",
+			reply.GetAvailableCapacity(), reply.GetMaximumVolumeSize().GetValue(), want)
 	}
 	_, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{Parameters: map[string]string{
 		"pool": "sp0",
@@ -476,8 +530,9 @@ func TestGetCapacity(t *testing.T) {
 		paramCluster: "nowhere",
 	}})
 	wantCode(t, err, codes.OK, "a cluster that does not exist")
-	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize() != nil {
-		t.Errorf("a cluster that does not exist answers %v, want nothing free", reply)
+	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize() == nil ||
+		reply.GetMaximumVolumeSize().GetValue() != 0 {
+		t.Errorf("a cluster that does not exist answers %v, want zero and zero", reply)
 	}
 	_, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{})
 	wantCode(t, err, codes.OK, "no parameters at all")
