@@ -2,6 +2,7 @@ package csi
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -156,14 +157,29 @@ func (n *node) NodeStageVolume(
 	}
 	dev, err := n.host.waitDevice(ctx, pc.uuid, remaining)
 	if err != nil {
+		// UNAVAILABLE: the kubelet stages the volume again or unstages it.
 		return nil, err
 	}
 	n.follow.trigger()
+	if err := n.stageDevice(ctx, staging, cap, dev); err != nil {
+		n.forgetFailedStage(ctx, staging, pc.nqn, err)
+		return nil, err
+	}
+	return &csi.NodeStageVolumeResponse{}, nil
+}
 
+// stageDevice formats a blank device of a filesystem volume and mounts it
+// at the staging path; a block volume is published straight from the
+// device.
+func (n *node) stageDevice(
+	ctx context.Context,
+	staging string,
+	cap *csi.VolumeCapability,
+	dev string,
+) error {
 	mnt, ok := cap.GetAccessType().(*csi.VolumeCapability_Mount)
 	if !ok {
-		// A block volume is published straight from the device.
-		return &csi.NodeStageVolumeResponse{}, nil
+		return nil
 	}
 	fsType := mnt.Mount.GetFsType()
 	if fsType == "" {
@@ -171,37 +187,63 @@ func (n *node) NodeStageVolume(
 	}
 	entry, err := n.mnt.mountAt(ctx, staging)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
 	if entry != nil {
 		if entry.fsType != fsType {
-			return nil, status.Errorf(codes.AlreadyExists,
+			return status.Errorf(codes.AlreadyExists,
 				"%s is staged with %s, not %s", staging, entry.fsType, fsType)
 		}
-		return &csi.NodeStageVolumeResponse{}, nil
+		return nil
 	}
-	existing, err := n.mnt.fsType(ctx, dev)
+	existing, ptType, err := n.mnt.probe(ctx, dev)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
-	switch existing {
-	case "":
+	switch {
+	case existing == "" && ptType != "":
+		return status.Errorf(codes.FailedPrecondition,
+			"the device of the volume carries a %s partition table and no "+
+				"filesystem; the driver never formats over it", ptType)
+	case existing == "":
 		if err := n.mnt.mkfs(ctx, fsType, dev); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return status.Error(codes.Internal, err.Error())
 		}
-	case fsType:
+	case existing == fsType:
 	default:
-		return nil, status.Errorf(codes.FailedPrecondition,
+		return status.Errorf(codes.FailedPrecondition,
 			"the device of the volume carries %s, not %s; the driver never "+
 				"reformats", existing, fsType)
 	}
 	if err := n.mnt.mkdir(ctx, staging); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
 	if err := n.mnt.mount(ctx, dev, staging, fsType, mnt.Mount.GetMountFlags()); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
-	return &csi.NodeStageVolumeResponse{}, nil
+	return nil
+}
+
+// forgetFailedStage undoes the follower's part of a stage that failed for
+// good (csi.md CSI16): the kubelet never unstages a volume whose stage
+// answered a final code, so the subsystem leaves the staged set here, its
+// paths with it. A code the kubelet retries keeps it, and so does a mount
+// at the staging path, which an earlier stage made; a mount table that
+// cannot be read keeps it too.
+func (n *node) forgetFailedStage(ctx context.Context, staging string, nqn string, err error) {
+	switch status.Code(err) {
+	case codes.Unavailable, codes.Canceled, codes.DeadlineExceeded,
+		codes.ResourceExhausted, codes.Aborted:
+		return
+	}
+	entry, merr := n.mnt.mountAt(ctx, staging)
+	if merr != nil || entry != nil {
+		return
+	}
+	if uerr := n.follow.unstage(ctx, nqn); uerr != nil {
+		slog.WarnContext(ctx, msgFollowerSyncError,
+			slog.String("nqn", nqn), slog.String("error", uerr.Error()))
+	}
 }
 
 // NodeUnstageVolume unmounts the staging path, drops every path to the

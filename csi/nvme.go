@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"path"
 	"strings"
 	"time"
@@ -91,25 +92,29 @@ type nvmeHost struct {
 }
 
 // ctrl is one controller of the node as sysfs shows it: its device name,
-// the subsystem it belongs to, the address of the cntlr it reaches and its
-// state.
+// the subsystem it belongs to, the address of the cntlr it reaches, its
+// state and the host NQN it was made under, empty for a controller that is
+// not over a fabric.
 type ctrl struct {
 	name    string
 	subNqn  string
 	trAddr  string
 	trSvcId string
 	state   string
+	hostNqn string
 }
 
-// key is a cntlr's address as the discovery log and sysfs name it.
+// key is a cntlr's address as the discovery log and sysfs name it, in the
+// form an endpoint is written in.
 func (c ctrl) key() string {
-	return c.trAddr + ":" + c.trSvcId
+	return net.JoinHostPort(c.trAddr, c.trSvcId)
 }
 
 // controllers lists the node's NVMe controllers from sysfs: every
-// nvme<N> directory with the three attributes the follower reads. A
-// controller that vanishes between the listing and the read is skipped; a
-// controller that cannot be read otherwise is an error.
+// nvme<N> directory with the three attributes the follower reads, and its
+// host NQN where it has one. A controller that vanishes between the listing
+// and the read is skipped; a controller that cannot be read otherwise is an
+// error.
 func (h *nvmeHost) controllers(ctx context.Context) ([]ctrl, error) {
 	names, err := h.oc.ReadDir(ctx, sysClassNvme)
 	if err != nil {
@@ -127,16 +132,21 @@ func (h *nvmeHost) controllers(ctx context.Context) ([]ctrl, error) {
 		c := ctrl{name: name}
 		var missing bool
 		for _, attr := range []struct {
-			file string
-			dst  *string
+			file     string
+			dst      *string
+			optional bool
 		}{
-			{"subsysnqn", &c.subNqn},
-			{"address", nil},
-			{"state", &c.state},
+			{"subsysnqn", &c.subNqn, false},
+			{"address", nil, false},
+			{"state", &c.state, false},
+			{"hostnqn", &c.hostNqn, true},
 		} {
 			data, err := h.oc.ReadFile(ctx, path.Join(dir, attr.file))
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
+					if attr.optional {
+						continue
+					}
 					missing = true
 					break
 				}
@@ -226,15 +236,17 @@ type endpoint struct {
 	trSvcId string
 }
 
-func (e endpoint) String() string { return e.trAddr + ":" + e.trSvcId }
+// String writes an endpoint as ip:port, an IPv6 address in brackets.
+func (e endpoint) String() string { return net.JoinHostPort(e.trAddr, e.trSvcId) }
 
-// parseEndpoint reads an ip:port.
+// parseEndpoint reads an ip:port, an IPv6 address in brackets, which it
+// strips: nvme-cli and sysfs carry the bare address.
 func parseEndpoint(s string) (endpoint, error) {
-	idx := strings.LastIndex(s, ":")
-	if idx <= 0 || idx == len(s)-1 {
+	host, port, err := net.SplitHostPort(s)
+	if err != nil || host == "" || port == "" {
 		return endpoint{}, fmt.Errorf("%q is not ip:port", s)
 	}
-	return endpoint{trAddr: s[:idx], trSvcId: s[idx+1:]}, nil
+	return endpoint{trAddr: host, trSvcId: port}, nil
 }
 
 // logEntry is one entry of a discovery log: a subsystem a cntlr exports to

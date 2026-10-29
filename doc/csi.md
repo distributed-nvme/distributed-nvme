@@ -68,8 +68,9 @@ daemon (`architecture.md`, Components: invocation reference). The controller
 plugin takes the socket to serve (`--csi-address`), the gateway's address
 (`--gateway-address`), the cdc addresses it hands to the node plugin at
 attach (`--cdc-addresses`) and the bound on one gateway call
-(`--gateway-timeout`); a cdc address is an IP literal and a port, since the
-node connects to it as the kernel's discovery address. The identity service
+(`--gateway-timeout`); a cdc address is an IP literal and a port, an IPv6
+address in brackets, since the node connects to it as the kernel's
+discovery address. The identity service
 reports the driver's name and version and advertises the controller service
 and the accessibility constraints (CSI13) from both plugins, since a
 capability describes the driver, not the process that answers: the
@@ -224,25 +225,38 @@ cntlr the node has no path to and drops, by controller, a path to a cntlr
 no cdc lists any more, which is the node's part of the failover contract
 (`architecture.md`, Host view). The triggers are a stage, the kernel's
 device events, read off its event socket, among them the
-discovery-log-change notification, and a timer as the safety net. A cdc
-whose log cannot be read holds every drop off: an answer that is missing is
-not an answer that the cntlr is gone. After a restart the plugin reads its
-state back from sysfs: the subsystems of the driver's NQN prefix are
-staged, and the discovery connections name the cdcs. It touches no path of
-a subsystem that is not its own.
+discovery-log-change notification, and a timer as the safety net. A stage,
+an unstage, a pass and the stop's drop run one at a time, so an unstage
+that empties the set never forgets the cdcs under a stage of another
+volume. A cdc that cannot be reached, or whose log cannot be read, holds
+every drop off and leaves the connects to the others, since twins exist so
+that one can be down; a pass that read no log drops nothing: an answer that
+is missing is not an answer that the cntlr is gone. The plugin's discovery
+connections are those under the node's host NQN to a cdc it knows, and it
+uses and drops no other. After a restart the plugin reads its state back
+from sysfs: the subsystems of the driver's NQN prefix are staged, and a
+discovery connection under the node's host NQN whose log lists a subsystem
+of the driver names a cdc; one whose log cannot be read yet is read again
+on every pass and holds no drop off, since it may be another tool's. A
+connection another tool made to the same cdc under the same host NQN cannot
+be told apart from the plugin's. It touches no path of a subsystem that is
+not its own.
 
 CSI16. **Nothing staged, nothing connected.** The last unstage drops the
 subsystem's paths and the persistent discovery connections with them, and
 so does a stop of the plugin with nothing staged; a stop with volumes staged
 leaves every connection in place, since the data path must outlive the
-plugin's pod.
+plugin's pod. A stage that fails with a code the kubelet does not retry
+leaves the set at once, with its paths, since the kubelet never unstages
+it; a mount at the staging path, which an earlier stage made, keeps it.
 
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
-stage of a filesystem volume reads the device's filesystem: a blank device
-is formatted with the capability's filesystem, ext4 when none is named, a
-device that carries that filesystem is mounted as it is, and a device that
-carries another is FAILED_PRECONDITION, since reformatting would destroy
-data; a block volume is never formatted or mounted at stage. Publish
+stage of a filesystem volume reads the device's filesystem and partition
+table straight from the device: a blank device is formatted with the
+capability's filesystem, ext4 when none is named, a device that carries
+that filesystem is mounted as it is, and a device that carries another, or
+a partition table and no filesystem, is FAILED_PRECONDITION, since
+formatting it would destroy data; a block volume is never formatted or mounted at stage. Publish
 bind-mounts the staging path at the target, read-only when asked, and for a
 block volume makes a file at the target and bind-mounts the device node
 onto it. Unpublish unmounts the target and removes it, a directory with a
@@ -269,7 +283,9 @@ made it, so a connect from a pod's own namespace would die with the pod.
 The kubelet's pod and plugin directories are mounted both ways, so the
 mounts the plugin makes reach the host and the pods; the device and sysfs
 trees give the plugin the volumes' devices and the controllers' state; the
-host's nvme directory, read-only, gives it the node's identity. The
+host's nvme directory, read-only, gives it the node's identity, and is made
+empty where it is absent, so that the plugin starts and its own refusal
+names the missing files (CSI13). The
 registrar sidecar announces the socket to the kubelet, and the liveness
 probe sidecar answers the kubelet's health checks for both plugins.
 

@@ -106,19 +106,30 @@ func (m *mounter) mountAt(ctx context.Context, target string) (*mountEntry, erro
 	return nil, nil
 }
 
-// fsType reads the filesystem a device carries: empty for a blank device.
-func (m *mounter) fsType(ctx context.Context, dev string) (string, error) {
+// probe reads what a device carries, straight from the device: its
+// filesystem and its partition table, both empty for a blank device.
+func (m *mounter) probe(ctx context.Context, dev string) (string, string, error) {
 	stdout, stderr, code, err := m.oc.RunCommand(ctx, "blkid",
-		[]string{"-o", "value", "-s", "TYPE", dev}, "")
+		[]string{"-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", dev}, "")
 	if err != nil {
 		// blkid answers 2 with nothing on stdout for a device with no
 		// recognizable content: a blank device.
 		if code == 2 && strings.TrimSpace(stdout) == "" {
-			return "", nil
+			return "", "", nil
 		}
-		return "", fmt.Errorf("blkid %s: %w: %s", dev, err, strings.TrimSpace(stderr))
+		return "", "", fmt.Errorf("blkid %s: %w: %s", dev, err, strings.TrimSpace(stderr))
 	}
-	return strings.TrimSpace(stdout), nil
+	var fsType, ptType string
+	for _, line := range strings.Split(stdout, "\n") {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
+		switch key {
+		case "TYPE":
+			fsType = value
+		case "PTTYPE":
+			ptType = value
+		}
+	}
+	return fsType, ptType, nil
 }
 
 // mkfs formats a blank device with the one of the two filesystems named.

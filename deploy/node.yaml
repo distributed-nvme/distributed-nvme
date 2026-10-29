@@ -3,7 +3,9 @@
 # network namespace of the process that made it. The kubelet's directories
 # are mounted both ways so the mounts the plugin makes reach the host and the
 # pods; the device and sysfs trees give it the volumes' devices and the
-# controllers' state; the host's nvme directory gives it the node's identity.
+# controllers' state; the host's nvme directory gives it the node's identity,
+# made empty where it is absent so that the plugin's own refusal names the
+# missing files.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -102,4 +104,4 @@ spec:
         - name: nvme-etc
           hostPath:
             path: /etc/nvme
-            type: Directory
+            type: DirectoryOrCreate

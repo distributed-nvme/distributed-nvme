@@ -36,12 +36,18 @@ type fakeNode struct {
 	uuidOf   map[string]string     // subsystem NQN -> namespace uuid, for the link
 	mounts   []mountEntry          // the mount table
 	fsOf     map[string]string     // blkid's answer per device
+	ptOf     map[string]string     // blkid's partition table per device
 	logs     map[string][]logEntry // discovery log per cdc endpoint
 	logFail  map[string]bool       // cdcs whose log read fails
+	discFail map[string]bool       // cdcs a discovery connect fails to
 	refuse   map[string]int        // endpoint -> connects still refused
 	sizes    map[string]uint64     // blockdev --getsize64 per device
+	mountErr bool                  // a mount of a device fails
 	calls    []string              // every command, joined
 	statLine string                // stat -f's answer
+	// onCommand, when set, runs before every command, outside the lock,
+	// so a test can act in the middle of an operation.
+	onCommand func(name string, args []string)
 }
 
 const (
@@ -63,8 +69,10 @@ func newFakeNode() *fakeNode {
 		links:    map[string]bool{},
 		uuidOf:   map[string]string{},
 		fsOf:     map[string]string{},
+		ptOf:     map[string]string{},
 		logs:     map[string][]logEntry{},
 		logFail:  map[string]bool{},
+		discFail: map[string]bool{},
 		refuse:   map[string]int{},
 		sizes:    map[string]uint64{},
 		statLine: "4096 1000 500 400 100 50",
@@ -72,13 +80,19 @@ func newFakeNode() *fakeNode {
 	return f
 }
 
-// addCtrl plants a controller; a path to a subsystem with a known uuid also
-// makes the device link appear, as a live optimized path does.
+// addCtrl plants a controller under the node's host NQN; a path to a
+// subsystem with a known uuid also makes the device link appear, as a live
+// optimized path does.
 func (f *fakeNode) addCtrl(subNqn string, ep endpoint) string {
+	return f.addCtrlAs(subNqn, ep, testNodeA)
+}
+
+// addCtrlAs plants a controller made under a given host NQN.
+func (f *fakeNode) addCtrlAs(subNqn string, ep endpoint, hostNqn string) string {
 	name := fmt.Sprintf("nvme%d", f.nextCtrl)
 	f.nextCtrl++
 	f.ctrls[name] = ctrl{name: name, subNqn: subNqn, trAddr: ep.trAddr,
-		trSvcId: ep.trSvcId, state: "live"}
+		trSvcId: ep.trSvcId, state: "live", hostNqn: hostNqn}
 	if uuid, ok := f.uuidOf[subNqn]; ok {
 		f.links[devicePath(uuid)] = true
 	}
@@ -192,6 +206,10 @@ func (f *fakeNode) client() common.OsClient {
 						",src_addr=10.0.0.193\n", nil
 				case "state":
 					return c.state + "\n", nil
+				case "hostnqn":
+					if c.hostNqn != "" {
+						return c.hostNqn + "\n", nil
+					}
 				}
 				return "", notExist(path)
 			}
@@ -238,6 +256,9 @@ func (f *fakeNode) client() common.OsClient {
 func (f *fakeNode) runCommand(
 	ctx context.Context, name string, args []string, stdin string,
 ) (string, string, int, error) {
+	if f.onCommand != nil {
+		f.onCommand(name, args)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
@@ -289,7 +310,10 @@ func (f *fakeNode) runCommand(
 				return string(doc), "", 0, nil
 			}
 			ep := endpoint{trAddr: argument(args, "-a"), trSvcId: argument(args, "-s")}
-			f.addCtrl(common.NvmeDiscoveryNqn, ep)
+			if f.discFail[ep.String()] {
+				return fail(1, "Failed to write to /dev/nvme-fabrics: Connection refused")
+			}
+			f.addCtrlAs(common.NvmeDiscoveryNqn, ep, argument(args, "--hostnqn"))
 			return "", "", 0, nil
 		case "disconnect":
 			if dev := argument(args, "-d"); dev != "" {
@@ -306,10 +330,17 @@ func (f *fakeNode) runCommand(
 		}
 	case "blkid":
 		dev := args[len(args)-1]
-		if fs, ok := f.fsOf[dev]; ok && fs != "" {
-			return fs + "\n", "", 0, nil
+		var out string
+		if fs := f.fsOf[dev]; fs != "" {
+			out += "TYPE=" + fs + "\n"
 		}
-		return fail(2, "")
+		if pt := f.ptOf[dev]; pt != "" {
+			out += "PTTYPE=" + pt + "\n"
+		}
+		if out == "" {
+			return fail(2, "")
+		}
+		return "DEVNAME=" + dev + "\n" + out, "", 0, nil
 	case "mkfs.ext4", "mkfs.xfs":
 		f.fsOf[args[len(args)-1]] = strings.TrimPrefix(name, "mkfs.")
 		return "", "", 0, nil
@@ -321,6 +352,8 @@ func (f *fakeNode) runCommand(
 		case args[0] == "--bind":
 			f.mounts = append(f.mounts, mountEntry{target: args[2], source: args[1], fsType: "bind"})
 		case args[0] == "-o" && strings.HasPrefix(args[1], "remount"):
+		case f.mountErr:
+			return fail(32, "mount: wrong fs type, bad option")
 		default:
 			f.mounts = append(f.mounts, mountEntry{
 				target: args[len(args)-1], source: args[len(args)-2],
@@ -504,6 +537,14 @@ func TestNodeStageRefuses(t *testing.T) {
 	wantCode(t, err, codes.FailedPrecondition, "a device with another filesystem")
 	if f.count("mkfs") != 0 {
 		t.Error("a device with a filesystem was reformatted")
+	}
+	// The device carries a partition table and no filesystem: not blank.
+	f.fsOf[devicePath(namespaceUuidOf(testVolume))] = ""
+	f.ptOf[devicePath(namespaceUuidOf(testVolume))] = "gpt"
+	_, err = n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.FailedPrecondition, "a device with a partition table")
+	if f.count("mkfs") != 0 {
+		t.Error("a device with a partition table was formatted")
 	}
 	// No cdc lists the volume: the link never comes.
 	f.logs[fakeCdcA] = nil
@@ -699,16 +740,34 @@ func TestFollowerFollowsTheCdc(t *testing.T) {
 	}
 }
 
-// TestFollowerRecovers pins the restart: the staged subsystems and the cdcs
-// are read back from sysfs, the subsystems of another prefix left alone.
+// TestFollowerRecovers pins the restart (csi.md CSI15): the staged
+// subsystems are read back from sysfs, and a discovery connection is the
+// follower's when it is under the node's host NQN and its log lists a
+// subsystem of the driver; one whose log cannot be read yet is read again
+// on every sync. Another tool's connections are neither used nor dropped.
 func TestFollowerRecovers(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
 	nqn := subsystemNqnOf(testVolume)
+	const (
+		foreignCdc = "10.0.0.9:8009"  // another storage's discovery service
+		lateCdc    = "10.0.0.10:8009" // the driver's, unreadable at the start
+	)
+	foreignNqn := "nqn.2024-01.io.dnv-it:e2e:ss0"
 	f.mu.Lock()
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcB))
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(foreignCdc))
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(lateCdc))
+	f.addCtrlAs(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA), testNodeB)
 	f.addCtrl(nqn, mustEndpoint(fakeCn0))
-	f.addCtrl("nqn.2024-01.io.dnv-it:e2e:ss0", mustEndpoint(fakeCn1))
+	f.addCtrl(foreignNqn, mustEndpoint(fakeCn1))
+	f.logs[fakeCdcB] = []logEntry{
+		{subNqn: nqn, ep: mustEndpoint(fakeCn0)},
+		{subNqn: nqn, ep: mustEndpoint(fakeCn2)},
+	}
+	f.logs[foreignCdc] = []logEntry{{subNqn: foreignNqn, ep: mustEndpoint(fakeCn1)}}
+	f.logs[lateCdc] = f.logs[fakeCdcB]
+	f.logFail[lateCdc] = true
 	f.mu.Unlock()
 	if err := n.follow.recover(ctx); err != nil {
 		t.Fatal(err)
@@ -717,23 +776,204 @@ func TestFollowerRecovers(t *testing.T) {
 		t.Errorf("staged %v, want the driver's subsystem alone", n.follow.staged)
 	}
 	if _, ok := n.follow.cdcs[fakeCdcB]; !ok || len(n.follow.cdcs) != 1 {
-		t.Errorf("cdcs %v, want the discovery connection's", n.follow.cdcs)
+		t.Errorf("cdcs %v, want the one whose log lists the driver's subsystem",
+			n.follow.cdcs)
 	}
-	// The recovered follower syncs from the second cdc's log.
-	f.mu.Lock()
-	f.logs[fakeCdcB] = []logEntry{
-		{subNqn: nqn, ep: mustEndpoint(fakeCn0)},
-		{subNqn: nqn, ep: mustEndpoint(fakeCn2)},
+	if _, ok := n.follow.pending[lateCdc]; !ok || len(n.follow.pending) != 1 {
+		t.Errorf("pending %v, want the unreadable one", n.follow.pending)
 	}
-	f.mu.Unlock()
+	// The recovered follower syncs from the second cdc's log; the waiting
+	// connection holds no drop off.
 	if err := n.follow.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0+" "+fakeCn2 {
 		t.Errorf("paths %v after the recovered sync", got)
 	}
-	if got := f.paths("nqn.2024-01.io.dnv-it:e2e:ss0"); len(got) != 1 {
+	if got := f.paths(foreignNqn); len(got) != 1 {
 		t.Errorf("the foreign subsystem's path was touched: %v", got)
+	}
+	// Once its log answers, the waiting connection is a cdc.
+	f.mu.Lock()
+	f.logFail[lateCdc] = false
+	f.mu.Unlock()
+	if err := n.follow.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := n.follow.cdcs[lateCdc]; !ok || len(n.follow.pending) != 0 {
+		t.Errorf("cdcs %v, pending %v: the late cdc was not adopted",
+			n.follow.cdcs, n.follow.pending)
+	}
+	// The last unstage drops the follower's discovery connections and
+	// leaves the other tool's and the other host NQN's.
+	if err := n.follow.unstage(ctx, nqn); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.paths(common.NvmeDiscoveryNqn); strings.Join(got, " ") !=
+		fakeCdcA+" "+foreignCdc {
+		t.Errorf("discovery connections %v after the unstage, want the "+
+			"foreign one and the other host's", got)
+	}
+}
+
+// TestFollowerHoldsDropsWithoutAnswer pins the rule that a sync hearing from
+// no cdc drops nothing (csi.md CSI15): a restart that finds a volume's paths
+// and no discovery connection, and a known cdc that cannot be reached, both
+// leave every path in place.
+func TestFollowerHoldsDropsWithoutAnswer(t *testing.T) {
+	n, f := newTestNode(t)
+	ctx := t.Context()
+	nqn := subsystemNqnOf(testVolume)
+	f.mu.Lock()
+	f.addCtrl(nqn, mustEndpoint(fakeCn0))
+	f.addCtrl(nqn, mustEndpoint(fakeCn1))
+	f.mu.Unlock()
+	if err := n.follow.recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.follow.cdcs) != 0 {
+		t.Fatalf("cdcs %v, want none", n.follow.cdcs)
+	}
+	_ = n.follow.sync(ctx)
+	if got := f.paths(nqn); len(got) != 2 {
+		t.Errorf("paths %v after a sync with no cdc, want both kept", got)
+	}
+	// The only cdc cannot be reached: still nothing heard.
+	f.mu.Lock()
+	f.discFail[fakeCdcA] = true
+	f.logs[fakeCdcA] = nil
+	f.mu.Unlock()
+	n.follow.mu.Lock()
+	n.follow.cdcs[fakeCdcA] = mustEndpoint(fakeCdcA)
+	n.follow.mu.Unlock()
+	if err := n.follow.sync(ctx); err == nil {
+		t.Error("a sync that reached no cdc answered no error")
+	}
+	if got := f.paths(nqn); len(got) != 2 {
+		t.Errorf("paths %v after a sync that reached no cdc, want both kept", got)
+	}
+}
+
+// TestFollowerUnstageRacesStage pins the one-at-a-time rule of csi.md
+// CSI15: the last unstage of one volume, with a stage of another volume
+// arriving while it drops the discovery connection, leaves the new volume
+// followed, with its paths and its discovery connection.
+func TestFollowerUnstageRacesStage(t *testing.T) {
+	n, f := newTestNode(t)
+	ctx := t.Context()
+	const other = "pvc-other"
+	otherNqn := subsystemNqnOf(other)
+	f.mu.Lock()
+	f.uuidOf[otherNqn] = namespaceUuidOf(other)
+	f.logs[fakeCdcA] = append(f.logs[fakeCdcA],
+		logEntry{subNqn: otherNqn, ep: mustEndpoint(fakeCn0)},
+		logEntry{subNqn: otherNqn, ep: mustEndpoint(fakeCn1)})
+	f.mu.Unlock()
+	req := stageReq(blockCap(rwo))
+	_, err := n.NodeStageVolume(ctx, req)
+	wantCode(t, err, codes.OK, "stage")
+
+	otherReq := stageReq(blockCap(rwo))
+	otherReq.VolumeId = fakeClusterOne + "/" + other
+	otherReq.PublishContext[ctxNqn] = otherNqn
+	otherReq.PublishContext[ctxUuid] = namespaceUuidOf(other)
+	done := make(chan error, 1)
+	var once sync.Once
+	f.onCommand = func(name string, args []string) {
+		if name != nvmeBin || args[0] != "disconnect" || argument(args, "-d") == "" {
+			return
+		}
+		once.Do(func() {
+			go func() {
+				_, err := n.NodeStageVolume(ctx, otherReq)
+				done <- err
+			}()
+			// The window the stage would have run in.
+			time.Sleep(200 * time.Millisecond)
+		})
+	}
+	_, err = n.NodeUnstageVolume(ctx, &csi.NodeUnstageVolumeRequest{
+		VolumeId: req.GetVolumeId(), StagingTargetPath: req.GetStagingTargetPath(),
+	})
+	wantCode(t, err, codes.OK, "unstage")
+	wantCode(t, <-done, codes.OK, "the stage that raced the unstage")
+	if err := n.follow.sync(ctx); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := f.paths(otherNqn); len(got) != 2 {
+		t.Errorf("paths %v of the new volume, want both cntlrs", got)
+	}
+	if got := f.paths(common.NvmeDiscoveryNqn); strings.Join(got, " ") != fakeCdcA {
+		t.Errorf("discovery connections %v, want the cdc", got)
+	}
+	if _, ok := n.follow.cdcs[fakeCdcA]; !ok {
+		t.Errorf("cdcs %v: the new volume is not followed", n.follow.cdcs)
+	}
+}
+
+// TestFollowerOneCdcDown pins csi.md CSI15 for cdc twins: a cdc that cannot
+// be reached leaves the connects to the other and holds the drops off until
+// it answers again.
+func TestFollowerOneCdcDown(t *testing.T) {
+	n, f := newTestNode(t)
+	ctx := t.Context()
+	nqn := subsystemNqnOf(testVolume)
+	f.mu.Lock()
+	f.logs[fakeCdcB] = f.logs[fakeCdcA]
+	f.discFail[fakeCdcB] = true
+	f.mu.Unlock()
+	req := stageReq(blockCap(rwo))
+	req.PublishContext[ctxCdc] = fakeCdcA + "," + fakeCdcB
+	_, err := n.NodeStageVolume(ctx, req)
+	wantCode(t, err, codes.OK, "stage with one cdc down")
+	if got := f.paths(nqn); len(got) != 2 {
+		t.Errorf("paths %v with one cdc down, want both cntlrs", got)
+	}
+	// A failover the reachable cdc shows: cn1 is withdrawn, but the other
+	// cdc has not answered, so the path stays.
+	f.mu.Lock()
+	f.logs[fakeCdcA] = []logEntry{{subNqn: nqn, ep: mustEndpoint(fakeCn0)}}
+	f.mu.Unlock()
+	_ = n.follow.sync(ctx)
+	if got := f.paths(nqn); len(got) != 2 {
+		t.Errorf("paths %v while a cdc is down, want both kept", got)
+	}
+	f.mu.Lock()
+	f.discFail[fakeCdcB] = false
+	f.logs[fakeCdcB] = f.logs[fakeCdcA]
+	f.mu.Unlock()
+	if err := n.follow.sync(ctx); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0 {
+		t.Errorf("paths %v once both cdcs answer, want cn0 alone", got)
+	}
+}
+
+// TestNodeStageForgetsAFailedStage pins csi.md CSI16: a stage that fails
+// for good with nothing mounted leaves no path and no discovery connection,
+// since the kubelet never unstages it; a failure over a volume an earlier
+// stage mounted keeps everything.
+func TestNodeStageForgetsAFailedStage(t *testing.T) {
+	n, f := newTestNode(t)
+	ctx := t.Context()
+	nqn := subsystemNqnOf(testVolume)
+	f.mountErr = true
+	_, err := n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.Internal, "a stage whose mount fails")
+	if len(n.follow.staged) != 0 || len(f.paths(nqn)) != 0 ||
+		len(f.paths(common.NvmeDiscoveryNqn)) != 0 {
+		t.Errorf("staged %v, paths %v, discovery %v after a failed stage",
+			n.follow.staged, f.paths(nqn), f.paths(common.NvmeDiscoveryNqn))
+	}
+	f.mountErr = false
+	_, err = n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.OK, "the stage once the mount works")
+	_, err = n.NodeStageVolume(ctx, stageReq(mountCap(fsXfs, rwo)))
+	wantCode(t, err, codes.AlreadyExists, "a stage over another filesystem's mount")
+	if !n.follow.staged[nqn] || len(f.paths(nqn)) != 2 {
+		t.Errorf("staged %v, paths %v: the mounted volume lost its paths",
+			n.follow.staged, f.paths(nqn))
 	}
 }
 
@@ -784,6 +1024,20 @@ func TestParsers(t *testing.T) {
 	addr, svc := parseAddress("traddr=10.0.0.125,trsvcid=4300,src_addr=10.0.0.193")
 	if addr != "10.0.0.125" || svc != "4300" {
 		t.Errorf("parseAddress = %q, %q", addr, svc)
+	}
+	// An IPv6 cdc address comes in brackets and goes to nvme-cli bare; the
+	// key of the controller sysfs shows for it is the same address.
+	ep, err := parseEndpoint("[fd00::10]:8009")
+	if err != nil || ep.trAddr != "fd00::10" || ep.trSvcId != "8009" {
+		t.Errorf("parseEndpoint of an IPv6 address = %+v, %v", ep, err)
+	}
+	addr, svc = parseAddress("traddr=fd00::10,trsvcid=8009,src_addr=fd00::193")
+	if c := (ctrl{trAddr: addr, trSvcId: svc}); c.key() != ep.String() ||
+		ep.String() != "[fd00::10]:8009" {
+		t.Errorf("the controller's key %q, the endpoint %q", c.key(), ep.String())
+	}
+	if _, err := parseEndpoint("fd00::10:8009"); err == nil {
+		t.Error("an IPv6 address without brackets was read as ip:port")
 	}
 	entries, err := parseDiscoveryLog(`{"device":"nvme0","genctr":3,"records":[
 		{"trtype":"tcp","adrfam":"ipv4","subtype":"nvme subsystem","treq":"not specified",
