@@ -41,35 +41,42 @@ type follower struct {
 	// no cdc, would drop that volume's paths.
 	mu     sync.Mutex
 	staged map[string]bool // subsystem NQN
-	cdcs   map[string]endpoint
-	// pending holds the discovery connections a restart found under the
-	// node's host NQN whose log could not be read yet: each sync reads them
-	// again, and none holds a drop off, since it may be another tool's.
-	pending map[string]endpoint
+	// cdcs are the cdcs the follower follows: the configured ones, known
+	// from the start, and those the attaches named.
+	cdcs map[string]endpoint
+	// conf are the configured cdcs, which a drop of the discovery
+	// connections leaves known.
+	conf map[string]endpoint
 
 	// kick asks the follower's loop for a sync; a kick that finds one
 	// pending is folded into it.
 	kick chan struct{}
 }
 
-func newFollower(host *nvmeHost, period time.Duration) *follower {
+func newFollower(host *nvmeHost, period time.Duration, conf []endpoint) *follower {
 	if period <= 0 {
 		period = DefaultSyncPeriod
 	}
-	return &follower{
-		host:    host,
-		period:  period,
-		staged:  map[string]bool{},
-		cdcs:    map[string]endpoint{},
-		pending: map[string]endpoint{},
-		kick:    make(chan struct{}, 1),
+	f := &follower{
+		host:   host,
+		period: period,
+		staged: map[string]bool{},
+		cdcs:   map[string]endpoint{},
+		conf:   map[string]endpoint{},
+		kick:   make(chan struct{}, 1),
 	}
+	for _, ep := range conf {
+		f.conf[ep.String()] = ep
+		f.cdcs[ep.String()] = ep
+	}
+	return f
 }
 
 // recover reads the follower's state back from sysfs after a start: the
-// subsystems of the driver's own NQN prefix are staged, and a discovery
-// connection under the node's host NQN whose log lists a subsystem of the
-// driver names a cdc.
+// subsystems of the driver's own NQN prefix are staged. Its discovery
+// connections are those to the configured cdcs, which it knows from the
+// start, so a cdc that cannot be read holds the drops off after a restart
+// as before one.
 func (f *follower) recover(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -78,67 +85,23 @@ func (f *follower) recover(ctx context.Context) error {
 		return err
 	}
 	for _, c := range ctrls {
-		switch {
-		case f.isNodeDiscovery(c):
-			f.pending[c.key()] = endpoint{trAddr: c.trAddr, trSvcId: c.trSvcId}
-		case strings.HasPrefix(c.subNqn, nqnPrefix):
+		if strings.HasPrefix(c.subNqn, nqnPrefix) {
 			f.staged[c.subNqn] = true
 		}
 	}
-	f.adoptLocked(ctx, ctrls)
 	return nil
 }
 
-// isNodeDiscovery reports whether a controller is a discovery connection
-// under the node's own host NQN; one under another host NQN is never the
-// follower's.
-func (f *follower) isNodeDiscovery(c ctrl) bool {
-	return c.subNqn == common.NvmeDiscoveryNqn && c.hostNqn == f.host.id.hostNqn
-}
-
 // ownsLocked reports whether a controller is one of the follower's
-// discovery connections: the node's, to a cdc the follower knows.
+// discovery connections: one under the node's host NQN, to a cdc the
+// follower knows; one under another host NQN or to another address is
+// another tool's.
 func (f *follower) ownsLocked(c ctrl) bool {
-	if !f.isNodeDiscovery(c) {
+	if c.subNqn != common.NvmeDiscoveryNqn || c.hostNqn != f.host.id.hostNqn {
 		return false
 	}
 	_, ok := f.cdcs[c.key()]
 	return ok
-}
-
-// adoptLocked reads the log of every discovery connection waiting in
-// pending: one whose log lists a subsystem of the driver names a cdc, one
-// whose log lists none is left alone, as another tool's, and one whose log
-// cannot be read waits for the next sync. A connection that is gone is
-// forgotten.
-func (f *follower) adoptLocked(ctx context.Context, ctrls []ctrl) {
-	if len(f.pending) == 0 {
-		return
-	}
-	names := map[string]string{} // endpoint -> controller name
-	for _, c := range ctrls {
-		if f.isNodeDiscovery(c) {
-			names[c.key()] = c.name
-		}
-	}
-	for key, ep := range f.pending {
-		name, ok := names[key]
-		if _, known := f.cdcs[key]; known || !ok {
-			delete(f.pending, key)
-			continue
-		}
-		entries, err := f.host.discoveryLog(ctx, name)
-		if err != nil {
-			continue
-		}
-		delete(f.pending, key)
-		for _, e := range entries {
-			if strings.HasPrefix(e.subNqn, nqnPrefix) {
-				f.cdcs[key] = ep
-				break
-			}
-		}
-	}
 }
 
 // stage adds a subsystem and its cdcs and syncs at once, so that the
@@ -184,7 +147,8 @@ func (f *follower) unstage(ctx context.Context, nqn string) error {
 }
 
 // dropDiscoveryLocked disconnects the follower's own discovery connections
-// and forgets the cdcs; a discovery connection of another tool stays.
+// and forgets the cdcs the attaches named; a discovery connection of
+// another tool stays.
 func (f *follower) dropDiscoveryLocked(ctx context.Context) error {
 	ctrls, err := f.host.controllers(ctx)
 	if err != nil {
@@ -201,7 +165,9 @@ func (f *follower) dropDiscoveryLocked(ctx context.Context) error {
 			slog.String("endpoint", c.key()))
 	}
 	f.cdcs = map[string]endpoint{}
-	f.pending = map[string]endpoint{}
+	for key, ep := range f.conf {
+		f.cdcs[key] = ep
+	}
 	return nil
 }
 
@@ -227,7 +193,6 @@ func (f *follower) syncLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	f.adoptLocked(ctx, ctrls)
 	var firstErr error
 	keep := func(err error) {
 		if firstErr == nil {

@@ -144,8 +144,8 @@ It prints `docker.io/library/dnv-csi:0.1.0`.
 ## The driver
 
 The manifests under `deploy/` are applied as they are, except two: the
-config map, which carries the addresses the controller plugin needs, and
-the storage class. The controller plugin runs on the pod network, where
+config map, which carries the addresses the two plugins need, and the
+storage class. The controller plugin runs on the pod network, where
 127.0.0.1 is the pod itself, so it reaches the gateway through the
 machine's address; the node plugin runs on the machine's network, so it
 reaches the cdc at 127.0.0.1, where the all-in-one tutorial started it.

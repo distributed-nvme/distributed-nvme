@@ -64,9 +64,10 @@ type Config struct {
 	Endpoint string
 	// GatewayAddress is the gateway's host:port (the controller plugin).
 	GatewayAddress string
-	// CdcAddresses are the cdc endpoints, host:port each, which the
-	// controller plugin hands to the node plugin at attach (csi.md, Attach
-	// and detach).
+	// CdcAddresses are the cdc endpoints, ip:port each: the controller
+	// plugin hands them to the node plugin at attach (csi.md, Attach and
+	// detach), and the node plugin's follower knows them from its start, so
+	// that a restart knows its discovery connections (csi.md CSI15).
 	CdcAddresses []string
 	// GatewayTimeout bounds one gateway call; zero takes
 	// DefaultGatewayTimeout.
@@ -137,13 +138,22 @@ func RunNode(ctx context.Context, cfg Config) error {
 	if deviceWait <= 0 {
 		deviceWait = DefaultDeviceWait
 	}
+	var cdcs []endpoint
+	for _, raw := range cfg.CdcAddresses {
+		ep, err := parseEndpoint(raw)
+		if err != nil {
+			return err
+		}
+		cdcs = append(cdcs, ep)
+	}
 	slog.InfoContext(ctx, msgNodeStarting,
 		slog.String("endpoint", cfg.Endpoint),
 		slog.String("node_id", id.hostNqn),
+		slog.Any("cdc_addresses", cfg.CdcAddresses),
 		slog.String("version", Version),
 	)
 	host := &nvmeHost{oc: oc, id: id}
-	follow := newFollower(host, cfg.SyncPeriod)
+	follow := newFollower(host, cfg.SyncPeriod, cdcs)
 	if err := follow.recover(ctx); err != nil {
 		return err
 	}

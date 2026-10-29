@@ -224,12 +224,13 @@ func (n *node) stageDevice(
 	return nil
 }
 
-// forgetFailedStage undoes the follower's part of a stage that failed for
-// good (csi.md CSI16): the kubelet never unstages a volume whose stage
-// answered a final code, so the subsystem leaves the staged set here, its
-// paths with it. A code the kubelet retries keeps it, and so does a mount
-// at the staging path, which an earlier stage made; a mount table that
-// cannot be read keeps it too.
+// forgetFailedStage undoes the follower's part of a stage that failed with a
+// final code (csi.md CSI16): after one the kubelet counts the volume as not
+// staged and never unstages it, so the subsystem leaves the staged set here,
+// its paths with it. A code after which the stage may still be running
+// keeps it, since the kubelet unstages such a volume itself, and so does a
+// mount at the staging path, which an earlier stage made; a mount table
+// that cannot be read keeps it too.
 func (n *node) forgetFailedStage(ctx context.Context, staging string, nqn string, err error) {
 	switch status.Code(err) {
 	case codes.Unavailable, codes.Canceled, codes.DeadlineExceeded,

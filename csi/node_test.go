@@ -37,6 +37,7 @@ type fakeNode struct {
 	mounts   []mountEntry          // the mount table
 	fsOf     map[string]string     // blkid's answer per device
 	ptOf     map[string]string     // blkid's partition table per device
+	blkidErr map[string]string     // blkid's complaint per device it cannot read
 	logs     map[string][]logEntry // discovery log per cdc endpoint
 	logFail  map[string]bool       // cdcs whose log read fails
 	discFail map[string]bool       // cdcs a discovery connect fails to
@@ -70,6 +71,7 @@ func newFakeNode() *fakeNode {
 		uuidOf:   map[string]string{},
 		fsOf:     map[string]string{},
 		ptOf:     map[string]string{},
+		blkidErr: map[string]string{},
 		logs:     map[string][]logEntry{},
 		logFail:  map[string]bool{},
 		discFail: map[string]bool{},
@@ -330,6 +332,9 @@ func (f *fakeNode) runCommand(
 		}
 	case "blkid":
 		dev := args[len(args)-1]
+		if msg := f.blkidErr[dev]; msg != "" {
+			return fail(2, msg)
+		}
 		var out string
 		if fs := f.fsOf[dev]; fs != "" {
 			out += "TYPE=" + fs + "\n"
@@ -405,7 +410,7 @@ func newTestNode(t *testing.T) (*node, *fakeNode) {
 	n := &node{
 		id:         id,
 		host:       host,
-		follow:     newFollower(host, time.Hour),
+		follow:     newFollower(host, time.Hour, nil),
 		mnt:        &mounter{oc: oc},
 		deviceWait: 3 * time.Second,
 	}
@@ -538,6 +543,15 @@ func TestNodeStageRefuses(t *testing.T) {
 	if f.count("mkfs") != 0 {
 		t.Error("a device with a filesystem was reformatted")
 	}
+	// blkid cannot open the device: no answer, so no format.
+	f.blkidErr[devicePath(namespaceUuidOf(testVolume))] = "error: " +
+		devicePath(namespaceUuidOf(testVolume)) + ": Input/output error"
+	_, err = n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.Internal, "a device blkid cannot open")
+	if f.count("mkfs") != 0 {
+		t.Error("a device blkid could not open was formatted")
+	}
+	f.blkidErr = map[string]string{}
 	// The device carries a partition table and no filesystem: not blank.
 	f.fsOf[devicePath(namespaceUuidOf(testVolume))] = ""
 	f.ptOf[devicePath(namespaceUuidOf(testVolume))] = "gpt"
@@ -741,33 +755,34 @@ func TestFollowerFollowsTheCdc(t *testing.T) {
 }
 
 // TestFollowerRecovers pins the restart (csi.md CSI15): the staged
-// subsystems are read back from sysfs, and a discovery connection is the
-// follower's when it is under the node's host NQN and its log lists a
-// subsystem of the driver; one whose log cannot be read yet is read again
-// on every sync. Another tool's connections are neither used nor dropped.
+// subsystems are read back from sysfs, and the follower's discovery
+// connections are those under the node's host NQN to the configured cdcs,
+// which it knows from the start; a configured cdc that cannot be read holds
+// the drops off as before a restart. Another tool's connections are neither
+// used nor dropped.
 func TestFollowerRecovers(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
 	nqn := subsystemNqnOf(testVolume)
-	const (
-		foreignCdc = "10.0.0.9:8009"  // another storage's discovery service
-		lateCdc    = "10.0.0.10:8009" // the driver's, unreadable at the start
-	)
+	const foreignCdc = "10.0.0.9:8009" // another storage's discovery service
 	foreignNqn := "nqn.2024-01.io.dnv-it:e2e:ss0"
+	n.follow = newFollower(n.host, time.Hour,
+		[]endpoint{mustEndpoint(fakeCdcA), mustEndpoint(fakeCdcB)})
 	f.mu.Lock()
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA))
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcB))
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(foreignCdc))
-	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(lateCdc))
 	f.addCtrlAs(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA), testNodeB)
 	f.addCtrl(nqn, mustEndpoint(fakeCn0))
+	f.addCtrl(nqn, mustEndpoint(fakeCn1))
 	f.addCtrl(foreignNqn, mustEndpoint(fakeCn1))
-	f.logs[fakeCdcB] = []logEntry{
+	f.logs[fakeCdcA] = []logEntry{
 		{subNqn: nqn, ep: mustEndpoint(fakeCn0)},
 		{subNqn: nqn, ep: mustEndpoint(fakeCn2)},
 	}
+	f.logs[fakeCdcB] = f.logs[fakeCdcA]
 	f.logs[foreignCdc] = []logEntry{{subNqn: foreignNqn, ep: mustEndpoint(fakeCn1)}}
-	f.logs[lateCdc] = f.logs[fakeCdcB]
-	f.logFail[lateCdc] = true
+	f.logFail[fakeCdcB] = true
 	f.mu.Unlock()
 	if err := n.follow.recover(ctx); err != nil {
 		t.Fatal(err)
@@ -775,37 +790,27 @@ func TestFollowerRecovers(t *testing.T) {
 	if !n.follow.staged[nqn] || len(n.follow.staged) != 1 {
 		t.Errorf("staged %v, want the driver's subsystem alone", n.follow.staged)
 	}
-	if _, ok := n.follow.cdcs[fakeCdcB]; !ok || len(n.follow.cdcs) != 1 {
-		t.Errorf("cdcs %v, want the one whose log lists the driver's subsystem",
-			n.follow.cdcs)
+	// The second cdc cannot be read: the new cntlr is connected, and cn1,
+	// which the readable cdc no longer lists, keeps its path.
+	_ = n.follow.sync(ctx)
+	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0+" "+fakeCn1+" "+fakeCn2 {
+		t.Errorf("paths %v while a configured cdc is unread, want all three kept", got)
 	}
-	if _, ok := n.follow.pending[lateCdc]; !ok || len(n.follow.pending) != 1 {
-		t.Errorf("pending %v, want the unreadable one", n.follow.pending)
-	}
-	// The recovered follower syncs from the second cdc's log; the waiting
-	// connection holds no drop off.
-	if err := n.follow.sync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0+" "+fakeCn2 {
-		t.Errorf("paths %v after the recovered sync", got)
-	}
-	if got := f.paths(foreignNqn); len(got) != 1 {
-		t.Errorf("the foreign subsystem's path was touched: %v", got)
-	}
-	// Once its log answers, the waiting connection is a cdc.
 	f.mu.Lock()
-	f.logFail[lateCdc] = false
+	f.logFail[fakeCdcB] = false
 	f.mu.Unlock()
 	if err := n.follow.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := n.follow.cdcs[lateCdc]; !ok || len(n.follow.pending) != 0 {
-		t.Errorf("cdcs %v, pending %v: the late cdc was not adopted",
-			n.follow.cdcs, n.follow.pending)
+	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0+" "+fakeCn2 {
+		t.Errorf("paths %v once both cdcs answer, want cn0 and cn2", got)
+	}
+	if got := f.paths(foreignNqn); len(got) != 1 {
+		t.Errorf("the foreign subsystem's path was touched: %v", got)
 	}
 	// The last unstage drops the follower's discovery connections and
-	// leaves the other tool's and the other host NQN's.
+	// leaves the other tool's and the other host NQN's; the configured cdcs
+	// stay known.
 	if err := n.follow.unstage(ctx, nqn); err != nil {
 		t.Fatal(err)
 	}
@@ -813,6 +818,44 @@ func TestFollowerRecovers(t *testing.T) {
 		fakeCdcA+" "+foreignCdc {
 		t.Errorf("discovery connections %v after the unstage, want the "+
 			"foreign one and the other host's", got)
+	}
+	if len(n.follow.cdcs) != 2 {
+		t.Errorf("cdcs %v after the unstage, want the configured two", n.follow.cdcs)
+	}
+}
+
+// TestFollowerSplitRangesAcrossARestart pins csi.md CSI15 for cdcs that
+// split the shard codes: after a restart while the cdc of one range cannot
+// be read, a volume only that cdc lists keeps its paths, however the other
+// range's cdc answers.
+func TestFollowerSplitRangesAcrossARestart(t *testing.T) {
+	n, f := newTestNode(t)
+	ctx := t.Context()
+	one, two := subsystemNqnOf("pvc-one"), subsystemNqnOf("pvc-two")
+	n.follow = newFollower(n.host, time.Hour,
+		[]endpoint{mustEndpoint(fakeCdcA), mustEndpoint(fakeCdcB)})
+	f.mu.Lock()
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA))
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcB))
+	f.addCtrl(one, mustEndpoint(fakeCn0))
+	f.addCtrl(two, mustEndpoint(fakeCn1))
+	f.addCtrl(two, mustEndpoint(fakeCn2))
+	f.logs[fakeCdcA] = []logEntry{{subNqn: one, ep: mustEndpoint(fakeCn0)}}
+	f.logs[fakeCdcB] = []logEntry{
+		{subNqn: two, ep: mustEndpoint(fakeCn1)},
+		{subNqn: two, ep: mustEndpoint(fakeCn2)},
+	}
+	f.logFail[fakeCdcB] = true
+	f.mu.Unlock()
+	if err := n.follow.recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_ = n.follow.sync(ctx)
+	if got := f.paths(two); len(got) != 2 {
+		t.Errorf("paths %v of the volume the unread cdc lists, want both kept", got)
+	}
+	if got := f.paths(one); len(got) != 1 {
+		t.Errorf("paths %v of the volume the readable cdc lists", got)
 	}
 }
 
@@ -1071,6 +1114,11 @@ func TestParsers(t *testing.T) {
 // nothing staged without discovery connections.
 func TestRunNodeServesOverTheSocket(t *testing.T) {
 	f := newFakeNode()
+	// A discovery connection of the plugin's, left by an earlier run, and
+	// another tool's: the stop with nothing staged drops the first alone.
+	const foreignCdc = "10.0.0.9:8009"
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA))
+	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(foreignCdc))
 	dir, err := os.MkdirTemp("", "dnv-csi")
 	if err != nil {
 		t.Fatal(err)
@@ -1080,7 +1128,8 @@ func TestRunNodeServesOverTheSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		done <- RunNode(ctx, Config{Endpoint: endpoint, OsClient: f.client()})
+		done <- RunNode(ctx, Config{Endpoint: endpoint, OsClient: f.client(),
+			CdcAddresses: []string{fakeCdcA}})
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -1124,6 +1173,9 @@ func TestRunNodeServesOverTheSocket(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("RunNode did not stop")
+	}
+	if got := f.paths(common.NvmeDiscoveryNqn); strings.Join(got, " ") != foreignCdc {
+		t.Errorf("discovery connections %v after the stop, want the other tool's alone", got)
 	}
 
 	// Without the identity files the plugin refuses to start.

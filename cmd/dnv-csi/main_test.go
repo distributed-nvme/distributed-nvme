@@ -82,6 +82,7 @@ func TestRootHasTheControllerSubcommand(t *testing.T) {
 
 // nodeFlags is the node subcommand's flag set, verbatim.
 var nodeFlags = []string{
+	"cdc-addresses",
 	"config",
 	"csi-address",
 	"device-wait",
@@ -104,7 +105,8 @@ func TestNodeOptions(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
 	cmd := newNodeCmd()
-	if err := cmd.ParseFlags([]string{"--csi-address", "/csi/csi.sock"}); err != nil {
+	if err := cmd.ParseFlags([]string{"--csi-address", "/csi/csi.sock",
+		"--cdc-addresses", "192.168.122.78:18030"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := bindViper(cmd); err != nil {
@@ -115,11 +117,12 @@ func TestNodeOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := csi.Config{
-		Endpoint:    "/csi/csi.sock",
-		HostNqnPath: csi.DefaultHostNqnPath,
-		HostIdPath:  csi.DefaultHostIdPath,
-		DeviceWait:  csi.DefaultDeviceWait,
-		SyncPeriod:  csi.DefaultSyncPeriod,
+		Endpoint:     "/csi/csi.sock",
+		CdcAddresses: []string{"192.168.122.78:18030"},
+		HostNqnPath:  csi.DefaultHostNqnPath,
+		HostIdPath:   csi.DefaultHostIdPath,
+		DeviceWait:   csi.DefaultDeviceWait,
+		SyncPeriod:   csi.DefaultSyncPeriod,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("config %+v, want %+v", cfg, want)
@@ -132,6 +135,9 @@ func TestNodeOptions(t *testing.T) {
 		{[]string{"--csi-address", "/csi/csi.sock", "--hostnqn-file", ""}, "--hostnqn-file"},
 		{[]string{"--csi-address", "/csi/csi.sock", "--device-wait", "0"}, "--device-wait"},
 		{[]string{"--csi-address", "/csi/csi.sock", "--sync-period", "-1"}, "--sync-period"},
+		{[]string{"--csi-address", "/csi/csi.sock"}, "--cdc-addresses"},
+		{[]string{"--csi-address", "/csi/csi.sock", "--cdc-addresses", "cdc.example:8009"},
+			"not an IP address"},
 	} {
 		viper.Reset()
 		cmd := newNodeCmd()

@@ -70,6 +70,9 @@ func newNodeCmd() *cobra.Command {
 	flags.Int("sync-period", int(csi.DefaultSyncPeriod/time.Second),
 		"seconds between two follows of the cdc, the safety net under the "+
 			"kernel's change notification")
+	flags.String("cdc-addresses", "",
+		"comma-separated ip:port list of the dnv cdc endpoints, the same list "+
+			"the controller plugin hands to the node at attach (required)")
 	flags.String("config", "", "optional viper config file")
 	return cmd
 }
@@ -130,14 +133,9 @@ func controllerOptionsFromViper() (csi.Config, error) {
 	if _, _, err := net.SplitHostPort(gateway); err != nil {
 		return csi.Config{}, fmt.Errorf("--gateway-address: %q is not host:port", gateway)
 	}
-	cdc := splitList(viper.GetString("cdc-addresses"))
-	if len(cdc) == 0 {
-		return csi.Config{}, errors.New("missing required flag: --cdc-addresses")
-	}
-	for _, addr := range cdc {
-		if err := checkCdcAddress(addr); err != nil {
-			return csi.Config{}, err
-		}
+	cdc, err := cdcAddressesFromViper()
+	if err != nil {
+		return csi.Config{}, err
 	}
 	timeout := viper.GetInt("gateway-timeout")
 	if timeout <= 0 {
@@ -176,13 +174,33 @@ func nodeOptionsFromViper() (csi.Config, error) {
 		return csi.Config{}, fmt.Errorf(
 			"--sync-period: %d is not a positive number of seconds", syncPeriod)
 	}
+	cdc, err := cdcAddressesFromViper()
+	if err != nil {
+		return csi.Config{}, err
+	}
 	return csi.Config{
-		Endpoint:    endpoint,
-		HostNqnPath: nqnPath,
-		HostIdPath:  idPath,
-		DeviceWait:  time.Duration(deviceWait) * time.Second,
-		SyncPeriod:  time.Duration(syncPeriod) * time.Second,
+		Endpoint:     endpoint,
+		CdcAddresses: cdc,
+		HostNqnPath:  nqnPath,
+		HostIdPath:   idPath,
+		DeviceWait:   time.Duration(deviceWait) * time.Second,
+		SyncPeriod:   time.Duration(syncPeriod) * time.Second,
 	}, nil
+}
+
+// cdcAddressesFromViper reads the cdc endpoints both plugins take: at least
+// one, each an IP literal and a port.
+func cdcAddressesFromViper() ([]string, error) {
+	cdc := splitList(viper.GetString("cdc-addresses"))
+	if len(cdc) == 0 {
+		return nil, errors.New("missing required flag: --cdc-addresses")
+	}
+	for _, addr := range cdc {
+		if err := checkCdcAddress(addr); err != nil {
+			return nil, err
+		}
+	}
+	return cdc, nil
 }
 
 // splitList parses one comma-separated flag value: entries are trimmed and

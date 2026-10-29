@@ -45,9 +45,10 @@ discovery (`cdc.md` DS4). The node plugin follows the discovery log as a
 host must (`architecture.md`, Host view): it holds a persistent discovery
 connection to every cdc address, connects every listed cntlr of the
 subsystems it has staged, drops a path the cdc withdraws, and touches no
-other connection. It never talks to the gateway: the controller plugin
-hands it the subsystem NQN, the namespace uuid and the cdc addresses at
-attach time.
+connection but those CSI15 names its own. It never talks to the gateway:
+the controller plugin hands it the subsystem NQN, the namespace uuid and the
+cdc addresses at attach time, and the plugin knows the cdc addresses from
+its own configuration as well, so that a restart knows them.
 
 ## The driver
 
@@ -94,28 +95,27 @@ of the calls a CSI call makes carry it.
 CSI9. **Create makes four objects in order, each step repeatable.** The
 pool, named as the volume: one slice, the class's redundancy and cntlr
 count, a first data group of one eighth of the volume rounded up to whole
-extents and at least one, dnv's default auto-grow mark whatever the
-cluster stores, since a cluster's mark can switch auto-grow off and the
-volume model needs it on, and the cluster's defaults for the rest. The thin
-device, named as the volume, sized to the request rounded up to the pool's
-unit, the stripe size: the required bytes rounded up, or the limit rounded
-down when only a limit is given, or the driver's default when neither is,
-and OUT_OF_RANGE when no multiple of the unit fits the range. The
-subsystem with the volume's NQN and no host. The namespace at index one
-with the volume's uuid. A step that finds its object there reads it back
-and goes on when it matches; a thin device of another size is
-ALREADY_EXISTS, the spec's word for an incompatible volume of the same
-name; a namespace that is not the volume's is ALREADY_EXISTS too; a pool
-still being deleted under the name is ABORTED, so the caller retries once
-the drain has removed it. The create returns once the four records exist;
-the node plugin waits for the device. A delete removes the objects in the
-reverse order, each step repeatable: the namespace, the subsystem and the
-thin device, then the pool, last since its delete is refused while a
-user-created object remains (`architecture.md`, Storage pools); the worker
-drains the rest (`dnv-worker.md`, The sp drain). An object already gone is done, a
-write the gateway refuses because the pool is already deleting is done,
-and so is an id that names no volume of this driver. A create from a
-snapshot or another volume is refused.
+extents and at least one, dnv's default auto-grow mark whatever the cluster
+stores, since a cluster's mark can switch auto-grow off and the volume model
+needs it on, and the cluster's defaults for the rest. The thin device, named
+as the volume, sized to the request rounded up to the pool's unit, the
+stripe size: the required bytes rounded up, or the limit rounded down when
+only a limit is given, or the driver's default when neither is, and
+OUT_OF_RANGE when no multiple of the unit fits the range. The subsystem with
+the volume's NQN and no host. The namespace at index one with the volume's
+uuid. A step that finds its object there reads it back and goes on when it
+matches; a thin device of another size is ALREADY_EXISTS, the spec's word
+for an incompatible volume of the same name; a namespace that is not the
+volume's is ALREADY_EXISTS too; a pool still being deleted under the name is
+ABORTED, so the caller retries once the drain has removed it. The create
+returns once the four records exist; the node plugin waits for the device. A
+delete removes the objects in the reverse order, each step repeatable: the
+namespace, the subsystem and the thin device, then the pool, last since its
+delete is refused while a user-created object remains (`architecture.md`,
+Storage pools); the worker drains the rest (`dnv-worker.md`, The sp drain).
+An object already gone is done, a write the gateway refuses because the pool
+is already deleting is done, and so is an id that names no volume of this
+driver. A create from a snapshot or another volume is refused.
 
 ## Attach and detach
 
@@ -167,24 +167,25 @@ class's error (CSI12).
 
 CSI12. **Three parameters, single-node access, two filesystems.** A storage
 class carries the cluster name, with the gateway's default when absent, the
-redundancy, RAID1 or none, with RAID1 when absent, and the cntlr count,
-with the gateway's default when absent; a cluster that does not exist is
-INVALID_ARGUMENT on a create, the class's error; any other key is INVALID_ARGUMENT,
-so a typo never passes silently, except the keys Kubernetes reserves for
-itself, which are ignored, since the provisioner strips them from a create
-but hands them over whole with a capacity query. A volume capability is a
-single-node access mode, in every form the spec has for one node, and a
-block volume or a mount volume of ext4 or xfs, ext4 when no filesystem is
-named; a multi-node mode or another filesystem is INVALID_ARGUMENT on a
-create and leaves a validation unconfirmed with the reason. The controller
-plugin advertises create and delete, publish and unpublish, and get
-capacity, and nothing else; the volume list, snapshots, expansion and
-modification are not served.
+redundancy, RAID1 or none, with RAID1 when absent, and the cntlr count, with
+the gateway's default when absent; a cluster that does not exist is
+INVALID_ARGUMENT on a create, the class's error; any other key is
+INVALID_ARGUMENT, so a typo never passes silently, except the keys
+Kubernetes reserves for itself, which are ignored, since the provisioner
+strips them from a create but hands them over whole with a capacity query. A
+volume capability is a single-node access mode, in every form the spec has
+for one node, and a block volume or a mount volume of ext4 or xfs, ext4 when
+no filesystem is named; a multi-node mode or another filesystem is
+INVALID_ARGUMENT on a create and leaves a validation unconfirmed with the
+reason. The controller plugin advertises create and delete, publish and
+unpublish, and get capacity, and nothing else; the volume list, snapshots,
+expansion and modification are not served.
 
 ## The node plugin
 
 The node subcommand runs on every Kubernetes node that may mount a volume.
-It takes the socket to serve (`--csi-address`), the two identity files
+It takes the socket to serve (`--csi-address`), the cdc addresses, the same
+list the controller plugin takes (`--cdc-addresses`), the two identity files
 (`--hostnqn-file`, `--hostid-file`), the bound on a stage's wait for the
 device (`--device-wait`) and the follower's period (`--sync-period`).
 Everything it does to the node goes through the OS client, the one path to
@@ -221,7 +222,8 @@ path is live and optimized. A volume whose link does not come within the
 wait is UNAVAILABLE, and the kubelet calls again.
 
 CSI15. **The follower.** The plugin keeps the set of subsystems it has
-staged and the cdc addresses their attaches named, holds one persistent
+staged and the cdcs it follows, the configured ones and those the attaches
+named, holds one persistent
 discovery connection to each cdc, and on every trigger reads the discovery
 log through each of them, then for every staged subsystem connects a listed
 cntlr the node has no path to and drops, by controller, a path to a cntlr
@@ -235,40 +237,43 @@ volume. A cdc that cannot be reached, or whose log cannot be read, holds
 every drop off and leaves the connects to the others, since twins exist so
 that one can be down; a pass that read no log drops nothing: an answer that
 is missing is not an answer that the cntlr is gone. The plugin's discovery
-connections are those under the node's host NQN to a cdc it knows, and it
-uses and drops no other. After a restart the plugin reads its state back
-from sysfs: the subsystems of the driver's NQN prefix are staged, and a
-discovery connection under the node's host NQN whose log lists a subsystem
-of the driver names a cdc; one whose log cannot be read yet is read again
-on every pass and holds no drop off, since it may be another tool's. A
-connection another tool made to the same cdc under the same host NQN cannot
-be told apart from the plugin's. It touches no path of a subsystem that is
-not its own.
+connections are those under the node's host NQN to a cdc it follows, and it
+uses and drops no other; a connection another tool made to the same cdc
+under the same host NQN cannot be told apart from the plugin's. After a
+restart the plugin reads the staged subsystems back from sysfs, those of
+the driver's NQN prefix, and follows the configured cdcs from the start, so
+a configured cdc that cannot be read holds the drops off after a restart as
+before one, whichever shard codes each cdc serves. It touches no path of a
+subsystem that is not its own.
 
 CSI16. **Nothing staged, nothing connected.** The last unstage drops the
 subsystem's paths and the persistent discovery connections with them, and
 so does a stop of the plugin with nothing staged; a stop with volumes staged
 leaves every connection in place, since the data path must outlive the
-plugin's pod. A stage that fails with a code the kubelet does not retry
-leaves the set at once, with its paths, since the kubelet never unstages
-it; a mount at the staging path, which an earlier stage made, keeps it.
+plugin's pod. A stage that fails with a final code, after which the kubelet
+counts the volume as not staged and never unstages it, leaves the set at
+once, with its paths; a code after which the stage may still be running
+keeps it, as does a mount at the staging path, which an earlier stage made.
+A drop of the discovery connections forgets the cdcs the attaches named and
+keeps the configured ones.
 
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
 stage of a filesystem volume reads the device's filesystem and partition
-table straight from the device: a blank device is formatted with the
-capability's filesystem, ext4 when none is named, a device that carries
-that filesystem is mounted as it is, and a device that carries another, or
-a partition table and no filesystem, is FAILED_PRECONDITION, since
-formatting it would destroy data; a block volume is never formatted or
-mounted at stage. Publish bind-mounts the staging path at the target,
-read-only when asked, and for a block volume makes a file at the target and
-bind-mounts the device node onto it. Unpublish unmounts the target and removes it, a directory with a
-plain rmdir, never recursively; unstage unmounts the staging path. Every
-step reads the mount table first, so a repeat is done, as the spec asks,
-and a capability the driver does not serve is FAILED_PRECONDITION at stage
-and publish, the spec's word for a capability the volume does not support.
-The used-space report reads a mounted filesystem's totals in bytes and
-inodes through the OS client, and a block volume's size alone.
+table straight from the device: a blank device, one in which blkid finds
+nothing and reports no error, is formatted with the capability's filesystem,
+ext4 when none is named, a device that carries that filesystem is mounted as
+it is, and a device that carries another, or a partition table and no
+filesystem, is FAILED_PRECONDITION, since formatting it would destroy data;
+a block volume is never formatted or mounted at stage. Publish bind-mounts
+the staging path at the target, read-only when asked, and for a block volume
+makes a file at the target and bind-mounts the device node onto it.
+Unpublish unmounts the target and removes it, a directory with a plain
+rmdir, never recursively; unstage unmounts the staging path. Every step
+reads the mount table first, so a repeat is done, as the spec asks, and a
+capability the driver does not serve is FAILED_PRECONDITION at stage and
+publish, the spec's word for a capability the volume does not support. The
+used-space report reads a mounted filesystem's totals in bytes and inodes
+through the OS client, and a block volume's size alone.
 
 ## Deployment
 
@@ -295,16 +300,17 @@ registrar sidecar announces the socket to the kubelet, and the liveness
 probe sidecar answers the kubelet's health checks for both plugins.
 
 CSI19. **The controller pod runs anywhere and tolerates the control-plane
-taint.** It holds the plugin, the provisioner, the attacher and the
-liveness probe around one socket. The plugin reads the gateway address and
-the cdc addresses from a config map, as environment, so the manifests of a
-cluster differ from the examples in that map and in the storage classes
-alone, which name the operator's clusters. The driver object asks
-for attach, no pod information on mount, the persistent lifecycle and
-capacity tracking, since the plugin answers capacity; the provisioner polls
-it and owns the capacity objects, for every class of the driver, those with
-immediate binding included, since no scheduler needs those but the capacity
-objects are the one place Kubernetes shows dnv's free space.
+taint.** It holds the plugin, the provisioner, the attacher and the liveness
+probe around one socket. The plugin reads the gateway address and the cdc
+addresses from a config map, as environment, and the node plugin reads the
+cdc addresses from the same map, so the manifests of a cluster differ from
+the examples in that map and in the storage classes alone, which name the
+operator's clusters. The driver object asks for attach, no pod information
+on mount, the persistent lifecycle and capacity tracking, since the plugin
+answers capacity; the provisioner polls it and owns the capacity objects,
+for every class of the driver, those with immediate binding included, since
+no scheduler needs those but the capacity objects are the one place
+Kubernetes shows dnv's free space.
 
 ## The suite's dnv stack
 
@@ -404,17 +410,17 @@ pipes them into the k3s image store of every node, so no pod pulls them and
 no registry of the suite's takes part. The sidecar images the manifests
 name come from their public registry, which each node pulls from once.
 
-CSI5. **Cleanup removes what the suite started and nothing else.** The
-test namespace and the driver's namespace are deleted and waited for, the
+CSI5. **Cleanup removes what the suite started and nothing else.** The test
+namespace and the driver's namespace are deleted and waited for, the
 driver's cluster-wide objects and the storage class with them; then the
 hosts' connections of the driver's and dnv's and the discovery connections
 to the suite's cdc go, then the controller nodes' and the disk nodes'
-devices, exports and agents, with the controller nodes' nvmet entries of
-the two hosts that attaches made, then the control plane's processes, the
+devices, exports and agents, with the controller nodes' nvmet entries of the
+two hosts that attaches made, then the control plane's processes, the
 imported images and the work directories, holder first. Cleanup runs at the
-start of every run and, on success only, at its end; a failing run leaves everything in
-place and dumps diagnostics. k3s, the hostnames and the identity files
-stay.
+start of every run and, on success only, at its end; a failing run leaves
+everything in place and dumps diagnostics. k3s, the hostnames and the
+identity files stay.
 
 CSI6. **Test pods run on the hosts.** The control-plane node carries a
 no-schedule taint the suite ensures on every run, and every pod names its
@@ -457,12 +463,12 @@ a pattern and checking it; the cluster holds eight pools; then every
 delete, and nothing left.
 
 **sanity.** csi-sanity, the upstream conformance test, built on the suite's
-machine from its pinned module in a module of its own, runs on host0 against both
-plugins started there as plain processes with the lab's gateway and cdc,
-after the driver's pods are taken down, since two node plugins on one host
-would follow each other's subsystems. The tests of capabilities the driver
-does not advertise skip on their own; a failure names its test. Then the
-plugins stop, and nothing is left.
+machine from its pinned module in a module of its own, runs on host0 against
+both plugins started there as plain processes with the lab's gateway and
+cdc, after the driver's pods are taken down, since two node plugins on one
+host would follow each other's subsystems. The tests of capabilities the
+driver does not advertise skip on their own; a failure names its test. Then
+the plugins stop, and nothing is left.
 
 ### Preflight
 

@@ -113,8 +113,10 @@ func (m *mounter) probe(ctx context.Context, dev string) (string, string, error)
 		[]string{"-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", dev}, "")
 	if err != nil {
 		// blkid answers 2 with nothing on stdout for a device with no
-		// recognizable content: a blank device.
-		if code == 2 && strings.TrimSpace(stdout) == "" {
+		// recognizable content: a blank device. It answers 2 as well for a
+		// device it cannot open, with a message on stderr, which is no
+		// answer.
+		if code == 2 && strings.TrimSpace(stdout) == "" && strings.TrimSpace(stderr) == "" {
 			return "", "", nil
 		}
 		return "", "", fmt.Errorf("blkid %s: %w: %s", dev, err, strings.TrimSpace(stderr))

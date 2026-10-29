@@ -1436,7 +1436,7 @@ sanity_start() {
 		--gateway-address "$1" --cdc-addresses "$2" >>"$dir/ctl.log" 2>&1 </dev/null &
 	echo $! >"$dir/ctl.pid"
 	nohup "$WORK/bin/dnv-csi" node --csi-address "$dir/node.sock" \
-		>>"$dir/node.log" 2>&1 </dev/null &
+		--cdc-addresses "$2" >>"$dir/node.log" 2>&1 </dev/null &
 	echo $! >"$dir/node.pid"
 	local i
 	for ((i = 0; i < 40; i++)); do
