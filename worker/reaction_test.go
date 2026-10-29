@@ -23,8 +23,10 @@ const (
 	// 1 MiB pool blocks, 128-block bitmap chunks, md-raid1. model.GroupBlocks
 	// turns them into the meta_blocks / data_blocks the AR6 pending rule does
 	// its arithmetic on, so the numbers below are never hand-written.
-	reactExtentSize  = uint64(64) << 20
-	reactBlockSize   = uint64(1) << 20
+	reactExtentSize = uint64(64) << 20
+	reactBlockSize  = uint64(1) << 20
+	// reactTdSize is the fixture thin device's size (reactFixture).
+	reactTdSize      = uint64(1) << 40
 	reactChunkBlocks = uint64(128)
 
 	// The cluster's stored alloc_conf. Both are deliberately NOT
@@ -201,7 +203,10 @@ func reactFixture(t *testing.T) *model.SpState {
 				)},
 			},
 		},
-		Tds:      []*pb.ThinDevice{{TdId: 500, DevId: 1}},
+		// td0's size keeps every test's slice far from covered (AR6's
+		// covered rule): one TiB against data groups of a few hundred
+		// blocks, so only the tests of that rule set a size of their own.
+		Tds:      []*pb.ThinDevice{{TdId: 500, DevId: 1, Size: reactTdSize}},
 		TdNames:  []string{"td0"},
 		DnByAddr: map[string]*pb.DnConf{},
 		CnByAddr: map[string]*pb.CnConf{},
@@ -1557,8 +1562,8 @@ func sharedStateFixture(t *testing.T) *model.SpState {
 	state := reactFixture(t)
 	state.Conf.TdNameList = []string{"td0", "td1"}
 	state.Tds = []*pb.ThinDevice{
-		{TdId: reactLostTd, DevId: 1, Created: true},
-		{TdId: reactOtherTd, DevId: 2, Created: true},
+		{TdId: reactLostTd, DevId: 1, Created: true, Size: reactTdSize},
+		{TdId: reactOtherTd, DevId: 2, Created: true, Size: reactTdSize},
 	}
 	state.TdNames = []string{"td0", "td1"}
 	state.Conf.NqnList = []string{reactNqn}

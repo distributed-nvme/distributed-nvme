@@ -149,6 +149,10 @@ const (
 	// which model.GrowSlice refuses. It is model's string, for the reason
 	// reasonGrowPending is.
 	reasonGrpListFull = model.ReasonGrpListFull
+	// reasonDataCovered is a slice whose data groups already hold what the
+	// pool's thin devices can use in it (AR6's covered rule): a data grow
+	// would add room no volume can write.
+	reasonDataCovered = "data_covered"
 	// reasonNoDataGroup is a slice with no data group to size a data grow by.
 	reasonNoDataGroup = "no_data_group"
 	// reasonOpFailed is a transient failure — an etcd error, a scan that did
@@ -1707,6 +1711,14 @@ func (w *spWorker) runGrow(
 		w.reactionSkipped(ctx, kind, reasonGrowPending, sliceAttr)
 		return false
 	}
+	if !isMeta && dataCovered(p.state, slice, blockSize) {
+		// AR6's covered rule: the slice's data groups already hold what the
+		// pool's thin devices can use, so a data grow would add room nothing
+		// can write. It holds until a thin device is created, and the pass
+		// goes on (AR2), as past a full group list.
+		w.reactionSkipped(ctx, kind, reasonDataCovered, sliceAttr)
+		return false
+	}
 	// The cluster's stored extent size — the same value model.GrowSlice reads
 	// inside its STM, which is what makes this pre-check ask the allocator
 	// for the ext_cnt the transaction will then demand.
@@ -1778,6 +1790,46 @@ func growPending(
 	blockSize uint64,
 ) bool {
 	return model.GrowPending(slice, isMeta, poolTotal(usage, isMeta), blockSize)
+}
+
+// dataCovered is AR6's covered rule as the pass's pre-check: a data grow is
+// skipped once the data blocks of all the slice's data groups, the newest
+// included, reach the sum over the pool's thin devices of the blocks each can
+// use in one slice — its size divided by the slice count, rounded up to whole
+// data blocks. The gateway makes every size a multiple of the slice count
+// times the stripe, so the division is exact. A snapshot counts in full: it
+// shares blocks with its origin only until they diverge, so the sum is an
+// upper bound of the need and the rule may let a pool grow further than
+// strictly needed, never less. A thin device the state lists but holds no
+// record of makes the rule hold off, since a need computed without it would
+// undercount. Unlike the pending rule, which model.GrowSlice applies in its
+// STM too, this one binds only the worker's own grow: an operator's GrowSlice
+// is explicit intent (architecture.md, GrowSlice), and reading every thin
+// device inside the transaction would approach EtcdMaxTxnOps at the
+// thin-device ceiling.
+func dataCovered(
+	state *model.SpState,
+	slice *pb.Slice,
+	blockSize uint64,
+) bool {
+	if blockSize == 0 ||
+		len(state.Tds) != len(state.Conf.GetTdNameList()) {
+		return false
+	}
+	sliceCnt := uint64(len(state.Conf.GetSliceIdList()))
+	if sliceCnt == 0 {
+		return false
+	}
+	need := uint64(0)
+	for _, td := range state.Tds {
+		perSlice := td.GetSize() / sliceCnt
+		need += (perSlice + blockSize - 1) / blockSize
+	}
+	held := uint64(0)
+	for _, grp := range slice.GetDataGrpList() {
+		held += grp.GetDataBlocks()
+	}
+	return held >= need
 }
 
 // growExtCnt is the ext_cnt of the group a grow would append (architecture.md,

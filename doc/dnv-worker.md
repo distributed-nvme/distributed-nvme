@@ -2777,7 +2777,8 @@ AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
 the reactions read, and with the `Clone`s the ones this worker itself
 writes the `err_epoch`s into — and the sub-objects `SpConf` lists (AR5's
 and AR7's row classes attribute rows through its tds, subsystems,
-transfers and clones; AR11 and AR12 read its repairs and retired legs),
+transfers and clones, and AR6 sums its tds' sizes; AR11 and AR12 read its
+repairs and retired legs),
 plus the in-memory latest `CntlrInfo` of the **primary** cntlr
 (pool usage, group rows, AR5's and AR7's rows, and the verdicts on repairs
 and the groups' whole flags and in-sync lists (`GrpInfo`) AR8, AR11, AR12
@@ -2876,8 +2877,8 @@ past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, which can hold for as long as the error does — an
 operator's intervention, for a lost thin id; AR6's `grow_pending`,
-`grp_list_full`, `meta_ladder_cap` and `no_data_group` when the pass's own
-check finds them, ahead of any scan and any transaction (each can hold
+`data_covered`, `grp_list_full`, `meta_ladder_cap` and `no_data_group` when
+the pass's own check finds them, ahead of any scan and any transaction (each can hold
 indefinitely — a grow deferred on the CN, a ceiling of `architecture.md`,
 GrowSlice — and must not disable AR7 and AR8 for the duration); AR7's
 `shared_state` and `same_error`, which can hold as long as AR5's and move
@@ -3146,7 +3147,16 @@ that did, `architecture.md`, Common validation):
 * a **data grow** when the used data blocks exceed the mark's percentage of
   the total data blocks: an internal `GrowSlice` of the data kind with
   `ext_cnt` the slice's first data group's (grow by the original allocation
-  unit);
+  unit) — unless the slice's data already covers its thin devices: the
+  data blocks of all its data groups, the newest included, reach the sum
+  over the pool's thin devices of the blocks each can use in one slice, its
+  size divided by the slice count and rounded up to whole data blocks. Then
+  the grow is skipped with `data_covered`, so a pool never grows past what
+  its volumes can write; a snapshot counts in full, since it shares blocks
+  with its origin only until they diverge, so the sum is an upper bound of
+  the need and the pool may grow further than strictly needed, never less;
+  and a thin device the pass's state lists as missing stops the skip, since
+  a need computed without it would undercount;
 * a **meta grow** when the used metadata blocks exceed the mark's percentage
   of the total metadata blocks: an internal `GrowSlice` of the meta kind,
   ladder-sized (`architecture.md`, GrowSlice); data is checked first when both

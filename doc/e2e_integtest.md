@@ -576,7 +576,11 @@ writes, one action per pass making every wait a threshold plus a few passes
 judged by a delta from values read just before the trigger. Strided writes
 sized from the primary's own pool usage push slice 0's thin pool past its
 mark, and the worker must add exactly one data group and the pool grow on the
-device (`dnv-worker.md` AR6); a primary that moves meanwhile stops the run.
+device (`dnv-worker.md` AR6), which the case's two thin devices leave room
+for: together they need more blocks in slice 0 than its data groups hold,
+asserted before the writes, since the covered rule of the same AR6 would
+otherwise stop the grow the case waits for; a primary that moves meanwhile
+stops the run.
 The primary's cn agent is killed, host0 having let go first since a killed
 agent's nvmet objects go on advertising optimized, and the standby must become
 primary and build the stack, held to the cntlr threshold while settling

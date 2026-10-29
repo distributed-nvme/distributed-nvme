@@ -2533,9 +2533,10 @@ effective size and keep reporting `OK` at that size, and the grow
 completes by itself once the leg clears (Side provisioning protocol,
 Automatic reactions). The per-kind "one grow per pool at a time" pending
 rule (`dnv-worker.md` AR6) binds only the sp worker's own auto-grow, which
-judges "pending" by the primary's reported usage; a user-driven
-`GrowSlice` is explicit operator intent, holds no such report and is
-**not** so gated (`gateway.md`, Storage pools and GrowSlice) — stacked
+judges "pending" by the primary's reported usage, and so does its covered
+rule, which stops a data grow once the slice's data covers the pool's thin
+devices; a user-driven `GrowSlice` is explicit operator intent, holds no
+such report and is **not** so gated (`gateway.md`, Storage pools and GrowSlice) — stacked
 grows are absorbed by the deferred growth above, though every stacked
 group's DN extents are charged immediately. Reply `slice_id` and `grp_id`.
 
@@ -4706,8 +4707,10 @@ The four reactions:
   metadata usage passes `DmPoolConf.low_water_mark_pct`, which is not an
   `EventThreshold` field, is grown by an internal `GrowSlice` (GrowSlice);
   a grow whose new group still holds a provisioning leg completes by itself
-  when the leg clears (`cnagent.md` CN13, [D15]). Auto-grow is best-effort,
-  so a pool can fill (Known limits).
+  when the leg clears (`cnagent.md` CN13, [D15]). A data grow stops once
+  the slice's data covers what the pool's thin devices can use
+  (`dnv-worker.md` AR6), so a pool never grows past its volumes. Auto-grow
+  is best-effort, so a pool can fill (Known limits).
 * **Cntlr replacement** (`dnv-worker.md` AR7): a cntlr that stays unhealthy
   — a non-primary one, or the primary of an SP with no failover candidate
   — is replaced on a fresh CN by an internal `ReplaceCntlr`, one

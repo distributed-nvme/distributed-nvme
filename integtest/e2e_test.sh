@@ -18988,6 +18988,21 @@ react_target() {
 	assert_ge "$slicemib" 1 \
 		"$TD_REACT's per-slice thin volume must hold at least one 1 MiB chunk"
 
+	# The covered rule (dnv-worker.md AR6): a data grow is skipped once slice
+	# 0's data groups hold what the pool's thin devices can use in that slice,
+	# so the grow step 02 waits for fires only while a0 and t0 together need
+	# more blocks than the slice's data groups hold. Asserted here, so a change
+	# of either size fails at once instead of in step 02's wait.
+	local need held
+	need=$(((REACT_TD_SIZE / SLICE_CNT + block - 1) / block +
+		(TD0_SIZE / SLICE_CNT + block - 1) / block))
+	held=$(sp_field '[.slice_list[0].data_grp_list[].data_blocks | tonumber] | add')
+	case "$held" in
+	'' | *[!0-9]*) die "slice 0's data blocks read '$held', not a number" ;;
+	esac
+	assert_ge "$need" "$((held + 1))" \
+		"the blocks $TD_REACT and t0 need in slice 0 must exceed the $held its data groups hold, or AR6's covered rule stops the grow step 02 waits for"
+
 	ctl_ok td create --name "$TD_REACT" --size "$REACT_TD_SIZE"
 	REACT_TD_ID=$(jq_of "$CTL_OUT" '.td_id')
 	case "$REACT_TD_ID" in
