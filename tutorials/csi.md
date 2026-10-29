@@ -198,9 +198,10 @@ sudo k3s kubectl get csistoragecapacities -A -o custom-columns=CLASS:.storageCla
 
 It prints one row: the class `dnv`, a capacity of `18Gi` and a largest
 volume of `18Gi`. The four disk nodes hold 36 free extents of 1 GiB, and
-RAID1 writes every byte twice, so 18 GiB is free now; a new volume can be
-no larger than that. The number is free space, not a promise: it is not
-held for any volume.
+RAID1 writes every byte twice, so 18 GiB is free now, and the largest
+volume Kubernetes is told of is capped at that. Both are free space, not a
+promise: nothing is held for a volume, and a create can build a larger
+claim too, since a volume takes only an eighth of its size at the start.
 
 ## A volume
 

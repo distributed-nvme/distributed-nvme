@@ -28,37 +28,55 @@ func initExtCnt(size uint64, extentSize uint64) uint64 {
 // meta group and its data group.
 const poolGrpCnt = 2
 
+// dnFloorOf is the free extents a disk node needs to be offered at all: the
+// level of the cluster's smallest bin (architecture.md, DN bins); a disk
+// node below it holds no capacity key, and no scan finds it.
+func dnFloorOf(conf *pb.DnBinConf) uint64 {
+	shift := conf.GetBin0Shift()
+	if shift >= 64 {
+		return ^uint64(0)
+	}
+	return uint64(1) << shift
+}
+
 // capacityOf turns the cluster capacity call's records into the two numbers
-// Kubernetes asks for (csi.md, Capacity). A pool puts every leg on a disk
-// node of its own and every cntlr on a controller node of its own, charged
-// with the whole pool's extents (architecture.md, Per-operation
-// allocation), so a class that needs more eligible disk nodes or controller
-// nodes than the cluster has gets nothing; an eligible node is enabled,
-// healthy, below its ceiling and has an extent free. Otherwise the available
-// bytes are the smaller of the disk side and the controller side: the free
-// extents of the eligible disk nodes, times the extent size, divided by the
-// legs a group has; and the free extents of the eligible controller nodes,
-// times the extent size, divided by the cntlr count. The largest volume is
-// the one whose first data group, one part in volumeSteps of it, still fits
-// the disk node that would carry its last data leg, the legs-th largest free
-// count, since the meta group's legs sit on other disk nodes, and the
-// controller node that would carry its last cntlr, the cntlrs-th largest
-// free count less the meta group's extent; and it is never above the
-// available bytes. Both are estimates, as the capacity call itself is.
+// Kubernetes asks for (csi.md, Capacity). A disk node counts when it is
+// enabled, healthy, below its side ceiling and has dnFloor free extents; a
+// controller node when it is enabled, healthy, below its cntlr ceiling and
+// has an extent free. A pool puts every leg on a disk node of its own and
+// every cntlr on a controller node of its own, charged with the whole
+// pool's extents (architecture.md, Per-operation allocation), so a class
+// that needs more disk nodes or controller nodes than count gets nothing.
+// Otherwise the available bytes are the smaller of the disk side and the
+// controller side: the free extents of the disk nodes that count, times the
+// extent size, divided by the legs a group has; and the free extents of the
+// controller nodes that count, times the extent size, divided by the cntlr
+// count. The largest volume is the one whose first data group, one part in
+// volumeSteps of it, fits whichever disk nodes the meta group takes, since
+// the gateway places the meta group first and at random: at least legs of
+// the poolGrpCnt*legs fullest disk nodes stay free for the data group, so
+// the bound is the (poolGrpCnt*legs)-th largest free count. It also fits
+// the controller node that would carry the last cntlr, the cntlrs-th
+// largest free count less the meta group's extent; and it is never above
+// the available bytes. Both are estimates, as the capacity call itself is.
 func capacityOf(
 	reply *pb.GetClusterCapacityReply,
 	legs int,
 	cntlrs uint32,
+	dnFloor uint64,
 ) (uint64, uint64) {
 	extent := reply.GetExtentSize()
 	if extent == 0 || legs <= 0 || cntlrs == 0 {
 		return 0, 0
 	}
+	if dnFloor == 0 {
+		dnFloor = 1
+	}
 	var dnFree, cnFree []uint64
 	dnSum, cnSum := uint64(0), uint64(0)
 	for _, dn := range reply.GetAddrPortToDn() {
 		if dn.GetDisabled() || dn.GetErrEpoch() != 0 ||
-			dn.GetSideCnt() >= common.MaxSideCntPerDn || dn.GetFreeExtCnt() == 0 {
+			dn.GetSideCnt() >= common.MaxSideCntPerDn || dn.GetFreeExtCnt() < dnFloor {
 			continue
 		}
 		dnSum += dn.GetFreeExtCnt()
@@ -81,7 +99,7 @@ func capacityOf(
 	}
 	sort.Slice(dnFree, func(i, j int) bool { return dnFree[i] > dnFree[j] })
 	sort.Slice(cnFree, func(i, j int) bool { return cnFree[i] > cnFree[j] })
-	dataExt := dnFree[legs-1]
+	dataExt := dnFree[poolGrpCnt*legs-1]
 	if cnExt := cnFree[cntlrs-1] - 1; cnExt < dataExt {
 		dataExt = cnExt
 	}

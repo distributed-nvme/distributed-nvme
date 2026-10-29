@@ -299,7 +299,10 @@ func (g *fakeGateway) GetStoragePool(
 	}
 	return &pb.GetStoragePoolReply{
 		SpName: req.GetSpName(),
-		SpConf: &pb.SpConf{Deleting: p.deleting},
+		SpConf: &pb.SpConf{
+			Deleting: p.deleting,
+			BdevConf: p.req.GetBdevConf(),
+		},
 	}, nil
 }
 

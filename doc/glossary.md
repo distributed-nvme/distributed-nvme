@@ -156,7 +156,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **dnv disk format** — The self-describing layout a disk node writes on its `--disk` device: a checksummed header block, alternating checksummed volume-table slots, the clone-metadata area and the extent area. The on-disk table, not the local store, is authoritative for extent placement.
 
-**dnv name** — The name a CSI volume's storage pool, thin device and subsystem carry: the name Kubernetes gives the volume when dnv takes it as a name, else its leading characters made acceptable and a hash of the whole name, the same for the same name (see `csi.md`, The volume model).
+**dnv name** — The name a CSI volume's storage pool, thin device and subsystem carry, made from the name Kubernetes gives the volume, the same for the same name (see `csi.md`, The volume model).
 
 **dnvctl** — The operator CLI: a noun-grouped command tree with one leaf command per Gateway RPC, taking the cluster and pool names as global flags and a presence-based `--rev` token, and printing one canonical JSON result document on stdout.
 
@@ -436,7 +436,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **provisioned, zeroing** — The side flag the sp worker sets on a side once the disk node reports the side's zeroing complete (`provisioned`). Zeroing writes zeros from the start of a new side over the length the sp worker sends, the whole leg span for a side of a slice's meta group and the meta region and first data block for a side of a data group or of a clone meta group, as batched zero-out writes through the side device in the dn agent's background, tracked in the volume table as a count of bytes zeroed; a leg none of whose sides has the flag is deferred on the controller node, and so is a clone until every side of its clone meta group's leg list has it. A migration destination carries its own flag that gates the source export and the clone, and takes its clone-metadata slot before it zeroes, zeroing nothing while it has none (see `architecture.md`, Side provisioning protocol).
 
-**publish, unpublish** — The node plugin's calls that give a staged volume to one pod, a bind mount at the pod's path, and take it back. The publish context is what an attach hands the node: the subsystem NQN, the namespace uuid and the cdc addresses (see `csi.md` CSI10, CSI17).
+**publish, unpublish** — The node plugin's calls that give a staged volume to one pod, a bind mount at the pod's path, and take it back. The controller plugin's publish and unpublish are attach and detach, and the publish context is what an attach hands the node: the subsystem NQN, the namespace uuid and the cdc addresses (see `csi.md` CSI10, CSI17).
 
 **QoS** — The cluster-wide ratio of size-proportional IO limits (`qos_ratio`) that every controller-node syncup carries; the cn agent persists it and enforces nothing.
 

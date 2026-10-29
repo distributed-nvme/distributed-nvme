@@ -155,6 +155,10 @@ func TestCreateVolumeIsRepeatable(t *testing.T) {
 	}
 	_, err = c.CreateVolume(ctx, createReq(testVolume, 20*gib))
 	wantCode(t, err, codes.AlreadyExists, "another size")
+	other := createReq(testVolume, 10*gib)
+	other.Parameters[paramRedundancy] = redundancyNone
+	_, err = c.CreateVolume(ctx, other)
+	wantCode(t, err, codes.AlreadyExists, "another redundancy")
 	// A namespace at index one that is not the volume's.
 	ss := g.pool(fakeClusterOne, testVolume).ss[subsystemNqnOf(testVolume)]
 	g.mu.Lock()
@@ -480,7 +484,7 @@ func TestGetCapacity(t *testing.T) {
 	if reply.GetAvailableCapacity() != wantAvail {
 		t.Errorf("available %d, want %d", reply.GetAvailableCapacity(), wantAvail)
 	}
-	// The second-largest disk node holds 1000 extents and the
+	// The fourth-largest disk node holds 1000 extents and the
 	// second-largest controller node 900, less the meta group's one; times
 	// 8 either is above the available bytes, so the largest volume is the
 	// available bytes.
@@ -513,11 +517,23 @@ func TestGetCapacity(t *testing.T) {
 	reply, err = c.GetCapacity(ctx, none)
 	wantCode(t, err, codes.OK, "capacity without redundancy")
 	// A pool without redundancy takes two disk nodes, with 10 and 1000
-	// free.
+	// free; its meta group may take the fuller, so the data group is sure
+	// of 10 extents, times 8.
 	if want := int64(1010 * fakeExtent); reply.GetAvailableCapacity() != want ||
-		reply.GetMaximumVolumeSize().GetValue() != want {
-		t.Errorf("without redundancy: available %d, maximum %d, want %d",
-			reply.GetAvailableCapacity(), reply.GetMaximumVolumeSize().GetValue(), want)
+		reply.GetMaximumVolumeSize().GetValue() != int64(10*fakeExtent*volumeSteps) {
+		t.Errorf("without redundancy: available %d, maximum %d, want %d and %d",
+			reply.GetAvailableCapacity(), reply.GetMaximumVolumeSize().GetValue(), want,
+			10*fakeExtent*volumeSteps)
+	}
+	// The cluster's smallest bin is 16 extents: the disk node with 10 is
+	// offered to no scan, and one is left.
+	g.mu.Lock()
+	cl.conf.DnBinConf.Bin0Shift = 4
+	g.mu.Unlock()
+	reply, err = c.GetCapacity(ctx, none)
+	wantCode(t, err, codes.OK, "capacity under a bin floor")
+	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize().GetValue() != 0 {
+		t.Errorf("one disk node above the floor answers %v, want nothing", reply)
 	}
 	_, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{Parameters: map[string]string{
 		"pool": "sp0",

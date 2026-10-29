@@ -48,35 +48,41 @@ func TestCapacityOf(t *testing.T) {
 	}
 	// RAID1 puts four legs on four disk nodes, and three are eligible: no
 	// pool of the class can be built.
-	if avail, maxVol := capacityOf(reply, 2, 2); avail != 0 || maxVol != 0 {
+	if avail, maxVol := capacityOf(reply, 2, 2, 1); avail != 0 || maxVol != 0 {
 		t.Errorf("three disk nodes for four legs: available %d, maximum %d", avail, maxVol)
 	}
-	// With a fourth: 560 free disk extents over 2 legs; the second largest
-	// disk node has 30, the meta group's legs going elsewhere, times 8.
+	// With a fourth: 560 free disk extents over 2 legs. The meta group,
+	// placed first and at random, may take the two fullest disk nodes, so
+	// the data group is sure of the fourth largest, 10, times 8.
 	reply.AddrPortToDn["d"] = dn(20)
-	avail, maxVol := capacityOf(reply, 2, 2)
+	avail, maxVol := capacityOf(reply, 2, 2, 1)
 	if want := 560 * fakeExtent / 2; avail != want {
 		t.Errorf("available %d, want %d", avail, want)
 	}
-	if want := 30 * fakeExtent * volumeSteps; maxVol != want {
+	if want := 10 * fakeExtent * volumeSteps; maxVol != want {
 		t.Errorf("maximum volume %d, want %d", maxVol, want)
 	}
-	// No redundancy, one cntlr: the largest disk node bounds the volume,
-	// capped by the available bytes.
-	avail, maxVol = capacityOf(reply, 1, 1)
-	if want := 560 * fakeExtent; avail != want || maxVol != want {
-		t.Errorf("without redundancy: available %d, maximum %d, want %d",
-			avail, maxVol, want)
+	// No redundancy, one cntlr: the second largest disk node bounds the
+	// volume, 30 times 8.
+	avail, maxVol = capacityOf(reply, 1, 1, 1)
+	if want := 560 * fakeExtent; avail != want || maxVol != 30*fakeExtent*volumeSteps {
+		t.Errorf("without redundancy: available %d, maximum %d, want %d and %d",
+			avail, maxVol, want, 30*fakeExtent*volumeSteps)
+	}
+	// A disk node below the cluster's smallest bin is offered to no scan:
+	// with a floor of 16 extents, c (10) drops out and RAID1 has three.
+	if avail, maxVol = capacityOf(reply, 2, 2, 16); avail != 0 || maxVol != 0 {
+		t.Errorf("a floor of 16: available %d, maximum %d, want nothing", avail, maxVol)
 	}
 	// The controller node that would carry the last cntlr bounds the
 	// volume: 6 free, less the meta group's extent.
 	reply.AddrPortToCn["y"].FreeExtCnt = 6
-	if _, maxVol = capacityOf(reply, 2, 2); maxVol != 5*fakeExtent*volumeSteps {
+	if _, maxVol = capacityOf(reply, 2, 2, 1); maxVol != 5*fakeExtent*volumeSteps {
 		t.Errorf("maximum volume %d under a full controller node, want %d",
 			maxVol, 5*fakeExtent*volumeSteps)
 	}
 	// More cntlrs than eligible controller nodes: nothing.
-	if avail, maxVol = capacityOf(reply, 2, 3); avail != 0 || maxVol != 0 {
+	if avail, maxVol = capacityOf(reply, 2, 3, 1); avail != 0 || maxVol != 0 {
 		t.Errorf("two controller nodes for three cntlrs: available %d, maximum %d",
 			avail, maxVol)
 	}
@@ -84,11 +90,14 @@ func TestCapacityOf(t *testing.T) {
 	// smaller.
 	reply.AddrPortToCn["x"].FreeExtCnt = 50
 	reply.AddrPortToCn["y"].FreeExtCnt = 50
-	avail, _ = capacityOf(reply, 2, 2)
+	avail, _ = capacityOf(reply, 2, 2, 1)
 	if want := 100 * fakeExtent / 2; avail != want {
 		t.Errorf("available %d under a tight controller side, want %d", avail, want)
 	}
-	if avail, maxVol = capacityOf(&pb.GetClusterCapacityReply{}, 2, 2); avail != 0 || maxVol != 0 {
+	if avail, maxVol = capacityOf(&pb.GetClusterCapacityReply{}, 2, 2, 1); avail != 0 || maxVol != 0 {
 		t.Errorf("an empty reply gives %d and %d", avail, maxVol)
+	}
+	if dnFloorOf(&pb.DnBinConf{Bin0Shift: 4}) != 16 || dnFloorOf(nil) != 1 {
+		t.Errorf("dnFloorOf: %d and %d", dnFloorOf(&pb.DnBinConf{Bin0Shift: 4}), dnFloorOf(nil))
 	}
 }

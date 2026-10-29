@@ -222,6 +222,11 @@ func (c *controller) CreateVolume(
 	if err != nil && codeOf(err) != codes.AlreadyExists {
 		return nil, fromGateway("CreateStoragePool", err)
 	}
+	if err != nil {
+		if err := c.checkPool(ctx, p, name); err != nil {
+			return nil, err
+		}
+	}
 
 	// The thin device, named as the volume and sized to the request.
 	tdId, err := c.ensureThinDevice(ctx, p.cluster, name, size)
@@ -273,6 +278,37 @@ func (c *controller) clusterConf(
 		return nil, fromGateway("GetCluster", err)
 	}
 	return reply.GetClusterConf(), nil
+}
+
+// checkPool reads back the pool a repeated create found under the volume's
+// name (csi.md CSI9): one still being deleted is ABORTED, so the caller
+// retries once the drain has removed the name, and one of another
+// redundancy is ALREADY_EXISTS. Its cntlr count is not compared, since an
+// operator may add or delete cntlrs.
+func (c *controller) checkPool(ctx context.Context, p params, name string) error {
+	gctx, cancel := c.gwCtx(ctx)
+	reply, err := c.gw.GetStoragePool(gctx, &pb.GetStoragePoolRequest{
+		ClusterName: p.cluster,
+		SpName:      name,
+	})
+	cancel()
+	if err != nil {
+		if codeOf(err) == codes.NotFound {
+			return status.Errorf(codes.Aborted,
+				"volume %q went away under the create; retry", name)
+		}
+		return fromGateway("GetStoragePool", err)
+	}
+	if reply.GetSpConf().GetDeleting() {
+		return status.Errorf(codes.Aborted,
+			"volume %q is still being deleted; retry later", name)
+	}
+	_, none := reply.GetSpConf().GetBdevConf().GetRedundConf().GetRedunKind().(*pb.RedundConf_RedundNone)
+	if none != (p.redundancy == redundancyNone) {
+		return status.Errorf(codes.AlreadyExists,
+			"volume %q exists with another redundancy", name)
+	}
+	return nil
 }
 
 // ensureThinDevice creates the volume's thin device or finds it, and
@@ -692,25 +728,36 @@ func (c *controller) GetCapacity(
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 	}
+	// A cluster that does not exist has nothing free (csi.md, Capacity):
+	// Kubernetes asks on a timer, and a create is where a class that names
+	// a wrong cluster fails.
+	nothing := &csi.GetCapacityResponse{MaximumVolumeSize: wrapperspb.Int64(0)}
 	gctx, cancel := c.gwCtx(ctx)
+	cluster, err := c.gw.GetCluster(gctx, &pb.GetClusterRequest{
+		ClusterName: p.cluster,
+	})
+	cancel()
+	if err != nil {
+		if codeOf(err) == codes.NotFound {
+			return nothing, nil
+		}
+		return nil, fromGateway("GetCluster", err)
+	}
+	gctx, cancel = c.gwCtx(ctx)
 	defer cancel()
 	reply, err := c.gw.GetClusterCapacity(gctx, &pb.GetClusterCapacityRequest{
 		ClusterName: p.cluster,
 	})
 	if err != nil {
 		if codeOf(err) == codes.NotFound {
-			// A cluster that does not exist has nothing free (csi.md,
-			// Capacity): Kubernetes asks on a timer, and a create is
-			// where a class that names a wrong cluster fails.
-			return &csi.GetCapacityResponse{
-				MaximumVolumeSize: wrapperspb.Int64(0),
-			}, nil
+			return nothing, nil
 		}
 		return nil, fromGateway("GetClusterCapacity", err)
 	}
 	// The largest volume is always set, zero included: an unset one means
 	// no bound per volume.
-	available, maxVolume := capacityOf(reply, p.legs(), p.cntlrCnt())
+	available, maxVolume := capacityOf(reply, p.legs(), p.cntlrCnt(),
+		dnFloorOf(cluster.GetClusterConf().GetDnBinConf()))
 	return &csi.GetCapacityResponse{
 		AvailableCapacity: int64(available),
 		MaximumVolumeSize: wrapperspb.Int64(int64(maxVolume)),
