@@ -1,12 +1,12 @@
 # dnv build entry points (layout.md, Protobuf generation; layout.md,
-# `cmd/` wiring).
+# `cmd/` wiring; the release archive, layout.md, Directory tree).
 GO ?= go
 PROTOC ?= protoc
 
 # The cmd/ directories that already contain Go sources.
 CMDS := $(sort $(patsubst cmd/%/,%,$(dir $(wildcard cmd/*/*.go))))
 
-.PHONY: all gen fmt build vet test fetch-etcd clean
+.PHONY: all gen fmt build vet test fetch-etcd release clean
 
 all: build
 
@@ -67,5 +67,43 @@ test:
 fetch-etcd:
 	bash integtest/fetch_etcd.sh
 
+# release builds the six programs for Linux x64 into one archive with a
+# checksum file under _out/ (layout.md, Directory tree). VERSION is the exact
+# tag on HEAD; an untagged HEAD or a tree that is not clean is refused, unless
+# VERSION is given on the command line, which overrides both refusals; an
+# environment VERSION is ignored. The binaries are static (cgo off), free of
+# build paths (-trimpath) and stripped (-s -w); Go stamps the module version
+# from the tag, so `go version -m` on each binary still prints it. The archive
+# is reproducible: a fixed owner, sorted entries, the commit time of HEAD as
+# every entry's time, and gzip without a timestamp, so a rebuild on the same
+# commit gives the same checksum.
+ifneq ($(origin VERSION),command line)
+VERSION := $(shell git describe --tags --exact-match 2>/dev/null)
+endif
+RELEASE_DIR := dnv-$(VERSION)-linux-amd64
+
+release:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "make release: HEAD carries no tag; tag it, or pass VERSION=<version>" >&2; \
+		exit 1; \
+	fi
+	@if [ "$(origin VERSION)" != "command line" ] && [ -n "$$(git status --porcelain)" ]; then \
+		echo "make release: the tree is not clean; commit or stash, or pass VERSION=<version>" >&2; \
+		exit 1; \
+	fi
+	rm -rf _out/$(RELEASE_DIR) _out/$(RELEASE_DIR).tar.gz _out/SHA256SUMS
+	mkdir -p _out/$(RELEASE_DIR)
+	@for c in $(CMDS); do \
+		echo "  build _out/$(RELEASE_DIR)/$$c"; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags '-s -w' \
+			-o _out/$(RELEASE_DIR)/$$c ./cmd/$$c || exit 1; \
+	done
+	cp LICENSE _out/$(RELEASE_DIR)/
+	cp -r deploy _out/$(RELEASE_DIR)/
+	tar -C _out --sort=name --owner=0 --group=0 --numeric-owner \
+		--mtime=@$$(git log -1 --format=%ct) -cf - $(RELEASE_DIR) | gzip -n > _out/$(RELEASE_DIR).tar.gz
+	cd _out && sha256sum $(RELEASE_DIR).tar.gz > SHA256SUMS
+	@echo "release: _out/$(RELEASE_DIR).tar.gz and _out/SHA256SUMS"
+
 clean:
-	rm -rf bin
+	rm -rf bin _out
