@@ -1,5 +1,5 @@
 // Command cnagentctl is the gRPC driver of the cn-agent integration test
-// (doc/cnagent_integtest.md, The driver: `cnagentctl`). The agent serves
+// (cnagent_integtest.md, The driver: `cnagentctl`). The agent serves
 // plaintext gRPC without
 // server reflection, so grpcurl cannot drive it; this binary speaks the
 // generated ControllerNodeAgent client instead and prints every reply as

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cdc_test.sh — the `dnv-cdc` integration test of doc/cdc.md, Integration test
+# cdc_test.sh — the `dnv-cdc` integration test of cdc.md, Integration test
 # plan. Four servers, a real single-node etcd, a real four-instance dnv-cdc
 # fleet, real nvmet targets over dm-zero and two real kernel NVMe hosts, driven
 # from this machine over ssh by integtest/cdcctl (the gateway's write path for

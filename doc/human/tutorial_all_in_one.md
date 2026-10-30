@@ -3,7 +3,7 @@
 This tutorial runs a whole dnv system on one Linux machine and ends with a
 50 GiB volume on that same machine, connected through nvme-stas. Every
 command is complete: copy it, paste it, run it. Nothing is kept in shell
-variables. The words are those of `doc/core_glossary.md`.
+variables. The words are those of [`core_glossary.md`](core_glossary.md).
 
 ## What you build
 

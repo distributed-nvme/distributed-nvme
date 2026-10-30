@@ -9,94 +9,17 @@ per-node agents converge the data plane to it. It can be the data plane of a
 multi-tenant block storage system, for example behind Kubernetes or OpenStack
 Cinder: it leaves the authentication of users to the layer above, and it keeps
 the data of one storage pool unreadable from any other storage pool unless
-that layer exports it there itself, for example with a transfer
-(`architecture.md`, System overview). The binaries:
+that layer exports it there itself, for example with a transfer.
 
-- `dnv-gateway` serves the `Gateway` gRPC API, stateless and active-active.
-- `dnv-worker` turns the desired state into agent calls, runs the automatic
-  reactions and drains deleted pools and clones.
-- `dnv-agent` runs as `dn` on a disk node or `cn` on a controller node; it
-  converges local state to the desired state it is sent, and never talks to etcd.
-- `dnv-cdc` is the central discovery controller: it serves NVMe-oF discovery to hosts.
-- `dnvctl` is the operator CLI, one command per `Gateway` RPC.
+- [`doc/human/core_glossary.md`](doc/human/core_glossary.md) — the core words
+  of dnv in plain language, the short list to read first.
+- [`doc/human/tutorial_all_in_one.md`](doc/human/tutorial_all_in_one.md) — dnv
+  on one machine, run from its binaries: the whole system, then a host
+  connected to a volume with nvme-stas, every command complete.
+- [`doc/human/tutorial_csi.md`](doc/human/tutorial_csi.md) — dnv under
+  Kubernetes on one machine: a one-node Kubernetes gets its volumes from dnv
+  through `dnv-csi`, every command complete.
+- [`LICENSE`](LICENSE) — the MIT license dnv is released under.
 
-Module: `github.com/distributed-nvme/distributed-nvme`.
-
-## Start here
-
-Read [`doc/core_glossary.md`](doc/core_glossary.md) first: the core words in
-plain language. [`doc/glossary.md`](doc/glossary.md) defines the full
-vocabulary the documents use. Then read
-[`doc/architecture.md`](doc/architecture.md), the design as a whole: the object
-model, the device stacks, naming, the etcd data model, allocation, common
-validation, the `Gateway` API contract, the agent and worker contracts, the
-procedures that span components and the design decisions. The other documents
-each own a part:
-
-- [`doc/gateway.md`](doc/gateway.md) — `dnv-gateway`: how it carries out each RPC.
-- [`doc/dnv-worker.md`](doc/dnv-worker.md) — `dnv-worker` and the `etcdutil` and `model` packages.
-- [`doc/dnagent.md`](doc/dnagent.md) — `dnv-agent`: what both roles share, the command, the dn role.
-- [`doc/cnagent.md`](doc/cnagent.md) — the cn role of `dnv-agent`.
-- [`doc/cdc.md`](doc/cdc.md) — `dnv-cdc`: the discovery service and its etcd watcher.
-- [`doc/dnvctl.md`](doc/dnvctl.md) — `dnvctl`: invocation, the command tree, output and errors.
-- [`doc/log.md`](doc/log.md) — the JSON logging and the trace id every binary shares.
-- [`doc/grpc.md`](doc/grpc.md) — the gRPC interceptors every dnv connection and server chains, and the message limit every one sets.
-- [`doc/osclient.md`](doc/osclient.md) — the `OsClient`, the one path to the operating system.
-- [`doc/layout.md`](doc/layout.md) — the directory tree, the dependency rules, protobuf generation.
-- [`doc/dependencies.md`](doc/dependencies.md) — the direct module dependencies and why each is allowed.
-- [`doc/csi.md`](doc/csi.md) — dnv-csi, the CSI driver for Kubernetes, and its suite.
-
-Two tutorials run the system on one machine, every command complete:
-[`tutorials/all_in_one.md`](tutorials/all_in_one.md) builds dnv and connects
-a host to a volume with nvme-stas, and [`tutorials/csi.md`](tutorials/csi.md)
-adds a one-node Kubernetes and mounts a claim in a pod through the CSI driver.
-
-The integration suites drive real binaries on lab VMs over ssh, one script
-under `integtest/` each; what a suite proves, its topology and its cleanup are
-its document's:
-
-- `integtest/dnagent_test.sh` — [`doc/dnagent_integtest.md`](doc/dnagent_integtest.md)
-- `integtest/cnagent_test.sh` — [`doc/cnagent_integtest.md`](doc/cnagent_integtest.md)
-- `integtest/e2e_test.sh` — [`doc/e2e_integtest.md`](doc/e2e_integtest.md)
-- `integtest/worker_test.sh` — [`doc/dnv-worker.md`, Integration test plan](doc/dnv-worker.md#integration-test-plan)
-- `integtest/gateway_test.sh` — [`doc/gateway.md`, Integration test plan](doc/gateway.md#integration-test-plan)
-- `integtest/cdc_test.sh` — [`doc/cdc.md`, Integration test plan](doc/cdc.md#integration-test-plan)
-- `integtest/dnvctl_test.sh` — [`doc/dnvctl.md`, Integration test plan](doc/dnvctl.md#integration-test-plan)
-- `integtest/csi_test.sh` — [`doc/csi.md`, Integration test plan](doc/csi.md#integration-test-plan)
-
-`integtest/runner.sh` runs the suites one after another, as listed in
-`integtest/runner.conf`, and ends with a summary of every run (`layout.md`,
-Directory tree).
-
-## Build
-
-The build entry points are `Makefile` targets, run as "make build" and so on:
-
-- `build` compiles every binary under `cmd/` into `bin/` (`layout.md`, `cmd/` wiring).
-- `vet` runs go vet over the whole module.
-- `test` runs go test over the whole module. Its etcd-backed tests need an
-  etcd binary, found as `dnv-worker.md` EU7 says, and the target fails
-  without one.
-- `fetch-etcd` fetches the etcd release the integration suites pin into
-  `integtest/bin/cache`, where `test` finds it.
-- `fmt` formats the Go sources with gofmt and `pb/schema.proto` with
-  clang-format, which must be installed.
-- `gen` regenerates `pb/schema.pb.go` and `pb/schema_grpc.pb.go`; it needs
-  `protoc`, `protoc-gen-go` and `protoc-gen-go-grpc` on the PATH. The generated
-  files are committed, so build and test never need protoc (`layout.md`,
-  Protobuf generation).
-
-## Docs and code
-
-The documents under `doc/` are the high-level guide the code must follow: they
-state the current design, its roles, contracts, invariants, orderings and gates,
-and each decision with its reason. The code is the source of truth for every
-detail, so a document never restates a constant's value, a signature or a flag
-table. Each rule has exactly one owner document; anywhere else a rule is cited
-by its id, as in "`gateway.md` GW6", or by its owner's heading text, which the
-bold lead-in of a paragraph under that heading may follow, never by a section
-number, and never restated. A comment or a message names code by identifier,
-as in "ProbeSubsystem (agent/nvmet.go)", never by a line number, and carries
-no date and no citation of a note kept outside the repository.
-`go test ./doclint/`, which `test` also runs, checks the documents, this
-README, and the citations, pointers and dates in the code.
+The design documents under `doc/llm/` are written for maintainers and LLM
+agents.

@@ -15,7 +15,8 @@ import (
 //   - a pointer of the form "identifier (path/file.ext)" names a file of the
 //     tree that holds the identifier;
 //   - what follows a document's name and a comma is a rule id or a heading
-//     text of that document.
+//     text of that document, the one doc of that base name; a README's
+//     headings are never cited.
 //
 // Exceptions go in allowlist.txt under the checks identptr and heading.
 
@@ -126,21 +127,24 @@ func commentBlocks(lines []string, goStyle bool) map[int]string {
 	return out
 }
 
-// TestCitedHeadingsExist: in a comment of a code file and in a doc, what
+// TestCitedHeadingsExist: in a comment of a code file and in an LLM doc, what
 // follows a document's name and a comma is a rule id (TestCitedRuleIdsAreDefined
 // checks that it is defined) or a heading text of that document; a bold
-// lead-in of a paragraph under the heading may follow and is not checked. In a
-// doc, a list of document names and a lower-case continuation are prose, not
-// citations.
+// lead-in of a paragraph under the heading may follow and is not checked. The
+// name is a base name, and it names the one doc that carries it
+// (TestDocBaseNamesAreUnique); the two README.md are never cited by a heading.
+// In a doc, a list of document names and a lower-case continuation are prose,
+// not citations.
 func TestCitedHeadingsExist(t *testing.T) {
 	ok := allow(t, "heading")
 	heads := map[string][]string{}
+	byBase := map[string][]string{}
 	for _, f := range docFiles(t) {
-		base := filepath.Base(f)
-		heads[base] = nil
+		byBase[filepath.Base(f)] = append(byBase[filepath.Base(f)], f)
+		heads[f] = nil
 		for _, ln := range docProse(readLines(t, f)) {
 			if m := headingRe.FindStringSubmatch(ln); m != nil {
-				heads[base] = append(heads[base], normCite(m[1]))
+				heads[f] = append(heads[f], normCite(m[1]))
 			}
 		}
 	}
@@ -156,11 +160,19 @@ func TestCitedHeadingsExist(t *testing.T) {
 				unicode.IsLower([]rune(rest)[0])) {
 				continue
 			}
-			hs, known := heads[doc]
-			if !known {
+			paths := byBase[doc]
+			switch {
+			case len(paths) == 0:
 				bad = append(bad, where+": "+doc+" is not a document")
 				continue
+			case doc == "README.md":
+				bad = append(bad, where+": a README's headings are never cited")
+				continue
+			case len(paths) > 1:
+				bad = append(bad, where+": "+doc+" is the base name of more than one document")
+				continue
 			}
+			hs := heads[paths[0]]
 			if loc := idCiteRe.FindStringIndex(rest); loc != nil && loc[0] == 0 {
 				continue
 			}
@@ -188,7 +200,7 @@ func TestCitedHeadingsExist(t *testing.T) {
 			check(f+":"+itoa(start), text, false)
 		}
 	}
-	for _, f := range docFiles(t) {
+	for _, f := range llmDocFiles(t) {
 		prose := docProse(readLines(t, f))
 		start, cur := 0, []string(nil)
 		flush := func() {

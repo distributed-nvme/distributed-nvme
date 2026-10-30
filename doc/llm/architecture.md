@@ -6348,13 +6348,13 @@ document and the component documents cite it by its id.
   under another version is refused, never formatted over (Disk node).
 * **[D14] The CN uses no LVM either; a clone's dm-clone metadata lives on
   DNs.** A volume group would bring onto the CN exactly the failure class
-  [D13](a) keeps off the DN: a bare vgs or lvs label scan reads every block
+  [D13] (a) keeps off the DN: a bare vgs or lvs label scan reads every block
   device on the node, and a CN holds error targets, md members and
   pathless multipath legs, and can hold suspended devices, which wedge an
   LVM scan in unkillable D state ("exit_aio"; "ignore_suspended_devices"
   and "global_filter" do not help) — while the cn agent would run those
   scans on every converge and every read its check rounds start. The
-  reasons: the [D13](a) label-scan class is eliminated rather than
+  reasons: the [D13] (a) label-scan class is eliminated rather than
   mitigated, lvm2 is one dependency fewer, and CN naming is as
   deterministic as everything else.
   A clone keeps its dm-clone metadata on its clone meta group (Terminology

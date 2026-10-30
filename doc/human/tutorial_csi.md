@@ -1,10 +1,10 @@
 # dnv under Kubernetes on one machine
 
-This tutorial builds on [dnv on one machine](all_in_one.md): the same dnv
+This tutorial builds on [dnv on one machine](tutorial_all_in_one.md): the same dnv
 system on one Linux machine, then a one-node Kubernetes on the same
 machine with the dnv CSI driver, and it ends with a claim of 8 GiB mounted
 in a pod. Every command is complete: copy it, paste it, run it. Nothing is
-kept in shell variables. The words are those of `doc/core_glossary.md`;
+kept in shell variables. The words are those of [`core_glossary.md`](core_glossary.md);
 the few Kubernetes words are explained where they first appear.
 
 ## What you build

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# worker_test.sh — the `dnv-worker` integration test of doc/dnv-worker.md,
+# worker_test.sh — the `dnv-worker` integration test of dnv-worker.md,
 # Integration test plan. One server, a real single-node etcd, a real
 # three-process worker fleet and the plan's fake dn/cn agents, driven from this
 # machine over ssh by integtest/workerctl (the gateway's write path) and

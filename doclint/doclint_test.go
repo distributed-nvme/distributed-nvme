@@ -1,22 +1,30 @@
-// Package doclint holds the tests that hold doc/*.md and README.md to the
-// documentation rules: a doc states the current design and never restates
-// what the code holds. It reads the repository from "..". The checks:
+// Package doclint holds the tests that hold the docs under doc/ and README.md
+// to the documentation rules: a doc states the current design and never
+// restates what the code holds, and a doc written for people never leads its
+// reader into the docs written for the LLM. It reads the repository from "..".
+// An LLM doc, a file under doc/llm/, is under every check; a human doc,
+// README.md at the root or a file under doc/human/, is under the link, path
+// and reference checks alone (layout.md, Human docs and LLM docs). The
+// checks:
 //
-//   - no section numbers anywhere: no section sign in a doc or a code comment, no
-//     numbered headings;
-//   - every rule id cited in a doc, a Go file or a shell suite is defined in a
-//     doc (ids are permanent anchors the code relies on);
-//   - every backticked code identifier and every path a doc names exists in
-//     the tree;
+//   - no section numbers anywhere: no section sign in an LLM doc or a code
+//     comment, no numbered headings;
+//   - every rule id cited in an LLM doc, a Go file or a shell suite is defined
+//     in an LLM doc (ids are permanent anchors the code relies on);
+//   - every backticked code identifier an LLM doc names, and every backticked
+//     path any doc names, exists in the tree;
 //   - no numeric literal beside a named constant (the value lives in the code);
-//   - no dates in a doc (history lives in git); history words are reported
-//     with -v only;
+//   - no dates in an LLM doc (history lives in git); history words are
+//     reported with -v only;
 //   - in a code file: no "path.ext:N" line pointer into a Go, shell, proto or
 //     Markdown file, no ISO date, and no citation of a note kept outside the
 //     repository in the words outsideNoteRe matches (cleanlint_test.go);
 //   - an "identifier (path/file.ext)" pointer resolves, and what follows a
-//     document's name and a comma is a rule id or a heading text of that
-//     document (citelint_test.go).
+//     document's name and a comma is a rule id or a heading text of the one
+//     document of that base name (citelint_test.go);
+//   - every markdown file is in its place, no two docs share a base name,
+//     every markdown link names a file of the tree, and a human doc names no
+//     LLM doc (placelint_test.go).
 //
 // Exceptions live in allowlist.txt beside this file, one per line:
 // "<check> <token>", where check is one of ids, ident, path, value, history,
@@ -68,10 +76,40 @@ func walkFiles(t *testing.T, match func(path string) bool) []string {
 	return out
 }
 
+// docFiles lists every doc: README.md at the root and the markdown files
+// under doc/.
 func docFiles(t *testing.T) []string {
 	return walkFiles(t, func(p string) bool {
 		return p == "README.md" || (strings.HasPrefix(p, "doc/") && strings.HasSuffix(p, ".md"))
 	})
+}
+
+// isLlmDoc says whether a doc is written for the LLM and maintainers; every
+// other doc is a human doc (layout.md, Human docs and LLM docs).
+func isLlmDoc(p string) bool {
+	return strings.HasPrefix(p, "doc/llm/")
+}
+
+// llmDocFiles lists the docs under every check.
+func llmDocFiles(t *testing.T) []string {
+	var out []string
+	for _, f := range docFiles(t) {
+		if isLlmDoc(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// humanDocFiles lists the docs written for people.
+func humanDocFiles(t *testing.T) []string {
+	var out []string
+	for _, f := range docFiles(t) {
+		if !isLlmDoc(f) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func codeFiles(t *testing.T) []string {
@@ -153,7 +191,7 @@ var numberedHeadingRe = regexp.MustCompile(`^#{1,6}\s+(\d+(\.\d+)*\.?|Appendix\s
 
 func TestNoSectionNumbers(t *testing.T) {
 	var bad []string
-	for _, f := range docFiles(t) {
+	for _, f := range llmDocFiles(t) {
 		for i, ln := range readLines(t, f) {
 			if strings.Contains(ln, sectionSign) {
 				bad = append(bad, f+":"+itoa(i+1)+": section sign")
@@ -196,7 +234,7 @@ var (
 
 func definedIds(t *testing.T) map[string]bool {
 	defs := map[string]bool{}
-	for _, f := range docFiles(t) {
+	for _, f := range llmDocFiles(t) {
 		for _, ln := range docProse(readLines(t, f)) {
 			if m := headDefRe.FindStringSubmatch(ln); m != nil {
 				defs[m[1]+m[2]] = true
@@ -216,7 +254,7 @@ func definedIds(t *testing.T) map[string]bool {
 func TestCitedRuleIdsAreDefined(t *testing.T) {
 	defs := definedIds(t)
 	if len(defs) == 0 {
-		t.Fatal("no rule ids defined in doc/")
+		t.Fatal("no rule ids defined in doc/llm/")
 	}
 	ok := allow(t, "ids")
 	var bad []string
@@ -234,7 +272,7 @@ func TestCitedRuleIdsAreDefined(t *testing.T) {
 			}
 		}
 	}
-	for _, f := range docFiles(t) {
+	for _, f := range llmDocFiles(t) {
 		for i, ln := range docProse(readLines(t, f)) {
 			check(f, i, ln)
 		}
@@ -291,6 +329,8 @@ func isCodeName(tok string) bool {
 	return hasUpper.MatchString(body) || strings.Contains(body, "_") || strings.Contains(body, ".")
 }
 
+// TestDocIdentifiersAndPathsExist: a backticked path of any doc exists from
+// the repository root; a backticked code name of an LLM doc is in some source.
 func TestDocIdentifiersAndPathsExist(t *testing.T) {
 	code := corpus(t)
 	words := map[string]bool{}
@@ -307,6 +347,7 @@ func TestDocIdentifiersAndPathsExist(t *testing.T) {
 	var bad []string
 	seen := map[string]bool{}
 	for _, f := range docFiles(t) {
+		llm := isLlmDoc(f)
 		prose := docProse(readLines(t, f))
 		for _, i := range sortedKeys(prose) {
 			ln := prose[i]
@@ -324,7 +365,7 @@ func TestDocIdentifiersAndPathsExist(t *testing.T) {
 						seen[f+"|"+tok] = true
 						bad = append(bad, f+":"+itoa(i)+": path `"+tok+"` does not exist")
 					}
-				case isCodeName(tok):
+				case llm && isCodeName(tok):
 					if okIdent[tok] {
 						continue
 					}
@@ -365,7 +406,7 @@ var valueRe = regexp.MustCompile("`[A-Z][A-Za-z0-9]*`\\s*(=|==|:=|:|\\(|is|of|=\
 func TestNoValuesBesideConstants(t *testing.T) {
 	ok := allow(t, "value")
 	var bad []string
-	for _, f := range docFiles(t) {
+	for _, f := range llmDocFiles(t) {
 		prose := docProse(readLines(t, f))
 		for _, i := range sortedKeys(prose) {
 			if m := valueRe.FindString(prose[i]); m != "" {
@@ -390,7 +431,7 @@ var (
 func TestNoDatesInDocs(t *testing.T) {
 	ok := allow(t, "history")
 	var bad []string
-	for _, f := range docFiles(t) {
+	for _, f := range llmDocFiles(t) {
 		prose := docProse(readLines(t, f))
 		for _, i := range sortedKeys(prose) {
 			if d := dateRe.FindString(prose[i]); d != "" && !ok[d] {
@@ -431,9 +472,9 @@ func report(t *testing.T, what string, bad []string) {
 // there by its path with a trailing slash (`agent/cnagent/`). Which file holds
 // what is the code's; the package boundaries are the doc's.
 func TestLayoutNamesEveryPackage(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join(root, "doc", "layout.md"))
+	b, err := os.ReadFile(filepath.Join(root, "doc", "llm", "layout.md"))
 	if err != nil {
-		t.Fatalf("read doc/layout.md: %v", err)
+		t.Fatalf("read doc/llm/layout.md: %v", err)
 	}
 	text := string(b)
 	dirs := map[string]bool{}
@@ -446,7 +487,7 @@ func TestLayoutNamesEveryPackage(t *testing.T) {
 			continue
 		}
 		if !strings.Contains(text, "`"+d+"/`") {
-			bad = append(bad, "`"+d+"/` is a Go package directory that doc/layout.md does not name")
+			bad = append(bad, "`"+d+"/` is a Go package directory that layout.md does not name")
 		}
 	}
 	sort.Strings(bad)

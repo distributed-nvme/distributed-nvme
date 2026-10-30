@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# e2e_test.sh — the end-to-end integration test of doc/e2e_integtest.md. Ten
+# e2e_test.sh — the end-to-end integration test of e2e_integtest.md. Ten
 # real guests and no fakes anywhere: a real single-node etcd, a real
 # dnv-gateway, a real dnv-worker and a real dnv-cdc on the control-plane VM,
 # many real `dnv-agent dn` instances per DN VM over loop devices, one real
@@ -99,7 +99,7 @@
 #     byte offset, so a length-changing edit kills the run with a bogus syntax
 #     error at an unrelated line.
 #
-# Spec: doc/e2e_integtest.md (rules E2E1..).
+# Spec: e2e_integtest.md (rules E2E1..).
 
 set -euo pipefail
 
@@ -280,7 +280,7 @@ REACT_SLICE_CAP=8
 EXTENT_SIZE=67108864
 
 # The sp's dm-striped chunk. dm-striped maps chunk c of a td to slice
-# c mod slice_cnt (doc/architecture.md, raid0 bitmap math, and
+# c mod slice_cnt (architecture.md, raid0 bitmap math, and
 # regionSkippable's comment in agent/cnagent/thinbm.go), and stripe index i
 # is slice_idx i because the
 # plan sorts its slices by slice_idx (buildSlices, agent/cnagent/plan.go) and
@@ -807,7 +807,7 @@ jq_of() { printf '%s' "$1" | "$JQ" -r "$2"; }
 
 # assert_field reads one field out of a JSON document. dnvctl renders 64-bit
 # proto fields as JSON STRINGS and 32-bit ones as bare numbers (emit (ctl/root.go),
-# doc/dnvctl.md CT4), and `byte_cnt` in the two bitmap replies is a Go int,
+# dnvctl.md CT4), and `byte_cnt` in the two bitmap replies is a Go int,
 # so it is a number too — every comparison here is textual, through jq -r.
 assert_field() { # <json> <filter> <want> <label>
 	assert_eq "$(jq_of "$1" "$2")" "$3" "$4"
@@ -1904,7 +1904,7 @@ require_cluster_id() {
 # hex16 renders one id the way every Go formatter does, with %016x. Its input
 # is a DECIMAL id, which is exactly what dnvctl prints: protojson renders a
 # uint64 proto field as a JSON STRING of decimal digits and a uint32 as a bare
-# number (emit (ctl/root.go), doc/dnvctl.md CT4), so an id arrives here as
+# number (emit (ctl/root.go), dnvctl.md CT4), so an id arrives here as
 # text either way and is handed to printf as text.
 #
 # It is deliberately NOT `printf '%016x' "$(($1))"` (hex16 (cnagent_test.sh)): that
@@ -2556,7 +2556,7 @@ host_write_range() { # <h> <src> <dst> <countMiB> [seekMiB]
 # It is synchronous, unlike host_sha_probe, and that is a claim about one
 # level only: the sole place this suite writes into a device it expects to
 # refuse is SP_LEVEL_READONLY, where the ns-dev carries dm-flakey's
-# `error_writes` table (doc/cnagent.md CN19), the one
+# `error_writes` table (cnagent.md CN19), the one
 # FlakeyErrorWritesTable (agent/dm.go) builds. dm-flakey
 # fails such a bio with an error — it does not requeue it — so nothing here
 # can leave a task in D state, which is the one thing that would need the
@@ -5370,7 +5370,7 @@ report_ctrls() { # <nqn>
 #     `failed to connect socket: -111` — ECONNREFUSED — in the host's dmesg,
 #     once per discovery record. nvme-cli reports neither and returns 0.
 #   * AN EMPTY DISCOVERY LOG. Presenting a hostnqn that is not in the
-#     subsystem's allowed_hosts, DS4 hides the entry (cdc/view.go, doc/cdc.md
+#     subsystem's allowed_hosts, DS4 hides the entry (cdc/view.go, cdc.md
 #     DS4), the log page comes back empty and there is nothing to connect to:
 #     exit 0, nothing on stdout, nothing on stderr, nothing in dmesg, and
 #     `nvme list-subsys` empty afterwards.
@@ -7908,10 +7908,10 @@ DISC_JSON=""
 # SP_GRP_PATH walks the slices outermost and, within each slice, meta groups
 # before data groups — the order allGroups (gateway/alloc.go) uses for one
 # slice. SP_LEG_PATH is each group's leg_list, the legs md takes its members
-# from (doc/cnagent.md CN12). `sp get` holds no other leg of the pool: a
+# from (cnagent.md CN12). `sp get` holds no other leg of the pool: a
 # repair's new leg lives in its repair until the finish and a retired leg in
 # its own record, which `repair get|list` and `retired-leg list` read
-# (doc/architecture.md, Repairs, Retired legs); a group names them only by
+# (architecture.md, Repairs, Retired legs); a group names them only by
 # its rep_name and its retired_leg_id_list.
 SP_GRP_PATH='.slice_list[] | (.meta_grp_list[], .data_grp_list[])'
 SP_LEG_PATH="$SP_GRP_PATH | .leg_list[]"
@@ -7928,7 +7928,7 @@ SP_SIDE_VM='.addr_port | split(":") | .[0]'
 # is a proto3 bool and EmitUnpopulated keeps the false visible, so `not` is a
 # real test and not a null probe. It walks the legs' sides alone: a repair's
 # new side is waited for through its repair, whose STARTED needs it
-# provisioned (doc/architecture.md, Repair).
+# provisioned (architecture.md, Repair).
 SP_UNPROV_CNT="[$SP_SIDE_PATH | select(.provisioned | not)] | length"
 
 # The four CntlrInfo row counts setup step 7 waits on. Maps are keyed by
@@ -8227,7 +8227,7 @@ sp_sides_provisioned() {
 # which re-read [$SP_LEG_PATH] and the pool's repairs on every poll (sp_totals).
 # Three facts about the counts those predicates compare:
 #
-#   * the three counts are what doc/cnagent.md CN10/CN12/CN13 say a primary
+#   * the three counts are what cnagent.md CN10/CN12/CN13 say a primary
 #     holds at READWRITE — one leg row per leg of every group (both roles), one
 #     md/linear row per group, one thin-pool row per slice;
 #   * grp_id_to_md_raid is expected for `none` as well as raid1, because the
@@ -8289,7 +8289,7 @@ td_created() { # <td name>
 # both roles.
 #
 # WHAT THE GATE ASKS, and why it is the agent's own words rather than a sleep.
-# The two rows are doc/cnagent.md's probe table (CN28):
+# The two rows are cnagent.md's probe table (CN28):
 #
 #   ss_id_to_subsystem[ss] OK ⇒ the nvmet subsystem exists, its cntlid range,
 #     serial and model match, attr_allow_any_host is 0, its allowed_hosts are
@@ -8397,7 +8397,7 @@ wait_ns_exported_all() { # <nqn> <ss_id> <ns_id> [secs]
 
 # cntlr_xfer_exported is the transfer twin. A transfer has no CdcEntry and no
 # ss_id/ns_id of its own: CN17 gives it one subsystem and one namespace, and
-# both InspectCntlr rows are keyed by the XFER ID (doc/cnagent.md CN28, and a
+# both InspectCntlr rows are keyed by the XFER ID (cnagent.md CN28, and a
 # deferred transfer's rows are RES_STATUS_PROVISIONING, which again must not
 # pass).
 cntlr_xfer_exported() { # <cntlr id> <xfer_id>
@@ -8934,7 +8934,7 @@ setup_register_nodes() {
 			# wait_until ran its predicate in THIS shell and returned on the
 			# call that succeeded, so $CTL_OUT is that instance's reply.
 			# port_info's res_name is the agent's own port id as %d
-			# (probeDn (agent/dnagent/probe.go); doc/dnagent.md DN18 names
+			# (probeDn (agent/dnagent/probe.go); dnagent.md DN18 names
 			# the row by the agent's port id as a decimal, so on a node running
 			# several agents the rows differ), so this is the
 			# end-to-end proof that --nvmet-port-id reached the agent and
@@ -9229,8 +9229,8 @@ setup_create_sp() {
 # Setup step 7 — provisioning, the primary's stack, the standby's shape
 # ---------------------------------------------------------------------------
 
-# setup_assert_standby takes its standby assertions from doc/cnagent.md.
-# What doc/cnagent.md specifies, rule by rule:
+# setup_assert_standby takes its standby assertions from cnagent.md.
+# What cnagent.md specifies, rule by rule:
 #
 #   CN10 (legs)   "every leg of every group of every slice … both roles", so a
 #                 standby DOES report leg_id_to_leg, one row per leg.
@@ -10143,7 +10143,7 @@ cn_residue_empty() { # <v>
 # per array the way md_stop_all does.
 #
 # WHAT IT IS MEANT TO PROVE, EXACTLY: only the CN assembles arrays ON PURPOSE
-# (doc/cnagent.md CN12: "Groups (md.go; primary only)"), so a dnv-named array
+# (cnagent.md CN12: "Groups (md.go; primary only)"), so a dnv-named array
 # on a DN VM means something else assembled one — which is not hypothetical:
 # the cn writes each leg's md superblock through the side's nvme-tcp export, so
 # it lands on the DN's storage, and an unmasked DN assembles it (rule 7,
@@ -11630,7 +11630,7 @@ ops_inspect() {
 # The whole ladder of architecture.md, SpLevel, down to DISABLE and back to
 # READWRITE, asserting the DOCUMENTED shape at each rung rather than assuming
 # one. The shape comes
-# from doc/cnagent.md CN19's table and was re-derived from
+# from cnagent.md CN19's table and was re-derived from
 # probeCntlr (agent/cnagent/probe.go), which is the only place that decides
 # what InspectCntlr reports:
 #
@@ -13645,7 +13645,7 @@ copy_transfer() {
 	# proof that the agent has converged the transfer, and it is not: the park is
 	# done by the SWEEP and the transfer's subsystem and namespace by the BUILD
 	# phase that follows it (convergeCntlr (agent/cnagent/syncup_cntlr.go) is
-	# "one sweep top-down, then one build phase bottom-up"; doc/cnagent.md
+	# "one sweep top-down, then one build phase bottom-up"; cnagent.md
 	# CN9's ANA and park pre-steps put the park in the sweep by name).
 	# So host0's ns 1 can be inaccessible while $XNQN does not exist yet, and a
 	# connect issued then would not produce a controller. What that failure would

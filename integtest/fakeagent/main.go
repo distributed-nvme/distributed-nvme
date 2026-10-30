@@ -1,9 +1,9 @@
 // Command fakeagent is the fake dn/cn agent pair of the dnv-worker
-// integration suite (doc/dnv-worker.md, Integration test plan, The fake
+// integration suite (dnv-worker.md, Integration test plan, The fake
 // agent): the behavior-file front of the integtest/agentfake library, served
 // over TCP. One binary with a `dn` and a `cn` subcommand, serving the
 // generated DiskNodeAgent resp. ControllerNodeAgent service on a plaintext
-// listener behind the real server interceptors (doc/grpc.md, Wiring), so
+// listener behind the real server interceptors (grpc.md, Wiring), so
 // `agent.log` carries one `grpc server request`/`reply`/`recv`/`send` record
 // per message with the caller's trace id — the suite's evidence of what the
 // worker sent and which worker sent it (RW10). The JSON log goes to stderr
@@ -233,7 +233,7 @@ type program struct {
 // loaded from the state file, the levers from the behavior file — and the
 // server that serves it behind the real server interceptors: they are not
 // optional, since agent.log is the suite's only record of what the worker
-// sent and which worker sent it (doc/grpc.md, Wiring).
+// sent and which worker sent it (grpc.md, Wiring).
 func newProgram(ctx context.Context, opts options) (*program, error) {
 	front := &behaviorFront{path: filepath.Join(opts.dir, behaviorFileName)}
 	agent, err := agentfake.New(ctx, agentfake.Config{

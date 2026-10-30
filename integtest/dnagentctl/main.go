@@ -1,5 +1,5 @@
 // Command dnagentctl is the gRPC driver of the dn-agent integration test
-// (doc/dnagent_integtest.md, The driver: `dnagentctl`). The agent serves
+// (dnagent_integtest.md, The driver: `dnagentctl`). The agent serves
 // plaintext gRPC without server reflection, so grpcurl cannot drive it; this
 // binary speaks the generated DiskNodeAgent client instead and prints every
 // reply as protojson (proto field names) on stdout for the test script to

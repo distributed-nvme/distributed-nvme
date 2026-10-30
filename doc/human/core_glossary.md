@@ -1,6 +1,6 @@
 # Core glossary
 
-The core words of dnv in plain language: the short list to read first. The entries are in reading order, not in alphabetical order. An entry says what a thing is and leaves out how it works in detail, and it uses only ordinary Linux storage words and other words of this list. `glossary.md` holds the full vocabulary with the exact definitions; where an entry here and `glossary.md` disagree, `glossary.md` is right.
+The core words of dnv in plain language: the short list to read first. The entries are in reading order, not in alphabetical order. An entry says what a thing is and leaves out how it works in detail, and it uses only ordinary Linux storage words and other words of this list.
 
 ## Machines
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# dnvctl_test.sh — the `dnvctl` integration test of doc/dnvctl.md, Integration
+# dnvctl_test.sh — the `dnvctl` integration test of dnvctl.md, Integration
 # test plan. One VM, one `integtest/fakegateway` process standing in for the
 # whole control plane, and the real `bin/dnvctl` driven over ssh. Nothing here
 # tests the gateway: the fake records what dnvctl put on the wire and answers

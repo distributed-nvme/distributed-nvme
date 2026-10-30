@@ -252,6 +252,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **host state** — The cdc's record of one host on one instance: created at the host NQN's first live connection with a fresh GENCTR, no pending bit and its view rendered, shared by all its connections and dropped at its last disconnect, so GENCTR restarts when it is recreated (see `cdc.md` DS7).
 
+**human doc** — A markdown file written for people: `README.md` at the repository root and every file under `doc/human/`, in the words of `core_glossary.md` and ordinary Linux storage words, any other project word explained where it first appears. It never links to, names or cites an LLM doc (see `layout.md`, Human docs and LLM docs).
+
 **hydration** — dm-clone's background copy, from the source to the destination, of every region not yet hydrated, which its "enable_hydration" message starts; a region the skip bitmap lets the agent discard needs no copy. An unforced `DeleteClone` or `FinishMigration` first proves through the agent that hydration is complete, from the agent's latest observation of the object that runs the dm-clone (see `architecture.md`, Clones, and Migrations).
 
 **id counters** — The values a cluster's new ids are drawn from: the next id of each of its globals, and each pool's next id and next thin id. An etcd restore takes them back to values the cluster has already handed out, and the id step then moves them far forward (see id step; `architecture.md`, Globals: id allocation + shard buckets).
@@ -313,6 +315,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **lever** — A setting of a fake agent that changes how it answers about one object, such as a row's status, details or reason, a hang of its rounds or of its syncup, a late answer, a dropped stream, a forced reply code, an old or absent observation, or a leftover that clears after some rounds. Its behavior file and Go calls set the same levers (see `dnv-worker.md`, Integration test plan).
 
 **listing rule, discovery listing rule** — The rule that decides which cntlrs' addresses a pool's discovery records carry: a cntlr is listed while it is enabled and either is the primary or has a zero health epoch, which names the primary and every standby a failover may elect (`CdcListed`, `CdcTrConfList`; see `architecture.md` [D18]). Every writer of a `CdcEntry` applies it.
+
+**LLM doc** — A markdown file written for the LLM and maintainers: every file under `doc/llm/`. It may refer to a human doc by its bare name or by a markdown link relative to itself (see `layout.md`, Human docs and LLM docs).
 
 **local store** — The directory an agent keeps the last accepted request per object and one file per received bitmap chunk in (`--local-store`), each written through a temp file, fsync and rename. After a restart it is the desired state the agent reconciles to before serving, and its temp leftovers are deleted at startup.
 

@@ -1,7 +1,7 @@
 // Command fakegateway is the fake dnv gateway of the dnvctl integration suite
-// (doc/dnvctl.md, Integration test plan, The fake gateway, `fakegateway`). It
+// (dnvctl.md, Integration test plan, The fake gateway, `fakegateway`). It
 // serves every method of the generated `Gateway` service on a plaintext
-// listener behind the real server interceptors of doc/grpc.md, Wiring, so
+// listener behind the real server interceptors of grpc.md, Wiring, so
 // `fakegateway.log` carries one `grpc server request`/`reply` record per call
 // with the caller's trace id — the suite's evidence of what dnvctl put on the
 // wire (Integration test plan, What a pass means). The JSON log goes to stderr
@@ -9,7 +9,7 @@
 // `fakegateway.log`.
 //
 // It mirrors integtest/fakeagent's behavior/state/log contract, with the one
-// structural difference doc/dnvctl.md calls out (Integration test plan, The
+// structural difference dnvctl.md calls out (Integration test plan, The
 // fake gateway): everything is keyed per *method*, not per object, because
 // this fake models no cluster state. It answers every call with an empty reply
 // unless behavior.json says otherwise, and the suite it serves tests dnvctl
@@ -1177,7 +1177,7 @@ func main() {
 	}
 	// The server interceptors are not optional: fakegateway.log carries the
 	// method, the caller's trace id and the interceptor's rendering of every
-	// request and reply (doc/grpc.md, Wiring; dnvctl.md, Integration test
+	// request and reply (grpc.md, Wiring; dnvctl.md, Integration test
 	// plan, The fake gateway and What a pass means). The suite reads its
 	// trace-id evidence there; request EQUALITY it asserts against
 	// state.json's last_request. The stream twin is installed even though

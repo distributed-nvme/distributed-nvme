@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# csi_test.sh — the Kubernetes integration test of doc/csi.md (Integration
+# csi_test.sh — the Kubernetes integration test of csi.md (Integration
 # test plan). Three of the lab's guests run Kubernetes: the control-plane
 # guest runs the k3s server beside dnv's control plane, and the two hosts run
 # the k3s agents, so that the pods that mount dnv volumes run on the two real
@@ -53,12 +53,12 @@
 #  9. NEVER edit this file while it is running: bash re-seeks the script by
 #     byte offset, so a length-changing edit kills the run.
 #
-# Spec: doc/csi.md (rules CSI1..).
+# Spec: csi.md (rules CSI1..).
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constants (doc/csi.md, Topology and parameters)
+# Constants (csi.md, Topology and parameters)
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -1517,7 +1517,7 @@ ship_helpers() {
 }
 
 # ---------------------------------------------------------------------------
-# Preflight (doc/csi.md, Preflight)
+# Preflight (csi.md, Preflight)
 # ---------------------------------------------------------------------------
 
 read_constants() {
@@ -1701,7 +1701,7 @@ nodes_ready() {
 }
 
 # ---------------------------------------------------------------------------
-# The dnv stack (doc/csi.md, The suite's dnv stack)
+# The dnv stack (csi.md, The suite's dnv stack)
 # ---------------------------------------------------------------------------
 
 remote_start() { # <target> <dir> <logfile> <cmd…>
@@ -1832,7 +1832,7 @@ ship_one() { # <target> <label> <file…>
 		die "chmod of $WORK/bin on $label failed"
 }
 
-# dnv_up deploys the dnv stack and registers every node (doc/csi.md, The
+# dnv_up deploys the dnv stack and registers every node (csi.md, The
 # suite's dnv stack): the control plane on cp, one dn agent per
 # disk-node guest, one cn agent per controller-node guest, the cluster.
 dnv_up() {
@@ -1903,7 +1903,7 @@ dnv_up() {
 }
 
 # ---------------------------------------------------------------------------
-# The image and the driver's deployment (doc/csi.md, Deployment)
+# The image and the driver's deployment (csi.md, Deployment)
 # ---------------------------------------------------------------------------
 
 # image_build builds the driver's image from the Dockerfile with the binary
@@ -2349,7 +2349,7 @@ host_clean() { # <h>
 }
 
 # ---------------------------------------------------------------------------
-# The cases (doc/csi.md, The cases)
+# The cases (csi.md, The cases)
 # ---------------------------------------------------------------------------
 
 pod_name() { printf 'smoke-host%s' "$1"; }
@@ -2399,7 +2399,7 @@ EOF
 
 # case_volume: a claim, a pod on host0 that writes and reads, the pod on
 # host1 reading the data back, a raw block claim, then every delete and the
-# check that nothing remains (doc/csi.md, The cases).
+# check that nothing remains (csi.md, The cases).
 # capacity_published answers whether the provisioner holds a capacity object
 # of the suite's class with a capacity above zero (csi.md CSI19): the one
 # place Kubernetes shows dnv's free space, and the one the provisioner
@@ -2469,7 +2469,7 @@ cn_index_of() { # <addr_port>
 
 # case_failover: a pod writes in a loop while the primary's cn agent is cut
 # off; after the failover the writer has failed nothing, the stall is
-# reported, and the pattern written before checks out (doc/csi.md, The
+# reported, and the pattern written before checks out (csi.md, The
 # cases).
 case_failover() {
 	CASE=failover

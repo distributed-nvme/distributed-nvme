@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # cnagent_test.sh — the `dnv-agent cn` integration test of
-# doc/cnagent_integtest.md. Two real VMs, real nvme-tcp/md-raid1/dm-thin/
+# cnagent_integtest.md. Two real VMs, real nvme-tcp/md-raid1/dm-thin/
 # dm-clone/nvmet, driven over gRPC from this machine by integtest/cnagentctl,
 # with real `dnv-agent dn` instances (driven by integtest/dnagentctl) as the
 # side backing.

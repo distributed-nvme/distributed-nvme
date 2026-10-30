@@ -2,7 +2,8 @@
 
 This document owns the layout of the repository: the module identity, the
 directory tree with the role of every Go package directory, how the
-integration suites are run, the dependency rules between the packages,
+integration suites are run, where the documents for people and for the
+LLM live and who may name whom, the dependency rules between the packages,
 protobuf generation, and the rules every binary's `main` follows, so that
 the documents and the imports agree on every package path. It leans on
 `dependencies.md` for the module's direct dependencies, on `architecture.md`
@@ -41,7 +42,8 @@ Unit tests are colocated `_test.go` files inside each package.
 |---|---|
 | `go.mod`, `go.sum` | the module (Module identity) and its requirements (`dependencies.md`, Direct dependencies) |
 | `Makefile` | the build entry points: protobuf generation and formatting (Protobuf generation), the binaries (`cmd/` wiring), vet and test over the whole module, and the fetch of the etcd release the integration suites pin (`dnv-worker.md` EU7) |
-| `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, `glossary.md`, the project vocabulary, and `core_glossary.md`, its core words in plain language |
+| `doc/human/` | the human docs (Human docs and LLM docs): `core_glossary.md`, the core words of dnv in plain language, and the two tutorials, user guides that run the system on one machine with every command complete: dnv alone, with a host connected over nvme-stas, and dnv under a one-node Kubernetes through the CSI driver |
+| `doc/llm/` | the LLM docs (Human docs and LLM docs), the design documents the code follows: `README.md`, the entry point, with what each document owns, the suites and the rules for docs and code comments; `architecture.md` for the system as a whole; one document per component and per shared piece; the repository-level documents (this one and `dependencies.md`); the documents of the on-hardware suites; and `glossary.md`, the project vocabulary |
 | `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and in `integtest/bin/` the built drivers, the etcd download cache the suites and the unit tests share (`dnv-worker.md` EU7), the gojq fallback a suite installs when the machine running it has no jq, and the runner's output, one directory for each time it runs |
 | `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation), beside tests that read the schema's descriptors |
 | `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats, the name format of a worker's repair with its reserved prefix (`architecture.md`, Common validation), the strict parsers of the dm-name and NQN formats, the metadata-unit formula the gateway and the dn agent share (`architecture.md`, Metadata units), the dm line parser and the dm-clone status parser the gateway, both agents and the two agent drivers share (`architecture.md`, Live-state reporting), logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors and the message-limit options (`grpc.md`) |
@@ -72,8 +74,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `cmd/dnvctl/` | the `main` of `dnvctl`, the operator CLI |
 | `cmd/dnv-csi/` | the `main` of `dnv-csi`, the CSI driver |
 | `deploy/` | the CSI driver's container image recipe and the plain manifests that deploy its two plugins with the Kubernetes sidecars (`csi.md`, Deployment) |
-| `tutorials/` | the two tutorials, user guides that run the system on one machine with every command complete: dnv alone, with a host connected over nvme-stas, and dnv under a one-node Kubernetes through the CSI driver |
-| `doclint/` | a test-only package: the lint that holds the documents under `doc/` and `README.md` to the documentation rules |
+| `doclint/` | a test-only package: the lint that holds the documents under `doc/` and `README.md` to the documentation rules, the placement and reference rules among them (Human docs and LLM docs) |
 
 The integration suites are driven over ssh against remote hosts. The two
 agent suites need passwordless sudo, for real dm, md, nvmet and NVMe/TCP over
@@ -109,6 +110,39 @@ suite builds the programs from the working tree; a git call that fails
 reads as unknown, never as clean. An interrupted runner starts no further
 copy, no cleanup-only run and no later run, and stops once the running suite
 or copy has ended.
+
+## Human docs and LLM docs
+
+Every tracked markdown file is one of three things: `README.md` at the
+repository root, a human doc under `doc/human/`, or an LLM doc under
+`doc/llm/`. A human doc is written for people, in the words of
+`core_glossary.md` and ordinary Linux storage words, and it explains any
+other project word in the sentence that first uses it; an LLM doc is
+written for the LLM and maintainers. A human doc never links to, names or
+cites an LLM doc: not by a link or an image whose target is under
+`doc/llm/`, not by an LLM doc's file name, and not by a rule id. The bare
+name `README.md` is the root README's as well and may be written; a path
+to the LLM one may not. An LLM doc may refer to a human doc by its bare
+name, and a link from an LLM doc to a human doc is a markdown link relative
+to the LLM doc. The root README may say that the documents under
+`doc/llm/` exist and whom they are for, naming the directory and no file in
+it.
+
+The reason: a human reads only the human docs, and the LLM reads both. A
+human doc that names an LLM doc leads its reader where the words are not
+theirs, since an LLM doc uses the full vocabulary of `glossary.md` and
+cites rules by id; the directory name alone tells a developer that the
+design documents exist.
+
+In a human doc, another doc is a markdown link with a path relative to the
+file, so that a reader on GitHub can follow it; file and program names stay
+in backticks, and a backticked path of a file is written from the
+repository root, where `doclint/` looks it up. No two docs share a base
+name, so that a bare name names one document wherever it is cited, except
+the two `README.md`, which are never cited by their headings. `doclint/`
+enforces the placement, the references of the human docs, that every
+markdown link of every doc names a file of the tree, and the unique base
+names.
 
 ## Dependency rules
 

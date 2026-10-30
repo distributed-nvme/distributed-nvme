@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # dnagent_test.sh — the `dnv-agent dn` integration test of
-# doc/dnagent_integtest.md. Two real VMs, real dm/nvmet/nvme-tcp, driven
+# dnagent_integtest.md. Two real VMs, real dm/nvmet/nvme-tcp, driven
 # over gRPC from this machine by integtest/dnagentctl.
 #
 #   bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \

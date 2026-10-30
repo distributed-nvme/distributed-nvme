@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gateway_test.sh — the `dnv-gateway` integration test (doc/gateway.md,
+# gateway_test.sh — the `dnv-gateway` integration test (gateway.md,
 # Integration test plan).
 # One server, a real single-node etcd, THREE real dnv-gateway instances and the
 # fake dn/cn agents of dnv-worker.md

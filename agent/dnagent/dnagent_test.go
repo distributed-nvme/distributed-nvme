@@ -1316,7 +1316,7 @@ func TestZeroingResumesAfterRestart(t *testing.T) {
 // drained by a bare cancel just as fast as by cancel-and-wait, so a test built
 // on those passes with the `<-done` deleted and with the stop moved after the
 // removal. Here the removal must not appear until the child returns
-// (doc/dnagent.md DN9).
+// (dnagent.md DN9).
 func TestZeroingCancelledBeforeDeviceRemoval(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
