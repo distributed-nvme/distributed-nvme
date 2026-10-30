@@ -53,8 +53,9 @@ How the commands are written:
 
 - All commands run in one terminal, in the directory that holds the
   binaries `etcd`, `dnv-gateway`, `dnv-worker`, `dnv-cdc`, `dnv-agent` and
-  `dnvctl`. Change into that directory once; every file the tutorial makes
-  lands there.
+  `dnvctl`; [Get dnv](introduction.md#get-dnv) says where they come from.
+  Change into that directory once; every file the tutorial makes lands
+  there.
 - Commands that touch the kernel run with `sudo`. The control plane and
   `dnvctl` run as you.
 - A long-running program goes to the background with a log file and a pid

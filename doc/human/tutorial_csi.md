@@ -45,9 +45,12 @@ The fixed names:
 How the commands are written:
 
 - All commands run in one terminal, in the directory of the all-in-one
-  tutorial, the one that holds the binaries. Before you start, copy
-  `dnv-csi` from the build's `bin/` and the repository's `deploy/`
-  directory, the image recipe and the driver's manifests, into it.
+  tutorial, the one that holds the binaries ([Get dnv](introduction.md#get-dnv)
+  says where they come from). Before you start, make sure that directory
+  holds `dnv-csi` and the `deploy/` directory, the image recipe and the
+  driver's manifests: the unpacked release folder has both already; a build
+  has them in its `bin/` and in the repository's `deploy/`, so copy them
+  from there.
 - Every Kubernetes command runs as `sudo k3s kubectl`: k3s keeps its
   credentials readable by root alone. Commands that touch the kernel run
   with `sudo`. The control plane and `dnvctl` run as you.

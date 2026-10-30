@@ -11,6 +11,9 @@ Cinder: it leaves the authentication of users to the layer above, and it keeps
 the data of one storage pool unreadable from any other storage pool unless
 that layer exports it there itself, for example with a transfer.
 
+- [`doc/human/introduction.md`](doc/human/introduction.md) — what dnv is for,
+  its six programs, how it is built up and how it behaves, with diagrams;
+  what it needs, what 0.1 is, and how to get it.
 - [`doc/human/core_glossary.md`](doc/human/core_glossary.md) — the core words
   of dnv in plain language, the short list to read first.
 - [`doc/human/tutorial_all_in_one.md`](doc/human/tutorial_all_in_one.md) — dnv
