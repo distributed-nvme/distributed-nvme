@@ -42,8 +42,8 @@ import (
 // side sizes its own batches from the kills it sees (zeroLoop).
 
 // zeroLockPoll is how often the loop retries a lock it could not take. The
-// loop must NEVER block on a lock: dropSideState and the DN6 record sweep
-// cancel it and wait for it while holding the node WRITE lock, and cancelling
+// loop must NEVER block on a lock: dropSideState cancels it and waits for it
+// while holding the node WRITE lock, and cancelling
 // a ctx does not release a goroutine parked in sync.RWMutex.RLock, so a
 // blocking acquire would hang the whole agent (DN9).
 const zeroLockPoll = 20 * time.Millisecond

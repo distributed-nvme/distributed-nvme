@@ -1553,9 +1553,13 @@ func (s *DnAgentServer) sweepDn(
 			slog.Uint64("dn_id", dnId))
 		return res
 	}
-	// A side named only by a record still has its DN9 zeroing child holding
-	// the side device open, and `dmsetup remove` on a device with an open fd
-	// fails EBUSY.
+	// No side device the chain holds has a zeroing goroutine of this process:
+	// the chain holds only sides with no state, and dropSideState cancels and
+	// joins the goroutine before a side's state goes. This loop therefore
+	// finds nothing and is a defensive no-op, not the guard; the guard of the
+	// remove below, which fails EBUSY on a device a child holds open (DN6), is
+	// that join. A child of a killed predecessor is out of reach either way
+	// and surfaces as a leftover.
 	for _, name := range chain.sideDevs {
 		if dn, ok := common.ParseDmName(name); ok {
 			s.stopZeroingOf(clusterId, dnId, dn.Ids[0], dn.Ids[1])

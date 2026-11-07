@@ -134,10 +134,11 @@ type DnAgentServer struct {
 // armed once it has begun. The mark is never cleared: a joined server starts
 // no background work again. A fence callback already running is the
 // deliberate carve-out: it is not enrolled and not waited for, and its
-// converge runs on rootCtx, which agent.Serve cancels before the join, so it
-// starts no command and no task. cmd/dnv-agent passes it to agent.Serve,
-// which cancels rootCtx and calls it after GracefulStop has drained the last
-// RPC (SH27).
+// converge runs on rootCtx, which a signal cancels as the graceful stop starts
+// and agent.Serve cancels on an error return, so it starts no command and no
+// task. cmd/dnv-agent passes it to agent.Serve, which calls it after
+// GracefulStop has drained the last RPC, or straight after an error return,
+// with rootCtx cancelled either way (SH27).
 func (s *DnAgentServer) WaitBackground() {
 	s.mu.Lock()
 	s.bgClosed = true

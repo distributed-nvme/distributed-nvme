@@ -122,10 +122,11 @@ The constants this document relies on, whose values and comments
   leftover by definition has no row — nothing wanted names it. An agent also
   reports a few conditions this way so that the worker re-sends the
   `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
-  sweep): on a dn a disk identity not yet confirmed, or a side with bytes
+  sweep): on a dn a disk identity not yet confirmed, a side with bytes
   still to zero and nothing zeroing it that is not a migration destination
-  waiting for a free run in the clone-metadata area (DN16); on a cn what
-  `cnagent.md` CN30 lists. Only a read's verdict names a side nothing
+  waiting for a free run in the clone-metadata area (DN16), or a side or
+  clone-metadata record a converge's pass could not free (DN19); on a cn
+  what `cnagent.md` CN30 lists. Only a read's verdict names a side nothing
   zeroes, so the observation a converge stores leaves it out until the
   side's next read (DN16); `cnagent.md` CN30 says which of the cn's
   conditions only a read names. It is not a rejection: the worker
@@ -255,8 +256,9 @@ registration and the start of that wait take one lock, so the join waits
 for every task that registered before it and none registers once it has
 begun — a task that would start then is refused, and the next process's
 reconcile starts its work again (DN2). `Serve` takes it as its
-`waitBackground` parameter, cancels the task ctx after the graceful stop
-and then waits. Cancellation kills the in-flight
+`waitBackground` parameter; the task ctx derives from the signal ctx, so a
+signal cancels it as the graceful stop starts, and `Serve` waits once the
+stop has drained the last RPC. Cancellation kills the in-flight
 child through the SH15 soft/hard timeout machinery (`osclient.md`,
 RunCommand, sends SIGTERM then SIGKILL), so the wait is bounded by
 `CmdHardTimeout` per in-flight command — unless the child sits in an
@@ -1857,11 +1859,11 @@ whose `dmsetup info` did not answer, which is not an absence (SH15) — is
 reported as a leftover and stays allocated until a later pass finds the
 device gone; freeing extents a live device still maps is the corruption
 path above, not a leak. Cancelling the zeroing goroutine is not this step's
-business either: the node-level pass cancels and waits for the goroutine of
-every side device it is **about to remove**, ahead of the layers, because a
-live `blkdiscard --zeroout` child holds `DnSideName` open and
-`dmsetup remove` on an open device fails EBUSY (`architecture.md`, Side
-provisioning protocol). The whole step refuses on a disk whose identity
+business either: the goroutine ends when the side's state is dropped,
+ahead of the sweep — the drop of a side whose pointer left the list cancels
+and waits for it — because a live `blkdiscard --zeroout` child holds
+`DnSideName` open and `dmsetup remove` on an open device fails EBUSY
+(DN9). The whole step refuses on a disk whose identity
 this node has not confirmed, as every mutation of the table does (DN5), and
 it says so: the table it cannot use counts as a listing that did not answer
 ("volume table: disk identity is not confirmed for this node"), so the
@@ -2120,7 +2122,11 @@ never be taken from the request.
   and waits for it** before the sweep removes the dm device, because the
   running child holds `DnSideName` open and `dmsetup remove` would fail
   EBUSY. Process exit is SH27's `WaitBackground`, so no orphan
-  `blkdiscard` ever outlives the agent.
+  `blkdiscard` outlives an agent that exits through it; an agent killed
+  outright leaves its child, which holds the side device until its batch
+  ends: a sweep that removes that device meanwhile fails EBUSY and names it
+  a leftover (DN6), and a side still wanted is converged over it, its new
+  goroutine zeroing beside it.
 * `SideInfo.zeroed_bytes` / `zero_bytes` are filled by every converge and
   every background read (DN14, DN16, DN18) of a side DN8's gate admits, so
   every info of such a side carries them.
@@ -2975,7 +2981,10 @@ needed, and the worker never turns one into an `err_epoch`
   and `DnLinearName`: `dmsetup info` plus `dmsetup table` (`probeDmTarget`;
   the linear's target — side device, dm-error or dm-clone — must match the
   desired role; on a migration destination, the backing DN13's shared rule
-  gives, not the dm-clone's mere presence). Inside the cutover window of
+  gives, judged by the dm-clone's presence only where a pass that stopped
+  or waits for the cutover cannot read where the stacks are, DN13). Inside
+  the
+  cutover window of
   `architecture.md`, Migration, the linear is read by phase 1's test
   (DN12): there and suspended, on whatever table it carries, with the
   details "suspended (migration cutover grace window)"; the probe never
@@ -3049,10 +3058,13 @@ could not remove everything, or whose enumeration did not answer, replies
 `ReplyCodeLeftover` with `details` listing the leftovers as "kind:name"
 entries with their count — at most `maxLeftoverNames` names, then a "[+k
 more]" tail — and an "enumeration failed" entry naming what did not answer
-and the error, for each such listing (`LeftoverReply`). Two dn checks that
-are not listings are folded into the same outcome, in that same form, so
-that they drive the same re-send: DN6's record step on a disk whose
-identity is not confirmed, and — in the read-only verdict only, so a
+and the error, for each such listing (`LeftoverReply`). Three dn checks
+that are not listings are folded into the same outcome, in that same form,
+so that they drive the same re-send: DN6's record step on a disk whose
+identity is not confirmed; a record of a side, or of the clone-metadata
+area, that a converge's pass could not free — a read frees nothing — named
+as that record with the error
+(`log.md`, Leftovers); and — in the read-only verdict only, so a
 converge's observation leaves it out until the side's next read (DN16) — a
 side with bytes still to zero and no zeroing goroutine, other than a
 migration destination waiting for a free run in the clone-metadata area.
@@ -3071,13 +3083,19 @@ else reported through `agent_reply` is still a protocol-level refusal.
 
 ## Known limits
 
-* A reload that fails leaves its device suspended (OS wrappers), so
+* A reload whose load fails leaves its device suspended (OS wrappers), so
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,
   the linear stays suspended on its old table only until a later converge
   of the side resumes it there (DN12 rule 2), releasing onto the side's
   data the IO it queued, ahead of any retry of the reload in that
-  converge's build phase.
+  converge's build phase. A flip whose step for the old primary fails
+  before its load — its dm-error step, the read of the dm-error's device
+  number or of the linear, or a suspend that failed before the kernel
+  carried it out — leaves that linear live on the side device beside the new
+  primary's, with the reply's code zero, until the pool's next revision or
+  a restart of the agent (DN2), so one leg can have two live writers for
+  that long (`architecture.md`, Failover).
 * The fence window's start, and the mark a level with no export layer
   leaves when it ends a window early (DN12 rule 3), live only in memory.
   After the window, with the linears resumed on the dm-errors phase 2 left

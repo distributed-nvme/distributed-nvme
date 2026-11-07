@@ -4902,7 +4902,9 @@ mechanisms make that harmless, and both are load-bearing: (a) each side's
 flip is **atomic within one DN converge** — the old primary's dm-linear
 reloads onto dm-error in the same pass that puts the new primary's onto
 the side device — so a single leg never has two writers, short of a reload
-whose load fails (the known limit above); and (b) across the legs of a
+whose load fails (the known limit above) or of an old primary's step that
+fails before its load, which can leave that linear live (`dnagent.md`,
+Known limits); and (b) across the legs of a
 group, **md's own arbitration** decides: a leg whose superblock still
 claims a clean full array is not started degraded on its own ("Make sure
 all groups are available"), and once both legs are reachable the event
@@ -6574,7 +6576,9 @@ document and the component documents cite it by its id.
   available"): each DN converges its side's old-primary-to-dm-error and
   new-primary-to-side-device reloads in one pass, so one leg never has
   two writers — short of a reload of the old
-  primary's linear whose load fails (`dnagent.md`, Known limits); and
+  primary's linear whose load fails, or of a step for that linear that
+  fails before the load and can leave it live (`dnagent.md`, Known limits);
+  and
   mdadm's assembly rules arbitrate across legs — a stale leg whose
   superblock claims a clean full array will not start degraded alone, and
   event counts plus resync direction repair divergence once both legs

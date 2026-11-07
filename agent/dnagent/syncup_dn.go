@@ -390,12 +390,11 @@ func (s *DnAgentServer) sweepOrphanRecords(
 }
 
 // stopZeroingOf cancels and joins the DN9 zeroing goroutine of a side named
-// only by its ids — the shape the node-level sweep works in, where a side's
-// state has already been dropped. The join must precede the side device's
-// removal: the goroutine's `blkdiscard --zeroout` child holds that device
-// open, and `dmsetup remove` on a device with an open fd fails EBUSY. It is a
-// no-op when no local state for that side exists, which is the sweep's normal
-// case.
+// only by its ids. Its one caller, the node-level sweep's loop over the
+// chain's side devices, passes only sides this agent holds no state for, so it
+// finds nothing: the join that guards the side device's removal against EBUSY
+// — the goroutine's `blkdiscard --zeroout` child holds that device open — is
+// dropSideState's (dnagent.md DN6), and this one is a defensive no-op.
 func (s *DnAgentServer) stopZeroingOf(
 	clusterId uint64,
 	dnId uint64,

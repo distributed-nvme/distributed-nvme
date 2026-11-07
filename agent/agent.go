@@ -87,10 +87,11 @@ func Serve(
 	slog.InfoContext(startupCtx, "agent serving",
 		slog.String("network", network),
 		slog.String("address", address))
-	// GracefulStop has drained every RPC by the time Serve returns; the
-	// deferred cancel-and-join above then stops the background workers and
-	// waits for the ones waitBackground covers, so no orphan child process of
-	// theirs outlives the agent (SH27).
+	// GracefulStop has drained every RPC by the time Serve returns. A signal
+	// has cancelled runCtx by then, since it derives from ctx; the deferred
+	// cancel-and-join above cancels it on an error return and then waits for
+	// the workers waitBackground covers, so no orphan child process of theirs
+	// outlives the agent (SH27).
 	return grpcServer.Serve(lis)
 }
 
