@@ -1119,9 +1119,8 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 // down to whatever the level allows.
 //
 // It is written and bumped unconditionally even when the level is unchanged:
-// GW6's idempotent no-write covers the three Update*Enabled/Disabled RPCs
-// only, and an operator resending a level after a partial convergence wants
-// exactly the re-push a bump produces.
+// this RPC is not among GW6's no-writes, and an operator resending a level
+// after a partial convergence wants exactly the re-push a bump produces.
 func (s *Server) UpdateStoragePoolLevel(
 	ctx context.Context,
 	req *pb.UpdateStoragePoolLevelRequest,

@@ -51,9 +51,10 @@ func newRootCmd() *cobra.Command {
 		Short: "dnv control-plane API server",
 		Long: "dnv-gateway serves the Gateway gRPC service to users and " +
 			"CLIs. It reads and writes etcd, and calls agents only for " +
-			"GetDnSize/GetCnSize, the Get*Info behind its Inspect* RPCs " +
-			"and behind the force=false checks of DeleteClone and " +
-			"FinishMigration, and the Get*Bm bitmap reads (gateway.md).",
+			"GetDnSize/GetCnSize, the Get*Info behind its Inspect* RPCs, " +
+			"behind the force=false checks of DeleteClone and " +
+			"FinishMigration and behind ForceStartGroup's check of the " +
+			"group's array, and the Get*Bm bitmap reads (gateway.md).",
 		SilenceUsage: true,
 		// main reports the error on stderr and exits 1; without this cobra
 		// would print the very same line a second time.

@@ -24,9 +24,10 @@
 # creates lives under $WORK on the server, and cleanup removes exactly that.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 67 RPCs maintains exactly the etcd schema (architecture.md,
-# etcd data model), verified against ground truth that never goes through the
-# code under test; (b) parallel gRPCs across instances are correct — disjoint
+# of the RPCs of service Gateway maintains exactly the etcd schema
+# (architecture.md, etcd data model), verified against ground truth that never
+# goes through the code under test; (b) parallel gRPCs across instances are
+# correct — disjoint
 # work all succeeds, contended work has exactly one winner and no partial
 # writes; (c) refusals of every class write nothing, provably, via before/after
 # store-revision brackets; (d) instances are stateless — one can be killed
@@ -2595,8 +2596,8 @@ EOF
 		'["0:0","0:1","2:0"]' \
 		"the FIRST chunk of a SECOND slice is a third key"
 	assert_eq "$(key_count clone_bitmap)" "3" "clone_bitmap keys, two slices"
-	# The transport list is a REPLACEMENT, never a merge: an address that is
-	# gone must stop being retried.
+	# The transport list is a REPLACEMENT, never a merge: a later pass must not
+	# connect an address that is gone again (gateway/clone.go UpdateCloneTrConf).
 	out=$(gw set-clone-tr --sp sp0 --rev "$SP_REV" --name cl0 \
 		--src-tr-addr 127.0.0.2 --src-tr-svc-id 4421)
 	refresh_rev sp0

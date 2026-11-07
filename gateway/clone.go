@@ -748,9 +748,15 @@ func (s *Server) GetClone(
 
 // UpdateCloneTrConf is the UpdateCloneTrConf of architecture.md, Clones: the
 // source SP's cntlrs moved, so the addresses the primary reconnects to are
-// replaced wholesale. The list is a replacement and never a merge — an address
-// that is gone must stop being retried — and the bump is what tells the
-// primary to reconnect.
+// replaced wholesale. The list is a replacement and never a merge — the
+// replacement keeps a later pass from connecting a gone address again, while
+// a controller already connected to it is retired by no pass: with no
+// controller-loss timeout (dnagent.md SH20) it goes on reconnecting while the
+// old endpoint is unreachable, and the host deletes it only when the target
+// refuses the reconnect with DNR; a sweep disconnects a source whose NQN is a
+// transfer of this cluster once no clone names it (cnagent.md CN18, CN21), and
+// any other source waits for an operator or a reboot — and the bump is what
+// tells the primary to reconnect.
 func (s *Server) UpdateCloneTrConf(
 	ctx context.Context,
 	req *pb.UpdateCloneTrConfRequest,

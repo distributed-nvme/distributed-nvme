@@ -27,8 +27,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The normative msg strings of gateway.md, Log records (LG2). The integration
-// suite greps them, so they are constants and never formatted.
+// The normative msg strings of gateway.md, Log records (LG2): the names are
+// binding under that rule, so they are constants and never formatted.
 const (
 	msgGatewayStarting = "gateway starting"
 	msgGatewayServing  = "gateway serving"

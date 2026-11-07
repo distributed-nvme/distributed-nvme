@@ -2397,10 +2397,9 @@ func TestCreateNamespaceRefusals(t *testing.T) {
 // Subsystem value: DeleteNamespace (which returns no id to any counter, since
 // per-SP ids are never reused), UpdateNamespaceDev (which repoints the ns at
 // another td by ID) and UpdateNamespaceSuspended (which writes and bumps even
-// when the flag does not move — GW6's idempotent no-write covers the three
-// Update*Enabled/Disabled RPCs only, and the choreography of architecture.md,
-// Transfer + clone = cross-SP live migration, relies on the bump reaching the
-// cntlrs).
+// when the flag does not move — this RPC is not among GW6's no-writes, and
+// the choreography of architecture.md, Transfer + clone = cross-SP live
+// migration, relies on the bump reaching the cntlrs).
 func TestNamespaceUpdatesAndDelete(t *testing.T) {
 	env := newVolEnv(t)
 	env.putSubsystem(volNqn, 501, []*pb.Namespace{{
@@ -3589,8 +3588,8 @@ func TestDeleteCloneWithoutPrimaryCntlr(t *testing.T) {
 
 // TestGetAndUpdateCloneTrConf pins the read and the transport rewrite of
 // architecture.md, Clones: the
-// list is a REPLACEMENT and never a merge, because an address that is gone
-// must stop being retried by the primary.
+// list is a REPLACEMENT and never a merge, so that a later pass of the primary
+// does not connect an address that is gone again.
 func TestGetAndUpdateCloneTrConf(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)

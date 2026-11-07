@@ -615,9 +615,8 @@ func (s *Server) UpdateNamespaceDev(
 // = cross-SP live migration.
 //
 // It writes and bumps even when the stored flag already equals the requested
-// one: the GW6 idempotent no-write applies to UpdateCntlrEnabled and the
-// two Update*Disabled RPCs only, and the choreography relies on the bump
-// reaching the cntlrs.
+// one: this RPC is not among GW6's no-writes, and the choreography relies on
+// the bump reaching the cntlrs.
 func (s *Server) UpdateNamespaceSuspended(
 	ctx context.Context,
 	req *pb.UpdateNamespaceSuspendedRequest,

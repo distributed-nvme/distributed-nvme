@@ -643,9 +643,13 @@ func (s *Server) InspectCntlr(
 // (architecture.md, Repair). An id in none of them is NOT_FOUND.
 //
 // The agent request names the side by the full SidePointer, not by side_id
-// alone: the dn agent keys its objects by (sp_id, leg_id, side_id), so the
-// leg the scan found travels with the id — a new leg's own id, or a retired
-// leg's, which keys its record. The DnConf is read for its `dn_id`
+// alone, because that is the shape of GetSideInfoRequest: the real dn agent
+// keys a side by (cluster_id, dn_id, sp_id, side_id), and its GetSideInfo
+// reads leg_id only into its message for an unknown side, while the fake agent
+// of the suites keys on leg_id too, so the leg the scan found travels with the
+// id — a new
+// leg's own id, or a retired leg's, which keys its record. The DnConf is read
+// for its `dn_id`
 // alone and its absence is ABORTED for the same reason InspectCntlr's CnConf
 // is — DeleteDiskNode refuses a DN that still carries side pointers.
 //

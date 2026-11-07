@@ -279,10 +279,10 @@ func (s *Server) GetTransfer(
 // only for the destination SP's clone, which is told where
 // to connect out of band.
 //
-// The list is rewritten and the SP bumped unconditionally: GW6's
-// idempotent no-write applies to the three Update*Enabled/Disabled RPCs only,
-// and a caller that resends the same list still wants the cntlrs to re-apply
-// it (architecture.md, Revision keys and the sync fan-out).
+// The list is rewritten and the SP bumped unconditionally: this RPC is not
+// among GW6's no-writes, and a caller that resends the same list still wants
+// the cntlrs to re-apply it (architecture.md, Revision keys and the sync
+// fan-out).
 func (s *Server) UpdateTransferHosts(
 	ctx context.Context,
 	req *pb.UpdateTransferHostsRequest,

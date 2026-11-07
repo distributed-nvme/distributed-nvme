@@ -34,12 +34,13 @@ with `dnvctl`.
 
 The STM bodies of the public RPCs live in the per-resource files of
 `gateway/`. The `model` operations a handler runs as its deciding STM —
-`GrowSlice`, the repair operations `CreateRepair`, `FinishRepair`,
-`CancelRepair`, `SetRepairAbort` and `DeleteRetiredLeg`, which take the
-group of either kind through the parent it records, and `ForceStartGroup`
-and `SetGrpOperatorInCharge`, which take it through the parent their caller
-found (`dnv-worker.md` MD6) — are reused, never duplicated (`dnv-worker.md`
-MD8).
+`GrowSlice`, the repair operations `FinishRepair`, `CancelRepair` and
+`SetRepairAbort` and the retired-leg operation `DeleteRetiredLeg`, which
+take the group of either kind through the parent their record holds, and
+`CreateRepair`, which
+writes the `Repair` record, with `ForceStartGroup` and `SetGrpOperatorInCharge`,
+which take it through the parent their caller found (`dnv-worker.md` MD6)
+— are reused, never duplicated (`dnv-worker.md` MD8).
 
 The package's files follow `layout.md`, Directory tree: serving and the
 trace-id mint (GW1 to GW3); the shared handler helpers — resolution, the
@@ -856,9 +857,11 @@ position, and a re-run of the STM closure on the same picks and reads
   of it (the `SpRev` is the token source).
 * **ListStoragePools** — a paged plain range over `SpConfPrefix` of the
   cluster id (GW10).
-* **UpdateStoragePoolCntlidSlotList** — STM: resolve; token; the validation
-  of `architecture.md`, Storage pools (a duplicate, a value at or above
-  `CnCntlidSlotCnt`, or removing a slot in use is `INVALID_ARGUMENT`), the
+* **UpdateStoragePoolCntlidSlotList** — the list's own validation of
+  `architecture.md`, Storage pools, first, before any read (GW4): an empty
+  list, a duplicate or a value at or above `CnCntlidSlotCnt` is
+  `INVALID_ARGUMENT`. Then STM: resolve; token; removing a slot in use is
+  `INVALID_ARGUMENT`, the
   slots in use read from every cntlr, every slice's sides and the sides of
   every clone's clone meta group, the clones read for that alone, and a
   refusal for a clone's side naming the clone; no repair and no retired leg
@@ -1756,7 +1759,9 @@ bitmap reads, the trace-id chain of GW2 and AG2, and the listing rule of
 the parallel case GW9 — candidate units that lose a pick and run again,
 invisibly — and GW12 under concurrency; the contention case GW6 as fence
 and as liveness loop, GW8 and GW12 (a loser burns no id); the faults
-case GW4, GW7 throughout, AG2's budget, AG3 and AG4, and the primary
+case GW4, GW7 throughout, AG2's budget, AG3, and of AG4 only that
+`DeleteClone` and `FinishMigration` run their agent call between the
+phases, and the primary
 threshold's floor of `architecture.md`, Common validation, from both
 sides, with GW11's `event_threshold` stored as sent; the restart
 case GW1, with the atomicity of one STM per RPC (GW8); and the ceiling
@@ -1778,7 +1783,9 @@ never checks; the primary threshold's floor for a threshold left to
 its default, and where `CreateStoragePool` judges it, before its
 candidate scans and again in its STM; GW9's round cap and the in-STM
 re-check of a pick that filled up after its scan, which no stage can time
-between a scan and its commit; `CreateRepair`'s candidate-changed refusals
+between a scan and its commit; AG4's re-check of a write that lands
+between a two-phase RPC's agent call and its deciding STM, which no stage
+times either; `CreateRepair`'s candidate-changed refusals
 of a group that gained a DN or a pick that went stale; `CreateRepair`'s
 answers to
 the reasons `model` exports, which only a write between its planning read
