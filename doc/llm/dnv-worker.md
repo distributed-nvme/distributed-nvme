@@ -3635,7 +3635,7 @@ the group's whole flag (`grp_not_whole`); and while a leg of the group's
 `leg_list`, or that leg's side, has an `err_epoch` (`grp_leg_unhealthy`).
 Reasons: the retired leg's data exists twice elsewhere only while the group
 is whole, so a group waiting for its legs, through a repair or until md
-makes its array whole, keeps its retired copies; a row turns `UNKNOWN` when
+makes its array whole, keeps its retired legs; a row turns `UNKNOWN` when
 the primary's stream dies, while a plain field such as the whole flag does
 not, so the row must read `OK`; the timer reads the row and the whole flag
 only from an observation at the snapshot's revision or later, since an

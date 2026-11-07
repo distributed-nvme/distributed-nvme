@@ -242,8 +242,9 @@ func (s *Server) CreateControllerNode(
 // Controller nodes.
 //
 // It reaches no agent by design: removing the CnRev key stops the cn-worker,
-// and once no desired state describes the node its agent process can simply
-// be stopped (architecture.md, Disk nodes). The occupancy check is
+// which sends no last syncup, so the node keeps what its agent has not swept
+// and the agent keeps the node's request in its local store (architecture.md,
+// Controller nodes; Known limits). The occupancy check is
 // `cntlr_ptr_list` — the CN mirror of the `side_ptr_list` of architecture.md,
 // Disk nodes — and it runs AFTER the token check (GW6) so an operator working
 // from a stale GetControllerNode is told its view is stale, not told about

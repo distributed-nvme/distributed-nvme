@@ -194,8 +194,9 @@ func (s *Server) CreateDiskNode(
 // DeleteDiskNode is the DeleteDiskNode of architecture.md, Disk nodes.
 //
 // It reaches no agent by design: removing the DnRev key stops the dn-worker,
-// and once no desired state describes the node its agent process can simply
-// be stopped (architecture.md, Disk nodes). The occupancy check is
+// which sends no last syncup, so the node keeps what its agent has not swept
+// and the agent keeps the node's request in its local store (architecture.md,
+// Disk nodes; Known limits). The occupancy check is
 // `side_ptr_list`, and it runs AFTER the token check (GW6) so an operator
 // working from a stale GetDiskNode is told its view is stale, not told about
 // sides it never saw. An operator who sent no token has opted out of that

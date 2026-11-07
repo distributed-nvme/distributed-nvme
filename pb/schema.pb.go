@@ -40,17 +40,17 @@ const (
 	// Do not create thin pools
 	// and include all in SP_LEVEL_NO_CLONE
 	SpLevel_SP_LEVEL_NO_THINPOOL SpLevel = 48
-	// Do not create raid 1/5/6
-	// and include all in SP_LEVEL_NO_THINPOOL
+	// Do not create group devices, md arrays and linears alike, whatever
+	// the redundancy, and include all in SP_LEVEL_NO_THINPOOL
 	SpLevel_SP_LEVEL_NO_REDUND SpLevel = 64
-	// Do not create dm-clone for migratoins
+	// Do not create dm-clone for migrations
 	// and include all in SP_LEVEL_NO_REDUND
 	SpLevel_SP_LEVEL_NO_MIGRATION SpLevel = 80
 	// Do not export sides
 	// and include all in SP_LEVEL_NO_MIGRATION
 	SpLevel_SP_LEVEL_NO_SIDE SpLevel = 96
-	// Only keep the side data devices and their allocation records,
-	// and nothing else
+	// Only keep the side data devices, their allocation records, their
+	// zeroing and a migration destination's clone-metadata record
 	SpLevel_SP_LEVEL_DISABLE SpLevel = 112
 )
 
@@ -270,8 +270,9 @@ func (ResReason) EnumDescriptor() ([]byte, []int) {
 
 // The stage of a repair. CreateRepair writes CREATED; the sp worker moves a
 // CREATED repair to STARTED once the primary reports that the new leg holds
-// a place in the group's array, and to ABORTED once the abort flag is set and
-// the primary confirms the abort. FinishRepair takes a STARTED repair,
+// a place in the group's array and md holds nothing on the bad leg, and to
+// ABORTED once the abort flag is set and the primary confirms the abort.
+// FinishRepair takes a STARTED repair,
 // CancelRepair an ABORTED one, and TryToAbortRepair a CREATED one. Appended
 // values only, never renumbered.
 type RepStage int32
@@ -1476,8 +1477,9 @@ type Group struct {
 	// list of legs renumbered onto 6 would decode
 	// a stored group's old entries as its own,
 	// silently; the name goes with it.
-	// The name of the group's open repair, empty while it has none: one
-	// repair per group, checked in the transaction that creates one without
+	// The name of the group's repair, whatever its stage, empty while it
+	// has none: one repair per group, checked in the transaction that
+	// creates one without
 	// a scan, and the link a cntlr finds the group's repair by in its
 	// request. CreateRepair sets it, and FinishRepair, CancelRepair and the
 	// drains clear it with the Repair key. Appended, never renumbered.
@@ -4433,8 +4435,11 @@ type RetiredLeg struct {
 	GrpId  uint64 `protobuf:"varint,1,opt,name=grp_id,json=grpId,proto3" json:"grp_id,omitempty"`
 	LegIdx uint32 `protobuf:"varint,2,opt,name=leg_idx,json=legIdx,proto3" json:"leg_idx,omitempty"`
 	// The leg's one side, which keeps its extents, its place in its disk
-	// node's side_ptr_list and the data as it was when the leg left. Its
-	// err_epoch is the side's health.
+	// node's side_ptr_list and the data as it was when the leg left, save
+	// what md wrote on it while it was the new leg of a repair that was then
+	// cancelled, and the zero a forced start left on its superblock
+	// (architecture.md, Repair; Known limits). Its err_epoch is the side's
+	// health.
 	Side *Side `protobuf:"bytes,3,opt,name=side,proto3" json:"side,omitempty"`
 	// The time FinishRepair retires the leg at, in unix seconds as
 	// err_epoch is; the retire timer measures the leg's age from it.
@@ -15845,9 +15850,10 @@ func (x *CntlrInfo_ThinInfo) GetTorn() bool {
 }
 
 // The primary's verdict on one repair: whether the repair's new leg
-// holds a place in the group's array, copying or in sync, and whether the
-// abort of a repair whose flag is set is confirmed, the new leg being no
-// member. Fields, not rows: no health rule reads them.
+// holds a place in the group's array, copying or in sync, while md holds
+// nothing on the bad leg, and whether the abort of a repair whose flag
+// is set is confirmed, the new leg being no member. Fields, not rows: no
+// health rule reads them.
 type CntlrInfo_RepairInfo struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Started        bool                   `protobuf:"varint,1,opt,name=started,proto3" json:"started,omitempty"`

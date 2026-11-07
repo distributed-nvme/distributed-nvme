@@ -182,8 +182,8 @@ func (s *CnAgentServer) dumpThinMetadata(
 	}
 	// A dump the soft timeout truncated, or a shared subtree the parser
 	// mishandled, both show up here — and a wrong bitmap is worse than no
-	// bitmap (architecture.md, Clones: bitmaps are an optimization, never a
-	// correctness input).
+	// bitmap (architecture.md, Clones: a bitmap read when Clones says is an
+	// optimization, never a correctness input).
 	defs := sb.defExtents()
 	for i := range sb.Devices {
 		var mapped uint64

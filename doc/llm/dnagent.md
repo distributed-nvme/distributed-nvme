@@ -2761,7 +2761,8 @@ free.
 
 DN14. Reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
-`zeroed_bytes`/`zero_bytes`, filled on every reply (DN9) — `bm_info`
+`zeroed_bytes`/`zero_bytes`, filled on every reply of a side DN8's gate
+admits (DN9) — `bm_info`
 (the applied set, SH21), and the stamp and save time of SH28.
 
 ### `PushMigrBitmap`

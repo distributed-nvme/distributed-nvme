@@ -16,8 +16,9 @@ import (
 // the RPC with an Internal status naming the step (architecture.md, Common
 // agent rules). A pool whose
 // metadata outgrows what thin_dump emits inside CmdSoftTimeout fails the RPC
-// and the caller falls back to a full copy: bitmaps are an optimization, never
-// a correctness input (architecture.md, Clones).
+// and the caller falls back to a full copy: a bitmap read when
+// architecture.md, Clones or Migration, says is an optimization, never a
+// correctness input.
 
 // primaryPlanFor resolves the request's cntlr and returns its plan. Both RPCs
 // need the same three checks, and both must run under the CN1 locks — the

@@ -153,8 +153,9 @@ message Group {
                                 // list of legs renumbered onto 6 would decode
                                 // a stored group's old entries as its own,
                                 // silently; the name goes with it.
-    // The name of the group's open repair, empty while it has none: one
-    // repair per group, checked in the transaction that creates one without
+    // The name of the group's repair, whatever its stage, empty while it
+    // has none: one repair per group, checked in the transaction that
+    // creates one without
     // a scan, and the link a cntlr finds the group's repair by in its
     // request. CreateRepair sets it, and FinishRepair, CancelRepair and the
     // drains clear it with the Repair key. Appended, never renumbered.
@@ -216,17 +217,17 @@ enum SpLevel {
     // Do not create thin pools
     // and include all in SP_LEVEL_NO_CLONE
     SP_LEVEL_NO_THINPOOL = 48;
-    // Do not create raid 1/5/6
-    // and include all in SP_LEVEL_NO_THINPOOL
+    // Do not create group devices, md arrays and linears alike, whatever
+    // the redundancy, and include all in SP_LEVEL_NO_THINPOOL
     SP_LEVEL_NO_REDUND = 64;
-    // Do not create dm-clone for migratoins
+    // Do not create dm-clone for migrations
     // and include all in SP_LEVEL_NO_REDUND
     SP_LEVEL_NO_MIGRATION = 80;
     // Do not export sides
     // and include all in SP_LEVEL_NO_MIGRATION
     SP_LEVEL_NO_SIDE = 96;
-    // Only keep the side data devices and their allocation records,
-    // and nothing else
+    // Only keep the side data devices, their allocation records, their
+    // zeroing and a migration destination's clone-metadata record
     SP_LEVEL_DISABLE = 112;
 }
 
@@ -383,9 +384,10 @@ message CntlrInfo {
         bool torn = 2;
     }
     // The primary's verdict on one repair: whether the repair's new leg
-    // holds a place in the group's array, copying or in sync, and whether the
-    // abort of a repair whose flag is set is confirmed, the new leg being no
-    // member. Fields, not rows: no health rule reads them.
+    // holds a place in the group's array, copying or in sync, while md holds
+    // nothing on the bad leg, and whether the abort of a repair whose flag
+    // is set is confirmed, the new leg being no member. Fields, not rows: no
+    // health rule reads them.
     message RepairInfo {
         bool started = 1;
         bool abort_confirmed = 2;
@@ -763,8 +765,9 @@ message MigrBitmap {
 
 // The stage of a repair. CreateRepair writes CREATED; the sp worker moves a
 // CREATED repair to STARTED once the primary reports that the new leg holds
-// a place in the group's array, and to ABORTED once the abort flag is set and
-// the primary confirms the abort. FinishRepair takes a STARTED repair,
+// a place in the group's array and md holds nothing on the bad leg, and to
+// ABORTED once the abort flag is set and the primary confirms the abort.
+// FinishRepair takes a STARTED repair,
 // CancelRepair an ABORTED one, and TryToAbortRepair a CREATED one. Appended
 // values only, never renumbered.
 enum RepStage {
@@ -810,8 +813,11 @@ message RetiredLeg {
     uint64 grp_id = 1;
     uint32 leg_idx = 2;
     // The leg's one side, which keeps its extents, its place in its disk
-    // node's side_ptr_list and the data as it was when the leg left. Its
-    // err_epoch is the side's health.
+    // node's side_ptr_list and the data as it was when the leg left, save
+    // what md wrote on it while it was the new leg of a repair that was then
+    // cancelled, and the zero a forced start left on its superblock
+    // (architecture.md, Repair; Known limits). Its err_epoch is the side's
+    // health.
     Side side = 3;
     // The time FinishRepair retires the leg at, in unix seconds as
     // err_epoch is; the retire timer measures the leg's age from it.

@@ -756,9 +756,10 @@ type FinishRepairResult struct {
 // DeleteRetiredLeg gives one back: its side returns the group's ext_cnt and
 // its pointer to its disk node, with the node's capacity key and DnRev,
 // through the DN ledger the drains use, and its record and its two list
-// entries go. The group keeps its in-sync leg and its newest retired copy,
-// and a cancelled repair costs no retired copy, since only the finish gives
-// one back. An operator's repair never gives one back.
+// entries go. The group keeps its in-sync leg and its newer retired legs,
+// whole copies or not (architecture.md, Known limits), and a cancelled repair
+// costs no retired leg, since only the finish gives one back. An operator's
+// repair never gives one back.
 //
 // cc is the cluster's stored conf, gated at the top of the STM as the drains
 // gate it, for the bins of the capacity keys the give-back maintains.

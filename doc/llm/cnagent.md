@@ -3372,8 +3372,9 @@ dump overwrites it, and one whose pool is gone stays until a reboot
 clears the runtime directory. The command timeouts of
 `architecture.md`, Common validation, bound the dump; a pool whose
 metadata outgrows what `thin_dump` emits inside `CmdSoftTimeout` fails
-the RPC, and the caller falls back to a full copy — bitmaps are an
-optimization, never a correctness input (`architecture.md`, Clones).
+the RPC, and the caller falls back to a full copy — a bitmap read when
+`architecture.md`, Clones or Migration, says is an optimization, never a
+correctness input.
 CN14's sweeps of a pool's thin ids — the activation sweep and the sweep
 after a failed delete — share this reservation machinery and its
 `CmdSoftTimeout` bound: metadata too large to dump inside the bound fails

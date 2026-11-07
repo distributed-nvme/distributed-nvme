@@ -490,8 +490,10 @@ func (s *Server) CreateStoragePool(
 		// stored conf: the merge below would resolve a zero read back out of
 		// the store into a constant and judge the request against that, where
 		// architecture.md, UNEXPECTED_ERROR → `ABORTED`, makes a stored conf
-		// that fails architecture.md, Common validation, ABORTED, never
-		// INVALID_ARGUMENT.
+		// that fails the stored-conf validators ABORTED, never
+		// INVALID_ARGUMENT. A merged conf that breaks a geometry rule is the
+		// request's INVALID_ARGUMENT below, whichever side the bad member
+		// comes from (architecture.md, Storage pools).
 		if err := model.ValidateClusterConf(scanCc); err != nil {
 			return errAborted("%v", err)
 		}

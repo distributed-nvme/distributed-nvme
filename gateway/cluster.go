@@ -395,7 +395,7 @@ func (s *Server) AdvanceClusterIds(
 
 // GetClusterCapacity is the GetClusterCapacity of architecture.md, Clusters:
 // the recorded counts and flags of every node of a cluster, for the layer
-// above to sum (csi.md, The volume model).
+// above to sum (csi.md CSI11).
 //
 // It reads as the paged lists read (GW5, GW10): a plain `ClusterConf` read
 // for the cluster id, then two plain ranges, the DnConf prefix and the CnConf

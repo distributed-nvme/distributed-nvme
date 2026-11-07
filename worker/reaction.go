@@ -3082,7 +3082,7 @@ func (w *spWorker) retireOldLeg(ctx context.Context, p *spPass) {
 // retireHold is the retire timer's test of one old retired leg: "" when it
 // may be deleted, else the reason it is kept. Reason (AR12): its data
 // exists twice elsewhere only while the group is whole, so a group waiting
-// for its legs keeps its retired copies; md learns that a member is dead
+// for its legs keeps its retired legs; md learns that a member is dead
 // only from IO, so an idle array over a dead leg still reads whole, while
 // the legs' and sides' err_epochs come from probes that run without IO; and
 // a row turns UNKNOWN when the primary's stream dies, while a plain field

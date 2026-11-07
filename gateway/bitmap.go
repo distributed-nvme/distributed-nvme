@@ -19,10 +19,13 @@ import (
 // (architecture.md, Revision keys and the sync fan-out) — AG4's "re-run
 // resolution in the deciding STM" has no second STM to apply to here, because
 // there is nothing to decide: the reply is a measurement of the primary's
-// live dm-thin metadata, not a change to desired state. A concurrent
-// mutation therefore cannot corrupt anything; it can only make the answer
-// describe a slightly older world, which is exactly what a bitmap consumer
-// re-reads for.
+// live dm-thin metadata, not a change to desired state. A concurrent etcd
+// change therefore cannot corrupt anything; it can only make the answer
+// describe a slightly older world. The time of the read matters for
+// another reason, which architecture.md, Clones and Migration, states: a
+// bitmap read while the source still takes writes marks blocks written
+// afterwards as skippable, and the reply carries no mark of when it was
+// read, so the caller keeps that order.
 //
 // Both go to the PRIMARY cntlr's CN. The primary is the one cntlr that builds
 // the stack of architecture.md, Primary cntlr — the per-slice thin pools and
