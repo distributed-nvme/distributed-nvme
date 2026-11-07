@@ -7161,6 +7161,20 @@ that component's document and only pointed to here.
   rather than discovered, stays when the records withdraw its cntlr, so
   that host keeps a failed-over primary's path past the fence (Host view,
   Failover).
+* **A detach does not cut a connected host.** The CSI driver's detach empties
+  the subsystem's allowed hosts (`csi.md` CSI10), which closes it to new
+  connections only (Primary cntlr), so a host already connected keeps its
+  controller and its IO until its node plugin drops the path (`csi.md` CSI15)
+  or it disconnects. A plugin that cannot run, or cannot read a cdc, drops no
+  path on its own, so a detach Kubernetes forces by a force-deleted pod, a
+  deleted Node object or the out-of-service taint, while the host is cut off
+  from Kubernetes and from a cdc the plugin follows, can leave the old host
+  writing beside the host the volume moves to, and dnv reports no error for it.
+* **A cdc address an old attach named can hold every path drop on a host**
+  (`csi.md` CSI15). The address returns with the next stage of a volume
+  attached before the cdc moved, and until the node drops its discovery
+  connections (`csi.md` CSI16) or the plugin restarts, the plugin's passes drop
+  no path on that host, a fenced old primary's among them.
 * **An old primary that cannot apply its demotion within the demotion
   hold fails IO from the fence.** An agent whose demotion waits behind a
   slow converge for the cntlr's locks (`cnagent.md` CN1; the head-of-line

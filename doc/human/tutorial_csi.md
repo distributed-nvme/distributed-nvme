@@ -204,7 +204,8 @@ volume of `18Gi`. The four disk nodes hold 36 free extents of 1 GiB, and
 RAID1 writes every byte twice, so 18 GiB is free now, and the largest
 volume Kubernetes is told of is capped at that. Both are free space, not a
 promise: nothing is held for a volume, and a create can build a larger
-claim too, since a volume takes only an eighth of its size at the start.
+claim too, since a volume takes only one extent for its metadata and an
+eighth of its size for data at the start.
 
 ## A volume
 
@@ -227,16 +228,17 @@ EOF
 
 What happens now: the provisioner sidecar asks the controller plugin for a
 volume of 8 GiB. The plugin creates, in the cluster `c0`, a storage pool
-named after the volume, RAID1 with one slice and one cntlr, whose data
-group is one extent: one eighth of 8 GiB, rounded up to whole extents. In
-it a thin device of 8 GiB, a subsystem with no allowed host yet, and a
-namespace over the thin device. The worker then provisions the pool as in
-the all-in-one tutorial. The volume is thin: it reserves an eighth of its
-size, and auto-grow adds a data group of one extent whenever the pool
-fills up, until the data groups cover the volume. So the volumes of a
-cluster can be larger, together, than its free space. When a pool needs
-another data group and the disk nodes have no room left for it, the writes
-in the pod stall and then fail, as for any full pool.
+named after the volume, RAID1 with one slice and one cntlr, with a meta
+group of one extent and a data group of one extent: one eighth of 8 GiB,
+rounded up to whole extents. In it a thin device of 8 GiB, a subsystem with no
+allowed host yet, and a namespace over the thin device. The worker then
+provisions the pool as in the all-in-one tutorial. The volume is thin: it
+reserves one extent for its metadata and an eighth of its size for data, and
+auto-grow adds a data group of one extent each time the pool's data use passes
+half of its data space, until the data groups cover the volume. So the volumes
+of a cluster can be larger, together, than its free space. When a pool needs
+another data group and the disk nodes have no room left for it, the writes in
+the pod stall and then fail, as for any full pool.
 
 Check: the claim is bound, the pool exists, and the worker has provisioned
 its four sides and made the cntlr the primary. Zeroing the meta sides takes

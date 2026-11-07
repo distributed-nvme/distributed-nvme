@@ -90,9 +90,9 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   Connect to it and leaves a kernel-log record naming that host and that
   subsystem, a record no other connect failure leaves, so the suite reads an
   admission refusal from that record (Conventions).
-* nvmet checks admission only when a host connects, so removing a host's link
-  from a subsystem leaves the host's controller to it live, which smoke
-  asserts after revoking the host.
+* nvmet checks admission only when a host connects (`architecture.md`, Primary
+  cntlr), so removing a host's link from a subsystem leaves the host's
+  controller to it live, which smoke asserts after revoking the host.
 * The suite installs the md udev mask of `architecture.md`, Components:
   invocation reference, for the run and removes it at cleanup, the VMs being
   shared; the preflight checks that the stock incremental-assembly rule honours

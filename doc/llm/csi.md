@@ -32,24 +32,29 @@ namespaces and hosts never bind, and the tenant promise of dnv holds per
 volume (`architecture.md`, System overview).
 
 A storage class names one dnv cluster, the redundancy of every group and
-the cntlr count of every pool. A pool has one slice. Its first data group
-holds one eighth of the volume size, rounded up to whole extents, and
-auto-grow adds groups of that size until the slice covers the volume
-(`dnv-worker.md`, Thin-pool auto-grow). So a volume reserves one eighth of
-its size when it is created and the cluster can be over-committed; when no
-free extent is left, writes stall and then fail, as for any full pool
-(`architecture.md`, Known limits).
+the cntlr count of every pool. A pool has one slice, with a meta group of one
+extent (`architecture.md`, Storage pools) and a first data group of one part in
+`volumeSteps` of the volume size, rounded up to whole extents. Auto-grow adds a
+data group of that size each time the pool's data use passes the mark the
+driver sets at every create, `DefaultPoolLowWatermarkPct`, until the slice's
+data covers the volume, and a meta group of the meta ladder's next size when
+the metadata passes the same mark (`dnv-worker.md`, Thin-pool auto-grow). So a
+volume reserves one extent and one part in `volumeSteps` of its size when it is
+created and the cluster can be over-committed; when no free extent is left,
+writes stall and then fail, as for any full pool (`architecture.md`, Known
+limits).
 
 Attach sets the subsystem's allowed hosts to the node's host NQN alone;
-detach empties the list, which admits nobody and hides the subsystem from
-discovery (`cdc.md` DS4). The node plugin follows the discovery log as a
-host must (`architecture.md`, Host view): it holds a persistent discovery
-connection to every cdc address, connects every listed cntlr of the
-subsystems it has staged, drops a path the cdc withdraws, and touches no
-connection but those CSI15 names its own. It never talks to the gateway:
-the controller plugin hands it the subsystem NQN, the namespace uuid and the
-cdc addresses at attach time, and the plugin knows the cdc addresses from
-its own configuration as well, so that a restart knows them.
+detach empties the list, which closes the subsystem to new connections
+(`architecture.md`, Primary cntlr) and hides it from discovery (`cdc.md` DS4).
+The node plugin follows the discovery log as a host must (`architecture.md`,
+Host view): it holds a persistent discovery connection to every cdc address,
+connects every listed cntlr of the subsystems it has staged, drops a path the
+cdc withdraws, and touches no connection but those CSI15 names its own. It
+never talks to the gateway: the controller plugin hands it the subsystem NQN,
+the namespace uuid and the cdc addresses at attach time, and the plugin knows
+the cdc addresses from its own configuration as well, so that a restart knows
+them.
 
 ## The driver
 
@@ -95,30 +100,29 @@ of the calls a CSI call makes carry it.
 
 CSI9. **Create makes four objects in order, each step repeatable.** The
 pool, named as the volume: one slice, the class's redundancy and cntlr
-count, a first data group of one eighth of the volume rounded up to whole
-extents and at least one, dnv's default auto-grow mark whatever the cluster
-stores, since a cluster's mark can switch auto-grow off and the volume model
-needs it on, and the cluster's defaults for the rest. The thin device, named
-as the volume, sized to the request rounded up to the pool's unit, the
-stripe size: the required bytes rounded up, or the limit rounded down when
-only a limit is given, or the driver's default when neither is, and
-OUT_OF_RANGE when no multiple of the unit fits the range. The subsystem with
-the volume's NQN and no host. The namespace at index one with the volume's
-uuid. A step that finds its object there reads it back and goes on when it
-matches; a pool of another redundancy is ALREADY_EXISTS, the spec's word
-for an incompatible volume of the same name, and so are a thin device of
-another size and a namespace that is not the volume's; a pool's cntlr count
-is not compared, since an operator may add or delete cntlrs; a pool still
-being deleted under the name is ABORTED, so the caller retries once the
-drain has removed it. The create
+count, a first data group of one part in `volumeSteps` of the volume rounded up
+to whole extents and at least one, dnv's default auto-grow mark whatever the
+cluster stores, since a cluster's mark can switch auto-grow off and the volume
+model needs it on, and the cluster's defaults for the rest. The thin device,
+named as the volume, sized to the request rounded up to the pool's unit, the
+stripe size: the required bytes rounded up, or the limit rounded down when only
+a limit is given, or the driver's default when neither is, and OUT_OF_RANGE
+when no multiple of the unit fits the range. The subsystem with the volume's
+NQN and no host. The namespace at index one with the volume's uuid. A step that
+finds its object there reads it back and goes on when it matches; a pool of
+another redundancy is ALREADY_EXISTS, the spec's word for an incompatible
+volume of the same name, and so are a thin device of another size and a
+namespace that is not the volume's; a pool's cntlr count is not compared, since
+an operator may add or delete cntlrs; a pool still being deleted under the name
+is ABORTED, so the caller retries once the drain has removed it. The create
 returns once the four records exist; the node plugin waits for the device. A
 delete removes the objects in the reverse order, each step repeatable: the
 namespace, the subsystem and the thin device, then the pool, last since its
 delete is refused while a user-created object remains (`architecture.md`,
-Storage pools); the worker drains the rest (`dnv-worker.md`, The sp drain).
-An object already gone is done, a write the gateway refuses because the pool
-is already deleting is done, and so is an id that names no volume of this
-driver. A create from a snapshot or another volume is refused.
+Storage pools); the worker drains the rest (`dnv-worker.md`, The sp drain). An
+object already gone is done, a write the gateway refuses because the pool is
+already deleting is done, and so is an id that names no volume of this driver.
+A create from a snapshot or another volume is refused.
 
 ## Attach and detach
 
@@ -134,7 +138,12 @@ the cdc addresses joined by commas; the volume context of a create carries
 the NQN and the uuid as well. Detach takes the node out of the list, which
 empties it, or empties it outright when no node is named; a node not in the
 list, a subsystem or a pool that is gone, and an id of another form are all
-done.
+done. Neither call cuts a live path: a host already connected keeps its
+controller and its IO (`architecture.md`, Primary cntlr) until it disconnects
+or its own node plugin drops the path (CSI15), and a detach Kubernetes forces
+while that plugin does not run, or cannot read a cdc it follows, lets the old
+host write on beside the host the volume moves to (`architecture.md`, Known
+limits).
 
 ## Capacity
 
@@ -154,26 +163,26 @@ the free extents of the disk nodes that count, times the extent size,
 divided by the legs a group has under the class's redundancy. The controller
 side is the free extents of the controller nodes that count, times the
 extent size, divided by the class's cntlr count. The largest volume is the
-one whose first data group, one eighth of it, fits whichever disk nodes the
-meta group takes, since the gateway places the meta group first and at
-random: of the twice-legs disk nodes with the most free extents, legs stay
-for the data group, so the bound is the twice-legs-th largest free count,
+one whose first data group, one part in `volumeSteps` of it, fits whichever
+disk nodes the meta group takes, since the gateway places the meta group first
+and at random: of the twice-legs disk nodes with the most free extents, legs
+stay for the data group, so the bound is the twice-legs-th largest free count,
 the worst case, which can be well below what a create builds where the
 allocator offers the meta group only the disk nodes with the fewest free
-extents. It also fits the controller node that would carry its last cntlr,
-the cntlr-count-th largest free count less the meta group's extent; it is
-never above the available bytes, and it is always reported, zero included,
-since an absent one means no bound per volume. Locations are not counted, so
-a cluster whose disk nodes share few locations can answer more than a create
-builds. Both are estimates, as the capacity call's records are
-(`architecture.md`, Clusters), and the available bytes can be over-promised,
-since a volume reserves one eighth of itself (The volume model). A create
-does not check them: whether it builds a claim depends on the gateway's
-placement, which draws the meta group first and at random and can take a
-retry. A cluster that does not exist has nothing free: both answers are
+extents. It also fits the controller node that would carry its last cntlr, the
+cntlr-count-th largest free count less the meta group's extent; it is never
+above the available bytes, and it is always reported, zero included, since an
+absent one means no bound per volume. Locations are not counted, so a cluster
+whose disk nodes share few locations can answer more than a create builds. Both
+are estimates, as the capacity call's records are (`architecture.md`,
+Clusters), and the available bytes can be over-promised, since a volume
+reserves one extent and one part in `volumeSteps` of itself (The volume model).
+A create does not check them: whether it builds a claim depends on the
+gateway's placement, which draws the meta group first and at random and can
+take a retry. A cluster that does not exist has nothing free: both answers are
 zero, not an error, since Kubernetes asks the capacity of every class on a
-timer and a class may name a cluster still to be created; a create in it is
-the class's error (CSI12).
+timer and a class may name a cluster still to be created; a create in it is the
+class's error (CSI12).
 
 ## Parameters and capabilities
 
@@ -258,19 +267,28 @@ before one, whichever shard codes each cdc serves. A discovery connection
 under the node's host NQN to another address is followed as well when its
 log lists a staged subsystem, since an attach named that cdc before the
 configuration changed; it only adds a cdc that must answer, and one whose
-log cannot be read at the restart stays another tool's. It touches no path
-of a subsystem that is not its own.
+log cannot be read at the restart stays another tool's. A cdc an attach named
+leaves the set only when the drop of the discovery connections forgets it
+(CSI16) or when a restart does not find its log listing a staged subsystem, and
+a stage brings it back from the volume's publish context, so an address a cdc
+left for good can return with the next stage of a volume attached before the
+cdc moved and hold every drop off until the discovery connections are dropped
+or the plugin restarts, while the connects go on through the others; the
+warning on every pass is what shows it (`architecture.md`, Known limits). The
+plugin touches no path of a subsystem that is not its own.
 
 CSI16. **Nothing staged, nothing connected.** The last unstage drops the
 subsystem's paths and the persistent discovery connections with them, and
 so does a stop of the plugin with nothing staged; a stop with volumes staged
 leaves every connection in place, since the data path must outlive the
 plugin's pod. A stage that fails with a final code, after which the kubelet
-counts the volume as not staged and never unstages it, leaves the set at
-once, with its paths; a code after which the stage may still be running
-keeps it, as does a mount at the staging path, which an earlier stage made.
-A drop of the discovery connections forgets the cdcs the attaches named and
-keeps the configured ones.
+counts the volume as not staged and never unstages it, leaves the set at once,
+with its paths, and with the discovery connections when nothing else is staged,
+as the last unstage does; a code after which the stage may still be running
+keeps it, as does a mount at the staging path, which an earlier stage made, and
+a mount table that cannot be read, since a missing answer is not an answer that
+nothing is mounted. A drop of the discovery connections forgets the cdcs the
+attaches named and keeps the configured ones.
 
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
 stage of a filesystem volume reads the device's filesystem and partition
@@ -380,8 +398,8 @@ stack on all ten, with the driver deployed from its manifests. It first
 proves the Kubernetes floor everything else stands on: the three guests
 are distinct machines, k3s is present at the pinned version or gets
 installed, an image built on the suite's machine reaches every node
-without a registry, and a pod runs from it on each host and is removed with its
-namespace. On that floor it proves the driver: a claim becomes a pool that
+without a registry, and a pod runs from it on each host and is then
+removed. On that floor it proves the driver: a claim becomes a pool that
 a pod reads and writes on either host, as a filesystem and as a raw block
 device; a failover under IO loses no write; eight volumes live at once; the
 upstream conformance test passes; and every delete leaves nothing behind.

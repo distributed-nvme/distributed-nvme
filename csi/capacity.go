@@ -7,10 +7,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// volumeSteps is the "thin in eight steps" of csi.md, The volume model: a
-// volume's first data group holds one part in volumeSteps of the volume,
-// rounded up to whole extents, and auto-grow adds groups of that size until
-// the slice covers the volume.
+// volumeSteps is the first data group's share of a volume (csi.md, The
+// volume model): one part in volumeSteps, rounded up to whole extents;
+// auto-grow adds data groups of that size until the slice's data covers the
+// volume.
 const volumeSteps = 8
 
 // initExtCnt is the extents of a volume's first data group: one part in
