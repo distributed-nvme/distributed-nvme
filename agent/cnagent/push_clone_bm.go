@@ -60,8 +60,10 @@ func (s *CnAgentServer) pushCloneBitmap(
 	}
 	if stored, ok := set.Get(chunkKey); ok &&
 		bytes.Equal(stored, req.GetBitmap()) {
-		// Already persisted and applied — the chunk stays in the applied set
-		// and nothing needs re-doing. A payload that *differs* falls through
+		// Already persisted and counted as applied — the chunk stays in the
+		// applied set; an apply that did not run waits for the next whole-set
+		// apply (applyCloneChunks), at the cost of copying only (CN22). A
+		// payload that *differs* falls through
 		// and overwrites the stored file, which is how a chunk grows in place
 		// ([D8]).
 		return &pb.PushCloneBitmapReply{AgentReply: agent.OkReply()}

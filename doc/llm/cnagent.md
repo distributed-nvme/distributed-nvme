@@ -340,7 +340,17 @@ while its pointer is in the list; but its request-derived set — the clone
 sources some request names (CN21) — is read from the cntlrs in memory
 alone, so a skipped cntlr's clone source that the sweep judges at all, a
 transfer of this cluster (CN21), survives a sweep whose listings answered
-only while a live dm-clone maps it: the source reads as in use.
+only while a live dm-clone maps it: the source reads as in use. So is the
+ownership of its host-facing subsystems: with no cntlr in memory to claim
+it, a subsystem of its sp that holds no namespace over an ns-dev reads as
+nobody's and is removed, and its connected hosts can lose that controller:
+a reconnect attempt that finds the subsystem gone while the port still
+carries another subsystem is refused with DNR and ends the host's
+reconnects, so such a host must connect again once the cntlr's
+`SyncupCntlr` has rebuilt it, while a host whose attempts land after the
+rebuild, or while the port carries nothing and so does not listen,
+reconnects by itself (CN21; `dnagent_integtest.md`, Assumptions and
+preflight checks).
 Nor is anything hidden: with none of it in memory, the CN and
 each of those cntlrs answer their Check rounds `ReplyCodeUnknownObject`
 (`dnagent.md` SH25), and the worker re-sends each `Syncup*` (`dnv-worker.md` RW4). The
@@ -362,7 +372,15 @@ as a list that names no cntlr, and its cntlrs get this far only while no
 CN file is unread — the cntlr is dropped: its cntlr file and
 chunk files, its memory entry, its object lock and its goroutines
 go, and nothing of its is removed from the node here. Its resources are
-found afterwards, by name, by the node-level sweep (CN21) that runs next.
+found afterwards, by name, by the node-level sweep (CN21): the one that
+runs next in this pass for a CN whose request loaded, or, for a cntlr
+dropped because its CN has no request loaded — which only a `cn-*` file
+that is lost, or a CN whose first save failed, leaves, a later save that
+fails leaving the earlier file, since the agent never removes one — the
+sweep of the
+`SyncupCn` the worker sends again when its list no longer names the cntlr;
+one it still names is re-adopted probe-first by its `SyncupCntlr` (CN8),
+and nothing sweeps them if that CN no longer exists.
 That split is the point: a teardown that deletes the same state after a
 best-effort removal pass whose every step only logs its failure forgets a
 cntlr whose array would not stop with its devices still live, and nothing
@@ -621,7 +639,12 @@ pool (`CnPoolMetaName`, `CnPoolDataName`, `CnPoolFinalName`), the
 the per-td `CnErrorName`, the `CnNsDevName` ns-dev with its nvmet
 namespace, the host-facing subsystems, and the `CnXferFinalName` transfer
 with its subsystem and namespace under `wantAny`; the `CnCloneFinalName`
-dm-clone and the clone-source connection under `wantClone`. The raid0
+dm-clone and the clone-source connection under `wantClone` — a flag that,
+for this connection, decides only whether it is made (CN18): its removal
+follows the
+sweep's in-use test alone, whatever the role or level (CN19, CN21), so a
+standby, or a cntlr at `SP_LEVEL_NO_CLONE`, keeps a connection while a
+stored `clone_list` names it or a live dm-clone maps it. The raid0
 sits with
 the pool, not with `wantAny`, because at `SP_LEVEL_NO_THINPOOL` there is
 no thin volume left to stripe over (CN19) — a standby keeps only what
@@ -1060,7 +1083,9 @@ dm-clone (CN18).
   member for an md superblock (`mdadm --examine`), and each available new
   leg of an open repair beside them (A group's repair, below):
   1. No member has one, nor any such new leg ⇒ `mdadm --create` with
-     `--run --assume-clean` over the `leg_list` members alone —
+     `--run --assume-clean` over the `leg_list` members alone (a create
+     killed between its superblock writes is What a killed mdadm means,
+     below) —
      but only when every `leg_list` member is available and was probed:
      with any member missing, the group is simply unavailable this pass
      ("only k of n legs available and none carries a superblock"),
@@ -1757,8 +1782,9 @@ dm-clone (CN18).
   of step 1 fails on that primary: at a level that builds thin pools the
   slice's concat over a slice's group, and at a level that builds clones a
   clone's dm-clone over its clone meta group (CN18; Known limits). A converge reports the forced start's rows; a read
-  of the absent array reads it `RES_STATUS_MISSING`, as it reads one whose
-  assembly mdadm refused (CN28).
+  reads an array md left absent `RES_STATUS_MISSING`, and one it left
+  inactive, as a refused assembly can, `RES_STATUS_ERROR` with its state
+  (CN28; Known limits).
 
   A group whose `leg_list` holds a provisioning leg (CN9) is
   **deferred**: none of `--examine`, `--create`, `--assemble`, `--add`,
@@ -1800,7 +1826,19 @@ no member to answer with one — every `leg_list` member available, each
 fresh or answering so — and its `--create --assume-clean` then writes to
 the member whose read failed: into the same failing IO or, if a path has
 reconnected or the disk reads again in between, over its live data (Known
-limits). `Md.Examine`,
+limits). A `--create` that is killed between its members' superblock
+writes — mdadm writes them one after the other, and a slow write to one
+leg's side can outlast the soft timeout — leaves one leg with a superblock
+that counts both legs as working and the other with none: the next
+converge takes case 2 from that one leg, without `--run`, and mdadm
+refuses to start a lone leg whose superblock counts another leg, which can
+leave an inactive array that every later converge of this cntlr reads as
+the group's error and leaves as it is (above), while a cntlr promoted after
+it meets the same refusal from the same lone leg. Only an operator's forced
+start from the leg that carries the superblock recovers the group; the
+group is new — a slice group of a new pool, a group `GrowSlice` appends, or
+a clone meta group with no dm-clone over it yet — so no data is lost.
+`Md.Examine`,
 the human-readable `mdadm --examine` the forced start and the take-back
 check read a member's role, recovery offset, events count and array
 identity from (CN12), keeps the same rule: a run that did not answer is an
@@ -2004,8 +2042,11 @@ error paths too, so no device outlives the sequence suspended
 (`architecture.md`, [D12]) short of a `dmsetup` command on it that fails
 (CN16). Only the messages sit inside the window — the snapshots' own thin
 devices are created after the resume, since the content is fixed at
-message time. The window is bounded by one message per slice under the
-`dnagent.md` SH15 timeouts. The trigger is liveness and nothing else: when the origin
+message time. The window is bounded by up to four commands per slice that
+needs the message — the `dmsetup info`, the suspend and the resume of the
+origin's thin volume in that slice, and the message to its pool — each
+under its own `dnagent.md` SH15 timeout. The trigger is liveness and
+nothing else: when the origin
 td's raid0 is not live — never built on this cntlr, or already removed —
 there is no dnv IO path to quiesce and the messages go unquiesced (at a
 pool-suppressing `sp_level` the pre-pass does not run at all, so no
@@ -2529,8 +2570,13 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    over a fresh group it finds the first data block zeroed
    (`architecture.md`, Side provisioning protocol) and formats new
    metadata there. A dm-clone that is there is converged probe-first: only
-   its four positional arguments are compared, since the feature and core
-   arguments it prints back follow its live hydration state, and one that
+   its four positional arguments are compared, since `dmsetup table` prints
+   the constructor's feature and core arguments back and never the live
+   hydration state, which `dmsetup status` alone shows: the table's feature
+   arguments are the create's own fixed pair and its core arguments the
+   create's own copy of `dm_clone_conf`, which no request changes after the
+   create, and the live knobs are converged by message from the status, so
+   a compare of them would find nothing a reload could change; one that
    differs is reloaded, with hydration off. Then the `hydration_threshold`
    and `hydration_batch_size` messages from `dm_clone_conf`, one per
    non-zero member the probed status does not already show (probe-first,
@@ -2891,10 +2937,11 @@ finds it, not only once. The code means accepted with residue, not a rejection
 (`architecture.md`, Teardown by sweep), and `revision` is the request's
 own. No pass remembers it: every converge and every read recomputes it
 by enumerating the node, and a `Check*` carries the code of the cntlr's
-latest observation (CN30). A cntlr the conf gate refused
+latest observation (CN30). A `SyncupCntlr` the conf gate refused
 has no verdict at all (CN8): nothing was converged and nothing
-enumerated, so the reply carries `ReplyCodeInvalidConf` and the sweep
-never ran.
+enumerated, so its reply carries `ReplyCodeInvalidConf` and the sweep
+never ran; a stored conf refused at startup or by a read stores code zero
+(CN23).
 
 `bm_info_list` is one `BitmapInfo` per `clone_list` entry of the
 (now-stored) request, its `res_id` the clone id and its `chunk_id_list`
@@ -3217,7 +3264,13 @@ Then `dnagent.md` SH21 with the clone twists of that protocol: persist the chunk
 the `LocalCloneBmPath` of the cluster, cn, sp, clone and the pair —
 overwriting when the payload differs, because clone chunks may grow in
 place (`architecture.md`, [D8]); a byte-identical payload is already
-persisted and already applied, and is skipped outright — then recompute
+persisted and counted as applied, and is skipped outright, though its
+apply may not have run — one skipped because the dm-clone's `dmsetup info`
+did not answer, or whose `blkdiscard` failed, waits for the next event that
+applies the whole set (a create or reload of the dm-clone or a build that
+finds hydration off, CN18 step 4, or another chunk's push, below), at the
+cost of
+copying only — then recompute
 and apply. Clone chunks are self-positioned by the pair (`dnagent.md` SH22): the chunk
 (s, b) holds the bytes of source slice s's bitmap from the offset b times
 the chunk capacity `CloneBmChunkBytes` for its own length, at an offset
@@ -3283,7 +3336,13 @@ rows and then the verdict from that one reading, so its rows and its code
 tell of one look at the node. The reading is the read's own, taken under
 its CN1 locks and shared with nothing, so every read reads the node
 afresh. A read of a cntlr whose stored conf the gate refuses (CN8) takes
-no reading: its info is empty and it has no verdict (CN30). A CN's read
+no reading, and the startup reconcile's converge of it (CN2) converges
+nothing: each stores empty info and code zero,
+since only a syncup's reply carries `ReplyCodeInvalidConf` (CN8), so a
+round at the same revision brings no new syncup and the cntlr stays as the
+node holds it, converged by no pass and read by nothing, shown by the
+gate's Error record and its empty rows alone. A CN's
+read
 takes no reading: its probe runs first and its verdict second. A read
 never creates, changes or removes an object of the node, though a
 cntlr's read makes the kernel commit the metadata of each dm-clone whose
@@ -3847,7 +3906,8 @@ retry attempt's — is the code its own reply carries, or would carry where
 no reply is sent: that of its own sweep, which removes (CN20, CN21). The
 read-only verdict is the CN21 sweep with the removals left out: the same
 attribution, the same comparison against the same wanted set, and nothing
-removed or built (CN23). Details and log record are CN20's. A CN's read
+removed or built (CN23). Details and log record are CN20's. A
+CN's read
 lists the node with the node-level sweep's enumeration (CN21). A cntlr's
 read takes its verdict's dm, md and nvme listings from its reading
 (CN28): the dm devices
@@ -4022,7 +4082,8 @@ under any other NQN is in neither set, so neither verdict names it
 (Known limits). A cntlr whose stored
 conf the gate refuses has no verdict either — it converged nothing and
 enumerated nothing, and naming objects this agent is not allowed to remove
-would be a leftover report no `Syncup*` could ever clear.
+would be a leftover report no `Syncup*` could ever clear; what its read
+stores instead is CN23's.
 
 ## Known limits
 

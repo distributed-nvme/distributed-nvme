@@ -614,9 +614,13 @@ func pathStates(view *subsysView) string {
 // ensureDmClone converges the dm-clone and reports whether this pass created
 // or reloaded it. Its metadata device is the clone meta group's device, named
 // by its number by the rule the pool concats name a group by (grpDevNo). Only
-// the four positional arguments are compared: the feature and core arguments
-// dm-clone prints back reflect its live hydration state, and treating those
-// as drift would reload the device onto `no_hydration` on every pass.
+// the four positional arguments are compared: `dmsetup table` prints the
+// constructor's feature and core arguments back, never the live hydration
+// state (`dmsetup status` shows that); the table's feature arguments are the
+// create's own fixed pair and its core arguments the create's own copy of
+// dm_clone_conf, which no request changes after the create, and the live
+// knobs are converged by message from the status, so a compare of them would
+// find nothing a reload could change (CN18).
 func (s *CnAgentServer) ensureDmClone(
 	ctx context.Context,
 	plan *cntlrPlan,

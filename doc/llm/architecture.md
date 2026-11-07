@@ -4445,10 +4445,14 @@ device is there, the next enumeration finds it.
   would sweep them away first. The one deferral that shrinks the set
   instead is the source role of Migration, whose `dst_provisioned` gate
   makes a deferred source neither built nor wanted. The node-level pass
-  never touches a side or sp that *is* in the pointer list, even when its
-  own file is missing: the pointer arrives before the object's `Syncup*`
-  (Common agent rules), and after a lost `--local-store` the resources
-  must be re-adopted probe-first by that `Syncup*`. What else each scope
+  never touches a side that *is* in the pointer list on the dn, nor the
+  sp-scoped chain of an sp that *is* in it on the cn, even when its own
+  file is missing: the pointer arrives
+  before the object's `Syncup*` (Common agent rules), and after a lost
+  `--local-store` the resources must be re-adopted probe-first by that
+  `Syncup*`. The cn's node-level steps for unowned subsystems and source
+  connections are not keyed on the pointer list, so they can remove an
+  object of such an sp (`cnagent.md` CN21). What else each scope
   holds back, and until when, is `dnagent.md` DN6 and `cnagent.md` CN21.
 * **Attribution by name first, and "not mine" is not "nobody's".** Two
   questions are asked of every object an enumeration finds, in this order:

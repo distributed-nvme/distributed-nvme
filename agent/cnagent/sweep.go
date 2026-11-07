@@ -2028,10 +2028,14 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 // released; the connect steps' registry check (disconnectInFlight) keeps a
 // converge from adopting that connection meanwhile.
 //
-// An sp that IS in the pointer list is never touched here, even when it has
-// no cntlr file: CN8 introduces the pointer before the SyncupCntlr, and after
-// a lost --local-store the resources exist and must be re-adopted probe-first
-// by that syncup rather than swept.
+// The sp-scoped chain of an sp that IS in the pointer list is never touched
+// here, even when it has no cntlr file: CN8 introduces the pointer before the
+// SyncupCntlr, and after a lost --local-store the resources exist and must be
+// re-adopted probe-first by that syncup rather than swept. The steps for
+// unowned subsystems and source connections are keyed on the stored requests
+// and on what the kernel shows instead, so a host-facing subsystem of such an
+// sp that holds no namespace over an ns-dev of ours, with no cntlr in memory
+// to claim it, or an unmapped source, is removed (CN21).
 //
 // redrive is what of the base state the caller's own probe read wrong in a
 // way a SyncupCn's converge would cure (probeCn): a piece of it absent, or an

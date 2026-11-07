@@ -634,9 +634,12 @@ func (s *CnAgentServer) legInfo(
 // post-flip pre-promote window — this function cannot know the promote phase,
 // so both pass. What fails the row is an *unpromotable* path: `inaccessible`
 // (the DN parked the side or handed it over) or any state the DN never sets
-// (`change`, `persistent-loss`, garbage); err_epoch absorbs a transient read
-// during a cutover's ana_grpid rewrites, and a persistent one correctly ages
-// toward AR8 leg repair. A leg whose side_list holds two sides is
+// (`change`, `persistent-loss`, garbage); a transient bad read during a
+// cutover's ana_grpid rewrites shows in the log alone, since a standby's leg
+// row is logged and never recorded (dnv-worker.md HL2); a persistent one shows
+// there too, and in the primary's leg row (CN11) once the worker makes this
+// standby the primary.
+// A leg whose side_list holds two sides is
 // mid-migration (CN10) and exempt: its ANA is wrong-by-design for the whole
 // hydration (dst inaccessible until cutover, src after) and the phase is the
 // DN's knowledge, not this CN's, so such a leg keeps the live-only check.
