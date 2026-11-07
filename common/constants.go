@@ -830,7 +830,12 @@ const (
 	// soon as it accepts.
 	DefaultCdcPendingTmoMs = 10000
 	// DefaultCdcKeepAliveGraceMs is added to a connection's KATO before it
-	// is reaped (NP10), mirroring nvmet's grace.
+	// is reaped (NP10): dnv's own fixed allowance for a late keep-alive. nvmet
+	// has no fixed grace: its timer runs for KATO, rounded up to whole
+	// seconds, and, having seen a command since it was armed (a Keep Alive,
+	// which also re-arms it, counts), runs once more before it reaps
+	// (traffic-based keep-alive), so its cutoff lies between one and two
+	// KATO after the last command, exactly two after a Keep Alive.
 	DefaultCdcKeepAliveGraceMs = 10000
 	// DefaultCdcZeroKatoTmoMs is the idle cutoff of a connected connection
 	// whose KATO is zero (NP10) — a one-shot `nvme discover` is not

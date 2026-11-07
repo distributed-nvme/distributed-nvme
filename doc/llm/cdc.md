@@ -46,10 +46,10 @@ One process, three parts:
 dnv-cdc process  (--range …; one listener)
 ├── watcher (WV) — scan + watch of {p} cdc, filtered on owned shard codes,
 │                  feeding the view registry
-├── view registry (DS) — per active hostnqn: rendered records, GENCTR, pending
+├── view registry (DS) — per active hostnqn: rendered records, GENCTR
 └── NVMe/TCP server (NP) — accept loop; per-connection admin-queue state
                    machine (Connect, properties, Identify, Get Log Page,
-                   Features, Keep Alive, AER)
+                   Features, Keep Alive, AER) and pending bit
 ```
 
 The package `cdc` is the engine and `cmd/dnv-cdc` the command; what each
@@ -193,8 +193,10 @@ a view is rendered once per read that finds it moved, however many events
 moved it since its last render.
 
 DS7. **Host state.** Created at a hostnqn's first live connection, with a
-fresh GENCTR, no pending bit and its view rendered; shared by all its
-connections on this instance; dropped at its last disconnect. Hosts without
+fresh GENCTR and its view rendered; shared by all its
+connections on this instance; dropped at its last disconnect. The pending
+bit is each connection's own (DS6, NP11), so a second connection of a host
+starts with it clear whatever the first holds. Hosts without
 a connection are never tracked and never notified — they catch up by
 reading the log when they next connect, which is the whole point of
 persistent discovery connections. GENCTR is therefore scoped to the
@@ -260,7 +262,15 @@ alike (the rule of `dnv-worker.md` SW2). A malformed value is dropped the
 same way by a scan; in a watch event it ends the watch generation instead,
 because `WatchTyped` reports a value it cannot decode as the watch's error,
 so the rescan that follows (WV4) is what skips it: one such put costs a
-rescan and a re-render of every active host.
+rescan and a re-render of every active host. The skip withdraws the entry:
+the rescan installs the freshly scanned map wholesale (WV4), so the last
+good value of that key leaves the served state, and every active host that
+saw the subsystem gets an AEN and an answer without it (DS6; one without a
+connection sees the loss at its next read, DS7); a twin reads the same etcd
+and withdraws it too, so once no discovery controller the host reads still
+lists it, nvme-stas drops the data connections it made for it
+(`architecture.md`, Known limits); the
+entry stays gone until a valid value is written.
 
 WV3. **Events.** A put upserts the entry (log `cdc entry applied`, `op`
 put); a delete removes it (`op` delete). Either way the DS6 impact pass runs
@@ -329,13 +339,14 @@ connected connection counts against no cap: its keep-alive bounds it
 An `Accept` error that is not the shutdown logs `cdc accept failed` and
 pauses for `acceptRetryDelay` before accepting again, so a transient
 failure (a file-descriptor shortage, say) costs a pause rather than a spin
-that fills the log and the CPU. SIGTERM: stop accepting — a loop waiting
-at the cap stops too — close every connection, stop. The listener is open
+that fills the log and the CPU. SIGTERM or SIGINT: stop accepting — a loop
+waiting at the cap stops too — close every connection, stop. The listener
+is open
 from startup, but nothing is accepted before the watcher's first scan has
 landed (CM4): until then a connecting host's TCP handshake completes into
 the kernel's listen backlog (while it has room) and nothing answers its
-ICReq. A SIGTERM in that window closes the listener, which resets those
-connections unanswered.
+ICReq. A SIGTERM or SIGINT in that window closes the listener, which
+resets those connections unanswered.
 
 NP2. **PDU subset.** Implemented: ICReq, ICResp, H2CTermReq, C2HTermReq,
 CapsuleCmd (Connect is the only command whose in-capsule data is read),
@@ -371,13 +382,27 @@ byte offset: this controller pads no PDU data, so a host that demands
 alignment is refused, not ignored (nvmet refuses a non-zero HPDA too).
 ICResp: the same format version, no controller PDU data alignment (CPDA),
 both digests disabled regardless of what the host requested (a controller
-enables only what both sides support), MAXH2CDATA `CdcMaxH2CData`.
+enables only what both sides support), MAXH2CDATA `CdcMaxH2CData`. Exactly
+one ICReq, and first: a first PDU of another type, a second ICReq, or an
+H2CData, which is never solicited since no R2T is ever sent (NP2), is a PDU
+sequence error that ends the connection the way NP4 describes.
 
 NP4. **One admin queue.** The first capsule MUST be a Fabrics Connect of
 the admin queue; SQSIZE, a 0's-based value, is capped at CAP.MQES, so the
 admin queue never exceeds `CdcMaxAdminSqSize` entries. A Connect of
 any other queue is refused with connect invalid parameters — there are no
-I/O queues. The Disable SQ Flow Control attribute is honored; without it,
+I/O queues. A first capsule that is no Connect, and a second Connect on one
+connection, end the connection with a PDU error (NP2: the `pdu error`
+record names the fault; the connected one then also logs
+`host disconnected`, reason `pdu_error`, the never-connected one nothing
+more, NP13), where nvmet answers a status and keeps the connection:
+a departure from the mirror rule (NP14), kept because the admin queue does
+not exist before Connect has made it, so such a first capsule is a fault of
+the connection and no command to answer, and a second Connect is treated
+the same as a decision, since a connection carries one admin queue and a
+host that asks for another has lost track of the queue it holds. The
+Disable SQ Flow Control attribute
+is honored; without it,
 SQHD is maintained in every response.
 
 NP5. **Connect.** Connect validates its connect data: SUBNQN must be
@@ -479,13 +504,16 @@ and refuses no connection.
 
 NP13. **Teardown.** On a socket close or error, a keep-alive expiry, a
 pending connection's pre-Connect deadline (NP10), a terminal PDU error,
-or a write that does not complete within `socketWriteTimeout` — set on
-every PDU write, because a host that has stopped reading is gone and the
-controller must not hold a goroutine and a socket on it forever: cancel
-the timers, discard the outstanding AERs, unregister from the host state
-(DS7: the last connection drops the state) or, for a connection that
-never completed Connect, give its place under the cap back (NP1), and log
-`host disconnected` with the reason. A write that hits its write deadline
+a stop on SIGTERM or SIGINT, which closes every live connection (NP1,
+CM5), or a write that does not complete within `socketWriteTimeout` — set
+on every PDU write, because a host that has stopped reading is gone and
+the controller must not hold a goroutine and a socket on it forever:
+cancel the timers, discard the outstanding AERs, and then either unregister
+from the host state (DS7: the last connection drops the state) and log
+`host disconnected` with the reason, one of the reason constants of `cdc`
+(the stop has one of its own), or, for a connection that never completed
+Connect, give its place under the cap back (NP1). A write that hits its
+write deadline
 has no reason of its own: like any other socket error it ends the
 connection as `closed`, the same value a host that simply went away
 produces, since the record's reasons have nothing finer (Log records). A
@@ -522,7 +550,8 @@ which runs the watcher, the listener and the view registry. No interceptors
 
 CM4. **Lifecycle logs, the start half.** `cdc starting` first. Then the
 start order: the listener opens (a busy port fails the process before the
-watcher exists), the watcher starts, and the accept loop starts only once
+watcher exists, with the etcd client closed first; a close that fails logs
+an Error record), the watcher starts, and the accept loop starts only once
 the watcher's first scan has landed. Before that scan the registry holds no
 state at all — empty, not "no subsystems" — yet a host answered out of it
 would be told there are no subsystems. After a control-plane restart in
@@ -530,10 +559,15 @@ which etcd answers later than `dnv-cdc` listens, every discovery controller
 would tell every host so at once, and nvme-stas would disconnect the data
 connections it made. So until then nothing is accepted (NP1), and every
 `firstScanLogInterval` of waiting logs `cdc waiting for first scan` at
-Error. A SIGTERM while waiting still ends the process (CM5).
+Error. A SIGTERM or SIGINT while waiting still ends the process (CM5).
 
 CM5. **Lifecycle logs, the stop half.** `cdc stopping` on SIGTERM or
-SIGINT, after the listener and the watcher have stopped.
+SIGINT, after the listener and the watcher have stopped and the etcd
+client is closed; a close that fails logs an Error record and stops
+nothing. A second signal
+during that stop exits at once with status 1, after a Warn record and
+with no `cdc stopping`, as the gateway and the worker do (`gateway.md`
+CM3; `dnv-worker.md` CM5).
 
 Production placement: one `dnv-cdc` per control-plane server (the physical
 view of `architecture.md`, System overview), twins of a range on different
@@ -566,7 +600,8 @@ decision each marks:
   life of a connection that completed Connect (NP5, NP13);
 * `view changed`, once per impacted host, with its new GENCTR (DS6);
 * `aen sent`, once per delivered AER (DS8);
-* `pdu error`, a terminal framing error (NP2).
+* `pdu error`, a terminal PDU error: a framing fault (NP2), a PDU out of
+  sequence (NP3) or a capsule out of sequence (NP4).
 
 The Error and Warn records — the wait for the first scan (CM4), a failed
 accept (NP1), the second signal (CM5) and a failed client close (CM4, CM5)
@@ -712,10 +747,15 @@ because it runs the discovery daemon without the connector and so what a
 daemon read leaves no trace in the kernel: it reads each daemon's cached
 log over that daemon's bus, parses the answer as data rather than as text,
 and keeps the same triples, while the daemons' discovery connections are
-judged by kernel state. Every wait is a bounded poll; and
+judged by kernel state. Every wait for a state the suite judges is a
+bounded poll, and
 "undisturbed throughout" holds on every poll of
 the wait, not at two point samples, which would pass a connection that
-dropped and came back between them. The cdc records are matched by their
+dropped and came back between them; a check that something did not happen
+reads after a fixed wait, and the keep-alive stage waits three keep-alive
+timeouts and then judges by the `host disconnected` records with the
+keep-alive reason and one final read of each controller. The cdc records
+are matched by their
 exact names (Log records), read through a filter that drops a line torn by
 a concurrent append. The flood case judges accepting by kernel socket
 state — the listener's accept queue on the first server and the flooding

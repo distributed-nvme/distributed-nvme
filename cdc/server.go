@@ -146,8 +146,8 @@ func (s *server) pendingCount() int {
 	return len(s.pendingSlots)
 }
 
-// shutdownConns closes every live connection with the shutdown reason of
-// cdc.md, Log records.
+// shutdownConns closes every live connection with reasonShutdown, one of the
+// `host disconnected` reason constants of cdc.go (cdc.md NP13).
 func (s *server) shutdownConns() {
 	s.mu.Lock()
 	live := make([]*conn, 0, len(s.conns))

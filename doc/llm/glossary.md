@@ -250,7 +250,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **host NQN** — The NQN an nvme host connects under and an allowed-hosts list names, from which its host id is derived (`NvmeHostId`): an agent connects as its controller node's `CnHostNqn` for legs and clone sources, or as `DnHostNqn` for a migration destination, and a side's export to a controller node admits that node's `CnHostNqn` alone.
 
-**host state** — The cdc's record of one host on one instance: created at the host NQN's first live connection with a fresh GENCTR, no pending bit and its view rendered, shared by all its connections and dropped at its last disconnect, so GENCTR restarts when it is recreated (see `cdc.md` DS7).
+**host state** — The cdc's record of one host on one instance: created at the host NQN's first live connection with a fresh GENCTR and its view rendered, shared by all its connections and dropped at its last disconnect, so GENCTR restarts when it is recreated (see `cdc.md` DS7).
 
 **human doc** — A markdown file written for people: `README.md` at the repository root and every file under `doc/human/`, in the words of `core_glossary.md` and ordinary Linux storage words, any other project word explained where it first appears. It never links to, names or cites an LLM doc (see `layout.md`, Human docs and LLM docs).
 
