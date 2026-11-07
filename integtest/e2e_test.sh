@@ -118,10 +118,10 @@ CDC_BIN="$REPO_ROOT/bin/dnv-cdc"
 DNVCTL_BIN="$REPO_ROOT/bin/dnvctl"
 
 # cnagentctl is built for ONE subcommand, `host-id --hostnqn`
-# (NvmeHostId (common/name_fmt.go)), so the suite can pass the kernel's required
-# explicit --hostid. workerctl is built for ONE subcommand, `constants`, which
-# prints the Go constants as JSON on the driver. Neither is ever shipped to a
-# guest — the same arrangement cdc_test.sh uses for workerctl.
+# (NvmeHostId (common/name_fmt.go)), for the host_id helper, which no step of
+# this suite calls (see host_id). workerctl is built for ONE subcommand,
+# `constants`, which prints the Go constants as JSON on the driver. Neither is
+# ever shipped to a guest — the same arrangement cdc_test.sh uses for workerctl.
 CNAGENTCTL_BIN="$BIN_DIR/cnagentctl"
 WORKERCTL_BIN="$BIN_DIR/workerctl"
 
@@ -5718,11 +5718,11 @@ sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 # empty until it has run, which would make start_etcd pass `--max-txn-ops=`
 # and `--max-request-bytes=` and etcd refuse to start.
 #
-# cnagentctl and workerctl run on the DRIVER and are built for exactly one
-# subcommand each (`host-id --hostnqn`, `constants`). They are cross-built
-# GOOS=linux GOARCH=amd64 like everything else here, so they will not exec on
-# a driver that is not linux/amd64 — which is one of the things the dies
-# below report.
+# cnagentctl and workerctl are built to run on the DRIVER, for exactly one
+# subcommand each (`host-id --hostnqn`, which no step calls, and `constants`).
+# They are cross-built GOOS=linux GOARCH=amd64 like everything else here, so
+# they will not exec on a driver that is not linux/amd64 — which is one of
+# the things the dies below report.
 preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"

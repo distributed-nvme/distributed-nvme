@@ -601,15 +601,17 @@ func (m *Md) sameMembers(ctx context.Context, members []mdMemberDir) bool {
 // dmNames, the wrapper names of a group's members (Match), and reads its
 // state from sysfs. It never runs mdadm and never resolves /dev/md/<name>.
 //
-// Detail runs no mdadm because `mdadm --detail`
-// opens a member device: it loads the superblock from the first member that
-// opens, and when that member's DN side has gone the read sits in the
-// multipath head's requeue list until the path's failfast expires — up to
-// ~13 s after the side died (the keep-alive timeout, error recovery, then
-// fast_io_fail_tmo), far past the soft timeout. A kill would turn the group's
-// md row ERROR for a member fault the leg row already reports, and an md row
-// counts toward cntlr health. A killed read taken as absent would also let a
-// teardown skip `mdadm --stop` and leak the array's leg wrappers.
+// Detail runs no mdadm because `mdadm --detail` opens a member device: it loads
+// the superblock from the first member that opens, and when that member's DN
+// side has gone the read sits in the multipath head's requeue list until the
+// path's failfast expires — up to ~13 s after the side died (the keep-alive
+// timeout, error recovery, then fast_io_fail_tmo), or without limit while
+// another path of the leg stays live and none can serve — far past the soft
+// timeout. A kill would turn the group's md row ERROR for a member fault the
+// leg row already reports, and an md row counts toward cntlr health. No
+// enumerator in the agent runs mdadm for the same reason: a killed read taken
+// as absent would leave a teardown no array to stop (ListArrays, cnagent.md
+// CN21).
 //
 // No array holding any of dmNames is "absent" (Exists false, nil error): the
 // assembly is what fixes that. So is a matched array whose array_state has

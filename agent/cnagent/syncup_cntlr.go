@@ -218,11 +218,12 @@ func (s *CnAgentServer) convergeCntlr(
 	// before its sweep, to the legs its plan still probes: the trim decides
 	// from the plan alone and removes nothing from the node, so a sweep
 	// that an unanswered listing stops, or whose descent stops above L10,
-	// is no reason for it to wait. Inside L10 it did wait on every layer
-	// above, and a demoted primary's probers went on probing through the
+	// is no reason for it to wait. Inside L10 it would wait on every layer
+	// above, and a demoted primary's probers would go on probing through the
 	// standby's legs, and a departed leg's through its wrapper, until some
 	// later pass got that far. Coming first, it also comes before L10's
-	// disconnect, which is what releases a prober wedged on a pathless leg.
+	// disconnect, which is what releases a prober still wedged on a leg the
+	// sweep removes.
 	s.stopLegProbers(st, wantedProbers(plan))
 	// CN10: the pass's NVMe walk, the sweep's list of connections and where
 	// the build's lookups find their entries until the build marks it stale.

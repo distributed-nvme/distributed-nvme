@@ -42,7 +42,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **bitmap chunk** — One stored piece of a skip bitmap. A migration chunk is an immutable append in sequence (`MigrBitmap`, `bm_idx`); a clone chunk is addressed by the pair of source slice and chunk index, self-positioned at a fixed quantum, and may grow in place (`CloneBitmap`, `src_slice_idx`, `bm_idx`).
 
-**bitmap push** — The unary delivery of one chunk to the agent that runs the dm-clone: `PushMigrBitmap` to the destination side's disk node, `PushCloneBitmap` to the primary cntlr's controller node. A push carries no revision and passes no revision gate, refused only for a migration or clone the agent does not know or a clone chunk addressed outside the clone's geometry; the worker keeps one in flight per migration or clone, in ascending address order.
+**bitmap push** — The unary delivery of one chunk to the agent that runs the dm-clone: `PushMigrBitmap` to the destination side's disk node, `PushCloneBitmap` to the primary cntlr's controller node. A push carries no revision and passes no revision gate, refused only for a migration or clone the agent does not know, or for a chunk address out of range — a migration chunk index at or past `MaxMigrBmCnt` (see `dnagent.md` DN15), a clone chunk outside the clone's geometry or with an index at or past `MaxCloneBmCnt` (see `cnagent.md` CN22); the worker keeps one in flight per migration or clone, in ascending address order.
 
 **block zeroing** — dm-thin's write of a whole block when it provisions the block for a thin device: zeros around a write that covers only part of the block, or the write alone when it covers all of it, so that a host never reads what the block held before. dnv's thin pools never skip it (dm-thin's "skip_block_zeroing" feature), which is what keeps one pool's data unreadable from another (see `architecture.md`, [D15]).
 
@@ -100,7 +100,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **control plane, data plane** — The control plane is etcd plus the stateless processes on the control-plane servers, gateway, worker and cdc; the data plane is the disk nodes, the controller nodes and the NVMe-oF paths between them and the hosts.
 
-**controller node, CN** — A machine that runs the volume logic of the cntlrs it hosts: it contributes no persistent storage and holds no clone's metadata — a clone's dm-clone keeps it on the clone's clone meta group — and offers a capacity budget in extents from which every cntlr's footprint is debited (`--capacity`). It runs one cn agent, never two on one kernel, and exports its namespaces over that agent's nvmet port.
+**controller node, CN** — A machine that runs the volume logic of the cntlrs it hosts: it contributes no persistent storage and holds no clone's metadata — a clone's dm-clone keeps it on the clone's clone meta group — and offers a capacity budget, given to `--capacity` in bytes and counted in extents, from which every cntlr's footprint is debited. It runs one cn agent, never two on one kernel, and exports its namespaces over that agent's nvmet port.
 
 **controller plugin** — The part of the CSI driver that runs once per Kubernetes cluster and talks to the gateway alone: for each volume it creates and deletes one storage pool with one thin device, one subsystem and one namespace, attaches and detaches it, and answers the capacity of a storage class (see `csi.md`, The driver).
 
@@ -176,7 +176,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **emulated host** — The agent suites' stand-in for an initiator that is not a dnv process: a plain `nvme connect` from a lab VM under a chosen host NQN and the host id derived from it (`NvmeHostId`), playing the controller nodes in the dn suite and the host in the cn suite. In the dn suite a VM holds several such identities, and an identity may reach its own VM's exports as well as the other VM's; the cn suite uses one fixed host NQN.
 
-**entry point** — A place that mints a trace id, which the interceptors never do (see `grpc.md` T4): each daemon at startup; the agent per attempt of a background task, with the two exceptions T4 names; the cdc per accepted host connection, per scan attempt and per applied watch event; dnvctl per invocation unless `--trace-id` is given; the gateway for a request that arrives without one; and the worker per unit of work and per part of an incarnation that outlives one (see `dnv-worker.md` RW10). The suites' drivers mint none: each carries the id its suite gives it through `--trace-id`, if any (see `grpc.md`, Drivers and fakes, and `log.md` R5).
+**entry point** — A place that mints a trace id, which the interceptors never do (see `grpc.md` T4): each daemon at startup; the agent per attempt of a background task, with the two exceptions T4 names; the cdc per accepted host connection, per scan attempt and per applied watch event; dnvctl per invocation unless `--trace-id` is given; dnv-csi per CSI call, in its own interceptor (see `csi.md` CSI8); the gateway for a request that arrives without one; and the worker per unit of work and per part of an incarnation that outlives one (see `dnv-worker.md` RW10). The suites' drivers mint none: each carries the id its suite gives it through `--trace-id`, if any (see `grpc.md`, Drivers and fakes, and `log.md` R5).
 
 **enumeration** — A sweep's listing of what the node holds: the dm devices, the nvmet tree and the nvme-host subsystems, and on the cn the md arrays. An enumeration that did not answer makes the verdict unclean and licenses no removal, on the cn any of the four stopping the whole sweep and on the dn the dm listing (see `architecture.md`, Teardown by sweep).
 
@@ -190,7 +190,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **extent** — The allocation unit of disk-node space and controller-node budget, sized per cluster (`extent_size`); counts round down.
 
-**failfast window** — The time after a connected target stops answering during which the connecting kernel still queues IO to the lost path instead of failing it: the fast IO fail timeout every agent connection is made with (`DefaultNvmeFastIoFailTmo`; see `dnagent.md` SH20), while its controller-loss timeout reconnects forever. A command that opens a device over such a path blocks for the whole window, so a sweep that meets one on a dead remote reports what it could not reach and succeeds on a later round, once the window has passed (see `architecture.md`, Teardown by sweep).
+**failfast window** — The time after the connection to a target is lost, while the kernel reconnects, during which it still queues IO to that path instead of failing it: the fast IO fail timeout every agent connection is made with (`DefaultNvmeFastIoFailTmo`; see `dnagent.md` SH20), while its controller-loss timeout reconnects forever. A command that does IO over such a connection blocks until the window ends or the path serves again, so a sweep that meets a dead remote reports what it could not reach and succeeds on a later round, once the window has passed (see `architecture.md`, Teardown by sweep); while a path of the same namespace stays live and none can serve — a target that stalls but still takes the reconnect, or an ANA-inaccessible path — the IO waits without limit instead (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
 **failover** — The sp worker's reaction that makes a healthy, enabled standby the primary when the primary is disabled or has been unhealthy past the primary threshold, held to the cntlr threshold when that is longer while it is settling, and not where a failover cannot help, such as an error any primary would read alike (see `dnv-worker.md` AR5); the unhealthy trigger also needs the coordinator's own verdict (see own-verdict rule). Its transaction takes an old primary that has a health epoch out of the discovery records (see listing rule). The old primary becomes a standby and the new one is settling until its stack is seen built and clean.
 
@@ -222,7 +222,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **full sync** — The rule that every syncup request carries the complete desired state of its object, pointer lists included, so an agent never needs an earlier request to know what to build or remove.
 
-**gateway** — `dnv-gateway`, the stateless, active-active gRPC server that implements the Gateway API over etcd: every mutation is one transaction, and it calls an agent only for a size, an inspection, a hydration check, a bitmap read or the forced start's check of a group's array.
+**gateway** — `dnv-gateway`, the stateless, active-active gRPC server that implements the Gateway API over etcd: every mutation is one transaction but `AdvanceClusterIds`, which commits one for the cluster and then one per pool (see `gateway.md` GW19), and it calls an agent only for a size, an inspection, a hydration check, a bitmap read or the forced start's check of a group's array.
 
 **geometry** — The device parameters a pool's `bdev_conf` holds concrete, such as the block size, the stripe size and the bitmap chunk; the gateway fills every member the caller omits from the cluster's conf, else from a constant, when it writes the pool, so a stored zero is an invalid stored conf that the worker refuses to drive and an agent refuses to converge.
 
@@ -330,7 +330,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **low water mark** — The pool-usage fraction above which auto-grow fires (`low_water_mark_pct`); a mark that cannot be reached disables auto-grow for the pool.
 
-**md assembly mask, md udev mask** — The udev rule every node running a dnv agent carries so that only the agent assembles dnv md arrays: ordered before the stock incremental-assembly rule, it marks a device whose array name carries the dnv prefix not ready, and the stock rule skips it (see `architecture.md`, Components: invocation reference). The cn and end-to-end suites install it for their run.
+**md assembly mask, md udev mask** — The udev rule every node running a dnv agent carries so that only the agent assembles dnv md arrays: ordered before the stock incremental-assembly rule, it marks a device whose array name carries the dnv prefix not ready, and the stock rule skips it (see `architecture.md`, Components: invocation reference). The cn, end-to-end and csi suites install it for their run.
 
 **md walk** — The cn agent's read of the node's md arrays from "/sys/block": every array node, each array's "md" directory and the dm name of each member, never a member device itself, so it cannot block on a dead leg. One serves all the groups of a converge or of a cntlr's background read; a read's is part of its reading and serves its verdict too (see `cnagent.md` CN12).
 
@@ -418,7 +418,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **plant, planting library** — To write state into etcd directly from a test, as its writer would have written it: the gateway's transaction for a desired state, or the worker for what it records, such as a health epoch or a `CdcEntry`. Where an allocator would place an object, the test chooses the placement instead. The planting library (`integtest/plant`) holds a set of such writes as Go calls: `workerctl` is a front over it for the shell suites, and the worker's Go tests may call it (see `layout.md`, Dependency rules).
 
-**plays the worker** — What the gateway suite does when it writes a worker-owned flip, starts a migration's cutover or runs a worker-owned drain through `workerctl`, so a gateway precondition can be exercised without a running worker.
+**plays the worker** — What the gateway suite does when it writes a worker-owned flip, a leg's health epoch or a repair's stage move, starts a migration's cutover or runs a worker-owned drain through `workerctl`, so a gateway precondition can be exercised without a running worker.
 
 **pointer list** — The ids of the sides or cntlrs a node hosts, kept in its record (`side_ptr_list`, `cntlr_ptr_list`) and sent in its syncup request (`side_pointer_list`, `cntlr_pointer_list`); the list is authoritative, so an object it omits is removed by the node sweep.
 
@@ -554,7 +554,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **subsystem** — `Subsystem`, the host-facing NVMe-oF object a pool exports from every cntlr under one NQN, each cntlr's export within that cntlr's cntlid slot: it carries its allowed hosts and its namespaces, and the gateway publishes it to the cdc as a `CdcEntry`.
 
-**suite** — One of the integration test scripts under `integtest/` that drives real binaries on lab VMs over ssh: the dn agent, cn agent, worker, gateway, dnvctl, cdc and end-to-end suites.
+**suite** — One of the integration test scripts under `integtest/` that drives real binaries on lab VMs over ssh: the dn agent, cn agent, worker, gateway, dnvctl, cdc, end-to-end and csi suites.
 
 **suppressed** — A resource a pool's level excludes: the cn agent reports it missing with the level's reason, which the worker reads as expected absence, not as failure, and with the details "sp_level" for people; the dn agent reports no row for it (see `cnagent.md` CN19; `dnv-worker.md` HL2).
 

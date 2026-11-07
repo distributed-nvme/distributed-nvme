@@ -4475,17 +4475,18 @@ device is there, the next enumeration finds it.
   first.** An object whose pointer has left the list loses its file, its
   memory entry and its object lock in the same pass, before anything of it
   is removed (Common agent rules), and the parent's own request is
-  persisted **before** the sweep, not after it: a sweep can block for a
-  whole fast-IO-fail window on a dead remote — every leg is connected with
-  a fast-IO-fail timeout and a controller-loss timeout that never expires
-  (Primary cntlr), which is also the bound that makes a pass safe to run
-  at all, since once that timeout has passed after a path loss every IO
-  queued at that multipath head fails immediately — and a request
-  cancelled in that window would skip a save made after the sweep, leaving
-  the next startup to rebuild the object from the old list against sides
-  that no longer exist. With the new list on disk first, a crash mid-sweep
-  is nothing worse than a startup sweep (`dnagent.md` SH5, SH7;
-  `cnagent.md` CN7).
+  persisted **before** the sweep, not after it: a sweep can block for a whole
+  failfast window on a dead remote, and a request cancelled in that window
+  would skip a save made after the sweep, leaving the next startup to rebuild
+  the object from the old list against sides that no longer exist. Every leg is
+  connected with a fast IO fail timeout and a controller-loss timeout that
+  never expires (Primary cntlr), so IO queued at a leg's multipath head fails
+  at the latest when the failfast window after the loss of its last live path
+  ends, the bound a pass relies on to end; while a path stays live and none can
+  serve, the IO is held without limit instead (`osclient.md`, Exported raw
+  helpers and the probe-IO carve-out), and a pass whose command meets it waits
+  as long. With the new list on disk first, a crash mid-sweep is nothing worse
+  than a startup sweep (`dnagent.md` SH5, SH7; `cnagent.md` CN7).
 * **An enumeration that did not answer licenses no removal.** "Actual
   minus desired" with an unanswered listing subtracts to *remove nothing*,
   which looks like the safe direction and is not: an empty actual is also
@@ -4529,12 +4530,13 @@ device is there, the next enumeration finds it.
   downwards. Every unwanted object of a layer is attempted, but the layer
   below is skipped when this one left anything: a leg pulled out from
   under a live md array, or a migration source pulled out from under a
-  live dm-clone, is destructive, while a pass that simply runs again next
-  round costs nothing — by then the failfast window has passed and the
-  same order succeeds. The skipped layers' objects are reported as
-  leftovers without being touched. Each role's layers, and the step each
-  runs ahead of its first layer, are `dnagent.md` DN6 and `cnagent.md`
-  CN21.
+  live dm-clone, is destructive, while a pass that simply runs again next round
+  costs nothing — by then the failfast window has passed and the same order
+  succeeds, unless a path stays live while none can serve, which holds the IO
+  without limit (`osclient.md`, Exported raw helpers and the probe-IO
+  carve-out). The skipped layers' objects are reported as leftovers without
+  being touched. Each role's layers, and the step each runs ahead of its first
+  layer, are `dnagent.md` DN6 and `cnagent.md` CN21.
 * **The verdict is recomputed, and kept only to be reported.** "Something is
   left" is the result of one comparison, never a flag. A converge's sweep
   makes it as it removes; the background read a check round starts reads the
@@ -6447,28 +6449,26 @@ document and the component documents cite it by its id.
   DNs.** A volume group would bring onto the CN exactly the failure class
   [D13] (a) keeps off the DN: a bare vgs or lvs label scan reads every block
   device on the node, and a CN holds error targets, md members and
-  pathless multipath legs, and can hold suspended devices, which wedge an
-  LVM scan in unkillable D state ("exit_aio"; "ignore_suspended_devices"
-  and "global_filter" do not help) — while the cn agent would run those
-  scans on every converge and every read its check rounds start. The
-  reasons: the [D13] (a) label-scan class is eliminated rather than
-  mitigated, lvm2 is one dependency fewer, and CN naming is as
-  deterministic as everything else.
-  A clone keeps its dm-clone metadata on its clone meta group (Terminology
-  and object model), a group of the pool on DNs that the primary assembles
-  as it does a slice's group and gives the dm-clone as its metadata device
-  (`cnagent.md` CN18), and the CN holds none of it. Reason: a clone's
+  multipath legs with no usable path, and can hold suspended devices, which
+  wedge an LVM scan in unkillable D state ("exit_aio";
+  "ignore_suspended_devices" and "global_filter" do not help) — while the cn
+  agent would run those scans on every converge and every read its check rounds
+  start. The reasons: the [D13] (a) label-scan class is eliminated rather than
+  mitigated, lvm2 is one dependency fewer, and CN naming is as deterministic as
+  everything else. A clone keeps its dm-clone metadata on its clone meta group
+  (Terminology and object model), a group of the pool on DNs that the primary
+  assembles as it does a slice's group and gives the dm-clone as its metadata
+  device (`cnagent.md` CN18), and the CN holds none of it. Reason: a clone's
   metadata must outlive the CN that runs its dm-clone, since a failover, a
-  cntlr replacement, a CN reboot and a lost CN each hand the clone to a
-  build that can go on with the copy only from what that metadata holds
-  (Clone metadata durability).
-  The destination thin pools' maps cannot stand in for it: where one block
-  of a slice's thin pool holds parts of several dm-clone regions, as at the
-  default slice count, stripe and block sizes, a copy or a host write into
-  one region maps a block that other regions share, so a rebuild that read
-  "mapped" as "copied" would mark those regions copied without a copy, and
-  they would read the destination's zeros where the source holds data,
-  with nothing to show it.
+  cntlr replacement, a CN reboot and a lost CN each hand the clone to a build
+  that can go on with the copy only from what that metadata holds (Clone
+  metadata durability). The destination thin pools' maps cannot stand in for
+  it: where one block of a slice's thin pool holds parts of several dm-clone
+  regions, as at the default slice count, stripe and block sizes, a copy or a
+  host write into one region maps a block that other regions share, so a
+  rebuild that read "mapped" as "copied" would mark those regions copied
+  without a copy, and they would read the destination's zeros where the source
+  holds data, with nothing to show it.
 * **[D15] The tenant promise rests on dm-thin; a new side is zeroed where
   the design assumes zeros, behind a `provisioned` gate;
   `RES_STATUS_PROVISIONING`.** A host reads a pool's data only through the
@@ -6787,68 +6787,67 @@ that component's document and only pointed to here.
   inaccessible, until the primary's path to the destination is live and
   optimized (Migration). In that gap anything that commits the thin pool on
   that leg can block. A commit flushes the pool's data device and writes its
-  metadata device, which between them reach every working leg the pool sits
-  on, and the leg with no usable path holds that IO: nvme queues the IO of a
-  namespace that has a live controller but no usable path. A leg that md has
-  failed out of its md-raid1 group gets none of this IO; md fails such a leg
-  when an IO it sends failfast (`cnagent.md` CN12) reaches the source after
-  src step 1, before the primary has read the ANA change, and the primary's
-  member reconciliation puts the leg back once its path to the destination
-  serves and its health probe passes (`cnagent.md` CN12, CN30). The
-  primary's own reads of the pool's status, in its background reads and
-  converges (`cnagent.md` CN28), carry the `--noflush` flag and commit
-  nothing (`dnagent.md` SH17). What still commits the pool in a
-  gap: a thin
-  device's create or delete (`cnagent.md` CN14); every read through a thin
-  metadata snapshot, whose reservation commits the pool, the bitmap reads of
-  a thin device and of a data leg (`cnagent.md` CN25) and the thin id
-  sweeps (`cnagent.md` CN14) among them; a reload or suspend of the pool; a
-  commit of a clone's dm-clone, which flushes the td it writes into and so
-  commits the pool, whether a status read of the dm-clone makes it
-  (`dnagent.md` SH17) or dm-clone makes it on its own once its metadata has
-  changed, as it does while hydration runs; and dm-thin's own periodic
-  commit once any write has mapped new blocks, a host's write or a clone's
-  hydration copy into the td alike. While a commit waits, the rest of that
-  pool's IO waits too, and so does a status read of the pool, which takes
-  the pool's metadata lock for reading. A background read, a converge or
-  a bitmap read that waits holds the cntlr's lock and the node read lock
-  meanwhile (`cnagent.md` CN1), so the cntlr's other calls that take them
-  wait with it — a syncup that cancels the read included, since a
-  cancelled read lets go only once its waiting command returns — while
-  its check rounds answer from an observation that ages and, if the wait
-  lasts, grows too old (`dnv-worker.md` HL7).
-  The gap's end needs nothing of the primary: the cutover comes only once
-  the primary holds a live path to the destination (Migration), and the
-  destination's last step moves that path to optimized, so the waiting IO
-  goes on and the commit finishes once the disk nodes have run their
-  steps. Where a step of theirs stops instead, as when the destination's
-  connect to the source is still refused once its pass's retries run out,
-  the gap lasts until a later pass of the destination's retry runs it
-  (`dnagent.md` DN13), and a commit waits that long. The pass the cutover
-  brings retries the connect longer than any other (`dnagent.md` DN13). A
-  migration whose record carries no `cutover_pending` has no cutover to
-  wait at (Upgrade in lockstep): its gap can open before the primary has
-  connected the
-  destination, and the converge that would connect it (`cnagent.md` CN10)
-  needs the cntlr lock a waiting call holds, so the cntlr can stay blocked
-  until the migration ends. A cancel gives the primary back its path to
-  the source, which lets the commit finish. A finish removes the source's
-  exports, which fails the IO that waits on the leg: an md-raid1 group
-  that keeps another working member absorbs that error, as md completes
-  the array's flush and charges a failed write to the leg, so the commit
-  goes on; a `RedundNone` group passes it up, so the waiting commit fails,
-  and dm-thin drops the block mappings made since the last commit and
-  leaves the pool read-only with its needs_check flag set, which nothing
-  clears (No thin-metadata repair path is specified, above), while the
-  pool's row still reads OK (`cnagent.md` CN28). On such a group only a
-  cancel ends the block with the pool intact. Meanwhile a node write
-  queued behind the blocked call, a `SyncupCn`, holds up every later call
-  of that agent that takes the node lock (the head-of-line blocking
-  above). Migration's read rule does not keep a bitmap read out of a gap:
-  a data leg's bitmap read that keeps the rule for its own leg can still
-  block in the gap of another leg the same pool sits on, and a thin
-  device's bitmap read can block in the gap of any leg the pool it reads
-  sits on.
+  metadata device, which between them reach every working leg the pool sits on,
+  and the leg with no usable path holds that IO: nvme queues the IO of a
+  namespace that has a live controller but no usable path (`osclient.md`,
+  Exported raw helpers and the probe-IO carve-out). A leg that md has failed
+  out of its md-raid1 group gets none of this IO; md fails such a leg when an
+  IO it sends failfast (`cnagent.md` CN12) reaches the source after src step 1,
+  before the primary has read the ANA change, and the primary's member
+  reconciliation puts the leg back once its path to the destination serves and
+  its health probe passes (`cnagent.md` CN12, CN30). The primary's own reads of
+  the pool's status, in its background reads and converges (`cnagent.md` CN28),
+  carry the `--noflush` flag and commit nothing (`dnagent.md` SH17). What still
+  commits the pool in a gap: a thin device's create or delete (`cnagent.md`
+  CN14); every read through a thin metadata snapshot, whose reservation commits
+  the pool, the bitmap reads of a thin device and of a data leg (`cnagent.md`
+  CN25) and the thin id sweeps (`cnagent.md` CN14) among them; a reload or
+  suspend of the pool; a commit of a clone's dm-clone, which flushes the td it
+  writes into and so commits the pool, whether a status read of the dm-clone
+  makes it (`dnagent.md` SH17) or dm-clone makes it on its own once its
+  metadata has changed, as it does while hydration runs; and dm-thin's own
+  periodic commit once any write has mapped new blocks, a host's write or a
+  clone's hydration copy into the td alike. While a commit waits, the rest of
+  that pool's IO waits too, and so does a status read of the pool, which takes
+  the pool's metadata lock for reading. A background read, a converge or a
+  bitmap read that waits holds the cntlr's lock and the node read lock
+  meanwhile (`cnagent.md` CN1), so the cntlr's other calls that take them wait
+  with it — a syncup that cancels the read included, since a cancelled read
+  lets go only once its waiting command returns — while its check rounds answer
+  from an observation that ages and, if the wait lasts, grows too old
+  (`dnv-worker.md` HL7). The gap's end needs nothing of the primary: the
+  cutover comes only once the primary holds a live path to the destination
+  (Migration), and the destination's last step moves that path to optimized, so
+  the waiting IO goes on and the commit finishes once the disk nodes have run
+  their steps. Where a step of theirs stops instead, as when the destination's
+  connect to the source is still refused once its pass's retries run out, the
+  gap lasts until a later pass of the destination's retry runs it (`dnagent.md`
+  DN13), and a commit waits that long. The pass the cutover brings retries the
+  connect longer than any other (`dnagent.md` DN13). A migration whose record
+  carries no `cutover_pending` has no cutover to wait at (Upgrade in lockstep):
+  its gap can open before the primary has connected the destination, and the
+  converge that would connect it (`cnagent.md` CN10) needs the cntlr lock a
+  waiting call holds, so the cntlr can stay blocked until the migration ends. A
+  cancel gives the primary back its path to the source, which lets the commit
+  finish. A finish removes the source's exports. Where the primary holds a live
+  path to the destination, the waiting IO goes on there once the destination,
+  now the leg's only side, makes that path optimized (`dnagent.md` DN10). Where
+  it holds none, as when the gap opened before its connect, the finish fails
+  the IO that waits on the leg: an md-raid1 group that keeps another working
+  member absorbs that error, as md completes the array's flush and charges a
+  failed write to the leg, so the commit goes on; a `RedundNone` group passes
+  it up, so the waiting commit fails, and dm-thin drops the block mappings made
+  since the last commit and leaves the pool read-only with its needs_check flag
+  set, which nothing clears (No thin-metadata repair path is specified, above),
+  while the pool's row still reads OK (`cnagent.md` CN28). On such a group,
+  with no live path to the destination, a finish fails the commit and a cancel
+  ends the block with the pool intact. Meanwhile a node write queued behind the
+  blocked call, a `SyncupCn`, holds up every later call of that agent that
+  takes the node lock (the head-of-line blocking above). Migration's read rule
+  does not keep a bitmap read out of a gap: a data leg's bitmap read that keeps
+  the rule for its own leg can still block in the gap of another leg the same
+  pool sits on, and a thin device's bitmap read can block in the gap of any leg
+  the pool it reads sits on.
 * **A leg bitmap read too early can hand a pool another pool's bytes.**
   Nothing in the gateway orders a `GetLegBitmap` read against the
   migration it feeds; the caller keeps the order (Migration). Read while

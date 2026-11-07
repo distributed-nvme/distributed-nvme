@@ -5712,9 +5712,9 @@ case_repair() {
 # `dnvctl sp delete` drains an sp by deleting the cntlr records and then the
 # slice records, and by design never waits on an agent. So a CN is told to
 # tear its stack down while the DN sides under it are already vanishing. In
-# that window an `mdadm --detail` blocks on a member read that sits in the
-# multipath head's requeue list, and the soft timeout kills the command. A
-# teardown that read the kill as "the array is absent" would issue no
+# that window a read that touches a member blocks in the multipath head's
+# requeue list, and a probe can fail to answer. A teardown that read an
+# unanswered probe as "the array is absent" would issue no
 # `mdadm --stop`; the un-stopped array would pin its two leg wrappers, both
 # `dmsetup remove`s would fail EBUSY, and a teardown that discarded the
 # failures, deleted the cntlr's state file and memory entry anyway and

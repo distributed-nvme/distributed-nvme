@@ -548,8 +548,12 @@ func TestLegProbeUsesTheProbeIo(t *testing.T) {
 
 // TestWedgedProbeDoesNotBlockAConverge is the central carve-out property
 // (CN11): a probe that never returns must not delay anything else on the node.
-// A leg with no serving path queues IO forever (ctrl_loss_tmo = -1), so this
-// is the ordinary failure mode, not an exotic one — and the design's answer is
+// A leg's IO waits without limit while no path of it can serve and one stays
+// live — a target that stalls but still takes the reconnect, or a migrating
+// leg whose live paths are all inaccessible, as in the migration gap
+// (osclient.md, Exported raw helpers and the probe-IO carve-out) — so this is
+// a failure mode to expect, not an exotic one, and
+// the design's answer is
 // that a hung probe is harmless: its IO does not go through the process's
 // DefaultOsClientLimit semaphore (osclient.md, Exported raw helpers and the
 // probe-IO carve-out), and CN1 forbids holding

@@ -24,8 +24,8 @@ import (
 // block on a dead remote, and recomputes "something is left" from scratch.
 // A removal derived from a remembered plan would forget a failed removal
 // together with the plan that named it, and nothing would enumerate the
-// object again: a killed `mdadm --detail` read as "the array is not there"
-// would leave the array pinning its leg wrappers for ever.
+// object again: an unanswered sysfs listing of the arrays read as "the array
+// is not there" would leave the array pinning its leg wrappers for ever.
 //
 // Two rules make the sweep safe rather than merely thorough:
 //
@@ -37,7 +37,9 @@ import (
 //     descent STOPS at the first layer that left something behind. Removing a
 //     leg out from under a live array is destructive on the migration path,
 //     and a pass that simply re-runs next round costs nothing: by then the
-//     failfast window has passed and the same order succeeds.
+//     failfast window has passed and the same order succeeds, unless a path
+//     stays live while none can serve, which holds the IO without limit
+//     (osclient.md, Exported raw helpers and the probe-IO carve-out).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -969,8 +971,8 @@ func (s *CnAgentServer) runChain(
 				left := false
 				// Their probers are cancelled already — by the converge's
 				// trim before its sweep (convergeCntlr), or at node level by
-				// the drop step (CN7) — but one wedged on a pathless leg
-				// still holds an open fd on the wrapper; the disconnect set
+				// the drop step (CN7) — but one still wedged on its leg
+				// holds an open fd on the wrapper; the disconnect set
 				// going below is what releases one stuck in D state (CN11).
 				for _, nqn := range chain.legNqns {
 					if !s.disconnectVerified(ctx, nqn) {

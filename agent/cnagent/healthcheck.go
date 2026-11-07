@@ -21,10 +21,10 @@ import (
 // call the raw block-IO helpers through LegProbeIO (osclient.md, Exported raw
 // helpers and the probe-IO carve-out), because a
 // blocked probe must not hold one of the OsClient's DefaultOsClientLimit
-// semaphore slots. Their IO can block far past every command timeout — a leg
-// with no serving path queues IO indefinitely — and nothing that holds a lock
-// ever waits on them: they only publish results into their own registry, which
-// the probes read.
+// semaphore slots. Their IO can block far past every command timeout —
+// without limit while no path of the leg can serve and one stays live — and
+// nothing that holds a lock ever waits on them: they only publish results into
+// their own registry, which the probes read.
 
 const (
 	detailsProbeStalled = "health probe stalled"
@@ -35,12 +35,12 @@ const (
 // NOT go through the process's LimitedOsClient (osclient.md, Exported raw
 // helpers and the probe-IO carve-out): that client
 // is a DefaultOsClientLimit-slot semaphore held across the blocking syscall,
-// and a probe of a pathless leg (ctrl_loss_tmo = -1 ⇒ IO queues forever)
-// would wedge in D state holding a slot. One dead DN can back many legs of one
-// CN, at which point every OS operation on the node starves — including the
-// teardown `nvme disconnect` that is the documented release mechanism for a
-// wedged probe. A hung probe is partly the feature working, so the design
-// makes hanging harmless rather than preventing it.
+// and a probe whose IO waits without limit — no path of the leg able to serve
+// and one live — would wedge in D state holding a slot. One DN can back many
+// legs of one CN, so when its targets stall, every OS operation on the node
+// would starve — including the teardown `nvme disconnect` that releases a
+// wedged probe. A hung probe is partly the feature working, so the
+// design makes hanging harmless rather than preventing it.
 //
 // Implementations open the device per call (never a cached fd), may block
 // indefinitely, must never be called under a lock, and log their own record
@@ -172,12 +172,15 @@ func (s *CnAgentServer) startLegProber(
 }
 
 // stopLegProbers cancels the probers of legs that are no longer probed — a
-// primary→standby flip, a leg leaving the desired state, a level at or above
-// SP_LEVEL_NO_SIDE, or a cntlr being dropped. A goroutine wedged in D state on
-// a pathless leg is released by the sweep's own disconnect (deleting the
-// controller errors its queued IO) — which the sweep's L10 sets going before
-// the wrapper removal, off the pass, so the wrapper it holds normally goes on
-// a later pass — and is accepted as unreclaimable until then (CN11).
+// primary→standby flip or a primary's disable, a leg leaving the desired state,
+// a level at or above SP_LEVEL_NO_SIDE, or a cntlr being dropped. A goroutine
+// wedged in D state on its leg is released when the IO ends. For a leg the
+// sweep removes, that is at the latest the sweep's own disconnect, which
+// deletes every controller of the leg's NQN and so errors its queued IO — the
+// sweep's L10 sets it going before the wrapper removal, off the pass, so the
+// wrapper the goroutine holds normally goes on a later pass; after a flip to
+// standby, or on a disabled primary, the leg stays and only the IO's own end
+// releases it. Until then the goroutine is accepted as unreclaimable (CN11).
 func (s *CnAgentServer) stopLegProbers(
 	st *cntlrState,
 	wanted map[uint64]struct{},

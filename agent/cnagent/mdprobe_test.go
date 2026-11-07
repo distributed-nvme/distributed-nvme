@@ -31,11 +31,12 @@ func mdLookup(ctx context.Context, md *Md, names ...string) (*MdDetail, error) {
 // /sys/block, which touches no member, and no mdadm runs at all. Not from
 // `mdadm --detail`, which loads a superblock from a member device: when that
 // member's DN side has gone, the read sits in the multipath head's requeue
-// list until the path's failfast expires, and a run the soft timeout killed
+// list until the path's failfast expires, or without limit while another path
+// of the leg stays live and none can serve, and a run the soft timeout killed
 // would read the group's md row ERROR for a member fault the leg row already
 // reports. md rows count toward cntlr health, so that ERROR would fail the
-// primary over; and the same kill, read as "absent", would let a teardown
-// skip `mdadm --stop`.
+// primary over; and the same kill, read as "absent", would leave a teardown no
+// array to stop.
 //
 // The array is found by member, never by name: it is the one holding any of
 // the group's leg wrappers, so either leg finds it and a set naming none of

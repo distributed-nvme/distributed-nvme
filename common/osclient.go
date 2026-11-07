@@ -35,9 +35,10 @@ import (
 // One carve-out is recorded (osclient.md, Exported raw helpers and the
 // probe-IO carve-out): the CN11
 // leg health prober calls the raw helpers WriteBlockAt / ReadBlockDirectAt
-// directly, because its IO may block indefinitely by design — a pathless leg
-// queues IO forever — and must never hold one of the LimitedOsClient's
-// semaphore slots, nor run under a lock, while it does. It logs its own
+// directly, because its IO may block indefinitely by design — it waits
+// without limit while no path of the leg can serve and one stays live — and
+// must never hold one of the LimitedOsClient's semaphore slots, nor run under
+// a lock, while it does. It logs its own
 // records ("probe write block" / "probe read block direct") and is faked
 // through its own LegProbeIO interface, so both properties above survive.
 type OsClient interface {
@@ -560,12 +561,12 @@ var rawOpen = syscall.Open
 //
 // Like WriteBlockAt it takes no context, does no logging and holds no OsClient
 // semaphore slot; the caller logs. It may block for as long as the device
-// queues IO — a pathless nvme multipath leg queues forever — which is
-// precisely why it lives outside the OsClient: a wedged probe
-// must not consume one of the DefaultOsClientLimit slots the node's teardown
-// commands need. The only sanctioned direct caller is the CN11 leg health
-// prober, and it must never run under a lock (osclient.md, Exported raw
-// helpers and the probe-IO carve-out; cnagent.md CN1/CN11).
+// queues IO — without limit while no path of an nvme multipath leg can serve
+// and one stays live — which is precisely why it lives outside the OsClient: a
+// wedged probe must not consume one of the DefaultOsClientLimit slots the
+// node's teardown commands need. The only sanctioned direct caller is the CN11
+// leg health prober, and it must never run under a lock (osclient.md, Exported
+// raw helpers and the probe-IO carve-out; cnagent.md CN1/CN11).
 //
 // The descriptor is opened O_CLOEXEC, as os.OpenFile opens every one;
 // syscall.Open does not add it. The read can block for as long as the device

@@ -1798,8 +1798,10 @@ afterwards, the layers below are **reported** as leftovers and not touched.
 Continuing would disconnect a live clone's source, or attempt a device
 something still maps; stopping at the first failure inside a layer would
 lose the rest of its names from the report. Nothing is lost by waiting: the
-pass is re-run on the next round, by which time the failfast window has
-passed and no command blocks.
+pass is re-run on the next round, by which time the failfast window has passed
+and no command blocks, unless the target behind one of the node's connections
+stalls but still takes the reconnect, which holds the IO without limit, as on a
+leg (`osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
 **"Gone" is probe-verified.** Every removal is followed by a re-probe —
 `dmsetup info` for a dm device, the configfs directory for a subsystem, the

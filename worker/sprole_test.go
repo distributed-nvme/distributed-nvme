@@ -7574,22 +7574,23 @@ func testSpLoadFailureRetriesOnTick(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// [D12] — common.ReplyCodeLeftover is an ACCEPTED reply
+// common.ReplyCodeLeftover is an ACCEPTED reply (architecture.md, Teardown by
+// sweep)
 // ---------------------------------------------------------------------------
 
-// TestLeftoverCodeIsAccepted pins [D12]: a reply carrying
-// common.ReplyCodeLeftover is an accepted request — the desired state is
-// stored and every WANTED object converged; what is left over is something the
-// desired state does not want, or an enumeration that did not answer, and the
-// agent goes on sweeping either way. Its *Info rows are therefore a full probe
-// of the wanted objects and are read exactly as code 0's, while the code alone
-// re-drives the sweep by forcing a Syncup* every round (RW4 step 5).
+// TestLeftoverCodeIsAccepted pins architecture.md, Teardown by sweep: a reply
+// carrying common.ReplyCodeLeftover is an accepted request — the desired state
+// is stored and every WANTED object converged; what is left over is something
+// the desired state does not want, or an enumeration that did not answer, and
+// the agent goes on sweeping either way. Its *Info rows are therefore a full
+// probe of the wanted objects and are read exactly as code 0's, while the code
+// alone re-drives the sweep by forcing a Syncup* every round (RW4 step 5).
 //
-// Every site that reads a reply's rows returned "no verdict" on ANY non-zero
-// code before [D12]. Left that way, one leftover would have frozen health,
-// bitmap pushes, RW19 td completion and the HL2 leg rows for as long as it
-// survived — which is exactly as long as a dead remote's failfast window, i.e.
-// exactly when they matter.
+// A site that read "no verdict" on ANY non-zero code would let one leftover
+// freeze health, bitmap pushes, RW19 td completion and the HL2 leg rows for as
+// long as it survived; a cn teardown leaves one routinely, and a dead remote
+// keeps one for its whole failfast window, which is when those reads matter
+// most.
 func TestLeftoverCodeIsAccepted(t *testing.T) {
 	// (a) The five observation functions of HL1/HL2 read a leftover reply's
 	// rows exactly as a code 0 reply's — and still return no verdict for the

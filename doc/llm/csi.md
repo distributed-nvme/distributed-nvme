@@ -352,13 +352,13 @@ own copies of the deployment verbs: etcd, the gateway, the worker and the
 cdc on the control-plane guest as the login user, one dn agent per
 disk-node guest over a sparse loop device, one cn agent per controller-node
 guest, each guest its own location, and a cluster with every node
-registered; the hosts carry the mask of the kernel's own autoconnector for
-the run. The stack listens on a port block of its own, bound by no other
-suite. The suite never builds a pool: the driver does, one per volume, so
-a RAID1 pool of one slice takes four disk-node guests, which is the least
-the suite accepts, and the failover needs the second controller-node
-guest. The storage class of the cases names the suite's cluster, RAID1 and
-two cntlrs.
+registered; the controller and disk nodes carry the md assembly mask, and the
+hosts the mask of the kernel's own autoconnector, for the run. The stack
+listens on a port block of its own, bound by no other suite. The suite never
+builds a pool: the driver does, one per volume, so a RAID1 pool of one slice
+takes four disk-node guests, which is the least the suite accepts, and the
+failover needs the second controller-node guest. The storage class of the cases
+names the suite's cluster, RAID1 and two cntlrs.
 
 ## Log records
 
@@ -448,11 +448,11 @@ namespace and the driver's namespace are deleted and waited for, the
 driver's cluster-wide objects and the storage class with them; then the
 hosts' connections of the driver's and dnv's and the discovery connections
 to the suite's cdc go, then the controller nodes' and the disk nodes'
-devices, exports and agents, with the controller nodes' nvmet entries of the
-two hosts that attaches made, then the control plane's processes, the
-imported images and the work directories, holder first. Cleanup runs at the
-start of every run and, on success only, at its end; a failing run leaves
-everything in place and dumps diagnostics. k3s, the hostnames and the
+devices, exports, agents and md assembly masks, with the controller nodes'
+nvmet entries of the two hosts that attaches made, then the control plane's
+processes, the imported images and the work directories, holder first. Cleanup
+runs at the start of every run and, on success only, at its end; a failing run
+leaves everything in place and dumps diagnostics. k3s, the hostnames and the
 identity files stay.
 
 CSI6. **Test pods run on the hosts.** The control-plane node carries a

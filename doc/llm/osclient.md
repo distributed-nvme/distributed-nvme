@@ -178,13 +178,12 @@ the method set is exactly the following, each taking the caller's ctx:
   the configfs write runs to the end regardless of the signal that hit the
   process waiting on it — so neither "it happened" nor "it did not" follows
   from the kill, and only a fresh probe afterwards can say which it was.
-  Reading the second class as the first lets an agent teardown skip
-  `mdadm --stop` for an array whose `mdadm --detail` was killed at the soft
-  timeout (a `--detail` opens the members, so it blocks until the leg's
-  fast_io_fail_tmo expires, which is longer than `CmdSoftTimeout`), leave
-  the array pinning its two leg wrappers, and forget it for ever; on the DN
-  the same conflation frees an extent record while the device still maps
-  those extents, and the next allocation hands them out twice.
+  Reading the second class as the first lets a dn teardown free an extent
+  record while the device still maps those extents, and the next allocation
+  hands them out twice; reading an in-process read that failed as one that
+  found nothing lets a cn teardown find no array to stop and disconnect its
+  legs from under the live array (`cnagent.md` CN21, which reads CN12's
+  `ListArrays` strictly for that reason).
 
   `agent.Reported` (`agent/oswrap.go`) is the one predicate — a nil error,
   or an exit code above zero — and `osBase.runProbe` is the one probe
@@ -276,7 +275,7 @@ the method set is exactly the following, each taking the caller's ctx:
 
 ### ReadDir
 
-* `ReadDir` lists a directory in the agent's own process; no child process
+* `ReadDir` lists a directory in the caller's own process; no child process
   runs. Reason: an agent lists many sysfs directories in one background
   read or converge, and starting a process for each listing costs far more
   than the listing itself. The nvmet configfs tree is never listed this way
@@ -304,7 +303,7 @@ the method set is exactly the following, each taking the caller's ctx:
 
 ### ReadMtime
 
-* `ReadMtime` reads a path's modification time in the agent's own process;
+* `ReadMtime` reads a path's modification time in the caller's own process;
   no child process runs. The dn's attribution reads a subsystem directory's
   age this way, and both agents' port probe whether their port's directory
   is there, for the reasons the configfs access rule gives (`dnagent.md`
@@ -334,13 +333,15 @@ the method set is exactly the following, each taking the caller's ctx:
 
 ### ReadDevNo
 
-* `ReadDevNo` reads the number of a block device in the agent's own
+* `ReadDevNo` reads the number of a block device in the caller's own
   process; no child process runs. The dn reads its disk's number this way,
   to read the disk's size from sysfs, which names each block device by its
   number, for the reason the probing conventions give (`dnagent.md` SH17).
 * It returns the number and nothing else, as "major:minor", the form
-  sysfs and dm tables print. Reason: the size read is its only caller, and
-  a general stat would add surface no caller needs.
+  sysfs and dm tables print. Reason: the disk node's size read is the only
+  caller that uses the number — the node plugin calls it too, to test that
+  a block device is there, and drops the number (Scope and placement) —
+  and a general stat would add surface no caller needs.
 * Like `ReadMtime`, it holds one semaphore slot and checks the ctx error
   after acquiring it. That is its last cancellation point: the read itself
   is not cancelable, and one the kernel holds returns only when the kernel
@@ -448,21 +449,28 @@ sanctioned direct-syscall path in dnv:
   would be answered from cache and observe no device IO at all, making the
   read-back vacuous. The write half needs no direct twin: its fsync already
   forces the data to the device and surfaces the IO error.
-* *It may block indefinitely, by design.* A leg with no serving path (a
-  ctrl_loss_tmo of -1) queues IO forever, so the calling goroutine sits in
-  uninterruptible D state until that IO is errored — which happens only when
-  the agent disconnects the path (`cnagent.md` CN10). This is the feature
-  working: a hung probe is how a silently stalled target is detected. Two
-  consequences the implementer must not design around: **cancelling the
-  prober's context does not unblock a syscall already in flight** (the
-  helpers take no ctx; the prober's ctx is checked once before the call and
-  otherwise only carries the CN2 per-attempt trace id into the records
-  below), and **nothing ever waits for a prober to finish** — cancel and
-  move on, never cancel-and-wait. (Contrast the dn zeroing goroutines of
-  `dnagent.md` DN9, which *are* waited for: their blkdiscard is a child
-  process SIGKILL ends, not a blocked syscall of the agent's own — though
-  one in an uninterruptible kernel wait dies only when the kernel returns,
-  RunCommand above.)
+* *It may block indefinitely, by design.* A leg's IO waits on its multipath
+  namespace, not on one controller. The IO fails at once when the teardown's
+  disconnect of the leg's NQN deletes every controller (`cnagent.md` CN10),
+  and, once the leg has lost every controller, at the latest when the last
+  failfast window ends (`dnagent.md` SH20). While a path of the leg stays live
+  and none can serve, the IO waits without limit: a target that stalls but
+  still takes the reconnect, or an ANA-inaccessible path — a migrating leg's
+  destination path from the cntlr's connect to it until dst step 5, its source
+  path from src step 1 on, so both in the migration gap (`architecture.md`,
+  Migration). The calling goroutine then sits in uninterruptible D state until
+  the target answers, a path turns usable, or the IO fails as above. This is
+  the feature working: a hung probe is how a silently stalled target is
+  detected. Two consequences the implementer must not design around:
+  **cancelling the prober's context does not unblock a syscall already in
+  flight** (the helpers take no ctx; the prober's ctx is checked once before
+  the call and otherwise only carries the CN2 per-attempt trace id into the
+  records below), and **nothing ever waits for a prober to finish** — cancel
+  and move on, never cancel-and-wait. (Contrast the dn zeroing goroutines of
+  `dnagent.md` DN9, which *are* waited for: their blkdiscard is a child process
+  SIGKILL ends, not a blocked syscall of the agent's own — though one in an
+  uninterruptible kernel wait dies only when the kernel returns, RunCommand
+  above.)
 * *Its descriptor is close-on-exec.* `ReadBlockDirectAt` opens with
   O_CLOEXEC, as `os.OpenFile` opens every descriptor (`WriteBlockAt`'s
   included); a bare `syscall.Open` does not add it. Every command the agent
@@ -476,11 +484,13 @@ sanctioned direct-syscall path in dnv:
   observations would only age.
 * *It must never run through the semaphore.* `LimitedOsClient` is a
   `DefaultOsClientLimit`-slot semaphore held across the blocking syscall.
-  One dead or partitioned DN can back more legs on a CN than the client has
-  slots (`MaxSideCntPerDn` is far above `DefaultOsClientLimit`); that many
-  wedged probes then starve **every** OS operation on the node — including
-  the `nvme disconnect` that is the only documented release mechanism for
-  those very probes, and the mdadm and dm commands the self-healing of
+  One DN can back more legs on a CN than the client has slots
+  (`MaxSideCntPerDn` is far above `DefaultOsClientLimit`). If it dies and its
+  legs have no other path, that many wedged probes would starve **every** OS
+  operation on the node until the failfast window ends; if its targets stall
+  but still take the reconnect, or its legs keep a live path that cannot serve,
+  they would starve them without limit — the `nvme disconnect` that releases
+  those very probes included, and the mdadm and dm commands the self-healing of
   `architecture.md`, Automatic reactions, needs. Deadlock by construction;
   hence the helpers, not a second `OsClient` and not a probe budget.
 * *Who may call them.* Only the cn agent's lock-free prober goroutines

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # The pinned etcd release every suite that starts an etcd runs, and the one
 # download-and-verify path that puts it into integtest/bin/cache. The worker,
-# gateway, cdc and end-to-end suites source this file and call fetch_etcd at
-# preflight; `make fetch-etcd` runs it, and `make test` hands the unit tests
-# the binary it leaves there when ETCD_BIN is empty or unset and the PATH
-# holds no etcd (dnv-worker.md EU7). A cached tarball whose sha256 already
-# matches the pin is never re-downloaded, so a repeat run needs no network
-# and a fresh checkout still works.
+# gateway, cdc, end-to-end and csi suites source this file and call
+# fetch_etcd at preflight; `make fetch-etcd` runs it, and `make test` hands
+# the unit tests the binary it leaves there when ETCD_BIN is empty or unset
+# and the PATH holds no etcd (dnv-worker.md EU7). A cached tarball whose
+# sha256 already matches the pin is never re-downloaded, so a repeat run
+# needs no network and a fresh checkout still works.
 #
 # Run as a command: with no argument it fetches and prints the etcd binary;
 # with `path` it prints the cached etcd binary, or fails when there is none,

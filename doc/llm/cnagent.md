@@ -271,16 +271,16 @@ ids); one background read of a CN — node read; `GetCnSize`, `GetCnInfo`,
 the last four answer from the object's latest observation (`dnagent.md`
 SH28). How a syncup cancels a read and how every other holder waits for
 one is `dnagent.md` SH30. The CN11 leg probers take no
-lock at all: their IO can block far past every command timeout (a leg
-with no serving path queues IO indefinitely), and nothing that holds a
-lock ever waits on them — they only publish results into their own
-registry, which probes read. They also take no `OsClient` semaphore slot:
-their IO is issued by the direct-syscall path of Leg-probe IO leaves the
-`OsClient`, so a wedged prober can starve neither the lock hierarchy nor
-the node's OS-command budget — which is what keeps the teardown
-`nvme disconnect` that releases it runnable. That disconnect takes no
-lock either: the sweep issues it through the CN10 disconnect registry,
-and under its locks the pass only probes the connection.
+lock at all: their IO can block far past every command timeout, without limit
+while no path of the leg can serve and one stays live (`osclient.md`, Exported
+raw helpers and the probe-IO carve-out), and nothing that holds a lock ever
+waits on them — they only publish results into their own registry, which probes
+read. They also take no `OsClient` semaphore slot: their IO is issued by the
+direct-syscall path of Leg-probe IO leaves the `OsClient`, so a wedged prober
+can starve neither the lock hierarchy nor the node's OS-command budget — which
+is what keeps the teardown `nvme disconnect` that releases it runnable. That
+disconnect takes no lock either: the sweep issues it through the CN10
+disconnect registry, and under its locks the pass only probes the connection.
 
 ### Startup reconcile
 
@@ -1031,20 +1031,22 @@ hydration and the phase is the DN's knowledge, not this CN's. Probers
 start when the wrapper converges and are cancelled by the first converge
 whose plan no longer probes their leg — every converge trims them before
 its sweep, whether or not the sweep's descent reaches the legs (CN21) —
-or when the cntlr is dropped (CN7); a goroutine wedged in D state on a
-pathless leg is released by the teardown's own disconnect (deleting the
-controller errors its queued IO) and is accepted as unreclaimable until
-then. Because that wedged probe still holds an open fd on the leg wrapper
-after its cancel, CN21's L10 order is: set the leg's disconnect going,
-then remove the wrapper — a `dmsetup remove` fails EBUSY until the
-disconnect, which runs off the pass (CN10), has errored the queued IO, so
-such a wrapper normally goes on a later pass. The cancel itself comes
-before L10: in the converge's trim ahead of its sweep, or, for a cntlr
-that is forgotten, in the drop step that precedes the node-level sweep
-(CN7, CN2). Cancellation is never a join — the direct read is
-uninterruptible, so waiting for it would hang shutdown forever (Leg-probe
-IO leaves the `OsClient`; `dnagent.md` SH27). A wedged prober costs
-nothing else: it holds no lock (CN1) and no `OsClient` slot.
+or when the cntlr is dropped (CN7); a goroutine wedged in D state on its leg is
+released when the IO ends (`osclient.md`, Exported raw helpers and the probe-IO
+carve-out): for a leg the sweep removes, at the latest by the teardown's own
+disconnect, which deletes every controller of the leg's NQN and so errors its
+queued IO; after a flip to standby, or on a disabled primary, the leg stays and
+only the IO's own end releases it; until then it is accepted as unreclaimable.
+Because that wedged probe still holds an open fd on the leg wrapper after its
+cancel, CN21's L10 order is: set the leg's disconnect going, then remove the
+wrapper — a `dmsetup remove` fails EBUSY until the disconnect, which runs off
+the pass (CN10), has errored the queued IO, so such a wrapper normally goes on
+a later pass. The cancel itself comes before L10: in the converge's trim ahead
+of its sweep, or, for a cntlr that is forgotten, in the drop step that precedes
+the node-level sweep (CN7, CN2). Cancellation is never a join — the direct read
+is uninterruptible, so waiting for it would hang shutdown forever (Leg-probe IO
+leaves the `OsClient`; `dnagent.md` SH27). A wedged prober costs nothing else:
+it holds no lock (CN1) and no `OsClient` slot.
 
 CN12. Groups (`md.go`; primary only — a standby has none,
 `architecture.md`, Standby cntlr). The groups are those of every slice and
@@ -1865,45 +1867,44 @@ error, as a killed second run is (CN12, the forced start).
 
 **Nothing in the agent runs mdadm --detail** (CN21, CN28). It loads the
 superblock from the first array member that opens; when that member's DN
-side has gone, the read sits in the multipath head's requeue list until
-the path's failfast expires — the controller stays live until its
-keep-alive times out, error recovery starts after it, and the fast IO
-fail timeout runs from the reconnect that follows — far past the soft
-timeout. A read's probe killed that way would read the group's
-row `ERROR` for a member fault the leg row already reports, and that row
-counts toward cntlr health: it would fail the primary over. What the
-sweeps, the member reconciliation, the md rows and the pool concats need
-about an array they read from sysfs, which touches no member device and therefore
-cannot block on a dead leg (of the md probes, only `--examine` still reads
-a member: the assembly's, the forced start's and the take-back check's
-above, each only of a leg that serves, available in a converge and serving
-as a read finds it in a read):
-`ListArrays` walks "/sys/block" for the array nodes (numbered or named,
-above), reads each array's "array_state", and names each member through
-its "block/dm/name" under the array's "md" directory — which is what
-attributes an array to an sp, and a member with no such attribute is not
-a dm device at all. `Md.Walk` makes the same listings and dm-name reads
-(not "array_state"), once per converge for the md groups (above), under a
-different rule for an array that did not answer: `ListArrays` keeps the
-strict one — one array whose "array_state", "md" listing or member dm
-name did not answer fails the whole md enumeration, because a removal
-decision needs the whole node; that is the sweep's "enumeration failed:
-md arrays …" and a `ReplyCodeLeftover`, never a row, and the worker
-counts a Leftover reply as accepted, so it does not reach cntlr health —
-while `Md.Walk` records such an array as unanswered. The md walk of a
-cntlr's read, `Md.Scan`, makes `ListArrays`' reads once
-and serves both rules: its group rows and concat rows read it under
-`Md.Walk`'s, its verdict under `ListArrays`'. `Md.Gone` verifies a
-stop from the same "array_state": only an absent directory or clear
-counts, never inactive, which is an assembled-but-not-running array that
-pins its members just as hard. A read that fails is an error, never gone
-— the EBUSY a stopped array's "array_state" reads until its "md"
-directory goes (above) included: `stopArrayVerified` logs that verifying
-an md stop failed and reports the array as a Leftover, which the worker
-re-drives, and the forced start's stop registers the CN10 background
-retry for it (the forced start, above). "mdadm --detail --scan" is
-deliberately not the enumerator: it loads superblocks. The node a sweep stops is the one sysfs named — never
-the `CnMdDevName` link under "/dev/md", which depends on udev having run.
+side has gone, the read sits in the multipath head's requeue list until the
+path's failfast expires — the controller stays live until its keep-alive times
+out, error recovery starts after it, and the fast IO fail timeout runs from the
+reconnect that follows — or without limit while another path of the leg stays
+live and none can serve (`osclient.md`, Exported raw helpers and the probe-IO
+carve-out), far past the soft timeout. A read's probe killed that way would
+read the group's row `ERROR` for a member fault the leg row already reports,
+and that row counts toward cntlr health: it would fail the primary over. What
+the sweeps, the member reconciliation, the md rows and the pool concats need
+about an array they read from sysfs, which touches no member device and
+therefore cannot block on a dead leg (of the md probes, only `--examine` still
+reads a member: the assembly's, the forced start's and the take-back check's
+above, each only of a leg that serves, available in a converge and serving as a
+read finds it in a read): `ListArrays` walks "/sys/block" for the array nodes
+(numbered or named, above), reads each array's "array_state", and names each
+member through its "block/dm/name" under the array's "md" directory — which is
+what attributes an array to an sp, and a member with no such attribute is not a
+dm device at all. `Md.Walk` makes the same listings and dm-name reads (not
+"array_state"), once per converge for the md groups (above), under a different
+rule for an array that did not answer: `ListArrays` keeps the strict one — one
+array whose "array_state", "md" listing or member dm name did not answer fails
+the whole md enumeration, because a removal decision needs the whole node; that
+is the sweep's "enumeration failed: md arrays …" and a `ReplyCodeLeftover`,
+never a row, and the worker counts a Leftover reply as accepted, so it does not
+reach cntlr health — while `Md.Walk` records such an array as unanswered. The
+md walk of a cntlr's read, `Md.Scan`, makes `ListArrays`' reads once and serves
+both rules: its group rows and concat rows read it under `Md.Walk`'s, its
+verdict under `ListArrays`'. `Md.Gone` verifies a stop from the same
+"array_state": only an absent directory or clear counts, never inactive, which
+is an assembled-but-not-running array that pins its members just as hard. A
+read that fails is an error, never gone — the EBUSY a stopped array's
+"array_state" reads until its "md" directory goes (above) included:
+`stopArrayVerified` logs that verifying an md stop failed and reports the array
+as a Leftover, which the worker re-drives, and the forced start's stop
+registers the CN10 background retry for it (the forced start, above). "mdadm
+--detail --scan" is deliberately not the enumerator: it loads superblocks. The
+node a sweep stops is the one sysfs named — never the `CnMdDevName` link under
+"/dev/md", which depends on udev having run.
 
 CN13. Per-slice pools (`pool.go`; primary only). Per slice of
 `id_to_slice`: the multi-target dm-linears `CnPoolMetaName` (meta group
@@ -3238,8 +3239,8 @@ descent stopped at an array that would not stop, or a sweep stopped by
 an unanswered listing, would leave a demoted primary's probers probing
 through the standby's legs, and a departed leg's through its wrapper,
 until some pass got that far. Coming before the sweep, it still precedes
-L10's disconnect, which is what releases a prober wedged on a pathless
-leg.
+L10's disconnect, which is what releases a prober still wedged on a leg the
+sweep removes.
 
 ### `PushCloneBitmap`
 

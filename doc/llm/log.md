@@ -67,17 +67,20 @@ R5. The trace id is carried in the context under an unexported key and
     which writes it straight into the incoming metadata
     (`gateway/traceid.go`), and `gatewayctl`, `dnagentctl` and `cnagentctl`,
     which put it into their outgoing metadata themselves because they dial
-    without the client interceptors (`grpc.md`, Drivers and fakes) — and three places that move an id they
-    were handed: the `Check*` streams, whose requests carry each round's id
-    in a `trace_id` field that the worker fills and the agent adopts
-    (`grpc.md` T3); the background read a round starts, which puts that
-    round's id onto the agent's lifetime ctx (`rootCtx`) and mints one only
-    if the round had none (`dnagent.md` SH29); and the cn sweep's background
-    "nvme disconnect", which puts the id of the pass that set it going onto
-    `rootCtx` and mints one only if that pass had none (`dnagent.md` SH27,
-    `cnagent.md` CN10). On a logger derived with `WithGroup` the attribute
-    is nested inside that group rather than at the top level — see R12 — so
-    a consumer that greps `trace_id` positionally must account for it.
+    without the client interceptors (`grpc.md`, Drivers and fakes) — and four
+    places that move an id they were handed: the `Check*` streams, whose
+    requests carry each round's id in a `trace_id` field that the worker fills
+    and the agent adopts (`grpc.md` T3); the background read a round starts,
+    which puts that round's id onto the agent's lifetime ctx (`rootCtx`) and
+    mints one only if the round had none (`dnagent.md` SH29); the cn sweep's
+    background "nvme disconnect", which puts the id of the pass that set it
+    going onto `rootCtx` and mints one only if that pass had none (`dnagent.md`
+    SH27, `cnagent.md` CN10); and the end of a converge or a read, which stores
+    its id in the observation it makes, for the reply's stamp to carry as
+    `obs_trace_id` and the worker's `syncup result` record of a re-send to name
+    (`grpc.md` T3). On a logger derived with `WithGroup` the attribute is
+    nested inside that group rather than at the top level — see R12 — so a
+    consumer that greps `trace_id` positionally must account for it.
 
 R6. Log levels per binary: the five daemons — `dnv-gateway`, `dnv-worker`,
     `dnv-agent` in both roles, `dnv-cdc` and `dnv-csi` — log at Info; `dnvctl` logs at
@@ -106,20 +109,22 @@ R8. The following events MUST be logged at **Info** level, with the record
     4. every etcd read/write (human-readable key, value decoded from
        protobuf and rendered as JSON — never raw protobuf binary) —
        implemented in the central etcd helpers of `etcdutil`;
-    5. every directory listing made in the agent's own process (full path;
+    5. every directory listing made in the caller's own process (full path;
        every name, never truncated) — implemented once inside
        `LimitedOsClient`;
-    6. every modification-time read made in the agent's own process (full
+    6. every modification-time read made in the caller's own process (full
        path; the time read) — implemented once inside `LimitedOsClient`;
-    7. every device-number read made in the agent's own process (full path;
+    7. every device-number read made in the caller's own process (full path;
        the number read) — implemented once inside `LimitedOsClient`.
 
 R9. Each logging point emits exactly **one** record per operation, on
-    completion, so the record can carry the outcome (exit code, error). When
-    the operation failed, the same Info record additionally carries an
-    `error` attribute holding the error's text. These logging points do not
-    use other levels; failures still reach the caller through the returned
-    error.
+    completion, so the record can carry the outcome (exit code, error); a
+    unary call's request record, logged before the call (`grpc.md` L3), and
+    the record of a put or delete that an STM holds back for its commit (etcd,
+    below) carry no outcome. When the operation failed, the same Info record
+    additionally carries an `error` attribute holding the error's text. These
+    logging points do not use other levels; failures still reach the caller
+    through the returned error.
 
 R10. Protobuf messages are rendered for logging exclusively through
      `PbToLogValue`, which replaces every `bytes` field, at any nesting depth
@@ -163,14 +168,14 @@ implements them:
 * a file read logs `os read file`, a file write `os write file` and a direct
   write `os write file direct`, each with `path`, `size` (the bytes read or
   written), `data` (as `TruncForLog` renders it) and "error?";
-* a directory listing made in the agent's own process (`ReadDir`) logs
+* a directory listing made in the caller's own process (`ReadDir`) logs
   `os read dir` with `path`, `count` (the names returned), `names` (every
   name, as an array, empty when none) and "error?"; a listing by `ls` is a
   command run;
-* a modification-time read made in the agent's own process (`ReadMtime`)
+* a modification-time read made in the caller's own process (`ReadMtime`)
   logs `os read mtime` with `path`, `mtime` (the time read, the zero time
   when the read failed) and "error?";
-* a device-number read made in the agent's own process (`ReadDevNo`) logs
+* a device-number read made in the caller's own process (`ReadDevNo`) logs
   `os read devno` with `path`, `devno` (the number read as "major:minor",
   empty when the read failed) and "error?";
 * a raw block read logs `os read block` and a raw block write
@@ -239,10 +244,16 @@ decoded message to render. The unmarshal error then ends that watch
 logs it on the way out — each `WatchTyped` consumer with a record of its
 own, the worker's named in `dnv-worker.md`, Log records, and the cdc's in
 `cdc.md` WV4 — and its outer loop rescans and re-opens the watch, so this
-record is not the only trace of which key broke it. Inside an STM, reads
-and writes may be re-executed on
-transaction retry; each attempt logs, so duplicate records for retried
-transactions are expected and acceptable.
+record is not the only trace of which key broke it. Inside an STM a put or
+a delete logs when it is held back for the commit, with no error, so its
+`etcd put` or `etcd delete` record says only that the write was staged and
+carries no commit outcome, which reaches the caller only through the returned
+error. A transaction function that fails after the write was held back, or a
+commit etcd refuses, leaves such a record for a write that never happened; a
+commit that times out leaves one for a write that may or may not have happened.
+Inside an STM, reads and writes may be re-executed on transaction retry; each
+attempt logs, so duplicate records for retried transactions are expected and
+acceptable.
 
 ### Leftovers
 

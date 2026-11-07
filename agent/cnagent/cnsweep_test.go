@@ -22,8 +22,8 @@ import (
 // derived from a remembered plan — "the plan I applied last time minus the
 // plan I am applying now", the applied plan overwritten whether or not the
 // removals worked — forgets a failed removal together with the plan that
-// named it, and one killed `mdadm --detail` would then leak an array and its
-// leg wrappers for ever.
+// named it, and one unanswered sysfs listing of the arrays, read as "no
+// array", would then leak an array and its leg wrappers for ever.
 //
 // The tests are therefore written against OBJECTS and REPLY CODES, not
 // against the shape of any plan: a sweep that only works while its cntlr's
