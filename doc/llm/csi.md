@@ -353,7 +353,7 @@ cdc on the control-plane guest as the login user, one dn agent per
 disk-node guest over a sparse loop device, one cn agent per controller-node
 guest, each guest its own location, and a cluster with every node
 registered; the controller and disk nodes carry the md assembly mask, and the
-hosts the mask of the kernel's own autoconnector, for the run. The stack
+hosts the mask of nvme-cli's autoconnector, for the run. The stack
 listens on a port block of its own, bound by no other suite. The suite never
 builds a pool: the driver does, one per volume, so a RAID1 pool of one slice
 takes four disk-node guests, which is the least the suite accepts, and the
@@ -435,7 +435,10 @@ two hosts' host NQNs must differ; the fix is named, not applied.
 
 CSI3. **kubectl runs on the control-plane guest only**, as the k3s binary's
 subcommand over ssh, with every manifest piped from the suite's machine,
-which installs nothing: it needs Go, ssh, scp and docker.
+which installs no package: besides the tree's own builds and the images of CSI4
+it puts only csi-sanity, the pinned etcd release and, when the machine has no
+`jq`, `gojq` into `integtest/bin` (`layout.md`, Directory tree); it needs Go,
+ssh, scp and docker, and curl, tar and sha256sum for the etcd fetch.
 
 CSI4. **The suite's images reach a node by import.** The suite builds the
 driver's image and the smoke case's image on its machine, saves them and
@@ -447,13 +450,13 @@ CSI5. **Cleanup removes what the suite started and nothing else.** The test
 namespace and the driver's namespace are deleted and waited for, the
 driver's cluster-wide objects and the storage class with them; then the
 hosts' connections of the driver's and dnv's and the discovery connections
-to the suite's cdc go, then the controller nodes' and the disk nodes'
-devices, exports, agents and md assembly masks, with the controller nodes'
-nvmet entries of the two hosts that attaches made, then the control plane's
-processes, the imported images and the work directories, holder first. Cleanup
-runs at the start of every run and, on success only, at its end; a failing run
-leaves everything in place and dumps diagnostics. k3s, the hostnames and the
-identity files stay.
+to the suite's cdc go, with the hosts' mask of nvme-cli's autoconnector, then
+the controller nodes' and the disk nodes' devices, exports, agents and md
+assembly masks, with the controller nodes' nvmet entries of the two hosts that
+attaches made, then the control plane's processes, the imported images and the
+work directories, holder first. Cleanup runs at the start of every run and, on
+success only, at its end; a failing run leaves everything in place and dumps
+diagnostics. k3s, the hostnames and the identity files stay.
 
 CSI6. **Test pods run on the hosts.** The control-plane node carries a
 no-schedule taint the suite ensures on every run, and every pod names its

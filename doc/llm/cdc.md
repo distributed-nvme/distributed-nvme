@@ -706,7 +706,7 @@ flood and its waits are sized by `CdcMaxPendingConnCnt` and
 case runs many copies of the discovery daemon on each host server, each
 its own host — its own host NQN and host id, its own private bus and its
 own runtime directory — listing every instance, with the host's own
-nvme-stas stopped and the kernel's autoconnect unit masked as for every
+nvme-stas stopped and nvme-cli's autoconnect unit masked as for every
 case: each daemon starts that unit for every AEN another daemon receives,
 so unmasked it would try to connect every entry of the other daemons' logs
 at every change. Only the discovery daemon runs, because the case proves
@@ -781,8 +781,8 @@ reconnects by itself; then the first server's processes. Cleanup touches
 only what is the suite's — the test subsystems and the discovery
 controllers that point at the fleet, never every subsystem of a host —
 and leaves nvme-stas installed and the kernel modules loaded; the
-end-of-run cleanup also removes the work directories and unmasks the
-kernel's autoconnect unit.
+end-of-run cleanup also removes the work directories and unmasks
+nvme-cli's autoconnect unit.
 
 **The driver, `cdcctl`.** `cdcctl` is the etcd driver that plays the
 gateway and the worker for `CdcEntry` keys only: it formats the keys
@@ -822,7 +822,7 @@ actions that hold state: the nvme-stas control, which saves the host's own
 nvme-stas configuration, writes the suite's — every cdc endpoint, no mDNS,
 connect every entry and disconnect only the connections nvme-stas made or
 took over once their entry vanishes — and restores the original afterwards;
-the masking of the kernel's autoconnect unit, which would otherwise connect on
+the masking of nvme-cli's autoconnect unit, which would otherwise connect on
 the very AEN the lowlevel case measures, so it is masked for every case and
 setup checks the mask rather than trusting it; the manyhosts case's
 daemons, each started as a transient service whose private mount of the
@@ -833,7 +833,7 @@ then removes, the controllers its runtime directory remembers; the reads
 of every daemon's log over its bus; the daemons' stop, which stops them
 before their buses, then disconnects the discovery controllers under the
 daemons' identities and only those, which outlive their daemon, and puts
-back the override of the kernel's autoconnect rule that every daemon writes
+back the override of nvme-cli's autoconnect rule that every daemon writes
 and the first to stop removes; and the record of the server's state the
 case compares; the uevent capture of the lowlevel and flood cases; the
 flood case's idle connections, held by one process that the wipes end; and

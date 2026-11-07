@@ -22,11 +22,12 @@ no repair, no forced start and no take-over:
   transaction `EtcdMaxTxnOps` is sized by, at two cntlrs rather than the widest
   shape's cntlr ceiling: a pool no other suite builds on real agents.
 * **The operator surface works against a real control plane.** Every `Gateway`
-  RPC but the cluster and node deletions and listings and the id step is
-  issued by the shipped `dnvctl` against a real gateway, etcd and agents, and
-  no echoed id is the whole of an assertion: a mutation is read back from its
-  record and, where the device is the point, from its agent, or, for a few,
-  proved by its effect, which is what the suite observes.
+  RPC but the cluster and node deletions and listings, the id step and the
+  capacity read of the layer above, `GetClusterCapacity`, is issued by the
+  shipped `dnvctl` against a real gateway, etcd and agents, and no echoed id is
+  the whole of an assertion: a mutation is read back from its record and, where
+  the device is the point, from its agent, or, for a few, proved by its effect,
+  which is what the suite observes.
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, through
   slice grows and the level ladder, failovers, the worker's leg repairs, an
@@ -92,33 +93,33 @@ no repair, no forced start and no take-over:
   configuration of it back byte for byte.
 
 **What it does not prove.** The RPCs it never issues, the deletions and
-listings of clusters, disk nodes and controller nodes and the id step
-(`architecture.md`, Clusters): the gateway suite covers the node deletions and
-the id step, and this run discards the whole cluster between cases.
-Error paths, beyond the few refusals the ops case asserts on purpose, the
-copy case's refused abort and cancel of a started repair, react's refused
-forced start of a group whose array runs and its refused repair that takes
-back a retired leg newer than the array, the `NOT_FOUND` reads after the
-copy and react cases' deletions and the read the cutoff case sees refused
-while etcd is down; validation and CLI semantics are the gateway and dnvctl
-suites'. Concurrency: one dnvctl call and one case at a time, and never a
-revision token, since a present token changes what the
+listings of clusters, disk nodes and controller nodes, the id step and the
+capacity read `GetClusterCapacity` (`architecture.md`, Clusters): the gateway
+suite issues each of them, the dnvctl suite each against its fake gateway, and
+the csi suite reaches the capacity read through dnv-csi; this run discards the
+whole cluster between cases. Error paths, beyond the few refusals the ops case
+asserts on purpose, the copy case's refused abort and cancel of a started
+repair, react's refused forced start of a group whose array runs and its
+refused repair that takes back a retired leg newer than the array, the
+`NOT_FOUND` reads after the copy and react cases' deletions and the read the
+cutoff case sees refused while etcd is down; validation and CLI semantics are
+the gateway and dnvctl suites'. Concurrency: one dnvctl call and one case at a
+time, and never a revision token, since a present token changes what the
 gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection between
 two usable controllers (Known limits). Auto-grow, cntlr replacement, leg
-repair, a failover after the primary's cn agent is killed, the forced
-start and the take-over of a group's repair, on a pool at the ceiling
-(`dnv-worker.md` AR5 to AR8, AR13; `cnagent.md` CN12; `architecture.md`,
-Repairs), as react's pool has at most `REACT_SLICE_CAP` slices
-(Known limits); the cutoff case's failover, after
-that agent is stopped, runs at the run's slice count. A demotion hold that
-the old primary's report ends early (`dnv-worker.md` RW22): react's and
-cutoff's failovers lose an agent that answers nothing, one killed and one
-stopped, and copy's disabled primary answers, but the case only logs which
-of the two ended its hold, the report or the timer. The worker's own
+repair, a failover after the primary's cn agent is killed, the forced start and
+the take-over of a group's repair, on a pool at the ceiling (`dnv-worker.md`
+AR5 to AR8, AR13; `cnagent.md` CN12; `architecture.md`, Repairs), as react's
+pool has at most `REACT_SLICE_CAP` slices (Known limits); the cutoff case's
+failover, after that agent is stopped, runs at the run's slice count. A
+demotion hold that the old primary's report ends early (`dnv-worker.md` RW22):
+react's and cutoff's failovers lose an agent that answers nothing, one killed
+and one stopped, and copy's disabled primary answers, but the case only logs
+which of the two ended its hold, the report or the timer. The worker's own
 try-to-abort of a repair of its own, and its cancel of one, which react's
-take-over sees only when it comes before the operator's (`dnv-worker.md`,
-Leg repair; `architecture.md`, Repair); and the retire timer, as no run
-waits out a retired leg's age (`dnv-worker.md` AR12).
+take-over sees only when it comes before the operator's (`dnv-worker.md`, Leg
+repair; `architecture.md`, Repair); and the retire timer, as no run waits out a
+retired leg's age (`dnv-worker.md` AR12).
 
 ## Topology and parameters
 
@@ -322,7 +323,7 @@ the first ssh and checks what it can, that no port of its block listens and no
 nvmet port it needs exists.
 
 E2E10. **Hosts reach namespaces through the cdc, and every path a host holds is
-the suite's own, but for nvme-stas's inside the cutoff case.** The kernel's
+the suite's own, but for nvme-stas's inside the cutoff case.** nvme-cli's
 autoconnector is masked at preflight and at every rebuild and read back, and
 nvme-stas must be inactive at preflight. The one exception is host0 inside the
 cutoff case, whose subject is what a host running nvme-stas sees: there
@@ -437,291 +438,284 @@ semantics); and a disabled disk node and controller node, invisible to the
 agents, each proved by a refused allocation that writes nothing
 (`architecture.md`, Capacity index keys).
 
-**copy** proves the four RPC groups that move bytes, among them two of an
-operator's repairs on a group whose legs' disk nodes die, the second taking
-back the leg the first retired, and that a clone's copy survives a failover.
-A transfer, auto-suspended,
-parks the origin namespace and carries its identity, so host1, the only host
-connected to it, reads the origin through it (`architecture.md`, Transfers;
-`cnagent.md` CN17). A clone pulls the origin through the transfer into a fresh
-thin device served live through the dm-clone (`cnagent.md` CN16's clone rule,
-CN18); its unforced delete rests on the gateway's proof of hydration, and with
-the transfer aborted the destination, read through its own raid0 with no
-source left to read through, holds what hydration copied (`architecture.md`,
-Transfer + clone = cross-SP live migration, [D3]); a source on the primary's
-own kernel that fails routes to a second pool on another controller node
-(Known limits). A migration moves
-a side to a disk node outside its group, on a distinct cntlid slot. Its
-cutover comes only once the primary holds a live path to the new side, and
-the worker's record of it names the primary and a reply of the primary's at
-a revision no older than the new side's provisioned flip
-(`dnv-worker.md` RW18). Once the new side serves, the case reads both dn
-agents' logs and prints the migration gap, from the old side's first write
-of the inaccessible group to the primary's export of the leg to the new
-side's write of the optimized group to its own. It sets no time limit on
-the gap, and fails when either write failed, or when the new side's does
-not come from the new side's cutover request: that request's pass waits for
-the old side's own pass only as long as its connect budget (`dnagent.md`
-DN13), so an old side whose pass outlasts the budget, or any other step of
-that pass that stops, leaves the gap to a later pass and fails the case.
-With raid1 the case then fails the moving leg's md member on the primary by
-hand: the drop an IO md sends with its failfast flag makes when it meets the
-old side just after its export turns inaccessible (`architecture.md`, Known
-limits), which no run can force. It does so after the gap check, so the
-syncup the drop brings lies outside the window that check reads, and waits
-for the array to read clean before the finish. Any converge of the
-primary would put the member back, so before the drop the primary has
-applied the pool's latest revision and runs no CN10 retry: the converge
-that puts the member back is then a re-send the naming verdict brings. The
-member must come back in sync with its failfast flag, and the logs must join
-that verdict to that converge through trace ids in three steps: a read of
-the primary's cntlr whose verdict named the member, logged under the id of
-the check round that started the read (`dnagent.md` SH29); the worker's
-`syncup result` record of the `SyncupCntlr` it re-sent on the code of a
-round that answered from that read's observation, which names the read's id
-as the observation's trace id while the re-send runs under the round's own
-id; and the converge's remove and then add of the member under that
-re-send's id (`cnagent.md` CN12, CN30; `dnv-worker.md` RW4, RW10).
-Its leg bitmap is read and pushed only once the primary reaches the leg
-through the new side, and it finishes under the same leg id with an
-optimized path before any read (`architecture.md`, Migration;
-`dnagent.md` DN12, DN13); a cancelled one leaves its source untouched,
-the case relying on leg repair leaving a two-sided leg alone
-(`dnv-worker.md` AR8). Two of an operator's repairs (raid1 only) then work on
-the same group, each replacing a leg whose disk node dies as in react, its
-agent killed and its nvmet port removed (`architecture.md`, Repairs, Repair,
-Retired legs). Each dying disk node carries no other side of the pool, so its
-death takes down one leg and its record's side count can be checked: for the
-first leg `sp get` tells that, as the pool holds no repair, retired leg or
-clone yet, whose sides it leaves out, and for the second the node's own record
-does. The first repair takes a fresh new leg, placed outside the group's disk
-nodes (E2E4), once the primary's probe has given the dead leg the health epoch
-a create requires. It must reach STARTED, read through `repair get` alone, as
-the worker follows the primary's report (`dnv-worker.md` AR11; `cnagent.md`
-CN12, CN28), and refuse an abort and a cancel, naming its stage; its finish,
-made while md still copies onto the new leg, must put the new leg in the bad
-leg's place with the bad leg's `leg_idx` and keep the bad leg as the pool's
-one retired leg, its side still in its disk node's record, while the primary
-reports the group degraded, in sync on the leg that stayed alone. The second
-repair takes that retired leg back once the new leg's disk node has died in
-the middle of md's copy onto it: only then has the group stayed degraded since
-the retired leg left, the one whole copy on the leg that stayed, so md's copy
-onto the new leg is slowed on the primary until that leg's disk node has died,
-and the case fails rather than passes when the copy has ended before the kill.
-A create from a retired leg needs the retired side's health epoch clear, so
-that leg's disk node returns first; the repair keeps the retired time for a
-cancel, must reach STARTED, and its finish must put the retired leg back in
-its place, with its own `leg_idx` and side, and retire the leg that died. md
-must then hold the group whole, by the array's state words and by the whole
-flag and in-sync list the primary reports beside its rows; how md took the leg
-back is logged (Known limits). No cntlr may hold a retired leg; host0 reads
-its data while each leg is dead, while md copies, once the group is whole and
-at the end, and its kernel log, marked before the first disk node dies, must
-report no failed IO, as md fails a member whose IO errs and serves the read
-from the other (`cnagent.md` CN12); and no failover may happen across the two
-repairs. The second retired leg's delete must take its side out of its disk
-node's record with the group's extents; that node's returning agent then
-removes the side no record names (`dnagent.md` DN6) until its counts agree
-with its record (`dnagent.md` DN18), and the primary holds every leg again.
-The quiet thresholds keep the worker's own leg repair off the dead legs, so
-that it cannot race the operator's creates (`dnv-worker.md` AR8), and the
-retire timer deletes only an old retired leg (`dnv-worker.md` AR12), so the
-worker only moves the repairs' stages and every other step is the operator's.
-Last, a second clone's copy survives a failover of the primary in its middle
-(`architecture.md`, Clone metadata durability). Its source is a second
-pool's, on a controller node with no cntlr of the case's pool, so the
-failover moves the clone and not its source; host1 writes a few MiB at the
-source's start, which keeps its pool below the mark of auto-grow
-(`dnv-worker.md` AR6), and no bitmap chunk is pushed, so every region is
-copied and no discard on the dm-clone waits for reads of the slowed source
-(`cnagent_integtest.md`, Lab facts). A copy of a few MiB over the lab's network ends in well under a
-second, so a token bucket on the source's controller node, kept to the
-source's address and port, slows what the source sends to a rate at which
-the copy takes about the same time at every slice count, one region in
-flight. Over the slowed source a device-mapper command after which udev
-reads the dm-clone, its create or the resume of a namespace device above it,
-can outlast the agent's command timeout, as it waits for udev's reads, which
-go through the source; the agent's retry then finishes the build
-(`cnagent.md` CN16, CN18), so the case waits for the dm-clone to serve
-before it reads a count. The destination's namespace exists, suspended,
-before the clone, as in a live migration (`architecture.md`, Transfer +
-clone = cross-SP live migration), and the case logs the host's wait at the
-clone's creation: the time from the create to host0 reading that namespace
-optimized, and within it, when a poll sees it first, the time to every side
-of the clone meta group provisioned, with no limit on either; such a
-command lengthens that wait by the retry. Once a quarter of the copy's
-regions are copied the primary is disabled, which fails it over at once
-(`dnv-worker.md` AR5). The new primary's first count is at least the last
-count read on the old one and leaves a region to copy; with the throttle
-gone and the copy whole, the new primary's destination raid0, which its
-promotion created, has had at most the regions the old primary's last count
-left written into it, where a dm-clone over new metadata would copy every
-region again, and at least the regions the new primary's first count left,
-which a write count that sees the copy reads; the clone's unforced delete is
-accepted, and the whole destination reads the whole source's digest, which
-host1 read before the clone. The worker logs that one failover, the old
-primary returns as a standby once enabled, both cntlrs are listed again, and
-host0 still reads its data. Both controller nodes keep their connection to
-the source after the clone has gone, as the cn agent disconnects only a
-clone source that is a transfer of its own cluster (`cnagent.md` CN21, Known
-limits), so the removal of the second pool, here as after the fallback,
-drops it on every controller node before the pool's subsystem goes.
+**copy** proves the four RPC groups that move bytes — transfer, clone,
+migration and an operator's repairs — and that a clone's copy survives a
+failover, each judged by a record or a device read back. A transfer,
+auto-suspended, parks the origin namespace and carries its identity, so host1,
+the only host connected to it, reads the origin through it (`architecture.md`,
+Transfers; `cnagent.md` CN17). A clone pulls the origin through the transfer
+into a fresh thin device served live through the dm-clone (`cnagent.md` CN16's
+clone rule, CN18); its unforced delete rests on the gateway's proof of
+hydration, and with the transfer aborted the destination, read through its own
+raid0 with no source left to read through, holds what hydration copied
+(`architecture.md`, Transfer + clone = cross-SP live migration, [D3]); a source
+on the primary's own kernel that fails routes to a second pool on another
+controller node (Known limits). A migration moves a side to a disk node outside
+its group, on a distinct cntlid slot; its cutover comes only once the primary
+holds a live path to the new side, and the worker's record of it names the
+primary and a reply of the primary's at a revision no older than the new side's
+provisioned flip (`dnv-worker.md` RW18). The case prints the migration gap,
+read from both dn agents' logs — from the old side's first write of the
+inaccessible group to the primary's export of the leg to the new side's write
+of the optimized group — with no time limit on it, and fails when either write
+failed or when the new side's does not come from its cutover request: that
+request's pass waits for the old side's own pass only as long as its connect
+budget (`dnagent.md` DN13), so an old side's pass that outlasts the budget, or
+any other step of the new side's pass that stops, leaves the gap to a later
+pass and fails the case. With raid1 the case fails the moving leg's md member
+on the primary by hand — the drop md's failfast IO makes when it meets the old
+side just after its export turns inaccessible (`architecture.md`, Known
+limits), which no run can force — after the gap check, so that the syncup the
+drop brings lies outside the window that check reads, and, as any converge of
+the primary puts the member back, with the primary at the pool's latest
+revision and no CN10 retry running, so that the converge that puts the member
+back is the re-send the naming verdict brings; the member must come back in
+sync with its failfast flag and the array must read clean, and the logs must
+join the verdict to that converge through trace ids: the read whose verdict
+named the member, logged under the id of the round that started it
+(`dnagent.md` SH29); the worker's `syncup result` record of the `SyncupCntlr`
+it re-sent on the code of a later round that answered from that read's
+observation, which names the read's id as the observation's trace id while the
+re-send runs under that later round's own id; and the converge's remove and
+then add of the member under the re-send's id (`cnagent.md` CN12, CN30;
+`dnv-worker.md` RW4, RW10). The leg bitmap is read and pushed only once the
+primary reaches the leg through the new side, and the migration finishes under
+the same leg id with an optimized path before any read (`architecture.md`,
+Migration; `dnagent.md` DN12, DN13); a cancelled one leaves its source
+untouched, the case relying on leg repair leaving a two-sided leg alone
+(`dnv-worker.md` AR8). Two of an operator's repairs (raid1 only) work on one
+group, each replacing a leg whose disk node dies as in react, its agent killed
+and its nvmet port removed (`architecture.md`, Repairs, Repair, Retired legs);
+each dying disk node carries no other side of the pool — for the first leg `sp
+get` shows that, since it leaves out only the sides of repairs, retired legs
+and clones and the pool then holds none of them, and for the second the node's
+own record does — so its death takes down one leg and its record's side count
+can be checked. The first repair takes a fresh new leg, placed outside the
+group's disk nodes (E2E4), once the primary's probe has given the dead leg the
+health epoch a create requires; it must reach STARTED, read through `repair
+get` alone, as the worker follows the primary's report (`dnv-worker.md` AR11;
+`cnagent.md` CN12, CN28), refuse an abort and a cancel, each refusal naming its
+stage, and its finish, made while md still copies onto the new leg, must put
+the new leg in the bad leg's place with the bad leg's `leg_idx` and keep the
+bad leg as the pool's one retired leg, its side still in its disk node's
+record, while the primary reports the group degraded, in sync on the leg that
+stayed alone. The second repair takes that retired leg back once the first
+repair's new leg has died in the middle of md's copy onto it, so that the group
+has stayed degraded since the retired leg left, the one whole copy on the leg
+that stayed: md's copy onto that new leg is slowed on the primary until its
+disk node has died, the case failing rather than passing when the copy has
+ended before the kill; a create from a retired leg needs the retired side's
+health epoch clear, so the retired leg's disk node returns first; the repair
+keeps the retired time for a cancel, must reach STARTED, and its finish must
+put the retired leg back in its place, with its own `leg_idx` and side, and
+retire the leg that died; md must then hold the group whole, by the array's
+state words and by the whole flag and in-sync list the primary reports beside
+its rows, and how md took the leg back is logged (Known limits). Across the two
+repairs no cntlr may hold a retired leg; host0 reads its data while each leg is
+dead, while md copies, once the group is whole and at the end, and its kernel
+log, marked before the first disk node dies, must report no failed IO, as md
+fails a member whose IO errs and serves the read from the other (`cnagent.md`
+CN12); no failover may happen. The second retired leg's delete must take its
+side out of its disk node's record with the group's extents; that node's
+returning agent must then remove the side no record names (`dnagent.md` DN6)
+until its counts agree with its record (`dnagent.md` DN18), and the primary
+must hold every leg again. The quiet thresholds keep the worker's own leg
+repair off the dead legs, so that it cannot race the operator's creates
+(`dnv-worker.md` AR8), and the retire timer deletes only an old retired leg
+(`dnv-worker.md` AR12), so the worker only moves the repairs' stages and every
+other step is the operator's. A second clone's copy survives a failover of the
+primary in its middle (`architecture.md`, Clone metadata durability): its
+source is a second pool's, on a controller node with no cntlr of the case's
+pool, so the failover moves the clone and not its source; host1 writes a few
+MiB at the source's start, which keeps its pool below the mark of auto-grow
+(`dnv-worker.md` AR6), and no bitmap chunk is pushed, so every region is copied
+and no discard on the dm-clone waits for reads of the slowed source
+(`cnagent_integtest.md`, Lab facts); a token bucket on the source's controller
+node, kept to the source's address and port, slows what the source sends to a
+rate at which the copy takes about the same time at every slice count, one
+region in flight, since a copy of a few MiB over the lab's network would
+otherwise end in well under a second. Over the slowed source a device-mapper
+command after which udev reads the dm-clone, its create or the resume of a
+namespace device above it, can outlast the agent's command timeout, as it waits
+for udev's reads, which go through the source, and the agent's retry then
+finishes the build (`cnagent.md` CN16, CN18), so the case waits for the
+dm-clone to serve before it reads a count; the destination's namespace exists,
+suspended, before the clone, as in a live migration (`architecture.md`,
+Transfer + clone = cross-SP live migration), and the case logs the host's wait
+at the clone's creation — the time from the create to host0 reading that
+namespace optimized, and within it, when a poll sees it first, the time to
+every side of the clone meta group provisioned — with no limit on either, such
+a command lengthening the wait by the retry. The primary is disabled once a
+quarter of the copy's regions are copied, which fails it over at once
+(`dnv-worker.md` AR5); the new primary's first count must be at least the last
+count read on the old one and leave a region to copy; with the throttle gone
+and the copy whole, the new primary's destination raid0, which its promotion
+created, must have had at most the regions the old primary's last count left
+written into it, where a dm-clone over new metadata would copy every region
+again, and at least the regions the new primary's first count left, which a
+write count that sees the copy reads; the clone's unforced delete must be
+accepted, and the whole destination must read the whole source's digest, which
+host1 read before the clone. The worker logs that one failover, the old primary
+returns as a standby once enabled, both cntlrs are listed again, and host0
+still reads its data. Both controller nodes keep their connection to the source
+after the clone has gone, as the cn agent disconnects only a clone source that
+is a transfer of its own cluster (`cnagent.md` CN21, Known limits), so the
+removal of the second pool, here as after the fallback, drops it on every
+controller node before the pool's subsystem goes.
 
 **react** proves the four reactions on real faults, an operator's forced
 start of a group md will not start, and an operator's take-over of a group's
-repair from the worker, on a pool of the run's slice count but at
-most `REACT_SLICE_CAP` slices (Topology and parameters), each by the record it
+repair from the worker, on a pool of the run's slice count but at most
+`REACT_SLICE_CAP` slices (Topology and parameters), each by the record it
 writes, one action per pass making every wait a threshold plus a few passes
 (`dnv-worker.md` AR2); its own build may have reacted, so each reaction is
-judged by a delta from values read just before the trigger. Strided writes
-sized from the primary's own pool usage push slice 0's thin pool past its
-mark, and the worker must add exactly one data group and the pool grow on the
-device (`dnv-worker.md` AR6), which the case's two thin devices leave room
-for: together they need more blocks in slice 0 than its data groups hold,
-asserted before the writes, since the covered rule of the same AR6 would
-otherwise stop the grow the case waits for; a primary that moves meanwhile
-stops the run.
-The primary's cn agent is killed, host0 having let go first since a killed
-agent's nvmet objects go on advertising optimized, and the standby must become
-primary and build the stack, held to the cntlr threshold while settling
-(`dnv-worker.md` AR5, HL2; `architecture.md`, Failover); a second failover
-stops the run. host0 then reconnects through the cdc, whose records the
-failover's own transaction rewrote without the dead cntlr (`architecture.md`
-[D18]). The dead cntlr is replaced on a node that held none, keeping its slot
-and role (`dnv-worker.md` AR7), and the dead agent, restarted, removes what it
-left (`cnagent.md` CN7). Leg repair (raid1 only) needs both planes, as kernel
-objects outlive their agent: while the pool holds no repair, a dn agent is
-killed and its nvmet port removed, on a disk node that carries no other leg's
-side of the pool (a retired side there is no leg that any cntlr connects), and
-the worker must repair the dead leg with a repair of its own and finish it
-(`dnv-worker.md` AR8, Leg repair; `architecture.md`, Repair). The repair
-carries the name the worker gives it, the reserved prefix followed by the
-pool's and the group's ids, whose time part is logged and never asserted
-(`architecture.md`, Common validation); its new leg is fresh, none of the
-group's retired legs, and lands outside the group's disk nodes (E2E4) and
-alone on its disk node: while the worker picks it, every disk node that holds
-a side is disabled, and enabled again once the repair exists, so that the
-later steps that kill a leg's disk node take down that leg alone. The scan
-offers one disk node of each location outside the group's and the worker draws
-one of them at random (`architecture.md`, Finding DN candidates, Per-operation
-allocation), so a location with no side-less disk node would offer one that
-holds a side; a disabled disk node keeps serving its sides (`architecture.md`,
-Disk nodes, UpdateDiskNodeDisabled). The finish puts the new leg in the dead
-leg's place with its `leg_idx`, keeps the dead leg as a retired leg and leaves
-the group no repair and exactly the retired legs its give-back rule leaves,
-judged from the retired legs and their times read before the kill
+judged by a delta from values read just before the trigger. Auto-grow:
+strided writes sized from the primary's own pool usage push slice 0's thin
+pool past its mark, and the worker must add exactly one data group and the
+pool grow on the device (`dnv-worker.md` AR6); the case's two thin devices
+together need more blocks in slice 0 than its data groups hold, asserted
+before the writes, since the covered rule of the same AR6 would otherwise
+stop the grow the case waits for, and a primary that moves meanwhile stops
+the run. Failover and cntlr replacement: the primary's cn agent is killed,
+host0 having let go first since a killed agent's nvmet objects go on
+advertising optimized; the standby must become primary and build the stack,
+held to the cntlr threshold while settling (`dnv-worker.md` AR5, HL2;
+`architecture.md`, Failover), a second failover stops the run, host0
+reconnects through the cdc, whose records the failover's own transaction
+rewrote without the dead cntlr (`architecture.md` [D18]), the dead cntlr is
+replaced on a node that held none, keeping its slot and role
+(`dnv-worker.md` AR7), and the dead agent, restarted, removes what it left
+(`cnagent.md` CN7). Leg repair (raid1 only) needs both planes, as kernel
+objects outlive their agent: a dn agent is killed and its nvmet port
+removed, on a disk node that carries no other leg's side of the pool (a
+retired side there is no leg that any cntlr connects) and while the pool
+holds no repair, and the worker must repair the dead leg with a repair of
+its own and finish it (`dnv-worker.md` AR8, Leg repair; `architecture.md`,
+Repair). The repair carries the name the worker gives it, the reserved
+prefix followed by the pool's and the group's ids, whose time part is logged
+and never asserted (`architecture.md`, Common validation); its new leg is
+fresh, none of the group's retired legs, lands outside the group's disk
+nodes (E2E4) and alone on its disk node, so that the later deaths of a leg's
+disk node take down that leg alone: every disk node that holds a side is
+disabled while the worker picks it, since the scan offers one disk node of
+each location outside the group's and the worker draws one of them at random
+(`architecture.md`, Finding DN candidates, Per-operation allocation), so a
+location with no side-less disk node would offer one that holds a side, and
+a disabled disk node keeps serving its sides (`architecture.md`, Disk nodes,
+UpdateDiskNodeDisabled). The finish puts the new leg in the dead leg's place
+with its `leg_idx`, keeps the dead leg as a retired leg and leaves the group
+no repair and exactly the retired legs its give-back rule leaves, judged
+from the retired legs and their times read before the kill
 (`architecture.md`, Repairs, FinishRepair; Retired legs). The repair is read
-through dnvctl, and its start through the finish, which only a started repair
-takes, and through the worker's one record of the stage move (`dnv-worker.md`
-AR11), as a poll can miss the start. md must then hold the group whole, no
-cntlr may hold the retired leg, host0 must read its data with no failed IO in
-its kernel log, and no failover may happen meanwhile, proved by an unchanged
-count of the worker's failover records. Then, again while the pool holds no
-repair, the disk nodes of both of that group's legs die the same way, one
-right after the other, and no host IO runs until the group is whole again, as
-md learns of a dead member only from an IO to it (`cnagent_integtest.md`, Lab
-facts) and so keeps the array running for the leg that comes back: past the
-side threshold the group's legs and retired legs and the pool's revision must
-be unchanged, no repair of the group may exist, and the worker must have
-logged that no leg of the group is healthy (`dnv-worker.md` AR8). With the
-disk node that died last back, the worker must repair the other leg in the
-same way, with a fresh leg steered alone onto its disk node, and md must hold
-the new leg in sync and the replaced one in no array (`cnagent.md` CN12), as
-on the idle array only md's members tell the new array from the old; then the
-group must read whole and host0 reads its data, again with no failover and no
-failed IO. Two forced starts follow on the same group (raid1 only;
-`architecture.md`, Repair; `cnagent.md` CN12). In each, md's copy onto the
-fresh new leg of the worker's repair of one leg is slowed on the primary, so
-that the leg md holds in sync dies in the middle of it, which leaves md unable
-to start the array by itself. That repair's fresh leg is steered alone onto
-its disk node as in the leg repairs before, so a later death of that disk node
-takes down that leg alone. The repairs before each such repair leave the group
-at the retired-leg bound, so its finish gives back the group's oldest retired
-leg, and the group must then hold exactly the retired legs that rule leaves,
-judged as after the first repair (`architecture.md`, Repairs, FinishRepair).
-Before the death of the leg md holds in sync, the pool's level is raised to
-the one where reactions stop, while every leg row and the group's row read OK:
-an array that does not run turns the group's row into an error, which sets the
-primary's health epoch, and a failover would hand the group to a primary that
-cannot start it either (`dnv-worker.md` AR3, HL2; `cnagent.md` CN28); at that
-level no pool holds the array open (`cnagent.md` CN13, CN19); and host0 makes
-no IO until the pool is back at the read-write level. Each forced start comes
-only once md on the primary has read the array down, and the primary's report
-the group's row, on every poll for several of the primary's check rounds:
-while md retries a copy whose only source is dead, the array's state moves
+through dnvctl, and its start through the finish, which only a started
+repair takes, and through the worker's one record of the stage move
+(`dnv-worker.md` AR11), as a poll can miss the start; md must then hold the
+group whole, no cntlr may hold the retired leg, host0 must read its data
+with no failed IO in its kernel log, and no failover may happen meanwhile,
+proved by an unchanged count of the worker's failover records. A group with
+no healthy leg: the disk nodes of both of the same group's legs die the same
+way, one right after the other, while the pool holds no repair, and no host IO
+runs until the group is whole again, as md learns of a dead member only from an
+IO to it (`cnagent_integtest.md`, Lab facts) and so keeps the array running for
+the leg that comes back; past the side threshold the group's legs and retired
+legs and the pool's revision must be unchanged, no repair of the group may
+exist, and the worker must have logged that no leg of the group is healthy
+(`dnv-worker.md` AR8); with the disk node that died last back, the worker must
+repair the other leg in the same way, with a fresh leg steered alone onto its
+disk node, and md must hold the new leg in sync and the replaced one in no
+array (`cnagent.md` CN12), as on the idle array only md's members tell the new
+array from the old; the group must then read whole and host0 reads its data,
+again with no failover and no failed IO. Two forced starts (raid1 only;
+`architecture.md`, Repair; `cnagent.md` CN12) each start the same group when md
+will not start it: md's copy onto the fresh new leg of the worker's repair of
+one leg is slowed on the primary, so that the leg md holds in sync dies in the
+middle of it; that fresh leg is steered alone onto its disk node as before, so
+a later death of its disk node takes down that leg alone; and the repairs
+before each such repair leave the group at the retired-leg bound, so its finish
+gives back the group's oldest retired leg and the group must hold exactly the
+retired legs that rule leaves, judged as after the first repair
+(`architecture.md`, Repairs, FinishRepair). The pool's level is raised to the
+one where reactions stop before the leg md holds in sync dies, while every leg
+row and the group's row read OK, because an array that does not run turns the
+group's row into an error, which sets the primary's health epoch, and a
+failover would hand the group to a primary that cannot start it either
+(`dnv-worker.md` AR3, HL2; `cnagent.md` CN28), and because at that level no
+pool holds the array open (`cnagent.md` CN13, CN19); host0 makes no IO until
+the pool is back at the read-write level. Each forced start comes only once md
+on the primary has read the array down and the primary's report has read the
+group's row down, both on every poll for several of the primary's check rounds,
+since while md retries a copy whose only source is dead the array's state moves
 between running and broken, and a pass of the primary's that reads it running
-leaves the mark waiting (`cnagent.md`, Known limits). In the first, the forced
-start is refused while the array runs (`architecture.md`, Repairs); while the
-leg that held the data is still dead, a forced start from it, retried while
-the gateway still refuses it, as the primary's latest report can read the
-array running (`architecture.md`, Known limits) and its agent can fail to
-answer or report no row of the group (`architecture.md`, Repairs), must leave
-a mark that `sp get` shows, and the primary must stop the array that does not
-run then, which leaves that leg's superblock as md last wrote it, with no
+leaves the mark waiting (`cnagent.md`, Known limits). In the first, a forced
+start made while the array still runs is refused (`architecture.md`, Repairs);
+one from the dead leg that held the data, retried while the gateway still
+refuses it, as the primary's latest report can read the array running
+(`architecture.md`, Known limits) and its agent can fail to answer or report no
+row of the group (`architecture.md`, Repairs), must leave a mark that `sp get`
+shows, and the primary must stop the array that does not run while that leg is
+still dead, which leaves that leg's superblock as md last wrote it, with no
 record of the regions md could not copy (`cnagent.md`, Known limits); once the
-leg is back, the primary's own log must show the other leg's superblock
-zeroed, the array assembled from the named leg alone and the agent's record
-that the array started, and after that record the zeroed leg added back as a
-new member, which md copies whole (`cnagent.md` CN12), the worker must clear
-the mark from the primary's report once the start is done (`dnv-worker.md`
-AR13), and host0 must read both namespaces' data unchanged. In the second,
-host0 first writes new bytes over a block the group held before the first
-forced start's retired leg left it, and the leg that holds the data stays
-dead: an operator's repair takes that retired leg back and stays created over
-an array that does not run, a forced start from the repair's new leg must
-start the array, the repair must start and be finished, and host0 must read
-the bytes that retired leg kept, not the new ones (`architecture.md`, Repairs,
-CreateRepair, FinishRepair). Then a repair that takes back the retired leg
-holding the new bytes, whose md events count, read on the primary, must be
-above the array's, must be refused: the primary's verdict carries the refusal,
-the worker logs it and moves no stage (`cnagent.md` CN12; `dnv-worker.md`
-AR11), and the primary neither adds that leg nor takes the bad leg out; the
-repair is aborted and cancelled, which gives the leg back as a retired leg
-with its kept time (`architecture.md`, Repairs, CancelRepair), and host0 still
-reads the restored copy. Each forced start is judged by the agent's record of
-the start and by the zeroed leg in sync, never by an exit status, as a command
-killed at the agent's soft timeout can still have taken effect (`dnagent.md`
-SH15), and neither member of the started array may hold an md bad block, which
-md serves as an IO error. No failover may happen across either, and host0's
-kernel log reports no failed IO. The dead legs' disk nodes come back in the
-end, as only a live agent removes the side of a retired leg the pool's drain
-gives back. Last, an operator takes the same group's repair over from the
-worker (raid1 only; `architecture.md`, Repairs), the pool at the read-write
-level when the stage starts and when it ends, as the stage changes no level.
-The group first goes below the retired-leg bound, its oldest retired leg
-deleted, as an operator's repair takes a fresh leg only below it
-(`architecture.md`, Repairs, CreateRepair).
-One of its legs then dies as in the leg repairs before, and the worker's
-repair, its fresh leg steered alone onto its disk node, must stay created:
-before the kill the primary's controller node refuses its own TCP connects to
-the nvmet port of every disk node that leg can land on, a reset answering
-each, so the primary cannot add the new leg (`cnagent.md` CN12), while those
-disk nodes stay healthy and answer, so the worker still places the leg there
-and flips its side provisioned. A worker's repair is otherwise created for a
-few passes only, and a frozen disk node would not hold it, as the worker marks
-a disk node unhealthy at the first round it misses (`dnv-worker.md` HL1) and
-allocation passes it over. The rule names each disk node's address and port,
-never a product of the two, so it refuses no connect to a leg of the pool, and
-it comes off once the worker's repair is gone; a failed run and every cleanup
-take it off too (E2E6). Once the rule has refused a connect, the repair must
-read created with its side provisioned, or aborted with its side provisioned
-should the worker's own abort have come first (`dnv-worker.md` AR8). With the
-group's `operator_in_charge` flag set, which `sp get` shows, the operator's
-abort of the worker's repair must be answered done, or refused as a repair the
-worker has already aborted or cancelled; the repair must then read aborted, or
-be gone with the dead leg still in its place, and the operator's cancel must
-take it away or find it gone, the worker's drive step having cancelled it
-first, which the worker's record of that cancel must show (`dnv-worker.md`
-AR8). A worker's own abort the case sees come first, as an abort flag already
-set when the repair reads held or as the refusal of the operator's abort, must
-likewise show in the worker's records. With the rule off, for several passes
-the group must keep its legs and get no repair, while the worker logs that it
-holds its create of a repair for the dead leg under the flag (`dnv-worker.md`
-AR8). The operator's own repair of the dead leg, with a fresh leg, must then
-start and be finished, the dead leg kept as a retired leg, the flag cleared, md
-must hold the group whole on the fresh leg, which it copies whole as it was
-never a member (`architecture.md`, Repair), host0 must read both namespaces'
-data unchanged with no failed IO in its kernel log, and no failover may happen
+leg is back, the primary's own log must show the other leg's superblock zeroed,
+the array assembled from the named leg alone and the agent's record that the
+array started, and after that record the zeroed leg added back as a new member,
+which md copies whole (`cnagent.md` CN12); the worker must clear the mark from
+the primary's report once the start is done (`dnv-worker.md` AR13), and host0
+must read both namespaces' data unchanged. For the second, host0 writes new
+bytes over a block the group held before the first forced start's retired leg
+left it, and the leg that holds the data stays dead: an operator's repair takes
+that retired leg back and stays created over an array that does not run, a
+forced start from the repair's new leg must start the array, the repair must
+start and be finished, and host0 must read the bytes that retired leg kept, not
+the new ones (`architecture.md`, Repairs, CreateRepair, FinishRepair); a repair
+that takes back the retired leg holding the new bytes, whose md events count,
+read on the primary, must be above the array's, must be refused — the primary's
+verdict carries the refusal, the worker logs it and moves no stage
+(`cnagent.md` CN12; `dnv-worker.md` AR11), and the primary neither adds that
+leg nor takes the bad leg out — and its abort and cancel give the leg back as a
+retired leg with its kept time (`architecture.md`, Repairs, CancelRepair),
+host0 still reading the restored copy. Each forced start is judged by the
+agent's record of the start and by the zeroed leg in sync, never by an exit
+status, as a command killed at the agent's soft timeout can still have taken
+effect (`dnagent.md` SH15), and neither member of the started array may hold an
+md bad block, which md serves as an IO error; no failover may happen across
+either, and host0's kernel log reports no failed IO. The dead legs' disk nodes
+come back in the end, as only a live agent removes the side of a retired leg
+the pool's drain gives back. The take-over (raid1 only; `architecture.md`,
+Repairs) runs with the pool at the read-write level when its stage starts and
+when it ends, as the stage changes no level, and with the same group below the
+retired-leg bound, its oldest retired leg deleted, as an operator's repair
+takes a fresh leg only below it (`architecture.md`, Repairs, CreateRepair). One
+of the group's legs dies as in the leg repairs before, and the worker's repair,
+its fresh leg steered alone onto its disk node, must stay created: before the
+kill the primary's controller node refuses its own TCP connects to the nvmet
+port of every disk node that leg can land on, a reset answering each, so the
+primary cannot add the new leg (`cnagent.md` CN12), while those disk nodes stay
+healthy and answer, so the worker still places the leg there and flips its side
+provisioned — a worker's repair is otherwise created for a few passes only, and
+a frozen disk node would not hold it, as the worker marks a disk node unhealthy
+at the first round it misses (`dnv-worker.md` HL1) and allocation passes it
+over; the rule names each disk node's address and port, never a product of the
+two, so it refuses no connect to a leg of the pool, and it comes off once the
+worker's repair is gone, as it does in a failed run and in every cleanup
+(E2E6). Once the rule has refused a connect, the repair must read created with
+its side provisioned, or aborted with its side provisioned should the worker's
+own abort have come first (`dnv-worker.md` AR8); with the group's
+`operator_in_charge` flag set, which `sp get` shows, the operator's abort of
+the worker's repair must be answered done, or refused as a repair the worker
+has already aborted or cancelled; the repair must then read aborted, or be gone
+with the dead leg still in its place, and the operator's cancel must take it
+away or find it gone, the worker's drive step having cancelled it first, which
+the worker's record of that cancel must show (`dnv-worker.md` AR8); a worker's
+own abort the case sees come first, as an abort flag already set when the
+repair reads held or as the refusal of the operator's abort, must likewise show
+in the worker's records. With the rule off, for several passes the group must
+keep its legs and get no repair, while the worker logs that it holds its create
+of a repair for the dead leg under the flag (`dnv-worker.md` AR8); the
+operator's own repair of the dead leg, with a fresh leg, must then start and be
+finished, the dead leg kept as a retired leg, the flag cleared, md must hold
+the group whole on the fresh leg, which it copies whole as it was never a
+member (`architecture.md`, Repair), host0 must read both namespaces' data
+unchanged with no failed IO in its kernel log, and no failover may happen
 across the take-over. As in the leg repairs before, host0 makes no IO from the
 kill until md holds the group whole, so the stage proves the take-over at the
 read-write level, not IO during it.

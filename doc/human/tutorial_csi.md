@@ -77,9 +77,9 @@ nohup ./dnv-gateway --grpc-address 0.0.0.0:29527 --etcd-endpoints 127.0.0.1:2379
 
 nvme-stas, which the all-in-one tutorial installs, is not used here: the
 node plugin is the connector. Its two daemons stay idle, since nothing
-points them at the cdc. The mask of the kernel's own connector unit from
-the all-in-one tutorial's Prerequisites holds here too, for the same
-reason: one connector.
+points them at the cdc. The mask of nvme-cli's connector unit from the
+all-in-one tutorial's Prerequisites holds here too, for the same reason: one
+connector.
 
 The machine's identity as an NVMe host. The node plugin reads it from the
 two files below and refuses to start without them; nvme-cli's package

@@ -1132,7 +1132,7 @@ write_host_helper() { # <path>
 #   wipe_data              disconnect every dnv-it subsystem only, leaving
 #                          the discovery controllers to stafd, and close a
 #                          flood left over
-#   mask / unmask          neutralise the kernel's own nvmf autoconnect
+#   mask / unmask          neutralise nvme-cli's nvmf autoconnect
 #   stas_start <ip> <work> <p0> <p1> <p2> <p3>
 #   stas_stop <work>
 #   uev_start <work> / uev_stop
@@ -1263,14 +1263,14 @@ flood_count() { # <work> <tcp state>
 	printf '%s\n' "$out" | grep -c "pid=$pid," || true
 }
 
-# The kernel ships /usr/lib/udev/rules.d/70-nvmf-autoconnect.rules, which
+# nvme-cli installs /usr/lib/udev/rules.d/70-nvmf-autoconnect.rules, which
 # starts nvmf-connect@.service on the very AEN this suite measures. Masking the
 # unit leaves exactly one connector active: the operator (cases S, M, L) or
 # stacd (cases T, H). nvme-stas 2.4.1 offers no knob of its own for this.
 #
 # do_mask reads the result back instead of announcing it. Both mask calls
 # carry `|| true` (a mask can fail, on a read-only /etc for one), so an
-# unconditional `echo masked` would pass setup with the kernel's autoconnect
+# unconditional `echo masked` would pass setup with nvme-cli's autoconnect
 # still live for the whole run. `systemctl is-enabled` prints `masked` for a
 # masked unit and exits 1, hence its own `|| true`: the word is the evidence,
 # not the status. Anything else comes back as the two states it read
@@ -1416,7 +1416,7 @@ stas_stop() { # <work>
 # every nvme uevent, and runs `systemctl restart nvmf-connect@…` for each
 # discovery-change AEN of a controller it does not own; the unit is masked
 # for the whole run (do_mask), so that costs a process start and does
-# nothing. And every copy writes the same override of the kernel's
+# nothing. And every copy writes the same override of nvme-cli's
 # autoconnect udev rule at start, which the first clean stop removes for
 # all; many_start saves what was there and many_stop puts it back.
 MANY_UNIT=dnv-cdc-many
@@ -1843,7 +1843,7 @@ cleanup() { # <end 0|1>
 	RUNNING=()
 
 	if [ "$end" = 1 ]; then
-		log "[cleanup] end of run: unmask the kernel autoconnect, remove $WORK"
+		log "[cleanup] end of run: unmask nvme-cli's autoconnect, remove $WORK"
 		for hostsel in h1 h2; do
 			ok_or_true h "$hostsel" "$WORK/cdc_host.sh unmask"
 		done
@@ -2173,7 +2173,7 @@ setup() {
 	stage target "build the nvmet topology on s2 (Integration test plan, Topology)"
 	s2 "$WORK/cdc_target.sh setup $IP2" || die "cdc_target.sh setup failed"
 
-	stage hosts "mask the kernel autoconnect and mint the ghost identity"
+	stage hosts "mask nvme-cli's autoconnect and mint the ghost identity"
 	local hostsel out
 	for hostsel in h1 h2; do
 		# The verb answers `masked` only when both units read back masked;

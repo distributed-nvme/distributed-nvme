@@ -56,17 +56,18 @@ shares is dropped by its controller (`dnagent.md` SH20).
 ## Assumptions and preflight checks
 
 Assumed and not checked: both VMs are linux/amd64, which the agent is built
-for, on one lab image whose kernel has dm-clone. The preflight installs
-nothing and fails fast, its per-VM half running after the start-of-run
-cleanup, since free agent ports mean something only once a crashed run's
-agents are gone. It supplies the kernel modules and the configfs mount, which
-the agent neither loads nor mounts, without verifying each module, and checks
-what the suite and the agent need and the agent does not check itself:
-passwordless ssh and sudo, the tools (no LVM: the dn agent runs none,
-`architecture.md`, [D13]), nvmet configfs present, native multipath on, which
-the standby assertions and the migration merge need, the work directory's
-free space and punch-hole support, and the agent ports free. The suite rests
-on these lab facts:
+for, on one lab image whose kernel has dm-clone. The preflight installs nothing
+on the VMs — on the machine that runs the suite it builds `gojq` into
+`integtest/bin` when that machine has no `jq` (`layout.md`, Directory tree) —
+and fails fast, its per-VM half running after the start-of-run cleanup, since
+free agent ports mean something only once a crashed run's agents are gone. It
+supplies the kernel modules and the configfs mount, which the agent neither
+loads nor mounts, without verifying each module, and checks what the suite and
+the agent need and the agent does not check itself: passwordless ssh and sudo,
+the tools (no LVM: the dn agent runs none, `architecture.md`, [D13]), nvmet
+configfs present, native multipath on, which the standby assertions and the
+migration merge need, the work directory's free space and punch-hole support,
+and the agent ports free. The suite rests on these lab facts:
 
 * The VMs' uutils dd silently mishandles direct IO, with false failures and
   dropped writes, so the suite never passes dd an input or output flag at all:
@@ -114,18 +115,20 @@ on one stream until one answers from an observation read wholly after the agent
 answered the command's first round, with no converge of the object in flight,
 and print and judge that reply alone; this document calls such a command a
 fresh round. An observation's time is when its reading ended, so the first one
-to end after that answer may have begun before it; the object's reads and
-converges hold its locks one at a time, so an observation newer than that one
-was read wholly after that answer, at the cost of about one read more. Where
-a background converge of the object can run, such as an attempt of the
-connect retry (`dnagent.md` SH28), the observation a fresh round reports can
-be that converge's rather than a read's. The pollers, which wait until a side
-is zeroed or a destination hydrated, the latter through
-`common.ParseCloneStatus`, sample with rounds on one stream: the first sample
-is a fresh round's reply and each later one a reply with a newer observation,
-since neither the zeroing loop nor the kernel's hydration stores an
-observation and a read a round starts brings their progress in. The info-read
-commands are plain memory reads.
+to end after that answer may have begun before it; an object's reads run one
+at a time, each counting as the running read until it stores, and a converge
+excludes a read by its locks (`dnagent.md` SH14, SH29), and a disk node's read
+holds only the node read lock, which lets the next read start before the first
+has returned. An observation newer than that one was therefore read wholly
+after that answer, at the cost of about one read more. Where a background
+converge of the object can run, such as an attempt of the connect retry
+(`dnagent.md` SH28), the observation a fresh round reports can be that
+converge's rather than a read's. The pollers, which wait until a side is zeroed
+or a destination hydrated, the latter through `common.ParseCloneStatus`, sample
+with rounds on one stream: the first sample is a fresh round's reply and each
+later one a reply with a newer observation, since neither the zeroing loop nor
+the kernel's hydration stores an observation and a read a round starts brings
+their progress in. The info-read commands are plain memory reads.
 
 ## Conventions
 
@@ -304,14 +307,14 @@ SH4 to SH6, DN2): with a connected side on one node and a gated destination
 holding a chunk on the other, both agents restart over untouched kernel state
 while the host keeps reading. Every snapshot, on both sides of the restart,
 is a fresh round's reply, so it shows the node as a read after the command
-began found it. The reloaded infos, revisions included, equal the snapshots
-but for the status epochs (SH14), the zeroing's byte counts with them
-(`architecture.md`, [D13]), and the replies' stamps, which name an
-observation's times and trace id and so differ by nature; the chunk is still
-applied (SH21); unchanged re-sends leave the new log free of any mutating
-command or block or configfs write (SH16, SH17, DN5, DN9); and a revision
-below the one those re-sends stored is refused as stale in a normal reply
-(SH8, SH9, DN4).
+began found it. The reloaded infos, revisions and the zeroing's byte counts
+included — the counts are stored in the volume table on the disk
+(`architecture.md`, Side provisioning protocol) — equal the snapshots but for
+the status epochs (SH14) and the replies' stamps, which name an observation's
+times and trace id and so differ by nature; the chunk is still applied (SH21);
+unchanged re-sends leave the new log free of any mutating command or block or
+configfs write (SH16, SH17, DN5, DN9); and a revision below the one those
+re-sends stored is refused as stale in a normal reply (SH8, SH9, DN4).
 
 **What a pass means.** Exit status zero and PASS mean every case's assertions
 held in a run that stops at the first failure: data checked against a pattern

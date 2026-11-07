@@ -13,21 +13,23 @@ The suite proves that a real `dnv-agent cn` — nvme-tcp legs, md-raid1, dm-thin
 dm-clone, dm-flakey, nvmet configfs — behaves as `cnagent.md` specifies on two
 lab VMs driven over gRPC from the developer machine, with real `dnv-agent dn`
 instances behind the sides, the dn role having its own suite. It exercises
-every `ControllerNodeAgent` RPC and reads the kernel state beside the agent's
-report. It also pins the md assembly rules the cross-leg half of failover
-safety rests on, the refusal before redund builds its pool and the kick in
-its late flip (`architecture.md`, [D16]). It proves the happy path; error
-paths are out of scope but for the stale probe, the dead leg, the promotion
-that outruns the sides' flip, md's refusal to start an array from one clean
-leg, a repair's bad leg that does not serve, the leg that keeps the data
-dying while md copies onto a repair's new leg, where a forced start refuses
-the half-copied leg and starts from the leg that died, a take-back refused
-for a retired leg newer than the array, the clone's source lost and given
-back, and the leftover, an accepted request reporting residue (`cnagent.md`
-CN20). The cases run in a fixed order, fail-fast — smoke, redund, repair,
-teardown, thinbm, clone_xfer, restart — each under pool ids of its own and
-each leaving nothing of its pools, a teardown per case and per stage that also keeps the run inside a DN's data
-area, which the cases together would overdraw.
+every `ControllerNodeAgent` RPC but `GetCnInfo`, whose reading `CheckCn`
+answers the same way (`cnagent.md` CN23, CN24) and which the unit tests and the
+e2e suite's `InspectControllerNode` call, and reads the kernel state beside the
+agent's report. It also pins the md assembly rules the cross-leg half of
+failover safety rests on, the refusal before redund builds its pool and the
+kick in its late flip (`architecture.md`, [D16]). It proves the happy path;
+error paths are out of scope but for the stale probe, the dead leg, the
+promotion that outruns the sides' flip, md's refusal to start an array from one
+clean leg, a repair's bad leg that does not serve, the leg that keeps the data
+dying while md copies onto a repair's new leg, where a forced start refuses the
+half-copied leg and starts from the leg that died, a take-back refused for a
+retired leg newer than the array, the clone's source lost and given back, and
+the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
+cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
+thinbm, clone_xfer, restart — each under pool ids of its own and each leaving
+nothing of its pools, a teardown per case and per stage that also keeps the run
+inside a DN's data area, which the cases together would overdraw.
 
 Beside the suite, the Go tests of `agent/cnagent` run a real cn agent the way
 the dn agent's run (`dnagent_integtest.md`, Goal and scope), driven by a fake
@@ -62,16 +64,18 @@ a case fails a stop that leaves an agent alive to race its successor.
 
 Both VMs run one lab image with nvme native multipath, md raid1, dm-thin,
 dm-clone and dm-flakey, and accept passwordless ssh and sudo. The preflight
-installs nothing and fails fast, its per-VM half after the start-of-run
+installs nothing on the VMs — on the machine that runs the suite it builds
+`gojq` into `integtest/bin` when that machine has no `jq` (`layout.md`,
+Directory tree) — and fails fast, its per-VM half after the start-of-run
 cleanup, since free agent ports mean something only once a crashed run's agents
 are gone. It loads the kernel modules and mounts configfs, neither of which the
 agent does, then checks each module loaded or built in; the tools, no LVM one
 among them (`architecture.md`, [D13], [D14]); nvmet configfs, md support,
 native multipath and the udev rule the md mask needs; and the free space and
 punch-hole support of the work directory's filesystem and the free memory.
-iptables and tc are left to the stages that use them, the partition stages
-and clone_xfer's slowed copy, so a VM without one fails in the stage that
-needs it rather than a run that might never reach one.
+iptables and tc are left to the stages that use them, the partition stages and
+clone_xfer's slowed copy, so a VM without one fails in the stage that needs it
+rather than a run that might never reach one.
 
 ## Lab facts
 
@@ -271,8 +275,12 @@ its info-read commands are plain memory reads.
   case read from /proc/mdstat, the standby's no-array check and the md part
   of the residue check take a failure for no array. A log that was read can
   still hold none of a stage's records, so restart's zero-mutation and mdadm
-  checks, the late flip's "assembled nothing" and the gated clone's
-  "no source connection" have no positive control.
+  checks, repair's check that the converge of a started repair ran no mdadm
+  against the data array, and the count in repair's abort stage that the
+  converge after the one carrying the abort flag, finding the new leg no
+  member, added none, have no positive control; the gated clone's count has one
+  in the `dmsetup create` records the check before it requires, and the late
+  flip's "assembled nothing" in the records it refuses to accept empty.
 * **Steady state.** Stages read the agent as the dn suite's stages do
   (`dnagent_integtest.md`, Conventions, Check rounds). One fresh `CheckCn`
   and one fresh `CheckCntlr` round per CN reply code zero, the revision that
@@ -613,40 +621,40 @@ any dm or nvmet residue fails it, since reporting it is not success.
 ## Out of scope
 
 Error paths beyond the nine above; QoS, not enforced (`cnagent.md` CN6);
-`GrowSlice`; a leg gaining or losing a second side, which the dn suite's
-migrations prove, and the path rows of a leg with two sides
-(`cnagent.md` CN28), which the unit tests cover; levels but read-write,
-read-only and the no-clone gate, save what repair's forced-start stages read
-of the two levels they use to free the data array: the pool row the level
-that builds no thin pool suppresses, and the group array the level that
-builds no group array stops (`cnagent.md` CN19); more than one slice;
-several namespaces per subsystem; snapshots of snapshots; `UpdateNamespaceDev`; a host-facing
-namespace or subsystem dropped short of a cntlr teardown, leaving the park
-before its removal (`cnagent.md` CN21's park before every layer and its nvmet
-layer L1) to the unit tests;
-cntlid-slot exhaustion; the cdc; TLS and authentication; performance; faults
-beyond the partition, the pin, the writer and the lost source; provisioning
+`GrowSlice`; a leg gaining or losing a second side, whose disk node part the dn
+suite's migrations prove, but for a cancel, which only the e2e suite's
+cancelled migration exercises, and whose cn agent part — the connect per side
+and the disconnect of a dead path by device (`cnagent.md` CN10) — the unit
+tests prove, the e2e suite's migrations exercising it, and the path rows of a
+leg with two sides (`cnagent.md` CN28), which the unit tests cover; levels but
+read-write, read-only and the no-clone gate, save what repair's forced-start
+stages read of the two levels they use to free the data array: the pool row the
+level that builds no thin pool suppresses, and the group array the level that
+builds no group array stops (`cnagent.md` CN19); more than one slice; several
+namespaces per subsystem; snapshots of snapshots; `UpdateNamespaceDev`; a
+host-facing namespace or subsystem dropped short of a cntlr teardown, leaving
+the park before its removal (`cnagent.md` CN21's park before every layer and
+its nvmet layer L1) to the unit tests; cntlid-slot exhaustion; the cdc; TLS and
+authentication; performance; faults beyond those the Cases name; provisioning
 deferral (`cnagent.md` CN9), a clone's for its clone meta group's sides
 included; a clone meta group under md-raid1 or one that is not ready, and a
 dm-clone whose metadata is not in read-write mode, all of which the unit tests
-cover (CN18); of a repair, the put-back of a new leg md has failed, a bad
-leg that md holds without a place once its repair has started in md, the
-add's wait for a member that keeps the data, a half-copied new leg after a
-failover, a new leg that is not available, which is no late member short of
-a forced start's wait and no candidate of an assembly, a converge's read of
-the array again that fails or finds it not running, an aborted repair's new
-leg as an extra and a repair on a clone meta group, all of which the unit
-tests cover (CN12); of a forced
-start, the second form of its assembly, the stop a pool's concat refuses, a
-zero that fails or is killed, a new leg of a CREATED repair whose abort flag
-is set, which it neither names nor zeroes, a STARTED repair's new leg, which
-it keeps whatever the flag says, its late member and the retry its other
-errors register, and of the take-back check, a new leg with no superblock, a
-STARTED repair's add with no member to compare with, a keeper whose examine
-finds no superblock and an examine that did not answer, all of which the
-unit tests cover (CN12); a torn
-snapshot, which needs two slices, whose mark the unit tests cover (CN14);
-the lingering-clone hold's scope per thin device, left to the unit tests
-(CN18); the
-other states of the clone's shared row rule (CN18); and the lock entry a
-refused request must not leave (`dnagent.md`, Concurrency — `locks.go`).
+cover (CN18); of a repair, the put-back of a new leg md has failed, a bad leg
+that md holds without a place once its repair has started in md, the add's wait
+for a member that keeps the data, a half-copied new leg after a failover, a new
+leg that is not available, which is no late member short of a forced start's
+wait and no candidate of an assembly, a converge's read of the array again that
+fails or finds it not running, an aborted repair's new leg as an extra and a
+repair on a clone meta group, all of which the unit tests cover (CN12); of a
+forced start, the second form of its assembly, the stop a pool's concat
+refuses, a zero that fails or is killed, a new leg of a CREATED repair whose
+abort flag is set, which it neither names nor zeroes, a STARTED repair's new
+leg, which it keeps whatever the flag says, its late member and the retry its
+other errors register, and of the take-back check, a new leg with no
+superblock, a STARTED repair's add with no member to compare with, a keeper
+whose examine finds no superblock and an examine that did not answer, all of
+which the unit tests cover (CN12); a torn snapshot, which needs two slices,
+whose mark the unit tests cover (CN14); the lingering-clone hold's scope per
+thin device, left to the unit tests (CN18); the other states of the clone's
+shared row rule (CN18); and the lock entry a refused request must not leave
+(`dnagent.md`, Concurrency — `locks.go`).

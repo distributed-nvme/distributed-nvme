@@ -77,7 +77,7 @@
 #     abandoned there and the run dies with its diagnostics instead of
 #     hanging.
 #  6. `nvmf-connect@.service` is masked on both hosts for the whole run
-#     (E2E10): the kernel's own autoconnector matches the discovery AEN
+#     (E2E10): nvme-cli's autoconnector matches the discovery AEN
 #     (NVME_AEN=0x70f002) and would connect behind the suite's back. Every
 #     connect here is the suite's own act, but inside the cutoff case, where
 #     host0's connects are nvme-stas's on purpose — that case starts stas with
@@ -4768,7 +4768,7 @@ identity() {
 	return 0
 }
 
-# mask neutralises the kernel's own autoconnector for the whole run (rule 6).
+# mask neutralises nvme-cli's autoconnector for the whole run (rule 6).
 # /usr/lib/udev/rules.d/70-nvmf-autoconnect.rules starts nvmf-connect@.service
 # on the discovery AEN this suite's own connects cause (NVME_AEN=0x70f002),
 # and a connection made behind the
@@ -4821,8 +4821,8 @@ stas_state() {
 # The settings are the cdc suite's (the stas_start of the host helper
 # write_host_helper (cdc_test.sh) generates), with ONE controller line: this
 # run's single cdc. stacd's own [Controllers] stays empty, so every path it
-# makes comes from a discovery log entry and goes when the entry does, and the
-# kernel's autoconnector stays masked (rule 6), so stacd is the only
+# makes comes from a discovery log entry and goes when the entry does, and
+# nvme-cli's autoconnector stays masked (rule 6), so stacd is the only
 # connector. nvme-stas is never installed here: preflight checks it is there.
 #
 # The host's own two files are copied ONCE into $WORK/stas-backup, with a
@@ -6843,7 +6843,7 @@ preflight_host() { # <h>
 				"witness: $(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
-	# Rule 6: the kernel's own autoconnector matches the discovery AEN this
+	# Rule 6: nvme-cli's autoconnector matches the discovery AEN this
 	# suite's connects cause and would make paths nothing here created.
 	# The word is the evidence: `mask` re-reads both units with
 	# `systemctl is-enabled` and prints `service=… target=…` when either is not
@@ -8570,7 +8570,7 @@ host_disc_is() { # <h>
 # host_connect_all and host_connect are the ONLY places the driver reaches
 # nvme-cli's connect verbs. Every connect in this suite is the suite's own act
 # (rule 6) except inside the cutoff case, where host0's connects are
-# nvme-stas's: the kernel's autoconnector is masked for the whole run.
+# nvme-stas's: nvme-cli's autoconnector is masked for the whole run.
 #
 # THEY VERIFY; THEY DO NOT TRUST rc. `nvme connect-all` EXITS 0 HAVING
 # CONNECTED NOTHING — measured on host0 against this very lab in
@@ -8771,8 +8771,8 @@ setup_infra() {
 	ship_binaries
 	# The hosts are re-masked here and not only in preflight_guests, because
 	# host_cleanup's last act is `unmask` and setup_infra is also the rebuild
-	# half of setup_between_cases. Rule 6 has to hold for the WHOLE run: the
-	# kernel's autoconnector matches the discovery AEN that this suite's own
+	# half of setup_between_cases. Rule 6 has to hold for the WHOLE run:
+	# nvme-cli's autoconnector matches the discovery AEN that this suite's own
 	# connect-all causes and would connect behind its back.
 	# The result is ASSERTED and not merely status-checked: `mask` returns 0
 	# whatever systemctl did, and reports the two units' real is-enabled states
@@ -8781,8 +8781,8 @@ setup_infra() {
 	for h in "${!HOST[@]}"; do
 		maskout=$(helper_host "$h" mask) ||
 			die "host$h: the mask verb itself failed;" \
-				"rule 6 cannot be satisfied and the run would race the" \
-				"kernel's own autoconnector"
+				"rule 6 cannot be satisfied and the run would race" \
+				"nvme-cli's autoconnector"
 		assert_eq "$maskout" masked \
 			"host$h: the nvmf-connect@.service and nvmf-connect.target masks (rule 6)"
 	done
@@ -21725,7 +21725,7 @@ case_react() {
 #
 # THE HOST-SIDE EXCEPTIONS, both inside this case alone. host0 runs nvme-stas,
 # where E2E10 wants it inactive: stafd and stacd on the cdc suite's settings
-# against this run's cdc, the kernel's autoconnector still masked (rule 6),
+# against this run's cdc, nvme-cli's autoconnector still masked (rule 6),
 # host0's own stas configuration copied before and put back after. host0's
 # suite-made paths are dropped before stas starts, so stacd is the only
 # connector, and stacd's paths are dropped and the suite's own made again

@@ -111,7 +111,7 @@ EOF
 sudo udevadm control --reload
 ```
 
-One connector. The kernel ships a unit that connects to every subsystem a
+One connector. nvme-cli installs a unit that connects to every subsystem a
 discovery change announces. nvme-stas is the only connector in this
 tutorial, so mask that unit:
 

@@ -35,7 +35,9 @@
 #     hostnqn<->hostid map, and any other user of the guest shares this
 #     identity. The two hosts' identities must differ, or preflight dies.
 #  3. kubectl runs on the control-plane guest only, as the k3s binary's
-#     subcommand over ssh (CSI3). The driver machine installs nothing.
+#     subcommand over ssh (CSI3). The driver machine installs no package:
+#     besides the tree's own builds and the images it puts only csi-sanity,
+#     the pinned etcd release and, with no jq, gojq into integtest/bin.
 #  4. The suite's images, the driver's and the smoke image, reach a node by
 #     import into its k3s image store (CSI4), and no pod pulls them; the IO
 #     pods run the driver's own image, which carries the tools they need.
@@ -1360,7 +1362,7 @@ cp_cleanup() {
 
 # --- the hosts ---------------------------------------------------------------------
 
-# mask neutralises the kernel's own autoconnector for the run, and verifies.
+# mask neutralises nvme-cli's autoconnector for the run, and verifies.
 mask() {
 	local svc tgt
 	systemctl mask nvmf-connect@.service >/dev/null 2>&1 || true
