@@ -21,9 +21,9 @@ knows no tenants and authenticates nobody: the layer above authenticates its
 users and decides which storage pools, subsystems and hosts serve each of
 them. dnv promises that layer that the data of one storage pool is never
 readable from another storage pool, unless that layer exports it there itself,
-for example with a transfer, or a step of a caller breaks it, as the limits
-below say. The promise is about what a host can read, not about the network
-or the nodes: the network under dnv and the root user of every node are
+for example with a transfer, or a step of a caller breaks the promise, as the
+limits below say. The promise is about what a host can read, not about the
+network or the nodes: the network under dnv and the root user of every node are
 trusted.
 
 The words are those of [the core glossary](core_glossary.md), the list to read
@@ -312,9 +312,10 @@ dnv is tested on Ubuntu 26.04 LTS with the kernel 7.0.0-38-generic, the lab
 VMs' distribution and kernel.
 
 Tools: nvme-cli, mdadm, nvme-stas, a 2.x version with its daemons stafd and
-stacd, and dmsetup, which the all-in-one tutorial installs, and losetup from
-util-linux for its loop-device disks. The agents also run blkdiscard and lsblk
-from util-linux and thin_dump from thin-provisioning-tools.
+stacd, dmsetup, and thin-provisioning-tools, whose thin_dump the agents run,
+all of which the all-in-one tutorial installs, and losetup from util-linux for
+its loop-device disks. The agents also run blkdiscard and lsblk from
+util-linux.
 
 Kernel: the NVMe/TCP target and host drivers nvmet, nvmet-tcp, nvme-tcp and
 nvme-fabrics; native NVMe multipath switched on, which joins a host's paths
@@ -336,8 +337,8 @@ A host: an NVMe/TCP initiator with native multipath and a follower of the
 discovery log such as nvme-stas, which drops a failed-over primary's path; a
 path that no follower manages is never dropped.
 
-To build: Go 1.26.5 or newer. For the CSI driver: a Kubernetes, k3s in its
-tutorial, and docker to build the driver's image.
+To build: Go 1.26.5 or newer. For the CSI driver: Kubernetes 1.34 or newer,
+k3s in its tutorial, and docker to build the driver's image.
 
 ## Status and limits of 0.1
 
@@ -369,19 +370,26 @@ The limits a user must know:
   already written keep serving.
 - Corrupt thin pool metadata has no repair path in dnv: repairing it is an
   operator's job, by hand, onto fresh space.
-- A leg bitmap read too early during a migration can hand a pool another
-  pool's bytes. The optional fast path skips the blocks of a leg that the thin
-  pool has not written; read while the old side still takes writes, it misses
-  the blocks written after the read, and the pool later reads there what the
-  new side's recycled extents hold. Read it only after the cutover, once the
+- A leg bitmap read too early during a migration can hand a pool another pool's
+  bytes. The optional fast path skips the blocks of a leg that the thin pool
+  has not written; read while the old side still takes writes, it misses the
+  blocks written after the read, and the pool later reads there what the new
+  side's recycled extents hold. Read it only after the cutover, once the
   primary's path to the new side is ANA optimized.
+- A migration finished with force before its copy is complete can hand a pool
+  another pool's bytes: force skips the check that the copy is complete, the
+  old side is removed, and every region the copy had not reached reads what the
+  new side's recycled extents hold.
 - The forced start, an operator's start of a RAID1 group's array from one leg
   they name when md will not start it on its own, has sharp edges: it can
   lose the data that only the other legs held; it restores one group, not the
   pool, so a start from an older copy gives the pool a mix of older and newer
-  blocks with no error; a leg of the old history taken back later can be
-  copied over with no error; and while the group has a repair under way it
-  can leave the group down.
+  blocks with no error, and in a data group a block the pool first used after
+  that copy left the array reads what the copy holds there, which can be
+  another pool's bytes; a leg that left the array before the forced start and
+  is later put back into the group can be copied over with no error, losing the
+  data only it held; and while one of the group's legs is being replaced it can
+  leave the group down.
 
 ## Get dnv
 

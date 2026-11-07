@@ -68,19 +68,20 @@ How the commands are written:
 - The tutorial changes the machine: it installs packages, loads kernel
   modules, writes a udev rule, masks a systemd unit and replaces the
   nvme-stas settings. Use a test machine. The teardown at the end puts
-  everything back.
+  back most of it; what stays is named there.
 
 ## Prerequisites
 
 The tools, on Ubuntu or Debian:
 
 ```
-sudo apt-get install -y nvme-cli mdadm nvme-stas dmsetup
+sudo apt-get install -y nvme-cli mdadm nvme-stas dmsetup thin-provisioning-tools
 ```
 
 On another distribution install the same tools: `nvme` from nvme-cli,
 `mdadm`, nvme-stas with its two daemons `stafd` and `stacd`, `dmsetup`,
-and `losetup` from util-linux. nvme-stas must be a 2.x version:
+`thin_dump` from thin-provisioning-tools, and `losetup` from util-linux.
+nvme-stas must be a 2.x version:
 
 ```
 sudo stafd --version
@@ -167,16 +168,18 @@ nohup ./dnv-cdc --etcd-endpoints 127.0.0.1:2379 --tr-addr 127.0.0.1 --tr-svc-id 
 ```
 
 Check: the gateway answers through etcd with an empty cluster list, and
-the cdc has started.
+the cdc has read etcd and listens.
 
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 cluster list
-grep -c '"cdc starting"' cdc.log
+grep -c '"cdc scan complete"' cdc.log
 ```
 
 The first prints `{"cluster_name":[],"page_token":""}`; if it says
 UNAVAILABLE instead, the gateway is still starting, so run it again a
-second later. The second prints `1`.
+second later. The second prints `1` once the cdc has read etcd; if it
+prints `0`, wait a moment and run it again, and if it stays `0`, read
+`cdc.log`, where a cdc that could not listen says so.
 
 ## Agents
 
@@ -252,7 +255,8 @@ are four failure domains, which the RAID1 placement needs.
 ```
 
 Check: a disk node has nine extents. A 10 GiB disk minus the 256 MiB the
-disk node keeps for its header, its table and its metadata area holds nine
+disk node keeps for its header, its record of which extents each side holds
+and its metadata area holds nine
 whole 1 GiB extents.
 
 ```
@@ -262,8 +266,10 @@ whole 1 GiB extents.
 It prints `"free_ext_cnt":"9"` and `"total_ext_cnt":"9"`.
 
 Check: the worker has made each node follow its record. The agent's own
-report shows every row OK: on a disk node the disk format, the table and
-the nvmet port, three rows; on the controller node the port, one row. The
+report shows every row OK: on a disk node the disk, the disk node's header on
+it with its record of which extents each side holds, and the nvmet port, three
+rows; on the controller node the port, one
+row. The
 worker reaches a new node within a few seconds, and until then the count
 is 0. Repeat until the counts are 3, 3, 3, 3 and 1.
 
@@ -278,8 +284,9 @@ is 0. Repeat until the counts are 3, 3, 3, 3 and 1.
 ## Storage pool
 
 RAID1, one slice, one cntlr, and a data group of two extents on each of
-its legs. The meta group, which holds the thin pool's metadata, is always
-one extent.
+its legs. The first meta group, which holds the thin pool's metadata, is
+always one extent, and the call that creates the pool takes no size for it;
+auto-grow can add further meta groups later.
 
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 --sp sp0 sp create --redund raid1 --slice-cnt 1 --cntlr-cnt 1 --init-ext-cnt 2
@@ -287,9 +294,9 @@ one extent.
 
 What happens now: the worker sends each of the four disk nodes its side. A
 disk node zeroes what must read as zeros, a whole meta side and the first
-blocks of a data side, and exports the side over NVMe/TCP; the worker then
-marks the side provisioned. The controller node holds the pool's one
-cntlr, so it is the primary: it connects the four sides, assembles the two
+blocks of a data side; the worker then marks the side provisioned, and the
+disk node exports the side over NVMe/TCP. The controller node holds the pool's
+one cntlr, so it is the primary: it connects the four sides, assembles the two
 RAID1 arrays and builds the slice's thin pool.
 
 Check: four sides provisioned, one primary. Zeroing the two meta sides
@@ -531,4 +538,11 @@ sudo mv /etc/stas/stacd.conf.dnv-bak /etc/stas/stacd.conf
 if test -f /etc/stas/sys.conf.dnv-bak; then sudo mv /etc/stas/sys.conf.dnv-bak /etc/stas/sys.conf; else sudo rm -f /etc/stas/sys.conf; fi
 ```
 
-The machine is as it was, except for the packages installed at the start.
+The machine is as it was, except for the packages installed at the start; the
+kernel modules, which stay loaded until a reboot; the configfs mount, if the
+tutorial made one: on Ubuntu, systemd mounts configfs at boot and the
+tutorial's mount step then does nothing; the two nvme-stas daemons, `stafd` and
+`stacd`, which stay stopped until they are started again, by you or, if their
+units are enabled, at the next boot; and the directory `/run/dnv-thin-dump`,
+which the controller node's agent made for `thin_dump` and which goes at a
+reboot.

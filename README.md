@@ -9,7 +9,8 @@ per-node agents converge the data plane to it. It can be the data plane of a
 multi-tenant block storage system, for example behind Kubernetes or OpenStack
 Cinder: it leaves the authentication of users to the layer above, and it keeps
 the data of one storage pool unreadable from any other storage pool unless
-that layer exports it there itself, for example with a transfer.
+that layer exports it there itself, for example with a transfer, or a step of
+a caller breaks this, as the limits in the introduction say.
 
 - [`doc/human/introduction.md`](doc/human/introduction.md) — what dnv is for,
   its six programs, how it is built up and how it behaves, with diagrams;

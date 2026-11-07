@@ -58,8 +58,8 @@ How the commands are written:
   what the all-in-one tutorial installs, and it starts Kubernetes pods that
   mount volumes. Use a test machine with 4 GiB of memory or more: the
   stack, k3s, the driver and the pod together stayed under 2 GiB on the
-  machine this tutorial was checked on. The teardown at the end puts
-  everything back.
+  machine this tutorial was checked on. The teardown at the end puts back
+  most of it; what stays is named there.
 
 ## Prerequisites
 
@@ -235,14 +235,17 @@ allowed host yet, and a namespace over the thin device. The worker then
 provisions the pool as in the all-in-one tutorial. The volume is thin: it
 reserves one extent for its metadata and an eighth of its size for data, and
 auto-grow adds a data group of one extent each time the pool's data use passes
-half of its data space, until the data groups cover the volume. So the volumes
-of a cluster can be larger, together, than its free space. When a pool needs
-another data group and the disk nodes have no room left for it, the writes in
-the pod stall and then fail, as for any full pool.
+half of its data space, until the data groups cover the volume, and a meta
+group each time the pool's metadata use passes half of its metadata space. So
+the volumes of a cluster can be larger, together, than its free space. When a
+pool needs another data group and the disk nodes have no room left for it, the
+writes in the pod stall and then fail, as for any full pool.
 
-Check: the claim is bound, the pool exists, and the worker has provisioned
-its four sides and made the cntlr the primary. Zeroing the meta sides takes
-some seconds; repeat the last two until they print 4 and 1.
+Check: the claim is bound, the pool exists, the worker has provisioned its
+four sides, and the pool has one primary, which the call that created the
+pool chose.
+Zeroing the meta sides takes some seconds; repeat the third command until
+it prints 4. The fourth prints 1 from the start.
 
 ```
 sudo k3s kubectl get pvc demo
@@ -394,7 +397,8 @@ The first prints `No resources found`; `/proc/mdstat` lists no array.
 
 In the order a holder goes before what it holds. The driver's pods first,
 which stop with nothing staged, then k3s as a whole: its uninstall script
-stops the service and removes its program, its state and its containers.
+stops the service and removes its program, its containers and most of its
+state.
 Then the image and its build directory.
 
 ```
@@ -455,5 +459,11 @@ sudo systemctl unmask nvmf-connect@.service nvmf-connect.target
 ```
 
 The machine is as it was, except for the packages installed at the start,
-docker among them, and the two identity files under `/etc/nvme`, which are
-the machine's and stay.
+docker among them; the two identity files under `/etc/nvme`, which are the
+machine's and stay; the kernel modules, which stay loaded until a reboot; the
+configfs mount, if the all-in-one tutorial's mount step made one: on Ubuntu,
+systemd mounts configfs at boot and that step then does nothing; the directory
+`/run/dnv-thin-dump`, which the controller node's agent made for `thin_dump`
+and which goes at a reboot; and some of what k3s's uninstall script leaves,
+such as its node password under `/etc/rancher/node` and the logs of the pods it
+stopped under `/var/log/pods` and `/var/log/containers`.
