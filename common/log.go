@@ -84,7 +84,7 @@ func (h *TraceIdHandler) WithGroup(name string) slog.Handler {
 }
 
 // logLevel's zero value is slog.LevelInfo, the level used by dnv-gateway,
-// dnv-worker, dnv-agent and dnv-cdc (log.md R6).
+// dnv-worker, dnv-agent, dnv-cdc and dnv-csi (log.md R6).
 var logLevel = new(slog.LevelVar)
 
 // SetLogLevel changes the process-wide log level. dnvctl calls
@@ -99,7 +99,7 @@ func SetLogLevel(l slog.Level) {
 // kubectl reserves stdout for the result a script pipes. Applied here it means
 // stdout is the payload channel of every dnv binary — dnvctl's one result
 // document, and nothing from a running daemon (cobra's own --help text is all
-// four ever put there) — so a log record can never be mistaken for output.
+// five ever put there) — so a log record can never be mistaken for output.
 // The handler holds logLevel (a *slog.LevelVar) rather than a fixed level, so
 // SetLogLevel keeps biting after init.
 func init() {

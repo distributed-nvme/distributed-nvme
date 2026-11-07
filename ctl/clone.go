@@ -57,9 +57,11 @@ func cloneSrcTrConfList() []*pb.NvmeTrConf {
 // bound, no cross-check, no default-filling — so a bad geometry is
 // INVALID_ARGUMENT from the gateway and never a client-side refusal.
 //
-// --auto-resume asks the CP to resume the destination's namespaces itself once
-// the copy completes, instead of the operator following up with
-// `ns set-suspended --suspended=false`.
+// --auto-resume makes the destination's namespaces serve through the dm-clone
+// while the copy runs, from the moment the clone is built, even while their
+// stored suspended flag is set or an auto_suspend transfer names them
+// (cnagent.md CN16); nothing watches for the copy to finish, and DeleteClone
+// clears the stored flag with or without it.
 func cloneCreateCmd() *cobra.Command {
 	cmd := leaf("create", "create a clone (CreateClone)",
 		func() (job, error) {
@@ -98,8 +100,9 @@ func cloneCreateCmd() *cobra.Command {
 	flags.Uint64("src-block", 0, "src_block_size in bytes")
 	trConfFlags(flags, "src-")
 	flags.Bool("auto-resume", false,
-		"auto_resume — let the CP resume the destination's namespaces "+
-			"when the copy completes")
+		"auto_resume — let the destination's namespaces serve through the "+
+			"dm-clone while the copy runs, even while stored suspended "+
+			"or named by an auto_suspend transfer")
 	dmCloneConfFlags(flags)
 	return cmd
 }

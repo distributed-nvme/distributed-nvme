@@ -143,8 +143,9 @@ func setupCreateClone(fs *flag.FlagSet) job {
 	srcBlock := fs.Uint64("src-block", 0, "src_block_size in bytes")
 	srcTrConf := trConfFlags(fs, "src-", "tcp", "ipv4", "127.0.0.1", "4420")
 	autoResume := fs.Bool("auto-resume", false,
-		"auto_resume — let the CP resume the destination's namespaces "+
-			"when the copy completes")
+		"auto_resume — let the destination's namespaces serve through the "+
+			"dm-clone while the copy runs, even while stored suspended "+
+			"or named by an auto_suspend transfer")
 	dmCloneConf := dmCloneConfFlags(fs)
 	return func(
 		ctx context.Context,

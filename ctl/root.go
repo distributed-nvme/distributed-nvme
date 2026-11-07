@@ -227,7 +227,7 @@ var envGlobals = []string{
 }
 
 // bindViper wires flags, config file and environment together the way the
-// four daemons do (CT9), for the env-backed global flags only: it binds each
+// five daemons do (CT9), for the env-backed global flags only: it binds each
 // of them from the invoked command's flag set and binds nothing else, and no
 // other value is ever read through viper.
 func bindViper(cmd *cobra.Command) error {
@@ -412,8 +412,8 @@ var marshalOpts = protojson.MarshalOptions{
 // encoding/json: sorted keys, stable spacing, proto field names, proto3
 // defaults visible, uint64 as JSON strings.
 //
-// This and the two bitmap reads are the only fmt.Print* in the package — the
-// log.md R1 exemption for CLI results (CT4).
+// This is the only fmt.Print* in the package, the bitmap reads printing
+// through it too — the log.md R1 exemption for CLI results (CT4).
 func emit(result any) error {
 	value := result
 	if msg, ok := result.(proto.Message); ok {
@@ -501,9 +501,9 @@ func timeoutOf() (time.Duration, error) {
 var invoked *pflag.FlagSet
 
 // revRead records that the command being run read its token: revToken sets
-// it and run clears it before each build. The 38 token carriers read --rev
-// in build, and the 29 commands whose request has no token field never do,
-// so a typed --rev left unread is how run knows it has nowhere to go (CT3).
+// it and run clears it before each build. The token carriers read --rev in
+// build, and the commands whose request has no token field never do, so a
+// typed --rev left unread is how run knows it has nowhere to go (CT3).
 var revRead bool
 
 // leafValue reads one flag of the invoked command through pflag's typed
@@ -635,9 +635,9 @@ func hexBytesOf(name string) ([]byte, error) {
 // The two scope global flags (dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
-// clusterOf fills `cluster_name`. It is the global --cluster for 62 of the 66
-// requests that carry the field; only the `cluster` group's own four
-// commands override it, through clusterNameOf. Like spOf it reads an
+// clusterOf fills `cluster_name`. It is the global --cluster for every
+// request that carries the field but those of the `cluster` group's own
+// commands, which override it through clusterNameOf. Like spOf it reads an
 // env-backed global flag, so it reads viper, where bindViper put the flag's
 // carriers (CT9).
 func clusterOf() string { return viper.GetString("cluster") }

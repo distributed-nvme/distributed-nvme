@@ -994,11 +994,12 @@ EOF
 
 	# --- `sp` — `ctl/sp.go` --------------------------------------------
 	# CreateStoragePool carries no token, so its sweep row types no --rev
-	# (case C stage 7 refuses one); and the always-present redund_md_raid1 is
-	# the one dnvctl-side default (Conventions, Defaults), with an EMPTY body
-	# because --bitmap-chunk-blocks was not given. --low-water-mark-pct alone
-	# builds dm_pool_conf with no data_block_size key (--block-size was not
-	# given); the mark is a uint32, so it is recorded as a bare JSON number.
+	# (case C stage 7 refuses one, on `cluster delete`); and the always-present
+	# redund_md_raid1 is the one dnvctl-side default (Conventions, Defaults),
+	# with an EMPTY body because --bitmap-chunk-blocks was not given.
+	# --low-water-mark-pct alone builds dm_pool_conf with no data_block_size
+	# key (--block-size was not given); the mark is a uint32, so it is
+	# recorded as a bare JSON number.
 	sweep_step 19 CreateStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"bdev_conf\":{\"dm_pool_conf\":{\"low_water_mark_pct\":30},

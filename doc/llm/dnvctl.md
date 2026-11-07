@@ -89,7 +89,7 @@ env-backed global flags only.
 
 CT9. **Environment and config binding, global flags only.** Before a leaf runs,
 the root binds every global flag but `--rev` — the env-backed ones — into
-viper the way the four daemons bind their flags (`bindViper`), except that
+viper the way the five daemons bind their flags (`bindViper`), except that
 it binds those flags one by one, each looked up in the invoked command's
 flag set, where a daemon binds its whole flag set; the environment prefix is
 `DNVCTL`, a dash in a flag name becomes an underscore, every bound key is
@@ -319,23 +319,28 @@ end of the field fails to parse, a usage error. A wider parse would cut
 such a value and send a number nobody typed; a narrower one would refuse
 values the gateway should judge, the client-side check CT8 forbids. An
 id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`, `--retired-leg` —
-is declared as a string and parsed by dnvctl
-with Go's base-0 rule, so a `0x` prefix is accepted. `--slots`, `--ids` and
+is declared as a string and parsed by dnvctl with Go's base-0 rule, so a `0x`
+prefix is accepted and a leading zero without one selects octal: an id copied
+from a device name, which spells ids as zero-padded hex digits with no prefix
+(`architecture.md`, Naming), needs the `0x` prefix, since the padded form
+parses as octal with no error where its digits allow and is refused where they
+do not, and a hex id typed without its zeros and without the prefix parses as
+decimal where its digits allow and is refused otherwise. `--slots`, `--ids` and
 `--bad-legs` are comma-separated numeric lists; `--hosts` and the selector
-flags are comma-separated string lists. An empty list flag is the empty
-list. Any other value is split at each comma: a string list sends every
-item as typed, spaces and empty items included, and a numeric list trims
-each item and parses it, so an empty item is a usage error. No item is dropped,
-because a comma list whose items are all unset shell variables, such as
-`$A,$B`, would otherwise shrink to nothing and revoke every host of a
-subsystem (`architecture.md`, Primary cntlr) or drop a white list
-(`architecture.md`, Finding DN candidates), while the gateway refuses an
-empty host NQN or node address (`architecture.md`, Common validation). A
-list flag
-replaces its value on each occurrence rather than accumulating, which is
-why the lists are plain string flags: pflag's own slice flags append. A
-boolean that must be turned off is written `--enabled=false`, never
-`--enabled false`, whose `false` would be a positional argument, which no
+flags are comma-separated string lists. An empty list flag is the empty list.
+Any other value is split at each comma: a string list sends every item as
+typed, spaces and empty items included, and a numeric list trims each item and
+parses it with the same base-0 rule, so an empty item is a usage error and an
+id copied from a device name needs the `0x` prefix in `--ids` and `--bad-legs`
+as it does in an id flag. No item is dropped, because a comma list whose items
+are all unset shell variables, such as `$A,$B`, would otherwise shrink to
+nothing and revoke every host of a subsystem (`architecture.md`, Primary cntlr)
+or drop a white list (`architecture.md`, Finding DN candidates), while the
+gateway refuses an empty host NQN or node address (`architecture.md`, Common
+validation). A list flag replaces its value on each occurrence rather than
+accumulating, which is why the lists are plain string flags: pflag's own slice
+flags append. A boolean that must be turned off is written `--enabled=false`,
+never `--enabled false`, whose `false` would be a positional argument, which no
 leaf accepts.
 
 **Defaults.** dnvctl keeps a leaf-flag default of its own only where a spec
@@ -374,8 +379,10 @@ CT1. **Completeness.** The leaves are exhaustive: one per RPC of
 `--rev` token exactly when its request has a token field, so the leaves that
 take `--rev` are exactly CT3's carriers, and `--rev` on any other leaf is a usage
 error. Both claims are pinned by the unit tests against
-`pb.Gateway_ServiceDesc` and the request types, and made on the wire by the
-integration sweep (Integration test plan).
+`pb.Gateway_ServiceDesc` and the request types, the refusal on every leaf with
+no token field; on the wire the integration suite makes the first claim, sends
+`--rev` on every carrier and types it on one leaf with no token field
+(Integration test plan).
 
 ### `cluster` — `ctl/cluster.go`
 
@@ -544,7 +551,15 @@ Clones. dnvctl adds no wait flag here either (CT8, CT1).
 `--bm-idx`, never by either alone; what a chunk is and how its pages append
 is `architecture.md`, Clones. An empty `--bm-hex` sends an empty bitmap on
 purpose, so the gateway's refusal of one stays reachable; a malformed
-non-empty value is a usage error (exit 2).
+non-empty value is a usage error (exit 2). Both `append-bm` leaves take the
+bitmap as one hex string in `--bm-hex`, with no file or stdin input, so the
+kernel's bound on the length of one argument bounds one append to half that
+many bytes of bitmap; a migration's `MaxMigrBmCnt` appends therefore cover a
+leg of a bounded size, and the caller of a larger leg can send only its first
+part: the disk node of the migration's destination side applies the unbroken
+run of chunks from the start (`dnagent.md` SH23) and copies what no chunk
+covers, which costs only the optional bitmap fast path (`architecture.md`,
+Bitmap push protocol).
 
 ### `xfer` — `ctl/xfer.go`
 
@@ -559,8 +574,10 @@ Two leaves are deliberately not symmetric with their siblings, because their
 RPCs are not: `migr cancel` has no `--force` — throwing an unfinished copy
 away needs no proof about the copy — while `migr finish` has one; and
 `migr append-bm` takes no index, because a migration copies one side and its
-chunks are an append sequence, while a clone chunk is addressed by the pair
-of source slice and chunk index (`clone` — `ctl/clone.go`).
+chunks are an append sequence, while a clone chunk is addressed by the pair of
+source slice and chunk index (`clone` — `ctl/clone.go`), which also states the
+bound one `--bm-hex` puts on an append, and so on the part of a leg a
+migration's appends can cover.
 
 `migr finish` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished and nothing else: a migration whose cutover
@@ -679,15 +696,17 @@ before and after the call.
 restarted fake whose behavior file is reset and whose state file holds only
 the reset's own readiness probe, so counters are read only as deltas.
 Together they exercise, on the wire, CT1 with one step per RPC in tree
-order, CT2's trace id and deadline, CT3's token on exactly its carriers and
-its refusal elsewhere, CT4's goldens, CT5's failure line and codes, CT7's
-empty stderr, CT8's parse-only refusals, CT9's precedence of flag over
-environment, and the field and flag rules of Conventions. What one step per
-RPC has no room for is left to the unit tests: the transport conf's nil
+order, CT2's trace id and deadline, CT3's token on exactly its carriers and its
+refusal on one leaf that carries none, CT4's goldens, CT5's failure line and
+codes, CT7's empty stderr, CT8's parse-only refusals, CT9's precedence of flag
+over environment, and the field and flag rules of Conventions. What one step
+per RPC has no room for is left to the unit tests: the transport conf's nil
 rule and a clone's empty source list, a bare `cluster create` sending no
-`dn_bin_conf`, the silence of the environment and the config file on leaf
-flags (CT9), `--timeout` refused or clamped from every carrier, and the
-code name of every gRPC code (CT5).
+`dn_bin_conf`, the silence of the environment and the config file on leaf flags
+(CT9), `--timeout` refused or clamped from every carrier, the code name of
+every gRPC code (CT5), and the `--rev` refusal on the leaves with no token
+field other than the one the suite types it on, which the unit tests pin
+on every such leaf (CT1).
 
 Out of scope: real-gateway runs, which are the gateway suite's harness;
 concurrency, which stays with gatewayctl's barrier runner; performance; and

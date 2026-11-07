@@ -23,10 +23,12 @@ import (
 
 // cntlrIdFlag declares the group's identity flag, the cntlr_id (dnvctl.md,
 // Conventions). It is a string flag read back through hexOf so that Go
-// base-0 parsing applies — 3 and 0x3 name the same controller, ids being
-// printed in hex by the rest of dnv — and so that a malformed value is a
-// usage error (exit 2) before any RPC is issued rather than an
-// INVALID_ARGUMENT from the gateway.
+// base-0 parsing applies — 3 and 0x3 name the same controller, so an id
+// copied from a device name or an NQN, which spell ids in zero-padded hex,
+// is typed with the 0x, and one copied from dnvctl's JSON, a log record's id
+// attribute or a gateway message, which print ids in decimal, without it —
+// and so that a malformed value is a usage error (exit 2) before any RPC is
+// issued rather than an INVALID_ARGUMENT from the gateway.
 //
 // The spelling matches `sp inspect-side --id` on purpose even though that one
 // is a side id: the RPC decides what the id means, as in gatewayctl
