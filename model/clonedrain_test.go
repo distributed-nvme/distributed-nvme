@@ -444,10 +444,10 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 // rev key because the SP is going away. Here the SP outlives the clone, so the
 // bump is every mutator's normal epilogue.
 //
-// Both halves are asserted together and never separately: model.LoadSp fetches
-// clones by iterating clone_name_list, so a key removed with the name still
-// listed would break every subsequent load, and a name removed with the key
-// still there would strand it for ever.
+// Both halves are asserted together and never separately: a key removed with
+// the name still listed would leave a name no drain step can take out, since
+// each needs the Clone it names, while model.LoadSp merely skips it, and a
+// name removed with the key still there would strand it for ever.
 func TestFinishCloneDelete(t *testing.T) {
 	env := newOpsEnv(t)
 	env.putDrainClone(true, nil)

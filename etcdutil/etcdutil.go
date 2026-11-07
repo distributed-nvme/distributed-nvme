@@ -325,9 +325,10 @@ func (c *Client) Range(
 // (limit <= 0 means no limit). It exists for the allocator of architecture.md,
 // Finding DN candidates and Finding CN candidates (model/alloc.go, MD5): the
 // capacity keys embed free_ext_cnt in
-// common.FreeSpaceFmt, so descending key order is "largest free first", and
-// the allocator stops as soon as it has enough candidates — which is what the
-// bounded scan expresses without pulling a whole bin into memory. Same "etcd
+// common.FreeSpaceFmt, so descending key order is "largest free first". The
+// allocator reads each bin whole (limit 0) and stops its own walk over the
+// result once it has enough candidates: a limit could end the scan just
+// before the DNs its filters would accept (FindDnCandidates). Same "etcd
 // range" record as Range.
 func (c *Client) RangeDesc(
 	ctx context.Context,

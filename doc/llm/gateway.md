@@ -494,7 +494,12 @@ read, right behind GW6's token check, and a group's retired legs at
 `MaxRetiredLegPerGrp` for an operator's `CreateRepair` with a fresh new leg
 and `GrowSlice`'s group ceiling from the planning snapshot. A caller at a
 ceiling then hears the ceiling rather than a scan's shortfall, and no scan
-is run for a create that cannot commit.
+is run for a create that cannot commit. `GrowSlice` is the one allocating
+RPC whose op keeps a stale pick's own refusal: a record that is gone, a DN
+no longer allocatable or one short of extents is `FAILED_PRECONDITION`
+(GW7) with no further round (`dnv-worker.md` MD5), where every other
+allocating RPC answers "candidate changed", and only a key gone under a
+record that still fits is "candidate changed" there.
 The deciding STM checks the ceiling again, because only it sees a write
 that commits between the two reads. `DeleteThinDevice` runs the same loop,
 cap included, without allocating: its scan is the plan's walk for uncreated

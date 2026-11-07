@@ -1014,9 +1014,11 @@ func (w *revWorker) logLateObservation(
 
 // logSyncupRejected emits the "syncup rejected" record (RW5; dnv-worker.md, Log
 // records). common.ReplyCodeStaleRevision means the agent holds a revision
-// newer than etcd's, which only an etcd restore can cause, and is logged at
-// Error; everything else — an unknown object above all, which merely means the
-// parent syncup has not landed yet — at Info.
+// newer than this worker's — for a while under an overlap of two owners, for
+// longer when the lagging owner's revision watch has stopped being served,
+// for good only after an etcd restore — and is logged at Error; everything
+// else — an unknown object above all, which merely means the parent syncup
+// has not landed yet — at Info.
 func (w *revWorker) logSyncupRejected(
 	ctx context.Context,
 	revision uint64,

@@ -527,8 +527,9 @@ func DrainSpRetiredLegs(
 // If both group lists are empty after the pop, the SAME transaction deletes the
 // `slice` key and removes the id from slice_id_list; otherwise it puts the
 // shrunken Slice. There is no "empty slice" intermediate state, and no dangling
-// id: model.LoadSp fetches children by iterating the id lists, so a slice id
-// pointing at nothing would break every subsequent load (SPD10, SPD11).
+// id: a slice id pointing at nothing would show in model.LoadSp's Missing on
+// every load, refuse the drain's next slice step (slice not found) and fail
+// GetStoragePool with ABORTED (SPD10, SPD11).
 //
 // Every commit therefore leaves a LOADABLE SP whose id lists exactly match its
 // keys and whose DN budgets exactly match its sides (SPD13).

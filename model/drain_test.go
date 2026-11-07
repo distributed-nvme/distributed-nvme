@@ -20,7 +20,8 @@ import (
 //     that only checked the happy path, so every guard row is paired with a
 //     "and the same op on a correctly latched SP commits";
 //   - the slice-final STM: a batch that deleted the key without shrinking
-//     slice_id_list would break every later LoadSp, and one that shrank the
+//     slice_id_list would leave an id every LoadSp reports missing and the
+//     drain's next slice step refuses, and one that shrank the
 //     list without deleting the key would strand a slice for ever, so the two
 //     are asserted together and never separately.
 

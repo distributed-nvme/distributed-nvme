@@ -603,10 +603,11 @@ func (s *Server) DeleteClone(
 		if err := resumeCloneDstNs(stm, sc, clone.GetDstTdId()); err != nil {
 			return err
 		}
-		// CLD4: the latch, and nothing else. The Clone key stays, its chunk
-		// keys stay, and the name stays in clone_name_list — model.LoadSp
-		// fetches clones by iterating that list, so a dangling name would
-		// break every subsequent load.
+		// CLD4: the latch, and nothing else. The Clone key stays, rewritten
+		// with the flag, its chunk keys stay, and the name stays in
+		// clone_name_list: a name whose Clone is gone would stay listed for
+		// ever, since the step that removes a name needs the Clone it names
+		// (CLD9), while model.LoadSp merely skips it.
 		//
 		// CLD6, SPD5's clone twin: no code path in any component writes
 		// `deleting = false` on an existing Clone, so this is one-way across

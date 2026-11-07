@@ -375,7 +375,9 @@ and `CnCapacityKey`, `CnCapacityPrefix` and `ParseCnCapacityKey`;
 pair no worker uses (like the three list-range prefixes): `dnv-cdc` scans and
 watches the prefix and decodes the keys off it (`cdc.md`, The etcd watcher);
 `SpConfKey`, `SpNameKey` and `SpConfPrefix`, the `ListStoragePools` page range
-(`gateway.md` GW10), scanned by no worker; `CntlrKey` and `SliceKey`;
+(`gateway.md` GW10) and the keys-only range `AdvanceClusterIds` walks to
+visit every pool (`gateway.md` GW19), scanned by no worker; `CntlrKey` and
+`SliceKey`;
 `ThinDeviceKey` and `SubsystemKey`; `CloneKey` and `CloneBitmapKey` — the
 seven-field key, BOTH indexes rendered with `BmIdxFmt` —, `CloneBitmapPrefix`
 and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`, `MigrBitmapKey`,
@@ -401,7 +403,8 @@ a short chunk's missing tail, read as *written* — the safe direction, the
 region being copied rather than skipped. A migration's chunks keep their
 six-field key and their flat append sequence. The two parsers are not
 interchangeable — `ParseCloneBmKey` takes the seven-field `clone_bitmap` key,
-`ParseBmIdx` the six-field `migr_bitmap` one, each rejecting the other's shape
+`ParseBmIdx` the six-field `migration_bitmap` one, each rejecting the
+other's shape
 — and a six-field key under the clone prefix is malformed: it parses as not
 ok and is skipped by MD3's loader.
 
@@ -497,7 +500,15 @@ Because the picked node's free count is part of its capacity key, every op of
 MD6 re-validates a pick by getting the exact capacity key the scan saw: gone
 means an `ErrPrecondition` with `ReasonCandidateChanged`, on which the caller rescans
 and retries the scan and the STM as one unit (the candidate unit of
-`architecture.md`, Storage pools). `ReplaceCntlr` fails with the same reason
+`architecture.md`, Storage pools) — save that `GrowSlice` and `ReplaceCntlr`
+keep a stale pick's own refusal: a record that is gone, a node no longer
+allocatable or one short of extents answers with that refusal's reason: on
+`GrowSlice` the gateway's `FAILED_PRECONDITION` with no new scan
+(`gateway.md` GW7) or, from the worker's auto-grow, a `reaction skipped`
+record carrying the op's own reason (AR2, AR6), and on `ReplaceCntlr` such
+a record (AR2, AR7); only `CreateRepair`'s fresh new leg turns
+those three
+into `candidate changed`. `ReplaceCntlr` fails with the same reason
 when the plan the scan ran against has moved: a surviving cntlr of the SP sits
 on a CN outside the SP endpoints it is handed (MD6). `CreateRepair` with a
 fresh new leg fails with it when the group holds a DN outside the group DNs
@@ -538,10 +549,13 @@ The clone-keyed twins — `SetCloneLegErrEpoch`, `SetCloneSideErrEpoch` and
 clone's clone meta group (`architecture.md`, Terminology and object
 model), through functions of their own, so no slice-keyed op ever walks a clone and no clone-keyed op a
 slice. A clone's record is keyed by its name, so each takes the clone's
-name and its `clone_id`, and requires, as its clone checks, the `Clone` to
-exist ("clone not found"), to carry that id ("clone id changed": a clone
-deleted and re-created under the name is another clone) and to have a
-group ("clone has no group"); group, leg and side ids are unique in the SP
+name and its `clone_id`. The two epoch twins require, as their clone
+checks, the `Clone` to exist ("clone not found"), to carry that id ("clone
+id changed": a clone deleted and re-created under the name is another
+clone) and to have a group ("clone has no group"); `FlipCloneProvisioned`
+skips such a clone instead and fails nothing (its entry below), as it skips
+a deleting clone's side, which RW18 therefore never reports; group, leg and
+side ids are unique in the SP
 and address the rest. No clone-keyed op takes a clone with no group; the
 clone drain's batches and its final transaction take one all the same, so
 a drain is never stranded on one. The sp worker writes the health epochs
@@ -894,8 +908,10 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   bump, as the call's spec says (`architecture.md`, Repairs); a group whose
   flag already holds the value is answered with no write.
 * `DrainSpCntlrs` requires the drain checks of SPD2 (`SpConf` exists, `sp_id`
-  unchanged, `deleting` true — `sp_level` is deliberately not consulted) and
-  every listed `Cntlr` key to exist. It deletes every `Cntlr`; per DISTINCT CN
+  unchanged, `deleting` true — `sp_level` is deliberately not consulted),
+  every listed `Slice` key to exist, since it sums the footprint from the
+  slices first ("slice not found" otherwise), and every listed `Cntlr` key
+  to exist. It deletes every `Cntlr`; per DISTINCT CN
   the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose
   record is gone is skipped, as in `ReplaceCntlr`); the `SpConf` with an empty
   `cntlr_id_list`; a `SpRev` bump; it returns the count removed. An
@@ -936,8 +952,11 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   `repair_name_list`, `retired_leg_id_list` and `slice_id_list` all empty;
   `SpRev` and `SpGlobal` to exist. It deletes
   `SpConf`, `SpName` and `SpRev` and decrements the shard's entry of
-  `SpGlobal.shard_bucket`. It is the ONE op that does not bump `SpRev` — it
-  deletes the key, which is the shard worker's stop signal (RW14).
+  `SpGlobal.shard_bucket`. It is the one write of the storage pool drain
+  that does not bump `SpRev` — it deletes the key, which is the shard
+  worker's stop signal (RW14); the health epoch writers,
+  `SetGrpOperatorInCharge` and `DrainCloneBm` bump none either (their
+  entries).
 * `DrainCloneBm` takes the clone and a list of chunks and requires the clone
   drain checks of CLD2 (`SpConf` exists and is not itself deleting, `sp_id`
   unchanged, `Clone` exists, `clone_id` unchanged, `deleting` true) and at
@@ -1027,7 +1046,10 @@ then RW11 — an in-flight `Syncup*` or `Push*` is allowed to finish),
 without waiting for them; **deletes its own registrations** (best effort,
 one `Delete` per role under `DefaultEtcdOpTimeout`, so peers start their
 grace windows now rather than after the dead threshold); joins the shard
-workers, which can take up to `DefaultWorkerSyncupTimeout`; closes the cache
+workers, which can take up to `DefaultWorkerSyncupTimeout` plus
+`DefaultWorkerPushTimeout`, since a child stops its loop first and its
+bitmap pusher after it, and a push that starts near the end of the first
+wait runs its own course (RW11); closes the cache
 watch and the client; returns nil. A second signal during that window exits
 immediately with status 1. Both ways out share this one order. A last
 `Syncup*` or `Push*` can still finish after the deletes, possibly after a
@@ -1253,7 +1275,8 @@ it no longer owns (VW9); best-effort `Delete` the old registrations (they
 may already be gone). Deleting before the drain is joined lets the peers
 observe a delete that lands as a disappear and start their grace windows at
 once, rather than when the drain ends — which can take
-`DefaultWorkerSyncupTimeout` (RW11) — or the dead threshold passes,
+`DefaultWorkerSyncupTimeout` plus `DefaultWorkerPushTimeout` (RW11, CM5) —
+or the dead threshold passes,
 whichever comes first; a last syncup can then finish after a peer took its
 shard, the accepted overlap of an ownership change (VW7). The drain is
 started before the deletes because a delete that cannot land — a VW8 (a)
@@ -1314,7 +1337,9 @@ desired state (RW3 coalescing; a put that changes neither `revision` nor
 the handle is a no-op); a put for a new key starts a revision worker; a
 delete forgets it and stops it gracefully (RW11) on a goroutine of its own,
 without waiting: the stop waits out the worker's in-flight unary call,
-which can take `DefaultWorkerSyncupTimeout`, and the shard's other keys are
+which can take `DefaultWorkerSyncupTimeout`, plus `DefaultWorkerPushTimeout`
+for an sp worker whose child has a push in flight (CM5), and the shard's
+other keys are
 not held behind it. A worker started for the same key before that stop has
 returned drives nothing until it has (RW1). Each start and stop logs
 `revision worker started` / `revision worker stopped`; a worker waiting
@@ -1472,8 +1497,11 @@ and any other non-zero code — below) is logged as `syncup rejected`
 parent syncup has not landed yet — an sp worker's `SyncupSide` reaching the
 DN before the dn worker's `SyncupDn` listed the side, say, which is normal
 since the roles are independent (VW10) — and stale revision means the agent
-holds a revision newer than etcd's, which only an etcd restore can cause
-(`architecture.md`, etcd backup and restore) and is logged at Error. Invalid
+holds a revision newer than this worker's, which an overlap of two owners
+(VW7) causes for a while — for longer when the lagging owner's revision
+watch has stopped being served — and which only an etcd restore causes for
+good (`architecture.md`, etcd backup and restore); it is logged at Error.
+Invalid
 conf means the agent found a value the control plane cannot have written —
 a proto3 zero where `architecture.md`, Common validation, requires a
 concrete value, or a side's length to zero
@@ -1796,11 +1824,16 @@ side's leg id and side id (`architecture.md`, Repair), so the diff compares
 the record that owns each side, and the restarted child's fresh monitor
 writes to the record the new plan names;
 every remaining child receives its new request as a desired change (RW6). A
-child whose **request** changed while the `SpRev` revision did not — a
-re-resolution tick that altered a standby list — is restarted too, because
-RW3's coalescing sees the unchanged revision and would otherwise swallow
-the change and leave the child driving a stale request until the next
-bump. That is the fan-out: unordered within each kind, sides before cntlrs
+child whose **request** changed while the `SpRev` revision did not is
+restarted too: a health write to a `Cntlr`, a `Slice`, a `Clone` or a
+`Repair`, records the cntlr requests carry, changes those requests and
+moves no revision (HL3), so a
+re-resolution tick that rebuilds the requests restarts the cntlr children
+concerned. The restart only refreshes the request the child sends on its
+next syncup; it delivers nothing to an agent already at that revision,
+since a round sends a syncup only on a non-zero code or a different
+revision (RW4). That is the fan-out: unordered within each kind, sides
+before cntlrs
 (below), and a demoted cntlr before both (RW22). `ErrNotFound` from
 `LoadSp` means the SP is being deleted: log, keep the children until the
 `SpRev` delete arrives (the agents tear down through the pointer lists).
@@ -1932,7 +1965,8 @@ falls after the hold's deadline when the two intervals are equal, as they are
 by default. It is paid as well, in part or in whole, when the diff restarts a
 side whose old child is still inside a `Syncup*`: the new child sends and
 reports nothing until that call has ended and the old child has stopped (RW1,
-RW11), which can be up to `DefaultWorkerSyncupTimeout` later — past the hold's
+RW11), which can be up to `DefaultWorkerSyncupTimeout` plus
+`DefaultWorkerPushTimeout` later (CM5) — past the hold's
 deadline at the default `cntlr_interval`. And it is paid at the first
 fan-out of a new owner or a restarted worker, and at a fan-out that
 restarts a side, for each side the hold waits for whose new child's first
@@ -2037,8 +2071,9 @@ comes during a demotion hold, which holds it like any other fan-out
 (above). And a
 cntlr with no running child — every cntlr of a coordinator that has just
 started, after a restart or a handoff, until its first hold starts the
-cntlr children, and one left idle (RW14) — has no agent this coordinator
-told it was the primary, so a failover that a coordinator fans out before
+cntlr children, and one left idle (RW14) — leaves this coordinator nothing
+to send a demotion through, whether or not an earlier child of its told
+the agent it was the primary, so a failover that a coordinator fans out before
 its first hold has started the cntlr children runs in RW14's order. Nothing
 of the demotion hold is persisted either: a new owner or a restarted worker
 cannot know an earlier owner's demotion, so a failover whose owner loses
@@ -2232,7 +2267,14 @@ again (CLD7) — and a validating get would either hide that or log it five
 times.
 An invalid conf is deliberately still **cached**: dropping it would make a
 cluster whose conf went bad indistinguishable from a deleted one and send
-the operator chasing a phantom deletion that never happened. A cluster
+the operator chasing a phantom deletion that never happened. A value that
+does not decode is the exception: it ends the watch, and the rescan skips
+its key and replaces the whole map, so the last good entry goes with it —
+the cache keys an entry by the `cluster_id` built from the value's
+`creation_epoch`, which such a value does not give — and the cluster's
+loops idle as on a deleted cluster, logging `cluster conf missing` (RW9),
+while `etcdutil`'s own record of the decode names the key and the error. A
+cluster
 **absent** from the cache is the separate RW9 and SW6 idle path, with a
 record of its own. Watch errors and compaction are handled like SW4.
 
@@ -2567,7 +2609,9 @@ breaks the stream too.
 HL5. `show_info` false streams carry an `*Info` only when something
 changed; the worker evaluates health on the latest known info, and a reply
 with neither info nor error is a clean round when the observation it
-answers from is not too old and is one a round asked for (HL7).
+answers from is not too old and is one a round asked for (HL7), and the
+latest known info holds no `ERROR` row (HL1); with no known info at all it
+is clean.
 
 HL6. **No cross-role health writes.** The sp role's health bookkeeping —
 this section's `err_epoch` writers — never touches `DnConf` or `CnConf`
@@ -2723,8 +2767,13 @@ even though the agent acknowledges its address. `AppendCloneBitmap` grows a
 chunk in place, at the pair that already addresses it, so the memo must key on
 the whole pair: judged by `bm_idx` alone it would compare one source slice's
 growth against another slice's revision and drop a chunk the agent never
-received. The memo is in-memory and lost on a handoff — accepted by
-`architecture.md`, [D8]. Migration chunks are immutable, so nothing can make
+received. The memo is in-memory, kept by the child's pusher (RW2), and
+lost whenever the child is restarted on the same worker — an endpoint
+change, a side moved to another record or a request changed at one
+revision (RW14) — as on a handoff; accepted by `architecture.md`, [D8]: a
+chunk the agent has acknowledged can then grow in etcd and stay shorter at
+the agent, which costs copying only. Migration chunks are immutable, so
+nothing can make
 the rule re-push one; `worker/bmpush.go` implements BM1 to BM6 once for both
 kinds and therefore memoizes migration chunks too, where the mod-revision
 comparison is inert.
@@ -2748,7 +2797,10 @@ rejection code, or a stored revision behind the desired one — and RW4 step
 5 issues the `Syncup*` that re-plans within the round. When the push failed
 on the wire while the agent is healthy and at the desired revision, no
 re-sync is due and the chunk waits for the next `Syncup*` from any cause (a
-revision bump, a leftover, a handoff). That wait is accepted because the
+revision bump or a leftover; a handoff sends none, since a new child starts
+with a round, which sends a syncup only on a code or a revision, RW4), and
+so do the parts of a plan that a worker's failure cut short. That wait is
+accepted because the
 skip bitmap is an optimization: a chunk that has not arrived leaves its
 regions hydrated instead of discarded (`architecture.md`, Bitmap push
 protocol), which costs copying, never correctness.
@@ -2759,11 +2811,13 @@ The automation of `architecture.md`, Automatic reactions, as the sp
 coordinator's **pass**: one evaluation of the automatic reactions for one
 SP. Everything here is the worker's job; agents only report. There are
 four reactions — failover, thin-pool auto-grow, cntlr replacement, leg
-repair — and no migration reaction: every condition that sets
-`Side.err_epoch` also prevents the source DN from serving a migration, so
-`side_unhealthy` and `leg_unhealthy` are instead the two triggers of one
-leg-repair procedure (AR8) — the shorter wait when the DN itself looks
-dead, the longer one when only the cntlr's path is bad. Beside the
+repair — and no migration reaction: a set `Side.err_epoch` can mean a dead
+device or node, which no migration could read from, and an unhealthy side
+that can still be read is left to the operator's `CreateMigration` (Known
+limits), so `side_unhealthy` and `leg_unhealthy` are instead the two
+triggers of one leg-repair procedure (AR8), the one automatic answer — the
+shorter wait when the DN itself looks dead, the longer one when only the
+cntlr's path is bad. Beside the
 reactions the pass runs the three steps of the procedure Repair of
 `architecture.md` that are the worker's, a repair's stage moves (AR11), the
 retire timer (AR12) and the clear of a forced-start mark (AR13), which are
@@ -2941,10 +2995,11 @@ failed, or whose cluster conf is missing or unusable, runs no step at all
 deliberately — SPD6). A
 **disabled** cntlr is never a candidate, replaced or repaired — but a
 disabled *primary* is itself the AR5 failover trigger (`architecture.md`,
-Cntlrs). Disabling is the operator's hands-off signal, and the "skipping
-the enabled check" of `architecture.md`, Automatic reactions, is read as
-skipping the public `disabled` precondition of `DeleteCntlr`, not as
-replacing disabled cntlrs.
+Cntlrs). Disabling is the operator's hands-off signal: `model.ReplaceCntlr`
+runs without `DeleteCntlr`'s not-primary and disabled preconditions
+(`architecture.md`, Automatic reactions), which means it does not demand
+that the cntlr it deletes be disabled; it refuses a disabled one, so it
+never replaces disabled cntlrs.
 
 AR4. **Thresholds.** `now` minus `err_epoch` at least the threshold, which
 is the SP's `event_threshold` field of that kind, a zero meaning its
@@ -3151,8 +3206,10 @@ that did, `architecture.md`, Common validation):
   data blocks of all its data groups, the newest included, reach the sum
   over the pool's thin devices of the blocks each can use in one slice, its
   size divided by the slice count and rounded up to whole data blocks. Then
-  the grow is skipped with `data_covered`, so a pool never grows past what
-  its volumes can write; a snapshot counts in full, since it shares blocks
+  the grow is skipped with `data_covered`, so no data grow starts once the
+  slice's data covers its volumes, though the last grow can pass the need
+  by up to one group, since a grow adds a whole group; a snapshot counts in
+  full, since it shares blocks
   with its origin only until they diverge, so the sum is an upper bound of
   the need and the pool may grow further than strictly needed, never less;
   and a thin device the pass's state lists as missing stops the skip, since
@@ -3183,7 +3240,9 @@ its redundancy kind (`legCnt`: one for `RedundNone`, `MaxAllocLegPerGrp` for
 on distinct DNs; fewer candidates than legs, or a cntlr's CN below the budget
 (checked in the op), means `reaction skipped`. A slice whose list of that kind
 already holds `MaxGrpCntPerSlice` groups (`architecture.md`, GrowSlice) can
-never grow that kind again: a breach of that kind that is not pending logs
+never grow that kind again: a breach of that kind that is not pending —
+and, for data, not covered, since the covered test comes first and logs
+`data_covered` — logs
 `reaction skipped` (`grp_list_full`) without a scan and the pass goes on
 (AR2); `GrowSlice`'s in-STM refusal carries the same reason, both through
 `model.GrpListFull`, and ends the pass, as its in-STM `grow_pending` does
@@ -3365,10 +3424,14 @@ Reasons: a bad leg that reads healthy again needs no repair, and while md
 holds it in its place, serving with an `OK` leg row, the primary never
 fails it, so the repair could only wait (`architecture.md`, Known limits).
 The clocks keep
-the abort off a fresh new leg: it reads `ERROR` from its provisioned flip
-until the primary's connect to it completes, its `err_epoch` is set at
-once, and the abort flag is never cleared, so an abort read off that window
-would turn every worker's repair into a loop of create, abort and cancel.
+the abort off a fresh new leg: it reads `PENDING` from its provisioned flip
+until its first probe completes (`cnagent.md` CN11), and a connect that runs
+before its side's export exists fails and reads `ERROR`, with its
+`err_epoch` set at once — RW14's sides-first hold makes that less likely,
+never impossible — and the abort flag is never cleared, so an abort read off
+that
+window would turn every worker's repair into a loop of create, abort and
+cancel.
 These are the clocks the triggers use. The side clock needs no `err_epoch`
 on the new leg, unlike case 2, because an unprovisioned new leg is neither
 connected nor probed, so only its side's health shows a DN that dies while
@@ -3856,8 +3919,11 @@ is ever renumbered.
 SPD11. **D2's slice-final half**, the same batch as SPD10's and never a
 step of its own. The batch that empties a slice deletes the `Slice` key AND
 its `slice_id_list` entry in the same transaction — there is no "empty
-slice" intermediate state, and `model.LoadSp` iterates the id lists, so a
-dangling id would break every later load.
+slice" intermediate state. A dangling id would not break `model.LoadSp`,
+which reports the missing key in `Missing` and succeeds (MD3), but it would
+stop the drain's next slice step, D2, with `slice not found` (SPD10; a lost
+sub-object key wedges the drain, below) and fail the gateway's
+`GetStoragePool` with `ABORTED`, and every load would report it.
 
 SPD12. **D3 — the final keys.** `SpConf`, `SpName`, `SpRev` and `gateway.md`
 GW12's deletion half on `SpGlobal`, guarded on the cntlr, repair, retired-leg
@@ -3877,7 +3943,10 @@ not run again, since its own delete has stopped the pool's coordinator
 reusable.
 
 **A lost sub-object key wedges the drain, deliberately.** D1 refuses when a
-listed `Cntlr` key is absent, D2 when a listed `Slice` key is, and the SPD15
+listed `Cntlr` key is absent, and when a listed `Slice` key is, since it
+sums the pool's footprint from every slice before it reads a cntlr; D2 when
+a listed `Slice` key is, which it reaches only once the pool has no cntlr
+left; and the SPD15
 batches when a listed `Repair` or `RetiredLeg` key is, or the parent it
 names; each is the record that says which node reserved what, so without it
 the release cannot be made exact, and a drain that carried on would
@@ -3971,10 +4040,11 @@ a clone whose `deleting` is already true writes nothing, bumps nothing and
 calls no agent, the check sitting ahead of the hydration check because the
 stack is gone by then (CLD5), as `gateway.md`, Clones, describes.
 
-CLD4. **The latch, and what it does not write.** `DeleteClone` latches the
-clone — the destination namespaces resumed, `deleting` true, one `SpRev`
-bump, and neither the `Clone` key, a chunk key nor `clone_name_list`
-touched — as `gateway.md`, Clones, describes; the drain starts from that
+CLD4. **The latch, and what it does not remove.** `DeleteClone` latches the
+clone — the destination namespaces resumed, `deleting` true written into
+the `Clone` record, whose key the latch rewrites and does not delete, one
+`SpRev` bump, and no chunk key and no `clone_name_list` entry touched — as
+`gateway.md`, Clones, describes; the drain starts from that
 latch, and the surviving name is what CLD9 removes last (SPD11, the sp
 drain's slice-final rule, applying verbatim). Force-deleting an unhydrated
 clone exposes unhydrated data on the resumed namespace.
@@ -4006,12 +4076,15 @@ deliberately distinct from level suppression, under which the cn agent keeps a c
 a later rebuild (`cnagent.md` CN21). The teardown's disconnect of a source
 that is a transfer of the cluster (`cnagent.md` CN21) runs off the pass
 (`cnagent.md` CN10), so until a later pass finds the
-source gone the converge answers `ReplyCodeLeftover` (RW5). No push of the
-clone is submitted once the exclusion has reached the primary's child, which
-is when the RW14 sides-first hold the latch's fan-out lands in releases the
-cntlrs. Until then that child drives the pre-latch plan, whose clones still
-carry the clone's chunks, and a `SyncupCntlr` reply can submit a push from
-it (a leftover reply re-syncs every round, RW4 step 5), while a pass, or
+source gone the converge answers `ReplyCodeLeftover` (RW5). No syncup sent
+after the exclusion has reached the primary's child submits a push of the
+clone; the exclusion reaches it when the RW14 sides-first hold the latch's
+fan-out lands in releases the cntlrs. Until then that child drives the
+pre-latch plan, whose clones still carry the clone's chunks, and a
+`SyncupCntlr` reply can submit a push from it (a leftover reply re-syncs
+every round, RW4 step 5) — one still running when the exclusion arrives
+among them, since a syncup reads its plan before the call and keeps it for
+the reply — while a pass, or
 the drain's wake-up (CLD7), inside the hold may already run CLD8 batches; a
 push already submitted also runs on after the hand-over. Such a push can
 find a chunk key a batch deleted and end with `bitmap push failed` (BM6),
@@ -4304,9 +4377,10 @@ proves is everything between etcd and the agent's gRPC surface: membership and
 ownership, revision propagation, health bookkeeping, the flips, the pushes,
 the reactions, the two pass steps of a repair, the forced-start clear, the
 two drains and handoff —
-the happy paths plus every failure
-the worker is specified to handle; error paths of etcd itself (quorum loss,
-compaction races) are out of scope. It runs on one server as a plain user,
+the happy paths plus the failures each case names; the failures it does
+not run are listed under Rules exercised and left to the unit tests, and
+error paths of etcd itself (quorum loss, compaction races) are out of
+scope. It runs on one server as a plain user,
 because nothing it exercises needs root: real etcd, several real workers, fake
 agents driven by a behavior file, etcd driven by a fake-gateway CLI, and
 assertions over the JSON logs.
@@ -4484,8 +4558,10 @@ revision gate being per object and not per cluster.
 
 **Rules exercised.** The vote and handoff cases exercise VW1 to VW7 and VW9
 to VW11, the vote case VW8 (a), and every case's fleet restart VW7, RW11
-and CM5; SW1 to SW3, SW5 and SW6 are exercised by the smoke, revision and
-handoff cases; RW1 to RW12 by the smoke, revision and health cases, RW10 by
+and CM5; SW1 to SW3 and SW5 are exercised by the smoke, revision and
+handoff cases, and of SW6 only the `cluster_id` read from a key of the one
+cluster each case makes, no case holding a second or an unknown cluster
+(below); RW1 to RW12 by the smoke, revision and health cases, RW10 by
 the attribution of the vote and handoff cases; RW13 to RW21 (save RW13's
 count compare, below) by the smoke case's request builders, the revision
 case's moved endpoint, the bitmap case's migration confs and cutover and
@@ -4586,11 +4662,21 @@ a retired leg; the repair half of CLD5 and CLD9 — a deleting clone's
 repair left out of every cntlr's request, the sides of its new leg and
 retired legs driven until the final transaction, and that transaction
 giving them back — since no suite case deletes a clone whose group holds a
-repair or a retired leg; and the guards of CLD2 and the gateway halves
-of CLD1 and CLD3, the gateway suite owning the clone latch.
+repair or a retired leg; the guards of CLD2 and the gateway halves
+of CLD1 and CLD3, the gateway suite owning the clone latch; the guards no
+reaction case stages — auto-grow's `data_covered`, `grp_list_full` and
+`meta_ladder_cap` (AR6), cntlr replacement's
+`candidate changed` (AR7) and leg repair's `leg_has_two_sides` (AR8), while
+auto-grow's `no_data_group` is reached by no test at all, since every slice
+is created with a data group; and
+SW6's idle on a cluster the cache does not hold, since no suite case holds
+a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the three conf gates are unit-tested instead.
-Ten records no suite case stages: `sp drain failed` and `clone drain failed`,
+Thirteen records no suite case stages: `worker reg watch restarting`, `rev
+watch restarting` and `cluster conf watch restarting`, since no suite case
+ends a watch on an error or a compaction; `sp drain failed` and `clone drain
+failed`,
 which the drain case asserts at zero after every drain; `sp flip failed`,
 which the bitmap case asserts at zero for its cutover; `cluster conf
 missing`, which every suite case avoids by writing its cluster conf before
@@ -4613,12 +4699,16 @@ compaction races; clock-skew injection, clock agreement across workers being
 no correctness dependency (VW4); TLS and authentication, the fabric being
 trusted (`architecture.md`, Known limits); failures of `RedundNone` legs, for
 which nothing automatic is specified; and a clone push to a primary whose
-build is still deferred. Two things the clone drain's design asks for are out
-of reach of every suite in the tree: a host IO probe of a clone's destination
-namespace right after the latch, which would need a real host and a real CN,
-so CLD4's resume is asserted at the etcd level only, and only by the gateway
-suite; and a proof that the coordinator makes no agent call during a
-drain (CLD10).
+build is still deferred. Two things the clone drain's design asks for no
+suite does: a host IO probe of a clone's destination namespace right after
+the latch, which needs a real host and a real CN — the e2e suite has both
+and deletes a clone while a host holds a destination namespace, and reads
+that namespace only after the drain and the transfer's abort, never having
+suspended it, so no read checks the resume; such a stage would suspend that
+namespace before the delete and read it with the host's probe after — so
+CLD4's resume is
+asserted at the etcd level only, and only by the gateway suite; and a proof
+that the coordinator makes no agent call during a drain (CLD10).
 
 **What a pass means.** Exit status zero means every case's assertions held,
 each against the state of its own cluster, in a run that stops at the first
@@ -4647,9 +4737,12 @@ a conf nobody made concrete (RW9, RW14, AR1) — and never dials an agent.
 It is a front over the planting library `integtest/plant` (`layout.md`,
 Directory tree), whose calls the Go cases make directly, so what this
 paragraph says of a `workerctl` write holds of the library call behind it.
-Where the gateway's writes carry more than the record, its own are raw, so a
-case plants exactly the state it means to — save the node bookkeeping of the
-copies it plants: `put-clone` charges the extents of its clone meta group,
+Its `put-*` writes leave what the gateway's transaction would leave — the
+charges on the disk nodes and controller nodes with their capacity keys and
+revision bumps, `SpGlobal`, the primary's `settling` and the `CdcEntry`
+records — with the caller's placement and without the gateway's validation,
+so a case plants the state a gateway would have left where it says: among
+those charges, `put-clone` charges the extents of its clone meta group,
 which it places where the case says, to the DNs of the group's sides, and
 `put-migr` charges its destination DN the side's extents and the
 migration's units, as the gateway's creates do but never refusing a node
@@ -4657,9 +4750,11 @@ past its metadata area (`architecture.md`, Metadata units), so that a
 later release, the clone drain's among them, finds what it gives back.
 `put-migr` sets the migration's `cutover_pending` only when a case asks
 for it, which a case that means to stage what `CreateMigration` writes
-does. Its
-`set-epoch` is raw in the
-same way: it plants one `err_epoch`, on a cntlr, or on a leg or a side of a
+does. Of the `set-*` writes only `set-epoch` and `set-operator-in-charge`
+write one record and nothing else, the latter under its op's checks
+(below); every other `set-*` bumps the pool's revision too, save
+`set-free`, which maintains the capacity key. `set-epoch` is raw: it
+plants one `err_epoch`, on a cntlr, or on a leg or a side of a
 slice or of a clone's clone meta group, and touches
 neither a revision nor a `CdcEntry` nor a `settling` flag, so a case can
 stage the epoch an earlier owner or another observer would have left (AR10).
@@ -4822,7 +4917,12 @@ which no suite case sets, so no suite case runs RW13's count compare.
   interval plus the grace time after a crash; the grace time after a graceful
   stop or after a fence — both of which delete their registrations without
   waiting for their drain (CM5, VW8), so the window does not wait out the
-  drain's in-flight calls. Revision keys are durable, so nothing is lost:
+  drain's in-flight calls; and, on a worker that keeps running, the wait
+  for the shard workers it released, which holds the next owned set it is
+  sent back until they have stopped — up to `DefaultWorkerSyncupTimeout`,
+  plus `DefaultWorkerPushTimeout` when a bitmap push follows the in-flight
+  syncup (CM5) — so a shard owned only by that next set has no shard worker
+  meanwhile. Revision keys are durable, so nothing is lost:
   convergence is delayed, not skipped.
 * **After a pause, the first verdict waits a round.** Only rounds start
   background reads (`dnagent.md` SH29), so while no round drives an
@@ -4856,13 +4956,16 @@ which no suite case sets, so no suite case runs RW13's count compare.
   step can also count again a look its predecessor counted, since an
   observation made before the step can read as ending after the new
   loop's first round (RW23).
-* **The grown-chunk memo of BM5** (`architecture.md`, [D8]) is per worker; a
-  handoff can leave a shorter chunk at the agent (cost: extra copying, never
+* **The grown-chunk memo of BM5** (`architecture.md`, [D8]) lives as long as
+  its child: a handoff, and any restart of the child on the same worker
+  (RW14), can leave a shorter chunk at the agent (cost: extra copying, never
   correctness).
 * **A slice whose data list holds `MaxGrpCntPerSlice` groups never grows its
   data again** (AR6): every pass that finds the pool's data usage above
-  `low_water_mark_pct`, with no data grow pending, logs `reaction skipped`
-  (`grp_list_full`) and goes on (AR2). Nothing frees the list, and the pool
+  `low_water_mark_pct`, with no data grow pending and the slice's data not
+  covering its volumes, logs `reaction skipped` (`grp_list_full`) and goes
+  on (AR2); a covered slice logs `data_covered` instead. Nothing frees the
+  list, and the pool
   can run out of data space (`architecture.md`, Automatic reactions;
   `architecture.md`, Known limits).
 * **An operator's open repair keeps the worker from repairing its group.**
@@ -5238,13 +5341,20 @@ which no suite case sets, so no suite case runs RW13's count compare.
   a clone meta group in such a pool has neither, since `CreateMigration`
   refuses its side (`architecture.md`, Clones).
 * **Reaction inputs are one pass old**: `err_epoch`s are read fresh each pass,
-  but pool usage, group rows, the groups' whole flags and
+  but pool usage, group rows, the rows AR5's and AR7's refusals read, the
+  groups' whole flags and
   in-sync lists and the verdicts on repairs come from the primary's
   last Check reply, at most one interval old, which answers from an
   observation HL7 lets be up to its bound older. A reaction is late by at
-  most that much; never wrong, because the op re-validates, save AR8's gate
-  on the create, which no op can re-validate, since no STM sees a report
-  (AR8): a row that turned since that observation is read as it was,
+  most that much; never wrong where the op re-validates, which it does not
+  for what only a report holds, since no STM sees one: AR8's gate on the
+  create; AR5's and AR7's refusals, their row classes and the rows of the
+  last failover or primary replacement, which `model.Failover` and
+  `model.ReplaceCntlr` do not read again; and AR6's reading of the pool's
+  usage, which `model.GrowSlice` checks only against a pending grow — so a
+  stale reading there can bring a failover, a replacement or a grow that a
+  fresh one would refuse, or refuse one that a fresh one would allow (AR5,
+  AR6, AR7, AR8): a row that turned since that observation is read as it was,
   though the gate never reads an observation older than the snapshot's
   revision (AR8). AR8's healthy-leg test and AR12's
   retire timer read the groups' whole flags and in-sync lists, and the
@@ -5273,7 +5383,11 @@ which no suite case sets, so no suite case runs RW13's count compare.
   becomes the latest known info (HL5), so until a later round answers from
   an observation made after that round, normally one interval later, the
   pass reads pool usage and group rows from that older
-  observation, and AR6, which waits for no verdict, can act on that usage.
+  observation, and AR6, which waits for no verdict, can act on that usage;
+  so can AR12's retire timer, whose only freshness test compares the
+  observation's revision with the snapshot's and passes when no revision
+  moved during the pause, so in that first interval it can trust an old
+  whole flag and delete a retired leg, which cannot be undone.
 * **A disk node's own free count is compared, never reconciled** (RW13): a
   disagreement that two compares in a row see is logged, once until a
   compare agrees, and nothing corrects the record or the disk's volume
@@ -5308,10 +5422,14 @@ which no suite case sets, so no suite case runs RW13's count compare.
   `DnConf` or `CnConf` is absent (RW13); a `late observation` while an
   object's observations stay older than an interval (HL7); and a
   `health write failed` while a health write keeps failing (RW12). The sp
-  coordinator's pass adds its own,
-  once per pass rather than per object — AR5's `reaction skipped` with
-  `no candidate`, say, for as long as a primary due for failover has no
-  eligible candidate, or `shared_state` or `same_error` for as long as the
-  error that holds one lasts, and AR7's `shared_state` or `same_error` once
-  the primary it holds is due for replacement — beside AR5's, or alone while a
-  `primary_unhealthy` longer than `cntlr_unhealthy` has not yet run out.
+  coordinator's pass adds its own, in these amounts: failover's once per
+  pool — AR5's `reaction skipped` with `no candidate`, say, for as long as a
+  primary due for failover has no eligible candidate, or `shared_state` or
+  `same_error` for as long as the error that holds one lasts —, cntlr
+  replacement's once per cntlr — AR7's `shared_state` or `same_error` once
+  the primary it holds is due for replacement, beside AR5's, or alone while
+  a `primary_unhealthy` longer than `cntlr_unhealthy` has not yet run out —,
+  auto-grow's once per slice and kind (AR6), leg repair's once per candidate
+  leg (AR8), so a dead DN adds one record per affected leg per pass, a
+  repair's stage moves once per repair (AR11) and the retire timer's once
+  per retired leg (AR12).

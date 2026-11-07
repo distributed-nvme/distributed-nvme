@@ -1956,7 +1956,7 @@ EOF
 	assert_none_for 3 "a re-sync of the restarted fake (its revision is intact)" \
 		reqs_gt "$syncups" dn0 SyncupDn
 
-	stage 6 "PROVISIONING neither sets nor clears ([D15])"
+	stage 6 "PROVISIONING does not set err_epoch ([D15])"
 	set_behavior dn0 <<'EOF'
 {"objects": {"dn": {"rows": {"meta_info": {"status": "PROVISIONING"}}}}}
 EOF

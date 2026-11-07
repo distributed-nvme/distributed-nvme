@@ -778,8 +778,8 @@ func findCloneGroup(clone *pb.Clone, grpId uint64) *pb.Group {
 	return grp
 }
 
-// loadCloneForTwin reads one clone inside the caller's STM for a clone-keyed
-// op and applies the checks every one of them shares: the Clone exists, it is
+// loadCloneForTwin reads one clone inside the caller's STM for the two epoch
+// twins and applies the checks they share: the Clone exists, it is
 // the one the caller addressed, and it has a group. The record is keyed by
 // its name, so a clone deleted and re-created under the same name between
 // the caller's snapshot and this STM carries another clone_id, and none of
@@ -1169,8 +1169,8 @@ func SetCloneLegErrEpoch(
 }
 
 // SetCloneSideErrEpoch is SetSideErrEpoch's clone-keyed twin (MD6, HL2): one
-// side of a clone's clone meta group, looked up in both leg lists of the
-// group, by the rule and with the checks of SetCloneLegErrEpoch.
+// side of a clone's clone meta group, looked up in the group's leg_list, by
+// the rule and with the checks of SetCloneLegErrEpoch.
 func SetCloneSideErrEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,

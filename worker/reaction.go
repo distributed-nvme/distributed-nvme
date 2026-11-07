@@ -2402,9 +2402,11 @@ func legNeedsRepair(p *spPass, leg *pb.Leg) bool {
 // side's clock needs no epoch on the leg: an unprovisioned new leg is
 // neither connected nor probed, so only its side's health shows a disk node
 // that dies while it zeroes. A bare epoch asks for nothing: a fresh new leg
-// reads ERROR from its provisioned flip until the primary's connect to it
-// completes, and an abort read off that window would turn every worker's
-// repair into a loop of create, abort and cancel.
+// reads PENDING from its provisioned flip until its first probe completes
+// (cnagent.md CN11), and ERROR, with its epoch stamped at once, when its
+// connect ran before the side's export existed, and an abort read off that
+// window would turn every worker's repair into a loop of create, abort and
+// cancel.
 func newLegDue(p *spPass, leg *pb.Leg) bool {
 	if p.judged.legs[leg.GetLegId()] &&
 		reached(p.now, leg.GetErrEpoch(), p.th.GetLegUnhealthy()) {

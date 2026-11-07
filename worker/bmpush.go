@@ -172,8 +172,9 @@ type bmPusher struct {
 	running map[uint64]bool
 	next    map[uint64]*bmPlan
 	// memo is BM5: per (res_id, src_slice_idx, bm_idx) the etcd mod_revision
-	// of the chunk last pushed. In-memory and lost on a handoff, as [D8]
-	// accepts.
+	// of the chunk last pushed. In-memory and lost with its child — a handoff
+	// or a restart of the child on the same worker (dnv-worker.md RW14) — as
+	// [D8] accepts.
 	memo     map[bmMemoKey]int64
 	conn     *grpc.ClientConn
 	connHeld bool
@@ -213,11 +214,11 @@ func newBmPusher(p bmPusherParams) *bmPusher {
 // etcd mod_revision has advanced since — AppendCloneBitmap may grow a chunk
 // that keeps its pair (BM5).
 //
-// architecture.md [D8] keeps that memo per (clone_id, src_slice_idx, bm_idx)
-// and is clone-only; dnv-worker.md BM5 generalizes the key to (res_id,
-// src_slice_idx, bm_idx) so one implementation serves migrations too, and BM5
-// is the normative rule here. Either way the mod_revision needs no chunk value
-// to decide.
+// The memo is keyed by (res_id, src_slice_idx, bm_idx) for both kinds, the
+// res_id being the clone_id or the migr_id (dnv-worker.md BM5, the rule
+// architecture.md [D8] points to); for a migration the comparison of mod
+// revisions has no effect, since its chunks are immutable. The mod_revision
+// needs no chunk value to decide.
 //
 // The result is ascending (src_slice_idx, bm_idx) lexicographic (BM3):
 // load-bearing for a migration, whose chunks concatenate, and deterministic

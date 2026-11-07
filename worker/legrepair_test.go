@@ -1120,8 +1120,9 @@ func TestLegRepairAbortsWhenTheBadLegReturns(t *testing.T) {
 // a new leg asks for an abort only once its health epoch is leg_unhealthy
 // old, or its side's side_unhealthy old, each with this coordinator's own
 // unhealthy verdict on it; another leg of the group asks only on AR8's own
-// triggers. A fresh new leg reading ERROR from its provisioned flip until
-// the primary's connect completes, which stamps its epoch at once, aborts
+// triggers. A fresh new leg reading PENDING from its provisioned flip until
+// its first probe completes, or ERROR with its epoch stamped at once when its
+// connect ran before the side's export existed, aborts
 // nothing; an unprovisioned new leg, neither connected nor probed, aborts on
 // its side's clock alone when its DN dies while it zeroes. Two triggers that
 // hold at once name the first in AR8's order: the bad leg healthy again, then

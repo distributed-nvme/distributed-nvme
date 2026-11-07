@@ -182,9 +182,10 @@ func DrainCloneBm(
 // bumps SpRev (CLD9).
 //
 // The two go together and never separately, for the sp drain's slice-final
-// reason: model.LoadSp fetches clones by iterating `clone_name_list`, so a
-// dangling name would break every subsequent load, and a key left behind with
-// the name gone would be unreachable for ever.
+// reason: model.LoadSp skips a listed clone it does not find (MD3), so a
+// dangling name would not break a load but would stay listed for ever, since
+// the step that removes a name needs the Clone it names (CLD2, CLD9), and a
+// key left behind with the name gone would be unreachable for ever.
 //
 // The caller invokes it only when its snapshot scan found zero surviving chunk
 // keys, and that emptiness is STABLE even though an STM cannot range to

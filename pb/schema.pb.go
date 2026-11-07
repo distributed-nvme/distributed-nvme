@@ -3545,8 +3545,8 @@ type Cntlr struct {
 	// still primary, is re-enabled) until the worker first observes it
 	// clean in that role with its stack built — no row outside
 	// leg_id_to_leg, grp_id_to_md_raid and side_id_to_path PROVISIONING,
-	// or MISSING but for the sp_level's (dnv-worker.md HL2) — or a failover
-	// demotes it.
+	// or MISSING but for the sp_level's or the source fault's reason
+	// (dnv-worker.md HL2) — or a failover demotes it.
 	// AR5 holds a settling primary to cntlr_unhealthy instead of
 	// primary_unhealthy when that is the longer. Existing records decode
 	// false = settled.

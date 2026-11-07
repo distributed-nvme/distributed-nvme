@@ -4334,8 +4334,10 @@ therefore memoizes, per `res_id`, `src_slice_idx` and `bm_idx` and for
 both kinds, the etcd mod revision of the chunk it last pushed, and
 re-pushes a chunk whose mod revision advanced past it (`dnv-worker.md`
 BM5); the agent overwrites the stored file and re-applies whenever a
-received payload differs from it. If the worker changes (crash, shard
-re-ownership) the memo is lost, and a chunk that grows afterwards while
+received payload differs from it. If the child that pushes changes — a
+worker change (crash, shard re-ownership), or a restart of the child on the
+same worker (`dnv-worker.md` RW14) — the memo is lost, and a chunk that
+grows afterwards while
 staying in the acknowledged set may keep its shorter version at the agent
 — accepted: a source bitmap read when Clones says is a pure optimization
 that never affects correctness (Clones, Clone metadata durability); the
@@ -4764,7 +4766,8 @@ The four reactions:
   a grow whose new group still holds a provisioning leg completes by itself
   when the leg clears (`cnagent.md` CN13, [D15]). A data grow stops once
   the slice's data covers what the pool's thin devices can use
-  (`dnv-worker.md` AR6), so a pool never grows past its volumes. Auto-grow
+  (`dnv-worker.md` AR6), so no data grow starts past that cover, though the
+  last one can pass it by up to a group. Auto-grow
   is best-effort, so a pool can fill (Known limits).
 * **Cntlr replacement** (`dnv-worker.md` AR7): a cntlr that stays unhealthy
   — a non-primary one, or the primary of an SP with no failover candidate
@@ -6306,7 +6309,8 @@ document and the component documents cite it by its id.
   already-acknowledged chunk `(src_slice_idx, bm_idx)` up to its
   `CloneBmChunkBytes` ceiling; the worker re-pushes when it observes growth
   — the memo it keeps for that, and the key the memo is kept under, are
-  `dnv-worker.md` BM5 — and a worker change can leave the shorter version
+  `dnv-worker.md` BM5 — and a worker change, or a restart of the pushing
+  child (`dnv-worker.md` RW14), can leave the shorter version
   at the agent — accepted, because a source bitmap read when Clones says
   only ever costs extra copying, never correctness (Bitmap push protocol,
   Clone metadata durability).

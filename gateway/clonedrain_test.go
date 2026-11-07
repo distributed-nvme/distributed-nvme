@@ -96,9 +96,9 @@ func volCloneKeyCnt(env *volEnv, cloneName string) int {
 // nothing else. No chunk key is touched and the name stays in
 // `clone_name_list`.
 //
-// The name is the load-bearing half: model.LoadSp fetches clones by iterating
-// that list, so a latch that removed the name would break every subsequent
-// load of the SP — the sp drain's slice-final rule, applying verbatim.
+// The name is the load-bearing half: a latch that removed the name would
+// leave a Clone key no load lists and no drain step reaches — the sp drain's
+// slice-final rule, applying verbatim.
 func TestDeleteCloneLatchesOnly(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)

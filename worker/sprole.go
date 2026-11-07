@@ -2010,9 +2010,10 @@ func (w *spWorker) demoting() bool {
 
 // demotions is RW22's test, each demoted cntlr mapped to the revision of its
 // demotion: a cntlr whose child was last handed a primary plan and whose plan
-// in this fan-out is a standby's. A cntlr with no running child has no agent
-// this coordinator told it was the primary, and a cntlr replacement deletes
-// the old cntlr, so neither is a demotion.
+// in this fan-out is a standby's. A cntlr with no running child leaves the
+// coordinator nothing to send a demotion through, whatever an earlier child of
+// its told the agent, and a cntlr replacement deletes the old cntlr, so
+// neither is a demotion.
 func (w *spWorker) demotions(plan *spPlan) map[uint64]uint64 {
 	var demoted map[uint64]uint64
 	for cntlrId, next := range plan.cntlrs {
@@ -2292,10 +2293,10 @@ func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
 // cntlr its request first and holds the sides as well (holdDemotion).
 //
 // A re-resolution tick can also change a request without changing the SpRev
-// revision — a cntlr whose CnConf finally appeared changes every side's
-// standby list. The generic loop coalesces an unchanged desired state away
-// (RW3), so such a child is restarted instead: rare, and the alternative
-// would be a child driving a stale request until the next bump.
+// revision — a health write to a record the cntlr request carries (HL3). The
+// generic loop coalesces an unchanged desired state away (RW3), so such a
+// child is restarted instead, which only refreshes what its next syncup
+// sends: an agent already at that revision gets nothing (RW14).
 func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 	for key, child := range w.sides {
 		next, ok := plan.sides[key]
