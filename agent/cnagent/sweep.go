@@ -1268,8 +1268,9 @@ func (s *CnAgentServer) deleteThinIdByName(
 
 // sweepAfterFailedDeletes is CN14's sweep after a failed delete: each pool
 // that refused, or did not answer, an L7 delete message of this pass has its
-// thin ids swept in the same pass (sweepThinIds), under an RPC-delivered
-// request only, as the activation sweep is (the caller's reqFromRpc gate). A
+// thin ids swept in the same pass (sweepThinIds), under a request that
+// counts as delivered only, as the activation sweep is (the caller's
+// reqFromRpc gate). A
 // delete that fails after its volume is gone is otherwise never sent again:
 // no later pass lists the volume, and only a sweep of the pool's ids finds an
 // id that has no dm device. The sweep deletes no id that a thin volume of
@@ -1667,7 +1668,8 @@ func (s *CnAgentServer) unownedSrcNqns(
 // reads them again. A
 // converge passes none: it has just tried to put them back, and its rows say
 // how that went. The verdict also names each forced-start mark of a request
-// no SyncupCntlr of this process delivered (storedMarks; CN12, CN30).
+// that does not count as delivered (cntlrState.reqFromRpc; storedMarks;
+// CN12, CN30).
 func (s *CnAgentServer) sweepCntlr(
 	ctx context.Context,
 	st *cntlrState,

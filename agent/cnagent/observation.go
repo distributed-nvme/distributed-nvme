@@ -22,7 +22,9 @@ import (
 // lock, unless a gate refuses it against the object's held request
 // (markSyncup, markNodeSyncup); a SyncupCn newer than the CN's held request,
 // or for a CN the agent does not hold, marks the node too and cancels every
-// read, one at the held revision only the CN's own. A background converge
+// read, one at the held revision only the CN's own. While the store's latest
+// save failed, a syncup the gates admit marks its own object alone and
+// cancels no read. A background converge
 // marks its object before it waits for the object lock (markConverge). No
 // read starts while a mark of its object or of the node stands.
 // ---------------------------------------------------------------------------
@@ -242,8 +244,9 @@ func (s *CnAgentServer) storeCntlrObs(
 // markSyncup marks a SyncupCntlr of key in flight as it arrives, then cancels
 // the cntlr's running read, before the syncup waits for any lock (SH30): a
 // round in between starts no read the object lock might be handed to first.
-// The func it returns ends the mark; the syncup calls it once its converge
-// has stored its observation and its locks have gone.
+// The func it returns ends the mark; the syncup calls it once its locks have
+// gone, after its converge has stored its observation or the call has ended
+// without one.
 //
 // A request CN8's gates refuse against the request the agent holds for the
 // cntlr — its pointer, its revision (dnagent.md SH8) or its conf
@@ -261,6 +264,14 @@ func (s *CnAgentServer) storeCntlrObs(
 // costs that one syncup a wait for the read or one cancelled read. A cntlr
 // the agent does not hold, or a request the gates admit, is marked as
 // before.
+//
+// While the store's latest save failed (agent.Store.SaveFailing), a request
+// the gates admit marks the cntlr and cancels nothing, for the same reason:
+// a request refused for a failed save comes back every round too, at a
+// newer revision, and at the held revision while the cntlr's rounds answer
+// a non-zero code (dnagent.md SH5), and nothing knows before its save that
+// it will be refused. Its object lock waits for the cntlr's read, which runs
+// bounded commands (dnagent.md SH13).
 func (s *CnAgentServer) markSyncup(
 	key string,
 	req *pb.SyncupCntlrRequest,
@@ -277,7 +288,7 @@ func (s *CnAgentServer) markSyncup(
 		}
 	}
 	s.marks.BeginLocked(key, now)
-	if st != nil {
+	if st != nil && !s.store.SaveFailing() {
 		st.obs.CancelReadLocked()
 	}
 	return func() { s.endMark(key, false) }
@@ -285,8 +296,8 @@ func (s *CnAgentServer) markSyncup(
 
 // markNodeSyncup marks a SyncupCn's converge of the CN key as it arrives,
 // before the syncup waits for the node write lock (SH30), and returns what
-// ends the marks it made once the converge has stored its observation and the
-// lock has gone.
+// ends the marks it made once the lock has gone, after the converge has
+// stored its observation or the call has ended without one.
 //
 // A request of a revision newer than the one the agent holds for the CN, or
 // for a CN it does not hold, marks the CN and the node and cancels every
@@ -311,24 +322,40 @@ func (s *CnAgentServer) markSyncup(
 // marks nothing and cancels nothing, for markSyncup's reason: the held
 // revision only grows, so the gate refuses it again under the write lock.
 // SyncupCn has no other gate.
+//
+// While the store's latest save failed (agent.Store.SaveFailing), a request
+// the gate admits marks the CN alone and cancels nothing, whatever its
+// revision, for markSyncup's reason: the worker re-sends a request refused
+// for a failed save on every round at a newer revision, and at the held
+// revision while the CN's rounds answer a non-zero code (dnagent.md SH5),
+// and nothing knows before its save that it will be refused. Were each
+// newer re-send, or each one for a CN the agent does not hold, to mark the
+// node and cancel every read of the agent, the observations of the agent's
+// CNs and cntlrs would go too old (dnv-worker.md HL7), and were each
+// re-send at the held revision to cancel the CN's own read, the CN's would.
+// Its write lock waits for the reads that hold the node read lock when it
+// asks, as a re-send's at the held revision does.
 func (s *CnAgentServer) markNodeSyncup(key string, revision uint64) func() {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.cns[key]
+	var held uint64
 	if st != nil {
-		held := st.loadReq().GetRevision()
+		held = st.loadReq().GetRevision()
 		if agent.GateRevision(held, revision) != nil {
 			return func() {}
 		}
-		if revision == held {
-			s.marks.BeginLocked(key, now)
-			st.obs.CancelReadLocked()
-			return func() { s.endMark(key, false) }
-		}
+	}
+	s.marks.BeginLocked(key, now)
+	if s.store.SaveFailing() {
+		return func() { s.endMark(key, false) }
+	}
+	if st != nil && revision == held {
+		st.obs.CancelReadLocked()
+		return func() { s.endMark(key, false) }
 	}
 	s.marks.BeginNodeLocked()
-	s.marks.BeginLocked(key, now)
 	for _, st := range s.cns {
 		st.obs.CancelReadLocked()
 	}

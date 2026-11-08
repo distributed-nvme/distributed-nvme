@@ -1481,9 +1481,11 @@ RW4. **Round**, every interval (RW9):
    converge's observation carries the code of the converge's own reply,
    which leaves out what only a read's verdict names (`dnagent.md` SH28,
    SH29), so for such a condition a converge's clean observation only
-   pauses the re-sync, and while the condition lasts the re-sends fall to
-   every other round at most instead of stopping (the subsystem directory
-   a cn teardown leaves is such a condition, RW5);
+   pauses the re-sync, and while the condition lasts and the agent accepts
+   the re-sends, they fall to every other round at most instead of
+   stopping (the subsystem directory a cn teardown leaves is such a
+   condition, RW5); a re-send the agent refuses for a failed save stores
+   no observation (`dnagent.md` SH5, SH28), so it pauses nothing;
 6. re-arm the timer.
 
 RW5. **Syncup.** Build the request from the current inputs (RW13 to RW16),
@@ -1492,8 +1494,9 @@ reply — code zero, or `ReplyCodeLeftover` below — has its `*Info` processed
 (Health bookkeeping), its `bm_info` or `bm_info_list` diffed (Bitmap
 pushes) and its sp flips run (RW18, RW19). A REJECTED one
 (`ReplyCodeStaleRevision`, `ReplyCodeUnknownObject`, `ReplyCodeInvalidConf`,
-and any other non-zero code — below) is logged as `syncup rejected`
-(`code`, `details`) and left to the next round: unknown object means the
+`ReplyCodeSaveFailed`, and any other non-zero code — below) is logged as
+`syncup rejected` (`code`, `details`) and left to the next round: unknown
+object means the
 parent syncup has not landed yet — an sp worker's `SyncupSide` reaching the
 DN before the dn worker's `SyncupDn` listed the side, say, which is normal
 since the roles are independent (VW10) — and stale revision means the agent
@@ -1516,6 +1519,20 @@ copy of those rules and `model`'s have drifted apart (`dnagent.md`, Shared
 mechanism — package `agent`); one to `SyncupSide` means a stored group
 whose block counts claim more than its extents hold, the one bound the dn
 agent checks and RW14 does not, since checking it needs the extent size.
+A failed save (`ReplyCodeSaveFailed`) means the agent could not save the
+request to its local store and so refused it (`dnagent.md` SH5): the
+request did not become the agent's desired state and nothing was
+converged, and the reply carries the revision the agent still holds for
+the object, zero when it holds none. The agent answers the object's rounds
+from what it still holds (`dnagent.md` SH28), so a request at a revision
+the agent does not hold, or for an object it does not hold, is re-issued
+by each round (RW4 step 5) until a save succeeds, and one at the held
+revision by each round that answers a non-zero code. The main cause is a
+local store on a full or read-only disk, an operator event; a save that
+the agent's soft timeout cut off is another (`dnagent.md` SH4). It is
+logged at Error: a rejection neither sets nor clears a health epoch
+(HL1, HL2), so this record is where the worker's log shows the fault,
+once for each refused `Syncup*`.
 
 `ReplyCodeLeftover` is the one non-zero code that is **not** a rejection:
 the request was applied — the desired state is stored and every wanted
@@ -1551,17 +1568,18 @@ later read names the connection again RW4 step 5 issues nothing more for
 it; a round whose observation still names it re-issues the `Syncup*`,
 whose pass sets no second disconnect of that subsystem going while the
 first still runs. While all that is left is a subsystem directory whose
-last controller is gone, the re-issued `Syncup*`'s removing pass counts
-the connection gone and answers code zero, and the observation its
-converge stores carries that code (`dnagent.md` SH28): the round after it
-issues nothing and starts a read (`dnagent.md` SH29), whose verdict names
-the directory again, so the worker re-syncs on every other round at most
-and logs a `syncup result` with no `syncup leftover`; what names the
-connection then is the agent's own `sweep leftover` record of each read's
-verdict (`log.md`, Leftovers).
+last controller is gone and the agent accepts the re-issued `Syncup*`,
+its removing pass counts the connection gone and answers code zero, and
+the observation its converge stores carries that code (`dnagent.md`
+SH28): the round after it issues nothing and starts a read (`dnagent.md`
+SH29), whose verdict names the directory again, so the worker re-syncs on
+every other round at most and logs a `syncup result` with no
+`syncup leftover`; what names the connection then is the agent's own
+`sweep leftover` record of each read's verdict (`log.md`, Leftovers).
 
 The rejection handling does not enumerate the codes: only
-`ReplyCodeStaleRevision` raises the record to Error, every other value —
+`ReplyCodeStaleRevision` and `ReplyCodeSaveFailed` raise the record to
+Error, every other value —
 including one this worker does not know — is Info, and an unknown code
 counts as a rejection, because a reply this worker cannot interpret carries
 no verdict it may act on. Nothing is remembered either way (RW2): the
@@ -1588,7 +1606,9 @@ round's answer, and no lock rides on it: the round holds none the
 `Syncup*` needs, because the
 agent answers it from its latest observation and takes no lock for it
 (`dnagent.md` SH25), and the `Syncup*` cancels the object's background read
-itself before it waits for its locks (`dnagent.md` SH30). The next round
+itself before it waits for its locks, or, when a gate refuses it as it
+arrives or while the agent's latest save stands failed, leaves that read
+running (`dnagent.md` SH30). The next round
 opens a fresh stream, which the agent answers with the complete `*Info`
 again (`architecture.md`, Check streams). The sp coordinator is the one
 parent that hands a change on late, and on purpose: its cntlr children receive a
@@ -1692,8 +1712,8 @@ everything the loop could not finish — an unreachable agent, a rejected
 syncup, a leftover reply, a health write that did not commit, a missing
 cluster conf. A failed PUSH is the one thing NOT on that list, and not
 because it waits longer: it arms nothing at all (BM6), so no round retries
-it. It is re-planned only when the object's next `Syncup*` is issued for
-some other reason, from the agent's own acknowledged set (BM2).
+it. It is re-planned only when a `Syncup*` of the object issued for some
+other reason is accepted, from the agent's own acknowledged set (BM2).
 
 RW23. **New observations.** Each loop keeps the latest observation time it
 has seen for its object in a round's reply or a `Syncup*` reply
@@ -2307,9 +2327,10 @@ missed round on `DnConf.err_epoch` or `CnConf.err_epoch`:
   Legs are the exception: HL2's `Leg.err_epoch` clears on the primary's
   `RES_STATUS_OK` alone, so a `PROVISIONING` or `MISSING` leg row neither
   sets nor clears it;
-* a rejection code (stale revision, unknown object, invalid conf, or one this
-  worker does not know): neither set nor clear; it triggers a re-sync (RW4
-  step 5);
+* a rejection code (stale revision, unknown object, invalid conf, a failed
+  save, or one this worker does not know): neither set nor clear; on a
+  round it triggers a re-sync (RW4 step 5), and a `Syncup*` reply's is left
+  to the next round (RW5);
 * `agent_reply.code` equal to `ReplyCodeLeftover`: evaluated exactly as code
   zero — the rows above set it, clear it or do neither — and the re-sync of
   RW4 step 5 still runs. The request WAS applied, so the `*Info` is a full
@@ -2679,10 +2700,21 @@ when it answers from that reply's observation and that observation is not
 too old. After
 the re-send a round issues (RW4 step 5), and after an immediate syncup
 that abandons a round (RW6), the loop waits a whole interval from the
-reply (RW4 step 6), and no read of the object ends meanwhile: only a round
-starts one (`dnagent.md` SH29), and the syncup cancelled the read the
-round before it had started, if one still ran (`dnagent.md` SH30). So
-that round is late by the loop's own wait. After an immediate syncup sent
+reply (RW4 step 6), and as a rule no read of the object ends meanwhile:
+only a round starts one (`dnagent.md` SH29), and the syncup cancelled the
+read the round before it had started, if one still ran (`dnagent.md`
+SH30). So that round is late by the loop's own wait. A syncup cancels no
+read when a gate refuses it as it arrives, and whenever it arrives while
+the agent's latest save stands failed (`dnagent.md` SH30). Such a syncup
+of an object the agent holds waits for the read the round before it had
+started, so that read normally ends before the syncup's reply, and ends
+in the loop's wait when the syncup took the locks before it. When the
+agent refuses such a syncup, at a gate or for a failed save, the reply
+carries no observation (`dnagent.md` SH28), so the leave above, which is
+only for a round that answers from the reply's own observation, does not
+cover the next round: that round answers from the read, and when the
+read ended before the reply, its age exceeds the loop's own wait and it
+is logged as `late observation`. After an immediate syncup sent
 between rounds, the round timer, armed after the round before (RW8),
 keeps running, so the next round comes less than an interval after the
 reply and is seldom late at all. A converge in flight that the
@@ -2718,16 +2750,17 @@ Chunk addresses come from the snapshot's keys-only scans (`MigrBmIdx` and
 carried at slice index zero; chunk **values** are read one at a time
 (`Get`) when pushed, at the key the address names.
 
-BM2. **Diff.** After every `SyncupSide` reply: the missing set is
-`MigrBmIdx` of the migration minus `bm_info.bm_idx_list` (only when
-`bm_info.res_id` is the `migr_id`). After every `SyncupCntlr` reply on the
-primary: per `bm_info_list` entry (its `res_id` the `clone_id`), the
-missing set is `CloneBmIdx` of the clone minus `bm_info.chunk_id_list`. A
-clone reports `chunk_id_list` and leaves `bm_idx_list` unset — that field
-is migration-only — and both sides are compared by the WHOLE pair, so one
-`bm_idx` acknowledged on one source slice says nothing about the same
-`bm_idx` on another. A clone absent from the list, and every pair a listed
-`chunk_id_list` omits, has everything missing.
+BM2. **Diff.** After every accepted `SyncupSide` reply (RW5): the missing
+set is `MigrBmIdx` of the migration minus `bm_info.bm_idx_list` (only when
+`bm_info.res_id` is the `migr_id`). After every accepted `SyncupCntlr`
+reply on the primary: per `bm_info_list` entry (its `res_id` the
+`clone_id`), the missing set is `CloneBmIdx` of the clone minus
+`bm_info.chunk_id_list`. A clone reports `chunk_id_list` and leaves
+`bm_idx_list` unset — that field is migration-only — and both sides are
+compared by the WHOLE pair, so one `bm_idx` acknowledged on one source
+slice says nothing about the same `bm_idx` on another. A clone absent from
+the list, and every pair a listed `chunk_id_list` omits, has everything
+missing.
 
 BM3. **One in flight per migration/clone, ascending address,** each a
 `PushMigrBitmapRequest` or a `PushCloneBitmapRequest` that addresses one
@@ -2784,26 +2817,26 @@ whose value can no longer be read from etcd, or a non-zero
 not been applied yet, or the address is out of range for the object) — is
 logged as `bitmap push failed` (Log records) and **ends that plan**. The
 remaining parts are not sent, nothing is re-armed and no flag is raised
-anywhere. The next `Syncup*` reply for the object re-plans the diff (BM2)
-from the agent's OWN acknowledged set, which is the only place a diff has
-ever come from; a plan rebuilt from a remembered failure would be a plan
-built from the worker's memory instead of from the agent's state. The rest
-of the plan goes with the failed part because the parts are ordered (BM3)
-and a migration's chunks are interpretable only in sequence.
+anywhere. The next accepted `Syncup*` reply for the object re-plans the
+diff (BM2) from the agent's OWN acknowledged set, which is the only place a
+diff has ever come from; a plan rebuilt from a remembered failure would be
+a plan built from the worker's memory instead of from the agent's state.
+The rest of the plan goes with the failed part because the parts are
+ordered (BM3) and a migration's chunks are interpretable only in sequence.
 
 There is no push-specific timer and no push-driven re-sync. When the
 refusal was the agent's own, its `Check*` reply says so too — the same
 rejection code, or a stored revision behind the desired one — and RW4 step
-5 issues the `Syncup*` that re-plans within the round. When the push failed
-on the wire while the agent is healthy and at the desired revision, no
-re-sync is due and the chunk waits for the next `Syncup*` from any cause (a
-revision bump or a leftover; a handoff sends none, since a new child starts
-with a round, which sends a syncup only on a code or a revision, RW4), and
-so do the parts of a plan that a worker's failure cut short. That wait is
-accepted because the
-skip bitmap is an optimization: a chunk that has not arrived leaves its
-regions hydrated instead of discarded (`architecture.md`, Bitmap push
-protocol), which costs copying, never correctness.
+5 issues the `Syncup*` whose accepted reply re-plans within the round. When
+the push failed on the wire while the agent is healthy and at the desired
+revision, no re-sync is due and the chunk waits for the next accepted
+`Syncup*` from any cause (a revision bump or a leftover; a handoff sends
+none, since a new child starts with a round, which sends a syncup only on a
+code or a revision, RW4), and so do the parts of a plan that a worker's
+failure cut short. That wait is accepted because the skip bitmap is an
+optimization: a chunk that has not arrived leaves its regions hydrated
+instead of discarded (`architecture.md`, Bitmap push protocol), which costs
+copying, never correctness.
 
 ## Automatic reactions — `worker/reaction.go`
 
@@ -4263,7 +4296,8 @@ worker's (RW9), the sp fan-out's (RW14) or the pass's (AR1), whose
 cluster-conf gate a latched SP's drain wake-up applies too (SPD6) — once
 per distinct error and never once per round; `syncup result` every
 `Syncup*` reply or failure (RW5, RW10), and `syncup rejected` a rejecting
-code, at Error for a stale revision (RW5); `late observation` a round HL7
+code, at Error for a stale revision and a failed save (RW5);
+`late observation` a round HL7
 judges whose observation's age, counted from no earlier than the first
 round after a pause, exceeds one interval, or whose reply carries no
 answer time, too old or not, but for the leave HL7 gives the round right
@@ -5150,29 +5184,36 @@ which no suite case sets, so no suite case runs RW13's count compare.
   has run out, that fails over a primary that only waits for a member,
   though the next primary would wait the same.
 * **While a leftover keeps every round re-sending, a round's own report
-  counts in a run only when a background converge made it.** Each such
-  round answers from the object's latest observation: the one the
-  `Syncup*` before it stored, unless a background converge of the object
-  stored a later one between that reply and the round. The loop saw the
+  counts in a run only when a background converge made it, unless the
+  agent's saves fail.** While the agent's saves succeed, each such round
+  answers from the object's latest observation: the one the `Syncup*`
+  before it stored, unless a background converge of the object stored a
+  later one between that reply and the round. The loop saw the
   `Syncup*`'s observation on that reply, so a round that answers from it
   answers from no new one (RW23), and the `Syncup*` the round issues
   cancels the read the round starts (`dnagent.md` SH30), so no round
-  answers from a read. A cntlr's background converge is an attempt of the
-  cn agent's connect retry (`cnagent.md` CN10, CN18), which runs for a
-  cause of its own beside the re-sends. An
+  answers from a read while those saves succeed. A cntlr's background
+  converge is an attempt of the cn agent's connect retry (`cnagent.md`
+  CN10, CN18), which runs for a cause of its own beside the re-sends. An
   attempt's observation reaches the loop first in a round's reply, so the
   first round that answers from it answers from a new one, and its report
   counts in the cntlr's run (AR10; previous item). A primary's failover
   on its threshold therefore waits until the leftover clears unless its
-  rounds miss, answer from an observation too old or answer from such
-  attempts (AR10). The dn agent's background converges, its fence timer
+  rounds miss, answer from an observation too old, answer from such
+  attempts (AR10) or answer from reads while the agent's saves fail (end
+  of this item). The dn agent's background converges, its fence timer
   and its migration retry, each converge a side (`dnagent.md` DN12,
-  DN13), so a DN's count compare (RW13) waits until the leftover clears. A `Syncup*` reply's observation
-  counts for nothing because a converge's rows can read unhealthy while it
+  DN13), so a DN's count compare (RW13) waits until the leftover clears,
+  unless the agent's saves fail (end of this item). A `Syncup*` reply's
+  observation counts for nothing because a converge's rows can read unhealthy while it
   waits for a member (AR10); the case needs a leftover that lasts and an
   unhealthy primary at once. A leftover of a disk node or a controller
   node keeps no read of its sides or cntlrs from ending (`dnagent.md`
-  SH30).
+  SH30). A re-send the agent refuses for a failed save stores no
+  observation (`dnagent.md` SH5), and while the agent's latest save stands
+  failed a syncup cancels no read (`dnagent.md` SH30), so while the
+  agent's saves fail the rounds of its objects can answer from reads, and
+  those reports count.
 * **After a restart or a handoff, a leg its primary reads missing waits
   for a converge.** A primary's background read reads a leg whose
   device-mapper wrapper is absent — one it had to build while the leg's
@@ -5418,9 +5459,14 @@ which no suite case sets, so no suite case runs RW13's count compare.
   rejection (RW5; a leftover only a background read's verdict still names
   is paired with neither) — a stale revision after an etcd restore repeats its
   `syncup rejected` at Error every round until the revision in etcd reaches
-  the agent's; a `dn conf missing` or `cn conf missing` while the node's
+  the agent's, and a failed save repeats its own at Error on each round
+  that re-sends the refused request (RW5); a
+  `dn conf missing` or `cn conf missing` while the node's
   `DnConf` or `CnConf` is absent (RW13); a `late observation` while an
-  object's observations stay older than an interval (HL7); and a
+  object's observations stay older than an interval (HL7), which as a
+  rule comes once per round beside each `syncup rejected` of an object
+  the agent holds, a stale revision's and a failed save's among them,
+  since a refused reply carries no observation (HL7); and a
   `health write failed` while a health write keeps failing (RW12). The sp
   coordinator's pass adds its own, in these amounts: failover's once per
   pool — AR5's `reaction skipped` with `no candidate`, say, for as long as a

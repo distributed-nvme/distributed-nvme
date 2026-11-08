@@ -1803,8 +1803,10 @@ message SyncupDnReply {
     uint64 revision = 2;
     DnInfo dn_info = 3;
     ObsStamp obs_stamp = 4;
-    // When the agent saved the request to its local store; unset when it
-    // saved none.
+    // When the agent saved the request to its local store. Every reply that
+    // accepts the request carries it; one that refuses the request carries
+    // none, a refusal for a save that failed included (architecture.md,
+    // Live-state reporting).
     google.protobuf.Timestamp save_time = 5;
 }
 

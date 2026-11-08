@@ -1245,7 +1245,8 @@ func TestEveryCheckStreamSendsTheRoundTraceId(t *testing.T) {
 // Syncup* is sent. The round's reply would answer the request built from the
 // superseded revision, so the stream goes with the round and is never reused
 // (RW4 step 4); the agent's Syncup* cancels the object's background read
-// itself (dnagent.md SH30). The stub holds the round unanswered (holdRound),
+// itself, or, while the agent's latest save failed, waits for it, a bounded
+// wait (dnagent.md SH30). The stub holds the round unanswered (holdRound),
 // so only the drop's cancel ends it, not its CloseSend. The stub's SyncupDn
 // gives the stream a bounded wait to end — time that, in the synctest bubble,
 // passes only once nothing else can run — and records whether it did.
@@ -1371,8 +1372,8 @@ func TestSyncupLeftoverLogged(t *testing.T) {
 	if got := rec["dn_id"]; got == nil {
 		t.Fatalf("the record carries no ids: %v", rec)
 	}
-	// RW5's three rejection codes mean the request was NOT applied; a
-	// leftover reply was, so "syncup rejected" would be wrong about it.
+	// RW5's rejection codes mean the request was NOT applied; a leftover
+	// reply was, so "syncup rejected" would be wrong about it.
 	if got := len(h.logs.withMsg(msgSyncupRejected)); got != 0 {
 		t.Fatalf("%d 'syncup rejected' records for an accepted reply", got)
 	}
@@ -3056,7 +3057,7 @@ func testObservationsSeenResetOnAMove(t *testing.T) {
 // answered from beside the call's own trace id, and gives the time from the
 // agent's save of the request to the observation its reply carries, the
 // converge's length. An immediate syncup (RW6) names no observation, and a
-// reply that saved nothing gives no length.
+// reply that carries no save time gives no length.
 func TestSyncupResultNamesTheObservation(t *testing.T) {
 	synctest.Test(t, testSyncupResultNamesTheObservation)
 }
@@ -3104,7 +3105,7 @@ func testSyncupResultNamesTheObservation(t *testing.T) {
 		t.Errorf("converge_ms = %v, want 1500", rec["converge_ms"])
 	}
 
-	// An immediate syncup, whose reply saved nothing.
+	// An immediate syncup, whose reply carries no save time.
 	stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
 		return &pb.CheckDnReply{Revision: req.GetRevision()}
 	})
@@ -3123,7 +3124,7 @@ func testSyncupResultNamesTheObservation(t *testing.T) {
 			t.Errorf("an immediate syncup names an observation: %v", rec)
 		}
 		if _, ok := rec["converge_ms"]; ok {
-			t.Errorf("a reply that saved nothing gives a length: %v", rec)
+			t.Errorf("a reply that carries no save time gives a length: %v", rec)
 		}
 		return
 	}

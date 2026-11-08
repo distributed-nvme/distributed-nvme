@@ -7,9 +7,9 @@
 #   bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
 #       [--wipe] user1@ip1 user2@ip2
 #
-# Cases: smoke, zeroing, sides, migr_full, migr_bitmap, teardown, restart
-# (dnagent_integtest.md, Cases; for `teardown`, also architecture.md,
-# Teardown by sweep). Cleanup runs
+# Cases: smoke, zeroing, sides, migr_full, migr_bitmap, teardown, restart,
+# store_full (dnagent_integtest.md, Cases; for `teardown`, also
+# architecture.md, Teardown by sweep). Cleanup runs
 # unconditionally at the start and, on success only, at the end: a failing run
 # leaves every dm/nvmet object and both agent logs in place and dumps
 # diagnostics (dnagent_integtest.md, Teardown and cleanup).
@@ -85,6 +85,12 @@ ZERO_TIMEOUT=120
 # which the smoke case's export made by hand reads old (dnagent.md DN6).
 ORPHAN_GRACE=30
 
+# The size of the tmpfs the store_full case puts dn1's local store on. Every
+# file with data on a tmpfs takes at least a page: each store file, and the
+# temp file a save writes beside its target (common.AtomicWriteTmpInfix). The
+# case's few files need a few pages, and one file fills the rest at once.
+STORE_TMPFS_SIZE=1m
+
 # Polling budget for the end of a migration source's cutover grace window
 # (architecture.md, Migration, src step 2), which migr_full's lost source
 # waits for: common.SuspendSeconds from the cutover, and the converge that
@@ -127,8 +133,13 @@ CASE="setup"
 TRACE="it-setup"
 STAGE="(startup)"
 SETUP_DONE=0
+# The VM whose local store the store_full case moves onto a tmpfs: set from
+# that agent's stop until the restore stage has moved the store back, so that
+# a failure in between takes off any tmpfs left there (release_store_tmpfs);
+# empty otherwise.
+STORE_VM=""
 
-CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart)
+CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart store_full)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -279,6 +290,7 @@ on_exit() {
 		log ""
 		log "########## diagnostics (dnagent_integtest.md, Teardown and cleanup) ##########"
 		diagnostics || true
+		release_store_tmpfs
 		log ""
 		log "debris left in place on both VMs; failing stage '$STAGE'"
 		log "pull records with: jq 'select(.trace_id==\"$TRACE\")' $WORK/agent.log"
@@ -491,6 +503,8 @@ vm_helper_source() {
 # the opposite (see residue): an assertion that wants their output empty must
 # never read a tool that failed as a node that is clean.
 WORK=/var/tmp/dnv-integtest
+# STORE is the agent's local store, the --local-store of start_agent.
+STORE=$WORK/store
 NVMET=/sys/kernel/config/nvmet
 NQN_PREFIX=nqn.2024-01.io.dnv
 # PIN_PREFIX is where pin_dev records its holders' pids: outside $WORK,
@@ -1063,6 +1077,178 @@ kill_pins() {
 	return 0
 }
 
+# --- the local store on a tmpfs (dnagent_integtest.md, Cases, store_full) ---
+
+# agent_stop stops this node's dn agent gracefully (dnagent.md SH27) and
+# prints stopped once none runs, or STILL_RUNNING, failing, when one outlives
+# the wait.
+agent_stop() {
+	local i
+	pkill -x dnv-agent >/dev/null 2>&1
+	for ((i = 0; i < 30; i++)); do
+		if ! pgrep -x dnv-agent >/dev/null 2>&1; then
+			echo stopped
+			return 0
+		fi
+		sleep 0.5
+	done
+	echo STILL_RUNNING
+	return 1
+}
+
+# store_copy <from> <to> copies the files of one store directory, the fill
+# aside, into another. The store holds plain files alone.
+store_copy() {
+	local f
+	for f in "$1"/*; do
+		[ -f "$f" ] || continue
+		[ "${f##*/}" = fill ] && continue
+		cp -p "$f" "$2/" || return 1
+	done
+	return 0
+}
+
+# store_tmpfs_mount <size> puts the local store on a tmpfs of <size> that
+# holds a copy of the store's files, so the agent started over it holds what
+# it held before, and prints the type of the file system mounted there. The
+# agent must be stopped: no save may run while the files move.
+store_tmpfs_mount() {
+	local copy
+	if pgrep -x dnv-agent >/dev/null 2>&1; then
+		echo "store_tmpfs_mount: an agent runs on this node" >&2
+		return 1
+	fi
+	if mountpoint -q "$STORE"; then
+		echo "store_tmpfs_mount: $STORE is a mount point already" >&2
+		return 1
+	fi
+	copy=$(mktemp -d "$WORK/store-copy.XXXXXX") || return 1
+	store_copy "$STORE" "$copy" || return 1
+	mount -t tmpfs -o "size=$1,mode=0755" dnv-it-store "$STORE" || return 1
+	store_copy "$copy" "$STORE" || return 1
+	rm -rf "$copy"
+	awk -v d="$STORE" '$2 == d {t = $3} END {print t}' /proc/self/mounts
+}
+
+# store_probe prints yes when one byte can be written to a new file of the
+# store, no when the write fails, and leaves no file behind. The bash
+# builtin reports a failed write in its status.
+store_probe() {
+	if printf x 2>/dev/null >"$STORE/probe"; then
+		echo yes
+	else
+		echo no
+	fi
+	rm -f "$STORE/probe"
+}
+
+# store_fill writes one file, $STORE/fill, a page at a time until a write
+# fails, and prints full once a probe write fails too, or what is left. The
+# count only bounds a dd that would go on past a failed write; dd takes no
+# iflag= or oflag= (the dd rule at the head of this script).
+store_fill() {
+	local pages
+	if ! mountpoint -q "$STORE"; then
+		echo "store_fill: no file system is mounted at $STORE" >&2
+		return 1
+	fi
+	pages=$(df -Pk "$STORE" | awk 'NR == 2 {print int($2 / 4) + 1}')
+	[ -n "$pages" ] || return 1
+	dd if=/dev/zero of="$STORE/fill" bs=4096 count="$pages" status=none \
+		2>/dev/null
+	if [ "$(store_probe)" = no ]; then
+		echo full
+	else
+		echo "not full: a probe write succeeded," \
+			"$(df -Pk "$STORE" | awk 'NR == 2 {print $4}')K free"
+	fi
+}
+
+# store_unfill removes the fill and prints room once a probe write succeeds.
+store_unfill() {
+	rm -f "$STORE/fill" || return 1
+	if [ "$(store_probe)" = yes ]; then
+		echo room
+	else
+		echo "no room: a probe write failed with the fill removed"
+	fi
+}
+
+# store_sums prints every file of the local store but the fill with its
+# sha256, one a line in name order: a request whose save failed leaves it as
+# it was, and a save's temp file left behind shows as a line of its own.
+store_sums() {
+	local f
+	for f in "$STORE"/*; do
+		[ -e "$f" ] || continue
+		[ "${f##*/}" = fill ] && continue
+		sha256sum "$f" || return 1
+	done
+}
+
+# store_tmpfs_restore moves the local store back to its disk: the files the
+# tmpfs holds, the fill aside, replace the disk's, and the tmpfs comes off.
+# The agent must be stopped. Prints restored.
+store_tmpfs_restore() {
+	local keep f
+	if pgrep -x dnv-agent >/dev/null 2>&1; then
+		echo "store_tmpfs_restore: an agent runs on this node" >&2
+		return 1
+	fi
+	if ! mountpoint -q "$STORE"; then
+		echo "store_tmpfs_restore: no file system is mounted at $STORE" >&2
+		return 1
+	fi
+	keep=$(mktemp -d "$WORK/store-copy.XXXXXX") || return 1
+	store_copy "$STORE" "$keep" || return 1
+	timeout 10 umount "$STORE" || return 1
+	for f in "$STORE"/*; do
+		[ -e "$f" ] || continue
+		rm -f "$f" || return 1
+	done
+	store_copy "$keep" "$STORE" || return 1
+	rm -rf "$keep"
+	echo restored
+}
+
+# store_tmpfs_release takes the tmpfs off the local store on a failed run's
+# way out (dnagent_integtest.md, Teardown and cleanup): the agent stops
+# first, killed when it outlives the wait, and stays stopped; then
+# unmount_work.
+store_tmpfs_release() {
+	if ! mountpoint -q "$STORE"; then
+		echo "no file system is mounted at $STORE"
+		return 0
+	fi
+	if ! agent_stop >/dev/null; then
+		pkill -9 -x dnv-agent >/dev/null 2>&1
+		sleep 1
+	fi
+	unmount_work
+	if mountpoint -q "$STORE"; then
+		echo "$STORE is still a mount point"
+		return 1
+	fi
+	echo "$STORE is back on its disk; the agent is stopped"
+}
+
+# unmount_work unmounts every file system mounted at or under $WORK, the
+# deepest first. Only the store_full case mounts one, its tmpfs over the
+# local store, and a run that failed or crashed can leave it: rm -rf cannot
+# remove a mount point, so the next run's agent would keep its store on that
+# small tmpfs. Every agent must be gone first, as none then holds a file
+# there. A tmpfs does no IO on unmount, and one still busy past the bounded
+# umount is detached lazily, which does not wait for its users.
+unmount_work() {
+	local mnt
+	for mnt in $(awk -v w="$WORK" '$2 == w || index($2, w "/") == 1 {print $2}' \
+		/proc/self/mounts | sort -r); do
+		timeout 10 umount "$mnt" >/dev/null 2>&1 ||
+			timeout 10 umount -l "$mnt" >/dev/null 2>&1
+	done
+	return 0
+}
+
 # --- teardown ---------------------------------------------------------------
 
 # agent_dm_names and dm_kind_names fail when `dmsetup ls` does, like the
@@ -1230,6 +1416,9 @@ cleanup() {
 		wipefs -a "$dev" >/dev/null 2>&1
 		losetup -d "$dev" >/dev/null 2>&1
 	done
+	# A tmpfs over the local store comes off before the work directory goes
+	# (see unmount_work); the agents went first.
+	unmount_work
 	rm -rf "$WORK"
 	echo "cleaned"
 	return 0
@@ -1422,6 +1611,9 @@ diag() {
 	ls -R "$NVMET/ports" "$NVMET/subsystems" 2>/dev/null
 	echo "--- nvme list-subsys ---"
 	subsys_json
+	echo "--- local store ---"
+	awk -v w="$WORK" 'index($2, w "/") == 1' /proc/self/mounts
+	ls -la "$STORE" 2>/dev/null
 	return 0
 }
 
@@ -1483,14 +1675,29 @@ cleanup_all() {
 	for pid in "${pids[@]}"; do wait "$pid" || true; done
 }
 
-# DIAG_SIDES holds "dnidx sp leg side" for every side a migration case has
+# release_store_tmpfs takes store_full's tmpfs off the local store on the
+# failure path, after the dump has listed the store's files
+# (dnagent_integtest.md, Teardown and cleanup). The agent over it stops and
+# stays stopped: one started over the store on the disk would converge the
+# older request that store holds and remove the debris the failing run
+# leaves.
+release_store_tmpfs() {
+	[ -n "$STORE_VM" ] || return 0
+	log ""
+	log "=== vm$STORE_VM: the local store comes off its tmpfs, and dn$STORE_VM's agent stays stopped"
+	helper_ok "$STORE_VM" store_tmpfs_release >&2
+	STORE_VM=""
+}
+
+# DIAG_SIDES holds "dnidx sp leg side" for every side the running case has
 # reached so far, so the failure dump of dnagent_integtest.md,
 # Teardown and cleanup, can end with the last get-side-info of every
-# involved side — the one view of a failure that names the migration's own
-# resources (clone, target, per-CN maps) instead of the node's raw dm/nvmet
-# state. An info read answers from memory, so it shows the side as the last
-# converge or read left it, and it answers even while a converge is wedged.
-# The migration cases fill it as they set each side up (a side that does not
+# involved side — the one view of a failure that names a side's own
+# resources (for a migration its clone, target and per-CN maps) instead of
+# the node's raw dm/nvmet state. An info read answers from memory, so it
+# shows the side as the last converge or read left it, and it answers even
+# while a converge is wedged. The zeroing, migration, teardown and
+# store_full cases fill it as they set each side up (a side that does not
 # exist yet has nothing to report), and clear it once the case has torn its
 # sides down again.
 DIAG_SIDES=()
@@ -1567,7 +1774,7 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid wipefs ss; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid wipefs ss mountpoint; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# The agent hardcodes the configfs path and neither mounts nor
 		# modprobes; the harness does both here and nothing else.
@@ -1686,11 +1893,12 @@ assert_no_residue() { # sp
 # request itself.
 #
 # Only code 4 is tolerated in between. Every other non-zero code is a refusal
-# (stale revision, invalid conf, unknown object) that repeating cannot fix, so
-# it dies immediately rather than after the whole budget. The first reply is
-# logged with its details: whether the very first pass was already clean or
-# reported the leftover the design predicts is the one thing about this loop
-# worth reading afterwards, and neither outcome is a failure.
+# (stale revision, unknown object, invalid conf, a failed save), and it dies
+# at once rather than after the whole budget: a refusal ran no pass of the
+# drop, and the loop waits out only the leftover that a pass reports. The
+# first reply is logged with its details: whether the very first pass was
+# already clean or reported the leftover the design predicts is the one thing
+# about this loop worth reading afterwards, and neither outcome is a failure.
 dn_drop_until_clean() { # dnidx secs
 	local idx=$1 secs=$2 out code details deadline first=1
 	deadline=$((SECONDS + secs))
@@ -3790,6 +3998,251 @@ case_restart() {
 	done
 	assert_no_residue "$sp"
 	sshv_ok "$cnvm" "rm -f $WORK/pattern-restart.bin"
+	rm -rf "$snap"
+}
+
+# ---------------------------------------------------------------------------
+# Case F — store_full (dnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+#
+# A request whose save to the local store fails is refused (dnagent.md SH5),
+# on a real store: dn1's store moves onto a small tmpfs, and one file fills it
+# until a write fails. dn2 and vm2 take no part. Every request the case
+# expects refused for its save is sent at a revision above the one the agent
+# holds for its object, so the stale-revision gate cannot be what refuses it,
+# and assert_save_refused reads the failed save in the reply's details.
+
+# stop_agent <idx> stops one VM's agent gracefully (dnagent.md SH27) and fails
+# the stage when it outlives the wait: a survivor keeps the endpoint, so the
+# agent started next could not serve.
+stop_agent() {
+	assert_eq "$(helper "$1" agent_stop)" stopped "dn$1's agent stop"
+}
+
+# assert_save_refused <json> <revision> <label> holds a reply the agent
+# refused for a failed save, whose code (common.ReplyCodeSaveFailed) ctl's
+# --expect-code has matched: it carries the revision the agent still holds,
+# and its details carry the save's error, on the full tmpfs no space left on
+# the device (agent.SaveFailedReply).
+assert_save_refused() {
+	local details
+	assert_eq "$(jq_of "$1" '.revision // "0"')" "$2" "$3: the reply's revision"
+	details=$(jq_of "$1" '.agent_reply.details // ""')
+	case "$details" in
+	*"saving the request failed"*"no space left on device"*) ;;
+	*) die "$3: the details name no save that failed on a full store: $details" ;;
+	esac
+}
+
+# store_snapshot <dir> <pre|post> <dnidx> <sp> <aleg> <aside> <bleg> <bside>
+# writes the case's three snapshots across its restart, each a fresh round
+# with the info: the disk node and its two sides.
+store_snapshot() {
+	local dir=$1 when=$2 idx=$3 sp=$4
+	ctl "$idx" check-dn --fresh --revision "${DNREV[$idx]}" >"$dir/dn.$when.raw"
+	ctl "$idx" check-side --fresh --sp "$sp" --leg "$5" --side "$6" \
+		>"$dir/side_a.$when.raw"
+	ctl "$idx" check-side --fresh --sp "$sp" --leg "$7" --side "$8" \
+		>"$dir/side_b.$when.raw"
+}
+
+case_store_full() {
+	CASE=store_full
+	local dn=1 sp=0x71 aleg=0x1 aside=0x11 bleg=0x2 bside=0x12 cn=0x21
+	local area=$((DATA_SIZE / EXTENT_SIZE))
+	# The disk counts as in the zeroing case (dnagent.md DN18).
+	local counts='.dn_info.disk_counts | "\(.total_ext_cnt // "0") \(.free_ext_cnt // "0") \(.side_rec_cnt // "0") \(.side_recs_match // false)"'
+	# As the restart case's: epochs and the reply's stamp differ by nature.
+	local norm='del(.obs_stamp) | walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
+	local out got sums res provrev arev brev refrev bnqn name when snap muts
+	bnqn=$(side_to_cn_nqn "$CLUSTER" "$sp" "$bleg" "$cn")
+	snap=$(mktemp -d)
+	DIAG_SIDES=()
+
+	stage tmpfs "dn$dn's local store moves onto a small tmpfs, and the agent starts over it"
+	stop_agent "$dn"
+	# From here a failure takes the tmpfs off (release_store_tmpfs).
+	STORE_VM=$dn
+	assert_eq "$(helper "$dn" "store_tmpfs_mount $STORE_TMPFS_SIZE")" tmpfs \
+		"the file system of dn$dn's local store"
+	start_agent "$dn"
+	out=$(ctl "$dn" get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "store_full dn$dn size"
+	# The tmpfs holds a copy of the store: the agent holds what it held.
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$dn]}" \
+		"dn$dn's revision over the tmpfs"
+
+	stage sidea "SyncupDn names side A, which provisions and exports"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE" --side "$sp:$aleg:$aside")
+	assert_dn_info_ok "$out" "store_full syncup-dn with side A"
+	diag_add_side "$dn" "$sp" "$aleg" "$aside"
+	bump_rev "$dn"
+	provrev=${REV[$dn]}
+	bump_rev "$dn"
+	arev=${REV[$dn]}
+	sync_side_2phase "$dn" "$provrev" "$arev" "$sp" "$aleg" "$aside" \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	assert_ok "$SYNC_SIDE_REPLY" ".side_info.side_dev_info.status" \
+		"store_full side A side_dev"
+	assert_cn_ok "$SYNC_SIDE_REPLY" cn_id_to_nvmeof "$cn" "store_full side A"
+	converge_check "$dn" "$sp" "$aleg" "$aside" "$arev"
+
+	stage fill "one file fills the tmpfs until a write fails"
+	assert_eq "$(helper "$dn" store_fill)" full "dn$dn's local store after the fill"
+	sums=$(helper "$dn" store_sums)
+
+	stage refuse "a SyncupDn adding side B is refused for its failed save"
+	bump_rev "$dn"
+	refrev=${REV[$dn]}
+	out=$(ctl "$dn" syncup-dn --revision "$refrev" \
+		--extent-size "$EXTENT_SIZE" \
+		--side "$sp:$aleg:$aside" --side "$sp:$bleg:$bside" --expect-code 5)
+	assert_save_refused "$out" "${DNREV[$dn]}" "the SyncupDn adding side B"
+	assert_eq "$(helper "$dn" store_sums)" "$sums" \
+		"dn$dn's store files after the refused SyncupDn"
+	# A plain round answers from the latest observation, and a refused
+	# request stores none.
+	out=$(ctl "$dn" check-dn --revision "$refrev")
+	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$dn]}" \
+		"the check round after the refused SyncupDn"
+
+	stage unknown "side B's SyncupSide is an unknown object, and nothing of B is built"
+	bump_rev "$dn"
+	ctl "$dn" syncup-side --revision "${REV[$dn]}" \
+		--sp "$sp" --leg "$bleg" --side "$bside" --provisioned=false \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite \
+		--expect-code 2 >/dev/null
+	ctl "$dn" check-side --fresh --sp "$sp" --leg "$bleg" --side "$bside" \
+		--expect-code 2 >/dev/null
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$dn]}" \
+		"dn$dn's revision in a read made after the refusal"
+	assert_eq "$(jq_of "$out" "$counts")" "$area $((area - 1)) 1 true" \
+		"dn$dn's counts (total, free, side records, match) with side A alone"
+	res=$(helper "$dn" "residue $(hex16 "$sp")")
+	got=$(printf '%s\n' "$res" | awk -F- -v s="$(hex16 "$bside")" '$6 == s')
+	[ -z "$got" ] || die "side B has dm devices after its refusals: $got"
+	assert_eq "$(helper "$dn" "subsys_present '$bnqn'")" no \
+		"side B's export after its refusals"
+	assert_eq "$(helper "$dn" store_sums)" "$sums" \
+		"dn$dn's store files after side B's SyncupSide"
+
+	stage freed "with the fill removed, the refused SyncupDn sent again is accepted"
+	assert_eq "$(helper "$dn" store_unfill)" room \
+		"dn$dn's local store with the fill removed"
+	# The same request at its own revision, as a worker's next round sends a
+	# refused one again while the desired state stays the same (dnv-worker.md
+	# RW4, RW5): still above the revision the agent holds, though side B's
+	# SyncupSide has taken a later one.
+	DNREV[$dn]=$refrev
+	out=$(ctl "$dn" syncup-dn --revision "$refrev" \
+		--extent-size "$EXTENT_SIZE" \
+		--side "$sp:$aleg:$aside" --side "$sp:$bleg:$bside")
+	assert_dn_info_ok "$out" "store_full syncup-dn with sides A and B"
+	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$dn]}" \
+		"the accepted SyncupDn's revision"
+	[ -n "$(jq_of "$out" '.save_time // ""')" ] ||
+		die "the accepted SyncupDn's reply carries no save time"
+
+	stage sideb "side B provisions and exports"
+	diag_add_side "$dn" "$sp" "$bleg" "$bside"
+	bump_rev "$dn"
+	provrev=${REV[$dn]}
+	bump_rev "$dn"
+	brev=${REV[$dn]}
+	sync_side_2phase "$dn" "$provrev" "$brev" "$sp" "$bleg" "$bside" \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	assert_ok "$SYNC_SIDE_REPLY" ".side_info.side_dev_info.status" \
+		"store_full side B side_dev"
+	assert_cn_ok "$SYNC_SIDE_REPLY" cn_id_to_nvmeof "$cn" "store_full side B"
+	converge_check "$dn" "$sp" "$bleg" "$bside" "$brev"
+
+	stage refill "filled again, a side's and the node's requests are refused and nothing moves"
+	assert_eq "$(helper "$dn" store_fill)" full "dn$dn's local store after the second fill"
+	sums=$(helper "$dn" store_sums)
+	# Sorted: the comparisons below read the set, not the listing's order.
+	res=$(helper "$dn" "residue $(hex16 "$sp")" | sort)
+	for name in "$(dn_side_name "$CLUSTER" "${DNID[$dn]}" "$sp" "$aside")" \
+		"$(dn_side_name "$CLUSTER" "${DNID[$dn]}" "$sp" "$bside")" \
+		"$(side_to_cn_nqn "$CLUSTER" "$sp" "$aleg" "$cn")" "$bnqn"; do
+		grep -qxF -- "$name" <<<"$res" || die "dn$dn holds no $name"
+	done
+	bump_rev "$dn"
+	out=$(ctl "$dn" syncup-side --revision "${REV[$dn]}" \
+		--sp "$sp" --leg "$aleg" --side "$aside" --provisioned=true \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite \
+		--expect-code 5)
+	assert_save_refused "$out" "$arev" "side A's SyncupSide"
+	# A request that drops side B: refused, it removes nothing.
+	bump_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE" --side "$sp:$aleg:$aside" \
+		--expect-code 5)
+	assert_save_refused "$out" "${DNREV[$dn]}" "the SyncupDn dropping side B"
+	assert_eq "$(helper "$dn" store_sums)" "$sums" \
+		"dn$dn's store files after the refusals"
+	assert_eq "$(helper "$dn" "residue $(hex16 "$sp")" | sort)" "$res" \
+		"what dn$dn holds of sp $sp after the refusals"
+
+	stage restart "the agent restarts over the full store, and the node is as the last accepted requests left it"
+	store_snapshot "$snap" pre "$dn" "$sp" "$aleg" "$aside" "$bleg" "$bside"
+	stop_agent "$dn"
+	sshv "$dn" "mv $WORK/agent.log $WORK/agent.pre-store-restart.log"
+	start_agent "$dn"
+	out=$(ctl "$dn" get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "store_full dn$dn size after the restart"
+	store_snapshot "$snap" post "$dn" "$sp" "$aleg" "$aside" "$bleg" "$bside"
+	for name in dn side_a side_b; do
+		for when in pre post; do
+			"$JQ" "$norm" "$snap/$name.$when.raw" >"$snap/$name.$when.json"
+		done
+		diff -u "$snap/$name.pre.json" "$snap/$name.post.json" >&2 ||
+			die "store_full: $name differs across the restart"
+	done
+	assert_eq "$("$JQ" -r '.revision // "0"' "$snap/dn.post.raw")" \
+		"${DNREV[$dn]}" "dn$dn's revision after the restart"
+	assert_eq "$("$JQ" -r '.revision // "0"' "$snap/side_a.post.raw")" \
+		"$arev" "side A's revision after the restart"
+	assert_eq "$("$JQ" -r '.revision // "0"' "$snap/side_b.post.raw")" \
+		"$brev" "side B's revision after the restart"
+	assert_eq "$(helper "$dn" "residue $(hex16 "$sp")" | sort)" "$res" \
+		"what dn$dn holds of sp $sp after the restart"
+	# The new log covers the startup reconcile and the post snapshot's reads.
+	muts=$(helper "$dn" mutations)
+	[ -z "$muts" ] ||
+		die "store_full: dn$dn mutated after the restart:"$'\n'"$muts"
+
+	stage teardown "with the fill removed, an empty side list tears both sides down"
+	assert_eq "$(helper "$dn" store_unfill)" room \
+		"dn$dn's local store with the fill removed again"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE")
+	assert_dn_info_ok "$out" "store_full teardown syncup-dn"
+	assert_no_residue "$sp"
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+	assert_eq "$(jq_of "$out" "$counts")" "$area $area 0 true" \
+		"dn$dn's counts (total, free, side records, match) after the teardown"
+	DIAG_SIDES=()
+
+	stage restore "dn$dn's local store moves back to its disk, and the agent starts over it"
+	stop_agent "$dn"
+	assert_eq "$(helper "$dn" store_tmpfs_restore)" restored \
+		"dn$dn's local store back on its disk"
+	STORE_VM=""
+	start_agent "$dn"
+	out=$(ctl "$dn" get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "store_full dn$dn size on its disk store"
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$dn]}" \
+		"dn$dn's revision over its disk store"
 	rm -rf "$snap"
 }
 

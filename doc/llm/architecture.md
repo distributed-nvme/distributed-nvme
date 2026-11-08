@@ -272,8 +272,9 @@ always means the SP's `DmPoolConf.data_block_size`.
   one leg they name, for an array md will not start by itself: the
   group's **forced-start mark**, `Group.forced_start`, holds the named leg
   and the `SpRev` revision its write committed until it is cleared or
-  withdrawn, and the primary acts on it while it stands (Repairs,
-  `ForceStartGroup`; Repair, Forced start).
+  withdrawn, and the primary acts on it while it stands, from a request
+  that counts as delivered (Repairs, `ForceStartGroup`; Repair, Forced
+  start).
 * **operator in charge** — An operator's take-over of an md-raid1 group's
   repair from the sp worker: the group's flag, `Group.operator_in_charge`,
   which the operator sets and clears, keeps the worker from creating a
@@ -1163,22 +1164,24 @@ SideToCn, `3` MigrSrc, `4` Xfer. The fields of an NQN are joined by ":".
 
 ### Agent local-store paths
 
-The agent's persistent state (Common agent rules) lives as flat protobuf
+The agent's persistent state (Common agent rules, Local store) lives as flat protobuf
 files under the `--local-store` directory, {prefix} below (default
 `DefaultLocalStorPrefix`, a directory that must exist before the agent
 starts, `dnagent.md` SH3). The default is not /var/tmp, where the stock
 tmpfiles rule of some distributions deletes files that nothing has touched
-for weeks: a store file is written only when a request for its object is
-accepted and read only at startup, so the file of an object that stays quiet
-that long would go while its agent runs, and the next restart would find it
-lost. {src_slice_idx} and {bm_idx} are both rendered with `BmIdxFmt`.
+for weeks: a store file is written only when the gates admit a request for
+its object, and read only at startup, so the file of an object that stays
+quiet that long would go while its agent runs, and the next restart would
+find it lost. A request whose save failed only at the directory sync is
+refused, yet its file then holds it (Common agent rules, Local store).
+{src_slice_idx} and {bm_idx} are both rendered with `BmIdxFmt`.
 
 | function | path | content |
 |---|---|---|
-| `LocalDnPath` | {prefix}/dn-{cluster}-{dn} | the last accepted `SyncupDnRequest` |
-| `LocalSidePath` | {prefix}/side-{cluster}-{dn}-{sp}-{side} | the last accepted `SyncupSideRequest` |
-| `LocalCnPath` | {prefix}/cn-{cluster}-{cn} | the last accepted `SyncupCnRequest` |
-| `LocalCntlrPath` | {prefix}/cntlr-{cluster}-{cn}-{sp}-{cntlr} | the last accepted `SyncupCntlrRequest` |
+| `LocalDnPath` | {prefix}/dn-{cluster}-{dn} | the last accepted `SyncupDnRequest`, or a newer refused one |
+| `LocalSidePath` | {prefix}/side-{cluster}-{dn}-{sp}-{side} | the last accepted `SyncupSideRequest`, or a newer refused one |
+| `LocalCnPath` | {prefix}/cn-{cluster}-{cn} | the last accepted `SyncupCnRequest`, or a newer refused one |
+| `LocalCntlrPath` | {prefix}/cntlr-{cluster}-{cn}-{sp}-{cntlr} | the last accepted `SyncupCntlrRequest`, or a newer refused one |
 | `LocalMigrBmPath` | {prefix}/migr-bm-{cluster}-{dn}-{sp}-{migr}-{bm_idx} | one received `PushMigrBitmapRequest` chunk (Bitmap push protocol) |
 | `LocalCloneBmPath` | {prefix}/clone-bm-{cluster}-{cn}-{sp}-{clone}-{src_slice_idx}-{bm_idx} | one received `PushCloneBitmapRequest` chunk (Bitmap push protocol); a clone chunk is addressed by the PAIR, so the name carries two index segments where the migration name carries one |
 
@@ -2715,9 +2718,10 @@ pool) so that CN14's pool-presence gate skipped the message, by the CN14
 **activation sweep** at the next re-creation of the pool device
 (`cnagent.md` CN14) — so a later bad row is a health event (`err_epoch`),
 not evidence the id is gone. A delete message that fails is followed in
-the same pass, under a request the revision-gated syncup delivered, by a
-sweep of that pool's ids, and an id that sweep does not reach waits for
-the next sweep of that pool's ids that gets through (`cnagent.md` CN14).
+the same pass, under a request that counts as delivered (`cnagent.md`
+CN8), by a sweep of that pool's ids, and an id that sweep does not reach
+waits for the next sweep of that pool's ids that gets through
+(`cnagent.md` CN14).
 A td deleted and re-created under the same name is a different td — new
 `td_id`, new `dev_id`, `created` false — and `dev_id`s are never
 reused, so an old snapshot's `ori_id` can never resolve to it. The
@@ -3716,15 +3720,19 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
 
 * **Local store.** The agent persists, per synced object, the serialized
   **last accepted request**, at the point the Revision gate below gives,
-  as a flat protobuf file: `SyncupDnRequest` at `LocalDnPath`,
-  `SyncupSideRequest` at `LocalSidePath`, `SyncupCnRequest` at
-  `LocalCnPath`, `SyncupCntlrRequest` at `LocalCntlrPath` — plus one
+  as a flat protobuf file:
+  `SyncupDnRequest` at `LocalDnPath`, `SyncupSideRequest` at
+  `LocalSidePath`, `SyncupCnRequest` at `LocalCnPath`,
+  `SyncupCntlrRequest` at `LocalCntlrPath` — plus one
   file per received bitmap chunk at `LocalMigrBmPath` or
   `LocalCloneBmPath` (Agent local-store paths, Bitmap push protocol).
   Every write goes to a temp file in the same dir, fsync,
-  rename, fsync the dir (until then a crash can undo the rename). A write
-  that does not succeed can leave its temp file behind, as one whose process
-  dies between the write and the rename does (`osclient.md`, ReadFile /
+  rename, fsync the dir (until then a crash can undo the rename). A
+  request whose save fails is refused (Revision gate below) and its file
+  left as it was, save when only that last fsync failed, after the rename
+  put the refused request in place (`dnagent.md` SH5). A write that does
+  not succeed can leave its temp file behind, as one whose process dies
+  between the write and the rename does (`osclient.md`, ReadFile /
   WriteFile / WriteFileDirect, lists every way). The committed file is the
   only truth: the next start deletes such a file unread (`dnagent.md` SH6),
   since what it held was never committed and the worker sends again whatever
@@ -3741,11 +3749,11 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   `cnagent.md` CN2 say which files that holds back). When an object
   disappears from its parent's pointer list, the agent drops its file or
   files, its chunk files, its in-memory entry and its object lock in that
-  same pass, **before** anything of it is removed — save a file a restart
-  left unloaded that no memory entry has named since (a file that did not
-  load, or one skipped as above): the sweep (Teardown by sweep) removes its
-  object's resources by name in that pass, and such a file stays until a
-  later restart decodes it and finds the pointer absent (`dnagent.md` SH7).
+  same pass, **before** anything of it is removed — save a file no memory
+  entry names, such as one a restart left unloaded (`dnagent.md` SH7 says
+  which): the sweep (Teardown by sweep) removes its object's resources by
+  name in that pass, and such a file stays until a later restart decodes
+  it and finds the pointer absent.
   The agent keeps no record of the object afterwards because it needs none:
   the sweep finds the object's resources by their names, and a record kept
   until they were gone would be a record of work owed — the very thing that
@@ -3753,9 +3761,11 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
 * **Revision gate.** A `Syncup*` request with a revision **lower** than
   the stored one is rejected (`AgentReply.code` non-zero, `details`
   explains). Equal revision: re-apply idempotently (workers retry).
-  Higher: accept, subject to the conf gate below. When an accepted request
-  is persisted is the agent docs' rule — every request once its gates admit
-  it, before its converge (`dnagent.md` SH5). `Push*Bitmap` carries no
+  Higher: accept, subject to the conf gate below. When a request is
+  persisted is the agent docs' rule — every request once its gates admit
+  it, before it becomes the desired state and before its converge
+  (`dnagent.md` SH5). A request whose save fails is refused, not
+  accepted (`dnagent.md` SH5, SH9). `Push*Bitmap` carries no
   revision and passes no such gate; Bitmap push protocol says why.
 * **Conf gate.** Agents resolve no conf defaults of their own (Common
   validation): a geometry an agent invented is one the rest of the
@@ -3805,11 +3815,12 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   latest observation of it: the code, the `revision` and the `*Info` — on
   a `Check*` reply as `show_info` asks (Check streams) — are that
   observation's, and the stamp names it. A `Syncup*` reply carries the
-  revision of the request the agent holds for the object; when its gates
-  admitted the request, its code and `*Info` are what its converge
-  reached, its stamp is that of the observation the converge stored, and
-  its `save_time` is when the agent saved the request, unset when the save
-  failed (`dnagent.md` SH28).
+  revision of the request the agent holds for the object; when the agent
+  accepted the request, its gates admitting it and its save holding
+  (Revision gate), its code and `*Info` are what its converge reached, its
+  stamp is that of the observation the converge stored, and its
+  `save_time`, which every such reply carries, is when the agent saved the
+  request (`dnagent.md` SH28).
   The exact reply fields are listed per RPC under `service DiskNodeAgent` and
   `service ControllerNodeAgent`. `PushMigrBitmapReply` and
   `PushCloneBitmapReply` carry only `AgentReply`; `GetDnSize`, `GetCnSize`,
@@ -3837,7 +3848,11 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   a chunk whose own file, or whose owner's or that owner's parent's, the
   restart could not load: it stays out of the applied set — left on disk
   or deleted — so the worker pushes it again if it still wants it
-  (`dnagent.md` DN2, `cnagent.md` CN2). Re-applying a chunk is always
+  (`dnagent.md` DN2, `cnagent.md` CN2). A push whose save failed only at
+  the directory sync, after its rename, leaves its file in place and
+  applies nothing: the applied set keeps the chunk as it held it before
+  that push until a push rewrites the file or a later restart loads it
+  (`dnagent.md` SH21). Re-applying a chunk is always
   harmless — re-`blkdiscard`ing an already-hydrated dm-clone region is a
   no-op, which holds only because every dnv dm-clone carries
   `no_discard_passdown` ([D7]; `cnagent.md` CN18). Bitmap push protocol
@@ -3870,10 +3885,10 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   the per-CN dm-error, dm-linear and nvmet subsystem, the primary versus
   standby table targets and ANA states, and the migration source and
   destination roles (Migration). Reply `agent_reply`, `revision`,
-  `side_info` (which reports `zeroed_bytes` and `zero_bytes` for a side
-  the gate of `dnagent.md` DN8 admits, Side
-  provisioning protocol), `bm_info` (the applied migration-bitmap
-  indexes, Bitmap push protocol), `obs_stamp` and `save_time`.
+  `side_info` (which reports `zeroed_bytes` and `zero_bytes` on every
+  reply that accepts the request, Side provisioning protocol), `bm_info`
+  (the applied migration-bitmap indexes, Bitmap push protocol), `obs_stamp`
+  and `save_time`.
 * `PushMigrBitmap` delivers one `MigrBitmap` chunk (`side_pointer`,
   `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per
   Bitmap push protocol: persist the chunk at `LocalMigrBmPath`, then
@@ -4068,9 +4083,11 @@ disagrees with the request's, is an error. While the gate is closed
 every resource above the side device reports
 `RES_STATUS_PROVISIONING`, and `RES_STATUS_ERROR` stays confined to
 `side_dev_info`. `SideInfo.zeroed_bytes` and `zero_bytes` are filled on
-every reply and every Check round of a side the gate of `dnagent.md` DN8
-admits, and a side it refuses reports an empty `SideInfo`; equal values,
-with the length above
+every reply that accepts the request and on every Check round of a side
+the side conf gate of `dnagent.md` DN8 admits, and a side whose stored
+request that gate refuses reports an empty `SideInfo`; a reply that
+refuses the request, at a gate or for a failed save, carries no
+`SideInfo` (`dnagent.md` DN14, SH28). Equal values, with the length above
 zero, mean the zeroing is complete, which is what the sp worker's flip
 rule reads (sp role). Zeroing runs at **every** `sp_level`,
 `SP_LEVEL_DISABLE` included (SpLevel): it is bottom-layer provisioning, and
@@ -4132,12 +4149,13 @@ agent's clock as it answers and the start of a converge of the object in
 flight. A round or an info read of an object the agent does not hold
 refuses it as unknown (`dnagent.md` SH25, DN16; `cnagent.md` CN23); its
 stamp carries no observation time, nor does the stamp of one about an
-object the agent holds but has not observed yet. When the gates admit a
+object the agent holds but has not observed yet. When the agent accepts a
 `Syncup*` request, its reply's `obs_stamp` gives the observation its
-converge stored, and its `save_time` when the agent saved the request,
-unset when the save failed; a reply that refuses the request carries
-neither. The worker judges an observation by its age, which it takes on
-the node's own clock from the times the agent's stamps carry
+converge stored, and its `save_time` when the agent saved the request; a
+reply that refuses the request, at a gate or because its save failed
+(Common agent rules, Revision gate), carries neither. The worker judges an
+observation by its age, which it takes on the node's own clock from the
+times the agent's stamps carry
 (`dnv-worker.md` HL7).
 Reason: an answer that read the node itself, or waited for a converge's
 lock to read it, would make a busy node miss the worker's rounds; the cost
@@ -4198,9 +4216,10 @@ rows of both sides of a migration whose cutover is pending (Migration;
 reporting `RES_STATUS_OK` with its raw `dmsetup status` details even while
 a grow is deferred, so the thin-pool auto-grow of Automatic reactions
 keeps parsing them. `SideInfo` additionally
-reports `zeroed_bytes` and `zero_bytes` on every reply and every Check
-round of a side the gate of `dnagent.md` DN8 admits, which the sp worker's
-flip rule reads (sp role).
+reports `zeroed_bytes` and `zero_bytes` on every reply that accepts the
+request and every Check round of a side the side conf gate of
+`dnagent.md` DN8 admits (Side provisioning protocol), which the sp
+worker's flip rule reads (sp role).
 
 `DnInfo` also carries the disk node's own **disk counts**, a part beside
 its rows that holds numbers and no status: the disk's total extents, its
@@ -4288,9 +4307,11 @@ clone, in ascending address order (load-bearing for a migration, whose
 chunks concatenate; deterministic only for a clone), to the destination
 side's DN or to the CN hosting the primary cntlr; calls for different
 objects are independent. A failure ends that object's plan and is
-remembered nowhere: the object's next `Syncup*` reply reports its applied
-set again, and what is still missing is planned again from that
-(`dnv-worker.md` BM1 to BM6).
+remembered nowhere: the object's next accepted `Syncup*` reply reports its
+applied set again, and what is still missing is planned again from that
+(`dnv-worker.md` BM1 to BM6); a reply that refuses the request, at a gate
+or for a failed save (`dnagent.md` SH9), gives the worker no applied set
+(`dnv-worker.md` RW5).
 
 **The agent's contract.** Its only gate is the object's identity and the
 chunk's address, never a revision: a `migr_id` or `clone_id` it does not
@@ -4310,21 +4331,25 @@ whenever the dm-clone is (re)created, by a new primary or after a CN
 reboot among others (Clone metadata durability). The reply carries only
 `AgentReply`, and a code-zero reply is the acknowledgement that releases
 the worker's next part — not proof that the chunk was applied: a chunk
-whose persist failed is acked code zero too, and heals because the
-applied set is derived from the files present (Common agent rules, Bitmap
-durability), so the object's next
-`Syncup*` reply reports it missing and the worker pushes it again. Nothing
+whose persist failed is acked code zero too, and heals because it is not
+added to the applied set, even when only the directory sync after its
+rename failed and its file is in place (`dnagent.md` SH21), so the
+object's next accepted `Syncup*` reply reports it missing and the worker
+pushes it again; a clone chunk that grows in place is the exception
+(Grown clone chunks, below). Nothing
 else schedules that re-push — no push outcome schedules a `Syncup*`, and
 the `Check*` rounds carry no applied set — so the chunk waits for whatever
 re-issues the object's `Syncup*` anyway (a revision bump, or a `Check*`
 round the agent answers with another revision or a non-zero code, Check
 streams); until then its regions are copied instead of skipped, which
 costs only the optional bitmap fast path. The files go with their object:
-they are deleted when its pointer leaves the parent's list, before the
-sweep of that pass removes its devices by name (Common agent rules;
-`dnagent.md` SH7), while a role or an `sp_level` that merely suppresses the
-dm-clone keeps them, applied-by-file, so that nothing is re-pushed when the
-suppression lifts. `dnagent.md` DN15 and SH21 to SH23
+they are deleted when its pointer leaves the parent's list — save a chunk
+file no memory entry names, such as one the startup reload left unloaded
+or one a push left outside the applied set when its save failed only at
+the directory sync — before the sweep of that pass removes its devices by
+name (Common agent rules; `dnagent.md` SH7), while a role or an
+`sp_level` that merely suppresses the dm-clone keeps them, applied-by-file,
+so that nothing is re-pushed when the suppression lifts. `dnagent.md` DN15 and SH21 to SH23
 and `cnagent.md` CN22 carry the agent side out.
 
 **Grown clone chunks ([D8]).** `AppendCloneBitmap` may append more bytes
@@ -5462,13 +5487,16 @@ the leg it names and the `SpRev` revision its write committed, in the
 group's record, so the fan-out hands it to every cntlr; a new primary after
 a failover or a cntlr replacement acts on it as it finds its own node, which
 holds no array of the group until that primary builds one (Known limits). A
-primary acts on a mark only from a request a `SyncupCntlr` has delivered
-since its agent started, never from the copy its agent stored, and its
-agent's read asks the worker for that `SyncupCntlr` (`cnagent.md` CN12,
-CN30). Reason: the stored copy
-can carry a mark the worker has cleared since, when the fan-out of the
-clear did not reach the agent, and a start from that mark's leg, stale by
-then, would zero the member with the newest data. While the mark stands and
+primary acts on a mark only from a request that counts as delivered
+(`cnagent.md` CN8). It acts on no mark from any other request, such as the
+copy the startup reconcile loaded, and its agent's read names such a mark,
+so the worker sends the `SyncupCntlr` again (`cnagent.md` CN12, CN30). Reason: the
+stored copy, or a held request older than one the agent refused for a
+failed save (`dnagent.md` SH5), can carry a mark the worker has cleared,
+or the operator withdrawn, since: the request that clears it did not
+reach the agent or was the one refused; a start from that
+mark's leg, stale by then, would zero the member with the newest data.
+While the mark stands and
 no array of the group runs, the primary starts the array from the named leg
 alone: it stops a group array that does not run, zeroes the superblock of
 every other member the forced start keeps, the open repair's bad leg

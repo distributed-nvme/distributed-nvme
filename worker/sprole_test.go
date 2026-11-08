@@ -7594,7 +7594,7 @@ func testSpLoadFailureRetriesOnTick(t *testing.T) {
 func TestLeftoverCodeIsAccepted(t *testing.T) {
 	// (a) The five observation functions of HL1/HL2 read a leftover reply's
 	// rows exactly as a code 0 reply's — and still return no verdict for the
-	// three REJECTION codes, which is what keeps this from being the vacuous
+	// REJECTION codes, which is what keeps this from being the vacuous
 	// "every code is accepted".
 	t.Run("rows are evaluated as for code 0", func(t *testing.T) {
 		legs := func(res *pb.ResInfo) *pb.CntlrInfo {
@@ -7656,6 +7656,7 @@ func TestLeftoverCodeIsAccepted(t *testing.T) {
 					common.ReplyCodeStaleRevision,
 					common.ReplyCodeUnknownObject,
 					common.ReplyCodeInvalidConf,
+					common.ReplyCodeSaveFailed,
 				} {
 					if obs, _ := tc.run(code); obs != healthNone {
 						t.Fatalf("code %d gave %v, want no verdict", code, obs)

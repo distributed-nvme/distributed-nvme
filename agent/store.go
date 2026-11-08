@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -31,6 +32,8 @@ const (
 type Store struct {
 	oc     common.OsClient
 	prefix string
+	// failing is whether the latest Save failed (SaveFailing).
+	failing atomic.Bool
 }
 
 func NewStore(oc common.OsClient, localStorPrefix string) *Store {
@@ -52,7 +55,8 @@ func NewStore(oc common.OsClient, localStorPrefix string) *Store {
 // constant's comment lists every way one is left behind — and List never
 // returns it, whatever it holds: nothing tells a whole one from a
 // half-written one, which can decode with its tail missing, and what it holds
-// was never committed (a Save that fails is only logged), so the restarted
+// was never committed (a request whose Save fails is refused, SH5, and a
+// chunk whose Save fails is not applied, DN15 and CN22), so the restarted
 // agent reports only what was committed and the worker sends again whatever
 // that lacks. It sorts right after the file it was meant to replace, so a
 // reload that decoded it would let it win — and, left in place, win again at
@@ -133,8 +137,8 @@ func (s *Store) Load(
 // save always comes after the gates: a request a gate rejected is never saved
 // (SH5; for a chunk, DN15 and CN22). A request, parent (SyncupDn/SyncupCn)
 // or object (SyncupSide/SyncupCntlr), is saved as soon as it has passed
-// them, before its converge (SH5); a bitmap chunk before it is applied
-// (SH21).
+// them, before it becomes the desired state and before its converge (SH5); a
+// bitmap chunk before it is applied (SH21).
 //
 // It runs on a ctx carrying the soft timeout (SH4, SH15). The write is
 // in-process, so the bound ends only a wait for an OsClient slot. Every
@@ -142,9 +146,13 @@ func (s *Store) Load(
 // request, the node read lock and an object lock for an object request or a
 // chunk — and without the bound a save that finds every slot held could
 // wait for one until the RPC's deadline. A save the bound cuts off fails
-// like any other and is logged by its caller. A request's RPC goes on to
-// its converge under its locks whatever the save's outcome; a chunk whose
-// save failed is acked at once, and its RPC returns, releasing them.
+// like any other and is logged by its caller. A request whose save failed is
+// refused with common.ReplyCodeSaveFailed: it does not become the desired
+// state and no converge runs, so the store never holds a request older than
+// the last one the agent accepted (SH5). A save whose rename held but whose
+// directory fsync failed leaves the refused request in the file, which a
+// restart converges and the worker wants anyway. A chunk whose save failed
+// is acked at once, and its RPC returns, releasing its locks.
 func (s *Store) Save(
 	ctx context.Context,
 	path string,
@@ -152,7 +160,19 @@ func (s *Store) Save(
 ) error {
 	cctx, cancel := cmdCtx(ctx)
 	defer cancel()
-	return s.oc.WriteProto(cctx, path, msg)
+	err := s.oc.WriteProto(cctx, path, msg)
+	s.failing.Store(err != nil)
+	return err
+}
+
+// SaveFailing reports whether the latest Save failed, of a request or of a
+// chunk, whichever object it was for; the first Save that succeeds ends it.
+// While it holds, a syncup that the gates admit as it arrives marks its own
+// object alone and cancels no read (SH30): the worker re-sends every round a
+// request the agent refused for a failed save, and each re-send would
+// otherwise cancel that round's reads.
+func (s *Store) SaveFailing() bool {
+	return s.failing.Load()
 }
 
 // Remove deletes store files (rm -f: a file already gone is no error). No

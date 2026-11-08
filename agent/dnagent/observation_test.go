@@ -2,7 +2,6 @@ package dnagent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -242,7 +241,10 @@ func TestRoundReadsDefault(t *testing.T) {
 // (SH28): a syncup's, the startup reconcile's, a DN13 retry attempt's and the
 // DN12 fence timer's. It carries the converge's own info, code and revision,
 // a time and the converge's trace id; a syncup's reply stamps it with no
-// converge start, beside the time the request was saved.
+// converge start, beside the time the request was saved. A syncup whose save
+// fails is refused before any converge (SH5), so it stores none: the
+// observation stays the one before the call, and the reply carries no save
+// time.
 func TestEveryConvergeEndStoresAnObservation(t *testing.T) {
 	t.Run("SyncupDn", func(t *testing.T) {
 		srv, _ := newTestServer(t)
@@ -301,27 +303,23 @@ func TestEveryConvergeEndStoresAnObservation(t *testing.T) {
 		srv, node := newTestServer(t)
 		syncupBoth(t, srv, 1, testSide)
 		path := srv.nf.LocalSidePath(testCluster, testDn, testSp, testSide)
-		oc := node.osClient()
-		write := oc.WriteProtoFn
-		oc.WriteProtoFn = func(
-			ctx context.Context, p string, msg proto.Message,
-		) error {
-			if p == path {
-				return errors.New("write " + p + ": no space left on device")
-			}
-			return write(ctx, p, msg)
-		}
-		srv.store = agent.NewStore(oc, common.DefaultLocalStorPrefix)
+		failSaves(srv, node, onlyPath(path))
+		before := sideObs(t, srv)
 		reply, err := srv.SyncupSide(traced("side-syncup"), failoverReq(2))
 		if err != nil {
 			t.Fatalf("SyncupSide: %v", err)
 		}
+		if got := reply.GetAgentReply().GetCode(); got !=
+			common.ReplyCodeSaveFailed {
+			t.Errorf("reply code %d, want ReplyCodeSaveFailed", got)
+		}
 		if reply.GetSaveTime() != nil {
 			t.Errorf("save time %v for a save that failed", reply.GetSaveTime())
 		}
-		if obs := sideObs(t, srv); obs.Revision != 2 {
-			t.Errorf("observation revision %d, want the converged 2",
-				obs.Revision)
+		if obs := sideObs(t, srv); obs.Revision != 1 ||
+			obs.TraceId != before.TraceId || !obs.Time.Equal(before.Time) {
+			t.Errorf("observation = trace %q at rev %d, want the one at "+
+				"revision 1 before the call", obs.TraceId, obs.Revision)
 		}
 	})
 
@@ -434,9 +432,25 @@ func TestACutOffConvergeStoresNothing(t *testing.T) {
 	})
 
 	t.Run("a new dn", func(t *testing.T) {
-		srv, _ := newTestServer(t)
+		srv, node := newTestServer(t)
+		// The call is cut off right after its save, so the converge is the
+		// first step that finds it cut: a call cut off before the save is
+		// refused (SH5), and the agent would not hold the dn.
 		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
+		defer cancel()
+		dnPath := srv.nf.LocalDnPath(testCluster, testDn)
+		oc := node.osClient()
+		write := oc.WriteProtoFn
+		oc.WriteProtoFn = func(
+			ctx context.Context, p string, msg proto.Message,
+		) error {
+			err := write(ctx, p, msg)
+			if p == dnPath {
+				cancel()
+			}
+			return err
+		}
+		srv.store = agent.NewStore(oc, common.DefaultLocalStorPrefix)
 		reply, err := srv.SyncupDn(ctx, dnReq(1, testSide))
 		if err != nil {
 			t.Fatalf("SyncupDn: %v", err)
@@ -876,11 +890,13 @@ func TestAReadWhoseListingFailedStillWrites(t *testing.T) {
 	}
 }
 
-// A syncup cancels the object's running read before it takes a lock (SH30),
-// so it never waits behind one; the cancelled read stores nothing. A read
-// cancelled while it waits for the side's lock runs nothing once it gets the
-// lock. A syncup DN8's gates refuse on the held request cancels nothing: that
-// is TestARefusedSyncupCancelsNoRead.
+// While the agent's saves succeed, a syncup cancels the object's running
+// read before it takes a lock (SH30), so it never waits behind one; the
+// cancelled read stores nothing. A read cancelled while it waits for the
+// side's lock runs nothing once it gets the lock. A syncup DN8's gates
+// refuse on the held request cancels nothing: that is
+// TestARefusedSyncupCancelsNoRead; nor does one that arrives while the
+// store's latest save failed: that is TestASyncupWhileSavesFailCancelsNoRead.
 func TestASyncupCancelsTheRead(t *testing.T) {
 	// admittedReq is a SyncupSide DN8's gates admit that asks for what the
 	// side already holds, so its converge changes nothing on the node.
@@ -1011,7 +1027,8 @@ func TestASyncupCancelsTheRead(t *testing.T) {
 	})
 }
 
-// A SyncupDn cancels every read of the agent before it waits for the node
+// While the agent's saves succeed, a SyncupDn the gates admit at a newer
+// revision cancels every read of the agent before it waits for the node
 // write lock, which each of them holds the read lock of (SH30).
 func TestASyncupDnCancelsEveryRead(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -1202,7 +1219,10 @@ func TestAReSentSyncupDnLetsSideReadsEnd(t *testing.T) {
 // end and the observation would go stale (dnv-worker.md HL7). The read runs
 // on to its end and stores its observation, the gates refuse the request
 // under its locks as before, and a round after it starts a read. A mark
-// another converge of the object holds outlives the refused syncup.
+// another converge of the object holds outlives the refused syncup. Each
+// case runs once more while the store's latest save failed
+// (agent.Store.SaveFailing): the gates still come first, so a request they
+// refuse marks nothing then either.
 func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 	sideK := sideKey(testCluster, testDn, testSp, testSide)
 	dnK := dnKey(testCluster, testDn)
@@ -1267,7 +1287,21 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 			"dn-round":   dnObs(t, srv).TraceId,
 		}
 	}
-	for _, tc := range []struct {
+	// failSaving makes the store's latest save fail: every save fails, and
+	// a SyncupSide the gates admit is refused for its own.
+	failSaving := func(t *testing.T, srv *DnAgentServer, node *fakeNode) {
+		t.Helper()
+		failSaves(srv, node, everyPath)
+		reply, _ := srv.SyncupSide(traced("syncup-0"), sideReq(3, testSide,
+			testCn0, []uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE))
+		if got := reply.GetAgentReply().GetCode(); got !=
+			common.ReplyCodeSaveFailed || !srv.store.SaveFailing() {
+			t.Fatalf("fixture is wrong: the SyncupSide answered code %d "+
+				"and the store's latest save failed: %v", got,
+				srv.store.SaveFailing())
+		}
+	}
+	type refusedCase struct {
 		name  string
 		stale func(srv *DnAgentServer) *pb.AgentReply
 		// code is the refusal's.
@@ -1276,19 +1310,36 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 		rounds map[string]func(srv *DnAgentServer, traceId string)
 		// stored is the trace id each object's observation holds.
 		stored func(t *testing.T, srv *DnAgentServer) map[string]string
-	}{
-		{"SyncupSide", staleSide, common.ReplyCodeStaleRevision,
-			sideRounds, sideStored},
-		{"SyncupSide side conf", badConfSide, common.ReplyCodeInvalidConf,
-			sideRounds, sideStored},
-		{"SyncupDn", staleDn, common.ReplyCodeStaleRevision,
-			nodeRounds, nodeStored},
-		{"SyncupDn conf", badConfDn, common.ReplyCodeInvalidConf,
-			nodeRounds, nodeStored},
-	} {
+		// saveFailing has the store's latest save fail first.
+		saveFailing bool
+	}
+	var cases []refusedCase
+	for _, saveFailing := range []bool{false, true} {
+		suffix := ""
+		if saveFailing {
+			suffix = " while saves fail"
+		}
+		cases = append(cases,
+			refusedCase{"SyncupSide" + suffix, staleSide,
+				common.ReplyCodeStaleRevision, sideRounds, sideStored,
+				saveFailing},
+			refusedCase{"SyncupSide side conf" + suffix, badConfSide,
+				common.ReplyCodeInvalidConf, sideRounds, sideStored,
+				saveFailing},
+			refusedCase{"SyncupDn" + suffix, staleDn,
+				common.ReplyCodeStaleRevision, nodeRounds, nodeStored,
+				saveFailing},
+			refusedCase{"SyncupDn conf" + suffix, badConfDn,
+				common.ReplyCodeInvalidConf, nodeRounds, nodeStored,
+				saveFailing})
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
 			syncupBoth(t, srv, 2, testSide)
+			if tc.saveFailing {
+				failSaving(t, srv, node)
+			}
 			srv.roundReads = true
 			node.Reset()
 			release := softGate(t, node, "dmsetup ls")

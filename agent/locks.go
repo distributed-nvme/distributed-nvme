@@ -6,8 +6,12 @@ import "sync"
 // is always node before object. Obj creates an object's lock, and a caller
 // asks for it only once it has found, under the node read lock, that the agent
 // holds the object, or once the object's gates have admitted its syncup, so a
-// refused call leaves no entry (dnagent.md, Concurrency — `locks.go`). An
-// entry is dropped only during teardown while the node write lock is held.
+// call its gates refuse leaves no entry, and one they admit whose save then
+// fails leaves the entry it created (dnagent.md, Concurrency — `locks.go`;
+// SH5). An entry is dropped only while the node write lock is held: by the
+// teardown of an object the agent holds, and by the parent's pointer diff for
+// every pointer that left the list, held or not (dropRemovedSides,
+// dropRemovedCntlrs).
 //
 // Node write lock: the startup reconcile and the node-level syncup (SH10).
 // Node read lock + the object lock: every object-scoped RPC and every
@@ -44,8 +48,9 @@ func (l *LockSet) Obj(key string) *sync.Mutex {
 	return lock
 }
 
-// DropObj forgets an object's lock. Only legal during teardown, with the
-// node write lock held — otherwise a concurrent holder would be dropped.
+// DropObj forgets an object's lock. Only legal with the node write lock
+// held, at a teardown or in the parent's pointer diff — otherwise a
+// concurrent holder would be dropped.
 func (l *LockSet) DropObj(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

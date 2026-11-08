@@ -238,13 +238,15 @@ func TestAnotherSidesPassReadsARequestBeingReplaced(t *testing.T) {
 	}
 }
 
-// A request refused for a side the agent does not hold creates no lock entry
-// for it (dnagent.md, Concurrency — `locks.go`): only the teardown of a held
-// object drops an entry, so one a refusal created would stay for the life of
-// the process. Each call is checked twice: the set holds as many entries
-// after it as before, and the call does not wait for an entry another call
-// holds. The admitted request at the end creates its side's entry, which is
-// what the count can see.
+// A request refused for a side the agent does not hold, before any save,
+// creates no lock entry for it (dnagent.md, Concurrency — `locks.go`): an
+// entry is dropped only when the side's pointer leaves its DN's list
+// (dropRemovedSides), so one a refusal created would stay until then, and
+// for a pointer the list never named, for the life of the process. Each
+// call is checked twice: the set holds as many entries after it as before,
+// and the call does not wait for an entry another call holds. The admitted
+// request at the end creates its side's entry, which is what the count can
+// see.
 func TestARefusedRequestLeavesNoLockEntry(t *testing.T) {
 	ctx := context.Background()
 	key := sideKey(testCluster, testDn, testSp, testSide)
@@ -340,6 +342,51 @@ func TestARefusedRequestLeavesNoLockEntry(t *testing.T) {
 				t.Fatal("the refusal waited for the side's object lock")
 			}
 		})
+	}
+}
+
+// A SyncupSide that DN8's gates admit for a side the agent does not hold,
+// and whose save then fails (SH5), leaves the lock entry it created: the
+// side is not held, so no teardown of its own drops it. The request sent
+// again reuses the entry, and the DN6 pointer diff drops it once the side's
+// pointer leaves the DN's list (dropRemovedSides), so the entries such
+// refusals leave never outlive the DN's list.
+func TestASaveRefusedSyncupSideLeavesAnEntryUntilItsPointerLeaves(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	srv, node := newTestServer(t)
+	if reply, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil ||
+		reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupDn: %v %v", reply.GetAgentReply(), err)
+	}
+	failSaves(srv, node, onlyPath(srv.nf.LocalSidePath(
+		testCluster, testDn, testSp, testSide)))
+	before := srv.locks.ObjCount()
+	for _, send := range []string{"the first", "the re-sent"} {
+		reply, err := srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide,
+			testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if got := reply.GetAgentReply().GetCode(); got !=
+			common.ReplyCodeSaveFailed {
+			t.Fatalf("fixture is wrong: %s SyncupSide answered code %d, "+
+				"want ReplyCodeSaveFailed", send, got)
+		}
+		if got := srv.locks.ObjCount(); got != before+1 {
+			t.Errorf("%d lock entries after %s SyncupSide, want %d",
+				got, send, before+1)
+		}
+	}
+
+	if reply, err := srv.SyncupDn(ctx, dnReq(2)); err != nil ||
+		reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupDn: %v %v", reply.GetAgentReply(), err)
+	}
+	if got := srv.locks.ObjCount(); got != before {
+		t.Errorf("%d lock entries once the side's pointer left the list, "+
+			"want %d", got, before)
 	}
 }
 

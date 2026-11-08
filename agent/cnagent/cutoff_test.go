@@ -2,14 +2,11 @@ package cnagent
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/distributed-nvme/distributed-nvme/agent"
-	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -105,9 +102,10 @@ func cutOffSyncupCntlr(
 
 // A cntlr's request is saved as soon as the gates admit it: its file is the
 // call's first write, before the converge's first mutating OS call (CN8;
-// dnagent.md SH5). A save that fails is only logged: the converge runs all
-// the same, and the reply carries the request's revision (CN20), as after a
-// save that held.
+// dnagent.md SH5). A save that fails refuses the request with
+// ReplyCodeSaveFailed at the revision the agent holds (dnagent.md SH5;
+// CN20): the converge does not run and the file keeps the request before
+// it, so a restart converges the request the agent last accepted.
 func TestACntlrRequestIsSavedBeforeItsConverge(t *testing.T) {
 	ctx := context.Background()
 	t.Run("the save holds", func(t *testing.T) {
@@ -131,29 +129,19 @@ func TestACntlrRequestIsSavedBeforeItsConverge(t *testing.T) {
 		srv, node := newTestServer(t)
 		syncupTdA(t, srv, node)
 		path := srv.nf.LocalCntlrPath(testCluster, testCn, testSp, testCntlr)
-		oc := node.osClient()
-		write := oc.WriteProtoFn
-		oc.WriteProtoFn = func(
-			ctx context.Context, p string, msg proto.Message,
-		) error {
-			if p == path {
-				return errors.New("write " + p + ": no space left on device")
-			}
-			return write(ctx, p, msg)
-		}
-		srv.store = agent.NewStore(oc, common.DefaultLocalStorPrefix)
+		failSaves(srv, node, path)
 		node.Reset()
 		reply, err := srv.SyncupCntlr(ctx, newTdReq(3))
 		if err != nil {
 			t.Fatalf("SyncupCntlr: %v", err)
 		}
-		if got := reply.GetRevision(); got != 3 {
-			t.Errorf("the reply carries revision %d, want 3", got)
+		assertSaveRefused(t, "SyncupCntlr", reply.GetAgentReply(),
+			reply.GetRevision(), 2)
+		if node.hasCall("cmd dmsetup create " + thinName(srv, testSnapTd)) {
+			t.Error("the converge ran after the failed save: td B's thin " +
+				"volume was built")
 		}
-		if !node.hasCall("cmd dmsetup create " + thinName(srv, testSnapTd)) {
-			t.Error("a failed save stopped the converge: td B's thin " +
-				"volume was not built")
-		}
+		assertOnlyFailedWrite(t, node, path)
 		if got := storedCntlrRevision(t, srv, node); got != 2 {
 			t.Errorf("the cntlr file holds revision %d, want the 2 before "+
 				"the failed save", got)

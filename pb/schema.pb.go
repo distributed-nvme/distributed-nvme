@@ -13081,8 +13081,10 @@ type SyncupDnReply struct {
 	Revision   uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
 	DnInfo     *DnInfo                `protobuf:"bytes,3,opt,name=dn_info,json=dnInfo,proto3" json:"dn_info,omitempty"`
 	ObsStamp   *ObsStamp              `protobuf:"bytes,4,opt,name=obs_stamp,json=obsStamp,proto3" json:"obs_stamp,omitempty"`
-	// When the agent saved the request to its local store; unset when it
-	// saved none.
+	// When the agent saved the request to its local store. Every reply that
+	// accepts the request carries it; one that refuses the request carries
+	// none, a refusal for a save that failed included (architecture.md,
+	// Live-state reporting).
 	SaveTime      *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=save_time,json=saveTime,proto3" json:"save_time,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

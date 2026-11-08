@@ -18,7 +18,10 @@ import (
 const msgInvalidStoredConf = "invalid stored conf"
 
 // syncupCntlr implements CN8-CN20. The node read lock and this cntlr's object
-// lock are held by the caller.
+// lock are held by the caller. A request the gates refuse, or whose save
+// fails (dnagent.md SH5), stores no observation; a saved one stores its
+// converge's, unless its call is cut off, before the caller lets go of the
+// locks (dnagent.md SH28).
 func (s *CnAgentServer) syncupCntlr(
 	ctx context.Context,
 	key string,
@@ -33,23 +36,59 @@ func (s *CnAgentServer) syncupCntlr(
 		return reply
 	}
 	// The cntlr file is persisted as soon as the gates admit the request,
-	// before the converge, for dnagent.md SH5's reason: a request the
-	// worker cancels inside a long converge would skip a save placed after
-	// it, and the next Reconcile would converge the request before this one
-	// — whose td_list lacks a thin volume this pass may have created, and
-	// whose sweep would then delete that volume's thin id. A failed save is
-	// only logged; the converge runs whatever its outcome.
+	// before it becomes the desired state and before the converge, for
+	// dnagent.md SH5's reason: a request the worker cancels inside a long
+	// converge would skip a save placed after it, and the next Reconcile
+	// would converge the request before this one — whose td_list lacks a
+	// thin volume this pass may have created, and whose sweep would then
+	// delete that volume's thin id. A request whose save fails is refused at
+	// the revision the agent holds, zero for a cntlr it does not hold, for
+	// the same reason: it does not become the desired state, a cntlr the
+	// agent does not hold stays unknown, and no converge runs, so the cntlr
+	// file keeps the last request the agent accepted and a restart undoes
+	// nothing the node serves. Only when the directory fsync after the
+	// rename alone failed does the file hold this request, which a restart
+	// converges and the worker wants anyway. The held request stays the one
+	// the call found. The worker sends the request again as dnagent.md SH5
+	// says (dnv-worker.md RW4, RW12).
 	ptr := req.GetCntlrPointer()
 	path := s.nf.LocalCntlrPath(req.GetClusterId(), req.GetCnId(),
 		ptr.GetSpId(), ptr.GetCntlrId())
-	var saveAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting cntlr state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
-	} else {
-		saveAt = s.now()
+		// CN8: a refused request newer than the held one makes the held
+		// request count as delivered no more, as if the startup reconcile
+		// had loaded it, until a SyncupCntlr whose save holds sets
+		// reqFromRpc again, even one at the held revision, such as an old
+		// owner's during an ownership change (cnagent.md, Known limits).
+		// The refused request may be the sp worker's clear of a
+		// forced-start mark (dnv-worker.md AR13) or the operator's
+		// withdrawal of it. Were the held request still to count
+		// as delivered, every CN10 retry attempt would converge it and act
+		// on the mark: one that read the group's array not running would
+		// start the array from the marked leg and zero the other members
+		// the forced start keeps, one of which may hold newer data. So no
+		// converge acts on a mark of the held request
+		// (dropForcedStartMarks), the cntlr's reads name its marks
+		// (storedMarks), and CN14's thin id sweeps, behind the same gate,
+		// do not run from it either. A refused request at the held
+		// revision leaves reqFromRpc as it is: the clear and the withdrawal
+		// of a mark each raise SpRev, so a request at the held revision
+		// clears no mark the held request carries. A cntlr the agent does
+		// not hold has no state, and nothing changes. The object lock this
+		// call holds orders the write before every later converge and read
+		// of the cntlr (cntlrState.reqFromRpc).
+		if st != nil && req.GetRevision() > stored {
+			st.reqFromRpc = false
+		}
+		return &pb.SyncupCntlrReply{
+			AgentReply: agent.SaveFailedReply(err),
+			Revision:   stored,
+		}
 	}
+	saveAt := s.now()
 	if st == nil {
 		st = newCntlrState(req)
 	}
@@ -57,12 +96,14 @@ func (s *CnAgentServer) syncupCntlr(
 	// (cntlrState.req): the store is atomic, and what it replaces is never
 	// modified.
 	st.storeReq(req)
-	// This request came through the revision gate, so GateRevision makes
-	// it the newest desired state this cntlr has ever accepted and its
-	// td_list is authoritative — the one copy CN14's thin id sweeps may
-	// delete against, and the one whose forced-start marks a converge acts
-	// on (CN12). Only this cntlr's converges and reads read it, each under
-	// the object lock held here or the node write lock.
+	// This request came through the revision gate and its save held, so
+	// GateRevision makes it the newest desired state this cntlr has ever
+	// accepted, and it counts as delivered (CN8) until a newer request is
+	// refused for a failed save (above): a converge acts on its
+	// forced-start marks (CN12), and CN14's thin id sweeps, behind the same
+	// gate, may run from it. Only this cntlr's converges and reads read
+	// reqFromRpc, each under the object lock held here or the node write
+	// lock.
 	st.reqFromRpc = true
 	s.putCntlr(key, st)
 
@@ -191,14 +232,17 @@ func (s *CnAgentServer) convergeCntlr(
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, req)
-	// CN12: a forced-start mark acts only from a request a SyncupCntlr of
-	// this process delivered. Until one has, the request is the stored copy
-	// the startup reconcile loaded, and the background retry converges from
-	// it too: it can still carry a mark the worker has cleared since, whose
-	// clear never reached this agent, and a start from that mark's leg would
-	// zero the member with the newest data. Such a pass converges every
-	// group as with no mark, and the cntlr's read names the mark, so the
-	// worker re-sends the SyncupCntlr (storedMarks).
+	// CN12: a forced-start mark acts only from a request that counts as
+	// delivered (cntlrState.reqFromRpc). Any other held request is the
+	// stored copy the startup reconcile loaded, or one whose newer
+	// successor was refused for a failed save (syncupCntlr, dnagent.md
+	// SH5), and the background retry converges from it too: it can still
+	// carry a mark the worker has cleared since, whose clear this agent has
+	// not accepted (the clear never arrived, say, or its save failed), and
+	// a start from that mark's leg would zero the member with the newest
+	// data. Such a pass converges every group as with no mark, and the
+	// cntlr's read names the mark, so the worker re-sends the SyncupCntlr
+	// (storedMarks).
 	if !st.reqFromRpc {
 		plan.dropForcedStartMarks()
 	}
@@ -394,8 +438,10 @@ func (s *CnAgentServer) build(
 		// without the mark, from the worker's clear (dnv-worker.md AR13), the
 		// operator's withdrawal or a repair's finish that retires the leg the
 		// mark names, or of one by which this cntlr builds no array of the
-		// group. The pass that started the array registers nothing for its
-		// mark.
+		// group, or of a held request that counts as delivered no more since
+		// syncupCntlr refused a newer one for a failed save
+		// (cntlrState.reqFromRpc). The pass that started the array registers
+		// nothing for its mark.
 		s.startConnectRetry(st, plan)
 		retryNeeded = true
 	}
@@ -415,12 +461,13 @@ func (s *CnAgentServer) build(
 			poolReady[sp.sliceId] = s.ensureSlice(ctx, st, plan, sp, info)
 		}
 		// CN14's activation sweep, for every slice whose pool device this
-		// incarnation just created. A
-		// startup reconcile arms and skips — its persisted request may lag
-		// the pool, and deleting against a lagging td_list would destroy a
-		// live td; the first post-boot SyncupCntlr then finds the flag still
-		// set — its own ensurePool probe-matches the surviving device and
-		// arms nothing — and sweeps with the fresh, revision-gated td_list.
+		// incarnation just created. It runs only from a request that counts
+		// as delivered (cntlrState.reqFromRpc), the gate CN12 puts on the
+		// forced-start marks for a reason of its own, so a startup
+		// reconcile arms and skips; the first post-boot SyncupCntlr whose
+		// save holds then finds the flag still set — its own ensurePool
+		// probe-matches the surviving device and arms nothing — and sweeps
+		// with the revision-gated td_list.
 		// Sweeping here, before the pre-pass and the thin loop below, also
 		// frees the strays' blocks before anything allocates, and a stray can
 		// never collide with a new id (dev_ids are never reused;

@@ -31,6 +31,15 @@ func UnknownObjectReply(format string, args ...any) *pb.AgentReply {
 	}
 }
 
+// SaveFailedReply refuses a request the gates admitted whose save to the
+// local store failed (SH5): details carry err, the save's error.
+func SaveFailedReply(err error) *pb.AgentReply {
+	return &pb.AgentReply{
+		Code:    common.ReplyCodeSaveFailed,
+		Details: fmt.Sprintf("saving the request failed: %v", err),
+	}
+}
+
 // OkReply is the AgentReply of an accepted request (code 0). Per-resource
 // failures never travel here — they ride in the *Info (SH14, DN19).
 func OkReply() *pb.AgentReply {
@@ -53,9 +62,9 @@ func OkReply() *pb.AgentReply {
 // node's base state that the CN's background read probed absent, or an ANA
 // group it read in a state other than its fixed one on a port whose
 // transport attributes match, and a forced-start mark of a cntlr's request
-// that no SyncupCntlr of the running agent has delivered (cnagent.md CN12,
-// CN30). Each arrives among the failures, rendered like an enumeration that
-// did not answer. One condition arrives among the
+// that does not count as delivered (cnagent.md CN8, CN12, CN30). Each
+// arrives among the failures, rendered like an enumeration that did not
+// answer. One condition arrives among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background
 // read names as one its converge would put back or add, under
 // LeftoverKindMdMember (cnagent.md CN30). Only a read's verdict names these

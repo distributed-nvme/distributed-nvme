@@ -106,14 +106,19 @@ The constants this document relies on, whose values and comments
   probe-first and puts back one found in another state (SH19); every ANA
   transition rewrites a namespace's "ana_grpid" instead.
 * The `AgentReply.code` values. Zero is OK. `ReplyCodeStaleRevision`,
-  `ReplyCodeUnknownObject` and `ReplyCodeInvalidConf` are rejections: the
-  request was not applied, so the worker reads no verdict from the reply's
-  rows. `ReplyCodeInvalidConf` refuses a request whose conf carries a value
-  the control plane cannot have written — a proto3 zero where
+  `ReplyCodeUnknownObject`, `ReplyCodeInvalidConf` and
+  `ReplyCodeSaveFailed` are rejections: the request was not applied, so
+  the worker reads no verdict from the reply's rows.
+  `ReplyCodeInvalidConf` refuses a request whose conf carries a value the
+  control plane cannot have written — a proto3 zero where
   `architecture.md`, Common validation, requires a concrete geometry, or a
   side's length to zero outside the bounds of DN8's side conf gate; the
   object is known and the revision is current, it is the conf that is
-  unusable, which is why it is neither of the other two.
+  unusable, which is why it is neither of the first two.
+  `ReplyCodeSaveFailed` refuses a request the gates admitted whose save to
+  the local store failed (SH5): the request is current and its conf
+  usable, and the agent cannot keep it, which is why it is none of the
+  other three.
   `ReplyCodeLeftover` reports an **accepted** request with residue: the
   desired state is stored and every wanted object was converged, but the
   node still holds objects the desired state does not want, or an
@@ -140,8 +145,10 @@ The constants this document relies on, whose values and comments
   non-zero code in a `Check*` reply makes the worker issue a `Syncup*`
   (`dnv-worker.md` RW4), save in a reply whose observation is too old
   (`dnv-worker.md` HL7), and in a `Push*Bitmap` reply ends that push plan.
-  Among the rejections the specific value only sets the level of the
-  worker's "syncup rejected" record and otherwise serves details and tests.
+  Among the rejections the specific value sets the level of the worker's
+  "syncup rejected" record (`dnv-worker.md` RW5), and a round answered
+  with `ReplyCodeUnknownObject` is not judged by its observation's age
+  (`dnv-worker.md` HL7); otherwise it serves details and tests.
 * `DnMigrConnectRetryInterval`, the pace of the background retries of a
   migration destination whose build stopped short, at its `nvme connect`
   once the retries within its pass ran out or at another step, and of one
@@ -320,7 +327,8 @@ empty.
 
 SH4. The store holds exactly what `architecture.md`, Common agent rules and
 Agent local-store paths, prescribe: the last accepted `Syncup*Request` per
-object, persisted at the point SH5 gives, and one file per received
+object, persisted at the point SH5 gives (or the refused one after it
+whose save failed only at the directory sync, SH5), and one file per received
 `Push*BitmapRequest` chunk, all written via `OsClient.WriteProto` (atomic
 replace) at the `Local*Path` locations and read back via `ReadProto`. Both
 run on a ctx carrying the SH15 soft timeout, as the store's listing and `rm`
@@ -328,16 +336,17 @@ do (SH6, SH7): the calls are in-process, so the bound ends only a wait for an
 `OsClient` slot. A save takes its slot under the locks its RPC holds
 (SH10, SH11), and without the bound a save that finds every slot held could
 wait until the RPC's deadline. A save the bound cuts off fails like any
-other and is only logged. A request is saved before its converge (SH5),
-which runs under the RPC's locks whatever the save's outcome; a chunk whose
-save failed is acked at once (DN15, `cnagent.md` CN22), and its RPC then
-returns and releases its locks.
+other: its caller logs it, and a request whose save failed is refused with
+no converge (SH5), while a chunk whose save failed is acked at once (DN15,
+`cnagent.md` CN22); either RPC then returns and releases its locks. The
+store keeps whether its latest save failed, of a request or a chunk,
+whatever its object, until a save succeeds (`Store.SaveFailing`); SH30
+says what a syncup does while it holds.
 
-SH5. Every request is persisted once it has passed the gates, before its
-converge. A **parent** request (`SyncupDn`/`SyncupCn`) is persisted as soon
-as it has passed the gates and become the desired state; an **object**
-request (`SyncupSide`/`SyncupCntlr`) as soon as it has passed the gates,
-before it becomes the desired state. Reason: a converge can run long, and a
+SH5. Every request, a **parent** request (`SyncupDn`/`SyncupCn`) or an
+**object** request (`SyncupSide`/`SyncupCntlr`), is persisted as soon as
+it has passed the gates, before it becomes the desired state and before
+its converge. Reason: a converge can run long, and a
 save that waited for it would be skipped by a request the worker cancels
 inside it, or by a crash there, so the next startup reconcile would
 converge the request before it and undo what the cut-off pass had begun. A
@@ -350,14 +359,47 @@ exist. An object's converge can run a migration's cutover or finish (DN12,
 DN13), a failover's primary flip (DN10) or a thin volume's creation
 (`cnagent.md` CN14), and the reconcile would undo it. With the new request
 on disk first, a crash mid-converge is nothing worse than a startup
-reconcile that completes the pass. A save that fails is only logged, and
-the converge runs whatever its outcome, so a full or read-only store stops
-no fence and no finish; such a save is the one way an older request stays
-on disk (Known limits; `cnagent.md`, Known limits). Per-resource
-`RES_STATUS_ERROR` outcomes do not block persistence — the errors travel in
-the `*Info` and the worker's health loop drives repair (equal-revision
-re-syncs re-apply idempotently). Protocol rejections — stale revision,
-unknown pointer, invalid stored conf (SH9) — never reach persistence.
+reconcile that completes the pass. Per-resource `RES_STATUS_ERROR`
+outcomes do not block persistence — the errors travel in the `*Info` and
+the worker's health loop drives repair (equal-revision re-syncs re-apply
+idempotently). The gates' rejections — stale revision, unknown pointer,
+invalid stored conf (SH9) — never reach persistence.
+
+A request whose save fails is refused, whatever made the save fail: a
+full or read-only store disk, the SH4 bound or a cancelled call. The call
+logs the failure and replies `ReplyCodeSaveFailed` (SH9), its `details`
+carrying the save's error, at the revision the agent holds for the
+object, zero when it holds none. The save comes before the request
+becomes the desired state, so the process that refuses a request never
+makes it the desired state: the agent keeps the request it held (on a cn,
+a refused `SyncupCntlr` above the held revision makes the held request
+count as delivered no more, `cnagent.md` CN8), and an object it did not
+hold stays unknown — the agent does not take that DN,
+CN, side or cntlr into the set of objects it holds, and of a side or
+cntlr keeps only the lock entry the call created (Concurrency —
+`locks.go`).
+Nothing that follows the save runs: no converge, no pointer diff (DN6,
+`cnagent.md` CN7), no sweep, and no observation is stored (SH28), so the
+object's next check round answers the old revision, or unknown object for
+an object the agent does not hold (SH25). A save whose rename held but
+whose directory sync then failed
+(`osclient.md`, ReadFile / WriteFile / WriteFileDirect) is refused the
+same way, though the file then holds the refused request: an agent
+restart that finds it there reloads it as it does every stored request
+(DN2, `cnagent.md` CN2), and the worker wants it anyway. The worker re-sends a refused
+request at a revision the agent does not hold, or for an object it does
+not hold, on every round, with no backoff, until a save holds, and one at
+the held revision while the object's rounds answer a non-zero code
+(`dnv-worker.md` RW4, RW5, RW12); what that costs while the store disk
+refuses writes is under Known limits. Reason: the local files
+then never hold a request older than the last one the agent accepted, so
+a restart never undoes anything. Were a request converged over a failed
+save, the request before it would stay on disk, and the next startup
+reconcile would converge that older request and undo what the newer one
+did: on a dn, a side the newer `SyncupDn` added, whose own `SyncupSide`
+had then been accepted and built, would be missing from the older side
+list, so the restart would drop that live side and its sweep free the
+side's extents (DN2, DN6).
 
 SH6. Enumeration on startup: one listing of the prefix through
 `OsClient.ReadDir`, in the agent's own process, on a ctx carrying the SH15
@@ -375,8 +417,10 @@ process died before its rename, for instance; `osclient.md`, ReadFile /
 WriteFile / WriteFileDirect, lists every way one is left behind. The
 enumeration never returns one, so nothing reads it: nothing tells a whole
 one from a half-written one, which can decode with its tail missing, and
-what it holds was never committed (a save that fails is only logged), so the
-restarted agent reports only what was committed, and the worker sends again
+what it holds was never committed (a request whose save fails is refused,
+SH5, and a chunk whose save fails is not applied, DN15, `cnagent.md`
+CN22), so the restarted
+agent reports only what was committed, and the worker sends again
 whatever that lacks. It sorts right after the file it was meant to replace,
 so a reload that decoded it would let it win — and, left on disk, win again
 at every later restart, long after later saves had overtaken it. So the
@@ -399,12 +443,17 @@ as a to-be-deleted list. Keeping the file until the resources are gone would
 be the opposite of idempotent: a removal pass that only logs its failures
 and deletes the file regardless destroys the one record naming the object
 exactly when the object has failed to go. The exception is a file no memory
-entry names — a chunk the startup reload skipped (DN2, `cnagent.md` CN2)
-and no push has rewritten since, or the `side-*` or `cntlr-*` file of an
-object it skipped that no `SyncupSide` or `SyncupCntlr` has rebuilt: it is
-not deleted when its object's pointer leaves the list. The sweep still
-removes the object's resources by name, and a later restart that decodes
-the file finds the pointer absent and deletes it.
+entry names — a chunk the startup reload skipped (DN2, `cnagent.md` CN2),
+or one a push left outside the applied set when its save failed only at
+the directory sync (DN15, `cnagent.md` CN22), that no push has rewritten
+since; the `side-*` or `cntlr-*` file of an object the reload skipped
+that no `SyncupSide` or `SyncupCntlr` has rebuilt; or the one a
+`SyncupSide` or `SyncupCntlr` for an object the agent does not hold left
+behind when it was refused for a save whose rename held and whose
+directory sync failed (SH5): it is not deleted when its object's pointer
+leaves the list. The sweep still removes the object's resources
+by name, and a later restart that decodes the file finds the pointer
+absent and deletes it.
 
 ### Revision gate — `revision.go`
 
@@ -420,15 +469,24 @@ SH9. Unknown-object rejections use `ReplyCodeUnknownObject` with a
 carries a value the control plane cannot have written is rejected with
 `ReplyCodeInvalidConf` and the validator's message of Files (DN4,
 `cnagent.md` CN8), or the message of DN8's side conf gate: the object is
-known and the revision is current, so it is neither of the other two, and
-`details` names the proto field rather than an id. All three rejection
-kinds return a normal gRPC reply (`AgentReply.code` non-zero), never a
-gRPC error status — only `GetDnSize`/`GetCnSize` and `Get*Bm` report
-failure through the status (`architecture.md`, Common agent rules). A
-rejected request is never persisted (SH5), whichever kind it is.
+known and the revision is current, so it is neither a stale revision nor
+an unknown object, and `details` names the proto field rather than an id.
+A request the gates admit whose save then fails is rejected with
+`ReplyCodeSaveFailed`, its `details` carrying the save's error (SH5): the
+request is current and its conf usable, so it is none of the other three.
+All four rejection kinds
+return a normal gRPC reply (`AgentReply.code` non-zero), never a gRPC
+error status — only `GetDnSize`/`GetCnSize` and `Get*Bm` report failure
+through the status (`architecture.md`, Common agent rules). A request a
+gate refuses is never persisted (SH5); one refused for a failed save is
+in the store only when its rename held and the directory sync after it
+failed (SH5). Neither becomes the desired state of the process that
+refused it; a restart that finds the second still in its file reloads it
+as it does every stored request (DN2, `cnagent.md` CN2).
 `ReplyCodeLeftover` is **not** one of these: it reports an accepted
 request whose node still holds unwanted objects (DN19), so it is the one
-non-zero code that leaves the request stored and its rows worth reading.
+non-zero code whose request becomes the desired state and whose rows are
+worth reading.
 
 ### Concurrency — `locks.go`
 
@@ -438,17 +496,29 @@ objects MAY hit the agent concurrently, and `Check*` streams run alongside
 `Syncup*` (`architecture.md`, Bitmap push protocol and Check streams). The
 agent therefore serializes with a **two-level hierarchy**, `LockSet`: a
 node-level read-write lock (`Node`) and one mutex per object (`Obj`),
-created on first use and dropped (`DropObj`) only during teardown while the
-node write lock is held. First use is a call, a background converge attempt
-or a background read (SH29) that has found, under the node read lock, that
-the agent holds the object, or a `SyncupSide` or `SyncupCntlr` of an object
-it does not hold whose gates (DN8, `cnagent.md` CN8) admit the request: a
-request refused as unknown, or refused by those gates before the agent
-holds the object, leaves no entry, and a check round or an info read takes
-no lock of the hierarchy (SH28). Lock order is always node before object.
-Reason: only the teardown of an object the agent holds drops an entry, so
-an entry a refused request created would stay for the life of the process,
-and refused requests would grow the set without bound.
+created on first use and dropped (`DropObj`) only while the node write
+lock is held: by the teardown of an object the agent holds, and by the
+parent's pointer diff (DN6, `cnagent.md` CN7) for every pointer that left
+the list, whether or not the agent holds that object. First use is a
+call, a background converge attempt, a background read (SH29) or a
+zeroing batch's volume-table update (DN9) that has found, under the node
+read lock, that the agent holds the object, or a
+`SyncupSide` or `SyncupCntlr` of an object it does not hold whose gates
+(DN8, `cnagent.md` CN8) admit the request: a request refused as unknown,
+or refused by those gates before the agent holds the object, leaves no
+entry, and a check round or an info read takes no lock of the hierarchy
+(SH28). A request those gates admit whose save then fails (SH5) leaves
+the entry it created: the request sent again reuses it, and since the
+gates admit only a pointer of the parent's held list, the pointer diff
+drops it once the pointer leaves the list. Lock order is always node
+before object. Reason: only the teardown and the pointer diff drop an
+entry, the diff only for a pointer that leaves the list, so an entry a
+request refused as unknown created would stay for the life of the
+process whenever the parent's list never names its pointer, and refused
+requests would grow the set without bound. A request the later gates
+refuse names a pointer of the held list, whose entry the diff would
+drop; it leaves none all the same because every gate runs before the
+entry is made.
 
 SH10. Node **write** lock: the startup reconcile and the node-level syncup
 (`SyncupDn`/`SyncupCn` — they diff the pointer list and run the node-level
@@ -462,16 +532,20 @@ waits for, which holds the node read lock too.
 SH11. Node **read** lock + the object's lock: every object-scoped RPC
 but a check round and an info read (SH12) — `SyncupSide`/`SyncupCntlr`,
 `Push*Bitmap`, the cn's `Get*Bm` bitmap reads — the background read of a
-side or a cntlr (SH29), and every background converge attempt (the dn's connect retry — DN13; DN1's and
+side or a cntlr (SH29), a zeroing batch's volume-table update (try-acquire,
+DN9), and every background converge attempt (the dn's connect retry — DN13; DN1's and
 SH27's "DN8 retry" — and DN12 fence timer, which share `reconvergeSide`,
 and the cn's connect retry, which runs `reconvergeCntlr` — the SH27
 background tasks that converge; `cnagent.md`
 CN1). Each takes the object's lock only once it has found the object, or
 its gates have admitted the request, under the node read lock (Concurrency
-— `locks.go`): a call refused for an object the agent does not hold takes
-the read lock alone. A `SyncupSide` or `SyncupCntlr` cancels the object's
-read before it takes a lock, save a refused one that marks nothing (SH30);
-every other holder waits for a read as it waits for a converge.
+— `locks.go`): a call its gates refuse for an object the agent does not
+hold takes the read lock alone, and a `SyncupSide` or `SyncupCntlr` they
+admit whose save then fails leaves the lock entry it created (SH5). A
+`SyncupSide` or `SyncupCntlr` cancels the object's read before it takes a
+lock, save one a gate refuses as it arrives, which marks nothing, and one
+that arrives while the store's latest save failed (SH30); every other
+holder waits for a read as it waits for a converge, and so do those two.
 
 SH12. Node **read** lock only: the background read of a DN or a CN (SH29).
 `GetDnSize`/`GetCnSize`, the four info reads and every check round take no
@@ -909,7 +983,9 @@ and by which reads, is the cn role's rule (`cnagent.md`,
 SH21. Implements the agent side of `architecture.md`, Bitmap push protocol:
 persist the received `Push*BitmapRequest` verbatim at its `Local*BmPath`
 (via `WriteProto`) **before** applying; the applied set is derived from the
-files present, save those the startup reload leaves unloaded (below) —
+files present, save those the startup reload leaves unloaded and those a
+failed push left in place for a chunk outside the set, since a push whose
+save fails changes nothing in it (below) —
 `BitmapInfo.bm_idx_list` for a migration, keyed by the append index, and
 `BitmapInfo.chunk_id_list` for a clone, keyed by the `src_slice_idx` and
 `bm_idx` pair that addresses the chunk. The file name carries that pair too,
@@ -917,7 +993,13 @@ but only as an address: the persisted request's CONTENT is what the startup
 reload decodes it from. A file that reload leaves unloaded — one that does
 not decode, DN2's skips while a `dn-*` or `side-*` file does not load, and
 `cnagent.md` CN2's while a `cn-*` or `cntlr-*` file does not — is in no
-applied set until a push rewrites it or a later restart loads it.
+applied set until a push rewrites it or a later restart loads it. A push
+whose save failed only at the directory sync, after its rename, leaves
+its file in place and applies nothing (DN15, `cnagent.md` CN22): the
+applied set keeps the chunk as it held it before that push — out of the
+set if it was out, in it at the bytes it held if it was in, which for a
+clone chunk that grows in place are its older bytes — until a push
+rewrites it or a later restart loads it.
 
 SH22. Of `architecture.md`, raid0 bitmap math, this file holds the
 migration's chunk placement (concatenation in `bm_idx` order,
@@ -1006,10 +1088,13 @@ finds it too old brings none (`dnv-worker.md` HL7), and a read that round
 starts stores the node's state at the revision the agent now holds, the
 cut-off syncup's own (SH8), so the rounds after it answer at that
 revision, and only a verdict that is not clean brings a syncup until the
-desired revision moves on (Known limits). A syncup's reply carries the
-stamp of the observation its converge stored, with no converge start, and
-the time the agent saved the request to its local store (SH5), unset when
-it saved none. An object's observation times only increase: a time not later than
+desired revision moves on (Known limits). A syncup's reply to a request
+the agent accepted carries the stamp of the observation its converge
+stored, with no converge start, and the time the agent saved the request
+to its local store (SH5), which every accepted request has. A reply that
+refuses the request, a gate's refusal or a failed save's (SH9), carries
+no rows, no stamp and no save time, and its call stores no observation.
+An object's observation times only increase: a time not later than
 the stored one is stored as just after it, so equal times mean the same
 observation.
 
@@ -1046,7 +1131,8 @@ read in the round's own path would bring it.
 
 SH30. **Converge marks.** A syncup marks a converge of its object in flight
 as it arrives, then cancels the object's running read, and only then waits
-for its locks; its mark ends once its converge has stored its observation.
+for its locks; its mark ends once its converge has stored its observation,
+or once its call has ended without one, as a refusal does.
 
 A syncup that a gate refuses as it arrives marks nothing and cancels
 nothing; its gates run again under its locks, and that run decides. That
@@ -1068,7 +1154,8 @@ read end, and the object's health epoch would go on and off with no fault
 on the node (`dnv-worker.md` HL7).
 
 A node-level syncup that marks its object marks the node too, save one at
-the revision the agent holds for its DN or CN. The node's mark keeps every
+the revision the agent holds for its DN or CN and one that arrives while
+the store's latest save failed (below). The node's mark keeps every
 read from starting until the syncup ends, and the syncup cancels every
 read of the agent, each of which holds the node read lock its write lock
 waits for. A node-level syncup at the held revision is the re-send the
@@ -1083,6 +1170,26 @@ starting, such a read would end only between two re-sends, none would
 while a read takes longer than that, and the observations of sides and
 cntlrs with no fault would go too old (`dnv-worker.md` HL7).
 
+While the store's latest save failed, of a request or a chunk, whatever
+its object (`Store.SaveFailing`, SH4), a syncup that marks its object as
+it arrives marks that object alone and cancels no read, its own object's
+included, whatever its revision: a node-level syncup marks no node. It
+then waits for its locks behind the reads that hold them, each of which
+runs bounded commands (SH13): a `SyncupSide` or `SyncupCntlr` behind its
+object's read, a node-level syncup behind every read that holds the node
+read lock when it asks for it, as one at the held revision does (above).
+A syncup a gate refuses as it arrives still marks nothing. The first save
+that succeeds ends the state. Reason: the worker re-sends a request
+refused for a failed save round after round (SH5), as it re-sends one a
+gate refuses, and nothing knows before the save that the request will be
+refused; a cancel on each re-send would stop the reads of every round
+that brings one, so the observations of objects with no fault would go
+too old (`dnv-worker.md` HL7) and their health epochs would go on and
+off. The state is the outcome of the latest save, not a reading of the
+disk: a save that fails because its call was cancelled or the SH4 bound
+ran out sets it on a healthy disk as a full or read-only one does. It
+records no work owed and starts no retry.
+
 A background converge attempt (DN12, DN13; `cnagent.md` CN10, CN18) marks
 its object before it waits for the object's lock and cancels nothing. The
 teardown of an object's state cancels its read and waits for nothing. The
@@ -1093,7 +1200,8 @@ shows in no side's or cntlr's, though no read of them starts while it
 stands. Reason: the worker's deadline cannot cut a lock wait, so a syncup
 cancels a read rather than wait for all of its probes, and waits for it no
 longer than its current command, save the side or cntlr reads a
-node-level syncup at the held revision waits for (above); the other lock
+node-level syncup at the held revision waits for and the reads a syncup
+waits for while the store's latest save failed (above); the other lock
 holders it may wait for are
 the converges, the `Push*Bitmap` calls, the cn's bitmap reads and a zeroing
 batch's volume-table update (DN9). Marking before the
@@ -1220,10 +1328,11 @@ read are one step against a syncup's mark and its cancel of that read
 
 DN1. Lock mapping (instantiates SH10 to SH13): `SyncupDn` and the startup
 reconcile — node write; `SyncupSide`, `PushMigrBitmap`, a side's background
-read, one DN8 retry attempt or DN12 fence-timer converge — node read + that
-side's object lock (key = `(cluster_id, dn_id, sp_id, side_id)`); a DN's
-background read — node read; `GetDnSize`, `GetDnInfo`, `GetSideInfo` and
-every `CheckDn` and `CheckSide` round — no lock of the hierarchy.
+read, one DN8 retry attempt or DN12 fence-timer converge, and a DN9 zeroing
+batch's volume-table update (try-acquire) — node read + that side's object
+lock (key = `(cluster_id, dn_id, sp_id, side_id)`); a DN's background
+read — node read; `GetDnSize`, `GetDnInfo`, `GetSideInfo` and every
+`CheckDn` and `CheckSide` round — no lock of the hierarchy.
 `SyncupDn` and `SyncupSide` cancel the reads SH30 names for each, as each
 arrives and before it takes a lock.
 
@@ -1360,13 +1469,22 @@ what this disk's [D13] header is formatted with and what every side's runs
 are carved out of, so a value this node substituted would be one the rest
 of the cluster does not share; the control plane resolves it when it
 *writes* the `ClusterConf`, and a zero arriving here is refused rather than
-replaced. Placement is load-bearing: the gate sits **before** the request
-becomes the desired state, so nothing is converged, no dm device is
-removed, no volume-table block is written and no local-store file is
-touched. After the assignment it would instead persist the zero and let the
-next startup reconcile converge it. (DN5's header-identity guard is not
-this gate: it refuses a disk formatted for another cluster, dn or extent
-size, which is a disk fact, not a conf fact.)
+replaced. Placement is load-bearing: the gate sits **before** the
+local-store save and before the request becomes the desired state, so
+nothing is converged, no dm device is removed, no volume-table block is
+written and no local-store file is touched. After the save it would
+instead persist the zero, replacing any request accepted before it, and
+the next startup reconcile would load that file and refuse it,
+converging neither the DN nor its sides (DN2).
+(DN5's header-identity guard is not this gate: it refuses a disk formatted
+for another cluster, dn or extent size, which is a disk fact, not a conf
+fact.)
+
+A request both gates admit is saved at once, under the node write lock,
+and only then becomes the DN's desired state (SH5). A save that fails
+refuses it with `ReplyCodeSaveFailed` at the stored revision, zero for a
+DN the agent does not hold, which it then still does not hold: the agent
+keeps the request it held, and none of DN5 to DN7 runs.
 
 DN5. Converge the once-per-DN base state of `architecture.md`, Disk node,
 probe-first (SH16), building `DnInfo` as it goes:
@@ -1449,17 +1567,28 @@ probe-first (SH16), building `DnInfo` as it goes:
 DN6. **Removal is a sweep of actual minus desired, never a memory.**
 `side_pointer_list` is authoritative (full sync, `architecture.md`, Common
 agent rules). A pointer in the request without local state needs nothing
-yet — resources come with its first `SyncupSide`; the persisted request is
-what makes the pointer *known*. A side this process holds whose pointer has
-**left** the list is dropped on the spot (SH7): its DN8 connect-retry
+yet — resources come with its first `SyncupSide`; the accepted request
+the agent holds for the DN is what makes the pointer *known* (DN8). A
+side this process holds whose pointer has **left** the list is dropped
+on the spot (SH7): its DN8 connect-retry
 registration goes, its DN9 zeroing goroutine is cancelled **and waited
 for**, its fence is cleared, and its `side-*` and `migr-bm-*` files, memory
 entry and object lock are deleted. Nothing of it is removed from the node
 at that point. The files deleted are the ones its memory entry names — the
-request's own path and its chunk set's files — so a chunk DN2's reload
-skipped and no push has rewritten stays, as does every file of a side DN2
-skipped that no `SyncupSide` has rebuilt, which the process does not hold
-at all; they wait for a later restart (SH7).
+request's own path and its chunk set's files — so a file no memory entry
+names stays: a chunk DN2's reload skipped, or one a push left outside the
+applied set when its save failed only at the directory sync (DN15), that
+no push has rewritten since; every file of a side DN2 skipped that no
+`SyncupSide` has rebuilt, which the process does not hold at all; and the
+`side-*` file a `SyncupSide` left for a side the process does not hold
+when its save failed only at the directory sync (SH5). They wait for a
+later restart (SH7). The pointer diff of a
+`SyncupDn` also drops, under its node write lock, the object lock entry of
+every pointer that left the list since the request the agent held for the
+DN before this one, whether or not the agent holds that side: a
+`SyncupSide` that DN8's gates admitted for a side the agent does not hold,
+and whose save then failed, leaves the entry it created (Concurrency —
+`locks.go`), and no teardown runs for a side never held.
 
 What to remove is derived afterwards from the node itself: enumerate what
 exists — `dmsetup ls`, the configfs subsystem listing, the walk of
@@ -1911,10 +2040,10 @@ stamp and save time of SH28.
 DN8 to DN14 below; the converge order is build bottom-up (side device, then
 dm, then nvmet), tear down top-down, probe-first throughout (SH16).
 
-DN8. **Gating.** The pointer MUST be present in the stored
-`SyncupDnRequest.side_pointer_list` — else `ReplyCodeUnknownObject`
-(`SyncupDn` introduces pointers first, `architecture.md`, `service
-DiskNodeAgent`). Then the SH8 revision gate against the `SyncupSideRequest`
+DN8. **Gating.** The pointer MUST be present in the `side_pointer_list`
+of the `SyncupDnRequest` this process holds for the DN (SH8) — else
+`ReplyCodeUnknownObject` (`SyncupDn` introduces pointers first,
+`architecture.md`, `service DiskNodeAgent`). Then the SH8 revision gate against the `SyncupSideRequest`
 this process holds — zero while it holds none, as for a side whose file
 DN2's reload did not load, whatever revision that file carries.
 
@@ -1938,7 +2067,11 @@ has no size to bound the length by, and only the first two bounds are
 checked.
 
 A request the three gates admit is persisted at once, before it becomes
-the side's desired state and before its converge (SH5).
+the side's desired state and before its converge (SH5). A save that fails
+refuses it with `ReplyCodeSaveFailed` at the revision this process holds
+for the side, zero when it holds none: no converge runs, the agent keeps
+the request it held, and a side it did not hold stays unknown, with only
+the lock entry the call created (SH11).
 
 The same check runs inside the converge, for the entrances that do not
 come through this RPC: DN2's startup reconcile, DN13's connect retry and
@@ -2429,10 +2562,9 @@ revision (below). The request that clears the flag runs steps (3) to (5).
 
 The worker never sends `cutover_pending` again once its cutover cleared
 it, so a pass that waits for the cutover and finds a per-CN stack serving
-through the dm-clone converges a stale request: DN2's re-run of a stored
-request whose successor, the one that cleared the flag, failed to save
-(SH5). That pass leaves the stack serving through the
-dm-clone, as a step that stops does, until the worker sees the side's
+through the dm-clone converges a request older than the one whose
+converge built that dm-clone. That pass leaves the stack serving through
+the dm-clone, as a step that stops does, until the worker sees the side's
 older revision and sends the newer request again (`dnv-worker.md` RW4).
 Reason: reloading the leg's only serving path onto its dm-error would
 fail host IO until that request came.
@@ -2518,11 +2650,10 @@ loaded node, so that normally the gap holds only the two sides' own steps. A
 process gives it to one pass per cutover, since once that pass's request has
 replaced the held one the process holds no request with the flag, so a
 source that never answers holds the side's locks that long once, not on
-every retry and not on every revision. A restart can give it once more: when
-the save of the request that cleared the flag failed, DN2's re-run converges
-the stored request before it, which still carries the flag (Known limits),
-and the process then holds that request, so the request the worker sends
-again gets the longer budget a second time. The longer budget is a bound,
+every retry and not on every revision. A request without the flag whose
+save fails is refused before it replaces the held one (SH5), so the process
+still holds the request with the flag, and the converge of the request the
+worker sends again is still the one the cutover brings. The longer budget is a bound,
 not a wait for the source: a source whose pass outlasts it leaves the gap to
 a pass of the DN8 retry (`architecture.md`, Known limits), and so does a
 source slower than the shorter budget wherever no pass gets the longer one:
@@ -2769,9 +2900,11 @@ free.
 
 DN14. Reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
-`zeroed_bytes`/`zero_bytes`, filled on every reply of a side DN8's gate
-admits (DN9) — `bm_info`
-(the applied set, SH21), and the stamp and save time of SH28.
+`zeroed_bytes`/`zero_bytes`, filled on every reply to a request DN8's
+gates admit and whose save holds (DN9) — `bm_info`
+(the applied set, SH21), and the stamp and save time of SH28. A request
+whose save fails gets SH5's refusal instead, `agent_reply` and `revision`
+alone (SH28).
 
 ### `PushMigrBitmap`
 
@@ -2799,9 +2932,11 @@ counts as applied; chunks are re-applied whenever the dm-clone is
 (re)created. A **failed persist is still acked code zero**, with the error
 logged and neither the recompute nor the `blkdiscard` attempted
 (`architecture.md`, Bitmap push protocol): not persisted is not applied, so
-the chunk stays out of the applied set — SH21 derives that set from the
-files present — the next `SyncupSide` reply's `bm_info.bm_idx_list` omits
-the index, and the worker pushes it again on a later round. Reply
+the push leaves the applied set as it was (SH21), and a chunk not yet in
+it stays out, even when only the directory sync after the rename failed
+and its file is in place — the next accepted `SyncupSide` reply's
+`bm_info.bm_idx_list` omits the index, and the worker pushes it again on
+a later round. Reply
 `agent_reply` only.
 
 ### `GetDnInfo` / `GetSideInfo`
@@ -2894,11 +3029,17 @@ a converge's sweep both name them, so the rounds reply
 `ReplyCodeLeftover`, the worker re-issues the `Syncup*` that owns them
 (`dnv-worker.md` RW4), and the sweep inside it tries again — including
 after a restart, where the observations the startup reconcile stores
-(SH28) report what the startup sweep could not remove. The condition only
+(SH28) report what the startup sweep could not remove. While the node's
+store disk refuses writes, the re-issued `Syncup*` is refused for its
+failed save before its converge, so it runs no sweep (SH5), and no
+syncup re-drives the leftover until a save holds again; meanwhile only a
+converge no syncup brings, a background converge attempt (SH11) or a
+restart's reconcile (DN2), can sweep it (Known limits). The condition only
 a read's verdict names re-drives on the rounds that answer a read's
 observation (DN16). While a leftover keeps every round re-sending, each
-re-sent `Syncup*` cancels the read that the round which brought it started
-(SH30), so a read of the object ends only where it beats the re-send; what
+re-sent `Syncup*` cancels the read that the round which brought it started,
+so a read of the object ends only where it beats the re-send, save while
+the store's latest save failed, when a re-send cancels no read (SH30); what
 that does to the worker's runs of rounds in a row is the worker's
 (`dnv-worker.md` RW23; `dnv-worker.md`, Known limits). No agent-side loop
 exists for leftovers, because the one the worker already runs is enough;
@@ -3311,28 +3452,27 @@ else reported through `agent_reply` is still a protocol-level refusal.
   failing, and a read's verdict names the side as one nothing zeroes, so
   the worker re-sends its `SyncupSide` on the rounds that answer a read's
   observation (DN16).
-* A side's save that fails leaves the request before it on disk, the one
-  way a stale request stays there: the save comes before the converge, so a
-  crash or a cancelled call inside a pass leaves none (SH5). The converge
-  runs on after a failed save, so an agent restart before the side's next
-  accepted save converges that older request and can undo what the newer
-  one did. A migration source whose stored request comes from before its
-  cutover puts its fenced dm-linears back onto the side's data, moves the
-  primary's namespace back to optimized and removes its migration source
-  export (DN12). A destination whose stored request comes from before its
-  finish takes a fresh run of the clone-metadata area and runs the
-  destination's steps again (DN13). When the source's export is gone, as it
-  is once the source has torn its side down after the finish, the source
-  connection answers with no namespace device, so the per-CN stacks go onto
-  their dm-errors with every namespace `AnaGrpIdInaccessible`: the leg's only
-  side serves nothing until the worker sees the side's older revision and
-  sends the newer request again (`dnv-worker.md` RW4). While the source's
-  export still answers, the destination builds its dm-clone again over the
-  fresh run, which copies the source's data over every write made since the
-  cutover. A side whose stored request comes from before a failover moves
-  the old primary's dm-linear back onto the side's data and its namespace
-  back to optimized. DN13's guard covers only a destination whose stored
-  request still waits for the cutover. Nothing tries the save again before
-  the side's next accepted `SyncupSide`, and the side's observations carry
-  the revision the process holds, so only a round's non-zero reply code or
-  a newer desired revision brings one (`dnv-worker.md` RW4).
+* While a node's store disk refuses writes, full or read-only, every
+  request the gates admit is refused for its failed save (SH5), so every
+  change of that node's desired state stalls until a save holds again: a
+  failover's fence or primary flip, a migration's cutover or finish and a
+  cntlr's promotion stall with it, and so does a removal, such as a pool
+  delete's. So does every re-converge a syncup at the held revision would
+  bring, such as a leftover's sweep (DN17) or the start of a side's zeroing
+  that nothing runs (DN16); only the converges no syncup brings still run —
+  the background converge attempts (SH11) and a restart's reconcile (DN2).
+  Apart from one narrow case on a CN, during an ownership change of a
+  pool (`cnagent.md`, Known limits), nothing is lost on either role: the
+  node serves on as the requests it accepted left it, and md's
+  arbitration keeps a group from two writers (`architecture.md`,
+  Failover). On a CN, what a `SyncupCntlr` refused for
+  its failed save does to the forced-start marks and thin-id sweeps of the
+  request the agent holds for that cntlr is `cnagent.md` CN8; what that
+  costs is `cnagent.md`, Known limits. The worker sends each refused
+  change again every round, with no backoff
+  (SH5), each a failed save and no converge; each such syncup waits for
+  the reads in flight rather than cancel them (SH30). A rejection neither
+  sets nor clears a health epoch (`dnv-worker.md` HL1), so the fault
+  shows in the logs: the agent's record of each failed save, and the
+  worker's record of each rejection, on each round that re-sends the
+  refused request (SH5; `dnv-worker.md`, Log records).

@@ -11677,7 +11677,10 @@ ops_inspect() {
 # answers from the cntlr's latest observation, and an observation at that
 # revision is the converge's own, stored as it ends, or a later read's: no
 # read starts while the converge runs, and one running when it arrives is
-# cancelled (dnagent.md SH28, SH30). So a reply at that revision comes after
+# cancelled or, while the agent's latest save stands failed, takes the
+# cntlr's object lock before or after the converge, and one that takes it
+# before stores the revision held before the converge (dnagent.md SH28 to
+# SH30). So a reply at that revision comes after
 # the converge of the level, and its rows are judged against the plan of
 # that level. The converge need not have applied the level: one whose call
 # was cut off stores no observation, but the agent already holds its

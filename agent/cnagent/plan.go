@@ -267,8 +267,8 @@ type grpPlan struct {
 	rep *repPlan
 	// mark is the group's forced-start mark (architecture.md, Repair), nil
 	// while none stands: the leg CN12's forced start starts the array from
-	// alone while no array of the group runs. A converge of a request no
-	// SyncupCntlr of this process delivered holds none
+	// alone while no array of the group runs. A converge of a request that
+	// does not count as delivered (cntlrState.reqFromRpc) holds none
 	// (dropForcedStartMarks).
 	mark *pb.ForcedStart
 
@@ -370,9 +370,11 @@ func (gp *grpPlan) forcedStartLegs() (named *legPlan, kept []*legPlan) {
 }
 
 // dropForcedStartMarks takes every group's forced-start mark out of the
-// plan, for a converge of a request no SyncupCntlr of this process
-// delivered (cntlrState.reqFromRpc): CN12 acts on a mark only from a
-// delivered request, and the group then converges as with no mark.
+// plan, for a converge of a request that does not count as delivered
+// (cntlrState.reqFromRpc): the stored copy the startup reconcile loaded, or
+// a held request whose newer successor syncupCntlr refused for a failed
+// save. CN12 acts on a mark only from a request that counts as delivered,
+// and the group then converges as with no mark.
 func (p *cntlrPlan) dropForcedStartMarks() {
 	for _, gp := range p.grps {
 		gp.mark = nil
@@ -487,8 +489,9 @@ func (gp *grpPlan) hasLateMember(
 // false, and that error registers the retry instead (markedErr). The pass
 // that started the array registers nothing for the mark: the array runs
 // from the named leg, and the worker's clear follows the primary's report
-// of it. A converge of a request no SyncupCntlr of this process delivered
-// holds no mark (dropForcedStartMarks), so it registers nothing for one.
+// of it. A converge of a request that does not count as delivered
+// (cntlrState.reqFromRpc) holds no mark (dropForcedStartMarks), so it
+// registers nothing for one.
 func (gp *grpPlan) markWaits(running, forcedStarted bool) bool {
 	return gp.mark != nil && running && !forcedStarted
 }

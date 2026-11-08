@@ -73,9 +73,13 @@ func (s *CnAgentServer) pushCloneBitmap(
 	path := s.nf.LocalCloneBmPath(req.GetClusterId(), req.GetCnId(),
 		ptr.GetSpId(), req.GetCloneId(), req.GetSrcSliceIdx(), req.GetBmIdx())
 	if err := s.store.Save(ctx, path, req); err != nil {
-		// Not persisted ⇒ not applied: the chunk stays out of the applied
-		// set, so the worker re-pushes it on its next round (architecture.md,
-		// Bitmap push protocol).
+		// Not persisted ⇒ not applied: a pair the set does not hold stays out
+		// of it, even when only the directory sync after the rename failed
+		// and its file is in place, so the worker pushes it again after a
+		// later accepted SyncupCntlr reply; a grown pair keeps its older
+		// bytes, and this ack refreshes the worker's memo, so the worker
+		// pushes it again only once the chunk grows again (CN22;
+		// architecture.md, Bitmap push protocol).
 		slog.ErrorContext(ctx, "persisting clone bitmap chunk failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
@@ -107,10 +111,12 @@ func findClone(req *pb.SyncupCntlrRequest, cloneId uint64) *pb.Clone {
 
 // bitmapInfoList is the CN20 reply field: one BitmapInfo per clone of the
 // stored request, its chunk_id_list derived from the files present save any
-// the startup reload left unloaded (SH21), so it survives an agent restart and
-// the worker re-pushes no chunk the reload loaded. A clone reports its applied set as chunk_id_list
-// only — bm_idx_list is a migration field, and a flat index cannot name a
-// chunk the pair (src_slice_idx, bm_idx) addresses.
+// the startup reload left unloaded and any a push for a pair the set did not
+// hold left in place when its save failed only at the directory sync (SH21;
+// CN22), so it survives an agent restart and the worker re-pushes no chunk
+// the reload loaded. A clone reports its applied set as chunk_id_list only —
+// bm_idx_list is a migration field, and a flat index cannot name a chunk the
+// pair (src_slice_idx, bm_idx) addresses.
 func (s *CnAgentServer) bitmapInfoList(st *cntlrState) []*pb.BitmapInfo {
 	clones := st.loadReq().GetCloneList()
 	if len(clones) == 0 {

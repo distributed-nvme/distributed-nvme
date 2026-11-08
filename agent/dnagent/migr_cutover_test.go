@@ -2,13 +2,10 @@ package dnagent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
-
-	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -463,15 +460,13 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 }
 
 // The worker never sends cutover_pending again once its cutover cleared it, so
-// a destination converges a pending request over a dm-clone that serves only
-// when that request is a stale one: a restart's re-run of a stored request
-// whose successor, the one that cleared the flag, was converged after a save
-// that failed (dnagent.md SH5). Such a pass reads where the per-CN stacks are,
-// as a step that stops does, so the primary keeps serving through the dm-clone
-// until the worker sends the newer request again: reloading it onto its
-// dm-error under a live dm-clone would fail host IO. The check round's read
-// reads the per-CN rows by the same answer, and the pass leaves no retry,
-// since its primary's stack is where the pass put it.
+// a pending request that a destination converges over a dm-clone that serves
+// is older than the one whose converge built that dm-clone (DN13). Such a pass
+// reads where the per-CN stacks are, as a step that stops does, so the primary
+// keeps serving through the dm-clone until the worker sends the newer request
+// again: reloading it onto its dm-error under a live dm-clone would fail host
+// IO. The check round's read reads the per-CN rows by the same answer, and the
+// pass leaves no retry, since its primary's stack is where the pass put it.
 func TestAStalePendingRequestKeepsAServingClone(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -488,8 +483,8 @@ func TestAStalePendingRequestKeepsAServingClone(t *testing.T) {
 	if !servesThroughClone(t, srv, node, names) {
 		t.Fatal("setup: the destination does not serve through its dm-clone")
 	}
-	// The save of revision 3 is lost: the stored file is the pending
-	// request before it.
+	// The side file is put back to the pending request before revision 3,
+	// so the restart converges that request.
 	stale := pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
 	path := srv.nf.LocalSidePath(stale.GetClusterId(), stale.GetDnId(),
 		stale.GetSidePointer().GetSpId(), stale.GetSidePointer().GetSideId())
@@ -946,70 +941,72 @@ func TestARestartThatHoldsNoRequestKeepsTheShortBudget(t *testing.T) {
 	}
 }
 
-// A restart whose DN2 re-run puts back a stored request that still carries
-// cutover_pending gives the request the worker sends again the longer budget
-// once more (DN13): the save of the request that cleared the flag failed,
-// which is only logged (SH5), so the restarted process holds the flagged
-// request, and the request without the flag brings the cutover to it as it
-// did to the process before. The longer budget goes to one pass per cutover
-// in a process, not in the side's whole life.
-func TestARestartOverAFlaggedRequestGivesTheLongerBudgetOnceMore(
-	t *testing.T,
-) {
+// A request that clears cutover_pending and whose save fails is refused
+// (SH5): no converge runs, and the agent and the side file keep the flagged
+// request it held. So the same request, sent again once saves work, is the
+// one the cutover brings and gets DnMigrCutoverConnectBudget (DN13): a
+// failed save costs the cutover its pass, never its longer budget.
+func TestARefusedClearingRequestLeavesTheFlaggedRequestHeld(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.migrRetryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
-	withDnClock(srv, node)
+	clock := withDnClock(srv, node)
 	setFailAlways(node, "nvme connect", "connect refused")
 	if _, err := srv.SyncupSide(ctx,
 		pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
+	key := sideKey(testCluster, testDn, testSp, testSide)
 	path := srv.nf.LocalSidePath(testCluster, testDn, testSp, testSide)
-	oc := node.osClient()
-	write := oc.WriteProtoFn
-	oc.WriteProtoFn = func(
-		ctx context.Context, p string, msg proto.Message,
-	) error {
-		if p == path {
-			return errors.New("write " + p + ": no space left on device")
-		}
-		return write(ctx, p, msg)
-	}
-	srv.store = agent.NewStore(oc, common.DefaultLocalStorPrefix)
-	if _, err := srv.SyncupSide(ctx,
-		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
-		t.Fatalf("SyncupSide: %v", err)
-	}
-	if got := storedSideRevision(t, srv, node); got != 2 {
-		t.Fatalf("the side file holds revision %d, want the 2 before the "+
-			"failed save", got)
-	}
-
-	// The kernel state and the stored request survive; the agent process
-	// does not.
-	restarted := NewDnAgentServer(node.osClient(),
-		common.NewNameFmt(common.DefaultLocalStorPrefix),
-		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
-	restarted.roundReads = false
-	restarted.migrRetryInterval = time.Hour
-	clock := withDnClock(restarted, node)
-	rootCtx, cancel := context.WithCancel(ctx)
-	t.Cleanup(func() {
-		cancel()
-		restarted.WaitBackground()
-	})
-	if err := restarted.Reconcile(rootCtx); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	failSaves(srv, node, onlyPath(path))
 
 	start := clock.Now()
 	node.Reset()
-	if _, err := restarted.SyncupSide(ctx,
+	reply, err := srv.SyncupSide(ctx,
+		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := reply.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeSaveFailed || reply.GetRevision() != 2 {
+		t.Errorf("the clearing request answered code %d at revision %d, "+
+			"want ReplyCodeSaveFailed at the held 2", got,
+			reply.GetRevision())
+	}
+	// The held side is a migration destination, so an accepted reply
+	// would carry bm info (DN14); the refusal carries none of it.
+	if reply.GetSideInfo() != nil || reply.GetBmInfo() != nil ||
+		reply.GetObsStamp() != nil || reply.GetSaveTime() != nil {
+		t.Errorf("the refusal carries info %v, bm info %v, stamp %v, "+
+			"save time %v; want none", reply.GetSideInfo(),
+			reply.GetBmInfo(), reply.GetObsStamp(), reply.GetSaveTime())
+	}
+	if n := len(node.callsMatching("cmd nvme connect ")); n != 0 ||
+		!clock.Now().Equal(start) {
+		t.Errorf("the refused request made %d connects and waited %v, "+
+			"want none", n, clock.Now().Sub(start))
+	}
+	if held := srv.getSide(key).req.Load(); held.GetRevision() != 2 ||
+		!held.GetMigrDstConf().GetCutoverPending() {
+		t.Errorf("the agent holds revision %d with cutover_pending %v, "+
+			"want the flagged 2", held.GetRevision(),
+			held.GetMigrDstConf().GetCutoverPending())
+	}
+	if got := storedSideRevision(t, srv, node); got != 2 {
+		t.Errorf("the side file holds revision %d, want the flagged 2", got)
+	}
+
+	// The store disk works again; the worker sends the same request.
+	srv.store = agent.NewStore(node.osClient(), common.DefaultLocalStorPrefix)
+	start = clock.Now()
+	node.Reset()
+	if reply, err = srv.SyncupSide(ctx,
 		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("the request sent again answered code %d, want 0", got)
 	}
 	if got := clock.Now().Sub(start); got !=
 		common.DnMigrCutoverConnectBudget {
@@ -1020,6 +1017,9 @@ func TestARestartOverAFlaggedRequestGivesTheLongerBudgetOnceMore(
 		"cmd nvme connect ")); n != cutoverRetries+1 {
 		t.Errorf("the request sent again made %d connects, want the first "+
 			"and %d retries", n, cutoverRetries)
+	}
+	if got := storedSideRevision(t, srv, node); got != 3 {
+		t.Errorf("the side file holds revision %d, want 3", got)
 	}
 }
 

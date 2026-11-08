@@ -14,9 +14,9 @@ import (
 )
 
 // syncupSide implements DN8-DN14. The node read lock and this side's object
-// lock are held by the caller. A request the gates refuse stores no
-// observation; an admitted one stores its converge's before the caller lets
-// go of the locks (SH28).
+// lock are held by the caller. A request the gates refuse, or whose save
+// fails (SH5), stores no observation; a saved one stores its converge's,
+// unless its call is cut off, before the caller lets go of the locks (SH28).
 func (s *DnAgentServer) syncupSide(
 	ctx context.Context,
 	key string,
@@ -40,21 +40,31 @@ func (s *DnAgentServer) syncupSide(
 		connectBudget = common.DnMigrCutoverConnectBudget
 	}
 	// The side file is persisted as soon as the gates admit the request,
-	// BEFORE the converge (SH5). A converge can run long — a cutover, a
-	// finish, a failover's fence — and a request the worker cancels inside
-	// it would skip a save placed after it, so the next Reconcile would
-	// converge the request before this one and undo what this pass did. A
-	// failed save is only logged; the converge runs whatever its outcome.
+	// BEFORE it becomes the desired state and before the converge (SH5). A
+	// converge can run long — a cutover, a finish, a failover's fence — and
+	// a request the worker cancels inside it would skip a save placed after
+	// it, so the next Reconcile would converge the request before this one
+	// and undo what this pass did. A request whose save fails is refused at
+	// the revision the agent holds, zero for a side it does not hold: it
+	// does not become the desired state, a side the agent does not hold
+	// stays unknown, and no converge runs, so the side file keeps the last
+	// request the agent accepted and a restart undoes nothing the node
+	// serves. Only when the directory fsync after the rename alone failed
+	// does the file hold this request, which a restart converges and the
+	// worker wants anyway. The worker sends the request again as SH5 says
+	// (dnv-worker.md RW4, RW12).
 	path := s.nf.LocalSidePath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
-	var savedAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting side state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
-	} else {
-		savedAt = s.now()
+		return &pb.SyncupSideReply{
+			AgentReply: agent.SaveFailedReply(err),
+			Revision:   held.GetRevision(),
+		}
 	}
+	savedAt := s.now()
 	// Stored before the converge builds anything, so no claim of this
 	// request can be missing from another side's pass that sees what the
 	// converge builds (collectClaims). The store is atomic because those
@@ -83,15 +93,16 @@ func (s *DnAgentServer) syncupSide(
 // cutover_pending, and held, the request this process held for the side
 // before it, carried the flag for the same migration. The flag comes from
 // the migration's record, which nothing but the worker's cutover changes
-// once it is written (dnv-worker.md RW15, RW18), so a process passes at
-// most one request per cutover. A restart whose DN2 re-run puts back a
-// stored request that still carries the flag, because the save of the
-// request after it failed (SH5), lets the new process pass that later
-// request once more when the worker sends it again, and a process that held
-// no request with the flag when the request without it came passes none
+// once it is written (dnv-worker.md RW15, RW18), so a process gives the
+// longer budget to at most one converge per cutover: once that converge's
+// request has replaced the held one, the process holds no request with the
+// flag. A request without the flag whose save fails is refused before it
+// replaces the held one (SH5), so the request the worker sends again is
+// still the one the cutover brings. A process that held no request with the
+// flag when the request without it came gives the longer budget to none
 // (DN13). The entrances that converge a request stored earlier — DN2's
 // startup re-run, the DN13 retry and the DN12 fence timer — do not come
-// through here, so none of them passes either.
+// through here, so none of them gets it either.
 func bringsCutover(held, req *pb.SyncupSideRequest) bool {
 	was, dst := held.GetMigrDstConf(), req.GetMigrDstConf()
 	return was.GetCutoverPending() && dst != nil &&

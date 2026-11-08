@@ -1044,12 +1044,14 @@ func TestAConvergeDoesNotRaceAnotherCntlrsReads(t *testing.T) {
 }
 
 // TestARefusedCallLeavesNoLockEntry: a call refused for a cntlr the agent
-// does not hold creates no lock entry for it (dnagent.md, SH11): only the
-// teardown of a held cntlr drops an entry, so one a refusal created would
-// stay for the life of the process. Each call is checked twice: the set holds
-// as many entries after it as before, and the call does not wait for an
-// entry another call holds. The admitted SyncupCntlr at the end creates its
-// cntlr's entry, which is what the count can see.
+// does not hold, before any save, creates no lock entry for it (dnagent.md,
+// SH11): an entry is dropped only when the cntlr's pointer leaves its CN's
+// list (dropRemovedCntlrs), so one a refusal created would stay until then,
+// and for a pointer the list never named, for the life of the process. Each
+// call is checked twice: the set holds as many entries after it as before,
+// and the call does not wait for an entry another call holds. The admitted
+// SyncupCntlr at the end creates its cntlr's entry, which is what the count
+// can see.
 func TestARefusedCallLeavesNoLockEntry(t *testing.T) {
 	ctx := context.Background()
 	key := cntlrKey(testCluster, testCn, testSp, testCntlr)

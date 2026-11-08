@@ -656,5 +656,6 @@ whose examine finds no superblock and an examine that did not answer, all of
 which the unit tests cover (CN12); a torn snapshot, which needs two slices,
 whose mark the unit tests cover (CN14); the lingering-clone hold's scope per
 thin device, left to the unit tests (CN18); the other states of the clone's
-shared row rule (CN18); and the lock entry a refused request must not leave
-(`dnagent.md`, Concurrency — `locks.go`).
+shared row rule (CN18); and whether a refused request leaves a lock entry
+(`dnagent.md`, Concurrency — `locks.go`; `cnagent.md` CN7), left to the unit
+tests.

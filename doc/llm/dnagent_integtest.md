@@ -15,12 +15,12 @@ format on a block device, nvmet configfs, nvme-tcp — behaves as `dnagent.md`
 specifies on two lab VMs driven over gRPC from the developer machine,
 exercising every `DiskNodeAgent` RPC and reading the kernel state itself
 beside the agent's report. It proves the happy path: error paths are out of
-scope but for the restart case's stale probe and migr_full's lost source,
-and a leftover reply is no exception, being an accepted request with
-residue (`dnagent.md` SH9, DN19).
+scope but for the restart case's stale probe, migr_full's lost source and
+store_full's full local store, and a leftover reply is no exception, being
+an accepted request with residue (`dnagent.md` SH9, DN19).
 The cases run in a fixed order, fail-fast — smoke, zeroing, sides, migr_full,
-migr_bitmap, teardown, restart — each under storage-pool ids of its own, and
-each ends with neither node holding anything of its pool.
+migr_bitmap, teardown, restart, store_full — each under storage-pool ids of
+its own, and each ends with neither node holding anything of its pool.
 
 Beside the suite, the Go tests of `agent/dnagent` run a real dn agent inside
 the test process, behind the real server interceptors over an in-memory gRPC
@@ -133,8 +133,12 @@ their progress in. The info-read commands are plain memory reads.
 ## Conventions
 
 * **Revisions.** One monotonic counter per disk node, undercut only by the
-  stale probe; equal-revision re-sends are deliberate re-applies (`dnagent.md`
-  SH8, SH16). A side's pointer precedes its `SyncupSide` (DN8).
+  stale probe and by store_full's re-send of its refused disk node request,
+  which stays above the revision the agent holds for the disk node (Cases,
+  store_full); equal-revision re-sends are deliberate re-applies (`dnagent.md`
+  SH8, SH16). A side's pointer precedes its `SyncupSide` (DN8), except once
+  in store_full, where a side's `SyncupSide` comes when the only request that
+  had carried its pointer was refused, so the agent holds no pointer for it.
 * **The provisioned flip.** No worker runs, so the suite plays its flip
   (`architecture.md`, Side provisioning protocol): a new side is synced
   unprovisioned, waited on until it reports the length to zero it asked for,
@@ -170,15 +174,18 @@ their progress in. The info-read commands are plain memory reads.
   (The driver: `dnagentctl`); an info read answers from whatever observation
   the agent holds, so a stage uses one only where the last converge's
   observation, or the one a round of the stage just answered from, holds what
-  it reads. In smoke and sides at steady state, a fresh `CheckDn` round must
-  reply code zero, the stored revision and the node rows OK, and a fresh
-  `CheckSide` round the side's revision and its side-device row OK
+  it reads. In smoke, sides and store_full at steady state, a fresh `CheckDn`
+  round must reply code zero, the stored revision and the node rows OK, and a
+  fresh `CheckSide` round the side's revision and its side-device row OK
   (`dnagent.md` DN17, SH24 to SH26), fresh because the disk node's last
   observation is its `SyncupDn`'s, older than the side converges that followed
   it; the migration cases run a plain `CheckDn` round after their teardown,
   which answers from the observation the teardown's `SyncupDn` stored, the
-  restart case compares snapshots instead, and the teardown case reads residue
-  and the verdicts of reads made after its drops.
+  restart case compares snapshots instead, as store_full does across its
+  restart, the teardown case reads residue and the verdicts of reads made
+  after its drops, and store_full sends one plain round right after a
+  refused request, which answers from the observation the agent held before
+  it.
 * **Observed, never asserted.** The provisioning and read-through windows are
   races a loop device usually wins; the cutover window lasts `SuspendSeconds`
   and is sampled once right after the cutover reply, which a slow step can
@@ -316,6 +323,30 @@ unchanged re-sends leave the new log free of any mutating command or block or
 configfs write (SH16, SH17, DN5, DN9); and a revision below the one those
 re-sends stored is refused as stale in a normal reply (SH8, SH9, DN4).
 
+**store_full** proves on a real local store that a request whose save fails is
+refused and that a restart keeps what the agent accepted (`dnagent.md` SH4 to
+SH6, DN2, DN8). One node's agent runs over a small tmpfs that holds a copy of
+its local store, so it holds what it held before, and one file fills the tmpfs
+until a write fails. Every request the case expects refused for its save
+carries a revision above the one the agent holds for its object, so the
+stale-revision gate cannot be what refuses it, and the reply's details name
+the failed save. A disk node request that adds a side is refused with
+`common.ReplyCodeSaveFailed` at the held revision, the store's files keep
+their bytes and no temp file stays; the side's own syncup is an unknown
+object, and nothing of the side is built, by the next round's revision, the
+disk counts of a read made after the refusal (DN18) and the kernel's listings.
+With the file removed, the refused request sent again at its own revision, as
+a worker's next round sends it while the desired state stays the same
+(`dnv-worker.md` RW4, RW5), is accepted, and the side provisions through the
+flip. Filled again, a side request and a disk node request that drops a side
+are refused alike, and the node keeps every device and export of the pool. The
+agent then restarts over the full store: fresh rounds before and after the
+restart agree as in the restart case, at the revisions of the last accepted
+requests, the node's devices and exports are the same, and the new log holds
+no mutating command. Once the pool is torn down, the agent goes back to its
+disk store, holding the last request it accepted. The other node takes no
+part.
+
 **What a pass means.** Exit status zero and PASS mean every case's assertions
 held in a run that stops at the first failure: data checked against a pattern
 file the agent never sees or against zeros, removals proved by the node's own
@@ -328,15 +359,18 @@ that pass is as good as that line.
 ## Teardown and cleanup
 
 Cleanup runs unconditionally at the start of every run and at its end only on
-success; a failing run leaves its debris and dumps the agents' logs, the dm,
-nvmet and host state of both VMs, the last info of every migration or teardown
-side, an info read's, which shows the side as the last converge or read left
-it and answers even while a converge is wedged, and the failing stage's trace
-id. A cleanup-only run does the scrub
-alone. It takes every `dnv-agent` and every dnv dm device on the node, of
-either role, which is why one dnv suite runs at a time in the lab
-(`layout.md`, Directory tree). Each step is best-effort, and the order is
-load-bearing on one principle, a holder goes before what it holds: the agents
+success; a failing run leaves its debris and dumps the tail of each agent's
+log, the dm, nvmet and host state of both VMs, a listing of each local store
+and of any file system mounted under the work directory, the failing stage's
+trace id and, when the failing case is zeroing, a migration case, teardown or
+store_full, the last info of every side that case has set up since it last
+tore all its sides down, an info read's, which shows the side as the last
+converge or read left it and answers even while a converge is wedged. A
+cleanup-only run does the scrub alone. It takes every `dnv-agent` and every
+dnv dm device on the node, of either role, which is why one dnv suite runs at
+a time in the lab (`layout.md`, Directory tree). Each step is best-effort,
+and the order is load-bearing on one principle, a holder goes before what it
+holds: the agents
 go first, a graceful stop joining their children (`dnagent.md` SH27) while one
 killed outright can leave a zeroing child holding a side device a moment
 longer, which a final retry sweep absorbs; any process a failed stage left
@@ -353,6 +387,17 @@ both VMs are cleaned at once, since a node's migration source export backs its
 peer's clone. The helper running all this lives outside the work directory it
 removes, and every run ships it afresh.
 
+A tmpfs over a local store, which store_full mounts, comes off before the work
+directory goes, once the agents are gone and so hold no file there: the
+directory's removal cannot remove a mount point, and the next run's agent
+would keep its store on that small tmpfs. An unmount that finds it busy
+detaches it lazily rather than wait. A failing store_full run takes its tmpfs
+off itself, once the dump has listed the store's files, so no mount of the
+run outlives it over the local store; the requests the agent accepted after
+the move lived only on the tmpfs, and the dump is what keeps their names.
+That node's agent stays stopped: started over the disk store below, it would
+converge the older requests held there and remove the debris the run leaves.
+
 The wipe is a separate flag that runs no case: it reads no dm kind, taking
 dnv-named residue whatever its name decodes to, every dnv nvmet subsystem and
 md array and, past dnv, every fabrics controller on the node, a reach that
@@ -364,16 +409,16 @@ only reported, a guest's own not being the suite's to fail on.
 
 ## Out of scope
 
-Error paths beyond the stale probe and migr_full's lost source, the
-provisioning error rows among them (`dnagent.md` DN9); a migration
-destination that waits for a free run in the clone-metadata area, and the
-other states of the destination's shared row rule, whose rows the unit
-tests cover (DN13); the destination's retries of a failed connect within
-its pass, left to the unit tests (DN13); the cn role; fault injection under
-a live stack beyond that lost source, the teardown case removing a real
-remote instead; a shutdown that meets a background task starting or a fence
-timer armed (`dnagent.md` SH27), and the lock entry a refused request must
-not leave (`dnagent.md`, Concurrency — `locks.go`), both left to the unit
-tests; performance; TLS and authentication; levels other than read-write and
+Error paths beyond the stale probe, migr_full's lost source and store_full's
+full local store, the provisioning error rows among them (`dnagent.md` DN9); a
+migration destination that waits for a free run in the clone-metadata area,
+and the other states of the destination's shared row rule, whose rows the unit
+tests cover (DN13); the destination's retries of a failed connect within its
+pass, left to the unit tests (DN13); the cn role; fault injection under a live
+stack beyond that lost source, the teardown case removing a real remote
+instead; a shutdown that meets a background task starting or a fence timer
+armed (`dnagent.md` SH27) and whether a refused request leaves a lock entry
+(`dnagent.md`, Concurrency — `locks.go`), both left to the unit tests;
+performance; TLS and authentication; levels other than read-write and
 no-migration (`dnagent.md` DN11); lock contention on one agent; the source
 half of a cancelled migration; a zeroing batch cancelled mid-flight.

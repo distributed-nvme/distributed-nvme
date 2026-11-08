@@ -77,7 +77,7 @@ type replyState struct {
 	obsTraceId    string
 	// saveTime is when the agent saved the request a Syncup* reply answers
 	// to its local store, zero on a round's reply and on a Syncup* reply
-	// that saved nothing.
+	// that refuses the request (architecture.md, Live-state reporting).
 	saveTime time.Time
 	// newObs reports whether a round's observation is later than every one
 	// the loop has seen for the object (RW23). The loop sets it, on a
@@ -300,8 +300,12 @@ type revWorker struct {
 	// (staleRound, fail). That round answers from it as a rule, a whole
 	// interval after the reply (RW4 step 6) with no read of the object in
 	// between, since the Syncup* cancelled the one the round before it
-	// started (dnagent.md SH30): an age past one interval of the loop's own
-	// making, which the late record leaves out (HL7).
+	// started: an age past one interval of the loop's own making, which the
+	// late record leaves out (HL7). While the agent's latest save failed,
+	// the Syncup* cancelled none (dnagent.md SH30): that read normally ended
+	// before its converge, and when the Syncup* took the locks first, it
+	// ends in the loop's wait and the round answers from its later
+	// observation instead.
 	syncupObs time.Time
 	// askFrom is the agent's answer time on the first round the loop judged
 	// after a pause in its rounds of the object: its start, an idle or a
@@ -785,7 +789,10 @@ func (w *revWorker) recv(
 			// the stream goes with it, before the Syncup* is sent. The round
 			// itself holds no lock the Syncup* needs: the agent answers it
 			// from memory, and the Syncup* cancels the object's background
-			// read itself before it waits for its locks (dnagent.md SH30).
+			// read itself before it waits for its locks, or, while the
+			// agent's latest save failed (agent.Store.SaveFailing), cancels
+			// none and waits behind the reads that hold its locks, which run
+			// bounded commands (dnagent.md SH30).
 			// applyDesired's own drop when RW13 moved the object finds no
 			// stream left. The next round opens a fresh one, which the agent
 			// answers with the complete *Info again (architecture.md, Check
@@ -1013,12 +1020,18 @@ func (w *revWorker) logLateObservation(
 }
 
 // logSyncupRejected emits the "syncup rejected" record (RW5; dnv-worker.md, Log
-// records). common.ReplyCodeStaleRevision means the agent holds a revision
-// newer than this worker's — for a while under an overlap of two owners, for
-// longer when the lagging owner's revision watch has stopped being served,
-// for good only after an etcd restore — and is logged at Error; everything
-// else — an unknown object above all, which merely means the parent syncup
-// has not landed yet — at Info.
+// records). Two codes are logged at Error. common.ReplyCodeStaleRevision means
+// the agent holds a revision newer than this worker's — for a while under an
+// overlap of two owners, for longer when the lagging owner's revision watch has
+// stopped being served, for good only after an etcd restore.
+// common.ReplyCodeSaveFailed means the agent could not save the request to its
+// local store and so refused it: a full or read-only store disk on the node
+// above all, which is an operator event, or a save the agent's soft timeout cut
+// off while every command slot was held (dnagent.md SH4). A rejection neither
+// sets nor clears a health epoch (HL1, HL2), so this record is where the worker
+// log shows the fault, once for each refused Syncup* (RW4 step 5 says when a
+// round re-sends one). Everything else — an unknown object above all, which
+// merely means the parent syncup has not landed yet — is at Info.
 func (w *revWorker) logSyncupRejected(
 	ctx context.Context,
 	revision uint64,
@@ -1029,7 +1042,8 @@ func (w *revWorker) logSyncupRejected(
 		slog.Uint64("code", uint64(reply.code)),
 		slog.String("details", reply.details),
 	)
-	if reply.code == common.ReplyCodeStaleRevision {
+	switch reply.code {
+	case common.ReplyCodeStaleRevision, common.ReplyCodeSaveFailed:
 		slog.ErrorContext(ctx, msgSyncupRejected, attrs...)
 		return
 	}

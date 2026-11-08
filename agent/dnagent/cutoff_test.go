@@ -2,7 +2,6 @@ package dnagent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -101,9 +100,10 @@ func releasedOntoDev(node *fakeNode, lin, devNo string) bool {
 
 // A side's request is saved as soon as the gates admit it: its file is the
 // call's first write, before the converge's first mutating OS call (SH5,
-// DN8). A save that fails is only logged: the converge runs all the same,
-// and the reply carries the request's revision (DN14), as after a save that
-// held.
+// DN8). A request whose save fails is refused with ReplyCodeSaveFailed at
+// the revision the agent holds (DN14), and no converge runs: the side file
+// keeps the last request the agent accepted, so a restart converges what
+// the node already serves and undoes nothing.
 func TestASideRequestIsSavedBeforeItsConverge(t *testing.T) {
 	ctx := context.Background()
 	t.Run("the save holds", func(t *testing.T) {
@@ -127,36 +127,36 @@ func TestASideRequestIsSavedBeforeItsConverge(t *testing.T) {
 		srv, node := newTestServer(t)
 		syncupBoth(t, srv, 1, testSide)
 		path := srv.nf.LocalSidePath(testCluster, testDn, testSp, testSide)
-		oc := node.osClient()
-		write := oc.WriteProtoFn
-		oc.WriteProtoFn = func(
-			ctx context.Context, p string, msg proto.Message,
-		) error {
-			if p == path {
-				return errors.New("write " + p + ": no space left on device")
-			}
-			return write(ctx, p, msg)
-		}
-		srv.store = agent.NewStore(oc, common.DefaultLocalStorPrefix)
+		failSaves(srv, node, onlyPath(path))
 		lin0 := srv.nf.DnLinearName(testCluster, testDn, testSp, testSide,
 			testCn0)
 		dmErr0 := srv.nf.DnErrorName(testCluster, testDn, testSp, testSide,
 			testCn0)
+		sideDev := srv.nf.DnSideName(testCluster, testDn, testSp, testSide)
 		node.Reset()
 		reply, err := srv.SyncupSide(ctx, failoverReq(2))
 		if err != nil {
 			t.Fatalf("SyncupSide: %v", err)
 		}
-		if got := reply.GetRevision(); got != 2 {
-			t.Errorf("the reply carries revision %d, want 2", got)
+		if got := reply.GetAgentReply().GetCode(); got !=
+			common.ReplyCodeSaveFailed {
+			t.Errorf("the reply code is %d, want ReplyCodeSaveFailed", got)
 		}
-		if !linearMapsDm(node, lin0, dmErr0) {
-			t.Error("a failed save stopped the converge: the old primary's " +
-				"dm-linear is not on its dm-error")
+		if got := reply.GetRevision(); got != 1 {
+			t.Errorf("the reply carries revision %d, want the held 1", got)
+		}
+		if linearMapsDm(node, lin0, dmErr0) ||
+			!linearMapsDm(node, lin0, sideDev) {
+			t.Error("the refused request converged: the old primary's " +
+				"dm-linear left the side device for its dm-error")
+		}
+		if muts := node.Mutations(); len(muts) != 0 {
+			t.Errorf("the refused request changed the node:\n%s",
+				strings.Join(muts, "\n"))
 		}
 		if got := storedSideRevision(t, srv, node); got != 1 {
-			t.Errorf("the side file holds revision %d, want the 1 before "+
-				"the failed save", got)
+			t.Errorf("the side file holds revision %d, want the 1 the "+
+				"agent last accepted", got)
 		}
 	})
 }

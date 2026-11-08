@@ -341,10 +341,10 @@ func (m migrServing) cloneLive() bool {
 // dm-clone, so a waiting pass puts the stacks on their dm-errors with every
 // namespace inaccessible (DN13 step (1)). The worker never sends
 // cutover_pending again once the cutover cleared it, so a waiting pass that
-// finds a stack serving through the dm-clone converges a stale request — a
-// restart's re-run of a stored request whose successor's save failed (SH5) —
-// and leaves that stack serving: reloading it onto its dm-error would fail
-// host IO until the worker sent the newer request again.
+// finds a stack serving through the dm-clone converges a request older than
+// the one whose converge built that dm-clone, and it leaves that stack
+// serving: reloading it onto its dm-error would fail host IO until the
+// worker sent the newer request again.
 //
 // Hydration that will not converge (a knob or the enable) does not enter it:
 // the dm-clone is converged onto the source the pass found and reads through

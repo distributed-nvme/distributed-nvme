@@ -409,21 +409,18 @@ func TestACutOffConvergeStoresNothing(t *testing.T) {
 }
 
 // TestAnObjectWithNoObservationAnswersAZeroTime: a cntlr the agent holds but
-// has no observation of yet — its first syncup was cut off — is answered by a
-// round and an info read with no observation time, revision zero, a clean
-// code and no info, and an unknown one with the refusal; both with the
-// agent's answer time (dnagent.md SH25, SH28).
+// has no observation of yet — its first syncup was cut off after its save,
+// in its converge's first leg connect — is answered by a round and an info
+// read with no observation time, revision zero, a clean code and no info,
+// and an unknown one with the refusal; both with the agent's answer time
+// (dnagent.md SH25, SH28).
 func TestAnObjectWithNoObservationAnswersAZeroTime(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
 	clock := withClock(srv)
 	cnSyncup(t, srv, 1, true)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := srv.SyncupCntlr(ctx,
-		cntlrReq(reqOpts{revision: 2, primary: true})); err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
-	}
+	cutOffSyncupCntlr(t, srv, node,
+		cntlrReq(reqOpts{revision: 2, primary: true}), "nvme connect")
 	fixtureCntlrState(t, srv)
 
 	round := roundCntlr(srv, "round", 2)
@@ -974,8 +971,11 @@ func TestANodeSyncupCancelsEveryRead(t *testing.T) {
 // were it to cancel each round's read, no read would ever end and the
 // observation would go stale (dnv-worker.md HL7). The read runs on to its
 // end and stores its observation, the gates refuse the request under its
-// locks as before, and a round after it starts a read. A mark another
-// converge of the object holds outlives the refused syncup.
+// locks as before, and a round after it starts a read. Each case runs a
+// second time while the store's latest save failed: the gates run before
+// that rule (markSyncup, markNodeSyncup), so a request they refuse marks
+// nothing then either. A mark another converge of the object holds outlives
+// the refused syncup.
 func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 	cntlrK := cntlrKey(testCluster, testCn, testSp, testCntlr)
 	cnK := cnKey(testCluster, testCn)
@@ -1068,68 +1068,89 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 				}
 			}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, node := newTestServer(t)
-			syncupBoth(t, srv, reqOpts{revision: 2})
-			srv.roundReads = true
-			var releases []func()
-			for _, gate := range tc.gates {
-				releases = append(releases, openGate(t, node, gate))
+		for _, failing := range []bool{false, true} {
+			name := tc.name
+			if failing {
+				name += " while saves fail"
 			}
-			node.Reset()
-			for id, round := range tc.rounds {
-				round(srv, id)
-			}
-			waitFor(t, func() bool {
-				for _, gate := range tc.gates {
-					if !node.hasCall(gate) {
-						return false
+			t.Run(name, func(t *testing.T) {
+				srv, node := newTestServer(t)
+				syncupBoth(t, srv, reqOpts{revision: 2})
+				if failing {
+					// A newer SyncupCntlr the gates admit, whose save
+					// fails, a round before the refused one.
+					failSaves(srv, node,
+						srv.nf.LocalCnPath(testCluster, testCn),
+						cntlrPathOf(srv, cntlrPtr()))
+					reply, _ := srv.SyncupCntlr(traced("prime"),
+						cntlrReq(reqOpts{revision: 3}))
+					if reply.GetAgentReply().GetCode() !=
+						common.ReplyCodeSaveFailed ||
+						!srv.store.SaveFailing() {
+						t.Fatalf("fixture is wrong: the store's latest "+
+							"save did not fail: %v", reply.GetAgentReply())
 					}
 				}
-				return true
+				srv.roundReads = true
+				var releases []func()
+				for _, gate := range tc.gates {
+					releases = append(releases, openGate(t, node, gate))
+				}
+				node.Reset()
+				for id, round := range tc.rounds {
+					round(srv, id)
+				}
+				waitFor(t, func() bool {
+					for _, gate := range tc.gates {
+						if !node.hasCall(gate) {
+							return false
+						}
+					}
+					return true
+				})
+				done := make(chan *pb.AgentReply, 1)
+				go func() { done <- tc.stale(srv) }()
+				readsDone := make(chan struct{})
+				go func() {
+					srv.reads.Wait()
+					close(readsDone)
+				}()
+				select {
+				case <-readsDone:
+					t.Fatal("the refused syncup cancelled a read")
+				case <-time.After(150 * time.Millisecond):
+				}
+				quiet(t, srv, cntlrK, cnK)
+				for _, release := range releases {
+					release()
+				}
+				select {
+				case reply := <-done:
+					if reply.GetCode() != tc.code {
+						t.Fatalf("fixture is wrong: the syncup was not "+
+							"refused with code %d: %v", tc.code, reply)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("the refused syncup never returned")
+				}
+				joinReads(t, srv)
+				// Every Wait returns before the next round's read joins the
+				// group.
+				<-readsDone
+				for id, got := range tc.stored(t, srv) {
+					if got != id {
+						t.Errorf("the observation is %q's, want the read %q "+
+							"stored", got, id)
+					}
+				}
+				cntlrRound(srv, "after")
+				joinReads(t, srv)
+				if got := latestCntlrObs(t, srv).TraceId; got != "after" {
+					t.Errorf("the round after the refused syncup stored "+
+						"no read: the observation is %q's", got)
+				}
 			})
-			done := make(chan *pb.AgentReply, 1)
-			go func() { done <- tc.stale(srv) }()
-			readsDone := make(chan struct{})
-			go func() {
-				srv.reads.Wait()
-				close(readsDone)
-			}()
-			select {
-			case <-readsDone:
-				t.Fatal("the refused syncup cancelled a read")
-			case <-time.After(150 * time.Millisecond):
-			}
-			quiet(t, srv, cntlrK, cnK)
-			for _, release := range releases {
-				release()
-			}
-			select {
-			case reply := <-done:
-				if reply.GetCode() != tc.code {
-					t.Fatalf("fixture is wrong: the syncup was not refused "+
-						"with code %d: %v", tc.code, reply)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("the refused syncup never returned")
-			}
-			joinReads(t, srv)
-			// Every Wait returns before the next round's read joins the
-			// group.
-			<-readsDone
-			for id, got := range tc.stored(t, srv) {
-				if got != id {
-					t.Errorf("the observation is %q's, want the read %q "+
-						"stored", got, id)
-				}
-			}
-			cntlrRound(srv, "after")
-			joinReads(t, srv)
-			if got := latestCntlrObs(t, srv).TraceId; got != "after" {
-				t.Errorf("the round after the refused syncup stored no read: "+
-					"the observation is %q's", got)
-			}
-		})
+		}
 	}
 
 	// The refused syncup ends no mark it did not make: a retry attempt's

@@ -353,16 +353,19 @@ const (
 	AnaGrpIdNonOptimized = 2
 	AnaGrpIdInaccessible = 3
 
-	// AgentReply.code values (dnagent.md SH8, SH9). 0 = OK. Codes 1-3 are
-	// rejections: the request was not applied, so the worker reads no
-	// verdict from the reply's rows. ReplyCodeLeftover (4) is accepted: the
-	// worker reads the rows exactly as for 0 (worker/health.go accepted).
+	// AgentReply.code values (dnagent.md SH8, SH9). 0 = OK. Codes 1-3 and
+	// ReplyCodeSaveFailed are rejections: the request was not applied, so
+	// the worker reads no verdict from the reply's rows. ReplyCodeLeftover
+	// (4) is accepted: the worker reads the rows exactly as for 0
+	// (worker/health.go accepted). A worker reads a code it does not know as
+	// a rejection (dnv-worker.md RW5).
 	// Any code != 0 in a Check* reply whose observation is not too old makes
 	// the worker issue a Syncup* (dnv-worker.md RW4 step 5, HL7), and in a
-	// Push*Bitmap reply ends that push
-	// plan. Among the rejections the specific value only sets the level of
-	// the worker's `syncup rejected` record (a stale revision logs at Error)
-	// and otherwise serves details and tests.
+	// Push*Bitmap reply ends that push plan. Among the rejections the
+	// specific value sets the level of the worker's `syncup rejected` record
+	// (a stale revision and a failed save log at Error), and a round's reply
+	// that refuses the object as unknown is not judged by its observation's
+	// age (dnv-worker.md HL7); otherwise the value serves details and tests.
 	ReplyCodeStaleRevision = 1
 	ReplyCodeUnknownObject = 2
 	// ReplyCodeInvalidConf refuses a request whose conf carries a value the
@@ -403,6 +406,14 @@ const (
 	// converge and every background read, and kept only as the code of the
 	// object's observation, which rounds answer from (dnagent.md SH28).
 	ReplyCodeLeftover = 4
+	// ReplyCodeSaveFailed refuses a request the gates admitted whose save to
+	// the agent's local store failed (dnagent.md SH5): the request did not
+	// become the desired state and nothing was converged, and the reply's
+	// revision is the one the agent still holds, zero when it holds none.
+	// The details carry the save's error. It is neither a stale revision nor
+	// an invalid conf: the request is current and usable, and the agent
+	// cannot keep it.
+	ReplyCodeSaveFailed = 5
 
 	// Seconds between background retries of a migration destination whose
 	// build stopped short, at its nvme connect once the in-pass retries below

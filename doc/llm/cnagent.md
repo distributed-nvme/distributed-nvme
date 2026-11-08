@@ -248,8 +248,8 @@ memory only, never persisted. Three more in-memory-only
 fields of a cntlr's state sit outside that mutex, touched only under the
 cntlr's object lock or the node write lock: the marks of CN14's
 activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`) and
-`reqFromRpc`, which says whether the request this process holds arrived
-by the revision-gated RPC (CN12, CN14). Each state's request is an atomic
+`reqFromRpc`, which says whether the request this process holds counts
+as delivered (CN8, CN12, CN14). Each state's request is an atomic
 pointer, stored and loaded without that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
 lock, and a request is never modified once stored. The tracker has its
@@ -375,8 +375,9 @@ go, and nothing of its is removed from the node here. Its resources are
 found afterwards, by name, by the node-level sweep (CN21): the one that
 runs next in this pass for a CN whose request loaded, or, for a cntlr
 dropped because its CN has no request loaded — which only a `cn-*` file
-that is lost, or a CN whose first save failed, leaves, a later save that
-fails leaving the earlier file, since the agent never removes one — the
+that is lost leaves: the agent never removes one, and CN8 admits a cntlr
+only while the agent holds its CN's request, which it holds only from a
+`cn-*` file, loaded at startup or just saved by a `SyncupCn` (CN7) — the
 sweep of the
 `SyncupCn` the worker sends again when its list no longer names the cntlr;
 one it still names is re-adopted probe-first by its `SyncupCntlr` (CN8),
@@ -388,9 +389,9 @@ ever enumerates them again (`architecture.md`, Teardown by sweep). Ids
 are never reused, so a dropped cntlr never comes back, an etcd restore
 aside (`architecture.md`, etcd backup and restore). Every other
 cntlr request: re-run the `SyncupCntlr` converge from the stored
-request, which acts on no forced-start mark it carries until a
-`SyncupCntlr` delivers a request (CN12) — and which, per CN18,
-finishes by its steps 4 and 5 a clone whose
+request, which acts on no forced-start mark it carries until the
+request the agent holds counts as delivered (CN8, CN12) — and which, per
+CN18, finishes by its steps 4 and 5 a clone whose
 dm-clone is up with hydration off, as an agent killed between steps 3 and
 5 leaves it, and creates the dm-clone again over its clone meta group's
 metadata where it is gone; a dm-clone
@@ -446,25 +447,43 @@ programs nothing and reports no QoS row in `CnInfo` (`architecture.md`,
 Controller node, common: QoS is not enforced).
 
 CN7. Persist first, then drop, then sweep. The request is written to
-`LocalCnPath` before the converge, as `dnagent.md` SH5 states for every
-request and for SH5's reason: the node-level sweep below is what removes
-the resources of a cntlr whose pointer has just left the list, and it can
-block for a whole failfast window on a dead leg.
+`LocalCnPath` as soon as the CN4 gate admits it, before it becomes the
+CN's desired state and before the converge, as `dnagent.md` SH5 states
+for every request and for SH5's reason: the node-level sweep below is
+what removes the resources of a cntlr whose pointer has just left the
+list, and it can block for a whole failfast window on a dead leg. A
+request whose save fails is refused with `ReplyCodeSaveFailed`, and
+nothing below runs (`dnagent.md` SH5). Reason for the save ahead of the
+desired state: CN8 admits a cntlr only while the CN's held list names its
+pointer, so a list held over a failed save would let a cntlr that list
+alone names be built, and the next restart, reading the older list from
+the cn file, would drop that cntlr, and its sweep would remove the
+devices its hosts use.
 
 Then the CN5 base-state converge. Then the `cntlr_pointer_list` diff
 against the loaded cntlr states (`architecture.md`, Common agent rules:
 full sync) — never against the files: a cntlr whose file CN2 skipped is
 not in memory and keeps its file (CN2). A pointer in the request without
 local state needs nothing
-yet — resources come with its first `SyncupCntlr`; the persisted request
-is what makes the pointer known. A local cntlr whose pointer left the
-list is forgotten: its cntlr file and chunk files are deleted, its
+yet — resources come with its first `SyncupCntlr`; the accepted request
+the agent holds for the CN is what makes the pointer known (CN8). A local
+cntlr whose pointer left the list is forgotten: its cntlr file and chunk files are deleted, its
 connect retry, its leg probers and its running read are cancelled, its memory entry and object lock are dropped
 (`dnagent.md` SH7) — and nothing of its is removed from the node by this
-step. Then the node-level sweep (CN21) finds its resources by name
-and removes them. What the sweep could not finish is remembered only as
-the code of the CN's observation, which the next read or converge
-replaces, and no later pass reads it (CN30); the reply's code is that of
+step. The diff also drops the object lock entry of every pointer that
+left the list since the request the agent held for the CN before this
+one, whether or not the agent holds that cntlr: a `SyncupCntlr` that CN8
+admitted for a cntlr the agent does not hold, and whose save then failed,
+leaves the entry it took (`dnagent.md` SH5), and no teardown runs for a
+cntlr the agent never held. A pointer leaves the held list only at a
+`SyncupCn` that is accepted, whose diff drops its entry; the node write
+lock is held, so no call holds an object lock or waits for one. Reason:
+such an entry would otherwise stay for the life of the process
+(`dnagent.md`, Concurrency — `locks.go`). Then the node-level sweep
+(CN21) finds the resources of each cntlr the agent forgot by name and
+removes them. What the sweep could
+not finish is remembered only as the code of the CN's observation, which
+the next read or converge replaces, and no later pass reads it (CN30); the reply's code is that of
 the sweep's own verdict. The base state itself is never swept — like the DN port, it
 outlives every cntlr and only lab cleanup removes it. Reply
 `agent_reply`, `revision`, `cn_info`, and the `obs_stamp` and
@@ -473,8 +492,9 @@ reply, holds that code and that `cn_info`.
 
 ### `SyncupCntlr`
 
-CN8. Gating. The pointer must be present in the stored
-`SyncupCnRequest.cntlr_pointer_list` — else `ReplyCodeUnknownObject`
+CN8. Gating. The pointer must be present in the `cntlr_pointer_list`
+of the `SyncupCnRequest` this process holds for the CN (`dnagent.md` SH8)
+— else `ReplyCodeUnknownObject`
 (`SyncupCn` introduces pointers first; `architecture.md`, Common agent
 rules). Then the `dnagent.md` SH8 revision gate against the `SyncupCntlrRequest` this
 process holds — zero while it holds none, as for a cntlr whose file CN2's
@@ -494,7 +514,10 @@ message, and the reply echoes the stored revision, not the request's, so
 the worker sees that the request was not accepted. One Error record, msg
 "invalid stored conf", names the ids and the field. A request the three
 gates admit is persisted at once, before it becomes the cntlr's desired
-state and before its converge (`dnagent.md` SH5).
+state and before its converge (`dnagent.md` SH5). A request whose save
+fails is refused with `ReplyCodeSaveFailed` (`dnagent.md` SH5). Such a
+call for a cntlr the process does not hold leaves its lock entry
+(`dnagent.md`, Concurrency — `locks.go`; CN7).
 
 Placement is load-bearing: the gate sits before the local-store persist
 and before the request becomes this cntlr's desired state, so it skips the
@@ -511,6 +534,26 @@ There it returns an empty `CntlrInfo`,
 enumerates nothing and converges nothing — and it carries no leftover
 verdict either (CN30), because a cntlr this agent deliberately did not
 build must not have its objects named as removable.
+
+The request the agent holds for a cntlr **counts as delivered**
+(`reqFromRpc`) while a `SyncupCntlr` of this process stored it, its save
+having held, and no `SyncupCntlr` newer than it has been refused for a
+failed save since. Only from such a request does a converge act on a
+forced-start mark (CN12) or run CN14's thin-id sweeps. The request the
+startup reconcile loaded (CN2) never counts, and a refused request never
+makes it count. A request refused for a failed save at a revision above
+the held one makes the held request count no more, until a `SyncupCntlr`
+whose save holds, even one at the held revision (CN30, Known limits);
+one refused at the held revision changes nothing, since the clear and the
+withdrawal of a mark each raise the pool's revision (`architecture.md`,
+Revision keys and the sync fan-out), so a request at the held revision
+clears no mark the held request carries. Reason: the refused request
+may be the worker's clear of a mark (`dnv-worker.md` AR13) or the
+operator's withdrawal of it (`architecture.md`, Repairs,
+`ForceStartGroup`), and were the held request still to count, every CN10
+retry attempt would act on the mark: one that found the group's array
+not running would start the array from the marked leg and zero the other
+members the forced start keeps, one of which may hold newer data (CN12).
 
 CN9. Role and pass structure. The effective role is primary iff
 `primary` is set and `disabled` is not; anything else converges the
@@ -1629,19 +1672,21 @@ dm-clone (CN18).
   mark that names the bad leg of a STARTED repair is the group's error too,
   and nothing is examined or zeroed, since the mark may not name that leg
   (`architecture.md`, Repair, Forced start). The primary acts on a mark only
-  from a request that a `SyncupCntlr` has delivered since the agent started
-  (`reqFromRpc`, as
-  for CN14's sweeps): a converge of the request the startup reconcile
-  loaded from the store (CN2), the CN10 retry's attempts from it among
-  them, converges every group as with no mark, and the cntlr's read names
-  each such mark in its verdict (CN30), so the worker re-sends the
-  `SyncupCntlr`, which carries the mark only while it still stands.
-  Reason: the stored copy can carry a mark the worker has cleared since —
-  the clear changes only etcd, and the copy on disk changes only when a
-  `SyncupCntlr` reaches this agent and its save goes through
-  (`dnagent.md` SH5) — and after a reboot no array runs, so a start from
-  that mark's leg, stale by then, would zero the member with the newest
-  data. Each pass that acts on the mark, in this order:
+  from a request that counts as delivered (CN8; `reqFromRpc`, as for
+  CN14's sweeps): a converge of any other request — the one the startup
+  reconcile loaded from the store (CN2), or a held one after a newer
+  `SyncupCntlr` was refused for a failed save (CN8) — the CN10 retry's
+  attempts from it among them, converges every group as with no mark, and
+  the cntlr's read names each such mark in its verdict (CN30), so the
+  worker re-sends the `SyncupCntlr`, which carries the mark only while it
+  still stands. Reason: such a request can carry a mark the worker has
+  cleared since — the clear changes only etcd, the copy on disk changes
+  only when a `SyncupCntlr` reaches this agent and its save puts it in place
+  (`dnagent.md` SH5), and the refused request may be the clear itself —
+  and a start from that mark's leg, stale by then, would zero the member
+  with the newest data: after a reboot no array runs, and a CN10 retry
+  attempt acts on a mark once it reads the array not running (below).
+  Each pass that acts on the mark, in this order:
 
   1. An array of the group that runs leaves the mark waiting, and the pass
      registers the CN10 background retry: the member reconciliation runs
@@ -1655,16 +1700,19 @@ dm-clone (CN18).
      the mark, while a read of a group whose array does not run names
      nothing for it (CN30); and an array that holds a member that is not a
      dm device, read broken, meets the refusal below, which retries too.
-     The retry's converge reads the array again: one that reads it not
-     running runs the steps below, and one that reads it running registers
-     the retry again. A converge that acts on no mark registers nothing
-     for one: that of a request without the mark, which the worker's clear
-     (`dnv-worker.md` AR13), the operator's withdrawal of the mark
-     (`architecture.md`, Repairs, `ForceStartGroup`), or a finish of the
-     group's repair that retires the bad leg the mark names
-     (`architecture.md`, Repair, Forced start) hands the agent, and that of
-     a request by which the cntlr builds no array of the group, a standby's
-     or one at a level that builds none (CN19). The cost is a converge
+     The retry's converge reads the array again: one that acts on the mark
+     and reads it not running runs the steps below, and one that acts on it
+     and reads it running registers the retry again. A converge that acts
+     on no mark registers nothing for one: that of a request without the
+     mark, which the worker's clear (`dnv-worker.md` AR13), the operator's
+     withdrawal of the mark (`architecture.md`, Repairs,
+     `ForceStartGroup`), or a finish of the group's repair that retires the
+     bad leg the mark names (`architecture.md`, Repair, Forced start) hands
+     the agent, and that of a request by which the cntlr builds no array of
+     the group, a standby's or one at a level that builds none (CN19). A
+     converge of a request that does not count as delivered (CN8) acts on
+     no mark either, and the held request counts as delivered no more once
+     a newer `SyncupCntlr` is refused for a failed save. The cost is a converge
      every retry interval for as long as a mark stands over an array that
      runs (Known limits). An array of the group that does not run — broken,
      or inactive — is stopped, by the node sysfs named, but only when every
@@ -2138,26 +2186,25 @@ fan-outs where that skips every cntlr (a demote and a delete coalesced
 into one revision, a delete at a pool-suppressing `sp_level`, a failover
 and delete race) are healed by the **activation sweep**: creating a
 slice's pool device arms the sweep, and the first converge whose request
-arrived by the revision-gated RPC then enumerates the pool's device ids
+counts as delivered (CN8) then enumerates the pool's device ids
 through the CN25 reserve, `thin_dump` and release machinery and deletes
-every id not among `td_list`'s `dev_id`s — correct because the RPC
+every id not among `td_list`'s `dev_id`s — correct because such a
 request is the newest accepted desired state, `dev_id`s are never reused
 (`architecture.md`, Known limits, names the etcd restore that can break
 that) and thin ids belong to tds alone. An agent restart under a
 surviving pool device does not sweep (nothing else writes the pool, and
 the CN2 zero-mutation reconcile stays intact), and a startup reconcile that
-re-creates the device (a node reboot) arms but does not run it: it
-converges from the persisted request, which lags the pool's true
-contents after a persist that failed (one that fails is only logged and
-the converge runs on, `dnagent.md` SH5), and deleting against a lagging
-`td_list` would destroy a live td — the first revision-gated
-`SyncupCntlr` after boot runs the sweep instead. A sweep failure is logged
-and retried on later converges until it succeeds once; a stray surviving a
-crash between creation and sweep waits for the next sweep of the pool's
-ids that gets through. A
+re-creates the device (a node reboot) arms but does not run it: the
+reconcile converges the stored request, and the sweep runs only from a
+request that counts as delivered (CN8), the gate CN12 puts on the
+forced-start marks for CN12's own reason — the first revision-gated
+`SyncupCntlr` after boot whose save holds runs the sweep instead. A
+sweep failure is logged and retried on later converges until it succeeds
+once; a stray surviving a crash between creation and sweep waits for the
+next sweep of the pool's ids that gets through. A
 delete message that fails, refused or unanswered, runs the same sweep of
 that pool in the same pass, on the same condition — the request the pass
-converges came by the revision-gated RPC — and that sweep keeps every id
+converges counts as delivered — and that sweep keeps every id
 that a thin volume of the sp the pass lists still maps in that pool, read
 from the volume's live table, since such an id is no stray; a volume
 whose table names a device the pass's listing does not resolve keeps its
@@ -2165,9 +2212,9 @@ id in every pool swept, and one whose table cannot be read while it is
 still there stops every such sweep of the pass. A sweep that gets through
 also ends a pending activation sweep of its slice. Nothing of the failure
 is remembered: a sweep that fails too, or a failed delete in a pass whose
-request did not come by the RPC, leaves the id to the next sweep of that
-pool's ids that gets through — the one after a later failed delete in
-that pool, or an activation sweep — and no pass aims at it. Reason: only
+request does not count as delivered, leaves the id to the next sweep of
+that pool's ids that gets through — the one after a later failed delete
+in that pool, or an activation sweep — and no pass aims at it. Reason: only
 a sweep of a pool's ids finds an id that has no dm device, so without the
 one after a failed delete, the id's blocks can stay allocated for the
 life of the pool device.
@@ -2942,13 +2989,18 @@ latest observation (CN30). A `SyncupCntlr` the conf gate refused
 has no verdict at all (CN8): nothing was converged and nothing
 enumerated, so its reply carries `ReplyCodeInvalidConf` and the sweep
 never ran; a stored conf refused at startup or by a read stores code zero
-(CN23).
+(CN23). A `SyncupCntlr` whose save failed has no verdict either (CN8):
+nothing was converged and nothing enumerated, so its reply carries
+`ReplyCodeSaveFailed` and neither `cntlr_info` nor `bm_info_list`
+(`dnagent.md` SH5).
 
 `bm_info_list` is one `BitmapInfo` per `clone_list` entry of the
 (now-stored) request, its `res_id` the clone id and its `chunk_id_list`
 derived from the chunk files present, save those CN2's reload
-left unloaded (`dnagent.md` SH21): one `BmChunkId` of `src_slice_idx` and `bm_idx`
-per chunk this node holds for that clone, ascending by the pair.
+left unloaded and those a push left out of the applied set when its save
+failed only at the directory sync (`dnagent.md` SH21; CN22): one
+`BmChunkId` of `src_slice_idx` and `bm_idx` per chunk in that clone's
+applied set, ascending by the pair.
 `bm_idx_list` is left unset — that field is the migration applied set
 (`SyncupSideReply.bm_info`), and a flat index cannot name a
 pair-addressed chunk. A clone with no chunks reports a `BitmapInfo` with
@@ -3079,10 +3131,10 @@ attributed in two steps, the request first for the reason
 holds whose `nqn_to_subsystem` still
 names it settles it, under that cntlr's sp, with nothing read from
 configfs: a cntlr's request is in memory (`putCntlr`) before its converge
-builds anything, so no subsystem can exist whose claim is not already
-visible here — a local-store save can fail and the converge runs on
-(`dnagent.md` SH5), so the guarantee is about this process's state, not
-about the files. Second,
+builds anything, so no subsystem a converge of this process builds can
+exist whose claim is not already visible here. The guarantee is about
+this process's state, not about the files: the claim of a cntlr whose
+file CN2 skipped is in that file alone (CN2). Second,
 for a subsystem no held request claims, its namespaces, in the listing's
 order: the first whose "device_path" parses as an ns-dev (`CnNsDevName`)
 decides for the whole subsystem — one of ours makes it that sp's; one
@@ -3145,7 +3197,7 @@ L6. per-td raid0s and dm-errors.
 L7. each thin volume removed and then, only if its pool is one the
 desired state still wants, the pool-side delete of its id under CN14's
 rule; a delete that fails has that pool's ids swept later in the same
-pass when the pass's request came by the revision-gated RPC (CN14).
+pass when the pass's request counts as delivered (CN8, CN14).
 
 L8. thin pools, then the concats under them. An arming of CN14's
 activation sweep ends with its pool's life, but the layer drops its
@@ -3301,8 +3353,9 @@ of the applied set, so it stays out of the clone's `BitmapInfo`
 diff is the whole recovery, and it is eventual rather than prompt: no
 push outcome arms anything on the worker (`dnv-worker.md` BM6 — a failed push is logged
 and ends its plan, and there is no flag to raise), and `bm_info_list`
-rides no `CheckCntlr` reply, so the re-push waits for whatever next
-makes the worker issue a `SyncupCntlr` (`dnv-worker.md` RW4) — a revision change, a
+rides no `CheckCntlr` reply, so the re-push waits for the next
+`SyncupCntlr` the agent accepts, whatever makes the worker issue it
+(`dnv-worker.md` RW4, BM2) — a revision change, a
 round this cntlr rejects or answers with another revision, or a round
 whose reply carries `ReplyCodeLeftover` (CN30). A failed persist of a
 grown chunk (`architecture.md`, [D8], and Bitmap push protocol) is the
@@ -3311,8 +3364,10 @@ applied set with the shorter payload, so `chunk_id_list` keeps
 advertising it, and the code-zero ack also refreshes the worker's memo (`dnv-worker.md` BM5)
 — which keys on the clone id and the pair, so only that one chunk
 is affected — and the node keeps the shorter version until
-`AppendCloneBitmap` grows that chunk again, the same bounded,
-correctness-neutral loss `architecture.md`, [D8], already accepts. Reply
+`AppendCloneBitmap` grows that chunk again or, when only the directory
+sync failed and the longer file is in place, until an agent restart
+loads it (`dnagent.md` SH21), the same bounded, correctness-neutral loss
+`architecture.md`, [D8], already accepts. Reply
 `agent_reply` only.
 
 ### `GetCnInfo` / `GetCntlrInfo`
@@ -4016,16 +4071,18 @@ round for a converge that refuses again; the first read that finds the
 guard let go names the group's members again.
 
 A cntlr's read-only verdict also names each forced-start mark of the
-request the agent holds while no `SyncupCntlr` has delivered that request
-since the agent started, on each group a converge would build that is not
+request the agent holds while that request does not count as delivered
+(CN8), on each group a converge would build that is not
 deferred (CN12), rendered as CN20 renders an enumeration that did not
 answer, the group named and the cause after it; the log record lists it
 among its failures. Reason: a converge of such a request acts on no mark
-(CN12), the request's revision is the one the worker wants unless the
-mark has been cleared since, and nothing else re-drives a converge for a
-group whose array does not run, so without the name a mark that stands
-would wait for the next revision. The `SyncupCntlr` the worker then sends
-delivers the request, and the reads after it name the mark no more.
+(CN12), a request the startup reconcile loaded can be at the revision the
+worker wants, unless the mark has been cleared since, and nothing else
+re-drives a converge for a group whose array does not run, so without the
+name a mark that stands would wait for the next revision. The
+`SyncupCntlr` the worker then sends, once its save holds, makes the
+request the agent holds count as delivered, and the reads after it name
+the mark no more.
 
 No verdict is carried over: each read and each converge that takes one
 computes its own, which is kept only as the code of the object's
@@ -4044,7 +4101,9 @@ with no controller (CN21), an md member to put back, a piece of the base
 state and a stored forced-start mark (all above) — brings by itself the
 `Syncup*` on every second
 round at most (`dnv-worker.md` RW4 step 5, and RW5 for the subsystem
-directory). No agent-side loop exists for
+directory) while the agent accepts it; while the agent's saves fail, the
+`Syncup*` is refused and stores no observation, so each round brings it
+(`dnagent.md` SH5, SH28). No agent-side loop exists for
 leftovers, because a second retrier for something the worker already
 re-drives would be invisible to the control plane. CN10's connect retry
 sweeps only as part of a converge it re-runs for a reason of its own,
@@ -4264,7 +4323,13 @@ stores instead is CN23's.
   Repair, Forced start), a converge reads the array not running and runs
   the forced start, or the cntlr builds the group's array no more (CN12),
   each attempt holding the cntlr's reads off while it runs, as the
-  late-member retry's do (below).
+  late-member retry's do (below). The clear, the mark's other ways of
+  going and a request that builds the array no more each come as a
+  `SyncupCntlr` newer than the held request, which ends the retry for the
+  mark once its save holds. While the CN's store disk refuses writes, such
+  a request is refused, and the held request counts as delivered no more
+  (CN8), so the next attempt acts on no mark and registers nothing for it
+  (below).
 * A copy md ended on bad blocks reads as a full member: when the leg that
   kept the data comes back before its broken array is stopped, md can end
   the copy onto the new leg by recording each region it could not read as
@@ -4521,10 +4586,14 @@ stores instead is CN23's.
   (CN10), the observation that converge stores carries the code, and the
   worker re-sends the `Syncup*` on every round that answers from it
   (`dnv-worker.md` RW4); each re-send cancels the read its round has just
-  started, if that read still runs (`dnagent.md` SH30). So a cntlr whose
-  own converge names the connection has its observation renewed by those
-  converges, and by a read only when the read ends before the re-send
-  arrives. The pool drain keeps its cross-role race —
+  started, if that read still runs, save while the store's latest save
+  failed, when a re-send cancels no read (`dnagent.md` SH30). So, while
+  the agent's saves succeed, a cntlr whose own converge names the
+  connection has its observation renewed by those converges, and by a
+  read only when the read ends before the re-send arrives; while they
+  fail, a re-sent `SyncupCntlr` is refused before any converge
+  (`dnagent.md` SH5) and cancels no read, so the cntlr's reads renew it.
+  The pool drain keeps its cross-role race —
   it deletes an sp's cntlrs and then its slices and waits on no agent
   (`dnv-worker.md` SPD13) — so a `SyncupCn` that drops the cntlr from its
   pointer list sets the leg disconnects going in the background and is
@@ -4588,13 +4657,13 @@ stores instead is CN23's.
   removes or connects many connections makes them.
 * A thin `delete` message that fails after its volume's removal is
   re-driven only once, by the sweep of that pool's ids its own pass runs
-  under an RPC-delivered request (CN14), and nothing of it is remembered.
-  When that sweep fails too, or the pass's request did not come by the
-  RPC, no pass aims at the id again: only the next sweep of that pool's
-  ids that gets through deletes it — the sweep after a later failed
-  delete in that pool, or an activation sweep, which the pool device's
-  creation alone arms — and until then its blocks stay allocated, for the
-  life of the pool device on this primary if no such sweep comes.
+  under a request that counts as delivered (CN8, CN14), and nothing of it
+  is remembered. When that sweep fails too, or the pass's request does not
+  count as delivered, no pass aims at the id again: only the next sweep of
+  that pool's ids that gets through deletes it — the sweep after a later
+  failed delete in that pool, or an activation sweep, which the pool
+  device's creation alone arms — and until then its blocks stay allocated,
+  for the life of the pool device on this primary if no such sweep comes.
 * A base state that cannot be built is re-sent on each round that
   answers from a read: a read of the CN that reads absent a piece of its
   base state that a `SyncupCn` would build, or an ANA group in a state
@@ -4605,18 +4674,20 @@ stores instead is CN23's.
   leftover record of each read names what the read read, and each refused
   command or write is logged as it fails — as for a disk node whose disk
   identity stays unconfirmed. The converge's own observation does not
-  name the piece (CN30), so the round after each re-send answers without
-  it and starts the read that names it again: the piece brings a re-send
-  at most every second round (`dnv-worker.md` RW4). The verdict does not
+  name the piece (CN30), so the round after each re-send the agent
+  accepts answers without it and starts the read that names it again:
+  the piece brings a re-send at most every second round (`dnv-worker.md`
+  RW4), and on each round while the agent's saves fail (CN30). The
+  verdict does not
   re-drive a port transport attribute that differs (CN30): its row reads
   `ERROR`, and while a subsystem is linked to the port it waits for an
   operator, since nvmet refuses every transport-attribute write then; one
   that differs while none is linked, which a re-sent `SyncupCn` would
   rewrite, is not re-driven either and waits for the CN's next
   `SyncupCn` for another reason or the agent's next start.
-  Each re-sent `SyncupCn` holds the node write lock for its
-  converge and its removing node-level sweep (CN1), so a cntlr converge or
-  read that comes after it waits it out, once for each re-send; it keeps
+  Each re-sent `SyncupCn` holds the node write lock (CN1), for its
+  converge and its removing node-level sweep when the agent accepts it,
+  so a cntlr converge or read that comes after it waits it out, once for each re-send; it keeps
   no cntlr's read from ending (`dnagent.md` SH30).
 * A torn snapshot's mark is best effort. CN14 keeps it in memory from the
   pre-pass run that saw the tear until a request carries the td `created`,
@@ -4627,15 +4698,44 @@ stores instead is CN23's.
   finds every slice's id made already sees no tear, and a demoted primary
   reports no thin rows. The snapshot then flips with `torn` false
   (`architecture.md`, Known limits).
-* A cntlr's save that fails leaves the request before it on disk, the one
-  way a stale request stays there: the save comes before the converge, so a
-  crash or a cancelled call inside a pass leaves none (`dnagent.md` SH5).
-  The converge runs on after a failed save, so an agent restart before the
-  cntlr's next accepted save converges that older request. Its sweep
-  removes the thin volume of a td that request does not list and, while the
-  pool is wanted, sends the delete message of the td's thin id (CN21): a
-  thin volume the newer request created is lost. CN14's guard on its two
-  thin-id sweeps does not cover that sweep. Nothing tries the save again
-  before the cntlr's next accepted `SyncupCntlr`, and its Check rounds
-  answer the revision the process holds, so only a round's non-zero reply
-  code or a newer desired revision brings one (`dnv-worker.md` RW4).
+* While the CN's store disk refuses writes, the agent keeps the last
+  requests it accepted for the CN and its cntlrs: every `SyncupCn` and
+  `SyncupCntlr` the gates admit is refused until a save holds
+  (`dnagent.md` SH5), so a cntlr here is neither promoted nor demoted, a
+  td new to `td_list` gets no thin volume, and a cntlr whose pointer
+  leaves the CN's list keeps its devices (`dnagent.md`, Known limits).
+  A refused `SyncupCntlr` newer than the held request makes the held
+  request count as delivered no more (CN8), so until a `SyncupCntlr` of
+  that cntlr is saved, no converge acts on a forced-start mark the held
+  request carries, the CN10 retry's attempts among them, and the cntlr's
+  reads name the mark (CN12, CN30). A mark whose clear (`dnv-worker.md`
+  AR13) or withdrawal (`architecture.md`, Repairs, `ForceStartGroup`) is
+  refused is thus not acted on until then. The cost: a mark that still
+  stands waits too — one a refused newer request keeps, and, after an
+  agent restart in that time, each mark of the request the startup
+  reconcile loaded (CN2), since the `SyncupCntlr` the worker sends again
+  for it (CN30) is refused as well — so a group whose array does not run
+  stays down until a save holds.
+  Neither of CN14's thin-id sweeps runs from the held request either, so
+  a pending activation sweep waits, and a thin id whose delete message
+  fails in that time waits for a later sweep of its pool's ids (CN14). A
+  request refused at the held revision changes nothing: the held request
+  keeps counting as delivered, or not counting (CN8). But a request at the
+  held revision whose save holds makes the held request count again
+  (CN8), so a mark whose clear or withdrawal was refused can still be
+  acted on. During an ownership change of the pool (`dnv-worker.md` VW7)
+  the old owner can still want the held revision after the new owner's
+  request that drops the mark was refused, and it sends that revision
+  again, since the cntlr's reads name the mark. Once the store disk takes
+  writes again, the old owner's request can be saved before the new
+  owner's, which that owner sends again each round (`dnv-worker.md` RW5).
+  Its converge and the CN10 retry's attempts then act on the mark until
+  the new owner's request is saved: one that reads the group's array not
+  running can start the array from the marked leg and zero the other
+  members the forced start keeps, one of which may hold newer data
+  (CN12). The case needs an ownership change, a store disk that takes
+  writes again inside it, and a group whose array does not run. The
+  revision gate admits the old owner's request because it measures
+  against the request the agent accepted last (CN8, `dnagent.md` SH8): a
+  refused request never becomes the desired state (`dnagent.md` SH5), and
+  the agent keeps no revision of it.

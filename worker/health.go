@@ -675,8 +675,9 @@ func newCnMonitor(
 // rejection would freeze health, push planning and RW19 reporting for as long
 // as one leftover survived.
 //
-// The three rejection codes (stale revision, unknown object, invalid conf)
-// mean the request was NOT applied, so their replies carry no verdict.
+// The rejection codes (stale revision, unknown object, invalid conf, a failed
+// save) and any code this worker does not know mean the request was NOT
+// applied, so their replies carry no verdict.
 func accepted(code uint32) bool {
 	return code == 0 || code == common.ReplyCodeLeftover
 }

@@ -96,9 +96,10 @@ type CnAgentServer struct {
 }
 
 // cnState is one synced CN: its last accepted SyncupCnRequest as this process
-// holds it (SH8) — a SyncupCn stores it once it has passed the revision gate,
-// before its converge runs — plus the ResInfo history of the base state
-// (architecture.md, Controller node, common), and its latest observation.
+// holds it (SH8) — a SyncupCn stores it once it has passed the revision gate
+// and its save has succeeded (dnagent.md SH5), before its converge runs —
+// plus the ResInfo history of the base state (architecture.md, Controller
+// node, common), and its latest observation.
 type cnState struct {
 	// req is read and written through loadReq and storeReq only. It is
 	// stored only under the node write lock, and every reader holds
@@ -143,9 +144,10 @@ type cntlrState struct {
 	// cntlrKeysOf reads every cntlr's ids too. So it is an atomic pointer: a
 	// lock-free read cannot race the store, and taking no lock for it adds no
 	// lock order. A request is never modified once stored. reqFromRpc, which
-	// changes with it, needs none of that: only this cntlr's own converges
-	// and reads read it, and each holds this cntlr's object lock or the node
-	// write lock, either of which orders it after the store.
+	// changes with it and on a refused save, needs none of that: only this
+	// cntlr's own converges and reads read it, and each holds this cntlr's
+	// object lock or the node write lock, either of which orders it after
+	// the write.
 	req     atomic.Pointer[pb.SyncupCntlrRequest]
 	tracker *agent.ResTracker
 
@@ -175,17 +177,22 @@ type cntlrState struct {
 	// info (tornMark). It is read and written under this cntlr's object lock
 	// or the node write lock, as pendingSweep is.
 	tornTds map[uint64]bool
-	// reqFromRpc is true once req was delivered by a revision-gated
-	// SyncupCntlr in THIS incarnation. The startup Reconcile converges from
-	// the persisted copy, which a failed save lets lag the pool's true
-	// contents: syncupCntlr saves before convergeCntlr but only logs a Save
-	// that fails, and the converge runs on — the sweep deletes ids absent
-	// from td_list, so it only ever trusts an RPC-delivered one (CN14). The
-	// persisted copy can also carry a forced-start mark the worker has
-	// cleared since, so a converge acts on a mark only while this is set,
-	// and a read names a mark while it is not (CN12; dropForcedStartMarks,
-	// storedMarks). The cntlr's reads read it too, each under this cntlr's
-	// object lock, which orders it after the store as well.
+	// reqFromRpc says whether req counts as delivered (CN8): a
+	// revision-gated SyncupCntlr of THIS incarnation stored it, whose save
+	// held, and no SyncupCntlr newer than it has been refused for a failed
+	// save since (dnagent.md SH5). syncupCntlr sets it with each request it
+	// stores and clears it when it refuses a newer request for a failed
+	// save; a request at the held revision refused so leaves it as it is.
+	// The startup Reconcile converges from the persisted copy, which can
+	// carry a forced-start mark the worker has cleared since, whose clear
+	// this agent never accepted (the clear never arrived, say, or its save
+	// failed), and a held request whose newer successor was refused can
+	// carry a mark the refused request clears or withdraws, so a converge
+	// acts on a mark only while this is set, and a read names a mark while
+	// it is not (CN12; dropForcedStartMarks, storedMarks). CN14's thin id
+	// sweeps, which delete ids absent from td_list, run only while it is
+	// set as well. The cntlr's reads read it too, each under this cntlr's
+	// object lock, which orders it after the write as well.
 	reqFromRpc bool
 
 	// probers are the CN11 leg health probers, keyed by leg_id. They hold no
@@ -423,7 +430,10 @@ func (s *CnAgentServer) GetCnSize(
 // ending. A request the revision gate refuses against the CN's held request
 // marks nothing and cancels nothing, so a stale request the worker re-sends
 // every round keeps no read from ending; the gate refuses it under the write
-// lock (markNodeSyncup).
+// lock. While the store's latest save failed, a request the gate admits
+// marks the CN alone and cancels nothing, since a request refused for a
+// failed save (dnagent.md SH5) comes back every round as well
+// (markNodeSyncup).
 func (s *CnAgentServer) SyncupCn(
 	ctx context.Context,
 	req *pb.SyncupCnRequest,
@@ -439,15 +449,21 @@ func (s *CnAgentServer) SyncupCn(
 // running read before it takes a lock (dnagent.md SH30), save a request CN8's
 // gates refuse against the cntlr's held request, which marks nothing and
 // cancels nothing, so a refused request the worker re-sends every round
-// keeps no read from ending (markSyncup); the gates refuse it under the
-// object lock.
+// keeps no read from ending; the gates refuse it under the object lock.
+// While the store's latest save failed, a request the gates admit marks the
+// cntlr and cancels nothing, since a request refused for a failed save
+// (dnagent.md SH5) comes back every round as well, and its object lock
+// waits for the cntlr's read (markSyncup).
 //
 // It takes the cntlr's object lock only for a cntlr this process holds or a
 // request CN8's gates admit: a request they refuse for a cntlr it does not
 // hold is answered under the node read lock alone, so it leaves no lock
-// entry behind (dnagent.md, SH11) — only the teardown of a held cntlr drops
-// one (dropCntlrState). syncupCntlr runs every gate again under the object
-// lock.
+// entry behind (dnagent.md, SH11). syncupCntlr runs every gate again under
+// the object lock. A request the gates admit whose save then fails, for a
+// cntlr the process does not hold, leaves the entry it created: the request
+// sent again reuses it, and the CN7 pointer diff drops it once the cntlr's
+// pointer leaves the CN's list (dropRemovedCntlrs), as the teardown of a
+// held cntlr drops its own (dropCntlrState).
 func (s *CnAgentServer) SyncupCntlr(
 	ctx context.Context,
 	req *pb.SyncupCntlrRequest,

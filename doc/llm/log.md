@@ -285,8 +285,8 @@ logs for the same thing.
   that the CN's background read found absent, or an ANA group it found in
   a state other than its fixed one, in each case only where a `SyncupCn`
   would build or rewrite it, or, on a cntlr, a forced-start mark of the
-  request the agent holds that no `SyncupCntlr` of this process delivered
-  (`cnagent.md` CN30) — each rendered "what:
+  request the agent holds while that request does not count as delivered
+  (`cnagent.md` CN8, CN30) — each rendered "what:
   error" and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`

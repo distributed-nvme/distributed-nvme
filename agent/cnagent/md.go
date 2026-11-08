@@ -1667,20 +1667,23 @@ func forcedStartRetries(err error) bool {
 }
 
 // errStoredMark is the failure a cntlr's read names a forced-start mark by
-// while the request the agent holds is the stored copy (storedMarks).
+// while the request the agent holds does not count as delivered
+// (storedMarks).
 var errStoredMark = errors.New(
-	"the mark comes from the stored request, and no SyncupCntlr of this " +
-		"agent has delivered it")
+	"the mark comes from the stored request, or from one held after a " +
+		"newer SyncupCntlr failed to save, so no converge acts on it")
 
 // storedMarks names, in a cntlr's read-only verdict, each forced-start mark
-// of a group a converge would build while the request the agent holds was
-// delivered by no SyncupCntlr of this process (cntlrState.reqFromRpc), so
-// that the worker re-sends the SyncupCntlr whose converge acts on the mark
-// if it still stands (cnagent.md CN12, CN30). A converge of such a request
-// acts on no mark (dropForcedStartMarks): it may be one the worker has
-// cleared since, and nothing else re-drives a converge for a group whose
-// array does not run. A deferred group builds nothing, and its provisioned
-// flip raises the pool's revision, whose fan-out delivers the request.
+// of a group a converge would build while the request the agent holds does
+// not count as delivered (cntlrState.reqFromRpc) — the stored copy the
+// startup reconcile loaded, or a held request whose newer successor
+// syncupCntlr refused for a failed save — so that the worker re-sends the
+// SyncupCntlr whose converge acts on the mark if it still stands (cnagent.md
+// CN12, CN30). A converge of such a request acts on no mark
+// (dropForcedStartMarks): it may be one the worker has cleared since, and
+// nothing else re-drives a converge for a group whose array does not run. A
+// deferred group builds nothing, and its provisioned flip raises the pool's
+// revision, whose fan-out delivers the request.
 func storedMarks(plan *cntlrPlan, res *agent.SweepResult) {
 	if !plan.wantGrp {
 		return

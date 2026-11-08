@@ -943,17 +943,23 @@ func TestWholeWorkerSyncupHungGivesNoVerdict(t *testing.T) {
 	}
 }
 
-// TestWholeWorkerSyncupRefusalsAreResentByRounds pins RW5's refusals: a
-// syncup refused as stale, as unknown or as invalid is logged as refused, at
-// Error for a stale revision and at Info otherwise, nothing is armed, and the
-// re-send comes from the next round only, whose own reply repeats the
-// refusal's cause (RW4 step 5, RW2). Each refusal is played on a kind whose
-// syncup can return it: stale on dn 3, whose revision key goes back below
-// what its agent holds, as an etcd restore does (architecture.md, etcd backup
-// and restore); unknown on side 8 and invalid on cntlr 2, by the reply-code
-// lever, which forces the code on the rounds too, as an agent that stores a
-// refusal reports it on them. Every re-sent syncup carries the trace id of a
-// round of its object, one per round (RW10). Once the cause is gone, no
+// TestWholeWorkerSyncupRefusalsAreResentByRounds pins RW5's refusals: a syncup
+// refused as stale, as unknown, as invalid or for a failed save is logged as
+// refused, at Error for a stale revision and a failed save and at Info
+// otherwise, nothing is armed, and the re-send comes from the next round only,
+// whose own reply repeats the refusal's cause (RW4 step 5, RW2). A failed save
+// is at Error because its main cause, a full or read-only store disk on a node,
+// is an operator event and the record is where an operator sees it (RW5). Each
+// refusal is played on a kind whose syncup can return it, so that the four
+// kinds are covered once each: stale on dn 3, whose revision key goes back
+// below what its agent holds, as an etcd restore does (architecture.md, etcd
+// backup and restore); unknown on side 8, invalid on cntlr 2 and a failed save
+// on cn 3, which holds nothing of the pool, by the reply-code lever, which
+// forces the code on the rounds too. An agent that stores a refusal reports it
+// on its rounds so; one whose save failed answers its rounds at the revision it
+// still holds, or as an unknown object when it holds none, which brings the
+// syncup on every round in the same way. Every re-sent syncup carries the trace
+// id of a round of its object, one per round (RW10). Once the cause is gone, no
 // syncup is sent any more.
 func TestWholeWorkerSyncupRefusalsAreResentByRounds(t *testing.T) {
 	t.Parallel()
@@ -966,16 +972,14 @@ func TestWholeWorkerSyncupRefusalsAreResentByRounds(t *testing.T) {
 		{roundDn(c, 3), common.ReplyCodeStaleRevision, slog.LevelError},
 		{roundSide(t, c, 8), common.ReplyCodeUnknownObject, slog.LevelInfo},
 		{roundCntlr(t, c, 2), common.ReplyCodeInvalidConf, slog.LevelInfo},
+		{roundCn(c, 3), common.ReplyCodeSaveFailed, slog.LevelError},
 	}
 	since := time.Now()
 	held := c.dnRev(t, 3)
 	c.setDnRevision(t, 3, held-1)
-	cases[1].o.set(t, func(ob *agentfake.Object) {
-		ob.ReplyCode = common.ReplyCodeUnknownObject
-	})
-	cases[2].o.set(t, func(ob *agentfake.Object) {
-		ob.ReplyCode = common.ReplyCodeInvalidConf
-	})
+	for _, tc := range cases[1:] {
+		tc.o.set(t, func(ob *agentfake.Object) { ob.ReplyCode = uint32(tc.code) })
+	}
 	h.waitUntil(t, 30*time.Second, "four refused syncups of each object",
 		func() (bool, string) {
 			for _, tc := range cases {

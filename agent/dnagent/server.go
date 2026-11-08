@@ -183,9 +183,9 @@ func (s *DnAgentServer) enrollLocked() {
 var bgEnrolling = func(*sync.Mutex) {}
 
 // dnState is one synced DN: its last accepted request as this process holds it
-// (SH8) — a SyncupDn stores it once it has passed the revision and conf gates,
-// before its converge runs — plus the ResInfo history of its node-level
-// resources and its latest observation.
+// (SH8) — a SyncupDn stores it once it has passed the revision and conf gates
+// and its save has succeeded (SH5), before its converge runs — plus the
+// ResInfo history of its node-level resources and its latest observation.
 type dnState struct {
 	// req is replaced only under the node write lock (SyncupDn), which
 	// orders it against every converge and read, since each holds the node
@@ -421,7 +421,9 @@ func (s *DnAgentServer) GetDnSize(
 // keeps no side's read from ending. A request DN4's gates refuse against the
 // held request marks nothing and cancels nothing, so a request the worker
 // re-sends every round keeps no read from ending; the gates refuse it under
-// the write lock (beginDnSyncup).
+// the write lock. While the store's latest save failed, a request the gates
+// admit marks the DN alone and cancels nothing, since a request refused for
+// a failed save (SH5) comes back every round as well (beginDnSyncup).
 func (s *DnAgentServer) SyncupDn(
 	ctx context.Context,
 	req *pb.SyncupDnRequest,
@@ -436,19 +438,25 @@ func (s *DnAgentServer) SyncupDn(
 }
 
 // SyncupSide marks its converge as it arrives and cancels the side's running
-// read before it takes any lock (SH30), so it never waits behind a read; the
-// mark ends once the call has, refusals included — save a request DN8's
-// gates refuse against the side's held request, which marks nothing and
-// cancels nothing, so a refused request the worker re-sends every round
-// keeps no read from ending (beginSideSyncup); the gates refuse it under the
-// object lock.
+// read before it takes any lock (SH30); the mark ends once the call has,
+// refusals included — save a request DN8's gates refuse against the side's
+// held request, which marks nothing and cancels nothing, so a refused
+// request the worker re-sends every round keeps no read from ending; the
+// gates refuse it under the object lock, which waits for the side's read.
+// While the store's latest save failed, a request the gates admit marks the
+// side and cancels nothing, since a request refused for a failed save (SH5)
+// comes back every round as well, and its object lock waits for the side's
+// read (beginSideSyncup).
 //
 // It takes the side's object lock only for a side this process holds
 // or a request DN8's gates admit: a request they refuse for a side it does
 // not hold is answered under the node read lock alone, so it leaves no lock
 // entry behind (dnagent.md, Concurrency — `locks.go`). The DN request the
 // gates read cannot change under that lock, and syncupSide runs every gate
-// again under the object lock.
+// again under the object lock. A request the gates admit whose save then
+// fails, for a side the process does not hold, leaves the entry it
+// created: the request sent again reuses it, and the DN6 pointer diff
+// drops it once the side's pointer leaves the DN's list (dropRemovedSides).
 func (s *DnAgentServer) SyncupSide(
 	ctx context.Context,
 	req *pb.SyncupSideRequest,

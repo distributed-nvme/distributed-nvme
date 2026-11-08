@@ -366,6 +366,14 @@ func (s *DnAgentServer) beginSideConverge(key string) {
 // between, a SyncupDn or a newer SyncupSide of this side, which costs that
 // one syncup a wait for the read or one cancelled read. A side the agent
 // does not hold, or a request the gates admit, is marked as before.
+//
+// While the store's latest save failed (agent.Store.SaveFailing), a request
+// the gates admit marks the side and cancels nothing, for the same reason:
+// a request refused for a failed save comes back every round too, at a
+// newer revision, and at the held revision while the side's rounds answer a
+// non-zero code (SH5), and nothing knows before its save that it will be
+// refused. Its object lock waits for the side's read, which runs bounded
+// commands (SH13).
 func (s *DnAgentServer) beginSideSyncup(
 	key string,
 	req *pb.SyncupSideRequest,
@@ -381,7 +389,7 @@ func (s *DnAgentServer) beginSideSyncup(
 		}
 	}
 	s.marks.BeginLocked(key, s.now())
-	if st != nil {
+	if st != nil && !s.store.SaveFailing() {
 		st.obs.CancelReadLocked()
 	}
 	return true
@@ -389,7 +397,8 @@ func (s *DnAgentServer) beginSideSyncup(
 
 // beginDnSyncup marks a SyncupDn's converge as it arrives, before the syncup
 // waits for the node write lock (SH30), and returns what ends the marks it
-// made once the converge has stored its observation, nil when it made none.
+// made once the converge has stored its observation or the call has ended
+// without one, nil when it made none.
 //
 // A request of a revision newer than the one the agent holds for the DN, or
 // for a DN it does not hold, marks the DN and the node and cancels every
@@ -413,6 +422,18 @@ func (s *DnAgentServer) beginSideSyncup(
 // request, or the conf gate — marks nothing and cancels nothing, for
 // beginSideSyncup's reason. The held revision only grows and the conf gate
 // reads the request alone, so they refuse it again under the write lock.
+//
+// While the store's latest save failed (agent.Store.SaveFailing), a request
+// the gates admit marks the DN alone and cancels nothing, whatever its
+// revision, for beginSideSyncup's reason: the worker re-sends a request
+// refused for a failed save on every round at a newer revision, and at the
+// held revision while the DN's rounds answer a non-zero code (SH5), and
+// nothing knows before its save that it will be refused. Were each newer
+// re-send to mark the node and cancel every read, the observations of the
+// agent's DNs and sides would go too old (dnv-worker.md HL7), and were each
+// re-send at the held revision to cancel the DN's own read, the DN's would.
+// Its write lock waits for the reads that hold the node read lock when it
+// asks, as a re-send's at the held revision does.
 func (s *DnAgentServer) beginDnSyncup(
 	key string,
 	req *pb.SyncupDnRequest,
@@ -428,6 +449,9 @@ func (s *DnAgentServer) beginDnSyncup(
 		return nil
 	}
 	s.marks.BeginLocked(key, s.now())
+	if s.store.SaveFailing() {
+		return func() { s.endConverge(key) }
+	}
 	if held != nil && req.GetRevision() == held.GetRevision() {
 		s.dns[key].obs.CancelReadLocked()
 		return func() { s.endConverge(key) }
@@ -442,9 +466,9 @@ func (s *DnAgentServer) beginDnSyncup(
 	return func() { s.endDnSyncup(key) }
 }
 
-// endConverge ends one mark beginSideConverge, beginSideSyncup or a re-sent
-// SyncupDn's beginDnSyncup made, once the converge has stored its
-// observation.
+// endConverge ends the one mark beginSideConverge or beginSideSyncup made,
+// or the DN's mark alone that beginDnSyncup made, once the converge has
+// stored its observation or the call has ended without one.
 func (s *DnAgentServer) endConverge(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -525,8 +525,9 @@ func pointerKnown(req *pb.SyncupDnRequest, ptr *pb.SidePointer) bool {
 const msgInvalidStoredConf = "invalid stored conf"
 
 // syncupDn implements DN4-DN7. The node write lock is held by the caller. A
-// request the gates refuse stores no observation; an admitted one stores its
-// converge's before the caller lets go of the lock (SH28).
+// request the gates refuse, or whose save fails (SH5), stores no
+// observation; a saved one stores its converge's, unless its call is cut
+// off, before the caller lets go of the lock (SH28).
 func (s *DnAgentServer) syncupDn(
 	ctx context.Context,
 	req *pb.SyncupDnRequest,
@@ -547,8 +548,9 @@ func (s *DnAgentServer) syncupDn(
 	// This is the last point with literally zero side effects: the request
 	// has not become the desired state, nothing has been converged, no dm
 	// device removed, no volume-table block written and no local-store file
-	// touched. Putting it after the request is stored below would persist
-	// the zero and let the next Reconcile converge it.
+	// touched. Putting it after the save below would persist the zero,
+	// replacing any request accepted before it, and the next Reconcile would
+	// load that file and refuse it, converging neither the DN nor its sides.
 	if err := agent.ValidateExtentSize(req.GetExtentSize()); err != nil {
 		slog.ErrorContext(ctx, msgInvalidStoredConf,
 			slog.Uint64("cluster_id", req.GetClusterId()),
@@ -559,30 +561,46 @@ func (s *DnAgentServer) syncupDn(
 			Revision:   stored,
 		}
 	}
-	if st == nil {
-		st = &dnState{tracker: agent.NewResTracker()}
-	}
-	st.req.Store(req)
-	s.putDn(key, st)
 
-	// The dn file is persisted BEFORE the sweep, not after it. The
+	// The dn file is persisted as soon as the gates admit the request,
+	// BEFORE it becomes the desired state and before the sweep (SH5). The
 	// sweep is what removes the resources of a side whose pointer has just
-	// left the list, and it can block for the whole failfast window on a dead
-	// remote; a request cancelled in that window would skip a save placed
-	// after it, and the next Reconcile would read the OLD list, which still
-	// names the side. With the new list on disk first, a crash mid-sweep is
-	// nothing but a startup sweep.
+	// left the list, and it can block for the whole failfast window on a
+	// dead remote; a request cancelled in that window would skip a save
+	// placed after it, and the next Reconcile would read the OLD list, which
+	// still names the side. With the new list on disk first, a crash
+	// mid-sweep is nothing but a startup sweep. A request whose save fails
+	// is refused at the revision the agent holds, zero for a DN it does not
+	// hold: it does not become the desired state, a DN the agent does not
+	// hold stays unknown, and nothing is converged or swept, so the dn file
+	// keeps the side list of the last request the agent accepted, unless
+	// only the directory fsync after the rename failed: the file then holds
+	// this request, which a restart converges and the worker wants anyway.
+	// Were the request converged over a failed save, a side it adds would be
+	// built and its SyncupSide accepted, and the next Reconcile, reading the
+	// older list, would sweep that live side and free its extents.
 	path := s.nf.LocalDnPath(req.GetClusterId(), req.GetDnId())
-	var savedAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting dn state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
-	} else {
-		savedAt = s.now()
+		return &pb.SyncupDnReply{
+			AgentReply: agent.SaveFailedReply(err),
+			Revision:   stored,
+		}
 	}
+	savedAt := s.now()
+	var prev *pb.SyncupDnRequest
+	if st == nil {
+		st = &dnState{tracker: agent.NewResTracker()}
+	} else {
+		prev = st.req.Load()
+	}
+	st.req.Store(req)
+	s.putDn(key, st)
+
 	info := s.convergeDn(ctx, st)
-	s.dropRemovedSides(ctx, req)
+	s.dropRemovedSides(ctx, prev, req)
 	sweep := s.sweepDn(ctx, st, true)
 	reply := sweep.Reply()
 
@@ -764,9 +782,19 @@ func (s *DnAgentServer) ensurePort(
 // sweep that runs next finds every one of its resources by name. Ids are
 // never reused, so a dropped side never comes back, an etcd restore aside
 // (architecture.md, etcd backup and restore).
+//
+// It also drops the object lock of every pointer that left the list since
+// prev, the request the agent held for the DN before req, whether or not
+// the agent holds that side: a SyncupSide that DN8's gates admitted for a
+// side the agent does not hold, and whose save then failed (SH5), leaves
+// the entry it created, and no teardown runs for a side never held. DN8
+// admits only a pointer of the held list, and a pointer leaves that list at
+// one SyncupDn, whose diff here drops its entry. The node write lock is
+// held, so no call holds an object lock or waits for one, and dropping an
+// entry the set does not hold does nothing.
 func (s *DnAgentServer) dropRemovedSides(
 	ctx context.Context,
-	req *pb.SyncupDnRequest,
+	prev, req *pb.SyncupDnRequest,
 ) {
 	for _, key := range s.sideKeysOf(req.GetClusterId(), req.GetDnId()) {
 		st := s.getSide(key)
@@ -774,6 +802,12 @@ func (s *DnAgentServer) dropRemovedSides(
 			continue
 		}
 		s.dropSideState(ctx, key, st)
+	}
+	for _, ptr := range prev.GetSidePointerList() {
+		if !pointerKnown(req, ptr) {
+			s.locks.DropObj(sideKey(req.GetClusterId(), req.GetDnId(),
+				ptr.GetSpId(), ptr.GetSideId()))
+		}
 	}
 }
 

@@ -333,24 +333,24 @@ const (
 
 // sweepThinIds is CN14's thin id sweep: enumerate one pool's device ids and
 // delete every id that no td of td_list owns and keep does not name. Two runs
-// use it, each only under an RPC-delivered request (the call sites'
-// reqFromRpc gates): the activation sweep, at most once per pool-device
-// creation, which passes no keep; and the sweep after an L7 delete message
-// failed (sweepAfterFailedDeletes), whose keep reads the ids the pass's thin
-// volumes still map. keep runs only once the dump is in, so a pool whose
-// dump fails costs none of its reads, and an error keep returns stops the
-// sweep.
+// use it, each only under a request that counts as delivered (the call
+// sites' reqFromRpc gates): the activation sweep, at most once per
+// pool-device creation, which passes no keep; and the sweep after an L7
+// delete message failed (sweepAfterFailedDeletes), whose keep reads the ids
+// the pass's thin volumes still map. keep runs only once the dump is in, so a
+// pool whose dump fails costs none of its reads, and an error keep returns
+// stops the sweep.
 // Either one that gets through ends the slice's pending activation sweep; a
 // failure leaves pendingSweep as it is, so a pending one is retried by a
 // later converge.
 //
-// It is correct to delete against this td_list and no other: GateRevision
-// makes an RPC-delivered request the newest desired state this cntlr has ever
-// accepted, dev_ids are never reused (SpConf.next_dev_id; architecture.md,
-// Known limits, names the etcd restore that can break that), thin ids belong
-// exclusively to tds — clones and transfers own none — and DN-side fencing
-// leaves no other writer, so a pool id absent from it can only belong to a td
-// deleted at or before that revision.
+// It is correct to delete against this td_list: GateRevision makes a
+// request that counts as delivered the newest desired state this
+// cntlr has ever accepted, dev_ids are never reused (SpConf.next_dev_id;
+// architecture.md, Known limits, names the etcd restore that can break
+// that), thin ids belong exclusively to tds — clones and transfers own none —
+// and DN-side fencing leaves no other writer, so a pool id absent from it can
+// only belong to a td deleted at or before that revision.
 //
 // Its deletions are its own messages, not L7's (deleteThinIdByName,
 // sweep.go): it must see each failure, to keep its arming alive, and it
@@ -400,7 +400,8 @@ func (s *CnAgentServer) sweepThinIds(
 		}
 	}
 	// Only a full pass disarms: anything short of it leaves the slice
-	// sweep-pending for the next converge under an RPC-delivered request.
+	// sweep-pending for the next converge under a request that counts as
+	// delivered.
 	delete(st.pendingSweep, sp.sliceId)
 	slog.InfoContext(ctx, msgThinSweep,
 		slog.String("pool", sp.poolFinalName),

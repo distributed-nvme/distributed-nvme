@@ -128,10 +128,12 @@ func (s *ObsSlot[T]) WriteLocked(ctx context.Context, obs Observation[T]) bool {
 // yet ended, and since when one has been in flight without a break; and how
 // many node-level syncups that mark the node are in flight. A syncup marks
 // itself when it arrives, before it cancels a read and waits for its locks,
-// unless a gate refuses it on the request the agent holds; a background
-// converge marks itself before it waits for the object lock. No read starts
-// while a mark of its object, or of its node, stands. It has no lock of its
-// own: the role server's leaf lock guards it, as it guards the ObsSlots.
+// unless a gate refuses it on the request the agent holds; while the store's
+// latest save failed (Store.SaveFailing) it marks its own object alone and
+// cancels no read, its own object's included. A background converge marks
+// itself before it waits for the object lock. No read starts while a mark of
+// its object, or of its node, stands. It has no lock of its own: the role
+// server's leaf lock guards it, as it guards the ObsSlots.
 type ConvergeMarks struct {
 	objs map[string]*convergeMark
 	node int

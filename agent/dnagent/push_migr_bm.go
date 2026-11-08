@@ -48,9 +48,12 @@ func (s *DnAgentServer) pushMigrBitmap(
 	path := s.nf.LocalMigrBmPath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetMigrId(), req.GetBmIdx())
 	if err := s.store.Save(ctx, path, req); err != nil {
-		// Not persisted ⇒ not applied: the chunk stays out of the applied
-		// set, so the worker re-pushes it on its next round (architecture.md,
-		// Bitmap push protocol).
+		// Not persisted ⇒ not applied: the push leaves the applied set as it
+		// was, so a chunk not yet in it stays out, even when only the
+		// directory sync after the rename failed and its file is in place,
+		// and the worker pushes it again after a later accepted SyncupSide
+		// reply, whose bm_info leaves it out (DN15; dnv-worker.md BM2;
+		// architecture.md, Bitmap push protocol).
 		slog.ErrorContext(ctx, "persisting bitmap chunk failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
@@ -118,8 +121,10 @@ func (s *DnAgentServer) applyChunks(
 
 // bitmapInfo reports the applied set: the chunks this process loaded at
 // startup or received since. That is every file present (SH21) save those
-// DN2's reload skipped, so the set survives an agent restart, and a skipped
-// chunk is pushed again.
+// DN2's reload skipped and those a push left in place for a chunk outside
+// the set when its save failed only at the directory sync, since a push
+// whose save fails changes nothing in the set (DN15). So the set survives
+// an agent restart, and a chunk left out is pushed again.
 func (s *DnAgentServer) bitmapInfo(st *sideState) *pb.BitmapInfo {
 	dst := st.req.Load().GetMigrDstConf()
 	if dst == nil {

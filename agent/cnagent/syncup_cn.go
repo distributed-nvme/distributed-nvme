@@ -199,7 +199,10 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	return nil
 }
 
-// syncupCn implements CN4-CN7. The node write lock is held by the caller.
+// syncupCn implements CN4-CN7. The node write lock is held by the caller. A
+// request the gate refuses, or whose save fails (dnagent.md SH5), stores no
+// observation; a saved one stores its converge's, unless its call is cut
+// off, before the caller lets go of the lock (dnagent.md SH28).
 func (s *CnAgentServer) syncupCn(
 	ctx context.Context,
 	req *pb.SyncupCnRequest,
@@ -213,30 +216,48 @@ func (s *CnAgentServer) syncupCn(
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupCnReply{AgentReply: reject, Revision: stored}
 	}
-	if st == nil {
-		st = newCnState(req)
-	} else {
-		st.storeReq(req)
-	}
-	s.putCn(key, st)
 
-	// The cn file is persisted BEFORE the sweep, not after it. The
+	// The cn file is persisted as soon as the gate admits the request,
+	// BEFORE it becomes the desired state and before the sweep (CN7). The
 	// sweep is what removes the resources of a cntlr whose pointer has just
 	// left the list, and it can block for the whole failfast window on a dead
 	// leg; with the new list on disk first, a crash or a cancellation in that
 	// window is nothing but a startup sweep, never a Reconcile that rebuilds
-	// the cntlr from a stale list against sides that no longer exist.
+	// the cntlr from a stale list against sides that no longer exist. A
+	// request whose save fails is refused at the revision the agent holds,
+	// zero for a CN it does not hold: it does not become the desired state, a
+	// CN the agent does not hold stays unknown, and nothing is converged,
+	// dropped or swept, so the cn file keeps the pointer list of the last
+	// request the agent accepted, unless only the directory fsync after the
+	// rename failed: the file then holds this request, which a restart
+	// converges and the worker wants anyway. Were the request held in memory
+	// over a failed save, a cntlr only its list names would pass CN8's
+	// pointer gate and be built, and the next Reconcile, reading the older
+	// list, would forget that cntlr and its sweep remove the devices its
+	// hosts use. The worker sends the request again as dnagent.md SH5 says
+	// (dnv-worker.md RW4, RW12).
 	path := s.nf.LocalCnPath(req.GetClusterId(), req.GetCnId())
-	var saveAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting cn state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
-	} else {
-		saveAt = s.now()
+		return &pb.SyncupCnReply{
+			AgentReply: agent.SaveFailedReply(err),
+			Revision:   stored,
+		}
 	}
+	saveAt := s.now()
+	var prev *pb.SyncupCnRequest
+	if st == nil {
+		st = newCnState(req)
+	} else {
+		prev = st.loadReq()
+		st.storeReq(req)
+	}
+	s.putCn(key, st)
+
 	info := s.convergeCn(ctx, st)
-	s.dropRemovedCntlrs(ctx, req)
+	s.dropRemovedCntlrs(ctx, prev, req)
 	code := s.sweepCn(ctx, st, true, nil).Reply()
 	// The converge's observation, stored under the node write lock before
 	// the reply is built (dnagent.md SH28): the next round answers from it.
@@ -326,9 +347,19 @@ func (s *CnAgentServer) ensurePort(
 //
 // The base state itself is never torn down — like the DN port it outlives
 // every cntlr, and only lab cleanup removes it.
+//
+// It also drops the object lock of every pointer that left the list since
+// prev, the request the agent held for the CN before req, whether or not the
+// agent holds that cntlr: a SyncupCntlr that CN8's gates admitted for a
+// cntlr the agent does not hold, and whose save then failed (dnagent.md
+// SH5), leaves the entry it created, and no teardown runs for a cntlr never
+// held. CN8 admits only a pointer of the held list, and a pointer leaves
+// that list at one SyncupCn, whose diff here drops its entry. The node write
+// lock is held, so no call holds an object lock or waits for one, and
+// dropping an entry the set does not hold does nothing.
 func (s *CnAgentServer) dropRemovedCntlrs(
 	ctx context.Context,
-	req *pb.SyncupCnRequest,
+	prev, req *pb.SyncupCnRequest,
 ) {
 	for _, key := range s.cntlrKeysOf(req.GetClusterId(), req.GetCnId()) {
 		st := s.getCntlr(key)
@@ -336,6 +367,12 @@ func (s *CnAgentServer) dropRemovedCntlrs(
 			continue
 		}
 		s.dropCntlrState(ctx, key, st)
+	}
+	for _, ptr := range prev.GetCntlrPointerList() {
+		if !pointerKnown(req, ptr) {
+			s.locks.DropObj(cntlrKey(req.GetClusterId(), req.GetCnId(),
+				ptr.GetSpId(), ptr.GetCntlrId()))
+		}
 	}
 }
 

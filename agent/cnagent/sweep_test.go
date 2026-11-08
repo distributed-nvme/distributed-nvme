@@ -216,9 +216,10 @@ func TestRestartDoesNotSweep(t *testing.T) {
 		t.Fatalf("the reconcile of a converged node mutated: %q\nall:\n%s",
 			call, strings.Join(node.Mutations(), "\n"))
 	}
-	// The first post-boot request is revision-gated, so its reqFromRpc half
-	// is satisfied — and it still sweeps nothing, because its own ensurePool
-	// probe-matched the surviving device and armed nothing.
+	// The first post-boot request is revision-gated and its save holds, so
+	// it counts as delivered (reqFromRpc) — and it still sweeps nothing,
+	// because its own ensurePool probe-matched the surviving device and
+	// armed nothing.
 	node.Reset()
 	syncupCntlrAt(t, fresh, reqOpts{revision: 3, primary: true, tds: tds})
 	for _, fragment := range []string{
@@ -238,8 +239,8 @@ func TestRestartDoesNotSweep(t *testing.T) {
 // TestSweepFailureRetries: the dump is the sweep's first step and the first
 // thing that can fail (a killed reader's reservation, a truncated document).
 // The flag survives it, the converge's own rows are untouched — the sweep is
-// housekeeping, never a build step — and the next converge under an
-// RPC-delivered request finishes the job.
+// housekeeping, never a build step — and the next converge under a request
+// that counts as delivered (cntlrState.reqFromRpc) finishes the job.
 func TestSweepFailureRetries(t *testing.T) {
 	srv, node := newTestServer(t)
 	pool := poolName(srv)
@@ -313,26 +314,27 @@ func TestSweepSurvivesDeleteFailure(t *testing.T) {
 	}
 }
 
-// TestStartupReconcileDefersSweep is CN14's startup-deferral data-loss pin.
-// The startup reconcile converges from the persisted request, and a failed
-// save (syncupCntlr saves before convergeCntlr but only logs a Save that
-// fails, and converges all the same) lets that copy lag the pool's true
-// contents. A sweep run against it deletes a live created
-// td's thin id, which CN14 then reports as a permanent, never-re-messaged
-// RES_STATUS_ERROR — data loss, where the same staleness without a sweep is
-// merely a td left unbuilt until the next sync. So the startup Create arms
-// only; the first revision-gated SyncupCntlr sweeps, with the fresh td_list,
-// keeping the reboot as a heal point — the re-created pool is still swept,
-// just at the first post-boot sync.
+// TestStartupReconcileDefersSweep is CN14's startup-deferral pin. The
+// startup reconcile converges the stored request, which no SyncupCntlr of
+// this process delivered, and CN14's thin id sweep runs only from one that
+// counts as delivered (CN8, cntlrState.reqFromRpc, the gate CN12 puts on
+// the forced-start marks). The stored request here lists td A alone while the pool also
+// holds td B's id, and the first request after boot lists B. A sweep run
+// against the stored request would delete B's thin id, which CN14 then
+// reports as a permanent, never-re-messaged RES_STATUS_ERROR — data loss,
+// where without a sweep B is merely left unbuilt until that request. So the
+// startup Create arms only; the first revision-gated SyncupCntlr sweeps,
+// with its own td_list, keeping the reboot as a heal point — the re-created
+// pool is still swept, just at the first post-boot sync.
 func TestStartupReconcileDefersSweep(t *testing.T) {
 	srv, node := newTestServer(t)
 	pool := poolName(srv)
 	ctx := context.Background()
 
-	// td B was created after the Save that the persisted copy is stuck at,
-	// so the store knows only td A. S is a genuine stray. All three ids are
-	// in the pool metadata on the legs, which is what lets A's and B's bare
-	// `dmsetup create` attach.
+	// The stored request lists td A alone, though td B's id is in the pool
+	// too. S is a genuine stray. All three ids are in the pool metadata on
+	// the legs, which is what lets A's and B's bare `dmsetup create`
+	// attach.
 	tdA := createdTd(testTd, sweepLiveDevId)
 	tdB := createdTd(testSnapTd, sweepLiveDevId2)
 	node.holdThinIds(pool, sweepLiveDevId, sweepLiveDevId2, sweepStrayDevId)
@@ -388,7 +390,7 @@ func TestStartupReconcileDefersSweep(t *testing.T) {
 	// converged from, and it is still here.
 	if n := callCnt(node, deleteMsg(pool, sweepLiveDevId2)); n != 0 {
 		t.Fatalf("the sweep deleted td B's id (%d messages) — the id the "+
-			"stale persisted request had forgotten", n)
+			"stored request lacks", n)
 	}
 	if n := callCnt(node, deleteMsg(pool, sweepLiveDevId)); n != 0 {
 		t.Fatalf("the sweep deleted td A's id (%d messages)", n)
@@ -508,10 +510,10 @@ func failedDeleteFixture(
 // TestAFailedThinDeleteSweepsThePool is CN14's sweep after a failed delete. A
 // td leaves td_list; L7 removes its thin volume and the delete message of its
 // id fails. No later pass lists that volume again, so the same pass sweeps
-// the pool's ids — under an RPC-delivered request only, as the activation
-// sweep — and deletes the id there. It never deletes an id a thin volume the
-// pass still lists maps, and such a volume keeps its id in its own pool's
-// sweep only, when two pools are swept in one pass too. A pool sweeps once in
+// the pool's ids — under a request that counts as delivered only, as the
+// activation sweep — and deletes the id there. It never deletes an id a thin
+// volume the pass still lists maps, and such a volume keeps its id in its own
+// pool's sweep only, when two pools are swept in one pass too. A pool sweeps once in
 // the pass however many of its deletes failed, and once the read of the
 // listed volumes' ids has failed no pool is dumped any more. It remembers
 // nothing: a startup reconcile's failed delete is not swept, by it or by the
