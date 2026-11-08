@@ -111,7 +111,10 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
 * The dead-leg stage cuts each array's first member, the one mdadm's detail
   read would block on, under a host write, since md learns of a dead member
   only from an IO to it (`cnagent.md` CN12, CN29); a failfast member write
-  fails at the controller's keep-alive expiry.
+  in flight on the path fails at the teardown the controller's keep-alive
+  expiry triggers, a quarter keep-alive timeout later, and one that reaches
+  the leg's multipath head after the expiry waits there until the fast IO
+  fail timeout (`architecture.md`, Known limits).
 * dm-flakey counts the feature name among its feature arguments and prints them
   back in a kernel-dependent order, so the read-only check matches the target
   and the error-writes feature apart, as `nsDevTableMatches` does.

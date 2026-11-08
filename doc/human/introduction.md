@@ -410,11 +410,13 @@ The limits a user must know:
   is later put back into the group can be copied over with no error, losing the
   data only it held; and while one of the group's legs is being replaced it can
   leave the group down.
-- A group that loses every leg at once under writes, as on a switch reload
-  or a double reboot of its disk nodes, is broken by md: every leg connection
-  has a 5 s fast IO fail timeout, after which the kernel fails the IO queued
-  on a lost path, so when the last leg fails its IO too md marks the array
-  broken and refuses every write. The primary leaves a broken array as it is
+- A group that loses every leg at once under IO, as on a switch reload or a
+  reboot of all its disk nodes, is broken by md: the kernel fails the IO on
+  each lost path, md's own writes when it tears the path down and the rest
+  at the 5 s fast IO fail timeout, so when the last leg fails its IO too md
+  marks the array broken and refuses every write; an idle array whose legs
+  all died keeps running until IO reaches it, a read as well as a write. The
+  primary leaves a broken array as it is
   when the legs return, so the group stays down until an operator forces a
   start or the primary role moves to another cntlr, whose build assembles
   the array again once the legs are back; the broken array marks the primary
@@ -427,15 +429,24 @@ The limits a user must know:
   commits too, so when it is a data group and its slice's meta group still
   takes writes, a commit under writes turns that thin pool read-only, as for
   a group of one leg, and a new primary's build brings the array back but
-  not a writable thin pool, a consequence worked out from md's and dm-thin's
-  code, not measured.
-- Writes to a group with a leg on a dead disk node wait about 14 s, 15 at
-  most, over NVMe/TCP, a figure read from the kernel's timers, not measured:
-  the kernel's keep-alive takes most of that to give the leg's connection
-  up, the 5 s fast IO fail timeout then fails the queued IO, md fails the
-  member, and the write completes on the other leg; a group of one leg
-  returns the error, with the read-only thin pool of the bullet above when it
-  fails a commit.
+  not a writable thin pool; when it is the meta group, the mark that keeps a
+  pool read-only cannot be written either, so a new primary's build brings
+  the pool back writable as of its last commit, without the blocks mapped
+  since; a consequence worked out from md's and dm-thin's code, not
+  measured.
+- Writes to a group with a leg on a dead disk node wait for the kernel's
+  keep-alive to give the leg's connection up, over NVMe/TCP, figures read
+  from the kernel's code and timers, not measured: when the kernel tears the
+  dead path down, about 6 to 10 s after the node died, md's own writes,
+  which it sends with the failfast flag, fail, so md fails the member then
+  and the writes complete on the other leg, and a flush md sent to that leg
+  ends then as well, with no error; what md sends in the second or so
+  between the keep-alive giving up and the teardown, a write or a flush,
+  waits the 5 s fast IO fail timeout more, 11 to 15 s after the node died,
+  and an fsync whose flush is among it waits that long; a group of one leg
+  has no other leg to complete on: its writes and reads wait until the fast
+  IO fail timeout and return the error, with the read-only thin pool of the
+  bullet above when it fails a commit.
 - Restarting a controller node's agent for longer than about 4 to 6 s at the
   defaults fails over every primary on that node, a figure worked out from
   the defaults, not measured: the agent answers no check round until the
@@ -444,13 +455,19 @@ The limits a user must know:
   over. Before maintenance, stop the workers first, as an upgrade does, or
   create pools with a larger `--thr-primary` of `dnvctl sp create`.
 - A write is durable once a later flush from the host, or a write the host
-  marks to reach stable storage before it completes (FUA), has completed, so
-  a completed fsync survives a crash of the primary; without one, a write
-  that needs a new block of the thin pool, to a block not written before or
-  to one a snapshot shares, is committed about once a second, and a primary
-  that dies before that commit loses it, the block reading as it did before
-  the write, zeros where nothing was written. The volumes report a volatile
-  write cache, so hosts flush as they do to a disk with one.
+  marks to reach stable storage before it completes (FUA), has completed on
+  the primary that took the write, so a completed fsync survives a crash of
+  the primary when that primary completed the flush itself; a primary that
+  dies first loses the writes it had not committed though the host's fsync
+  can still complete, since the host's kernel completes a flush it had to
+  cancel on the dead path with no error, the request carrying no data to
+  retry, and sends a later flush to the new primary, which commits nothing
+  of the dead one's; without a flush, a write that needs a new block of the
+  thin pool, to a block not written before or to one a snapshot shares, is
+  committed about once a second, and a primary that dies before that commit
+  loses it, the block reading as it did before the write, zeros where
+  nothing was written. The volumes report a volatile write cache, so hosts
+  flush as they do to a disk with one.
 - A RAID1 pool survives the loss of any one disk node, but not every loss of
   two: a group's two legs sit on two disk nodes, and losing both legs of one
   group loses that slice's thin pool and with it every thin device of the
@@ -461,9 +478,11 @@ The limits a user must know:
 - Nothing limits recovery load across pools: a dead disk node starts a leg
   repair, a full copy, in every RAID1 group whose leg it held, and a dead
   controller node fails over every primary it held, all at about the same
-  time; the agents set no copy speed on md, so the kernel's
-  `dev.raid.speed_limit_min` and `dev.raid.speed_limit_max` are the only
-  control of the copies' speed.
+  time; the agents set no copy speed on md, so md's own limits alone control
+  the copies' speed: the kernel's `dev.raid.speed_limit_min` and
+  `dev.raid.speed_limit_max`, which an array's own `md/sync_speed_min` and
+  `md/sync_speed_max` override until the array stops, as read in the kernel's
+  md source.
 - A RAID1 pool needs four disk nodes per slice at create: the create puts
   every leg of the pool on a disk node of its own, and each slice has a meta
   group and a data group of two legs each, so a cluster with fewer disk nodes
@@ -491,11 +510,13 @@ The limits a user must know:
 - A host discard frees pool space only where it covers, on every slice, a
   whole aligned block: a thin pool frees whole blocks only and completes a
   shorter or misaligned discard with success, and the striped device hands
-  each slice its share of the range unsplit, so a discard frees a block only
-  when it covers an aligned range of the slice count times the pool's block
-  size, 2 MiB at the defaults of two slices and a 1 MiB block, while the
-  volume advertises 1 MiB as its discard granularity; `fstrim` can therefore
-  report success and free nothing. These sizes are read from the kernel's
+  each slice its share of the range unsplit, so with a stripe smaller than
+  the block a discard frees a block on one slice only when it covers nearly
+  the slice count times the pool's block size, and an aligned range of that
+  size frees one block on every slice, 2 MiB at the defaults of two slices
+  and a 1 MiB block, while the volume advertises 1 MiB as its discard
+  granularity; `fstrim` can therefore report success and free nothing. These
+  sizes are read from the kernel's
   source, not measured. A `--stripe-size` equal to the `--block-size` at
   create, which needs a block of 1 MiB or less, the largest stripe, makes one
   aligned host block one pool block.
@@ -508,9 +529,10 @@ The limits a user must know:
   that the mount does not follow, until the pod that uses it, the Kubernetes
   unit of one or more containers, is deleted and made again.
 - A fault that only a host sees never fails over: the worker reads the
-  agents' reports alone, so a primary whose agent answers while hosts cannot
-  reach its NVMe/TCP address stays the primary and stays in the cdc's answer,
-  and the host's IO queues as long as a standby path is left. On a pool with
+  agents' reports and the stored records, never a host, so a primary whose
+  agent answers while hosts cannot reach its NVMe/TCP address stays the
+  primary and stays in the cdc's answer, and the host's IO queues as long as
+  a standby path is left. On a pool with
   an enabled standby that is healthy, the operator disables the primary,
   which starts a failover with no threshold wait, and enables it again after
   the failover, since a disabled cntlr is never a candidate and is never

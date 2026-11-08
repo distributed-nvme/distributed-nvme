@@ -4350,27 +4350,27 @@ case_redund() {
 	# CN28: the md row is read from /sys/block/mdN/md,
 	# never from `mdadm --detail`, which loads the superblock from a member
 	# device and, when that member's DN side has gone, blocks until the
-	# path's failfast expires — ~13 s after the side died, well past
-	# CmdSoftTimeout. If the kill turned the md row ERROR, the row would count
-	# toward cntlr health and fail the primary over. The partition (case T's,
-	# on vm1's INPUT from vm2 to the nvme-tcp port) takes CN2's two legs into
-	# DN1 away without the DN agent: meta leg 1 and data leg 1 — leg_idx 0, so
-	# disk 0 of their arrays, the member `mdadm --detail` would load its
-	# superblock from. It also cuts the emulated host's path to CN1, the
-	# standby's, inaccessible since the failover; it reconnects once the
-	# rule goes, and the lateflip stage waits for it to be live before it
-	# reads through it.
+	# path's failfast expires — 11 to 15 s after the side died, by the
+	# kernel's timers, well past CmdSoftTimeout. If the kill turned the md row
+	# ERROR, the row would count toward cntlr health and fail the primary
+	# over. The partition (case T's, on vm1's INPUT from vm2 to the nvme-tcp
+	# port) takes CN2's two legs into DN1 away without the DN agent: meta leg
+	# 1 and data leg 1 — leg_idx 0, so disk 0 of their arrays, the member
+	# `mdadm --detail` would load its superblock from. It also cuts the
+	# emulated host's path to CN1, the standby's, inaccessible since the
+	# failover; it reconnects once the rule goes, and the lateflip stage
+	# waits for it to be live before it reads through it.
 	assert_eq "$(helper 1 have_iptables)" yes \
 		"degrade: vm1 needs iptables to partition the nvme-tcp port"
 	assert_eq "$(helper 1 "partition_from ${IP[2]}")" partitioned \
 		"degrade: the partition rule was not installed"
 	# md learns that a member is dead only from an IO to it. This write goes
 	# to both data legs; the one into DN1 hangs on the black-holed connection
-	# until CN2's controller gives up on it at its keep-alive expiry. md sends
-	# member writes failfast, so the controller's error recovery fails that
-	# one then, rather than parking it at the multipath head for the failfast
-	# interval as it parks the plain read an `mdadm --detail` makes; md fails
-	# that member and the write completes on DN2's. The MiB
+	# until the teardown CN2's controller runs a quarter keep-alive timeout
+	# after its keep-alive expiry. md sends member writes failfast, so that
+	# teardown fails this one, rather than parking it at the multipath head
+	# for the failfast interval as it parks the plain read an `mdadm --detail`
+	# makes; md fails that member and the write completes on DN2's. The MiB
 	# is a fresh one, so the readback at the end of the stage can tell it
 	# from the one stage failover left at 9.
 	make_pattern "$hv" "$WORK/probe-redund.bin" 1
@@ -4391,10 +4391,11 @@ case_redund() {
 		die "degrade: the background host write completed although DN1's" \
 			"member is partitioned away"
 	# The rounds begin once that path has left `live` (its State, for
-	# leg_wait_not_live's reason), which is when the controller's error
-	# recovery fails the write above: from there on a plain member read — an
-	# `mdadm --detail` probe's — sits at the multipath head until the
-	# failfast interval expires, so these rounds are the ones it would fail.
+	# leg_wait_not_live's reason), which it does at its keep-alive expiry, a
+	# quarter keep-alive timeout before the controller's teardown fails the
+	# write above: from there on a plain member read — an `mdadm --detail`
+	# probe's — sits at the multipath head until the failfast interval
+	# expires, so these rounds are the ones it would fail.
 	leg_wait_not_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
 	mkey=$(d16 "$A_MGRP")
 	dkey=$(d16 "$A_DGRP")
@@ -5752,13 +5753,15 @@ case_repair() {
 #
 # The bound every stage's patience comes from (cnagent_integtest.md, Cases,
 # teardown; dnagent.md SH20): legs are connected
-# with fast_io_fail_tmo = 5 and ctrl_loss_tmo = -1, so from 5 s after a path
-# loss every IO queued at that multipath head fails at once, and a controller
-# stuck in `connecting` can always be disconnected. The bound is an absolute
-# deadline from the path loss, not a per-command budget, so a pass blocks for
-# about one failfast interval plus a few soft timeouts however many commands it
-# issues. A partition is the same shape with the host-side keep-alive timeout
-# added in front, which is why S4 alone is given 90 s and not 60. Those
+# with fast_io_fail_tmo = 5 and ctrl_loss_tmo = -1, so from 5 s after the
+# teardown that follows a path loss, a quarter keep-alive timeout after the
+# loss is seen, every IO queued at that multipath head fails at once, and a
+# controller stuck in `connecting` can always be disconnected. The bound is an
+# absolute deadline from the path loss, not a per-command budget, so a pass
+# blocks for about one failfast interval plus a few soft timeouts however many
+# commands it issues. A partition is the same shape with the host-side
+# keep-alive wait and timeout added in front, which is why S4 alone is given
+# 90 s and not 60. Those
 # seconds are retry windows, not deadlines: cn_drop_until_clean and
 # dn_drop_until_clean read the clock only between calls, so one more call
 # can start as a window closes, and it carries the syncup's own deadline.

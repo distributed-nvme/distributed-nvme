@@ -16073,7 +16073,7 @@ func (x *SyncupSideRequest_SideConf) GetZeroBytes() uint64 {
 type SyncupSideRequest_MigrSrcConf struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	MigrId         uint64                 `protobuf:"varint,1,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
-	DstSideId      uint64                 `protobuf:"varint,2,opt,name=dst_side_id,json=dstSideId,proto3" json:"dst_side_id,omitempty"`
+	DstSideId      uint64                 `protobuf:"varint,2,opt,name=dst_side_id,json=dstSideId,proto3" json:"dst_side_id,omitempty"` // for the record; read by no agent (architecture.md, service DiskNodeAgent)
 	DstDnId        uint64                 `protobuf:"varint,3,opt,name=dst_dn_id,json=dstDnId,proto3" json:"dst_dn_id,omitempty"`
 	DstProvisioned bool                   `protobuf:"varint,4,opt,name=dst_provisioned,json=dstProvisioned,proto3" json:"dst_provisioned,omitempty"`
 	// The worker copies Migration.cutover_pending here and sends
@@ -16153,13 +16153,13 @@ func (x *SyncupSideRequest_MigrSrcConf) GetCutoverPending() bool {
 type SyncupSideRequest_MigrDstConf struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	MigrId        uint64                 `protobuf:"varint,1,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
-	SrcSideId     uint64                 `protobuf:"varint,2,opt,name=src_side_id,json=srcSideId,proto3" json:"src_side_id,omitempty"`
+	SrcSideId     uint64                 `protobuf:"varint,2,opt,name=src_side_id,json=srcSideId,proto3" json:"src_side_id,omitempty"` // for the record; read by no agent (architecture.md, service DiskNodeAgent)
 	SrcDnId       uint64                 `protobuf:"varint,3,opt,name=src_dn_id,json=srcDnId,proto3" json:"src_dn_id,omitempty"`
 	SrcNvmeTrConf *NvmeTrConf            `protobuf:"bytes,4,opt,name=src_nvme_tr_conf,json=srcNvmeTrConf,proto3" json:"src_nvme_tr_conf,omitempty"`
 	BlockSize     uint64                 `protobuf:"varint,5,opt,name=block_size,json=blockSize,proto3" json:"block_size,omitempty"`
 	MetaBlocks    uint64                 `protobuf:"varint,6,opt,name=meta_blocks,json=metaBlocks,proto3" json:"meta_blocks,omitempty"`
 	DmCloneConf   *DmCloneConf           `protobuf:"bytes,7,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
-	BmCnt         uint32                 `protobuf:"varint,8,opt,name=bm_cnt,json=bmCnt,proto3" json:"bm_cnt,omitempty"`
+	BmCnt         uint32                 `protobuf:"varint,8,opt,name=bm_cnt,json=bmCnt,proto3" json:"bm_cnt,omitempty"` // for the record; read by no agent (dnagent.md DN15 bounds a chunk's index by MaxMigrBmCnt)
 	// The worker copies Migration.cutover_pending here (dnv-worker.md
 	// RW15). While it is true a provisioned dst side builds its
 	// metadata wrapper and its per-CN stacks, connects to no source and

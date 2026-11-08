@@ -5058,7 +5058,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
   primary to start its array or for a leg to read healthy, or until an
   operator acts. A running array whose row reads `ERROR`, as while the
   in-sync guard holds over it (`cnagent.md` CN12), gets no repair either
-  until its row reads `OK` again.
+  until its row reads `OK` again. A group that lost every leg at once under
+  IO, whose array md marks broken, is a group whose array does not run; what
+  brings it back is `architecture.md`, Known limits.
 * **A group whose only in-sync leg dies while md copies onto a finished
   repair's new leg waits for an operator's forced start.** A finish runs as
   soon as the primary reports the new leg holding a place (AR8), and md may
@@ -5481,3 +5483,15 @@ which no suite case sets, so no suite case runs RW13's count compare.
   leg (AR8), so a dead DN adds one record per affected leg per pass, a
   repair's stage moves once per repair (AR11) and the retire timer's once
   per retired leg (AR12).
+* **A reaction pass reads the pool from etcd every interval.** The pass
+  starts with a fresh snapshot of the SP (AR1), which `model.LoadSp` reads
+  one key per record — the `SpConf` and its revision key, every cntlr,
+  slice, thin device, subsystem, transfer, clone and migration it lists, a
+  range each for its repairs and its retired legs, the record of every node
+  its legs and cntlrs sit on, and a keys-only scan per clone and migration
+  for their bitmap chunks — so over a dozen reads for a small pool and over
+  a hundred at the slice ceiling, each point read and each record decoded
+  from a range logged as an `etcd get`, and each range, the keys-only scans
+  included, as an `etcd range` (`log.md`, etcd), once per `cntlr_interval`
+  per pool, with no random offset between pools. The cost is steady, and
+  nearly every pass acts on nothing.

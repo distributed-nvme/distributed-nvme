@@ -4168,6 +4168,18 @@ stores instead is CN23's.
   reads `OK` (`dnv-worker.md` AR8), nor can an operator's repair, which
   refuses a bad leg with no health epoch and points the operator to a
   migration of the leg's side instead (`architecture.md`, Repairs).
+* The leg probe reports failed or stalled, never slow: the CN11 probe reads
+  `ERROR` on an attempt that fails or on one in flight longer than
+  `CnLegProbeStallSeconds`, `PENDING` before its first attempt completes,
+  and `OK` otherwise, so a leg whose IO
+  completes slowly, inside that bound, reads `OK` on every round while md
+  waits on it for every write of the group, since a RAID1 write completes
+  only once every member has taken it, and no reaction acts: the leg has
+  no health epoch (`dnv-worker.md` HL2), so leg repair creates no repair
+  for it (`dnv-worker.md` AR8), and an operator's repair refuses a leg with
+  no health epoch. Nothing in dnv measures a leg's latency; the operator's
+  action is a migration of the leg's side (`architecture.md`, Repairs: a
+  healthy leg is moved, not repaired).
 * A member can be named on every read on a leg whose converge fails:
   the verdict tests only the parts of the leg's availability a read can
   read (CN30). A leg with two sides, a migration in flight, whose path
@@ -4294,6 +4306,16 @@ stores instead is CN23's.
   by the cancel, and both need a running array, the cancel through the
   abort its verdict confirms (CN28), so only once another forced start has
   the array running again.
+* An array created on a kernel of a newer series can be refused by an
+  older kernel: from 6.19 on, md records a new array's logical block size
+  in bytes of the superblock that earlier kernels read as padding, with no
+  feature bit to announce it, and an earlier kernel's check that the
+  padding is zero refuses such a superblock, so a failover (`dnv-worker.md`
+  AR5) or a cntlr replacement (`dnv-worker.md` AR7) to a controller node on
+  the earlier kernel cannot assemble the pool's arrays (CN12) and its
+  primary cannot build the pool. Every controller node of a cluster
+  therefore runs one kernel series; `introduction.md`, Requirements,
+  carries the rule. Read in the kernel's md source, not in the lab.
 * A layer above can keep a forced start from stopping the array: at a
   level that builds thin pools the slice's concat holds a slice's group
   array that does not run open, and at a level that builds clones a

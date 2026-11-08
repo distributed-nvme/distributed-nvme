@@ -3904,7 +3904,11 @@ limits).
   `dst_dn_id`, `dst_provisioned`, `cutover_pending`: the source role,
   Migration) and/or `migr_dst_conf` (`migr_id`, `src_side_id`,
   `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`,
-  `dm_clone_conf`, `bm_cnt`, `cutover_pending`: the destination role). It
+  `dm_clone_conf`, `bm_cnt`, `cutover_pending`: the destination role);
+  `MigrSrcConf.dst_side_id`, `MigrDstConf.src_side_id` and
+  `MigrDstConf.bm_cnt` are carried for the record and read by no agent,
+  and the dn agent bounds a chunk index by `MaxMigrBmCnt` (`dnagent.md`
+  DN15). It
   is rejected if the pointer is unknown (`SyncupDn` must introduce it
   first). It converges the per-side stack of Disk node: the side device of
   `ext_cnt` extents and its zeroing state (Side provisioning protocol),
@@ -5899,7 +5903,11 @@ pool's `cntlid_slot_list`, which the gateway holds below `CnCntlidSlotCnt`
 like every cntlr's. Slot *s* starts at the base plus
 *s* steps and ends one CNTLID below the next slot's start; nvmet's range
 includes both ends, so a slot holds exactly one step of CNTLIDs and no two
-slots share one. All slots come from `SpConf.cntlid_slot_list`. Rules:
+slots share one. nvmet draws every controller id from one id space for the
+whole kernel, a subsystem's "attr_cntlid_min" and "attr_cntlid_max" being
+bounds inside it, and a full range answers Connect with CTRL_BUSY and
+do-not-retry (Known limits). All slots come from `SpConf.cntlid_slot_list`.
+Rules:
 
 * Every **cntlr** of an SP uses a slot distinct from every other cntlr of
   the same SP (host-facing multipath aggregates them).
@@ -5980,8 +5988,10 @@ Known limits).
 ### etcd backup and restore
 
 A backup is etcd's own snapshot of its data, and a restore is etcd's
-restore tool run on one; dnv adds nothing to either. A restore needs an
-order, because the restored desired state is older than the nodes: the
+restore tool run on one; dnv adds nothing to either, and dnv's suites and
+tutorials run etcd as one member, so an etcd of several members is
+untested. A restore needs an order, because the restored desired state is
+older than the nodes: the
 agents' stores, the disks and the kernels hold what was built after the
 backup, and the id counters (Globals: id allocation + shard buckets) are
 back at values the cluster has handed out since.
@@ -6020,6 +6030,13 @@ A restore loses or breaks what changed after the backup:
 * Unless its agent refuses its disk as a foreign one (below), a disk node
   frees every side the restored state does not name, so what was created
   after the backup is lost with its data.
+* A primary's sweep removes every thin volume its restored `td_list` does
+  not name and, while the pool is still wanted, deletes the volume's thin
+  id from the pool, and the next sweep of the pool's ids that gets through
+  — an activation sweep where the pool device is created again, or the
+  sweep after a failed delete — deletes every id the list does not name
+  (`cnagent.md` CN14, CN21), so every thin device created after the backup
+  is lost with its data, with no undo.
 * A pool that gained groups after the backup by auto-grow, or whose legs a
   migration, a repair or a leg repair moved, goes back to its old layout
   and breaks.
@@ -6804,6 +6821,41 @@ that component's document and only pointed to here.
   One etcd request grows with the slices it writes, the widest a
   provisioned flip over every slice, which sizes `EtcdMaxRequestBytes`
   (`dnv-worker.md`, Constants this document owns).
+* **A CSI volume costs the cluster a pool** (`csi.md`, The volume model).
+* **A RAID1 pool needs as many disk nodes per slice at create as its meta
+  and data groups have legs together.** `CreateStoragePool` puts every leg
+  of the pool on a disk node of its own, through a black list that grows
+  with every pick (Per-operation allocation), and each slice has a meta
+  group and a data group of `MaxAllocLegPerGrp` legs each under
+  `RedundMdRaid1`, so a cluster with fewer disk nodes than the pool has legs
+  is refused `RESOURCE_EXHAUSTED` whatever its disks hold. `GrowSlice` and
+  `CreateClone` black-list no disk node of the pool's — a grow's black list
+  is the request's own selector and nothing else, a clone's is empty — and
+  spread the one new group's legs over distinct disk nodes through the
+  candidate scan's one-per-location rule (Finding DN candidates), so a
+  grown group or a clone meta group may share disk nodes with the pool's
+  other groups.
+* **A RAID1 pool survives the loss of fewer disk nodes than a group has
+  legs, and not every loss of as many.** Under `RedundMdRaid1` a group's
+  legs sit on as many disk nodes, so no disk node holds more than one copy
+  of a group; losing every leg of one group loses that slice's thin pool,
+  and with it every thin device of the pool, since every thin device is
+  striped over all slices (Primary cntlr). The sets of disk nodes whose
+  loss does that are at most the pool's group count, one per group, so for
+  as many failures as a group has legs, drawn at random among N disk nodes,
+  the chance is at most that count over the number of such sets N disk
+  nodes hold; a repair whose copy ends between the losses restores the
+  redundancy (Repair).
+* **Nothing limits recovery load across pools.** The reaction pass takes
+  one action per pool per interval and holds nothing across pools
+  (`dnv-worker.md` AR2): a dead disk node starts a repair, a full copy onto
+  a fresh leg, in every `RedundMdRaid1` group whose leg it held, and a dead
+  controller node fails over every primary it held, each pool's at about
+  the same time. The agents write no md speed limit, so md's limits alone
+  control the copies' speed: the kernel's "dev.raid.speed_limit_min" and
+  "dev.raid.speed_limit_max" sysctls, which an array's own
+  "md/sync_speed_min" and "md/sync_speed_max" override until the array
+  stops. Read in the kernel's md source.
 * **The agent node lock has head-of-line blocking.** A pending node write
   (`SyncupDn`/`SyncupCn`) blocks every new node-read acquisition behind the
   slowest in-flight object converge. Converges are bounded per command
@@ -6842,7 +6894,24 @@ that component's document and only pointed to here.
   through a pool's thin devices, bytes another pool wrote; it does not
   defend against an attacker on the storage network, nor against root on
   a node, which can read the old bytes of a recycled extent from the raw
-  leg or disk. Deploy on an isolated, trusted fabric.
+  leg or disk. Deploy on an isolated, trusted fabric. The agents' gRPC
+  ports are open the same way: whoever reaches one can send a syncup the
+  agent accepts, since its gates check the revision, the object and a few
+  geometry values and nothing else (`dnagent.md` SH8, SH9, DN4, DN8;
+  `cnagent.md` CN4, CN8), so such a caller can store a desired state that
+  removes the
+  node's sides or cntlrs; and the cn agent builds its configfs paths from a
+  request's NQNs with no check of their form (`SubsysPath` and `HostPath`
+  of `agent/nvmet.go`), under "mkdir -p" and the file writes of
+  `osclient.md`, ReadFile / WriteFile / WriteFileDirect, so a caller that
+  bypasses the gateway's NQN checks (Common validation) can make it create
+  directories and files at paths of its choosing, as root. Hosts need only
+  the NVMe/TCP ports and the cdc; a deployment limits who reaches the
+  gateway, the agents and etcd by its firewall alone. Root on a host can
+  claim any host NQN, so the allow-lists bind no one who holds a host.
+* **In a Kubernetes cluster every pod reaches dnv's ports unless the
+  operator blocks it** (`csi.md`, Deployment): the trust in the network
+  above is then trust in every pod of the cluster.
 * **A pool commit in a migration gap waits for the gap to end.** A migration
   gap is the time in which the primary has no usable path to a migrating
   leg: from src step 1, which moves the source's per-CN namespaces to
@@ -7004,6 +7073,23 @@ that component's document and only pointed to here.
   [D3]'s destination is empty, so the exposure is a snapshot of
   an empty td, and only a snapshot not yet created by the time a clone into
   that td is created.
+* **A write that needs a new block is durable only after a flush or a
+  commit.** dm-thin completes a write that provisions a block — to a block
+  never written, or to one a snapshot shares — before it commits the
+  block's mapping; a flush, or a write the host marks FUA, to a thin device
+  with uncommitted changes commits the metadata first, after flushing the
+  data device, so a completed fsync is durable when the primary that took
+  its writes completed the flush itself; a primary that dies first loses
+  those writes though the host's fsync can still complete, since the host's
+  kernel completes a flush cancelled on the dead path with no error, the
+  request carrying no data to retry, and sends a later flush to the new
+  primary, which commits nothing of the dead one's; without a flush the
+  pool commits about once a second, its commit period, and a primary that
+  dies before that commit loses the write, the block reading as it did
+  before it, zeros for a block never written. nvmet reports a volatile
+  write cache on its controllers, so hosts flush as they do to a disk with
+  one. Read in the kernel's dm-thin, nvmet, block and NVMe host sources,
+  not measured.
 * **md's assembly behaviour is pinned in the lab only.** The cross-leg
   half of failover safety ([D16], "Make sure all groups are available")
   rests on mdadm refusing to start an array from a lone survivor whose
@@ -7028,6 +7114,73 @@ that component's document and only pointed to here.
   mismatches there. They are harmless, since neither the pool nor the
   dm-clone reads a block it has not written through the array
   (`cnagent.md` CN12), and dnv runs no check of its own.
+* **Writes to a group wait out the keep-alive when a disk node dies, and
+  IO that follows the keep-alive's expiry waits the fast IO fail timeout
+  too.** A leg's connection carries a fast IO fail timeout and a
+  controller-loss timeout that never expires (`dnagent.md` SH20). Over TCP
+  against nvmet, which advertises traffic-based keep-alive, the host
+  kernel checks every quarter of the keep-alive timeout and sends a
+  keep-alive only when no completion came since its last check, so the
+  first unanswered one goes out up to two quarters after the node died;
+  it times out after one keep-alive timeout plus up to a second of timer
+  rounding, which takes the path out of live at once; and the transport
+  waits a quarter more before it tears the queues down and starts
+  reconnecting. The teardown fails at once the IO in flight that md sent
+  failfast, as md sends every write while the array has more than one
+  working member (`cnagent.md` CN12 gives every member the flag), so md
+  fails the member there and those writes complete on the other leg; a
+  flush md sent to that leg before the keep-alive timed out ends at the
+  teardown as well, with no error, since the block layer's flush request
+  carries no data, so the multipath code has nothing to move to the head
+  and completes it as done. IO that reached the leg's multipath head after
+  the keep-alive timed out, a write or a flush, failfast or not, waits in
+  the head until the fast IO fail timeout, which runs from the reconnect
+  the teardown starts, fails it, and so does a commit of the slice's thin
+  pool whose flush that is, with the IO that waits behind it; md then
+  fails the member for a failed write and completes the write on the other
+  leg, and completes a flush whatever its members' flushes returned. With
+  the kernel's default keep-alive timeout of 5 s the teardown comes about
+  6 to 10 s after the node died, and that IO waits
+  `DefaultNvmeFastIoFailTmo` more, read from the kernel's code and timers,
+  not measured. A `RedundNone` group's device is a dm-linear over the leg
+  wrapper with no md between (`cnagent.md` CN12), so none of its IO is
+  failfast: its data IO in flight at the teardown, and all its IO that
+  reached the head after the keep-alive timed out, waits in the head until
+  the fast IO fail timeout and returns the error, while a flush of its in
+  flight at the teardown ends there with no error, as md's does; a commit
+  of the slice's thin pool that fails leaves the pool read-only with its
+  needs_check flag set (A pool commit in a migration gap waits for the gap
+  to end, above, says what dm-thin does then). A disk that stalls while
+  its nvmet answers the keep-alives is bounded by none of this: its IO
+  waits out the host's "nvme_core.io_timeout", the kernel's 30 s default,
+  which some cloud images raise to its largest value.
+* **A group that loses every leg at once under IO is broken by md.** When
+  every path of a group goes at once, as on a switch reload or a reboot of
+  all its disk nodes, the transport's teardown and then the fast IO fail
+  timeout fail the IO on every leg (`dnagent.md` SH20; the entry above), md
+  has no member left to serve a write, marks the array broken and refuses
+  every write (`cnagent.md` CN29), and a `RedundNone` group returns the
+  errors to the host. The primary leaves a broken array as it is when the
+  legs return: only a forced start's stop acts on it (`cnagent.md` CN12,
+  CN29). The broken group's row is an `ERROR` row of the primary's own, so
+  its health epoch is set (`dnv-worker.md` HL2) and a failover
+  (`dnv-worker.md` AR5) or, for a sole primary, a cntlr replacement
+  (`dnv-worker.md` AR7) moves the role, and the new primary's build
+  assembles the array once the legs are back; until then, or an operator's
+  forced start (Repair, Forced start), the group stays down, and the worker
+  repairs nothing of it (`dnv-worker.md`, Known limits). An idle array
+  whose legs all died keeps running until IO reaches it, a read as well as
+  a write, since md learns of a dead member from IO alone (`cnagent.md`
+  CN12). A broken array refuses the thin pool's commits too. When it is a
+  data group and the slice's meta group still takes writes, a commit under
+  writes leaves the slice's thin pool read-only with its needs_check flag
+  set, as a `RedundNone` group's failed commit does (A pool commit in a
+  migration gap waits for the gap to end, above), and a new primary's build
+  brings the array back but not a writable pool; when it is the meta group,
+  the flag cannot be written either, so a new primary's build brings the
+  pool back writable as of its last commit, without the mappings made
+  since. Worked out from md's and dm-thin's code; the outage under host IO
+  is not measured.
 * **A repair waits while its array does not run or its bad leg serves.**
   `CreateRepair` reads no report, so it accepts a repair of a group whose
   array is stopped or broken; such a repair, and one whose pool is raised
@@ -7231,6 +7384,22 @@ that component's document and only pointed to here.
   endpoint (`cdc.md` DS2). A host running nvme-stas whose discovery
   connections include such a twin keeps the old primary's path past the
   fence (Failover).
+* **An nvme-stas host drops every path stacd made when stafd stays
+  away.** stacd reads a stafd it cannot reach as an empty discovery log,
+  and its start, or its next reconfiguration — the pass in which it
+  matches its connections to the logs, which a reload, a discovery
+  controller stafd reports removed, a log-page change, a connection audit
+  where its disconnect scope enables one, or one of its soak timers
+  starts — disconnects every connection it made from discovery and keeps
+  only those its own configuration names, which
+  "disconnect-scope=only-stas-connections", the tutorial's setting, makes
+  a real disconnect. stafd going away starts no reconfiguration by itself
+  and only lengthens stacd's settle time, and stafd's return starts one
+  after that longer settle, so a quick stafd restart is survived unless a
+  reload, such an audit or a soak timer already running brings a
+  reconfiguration meanwhile, or stacd starts while stafd is down; stacd's
+  own stop keeps its connections, so stopping stacd before stafd is the
+  safe order. Read in the nvme-stas 2.3.1 source.
 * **A path that nothing following the discovery log manages is never
   dropped.** A path connected by hand on a host that runs no nvme-stas or
   equivalent, or a controller named in nvme-stas's own configuration
@@ -7251,14 +7420,46 @@ that component's document and only pointed to here.
   attached before the cdc moved, and until the node drops its discovery
   connections (`csi.md` CSI16) or the plugin restarts, the plugin's passes drop
   no path on that host, a fenced old primary's among them.
+* **A mount does not survive the loss of its last path.** A host connects
+  with the kernel's controller-loss default unless its connect sets one,
+  the node plugin's connect and nvme-stas's alike, so a mount survives an
+  outage of every path that ends inside the kernel's reconnect limit, the
+  kernel queueing its IO and reconnecting onto the same device — save a
+  refusal with DNR, which ends a path's reconnects for good: one from a
+  cntlr's port that listens for another subsystem before the volume's is
+  built again, or one from a subsystem whose cntlid slot has run out
+  (cntlid slots) — and does not survive the loss of its last path: past the
+  limit the kernel deletes the
+  controller, and a later connect makes a new namespace device, which the
+  mount does not follow. A cntlr replacement on a pool of one cntlr, and
+  the follower's drop of a path whose connect to the replacing cntlr failed
+  in the same pass, end the last controller the same way. The mechanism and
+  the way out are `csi.md` CSI14: the operator deletes the pod, as a host
+  of any other kind mounts the new device again by hand.
+* **A fault only a host sees never fails over.** Reactions read the
+  agents' reports and the stored records, never a host (Automatic
+  reactions; `dnv-worker.md` AR1), so a primary whose agent answers the
+  worker while hosts cannot reach its `nvme_tr_conf` address,
+  or its controller node's data interface, stays the primary and stays
+  listed in the discovery records ([D18]); the host's IO queues while a
+  standby's path is left, and fails at the kernel's reconnect limit
+  otherwise. The way out is the operator's: disabling the primary starts a
+  failover with no threshold wait where an enabled standby with a zero
+  health epoch exists (`dnv-worker.md` AR5), the operator enabling the
+  cntlr again afterwards, since a disabled cntlr is never a candidate; with
+  no such standby a disable starts no failover and takes the primary out of
+  the discovery records (Cntlrs), so a host that follows the log drops its
+  last path (`csi.md`, The node plugin).
 * **An old primary that cannot apply its demotion within the demotion
   hold fails IO from the fence.** An agent whose demotion waits behind a
   slow converge for the cntlr's locks (`cnagent.md` CN1; the head-of-line
   blocking above) applies it only after the sides have fenced its legs,
   and until then answers IO errors on its still-optimized path to every
-  host still on that path — a host of the two entries above, or one whose
-  discovery-log follower drops the path later than the demotion hold ends
-  (Failover).
+  host still on that path — a host of A stale discovery view keeps a
+  withdrawn path, A path that nothing following the discovery log manages
+  is never dropped or A cdc address an old attach named can hold every path
+  drop on a host, above, or one whose discovery-log follower drops the path
+  later than the demotion hold ends (Failover).
 * **A cntlr replacement of a serving primary can fence it first.** A
   replacement deletes the cntlr it replaces, so its fan-out starts no
   demotion hold and keeps the sides-first order (`dnv-worker.md` RW14,
@@ -7331,6 +7532,32 @@ that component's document and only pointed to here.
   fails with EIO, while already-provisioned blocks keep serving. A
   `low_water_mark_pct` above a hundred percent switches auto-grow off
   (Common validation).
+* **A host discard frees pool space only where it covers, on every slice,
+  a whole aligned block.** dm-thin frees whole blocks only, completes a
+  shorter or misaligned discard with success, and advertises one block as
+  a thin device's discard granularity; dm-stripe hands each slice its
+  contiguous share of a discard unsplit, where it splits a write at every
+  stripe boundary (raid0 bitmap math). So a host discard frees a block on a
+  slice only where its share there covers an aligned whole block, which,
+  with a `stripe_size` below `data_block_size`, takes a host range of nearly
+  the slice count times `data_block_size`, and an aligned range of that size
+  frees one block on every slice; `fstrim` can report success and free
+  nothing. A `stripe_size` equal to `data_block_size`, possible for a block
+  no larger than the largest stripe (Common validation), makes one aligned
+  host block one pool block. Read in the kernel's dm-thin and dm-stripe
+  sources, not in the lab.
+* **Controller node budgets cap a cluster's group space.** Every cntlr of
+  a pool, a standby as much as the primary, charges its controller node
+  the full size of the groups of the pool's slices (Terminology and object
+  model; Per-operation allocation), and only those: the clone meta group
+  is in no cntlr's footprint. The budget is set once, at
+  `CreateControllerNode`, from the `GetCnSize` reply (Size → extents;
+  Controller nodes), and no call changes it, so the budgets, divided by
+  the pools' cntlr counts, cap the group space of a cluster whatever its
+  disks hold, and an auto-grow refused for want of budget shows only as
+  the worker's `reaction skipped` record (`dnv-worker.md` AR6) and ends
+  that pass (`dnv-worker.md` AR2), while an operator's `GrowSlice` is
+  refused `RESOURCE_EXHAUSTED` (GrowSlice).
 * **A pool's thin ids run out.** dm-thin takes no thin id above
   `MaxThinDevId`, and a pool hands out each thin id once, the restore of the
   next bullet aside, so a pool creates a bounded number of thin devices over
@@ -7349,6 +7576,25 @@ that component's document and only pointed to here.
   one the restored state makes a standby or does not name, that sweep only
   removes the volume. An id that no thin volume maps stays in the pool
   until a sweep of the pool's ids deletes it (`cnagent.md` CN14).
+* **One cntlid slot can serve most subsystems of a kernel.** nvmet draws
+  every controller id from one id space per kernel, a subsystem's range
+  being bounds inside it (cntlid slots), every new side but a migration
+  destination takes the first slot of its pool's `cntlid_slot_list`
+  (Storage pools, Clones, Repairs; a grow's sides alike, `firstCntlidSlot`),
+  the first cntlr created of every pool takes its list's first entry too,
+  and a controller node and a disk node partition the space alike. So on a
+  kernel that takes many connects in one slot — a controller node whose
+  cntlrs all sit in one slot, as the pools' first cntlrs do where their
+  lists start with the same slot, as the default list does, each host
+  connect to one of their subsystems taking an id, or a machine that runs
+  both roles, whose side exports draw from the same slot — that slot's ids
+  can run out while the other slots' are free, and nvmet then answers
+  Connect with CTRL_BUSY and do-not-retry: a cntlr's connect to a leg fails
+  and registers the cn
+  agent's retry (`cnagent.md` CN10), a host's connect is refused, and a
+  path mid-reconnect is deleted, since the kernel reconnects no controller
+  refused with do-not-retry. Read in the kernel's nvmet and NVMe host
+  sources, not in the lab.
 * **A created td is never re-created by message** (`cnagent.md` CN14): a
   pool that has lost a created td's thin id reads `RES_STATUS_ERROR` with
   the lost-id reason (Live-state reporting) on every converge, which
@@ -7379,6 +7625,12 @@ that component's document and only pointed to here.
   (`dnv-worker.md`, Known limits).
 * **A new leg the primary never reports keeps its repair CREATED**
   (`dnv-worker.md`, Known limits).
+* **A reaction pass reads the pool from etcd every interval**
+  (`dnv-worker.md`, Known limits).
+* **The leg probe reports failed or stalled, never slow** (`cnagent.md`,
+  Known limits).
+* **An array created on a kernel of a newer series can be refused by an
+  older kernel** (`cnagent.md`, Known limits).
 * **A slice's data space is capped when its SP is created**: every data
   grow appends a group of the slice's first data group's size, and a
   slice's data list holds at most `MaxGrpCntPerSlice` groups

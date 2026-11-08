@@ -1822,7 +1822,7 @@ message SyncupSideRequest {
     }
     message MigrSrcConf {
         uint64 migr_id = 1;
-        uint64 dst_side_id = 2;
+        uint64 dst_side_id = 2;  // for the record; read by no agent (architecture.md, service DiskNodeAgent)
         uint64 dst_dn_id = 3;
         bool dst_provisioned = 4;
         // The worker copies Migration.cutover_pending here and sends
@@ -1833,13 +1833,13 @@ message SyncupSideRequest {
     }
     message MigrDstConf {
         uint64 migr_id = 1;
-        uint64 src_side_id = 2;
+        uint64 src_side_id = 2;  // for the record; read by no agent (architecture.md, service DiskNodeAgent)
         uint64 src_dn_id = 3;
         NvmeTrConf src_nvme_tr_conf = 4;
         uint64 block_size = 5;
         uint64 meta_blocks = 6;
         DmCloneConf dm_clone_conf = 7;
-        uint32 bm_cnt = 8;
+        uint32 bm_cnt = 8;  // for the record; read by no agent (dnagent.md DN15 bounds a chunk's index by MaxMigrBmCnt)
         // The worker copies Migration.cutover_pending here (dnv-worker.md
         // RW15). While it is true a provisioned dst side builds its
         // metadata wrapper and its per-CN stacks, connects to no source and
