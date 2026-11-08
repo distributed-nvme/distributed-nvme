@@ -4320,6 +4320,8 @@ observer or an earlier owner left;
 the primary role, the re-enable of a primary counting as one and none when
 the cntlr is demoted before it settles, plus a repeat for a plan loaded
 before the write landed (HL2) or for a second owner in an overlap (VW7);
+`health write failed`, at Error, a health write that did not commit, whose
+transition or settle the next round tries again (RW12);
 `flip applied` a committed provisioned flip, the clone flip's and the
 repair flip's included, a
 committed created flip or a committed cutover, naming the new `SpRev`

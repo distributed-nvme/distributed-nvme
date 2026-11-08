@@ -577,7 +577,8 @@ away needs no proof about the copy — while `migr finish` has one; and
 chunks are an append sequence, while a clone chunk is addressed by the pair of
 source slice and chunk index (`clone` — `ctl/clone.go`), which also states the
 bound one `--bm-hex` puts on an append, and so on the part of a leg a
-migration's appends can cover.
+migration's appends can cover; how a caller pages a migration's bitmap into
+appends is `architecture.md`, Bitmap reads.
 
 `migr finish` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished and nothing else: a migration whose cutover

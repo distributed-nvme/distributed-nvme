@@ -1991,9 +1991,14 @@ space queues writes and then fails them when its own timeout runs out
 (`architecture.md`, Known limits).
 
 `GrowSlice` arrives as longer group lists: the converge reloads the
-concats with the appended targets and reloads the pool table with the
-new sizes — dm-thin picks up both data and metadata growth from the
-table swap; no pool message is involved. A deferred group (CN9) is left
+concats with the appended targets and then reloads the pool. The pool
+table carries the data length and the low-water mark derived from the
+data blocks, so a data grow changes it, while a metadata grow changes
+nothing in it, since the metadata device is named there, not sized;
+dm-thin takes the data size from the table's length and reads the
+metadata device's size, each only when the pool resumes, so the converge
+that appended the groups reloads the pool even over an unchanged table
+(`concatGrew`); no pool message is involved. A deferred group (CN9) is left
 out of both concats and out of the pool sizing until it clears, and so
 is every group after it in the same list — the concat takes each list's
 leading run of non-deferred groups, never a filtered subset, because a
@@ -4664,6 +4669,21 @@ stores instead is CN23's.
   failed delete in that pool, or an activation sweep, which the pool
   device's creation alone arms — and until then its blocks stay allocated,
   for the life of the pool device on this primary if no such sweep comes.
+* A thin volume whose table read did not answer leaks its thin id until a
+  later sweep of that pool's ids: the removal of an unwanted thin volume
+  reads its live table for its pool and `dev_id` before it removes the
+  volume and sends the pool the delete message (CN14), and a read that
+  fails is taken as a device already gone, so the volume is removed and no
+  message is sent. A `dmsetup table` the soft timeout kills, or the
+  `OsClient` semaphore refuses, fails the same way while the device is
+  still there, and so does a delete whose pool `dmsetup info` did not
+  answer. The id's blocks stay allocated in the pool, and nothing records
+  the skip: the next sweep of that pool's ids that gets through is the one
+  after a later delete in that pool that fails under a request that counts
+  as delivered, or an activation sweep, which the pool device's creation
+  alone arms, as after a reboot or a failover, run on the first converge
+  whose request counts as delivered (CN8, CN14). No data is lost; pool
+  space is, until then.
 * A base state that cannot be built is re-sent on each round that
   answers from a read: a read of the CN that reads absent a piece of its
   base state that a `SyncupCn` would build, or an ANA group in a state

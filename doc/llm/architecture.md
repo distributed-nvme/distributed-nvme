@@ -1081,12 +1081,20 @@ The leg wrapper of Primary cntlr is agent-internal — it is CN dm kind `c9`,
 `CnLegName` in `cnagent.md`, Names and constants in `common` — and, like
 kind `ca`, is not part of the cross-component contract [D1].
 
-`common.ParseDmName` is the reverse of this table, and how a sweep decides
-whether a name the kernel handed back is its own. It is strict on purpose:
-the dm prefix, a kind this build knows, and exactly the id count that kind
+`common.ParseDmName` is the reverse of this table, and `common.ParseNqn`
+the reverse of the NQN table (NQNs); a sweep reads through them the owner
+a name the kernel handed back carries. Both are strict on purpose: their
+own prefix, a kind this build knows, and exactly the id count that kind
 carries, each a full `IdKeyFmt` field. A name that does not decode exactly
 is "not a dnv name" rather than a partly-read one, because the caller's next
-move is a removal. Every kind of both roles carries the **sp id first**,
+move is a removal. A subsystem in a cn's nvmet tree whose NQN does not
+decode is a host-facing one, which the cn agent attributes by the held
+request that still names it or else by the namespaces it is built out of
+(`cnagent.md` CN21); one carrying the dnv prefix is never touched
+(dm-device kinds); and any other NQN that does not decode, a connection's
+on the cn or any on the dn, is left alone and never judged (`cnagent.md`
+CN21; `dnagent.md` DN6). Every dm kind of both roles carries the **sp id
+first**,
 which is what lets a sweep group a node's devices by storage pool without
 consulting any stored plan (Teardown by sweep).
 
@@ -1575,7 +1583,14 @@ counts no metadata units, since no copy keeps its metadata there.
   than `requiredCnt` is `RESOURCE_EXHAUSTED`; pick `requiredCnt`
   **randomly** from the list; add the picked DNs to the black list; continue
   with the next group. The growing black list means every leg of the SP
-  lands on a distinct DN.
+  lands on a distinct DN. The groups are scanned in the order the STM mints
+  them (`gateway.md` GW15), per slice the meta group first, and a short
+  group never sends the scan back to an earlier pick (only a pick whose
+  capacity key moved reruns the scan, `gateway.md` GW9): a group the scan
+  leaves short refuses the whole create, though another draw for an earlier
+  group could have left it room, so a
+  cluster that could hold the pool can refuse a create that a repeat then
+  builds (`csi.md` CSI11).
 * **CreateStoragePool — CNs.** `candExt` is the sum of `ext_cnt` over
   **all** groups of the SP; `requiredCnt` is one and `candCnt` is
   `alloc_conf.cn_batch_size`; repeat `cntlr_cnt` times, a random pick that
@@ -3712,7 +3727,18 @@ verbatim (`gateway.md` GW14). The **bit order** is normative too: bits are
 **LSB-first within each byte** — bit i is bit i mod 8 of byte i div 8 —
 and the trailing pad bits of the last byte are zero. Chunks are
 byte-aligned, so the bit-level concatenation of a migration's chunks is
-plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
+plain byte concatenation (Bitmap push protocol, raid0 bitmap math). That
+holds only while every chunk but the last covers a number of blocks that is
+a multiple of 8:
+a bitmap read pads the last byte of its reply with zero bits and a chunk
+carries no block count, so a page over a block count that is not a
+multiple of 8, appended as a chunk before the last, puts its pad bits in
+the middle of the joined bitmap and shifts every later bit; the pages of
+one clone chunk
+join the same way (Clones), so a caller that appends a migration's bitmap
+in more than one chunk, or a clone chunk in more than one page, reads
+every page but the last of each over a multiple of 8 blocks (Known
+limits).
 
 ## Agent services and agent behavior
 
@@ -6050,9 +6076,14 @@ weigh a restore against them.
 ### Upgrade in lockstep
 
 dnv upgrades in **lockstep**: every dnv program of an etcd installation
-stops — its gateways, workers and cdc instances, and the agents of every
-cluster it holds — every binary is replaced by the one of the new build,
-`dnvctl` included, and only then does any program start again. The
+stops — its gateways, workers and cdc instances, the agents of every
+cluster it holds, and the controller plugin and the node plugins of every
+CSI driver that talks to its gateways, a stopped node plugin leaving the
+connections of its staged volumes in place (`csi.md` CSI16), and their
+mounts, which a stop never touches, so that those volumes serve through
+the upgrade — every binary is
+replaced by the one of the new build, `dnvctl` included, and only then
+does any program start again. The
 installation is the unit, not a cluster, because its gateways, workers and
 cdc instances serve every cluster it holds (`dnv-worker.md` SW6; `cdc.md`
 DS1). etcd is no dnv program and keeps its data, and before any program of
@@ -6062,8 +6093,10 @@ etcd installation at once. Reason: no message carries a build version and
 nothing checks one, so two builds that differ in a message would misread
 each other with no error — a field one of them lacks is ignored when it
 arrives and read as zero when it is missing; with one build at a time, only
-what the nodes and etcd hold crosses from one build to the next, and the
-rules below keep it readable.
+what the nodes and etcd hold, and what the CSI plugins handed Kubernetes —
+a volume's id and its publish and volume contexts (`csi.md`, The volume
+model, CSI10) — crosses from one build to the next, and the rules below
+keep it readable.
 
 Every worker stops before any agent does, and the workers start last, once
 the agents serve again (`dnagent.md` SH1); the gateways and the cdc
@@ -6080,7 +6113,8 @@ So a build takes over whatever an older build left of the kinds of object
 it builds, as it is: it finds what the nodes hold and etcd's records by the
 names of Naming and the keys of etcd data model, which it keeps for those
 kinds; it reads every message the older build
-stored, in etcd or in a local store; and neither its conf gates nor its
+stored, in etcd or in a local store, and every volume id and context an
+older build's plugins handed Kubernetes; and neither its conf gates nor its
 readers refuse a value the older build stored (Common validation), with
 one exception: a `Clone` with no `meta_grp`, which no released build
 writes, is refused by the worker's writes of its legs' and sides' health
@@ -6884,6 +6918,21 @@ that component's document and only pointed to here.
   those blocks, and the pool later reads there what the destination's
   recycled extents hold, which may be another pool's bytes ([D15]). A data
   leg's read in the migration gap can block instead (above).
+* **A migration bitmap, or a clone chunk, whose pages before the last
+  cover block counts that are not multiples of 8 can skip written blocks.**
+  Nothing checks a page's size: a chunk or a page carries no block count,
+  so the gateway cannot, and the destination's disk node joins a
+  migration's chunks byte by byte (`dnagent.md` SH23), as the gateway joins
+  a clone chunk's pages (Clones). A short page before the last shifts every
+  later bit, so a block the pool wrote can read as never written, and the
+  copy skips it; after the cutover the destination serves what its extents
+  held there, with no error, as after a bitmap read too early. In a clone
+  chunk the shift stays inside the chunk, and the clone serves zeros where
+  the source wrote. One chunk the gateway takes covers a very large leg at
+  the default block size, but one `--bm-hex` of dnvctl covers only a
+  bounded part of a leg (`dnvctl.md`, The command tree), so an operator who
+  appends a larger leg's bitmap through dnvctl pages it and meets this
+  unless every page but the last covers a multiple of 8 blocks.
 * **A forced finish before the copy is whole serves the destination's
   recycled bytes.** `FinishMigration` with `force` skips the proof that the
   copy is complete and nothing else (Migrations), so after the cutover it

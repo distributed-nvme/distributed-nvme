@@ -71,9 +71,12 @@ is the `Makefile` row of `layout.md`, Directory tree. `make test` runs
   model, allocation, validation and the procedures that span components.
   Any other doc cites the rule and never restates it.
 - Rule ids (CN11, GW6, [D12]) are permanent: never renumbered; a new rule
-  takes the next free number; a deleted id is retired forever. Headings are
-  unnumbered, and nothing cites a section number, in a doc or a code
-  comment.
+  takes the next free number; a deleted id is retired forever. An id
+  belongs to its doc, so `CM1` of `cdc.md` and `CM1` of `gateway.md` are
+  different rules: a bare id cites the doc it stands in or, in code, the doc
+  of the code's component ([D] ids are `architecture.md`'s wherever they
+  stand), and every other citation names the doc. Headings are unnumbered,
+  and nothing cites a section number, in a doc or a code comment.
 - A citation is the doc's bare name with a rule id or a heading text, as in
   "`gateway.md` GW6" or "`architecture.md`, System overview", never a path
   and never a line number; the bold lead-in of a paragraph under the heading

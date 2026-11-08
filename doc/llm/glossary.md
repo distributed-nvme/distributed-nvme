@@ -326,7 +326,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **lock hierarchy** — The agent's lock set (`LockSet`): the node write lock for a node syncup or the startup reconcile; the node read lock plus the object's own lock, created only once the call or task has found the object held or its gates have admitted the request, for every object-scoped call but a check round and an info read, and for every background read and background converge of a side or a cntlr; and the node read lock alone for the background read of a DN or a CN. The check rounds and info reads, which answer from the observation, the size reads, the leg health probers and the background disconnects take none (see `dnagent.md` SH10 to SH13).
 
-**lockstep** — The way dnv is upgraded: every dnv program of an etcd installation, the agents of every cluster it holds included, stops and every binary is replaced before any program starts again, so no two builds ever run in one etcd installation at once (see `architecture.md`, Upgrade in lockstep).
+**lockstep** — The way dnv is upgraded: every dnv program of an etcd installation, the agents of every cluster it holds and the plugins of every CSI driver that talks to its gateways included, stops and every binary is replaced before any program starts again, so no two builds ever run in one etcd installation at once (see `architecture.md`, Upgrade in lockstep).
 
 **log record** — One JSON line on stderr per operation, written on completion with its outcome and the trace id, by every dnv binary through the one shared handler chain; stdout stays the result channel. Record names and attributes are normative, since the suites match them.
 

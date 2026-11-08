@@ -614,7 +614,8 @@ name or state, and stopped before they are detached.
 The wipe is a separate flag that runs no case. Kind-blind, it takes every
 dnv-named dm device, every dnv nvmet subsystem and md array, an array named
 also by its members' dm names, and every fabrics controller on the node, a
-reach that makes it a flag; then the ordinary cleanup runs. It repeats while
+reach that makes it a flag; then, when no residue fails it (below), the
+ordinary cleanup runs. It repeats while
 dnv dm devices remain, as udev can re-assemble an array from its members, and
 any dm or nvmet residue fails it, since reporting it is not success.
 

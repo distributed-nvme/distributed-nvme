@@ -117,8 +117,9 @@ func openBitmapTarget(
 // by the agent, which inverts thin-pool metadata's native "mapped = written"
 // once at that boundary (architecture.md, raid0 bitmap math). The gateway
 // never inspects or rewrites a bit, so it can never disagree with the agent
-// about the convention, and byte-aligned chunks stay concatenable by the
-// caller.
+// about the convention, and the caller's pages stay concatenable while every
+// page but the last covers a multiple of 8 blocks (architecture.md, Bitmap
+// reads).
 func (s *Server) GetThinDeviceBitmap(
 	ctx context.Context,
 	req *pb.GetThinDeviceBitmapRequest,

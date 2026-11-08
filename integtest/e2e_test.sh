@@ -6260,9 +6260,12 @@ DIAG_MAX_DN_LOGS=6
 #   - no `jq`: no guest in this suite parses JSON. resolve_jq builds one for
 #     the DRIVER, and the helper reads sysfs instead (disconnect_prefix,
 #     port_trsvcid).
-#   - no `thin_dump`: that is cnagent_test.sh's thin-metadata oracle
-#     (cnagent_integtest.md, Cases, thinbm); this suite never reads thin
-#     metadata.
+#   - `thin_dump` is run by the cn AGENT, not by this suite's HELPER: for the
+#     bitmap reads the ops and copy cases issue (`td get-bm`, `td get-leg-bm`)
+#     and for its activation sweep of a pool's thin ids (cnagent.md CN14,
+#     CN25), so a controller node needs it, and CN_TOOLS does not list it —
+#     an exception to the standard below, as `nohup` (dn_up, cn_up) and
+#     `dmesg` (diag) are on the nodes.
 #   - no `cmp`: every comparison here is a sha256 string compared on the
 #     driver.
 # The check runs under the same shell the work runs under — `sudo -n bash -c`
@@ -6359,10 +6362,15 @@ HOST_KMSG_TOOLS="dmesg"
 CP_TOOLS="ss pgrep pkill awk sed du df tail nohup grep timeout"
 
 # The module list of preflight_vms (cnagent_test.sh) minus dm-flakey, which
-# only that
-# suite's fault injection needs. modprobe is best-effort on purpose: a module
-# built into the kernel makes `modprobe` fail, and what matters is the assert
-# that follows (the nvmet configfs tree, /proc/mdstat, multipath).
+# the agent uses here too: at the read-only level the ops case steps through,
+# the primary gives the ns-dev of each namespace it serves a dm-flakey table
+# over that namespace's backing (cnagent.md CN16 rule 7, CN19). The
+# list does not load or check it; the agent's table load pulls the target
+# in on a kernel whose modules are installed, which is why the gap does no
+# harm, and preflight does not prove it. modprobe is best-effort on
+# purpose: a module built into the kernel makes `modprobe` fail, and what
+# matters is the assert that follows (the nvmet configfs tree, /proc/mdstat,
+# multipath).
 NODE_MODULES="nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool raid1"
 
 # tools_cmd builds the ONE-LINE guest command that prints the missing tools,

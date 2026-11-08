@@ -791,9 +791,10 @@ func TestAFailedSourceBuildSettlesTheFence(t *testing.T) {
 
 // The export's row of a migration source is set after its port link, so it
 // reports the link (linkMigrSrc): a link the kernel refuses reads ERROR
-// there with the refusal, though the build held and the pass went on to
-// steps 1 and 2, and nothing is linked, so the destination cannot reach the
-// export (DN12).
+// there with the refusal, while the build held (the dm-linear row reads OK)
+// and the pass reached step 2 (the reload of a per-CN linear is asserted;
+// step 1's ANA moves are not), and nothing is linked, so the destination
+// cannot reach the export (DN12).
 func TestASourceWhosePortLinkFailsReportsIt(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)

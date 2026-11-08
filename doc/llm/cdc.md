@@ -432,7 +432,8 @@ not by its CNTLID.
 NP6. **Properties.** Property Get: CAP (MQES one below
 `CdcMaxAdminSqSize`, contiguous queues required, the smallest doorbell
 stride and memory page size, the NVM command set, the enable timeout per
-NP14), VS (NP14), CC, CSTS. Property Set: CC only, with EN, SHN, IOSQES and
+NP14), VS, the fixed version `controllerVersion` holds, which NP14 does
+not decide, CC, CSTS. Property Set: CC only, with EN, SHN, IOSQES and
 IOCQES accepted. CSTS.RDY follows CC.EN; CC.SHN sets CSTS.SHST to shutdown
 complete, and the host is expected to close; CC.EN cleared after being set
 marks the controller not ready and leaves teardown to the socket. Any other
@@ -443,8 +444,9 @@ discovery controller, DCTYPE Direct Discovery Controller, MDTS reporting no
 limit, KAS its keep-alive granularity, AERL `CdcAerl`, OAES with the
 Discovery Log Page Change bit set, LPA advertising the extended NUMD and
 LPO, SGLS advertising SGLs with in-capsule data, SUBNQN `NvmeDiscoveryNqn`,
-MN `NvmeModel`, SN derived from the listen endpoint and FR from the build;
-every unlisted field per NP14. Any other CNS: invalid field, DNR.
+MN `NvmeModel`, SN derived from the listen endpoint, FR from the build and
+VER the version VS reports (NP6); every unlisted field per NP14. Any other
+CNS: invalid field, DNR.
 
 NP8. **Get Log Page.** The discovery log page only (anything else: invalid
 field, DNR — nvmet's discovery parser does the same). NUMDL and NUMDU, LPOL
@@ -459,10 +461,16 @@ delivery-based (NP11). Data returns as C2HData followed by a CapsuleResp;
 the SUCCESS-flag shortcut is not used.
 
 NP9. **Features.** Set and Get Features of the Asynchronous Event
-Configuration: stored per connection, all clear by default — only the
-discovery-log-change bit is meaningful, and it gates DS8 delivery. AENs are
-gated by it because the specs default that bit to disabled; kernels enable
-it because Identify's OAES advertises it (NP7). Set and Get of the Keep
+Configuration: stored per connection and all clear at Connect, where Linux
+nvmet starts with its namespace-attribute and ANA-change bits set, bits no
+event here reads; the discovery-log-change bit, the only one meaningful
+here, is clear at Connect whatever the KATO, as Linux nvmet leaves it too,
+and it gates DS8 delivery. NP9 pins these values itself, so the mirror rule
+(NP14) does not decide them. The specs say a discovery controller shall
+enable that bit itself when Connect carries a non-zero KATO, so a host that
+follows them and sends no Set Features gets no notice: a departure from the
+specs, the one nvmet makes, kept because a Linux host sets the bit itself,
+since Identify's OAES advertises the notice (NP7). Set and Get of the Keep
 Alive Timer SHOULD update the connection's KATO. Any other FID: invalid
 field, DNR.
 

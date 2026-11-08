@@ -3058,7 +3058,8 @@ lab_wipe() {
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
 	# devices, the udev rule, the nvmet port — belongs to the
-	# ordinary cleanup that runs after it and is not counted here.
+	# ordinary cleanup that runs after a wipe that does not fail and is not
+	# counted here.
 	local dm_left nvmet_left md_left
 	dm_left=$(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv/ {print $1}' | tr '\n' ' ')
 	nvmet_left=$(ls "$NVMET/subsystems" 2>/dev/null | grep -F dnv | tr '\n' ' ')
@@ -3156,10 +3157,14 @@ ship_helper() {
 # wipe_all runs the one-time lab wipe (cnagent_integtest.md,
 # Teardown and cleanup) on both VMs, concurrently
 # for cleanup_all's reason: a subsystem on one VM backs a connection on the
-# other, so the shorter the window the better. `--wipe` is its only caller and
-# it always runs the ordinary start-of-run cleanup afterwards, which takes
-# what the wipe deliberately leaves — $WORK, the loop devices, the udev rule
-# and the nvmet port.
+# other, so the shorter the window the better. `--wipe` is its only caller:
+# after a wipe that does not fail it runs the ordinary start-of-run cleanup,
+# which takes what the wipe deliberately leaves — $WORK, the loop devices,
+# the udev rule and the nvmet port; a wipe that leaves a dnv dm device or
+# nvmet subsystem behind dies here, before that cleanup. The wipe releases
+# no pin (unpin_all runs in cleanup_phase1 alone), so a device a pinned
+# process holds survives it and fails it, and `--cleanup-only`, whose
+# cleanup releases the pins first, is the way past that.
 #
 # EACH VM'S STATUS IS READ, because the two VMs' output interleaves and a
 # missing report does not stand out.
@@ -3178,7 +3183,8 @@ wipe_all() {
 	done
 	[ ${#bad[@]} -eq 0 ] ||
 		die "the lab wipe left objects behind on ${bad[*]} — the residue is" \
-			"printed above; re-run --wipe, and if the same names survive that" \
+			"printed above; run --cleanup-only, which releases the suite's" \
+			"device pins, then --wipe again, and if the same names survive that" \
 			"something outside dnv is holding them"
 }
 
@@ -7685,7 +7691,8 @@ usage: bash integtest/cnagent_test.sh [--only <case>] [--cleanup-only] \\
 cases: ${CASES[*]}
 
 --wipe is the ONE-TIME lab wipe: it removes EVERY dnv object on both VMs,
-whatever dm kind spelling its name carries, then runs the ordinary cleanup.
+whatever dm kind spelling its name carries, then, unless a dnv dm device or
+nvmet subsystem is left, runs the ordinary cleanup.
 It runs no case. Never run it while another suite is using these VMs.
 EOF
 	exit 2

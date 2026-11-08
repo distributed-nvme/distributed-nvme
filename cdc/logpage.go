@@ -202,7 +202,9 @@ func renderHeader(genCtr uint64, numRec uint64) []byte {
 //
 // The returned slice is always exactly length bytes, which is what the host's
 // buffer expects; an offset past the end therefore yields all zeros rather
-// than an error, as the specs require of a log page read.
+// than an error. DS9 states the zeros beyond the end; the NVMe Base
+// specification aborts a log page read that starts past the end with Invalid
+// Field, and nvmet does so with DNR, a departure common hosts never meet.
 func logPageBytes(genCtr uint64, numRec uint64, body []byte, off uint64, length int) []byte {
 	out := make([]byte, length)
 	if length == 0 {

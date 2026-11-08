@@ -166,7 +166,7 @@ func fullMethod(method string) string {
 // ---------------------------------------------------------------------------
 
 // TestMethodTypeRegistryMatchesServiceDesc pins the registry against
-// pb.Gateway_ServiceDesc in both directions, with CT1's 68 RPCs spelled
+// pb.Gateway_ServiceDesc in both directions, with every RPC of CT1 spelled
 // out: the registry is what decodes behavior.json's `reply`, so a method it
 // misses would silently answer with the wrong message type.
 func TestMethodTypeRegistryMatchesServiceDesc(t *testing.T) {

@@ -36,9 +36,13 @@ func poolSegments(grps []*grpPlan) []dmSegment {
 
 // ensureSlice converges one slice's meta concat, data concat and thin-pool.
 // GrowSlice arrives as longer group lists: the converge reloads the concat(s)
-// with the appended targets and reloads the pool table with the new sizes —
-// dm-thin picks up both data and metadata growth from the table swap, and no
-// pool message is involved.
+// with the appended targets and then reloads the pool. A data grow changes
+// the pool table — the data length and the low-water mark — while a metadata
+// grow changes nothing in it, since the table names the metadata device and
+// does not size it; dm-thin takes the data size from the table's length and
+// reads the metadata device's size only at the resume, so the pool is
+// reloaded even over an unchanged table (concatGrew), and no pool message is
+// involved (cnagent.md CN13).
 //
 // A grown group whose sides are still provisioning is simply not in the
 // effective lists yet ([D15]): the concats and the pool keep their old size, the

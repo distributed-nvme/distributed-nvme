@@ -401,7 +401,8 @@ converge the older requests held there and remove the debris the run leaves.
 The wipe is a separate flag that runs no case: it reads no dm kind, taking
 dnv-named residue whatever its name decodes to, every dnv nvmet subsystem and
 md array and, past dnv, every fabrics controller on the node, a reach that
-makes it a flag and not a step; then it runs the ordinary cleanup. It repeats
+makes it a flag and not a step; then, when it does not fail (below), it runs
+the ordinary cleanup. It repeats
 while dnv dm devices remain, as udev can re-assemble an array from its
 members, and fails if a dnv dm device or nvmet subsystem is left or the dm
 listing did not answer, as reporting a residue is not success; md arrays are

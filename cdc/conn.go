@@ -33,7 +33,8 @@ const (
 	// 15 is nvmet's value (NP14).
 	capTimeout = 15
 	// controllerVersion is the VS property and Identify's VER: NVMe 1.3.0,
-	// what nvmet reports for a subsystem that was never told otherwise.
+	// a fixed value of dnv's own, not the mirror rule's (NP14): Linux 7.0's
+	// nvmet reports 2.1.0 in both.
 	controllerVersion = 0x00010300
 	// identifyLen is the size of the Identify data structure.
 	identifyLen = 4096
@@ -744,7 +745,7 @@ const (
 	// controller.
 	cntrlTypeDiscovery = 2
 	// oaesDiscChange is OAES bit 31: this controller supports Discovery Log
-	// Page Change notices, which is what makes the host enable them (NP9).
+	// Page Change notices, which is what makes a Linux host enable them (NP9).
 	oaesDiscChange = 1 << 31
 	// ctrattHostId128 says the host identifier is 128 bits, as fabrics
 	// hosts always send it.

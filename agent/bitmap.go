@@ -18,16 +18,21 @@ import (
 //     multiple of 8 the trailing pad bits of the last byte are 0.
 //   - Chunks are byte-aligned, so migration's bit-level concatenation
 //     (chunk k starts at the summed bit length of chunks 0…k−1) is plain byte
-//     concatenation.
+//     concatenation — while every chunk but the last covers a number of
+//     blocks that is a multiple of 8: a chunk made from a page whose block
+//     count is not a multiple of 8 carries its pad bits in the middle of the
+//     joined bitmap (architecture.md, Bitmap reads).
 const bitsPerByte = 8
 
 // BitmapBitCount is the number of bits a chunk carries.
 //
-// It is for **wire chunks only**, where every bit of every byte is meaningful
-// by construction (chunks are byte-aligned; architecture.md,
-// raid0 bitmap math). It must never be used as
-// the bit count of a bitmap whose logical length is not a multiple of 8:
-// there it would count the trailing pad bits as real ones.
+// It is for **wire chunks only**, where every bit is meaningful but the zero
+// pad bits of the last chunk's last byte, which read as written, the safe
+// direction, as long as every chunk but the last covers a number of blocks
+// that is a multiple of 8 (the rule above; architecture.md, Bitmap reads).
+// It must never be used as the bit count of a "written = 1" bitmap whose
+// logical length is not a multiple of 8: there its zero pad bits would count
+// as real unwritten blocks.
 func BitmapBitCount(bitmap []byte) uint64 {
 	return uint64(len(bitmap)) * bitsPerByte
 }
