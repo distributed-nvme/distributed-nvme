@@ -68,7 +68,11 @@ Disks, Control plane, Agents and Cluster and nodes, with one change: in
 Control plane, start the gateway with this command in place of the one
 written there, so that it listens on every address of the machine. Every
 `dnvctl` command stays as written, since 127.0.0.1 is one of those
-addresses.
+addresses. This bind is a demo: the gateway checks no caller, so bound to
+every address it is open to every pod and to the LAN; a deployment blocks
+that traffic to all but the controller plugin and the operator's `dnvctl`,
+with a firewall rule or a network policy that the cluster's network software
+enforces.
 
 ```
 nohup ./dnv-gateway --grpc-address 0.0.0.0:29527 --etcd-endpoints 127.0.0.1:2379 \

@@ -37,6 +37,12 @@ Everything listens on 127.0.0.1:
 | dn agents dn0 to dn3 | gRPC 29900 to 29903; nvmet port ids 1 to 4 on NVMe/TCP ports 4301 to 4304 | `dn0.img` to `dn3.img`, `store-dn0/` to `store-dn3/`, `dn0.log` to `dn3.log`, `dn0.pid` to `dn3.pid` |
 | cn agent cn0 | gRPC 29950; nvmet port id 5 on NVMe/TCP port 4420 | `store-cn0/`, `cn0.log`, `cn0.pid` |
 
+The logs share the working directory with the agents' stores, the `store-`
+directories in which each agent keeps the desired state it last accepted,
+and with etcd's data, which fits a tutorial. In a deployment the logs go on
+a filesystem of their own and are rotated, since dnv rotates nothing and a
+disk the logs fill is one the stores and etcd cannot write.
+
 The fixed names and identities:
 
 | what | value |
@@ -81,7 +87,8 @@ sudo apt-get install -y nvme-cli mdadm nvme-stas dmsetup thin-provisioning-tools
 On another distribution install the same tools: `nvme` from nvme-cli,
 `mdadm`, nvme-stas with its two daemons `stafd` and `stacd`, `dmsetup`,
 `thin_dump` from thin-provisioning-tools, and `losetup` from util-linux.
-nvme-stas must be a 2.x version:
+nvme-stas must be a 2.x version, the one dnv is tested with; 3.x is untested
+with dnv:
 
 ```
 sudo stafd --version
@@ -254,6 +261,12 @@ are four failure domains, which the RAID1 placement needs.
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 cn create --addr 127.0.0.1:29950 --tr-addr 127.0.0.1 --tr-svc-id 4420
 ```
 
+The controller node's budget, the space of the pools whose cntlrs it may
+hold, is read at this create from the `--capacity` its cn agent was started
+with; the tutorial leaves it unset, so the node takes the default, and no call
+changes a budget afterwards, so a deployment sets `--capacity` on every cn
+agent before its node's create.
+
 Check: a disk node has nine extents. A 10 GiB disk minus the 256 MiB the
 disk node keeps for its header, its record of which extents each side holds
 and its metadata area holds nine
@@ -406,6 +419,17 @@ connect-attempts-on-ncc=0
 EOF
 sudo systemctl restart stafd stacd
 ```
+
+The two restart together here, before stacd holds any path to the volume.
+Afterwards never restart stafd while stacd runs, nor start stacd while stafd
+is down: stacd reads a stafd that stays away as an empty discovery log, and
+its start or its next reconfiguration, the pass in which it matches its
+connections to the discovery log, which a reload, a removed controller, a
+device audit or one of its timers starts, then drops every path it made,
+since `disconnect-scope` above lets it disconnect what it connected. To
+restart stafd, stop stacd first, which keeps its connections when it stops;
+restart stafd; once `stafctl ls`, the first check below, shows stafd holding
+its connection to the cdc again, start stacd.
 
 Check: the discovery daemon holds its connection to the cdc, and the
 connector holds one to the subsystem. The two need a few seconds; repeat

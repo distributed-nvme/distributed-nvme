@@ -204,7 +204,8 @@ func spCreateCmd() *cobra.Command {
 	// says so rather than promising one.
 	flags.Uint32("slice-cnt", 0,
 		fmt.Sprintf("slice_cnt — slices the SP has (0 = the gateway "+
-			"default, %d)", common.DefaultSliceCntPerSp))
+			"default, %d); a RAID1 SP needs four DNs per slice at create",
+			common.DefaultSliceCntPerSp))
 	flags.Uint64("init-ext-cnt", 0,
 		"init_ext_cnt — DN extents per data group (required; 0 is refused)")
 	flags.String("slots", "",
