@@ -28,8 +28,16 @@ outside their set, which the spec lets a caller send, becomes its leading
 characters, each made acceptable, and a hash of the whole name, the same
 for the same name, so a repeated create finds its objects. So every object
 of a volume is found by one name, the per-pool limits on subsystems,
-namespaces and hosts never bind, and the tenant promise of dnv holds per
-volume (`architecture.md`, System overview).
+namespaces and hosts never bind, and the tenant promise of dnv holds per volume
+(`architecture.md`, System overview). A volume costs the cluster what a pool
+costs: its cntlrs count against the controller nodes' cntlr ceiling; its sides,
+one per leg of each of its groups and one more for each migration destination,
+repair's new leg and retired leg a group holds, up to `MaxRetiredLegPerGrp`
+retired legs a group, against the disk nodes' side ceiling; and the pool itself
+against the cluster's pool ceiling; so how many volumes a cluster can hold
+follows from those ceilings and the node counts, the free extents each volume
+reserves, the class's cntlr count, its redundancy and the groups auto-grow adds
+to each volume (`architecture.md`, Cardinality limits).
 
 A storage class names one dnv cluster, the redundancy of every group and
 the cntlr count of every pool. A pool has one slice, with a meta group of one
@@ -213,7 +221,20 @@ Everything it does to the node goes through the OS client, the one path to
 the operating system (`osclient.md`): nvme-cli for what the kernel takes as
 a command, the mount tools, blkid, the filesystem makers, the sysfs and
 mount table reads. Only the kernel's event socket is the plugin's own, since
-the OS client has no socket.
+the OS client has no socket. The plugin reports nothing to dnv, and the
+worker's reactions read the agents' reports and the stored records, never a
+host (`architecture.md`, Automatic reactions), so no reaction fails over a
+primary the worker reaches but the node cannot, at the cntlr's address, and the
+node's IO to the volume queues while a standby's path is left (`osclient.md`,
+Exported raw helpers and the probe-IO carve-out) and fails at the kernel's
+reconnect limit otherwise (CSI14); on a pool with an enabled standby of a zero
+health epoch the operator ends that by disabling the primary
+(`UpdateCntlrEnabled`), which starts a failover with no threshold wait
+(`dnv-worker.md` AR5), and enabling it again after the failover, since a
+disabled cntlr is never a candidate (`dnv-worker.md` AR3); on a pool with no
+such standby a disable starts no failover (`dnv-worker.md` AR5) and takes the
+primary out of the discovery records (`architecture.md`, Cntlrs), so the
+follower drops the node's last path and the mount does not survive it (CSI14).
 
 CSI13. **The node id is the host NQN, and every node is in one topology
 segment.** The plugin reads the node's identity files at start and refuses
@@ -230,17 +251,37 @@ ignores the topology requirements it is sent, which can only name that
 segment, and names no accessible topology for the volume, which Kubernetes
 reads as every node.
 
-CSI14. **The plugin's own connect, with the kernel's defaults.** A node's
-path to a volume is made by nvme-cli with the node's identity and no
-timeout settings of its own, so the kernel's defaults hold; the agent's
-connect, which hard-codes dnv's settings for a cntlr's path to a leg, is
-not reused, and neither are its sysfs readers. A stage connects to every
-cntlr the cdcs list for the volume's subsystem, retrying a cntlr whose port
-does not listen yet inside the stage's wait, since the cdc lists a
-subsystem before its cntlrs have built it, and then waits for the volume's
-device link by uuid under the disk-by-id directory, which appears once a
-path is live and optimized. A volume whose link does not come within the
-wait is UNAVAILABLE, and the kubelet calls again.
+CSI14. **The plugin's own connect, with the kernel's defaults.** A node's path
+to a volume is made by nvme-cli with the node's identity and no timeout
+settings of its own, so the kernel's defaults hold; the agent's connect, which
+hard-codes dnv's settings for a cntlr's path to a leg, is not reused, and
+neither are its sysfs readers. Under those defaults a mount survives an outage
+of every path that ends inside the kernel's reconnect limit, since IO queues
+and the kernel reconnects onto the same device, save where a path's reconnect
+reaches its cntlr's port while the port listens for another subsystem and
+before the volume's is built again, as on a controller node that comes back
+holding other volumes' cntlrs, which refuses it with DNR and ends that path's
+reconnects for good (`dnagent_integtest.md`, Assumptions and preflight checks;
+`cnagent.md` CN2); and it does not survive the loss of its last path: past that
+limit the kernel deletes the controller, and a later connect to the subsystem
+makes a new namespace device, which the mount does not follow. The follower
+drops a withdrawn path even when its connect to the cntlr that replaces it
+failed in the same pass (CSI15), so on a pool of one cntlr a cntlr replacement,
+whose new cntlr the cdc lists before its agent has exported the subsystem,
+loses the last path the same way. The plugin reports no volume health, so
+nothing in the driver or in Kubernetes acts on a dead mount, and the operator
+deletes the pod. A stage connects to every cntlr the cdcs list for the volume's
+subsystem and repeats the connects, since the cdc lists a subsystem before its
+cntlrs have built it, until a pass ends with no error or the node holds a path
+to the subsystem, a standby's included, and a stage whose wait runs out first
+is UNAVAILABLE; a cntlr still refusing when the connects end is left to the
+follower's passes (CSI15), each of which retries it, the next within a timer
+period, so the wait the stage has left covers that retry only while the
+follower's period stays well below it, as at the defaults when the connects end
+early in the wait; the stage then waits for the volume's device link by uuid
+under the disk-by-id directory, which appears once a path is live and
+optimized. A volume whose link does not come within the wait is UNAVAILABLE,
+and the kubelet calls again.
 
 CSI15. **The follower.** The plugin keeps the set of subsystems it has
 staged and the cdcs it follows, the configured ones and those the attaches
@@ -314,11 +355,25 @@ The driver ships as one container image and plain manifests in `deploy/`:
 one file per Kubernetes object, and the Dockerfile beside them. It promises
 Kubernetes 1.34 and newer; the lab proves it on the k3s release the suite
 pins, with the sidecar images the manifests name.
-The image is the Ubuntu release the lab runs with nvme-cli, the mount
-tools, blkid and the two filesystem makers, plus the one binary; the pod's
-command names the subcommand. The manifests name the image by the driver's
-version and pull it only when it is absent, so a lab imports it into every
-node under that name and a user who publishes it keeps the same files.
+The image is the Ubuntu release the lab runs with nvme-cli, the mount tools,
+blkid and the two filesystem makers, plus the one binary; the pod's command
+names the subcommand. The plugin passes the makers no feature option, so they
+format with the image's defaults, and the xfs maker of that release formats
+with nrext64, which needs kernel 5.19 or newer, so a node that mounts an xfs
+volume runs that kernel or a newer one. The manifests name the image by the
+driver's version, with no registry, and pull it only when it is absent, so a
+lab imports it into every node under that name, and a user who publishes it in
+a registry names it there in the controller and node manifests or maps that
+name to the registry in every node's container runtime.
+The kubelet directory is the one value of the node manifest an operator changes
+per distribution, in its mounts and in the registrar's registration path, since
+a distribution may keep the kubelet elsewhere. Of dnv's services, the
+controller pod reaches the gateway alone (CSI7) and the node pods the cdcs and
+the cntlrs' ports; every other pod of the cluster reaches those ports, and the
+agents' and etcd's, through its machine as well unless the operator blocks it,
+and dnv authenticates no user and no host beyond its NQN (`architecture.md`,
+Known limits), so a gateway bound to every address of its machine is open to
+every pod and to the machine's network.
 
 CSI18. **The node pods run privileged on the host's network.** The kernel
 keeps an NVMe/TCP connection in the network namespace of the process that
@@ -336,9 +391,11 @@ CSI19. **The controller pod runs anywhere and tolerates the control-plane
 taint.** It holds the plugin, the provisioner, the attacher and the liveness
 probe around one socket. The plugin reads the gateway address and the cdc
 addresses from a config map, as environment, and the node plugin reads the
-cdc addresses from the same map, so the manifests of a cluster differ from
-the examples in that map and in the storage classes alone, which name the
-operator's clusters. The driver object asks for attach, no pod information
+cdc addresses from the same map, so the manifests of a cluster differ from the
+examples in that map, in the storage classes, which name the operator's
+clusters, in the kubelet directory where a distribution keeps the kubelet
+elsewhere, and in the driver's image name where a registry serves the image
+(Deployment). The driver object asks for attach, no pod information
 on mount, the persistent lifecycle and capacity tracking, since the plugin
 answers capacity; the provisioner polls it and owns the capacity objects,
 for every class of the driver, those with immediate binding included, since
@@ -401,8 +458,10 @@ installed, an image built on the suite's machine reaches every node
 without a registry, and a pod runs from it on each host and is then
 removed. On that floor it proves the driver: a claim becomes a pool that
 a pod reads and writes on either host, as a filesystem and as a raw block
-device; a failover under IO loses no write; eight volumes live at once; the
-upstream conformance test passes; and every delete leaves nothing behind.
+device; a failover under IO loses no write, for one pool at a time, since no
+case stops the cn agent of a controller node that holds many pools; eight
+volumes live at once; the upstream conformance test passes; and every delete
+leaves nothing behind.
 
 ### Topology and parameters
 

@@ -36,8 +36,8 @@ const (
 	byIdDir      = "/dev/disk/by-id"
 	nvmeBin      = "nvme"
 	trTypeTcp    = "tcp"
-	// connectRetry is the pause between two tries of a connect whose cntlr
-	// does not listen yet.
+	// connectRetry is the pause between two tries of a connect that a cntlr
+	// refused because it has not built the subsystem.
 	connectRetry = time.Second
 )
 

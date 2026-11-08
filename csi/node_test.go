@@ -498,8 +498,8 @@ func TestNodeStageMountsAFilesystemVolume(t *testing.T) {
 }
 
 // TestNodeStageRetriesARefusedConnect pins the retry of csi.md CSI14: a
-// cntlr whose port does not listen yet refuses, and the stage tries again
-// within its wait.
+// cntlr that has not built the subsystem refuses the connect, and the
+// stage tries again within its wait.
 func TestNodeStageRetriesARefusedConnect(t *testing.T) {
 	n, f := newTestNode(t)
 	f.refuse[fakeCn0] = 1

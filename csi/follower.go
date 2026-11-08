@@ -300,9 +300,9 @@ func (f *follower) syncLocked(ctx context.Context) error {
 				continue
 			}
 			if err := f.host.connect(ctx, nqn, ep); err != nil {
-				// A cntlr the cdc lists before its port listens refuses
-				// the connect; the next sync, or the stage's own retry,
-				// tries again.
+				// A cntlr the cdc lists before it has built the subsystem
+				// refuses the connect; the next sync tries again, as does
+				// the stage's own retry until the node holds a path.
 				slog.WarnContext(ctx, msgFollowerSyncError,
 					slog.String("nqn", nqn), slog.String("endpoint", key),
 					slog.String("error", err.Error()))

@@ -1652,9 +1652,14 @@ gateway, never through `workerctl`.
   which a list of every cntlr would fail, but only the list's length as
   the cntlr mutators change it, and the entry gone with its subsystem;
   every defaultable member of the stored confs resolved on the write path;
-  paging with its empty last page and a malformed token; the inspects and
-  bitmap reads passing the agent's bytes and revision through verbatim, a
-  revision no stored rev key holds; the worker flip the snapshot
+  paging with its empty last page and a malformed token; the inspects passing
+  the agent's report and revision through verbatim, a revision the pool's rev
+  key has passed, and the bitmap reads passing its bitmap through, which the
+  fake replies empty, having no setting for its bytes, so the case proves the
+  reply's shape and not that the bytes cross unchanged (GW14), and no suite
+  compares the bytes with the agent's: the e2e suite reads non-empty bitmaps
+  from the real agents and the thin bitmap's bit for the block its setup wrote
+  (`e2e_integtest.md`, The cases); the worker flip the snapshot
   precondition waits for; a migration's `cutover_pending` set
   at its create, a cancel while it is pending, and a finish refused while
   it is pending, with `force` and without, before the suite plays the
@@ -1752,7 +1757,8 @@ gateway, never through `workerctl`.
   alike, a units-only one with no revision moved.
 
 **Rules exercised.** The smoke case exercises GW4 to GW12, GW14 and GW19 across
-every resource group, GW5's `deleting` gate on a latched pool, GW10's
+every resource group, GW14's bitmap reads only on the empty bitmap the fake
+replies (above), GW5's `deleting` gate on a latched pool, GW10's
 paging, GW11's write-time resolution, AG1 and AG3 on the inspects and the
 bitmap reads, the trace-id chain of GW2 and AG2, and the listing rule of
 `architecture.md` [D18] on the `CdcEntry` transport lists it reads back;

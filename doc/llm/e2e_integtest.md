@@ -119,7 +119,12 @@ which of the two ended its hold, the report or the timer. The worker's own
 try-to-abort of a repair of its own, and its cancel of one, which react's
 take-over sees only when it comes before the operator's (`dnv-worker.md`, Leg
 repair; `architecture.md`, Repair); and the retire timer, as no run waits out a
-retired leg's age (`dnv-worker.md` AR12).
+retired leg's age (`dnv-worker.md` AR12). Guest distinctness of a migration
+destination or a repair's fresh new leg where the suite skips its check: at as
+many disk-node guests as a group has legs, where no guest lies outside the
+group's and the copy case's migration destination can share its source's guest,
+and for a leg repair whose fresh leg react's steer pushes to the second tier
+(E2E4; Known limits).
 
 ## Topology and parameters
 
@@ -187,9 +192,11 @@ emptiest disk nodes first and so take side-less nodes first
 node on as many guests as a group has legs, and guaranteeing that
 guarantees the create. The guarantee is sufficient, not necessary: below
 the bound the proof is lost, not the run. Its headroom also keeps the
-allocator's second tier out of reach (E2E4), and as one more guest does
-not always lower the bound, a shape above the per-kernel cap is told how
-many disk-node guests it needs.
+allocator's second tier out of reach wherever there are more disk-node guests
+than legs per group (Known limits), save where react's steer leaves no enabled
+side-less disk node on a guest outside the group's (E2E4), and as one more
+guest does not always lower the bound, a shape above the per-kernel cap is told
+how many disk-node guests it needs.
 
 **Event thresholds.** Only a pool's create sets its thresholds, so each case's
 set is chosen just before its pool is built, and a case without one dies rather
@@ -242,9 +249,10 @@ override below it is a warning naming the demand it risks, never an error; a
 value above the per-kernel cap is a die naming the guest count the shape needs.
 
 E2E4. **Every dn agent of a guest registers that guest as its location**, so
-groups straddle guests and no two sides of a leg share a kernel — by headroom,
-not by structure. Guest distinctness is asserted after the create and every
-grow. A migration destination or a repair's fresh new leg, a leg repair's
+groups straddle guests and, with more disk-node guests than legs per group, no
+two sides of a leg share a kernel — by headroom, not by structure. Guest
+distinctness is asserted after the create and every grow. A migration
+destination or a repair's fresh new leg, a leg repair's
 included, excludes the group's locations only at the allocator's first tier
 (`architecture.md`, Per-operation allocation), and a migration destination
 beside its source would collide with it on the side export's NQN, which
@@ -962,6 +970,19 @@ the connect attempted.
   source is a second pool's, on a controller node outside the case's pool,
   so a failover of a pool whose own transfer is the source, which moves the
   source with the clone, is not exercised.
+* **At as many disk-node guests as a group has legs, the copy case's migration
+  can land beside its source.** The group's legs then hold every location, so
+  the allocator's first tier has no candidate and the second offers, for each
+  guest, one disk node outside the group's, the source's guest included, and
+  the destination is drawn among them (`architecture.md`, Per-operation
+  allocation, Finding DN candidates); there two dn agents of one kernel hold
+  the two sides of one leg, which the placement rule forbids, and both converge
+  the one side export (`architecture.md`, Disk node). The case can then fail,
+  and one agent's removal leaves the export without its namespace on the
+  other's port until that agent converges again (`dnagent.md` DN6, Known
+  limits); the suite logs that the guest check is skipped (E2E4) and goes on.
+  With more disk-node guests than legs the first tier places the destination on
+  a guest outside the group's while a disk node there has room.
 * **A standby's namespaces are inaccessible, never non-optimized**
   (`cnagent.md` CN16), so a host holds one usable path per namespace, and ANA
   path selection across two usable controllers is not exercised.

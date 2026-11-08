@@ -128,9 +128,10 @@ func (n *node) NodeStageVolume(
 		return nil, err
 	}
 
-	// The connects, retried within the device wait: the cdc lists a
-	// subsystem before its cntlrs have built it, and a port that does not
-	// listen yet refuses the connect.
+	// The connects, retried within the device wait until the node holds a
+	// path to the subsystem: the cdc lists a subsystem before its cntlrs
+	// have built it, and a cntlr that has not built it refuses the connect;
+	// one still refusing then is the follower's to retry.
 	deadline := time.Now().Add(n.deviceWait)
 	for {
 		err := n.follow.stage(ctx, pc.nqn, pc.cdcs)

@@ -1690,8 +1690,10 @@ derive_params() {
 	# before that DN's, and the step checks it itself. So none of them enters
 	# the count above, and each states and checks its own precondition. They
 	# are not INDEPENDENT of the bound either: the headroom it leaves keeps
-	# E2E4's tier-2 relaxation out of reach and makes a side-less DN outside
-	# the group likely, which is why a sub-bound value warns about them too.
+	# E2E4's tier-2 relaxation out of reach — on more DN VMs than LEGS, save
+	# where react_steer leaves no enabled disk node on a VM outside the
+	# group's — and makes a side-less DN outside the group likely, which is
+	# why a sub-bound value warns about them too.
 	local divisor=$((DN_VM_CNT - LEGS + 1))
 	local cap=$LEGS
 	[ "$divisor" -ge "$LEGS" ] || cap=$divisor
@@ -8883,9 +8885,14 @@ setup_register_nodes() {
 	# E2E4: every dnagent of one VM registers --location dn<v>, the VM's role.
 	# That is what makes the allocator spread a group's legs across VMs — a
 	# FindDnCandidates (model/alloc.go) scan returns at most one candidate per
-	# location — and therefore what keeps two sides of one leg off one kernel,
-	# where SideToCnNqn (common/name_fmt.go), which carries no dn_id, would
-	# collide between the two agents.
+	# location — and what keeps two sides of one leg off one kernel, where
+	# SideToCnNqn (common/name_fmt.go), which carries no dn_id, would collide
+	# between the two agents: CreateMigration's first tier seeds that
+	# per-location set with the group's locations (the excludeLocs of
+	# FindDnCandidates (model/alloc.go), tier 1 of FindDnCandidatesAntiAffine),
+	# which holds while a DN VM outside the group's has a disk node with room,
+	# which needs more DN VMs than LEGS; otherwise the allocator's second tier
+	# drops the location exclusion (copy_migration's comment says how).
 	#
 	# The four --tr-* values are passed explicitly and identically to the
 	# agent's own launch flags (dn_up). They are not decoration: the CN dials
@@ -14364,9 +14371,10 @@ copy_xfer_delete() {
 # candidates than the legs being placed (pickDns (gateway/alloc.go)). So
 # assert LOCATIONS, not just addr_ports, and know that tier 2 relaxes them.
 #
-# Tier 1 falls short only when no DN outside the group's locations can take
-# the group's ext_cnt — which at a shape with more DN VMs than legs means the
-# cluster is out of extents, not that the rule was waived. So the location
+# Tier 1 falls short only when no allocatable DN outside the group's locations
+# has the group's ext_cnt and the migration's metadata units free — which at a
+# shape with more DN VMs than legs means the DN VMs outside the group's are
+# out of room, not that the rule was waived. So the location
 # assertion below is made only when DN_VM_CNT > LEGS, i.e. exactly when tier 1
 # has somewhere anti-affine to go; with DN_VM_CNT == LEGS it is skipped with a
 # log line instead of failing a run that is behaving correctly.
@@ -14435,10 +14443,10 @@ copy_migration() {
 			die "the migration destination $dstaddr is on a DN VM the group" \
 				"already occupies ($before_vms). Tier 1 (architecture.md," \
 				"Per-operation allocation) excludes the" \
-				"group's locations and relaxes only when no DN outside them" \
-				"can take the group's ext_cnt — with $DN_VM_CNT DN VMs and" \
-				"$LEGS leg(s) per group that would mean the cluster is out" \
-				"of extents, not that the rule was waived"
+				"group's locations and relaxes only when no allocatable DN outside" \
+				"them has the group's ext_cnt and the migration's metadata units" \
+				"free — with $DN_VM_CNT DN VMs and $LEGS leg(s) per group that would" \
+				"mean the DN VMs outside the group's are out of room, not that the rule was waived"
 			;;
 		esac
 	else
