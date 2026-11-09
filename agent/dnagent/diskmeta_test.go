@@ -57,8 +57,8 @@ func reopen(node *fakeNode) *DiskMeta {
 
 // mayFormat is the format gate these tests hand EnsureFormatted: they build
 // no dm device, so a blank disk may always be formatted. The DN converge's
-// own gate, diskUnmapped, is tested through the server
-// (TestABlankHeaderUnderLiveSidesIsNeverFormatted).
+// own gate, formatGate, is tested through the server
+// (TestABlankHeaderUnderLiveSidesIsNeverFormatted, formatguard_test.go).
 func mayFormat(context.Context) error { return nil }
 
 // ---------------------------------------------------------------------------

@@ -435,7 +435,10 @@ startup's enumeration finds the file again. The other role's kinds are left
 alone: a dn and a cn agent may share one prefix (CM2), and the other agent's
 temp file may be a write in flight. A temp file of the role's own kinds
 never is: the enumeration runs before the agent saves anything, and two
-agents of one role must not share a prefix (CM2).
+agents of one role must not share a prefix (CM2). The one other listing of
+the store, the dn's format gate (DN5), lists the side files alone
+(`Store.Paths`), returns no temp file and deletes nothing, so it is safe
+beside any save.
 
 SH7. When an object's pointer leaves its parent's list, its state is dropped
 **at that moment** and nothing of it is removed from the node yet: its
@@ -1550,9 +1553,24 @@ probe-first (SH16), building `DnInfo` as it goes:
   disk, the disk stays blank, `meta_info` names the first device that maps
   it and the DN's code is `ReplyCodeLeftover` (DN6's record step), in
   every `SyncupDn`'s reply and every observation of the DN, until an
-  operator removes it. Once no side device or
-  clone-metadata wrapper maps the disk, the next converge whose reads all
-  answer formats. The format writes slot A with an empty table at the first
+  operator removes it. Nor is a blank disk formatted while the local
+  store holds a side at `provisioned` true, read afresh from the store's
+  side files (`Store.Paths`), or while that listing or one of those files
+  does not answer or does not decode; the converge's `meta_info` then
+  names the side, the file, or the store directory whose listing failed.
+  Reason: dm devices do not survive a reboot, so after one a header blanked
+  by a stray write has no device over it, while the stored sides still say
+  the disk held their records; a format would take away the by-hand
+  recovery of the old table and hand its extents to the next side. Sides
+  not provisioned never refuse, since they hold no data yet. A DN's list
+  of side pointers never refuses either, since a new disk's first
+  `SyncupDn` can bring a list before any side is stored; it only lets pass
+  a stored side that a DN this agent holds no longer lists, such as one
+  whose state file the drop could not delete (SH7), which no one wants any
+  more. The refusal keeps the DN's code as a blank header under a live
+  device keeps it (DN6's record step). Once no side device or
+  clone-metadata wrapper maps the disk and the store holds no provisioned
+  side but those, the next converge whose reads all answer formats. The format writes slot A with an empty table at the first
   sequence number **first**, then the header (a fresh `format_uuid` from
   the kernel's random source, the request's `cluster_id`, `dn_id` and
   `extent_size`, and the three layout fields; the two envelopes, what each
@@ -2057,8 +2075,8 @@ it says so: the table it cannot use counts as a listing that did not answer
 ("volume table: disk identity is not confirmed for this node"), so the
 verdict is not clean and the worker re-drives the `SyncupDn`, whose DN5
 converge checks the disk again — every round, for as long as the disk stays
-unreadable, corrupt, another node's, or blank under a live side device or
-clone-metadata wrapper (DN16).
+unreadable, corrupt, another node's, or blank under a live side device,
+a clone-metadata wrapper or a stored provisioned side (DN5, DN16).
 
 Ids are never reused, so a swept side never comes back, an etcd restore
 aside (`architecture.md`, etcd backup and restore).
@@ -3017,8 +3035,9 @@ same enumeration, the same wanted set, the same comparison, nothing touched
 node-level leftovers, while one of its listings does not answer, and while
 the disk's identity is not confirmed (DN6's record step, which a
 `SyncupDn`'s sweep runs too: for as long as the disk stays unreadable,
-corrupt, another node's, or blank under a live side device or
-clone-metadata wrapper, and the worker re-sends `SyncupDn` on the rounds
+corrupt, another node's, or blank under a live side device, a
+clone-metadata wrapper or a stored provisioned side (DN5), and the worker
+re-sends `SyncupDn` on the rounds
 whose reply carries the code), and a side's read while that side holds
 leftovers, while one of its listings does not answer, and — the first of
 the two comparisons a side's verdict makes beyond its sweep's — while its record,
@@ -3196,7 +3215,8 @@ needed, and the worker never turns one into an `err_epoch`
   `RES_STATUS_ERROR`, details "record missing", at `provisioned` true (a
   lost or foreign disk, or that same blank header, under which the side's
   devices keep serving its data: nothing removes a device the side still
-  wants, and DN5 will not format while they map the disk); zeroing not done
+  wants, and DN5 will not format while they map the disk, nor, after a
+  reboot has taken them, while the local store holds the side); zeroing not done
   ⇒ `RES_STATUS_PROVISIONING`, details "zeroing k/n MiB", at false and
   `RES_STATUS_ERROR`, details "not zeroed", at true; at false, an
   outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's

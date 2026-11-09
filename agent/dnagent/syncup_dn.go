@@ -668,26 +668,35 @@ func (s *DnAgentServer) convergeDn(
 }
 
 // ensureDiskMeta converges the [D13] disk format: a blank disk is formatted
-// (header + an empty volume table in slot A) once no side device or
-// clone-metadata wrapper maps it, a disk already formatted for this
-// cluster/dn/extent_size is left untouched, and a disk formatted for anything
-// else is refused rather than overwritten (DN5).
+// (header + an empty volume table in slot A) only as the format gate allows
+// (formatGate), a disk already formatted for this cluster/dn/extent_size is
+// left untouched, and a disk formatted for anything else is refused rather
+// than overwritten (DN5). The DNs' lists are read here, before
+// EnsureFormatted takes DiskMeta's lock, which the gate runs under: a
+// zeroing batch takes that lock while it holds s.mu.
 func (s *DnAgentServer) ensureDiskMeta(
 	ctx context.Context,
 	t *agent.ResTracker,
 	req *pb.SyncupDnRequest,
 ) *pb.ResInfo {
+	lists := s.dnLists()
+	gate := func(ctx context.Context) error {
+		return s.formatGate(ctx, lists)
+	}
 	if err := s.meta.EnsureFormatted(ctx, req.GetClusterId(),
-		req.GetDnId(), req.GetExtentSize(), s.diskUnmapped); err != nil {
+		req.GetDnId(), req.GetExtentSize(), gate); err != nil {
 		return t.Err(resKeyMeta, s.disk, err.Error())
 	}
 	return t.Ok(resKeyMeta, s.disk, s.meta.Describe())
 }
 
-// diskUnmapped is DN5's format gate: EnsureFormatted formats a blank header
+// formatGate is DN5's format gate: EnsureFormatted formats a blank header
 // only when this answers nil, i.e. when no side device or clone-metadata
 // wrapper on the node — whatever cluster or dn its name carries — has a live
-// table that maps this disk. Those two kinds are the only devices dnv builds
+// table that maps this disk, and the local store holds no side at
+// provisioned = true but those a DN this agent holds no longer lists
+// (storedProvisionedSide).
+// Side devices and clone-metadata wrappers are the only devices dnv builds
 // on the disk itself. A header can go blank under live side devices (one
 // mistaken `dd` over its first 4 KiB is enough), and formatting it then would
 // write a fresh, empty table whose next allocation hands their extents to
@@ -696,9 +705,13 @@ func (s *DnAgentServer) ensureDiskMeta(
 // proves nothing about what maps the disk. The refusal is the meta row's
 // error, and the disk stays blank until every such device is gone — this
 // dn's sweep removes its own once nothing wants them; a device of another
-// cluster or dn stays until an operator removes it — after which a converge
-// whose reads all answer formats it.
-func (s *DnAgentServer) diskUnmapped(ctx context.Context) error {
+// cluster or dn stays until an operator removes it — and every such stored
+// side has left its DN's list, after which a converge whose reads all answer
+// formats it.
+func (s *DnAgentServer) formatGate(
+	ctx context.Context,
+	lists map[[2]uint64]map[[2]uint64]struct{},
+) error {
 	const refusing = "blank disk header; refusing to format"
 	devNo, err := s.dm.DevNo(ctx, s.disk)
 	if err != nil {
@@ -728,6 +741,72 @@ func (s *DnAgentServer) diskUnmapped(ctx context.Context) error {
 		sort.Strings(live)
 		return fmt.Errorf("%s: %d live dm device(s) still map the disk, "+
 			"first %s", refusing, len(live), live[0])
+	}
+	if err := s.storedProvisionedSide(ctx, lists); err != nil {
+		return fmt.Errorf("%s: %w", refusing, err)
+	}
+	return nil
+}
+
+// dnLists is the side pointers each DN this agent holds lists, by (cluster,
+// dn) and then by (sp, side).
+func (s *DnAgentServer) dnLists() map[[2]uint64]map[[2]uint64]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[[2]uint64]map[[2]uint64]struct{}, len(s.dns))
+	for _, dn := range s.dns {
+		req := dn.req.Load()
+		listed := make(map[[2]uint64]struct{})
+		for _, ptr := range req.GetSidePointerList() {
+			listed[[2]uint64{ptr.GetSpId(), ptr.GetSideId()}] = struct{}{}
+		}
+		out[[2]uint64{req.GetClusterId(), req.GetDnId()}] = listed
+	}
+	return out
+}
+
+// storedProvisionedSide is the half of the format gate that outlives a
+// reboot: dm devices do not, so a header blanked and then rebooted has none
+// over it, while the local store still holds the sides the disk's table
+// held. A side at provisioned = true had its extents zeroed and handed to a
+// host, so its record was on the disk; formatting would take away the
+// by-hand recovery of the old table and hand those extents to the next side.
+// The store is read afresh, and a listing or a file that does not answer or
+// does not decode refuses too, since it proves nothing. A side not
+// provisioned holds no data yet, so it never refuses. A DN's list of side
+// pointers never refuses either, since a new disk's first SyncupDn can bring
+// a list before any side is stored; it only lets a stored side pass that a
+// DN this agent holds no longer lists: a side whose state file the drop
+// could not delete (dropSideState), which no one wants any more and which
+// would otherwise refuse until a restart's reload deleted the file. The
+// restore and re-add procedures clear the store (architecture.md, etcd
+// backup and restore, and Disk nodes), so they still format.
+func (s *DnAgentServer) storedProvisionedSide(
+	ctx context.Context,
+	lists map[[2]uint64]map[[2]uint64]struct{},
+) error {
+	paths, err := s.store.Paths(ctx, agent.StoreKindSide)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		req := &pb.SyncupSideRequest{}
+		if err := s.store.Load(ctx, path, req); err != nil {
+			return fmt.Errorf("side state file %s unreadable: %w", path, err)
+		}
+		ptr := req.GetSidePointer()
+		if listed, held := lists[[2]uint64{
+			req.GetClusterId(), req.GetDnId()}]; held {
+			if _, ok := listed[[2]uint64{
+				ptr.GetSpId(), ptr.GetSideId()}]; !ok {
+				continue
+			}
+		}
+		if req.GetSideConf().GetProvisioned() {
+			return fmt.Errorf("the local store holds provisioned side %s",
+				s.nf.DnSideName(req.GetClusterId(), req.GetDnId(),
+					ptr.GetSpId(), ptr.GetSideId()))
+		}
 	}
 	return nil
 }

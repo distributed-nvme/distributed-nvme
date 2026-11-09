@@ -121,6 +121,27 @@ func (s *Store) List(
 	return out, nil
 }
 
+// Paths lists the committed files of one kind, sorted. Unlike List it
+// removes nothing and runs beside any Save: an interrupted write's temp file
+// is skipped and left for the next startup's List.
+func (s *Store) Paths(ctx context.Context, kind string) ([]string, error) {
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	names, err := s.oc.ReadDir(cctx, s.prefix)
+	if err != nil {
+		return nil, fmt.Errorf("local store %s unreadable: %w", s.prefix, err)
+	}
+	var out []string
+	for _, name := range names {
+		if strings.HasPrefix(name, kind) &&
+			!strings.Contains(name, common.AtomicWriteTmpInfix) {
+			out = append(out, s.prefix+"/"+name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // Load decodes one store file into msg, on a ctx carrying the soft timeout
 // like every other call the store makes (SH4, SH15).
 func (s *Store) Load(

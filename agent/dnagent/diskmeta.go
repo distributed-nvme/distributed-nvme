@@ -312,9 +312,10 @@ func dnSlotRoundUp(n uint64) uint64 {
 //
 // mayFormat is asked only when the header is blank, before anything is
 // written, and the disk is formatted only when it answers nil. The DN
-// converge passes diskUnmapped: a header can go blank under live side
-// devices, and a fresh, empty table would hand their extents to the next side
-// (DN5).
+// converge passes formatGate: a header can go blank under live side
+// devices, or under sides the local store still holds once a reboot has
+// taken their devices, and a fresh, empty table would hand their extents to
+// the next side (DN5).
 func (d *DiskMeta) EnsureFormatted(
 	ctx context.Context,
 	clusterId uint64,

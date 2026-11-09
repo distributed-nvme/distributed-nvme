@@ -728,13 +728,51 @@ func TestStoreCallsCarryTheSoftTimeout(t *testing.T) {
 		context.Background(), "/store/dn-1", req); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	if _, err := store.Paths(context.Background(), StoreKindDn); err != nil {
+		t.Fatalf("Paths: %v", err)
+	}
 	if got := strings.Join(cmds, " "); got !=
-		"readdir rm rm writeproto readproto" {
+		"readdir rm rm writeproto readproto readdir" {
 		t.Fatalf("calls = %q, want exactly one listing and its rm, "+
-			"the Remove's rm, then the Save and the Load", got)
+			"the Remove's rm, then the Save, the Load and the Paths "+
+			"listing, which removes nothing", got)
 	}
 	if len(unbounded) != 0 {
 		t.Errorf("store calls without the SH15 soft timeout: %v", unbounded)
+	}
+}
+
+// TestStorePathsLeavesAnInterruptedWrite: Paths runs beside the saves, so it
+// returns only the committed files of its kind and removes nothing, a temp
+// file of its kind included, which may be a save in flight.
+func TestStorePathsLeavesAnInterruptedWrite(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store := NewStore(common.NewLimitedOsClient(0), dir)
+	nf := common.NewNameFmt(dir)
+	sidePath := nf.LocalSidePath(1, 3, 0x11, 0x16)
+	if err := store.Save(ctx, sidePath, &pb.SyncupSideRequest{
+		ClusterId: 1, DnId: 3, Revision: 2}); err != nil {
+		t.Fatalf("saving the side request: %v", err)
+	}
+	inFlight := nf.LocalSidePath(1, 3, 0x11, 0x17) +
+		common.AtomicWriteTmpInfix + "42"
+	if err := os.WriteFile(inFlight, []byte{0xff}, 0o644); err != nil {
+		t.Fatalf("planting %s: %v", inFlight, err)
+	}
+	if err := store.Save(ctx, nf.LocalDnPath(1, 3), &pb.SyncupDnRequest{
+		ClusterId: 1, DnId: 3, Revision: 2}); err != nil {
+		t.Fatalf("saving the dn request: %v", err)
+	}
+	got, err := store.Paths(ctx, StoreKindSide)
+	if err != nil {
+		t.Fatalf("Paths: %v", err)
+	}
+	if len(got) != 1 || got[0] != sidePath {
+		t.Errorf("side paths = %q, want only the committed %s", got, sidePath)
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Errorf("Paths touched the write in flight: %v", err)
 	}
 }
 

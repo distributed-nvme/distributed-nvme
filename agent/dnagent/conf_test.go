@@ -889,6 +889,19 @@ func newDiskNode() *fakeNode {
 func TestReconcileKeepsTheSidesOfAnUnreadableDnFile(t *testing.T) {
 	ctx := context.Background()
 	node := newDiskNode()
+	// The disk holds this node's table, as the disk of an agent that
+	// restarts does: a blank header under a stored provisioned side is never
+	// formatted (DN5).
+	first := startTestServer(t, node)
+	if _, err := first.SyncupDn(ctx, dnReq(1)); err != nil {
+		t.Fatalf("formatting SyncupDn: %v", err)
+	}
+	stopTestServer(t, first)
+	node.mu.Lock()
+	for path := range node.protos {
+		delete(node.protos, path)
+	}
+	node.mu.Unlock()
 
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	dnPath := nf.LocalDnPath(testCluster, testDn)
