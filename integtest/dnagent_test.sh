@@ -2618,6 +2618,8 @@ migr_declare_dst() { # m revision sp_level cutover_pending
 		# (dnagent_integtest.md, Conventions, Negatives are exact).
 		assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m gated clone"
+		assert_gated "$out" ".side_info.migr_dst_info.target_info.status" \
+			"migr $m gated source connection"
 		# The other half of the gated declaration's "no clone and no
 		# connection" (dnagent_integtest.md, Cases, migr_full and migr_bitmap).
 		# The clone and the connection to the source's :3: subsystem are built by
@@ -2696,6 +2698,8 @@ migr_provision_dst() { # m revision
 	# turn that into anything else.
 	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 		"migr $m dst clone before provisioning"
+	assert_gated "$out" ".side_info.migr_dst_info.target_info.status" \
+		"migr $m dst source connection before provisioning"
 	# The same three-map + kernel-side gate proof sync_side_2phase runs; this
 	# request names one CN (the migration's primary), so the loop over the
 	# request's CN ids collapses to it (dnagent_integtest.md, Conventions,
@@ -2976,6 +2980,8 @@ migr_finish_dst() { # m revision
 	# gated, never merely "not OK").
 	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 		"migr $m clone after finish"
+	assert_gated "$out" ".side_info.migr_dst_info.target_info.status" \
+		"migr $m source connection after finish"
 	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m finished dst"
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m finished dst"
 }

@@ -5674,6 +5674,10 @@ case_repair() {
 		"repair add: the bad leg removed, then the new leg added"
 	assert_eq "$(event_cnt "$seq" "^mdadm $md1dev ")" "$want_cmds" \
 		"repair add: the converge's mdadm commands against the data array"
+	# And no other mdadm command at all: not on a leg, not on the meta
+	# array (cnagent_integtest.md, Cases, repair).
+	assert_eq "$(event_cnt "$seq" '^mdadm ')" "$want_cmds" \
+		"repair add: the converge's mdadm commands"
 	if helper 1 "md_member_of $bad" >/dev/null 2>&1; then
 		die "repair add: md still holds the bad leg"
 	fi
@@ -5844,11 +5848,17 @@ case_repair() {
 	rev1=${CNREV[1]}
 	cn_syncup_cntlr 1 "$req1" --expect-code 4 >/dev/null 2>&1 || true
 	resync_until_clean 1 "$sp" "$c1" "$rev1" "$req1" 60 "repair finish cn1"
-	seq=$(helper 2 "cn_events $TRACE")
-	[ "$(event_cnt "$seq" '^dmsetup ')" != 0 ] ||
-		die "repair finish: no dmsetup command of cn2 under this trace"
-	assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
-		"repair finish: cn2's mdadm commands"
+	# Both cntlrs' converges run no mdadm command (cnagent_integtest.md,
+	# Cases, repair); each log must hold this trace's converge, or a count
+	# of zero proves nothing.
+	local idx
+	for idx in 2 1; do
+		seq=$(helper "$idx" "cn_events $TRACE")
+		[ "$(event_cnt "$seq" '^dmsetup ')" != 0 ] ||
+			die "repair finish: no dmsetup command of cn$idx under this trace"
+		assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
+			"repair finish: cn$idx's mdadm commands"
+	done
 	assert_eq "$(helper 2 "dm_state $(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")")" \
 		missing "repair finish: the retired leg's wrapper on cn2"
 	out=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --show-info \
