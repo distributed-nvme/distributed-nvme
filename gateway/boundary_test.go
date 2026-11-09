@@ -1626,7 +1626,7 @@ func TestIdCounterAtItsLastValueIsNotReused(t *testing.T) {
 				ClusterName: env.name,
 				SpName:      sptSpName,
 				TdName:      name,
-				Size:        uint64(common.DefaultDmRaid0StripeSize),
+				Size:        uint64(model.DefaultStripeSize(common.DefaultDmPoolDataBlockSize)),
 			})
 		return reply.GetTdId(), err
 	}

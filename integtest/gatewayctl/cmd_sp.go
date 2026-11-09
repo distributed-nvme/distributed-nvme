@@ -67,10 +67,11 @@ func spSelectorFlags(fs *flag.FlagSet, prefix string) func() *pb.NodeSelector {
 //
 // --stripe-size and --block-size fill bdev_conf.dm_raid0_conf.stripe_size
 // and bdev_conf.dm_pool_conf.data_block_size, each sent only when non-zero.
-// The gateway suite never passes --stripe-size, and passes --block-size only
-// in its ceiling case, whose pools take the smallest block the gateway
-// accepts because a copy there costs the most metadata units
-// (architecture.md, Metadata units). The gateway judges both sizes against
+// The gateway suite passes --block-size, and --stripe-size with it, only in
+// its ceiling case, whose pools take the smallest block the gateway accepts
+// because a copy there costs the most metadata units (architecture.md,
+// Metadata units); a pool inherits its cluster's stripe otherwise, which
+// does not divide that block. The gateway judges both sizes against
 // their bounds and the geometry rules (validateBdevConf), and its
 // TestValidateBdevConf and TestBdevConfGeometryRules pin those refusals.
 // --feature-junk appends one empty BdevFeature purely so the case C

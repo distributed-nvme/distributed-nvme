@@ -473,7 +473,9 @@ only when one of `--thr-primary`, `--thr-cntlr`, `--thr-side` and
 `--low-water-mark-pct` are forwarded as typed, a zero and a mark above one
 hundred included (CT8); which zeros the gateway fills with a default and
 which it refuses is `architecture.md`, Storage pools and `architecture.md`,
-Common validation.
+Common validation. A `--block-size` the cluster's stripe does not divide
+needs a `--stripe-size` with it: the pool inherits that stripe otherwise,
+and the gateway refuses the pair, naming the way out.
 
 `sp delete` latches and returns, so a successful `sp delete` means teardown
 started, not gone; the drain, and what the pool answers while it runs, are

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -1268,6 +1269,24 @@ func TestBdevConfGeometryRules(t *testing.T) {
 				BdevConf: bdev(0, 0, raid1(1024)),
 			}), codes.OK)
 	})
+	// The stripe a cluster names none of follows its block (architecture.md,
+	// Common validation), so a block below the default block's stripe is
+	// accepted as stored, and a block above the largest stripe stores it.
+	for _, item := range []struct {
+		block, stripe uint64
+	}{{64 * kib, 64 * kib}, {256 * kib, 256 * kib}, {4 * mib, mib}} {
+		conf := bdev(item.block, 0, nil)
+		t.Run(fmt.Sprintf("as stored: a %d-byte block with no stripe",
+			item.block), func(t *testing.T) {
+			validateWantCode(t, "validateClusterConfInput",
+				validateClusterConfInput(
+					&pb.CreateClusterRequest{BdevConf: conf}), codes.OK)
+			if got := model.ResolveBdevConf(conf).GetDmRaid0Conf().
+				GetStripeSize(); got != item.stripe {
+				t.Errorf("stored stripe %d, want %d", got, item.stripe)
+			}
+		})
+	}
 	t.Run("as sent: a 96 KiB block", func(t *testing.T) {
 		err := validateClusterConfInput(
 			&pb.CreateClusterRequest{BdevConf: bdev(96*kib, 0, nil)})

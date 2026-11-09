@@ -266,13 +266,23 @@ func mergeRedundConf(
 // and resolved. The request itself was judged only between the members it
 // states; a member it omits is inherited, and whether that one meets the rest
 // shows only here. The refusal says so, because the value it names may be one
-// the request never sent.
-func validateMergedBdevConf(bdev *pb.BdevConf) error {
-	if err := validateBdevConf(bdev); err != nil {
-		return errInvalid("bdev_conf merged over the cluster's: %s",
-			status.Convert(err).Message())
+// the request never sent; a block the cluster's stripe does not divide, in a
+// request that names no stripe, gets the way out named too.
+func validateMergedBdevConf(bdev *pb.BdevConf, req *pb.BdevConf) error {
+	err := validateBdevConf(bdev)
+	if err == nil {
+		return nil
 	}
-	return nil
+	hint := ""
+	block := bdev.GetDmPoolConf().GetDataBlockSize()
+	stripe := bdev.GetDmRaid0Conf().GetStripeSize()
+	if req.GetDmRaid0Conf().GetStripeSize() == 0 && stripe != 0 &&
+		block%stripe != 0 {
+		hint = "; the stripe_size is the cluster's: name one that divides " +
+			"the data_block_size"
+	}
+	return errInvalid("bdev_conf merged over the cluster's: %s%s",
+		status.Convert(err).Message(), hint)
 }
 
 // growSliceCnBudget is the CN half of the RESOURCE_EXHAUSTED of
@@ -516,7 +526,8 @@ func (s *Server) CreateStoragePool(
 		// the scans: a scan run first would answer a request whose merge
 		// breaks one RESOURCE_EXHAUSTED on a cluster short of nodes, sending
 		// the operator to add capacity for a pool that is refused anyway.
-		if err := validateMergedBdevConf(scanBdev); err != nil {
+		if err := validateMergedBdevConf(
+			scanBdev, req.GetBdevConf()); err != nil {
 			return err
 		}
 		// The primary threshold against the cluster's cntlr_interval
@@ -605,7 +616,8 @@ func (s *Server) CreateStoragePool(
 			// so this verdict is the one reached before the scans; it is
 			// judged here too because this read, not that one, is
 			// authoritative.
-			if err := validateMergedBdevConf(bdev); err != nil {
+			if err := validateMergedBdevConf(
+				bdev, req.GetBdevConf()); err != nil {
 				return err
 			}
 			if err := validatePrimaryThreshold(

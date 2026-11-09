@@ -19,6 +19,7 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -973,7 +974,7 @@ func testBdevConf() *pb.BdevConf {
 			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
 		},
 		DmRaid0Conf: &pb.DmRaid0Conf{
-			StripeSize: common.DefaultDmRaid0StripeSize,
+			StripeSize: model.DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 		},
 		RedundConf: &pb.RedundConf{
 			RedunKind: &pb.RedundConf_RedundMdRaid1{

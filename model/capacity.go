@@ -148,12 +148,21 @@ func ResolveHealthCheckConf(conf *pb.HealthCheckConf) *pb.HealthCheckConf {
 	}
 }
 
+// DefaultStripeSize is the stripe a bdev conf that names none takes
+// (architecture.md, Common validation): its data block size, at most
+// MaxDmRaid0StripeSize. A whole aligned block then reaches one slice's
+// dm-thin unsplit, which skips the zero fill of a block written whole, and
+// the stripe always divides the block, since both are powers of two.
+func DefaultStripeSize(blockSize uint64) uint64 {
+	return min(blockSize, uint64(common.MaxDmRaid0StripeSize))
+}
+
 // ResolveBdevConf returns a copy of conf with every defaultable member
 // concrete (architecture.md, Common validation): data_block_size 0 => 1 MiB,
-// low_water_mark_pct 0 => 50,
-// stripe_size 0 => 64 KiB, and — only when the redund_conf oneof actually
-// selects md-raid1 — bitmap_chunk_block_cnt 0 => 128. A nil conf resolves to
-// the pure defaults.
+// low_water_mark_pct 0 => 50, stripe_size 0 => DefaultStripeSize of the
+// resolved block, and — only when the redund_conf oneof actually selects
+// md-raid1 — bitmap_chunk_block_cnt 0 => 128. A nil conf resolves to the
+// pure defaults.
 //
 // Two members are deliberately left alone. low_water_mark_pct above 100 is a
 // MEANING, not an error ("never grow this pool automatically",
@@ -191,7 +200,8 @@ func ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf {
 		resolved.DmPoolConf.LowWaterMarkPct = common.DefaultPoolLowWatermarkPct
 	}
 	if resolved.DmRaid0Conf.StripeSize == 0 {
-		resolved.DmRaid0Conf.StripeSize = common.DefaultDmRaid0StripeSize
+		resolved.DmRaid0Conf.StripeSize = DefaultStripeSize(
+			resolved.DmPoolConf.DataBlockSize)
 	}
 	if raid1 := conf.GetRedundConf().GetRedundMdRaid1(); raid1 != nil {
 		chunkBlockCnt := raid1.GetBitmapChunkBlockCnt()

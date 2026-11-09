@@ -631,9 +631,12 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
 
 		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
-		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
-		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
-		"RetiredLegMaxAge":           common.RetiredLegMaxAge,
+		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
+		"DefaultStripeSize": model.DefaultStripeSize(
+			common.DefaultDmPoolDataBlockSize),
+		"DefaultPrimaryUnhealthy": common.DefaultPrimaryUnhealthy,
+		"DemotionHoldTimeout":     common.DemotionHoldTimeout,
+		"RetiredLegMaxAge":        common.RetiredLegMaxAge,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,

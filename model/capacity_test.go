@@ -76,7 +76,7 @@ func testBdevConf(dataBlockSize uint64) *pb.BdevConf {
 			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
 		},
 		DmRaid0Conf: &pb.DmRaid0Conf{
-			StripeSize: common.DefaultDmRaid0StripeSize,
+			StripeSize: DefaultStripeSize(dataBlockSize),
 		},
 	}
 }
@@ -337,7 +337,7 @@ func TestResolveBdevConf(t *testing.T) {
 			conf:          nil,
 			wantBlockSize: common.DefaultDmPoolDataBlockSize,
 			wantPct:       common.DefaultPoolLowWatermarkPct,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 		},
 		{
 			// An unset redund_conf already means redund_none (architecture.md,
@@ -347,16 +347,28 @@ func TestResolveBdevConf(t *testing.T) {
 			conf:          &pb.BdevConf{},
 			wantBlockSize: common.DefaultDmPoolDataBlockSize,
 			wantPct:       common.DefaultPoolLowWatermarkPct,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 		},
 		{
+			// The default stripe follows the block, so a smaller block
+			// with no stripe still resolves to a stripe that divides it.
 			name: "data_block_size alone",
 			conf: &pb.BdevConf{
-				DmPoolConf: &pb.DmPoolConf{DataBlockSize: 64 * 1024},
+				DmPoolConf: &pb.DmPoolConf{DataBlockSize: 256 * 1024},
 			},
-			wantBlockSize: 64 * 1024,
+			wantBlockSize: 256 * 1024,
 			wantPct:       common.DefaultPoolLowWatermarkPct,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    256 * 1024,
+		},
+		{
+			// Above the largest stripe, the stripe is the largest.
+			name: "a block above the largest stripe",
+			conf: &pb.BdevConf{
+				DmPoolConf: &pb.DmPoolConf{DataBlockSize: 4 << 20},
+			},
+			wantBlockSize: 4 << 20,
+			wantPct:       common.DefaultPoolLowWatermarkPct,
+			wantStripe:    common.MaxDmRaid0StripeSize,
 		},
 		{
 			name: "low_water_mark_pct alone",
@@ -365,7 +377,7 @@ func TestResolveBdevConf(t *testing.T) {
 			},
 			wantBlockSize: common.DefaultDmPoolDataBlockSize,
 			wantPct:       80,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 		},
 		{
 			// Above 100 is the "auto-grow off" setting of architecture.md, Common
@@ -376,7 +388,7 @@ func TestResolveBdevConf(t *testing.T) {
 			},
 			wantBlockSize: common.DefaultDmPoolDataBlockSize,
 			wantPct:       4096,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 		},
 		{
 			name: "stripe_size alone",
@@ -392,7 +404,7 @@ func TestResolveBdevConf(t *testing.T) {
 			conf:          &pb.BdevConf{RedundConf: noneConf()},
 			wantBlockSize: common.DefaultDmPoolDataBlockSize,
 			wantPct:       common.DefaultPoolLowWatermarkPct,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 			wantNone:      true,
 		},
 		{
@@ -400,7 +412,7 @@ func TestResolveBdevConf(t *testing.T) {
 			conf:          &pb.BdevConf{RedundConf: raid1Conf(0)},
 			wantBlockSize: common.DefaultDmPoolDataBlockSize,
 			wantPct:       common.DefaultPoolLowWatermarkPct,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 			wantChunk:     common.DefaultChunkBlockCnt,
 		},
 		{
@@ -408,7 +420,7 @@ func TestResolveBdevConf(t *testing.T) {
 			conf:          &pb.BdevConf{RedundConf: raid1Conf(7)},
 			wantBlockSize: common.DefaultDmPoolDataBlockSize,
 			wantPct:       common.DefaultPoolLowWatermarkPct,
-			wantStripe:    common.DefaultDmRaid0StripeSize,
+			wantStripe:    DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 			wantChunk:     7,
 		},
 	}
@@ -499,8 +511,7 @@ func TestResolveClusterConf(t *testing.T) {
 	}
 	if got.GetBdevConf().GetDmPoolConf().GetLowWaterMarkPct() !=
 		common.DefaultPoolLowWatermarkPct ||
-		got.GetBdevConf().GetDmRaid0Conf().GetStripeSize() !=
-			common.DefaultDmRaid0StripeSize {
+		got.GetBdevConf().GetDmRaid0Conf().GetStripeSize() != 64*1024 {
 		t.Errorf(
 			"ResolveClusterConf did not resolve bdev_conf: %v",
 			got.GetBdevConf(),

@@ -102,7 +102,7 @@ const (
 	// values.
 	volExtSize   = uint64(4) << 30
 	volPoolBlock = uint64(2) << 20
-	// volStripe is deliberately NOT DefaultDmRaid0StripeSize: the size rule
+	// volStripe is deliberately NOT model.DefaultStripeSize: the size rule
 	// of architecture.md, Thin devices, must be computed from the SP's STORED
 	// geometry, so a fixture that happened to match the constant could not tell
 	// the two apart.

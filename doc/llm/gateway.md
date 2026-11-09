@@ -530,7 +530,8 @@ order after the request validation and the two stored messages it exempts
 are `architecture.md`, Common validation, and its order after
 `CreateStoragePool`'s merge is `architecture.md`, Storage pools; the rungs
 are a member from the request, else from the owning
-`ClusterConf`, else from a constant of `common/constants.go`, all applied by
+`ClusterConf`, else from a constant of `common/constants.go` or, for the
+stripe, from the block, all applied by
 the RPC that writes the conf. This rule is where each handler carries that
 out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
 settles `bdev_conf`, `dn_bin_conf`, `alloc_conf` and `health_check_conf`
@@ -1642,9 +1643,10 @@ request-size cap at `EtcdMaxRequestBytes`, which the suite reads from the
 `workerctl` it has just built instead of copying the numbers, as it reads
 `MaxSliceCntPerSp` for the clone it creates at that ceiling,
 `DefaultHealthCheckInterval` for the health intervals the smoke case
-expects in the stored `ClusterConf`, a DN's metadata ceiling
-`DnCloneMetaUnitCnt` and its unit size `DnCloneMetaUnit`, for the area the
-ceiling case fills, and the id step's strides
+expects in the stored `ClusterConf`, `DefaultDmPoolDataBlockSize` and the
+`DefaultStripeSize` that block gives for its stored block and stripe, a
+DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
+`DnCloneMetaUnit`, for the area the ceiling case fills, and the id step's strides
 `IdStepStride` and `ThinIdStepStride`, which its smoke case checks the
 moved counters against); three gateway instances on one launch
 line that differs only in the gRPC address; four fake DNs and three fake

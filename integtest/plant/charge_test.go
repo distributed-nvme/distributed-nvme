@@ -84,7 +84,7 @@ func testPoolBdev(blockSize uint64) *pb.BdevConf {
 			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
 		},
 		DmRaid0Conf: &pb.DmRaid0Conf{
-			StripeSize: common.DefaultDmRaid0StripeSize,
+			StripeSize: model.DefaultStripeSize(blockSize),
 		},
 	}
 }

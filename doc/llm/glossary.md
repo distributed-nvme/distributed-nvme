@@ -226,7 +226,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **gateway** — `dnv-gateway`, the stateless, active-active gRPC server that implements the Gateway API over etcd: every mutation is one transaction but `AdvanceClusterIds`, which commits one for the cluster and then one per pool (see `gateway.md` GW19), and it calls an agent only for a size, an inspection, a hydration check, a bitmap read or the forced start's check of a group's array.
 
-**geometry** — The device parameters a pool's `bdev_conf` holds concrete, such as the block size, the stripe size and the bitmap chunk; the gateway fills every member the caller omits from the cluster's conf, else from a constant, when it writes the pool, so a stored zero is an invalid stored conf that the worker refuses to drive and an agent refuses to converge.
+**geometry** — The device parameters a pool's `bdev_conf` holds concrete, such as the block size, the stripe size and the bitmap chunk; the gateway fills every member the caller omits from the cluster's conf, else from a constant or, for the stripe, from the block, when it writes the pool, so a stored zero is an invalid stored conf that the worker refuses to drive and an agent refuses to converge.
 
 **global flags** — dnvctl's root persistent flags, such as the gateway address, the cluster and pool scope, `--rev` and the timeout: every one but `--rev` is env-backed, read from the flag, then the environment, then the config file (see `dnvctl.md` CT9). They are not the id counters named globals.
 

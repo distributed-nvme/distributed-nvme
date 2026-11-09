@@ -38,13 +38,13 @@ func (e *sptEnv) advanceIds() (*pb.AdvanceClusterIdsReply, error) {
 		&pb.AdvanceClusterIdsRequest{ClusterName: e.name})
 }
 
-// createTd runs CreateThinDevice for a one-MiB thin device, a whole number of
+// createTd runs CreateThinDevice for a 4 MiB thin device, a whole number of
 // stripe units on the pools of sptDefaultSpec and sptSmallSpec, and returns
 // its reply.
 func (e *sptEnv) createTd(spName string, tdName string) *pb.CreateThinDeviceReply {
 	e.t.Helper()
 	reply, err := e.srv.CreateThinDevice(e.ctx, &pb.CreateThinDeviceRequest{
-		ClusterName: e.name, SpName: spName, TdName: tdName, Size: 1 << 20,
+		ClusterName: e.name, SpName: spName, TdName: tdName, Size: 4 << 20,
 	})
 	if err != nil {
 		e.t.Fatalf("CreateThinDevice %s/%s: %v", spName, tdName, err)

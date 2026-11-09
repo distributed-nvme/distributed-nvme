@@ -128,6 +128,13 @@ MAX_SLICE_CNT=
 # stored interval is the default — and not a copy of the number.
 DEFAULT_HEALTH_INTERVAL=
 
+# common.DefaultDmPoolDataBlockSize and the stripe a cluster created without
+# one is stored with, model.DefaultStripeSize of that block (architecture.md,
+# Common validation): case S pins the stored cluster and pool confs to them.
+# read_constants() fills both from `workerctl constants`.
+DEFAULT_BLOCK=
+DEFAULT_STRIPE=
+
 # A DN's metadata area (architecture.md, Metadata units): DN_META_UNITS is
 # common.DnCloneMetaUnitCnt, the units one DN's area holds, and META_UNIT is
 # the bytes of a unit, common.DnCloneMetaUnit. The ceiling case fills a DN's
@@ -981,7 +988,8 @@ read_constants() {
 		die "\`workerctl constants\` failed: this suite reads" \
 			"common.EtcdMaxTxnOps, common.EtcdMaxRequestBytes," \
 			"common.MaxSliceCntPerSp," \
-			"common.DefaultHealthCheckInterval, a DN metadata area's" \
+			"common.DefaultHealthCheckInterval, the default block and" \
+			"stripe, a DN metadata area's" \
 			"common.DnCloneMetaUnitCnt and common.DnCloneMetaUnit and the" \
 			"id step's common.IdStepStride and common.ThinIdStepStride from" \
 			"it and must not guess them"
@@ -1019,6 +1027,15 @@ read_constants() {
 	esac
 	log "  case S's stored health intervals =" \
 		"common.DefaultHealthCheckInterval = $DEFAULT_HEALTH_INTERVAL"
+	DEFAULT_BLOCK=$(jq_of "$json" .DefaultDmPoolDataBlockSize)
+	DEFAULT_STRIPE=$(jq_of "$json" .DefaultStripeSize)
+	case "$DEFAULT_BLOCK$DEFAULT_STRIPE" in
+	'' | *[!0-9]*)
+		die "workerctl constants: DefaultDmPoolDataBlockSize is" \
+			"'$DEFAULT_BLOCK' and DefaultStripeSize '$DEFAULT_STRIPE' in $json"
+		;;
+	esac
+	log "  case S's stored block and stripe = $DEFAULT_BLOCK, $DEFAULT_STRIPE"
 	# Zero is refused as well: an area of no units has no ceiling to reach,
 	# and a unit of no bytes sizes no copy.
 	local key val
@@ -1606,9 +1623,9 @@ case_smoke() {
 		"ClusterConf.qos_ratio is not defaultable and stays absent"
 	local probe field want
 	for probe in \
-		'.bdev_conf.dm_pool_conf.data_block_size|1048576' \
+		".bdev_conf.dm_pool_conf.data_block_size|$DEFAULT_BLOCK" \
 		'.bdev_conf.dm_pool_conf.low_water_mark_pct|50' \
-		'.bdev_conf.dm_raid0_conf.stripe_size|65536' \
+		".bdev_conf.dm_raid0_conf.stripe_size|$DEFAULT_STRIPE" \
 		'.dn_bin_conf.extent_size|1073741824' \
 		'.dn_bin_conf.bin1_shift|4' \
 		'.dn_bin_conf.bin2_shift|8' \
@@ -1969,9 +1986,9 @@ EOF
 	# invalid stored conf instead of re-defaulting.
 	local spProbe spField spWant
 	for spProbe in \
-		'.dm_pool_conf.data_block_size|1048576' \
+		".dm_pool_conf.data_block_size|$DEFAULT_BLOCK" \
 		'.dm_pool_conf.low_water_mark_pct|50' \
-		'.dm_raid0_conf.stripe_size|65536' \
+		".dm_raid0_conf.stripe_size|$DEFAULT_STRIPE" \
 		'.redund_conf.redund_md_raid1.bitmap_chunk_block_cnt|128' ; do
 		spField=${spProbe%%|*}
 		spWant=${spProbe##*|}
@@ -5009,7 +5026,8 @@ faults_validation_battery() { # <the cluster's stored cntlr_interval>
 		--nqn nqn.2014-08.org.nvmexpress.discovery
 
 	# A size must be a positive multiple of slice_cnt x stripe_size
-	# (architecture.md, Thin devices) — here 1 x 64 KiB — because dm-striped
+	# (architecture.md, Thin devices) — here 1 x the default stripe — because
+	# dm-striped
 	# takes equal, chunk-aligned members.
 	# The check is state-dependent, so it runs inside the transaction; the
 	# refusal still lands before the id minter is ever created.
@@ -6453,7 +6471,10 @@ case_restart() {
 
 # CEIL_BLOCK is common.MinDmPoolDataBlockSize, the block that gives a copy the
 # most regions per byte. It is a request value of create-sp, which the gateway
-# accepts or refuses on its own, so it is typed like TD_SIZE.
+# accepts or refuses on its own, so it is typed like TD_SIZE. Its pools name
+# it as their stripe too: one inherits the cluster's stripe otherwise, which
+# is the default block's and does not divide CEIL_BLOCK (architecture.md,
+# Common validation).
 CEIL_BLOCK=65536
 
 # ceil_gwx_out is gwx with the reply kept in CEIL_OUT, for the refusals whose
@@ -6567,7 +6588,7 @@ case_ceiling() {
 	stage 2 "a clone whose metadata one side of its group cannot hold is refused"
 	# -----------------------------------------------------------------
 	gw create-sp --sp spE0 --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 1 \
-		--block-size "$CEIL_BLOCK" --cn-white "$(cn_addr 0),$(cn_addr 1)" \
+		--block-size "$CEIL_BLOCK" --stripe-size "$CEIL_BLOCK" --cn-white "$(cn_addr 0),$(cn_addr 1)" \
 		--dn-white "$(dn_addr 0),$(dn_addr 3)" >/dev/null
 	refresh_rev spE0
 	assert_eq "$(jq_of "$(sp_json spE0)" '[.cntlrs[].addr_port] | sort | @json')" \
@@ -6700,6 +6721,7 @@ case_ceiling() {
 	# DN of its own.
 	gw create-sp --sp spE2 --cntlr-cnt 1 --slice-cnt 1 \
 		--init-ext-cnt "$efill" --block-size "$CEIL_BLOCK" \
+		--stripe-size "$CEIL_BLOCK" \
 		--dn-white "$(dn_addr 0),$(dn_addr 3)" >/dev/null
 	refresh_rev spE2
 	fillSide=$(sp_side_id spE2 data 0 0)

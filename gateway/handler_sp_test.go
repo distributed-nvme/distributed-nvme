@@ -576,7 +576,7 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
 		},
 		DmRaid0Conf: &pb.DmRaid0Conf{
-			StripeSize: common.DefaultDmRaid0StripeSize,
+			StripeSize: model.DefaultStripeSize(common.DefaultDmPoolDataBlockSize),
 		},
 		RedundConf: &pb.RedundConf{
 			RedunKind: &pb.RedundConf_RedundMdRaid1{
@@ -879,7 +879,7 @@ func TestCreateStoragePoolResolvesTheMergedBdevConf(t *testing.T) {
 			DataBlockSize:   1024 * 1024, // 1 MiB
 			LowWaterMarkPct: 50,
 		},
-		DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 64 * 1024},
+		DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 1024 * 1024},
 		RedundConf: &pb.RedundConf{
 			RedunKind: &pb.RedundConf_RedundMdRaid1{
 				RedundMdRaid1: &pb.RedundMdRaid1{BitmapChunkBlockCnt: 128},
@@ -1065,13 +1065,13 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 			"bitmap_chunk_block_cnt",
 		},
 		{
-			"a 512 KiB block under the inherited 1 MiB stripe " +
-				"(the 64 KiB constant would divide it)",
+			"a 512 KiB block under the inherited 1 MiB stripe, " +
+				"the way out named",
 			&pb.BdevConf{
 				DmPoolConf: &pb.DmPoolConf{DataBlockSize: 512 * kib},
 				RedundConf: none,
 			}, 0,
-			"stripe_size",
+			"the stripe_size is the cluster's",
 		},
 		{
 			"one cntlr more than the cluster has CNs",

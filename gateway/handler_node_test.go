@@ -364,7 +364,8 @@ func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 				DataBlockSize:   1024 * 1024, // 1 MiB
 				LowWaterMarkPct: 50,
 			},
-			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 64 * 1024},
+			// The stripe a conf that names none takes is its block.
+			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 1024 * 1024},
 			// redund_conf stays unset: an unset oneof already means
 			// redund_none (architecture.md, Storage pools), and nothing invents a
 			// redundancy kind.

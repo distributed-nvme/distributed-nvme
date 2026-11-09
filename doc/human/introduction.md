@@ -515,17 +515,16 @@ The limits a user must know:
   its first data group on every leg, however small the volume.
 - A host discard frees pool space only where it covers, on every slice, a
   whole aligned block: a thin pool frees whole blocks only and completes a
-  shorter or misaligned discard with success, and the striped device hands
-  each slice its share of the range unsplit, so with a stripe smaller than
-  the block a discard frees a block on one slice only when it covers nearly
-  the slice count times the pool's block size, and an aligned range of that
-  size frees one block on every slice, 2 MiB at the defaults of two slices
-  and a 1 MiB block, while the volume advertises 1 MiB as its discard
-  granularity; `fstrim` can therefore report success and free nothing. These
-  sizes are read from the kernel's
-  source, not measured. A `--stripe-size` equal to the `--block-size` at
-  create, which needs a block of 1 MiB or less, the largest stripe, makes one
-  aligned host block one pool block.
+  shorter or misaligned discard with success. A new cluster's stripe
+  equals its block, 1 MiB at the defaults, so an aligned 1 MiB discard
+  frees one block. A pool has a stripe smaller than its block when it asks
+  for one or for a block above 1 MiB, the largest stripe, or when its
+  cluster stored a smaller stripe, as a cluster keeps the stripe it was
+  created with; then the striped device hands each slice its share of the
+  range unsplit, so a discard frees a block on one slice only when it
+  covers nearly the slice count times the pool's block size, and `fstrim`
+  can report success and free nothing. These sizes are read
+  from the kernel's source, not measured.
 - A mount on a Kubernetes node does not survive the loss of its last path
   past the kernel's reconnect limit of 600 s (measured 615 s with refused
   connects, 809 s with dropped packets), nor a cntlr replacement on a pool

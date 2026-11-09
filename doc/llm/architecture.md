@@ -1901,7 +1901,8 @@ harmless. A migration destination takes its run before it zeroes
   exempts). The list `count` is different: it reaches no create RPC and is
   stored nowhere — the paged list RPCs resolve it per request, cut one page
   with it and throw it away (page_token; `gateway.md` GW4). The bounds and
-  the defaults are constants of `common/constants.go`:
+  the defaults are constants of `common/constants.go`, save the stripe's
+  default, which follows the block:
   * `dn_bin_conf.extent_size`: `MinDnExtSize` to `MaxDnExtSize`, default
     `DefaultDnExtSize`;
   * `alloc_conf.dn_batch_size`: `MinAllocDnBatchSize` to
@@ -1917,8 +1918,15 @@ harmless. A migration destination takes its run before it zeroes
     Automatic reactions **off** (`pb/schema.proto`); the agent then passes
     a zero `low_water_mark` to the thin-pool table — no dm events;
   * `dm_raid0_conf.stripe_size`, a multiple of `MinDmRaid0StripeSize`:
-    `MinDmRaid0StripeSize` to `MaxDmRaid0StripeSize`, default
-    `DefaultDmRaid0StripeSize`;
+    `MinDmRaid0StripeSize` to `MaxDmRaid0StripeSize`, default the conf's
+    `data_block_size`, at most `MaxDmRaid0StripeSize`
+    (`model.DefaultStripeSize`). Reason: a whole aligned block written in
+    one request then reaches one slice's dm-thin unsplit, and dm-thin skips
+    the zero fill of a block one write covers whole ([D15]); and one aligned
+    host block is one pool block for a discard (Known limits). A pool that
+    names a block and no stripe inherits its cluster's stored stripe
+    (Storage pools), so a pool whose block is smaller than that stripe
+    names its stripe too, or is refused;
   * `redund_md_raid1.bitmap_chunk_block_cnt`: `MinChunkBlockCnt` to
     `MaxChunkBlockCnt`, default `DefaultChunkBlockCnt`;
   * the `DmCloneConf` hydration pair, of a clone and of a migration alike:
@@ -6610,7 +6618,8 @@ document and the component documents cite it by its id.
   that can go on with the copy only from what that metadata holds (Clone
   metadata durability). The destination thin pools' maps cannot stand in for
   it: where one block of a slice's thin pool holds parts of several dm-clone
-  regions, as at the default slice count, stripe and block sizes, a copy or a
+  regions, as wherever a pool of more than one slice has a stripe smaller
+  than its block, a copy or a
   host write into one region maps a block that other regions share, so a
   rebuild that read "mapped" as "copied" would mark those regions copied
   without a copy, and they would read the destination's zeros where the source
@@ -6896,6 +6905,16 @@ that component's document and only pointed to here.
   want more queues per path, and a node with many paths fewer; an
   operator who measures sets the flag. A subsystem linked before the cap
   changed keeps its old cap until it is unlinked everywhere or removed.
+* **The default stripe gives hosts large IO hints.** dm-stripe reports the
+  stripe as a device's smallest efficient IO and the stripe times the slice
+  count as its optimal IO, and nvmet passes both to the host, which sets
+  its read-ahead to at least twice the optimal IO and, above 4 MiB, lets
+  one request grow to it. With the stripe equal to a 1 MiB block (Common
+  validation), a pool of 32 slices has hosts read ahead 64 MiB and send
+  commands of up to 32 MiB, each of which nvmet buffers on the controller
+  node; a filesystem maker takes its alignment from the same hints. Read
+  in the kernel's source, not measured; a pool that names a smaller stripe
+  keeps smaller hints.
 * **A CSI volume costs the cluster a pool** (`csi.md`, The volume model).
 * **A RAID1 pool needs as many disk nodes per slice at create as its meta
   and data groups have legs together.** `CreateStoragePool` puts every leg
@@ -7631,9 +7650,9 @@ that component's document and only pointed to here.
   with a `stripe_size` below `data_block_size`, takes a host range of nearly
   the slice count times `data_block_size`, and an aligned range of that size
   frees one block on every slice; `fstrim` can report success and free
-  nothing. A `stripe_size` equal to `data_block_size`, possible for a block
-  no larger than the largest stripe (Common validation), makes one aligned
-  host block one pool block. Read in the kernel's dm-thin and dm-stripe
+  nothing. A `stripe_size` equal to `data_block_size`, the default for a
+  block no larger than the largest stripe (Common validation), makes one
+  aligned host block one pool block. Read in the kernel's dm-thin and dm-stripe
   sources, not in the lab.
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node

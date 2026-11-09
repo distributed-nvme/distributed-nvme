@@ -1120,7 +1120,10 @@ func cmdPing(g *globals, args []string) {
 // stores, the default primary threshold a pool created without one reads,
 // the demotion hold's wait (dnv-worker.md RW22), and the age at which the
 // retire timer deletes a retired leg (dnv-worker.md AR12), which the worker
-// suite's repair case plants a retired leg older than. The
+// suite's repair case plants a retired leg older than. Then the default
+// thin block and the stripe a conf that names none takes with it
+// (model.DefaultStripeSize), which the gateway suite's smoke case pins the
+// stored confs to. The
 // next two are a DN's metadata area (architecture.md, Metadata units): the
 // ceiling of a DN's used units and the unit. The gateway suite's ceiling case
 // fills a DN's area to that ceiling with a migration it sizes in that unit.
@@ -1146,9 +1149,12 @@ func cmdConstants(g *globals, args []string) {
 		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
 
 		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
-		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
-		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
-		"RetiredLegMaxAge":           common.RetiredLegMaxAge,
+		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
+		"DefaultStripeSize": model.DefaultStripeSize(
+			common.DefaultDmPoolDataBlockSize),
+		"DefaultPrimaryUnhealthy": common.DefaultPrimaryUnhealthy,
+		"DemotionHoldTimeout":     common.DemotionHoldTimeout,
+		"RetiredLegMaxAge":        common.RetiredLegMaxAge,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,

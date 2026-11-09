@@ -52,9 +52,10 @@ const (
 	MaxDmPoolDataBlockSize     = 1 * 1024 * 1024 * 1024
 	MinDmPoolDataBlockSize     = 64 * 1024
 	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
-	MaxDmRaid0StripeSize       = 1 * 1024 * 1024
-	MinDmRaid0StripeSize       = 4 * 1024
-	DefaultDmRaid0StripeSize   = 64 * 1024
+	// A stripe left unset is the data block size, at most
+	// MaxDmRaid0StripeSize (model.DefaultStripeSize).
+	MaxDmRaid0StripeSize = 1 * 1024 * 1024
+	MinDmRaid0StripeSize = 4 * 1024
 	// ThinMetaBlockSize is dm-thin's fixed metadata block size: a thin pool
 	// counts its metadata used and total in these blocks, never in its
 	// data_block_size, and a meta group's data region holds data_blocks x

@@ -608,10 +608,10 @@ func TestStoredSpBdevConfZeroIsRefusedByEveryReader(t *testing.T) {
 					ClusterName: env.name,
 					SpName:      sptSpName,
 					TdName:      "sc-td",
-					// slice_cnt 2 x the stored 64 KiB stripe = 128 KiB, and 1
-					// GiB is 8192 of those: a size the rule of architecture.md,
-					// Thin devices, accepts, so the only thing left to refuse it
-					// is the conf.
+					// slice_cnt 2 x the stored 1 MiB stripe = 2 MiB, and 1 GiB
+					// is 512 of those: a size the rule of architecture.md, Thin
+					// devices, accepts, so the only thing left to refuse it is
+					// the conf.
 					Size: 1 << 30,
 				})
 			return err
