@@ -663,8 +663,8 @@ func (d *DiskMeta) ProbeHeader(
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// The lazy load populates the table counts Describe reports. It writes
-	// nothing, so the read a round starts mutates nothing on the node (DN16,
-	// SH29); what it can change is this cache (below).
+	// nothing, so the read a round starts mutates no object of the node
+	// (DN16, SH29); what it can change is this cache (below).
 	if err := d.load(ctx); err != nil {
 		return "", err
 	}

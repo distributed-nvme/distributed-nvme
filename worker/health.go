@@ -684,7 +684,8 @@ func accepted(code uint32) bool {
 
 // dnObservation applies the HL1 table to one CheckDn/SyncupDn reply (HL5:
 // info is the LATEST KNOWN DnInfo, not necessarily this reply's). The ERROR
-// sources are disk_info, meta_info and port_info.
+// sources are disk_info, meta_info, port_info and store_info; an agent that
+// predates the store row sends none, which is no row.
 func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
 	if !accepted(code) {
 		return healthNone, ""
@@ -693,6 +694,7 @@ func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
 		row{"disk_info", info.GetDiskInfo()},
 		row{"meta_info", info.GetMetaInfo()},
 		row{"port_info", info.GetPortInfo()},
+		row{"store_info", info.GetStoreInfo()},
 	); bad {
 		return healthErrorRow, resName
 	}
@@ -700,13 +702,15 @@ func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
 }
 
 // cnObservation applies the HL1 table to one CheckCn/SyncupCn reply. The
-// ERROR source is port_info, the one row a CnInfo carries.
+// ERROR sources are port_info and store_info, the two rows a CnInfo
+// carries; an agent that predates the store row sends none, which is no row.
 func cnObservation(code uint32, info *pb.CnInfo) (healthObs, string) {
 	if !accepted(code) {
 		return healthNone, ""
 	}
 	if resName, bad := firstErrorRow(
 		row{"port_info", info.GetPortInfo()},
+		row{"store_info", info.GetStoreInfo()},
 	); bad {
 		return healthErrorRow, resName
 	}
@@ -724,7 +728,8 @@ func markDnUnknown(info *pb.DnInfo) {
 	if info == nil {
 		return
 	}
-	markUnknown(info.GetDiskInfo(), info.GetMetaInfo(), info.GetPortInfo())
+	markUnknown(info.GetDiskInfo(), info.GetMetaInfo(), info.GetPortInfo(),
+		info.GetStoreInfo())
 	info.DiskCounts = nil
 }
 
@@ -734,7 +739,7 @@ func markCnUnknown(info *pb.CnInfo) {
 	if info == nil {
 		return
 	}
-	markUnknown(info.GetPortInfo())
+	markUnknown(info.GetPortInfo(), info.GetStoreInfo())
 }
 
 // ---------------------------------------------------------------------------

@@ -407,10 +407,12 @@ assert_thin_ok() { # json td slice label
 		"$4 thin[$2][$3]"
 }
 
-# assert_cn_info_ok covers the one base-state resource of CnInfo, the port
-# (architecture.md, Controller node, common; cnagent.md CN5).
+# assert_cn_info_ok covers the two rows of CnInfo: the one base-state
+# resource, the port (architecture.md, Controller node, common; cnagent.md
+# CN5), and the local store (cnagent.md CN28).
 assert_cn_info_ok() { # json label
 	assert_ok "$1" ".cn_info.port_info.status" "$2 port_info"
+	assert_ok "$1" ".cn_info.store_info.status" "$2 store_info"
 }
 
 # assert_all_ok fails on any ResInfo under a reply subtree whose status is not
@@ -3495,7 +3497,7 @@ setup() {
 		out=$(dnctl "$idx" syncup-dn \
 			--revision "${DNREV[$idx]}" --extent-size "$EXTENT_SIZE")
 		local field
-		for field in disk_info meta_info port_info; do
+		for field in disk_info meta_info port_info store_info; do
 			assert_ok "$out" ".dn_info.$field.status" "dn$idx baseline"
 		done
 	done
@@ -3523,7 +3525,7 @@ dn_pointers() { # dnidx sp:leg:side…
 	bump_dn_rev "$idx"
 	out=$(dnctl "$idx" syncup-dn --revision "${DNREV[$idx]}" \
 		--extent-size "$EXTENT_SIZE" "${args[@]}")
-	for field in disk_info meta_info port_info; do
+	for field in disk_info meta_info port_info store_info; do
 		assert_ok "$out" ".dn_info.$field.status" "dn$idx pointers"
 	done
 }
@@ -3634,7 +3636,7 @@ dn_drop() { # dnidx
 	bump_dn_rev "$1"
 	out=$(dnctl "$1" syncup-dn --revision "${DNREV[$1]}" \
 		--extent-size "$EXTENT_SIZE")
-	for field in disk_info meta_info port_info; do
+	for field in disk_info meta_info port_info store_info; do
 		assert_ok "$out" ".dn_info.$field.status" "dn$1 teardown"
 	done
 }
@@ -3680,7 +3682,7 @@ dn_drop_until_clean() { # dnidx secs
 			first=0
 		fi
 		if [ "$code" = 0 ]; then
-			for field in disk_info meta_info port_info; do
+			for field in disk_info meta_info port_info store_info; do
 				assert_ok "$out" ".dn_info.$field.status" "dn$idx teardown"
 			done
 			return 0

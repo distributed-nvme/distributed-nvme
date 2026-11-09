@@ -295,7 +295,7 @@ its info-read commands are plain memory reads.
   first polling with rounds until no leg row reads pending, as a primary's
   legs do until their probers' first round (CN11). The teardown case runs no
   `CheckCntlr` round, since its cntlrs are gone; each of its stages ends with
-  the fresh `CheckCn` round per CN, code zero and the base-state row OK.
+  the fresh `CheckCn` round per CN, code zero and the CN's two rows OK.
 * **Mutation-free.** The mutation reader lists every mutating command, every
   configfs or block write ("os write block" by name) and every discard tried
   ("os discard ranges", one line per range it lists, a range past the
@@ -311,10 +311,10 @@ its info-read commands are plain memory reads.
 
 Setup proves each dn agent by its exact data area and a baseline `SyncupDn`
 (`dnagent.md` DN3, DN5), each cn agent by a `GetCnSize` echoing its capacity
-(`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with its base row OK (CN5).
-Both agents of a VM start with an IO queue cap below the VMs' CPU
-count, so that the cap and not the CPU count sets each path's queues
-(`dnagent.md` CM2, SH32).
+(`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with its base row and its
+store row OK (CN5, CN28). Both agents of a VM start with an IO queue cap below
+the VMs' CPU count, so that the cap and not the CPU count sets each path's
+queues (`dnagent.md` CM2, SH32).
 
 **smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
 a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the

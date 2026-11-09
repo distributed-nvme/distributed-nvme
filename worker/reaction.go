@@ -1794,9 +1794,10 @@ func (w *spWorker) runGrow(
 	blockSize := dataBlockSize(p.state.Conf.GetBdevConf())
 	if growPending(slice, isMeta, usage, blockSize) {
 		// AR6: while pending, no grow of THAT KIND starts. Another kind, and
-		// every other reaction, is untouched — unless the grow waits on a
-		// disk node that died while a side of the new group zeroed, which
-		// only withdrawing the group ends (withdrawTarget).
+		// every other reaction, is untouched — unless the grow waits on a side of
+		// the new group unhealthy on a disk node that carries a health epoch,
+		// dead or with an error row such as its store's, which only withdrawing
+		// the group ends (withdrawTarget).
 		if grp, ok := withdrawTarget(p, slice, isMeta); ok {
 			return w.withdrawGrow(ctx, p, sliceId, isMeta, grp, usage)
 		}
@@ -1895,13 +1896,14 @@ func (w *spWorker) runGrow(
 // epoch in the pass's snapshot, no repair, retired leg, forced-start mark or
 // operator acts on the group, and the primary's report is of an observation
 // made at the snapshot's revision or later. Such a side's disk node died
-// while it zeroed: the side does not provision while that node stays dead,
-// so no cntlr builds the group, the grow stays pending, and no leg repair or
-// operator repair can replace a side of a leg still provisioning. A leg with
-// two sides carries a migration, which owns both sides until its finish or
-// cancel, so its group is left alone. model.WithdrawGrow re-checks inside its
-// STM every condition but the verdict, the side's unhealthy age, the node's
-// epoch and the report's age.
+// while it zeroed, or is live with an error row of its own, such as its
+// store's, beside a side unhealthy for its own reason: the side does not
+// provision while that holds, so no cntlr builds the group, the grow stays
+// pending, and no leg repair or operator repair can replace a side of a leg
+// still provisioning. A leg with two sides carries a migration, which owns
+// both sides until its finish or cancel, so its group is left alone.
+// model.WithdrawGrow re-checks inside its STM every condition but the
+// verdict, the side's unhealthy age, the node's epoch and the report's age.
 func withdrawTarget(
 	p *spPass,
 	slice *pb.Slice,
@@ -1940,8 +1942,8 @@ func withdrawTarget(
 // withdrawGrow runs AR6's withdrawal as the pass's one action (AR2): it ends
 // the pass whatever its outcome, as a grow's op does. The next pass that
 // finds the pool past its mark finds the grow no longer pending and grows
-// again; the dead disk node, whose health epoch withdrawTarget required, has
-// no capacity key and is offered for no new side.
+// again; the disk node, whose health epoch withdrawTarget required, has no
+// capacity key and is offered for no new side.
 func (w *spWorker) withdrawGrow(
 	ctx context.Context,
 	p *spPass,

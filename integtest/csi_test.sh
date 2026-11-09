@@ -1832,12 +1832,14 @@ dn_node_ready() { # <v>
 	ctl_try dn inspect --addr "$(dn_addr "$1")" || return 1
 	[ "$(jq_of "$CTL_OUT" '.dn_info.disk_info.status')" = RES_STATUS_OK ] &&
 		[ "$(jq_of "$CTL_OUT" '.dn_info.meta_info.status')" = RES_STATUS_OK ] &&
-		[ "$(jq_of "$CTL_OUT" '.dn_info.port_info.status')" = RES_STATUS_OK ]
+		[ "$(jq_of "$CTL_OUT" '.dn_info.port_info.status')" = RES_STATUS_OK ] &&
+		[ "$(jq_of "$CTL_OUT" '.dn_info.store_info.status')" = RES_STATUS_OK ]
 }
 
 cn_node_ready() { # <v>
 	ctl_try cn inspect --addr "$(cn_addr "$1")" || return 1
-	[ "$(jq_of "$CTL_OUT" '.cn_info.port_info.status')" = RES_STATUS_OK ]
+	[ "$(jq_of "$CTL_OUT" '.cn_info.port_info.status')" = RES_STATUS_OK ] &&
+		[ "$(jq_of "$CTL_OUT" '.cn_info.store_info.status')" = RES_STATUS_OK ]
 }
 
 ship_one() { # <target> <label> <file…>
@@ -1911,10 +1913,10 @@ dnv_up() {
 			--tr-type tcp --adr-fam ipv4 --tr-addr "${CN_IP[$v]}" --tr-svc-id "$CN_TRSVCID"
 	done
 	for v in "${!DN[@]}"; do
-		wait_until "$WAIT_PROVISION" "dn$v to report disk, header and port OK" dn_node_ready "$v"
+		wait_until "$WAIT_PROVISION" "dn$v to report disk, header, port and store OK" dn_node_ready "$v"
 	done
 	for v in "${!CN[@]}"; do
-		wait_until "$WAIT_PROVISION" "cn$v to report its nvmet port" cn_node_ready "$v"
+		wait_until "$WAIT_PROVISION" "cn$v to report its nvmet port and store OK" cn_node_ready "$v"
 	done
 	log "  the dnv stack serves cluster $CLUSTER ($CLUSTER_ID)"
 }

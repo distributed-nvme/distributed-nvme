@@ -337,21 +337,32 @@ empty.
 
 SH4. The store holds exactly what `architecture.md`, Common agent rules and
 Agent local-store paths, prescribe: the last accepted `Syncup*Request` per
-object, persisted at the point SH5 gives (or the refused one after it
-whose save failed only at the directory sync, SH5), and one file per received
+object, persisted at the point SH5 gives (or the refused one after it whose
+save failed only at the directory sync, SH5), and one file per received
 `Push*BitmapRequest` chunk, all written via `OsClient.WriteProto` (atomic
-replace) at the `Local*Path` locations and read back via `ReadProto`. Both
-run on a ctx carrying the SH15 soft timeout, as the store's listing and `rm`
-do (SH6, SH7): the calls are in-process, so the bound ends only a wait for an
-`OsClient` slot. A save takes its slot under the locks its RPC holds
-(SH10, SH11), and without the bound a save that finds every slot held could
-wait until the RPC's deadline. A save the bound cuts off fails like any
-other: its caller logs it, and a request whose save failed is refused with
-no converge (SH5), while a chunk whose save failed is acked at once (DN15,
+replace) at the `Local*Path` locations and read back via `ReadProto`. The
+probe file of DN18 is written the same way while the store refuses writes,
+and never read. Both calls, `WriteProto` and `ReadProto`, run on a ctx
+carrying the SH15 soft timeout, as the store's listing and `rm` do (SH6,
+SH7): the calls are in-process, so the bound ends only a wait for an
+`OsClient` slot. A save takes its slot under the locks its RPC holds (SH10,
+SH11), and without the bound a save that finds every slot held could wait
+until the RPC's deadline. A save the bound cuts off fails like any other:
+its caller logs it, and a request whose save failed is refused with no
+converge (SH5), while a chunk whose save failed is acked at once (DN15,
 `cnagent.md` CN22); either RPC then returns and releases its locks. The
-store keeps whether its latest save failed, of a request or a chunk,
-whatever its object, until a save succeeds (`Store.SaveFailing`); SH30
-says what a syncup does while it holds.
+store keeps two states over every save, of a request or a chunk, whatever
+its object. The first is whether its latest save failed, until a save
+succeeds (`Store.SaveFailing`); SH30 says what a syncup does while it holds.
+The second is whether the disk refused a save: a save that fails with an
+error of the write itself, such as no space left, a read-only file system or
+an IO error, sets it, with that error; the next save that succeeds clears
+both, and a probe of DN18 that holds clears the second alone (DN18 says when
+it does not); a save its ctx cut off — the bound, the call's deadline or a
+cancel — leaves it as it is (`Store.Refusal`). The node's store row reads
+the second, and a node's read writes a probe file while it holds (DN18).
+Reason: a cut-off save fails on a healthy disk too, so it says nothing of
+the disk.
 
 SH5. Every request, a **parent** request (`SyncupDn`/`SyncupCn`) or an
 **object** request (`SyncupSide`/`SyncupCntlr`), is persisted as soon as
@@ -418,35 +429,37 @@ SH6. Enumeration on startup: one listing of the prefix through
 soft timeout (the store calls the `OsClient` directly, so it applies that
 bound itself); a prefix that is missing, is not a directory or whose listing
 fails in any other way is SH3's fatal case. It filters by the role's
-`Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide` and
-`StoreKindMigrBm` for the dn; `StoreKindCn`, `StoreKindCntlr` and
-`StoreKindCloneBm` for the cn). File names are used only for discovery; the
-ids come from the decoded protos. The committed file is the only truth
+`Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide`,
+`StoreKindMigrBm` and `StoreKindDnProbe` for the dn; `StoreKindCn`,
+`StoreKindCntlr`, `StoreKindCloneBm` and `StoreKindCnProbe` for the cn); the
+probe file of DN18 is never loaded: the enumeration deletes it, and its temp
+files with the others, before anything is loaded, since nothing reads it and
+it holds room the store may need; a failed delete is logged, and the next
+startup tries again. File names are used only for discovery; the ids come
+from the decoded protos. The committed file is the only truth
 (`architecture.md`, Common agent rules): a name of one of those kinds that
 carries `AtomicWriteTmpInfix` is no store file but the temp file of a
-`WriteProto` that did not succeed — one whose
-process died before its rename, for instance; `osclient.md`, ReadFile /
-WriteFile / WriteFileDirect, lists every way one is left behind. The
-enumeration never returns one, so nothing reads it: nothing tells a whole
-one from a half-written one, which can decode with its tail missing, and
-what it holds was never committed (a request whose save fails is refused,
-SH5, and a chunk whose save fails is not applied, DN15, `cnagent.md`
-CN22), so the restarted
-agent reports only what was committed, and the worker sends again
-whatever that lacks. It sorts right after the file it was meant to replace,
-so a reload that decoded it would let it win — and, left on disk, win again
-at every later restart, long after later saves had overtaken it. So the
-enumeration also deletes every such file of the role's kinds, before
-anything is loaded, in one `rm -f` under the same bound as the listing. A
-delete that fails is logged and never fails the reconcile; the next
-startup's enumeration finds the file again. The other role's kinds are left
-alone: a dn and a cn agent may share one prefix (CM2), and the other agent's
-temp file may be a write in flight. A temp file of the role's own kinds
-never is: the enumeration runs before the agent saves anything, and two
-agents of one role must not share a prefix (CM2). The one other listing of
-the store, the dn's format gate (DN5), lists the side files alone
-(`Store.Paths`), returns no temp file and deletes nothing, so it is safe
-beside any save.
+`WriteProto` that did not succeed — one whose process died before its
+rename, for instance; `osclient.md`, ReadFile / WriteFile / WriteFileDirect,
+lists every way one is left behind. The enumeration never returns one, so
+nothing reads it: nothing tells a whole one from a half-written one, which
+can decode with its tail missing, and what it holds was never committed (a
+request whose save fails is refused, SH5, and a chunk whose save fails is
+not applied, DN15, `cnagent.md` CN22), so the restarted agent reports only
+what was committed, and the worker sends again whatever that lacks. It sorts
+right after the file it was meant to replace, so a reload that decoded it
+would let it win — and, left on disk, win again at every later restart, long
+after later saves had overtaken it. So the enumeration also deletes every
+such file of the role's kinds, before anything is loaded, in one `rm -f`
+under the same bound as the listing. A delete that fails is logged and never
+fails the reconcile; the next startup's enumeration finds the file again.
+The other role's kinds are left alone: a dn and a cn agent may share one
+prefix (CM2), and the other agent's temp file may be a write in flight. A
+temp file of the role's own kinds never is: the enumeration runs before the
+agent saves anything, and two agents of one role must not share a prefix
+(CM2). The one other listing of the store, the dn's format gate (DN5), lists
+the side files alone (`Store.Paths`), returns no temp file and deletes
+nothing, so it is safe beside any save.
 
 SH7. When an object's pointer leaves its parent's list, its state is dropped
 **at that moment** and nothing of it is removed from the node yet: its
@@ -827,45 +840,45 @@ safe: gratuitous re-writes of live objects are not no-ops (re-linking a
 live port-to-subsystem link or reloading a live dm table stalls host IO).
 
 SH17. Probing follows these conventions: the probe commands — the dn's are
-`dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`,
-`lsblk` for a device's number, and `ls` of the nvmet configfs tree alone
-(SH18), since it lists sysfs and its local store in its own process
-(`OsClient.ReadDir`) and reads there too a subsystem directory's age and,
-in the port probe, whether its port's directory is there
-(`OsClient.ReadMtime`, SH18), and
-the size of its `--disk`: the number of the device the `--disk` path names
-(`OsClient.ReadDevNo`), then the size sysfs keeps under that number, the
-file `lsblk` reads it from;
-the cn's are `cnagent.md` CN28's, and CN12's `mdadm --examine` and `lsblk`
-of the array node — the walk of
-"/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact
-— the namespace device, controller liveness and ANA state alike (SH20,
+`dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`, `lsblk`
+for a device's number, and `ls` of the nvmet configfs tree alone (SH18),
+since it lists sysfs and its local store in its own process
+(`OsClient.ReadDir`) and reads there too a subsystem directory's age and, in
+the port probe, whether its port's directory is there (`OsClient.ReadMtime`,
+SH18), and the size of its `--disk`: the number of the device the `--disk`
+path names (`OsClient.ReadDevNo`), then the size sysfs keeps under that
+number, the file `lsblk` reads it from; the cn's are `cnagent.md` CN28's,
+and CN12's `mdadm --examine` and `lsblk` of the array node — the walk of
+"/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact —
+the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
 of the disk header for the DN's [D13] metadata. No LVM report is probed
-anywhere ([D14]). Reason for the disk's size: every background read of a
-DN reads it, and a read in the agent's own process costs far less than
-a process, which on a node of many dn agents waits for its turn on the
-CPU. These commands create, change and remove nothing, but a
-status read is not always free of writes. A thin pool's status read
-carries the `--noflush` flag, which makes the kernel skip the commit of the
-pool's metadata it otherwise makes first. Reason: once its metadata has
-changed since the pool device was set up, a thin pool's commit flushes its
-data device first, which reaches every leg the pool sits on, so in a
-migration gap a read that committed would wait on the leg with no usable
-path while the cn agent's read or converge that made it holds its cntlr lock
-(`cnagent.md` CN1; `architecture.md`, Known limits). With the flag the
-counts are the open transaction's: a data block freed since dm-thin's last
-commit already counts free, and a metadata block freed since then counts
-used until the next commit, so the thin-pool auto-grow (`dnv-worker.md`
-AR6) grows metadata at most a little earlier than the committed counts
-would, and data no differently. A read with the flag still takes the
-pool's metadata lock for reading, so it waits behind a commit already
-running on that pool, and on that commit's IO. A dm-clone's
-status read carries no flag: unless the device is suspended, the kernel
-first commits the clone's metadata, which flushes the clone's destination
-once that metadata has changed, and a probe that reads it waits on that
-IO. Probe reads MUST tolerate padded or normalized read-back; compare
-canonically, never byte-wise:
+anywhere ([D14]). Reason for the disk's size: every background read of a DN
+reads it, and a read in the agent's own process costs far less than a
+process, which on a node of many dn agents waits for its turn on the CPU.
+These commands create, change and remove nothing; the one file a read writes
+itself is the store's probe file while the store refuses writes, which the
+read removes once the write holds (DN18), a file of the agent's own store
+and no object of the node. And a status read is not always free of writes. A
+thin pool's status read carries the `--noflush` flag, which makes the kernel
+skip the commit of the pool's metadata it otherwise makes first. Reason:
+once its metadata has changed since the pool device was set up, a thin
+pool's commit flushes its data device first, which reaches every leg the
+pool sits on, so in a migration gap a read that committed would wait on the
+leg with no usable path while the cn agent's read or converge that made it
+holds its cntlr lock (`cnagent.md` CN1; `architecture.md`, Known limits).
+With the flag the counts are the open transaction's: a data block freed
+since dm-thin's last commit already counts free, and a metadata block freed
+since then counts used until the next commit, so the thin-pool auto-grow
+(`dnv-worker.md` AR6) grows metadata at most a little earlier than the
+committed counts would, and data no differently. A read with the flag still
+takes the pool's metadata lock for reading, so it waits behind a commit
+already running on that pool, and on that commit's IO. A dm-clone's status
+read carries no flag: unless the device is suspended, the kernel first
+commits the clone's metadata, which flushes the clone's destination once
+that metadata has changed, and a probe that reads it waits on that IO. Probe
+reads MUST tolerate padded or normalized read-back; compare canonically,
+never byte-wise:
 
 * "attr_serial" reads back space-padded — compare trimmed.
 * "device_uuid" and "device_nguid" read back **dash-separated and
@@ -1230,25 +1243,26 @@ starting, such a read would end only between two re-sends, none would
 while a read takes longer than that, and the observations of sides and
 cntlrs with no fault would go too old (`dnv-worker.md` HL7).
 
-While the store's latest save failed, of a request or a chunk, whatever
-its object (`Store.SaveFailing`, SH4), a syncup that marks its object as
-it arrives marks that object alone and cancels no read, its own object's
-included, whatever its revision: a node-level syncup marks no node. It
-then waits for its locks behind the reads that hold them, each of which
-runs bounded commands (SH13): a `SyncupSide` or `SyncupCntlr` behind its
-object's read, a node-level syncup behind every read that holds the node
-read lock when it asks for it, as one at the held revision does (above).
-A syncup a gate refuses as it arrives still marks nothing. The first save
-that succeeds ends the state. Reason: the worker re-sends a request
-refused for a failed save round after round (SH5), as it re-sends one a
-gate refuses, and nothing knows before the save that the request will be
-refused; a cancel on each re-send would stop the reads of every round
-that brings one, so the observations of objects with no fault would go
-too old (`dnv-worker.md` HL7) and their health epochs would go on and
-off. The state is the outcome of the latest save, not a reading of the
-disk: a save that fails because its call was cancelled or the SH4 bound
-ran out sets it on a healthy disk as a full or read-only one does. It
-records no work owed and starts no retry.
+While the store's latest save failed, of a request or a chunk, whatever its
+object (`Store.SaveFailing`, SH4), a syncup that marks its object as it
+arrives marks that object alone and cancels no read, its own object's
+included, whatever its revision: a node-level syncup marks no node. It then
+waits for its locks behind the reads that hold them, each of which runs
+bounded commands (SH13): a `SyncupSide` or `SyncupCntlr` behind its object's
+read, a node-level syncup behind every read that holds the node read lock
+when it asks for it, as one at the held revision does (above). A syncup a
+gate refuses as it arrives still marks nothing. The first save that succeeds
+ends the state; the probe of DN18 leaves it as it is. Reason: the worker
+re-sends a request refused for a failed save round after round (SH5), as it
+re-sends one a gate refuses, and nothing knows before the save that the
+request will be refused; a cancel on each re-send would stop the reads of
+every round that brings one, so the observations of objects with no fault
+would go too old (`dnv-worker.md` HL7) and their health epochs would go on
+and off. The state is the outcome of the latest save, not a reading of the
+disk: a save that fails because its call was cancelled or the SH4 bound ran
+out sets it on a healthy disk as a full or read-only one does. It records no
+work owed and starts no retry. The second state of SH4, which only the store
+row and its probe read (DN18), plays no part here.
 
 A background converge attempt (DN12, DN13; `cnagent.md` CN10, CN18) marks
 its object before it waits for the object's lock and cancels nothing. The
@@ -1597,6 +1611,8 @@ keeps the request it held, and none of DN5 to DN7 runs.
 DN5. Converge the once-per-DN base state of `architecture.md`, Disk node,
 probe-first (SH16), building `DnInfo` as it goes:
 
+* report the store row (DN18): OK here, since the converge runs only after
+  its own save held, or at startup before any save;
 * read the `--disk` device's size (SH17) — to report `disk_info`, to
   give the disk counts of DN18 their total, and to hand the allocator the
   raw size, the one input the disk format itself does not carry (the
@@ -3185,20 +3201,22 @@ comes from the DN, nor a side whose stored request DN8's side conf gate
 refuses, which converges and sweeps nothing for the same reason.
 
 A read never creates, changes or removes an object of the node, though one
-that reads a migration destination's dm-clone status makes the kernel
-commit the clone's metadata (SH17); a check round and an info read change
-nothing at all, save that a round starts a read. In particular a read
-never allocates a record and never registers a DN9 zeroing goroutine
-(registration happens only on a converge path), and it reports
-`RES_STATUS_MISSING` for a side whose record the converge has not written
-yet. That holds for the verdict too: it enumerates and compares, and
-removes nothing. What a read does change is the agent's own account of
-what it observed: the object's observation (SH28), the SH14 tracker, the
-disk size the allocator reads, and `DiskMeta`'s copy of the volume table,
-which a disk read that answers loads (that disk read can be the one that
-confirms the identity, DN5) and which a header other than the one it came
-from drops (DN18), so the converges, reads and DN9 goroutines that follow
-re-read the disk.
+that reads a migration destination's dm-clone status makes the kernel commit
+the clone's metadata (SH17); a check round and an info read change nothing
+at all, save that a round starts a read. In particular a read never
+allocates a record and never registers a DN9 zeroing goroutine (registration
+happens only on a converge path), and it reports `RES_STATUS_MISSING` for a
+side whose record the converge has not written yet. That holds for the
+verdict too: it enumerates and compares, and removes nothing. What a read
+does change is the agent's own account of what it observed: the object's
+observation (SH28), the SH14 tracker, the disk size the allocator reads, and
+`DiskMeta`'s copy of the volume table, which a disk read that answers loads
+(that disk read can be the one that confirms the identity, DN5) and which a
+header other than the one it came from drops (DN18), so the converges, reads
+and DN9 goroutines that follow re-read the disk. While the store refuses
+writes, the DN's read also writes the store's probe file and removes it once
+the write holds, and a probe that holds clears the store's second state
+(DN18 says when it does not).
 
 ### `CheckDn` / `CheckSide`
 
@@ -3278,6 +3296,33 @@ needed, and the worker never turns one into an `err_epoch`
   answer is an `ERROR` naming it; the `SyncupDn` converge's own check reads
   them loosely (`Nvmet.ProbePort`). What of the port the DN's verdict names
   is SH31's.
+* `DnInfo.store_info`, the store row, named by the `--local-store`
+  directory: the local store's second state of SH4 (`Store.Refusal`) —
+  `RES_STATUS_ERROR`, with the latest refused write's error, from a save the
+  disk refused until a later save or probe holds, and `RES_STATUS_OK`
+  otherwise; no reason. Both channels fill it. The `SyncupDn` converge's row
+  always reads OK, since the converge runs only after its own save held, or
+  at startup before any save (DN5). While the second state holds, the
+  background read first writes the probe file, `LocalDnProbePath`, the one
+  file a read writes itself (SH17): random bytes, at least as many as the
+  refused save tried to write, through the store's own write and under its
+  bound (SH4). A probe that holds clears the second state alone, so the row
+  reads OK in that same read, with no syncup, while the first state waits
+  for a save of a request or a chunk (SH30), and then removes the file, so
+  that it keeps none of the room it proved; one that began before a newer
+  refused save clears nothing; a refused one keeps the state and gives the
+  row its error, and once the row reads ERROR a refused probe leaves its
+  epoch where it is. A removal that fails leaves the file until the next
+  startup deletes it (SH6). A read writes no probe file while the second
+  state is clear. Reason: a chunk whose save failed is acked, and the worker
+  pushes it again only after a later accepted syncup of its side (DN15;
+  `dnv-worker.md` BM2), which a quiet node does not get, so without the
+  probe the row of a quiet node would read the refusal, with an old error,
+  until the next save of anything, and the worker would offer the node for
+  no new side for that long; and the bytes are random, since a file system
+  that compresses or shares blocks stores zeros in next to no room. The row
+  is the node's alone: a side's refused save marks the node and no side;
+  what the worker does with it is `dnv-worker.md` HL1's.
 * `SideInfo.side_dev_info`, named `DnSideName`: the volume-table record —
   its runs, `zero_bytes` and `zeroed_bytes` — and the live table, judged by
   the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned` false
@@ -3671,27 +3716,38 @@ else reported through `agent_reply` is still a protocol-level refusal.
   failing, and a read's verdict names the side as one nothing zeroes, so
   the worker re-sends its `SyncupSide` on the rounds that answer a read's
   observation (DN16).
-* While a node's store disk refuses writes, full or read-only, every
-  request the gates admit is refused for its failed save (SH5), so every
-  change of that node's desired state stalls until a save holds again: a
-  failover's fence or primary flip, a migration's cutover or finish and a
-  cntlr's promotion stall with it, and so does a removal, such as a pool
-  delete's. So does every re-converge a syncup at the held revision would
-  bring, such as a leftover's sweep (DN17) or the start of a side's zeroing
-  that nothing runs (DN16); only the converges no syncup brings still run —
-  the background converge attempts (SH11) and a restart's reconcile (DN2).
-  Apart from one narrow case on a CN, during an ownership change of a
-  pool (`cnagent.md`, Known limits), nothing is lost on either role: the
-  node serves on as the requests it accepted left it, and md's
-  arbitration keeps a group from two writers (`architecture.md`,
-  Failover). On a CN, what a `SyncupCntlr` refused for
-  its failed save does to the forced-start marks and thin-id sweeps of the
-  request the agent holds for that cntlr is `cnagent.md` CN8; what that
-  costs is `cnagent.md`, Known limits. The worker sends each refused
-  change again every round, with no backoff
-  (SH5), each a failed save and no converge; each such syncup waits for
-  the reads in flight rather than cancel them (SH30). A rejection neither
-  sets nor clears a health epoch (`dnv-worker.md` HL1), so the fault
-  shows in the logs: the agent's record of each failed save, and the
-  worker's record of each rejection, on each round that re-sends the
-  refused request (SH5; `dnv-worker.md`, Log records).
+* While a node's store disk refuses writes, full or read-only, every request
+  the gates admit is refused for its failed save (SH5), so every change of
+  that node's desired state stalls until a save holds again: a failover's
+  fence or primary flip, a migration's cutover or finish and a cntlr's
+  promotion stall with it, and so does a removal, such as a pool delete's.
+  So does every re-converge a syncup at the held revision would bring, such
+  as a leftover's sweep (DN17) or the start of a side's zeroing that nothing
+  runs (DN16); only the converges no syncup brings still run — the
+  background converge attempts (SH11) and a restart's reconcile (DN2). Apart
+  from one narrow case on a CN, during an ownership change of a pool
+  (`cnagent.md`, Known limits), nothing is lost on either role: the node
+  serves on as the requests it accepted left it, and md's arbitration keeps
+  a group from two writers (`architecture.md`, Failover). On a CN, what a
+  `SyncupCntlr` refused for its failed save does to the forced-start marks
+  and thin-id sweeps of the request the agent holds for that cntlr is
+  `cnagent.md` CN8; what that costs is `cnagent.md`, Known limits. The
+  worker sends each refused change again every round, with no backoff (SH5),
+  each a failed save and no converge; each such syncup waits for the reads
+  in flight rather than cancel them (SH30). A rejection neither sets nor
+  clears a health epoch (`dnv-worker.md` HL1); the node's store row does
+  (DN18), from the first save the disk refuses, with the effects
+  `dnv-worker.md` HL1 gives it. The fault also shows in the logs: the
+  agent's record of each failed save, and the worker's record of each
+  rejection, on each round that re-sends the refused request (SH5;
+  `dnv-worker.md`, Log records).
+* A store disk that fills, or turns read-only, while nothing is saved is
+  offered for new sides and cntlrs until a save is refused: the store row
+  reads the saves, the probe of DN18 runs only once one was refused, and no
+  save runs on a quiet node whose rounds answer code zero. The first request
+  refused marks the node, and that one object waits on the node until the
+  disk takes writes again. A store with room for small saves only can read
+  OK while a larger request is refused: a smaller save that holds clears the
+  refusal, and the row reads ERROR again only once the larger request's next
+  re-send is refused. A restart forgets the refusal, so the row reads OK
+  until a save of the new process is refused.

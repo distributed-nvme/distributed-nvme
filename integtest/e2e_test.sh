@@ -8206,7 +8206,7 @@ ctl_create_try() { # <args…>
 }
 
 # dn_node_ready is setup step 5's "the dn-worker has formatted the disk" poll.
-# All three DnInfo rows are checked, not just disk_info, because each proves a
+# All four DnInfo rows are checked, not just disk_info, because each proves a
 # different thing, as probeDn (agent/dnagent/probe.go) builds them:
 #   disk_info  the agent can measure --disk at all
 #   meta_info  ProbeHeader accepted the 4 KiB header for THIS cluster_id,
@@ -8215,6 +8215,8 @@ ctl_create_try() { # <args…>
 #              read) found ports/<--nvmet-port-id> carrying the four
 #              addr_* attributes this agent was launched with AND the three
 #              fixed ANA groups in their fixed states (probePort (agent/nvmet.go))
+#   store_info the local store has refused no write since the agent started,
+#              or a later save or probe held (agent.Store.Row)
 # A dn_info of `null` (the agent has never been told about this dn) reads as
 # null through jq and simply is not RES_STATUS_OK, so the poll keeps going.
 dn_node_ready() { # <v> <k>
@@ -8223,17 +8225,19 @@ dn_node_ready() { # <v> <k>
 	fi
 	[ "$(jq_of "$CTL_OUT" '.dn_info.disk_info.status')" = RES_STATUS_OK ] &&
 		[ "$(jq_of "$CTL_OUT" '.dn_info.meta_info.status')" = RES_STATUS_OK ] &&
-		[ "$(jq_of "$CTL_OUT" '.dn_info.port_info.status')" = RES_STATUS_OK ]
+		[ "$(jq_of "$CTL_OUT" '.dn_info.port_info.status')" = RES_STATUS_OK ] &&
+		[ "$(jq_of "$CTL_OUT" '.dn_info.store_info.status')" = RES_STATUS_OK ]
 }
 
-# cn_node_ready is the CN twin. CnInfo's one row is the base state of
-# architecture.md, Controller node, common: the nvmet port
+# cn_node_ready is the CN twin. CnInfo's two rows: the nvmet port, the base
+# state of architecture.md, Controller node, common, and the local store
 # (probeCn (agent/cnagent/syncup_cn.go)).
 cn_node_ready() { # <v>
 	if ! ctl_try cn inspect --addr "$(cn_addr "$1")"; then
 		return 1
 	fi
-	[ "$(jq_of "$CTL_OUT" '.cn_info.port_info.status')" = RES_STATUS_OK ]
+	[ "$(jq_of "$CTL_OUT" '.cn_info.port_info.status')" = RES_STATUS_OK ] &&
+		[ "$(jq_of "$CTL_OUT" '.cn_info.store_info.status')" = RES_STATUS_OK ]
 }
 
 # sp_sides_provisioned is setup step 7's first wait. It reports progress when
@@ -8981,7 +8985,7 @@ setup_register_nodes() {
 	for v in "${!DN[@]}"; do
 		for ((k = 0; k < DNS_PER_VM; k++)); do
 			wait_until "$WAIT_PROVISION" \
-				"dn$v instance $k at $(dn_addr "$v" "$k") to report disk, header and port all OK" \
+				"dn$v instance $k at $(dn_addr "$v" "$k") to report disk, header, port and store all OK" \
 				dn_node_ready "$v" "$k"
 			# wait_until ran its predicate in THIS shell and returned on the
 			# call that succeeded, so $CTL_OUT is that instance's reply.
@@ -9000,7 +9004,7 @@ setup_register_nodes() {
 	done
 	for v in "${!CN[@]}"; do
 		wait_until "$WAIT_PROVISION" \
-			"cn$v ($(cn_addr "$v")) to report its nvmet port" \
+			"cn$v ($(cn_addr "$v")) to report its nvmet port and store OK" \
 			cn_node_ready "$v"
 		assert_field "$CTL_OUT" '.cn_info.port_info.res_name' "$CN_PORT_ID" \
 			"cn$v converged nvmet port $CN_PORT_ID (no --nvmet-port-id, so the default)"
@@ -17640,7 +17644,7 @@ react_drop_dn_port() { # <v> <k>
 react_return_dn() { # <v> <k>
 	start_dn_instance "$1" "$2"
 	wait_until "$WAIT_PROVISION" \
-		"dn$1 instance $2 to report disk, header and port OK again" \
+		"dn$1 instance $2 to report disk, header, port and store OK again" \
 		dn_node_ready "$1" "$2"
 	assert_field "$CTL_OUT" '.dn_info.port_info.res_name' \
 		"$(dn_port_id "$2")" \

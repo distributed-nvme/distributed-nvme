@@ -230,7 +230,7 @@ assert_cn_ok() {
 
 assert_dn_info_ok() {
 	local json=$1 label=$2 field
-	for field in disk_info meta_info port_info; do
+	for field in disk_info meta_info port_info store_info; do
 		assert_ok "$json" ".dn_info.$field.status" "$label"
 	done
 }
@@ -4035,7 +4035,9 @@ case_restart() {
 # until a write fails. dn2 and vm2 take no part. Every request the case
 # expects refused for its save is sent at a revision above the one the agent
 # holds for its object, so the stale-revision gate cannot be what refuses it,
-# and assert_save_refused reads the failed save in the reply's details.
+# and assert_save_refused reads the failed save in the reply's details. The
+# node's store row reads the refusal, and with the fill removed a read's probe
+# turns it OK with no request sent (dnagent.md DN18).
 
 # stop_agent <idx> stops one VM's agent gracefully (dnagent.md SH27) and fails
 # the stage when it outlives the wait: a survivor keeps the endpoint, so the
@@ -4059,6 +4061,21 @@ assert_save_refused() {
 	esac
 }
 
+# assert_store_row <json> <status> <label> holds the node's store row
+# (dnagent.md DN18): its status and, for an error row, the full tmpfs's
+# error in its details.
+assert_store_row() {
+	local details
+	assert_eq "$(jq_of "$1" '.dn_info.store_info.status // "ABSENT"')" "$2" \
+		"$3: the store row's status"
+	[ "$2" = RES_STATUS_ERROR ] || return 0
+	details=$(jq_of "$1" '.dn_info.store_info.details // ""')
+	case "$details" in
+	*"no space left on device"*) ;;
+	*) die "$3: the store row's details name no full store: $details" ;;
+	esac
+}
+
 # store_snapshot <dir> <pre|post> <dnidx> <sp> <aleg> <aside> <bleg> <bside>
 # writes the case's three snapshots across its restart, each a fresh round
 # with the info: the disk node and its two sides.
@@ -4078,7 +4095,9 @@ case_store_full() {
 	# The disk counts as in the zeroing case (dnagent.md DN18).
 	local counts='.dn_info.disk_counts | "\(.total_ext_cnt // "0") \(.free_ext_cnt // "0") \(.side_rec_cnt // "0") \(.side_recs_match // false)"'
 	# As the restart case's: epochs and the reply's stamp differ by nature.
-	local norm='del(.obs_stamp) | walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
+	# The store row too: a restart forgets the refusal until a save fails
+	# again (dnagent.md, Known limits), so it is checked on its own.
+	local norm='del(.obs_stamp) | del(.dn_info.store_info) | walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
 	local out got sums res provrev arev brev refrev bnqn name when snap muts
 	bnqn=$(side_to_cn_nqn "$CLUSTER" "$sp" "$bleg" "$cn")
 	snap=$(mktemp -d)
@@ -4134,6 +4153,13 @@ case_store_full() {
 	out=$(ctl "$dn" check-dn --revision "$refrev")
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$dn]}" \
 		"the check round after the refused SyncupDn"
+	# A fresh round's read finds the store refusing: the store row reads
+	# the error, and the read's probe of the full store fails too
+	# (dnagent.md DN18).
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+	assert_store_row "$out" RES_STATUS_ERROR "the read after the refused SyncupDn"
+	assert_eq "$(helper "$dn" store_sums)" "$sums" \
+		"dn$dn's store files after the read's probe"
 
 	stage unknown "side B's SyncupSide is an unknown object, and nothing of B is built"
 	bump_rev "$dn"
@@ -4160,6 +4186,18 @@ case_store_full() {
 	stage freed "with the fill removed, the refused SyncupDn sent again is accepted"
 	assert_eq "$(helper "$dn" store_unfill)" room \
 		"dn$dn's local store with the fill removed"
+	# With no request sent, a read's probe finds room and turns the store
+	# row OK (dnagent.md DN18); a few rounds a second apart bound it.
+	local tries=0
+	while :; do
+		out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+		[ "$(jq_of "$out" '.dn_info.store_info.status // "ABSENT"')" = \
+			RES_STATUS_OK ] && break
+		tries=$((tries + 1))
+		[ "$tries" -lt 5 ] ||
+			assert_store_row "$out" RES_STATUS_OK "the reads with the fill removed"
+		sleep 1
+	done
 	# The same request at its own revision, as a worker's next round sends a
 	# refused one again while the desired state stays the same (dnv-worker.md
 	# RW4, RW5): still above the revision the agent holds, though side B's
@@ -4237,6 +4275,10 @@ case_store_full() {
 		"$arev" "side A's revision after the restart"
 	assert_eq "$("$JQ" -r '.revision // "0"' "$snap/side_b.post.raw")" \
 		"$brev" "side B's revision after the restart"
+	assert_store_row "$(cat "$snap/dn.pre.raw")" RES_STATUS_ERROR \
+		"the read before the restart"
+	assert_store_row "$(cat "$snap/dn.post.raw")" RES_STATUS_OK \
+		"the read after the restart, which no save has refused yet"
 	assert_eq "$(helper "$dn" "residue $(hex16 "$sp")" | sort)" "$res" \
 		"what dn$dn holds of sp $sp after the restart"
 	# The new log covers the startup reconcile and the post snapshot's reads.

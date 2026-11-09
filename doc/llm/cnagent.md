@@ -287,36 +287,36 @@ disconnect registry, and under its locks the pass only probes the connection.
 
 ### Startup reconcile
 
-CN2. Enumerate the store (`dnagent.md` SH6) for the cn's three store kinds —
+CN2. Enumerate the store (`dnagent.md` SH6) for the cn's four store kinds —
 `StoreKindCn`, the CN request file; `StoreKindCntlr`, the cntlr request
-file; `StoreKindCloneBm`, the clone bitmap chunk file — and load every CN
-and cntlr request into memory first, saving the cntlr files skipped with
-their CN (below). Then reload every chunk into the owning cntlr's
-`CloneChunkSet` (`dnagent.md` SH21), keyed
-by the `(src_slice_idx, bm_idx)` pair the chunk is addressed by — before
-any converge runs, so that a dm-clone the converge (re)builds re-applies
-in the same pass every chunk the node already holds (CN18 step 4). Owner
-and address come out of the file's content: the file is a persisted
-`PushCloneBitmapRequest`, and its `cluster_id`, `cn_id` and
-`cntlr_pointer`, its `clone_id` and its `src_slice_idx` and `bm_idx` are
-what the reload reads. The name carries the same pair (Names and
-constants in `common`), but only as an address — nothing here parses it.
-A file that
-does not decode is logged and skipped; a skipped file is deliberately not
-an orphan and is not deleted — a decode failure says nothing about who
-owns it, so nothing here may conclude the owner is gone. The reload
-reads a store file an older build wrote as it reads any other, since an
-upgrade keeps the store (`architecture.md`, Upgrade in lockstep). Loading
-the chunks after the converges would lose none of them — a chunk in memory is
-advertised as applied by the next reply's `chunk_id_list` (CN20), so the
-worker's diff (`dnv-worker.md` BM2) would not push it again — but their discards would
-then wait for the next event that re-applies the whole set: a create of
-that dm-clone, a converge reload of its table onto a changed length,
-devno or region size (step 4 runs on both — the converge treats a reload
-exactly as a create), a build that finds the dm-clone with hydration off
-(step 4 runs then too), or another chunk's own push (CN22), each of which
-lands only while no ns-dev maps the dm-clone (`osclient.md`,
-DiscardRanges). Until then the clone re-copies regions it never needed to.
+file; `StoreKindCloneBm`, the clone bitmap chunk file; `StoreKindCnProbe`,
+the probe file of CN28, which the enumeration deletes and never loads — and
+load every CN and cntlr request into memory first, saving the cntlr files
+skipped with their CN (below). Then reload every chunk into the owning
+cntlr's `CloneChunkSet` (`dnagent.md` SH21), keyed by the `(src_slice_idx,
+bm_idx)` pair the chunk is addressed by — before any converge runs, so that
+a dm-clone the converge (re)builds re-applies in the same pass every chunk
+the node already holds (CN18 step 4). Owner and address come out of the
+file's content: the file is a persisted `PushCloneBitmapRequest`, and its
+`cluster_id`, `cn_id` and `cntlr_pointer`, its `clone_id` and its
+`src_slice_idx` and `bm_idx` are what the reload reads. The name carries the
+same pair (Names and constants in `common`), but only as an address —
+nothing here parses it. A file that does not decode is logged and skipped; a
+skipped file is deliberately not an orphan and is not deleted — a decode
+failure says nothing about who owns it, so nothing here may conclude the
+owner is gone. The reload reads a store file an older build wrote as it
+reads any other, since an upgrade keeps the store (`architecture.md`,
+Upgrade in lockstep). Loading the chunks after the converges would lose none
+of them — a chunk in memory is advertised as applied by the next reply's
+`chunk_id_list` (CN20), so the worker's diff (`dnv-worker.md` BM2) would not
+push it again — but their discards would then wait for the next event that
+re-applies the whole set: a create of that dm-clone, a converge reload of
+its table onto a changed length, devno or region size (step 4 runs on both —
+the converge treats a reload exactly as a create), a build that finds the
+dm-clone with hydration off (step 4 runs then too), or another chunk's own
+push (CN22), each of which lands only while no ns-dev maps the dm-clone
+(`osclient.md`, DiscardRanges). Until then the clone re-copies regions it
+never needed to.
 
 A decoded chunk file whose cntlr is not among the loaded cntlr
 requests, or whose `clone_id` is absent from that cntlr's stored
@@ -436,15 +436,16 @@ logging only. No locks, no store, no OS access. This RPC has no
 CN4. Gate the revision (`dnagent.md` SH8) against the stored `SyncupCnRequest`.
 
 CN5. Converge the once-per-CN base state of `architecture.md`, Controller
-node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it
-goes. The base state is the agent's one nvmet port: `EnsurePort`
-(`dnagent.md` SH19: the agent's `--nvmet-port-id` port, default
-`NvmetPortId`, from the transport flags plus the three fixed ANA groups),
-whose outcome is `port_info`. CN host-facing namespaces only ever use the
-optimized and the inaccessible group — the non-optimized group exists on
-every port (`architecture.md`, [D4]) but no cn code path assigns it. The
-CN keeps no clone's metadata: a clone's dm-clone keeps it on the clone's
-clone meta group, on DNs (CN18; `architecture.md`, [D14]).
+node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes.
+The base state is the agent's one nvmet port: `EnsurePort` (`dnagent.md`
+SH19: the agent's `--nvmet-port-id` port, default `NvmetPortId`, from the
+transport flags plus the three fixed ANA groups), whose outcome is
+`port_info`. `CnInfo` also carries the node's store row, `store_info`, as
+`dnagent.md` DN18 gives it (CN28). CN host-facing namespaces only ever use
+the optimized and the inaccessible group — the non-optimized group exists on
+every port (`architecture.md`, [D4]) but no cn code path assigns it. The CN
+keeps no clone's metadata: a clone's dm-clone keeps it on the clone's clone
+meta group, on DNs (CN18; `architecture.md`, [D14]).
 
 CN6. QoS is accepted, persisted and not applied: the agent persists
 `qos_ratio` with the request (`dnagent.md` SH5 does that for free),
@@ -3715,10 +3716,16 @@ The rows, each with its `res_name` and what its probe checks:
   (so on a node running several agents the rows differ): the configfs
   transport attributes match the transport flags; the three groups of
   `architecture.md`, [D4], are present with their fixed states. It is the
-  one row `CnInfo` carries: the CN holds no clone's metadata
+  one base-state row `CnInfo` carries: the CN holds no clone's metadata
   (`architecture.md`, [D14]), and a clone's metadata health is its clone
   meta group's rows (`grp_id_to_md_raid`, `leg_id_to_leg`) and its
   dm-clone's metadata mode (`clone_id_to_dm_clone`).
+* `CnInfo.store_info`, the store row, named by the `--local-store`
+  directory: the agent's local store, as `dnagent.md` DN18 gives
+  `DnInfo.store_info`, on both channels, the `SyncupCn` converge and the
+  CN's read; the probe file the CN's read writes while the store refuses
+  writes, the one file a read writes itself, is `LocalCnProbePath`. A
+  cntlr's refused save marks the node and no cntlr.
 * `ss_id_to_subsystem`, named by the subsystem NQN: configfs: present,
   "attr_allow_any_host" "0" (one found with it set reports
   `RES_STATUS_ERROR`), cntlid range, serial and model (trimmed,
@@ -3974,47 +3981,45 @@ once the new leg's own leg row reads `OK` (CN30), so while that row does
 not read `OK` a converge reports a refusal that a read leaves empty.
 
 CN29. Error capture (`architecture.md`, Common agent rules): a failed
-command marks that resource `RES_STATUS_ERROR` with the command output
-in its details and the converge pass continues with the remaining
-resources. Two things qualify that. The details are for people: where
-the worker must tell one cause of a row's status from another, the row
-says so in its reason (`architecture.md`, Live-state reporting), never in
-the text. The cn agent sets three reasons: CN14's lost thin id, from the
-command wrapper's typed error (`dnagent.md`, OS wrappers — `dm.go`,
-`nvmet.go`, `nvmehost.go`); and, from its own pass's state, CN19's level,
-from the level the pass's plan reads, and CN18's source fault, which
-marks the clone rows this node keeps missing because it does not read the
-clone's source as ready, from step 1's reading of the source. And a
-clone's two rows take their status from CN18's shared rule, from the live
-state, on a converge and a read alike, a failed command's output joining
-their details. Probes create, change and remove nothing — the
-metadata-snapshot reserve runs only inside `dumpThinMetadata` (the CN25
-bitmap reads and CN14's sweeps of a pool's thin ids — the activation
-sweep and the sweep after a failed delete), never from `probe.go` —
-though a status read of a dm-clone makes the kernel commit the clone's
-metadata, where a thin pool's commits nothing (`dnagent.md` SH17).
-`RES_STATUS_PROVISIONING` is never produced by this path: it is assigned
-by the CN9 gate, not by a failed command; and `RES_STATUS_PENDING` is
-produced by the CN11 registry alone, never by a failed command. The
-group row's probe opens no md member device: it is CN12's sysfs read, so
-a dead member of an array that keeps another in-sync member does not
-turn the row `ERROR` — it reads `OK`, with degraded once md has failed
-the member (an IO to it that errors does, and so does CN12's
+command marks that resource `RES_STATUS_ERROR` with the command output in
+its details and the converge pass continues with the remaining resources.
+Two things qualify that. The details are for people: where the worker must
+tell one cause of a row's status from another, the row says so in its reason
+(`architecture.md`, Live-state reporting), never in the text. The cn agent
+sets three reasons: CN14's lost thin id, from the command wrapper's typed
+error (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`); and,
+from its own pass's state, CN19's level, from the level the pass's plan
+reads, and CN18's source fault, which marks the clone rows this node keeps
+missing because it does not read the clone's source as ready, from step 1's
+reading of the source. And a clone's two rows take their status from CN18's
+shared rule, from the live state, on a converge and a read alike, a failed
+command's output joining their details. Probes create, change and remove no
+object of the node — the one file the CN's read writes itself is the store's
+probe file (the store row above) — the metadata-snapshot reserve runs only
+inside `dumpThinMetadata` (the CN25 bitmap reads and CN14's sweeps of a
+pool's thin ids — the activation sweep and the sweep after a failed delete),
+never from `probe.go` — though a status read of a dm-clone makes the kernel
+commit the clone's metadata, where a thin pool's commits nothing
+(`dnagent.md` SH17). `RES_STATUS_PROVISIONING` is never produced by this
+path: it is assigned by the CN9 gate, not by a failed command; and
+`RES_STATUS_PENDING` is produced by the CN11 registry alone, never by a
+failed command. The group row's probe opens no md member device: it is
+CN12's sysfs read, so a dead member of an array that keeps another in-sync
+member does not turn the row `ERROR` — it reads `OK`, with degraded once md
+has failed the member (an IO to it that errors does, and so does CN12's
 reconciliation failing it out as an extra or as a repair's bad leg; until
 then the dead member does not count in "degraded"), and the fault is its leg
-row's, from the CN11 prober's own IO, until the leg can take the member
-back beside a copy source, when the verdict names it (CN30) and the
-converge puts it back
-(CN12), unless it is an open repair's bad leg, which stays out while its
-repair is open. While CN12's in-sync guard holds over the array, the row reads
-`ERROR` instead, and the member is neither named nor put back (CN28,
-CN30). md does not fail the last in-sync
-member of a mirror (dnv never sets md's fail-last-device option): an
-error it charges to that member — a failed superblock or bitmap write,
-which array writes bring, is one — marks the array broken instead. The
-array then refuses every write for as long as it runs, its "array_state"
-reads broken wherever it would read clean, and CN28 reports that as
-`ERROR`.
+row's, from the CN11 prober's own IO, until the leg can take the member back
+beside a copy source, when the verdict names it (CN30) and the converge puts
+it back (CN12), unless it is an open repair's bad leg, which stays out while
+its repair is open. While CN12's in-sync guard holds over the array, the row
+reads `ERROR` instead, and the member is neither named nor put back (CN28,
+CN30). md does not fail the last in-sync member of a mirror (dnv never sets
+md's fail-last-device option): an error it charges to that member — a failed
+superblock or bitmap write, which array writes bring, is one — marks the
+array broken instead. The array then refuses every write for as long as it
+runs, its "array_state" reads broken wherever it would read clean, and CN28
+reports that as `ERROR`.
 
 Two kinds of thing travel in `agent_reply` rather than in the rows:
 protocol failures (the CN8 gates, CN22's), and leftovers — the one

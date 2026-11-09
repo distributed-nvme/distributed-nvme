@@ -279,12 +279,12 @@ whole 1 GiB extents.
 It prints `"free_ext_cnt":"9"` and `"total_ext_cnt":"9"`.
 
 Check: the worker has made each node follow its record. The agent's own
-report shows every row OK: on a disk node the disk, the disk node's header on
-it with its record of which extents each side holds, and the nvmet port, three
-rows; on the controller node the port, one
-row. The
-worker reaches a new node within a few seconds, and until then the count
-is 0. Repeat until the counts are 3, 3, 3, 3 and 1.
+report shows every row OK: on a disk node the disk, the disk node's header
+on it with its record of which extents each side holds, the nvmet port and
+the agent's local files, four rows; on the controller node the port and the
+agent's local files, two rows. The worker reaches a new node within a few
+seconds, and until then the count is 0. Repeat until the counts are 4, 4, 4,
+4 and 2.
 
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn inspect --addr 127.0.0.1:29900 | grep -o RES_STATUS_OK | wc -l

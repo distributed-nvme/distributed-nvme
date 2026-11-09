@@ -25,10 +25,11 @@ import (
 // ---------------------------------------------------------------------------
 
 // TestHealthDnTable walks the HL1 table for a DN: an ERROR row in disk_info,
-// meta_info or port_info sets; a clean reply clears; PROVISIONING and MISSING
-// never set, and a reply with them and no ERROR row is a clean one; a
-// rejection code neither sets nor clears. The disk counts are no row:
-// whatever they say, the rows alone decide.
+// meta_info, port_info or store_info sets, and an absent store row is no row;
+// a clean reply clears; PROVISIONING and MISSING never set, and a reply with
+// them and no ERROR row is a clean one; a rejection code neither sets nor
+// clears. The disk counts are no row: whatever they say, the rows alone
+// decide.
 func TestHealthDnTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -77,6 +78,29 @@ func TestHealthDnTable(t *testing.T) {
 			},
 			want:    healthErrorRow,
 			wantRes: "port",
+		},
+		{
+			// The local store refuses writes (dnagent.md DN18): the node
+			// gets no new side, and no side is marked.
+			name: "store error",
+			info: &pb.DnInfo{
+				DiskInfo:  resOk("disk"),
+				MetaInfo:  resOk("meta"),
+				PortInfo:  resOk("port"),
+				StoreInfo: resErr("/var/lib/dnv", "no space left on device"),
+			},
+			want:    healthErrorRow,
+			wantRes: "/var/lib/dnv",
+		},
+		{
+			// An agent that predates the store row sends none.
+			name: "no store row: a clean round",
+			info: &pb.DnInfo{
+				DiskInfo: resOk("disk"),
+				MetaInfo: resOk("meta"),
+				PortInfo: resOk("port"),
+			},
+			want: healthClean,
 		},
 		{
 			// PROVISIONING and MISSING are not ERROR rows, so the round is
@@ -133,8 +157,8 @@ func TestHealthDnTable(t *testing.T) {
 	}
 }
 
-// TestHealthCnTable walks the HL1 table for a CN: port_info is the ERROR
-// source.
+// TestHealthCnTable walks the HL1 table for a CN: port_info and store_info
+// are the ERROR sources.
 func TestHealthCnTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -153,6 +177,31 @@ func TestHealthCnTable(t *testing.T) {
 			info:    &pb.CnInfo{PortInfo: resErr("port", "x")},
 			want:    healthErrorRow,
 			wantRes: "port",
+		},
+		{
+			// The local store refuses writes (cnagent.md CN28): the node
+			// gets no new cntlr, and no cntlr is marked.
+			name: "store error",
+			info: &pb.CnInfo{
+				PortInfo:  resOk("port"),
+				StoreInfo: resErr("/var/lib/dnv", "no space left on device"),
+			},
+			want:    healthErrorRow,
+			wantRes: "/var/lib/dnv",
+		},
+		{
+			name: "store ok",
+			info: &pb.CnInfo{
+				PortInfo:  resOk("port"),
+				StoreInfo: resOk("/var/lib/dnv"),
+			},
+			want: healthClean,
+		},
+		{
+			// An agent that predates the store row sends none.
+			name: "no store row: a clean round",
+			info: &pb.CnInfo{PortInfo: resOk("port")},
+			want: healthClean,
 		},
 		{
 			name: "provisioning is not an ERROR row: a clean round",
@@ -1445,6 +1494,17 @@ func TestHealthMarkUnknownClearsStaleErrors(t *testing.T) {
 	markCnUnknown(cn)
 	if obs, _ := cnObservation(0, cn); obs != healthClean {
 		t.Fatalf("cn obs after markUnknown = %v", obs)
+	}
+	// The store rows go unknown too (dnagent.md DN18, cnagent.md CN28).
+	dnStore := &pb.DnInfo{StoreInfo: resErr("/var/lib/dnv", "full")}
+	markDnUnknown(dnStore)
+	if obs, _ := dnObservation(0, dnStore); obs != healthClean {
+		t.Fatalf("dn store obs after markUnknown = %v, want clean", obs)
+	}
+	cnStore := &pb.CnInfo{StoreInfo: resErr("/var/lib/dnv", "full")}
+	markCnUnknown(cnStore)
+	if obs, _ := cnObservation(0, cnStore); obs != healthClean {
+		t.Fatalf("cn store obs after markUnknown = %v, want clean", obs)
 	}
 	side := &pb.SideInfo{
 		SideDevInfo:   resErr("side", "x"),

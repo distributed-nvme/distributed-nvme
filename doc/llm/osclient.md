@@ -374,7 +374,8 @@ the method set is exactly the following, each taking the caller's ctx:
 * These are the methods the agents use for the `Local*Path` files
   (`architecture.md`, Agent local-store paths and Common agent rules): per
   object, the last `Syncup*Request` saved for it — `dnagent.md` SH5 says
-  when — and the received `Push*BitmapRequest` chunks.
+  when — and the received `Push*BitmapRequest` chunks; `WriteProto` also
+  writes the store's probe file (`dnagent.md` DN18).
 
 ### ReadBlock / WriteBlock
 

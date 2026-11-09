@@ -1535,48 +1535,46 @@ RW4. **Round**, every interval (RW9):
 RW5. **Syncup.** Build the request from the current inputs (RW13 to RW16),
 send under `DefaultWorkerSyncupTimeout` with a trace id (RW10). An ACCEPTED
 reply — code zero, or `ReplyCodeLeftover` below — has its `*Info` processed
-(Health bookkeeping), its `bm_info` or `bm_info_list` diffed (Bitmap
-pushes) and its sp flips run (RW18, RW19). A REJECTED one
-(`ReplyCodeStaleRevision`, `ReplyCodeUnknownObject`, `ReplyCodeInvalidConf`,
-`ReplyCodeSaveFailed`, and any other non-zero code — below) is logged as
-`syncup rejected` (`code`, `details`) and left to the next round: unknown
-object means the
-parent syncup has not landed yet — an sp worker's `SyncupSide` reaching the
-DN before the dn worker's `SyncupDn` listed the side, say, which is normal
+(Health bookkeeping), its `bm_info` or `bm_info_list` diffed (Bitmap pushes)
+and its sp flips run (RW18, RW19). A REJECTED one (`ReplyCodeStaleRevision`,
+`ReplyCodeUnknownObject`, `ReplyCodeInvalidConf`, `ReplyCodeSaveFailed`, and
+any other non-zero code — below) is logged as `syncup rejected` (`code`,
+`details`) and left to the next round: unknown object means the parent
+syncup has not landed yet — an sp worker's `SyncupSide` reaching the DN
+before the dn worker's `SyncupDn` listed the side, say, which is normal
 since the roles are independent (VW10) — and stale revision means the agent
 holds a revision newer than this worker's, which an overlap of two owners
 (VW7) causes for a while — for longer when the lagging owner's revision
 watch has stopped being served — and which only an etcd restore causes for
 good (`architecture.md`, etcd backup and restore); it is logged at Error.
-Invalid
-conf means the agent found a value the control plane cannot have written —
-a proto3 zero where `architecture.md`, Common validation, requires a
-concrete value, or a side's length to zero
-outside the bounds of the dn agent's side conf gate (`dnagent.md` DN8) —
-and converged nothing (`dnagent.md`, Names and constants in `common`).
-`SyncupDn`, `SyncupSide` and `SyncupCntlr` can return it, and the same
-values are checked on this side first — `extent_size` by RW9's gate, the
-SP's `bdev_conf` and every group's length to zero by RW14's — so a
-request this worker sends should never provoke it. From a live agent, a
-`ReplyCodeInvalidConf` to `SyncupDn` or `SyncupCntlr` means the agent's
-copy of those rules and `model`'s have drifted apart (`dnagent.md`, Shared
-mechanism — package `agent`); one to `SyncupSide` means a stored group
-whose block counts claim more than its extents hold, the one bound the dn
-agent checks and RW14 does not, since checking it needs the extent size.
-A failed save (`ReplyCodeSaveFailed`) means the agent could not save the
-request to its local store and so refused it (`dnagent.md` SH5): the
-request did not become the agent's desired state and nothing was
-converged, and the reply carries the revision the agent still holds for
-the object, zero when it holds none. The agent answers the object's rounds
-from what it still holds (`dnagent.md` SH28), so a request at a revision
-the agent does not hold, or for an object it does not hold, is re-issued
-by each round (RW4 step 5) until a save succeeds, and one at the held
-revision by each round that answers a non-zero code. The main cause is a
-local store on a full or read-only disk, an operator event; a save that
-the agent's soft timeout cut off is another (`dnagent.md` SH4). It is
-logged at Error: a rejection neither sets nor clears a health epoch
-(HL1, HL2), so this record is where the worker's log shows the fault,
-once for each refused `Syncup*`.
+Invalid conf means the agent found a value the control plane cannot have
+written — a proto3 zero where `architecture.md`, Common validation, requires
+a concrete value, or a side's length to zero outside the bounds of the dn
+agent's side conf gate (`dnagent.md` DN8) — and converged nothing
+(`dnagent.md`, Names and constants in `common`). `SyncupDn`, `SyncupSide`
+and `SyncupCntlr` can return it, and the same values are checked on this
+side first — `extent_size` by RW9's gate, the SP's `bdev_conf` and every
+group's length to zero by RW14's — so a request this worker sends should
+never provoke it. From a live agent, a `ReplyCodeInvalidConf` to `SyncupDn`
+or `SyncupCntlr` means the agent's copy of those rules and `model`'s have
+drifted apart (`dnagent.md`, Shared mechanism — package `agent`); one to
+`SyncupSide` means a stored group whose block counts claim more than its
+extents hold, the one bound the dn agent checks and RW14 does not, since
+checking it needs the extent size. A failed save (`ReplyCodeSaveFailed`)
+means the agent could not save the request to its local store and so refused
+it (`dnagent.md` SH5): the request did not become the agent's desired state
+and nothing was converged, and the reply carries the revision the agent
+still holds for the object, zero when it holds none. The agent answers the
+object's rounds from what it still holds (`dnagent.md` SH28), so a request
+at a revision the agent does not hold, or for an object it does not hold, is
+re-issued by each round (RW4 step 5) until a save succeeds, and one at the
+held revision by each round that answers a non-zero code. The main cause is
+a local store on a full or read-only disk, an operator event; a save that
+the agent's soft timeout cut off is another (`dnagent.md` SH4). It is logged
+at Error: a rejection neither sets nor clears a health epoch (HL1, HL2), so
+this record is where the worker's log shows the fault, once for each refused
+`Syncup*`; the node's store row shows the disk's refusal as the node's
+health epoch (HL1; `dnagent.md` DN18).
 
 `ReplyCodeLeftover` is the one non-zero code that is **not** a rejection:
 the request was applied — the desired state is stored and the converge
@@ -2385,8 +2383,13 @@ missed round on `DnConf.err_epoch` or `CnConf.err_epoch`:
   `RES_STATUS_UNKNOWN` (what the worker records itself while the stream is
   dead, `architecture.md`, Live-state reporting — never written to etcd);
 * any `RES_STATUS_ERROR` row in `DnInfo` (`disk_info`, `meta_info`,
-  `port_info`) or `CnInfo` (`port_info`), save on a round that answers from
-  an observation no round asked for (below): set to now if zero;
+  `port_info`, `store_info`) or `CnInfo` (`port_info`, `store_info`), save
+  on a round that answers from an observation no round asked for (below):
+  set to now if zero; the store row's error marks the node alone, so a node
+  whose local store refuses writes gets no new side or cntlr, and no
+  failover, leg repair or cntlr replacement starts from it; it alone
+  withdraws no stuck grow, though it completes AR6's condition for a side
+  unhealthy on that node for a reason of its own (AR6; `dnagent.md` DN18);
 * a clean round — a reply in time from an observation that is not too old
   and that a round asked for (HL7), an accepted code (zero or
   `ReplyCodeLeftover`), no `ERROR` row in the latest known info: cleared to
@@ -3390,34 +3393,38 @@ and, for data, not covered, since the covered test comes first and logs
 `model.GrpListFull`, and ends the pass, as its in-STM `grow_pending` does
 (AR2).
 
-**The withdrawal of a stuck grow.** A grow whose new group holds a leg
-that never provisions stays pending for good: no cntlr builds a group with
-a leg whose every side is still not provisioned (`cnagent.md` CN9), so the
-pool's total never moves, and neither leg repair nor an operator's repair
-can replace a side of such a leg, since both need the leg's health epoch,
-which a provisioning leg never gets (HL2). The pass withdraws a grow when
-three things hold. The grow: it is pending, and the primary's report is of
-an observation made at the snapshot's revision or later. The group: it is
-the newest group of the grow's kind, with one side per leg, and with no
-repair, retired leg, forced-start mark or operator in charge. The side: one
-of the group's sides is not `provisioned`, has been unhealthy for
-`side_unhealthy` with this coordinator's own unhealthy verdict on it
-(AR10), and sits on a disk node whose record carries a health epoch in the
-pass's snapshot. Together these say that the side's disk node died while
-the side zeroed. The pass then runs `WithdrawGrow` (MD6) as its one
-action, with the pool total the primary reported. The op takes
-the group off the tail of its list, whichever grow added it, and gives its
-extents back to the disk nodes and the CNs; the group never held data,
-since no array was built from it. A leg with two sides carries a migration,
-which owns both sides until its finish or its cancel (`architecture.md`,
-Migrations), so its group is never withdrawn. The next pass that finds the
-pool past its mark grows again, the grow no longer pending, and the dead
-disk node, whose health epoch the trigger required, has no capacity key
-while that epoch stands, so it is offered for no new side. A disk node can also come back first: when
-it does so before a pass finds both its side unhealthy past the threshold
-and the node itself unhealthy, it finishes the zeroing, and the grow
-completes by itself (`architecture.md`, GrowSlice). The trigger is part of auto-grow, so it
-runs only while the pool's usage of that kind is past its mark.
+**The withdrawal of a stuck grow.** A grow whose new group holds a leg that
+never provisions stays pending for good: no cntlr builds a group with a leg
+whose every side is still not provisioned (`cnagent.md` CN9), so the pool's
+total never moves, and neither leg repair nor an operator's repair can
+replace a side of such a leg, since both need the leg's health epoch, which
+a provisioning leg never gets (HL2). The pass withdraws a grow when three
+things hold. The grow: it is pending, and the primary's report is of an
+observation made at the snapshot's revision or later. The group: it is the
+newest group of the grow's kind, with one side per leg, and with no repair,
+retired leg, forced-start mark or operator in charge. The side: one of the
+group's sides is not `provisioned`, has been unhealthy for `side_unhealthy`
+with this coordinator's own unhealthy verdict on it (AR10), and sits on a
+disk node whose record carries a health epoch in the pass's snapshot.
+Together these say that the side's disk node died while the side zeroed, or
+that a live disk node with an error row of its own — a store that refuses
+writes (`dnagent.md` DN18), or a disk, header or port fault — holds a side
+unhealthy for a reason of its own, such as a zeroing that fails; the grow is
+withdrawn either way. A refused save sets no side's epoch, so the store row
+alone withdraws no grow. The pass then runs `WithdrawGrow` (MD6) as its one
+action, with the pool total the primary reported. The op takes the group off
+the tail of its list, whichever grow added it, and gives its extents back to
+the disk nodes and the CNs; the group never held data, since no array was
+built from it. A leg with two sides carries a migration, which owns both
+sides until its finish or its cancel (`architecture.md`, Migrations), so its
+group is never withdrawn. The next pass that finds the pool past its mark
+grows again, the grow no longer pending, and the disk node, whose health
+epoch the trigger required, has no capacity key while that epoch stands, so
+it is offered for no new side. A disk node can also come back first: when it
+does so before a pass finds both its side unhealthy past the threshold and
+the node itself unhealthy, it finishes the zeroing, and the grow completes
+by itself (`architecture.md`, GrowSlice). The trigger is part of auto-grow,
+so it runs only while the pool's usage of that kind is past its mark.
 
 ### Cntlr replacement
 
@@ -3784,35 +3791,32 @@ read them as they read a slice's.
 AR9. **The worker never**: deletes a td, subsystem, transfer or migration,
 or a clone that is not `deleting`; touches a `RedundNone` leg, save the
 withdrawal of a stuck grow (AR6), whose group no array was ever built from;
-acts on a
-suppressed SP; starts a migration; creates, finishes, cancels or tries to
-abort an operator's repair (`architecture.md`, Repair); or runs two
-reactions in one pass. The repairs it does create, finish, cancel and try
-to abort are its own (AR8).
-Every automatic action re-homes redundancy or roles, grows a pool, or
-withdraws a grow that waits on a dead disk node, giving back what its group took
-(`architecture.md`, Automatic reactions; AR6). It does delete the implicit children — cntlrs,
+acts on a suppressed SP; starts a migration; creates, finishes, cancels or
+tries to abort an operator's repair (`architecture.md`, Repair); or runs two
+reactions in one pass. The repairs it does create, finish, cancel and try to
+abort are its own (AR8). Every automatic action re-homes redundancy or
+roles, grows a pool, or withdraws a grow that waits on a disk node that
+carries a health epoch, giving back what its group took (`architecture.md`,
+Automatic reactions; AR6). It does delete the implicit children — cntlrs,
 repairs, retired legs, slices, groups, legs, sides — of an SP a
 `DeleteStoragePool` has LATCHED, which is the sp drain and not a reaction
-(the five-empty-lists precondition that let it be latched means it holds
-no td, subsystem, clone, transfer or migration), and it does delete a
-`Clone` a
+(the five-empty-lists precondition that let it be latched means it holds no
+td, subsystem, clone, transfer or migration), and it does delete a `Clone` a
 `DeleteClone` has LATCHED — its chunk keys in batches, then the record
 together with its `clone_name_list` entry, its clone meta group and that
 group's repair and retired legs, all their sides going back to their DNs —
-which is the clone drain and not a reaction (CLD8, CLD9). And it deletes
-a grown group no array was ever built from, its sides going back to their
-DNs, which is auto-grow's withdrawal of a stuck grow (AR6): the group
-holds no data, and nothing else ends its grow while its disk node stays
-dead. Both drains
-finish a deletion a user began with the latch and neither ever starts one;
-the list above is what no reaction touches. Beside the drains, the retire
-timer deletes a retired leg that has aged on a whole group: a retired leg
-is no leg, the timer is no reaction, and the data of the leg it deletes is
-held twice elsewhere (AR12). The finish of the worker's own repair at the
+which is the clone drain and not a reaction (CLD8, CLD9). And it deletes a
+grown group no array was ever built from, its sides going back to their DNs,
+which is auto-grow's withdrawal of a stuck grow (AR6): the group holds no
+data, and nothing else ends its grow while its disk node stays dead. Both
+drains finish a deletion a user began with the latch and neither ever starts
+one; the list above is what no reaction touches. Beside the drains, the
+retire timer deletes a retired leg that has aged on a whole group: a retired
+leg is no leg, the timer is no reaction, and the data of the leg it deletes
+is held twice elsewhere (AR12). The finish of the worker's own repair at the
 retired-leg bound gives back the group's oldest retired leg in its own
-transaction, a copy older than the newest one the group keeps beside the
-leg md holds in sync (AR8; `architecture.md`, Repairs), and its cancel gives
+transaction, a copy older than the newest one the group keeps beside the leg
+md holds in sync (AR8; `architecture.md`, Repairs), and its cancel gives
 back only its fresh new leg's side, which the array does not use, since the
 primary confirms an abort only once md holds nothing on that leg
 (`architecture.md`, Repair).
@@ -5112,21 +5116,21 @@ which no suite case sets, so no suite case runs RW13's count compare.
   falls against the peers' commit of it dead is CM3's.
 
 * **A stuck grow waits while another hold stands on it.** Auto-grow
-  withdraws a grown group whose provisioning side's disk node died (AR6)
-  only while no repair, retired leg, forced-start mark, operator in charge
-  or migration acts on the group, only once the side's health epoch is
-  `side_unhealthy` old with the coordinator's own unhealthy verdict on it
-  and its disk node carries a health epoch of its own, only on a primary's
-  report of the snapshot's revision or later, and only while the pool is
-  past its mark, which a `low_water_mark_pct` above 100 never is: until
-  then the grow stays pending, no grow of that kind runs on the slice, and the group keeps its
-  extents on the disk nodes and its share of every CN's budget. A side
-  whose disk node answers its rounds, one that zeroes very slowly or fails
-  its zeroing on a node that passes its own rounds, is never withdrawn,
-  and its grow waits for the zeroing. An operator's `GrowSlice` stacked on
-  top of the stuck group is a later group of the list, so the stuck one is
-  not the newest any more and is not withdrawn while that later group
-  stands.
+  withdraws a grown group whose provisioning side is unhealthy on a disk
+  node that carries a health epoch (AR6) only while no repair, retired leg,
+  forced-start mark, operator in charge or migration acts on the group, only
+  once the side's health epoch is `side_unhealthy` old with the
+  coordinator's own unhealthy verdict on it and its disk node carries a
+  health epoch of its own, only on a primary's report of the snapshot's
+  revision or later, and only while the pool is past its mark, which a
+  `low_water_mark_pct` above 100 never is: until then the grow stays
+  pending, no grow of that kind runs on the slice, and the group keeps its
+  extents on the disk nodes and its share of every CN's budget. A side whose
+  disk node passes its own rounds, one that zeroes very slowly or fails its
+  zeroing there, is never withdrawn, and its grow waits for the zeroing. An
+  operator's `GrowSlice` stacked on top of the stuck group is a later group
+  of the list, so the stuck one is not the newest any more and is not
+  withdrawn while that later group stands.
 
 * **A pool with a lost record waits for an operator.** When a record that a
   list of a live pool names is missing from etcd, the sp role sends the pool no new request and its pass runs

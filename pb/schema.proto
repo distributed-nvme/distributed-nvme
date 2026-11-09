@@ -339,6 +339,16 @@ message DnInfo {
     ResInfo port_info = 3;
     // Appended, never renumbered.
     DiskCounts disk_counts = 4;
+    // The agent's local store (dnagent.md SH4, DN18): RES_STATUS_ERROR, with
+    // the latest refused write's error, from a save the disk refused until a
+    // later save or probe holds; RES_STATUS_OK otherwise. Filled on both
+    // channels. An agent that predates the row sends none, which the worker
+    // reads as no row.
+    ResInfo store_info = 6;
+    // Retired with its number, never reused: a field renumbered onto it
+    // would decode an older agent's row as itself, silently.
+    reserved 5;
+    reserved "migr_vg_info";
 }
 
 message CnInfo {
@@ -349,6 +359,8 @@ message CnInfo {
     reserved 2, 3, 4;
     reserved "tmpfs_info", "tmp_file_info", "loop_dev_info";
     reserved 5;  // retired, never reused: a field renumbered onto it would decode silently
+    // The agent's local store, as DnInfo.store_info says (cnagent.md CN28).
+    ResInfo store_info = 6;
 }
 
 message SideInfo {

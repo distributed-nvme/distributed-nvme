@@ -10,10 +10,12 @@ import (
 )
 
 // The probe map of DN18. No function here creates, changes or removes an
-// object of the node, as the background read behind the check rounds must
-// not (DN16, SH29); reading a migration destination's dm-clone status still
-// makes the kernel commit the clone's metadata (SH17). What a probe can
-// change is the agent's own view of the disk (probeDn). A migration
+// object of the node, as the background read behind the check rounds must not
+// (DN16, SH29); reading a migration destination's dm-clone status still makes
+// the kernel commit the clone's metadata (SH17). What a probe can change is
+// the agent's own view of the disk (probeDn), and the one file a read writes
+// itself is the store's probe file, while the store refuses writes, which the
+// read removes once the write holds (agent.Store.Probe, DN18). A migration
 // destination's two rows, and where its per-CN rows are judged to serve from,
 // come from the rule its converge applies to what it reads (migrDstSeen,
 // DN13).
@@ -33,6 +35,14 @@ func (s *DnAgentServer) probeDn(
 	// (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
 	info := &pb.DnInfo{}
+
+	// While the store refuses writes, every read saves the probe file
+	// (agent.Store.Probe): a probe that holds turns the store row OK in this
+	// same read, and a refused one gives the row its error. A healthy store
+	// is not written.
+	_ = s.store.Probe(ctx,
+		s.nf.LocalDnProbePath(req.GetClusterId(), req.GetDnId()))
+	info.StoreInfo = s.store.Row(t)
 
 	size, err := s.dm.DiskSize(ctx, s.disk)
 	info.DiskInfo = t.FromErr(resKeyDisk, s.disk, "", err)

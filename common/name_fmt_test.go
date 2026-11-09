@@ -319,6 +319,12 @@ func TestLocalStorePaths(t *testing.T) {
 	checkName(t, "LocalCloneBmPath",
 		nf.LocalCloneBmPath(testCluster, testCn, testSp, testClone, 0x07, 0x0a),
 		"/var/lib/dnv/clone-bm-"+c+"-0000000000000005-0000000000000011-0000000000000041-07-0a")
+	// The probe files have kinds of their own, which no other kind starts
+	// with (agent.StoreKindDnProbe, agent.StoreKindCnProbe).
+	checkName(t, "LocalDnProbePath", nf.LocalDnProbePath(testCluster, testDn),
+		"/var/lib/dnv/probe-dn-"+c+"-0000000000000003")
+	checkName(t, "LocalCnProbePath", nf.LocalCnProbePath(testCluster, testCn),
+		"/var/lib/dnv/probe-cn-"+c+"-0000000000000005")
 
 	// --local-store overrides the prefix (architecture.md, Components:
 	// invocation reference).

@@ -30,10 +30,19 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	s.locks.Node().Lock()
 	defer s.locks.Node().Unlock()
 
-	files, err := s.store.List(ctx,
-		agent.StoreKindCn, agent.StoreKindCntlr, agent.StoreKindCloneBm)
+	// The probe kind is listed so that List removes an interrupted probe
+	// write, and a probe file whose removal a probe did not get to goes too:
+	// nothing reads it, and it holds room the store may need (CN28).
+	files, err := s.store.List(ctx, agent.StoreKindCn, agent.StoreKindCntlr,
+		agent.StoreKindCloneBm, agent.StoreKindCnProbe)
 	if err != nil {
 		return err
+	}
+	if probes := files[agent.StoreKindCnProbe]; len(probes) > 0 {
+		if err := s.store.Remove(ctx, probes...); err != nil {
+			slog.ErrorContext(ctx, agent.MsgProbeRemoveFailed,
+				slog.String("error", err.Error()))
+		}
 	}
 
 	// unreadCn is set when a cn-* file did not load. Such a file names no CN
@@ -288,7 +297,12 @@ func (s *CnAgentServer) convergeCn(
 	// A row made after the call is cut off moves no epoch, through a view of
 	// its own, as the CN's read writes (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
-	return &pb.CnInfo{PortInfo: s.ensurePort(ctx, t)}
+	// The store row (CN28): after a SyncupCn whose save held it reads OK,
+	// and at startup the store has refused no write yet.
+	return &pb.CnInfo{
+		StoreInfo: s.store.Row(t),
+		PortInfo:  s.ensurePort(ctx, t),
+	}
 }
 
 // ensurePort converges this agent's single nvmet port — s.port.PortId, the
@@ -423,6 +437,14 @@ func (s *CnAgentServer) probeCn(
 	// (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
 	info := &pb.CnInfo{}
+	// While the store refuses writes, every read saves the probe file
+	// (agent.Store.Probe): a probe that holds turns the store row OK in this
+	// same read, and a refused one gives the row its error. A healthy store
+	// is not written.
+	req := st.loadReq()
+	_ = s.store.Probe(ctx,
+		s.nf.LocalCnProbePath(req.GetClusterId(), req.GetCnId()))
+	info.StoreInfo = s.store.Row(t)
 	var redrive []agent.BaseRedrive
 	portName := fmt.Sprintf("%d", s.port.PortId)
 	portState, details, err := s.nvmet.ProbePortState(

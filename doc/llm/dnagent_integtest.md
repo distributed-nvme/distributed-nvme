@@ -324,28 +324,34 @@ configfs write (SH16, SH17, DN5, DN9); and a revision below the one those
 re-sends stored is refused as stale in a normal reply (SH8, SH9, DN4).
 
 **store_full** proves on a real local store that a request whose save fails is
-refused and that a restart keeps what the agent accepted (`dnagent.md` SH4 to
-SH6, DN2, DN8). One node's agent runs over a small tmpfs that holds a copy of
-its local store, so it holds what it held before, and one file fills the tmpfs
+refused, that the node's store row reads the refusal until a probe holds, and
+that a restart keeps what the agent accepted (`dnagent.md` SH4 to SH6, DN2,
+DN8, DN18). One node's agent runs over a small tmpfs that holds a copy of its
+local store, so it holds what it held before, and one file fills the tmpfs
 until a write fails. Every request the case expects refused for its save
 carries a revision above the one the agent holds for its object, so the
-stale-revision gate cannot be what refuses it, and the reply's details name
-the failed save. A disk node request that adds a side is refused with
-`common.ReplyCodeSaveFailed` at the held revision, the store's files keep
-their bytes and no temp file stays; the side's own syncup is an unknown
-object, and nothing of the side is built, by the next round's revision, the
-disk counts of a read made after the refusal (DN18) and the kernel's listings.
-With the file removed, the refused request sent again at its own revision, as
-a worker's next round sends it while the desired state stays the same
-(`dnv-worker.md` RW4, RW5), is accepted, and the side provisions through the
-flip. Filled again, a side request and a disk node request that drops a side
-are refused alike, and the node keeps every device and export of the pool. The
-agent then restarts over the full store: fresh rounds before and after the
-restart agree as in the restart case, at the revisions of the last accepted
-requests, the node's devices and exports are the same, and the new log holds
-no mutating command. Once the pool is torn down, the agent goes back to its
-disk store, holding the last request it accepted. The other node takes no
-part.
+stale-revision gate cannot be what refuses it, and the reply's details name the
+failed save. A disk node request that adds a side is refused with
+`common.ReplyCodeSaveFailed` at the held revision, the store's files keep their
+bytes and no temp file stays; the side's own syncup is an unknown object, and
+nothing of the side is built, by the next round's revision, the disk counts of
+a read made after the refusal (DN18) and the kernel's listings. A fresh round
+after the refusal reads the node's store row in error, with the full store's
+error, and its read's refused probe leaves the store's files as they were; with
+the file removed, fresh rounds alone, with no request sent, read the row OK
+within a few seconds, which proves the probe (DN18). Then the refused request
+sent again at its own revision, as a worker's next round sends it while the
+desired state stays the same (`dnv-worker.md` RW4, RW5), is accepted, and the
+side provisions through the flip. Filled again, a side request and a disk node
+request that drops a side are refused alike, and the node keeps every device
+and export of the pool. The agent then restarts over the full store: fresh
+rounds before and after the restart agree as in the restart case, the store row
+aside, at the revisions of the last accepted requests, the node's devices and
+exports are the same, the new log holds no mutating command, and the store row
+reads the error before the restart and OK after it, since a restart forgets the
+refusal (`dnagent.md`, Known limits). Once the pool is torn down, the agent
+goes back to its disk store, holding the last request it accepted. The other
+node takes no part.
 
 **What a pass means.** Exit status zero and PASS mean every case's assertions
 held in a run that stops at the first failure: data checked against a pattern

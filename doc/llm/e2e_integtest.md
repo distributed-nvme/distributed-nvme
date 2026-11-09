@@ -398,30 +398,30 @@ passes.
 **Setup** proves each layer before the next rests on it: the gateway serving;
 the cluster storing an extent-size-only conf on the default bin ladder
 (`gateway.md` GW11); every node registered, through the `ABORTED` a
-not-yet-serving agent causes (`gateway.md` AG3), with its base rows OK and each
-disk node on its own nvmet port (`dnagent.md` DN5, CM2; `cnagent.md` CN5); the
-create read back field by field — each side on its own disk node, each group
-across guests, the cntlrs on distinct nodes with one primary, and the slots
-(`architecture.md`, cntlid slots); every side provisioned (`architecture.md`,
-Side provisioning protocol); the primary's stack complete and the standby
-holding legs with no group or pool (`cnagent.md` CN10, CN12, CN13), read from
-the live shape so that a primary role moving under the wait is followed and
-reported; a thin device with its raid0 (`dnv-worker.md` RW19; `cnagent.md`
-CN15); and a namespace over it, under a subsystem admitting both hosts, that
-host0 reaches through the cdc, the export gate and the connect verdict and
-sees optimized through the primary and inaccessible through the standby
-(`cnagent.md` CN16). Before any host writes to the pool, host0 reads the thin
-device whole as zeros, which dm-thin returns for every block no host has
-written (`architecture.md` [D15]), while each side read through its device on
-its disk node shows how far its zeroing went: a data group's side reads zero
-at its first data block and still holds the backing pattern at the end of its
-extent, and a meta group's side reads zero there (`architecture.md`, Side
-provisioning protocol; `dnagent.md` DN9). After a build whose reactions
-changed its legs, which leaves a repair, a retired leg or a side count other
-than the create's, a leg's side may not be the one the create placed over the
-pattern, so the disk-node half is skipped and logged. The random pattern
-written through the namespace then gives the digest every later step
-compares.
+not-yet-serving agent causes (`gateway.md` AG3), with its base rows and its
+store row OK and each disk node on its own nvmet port (`dnagent.md` DN5, CM2;
+`cnagent.md` CN5); the create read back field by field — each side on its own
+disk node, each group across guests, the cntlrs on distinct nodes with one
+primary, and the slots (`architecture.md`, cntlid slots); every side
+provisioned (`architecture.md`, Side provisioning protocol); the primary's
+stack complete and the standby holding legs with no group or pool (`cnagent.md`
+CN10, CN12, CN13), read from the live shape so that a primary role moving under
+the wait is followed and reported; a thin device with its raid0
+(`dnv-worker.md` RW19; `cnagent.md` CN15); and a namespace over it, under a
+subsystem admitting both hosts, that host0 reaches through the cdc, the export
+gate and the connect verdict and sees optimized through the primary and
+inaccessible through the standby (`cnagent.md` CN16). Before any host writes to
+the pool, host0 reads the thin device whole as zeros, which dm-thin returns for
+every block no host has written (`architecture.md` [D15]), while each side read
+through its device on its disk node shows how far its zeroing went: a data
+group's side reads zero at its first data block and still holds the backing
+pattern at the end of its extent, and a meta group's side reads zero there
+(`architecture.md`, Side provisioning protocol; `dnagent.md` DN9). After a
+build whose reactions changed its legs, which leaves a repair, a retired leg or
+a side count other than the create's, a leg's side may not be the one the
+create placed over the pattern, so the disk-node half is skipped and logged.
+The random pattern written through the namespace then gives the digest every
+later step compares.
 
 **smoke** has setup as its subject: the widest pool comes up whole, and
 deleting it gives every extent back and leaves nothing behind, the two

@@ -35,10 +35,19 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	s.locks.Node().Lock()
 	defer s.locks.Node().Unlock()
 
-	files, err := s.store.List(ctx,
-		agent.StoreKindDn, agent.StoreKindSide, agent.StoreKindMigrBm)
+	// The probe kind is listed so that List removes an interrupted probe
+	// write, and a probe file whose removal a probe did not get to goes too:
+	// nothing reads it, and it holds room the store may need (DN18).
+	files, err := s.store.List(ctx, agent.StoreKindDn, agent.StoreKindSide,
+		agent.StoreKindMigrBm, agent.StoreKindDnProbe)
 	if err != nil {
 		return err
+	}
+	if probes := files[agent.StoreKindDnProbe]; len(probes) > 0 {
+		if err := s.store.Remove(ctx, probes...); err != nil {
+			slog.ErrorContext(ctx, agent.MsgProbeRemoveFailed,
+				slog.String("error", err.Error()))
+		}
 	}
 
 	// unreadDn is set when a dn-* file did not load. Such a file names no DN
@@ -630,7 +639,9 @@ func (s *DnAgentServer) convergeDn(
 	// A row made after the call is cut off moves no epoch, through a view of
 	// its own, as the DN's read writes (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
-	info := &pb.DnInfo{}
+	// The store row (DN18): after a SyncupDn whose save held it reads OK,
+	// and at startup the store has refused no write yet.
+	info := &pb.DnInfo{StoreInfo: s.store.Row(t)}
 
 	// architecture.md, Common validation: the entrance that does not come
 	// through syncupDn's gate is the startup Reconcile, which converges from a

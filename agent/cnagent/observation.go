@@ -119,15 +119,17 @@ func (s *CnAgentServer) readParent(roundCtx context.Context) context.Context {
 
 // refreshCn is the CN's read (SH29). Under the node read lock it probes the
 // base state and then takes the node-level read-only verdict: the same
-// enumeration and the same comparison the sweep makes, with nothing touched
-// (CN23), plus what of the base state the probe read wrong in a way a
-// SyncupCn would cure (probeCn, dnagent.md SH31). It stores both as the CN's
-// observation with the revision held when it took the lock, even when a
-// listing did not answer, as the verdict then says. A read of a CN the agent no longer holds,
-// or one cancelled before it took the lock, reads nothing; a cancelled one
-// stores nothing, and the rows it makes once cancelled move no epoch
-// (agent.ResTracker; probeCn writes through a view of its own, since the CN's
-// next read may share the node read lock before this one has returned). A
+// enumeration and the same comparison the sweep makes, with nothing of the
+// node touched (CN23) — the one file it writes itself is the store's probe
+// file, while the store refuses writes, removed once the write holds
+// (agent.Store.Probe, CN28) — plus what of the base state the probe read wrong
+// in a way a SyncupCn would cure (probeCn, dnagent.md SH31). It stores both as
+// the CN's observation with the revision held when it took the lock, even when
+// a listing did not answer, as the verdict then says. A read of a CN the agent
+// no longer holds, or one cancelled before it took the lock, reads nothing; a
+// cancelled one stores nothing, and the rows it makes once cancelled move no
+// epoch (agent.ResTracker; probeCn writes through a view of its own, since the
+// CN's next read may share the node read lock before this one has returned). A
 // round starts it in the background (answerCn); unit tests call it themselves
 // with a ctx of their own, which ends no read.
 func (s *CnAgentServer) refreshCn(

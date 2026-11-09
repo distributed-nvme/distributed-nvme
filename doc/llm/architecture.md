@@ -567,14 +567,14 @@ Per **side** (one per hosted leg replica):
     from holding the two sides of one leg. A distinct `--nvmet-port-id`
     gives each agent its own port, but nvmet subsystems are **not** under
     the port — a subsystem's configfs directory is kernel-global and the
-    port only links to it — so both agents would converge that one
-    subsystem and its one namespace, each writing its own side device into
-    the same "device_path", and either one's teardown would run
-    `RemoveSubsystem` against the whole of it. No other dn-side name names
-    an object the two would fight over: `DnSideName`, `DnErrorName`,
-    `DnLinearName`, `DnMigrMetaDmName`, `DnMigrSrcName`, `DnMigrFinalName`,
-    `MigrSrcNqn`, `DnHostNqn`, `LocalDnPath`, `LocalSidePath` and
-    `LocalMigrBmPath` all carry `dn_id` (dm device names, NQNs, Agent
+    port only links to it — so both agents would converge that one subsystem
+    and its one namespace, each writing its own side device into the same
+    "device_path", and either one's teardown would run `RemoveSubsystem`
+    against the whole of it. No other dn-side name names an object the two
+    would fight over: `DnSideName`, `DnErrorName`, `DnLinearName`,
+    `DnMigrMetaDmName`, `DnMigrSrcName`, `DnMigrFinalName`, `MigrSrcNqn`,
+    `DnHostNqn`, `LocalDnPath`, `LocalSidePath`, `LocalMigrBmPath` and
+    `LocalDnProbePath` all carry `dn_id` (dm device names, NQNs, Agent
     local-store paths), and the ANA groups are nested under the port. Two
     dn-built names carry no `dn_id` and are harmless all the same:
     `CnHostNqn` of the cluster and cn, whose kernel-global host directory
@@ -1179,18 +1179,18 @@ SideToCn, `3` MigrSrc, `4` Xfer. The fields of an NQN are joined by ":".
 
 ### Agent local-store paths
 
-The agent's persistent state (Common agent rules, Local store) lives as flat protobuf
-files under the `--local-store` directory, {prefix} below (default
+The agent's persistent state (Common agent rules, Local store) lives as flat
+protobuf files under the `--local-store` directory, {prefix} below (default
 `DefaultLocalStorPrefix`, a directory that must exist before the agent
 starts, `dnagent.md` SH3). The default is not /var/tmp, where the stock
 tmpfiles rule of some distributions deletes files that nothing has touched
-for weeks: a store file is written only when the gates admit a request for
-its object, and read only at startup and by the disk node's format gate
-over a blank header (`dnagent.md` DN5), so the file of an object that stays
-quiet that long would go while its agent runs, and the next restart would
-find it lost. A request whose save failed only at the directory sync is
-refused, yet its file then holds it (Common agent rules, Local store).
-{src_slice_idx} and {bm_idx} are both rendered with `BmIdxFmt`.
+for weeks: a request's or a chunk's file is written only when the gates
+admit it, and read only at startup and by the disk node's format gate over a
+blank header (`dnagent.md` DN5), so the file of an object that stays quiet
+that long would go while its agent runs, and the next restart would find it
+lost. A request whose save failed only at the directory sync is refused, yet
+its file then holds it (Common agent rules, Local store). {src_slice_idx}
+and {bm_idx} are both rendered with `BmIdxFmt`.
 
 | function | path | content |
 |---|---|---|
@@ -1199,6 +1199,8 @@ refused, yet its file then holds it (Common agent rules, Local store).
 | `LocalCnPath` | {prefix}/cn-{cluster}-{cn} | the last accepted `SyncupCnRequest`, or a newer refused one |
 | `LocalCntlrPath` | {prefix}/cntlr-{cluster}-{cn}-{sp}-{cntlr} | the last accepted `SyncupCntlrRequest`, or a newer refused one |
 | `LocalMigrBmPath` | {prefix}/migr-bm-{cluster}-{dn}-{sp}-{migr}-{bm_idx} | one received `PushMigrBitmapRequest` chunk (Bitmap push protocol) |
+| `LocalDnProbePath` | {prefix}/probe-dn-{cluster}-{dn} | the probe a dn agent's read saves while its store's disk refuses writes (`dnagent.md` DN18); never loaded |
+| `LocalCnProbePath` | {prefix}/probe-cn-{cluster}-{cn} | the probe a cn agent's read saves while its store's disk refuses writes (`cnagent.md` CN28); never loaded |
 | `LocalCloneBmPath` | {prefix}/clone-bm-{cluster}-{cn}-{sp}-{clone}-{src_slice_idx}-{bm_idx} | one received `PushCloneBitmapRequest` chunk (Bitmap push protocol); a clone chunk is addressed by the PAIR, so the name carries two index segments where the migration name carries one |
 
 ## etcd data model
@@ -3821,45 +3823,46 @@ limits).
 ### Common agent rules
 
 * **Local store.** The agent persists, per synced object, the serialized
-  **last accepted request**, at the point the Revision gate below gives,
-  as a flat protobuf file:
-  `SyncupDnRequest` at `LocalDnPath`, `SyncupSideRequest` at
-  `LocalSidePath`, `SyncupCnRequest` at `LocalCnPath`,
-  `SyncupCntlrRequest` at `LocalCntlrPath` — plus one
-  file per received bitmap chunk at `LocalMigrBmPath` or
-  `LocalCloneBmPath` (Agent local-store paths, Bitmap push protocol).
-  Every write goes to a temp file in the same dir, fsync,
-  rename, fsync the dir (until then a crash can undo the rename). A
+  **last accepted request**, at the point the Revision gate below gives, as
+  a flat protobuf file: `SyncupDnRequest` at `LocalDnPath`,
+  `SyncupSideRequest` at `LocalSidePath`, `SyncupCnRequest` at
+  `LocalCnPath`, `SyncupCntlrRequest` at `LocalCntlrPath` — plus one file
+  per received bitmap chunk at `LocalMigrBmPath` or `LocalCloneBmPath`
+  (Agent local-store paths, Bitmap push protocol). While the store's disk
+  refuses writes, a node's read also saves a probe file at
+  `LocalDnProbePath` or `LocalCnProbePath`, which nothing loads
+  (`dnagent.md` DN18). Every write goes to a temp file in the same dir,
+  fsync, rename, fsync the dir (until then a crash can undo the rename). A
   request whose save fails is refused (Revision gate below) and its file
   left as it was, save when only that last fsync failed, after the rename
-  put the refused request in place (`dnagent.md` SH5). A write that does
-  not succeed can leave its temp file behind, as one whose process dies
-  between the write and the rename does (`osclient.md`, ReadFile /
-  WriteFile / WriteFileDirect, lists every way). The committed file is the
-  only truth: the next start deletes such a file unread (`dnagent.md` SH6),
-  since what it held was never committed and the worker sends again whatever
-  the committed files lack. The stored request contains the revision, so no
+  put the refused request in place (`dnagent.md` SH5). A write that does not
+  succeed can leave its temp file behind, as one whose process dies between
+  the write and the rename does (`osclient.md`, ReadFile / WriteFile /
+  WriteFileDirect, lists every way). The committed file is the only truth:
+  the next start deletes such a file unread (`dnagent.md` SH6), since what
+  it held was never committed and the worker sends again whatever the
+  committed files lack. The stored request contains the revision, so no
   separate revision record exists. In memory each side's and each cntlr's
   current request is an atomic pointer, so another object's pass reads it
   whole beside the converge that replaces it; a node's request is replaced
-  only under the node write lock. On start the agent loads every
-  other file of its role's kinds under its prefix, reconciles the system to
-  it (full idempotent re-apply; for a clone, Clone metadata durability),
-  then serves — except that it skips, neither loading nor deleting them, the
-  files that may belong under a file it cannot load: a file that did not
-  load names no object, so it proves no owner gone (`dnagent.md` DN2 and
-  `cnagent.md` CN2 say which files that holds back). When an object
-  disappears from its parent's pointer list, the agent drops its file or
-  files, its chunk files, its in-memory entry and its object lock in that
-  same pass, **before** anything of it is removed — save a file no memory
-  entry names, such as one a restart left unloaded (`dnagent.md` SH7 says
-  which): the sweep (Teardown by sweep) removes its object's resources by
-  name in that pass, and such a file stays until a later restart decodes
-  it and finds the pointer absent.
-  The agent keeps no record of the object afterwards because it needs none:
-  the sweep finds the object's resources by their names, and a record kept
-  until they were gone would be a record of work owed — the very thing that
-  lets a failed teardown be forgotten.
+  only under the node write lock. On start the agent loads every other
+  request and chunk file of its role's kinds under its prefix, reconciles
+  the system to it (full idempotent re-apply; for a clone, Clone metadata
+  durability), then serves — except that it skips, neither loading nor
+  deleting them, the files that may belong under a file it cannot load: a
+  file that did not load names no object, so it proves no owner gone
+  (`dnagent.md` DN2 and `cnagent.md` CN2 say which files that holds back).
+  When an object disappears from its parent's pointer list, the agent drops
+  its file or files, its chunk files, its in-memory entry and its object
+  lock in that same pass, **before** anything of it is removed — save a file
+  no memory entry names, such as one a restart left unloaded (`dnagent.md`
+  SH7 says which): the sweep (Teardown by sweep) removes its object's
+  resources by name in that pass, and such a file stays until a later
+  restart decodes it and finds the pointer absent. The agent keeps no record
+  of the object afterwards because it needs none: the sweep finds the
+  object's resources by their names, and a record kept until they were gone
+  would be a record of work owed — the very thing that lets a failed
+  teardown be forgotten.
 * **Revision gate.** A `Syncup*` request with a revision **lower** than
   the stored one is rejected (`AgentReply.code` non-zero, `details`
   explains). Equal revision: re-apply idempotently (workers retry).
@@ -4908,15 +4911,14 @@ The four reactions:
   healthy, enabled cntlr; this *is* the failover trigger of Failover.
 * **Thin-pool auto-grow** (`dnv-worker.md` AR6): a slice pool whose data or
   metadata usage passes `DmPoolConf.low_water_mark_pct`, which is not an
-  `EventThreshold` field, is grown by an internal `GrowSlice` (GrowSlice);
-  a grow whose new group still holds a provisioning leg completes by itself
+  `EventThreshold` field, is grown by an internal `GrowSlice` (GrowSlice); a
+  grow whose new group still holds a provisioning leg completes by itself
   when the leg clears (`cnagent.md` CN13, [D15]), and one whose leg never
-  clears can be withdrawn and grown again on disk nodes other than the dead
-  one, under the conditions of `dnv-worker.md` AR6. A data grow stops once
-  the slice's data covers what the pool's thin devices can use
-  (`dnv-worker.md` AR6), so no data grow starts past that cover, though the
-  last one can pass it by up to a group. Auto-grow
-  is best-effort, so a pool can fill (Known limits).
+  clears can be withdrawn and grown again on other disk nodes, under the
+  conditions of `dnv-worker.md` AR6. A data grow stops once the slice's data
+  covers what the pool's thin devices can use (`dnv-worker.md` AR6), so no
+  data grow starts past that cover, though the last one can pass it by up to
+  a group. Auto-grow is best-effort, so a pool can fill (Known limits).
 * **Cntlr replacement** (`dnv-worker.md` AR7): a cntlr that stays unhealthy
   — a non-primary one, or the primary of an SP with no failover candidate
   — is replaced on a fresh CN by an internal `ReplaceCntlr`, one

@@ -274,7 +274,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **incarnation** — One lifetime under a name, told from the next by a fresh identity. A worker's incarnation is one seed's: a process start, and every rejoin after a self-fence, mints a new seed and drives nothing for one grace window (see `dnv-worker.md` VW1, VW7). A cluster's incarnation is one creation under its name, told apart by the creation epoch folded into its id, so a recreated cluster's keys and node-local names, the md superblock names apart, never collide with a leftover of the old one (see `architecture.md`, Naming, and [D9]).
 
-**info** — The live-state report an agent builds per object (`DnInfo`, `SideInfo`, `CnInfo`, `CntlrInfo`): one row per resource the desired state calls for, each with a status and details, built by a converge as it runs and by a background read from probes alone, which on a cntlr take most of their facts from the node reading (see reading). Check rounds and info reads answer with the info of the object's latest observation (see observation). A disk node's info also carries its disk counts, beside the rows (see disk counts), and a cntlr's info the primary's repair verdicts and, for each group whose row reads OK, a running array the in-sync guard does not hold, whether the array is whole and which legs md holds in sync, fields that no health rule judges (see repair verdict; whole, in sync).
+**info** — The live-state report an agent builds per object (`DnInfo`, `SideInfo`, `CnInfo`, `CntlrInfo`): one row per resource the desired state calls for, and on a node's info the store row, each with a status and details, built by a converge as it runs and by a background read from probes alone, which on a cntlr take most of their facts from the node reading (see reading). Check rounds and info reads answer with the info of the object's latest observation (see observation). A disk node's info also carries its disk counts, beside the rows (see disk counts), and a cntlr's info the primary's repair verdicts and, for each group whose row reads OK, a running array the in-sync guard does not hold, whether the array is whole and which legs md holds in sync, fields that no health rule judges (see repair verdict; whole, in sync).
 
 **info read** — One of the four unary agent calls `GetDnInfo`, `GetSideInfo`, `GetCnInfo` and `GetCntlrInfo`, which the gateway's inspects, its hydration checks and its forced start's check of a group's array make and the worker never does: the agent answers it at once from its latest observation of the object, with the observation's code, revision and info and its stamp, takes no lock of the lock hierarchy, reads nothing of the node and starts no background read (see `dnagent.md` SH28).
 
@@ -322,7 +322,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **LLM doc** — A markdown file written for the LLM and maintainers: every file under `doc/llm/`. It may refer to a human doc by its bare name or by a markdown link relative to itself (see `layout.md`, Human docs and LLM docs).
 
-**local store** — The directory an agent keeps the last accepted request per object and one file per received bitmap chunk in (`--local-store`), each written through a temp file, fsync, rename and a fsync of the directory; a request whose save fails only at that last fsync is refused, yet its file then holds it (see `dnagent.md` SH5). After a restart it is the desired state the agent reconciles to before serving, and its temp leftovers are deleted at startup.
+**local store** — The directory an agent keeps the last accepted request per object and one file per received bitmap chunk in (`--local-store`), each written through a temp file, fsync, rename and a fsync of the directory; a request whose save fails only at that last fsync is refused, yet its file then holds it (see `dnagent.md` SH5). After a restart it is the desired state the agent reconciles to before serving, and its temp leftovers are deleted at startup. The store keeps whether its latest save failed and whether its disk refused a save; while the disk refuses, a node's read writes a probe file there, and the node's store row reports the refusal (see probe file; `dnagent.md` SH4, DN18).
 
 **location** — The failure-domain string a node registers (`location`), defaulting to its address: the allocator never places two legs in one location within one allocation round, and keeps a pool's new cntlrs, a repair's fresh new leg and a migration destination out of occupied locations at its first tier only.
 
@@ -438,7 +438,9 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **primary** — The cntlr that runs a pool's full stack: it connects every leg of the pool's slices and of its clones' clone meta groups, assembles their groups, activates the thin pools, raid0s, clones and transfers, and exports the namespaces optimized. Only the sp worker changes which cntlr is primary.
 
-**probe** — A read of live state through the OS client that creates, changes and removes nothing, made per object, except for what a cntlr's background read takes from the node reading (see reading); a status read of a dm-clone still makes the kernel commit the clone's metadata, while a thin pool's carries the `--noflush` flag and commits nothing (see `dnagent.md` SH17). A converge probes first and mutates only the differences, and a background read's info is built from probes alone.
+**probe** — A read of live state through the OS client that creates, changes and removes nothing, made per object (a node's read also writes and removes the store's probe file while the store refuses writes, see probe file), except for what a cntlr's background read takes from the node reading (see reading); a status read of a dm-clone still makes the kernel commit the clone's metadata, while a thin pool's carries the `--noflush` flag and commits nothing (see `dnagent.md` SH17). A converge probes first and mutates only the differences, and a background read's info is built from probes alone.
+
+**probe file** — The file a node's background read writes in the agent's local store while the store's disk refuses writes, of random bytes, at least as many as the refused save tried to write, and removes once it holds; a probe that holds clears the refusal the store row reports, unless a newer refused save came after it began, and nothing reads it (see `dnagent.md` DN18). It is the one file a read writes itself.
 
 **probe-IO carve-out** — The one sanctioned bypass of the OS client: the leg health probers write and read their health block through `WriteBlockAt` and `ReadBlockDirectAt`, which take no context, hold no OS client slot and log nothing, so the probers log their own probe records (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
@@ -504,7 +506,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **rotation** — The operator's replacement of a cntlr to give it a free cntlid slot or another controller node: disable it, delete it, then create a cntlr with a free slot (`UpdateCntlrEnabled`, `DeleteCntlr`, `CreateCntlr`).
 
-**row** — One line of an agent's report about one device, with a status and a text: one `ResInfo` of an info (see ResInfo).
+**row** — One line of an agent's report about one device, export or connection, or about the agent's local store (see store row), with a status and a text: one `ResInfo` of an info (see ResInfo).
 
 **runner** — The script that runs the suites one after another from one configuration file listing each run of a suite with its arguments (`integtest/runner.sh`), runs a failed suite's cleanup-only run before it goes on, and ends with a summary of every run (see `layout.md`, Directory tree). The STM runners of `etcdutil` (see `dnv-worker.md` EU4) and gatewayctl's barrier runner are other things.
 
@@ -555,6 +557,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **storage class** — The Kubernetes object that names a CSI driver and its settings; a dnv storage class names one cluster, the redundancy of every group and the cntlr count of every pool (see `csi.md` CSI12).
 
 **storage pool, SP, sp** — `SpConf`, the unit of volume service: a set of cntlrs on controller nodes, slices made of groups of legs on disk nodes, and the thin devices, subsystems, clones, transfers and migrations it owns, with one conf, one level and one revision.
+
+**store row** — A node's row about its agent's local store (`store_info` in `DnInfo` and `CnInfo`): error, with the latest refused write's error, from a save the disk refused until a later save or probe holds, and ok otherwise; the worker sets the node's health epoch from an error row, so the node gets no new side or cntlr, and no side or cntlr is marked by it (see probe file; `dnagent.md` DN18; `dnv-worker.md` HL1).
 
 **subsystem** — `Subsystem`, the host-facing NVMe-oF object a pool exports from every cntlr under one NQN, each cntlr's export within that cntlr's cntlid slot: it carries its allowed hosts and its namespaces, and the gateway publishes it to the cdc as a `CdcEntry`.
 
@@ -620,7 +624,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **wipe** — A lab-only scrub of a guest: the e2e suite's host-side disconnect of every dnv NQN, and the agent suites' kind-blind `--wipe` over every dnv-named dm device, nvmet subsystem and md array and every fabrics controller on the node, repeated while dnv dm devices remain and failing on dm or nvmet residue.
 
-**withdrawal of a stuck grow** — The sp worker's removal of the newest group of a kind from a slice when the grow that added it waits on a dead disk node: a leg's only side does not provision because its disk node died while it zeroed, so no array was ever built from the group and the pool does not count it. The group's extents go back to the disk nodes and the controller nodes, and auto-grow grows again, on disk nodes other than the dead one (see `dnv-worker.md` AR6).
+**withdrawal of a stuck grow** — The sp worker's removal of the newest group of a kind from a slice when the grow that added it waits on a side that does not provision: a leg's only side is unhealthy past its threshold on a disk node that carries a health epoch, one that died while the side zeroed or one with an error row of its own, such as a store that refuses writes, so no array was ever built from the group and the pool does not count it. The group's extents go back to the disk nodes and the controller nodes, and auto-grow grows again, on disk nodes other than that one (see `dnv-worker.md` AR6).
 
 **worker** — `dnv-worker`, the control-plane process that turns etcd's desired state into agent calls: it watches revision keys by role and shard, syncs and checks each object, applies flips, runs health rounds, reacts, and drains deleted pools and clones. Several run active-active, divided by shard ownership.
 

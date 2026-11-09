@@ -158,7 +158,8 @@ var renderCases = []renderCase{
 			`{"free_ext_cnt":"231","free_meta_units":"64",` +
 			`"side_rec_cnt":"1","side_recs_match":false,` +
 			`"total_ext_cnt":"256"},"disk_info":null,"meta_info":null,` +
-			`"port_info":null},"obs_age":null,"obs_stamp":null}` + "\n",
+			`"port_info":null,"store_info":null},"obs_age":null,` +
+			`"obs_stamp":null}` + "\n",
 	},
 	{
 		// Counts the agent could not take are absent, never zeros: the
@@ -171,8 +172,8 @@ var renderCases = []renderCase{
 			DnInfo:          &pb.DnInfo{},
 		},
 		want: `{"applied_revision":"7","dn_info":{"disk_counts":null,` +
-			`"disk_info":null,"meta_info":null,"port_info":null},` +
-			`"obs_age":null,"obs_stamp":null}` + "\n",
+			`"disk_info":null,"meta_info":null,"port_info":null,` +
+			`"store_info":null},"obs_age":null,"obs_stamp":null}` + "\n",
 	},
 	{
 		// The agent's stamp and the observation's age (architecture.md,

@@ -128,8 +128,9 @@ func (a *Agent) epochLocked(
 // (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
-// dnInfoLocked reports the three DnInfo rows; nil until a SyncupDn has been
-// applied, so the worker's revision check re-issues the syncup. The disk
+// dnInfoLocked reports the disk, meta and port rows of DnInfo, and no store
+// row; nil until a SyncupDn has been applied, so the worker's revision check
+// re-issues the syncup. The disk
 // counts ride beside the rows when the levers give them and the meta row
 // reads OK, as the dn agent sends them only beside an OK meta row
 // (dnagent.md DN18).
@@ -167,8 +168,8 @@ func (a *Agent) dnInfoLocked() *pb.DnInfo {
 	return info
 }
 
-// cnInfoLocked reports CnInfo's one row, its port's
-// (architecture.md, Controller node, common; cnagent.md CN5).
+// cnInfoLocked reports CnInfo's port row (architecture.md, Controller node,
+// common; cnagent.md CN5), and no store row.
 func (a *Agent) cnInfoLocked() *pb.CnInfo {
 	if a.requestLocked(CnKey) == nil {
 		return nil

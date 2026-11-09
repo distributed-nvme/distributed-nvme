@@ -97,6 +97,8 @@ const (
 	localStorKindCntlr   = "cntlr"
 	localStorKindMigrBm  = "migr-bm"
 	localStorKindCloneBm = "clone-bm"
+	localStorKindDnProbe = "probe-dn"
+	localStorKindCnProbe = "probe-cn"
 )
 
 type NameFmt struct {
@@ -659,6 +661,21 @@ func (nf *NameFmt) LocalDnPath(
 	)
 }
 
+// LocalDnProbePath names the probe file of a dn agent's local store, which
+// the agent writes only while its store refuses writes (dnagent.md DN18).
+func (nf *NameFmt) LocalDnProbePath(
+	clusterId uint64,
+	dnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindDnProbe,
+		clusterId,
+		dnId,
+	)
+}
+
 func (nf *NameFmt) LocalSidePath(
 	clusterId uint64,
 	dnId uint64,
@@ -684,6 +701,21 @@ func (nf *NameFmt) LocalCnPath(
 		"%s/%s-%016x-%016x",
 		nf.localStorPrefix,
 		localStorKindCn,
+		clusterId,
+		cnId,
+	)
+}
+
+// LocalCnProbePath names the probe file of a cn agent's local store, which
+// the agent writes only while its store refuses writes (cnagent.md CN28).
+func (nf *NameFmt) LocalCnProbePath(
+	clusterId uint64,
+	cnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindCnProbe,
 		clusterId,
 		cnId,
 	)
