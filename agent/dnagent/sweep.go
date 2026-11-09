@@ -590,8 +590,9 @@ func (s *DnAgentServer) retireSuspended(
 // a per-CN linear of a side export, or a migration source's linear — and
 // resumes every suspended device of this node's that it finds, on whatever
 // table is live. Apart from a reload's moment between its suspend and its
-// resume, dnv suspends on purpose only the per-CN linears, at a fence, and
-// those are retireSuspended's; any other device of ours found suspended was
+// resume, the dn agent suspends on purpose only the per-CN linears, at a
+// fence, and those are retireSuspended's; any other device of ours found
+// suspended was
 // left so by a reload that failed or was cut off, and the IO it holds came
 // through devices that still map it, so a bare resume releases it where it
 // was going. It walks every export, and reports whether every device below
@@ -1851,8 +1852,8 @@ func (s *DnAgentServer) zeroingVerdict(
 // (DiskMeta.SideAllocRefusal), so a refused allocation (no room, a record
 // that disagrees with the request, a disk not confirmed) is never re-sent for
 // ever. A provisioned side with no record reads ERROR, not MISSING, and its
-// row feeds leg repair instead. Above the side device every row is only set
-// once the side is ready (probeSide), and a MISSING one there is a dm device
+// row feeds leg repair instead. Above the side device a row reads MISSING
+// only once the side is ready (probeSide), and such a row is a dm device
 // or an export the converge builds: the per-CN dm-errors, dm-linears and
 // exports, and a migration source's linear and export. An export is named
 // too when its subsystem is there and a part its build makes is not

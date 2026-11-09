@@ -706,8 +706,8 @@ func (s *DnAgentServer) ensureDiskMeta(
 // error, and the disk stays blank until every such device is gone — this
 // dn's sweep removes its own once nothing wants them; a device of another
 // cluster or dn stays until an operator removes it — and every such stored
-// side has left its DN's list, after which a converge whose reads all answer
-// formats it.
+// side is one a DN this agent holds no longer lists, after which a converge
+// whose reads all answer formats it.
 func (s *DnAgentServer) formatGate(
 	ctx context.Context,
 	lists map[[2]uint64]map[[2]uint64]struct{},

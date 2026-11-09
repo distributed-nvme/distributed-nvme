@@ -120,7 +120,7 @@ The constants this document relies on, whose values and comments
   usable, and the agent cannot keep it, which is why it is none of the
   other three.
   `ReplyCodeLeftover` reports an **accepted** request with residue: the
-  desired state is stored and every wanted object was converged, but the
+  desired state is stored and the converge built what it could, but the
   node still holds objects the desired state does not want, or an
   enumeration of what exists did not answer. It is the one thing that
   travels in `agent_reply` rather than in the `*Info` rows, because a
@@ -133,9 +133,10 @@ The constants this document relies on, whose values and comments
   found absent that a re-sent `Syncup*` would build, or the port in a
   state one would rewrite (SH31, DN16), or a side or clone-metadata record
   a converge's pass could not free (DN19); on a cn what `cnagent.md` CN30
-  lists. Only a read's verdict names a side nothing zeroes and what a read
-  found, so the observation a converge stores leaves them out until the
-  object's next read (SH31, DN16); `cnagent.md` CN30 says which of the
+  lists. Only a read's verdict names a side nothing zeroes, what a read
+  found absent, and the port in a state one would rewrite, so the
+  observation a converge stores leaves them out until the object's next
+  read (SH31, DN16); `cnagent.md` CN30 says which of the
   cn's conditions only a read names. It is not a rejection: the worker
   evaluates the reply's rows exactly as for code zero and re-issues the
   `Syncup*` on every round whose reply carries the code from an
@@ -770,16 +771,17 @@ taken as absence would report a live subsystem as not connected (SH20); in
 the cn's lookups, a subsystem whose "subsysnqn" read failed, passed over as
 another NQN's, would send the connect step after sides whose controllers
 are live (`cnagent.md` CN10). The read under it, `osBase.readAttrStrict`,
-carries the rule for every other strict read besides `Md.Detail`'s above:
+carries the rule for the other strict reads besides `Md.Detail`'s above,
+among them:
 `Nvmet.NsDevicePath` (a
 namespace's "device_path", by which the cn sweep attributes a host-facing
 subsystem no stored request claims — one with no attributable namespace is
 unowned, and the node-level sweep removes it, `cnagent.md` CN21 — and by
 which DN6 attributes a `SideToCnNqn` export: an export whose read did not
 answer is foreign for that pass and named as a failed enumeration; and by
-which DN6's release step finds the device a migration source export
-serves: a read that did not answer stops the pass before its first
-removal),
+which DN6's step before the first layer finds the device a migration
+source export serves: a read that did not answer stops the descent before
+L1, so no layer runs),
 `Nvmet.NsAnaGrpId` (a namespace's "ana_grpid", by which DN13 reads, in a
 destination pass whose step stopped, whether a per-CN stack serves through
 the dm-clone: a group read that did not answer, taken as not optimized,
@@ -1227,12 +1229,14 @@ nothing: they wait for a read as they wait for a converge.
 SH31. **What a read names for a re-send.** The worker re-sends a
 `Syncup*` on a `Check*` reply's code, never on its rows (`dnv-worker.md`
 RW4), and a read builds and rewrites nothing (SH29). So a read's verdict
-also names, as failures, some of what the read's own probe read wrong that
-a re-sent `Syncup*` of the same scope would cure. What this rule adds names
-nothing the agent's own rules refuse, such as a gate (DN8, SH9) or an
-allocation `AllocSide` refuses; a disk whose identity is not confirmed is
-named by DN6's record step, for its own reason. Each role lists what: a DN's and a side's in DN16, a CN's and a
-cntlr's in `cnagent.md` CN30. The node's nvmet
+also names some of what the read's own probe read wrong that a re-sent
+`Syncup*` of the same scope would cure. What this rule adds names nothing
+the agent's own rules refuse, such as a gate (DN8, SH9) or an allocation
+`AllocSide` refuses, save the per-CN rows DN16 names for the two converges
+that stop before the stacks; a disk whose identity is not confirmed is
+named by DN6's record step, for its own reason. Each role lists what: a
+DN's and a side's in DN16, a CN's and a cntlr's in `cnagent.md` CN30.
+The node's nvmet
 port follows one rule on both roles (`agent.PortRedrive`): a missing port
 directory or ANA group is named as absent, and an ANA group whose
 "ana_state" reads other than its fixed one, on a port whose transport
@@ -1247,13 +1251,13 @@ not named either: it waits for the node's next syncup for another reason
 or the agent's next start (Known limits). The port is read
 with strict reads (`agent.Nvmet.ProbePortState`), so a read that did not
 answer is an `ERROR` row naming the read and names nothing; the next read
-asks again. Each is rendered as an enumeration that did not answer is
-(DN19), "enumeration failed" with the object's name and "absent", with the
-probe's words after it where it has some, or the port's "differs" with the
-probe's words after it. The converge's reply and the observation a
-converge stores (SH28) carry none of them: that converge has just tried
-to build them, and its rows say how that went. So the round after a
-converge answers without them, and the read that round starts names them
+asks again. What this rule adds is rendered as an enumeration that did
+not answer is (DN19), "enumeration failed" with the object's name and
+"absent", with the probe's words after it where it has some, or the
+port's "differs" with the probe's words after it. The converge's reply and
+the observation a converge stores (SH28) carry none of them: that converge
+has just tried to build them, or stopped short of them, and its rows say
+how that went. So the round after a converge answers without them, and the read that round starts names them
 again; a piece that can never be built — a `mkdir` refused every time,
 say — is re-sent on each round that answers from a read, and each attempt
 is logged. Reason: without the name in the code nothing would re-send the
@@ -1577,11 +1581,13 @@ probe-first (SH16), building `DnInfo` as it goes:
   `SyncupDn` can bring a list before any side is stored; it only lets pass
   a stored side that a DN this agent holds no longer lists, such as one
   whose state file the drop could not delete (SH7), which no one wants any
-  more. The refusal keeps the DN's code as a blank header under a live
-  device keeps it (DN6's record step). Once no side device or
-  clone-metadata wrapper maps the disk, and every side file of the store
-  decodes and is either not provisioned or a side its DN no longer lists,
-  the next converge whose reads all answer formats. The format writes slot A with an empty table at the first
+  more. While the format is refused the disk stays blank, so DN6's record
+  step names it and the DN's code is `ReplyCodeLeftover`, as under a live
+  device. Once no side device or clone-metadata wrapper maps the disk, and
+  every side file of the store decodes and is either not provisioned or a
+  side that a DN this agent holds no longer lists, the next converge whose
+  reads all answer formats. The format writes slot A with an empty table
+  at the first
   sequence number **first**, then the header (a fresh `format_uuid` from
   the kernel's random source, the request's `cluster_id`, `dn_id` and
   `extent_size`, and the three layout fields; the two envelopes, what each
@@ -1977,7 +1983,7 @@ descent before L1, as a layer that left something behind does: no layer
 runs, every unwanted object of the scope is named as a leftover, and the
 next pass tries again. In the node-level scope that is every unwanted
 object of the node, so one device below one export that keeps failing
-holds every removal of the node.
+holds every layer of the node's sweep.
 
 L1. The `SideToCnNqn` exports and the `MigrSrcNqn` export: an enabled nvmet
 namespace holds its backing device open, and removing the subsystem is what

@@ -4641,8 +4641,8 @@ device is there, the next enumeration finds it.
   per-resource outcome that cannot ride in the `*Info` rows of Live-state
   reporting: those rows are keyed by the ids of *wanted* objects, and a
   leftover is by definition something nothing wants. The code means
-  **accepted with residue** — the desired state is stored and every wanted
-  object converged — and is not a rejection: the worker reads the reply's
+  **accepted with residue** — the desired state is stored and the converge
+  built what it could — and is not a rejection: the worker reads the reply's
   rows exactly as for code zero and re-issues the object's `Syncup*` on a
   round whose reply carries it, save a round whose observation is too old,
   as Check streams says (`dnv-worker.md` RW4, RW5), and nothing on the

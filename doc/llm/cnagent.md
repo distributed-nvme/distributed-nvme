@@ -3953,14 +3953,9 @@ Two kinds of thing travel in `agent_reply` rather than in the rows:
 protocol failures (the CN8 gates, CN22's), and leftovers — the one
 per-resource outcome that cannot ride in a row, carried as
 `ReplyCodeLeftover` (`architecture.md`, Teardown by sweep, and Live-state
-reporting; CN20, CN30). A piece of the CN's base state — the port or one
-of its ANA groups — that a read of the CN reads absent, and that a
-`SyncupCn` would build, travels in both: the port row reads `ERROR`, and
-the verdict names it too (`dnagent.md` SH31), because the worker re-syncs on a reply's
-code and never on its rows. So does an ANA group that the read reads in a
-state other than its fixed one while the port's transport attributes
-match, which a `SyncupCn` would rewrite: the port row reads `ERROR` with
-the probe's words, and the verdict names it. And so does an md member
+reporting; CN20, CN30). What of the CN's base state a read names under
+the shared port rule (`dnagent.md` SH31) travels in both: the port row
+reads `ERROR`, and the verdict names it too. And so does an md member
 that a cntlr's converge would put back or add (CN12) on a leg that can
 take it, or remove for a repair: its group's row reads `OK`, and a
 read's verdict names the member (CN30), unless CN12's in-sync guard
@@ -4731,15 +4726,10 @@ stores instead is CN23's.
   name the piece (`dnagent.md` SH31), so the round after each re-send the agent
   accepts answers without it and starts the read that names it again:
   the piece brings a re-send at most every second round (`dnv-worker.md`
-  RW4), and on each round while the agent's saves fail (CN30). The
-  verdict does not
-  re-drive a port transport attribute that differs (`dnagent.md` SH31):
-  its row reads
-  `ERROR`, and while a subsystem is linked to the port it waits for an
-  operator, since nvmet refuses every transport-attribute write then; one
-  that differs while none is linked, which a re-sent `SyncupCn` would
-  rewrite, is not re-driven either and waits for the CN's next
-  `SyncupCn` for another reason or the agent's next start.
+  RW4), and on each round while the agent's saves fail (CN30). A port
+  transport attribute that differs is not re-driven (`dnagent.md` SH31,
+  and its Known limits for one that differs while no subsystem is
+  linked).
   Each re-sent `SyncupCn` holds the node write lock (CN1), for its
   converge and its removing node-level sweep when the agent accepts it,
   so a cntlr converge or read that comes after it waits it out, once for each re-send; it keeps
