@@ -409,8 +409,8 @@ func (gp *grpPlan) isStartedBadLeg(legId uint64) bool {
 // not flipped to this CN yet exports dm-error to it (a non-optimized path).
 // Only availability decides: a held member md has failed on a leg that is
 // available again is not late — the read's verdict names it once its
-// leg can take it, and the converge of the syncup the worker re-sends puts it
-// back (putBackNames, reconcileMembers; cnagent.md CN12) — unless CN12's
+// leg can take it and a copy source serves, and the converge of the syncup
+// the worker re-sends puts it back (putBackNames, reconcileMembers; cnagent.md CN12) — unless CN12's
 // in-sync guard holds over its array (inSyncGuard): the read's row then reads
 // ERROR, its verdict names nothing for the group and the converge puts
 // nothing back while the guard holds (cnagent.md CN12). Short of a forced

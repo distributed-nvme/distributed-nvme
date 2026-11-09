@@ -1978,7 +1978,9 @@ func (s *CnAgentServer) stopGroupArray(ctx context.Context, dev string) error {
 // md then resyncs it, from its write-intent bitmap for a briefly absent leg.
 // And it puts a member md has failed back: a leg_list member md has failed
 // and moved out of its slot (MdMember.failedOutOfSlot), on a leg that
-// can take it (legTakesMember), is removed, and the add loop adds it again,
+// can take it (legTakesMember), is removed, and the add loop adds it again —
+// both, and the add of a member the array lacks, only beside a copy source
+// (hasCopySource) —
 // which mdadm turns into a re-add that md resyncs from its write-intent
 // bitmap. md keeps its claim on a failed member until the member is removed,
 // so an --add alone is refused. The put-back is an mdadm child the soft
@@ -2088,9 +2090,12 @@ func (s *CnAgentServer) reconcileMembers(
 	takes := func(lp *legPlan) bool {
 		return legTakesMember(available[lp.legId], legRows[lp.legId])
 	}
+	sources := func(lp *legPlan) bool {
+		return copySourceLeg(available[lp.legId], legRows[lp.legId])
+	}
 	// The put-back's remove. A removed member is no longer held, so the
 	// add loops below add it in this same pass.
-	for _, lp := range putBackLegs(gp, held, takes) {
+	for _, lp := range putBackLegs(gp, held, takes, sources) {
 		if err := run(s.md.Remove, lp.path); err != nil {
 			return changed, "", err
 		}
@@ -2098,7 +2103,8 @@ func (s *CnAgentServer) reconcileMembers(
 	}
 	for _, lp := range gp.legs {
 		if _, ok := held[lp.name]; ok || !available[lp.legId] ||
-			gp.isBadLeg(lp.legId) {
+			gp.isBadLeg(lp.legId) ||
+			!hasCopySource(gp, held, sources, lp.name) {
 			continue
 		}
 		if err := run(s.md.Add, lp.path); err != nil {
@@ -2107,7 +2113,7 @@ func (s *CnAgentServer) reconcileMembers(
 	}
 	step := repSteps(gp, held, func(lp *legPlan) bool {
 		return available[lp.legId]
-	}, takes)
+	}, takes, sources)
 	// The take-back check comes before the bad leg goes out: a refused add
 	// leaves the step, and a step it leaves with no add is empty, so the bad
 	// leg stays in its place unless another new leg is added.
@@ -2203,18 +2209,19 @@ func startedBadLegs(gp *grpPlan, held map[string]MdMember) []*legPlan {
 
 // putBackLegs are the members the put-back removes, so that an add loop adds
 // them again (CN12): md has failed each and moved it out of its slot, on a
-// leg that can take it (takes), and each is a leg_list member other than an
-// open repair's bad leg, or a new leg of a repair that is STARTED, or
-// CREATED with no abort flag in the request.
+// leg that can take it (takes), another member can feed the copy md starts
+// when it joins again (hasCopySource, over sources), and each is a leg_list
+// member other than an open repair's bad leg, or a new leg of a repair that
+// is STARTED, or CREATED with no abort flag in the request.
 func putBackLegs(
 	gp *grpPlan,
 	held map[string]MdMember,
-	takes func(*legPlan) bool,
+	takes, sources func(*legPlan) bool,
 ) []*legPlan {
 	var out []*legPlan
 	check := func(lp *legPlan) {
 		if member, ok := held[lp.name]; ok && member.failedOutOfSlot() &&
-			takes(lp) {
+			takes(lp) && hasCopySource(gp, held, sources, lp.name) {
 			out = append(out, lp)
 		}
 	}
@@ -2268,7 +2275,7 @@ type repBadLeg struct {
 func repSteps(
 	gp *grpPlan,
 	held map[string]MdMember,
-	avail, takes func(*legPlan) bool,
+	avail, takes, sources func(*legPlan) bool,
 ) repStep {
 	rp := gp.rep
 	if rp == nil {
@@ -2284,7 +2291,15 @@ func repSteps(
 		return repStep{}
 	}
 	if rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED {
-		return step
+		// A STARTED repair's new leg joins as a leg_list member does, once
+		// another member can feed its copy (hasCopySource).
+		var add []*legPlan
+		for _, lp := range step.add {
+			if hasCopySource(gp, held, sources, lp.name) {
+				add = append(add, lp)
+			}
+		}
+		return repStep{add: add}
 	}
 	if !rp.mayAdd() || !keepsData(gp, held, takes) {
 		return repStep{}
@@ -2304,6 +2319,55 @@ func repSteps(
 		}
 	}
 	return step
+}
+
+// hasCopySource reports whether a member other than name can feed the copy
+// md starts when name joins the array (CN12): one the array holds, md marks
+// in sync (MdMember.inSync), of a leg_list leg or an open repair's new leg,
+// on a leg that can be a source (sources, copySourceLeg). md learns that a
+// member is dead only from IO to it, so on an idle array a dead member still
+// reads in sync, and a copy that reads it breaks the array. It is the
+// in-sync guard's test (inSyncGuard) with the joining member left out, an
+// open repair's new legs counted and a source leg whose row reads ERROR left
+// out; a repair's bad leg counts, since nothing leaves the array when a
+// member joins. The put-back, the add of a member the array lacks and a
+// STARTED repair's add all wait for it; a member left out is no error, and
+// the late-member retry or the read's verdict brings the converge that adds
+// it once a source serves again.
+func hasCopySource(
+	gp *grpPlan,
+	held map[string]MdMember,
+	sources func(*legPlan) bool,
+	name string,
+) bool {
+	source := func(lp *legPlan) bool {
+		member, ok := held[lp.name]
+		return lp.name != name && ok && member.inSync() && sources(lp)
+	}
+	for _, lp := range gp.legs {
+		if source(lp) {
+			return true
+		}
+	}
+	if rp := gp.openRep(); rp != nil {
+		for _, lp := range rp.newLegs {
+			if source(lp) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// copySourceLeg is CN12's test of a leg whose member can feed a copy: the leg
+// serves this pass (serves: the converge's availability, a read's
+// legServes), and its row does not read ERROR. A row that reads PENDING, as
+// before a new primary's first probe, does not hold a source back; one that
+// reads ERROR — a leg whose probe IO failed, a disk returning errors — does,
+// since a copy that reads errors from the last in-sync member makes md mark
+// the array broken (CN29).
+func copySourceLeg(serves bool, legRow *pb.ResInfo) bool {
+	return serves && legRow.GetStatus() != pb.ResStatus_RES_STATUS_ERROR
 }
 
 // keepsData reports whether a member keeps the data while a repair's bad leg
@@ -2505,7 +2569,8 @@ func errInSyncGuard(member, dev string) error {
 // md group (cnagent.md CN30): the dm name of each member that the converge's
 // member reconciliation would put back or add (CN12) — a leg_list member
 // other than an open repair's bad leg that md has failed and moved out of its
-// slot, or that the running array lacks, on a leg that can take it — then
+// slot, or that the running array lacks, on a leg that can take it, beside a
+// copy source (hasCopySource) — then
 // each new leg of a CREATED repair whose abort flag the request carries,
 // and each bad leg of a repair that has started in md, that the converge
 // would remove (abortRemovals, startedBadLegs), and each new leg it would add,
@@ -2550,17 +2615,26 @@ func (s *CnAgentServer) putBackNames(
 		return nil, ""
 	}
 	held := heldMembers(detail)
-	// takes is legTakesMember as a read can test it: the leg row first, and
-	// only then, once per leg, a lookup of its path.
-	tested := make(map[uint64]bool)
-	takes := func(lp *legPlan) bool {
-		ok, seen := tested[lp.legId]
+	// serves is legServes, once per leg; takes is legTakesMember as a read
+	// can test it: the leg row first, and only then the leg's serves.
+	servesSeen := make(map[uint64]bool)
+	serves := func(lp *legPlan) bool {
+		ok, seen := servesSeen[lp.legId]
 		if !seen {
-			ok = legRows[lp.legId].GetStatus() ==
-				pb.ResStatus_RES_STATUS_OK && s.legServes(ctx, plan, lp)
-			tested[lp.legId] = ok
+			ok = s.legServes(ctx, plan, lp)
+			servesSeen[lp.legId] = ok
 		}
 		return ok
+	}
+	takes := func(lp *legPlan) bool {
+		return legRows[lp.legId].GetStatus() ==
+			pb.ResStatus_RES_STATUS_OK && serves(lp)
+	}
+	// sources is copySourceLeg as a read can test it: the leg row first, and
+	// only then the leg's serves.
+	sources := func(lp *legPlan) bool {
+		return legRows[lp.legId].GetStatus() !=
+			pb.ResStatus_RES_STATUS_ERROR && serves(lp)
 	}
 	var names []string
 	for _, lp := range gp.legs {
@@ -2570,7 +2644,7 @@ func (s *CnAgentServer) putBackNames(
 		if member, ok := held[lp.name]; ok && !member.failedOutOfSlot() {
 			continue
 		}
-		if !takes(lp) {
+		if !takes(lp) || !hasCopySource(gp, held, sources, lp.name) {
 			continue
 		}
 		names = append(names, lp.name)
@@ -2579,11 +2653,11 @@ func (s *CnAgentServer) putBackNames(
 		startedBadLegs(gp, held)...) {
 		names = append(names, lp.name)
 	}
-	for _, lp := range putBackLegs(gp, held, takes) {
+	for _, lp := range putBackLegs(gp, held, takes, sources) {
 		delete(held, lp.name)
 	}
 	step, refusal, err := s.takeBackStep(ctx, gp, held, takes,
-		repSteps(gp, held, takes, takes))
+		repSteps(gp, held, takes, takes, sources))
 	if err != nil {
 		return names, ""
 	}

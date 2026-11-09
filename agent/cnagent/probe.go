@@ -43,7 +43,8 @@ type legSide struct {
 // returns the dm names of the md members the converge would put back, add or
 // remove for a repair, which the verdict names (putBackNames, cnagent.md
 // CN30): they are read from the arrays and the leg rows the probe has just
-// read, and from a lookup of each such member's leg in the call's walk. And
+// read, and from a lookup in the call's walk of each such member's leg and
+// of the legs that could be its copy source. And
 // it returns each provisioned side of a wanted leg that the converge would
 // connect, the leg's lookup having answered (sidesToConnect, CN30), which the
 // verdict names too.

@@ -1410,7 +1410,8 @@ dm-clone (CN18).
   "state", its "slot" none), on a leg that can take it, is `--remove`d; then
   an available `leg_list` member the array lacks, one just removed included,
   is `--add --failfast`ed, an open repair's bad leg in neither of these two
-  steps; then a repair's new legs are added (below). md then resyncs: a
+  steps; then a repair's new legs are added (below). The put-back and both
+  adds wait for a copy source (below). md then resyncs: a
   bitmap catch-up for a briefly absent leg or a member put back, a full
   copy for a repair's new leg, short of a retired leg taken back while the
   array has stayed degraded (`architecture.md`,
@@ -1461,6 +1462,24 @@ dm-clone (CN18).
   available it is not late either (above), and while its leg is not
   available the CN10 background retry brings only converges the guard
   refuses again, so nothing brings it back in sync while the guard holds.
+
+  **The copy source.** A member joins the array — a put-back of a member
+  md has failed, the add of a `leg_list` member the array lacks, the add of
+  a STARTED repair's new leg — only while another member can feed the copy
+  md starts onto it: one the array holds, md marks in sync and not faulty,
+  of a `leg_list` leg or of an open repair's new leg, on a leg available
+  this pass whose leg row does not read `ERROR`: a row that reads
+  `PENDING`, as before a new primary's first probe, does not hold a source
+  back, but a copy that reads errors from the last in-sync member makes md
+  mark the array broken (CN29). A bad leg counts, since nothing leaves the
+  array here. With
+  none, the member is left out, which is no error: a `leg_list` member
+  whose leg is not available is late (above) and registers the CN10 retry,
+  and the read's verdict names the member left out once a source serves
+  again (CN30). Reason: it is the in-sync guard's reason, md
+  learning that a member is dead only from IO to it, so on an idle array a
+  copy would read a dead member that still reads in sync and break the
+  array.
 
   The put-back is a remove and then an add, run by mdadm. md keeps its
   claim on a failed member until the member is removed, so an `--add`
@@ -1568,7 +1587,7 @@ dm-clone (CN18).
     and leaves the new leg out, and once md has moved the member out of
     its place the next converge removes it and adds the new leg. A
     STARTED repair's new leg that the array lacks is added once available,
-    as a `leg_list` member is. Either add of a new leg taken from a
+    as a `leg_list` member is, beside a copy source (above). Either add of a new leg taken from a
     retired leg passes the take-back check first (below).
   * The put-back. A new leg md has failed and moved out of its place, of a
     STARTED repair or of a CREATED one whose abort flag the request does
@@ -3950,7 +3969,8 @@ the member (an IO to it that errors does, and so does CN12's
 reconciliation failing it out as an extra or as a repair's bad leg; until
 then the dead member does not count in "degraded"), and the fault is its leg
 row's, from the CN11 prober's own IO, until the leg can take the member
-back, when the verdict names it (CN30) and the converge puts it back
+back beside a copy source, when the verdict names it (CN30) and the
+converge puts it back
 (CN12), unless it is an open repair's bad leg, which stays out while its
 repair is open. While CN12's in-sync guard holds over the array, the row reads
 `ERROR` instead, and the member is neither named nor put back (CN28,
@@ -4041,7 +4061,9 @@ back or add (CN12): a `leg_list` member of a wanted group's running
 array that md has failed and moved out of its slot, or that the array
 lacks, on a leg whose leg row reads `OK` (its wrapper there and its last
 CN11 probe passed) and whose subsystem has a multipath namespace, every
-controller's "address" known and a path both live and optimized. It
+controller's "address" known and a path both live and optimized, while
+another member is a copy source (CN12), its leg read as serving the same
+way and its leg row not `ERROR`. It
 reads them from the arrays and the leg rows of the read's own probe and,
 for each such member whose leg row reads `OK`, from one lookup of the
 leg's subsystem in the read's walk. An open repair's bad leg is not one
@@ -4211,7 +4233,10 @@ stores instead is CN23's.
   not available and refuses to fail the member the group does not keep,
   while a read finds the leg serving, reads the group's row `OK` and names
   a `leg_list` member the array lacks whose leg can take it, so each round
-  that answers from such a read brings a converge that refuses again.
+  that answers from such a read brings a converge that refuses again. So
+  does a member's copy source on such a leg (CN12): the read counts the
+  source and names the member, while the converge, whose leg fails at the
+  connect, counts none and adds nothing.
 * A side whose controller is gone and whose connect keeps failing is named
   on every read (CN30). A side whose disk node dies keeps its controller,
   connecting, since a leg's controller has no controller-loss timeout

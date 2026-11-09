@@ -522,6 +522,13 @@ func TestRepairAddsTheNewLeg(t *testing.T) {
 			func(f *repFix) []string {
 				return []string{f.add(f.newLegDev)}
 			}, false, false},
+		// No member a copy onto the new leg could read from serves: the
+		// add waits (hasCopySource, CN12).
+		{"started, no source serves", pb.RepStage_REP_STAGE_STARTED, false,
+			allLegs, func(f *repFix) {
+				f.badLegDead()
+				f.legDead(testDataLeg2, testIp2, testSvcId2)
+			}, nil, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRepFix(t, tc.probed...)
