@@ -4032,7 +4032,8 @@ limits).
   info, `obs_stamp`).
 * `GetThinDeviceBm` and `GetLegBm` serve the gateway's bitmap reads
   (Bitmap reads) from a dm-thin metadata snapshot, reserved, dumped and
-  always released (`cnagent.md` CN25 to CN27): the per-slice td mapping
+  released after every reserve that succeeded or did not answer
+  (`cnagent.md` CN25 to CN27): the per-slice td mapping
   bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the
   wire convention **1 = unmapped**.
 * `CheckCn` and `CheckCntlr` are the health streams, one per CN or per
@@ -5345,9 +5346,14 @@ DN reboot resumes hydration where it left off, as a clone's copy goes on
 from the metadata on its clone meta group (Clone metadata durability). The
 optional bitmap fast-path: `GetLegBitmap` (paged) → `AppendMigrationBitmap`
 → the worker's `PushMigrBitmap` (Bitmap push protocol) → the destination
-agent persists each chunk at `LocalMigrBmPath` and discards
+agent persists each chunk at `LocalMigrBmPath` and tries to discard the
 never-written regions so that they are never copied (Migrations, Bitmap
-reads, raid0 bitmap math).
+reads, raid0 bitmap math). A leg bitmap read when this section allows
+(below) arrives after the primary's per-CN dm-linear maps the dm-clone, so
+that discard is refused at its exclusive open (`osclient.md`,
+DiscardRanges) and the regions are copied; only a create of the dm-clone,
+as after a DN reboot, applies the stored chunks (`dnagent.md`, Known
+limits).
 A skipped region keeps what the destination's recycled extents held, which
 the pool never reads, since no pool block maps there ([D15]) — provided
 the bitmap is read late enough. **A caller reads the leg bitmap only once
@@ -5747,9 +5753,12 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   (paged) → `AppendCloneBitmap` with that slice as `src_slice_idx` on sp2
   → the worker's `PushCloneBitmap` (Bitmap push protocol) → the sp2
   primary persists each chunk at `LocalCloneBmPath` and discards
-  (raid0 bitmap math). This is safe while IO runs through the dm-clone,
-  provided every page was read after the source stopped taking writes
-  (Clones; [D3], [D7]).
+  (raid0 bitmap math), provided every page was read after the source
+  stopped taking writes (Clones; [D3], [D7]). A chunk takes effect only
+  while no ns-dev maps the dm-clone: before the namespace serves through it
+  (`cnagent.md` CN18 step 6), or at a create or reload of the dm-clone;
+  once the ns-devs map it, the discard is refused at its exclusive open
+  (`osclient.md`, DiscardRanges) and those regions are copied.
 * When hydration completes: `DeleteTransfer` with `force` false on sp1
   (it retires the source: `suspended` true) and `DeleteClone` on sp2
   (`suspended` false, the namespace now backed by the local raid0). To
@@ -6321,8 +6330,8 @@ processes run co-located on any number of control-plane servers (fig.
   (Disk node; Controller node, common; `dnagent.md` CM2). Several agents on
   one kernel need more than distinct port ids (`dnagent.md` CM2), and two
   cn agents on one kernel are never safe (Controller node, common). Each
-  agent writes an IO queue cap on every subsystem it links to its port,
-  which, when above zero, bounds the TCP connections of every path to it
+  agent caps the IO queues of the subsystems it links to its port, when its
+  cap is above zero, which bounds the TCP connections of every path to them
   (`dnagent.md` SH32).
 * `dnv-cdc` (`cdc.md`) — the discovery controller (dnv-cdc): it reads etcd
   and listens for hosts on its NVMe/TCP endpoint; its placement is
@@ -6957,7 +6966,8 @@ that component's document and only pointed to here.
   blocked in an uninterruptible kernel wait is not (Common validation), nor
   is an in-process sysfs, configfs or device access once its syscall has
   started (`dnagent.md` SH15), the discards of a chunk apply aside, which
-  give up on a range at the soft timeout (`osclient.md`, DiscardRanges). The cn sweep's `nvme disconnect`, whose
+  give up on a range at the soft timeout or at the caller's cancel
+  (`osclient.md`, DiscardRanges). The cn sweep's `nvme disconnect`, whose
   delete can wait out the kernel's admin timeout, runs off the locks for
   that reason (`cnagent.md` CN10 and CN21); the disconnects that still run
   under a lock are each role's own limit (`cnagent.md`, Known limits;

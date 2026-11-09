@@ -88,7 +88,7 @@ type NqnParts struct {
 // arity, a non-hex id — is "not ours, never touched", NOT the user-chosen
 // host-facing NQN that ParseNqn's false otherwise means. Treating it as
 // host-facing would let a malformed name get a subsystem deleted, because a
-// host-facing subsystem with nothing attributable under it is swept as
+// host-facing subsystem with no namespace device and dnv's model is swept as
 // unowned.
 func IsDnvNqn(nqn string) bool {
 	return strings.HasPrefix(nqn, NqnPrefix+":")
@@ -96,8 +96,9 @@ func IsDnvNqn(nqn string) bool {
 
 // ParseNqn decodes a dnv-format NQN. A host-facing subsystem NQN is chosen by
 // the user and carries nothing, so it parses false; that "false" is the
-// signal the sweep attributes such a subsystem by its namespaces' backing
-// device instead. The gateway refuses a NEW host-facing NQN in the dnv
+// signal the sweep attributes such a subsystem by the held request that names
+// it, its namespaces' backing device, and with no namespace device its model
+// instead. The gateway refuses a NEW host-facing NQN in the dnv
 // namespace (architecture.md, Common validation), but a stored subsystem
 // may still carry one: if it decodes, it is attributed as
 // the kind it mimics, and if it does not, it is left alone (IsDnvNqn).

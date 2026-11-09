@@ -3204,8 +3204,10 @@ all, makes the subsystem foreign and untouchable, since dnv exports a host
 namespace only over an ns-dev. A subsystem with no namespace device is
 dnv's only when its "attr_model" reads dnv's model name
 (`common.NvmeModel`), which the gateway stamps on every subsystem record
-and the converge writes right after it closes the subsystem and reads its
-cntlid range, before any namespace or link, and it is then unowned; with the kernel's default model it is foreign, and a model
+and the converge writes right after it closes the subsystem and, when the
+new cntlid range lies above the live one, raises its cntlid max, before any
+namespace or link, and it is then unowned; with the kernel's default model
+it is foreign, and a model
 read that did not answer makes it not ours for the pass, named as a failed
 enumeration. Unowned subsystems only the node-level scope removes.
 Reason: the node-level sweep is the only remover of a host-facing
@@ -3885,7 +3887,8 @@ The rows, each with its `res_name` and what its probe checks:
   leg row — read their lookup, so the leg loop looks up a leg at most once:
   every wanted leg on a standby, and on a primary a two-sided leg or one
   whose row does not read `OK` (CN30); the put-back test looks up again the
-  legs of the members it would name and of their copy sources (CN30). The
+  legs it weighs, members whose row reads `OK` and their copy sources, and
+  so does the in-sync guard (CN30, CN12). The
   worker's cutover reads the primary's row of a migration's destination
   side (`dnv-worker.md` RW18), and no health rule judges these rows
   (`dnv-worker.md` HL2). Reason for the rows' scope: the primary's leg
@@ -4274,8 +4277,8 @@ stores instead is CN23's.
   disk node is dead or refuses the connect reads with no controller, so
   each round that answers from a read brings one `SyncupCntlr` and one
   converge, which fails at the connect, beside the CN10 retry that failed
-  connect registers, until the node answers again or leg repair moves the
-  leg (`dnv-worker.md` AR8).
+  connect registers, until the node answers again or the finish of the leg
+  repair (`dnv-worker.md` AR8) retires the leg.
 * A killed `--remove` leaves a repair's add half done: an add that runs
   within seconds of the bad leg's side dying can have its `--remove` of
   the bad leg killed at the soft timeout while a superblock write is
@@ -4446,8 +4449,9 @@ stores instead is CN23's.
   no namespace device the node-level sweep reads it as foreign and leaves
   it (CN21); an operator removes it.
 * A clone's bitmap apply takes time that grows with its ranges while no
-  table maps the dm-clone: its create and a build that finds hydration off
-  (CN18 step 4) and a push of a changed chunk (CN22) apply the whole skip
+  table maps the dm-clone: its create or reload and a build that finds
+  hydration off (CN18 step 4) and a push of a changed chunk (CN22) apply the
+  whole skip
   set under the cntlr's CN1 locks. The discards run in the agent's own
   process, one open and one ioctl per range with no child process each
   (`osclient.md`, DiscardRanges), but a fragmented source's hundreds of

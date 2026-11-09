@@ -382,11 +382,14 @@ The limits a user must know:
 - Corrupt thin pool metadata has no repair path in dnv: repairing it is an
   operator's job, by hand, onto fresh space.
 - A leg bitmap read too early during a migration can hand a pool another pool's
-  bytes. The optional fast path skips the blocks of a leg that the thin pool
-  has not written; read while the old side still takes writes, it misses the
-  blocks written after the read, and the pool later reads there what the new
-  side's recycled extents hold. Read it only after the cutover, once the
-  primary's path to the new side is ANA optimized.
+  bytes. The optional fast path would skip the blocks of a leg that the thin
+  pool has not written; read while the old side still takes writes, it
+  misses the blocks written after the read, and the pool later reads there
+  what the new side's recycled extents hold. Read it only after the cutover,
+  once the primary's path to the new side is ANA optimized; at that point
+  the new side's copy device is in use and refuses the skip, so the fast
+  path skips nothing until the new side is rebuilt, as after a reboot of its
+  disk node.
 - A migration's bitmap appended in more than one piece can hand a pool
   another pool's bytes: the pieces join byte by byte and carry no block
   count, so a piece before the last that covers a block count that is not a

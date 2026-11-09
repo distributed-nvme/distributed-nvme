@@ -37,11 +37,11 @@ it.
   files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
   maker and mount commands, its sysfs and mount table reads and its read of
   a volume's device link (`csi.md`, The node plugin). **All** OS command execution, directory listing, modification-time
-  read, device-number read and disk file IO in production code goes
+  read, device-number read, discard and disk file IO in production code goes
   through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile`, and never read a directory or stat a path,
   directly outside this file. This is what makes the logging rules of
-  `log.md` R8 (its first, second, fifth, sixth and seventh items)
+  `log.md` R8 (its first, second, fifth, sixth, seventh and eighth items)
   enforceable and
   makes every consumer unit-testable via `FakeOsClient`. There is exactly **one** sanctioned exception in
   production code, recorded under "Exported raw helpers and the probe-IO

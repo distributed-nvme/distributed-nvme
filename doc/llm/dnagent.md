@@ -255,10 +255,10 @@ and, like the CN11 probers, takes no SH11 lock at all. A background read
 reads for the round that started it: it carries that round's trace id,
 minting one only when that round had none, so its records, a verdict that
 is not clean among them, name the round that brought them; and it takes
-the SH11 or SH12 locks for that one read. One goroutine outlives its RPC
-inside the `OsClient` itself: a discard given up on at the soft timeout or
-at the caller's cancel (`osclient.md`, DiscardRanges), which ends when the
-kernel answers it and which no `WaitBackground` joins.
+the SH11 or SH12 locks for that one read. A discard given up on at the
+soft timeout or at the caller's cancel (`osclient.md`, DiscardRanges)
+outlives its RPC inside the `OsClient` itself: its goroutines end when the
+kernel answers it, and no `WaitBackground` joins them.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
@@ -578,8 +578,8 @@ a listing, `osclient.md`, ReadDir; for a modification-time read,
 `osclient.md`, ReadMtime; for a device-number read, `osclient.md`,
 ReadDevNo), so a sysfs, configfs or device access the kernel holds returns
 only when the kernel does. The discards of a chunk apply are the exception:
-the call returns at the soft timeout and leaves a discard the kernel holds
-to finish there (`osclient.md`, DiscardRanges). A check round and an info read probe nothing
+the call returns at the soft timeout or at the caller's cancel and leaves a
+discard the kernel holds to finish there (`osclient.md`, DiscardRanges). A check round and an info read probe nothing
 (SH28), so a probe under a lock that runs long holds up the object's next
 observation and the calls that wait for its locks, never the reply to a
 round or an info read, and the worker judges that observation's age
@@ -3433,9 +3433,11 @@ else reported through `agent_reply` is still a protocol-level refusal.
   as long as the kernel takes over them. Once the primary's per-CN
   dm-linear maps the dm-clone (DN13 step 5), an apply is refused at the
   open: it discards nothing, holds the locks only briefly, and the regions
-  it would have marked are copied. A cancelled push returns at once and
-  leaves the range in flight to the kernel; the ranges it did not reach cost
-  extra copying only, until the next apply.
+  it would have marked are copied. A leg bitmap read when `architecture.md`,
+  Migration, allows arrives after that step, so on a migration only a create
+  of the dm-clone, as after a DN reboot, discards anything. A cancelled push
+  returns at once and leaves the range in flight to the kernel; the ranges
+  it did not reach cost extra copying only, until the next apply.
 * A reload whose load fails leaves its device suspended (OS wrappers), so
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,
