@@ -78,8 +78,9 @@ fetch-etcd:
 # directory or a program, whatever the builder's umask, as long as it leaves
 # the owner read, write and execute, and with no setuid or setgid bit), sorted
 # entries, the commit time of HEAD as every entry's time, and gzip without a
-# timestamp, so a rebuild on the same commit with the same Go, tar and gzip
-# gives the same checksum.
+# timestamp, so a rebuild on the same commit with the same Go and Go
+# settings, tar and gzip, and no file git ignores under deploy/, gives the
+# same checksum.
 ifneq ($(origin VERSION),command line)
 VERSION := $(shell git describe --tags --exact-match 2>/dev/null)
 endif

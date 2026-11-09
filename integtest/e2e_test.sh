@@ -1700,7 +1700,7 @@ derive_params() {
 	# most free first only inside one bin. Tier 1 draws from the guests
 	# outside the group's. Tier 2 draws from every guest when none of those
 	# has room, as on exactly LEGS DN guests, which a run with the copy case
-	# never has, while one of react alone can. So the pick is side-less for
+	# never has, while a run of react alone can. So the pick is side-less for
 	# certain only while every location in the draw still holds a side-less
 	# DN and no occupied DN with room for the leg in a bin the scan reads
 	# before that DN's, and the step checks it itself. So none of them enters
@@ -6386,9 +6386,9 @@ CP_TOOLS="ss pgrep pkill awk sed du df tail nohup grep timeout"
 # because the agent uses it here too: at the read-only level the ops case
 # steps through, the primary gives the ns-dev of each namespace it serves a
 # dm-flakey table over that namespace's backing (cnagent.md CN16 rule 7,
-# CN19). modprobe is best-effort on purpose, since a module built into the
-# kernel makes `modprobe` fail; modules_missing_cmd then proves each one
-# loaded or built in.
+# CN19). modprobe is best-effort on purpose: a module the guest lacks makes
+# it fail, and modules_missing_cmd then names each module neither loaded nor
+# built in, with the fix.
 NODE_MODULES="nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool dm-flakey raid1"
 
 # tools_cmd builds the ONE-LINE guest command that prints the missing tools,
@@ -14420,8 +14420,7 @@ copy_xfer_delete() {
 # has the group's ext_cnt and the migration's metadata units free — which at a
 # shape with more DN VMs than legs means the DN VMs outside the group's are
 # out of room, not that the rule was waived. A run with the copy case always
-# has more DN VMs than legs (parse_args refuses a run with no more DN VMs
-# than legs), so the location
+# has more DN VMs than legs (parse_args refuses such a run), so the location
 # assertion below is always made.
 copy_migration() {
 	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled"

@@ -121,8 +121,10 @@ take-over sees only when it comes before the operator's (`dnv-worker.md`, Leg
 repair; `architecture.md`, Repair); and the retire timer, as no run waits out a
 retired leg's age (`dnv-worker.md` AR12). Guest distinctness of a repair's
 fresh new leg in the react case at as many disk-node guests as a group has
-legs, where no guest lies outside the group's, and for a leg repair whose
-fresh leg react's steer pushes to the second tier (E2E4).
+legs, where no guest lies outside the group's, and for a leg repair whose fresh
+leg react's steer pushes to the second tier (E2E4); and the destination of the
+copy case's second migration, created and cancelled at once, which the case
+does not check at all.
 
 ## Topology and parameters
 
@@ -132,11 +134,11 @@ control-plane guest runs etcd, `dnv-gateway`, `dnv-worker`, `dnv-cdc` and
 `dnv-agent cn` each: two carry the pool's cntlrs and the rest none, where the
 ops case's third cntlr and the cntlr replacement land. The disk-node guests, at
 least as many as a group has legs, and more than that in a run with the copy
-case, which the suite refuses otherwise (E2E4), run many `dnv-agent dn`
-instances each, every one on its own loop device and its own nvmet port and
-service id, as two ports cannot listen on one address, all registered at their
-guest's location (E2E4). Two hosts run only the kernel's nvme-tcp stack and
-nvme-cli, but for nvme-stas on host0 inside the cutoff case (E2E10).
+case, which the suite refuses otherwise, run many `dnv-agent dn` instances
+each, every one on its own loop device and its own nvmet port and service id,
+as two ports cannot listen on one address, all registered at their guest's
+location (E2E4). Two hosts run only the kernel's nvme-tcp stack and nvme-cli,
+but for nvme-stas on host0 inside the cutoff case (E2E10).
 
 The control plane has a guest of its own, as in a deployment
 (`architecture.md`, System overview): it holds no kernel state and runs without
@@ -191,8 +193,8 @@ Finding DN candidates), ops needs a side-less disk node on as many guests as a
 group has legs, and guaranteeing that guarantees the create. The guarantee is
 sufficient, not necessary: below the bound the proof is lost, not the run. Its
 headroom also keeps the allocator's second tier out of reach wherever there are
-more disk-node guests than legs per group, which a run with the copy case needs
-(E2E4), save where react's steer leaves no enabled side-less disk node on a
+more disk-node guests than legs per group, which a run with the copy case
+needs, save where react's steer leaves no enabled side-less disk node on a
 guest outside the group's (E2E4), and as one more guest does not always lower
 the bound, a shape above the per-kernel cap is told how many disk-node guests
 it needs.

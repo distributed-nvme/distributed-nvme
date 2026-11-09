@@ -486,21 +486,23 @@ discovery controller stores its own default (NP10 owns the zero-KATO
 cutoff). Any other FID: invalid field, DNR.
 
 NP10. **Keep Alive.** A pending connection (NP1) has no keep-alive yet: it
-ends at its pre-Connect deadline, `DefaultCdcPendingTmoMs` after its
-accept, and nothing moves that deadline — not the ICReq, not a Connect the
+ends at its pre-Connect deadline, `DefaultCdcPendingTmoMs` after its accept,
+and nothing moves that deadline — not the ICReq, not a Connect the
 controller refused. A host's kernel sends its ICReq at its TCP connect and
-its Connect within moments of the ICResp, which the controller sends as
-soon as it accepts, so a deadline counted from the accept costs a real
-host nothing, while one that a refused Connect moved would let a client
-that never connects keep its place under the cap for as long as it keeps
-sending Connects the controller refuses. From a successful Connect on,
-every received command restarts the timer (the nvmet rule). A
-non-zero KATO expires at KATO plus `DefaultCdcKeepAliveGraceMs`; a zero
-KATO expires after `DefaultCdcZeroKatoTmoMs` idle, because zero does not
-mean immortal: such connections, a one-shot "nvme discover" among them,
-get a fixed idle cutoff, mirroring nvmet's discovery default. Expiry
-closes the socket; a connected connection then logs `host disconnected`,
-reason `keep_alive`, and a pending one logs nothing (NP13).
+its Connect within moments of the ICResp, which the controller sends as soon
+as it accepts, so a deadline counted from the accept costs a real host
+nothing, while one that a refused Connect moved would let a client that
+never connects keep its place under the cap for as long as it keeps sending
+Connects the controller refuses. From a successful Connect on, every
+received command restarts the timer (the nvmet rule). A non-zero KATO
+expires at KATO plus `DefaultCdcKeepAliveGraceMs`; a zero KATO expires after
+`DefaultCdcZeroKatoTmoMs` idle, because zero does not mean immortal: such
+connections, a one-shot "nvme discover" among them, get a fixed idle cutoff:
+the default nvmet's discovery controller gives a zero KATO at Connect, kept
+here for a zero a later Set Features writes too, where nvmet runs no
+keep-alive timer. Expiry closes the socket; a connected connection then logs
+`host disconnected`, reason `keep_alive`, and a pending one logs nothing
+(NP13).
 
 NP11. **AER.** Up to `CdcAerl` + 1 outstanding per connection; one more is
 refused with the AER-limit-exceeded status. An armed AER completes

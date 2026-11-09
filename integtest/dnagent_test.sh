@@ -2694,7 +2694,8 @@ migr_provision_dst() { # m revision
 		--bm-cnt "$BM_CNT" --cutover-pending=true)
 	assert_provisioning_or_ok "$out" ".side_info.side_dev_info.status" \
 		"migr $m dst phase 1"
-	# sp_level no_migration already suppresses the clone; the gate must not
+	# sp_level no_migration already suppresses the clone and the source
+	# connection; the gate must not
 	# turn that into anything else.
 	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 		"migr $m dst clone before provisioning"

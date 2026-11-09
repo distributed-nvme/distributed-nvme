@@ -1906,8 +1906,8 @@ harmless. A migration destination takes its run before it zeroes
   paged list RPCs resolve it per request, cut one page with it and throw it
   away (page_token; `gateway.md` GW4). The bounds and the defaults are
   constants of `common/constants.go`, save the stripe's default, which
-  follows the block, and a clone's hydration pair, which keeps the dm-clone
-  target's own:
+  follows the block, and a clone's hydration defaults, which are the
+  dm-clone target's own:
   * `dn_bin_conf.extent_size`: `MinDnExtSize` to `MaxDnExtSize`, default
     `DefaultDnExtSize`;
   * `alloc_conf.dn_batch_size`: `MinAllocDnBatchSize` to
@@ -7628,10 +7628,10 @@ that component's document and only pointed to here.
   its build. A node of the Kubernetes driver keeps the old primary's path
   until the replacement's path shows the volume's namespace (`csi.md`
   CSI15), so its IO can meet those errors until that teardown, or until the
-  replacement's path shows the namespace if that comes first; after the
-  teardown the old path reconnects and its IO waits, unless the old port
-  refuses the reconnect with DNR (A mount does not survive the loss of its
-  last path).
+  node drops the old path, which it does once the replacement's path shows
+  the namespace, if that comes first; after the teardown the old path
+  reconnects and its IO waits, unless the old port refuses the reconnect
+  with DNR (A mount does not survive the loss of its last path).
 * **A DN's metadata area can refuse a migration the count allowed.** A
   migration's run is contiguous, and a release can commit before the DN
   frees the run, so an area whose free units lie in runs too short, or
