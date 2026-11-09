@@ -3498,10 +3498,13 @@ leaked reservation blocks the next reserve and pins the pool's metadata
 blocks; on the caller's own context, a caller that went away before the
 release, such as one whose client gave up in the middle of the dump,
 would take the release with it and leave the reservation held until some
-later reserve on that pool met it. A reserve refused because a metadata
-snapshot is already held — one an earlier reserve made and nothing
-released, such as one whose reserve was killed after its message ran — is
-retried once after a release; that refusal is read from the error's type,
+later reserve on that pool met it. A reserve that did not answer — killed
+at the soft timeout, or its caller gone — may have run in the kernel, so
+the release follows it too, on the same kind of context; a reserve the
+kernel refused for any other cause holds nothing and gets no release of
+its own. A reserve refused because a
+metadata snapshot is already held — one an earlier reserve made and
+nothing released — is retried once after a release; that refusal is read from the error's type,
 EBUSY, or EEXIST for an output that words it "already exists", never from
 its text (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
 The XML goes to a file, never to stdout: the OS

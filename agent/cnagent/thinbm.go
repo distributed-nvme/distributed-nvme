@@ -3,6 +3,7 @@ package cnagent
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -140,7 +141,10 @@ func parseThinDump(doc string) (*thinSuperblock, error) {
 // the caller's cancellation does not reach, because a leaked reservation
 // blocks the next reserve and pins metadata blocks, and a caller that went
 // away before the release must not take the release with it. A reserve that
-// fails because one is already held is released and retried once.
+// fails because one is already held is released and retried once. A reserve
+// that did not answer — killed at the soft timeout, or its caller gone — may
+// have run in the kernel, so it is released too; one the kernel refused for
+// any other cause holds nothing and gets no release of its own.
 //
 // The document goes to a file (`-o`), never to stdout: the `os command` record
 // logs a command's stdout in full (log.md), and a dump is one element per
@@ -159,6 +163,9 @@ func (s *CnAgentServer) dumpThinMetadata(
 		return nil, err
 	}
 	if err := s.reserveMetadataSnap(ctx, sp); err != nil {
+		if !commandRefused(err) {
+			s.releaseMetadataSnap(context.WithoutCancel(ctx), sp)
+		}
 		return nil, err
 	}
 	defer s.releaseMetadataSnap(context.WithoutCancel(ctx), sp)
@@ -288,6 +295,14 @@ func (s *CnAgentServer) reserveMetadataSnap(
 	}
 	s.releaseMetadataSnap(ctx, sp)
 	return s.dm.Message(ctx, sp.poolFinalName, 0, "reserve_metadata_snap")
+}
+
+// commandRefused says whether err is a command that ran and answered "no",
+// as against one that never reported (agent.Reported), which may still have
+// run in the kernel.
+func commandRefused(err error) bool {
+	var cmdErr *agent.CmdError
+	return errors.As(err, &cmdErr) && agent.Reported(cmdErr.ExitCode, err)
 }
 
 func (s *CnAgentServer) releaseMetadataSnap(
