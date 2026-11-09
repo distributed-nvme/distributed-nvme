@@ -927,3 +927,100 @@ func TestARefusedNewerCntlrSaveTakesBackTheTrustInTheHeldRequest(t *testing.T) {
 		}
 	})
 }
+
+// TestARefusedNewerCntlrSaveStopsTheThinIdSweep: the other effect of the rule
+// the test above pins. CN14's activation sweep deletes from a slice's pool
+// every thin id the held request's td_list does not name, and runs only
+// under a request that counts as delivered (cntlrState.reqFromRpc; CN8). A
+// SyncupCntlr newer than the held request, refused for a failed save
+// (dnagent.md SH5), takes that trust back, so no converge sweeps until a
+// SyncupCntlr whose save holds arrives: the refused request may drop a td the
+// held one names, or add one whose id the held one does not, and the held
+// td_list is then no longer the newest this cntlr accepted. The sweep is
+// owed here because the dump of the converge that created the pool failed,
+// which leaves the slice armed. The request is then sent again and its save
+// holds, and its converge deletes the stray id once.
+func TestARefusedNewerCntlrSaveStopsTheThinIdSweep(t *testing.T) {
+	srv, node := newTestServer(t)
+	pool := poolName(srv)
+	node.holdThinIds(pool, sweepLiveDevId, sweepStrayDevId)
+	scriptDump(srv, node, sweepDump(sweepLiveDevId, sweepStrayDevId))
+	node.failCmd["cmd thin_dump"] = "thin_dump: metadata device is busy"
+	tds := []*pb.ThinDevice{createdTd(testTd, sweepLiveDevId)}
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: tds})
+	st := fixtureCntlrState(t, srv)
+	if !st.reqFromRpc || !sweepPending(srv, testSlice) ||
+		!node.thinPools[pool][sweepStrayDevId] {
+		t.Fatalf("fixture is wrong: delivered %v, sweep owed %v, stray "+
+			"held %v; want all three", st.reqFromRpc,
+			sweepPending(srv, testSlice), node.thinPools[pool][sweepStrayDevId])
+	}
+	delete(node.failCmd, "cmd thin_dump")
+
+	path := cntlrPathOf(srv, cntlrPtr())
+	fault := failSaves(srv, node, path)
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(),
+		cntlrReq(reqOpts{revision: 3, primary: true, tds: tds}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	assertSaveRefused(t, "SyncupCntlr", reply.GetAgentReply(),
+		reply.GetRevision(), 2)
+	assertOnlyFailedWrite(t, node, path)
+	if st.reqFromRpc {
+		t.Error("the held request still counts as delivered after a " +
+			"newer request was refused for a failed save")
+	}
+
+	// Two CN10 retry attempts converge the held request; neither sweeps.
+	retryAttempt(t, srv)
+	retryAttempt(t, srv)
+	for _, fragment := range []string{
+		"cmd dmsetup message " + pool + " 0 reserve_metadata_snap",
+		"cmd thin_dump",
+		"cmd dmsetup message " + pool + " 0 delete ",
+	} {
+		if n := callCnt(node, fragment); n != 0 {
+			t.Errorf("%d %q calls under the held request after the "+
+				"refusal, want none\ncalls:\n%s", n, fragment,
+				strings.Join(node.Calls(), "\n"))
+		}
+	}
+	if !node.thinPools[pool][sweepStrayDevId] {
+		t.Error("the stray id left the pool under the held request")
+	}
+	if !sweepPending(srv, testSlice) {
+		t.Error("the converges under the held request disarmed the slice")
+	}
+
+	// The request again, and its save holds: its converge sweeps once.
+	fault.mu.Lock()
+	clear(fault.paths)
+	fault.mu.Unlock()
+	node.Reset()
+	syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true, tds: tds})
+	if !st.reqFromRpc {
+		t.Error("the request whose save held does not count as delivered")
+	}
+	if n := callCnt(node, deleteMsg(pool, sweepStrayDevId)); n != 1 {
+		t.Errorf("%d deletes of the stray id, want exactly 1\ncalls:\n%s",
+			n, strings.Join(node.Calls(), "\n"))
+	}
+	if n := callCnt(node, deleteMsg(pool, sweepLiveDevId)); n != 0 {
+		t.Errorf("the sweep deleted the live td's id (%d messages)", n)
+	}
+	if node.thinPools[pool][sweepStrayDevId] {
+		t.Error("the stray id is still in the pool after the sweep")
+	}
+	if sweepPending(srv, testSlice) {
+		t.Error("the completed sweep left the slice armed")
+	}
+
+	// A further retry attempt under the delivered request sweeps nothing.
+	node.Reset()
+	retryAttempt(t, srv)
+	if n := callCnt(node, "cmd thin_dump"); n != 0 {
+		t.Errorf("%d dumps after the sweep completed, want none", n)
+	}
+}
