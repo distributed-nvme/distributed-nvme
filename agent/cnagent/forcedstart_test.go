@@ -538,7 +538,7 @@ func TestForcedStartRetriesASecondArrayThatRuns(t *testing.T) {
 // read of a broken array killed leaves the group ERROR, nothing stopped or
 // zeroed, and registers the retry, whose converge, the read answering, stops
 // the array and starts it from the named leg. The same read with no mark
-// registers none: every leg is available, and nothing waits.
+// registers the retry too, as a group build that failed (CN12).
 func TestForcedStartRetriesAReadBeforeIt(t *testing.T) {
 	for _, marked := range []bool{true, false} {
 		name := "with the mark"
@@ -564,8 +564,8 @@ func TestForcedStartRetriesAReadBeforeIt(t *testing.T) {
 				state, "grp data")
 			assertNoCall(t, f.node, "cmd mdadm --stop ")
 			assertNoCall(t, f.node, "--zero-superblock")
-			if retrying(t, f.srv) != marked {
-				t.Fatalf("retrying = %v, want %v", !marked, marked)
+			if !retrying(t, f.srv) {
+				t.Fatalf("the read that did not answer registered no retry")
 			}
 			if !marked {
 				return
@@ -593,7 +593,8 @@ func TestForcedStartRetriesAReadBeforeIt(t *testing.T) {
 // array of the group, the build's /sys/block listing killed while the
 // sweep's answers leaves the group ERROR, nothing zeroed or assembled, and
 // registers the retry, whose converge, the listing answering, starts the
-// array from the named leg. The same walk with no mark registers none.
+// array from the named leg. The same walk with no mark registers the retry
+// too, as a group build that failed (CN12).
 func TestForcedStartRetriesAWalkBeforeIt(t *testing.T) {
 	for _, marked := range []bool{true, false} {
 		name := "with the mark"
@@ -618,8 +619,8 @@ func TestForcedStartRetriesAWalkBeforeIt(t *testing.T) {
 			assertNoCall(t, f.node, "--zero-superblock")
 			assertNoCall(t, f.node, examineOf(f.leg2))
 			assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev)
-			if retrying(t, f.srv) != marked {
-				t.Fatalf("retrying = %v, want %v", !marked, marked)
+			if !retrying(t, f.srv) {
+				t.Fatalf("the read that did not answer registered no retry")
 			}
 			if !marked {
 				return
@@ -860,9 +861,10 @@ func TestForcedStartActsOnlyOnADeliveredMark(t *testing.T) {
 		assertNoCall(t, f.node, " --run --force")
 	}
 	assertStoredMarkLeftAlone("the startup reconcile")
-	if retrying(t, f.srv) {
-		t.Fatalf("the startup reconcile of a stored mark registered the " +
-			"retry")
+	// The refused assembly registers the CN10 retry (CN12), whose attempts
+	// leave the stored mark alone as the reconcile did (below).
+	if !retrying(t, f.srv) {
+		t.Fatalf("the refused assembly registered no retry")
 	}
 	f.node.Reset()
 	retryAttempt(t, f.srv)

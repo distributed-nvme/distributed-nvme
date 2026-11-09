@@ -915,7 +915,10 @@ more, or teardown (the `dnagent.md` DN13 pattern); the RPC itself retries a conn
 or waits for its head, only as far as the pass's budget allows. These
 register it: a leg that failed to converge — its connect, its
 multipath namespace or its wrapper (above), an unknown controller or a
-disconnect of its subsystem still in flight (below) — a clone source whose
+disconnect of its subsystem still in flight (below) — a group's build
+that failed with its legs as they are (CN12), a failed step of a
+namespace's or a transfer's export, its subsystem, its namespace or its
+port link (CN16, CN17), a clone source whose
 connection failed, or whose disconnect is still in flight (below), a
 clone failure CN18 lists, such as a clone meta group that is not ready
 while no dm-clone of the clone serves,
@@ -1233,8 +1236,21 @@ dm-clone (CN18).
   it is. While the array does not
   run, the bad leg is late as any other member is: the assembly takes it
   once it is available (case 2, above), and mdadm can refuse to start the
-  array without it. An assembly can still need a new leg, and then waits
-  for a converge that comes for another reason (Known limits). While the
+  array without it. An assembly that needs a repair's new leg that is not
+  available yet fails, and registers the retry as every failed build does
+  (next). A
+  group's build that fails with its legs as they are registers the CN10
+  retry too: its md walk or array read that did not answer, its create,
+  assembly or superblock probe that failed or did not answer, its start
+  that did not show, and a `RedundNone` group's dm-linear step. Reason:
+  the group's error is a row, which re-drives nothing, and a grow's new
+  group under a pool that serves (CN13) has no namespace that waits for
+  it. An array state the pass finds and leaves alone registers none — a
+  member that is not a dm device, an array that does not run, two arrays
+  that both hold legs of the group, an md attribute that does not parse —
+  short of a group whose forced-start mark stands (the forced start,
+  below), and neither does the create's refusal while another array holds
+  the group's name: only an operator ends those. While the
   group's forced-start mark stands and its array does not run, a member the
   forced start keeps (below) that is not available is late too, a repair's
   new leg among them: the forced start waits for it, and no read's verdict
@@ -1337,19 +1353,12 @@ dm-clone (CN18).
   listing of an array's "md" directory that failed with anything but ENOENT,
   or a member dm-name read failing with something other than ENOENT, makes
   an array unanswered; a foreign array's non-dm member reads ENOENT and is
-  recorded, so a foreign array cannot hold an assembly off for good. Nothing
-  re-drives the refused assembly either — unless the same pass registers the
-  CN10 retry for something else (any of CN10's triggers, among them a
-  `leg_list` member of any group of this cntlr that is not available, above,
-  and a namespace that waits for the layers above the group, CN16), whose
-  next attempt is a whole converge and tries the group again: the group's
-  error is a row, not a reply code (CN29), the error itself registers no
-  CN10 background retry, short of a group whose forced-start mark stands
-  (the forced start, below), and the cntlr's verdict reports a leftover (a
-  reply code the worker re-drives) only while its md enumeration still fails
-  (CN30) — so the group stays unassembled, its row `MISSING` on the Check
-  rounds after the array answers, until the cntlr's next converge for some
-  other reason (Known limits). Beside an answering match an unanswered array
+  recorded, so a foreign array cannot hold an assembly off for good. The
+  group's error is a row, not a reply code (CN29), and the cntlr's verdict
+  reports a leftover only while its md enumeration still fails (CN30), so
+  the read that did not answer registers the CN10 retry, as a failed build
+  does (above), whose next attempt is a whole converge and tries the group
+  again once the array answers. Beside an answering match an unanswered array
   is left alone (it cannot be told from another sp's array whose read was
   cut off; the one thing it hides is a second array of this group). Two
   answering arrays are an error; a member with no dm name (a foreign member)
@@ -2450,7 +2459,9 @@ before its enable, never the kernel's default group, so only the last loop
 moves a namespace to optimized. A converge that leaves the ns-dev of a
 namespace whose desired group is optimized off the backing the rules
 select — waiting, held or failed — registers the CN10 retry, whatever the
-cause and for as long as it lasts (Known limits). A move of the
+cause and for as long as it lasts (Known limits). So does a failed step
+of a subsystem's export: its `EnsureSubsystem`, a namespace object's step
+or its port link, whose rows re-drive nothing. A move of the
 last loop that fails registers the CN10 retry too: the namespace stays
 out of the group this rule gives it, even over an ns-dev on its serving
 device. Reasons: an IO
@@ -2536,7 +2547,8 @@ origin's raid0 is not there yet. A transfer namespace the build creates,
 or finds not enabled, gets `AnaGrpIdInaccessible` before its enable, and
 a converge that leaves the device of a transfer whose desired group is
 optimized off what the desired state wants registers the CN10 retry, as
-does a transfer's move that fails. The clone in the other pool then waits
+does a transfer's move that fails and a failed step of the transfer's
+export, its subsystem, its namespace or its port link. The clone in the other pool then waits
 rather than reads IO errors.
 
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
@@ -4225,41 +4237,6 @@ stores instead is CN23's.
   failover reaction fail the primary over (`dnv-worker.md` AR5). The new
   primary assembles the group from its `leg_list` legs and an open
   repair's new legs (CN12), which leave out the member the guard kept.
-* An unanswered array can leave a group unassembled: a group with no
-  answering array while another array of the walk did not answer is
-  neither created nor assembled that pass (CN12), and the error is a
-  row, which nothing re-drives by itself; the cntlr's verdict stays
-  non-zero only while its md enumeration still fails (CN30).
-  Once the array answers, the group waits, its row `MISSING`, for the
-  cntlr's next converge for some other reason — and the groups this can
-  hit include those a new primary's first converge must assemble, whose
-  slice layers cannot be built meanwhile. The late-member retry of CN12
-  does not reliably cover it: it runs only while some `leg_list` member
-  of the cntlr is not available, and the group's own legs, like every
-  other leg, may all be available. The retry a waiting namespace or
-  transfer registers (CN16, CN17) covers a group that a td's raid0 not
-  built yet needs, while a namespace or a transfer of that td the desired
-  state wants optimized waits for it, as at a new primary's first
-  converge, and the retry a clone registers while its clone meta group is
-  not ready and no dm-clone of it serves covers that group (CN18 step 2).
-  It does not cover a group the
-  serving stack does not need, such as a grow's new group under a pool
-  that serves (CN13), nor a group at the level that removes the thin
-  pools, whose namespaces sit on the dm-error on purpose (CN16 rule 3).
-* An assembly that needs a repair's new leg registers no retry of its
-  own: short of a forced start's wait, a repair's new leg is never late
-  (CN12), yet an assembly takes one
-  once it is available, and mdadm refuses to start the array from a lone
-  leg whose superblock counts another member as working
-  (`architecture.md`, "Make sure all groups are available"). So when a
-  promotion's first converge reads a STARTED repair's new leg that md
-  holds in sync before its side's ANA flip has reached this CN, while
-  every `leg_list` leg of the group is available, the bad leg among them,
-  the group stays unassembled until a converge for another reason; a
-  `leg_list` leg that is not available is late and registers the retry,
-  the bad leg too while the array does not run (CN12). The retries that
-  cover an unanswered array (above) cover it too, and leave out the same
-  groups.
 * A failed `--examine` read answers "no superblock": `Md.HasSuperblock`
   keeps a killed `mdadm --examine` apart from a member without a
   superblock, but not one that answered after its path's failfast
@@ -4270,7 +4247,9 @@ stores instead is CN23's.
   disk, and it reaches
   case 1 only when no member of the group answers with a superblock;
   that `--create --assume-clean` lands over live data only if a path of
-  that leg reconnects, or its disk reads again, before it runs. Nothing
+  that leg reconnects, or its disk reads again, before it runs. A group
+  whose assembly keeps failing has its probes, and so this chance, taken
+  again on each CN10 retry attempt (CN12). Nothing
   tells the two answers
   apart. `Md.Examine` gives the same answer (CN12): the forced start reads
   it as a named leg with no superblock and refuses the leg, the safe side,
@@ -4414,7 +4393,10 @@ stores instead is CN23's.
   `CnConnectRetryInterval`, which holds the cntlr's reads off while it
   runs: the late-member retry (CN10, CN12) runs the whole converge of the
   cntlr until every `leg_list` member is available, an open repair's bad
-  leg aside while its group's array runs. On members that are
+  leg aside while its group's array runs. A group's build that keeps
+  failing, such as an assembly mdadm keeps refusing, and an export step
+  that keeps failing cost the same, for as long as their cause lasts
+  (CN12, CN16, CN17). On members that are
   genuinely dead that lasts until the worker's leg repair
   (`dnv-worker.md` AR8) has created a repair for the last of them, whose
   bad leg is then no late member while the group's array runs (CN12),
@@ -4440,7 +4422,8 @@ stores instead is CN23's.
   (`dnv-worker.md` AR3), or no DN to place the new leg on. The retry then
   runs until the DN returns or an operator acts. Each attempt
   is a full converge of a built cntlr — probes, the sweep's enumerations,
-  no creates — the profile the connect retry already has while a side's
+  no creates, save the steps of a build or an export that keeps failing,
+  which each attempt runs again — the profile the connect retry already has while a side's
   connect fails (a leg's controller is connected with no controller-loss
   timeout, `dnagent.md` SH20, so a side that dies while its controller survives is
   late rather than a failed connect; once the controller is gone — its

@@ -677,9 +677,9 @@ func (w *MdWalk) Match(dmNames []string) (string, error) {
 			continue
 		}
 		if found != "" {
-			return "", fmt.Errorf(
+			return "", mdStateError{fmt.Errorf(
 				"arrays /dev/%s and /dev/%s both hold legs of the group",
-				found, node)
+				found, node)}
 		}
 		found = node
 	}
@@ -833,7 +833,8 @@ func (m *Md) readDetail(
 			return nil, err
 		}
 		if detail.Degraded, err = strconv.Atoi(degraded); err != nil {
-			return nil, fmt.Errorf("%s md/degraded %q: %w", dev, degraded, err)
+			return nil, mdStateError{
+				fmt.Errorf("%s md/degraded %q: %w", dev, degraded, err)}
 		}
 		if detail.SyncAction, err = m.presentAttr(
 			ctx, mdDir+"/sync_action"); err != nil {
@@ -1274,15 +1275,18 @@ func (s *CnAgentServer) ensureGroup(
 	err error,
 ) {
 	if !gp.raid1 {
-		return nil, false, false, "", s.ensureLinearGroup(ctx, gp, available)
+		return nil, false, false, "",
+			asBuildErr(s.ensureLinearGroup(ctx, gp, available))
 	}
+	// A walk or an array read that did not answer leaves the group unbuilt
+	// for the pass, a build failure as a failed create is (asBuildErr).
 	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
-		return nil, false, false, "", markedErr(gp, err)
+		return nil, false, false, "", markedErr(gp, asBuildErr(err))
 	}
 	detail, err = s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil {
-		return nil, false, false, "", markedErr(gp, err)
+		return nil, false, false, "", markedErr(gp, asBuildErr(err))
 	}
 	forced := gp.mark != nil && !(detail.Exists && mdRunning(detail.State))
 	switch {
@@ -1294,6 +1298,7 @@ func (s *CnAgentServer) ensureGroup(
 		if err == nil {
 			detail, err = s.startedArray(ctx, gp, walk)
 		}
+		err = asBuildErr(err)
 	}
 	if err == nil {
 		err = runningArrayErr(detail)
@@ -1545,9 +1550,8 @@ func (s *CnAgentServer) assembleGroup(
 			return err
 		}
 		if inUse {
-			return fmt.Errorf(
-				"an array runs under %s holding none of the group's legs",
-				gp.devPath)
+			return fmt.Errorf("an array runs under %s %w",
+				gp.devPath, errArrayNameInUse)
 		}
 		conf.AssumeClean = true
 		return s.md.Create(ctx, conf, members)
@@ -1624,6 +1628,57 @@ func (s *CnAgentServer) forcedStartPass(
 // (markedErr), with err's own text. The pass registers the CN10 retry for it
 // (forcedStartRetries).
 type forcedStartError struct{ err error }
+
+// errArrayNameInUse is the create's refusal while an array that holds none of
+// the group's legs runs under the group's name (assembleGroup). Only an
+// operator ends it, so it registers no retry (asBuildErr).
+var errArrayNameInUse = errors.New("holding none of the group's legs")
+
+// mdStateError marks an md read that answered with a state the pass leaves
+// alone: two arrays that both hold legs of the group (MdWalk.Match), or an
+// md attribute that does not parse (readDetail). Only an operator ends the
+// first, and nothing the pass does changes the second, so neither registers
+// the retry (asBuildErr).
+type mdStateError struct{ err error }
+
+func (e mdStateError) Error() string { return e.err.Error() }
+
+func (e mdStateError) Unwrap() error { return e.err }
+
+// groupBuildError marks a failure of a group's build with the pass's legs as
+// they are: the md walk or the array read before it that did not answer, the
+// create or the assembly that failed or did not answer, the superblock probe
+// before it, the start that did not show, or a RedundNone group's dm-linear
+// step (CN12). The pass leaves the group as it found it, and the worker
+// re-sends no syncup for a row, so the pass registers the CN10 retry
+// (groupBuildRetries). An array the pass finds and leaves alone — a member
+// that is not a dm device, an array that does not run (runningArrayErr),
+// an md state that answered as the pass leaves it (mdStateError) — is no
+// build failure, and neither is the name another array holds
+// (errArrayNameInUse): only an operator ends those.
+type groupBuildError struct{ err error }
+
+func (e groupBuildError) Error() string { return e.err.Error() }
+
+func (e groupBuildError) Unwrap() error { return e.err }
+
+// asBuildErr marks err as a group build's failure (groupBuildError), the
+// refusal of a name in use aside.
+func asBuildErr(err error) error {
+	var answered mdStateError
+	if err == nil || errors.Is(err, errArrayNameInUse) ||
+		errors.As(err, &answered) {
+		return err
+	}
+	return groupBuildError{err}
+}
+
+// groupBuildRetries reports whether a group's error is a build failure that
+// registers the CN10 retry (groupBuildError).
+func groupBuildRetries(err error) bool {
+	var build groupBuildError
+	return errors.As(err, &build)
+}
 
 func (e forcedStartError) Error() string { return e.err.Error() }
 

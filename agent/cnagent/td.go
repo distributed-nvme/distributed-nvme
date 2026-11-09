@@ -624,7 +624,9 @@ func objectAnaGrpId(state *agent.NsState) int {
 // attributes (cnagent.md CN16). Each namespace's step leaves its error in
 // nsErrs, from which reportNamespaces writes the namespace rows after the
 // build's ANA loop; a subsystem whose own step fails steps none of its
-// namespaces, and they get no row.
+// namespaces, and they get no row. It reports whether every step went
+// through: one that failed goes to a row, which re-drives nothing, so the
+// build registers the CN10 retry for it (CN16).
 func (s *CnAgentServer) ensureSubsystem(
 	ctx context.Context,
 	st *cntlrState,
@@ -632,19 +634,24 @@ func (s *CnAgentServer) ensureSubsystem(
 	sp *ssPlan,
 	info *pb.CntlrInfo,
 	nsErrs map[uint64]error,
-) {
+) bool {
 	ssKey := resKeyOf(resKeySubsysFmt, sp.ssId)
 	if err := s.nvmet.EnsureSubsystem(
 		ctx, s.subsysConf(plan, sp)); err != nil {
 		info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(
 			ssKey, sp.nqn, err.Error())
-		return
+		return false
 	}
+	ok := true
 	for _, np := range sp.namespaces {
 		nsErrs[np.nsId] = s.ensureNamespaceObject(ctx, np)
+		if nsErrs[np.nsId] != nil {
+			ok = false
+		}
 	}
 	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn)
 	info.SsIdToSubsystem[sp.ssId] = st.tracker.FromErr(ssKey, sp.nqn, "", err)
+	return ok && err == nil
 }
 
 // reportNamespaces writes a converge's namespace rows after its ANA loop

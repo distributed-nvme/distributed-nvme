@@ -124,6 +124,10 @@ type xferStep struct {
 	outcome xferDevOutcome
 	rows    xferRows
 	nsErr   error
+	// exportFailed is a failed step of the transfer's export — its
+	// subsystem, its namespace or its port link — which the build registers
+	// the CN10 retry for (CN17).
+	exportFailed bool
 }
 
 func (s *CnAgentServer) xferSubsysConf(
@@ -227,13 +231,14 @@ func (s *CnAgentServer) ensureXfer(
 		ctx, s.xferSubsysConf(plan, xp)); err != nil {
 		info.XferIdToSubsystem[xp.xferId] = st.tracker.Err(
 			ssKey, xp.nqn, err.Error())
-		return xferStep{outcome: xferDevPut}
+		return xferStep{outcome: xferDevPut, exportFailed: true}
 	}
 	nsErr := s.ensureXferNamespace(ctx, plan, xp)
 	linkErr := s.nvmet.EnsurePortLink(ctx, s.port.PortId, xp.nqn)
 	info.XferIdToSubsystem[xp.xferId] = deferredFromErr(
 		st.tracker, xp.deferred, ssKey, xp.nqn, "", linkErr)
-	return xferStep{outcome: xferDevPut, rows: xferRowsNamespace, nsErr: nsErr}
+	return xferStep{outcome: xferDevPut, rows: xferRowsNamespace, nsErr: nsErr,
+		exportFailed: nsErr != nil || linkErr != nil}
 }
 
 // reportXferExport writes the export rows ensureXfer left to the build, after

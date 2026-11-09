@@ -398,7 +398,7 @@ func (s *CnAgentServer) build(
 			}
 			if gp.hasLateMember(available, running) ||
 				gp.markWaits(running, forcedStarted) ||
-				forcedStartRetries(err) {
+				forcedStartRetries(err) || groupBuildRetries(err) {
 				late = true
 			}
 		}
@@ -441,7 +441,10 @@ func (s *CnAgentServer) build(
 		// group, or of a held request that counts as delivered no more since
 		// syncupCntlr refused a newer one for a failed save
 		// (cntlrState.reqFromRpc). The pass that started the array registers
-		// nothing for its mark.
+		// nothing for its mark. And so does a group build that failed with
+		// its legs as they are (groupBuildRetries): its error is a row, and a
+		// grow's new group under a pool that serves has no namespace that
+		// waits for it.
 		s.startConnectRetry(st, plan)
 		retryNeeded = true
 	}
@@ -631,7 +634,12 @@ func (s *CnAgentServer) build(
 		// the ANA loop (reportNamespaces).
 		nsErrs := make(map[uint64]error, len(plan.namespaces))
 		for _, ssp := range plan.subsystems {
-			s.ensureSubsystem(ctx, st, plan, ssp, info, nsErrs)
+			if !s.ensureSubsystem(ctx, st, plan, ssp, info, nsErrs) {
+				// A failed export step goes to a row, which re-drives nothing
+				// (CN16): the CN10 retry builds it again.
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
+			}
 		}
 
 		// ANA rewrites to optimized last — architecture.md, Failover,
@@ -695,10 +703,15 @@ func (s *CnAgentServer) build(
 		// group otherwise; one left short, its move that failed included,
 		// registers the CN10 retry, for the namespaces' reason.
 		for _, xp := range plan.xfers {
+			step := xferSteps[xp.xferId]
+			if step.exportFailed {
+				// As a namespace's failed export step: the CN10 retry.
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
+			}
 			if plan.xferAnaGrpId(xp) == common.AnaGrpIdInaccessible {
 				continue
 			}
-			step := xferSteps[xp.xferId]
 			if step.outcome != xferDevPut {
 				s.startConnectRetry(st, plan)
 				retryNeeded = true

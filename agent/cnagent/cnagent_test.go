@@ -1511,11 +1511,10 @@ func TestGroupCreateAssumeClean(t *testing.T) {
 }
 
 // TestGroupAssembleRefusalIsAnError: a promotion whose assembly md refuses
-// reads the group's row ERROR. A group's error is a row, and by itself
-// registers no CN10 retry: with every leg available, no member is late
-// (CN12). A namespace over the group waits all the same — its ns-dev stays
-// parked, its namespace inaccessible — and that registers the retry (CN16),
-// a cause that never goes away included.
+// reads the group's row ERROR. The row re-drives nothing, so the failed
+// assembly registers the CN10 retry by itself (CN12), with no namespace
+// waiting over the group as under one, whose ns-dev stays parked and its
+// namespace inaccessible (CN16).
 func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1524,7 +1523,7 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 		retry bool
 	}{
 		{name: "under a namespace", retry: true},
-		{name: "with no td", noTd: true},
+		{name: "with no td", noTd: true, retry: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -2105,6 +2104,7 @@ func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{
 				revision: 2, primary: true, raid1: true, twoLegs: true})
 			mdDev := srv.nf.MdPath(
@@ -2141,6 +2141,13 @@ func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 				!strings.Contains(info.GetDetails(), want) {
 				t.Fatalf("the group reported %v %q, want ERROR %q",
 					info.GetStatus(), info.GetDetails(), want)
+			}
+			// CN12: the refusal of a name another array holds is an
+			// operator's to end, so it registers no CN10 retry; a name probe
+			// that did not answer is a build failure, which does.
+			if got := retrying(t, srv); got != tc.killNameProbe {
+				t.Fatalf("the retry is registered: %v, want %v",
+					got, tc.killNameProbe)
 			}
 			assertNoCall(t, node, "cmd mdadm --create")
 			assertNoCall(t, node, "cmd mdadm --detail")
