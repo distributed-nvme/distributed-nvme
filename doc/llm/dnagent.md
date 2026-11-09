@@ -775,8 +775,8 @@ carries the rule for the other strict reads besides `Md.Detail`'s above,
 among them:
 `Nvmet.NsDevicePath` (a
 namespace's "device_path", by which the cn sweep attributes a host-facing
-subsystem no stored request claims — one with no attributable namespace is
-unowned, and the node-level sweep removes it, `cnagent.md` CN21 — and by
+subsystem no stored request claims — a namespace over another device makes
+it foreign, `cnagent.md` CN21 — and by
 which DN6 attributes a `SideToCnNqn` export: an export whose read did not
 answer is foreign for that pass and named as a failed enumeration; and by
 which DN6's step before the first layer finds the device a migration
@@ -785,7 +785,10 @@ L1, so no layer runs),
 `Nvmet.NsAnaGrpId` (a namespace's "ana_grpid", by which DN13 reads, in a
 destination pass whose step stopped, whether a per-CN stack serves through
 the dm-clone: a group read that did not answer, taken as not optimized,
-would reload the leg's only serving path onto its dm-error), the "enable"
+would reload the leg's only serving path onto its dm-error),
+`Nvmet.SubsysModel` (a subsystem's "attr_model", by which the cn sweep
+calls a subsystem with no namespace device dnv's: a read that did not
+answer is not ours for the pass and named, `cnagent.md` CN21), the "enable"
 reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an
 "absent" would skip the disabling write and the rmdir of a namespace the
 kernel still has enabled), `Nvmet.NsEnabledStrict` (a side export's

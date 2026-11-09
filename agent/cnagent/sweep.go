@@ -326,10 +326,16 @@ func legWrapperSp(clusterId, cnId uint64, name string) (uint64, bool) {
 // A dnv-format NQN carries its own ids. A HOST-FACING NQN is chosen by the
 // user and carries nothing, so it is attributed by what its namespaces point
 // at: a namespace whose device_path is a kind-c6 ns-dev of ours makes the
-// subsystem that sp's. One with no attributable namespace at all is
-// **unowned** and only the node-level sweep may remove it — which assumes at
-// most one cn agent per kernel. A co-hosted dn agent is fine: its NQNs are
-// all dnv-format kinds 2 and 3, which never reach that arm.
+// subsystem that sp's. dnv exports a host namespace only over an ns-dev, so a
+// namespace over any other device, another cn's ns-dev included, makes the
+// subsystem foreign. One with no namespace device at all is dnv's only when
+// its attr_model reads common.NvmeModel, which every subsystem dnv makes
+// carries (a model read that did not answer is not dnv's, and is named as a
+// failure); it is then **unowned**, and only the node-level sweep may remove
+// it — which assumes at most one cn agent per kernel. A co-hosted dn agent is
+// fine: its NQNs are all dnv-format kinds 2 and 3, which never reach that
+// arm. A subsystem dnv made whose model write a kill cut off reads the
+// kernel's default and stays (cnagent.md, Known limits).
 //
 // ours is false for a subsystem this agent must never touch; unowned is true
 // only when ours is true and no sp could be named.
@@ -379,13 +385,18 @@ func (s *CnAgentServer) nvmetOwner(
 			res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, nsid), err)
 			return 0, false, false
 		}
-		if !ok {
+		path = strings.TrimSpace(path)
+		if !ok || path == "" || path == agent.NsDevicePathUnset {
+			// A namespace whose device was never written names nothing:
+			// what a build cut off between its namespace mkdir and its
+			// device_path write leaves.
 			continue
 		}
-		dn, ok := common.ParseDmName(strings.TrimPrefix(
-			strings.TrimSpace(path), "/dev/mapper/"))
+		dn, ok := common.ParseDmName(strings.TrimPrefix(path, "/dev/mapper/"))
 		if !ok || dn.Kind != common.DmKindCnNsDev {
-			continue
+			// A namespace over a device that is no ns-dev: dnv exports a
+			// host namespace over nothing else, so the subsystem is foreign.
+			return 0, false, false
 		}
 		if dn.ClusterId != clusterId || dn.NodeId != cnId {
 			// A namespace backed by ANOTHER cn's ns-dev: foreign, not
@@ -399,6 +410,15 @@ func (s *CnAgentServer) nvmetOwner(
 			return 0, false, false
 		}
 		return dn.SpId(), true, false
+	}
+	// No namespace device: dnv's only by its model.
+	model, ok, err := s.nvmet.SubsysModel(ctx, nqn)
+	if err != nil {
+		res.Fail("nvmet "+nqn+" attr_model", err)
+		return 0, false, false
+	}
+	if !ok || model != common.NvmeModel {
+		return 0, false, false
 	}
 	return 0, true, true
 }

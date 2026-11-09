@@ -1090,8 +1090,10 @@ carries, each a full `IdKeyFmt` field. A name that does not decode exactly
 is "not a dnv name" rather than a partly-read one, because the caller's next
 move is a removal. A subsystem in a cn's nvmet tree whose NQN does not
 decode is a host-facing one, which the cn agent attributes by the held
-request that still names it or else by the namespaces it is built out of
-(`cnagent.md` CN21); one carrying the dnv prefix is never touched
+request that still names it or else by the namespaces it is built out of,
+and with none of those by its model; one dnv did not make, an operator's
+own export on the same kernel, is foreign and never touched (`cnagent.md`
+CN21); one carrying the dnv prefix is never touched
 (dm-device kinds); and any other NQN that does not decode, a connection's
 on the cn or any on the dn, is left alone and never judged (`cnagent.md`
 CN21; `dnagent.md` DN6). Every dm kind of both roles carries the **sp id

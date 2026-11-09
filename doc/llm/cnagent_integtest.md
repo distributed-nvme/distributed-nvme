@@ -94,6 +94,9 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   Connect to it and leaves a kernel-log record naming that host and that
   subsystem, a record no other connect failure leaves, so the suite reads an
   admission refusal from that record (Conventions).
+* A namespace's "device_path" that was never written reads back "(null)",
+  not an empty string, which smoke asserts on a namespace it makes by hand
+  (`cnagent.md` CN21).
 * nvmet checks admission only when a host connects (`architecture.md`, Primary
   cntlr), so removing a host's link from a subsystem leaves the host's
   controller to it live, which smoke asserts after revoking the host.
@@ -315,8 +318,11 @@ clean and refuses the emulated host's connect; granted, it admits exactly that
 host; revoked again, the connected host keeps its path and its next connect is
 refused; host IO; clean check rounds, the namespace identity included
 (`dnagent.md` SH17); the raw thin-pool status line the auto-grow parses (CN28);
-and a teardown by an empty pointer list, re-sent while it replies leftover
-(CN7, CN21), leaving the CN no dm device or host-facing subsystem and a
+two subsystems made by hand, one with a namespace over a device that is no
+ns-dev and one empty with the kernel's default model, which the teardown's
+node-level sweep leaves alone, and a third with dnv's model and a namespace
+whose device was never written, which it removes (CN21); and a teardown by an empty pointer
+list, re-sent while it replies leftover (CN7, CN21), leaving the CN no dm device or host-facing subsystem but the two made by hand, which the stage then removes itself, and a
 fresh `CheckCn` round replying clean (CN30).
 
 **redund** first pins, with no agent and no NVMe-oF path, the refusal the

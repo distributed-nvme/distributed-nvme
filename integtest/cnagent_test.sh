@@ -1338,6 +1338,31 @@ port_linked() {
 	if [ -e "$NVMET/ports/1/subsystems/$1" ]; then echo linked; else echo no; fi
 }
 
+# foreign_subsys_add <nqn> [device_path] — an nvmet subsystem made by hand,
+# as an operator's own export is: its model the kernel's default and, with a
+# device path, one namespace over that path, not enabled (nvmet checks the
+# path only at the enable). Fails when a step fails.
+foreign_subsys_add() {
+	mkdir "$NVMET/subsystems/$1" || return 1
+	if [ -n "${2:-}" ]; then
+		mkdir "$NVMET/subsystems/$1/namespaces/1" || return 1
+		echo "$2" >"$NVMET/subsystems/$1/namespaces/1/device_path" ||
+			return 1
+	fi
+	echo added
+}
+
+# unset_subsys_add <nqn> — the shape a cn converge cut off between its
+# namespace mkdir and its device_path write leaves: dnv's model ("dnv",
+# common.NvmeModel) and one namespace whose device was never written, which
+# the kernel reads back as "(null)". Fails when a step fails.
+unset_subsys_add() {
+	mkdir "$NVMET/subsystems/$1" || return 1
+	echo dnv >"$NVMET/subsystems/$1/attr_model" || return 1
+	mkdir "$NVMET/subsystems/$1/namespaces/1" || return 1
+	echo added
+}
+
 # port_unlink <nqn> / port_relink <nqn> — take one exported subsystem's link
 # into port 1 away, behind the dn agent's back, and put it back. While the
 # link is gone and the port still listens, a host's reconnect to the
@@ -3966,9 +3991,36 @@ case_smoke() {
 	host_disconnect "$hv" "$nqn"
 	host_refused "$hv" "$cn" "$nqn" "smoke revoke"
 
+	stage foreign "subsystems dnv did not make are left alone (CN21)"
+	# Two nvmet subsystems made by hand on the CN, as an operator's own
+	# exports are: one with a namespace over a device that is no ns-dev, and
+	# one with no namespace and the kernel's default model. The node-level
+	# sweep of the teardown's SyncupCn leaves both alone; the stage removes
+	# them by hand after it. A third, with dnv's model and a namespace whose
+	# device was never written, is what a converge cut off early leaves: the
+	# sweep removes it.
+	local fdev="$NQN_IT_PREFIX:foreign-dev" fempty="$NQN_IT_PREFIX:foreign-empty"
+	local funset="$NQN_IT_PREFIX:unset-dev"
+	assert_eq "$(helper "$cn" "foreign_subsys_add '$fdev' /dev/dnv-it-no-ns-dev")" \
+		added "smoke: making $fdev by hand"
+	assert_eq "$(helper "$cn" "foreign_subsys_add '$fempty'")" added \
+		"smoke: making $fempty by hand"
+	assert_eq "$(helper "$cn" "unset_subsys_add '$funset'")" added \
+		"smoke: making $funset by hand"
+	assert_eq "$(helper "$cn" "ns_attr '$funset' 1 device_path")" '(null)' \
+		"smoke: a device_path never written"
+
 	stage teardown "empty cntlr list, then empty side list"
 	cn_drop "$cn"
 	dn_drop "$dn"
+	assert_eq "$(helper "$cn" "ns_attr '$fdev' 1 device_path")" \
+		/dev/dnv-it-no-ns-dev "smoke: the node sweep left $fdev alone"
+	assert_eq "$(helper "$cn" "ss_attr '$fempty' attr_model")" Linux \
+		"smoke: the node sweep left $fempty alone"
+	assert_eq "$(helper "$cn" "ss_attr '$funset' attr_model")" MISSING \
+		"smoke: the node sweep removed $funset"
+	helper_ok "$cn" "drop_subsys_glob '$fdev'"
+	helper_ok "$cn" "drop_subsys_glob '$fempty'"
 	got=$(helper "$cn" "cn_residue $(hex16 "${CNID[$cn]}")")
 	[ -z "$got" ] || die "smoke: vm$cn still holds cn objects: $got"
 	out=$(cnctl "$cn" check-cn --fresh --revision "${CNSYNC[$cn]}")

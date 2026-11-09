@@ -177,9 +177,9 @@ and the rule — the cn names that carry no cn id, and why placement
 does not reliably keep two cntlrs of one SP off one kernel — is
 `architecture.md`, Controller node, common. CN21's attribution assumes
 the rule as well: a host-facing subsystem that no cntlr this agent holds
-claims and no namespace attributes is unowned and removed at node level,
-and another cn agent's subsystem passes through that very shape while it
-is being built.
+claims, with no namespace device and dnv's model, is unowned and removed
+at node level, and another cn agent's subsystem passes through that very
+shape while it is being built.
 
 CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with two cn
 differences. `--capacity` is optional, since zero is a value (CN3). And
@@ -342,8 +342,8 @@ alone, so a skipped cntlr's clone source that the sweep judges at all, a
 transfer of this cluster (CN21), survives a sweep whose listings answered
 only while a live dm-clone maps it: the source reads as in use. So is the
 ownership of its host-facing subsystems: with no cntlr in memory to claim
-it, a subsystem of its sp that holds no namespace over an ns-dev reads as
-nobody's and is removed, and its connected hosts can lose that controller:
+it, a subsystem of its sp that holds no namespace device and carries
+dnv's model reads as nobody's and is removed, and its connected hosts can lose that controller:
 a reconnect attempt that finds the subsystem gone while the port still
 carries another subsystem is refused with DNR and ends the host's
 reconnects, so such a host must connect again once the cntlr's
@@ -3191,11 +3191,22 @@ exist whose claim is not already visible here. The guarantee is about
 this process's state, not about the files: the claim of a cntlr whose
 file CN2 skipped is in that file alone (CN2). Second,
 for a subsystem no held request claims, its namespaces, in the listing's
-order: the first whose "device_path" parses as an ns-dev (`CnNsDevName`)
-decides for the whole subsystem — one of ours makes it that sp's; one
-that is not ours (another cn's, another cluster's) makes the subsystem
-foreign and untouchable — and a subsystem with no such namespace at all
-is unowned. Those only the node-level scope removes. Calling anything
+order: the first with a "device_path" decides for the whole subsystem
+(the kernel reads one never written as "(null)", which names nothing, as an
+empty one does) —
+an ns-dev of ours (`CnNsDevName`) makes it that sp's; any other device,
+another cn's or another cluster's ns-dev or a device that is no ns-dev at
+all, makes the subsystem foreign and untouchable, since dnv exports a host
+namespace only over an ns-dev. A subsystem with no namespace device is
+dnv's only when its "attr_model" reads dnv's model name
+(`common.NvmeModel`), which the gateway stamps on every subsystem record
+and the converge writes right after it closes the subsystem, before any
+namespace or link, and it is then unowned; with the kernel's default model it is foreign, and a model
+read that did not answer makes it not ours for the pass, named as a failed
+enumeration. Unowned subsystems only the node-level scope removes.
+Reason: the node-level sweep is the only remover of a host-facing
+subsystem a teardown left behind with no namespace that names it, while an
+operator's own export on the same kernel must never be touched. Calling anything
 unowned assumes at most one cn agent per kernel (`cmd/dnv-agent cn`); a co-hosted dn
 agent is fine, because its NQNs are all dnv-format dn kinds, which never
 reach that arm.
@@ -4422,6 +4433,11 @@ stores instead is CN23's.
   release it. A namespace no host IO reaches after the suspend is not
   exposed; only a reload or resume of the ns-dev from outside the agent
   ends it.
+* A host-facing subsystem dnv made whose converge stopped before its
+  `attr_model` write — a kill, or the close before it refused — reads the
+  kernel's default model, so once no cntlr claims it and it holds no
+  namespace device the node-level sweep reads it as foreign and leaves it
+  (CN21); an operator removes it.
 * A namespace dropped from a dnv-prefixed subsystem that decodes to
   nothing stays enabled: the sweep is the only remover of a namespace
   (CN21), and it never attributes a subsystem whose NQN carries the dnv

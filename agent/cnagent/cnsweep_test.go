@@ -1046,15 +1046,28 @@ func TestThinDeleteOnlyUnderWantedPool(t *testing.T) {
 
 // seedNvmetSubsys installs a subsystem in the fake's configfs tree the way a
 // previous incarnation of this agent would have left it: the directory, its
-// two standard children, and — when devicePath is not empty — one namespace
-// backed by that device. A subsystem with no namespace at all is the shape a
-// teardown that was killed between the namespace rmdir and the subsystem
-// rmdir leaves behind.
+// two standard children, dnv's model (common.NvmeModel), and — when
+// devicePath is not empty — one namespace backed by that device. A subsystem
+// with no namespace at all is the shape a teardown that was killed between
+// the namespace rmdir and the subsystem rmdir leaves behind.
 func seedNvmetSubsys(node *fakeNode, nqn string, devicePath string) {
+	seedNvmetSubsysModel(node, nqn, devicePath, common.NvmeModel)
+}
+
+// seedNvmetSubsysModel is seedNvmetSubsys with the subsystem's attr_model
+// given: "Linux" is the kernel's default, what a subsystem made by hand
+// reads.
+func seedNvmetSubsysModel(
+	node *fakeNode,
+	nqn string,
+	devicePath string,
+	model string,
+) {
 	root := agent.NvmetRoot + "/subsystems/" + nqn
 	node.dirs[root] = true
 	node.dirs[root+"/namespaces"] = true
 	node.dirs[root+"/allowed_hosts"] = true
+	node.files[root+"/attr_model"] = model + "\n"
 	if devicePath == "" {
 		return
 	}
