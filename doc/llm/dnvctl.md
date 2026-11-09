@@ -583,9 +583,9 @@ states the
 bound one `--bm-hex` puts on an append, and so on the part of a leg a
 migration's appends can cover; how a caller pages a migration's bitmap into
 appends is `architecture.md`, Bitmap reads. The `--bm-idx` of
-`migr append-bm` addresses nothing, unlike the clone's: sent only when
-typed, it names the index a chunk must land at, and what the gateway does
-with a chunk sent again is `architecture.md`, Migrations.
+`migr append-bm` is a check, not an address as the clone's is: sent only
+when typed, it is the index the chunk must land at, and what the gateway
+does with a chunk sent again is `architecture.md`, Migrations.
 
 `migr finish` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished and nothing else: a migration whose cutover

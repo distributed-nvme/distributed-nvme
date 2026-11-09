@@ -54,8 +54,9 @@ const (
 )
 
 // The "kind" attribute of the two records (AR2; dnv-worker.md, Log records).
-// Every reaction the worker can run is one of these eight; nothing else is
-// ever logged as a kind. The last four are leg repair's (AR8): the create of a
+// Every reaction the worker can run is one of these nine; nothing else is
+// ever logged as a kind. grow_withdraw is auto-grow's withdrawal of a stuck
+// grow (AR6). The last four are leg repair's (AR8): the create of a
 // worker's repair, and the three steps that drive one, its finish, its cancel
 // and its try-to-abort.
 const (
@@ -1106,7 +1107,7 @@ type emptyScan struct {
 }
 
 // covers reports whether this empty scan proves another one empty: no less
-// room asked for, and every DN this one could pick still black-listed there.
+// room asked for, and every DN this one black-listed black-listed there too.
 // A location exclusion plays no part, since the create's tier 2 rescans
 // without it (architecture.md, Per-operation allocation).
 func (e emptyScan) covers(extCnt uint64, black []string) bool {
@@ -1711,8 +1712,9 @@ func (w *spWorker) parsePoolStatus(
 // architecture.md, GrowSlice, can stay that way indefinitely, so ending
 // the pass on it would disable AR7 and AR8 for the whole SP for exactly as
 // long. The same holds for a grow no DN or no CN budget has room for. Only an
-// APPLIED grow, or a grow whose scan or transaction failed or was refused
-// from inside the transaction (AR2), ends the pass.
+// APPLIED grow, a grow whose scan or transaction failed or was refused from
+// inside the transaction (AR2), and a withdrawal whatever its outcome
+// (withdrawGrow) end the pass.
 func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 	// The SP's stored percentage, used as stored (architecture.md, Common
 	// validation): a zero is invalid and the pass gate already refused it, so
@@ -1762,12 +1764,16 @@ func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 // runGrow runs one AR6 grow of one kind on one slice. It reports whether the
 // pass ends here, which distinguishes the two shapes of "no grow ran":
 //
-//   - the grow cannot run on the pass's snapshot — pending (AR6), the group
-//     ceiling or ladder cap of architecture.md, GrowSlice, no data group to
-//     size a data grow by, a CN of the SP short of budget, or no DN with room
-//     (the scan came back short): the record is emitted and false is
-//     returned, so the walk goes on to the other kind, the next slice and
-//     finally to AR7 and AR8, which a lack that lasts must not switch off;
+//   - the grow cannot run on the pass's snapshot — pending (AR6) with no
+//     group to withdraw, the group ceiling or ladder cap of
+//     architecture.md, GrowSlice, no data group to size a data grow by, a CN
+//     of the SP short of budget, or no DN with room (the scan came back
+//     short): the record is emitted and false is returned, so the walk goes
+//     on to the other kind, the next slice and finally to AR7 and AR8, which
+//     a lack that lasts must not switch off;
+//   - the grow is pending and its newest group is to be withdrawn
+//     (withdrawTarget): the withdrawal is the pass's one action, and true is
+//     returned whatever its outcome (withdrawGrow);
 //   - the grow ran and did not complete — an ErrPrecondition from inside
 //     the transaction, a failed scan or op: AR2 ends the pass, so that a pass
 //     whose snapshot the store has overtaken, or that may have touched etcd,
@@ -1889,12 +1895,13 @@ func (w *spWorker) runGrow(
 // epoch in the pass's snapshot, no repair, retired leg, forced-start mark or
 // operator acts on the group, and the primary's report is of an observation
 // made at the snapshot's revision or later. Such a side's disk node died
-// while it zeroed: the side can never provision, so no cntlr ever builds the
-// group, the grow stays pending, and no leg repair or operator repair can
-// replace a side of a leg still provisioning. A leg with two sides carries a
-// migration, which owns both sides until its finish or cancel, so its group
-// is left alone. model.WithdrawGrow re-checks every condition but the
-// verdict, the node's epoch and the report's age inside its STM.
+// while it zeroed: the side does not provision while that node stays dead,
+// so no cntlr builds the group, the grow stays pending, and no leg repair or
+// operator repair can replace a side of a leg still provisioning. A leg with
+// two sides carries a migration, which owns both sides until its finish or
+// cancel, so its group is left alone. model.WithdrawGrow re-checks inside its
+// STM every condition but the verdict, the side's unhealthy age, the node's
+// epoch and the report's age.
 func withdrawTarget(
 	p *spPass,
 	slice *pb.Slice,

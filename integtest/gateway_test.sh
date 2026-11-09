@@ -2815,7 +2815,7 @@ EOF
 		--bm-hex bb
 	assert_no_write "append-migr-bm at an index past bm_cnt" \
 		gwx FAILED_PRECONDITION append-migr-bm --sp sp0 --rev "$SP_REV" \
-		--name m0 --bm-idx 3 --bm-hex dd
+		--name m0 --bm-idx 4 --bm-hex dd
 	assert_no_write "append-migr-bm of other bytes at a stored index" \
 		gwx FAILED_PRECONDITION append-migr-bm --sp sp0 --rev "$SP_REV" \
 		--name m0 --bm-idx 0 --bm-hex dd

@@ -448,9 +448,9 @@ follows). A key the load looks for and does not find is reported in
 `Missing`, in the order the load reads it — the sub-objects the `SpConf`
 lists that it reads by point reads, then its repairs and retired legs,
 which it ranges, then the node records — and
-the load still succeeds. The caller decides: on a live SP a record a list
-of the `SpConf` names stops the sp role's fan-out and reaction pass until
-it is back (RW14, AR1); past a node record, which no list names, and past
+the load still succeeds. The caller decides: on a live SP a missing record
+that a list of the `SpConf` names stops the sp role's fan-out and the rest
+of its pass after the gates until it is back (RW14, AR1); past a node record, which no list names, and past
 any record of a latched SP the fan-out drives what it can, RW14 leaving
 idle the children the snapshot cannot resolve and logging the keys, and a
 latched SP's drain judges the keys it needs itself (SPD12). `SpRevision` is the revision the loaded
@@ -1140,9 +1140,8 @@ together, and the tick's puts end with the slowest. The **first** put of
 every role happens before the worker observes anything (VW3), so its own
 registration is part of its first scan or its first watch events. A failed
 put is logged by the `etcd put` record and retried at the next tick. The
-loop records `lastOkPut`, the monotonic time at which the puts of the last
-tick in which **every** role's put succeeded started, the first puts at
-start included (VW8 (a)).
+loop records `lastOkPut`: the start of the last tick whose puts **all**
+succeeded, one per role, the first puts at start included (VW8 (a)).
 
 ### Observation
 
@@ -1257,7 +1256,7 @@ every heartbeat tick and on every own-key watch event:
   clock advances meanwhile, and a tick checks (a) before it records its
   own put, so the tick the process resumes with fences although its put
   lands. A tick's check runs when its puts end and measures from the start
-  of the last tick's puts that all succeeded: a put a peer saw landed no
+  of the last tick whose puts all succeeded: a put a peer saw landed no
   earlier than its tick's start, and a tick's puts all start together
   (VW2), so the measure is never shorter than the widest gap a peer can
   see in any role's key, and a slow tick costs the time of its slowest put,
@@ -1668,8 +1667,9 @@ connection (`grpc.NewClient` with insecure transport credentials, both
 client interceptors, the message limit, and the keepalive with its connect
 bound — `grpc.md`, Wiring), reference-counted by the objects using an
 endpoint and closed when the last one stops. The keepalive is what bounds a
-call to a machine that stops answering with no reset: a syncup holds its
-object's loop (RW1), so without it a syncup to such a machine would hold
+call to an agent that stops answering with no reset, its machine gone or
+its process frozen (SIGSTOP, a paused VM): a syncup holds its
+object's loop (RW1), so without it a syncup to such an agent would hold
 the object's rounds for the whole syncup timeout, and a change that came
 every such period would delay the object's health result, and with it a
 failover, with no end. Every stream and unary call to one agent multiplexes over that
@@ -2090,8 +2090,8 @@ missing node record is not refused: the endpoint rule above leaves idle
 the children it cannot resolve. Nor is a latched SP's missing record: its
 lists hold no volume, since `DeleteStoragePool` refuses an SP that still
 has one (`architecture.md`, Storage pools), its teardown is what the drain
-asks for, and the drain judges the keys it needs for a reason of its own
-(SPD12), so its fan-out drives what it can.
+asks for, and the drain judges for itself the keys it needs (SPD12), so
+its fan-out drives what it can.
 
 A load whose `SpRevision` (MD3) is ahead of the revision the coordinator
 was delivered builds nothing either — no request, and no child started,
@@ -2423,10 +2423,12 @@ from, while this write is the health monitor's, issued against a conf
 re-read from the cache after the gate ran — one the watch goroutine may
 have replaced in between. It is not the only worker STM write that takes a
 `ClusterConf` — the sp role's `GrowSlice`, leg repair's `CreateRepair`,
-`FinishRepair` and `CancelRepair` (AR8), the retire timer's
+`FinishRepair` and `CancelRepair` (AR8), auto-grow's `WithdrawGrow` (AR6),
+the retire timer's
 `DeleteRetiredLeg` (AR12), and the sp drain's `DrainSpRepairs`,
 `DrainSpRetiredLegs` and `DrainSpSlice` take one too (MD6, HL6) — but those
-sit behind AR1's cluster-conf gate, and `GrowSlice` re-checks both confs,
+sit behind AR1's cluster-conf gate, and `GrowSlice` and `WithdrawGrow`
+re-check both confs,
 `FinishRepair`, `CancelRepair`, `DeleteRetiredLeg` and the three drain
 batches the cluster's, at the top of their own STMs besides; the clone drain's `FinishCloneDelete` takes one as
 well, ahead of every gate of the pass, and refuses an unusable one at the
@@ -2694,8 +2696,9 @@ a cntlr's run of unhealthy health verdicts, to which only rounds add
 (AR10), and for its observation, which the loop sees but which never adds
 to a run (RW23) and is never judged by its age (HL7). A `Syncup*`
 gRPC failure is not by itself a health failure — an unreachable agent
-breaks the stream too, and a syncup to a machine that stopped answering
-ends within the keepalive's bound (RW7); that closes the object's stream
+breaks the stream too, and a syncup to an agent that stopped answering,
+its machine gone or its process frozen (SIGSTOP, a paused VM), ends within the keepalive's bound
+(RW7); that closes the object's stream
 too, so the next round opens a new one, which fails within about the
 connect bound and gives the health result.
 
@@ -2716,7 +2719,9 @@ and `CnConf`
 through the model ops — `GrowSlice` charges DNs and every cntlr CN,
 leg repair's `CreateRepair` charges the DN of its fresh new leg, its
 `CancelRepair` gives that side back and its `FinishRepair`, at the
-retired-leg bound, the oldest retired side (AR8),
+retired-leg bound, the oldest retired side (AR8), auto-grow's
+`WithdrawGrow` credits the disk nodes of the group it takes back and every
+cntlr's CN (AR6),
 `ReplaceCntlr` rewrites two `CnConf`s
 — and so do the sp drain, whose D1 credits every cntlr CN and whose
 repair, retired-leg and D2 batches credit every DN they touch
@@ -3068,7 +3073,8 @@ sync again; and a group with a repair waits until its finish or its cancel,
 an operator's repair until the operator acts; and a group whose create
 finds no DN with room waits for one, a later group of the pass still
 scanned unless an empty scan of the same pass already shows its scan
-empty: one that asked for no more room with no more disk nodes black-listed.
+empty: the later scan would ask for no less room and black-list every disk
+node the empty scan black-listed.
 An empty scan
 ends nothing because a full cluster can last as long as any of the holds
 above, and the reactions after it must go on meanwhile; a refusal from
@@ -3335,7 +3341,8 @@ that did, `architecture.md`, Common validation):
   with its origin only until they diverge, so the sum is an upper bound of
   the need and the pool may grow further than strictly needed, never less;
   a thin device the state lists but lacks would make the need undercount,
-  and the records gate refuses such a pass before any reaction (AR1, MD3);
+  and the gate on the SP's records refuses such a pass before any reaction
+  (AR1, MD3);
 * a **meta grow** when the used metadata blocks exceed the mark's percentage
   of the total metadata blocks: an internal `GrowSlice` of the meta kind,
   ladder-sized (`architecture.md`, GrowSlice); data is checked first when both
@@ -3368,8 +3375,10 @@ CN of the pass's snapshot whose free extents are below its charge makes
 the grow impossible however many DNs have room, and logs `reaction
 skipped` (`cn free_ext_cnt too low`, naming the CN) with no scan; a CN
 missing from the snapshot counts as short, as the transaction refuses it. A slice whose list of that kind
-already holds `MaxGrpCntPerSlice` groups (`architecture.md`, GrowSlice) can
-never grow that kind again: a breach of that kind that is not pending —
+already holds `MaxGrpCntPerSlice` groups (`architecture.md`, GrowSlice)
+grows that kind again only once the withdrawal of a stuck grow (below) has
+taken its newest group back: until then a breach of that kind that is not
+pending —
 and, for data, not covered, since the covered test comes first and logs
 `data_covered` — logs
 `reaction skipped` (`grp_list_full`) without a scan and the pass goes on
@@ -3382,15 +3391,17 @@ that never provisions stays pending for good: no cntlr builds a group with
 a leg whose every side is still not provisioned (`cnagent.md` CN9), so the
 pool's total never moves, and neither leg repair nor an operator's repair
 can replace a side of such a leg, since both need the leg's health epoch,
-which a provisioning leg never gets (HL2). When a grow is pending, the
-primary's report is of an observation made at the snapshot's revision or
-later, and the newest group of its kind has one side per leg, no repair,
-retired leg, forced-start mark or operator in charge, and a leg whose side
-is not `provisioned`, has been unhealthy for `side_unhealthy` with this
-coordinator's own unhealthy verdict on it (AR10), and sits on a disk node
-whose record carries a health epoch in the pass's snapshot, the pass runs
-`WithdrawGrow` (MD6) as its one action, with the pool total the primary
-reported: the side's disk node died while the side zeroed. The op takes
+which a provisioning leg never gets (HL2). The pass withdraws a grow when
+three things hold. The grow: it is pending, and the primary's report is of
+an observation made at the snapshot's revision or later. The group: it is
+the newest group of the grow's kind, with one side per leg, and with no
+repair, retired leg, forced-start mark or operator in charge. The side: one
+of the group's sides is not `provisioned`, has been unhealthy for
+`side_unhealthy` with this coordinator's own unhealthy verdict on it
+(AR10), and sits on a disk node whose record carries a health epoch in the
+pass's snapshot. Together these say that the side's disk node died while
+the side zeroed. The pass then runs `WithdrawGrow` (MD6) as its one
+action, with the pool total the primary reported. The op takes
 the group off the tail of its list, whichever grow added it, and gives its
 extents back to the disk nodes and the CNs; the group never held data,
 since no array was built from it. A leg with two sides carries a migration,
@@ -3398,10 +3409,10 @@ which owns both sides until its finish or its cancel (`architecture.md`,
 Migrations), so its group is never withdrawn. The next pass that finds the
 pool past its mark grows again, the grow no longer pending, and the dead
 disk node, whose health epoch the trigger required, has no capacity key
-and is offered for no new side. A disk node that comes back before a pass
-finds its side unhealthy past the threshold and the node itself unhealthy
-finishes the zeroing, and the grow completes by itself (`architecture.md`,
-GrowSlice). The trigger is part of auto-grow, so it
+while that epoch stands, so it is offered for no new side. A disk node can also come back first: when
+it does so before a pass finds both its side unhealthy past the threshold
+and the node itself unhealthy, it finishes the zeroing, and the grow
+completes by itself (`architecture.md`, GrowSlice). The trigger is part of auto-grow, so it
 runs only while the pool's usage of that kind is past its mark.
 
 ### Cntlr replacement
@@ -3537,9 +3548,9 @@ pass's leg repair runs the drive step first and the create after it. A
 finish, a cancel, a try-to-abort and a create are each the pass's one
 action (AR2), and none runs at a level that suppresses reactions (AR3);
 there the operator drives the worker's repairs with the gateway's calls,
-which take a name with the reserved prefix (`architecture.md`, Repair). The
-group's `operator_in_charge` flag holds the create alone (The create,
-below): the drive step reads no `operator_in_charge` flag, so while an
+which take a name with the reserved prefix (`architecture.md`, Repair).
+Within leg repair, the group's `operator_in_charge` flag holds the create
+alone (The create, below): the drive step reads no `operator_in_charge` flag, so while an
 operator takes the group over the worker still finishes, cancels and tries
 to abort its own repair of it (`architecture.md`, Repairs).
 
@@ -3684,8 +3695,8 @@ plans from a snapshot that holds what changed, as AR7's does. An empty scan
 logs `no candidate` and holds that group only, as conditions 2 to 8 hold
 theirs: another group, whose legs sit on other DNs, may place its new leg
 where this one cannot. A later group of the pass whose scan
-would ask for no less room past a black list that holds every DN of an
-empty scan's is skipped with the same record and no scan, which spares
+would ask for no less room and black-list every DN an empty scan
+black-listed is skipped with the same record and no scan, which spares
 the scans of groups that wait on the same disk nodes. Every refusal of the
 op but
 `grp_operator_in_charge` (condition 4), and every failed scan, ends the
@@ -3775,7 +3786,7 @@ abort an operator's repair (`architecture.md`, Repair); or runs two
 reactions in one pass. The repairs it does create, finish, cancel and try
 to abort are its own (AR8).
 Every automatic action re-homes redundancy or roles, grows a pool, or
-withdraws a grow that can never complete, giving back what its group took
+withdraws a grow that waits on a dead disk node, giving back what its group took
 (`architecture.md`, Automatic reactions; AR6). It does delete the implicit children — cntlrs,
 repairs, retired legs, slices, groups, legs, sides — of an SP a
 `DeleteStoragePool` has LATCHED, which is the sp drain and not a reaction
@@ -3788,7 +3799,8 @@ group's repair and retired legs, all their sides going back to their DNs —
 which is the clone drain and not a reaction (CLD8, CLD9). And it deletes
 a grown group no array was ever built from, its sides going back to their
 DNs, which is auto-grow's withdrawal of a stuck grow (AR6): the group
-holds no data, and nothing else would ever end its grow. Both drains
+holds no data, and nothing else ends its grow while its disk node stays
+dead. Both drains
 finish a deletion a user began with the latch and neither ever starts one;
 the list above is what no reaction touches. Beside the drains, the retire
 timer deletes a retired leg that has aged on a whole group: a retired leg
@@ -4754,7 +4766,8 @@ discovery records by the listing rule (`architecture.md`, [D18]) in a cntlr's
 health write (HL2) and in a failover on either trigger (MD6) by the failover
 case, which finds each in its writer's own transaction, and in a cntlr
 replacement (MD6) by the reaction case; BM1 to BM5 by the bitmap case; AR1
-to AR9, and AR11 on the worker's repairs, by the reaction case, AR8's skip
+to AR9, and AR11 on the worker's repairs, by the reaction case, save the
+parts below, AR8's skip
 of a group with an operator's repair, its hold on a group with a
 forced-start mark and its hold on a group whose `operator_in_charge` flag
 is set, the drive step's try-to-abort and cancel running under the
@@ -4770,8 +4783,12 @@ retired-leg phases and the repair half of CLD5 and CLD9, below) by the
 drain case, whose
 `workerctl` latches only stand in for the gateway's SPD3, SPD4, CLD1, CLD3
 and CLD4; MD2 to MD6, EU1 to EU6 and CM1 to CM6 by every case, every launch
-and the driver; and the log records by every assertion. Left to the unit
-tests: VW8 (b), (c) and (d), because a broken watch with live puts cannot
+and the driver, save the parts below; and the log records by every
+assertion. Left to the unit tests: AR6's withdrawal of a stuck grow
+(`WithdrawGrow`, MD6) and its check of the CNs' budgets before a grow,
+AR2's pass-on of an empty scan, and EU4's and EU6's run again on a
+future revision, which the suite's one-member etcd never answers; VW8 (b),
+(c) and (d), because a broken watch with live puts cannot
 be induced from outside the process; that the drain's wake-up runs no
 reaction and re-seeds no health memo (SPD6, CLD7), because a pass with no
 reaction due and no epoch to correct leaves no record, so no case can tell
@@ -4874,8 +4891,9 @@ records withdraw is the e2e suite's to show (`e2e_integtest.md`, The cases);
 more than one server; a three-member etcd; etcd quorum loss, restore or
 compaction races; clock-skew injection, clock agreement across workers being
 no correctness dependency (VW4); TLS and authentication, the fabric being
-trusted (`architecture.md`, Known limits); failures of `RedundNone` legs, for
-which nothing automatic is specified; and a clone push to a primary whose
+trusted (`architecture.md`, Known limits); failures of `RedundNone` legs,
+save the withdrawal of a stuck grow (AR6), which is left to the unit tests;
+and a clone push to a primary whose
 build is still deferred. Two things the clone drain's design asks for no
 suite does: a host IO probe of a clone's destination namespace right after
 the latch, which needs a real host and a real CN — the e2e suite has both
@@ -5066,8 +5084,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
 
 * **An agent that is alive but slow holds its object's rounds.** A syncup
   holds its object's loop (RW1) until the agent answers or the syncup
-  timeout ends it. The keepalive ends it early only when the machine stops
-  answering (RW7); an agent that answers the keepalive but is slow to
+  timeout ends it. The keepalive ends it early only when the agent stops
+  answering the keepalive's ping, its machine gone or its process frozen (SIGSTOP, a paused VM)
+  (RW7); an agent that answers the keepalive but is slow to
   answer the syncup, such as one whose converge waits on a stalled device,
   holds its object's rounds, and so its health result, for up to the
   syncup timeout, and a change that arrives every such period delays them
@@ -5085,26 +5104,28 @@ which no suite case sets, so no suite case runs RW13's count compare.
   below about two thirds of `DefaultEtcdOpTimeout`, writes that succeed
   but take most of that timeout can reach the limit, and the worker fences
   and rejoins though none of its keys was seen dead. The measure is never
-  shorter than what a peer can see, so the fence still comes before any
-  peer's commit.
+  shorter than the widest gap a peer can see (VW8 (a)); how the fence
+  falls against the peers' commit of it dead is CM3's.
 
 * **A stuck grow waits while another hold stands on it.** Auto-grow
   withdraws a grown group whose provisioning side's disk node died (AR6)
   only while no repair, retired leg, forced-start mark, operator in charge
   or migration acts on the group, only once the side's health epoch is
-  `side_unhealthy` old and its disk node carries a health epoch of its
-  own, and only while the pool is past its mark: until then the grow stays
-  pending, no grow of that kind runs on the slice, and the group keeps its
+  `side_unhealthy` old with the coordinator's own unhealthy verdict on it
+  and its disk node carries a health epoch of its own, only on a primary's
+  report of the snapshot's revision or later, and only while the pool is
+  past its mark, which a `low_water_mark_pct` above 100 never is: until
+  then the grow stays pending, no grow of that kind runs on the slice, and the group keeps its
   extents on the disk nodes and its share of every CN's budget. A side
   whose disk node answers its rounds, one that zeroes very slowly or fails
   its zeroing on a node that passes its own rounds, is never withdrawn,
   and its grow waits for the zeroing. An operator's `GrowSlice` stacked on
   top of the stuck group is a later group of the list, so the stuck one is
-  not the newest any more and is never withdrawn.
+  not the newest any more and is not withdrawn while that later group
+  stands.
 
 * **A pool with a lost record waits for an operator.** When a record that a
-  list of a live pool names is missing from etcd, while the list still
-  names it, the sp role sends the pool no new request and its pass runs
+  list of a live pool names is missing from etcd, the sp role sends the pool no new request and its pass runs
   nothing after its gates — no reaction, failover included, no stage move,
   no forced-start clear and no retire timer — until an operator puts the
   record back (RW14, AR1). The running children keep their last request
@@ -5191,12 +5212,13 @@ which no suite case sets, so no suite case runs RW13's count compare.
   its child: a handoff, and any restart of the child on the same worker
   (RW14), can leave a shorter chunk at the agent (cost: extra copying, never
   correctness).
-* **A slice whose data list holds `MaxGrpCntPerSlice` groups never grows its
-  data again** (AR6): every pass that finds the pool's data usage above
+* **A slice whose data list holds `MaxGrpCntPerSlice` groups grows its data
+  no more** (AR6): every pass that finds the pool's data usage above
   `low_water_mark_pct`, with no data grow pending and the slice's data not
   covering its volumes, logs `reaction skipped` (`grp_list_full`) and goes
-  on (AR2); a covered slice logs `data_covered` instead. Nothing frees the
-  list, and the pool
+  on (AR2); a covered slice logs `data_covered` instead. Only the
+  withdrawal of a stuck newest group frees a place, and the next grow
+  fills it again, so the pool
   can run out of data space (`architecture.md`, Automatic reactions;
   `architecture.md`, Known limits).
 * **An operator's open repair keeps the worker from repairing its group.**

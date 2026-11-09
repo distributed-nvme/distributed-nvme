@@ -638,8 +638,10 @@ bit first — is produced and consumed by the agents (`architecture.md`, raid0
 bitmap math: the single inversion at the agent boundary); the gateway never
 converts or trims a bit and reads none for its meaning, so it can never
 disagree with the agents about the convention. The one comparison it makes
-is of whole stored bytes with a request's, to recognise a page sent again
-at the position it names (`architecture.md`, Clones, Migrations).
+is of stored bytes with a request's, byte for byte, to recognise a page sent
+again at the position it names: a clone page with the stored bytes at the
+offset it names, a migration chunk with the chunk at the index it names
+(`architecture.md`, Clones, Migrations).
 
 ## Handlers by resource group
 

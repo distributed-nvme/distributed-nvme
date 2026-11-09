@@ -278,7 +278,8 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **operator in charge** — An operator's take-over of an md-raid1 group's
   repair from the sp worker: the group's flag, `Group.operator_in_charge`,
   which the operator sets and clears, keeps the worker from creating a
-  repair of the group while it stands (Repairs,
+  repair of the group, and auto-grow from withdrawing a stuck grow of it
+  (`dnv-worker.md` AR6), while it stands (Repairs,
   `UpdateGroupOperatorInCharge`).
 * **shard code** — A uint32 below `ShardBucketSize`, formatted with
   `ShardCodeFmt`. Every DN, CN and SP gets one at creation; workers and the
@@ -2525,10 +2526,11 @@ only this data-or-meta **exclusivity signal**, and group sizes are
 computed (below); `FAILED_PRECONDITION` when `is_meta` is true and the
 slice's meta total has already reached the dm-thin metadata ceiling, when the
 slice's group list of the requested kind already holds
-`MaxGrpCntPerSlice` groups (the width of md names; a count, but one
-nothing frees on a live slice, because groups leave a slice only from the
-tail, by the drain of a deleting SP, `dnv-worker.md` SPD10 — the gateway
-answers it ahead of the candidate scan), or when `sp_level` is at
+`MaxGrpCntPerSlice` groups (the width of md names, a count that the
+gateway answers ahead of the candidate scan; on a live slice only
+auto-grow's withdrawal of a stuck newest group frees a place,
+`dnv-worker.md` AR6, and otherwise groups leave a slice only by a deleting
+SP's drain, `dnv-worker.md` SPD10), or when `sp_level` is at
 or above `SP_LEVEL_NO_THINPOOL` (the model op's level gate refuses: pools
 are suppressed at those levels, so there is nothing to grow; the same gate
 guards `CreateRepair` under the sp worker's name, Repairs);
@@ -2581,9 +2583,9 @@ the pool-meta and pool-data linear tables and resize the thin pool online
 contains a provisioning leg: the concat and the pool keep their old,
 effective size and keep reporting `OK` at that size, and the grow
 completes by itself once the leg clears (Side provisioning protocol,
-Automatic reactions), or, when it is the newest group of its list, no
-repair or operator acts on it and the disk node of a provisioning leg
-stays dead, the sp worker withdraws it (`dnv-worker.md` AR6). The per-kind "one grow per pool at a time" pending
+Automatic reactions). A group whose leg never clears can instead be taken
+back by the sp worker, under the conditions of `dnv-worker.md` AR6. The
+per-kind "one grow per pool at a time" pending
 rule (`dnv-worker.md` AR6) binds only the sp worker's own auto-grow, which
 judges "pending" by the primary's reported usage, and so does its covered
 rule, which stops a data grow once the slice's data covers the pool's thin
@@ -3439,7 +3441,8 @@ worker's repair while it is CREATED and cancels it once it is ABORTED.
 Reason: without the flag the worker would create its repair again at once
 after the cancel, and no call changes a pool's `event_threshold` once it is
 made; the flag is the group's, not a level or a flag of the pool, so that
-it stops that group's create and nothing else: failover, auto-grow and the
+it stops that group's create and auto-grow's withdrawal of the group
+(`dnv-worker.md` AR6) and nothing else: failover, auto-grow's grows and the
 other reactions run, the pool's IO goes on, and a level keeps its one
 meaning, the parts of the pool it switches off (SpLevel). The worker still
 drives a worker's repair that exists (`dnv-worker.md` AR8): its drive step
@@ -4856,10 +4859,9 @@ The four reactions:
   metadata usage passes `DmPoolConf.low_water_mark_pct`, which is not an
   `EventThreshold` field, is grown by an internal `GrowSlice` (GrowSlice);
   a grow whose new group still holds a provisioning leg completes by itself
-  when the leg clears (`cnagent.md` CN13, [D15]), and one whose new group
-  is the newest of its list, with a provisioning leg on a disk node that
-  stays dead and no repair or operator acting on it, is withdrawn and grown
-  again elsewhere (`dnv-worker.md` AR6). A data grow stops once
+  when the leg clears (`cnagent.md` CN13, [D15]), and one whose leg never
+  clears can be withdrawn and grown again on disk nodes other than the dead
+  one, under the conditions of `dnv-worker.md` AR6. A data grow stops once
   the slice's data covers what the pool's thin devices can use
   (`dnv-worker.md` AR6), so no data grow starts past that cover, though the
   last one can pass it by up to a group. Auto-grow
