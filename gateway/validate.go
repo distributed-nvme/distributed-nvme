@@ -395,9 +395,9 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 // A zero member is "unset" and takes part in no rule, so a rule between two
 // members is judged only when both are non-zero. The bdev_conf a create RPC
 // stores therefore comes through here a second time, resolved:
-// validateClusterConfInput resolves CreateCluster's against the constants, and
-// CreateStoragePool judges its merge over the cluster's conf, where an omitted
-// member takes its real value.
+// validateClusterConfInput resolves CreateCluster's against the constants and,
+// for the stripe, the block, and CreateStoragePool judges its merge over the
+// cluster's conf, where an omitted member takes its real value.
 func validateBdevConf(conf *pb.BdevConf) error {
 	if conf == nil {
 		return nil

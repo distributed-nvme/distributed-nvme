@@ -518,15 +518,15 @@ The limits a user must know:
   its first data group on every leg, however small the volume.
 - A host discard frees pool space only where it covers, on every slice, a
   whole aligned block: a thin pool frees whole blocks only and completes a
-  shorter or misaligned discard with success. A new cluster's stripe
-  equals its block, 1 MiB at the defaults, so an aligned 1 MiB discard
-  frees one block. A pool has a stripe smaller than its block when it asks
-  for one or for a block above 1 MiB, the largest stripe, or when its
-  cluster stored a smaller stripe, as a cluster keeps the stripe it was
-  created with; then the striped device hands each slice its share of the
-  range unsplit, so a discard frees a block on one slice only when it
-  covers nearly the slice count times the pool's block size, and `fstrim`
-  can report success and free nothing. These sizes are read
+  shorter or misaligned discard with success. A new cluster that names no
+  stripe gets one equal to its block, up to 1 MiB, so at the defaults an
+  aligned 1 MiB discard frees one block. A pool has a stripe smaller than
+  its block when it asks for one or for a block above 1 MiB, the largest
+  stripe, or when its cluster stored a smaller stripe, as a cluster keeps
+  the stripe it was created with; then the striped device hands each slice
+  its share of the range unsplit, so a discard frees a block on one slice
+  only when it covers nearly the slice count times the pool's block size,
+  and `fstrim` can report success and free nothing. These sizes are read
   from the kernel's source, not measured.
 - A mount on a Kubernetes node survives an outage of every path, however
   long, since the node plugin's connect never gives up reconnecting, and a

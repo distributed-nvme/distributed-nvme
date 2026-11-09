@@ -2138,7 +2138,10 @@ reports,
 and the wait is sized so that a host that follows the discovery log drops
 its path, withdrawn from the records, before the fence
 (`architecture.md`, [D18], and `architecture.md`, Host view): nvme-stas
-collects discovery log changes for 1.5 s before it disconnects a path.
+collects discovery log changes for 1.5 s before it disconnects a path. A
+node of the Kubernetes driver drops it only once it holds a path to a
+listed cntlr that shows the volume's namespace (`csi.md` CSI15), which the
+wait does not bound.
 
 A fan-out during the demotion hold replaces what is held and keeps the
 deadline, and a demoted cntlr is handed its newest plan at once. A further

@@ -952,8 +952,10 @@ distinct cntlids guaranteed by cntlid slots. Primary path ANA optimized,
 standby paths inaccessible. Following the discovery log is the host's part
 of a failover: it is what drops a failed-over primary's path, and for an
 old primary that does not answer its demotion within the demotion hold
-it does so before the sides fence that primary (Failover). A path that
-nothing following the discovery log manages is never dropped (Known
+it does so before the sides fence that primary (Failover); a node of the
+Kubernetes driver drops it only once it holds a path to a listed cntlr
+that shows the volume's namespace (`csi.md` CSI15). A path that nothing
+following the discovery log manages is never dropped (Known
 limits).
 
 ### Group on-leg layout: meta region, data region, health block
@@ -1804,10 +1806,12 @@ harmless. A migration destination takes its run before it zeroes
 * At most `MaxStrSize` bytes for `cluster_name`, `addr_port`, `sp_name`,
   `td_name`, `clone_name`, `xfer_name`, `migr_name`, `rep_name`,
   `location` and the `NvmeTrConf` members, each of which must also match
-  `ValidStrPattern`. An empty `cluster_name` or `location`, or an entirely
-  empty `NvmeTrConf`, means "not given"; an `NvmeTrConf` with any member set
-  must have all four, so the gateway never stores a transport conf partly
-  blank, which matters most for a node's, since no call changes it.
+  `ValidStrPattern`. An empty `cluster_name`, `location` or
+  `CreateThinDevice.ori_name`, or an entirely empty `NvmeTrConf`, means
+  "not given"; an `NvmeTrConf` with any member set must have all four, so
+  no request stores a transport conf partly blank, which matters most for a
+  node's, since no call changes it; a conf the gateway copies from a stored
+  record, as a side's or a cntlr's from its node's, is not judged again.
 * `CreateRepair.rep_name` must in addition not start with the reserved
   prefix, `RepNameReservedPrefix`. The prefix starts the name of every
   repair the sp worker creates, and of no other: that name, `WorkerRepName`,
@@ -1971,7 +1975,8 @@ harmless. A migration destination takes its run before it zeroes
   destination of a clone or a migration. A zero member is unset here as
   well, so a request is judged by a rule between two members only when it
   sets both; every rule is then judged again on the `bdev_conf` the create
-  RPC stores — `CreateCluster`'s resolved against the constants,
+  RPC stores — `CreateCluster`'s resolved against the constants and, for
+  the stripe, the block,
   `CreateStoragePool`'s merged over `ClusterConf.bdev_conf` and resolved
   (Storage pools) — because only that message shows what an omitted member
   becomes. An SP therefore cannot inherit a member these rules refuse, even
@@ -2355,7 +2360,8 @@ rules being judged on the merged conf the SP stores as well, and
 Defaults: `cntlr_cnt` is `DefaultCntlrCntPerSp`; `slice_cnt` is
 `DefaultSliceCntPerSp`; `cntlid_slot_list` is every slot below
 `CnCntlidSlotCnt`; `bdev_conf` is taken member-wise from
-`ClusterConf.bdev_conf`, then from the constants (a `redund_conf` unset in
+`ClusterConf.bdev_conf`, then from the constants or, for the stripe, from
+the block (a `redund_conf` unset in
 both the request and the cluster conf means `redund_none`; dnvctl defaults
 it to `redund_md_raid1` on the CLI). What is stored is the result of that
 merge, every defaultable member
@@ -3143,8 +3149,9 @@ top-down teardown is therefore: delete the clone, poll `GetClone` until
 **GetClone** — STM read.
 
 **UpdateCloneTrConf** — Errors: `INVALID_ARGUMENT` for the list rules of
-`CreateClone`'s `src_tr_conf`. STM: replace `src_tr_conf_list`, bump `SpRev`
-(used when the source SP's cntlrs moved); the primary reconnects.
+`CreateClone`'s `src_tr_conf`; `NOT_FOUND` clone; `FAILED_PRECONDITION`
+while the clone's `deleting` is true. STM: replace `src_tr_conf_list`, bump
+`SpRev` (used when the source SP's cntlrs moved); the primary reconnects.
 
 **AppendCloneBitmap** — Errors: `FAILED_PRECONDITION` when the clone's
 `deleting` is true (`DeleteClone` is the only RPC allowed to act on a
@@ -3269,18 +3276,19 @@ and holds the namespace in the inaccessible ANA group, each from its own
 request, so the destination clone is the only reader and writer of the
 bytes (Namespace suspend semantics).
 
-While a transfer lives its origin is the transfer's: every cntlr's xfer
-stack reads the origin's td, so `DeleteNamespace` and `UpdateNamespaceDev`
-of the origin are refused `FAILED_PRECONDITION`, and `CreateNamespace`
-refuses the place (`ori_nqn`, `ori_ns_idx`) while a transfer names it.
-Reason: a deleted origin leaves every cntlr unhealthy, building a stack
-over nothing, and a repointed one moves a live copy to another td, so a
-clone would end as a mix of two devices with no error. The guard reads the
-pool's transfer list and each listed transfer in the same STM; a transfer
-created or deleted meanwhile rewrites that list, so the commit fails and the
-STM runs again. `UpdateNamespaceSuspended` stays allowed: a suspend parks
-only the origin's own ns-dev, and the td the xfer stack reads does not
-change.
+While a transfer lives its origin is the transfer's: every cntlr builds its
+xfer stack from the origin namespace, the primary's mapping the origin's td
+and each standby's error table taking its size from it, so `DeleteNamespace`
+and `UpdateNamespaceDev` of the origin are refused `FAILED_PRECONDITION`,
+and `CreateNamespace` refuses the place (`ori_nqn`, `ori_ns_idx`) while a
+transfer names it. Reason: a deleted origin leaves every cntlr reporting the
+transfer in error and the destination reading errors, and a repointed one
+moves a live copy to another td, so a clone would end as a mix of two
+devices with no error. The guard reads the pool's transfer list and each
+listed transfer in the same STM; a transfer created or deleted meanwhile
+rewrites that list, so the commit fails and the STM runs again.
+`UpdateNamespaceSuspended` stays allowed: a suspend parks only the origin's
+own ns-dev, and the td the primary's xfer stack maps does not change.
 
 **DeleteTransfer** — `force` false **finalizes** a completed hand-over:
 the STM additionally sets `suspended` true on the origin namespace, so the
@@ -5070,23 +5078,23 @@ case it is in:
   failover ([D18]) — and dnv-cdc has told the hosts; a host that follows
   the discovery log (Host view) drops the path inside the demotion hold,
   before the fence, and its IO then queues as for a dead CN; a node of the
-  Kubernetes driver drops it once it holds a path to a listed cntlr
-  (`csi.md` CSI15), and keeps it while it can reach none.
+  Kubernetes driver drops it once it holds a path to a listed cntlr that
+  shows the volume's namespace (`csi.md` CSI15), and keeps it until then.
 
-What is left is an old primary still on a host's path at the fence that
-has not applied its demotion: a path nothing following the discovery log
-manages, a path the Kubernetes driver keeps while its node reaches no listed
-cntlr, a discovery view a cdc instance keeps stale, a demotion its agent
-cannot apply within the demotion hold, or a failover fanned out with no
-demotion hold by a coordinator that has just started, after a restart or a
-handoff, as when the failover's owner lost the shard before its demotion
-hold ended (Known limits). Its md arrays fail once the sides have fenced its
-legs ([D16], whose write-safety the paragraph above explains), and the
-errors nvmet returns on the still-optimized path are target-internal
-(DNR), not path errors — host multipath does **not** retry them on the new
-primary's path, so applications can see IO errors until the old primary
-applies its demotion or is stopped. [D16] records why that residue is
-accepted.
+What is left is an old primary still on a host's path at the fence that has
+not applied its demotion: a path nothing following the discovery log
+manages, a path the Kubernetes driver keeps while its node holds no path to
+a listed cntlr that shows the volume's namespace, a discovery view a cdc
+instance keeps stale, a demotion its agent cannot apply within the demotion
+hold, or a failover fanned out with no demotion hold by a coordinator that
+has just started, after a restart or a handoff, as when the failover's owner
+lost the shard before its demotion hold ended (Known limits). Its md arrays
+fail once the sides have fenced its legs ([D16], whose write-safety the
+paragraph above explains), and the errors nvmet returns on the
+still-optimized path are target-internal (DNR), not path errors — host
+multipath does **not** retry them on the new primary's path, so applications
+can see IO errors until the old primary applies its demotion or is stopped.
+[D16] records why that residue is accepted.
 
 #### "Make sure all groups are available"
 
@@ -6761,7 +6769,10 @@ document and the component documents cite it by its id.
   that follows the discovery log, the two waits and the withdrawal close
   both edges of a failover: an old primary that applies its demotion within
   the demotion hold is inaccessible before the fence, and one the worker
-  cannot reach is off the host's paths before it. Two costs are accepted.
+  cannot reach is off the host's paths before it, save on a node of the
+  Kubernetes driver, which drops it only once it holds a path to a listed
+  cntlr that shows the volume's namespace (`csi.md` CSI15). Two costs are
+  accepted.
   Every failover of an old primary that does not answer, a dead CN's
   among them, spends the demotion hold's bound before its sides are
   told, and its new primary comes up that much later. And an old primary
@@ -6840,24 +6851,25 @@ document and the component documents cite it by its id.
   The consequences. A new cntlr is listed from its creation, enabled and
   with a zero `err_epoch`: a host that connects to it before its agent has
   built the subsystem only retries, and listing it only once built would
-  need a field for a harmless case. The failover's own transaction takes
-  out an old primary that has an `err_epoch`, so hosts that follow the
-  discovery log drop its path, and for one that does not answer its
-  demotion they drop it while the demotion hold still keeps the sides back
-  (Failover). Its next clean verdict lists it again as a standby, if it is
-  enabled; a clean reply at a revision older than the one the worker
-  drives gives no verdict, so that an old primary that resumes is not
-  listed while it still exports its namespaces optimized, possibly over
-  legs the sides have fenced (`dnv-worker.md` HL2). An enabled standby
-  leaves the records when its `err_epoch` is set and returns when it is
-  cleared: hosts drop and re-add a path that is ANA inaccessible
-  anyway, with IO untouched, and nothing damps that churn, which shows in
-  the worker's health records and points at the sick standby. An enable
-  lists a cntlr at once only when it is the primary or its `err_epoch` is
-  zero, and any other at the worker's next clean verdict on it. A health
-  write still bumps no revision (Revision keys and the sync fan-out):
-  dnv-cdc watches the `CdcEntry` keys themselves, and no agent's desired
-  state moves.
+  need a field for a harmless case. The failover's own transaction takes out
+  an old primary that has an `err_epoch`, so hosts that follow the discovery
+  log drop its path, and for one that does not answer its demotion they drop
+  it while the demotion hold still keeps the sides back (Failover), save a
+  node of the Kubernetes driver that holds no path to a listed cntlr showing
+  the volume's namespace (`csi.md` CSI15). Its next clean verdict lists it
+  again as a standby, if it is enabled; a clean reply at a revision older
+  than the one the worker drives gives no verdict, so that an old primary
+  that resumes is not listed while it still exports its namespaces
+  optimized, possibly over legs the sides have fenced (`dnv-worker.md` HL2).
+  An enabled standby leaves the records when its `err_epoch` is set and
+  returns when it is cleared: hosts drop and re-add a path that is ANA
+  inaccessible anyway, with IO untouched, and nothing damps that churn,
+  which shows in the worker's health records and points at the sick standby.
+  An enable lists a cntlr at once only when it is the primary or its
+  `err_epoch` is zero, and any other at the worker's next clean verdict on
+  it. A health write still bumps no revision (Revision keys and the sync
+  fan-out): dnv-cdc watches the `CdcEntry` keys themselves, and no agent's
+  desired state moves.
 
 ## Known limits
 
@@ -6922,14 +6934,14 @@ that component's document and only pointed to here.
   changed keeps its old cap until it is unlinked everywhere or removed.
 * **The default stripe gives hosts large IO hints.** dm-stripe reports the
   stripe as a device's smallest efficient IO and the stripe times the slice
-  count as its optimal IO, and nvmet passes both to the host, which sets
-  its read-ahead to at least twice the optimal IO and, above 4 MiB, lets
-  one request grow to it. With the stripe equal to a 1 MiB block (Common
-  validation), a pool of 32 slices has hosts read ahead 64 MiB and send
-  commands of up to 32 MiB, each of which nvmet buffers on the controller
-  node; a filesystem maker takes its alignment from the same hints. Read
-  in the kernel's source, not measured; a pool that names a smaller stripe
-  keeps smaller hints.
+  count as its optimal IO, and nvmet passes both to the host, which sets its
+  read-ahead to at least twice the optimal IO and, above 4 MiB, lets one
+  request grow to it. With the stripe equal to the default block (Common
+  validation), a pool of many slices has hosts read ahead twice the block
+  times the slice count and send commands of up to that product, each of
+  which nvmet buffers on the controller node; a filesystem maker takes its
+  alignment from the same hints. Read in the kernel's source, not measured;
+  a pool that names a smaller stripe keeps smaller hints.
 * **A CSI volume costs the cluster a pool** (`csi.md`, The volume model).
 * **A RAID1 pool needs as many disk nodes per slice at create as its meta
   and data groups have legs together.** `CreateStoragePool` puts every leg
@@ -7549,7 +7561,9 @@ that component's document and only pointed to here.
   plugin's connect never gives up reconnecting, so its mount survives an
   outage of every path, the kernel holding its IO and reconnecting onto the
   same device, and the plugin keeps a path the cdc withdrew until a listed
-  cntlr's path shows the volume's namespace (`csi.md` CSI14, CSI15). A
+  cntlr's path shows the volume's namespace, or until the cdcs list no
+  cntlr for the subsystem, as after a detach or the disable of a pool's
+  only cntlr (`csi.md` CSI14, CSI15). A
   cntlr replacement on a pool of one cntlr keeps the mount only while the
   old path lasts that long: its controller node down, or its port
   listening for no other subsystem; a port that serves other subsystems
@@ -7682,9 +7696,11 @@ that component's document and only pointed to here.
   with a `stripe_size` below `data_block_size`, takes a host range of nearly
   the slice count times `data_block_size`, and an aligned range of that size
   frees one block on every slice; `fstrim` can report success and free
-  nothing. A `stripe_size` equal to `data_block_size`, the default for a
-  block no larger than the largest stripe (Common validation), makes one
-  aligned host block one pool block. Read in the kernel's dm-thin and dm-stripe
+  nothing. A `stripe_size` equal to `data_block_size`, the default of a
+  conf that names no stripe and a block no larger than the largest stripe,
+  makes one aligned host block one pool block; a pool that names its block
+  and no stripe takes its cluster's stripe instead (Common validation,
+  Storage pools). Read in the kernel's dm-thin and dm-stripe
   sources, not in the lab.
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node

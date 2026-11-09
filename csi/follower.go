@@ -14,11 +14,11 @@ import (
 // CSI15; architecture.md, Host view): while a volume is staged, the node
 // holds a path to every cntlr the cdc lists for the volume's subsystem and
 // drops a path to one the cdc has withdrawn once it holds a path to a listed
-// one, so a fenced old primary answers the node's IO with errors only while
-// the node can reach no listed cntlr. It keeps the set of staged subsystems
-// and the cdc addresses their attaches named, holds a persistent discovery
-// connection to each cdc, and on every trigger reads the discovery logs and
-// connects or drops paths to match.
+// one that shows the volume's namespace, so a fenced old primary answers the
+// node's IO with errors only while the node holds no such path. It keeps the
+// set of staged subsystems and the cdc addresses their attaches named, holds
+// a persistent discovery connection to each cdc, and on every trigger reads
+// the discovery logs and connects or drops paths to match.
 const (
 	// DefaultSyncPeriod is the follower's timer, the safety net under the
 	// kernel's change notification.

@@ -48,10 +48,12 @@ func resolveTransfer(
 
 // nsTransferRef is the guard of DeleteNamespace, UpdateNamespaceDev and
 // CreateNamespace (architecture.md, Transfers): the name of the first transfer
-// of the SP whose origin is the namespace place (nqn, nsIdx). Every cntlr's
-// xfer stack reads the origin's thin device while its transfer lives, so
-// deleting the origin would leave the cntlrs building a stack over nothing,
-// repointing it would move a live copy to another thin device mid-copy, and
+// of the SP whose origin is the namespace place (nqn, nsIdx). Every cntlr
+// builds its xfer stack from the origin while its transfer lives, the
+// primary's mapping the origin's thin device, so deleting the origin would
+// leave every cntlr reporting the transfer in error and the destination
+// reading errors, repointing it would move a live copy to another thin
+// device mid-copy, and
 // a new namespace at a place a transfer still names would become that
 // transfer's origin unasked. The walk is xfer_name_list, bounded by
 // MaxXferCntPerSp; a listed transfer whose key is gone is ABORTED, as

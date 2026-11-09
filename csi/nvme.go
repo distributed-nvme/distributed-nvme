@@ -204,7 +204,7 @@ func (h *nvmeHost) run(ctx context.Context, args ...string) (string, error) {
 var nsDevicePattern = regexp.MustCompile(`^nvme[0-9]+(c[0-9]+)?n[0-9]+$`)
 
 // showsNamespace reports whether the kernel shows a namespace under one
-// controller, which a connect's scan adds only after the connect returns;
+// controller, which a connect's scan can add after the connect returns;
 // a listing that fails reads as no.
 func (h *nvmeHost) showsNamespace(ctx context.Context, name string) bool {
 	entries, err := h.oc.ReadDir(ctx, path.Join(sysClassNvme, name))

@@ -214,7 +214,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **flip** — A one-way write of a readiness flag. The worker's two flips each write once the agents report it earned: the provisioned flip on a side whose zeroing is complete (`FlipProvisioned`), and the created flip on a thin device whose volume is OK in every slice (`FlipCreated`), which also writes the torn mark the report carries (see torn snapshot). For the sides of clone meta groups the provisioned flip runs through its twin, the clone flip (`FlipCloneProvisioned`), in a transaction of its own; it skips a clone that is gone, re-created under its name, without a group or being deleted (see `dnv-worker.md` RW18, MD6). For the side of a repair's new leg the provisioned flip runs through the repair flip (`FlipRepairProvisioned`), one side per transaction; it writes the `Repair`, and skips a repair that is gone or carries another `rep_id`, and one of a clone that is gone or being deleted (see `dnv-worker.md` RW18, MD6). Each flip bumps the pool's revision when it writes, so the next syncup carries the flag.
 
-**follower** — The node plugin's loop that keeps a node's paths to the volumes it has staged matching the cdcs' discovery logs: it connects every listed cntlr, drops a path no cdc lists any more, and drops nothing on a missing answer (see `csi.md` CSI15).
+**follower** — The node plugin's loop that keeps a node's paths to the volumes it has staged matching the cdcs' discovery logs: it connects every listed cntlr, drops a path no cdc lists any more once it holds a path to a listed cntlr that shows the volume's namespace or the cdcs list none for the subsystem, and drops nothing on a missing answer (see `csi.md` CSI15).
 
 **footprint** — The controller-node budget a cntlr reserves, the sum of the extents of every group of its pool's slices, a clone meta group counting in none: it is debited from the node's free extents when the cntlr is created and by each group a grow appends, and returned in the transaction that removes the cntlr, or, for one group, in the withdrawal of a stuck grow that takes the group back (see `dnv-worker.md` AR6).
 
@@ -482,7 +482,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **resolution** — The in-STM reads that turn a request's cluster name and pool name into the cluster id and the pool's conf (see `gateway.md` GW5); filling the conf members a caller omitted is the separate resolve-at-write.
 
-**resolve-at-write** — The rule that the RPC writing a conf fills every member the caller omitted, from the cluster conf and then the constants, so every stored conf is concrete and nothing downstream substitutes; the event thresholds and the hydration pair are the exceptions, stored as sent and resolved when read (see `gateway.md` GW11).
+**resolve-at-write** — The rule that the RPC writing a conf fills every member the caller omitted, from the cluster conf and then the constants or, for the stripe, the block, so every stored conf is concrete and nothing downstream substitutes; the event thresholds and the hydration pair are the exceptions, stored as sent and resolved when read (see `gateway.md` GW11).
 
 **ResStatus** — The status of one info row (`ResStatus`): missing, error, ok, provisioning for a healthy resource that is not ready, pending for a leg no probe round has completed, and unknown, which only the worker assigns, to an object it cannot reach or whose observation is too old (see `dnv-worker.md` HL7).
 

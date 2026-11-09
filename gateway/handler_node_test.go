@@ -274,11 +274,11 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 		QosRatio: req.GetQosRatio(),
 		BdevConf: &pb.BdevConf{
 			DmPoolConf: &pb.DmPoolConf{
-				// The request's, not the 1 MiB constant.
+				// The request's, not the default block.
 				DataBlockSize:   2 * 1024 * 1024,
 				LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
 			},
-			// The request's, not the 64 KiB constant.
+			// The request's, not the stripe its block would give.
 			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 128 * 1024},
 			// redund_conf stays unset: it is a CHOICE, not a default, and an
 			// unset oneof already means redund_none (architecture.md, Storage

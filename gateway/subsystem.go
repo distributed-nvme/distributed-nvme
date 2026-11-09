@@ -575,7 +575,7 @@ func (s *Server) DeleteNamespace(
 // own dm-linear onto the new td's raid0 and the nvmet device_path never
 // changes — so nothing here needs to touch the subsystem's identity, its
 // allowed hosts or the CdcEntry. A live transfer's origin is refused
-// (nsTransferRef): its xfer stacks read the td it points at.
+// (nsTransferRef): the primary's xfer stack maps the td it points at.
 func (s *Server) UpdateNamespaceDev(
 	ctx context.Context,
 	req *pb.UpdateNamespaceDevRequest,

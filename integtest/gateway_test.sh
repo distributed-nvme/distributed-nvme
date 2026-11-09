@@ -2472,8 +2472,8 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.xfers.x0.allowed_hosts | @json')" \
 		"[\"$host2\",\"$host3\"]" "transfer allowed_hosts after the update"
 	# While the transfer lives its origin is the transfer's (architecture.md,
-	# Transfers): every cntlr's xfer stack reads its thin device, so the
-	# origin's delete and its repoint are refused, with no write.
+	# Transfers): every cntlr builds its xfer stack from it, so the origin's
+	# delete and its repoint are refused, with no write.
 	assert_no_write "delete-ns of a live transfer's origin" \
 		gwx FAILED_PRECONDITION delete-ns --sp sp0 --rev "$SP_REV" \
 		--nqn "$nqn" --idx 1

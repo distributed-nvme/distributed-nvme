@@ -263,46 +263,46 @@ ignores the topology requirements it is sent, which can only name that
 segment, and names no accessible topology for the volume, which Kubernetes
 reads as every node.
 
-CSI14. **The plugin's own connect, which never gives up.** A node's path to
-a volume is made by nvme-cli with the node's identity and a reconnect that
-never gives up, as the agents' paths have (`dnagent.md` SH20), and the
-kernel's defaults for the rest; the agent's connect, which hard-codes dnv's
-settings for a cntlr's path to a leg, is not reused, and neither are its
-sysfs readers. So a mount survives an outage of every path, however long,
-since IO waits and the kernel reconnects onto the same device, save where a
-path's reconnect reaches its cntlr's port while the port listens for
-another subsystem and before the volume's is built again, as on a
-controller node that comes back holding other volumes' cntlrs, which
-refuses it with DNR and ends that path's reconnects for good
-(`dnagent_integtest.md`, Assumptions and preflight checks; `cnagent.md`
-CN2). A mount does not survive the loss of its last path that way: the
-kernel deletes the controller, and a later connect to the subsystem makes a
-new namespace device, which the mount does not follow. The cost of a
-reconnect without end is that IO to a volume none of whose cntlrs comes back
-waits for ever, with no error; a pod blocked in it cannot be killed, and the
-operator ends the wait with `nvme disconnect -n` of the volume's subsystem on
-the node (`architecture.md`, Known limits). The follower keeps a withdrawn
-path until a listed cntlr's path shows the volume's namespace (CSI15), so on
-a pool of one cntlr a cntlr replacement, whose new cntlr the cdc lists
-before its agent has exported the subsystem, keeps the old path until the
+CSI14. **The plugin's own connect, which never gives up.** A node's path to a
+volume is made by nvme-cli with the node's identity and a reconnect that never
+gives up, as the agents' paths have (`dnagent.md` SH20), and the kernel's
+defaults for the rest; the agent's connect, which hard-codes dnv's settings for
+a cntlr's path to a leg, is not reused, and neither are its sysfs readers. So a
+mount survives an outage of every path, however long, since IO waits and the
+kernel reconnects onto the same device, save where a path's reconnect reaches
+its cntlr's port while the port listens for another subsystem and before the
+volume's is built again, as on a controller node that comes back holding other
+volumes' cntlrs, which refuses it with DNR and ends that path's reconnects for
+good (`dnagent_integtest.md`, Assumptions and preflight checks; `cnagent.md`
+CN2), or where a subsystem whose cntlid slot has run out refuses the reconnect
+with DNR the same way (`architecture.md`, cntlid slots). A mount does not
+survive the loss of its last path that way: the kernel deletes the controller,
+and a later connect to the subsystem makes a new namespace device, which the
+mount does not follow. The cost of a reconnect without end is that IO to a
+volume none of whose cntlrs comes back waits for ever, with no error; a pod
+blocked in it cannot be killed, and the operator ends the wait with `nvme
+disconnect -n` of the volume's subsystem on the node (`architecture.md`, Known
+limits). The follower keeps a withdrawn path until a listed cntlr's path shows
+the volume's namespace, or until the cdcs list no cntlr for the subsystem
+(CSI15), so on a pool of one cntlr a cntlr replacement, whose new cntlr the cdc
+lists before its agent has exported the subsystem, keeps the old path until the
 new one has joined the device, as long as the old path's reconnects are not
-refused before then. Each path holds at most the cn agent's IO queue cap of
-IO queues, one per CPU up to the cap, plus its admin queue, when the cap is
-above zero (`dnagent.md` SH32): the cap binds this connect too. The plugin
-reports no volume health, so
-nothing in the driver or in Kubernetes acts on a dead mount, and the operator
-deletes the pod. A stage connects to every cntlr the cdcs list for the volume's
-subsystem and repeats the connects, since the cdc lists a subsystem before its
-cntlrs have built it, until a pass ends with no error or the node holds a path
-to the subsystem, a standby's included, and a stage whose wait runs out first
-is UNAVAILABLE; a cntlr still refusing when the connects end is left to the
-follower's passes (CSI15), each of which retries it, the next within a timer
-period, so the wait the stage has left covers that retry only while the
-follower's period stays well below it, as at the defaults when the connects end
-early in the wait; the stage then waits for the volume's device link by uuid
-under the disk-by-id directory, which appears once a path is live and
-optimized. A volume whose link does not come within the wait is UNAVAILABLE,
-and the kubelet calls again.
+refused before then. Each path holds at most the cn agent's IO queue cap of IO
+queues, one per CPU up to the cap, plus its admin queue, when the cap is above
+zero (`dnagent.md` SH32): the cap binds this connect too. The plugin reports no
+volume health, so nothing in the driver or in Kubernetes acts on a dead mount,
+and the operator deletes the pod. A stage connects to every cntlr the cdcs list
+for the volume's subsystem and repeats the connects, since the cdc lists a
+subsystem before its cntlrs have built it, until a pass ends with no error or
+the node holds a path to the subsystem, a standby's included, and a stage whose
+wait runs out first is UNAVAILABLE; a cntlr still refusing when the connects
+end is left to the follower's passes (CSI15), each of which retries it, the
+next within a timer period, so the wait the stage has left covers that retry
+only while the follower's period stays well below it, as at the defaults when
+the connects end early in the wait; the stage then waits for the volume's
+device link by uuid under the disk-by-id directory, which appears once a path
+is live and optimized. A volume whose link does not come within the wait is
+UNAVAILABLE, and the kubelet calls again.
 
 CSI15. **The follower.** The plugin keeps the set of subsystems it has staged
 and the cdcs it follows, the configured ones and those the attaches named,
@@ -325,23 +325,24 @@ run outside that order, tracked by controller, at most a fixed number at once,
 since an `nvme disconnect` of a target that vanished can wait out the kernel's
 admin timeout: no other volume's stage waits for them, a pass does not start a
 second drop of a controller being dropped, an unstage waits for the drops of
-its own volume before it drops the rest outside the order too, and a stage of a
-volume whose unstage still runs waits for it. A cdc that cannot be reached, or
-whose log cannot be read, holds every drop off and leaves the connects to the
-others, since twins exist so that one can be down; a pass that read no log
-drops nothing: an answer that is missing is not an answer that the cntlr is
-gone. The plugin's discovery connections are those under the node's host NQN to
-a cdc it follows, and it uses and drops no other; a connection another tool
-made to the same cdc under the same host NQN cannot be told apart from the
-plugin's. After a restart the plugin reads the staged subsystems back from
-sysfs, those of the driver's NQN prefix, and follows the configured cdcs from
-the start, so a configured cdc that cannot be read holds the drops off after a
-restart as before one, whichever shard codes each cdc serves. A discovery
-connection under the node's host NQN to another address is followed as well
-when its log lists a staged subsystem, since an attach named that cdc before
-the configuration changed; it only adds a cdc that must answer, and one whose
-log cannot be read at the restart stays another tool's. A cdc an attach named
-leaves the set only when the drop of the discovery connections forgets it
+its own volume and then disconnects the subsystem outside the order too, a
+disconnect neither tracked by controller nor counted in that number, and a
+stage of a volume whose unstage still runs waits for it. A cdc that cannot be
+reached, or whose log cannot be read, holds every drop off and leaves the
+connects to the others, since twins exist so that one can be down; a pass that
+read no log drops nothing: an answer that is missing is not an answer that the
+cntlr is gone. The plugin's discovery connections are those under the node's
+host NQN to a cdc it follows, and it uses and drops no other; a connection
+another tool made to the same cdc under the same host NQN cannot be told apart
+from the plugin's. After a restart the plugin reads the staged subsystems back
+from sysfs, those of the driver's NQN prefix, and follows the configured cdcs
+from the start, so a configured cdc that cannot be read holds the drops off
+after a restart as before one, whichever shard codes each cdc serves. A
+discovery connection under the node's host NQN to another address is followed
+as well when its log lists a staged subsystem, since an attach named that cdc
+before the configuration changed; it only adds a cdc that must answer, and one
+whose log cannot be read at the restart stays another tool's. A cdc an attach
+named leaves the set only when the drop of the discovery connections forgets it
 (CSI16) or when a restart does not find its log listing a staged subsystem, and
 a stage brings it back from the volume's publish context, so an address a cdc
 left for good can return with the next stage of a volume attached before the

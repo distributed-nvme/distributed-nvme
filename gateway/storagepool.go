@@ -148,7 +148,7 @@ func spDefaultCntlidSlots() []uint32 {
 // "unset" (architecture.md, Common validation). A member zero on BOTH sides is
 // settled afterwards, by
 // model.ResolveBdevConf — never here, so that "inherit from the cluster" stays
-// distinguishable from "take the constant".
+// distinguishable from "take the default".
 func spMergeUint64(reqValue uint64, clusterValue uint64) uint64 {
 	if reqValue != 0 {
 		return reqValue
@@ -178,8 +178,9 @@ func redundKindSet(conf *pb.RedundConf) bool {
 // one structural default of architecture.md, Storage pools — a redund_conf
 // unset in both is redund_none. The caller passes the result through
 // model.ResolveBdevConf, which settles any member still zero on both sides
-// against the constants of architecture.md, Common validation; the three
-// rungs (request, cluster, constant) therefore all land in the stored message.
+// against the constants of architecture.md, Common validation, and the stripe
+// against the block; the three rungs (request, cluster, default) therefore
+// all land in the stored message.
 //
 // The merge is stored rather than re-resolved at read time because an SP's
 // geometry must be immutable: legCntOf, model.GroupBlocks and every thin
