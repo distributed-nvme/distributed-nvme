@@ -261,7 +261,7 @@ func setupSetCloneTr(fs *flag.FlagSet) job {
 // about any other slice. The Clone record carries no chunk count at all — how
 // many chunks a clone holds is how many chunk keys it has — which is why
 // case S stage 13 asserts the three PAIRS it sent rather than any number on the
-// record.
+// record. --offset, sent only when given, places the page inside its chunk.
 func setupAppendCloneBm(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
@@ -273,6 +273,9 @@ func setupAppendCloneBm(fs *flag.FlagSet) job {
 		"bm_idx, the chunk's index within that slice's bitmap")
 	bmHex := fs.String("bm-hex", "",
 		"bitmap as hex; empty sends an empty bitmap on purpose")
+	var offset optUint32
+	fs.Var(&offset, "offset",
+		"the page's byte offset in the chunk; sent only when given")
 	return func(
 		ctx context.Context,
 		client pb.GatewayClient,
@@ -286,6 +289,7 @@ func setupAppendCloneBm(fs *flag.FlagSet) job {
 			SrcSliceIdx: uint32(*srcSliceIdx),
 			BmIdx:       uint32(*bmIdx),
 			Bitmap:      bitmapArg(*bmHex),
+			Offset:      offset.ptr,
 		})
 	}
 }
@@ -398,9 +402,10 @@ func setupGetMigr(fs *flag.FlagSet) job {
 // setupAppendMigrBm drives AppendMigrationBitmap. It is AppendCloneBitmap
 // without the chunk address: a migration copies one side, so its chunks are a
 // single sequence the record's bm_cnt numbers as they arrive (case S stage 14
-// appends two and asserts it reaches 2) — there is no slice to name and no
-// index to choose. An empty --bm-hex is again sent as an empty bitmap so the
-// gateway's own refusal is the one under test.
+// appends two and asserts it reaches 2) — there is no slice to name, and
+// --bm-idx, sent only when given, only names the index a chunk must land at.
+// An empty --bm-hex is again sent as an empty bitmap so the gateway's own
+// refusal is the one under test.
 func setupAppendMigrBm(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
@@ -408,6 +413,9 @@ func setupAppendMigrBm(fs *flag.FlagSet) job {
 	migrName := fs.String("name", "", "migr_name")
 	bmHex := fs.String("bm-hex", "",
 		"bitmap as hex; empty sends an empty bitmap on purpose")
+	var bmIdx optUint32
+	fs.Var(&bmIdx, "bm-idx",
+		"the index the chunk must land at; sent only when given")
 	return func(
 		ctx context.Context,
 		client pb.GatewayClient,
@@ -420,6 +428,7 @@ func setupAppendMigrBm(fs *flag.FlagSet) job {
 				SpRev:       &pb.SpRev{Revision: uint64(rev)},
 				MigrName:    *migrName,
 				Bitmap:      bitmapArg(*bmHex),
+				BmIdx:       bmIdx.ptr,
 			})
 	}
 }

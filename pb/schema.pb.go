@@ -10252,14 +10252,20 @@ func (x *UpdateCloneTrConfReply) GetCloneId() uint64 {
 }
 
 type AppendCloneBitmapRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	SpName        string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
-	SpRev         *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
-	CloneName     string                 `protobuf:"bytes,4,opt,name=clone_name,json=cloneName,proto3" json:"clone_name,omitempty"`
-	SrcSliceIdx   uint32                 `protobuf:"varint,5,opt,name=src_slice_idx,json=srcSliceIdx,proto3" json:"src_slice_idx,omitempty"`
-	BmIdx         uint32                 `protobuf:"varint,6,opt,name=bm_idx,json=bmIdx,proto3" json:"bm_idx,omitempty"`
-	Bitmap        []byte                 `protobuf:"bytes,7,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	SpName      string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
+	SpRev       *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
+	CloneName   string                 `protobuf:"bytes,4,opt,name=clone_name,json=cloneName,proto3" json:"clone_name,omitempty"`
+	SrcSliceIdx uint32                 `protobuf:"varint,5,opt,name=src_slice_idx,json=srcSliceIdx,proto3" json:"src_slice_idx,omitempty"`
+	BmIdx       uint32                 `protobuf:"varint,6,opt,name=bm_idx,json=bmIdx,proto3" json:"bm_idx,omitempty"`
+	Bitmap      []byte                 `protobuf:"bytes,7,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	// The page's byte offset inside the chunk, sent by a caller that may
+	// send a page again: present, the page is appended only at the chunk's
+	// current length, and a page whose bytes already stand at that offset
+	// changes nothing; absent, the page is appended wherever the chunk ends
+	// (architecture.md, Clones).
+	Offset        *uint32 `protobuf:"varint,8,opt,name=offset,proto3,oneof" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -10341,6 +10347,13 @@ func (x *AppendCloneBitmapRequest) GetBitmap() []byte {
 		return x.Bitmap
 	}
 	return nil
+}
+
+func (x *AppendCloneBitmapRequest) GetOffset() uint32 {
+	if x != nil && x.Offset != nil {
+		return *x.Offset
+	}
+	return 0
 }
 
 type AppendCloneBitmapReply struct {
@@ -11348,12 +11361,18 @@ func (x *GetMigrationReply) GetMigr() *Migration {
 }
 
 type AppendMigrationBitmapRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	SpName        string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
-	SpRev         *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
-	MigrName      string                 `protobuf:"bytes,4,opt,name=migr_name,json=migrName,proto3" json:"migr_name,omitempty"`
-	Bitmap        []byte                 `protobuf:"bytes,5,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	SpName      string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
+	SpRev       *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
+	MigrName    string                 `protobuf:"bytes,4,opt,name=migr_name,json=migrName,proto3" json:"migr_name,omitempty"`
+	Bitmap      []byte                 `protobuf:"bytes,5,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	// The chunk's index, sent by a caller that may send a chunk again:
+	// present, the chunk is stored only at the index bm_cnt, and a chunk
+	// whose bytes already stand at that index changes nothing; absent, the
+	// chunk is stored at bm_cnt whatever was sent before (architecture.md,
+	// Migrations).
+	BmIdx         *uint32 `protobuf:"varint,6,opt,name=bm_idx,json=bmIdx,proto3,oneof" json:"bm_idx,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11421,6 +11440,13 @@ func (x *AppendMigrationBitmapRequest) GetBitmap() []byte {
 		return x.Bitmap
 	}
 	return nil
+}
+
+func (x *AppendMigrationBitmapRequest) GetBmIdx() uint32 {
+	if x != nil && x.BmIdx != nil {
+		return *x.BmIdx
+	}
+	return 0
 }
 
 type AppendMigrationBitmapReply struct {
@@ -17363,7 +17389,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"clone_name\x18\x04 \x01(\tR\tcloneName\x12+\n" +
 	"\vsrc_tr_conf\x18\x05 \x03(\v2\v.NvmeTrConfR\tsrcTrConf\"3\n" +
 	"\x16UpdateCloneTrConfReply\x12\x19\n" +
-	"\bclone_id\x18\x01 \x01(\x04R\acloneId\"\xe7\x01\n" +
+	"\bclone_id\x18\x01 \x01(\x04R\acloneId\"\x8f\x02\n" +
 	"\x18AppendCloneBitmapRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
@@ -17372,7 +17398,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"clone_name\x18\x04 \x01(\tR\tcloneName\x12\"\n" +
 	"\rsrc_slice_idx\x18\x05 \x01(\rR\vsrcSliceIdx\x12\x15\n" +
 	"\x06bm_idx\x18\x06 \x01(\rR\x05bmIdx\x12\x16\n" +
-	"\x06bitmap\x18\a \x01(\fR\x06bitmap\"3\n" +
+	"\x06bitmap\x18\a \x01(\fR\x06bitmap\x12\x1b\n" +
+	"\x06offset\x18\b \x01(\rH\x00R\x06offset\x88\x01\x01B\t\n" +
+	"\a_offset\"3\n" +
 	"\x16AppendCloneBitmapReply\x12\x19\n" +
 	"\bclone_id\x18\x01 \x01(\x04R\acloneId\"\x8e\x02\n" +
 	"\x15CreateTransferRequest\x12!\n" +
@@ -17441,13 +17469,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\tmigr_name\x18\x03 \x01(\tR\bmigrName\"3\n" +
 	"\x11GetMigrationReply\x12\x1e\n" +
 	"\x04migr\x18\x01 \x01(\v2\n" +
-	".MigrationR\x04migr\"\xae\x01\n" +
+	".MigrationR\x04migr\"\xd5\x01\n" +
 	"\x1cAppendMigrationBitmapRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
 	"\x06sp_rev\x18\x03 \x01(\v2\x06.SpRevR\x05spRev\x12\x1b\n" +
 	"\tmigr_name\x18\x04 \x01(\tR\bmigrName\x12\x16\n" +
-	"\x06bitmap\x18\x05 \x01(\fR\x06bitmap\"5\n" +
+	"\x06bitmap\x18\x05 \x01(\fR\x06bitmap\x12\x1a\n" +
+	"\x06bm_idx\x18\x06 \x01(\rH\x00R\x05bmIdx\x88\x01\x01B\t\n" +
+	"\a_bm_idx\"5\n" +
 	"\x1aAppendMigrationBitmapReply\x12\x17\n" +
 	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\"\x9f\x02\n" +
 	"\x13CreateRepairRequest\x12!\n" +
@@ -18747,6 +18777,8 @@ func file_pb_schema_proto_init() {
 	file_pb_schema_proto_msgTypes[11].OneofWrappers = []any{
 		(*BdevFeature_BdevFeatureNone)(nil),
 	}
+	file_pb_schema_proto_msgTypes[152].OneofWrappers = []any{}
+	file_pb_schema_proto_msgTypes[170].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

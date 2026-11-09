@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -3322,6 +3324,194 @@ func TestAppendCloneBitmapPairAddressing(t *testing.T) {
 	}
 }
 
+// TestAppendCloneBitmapPageOffset pins the page position of architecture.md,
+// Clones, AppendCloneBitmap: a page that names its `offset` is appended only
+// at the chunk's current length, and a page whose bytes already stand at that
+// offset answers OK with nothing written and no new revision, so a page sent
+// again after a lost answer cannot move the chunk's later bits. Any other
+// offset is FAILED_PRECONDITION naming the stored length, with nothing
+// written.
+func TestAppendCloneBitmapPageOffset(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	created := volCreateClone(env, "clone-a", "dst")
+	appendAt := func(offset uint32, page []byte) (
+		*pb.AppendCloneBitmapReply, error,
+	) {
+		return env.srv.AppendCloneBitmap(
+			env.ctx, &pb.AppendCloneBitmapRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				CloneName:   "clone-a",
+				SrcSliceIdx: 1,
+				BmIdx:       0,
+				Bitmap:      page,
+				Offset:      proto.Uint32(offset),
+			})
+	}
+	chunkBytes := func() []byte {
+		chunk := &pb.CloneBitmap{}
+		env.get(model.CloneBitmapKey(env.cid, volSpId, "clone-a", 1, 0),
+			chunk)
+		return chunk.GetBitmap()
+	}
+	pageA := []byte{0x01, 0x02}
+	pageB := []byte{0x03, 0x04, 0x05}
+	if _, err := appendAt(0, pageA); err != nil {
+		t.Fatalf("page A at 0: %v", err)
+	}
+	if _, err := appendAt(2, pageB); err != nil {
+		t.Fatalf("page B at 2: %v", err)
+	}
+	want := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+	if got := chunkBytes(); !bytes.Equal(got, want) {
+		t.Fatalf("chunk after two pages: got %v, want %v", got, want)
+	}
+	// A page sent again, each at its own offset: OK, nothing written.
+	for _, again := range []struct {
+		name   string
+		offset uint32
+		page   []byte
+	}{
+		{"page B again", 2, pageB},
+		{"page A again", 0, pageA},
+		{"a tail of page B", 3, []byte{0x04, 0x05}},
+	} {
+		before := env.dump()
+		beforeRev := env.spRev()
+		reply, err := appendAt(again.offset, again.page)
+		if err != nil {
+			t.Fatalf("%s: %v", again.name, err)
+		}
+		if reply.GetCloneId() != created.GetCloneId() {
+			t.Errorf("%s: clone_id %d, want %d", again.name,
+				reply.GetCloneId(), created.GetCloneId())
+		}
+		if got := env.spRev(); got != beforeRev {
+			t.Errorf("%s: sp_rev %d, want %d (a repeat writes nothing)",
+				again.name, got, beforeRev)
+		}
+		if !reflect.DeepEqual(env.dump(), before) {
+			t.Errorf("%s: etcd changed on a repeat", again.name)
+		}
+	}
+	// Every other offset is refused with nothing written.
+	for _, bad := range []struct {
+		name   string
+		offset uint32
+		page   []byte
+	}{
+		{"past the end", 6, []byte{0x06}},
+		{"other bytes at a stored offset", 0, []byte{0x09, 0x02}},
+		{"a page that runs past the end", 4, []byte{0x05, 0x06}},
+		{"other bytes at the start of a page", 2, []byte{0x03, 0x00}},
+	} {
+		before := env.dump()
+		_, err := appendAt(bad.offset, bad.page)
+		msg := volWantCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(msg, "holds 5 bytes") {
+			t.Errorf("%s: message %q does not name the stored length",
+				bad.name, msg)
+		}
+		if !reflect.DeepEqual(env.dump(), before) {
+			t.Errorf("%s: etcd changed on a refusal", bad.name)
+		}
+	}
+	// The next page at the stored length appends as before.
+	if _, err := appendAt(5, []byte{0x06}); err != nil {
+		t.Fatalf("page C at 5: %v", err)
+	}
+	want = append(want, 0x06)
+	if got := chunkBytes(); !bytes.Equal(got, want) {
+		t.Errorf("chunk after page C: got %v, want %v", got, want)
+	}
+}
+
+// TestAppendCloneBitmapRepeatAtTheCeiling pins that a placed page's repeat
+// is judged before the chunk's ceiling (architecture.md, Clones): once a
+// chunk holds CloneBmChunkBytes, its last page sent again at its offset is
+// still OK with nothing written, while a new page past the end meets the
+// ceiling.
+func TestAppendCloneBitmapRepeatAtTheCeiling(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	volCreateClone(env, "clone-a", "dst")
+	appendAt := func(offset uint32, page []byte) error {
+		_, err := env.srv.AppendCloneBitmap(
+			env.ctx, &pb.AppendCloneBitmapRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				CloneName:   "clone-a",
+				SrcSliceIdx: 0,
+				BmIdx:       0,
+				Bitmap:      page,
+				Offset:      proto.Uint32(offset),
+			})
+		return err
+	}
+	first := bytes.Repeat([]byte{0xa5}, common.CloneBmChunkBytes-1)
+	last := []byte{0x5a}
+	if err := appendAt(0, first); err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	if err := appendAt(common.CloneBmChunkBytes-1, last); err != nil {
+		t.Fatalf("last page: %v", err)
+	}
+	before := env.dump()
+	beforeRev := env.spRev()
+	if err := appendAt(common.CloneBmChunkBytes-1, last); err != nil {
+		t.Fatalf("the last page again on a full chunk: %v", err)
+	}
+	if env.spRev() != beforeRev || !reflect.DeepEqual(env.dump(), before) {
+		t.Errorf("a repeat on a full chunk wrote")
+	}
+	err := appendAt(common.CloneBmChunkBytes, []byte{0x01})
+	volWantCode(t, err, codes.ResourceExhausted)
+	if !reflect.DeepEqual(env.dump(), before) {
+		t.Errorf("a refused page past the ceiling wrote")
+	}
+}
+
+// TestAppendBitmapWithoutPositionAppendsAgain pins the other half of the
+// position rule (architecture.md, Clones, Migrations, Known limits): a page or
+// a chunk sent again WITHOUT its position is appended again, as the calls
+// did before the field existed, so only a caller that names the place is
+// protected.
+func TestAppendBitmapWithoutPositionAppendsAgain(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	volCreateClone(env, "clone-a", "dst")
+	volCreateMigration(env, "migr-a")
+	for i := 0; i < 2; i++ {
+		if _, err := env.srv.AppendCloneBitmap(
+			env.ctx, &pb.AppendCloneBitmapRequest{
+				ClusterName: env.cluster, SpName: volSpName,
+				SpRev: env.token(), CloneName: "clone-a",
+				Bitmap: []byte{0x0f},
+			}); err != nil {
+			t.Fatalf("clone page %d: %v", i, err)
+		}
+		if _, err := env.srv.AppendMigrationBitmap(
+			env.ctx, &pb.AppendMigrationBitmapRequest{
+				ClusterName: env.cluster, SpName: volSpName,
+				SpRev: env.token(), MigrName: "migr-a",
+				Bitmap: []byte{0x0f},
+			}); err != nil {
+			t.Fatalf("migration chunk %d: %v", i, err)
+		}
+	}
+	chunk := &pb.CloneBitmap{}
+	env.get(model.CloneBitmapKey(env.cid, volSpId, "clone-a", 0, 0), chunk)
+	if !bytes.Equal(chunk.GetBitmap(), []byte{0x0f, 0x0f}) {
+		t.Errorf("clone chunk %v, want the page twice", chunk.GetBitmap())
+	}
+	if got := env.migration("migr-a").GetBmCnt(); got != 2 {
+		t.Errorf("bm_cnt %d, want 2: the chunk stored twice", got)
+	}
+}
+
 // TestAppendCloneBitmapRefusals pins all five bounds of architecture.md, Clones,
 // each by its GW7
 // code. The three index-and-shape rows are INVALID_ARGUMENT: they judge THIS
@@ -4869,6 +5059,97 @@ func TestAppendMigrationBitmapIsAppendOnly(t *testing.T) {
 	env.wantUntouched(before, beforeRev)
 	if got := env.migration("migr-a").GetBmCnt(); got != common.MaxMigrBmCnt {
 		t.Errorf("bm_cnt: got %d, want %d", got, common.MaxMigrBmCnt)
+	}
+}
+
+// TestAppendMigrationBitmapChunkIndex pins the chunk index of
+// architecture.md, Migrations, AppendMigrationBitmap: a chunk that names its
+// `bm_idx` is stored only at the index `bm_cnt`, and a chunk whose bytes
+// already stand at that index answers OK with nothing written and no new
+// revision, so a chunk sent again after a lost answer cannot move every later
+// chunk. The repeat is judged before the `MaxMigrBmCnt` ceiling, so the last
+// chunk can be sent again once the ceiling is reached. Any other index is
+// FAILED_PRECONDITION naming `bm_cnt`, with nothing written.
+func TestAppendMigrationBitmapChunkIndex(t *testing.T) {
+	env := newVolEnv(t)
+	created := volCreateMigration(env, "migr-a")
+	appendAt := func(idx uint32, chunk []byte) (
+		*pb.AppendMigrationBitmapReply, error,
+	) {
+		return env.srv.AppendMigrationBitmap(
+			env.ctx, &pb.AppendMigrationBitmapRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				MigrName:    "migr-a",
+				Bitmap:      chunk,
+				BmIdx:       proto.Uint32(idx),
+			})
+	}
+	repeat := func(name string, idx uint32, chunk []byte) {
+		t.Helper()
+		before := env.dump()
+		beforeRev := env.spRev()
+		reply, err := appendAt(idx, chunk)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if reply.GetMigrId() != created.GetMigrId() {
+			t.Errorf("%s: migr_id %d, want %d", name,
+				reply.GetMigrId(), created.GetMigrId())
+		}
+		if got := env.spRev(); got != beforeRev {
+			t.Errorf("%s: sp_rev %d, want %d (a repeat writes nothing)",
+				name, got, beforeRev)
+		}
+		if !reflect.DeepEqual(env.dump(), before) {
+			t.Errorf("%s: etcd changed on a repeat", name)
+		}
+	}
+	refused := func(name string, idx uint32, chunk []byte, wantCnt int) {
+		t.Helper()
+		before := env.dump()
+		_, err := appendAt(idx, chunk)
+		msg := volWantCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(msg, fmt.Sprintf("bm_cnt is %d", wantCnt)) {
+			t.Errorf("%s: message %q does not name bm_cnt %d",
+				name, msg, wantCnt)
+		}
+		if !reflect.DeepEqual(env.dump(), before) {
+			t.Errorf("%s: etcd changed on a refusal", name)
+		}
+	}
+	chunks := [][]byte{{0x01}, {0x02, 0x03}, {0x04}, {0x05}}
+	if _, err := appendAt(0, chunks[0]); err != nil {
+		t.Fatalf("chunk 0: %v", err)
+	}
+	repeat("chunk 0 again", 0, chunks[0])
+	refused("other bytes at index 0", 0, []byte{0x09}, 1)
+	refused("an index past bm_cnt", 2, chunks[2], 1)
+	for idx := 1; idx < len(chunks); idx++ {
+		if _, err := appendAt(uint32(idx), chunks[idx]); err != nil {
+			t.Fatalf("chunk %d: %v", idx, err)
+		}
+	}
+	if got := env.migration("migr-a").GetBmCnt(); got != common.MaxMigrBmCnt {
+		t.Fatalf("bm_cnt %d, want %d", got, common.MaxMigrBmCnt)
+	}
+	repeat("the last chunk again at the ceiling", 3, chunks[3])
+	repeat("chunk 1 again at the ceiling", 1, chunks[1])
+	refused("other bytes at index 1", 1, []byte{0x02}, common.MaxMigrBmCnt)
+	before := env.dump()
+	_, err := appendAt(common.MaxMigrBmCnt, []byte{0x06})
+	volWantCode(t, err, codes.ResourceExhausted)
+	if !reflect.DeepEqual(env.dump(), before) {
+		t.Errorf("a refused chunk past the ceiling changed etcd")
+	}
+	for idx, chunk := range chunks {
+		got := &pb.MigrBitmap{}
+		env.get(model.MigrBitmapKey(env.cid, volSpId, "migr-a",
+			uint32(idx)), got)
+		if !bytes.Equal(got.GetBitmap(), chunk) {
+			t.Errorf("chunk %d: got %v, want %v", idx, got.GetBitmap(), chunk)
+		}
 	}
 }
 

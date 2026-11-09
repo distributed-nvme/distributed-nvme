@@ -201,8 +201,11 @@ func cloneSetTrCmd() *cobra.Command {
 // C = common.CloneBmChunkBytes. Chunks are self-positioned, so an operator may
 // send them in any order and leave whole chunks unsent; only the PAGES of ONE
 // chunk must arrive in slice-bitmap order, because the gateway appends each
-// page at that chunk's current length. The Clone record carries no chunk count:
-// how many chunks a clone holds is how many chunk keys it has.
+// page at that chunk's current length. --offset, sent only when typed, names
+// the page's byte offset in the chunk, so a page sent again after a lost answer
+// changes nothing and a page at a wrong offset is refused (architecture.md,
+// Clones). The Clone record carries no chunk count: how many chunks a clone
+// holds is how many chunk keys it has.
 //
 // --bm-hex splits the two failure kinds dnvctl.md, `clone` — `ctl/clone.go`,
 // insists on: an EMPTY value sends an empty bitmap on purpose, so the
@@ -230,6 +233,7 @@ func cloneAppendBmCmd() *cobra.Command {
 				SrcSliceIdx: u32Of("src-slice-idx"),
 				BmIdx:       u32Of("bm-idx"),
 				Bitmap:      bitmap,
+				Offset:      optU32Of("offset"),
 			}
 			return func(ctx context.Context, client pb.GatewayClient) (
 				any, error,
@@ -243,5 +247,7 @@ func cloneAppendBmCmd() *cobra.Command {
 	flags.Uint32("bm-idx", 0, "bm_idx, the chunk's index within the slice")
 	flags.String("bm-hex", "",
 		"bitmap as hex; empty sends an empty bitmap on purpose")
+	flags.Uint32("offset", 0,
+		"the page's byte offset in the chunk; sent only when given")
 	return cmd
 }

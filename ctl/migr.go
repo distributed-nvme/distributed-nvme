@@ -15,7 +15,10 @@
 //     migration `bm_idx` IS an append sequence, numbered by the record's own
 //     `bm_cnt`; AppendCloneBitmap instead addresses a chunk by the pair
 //     (`src_slice_idx`, `bm_idx`), a fixed position inside one source slice's
-//     bitmap, and neither half of that pair has a counterpart here.
+//     bitmap. The --bm-idx of `migr append-bm` is no address: sent only
+//     when typed, it names the index the chunk must land at, so a chunk sent
+//     again after a lost answer changes nothing (architecture.md,
+//     Migrations).
 package ctl
 
 import (
@@ -178,11 +181,12 @@ func migrGetCmd() *cobra.Command {
 }
 
 // migrAppendBmCmd is AppendMigrationBitmap: one more immutable chunk of the
-// skip bitmap, stored at `bm_idx = bm_cnt`. The chunks concatenate in bm_idx
-// order into one bitmap over the leg's DATA region, 1 = never written ⇒
-// skippable, and the destination DN agent shifts by the leg's `meta_blocks`
-// before blkdiscarding the fully-skippable dm-clone regions (architecture.md,
-// Migrations; architecture.md, raid0 bitmap math).
+// skip bitmap, stored at `bm_idx = bm_cnt`; a typed --bm-idx must equal
+// it, or name a chunk already stored with the same bytes. The chunks
+// concatenate in bm_idx order into one bitmap over the leg's DATA region,
+// 1 = never written ⇒ skippable, and the destination DN agent shifts by the
+// leg's `meta_blocks` before blkdiscarding the fully-skippable dm-clone
+// regions (architecture.md, Migrations; architecture.md, raid0 bitmap math).
 //
 // An empty --bm-hex sends an EMPTY bitmap on purpose rather than being
 // rejected here, so the gateway's own refusal is what the operator sees; a
@@ -208,6 +212,7 @@ func migrAppendBmCmd() *cobra.Command {
 				SpRev:       rev,
 				MigrName:    strOf("name"),
 				Bitmap:      bitmap,
+				BmIdx:       optU32Of("bm-idx"),
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -219,5 +224,7 @@ func migrAppendBmCmd() *cobra.Command {
 	flags.String("name", "", "migr_name")
 	flags.String("bm-hex", "",
 		"bitmap as hex; empty sends an empty bitmap on purpose")
+	flags.Uint32("bm-idx", 0,
+		"the index the chunk must land at; sent only when given")
 	return cmd
 }

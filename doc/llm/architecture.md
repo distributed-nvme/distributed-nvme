@@ -3122,12 +3122,20 @@ guard stable, `dnv-worker.md` CLD1); `INVALID_ARGUMENT` empty `bitmap`;
 `INVALID_ARGUMENT` a `bitmap` longer than `CloneBmChunkBytes` (stateless,
 judged on this request alone); `INVALID_ARGUMENT` `src_slice_idx` at or
 above `Clone.src_slice_cnt`; `INVALID_ARGUMENT` `bm_idx` at or above
-`MaxCloneBmCnt`; `RESOURCE_EXHAUSTED` when the stored chunk plus the new
-page would exceed `CloneBmChunkBytes` — the chunk's ceiling reached by
-previous appends, the same shape as `AppendMigrationBitmap`'s `bm_cnt` cap.
+`MaxCloneBmCnt`; `FAILED_PRECONDITION`, naming the stored chunk's length,
+when the optional `offset` is present and is neither that length nor the
+place where the same bytes already stand; `RESOURCE_EXHAUSTED` when the
+stored chunk plus the new page would exceed `CloneBmChunkBytes` — the
+chunk's ceiling reached by previous appends, the same shape as
+`AppendMigrationBitmap`'s `bm_cnt` cap.
 Action: STM: append the bytes to the `CloneBitmap` key of
 (`src_slice_idx`, `bm_idx`) (created if absent), bump `SpRev`. The `Clone`
-record is not rewritten. These are the **source bitmaps**: bit *k* of
+record is not rewritten. A request that carries `offset` appends only at
+the stored chunk's length, and when its bytes already stand at that offset
+it answers OK and writes nothing, no revision bump included, judged before
+the ceiling: a page whose answer was lost can be sent again and the chunk's
+later bits stay where they are. Without `offset` the page lands at the
+chunk's end whatever was sent before (Known limits). These are the **source bitmaps**: bit *k* of
 source slice `src_slice_idx` covers `src_block_size` bytes of that slice's
 local address space; **1 = the source never wrote there, so the region is
 skippable**. Read as this paragraph says below, they are a pure
@@ -3347,9 +3355,17 @@ an operator ends a migration whose cutover never comes (Migration).
 `cutover_pending` included, which tells whether a finish can succeed yet.
 
 **AppendMigrationBitmap** — Errors: `INVALID_ARGUMENT` empty `bitmap`;
-`RESOURCE_EXHAUSTED` when `bm_cnt` is at or above `MaxMigrBmCnt`.
+`FAILED_PRECONDITION`, naming `bm_cnt`, when the optional `bm_idx` is
+present and is neither `bm_cnt` nor the index of a chunk that holds the
+same bytes; `RESOURCE_EXHAUSTED` when `bm_cnt` is at or above
+`MaxMigrBmCnt`.
 Action: STM: write a `MigrBitmap` at a `bm_idx` equal to `bm_cnt`,
-advance `bm_cnt`, bump `SpRev`. The chunks concatenate, in `bm_idx`
+advance `bm_cnt`, bump `SpRev`. A request that carries `bm_idx` is stored
+only at `bm_cnt`, and when its bytes already stand at that index it
+answers OK and writes nothing, no revision bump included, judged before the
+ceiling: a chunk whose answer was lost can be sent again and every later
+chunk stays where it is. Without `bm_idx` the chunk lands at `bm_cnt`
+whatever was sent before (Known limits). The chunks concatenate, in `bm_idx`
 order, into one bitmap over the **leg's data region**: bit k covers
 `block_size` bytes, and **1 means never written, hence skippable**. Every
 append creates a **new** chunk key, so a written chunk is immutable.
@@ -7002,6 +7018,19 @@ that component's document and only pointed to here.
   bounded part of a leg (`dnvctl.md`, The command tree), so an operator who
   appends a larger leg's bitmap through dnvctl pages it and meets this
   unless every page but the last covers a multiple of 8 blocks.
+* **A bitmap page sent again without its position is stored twice.**
+  `AppendCloneBitmap` and `AppendMigrationBitmap` place a page only when
+  the request names its position (Clones, Migrations). Without it the page
+  lands at the end, so a caller that lost the answer to a page that did
+  commit, and sends it again, stores it twice, and a `stale revision`
+  refusal invites that repeat, since the page's own commit raised the
+  revision. Every later bit of that clone chunk, or every later chunk of
+  that migration, then moves, so blocks the source wrote can read as never
+  written and the copy skips them, with no error: a clone serves zeros
+  there, and after a migration's cutover the destination serves what its
+  extents held there, as after a bitmap read too early. dnvctl sends the
+  position only when its flag is typed (`dnvctl.md`, `clone` —
+  `ctl/clone.go` and `migr` — `ctl/migr.go`).
 * **A forced finish before the copy is whole serves the destination's
   recycled bytes.** `FinishMigration` with `force` skips the proof that the
   copy is complete and nothing else (Migrations), so after the cutover it

@@ -312,7 +312,8 @@ var leafFlags = map[string][]string{
 	"clone get":    {"name"},
 	"clone set-tr": {"name", "src-tr-type", "src-adr-fam", "src-tr-addr",
 		"src-tr-svc-id"},
-	"clone append-bm": {"name", "src-slice-idx", "bm-idx", "bm-hex"},
+	"clone append-bm": {"name", "src-slice-idx", "bm-idx", "bm-hex",
+		"offset"},
 	// xfer
 	"xfer create": {"name", "ori-nqn", "ori-idx", "hosts", "auto-suspend"},
 	"xfer delete": {"name", "force"},
@@ -325,7 +326,7 @@ var leafFlags = map[string][]string{
 	"migr finish":    {"name", "force"},
 	"migr cancel":    {"name"},
 	"migr get":       {"name"},
-	"migr append-bm": {"name", "bm-hex"},
+	"migr append-bm": {"name", "bm-hex", "bm-idx"},
 	// repair
 	"repair create": {"name", "grp", "bad-legs", "retired-leg",
 		"dn-black", "dn-white"},

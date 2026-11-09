@@ -135,6 +135,29 @@ func (h *hexUint) Set(s string) error {
 	return nil
 }
 
+// optUint32 is a uint32 flag whose presence reaches the request: ptr stays nil
+// unless the flag was given, so a given 0 is a real value. The two append
+// drivers send a page's position through it only when the suite names one
+// (architecture.md, Clones and Migrations).
+type optUint32 struct{ ptr *uint32 }
+
+func (o *optUint32) String() string {
+	if o == nil || o.ptr == nil {
+		return ""
+	}
+	return strconv.FormatUint(uint64(*o.ptr), 10)
+}
+
+func (o *optUint32) Set(s string) error {
+	value, err := strconv.ParseUint(strings.TrimSpace(s), 0, 32)
+	if err != nil {
+		return err
+	}
+	v := uint32(value)
+	o.ptr = &v
+	return nil
+}
+
 // stringList is a comma-separated list flag. It REPLACES rather than appends
 // on every Set, so a value from the race job's params overrides a default the
 // same way a repeated command-line flag would.

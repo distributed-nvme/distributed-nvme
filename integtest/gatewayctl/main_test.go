@@ -352,6 +352,14 @@ func (c *recordingClient) CreateThinDevice(
 	return &pb.CreateThinDeviceReply{TdId: 1, DevId: 1}, nil
 }
 
+func (c *recordingClient) AppendMigrationBitmap(
+	ctx context.Context, in *pb.AppendMigrationBitmapRequest,
+	_ ...grpc.CallOption,
+) (*pb.AppendMigrationBitmapReply, error) {
+	c.req = in
+	return &pb.AppendMigrationBitmapReply{MigrId: 1}, nil
+}
+
 func (c *recordingClient) AppendCloneBitmap(
 	ctx context.Context, in *pb.AppendCloneBitmapRequest, _ ...grpc.CallOption,
 ) (*pb.AppendCloneBitmapReply, error) {
@@ -584,6 +592,38 @@ func TestBitmapIsVerbatim(t *testing.T) {
 	}
 	if req.GetBmIdx() != 1 {
 		t.Errorf("bm_idx = %d, want 1", req.GetBmIdx())
+	}
+}
+
+// TestBitmapPositionIsSentOnlyWhenGiven pins the two position flags of the
+// append drivers: absent unless given, and a given 0 is a present 0, so the
+// suite can test both the gateway's blind append and its placed one.
+func TestBitmapPositionIsSentOnlyWhenGiven(t *testing.T) {
+	blind := runArgv(t, "append-clone-bm",
+		"--sp", "sp0", "--rev", "3", "--name", "cl0", "--bm-hex", "ff",
+	).(*pb.AppendCloneBitmapRequest)
+	if blind.Offset != nil {
+		t.Errorf("no --offset: offset = %d, want absent", blind.GetOffset())
+	}
+	placed := runArgv(t, "append-clone-bm",
+		"--sp", "sp0", "--rev", "3", "--name", "cl0", "--bm-hex", "ff",
+		"--offset", "0",
+	).(*pb.AppendCloneBitmapRequest)
+	if placed.Offset == nil || placed.GetOffset() != 0 {
+		t.Errorf("--offset 0: offset = %v, want a present 0", placed.Offset)
+	}
+	migrBlind := runArgv(t, "append-migr-bm",
+		"--sp", "sp0", "--rev", "3", "--name", "m0", "--bm-hex", "ff",
+	).(*pb.AppendMigrationBitmapRequest)
+	if migrBlind.BmIdx != nil {
+		t.Errorf("no --bm-idx: bm_idx = %d, want absent", migrBlind.GetBmIdx())
+	}
+	migrPlaced := runArgv(t, "append-migr-bm",
+		"--sp", "sp0", "--rev", "3", "--name", "m0", "--bm-hex", "ff",
+		"--bm-idx", "2",
+	).(*pb.AppendMigrationBitmapRequest)
+	if migrPlaced.GetBmIdx() != 2 {
+		t.Errorf("--bm-idx 2: bm_idx = %d", migrPlaced.GetBmIdx())
 	}
 }
 

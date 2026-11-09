@@ -549,6 +549,19 @@ func u32Of(name string) uint32 {
 	return leafValue(name, (*pflag.FlagSet).GetUint32)
 }
 
+// optU32Of is one uint32 whose presence the gateway reads: nil unless the
+// flag was typed on this command line, so a typed 0 is a real value and an
+// untyped flag leaves the field absent. It is how the two append-bm leaves
+// send a page's position only when the operator gave one (dnvctl.md,
+// `clone` — `ctl/clone.go`, and `migr` — `ctl/migr.go`).
+func optU32Of(name string) *uint32 {
+	value := u32Of(name)
+	if !invoked.Changed(name) {
+		return nil
+	}
+	return &value
+}
+
 // hexOf is an id value: Go base-0, so 17 and 0x11 are the same number. An
 // unset flag is the empty string and reads as 0; a malformed one is a usage
 // error (exit 2), which is all the checking dnvctl does on an id (CT8).

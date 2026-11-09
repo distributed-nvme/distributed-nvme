@@ -298,7 +298,7 @@ these exceptions:
   `sp create`'s `bdev_conf.bdev_feature_list` (In scope / out of scope).
 
 A leaf has a flag only where its request has a field: `migr cancel` takes no
-`--force` and `migr append-bm` no index (`migr` — `ctl/migr.go`). An
+`--force` and `migr append-bm` no slice index (`migr` — `ctl/migr.go`). An
 optional sub-message follows the "not given" convention: it is sent only
 when one of its flags holds a non-zero value, a zero meaning the member was
 not given, except for the token messages (CT3) and where a group below says
@@ -549,7 +549,10 @@ Clones. dnvctl adds no wait flag here either (CT8, CT1).
 
 `clone append-bm` addresses a chunk by the pair `--src-slice-idx` and
 `--bm-idx`, never by either alone; what a chunk is and how its pages append
-is `architecture.md`, Clones. An empty `--bm-hex` sends an empty bitmap on
+is `architecture.md`, Clones. `--offset` names a page's place in its
+chunk and is sent only when typed, so a typed 0 is a real place and an
+untyped flag leaves the field out; what the gateway does with a page sent
+again is `architecture.md`, Clones. An empty `--bm-hex` sends an empty bitmap on
 purpose, so the gateway's refusal of one stays reachable; a malformed
 non-empty value is a usage error (exit 2). Both `append-bm` leaves take the
 bitmap as one hex string in `--bm-hex`, with no file or stdin input, so the
@@ -573,12 +576,16 @@ of `allowed_hosts`.
 Two leaves are deliberately not symmetric with their siblings, because their
 RPCs are not: `migr cancel` has no `--force` — throwing an unfinished copy
 away needs no proof about the copy — while `migr finish` has one; and
-`migr append-bm` takes no index, because a migration copies one side and its
-chunks are an append sequence, while a clone chunk is addressed by the pair of
-source slice and chunk index (`clone` — `ctl/clone.go`), which also states the
+`migr append-bm` takes no slice index, because a migration copies one side
+and its chunks are an append sequence, while a clone chunk is addressed by the
+pair of source slice and chunk index (`clone` — `ctl/clone.go`), which also
+states the
 bound one `--bm-hex` puts on an append, and so on the part of a leg a
 migration's appends can cover; how a caller pages a migration's bitmap into
-appends is `architecture.md`, Bitmap reads.
+appends is `architecture.md`, Bitmap reads. The `--bm-idx` of
+`migr append-bm` addresses nothing, unlike the clone's: sent only when
+typed, it names the index a chunk must land at, and what the gateway does
+with a chunk sent again is `architecture.md`, Migrations.
 
 `migr finish` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished and nothing else: a migration whose cutover

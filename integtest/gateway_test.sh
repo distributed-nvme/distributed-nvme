@@ -2596,6 +2596,25 @@ EOF
 		'["0:0","0:1","2:0"]' \
 		"the FIRST chunk of a SECOND slice is a third key"
 	assert_eq "$(key_count clone_bitmap)" "3" "clone_bitmap keys, two slices"
+	# A page that names its offset is placed (architecture.md, Clones): at the
+	# chunk's length it appends, sent again after a lost answer it writes
+	# nothing, and at any other offset it is refused, writing nothing.
+	out=$(gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
+		--src-slice-idx 2 --bm-idx 0 --offset 1 --bm-hex 5a)
+	refresh_rev sp0
+	assert_field "$out" '.clone_id' "$cloneId" \
+		"append-clone-bm at offset 1 reply clone_id"
+	assert_no_write "append-clone-bm of a page already stored" \
+		gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
+		--src-slice-idx 2 --bm-idx 0 --offset 1 --bm-hex 5a
+	assert_no_write "append-clone-bm at an offset past the chunk's end" \
+		gwx FAILED_PRECONDITION append-clone-bm --sp sp0 --rev "$SP_REV" \
+		--name cl0 --src-slice-idx 2 --bm-idx 0 --offset 3 --bm-hex 5a
+	assert_no_write "append-clone-bm of other bytes at a stored offset" \
+		gwx FAILED_PRECONDITION append-clone-bm --sp sp0 --rev "$SP_REV" \
+		--name cl0 --src-slice-idx 2 --bm-idx 0 --offset 1 --bm-hex 00
+	assert_eq "$(key_count clone_bitmap)" "3" \
+		"clone_bitmap keys after the placed pages"
 	# The transport list is a REPLACEMENT, never a merge: a later pass must not
 	# connect an address that is gone again (gateway/clone.go UpdateCloneTrConf).
 	out=$(gw set-clone-tr --sp sp0 --rev "$SP_REV" --name cl0 \
@@ -2783,11 +2802,30 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.migr_bm_idx.m0 | @json')" '[0,1]' \
 		"the migration's stored chunk indexes"
 	assert_eq "$(key_count migration_bitmap)" "2" "migration_bitmap keys"
+	# A chunk that names its index is placed (architecture.md, Migrations):
+	# at bm_cnt it appends, sent again after a lost answer it writes nothing,
+	# and at any other index it is refused, writing nothing.
+	gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-idx 2 \
+		--bm-hex cc
+	refresh_rev sp0
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.migrs.m0.bm_cnt')" "3" \
+		"migration bm_cnt after a placed append"
+	assert_no_write "append-migr-bm of a chunk already stored" \
+		gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-idx 1 \
+		--bm-hex bb
+	assert_no_write "append-migr-bm at an index past bm_cnt" \
+		gwx FAILED_PRECONDITION append-migr-bm --sp sp0 --rev "$SP_REV" \
+		--name m0 --bm-idx 3 --bm-hex dd
+	assert_no_write "append-migr-bm of other bytes at a stored index" \
+		gwx FAILED_PRECONDITION append-migr-bm --sp sp0 --rev "$SP_REV" \
+		--name m0 --bm-idx 0 --bm-hex dd
+	assert_eq "$(key_count migration_bitmap)" "3" \
+		"migration_bitmap keys after the placed chunk"
 	out=$(gw get-migr --sp sp0 --name m0)
 	assert_field "$out" '.migr.migr_id' "$migrId" "get-migr migr_id"
 	assert_field "$out" '.migr.src_side_id' "$srcSide" "get-migr src_side_id"
 	assert_field "$out" '.migr.dst_side_id' "$dstSide" "get-migr dst_side_id"
-	assert_field "$out" '.migr.bm_cnt' "2" "get-migr bm_cnt"
+	assert_field "$out" '.migr.bm_cnt' "3" "get-migr bm_cnt"
 	assert_field "$out" '.migr.cutover_pending' "true" "get-migr cutover_pending"
 	# CancelMigration throws the unfinished copy away: the destination's
 	# extents come back and the source was never touched. It needs no

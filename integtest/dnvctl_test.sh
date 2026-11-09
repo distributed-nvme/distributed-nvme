@@ -1173,9 +1173,9 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
 		  \"src_slice_idx\":1,\"bm_idx\":2,
-		  \"bitmap\":\"$BM_A5_B64\"}" \
+		  \"bitmap\":\"$BM_A5_B64\",\"offset\":3}" \
 		clone append-bm --name cl0 --src-slice-idx 1 --bm-idx 2 \
-		--bm-hex a5 --rev 7
+		--bm-hex a5 --offset 3 --rev 7
 
 	# --- `xfer` — `ctl/xfer.go` ----------------------------------------
 	sweep_step 50 CreateTransfer \
@@ -1223,8 +1223,8 @@ EOF
 	sweep_step 58 AppendMigrationBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\",
-		  \"bitmap\":\"$BM_A5A5_B64\"}" \
-		migr append-bm --name m0 --bm-hex a5a5 --rev 7
+		  \"bitmap\":\"$BM_A5A5_B64\",\"bm_idx\":1}" \
+		migr append-bm --name m0 --bm-hex a5a5 --bm-idx 1 --rev 7
 
 	# --- `repair` — `ctl/repair.go` ------------------------------------
 	# --bad-legs is a list flag, so the one bad leg id is a one-element list

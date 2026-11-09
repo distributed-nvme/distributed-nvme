@@ -396,6 +396,12 @@ The limits a user must know:
   makes the clone read zeros where the source wrote. Read every piece but
   the last over a multiple of 8 blocks; one `--bm-hex` of `dnvctl` covers
   only part of a large leg, so such a leg's list is appended in pieces.
+- A bitmap piece sent again without its place is stored twice: a caller that
+  lost the answer to a piece and sends it again moves every later block of
+  the list, with the same harm as above. `dnvctl` sends the place only when
+  you give `--offset` (clone) or `--bm-idx` (migration); give it whenever
+  you may send a piece again, and a piece already stored is then left as
+  it is.
 - A migration finished with force before its copy is complete can hand a pool
   another pool's bytes: force skips the check that the copy is complete, the
   old side is removed, and every region the copy had not reached reads what the

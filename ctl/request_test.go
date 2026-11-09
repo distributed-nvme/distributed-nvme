@@ -467,7 +467,7 @@ var sweepRows = []sweepRow{
 	{49, "AppendCloneBitmap",
 		[]string{"clone", "append-bm", "--name", "cl0",
 			"--src-slice-idx", "1", "--bm-idx", "2",
-			"--bm-hex", "a5", "--rev", "7"},
+			"--bm-hex", "a5", "--offset", "3", "--rev", "7"},
 		&pb.AppendCloneBitmapRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
@@ -476,6 +476,7 @@ var sweepRows = []sweepRow{
 			SrcSliceIdx: 1,
 			BmIdx:       2,
 			Bitmap:      []byte{0xa5},
+			Offset:      proto.Uint32(3),
 		}},
 
 	// ---- xfer ----
@@ -554,13 +555,14 @@ var sweepRows = []sweepRow{
 			ClusterName: itCluster, SpName: itSp, MigrName: "m0"}},
 	{58, "AppendMigrationBitmap",
 		[]string{"migr", "append-bm", "--name", "m0", "--bm-hex", "a5a5",
-			"--rev", "7"},
+			"--bm-idx", "1", "--rev", "7"},
 		&pb.AppendMigrationBitmapRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
 			SpRev:       wantSpRev(itRevValue),
 			MigrName:    "m0",
 			Bitmap:      []byte{0xa5, 0xa5},
+			BmIdx:       proto.Uint32(1),
 		}},
 
 	// ---- repair ----
@@ -1838,6 +1840,51 @@ func TestBitmapHexToBytes(t *testing.T) {
 		"migr", "append-bm", "--name", "m0", "--bm-hex", "FF00A5").(*pb.AppendMigrationBitmapRequest)
 	if string(upper.Bitmap) != string([]byte{0xff, 0x00, 0xa5}) {
 		t.Errorf("--bm-hex FF00A5 sent %v, want [255 0 165]", upper.Bitmap)
+	}
+}
+
+// TestBitmapPositionPresence pins the two append-bm position flags: each is
+// sent only when typed, so a typed 0 is a real position and an untyped flag
+// leaves the field absent, which the gateway reads as "append wherever the
+// bitmap ends" (architecture.md, Clones and Migrations).
+func TestBitmapPositionPresence(t *testing.T) {
+	cloneAbsent := runArgv(t, "AppendCloneBitmap",
+		"clone", "append-bm", "--name", "cl0",
+		"--bm-hex", "a5").(*pb.AppendCloneBitmapRequest)
+	if cloneAbsent.Offset != nil {
+		t.Errorf("no --offset sent offset %d, want it absent",
+			cloneAbsent.GetOffset())
+	}
+	cloneZero := runArgv(t, "AppendCloneBitmap",
+		"clone", "append-bm", "--name", "cl0", "--bm-hex", "a5",
+		"--offset", "0").(*pb.AppendCloneBitmapRequest)
+	if cloneZero.Offset == nil || cloneZero.GetOffset() != 0 {
+		t.Errorf("--offset 0 sent %v, want a present 0", cloneZero.Offset)
+	}
+	cloneSet := runArgv(t, "AppendCloneBitmap",
+		"clone", "append-bm", "--name", "cl0", "--bm-hex", "a5",
+		"--offset", "4096").(*pb.AppendCloneBitmapRequest)
+	if cloneSet.GetOffset() != 4096 {
+		t.Errorf("--offset 4096 sent %d", cloneSet.GetOffset())
+	}
+	migrAbsent := runArgv(t, "AppendMigrationBitmap",
+		"migr", "append-bm", "--name", "m0",
+		"--bm-hex", "a5").(*pb.AppendMigrationBitmapRequest)
+	if migrAbsent.BmIdx != nil {
+		t.Errorf("no --bm-idx sent bm_idx %d, want it absent",
+			migrAbsent.GetBmIdx())
+	}
+	migrZero := runArgv(t, "AppendMigrationBitmap",
+		"migr", "append-bm", "--name", "m0", "--bm-hex", "a5",
+		"--bm-idx", "0").(*pb.AppendMigrationBitmapRequest)
+	if migrZero.BmIdx == nil || migrZero.GetBmIdx() != 0 {
+		t.Errorf("--bm-idx 0 sent %v, want a present 0", migrZero.BmIdx)
+	}
+	migrSet := runArgv(t, "AppendMigrationBitmap",
+		"migr", "append-bm", "--name", "m0", "--bm-hex", "a5",
+		"--bm-idx", "3").(*pb.AppendMigrationBitmapRequest)
+	if migrSet.GetBmIdx() != 3 {
+		t.Errorf("--bm-idx 3 sent %d", migrSet.GetBmIdx())
 	}
 }
 

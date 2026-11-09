@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -909,10 +910,13 @@ func (s *Server) GetMigration(
 //
 // The chunk lands at bm_idx = the CURRENT bm_cnt and the count then advances,
 // which is the whole append rule: a written chunk is immutable, so the index
-// is a consequence of how many chunks exist and never a request field. The
-// bytes are stored verbatim (GW14) — the gateway never inspects or
-// rewrites a bit; the destination agent is what shifts them by the leg's
-// meta_blocks and blkdiscards the fully skippable regions.
+// is a consequence of how many chunks exist. The request's optional `bm_idx`
+// chooses no index: it only names the one the caller expects, so a chunk sent
+// again after a lost answer is recognised instead of stored twice
+// (architecture.md, Migrations). The bytes are stored verbatim (GW14) — the
+// gateway rewrites no bit and reads none for its meaning; the destination
+// agent is what shifts them by the leg's meta_blocks and blkdiscards the fully
+// skippable regions.
 func (s *Server) AppendMigrationBitmap(
 	ctx context.Context,
 	req *pb.AppendMigrationBitmapRequest,
@@ -945,6 +949,26 @@ func (s *Server) AppendMigrationBitmap(
 		}
 		migrId = migr.GetMigrId()
 		bmIdx := migr.GetBmCnt()
+		// A chunk that names its index is placed, never appended blind
+		// (architecture.md, Migrations): at bm_cnt it appends; a chunk whose
+		// bytes already stand at that index is one sent again after a lost
+		// answer, so it changes nothing and bumps nothing; any other index
+		// would move every later chunk and is refused. The repeat is judged
+		// before the ceiling, so the last chunk can be sent again.
+		if req.BmIdx != nil && req.GetBmIdx() != bmIdx {
+			if req.GetBmIdx() < bmIdx {
+				stored := &pb.MigrBitmap{}
+				stm.Get(model.MigrBitmapKey(sc.Cid, sc.SpId(),
+					req.GetMigrName(), req.GetBmIdx()), stored)
+				if bytes.Equal(stored.GetBitmap(), req.GetBitmap()) {
+					return nil
+				}
+			}
+			return errPrecondition(
+				"migration %q bm_cnt is %d: a chunk at bm_idx %d is "+
+					"neither the next chunk nor one already stored",
+				req.GetMigrName(), bmIdx, req.GetBmIdx())
+		}
 		if bmIdx >= common.MaxMigrBmCnt {
 			return errExhausted(
 				"migration %q already has %d bitmap chunks, "+

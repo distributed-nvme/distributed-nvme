@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -816,7 +817,9 @@ func (s *Server) UpdateCloneTrConf(
 // protocol). WITHIN one chunk the page lands at the chunk's current length — a
 // page is never a replacement, or paging would keep only the last one (the STM
 // below) — which is why the pages of ONE chunk must arrive in slice-bitmap
-// order.
+// order. A request that names its `offset` is placed instead of appended
+// blind, so a page sent again after a lost answer cannot move the chunk's
+// later bits (architecture.md, Clones).
 //
 // The Clone record carries no chunk count, and an append does not rewrite it:
 // the set of a clone's chunks IS the set of its `CloneBitmap` keys, which is
@@ -913,6 +916,32 @@ func (s *Server) AppendCloneBitmap(
 			sc.Cid, sc.SpId(), req.GetCloneName(), srcSliceIdx, bmIdx)
 		chunk := &pb.CloneBitmap{}
 		stm.Get(bmKey, chunk)
+		// A page that names its offset is placed, never appended blind
+		// (architecture.md, Clones): at the stored length it appends; a page
+		// whose bytes already stand at that offset is one sent again after a
+		// lost answer, so it changes nothing and bumps nothing; any other
+		// offset would move the chunk's later bits and is refused. The
+		// repeat is judged before the ceiling, so a full chunk's last page
+		// can be sent again.
+		if req.Offset != nil {
+			stored := chunk.GetBitmap()
+			page := req.GetBitmap()
+			offset := uint64(req.GetOffset())
+			end := offset + uint64(len(page))
+			if offset != uint64(len(stored)) {
+				if end <= uint64(len(stored)) &&
+					bytes.Equal(stored[offset:end], page) {
+					cloneId = clone.GetCloneId()
+					return nil
+				}
+				return errPrecondition(
+					"clone %q chunk (%d, %d) holds %d bytes: a page at "+
+						"offset %d is neither the next page nor one "+
+						"already stored",
+					req.GetCloneName(), srcSliceIdx, bmIdx,
+					len(stored), offset)
+			}
+		}
 		if len(chunk.GetBitmap())+len(req.GetBitmap()) >
 			common.CloneBmChunkBytes {
 			return errExhausted(

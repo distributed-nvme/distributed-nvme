@@ -348,7 +348,9 @@ is already set, `ForceStartGroup`'s cancel of a group that carries no
 mark, and `UpdateGroupOperatorInCharge` with the value the group's flag
 holds — writes nothing, bumps nothing and replies OK, a token the request
 carried still being checked first: a no-op that bumped would invalidate
-every client's token for nothing.
+every client's token for nothing. So does an `AppendCloneBitmap` or
+`AppendMigrationBitmap` that names the place where the same bytes already
+stand (`architecture.md`, Clones, Migrations).
 
 GW7. **Error mapping.** This is the gateway's single error table. Handlers
 return a gRPC status error straight from inside their STM closure:
@@ -397,8 +399,8 @@ uncommitted (`dnv-worker.md` EU4).
   (`architecture.md`, Per-operation allocation); `AppendMigrationBitmap`'s
   `bm_cnt` at `MaxMigrBmCnt`; `AppendCloneBitmap`'s stored chunk plus the
   new page above `CloneBmChunkBytes` — one chunk's ceiling reached by
-  previous appends, the same shape (its four other refusals are an invalid
-  request, `INVALID_ARGUMENT`: the empty `bitmap` of the first case, both
+  previous appends, the same shape (its four other refusals of the request
+  itself are an invalid request, `INVALID_ARGUMENT`: the empty `bitmap` of the first case, both
   index bounds — `src_slice_idx` at or above `src_slice_cnt` and `bm_idx` at
   or above `MaxCloneBmCnt`, checked in-STM — and the stateless page cap, a
   page longer than `CloneBmChunkBytes` judged on the request alone because a
@@ -633,8 +635,10 @@ gateway RPC), and the bitmap reads reply the agent's bytes (Bitmap reads).
 The wire convention — 1 means unmapped or never written, least significant
 bit first — is produced and consumed by the agents (`architecture.md`, raid0
 bitmap math: the single inversion at the agent boundary); the gateway never
-inspects, converts or trims a bit, so it can never disagree with the agents
-about the convention.
+converts or trims a bit and reads none for its meaning, so it can never
+disagree with the agents about the convention. The one comparison it makes
+is of whole stored bytes with a request's, to recognise a page sent again
+at the place it names (`architecture.md`, Clones, Migrations).
 
 ## Handlers by resource group
 
@@ -1196,7 +1200,11 @@ below name.
   `bm_idx` below `MaxCloneBmCnt`; read the chunk at `CloneBitmapKey` of the
   pair — an absent key decodes to an empty bitmap, which is what makes
   "create if absent" fall out and is the same read the ceiling check needs;
-  the stored length plus the page's at most `CloneBmChunkBytes`, else
+  with `offset` present, an offset other than the stored length answers OK
+  writing nothing when the same bytes stand there and is
+  `FAILED_PRECONDITION` otherwise (`architecture.md`, Clones), judged before
+  the ceiling; the stored length plus the page's at most
+  `CloneBmChunkBytes`, else
   `RESOURCE_EXHAUSTED` (GW7's ceiling-reached case: the constant bounds the
   STORED chunk, not one page); **append** the bytes to that chunk — the
   action of `architecture.md`, Clones, because the pages of ONE chunk
@@ -1306,9 +1314,12 @@ rather than a candidate problem.
 * **GetMigration** — one STM read; the record as stored, `cutover_pending`
   included.
 * **AppendMigrationBitmap** — validate non-empty (`validateBitmap`); STM:
-  resolve; token; the migration; the `MaxMigrBmCnt` ceiling on `bm_cnt`; put a
-  **new** chunk at the index `bm_cnt` (chunks are immutable, append-only);
-  advance `bm_cnt`; `BumpSpRev`. Reply `migr_id`.
+  resolve; token; the migration; with `bm_idx` present, an index other than
+  `bm_cnt` answers OK writing nothing when that chunk holds the same bytes
+  and is `FAILED_PRECONDITION` otherwise (`architecture.md`, Migrations);
+  the `MaxMigrBmCnt` ceiling on `bm_cnt`; put a **new** chunk at the index
+  `bm_cnt` (chunks are immutable, append-only); advance `bm_cnt`;
+  `BumpSpRev`. Reply `migr_id`.
 
 ### Repairs and retired legs
 
@@ -1664,7 +1675,10 @@ gateway, never through `workerctl`.
   at its create, a cancel while it is pending, and a finish refused while
   it is pending, with `force` and without, before the suite plays the
   destination's provisioned flip and the cutover; the clone's
-  pair-addressed chunks, its latch with the destination namespace resumed,
+  pair-addressed chunks, a page and a migration chunk placed at the place
+  they name, sent again with no write and refused at another place, past
+  the end and inside the stored bytes, its latch with the destination
+  namespace resumed,
   its repeat delete and its refusals while latched, then its drain; the
   clone's clone meta group, as many legs of `CloneMetaGrpExtCnt` extents
   as the pool's groups have, each on a DN of its own, charged to those DNs
