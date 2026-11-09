@@ -189,11 +189,13 @@ func validateBound(field string, value uint64, min uint64, max uint64) error {
 // MaxStrSize / ValidStrPattern rule of architecture.md, Common validation,
 // and tr_svc_id against MaxTrSvcIdLength as well: a CN's transport conf is
 // copied verbatim into the discovery log, whose TRSVCID field holds no more
-// (cdc.md DS3), and the one rule holds for every transport conf. An entirely
-// empty message is accepted here; the RPCs that require one say so
-// themselves.
+// (cdc.md DS3), and the one rule holds for every transport conf. The pattern
+// needs a character, so a message with any member set must have all four:
+// a partly blank address is stored for good, since no call changes a node's
+// address. An entirely empty message is accepted here; the RPCs that
+// require one say so themselves.
 func validateTrConf(field string, conf *pb.NvmeTrConf) error {
-	if conf == nil {
+	if trConfEmpty(conf) {
 		return nil
 	}
 	pairs := []struct {
@@ -206,7 +208,7 @@ func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 		{"tr_svc_id", conf.GetTrSvcId()},
 	}
 	for _, pair := range pairs {
-		if err := validateOptionalName(
+		if err := validateName(
 			field+"."+pair.name, pair.value,
 		); err != nil {
 			return err

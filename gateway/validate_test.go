@@ -723,11 +723,12 @@ func TestValidateListCountClamp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestValidateTrConf pins that all four NvmeTrConf members obey the name row
-// of architecture.md, Common validation, that tr_svc_id is held to
-// MaxTrSvcIdLength on top of it, the width the discovery log copies it into
-// (cdc.md DS3), and that an entirely empty message is accepted here: the RPCs
-// that require a non-empty one (CreateDiskNode, CreateControllerNode) say so
-// themselves through trConfEmpty.
+// of architecture.md, Common validation, whose pattern needs a character, so
+// a message with any member set must have all four; that tr_svc_id is held
+// to MaxTrSvcIdLength on top of it, the width the discovery log copies it
+// into (cdc.md DS3); and that an entirely empty message is accepted here:
+// the RPCs that require a non-empty one (CreateDiskNode,
+// CreateControllerNode) say so themselves through trConfEmpty.
 func TestValidateTrConf(t *testing.T) {
 	good := func() *pb.NvmeTrConf {
 		return &pb.NvmeTrConf{
@@ -765,12 +766,32 @@ func TestValidateTrConf(t *testing.T) {
 		{"tr_svc_id at the discovery log width", svcIdAtWidth, codes.OK},
 		{"tr_svc_id one byte over it", svcIdOverWidth,
 			codes.InvalidArgument},
+		{"no tr_type", &pb.NvmeTrConf{AdrFam: "ipv4",
+			TrAddr: "192.168.0.17", TrSvcId: "4420"}, codes.InvalidArgument},
+		{"no adr_fam", &pb.NvmeTrConf{TrType: "tcp",
+			TrAddr: "192.168.0.17", TrSvcId: "4420"}, codes.InvalidArgument},
+		{"no tr_addr", &pb.NvmeTrConf{TrType: "tcp", AdrFam: "ipv4",
+			TrSvcId: "4420"}, codes.InvalidArgument},
+		{"no tr_svc_id", &pb.NvmeTrConf{TrType: "tcp", AdrFam: "ipv4",
+			TrAddr: "192.168.0.17"}, codes.InvalidArgument},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			validateWantCode(t, "validateTrConf",
 				validateTrConf("nvme_tr_conf", item.conf), item.want)
 		})
+	}
+	// A blank member is named, so the operator fills the right one.
+	for member, conf := range map[string]*pb.NvmeTrConf{
+		"tr_type": {AdrFam: "ipv4", TrAddr: "192.168.0.17", TrSvcId: "4420"},
+		"adr_fam": {TrType: "tcp", TrAddr: "192.168.0.17", TrSvcId: "4420"},
+		"tr_addr": {TrType: "tcp", AdrFam: "ipv4", TrSvcId: "4420"},
+		"tr_svc_id": {TrType: "tcp", AdrFam: "ipv4",
+			TrAddr: "192.168.0.17"},
+	} {
+		validateWantMsg(t, "no "+member,
+			validateTrConf("nvme_tr_conf", conf),
+			"nvme_tr_conf."+member+" must not be empty")
 	}
 }
 
@@ -801,7 +822,7 @@ func TestValidateTrConfEmpty(t *testing.T) {
 }
 
 // TestValidateTrConfList pins the list form CreateClone and UpdateCloneTrConf
-// take: every non-empty member a valid name (architecture.md, Common
+// take: every member of every entry a valid name (architecture.md, Common
 // validation), at least one entry, no entry empty, and at most
 // MaxCntlrCntPerSp entries, the most cntlrs a source pool has. A clone with
 // no source address could never connect, so an empty list is refused and not
@@ -852,7 +873,14 @@ func TestValidateTrConfList(t *testing.T) {
 		},
 		{
 			"an entry with a bad member",
-			[]*pb.NvmeTrConf{good, {TrAddr: "10.0.0.1 "}},
+			[]*pb.NvmeTrConf{good, {TrType: "tcp", AdrFam: "ipv4",
+				TrAddr: "10.0.0.1 ", TrSvcId: "4420"}},
+			codes.InvalidArgument,
+		},
+		{
+			"an entry with an empty member",
+			[]*pb.NvmeTrConf{good, {TrType: "tcp", AdrFam: "ipv4",
+				TrSvcId: "4420"}},
 			codes.InvalidArgument,
 		},
 	}

@@ -1804,7 +1804,10 @@ harmless. A migration destination takes its run before it zeroes
 * At most `MaxStrSize` bytes for `cluster_name`, `addr_port`, `sp_name`,
   `td_name`, `clone_name`, `xfer_name`, `migr_name`, `rep_name`,
   `location` and the `NvmeTrConf` members, each of which must also match
-  `ValidStrPattern`.
+  `ValidStrPattern`. An empty `cluster_name` or `location`, or an entirely
+  empty `NvmeTrConf`, means "not given"; an `NvmeTrConf` with any member set
+  must have all four, so the gateway never stores a transport conf partly
+  blank, which matters most for a node's, since no call changes it.
 * `CreateRepair.rep_name` must in addition not start with the reserved
   prefix, `RepNameReservedPrefix`. The prefix starts the name of every
   repair the sp worker creates, and of no other: that name, `WorkerRepName`,
@@ -2209,7 +2212,8 @@ heavy read meant for an occasional poll, not a hot path.
 **CreateDiskNode** —
 Errors: `NOT_FOUND` cluster; `ALREADY_EXISTS` `dn_conf` key;
 `RESOURCE_EXHAUSTED` when the `DnGlobal` `shard_bucket` sum is at or above
-`MaxDnCntPerCluster`; `INVALID_ARGUMENT` if `nvme_tr_conf` is empty or the
+`MaxDnCntPerCluster`; `INVALID_ARGUMENT` if `nvme_tr_conf` is empty or has
+a member left blank (Common validation), or if the
 reported disk size yields a `total_ext_cnt` below one; `ABORTED` if the
 `DnGlobal` is missing or `GetDnSize` fails.
 Defaults: `location` is the node's `addr_port`; `disabled` as sent. No RPC
@@ -2995,7 +2999,8 @@ candidates) than the clone meta group has legs (Per-operation allocation);
 clone, or a destination whose
 dm-clone metadata one side of a clone meta group cannot hold — the message
 names the largest destination one side holds; `INVALID_ARGUMENT` when
-`src_tr_conf` is empty or longer than `MaxCntlrCntPerSp`, `src_nqn` is
+`src_tr_conf` is empty or longer than `MaxCntlrCntPerSp` or has an entry
+that is empty or has a member left blank (Common validation), `src_nqn` is
 invalid, `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
 `CreateStoragePool`'s own `slice_cnt`, a
 `src_slice_cnt` of zero is refused, not defaulted — it describes a source
@@ -3129,7 +3134,8 @@ top-down teardown is therefore: delete the clone, poll `GetClone` until
 
 **GetClone** — STM read.
 
-**UpdateCloneTrConf** — STM: replace `src_tr_conf_list`, bump `SpRev`
+**UpdateCloneTrConf** — Errors: `INVALID_ARGUMENT` for the list rules of
+`CreateClone`'s `src_tr_conf`. STM: replace `src_tr_conf_list`, bump `SpRev`
 (used when the source SP's cntlrs moved); the primary reconnects.
 
 **AppendCloneBitmap** — Errors: `FAILED_PRECONDITION` when the clone's

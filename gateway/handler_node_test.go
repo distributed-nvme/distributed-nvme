@@ -1097,6 +1097,39 @@ func TestCreateDiskNodeRefusalsWriteNothing(t *testing.T) {
 	}
 }
 
+// TestNodeCreateRefusesAPartlyBlankAddress pins architecture.md, Common
+// validation, on both node creates: an address record with a member left
+// blank is refused INVALID_ARGUMENT, naming the member, before anything is
+// written, since no call changes a node's address afterwards.
+func TestNodeCreateRefusesAPartlyBlankAddress(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	cluster := hnodeName("blankaddr")
+	cid := mustCluster(t, s, cluster)
+	addr := fakeAddrPort(t, "blank")
+	startFakeAgent(t, addr, 16<<30)
+	conf := testTrConf(addr)
+	conf.TrAddr = ""
+	_, err := s.CreateDiskNode(ctx, &pb.CreateDiskNodeRequest{
+		ClusterName: cluster, AddrPort: addr, NvmeTrConf: conf,
+	})
+	wantCode(t, err, codes.InvalidArgument, "CreateDiskNode")
+	hnodeWantMsg(t, err, "nvme_tr_conf.tr_addr", "CreateDiskNode")
+	if hnodeExists(t, s, model.DnConfKey(cid, addr)) {
+		t.Errorf("the refused CreateDiskNode wrote a dn_conf")
+	}
+	conf = testTrConf(addr)
+	conf.TrSvcId = ""
+	_, err = s.CreateControllerNode(ctx, &pb.CreateControllerNodeRequest{
+		ClusterName: cluster, AddrPort: addr, NvmeTrConf: conf,
+	})
+	wantCode(t, err, codes.InvalidArgument, "CreateControllerNode")
+	hnodeWantMsg(t, err, "nvme_tr_conf.tr_svc_id", "CreateControllerNode")
+	if hnodeExists(t, s, model.CnConfKey(cid, addr)) {
+		t.Errorf("the refused CreateControllerNode wrote a cn_conf")
+	}
+}
+
 // TestNodeBudgetsDivideByTheStoredExtentSize is the discriminator the two
 // budget tests above cannot be: they run on mustCluster's cluster, whose
 // extent size the gateway resolved to common.DefaultDnExtSize, so their
