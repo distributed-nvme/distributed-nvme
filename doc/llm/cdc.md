@@ -355,7 +355,11 @@ solicited. Anything malformed — an unknown PDU type, a bad HLEN or PLEN, a
 PDU carrying data whose PDO lies outside the range from HLEN to PLEN, a
 PLEN over `CdcMaxH2CData` plus the CapsuleCmd header (the one cap for every
 PDU type) — answers C2HTermReq with the fitting FES and closes (log
-`pdu error`).
+`pdu error`). The C2HTermReq carries, as its data, the header of the PDU in
+error as far as it was read, cut to the specs' C2HTermReq size: the common
+header alone for a fault found before the rest of the header is read, the
+whole header for a fault found after. Its FEI names the offending field's offset, and stays zero where the
+specs reserve it, as for a PLEN over the cap.
 
 An H2CTermReq after the ICReq ends the connection the way a closed socket
 does — no C2HTermReq, reason `closed` (NP13) — only if it passes the
@@ -409,7 +413,8 @@ NP5. **Connect.** Connect validates its connect data: SUBNQN must be
 `NvmeDiscoveryNqn` (else connect invalid parameters, IPO pointing at
 SUBNQN), HOSTNQN non-empty and at most `MaxNqnLength` bytes (else connect
 invalid host, IPO pointing at HOSTNQN), its format unchecked; HOSTID is
-recorded for the logs. KATO comes from the command. On success a CNTLID
+recorded for the logs. KATO comes from the command, rounded up to whole
+seconds, the unit nvmet keeps it in. On success a CNTLID
 from the round-robin counter, which wraps at `CdcCntlIdMax`, is assigned
 and returned, the connection registers under its hostnqn (DS7), and
 `host connected` is logged. The connect data's CNTLID field is not
@@ -470,9 +475,15 @@ and it gates DS8 delivery. NP9 pins these values itself, so the mirror rule
 enable that bit itself when Connect carries a non-zero KATO, so a host that
 follows them and sends no Set Features gets no notice: a departure from the
 specs, the one nvmet makes, kept because a Linux host sets the bit itself,
-since Identify's OAES advertises the notice (NP7). Set and Get of the Keep
-Alive Timer SHOULD update the connection's KATO. Any other FID: invalid
-field, DNR.
+since Identify's OAES advertises the notice (NP7). A Set of the Asynchronous
+Event Configuration with any bit other than the discovery-log-change one is
+an invalid field, DNR, and a Set accepted returns the value written, as
+nvmet's discovery controller does. Set of the Keep Alive Timer updates the
+connection's KATO, rounded up to whole seconds, and returns the seconds;
+Get returns the KATO in milliseconds, the same rounded value, as nvmet
+does, save a zero KATO, which reads back as zero where nvmet's discovery
+controller stores its own default (NP10 owns the zero-KATO cutoff). Any
+other FID: invalid field, DNR.
 
 NP10. **Keep Alive.** A pending connection (NP1) has no keep-alive yet: it
 ends at its pre-Connect deadline, `DefaultCdcPendingTmoMs` after its

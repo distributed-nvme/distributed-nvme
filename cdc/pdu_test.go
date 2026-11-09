@@ -220,8 +220,9 @@ func TestReadPduRejectsMalformed(t *testing.T) {
 				pduCapsuleCmd, 0, capsuleCmdHdrLen, capsuleCmdHdrLen,
 				maxPduLen+1,
 			),
+			// The specs reserve FEI for this FES.
 			fes: fesDataLimitExceeded,
-			fei: 4,
+			fei: 0,
 		},
 		{
 			name: "pdo inside the header",
@@ -399,10 +400,10 @@ func TestBuildICRespGolden(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestBuildTermReqGolden pins the terminate-connection request's layout: FES
-// at byte 8 and FEI at byte 10, the two fields a host logs when dnv-cdc kills
-// a connection.
+// at byte 8 and FEI at byte 10, the fields that say what dnv-cdc killed a
+// connection for (a Linux host logs the FES).
 func TestBuildTermReqGolden(t *testing.T) {
-	got := buildTermReq(fesDataLimitExceeded, 0x11223344)
+	got := buildTermReq(fesInvalidPduHdr, 0x11223344, nil)
 	if len(got) != termReqHdrLen {
 		t.Fatalf("term req is %d bytes, want %d", len(got), termReqHdrLen)
 	}
@@ -410,10 +411,37 @@ func TestBuildTermReqGolden(t *testing.T) {
 	want[0] = pduC2HTermReq
 	want[2] = termReqHdrLen
 	binary.LittleEndian.PutUint32(want[4:8], termReqHdrLen)
-	binary.LittleEndian.PutUint16(want[8:10], fesDataLimitExceeded)
+	binary.LittleEndian.PutUint16(want[8:10], fesInvalidPduHdr)
 	binary.LittleEndian.PutUint32(want[10:14], 0x11223344)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("term req\n got %v\nwant %v", got, want)
+	}
+}
+
+// TestBuildTermReqCarriesTheHeaderInError: the header of the PDU in error
+// follows the C2HTermReq's own header as its data, PLEN counting it, PDO
+// left at zero, and cut so that the whole PDU stays within termReqMaxLen.
+func TestBuildTermReqCarriesTheHeaderInError(t *testing.T) {
+	hdr := make([]byte, capsuleCmdHdrLen)
+	for i := range hdr {
+		hdr[i] = byte(i + 1)
+	}
+	got := buildTermReq(fesPduSequenceErr, 0, hdr)
+	if plen := binary.LittleEndian.Uint32(got[4:8]); plen !=
+		uint32(termReqHdrLen+len(hdr)) || len(got) != int(plen) {
+		t.Fatalf("plen %d, length %d; want %d", plen, len(got),
+			termReqHdrLen+len(hdr))
+	}
+	if got[3] != 0 || !bytes.Equal(got[termReqHdrLen:], hdr) {
+		t.Fatalf("pdo %d, data %x; want 0 and the header", got[3],
+			got[termReqHdrLen:])
+	}
+	long := make([]byte, 200)
+	got = buildTermReq(fesInvalidPduHdr, 2, long)
+	if len(got) != termReqMaxLen ||
+		binary.LittleEndian.Uint32(got[4:8]) != termReqMaxLen {
+		t.Fatalf("a 200-byte header gives %d bytes, want %d", len(got),
+			termReqMaxLen)
 	}
 }
 

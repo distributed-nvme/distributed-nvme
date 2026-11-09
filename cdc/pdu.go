@@ -2,6 +2,7 @@ package cdc
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -35,10 +36,13 @@ const (
 // the specs' HLEN values and the host validates them, so they are constants
 // and never computed.
 const (
-	pduCommonHdrLen  = 8
-	icReqLen         = 128
-	icRespLen        = 128
-	termReqHdrLen    = 24
+	pduCommonHdrLen = 8
+	icReqLen        = 128
+	icRespLen       = 128
+	termReqHdrLen   = 24
+	// termReqMaxLen is the largest C2HTermReq: its header and at most
+	// 128 bytes of the header of the PDU in error (NVMe/TCP, C2HTermReq).
+	termReqMaxLen    = 152
 	capsuleCmdHdrLen = 72
 	capsuleRespLen   = 24
 	c2hDataHdrLen    = 24
@@ -95,6 +99,19 @@ type pduError struct {
 	fes    uint16
 	fei    uint32
 	reason string
+	// hdr is the header of the PDU in error as far as it was read, which
+	// the C2HTermReq carries.
+	hdr []byte
+}
+
+// withHdr gives a *pduError in err the header of the PDU in error, when it
+// has none yet, and returns err.
+func withHdr(err error, hdr []byte) error {
+	var perr *pduError
+	if errors.As(err, &perr) && perr.hdr == nil {
+		perr.hdr = hdr
+	}
+	return err
 }
 
 func (e *pduError) Error() string {
@@ -156,32 +173,39 @@ func readPdu(r io.Reader) (*pdu, error) {
 		pdo:   ch[3],
 		plen:  binary.LittleEndian.Uint32(ch[4:8]),
 	}
+	// An error found before the rest is read carries the common header
+	// alone: that is the header as far as it was read.
+	early := func(err *pduError) (*pdu, error) {
+		err.hdr = append([]byte(nil), ch[:]...)
+		return nil, err
+	}
 	want, known := hdrLenFor(p.typ)
 	if !known {
-		return nil, newPduError(fesInvalidPduHdr, 0,
-			"unsupported pdu type %#x", p.typ)
+		return early(newPduError(fesInvalidPduHdr, 0,
+			"unsupported pdu type %#x", p.typ))
 	}
 	if int(p.hlen) != want {
-		return nil, newPduError(fesInvalidPduHdr, 2,
-			"pdu type %#x: hlen %d, want %d", p.typ, p.hlen, want)
+		return early(newPduError(fesInvalidPduHdr, 2,
+			"pdu type %#x: hlen %d, want %d", p.typ, p.hlen, want))
 	}
 	if p.plen < uint32(p.hlen) {
-		return nil, newPduError(fesInvalidPduHdr, 4,
-			"pdu type %#x: plen %d below hlen %d", p.typ, p.plen, p.hlen)
+		return early(newPduError(fesInvalidPduHdr, 4,
+			"pdu type %#x: plen %d below hlen %d", p.typ, p.plen, p.hlen))
 	}
+	// The specs reserve FEI for this FES, so it stays zero.
 	if p.plen > maxPduLen {
-		return nil, newPduError(fesDataLimitExceeded, 4,
+		return early(newPduError(fesDataLimitExceeded, 0,
 			"pdu type %#x: plen %d over the %d byte cap",
-			p.typ, p.plen, maxPduLen)
+			p.typ, p.plen, maxPduLen))
 	}
 	// PDO is the offset of the data from the start of the PDU. CPDA is 0
 	// (NP3), so a host never needs padding; a PDO inside the header or past
 	// the PDU is malformed either way.
 	if p.plen > uint32(p.hlen) {
 		if int(p.pdo) < want || uint32(p.pdo) > p.plen {
-			return nil, newPduError(fesInvalidPduHdr, 3,
+			return early(newPduError(fesInvalidPduHdr, 3,
 				"pdu type %#x: pdo %d outside [%d, %d]",
-				p.typ, p.pdo, want, p.plen)
+				p.typ, p.pdo, want, p.plen))
 		}
 	}
 	rest := make([]byte, int(p.plen)-pduCommonHdrLen)
@@ -254,19 +278,22 @@ func buildICResp() []byte {
 // ---------------------------------------------------------------------------
 
 // buildTermReq is the terminate-connection request sent before the socket is
-// closed. It carries no data: the offending header is already in this
-// instance's `pdu error` record, and a host that receives a C2HTermReq tears
-// the connection down without reading further.
-func buildTermReq(fes uint16, fei uint32) []byte {
-	buf := make([]byte, termReqHdrLen)
+// closed: the FES and FEI, then, as its data, the header of the PDU in error
+// as far as it was read, cut at termReqMaxLen, as the specs ask. PDO stays
+// zero: the specs reserve it in this PDU, whose data follows the header.
+func buildTermReq(fes uint16, fei uint32, hdr []byte) []byte {
+	if len(hdr) > termReqMaxLen-termReqHdrLen {
+		hdr = hdr[:termReqMaxLen-termReqHdrLen]
+	}
+	buf := make([]byte, termReqHdrLen, termReqHdrLen+len(hdr))
 	buf[0] = pduC2HTermReq
 	buf[1] = 0
 	buf[2] = termReqHdrLen
 	buf[3] = 0
-	binary.LittleEndian.PutUint32(buf[4:8], termReqHdrLen)
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(termReqHdrLen+len(hdr)))
 	binary.LittleEndian.PutUint16(buf[8:10], fes)
 	binary.LittleEndian.PutUint32(buf[10:14], fei)
-	return buf
+	return append(buf, hdr...)
 }
 
 // ---------------------------------------------------------------------------

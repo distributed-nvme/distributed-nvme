@@ -189,7 +189,7 @@ func (c *conn) serve() {
 			return
 		}
 		if err := c.dispatch(p); err != nil {
-			c.fail(err)
+			c.fail(withHdr(err, p.hdr))
 			return
 		}
 	}
@@ -207,7 +207,7 @@ func (c *conn) fail(err error) {
 			slog.String("reason", perr.reason),
 		)
 		// Best effort: the socket may already be gone.
-		_ = c.writePdu(buildTermReq(perr.fes, perr.fei))
+		_ = c.writePdu(buildTermReq(perr.fes, perr.fei, perr.hdr))
 		c.shutdown(reasonPduError)
 	case errors.Is(err, errHostTerminated):
 		c.shutdown(reasonClosed)
@@ -410,11 +410,11 @@ func (c *conn) handshake(reader *bufio.Reader) error {
 		return err
 	}
 	if p.typ != pduICReq {
-		return newPduError(fesPduSequenceErr, 0,
-			"first pdu is type %#x, want icreq", p.typ)
+		return withHdr(newPduError(fesPduSequenceErr, 0,
+			"first pdu is type %#x, want icreq", p.typ), p.hdr)
 	}
 	if _, err := parseICReq(p); err != nil {
-		return err
+		return withHdr(err, p.hdr)
 	}
 	// The ICReq moves no deadline: the pre-Connect one counts from accept
 	// (NP10).
@@ -546,7 +546,7 @@ func (c *conn) handleConnect(s sqe, data []byte) error {
 			connectIpo(connectDataHostNqnOff, true), 0)
 	}
 	hostId := formatHostId(data[connectDataHostIdOff : connectDataHostIdOff+16])
-	kato := time.Duration(s.connectKato()) * time.Millisecond
+	kato := time.Duration(katoSeconds(s.connectKato())) * time.Second
 	cntlId := c.srv.nextCntlId()
 
 	c.mu.Lock()
@@ -850,37 +850,44 @@ func (c *conn) handleGetLogPage(s sqe) error {
 // Features (NP9)
 // ---------------------------------------------------------------------------
 
-// handleSetFeatures implements 0Bh and 0Fh and refuses every other feature.
-//
-// The Asynchronous Event Configuration value is stored as the host wrote it
-// and only its discovery-log-change bit is ever read (NP9). nvmet rejects a
-// value with bits outside its supported mask; dnv-cdc deliberately does not,
-// because a host that asks for a notice this controller never sends loses
-// nothing by being told yes.
+// handleSetFeatures implements 0Bh and 0Fh and refuses every other feature,
+// as nvmet's discovery controller does (NP9): an Asynchronous Event
+// Configuration with a bit other than the discovery-log-change one is an
+// invalid field, and one accepted is stored and returned; a Keep Alive Timer
+// is rounded up to whole seconds, and the seconds are returned.
 func (c *conn) handleSetFeatures(s sqe) error {
 	cid := s.cid()
 	switch s.featFid() {
 	case fidAsyncEventConfig:
 		value := s.featDword11()
+		if value&^aenCfgDiscChange != 0 {
+			return c.respond(cid, statusInvalidField, 0, 0)
+		}
 		c.mu.Lock()
 		c.aenCfg = value
 		c.mu.Unlock()
 		// A host that enables the notice while an impact is already pending
 		// must still get it (NP11).
 		c.poke()
-		return c.respond(cid, statusSuccess, 0, 0)
+		return c.respond(cid, statusSuccess, value, 0)
 	case fidKeepAliveTimer:
-		value := s.featDword11()
+		secs := katoSeconds(s.featDword11())
 		c.mu.Lock()
-		c.kato = time.Duration(value) * time.Millisecond
+		c.kato = time.Duration(secs) * time.Second
 		c.lastAct = c.deps.clk.now()
 		c.mu.Unlock()
 		// The new KATO may be shorter than the one the timer is sleeping
 		// on (NP10).
 		c.rearmKeepAlive()
-		return c.respond(cid, statusSuccess, value, 0)
+		return c.respond(cid, statusSuccess, secs, 0)
 	}
 	return c.respond(cid, statusInvalidField, 0, 0)
+}
+
+// katoSeconds is a KATO in milliseconds rounded up to whole seconds, the unit
+// nvmet keeps it in (NP5, NP9).
+func katoSeconds(ms uint32) uint32 {
+	return uint32((uint64(ms) + 999) / 1000)
 }
 
 // handleGetFeatures is its mirror.

@@ -760,7 +760,12 @@ func readCtrlPdu(r io.Reader) (*pdu, error) {
 	p.hdr = append(p.hdr, ch[:]...)
 	p.hdr = append(p.hdr, rest[:want-pduCommonHdrLen]...)
 	if p.plen > uint32(p.hlen) {
-		p.data = rest[int(p.pdo)-pduCommonHdrLen:]
+		// A C2HTermReq's data follows its header; its PDO is reserved.
+		off := int(p.pdo)
+		if p.typ == pduC2HTermReq {
+			off = want
+		}
+		p.data = rest[off-pduCommonHdrLen:]
 	}
 	return p, nil
 }

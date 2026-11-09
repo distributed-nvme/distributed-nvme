@@ -98,8 +98,8 @@ func connRefused(hostNqn string) connArgs {
 }
 
 // connTermReq reads the C2HTermReq a protocol error is answered with (NP2) and
-// returns its FES and FEI.
-func connTermReq(t *testing.T, h *fakeHost) (uint16, uint32) {
+// returns its FES, its FEI and its data, the header of the PDU in error.
+func connTermReq(t *testing.T, h *fakeHost) (uint16, uint32, []byte) {
 	t.Helper()
 	p, err := h.recv()
 	if err != nil {
@@ -109,7 +109,7 @@ func connTermReq(t *testing.T, h *fakeHost) (uint16, uint32) {
 		t.Fatalf("pdu type %#x, want a c2h term req", p.typ)
 	}
 	return binary.LittleEndian.Uint16(p.hdr[8:10]),
-		binary.LittleEndian.Uint32(p.hdr[10:14])
+		binary.LittleEndian.Uint32(p.hdr[10:14]), p.data
 }
 
 // connSocketClosed asserts the controller has hung up (NP2, NP13). A read that
@@ -227,16 +227,21 @@ func TestHandshakeRejects(t *testing.T) {
 		name  string
 		frame []byte
 		fes   uint16
+		// hdr is how much of the frame's header the C2HTermReq carries
+		// back: the header as far as it was read (NP2).
+		hdr int
 	}{
 		{
 			name:  "pfv is not 1.0",
 			frame: buildICReqFor(1, 0, 0),
 			fes:   fesUnsupportedParam,
+			hdr:   icReqLen,
 		},
 		{
 			name:  "host demands pdu data alignment",
 			frame: buildICReqFor(0, 4, 0),
 			fes:   fesUnsupportedParam,
+			hdr:   icReqLen,
 		},
 		{
 			name: "a capsule before the icreq",
@@ -244,6 +249,13 @@ func TestHandshakeRejects(t *testing.T) {
 				pduCapsuleCmd, 0, capsuleCmdHdrLen, 0, capsuleCmdHdrLen,
 			),
 			fes: fesPduSequenceErr,
+			hdr: capsuleCmdHdrLen,
+		},
+		{
+			name:  "an unknown pdu type: the common header alone",
+			frame: pduCommonHdr(0xff, 0, 24, 0, 24),
+			fes:   fesInvalidPduHdr,
+			hdr:   pduCommonHdrLen,
 		},
 	}
 	for _, tt := range tests {
@@ -252,9 +264,13 @@ func TestHandshakeRejects(t *testing.T) {
 			ts := startServer(t)
 			h := ts.dial()
 			h.write(tt.frame)
-			fes, _ := connTermReq(t, h)
+			fes, _, data := connTermReq(t, h)
 			if fes != tt.fes {
 				t.Errorf("fes %#x, want %#x", fes, tt.fes)
+			}
+			if !bytes.Equal(data, tt.frame[:tt.hdr]) {
+				t.Errorf("term req data %x, want the header %x", data,
+					tt.frame[:tt.hdr])
 			}
 			connSocketClosed(t, h)
 			recs := logs.waitFor(t, msgPduError, 1)
@@ -287,9 +303,13 @@ func TestFirstCapsuleMustBeConnect(t *testing.T) {
 		h := ts.dial()
 		h.handshake()
 		h.send(newSqe(opcIdentify, 1), nil)
-		fes, _ := connTermReq(t, h)
+		fes, _, data := connTermReq(t, h)
 		if fes != fesPduSequenceErr {
 			t.Errorf("fes %#x, want %#x", fes, fesPduSequenceErr)
+		}
+		if len(data) != capsuleCmdHdrLen || data[0] != pduCapsuleCmd {
+			t.Errorf("term req data %x, want the capsule's %d-byte header",
+				data, capsuleCmdHdrLen)
 		}
 		connSocketClosed(t, h)
 	})
@@ -298,7 +318,7 @@ func TestFirstCapsuleMustBeConnect(t *testing.T) {
 		h := ts.dial()
 		h.handshake()
 		h.send(newSqe(opcIdentify, 1), make([]byte, 8))
-		fes, _ := connTermReq(t, h)
+		fes, _, _ := connTermReq(t, h)
 		if fes != fesPduSequenceErr {
 			t.Errorf("fes %#x, want %#x", fes, fesPduSequenceErr)
 		}
@@ -309,7 +329,7 @@ func TestFirstCapsuleMustBeConnect(t *testing.T) {
 		h := ts.dial()
 		h.connectOk(connHostA)
 		connSendCmd(h, connDefaults(connHostA))
-		fes, _ := connTermReq(t, h)
+		fes, _, _ := connTermReq(t, h)
 		if fes != fesPduSequenceErr {
 			t.Errorf("fes %#x, want %#x", fes, fesPduSequenceErr)
 		}
@@ -324,8 +344,10 @@ func TestConnectHappyPath(t *testing.T) {
 	ts := startServer(t)
 	h := ts.dial()
 	h.handshake()
+	// A KATO that is not whole seconds is rounded up, as nvmet keeps it
+	// (NP5).
 	args := connDefaults(connHostA)
-	args.katoMs = 30000
+	args.katoMs = 30500
 	c := connSend(h, args)
 	connStatus(t, c, statusSuccess, "connect")
 	cntlId := uint16(c.dw0)
@@ -342,8 +364,8 @@ func TestConnectHappyPath(t *testing.T) {
 	if rec["cntlid"] != uint64(cntlId) {
 		t.Errorf("cntlid %v, want %d", rec["cntlid"], cntlId)
 	}
-	if rec["kato_ms"] != int64(30000) {
-		t.Errorf("kato_ms %v, want 30000", rec["kato_ms"])
+	if rec["kato_ms"] != int64(31000) {
+		t.Errorf("kato_ms %v, want 31000, the KATO rounded up", rec["kato_ms"])
 	}
 	if rec["remote"] == nil || rec["remote"] == "" {
 		t.Error("`host connected` has no remote")
@@ -1013,9 +1035,10 @@ func TestFeaturesAenConfigGatesAens(t *testing.T) {
 		t.Fatalf("an AEN was delivered before the host enabled it: %+v", c)
 	}
 
-	// A configuration that enables some other notice is not this one: only
-	// the discovery-log-change bit gates DS8 delivery.
-	connStatus(t, h.setFeatures(fidAsyncEventConfig, 1), statusSuccess,
+	// A configuration that enables some other notice is refused, as nvmet's
+	// discovery controller refuses it (NP9), and delivers nothing: only the
+	// discovery-log-change bit gates DS8 delivery.
+	connStatus(t, h.setFeatures(fidAsyncEventConfig, 1), statusInvalidField,
 		"set features 0bh")
 	if c, ok := h.pollPending(200 * time.Millisecond); ok {
 		t.Fatalf("an AEN was delivered for an unrelated notice bit: %+v", c)
@@ -1060,16 +1083,41 @@ func TestFeaturesReadBackAndReject(t *testing.T) {
 			t.Fatalf("aen config %#x, want %#x", g.dw0, uint32(aenCfgDiscChange))
 		}
 	})
-	t.Run("0fh updates the kato", func(t *testing.T) {
-		c := h.setFeatures(fidKeepAliveTimer, 12000)
-		connStatus(t, c, statusSuccess, "set features 0fh")
-		if c.dw0 != 12000 {
-			t.Errorf("set features 0fh dword0 %d, want 12000", c.dw0)
+	t.Run("0bh refuses a bit other than the log change", func(t *testing.T) {
+		before := h.getFeatures(fidAsyncEventConfig).dw0
+		for _, v := range []uint32{1 << 8, aenCfgDiscChange | 1<<11} {
+			connStatus(t, h.setFeatures(fidAsyncEventConfig, v),
+				statusInvalidField, "set features 0bh")
+			if got := h.getFeatures(fidAsyncEventConfig).dw0; got != before {
+				t.Errorf("a refused set changed the stored value %#x to %#x",
+					before, got)
+			}
 		}
-		g := h.getFeatures(fidKeepAliveTimer)
-		connStatus(t, g, statusSuccess, "get features 0fh")
-		if g.dw0 != 12000 {
-			t.Fatalf("kato %d ms, want 12000", g.dw0)
+		c := h.setFeatures(fidAsyncEventConfig, aenCfgDiscChange)
+		connStatus(t, c, statusSuccess, "set features 0bh")
+		if c.dw0 != aenCfgDiscChange {
+			t.Errorf("set features 0bh dword0 %#x, want the value written",
+				c.dw0)
+		}
+	})
+	// nvmet keeps the KATO in whole seconds, rounded up: Set returns the
+	// seconds, and Get the seconds in milliseconds.
+	t.Run("0fh updates the kato, in whole seconds", func(t *testing.T) {
+		for _, tc := range []struct{ ms, secs uint32 }{
+			{12000, 12}, {1500, 2}, {1, 1},
+		} {
+			c := h.setFeatures(fidKeepAliveTimer, tc.ms)
+			connStatus(t, c, statusSuccess, "set features 0fh")
+			if c.dw0 != tc.secs {
+				t.Errorf("set features 0fh %d ms: dword0 %d, want %d",
+					tc.ms, c.dw0, tc.secs)
+			}
+			g := h.getFeatures(fidKeepAliveTimer)
+			connStatus(t, g, statusSuccess, "get features 0fh")
+			if g.dw0 != tc.secs*1000 {
+				t.Fatalf("kato %d ms after setting %d, want %d", g.dw0,
+					tc.ms, tc.secs*1000)
+			}
 		}
 	})
 	t.Run("any other feature identifier", func(t *testing.T) {
@@ -1462,16 +1510,21 @@ func TestGarbageOnTheWireTerminatesTheConnection(t *testing.T) {
 		name  string
 		frame []byte
 		fes   uint16
+		// hdr is how much of the frame the C2HTermReq carries back: the
+		// header of the PDU in error as far as it was read (NP2).
+		hdr int
 	}{
 		{
 			name:  "an unknown pdu type",
 			frame: pduCommonHdr(0xee, 0, 24, 0, 24),
 			fes:   fesInvalidPduHdr,
+			hdr:   pduCommonHdrLen,
 		},
 		{
 			name:  "a capsule cmd with the wrong hlen",
 			frame: pduCommonHdr(pduCapsuleCmd, 0, 8, 0, capsuleCmdHdrLen),
 			fes:   fesInvalidPduHdr,
+			hdr:   pduCommonHdrLen,
 		},
 		{
 			name: "more in-capsule data than MAXH2CDATA",
@@ -1480,6 +1533,7 @@ func TestGarbageOnTheWireTerminatesTheConnection(t *testing.T) {
 				maxPduLen+1,
 			),
 			fes: fesDataLimitExceeded,
+			hdr: pduCommonHdrLen,
 		},
 		{
 			name: "unsolicited h2c data, which is never solicited",
@@ -1487,11 +1541,13 @@ func TestGarbageOnTheWireTerminatesTheConnection(t *testing.T) {
 				pduH2CData, 0, h2cDataHdrLen, h2cDataHdrLen, h2cDataHdrLen+8,
 			),
 			fes: fesPduSequenceErr,
+			hdr: h2cDataHdrLen,
 		},
 		{
 			name:  "a second icreq once the connection is established",
 			frame: buildICReqFor(pfv10, 0, 0),
 			fes:   fesPduSequenceErr,
+			hdr:   icReqLen,
 		},
 	}
 	for _, tt := range tests {
@@ -1501,7 +1557,11 @@ func TestGarbageOnTheWireTerminatesTheConnection(t *testing.T) {
 			h := ts.dial()
 			h.connectOk(connHostA)
 			h.write(tt.frame)
-			fes, _ := connTermReq(t, h)
+			fes, _, data := connTermReq(t, h)
+			if !bytes.Equal(data, tt.frame[:tt.hdr]) {
+				t.Errorf("term req data %x, want the header %x", data,
+					tt.frame[:tt.hdr])
+			}
 			if fes != tt.fes {
 				t.Errorf("fes %#x, want %#x", fes, tt.fes)
 			}
