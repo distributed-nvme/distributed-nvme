@@ -979,7 +979,15 @@ while no other entry names the leg's NQN, leaves the pass not knowing
 whether the leg is connected, and so does the lookup's own "subsysnqn"
 read failing that way; a listing of the matching entry's own directory
 that fails, whatever the failure, leaves its controllers and namespace
-unread: the lookup fails naming the read, and the leg's converge fails
+unread; and a read of the namespace's "nsid" with no node picked, of a
+controller's "state", a listing of its directory, or a read of a path's
+"ana_state", that did not answer leaves the namespace or the path unknown,
+where taken as absent it would fail the leg with no multipath namespace,
+read a live path as not live or an optimized one as having no ANA state.
+Unlike an "address" read, which marks its own controller unknown (below),
+such a read fails the lookup for every side of the leg. In each case the
+lookup fails naming the read, a lookup in the head wait after a connect
+included, which ends the wait, and the leg's converge fails
 with it for the pass — `RES_STATUS_ERROR` naming the read, which
 registers the retry — connecting nothing on that answer. A
 "/sys/class/nvme-subsystem" that answers absent is an answer, no

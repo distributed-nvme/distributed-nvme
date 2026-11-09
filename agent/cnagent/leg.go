@@ -187,7 +187,9 @@ func (s *CnAgentServer) rewalk(ctx context.Context, pw *passWalk) {
 // the read, and its caller fails the leg or the clone source as it fails any
 // other step of it, which registers the retry. So does a listing of the
 // matching entry's own directory that fails, whatever the failure: its
-// controllers and namespace are unread. A match is the answer even beside a
+// controllers and namespace are unread; and a read of the namespace's nsid
+// with no node picked, or of a controller's state, directory or path
+// ana_state, that did not answer. A match is the answer even beside a
 // subsysnqn read that failed: the host joins every controller of one NQN to
 // the one subsystem it keeps for it ([D1]), so the entry that did not answer
 // is not this NQN's.
@@ -247,6 +249,25 @@ func (s *CnAgentServer) lookupSubsys(
 	case read.DirGone:
 		return nil, subsysUnknown(nqn,
 			fmt.Errorf("list %s: %w", match.Dir, fs.ErrNotExist))
+	case read.NsErr != nil && read.NsDev == "":
+		// An nsid read that did not answer is no missing namespace; beside
+		// a node it did pick, it is another nsid's, as the host keeps one
+		// head per nsid.
+		return nil, subsysUnknown(nqn, read.NsErr)
+	}
+	for _, ctrl := range read.Ctrls {
+		// A state, directory or ana_state read that did not answer is no
+		// path that is not live, nor an optimized one with no ANA state.
+		// Unlike an address read that did not answer, which marks its own
+		// controller unknown (unknownCtrl), it fails the lookup for every
+		// side of the leg for the pass (CN10).
+		for _, readErr := range []error{
+			ctrl.StateErr, ctrl.DirErr, ctrl.AnaErr,
+		} {
+			if readErr != nil {
+				return nil, subsysUnknown(nqn, readErr)
+			}
+		}
 	}
 	view := &subsysView{found: true, nsDev: read.NsDev,
 		ngListed: read.NgListed}
@@ -501,7 +522,9 @@ func (s *CnAgentServer) connectWithin(
 // reads that entry alone — its subsysnqn, its directory and its controllers
 // — while the entry it found stands; a lookup that finds no entry, or whose
 // entry fails the subsysnqn check, marks the walk stale again, so the next
-// one walks.
+// one walks. A lookup that did not answer ends the wait with its error
+// (lookupSubsys), which fails the leg or the clone source for the pass and
+// registers the retry.
 func (s *CnAgentServer) awaitNsHead(
 	ctx context.Context,
 	budget *agent.WaitBudget,
