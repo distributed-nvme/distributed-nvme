@@ -30,6 +30,13 @@ type fakeGateway struct {
 	fail map[string]codes.Code
 	// calls is every method called, in order.
 	calls []string
+	// alwaysStale refuses every host write as stale, as a pool that moves
+	// under every attempt would.
+	alwaysStale bool
+	// afterList runs once, outside the lock, after a ListSubsystems has
+	// read the hosts: a test's other attach or detach lands between that
+	// read and the write that follows it.
+	afterList func()
 }
 
 type fakeCluster struct {
@@ -45,10 +52,14 @@ type fakeCluster struct {
 type fakePool struct {
 	req      *pb.CreateStoragePoolRequest
 	deleting bool
-	tds      map[string]*pb.ThinDevice
-	nextTd   uint64
-	ss       map[string]*pb.Subsystem
-	nextSs   uint64
+	// rev is the pool's revision, which a token must match (gateway.md
+	// GW6). The fake moves it on a host write only; the gateway moves it on
+	// every change of what the agents build.
+	rev    uint64
+	tds    map[string]*pb.ThinDevice
+	nextTd uint64
+	ss     map[string]*pb.Subsystem
+	nextSs uint64
 }
 
 // The fixture's geometry: 64 MiB extents, 64 KiB stripes, 1 MiB blocks,
@@ -282,6 +293,7 @@ func (g *fakeGateway) CreateStoragePool(
 			req.GetSpName())
 	}
 	c.pools[req.GetSpName()] = &fakePool{
+		rev:    1,
 		req:    proto.Clone(req).(*pb.CreateStoragePoolRequest),
 		tds:    map[string]*pb.ThinDevice{},
 		nextTd: 1,
@@ -309,6 +321,7 @@ func (g *fakeGateway) GetStoragePool(
 			Deleting: p.deleting,
 			BdevConf: p.req.GetBdevConf(),
 		},
+		SpRev: &pb.SpRev{Revision: p.rev},
 	}, nil
 }
 
@@ -494,6 +507,20 @@ func (g *fakeGateway) CreateSubsystem(
 func (g *fakeGateway) ListSubsystems(
 	ctx context.Context, req *pb.ListSubsystemsRequest,
 ) (*pb.ListSubsystemsReply, error) {
+	reply, err := g.listSubsystems(ctx, req)
+	g.mu.Lock()
+	after := g.afterList
+	g.afterList = nil
+	g.mu.Unlock()
+	if after != nil {
+		after()
+	}
+	return reply, err
+}
+
+func (g *fakeGateway) listSubsystems(
+	ctx context.Context, req *pb.ListSubsystemsRequest,
+) (*pb.ListSubsystemsReply, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if err := g.enter("ListSubsystems"); err != nil {
@@ -524,11 +551,16 @@ func (g *fakeGateway) UpdateSubsystemHosts(
 	if err != nil {
 		return nil, err
 	}
+	if g.alwaysStale || (req.GetSpRev() != nil &&
+		req.GetSpRev().GetRevision() != p.rev) {
+		return nil, status.Error(codes.Aborted, "stale revision")
+	}
 	ss := p.ss[req.GetNqn()]
 	if ss == nil {
 		return nil, status.Errorf(codes.NotFound, "ss %q not found", req.GetNqn())
 	}
 	ss.AllowedHosts = append([]string(nil), req.GetAllowedHosts()...)
+	p.rev++
 	return &pb.UpdateSubsystemHostsReply{SsId: ss.GetSsId()}, nil
 }
 

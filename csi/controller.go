@@ -597,45 +597,33 @@ func (c *controller) ControllerPublishVolume(
 			"node %q is unknown to this driver: a node id is a host NQN", node)
 	}
 	nqn := subsystemNqnOf(name)
-	ss, err := c.subsystem(ctx, cluster, name, nqn)
+	ss, err := c.updateHosts(ctx, cluster, name, nqn,
+		func(ss *pb.Subsystem) ([]string, bool, error) {
+			if namespaceOf(ss) == nil {
+				return nil, false, status.Errorf(codes.NotFound,
+					"volume %q has no namespace", name)
+			}
+			hosts := ss.GetAllowedHosts()
+			switch {
+			case len(hosts) == 1 && hosts[0] == node:
+				return nil, false, nil
+			case len(hosts) == 0:
+				return []string{node}, true, nil
+			}
+			others := make([]string, 0, len(hosts))
+			for _, h := range hosts {
+				if h != node {
+					others = append(others, h)
+				}
+			}
+			return nil, false, status.Errorf(codes.FailedPrecondition,
+				"volume %q is published to node %s", name,
+				strings.Join(others, cdcSep))
+		})
 	if err != nil {
 		return nil, err
 	}
 	ns := namespaceOf(ss)
-	if ns == nil {
-		return nil, status.Errorf(codes.NotFound,
-			"volume %q has no namespace", name)
-	}
-	hosts := ss.GetAllowedHosts()
-	switch {
-	case len(hosts) == 1 && hosts[0] == node:
-	case len(hosts) == 0:
-		gctx, cancel := c.gwCtx(ctx)
-		_, err = c.gw.UpdateSubsystemHosts(gctx, &pb.UpdateSubsystemHostsRequest{
-			ClusterName:  cluster,
-			SpName:       name,
-			Nqn:          nqn,
-			AllowedHosts: []string{node},
-		})
-		cancel()
-		if err != nil {
-			if codeOf(err) == codes.NotFound {
-				return nil, status.Errorf(codes.NotFound,
-					"volume %q does not exist", name)
-			}
-			return nil, fromGateway("UpdateSubsystemHosts", err)
-		}
-	default:
-		others := make([]string, 0, len(hosts))
-		for _, h := range hosts {
-			if h != node {
-				others = append(others, h)
-			}
-		}
-		return nil, status.Errorf(codes.FailedPrecondition,
-			"volume %q is published to node %s", name,
-			strings.Join(others, cdcSep))
-	}
 	return &csi.ControllerPublishVolumeResponse{
 		PublishContext: map[string]string{
 			ctxNqn:  nqn,
@@ -663,40 +651,106 @@ func (c *controller) ControllerUnpublishVolume(
 		return done, nil
 	}
 	nqn := subsystemNqnOf(name)
-	ss, err := c.subsystem(ctx, cluster, name, nqn)
-	if err != nil {
-		if codeOf(err) == codes.NotFound {
-			return done, nil
-		}
+	node := req.GetNodeId()
+	_, err = c.updateHosts(ctx, cluster, name, nqn,
+		func(ss *pb.Subsystem) ([]string, bool, error) {
+			var hosts []string
+			found := node == ""
+			for _, h := range ss.GetAllowedHosts() {
+				if h == node {
+					found = true
+					continue
+				}
+				if node != "" {
+					hosts = append(hosts, h)
+				}
+			}
+			if !found || len(hosts) == len(ss.GetAllowedHosts()) {
+				return nil, false, nil
+			}
+			return hosts, true, nil
+		})
+	if err != nil && codeOf(err) != codes.NotFound {
 		return nil, err
 	}
-	node := req.GetNodeId()
-	var hosts []string
-	found := node == ""
-	for _, h := range ss.GetAllowedHosts() {
-		if h == node {
-			found = true
-			continue
-		}
-		if node != "" {
-			hosts = append(hosts, h)
-		}
-	}
-	if !found || len(hosts) == len(ss.GetAllowedHosts()) {
-		return done, nil
-	}
-	gctx, cancel := c.gwCtx(ctx)
-	defer cancel()
-	_, err = c.gw.UpdateSubsystemHosts(gctx, &pb.UpdateSubsystemHostsRequest{
-		ClusterName:  cluster,
-		SpName:       name,
-		Nqn:          nqn,
-		AllowedHosts: hosts,
-	})
-	if err != nil && codeOf(err) != codes.NotFound {
-		return nil, fromGateway("UpdateSubsystemHosts", err)
-	}
 	return done, nil
+}
+
+// hostsAttempts bounds updateHosts' attempts: a pool that moves under every
+// one of them is ABORTED, which the caller retries.
+const hostsAttempts = 4
+
+// gwStaleRevision is the gateway's fixed message for a token that no longer
+// matches the pool's revision (gateway.md GW6), the one refusal updateHosts
+// runs again; any other ABORTED is passed on with its own message.
+const gwStaleRevision = "stale revision"
+
+// updateHosts is one attach's or detach's change of a subsystem's allowed
+// hosts under the pool's revision token (csi.md CSI10; gateway.md GW6):
+// each attempt reads the pool's revision, then the subsystem, then decide
+// says the list to write, if any, and the write carries the revision read
+// first. A write the gateway refuses as stale ran over a change made after
+// that read, another attach or detach among them, so the attempt runs
+// again and decides afresh on what that change left; any other refusal is
+// passed on. It returns the
+// subsystem the deciding attempt read; a pool or subsystem that is gone is
+// NOT_FOUND.
+func (c *controller) updateHosts(
+	ctx context.Context,
+	cluster string,
+	name string,
+	nqn string,
+	decide func(ss *pb.Subsystem) ([]string, bool, error),
+) (*pb.Subsystem, error) {
+	for attempt := 0; attempt < hostsAttempts; attempt++ {
+		gctx, cancel := c.gwCtx(ctx)
+		pool, err := c.gw.GetStoragePool(gctx, &pb.GetStoragePoolRequest{
+			ClusterName: cluster,
+			SpName:      name,
+		})
+		cancel()
+		if err != nil {
+			if codeOf(err) == codes.NotFound {
+				return nil, status.Errorf(codes.NotFound,
+					"volume %q does not exist", name)
+			}
+			return nil, fromGateway("GetStoragePool", err)
+		}
+		ss, err := c.subsystem(ctx, cluster, name, nqn)
+		if err != nil {
+			return nil, err
+		}
+		hosts, write, err := decide(ss)
+		if err != nil || !write {
+			return ss, err
+		}
+		gctx, cancel = c.gwCtx(ctx)
+		_, err = c.gw.UpdateSubsystemHosts(gctx, &pb.UpdateSubsystemHostsRequest{
+			ClusterName:  cluster,
+			SpName:       name,
+			SpRev:        pool.GetSpRev(),
+			Nqn:          nqn,
+			AllowedHosts: hosts,
+		})
+		cancel()
+		switch codeOf(err) {
+		case codes.OK:
+			return ss, nil
+		case codes.Aborted:
+			if status.Convert(err).Message() == gwStaleRevision {
+				continue
+			}
+			return nil, fromGateway("UpdateSubsystemHosts", err)
+		case codes.NotFound:
+			return nil, status.Errorf(codes.NotFound,
+				"volume %q does not exist", name)
+		default:
+			return nil, fromGateway("UpdateSubsystemHosts", err)
+		}
+	}
+	return nil, status.Errorf(codes.Aborted,
+		"volume %q: its pool changed under every one of %d attempts; retry",
+		name, hostsAttempts)
 }
 
 // ValidateVolumeCapabilities confirms the capabilities the driver serves

@@ -150,7 +150,15 @@ the cdc addresses joined by commas; the volume context of a create carries
 the NQN and the uuid as well. Detach takes the node out of the list, which
 empties it, or empties it outright when no node is named; a node not in the
 list, a subsystem or a pool that is gone, and an id of another form are all
-done. Neither call cuts a live path: a host already connected keeps its
+done. Each of the two reads the pool's revision, then the subsystem, and,
+when the list changes, writes it with that revision as its token
+(`gateway.md` GW6): a write the gateway refuses as stale ran over another
+change of the pool, another attach or detach among them, so the call reads
+and decides again, a few times, and then answers ABORTED for the caller to
+retry; any other refusal is passed on. So two attaches of one volume to two
+nodes never both succeed, and a detach that runs late finds its node gone
+and leaves the next attach to another node alone; a late detach cannot
+tell an attach of its own node apart from the one it was asked to undo. Neither call cuts a live path: a host already connected keeps its
 controller and its IO (`architecture.md`, Primary cntlr) until it disconnects
 or its own node plugin drops the path (CSI15), and a detach Kubernetes forces
 while that plugin does not run, or cannot read a cdc it follows, lets the old
