@@ -389,8 +389,14 @@ func (s *CnAgentServer) build(
 			}
 			detail, running, forcedStarted, refusal, err := s.ensureGroup(
 				ctx, plan, gp, available, info.LegIdToLeg)
+			// CN28: an OK row carries the array's state line, as a read's
+			// does, when the pass read the array as it left it.
+			line := ""
+			if err == nil && detail != nil {
+				line = mdStateLine(detail)
+			}
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
-				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
+				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, line, err)
 			// CN28: the array's reading and the repair's verdict, from the
 			// array as the pass left it, for a group whose row reads OK.
 			if err == nil {

@@ -13391,9 +13391,9 @@ copy_check_drop() { # <mark> <name>
 # grp_md_clean is "md holds the group's array clean": no copy runs on it and
 # no place of it is degraded.
 #
-# WHAT THE ROW ACTUALLY CARRIES: probeGroup composes the details of
-# grp_id_to_md_raid from sysfs, not from mdadm's State line (mdStateLine
-# in agent/cnagent/md.go; cnagent.md CN28):
+# WHAT THE ROW ACTUALLY CARRIES: a read's probeGroup and a converge's group
+# step compose the details of grp_id_to_md_raid from sysfs, not from
+# mdadm's State line (mdStateLine in agent/cnagent/md.go; cnagent.md CN28):
 # md/array_state, then "degraded" while md/degraded is non-zero, then the
 # word of a sync that is running with its "(<done> / <total>)" sectors. A
 # running array of the group's own legs is RES_STATUS_OK, however degraded,

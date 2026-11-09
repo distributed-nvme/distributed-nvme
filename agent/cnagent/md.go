@@ -1229,7 +1229,7 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // reads (reconcileMembers). For an md group whose array runs at the end of
 // the pass, the array is returned too, as read after the pass's own member
 // changes, for what the primary reports beside the group's row
-// (reportGrpReading): a pass that changed a member reads the array's node
+// (reportGrpReading) and for the row's own state line (mdStateLine): a pass that changed a member reads the array's node
 // again (Md.RefreshArray), since Md.Refresh does not see an added member. A
 // read again whose listing of the node fails returns no array and no error
 // and leaves the pass's walk as it was; one whose listing answers updates the
