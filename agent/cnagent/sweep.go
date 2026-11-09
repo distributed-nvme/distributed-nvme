@@ -329,8 +329,8 @@ func legWrapperSp(clusterId, cnId uint64, name string) (uint64, bool) {
 // subsystem that sp's. dnv exports a host namespace only over an ns-dev, so a
 // namespace over any other device, another cn's ns-dev included, makes the
 // subsystem foreign. One with no namespace device at all is dnv's only when
-// its attr_model reads common.NvmeModel, which every subsystem dnv makes
-// carries (a model read that did not answer is not dnv's, and is named as a
+// its attr_model reads common.NvmeModel, which every host-facing subsystem
+// dnv makes carries (a model read that did not answer is not dnv's, and is named as a
 // failure); it is then **unowned**, and only the node-level sweep may remove
 // it — which assumes at most one cn agent per kernel. A co-hosted dn agent is
 // fine: its NQNs are all dnv-format kinds 2 and 3, which never reach that
@@ -2074,8 +2074,8 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 // re-adopted probe-first by that syncup rather than swept. The steps for
 // unowned subsystems and source connections are keyed on the stored requests
 // and on what the kernel shows instead, so a host-facing subsystem of such an
-// sp that holds no namespace over an ns-dev of ours, with no cntlr in memory
-// to claim it, or an unmapped source, is removed (CN21).
+// sp that holds no namespace device and carries dnv's model, with no cntlr in
+// memory to claim it, or an unmapped source, is removed (CN21).
 //
 // redrive is what of the base state the caller's own probe read wrong in a
 // way a SyncupCn's converge would cure (probeCn): a piece of it absent, or an

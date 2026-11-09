@@ -256,9 +256,9 @@ reads for the round that started it: it carries that round's trace id,
 minting one only when that round had none, so its records, a verdict that
 is not clean among them, name the round that brought them; and it takes
 the SH11 or SH12 locks for that one read. One goroutine outlives its RPC
-inside the `OsClient` itself: a discard given up on at the soft timeout
-(`osclient.md`, DiscardRanges), which ends when the kernel answers it and
-which no `WaitBackground` joins.
+inside the `OsClient` itself: a discard given up on at the soft timeout or
+at the caller's cancel (`osclient.md`, DiscardRanges), which ends when the
+kernel answers it and which no `WaitBackground` joins.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
@@ -788,7 +788,8 @@ among them:
 `Nvmet.NsDevicePath` (a
 namespace's "device_path", by which the cn sweep attributes a host-facing
 subsystem no stored request claims — a namespace over another device makes
-it foreign, `cnagent.md` CN21 — and by
+it foreign, and a read taken as absent could leave only the model to decide
+and get a dnv-model subsystem removed, `cnagent.md` CN21 — and by
 which DN6 attributes a `SideToCnNqn` export: an export whose read did not
 answer is foreign for that pass and named as a failed enumeration; and by
 which DN6's step before the first layer finds the device a migration
@@ -3422,16 +3423,19 @@ else reported through `agent_reply` is still a protocol-level refusal.
   linked, so a read never names a transport attribute that differs. It
   waits for the node's next `SyncupDn` or `SyncupCn` for another reason,
   or for the agent's next start.
-* A migration's bitmap apply still takes time that grows with its ranges:
-  each push of a changed chunk applies the whole skip set again under the
+* A migration's bitmap apply takes time that grows with its ranges while
+  no table maps the dm-clone: each push applies the whole skip set under the
   side's DN1 locks (DN15), each create of the dm-clone does under the
   converge's locks, and the startup reconcile does for every side under the
   node write lock. The discards run in the agent's own process, one open
   and one ioctl per range with no child process each (`osclient.md`,
-  DiscardRanges), but a fragmented source's many ranges still hold the
-  locks for as long as the kernel takes over them. A cancelled push returns
-  at once and leaves the range in flight to the kernel; the ranges it did
-  not reach cost extra copying only, until the next apply.
+  DiscardRanges), but a fragmented source's many ranges hold the locks for
+  as long as the kernel takes over them. Once the primary's per-CN
+  dm-linear maps the dm-clone (DN13 step 5), an apply is refused at the
+  open: it discards nothing, holds the locks only briefly, and the regions
+  it would have marked are copied. A cancelled push returns at once and
+  leaves the range in flight to the kernel; the ranges it did not reach cost
+  extra copying only, until the next apply.
 * A reload whose load fails leaves its device suspended (OS wrappers), so
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,

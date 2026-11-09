@@ -550,8 +550,9 @@ func (d *Dm) DiscardRanges(
 // optional). It needs no zeroing support in the disk: where the disk has
 // none, the kernel writes the zeros itself.
 //
-// --zeroout is the first argument on purpose, so a `blkdiscard --offset` grep
-// keeps meaning dm-clone hydration marking only.
+// --zeroout is the first argument, so a `blkdiscard --zeroout` grep finds
+// every zeroing batch; the hydration marking runs no blkdiscard at all
+// (DiscardRanges).
 //
 // answered is Reported's verdict on the run: false when the tool never
 // reported — typically killed at the SH15 soft timeout, which the zeroing loop

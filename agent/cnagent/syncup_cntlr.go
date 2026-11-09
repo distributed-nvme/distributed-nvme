@@ -447,10 +447,10 @@ func (s *CnAgentServer) build(
 		// group, or of a held request that counts as delivered no more since
 		// syncupCntlr refused a newer one for a failed save
 		// (cntlrState.reqFromRpc). The pass that started the array registers
-		// nothing for its mark. And so does a group build that failed with
-		// its legs as they are (groupBuildRetries): its error is a row, and a
-		// grow's new group under a pool that serves has no namespace that
-		// waits for it.
+		// nothing for its mark. A group build that failed with its legs as
+		// they are registers the retry too (groupBuildRetries): its error is
+		// a row, and a grow's new group under a pool that serves has no
+		// namespace that waits for it.
 		s.startConnectRetry(st, plan)
 		retryNeeded = true
 	}

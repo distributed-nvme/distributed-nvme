@@ -425,19 +425,20 @@ child process per range would hold the caller's locks for tens of seconds on
 a fragmented source.
 
 * It takes one semaphore slot for the whole call, opens the path once,
-  write-only and exclusively, as `blkdiscard` without `--force` does, and
+  write-only and, as `blkdiscard` without `--force` does, exclusively, and
   sends one BLKDISCARD ioctl per range, in the order given, the ctx checked
   before each, so a cancelled caller sends no further range. It returns how
   many ranges it discarded and the first error — a ctx error, the open's,
-  or an ioctl's — after which it discards no more. Reason for the exclusive
-  open: a device another dm table maps, or that anything else holds, is
-  refused EBUSY at once, as the agents' `blkdiscard` was; the discard of a
-  device that is mapped while it serves, and what a suspended dm-clone does
-  to a discard, are left as they were.
+  or an ioctl's — after which it discards no more. The exclusive open
+  refuses, EBUSY at once, a device another dm table maps or that anything
+  else holds: a discard onto a dm-clone that the ns-devs map (`cnagent.md`
+  CN18) or that a primary's per-CN dm-linear maps (`dnagent.md` DN13)
+  discards nothing, and those regions are copied instead.
 * Unlike every other method, `DiscardRanges` bounds itself: the caller's
   ctx needs no deadline of its own, since each range is waited for no
   longer than the ctx and the soft timeout (`CmdSoftTimeout`) allow, and
-  the call returns then with an error naming that range. A discard the
+  the call returns then: with an error naming the range at the soft
+  timeout, or with the ctx's error. A discard the
   kernel has not answered by then is left to finish there, as a killed
   child's ioctl is: its goroutine, its thread and the open device stay
   until the kernel answers, and only then is the device closed and the
@@ -446,7 +447,7 @@ a fragmented source.
   `dmsetup remove` of it fails EBUSY.
 * One `os discard ranges` record covers the call (`log.md`, OS commands and
   file IO), with the path, the range count, the ranges done and at most the
-  first 64 ranges, whatever the count.
+  first `discardLogRanges` ranges, whatever the count.
 
 ### Exported raw helpers and the probe-IO carve-out
 

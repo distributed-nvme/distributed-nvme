@@ -953,11 +953,12 @@ still holds; the first converge that finds none stops the retry.
 Only a converge connects a side, and the worker brings one on a reply's
 code or a new revision, never on a row (`dnv-worker.md` RW4). A
 controller the kernel deleted — after a reconnect nvmet refused with DNR,
-or lost to a CN reboot — therefore stays gone until a converge runs, so a cntlr's read names each side the converge would
-connect (CN30): the provisioned sides of a wanted leg that the leg's
-subsystem holds no controller for, in any state, where no controller's
-address read failed to answer (`sidesToConnect`, the connect step's own
-test).
+or lost to a CN reboot — therefore stays gone until a converge runs, so a
+cntlr's read names each side the converge would connect (CN30; on a
+primary, a one-sided leg's once its row stops reading `OK`): the
+provisioned sides of a wanted leg that the leg's subsystem holds no
+controller for, in any state, where no controller's address read failed to
+answer (`sidesToConnect`, the connect step's own test).
 
 **Dead paths**: a controller of the leg NQN whose traddr and trsvcid
 match no desired side (the source side after `FinishMigration` — its
@@ -987,7 +988,7 @@ controller's "state", a listing of its directory, or a read of a path's
 "ana_state", that did not answer leaves the namespace or the path unknown,
 where taken as absent it would fail the leg with no multipath namespace,
 read a live path as not live or an optimized one as having no ANA state.
-Unlike an "address" read, which marks its own controller unknown (below),
+Unlike an "address" read, which marks its own controller unknown (above),
 such a read fails the lookup for every side of the leg. In each case the
 lookup fails naming the read, a lookup in the head wait after a connect
 included, which ends the wait, and the leg's converge fails
@@ -1248,7 +1249,7 @@ dm-clone (CN18).
   run, the bad leg is late as any other member is: the assembly takes it
   once it is available (case 2, above), and mdadm can refuse to start the
   array without it. An assembly that needs a repair's new leg that is not
-  available yet fails, and registers the retry as every failed build does
+  available yet fails, and registers the retry, as a failed build does
   (next). A
   group's build that fails with its legs as they are registers the CN10
   retry too: its md walk or array read that did not answer, its create,
@@ -3203,8 +3204,8 @@ all, makes the subsystem foreign and untouchable, since dnv exports a host
 namespace only over an ns-dev. A subsystem with no namespace device is
 dnv's only when its "attr_model" reads dnv's model name
 (`common.NvmeModel`), which the gateway stamps on every subsystem record
-and the converge writes right after it closes the subsystem, before any
-namespace or link, and it is then unowned; with the kernel's default model it is foreign, and a model
+and the converge writes right after it closes the subsystem and reads its
+cntlid range, before any namespace or link, and it is then unowned; with the kernel's default model it is foreign, and a model
 read that did not answer makes it not ours for the pass, named as a failed
 enumeration. Unowned subsystems only the node-level scope removes.
 Reason: the node-level sweep is the only remover of a host-facing
@@ -3506,9 +3507,9 @@ step. Under the CN1 locks (node read plus object — the snapshot must not
 race a converge): the `reserve_metadata_snap` message to the
 `CnPoolFinalName` (`dmsetup message`), then `thin_dump --metadata-snap` on
 the `CnPoolMetaName`'s device path with `-o` naming the output file (the
-thin-provisioning-tools reader), then always the `release_metadata_snap`
-message —
-on the success path and on every error path, on a context the caller's
+thin-provisioning-tools reader), then the `release_metadata_snap`
+message on every path after a reserve that succeeded or did not answer —
+on a context the caller's
 cancellation does not reach (still under the soft timeout), because a
 leaked reservation blocks the next reserve and pins the pool's metadata
 blocks; on the caller's own context, a caller that went away before the
@@ -3881,9 +3882,10 @@ The rows, each with its `res_name` and what its probe checks:
   so they say what the node holds rather than the connect's error. In a
   read they come first in each leg's turn, and the read's other uses of
   the leg — the sides it names with no controller (CN30) and a standby's
-  leg row — read their lookup, so a read looks up a leg at most once: every
-  wanted leg on a standby, and on a primary a two-sided leg or one whose
-  row does not read `OK` (CN30). The
+  leg row — read their lookup, so the leg loop looks up a leg at most once:
+  every wanted leg on a standby, and on a primary a two-sided leg or one
+  whose row does not read `OK` (CN30); the put-back test looks up again the
+  legs of the members it would name and of their copy sources (CN30). The
   worker's cutover reads the primary's row of a migration's destination
   side (`dnv-worker.md` RW18), and no health rule judges these rows
   (`dnv-worker.md` HL2). Reason for the rows' scope: the primary's leg
@@ -4092,8 +4094,8 @@ controller's "address" known and a path both live and optimized, while
 another member is a copy source (CN12), its leg read as serving the same
 way and its leg row not `ERROR`. It
 reads them from the arrays and the leg rows of the read's own probe and,
-for each such member whose leg row reads `OK`, from one lookup of the
-leg's subsystem in the read's walk. An open repair's bad leg is not one
+for each such member whose leg row reads `OK` and for each copy source
+it weighs, from a lookup of the leg's subsystem in the read's walk. An open repair's bad leg is not one
 of them (CN12). Beside them it names a repair's members the converge
 would change (CN12): a new leg it would add, under the add's conditions
 read with the parts of each leg's availability a read can read — the new
@@ -4439,20 +4441,22 @@ stores instead is CN23's.
   exposed; only a reload or resume of the ns-dev from outside the agent
   ends it.
 * A host-facing subsystem dnv made whose converge stopped before its
-  `attr_model` write — a kill, or the close before it refused — reads the
-  kernel's default model, so once no cntlr claims it and it holds no
-  namespace device the node-level sweep reads it as foreign and leaves it
-  (CN21); an operator removes it.
-* A clone's bitmap apply still takes time that grows with its ranges: every
-  push of a changed chunk, every create or reload of the dm-clone, a build
-  that finds hydration off and the startup reconcile apply the whole skip
-  set again, each under the locks it holds (CN18 step 4, CN22). The
-  discards run in the agent's own process, one open and one ioctl per range
-  with no child process each (`osclient.md`, DiscardRanges), but a
-  fragmented source's hundreds of thousands of ranges still hold the locks
-  for as long as the kernel takes over them. A cancelled push returns at
-  once and leaves the range in flight to the kernel; the ranges it did not
-  reach cost extra copying only, until the next apply.
+  `attr_model` write — a kill, or a refused or unanswered step before it —
+  reads the kernel's default model, so once no cntlr claims it and it holds
+  no namespace device the node-level sweep reads it as foreign and leaves
+  it (CN21); an operator removes it.
+* A clone's bitmap apply takes time that grows with its ranges while no
+  table maps the dm-clone: its create and a build that finds hydration off
+  (CN18 step 4) and a push of a changed chunk (CN22) apply the whole skip
+  set under the cntlr's CN1 locks. The discards run in the agent's own
+  process, one open and one ioctl per range with no child process each
+  (`osclient.md`, DiscardRanges), but a fragmented source's hundreds of
+  thousands of ranges hold the locks for as long as the kernel takes over
+  them. Once the ns-devs map the dm-clone (CN18 step 6), an apply is refused
+  at the open: it discards nothing, holds the locks only briefly, and the
+  regions it would have marked are copied. A cancelled push returns at once
+  and leaves the range in flight to the kernel; the ranges it did not reach
+  cost extra copying only, until the next apply.
 * A namespace dropped from a dnv-prefixed subsystem that decodes to
   nothing stays enabled: the sweep is the only remover of a namespace
   (CN21), and it never attributes a subsystem whose NQN carries the dnv

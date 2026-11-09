@@ -137,8 +137,8 @@ func parseThinDump(doc string) (*thinSuperblock, error) {
 // ---------------------------------------------------------------------------
 
 // dumpThinMetadata reserves a dm-thin metadata snapshot, dumps it and
-// **always** releases — on the success path and on every error path, on a ctx
-// the caller's cancellation does not reach, because a leaked reservation
+// releases on every path after a reserve that succeeded or did not answer,
+// on a ctx the caller's cancellation does not reach, because a leaked reservation
 // blocks the next reserve and pins metadata blocks, and a caller that went
 // away before the release must not take the release with it. A reserve that
 // fails because one is already held is released and retried once. A reserve

@@ -6863,11 +6863,11 @@ that component's document and only pointed to here.
   One etcd request grows with the slices it writes, the widest a
   provisioned flip over every slice, which sizes `EtcdMaxRequestBytes`
   (`dnv-worker.md`, Constants this document owns).
-* **The IO queue cap's default was chosen without a measurement.** Every
+* **No measurement backs the IO queue cap's default.** Every
   path to a subsystem holds one TCP connection per IO queue, and an agent
   caps the queues of each subsystem it links at `NvmetQidMax` unless
   `--nvmet-qid-max` says otherwise (`dnagent.md` SH32). No host with many
-  CPUs was measured to choose it: one volume's IO from such a host may
+  CPUs has been measured for it: one volume's IO from such a host may
   want more queues per path, and a node with many paths fewer; an
   operator who measures sets the flag. A subsystem linked before the cap
   changed keeps its old cap until it is unlinked everywhere or removed.

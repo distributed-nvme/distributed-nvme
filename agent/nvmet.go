@@ -339,9 +339,10 @@ type SubsysConf struct {
 // subsystem left open as not converged. The loop writes the rest in this
 // order, and raiseCntlidMax may write "attr_cntlid_max" ahead of it.
 func (c SubsysConf) attrs() [][2]string {
-	// The model comes right after the close: a subsystem with no namespace
-	// device is dnv's only by its model (cnagent.md CN21), so a converge cut
-	// off early should leave as few subsystems without it as it can.
+	// The model comes right after the close and raiseCntlidMax: a subsystem
+	// with no namespace device is dnv's only by its model (cnagent.md CN21),
+	// so a converge cut off early should leave as few subsystems without it
+	// as it can.
 	attrs := [][2]string{{"attr_allow_any_host", "0"}}
 	if c.Model != "" {
 		attrs = append(attrs, [2]string{"attr_model", c.Model})
@@ -479,7 +480,8 @@ func (n *Nvmet) raiseCntlidMax(
 // (readAttrStrict): ok is false when the attribute is not there, and a read
 // that did not answer is an error. The kernel's default for a new subsystem
 // is "Linux"; the gateway stamps common.NvmeModel on every subsystem record
-// ([D2]), and the agents write it before any namespace or link.
+// ([D2]), and the cn agent writes it on every host-facing subsystem before
+// any namespace or link (a dn migration source export carries no model).
 func (n *Nvmet) SubsysModel(
 	ctx context.Context,
 	nqn string,

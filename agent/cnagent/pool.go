@@ -367,7 +367,8 @@ func (s *CnAgentServer) sweepThinIds(
 	keep func() (map[uint32]struct{}, error),
 ) {
 	// CN25's machinery: reserve_metadata_snap → thin_dump --metadata-snap →
-	// release_metadata_snap, releasing on every path.
+	// release_metadata_snap, releasing after every reserve that succeeded or
+	// did not answer.
 	sb, err := s.dumpThinMetadata(ctx, sp)
 	if err != nil {
 		slog.ErrorContext(ctx, msgThinSweepFailed,

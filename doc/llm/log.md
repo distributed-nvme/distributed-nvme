@@ -186,8 +186,8 @@ implements them:
   **never** `data`;
 * a set of discards made in the caller's own process (`DiscardRanges`)
   logs `os discard ranges` with `path`, `range_cnt` (the ranges asked
-  for), `done` (the ranges discarded), `ranges` (at most the first 64, as
-  `[offset, length]` pairs) and "error?";
+  for), `done` (the ranges discarded), `ranges` (at most the first
+  `discardLogRanges`, as `[offset, length]` pairs) and "error?";
 * a proto read logs `os read proto` and a proto write `os write proto`, each
   with `path`, `size` (the serialized bytes), `data` (the message as
   `PbToLogValue` renders it) and "error?".
