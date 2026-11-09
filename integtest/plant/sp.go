@@ -449,7 +449,7 @@ func PutSp(
 	// The SP's bdev_conf is the cluster's, with the redundancy the groups
 	// name and the Lwm override (architecture.md, Storage pools:
 	// CreateStoragePool takes bdev_conf member-wise from
-	// ClusterConf.bdev_conf, then from the constants).
+	// ClusterConf.bdev_conf, then from the defaults).
 	bdev := cloneBdevConf(cc.GetBdevConf())
 	if bdev.DmPoolConf == nil {
 		bdev.DmPoolConf = &pb.DmPoolConf{}

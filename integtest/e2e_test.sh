@@ -6279,8 +6279,11 @@ DIAG_MAX_DN_LOGS=6
 #   - `thin_dump` is run by the cn AGENT, not by this suite's HELPER: for the
 #     bitmap reads the ops and copy cases issue (`td get-bm`, `td get-leg-bm`)
 #     and for its activation sweep of a pool's thin ids (cnagent.md CN14,
-#     CN25), so a controller node needs it and CN_TOOLS lists it, so that a
-#     guest without it fails here, naming it, and not at the ops case.
+#     CN25), so a controller node needs it, and CN_TOOLS lists it, an
+#     exception to the standard below, so that a guest without it fails
+#     here, naming it, and not at the ops case. `nohup` (dn_up, cn_up) and
+#     `dmesg` (diag) are exceptions the other way: this suite runs them on
+#     the nodes, and no list names them.
 #   - no `cmp`: every comparison here is a sha256 string compared on the
 #     driver.
 # The check runs under the same shell the work runs under — `sudo -n bash -c`

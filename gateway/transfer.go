@@ -94,8 +94,8 @@ func errNsInTransfer(nqn string, nsIdx uint32, xferName string) error {
 // The origin is resolved — the Subsystem by ori_nqn and the Namespace by
 // ori_ns_idx inside it — inside the STM and NOT_FOUND when either is absent:
 // the record is a pointer into the SP's own subsystem table, and a transfer
-// pointing at a namespace that does not exist would make every cntlr build a
-// stack over nothing.
+// pointing at a namespace that does not exist would leave every cntlr
+// reporting the transfer in error and the destination reading errors.
 //
 // allowed_hosts carries the destination cntlrs' CnHostNqns, which is why it is
 // validated with the host-NQN rules of architecture.md, Common validation, and

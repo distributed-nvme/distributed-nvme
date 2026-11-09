@@ -656,7 +656,8 @@ and field-level rules stay in the cited section of `architecture.md`,
 * **CreateCluster** — validate the confs (`architecture.md`, Common
   validation) on the RAW request, where a zero still asks for the default,
   and its `bdev_conf` once more resolved, where an omitted member meets the
-  geometry rules as its constant (a refusal is `INVALID_ARGUMENT`, and the
+  geometry rules as its default, its constant or, for the stripe, the
+  stripe its block gives (a refusal is `INVALID_ARGUMENT`, and the
   message says the defaults were filled in); the `dn_bin_conf` shifts are
   judged as a set, all-or-nothing (`architecture.md`, DN bins). Stamp the
   creation epoch **once, outside** the STM, so that the STM's retries of
@@ -1241,8 +1242,9 @@ GW16. **Finalize skips a vanished origin.** `DeleteTransfer`'s finalize
 skips an origin subsystem or `ns_idx` that no longer exists instead of
 failing: the transfer is being deleted either way, and the RPC must stay
 able to complete. The namespace RPCs refuse to remove a live transfer's
-origin (`architecture.md`, Transfers), so only a record changed outside the
-gateway meets this.
+origin (`architecture.md`, Transfers), so no record this gateway writes
+meets this; one changed outside the gateway, or left by a gateway without
+that refusal, may.
 
 ### Migrations
 

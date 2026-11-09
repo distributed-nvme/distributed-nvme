@@ -1079,7 +1079,7 @@ func TestValidateBdevConf(t *testing.T) {
 // A zero member is the proto3 "unset", so validateBdevConf judges a rule
 // between two members only when the request states both. What an unset
 // member turns into is judged where the stored conf is built: CreateCluster
-// resolves it against the constants (the "as stored" rows below), and
+// resolves it against the defaults (the "as stored" rows below), and
 // CreateStoragePool judges its merge of the request over the cluster's conf
 // (TestCreateStoragePoolJudgesTheMergedGeometry).
 func TestBdevConfGeometryRules(t *testing.T) {
@@ -1220,7 +1220,7 @@ func TestBdevConfGeometryRules(t *testing.T) {
 				validateBdevConf(item.conf), item.want)
 		})
 	}
-	// CreateCluster stores its request resolved against the constants, so it
+	// CreateCluster stores its request resolved against the defaults, so it
 	// judges the rules on that message as well: each request below is legal
 	// as sent and illegal as stored, and the refusal says it concerns the
 	// defaults, because the value it names is one the request never sent.

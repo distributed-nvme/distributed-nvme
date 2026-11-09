@@ -12,12 +12,13 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// A namespace a live transfer names is the transfer's origin: every cntlr's
-// xfer stack reads its thin device. So DeleteNamespace and UpdateNamespaceDev
-// of it are refused, and CreateNamespace refuses a place a transfer still
-// names; UpdateNamespaceSuspended is not, since a suspend parks only the
-// origin's own ns-dev and leaves the thin device the xfer stack reads as it
-// is; a namespace no transfer names, the same index in another subsystem
+// A namespace a live transfer names is the transfer's origin: every cntlr
+// builds its xfer stack from it, the primary's mapping its thin device. So
+// DeleteNamespace and UpdateNamespaceDev of it are refused, and
+// CreateNamespace refuses a place a transfer still names;
+// UpdateNamespaceSuspended is not, since a suspend parks only the origin's own
+// ns-dev and leaves the thin device the primary's xfer stack maps as it is; a
+// namespace no transfer names, the same index in another subsystem
 // included, is not touched by the guard, and once the transfer is gone the
 // namespace can be deleted (architecture.md, Transfers).
 func TestANamespaceATransferNamesIsKept(t *testing.T) {

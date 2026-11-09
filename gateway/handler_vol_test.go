@@ -104,7 +104,7 @@ const (
 	volPoolBlock = uint64(2) << 20
 	// volStripe is deliberately NOT model.DefaultStripeSize: the size rule
 	// of architecture.md, Thin devices, must be computed from the SP's STORED
-	// geometry, so a fixture that happened to match the constant could not tell
+	// geometry, so a fixture that happened to match the default could not tell
 	// the two apart.
 	volStripe     = uint64(128) * 1024
 	volMetaExtCnt = uint64(1)
@@ -2544,9 +2544,9 @@ func TestCreateTransferWritesRecord(t *testing.T) {
 }
 
 // TestCreateTransferRefusals pins the error table of architecture.md,
-// Transfers. A transfer that pointed
-// at a namespace which does not exist would make every cntlr build a stack
-// over nothing, which is why both halves of the origin are NOT_FOUND.
+// Transfers. A transfer that pointed at a namespace which does not exist
+// would leave every cntlr reporting the transfer in error and the destination
+// reading errors, which is why both halves of the origin are NOT_FOUND.
 func TestCreateTransferRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

@@ -248,18 +248,18 @@ override below it is a warning naming the demand it risks, never an error; a
 value above the per-kernel cap is a die naming the guest count the shape needs.
 
 E2E4. **Every dn agent of a guest registers that guest as its location**, so
-groups straddle guests and, with more disk-node guests than legs per group, no
-two sides of a leg share a kernel — by headroom, not by structure. Guest
+groups straddle guests and, with more disk-node guests than legs per group,
+no two sides of a leg share a kernel — by headroom, not by structure. Guest
 distinctness is asserted after the create and every grow. A migration
-destination or a repair's fresh new leg, a leg repair's
-included, excludes the group's locations only at the allocator's first tier
-(`architecture.md`, Per-operation allocation), and a migration destination
-beside its source would collide with it on the side export's NQN, which
-names no disk node (`architecture.md`, NQNs). So a run with the copy case,
-which migrates a side and, under md-raid1, repairs a leg, is refused before
-it builds anything or touches a guest unless it has more disk-node guests
-than legs per group, and the copy case asserts each placement it makes
-guest-distinct. The react case's leg repairs are
+destination or a repair's fresh new leg, a leg repair's included, excludes
+the group's locations only at the allocator's first tier (`architecture.md`,
+Per-operation allocation), and a migration destination beside its source
+would collide with it on the side export's NQN, which names no disk node
+(`architecture.md`, NQNs). So a run with the copy case, which migrates a
+side and, under md-raid1, repairs a leg, is refused before it builds
+anything or touches a guest unless it has more disk-node guests than legs
+per group, and the copy case asserts its first migration's destination and
+its fresh-leg repair guest-distinct. The react case's leg repairs are
 asserted so only with more disk-node guests than legs, the skip logged
 otherwise, and a leg repair whose fresh leg react steers onto a side-less
 disk node (The cases, react) only while the steer leaves such a node enabled

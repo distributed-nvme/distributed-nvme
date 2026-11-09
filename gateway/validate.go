@@ -545,8 +545,9 @@ func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 		return err
 	}
 	// Once more on the bdev_conf CreateCluster STORES: a member the request
-	// left unset becomes its constant, and only the resolved message shows
-	// whether that constant meets the members the request did set — 1000
+	// left unset becomes its default, its constant or, for the stripe, the
+	// stripe its block gives, and only the resolved message shows whether
+	// that default meets the members the request did set — 1000
 	// chunk blocks of the default 1 MiB block is a bitmap chunk mdadm
 	// refuses, and a 192 KiB stripe does not divide that block. The message
 	// says so, because the value it names may be one this request never sent.

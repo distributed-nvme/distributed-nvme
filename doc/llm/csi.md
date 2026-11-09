@@ -133,7 +133,7 @@ driver. The gateway refuses the namespace's delete both when the pool is
 already deleting and while a transfer names the namespace as its origin
 (`architecture.md`, Transfers), so a refused namespace delete reads the pool:
 one already deleting or gone is done, and otherwise the refusal is passed on,
-since only the operator who made the transfer can end it.
+since the transfer is the operator's to end.
 A create from a snapshot or another volume is refused.
 
 ## Attach and detach
@@ -312,7 +312,8 @@ connects a listed cntlr the node has no path to and drops, by controller, a
 path to a cntlr no cdc lists any more, which is the node's part of the failover
 contract (`architecture.md`, Host view). It drops such a path only once the
 node holds a path to a listed cntlr under which the kernel shows the volume's
-namespace, a path connected in the same pass counting from the next one, or
+namespace, a path connected in the same pass counting from the next one and
+a path being dropped not counting, or
 when the cdcs list no cntlr for the subsystem, which a detach leaves (CSI10): a
 cntlr that replaced the withdrawn one but still refuses the connect, or whose
 path has not yet joined the multipath device, does not cost the volume its last

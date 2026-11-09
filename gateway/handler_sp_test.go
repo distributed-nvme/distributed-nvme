@@ -853,12 +853,12 @@ func (e *sptLiveEnv) createSpBdev(
 
 // TestCreateStoragePoolResolvesTheMergedBdevConf pins the bottom rung of
 // the merge of architecture.md, Storage pools: a member no one asked for
-// anywhere is stored as the constant of architecture.md, Common validation,
-// not as a zero.
+// anywhere is stored as the default of architecture.md, Common validation,
+// a constant or, for the stripe, the stripe the block gives, not as a zero.
 //
 // Neither the cluster request nor the SP request names a single number — the
 // SP's whole bdev_conf is the redundancy CHOICE — so all four members below
-// come from the constants, by way of a ClusterConf that CreateCluster had
+// come from the defaults, by way of a ClusterConf that CreateCluster had
 // already made concrete. bitmap_chunk_block_cnt is the one that could have
 // come from nowhere else at all: the cluster has no redund_conf, so it has no
 // chunk count to inherit. Storing these numbers is the point — the group's

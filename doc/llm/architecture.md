@@ -1928,9 +1928,9 @@ harmless. A migration destination takes its run before it zeroes
     one request then reaches one slice's dm-thin unsplit, and dm-thin skips
     the zero fill of a block one write covers whole ([D15]); and one aligned
     host block is one pool block for a discard (Known limits). A pool that
-    names a block and no stripe inherits its cluster's stored stripe
-    (Storage pools), so a pool whose block is smaller than that stripe
-    names its stripe too, or is refused;
+    names no stripe takes its cluster's stored stripe, whether or not it
+    names a block (Storage pools), so a pool whose block is smaller than
+    that stripe names its stripe too, or is refused;
   * `redund_md_raid1.bitmap_chunk_block_cnt`: `MinChunkBlockCnt` to
     `MaxChunkBlockCnt`, default `DefaultChunkBlockCnt`;
   * the `DmCloneConf` hydration pair, of a clone and of a migration alike:
@@ -2109,7 +2109,8 @@ exists (the hash-collision guard), checked inside the STM;
 not a ladder (DN bins — all four zero asks for the default and is
 accepted), when the resolved `bdev_conf` breaks a geometry rule of
 Common validation (a member the request omitted is judged as its
-constant, and the message says the defaults were filled in), or when
+default, its constant or, for the stripe, the stripe its block gives, and
+the message says the defaults were filled in), or when
 `qos_ratio` is not all zero (Common validation).
 Defaults: the defaults of Common validation for every `ClusterConf`
 member, applied **here** and stored concrete — `ClusterConf` is
@@ -2126,7 +2127,8 @@ Action: bound-check the raw request (Common validation), then resolve it
 — in that order, or the bounds check nothing — and build the message to
 store once, outside the STM, like the epoch above. The resolved
 `bdev_conf` is judged by the geometry rules once more before it is stored,
-since a member the request omitted meets them only as its constant. One
+since a member the request omitted meets them only as its default: its
+constant or, for the stripe, the stripe its block gives. One
 STM creates `ClusterConf` (the **resolved** members plus the stamped
 `creation_epoch`), and `DnGlobal`, `CnGlobal` and `SpGlobal`, each at its
 first `next_id` with every `shard_bucket` entry zero (Globals: id
@@ -3284,11 +3286,13 @@ and `CreateNamespace` refuses the place (`ori_nqn`, `ori_ns_idx`) while a
 transfer names it. Reason: a deleted origin leaves every cntlr reporting the
 transfer in error and the destination reading errors, and a repointed one
 moves a live copy to another td, so a clone would end as a mix of two
-devices with no error. The guard reads the pool's transfer list and each
-listed transfer in the same STM; a transfer created or deleted meanwhile
-rewrites that list, so the commit fails and the STM runs again.
-`UpdateNamespaceSuspended` stays allowed: a suspend parks only the origin's
-own ns-dev, and the td the primary's xfer stack maps does not change.
+devices with no error; a new namespace at a place a transfer still names
+would become that transfer's origin unasked. The guard reads the pool's
+transfer list and each listed transfer in the same STM; a transfer created
+or deleted meanwhile rewrites that list, so the commit fails and the STM
+runs again. `UpdateNamespaceSuspended` stays allowed: a suspend parks only
+the origin's own ns-dev, and the td the primary's xfer stack maps does not
+change.
 
 **DeleteTransfer** — `force` false **finalizes** a completed hand-over:
 the STM additionally sets `suspended` true on the origin namespace, so the
@@ -7686,10 +7690,10 @@ that component's document and only pointed to here.
   fails with EIO, while already-provisioned blocks keep serving. A
   `low_water_mark_pct` above a hundred percent switches auto-grow off
   (Common validation).
-* **A host discard frees pool space only where it covers, on every slice,
-  a whole aligned block.** dm-thin frees whole blocks only, completes a
-  shorter or misaligned discard with success, and advertises one block as
-  a thin device's discard granularity; dm-stripe hands each slice its
+* **A host discard frees pool space only where it covers, on every slice, a
+  whole aligned block.** dm-thin frees whole blocks only, completes a
+  shorter or misaligned discard with success, and advertises one block as a
+  thin device's discard granularity; dm-stripe hands each slice its
   contiguous share of a discard unsplit, where it splits a write at every
   stripe boundary (raid0 bitmap math). So a host discard frees a block on a
   slice only where its share there covers an aligned whole block, which,
@@ -7697,11 +7701,11 @@ that component's document and only pointed to here.
   the slice count times `data_block_size`, and an aligned range of that size
   frees one block on every slice; `fstrim` can report success and free
   nothing. A `stripe_size` equal to `data_block_size`, the default of a
-  conf that names no stripe and a block no larger than the largest stripe,
-  makes one aligned host block one pool block; a pool that names its block
-  and no stripe takes its cluster's stripe instead (Common validation,
-  Storage pools). Read in the kernel's dm-thin and dm-stripe
-  sources, not in the lab.
+  cluster conf that names no stripe and a block no larger than the largest
+  stripe, makes one aligned host block one pool block; a pool that names no
+  stripe takes its cluster's stored stripe instead, whatever its own block
+  (Common validation, Storage pools). Read in the kernel's dm-thin and
+  dm-stripe sources, not in the lab.
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node
   the full size of the groups of the pool's slices (Terminology and object

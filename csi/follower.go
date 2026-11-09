@@ -15,7 +15,8 @@ import (
 // holds a path to every cntlr the cdc lists for the volume's subsystem and
 // drops a path to one the cdc has withdrawn once it holds a path to a listed
 // one that shows the volume's namespace, so a fenced old primary answers the
-// node's IO with errors only while the node holds no such path. It keeps the
+// node's IO with errors until the follower drops its path, which it does once
+// the node holds such a path and every cdc it follows answers. It keeps the
 // set of staged subsystems and the cdc addresses their attaches named, holds
 // a persistent discovery connection to each cdc, and on every trigger reads
 // the discovery logs and connects or drops paths to match.
@@ -339,8 +340,9 @@ func (f *follower) sync(ctx context.Context) error {
 // leaves the connects to the others, since twins exist so that one can be
 // down; and a pass that read no log at all drops nothing: an answer that is
 // missing is not an answer that the cntlr is gone. A withdrawn path is
-// dropped only once the node holds a path to a listed cntlr, or when the
-// cdcs list none for the subsystem, which is what a detach leaves (csi.md
+// dropped only once the node holds a path to a listed cntlr that shows the
+// volume's namespace and is not being dropped, or when the cdcs list none
+// for the subsystem, which is what a detach leaves (csi.md
 // CSI15): a cntlr that replaced the withdrawn one but refuses the connect
 // does not cost the volume its last path. The drops run outside the lock
 // (dropPathLocked); the pass does not wait for them.
@@ -434,7 +436,7 @@ func (f *follower) syncLocked(ctx context.Context) error {
 	for nqn := range f.staged {
 		// A listed cntlr's path counts as held only once the kernel shows
 		// the volume's namespace under it and it is not being dropped: a
-		// connect returns before the scan that joins the path to the
+		// connect can return before the scan that joins the path to the
 		// multipath device, and a drop of the last joined path before then
 		// would take the device the mount uses. A path connected in this
 		// pass counts in the next one, which its own device events start.

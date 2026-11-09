@@ -479,11 +479,11 @@ since Identify's OAES advertises the notice (NP7). A Set of the Asynchronous
 Event Configuration with any bit other than the discovery-log-change one is
 an invalid field, DNR, and a Set accepted returns the value written, as
 nvmet's discovery controller does. Set of the Keep Alive Timer updates the
-connection's KATO, rounded up to whole seconds, and returns the seconds;
-Get returns the KATO in milliseconds, the same rounded value, as nvmet
-does, save a zero KATO, which reads back as zero where nvmet's discovery
-controller stores its own default (NP10 owns the zero-KATO cutoff). Any
-other FID: invalid field, DNR.
+connection's KATO, rounded up to whole seconds, and returns the seconds; Get
+returns the KATO in milliseconds, the same rounded value, as nvmet does,
+save a zero KATO from Connect, which reads back as zero where nvmet's
+discovery controller stores its own default (NP10 owns the zero-KATO
+cutoff). Any other FID: invalid field, DNR.
 
 NP10. **Keep Alive.** A pending connection (NP1) has no keep-alive yet: it
 ends at its pre-Connect deadline, `DefaultCdcPendingTmoMs` after its
