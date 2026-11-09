@@ -180,13 +180,13 @@ bound, `common.GrpcKeepaliveDialOptions` (`dnv-worker.md` RW7 says why):
 while a call is open, a connection that has read nothing for
 `GrpcKeepaliveTime` is pinged, and one whose ping is not answered within
 `GrpcKeepaliveTimeout` is closed, failing every call on it; a call that
-must wait for a lost connection to come back fails within
+must wait for a lost connection to come back fails within about
 `GrpcConnectTimeout`; and the pause between reconnect attempts stops
 growing at `GrpcReconnectMaxDelay`. Every dnv server lets a client ping as
 often as every `GrpcKeepaliveMinTime` while a call is open, through the
 same `common.GrpcServerMsgOptions`: a server at gRPC's default ends, after a
-few pings, a connection whose client pings more often than every five
-minutes while the server writes nothing, as during a long syncup or a quiet
+few pings, a connection whose client pings more often than that default
+allows while the server writes nothing, as during a long syncup or a quiet
 check stream. The other connections carry no keepalive. The five values are
 this document's constants; `common/constants.go` is authoritative for their
 comments.

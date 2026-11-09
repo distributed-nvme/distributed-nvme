@@ -25,9 +25,9 @@ func TestSpCnChargesAddsUpPerCn(t *testing.T) {
 	}
 }
 
-// TestCnBudgetShort pins CnBudgetShort: a CN is short only when its free
-// extents are below its charge, the first short CN of the order is named, and
-// a CN the records lack is not judged.
+// TestCnBudgetShort pins CnBudgetShort: a CN is short when its free extents
+// are below its charge or the records lack it, and the first short CN of the
+// order is named.
 func TestCnBudgetShort(t *testing.T) {
 	order := []string{"cn-a:1", "cn-b:1", "cn-c:1"}
 	charges := map[string]uint64{"cn-a:1": 4, "cn-b:1": 4, "cn-c:1": 4}
@@ -36,6 +36,12 @@ func TestCnBudgetShort(t *testing.T) {
 		"cn-c:1": {FreeExtCnt: 3},
 	}
 	addr, free, short := CnBudgetShort(order, charges, cns)
+	if !short || addr != "cn-b:1" || free != 0 {
+		t.Fatalf("got (%q, %d, %v), want cn-b:1, which the records lack, "+
+			"short with nothing free", addr, free, short)
+	}
+	cns["cn-b:1"] = &pb.CnConf{FreeExtCnt: 9}
+	addr, free, short = CnBudgetShort(order, charges, cns)
 	if !short || addr != "cn-c:1" || free != 3 {
 		t.Fatalf("got (%q, %d, %v), want cn-c:1 short with 3 free",
 			addr, free, short)

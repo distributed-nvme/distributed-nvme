@@ -210,7 +210,12 @@ func reactFixture(t *testing.T) *model.SpState {
 		Tds:      []*pb.ThinDevice{{TdId: 500, DevId: 1, Size: reactTdSize}},
 		TdNames:  []string{"td0"},
 		DnByAddr: map[string]*pb.DnConf{},
-		CnByAddr: map[string]*pb.CnConf{},
+		// Every cntlr's CN has room for any grow the tests run, so the
+		// pass's budget check (AR6) passes unless a test says otherwise.
+		CnByAddr: map[string]*pb.CnConf{
+			reactCnA: {FreeExtCnt: 1 << 20},
+			reactCnB: {FreeExtCnt: 1 << 20},
+		},
 	}
 }
 

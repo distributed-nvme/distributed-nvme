@@ -2577,8 +2577,9 @@ the pool-meta and pool-data linear tables and resize the thin pool online
 contains a provisioning leg: the concat and the pool keep their old,
 effective size and keep reporting `OK` at that size, and the grow
 completes by itself once the leg clears (Side provisioning protocol,
-Automatic reactions), or, when the disk node of a provisioning leg stays
-dead, the sp worker withdraws the group (`dnv-worker.md` AR6). The per-kind "one grow per pool at a time" pending
+Automatic reactions), or, when it is the newest group of its list, no
+repair or operator acts on it and the disk node of a provisioning leg
+stays dead, the sp worker withdraws it (`dnv-worker.md` AR6). The per-kind "one grow per pool at a time" pending
 rule (`dnv-worker.md` AR6) binds only the sp worker's own auto-grow, which
 judges "pending" by the primary's reported usage, and so does its covered
 rule, which stops a data grow once the slice's data covers the pool's thin
@@ -3134,8 +3135,8 @@ chunk's ceiling reached by previous appends, the same shape as
 Action: STM: append the bytes to the `CloneBitmap` key of
 (`src_slice_idx`, `bm_idx`) (created if absent), bump `SpRev`. The `Clone`
 record is not rewritten. A request that carries `offset` appends only at
-the stored chunk's length, and when its bytes already stand at that offset
-it answers OK and writes nothing, no revision bump included, judged before
+the stored chunk's length, and when its bytes already stand at the offset
+it names it answers OK and writes nothing, no revision bump included, judged before
 the ceiling: a page whose answer was lost can be sent again and the chunk's
 later bits stay where they are. Without `offset` the page lands at the
 chunk's end whatever was sent before (Known limits). These are the **source bitmaps**: bit *k* of
@@ -3364,8 +3365,8 @@ same bytes; `RESOURCE_EXHAUSTED` when `bm_cnt` is at or above
 `MaxMigrBmCnt`.
 Action: STM: write a `MigrBitmap` at a `bm_idx` equal to `bm_cnt`,
 advance `bm_cnt`, bump `SpRev`. A request that carries `bm_idx` is stored
-only at `bm_cnt`, and when its bytes already stand at that index it
-answers OK and writes nothing, no revision bump included, judged before the
+only at `bm_cnt`, and when its bytes already stand at the index it names
+it answers OK and writes nothing, no revision bump included, judged before the
 ceiling: a chunk whose answer was lost can be sent again and every later
 chunk stays where it is. Without `bm_idx` the chunk lands at `bm_cnt`
 whatever was sent before (Known limits). The chunks concatenate, in `bm_idx`
@@ -4805,7 +4806,9 @@ brings, or the first round that answers from an observation made after it
 
 Agents only report; the worker alone reacts. Every reaction is an ordinary
 STM mutation that bumps `SpRev` (`dnv-worker.md` MD6), so the data-plane
-choreography is the same as for the equivalent manual RPC. The sp role
+choreography is the same as for the equivalent manual RPC; the withdrawal
+of a stuck grow has no such RPC, and removes a group no array was built
+from (`dnv-worker.md` AR6). The sp role
 evaluates the reactions per SP on its own cadence and applies at most one
 per pass (`dnv-worker.md` AR1, AR2); none runs for an SP with `sp_level`
 at or above `SP_LEVEL_NO_THINPOOL`, a disabled cntlr is never a candidate,
@@ -4846,9 +4849,10 @@ The four reactions:
   metadata usage passes `DmPoolConf.low_water_mark_pct`, which is not an
   `EventThreshold` field, is grown by an internal `GrowSlice` (GrowSlice);
   a grow whose new group still holds a provisioning leg completes by itself
-  when the leg clears (`cnagent.md` CN13, [D15]), and one whose provisioning
-  leg sits on a disk node that stays dead is withdrawn and grown again
-  elsewhere (`dnv-worker.md` AR6). A data grow stops once
+  when the leg clears (`cnagent.md` CN13, [D15]), and one whose new group
+  is the newest of its list, with a provisioning leg on a disk node that
+  stays dead and no repair or operator acting on it, is withdrawn and grown
+  again elsewhere (`dnv-worker.md` AR6). A data grow stops once
   the slice's data covers what the pool's thin devices can use
   (`dnv-worker.md` AR6), so no data grow starts past that cover, though the
   last one can pass it by up to a group. Auto-grow

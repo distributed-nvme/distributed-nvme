@@ -593,8 +593,9 @@ func MaintainDnCapacity(
 	// DeleteDiskNode, UpdateDiskNodeDisabled and newDnLedger (the constructor
 	// the five handlers that keep their own DN bookkeeping share); in model,
 	// the own gates of GrowSlice, DrainSpSlice, DrainSpRepairs,
-	// DrainSpRetiredLegs, FinishCloneDelete, FinishRepair, CancelRepair and
-	// DeleteRetiredLeg and, for CreateRepair, its callers'; in the worker,
+	// DrainSpRetiredLegs, FinishCloneDelete, FinishRepair, CancelRepair,
+	// DeleteRetiredLeg and WithdrawGrow and, for CreateRepair, its callers';
+	// in the worker,
 	// newDnMonitor's per-write re-validation. The callers with no gate are
 	// integtest/plant's PutDn and PutDns, MoveDn, PutMigr and SetDnFree,
 	// which plant records on purpose for integtest/workerctl and the

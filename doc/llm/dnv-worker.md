@@ -272,7 +272,7 @@ serves it from whichever member the client picks, which may not have
 applied that revision yet. A read of `RunSTM` or `Snapshot` after the first
 that reaches such a member is answered "required revision is a future
 revision", which ends the client's STM; both runners then run the whole
-transaction again after a pause of a few tens of milliseconds, within the
+transaction again after a short random pause, within the
 same EU5 budget, since the member catches up within moments, and fail only
 when the lag outlasts the budget. So the callback of either runner may run
 more than once and must be a pure function of what it reads, as the
@@ -446,12 +446,14 @@ order; and `CnByAddr`, the `CnConf` of every cntlr's. A missing `SpConf`
 returns `ErrNotFound` (the SP is being deleted; the rev key's delete
 follows). A key the load looks for and does not find is reported in
 `Missing`, in the order the load reads it — the sub-objects the `SpConf`
-lists, then the repairs and the retired legs, then the node records — and
+lists that it reads by point reads, then its repairs and retired legs,
+which it ranges, then the node records — and
 the load still succeeds. The caller decides: on a live SP a record a list
 of the `SpConf` names stops the sp role's fan-out and reaction pass until
-it is back (RW14, AR1); a node record, which no list names, and any record
-of a latched SP are driven past, RW14 leaving idle the children the
-snapshot cannot resolve, with a record naming the keys. `SpRevision` is the revision the loaded
+it is back (RW14, AR1); past a node record, which no list names, and past
+any record of a latched SP the fan-out drives what it can, RW14 leaving
+idle the children the snapshot cannot resolve and logging the keys, and a
+latched SP's drain judges the keys it needs itself (SPD12). `SpRevision` is the revision the loaded
 state belongs to, for RW14's revision guard; the rev key is not a listed
 sub-object, so an absent one is no `Missing` entry. Bitmap **values** are
 never loaded here — pushes read one chunk at a time (BM3). Bitmap indexes
@@ -533,7 +535,8 @@ MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated`: one per
 `MaxFlipCreatedPerTxn` candidates, RW19), re-validates every precondition it
 lists (MD7), and bumps exactly the revisions the equivalent RPC bumps
 (`architecture.md`, `service Gateway` — RPC specifications, and
-`architecture.md`, Workers). `now` is the caller's unix seconds; thresholds
+`architecture.md`, Workers); `WithdrawGrow`, which no RPC runs, bumps the
+SP's and those of every node it touches, as `GrowSlice` does. `now` is the caller's unix seconds; thresholds
 are resolved inside from `SpConf.event_threshold` with the defaults of
 `architecture.md`, Common validation. The shard and the sp id address the
 `SpRev` key; the sp name the `SpConf`. The ops a gateway call runs are
@@ -735,8 +738,9 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, a `CnRev` bump
   each); the `Slice` and the `SpConf`; a `SpRev` bump.
 * `WithdrawGrow` takes the slice, the kind, the group's id, a pool total and
-  the cluster conf, and requires the SP checks above; the expected revision
-  as in the preamble; the SP's `bdev_conf` and the cluster conf both valid;
+  the cluster conf, and requires the SP checks above; an expected revision
+  checked as the preamble's ops check theirs, which the worker passes as
+  zero; the SP's `bdev_conf` and the cluster conf both valid;
   the slice to exist; the group to be the newest of its kind in the slice,
   with an older one before it ("no grown group" otherwise); a grow of that
   kind pending against the pool total (AR6's rule, `GrowPending`), so the
@@ -2691,9 +2695,9 @@ a cntlr's run of unhealthy health verdicts, to which only rounds add
 to a run (RW23) and is never judged by its age (HL7). A `Syncup*`
 gRPC failure is not by itself a health failure — an unreachable agent
 breaks the stream too, and a syncup to a machine that stopped answering
-ends within the keepalive's bound (RW7), so the next round fails at once,
-or within the connect bound when it must open a new stream, and gives the
-health result.
+ends within the keepalive's bound (RW7); that closes the object's stream
+too, so the next round opens a new one, which fails within about the
+connect bound and gives the health result.
 
 HL5. `show_info` false streams carry an `*Info` only when something
 changed; the worker evaluates health on the latest known info, and a reply
@@ -3064,7 +3068,8 @@ sync again; and a group with a repair waits until its finish or its cancel,
 an operator's repair until the operator acts; and a group whose create
 finds no DN with room waits for one, a later group of the pass still
 scanned unless an empty scan of the same pass already shows its scan
-empty: one that asked for no more room past no more DNs. An empty scan
+empty: one that asked for no more room with no more disk nodes black-listed.
+An empty scan
 ends nothing because a full cluster can last as long as any of the holds
 above, and the reactions after it must go on meanwhile; a refusal from
 inside a transaction ends the pass, the two refusals this rule lets hold
@@ -3329,8 +3334,8 @@ that did, `architecture.md`, Common validation):
   full, since it shares blocks
   with its origin only until they diverge, so the sum is an upper bound of
   the need and the pool may grow further than strictly needed, never less;
-  and a thin device the pass's state lists as missing stops the skip, since
-  a need computed without it would undercount;
+  a thin device the state lists but lacks would make the need undercount,
+  and the records gate refuses such a pass before any reaction (AR1, MD3);
 * a **meta grow** when the used metadata blocks exceed the mark's percentage
   of the total metadata blocks: an internal `GrowSlice` of the meta kind,
   ladder-sized (`architecture.md`, GrowSlice); data is checked first when both
@@ -3362,7 +3367,7 @@ CN budget by the rule `GrowSlice` applies in its transaction
 CN of the pass's snapshot whose free extents are below its charge makes
 the grow impossible however many DNs have room, and logs `reaction
 skipped` (`cn free_ext_cnt too low`, naming the CN) with no scan; a CN
-missing from the snapshot is left to the transaction. A slice whose list of that kind
+missing from the snapshot counts as short, as the transaction refuses it. A slice whose list of that kind
 already holds `MaxGrpCntPerSlice` groups (`architecture.md`, GrowSlice) can
 never grow that kind again: a breach of that kind that is not pending —
 and, for data, not covered, since the covered test comes first and logs
@@ -3393,9 +3398,10 @@ which owns both sides until its finish or its cancel (`architecture.md`,
 Migrations), so its group is never withdrawn. The next pass that finds the
 pool past its mark grows again, the grow no longer pending, and the dead
 disk node, whose health epoch the trigger required, has no capacity key
-and is offered for no new side. A disk node that comes back before the
-threshold finishes the zeroing and the grow completes by itself
-(`architecture.md`, GrowSlice). The trigger is part of auto-grow, so it
+and is offered for no new side. A disk node that comes back before a pass
+finds its side unhealthy past the threshold and the node itself unhealthy
+finishes the zeroing, and the grow completes by itself (`architecture.md`,
+GrowSlice). The trigger is part of auto-grow, so it
 runs only while the pool's usage of that kind is past its mark.
 
 ### Cntlr replacement
@@ -3675,9 +3681,9 @@ refuses the pick as `candidate changed` when the group holds a DN outside
 the plan — a migration destination that joined after the pass's snapshot —
 or when the pick has gone stale since the scan (MD6), and the next pass
 plans from a snapshot that holds what changed, as AR7's does. An empty scan
-logs `no candidate` and holds that group only, as conditions 2 to 8 do,
-for their reason: another group, whose legs sit on other DNs, may place
-its new leg where this one cannot. A later group of the pass whose scan
+logs `no candidate` and holds that group only, as conditions 2 to 8 hold
+theirs: another group, whose legs sit on other DNs, may place its new leg
+where this one cannot. A later group of the pass whose scan
 would ask for no less room past a black list that holds every DN of an
 empty scan's is skipped with the same record and no scan, which spares
 the scans of groups that wait on the same disk nodes. Every refusal of the
@@ -3761,14 +3767,16 @@ slice's group (`cnagent.md` CN10, CN11), so the triggers and the drive step
 read them as they read a slice's.
 
 AR9. **The worker never**: deletes a td, subsystem, transfer or migration,
-or a clone that is not `deleting`; touches a `RedundNone` leg; acts on a
+or a clone that is not `deleting`; touches a `RedundNone` leg, save the
+withdrawal of a stuck grow (AR6), whose group no array was ever built from;
+acts on a
 suppressed SP; starts a migration; creates, finishes, cancels or tries to
 abort an operator's repair (`architecture.md`, Repair); or runs two
 reactions in one pass. The repairs it does create, finish, cancel and try
 to abort are its own (AR8).
-Every automatic action re-homes redundancy or roles (`architecture.md`,
-Automatic reactions), save the withdrawal of a stuck grow, which gives
-back what a group no array was built from took (AR6). It does delete the implicit children — cntlrs,
+Every automatic action re-homes redundancy or roles, grows a pool, or
+withdraws a grow that can never complete, giving back what its group took
+(`architecture.md`, Automatic reactions; AR6). It does delete the implicit children — cntlrs,
 repairs, retired legs, slices, groups, legs, sides — of an SP a
 `DeleteStoragePool` has LATCHED, which is the sp drain and not a reaction
 (the five-empty-lists precondition that let it be latched means it holds
@@ -4996,9 +5004,9 @@ group (`cnagent.md` CN28), so that a Go case can stage HL2's leg rows and
 AR8 on such a group; no leg of it has a second side, so none has a path
 row. A cntlr reports a leg row per new leg of every repair its request
 carries, as the cn agent connects and probes a new leg as it does a leg of
-the group (`architecture.md`, Repair), and, while its request makes it the primary,
-marked primary and not disabled as the cn agent reads it (`cnagent.md`
-CN9), every group of the request as whole, with every leg of its `leg_list`
+the group (`architecture.md`, Repair). While its request marks it primary
+and not disabled, as the cn agent reads a primary (`cnagent.md` CN9), it
+reports every group of the request as whole, with every leg of its `leg_list`
 held in sync, and no verdict on a repair; the levers `repairs`,
 a verdict by a repair's name, the text of a refused take-back included,
 that the fake reports under the repair's
@@ -5064,8 +5072,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
   holds its object's rounds, and so its health result, for up to the
   syncup timeout, and a change that arrives every such period delays them
   with no end. The other way round, a machine too loaded to answer a ping
-  within the keepalive's timeout loses every call open on its connection,
-  and the worker sends them again on its next round.
+  within the keepalive's timeout loses every call open on its connection:
+  a syncup is sent again as RW4 says, once a later round asks for it, and
+  a bitmap push ends its plan as any failed push does (BM6).
 
 * **Slow heartbeat writes can fence a worker its peers saw alive.** VW8
   (a) measures from the start of the last good tick's puts to the end of
@@ -5682,6 +5691,6 @@ which no suite case sets, so no suite case runs RW13's count compare.
   per pool, with no random offset between pools. The cost is steady, and
   nearly every pass acts on nothing. A cluster with no room adds the
   scans: every pass scans the capacity index once for each grow that is
-  due, once for a cntlr replacement that is due, and once, or twice when
-  the create's second tier runs, for each group whose leg repair waits for
-  a DN, a later scan the same pass's empty one shows empty excepted (AR2).
+  due, and once, or twice when the scan's second tier runs, for a cntlr
+  replacement that is due and for each group whose leg repair waits for a
+  DN, a later scan the same pass's empty one shows empty excepted (AR2).

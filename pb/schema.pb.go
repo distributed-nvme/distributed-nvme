@@ -10262,9 +10262,9 @@ type AppendCloneBitmapRequest struct {
 	Bitmap      []byte                 `protobuf:"bytes,7,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
 	// The page's byte offset inside the chunk, sent by a caller that may
 	// send a page again: present, the page is appended only at the chunk's
-	// current length, and a page whose bytes already stand at that offset
-	// changes nothing; absent, the page is appended wherever the chunk ends
-	// (architecture.md, Clones).
+	// current length, and a page whose bytes already stand at the offset it
+	// names changes nothing; absent, the page is appended wherever the chunk
+	// ends (architecture.md, Clones).
 	Offset        *uint32 `protobuf:"varint,8,opt,name=offset,proto3,oneof" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -11369,9 +11369,9 @@ type AppendMigrationBitmapRequest struct {
 	Bitmap      []byte                 `protobuf:"bytes,5,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
 	// The chunk's index, sent by a caller that may send a chunk again:
 	// present, the chunk is stored only at the index bm_cnt, and a chunk
-	// whose bytes already stand at that index changes nothing; absent, the
-	// chunk is stored at bm_cnt whatever was sent before (architecture.md,
-	// Migrations).
+	// whose bytes already stand at the index it names changes nothing;
+	// absent, the chunk is stored at bm_cnt whatever was sent before
+	// (architecture.md, Migrations).
 	BmIdx         *uint32 `protobuf:"varint,6,opt,name=bm_idx,json=bmIdx,proto3,oneof" json:"bm_idx,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

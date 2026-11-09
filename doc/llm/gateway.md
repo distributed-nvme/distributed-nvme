@@ -348,9 +348,10 @@ is already set, `ForceStartGroup`'s cancel of a group that carries no
 mark, and `UpdateGroupOperatorInCharge` with the value the group's flag
 holds — writes nothing, bumps nothing and replies OK, a token the request
 carried still being checked first: a no-op that bumped would invalidate
-every client's token for nothing. So does an `AppendCloneBitmap` or
-`AppendMigrationBitmap` that names the place where the same bytes already
-stand (`architecture.md`, Clones, Migrations).
+every client's token for nothing. An `AppendCloneBitmap` or
+`AppendMigrationBitmap` that names the position where the same bytes
+already stand writes nothing, bumps nothing and replies OK in the same way
+(`architecture.md`, Clones, Migrations).
 
 GW7. **Error mapping.** This is the gateway's single error table. Handlers
 return a gRPC status error straight from inside their STM closure:
@@ -399,8 +400,8 @@ uncommitted (`dnv-worker.md` EU4).
   (`architecture.md`, Per-operation allocation); `AppendMigrationBitmap`'s
   `bm_cnt` at `MaxMigrBmCnt`; `AppendCloneBitmap`'s stored chunk plus the
   new page above `CloneBmChunkBytes` — one chunk's ceiling reached by
-  previous appends, the same shape (its four other refusals of the request
-  itself are an invalid request, `INVALID_ARGUMENT`: the empty `bitmap` of the first case, both
+  previous appends, the same shape (its four `INVALID_ARGUMENT` refusals
+  are an invalid request: the empty `bitmap` of the first case, both
   index bounds — `src_slice_idx` at or above `src_slice_cnt` and `bm_idx` at
   or above `MaxCloneBmCnt`, checked in-STM — and the stateless page cap, a
   page longer than `CloneBmChunkBytes` judged on the request alone because a
@@ -638,7 +639,7 @@ bitmap math: the single inversion at the agent boundary); the gateway never
 converts or trims a bit and reads none for its meaning, so it can never
 disagree with the agents about the convention. The one comparison it makes
 is of whole stored bytes with a request's, to recognise a page sent again
-at the place it names (`architecture.md`, Clones, Migrations).
+at the position it names (`architecture.md`, Clones, Migrations).
 
 ## Handlers by resource group
 
@@ -1201,7 +1202,7 @@ below name.
   pair — an absent key decodes to an empty bitmap, which is what makes
   "create if absent" fall out and is the same read the ceiling check needs;
   with `offset` present, an offset other than the stored length answers OK
-  writing nothing when the same bytes stand there and is
+  writing nothing when the same bytes stand at it and is
   `FAILED_PRECONDITION` otherwise (`architecture.md`, Clones), judged before
   the ceiling; the stored length plus the page's at most
   `CloneBmChunkBytes`, else
@@ -1675,8 +1676,8 @@ gateway, never through `workerctl`.
   at its create, a cancel while it is pending, and a finish refused while
   it is pending, with `force` and without, before the suite plays the
   destination's provisioned flip and the cutover; the clone's
-  pair-addressed chunks, a page and a migration chunk placed at the place
-  they name, sent again with no write and refused at another place, past
+  pair-addressed chunks, a page and a migration chunk placed at the position
+  they name, sent again with no write and refused at another position, past
   the end and inside the stored bytes, its latch with the destination
   namespace resumed,
   its repeat delete and its refusals while latched, then its drain; the

@@ -2114,9 +2114,9 @@ func SpCnCharges(
 }
 
 // CnBudgetShort names the first CN of order whose free_ext_cnt is below its
-// charge, with that count. A CN absent from cns is not judged: chargeSpCns
-// refuses it as "cn not found" before it asks, and the worker's pre-check
-// leaves it to the transaction.
+// charge, with that count. A CN absent from cns is short with nothing free:
+// chargeSpCns refuses it as "cn not found" before it asks, and the worker's
+// pre-check skips its grow the same way, so the two never disagree.
 func CnBudgetShort(
 	order []string,
 	charges map[string]uint64,
@@ -2125,7 +2125,7 @@ func CnBudgetShort(
 	for _, addrPort := range order {
 		cn, ok := cns[addrPort]
 		if !ok {
-			continue
+			return addrPort, 0, true
 		}
 		if cn.GetFreeExtCnt() < charges[addrPort] {
 			return addrPort, cn.GetFreeExtCnt(), true

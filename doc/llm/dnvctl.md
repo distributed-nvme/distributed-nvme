@@ -549,8 +549,8 @@ Clones. dnvctl adds no wait flag here either (CT8, CT1).
 
 `clone append-bm` addresses a chunk by the pair `--src-slice-idx` and
 `--bm-idx`, never by either alone; what a chunk is and how its pages append
-is `architecture.md`, Clones. `--offset` names a page's place in its
-chunk and is sent only when typed, so a typed 0 is a real place and an
+is `architecture.md`, Clones. `--offset` names a page's position in its
+chunk and is sent only when typed, so a typed 0 is a real position and an
 untyped flag leaves the field out; what the gateway does with a page sent
 again is `architecture.md`, Clones. An empty `--bm-hex` sends an empty bitmap on
 purpose, so the gateway's refusal of one stays reachable; a malformed
