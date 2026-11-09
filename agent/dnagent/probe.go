@@ -570,8 +570,8 @@ func (s *DnAgentServer) probeExport(
 	case err != nil:
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	case !portThere:
-		// The DN's verdict names the port (SH31), and its SyncupDn makes it;
-		// a SyncupSide could only fail its link until then.
+		// The DN's verdict names the port (SH31), whose node-level converge
+		// makes it; a SyncupSide could only fail its link until then.
 		return pb.ResStatus_RES_STATUS_ERROR, detailsPortMissing
 	case !linked:
 		return pb.ResStatus_RES_STATUS_ERROR, detailsNotLinked

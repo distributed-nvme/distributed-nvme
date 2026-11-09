@@ -1850,16 +1850,16 @@ func (s *DnAgentServer) zeroingVerdict(
 // side has not provisioned, and for a record that is there over a dm-linear
 // that is not; it is named only where AllocSide would hand a record back
 // (DiskMeta.SideAllocRefusal), so a refused allocation (no room, a record
-// that disagrees with the request, a disk not confirmed) is never re-sent for
-// ever. A provisioned side with no record reads ERROR, not MISSING, and its
+// that disagrees with the request, a disk not confirmed) is not re-sent on
+// every round. A provisioned side with no record reads ERROR, not MISSING, and its
 // row feeds leg repair instead. Above the side device a row reads MISSING
 // only once the side is ready (probeSide), and such a row is a dm device
 // or an export the converge builds: the per-CN dm-errors, dm-linears and
 // exports, and a migration source's linear and export. An export is named
 // too when its subsystem is there and a part its build makes is not
-// (exportPartAbsent); while the port itself is not there its row says so
-// (detailsPortMissing) and is not named, since only the DN's SyncupDn makes
-// the port. An object that is there but wrong, a dm table that
+// (exportPartAbsent); one whose link alone is missing while the port itself
+// is not there says so (detailsPortMissing) and is not named, since the DN's
+// verdict names the port. An object that is there but wrong, a dm table that
 // differs say, reads ERROR and is not named: its row feeds the side's health
 // epoch. A migration destination's two rows are left out: their converge
 // stops for reasons of its own (DN13) that a re-send repeats.

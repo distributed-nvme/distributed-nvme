@@ -1231,10 +1231,10 @@ SH31. **What a read names for a re-send.** The worker re-sends a
 RW4), and a read builds and rewrites nothing (SH29). So a read's verdict
 also names some of what the read's own probe read wrong that a re-sent
 `Syncup*` of the same scope would cure. What this rule adds names nothing
-the agent's own rules refuse, such as a gate (DN8, SH9) or an allocation
-`AllocSide` refuses, save the per-CN rows DN16 names for the two converges
-that stop before the stacks; a disk whose identity is not confirmed is
-named by DN6's record step, for its own reason. Each role lists what: a
+a re-sent request would refuse at a gate (DN8, SH9) or at `AllocSide`. It
+can name per-CN rows a re-send will not build while its converge stops
+before the stacks (DN16). A disk whose identity is not confirmed is named
+by DN6's record step, for its own reason. Each role lists what: a
 DN's and a side's in DN16, a CN's and a cntlr's in `cnagent.md` CN30.
 The node's nvmet
 port follows one rule on both roles (`agent.PortRedrive`): a missing port
@@ -2092,8 +2092,8 @@ it says so: the table it cannot use counts as a listing that did not answer
 ("volume table: disk identity is not confirmed for this node"), so the
 verdict is not clean and the worker re-drives the `SyncupDn`, whose DN5
 converge checks the disk again — every round, for as long as the disk stays
-unreadable, corrupt, another node's, or blank under a live side device,
-a clone-metadata wrapper or a stored provisioned side (DN5, DN16).
+unreadable, corrupt, another node's, or blank while DN5's format gate
+refuses it (DN5, DN16).
 
 Ids are never reused, so a swept side never comes back, an etcd restore
 aside (`architecture.md`, etcd backup and restore).
@@ -3052,8 +3052,8 @@ same enumeration, the same wanted set, the same comparison, nothing touched
 node-level leftovers, while one of its listings does not answer, and while
 the disk's identity is not confirmed (DN6's record step, which a
 `SyncupDn`'s sweep runs too: for as long as the disk stays unreadable,
-corrupt, another node's, or blank under a live side device, a
-clone-metadata wrapper or a stored provisioned side (DN5), and the worker
+corrupt, another node's, or blank while DN5's format gate refuses it,
+and the worker
 re-sends `SyncupDn` on the rounds
 whose reply carries the code), and a side's read while that side holds
 leftovers, while one of its listings does not answer, and — the first of
@@ -3088,10 +3088,12 @@ its subsystem is there as its build sets it and a part its build makes is
 not: its namespace,
 the namespace's enable, which a strict read must answer as off
 (`Nvmet.NsEnabledStrict`), or its link into a port that is there; that
-row reads `RES_STATUS_ERROR` with the part's words. While the port itself
-is not there, the row reads "the port is not there" and is not named: the
-DN's verdict names the port, and only a `SyncupDn` makes it, so the sides
-are not re-sent for it. An object that is there but wrong, a dm table that
+row reads `RES_STATUS_ERROR` with the part's words. An export whose
+subsystem and namespace are there as built, while the port itself is not,
+reads "the port is not there" and is not named: the DN's verdict names the
+port, so the sides are not re-sent for the link alone. An export that lacks
+more than its link is still named, and its re-send builds the rest and
+fails at the link until the port is back. An object that is there but wrong, a dm table that
 differs say, is not named: its row reads `RES_STATUS_ERROR` and feeds the
 side's health epoch (`dnv-worker.md` HL2). It names no refused allocation
 (no room, a record that disagrees with the request, a disk not
@@ -3505,10 +3507,12 @@ else reported through `agent_reply` is still a protocol-level refusal.
   re-run after a restart, or the timer of a fence window an earlier pass
   opened converges the source: the DN8 retry is never armed for a source,
   and its check rounds converge nothing. A failed build sets a reply code
-  only where the side's read then finds a part of it absent (DN16), which
-  brings a re-sent `SyncupSide` on each round that answers from a read; a
-  part that is there but wrong sets none, and then the worker sends the
-  next request only with the SP's next revision (`dnv-worker.md` RW4). Meanwhile the destination's connect stays
+  only where the side's read then finds absent one of the parts DN16
+  names, which brings a re-sent `SyncupSide` on each round that answers
+  from a read; any other part — a host the build did not link, an
+  attribute it did not write, a part that is there but wrong — sets none,
+  and then the worker sends the next request only with the SP's next
+  revision (`dnv-worker.md` RW4). Meanwhile the destination's connect stays
   refused, tried again by its DN8 retry, and an operator's cancel ends the
   wait.
 * The dn sweep's disconnect of a destination's source connection (DN6 L3)

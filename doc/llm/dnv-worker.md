@@ -1579,15 +1579,16 @@ logged at Error: a rejection neither sets nor clears a health epoch
 once for each refused `Syncup*`.
 
 `ReplyCodeLeftover` is the one non-zero code that is **not** a rejection:
-the request was applied — the desired state is stored and every wanted
-object converged — and the node still holds objects the desired state does
-not want, or an enumeration of what it holds did not answer, which proves
-nothing either way, or — on a dn — a disk whose identity it has not
-confirmed, which it reports the same way so that its `SyncupDn` is re-sent
-(`architecture.md`, Teardown by sweep); the agents' other such conditions
-come only from the verdict a background read gives (`dnagent.md` SH29), so
-they ride only on the `Check*` and `Get*Info` replies that answer from a
-read's observation, never on a converge's, a `Syncup*` reply's included.
+the request was applied — the desired state is stored and the converge
+built what it could — and the node still holds objects the desired state
+does not want, or an enumeration of what it holds did not answer, which
+proves nothing either way, or a condition the agent reports the same way so
+that its `Syncup*` is re-sent (`architecture.md`, Teardown by sweep). Most
+such conditions come only from the verdict a background read gives
+(`dnagent.md` SH29, SH31), so they ride only on the `Check*` and
+`Get*Info` replies that answer from a read's observation; a dn's
+unconfirmed disk identity rides on a converge's too, and a record a
+converge's pass could not free on a converge's alone (`dnagent.md` DN19).
 It is logged as
 `syncup leftover` (`log.md`, Leftovers) beside the ordinary
 `syncup result`: nothing agent-side re-drives the sweep for a leftover (the

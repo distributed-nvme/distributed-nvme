@@ -48,7 +48,7 @@ func OkReply() *pb.AgentReply {
 
 // InvalidConfReply and the codes above refuse a request. LeftoverReply is the
 // one AgentReply that does not: the request was applied, the desired state is
-// stored and every wanted object converged, but the node still holds objects
+// stored and the converge built what it could, but the node still holds objects
 // the desired state does not want — or an enumeration of what exists did not
 // answer, which is the same thing as far as the caller is concerned, because
 // an unanswered enumeration cannot prove the node is clean. The agents also

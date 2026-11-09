@@ -232,9 +232,11 @@ the method set is exactly the following, each taking the caller's ctx:
   propagates, which is what keeps a stalled sysfs or configfs read
   (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, `Nvmet.NsAnaGrpId`, the
   "enable" reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`,
-  `Nvmet.NsEnabledStrict`, and the attribute reads of
-  `Nvmet.ProbePortState`, which a read's verdict rests on, `dnagent.md`
-  SH31) from making a live object read as an absent one.
+  `Nvmet.NsEnabledStrict` and the attribute reads of
+  `Nvmet.ProbePortState`, on which a read's verdict rests (`dnagent.md`
+  DN16, SH31), `Dm.DiskSize`, and through `Cmd.ReadAttr` the md sysfs reads
+  of `cnagent.md` CN12, among them) from making a live object read as an
+  absent one.
 
 ### ReadFile / WriteFile / WriteFileDirect
 

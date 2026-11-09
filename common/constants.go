@@ -396,28 +396,18 @@ const (
 	// unusable, which is why it is neither of the two above.
 	ReplyCodeInvalidConf = 3
 	// ReplyCodeLeftover reports an ACCEPTED request with residue: the
-	// desired state is stored and every wanted object was converged, but the
+	// desired state is stored and the converge built what it could, but the
 	// node still holds objects the desired state does not want, or an
 	// enumeration of what exists did not answer. It is the one thing that
 	// travels in agent_reply rather than in the *Info rows, because a
 	// leftover by definition has no row — nothing wanted names it. An agent
 	// also reports a few conditions this way so that the worker re-sends the
-	// Syncup* whose converge acts on them (architecture.md, Teardown by sweep):
-	// on a dn a disk identity not yet confirmed, a side with bytes left to
-	// zero and nothing zeroing it that is not a migration destination waiting
-	// for a free run in the clone-metadata area (dnagent.md DN16), or, from a
-	// converge alone, a side or clone-metadata record its pass could not free,
-	// which a read never attempts (dnagent.md DN19); on a cn a
-	// piece of the node's base state that the CN's background read probed
-	// absent, or an ANA group it read in a state other than its fixed one on
-	// a port whose transport attributes match; and on a cntlr an md member
-	// that the cntlr's background read found its converge would put back —
-	// failed by md and moved out of its slot, or lacking from its running
-	// array — on a leg that serves with its row OK (cnagent.md CN12, CN30).
-	// Only a read's verdict names these, save two of the dn's: the
-	// unconfirmed disk identity, which the converge's own code names too, and
-	// the record a pass could not free, which only a converge's code names
-	// (dnagent.md DN16, DN19); a converge's code names none of the others.
+	// Syncup* whose converge acts on them (architecture.md, Teardown by
+	// sweep); dnagent.md, Names and constants in `common`, and cnagent.md
+	// CN30 say which.
+	// Only a read's verdict names most of them; a converge's code names the
+	// dn's unconfirmed disk identity too, and alone the record its pass could
+	// not free (dnagent.md DN16, DN19).
 	//
 	// It is not a rejection: the worker evaluates the reply's rows exactly as
 	// for code 0 and re-issues the Syncup* on every round whose reply carries

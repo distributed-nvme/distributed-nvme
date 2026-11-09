@@ -4033,8 +4033,7 @@ every read. A controller in any state is not named,
 since one that is connecting reconnects by itself, and neither is a side
 not provisioned, a leg the level suppresses or a leg whose disconnect is in
 flight: the converge connects none of them. The converge's reply carries
-none of them, as SH31 of `dnagent.md` says for every condition only a read
-names.
+none of them, as for every condition only a read names (below).
 
 A cntlr's read-only verdict also names each md member that its
 converge's member reconciliation would put

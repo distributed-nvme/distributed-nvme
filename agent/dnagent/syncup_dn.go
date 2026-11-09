@@ -776,9 +776,10 @@ func (s *DnAgentServer) dnLists() map[[2]uint64]map[[2]uint64]struct{} {
 // provisioned holds no data yet, so it never refuses. A DN's list of side
 // pointers never refuses either, since a new disk's first SyncupDn can bring
 // a list before any side is stored; it only lets a stored side pass that a
-// DN this agent holds no longer lists: a side whose state file the drop
-// could not delete (dropSideState), which no one wants any more and which
-// would otherwise refuse until a restart's reload deleted the file. The
+// DN this agent holds no longer lists, such as one this SyncupDn drops after
+// its converge, or one whose state file the drop could not delete
+// (dropSideState), which no one wants any more and which would otherwise
+// refuse until a restart's reload deleted the file. The
 // restore and re-add procedures clear the store (architecture.md, etcd
 // backup and restore, and Disk nodes), so they still format.
 func (s *DnAgentServer) storedProvisionedSide(

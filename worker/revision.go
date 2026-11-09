@@ -713,8 +713,8 @@ func (w *revWorker) syncup(
 	}
 	if reply.code == common.ReplyCodeLeftover {
 		// An accepted request with residue: the desired state is stored and
-		// the wanted objects converged, but the node still holds objects it
-		// does not want, or an enumeration did not answer. RW4 step 5 re-
+		// the converge built what it could, but the node still holds objects
+		// it does not want, or an enumeration did not answer. RW4 step 5 re-
 		// issues the Syncup* every round while the code persists, so the
 		// record is what makes a leftover each re-sync still finds visible
 		// in the worker log (logSyncupLeftover).
