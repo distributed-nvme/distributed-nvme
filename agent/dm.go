@@ -522,25 +522,29 @@ func (d *Dm) DevNo(ctx context.Context, path string) (string, error) {
 	return devNo, nil
 }
 
-// BlkDiscardRange discards one byte range of a device — how the agents mark
-// dm-clone regions "already hydrated" (architecture.md, Bitmap push protocol
-// and raid0 bitmap math).
-func (d *Dm) BlkDiscardRange(
+// DiscardRanges discards byte ranges of a device in the agent's own process
+// (OsClient.DiscardRanges) — how the agents mark dm-clone regions "already
+// hydrated" (architecture.md, Bitmap push protocol and raid0 bitmap math):
+// one exclusive open and one discard per range, with no child process per
+// range. The OsClient bounds each range by the caller's ctx and the soft
+// timeout itself, so ctx goes on unchanged (osclient.md, DiscardRanges).
+func (d *Dm) DiscardRanges(
 	ctx context.Context,
 	dev string,
-	offset uint64,
-	length uint64,
+	ranges []common.DiscardRange,
 ) error {
-	return d.runOk(ctx, "blkdiscard",
-		"--offset", strconv.FormatUint(offset, 10),
-		"--length", strconv.FormatUint(length, 10),
-		dev)
+	done, err := d.oc.DiscardRanges(ctx, dev, ranges)
+	if err != nil {
+		return fmt.Errorf("discarding %s: %d of %d ranges done: %w",
+			dev, done, len(ranges), err)
+	}
+	return nil
 }
 
 // BlkZeroout writes zeros over one byte range of a device — the side
 // provisioning primitive (architecture.md, Side provisioning protocol;
 // [D15]), which zeroes the part of a new side that must read as zeros. Unlike
-// BlkDiscardRange (a metadata-only "mark hydrated" hint) this is a
+// DiscardRanges (a metadata-only "mark hydrated" hint) this is a
 // *guaranteed* zero write: discard-reads-zeros is not a hardware guarantee
 // (the kernel dropped discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is
 // optional). It needs no zeroing support in the disk: where the disk has
@@ -659,7 +663,7 @@ func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
 // changed later.
 //
 // noDiscardPassdown matters because architecture.md, Bitmap push protocol and
-// raid0 bitmap math, use `blkdiscard` on the
+// raid0 bitmap math, use a discard on the
 // dm-clone as a metadata-only "mark this region hydrated" primitive. dm-clone
 // enables discard passdown by default whenever the destination advertises a
 // discard granularity no larger than a region, and then *also* remaps the
@@ -670,7 +674,7 @@ func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
 // (architecture.md, Migration, dst step 5) host IO flows through the dst
 // dm-clone, so a chunk whose bits were
 // read from the CN thin metadata *before* a host write can arrive afterwards
-// and blkdiscard a region the host has already written — with passdown that
+// and discard a region the host has already written — with passdown that
 // discard would reach the dst side device and destroy the only copy of an
 // acknowledged write (cnagent.md CN18 step 3, dnagent.md DN13 and [D7]: the
 // features `2 no_hydration no_discard_passdown`).

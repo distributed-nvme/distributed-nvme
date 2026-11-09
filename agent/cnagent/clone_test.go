@@ -20,7 +20,7 @@ import (
 // destination td
 // whose source wrote only its first 32 MiB, so the pushed chunk
 // `00000000ffffffff` (wire: 1 = never written = skippable) must coalesce into
-// exactly one 32 MiB blkdiscard at offset 32 MiB.
+// exactly one 32 MiB discard at offset 32 MiB.
 const (
 	testSrcNqn = "nqn.2024-01.io.dnv:4:" +
 		"0000000000000001:00000000000003d1:000000000000000c"
@@ -158,7 +158,7 @@ func TestCloneBuild(t *testing.T) {
 			// Stage 2: the chunk lands while nothing serves it.
 			node.Reset()
 			pushBitmap(t, srv, hexBytes(t, testSkipHex))
-			assertNoCall(t, node, "cmd blkdiscard")
+			assertNoCall(t, node, "discard --offset")
 			bmPath := srv.nf.LocalCloneBmPath(
 				testCluster, testCn, testSp, testClone, 0, 0)
 			if _, ok := node.protos[bmPath]; !ok {
@@ -180,7 +180,7 @@ func TestCloneBuild(t *testing.T) {
 			assertOrder(t, node,
 				"cmd nvme connect --transport tcp --traddr "+testIp2,
 				"cmd dmsetup create "+clone,
-				"cmd blkdiscard --offset 33554432 --length 33554432",
+				"discard --offset 33554432 --length 33554432",
 				"cmd dmsetup message "+clone+" 0 enable_hydration",
 				"cmd dmsetup reload "+nsDevName(srv, testNs),
 			)
@@ -201,7 +201,7 @@ func TestCloneBuild(t *testing.T) {
 					node.dms[clone].table, grpDev, metaNo)
 			}
 			// The table is created with hydration off, always — and with
-			// discard passdown off, without which every `blkdiscard` below
+			// discard passdown off, without which every discard below
 			// would be remapped to the destination raid0 (CN18 step 3).
 			create := node.callsMatching("cmd dmsetup create " + clone)
 			if len(create) != 1 || !strings.Contains(create[0],
@@ -211,8 +211,8 @@ func TestCloneBuild(t *testing.T) {
 			// Exactly one coalesced hydration discard: skip bits 32..63 →
 			// 32 MiB at 32 MiB, and no other discard of the pass.
 			if discards := node.callsMatching(
-				"cmd blkdiscard"); len(discards) != 1 {
-				t.Fatalf("want 1 blkdiscard, got %d: %v", len(discards),
+				"discard --offset"); len(discards) != 1 {
+				t.Fatalf("want 1 discard, got %d: %v", len(discards),
 					discards)
 			}
 			// The ns-dev now sits on the dm-clone, serving despite the
@@ -882,7 +882,7 @@ func TestPushHasNoRevisionGate(t *testing.T) {
 		testCluster, testCn, testSp, testClone, 0, 0)
 	assertOrder(t, node,
 		"writeproto "+bmPath,
-		"cmd blkdiscard --offset 33554432 --length 33554432",
+		"discard --offset 33554432 --length 33554432",
 	)
 	// And it is in the applied set the next reply reports, which is the only
 	// thing that stops the worker re-pushing it.
@@ -928,20 +928,20 @@ func TestPushCloneBitmapPersistBeforeApply(t *testing.T) {
 		testCluster, testCn, testSp, testClone, 0, 0)
 	assertOrder(t, node,
 		"writeproto "+bmPath,
-		"cmd blkdiscard --offset 33554432 --length 33554432",
+		"discard --offset 33554432 --length 33554432",
 	)
 
 	// A grown chunk overwrites the file and re-applies ([D8]).
 	node.Reset()
 	grown := append(hexBytes(t, testSkipHex), 0xff)
 	pushBitmap(t, srv, grown)
-	assertOrder(t, node, "writeproto "+bmPath, "cmd blkdiscard --offset")
+	assertOrder(t, node, "writeproto "+bmPath, "discard --offset")
 
 	// An identical re-push is neither rewritten nor re-applied.
 	node.Reset()
 	pushBitmap(t, srv, grown)
 	assertNoCall(t, node, "writeproto "+bmPath)
-	assertNoCall(t, node, "cmd blkdiscard")
+	assertNoCall(t, node, "discard --offset")
 }
 
 // TestPushCloneBitmapSurvivesRestart is SH21: the applied set is derived from
@@ -992,7 +992,7 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 
 	node.Reset()
 	pushBitmap(t, srv, hexBytes(t, testSkipHex))
-	assertNoCall(t, node, "cmd blkdiscard")
+	assertNoCall(t, node, "discard --offset")
 
 	node.Reset()
 	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
@@ -1004,7 +1004,7 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 		got[0] != [2]uint32{0, 0} {
 		t.Fatalf("the chunk was not reported applied: %v", got)
 	}
-	if !node.hasCall("cmd blkdiscard --offset 33554432 --length 33554432") {
+	if !node.hasCall("discard --offset 33554432 --length 33554432") {
 		t.Fatalf("the chunk was not re-applied on the rebuild")
 	}
 }

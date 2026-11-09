@@ -28,6 +28,7 @@ type FakeOsClient struct {
 	WriteFileDirectFn func(ctx context.Context, path string, data string) error
 	ReadBlockFn       func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
 	WriteBlockFn      func(ctx context.Context, path string, offset uint64, data []byte) error
+	DiscardRangesFn   func(ctx context.Context, path string, ranges []DiscardRange) (int, error)
 	ReadProtoFn       func(ctx context.Context, path string, target proto.Message) error
 	WriteProtoFn      func(ctx context.Context, path string, msg proto.Message) error
 }
@@ -98,6 +99,13 @@ func (f *FakeOsClient) WriteBlock(ctx context.Context, path string, offset uint6
 		return f.WriteBlockFn(ctx, path, offset, data)
 	}
 	return nil
+}
+
+func (f *FakeOsClient) DiscardRanges(ctx context.Context, path string, ranges []DiscardRange) (int, error) {
+	if f.DiscardRangesFn != nil {
+		return f.DiscardRangesFn(ctx, path, ranges)
+	}
+	return 0, nil
 }
 
 func (f *FakeOsClient) ReadProto(ctx context.Context, path string, target proto.Message) error {

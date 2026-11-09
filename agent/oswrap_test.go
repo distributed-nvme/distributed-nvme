@@ -232,19 +232,6 @@ func TestDmsetupRefusalCarriesItsErrno(t *testing.T) {
 			},
 		},
 		{
-			// Only dmsetup's words are read: another tool's text is its
-			// own, and nothing branches on it.
-			name: "blkdiscard",
-			run: osRun{
-				stderr:   "blkdiscard: /dev/x: BLKDISCARD: Device or resource busy",
-				exitCode: 1,
-				err:      errors.New("exit status 1"),
-			},
-			call: func(oc common.OsClient) error {
-				return NewDm(oc).BlkDiscardRange(ctx, "/dev/x", 0, 4096)
-			},
-		},
-		{
 			name: "blkdiscard --zeroout, which builds its own error",
 			run: osRun{
 				stderr:   "blkdiscard: /dev/x: BLKZEROOUT: Device or resource busy",

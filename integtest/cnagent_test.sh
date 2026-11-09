@@ -1719,7 +1719,7 @@ wait_no_ctrl() {
 # destination among them, and none of the reads from the clone's source: a
 # new dm-clone is read through its source by udev's probe, and the chunk's
 # discard waits for that probe, so a slowed source can leave the discard to
-# the command timeout (cnagent_integtest.md, Lab facts). The bucket's
+# the soft timeout (cnagent_integtest.md, Lab facts). The bucket's
 # queue is bounded in time, so a
 # metadata or keep-alive write of a leg waits behind the copy's data for a
 # fraction of a second at most, and its burst holds the loopback device's
@@ -2380,8 +2380,11 @@ log_readable() {
 }
 
 # events <log> [trace] — os commands as "cmd args…", configfs attribute
-# writes as "write <path> <data>" and the directory listings the agent makes
-# in its own process (`os read dir` records) as "list <path>", in log order.
+# writes as "write <path> <data>", the directory listings the agent makes
+# in its own process (`os read dir` records) as "list <path>" and its
+# in-process discards (`os discard ranges`) as one
+# "discard --offset <o> --length <l> <dev>" per range the record lists, in
+# log order.
 events() {
 	log_readable "$1" || return 1
 	jq -rnR --arg t "${2:-}" '
@@ -2389,6 +2392,9 @@ events() {
 	    | select($t == "" or .trace_id == $t)
 	    | if .msg == "os command" then
 	        .cmd + " " + ((.args // []) | join(" "))
+	      elif .msg == "os discard ranges" then
+	        .path as $p | (.ranges // [])[]
+	        | "discard --offset \(.[0]) --length \(.[1]) " + $p
 	      elif .msg == "os write file direct" then
 	        "write " + .path + " " + (.data // "")
 	      elif .msg == "os read dir" then
@@ -2426,18 +2432,24 @@ cn_log_since() {
 	tail -n "+$(($1 + 1))" "$CN_LOG"
 }
 
-# cn_cmds_since <mark> <prefix> — the os command records after line <mark>
-# whose "cmd args…" starts with <prefix> (empty: every one), each printed as
+# cn_cmds_since <mark> <prefix> — the os command records after line <mark>,
+# and the in-process discards rendered as events renders them, whose
+# "cmd args…" starts with <prefix> (empty: every one), each printed as
 # "<trace_id> cmd args…", in log order.
 cn_cmds_since() {
 	local recs
 	recs=$(cn_log_since "$1") || return 1
 	printf '%s\n' "$recs" | jq -rnR --arg p "$2" '
 	    inputs | fromjson? // empty | objects
-	    | select(.msg == "os command")
-	    | (.cmd + " " + ((.args // []) | join(" "))) as $e
-	    | select($e | startswith($p))
-	    | .trace_id + " " + $e' || return 1
+	    | .trace_id as $t
+	    | if .msg == "os command" then
+	        .cmd + " " + ((.args // []) | join(" "))
+	      elif .msg == "os discard ranges" then
+	        .path as $d | (.ranges // [])[]
+	        | "discard --offset \(.[0]) --length \(.[1]) " + $d
+	      else empty end
+	    | select(startswith($p))
+	    | $t + " " + .' || return 1
 }
 
 # cn_requests_since <mark> <method> <sp> <cntlr> — how many `grpc server
@@ -2485,22 +2497,29 @@ mutations() {
 	    | select(.msg == "os write file direct")
 	      | "write file direct " + .path' "$log" || return 1
 	# The verb tests bind .args first: a `[…] | index(.cmd)` would evaluate
-	# .cmd against the literal array, not the record.
+	# .cmd against the literal array, not the record. The in-process discards
+	# (osclient.md, DiscardRanges) come in the same pass, in log order, one
+	# "discard --offset <o> --length <l> <dev>" line per range listed, so a
+	# stage can order them against the commands around them.
 	jq -rnR --arg t "$trace" '
 	    inputs | fromjson? // empty | objects
 	    | select($t == "" or .trace_id == $t)
-	    | select(.msg == "os command")
-	    | (.args // []) as $a
-	    | select(
-	        (.cmd == "dmsetup" and ($a[0] | IN("create","reload","remove",
-	              "suspend","resume","message")))
-	        or (.cmd == "mdadm" and ($a | any(IN("--create","--assemble",
-	              "--add","--fail","--remove","--stop","--zero-superblock"))))
-	        or (.cmd == "nvme" and ($a[0] | IN("connect","disconnect")))
-	        or (.cmd | IN("blkdiscard","mount","umount","truncate","losetup",
-	              "mkdir","rmdir","ln","rm"))
-	      )
-	    | .cmd + " " + ($a | join(" "))' "$log" || return 1
+	    | if .msg == "os discard ranges" then
+	        .path as $p | (.ranges // [])[]
+	        | "discard --offset \(.[0]) --length \(.[1]) " + $p
+	      elif .msg == "os command" then
+	        (.args // []) as $a
+	        | select(
+	            (.cmd == "dmsetup" and ($a[0] | IN("create","reload","remove",
+	                  "suspend","resume","message")))
+	            or (.cmd == "mdadm" and ($a | any(IN("--create","--assemble",
+	                  "--add","--fail","--remove","--stop","--zero-superblock"))))
+	            or (.cmd == "nvme" and ($a[0] | IN("connect","disconnect")))
+	            or (.cmd | IN("blkdiscard","mount","umount","truncate","losetup",
+	                  "mkdir","rmdir","ln","rm"))
+	          )
+	        | .cmd + " " + ($a | join(" "))
+	      else empty end' "$log" || return 1
 	jq -rnR --arg t "$trace" '
 	    inputs | fromjson? // empty | objects
 	    | select($t == "" or .trace_id == $t)
@@ -6553,8 +6572,8 @@ case_thinbm() {
 # ---------------------------------------------------------------------------
 #
 # 32 of the td's 64 MiB are written, so the pushed bitmap is 00000000ffffffff:
-# bits 32..63 = 1 = skippable ⇒ exactly one 32 MiB blkdiscard at offset 32 MiB
-# **on the clone device**, which is the only blkdiscard a cn agent issues
+# bits 32..63 = 1 = skippable ⇒ exactly one 32 MiB discard at offset 32 MiB
+# **on the clone device**, which is the only discard a cn agent issues
 # (ApplySkipRanges (agent/bitmap.go)).
 #
 # The clone's clone meta group (architecture.md, Terminology and object
@@ -6829,7 +6848,7 @@ case_clone_xfer() {
 	# bm_idx as a slice index would refuse this push as an unknown source
 	# slice (code 2, a hard failure of the call below). Chunk (0, 1) covers
 	# bits 8*CloneBmChunkBytes upward — far past this clone's 64 regions — so
-	# it is stored, reported and reloaded, and changes no blkdiscard anywhere
+	# it is stored, reported and reloaded, and changes no discard anywhere
 	# in the case; the stage 4 arithmetic below is unaffected by it.
 	cnctl 2 push-clone-bm --sp "$sp2" --cntlr "$cntlr" \
 		--clone "$C_CLONE" --src-slice-idx 0 --bm-idx 1 \
@@ -6889,21 +6908,21 @@ case_clone_xfer() {
 		"clone_xfer: the dm-clone's metadata device is its group's"
 	# The log-arithmetic proof that geometry and inversion are right: skip
 	# bits 32..63 coalesce into one 32 MiB range at 32 MiB, the converge's
-	# one blkdiscard.
-	assert_eq "$(event_cnt "$seq" '^blkdiscard ')" 1 \
-		"clone_xfer: exactly one blkdiscard in the converge"
+	# one discard.
+	assert_eq "$(event_cnt "$seq" '^discard ')" 1 \
+		"clone_xfer: exactly one discard in the converge"
 	assert_eq "$(event_line "$seq" \
-		"^blkdiscard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$")" \
-		"$(event_line "$seq" '^blkdiscard ')" \
-		"clone_xfer: the blkdiscard range, on the clone"
+		"^discard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$")" \
+		"$(event_line "$seq" '^discard ')" \
+		"clone_xfer: the discard range, on the clone"
 	assert_before "$seq" "^dmsetup create $clonedm( |\$)" \
-		"^blkdiscard .*/dev/mapper/$clonedm\$" \
+		"^discard .*/dev/mapper/$clonedm\$" \
 		"clone_xfer: the chunk lands after the clone is created"
-	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
+	assert_before "$seq" "^discard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
 		"clone_xfer: hydration is enabled after the chunk (CN18 step 5)"
 	# CN18 step 3: every dnv dm-clone carries no_discard_passdown, without exception —
-	# it is what keeps the hydration blkdiscard above metadata-only instead of
+	# it is what keeps the hydration discard above metadata-only instead of
 	# also erasing the destination.
 	#
 	# The whole feature list is pinned, not just the one word: the exact
@@ -7103,9 +7122,9 @@ case_clone_xfer() {
 	assert_absent "$seq" "^dmsetup create $clonedm( |\$)" \
 		"clone_xfer giveback: no new dm-clone"
 	assert_before "$seq" "^dmsetup reload $clonedm .* $src1 " \
-		"^blkdiscard .*/dev/mapper/$clonedm\$" \
+		"^discard .*/dev/mapper/$clonedm\$" \
 		"clone_xfer giveback: the chunk lands after the reload"
-	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
+	assert_before "$seq" "^discard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
 		"clone_xfer giveback: the chunk lands before hydration"
 	[ "$(printf '%s\n' "$cmds" | grep -cE "^$TRACE dmsetup reload ")" = 0 ] ||
@@ -7233,9 +7252,9 @@ case_clone_xfer() {
 		"^dmsetup create $clonedm( |\$)" \
 		"clone_xfer rebuild: the group device before the dm-clone"
 	assert_before "$seq" "^dmsetup create $clonedm( |\$)" \
-		"^blkdiscard .*/dev/mapper/$clonedm\$" \
+		"^discard .*/dev/mapper/$clonedm\$" \
 		"clone_xfer rebuild: the chunk lands after the dm-clone is created"
-	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
+	assert_before "$seq" "^discard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
 		"clone_xfer rebuild: the chunk lands before hydration"
 	assert_eq "$(helper 2 "dm_backing $clonedm")" \

@@ -2,8 +2,8 @@
 
 This document owns the one path every dnv binary takes to the operating
 system: the `OsClient` interface for OS commands, for directory listings, for
-modification-time reads, for device-number reads and for file, protobuf and
-raw block IO, its production implementation `LimitedOsClient` with its
+modification-time reads, for device-number reads, for discards and for file,
+protobuf and raw block IO, its production implementation `LimitedOsClient` with its
 concurrency limit, its command timeouts and kill rule, the guarantees of each
 operation (a listing's names, all of them in byte order or none; the time of
 the path itself, never of what a link names; the number of the block device
@@ -32,7 +32,8 @@ it.
   nvmet-configfs work, for its listings of sysfs and of its local store, for
   the dn's read of an nvmet subsystem directory's age, for both roles' read
   of whether their nvmet port's directory is there, for the dn's read of its
-  disk's device number, and for persisting the `Local*Path` protobuf state
+  disk's device number, for both roles' discards on a dm-clone, and for
+  persisting the `Local*Path` protobuf state
   files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
   maker and mount commands, its sysfs and mount table reads and its read of
   a volume's device link (`csi.md`, The node plugin). **All** OS command execution, directory listing, modification-time
@@ -95,6 +96,9 @@ the method set is exactly the following, each taking the caller's ctx:
   callers use only for regions no dm table references.
 * `WriteBlock` writes data at a byte offset and fsyncs the file descriptor
   before returning.
+* `DiscardRanges` discards byte ranges of a block device in the caller's own
+  process, one exclusive open and one BLKDISCARD per range, and returns how many it
+  discarded and the first error (DiscardRanges).
 * `ReadProto` reads a protobuf binary file and deserializes it into a
   non-nil target message.
 * `WriteProto` serializes a message to wire binary and writes it with the
@@ -107,7 +111,7 @@ the method set is exactly the following, each taking the caller's ctx:
 * `NewLimitedOsClient` takes the limit; a limit of zero or less means "use
   `DefaultOsClientLimit`", the default cap on in-flight operations
   (commands, directory listings, modification-time reads, device-number
-  reads, file IO and proto IO combined) that
+  reads, discards, file IO and proto IO combined) that
   `constants.go` holds. Its reason: during convergence an agent fans out
   many dmsetup, mdadm, nvme and blkdiscard invocations plus state-file
   writes, and the default bounds fork and disk pressure while leaving ample
@@ -118,7 +122,8 @@ the method set is exactly the following, each taking the caller's ctx:
   (`semaphore.NewWeighted`) carries the limit. Every public method first
   acquires one unit (blocking, ctx-aware: a cancelled or expired ctx returns
   the ctx error without performing the operation and without logging an
-  operation record) and releases it when it returns.
+  operation record) and releases it when it returns, `DiscardRanges` aside,
+  which releases it when its device is closed (DiscardRanges).
 * `LimitedOsClient` is safe for concurrent use and holds no other mutable
   state. One instance per process is the expected usage.
 
@@ -411,6 +416,37 @@ methods.
 * The payload is **never** logged: the records carry `path`, `offset` and
   `length` only (Logging). Metadata blocks are large and uninteresting in a
   log, and a device region may hold arbitrary user data.
+
+### DiscardRanges
+
+How the agents mark dm-clone regions "already hydrated" (`architecture.md`,
+Bitmap push protocol): the whole set of a chunk apply in one call, where a
+child process per range would hold the caller's locks for tens of seconds on
+a fragmented source.
+
+* It takes one semaphore slot for the whole call, opens the path once,
+  write-only and exclusively, as `blkdiscard` without `--force` does, and
+  sends one BLKDISCARD ioctl per range, in the order given, the ctx checked
+  before each, so a cancelled caller sends no further range. It returns how
+  many ranges it discarded and the first error — a ctx error, the open's,
+  or an ioctl's — after which it discards no more. Reason for the exclusive
+  open: a device another dm table maps, or that anything else holds, is
+  refused EBUSY at once, as the agents' `blkdiscard` was; the discard of a
+  device that is mapped while it serves, and what a suspended dm-clone does
+  to a discard, are left as they were.
+* Unlike every other method, `DiscardRanges` bounds itself: the caller's
+  ctx needs no deadline of its own, since each range is waited for no
+  longer than the ctx and the soft timeout (`CmdSoftTimeout`) allow, and
+  the call returns then with an error naming that range. A discard the
+  kernel has not answered by then is left to finish there, as a killed
+  child's ioctl is: its goroutine, its thread and the open device stay
+  until the kernel answers, and only then is the device closed and the
+  call's slot given back, as a command's slot comes back only once its
+  child is reaped (RunCommand). While the device stays open, a
+  `dmsetup remove` of it fails EBUSY.
+* One `os discard ranges` record covers the call (`log.md`, OS commands and
+  file IO), with the path, the range count, the ranges done and at most the
+  first 64 ranges, whatever the count.
 
 ### Exported raw helpers and the probe-IO carve-out
 

@@ -1019,7 +1019,7 @@ func TestSkipRanges(t *testing.T) {
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("ranges = %v, want %v", got, want)
 	}
-	// Adjacent skippable regions coalesce into one blkdiscard.
+	// Adjacent skippable regions coalesce into one discard range.
 	got = SkipRanges([]byte{0b0000_0111}, 0, 10, region)
 	if len(got) != 1 || got[0].Offset != 0 || got[0].Length != 3*region {
 		t.Fatalf("adjacent regions did not coalesce: %v", got)
@@ -1042,24 +1042,54 @@ func TestSkipRanges(t *testing.T) {
 	}
 }
 
+// TestApplySkipRanges: every skippable range goes to one DiscardRanges call
+// of the agent's own process, no child process per range, and a failed call
+// names the ranges done.
 func TestApplySkipRanges(t *testing.T) {
-	var got []string
+	var calls [][]common.DiscardRange
+	var commands []string
+	fail := false
 	oc := &common.FakeOsClient{
 		RunCommandFn: func(
 			ctx context.Context, name string, args []string, stdin string,
 		) (string, string, int, error) {
-			got = append(got, name+" "+strings.Join(args, " "))
+			commands = append(commands, name)
 			return "", "", 0, nil
 		},
+		DiscardRangesFn: func(
+			ctx context.Context, path string, ranges []common.DiscardRange,
+		) (int, error) {
+			if path != "/dev/mapper/x" {
+				t.Fatalf("discard of %s", path)
+			}
+			calls = append(calls, ranges)
+			if fail {
+				return 1, errors.New("EIO")
+			}
+			return len(ranges), nil
+		},
 	}
-	err := ApplySkipRanges(context.Background(), NewDm(oc), "/dev/mapper/x",
-		[]SkipRange{{Offset: 0, Length: 4096}})
-	if err != nil {
+	ranges := []SkipRange{{Offset: 0, Length: 4096}, {Offset: 8192, Length: 4096}}
+	if err := ApplySkipRanges(context.Background(), NewDm(oc),
+		"/dev/mapper/x", ranges); err != nil {
 		t.Fatalf("ApplySkipRanges: %v", err)
 	}
-	if len(got) != 1 ||
-		got[0] != "blkdiscard --offset 0 --length 4096 /dev/mapper/x" {
-		t.Errorf("commands = %v", got)
+	want := []common.DiscardRange{
+		{Offset: 0, Length: 4096}, {Offset: 8192, Length: 4096}}
+	if len(calls) != 1 || !slices.Equal(calls[0], want) || len(commands) != 0 {
+		t.Fatalf("calls %v and commands %v, want one call of %v", calls,
+			commands, want)
+	}
+	fail = true
+	err := ApplySkipRanges(context.Background(), NewDm(oc), "/dev/mapper/x",
+		ranges)
+	if err == nil || !strings.Contains(err.Error(), "1 of 2 ranges done") {
+		t.Fatalf("a failed call answered %v, want the ranges done named", err)
+	}
+	calls = nil
+	if err := ApplySkipRanges(context.Background(), NewDm(oc),
+		"/dev/mapper/x", nil); err != nil || len(calls) != 0 {
+		t.Fatalf("no ranges: %v, %d calls, want none", err, len(calls))
 	}
 }
 
@@ -1091,7 +1121,7 @@ func TestTableBuilders(t *testing.T) {
 		t.Errorf("bare clone table = %q", got)
 	}
 	// The dnv form, used by both role packages:
-	// `blkdiscard` must stay a metadata-only "mark hydrated" primitive, so
+	// a discard must stay a metadata-only "mark hydrated" primitive, so
 	// every dnv dm-clone disables discard passdown (cnagent.md CN18 step 3).
 	if got := CloneTable(
 		2048, "253:1", "253:2", "259:0", 2048, true, true, 1, 1); got !=

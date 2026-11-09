@@ -488,7 +488,7 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 			assertNoCall(t, node, "cmd dmsetup create "+clone)
 			if tc.finishes {
 				assertOrder(t, node,
-					"cmd blkdiscard --offset 33554432 --length 33554432",
+					"discard --offset 33554432 --length 33554432",
 					"cmd "+enable)
 				assertNoCall(t, node, park)
 				assertNoCall(t, node, ana)
@@ -573,7 +573,7 @@ func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the level lowered: %v", err)
 			}
-			assertNoCall(t, node, "cmd blkdiscard --offset 0")
+			assertNoCall(t, node, "discard --offset 0")
 			if !tc.finishes {
 				assertOrder(t, node, "cmd dmsetup create "+clone,
 					"cmd "+enable, ana+"3")

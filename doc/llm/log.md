@@ -115,7 +115,10 @@ R8. The following events MUST be logged at **Info** level, with the record
     6. every modification-time read made in the caller's own process (full
        path; the time read) — implemented once inside `LimitedOsClient`;
     7. every device-number read made in the caller's own process (full path;
-       the number read) — implemented once inside `LimitedOsClient`.
+       the number read) — implemented once inside `LimitedOsClient`;
+    8. every set of discards made in the caller's own process (full path;
+       the ranges asked for, the ranges done) — implemented once inside
+       `LimitedOsClient`.
 
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error); a
@@ -181,6 +184,10 @@ implements them:
 * a raw block read logs `os read block` and a raw block write
   `os write block`, each with `path`, `offset`, `length` and "error?" —
   **never** `data`;
+* a set of discards made in the caller's own process (`DiscardRanges`)
+  logs `os discard ranges` with `path`, `range_cnt` (the ranges asked
+  for), `done` (the ranges discarded), `ranges` (at most the first 64, as
+  `[offset, length]` pairs) and "error?";
 * a proto read logs `os read proto` and a proto write `os write proto`, each
   with `path`, `size` (the serialized bytes), `data` (the message as
   `PbToLogValue` renders it) and "error?".

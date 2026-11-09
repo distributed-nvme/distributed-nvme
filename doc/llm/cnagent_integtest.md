@@ -138,7 +138,8 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   writes again whole. A copy whose reads all fail writes nothing.
 * A new dm-clone is read through its source at once, as udev probes the
   device, and a discard on it waits for those reads, so over a slowed source
-  the chunk's discard can outlast the agent's command timeout and be killed.
+  the chunk's discard can outlast the soft timeout and be given up on
+  (`osclient.md`, DiscardRanges).
   clone_xfer therefore slows its copy on the write side: a VM's cn agent
   reaches the sides of the dn agent beside it over the loopback device, and
   a token bucket there, kept to the nvme-tcp port, slows what its legs send
@@ -295,8 +296,9 @@ its info-read commands are plain memory reads.
   legs do until their probers' first round (CN11). The teardown case runs no
   `CheckCntlr` round, since its cntlrs are gone; each of its stages ends with
   the fresh `CheckCn` round per CN, code zero and the base-state row OK.
-* **Mutation-free.** The mutation reader lists every mutating command and every
-  configfs or block write ("os write block" by name) in a cn agent log, whole
+* **Mutation-free.** The mutation reader lists every mutating command, every
+  configfs or block write ("os write block" by name) and every discard ("os
+  discard ranges", one line per range it lists) in a cn agent log, whole
   or for one trace; the probers' "probe …" records fall outside it by
   construction (`osclient.md`, Exported raw helpers and the probe-IO
   carve-out). Records no stage RPC caused carry trace ids of their own

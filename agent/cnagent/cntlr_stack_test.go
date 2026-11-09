@@ -293,7 +293,7 @@ func TestADmCloneThatVanishedIsBuiltAgainOverItsMetadata(t *testing.T) {
 			}
 			assertOrder(t, node,
 				"cmd dmsetup create "+clone,
-				"cmd blkdiscard --offset 33554432 --length 33554432",
+				"discard --offset 33554432 --length 33554432",
 				"cmd dmsetup message "+clone+" 0 enable_hydration",
 			)
 			assertNoCall(t, node, "reserve_metadata_snap")

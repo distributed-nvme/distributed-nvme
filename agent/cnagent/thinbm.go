@@ -560,7 +560,7 @@ func regionSkippable(
 
 // foldRegions turns per-slice bitmaps into one device-order bitmap over the
 // dm-clone's regions, bit r = 1 iff region r need not be copied. It is what
-// agent.SkipRanges then coalesces into blkdiscard ranges (with
+// agent.SkipRanges then coalesces into discard ranges (with
 // shiftRegions = 0 — clones have no meta region, that shift is the dn's).
 func foldRegions(
 	regionCnt uint64,
@@ -581,7 +581,7 @@ func foldRegions(
 // Applying bitmaps to a dm-clone
 // ---------------------------------------------------------------------------
 
-// applyCloneChunks folds the source chunks this agent holds and blkdiscards
+// applyCloneChunks folds the source chunks this agent holds and discards
 // the fully-skippable regions of the dm-clone (CN22). Re-applying is harmless:
 // discarding an already-hydrated region is a no-op.
 func (s *CnAgentServer) applyCloneChunks(

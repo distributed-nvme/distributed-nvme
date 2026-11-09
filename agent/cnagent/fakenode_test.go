@@ -521,6 +521,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
+		DiscardRangesFn:   f.discardRanges,
 		ReadProtoFn:       f.readProto,
 		WriteProtoFn:      f.writeProto,
 	}
@@ -1282,8 +1283,6 @@ func (f *fakeNode) dispatch(
 		return f.cmdLn(args)
 	case "lsblk":
 		return f.cmdLsblk(args)
-	case "blkdiscard":
-		return f.cmdBlkdiscard(args)
 	case "dmsetup":
 		return f.cmdDmsetup(args, stdin)
 	case "nvme":
@@ -1538,14 +1537,35 @@ func (f *fakeNode) newMdUuid() string {
 	return fmt.Sprintf("uuid-%d", f.nextMdUuid)
 }
 
-func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
-	dev := args[len(args)-1]
-	name := strings.TrimPrefix(dev, "/dev/mapper/")
-	if dm, ok := f.dms[name]; ok {
-		dm.discards = append(dm.discards,
-			strings.Join(args[:len(args)-1], " "))
+// discardRanges answers OsClient.DiscardRanges, the agent's in-process
+// "mark hydrated" discards: one "discard --offset <o> --length <l> <dev>"
+// line per range, in order, each kept in the device's discards list, with
+// ctx checked before each range and the in-process hooks matching each line
+// (inProcessHookErr), so a test can cut a call off part-way.
+func (f *fakeNode) discardRanges(
+	ctx context.Context,
+	path string,
+	ranges []common.DiscardRange,
+) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, r := range ranges {
+		if err := ctx.Err(); err != nil {
+			return i, err
+		}
+		args := fmt.Sprintf("--offset %d --length %d", r.Offset, r.Length)
+		line := "discard " + args + " " + path
+		f.record("%s", line)
+		f.recordTrace(ctx, line)
+		if err := f.inProcessHookErr(line, fmt.Errorf("BLKDISCARD %s: %w",
+			path, syscall.EIO)); err != nil {
+			return i, err
+		}
+		if dm, ok := f.dms[strings.TrimPrefix(path, "/dev/mapper/")]; ok {
+			dm.discards = append(dm.discards, args)
+		}
 	}
-	return "", 0
+	return len(ranges), nil
 }
 
 // ---------------------------------------------------------------------------

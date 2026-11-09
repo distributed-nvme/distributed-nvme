@@ -306,7 +306,7 @@ reads a store file an older build wrote as it reads any other, since an
 upgrade keeps the store (`architecture.md`, Upgrade in lockstep). Loading
 the chunks after the converges would lose none of them — a chunk in memory is
 advertised as applied by the next reply's `chunk_id_list` (CN20), so the
-worker's diff (`dnv-worker.md` BM2) would not push it again — but their `blkdiscard`s would
+worker's diff (`dnv-worker.md` BM2) would not push it again — but their discards would
 then wait for the next event that re-applies the whole set: a create of
 that dm-clone, a converge reload of its table onto a changed length,
 devno or region size (step 4 runs on both — the converge treats a reload
@@ -2660,12 +2660,12 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    `dmsetup info`), destination = the destination td's `CnRaid0Name`,
    source = the connected device, region size = one block in sectors,
    created with the two features "no_hydration no_discard_passdown" always
-   — the second feature is not optional: `blkdiscard` is this design's
+   — the second feature is not optional: a discard is this design's
    metadata-only "mark hydrated" primitive (`architecture.md`, Bitmap push
    protocol, and raid0 bitmap math), and with passdown enabled dm-clone
    also remaps the discard to the destination, unmapping a block a host
    wrote through the dm-clone; `agent.CloneTable` carries the parameter
-   and every caller passes it, because a `blkdiscard` must stay a
+   and every caller passes it, because a discard must stay a
    metadata-only mark for the dn migration clone as for the cn clone. Over
    a group that holds the clone's metadata already — a new primary, a
    rebooted node, a dm-clone the level or a sweep removed —
@@ -2850,7 +2850,7 @@ status read included). So does a read after the enable that fails or does
 not show a dm-clone that serves, whose line the dm-clone row carries
 (`architecture.md`, Live-state reporting). Some failures stop nothing and
 are only logged: a failed knob message of step 3 (the knob keeps the
-value it had) and a failed source-chunk `blkdiscard` of step 4 (it costs
+value it had) and a failed source-chunk discard of step 4 (it costs
 an extra copy). Step 6 is CN16's, and a namespace of the td that a pass
 leaves waiting, whatever stopped it, registers the retry too (CN16).
 Whatever stopped a pass, CN16 puts the td's ns-devs on the dm-clone only
@@ -3385,7 +3385,7 @@ overwriting when the payload differs, because clone chunks may grow in
 place (`architecture.md`, [D8]); a byte-identical payload is already
 persisted and counted as applied, and is skipped outright, though its
 apply may not have run — one skipped because the dm-clone's `dmsetup info`
-did not answer, or whose `blkdiscard` failed, waits for the next event that
+did not answer, or whose discard failed, waits for the next event that
 applies the whole set (a create or reload of the dm-clone or a build that
 finds hydration off, CN18 step 4, or another chunk's push, below), at the
 cost of
@@ -3408,11 +3408,13 @@ still be growing it) and a slice holding no chunks at all therefore all
 count as written — the safe direction, which can only cost an extra
 copy. The folded bitmap feeds the shared `agent.SkipRanges` with no
 region shift (clones have no meta region — that shift is the dn's) and
-is `blkdiscard`ed onto `CnCloneFinalName`. If the dm-clone does not
+is discarded onto `CnCloneFinalName`, every range in one call of the
+agent's own process (`osclient.md`, DiscardRanges: one exclusive open and one
+BLKDISCARD per range, each bounded by the soft timeout). If the dm-clone does not
 currently exist (standby, not built yet, level-suppressed), the file
 still counts as applied; chunks are re-applied whenever the dm-clone is
 (re)created (CN18 step 4). A failed persist is logged and still acked
-code zero, with neither the fold nor the `blkdiscard` attempted. For a
+code zero, with neither the fold nor the discard attempted. For a
 pair the node does not hold yet that heals itself: the chunk stays out
 of the applied set, so it stays out of the clone's `BitmapInfo`
 `chunk_id_list` (CN20) and the worker's diff (`dnv-worker.md` BM2) pushes it again. That
@@ -4438,6 +4440,16 @@ stores instead is CN23's.
   kernel's default model, so once no cntlr claims it and it holds no
   namespace device the node-level sweep reads it as foreign and leaves it
   (CN21); an operator removes it.
+* A clone's bitmap apply still takes time that grows with its ranges: every
+  push of a changed chunk, every create or reload of the dm-clone, a build
+  that finds hydration off and the startup reconcile apply the whole skip
+  set again, each under the locks it holds (CN18 step 4, CN22). The
+  discards run in the agent's own process, one open and one ioctl per range
+  with no child process each (`osclient.md`, DiscardRanges), but a
+  fragmented source's hundreds of thousands of ranges still hold the locks
+  for as long as the kernel takes over them. A cancelled push returns at
+  once and leaves the range in flight to the kernel; the ranges it did not
+  reach cost extra copying only, until the next apply.
 * A namespace dropped from a dnv-prefixed subsystem that decodes to
   nothing stays enabled: the sweep is the only remover of a namespace
   (CN21), and it never attributes a subsystem whose NQN carries the dnv

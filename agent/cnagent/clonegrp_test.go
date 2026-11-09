@@ -1008,7 +1008,7 @@ func TestAnAgentRestartKeepsTheClone(t *testing.T) {
 			assertNoCall(t, node, "cmd dmsetup create "+clone)
 			assertNoCall(t, node, "cmd dmsetup reload "+clone)
 			assertNoCall(t, node, "cmd dmsetup message "+clone)
-			assertNoCall(t, node, "cmd blkdiscard")
+			assertNoCall(t, node, "discard --offset")
 			if got := node.dms[clone].table; got != table {
 				t.Fatalf("the restart changed the dm-clone's table to %q, "+
 					"want %q", got, table)
@@ -1052,7 +1052,7 @@ func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 			}
 			for _, call := range []string{"cmd dmsetup message " + clone,
 				"cmd dmsetup reload " + clone, "cmd dmsetup remove " + clone,
-				"cmd dmsetup create " + clone, "cmd blkdiscard"} {
+				"cmd dmsetup create " + clone, "discard --offset"} {
 				assertNoCall(t, node, call)
 			}
 			assertParked(t, srv, node, testNs, testTd, "a broken dm-clone")

@@ -904,7 +904,7 @@ func (s *Server) AppendCloneBitmap(
 		// (architecture.md, Bitmap push protocol; [D8]). Overwriting would
 		// keep only the last page and place its bits at the chunk's own
 		// offset, which PushCloneBitmap would then hand the primary as "these
-		// blocks were never written" and the agent would blkdiscard regions
+		// blocks were never written" and the agent would discard regions
 		// the source really wrote.
 		//
 		// The zero value of the read is what makes "create if absent" fall

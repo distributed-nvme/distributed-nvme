@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1722,5 +1723,320 @@ func TestReadBlockDirectAt(t *testing.T) {
 	if recs := capture.records(t); len(recs) != 0 {
 		t.Errorf("the raw helpers logged %d records: %s",
 			len(recs), capture.buf.String())
+	}
+}
+
+// TestDiscardRanges runs DiscardRanges over a regular file with the ioctl
+// replaced: one open, the ranges in order, the count done and the first error
+// returned, none sent after it, and none at all on a ctx already cancelled;
+// the device is closed on every return.
+func TestDiscardRanges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dev")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("planting %s: %v", path, err)
+	}
+	ranges := []DiscardRange{
+		{Offset: 0, Length: 512}, {Offset: 1024, Length: 512},
+		{Offset: 2048, Length: 512}}
+	var mu sync.Mutex
+	var sent []DiscardRange
+	var opened *os.File
+	failAt := -1
+	saved := blkDiscard
+	defer func() { blkDiscard = saved }()
+	blkDiscard = func(f *os.File, r DiscardRange) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if f.Name() != path {
+			return fmt.Errorf("ioctl on %s, want %s", f.Name(), path)
+		}
+		opened = f
+		sent = append(sent, r)
+		if len(sent) == failAt {
+			return errors.New("EIO")
+		}
+		return nil
+	}
+	client := NewLimitedOsClient(0)
+	for _, tc := range []struct {
+		name      string
+		failAt    int
+		cancelled bool
+		done      int
+		sent      int
+		wantErr   bool
+	}{
+		{"every range", -1, false, 3, 3, false},
+		{"the second refused", 2, false, 1, 2, true},
+		{"a ctx cancelled before the call", -1, true, 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			sent, failAt, opened = nil, tc.failAt, nil
+			mu.Unlock()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			done, err := client.DiscardRanges(ctx, path, ranges)
+			if done != tc.done || (err != nil) != tc.wantErr {
+				t.Fatalf("DiscardRanges = %d, %v; want %d, error %v",
+					done, err, tc.done, tc.wantErr)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(sent) != tc.sent ||
+				!slices.Equal(sent, ranges[:tc.sent]) {
+				t.Fatalf("sent %v, want the first %d", sent, tc.sent)
+			}
+			if opened != nil {
+				if _, err := opened.Stat(); !errors.Is(err, os.ErrClosed) {
+					t.Fatalf("the device is still open after the return: %v",
+						err)
+				}
+			}
+		})
+	}
+	if _, err := client.DiscardRanges(context.Background(),
+		path+"-missing", ranges); err == nil {
+		t.Fatalf("DiscardRanges of a missing device answered no error")
+	}
+}
+
+// errAfterCtx reads as cancelled through Err once n has reached one, while
+// its Done never closes: it shows the read of ctx before each range on its
+// own, apart from the wait on a range in flight.
+type errAfterCtx struct {
+	context.Context
+	n *atomic.Int32
+}
+
+func (c errAfterCtx) Err() error {
+	if c.n.Load() >= 1 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestDiscardRangesStopsAtTheNextRange: a caller that goes away while a range
+// runs gets no further range, and the call counts the range the kernel
+// answered.
+func TestDiscardRangesStopsAtTheNextRange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dev")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("planting %s: %v", path, err)
+	}
+	var sent atomic.Int32
+	saved := blkDiscard
+	defer func() { blkDiscard = saved }()
+	blkDiscard = func(f *os.File, r DiscardRange) error {
+		sent.Add(1)
+		return nil
+	}
+	released := 0
+	done, err := discardRanges(errAfterCtx{context.Background(), &sent},
+		path, []DiscardRange{{Offset: 0, Length: 512},
+			{Offset: 1024, Length: 512}}, func() { released++ })
+	if done != 1 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("discardRanges = %d, %v; want 1, context.Canceled",
+			done, err)
+	}
+	if sent.Load() != 1 || released != 1 {
+		t.Fatalf("sent %d ranges and released %d times, want 1 and 1",
+			sent.Load(), released)
+	}
+}
+
+// TestDiscardRangesBoundsAStalledRange: a discard the kernel does not answer
+// is waited for no longer than the soft timeout, or than the caller stays;
+// the call returns an error naming it and sends no later range. The stalled
+// ioctl is left to finish, and only once it has does the device close and
+// the call's slot go back.
+func TestDiscardRangesBoundsAStalledRange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dev")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("planting %s: %v", path, err)
+	}
+	savedIoctl, savedTimeout := blkDiscard, discardSoftTimeout
+	defer func() { blkDiscard, discardSoftTimeout = savedIoctl, savedTimeout }()
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		cancel  bool
+		want    string
+	}{
+		{"the soft timeout", 50 * time.Millisecond, false, "did not answer"},
+		{"the caller gone", time.Hour, true, context.Canceled.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			discardSoftTimeout = tc.timeout
+			unblock := make(chan struct{})
+			entered := make(chan *os.File, 2)
+			blkDiscard = func(f *os.File, r DiscardRange) error {
+				entered <- f
+				<-unblock
+				return nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				go func() { <-entered; cancel() }()
+			}
+			released := make(chan struct{}, 2)
+			start := time.Now()
+			done, err := discardRanges(ctx, path, []DiscardRange{
+				{Offset: 0, Length: 512}, {Offset: 1024, Length: 512}},
+				func() { released <- struct{}{} })
+			if done != 0 || err == nil ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("discardRanges = %d, %v; want 0 and %q",
+					done, err, tc.want)
+			}
+			if time.Since(start) > 5*time.Second {
+				t.Fatalf("returned after %v", time.Since(start))
+			}
+			var f *os.File
+			if tc.cancel {
+				// The cancelling goroutine took the one entry.
+			} else {
+				f = <-entered
+			}
+			select {
+			case <-released:
+				t.Fatalf("the slot went back while the ioctl still ran")
+			case <-time.After(50 * time.Millisecond):
+			}
+			if f != nil {
+				if _, err := f.Stat(); err != nil {
+					t.Fatalf("the device closed under its ioctl: %v", err)
+				}
+			}
+			close(unblock)
+			select {
+			case <-released:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the slot never went back after the ioctl ended")
+			}
+			if f != nil {
+				if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+					t.Fatalf("the device is open after its ioctl: %v", err)
+				}
+			}
+			if len(entered) != 0 {
+				t.Fatalf("a later range was sent")
+			}
+		})
+	}
+}
+
+// TestDiscardRangesSlotIsHeldUntilTheKernelAnswers: with a limit of one, a
+// call whose range was given up on still holds the client's slot, so the
+// next operation waits for the kernel's answer, as it would wait for a
+// command's stuck child.
+func TestDiscardRangesSlotIsHeldUntilTheKernelAnswers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dev")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("planting %s: %v", path, err)
+	}
+	savedIoctl, savedTimeout := blkDiscard, discardSoftTimeout
+	defer func() { blkDiscard, discardSoftTimeout = savedIoctl, savedTimeout }()
+	discardSoftTimeout = 20 * time.Millisecond
+	unblock := make(chan struct{})
+	blkDiscard = func(f *os.File, r DiscardRange) error {
+		<-unblock
+		return nil
+	}
+	client := NewLimitedOsClient(1)
+	if _, err := client.DiscardRanges(context.Background(), path,
+		[]DiscardRange{{Offset: 0, Length: 512}}); err == nil {
+		t.Fatalf("the stalled range answered no error")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(),
+		100*time.Millisecond)
+	defer cancel()
+	if _, err := client.ReadFile(ctx, path); err == nil {
+		t.Fatalf("an operation got the slot while the ioctl still ran")
+	}
+	close(unblock)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if _, err := client.ReadFile(ctx2, path); err != nil {
+		t.Fatalf("the slot never came back: %v", err)
+	}
+}
+
+// TestDiscardRangesRecord: one "os discard ranges" record per call, with the
+// path, the number of ranges asked, the number done and at most
+// discardLogRanges of the ranges as [offset, length] pairs, plus the error.
+func TestDiscardRangesRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dev")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("planting %s: %v", path, err)
+	}
+	saved := blkDiscard
+	defer func() { blkDiscard = saved }()
+	var sent atomic.Int32
+	blkDiscard = func(f *os.File, r DiscardRange) error {
+		if sent.Add(1) == 4 {
+			return errors.New("EIO")
+		}
+		return nil
+	}
+	ranges := make([]DiscardRange, discardLogRanges+6)
+	for i := range ranges {
+		ranges[i] = DiscardRange{Offset: uint64(i) * 1024, Length: 512}
+	}
+	capture := captureLogs(t)
+	done, err := NewLimitedOsClient(0).DiscardRanges(
+		context.Background(), path, ranges)
+	if done != 3 || err == nil {
+		t.Fatalf("DiscardRanges = %d, %v; want 3 and an error", done, err)
+	}
+	rec := capture.onlyMsg(t, "os discard ranges")
+	if rec["path"] != path || rec["range_cnt"] != float64(len(ranges)) ||
+		rec["done"] != float64(3) || rec["error"] == nil {
+		t.Fatalf("record %v", rec)
+	}
+	pairs, ok := rec["ranges"].([]any)
+	if !ok || len(pairs) != discardLogRanges {
+		t.Fatalf("the record lists %v, want %d pairs", rec["ranges"],
+			discardLogRanges)
+	}
+	if first, ok := pairs[1].([]any); !ok || len(first) != 2 ||
+		first[0] != float64(1024) || first[1] != float64(512) {
+		t.Fatalf("the second pair reads %v, want [1024 512]", pairs[1])
+	}
+}
+
+// TestDiscardRangesKernelInterface pins what reaches the kernel: an
+// exclusive write open, as `blkdiscard` without `--force` makes, BLKDISCARD's
+// number, its argument as start then length, and the ioctl refused on a file
+// that is no block device, naming the range.
+func TestDiscardRangesKernelInterface(t *testing.T) {
+	if discardOpenFlags != os.O_WRONLY|syscall.O_EXCL {
+		t.Fatalf("open flags %#x, want O_WRONLY|O_EXCL", discardOpenFlags)
+	}
+	if blkDiscardIoctl != 0x12<<8|119 {
+		t.Fatalf("ioctl %#x, want _IO(0x12, 119)", blkDiscardIoctl)
+	}
+	if got := discardArg(DiscardRange{Offset: 4096, Length: 512}); got !=
+		[2]uint64{4096, 512} {
+		t.Fatalf("argument %v, want [4096 512]", got)
+	}
+	path := filepath.Join(t.TempDir(), "dev")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("planting %s: %v", path, err)
+	}
+	f, err := os.OpenFile(path, discardOpenFlags, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	err = blkDiscard(f, DiscardRange{Offset: 1024, Length: 512})
+	if !errors.Is(err, syscall.ENOTTY) ||
+		!strings.Contains(err.Error(), "offset=1024 length=512") {
+		t.Fatalf("BLKDISCARD on a regular file = %v; want ENOTTY naming "+
+			"the range", err)
 	}
 }

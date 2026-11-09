@@ -126,6 +126,13 @@ type OsClient interface {
 	// descriptor before returning.
 	WriteBlock(ctx context.Context, path string, offset uint64, data []byte) (err error)
 
+	// DiscardRanges discards byte ranges of the block device at path in the
+	// caller's own process: one open, then one BLKDISCARD ioctl per range,
+	// in order, with ctx checked before each. It returns how many ranges it
+	// discarded and the first error, after which it discards no more. One
+	// "os discard ranges" record covers the whole call.
+	DiscardRanges(ctx context.Context, path string, ranges []DiscardRange) (done int, err error)
+
 	// ReadProto loads a raw Protobuf binary file from disk and deserializes
 	// it into a target message struct (target must be a non-nil pointer,
 	// e.g. &pb.SyncupDnRequest{}).
@@ -486,6 +493,135 @@ func readBlockAt(path string, offset uint64, length uint64) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// DiscardRange is one byte range of OsClient.DiscardRanges.
+type DiscardRange struct {
+	Offset uint64
+	Length uint64
+}
+
+// discardLogRanges bounds the ranges an "os discard ranges" record lists:
+// a fragmented clone source can bring hundreds of thousands, and the record
+// carries their count whatever the bound.
+const discardLogRanges = 64
+
+// blkDiscardIoctl is BLKDISCARD, _IO(0x12, 119): discard the [offset,
+// length) byte range its argument holds.
+const blkDiscardIoctl = 0x1277
+
+// discardOpenFlags open the device for DiscardRanges exclusively, as
+// `blkdiscard` without `--force` does: a device another dm table maps, or
+// that anything else holds, is refused EBUSY at once (osclient.md,
+// DiscardRanges).
+const discardOpenFlags = os.O_WRONLY | syscall.O_EXCL
+
+// discardArg is BLKDISCARD's argument for one range: its start, then its
+// length, in bytes.
+func discardArg(r DiscardRange) [2]uint64 {
+	return [2]uint64{r.Offset, r.Length}
+}
+
+// blkDiscard sends one BLKDISCARD on an open device. A variable, so the
+// package's tests can run DiscardRanges over a regular file.
+var blkDiscard = func(f *os.File, r DiscardRange) error {
+	arg := discardArg(r)
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(),
+		blkDiscardIoctl, uintptr(unsafe.Pointer(&arg[0]))); errno != 0 {
+		return fmt.Errorf("BLKDISCARD %s offset=%d length=%d: %w",
+			f.Name(), r.Offset, r.Length, errno)
+	}
+	return nil
+}
+
+func (c *LimitedOsClient) DiscardRanges(
+	ctx context.Context,
+	path string,
+	ranges []DiscardRange,
+) (int, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return 0, err
+	}
+	// The slot goes back when the device is closed, which for a range given
+	// up on is when the kernel answers it, as a command's slot goes back
+	// only once its child is reaped (osclient.md, DiscardRanges).
+	done, err := discardRanges(ctx, path, ranges, func() { c.sem.Release(1) })
+	logged := ranges
+	if len(logged) > discardLogRanges {
+		logged = logged[:discardLogRanges]
+	}
+	pairs := make([][2]uint64, len(logged))
+	for i, r := range logged {
+		pairs[i] = discardArg(r)
+	}
+	attrs := []any{
+		slog.String("path", path),
+		slog.Int("range_cnt", len(ranges)),
+		slog.Int("done", done),
+		slog.Any("ranges", pairs),
+	}
+	slog.InfoContext(ctx, "os discard ranges", appendErr(attrs, err)...)
+	return done, err
+}
+
+// discardSoftTimeout bounds each range of DiscardRanges, as CmdSoftTimeout
+// bounds a command. A variable, so the package's tests need not wait it out.
+var discardSoftTimeout = CmdSoftTimeout * time.Second
+
+// discardRanges is DiscardRanges without the slot and the record; release
+// runs exactly once, when the device is closed. Each ioctl runs on its own
+// goroutine and is waited for no longer than the ctx and discardSoftTimeout
+// allow: one the kernel has not answered by then is left to finish there,
+// as a killed child's ioctl is, and the device closes, and release runs,
+// once it returns. ctx is read before each range, so a cancelled caller
+// sends no further range.
+func discardRanges(
+	ctx context.Context,
+	path string,
+	ranges []DiscardRange,
+	release func(),
+) (int, error) {
+	if err := ctx.Err(); err != nil {
+		release()
+		return 0, err
+	}
+	f, err := os.OpenFile(path, discardOpenFlags, 0)
+	if err != nil {
+		release()
+		return 0, err
+	}
+	closeNow := func() {
+		f.Close()
+		release()
+	}
+	for i, r := range ranges {
+		if err := ctx.Err(); err != nil {
+			closeNow()
+			return i, err
+		}
+		errc := make(chan error, 1)
+		go func() { errc <- blkDiscard(f, r) }()
+		timer := time.NewTimer(discardSoftTimeout)
+		select {
+		case err := <-errc:
+			timer.Stop()
+			if err != nil {
+				closeNow()
+				return i, err
+			}
+		case <-ctx.Done():
+			timer.Stop()
+			go func() { <-errc; closeNow() }()
+			return i, ctx.Err()
+		case <-timer.C:
+			go func() { <-errc; closeNow() }()
+			return i, fmt.Errorf(
+				"BLKDISCARD %s offset=%d length=%d did not answer within %v",
+				path, r.Offset, r.Length, discardSoftTimeout)
+		}
+	}
+	closeNow()
+	return len(ranges), nil
 }
 
 func (c *LimitedOsClient) WriteBlock(

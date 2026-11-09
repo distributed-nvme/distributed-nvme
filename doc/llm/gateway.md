@@ -1214,7 +1214,7 @@ below name.
   concatenate into exactly the bytes that chunk holds (`architecture.md`,
   Bitmap push protocol), so a replace would keep only the last page and
   place its bits at the chunk's own offset, which `PushCloneBitmap` would
-  then hand the primary as "never written" and the agent would `blkdiscard`
+  then hand the primary as "never written" and the agent would discard
   regions the source really wrote. The `Clone` record is **not rewritten**:
   it carries no chunk count, and how many chunks a clone holds is how many
   `CloneBitmap` keys it has — which is what the drain and `PushCloneBitmap`

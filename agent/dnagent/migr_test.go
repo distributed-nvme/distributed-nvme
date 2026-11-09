@@ -112,7 +112,7 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	}
 	// Every dnv dm-clone carries both features (DN13 step 4). The dn
 	// hazard is after the cutover (architecture.md, Migration, dst step 5): a
-	// skip-bitmap chunk `blkdiscard`ing
+	// skip-bitmap chunk discarding
 	// a region the host already hydrated must stay metadata-only.
 	create := node.callsMatching("cmd dmsetup create " + cloneName)
 	if len(create) != 1 ||
@@ -1310,7 +1310,7 @@ func TestPushHasNoRevisionGate(t *testing.T) {
 	assertOrder(t, node,
 		"writeproto "+nf.LocalMigrBmPath(
 			testCluster, testDn, testSp, testMigrId, 0),
-		"cmd blkdiscard --offset 3145728 --length 1048576 "+
+		"discard --offset 3145728 --length 1048576 "+
 			nf.DmPath(cloneName),
 	)
 	// And it is in the applied set the next reply reports, which is the only
@@ -1378,7 +1378,7 @@ func TestPushMigrBitmap(t *testing.T) {
 	// SH21).
 	assertOrder(t, node,
 		"writeproto "+chunkPath,
-		"cmd blkdiscard --offset 3145728 --length 1048576 "+
+		"discard --offset 3145728 --length 1048576 "+
 			nf.DmPath(cloneName),
 	)
 	if got := node.dms[cloneName].discards; len(got) != 2 ||
@@ -1435,7 +1435,7 @@ func TestPushMigrBitmapWithoutDmClone(t *testing.T) {
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	if node.hasCall("cmd blkdiscard --offset") {
+	if node.hasCall("discard --offset") {
 		t.Error("discarded without a dm-clone")
 	}
 	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
@@ -1449,7 +1449,7 @@ func TestPushMigrBitmapWithoutDmClone(t *testing.T) {
 		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if !node.hasCall("cmd blkdiscard --offset 3145728") {
+	if !node.hasCall("discard --offset 3145728") {
 		t.Error("the chunk was not re-applied when the dm-clone appeared")
 	}
 }
@@ -1468,7 +1468,7 @@ func TestPushMigrBitmapNonContiguousPrefix(t *testing.T) {
 		ctx, pushReq(1, testMigrId, []byte{0xff})); err != nil {
 		t.Fatalf("PushMigrBitmap: %v", err)
 	}
-	if node.hasCall("cmd blkdiscard --offset") {
+	if node.hasCall("discard --offset") {
 		t.Error("applied a chunk with no contiguous prefix")
 	}
 	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))

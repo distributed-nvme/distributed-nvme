@@ -3908,7 +3908,7 @@ limits).
   applies nothing: the applied set keeps the chunk as it held it before
   that push until a push rewrites the file or a later restart loads it
   (`dnagent.md` SH21). Re-applying a chunk is always
-  harmless — re-`blkdiscard`ing an already-hydrated dm-clone region is a
+  harmless — discarding an already-hydrated dm-clone region again is a
   no-op, which holds only because every dnv dm-clone carries
   `no_discard_passdown` ([D7]; `cnagent.md` CN18). Bitmap push protocol
   and [D7] give the whole protocol.
@@ -3951,7 +3951,7 @@ limits).
 * `PushMigrBitmap` delivers one `MigrBitmap` chunk (`side_pointer`,
   `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per
   Bitmap push protocol: persist the chunk at `LocalMigrBmPath`, then
-  recompute and `blkdiscard` the fully skippable dm-clone regions
+  recompute and discard the fully skippable dm-clone regions
   (Migrations, raid0 bitmap math). Reply `agent_reply` only.
 * `GetDnInfo` and `GetSideInfo` return the agent's latest observation of
   the DN or the side from memory, without changing anything, reading the
@@ -3991,7 +3991,7 @@ limits).
   `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap`) to the **primary**
   cntlr's agent, per Bitmap push protocol: persist the chunk at the
   `LocalCloneBmPath` of its pair, translate through raid0 bitmap math,
-  `blkdiscard` the dm-clone. Safe at any time for a chunk read when Clones
+  discard on the dm-clone. Safe at any time for a chunk read when Clones
   says ([D3], [D7]).
   Reply `agent_reply` only.
 * `GetCnInfo` and `GetCntlrInfo` return the agent's latest observation of
@@ -4322,7 +4322,7 @@ per-RPC roles:
 | request fields | `cluster_id`, `dn_id`, `side_pointer`, `migr_id`, `bm_idx`, `bitmap` (no `revision`: below) | `cluster_id`, `cn_id`, `cntlr_pointer`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap` (likewise) |
 | local chunk file | `LocalMigrBmPath` of the cluster, dn, sp, migration and `bm_idx` | `LocalCloneBmPath` of the cluster, cn, sp, clone and the pair |
 | applied-set report | `SyncupSideReply.bm_info` (`BitmapInfo.res_id` the `migr_id`, applied set in `bm_idx_list`) | `SyncupCntlrReply.bm_info_list` (one `BitmapInfo` per clone, `res_id` the `clone_id`, applied set in `chunk_id_list` as `(src_slice_idx, bm_idx)` pairs) |
-| apply action | shift by the leg's `meta_blocks` (Migrations), then raid0 bitmap math → `blkdiscard` on `DnMigrFinalName` | raid0 bitmap math → `blkdiscard` on `CnCloneFinalName` |
+| apply action | shift by the leg's `meta_blocks` (Migrations), then raid0 bitmap math → discard on `DnMigrFinalName` | raid0 bitmap math → discard on `CnCloneFinalName` |
 
 **Why chunked, why ordered.** A whole bitmap might be too large for one etcd
 value or one gRPC message (`GetThinDeviceBitmap` and `GetLegBitmap` are
@@ -4386,7 +4386,7 @@ only then are the fully skippable dm-clone regions recomputed — for a
 migration from the contiguous prefix of its chunks from `bm_idx` zero,
 shifted by the leg's `meta_blocks` (Migrations); for a clone from every
 present chunk, read in place, an absent chunk, a short chunk's tail and a
-slice holding no chunk all reading as written — and `blkdiscard`ed onto
+slice holding no chunk all reading as written — and discarded onto
 `DnMigrFinalName` or `CnCloneFinalName` (raid0 bitmap math). A chunk whose
 dm-clone does not exist yet still counts as applied and is re-applied
 whenever the dm-clone is (re)created, by a new primary or after a CN
@@ -5312,7 +5312,7 @@ DN reboot resumes hydration where it left off, as a clone's copy goes on
 from the metadata on its clone meta group (Clone metadata durability). The
 optional bitmap fast-path: `GetLegBitmap` (paged) → `AppendMigrationBitmap`
 → the worker's `PushMigrBitmap` (Bitmap push protocol) → the destination
-agent persists each chunk at `LocalMigrBmPath` and `blkdiscard`s
+agent persists each chunk at `LocalMigrBmPath` and discards
 never-written regions so that they are never copied (Migrations, Bitmap
 reads, raid0 bitmap math).
 A skipped region keeps what the destination's recycled extents held, which
@@ -5713,7 +5713,7 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
 * Optional bitmap fast-path: per sp1 slice, `GetThinDeviceBitmap`
   (paged) → `AppendCloneBitmap` with that slice as `src_slice_idx` on sp2
   → the worker's `PushCloneBitmap` (Bitmap push protocol) → the sp2
-  primary persists each chunk at `LocalCloneBmPath` and `blkdiscard`s
+  primary persists each chunk at `LocalCloneBmPath` and discards
   (raid0 bitmap math). This is safe while IO runs through the dm-clone,
   provided every page was read after the source stopped taking writes
   (Clones; [D3], [D7]).
@@ -5767,7 +5767,7 @@ applying a source's `CloneBitmap`s and `MigrBitmap`s (Bitmap push protocol)
 use it with the dm-clone region as the region size — the destination
 `block_size`, which may exceed A's stripe size; a region then spans
 several source slices and *writtenA* simply ORs across all of them. They
-`blkdiscard` region *r* iff not *writtenA(r)*. For a migration they first
+discard region *r* iff not *writtenA(r)*. For a migration they first
 shift by the leg's `meta_blocks` (Migrations). The agent carries this out
 as `dnagent.md` SH22 and `cnagent.md` CN22 say.
 
@@ -6364,7 +6364,7 @@ document and the component documents cite it by its id.
 * **[D3] Empty destination td.** A clone's destination td must never have
   been written before the clone (the precondition of Clones). The source
   bitmaps mark the regions the source never wrote, and the primary
-  `blkdiscard`s those regions on the dm-clone (Bitmap push protocol), which
+  discards those regions on the dm-clone (Bitmap push protocol), which
   marks them copied without copying them, so each such region then reads
   the destination's own blocks — zeros only in a thin device never written.
   The control plane cannot verify it cheaply; it is a documented contract,
@@ -6416,13 +6416,13 @@ document and the component documents cite it by its id.
   dm-clone features — `no_hydration` **and** `no_discard_passdown` — are
   mandatory
   on **every** dnv dm-clone, cn clone and dn migration alike
-  (`agent/dm.go` builds the table), because `blkdiscard` must stay
+  (`agent/dm.go` builds the table), because a discard must stay
   metadata-only: with passdown enabled dm-clone also remaps the discard to
   the destination device, and passdown is on by default whenever the
   destination's discard granularity is at most one region — which both a
   raid0 over thin volumes (cn) and a dm-linear over a raw disk (dn)
   satisfy. Without it the idempotent re-apply this decision assumes, and
-  the Common agent rules' "re-`blkdiscard`ing an already-hydrated region is
+  the Common agent rules' "discarding an already-hydrated region again is
   a no-op", would destroy acknowledged writes: a chunk read from the CN
   thin metadata *before* a host write hydrated region *r* can arrive
   *after* it, and the resulting discard would reach the destination. The
@@ -6901,7 +6901,8 @@ that component's document and only pointed to here.
   (Common validation) wherever the command's child can be killed; one
   blocked in an uninterruptible kernel wait is not (Common validation), nor
   is an in-process sysfs, configfs or device access once its syscall has
-  started (`dnagent.md` SH15). The cn sweep's `nvme disconnect`, whose
+  started (`dnagent.md` SH15), the discards of a chunk apply aside, which
+  give up on a range at the soft timeout (`osclient.md`, DiscardRanges). The cn sweep's `nvme disconnect`, whose
   delete can wait out the kernel's admin timeout, runs off the locks for
   that reason (`cnagent.md` CN10 and CN21); the disconnects that still run
   under a lock are each role's own limit (`cnagent.md`, Known limits;

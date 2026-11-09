@@ -251,7 +251,10 @@ and, like the CN11 probers, takes no SH11 lock at all. A background read
 reads for the round that started it: it carries that round's trace id,
 minting one only when that round had none, so its records, a verdict that
 is not clean among them, name the round that brought them; and it takes
-the SH11 or SH12 locks for that one read.
+the SH11 or SH12 locks for that one read. One goroutine outlives its RPC
+inside the `OsClient` itself: a discard given up on at the soft timeout
+(`osclient.md`, DiscardRanges), which ends when the kernel answers it and
+which no `WaitBackground` joins.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
@@ -570,7 +573,9 @@ once, before it (`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for
 a listing, `osclient.md`, ReadDir; for a modification-time read,
 `osclient.md`, ReadMtime; for a device-number read, `osclient.md`,
 ReadDevNo), so a sysfs, configfs or device access the kernel holds returns
-only when the kernel does. A check round and an info read probe nothing
+only when the kernel does. The discards of a chunk apply are the exception:
+the call returns at the soft timeout and leaves a discard the kernel holds
+to finish there (`osclient.md`, DiscardRanges). A check round and an info read probe nothing
 (SH28), so a probe under a lock that runs long holds up the object's next
 observation and the calls that wait for its locks, never the reply to a
 round or an info read, and the worker judges that observation's age
@@ -698,7 +703,10 @@ SIGTERM and SIGKILL). A role package that calls the `OsClient` directly
 instead of through a wrapper — `cnagent.md` CN25's read of the `thin_dump`
 file, and the dn's raw-device `ReadBlock`/`WriteBlock` calls of the [D13]
 disk metadata (`DiskMeta`) — takes the same bound from the exported
-`agent.CmdCtx`. The bound holds in full only for a child the signals end.
+`agent.CmdCtx`. `Dm.DiscardRanges` is the one wrapper call that passes its
+caller's ctx on unchanged: the `OsClient` bounds each of its ranges itself
+(`osclient.md`, DiscardRanges). The bound holds in full only for a child the
+signals end.
 An in-process `OsClient` call — a directory listing, a modification-time
 read, a device-number read, a file, proto or block read or write — is
 bounded only until its syscall starts: its ctx is checked once, before it
@@ -1026,7 +1034,7 @@ migration's chunk placement (concatenation in `bm_idx` order,
 `ChunkSet.ContiguousPrefix`, SH23), the store of a clone's chunks
 (`CloneChunkSet`), each self-positioned by its `src_slice_idx` and `bm_idx`
 pair at the fixed capacity `CloneBmChunkBytes`, and the
-fully-skippable-region to `blkdiscard` range computation (`SkipRanges`,
+fully-skippable-region to discard range computation (`SkipRanges`,
 `ApplySkipRanges`). Where a clone chunk's bits land, and the fold over the
 source geometry, are the cn agent's (`cnagent.md`, Files). The single
 wire-convention inversion
@@ -2683,7 +2691,7 @@ the connection is later attributed to this agent (DN6); the dm-clone of step
 (4) carries the features **no_hydration and no_discard_passdown** — both
 are mandatory on **every** dnv dm-clone, dn and cn alike (`cnagent.md`
 CN18), because the bitmap protocols of `architecture.md`, Bitmap push
-protocol and raid0 bitmap math, use `blkdiscard` on a dm-clone as the
+protocol and raid0 bitmap math, use a discard on a dm-clone as the
 metadata-only "mark this region hydrated" primitive: dm-clone turns discard
 passdown on by default whenever the destination's discard granularity is no
 larger than one region — a dm-linear over a raw disk always satisfies that
@@ -2692,7 +2700,7 @@ larger than one region — a dm-linear over a raw disk always satisfies that
 destination dm-clone, a host write hydrates region *r*, and a skip-bitmap
 chunk whose bit for *r* was read from the CN thin metadata before that
 write arrives later — pushes are legal at any time and a restart re-applies
-every stored chunk — so the resulting `blkdiscard` would destroy the only
+every stored chunk — so the resulting discard would destroy the only
 copy of an acknowledged write. Without passdown the same discard is the
 metadata no-op that `architecture.md`, Bitmap push protocol, and
 `architecture.md`, [D7] assume, and a pass that creates the dm-clone
@@ -2974,7 +2982,7 @@ side records the `migr_id` its stored chunks belong to, and a destination
 converge whose `migr_id` differs drops them — files included — before step
 (2); a push naming another `migr_id` never gets that far (DN15). Migration
 ids are never reused, so a mismatch is proof the chunks describe a
-different copy, and applying them would `blkdiscard` regions this migration
+different copy, and applying them would discard regions this migration
 never copied, leaving the destination serving whatever its own extents
 hold, which may be an earlier side's bytes (`architecture.md`, [D15]),
 where the source's data should be.
@@ -3022,12 +3030,14 @@ harmless — while rejecting it would throw away work the worker has already
 done and need a whole re-sync to re-drive (`dnv-worker.md` BM3). Then SH21
 to SH23: persist the chunk at `LocalMigrBmPath`, recompute from the applied
 set's contiguous prefix (SH23; shifted by the leg's `meta_blocks`),
-`blkdiscard` the fully-skippable regions of `DnMigrFinalName`. If the
+discard the fully-skippable regions of `DnMigrFinalName`, in one call of
+the agent's own process (`OsClient.DiscardRanges`: one exclusive open and one
+BLKDISCARD per range, no child process). If the
 dm-clone does not currently exist — not built yet, suppressed by
 `sp_level`, or still behind DN13's provisioning gate — the file still
 counts as applied; chunks are re-applied whenever the dm-clone is
 (re)created. A **failed persist is still acked code zero**, with the error
-logged and neither the recompute nor the `blkdiscard` attempted
+logged and neither the recompute nor the discard attempted
 (`architecture.md`, Bitmap push protocol): not persisted is not applied, so
 the push leaves the applied set as it was (SH21), and a chunk not yet in
 it stays out, even when only the directory sync after the rename failed
@@ -3372,6 +3382,16 @@ else reported through `agent_reply` is still a protocol-level refusal.
   linked, so a read never names a transport attribute that differs. It
   waits for the node's next `SyncupDn` or `SyncupCn` for another reason,
   or for the agent's next start.
+* A migration's bitmap apply still takes time that grows with its ranges:
+  each push of a changed chunk applies the whole skip set again under the
+  side's DN1 locks (DN15), each create of the dm-clone does under the
+  converge's locks, and the startup reconcile does for every side under the
+  node write lock. The discards run in the agent's own process, one open
+  and one ioctl per range with no child process each (`osclient.md`,
+  DiscardRanges), but a fragmented source's many ranges still hold the
+  locks for as long as the kernel takes over them. A cancelled push returns
+  at once and leaves the range in flight to the kernel; the ranges it did
+  not reach cost extra copying only, until the next apply.
 * A reload whose load fails leaves its device suspended (OS wrappers), so
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,

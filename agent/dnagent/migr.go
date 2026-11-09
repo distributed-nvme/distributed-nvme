@@ -872,7 +872,7 @@ func (s *DnAgentServer) ensureDmClone(
 	}
 	conf := plan.migrDst.GetDmCloneConf()
 	// no_discard_passdown is mandatory on every dnv dm-clone (DN13 step
-	// 4): `blkdiscard` on a dm-clone is this design's metadata-only "mark
+	// 4): a discard on a dm-clone is this design's metadata-only "mark
 	// this region hydrated" primitive (architecture.md, Bitmap push protocol,
 	// and raid0 bitmap math), and dm-clone
 	// turns passdown on by default whenever the destination's discard
@@ -883,7 +883,7 @@ func (s *DnAgentServer) ensureDmClone(
 	// r, and a skip-bitmap chunk whose bit for r was read from the CN thin
 	// metadata before that write can still arrive later (chunk pushes are
 	// legal at any time, and a restart re-applies every stored chunk). The
-	// agent then `blkdiscard`s r; with passdown that discard would reach the
+	// agent then discards r; with passdown that discard would reach the
 	// side device and destroy the only copy of an acknowledged write. Without
 	// it the same discard is the metadata no-op that
 	// architecture.md, Bitmap push protocol, and [D7] already

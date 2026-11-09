@@ -901,24 +901,31 @@ clone_table() { dmsetup table "$1" 2>/dev/null || echo MISSING; }
 # on any record, or a line that does not parse, fails the whole call, on a
 # C jq and on gojq alike.
 
-# clone_discards <clone dm name> — the blkdiscard records the agent logged
-# against one dm-clone device (the log check of migr_bitmap,
-# dnagent_integtest.md, Cases).
-clone_discards() {
-	jq -rn --arg dev "/dev/mapper/$1" '
-	    inputs
-	    | select(.msg == "os command" and .cmd == "blkdiscard")
-	    | select(.args | index($dev)) | (.args | join(" "))' \
-		"$WORK/agent.log" || return 1
+# discard_lines — every "mark hydrated" discard the agent logged, one
+# "--offset <o> --length <l> <dev>" line per range, from the in-process
+# "os discard ranges" records (osclient.md, DiscardRanges), which list up to
+# 64 ranges each.
+discard_lines() {
+	jq -rn 'inputs
+	    | select(.msg == "os discard ranges")
+	    | .path as $p | (.ranges // [])[]
+	    | "--offset \(.[0]) --length \(.[1]) " + $p' "$WORK/agent.log"
 }
 
-# any_clone_discards — every blkdiscard against any dm-clone device (the
+# clone_discards <clone dm name> — the discards the agent logged against
+# one dm-clone device (the log check of migr_bitmap, dnagent_integtest.md,
+# Cases).
+clone_discards() {
+	local lines
+	lines=$(discard_lines) || return 1
+	printf '%s\n' "$lines" | grep -E -- " /dev/mapper/$1\$" || true
+}
+
+# any_clone_discards — every discard against any dm-clone device (the
 # migr_full check of dnagent_integtest.md, Cases).
 any_clone_discards() {
 	local lines
-	lines=$(jq -rn 'inputs
-	       | select(.msg == "os command" and .cmd == "blkdiscard")
-	       | (.args | join(" "))' "$WORK/agent.log") || return 1
+	lines=$(discard_lines) || return 1
 	printf '%s\n' "$lines" |
 		grep -E '/dev/mapper/dnv-[0-9a-f]{16}-[0-9a-f]{16}-d3-' || true
 }
@@ -944,6 +951,10 @@ mutations() {
 	    inputs
 	    | select(.msg == "os write file direct")
 	      | "write file direct " + .path' "$log" || return 1
+	jq -rn '
+	    inputs
+	    | select(.msg == "os discard ranges")
+	      | "discard " + .path' "$log" || return 1
 	jq -rn '
 	    inputs
 	    | select(.msg == "os command")
@@ -2626,7 +2637,7 @@ migr_declare_dst() { # m revision sp_level cutover_pending
 			"migr $m dst clone"
 		# DN13 step 4: every dnv dm-clone carries no_discard_passdown, without
 		# exception. The dn migration clone is the call site the rule fixed, and
-		# without the feature the "mark this region hydrated" blkdiscard of
+		# without the feature the "mark this region hydrated" discard of
 		# architecture.md, raid0 bitmap math, would also reach the destination
 		# side device and destroy an acknowledged write.
 		#
@@ -3444,7 +3455,7 @@ case_migr_full() {
 		local discards
 		discards=$(helper "${MDSTDN[$m]}" any_clone_discards)
 		[ -z "$discards" ] ||
-			die "migr $m: unexpected dm-clone blkdiscard: $discards"
+			die "migr $m: unexpected dm-clone discard: $discards"
 	}
 
 	run_migration_cases
@@ -3522,8 +3533,8 @@ case_migr_bitmap() {
 		discards=$(helper "${MDSTDN[$m]}" "clone_discards '$clone'")
 		want="--offset 67108864 --length 67108864 /dev/mapper/$clone"
 		assert_eq "$(printf '%s\n' "$discards" | grep -c . || true)" 1 \
-			"migr $m blkdiscard record count on $clone"
-		assert_eq "$discards" "$want" "migr $m blkdiscard range"
+			"migr $m discard count on $clone"
+		assert_eq "$discards" "$want" "migr $m discard range"
 	}
 
 	run_migration_cases

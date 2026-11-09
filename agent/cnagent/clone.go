@@ -645,7 +645,7 @@ func (s *CnAgentServer) ensureDmClone(
 	conf := cp.clone.GetDmCloneConf()
 	// no_discard_passdown is not optional here (CN18 step 3 and [D7]: the
 	// table's `2 no_hydration …`): CN22 marks regions hydrated by
-	// `blkdiscard`ing them, and with passdown enabled dm-clone would remap
+	// discarding them, and with passdown enabled dm-clone would remap
 	// those discards to the destination raid0 — unmapping any host write
 	// that landed on a hydrated region while `auto_resume` let the namespace
 	// serve.

@@ -185,7 +185,7 @@ func migrGetCmd() *cobra.Command {
 // it, or name a chunk already stored with the same bytes. The chunks
 // concatenate in bm_idx order into one bitmap over the leg's DATA region,
 // 1 = never written ⇒ skippable, and the destination DN agent shifts by the
-// leg's `meta_blocks` before blkdiscarding the fully-skippable dm-clone
+// leg's `meta_blocks` before discarding the fully-skippable dm-clone
 // regions (architecture.md, Migrations; architecture.md, raid0 bitmap math).
 //
 // An empty --bm-hex sends an EMPTY bitmap on purpose rather than being

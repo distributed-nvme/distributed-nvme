@@ -6272,13 +6272,14 @@ DIAG_MAX_DN_LOGS=6
 # for dn/cn/host, the plain login user for cp — so it sees the PATH the agents
 # will actually inherit.
 #
-# lsblk and blkdiscard are in the SHARED list because both roles really run
-# them: the dn agent's DevNo (agent/dm.go) is `lsblk`, and so is
-# the cn agent's check before an md create that no array runs under the
-# group's name, NameInUse (agent/cnagent/md.go); blkdiscard runs on
-# both — agent/dnagent/zeroing.go (BlkZeroout, side provisioning:
-# dnagent.md DN9), and ApplySkipRanges (agent/bitmap.go), which marks
-# regions of a dm-clone hydrated on either role.
+# lsblk is in the SHARED list because both roles really run it: the dn
+# agent's DevNo (agent/dm.go) is `lsblk`, and so is the cn agent's check
+# before an md create that no array runs under the group's name, NameInUse
+# (agent/cnagent/md.go). blkdiscard runs on the dn alone — the zeroing of
+# agent/dnagent/zeroing.go (BlkZeroout, side provisioning: dnagent.md DN9);
+# the agents mark dm-clone regions hydrated in their own process
+# (ApplySkipRanges, agent/bitmap.go) — and stays in the shared list since a
+# lab VM may host either role.
 # fallocate is the punch-hole probe below, not anything the run does.
 #
 # THE STANDARD THESE FOUR LISTS ARE HELD TO, because it is the only way to keep

@@ -223,10 +223,12 @@ type fakeDm struct {
 	noDiscardPassdown bool
 	threshold         uint32
 	batchSize         uint32
-	// discards holds the metadata-only `blkdiscard --offset/--length` hints
-	// (dm-clone hydration marking); zeroouts holds the DN9
-	// `blkdiscard --zeroout` side-provisioning writes. They are deliberately
-	// separate — see cmdBlkdiscard.
+	// discards holds the metadata-only discards (dm-clone hydration
+	// marking, discardRanges); zeroouts holds the DN9 `blkdiscard --zeroout`
+	// side-provisioning writes (cmdBlkdiscard). They are deliberately
+	// separate: a migration-dst side zeroes its own dm-linear while the
+	// dm-clone above it takes hydration discards, and one shared list would
+	// make either assertion meaningless.
 	discards []string
 	zeroouts []string
 }
@@ -353,6 +355,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
 		WriteBlockFn:      f.writeBlock,
+		DiscardRangesFn:   f.discardRanges,
 		ReadProtoFn:       f.readProto,
 		WriteProtoFn:      f.writeProto,
 	}
@@ -448,7 +451,7 @@ func (f *fakeNode) indexOfCall(substr string) int {
 
 // indexOfCallFrom is indexOfCall starting at from — what makes assertOrder a
 // subsequence match, so a sequence may name the same call shape twice (two
-// volume-table slot writes around a blkdiscard, say).
+// volume-table slot writes around a discard, say).
 func (f *fakeNode) indexOfCallFrom(substr string, from int) int {
 	calls := f.Calls()
 	for i := from; i < len(calls); i++ {
@@ -1333,6 +1336,45 @@ func (f *fakeNode) newDevNo() string {
 // of 4 KiB logical blocks, the strictest the agent must zero on.
 const fakeLogicalBlock = 4096
 
+// discardRanges answers OsClient.DiscardRanges, the agent's in-process
+// "mark hydrated" discards: one "discard --offset <o> --length <l> <dev>"
+// line per range, in order, each kept in the device's discards list, with
+// ctx checked before each range and the in-process hooks matching each line
+// (inProcessHookErr), so a test can cut a call off part-way.
+func (f *fakeNode) discardRanges(
+	ctx context.Context,
+	path string,
+	ranges []common.DiscardRange,
+) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, r := range ranges {
+		if err := ctx.Err(); err != nil {
+			return i, err
+		}
+		args := fmt.Sprintf("--offset %d --length %d", r.Offset, r.Length)
+		line := "discard " + args + " " + path
+		f.record("%s", line)
+		f.recordTrace(ctx, line)
+		// The kernel refuses a range that does not start and end on the
+		// device's logical block, so a range the agent's arithmetic leaves
+		// misaligned fails here rather than only on a lab disk of 4 KiB
+		// blocks.
+		if r.Offset%fakeLogicalBlock != 0 || r.Length%fakeLogicalBlock != 0 {
+			return i, fmt.Errorf("BLKDISCARD %s offset=%d length=%d: %w",
+				path, r.Offset, r.Length, syscall.EINVAL)
+		}
+		if err := f.inProcessHookErr(line, fmt.Errorf("BLKDISCARD %s: %w",
+			path, syscall.EIO)); err != nil {
+			return i, err
+		}
+		if dm, ok := f.dms[strings.TrimPrefix(path, "/dev/mapper/")]; ok {
+			dm.discards = append(dm.discards, args)
+		}
+	}
+	return len(ranges), nil
+}
+
 func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	dev := args[len(args)-1]
 	// The real tool refuses a range that does not start and end on the
@@ -1352,22 +1394,17 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 			return "", 1
 		}
 	}
-	name := strings.TrimPrefix(dev, "/dev/mapper/")
-	dm, ok := f.dms[name]
-	if !ok {
-		return "", 0
+	// The agent runs `blkdiscard` only to zero (DN9); its hydration
+	// discards run in its own process (discardRanges).
+	if !contains(args, "--zeroout") {
+		f.dispatchStderr = "blkdiscard without --zeroout: the agent " +
+			"discards in its own process"
+		return "", 1
 	}
-	// The DN9 side-provisioning write and the metadata-only "mark this
-	// region hydrated" discard are recorded in separate lists: a
-	// migration-dst side zeroes its own dm-linear while the dm-clone above it
-	// takes hydration discards, and one shared list would make either
-	// assertion meaningless.
-	if contains(args, "--zeroout") {
+	if dm, ok := f.dms[strings.TrimPrefix(dev, "/dev/mapper/")]; ok {
 		dm.zeroouts = append(dm.zeroouts,
 			strings.Join(args[:len(args)-1], " "))
-		return "", 0
 	}
-	dm.discards = append(dm.discards, strings.Join(args[:len(args)-1], " "))
 	return "", 0
 }
 

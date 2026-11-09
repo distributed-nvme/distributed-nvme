@@ -915,7 +915,7 @@ func (s *Server) GetMigration(
 // again after a lost answer is recognised instead of stored twice
 // (architecture.md, Migrations). The bytes are stored verbatim (GW14) — the
 // gateway rewrites no bit and reads none for its meaning; the destination
-// agent is what shifts them by the leg's meta_blocks and blkdiscards the fully
+// agent is what shifts them by the leg's meta_blocks and discards the fully
 // skippable regions.
 func (s *Server) AppendMigrationBitmap(
 	ctx context.Context,

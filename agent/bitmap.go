@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"sort"
+
+	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
 // Bitmap conventions (architecture.md, Bitmap push protocol and
@@ -223,19 +225,22 @@ func SkipRanges(
 	return ranges
 }
 
-// ApplySkipRanges blkdiscards every skippable range of a dm-clone device,
-// which is how a region is marked "already hydrated" without copying it.
-// Re-applying is harmless: discarding an already-hydrated region is a no-op.
+// ApplySkipRanges discards every skippable range of a dm-clone device, which
+// is how a region is marked "already hydrated" without copying it, in one
+// call of the agent's own process (Dm.DiscardRanges). Re-applying is
+// harmless: discarding an already-hydrated region is a no-op.
 func ApplySkipRanges(
 	ctx context.Context,
 	dm *Dm,
 	dev string,
 	ranges []SkipRange,
 ) error {
-	for _, r := range ranges {
-		if err := dm.BlkDiscardRange(ctx, dev, r.Offset, r.Length); err != nil {
-			return err
-		}
+	if len(ranges) == 0 {
+		return nil
 	}
-	return nil
+	discards := make([]common.DiscardRange, len(ranges))
+	for i, r := range ranges {
+		discards[i] = common.DiscardRange{Offset: r.Offset, Length: r.Length}
+	}
+	return dm.DiscardRanges(ctx, dev, discards)
 }
