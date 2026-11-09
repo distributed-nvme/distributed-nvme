@@ -167,10 +167,12 @@ wrapper among the nvme-host wrappers.
 CN-CM1. The `dnagent.md` CM2 flags gain one cn-only flag, `--capacity`: the capacity
 budget in bytes this CN is willing to host; `GetCnSize` replies it
 verbatim, and zero means "use the control-plane default" (`DefaultCnCap`).
-It is the only cn-only flag. `--nvmet-port-id` is a both-roles flag and
-lives in `dnagent.md` CM2 itself: the cn resolves and floor-checks it exactly as the dn
-does (`dnagent.md` CM3), and a cn that keeps the default co-owns the default port with
-a dn agent on the same node (`architecture.md`, Controller node, common).
+It is the only cn-only flag. `--nvmet-port-id` and `--nvmet-qid-max` are
+both-roles flags and live in `dnagent.md` CM2 itself: the cn resolves and
+checks both exactly as the dn does (`dnagent.md` CM3; the queue cap's rule
+is `dnagent.md` SH32), and a cn that keeps the default port id co-owns the
+default port with a dn agent on the same node (`architecture.md`,
+Controller node, common).
 
 Run at most one cn agent per kernel: the flag is not a licence for two,
 and the rule — the cn names that carry no cn id, and why placement
@@ -235,7 +237,8 @@ process's single `OsClient`, the `NameFmt`, the shared `Cmd`, `Store`,
 `Dm`, `Nvmet` and `NvmeHost` wrappers, the cn-only `Md` wrapper, the
 `LegProbeIO` of the CN11 probers, the `LockSet` (object key:
 the `LocalCntlrPath` id tuple), the `--capacity` value and the port conf
-(`PortConf`: the transport flags plus `--nvmet-port-id`). A leaf mutex
+(`PortConf`: the transport flags, `--nvmet-port-id` and `--nvmet-qid-max`).
+A leaf mutex
 guards the in-memory mirrors of the local store — two maps: cn requests,
 and cntlr states (last accepted request, `ResInfo` tracker, a per-clone
 `CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and what

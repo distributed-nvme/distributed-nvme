@@ -101,6 +101,11 @@ type PortConf struct {
 	TrAddr   string
 	TrSvcId  string
 	AnaGrpId []int
+
+	// QidMax is the IO queue cap the agent writes on a subsystem before it
+	// links it to the port (EnsurePortLink, dnagent.md SH32); 0 writes
+	// none. `dnv-agent --nvmet-qid-max` sets it.
+	QidMax int
 }
 
 func (n *Nvmet) portAttrs(conf PortConf) [][2]string {
@@ -903,10 +908,14 @@ func (n *Nvmet) NsEnabledStrict(
 	return enable == "1", nil
 }
 
+// EnsurePortLink links a subsystem to the port, probe-first. Before it
+// makes the link, a qidMax above zero becomes the subsystem's IO queue cap
+// (ensureQidMax, dnagent.md SH32).
 func (n *Nvmet) EnsurePortLink(
 	ctx context.Context,
 	portId int,
 	nqn string,
+	qidMax int,
 ) error {
 	linked, err := n.PortLinked(ctx, portId, nqn)
 	if err != nil {
@@ -915,7 +924,72 @@ func (n *Nvmet) EnsurePortLink(
 	if linked {
 		return nil
 	}
+	if qidMax > 0 {
+		if err := n.ensureQidMax(ctx, nqn, qidMax); err != nil {
+			return err
+		}
+	}
 	return n.symlink(ctx, n.SubsysPath(nqn), n.portLinkPath(portId, nqn))
+}
+
+// ensureQidMax writes a subsystem's IO queue cap, "attr_qid_max", when it
+// reads otherwise and the subsystem is linked to no port at all (dnagent.md
+// SH32): nvmet sizes a controller's queues when it makes the controller,
+// and a write of the cap, even of the value it holds, deletes every
+// controller of the subsystem, which only a port link lets exist. A
+// subsystem linked to any port keeps its cap. The cap is read strictly, so
+// a read that did not answer writes nothing; a cap that is not there is
+// written, which fails on a kernel whose nvmet has none.
+func (n *Nvmet) ensureQidMax(
+	ctx context.Context,
+	nqn string,
+	qidMax int,
+) error {
+	path := n.SubsysPath(nqn) + "/attr_qid_max"
+	want := strconv.Itoa(qidMax)
+	cur, ok, err := n.readAttrStrict(ctx, path)
+	if err != nil {
+		return err
+	}
+	if ok && cur == want {
+		return nil
+	}
+	linked, err := n.linkedToAnyPort(ctx, nqn)
+	if err != nil || linked {
+		return err
+	}
+	return n.writeAttr(ctx, path, want)
+}
+
+// linkedToAnyPort says whether a subsystem is linked to any port of the
+// kernel, this agent's or another's. The ports are listed, and each port's
+// link is looked up in the agent's own process (dirMtime, which reads the
+// link itself, never what it names), where only a link that is not there
+// reads as absent. A ports directory that is not there is an error: the
+// caller has made its own port.
+func (n *Nvmet) linkedToAnyPort(ctx context.Context, nqn string) (bool, error) {
+	portsPath := NvmetRoot + "/ports"
+	ports, ok, err := n.listDir(ctx, portsPath)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("list %s: not there", portsPath)
+	}
+	for _, name := range ports {
+		portId, err := strconv.Atoi(name)
+		if err != nil {
+			continue
+		}
+		_, present, err := n.dirMtime(ctx, n.portLinkPath(portId, nqn))
+		if err != nil {
+			return false, err
+		}
+		if present {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (n *Nvmet) RemovePortLink(

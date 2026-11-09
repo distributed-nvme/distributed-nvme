@@ -99,6 +99,10 @@ The constants this document relies on, whose values and comments
   converges (exactly one port per agent, `architecture.md`, Disk node);
   `dnv-agent --nvmet-port-id` overrides it, which is what lets several
   agents share one node's kernel, each converging its own port.
+* `NvmetQidMax`, the default IO queue cap an agent writes on each
+  subsystem it links to its port (SH32), which `dnv-agent --nvmet-qid-max`
+  overrides, and `NvmetQidMaxLimit`, nvmet's own bound on that cap and its
+  default for a new subsystem.
 * `AnaGrpIdOptimized`, `AnaGrpIdNonOptimized` and `AnaGrpIdInaccessible`,
   the three fixed ANA groups on every node's port ([D4]). The first always
   exists in nvmet and defaults to optimized; the other two are created at
@@ -881,9 +885,11 @@ configfs); directory and link operations go through `RunCommand` (`mkdir`,
 modification time through `OsClient.ReadMtime`, in the agent's own process:
 on the dn a subsystem directory's, for its age, and never an "attr_*"
 file's, whose lookup moves the directory's time on a kernel that stamps the
-directory on an attribute lookup, and on both agents the agent's own port
+directory on an attribute lookup, on both agents the agent's own port
 directory's, for whether it is there (`Nvmet.ProbePort`,
-`Nvmet.ProbePortState`); and directory listings through `RunCommand` as
+`Nvmet.ProbePortState`), and each port's link of a subsystem whose queue
+cap is about to be written, for whether the subsystem is linked there
+(SH32); and directory listings through `RunCommand` as
 well (`ls`), never in the agent's own process (`OsClient.ReadDir`). Reason
 for the time read: it is no listing — it looks up the one directory and
 opens nothing in it — and DN6 reads it for every export without namespace
@@ -952,6 +958,31 @@ SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
   pass skip the disable and then remove a namespace the kernel still has
   enabled. `RemoveSubsystem` and `RemoveNamespace` both read it that way,
   and both propagate the error instead of continuing.
+
+SH32. **The IO queue cap.** Every subsystem an agent of either role links
+to its port — on the dn a side export or a migration source export, on the
+cn a host-facing or a transfer subsystem — gets the agent's
+`--nvmet-qid-max` (CM2) as its "attr_qid_max": the number of IO queues one
+controller of it may create, each its own TCP connection. Without it nvmet
+allows `NvmetQidMaxLimit` queues, and a host makes one per CPU up to that,
+so each path of a large host would hold that many connections, standbys'
+paths included. `Nvmet.EnsurePortLink` writes the cap just before it
+links a subsystem not yet linked to the agent's port, and only when the cap
+reads otherwise and the subsystem is linked to no port at all, this
+agent's or another's on the kernel. Reason: nvmet sizes a controller's
+queues when it makes the controller, and a write of the cap, even of the
+value it holds, deletes every controller of the subsystem, which only a
+port link lets exist, so the cap is written only where no controller can
+exist yet. The cap is read strictly: a read that did not answer writes
+nothing, and the link waits for a later converge. So a linked subsystem is
+never rewritten: one linked before the cap changed, or linked by another
+agent of the kernel with another cap, keeps its cap until it is unlinked
+everywhere or removed. A cap of 0 writes none. A failed write fails the
+link step, which the converge reports as it reports a failed link. Hosts
+need no setting of their own: the target's cap binds every host, the
+Kubernetes driver's connect included (`csi.md` CSI14). A kernel whose nvmet
+has no "attr_qid_max" fails every first link while the cap is above 0; such
+a node runs with `--nvmet-qid-max 0`.
 
 SH20. `nvmehost.go`: `Connect` always passes `--fast_io_fail_tmo` set to
 `DefaultNvmeFastIoFailTmo` and `--ctrl-loss-tmo` set to never give up, the
@@ -1294,7 +1325,10 @@ operator's own input and may differ from these flags, `architecture.md`,
 Components: invocation reference);
 `--nvmet-port-id`, the configfs id of the nvmet port this agent converges
 (several agents on one node's kernel take distinct ids, `architecture.md`,
-Disk node; a value below one is refused, CM3); `--local-store`, the
+Disk node; a value below one is refused, CM3); `--nvmet-qid-max`, the IO
+queue cap the agent writes on each subsystem before it links it to the port
+(SH32; `NvmetQidMax` by default, 0 writes none, and a value outside 0 to
+`NvmetQidMaxLimit` is refused, CM3); `--local-store`, the
 `localStorPrefix` of `common.NewNameFmt` (`DefaultLocalStorPrefix` by
 default; the directory must exist before the agent starts, SH3); and
 `--config`, an optional viper config file. The dn alone takes `--disk`, the
@@ -1320,26 +1354,31 @@ automatic environment reads, and when `--config` is set read that config
 file. All value reads go through viper (so file and environment win per
 viper precedence).
 
-Two checks run **after** that resolution rather than through cobra's own
+Three checks run **after** that resolution rather than through cobra's own
 flag machinery, so that a config file or an environment variable is subject
 to the same rule as a flag: `requireValues` over `requiredCommon` (the
-values both roles must have, plus `--disk` for dn), and the
-`--nvmet-port-id` floor (`nvmetPortIdFromViper`). Below one the
-subcommand's `RunE` returns an error naming the floor and the value it got;
-the root command sets `SilenceUsage`, so `dnv-agent` exits non-zero with no
-usage dump, printing that message **twice** — cobra's own error line plus
-`main`'s own print to stderr — which is what anything grepping the output
-sees. It is the same rule, not the same validation: a non-numeric **flag**
-never reaches the floor, because pflag rejects it at parse time, while
-viper's integer read turns any non-numeric env or config value into zero,
-which the floor then reports as zero. An **empty** env var is ignored
-by viper, so an empty port-id variable leaves the default standing. Every
+values both roles must have, plus `--disk` for dn), the
+`--nvmet-port-id` floor (`nvmetPortIdFromViper`) and the `--nvmet-qid-max`
+range (`nvmetQidMaxFromViper`). A port id below one makes the
+subcommand's `RunE` return an error naming the floor and the value it got,
+and a queue cap outside 0 to `NvmetQidMaxLimit` one naming the range and
+the value as it was given; the root command sets `SilenceUsage`, so
+`dnv-agent` exits non-zero with no usage dump, printing that message
+**twice** — cobra's own error line plus `main`'s own print to stderr —
+which is what anything grepping the output sees. It is the same rule, not
+the same validation: a non-numeric **flag** never reaches either check,
+because pflag rejects it at parse time, while viper's integer read turns
+any non-numeric env or config value into zero, which the port-id floor then
+reports as zero. The queue-cap check parses the resolved value itself, so
+such a value is refused there rather than read as zero, which would turn
+the cap off without a word. An **empty** env var is ignored by viper, so an
+empty variable leaves the default standing. Every
 flag's env spelling is the prefix plus the flag with dashes replaced by
 underscores.
 
-CM4. Each subcommand's `RunE`: bind viper, then run CM3's two checks —
-`requireValues`, and the `--nvmet-port-id` floor whose resolved value is
-carried on to the constructor; a signal-notified ctx for SIGINT and SIGTERM;
+CM4. Each subcommand's `RunE`: bind viper, then run CM3's three checks —
+`requireValues`, then the `--nvmet-port-id` floor and the `--nvmet-qid-max`
+range, whose resolved values are carried on to the constructor; a signal-notified ctx for SIGINT and SIGTERM;
 construct `common.NewNameFmt` over the local store and the process's
 **single** `common.NewLimitedOsClient` (with the default limit); build the
 role server (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call
@@ -1379,7 +1418,8 @@ the background reads of a DN and of a side (SH29) and the converge marks
 formatter, the local store, the `DiskMeta`, the `Dm`, `Nvmet` and
 `NvmeHost` wrappers — the `OsClient`-backed wrappers, no raw client field —
 the `LockSet` (object key = the `LocalSidePath` id tuple), the `--disk`
-path, the port conf (`--tr-*` plus `--nvmet-port-id` as one `PortConf`),
+path, the port conf (`--tr-*`, `--nvmet-port-id` and `--nvmet-qid-max` as
+one `PortConf`),
 the per-object `ResInfo` trackers, each DN's and each side's latest
 observation and running background read (SH28, SH29), the converge marks
 (SH30), the DN8 retry registry (DN13), the per-side zeroing registry and its

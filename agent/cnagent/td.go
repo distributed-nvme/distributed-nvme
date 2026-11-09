@@ -649,7 +649,7 @@ func (s *CnAgentServer) ensureSubsystem(
 			ok = false
 		}
 	}
-	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn)
+	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn, s.port.QidMax)
 	info.SsIdToSubsystem[sp.ssId] = st.tracker.FromErr(ssKey, sp.nqn, "", err)
 	return ok && err == nil
 }

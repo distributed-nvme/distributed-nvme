@@ -277,8 +277,9 @@ type sideState struct {
 // NewDnAgentServer builds the dn role server. oc is the process's single
 // OsClient, localStore the --local-store prefix (the same one nf was built
 // with), disk the --disk device, trConf the transport of this agent's nvmet
-// port and portId the --nvmet-port-id it converges (common.NvmetPortId
-// unless the flag says otherwise).
+// port, portId the --nvmet-port-id it converges (common.NvmetPortId
+// unless the flag says otherwise) and qidMax the --nvmet-qid-max IO queue
+// cap of the subsystems it links (dnagent.md SH32; 0 writes none).
 func NewDnAgentServer(
 	oc common.OsClient,
 	nf *common.NameFmt,
@@ -286,6 +287,7 @@ func NewDnAgentServer(
 	disk string,
 	trConf *pb.NvmeTrConf,
 	portId int,
+	qidMax int,
 ) *DnAgentServer {
 	return &DnAgentServer{
 		nf:                nf,
@@ -312,6 +314,7 @@ func NewDnAgentServer(
 			AdrFam:  trConf.GetAdrFam(),
 			TrAddr:  trConf.GetTrAddr(),
 			TrSvcId: trConf.GetTrSvcId(),
+			QidMax:  qidMax,
 		},
 		dns:     make(map[string]*dnState),
 		sides:   make(map[string]*sideState),

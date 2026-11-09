@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -91,6 +92,11 @@ func addCommonFlags(cmd *cobra.Command) {
 			"(/sys/kernel/config/nvmet/ports/<id>); agents that need their "+
 			"own port take distinct ids, while a dn and a cn on one node "+
 			"may share the default")
+	flags.Int("nvmet-qid-max", common.NvmetQidMax,
+		fmt.Sprintf("IO queue cap (attr_qid_max) written on each nvmet "+
+			"subsystem before it is linked to the port, from 1 to %d; "+
+			"0 writes none and leaves nvmet's default",
+			common.NvmetQidMaxLimit))
 	flags.String("local-store", common.DefaultLocalStorPrefix,
 		"prefix of the agent's local state files")
 	flags.String("config", "", "optional viper config file")
@@ -144,6 +150,21 @@ func nvmetPortIdFromViper() (int, error) {
 	return portId, nil
 }
 
+// nvmetQidMaxFromViper resolves --nvmet-qid-max and refuses a value outside
+// 0..common.NvmetQidMaxLimit, the range nvmet takes plus 0 for "write none".
+// It parses the resolved string itself: viper.GetInt turns a non-numeric env
+// or config value into 0, which here is a valid value that would turn the
+// cap off without a word (CM3).
+func nvmetQidMaxFromViper() (int, error) {
+	raw := strings.TrimSpace(viper.GetString("nvmet-qid-max"))
+	qidMax, err := strconv.Atoi(raw)
+	if err != nil || qidMax < 0 || qidMax > common.NvmetQidMaxLimit {
+		return 0, fmt.Errorf("--nvmet-qid-max must be 0 to %d, got %q",
+			common.NvmetQidMaxLimit, raw)
+	}
+	return qidMax, nil
+}
+
 func trConfFromViper() *pb.NvmeTrConf {
 	return &pb.NvmeTrConf{
 		TrType:  viper.GetString("tr-type"),
@@ -164,6 +185,10 @@ func runDn(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	qidMax, err := nvmetQidMaxFromViper()
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(
 		context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -174,7 +199,7 @@ func runDn(cmd *cobra.Command, args []string) error {
 	oc := common.NewLimitedOsClient(0)
 	srv := dnagent.NewDnAgentServer(
 		oc, nf, localStore, viper.GetString("disk"), trConfFromViper(),
-		portId)
+		portId, qidMax)
 
 	return agent.Serve(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
@@ -202,6 +227,10 @@ func runCn(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	qidMax, err := nvmetQidMaxFromViper()
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(
 		context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -211,7 +240,7 @@ func runCn(cmd *cobra.Command, args []string) error {
 	// The process's single OsClient, shared by every wrapper (osclient.md).
 	oc := common.NewLimitedOsClient(0)
 	srv := cnagent.NewCnAgentServer(oc, nf, localStore,
-		viper.GetUint64("capacity"), trConfFromViper(), portId)
+		viper.GetUint64("capacity"), trConfFromViper(), portId, qidMax)
 
 	return agent.Serve(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),

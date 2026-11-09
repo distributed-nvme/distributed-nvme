@@ -98,7 +98,7 @@ func startTestServerOnPort(
 	t.Helper()
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srv := NewDnAgentServer(node.osClient(), nf,
-		common.DefaultLocalStorPrefix, testDisk, testTrConf(), portId)
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(), portId, 0)
 	// The cutover grace window (architecture.md, Migration, src step 2) is
 	// off unless a test asks for it: no
 	// unit test can wait common.SuspendSeconds, and with it off a migration
@@ -2245,7 +2245,7 @@ func TestZeroRetryIntervalDefault(t *testing.T) {
 	srv := NewDnAgentServer(newFakeNode().osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	if srv.zeroRetryInterval != common.DnZeroRetryInterval*time.Second {
 		t.Errorf("zeroRetryInterval = %v, want %v", srv.zeroRetryInterval,
 			common.DnZeroRetryInterval*time.Second)
@@ -2261,7 +2261,7 @@ func TestZeroBatchDefaults(t *testing.T) {
 	srv := NewDnAgentServer(newFakeNode().osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	if srv.zeroBatchMax != common.DnZeroBatchMaxBytes {
 		t.Errorf("zeroBatchMax = %d, want %d", srv.zeroBatchMax,
 			uint64(common.DnZeroBatchMaxBytes))
@@ -2920,7 +2920,7 @@ func TestLocalStoreLossKeepsSideAllocation(t *testing.T) {
 	node.mu.Unlock()
 	srv2 := NewDnAgentServer(node.osClient(), nf,
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	srv2.roundReads = false
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -3034,7 +3034,7 @@ func TestForeignDiskIsNeverWritten(t *testing.T) {
 			srv2 := NewDnAgentServer(node.osClient(),
 				common.NewNameFmt(common.DefaultLocalStorPrefix),
 				common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-				common.NvmetPortId)
+				common.NvmetPortId, 0)
 			srv2.roundReads = false
 			if err := srv2.Reconcile(ctx); err != nil {
 				t.Fatalf("reconcile: %v", err)
@@ -3555,7 +3555,7 @@ func TestAForeignRecordIsNotZeroingToReDrive(t *testing.T) {
 	srv2 := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	srv2.roundReads = false
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)

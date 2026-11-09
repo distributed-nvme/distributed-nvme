@@ -99,7 +99,7 @@ func newCnServer(node *fakeNode) *CnAgentServer {
 func newCnServerOnPort(node *fakeNode, portId int) *CnAgentServer {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srv := NewCnAgentServer(node.osClient(), nf,
-		common.DefaultLocalStorPrefix, testCapacity, testTrConf(), portId)
+		common.DefaultLocalStorPrefix, testCapacity, testTrConf(), portId, 0)
 	srv.probeIO = node.probeIO()
 	// The CN10 pass budget's pauses do not really sleep here: a fixture whose
 	// connect fails for good would otherwise spend the whole

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -164,6 +165,60 @@ func TestNvmetPortIdIsOnBothRolesAndBounded(t *testing.T) {
 		if !strings.Contains(err.Error(), bad) {
 			t.Errorf("error %q does not name the rejected value %s", err, bad)
 		}
+	}
+}
+
+// CM2: --nvmet-qid-max belongs to both roles, defaults to common.NvmetQidMax,
+// takes 0 (write none) up to nvmet's own bound, and refuses anything else,
+// a value that is not a number included: viper would read that as 0, which
+// would turn the cap off without a word (CM3).
+func TestNvmetQidMaxIsOnBothRolesAndBounded(t *testing.T) {
+	for _, use := range []string{"dn", "cn"} {
+		if subCmd(t, use).Flags().Lookup("nvmet-qid-max") == nil {
+			t.Fatalf("%s has no --nvmet-qid-max flag", use)
+		}
+	}
+	parse(t, "cn", exampleCnArgs)
+	if got, err := nvmetQidMaxFromViper(); err != nil ||
+		got != common.NvmetQidMax {
+		t.Errorf("nvmetQidMaxFromViper() = %d, %v; want the default %d, nil",
+			got, err, common.NvmetQidMax)
+	}
+	for _, good := range []int{0, 1, common.NvmetQidMaxLimit} {
+		parse(t, "dn", append([]string{
+			"--nvmet-qid-max", strconv.Itoa(good),
+		}, exampleDnArgs...))
+		if got, err := nvmetQidMaxFromViper(); err != nil || got != good {
+			t.Errorf("nvmetQidMaxFromViper() = %d, %v; want %d, nil",
+				got, err, good)
+		}
+	}
+	for _, bad := range []string{"-1",
+		strconv.Itoa(common.NvmetQidMaxLimit + 1)} {
+		parse(t, "cn", append([]string{
+			"--nvmet-qid-max", bad,
+		}, exampleCnArgs...))
+		got, err := nvmetQidMaxFromViper()
+		if err == nil {
+			t.Fatalf("--nvmet-qid-max %s was accepted as %d", bad, got)
+		}
+		if !strings.Contains(err.Error(), "--nvmet-qid-max") ||
+			!strings.Contains(err.Error(), bad) {
+			t.Errorf("error %q does not name the flag and the value %s",
+				err, bad)
+		}
+	}
+
+	t.Setenv("DNV_AGENT_NVMET_QID_MAX", "2")
+	parse(t, "dn", exampleDnArgs)
+	if got, err := nvmetQidMaxFromViper(); err != nil || got != 2 {
+		t.Errorf("nvmetQidMaxFromViper() = %d, %v; want the environment's "+
+			"2, nil", got, err)
+	}
+	t.Setenv("DNV_AGENT_NVMET_QID_MAX", "eight")
+	parse(t, "dn", exampleDnArgs)
+	if got, err := nvmetQidMaxFromViper(); err == nil {
+		t.Errorf("a non-numeric env value was accepted as %d", got)
 	}
 }
 

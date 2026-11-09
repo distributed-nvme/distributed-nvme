@@ -593,7 +593,7 @@ func (f *fakeNode) readMtime(
 		return time.Time{}, err
 	}
 	f.touchAttrParent(path)
-	if !f.dirs[path] {
+	if _, link := f.links[path]; !f.dirs[path] && !link {
 		return time.Time{}, &fs.PathError{
 			Op: "lstat", Path: path, Err: syscall.ENOENT}
 	}

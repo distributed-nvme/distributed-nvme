@@ -311,13 +311,17 @@ its info-read commands are plain memory reads.
 Setup proves each dn agent by its exact data area and a baseline `SyncupDn`
 (`dnagent.md` DN3, DN5), each cn agent by a `GetCnSize` echoing its capacity
 (`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with its base row OK (CN5).
+Both agents of a VM start with an IO queue cap below the VMs' CPU
+count, so that the cap and not the CPU count sets each path's queues
+(`dnagent.md` CM2, SH32).
 
 **smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
 a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the
 legs, pending until their probers' first round (CN11); admission on real
 nvmet (CN16): built with no allowed host the subsystem admits none, probes
 clean and refuses the emulated host's connect; granted, it admits exactly that
-host; revoked again, the connected host keeps its path and its next connect is
+host; the host's path and the CN's leg paths each hold the cap's IO queues
+and the admin queue (`dnagent.md` SH32); revoked again, the connected host keeps its path and its next connect is
 refused; host IO; clean check rounds, the namespace identity included
 (`dnagent.md` SH17); the raw thin-pool status line the auto-grow parses (CN28);
 two subsystems made by hand, one with a namespace over a device that is no

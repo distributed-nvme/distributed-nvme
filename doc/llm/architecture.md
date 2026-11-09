@@ -6287,7 +6287,10 @@ processes run co-located on any number of control-plane servers (fig.
   since the two roles' store kinds are disjoint
   (Disk node; Controller node, common; `dnagent.md` CM2). Several agents on
   one kernel need more than distinct port ids (`dnagent.md` CM2), and two
-  cn agents on one kernel are never safe (Controller node, common).
+  cn agents on one kernel are never safe (Controller node, common). Each
+  agent writes an IO queue cap on every subsystem it links to its port,
+  which, when above zero, bounds the TCP connections of every path to it
+  (`dnagent.md` SH32).
 * `dnv-cdc` (`cdc.md`) — the discovery controller (dnv-cdc): it reads etcd
   and listens for hosts on its NVMe/TCP endpoint; its placement is
   `cdc.md`, `cmd/dnv-cdc`.
@@ -6860,6 +6863,14 @@ that component's document and only pointed to here.
   One etcd request grows with the slices it writes, the widest a
   provisioned flip over every slice, which sizes `EtcdMaxRequestBytes`
   (`dnv-worker.md`, Constants this document owns).
+* **The IO queue cap's default was chosen without a measurement.** Every
+  path to a subsystem holds one TCP connection per IO queue, and an agent
+  caps the queues of each subsystem it links at `NvmetQidMax` unless
+  `--nvmet-qid-max` says otherwise (`dnagent.md` SH32). No host with many
+  CPUs was measured to choose it: one volume's IO from such a host may
+  want more queues per path, and a node with many paths fewer; an
+  operator who measures sets the flag. A subsystem linked before the cap
+  changed keeps its old cap until it is unlinked everywhere or removed.
 * **A CSI volume costs the cluster a pool** (`csi.md`, The volume model).
 * **A RAID1 pool needs as many disk nodes per slice at create as its meta
   and data groups have legs together.** `CreateStoragePool` puts every leg

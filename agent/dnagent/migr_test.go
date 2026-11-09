@@ -1403,7 +1403,7 @@ func TestPushMigrBitmap(t *testing.T) {
 	restarted := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	restarted.roundReads = false
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -1656,7 +1656,7 @@ func TestFenceWindowDefault(t *testing.T) {
 	srv := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	if want := common.SuspendSeconds * time.Second; srv.fenceWait != want {
 		t.Errorf("fenceWait = %v, want %v", srv.fenceWait, want)
 	}
@@ -3087,7 +3087,7 @@ func TestFenceNotRestartedAcrossAnAgentRestart(t *testing.T) {
 	restarted := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	restarted.roundReads = false
 	restarted.fenceWait = time.Hour
 	if err := restarted.Reconcile(ctx); err != nil {
@@ -3181,7 +3181,7 @@ func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 	restarted := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	restarted.roundReads = false
 	restarted.fenceWait = time.Hour
 	if err := restarted.Reconcile(ctx); err != nil {

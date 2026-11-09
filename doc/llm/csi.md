@@ -268,7 +268,9 @@ makes a new namespace device, which the mount does not follow. The follower
 drops a withdrawn path even when its connect to the cntlr that replaces it
 failed in the same pass (CSI15), so on a pool of one cntlr a cntlr replacement,
 whose new cntlr the cdc lists before its agent has exported the subsystem,
-loses the last path the same way. The plugin reports no volume health, so
+loses the last path the same way. Each path holds at most the cn agent's IO
+queue cap of queues, one per CPU up to the cap (`dnagent.md` SH32): the cap
+binds this connect too. The plugin reports no volume health, so
 nothing in the driver or in Kubernetes acts on a dead mount, and the operator
 deletes the pod. A stage connects to every cntlr the cdcs list for the volume's
 subsystem and repeats the connects, since the cdc lists a subsystem before its

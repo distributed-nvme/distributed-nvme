@@ -82,7 +82,7 @@ func (s *DnAgentServer) linkMigrSrc(
 		return
 	}
 	nqn := plan.migrSrcNqn()
-	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, nqn)
+	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, nqn, s.port.QidMax)
 	info.MigrSrcInfo.NvmeofInfo = st.tracker.FromErr(
 		resKeyMigrSrcNvmeof, nqn, "", err)
 }

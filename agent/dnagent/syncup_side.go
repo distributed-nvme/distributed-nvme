@@ -917,7 +917,8 @@ func (s *DnAgentServer) ensureExport(
 	if err := s.buildExport(ctx, subsys, ns); err != nil {
 		return err
 	}
-	return s.nvmet.EnsurePortLink(ctx, s.port.PortId, subsys.Nqn)
+	return s.nvmet.EnsurePortLink(
+		ctx, s.port.PortId, subsys.Nqn, s.port.QidMax)
 }
 
 // buildExport converges one subsystem and its single namespace, probe-first

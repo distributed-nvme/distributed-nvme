@@ -871,7 +871,7 @@ func TestARestartReRunKeepsTheShortBudget(t *testing.T) {
 	restarted := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	restarted.roundReads = false
 	restarted.migrRetryInterval = time.Hour
 	clock := withDnClock(restarted, node)

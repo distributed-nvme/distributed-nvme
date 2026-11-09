@@ -364,6 +364,19 @@ const (
 	// agents share one node's kernel, each converging its own port.
 	NvmetPortId = 1
 
+	// The DEFAULT IO queue cap of every subsystem an agent links to its
+	// port: the subsystem's attr_qid_max, the number of IO queues one
+	// controller of it may create, each its own TCP connection
+	// (dnagent.md SH32). `dnv-agent --nvmet-qid-max` overrides it, and 0
+	// writes none, which leaves nvmet's own default, NvmetQidMaxLimit.
+	// No measurement on a host with many CPUs chose it (architecture.md,
+	// Known limits).
+	NvmetQidMax = 8
+
+	// nvmet's bound on attr_qid_max (NVMET_NR_QUEUES), which is also its
+	// default for a new subsystem.
+	NvmetQidMaxLimit = 128
+
 	// The three fixed ANA groups on every nvmet port (architecture.md
 	// [D4]). Group 1 always exists in nvmet and defaults to optimized;
 	// groups 2 and 3 are created at port setup. Each group's state is fixed

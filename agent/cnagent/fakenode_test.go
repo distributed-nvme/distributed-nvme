@@ -849,7 +849,7 @@ func (f *fakeNode) readMtime(
 		Op: "lstat", Path: path, Err: syscall.EIO}); err != nil {
 		return time.Time{}, err
 	}
-	if !f.dirs[path] {
+	if _, link := f.links[path]; !f.dirs[path] && !link {
 		return time.Time{}, &fs.PathError{
 			Op: "lstat", Path: path, Err: syscall.ENOENT}
 	}

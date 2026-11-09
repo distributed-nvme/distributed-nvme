@@ -673,7 +673,7 @@ func TestAReadDoesNotNameASideOnAnotherNodesDisk(t *testing.T) {
 	srv2 := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	srv2.roundReads = false
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)

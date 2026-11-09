@@ -63,6 +63,10 @@ DATA_SIZE=1879048192
 # --capacity: an arbitrary exact value GetCnSize must echo back (CN-CM1;
 # cnagent_integtest.md, Cases, the setup paragraph).
 CN_CAPACITY=1099511627776
+# --nvmet-qid-max of both agents: below the VMs' CPU count, so that the cap,
+# not the host's one queue per CPU, sets how many IO queues each path holds,
+# which smoke reads back (dnagent.md SH32).
+QID_MAX=3
 
 # clone_xfer's slowed copy (cnagent_integtest.md, Cases, clone_xfer): the
 # rate at which the clone's node writes to its own sides, the copy's writes
@@ -1096,6 +1100,31 @@ path_field() {
 	      | select([.Address | split(",")[] | select(startswith("traddr="))]
 	               == ["traddr=" + $a])
 	      | .[$f] ] | first // "none"'
+}
+
+# queue_count <nqn> <traddr> — the queues, IO queues plus the admin queue,
+# of the controller this host holds to one target address, or "none".
+queue_count() {
+	local ctrl
+	ctrl=$(path_field "$1" "$2" Name)
+	[ "$ctrl" != none ] || {
+		echo none
+		return 0
+	}
+	cat /sys/class/nvme/"$ctrl"/queue_count 2>/dev/null || echo none
+}
+
+# leg_queue_counts — the distinct queue counts of every controller this node
+# holds to a disk node's side export (kind 2 NQNs), one per line.
+leg_queue_counts() {
+	local c nqn
+	for c in /sys/class/nvme/nvme*; do
+		[ -e "$c/subsysnqn" ] || continue
+		nqn=$(cat "$c/subsysnqn" 2>/dev/null) || continue
+		case "$nqn" in
+		"$NQN_PREFIX":2:*) cat "$c/queue_count" 2>/dev/null ;;
+		esac
+	done | sort -u
 }
 
 # ana_state <nqn> <traddr> — the ANA state of the path this host holds to one
@@ -3360,6 +3389,14 @@ preflight_vms() {
 		# --cleanup-only, so those sweeps run unchecked.
 		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm stat thin_dump; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
+		# smoke's queue counts prove the cap only on a VM with more CPUs than
+		# QID_MAX: with no more, a host asks for no more queues than the
+		# cap anyway (dnagent.md SH32).
+		local cpus
+		cpus=$(sshv "$idx" nproc) || die "nproc on vm$idx did not answer"
+		[ "$cpus" -gt "$QID_MAX" ] ||
+			die "vm$idx has $cpus CPUs; smoke's queue check needs more than" \
+				"QID_MAX=$QID_MAX"
 		# The agents hardcode the configfs path and neither mount nor
 		# modprobe; the harness does both here and nothing else.
 		sshv "$idx" "for m in nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool dm-flakey raid1; do modprobe \$m 2>/dev/null || true; done; grep -q ' /sys/kernel/config ' /proc/mounts || mount -t configfs none /sys/kernel/config; true"
@@ -3408,7 +3445,7 @@ start_dn_agent() { # <idx>
 	sshv "$idx" "setsid nohup $WORK/dnv-agent dn \
 --grpc-network tcp --grpc-address ${IP[$idx]}:$DN_GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
---local-store $WORK/dn-store --disk ${LOOP[$idx]} \
+--local-store $WORK/dn-store --disk ${LOOP[$idx]} --nvmet-qid-max $QID_MAX \
 >> $DN_LOG 2>&1 < /dev/null & echo launched"
 }
 
@@ -3421,7 +3458,7 @@ start_cn_agent() { # <idx>
 	sshv "$idx" "setsid nohup $WORK/dnv-agent cn \
 --grpc-network tcp --grpc-address ${IP[$idx]}:$CN_GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
---local-store $WORK/cn-store --capacity $CN_CAPACITY \
+--local-store $WORK/cn-store --capacity $CN_CAPACITY --nvmet-qid-max $QID_MAX \
 >> $CN_LOG 2>&1 < /dev/null & echo launched"
 }
 
@@ -3969,6 +4006,13 @@ case_smoke() {
 	helper "$hv" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv"
 	assert_eq "$(host_state "$hv" "$nqn" "$cn")" live "smoke path state"
 	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
+	# Both agents cap each subsystem they link at $QID_MAX IO queues, below
+	# the VMs' CPU count, so the host's path and the CN's leg paths each
+	# hold that many plus the admin queue (dnagent.md SH32).
+	assert_eq "$(helper "$hv" "queue_count '$nqn' '${IP[$cn]}'")" \
+		"$((QID_MAX + 1))" "smoke: the host path's queues"
+	assert_eq "$(helper "$cn" leg_queue_counts)" "$((QID_MAX + 1))" \
+		"smoke: the leg paths' queues"
 
 	stage io "4 MiB round trip: host -> CN thin/raid0 stack -> DN side"
 	make_pattern "$hv" "$WORK/pattern-smoke.bin" 4

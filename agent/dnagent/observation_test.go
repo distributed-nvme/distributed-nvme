@@ -228,7 +228,7 @@ func TestRoundReadsDefault(t *testing.T) {
 	srv := NewDnAgentServer(newFakeNode().osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	if !srv.roundReads {
 		t.Error("NewDnAgentServer leaves round reads off")
 	}
@@ -330,7 +330,7 @@ func TestEveryConvergeEndStoresAnObservation(t *testing.T) {
 		restarted := NewDnAgentServer(node.osClient(),
 			common.NewNameFmt(common.DefaultLocalStorPrefix),
 			common.DefaultLocalStorPrefix, testDisk, testTrConf(),
-			common.NvmetPortId)
+			common.NvmetPortId, 0)
 		restarted.roundReads = false
 		rootCtx, cancel := context.WithCancel(traced("startup"))
 		t.Cleanup(func() {

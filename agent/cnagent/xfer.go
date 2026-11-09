@@ -234,7 +234,8 @@ func (s *CnAgentServer) ensureXfer(
 		return xferStep{outcome: xferDevPut, exportFailed: true}
 	}
 	nsErr := s.ensureXferNamespace(ctx, plan, xp)
-	linkErr := s.nvmet.EnsurePortLink(ctx, s.port.PortId, xp.nqn)
+	linkErr := s.nvmet.EnsurePortLink(
+		ctx, s.port.PortId, xp.nqn, s.port.QidMax)
 	info.XferIdToSubsystem[xp.xferId] = deferredFromErr(
 		st.tracker, xp.deferred, ssKey, xp.nqn, "", linkErr)
 	return xferStep{outcome: xferDevPut, rows: xferRowsNamespace, nsErr: nsErr,

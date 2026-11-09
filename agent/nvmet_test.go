@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
@@ -48,6 +49,8 @@ type fakeConfigfs struct {
 	// unwritable makes every write of one path fail EIO: a write that did
 	// not go through, as when the soft timeout cuts it off.
 	unwritable string
+	// lsFail makes the `ls` of one path not answer, as a killed one does.
+	lsFail map[string]bool
 }
 
 func newFakeConfigfs() *fakeConfigfs {
@@ -59,6 +62,7 @@ func newFakeConfigfs() *fakeConfigfs {
 		files:   map[string]string{},
 		links:   map[string]string{},
 		readErr: map[string]error{},
+		lsFail:  map[string]bool{},
 	}
 }
 
@@ -124,6 +128,9 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 			path := args[len(args)-1]
 			switch cmd {
 			case "ls":
+				if c.lsFail[path] {
+					return "", "", -1, errors.New("signal: killed")
+				}
 				if !c.dirs[path] {
 					return "", "", 2, errors.New("exit status 2")
 				}
@@ -135,6 +142,10 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 				return "", "", 0, nil
 			case "ln":
 				c.changes = append(c.changes, "link "+path)
+				if strings.HasPrefix(path, NvmetRoot+"/ports/") {
+					c.links[path] = args[len(args)-2]
+					return "", "", 0, nil
+				}
 				subsysPath := path[:strings.LastIndex(path, "/allowed_hosts/")]
 				if c.files[subsysPath+"/attr_allow_any_host"] == "1" {
 					return "", "ln: Invalid argument", 1,
@@ -148,6 +159,13 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 				return "", "", 0, nil
 			}
 			return "", "", 127, fmt.Errorf("unexpected command %q", cmd)
+		},
+		ReadMtimeFn: func(ctx context.Context, path string) (time.Time, error) {
+			if _, link := c.links[path]; c.dirs[path] || link {
+				return time.Unix(1, 0), nil
+			}
+			return time.Time{}, &iofs.PathError{Op: "lstat", Path: path,
+				Err: iofs.ErrNotExist}
 		},
 		ReadFileFn: func(ctx context.Context, path string) (string, error) {
 			if err, ok := c.readErr[path]; ok {
@@ -417,5 +435,113 @@ func TestNsAnaGrpIdIsStrict(t *testing.T) {
 			t.Fatalf("nsid %d: gave (%d, %v, nil), want an error: no group "+
 				"was read", nsid, grpId, ok)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The IO queue cap (dnagent.md SH32)
+// ---------------------------------------------------------------------------
+
+// TestEnsurePortLinkCapsQueuesBeforeTheLink: the cap is written,
+// probe-first, before a subsystem's port link, and only while the subsystem
+// is linked to no port at all, since nvmet deletes every controller of a
+// subsystem whose cap is written; a zero cap writes none; a read that did not
+// answer writes nothing and makes no link, and so does a cap that could not
+// be written.
+func TestEnsurePortLinkCapsQueuesBeforeTheLink(t *testing.T) {
+	const portId, otherPort = 3, 5
+	for _, tc := range []struct {
+		name   string
+		qidMax int
+		// cur is the cap as it reads; "" is a cap that is not there.
+		cur string
+		// linkedHere and linkedThere link the subsystem to this agent's
+		// port and to another agent's.
+		linkedHere, linkedThere bool
+		// hideHere makes this port's listing read absent while its link
+		// is there.
+		hideHere   bool
+		unwritable bool
+		capReadErr bool
+		lsFail     string
+		want       []string
+		wantErr    bool
+	}{
+		{name: "unlinked, nvmet's default", qidMax: 8, cur: "128",
+			want: []string{"write {s}/attr_qid_max=8", "link {l}"}},
+		{name: "unlinked, the cap already", qidMax: 8, cur: "8",
+			want: []string{"link {l}"}},
+		{name: "unlinked, no cap attribute", qidMax: 8, cur: "",
+			want: []string{"write {s}/attr_qid_max=8", "link {l}"}},
+		{name: "unlinked, a zero cap", qidMax: 0, cur: "128",
+			want: []string{"link {l}"}},
+		{name: "linked here, another cap", qidMax: 8, cur: "128",
+			linkedHere: true, want: nil},
+		{name: "linked to another agent's port", qidMax: 8, cur: "128",
+			linkedThere: true, want: []string{"link {l}"}},
+		{name: "this port's listing misses a link that is there",
+			qidMax: 8, cur: "128", linkedHere: true, hideHere: true,
+			want: []string{"link {l}"}},
+		{name: "the write fails", qidMax: 8, cur: "128", unwritable: true,
+			want: []string{"write {s}/attr_qid_max=8"}, wantErr: true},
+		{name: "the cap read does not answer", qidMax: 8, cur: "128",
+			capReadErr: true, want: nil, wantErr: true},
+		{name: "this port's listing does not answer", qidMax: 8,
+			cur: "128", lsFail: "here", want: nil, wantErr: true},
+		{name: "the ports listing does not answer", qidMax: 8,
+			cur: "128", lsFail: "ports", want: nil, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfs := newFakeConfigfs()
+			nvmet := NewNvmet(cfs.osClient())
+			subsysPath := nvmet.SubsysPath(admissionNqn)
+			linkPath := nvmet.PortPath(portId) + "/subsystems/" + admissionNqn
+			cfs.dirs[NvmetRoot+"/ports"] = true
+			for _, id := range []int{portId, otherPort} {
+				cfs.dirs[nvmet.PortPath(id)] = true
+				cfs.dirs[nvmet.PortPath(id)+"/subsystems"] = true
+			}
+			cfs.mkdir(subsysPath)
+			if tc.cur != "" {
+				cfs.files[subsysPath+"/attr_qid_max"] = tc.cur
+			}
+			if tc.linkedHere {
+				cfs.links[linkPath] = subsysPath
+			}
+			if tc.hideHere {
+				cfs.dirs[nvmet.PortPath(portId)+"/subsystems"] = false
+			}
+			if tc.linkedThere {
+				cfs.links[nvmet.PortPath(otherPort)+"/subsystems/"+
+					admissionNqn] = subsysPath
+			}
+			if tc.unwritable {
+				cfs.unwritable = subsysPath + "/attr_qid_max"
+			}
+			if tc.capReadErr {
+				cfs.readErr[subsysPath+"/attr_qid_max"] = syscall.EIO
+			}
+			switch tc.lsFail {
+			case "here":
+				cfs.lsFail[nvmet.PortPath(portId)+"/subsystems"] = true
+			case "ports":
+				cfs.lsFail[NvmetRoot+"/ports"] = true
+			}
+			err := nvmet.EnsurePortLink(context.Background(), portId,
+				admissionNqn, tc.qidMax)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("EnsurePortLink = %v, want an error: %v", err,
+					tc.wantErr)
+			}
+			var want []string
+			for _, w := range tc.want {
+				w = strings.ReplaceAll(w, "{s}", subsysPath)
+				want = append(want, strings.ReplaceAll(w, "{l}", linkPath))
+			}
+			if strings.Join(cfs.changes, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("changes:\n%s\nwant:\n%s",
+					strings.Join(cfs.changes, "\n"), strings.Join(want, "\n"))
+			}
+		})
 	}
 }

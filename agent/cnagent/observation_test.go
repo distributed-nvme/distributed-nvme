@@ -232,7 +232,7 @@ func TestRoundReadsDefault(t *testing.T) {
 	srv := NewCnAgentServer(newFakeNode().osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testCapacity, testTrConf(),
-		common.NvmetPortId)
+		common.NvmetPortId, 0)
 	if !srv.roundReads {
 		t.Error("NewCnAgentServer leaves round reads off")
 	}
