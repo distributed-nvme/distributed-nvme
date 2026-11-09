@@ -3764,6 +3764,29 @@ wait_legs_probed() { # cnidx sp cntlr secs label
 	done
 }
 
+# leg_wait_not_error polls a cntlr with check rounds until one leg's row
+# reads anything but RES_STATUS_ERROR: the primary's prober has read the leg
+# again since its export came back (cnagent.md CN11). A converge takes a leg
+# whose row reads ERROR as no copy source (cnagent.md CN12), so a stage that
+# brings a leg back and wants it to feed a copy in its next converge waits
+# for this first. The rounds start the reads they sample, as
+# wait_legs_probed's do.
+leg_wait_not_error() { # cnidx sp cntlr leg secs label
+	local deadline=$((SECONDS + $5)) out st
+	while :; do
+		out=$(cnctl "$1" check-cntlr --show-info --sp "$2" --cntlr "$3")
+		st=$(jq_of "$out" \
+			"if .obs_stamp.obs_time == null then \"no observation\" else
+			 (.cntlr_info.leg_id_to_leg[\"$(d16 "$4")\"].status // \"ABSENT\") end")
+		case "$st" in
+		RES_STATUS_OK | RES_STATUS_PENDING) return 0 ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "$6: after $5s cn$1's row of leg $4 reads $st"
+		sleep 1
+	done
+}
+
 # converge_check runs the check-cn/check-cntlr round pair
 # (cnagent_integtest.md, Conventions, Steady state) and asserts that
 # each reply echoes the revision the agent actually stored. A primary's steady
@@ -5229,6 +5252,11 @@ repair_forced_start() {
 	exy=$(helper 2 "md_examine $yname") ||
 		die "repair forced: examining Y failed: $exy"
 	log "  Y's superblock: $exy"
+	# Y feeds Z's copy only once its leg row stops reading ERROR, which its
+	# prober's next round on the restored export brings (cnagent.md CN11,
+	# CN12); a converge before that starts the array and leaves Z to the
+	# late-member retry.
+	leg_wait_not_error 2 "$sp" "$c2" "$yleg" 30 "repair forced: Y's probe"
 	for f in "$req1" "$req2"; do mark_set "$f" "$yleg"; done
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
