@@ -719,8 +719,8 @@ func (f *fakeNode) writeFileDirect(
 	}
 	if strings.HasSuffix(path, "/enable") && strings.TrimSpace(data) == "0" {
 		dev := strings.TrimSpace(f.files[parentDir(path)+"/device_path"])
-		if dm := f.dms[strings.TrimPrefix(dev, "/dev/mapper/")]; dm != nil &&
-			dm.suspended {
+		if f.stackSuspended(strings.TrimPrefix(dev, "/dev/mapper/"),
+			map[string]bool{}) {
 			f.wedgedDisables = append(f.wedgedDisables, path)
 		}
 	}
@@ -1362,6 +1362,37 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	}
 	dm.discards = append(dm.discards, strings.Join(args[:len(args)-1], " "))
 	return "", 0
+}
+
+// stackSuspended reports whether name, or any dm device its live table maps
+// down to the disk, is suspended: a bio that reached a suspended device
+// anywhere below a namespace is held there, and the namespace's disable waits
+// for it.
+func (f *fakeNode) stackSuspended(name string, seen map[string]bool) bool {
+	dm := f.dms[name]
+	if dm == nil || seen[name] {
+		return false
+	}
+	seen[name] = true
+	if dm.suspended {
+		return true
+	}
+	for _, line := range dmTargets(dm.table) {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		for _, field := range fields[3:] {
+			for path, devNo := range f.devNo {
+				if devNo == field && strings.HasPrefix(path, "/dev/mapper/") &&
+					f.stackSuspended(strings.TrimPrefix(path, "/dev/mapper/"),
+						seen) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // heldBy reports the dm device whose live table still maps path, i.e.

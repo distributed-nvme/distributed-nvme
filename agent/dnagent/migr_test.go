@@ -2189,6 +2189,276 @@ func TestTeardownInsideTheFenceWindowOverAnUnreadExport(t *testing.T) {
 	)
 }
 
+// The step before the first sweep layer releases the whole stack under every
+// export the pass removes, not only the per-CN linears (DN6): a side device
+// or a migration source's linear that a failed reload left suspended holds
+// the bios the linears above it passed down, and the disable of the
+// namespace above waits for them. Each case leaves one device of ours
+// suspended, removes the export above it, and asserts that no disable is
+// written over a suspended stack and that the device is resumed first.
+func TestSweepReleasesTheWholeStackBeforeTheExports(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	sideDev := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	srcDev := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, srv *DnAgentServer)
+		stuck   string
+		removal func(t *testing.T, srv *DnAgentServer)
+	}{
+		{
+			name:  "a dropped side over a suspended side device",
+			setup: func(*testing.T, *DnAgentServer) {},
+			stuck: sideDev,
+			removal: func(t *testing.T, srv *DnAgentServer) {
+				if _, err := srv.SyncupDn(context.Background(),
+					dnReq(2)); err != nil {
+					t.Fatalf("SyncupDn: %v", err)
+				}
+			},
+		},
+		{
+			name:  "a level raised to no side over a suspended side device",
+			setup: func(*testing.T, *DnAgentServer) {},
+			stuck: sideDev,
+			removal: func(t *testing.T, srv *DnAgentServer) {
+				if _, err := srv.SyncupSide(context.Background(), sideReq(2,
+					testSide, testCn0, []uint64{testCn1},
+					pb.SpLevel_SP_LEVEL_NO_SIDE)); err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+			},
+		},
+		{
+			name: "an ended source role over a suspended source linear",
+			setup: func(t *testing.T, srv *DnAgentServer) {
+				if _, err := srv.SyncupSide(context.Background(),
+					migrSrcReq(2)); err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+			},
+			stuck: srcDev,
+			removal: func(t *testing.T, srv *DnAgentServer) {
+				if _, err := srv.SyncupSide(context.Background(), sideReq(3,
+					testSide, testCn0, []uint64{testCn1},
+					pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, 1, testSide)
+			tc.setup(t, srv)
+			node.mu.Lock()
+			dm := node.dms[tc.stuck]
+			if dm == nil {
+				node.mu.Unlock()
+				t.Fatalf("no %s to leave suspended", tc.stuck)
+			}
+			dm.suspended = true
+			node.mu.Unlock()
+			node.Reset()
+			tc.removal(t, srv)
+			node.mu.Lock()
+			wedged := append([]string(nil), node.wedgedDisables...)
+			node.mu.Unlock()
+			for _, path := range wedged {
+				t.Errorf("namespace disabled over a suspended stack: %s", path)
+			}
+			resume := node.indexOfCall("cmd dmsetup resume " + tc.stuck)
+			if resume < 0 {
+				t.Fatalf("%s was never resumed:\n%s", tc.stuck,
+					strings.Join(node.Calls(), "\n"))
+			}
+			for idx, call := range node.Calls() {
+				if strings.HasSuffix(call, "/enable=0") && idx < resume {
+					t.Errorf("namespace disabled at %d, %s resumed at %d",
+						idx, tc.stuck, resume)
+				}
+			}
+		})
+	}
+}
+
+// TestSweepReleasesADmCloneStack is the case two levels down: a migration
+// destination's primary linear maps its dm-clone, which maps its metadata
+// wrapper and the side device. Each of the three left suspended under a
+// dropped side is resumed before any namespace above is disabled.
+func TestSweepReleasesADmCloneStack(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	names := newMigrDstNames()
+	sideDev := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	for _, stuck := range []string{names.clone, names.meta, sideDev} {
+		t.Run(stuck, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			if _, err := srv.SyncupSide(ctx,
+				migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			node.mu.Lock()
+			if node.dms[stuck] == nil {
+				node.mu.Unlock()
+				t.Fatalf("no %s to leave suspended", stuck)
+			}
+			node.dms[stuck].suspended = true
+			node.mu.Unlock()
+			node.Reset()
+			if _, err := srv.SyncupDn(ctx, dnReq(3)); err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			for _, path := range node.wedgedDisables {
+				t.Errorf("namespace disabled over a suspended stack: %s", path)
+			}
+		})
+	}
+}
+
+// TestSweepReleasesADmErrorUnderARetiredLinear pins the walk's place after
+// the retire: inside a cutover window the per-CN linears are suspended, and
+// the step moves each onto its dm-error before it removes the exports. A
+// dm-error a failed reload left suspended then holds what the retired linear
+// passes it, so the walk, which runs after the retire, resumes it.
+func TestSweepReleasesADmErrorUnderARetiredLinear(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	dmErr := nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0)
+	node.mu.Lock()
+	node.dms[dmErr].suspended = true
+	node.mu.Unlock()
+	node.Reset()
+	req := migrSrcReq(3)
+	req.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+	if _, err := srv.SyncupSide(ctx, req); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	for _, path := range node.wedgedDisables {
+		t.Errorf("namespace disabled over a suspended dm-error: %s", path)
+	}
+}
+
+// TestSweepStopsBeforeTheExportsWhenAReadFails pins that a probe, a table
+// read or a namespace read below an export that did not answer stops the
+// descent before L1, as a failed resume does: nothing is disabled, and the
+// pass's code names leftovers.
+func TestSweepStopsBeforeTheExportsWhenAReadFails(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	sideDev := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	linear := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	for _, tc := range []struct {
+		name   string
+		source bool
+		fault  func(node *fakeNode)
+	}{
+		{"the probe of a device below", false, func(node *fakeNode) {
+			node.killCmdAlways["dmsetup info --columns --noheadings -o attr "+
+				sideDev] = true
+		}},
+		{"the table of a linear", false, func(node *fakeNode) {
+			node.failCmdAlways["dmsetup table "+linear] = "refused"
+		}},
+		{"a source export's device path", true, func(node *fakeNode) {
+			node.failReadAlways[nf.MigrSrcNqn(testCluster, testDn, testSp,
+				testMigrId)+"/namespaces/1/device_path"] = true
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			if tc.source {
+				if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+			}
+			node.mu.Lock()
+			tc.fault(node)
+			node.mu.Unlock()
+			node.Reset()
+			var code uint32
+			if tc.source {
+				// The source role ends, which removes its export.
+				reply, err := srv.SyncupSide(ctx, sideReq(3, testSide,
+					testCn0, []uint64{testCn1},
+					pb.SpLevel_SP_LEVEL_READWRITE))
+				if err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+				code = reply.GetAgentReply().GetCode()
+			} else {
+				reply, err := srv.SyncupDn(ctx, dnReq(3))
+				if err != nil {
+					t.Fatalf("SyncupDn: %v", err)
+				}
+				code = reply.GetAgentReply().GetCode()
+			}
+			if code != common.ReplyCodeLeftover {
+				t.Fatalf("code %d, want the leftover code", code)
+			}
+			for _, call := range node.Calls() {
+				if strings.HasSuffix(call, "/enable=0") {
+					t.Fatalf("a namespace was disabled past a failed read: %s",
+						call)
+				}
+			}
+		})
+	}
+}
+
+// TestSweepStopsBeforeTheExportsWhenAResumeFails pins the step's failure: a
+// resume of a suspended device below an export that fails leaves every export
+// in place, names the leftover, and the next pass, once the resume works,
+// finishes the removal.
+func TestSweepStopsBeforeTheExportsWhenAResumeFails(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	sideDev := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	syncupBoth(t, srv, 1, testSide)
+	node.mu.Lock()
+	node.dms[sideDev].suspended = true
+	node.failCmd["dmsetup resume "+sideDev] = "refused once"
+	node.mu.Unlock()
+	node.Reset()
+	reply, err := srv.SyncupDn(context.Background(), dnReq(2))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != common.ReplyCodeLeftover {
+		t.Fatalf("code %d, want the leftover code", reply.GetAgentReply().GetCode())
+	}
+	for _, call := range node.Calls() {
+		if strings.HasSuffix(call, "/enable=0") {
+			t.Fatalf("a namespace was disabled over a stack whose resume "+
+				"failed: %s", call)
+		}
+	}
+	node.Reset()
+	if _, err := srv.SyncupDn(context.Background(), dnReq(3)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.dms[sideDev] != nil {
+		t.Fatalf("the side device survived the pass after the fault cleared")
+	}
+	if len(node.wedgedDisables) != 0 {
+		t.Fatalf("disables over a suspended stack: %v", node.wedgedDisables)
+	}
+}
+
 // A level raise to SP_LEVEL_NO_SIDE inside the window takes the exports off
 // linears the fence holds suspended. At that level the linears stay wanted and
 // only the exports above them go, so a sweep that resumes only the linears it

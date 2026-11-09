@@ -651,7 +651,9 @@ writes nothing; the cost is liveness. Its bios queue with no timeout
 phase reloads a device whose live table is not the one it wants and resumes
 one whose live table is, a fenced linear inside its cutover window aside;
 the step before the sweep's first layer reloads onto its dm-error a
-suspended linear it is about to remove or unexport; the sweep of a side
+suspended linear it is about to remove or unexport, and resumes, on
+whatever table is live, every other suspended device of the node's under
+an export it is about to remove (DN6); the sweep of a side
 that plays no migration source resumes each per-CN dm-linear of the side it
 finds suspended, on whatever table is live (DN12 rule 2); and the sweep's
 removal of a dm device of any kind resumes one it finds suspended, on
@@ -1887,11 +1889,29 @@ with — the primary CN's maps the side's data — so what the window absorbed
 would be replayed onto it; against the dm-error it fails instead. The one
 exception is a request that also ends the source role: its pre-step has
 already made that bare resume, which is that role ending's own rule (DN12),
-so this step retires only a linear the resume left suspended. A linear this
-step cannot prove out of suspension — a probe or its reload failed — stops
-the descent before L1, as a layer that left something behind does: no layer
+so this step retires only a linear the resume left suspended. The same step
+then walks the live tables down from the namespace device of every export
+the pass removes — the per-CN linear of a side export, the migration
+source's linear of a `MigrSrcNqn` export, read off its namespace's
+`device_path` — and resumes, on whatever table is live, every suspended
+device of this node's that it finds on the way to the disk, a device before
+the one that maps it: a per-CN dm-error under a linear the step just
+retired, a dm-clone, its metadata wrapper, a side device or a source
+linear. A live device above passes new bios into a device below that a
+failed or cut-off reload left suspended, and the disable waits for those as
+for one a suspended linear holds; it runs after the retire, so that a
+retired linear's dm-error is on its path. The bare resume is safe there:
+but for a reload's own moment between its suspend and its resume, only the
+fence suspends a device on purpose, and only a per-CN linear, so any other
+device found suspended was left so by a reload that failed or was cut off,
+and what it holds came through devices that still map it. A device this
+step cannot prove out of suspension — a probe, a table read, the read of a
+source export's `device_path`, a reload or a resume failed — stops the
+descent before L1, as a layer that left something behind does: no layer
 runs, every unwanted object of the scope is named as a leftover, and the
-next pass tries again.
+next pass tries again. In the node-level scope that is every unwanted
+object of the node, so one device below one export that keeps failing
+holds every removal of the node.
 
 L1. The `SideToCnNqn` exports and the `MigrSrcNqn` export: an enabled nvmet
 namespace holds its backing device open, and removing the subsystem is what

@@ -395,6 +395,7 @@ func reportDms(res *agent.SweepResult, groups ...[]string) {
 func (s *DnAgentServer) runChain(
 	ctx context.Context,
 	chain *dnChain,
+	actual *dnActual,
 	res *agent.SweepResult,
 	gate recordGate,
 ) {
@@ -413,8 +414,15 @@ func (s *DnAgentServer) runChain(
 	// (unfenceLinears), against the tables they were suspended with — the
 	// role ending's own rule (DN12) — so P0 retires only one that resume left
 	// suspended. A linear P0 cannot prove out of suspension stops the descent
-	// before L1, as a layer that left something behind does.
+	// before L1, as a layer that left something behind does. Below every
+	// export it removes, P0 also resumes every suspended device of ours its
+	// live tables map down to the disk (releaseStacks): a dm-clone or a side
+	// device a failed or cut-off reload left suspended holds the bios a live
+	// device above it passes down, and the disable waits for those too.
 	stuck := !s.retireSuspended(ctx, chain)
+	if !s.releaseStacks(ctx, chain, actual) {
+		stuck = true
+	}
 	layers := []struct {
 		run    func() bool
 		report func()
@@ -571,6 +579,128 @@ func (s *DnAgentServer) retireSuspended(
 		}
 	}
 	return ok
+}
+
+// releaseStacks is P0's second half, run after retireSuspended so that a
+// retired linear's dm-error is on its path: under every export the chain
+// removes it walks the live tables down from the export's namespace device —
+// a per-CN linear of a side export, or a migration source's linear — and
+// resumes every suspended device of this node's that it finds, on whatever
+// table is live. Apart from a reload's moment between its suspend and its
+// resume, dnv suspends on purpose only the per-CN linears, at a fence, and
+// those are retireSuspended's; any other device of ours found suspended was
+// left so by a reload that failed or was cut off, and the IO it holds came
+// through devices that still map it, so a bare resume releases it where it
+// was going. It walks every export, and reports whether every device below
+// every one is now known not to be suspended: a read or a resume that failed
+// is none of those, and stops the descent before L1.
+func (s *DnAgentServer) releaseStacks(
+	ctx context.Context,
+	chain *dnChain,
+	actual *dnActual,
+) bool {
+	ok := true
+	starts := append([]string(nil), chain.exportLinears...)
+	for _, nqn := range chain.exports {
+		parts, parsed := common.ParseNqn(nqn)
+		if !parsed || parts.Kind != common.NqnKindMigrSrc {
+			continue
+		}
+		path, present, err := s.nvmet.NsDevicePath(ctx, nqn, sideNsid)
+		if err != nil {
+			slog.ErrorContext(ctx, "reading a migration source export's "+
+				"device failed",
+				slog.String("nqn", nqn),
+				slog.String("error", err.Error()))
+			ok = false
+			continue
+		}
+		if present {
+			starts = append(starts, strings.TrimPrefix(
+				strings.TrimSpace(path), "/dev/mapper/"))
+		}
+	}
+	seen := make(map[string]bool)
+	for _, name := range starts {
+		if !s.releaseBelow(ctx, name, actual, seen) {
+			ok = false
+		}
+	}
+	return ok
+}
+
+// releaseBelow walks name's live table down to the disk and resumes every
+// suspended device of ours on the way, children before their parent, so a
+// device's released bios meet no suspended device below it; name itself is
+// resumed too unless it is a per-CN linear, which is retireSuspended's.
+func (s *DnAgentServer) releaseBelow(
+	ctx context.Context,
+	name string,
+	actual *dnActual,
+	seen map[string]bool,
+) bool {
+	if seen[name] {
+		return true
+	}
+	seen[name] = true
+	if _, listed := actual.dms[name]; !listed {
+		// Not on the node: nothing below it to release.
+		return true
+	}
+	targets, err := s.dm.Table(ctx, name)
+	if err != nil {
+		slog.ErrorContext(ctx, "reading a dm table under an export failed",
+			slog.String("name", name),
+			slog.String("error", err.Error()))
+		return false
+	}
+	ok := true
+	for _, target := range targets {
+		for _, arg := range target.Args {
+			below, found := actual.byDevNo[arg]
+			if !found {
+				continue
+			}
+			if _, ours := actual.ours[below]; !ours {
+				continue
+			}
+			if !s.releaseBelow(ctx, below, actual, seen) {
+				ok = false
+			}
+		}
+	}
+	if dn, ours := actual.ours[name]; ours && dn.Kind != common.DmKindDnLinear {
+		if !s.resumeIfSuspended(ctx, name) {
+			ok = false
+		}
+	}
+	return ok
+}
+
+// resumeIfSuspended resumes one device of ours that a failed reload left
+// suspended, on its live table, and reports whether it is now known not to
+// be suspended: absent, never suspended, or resumed.
+func (s *DnAgentServer) resumeIfSuspended(
+	ctx context.Context,
+	name string,
+) bool {
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		slog.ErrorContext(ctx, "probing a dm device under an export failed",
+			slog.String("name", name),
+			slog.String("error", err.Error()))
+		return false
+	}
+	if dev == nil || !dev.Suspended {
+		return true
+	}
+	if err := s.dm.Resume(ctx, name); err != nil {
+		slog.ErrorContext(ctx, "resuming a dm device under an export failed",
+			slog.String("name", name),
+			slog.String("error", err.Error()))
+		return false
+	}
+	return true
 }
 
 // retireIfSuspended puts one suspended per-CN dm-linear on its own dm-error
@@ -733,7 +863,7 @@ func (s *DnAgentServer) sweepSide(
 	// migration release its slot in the pass that removes its wrapper,
 	// instead of waiting for the next SyncupDn.
 	_, _, identified := s.meta.Identity()
-	s.runChain(ctx, chain, res, s.cloneMetaGate(identified))
+	s.runChain(ctx, chain, actual, res, s.cloneMetaGate(identified))
 	st.tracker.Keep(sideResKeys(plan))
 	res.Log(ctx, sideIdAttrs(plan)...)
 	return res
@@ -1572,7 +1702,7 @@ func (s *DnAgentServer) sweepDn(
 	// unformatted, unreadable or foreign disk holds no table this node may
 	// write.
 	_, _, identified := s.meta.Identity()
-	s.runChain(ctx, chain, res, recordGate{
+	s.runChain(ctx, chain, actual, res, recordGate{
 		side:      func(uint64, uint64) bool { return identified },
 		cloneMeta: s.cloneMetaGate(identified).cloneMeta,
 	})
