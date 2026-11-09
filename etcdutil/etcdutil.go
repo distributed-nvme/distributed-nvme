@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync/atomic"
 	"time"
 
@@ -83,14 +84,18 @@ func New(
 }
 
 // timeouts are the client's settings a test of the package may set: the
-// keepalive time and timeout of EU1 and the silence threshold of a watch
-// (EU3). New uses prodTimeouts. gRPC raises a keepalive time below its floor
-// for a client to that floor, which is the production time, so of the two
-// keepalive settings only the timeout gets shorter in a test.
+// keepalive time and timeout of EU1, the silence threshold of a watch (EU3)
+// and a hook that edits the client's config, nil in production. New uses
+// prodTimeouts. gRPC raises a keepalive time below its floor for a client to
+// that floor, which is the production time, so of the two keepalive settings
+// only the timeout gets shorter in a test.
 type timeouts struct {
 	keepaliveTime    time.Duration
 	keepaliveTimeout time.Duration
 	watchSilence     time.Duration
+	// configure edits the client's config before the dial: a test adds an
+	// interceptor there that answers like an etcd member that is behind.
+	configure func(*clientv3.Config)
 }
 
 // prodTimeouts are the production values of timeouts.
@@ -115,7 +120,7 @@ func newClient(
 	if dialTimeout <= 0 {
 		dialTimeout = common.DefaultEtcdDialTimeout * time.Second
 	}
-	cli, err := clientv3.New(clientv3.Config{
+	cfg := clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: dialTimeout,
 		// Silence the etcd client's own zap logger: stderr carries one JSON
@@ -124,7 +129,11 @@ func newClient(
 		MaxCallSendMsgSize:   common.EtcdMaxRequestBytes,
 		DialKeepAliveTime:    tmo.keepaliveTime,
 		DialKeepAliveTimeout: tmo.keepaliveTimeout,
-	})
+	}
+	if tmo.configure != nil {
+		tmo.configure(&cfg)
+	}
+	cli, err := clientv3.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("etcd client: %w", err)
 	}
@@ -755,36 +764,30 @@ func (c *Client) run(
 	// holds the error of the last attempt, which is what NewSTM returns
 	// too when the callback is what ended the transaction.
 	var callbackErr error
-	_, err := concurrency.NewSTM(
-		c.cli,
-		func(stm concurrency.STM) error {
-			// Every attempt starts clean: a panic-driven abort inside the
-			// STM machinery must not be mistaken for a previous attempt's
-			// callback error below.
-			callbackErr = nil
-			view := &stmView{
-				ctx:      ctx,
-				stm:      stm,
-				readOnly: readOnly,
-				pending:  make(map[string]stmPending),
-			}
-			callbackErr = f(view)
-			if view.err != nil {
-				// A (de)serialization error is the root cause; it wins over
-				// whatever the callback made of the bad value.
-				callbackErr = view.err
-			}
-			if callbackErr != nil {
-				return callbackErr
-			}
-			if readOnly {
-				return errSnapshotDone
-			}
-			return nil
-		},
-		concurrency.WithAbortContext(octx),
-		concurrency.WithIsolation(concurrency.SerializableSnapshot),
-	)
+	var err error
+	// A read served by an etcd member that has not yet applied the
+	// revision the transaction's first read fixed answers "required
+	// revision is a future revision", and the etcd client's STM ends there
+	// with no retry. The member catches up within moments, so the whole
+	// transaction runs again after a short pause, inside the same budget
+	// (EU4, EU5); f must therefore be a pure function of what it reads, in
+	// a Snapshot as in a RunSTM, whose conflict retry asks the same. An
+	// error f returned itself is never retried here, whatever it wraps.
+	for {
+		err = c.stmOnce(ctx, octx, f, readOnly, &callbackErr)
+		if !errors.Is(err, rpctypes.ErrFutureRev) ||
+			(callbackErr != nil && err == callbackErr) {
+			break
+		}
+		pause := time.Duration(10+rand.IntN(40)) * time.Millisecond
+		select {
+		case <-time.After(pause):
+		case <-octx.Done():
+		}
+		if octx.Err() != nil {
+			break
+		}
+	}
 	if readOnly && errors.Is(err, errSnapshotDone) {
 		return nil
 	}
@@ -800,14 +803,58 @@ func (c *Client) run(
 	return nil
 }
 
+// stmOnce is one concurrency.NewSTM of run: one serializable-snapshot
+// transaction with the client's own conflict retries, its last attempt's
+// callback error left in callbackErr.
+func (c *Client) stmOnce(
+	ctx context.Context,
+	octx context.Context,
+	f func(s STM) error,
+	readOnly bool,
+	callbackErr *error,
+) error {
+	_, err := concurrency.NewSTM(
+		c.cli,
+		func(stm concurrency.STM) error {
+			// Every attempt starts clean: a panic-driven abort inside the
+			// STM machinery must not be mistaken for a previous attempt's
+			// callback error below.
+			*callbackErr = nil
+			view := &stmView{
+				ctx:      ctx,
+				stm:      stm,
+				readOnly: readOnly,
+				pending:  make(map[string]stmPending),
+			}
+			*callbackErr = f(view)
+			if view.err != nil {
+				// A (de)serialization error is the root cause; it wins over
+				// whatever the callback made of the bad value.
+				*callbackErr = view.err
+			}
+			if *callbackErr != nil {
+				return *callbackErr
+			}
+			if readOnly {
+				return errSnapshotDone
+			}
+			return nil
+		},
+		concurrency.WithAbortContext(octx),
+		concurrency.WithIsolation(concurrency.SerializableSnapshot),
+	)
+	return err
+}
+
 // RunSTM runs f as one read/write transaction (EU4) with serializable-snapshot
 // isolation. The etcd client re-runs f on a write conflict until ctx or the
-// common.DefaultEtcdOpTimeout budget of the whole transaction ends (EU5), so f
-// MUST be a pure function of what it reads through s. An error returned by f
-// ends the transaction before its commit and without a retry, and reaches the
-// caller unchanged; ErrNoCommit is the sentinel a deliberate abort wraps.
-// Every other error — connection, timeout, (de)serialization — is wrapped and
-// never retried here (EU6).
+// common.DefaultEtcdOpTimeout budget of the whole transaction ends (EU5), and
+// run re-runs it on a read a member behind the others answered as a future
+// revision, so f MUST be a pure function of what it reads through s. An error
+// returned by f ends the transaction before its commit and without a retry,
+// and reaches the caller unchanged; ErrNoCommit is the sentinel a deliberate
+// abort wraps. Every other error — connection, timeout, (de)serialization — is
+// wrapped and never retried here (EU6).
 func (c *Client) RunSTM(ctx context.Context, f func(s STM) error) error {
 	return c.run(ctx, f, false)
 }
@@ -822,8 +869,11 @@ func (c *Client) RunSTM(ctx context.Context, f func(s STM) error) error {
 // translates that sentinel back to nil. Compared with letting an empty write
 // set commit, this saves the commit round trip and, more importantly, removes
 // the conflict retry: a snapshot whose read set was concurrently rewritten
-// must still return the revision it read, not re-run f. s.Put/s.Del inside f
-// are a programming error and make Snapshot fail without writing anything.
+// must still return the revision it read, not re-run f. A later read that a
+// member behind the others answers as a future revision does re-run f, from
+// a fresh first read (run), so f must be a pure function of what it reads.
+// s.Put/s.Del inside f are a programming error and make Snapshot fail without
+// writing anything.
 func (c *Client) Snapshot(ctx context.Context, f func(s STM) error) error {
 	return c.run(ctx, f, true)
 }

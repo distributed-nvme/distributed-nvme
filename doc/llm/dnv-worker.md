@@ -268,8 +268,16 @@ instead, or, for the part of MD3's load that follows its ranges,
 `SnapshotAtRev`: MD3's and AR1's because they need the revision, and the
 dn role's read of a `DnConf` with its `DnRev` (RW13) because `SnapshotRev`
 serves a later read linearizable at the pinned revision, while `Snapshot`
-serves it from whichever member the client picks and fails on one that has
-not applied that revision yet.
+serves it from whichever member the client picks, which may not have
+applied that revision yet. A read of `RunSTM` or `Snapshot` after the first
+that reaches such a member is answered "required revision is a future
+revision", which ends the client's STM; both runners then run the whole
+transaction again after a pause of a few tens of milliseconds, within the
+same EU5 budget, since the member catches up within moments, and fail only
+when the lag outlasts the budget. So the callback of either runner may run
+more than once and must be a pure function of what it reads, as the
+conflict retry already asks of `RunSTM`'s; an error the callback returns
+itself is never retried, whatever it wraps.
 
 A third runner, `SnapshotRev`, is `Snapshot` that also **reports** the store
 revision its reads were served at: the client's STM pins that revision at
@@ -318,7 +326,8 @@ caller passes another value (`--etcd-dial-timeout`, CM1).
 
 EU6. **Errors.** Connection, timeout and (de)serialization errors are
 returned wrapped, never retried inside the helpers (the STM conflict retry
-of EU4 is the client's, not ours). The caller decides — the worker always
+of EU4 is the client's, not ours); a future-revision answer (EU4) is the
+one error the helpers retry themselves. The caller decides — the worker always
 retries on its own cadence (the next heartbeat, the next round, the next
 pass) and never crashes on an etcd error.
 

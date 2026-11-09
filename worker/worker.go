@@ -166,7 +166,8 @@ func (realClock) after(d time.Duration) <-chan time.Time {
 // SnapshotRev serves the dn role's read of a DnConf together with its DnRev
 // (readDnRecord, RW13). Every read of it after the first is linearizable at
 // the pinned revision, while Snapshot's are served by whichever member the
-// client picks and fail on one that has not applied that revision yet
+// client picks, so one that has not applied that revision yet makes Snapshot
+// run its callback again, and fail once the lag outlasts its budget
 // (snapshotView (etcdutil/etcdutil.go)).
 type etcdStore interface {
 	Get(ctx context.Context, key string, msg proto.Message) (bool, error)
