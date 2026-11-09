@@ -189,3 +189,58 @@ func TestAPrimaryLegRowKeepsItsProberWhenItsLookupFails(t *testing.T) {
 			"lookup did not answer", before, after)
 	}
 }
+
+// TestAPrimaryLooksUpAOneSidedLegOnlyWhenItsRowIsNotOk pins the cost of the
+// names above on a primary: a one-sided leg whose prober's row reads OK has a
+// live path through its one side, so the read takes no lookup of it. A
+// controller that goes after that probe is named once the leg's next probe
+// has failed and its row no longer reads OK.
+func TestAPrimaryLooksUpAOneSidedLegOnlyWhenItsRowIsNotOk(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	opts := reqOpts{revision: 2, primary: true}
+	syncupBoth(t, srv, opts)
+	probeLegs(t, srv, testMetaLeg, testDataLeg)
+	nqn := legNqn(srv, testDataLeg)
+	entry := "list " + subsysDirOf(t, node, nqn)
+	node.Reset()
+	if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+		t.Fatalf("verdict over probed legs = %v, want code 0", reply)
+	}
+	if n := countCalls(node, entry); n != 0 {
+		t.Fatalf("the read listed a probed one-sided leg's entry %d "+
+			"times, want 0", n)
+	}
+
+	dropLegCtrl(t, node, nqn, testIp, testSvcId)
+	if reply := checkCntlrVerdict(t, srv, 2); strings.Contains(
+		reply.GetDetails(), "no controller") {
+		t.Fatalf("verdict = %v before the leg's probe failed, want the "+
+			"side not named yet", reply)
+	}
+	st := legState(t, srv)
+	srv.mu.Lock()
+	var prober *legProber
+	for _, p := range st.probers {
+		if p.legId == testDataLeg {
+			prober = p
+		}
+	}
+	srv.mu.Unlock()
+	// The probe's IO through the leg's wrapper fails, as it does once the
+	// leg's only path is gone.
+	node.mu.Lock()
+	devNo := node.devNo[prober.path]
+	delete(node.devNo, prober.path)
+	node.mu.Unlock()
+	srv.runLegProbe(context.Background(), prober, testCn)
+	node.mu.Lock()
+	node.devNo[prober.path] = devNo
+	node.mu.Unlock()
+	reply := checkCntlrVerdict(t, srv, 2)
+	if !strings.Contains(reply.GetDetails(),
+		noCtrlName(nqn, testIp, testSvcId)) {
+		t.Fatalf("verdict after the failed probe = %v, want the side named",
+			reply)
+	}
+}

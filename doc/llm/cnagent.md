@@ -3835,8 +3835,9 @@ The rows, each with its `res_name` and what its probe checks:
   so they say what the node holds rather than the connect's error. In a
   read they come first in each leg's turn, and the read's other uses of
   the leg — the sides it names with no controller (CN30) and a standby's
-  leg row — read their lookup, so a read looks up each wanted leg once, on
-  either role. The
+  leg row — read their lookup, so a read looks up a leg at most once: every
+  wanted leg on a standby, and on a primary a two-sided leg or one whose
+  row does not read `OK` (CN30). The
   worker's cutover reads the primary's row of a migration's destination
   side (`dnv-worker.md` RW18), and no health rule judges these rows
   (`dnv-worker.md` HL2). Reason for the rows' scope: the primary's leg
@@ -4019,11 +4020,16 @@ A cntlr's read-only verdict also names each side its converge would
 connect (CN10): each provisioned side of a wanted leg that the leg's
 subsystem holds no controller for, as "enumeration failed" with the leg's
 subsystem NQN, " at " and the side's address, then "no controller". It
-reads them from one lookup of each wanted leg in the read's walk, a
-primary's legs included; a lookup that did not answer, or a controller
-whose address read did not answer, names none. A standby's leg row reads
-the same lookup and says so; a primary's leg row stays its prober's
-(CN11). A controller in any state is not named,
+reads them from one lookup of a leg in the read's walk: of every wanted
+leg on a standby, and on a primary of a leg with two sides or whose row,
+its prober's (CN11), does not read `OK`, since a one-sided leg whose probe
+passed has a live path through its one side. A side whose controller goes
+after such a probe is named once the leg's next probe has failed. A lookup
+that did not answer, or a controller whose address read did not answer,
+names none. A standby's leg row reads the same lookup and says so; a
+primary's leg row stays its prober's. Reason for a primary's bound: one
+with thousands of legs would otherwise read every leg's controllers on
+every read. A controller in any state is not named,
 since one that is connecting reconnects by itself, and neither is a side
 not provisioned, a leg the level suppresses or a leg whose disconnect is in
 flight: the converge connects none of them. The converge's reply carries

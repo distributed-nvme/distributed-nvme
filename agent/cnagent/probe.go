@@ -88,18 +88,28 @@ func (s *CnAgentServer) probeCntlr(
 		}
 		// The sides the converge would connect (CN30), from one lookup of the
 		// leg; a lookup that did not answer names none. A standby's leg row
-		// reads the same lookup and says so; a primary's row stays its
-		// prober's (legInfo).
-		if view == nil && lookupErr == nil {
+		// reads the same lookup and says so. A primary's row is its prober's
+		// (legInfo), and a one-sided leg whose row reads OK has a live path
+		// through its one side, so it is not looked up: a primary with
+		// thousands of legs would otherwise read each one's controllers on
+		// every read.
+		var row *pb.ResInfo
+		if plan.primary {
+			row = s.legInfo(ctx, st, plan, lp, view, lookupErr)
+		}
+		if view == nil && lookupErr == nil && (!plan.primary ||
+			row.GetStatus() != pb.ResStatus_RES_STATUS_OK) {
 			view, lookupErr = s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
 		}
-		if lookupErr == nil {
+		if lookupErr == nil && view != nil {
 			for _, side := range sidesToConnect(lp, view) {
 				noCtrl = append(noCtrl, legSide{nqn: lp.nqn, side: side})
 			}
 		}
-		info.LegIdToLeg[lp.legId] = s.legInfo(
-			ctx, st, plan, lp, view, lookupErr)
+		if !plan.primary {
+			row = s.legInfo(ctx, st, plan, lp, view, lookupErr)
+		}
+		info.LegIdToLeg[lp.legId] = row
 	}
 
 	// Groups — the reading's md walk serves all of them and the concat rows

@@ -523,10 +523,11 @@ func TestPathRowsOfAnUnansweredRead(t *testing.T) {
 }
 
 // TestPathRowsTakeOneLookupPerLeg pins what the rows cost. In a cntlr's
-// read, which a check round answers from, each leg is looked up once, on
-// both roles: a two-sided leg's path rows take the lookup, and the leg's
-// verdict of the sides the converge would connect (CN30) and a standby's leg
-// row read the same one; a one-sided leg's verdict takes it alone. A
+// read, which a check round answers from, each leg is looked up at most
+// once: a two-sided leg's path rows take the lookup, and the leg's verdict
+// of the sides the converge would connect (CN30) and a standby's leg row
+// read the same one; a one-sided leg's verdict takes it alone, on a primary
+// only while its row does not read OK, as here, where no probe has run. A
 // converge's rows read the view its connect step took, so its lookup of each
 // leg is the connect step's alone.
 func TestPathRowsTakeOneLookupPerLeg(t *testing.T) {
