@@ -62,7 +62,8 @@ func validateName(field string, value string) error {
 }
 
 // validateOptionalName is validateName for a field whose empty value is legal
-// (cluster_name, which defaults; location, which defaults to addr_port).
+// (cluster_name, which defaults; location, which defaults to addr_port;
+// CreateThinDevice's ori_name, which is optional).
 func validateOptionalName(field string, value string) error {
 	if value == "" {
 		return nil

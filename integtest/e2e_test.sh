@@ -6283,7 +6283,8 @@ DIAG_MAX_DN_LOGS=6
 #     exception to the standard below, so that a guest without it fails
 #     here, naming it, and not at the ops case. `nohup` (dn_up, cn_up) and
 #     `dmesg` (diag) are exceptions the other way: this suite runs them on
-#     the nodes, and no list names them.
+#     the nodes, and no node list (NODE_TOOLS, DN_TOOLS, CN_TOOLS) names
+#     them.
 #   - no `cmp`: every comparison here is a sha256 string compared on the
 #     driver.
 # The check runs under the same shell the work runs under — `sudo -n bash -c`
@@ -14419,7 +14420,8 @@ copy_xfer_delete() {
 # has the group's ext_cnt and the migration's metadata units free — which at a
 # shape with more DN VMs than legs means the DN VMs outside the group's are
 # out of room, not that the rule was waived. A run with the copy case always
-# has more DN VMs than legs (parse_args refuses fewer), so the location
+# has more DN VMs than legs (parse_args refuses a run with no more DN VMs
+# than legs), so the location
 # assertion below is always made.
 copy_migration() {
 	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled"

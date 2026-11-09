@@ -13,7 +13,8 @@ import (
 )
 
 // A namespace a live transfer names is the transfer's origin: every cntlr
-// builds its xfer stack from it, the primary's mapping its thin device. So
+// builds its xfer stack from it, the primary's mapping its thin device where
+// it serves the transfer. So
 // DeleteNamespace and UpdateNamespaceDev of it are refused, and
 // CreateNamespace refuses a place a transfer still names;
 // UpdateNamespaceSuspended is not, since a suspend parks only the origin's own

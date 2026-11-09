@@ -1900,13 +1900,14 @@ harmless. A migration destination takes its run before it zeroes
 * **Bounded numeric parameters.** These bounds are checked on the
   **request**: a non-zero value outside its bounds is rejected, while a
   proto3 zero is always accepted — it means "unset" and asks for the
-  default, which the create RPC substitutes once and for all (the
-  resolution rule below, which also names the two stored messages it
-  exempts). The list `count` is different: it reaches no create RPC and is
-  stored nowhere — the paged list RPCs resolve it per request, cut one page
-  with it and throw it away (page_token; `gateway.md` GW4). The bounds and
-  the defaults are constants of `common/constants.go`, save the stripe's
-  default, which follows the block:
+  default, which the create RPC substitutes once and for all (the resolution
+  rule below, which also names the two stored messages it exempts). The list
+  `count` is different: it reaches no create RPC and is stored nowhere — the
+  paged list RPCs resolve it per request, cut one page with it and throw it
+  away (page_token; `gateway.md` GW4). The bounds and the defaults are
+  constants of `common/constants.go`, save the stripe's default, which
+  follows the block, and a clone's hydration pair, which keeps the dm-clone
+  target's own:
   * `dn_bin_conf.extent_size`: `MinDnExtSize` to `MaxDnExtSize`, default
     `DefaultDnExtSize`;
   * `alloc_conf.dn_batch_size`: `MinAllocDnBatchSize` to
@@ -3280,19 +3281,19 @@ bytes (Namespace suspend semantics).
 
 While a transfer lives its origin is the transfer's: every cntlr builds its
 xfer stack from the origin namespace, the primary's mapping the origin's td
-and each standby's error table taking its size from it, so `DeleteNamespace`
-and `UpdateNamespaceDev` of the origin are refused `FAILED_PRECONDITION`,
-and `CreateNamespace` refuses the place (`ori_nqn`, `ori_ns_idx`) while a
-transfer names it. Reason: a deleted origin leaves every cntlr reporting the
-transfer in error and the destination reading errors, and a repointed one
-moves a live copy to another td, so a clone would end as a mix of two
-devices with no error; a new namespace at a place a transfer still names
-would become that transfer's origin unasked. The guard reads the pool's
-transfer list and each listed transfer in the same STM; a transfer created
-or deleted meanwhile rewrites that list, so the commit fails and the STM
-runs again. `UpdateNamespaceSuspended` stays allowed: a suspend parks only
-the origin's own ns-dev, and the td the primary's xfer stack maps does not
-change.
+where it serves the transfer and each standby's error table taking its size
+from it, so `DeleteNamespace` and `UpdateNamespaceDev` of the origin are
+refused `FAILED_PRECONDITION`, and `CreateNamespace` refuses the place
+(`ori_nqn`, `ori_ns_idx`) while a transfer names it. Reason: a deleted
+origin leaves every cntlr reporting the transfer in error and the
+destination reading errors, and a repointed one moves a live copy to another
+td, so a clone would end as a mix of two devices with no error; a new
+namespace at a place a transfer still names would become that transfer's
+origin unasked. The guard reads the pool's transfer list and each listed
+transfer in the same STM; a transfer created or deleted meanwhile rewrites
+that list, so the commit fails and the STM runs again.
+`UpdateNamespaceSuspended` stays allowed: a suspend parks only the origin's
+own ns-dev, and the td the primary's xfer stack maps does not change.
 
 **DeleteTransfer** — `force` false **finalizes** a completed hand-over:
 the STM additionally sets `suspended` true on the origin namespace, so the
@@ -7590,21 +7591,21 @@ that component's document and only pointed to here.
   the volume. The way out is the operator's: `nvme disconnect -n` of the
   volume's subsystem NQN on the node fails the waiting IO, after which the
   pod stops and the unstage runs (`csi.md` CSI14).
-* **A fault only a host sees never fails over.** Reactions read the
-  agents' reports and the stored records, never a host (Automatic
-  reactions; `dnv-worker.md` AR1), so a primary whose agent answers the
-  worker while hosts cannot reach its `nvme_tr_conf` address,
-  or its controller node's data interface, stays the primary and stays
-  listed in the discovery records ([D18]); the host's IO queues while a
-  standby's path is left, and otherwise fails at the kernel's reconnect
-  limit on a host whose connect sets none, or waits with no error on a node
-  of the Kubernetes driver, whose connect never gives up (`csi.md` CSI14). The way out is the operator's: disabling the primary starts a
-  failover with no threshold wait where an enabled standby with a zero
-  health epoch exists (`dnv-worker.md` AR5), the operator enabling the
-  cntlr again afterwards, since a disabled cntlr is never a candidate; with
-  no such standby a disable starts no failover and takes the primary out of
-  the discovery records (Cntlrs), so a host that follows the log drops its
-  last path (`csi.md`, The node plugin).
+* **A fault only a host sees never fails over.** Reactions read the agents'
+  reports and the stored records, never a host (Automatic reactions;
+  `dnv-worker.md` AR1), so a primary whose agent answers the worker while
+  hosts cannot reach its `nvme_tr_conf` address, or its controller node's
+  data interface, stays the primary and stays listed in the discovery
+  records ([D18]); the host's IO queues while a standby's path is left, and
+  otherwise fails at the kernel's reconnect limit on a host whose connect
+  sets none, or waits with no error on a node of the Kubernetes driver,
+  whose connect never gives up (`csi.md` CSI14). The way out is the
+  operator's: disabling the primary starts a failover with no threshold wait
+  where an enabled standby with a zero health epoch exists (`dnv-worker.md`
+  AR5), the operator enabling the cntlr again afterwards, since a disabled
+  cntlr is never a candidate; with no such standby a disable starts no
+  failover and takes the primary out of the discovery records (Cntlrs), so a
+  host that follows the log drops its last path (`csi.md`, The node plugin).
 * **An old primary that cannot apply its demotion within the demotion
   hold fails IO from the fence.** An agent whose demotion waits behind a
   slow converge for the cntlr's locks (`cnagent.md` CN1; the head-of-line
@@ -7622,12 +7623,15 @@ that component's document and only pointed to here.
   sole-primary replacement of Automatic reactions — its sides drop its
   exports in no order with its CN's teardown of its stack, which the CN
   learns of from its own node's syncup, and until that teardown it answers
-  IO errors on its still-optimized path to every host still on it. The
-  case needs a pool with no failover candidate; the replacement's path
-  comes with its build. A node of the Kubernetes driver keeps the old
-  primary's path until the replacement's path shows the volume's namespace
-  (`csi.md` CSI15), so its IO meets those errors for the whole build, unless
-  the old path's reconnect is refused first.
+  IO errors on its still-optimized path to every host still on it. The case
+  needs a pool with no failover candidate; the replacement's path comes with
+  its build. A node of the Kubernetes driver keeps the old primary's path
+  until the replacement's path shows the volume's namespace (`csi.md`
+  CSI15), so its IO can meet those errors until that teardown, or until the
+  replacement's path shows the namespace if that comes first; after the
+  teardown the old path reconnects and its IO waits, unless the old port
+  refuses the reconnect with DNR (A mount does not survive the loss of its
+  last path).
 * **A DN's metadata area can refuse a migration the count allowed.** A
   migration's run is contiguous, and a release can commit before the DN
   frees the run, so an area whose free units lie in runs too short, or
@@ -7701,11 +7705,11 @@ that component's document and only pointed to here.
   the slice count times `data_block_size`, and an aligned range of that size
   frees one block on every slice; `fstrim` can report success and free
   nothing. A `stripe_size` equal to `data_block_size`, the default of a
-  cluster conf that names no stripe and a block no larger than the largest
-  stripe, makes one aligned host block one pool block; a pool that names no
-  stripe takes its cluster's stored stripe instead, whatever its own block
-  (Common validation, Storage pools). Read in the kernel's dm-thin and
-  dm-stripe sources, not in the lab.
+  cluster conf that names no stripe, when its block is no larger than the
+  largest stripe, makes one aligned host block one pool block; a pool that
+  names no stripe takes its cluster's stored stripe instead, whatever its
+  own block (Common validation, Storage pools). Read in the kernel's dm-thin
+  and dm-stripe sources, not in the lab.
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node
   the full size of the groups of the pool's slices (Terminology and object

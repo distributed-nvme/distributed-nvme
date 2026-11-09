@@ -5027,8 +5027,7 @@ faults_validation_battery() { # <the cluster's stored cntlr_interval>
 
 	# A size must be a positive multiple of slice_cnt x stripe_size
 	# (architecture.md, Thin devices) — here 1 x the default stripe — because
-	# dm-striped
-	# takes equal, chunk-aligned members.
+	# dm-striped takes equal, chunk-aligned members.
 	# The check is state-dependent, so it runs inside the transaction; the
 	# refusal still lands before the id minter is ever created.
 	gwx INVALID_ARGUMENT create-td --sp sp0 --rev "$SP_REV" \
@@ -6588,7 +6587,8 @@ case_ceiling() {
 	stage 2 "a clone whose metadata one side of its group cannot hold is refused"
 	# -----------------------------------------------------------------
 	gw create-sp --sp spE0 --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 1 \
-		--block-size "$CEIL_BLOCK" --stripe-size "$CEIL_BLOCK" --cn-white "$(cn_addr 0),$(cn_addr 1)" \
+		--block-size "$CEIL_BLOCK" --stripe-size "$CEIL_BLOCK" \
+		--cn-white "$(cn_addr 0),$(cn_addr 1)" \
 		--dn-white "$(dn_addr 0),$(dn_addr 3)" >/dev/null
 	refresh_rev spE0
 	assert_eq "$(jq_of "$(sp_json spE0)" '[.cntlrs[].addr_port] | sort | @json')" \

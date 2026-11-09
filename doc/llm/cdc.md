@@ -350,16 +350,16 @@ resets those connections unanswered.
 
 NP2. **PDU subset.** Implemented: ICReq, ICResp, H2CTermReq, C2HTermReq,
 CapsuleCmd (Connect is the only command whose in-capsule data is read),
-CapsuleResp, C2HData. Never sent: R2T, since no host data is ever
-solicited. Anything malformed — an unknown PDU type, a bad HLEN or PLEN, a
-PDU carrying data whose PDO lies outside the range from HLEN to PLEN, a
-PLEN over `CdcMaxH2CData` plus the CapsuleCmd header (the one cap for every
-PDU type) — answers C2HTermReq with the fitting FES and closes (log
-`pdu error`). The C2HTermReq carries, as its data, the header of the PDU in
-error as far as it was read, cut to the specs' C2HTermReq size: the common
-header alone for a fault found before the rest of the header is read, the
-whole header for a fault found after. Its FEI names the offending field's offset, and stays zero where the
-specs reserve it, as for a PLEN over the cap.
+CapsuleResp, C2HData. Never sent: R2T, since no host data is ever solicited.
+Anything malformed — an unknown PDU type, a bad HLEN or PLEN, a PDU carrying
+data whose PDO lies outside the range from HLEN to PLEN, a PLEN over
+`CdcMaxH2CData` plus the CapsuleCmd header (the one cap for every PDU type)
+— answers C2HTermReq with the fitting FES and closes (log `pdu error`). The
+C2HTermReq carries, as its data, the header of the PDU in error as far as it
+was read, cut to the specs' C2HTermReq size: the common header alone for a
+fault found before the rest of the header is read, the whole header for a
+fault found after. Its FEI names the offending field's offset, and stays
+zero where the specs reserve it, as for a PLEN over the cap.
 
 An H2CTermReq after the ICReq ends the connection the way a closed socket
 does — no C2HTermReq, reason `closed` (NP13) — only if it passes the

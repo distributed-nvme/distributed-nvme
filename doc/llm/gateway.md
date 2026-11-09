@@ -1636,29 +1636,29 @@ pick: a node at its ceiling leaves the scan by the presence rule of
 `architecture.md`, Capacity index keys, and a create that picked it before is
 sent back to its scan.
 
-**Topology.** The developer machine builds the binaries and drives one
-Linux server over ssh, with no sudo anywhere. Everything runs on that
-server and listens on its loopback, on a port block disjoint from every
-other suite: one etcd, configured with the request caps every etcd serving
-dnv must have (its transaction-op cap at `EtcdMaxTxnOps` and its
-request-size cap at `EtcdMaxRequestBytes`, which the suite reads from the
-`workerctl` it has just built instead of copying the numbers, as it reads
-`MaxSliceCntPerSp` for the clone it creates at that ceiling,
-`DefaultHealthCheckInterval` for the health intervals the smoke case
-expects in the stored `ClusterConf`, `DefaultDmPoolDataBlockSize` and the
-`DefaultStripeSize` that block gives for its stored block and stripe, a
-DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
-`DnCloneMetaUnit`, for the area the ceiling case fills, and the id step's strides
-`IdStepStride` and `ThinIdStepStride`, which its smoke case checks the
-moved counters against); three gateway instances on one launch
-line that differs only in the gRPC address; four fake DNs and three fake
-CNs, in distinct locations because the CN scan dedupes locations too, served
-by `fakeagent`, the worker suite's fake (`dnv-worker.md`, Integration test
+**Topology.** The developer machine builds the binaries and drives one Linux
+server over ssh, with no sudo anywhere. Everything runs on that server and
+listens on its loopback, on a port block disjoint from every other suite:
+one etcd, configured with the request caps every etcd serving dnv must have
+(its transaction-op cap at `EtcdMaxTxnOps` and its request-size cap at
+`EtcdMaxRequestBytes`, which the suite reads from the `workerctl` it has
+just built instead of copying the numbers, as it reads `MaxSliceCntPerSp`
+for the clone it creates at that ceiling, `DefaultHealthCheckInterval` for
+the health intervals the smoke case expects in the stored `ClusterConf`,
+`DefaultDmPoolDataBlockSize` and the `DefaultStripeSize` that block gives
+for the block and stripe the smoke case expects in the stored cluster and
+pool confs, a DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
+`DnCloneMetaUnit`, for the area the ceiling case fills, and the id step's
+strides `IdStepStride` and `ThinIdStepStride`, which its smoke case checks
+the moved counters against); three gateway instances on one launch line that
+differs only in the gRPC address; four fake DNs and three fake CNs, in
+distinct locations because the CN scan dedupes locations too, served by
+`fakeagent`, the worker suite's fake (`dnv-worker.md`, Integration test
 plan); and the two drivers, `gatewayctl` for the RPCs and `workerctl` for
 the etcd ground truth, both run on the server. Every stage runs under a
 trace id of its own, the thread that ties a script stage to the gateway,
-agent and etcd records it caused; the suite asserts once that the id a
-stage sent reaches the fake agent the gateway called.
+agent and etcd records it caused; the suite asserts once that the id a stage
+sent reaches the fake agent the gateway called.
 
 **Cases.** The cases run in a fixed order, fail-fast, each against a store
 wiped of every dnv key, with every gateway restarted and every fake reset,

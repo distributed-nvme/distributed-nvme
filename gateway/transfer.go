@@ -50,16 +50,15 @@ func resolveTransfer(
 // CreateNamespace (architecture.md, Transfers): the name of the first transfer
 // of the SP whose origin is the namespace place (nqn, nsIdx). Every cntlr
 // builds its xfer stack from the origin while its transfer lives, the
-// primary's mapping the origin's thin device, so deleting the origin would
-// leave every cntlr reporting the transfer in error and the destination
-// reading errors, repointing it would move a live copy to another thin
-// device mid-copy, and
-// a new namespace at a place a transfer still names would become that
-// transfer's origin unasked. The walk is xfer_name_list, bounded by
-// MaxXferCntPerSp; a listed transfer whose key is gone is ABORTED, as
-// tdCloneRef reads a missing clone. The caller's STM has read the pool's
-// transfer list too, and a transfer created or deleted meanwhile rewrites
-// that list, so the commit fails and the STM runs again.
+// primary's mapping the origin's thin device where it serves the transfer, so
+// deleting the origin would leave every cntlr reporting the transfer in error
+// and the destination reading errors, repointing it would move a live copy to
+// another thin device mid-copy, and a new namespace at a place a transfer
+// still names would become that transfer's origin unasked. The walk is
+// xfer_name_list, bounded by MaxXferCntPerSp; a listed transfer whose key is
+// gone is ABORTED, as tdCloneRef reads a missing clone. The caller's STM has
+// read the pool's transfer list too, and a transfer created or deleted
+// meanwhile rewrites that list, so the commit fails and the STM runs again.
 func nsTransferRef(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -205,9 +204,10 @@ func (s *Server) CreateTransfer(
 //
 // A missing origin subsystem or ns_idx on the finalize path is skipped, not an
 // error (GW16): the transfer is being deleted either way, and the RPC must not
-// become unable to complete because a record changed outside the gateway no
-// longer holds the namespace it points at (the namespace RPCs refuse to
-// remove a live transfer's origin, nsTransferRef).
+// become unable to complete because a record changed outside the gateway, or
+// left by a gateway without the namespace RPCs' refusal to remove a live
+// transfer's origin (nsTransferRef), no longer holds the namespace it points
+// at.
 func (s *Server) DeleteTransfer(
 	ctx context.Context,
 	req *pb.DeleteTransferRequest,
