@@ -4891,7 +4891,8 @@ AR8 on such a group; no leg of it has a second side, so none has a path
 row. A cntlr reports a leg row per new leg of every repair its request
 carries, as the cn agent connects and probes a new leg as it does a leg of
 the group (`architecture.md`, Repair), and, while its request makes it the primary,
-every group of the request as whole, with every leg of its `leg_list`
+marked primary and not disabled as the cn agent reads it (`cnagent.md`
+CN9), every group of the request as whole, with every leg of its `leg_list`
 held in sync, and no verdict on a repair; the levers `repairs`,
 a verdict by a repair's name, the text of a refused take-back included,
 that the fake reports under the repair's

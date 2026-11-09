@@ -27,9 +27,9 @@ func (a *Agent) resolveRow(objKey string, keys ...string) *pb.ResInfo {
 }
 
 // resolveCntlrRow is resolveRow for a cntlr object: a row override marked
-// when_primary is skipped while primary — the cntlr.primary of the cntlr's
-// last accepted request — is false (dnv-worker.md, Integration test plan, The
-// fake agent).
+// when_primary is skipped while primary — the cntlr's last accepted request
+// marking it primary and not disabled — is false (dnv-worker.md, Integration
+// test plan, The fake agent).
 func (a *Agent) resolveCntlrRow(
 	objKey string, primary bool, keys ...string,
 ) *pb.ResInfo {
@@ -332,12 +332,14 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // the kinds of row the cn agent reports for a clone (cnagent.md CN28) — and,
 // for each clone of its clone_list, a group row for the clone's clone meta
 // group and a leg row per leg of it, as for a slice's group
-// (dnv-worker.md, Integration test plan, The fake agent). td_id_to_thin_info
-// is filled only when the request's cntlr.primary is true and the thin_ok
-// lever says so (architecture.md, sp role; cnagent CN14 "primary only"),
-// minus any thin_missing_slices — the created-flip negative of the worker
-// suite's smoke case (RW19). The same
-// cntlr.primary gates every when_primary row override (resolveCntlrRow).
+// (dnv-worker.md, Integration test plan, The fake agent). A cntlr is the
+// primary here exactly when the real cn agent converges it as one: its
+// request's cntlr.primary is set and cntlr.disabled is not (cnagent.md CN9);
+// a disabled primary reports the standby shape. td_id_to_thin_info is filled
+// only on the primary and when the thin_ok lever says so (architecture.md, sp
+// role; cnagent.md CN14, "primary only"), minus any thin_missing_slices — the
+// created-flip negative of the worker suite's smoke case (RW19). The same
+// primary test gates every when_primary row override (resolveCntlrRow).
 //
 // side_id_to_path holds one row per side of every leg of a slice's group with
 // two sides — the shape a migration gives a leg; a leg of a clone meta group
@@ -364,7 +366,7 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	if req == nil {
 		return nil
 	}
-	primary := req.GetCntlr().GetPrimary()
+	primary := req.GetCntlr().GetPrimary() && !req.GetCntlr().GetDisabled()
 	info := &pb.CntlrInfo{
 		SsIdToSubsystem:   make(map[uint64]*pb.ResInfo),
 		NsIdToNamespace:   make(map[uint64]*pb.ResInfo),

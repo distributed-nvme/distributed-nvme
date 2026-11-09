@@ -936,6 +936,26 @@ func syncupCntlrFixture(
 	t *testing.T, cnClient pb.ControllerNodeAgentClient, primary bool,
 ) *pb.SyncupCntlrReply {
 	t.Helper()
+	return syncupCntlrRequest(t, cnClient, cntlrFixture(primary))
+}
+
+// syncupDisabledPrimary is syncupCntlrFixture for a cntlr whose request marks
+// it primary AND disabled, which the real cn agent converges as a standby
+// (cnagent.md CN9).
+func syncupDisabledPrimary(
+	t *testing.T, cnClient pb.ControllerNodeAgentClient,
+) *pb.SyncupCntlrReply {
+	t.Helper()
+	req := cntlrFixture(true)
+	req.GetCntlr().Disabled = true
+	return syncupCntlrRequest(t, cnClient, req)
+}
+
+func syncupCntlrRequest(
+	t *testing.T, cnClient pb.ControllerNodeAgentClient,
+	req *pb.SyncupCntlrRequest,
+) *pb.SyncupCntlrReply {
+	t.Helper()
 	ctx := context.Background()
 	if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
 		ClusterId: 1, CnId: 1, Revision: 1,
@@ -943,7 +963,7 @@ func syncupCntlrFixture(
 	}); err != nil {
 		t.Fatalf("SyncupCn: %v", err)
 	}
-	reply, err := cnClient.SyncupCntlr(ctx, cntlrFixture(primary))
+	reply, err := cnClient.SyncupCntlr(ctx, req)
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
@@ -1042,8 +1062,8 @@ func TestCntlrInfoDerivation(t *testing.T) {
 
 // TestCntlrInfoWhenPrimary is the fake's when_primary (dnv-worker.md,
 // Integration test plan, The fake agent): the row override applies only while
-// the cntlr's last accepted request carries cntlr.primary = true, and an
-// ungated override beside it applies either way.
+// the cntlr's last accepted request marks it primary and not disabled
+// (cnagent.md CN9), and an ungated override beside it applies either way.
 func TestCntlrInfoWhenPrimary(t *testing.T) {
 	const behavior = `{"objects": {"cntlr 1:1": {"rows": {
 	  "slice_id_to_dm_pool.1": {"status": "ERROR", "details": "settling test",
@@ -1057,23 +1077,35 @@ func TestCntlrInfoWhenPrimary(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		primary  bool
+		disabled bool
 		wantPool pb.ResStatus
 	}{
-		{"standby", false, pb.ResStatus_RES_STATUS_OK},
-		{"primary", true, pb.ResStatus_RES_STATUS_ERROR},
+		{"standby", false, false, pb.ResStatus_RES_STATUS_OK},
+		{"primary", true, false, pb.ResStatus_RES_STATUS_ERROR},
+		// A disabled primary converges the standby shape (cnagent.md CN9),
+		// so the when_primary override does not apply to it.
+		{"disabled primary", true, true, pb.ResStatus_RES_STATUS_OK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := newTestAgent(t)
 			_, cnClient := startAgent(t, agent)
 			setBehavior(t, agent, behavior)
-			info := syncupCntlrFixture(t, cnClient, tc.primary).GetCntlrInfo()
+			reply := syncupCntlrFixture
+			if tc.disabled {
+				reply = func(
+					t *testing.T, c pb.ControllerNodeAgentClient, _ bool,
+				) *pb.SyncupCntlrReply {
+					return syncupDisabledPrimary(t, c)
+				}
+			}
+			info := reply(t, cnClient, tc.primary).GetCntlrInfo()
 			pool := info.GetSliceIdToDmPool()[1]
 			if pool.GetStatus() != tc.wantPool {
 				t.Errorf("slice_id_to_dm_pool.1 status = %v, want %v",
 					pool.GetStatus(), tc.wantPool)
 			}
 			wantDetails := ""
-			if tc.primary {
+			if tc.primary && !tc.disabled {
 				wantDetails = "settling test"
 			}
 			if pool.GetDetails() != wantDetails {
@@ -1097,6 +1129,7 @@ func TestCntlrInfoThinRows(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		primary    bool
+		disabled   bool
 		behavior   string
 		wantTds    []uint64
 		wantSlices []uint64
@@ -1110,6 +1143,13 @@ func TestCntlrInfoThinRows(t *testing.T) {
 		{
 			name:     "standby with thin_ok",
 			primary:  false,
+			behavior: `{"objects": {"cntlr 1:1": {"thin_ok": true}}}`,
+			wantTds:  nil,
+		},
+		{
+			name:     "disabled primary with thin_ok",
+			primary:  true,
+			disabled: true,
 			behavior: `{"objects": {"cntlr 1:1": {"thin_ok": true}}}`,
 			wantTds:  nil,
 		},
@@ -1133,7 +1173,13 @@ func TestCntlrInfoThinRows(t *testing.T) {
 			agent := newTestAgent(t)
 			_, cnClient := startAgent(t, agent)
 			setBehavior(t, agent, tc.behavior)
-			info := syncupCntlrFixture(t, cnClient, tc.primary).GetCntlrInfo()
+			var info *pb.CntlrInfo
+			if tc.disabled {
+				info = syncupDisabledPrimary(t, cnClient).GetCntlrInfo()
+			} else {
+				info = syncupCntlrFixture(t, cnClient, tc.primary).
+					GetCntlrInfo()
+			}
 			wantKeys(t, "td_id_to_thin_info", info.GetTdIdToThinInfo(),
 				tc.wantTds...)
 			for _, tdId := range tc.wantTds {

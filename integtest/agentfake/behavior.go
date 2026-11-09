@@ -28,7 +28,8 @@ import (
 // that status alone.
 //
 // WhenPrimary gates the override on the cntlr's role: it applies only while
-// the cntlr's last accepted request carries cntlr.primary = true, so a row
+// the cntlr's last accepted request carries cntlr.primary = true and
+// cntlr.disabled = false (cnagent.md CN9), so a row
 // planted on a standby bites the moment a failover promotes it and not
 // before. The fake reports a standby's pool and md rows too — every row but
 // the primary-only thin rows — where the real cn agent reports those for a

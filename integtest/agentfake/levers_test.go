@@ -897,12 +897,19 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 	              "r2": {"refusal": "leg 0x2ca holds newer data"}},
 	  "grps": {"12": {"whole": false}, "0x15": {"in_sync": []},
 	           "71": {"whole": false, "in_sync": [712]}}}}}`
-	for _, primary := range []bool{true, false} {
-		name := "standby"
-		if primary {
-			name = "primary"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, shape := range []struct {
+		name     string
+		primary  bool
+		disabled bool
+	}{
+		{"primary", true, false},
+		{"standby", false, false},
+		// A disabled primary converges the standby shape (cnagent.md CN9):
+		// no group readings and no repair verdicts.
+		{"disabled primary", true, true},
+	} {
+		primary := shape.primary && !shape.disabled
+		t.Run(shape.name, func(t *testing.T) {
 			agent := newTestAgent(t)
 			_, cnClient := startAgent(t, agent)
 			setBehavior(t, agent, behavior)
@@ -913,7 +920,8 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("SyncupCn: %v", err)
 			}
-			req := cntlrFixture(primary)
+			req := cntlrFixture(shape.primary)
+			req.GetCntlr().Disabled = shape.disabled
 			req.NameToRepair = map[string]*pb.Repair{
 				"r0": {RepId: 9, GrpId: 12, NewLegList: []*pb.Leg{
 					{LegId: 105},
