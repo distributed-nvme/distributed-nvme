@@ -3411,7 +3411,7 @@ preflight_vms() {
 		# dm target. Loaded means a /sys/module entry; built in means a line in
 		# modules.builtin, since a built-in module can lack a /sys/module entry
 		# (one without parameters has none).
-		missing=$(sshv "$idx" "for m in nvmet nvmet_tcp nvme_tcp nvme_fabrics loop dm_clone dm_thin_pool dm_flakey raid1; do [ -d /sys/module/\$m ] || tr - _ </lib/modules/\$(uname -r)/modules.builtin 2>/dev/null | grep -qF /\$m.ko || echo \$m; done")
+		missing=$(sshv "$idx" "for m in nvmet nvmet_tcp nvme_tcp nvme_fabrics loop dm_clone dm_thin_pool dm_flakey raid1; do [ -d /sys/module/\$m ] || tr - _ 2>/dev/null </lib/modules/\$(uname -r)/modules.builtin | grep -qF /\$m.ko || echo \$m; done")
 		[ -z "$missing" ] || die "missing: kernel module(s) $missing on vm$idx"
 		local got
 		got=$(sshv "$idx" "ls -d $NVMET 2>/dev/null || echo MISSING")

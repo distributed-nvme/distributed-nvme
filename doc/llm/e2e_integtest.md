@@ -119,12 +119,10 @@ which of the two ended its hold, the report or the timer. The worker's own
 try-to-abort of a repair of its own, and its cancel of one, which react's
 take-over sees only when it comes before the operator's (`dnv-worker.md`, Leg
 repair; `architecture.md`, Repair); and the retire timer, as no run waits out a
-retired leg's age (`dnv-worker.md` AR12). Guest distinctness of a migration
-destination or a repair's fresh new leg where the suite skips its check: at as
-many disk-node guests as a group has legs, where no guest lies outside the
-group's and the copy case's migration destination can share its source's guest,
-and for a leg repair whose fresh leg react's steer pushes to the second tier
-(E2E4; Known limits).
+retired leg's age (`dnv-worker.md` AR12). Guest distinctness of a repair's
+fresh new leg in the react case at as many disk-node guests as a group has
+legs, where no guest lies outside the group's, and for a leg repair whose
+fresh leg react's steer pushes to the second tier (E2E4).
 
 ## Topology and parameters
 
@@ -133,11 +131,12 @@ control-plane guest runs etcd, `dnv-gateway`, `dnv-worker`, `dnv-cdc` and
 `dnvctl` as the login user. At least three controller-node guests run one
 `dnv-agent cn` each: two carry the pool's cntlrs and the rest none, where the
 ops case's third cntlr and the cntlr replacement land. The disk-node guests, at
-least as many as a group has legs, run many `dnv-agent dn` instances each,
-every one on its own loop device and its own nvmet port and service id, as two
-ports cannot listen on one address, all registered at their guest's location
-(E2E4). Two hosts run only the kernel's nvme-tcp stack and nvme-cli, but for
-nvme-stas on host0 inside the cutoff case (E2E10).
+least as many as a group has legs, and more than that in a run with the copy
+case, which the suite refuses otherwise (E2E4), run many `dnv-agent dn`
+instances each, every one on its own loop device and its own nvmet port and
+service id, as two ports cannot listen on one address, all registered at their
+guest's location (E2E4). Two hosts run only the kernel's nvme-tcp stack and
+nvme-cli, but for nvme-stas on host0 inside the cutoff case (E2E10).
 
 The control plane has a guest of its own, as in a deployment
 (`architecture.md`, System overview): it holds no kernel state and runs without
@@ -187,16 +186,16 @@ and a pick fails once fewer guests than a group has legs hold an unpicked node;
 hence many agents per guest. The bound is the least count per guest that rules
 starvation out by counting, sized by the ops case rather than the create: after
 the create and its own two grows, whose scans hand each guest one of its
-emptiest disk nodes first and so take side-less nodes first
-(`architecture.md`, Finding DN candidates), ops needs a side-less disk
-node on as many guests as a group has legs, and guaranteeing that
-guarantees the create. The guarantee is sufficient, not necessary: below
-the bound the proof is lost, not the run. Its headroom also keeps the
-allocator's second tier out of reach wherever there are more disk-node guests
-than legs per group (Known limits), save where react's steer leaves no enabled
-side-less disk node on a guest outside the group's (E2E4), and as one more
-guest does not always lower the bound, a shape above the per-kernel cap is told
-how many disk-node guests it needs.
+emptiest disk nodes first and so take side-less nodes first (`architecture.md`,
+Finding DN candidates), ops needs a side-less disk node on as many guests as a
+group has legs, and guaranteeing that guarantees the create. The guarantee is
+sufficient, not necessary: below the bound the proof is lost, not the run. Its
+headroom also keeps the allocator's second tier out of reach wherever there are
+more disk-node guests than legs per group, which a run with the copy case needs
+(E2E4), save where react's steer leaves no enabled side-less disk node on a
+guest outside the group's (E2E4), and as one more guest does not always lower
+the bound, a shape above the per-kernel cap is told how many disk-node guests
+it needs.
 
 **Event thresholds.** Only a pool's create sets its thresholds, so each case's
 set is chosen just before its pool is built, and a case without one dies rather
@@ -256,13 +255,16 @@ destination or a repair's fresh new leg, a leg repair's
 included, excludes the group's locations only at the allocator's first tier
 (`architecture.md`, Per-operation allocation), and a migration destination
 beside its source would collide with it on the side export's NQN, which
-names no disk node (`architecture.md`, NQNs); so those placements are
-asserted guest-distinct only when there are more disk-node guests than legs
-per group, the skip logged otherwise. A leg repair whose fresh leg react
-steers onto a side-less disk node (The cases, react) is asserted so only
-while the steer leaves such a node enabled on a guest outside the group's,
-since the steer can itself push the pick to the second tier; the skip is
-logged then too.
+names no disk node (`architecture.md`, NQNs). So a run with the copy case,
+which migrates a side and, under md-raid1, repairs a leg, is refused before
+it builds anything or touches a guest unless it has more disk-node guests
+than legs per group, and the copy case asserts each placement it makes
+guest-distinct. The react case's leg repairs are
+asserted so only with more disk-node guests than legs, the skip logged
+otherwise, and a leg repair whose fresh leg react steers onto a side-less
+disk node (The cases, react) only while the steer leaves such a node enabled
+on a guest outside the group's, since the steer can itself push the pick to
+the second tier; the skip is logged then too.
 
 E2E5. **Sparse backing files and allocation caps.**
 Backing files are created sparse but for the backing pattern, one random
@@ -843,31 +845,30 @@ state; a cleanup-only run does neither. Preflight dies on the first failure,
 naming the guest and the fix. It proves that the driver has its tools, the
 binaries, the tree's constants (E2E12) and a pinned etcd release; that every
 guest answers passwordless ssh; that a node guest has what the sweeps and the
-agents need — sudo, the tools of both roles (on a controller node, also those
-of the copy case's throttle when that case is in the run and the one of the
-react case's reject rule when that case runs with md-raid1), the modules and
-the nvmet tree, native multipath on a disk node too, where a migration
-destination reads ANA through it, md support and a stock md assembly rule the
-mask can switch off (`architecture.md`, Components: invocation reference), hole
-punching, memory and free space, none of this run's ports listening, and no
-conflicting nvmet port, as a configfs port does not listen until a subsystem is
-linked and an agent would adopt and rewrite an existing port of its id
-(`dnagent.md` SH19);
-that a host is a clean initiator — sudo, nvme-tcp and multipath, its identity
-files, generated if absent and never overwritten, nvme-stas inactive and the
-masked autoconnector (E2E10); that host0, when the copy or the react case
-runs with md-raid1, has the tool of the kernel-log witness their repairs
-read; that host0, when the cutoff case is in the run, has the tools of the
-case's write loop and kernel-log witness and nvme-stas 2.x installed, both
-its units known to systemd, as a 1.x one would fail later and silently,
-never connecting,
-nvme-stas being a package the suite never installs; and that the
-control-plane guest has its tools, its ports free and the free-space floor the
-space guard holds it to, and needs no sudo: the closing trim is the one root
-command tried there and may be refused.
-The tool check covers only the sweeps after it: the start sweep runs before it
-and a cleanup-only run skips it, so on a guest missing mdadm or udevadm their
-md stop can silently leave dnv arrays standing.
+agents need — sudo, the tools of both roles (on a controller node, also the
+thin metadata reader the cn agent runs, those of the copy case's throttle when
+that case is in the run and the one of the react case's reject rule when that
+case runs with md-raid1), every module either loaded or built in, dm-flakey
+among them for the read-only level, and the nvmet tree, native multipath on a
+disk node too, where a migration destination reads ANA through it, md support
+and a stock md assembly rule the mask can switch off (`architecture.md`,
+Components: invocation reference), hole punching, memory and free space, none
+of this run's ports listening, and no conflicting nvmet port, as a configfs
+port does not listen until a subsystem is linked and an agent would adopt and
+rewrite an existing port of its id (`dnagent.md` SH19); that a host is a clean
+initiator — sudo, nvme-tcp and multipath, its identity files, generated if
+absent and never overwritten, nvme-stas inactive and the masked autoconnector
+(E2E10); that host0, when the copy or the react case runs with md-raid1, has
+the tool of the kernel-log witness their repairs read; that host0, when the
+cutoff case is in the run, has the tools of the case's write loop and
+kernel-log witness and nvme-stas 2.x installed, both its units known to
+systemd, as a 1.x one would fail later and silently, never connecting,
+nvme-stas being a package the suite never installs; and that the control-plane
+guest has its tools, its ports free and the free-space floor the space guard
+holds it to, and needs no sudo: the closing trim is the one root command tried
+there and may be refused. The tool check covers only the sweeps after it: the
+start sweep runs before it and a cleanup-only run skips it, so on a guest
+missing mdadm or udevadm their md stop can silently leave dnv arrays standing.
 
 ## Cleanup, and why the order is what it is
 
@@ -970,19 +971,6 @@ the connect attempted.
   source is a second pool's, on a controller node outside the case's pool,
   so a failover of a pool whose own transfer is the source, which moves the
   source with the clone, is not exercised.
-* **At as many disk-node guests as a group has legs, the copy case's migration
-  can land beside its source.** The group's legs then hold every location, so
-  the allocator's first tier has no candidate and the second offers, for each
-  guest, one disk node outside the group's, the source's guest included, and
-  the destination is drawn among them (`architecture.md`, Per-operation
-  allocation, Finding DN candidates); there two dn agents of one kernel hold
-  the two sides of one leg, which the placement rule forbids, and both converge
-  the one side export (`architecture.md`, Disk node). The case can then fail,
-  and one agent's removal leaves the export without its namespace on the
-  other's port until that agent converges again (`dnagent.md` DN6, Known
-  limits); the suite logs that the guest check is skipped (E2E4) and goes on.
-  With more disk-node guests than legs the first tier places the destination on
-  a guest outside the group's while a disk node there has room.
 * **A standby's namespaces are inaccessible, never non-optimized**
   (`cnagent.md` CN16), so a host holds one usable path per namespace, and ANA
   path selection across two usable controllers is not exercised.

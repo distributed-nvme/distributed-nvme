@@ -1327,7 +1327,8 @@ roles (repeatable flags; nothing is positional, nothing is hardcoded):
   --cn    at least 3  one \`dnv-agent cn\` each; $CNTLR_CNT carry the sp's
                       cntlrs and the rest carry none, where AR7 lands
                       (passwordless sudo)
-  --dn    at least LEGS (2 for raid1, 1 for none), and in practice 4:
+  --dn    at least LEGS (2 for raid1, 1 for none), more than LEGS for a
+                      run that includes the copy case, and in practice 4:
                       \$DNS_PER_VM \`dnv-agent dn\` instances each
                       (passwordless sudo)
   --host  exactly 2   real kernel NVMe hosts, reached through the cdc (E2E10)
@@ -1561,6 +1562,20 @@ parse_args() {
 		[ "$known" -eq 1 ] || usage
 	fi
 
+	# The copy case migrates a side and, under md-raid1, repairs a leg. With
+	# no more DN VMs than a group has legs, tier 2 of the placement
+	# (architecture.md, Per-operation allocation) can put the new side on
+	# its source's VM, and two dn agents of one kernel must never hold the
+	# two sides of one leg (dnagent.md CM2), so a run with that case is
+	# refused here, before it builds anything or touches a guest (E2E4). A
+	# cleanup-only run runs no case.
+	if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$DN_VM_CNT" -le "$LEGS" ] &&
+		{ [ -z "$ONLY" ] || [ "$ONLY" = copy ]; }; then
+		die "the copy case needs more DN VMs than a group has legs:" \
+			"$DN_VM_CNT DN VM(s) and $LEGS leg(s) per group; add a --dn," \
+			"or run another case alone (--only)"
+	fi
+
 	derive_params
 }
 
@@ -1684,7 +1699,8 @@ derive_params() {
 	# among ties, as the scan reads the bins from the fullest up and puts the
 	# most free first only inside one bin. Tier 1 draws from the guests
 	# outside the group's. Tier 2 draws from every guest when none of those
-	# has room, as on exactly LEGS DN guests. So the pick is side-less for
+	# has room, as on exactly LEGS DN guests, which a run with the copy case
+	# never has, while one of react alone can. So the pick is side-less for
 	# certain only while every location in the draw still holds a side-less
 	# DN and no occupied DN with room for the leg in a bin the scan reads
 	# before that DN's, and the step checks it itself. So none of them enters
@@ -6263,9 +6279,8 @@ DIAG_MAX_DN_LOGS=6
 #   - `thin_dump` is run by the cn AGENT, not by this suite's HELPER: for the
 #     bitmap reads the ops and copy cases issue (`td get-bm`, `td get-leg-bm`)
 #     and for its activation sweep of a pool's thin ids (cnagent.md CN14,
-#     CN25), so a controller node needs it, and CN_TOOLS does not list it —
-#     an exception to the standard below, as `nohup` (dn_up, cn_up) and
-#     `dmesg` (diag) are on the nodes.
+#     CN25), so a controller node needs it and CN_TOOLS lists it, so that a
+#     guest without it fails here, naming it, and not at the ops case.
 #   - no `cmp`: every comparison here is a sha256 string compared on the
 #     driver.
 # The check runs under the same shell the work runs under — `sudo -n bash -c`
@@ -6324,7 +6339,8 @@ DN_TOOLS="$NODE_TOOLS truncate wipefs dd sha256sum mdadm udevadm"
 # mdadm: the cn agent's Md (agent/cnagent/md.go), md_stop_all, md_names and the
 # cn diag. udevadm: md_stop_all's and md_names' name reads, and the reloads of
 # install_udev_rule and remove_udev_rule.
-CN_TOOLS="$NODE_TOOLS mdadm udevadm"
+# thin_dump: the cn agent's thin metadata reads (above).
+CN_TOOLS="$NODE_TOOLS mdadm udevadm thin_dump"
 # tc and ip: the copy case's throttle (throttle_from), which preflight_node asks
 # of a CN only when that case is in the run, as preflight_stas asks host0 for
 # nvme-stas only when the cutoff case is. The cleanup's unthrottle needs them
@@ -6362,17 +6378,14 @@ HOST_KMSG_TOOLS="dmesg"
 # the failure dump runs `grep_log` there over the four daemon logs.
 CP_TOOLS="ss pgrep pkill awk sed du df tail nohup grep timeout"
 
-# The module list of preflight_vms (cnagent_test.sh) minus dm-flakey, which
-# the agent uses here too: at the read-only level the ops case steps through,
-# the primary gives the ns-dev of each namespace it serves a dm-flakey table
-# over that namespace's backing (cnagent.md CN16 rule 7, CN19). The
-# list does not load or check it; the agent's table load pulls the target
-# in on a kernel whose modules are installed, which is why the gap does no
-# harm, and preflight does not prove it. modprobe is best-effort on
-# purpose: a module built into the kernel makes `modprobe` fail, and what
-# matters is the assert that follows (the nvmet configfs tree, /proc/mdstat,
-# multipath).
-NODE_MODULES="nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool raid1"
+# The module list of preflight_vms (cnagent_test.sh). dm-flakey is on it
+# because the agent uses it here too: at the read-only level the ops case
+# steps through, the primary gives the ns-dev of each namespace it serves a
+# dm-flakey table over that namespace's backing (cnagent.md CN16 rule 7,
+# CN19). modprobe is best-effort on purpose, since a module built into the
+# kernel makes `modprobe` fail; modules_missing_cmd then proves each one
+# loaded or built in.
+NODE_MODULES="nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool dm-flakey raid1"
 
 # tools_cmd builds the ONE-LINE guest command that prints the missing tools,
 # one per line, and nothing when they are all there. `$b` survives the
@@ -6389,6 +6402,17 @@ modules_cmd() { # <module…>
 	printf 'for m in %s; do modprobe $m 2>/dev/null || true; done;' "$*"
 	printf ' grep -q " /sys/kernel/config " /proc/mounts ||'
 	printf ' mount -t configfs none /sys/kernel/config; true'
+}
+
+# modules_missing_cmd builds the ONE-LINE guest command that prints each
+# module that is neither loaded nor built in, one per line, as preflight_vms
+# (cnagent_test.sh) checks them: loaded means a /sys/module entry, built in a
+# line in modules.builtin, since a built-in module without parameters has no
+# /sys/module entry. Module names are compared with dashes as underscores.
+modules_missing_cmd() { # <module…>
+	printf 'for m in %s; do m=$(echo $m | tr - _);' "$*"
+	printf ' [ -d /sys/module/$m ] || tr - _ 2>/dev/null </lib/modules/$(uname -r)/modules.builtin |'
+	printf ' grep -qF /$m.ko || echo $m; done; true'
 }
 
 # space_field pulls one key out of the helper's `space` output (work=,
@@ -6658,6 +6682,13 @@ preflight_node() { # <role: dn|cn> <index>
 
 	"$sshw" "$v" "$(modules_cmd $NODE_MODULES)" >/dev/null ||
 		die "$label: loading the kernel modules / mounting configfs failed"
+	local missingMods
+	missingMods=$("$sshw" "$v" "$(modules_missing_cmd $NODE_MODULES)") ||
+		die "$label: reading the kernel modules failed"
+	[ -z "$missingMods" ] ||
+		die "$label: kernel module(s) neither loaded nor built in:" \
+			$missingMods "(install the kernel's modules package, e.g." \
+			"linux-modules-extra on Ubuntu)"
 
 	# Every read below carries `|| echo MISSING` on the guest and `|| die` on
 	# the driver: the first turns an absent file into a readable assert
@@ -14371,7 +14402,7 @@ copy_xfer_delete() {
 # the reacting set too, which is why the two-sides rule is the argument and the
 # threshold is only the belt.
 #
-# PLACEMENT, and the one assertion that needs a guard: the destination's DN is
+# PLACEMENT: the destination's DN is
 # excluded by the BLACK LIST, always — grpDnAddrs names every DN the group
 # occupies and seeds it (gateway/migration.go's CreateMigration planning read)
 # — so "not a DN of this group" is unconditional. The destination's LOCATION
@@ -14384,10 +14415,9 @@ copy_xfer_delete() {
 # Tier 1 falls short only when no allocatable DN outside the group's locations
 # has the group's ext_cnt and the migration's metadata units free — which at a
 # shape with more DN VMs than legs means the DN VMs outside the group's are
-# out of room, not that the rule was waived. So the location
-# assertion below is made only when DN_VM_CNT > LEGS, i.e. exactly when tier 1
-# has somewhere anti-affine to go; with DN_VM_CNT == LEGS it is skipped with a
-# log line instead of failing a run that is behaving correctly.
+# out of room, not that the rule was waived. A run with the copy case always
+# has more DN VMs than legs (parse_args refuses fewer), so the location
+# assertion below is always made.
 copy_migration() {
 	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
@@ -14447,23 +14477,17 @@ copy_migration() {
 			"cannot happen"
 		;;
 	esac
-	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
-		case ",$before_vms," in
-		*",$dstvm,"*)
-			die "the migration destination $dstaddr is on a DN VM the group" \
-				"already occupies ($before_vms). Tier 1 (architecture.md," \
-				"Per-operation allocation) excludes the" \
-				"group's locations and relaxes only when no allocatable DN outside" \
-				"them has the group's ext_cnt and the migration's metadata units" \
-				"free — with $DN_VM_CNT DN VMs and $LEGS leg(s) per group that would" \
-				"mean the DN VMs outside the group's are out of room, not that the rule was waived"
-			;;
-		esac
-	else
-		log "  $DN_VM_CNT DN VM(s) and $LEGS leg(s) per group: tier 1" \
-			"(architecture.md, Per-operation allocation) has" \
-			"nowhere anti-affine to go, so the destination VM is not asserted"
-	fi
+	case ",$before_vms," in
+	*",$dstvm,"*)
+		die "the migration destination $dstaddr is on a DN VM the group" \
+			"already occupies ($before_vms). Tier 1 (architecture.md," \
+			"Per-operation allocation) excludes the" \
+			"group's locations and relaxes only when no allocatable DN outside" \
+			"them has the group's ext_cnt and the migration's metadata units" \
+			"free — with $DN_VM_CNT DN VMs and $LEGS leg(s) per group that would" \
+			"mean the DN VMs outside the group's are out of room, not that the rule was waived"
+		;;
+	esac
 	# GW18: the destination side takes the first cntlid slot that differs
 	# from the source's, because the two sides of ONE leg are aggregated by
 	# every CN and must occupy different CNTLID ranges
@@ -15185,20 +15209,17 @@ copy_repair() {
 			"(architecture.md, Repairs)"
 		;;
 	esac
-	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
-		case ",$before_vms," in
-		*",$newvm,"*)
-			die "the new leg landed on a DN VM the group already occupies" \
-				"($before_vms). Tier 1 (architecture.md, Per-operation" \
-				"allocation) excludes the group's locations and relaxes" \
-				"only when no DN outside them can take the group's ext_cnt"
-			;;
-		esac
-	else
-		log "  $DN_VM_CNT DN VM(s) and $LEGS leg(s) per group: tier 1" \
-			"(architecture.md, Per-operation allocation) has nowhere" \
-			"anti-affine to go, so the new leg's VM is not asserted (E2E4)"
-	fi
+	# A run with the copy case has more DN VMs than legs (parse_args), so
+	# tier 1 has somewhere anti-affine to go while a DN VM outside the group
+	# has room (E2E4).
+	case ",$before_vms," in
+	*",$newvm,"*)
+		die "the new leg landed on a DN VM the group already occupies" \
+			"($before_vms). Tier 1 (architecture.md, Per-operation" \
+			"allocation) excludes the group's locations and relaxes" \
+			"only when no DN outside them can take the group's ext_cnt"
+		;;
+	esac
 	COPY_REP_NEW=$newleg
 	COPY_REP_NEWSIDE=$newside
 	COPY_REP_NEWADDR=$newaddr
