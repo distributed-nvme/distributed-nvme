@@ -227,6 +227,21 @@ func TestCloneDrainIgnoresEveryPassGate(t *testing.T) {
 		}
 	})
 
+	t.Run("with a lost listed record", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, [][2]uint32{{0, 0}})
+		h.latchClone("c0")
+		h.state.Missing = append(h.state.Missing,
+			model.ThinDeviceKey(testCid, testSpId, "lost-td"))
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+		h.pass()
+		// The drain ran; the reactions refused the lost record (MD3).
+		h.wantOps("drain_clone_bm")
+		if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 1 {
+			t.Errorf("%q records = %d, want 1", msgInvalidStoredConf, got)
+		}
+	})
+
 	t.Run("at a suppressed sp_level", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.withClone("c0", 700, [][2]uint32{{0, 0}})

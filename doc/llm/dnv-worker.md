@@ -435,10 +435,14 @@ latched clone's too, the sides of the repairs' new legs in
 `repair_name_list` order and the retired sides in `retired_leg_id_list`
 order; and `CnByAddr`, the `CnConf` of every cntlr's. A missing `SpConf`
 returns `ErrNotFound` (the SP is being deleted; the rev key's delete
-follows). A listed sub-object whose key is missing is reported in `Missing`,
-in the order the load reads it — the `SpConf`'s sub-objects, then the
-repairs and the retired legs, then the node records — and logged by the
-caller; the load still succeeds. `SpRevision` is the revision the loaded
+follows). A key the load looks for and does not find is reported in
+`Missing`, in the order the load reads it — the sub-objects the `SpConf`
+lists, then the repairs and the retired legs, then the node records — and
+the load still succeeds. The caller decides: on a live SP a record a list
+of the `SpConf` names stops the sp role's fan-out and reaction pass until
+it is back (RW14, AR1); a node record, which no list names, and any record
+of a latched SP are driven past, RW14 leaving idle the children the
+snapshot cannot resolve, with a record naming the keys. `SpRevision` is the revision the loaded
 state belongs to, for RW14's revision guard; the rev key is not a listed
 sub-object, so an absent one is no `Missing` entry. Bitmap **values** are
 never loaded here — pushes read one chunk at a time (BM3). Bitmap indexes
@@ -1861,12 +1865,14 @@ An endpoint without a `DnConf` or `CnConf`
 leaves that child **idle**: the fan-out builds no request for it, so the
 diff treats it as gone — a running child is stopped (RW11) and none is
 started. While the last fan-out left anything unresolved — such an
-endpoint, or a cntlr's missing record (below) — the coordinator re-resolves
+endpoint, or a latched SP's cntlr whose record is missing (below) — the
+coordinator re-resolves
 every `cntlr_interval`, and the fan-out that resolves one starts a new child
 for it — a cntlr's with the sides-first release below — which drives
 nothing until an old one's stop, if still running, has returned (RW1). When
-the object that cannot be resolved is a **cntlr** — its `Cntlr` record is
-missing (MD3) or its `CnConf` is absent — **every side child** of the SP is
+the object that cannot be resolved is a **cntlr** — its `CnConf` is
+absent, or on a latched SP its `Cntlr` record is missing (MD3; a live SP's
+is refused below) — **every side child** of the SP is
 left idle, not just that cntlr's own: RW15's `primary_cn_id` and
 `standby_id_list` must name every cntlr of the SP, and a `side_conf` built
 from a shrunken set makes every DN of the SP tear the missing CN's
@@ -2023,6 +2029,23 @@ other thing that arms one, through the idle count — was not reached. What
 it deliberately does **not** do is stop the children already running: they
 keep driving the plan built from the last good conf, because a conf that
 cannot be read is not a reason to stop serving IO.
+
+Ahead of those two the fan-out of a live SP checks that every record a
+list of the `SpConf` names was found (MD3): a cntlr, a slice, a thin
+device, a subsystem, a clone, a transfer, a migration, a repair or a
+retired leg whose key is missing refuses the plan in exactly the same way,
+one `invalid stored conf` record naming the keys, the retry armed, the
+running children kept on their last plan. The agents read the lists a
+request carries as complete and converge on a missing entry by tearing its
+resources down, so a request built without a lost thin device would have
+the primary delete that thin device's data from every thin pool for good.
+The pool waits for an operator to put the record back (Known limits). A
+missing node record is not refused: the endpoint rule above leaves idle
+the children it cannot resolve. Nor is a latched SP's missing record: its
+lists hold no volume, since `DeleteStoragePool` refuses an SP that still
+has one (`architecture.md`, Storage pools), its teardown is what the drain
+asks for, and the drain judges the keys it needs for a reason of its own
+(SPD12), so its fan-out drives what it can.
 
 A load whose `SpRevision` (MD3) is ahead of the revision the coordinator
 was delivered builds nothing either — no request, and no child started,
@@ -2901,8 +2924,10 @@ because this pass takes its own fresh snapshot of the SP rather than
 reusing the fan-out's: AR6 reads `low_water_mark_pct` and `data_block_size`
 straight off it and sizes a meta grow with the cluster's `extent_size`,
 while the DN scans of AR6 and AR8 walk the bin ladder and every allocating
-reaction takes its oversampling batch from `alloc_conf`. A third gate
-follows the `bdev_conf` one: every group of the SP, a clone meta group
+reaction takes its oversampling batch from `alloc_conf`. Between the two
+sits the gate on the SP's records: a record a list of the `SpConf` names
+whose key is missing refuses the pass as it refuses RW14's fan-out (MD3).
+A fourth gate follows the `bdev_conf` one: every group of the SP, a clone meta group
 included, must give a length to zero (`model.SideZeroBytes`,
 `model.CloneMetaSideZeroBytes`), the check RW14's fan-out makes. No
 reaction reads a length to zero, but the pass must not commit a reaction
@@ -2917,8 +2942,8 @@ every gate: the clone drain's steps (CLD7) run first of all, ahead of the
 cluster-conf lookup and of every validation, and a latched SP's drain
 step (SPD6) runs behind the cluster-conf gate — its repair, retired-leg
 and D2 batches maintain DN capacity keys off the ladder — but ahead of the
-SP's own two, so a
-refusal of the SP's geometry or of a group's length still lets that SP
+SP's own three: the drain judges the records it needs itself (SPD12), and
+a refusal of the SP's geometry or of a group's length still lets that SP
 drain. The ticker keeps running — the pass cadence falls back to
 `DefaultHealthCheckInterval` on an unusable conf and logs nothing of its
 own, because a coordinator that stopped ticking would stop retrying the
@@ -2931,7 +2956,7 @@ children log
 `cluster conf missing` for the idle period (RW9).
 
 The steps of a live SP's pass run in this order: the re-seed of the health
-memos (HL3), the clone drain's steps (CLD7), the three gates, AR11's stage
+memos (HL3), the clone drain's steps (CLD7), the four gates, AR11's stage
 moves and AR13's forced-start clear at every `sp_level`, AR3's
 suppression, AR12's retire timer, and the reactions in AR2's priority. A
 latched SP runs its drain step behind the cluster-conf gate and neither the
@@ -3024,8 +3049,8 @@ pass and no reaction at all, at ANY `sp_level`, because a doomed SP must
 drain whatever level an operator left it at — "at most", because the AR1
 gates that sit ahead of the branch still apply: a pass whose `LoadSp`
 failed, or whose cluster conf is missing or unusable, runs no step at all
-(the SP's own `bdev_conf` and group-length gates sit *behind* it,
-deliberately — SPD6). A
+(the SP's own records, `bdev_conf` and group-length gates sit *behind*
+it, deliberately — SPD6). A
 **disabled** cntlr is never a candidate, replaced or repaired — but a
 disabled *primary* is itself the AR5 failover trigger (`architecture.md`,
 Cntlrs). Disabling is the operator's hands-off signal: `model.ReplaceCntlr`
@@ -3850,10 +3875,11 @@ of a repair (AR11, AR12) and no forced-start clear (AR13), regardless of
 `sp_level` suppression — "at most", because the gates ahead of the branch
 still apply: a pass whose `LoadSp` failed, or whose cluster conf is missing
 or unusable, runs nothing at all and retries on the next tick. (The SP's OWN
-gates, its `bdev_conf` and its groups' lengths (AR1), are deliberately NOT
-among them: the drain reads no geometry, and gating it there would make an
-SP whose stored geometry cannot be read permanently undeletable, the latch
-being one-way.) The FIRST step comes from the ordinary `cntlr_interval`
+gates, its records, its `bdev_conf` and its groups' lengths (AR1), are
+deliberately NOT among them: the drain reads no geometry and judges the
+lost keys it needs itself (SPD12), and gating it there would make an SP whose stored
+geometry cannot be read permanently undeletable, the latch being
+one-way.) The FIRST step comes from the ordinary `cntlr_interval`
 pass — the latch's `SpRev` bump reaches the coordinator as a desired
 change, which drives the fan-out, not the pass. After that a committed step
 ends in `BumpSpRev` (except the last), and once its call succeeds the step
@@ -4129,7 +4155,7 @@ SPD6, whose latched SP runs only drain steps: here the SP is healthy and
 its other children must keep converging. Each pass runs at most one step
 per deleting clone, bounded by `MaxCloneCntPerSp`, in `clone_name_list`
 order; the steps run ahead of EVERY gate of the pass — the cluster-conf
-cache lookup, `ValidateClusterConf`, the SP's own `bdev_conf` and
+cache lookup, `ValidateClusterConf`, the SP's own records, `bdev_conf` and
 group-length gates (AR1) and AR3's suppression — because none of them
 applies. A batch whose call succeeds also wakes the coordinator at once
 (CLD12), and that wake-up runs these steps alone: it loads the SP afresh
@@ -4291,7 +4317,8 @@ compaction and is reopened with a rescan (SW4);
 `cluster conf watch restarting` the same for the process's one `ClusterConf`
 watch (RW21); `cluster conf missing` the idle of a loop whose cluster is
 absent from the cache, once per idle period (RW9); `invalid stored conf`, at
-Error, a stored conf one of the three conf gates refused — a revision
+Error, a stored conf one of the conf gates refused, a record an SP's list
+names but etcd lacks among them — a revision
 worker's (RW9), the sp fan-out's (RW14) or the pass's (AR1), whose
 cluster-conf gate a latched SP's drain wake-up applies too (SPD6) — once
 per distinct error and never once per round; `syncup result` every
@@ -4708,7 +4735,7 @@ is created with a data group; and
 SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
-every conf it writes, and the three conf gates are unit-tested instead.
+every conf it writes, and the conf gates are unit-tested instead.
 Thirteen records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
@@ -4922,6 +4949,21 @@ which no suite case sets, so no suite case runs RW13's count compare.
 
 ## Known limits
 
+* **A pool with a lost record waits for an operator.** When a record that a
+  list of a live pool names is missing from etcd, while the list still
+  names it, the sp role sends the pool no new request and its pass runs
+  nothing after its gates — no reaction, failover included, no stage move,
+  no forced-start clear and no retire timer — until an operator puts the
+  record back (RW14, AR1). The running children keep their last request
+  and their rounds, but a worker that starts or takes the pool over
+  meanwhile starts none, so the pool then has no check round and no
+  health record either. Removing the name from the list instead is no way
+  out: the next request then lacks the record, and for a thin device the
+  primary deletes its data. Normal writes change a list and its record in
+  one transaction and a restore brings back one whole copy, so only a hand
+  edit of etcd or a program's bug reaches this. The refusal is the safe
+  side: the agents read the lists as complete, and a request without a lost
+  thin device would delete its data for good.
 * **A partitioned observer is tolerated, not repaired.** An observer whose
   watch of a role is broken while its puts succeed is caught by VW8 (b) only
   if that watch stops echoing its own puts too; a watch that delivers its

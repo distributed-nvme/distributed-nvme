@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,8 +70,10 @@ const (
 	// msgSpStandbyLegRow is HL2's "a standby's leg row is logged, never
 	// recorded".
 	msgSpStandbyLegRow = "standby leg row"
-	// msgSpSubObjectMissing is MD3's "a listed sub-object whose key is
-	// missing is reported in SpState.Missing and LOGGED BY THE CALLER".
+	// msgSpSubObjectMissing names the keys MD3 reported missing that the
+	// fan-out drives past: node records, which RW14 leaves to its endpoint
+	// rule, and any record of a latched SP. A live SP's missing listed record
+	// is refused instead, under msgInvalidStoredConf.
 	msgSpSubObjectMissing = "sp sub-object missing"
 	// msgSpSidesIdle is RW15's side_conf completeness gate: no side of the SP
 	// can be driven while the SP's cntlr set is not fully resolved.
@@ -382,7 +385,8 @@ type spPlan struct {
 	// cutover beside RW18's flip may start (cutoverRefs).
 	cutovers []model.CutoverRef
 	// unresolved counts what the snapshot could not resolve — an endpoint
-	// with no DnConf/CnConf, a cntlr whose record is missing — each of which
+	// with no DnConf/CnConf, a latched SP's cntlr whose record is missing
+	// (a live SP's is refused before the plan, MD3) — each of which
 	// leaves a child idle: no request, so a running one is stopped (RW14). A
 	// nonzero count makes the coordinator re-resolve on its ticker.
 	unresolved int
@@ -842,11 +846,29 @@ func (w *spWorker) fanOut() {
 		// desired change, which re-enters the fan-out, so no retry is armed.
 		return
 	}
+	if !state.Conf.GetDeleting() {
+		if err := checkListedRecords(w.cid, state); err != nil {
+			// MD3: a record a list of a live SP names is gone. The agents
+			// read the lists a request carries as complete and converge on a
+			// missing entry by tearing its resources down — for a thin
+			// device, deleting its data from every thin pool for good. So
+			// the whole plan is refused as for a stored conf that cannot be
+			// read (below): nothing built, the running children kept on
+			// their last plan, the retry armed, one record under the memo;
+			// an operator puts the record back. A latched SP is spared: its
+			// lists hold no volume (DeleteStoragePool refused one), its
+			// teardown is what the drain asks for, and the drain judges the
+			// keys it needs itself (SPD12).
+			w.fanWanted = true
+			w.refuseSpConf(ctx, err)
+			return
+		}
+	}
 	if len(state.Missing) > 0 {
-		// MD3: the load succeeded and the coordinator drives what it can,
-		// but every one of these keys is a sub-object BOTH agents converge on
-		// by tearing its resources down — the only record that names them is
-		// this one.
+		// MD3: a node record, which no list of the SP names, or any record
+		// of a latched SP: RW14 leaves idle the children the snapshot cannot
+		// resolve and drives the rest. This record names the keys that
+		// vanished.
 		slog.InfoContext(ctx, msgSpSubObjectMissing,
 			slog.Uint64("cluster_id", w.cid),
 			slog.Uint64("sp_id", w.spId),
@@ -901,6 +923,27 @@ func (w *spWorker) fanOut() {
 	w.confRefusal.fanOut = ""
 	plan := w.buildPlan(ctx, state)
 	w.applyPlan(ctx, plan)
+}
+
+// checkListedRecords is MD3's gate on an SP whose records are not whole: it
+// names every key in state.Missing that a list of the SpConf names — a cntlr,
+// a slice, a thin device, a subsystem, a clone, a transfer, a migration, a
+// repair or a retired leg — or returns nil. A node record (DnConf, CnConf) is
+// named by no list of the SP and is left to RW14's endpoint rule.
+func checkListedRecords(cid uint64, state *model.SpState) error {
+	dnPrefix, cnPrefix := model.DnConfPrefix(cid), model.CnConfPrefix(cid)
+	var lost []string
+	for _, key := range state.Missing {
+		if strings.HasPrefix(key, dnPrefix) ||
+			strings.HasPrefix(key, cnPrefix) {
+			continue
+		}
+		lost = append(lost, key)
+	}
+	if len(lost) == 0 {
+		return nil
+	}
+	return fmt.Errorf("listed record missing: %s", strings.Join(lost, ", "))
 }
 
 // refuseSpConf records fanOut's refusal, once per distinct error.
@@ -960,9 +1003,11 @@ func (w *spWorker) buildPlan(
 	for _, cntlrId := range conf.GetCntlrIdList() {
 		cntlr, ok := state.Cntlrs[cntlrId]
 		if !ok {
-			// MD3: the key is listed but absent. fanOut has already named it
-			// in the "sp sub-object missing" record; here it only counts, so
-			// that the cntlr_interval ticker re-resolves (RW14).
+			// MD3: the key is listed but absent, which reaches the plan only
+			// on a latched SP (fanOut refuses a live one's). fanOut has
+			// already named it in the "sp sub-object missing" record; here
+			// it only counts, so that the cntlr_interval ticker re-resolves
+			// (RW14).
 			plan.unresolved++
 			cntlrsResolved = false
 			continue

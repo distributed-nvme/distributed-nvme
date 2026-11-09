@@ -1106,8 +1106,9 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		// suppression, because a doomed SP must drain at any level. drain.go
 		// owns the rest.
 		//
-		// It also runs ahead of the SP's OWN two gates below, its bdev_conf
-		// and its groups' lengths to zero, deliberately: the drain reads no
+		// It also runs ahead of the SP's OWN three gates below, its records,
+		// its bdev_conf and its groups' lengths to zero, deliberately: the
+		// drain judges the records it needs itself (SPD12), and it reads no
 		// geometry at all — no block size, no stripe, no chunk count, no
 		// group's block counts — and an SP whose stored geometry cannot be
 		// read is exactly the one an operator most wants to be able to
@@ -1116,6 +1117,13 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		// ever removes the keys.
 		w.confRefusal.cc = ""
 		w.drainStep(ctx, state, cc)
+		return
+	}
+	// MD3's gate as well: while a record a list of the SP names is missing,
+	// the fan-out builds no request (RW14), so the pass must not commit a
+	// reaction the fan-out cannot deliver (AR1).
+	if err := checkListedRecords(w.cid, state); err != nil {
+		w.refuseReactionConf(ctx, err)
 		return
 	}
 	// The SP's own stored geometry, for the reactions: tryGrow reads

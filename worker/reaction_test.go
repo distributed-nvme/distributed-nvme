@@ -3406,6 +3406,21 @@ func TestReactionPassNeedsClusterConf(t *testing.T) {
 	h.wantNoRecord(msgRepairStageMoved)
 }
 
+// TestReactionPassGoesOnPastAMissingNodeRecord pins MD3's exemption: a node
+// record is named by no list of the SP, so a missing one refuses nothing and
+// the pass acts as usual.
+func TestReactionPassGoesOnPastAMissingNodeRecord(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.state.Missing = append(h.state.Missing,
+		model.DnConfKey(testCid, reactDnC), model.CnConfKey(testCid, reactCnC))
+	h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+	h.pass()
+	h.wantOps("failover")
+	if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 0 {
+		t.Fatalf("%d refusals for missing node records, want none", got)
+	}
+}
+
 // TestReactionPassRefusesAnInvalidConf checks the pass's gates (AR1;
 // architecture.md, Common validation). Both stored confs are needed and both
 // are checked before the reactions are evaluated: every allocating reaction
@@ -3413,7 +3428,8 @@ func TestReactionPassNeedsClusterConf(t *testing.T) {
 // low_water_mark_pct and data_block_size straight off the SP's own bdev_conf.
 // Every group's length to zero (RW15) is checked too: the fan-out builds no
 // request for an SP with a group whose stored counts give its sides none
-// (RW14), so a reaction committed past it could not be delivered. Any one of
+// (RW14), so a reaction committed past it could not be delivered, and so is
+// every record a list of the SP names (MD3), for the same reason. Any one of
 // them unusable makes the pass a complete no-op — no candidate scan, no model
 // op, no `reaction applied` and no `reaction skipped` — with one Error record
 // naming the field.
@@ -3450,6 +3466,15 @@ func TestReactionPassRefusesAnInvalidConf(t *testing.T) {
 				h.dataGrp().MetaBlocks = 0
 			},
 			field: fmt.Sprintf("group %d meta_blocks is zero", reactDataGrp),
+		},
+		{
+			name: "a listed thin device record missing",
+			corrupt: func(h *reactHarness) {
+				h.state.Missing = append(h.state.Missing,
+					model.ThinDeviceKey(testCid, h.state.Conf.GetSpId(),
+						"lost-td"))
+			},
+			field: "lost-td",
 		},
 	}
 	for _, tc := range cases {

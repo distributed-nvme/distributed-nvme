@@ -252,6 +252,13 @@ func TestDrainRunsAheadOfTheSpGates(t *testing.T) {
 				h.dataGrp().MetaBlocks = 0
 			},
 		},
+		{
+			name: "a lost listed record",
+			corrupt: func(h *reactHarness) {
+				h.state.Missing = append(h.state.Missing,
+					model.SliceKey(testCid, testSpId, 999))
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newReactHarness(t, reactFixture(t))

@@ -37,8 +37,10 @@ type BmChunk struct {
 //
 // Rev is that revision. Sub-object maps hold only the keys that existed;
 // anything the SpConf lists but etcd does not have is reported in Missing
-// instead, as the full key, and the load still succeeds — a worker logs those
-// and drives what it can rather than stalling an SP on one lost sub-object.
+// instead, as the full key, and the load still succeeds: the caller decides
+// (dnv-worker.md MD3) — the worker refuses a live SP's fan-out and pass on a
+// missing record a list names, and drives what it can past a missing node
+// record or a latched SP's missing record.
 //
 // Bitmap VALUES are never part of this: a push reads one chunk at a time
 // (BM3). CloneBmIdx and MigrBmIdx carry only which chunks exist, one entry per

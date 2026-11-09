@@ -7461,18 +7461,20 @@ func TestSpDeletingKeepsChildren(t *testing.T) {
 	}
 }
 
-// TestSpMissingSubObjectsLogged checks MD3: a listed sub-object whose key is
-// missing is reported in SpState.Missing and LOGGED BY THE CALLER. Nothing
-// else in worker/ reads that field, and every one of those keys is a
-// sub-object both agents converge on by tearing its resources down — without
-// this record no log names the key that vanished.
-func TestSpMissingSubObjectsLogged(t *testing.T) {
+// TestSpMissingNodeRecordIsLogged checks MD3: a node record whose key is
+// missing is reported in SpState.Missing and LOGGED BY THE CALLER, and the
+// fan-out goes on, since no list of the SP names a node record: RW14's
+// endpoint rule leaves idle the children it cannot resolve (every side child,
+// for a cntlr's CN) and drives the rest.
+func TestSpMissingNodeRecordIsLogged(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
 	state := spFixture()
+	delete(state.DnByAddr, spDnD)
+	delete(state.CnByAddr, spCnC)
 	state.Missing = []string{
-		model.SliceKey(testCid, testSpId, spSliceB),
-		model.CntlrKey(testCid, testSpId, spCntlrDisabled),
+		model.DnConfKey(testCid, spDnD),
+		model.CnConfKey(testCid, spCnC),
 	}
 	h.ops.setState(state)
 	h.start()
@@ -7490,6 +7492,160 @@ func TestSpMissingSubObjectsLogged(t *testing.T) {
 	}
 	if record["sp_name"] != testSpName {
 		t.Fatalf("sp_name = %v", record["sp_name"])
+	}
+	waitFor(t, "the fan-out goes on", func() bool {
+		return len(h.cntlrs[spCnA].syncups()) > 0
+	})
+	if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 0 {
+		t.Fatalf("%d refusals for a missing node record, want none", got)
+	}
+}
+
+// TestCheckListedRecords pins which missing keys MD3's gate refuses: every
+// kind a list of the SpConf names, and no node record.
+func TestCheckListedRecords(t *testing.T) {
+	for _, key := range []string{
+		model.CntlrKey(testCid, testSpId, 7),
+		model.SliceKey(testCid, testSpId, 7),
+		model.ThinDeviceKey(testCid, testSpId, "td-x"),
+		model.SubsystemKey(testCid, testSpId, "nqn.x"),
+		model.CloneKey(testCid, testSpId, "clone-x"),
+		model.TransferKey(testCid, testSpId, "xfer-x"),
+		model.MigrationKey(testCid, testSpId, "migr-x"),
+		model.RepairKey(testCid, testSpId, "rep-x"),
+		model.RetiredLegKey(testCid, testSpId, 7),
+	} {
+		state := &model.SpState{Missing: []string{
+			model.DnConfKey(testCid, spDnA), key,
+		}}
+		err := checkListedRecords(testCid, state)
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("missing %s: err = %v, want it named", key, err)
+		}
+		if err != nil && strings.Contains(err.Error(),
+			model.DnConfKey(testCid, spDnA)) {
+			t.Errorf("missing %s: err = %v names the node record", key, err)
+		}
+	}
+	nodes := &model.SpState{Missing: []string{
+		model.DnConfKey(testCid, spDnA), model.CnConfKey(testCid, spCnA),
+	}}
+	if err := checkListedRecords(testCid, nodes); err != nil {
+		t.Errorf("missing node records only: err = %v, want nil", err)
+	}
+}
+
+// TestSpRunningPoolKeepsItsPlanOnALostRecord is item 51's case on a running
+// pool: a revision arrives whose load lacks a thin device the pool's list
+// still names. The fan-out refuses it, so no request at that revision — one
+// that would have the primary delete the thin device's data — reaches any
+// agent, and every running child keeps its last plan: none is stopped.
+func TestSpRunningPoolKeepsItsPlanOnALostRecord(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newSpHarness(t)
+		h.addFixtureAgents()
+		w := h.start()
+		h.advanceUntil("children running", roundInterval, func() bool {
+			return len(h.cntlrs[spCnA].syncups()) > 0 &&
+				len(h.sides[spDnA].syncups()) > 0
+		})
+		lost := spFixture()
+		lost.SpRevision = testSpRev + 1
+		lost.Tds, lost.TdNames = lost.Tds[1:], lost.TdNames[1:]
+		lost.Missing = []string{model.ThinDeviceKey(testCid, testSpId, "td0")}
+		h.ops.setState(lost)
+		w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+		h.advanceUntil("the refusal", roundInterval, func() bool {
+			return len(h.logs.withMsg(msgInvalidStoredConf)) > 0
+		})
+		for i := 0; i < 3; i++ {
+			h.clk.advance(roundInterval)
+			time.Sleep(5 * time.Millisecond)
+		}
+		for _, addr := range []string{spCnA, spCnB, spCnC} {
+			for _, req := range h.cntlrs[addr].syncups() {
+				if req.GetRevision() == testSpRev+1 {
+					t.Fatalf("a cntlr syncup at the refused revision "+
+						"reached %s: %v", addr, req.GetTdList())
+				}
+			}
+		}
+		if got := len(h.logs.withMsg(msgRevisionWorkerStopped)); got != 0 {
+			t.Fatalf("%d children stopped on a refused fan-out, want none",
+				got)
+		}
+	})
+}
+
+// TestSpLatchedPoolFansOutPastALostRecord pins MD3's gate's exemption: a
+// latched SP lists no volume, its teardown is what the drain asks for, and
+// the drain judges the keys it needs itself (SPD12), so its fan-out drives
+// what it can past a missing record instead of being refused.
+func TestSpLatchedPoolFansOutPastALostRecord(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	state := spFixture()
+	state.Conf.Deleting = true
+	state.Missing = []string{model.RepairKey(testCid, testSpId, "rep-lost")}
+	h.ops.setState(state)
+	h.start()
+	waitFor(t, "the latched pool's fan-out", func() bool {
+		return len(h.cntlrs[spCnA].syncups()) > 0
+	})
+	if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 0 {
+		t.Fatalf("%d refusals on a latched pool, want none", got)
+	}
+}
+
+// TestSpFanOutRefusesALostListedRecord pins MD3's gate: a record that a list
+// of the pool names but whose key is missing stops the whole fan-out, since
+// the agents read the lists a request carries as complete and would remove
+// what the lost record described — a thin device's data for good. Nothing is
+// built and no child is started, one Error record names the key, and the
+// coordinator fans out again once the record is back, on the ticker alone.
+func TestSpFanOutRefusesALostListedRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lose func(state *model.SpState)
+		key  string
+	}{
+		{
+			name: "thin device",
+			lose: func(state *model.SpState) {
+				state.Tds, state.TdNames = state.Tds[1:], state.TdNames[1:]
+				state.Missing = append(state.Missing,
+					model.ThinDeviceKey(testCid, testSpId, "td0"))
+			},
+			key: model.ThinDeviceKey(testCid, testSpId, "td0"),
+		},
+		{
+			name: "transfer",
+			lose: func(state *model.SpState) {
+				delete(state.Xfers, spXferName)
+				state.Missing = append(state.Missing,
+					model.TransferKey(testCid, testSpId, spXferName))
+			},
+			key: model.TransferKey(testCid, testSpId, spXferName),
+		},
+		{
+			name: "cntlr",
+			lose: func(state *model.SpState) {
+				delete(state.Cntlrs, spCntlrStandby)
+				state.Missing = append(state.Missing,
+					model.CntlrKey(testCid, testSpId, spCntlrStandby))
+			},
+			key: model.CntlrKey(testCid, testSpId, spCntlrStandby),
+		},
+	} {
+		t.Run(tc.name, inBubble(func(t *testing.T) {
+			h, _ := spRefusedFanOut(t, tc.lose, tc.key)
+			h.ops.setState(spFixture())
+			h.advanceUntil("fan-out once the record is back", roundInterval,
+				func() bool {
+					return len(h.sides[spDnA].syncups()) > 0 &&
+						len(h.cntlrs[spCnA].syncups()) > 0
+				})
+		}))
 	}
 }
 
