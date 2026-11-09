@@ -435,9 +435,9 @@ a fragmented source.
   CN18) or that a primary's per-CN dm-linear maps (`dnagent.md` DN13)
   discards nothing, and those regions are copied instead.
 * Unlike every other method, `DiscardRanges` bounds itself: the caller's
-  ctx needs no deadline of its own, since each range is waited for no
-  longer than the ctx and the soft timeout (`CmdSoftTimeout`) allow, and
-  the call returns then: with an error naming the range at the soft
+  ctx needs no deadline of its own, since its wait for a slot and each
+  range are waited for no longer than the ctx and the soft timeout
+  (`CmdSoftTimeout`) allow, and a range's wait returns then: with an error naming the range at the soft
   timeout, or with the ctx's error. A discard the
   kernel has not answered by then is left to finish there, as a killed
   child's ioctl is: its goroutine, its thread and the open device stay

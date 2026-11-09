@@ -287,8 +287,8 @@ the chunks (SH21, DN14), the must-copy head matches the source, the skipped
 regions differ from the source's fresh random data, keeping what the
 destination's extents held before (`architecture.md`, Side provisioning
 protocol), the enabling converge's own hydration sample counts every skipped
-region, and the log holds one discard on the clone, at the range the
-meta-region shift implies (`dnagent.md` SH22, SH23; `architecture.md`, Bitmap
+region, and the log holds one discard that landed on the clone, at the
+range the meta-region shift implies (`dnagent.md` SH22, SH23; `architecture.md`, Bitmap
 push protocol). The discard checks read the agent's JSON log by design: if its
 layout drifts, the reader is adjusted, never the assertion.
 

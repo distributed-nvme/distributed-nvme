@@ -314,8 +314,9 @@ then wait for the next event that re-applies the whole set: a create of
 that dm-clone, a converge reload of its table onto a changed length,
 devno or region size (step 4 runs on both — the converge treats a reload
 exactly as a create), a build that finds the dm-clone with hydration off
-(step 4 runs then too), or another chunk's own push (CN22). Until then
-the clone re-copies regions it never needed to.
+(step 4 runs then too), or another chunk's own push (CN22), each of which
+lands only while no ns-dev maps the dm-clone (`osclient.md`,
+DiscardRanges). Until then the clone re-copies regions it never needed to.
 
 A decoded chunk file whose cntlr is not among the loaded cntlr
 requests, or whose `clone_id` is absent from that cntlr's stored
@@ -400,7 +401,8 @@ dm-clone is up with hydration off, as an agent killed between steps 3 and
 metadata where it is gone; a dm-clone
 whose table has drifted — a changed length, devno or region size — is
 reloaded by step 3's probe-first converge (`dnagent.md` SH16) with step
-4's locally held source chunks re-applied. A reboot clears the dm state,
+4's locally held source chunks tried again, which land only while no ns-dev
+maps the dm-clone (`osclient.md`, DiscardRanges). A reboot clears the dm state,
 the md arrays and the connections, but not the clone meta group's legs,
 which are sides on disk nodes: the converge connects the legs, assembles
 the group (CN12) and creates the dm-clone over the metadata it holds, so

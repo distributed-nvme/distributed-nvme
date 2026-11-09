@@ -387,9 +387,9 @@ The limits a user must know:
   misses the blocks written after the read, and the pool later reads there
   what the new side's recycled extents hold. Read it only after the cutover,
   once the primary's path to the new side is ANA optimized; at that point
-  the new side's copy device is in use and refuses the skip, so the fast
-  path skips nothing until the new side is rebuilt, as after a reboot of its
-  disk node.
+  the new side's dm-clone is in use and refuses the skip, so the fast path
+  skips nothing until the new side is rebuilt, as after a reboot of its disk
+  node.
 - A migration's bitmap appended in more than one piece can hand a pool
   another pool's bytes: the pieces join byte by byte and carry no block
   count, so a piece before the last that covers a block count that is not a

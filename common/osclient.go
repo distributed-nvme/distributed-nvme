@@ -539,7 +539,13 @@ func (c *LimitedOsClient) DiscardRanges(
 	path string,
 	ranges []DiscardRange,
 ) (int, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	// The wait for a slot is bounded by the soft timeout too, so a caller
+	// whose ctx has no deadline is bounded here as every wrapper call is
+	// (osclient.md, DiscardRanges).
+	actx, cancel := context.WithTimeout(ctx, discardSoftTimeout)
+	err := c.sem.Acquire(actx, 1)
+	cancel()
+	if err != nil {
 		return 0, err
 	}
 	// The slot goes back when the device is closed, which for a range given

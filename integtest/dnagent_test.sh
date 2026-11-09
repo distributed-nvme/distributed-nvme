@@ -902,27 +902,30 @@ clone_table() { dmsetup table "$1" 2>/dev/null || echo MISSING; }
 # C jq and on gojq alike.
 
 # discard_lines — every "mark hydrated" discard the agent logged, one
-# "--offset <o> --length <l> <dev>" line per range, from the in-process
-# "os discard ranges" records (osclient.md, DiscardRanges), which list up to
-# 64 ranges each.
+# "--offset <o> --length <l> <dev>" line per range done, and one
+# "failed --offset …" line per listed range past the done count, from the
+# in-process "os discard ranges" records (osclient.md, DiscardRanges), which
+# list up to `discardLogRanges` (common/osclient.go) ranges each.
 discard_lines() {
 	jq -rn 'inputs
 	    | select(.msg == "os discard ranges")
-	    | .path as $p | (.ranges // [])[]
-	    | "--offset \(.[0]) --length \(.[1]) " + $p' "$WORK/agent.log"
+	    | .path as $p | (.done // 0) as $n | (.ranges // []) as $r
+	    | ($r[:$n][] | "--offset \(.[0]) --length \(.[1]) " + $p),
+	      ($r[$n:][] | "failed --offset \(.[0]) --length \(.[1]) " + $p)' \
+		"$WORK/agent.log"
 }
 
-# clone_discards <clone dm name> — the discards the agent logged against
-# one dm-clone device (the log check of migr_bitmap, dnagent_integtest.md,
-# Cases).
+# clone_discards <clone dm name> — the discards that landed on one dm-clone
+# device (the log check of migr_bitmap, dnagent_integtest.md, Cases).
 clone_discards() {
 	local lines
 	lines=$(discard_lines) || return 1
-	printf '%s\n' "$lines" | grep -E -- " /dev/mapper/$1\$" || true
+	printf '%s\n' "$lines" | grep -E -- "^--offset .* /dev/mapper/$1\$" ||
+		true
 }
 
-# any_clone_discards — every discard against any dm-clone device (the
-# migr_full check of dnagent_integtest.md, Cases).
+# any_clone_discards — every discard tried against any dm-clone device,
+# landed or failed (the migr_full check of dnagent_integtest.md, Cases).
 any_clone_discards() {
 	local lines
 	lines=$(discard_lines) || return 1

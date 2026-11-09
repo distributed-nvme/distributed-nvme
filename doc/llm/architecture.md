@@ -3172,9 +3172,10 @@ source slice `src_slice_idx` covers `src_block_size` bytes of that slice's
 local address space; **1 = the source never wrote there, so the region is
 skippable**. Read as this paragraph says below, they are a pure
 optimization delivered through
-`PushCloneBitmap` (Bitmap push protocol) and may be applied at any time,
-even after the dm-clone started serving IO; the copy's durability never
-depends on them (Clone metadata durability). **A caller reads a source
+`PushCloneBitmap` (Bitmap push protocol) and are safe to apply at any
+time; one that arrives once the ns-devs map the dm-clone discards nothing
+until the dm-clone is created again (`osclient.md`, DiscardRanges), and the
+copy's durability never depends on them (Clone metadata durability). **A caller reads a source
 bitmap only once the source takes no more writes**: once every cntlr of
 the source pool has applied the transfer's `auto_suspend` move of the
 origin namespace (Transfers; `cnagent.md` CN16), which can be after
@@ -4581,7 +4582,8 @@ device is there, the next enumeration finds it.
   the ids of a dm name say which agent, which cluster, which node and
   which sp a dm device belongs to (dm-device kinds, dm device names), and
   a dnv-format NQN says the same of itself (NQNs); an object whose name
-  carries no owner is attributed by what it is built out of, and only
+  carries no owner is attributed by what it is built out of, a cn's
+  host-facing subsystem with no namespace device by its model, and only
   then judged. Several agents share one kernel — a lab node runs a dn
   agent per disk and often a cn beside them, and dm, nvmet and the nvme
   host namespace are all per kernel — so an object attributed to another
@@ -5354,9 +5356,9 @@ never-written regions so that they are never copied (Migrations, Bitmap
 reads, raid0 bitmap math). A leg bitmap read when this section allows
 (below) arrives after the primary's per-CN dm-linear maps the dm-clone, so
 that discard is refused at its exclusive open (`osclient.md`,
-DiscardRanges) and the regions are copied; only a create of the dm-clone,
-as after a DN reboot, applies the stored chunks (`dnagent.md`, Known
-limits).
+DiscardRanges) and the regions are copied; the stored chunks land only
+while no per-CN dm-linear maps the dm-clone, as at its create after a DN
+reboot (`dnagent.md`, Known limits).
 A skipped region keeps what the destination's recycled extents held, which
 the pool never reads, since no pool block maps there ([D15]) — provided
 the bitmap is read late enough. **A caller reads the leg bitmap only once
@@ -5759,9 +5761,10 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   (raid0 bitmap math), provided every page was read after the source
   stopped taking writes (Clones; [D3], [D7]). A chunk takes effect only
   while no ns-dev maps the dm-clone: before the namespace serves through it
-  (`cnagent.md` CN18 step 6), or at a create or reload of the dm-clone;
-  once the ns-devs map it, the discard is refused at its exclusive open
-  (`osclient.md`, DiscardRanges) and those regions are copied.
+  (`cnagent.md` CN18 step 6), as at a create of the dm-clone on a new
+  primary or after a CN reboot; once the ns-devs map it, every discard, a
+  reload's included, is refused at its exclusive open (`osclient.md`,
+  DiscardRanges) and those regions are copied.
 * When hydration completes: `DeleteTransfer` with `force` false on sp1
   (it retires the source: `suspended` true) and `DeleteClone` on sp2
   (`suspended` false, the namespace now backed by the local raid0). To
@@ -7136,8 +7139,9 @@ that component's document and only pointed to here.
   transfer it feeds, and the reply carries no mark of when it was read; the
   caller keeps the order (Clones). A page read while the source still took
   writes marks as never written every block the source wrote after it; the
-  destination's primary discards those regions on its dm-clone, which marks
-  them copied without copying (Bitmap push protocol), and the clone serves
+  destination's primary discards those regions on its dm-clone while no
+  ns-dev maps it, which marks them copied without copying (Bitmap push
+  protocol), and the clone serves
   zeros there with no error, since its destination td was empty ([D3]). The
   loss is certain for a chunk that reaches the primary before the dm-clone
   is built, since the chunks it holds are applied before the copy starts

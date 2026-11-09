@@ -2040,3 +2040,33 @@ func TestDiscardRangesKernelInterface(t *testing.T) {
 			"the range", err)
 	}
 }
+
+// TestDiscardRangesBoundsItsWaitForASlot: a call whose ctx has no deadline
+// waits for a slot no longer than the soft timeout, and answers an error
+// without touching the device.
+func TestDiscardRangesBoundsItsWaitForASlot(t *testing.T) {
+	saved, savedTimeout := blkDiscard, discardSoftTimeout
+	defer func() { blkDiscard, discardSoftTimeout = saved, savedTimeout }()
+	discardSoftTimeout = 50 * time.Millisecond
+	var sent atomic.Int32
+	blkDiscard = func(f *os.File, r DiscardRange) error {
+		sent.Add(1)
+		return nil
+	}
+	client := NewLimitedOsClient(1)
+	if err := client.sem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("taking the one slot: %v", err)
+	}
+	defer client.sem.Release(1)
+	start := time.Now()
+	done, err := client.DiscardRanges(context.Background(),
+		filepath.Join(t.TempDir(), "dev"),
+		[]DiscardRange{{Offset: 0, Length: 512}})
+	if err == nil || done != 0 || sent.Load() != 0 {
+		t.Fatalf("DiscardRanges = %d, %v with %d sent; want 0, an error, "+
+			"nothing sent", done, err, sent.Load())
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("waited %v for a slot", time.Since(start))
+	}
+}

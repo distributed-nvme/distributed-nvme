@@ -2412,8 +2412,9 @@ log_readable() {
 # writes as "write <path> <data>", the directory listings the agent makes
 # in its own process (`os read dir` records) as "list <path>" and its
 # in-process discards (`os discard ranges`) as one
-# "discard --offset <o> --length <l> <dev>" per range the record lists, in
-# log order.
+# "discard --offset <o> --length <l> <dev>" per range the record lists as
+# done, and "discard-failed …" for each listed range past the done count,
+# the ranges the kernel refused or never reached, in log order.
 events() {
 	log_readable "$1" || return 1
 	jq -rnR --arg t "${2:-}" '
@@ -2422,8 +2423,9 @@ events() {
 	    | if .msg == "os command" then
 	        .cmd + " " + ((.args // []) | join(" "))
 	      elif .msg == "os discard ranges" then
-	        .path as $p | (.ranges // [])[]
-	        | "discard --offset \(.[0]) --length \(.[1]) " + $p
+	        .path as $p | (.done // 0) as $n | (.ranges // []) as $r
+	        | ($r[:$n][] | "discard --offset \(.[0]) --length \(.[1]) " + $p),
+	          ($r[$n:][] | "discard-failed --offset \(.[0]) --length \(.[1]) " + $p)
 	      elif .msg == "os write file direct" then
 	        "write " + .path + " " + (.data // "")
 	      elif .msg == "os read dir" then
@@ -2474,8 +2476,9 @@ cn_cmds_since() {
 	    | if .msg == "os command" then
 	        .cmd + " " + ((.args // []) | join(" "))
 	      elif .msg == "os discard ranges" then
-	        .path as $d | (.ranges // [])[]
-	        | "discard --offset \(.[0]) --length \(.[1]) " + $d
+	        .path as $d | (.done // 0) as $n | (.ranges // []) as $r
+	        | ($r[:$n][] | "discard --offset \(.[0]) --length \(.[1]) " + $d),
+	          ($r[$n:][] | "discard-failed --offset \(.[0]) --length \(.[1]) " + $d)
 	      else empty end
 	    | select(startswith($p))
 	    | $t + " " + .' || return 1
@@ -2528,14 +2531,16 @@ mutations() {
 	# The verb tests bind .args first: a `[…] | index(.cmd)` would evaluate
 	# .cmd against the literal array, not the record. The in-process discards
 	# (osclient.md, DiscardRanges) come in the same pass, in log order, one
-	# "discard --offset <o> --length <l> <dev>" line per range listed, so a
+	# "discard --offset <o> --length <l> <dev>" line per range listed as done
+	# and one "discard-failed …" line per range past the done count, so a
 	# stage can order them against the commands around them.
 	jq -rnR --arg t "$trace" '
 	    inputs | fromjson? // empty | objects
 	    | select($t == "" or .trace_id == $t)
 	    | if .msg == "os discard ranges" then
-	        .path as $p | (.ranges // [])[]
-	        | "discard --offset \(.[0]) --length \(.[1]) " + $p
+	        .path as $p | (.done // 0) as $n | (.ranges // []) as $r
+	        | ($r[:$n][] | "discard --offset \(.[0]) --length \(.[1]) " + $p),
+	          ($r[$n:][] | "discard-failed --offset \(.[0]) --length \(.[1]) " + $p)
 	      elif .msg == "os command" then
 	        (.args // []) as $a
 	        | select(
@@ -7110,8 +7115,10 @@ case_clone_xfer() {
 	# old device number and reads nothing from it. cn2 gets no request: the
 	# CN10 retry reads the source ready again, and its pass reloads the
 	# dm-clone onto the source's new number, the one positional argument
-	# that differs, with hydration off, lands the chunk again and enables
-	# hydration (CN18 steps 1, 3, 4 and 5). The reload suspends the
+	# that differs, with hydration off, tries the chunk again, which the
+	# exclusive open refuses since the ns-devs still map the dm-clone
+	# (osclient.md, DiscardRanges), and enables hydration (CN18 steps 1, 3,
+	# 4 and 5). The reload suspends the
 	# dm-clone first, which commits its metadata to the group, so the
 	# reloaded dm-clone loads the held count. One over metadata formatted
 	# anew would count the chunk's 32 and climb from there, copying the
@@ -7166,11 +7173,13 @@ case_clone_xfer() {
 	assert_absent "$seq" "^dmsetup create $clonedm( |\$)" \
 		"clone_xfer giveback: no new dm-clone"
 	assert_before "$seq" "^dmsetup reload $clonedm .* $src1 " \
-		"^discard .*/dev/mapper/$clonedm\$" \
-		"clone_xfer giveback: the chunk lands after the reload"
-	assert_before "$seq" "^discard .*/dev/mapper/$clonedm\$" \
+		"^discard-failed .*/dev/mapper/$clonedm\$" \
+		"clone_xfer giveback: the chunk is tried, and refused, after the reload"
+	assert_before "$seq" "^discard-failed .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
-		"clone_xfer giveback: the chunk lands before hydration"
+		"clone_xfer giveback: the chunk is tried before hydration"
+	assert_absent "$seq" "^discard .*/dev/mapper/$clonedm\$" \
+		"clone_xfer giveback: no discard lands on the mapped dm-clone"
 	[ "$(printf '%s\n' "$cmds" | grep -cE "^$TRACE dmsetup reload ")" = 0 ] ||
 		die "clone_xfer giveback: the reload ran under the stage's own" \
 			"trace $TRACE: $cmds"

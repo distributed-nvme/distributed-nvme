@@ -297,8 +297,9 @@ its info-read commands are plain memory reads.
   `CheckCntlr` round, since its cntlrs are gone; each of its stages ends with
   the fresh `CheckCn` round per CN, code zero and the base-state row OK.
 * **Mutation-free.** The mutation reader lists every mutating command, every
-  configfs or block write ("os write block" by name) and every discard ("os
-  discard ranges", one line per range it lists) in a cn agent log, whole
+  configfs or block write ("os write block" by name) and every discard tried
+  ("os discard ranges", one line per range it lists, a range past the
+  record's done count read as failed) in a cn agent log, whole
   or for one trace; the probers' "probe …" records fall outside it by
   construction (`osclient.md`, Exported raw helpers and the probe-IO
   carve-out). Records no stage RPC caused carry trace ids of their own
@@ -535,8 +536,10 @@ dm-clone's and the group's ok. The source gets its namespace back from the
 transfer's own converge of a re-sent request (CN17), under a new device number
 on the destination, and with no request to the destination the connect retry,
 which a source with no namespace keeps registered, reloads the dm-clone onto
-that number in place, lands the chunk again and enables hydration (CN10,
-CN18), its count at least the held one, and the copy goes on. With no request,
+that number in place, tries the chunk again, a discard the exclusive open
+refuses since the ns-devs map the dm-clone (`osclient.md`, DiscardRanges),
+and enables hydration (CN10, CN18), its count at least the held one, and the
+copy goes on. With no request,
 the startup reconcile, or the connect retry its pass registers when a step
 fails, rebuilds a destination CN wiped in the middle of that copy, the group's
 leg and device before the dm-clone over them and the chunk again before

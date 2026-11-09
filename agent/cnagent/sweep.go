@@ -334,8 +334,9 @@ func legWrapperSp(clusterId, cnId uint64, name string) (uint64, bool) {
 // failure); it is then **unowned**, and only the node-level sweep may remove
 // it — which assumes at most one cn agent per kernel. A co-hosted dn agent is
 // fine: its NQNs are all dnv-format kinds 2 and 3, which never reach that
-// arm. A subsystem dnv made whose model write a kill cut off reads the
-// kernel's default and stays (cnagent.md, Known limits).
+// arm. A subsystem dnv made whose converge stopped before its model write —
+// a kill, or a refused or unanswered step before it — reads the kernel's
+// default and stays (cnagent.md, Known limits).
 //
 // ours is false for a subsystem this agent must never touch; unowned is true
 // only when ours is true and no sp could be named.

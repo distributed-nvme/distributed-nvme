@@ -3434,8 +3434,9 @@ else reported through `agent_reply` is still a protocol-level refusal.
   dm-linear maps the dm-clone (DN13 step 5), an apply is refused at the
   open: it discards nothing, holds the locks only briefly, and the regions
   it would have marked are copied. A leg bitmap read when `architecture.md`,
-  Migration, allows arrives after that step, so on a migration only a create
-  of the dm-clone, as after a DN reboot, discards anything. A cancelled push
+  Migration, allows arrives after that step, so on a migration a discard
+  lands only while no per-CN dm-linear maps the dm-clone: at its create, as
+  after a DN reboot, or while a stopped step has taken the stacks off it. A cancelled push
   returns at once and leaves the range in flight to the kernel; the ranges
   it did not reach cost extra copying only, until the next apply.
 * A reload whose load fails leaves its device suspended (OS wrappers), so
