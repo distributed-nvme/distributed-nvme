@@ -62,6 +62,7 @@ const (
 	reactionFailover     = "failover"
 	reactionGrowData     = "grow_data"
 	reactionGrowMeta     = "grow_meta"
+	reactionGrowWithdraw = "grow_withdraw"
 	reactionReplaceCntlr = "replace_cntlr"
 	reactionRepairCreate = "repair_create"
 	reactionRepairFinish = "repair_finish"
@@ -310,6 +311,21 @@ type reactionOps interface {
 		poolTotal uint64,
 		cc *pb.ClusterConf,
 		legs []model.Cand,
+	) (uint64, error)
+	// withdrawGrow is AR6's withdrawal of a grown group no array was built
+	// from; it returns the grp_id withdrawn. poolTotal is the total the
+	// primary reported, which the op re-runs the pending rule against.
+	withdrawGrow(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		sliceId uint64,
+		isMeta bool,
+		grpId uint64,
+		poolTotal uint64,
+		cc *pb.ClusterConf,
 	) (uint64, error)
 	// replaceCntlr is AR7; it returns the new cntlr_id. spCnAddrs is the
 	// exclusion the scan that found newCn was given, which the op holds the
@@ -581,6 +597,24 @@ func (o *modelReactionOps) growSlice(
 	return model.GrowSlice(
 		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, isMeta,
 		poolTotal, cc, legs,
+	)
+}
+
+func (o *modelReactionOps) withdrawGrow(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	sliceId uint64,
+	isMeta bool,
+	grpId uint64,
+	poolTotal uint64,
+	cc *pb.ClusterConf,
+) (uint64, error) {
+	return model.WithdrawGrow(
+		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, isMeta, grpId,
+		poolTotal, cc,
 	)
 }
 
@@ -1754,7 +1788,12 @@ func (w *spWorker) runGrow(
 	blockSize := dataBlockSize(p.state.Conf.GetBdevConf())
 	if growPending(slice, isMeta, usage, blockSize) {
 		// AR6: while pending, no grow of THAT KIND starts. Another kind, and
-		// every other reaction, is untouched.
+		// every other reaction, is untouched — unless the grow waits on a
+		// disk node that died while a side of the new group zeroed, which
+		// only withdrawing the group ends (withdrawTarget).
+		if grp, ok := withdrawTarget(p, slice, isMeta); ok {
+			return w.withdrawGrow(ctx, p, sliceId, isMeta, grp, usage)
+		}
 		w.reactionSkipped(ctx, kind, reasonGrowPending, sliceAttr)
 		return false
 	}
@@ -1840,6 +1879,83 @@ func (w *spWorker) runGrow(
 		slog.Uint64("ext_cnt", extCnt),
 		slog.Any("addr_port_list", candAddrs(picks)),
 	)
+	return true
+}
+
+// withdrawTarget is AR6's withdrawal trigger on a pending grow: the newest
+// group of the kind, when every leg has one side, a leg's side is still not
+// provisioned and has been unhealthy for side_unhealthy, with this
+// coordinator's own verdict on it (AR10), its disk node carries a health
+// epoch in the pass's snapshot, no repair, retired leg, forced-start mark or
+// operator acts on the group, and the primary's report is of an observation
+// made at the snapshot's revision or later. Such a side's disk node died
+// while it zeroed: the side can never provision, so no cntlr ever builds the
+// group, the grow stays pending, and no leg repair or operator repair can
+// replace a side of a leg still provisioning. A leg with two sides carries a
+// migration, which owns both sides until its finish or cancel, so its group
+// is left alone. model.WithdrawGrow re-checks every condition but the
+// verdict, the node's epoch and the report's age inside its STM.
+func withdrawTarget(
+	p *spPass,
+	slice *pb.Slice,
+	isMeta bool,
+) (*pb.Group, bool) {
+	grps := slice.GetDataGrpList()
+	if isMeta {
+		grps = slice.GetMetaGrpList()
+	}
+	if len(grps) < 2 || p.infoRev < p.state.SpRevision {
+		return nil, false
+	}
+	grp := grps[len(grps)-1]
+	if grp.GetRepName() != "" || len(grp.GetRetiredLegIdList()) > 0 ||
+		grp.GetForcedStart() != nil || grp.GetOperatorInCharge() {
+		return nil, false
+	}
+	for _, leg := range grp.GetLegList() {
+		if len(leg.GetSideList()) != 1 {
+			return nil, false
+		}
+	}
+	for _, leg := range grp.GetLegList() {
+		side := leg.GetSideList()[0]
+		key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
+		dn := p.state.DnByAddr[side.GetAddrPort()]
+		if !side.GetProvisioned() && p.judged.sides[key] &&
+			reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) &&
+			dn.GetErrEpoch() != 0 {
+			return grp, true
+		}
+	}
+	return nil, false
+}
+
+// withdrawGrow runs AR6's withdrawal as the pass's one action (AR2): it ends
+// the pass whatever its outcome, as a grow's op does. The next pass that
+// finds the pool past its mark finds the grow no longer pending and grows
+// again; the dead disk node, whose health epoch withdrawTarget required, has
+// no capacity key and is offered for no new side.
+func (w *spWorker) withdrawGrow(
+	ctx context.Context,
+	p *spPass,
+	sliceId uint64,
+	isMeta bool,
+	grp *pb.Group,
+	usage poolUsage,
+) bool {
+	attrs := []slog.Attr{
+		slog.Uint64("slice_id", sliceId),
+		slog.Uint64("grp_id", grp.GetGrpId()),
+		slog.Bool("is_meta", isMeta),
+	}
+	if _, err := w.reactor().ops.withdrawGrow(
+		ctx, w.cid, w.shard, w.spId, w.desired.handle,
+		sliceId, isMeta, grp.GetGrpId(), poolTotal(usage, isMeta), p.cc,
+	); err != nil {
+		w.reactionFailed(ctx, reactionGrowWithdraw, err, attrs...)
+		return true
+	}
+	w.reactionApplied(ctx, reactionGrowWithdraw, attrs...)
 	return true
 }
 

@@ -22,7 +22,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **attribution** — The sweep's test of which agent, cluster, node and storage pool a kernel object belongs to, by its parsed dm name or NQN, or for a nameless object by what it is built from. An object that is another agent's is foreign and is never touched; one nobody claims is unowned.
 
-**auto-grow, thin-pool auto-grow** — The sp worker's reaction that appends a data or meta group to a slice whose pool usage has crossed its low-water mark, a data group by the slice's original allocation and a meta group by the next rung of the meta ladder, the fixed sequence of sizes a slice's meta groups take. One grow of a kind stays pending until the reported pool total reflects it.
+**auto-grow, thin-pool auto-grow** — The sp worker's reaction that appends a data or meta group to a slice whose pool usage has crossed its low-water mark, a data group by the slice's original allocation and a meta group by the next rung of the meta ladder, the fixed sequence of sizes a slice's meta groups take. One grow of a kind stays pending until the reported pool total reflects it, or until auto-grow withdraws it (see withdrawal of a stuck grow).
 
 **auto_resume** — A clone attribute that makes the destination namespace serve while the clone runs although it is stored suspended. In cross-SP live migration the destination namespace is created suspended and the clone overrides that until it is deleted.
 
@@ -617,6 +617,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **whole, in sync** — md's words for a group's array: a member is in sync when it holds the whole data, and the array is whole when every place, one of its member slots, holds a member in sync, and degraded while one does not; a member without a place is one md holds in no slot, failed or not. The primary reports, beside its rows, for each group whose row reads OK, a running array the in-sync guard does not hold, whether the array is whole and which legs md holds in sync (`GrpInfo`); the retire timer needs the first, and the healthy-leg test and the forced-start clear need the second, which tells a half-copied leg, one that has no health epoch, from a copy of the data (see `cnagent.md` CN28; `dnv-worker.md` AR8, AR12, AR13).
 
 **wipe** — A lab-only scrub of a guest: the e2e suite's host-side disconnect of every dnv NQN, and the agent suites' kind-blind `--wipe` over every dnv-named dm device, nvmet subsystem and md array and every fabrics controller on the node, repeated while dnv dm devices remain and failing on dm or nvmet residue.
+
+**withdrawal of a stuck grow** — The sp worker's removal of the newest group of a kind from a slice when the grow that added it can never complete: a leg's only side never provisions because its disk node died while it zeroed, so no array was ever built from the group and the pool does not count it. The group's extents go back to the disk nodes and the controller nodes, and auto-grow grows again elsewhere (see `dnv-worker.md` AR6).
 
 **worker** — `dnv-worker`, the control-plane process that turns etcd's desired state into agent calls: it watches revision keys by role and shard, syncs and checks each object, applies flips, runs health rounds, reacts, and drains deleted pools and clones. Several run active-active, divided by shard ownership.
 

@@ -637,3 +637,82 @@ func operatorGrow(c *stdCluster) error {
 		c.sp.Ref.Name, 0, stdSliceId, false, math.MaxUint64, c.cl.Conf, picks)
 	return err
 }
+
+// TestScenGrowWithdrawnWhenItsDnDies pins AR6's withdrawal of a stuck grow
+// end to end: auto-grow adds a data group, a disk node of the new group stops
+// while its side zeroes, the other leg's side provisions, and the dead side
+// carries a health epoch for side_unhealthy. The grow stays pending, since no
+// cntlr builds a group with a provisioning leg, so the worker withdraws the
+// group, and the next pass grows again on disk nodes other than the dead one.
+func TestScenGrowWithdrawnWhenItsDnDies(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantScen(t, repairShape)
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	next := c.nextSpId(t)
+	grpId := next
+	sideKeys := []string{
+		agentfake.SideKey(stdSpId, next+1, next+2),
+		agentfake.SideKey(stdSpId, next+3, next+4),
+	}
+	for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
+		for _, key := range sideKeys {
+			slowZeroing(t, c.dnAgent(id), key, true)
+		}
+	}
+	total := c.dataGrp(t).GetDataBlocks()
+	c.setPoolRow(t, pb.ResStatus_RES_STATUS_OK, dataBreach(total))
+	grown := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+		reactionIs(reactionGrowData, ""))
+	if grown.num("grp_id") != grpId {
+		t.Fatalf("the grow %v, want group %d", grown.attrs, grpId)
+	}
+	var deadDn uint64
+	for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
+		if strings.Contains(fmt.Sprint(grown.attrs["addr_port_list"]),
+			stdDnAddr(id)) {
+			deadDn = id
+			break
+		}
+	}
+	if deadDn == 0 {
+		t.Fatalf("the grow %v names no disk node of the cluster", grown.attrs)
+	}
+	// The other leg's side finishes zeroing and provisions, the shape a
+	// single dead disk node leaves.
+	for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
+		if id != deadDn {
+			for _, key := range sideKeys {
+				slowZeroing(t, c.dnAgent(id), key, false)
+			}
+		}
+	}
+	dn := c.dnAgent(deadDn)
+	dn.Stop()
+	defer func() {
+		if err := dn.Start(agentfake.KeepStore); err != nil {
+			t.Errorf("restart dn %d: %v", deadDn, err)
+		}
+	}()
+	withdrawn := h.waitRecord(t, 30*time.Second, w, msgReactionApplied,
+		reactionIs(reactionGrowWithdraw, ""))
+	if withdrawn.num("grp_id") != grpId {
+		t.Fatalf("the withdrawal %v, want group %d", withdrawn.attrs, grpId)
+	}
+	regrown := h.waitRecord(t, 30*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool {
+			return rec.str("kind") == reactionGrowData &&
+				rec.num("grp_id") != grpId
+		})
+	if strings.Contains(fmt.Sprint(regrown.attrs["addr_port_list"]),
+		stdDnAddr(deadDn)) {
+		t.Fatalf("the second grow %v uses the dead dn %d", regrown.attrs,
+			deadDn)
+	}
+	if n := len(c.load(t).Slices[stdSliceId].GetDataGrpList()); n != 2 {
+		t.Fatalf("the slice holds %d data groups, want 2", n)
+	}
+}

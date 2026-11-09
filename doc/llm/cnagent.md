@@ -2008,7 +2008,9 @@ Concat and pool tables are therefore built and probed at the effective
 size, so a not-yet-grown pool is `RES_STATUS_OK` and not a mismatch, and
 the grow completes on the converge that follows the last leg's
 provisioning — out-of-order provisioning of two appended groups simply
-waits for the earlier one. The serving pool's `slice_id_to_dm_pool` row
+waits for the earlier one — unless the worker withdraws a grown group whose
+leg never provisions (`dnv-worker.md` AR6), which removes it from the
+request before any array is built from it. The serving pool's `slice_id_to_dm_pool` row
 keeps reporting `RES_STATUS_OK` with its raw `dmsetup status` line
 throughout — the auto-grow of `architecture.md`, Automatic reactions,
 parses that line, and a `PROVISIONING` pool row would silently switch

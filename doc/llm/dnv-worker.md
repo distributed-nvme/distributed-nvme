@@ -725,6 +725,25 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, a
   `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, a `CnRev` bump
   each); the `Slice` and the `SpConf`; a `SpRev` bump.
+* `WithdrawGrow` takes the slice, the kind, the group's id, a pool total and
+  the cluster conf, and requires the SP checks above; the expected revision
+  as in the preamble; the SP's `bdev_conf` and the cluster conf both valid;
+  the slice to exist; the group to be the newest of its kind in the slice,
+  with an older one before it ("no grown group" otherwise); a grow of that
+  kind pending against the pool total (AR6's rule, `GrowPending`), so the
+  pool does not count the group; one side per leg ("a leg has two sides"
+  otherwise: a migration is in flight); a leg whose only side is not
+  `provisioned`, so no cntlr ever built the group (`cnagent.md` CN9; "no leg
+  provisioning" otherwise); and the group to carry no repair
+  (`grp_has_repair`), no retired leg, no forced-start mark and no
+  `operator_in_charge` (`grp_operator_in_charge`). It pops the group off the
+  tail of its list, gives every side back to its DN through the DN ledger
+  (`side_ptr_list`, `free_ext_cnt`, capacity, a `DnRev` bump each), gives the
+  CN of every current cntlr the group's share of its charge back
+  (`free_ext_cnt`, capacity, a `CnRev` bump each; a cntlr created or replaced
+  since the grow was charged the whole footprint, the group included, and a
+  cntlr or CN record that is gone is skipped), puts the `Slice` and bumps
+  `SpRev`. No gateway call runs it.
 * `ReplaceCntlr` takes the old cntlr, the picked CN, the SP's CN endpoints the
   scan ran against, whether the new cntlr is primary and `now`, and requires
   the SP checks; the old cntlr's `err_epoch` set and `now` minus it at least
@@ -2972,9 +2991,10 @@ runs and the pass ends:
 
 Every action is a `model` op that re-validates its preconditions inside its
 STM (MD6, MD7); success logs `reaction applied` and the resulting `SpRev`
-bump re-fans the SP (RW14), so the next pass sees the new state. Leg
-repair's actions are the finish, the cancel and the try-to-abort of a
-worker's repair and the create of one (AR8). The
+bump re-fans the SP (RW14), so the next pass sees the new state. Auto-grow's
+actions are a grow and the withdrawal of a stuck grow (AR6), and leg
+repair's are the finish, the cancel and the try-to-abort of a worker's
+repair and the create of one (AR8). The
 invariant is **at most one applied action per SP per pass**; the clone
 drain's steps, AR11's stage moves, AR12's retire timer and AR13's
 forced-start clear are not actions in this sense and commit alongside one —
@@ -3084,8 +3104,8 @@ round from failing a primary over, so AR5's threshold trigger also needs
 AR10's run; what that run does not cover is in Known limits.
 
 AR10. **Own verdict.** A threshold reaction — AR5's failover on its
-threshold, AR7's replacement, AR8's create on either of its clocks and
-AR8's try-to-abort on a clock —
+threshold, AR6's withdrawal of a stuck grow, AR7's replacement, AR8's
+create on either of its clocks and AR8's try-to-abort on a clock —
 fires only for an object whose latest health verdict by this coordinator is
 unhealthy; the clock still runs from the stored `err_epoch` (AR4), and
 AR5's `disabled` trigger needs no verdict. AR8's case 1 needs the leg's
@@ -3325,6 +3345,32 @@ and, for data, not covered, since the covered test comes first and logs
 (AR2); `GrowSlice`'s in-STM refusal carries the same reason, both through
 `model.GrpListFull`, and ends the pass, as its in-STM `grow_pending` does
 (AR2).
+
+**The withdrawal of a stuck grow.** A grow whose new group holds a leg
+that never provisions stays pending for good: no cntlr builds a group with
+a leg whose every side is still not provisioned (`cnagent.md` CN9), so the
+pool's total never moves, and neither leg repair nor an operator's repair
+can replace a side of such a leg, since both need the leg's health epoch,
+which a provisioning leg never gets (HL2). When a grow is pending, the
+primary's report is of an observation made at the snapshot's revision or
+later, and the newest group of its kind has one side per leg, no repair,
+retired leg, forced-start mark or operator in charge, and a leg whose side
+is not `provisioned`, has been unhealthy for `side_unhealthy` with this
+coordinator's own unhealthy verdict on it (AR10), and sits on a disk node
+whose record carries a health epoch in the pass's snapshot, the pass runs
+`WithdrawGrow` (MD6) as its one action, with the pool total the primary
+reported: the side's disk node died while the side zeroed. The op takes
+the group off the tail of its list, whichever grow added it, and gives its
+extents back to the disk nodes and the CNs; the group never held data,
+since no array was built from it. A leg with two sides carries a migration,
+which owns both sides until its finish or its cancel (`architecture.md`,
+Migrations), so its group is never withdrawn. The next pass that finds the
+pool past its mark grows again, the grow no longer pending, and the dead
+disk node, whose health epoch the trigger required, has no capacity key
+and is offered for no new side. A disk node that comes back before the
+threshold finishes the zeroing and the grow completes by itself
+(`architecture.md`, GrowSlice). The trigger is part of auto-grow, so it
+runs only while the pool's usage of that kind is past its mark.
 
 ### Cntlr replacement
 
@@ -3695,7 +3741,8 @@ abort an operator's repair (`architecture.md`, Repair); or runs two
 reactions in one pass. The repairs it does create, finish, cancel and try
 to abort are its own (AR8).
 Every automatic action re-homes redundancy or roles (`architecture.md`,
-Automatic reactions). It does delete the implicit children — cntlrs,
+Automatic reactions), save the withdrawal of a stuck grow, which gives
+back what a group no array was built from took (AR6). It does delete the implicit children — cntlrs,
 repairs, retired legs, slices, groups, legs, sides — of an SP a
 `DeleteStoragePool` has LATCHED, which is the sp drain and not a reaction
 (the five-empty-lists precondition that let it be latched means it holds
@@ -3704,7 +3751,10 @@ no td, subsystem, clone, transfer or migration), and it does delete a
 `DeleteClone` has LATCHED — its chunk keys in batches, then the record
 together with its `clone_name_list` entry, its clone meta group and that
 group's repair and retired legs, all their sides going back to their DNs —
-which is the clone drain and not a reaction (CLD8, CLD9). Both drains
+which is the clone drain and not a reaction (CLD8, CLD9). And it deletes
+a grown group no array was ever built from, its sides going back to their
+DNs, which is auto-grow's withdrawal of a stuck grow (AR6): the group
+holds no data, and nothing else would ever end its grow. Both drains
 finish a deletion a user began with the latch and neither ever starts one;
 the list above is what no reaction touches. Beside the drains, the retire
 timer deletes a retired leg that has aged on a whole group: a retired leg
@@ -4422,8 +4472,9 @@ from the op, and only the op's refusal always ends the pass, save a refusal
 of AR8's drive step, which holds that repair's group alone, and the
 create's refusal under the group's `operator_in_charge` flag, which holds
 that group alone (AR2, AR8); each
-record names its reaction's kind, leg repair's being four, its create and
-the three steps of its drive step (AR8), and the record of a finish also
+record names its reaction's kind, auto-grow's being three, a data grow, a
+metadata grow and the withdrawal of a stuck grow (AR6), and leg repair's
+four, its create and the three steps of its drive step (AR8), and the record of a finish also
 names the retired leg it gave back, if any, and that of a try-to-abort its
 trigger; an op
 call that failed otherwise is also logged `reaction skipped`, with its
@@ -4978,6 +5029,20 @@ counts of its own: a leftover and the counts come only from those levers,
 which no suite case sets, so no suite case runs RW13's count compare.
 
 ## Known limits
+
+* **A stuck grow waits while another hold stands on it.** Auto-grow
+  withdraws a grown group whose provisioning side's disk node died (AR6)
+  only while no repair, retired leg, forced-start mark, operator in charge
+  or migration acts on the group, only once the side's health epoch is
+  `side_unhealthy` old and its disk node carries a health epoch of its
+  own, and only while the pool is past its mark: until then the grow stays
+  pending, no grow of that kind runs on the slice, and the group keeps its
+  extents on the disk nodes and its share of every CN's budget. A side
+  whose disk node answers its rounds, one that zeroes very slowly or fails
+  its zeroing on a node that passes its own rounds, is never withdrawn,
+  and its grow waits for the zeroing. An operator's `GrowSlice` stacked on
+  top of the stuck group is a later group of the list, so the stuck one is
+  not the newest any more and is never withdrawn.
 
 * **A pool with a lost record waits for an operator.** When a record that a
   list of a live pool names is missing from etcd, while the list still

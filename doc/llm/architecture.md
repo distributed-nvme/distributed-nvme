@@ -1123,7 +1123,9 @@ index otherwise; slice and group fields are two hex digits each.
 The group index is the group's index inside its `meta_grp_list` or
 `data_grp_list` (stable: a surviving group is never renumbered, because
 groups are appended at the tail and removed only from the tail, by the
-drain of a deleting SP, `dnv-worker.md` SPD10). Its two
+drain of a deleting SP, `dnv-worker.md` SPD10, or by the sp worker's
+withdrawal of a grown group no array was ever built from, `dnv-worker.md`
+AR6). Its two
 hex digits bound it, so `GrowSlice` refuses to append to a list that
 already holds `MaxGrpCntPerSlice` groups (GrowSlice): the index always fits
 its field, and a test fails if the ceiling is raised past what the field
@@ -2575,7 +2577,8 @@ the pool-meta and pool-data linear tables and resize the thin pool online
 contains a provisioning leg: the concat and the pool keep their old,
 effective size and keep reporting `OK` at that size, and the grow
 completes by itself once the leg clears (Side provisioning protocol,
-Automatic reactions). The per-kind "one grow per pool at a time" pending
+Automatic reactions), or, when the disk node of a provisioning leg stays
+dead, the sp worker withdraws the group (`dnv-worker.md` AR6). The per-kind "one grow per pool at a time" pending
 rule (`dnv-worker.md` AR6) binds only the sp worker's own auto-grow, which
 judges "pending" by the primary's reported usage, and so does its covered
 rule, which stops a data grow once the slice's data covers the pool's thin
@@ -4810,8 +4813,9 @@ replaced or repaired, and a `deleting` SP runs a step of its drain instead
 (`dnv-worker.md` AR3). A threshold is breached when now minus `err_epoch`
 is at least the SP's `event_threshold` field of that kind, a zero field
 meaning its default (Common validation; `dnv-worker.md` AR4). A breach
-fires a reaction — the failover of an unhealthy primary, a cntlr
-replacement, a leg repair on either of its clocks — only on an object
+fires a reaction — the failover of an unhealthy primary, the withdrawal of
+a stuck grow, a cntlr replacement, a leg repair on either of its clocks —
+only on an object
 whose latest health verdict by this worker's coordinator of the SP is
 unhealthy, and the failover only once the primary's last two health
 verdicts from check rounds, counted as `dnv-worker.md` RW23 says, are both
@@ -4829,8 +4833,9 @@ restart, a fence or a handoff, a round that answers from an observation
 that ended before the first round after the pause gives no verdict on
 what it reports and drives only the re-sync, until the
 observation is too old and the round is a missed round (`dnv-worker.md`
-HL7). No failover on its threshold, cntlr replacement or leg repair
-therefore rests on what such an observation reports, though a missed
+HL7). No failover on its threshold, withdrawal of a stuck grow, cntlr
+replacement or leg repair therefore rests on what such an observation
+reports, though a missed
 round counts in a failover run as any other does (`dnv-worker.md` AR10).
 The four reactions:
 
@@ -4841,7 +4846,9 @@ The four reactions:
   metadata usage passes `DmPoolConf.low_water_mark_pct`, which is not an
   `EventThreshold` field, is grown by an internal `GrowSlice` (GrowSlice);
   a grow whose new group still holds a provisioning leg completes by itself
-  when the leg clears (`cnagent.md` CN13, [D15]). A data grow stops once
+  when the leg clears (`cnagent.md` CN13, [D15]), and one whose provisioning
+  leg sits on a disk node that stays dead is withdrawn and grown again
+  elsewhere (`dnv-worker.md` AR6). A data grow stops once
   the slice's data covers what the pool's thin devices can use
   (`dnv-worker.md` AR6), so no data grow starts past that cover, though the
   last one can pass it by up to a group. Auto-grow

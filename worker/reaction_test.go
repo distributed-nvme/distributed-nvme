@@ -441,6 +441,25 @@ func (o *fakeReactionOps) growSlice(
 	return 999, err
 }
 
+func (o *fakeReactionOps) withdrawGrow(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	sliceId uint64,
+	isMeta bool,
+	grpId uint64,
+	poolTotal uint64,
+	cc *pb.ClusterConf,
+) (uint64, error) {
+	err := o.record(reactionCall{
+		op: "withdraw_grow", sliceId: sliceId, isMeta: isMeta, grpId: grpId,
+		poolTotal: poolTotal,
+	})
+	return grpId, err
+}
+
 func (o *fakeReactionOps) replaceCntlr(
 	ctx context.Context,
 	cid uint64,
@@ -3210,6 +3229,105 @@ func TestReactionGrowNoCandidateGoesOnToLegRepair(t *testing.T) {
 	h.wantSkipped(reactionGrowData, reasonNoCandidate)
 	h.wantOps("create_repair")
 	h.wantApplied(reactionRepairCreate)
+}
+
+// withGrownGroup appends a second data group to the fixture's slice, as a
+// grow leaves it: legs on C and D, the side on D not provisioned yet and
+// unhealthy since epoch (0 for healthy), the side on C provisioned. The
+// pool's reported data total is the first group's alone, so the grow is
+// pending (AR6). It returns the new group.
+func withGrownGroup(t *testing.T, h *reactHarness, epoch uint64) *pb.Group {
+	t.Helper()
+	grp := reactGroup(t, reactDataGrp+7, 2,
+		[]uint64{reactDataLegA + 7, reactDataLegB + 7},
+		[]uint64{reactSideDataA + 7, reactSideDataB + 7},
+		[]string{reactDnC, reactDnD})
+	dead := grp.GetLegList()[1].GetSideList()[0]
+	dead.Provisioned = false
+	dead.ErrEpoch = epoch
+	h.state.DnByAddr[reactDnD] = &pb.DnConf{ErrEpoch: epoch}
+	h.slice().DataGrpList = append(h.slice().DataGrpList, grp)
+	total := reactDataBlocks(t, 2)
+	h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+		poolLine(1, 1000, total, total))
+	return grp
+}
+
+// TestReactionGrowWithdrawsAGroupWhoseDnDied pins AR6's withdrawal of a stuck grow: a pending
+// grow whose new group holds a side that never provisioned, unhealthy for
+// side_unhealthy with this coordinator's own verdict, is withdrawn as the
+// pass's one action, with the reported total, and no other reaction runs.
+func TestReactionGrowWithdrawsAGroupWhoseDnDied(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	grp := withGrownGroup(t, h, h.ago(9000))
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+	h.dnCands(reactDnD)
+	h.pass()
+	calls := h.wantOps("withdraw_grow")
+	if calls[0].grpId != grp.GetGrpId() || calls[0].isMeta {
+		t.Fatalf("withdrew %+v, want data group %d", calls[0], grp.GetGrpId())
+	}
+	if calls[0].poolTotal != reactDataBlocks(t, 2) {
+		t.Fatalf("pool total %d, want the reported %d", calls[0].poolTotal,
+			reactDataBlocks(t, 2))
+	}
+	h.wantApplied(reactionGrowWithdraw)
+}
+
+// TestReactionGrowWithdrawWaits pins what holds AR6's withdrawal: a side that
+// provisioned, a side unhealthy for less than side_unhealthy, a side no
+// verdict of this coordinator judged unhealthy, a group a repair, a retired
+// leg, a forced-start mark or an operator acts on, a leg a migration gave a
+// second side, a disk node with no health epoch, and a primary's report older
+// than the snapshot. Each leaves the grow pending, the pass going on.
+func TestReactionGrowWithdrawWaits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(h *reactHarness, grp *pb.Group)
+	}{
+		{"the side provisioned", func(_ *reactHarness, grp *pb.Group) {
+			grp.GetLegList()[1].GetSideList()[0].Provisioned = true
+		}},
+		{"a young health epoch", func(h *reactHarness, grp *pb.Group) {
+			grp.GetLegList()[1].GetSideList()[0].ErrEpoch = h.ago(1)
+		}},
+		{"no verdict of this coordinator", func(h *reactHarness, _ *pb.Group) {
+			h.judgeStored = false
+		}},
+		{"a repair", func(_ *reactHarness, grp *pb.Group) {
+			grp.RepName = "r0"
+		}},
+		{"an operator in charge", func(_ *reactHarness, grp *pb.Group) {
+			grp.OperatorInCharge = true
+		}},
+		{"a retired leg", func(_ *reactHarness, grp *pb.Group) {
+			grp.RetiredLegIdList = []uint64{9999}
+		}},
+		{"a forced-start mark", func(_ *reactHarness, grp *pb.Group) {
+			grp.ForcedStart = &pb.ForcedStart{LegId: 1, Revision: 1}
+		}},
+		{"a leg with two sides", func(_ *reactHarness, grp *pb.Group) {
+			leg := grp.GetLegList()[0]
+			leg.SideList = append(leg.SideList, &pb.Side{
+				SideId: 9999, AddrPort: reactDnA, Provisioned: true,
+			})
+		}},
+		{"a disk node with no health epoch", func(h *reactHarness, _ *pb.Group) {
+			h.state.DnByAddr[reactDnD] = &pb.DnConf{}
+		}},
+		{"a report older than the snapshot", func(h *reactHarness, _ *pb.Group) {
+			h.state.SpRevision = 1 << 40
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			grp := withGrownGroup(t, h, h.ago(9000))
+			tc.edit(h, grp)
+			h.pass()
+			h.wantOps()
+			h.wantSkipped(reactionGrowData, reasonGrowPending)
+		})
+	}
 }
 
 // TestReactionGrowMemo pins the pass's memo of empty grow scans: after a grow
