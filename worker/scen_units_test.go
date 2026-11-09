@@ -21,7 +21,10 @@ import (
 // in the same pass does not run. The record names the op, which tells it
 // from the same reason found by the pass's own check.
 func TestReactionGrowRefusedInsideItsTransactionEndsThePass(t *testing.T) {
-	for _, reason := range []string{model.ReasonGrowPending, model.ReasonGrpListFull} {
+	for _, reason := range []string{
+		model.ReasonGrowPending, model.ReasonGrpListFull,
+		model.ReasonCnBudgetShort,
+	} {
 		t.Run(reason, func(t *testing.T) {
 			h := newReactHarness(t, reactFixture(t))
 			h.dnCands(reactDnC, reactDnD)

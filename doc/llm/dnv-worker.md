@@ -2989,19 +2989,22 @@ past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, which can hold for as long as the error does — an
 operator's intervention, for a lost thin id; AR6's `grow_pending`,
-`data_covered`, `grp_list_full`, `meta_ladder_cap` and `no_data_group` when
-the pass's own check finds them, ahead of any scan and any transaction (each can hold
-indefinitely — a grow deferred on the CN, a ceiling of `architecture.md`,
-GrowSlice — and must not disable AR7 and AR8 for the duration); AR7's
+`data_covered`, `grp_list_full`, `meta_ladder_cap`, `no_data_group` and the
+CN budget's `cn free_ext_cnt too low` when the pass's own check finds them,
+ahead of any scan and any transaction, and its scan that finds fewer DNs
+with room than the group has legs (each can hold indefinitely — a grow
+deferred on the CN, a ceiling of `architecture.md`, GrowSlice, a full
+cluster — and must not disable AR7 and AR8 for the duration); AR7's
 `shared_state` and `same_error`, which can hold as long as AR5's and move
-the scan to the next cntlr; AR8's refusal of a drive step by its op, which
+the scan to the next cntlr, and its scan that finds no CN, which moves the
+pass on to AR8; AR8's refusal of a drive step by its op, which
 holds that repair's group and moves the walk to the next repair; and
 AR8's `leg_has_two_sides`, `grp_operator_in_charge`, whether the pass's
 own check or the create's op finds it, `grp_forced_start`, its gate on the
 group's row (`grp_row_error`, `grp_row_missing`, `grp_row_unknown`,
 `grp_row_provisioning`, `grp_row_pending`, `grp_row_absent` and
-`grp_row_stale`), `no_healthy_leg` and `grp_has_repair`, which move the
-scan to the next candidate leg — a group whose `operator_in_charge` flag is
+`grp_row_stale`), `no_healthy_leg`, `grp_has_repair` and a create's scan
+that finds no DN, which move the scan to the next candidate leg — a group whose `operator_in_charge` flag is
 set waits until the operator clears it; a group with a forced-start mark
 waits until the mark goes in one of the ways AR8 names, a try-to-abort of
 the group's repair not among them (MD6); a group
@@ -3012,18 +3015,28 @@ report older than the snapshot waits for the primary's report of the
 snapshot's revision; a group whose other legs of its `leg_list` are
 unhealthy or not held in sync waits until one of them reads healthy and in
 sync again; and a group with a repair waits until its finish or its cancel,
-an operator's repair until the operator acts.
+an operator's repair until the operator acts; and a group whose create
+finds no DN with room waits for one, a later group of the pass still
+scanned unless an empty scan of the same pass already shows its scan
+empty: one that asked for no more room past no more DNs. An empty scan
+ends nothing because a full cluster can last as long as any of the holds
+above, and the reactions after it must go on meanwhile; a refusal from
+inside a transaction ends the pass, the two refusals this rule lets hold
+one group excepted, because it means the store has overtaken the pass's
+snapshot.
 Everything else ends the pass: every `ErrPrecondition` but a drive
-step's and the create's `grp_operator_in_charge`, every empty
-allocator scan and every transient op failure — `GrowSlice`'s
+step's and the create's `grp_operator_in_charge`, every allocator scan
+that fails and every transient op failure — `GrowSlice`'s
 refusal from inside its transaction among them, though it carries the
-`grow_pending` or `grp_list_full` of the pass's own check (its record names
-the op, Log records): that check found the grow applicable on the pass's
-snapshot, so the slice gained a group after the snapshot was read — another
-owner's grow (VW7) or an operator's `GrowSlice` — and the pass applies
-nothing more from a snapshot the store has overtaken; the next pass reads
-the slice afresh, and its own check then finds the grow pending or the list
-full and goes on. Two owners overlapping on one SP (VW7) cannot apply an
+`grow_pending`, `grp_list_full` or `cn free_ext_cnt too low` of the pass's
+own check (its record names the op, Log records): that check found the
+grow possible on the pass's snapshot, so the store changed after the
+snapshot was read — the slice gained a group, by another owner's grow
+(VW7) or an operator's `GrowSlice`, or a CN of the SP lost budget to a
+charge for any pool on it — and the pass applies nothing more from a
+snapshot the store has overtaken; the next pass reads afresh, and its own
+check then finds the grow pending, the list full or the CN short and goes
+on. Two owners overlapping on one SP (VW7) cannot apply an
 action twice — the second STM fails its precondition, except a
 try-to-abort's: a second create of a worker's repair finds the group's
 repair and is refused with `grp_has_repair`, or with `repair exists`,
@@ -3295,8 +3308,15 @@ count as the required count, an empty black list and no excluded locations
 scan, so tier 2 never runs), where the leg count is the SP's group shape by
 its redundancy kind (`legCnt`: one for `RedundNone`, `MaxAllocLegPerGrp` for
 `RedundMdRaid1`), picked randomly with the growing black list so the legs land
-on distinct DNs; fewer candidates than legs, or a cntlr's CN below the budget
-(checked in the op), means `reaction skipped`. A slice whose list of that kind
+on distinct DNs; fewer candidates than legs means `reaction skipped` (`no
+candidate`), and the pass goes on (AR2), sparing the scan of a later grow of
+the pass that asks for no less room. Ahead of the scan the pass checks the
+CN budget by the rule `GrowSlice` applies in its transaction
+(`model.CnBudgetShort`): every cntlr of the SP stacks the new group, so a
+CN of the pass's snapshot whose free extents are below its charge makes
+the grow impossible however many DNs have room, and logs `reaction
+skipped` (`cn free_ext_cnt too low`, naming the CN) with no scan; a CN
+missing from the snapshot is left to the transaction. A slice whose list of that kind
 already holds `MaxGrpCntPerSlice` groups (`architecture.md`, GrowSlice) can
 never grow that kind again: a breach of that kind that is not pending —
 and, for data, not covered, since the covered test comes first and logs
@@ -3331,7 +3351,9 @@ sole-primary variant, `disabled` false, `err_epoch` zero (HL2: a primary
 replacement is created settling, as a promoted primary is, and AR5 judges it
 by the settling threshold until it reports its stack built and clean as
 primary). The old CN is black-listed even when the node itself is healthy: its
-cntlr is what failed. None means `reaction skipped`. The op is handed the
+cntlr is what failed. None means `reaction skipped` (`no candidate`), and
+the pass goes on to AR8 (AR2) without trying the next due cntlr, whose scan
+would pass over the same CNs, those of the SP's cntlrs. The op is handed the
 endpoints the scan was, and its STM refuses the pick as `candidate changed`
 (MD5, MD6) when the SP holds a cntlr on a CN outside it — one the gateway's
 `CreateCntlr` committed after the pass's snapshot, whose CN and domain the
@@ -3581,8 +3603,15 @@ refuses the pick as `candidate changed` when the group holds a DN outside
 the plan — a migration destination that joined after the pass's snapshot —
 or when the pick has gone stale since the scan (MD6), and the next pass
 plans from a snapshot that holds what changed, as AR7's does. An empty scan
-logs `no candidate`. Every refusal of the op but `grp_operator_in_charge`
-(condition 4), and every empty scan or failed one, ends the pass (AR2).
+logs `no candidate` and holds that group only, as conditions 2 to 8 do,
+for their reason: another group, whose legs sit on other DNs, may place
+its new leg where this one cannot. A later group of the pass whose scan
+would ask for no less room past a black list that holds every DN of an
+empty scan's is skipped with the same record and no scan, which spares
+the scans of groups that wait on the same disk nodes. Every refusal of the
+op but
+`grp_operator_in_charge` (condition 4), and every failed scan, ends the
+pass (AR2).
 The new leg is always fresh, and the
 create proceeds while the group holds `MaxRetiredLegPerGrp` retired legs,
 since the worker cannot wait for an operator: the finish then gives back
@@ -5537,4 +5566,8 @@ which no suite case sets, so no suite case runs RW13's count compare.
   from a range logged as an `etcd get`, and each range, the keys-only scans
   included, as an `etcd range` (`log.md`, etcd), once per `cntlr_interval`
   per pool, with no random offset between pools. The cost is steady, and
-  nearly every pass acts on nothing.
+  nearly every pass acts on nothing. A cluster with no room adds the
+  scans: every pass scans the capacity index once for each grow that is
+  due, once for a cntlr replacement that is due, and once, or twice when
+  the create's second tier runs, for each group whose leg repair waits for
+  a DN, a later scan the same pass's empty one shows empty excepted (AR2).

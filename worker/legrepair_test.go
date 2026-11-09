@@ -856,14 +856,121 @@ func TestLegRepairCreateExcludesGroupLocations(t *testing.T) {
 	})
 }
 
-// TestLegRepairCreateNoCandidate pins the create's empty scan, which ends the
-// pass.
+// TestLegRepairCreateNoCandidate pins the create's empty scan, which holds
+// its group only.
 func TestLegRepairCreateNoCandidate(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
 	h.pass()
 	h.wantOps()
 	h.wantSkipped(reactionRepairCreate, reasonNoCandidate)
+}
+
+// TestLegRepairEmptyScanHoldsOnlyItsGroup pins AR8's create on two groups that
+// share a dead disk node: G1, the meta group, has legs on A and B, and G2,
+// the data group, on C and B. B's legs are due and G1's sorts first. The only
+// DN with room is A, which G1 may not use, so G1's scan is empty; that holds
+// G1 only, and G2 places its new leg on A in the same pass.
+func TestLegRepairEmptyScanHoldsOnlyItsGroup(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.legOf(reactDataLegA).GetSideList()[0].AddrPort = reactDnC
+	h.legOf(reactMetaLegB).ErrEpoch = h.ago(9000)
+	h.legOf(reactDataLegB).ErrEpoch = h.ago(9000)
+	h.rops.dnBlackFilter = true
+	h.dnCands(reactDnA)
+	h.pass()
+	h.wantSkipped(reactionRepairCreate, reasonNoCandidate)
+	calls := h.wantOps("create_repair")
+	if calls[0].badLegId != reactDataLegB {
+		t.Fatalf("repair created for leg %#x, want G2's %#x",
+			calls[0].badLegId, reactDataLegB)
+	}
+	if calls[0].legs[0].AddrPort != reactDnA {
+		t.Fatalf("new leg on %s, want %s", calls[0].legs[0].AddrPort, reactDnA)
+	}
+}
+
+// TestLegRepairEmptyScanMemo pins the pass's memo of empty create scans: a
+// group that asks for no less room past the same disk nodes as a group whose
+// scan came back empty is skipped without a scan of its own, while one that
+// asks for less is scanned.
+func TestLegRepairEmptyScanMemo(t *testing.T) {
+	t.Run("no less room, same disk nodes", func(t *testing.T) {
+		// The meta group (one extent) sorts first, the data group (two)
+		// follows: one scan, two records.
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactMetaLegB).ErrEpoch = h.ago(9000)
+		h.legOf(reactDataLegB).ErrEpoch = h.ago(9000)
+		h.pass()
+		h.wantOps()
+		if got := len(h.rops.allQueries()); got != 1 {
+			t.Fatalf("%d scans, want 1", got)
+		}
+		if got := countSkips(h, reactionRepairCreate, reasonNoCandidate); got != 2 {
+			t.Fatalf("%d no-candidate records, want 2", got)
+		}
+	})
+	t.Run("less room is scanned again", func(t *testing.T) {
+		// The data group's leg sorts first here: the meta group asks for
+		// less room, which the empty scan does not prove absent.
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.legOf(reactMetaLegB).LegId = reactDataLegB + 1
+		h.legOf(reactDataLegB + 1).ErrEpoch = h.ago(9000)
+		h.pass()
+		h.wantOps()
+		if got := len(h.rops.allQueries()); got != 2 {
+			t.Fatalf("%d scans, want 2", got)
+		}
+	})
+}
+
+// TestLegRepairEmptyScanMemoBlackList pins the direction of the memo's black
+// list: an empty scan past disk nodes B shows empty a later scan past every
+// one of B and more, never one past fewer. The data group gets a third disk
+// node, a leg whose second side sits on C, and both groups ask for the same
+// room.
+func TestLegRepairEmptyScanMemoBlackList(t *testing.T) {
+	build := func(t *testing.T) *reactHarness {
+		h := newReactHarness(t, reactFixture(t))
+		h.metaGrp().ExtCnt = h.dataGrp().GetExtCnt()
+		legA := h.legOf(reactDataLegA)
+		legA.SideList = append(legA.SideList, &pb.Side{
+			SideId: reactSideDataB + 100, AddrPort: reactDnC,
+		})
+		return h
+	}
+	t.Run("fewer disk nodes first: the wider scan is skipped", func(t *testing.T) {
+		h := build(t)
+		h.legOf(reactMetaLegB).ErrEpoch = h.ago(9000)
+		h.legOf(reactDataLegB).ErrEpoch = h.ago(9000)
+		h.pass()
+		if got := len(h.rops.allQueries()); got != 1 {
+			t.Fatalf("%d scans, want 1", got)
+		}
+	})
+	t.Run("more disk nodes first: the narrower scan runs", func(t *testing.T) {
+		h := build(t)
+		h.legOf(reactMetaLegB).LegId = reactDataLegB + 1
+		h.legOf(reactDataLegB).ErrEpoch = h.ago(9000)
+		h.legOf(reactDataLegB + 1).ErrEpoch = h.ago(9000)
+		h.pass()
+		if got := len(h.rops.allQueries()); got != 2 {
+			t.Fatalf("%d scans, want 2: an empty scan past {A, B, C} does "+
+				"not show one past {A, B} empty", got)
+		}
+	})
+}
+
+// countSkips counts the `reaction skipped` records of one kind and reason.
+func countSkips(h *reactHarness, kind, reason string) int {
+	n := 0
+	for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+		if rec["kind"] == kind && rec["reason"] == reason {
+			n++
+		}
+	}
+	return n
 }
 
 // TestLegRepairCreateAtTheRetiredBound pins the worker's repair at the

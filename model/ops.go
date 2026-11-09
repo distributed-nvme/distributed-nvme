@@ -2079,12 +2079,64 @@ func hasDuplicateAddr(cands []Cand) bool {
 	return false
 }
 
+// ReasonCnBudgetShort is the refusal of a group a CN of the SP cannot take
+// (architecture.md, GrowSlice): every cntlr of the SP stacks every group, so
+// each cntlr's CN is charged the group's ext_cnt. It is chargeSpCns's reason
+// and the worker's pre-check's (dnv-worker.md AR6), one rule for both, so the
+// pass and the transaction cannot disagree on what "short" means.
+const ReasonCnBudgetShort = "cn free_ext_cnt too low"
+
+// SpCnCharges is the charge a group of extCnt extents puts on the CNs of the
+// SP: extCnt once per cntlr each CN holds, the CNs in the order of their first
+// cntlr in cntlr_id_list. A CN hosting two cntlrs of one SP is not supposed to
+// exist (architecture.md, Finding CN candidates), but if one did it would
+// reserve the group twice, so the charge is accumulated per CN. A cntlr
+// missing from cntlrs contributes nothing.
+func SpCnCharges(
+	conf *pb.SpConf,
+	cntlrs map[uint64]*pb.Cntlr,
+	extCnt uint64,
+) ([]string, map[string]uint64) {
+	var order []string
+	charges := make(map[string]uint64)
+	for _, cntlrId := range conf.GetCntlrIdList() {
+		cntlr, ok := cntlrs[cntlrId]
+		if !ok {
+			continue
+		}
+		addrPort := cntlr.GetAddrPort()
+		if _, seen := charges[addrPort]; !seen {
+			order = append(order, addrPort)
+		}
+		charges[addrPort] += extCnt
+	}
+	return order, charges
+}
+
+// CnBudgetShort names the first CN of order whose free_ext_cnt is below its
+// charge, with that count. A CN absent from cns is not judged: chargeSpCns
+// refuses it as "cn not found" before it asks, and the worker's pre-check
+// leaves it to the transaction.
+func CnBudgetShort(
+	order []string,
+	charges map[string]uint64,
+	cns map[string]*pb.CnConf,
+) (string, uint64, bool) {
+	for _, addrPort := range order {
+		cn, ok := cns[addrPort]
+		if !ok {
+			continue
+		}
+		if cn.GetFreeExtCnt() < charges[addrPort] {
+			return addrPort, cn.GetFreeExtCnt(), true
+		}
+	}
+	return "", 0, false
+}
+
 // chargeSpCns takes extCnt extents off the CN of every cntlr of the SP, one
 // budget update, one capacity-key maintenance and one CnRev bump per CN
-// (architecture.md, GrowSlice). A CN hosting two cntlrs of one SP is not
-// supposed to exist (architecture.md, Finding CN candidates),
-// but if one did it would reserve the group twice, so the charge is
-// accumulated per CN and applied once.
+// (architecture.md, GrowSlice), charged as SpCnCharges says.
 func chargeSpCns(
 	s etcdutil.STM,
 	op string,
@@ -2092,33 +2144,30 @@ func chargeSpCns(
 	conf *pb.SpConf,
 	extCnt uint64,
 ) error {
-	var order []string
-	cns := make(map[string]*pb.CnConf)
-	charges := make(map[string]uint64)
+	cntlrs := make(map[uint64]*pb.Cntlr)
 	for _, cntlrId := range conf.GetCntlrIdList() {
 		cntlr := &pb.Cntlr{}
 		if !s.Get(CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
 			return fail(op, "cntlr not found")
 		}
-		addrPort := cntlr.GetAddrPort()
-		if _, ok := cns[addrPort]; !ok {
-			cn := &pb.CnConf{}
-			if !s.Get(CnConfKey(cid, addrPort), cn) {
-				return fail(op, "cn not found")
-			}
-			cns[addrPort] = cn
-			order = append(order, addrPort)
+		cntlrs[cntlrId] = cntlr
+	}
+	order, charges := SpCnCharges(conf, cntlrs, extCnt)
+	cns := make(map[string]*pb.CnConf, len(order))
+	for _, addrPort := range order {
+		cn := &pb.CnConf{}
+		if !s.Get(CnConfKey(cid, addrPort), cn) {
+			return fail(op, "cn not found")
 		}
-		charges[addrPort] += extCnt
+		cns[addrPort] = cn
+	}
+	if _, _, short := CnBudgetShort(order, charges, cns); short {
+		return fail(op, ReasonCnBudgetShort)
 	}
 	for _, addrPort := range order {
 		cn := cns[addrPort]
-		charge := charges[addrPort]
-		if cn.GetFreeExtCnt() < charge {
-			return fail(op, "cn free_ext_cnt too low")
-		}
 		newCn := proto.Clone(cn).(*pb.CnConf)
-		newCn.FreeExtCnt -= charge
+		newCn.FreeExtCnt -= charges[addrPort]
 		s.Put(CnConfKey(cid, addrPort), newCn)
 		MaintainCnCapacity(s, cid, addrPort, cn, newCn)
 		if err := BumpCnRev(s, op, cid, newCn); err != nil {

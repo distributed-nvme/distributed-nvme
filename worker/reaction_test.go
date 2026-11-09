@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -275,11 +276,15 @@ type candQuery struct {
 type fakeReactionOps struct {
 	mu      sync.Mutex
 	dnCands []model.Cand
-	cnCands []model.Cand
-	scanErr error
-	opErr   error
-	calls   []reactionCall
-	queries []candQuery
+	// dnBlackFilter drops from a DN scan's answer every candidate the scan
+	// black-listed, as the real allocator does, so a test can offer one set
+	// of DNs that suits one group and not another (AR8).
+	dnBlackFilter bool
+	cnCands       []model.Cand
+	scanErr       error
+	opErr         error
+	calls         []reactionCall
+	queries       []candQuery
 	// The sp drain's canned returns (drain.go). drainErr is separate from
 	// opErr so a test can fail a drain step without failing every reaction —
 	// the two never run in the same pass (SPD6), and keeping them apart is
@@ -363,9 +368,19 @@ func (o *fakeReactionOps) findDnCandidates(
 		requiredCnt: requiredCnt, black: black, excludeLocs: excludeLocs,
 	})
 	cands, err := o.dnCands, o.scanErr
+	filter := o.dnBlackFilter
 	o.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	if filter {
+		var kept []model.Cand
+		for _, cand := range cands {
+			if !slices.Contains(black, cand.AddrPort) {
+				kept = append(kept, cand)
+			}
+		}
+		cands = kept
 	}
 	return cands, nil
 }
@@ -3164,6 +3179,103 @@ func TestReactionReplaceNoCandidate(t *testing.T) {
 	h.pass()
 	h.wantOps()
 	h.wantSkipped(reactionReplaceCntlr, reasonNoCandidate)
+}
+
+// TestReactionReplaceNoCandidateGoesOnToLegRepair pins AR2 past AR7's empty
+// scan: no CN with room can last as long as the cluster stays full, so the
+// pass goes on and leg repair still creates the repair a dead leg needs.
+func TestReactionReplaceNoCandidateGoesOnToLegRepair(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.state.Cntlrs[reactCntlrB].ErrEpoch = h.ago(700)
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+	h.dnCands(reactDnD)
+	h.pass()
+	h.wantSkipped(reactionReplaceCntlr, reasonNoCandidate)
+	h.wantOps("create_repair")
+	h.wantApplied(reactionRepairCreate)
+}
+
+// TestReactionGrowNoCandidateGoesOnToLegRepair pins AR2 past AR6's empty
+// scan: fewer DNs with room than the group has legs can last as long as the
+// cluster stays full, so the pass goes on, and leg repair, which places one
+// leg, still creates its repair in the same pass.
+func TestReactionGrowNoCandidateGoesOnToLegRepair(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	total := reactDataBlocks(t, 2)
+	h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+		poolLine(1, 1000, total, total))
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+	h.dnCands(reactDnD)
+	h.pass()
+	h.wantSkipped(reactionGrowData, reasonNoCandidate)
+	h.wantOps("create_repair")
+	h.wantApplied(reactionRepairCreate)
+}
+
+// TestReactionGrowMemo pins the pass's memo of empty grow scans: after a grow
+// scan that found too few DNs for ext_cnt E, a later grow of the pass that
+// asks for E or more is skipped without a scan, and one that asks for less is
+// scanned. Two slices breach on data (ext_cnt 2) and the first on metadata
+// too (ext_cnt 1), walked as slice 1 data, slice 1 metadata, slice 2 data.
+func TestReactionGrowMemo(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	const slice2 = reactSliceId + 50
+	h.state.Conf.SliceIdList = append(h.state.Conf.SliceIdList, slice2)
+	h.state.Slices[slice2] = &pb.Slice{
+		SliceIdx: 1,
+		MetaGrpList: []*pb.Group{reactGroup(t, reactMetaGrp+50, 1,
+			[]uint64{reactMetaLegA + 50, reactMetaLegB + 50},
+			[]uint64{reactSideMetaA + 50, reactSideMetaB + 50},
+			[]string{reactDnA, reactDnB})},
+		DataGrpList: []*pb.Group{reactGroup(t, reactDataGrp+50, 2,
+			[]uint64{reactDataLegA + 50, reactDataLegB + 50},
+			[]uint64{reactSideDataA + 50, reactSideDataB + 50},
+			[]string{reactDnA, reactDnB})},
+	}
+	total := reactDataBlocks(t, 2)
+	h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+		poolLine(1000, 1000, total, total))
+	h.setPool(slice2, pb.ResStatus_RES_STATUS_OK,
+		poolLine(1, 1000, total, total))
+	h.dnCands(reactDnD)
+	h.pass()
+	var exts []uint64
+	for _, query := range h.rops.allQueries() {
+		if query.kind == "dn" && query.requiredCnt == 2 {
+			exts = append(exts, query.candExt)
+		}
+	}
+	if len(exts) != 2 || exts[0] != 2 || exts[1] != 1 {
+		t.Fatalf("grow scans for ext_cnt %v, want [2 1]: slice 2's data "+
+			"grow is shown empty by slice 1's", exts)
+	}
+	if got := countSkips(h, reactionGrowData, reasonNoCandidate); got != 2 {
+		t.Fatalf("%d data grow skips, want 2", got)
+	}
+}
+
+// TestReactionGrowShortCnBudgetIsSkipped pins AR6's CN budget check: a CN of
+// the SP whose free extents cannot take the new group makes the grow
+// impossible however many DNs have room, so the pass skips it with the
+// transaction's own reason, scans no DN for it, and goes on to leg repair.
+func TestReactionGrowShortCnBudgetIsSkipped(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	total := reactDataBlocks(t, 2)
+	h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+		poolLine(1, 1000, total, total))
+	h.state.CnByAddr[reactCnA] = &pb.CnConf{FreeExtCnt: 100}
+	h.state.CnByAddr[reactCnB] = &pb.CnConf{FreeExtCnt: 1}
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+	h.dnCands(reactDnC, reactDnD)
+	h.pass()
+	h.wantSkipped(reactionGrowData, model.ReasonCnBudgetShort)
+	for _, query := range h.rops.allQueries() {
+		if query.kind == "dn" && query.requiredCnt != 1 {
+			t.Fatalf("a DN scan for the grow ran: %+v", query)
+		}
+	}
+	h.wantOps("create_repair")
+	h.wantApplied(reactionRepairCreate)
 }
 
 // TestReactionCntlrThresholdNotReached checks AR4 on the replacement path: a

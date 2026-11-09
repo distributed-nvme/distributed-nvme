@@ -461,13 +461,12 @@ func TestScenGrowStaysPendingWhileItsSidesZeroSlowly(t *testing.T) {
 	}
 }
 
-// TestScenGrowWithNoDnEndsThePass pins the other half of AR2's rule for a
-// grow: a grow whose scan finds fewer DNs with room than its legs logs
-// `reaction skipped` (no candidate) and ends the pass, so a standby due for
-// replacement is not replaced while it lasts; once a DN has room the grow
-// commits, and a later pass, which finds the grow pending, replaces the
-// standby.
-func TestScenGrowWithNoDnEndsThePass(t *testing.T) {
+// TestScenGrowWithNoDnGoesOn pins AR2 past a grow's empty scan: a grow whose
+// scan finds fewer DNs with room than its legs logs `reaction skipped` (no
+// candidate) and the pass goes on, so a standby due for replacement is
+// replaced while no DN has room, in a pass that also logs the grow's skip;
+// once a DN has room the grow commits.
+func TestScenGrowWithNoDnGoesOn(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
 	c := h.plantStd(t, nil)
@@ -486,30 +485,55 @@ func TestScenGrowWithNoDnEndsThePass(t *testing.T) {
 	noDn := reactionIs(reactionGrowData, reasonNoCandidate)
 	h.waitRecord(t, 20*time.Second, w, msgReactionSkipped, noDn)
 	c.failCntlr(t, 2)
-	h.waitUntil(t, 20*time.Second, "cntlr 2 due for its replacement",
-		func() (bool, string) {
-			epoch := c.cntlr(t, 2).GetErrEpoch()
-			return epoch != 0 && reached(uint64(time.Now().Unix()), epoch,
-					c.spec.threshold.GetCntlrUnhealthy()+1),
-				fmt.Sprintf("err_epoch %d", epoch)
-		})
-	// Two more passes in which cntlr 2 is due and the grow finds no DN.
-	h.waitCount(t, 20*time.Second, w, msgReactionSkipped,
-		h.countRecs(w, msgReactionSkipped, noDn)+2, noDn)
-	if n := h.countRecs(w, "", reactionIs(reactionReplaceCntlr, "")); n != 0 {
-		t.Fatalf("%d replace records while the grow found no DN: the grow's "+
-			"empty scan must end the pass", n)
+	replaced := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+		reactionIs(reactionReplaceCntlr, ""))
+	if h.countRecs(w, msgReactionSkipped, func(rec logRecord) bool {
+		return noDn(rec) && rec.traceId == replaced.traceId
+	}) == 0 {
+		t.Errorf("the replacement's pass logged no grow skip: the grow's " +
+			"empty scan must let the pass go on")
+	}
+	if n := h.countRecs(w, msgReactionApplied,
+		reactionIs(reactionGrowData, "")); n != 0 {
+		t.Fatalf("%d grows while no DN has room", n)
 	}
 
 	if _, _, err := plant.SetDnFree(ctx, h.cli, c.cl, 3, c.spec.nodeFree); err != nil {
 		t.Fatalf("SetDnFree: %v", err)
 	}
-	grown := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+	h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
 		reactionIs(reactionGrowData, ""))
-	replaced := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
-		reactionIs(reactionReplaceCntlr, ""))
-	if replaced.traceId == grown.traceId {
-		t.Errorf("the grow and the replacement ran in one pass")
+}
+
+// TestScenReplaceWithNoCnGoesOnToLegRepair is AR2 past AR7's empty scan in a
+// full cluster: a standby is due for replacement and no CN has room for
+// it, so every pass logs its skip; a leg of the data group then fails, and
+// leg repair, which runs after AR7 in the same pass, creates the repair and
+// finishes it while the replacement still finds no CN.
+func TestScenReplaceWithNoCnGoesOnToLegRepair(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantScen(t, repairShape)
+	ctx := context.Background()
+	if _, _, err := plant.SetCnFree(ctx, h.cli, c.cl, 3, 0); err != nil {
+		t.Fatalf("SetCnFree: %v", err)
+	}
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	c.failCntlr(t, 2)
+	h.waitRecord(t, 20*time.Second, w, msgReactionSkipped,
+		reactionIs(reactionReplaceCntlr, reasonNoCandidate))
+	c.failLeg(t, 6)
+	created := h.waitCreated(t, w, 6)
+	finished := c.finishByVerdict(t, w, created.str("rep_name"))
+	if finished.num("retired_leg_id") != 6 {
+		t.Fatalf("the finish %v, want leg 6 retired", finished.attrs)
+	}
+	if n := h.countRecs(w, msgReactionApplied,
+		reactionIs(reactionReplaceCntlr, "")); n != 0 {
+		t.Fatalf("%d replacements while no CN has room", n)
 	}
 }
 

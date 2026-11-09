@@ -7584,8 +7584,9 @@ that component's document and only pointed to here.
   Controller nodes), and no call changes it, so the budgets, divided by
   the pools' cntlr counts, cap the group space of a cluster whatever its
   disks hold, and an auto-grow refused for want of budget shows only as
-  the worker's `reaction skipped` record (`dnv-worker.md` AR6) and ends
-  that pass (`dnv-worker.md` AR2), while an operator's `GrowSlice` is
+  the worker's `reaction skipped` record (`dnv-worker.md` AR6), the pass
+  going on to the reactions after it when its own check finds the
+  shortfall (`dnv-worker.md` AR2), while an operator's `GrowSlice` is
   refused `RESOURCE_EXHAUSTED` (GrowSlice).
 * **A pool's thin ids run out.** dm-thin takes no thin id above
   `MaxThinDevId`, and a pool hands out each thin id once, the restore of the

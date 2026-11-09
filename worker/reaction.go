@@ -1054,6 +1054,41 @@ type spPass struct {
 	// AR8's drive step passes over: the snapshot's record of such a repair
 	// holds the stage it moved from, and the next pass reads the new one.
 	moved map[string]bool
+	// growShort and repairShort are this pass's memo of empty DN scans (AR2):
+	// a scan that found no room for ext_cnt E, with black list B, also finds
+	// none for a larger ext_cnt or a wider black list, so a later grow or
+	// create that asks for no less is skipped without its scan. growShort is
+	// the smallest ext_cnt a grow scan came back short for, 0 for none; a
+	// grow scan has no black list. The memo lives one pass: the next pass
+	// scans again.
+	growShort   uint64
+	repairShort []emptyScan
+}
+
+// emptyScan is one leg-repair create scan that came back empty (spPass).
+type emptyScan struct {
+	extCnt uint64
+	black  map[string]bool
+}
+
+// covers reports whether this empty scan proves another one empty: no less
+// room asked for, and every DN this one could pick still black-listed there.
+// A location exclusion plays no part, since the create's tier 2 rescans
+// without it (architecture.md, Per-operation allocation).
+func (e emptyScan) covers(extCnt uint64, black []string) bool {
+	if extCnt < e.extCnt {
+		return false
+	}
+	have := make(map[string]bool, len(black))
+	for _, addr := range black {
+		have[addr] = true
+	}
+	for addr := range e.black {
+		if !have[addr] {
+			return false
+		}
+	}
+	return true
 }
 
 // reactionPass is RW20's hook: one automatic-reaction pass for this SP, on the
@@ -1641,8 +1676,9 @@ func (w *spWorker) parsePoolStatus(
 // architecture.md, Automatic reactions) or capped by a ceiling of
 // architecture.md, GrowSlice, can stay that way indefinitely, so ending
 // the pass on it would disable AR7 and AR8 for the whole SP for exactly as
-// long. Only an APPLIED grow, or one of the two skips AR2 makes pass-ending
-// (ErrPrecondition, no candidate), ends the pass.
+// long. The same holds for a grow no DN or no CN budget has room for. Only an
+// APPLIED grow, or a grow whose scan or transaction failed or was refused
+// from inside the transaction (AR2), ends the pass.
 func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 	// The SP's stored percentage, used as stored (architecture.md, Common
 	// validation): a zero is invalid and the pass gate already refused it, so
@@ -1692,13 +1728,16 @@ func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 // runGrow runs one AR6 grow of one kind on one slice. It reports whether the
 // pass ends here, which distinguishes the two shapes of "no grow ran":
 //
-//   - the grow is not APPLICABLE — pending (AR6), the group ceiling or ladder
-//     cap of architecture.md, GrowSlice, no data group to size a data grow by:
-//     the record is emitted and false is returned, so the walk goes on to the
-//     other kind, the next slice and finally to AR7 and AR8;
-//   - the grow WAS applicable and did not complete — no candidate, an
-//     ErrPrecondition, a failed scan or op: AR2 ends the pass, so that a pass
-//     that has already touched etcd (or may have) applies nothing else.
+//   - the grow cannot run on the pass's snapshot — pending (AR6), the group
+//     ceiling or ladder cap of architecture.md, GrowSlice, no data group to
+//     size a data grow by, a CN of the SP short of budget, or no DN with room
+//     (the scan came back short): the record is emitted and false is
+//     returned, so the walk goes on to the other kind, the next slice and
+//     finally to AR7 and AR8, which a lack that lasts must not switch off;
+//   - the grow ran and did not complete — an ErrPrecondition from inside
+//     the transaction, a failed scan or op: AR2 ends the pass, so that a pass
+//     whose snapshot the store has overtaken, or that may have touched etcd,
+//     applies nothing else.
 func (w *spWorker) runGrow(
 	ctx context.Context,
 	p *spPass,
@@ -1740,6 +1779,28 @@ func (w *spWorker) runGrow(
 		w.reactionSkipped(ctx, kind, reason, sliceAttr)
 		return false
 	}
+	// The CN budget, by the rule model.GrowSlice applies inside its STM
+	// (model.CnBudgetShort): every cntlr of the SP stacks the new group, so a
+	// CN that cannot take it makes the grow impossible however many DNs have
+	// room. A lack of budget can last, so the pass goes on; the same refusal
+	// from inside the transaction means the CN changed since the snapshot and
+	// ends the pass (AR2).
+	order, charges := model.SpCnCharges(p.state.Conf, p.state.Cntlrs, extCnt)
+	if addr, free, short := model.CnBudgetShort(
+		order, charges, p.state.CnByAddr,
+	); short {
+		w.reactionSkipped(ctx, kind, model.ReasonCnBudgetShort, sliceAttr,
+			slog.String("addr_port", addr),
+			slog.Uint64("free_ext_cnt", free),
+			slog.Uint64("charge", charges[addr]),
+		)
+		return false
+	}
+	if p.growShort != 0 && extCnt >= p.growShort {
+		// An earlier grow of this pass found no room for less (spPass).
+		w.reactionSkipped(ctx, kind, reasonNoCandidate, sliceAttr)
+		return false
+	}
 	legs := legCnt(p.state.Conf)
 	batch := int(p.cc.GetAllocConf().GetDnBatchSize())
 	// AR6: the black list starts empty — a new group may perfectly well land
@@ -1757,8 +1818,13 @@ func (w *spWorker) runGrow(
 	}
 	picks := pickDistinct(cands, legs)
 	if len(picks) < legs {
+		// No room can last as long as a full cluster: the pass goes on
+		// (AR2), and the memo spares the scans no less room would repeat.
+		if p.growShort == 0 || extCnt < p.growShort {
+			p.growShort = extCnt
+		}
 		w.reactionSkipped(ctx, kind, reasonNoCandidate, sliceAttr)
-		return true
+		return false
 	}
 	grpId, err := w.reactor().ops.growSlice(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
@@ -1883,7 +1949,7 @@ func growExtCnt(
 // tryReplaceCntlr is AR7. It reports whether the pass ends here.
 //
 // A primary its two refusals hold (replaceTarget) does NOT end the pass
-// (AR2).
+// (AR2), and neither does a scan that finds no CN.
 func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	oldId, old := w.replaceTarget(ctx, p)
 	if old == nil {
@@ -1916,8 +1982,11 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	}
 	picks := model.PickRandom(cands, 1)
 	if len(picks) == 0 {
+		// No CN with room can last, so the pass goes on to leg repair (AR2).
+		// Every other due cntlr would be scanned past the same CNs, those of
+		// the SP's cntlrs, so the walk does not try the next one.
 		w.reactionSkipped(ctx, reactionReplaceCntlr, reasonNoCandidate, ids...)
-		return true
+		return false
 	}
 	newId, err := w.reactor().ops.replaceCntlr(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
@@ -2511,7 +2580,9 @@ func grpRowHold(p *spPass, grpId uint64) string {
 // (model.ReasonGrpOperatorInCharge), which a pass built from a snapshot older
 // than the flag meets: it is logged with the reason the pass's own hold logs,
 // beside the op's name, and holds that group only, so the scan goes on, as a
-// refusal of the drive step does (driveFailed). It reports whether the pass
+// refusal of the drive step does (driveFailed). A scan that finds no DN holds
+// that group only too (AR2), and the pass's memo of empty scans spares the
+// scan of a later group it proves empty (spPass). It reports whether the pass
 // ends here. A clone meta group takes the same path with its own ext_cnt,
 // model.CreateRepair finding the group through its parent.
 func (w *spWorker) createRepair(
@@ -2522,8 +2593,18 @@ func (w *spWorker) createRepair(
 ) bool {
 	batch := int(p.cc.GetAllocConf().GetDnBatchSize())
 	plan := grpAddrs(target.grp)
+	extCnt := target.grp.GetExtCnt()
+	for _, empty := range p.repairShort {
+		if empty.covers(extCnt, plan) {
+			// An earlier create of this pass found no DN for this group
+			// either (spPass): this group waits, the walk goes on (AR2).
+			w.reactionSkipped(ctx, reactionRepairCreate, reasonNoCandidate,
+				ids...)
+			return false
+		}
+	}
 	cands, err := w.reactor().ops.findDnCandidates(
-		ctx, w.cid, p.cc, target.grp.GetExtCnt(), batch, 1,
+		ctx, w.cid, p.cc, extCnt, batch, 1,
 		plan, grpLocations(p.state, target.grp),
 	)
 	if err != nil {
@@ -2532,8 +2613,17 @@ func (w *spWorker) createRepair(
 	}
 	picks := model.PickRandom(cands, 1)
 	if len(picks) == 0 {
+		// No DN with room for this group holds this group only, as AR8's
+		// other conditions of one group do: the walk goes on to the next
+		// candidate leg, whose group may place its new leg elsewhere (AR2).
+		black := make(map[string]bool, len(plan))
+		for _, addr := range plan {
+			black[addr] = true
+		}
+		p.repairShort = append(p.repairShort,
+			emptyScan{extCnt: extCnt, black: black})
 		w.reactionSkipped(ctx, reactionRepairCreate, reasonNoCandidate, ids...)
-		return true
+		return false
 	}
 	repName := common.WorkerRepName(w.spId, target.grp.GetGrpId(), p.now)
 	ids = withAttr(ids, slog.String("rep_name", repName))
