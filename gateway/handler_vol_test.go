@@ -2955,8 +2955,8 @@ func TestDeleteTransferFinalizeSuspendsOrigin(t *testing.T) {
 // TestDeleteTransferFinalizeSkipsMissingOrigin is GW16's second half: on the
 // finalize path a missing origin subsystem or ns_idx is SKIPPED and not an
 // error, because the transfer is being deleted either way and the RPC must not
-// become unable to complete because the namespace it points at was removed
-// first.
+// become unable to complete because a record changed outside the gateway no
+// longer holds the namespace it points at.
 func TestDeleteTransferFinalizeSkipsMissingOrigin(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -5219,13 +5219,17 @@ func TestGetMigration(t *testing.T) {
 func volSeedTokenFixture(env *volEnv) {
 	env.t.Helper()
 	env.putTd("vol", 900, 7, 0, true)
-	env.putSubsystem(volNqn, 501, []*pb.Namespace{{
-		NsId: 601, NsIdx: 1, TdId: 900,
-	}})
+	// The transfer's origin is namespace 2, so the namespace cases, which
+	// address namespace 1, meet no transfer guard (architecture.md,
+	// Transfers).
+	env.putSubsystem(volNqn, 501, []*pb.Namespace{
+		{NsId: 601, NsIdx: 1, TdId: 900},
+		{NsId: 604, NsIdx: 2, TdId: 900},
+	})
 	mustPut(env.t, env.cli, model.CloneKey(env.cid, volSpId, "clone-a"),
 		&pb.Clone{CloneId: 701, DstTdId: 900, SrcSliceCnt: 1})
 	mustPut(env.t, env.cli, model.TransferKey(env.cid, volSpId, "xfer-a"),
-		&pb.Transfer{XferId: 702, OriNqn: volNqn, OriNsIdx: 1})
+		&pb.Transfer{XferId: 702, OriNqn: volNqn, OriNsIdx: 2})
 	mustPut(env.t, env.cli, model.MigrationKey(env.cid, volSpId, "migr-a"),
 		&pb.Migration{
 			MigrId: 703, SrcSideId: volDataSideA, DstSideId: volDataSideB,
@@ -5348,7 +5352,7 @@ func volTokenCases() []volTokenCase {
 			// Subsystems, namespaces) and not the revision check's.
 			bypassCode: codes.FailedPrecondition,
 			bypassMsg: fmt.Sprintf(
-				"subsystem %q still holds 1 namespaces", volNqn),
+				"subsystem %q still holds 2 namespaces", volNqn),
 		},
 		{
 			name: "UpdateSubsystemHosts",

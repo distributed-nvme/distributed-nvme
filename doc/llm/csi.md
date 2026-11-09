@@ -128,8 +128,12 @@ delete removes the objects in the reverse order, each step repeatable: the
 namespace, the subsystem and the thin device, then the pool, last since its
 delete is refused while a user-created object remains (`architecture.md`,
 Storage pools); the worker drains the rest (`dnv-worker.md`, The sp drain). An
-object already gone is done, a write the gateway refuses because the pool is
-already deleting is done, and so is an id that names no volume of this driver.
+object already gone is done, and so is an id that names no volume of this
+driver. The gateway refuses the namespace's delete both when the pool is
+already deleting and while a transfer names the namespace as its origin
+(`architecture.md`, Transfers), so a refused namespace delete reads the pool:
+one already deleting or gone is done, and otherwise the refusal is passed on,
+since only the operator who made the transfer can end it.
 A create from a snapshot or another volume is refused.
 
 ## Attach and detach

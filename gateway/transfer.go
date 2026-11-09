@@ -46,6 +46,44 @@ func resolveTransfer(
 	return key, xfer, nil
 }
 
+// nsTransferRef is the guard of DeleteNamespace, UpdateNamespaceDev and
+// CreateNamespace (architecture.md, Transfers): the name of the first transfer
+// of the SP whose origin is the namespace place (nqn, nsIdx). Every cntlr's
+// xfer stack reads the origin's thin device while its transfer lives, so
+// deleting the origin would leave the cntlrs building a stack over nothing,
+// repointing it would move a live copy to another thin device mid-copy, and
+// a new namespace at a place a transfer still names would become that
+// transfer's origin unasked. The walk is xfer_name_list, bounded by
+// MaxXferCntPerSp; a listed transfer whose key is gone is ABORTED, as
+// tdCloneRef reads a missing clone. The caller's STM has read the pool's
+// transfer list too, and a transfer created or deleted meanwhile rewrites
+// that list, so the commit fails and the STM runs again.
+func nsTransferRef(
+	stm etcdutil.STM,
+	sc *spScope,
+	nqn string,
+	nsIdx uint32,
+) (string, bool, error) {
+	for _, name := range sc.Conf.GetXferNameList() {
+		key := model.TransferKey(sc.Cid, sc.SpId(), name)
+		xfer := &pb.Transfer{}
+		if !stm.Get(key, xfer) {
+			return "", false, errAborted("transfer key %q is missing", key)
+		}
+		if xfer.GetOriNqn() == nqn && xfer.GetOriNsIdx() == nsIdx {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// errNsInTransfer is the refusal of a namespace place a transfer names.
+func errNsInTransfer(nqn string, nsIdx uint32, xferName string) error {
+	return errPrecondition(
+		"namespace %d of subsystem %s is the origin of transfer %s",
+		nsIdx, nqn, xferName)
+}
+
 // CreateTransfer is the CreateTransfer of architecture.md, Transfers: it
 // retires an existing namespace of this SP behind an xfer subsystem so a
 // destination SP's clone can read the bytes over NVMe-oF (architecture.md,
@@ -165,8 +203,9 @@ func (s *Server) CreateTransfer(
 //
 // A missing origin subsystem or ns_idx on the finalize path is skipped, not an
 // error (GW16): the transfer is being deleted either way, and the RPC must not
-// become unable to complete because the namespace it points at was removed
-// first.
+// become unable to complete because a record changed outside the gateway no
+// longer holds the namespace it points at (the namespace RPCs refuse to
+// remove a live transfer's origin, nsTransferRef).
 func (s *Server) DeleteTransfer(
 	ctx context.Context,
 	req *pb.DeleteTransferRequest,

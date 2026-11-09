@@ -2904,7 +2904,9 @@ rebuilt as `CreateSubsystem` writes it, with the new hosts. Reply `ss_id`.
 **CreateNamespace** — Errors: `NOT_FOUND` nqn or td; `RESOURCE_EXHAUSTED`
 when `ns_list` holds `MaxNsCntPerSs` namespaces or more;
 `INVALID_ARGUMENT` `ns_idx` zero, `ns_idx` already used in this subsystem,
-or a supplied `dev_uuid` or `dev_nguid` malformed. Defaults: an empty
+or a supplied `dev_uuid` or `dev_nguid` malformed; `FAILED_PRECONDITION`
+for a place (`nqn`, `ns_idx`) a transfer still names as its origin
+(Transfers). Defaults: an empty
 `dev_uuid` is a generated RFC 4122 version 4 uuid, an empty `dev_nguid` a
 generated random NGUID in hex. Callers supply both only when the namespace
 must impersonate an existing one — the transfer and clone flow of Transfer
@@ -2921,11 +2923,15 @@ ids are not stored — every namespace joins one of the three fixed
 node-local groups of [D4].
 
 **DeleteNamespace** — Errors: of the NQN rules of Common validation the
-`nqn` gets the length check alone; `NOT_FOUND` nqn or `ns_idx`. Action:
-STM: remove the `ns_idx` entry, bump `SpRev`. Reply `ns_id`.
+`nqn` gets the length check alone; `NOT_FOUND` nqn or `ns_idx`;
+`FAILED_PRECONDITION` while a transfer names the namespace as its origin
+(Transfers). Action: STM: remove the `ns_idx` entry, bump `SpRev`. Reply
+`ns_id`.
 
 **UpdateNamespaceDev** — repoints the namespace at another td
 (`td_name`), for example to expose a snapshot in place of the origin.
+Errors: `NOT_FOUND` nqn, `ns_idx` or td; `FAILED_PRECONDITION` while a
+transfer names the namespace as its origin (Transfers).
 STM: update `td_id`, bump `SpRev`; agents reload the namespace's own
 `CnNsDevName` onto the new td's raid0 (a dm reload — the nvmet
 "device_path" never changes, so the switch is invisible to the host).
@@ -3247,6 +3253,19 @@ primary included, parks the namespace's `CnNsDevName` on its td's dm-error
 and holds the namespace in the inaccessible ANA group, each from its own
 request, so the destination clone is the only reader and writer of the
 bytes (Namespace suspend semantics).
+
+While a transfer lives its origin is the transfer's: every cntlr's xfer
+stack reads the origin's td, so `DeleteNamespace` and `UpdateNamespaceDev`
+of the origin are refused `FAILED_PRECONDITION`, and `CreateNamespace`
+refuses the place (`ori_nqn`, `ori_ns_idx`) while a transfer names it.
+Reason: a deleted origin leaves every cntlr unhealthy, building a stack
+over nothing, and a repointed one moves a live copy to another td, so a
+clone would end as a mix of two devices with no error. The guard reads the
+pool's transfer list and each listed transfer in the same STM; a transfer
+created or deleted meanwhile rewrites that list, so the commit fails and the
+STM runs again. `UpdateNamespaceSuspended` stays allowed: a suspend parks
+only the origin's own ns-dev, and the td the xfer stack reads does not
+change.
 
 **DeleteTransfer** — `force` false **finalizes** a completed hand-over:
 the STM additionally sets `suspended` true on the origin namespace, so the

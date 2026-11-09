@@ -448,8 +448,9 @@ func namespaceOf(ss *pb.Subsystem) *pb.Namespace {
 // user-created object remains and answers done when the pool is already
 // deleting; the worker drains the rest. A pool, a subsystem or a thin
 // device that is already gone is done, and so is an id that names no
-// volume of this driver. A write refused because the pool is already
-// deleting is done too: the drain is running.
+// volume of this driver. A namespace delete the gateway refuses is done
+// when the pool is already deleting or gone, since the drain is running;
+// otherwise a transfer names the namespace, and the refusal is passed on.
 func (c *controller) DeleteVolume(
 	ctx context.Context,
 	req *csi.DeleteVolumeRequest,
@@ -475,8 +476,17 @@ func (c *controller) DeleteVolume(
 	switch codeOf(err) {
 	case codes.OK, codes.NotFound:
 	case codes.FailedPrecondition:
-		// The pool is already deleting: the drain is running.
-		return done, nil
+		// Either the pool is already deleting, and the drain is running, or
+		// a transfer names the namespace as its origin, which is the
+		// operator's to end first (csi.md CSI9). Only the pool tells which.
+		deleting, perr := c.poolDeletingOrGone(ctx, cluster, name)
+		if perr != nil {
+			return nil, perr
+		}
+		if deleting {
+			return done, nil
+		}
+		return nil, fromGateway("DeleteNamespace", err)
 	default:
 		return nil, fromGateway("DeleteNamespace", err)
 	}
@@ -527,6 +537,29 @@ func (c *controller) DeleteVolume(
 		return nil, fromGateway("DeleteStoragePool", err)
 	default:
 		return nil, fromGateway("DeleteStoragePool", err)
+	}
+}
+
+// poolDeletingOrGone reads the volume's pool: true when it is already
+// deleting or no longer there.
+func (c *controller) poolDeletingOrGone(
+	ctx context.Context,
+	cluster string,
+	name string,
+) (bool, error) {
+	gctx, cancel := c.gwCtx(ctx)
+	defer cancel()
+	reply, err := c.gw.GetStoragePool(gctx, &pb.GetStoragePoolRequest{
+		ClusterName: cluster,
+		SpName:      name,
+	})
+	switch codeOf(err) {
+	case codes.OK:
+		return reply.GetSpConf().GetDeleting(), nil
+	case codes.NotFound:
+		return true, nil
+	default:
+		return false, fromGateway("GetStoragePool", err)
 	}
 }
 

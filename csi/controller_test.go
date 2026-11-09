@@ -339,6 +339,43 @@ func TestDeleteVolume(t *testing.T) {
 	wantCode(t, err, codes.InvalidArgument, "delete with no id")
 }
 
+// TestDeleteVolumePassesOnANamespaceInTransfer pins csi.md CSI9: a namespace
+// delete the gateway refuses on a live pool, as it does while a transfer an
+// operator made names the namespace, is passed on, and the delete stops
+// there; the same refusal on a pool already deleting is done.
+func TestDeleteVolumePassesOnANamespaceInTransfer(t *testing.T) {
+	c, g := newTestController(t)
+	ctx := t.Context()
+	reply, err := c.CreateVolume(ctx, createReq(testVolume, gib))
+	wantCode(t, err, codes.OK, "create")
+	id := reply.GetVolume().GetVolumeId()
+	g.fail = map[string]codes.Code{"DeleteNamespace": codes.FailedPrecondition}
+	before := len(g.calls)
+	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id})
+	wantCode(t, err, codes.FailedPrecondition, "delete of a namespace in transfer")
+	for _, call := range g.calls[before:] {
+		if call == "DeleteSubsystem" || call == "DeleteStoragePool" {
+			t.Fatalf("the delete went on past the refusal: %v",
+				g.calls[before:])
+		}
+	}
+	if g.pool(fakeClusterOne, testVolume).deleting {
+		t.Fatalf("the pool was marked deleting past the refusal")
+	}
+	// A pool read that does not answer is passed on with its own code: it
+	// tells nothing about the pool.
+	g.fail["GetStoragePool"] = codes.Unavailable
+	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id})
+	wantCode(t, err, codes.Unavailable, "a pool read that did not answer")
+	delete(g.fail, "GetStoragePool")
+	g.pool(fakeClusterOne, testVolume).deleting = true
+	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id})
+	wantCode(t, err, codes.OK, "the same refusal on a deleting pool")
+	g.drain(fakeClusterOne, testVolume)
+	_, err = c.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id})
+	wantCode(t, err, codes.OK, "the same refusal on a pool already gone")
+}
+
 // TestPublishAndUnpublish pins csi.md, Attach and detach.
 func TestPublishAndUnpublish(t *testing.T) {
 	c, g := newTestController(t)

@@ -1075,16 +1075,18 @@ are those of `architecture.md`, Subsystems, namespaces.
 * **CreateNamespace** — `ns_idx` non-zero, judged with the rest of the
   validation before any read (GW4), so that a full subsystem never answers
   it with its ceiling; STM: the subsystem by NQN; the `MaxNsCntPerSs`
-  ceiling; `ns_idx` unused in this subsystem; the td by `td_name`; mint
+  ceiling; `ns_idx` unused in this subsystem; no transfer naming the place
+  as its origin (`nsTransferRef`); the td by `td_name`; mint
   `ns_id`; defaults: an empty
   `dev_uuid` is a random RFC 4122 version 4 UUID in the canonical dashed
   form, an empty `dev_nguid` a random NGUID in hex; append to `ns_list`.
   Reply `ns_id`.
 * **DeleteNamespace** — the NQN checked for length alone, as for
-  `DeleteSubsystem`; locate by NQN and `ns_idx`; remove from `ns_list`.
-  Reply `ns_id`.
-* **UpdateNamespaceDev** — locate the namespace; resolve the new `td_name`;
-  repoint the namespace's td reference. Reply `ns_id`.
+  `DeleteSubsystem`; locate by NQN and `ns_idx`; no transfer naming it as
+  its origin (`nsTransferRef`); remove from `ns_list`. Reply `ns_id`.
+* **UpdateNamespaceDev** — locate the namespace; no transfer naming it as
+  its origin (`nsTransferRef`); resolve the new `td_name`; repoint the
+  namespace's td reference. Reply `ns_id`.
 * **UpdateNamespaceSuspended** — locate the namespace; set `suspended`.
   Reply `ns_id`.
 
@@ -1237,7 +1239,9 @@ no `CdcEntry` involvement). The replies carry `xfer_id`.
 GW16. **Finalize skips a vanished origin.** `DeleteTransfer`'s finalize
 skips an origin subsystem or `ns_idx` that no longer exists instead of
 failing: the transfer is being deleted either way, and the RPC must stay
-able to complete.
+able to complete. The namespace RPCs refuse to remove a live transfer's
+origin (`architecture.md`, Transfers), so only a record changed outside the
+gateway meets this.
 
 ### Migrations
 

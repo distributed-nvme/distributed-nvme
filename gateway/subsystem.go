@@ -454,6 +454,14 @@ func (s *Server) CreateNamespace(
 			return errInvalid("ns_idx %d is already used by subsystem %q",
 				req.GetNsIdx(), req.GetNqn())
 		}
+		xferName, found, err := nsTransferRef(
+			stm, sc, req.GetNqn(), req.GetNsIdx())
+		if err != nil {
+			return err
+		}
+		if found {
+			return errNsInTransfer(req.GetNqn(), req.GetNsIdx(), xferName)
+		}
 		tdKey := model.ThinDeviceKey(sc.Cid, sc.SpId(), req.GetTdName())
 		td := &pb.ThinDevice{}
 		if !stm.Get(tdKey, td) {
@@ -502,7 +510,8 @@ func (s *Server) CreateNamespace(
 // (per-SP ids are never reused, architecture.md, Globals: id allocation +
 // shard buckets), so the SpConf is untouched and the SP's
 // single revision bump is the whole fan-out. The removed ns_id is the reply,
-// which is why the namespace is located before it is dropped.
+// which is why the namespace is located before it is dropped. A live
+// transfer's origin is refused (nsTransferRef).
 func (s *Server) DeleteNamespace(
 	ctx context.Context,
 	req *pb.DeleteNamespaceRequest,
@@ -531,6 +540,14 @@ func (s *Server) DeleteNamespace(
 		if err != nil {
 			return err
 		}
+		xferName, found, err := nsTransferRef(
+			stm, sc, req.GetNqn(), req.GetNsIdx())
+		if err != nil {
+			return err
+		}
+		if found {
+			return errNsInTransfer(req.GetNqn(), req.GetNsIdx(), xferName)
+		}
 		nsId = ns.GetNsId()
 		kept := make([]*pb.Namespace, 0, len(subsystem.GetNsList()))
 		for _, item := range subsystem.GetNsList() {
@@ -557,7 +574,8 @@ func (s *Server) DeleteNamespace(
 // The switch is invisible to the host — every cntlr reloads the namespace's
 // own dm-linear onto the new td's raid0 and the nvmet device_path never
 // changes — so nothing here needs to touch the subsystem's identity, its
-// allowed hosts or the CdcEntry.
+// allowed hosts or the CdcEntry. A live transfer's origin is refused
+// (nsTransferRef): its xfer stacks read the td it points at.
 func (s *Server) UpdateNamespaceDev(
 	ctx context.Context,
 	req *pb.UpdateNamespaceDevRequest,
@@ -588,6 +606,14 @@ func (s *Server) UpdateNamespaceDev(
 			stm, sc, req.GetNqn(), req.GetNsIdx())
 		if err != nil {
 			return err
+		}
+		xferName, found, err := nsTransferRef(
+			stm, sc, req.GetNqn(), req.GetNsIdx())
+		if err != nil {
+			return err
+		}
+		if found {
+			return errNsInTransfer(req.GetNqn(), req.GetNsIdx(), xferName)
 		}
 		tdKey := model.ThinDeviceKey(sc.Cid, sc.SpId(), req.GetTdName())
 		td := &pb.ThinDevice{}
