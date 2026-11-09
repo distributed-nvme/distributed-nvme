@@ -2248,8 +2248,8 @@ agent refuses the disk as a foreign one under any new node id
 zero the disk's header block, delete the agent's local store, start the
 agent, and create the node (etcd backup and restore). An agent started
 with the old store would format the blank disk under the old node id
-(`dnagent.md` DN2) or, while that store holds a provisioned side, refuse
-to format it (`dnagent.md` DN5).
+(`dnagent.md` DN2) or, while that store holds a provisioned side its
+stored node still lists, refuse to format it (`dnagent.md` DN5).
 
 **GetDiskNode** — Errors: `NOT_FOUND`; `ABORTED` if the `DnRev` that must
 exist is missing.
@@ -6097,8 +6097,8 @@ A restore loses or breaks what changed after the backup:
   a disk whose header carries no magic (`dnagent.md` DN5); delete the
   agent's local store, start it, and add the node again. An agent started
   with its old store formats the blank disk under the old node's identity
-  (`dnagent.md` DN2) or, while that store still holds a provisioned side,
-  refuses to format it (`dnagent.md` DN5). A controller node holds no disk,
+  (`dnagent.md` DN2) or, while that store still holds a provisioned side
+  its stored node still lists, refuses to format it (`dnagent.md` DN5). A controller node holds no disk,
   so the conflict never arises on one.
 * A node added after the backup is not in the restored state, and what it
   built stays on it until removed by hand. Added again it takes a new id,

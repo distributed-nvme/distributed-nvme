@@ -3992,9 +3992,9 @@ leftover of this cntlr from one read.
 
 The node-level verdict of a CN's read also names what of the CN's base
 state (CN5) the read's own probe read wrong in a way a `SyncupCn` would
-cure: the node's nvmet port, a missing port directory or ANA group and an
-ANA group in a state other than its fixed one, under the rule both roles
-share (`dnagent.md` SH31). That rule also says how each is rendered, why
+cure, of the node's nvmet port: a missing port directory or ANA group, and
+an ANA group in a state other than its fixed one, under the rule both
+roles share (`dnagent.md` SH31). That rule also says how each is rendered, why
 a probe that did not answer and a port transport attribute that differs
 name nothing, and why neither the `SyncupCn` reply nor the observation a
 converge stores carries them.

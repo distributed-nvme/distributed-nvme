@@ -231,10 +231,10 @@ the method set is exactly the following, each taking the caller's ctx:
   over `ReadFile`: only `fs.ErrNotExist` is "absent", every other error
   propagates, which is what keeps a stalled sysfs or configfs read
   (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, `Nvmet.NsAnaGrpId`, the
-  "enable" reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`, the
-  attribute reads of `Nvmet.ProbePortState`, and the port read of a
-  read's verdict, `dnagent.md` SH31) from making a live object read as an
-  absent one.
+  "enable" reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`,
+  `Nvmet.NsEnabledStrict`, and the attribute reads of
+  `Nvmet.ProbePortState`, which a read's verdict rests on, `dnagent.md`
+  SH31) from making a live object read as an absent one.
 
 ### ReadFile / WriteFile / WriteFileDirect
 

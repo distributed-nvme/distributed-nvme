@@ -672,8 +672,8 @@ func (s *DnAgentServer) convergeDn(
 // (formatGate), a disk already formatted for this cluster/dn/extent_size is
 // left untouched, and a disk formatted for anything else is refused rather
 // than overwritten (DN5). The DNs' lists are read here, before
-// EnsureFormatted takes DiskMeta's lock, which the gate runs under: a
-// zeroing batch takes that lock while it holds s.mu.
+// EnsureFormatted takes DiskMeta's lock, which the gate runs under: s.mu and
+// that lock are both leaf locks, so neither is taken inside the other.
 func (s *DnAgentServer) ensureDiskMeta(
 	ctx context.Context,
 	t *agent.ResTracker,
