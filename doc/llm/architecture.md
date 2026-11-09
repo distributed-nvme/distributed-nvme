@@ -5067,11 +5067,14 @@ case it is in:
   failover's own transaction, or by the disable that triggered the
   failover ([D18]) — and dnv-cdc has told the hosts; a host that follows
   the discovery log (Host view) drops the path inside the demotion hold,
-  before the fence, and its IO then queues as for a dead CN.
+  before the fence, and its IO then queues as for a dead CN; a node of the
+  Kubernetes driver drops it once it holds a path to a listed cntlr
+  (`csi.md` CSI15), and keeps it while it can reach none.
 
 What is left is an old primary still on a host's path at the fence that
 has not applied its demotion: a path nothing following the discovery log
-manages, a discovery view a cdc instance keeps stale, a demotion its agent
+manages, a path the Kubernetes driver keeps while its node reaches no listed
+cntlr, a discovery view a cdc instance keeps stale, a demotion its agent
 cannot apply within the demotion hold, or a failover fanned out with no
 demotion hold by a coordinator that has just started, after a restart or a
 handoff, as when the failover's owner lost the shard before its demotion
@@ -7538,30 +7541,42 @@ that component's document and only pointed to here.
   attached before the cdc moved, and until the node drops its discovery
   connections (`csi.md` CSI16) or the plugin restarts, the plugin's passes drop
   no path on that host, a fenced old primary's among them.
-* **A mount does not survive the loss of its last path.** A host connects
-  with the kernel's controller-loss default unless its connect sets one,
-  the node plugin's connect and nvme-stas's alike, so a mount survives an
-  outage of every path that ends inside the kernel's reconnect limit, the
-  kernel queueing its IO and reconnecting onto the same device — save a
-  refusal with DNR, which ends a path's reconnects for good: one from a
-  cntlr's port that listens for another subsystem before the volume's is
-  built again, or one from a subsystem whose cntlid slot has run out
-  (cntlid slots) — and does not survive the loss of its last path: past the
-  limit the kernel deletes the
-  controller, and a later connect makes a new namespace device, which the
-  mount does not follow. A cntlr replacement on a pool of one cntlr, and
-  the follower's drop of a path whose connect to the replacing cntlr failed
-  in the same pass, end the last controller the same way. The mechanism and
-  the way out are `csi.md` CSI14: the operator deletes the pod, as a host
-  of any other kind mounts the new device again by hand.
+* **A mount does not survive the loss of its last path.** The node
+  plugin's connect never gives up reconnecting, so its mount survives an
+  outage of every path, the kernel holding its IO and reconnecting onto the
+  same device, and the plugin keeps a path the cdc withdrew until a listed
+  cntlr's path shows the volume's namespace (`csi.md` CSI14, CSI15). A
+  cntlr replacement on a pool of one cntlr keeps the mount only while the
+  old path lasts that long: its controller node down, or its port
+  listening for no other subsystem; a port that serves other subsystems
+  refuses the old path's next reconnect with DNR once the old export is
+  gone, and the old path ends. A host whose connect sets no
+  controller-loss limit, nvme-stas's among them, keeps the kernel's default,
+  past which the kernel deletes the controller. And a refusal with DNR ends a
+  path's reconnects for good on any host: one from a cntlr's port that
+  listens for another subsystem before the volume's is built again, or one
+  from a subsystem whose cntlid slot has run out (cntlid slots). Once the
+  last controller is gone, a later connect makes a new namespace device,
+  which the mount does not follow. The way out is `csi.md` CSI14's: the
+  operator deletes the pod, as a host of any other kind mounts the new
+  device again by hand.
+* **A volume none of whose cntlrs comes back waits for ever on a
+  Kubernetes node.** The node plugin's connect never gives up, so the
+  kernel never deletes the volume's controllers and IO to the volume
+  waits, with no error, while no cntlr answers. A pod blocked in such IO
+  cannot be killed and stays terminating, so the kubelet never unstages
+  the volume. The way out is the operator's: `nvme disconnect -n` of the
+  volume's subsystem NQN on the node fails the waiting IO, after which the
+  pod stops and the unstage runs (`csi.md` CSI14).
 * **A fault only a host sees never fails over.** Reactions read the
   agents' reports and the stored records, never a host (Automatic
   reactions; `dnv-worker.md` AR1), so a primary whose agent answers the
   worker while hosts cannot reach its `nvme_tr_conf` address,
   or its controller node's data interface, stays the primary and stays
   listed in the discovery records ([D18]); the host's IO queues while a
-  standby's path is left, and fails at the kernel's reconnect limit
-  otherwise. The way out is the operator's: disabling the primary starts a
+  standby's path is left, and otherwise fails at the kernel's reconnect
+  limit on a host whose connect sets none, or waits with no error on a node
+  of the Kubernetes driver, whose connect never gives up (`csi.md` CSI14). The way out is the operator's: disabling the primary starts a
   failover with no threshold wait where an enabled standby with a zero
   health epoch exists (`dnv-worker.md` AR5), the operator enabling the
   cntlr again afterwards, since a disabled cntlr is never a candidate; with
@@ -7586,8 +7601,11 @@ that component's document and only pointed to here.
   exports in no order with its CN's teardown of its stack, which the CN
   learns of from its own node's syncup, and until that teardown it answers
   IO errors on its still-optimized path to every host still on it. The
-  case needs a pool with no failover candidate, whose hosts lose the old
-  primary's path either way; the replacement's path comes with its build.
+  case needs a pool with no failover candidate; the replacement's path
+  comes with its build. A node of the Kubernetes driver keeps the old
+  primary's path until the replacement's path shows the volume's namespace
+  (`csi.md` CSI15), so its IO meets those errors for the whole build, unless
+  the old path's reconnect is refused first.
 * **A DN's metadata area can refuse a migration the count allowed.** A
   migration's run is contiguous, and a release can commit before the DN
   frees the run, so an area whose free units lie in runs too short, or

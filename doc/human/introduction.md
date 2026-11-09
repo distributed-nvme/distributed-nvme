@@ -528,14 +528,20 @@ The limits a user must know:
   covers nearly the slice count times the pool's block size, and `fstrim`
   can report success and free nothing. These sizes are read
   from the kernel's source, not measured.
-- A mount on a Kubernetes node does not survive the loss of its last path
-  past the kernel's reconnect limit of 600 s (measured 615 s with refused
-  connects, 809 s with dropped packets), nor a cntlr replacement on a pool
-  of one cntlr: the node plugin connects with the kernel's defaults, and
-  when the last controller of a subsystem is gone the kernel deletes it, the
-  mount keeps the dead multipath device, and a later connect makes a new one
-  that the mount does not follow, until the pod that uses it, the Kubernetes
-  unit of one or more containers, is deleted and made again.
+- A mount on a Kubernetes node survives an outage of every path, however
+  long, since the node plugin's connect never gives up reconnecting, and a
+  cntlr replacement on a pool of one cntlr while the old path lasts until
+  the new one has joined, since the plugin keeps the old path until then.
+  The cost is that IO to a volume none of whose cntlrs comes back waits for
+  ever: a pod blocked in it cannot be stopped until the operator runs
+  `nvme disconnect -n` with the volume's subsystem NQN on the node. A path
+  whose reconnect a cntlr refuses with "do not retry" still ends for good,
+  as when a controller node comes back holding other volumes' cntlrs before
+  the volume's; when the last controller of a subsystem is gone the kernel
+  deletes it, the mount keeps the dead multipath device, and a later connect
+  makes a new one that the mount does not follow, until the pod that uses
+  it, the Kubernetes unit of one or more containers, is deleted and made
+  again.
 - A fault that only a host sees never fails over: the worker reads the
   agents' reports and the stored records, never a host, so a primary whose
   agent answers while hosts cannot reach its NVMe/TCP address stays the

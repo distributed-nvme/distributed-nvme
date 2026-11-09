@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -197,12 +198,40 @@ func (h *nvmeHost) run(ctx context.Context, args ...string) (string, error) {
 	return stdout, nil
 }
 
-// connect makes one path: the node's own identity and the kernel's default
-// settings (csi.md CSI14). A path that is already there is not an error.
+// nsDevicePattern is a namespace device the kernel shows under a
+// controller's sysfs directory: nvme<S>c<C>n<N> for a path of a multipath
+// namespace, nvme<C>n<N> without multipath.
+var nsDevicePattern = regexp.MustCompile(`^nvme[0-9]+(c[0-9]+)?n[0-9]+$`)
+
+// showsNamespace reports whether the kernel shows a namespace under one
+// controller, which a connect's scan adds only after the connect returns;
+// a listing that fails reads as no.
+func (h *nvmeHost) showsNamespace(ctx context.Context, name string) bool {
+	entries, err := h.oc.ReadDir(ctx, path.Join(sysClassNvme, name))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if nsDevicePattern.MatchString(e) {
+			return true
+		}
+	}
+	return false
+}
+
+// ctrlLossTmoNever is nvme-cli's --ctrl-loss-tmo for a reconnect that never
+// gives up.
+const ctrlLossTmoNever = "-1"
+
+// connect makes one path: the node's own identity, a reconnect that never
+// gives up, as the agents' paths have (dnagent.md SH20), and the kernel's
+// defaults for the rest (csi.md CSI14). A path that is already there is not
+// an error.
 func (h *nvmeHost) connect(ctx context.Context, nqn string, ep endpoint) error {
 	_, err := h.run(ctx, "connect", "-t", trTypeTcp,
 		"-a", ep.trAddr, "-s", ep.trSvcId, "-n", nqn,
-		"--hostnqn", h.id.hostNqn, "--hostid", h.id.hostId)
+		"--hostnqn", h.id.hostNqn, "--hostid", h.id.hostId,
+		"--ctrl-loss-tmo", ctrlLossTmoNever)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "already") {
 		return nil
 	}

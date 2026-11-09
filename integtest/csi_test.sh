@@ -937,6 +937,21 @@ subsys_nqns() {
 	return 0
 }
 
+# loss_tmos <nqn prefix> prints the distinct controller-loss timeouts of the
+# controllers to the subsystems of one NQN prefix, "off" for a reconnect
+# without end, or nothing when there is none.
+loss_tmos() {
+	local ctrl nqn
+	for ctrl in /sys/class/nvme/nvme*; do
+		[ -e "$ctrl/subsysnqn" ] || continue
+		nqn=$(cat "$ctrl/subsysnqn" 2>/dev/null) || continue
+		case "$nqn" in
+		"$1"*) cat "$ctrl/ctrl_loss_tmo" 2>/dev/null ;;
+		esac
+	done | sort -u
+	return 0
+}
+
 # disconnect_discovery drops the discovery controllers pointing at one cdc
 # address, by device: every discovery controller shares one NQN.
 disconnect_discovery() { # <traddr>
@@ -2431,6 +2446,10 @@ case_volume() {
 	stage 02 "the pod on host1 reads the pattern back"
 	run_pod r1 v0 1 Filesystem "$(check_fs_script)" /tmp/marker
 	assert_eq "$(kc_exec r1 cat /tmp/check)" "/data/pattern: OK" "host1 reads host0's pattern"
+	# The node plugin's paths reconnect without end (csi.md CSI14): the
+	# kernel shows the controller-loss timeout of each as "off".
+	assert_eq "$(helper_host 1 loss_tmos "$NQN_CSI:")" off \
+		"host1's paths to the volume reconnect without end"
 	delete_pod r1
 
 	stage 03 "a raw block claim, written and read through the device"

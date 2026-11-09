@@ -42,6 +42,7 @@ type fakeNode struct {
 	logFail  map[string]bool       // cdcs whose log read fails
 	discFail map[string]bool       // cdcs a discovery connect fails to
 	refuse   map[string]int        // endpoint -> connects still refused
+	noNs     map[string]bool       // endpoints whose paths show no namespace yet
 	sizes    map[string]uint64     // blockdev --getsize64 per device
 	mountErr bool                  // a mount of a device fails
 	calls    []string              // every command, joined
@@ -76,6 +77,7 @@ func newFakeNode() *fakeNode {
 		logFail:  map[string]bool{},
 		discFail: map[string]bool{},
 		refuse:   map[string]int{},
+		noNs:     map[string]bool{},
 		sizes:    map[string]uint64{},
 		statLine: "4096 1000 500 400 100 50",
 	}
@@ -225,6 +227,20 @@ func (f *fakeNode) client() common.OsClient {
 			defer f.mu.Unlock()
 			if path == sysClassNvme {
 				return f.ctrlNames(), nil
+			}
+			if name, ok := strings.CutPrefix(path, sysClassNvme+"/"); ok {
+				c, ok := f.ctrls[name]
+				if !ok {
+					return nil, notExist(path)
+				}
+				entries := []string{"address", "state", "subsysnqn"}
+				// A path of a volume's subsystem shows its namespace once
+				// the kernel's scan has run, which noNs holds back.
+				if _, vol := f.uuidOf[c.subNqn]; vol && !f.noNs[c.key()] {
+					entries = append(entries,
+						"nvme0c"+strings.TrimPrefix(name, "nvme")+"n1")
+				}
+				return entries, nil
 			}
 			if f.dirs[path] {
 				return nil, nil
@@ -415,6 +431,16 @@ func newTestNode(t *testing.T) (*node, *fakeNode) {
 		deviceWait: 3 * time.Second,
 	}
 	return n, f
+}
+
+// syncDrained runs one follower sync and waits for the path drops it began,
+// which run outside the follower's lock.
+func syncDrained(ctx context.Context, n *node) error {
+	err := n.follow.sync(ctx)
+	if werr := n.follow.waitDrops(ctx, ""); werr != nil {
+		return werr
+	}
+	return err
 }
 
 func mustEndpoint(s string) endpoint {
@@ -712,7 +738,7 @@ func TestFollowerFollowsTheCdc(t *testing.T) {
 		{subNqn: nqn, ep: mustEndpoint(fakeCn2)},
 	}
 	f.mu.Unlock()
-	if err := n.follow.sync(ctx); err != nil {
+	if err := syncDrained(ctx, n); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn1+" "+fakeCn2 {
@@ -724,14 +750,14 @@ func TestFollowerFollowsTheCdc(t *testing.T) {
 	f.logs[fakeCdcA] = []logEntry{{subNqn: nqn, ep: mustEndpoint(fakeCn2)}}
 	f.logFail[fakeCdcA] = true
 	f.mu.Unlock()
-	_ = n.follow.sync(ctx)
+	_ = syncDrained(ctx, n)
 	if got := f.paths(nqn); len(got) != 2 {
 		t.Errorf("paths %v after an unreadable log, want both kept", got)
 	}
 	f.mu.Lock()
 	f.logFail[fakeCdcA] = false
 	f.mu.Unlock()
-	if err := n.follow.sync(ctx); err != nil {
+	if err := syncDrained(ctx, n); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn2 {
@@ -802,14 +828,14 @@ func TestFollowerRecovers(t *testing.T) {
 	}
 	// The second cdc cannot be read: the new cntlr is connected, and cn1,
 	// which the readable cdc no longer lists, keeps its path.
-	_ = n.follow.sync(ctx)
+	_ = syncDrained(ctx, n)
 	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0+" "+fakeCn1+" "+fakeCn2 {
 		t.Errorf("paths %v while a configured cdc is unread, want all three kept", got)
 	}
 	f.mu.Lock()
 	f.logFail[fakeCdcB] = false
 	f.mu.Unlock()
-	if err := n.follow.sync(ctx); err != nil {
+	if err := syncDrained(ctx, n); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0+" "+fakeCn2 {
@@ -860,7 +886,7 @@ func TestFollowerSplitRangesAcrossARestart(t *testing.T) {
 	if err := n.follow.recover(ctx); err != nil {
 		t.Fatal(err)
 	}
-	_ = n.follow.sync(ctx)
+	_ = syncDrained(ctx, n)
 	if got := f.paths(two); len(got) != 2 {
 		t.Errorf("paths %v of the volume the unread cdc lists, want both kept", got)
 	}
@@ -887,7 +913,7 @@ func TestFollowerHoldsDropsWithoutAnswer(t *testing.T) {
 	if len(n.follow.cdcs) != 0 {
 		t.Fatalf("cdcs %v, want none", n.follow.cdcs)
 	}
-	_ = n.follow.sync(ctx)
+	_ = syncDrained(ctx, n)
 	if got := f.paths(nqn); len(got) != 2 {
 		t.Errorf("paths %v after a sync with no cdc, want both kept", got)
 	}
@@ -899,7 +925,7 @@ func TestFollowerHoldsDropsWithoutAnswer(t *testing.T) {
 	n.follow.mu.Lock()
 	n.follow.cdcs[fakeCdcA] = mustEndpoint(fakeCdcA)
 	n.follow.mu.Unlock()
-	if err := n.follow.sync(ctx); err == nil {
+	if err := syncDrained(ctx, n); err == nil {
 		t.Error("a sync that reached no cdc answered no error")
 	}
 	if got := f.paths(nqn); len(got) != 2 {
@@ -950,7 +976,7 @@ func TestFollowerUnstageRacesStage(t *testing.T) {
 	})
 	wantCode(t, err, codes.OK, "unstage")
 	wantCode(t, <-done, codes.OK, "the stage that raced the unstage")
-	if err := n.follow.sync(ctx); err != nil {
+	if err := syncDrained(ctx, n); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if got := f.paths(otherNqn); len(got) != 2 {
@@ -987,7 +1013,7 @@ func TestFollowerOneCdcDown(t *testing.T) {
 	f.mu.Lock()
 	f.logs[fakeCdcA] = []logEntry{{subNqn: nqn, ep: mustEndpoint(fakeCn0)}}
 	f.mu.Unlock()
-	_ = n.follow.sync(ctx)
+	_ = syncDrained(ctx, n)
 	if got := f.paths(nqn); len(got) != 2 {
 		t.Errorf("paths %v while a cdc is down, want both kept", got)
 	}
@@ -995,7 +1021,7 @@ func TestFollowerOneCdcDown(t *testing.T) {
 	f.discFail[fakeCdcB] = false
 	f.logs[fakeCdcB] = f.logs[fakeCdcA]
 	f.mu.Unlock()
-	if err := n.follow.sync(ctx); err != nil {
+	if err := syncDrained(ctx, n); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn0 {
