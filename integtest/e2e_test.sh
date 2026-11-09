@@ -8175,7 +8175,8 @@ ctl_create_try() { # <args…>
 #   disk_info  the agent can measure --disk at all
 #   meta_info  ProbeHeader accepted the 4 KiB header for THIS cluster_id,
 #              dn_id and extent_size
-#   port_info  ProbePort found ports/<--nvmet-port-id> carrying the four
+#   port_info  the port probe (ProbePort on a converge, ProbePortState on a
+#              read) found ports/<--nvmet-port-id> carrying the four
 #              addr_* attributes this agent was launched with AND the three
 #              fixed ANA groups in their fixed states (probePort (agent/nvmet.go))
 # A dn_info of `null` (the agent has never been told about this dn) reads as

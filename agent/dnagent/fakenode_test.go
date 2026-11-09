@@ -1283,6 +1283,13 @@ func (f *fakeNode) cmdLn(args []string) (string, int) {
 	if _, ok := f.links[link]; ok {
 		return "", 1
 	}
+	// The kernel's ln fails with ENOENT when the link's directory is not
+	// there, as a port's subsystems directory is not while the port is
+	// absent.
+	if !f.dirs[link[:strings.LastIndex(link, "/")]] {
+		return "ln: failed to create symbolic link '" + link +
+			"': No such file or directory", 1
+	}
 	f.links[link] = target
 	return "", 0
 }
@@ -1362,6 +1369,45 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	}
 	dm.discards = append(dm.discards, strings.Join(args[:len(args)-1], " "))
 	return "", 0
+}
+
+// rebootKernel drops what a reboot of the node drops: every dm device with its
+// device number, the nvmet configfs tree below its three top directories,
+// and the nvme host connections with their sysfs entries. The disk's blocks
+// and the agent's local files stay.
+func (f *fakeNode) rebootKernel() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for name := range f.dms {
+		delete(f.devNo, "/dev/mapper/"+name)
+	}
+	f.dms = make(map[string]*fakeDm)
+	f.conns = make(map[string]*fakeConn)
+	keep := map[string]bool{
+		agent.NvmetRoot:                 true,
+		agent.NvmetRoot + "/subsystems": true,
+		agent.NvmetRoot + "/ports":      true,
+		agent.NvmetRoot + "/hosts":      true,
+	}
+	gone := func(path string) bool {
+		return (strings.HasPrefix(path, agent.NvmetRoot+"/") && !keep[path]) ||
+			strings.HasPrefix(path, "/sys/class/nvme")
+	}
+	for path := range f.dirs {
+		if gone(path) {
+			delete(f.dirs, path)
+		}
+	}
+	for path := range f.files {
+		if gone(path) {
+			delete(f.files, path)
+		}
+	}
+	for path := range f.links {
+		if gone(path) {
+			delete(f.links, path)
+		}
+	}
 }
 
 // stackSuspended reports whether name, or any dm device its live table maps

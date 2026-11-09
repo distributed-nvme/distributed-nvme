@@ -265,7 +265,7 @@ func (s *DnAgentServer) convergeSide(
 
 	// What to remove is derived by subtracting the desired state from what
 	// the node actually holds, never from memory of a past converge.
-	sweep := s.sweepSide(ctx, st, plan, true)
+	sweep := s.sweepSide(ctx, st, plan, true, nil)
 
 	state, metaWait := s.ensureSideDev(ctx, st, plan, info)
 	if !plan.wantDm {

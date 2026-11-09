@@ -58,11 +58,11 @@ func OkReply() *pb.AgentReply {
 // nothing zeroing it that is not a migration destination waiting for a free
 // run in the clone-metadata area (dnagent.md DN16), or, from a converge
 // alone, a side or clone-metadata record its pass could not free, which a
-// read never attempts (dnagent.md DN19); on a cn a piece of the
-// node's base state that the CN's background read probed absent, or an ANA
-// group it read in a state other than its fixed one on a port whose
-// transport attributes match, and a forced-start mark of a cntlr's request
-// that does not count as delivered (cnagent.md CN8, CN12, CN30). Each
+// read never attempts (dnagent.md DN19); on both roles what a background
+// read found absent that a re-sent Syncup* would build, or the node's port in
+// a state one would rewrite (dnagent.md SH31, DN16); and on a cn a
+// forced-start mark of a cntlr's request that does not count as delivered
+// (cnagent.md CN8, CN12, CN30). Each
 // arrives among the failures, rendered like an enumeration that did not
 // answer. One condition arrives among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background

@@ -4157,7 +4157,10 @@ with `ResStatus`:
   observation too old (`dnv-worker.md` HL7); set by *workers*, never by
   the agent itself.
 * `RES_STATUS_MISSING` — the agent has not created it, a build still to
-  come or a resource its pool's level suppresses (`cnagent.md` CN19); a
+  come or a resource its pool's level suppresses (`cnagent.md` CN19). A
+  row alone brings no new `Syncup*`: the worker re-sends one on a reply's
+  code, which a read's verdict sets only for the conditions each role
+  names (`dnagent.md` SH31, DN16; `cnagent.md` CN30). A
   clone's `clone_id_to_target` row also reads it while the node reads the
   clone's source as not connected, not live or with no namespace
   (`cnagent.md` CN18). The row's reason marks a suppressed row, and a
@@ -4645,8 +4648,8 @@ device is there, the next enumeration finds it.
   leftovers, at most `maxLeftoverNames` of them, and reports an
   enumeration that did not answer the same way — an answer the agent
   cannot trust cannot prove the node clean — as it does each role's
-  conditions that only a `Syncup*` cures (`dnagent.md` DN16; `cnagent.md`
-  CN30). The agent log carries the full list (`log.md`, Leftovers), so a
+  conditions that only a `Syncup*` cures (`dnagent.md` SH31, DN16;
+  `cnagent.md` CN30). The agent log carries the full list (`log.md`, Leftovers), so a
   lingering leftover is visible on every pass that finds it rather than
   once.
 

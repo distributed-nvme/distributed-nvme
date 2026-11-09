@@ -212,7 +212,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		// not destroy resources. Its observation carries the empty verdict
 		// dnVerdict gives such a DN.
 		if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) == nil {
-			sweep = s.sweepDn(ctx, st, true)
+			sweep = s.sweepDn(ctx, st, true, nil)
 		}
 		storeObs(s, ctx, &st.obs, dnInfos[key], sweep.Reply(),
 			st.req.Load().GetRevision())
@@ -601,7 +601,7 @@ func (s *DnAgentServer) syncupDn(
 
 	info := s.convergeDn(ctx, st)
 	s.dropRemovedSides(ctx, prev, req)
-	sweep := s.sweepDn(ctx, st, true)
+	sweep := s.sweepDn(ctx, st, true, nil)
 	reply := sweep.Reply()
 
 	// The observation is the reply's info and code. Its disk counts are

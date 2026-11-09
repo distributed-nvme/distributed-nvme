@@ -2054,7 +2054,7 @@ func (s *CnAgentServer) sweepCn(
 	ctx context.Context,
 	st *cnState,
 	remove bool,
-	redrive []baseRedrive,
+	redrive []agent.BaseRedrive,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
 	req := st.loadReq()
@@ -2152,7 +2152,7 @@ func (s *CnAgentServer) sweepCn(
 		}
 	}
 	for _, piece := range redrive {
-		res.Fail(piece.what, piece.err)
+		res.Fail(piece.What, piece.Err)
 	}
 	res.Log(ctx,
 		slog.Uint64("cluster_id", clusterId),

@@ -2,13 +2,16 @@ package dnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
 // ---------------------------------------------------------------------------
@@ -808,14 +811,18 @@ func (s *DnAgentServer) freeCloneMetaOf(
 // startup Reconcile.
 //
 // remove = false is the read-only verdict the side's background read takes
-// (SH29): same enumeration, same comparison, nothing touched — plus the one
-// comparison only the verdict makes (zeroingVerdict), taken before the result
-// is logged so the pass's one `sweep leftover` record carries it.
+// (SH29): same enumeration, same comparison, nothing touched — plus the two
+// comparisons only the verdict makes, zeroing that should run
+// (zeroingVerdict) and what the read's probe found absent that a re-sent
+// SyncupSide builds (absentVerdict, from read, the read's rows), taken before
+// the result is logged so the pass's one `sweep leftover` record carries
+// them. A converge passes no rows: it has just built what it could.
 func (s *DnAgentServer) sweepSide(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	remove bool,
+	read *pb.SideInfo,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
 	verdict := !remove
@@ -850,6 +857,7 @@ func (s *DnAgentServer) sweepSide(
 		reportChain(chain, res)
 		if verdict {
 			s.zeroingVerdict(ctx, st, plan, res)
+			s.absentVerdict(ctx, plan, read, res)
 		}
 		res.Log(ctx, sideIdAttrs(plan)...)
 		return res
@@ -1475,12 +1483,21 @@ func (s *DnAgentServer) dmMapsUnwanted(
 // again, zeroing
 // live data. Nor, while that side is not held, is a migration object of its
 // sp (fullyKnown below).
+//
+// redrive is what the read's probe found wrong of the base state in a way a
+// SyncupDn would cure (probeDn, SH31); each piece is a failure, so the worker
+// re-sends the SyncupDn. A converge's sweep passes none: it has just made the
+// base state, and its rows report what it could not.
 func (s *DnAgentServer) sweepDn(
 	ctx context.Context,
 	st *dnState,
 	remove bool,
+	redrive []agent.BaseRedrive,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
+	for _, piece := range redrive {
+		res.Fail(piece.What, piece.Err)
+	}
 	req := st.req.Load()
 	clusterId := req.GetClusterId()
 	dnId := req.GetDnId()
@@ -1727,11 +1744,12 @@ func (s *DnAgentServer) sweepDn(
 func (s *DnAgentServer) dnVerdict(
 	ctx context.Context,
 	st *dnState,
+	redrive []agent.BaseRedrive,
 ) *agent.SweepResult {
 	if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) != nil {
 		return &agent.SweepResult{}
 	}
-	return s.sweepDn(ctx, st, false)
+	return s.sweepDn(ctx, st, false, redrive)
 }
 
 // sideVerdict is the side-level comparison the side's background read takes
@@ -1741,9 +1759,13 @@ func (s *DnAgentServer) dnVerdict(
 // side whose stored length to zero DN8's gate refuses: it converges nothing
 // and sweeps nothing, so naming leftovers for it would report objects it is
 // not allowed to remove.
+//
+// read is what the read's probe just found (probeSide); absentVerdict names
+// from it what a re-sent SyncupSide builds.
 func (s *DnAgentServer) sideVerdict(
 	ctx context.Context,
 	st *sideState,
+	read *pb.SideInfo,
 ) *agent.SweepResult {
 	req := st.req.Load()
 	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
@@ -1758,11 +1780,11 @@ func (s *DnAgentServer) sideVerdict(
 		return &agent.SweepResult{}
 	}
 	plan := newSidePlan(s.nf, req, extentSize)
-	return s.sweepSide(ctx, st, plan, false)
+	return s.sweepSide(ctx, st, plan, false, read)
 }
 
-// zeroingVerdict is the one comparison a side's verdict makes beyond the
-// sweep's: zeroing that should be running and is not. A record this node's
+// zeroingVerdict is one of the two comparisons a side's verdict makes beyond
+// the sweep's: zeroing that should be running and is not. A record this node's
 // confirmed table holds with bytes still to zero wants its DN9 goroutine,
 // at every level and on both sides of the provisioned gate, and only a
 // converge starts one. A converge that could not — the startup reconcile's
@@ -1812,3 +1834,80 @@ func (s *DnAgentServer) zeroingVerdict(
 	res.Fail(zeroingDetails(sideZeroedBytes(rec), sideZeroBytes(rec)),
 		fmt.Errorf("nothing is zeroing the side"))
 }
+
+// absentVerdict is the other comparison a side's verdict makes beyond the
+// sweep's: what the read found absent that a re-sent SyncupSide builds
+// (SH31, DN16). The worker re-sends a Syncup* on a Check reply's code alone, never
+// on its rows (dnv-worker.md RW4), so a side whose build stopped once — the
+// startup reconcile's while no read of the disk answered, a create that was
+// refused — would stay unbuilt with code zero until something else moved its
+// revision. It reads only the rows the read set, so nothing about the failed
+// build is remembered, and it names a row by its object, the failure text
+// "absent".
+//
+// The side device's row is MISSING for a record that is absent while the
+// side has not provisioned, and for a record that is there over a dm-linear
+// that is not; it is named only where AllocSide would hand a record back
+// (DiskMeta.SideAllocRefusal), so a refused allocation (no room, a record
+// that disagrees with the request, a disk not confirmed) is never re-sent for
+// ever. A provisioned side with no record reads ERROR, not MISSING, and its
+// row feeds leg repair instead. Above the side device every row is only set
+// once the side is ready (probeSide), and a MISSING one there is a dm device
+// or an export the converge builds: the per-CN dm-errors, dm-linears and
+// exports, and a migration source's linear and export. An export is named
+// too when its subsystem is there and a part its build makes is not
+// (exportPartAbsent); while the port itself is not there its row says so
+// (detailsPortMissing) and is not named, since only the DN's SyncupDn makes
+// the port. An object that is there but wrong, a dm table that
+// differs say, reads ERROR and is not named: its row feeds the side's health
+// epoch. A migration destination's two rows are left out: their converge
+// stops for reasons of its own (DN13) that a re-send repeats.
+func (s *DnAgentServer) absentVerdict(
+	ctx context.Context,
+	plan *sidePlan,
+	read *pb.SideInfo,
+	res *agent.SweepResult,
+) {
+	absent := func(row *pb.ResInfo) {
+		if row.GetStatus() == pb.ResStatus_RES_STATUS_MISSING {
+			res.Fail(row.GetResName(), errObjectAbsent)
+		}
+	}
+	exportAbsent := func(row *pb.ResInfo) {
+		if exportPartAbsent(row) {
+			res.Fail(row.GetResName(),
+				fmt.Errorf("%w: %s", errObjectAbsent, row.GetDetails()))
+			return
+		}
+		absent(row)
+	}
+	if read.GetSideDevInfo().GetStatus() ==
+		pb.ResStatus_RES_STATUS_MISSING &&
+		s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
+			plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) == nil {
+		absent(read.GetSideDevInfo())
+	}
+	for _, kind := range []struct {
+		rows  map[uint64]*pb.ResInfo
+		check func(*pb.ResInfo)
+	}{
+		{read.GetCnIdToDmError(), absent},
+		{read.GetCnIdToDmLinear(), absent},
+		{read.GetCnIdToNvmeof(), exportAbsent},
+	} {
+		cnIds := make([]uint64, 0, len(kind.rows))
+		for cnId := range kind.rows {
+			cnIds = append(cnIds, cnId)
+		}
+		slices.Sort(cnIds)
+		for _, cnId := range cnIds {
+			kind.check(kind.rows[cnId])
+		}
+	}
+	absent(read.GetMigrSrcInfo().GetDmLinearInfo())
+	exportAbsent(read.GetMigrSrcInfo().GetNvmeofInfo())
+}
+
+// errObjectAbsent is the failure absentVerdict records for each object it
+// names.
+var errObjectAbsent = errors.New("absent")

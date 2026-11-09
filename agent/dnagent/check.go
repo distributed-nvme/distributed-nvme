@@ -286,8 +286,8 @@ func (s *DnAgentServer) refreshDn(
 		return
 	}
 	revision := st.req.Load().GetRevision()
-	info := s.probeDn(ctx, st)
-	reply := s.dnVerdict(ctx, st).Reply()
+	info, redrive := s.probeDn(ctx, st)
+	reply := s.dnVerdict(ctx, st, redrive).Reply()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	writeObsLocked(s, ctx, &st.obs, info, reply, revision)
@@ -329,7 +329,7 @@ func (s *DnAgentServer) refreshSide(
 	defer st.tracker.Bind(ctx)()
 	revision := st.req.Load().GetRevision()
 	info := s.probeSide(ctx, st)
-	reply := s.sideVerdict(ctx, st).Reply()
+	reply := s.sideVerdict(ctx, st, info).Reply()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	writeObsLocked(s, ctx, &st.obs, info, reply, revision)

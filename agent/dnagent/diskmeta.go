@@ -955,33 +955,14 @@ func (d *DiskMeta) AllocSide(
 		return nil, err
 	}
 	if rec := findSide(d.table, spId, sideId); rec != nil {
-		if got := runTotal(rec); got != extCnt {
-			return nil, fmt.Errorf(
-				"allocated %d extents, want %d", got, extCnt)
-		}
-		if got := sideZeroBytes(rec); got != zeroBytes {
-			return nil, fmt.Errorf(
-				"allocated with zero_bytes %d, want %d", got, zeroBytes)
+		if err := sideRecordAgrees(rec, extCnt, zeroBytes); err != nil {
+			return nil, err
 		}
 		return rec, nil
 	}
-	if extCnt == 0 {
-		return nil, fmt.Errorf("ext_cnt is 0")
-	}
-	// The side conf gate (DN8) refuses both before a request is stored; these
-	// keep a record that could never finish, or that zeroes past its own
-	// extents, off the disk whatever the caller checked.
-	if zeroBytes == 0 {
-		return nil, fmt.Errorf("zero_bytes is 0")
-	}
-	if hi, sideBytes := bits.Mul64(
-		extCnt, d.hdr.GetExtentSize()); hi == 0 && zeroBytes > sideBytes {
-		return nil, fmt.Errorf(
-			"zero_bytes %d exceeds the side's %d bytes", zeroBytes, sideBytes)
-	}
-	runs, err := allocRuns(d.freeExtentMap(), d.extentCntLocked(), extCnt)
+	runs, err := d.planSideLocked(extCnt, zeroBytes)
 	if err != nil {
-		return nil, fmt.Errorf("allocating %d extents: %w", extCnt, err)
+		return nil, err
 	}
 	// zeroed_bytes is left 0 (the allocation step of dnagent.md DN9), which
 	// proto3 does not serialize, so "nothing zeroed yet" costs nothing in
@@ -1008,6 +989,80 @@ func (d *DiskMeta) AllocSide(
 	}
 	// The saved copy is the one the table now holds.
 	return findSide(d.table, spId, sideId), nil
+}
+
+// sideRecordAgrees is AllocSide's check of an existing record against the
+// request: its extent total and its length to zero are both fixed at
+// allocation (DN9).
+func sideRecordAgrees(
+	rec *pb.DnDiskTable_SideRecord,
+	extCnt uint64,
+	zeroBytes uint64,
+) error {
+	if got := runTotal(rec); got != extCnt {
+		return fmt.Errorf("allocated %d extents, want %d", got, extCnt)
+	}
+	if got := sideZeroBytes(rec); got != zeroBytes {
+		return fmt.Errorf(
+			"allocated with zero_bytes %d, want %d", got, zeroBytes)
+	}
+	return nil
+}
+
+// planSideLocked is AllocSide's decision for a side with no record: the runs
+// a new record would take, or why there is none. It writes nothing.
+func (d *DiskMeta) planSideLocked(
+	extCnt uint64,
+	zeroBytes uint64,
+) ([]*pb.DnDiskTable_ExtentRun, error) {
+	if extCnt == 0 {
+		return nil, fmt.Errorf("ext_cnt is 0")
+	}
+	// The side conf gate (DN8) refuses both before a request is stored; these
+	// keep a record that could never finish, or that zeroes past its own
+	// extents, off the disk whatever the caller checked.
+	if zeroBytes == 0 {
+		return nil, fmt.Errorf("zero_bytes is 0")
+	}
+	if hi, sideBytes := bits.Mul64(
+		extCnt, d.hdr.GetExtentSize()); hi == 0 && zeroBytes > sideBytes {
+		return nil, fmt.Errorf(
+			"zero_bytes %d exceeds the side's %d bytes", zeroBytes, sideBytes)
+	}
+	runs, err := allocRuns(d.freeExtentMap(), d.extentCntLocked(), extCnt)
+	if err != nil {
+		return nil, fmt.Errorf("allocating %d extents: %w", extCnt, err)
+	}
+	return runs, nil
+}
+
+// SideAllocRefusal is AllocSide's answer for a side, read without the
+// allocation: nil when AllocSide would return a record — the side's existing
+// one, whose extents and length to zero agree, or a new one it can allocate
+// — and the error AllocSide would return otherwise, an unreadable or
+// unconfirmed disk included. The side's verdict reads it to name a side whose
+// record a re-sent request would build, and no side a re-send cannot cure
+// (DN16).
+func (d *DiskMeta) SideAllocRefusal(
+	ctx context.Context,
+	spId uint64,
+	sideId uint64,
+	extCnt uint64,
+	zeroBytes uint64,
+) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.load(ctx); err != nil {
+		return err
+	}
+	if err := d.confirmedLocked(); err != nil {
+		return err
+	}
+	if rec := findSide(d.table, spId, sideId); rec != nil {
+		return sideRecordAgrees(rec, extCnt, zeroBytes)
+	}
+	_, err := d.planSideLocked(extCnt, zeroBytes)
+	return err
 }
 
 // SetSideZeroed advances a side's zeroed count to `to` once the batch of bytes

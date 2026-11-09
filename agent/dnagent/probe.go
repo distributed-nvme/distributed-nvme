@@ -18,10 +18,14 @@ import (
 // come from the rule its converge applies to what it reads (migrDstSeen,
 // DN13).
 
+// probeDn also returns what of the base state its read found wrong in a way a
+// SyncupDn's converge would cure (SH31): the port, by the rule both roles
+// share (agent.PortRedrive). A probe that did not answer proves nothing, and
+// the next read asks again.
 func (s *DnAgentServer) probeDn(
 	ctx context.Context,
 	st *dnState,
-) *pb.DnInfo {
+) (*pb.DnInfo, []agent.BaseRedrive) {
 	req := st.req.Load()
 	// A row made after the read is cancelled moves no epoch. The read holds
 	// only the node read lock, which the DN's next read may share before
@@ -48,17 +52,23 @@ func (s *DnAgentServer) probeDn(
 	// size as this probe leaves them.
 	s.addDiskCounts(info, req)
 
+	var redrive []agent.BaseRedrive
 	portName := fmt.Sprintf("%d", s.port.PortId)
-	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
+	portState, details, err := s.nvmet.ProbePortState(
+		ctx, s.port.PortId, s.port)
 	switch {
 	case err != nil:
 		info.PortInfo = t.Err(resKeyPort, portName, err.Error())
-	case !ok:
+	case portState != agent.PortOk:
 		info.PortInfo = t.Err(resKeyPort, portName, details)
+		if piece := agent.PortRedrive(
+			portName, portState, details); piece != nil {
+			redrive = append(redrive, *piece)
+		}
 	default:
 		info.PortInfo = t.Ok(resKeyPort, portName, "")
 	}
-	return info
+	return info, redrive
 }
 
 // addDiskCounts puts the disk counts (DN18) into info beside an OK meta row,
@@ -532,11 +542,21 @@ func (s *DnAgentServer) probeExport(
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
+	// ProbeNamespace reads the enable loosely, so a read that did not answer
+	// reads "not enabled"; the verdict names that part absent (SH31) only
+	// where a strict read answers it.
+	if state.Exists && !state.Enabled {
+		enabled, err := s.nvmet.NsEnabledStrict(ctx, ns.Nqn, ns.Nsid)
+		if err != nil {
+			return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		}
+		state.Enabled = enabled
+	}
 	switch {
 	case !state.Exists:
-		return pb.ResStatus_RES_STATUS_ERROR, "namespace missing"
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNsMissing
 	case !state.Enabled:
-		return pb.ResStatus_RES_STATUS_ERROR, "namespace not enabled"
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNsNotEnabled
 	case state.DevicePath != ns.DevicePath:
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
 			"device_path is %q, want %q", state.DevicePath, ns.DevicePath)
@@ -544,12 +564,43 @@ func (s *DnAgentServer) probeExport(
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
 			"ana_grpid is %d, want %d", state.AnaGrpId, ns.AnaGrpId)
 	}
-	linked, err := s.nvmet.PortLinked(ctx, s.port.PortId, ns.Nqn)
-	if err != nil {
+	linked, portThere, err := s.nvmet.PortLinkedState(
+		ctx, s.port.PortId, ns.Nqn)
+	switch {
+	case err != nil:
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
-	}
-	if !linked {
-		return pb.ResStatus_RES_STATUS_ERROR, "not linked to the port"
+	case !portThere:
+		// The DN's verdict names the port (SH31), and its SyncupDn makes it;
+		// a SyncupSide could only fail its link until then.
+		return pb.ResStatus_RES_STATUS_ERROR, detailsPortMissing
+	case !linked:
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNotLinked
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
+}
+
+// probeExport's details for an export whose subsystem is there while a part
+// the export's build makes is not: its namespace, the namespace's enable, or
+// the subsystem's link into a port that is there. A re-sent SyncupSide
+// builds each, so the side's verdict names them (exportPartAbsent,
+// absentVerdict). detailsPortMissing is the link's row while the port itself
+// is not there, which the side's verdict leaves to the DN's (SH31).
+const (
+	detailsNsMissing    = "namespace missing"
+	detailsNsNotEnabled = "namespace not enabled"
+	detailsNotLinked    = "not linked to the port"
+	detailsPortMissing  = "the port is not there"
+)
+
+// exportPartAbsent reports whether an export row is one of probeExport's
+// absent parts above.
+func exportPartAbsent(row *pb.ResInfo) bool {
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+		return false
+	}
+	switch row.GetDetails() {
+	case detailsNsMissing, detailsNsNotEnabled, detailsNotLinked:
+		return true
+	}
+	return false
 }

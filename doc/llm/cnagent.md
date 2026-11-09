@@ -3947,7 +3947,7 @@ per-resource outcome that cannot ride in a row, carried as
 reporting; CN20, CN30). A piece of the CN's base state — the port or one
 of its ANA groups — that a read of the CN reads absent, and that a
 `SyncupCn` would build, travels in both: the port row reads `ERROR`, and
-the verdict names it too (CN30), because the worker re-syncs on a reply's
+the verdict names it too (`dnagent.md` SH31), because the worker re-syncs on a reply's
 code and never on its rows. So does an ANA group that the read reads in a
 state other than its fixed one while the port's transport attributes
 match, which a `SyncupCn` would rewrite: the port row reads `ERROR` with
@@ -3991,36 +3991,13 @@ verdict never names. A listing partial for another cause can hide a
 leftover of this cntlr from one read.
 
 The node-level verdict of a CN's read also names what of the CN's base
-state the read's own probe read wrong in a way a `SyncupCn` would cure
-(CN5): a missing port directory or ANA group, and an ANA group whose
-"ana_state" the probe read as other than the group's fixed one on a port
-whose transport attributes all match: nvmet takes an "ana_state" write
-whatever is linked to the port, and `EnsurePort` rewrites a state that
-differs. Each is rendered the way CN20 renders an enumeration that did
-not answer — "enumeration failed" naming the piece as absent with the
-probe's own words after it, or a group's state as differing from the
-wanted one — and the log record lists it among its failures. Nothing
-else re-drives them — the worker re-syncs on a reply's code, never on a
-row — and a read cannot build or rewrite them itself (CN23). A probe that
-did not answer names nothing, and the next read asks again. Nor does a
-port transport attribute that differs, which its row alone reports:
-nvmet refuses every transport-attribute write while a subsystem is linked
-to the port (EACCES), so while one is every re-send would fail on that
-attribute the same way, and `EnsurePort` stops at it, before the groups.
-The probe, which reads the attributes first, does not read the groups of
-such a port either, so a group state that differs beside it is not named.
-The port is read with strict reads for this
-(`agent.Nvmet.ProbePortState`), so a group or an attribute whose read did
-not answer is an `ERROR` naming the read, not a missing group or a
-mismatch. The `SyncupCn` reply does not carry any of them: its converge
-has just tried to build the base state, and its rows say how that went.
-Nor does the observation that converge stores, or the startup
-reconcile's, so the round after it answers without them, and the read
-that round starts names them again. So a node whose base state can never
-be built — a port `mkdir` that is refused every time, say — is re-sent
-its `SyncupCn` on each round that answers from a read, and each attempt
-is logged, as a disk node whose disk identity stays unconfirmed is
-(`dnagent.md` DN16).
+state (CN5) the read's own probe read wrong in a way a `SyncupCn` would
+cure: the node's nvmet port, a missing port directory or ANA group and an
+ANA group in a state other than its fixed one, under the rule both roles
+share (`dnagent.md` SH31). That rule also says how each is rendered, why
+a probe that did not answer and a port transport attribute that differs
+name nothing, and why neither the `SyncupCn` reply nor the observation a
+converge stores carries them.
 
 A cntlr's read-only verdict also names each md member that its
 converge's member reconciliation would put
@@ -4712,18 +4689,19 @@ stores instead is CN23's.
   answers from a read: a read of the CN that reads absent a piece of its
   base state that a `SyncupCn` would build, or an ANA group in a state
   other than its fixed one on a port whose transport attributes match,
-  names it in its verdict (CN30), so while a port `mkdir` or
+  names it in its verdict (`dnagent.md` SH31), so while a port `mkdir` or
   "ana_state" write keeps being refused, the worker re-sends the
   `SyncupCn` on each such round and each attempt is logged — the agent's
   leftover record of each read names what the read read, and each refused
   command or write is logged as it fails — as for a disk node whose disk
   identity stays unconfirmed. The converge's own observation does not
-  name the piece (CN30), so the round after each re-send the agent
+  name the piece (`dnagent.md` SH31), so the round after each re-send the agent
   accepts answers without it and starts the read that names it again:
   the piece brings a re-send at most every second round (`dnv-worker.md`
   RW4), and on each round while the agent's saves fail (CN30). The
   verdict does not
-  re-drive a port transport attribute that differs (CN30): its row reads
+  re-drive a port transport attribute that differs (`dnagent.md` SH31):
+  its row reads
   `ERROR`, and while a subsystem is linked to the port it waits for an
   operator, since nvmet refuses every transport-attribute write then; one
   that differs while none is linked, which a re-sent `SyncupCn` would

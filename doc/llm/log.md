@@ -281,13 +281,12 @@ logs for the same thing.
   the dn, a disk whose identity is not confirmed or a side with bytes
   still to zero and no zeroing goroutine that is not a migration
   destination waiting for a free run in the clone-metadata area
-  (`dnagent.md` DN16), or, on the cn, a piece of the node's base state
-  that the CN's background read found absent, or an ANA group it found in
-  a state other than its fixed one, in each case only where a `SyncupCn`
-  would build or rewrite it, or, on a cntlr, a forced-start mark of the
-  request the agent holds while that request does not count as delivered
-  (`cnagent.md` CN8, CN30) — each rendered "what:
-  error" and joined by "; ".
+  (`dnagent.md` DN16), or, on either role, what a background read found
+  absent that a re-sent `Syncup*` would build, or the node's nvmet port in
+  a state one would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a
+  forced-start mark of the request the agent holds while that request
+  does not count as delivered (`cnagent.md` CN8, CN30) — each rendered
+  "what: error" and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`
   (the one the request carried) and `details` (the agent's own leftover

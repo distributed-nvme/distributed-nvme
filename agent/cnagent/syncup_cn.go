@@ -2,7 +2,6 @@ package cnagent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -405,62 +404,40 @@ func (s *CnAgentServer) dropCntlrState(
 // CN28 — the node-level probe map
 // ---------------------------------------------------------------------------
 
-// errBaseStateAbsent and errAnaStateDiffers are the failures the node-level
-// verdict records for what the read's probe read of the base state that a
-// SyncupCn would cure (CN30): a piece of it absent, or an ANA group of the
-// port in a state other than its fixed one.
-var (
-	errBaseStateAbsent = errors.New("absent")
-	errAnaStateDiffers = errors.New("differs")
-)
-
-// baseRedrive is one piece of the base state (architecture.md, Controller
-// node, common) that a probe read absent, or an ANA group it read in a state
-// other than its fixed one, in the words the node-level verdict reports it
-// with (sweepCn).
-type baseRedrive struct {
-	what string
-	err  error
-}
-
 // probeCn reads the base state (architecture.md, Controller node, common) into
 // its rows, and also returns what of it the probe read wrong in a way a
-// SyncupCn's converge would cure (CN30): an absent port directory or ANA
-// group, which EnsurePort makes; and an ANA group in a state other than its
-// fixed one on a port whose transport attributes all match, which EnsurePort
-// rewrites, since nvmet takes an ana_state write whatever is linked to the
-// port. A probe that did not answer proves nothing, and the next read asks
-// again. A transport attribute of the port that differs is left to its row
-// and not returned: nvmet refuses to rewrite it while a subsystem is linked
-// to the port (EACCES), so that while one is every re-send would fail on it
-// the same way.
+// SyncupCn's converge would cure (dnagent.md SH31): an absent port
+// directory or ANA group, which EnsurePort makes; and an ANA group in a state
+// other than its fixed one on a port whose transport attributes all match,
+// which EnsurePort rewrites, since nvmet takes an ana_state write whatever is
+// linked to the port. A probe that did not answer proves nothing, and the
+// next read asks again. A transport attribute of the port that differs is
+// left to its row and not returned: nvmet refuses to rewrite it while a
+// subsystem is linked to the port (EACCES), so that while one is every
+// re-send would fail on it the same way.
 func (s *CnAgentServer) probeCn(
 	ctx context.Context,
 	st *cnState,
-) (*pb.CnInfo, []baseRedrive) {
+) (*pb.CnInfo, []agent.BaseRedrive) {
 	// A row made after the read is cancelled moves no epoch
 	// (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
 	info := &pb.CnInfo{}
-	var redrive []baseRedrive
+	var redrive []agent.BaseRedrive
 	portName := fmt.Sprintf("%d", s.port.PortId)
 	portState, details, err := s.nvmet.ProbePortState(
 		ctx, s.port.PortId, s.port)
 	switch {
 	case err != nil:
 		info.PortInfo = t.Err(resKeyPort, portName, err.Error())
-	case portState == agent.PortAbsent:
-		info.PortInfo = t.Err(resKeyPort, portName, details)
-		redrive = append(redrive, baseRedrive{"nvmet port " + portName,
-			fmt.Errorf("%w: %s", errBaseStateAbsent, details)})
-	case portState == agent.PortAnaStateMismatch:
-		info.PortInfo = t.Err(resKeyPort, portName, details)
-		redrive = append(redrive, baseRedrive{"nvmet port " + portName,
-			fmt.Errorf("%w: %s", errAnaStateDiffers, details)})
 	case portState != agent.PortOk:
-		// A transport attribute that differs (PortAttrMismatch): not
-		// re-driven, see above.
 		info.PortInfo = t.Err(resKeyPort, portName, details)
+		// The shared rule of dnagent.md SH31: a transport attribute that
+		// differs (PortAttrMismatch) is not re-driven, see above.
+		if piece := agent.PortRedrive(
+			portName, portState, details); piece != nil {
+			redrive = append(redrive, *piece)
+		}
 	default:
 		info.PortInfo = t.Ok(resKeyPort, portName, "")
 	}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -175,6 +176,39 @@ func (n *Nvmet) ProbePort(
 ) (bool, string, error) {
 	state, details, err := n.probePort(ctx, portId, conf, n.readAttr)
 	return state == PortOk, details, err
+}
+
+// BaseRedrive is one piece of a node's base state that a read's probe read
+// wrong in a way a node-level Syncup* would cure, in the words the read's
+// verdict names it with (dnagent.md SH31): an absent port or ANA group, or an
+// ANA group in a state other than its fixed one. Both roles' verdicts record
+// each as a failure, so the worker re-sends the node's Syncup*.
+type BaseRedrive struct {
+	What string
+	Err  error
+}
+
+// ErrBaseStateAbsent and ErrAnaStateDiffers are the two failures a
+// BaseRedrive carries.
+var (
+	ErrBaseStateAbsent = errors.New("absent")
+	ErrAnaStateDiffers = errors.New("differs")
+)
+
+// PortRedrive is the shared rule of SH31 for the port: the BaseRedrive a probe
+// state calls for, or nil. A transport attribute that differs is left to the
+// row, since nvmet refuses to rewrite one while a subsystem is linked, and a
+// read that did not answer proves nothing.
+func PortRedrive(portName string, state PortState, details string) *BaseRedrive {
+	switch state {
+	case PortAbsent:
+		return &BaseRedrive{"nvmet port " + portName,
+			fmt.Errorf("%w: %s", ErrBaseStateAbsent, details)}
+	case PortAnaStateMismatch:
+		return &BaseRedrive{"nvmet port " + portName,
+			fmt.Errorf("%w: %s", ErrAnaStateDiffers, details)}
+	}
+	return nil
 }
 
 // PortState is what ProbePortState found of a port.
@@ -817,6 +851,36 @@ func (n *Nvmet) PortLinked(
 		return false, err
 	}
 	return contains(linked, nqn), nil
+}
+
+// PortLinkedState is PortLinked for a probe that must tell a port that is
+// not there from a subsystem not linked to it: portThere is false when the
+// port's subsystems directory is not there, and linked is then false too.
+func (n *Nvmet) PortLinkedState(
+	ctx context.Context,
+	portId int,
+	nqn string,
+) (linked bool, portThere bool, err error) {
+	links, ok, err := n.listDir(ctx, n.PortPath(portId)+"/subsystems")
+	if err != nil {
+		return false, false, err
+	}
+	return contains(links, nqn), ok, nil
+}
+
+// NsEnabledStrict reads a namespace's enable under the strict rule
+// (readAttrStrict): a read that did not answer is an error, never "not
+// enabled", as ProbeNamespace's loose read takes it.
+func (n *Nvmet) NsEnabledStrict(
+	ctx context.Context,
+	nqn string,
+	nsid int,
+) (bool, error) {
+	enable, _, err := n.readAttrStrict(ctx, n.NsPath(nqn, nsid)+"/enable")
+	if err != nil {
+		return false, err
+	}
+	return enable == "1", nil
 }
 
 func (n *Nvmet) EnsurePortLink(

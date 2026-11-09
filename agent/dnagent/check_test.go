@@ -411,10 +411,10 @@ func TestGetSideInfoAnswersAsACheckRound(t *testing.T) {
 			st := srv.getSide(key)
 
 			node.Reset()
-			srv.probeSide(ctx, st)
+			info := srv.probeSide(ctx, st)
 			want := node.Calls()
 			node.Reset()
-			srv.sideVerdict(ctx, st)
+			srv.sideVerdict(ctx, st, info)
 			want = append(want, node.Calls()...)
 			node.Reset()
 			srv.refreshSide(ctx, key, st)
