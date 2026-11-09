@@ -90,6 +90,9 @@ type repFix struct {
 	ctx                   context.Context
 	mdDev                 string
 	leg1, leg2, newLegDev string
+	// newLegDown is set by newLegUnreachable: the new leg's connect is
+	// refused, so it has no controller (withoutNewLegName).
+	newLegDown bool
 }
 
 // newRepFix converges the pool with no repair at revision 2, its arrays
@@ -146,7 +149,33 @@ func (f *repFix) read(
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: revision,
 	}, nil)
+	if f.newLegDown {
+		return info, f.withoutNewLegName(reply.GetAgentReply())
+	}
 	return info, reply.GetAgentReply()
+}
+
+// withoutNewLegName takes the new leg's own name off a verdict. A new leg
+// whose connect is refused has no controller, and a read names it so the
+// worker re-sends the converge that connects it (CN30), which
+// TestACheckRoundNamesALegSideWithNoController pins; the repair tests judge
+// the rest of the verdict.
+func (f *repFix) withoutNewLegName(reply *pb.AgentReply) *pb.AgentReply {
+	prefix := "enumeration failed: " + legNqn(f.srv, repNewLeg) + " at "
+	var kept []string
+	for _, part := range strings.Split(reply.GetDetails(), "; ") {
+		if strings.HasPrefix(part, prefix) &&
+			strings.HasSuffix(part, ": "+errNoController.Error()) {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) == 0 || (len(kept) == 1 && kept[0] == "") {
+		return &pb.AgentReply{}
+	}
+	return &pb.AgentReply{
+		Code: reply.GetCode(), Details: strings.Join(kept, "; "),
+	}
 }
 
 // mdCalls are the mdadm commands the node ran against the data group's
@@ -201,6 +230,7 @@ func (f *repFix) badLegDead() { f.legDead(testDataLeg, testIp, testSvcId) }
 // newLegUnreachable makes every connect to the new leg's side fail, so its
 // leg is not available (CN10, CN12).
 func (f *repFix) newLegUnreachable() {
+	f.newLegDown = true
 	f.node.mu.Lock()
 	defer f.node.mu.Unlock()
 	f.node.failCmdAlways["--nqn "+legNqn(f.srv, repNewLeg)+" --hostnqn"] =

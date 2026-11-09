@@ -30,21 +30,32 @@ import (
 // id sweeps (the activation sweep and the sweep after a failed delete) —
 // never from here (CN29).
 
+// legSide is one side of a leg, by its leg's subsystem NQN: a side with no
+// controller that a cntlr's verdict names (probeCntlr, sweepCntlr).
+type legSide struct {
+	nqn  string
+	side *pb.Side
+}
+
 // probeCntlr writes the rows of one read of the cntlr from plan, whose
 // reading readCntlr took (plan.rd, plan.walk, plan.mdWalks), and beside them
 // what it reads of each group's running array (reportGrpReading). It also
 // returns the dm names of the md members the converge would put back, add or
 // remove for a repair, which the verdict names (putBackNames, cnagent.md
 // CN30): they are read from the arrays and the leg rows the probe has just
-// read, and from a lookup of each such member's leg in the call's walk.
+// read, and from a lookup of each such member's leg in the call's walk. And
+// it returns each provisioned side of a wanted leg that the converge would
+// connect, the leg's lookup having answered (sidesToConnect, CN30), which the
+// verdict names too.
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
-) (*pb.CntlrInfo, []string) {
+) (*pb.CntlrInfo, []string, []legSide) {
 	t := st.tracker
 	info := newCntlrInfo()
 	var putBack []string
+	var noCtrl []legSide
 
 	// Legs — the wrapper table plus the CN11 prober outcome on a primary,
 	// transport liveness and ana_state per desired side on a standby. A
@@ -52,7 +63,7 @@ func (s *CnAgentServer) probeCntlr(
 	// take serves a standby's leg row too.
 	for _, lp := range plan.legs {
 		key := resKeyOf(resKeyLegFmt, lp.legId)
-		view := s.legPathRows(ctx, st, plan, lp, nil, info)
+		view, lookupErr := s.legPathRows(ctx, st, plan, lp, nil, info)
 		// CN19's suppression is evaluated first and wins over [D15]'s deferral:
 		// the operator has said the resource must not exist, which is a
 		// stronger statement than "it is coming".
@@ -75,7 +86,20 @@ func (s *CnAgentServer) probeCntlr(
 				key, lp.name, detailsDisconnectInFlight(lp.nqn))
 			continue
 		}
-		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, view)
+		// The sides the converge would connect (CN30), from one lookup of the
+		// leg; a lookup that did not answer names none. A standby's leg row
+		// reads the same lookup and says so; a primary's row stays its
+		// prober's (legInfo).
+		if view == nil && lookupErr == nil {
+			view, lookupErr = s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
+		}
+		if lookupErr == nil {
+			for _, side := range sidesToConnect(lp, view) {
+				noCtrl = append(noCtrl, legSide{nqn: lp.nqn, side: side})
+			}
+		}
+		info.LegIdToLeg[lp.legId] = s.legInfo(
+			ctx, st, plan, lp, view, lookupErr)
 	}
 
 	// Groups — the reading's md walk serves all of them and the concat rows
@@ -243,7 +267,7 @@ func (s *CnAgentServer) probeCntlr(
 		// CntlrInfo for the same stored request (architecture.md, Check
 		// streams: show_info always fills the complete current info).
 		s.reportSuppressed(st, plan, info)
-		return info, putBack
+		return info, putBack, noCtrl
 	}
 
 	// Transfers.
@@ -298,7 +322,7 @@ func (s *CnAgentServer) probeCntlr(
 				nsResName(ssp.nqn, np.nsIdx), nsStatus, nsDetails)
 		}
 	}
-	return info, putBack
+	return info, putBack, noCtrl
 }
 
 // cloneSourceLive reports whether every configured source endpoint has a live

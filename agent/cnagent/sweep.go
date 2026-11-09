@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -1670,12 +1671,18 @@ func (s *CnAgentServer) unownedSrcNqns(
 // how that went. The verdict also names each forced-start mark of a request
 // that does not count as delivered (cntlrState.reqFromRpc; storedMarks;
 // CN12, CN30).
+//
+// noCtrl are the sides of wanted legs with no controller that the converge
+// would connect (sidesToConnect, CN30), named as failures for the same
+// reason: the kernel deletes a controller whose reconnect nvmet refused for
+// good, and only a converge connects it again. A converge passes none.
 func (s *CnAgentServer) sweepCntlr(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	remove bool,
 	putBack []string,
+	noCtrl []legSide,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
 	actual := s.enumerateCn(
@@ -1765,12 +1772,21 @@ func (s *CnAgentServer) sweepCntlr(
 	for _, name := range putBack {
 		res.Add(agent.LeftoverKindMdMember, name)
 	}
+	for _, ls := range noCtrl {
+		tr := ls.side.GetNvmeTrConf()
+		res.Fail(ls.nqn+" at "+tr.GetTrAddr()+":"+tr.GetTrSvcId(),
+			errNoController)
+	}
 	if !converge && !st.reqFromRpc {
 		storedMarks(plan, res)
 	}
 	res.Log(ctx, s.cntlrIdAttrs(plan)...)
 	return res
 }
+
+// errNoController is the failure a cntlr's verdict records for a side of a
+// wanted leg that the converge would connect (sweepCntlr).
+var errNoController = errors.New("no controller")
 
 // wantedProbers is the set of legs the CN11 health prober still covers: a
 // standby runs none, a level at or above SP_LEVEL_NO_SIDE runs none, and a

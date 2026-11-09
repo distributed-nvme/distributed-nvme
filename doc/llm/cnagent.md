@@ -944,6 +944,15 @@ attempt mints its own trace id
 (CN2) and is a whole converge, which decides afresh whether any of them
 still holds; the first converge that finds none stops the retry.
 
+Only a converge connects a side, and the worker brings one on a reply's
+code or a new revision, never on a row (`dnv-worker.md` RW4). A
+controller the kernel deleted — after a reconnect nvmet refused with DNR,
+or lost to a CN reboot — therefore stays gone until a converge runs, so a cntlr's read names each side the converge would
+connect (CN30): the provisioned sides of a wanted leg that the leg's
+subsystem holds no controller for, in any state, where no controller's
+address read failed to answer (`sidesToConnect`, the connect step's own
+test).
+
 **Dead paths**: a controller of the leg NQN whose traddr and trsvcid
 match no desired side (the source side after `FinishMigration` — its
 controller died with DNR and will never reconnect) is disconnected by
@@ -3812,10 +3821,10 @@ The rows, each with its `res_name` and what its probe checks:
   the connect returns. A converge's rows read the lookup its connect step
   made; for a leg whose connect step failed they look the leg up again,
   so they say what the node holds rather than the connect's error. In a
-  read they come first in each leg's turn, and a standby's leg row reads
-  their lookup, so a primary's read looks up only the legs with two
-  sides, and a standby's read each leg once, or twice
-  where that lookup did not answer. The
+  read they come first in each leg's turn, and the read's other uses of
+  the leg — the sides it names with no controller (CN30) and a standby's
+  leg row — read their lookup, so a read looks up each wanted leg once, on
+  either role. The
   worker's cutover reads the primary's row of a migration's destination
   side (`dnv-worker.md` RW18), and no health rule judges these rows
   (`dnv-worker.md` HL2). Reason for the rows' scope: the primary's leg
@@ -3999,6 +4008,21 @@ a probe that did not answer and a port transport attribute that differs
 name nothing, and why neither the `SyncupCn` reply nor the observation a
 converge stores carries them.
 
+A cntlr's read-only verdict also names each side its converge would
+connect (CN10): each provisioned side of a wanted leg that the leg's
+subsystem holds no controller for, as "enumeration failed" with the leg's
+subsystem NQN, " at " and the side's address, then "no controller". It
+reads them from one lookup of each wanted leg in the read's walk, a
+primary's legs included; a lookup that did not answer, or a controller
+whose address read did not answer, names none. A standby's leg row reads
+the same lookup and says so; a primary's leg row stays its prober's
+(CN11). A controller in any state is not named,
+since one that is connecting reconnects by itself, and neither is a side
+not provisioned, a leg the level suppresses or a leg whose disconnect is in
+flight: the converge connects none of them. The converge's reply carries
+none of them, as SH31 of `dnagent.md` says for every condition only a read
+names.
+
 A cntlr's read-only verdict also names each md member that its
 converge's member reconciliation would put
 back or add (CN12): a `leg_list` member of a wanted group's running
@@ -4081,8 +4105,9 @@ is not too old (`dnv-worker.md` HL7), the worker's "re-sync while the code is no
 re-issues the `Syncup*` that sweeps again. A converge's observation
 carries only what its own removing sweep names, so what only a read's
 verdict names — a connection whose subsystem directory is left
-with no controller (CN21), an md member to put back, a piece of the base
-state and a stored forced-start mark (all above) — brings by itself the
+with no controller (CN21), a side with no controller the converge would
+connect, an md member to put back, a piece of the base state and a stored
+forced-start mark (all above) — brings by itself the
 `Syncup*` on every second
 round at most (`dnv-worker.md` RW4 step 5, and RW5 for the subsystem
 directory) while the agent accepts it; while the agent's saves fail, the
@@ -4165,18 +4190,26 @@ stores instead is CN23's.
   through one side reads live and optimized while the other provisioned
   side has no controller and refuses a new connect — its controller gone
   after a reconnect refused with DNR, say — has its failed member named
-  by every read. Each round that answers from such a read then costs one
-  `SyncupCntlr` and one converge, which fails the leg at the connect and
-  puts nothing back, beside the CN10 retry that failed connect registers,
-  until the side connects or leaves the leg. A verdict that also asked
-  for a controller on every provisioned side would not name the member
-  when that connect succeeds, and that converge is the one that puts the
-  member back. CN12's in-sync guard meets the same gap: when such a leg
+  by every read, and that side too (CN30). Each round that answers from
+  such a read then costs one `SyncupCntlr` and one converge, which fails
+  the leg at the connect and puts nothing back, beside the CN10 retry that
+  failed connect registers, until the side connects or leaves the leg.
+  CN12's in-sync guard meets the same gap: when such a leg
   carries the only member that stays in sync, the converge reads the leg
   not available and refuses to fail the member the group does not keep,
   while a read finds the leg serving, reads the group's row `OK` and names
   a `leg_list` member the array lacks whose leg can take it, so each round
   that answers from such a read brings a converge that refuses again.
+* A side whose controller is gone and whose connect keeps failing is named
+  on every read (CN30). A side whose disk node dies keeps its controller,
+  connecting, since a leg's controller has no controller-loss timeout
+  (`dnagent.md` SH20), and is not named; but once the controller is gone —
+  its reconnect refused with DNR, or lost to a CN reboot — a side whose
+  disk node is dead or refuses the connect reads with no controller, so
+  each round that answers from a read brings one `SyncupCntlr` and one
+  converge, which fails at the connect, beside the CN10 retry that failed
+  connect registers, until the node answers again or leg repair moves the
+  leg (`dnv-worker.md` AR8).
 * A killed `--remove` leaves a repair's add half done: an add that runs
   within seconds of the bad leg's side dying can have its `--remove` of
   the bad leg killed at the soft timeout while a superblock write is
@@ -4419,7 +4452,7 @@ stores instead is CN23's.
   reconnect refused with DNR, as when the side's port link is gone while
   the port still listens, or lost to a CN reboot — the next converge's
   `nvme connect` fails while the side stays down, and registers the same
-  retry). The cost is not CPU alone: an attempt marks the cntlr's
+  retry; a read names the side, so the worker brings that converge, CN30). The cost is not CPU alone: an attempt marks the cntlr's
   converge before it waits for the object lock and holds that lock for
   its whole converge, so no read of the cntlr runs meanwhile (CN1;
   `dnagent.md` SH30), and the cntlr's observation ages until the attempt

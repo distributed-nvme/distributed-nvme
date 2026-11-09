@@ -358,6 +358,11 @@ on a whole array with no IO while the member is out, is one converge whose only
 mdadm commands are the remove and then the add, and the sectors it writes to
 the member are a small part of the array: that count, never a time, tells md's
 re-add from its bitmap from the full copy mdadm makes when it cannot re-add.
+With the port link of one of the primary's data sides taken away on its DN
+while the port listens, the primary's reconnect is refused with DNR and its
+kernel deletes the controller; with the link back, a fresh check round names
+the side with no controller (CN10, CN30), and the `SyncupCntlr` re-sent as
+the worker would connects it, after which the arrays read clean again.
 Read-only fails writes through dm-flakey (CN16's read-only rule, CN19;
 `architecture.md`, [D11]); the data array's member on the DN the partition cut
 is then failed by hand, so the stage's last write reaches the other leg alone,

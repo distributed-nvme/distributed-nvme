@@ -60,9 +60,10 @@ func OkReply() *pb.AgentReply {
 // alone, a side or clone-metadata record its pass could not free, which a
 // read never attempts (dnagent.md DN19); on both roles what a background
 // read found absent that a re-sent Syncup* would build, or the node's port in
-// a state one would rewrite (dnagent.md SH31, DN16); and on a cn a
+// a state one would rewrite (dnagent.md SH31, DN16); and on a cn a side of
+// a wanted leg with no controller that the converge would connect, and a
 // forced-start mark of a cntlr's request that does not count as delivered
-// (cnagent.md CN8, CN12, CN30). Each
+// (cnagent.md CN8, CN10, CN12, CN30). Each
 // arrives among the failures, rendered like an enumeration that did not
 // answer. One condition arrives among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background

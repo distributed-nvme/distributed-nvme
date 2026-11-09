@@ -1338,6 +1338,20 @@ port_linked() {
 	if [ -e "$NVMET/ports/1/subsystems/$1" ]; then echo linked; else echo no; fi
 }
 
+# port_unlink <nqn> / port_relink <nqn> — take one exported subsystem's link
+# into port 1 away, behind the dn agent's back, and put it back. While the
+# link is gone and the port still listens, a host's reconnect to the
+# subsystem is refused with DNR, and the host's kernel deletes the
+# controller (cnagent.md CN10). Each fails when its step fails.
+port_unlink() {
+	rm "$NVMET/ports/1/subsystems/$1" || return 1
+	echo unlinked
+}
+port_relink() {
+	ln -s "$NVMET/subsystems/$1" "$NVMET/ports/1/subsystems/$1" || return 1
+	echo linked
+}
+
 # kmsg_mark <text> — one line into the kernel log, so that a later read can
 # start behind it.
 kmsg_mark() { echo "$1" >/dev/kmsg; }
@@ -4586,6 +4600,38 @@ case_redund() {
 	[ $((delta * 8)) -lt "$full" ] ||
 		die "resync: the put-back wrote $delta sectors to the member, not" \
 			"under an eighth of the array's $full: a full copy, not a re-add"
+
+	stage reconnect "a side whose controller the kernel deleted is named and connected again (CN10, CN30)"
+	# DN1's export of CN2's data leg 1 loses its port link while the port
+	# still listens, so CN2's reconnect is refused with DNR and its kernel
+	# deletes the controller. Only a converge connects the side again
+	# (cnagent.md CN10): once the link is back, CN2's check round names the
+	# side with no controller, and the SyncupCntlr the worker re-sends on
+	# that code connects it; a member md failed meanwhile, if IO reached
+	# it, is put back.
+	local dnqn shape
+	dnqn=$(side_to_cn_nqn "$CLUSTER" "$sp" "${A_DLEG[1]}" "${CNID[2]}")
+	assert_eq "$(helper 1 "port_unlink '$dnqn'")" unlinked \
+		"reconnect: unlinking DN1's export from its port"
+	shape=$(helper 2 "wait_no_ctrl '$dnqn' 90") ||
+		die "reconnect: CN2 still holds a controller of $dnqn: $shape"
+	assert_eq "$(helper 1 "port_relink '$dnqn'")" linked \
+		"reconnect: linking DN1's export back"
+	deadline=$((SECONDS + 30))
+	while :; do
+		vd=$(check_verdict 2 "$sp" "$c2" "$rev2")
+		case "$vd" in
+		"4 "*"$dnqn at ${IP[1]}:$TR_SVC_ID: no controller"*) break ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "reconnect: after 30 s CN2's check round reads '$vd', want" \
+				"the side of $dnqn named with no controller"
+		sleep 1
+	done
+	log "  CN2's verdict: $vd"
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 90 "reconnect"
+	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
+	md_wait_clean 2 "$sp" "$c2" 120 "reconnect" "$A_MGRP" "$A_DGRP"
 
 	stage readonly "SP_LEVEL_READONLY: reads served, writes error ([D11])"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READONLY"'

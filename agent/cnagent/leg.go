@@ -321,7 +321,7 @@ func (s *CnAgentServer) ensureLegs(
 		if plan.primary {
 			s.startLegProber(st, plan, lp)
 		}
-		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, view)
+		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, view, nil)
 	}
 	return available, retryNeeded
 }
@@ -362,24 +362,9 @@ func (s *CnAgentServer) ensureLeg(
 	if err != nil {
 		return nil, err
 	}
-	// CN10: a controller whose address read did not answer may be any
-	// side's path, so no side is connected beside it; the leg fails below.
-	unknown := view.unknownCtrl()
 	connected := false
-	for _, side := range lp.sides {
-		if !side.GetProvisioned() {
-			// [D15]: this side is still zeroing, so the DN has not built its
-			// per-CN export stack and a connect could only fail. The
-			// provisioned sides of the same leg connect normally — that is
-			// what keeps a migrating leg serving through its src side while
-			// its dst side provisions.
-			continue
-		}
+	for _, side := range sidesToConnect(lp, view) {
 		tr := side.GetNvmeTrConf()
-		if unknown != nil ||
-			view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) != nil {
-			continue
-		}
 		plan.walk.stale = true
 		if err := s.connectWithin(ctx, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
@@ -421,6 +406,29 @@ func (s *CnAgentServer) ensureLeg(
 // sideNsid is the single namespace id every side of a leg exports
 // (architecture.md, Disk node).
 const sideNsid = 1
+
+// sidesToConnect is ensureLeg's connect test (CN10), which a cntlr's read
+// names too (CN30): the provisioned sides of lp that view holds no
+// controller for, in any state. A side not provisioned is left out ([D15]:
+// it is still zeroing, so the DN has not built its per-CN export stack and a
+// connect could only fail); the provisioned sides of the same leg connect
+// normally, which is what keeps a migrating leg serving through its src side
+// while its dst side provisions. A view with a controller whose address read
+// did not answer gives none: that controller may be any side's path.
+func sidesToConnect(lp *legPlan, view *subsysView) []*pb.Side {
+	if view.unknownCtrl() != nil {
+		return nil
+	}
+	var out []*pb.Side
+	for _, side := range lp.sides {
+		tr := side.GetNvmeTrConf()
+		if side.GetProvisioned() &&
+			view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) == nil {
+			out = append(out, side)
+		}
+	}
+	return out
+}
 
 // connectWithin is the CN10 connect of one side of a leg, and the CN18
 // connect of one clone-source path: `nvme connect`, and again after a
@@ -602,6 +610,7 @@ func (s *CnAgentServer) legInfo(
 	plan *cntlrPlan,
 	lp *legPlan,
 	view *subsysView,
+	lookupErr error,
 ) *pb.ResInfo {
 	key := resKeyOf(resKeyLegFmt, lp.legId)
 	status, details := s.probeDmTarget(ctx, plan.rd, lp.name, "linear",
@@ -612,6 +621,9 @@ func (s *CnAgentServer) legInfo(
 	if plan.primary {
 		probeStatus, probeDetails := s.legProbeOutcome(st, lp)
 		return st.tracker.Set(key, lp.name, probeStatus, probeDetails)
+	}
+	if lookupErr != nil {
+		return st.tracker.Err(key, lp.name, lookupErr.Error())
 	}
 	if view == nil {
 		var err error
@@ -717,7 +729,8 @@ func transportHealth(
 // view is the leg's view the caller already holds — the converge's, from its
 // connect step — or nil, and the function then looks the leg up in the pass's
 // walk, once, and only when a side needs it. It returns the view it used, nil
-// when it has none, so the probe's standby leg row reads the same lookup.
+// when it has none, and the error of its lookup, so the probe's leg row and
+// its verdict read the same lookup.
 func (s *CnAgentServer) legPathRows(
 	ctx context.Context,
 	st *cntlrState,
@@ -725,9 +738,9 @@ func (s *CnAgentServer) legPathRows(
 	lp *legPlan,
 	view *subsysView,
 	info *pb.CntlrInfo,
-) *subsysView {
+) (*subsysView, error) {
 	if !lp.twoSided() {
-		return view
+		return view, nil
 	}
 	t := st.tracker
 	var lookupErr error
@@ -758,7 +771,7 @@ func (s *CnAgentServer) legPathRows(
 		status, details := pathHealth(view, lookupErr, tr)
 		info.SideIdToPath[sideId] = t.Set(key, name, status, details)
 	}
-	return view
+	return view, lookupErr
 }
 
 // twoSided reports whether the leg's side_list holds two sides: a

@@ -101,7 +101,8 @@ func (rd *cnReading) mdWalks() *mdWalkOnce {
 // (sweepCntlr with nothing removed), both from that reading, so the verdict
 // judges the node the rows read. The verdict also names the md members the
 // rows show the converge would put back, add or remove for a repair
-// (putBackNames, CN30).
+// (putBackNames, CN30), and the sides of wanted legs the converge would
+// connect (sidesToConnect, CN30).
 //
 // A stored conf the gate refuses (architecture.md, Common validation) takes
 // no reading: its rows are empty, what a cntlr with nothing provable looks
@@ -129,8 +130,8 @@ func (s *CnAgentServer) readCntlr(
 	plan := newCntlrPlan(s.nf, req)
 	rd := s.takeReading(ctx)
 	plan.rd, plan.walk, plan.mdWalks = rd, rd.walk, rd.mdWalks()
-	info, putBack := s.probeCntlr(ctx, st, plan)
-	return info, s.sweepCntlr(ctx, st, plan, false, putBack)
+	info, putBack, noCtrl := s.probeCntlr(ctx, st, plan)
+	return info, s.sweepCntlr(ctx, st, plan, false, putBack, noCtrl)
 }
 
 // dmDevAnswer is one own `dmsetup info` of a name: the device, nil when it is

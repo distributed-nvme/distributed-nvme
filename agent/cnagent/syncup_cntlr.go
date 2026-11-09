@@ -272,7 +272,7 @@ func (s *CnAgentServer) convergeCntlr(
 	// CN10: the pass's NVMe walk, the sweep's list of connections and where
 	// the build's lookups find their entries until the build marks it stale.
 	plan.walk = s.newPassWalk(ctx)
-	sweep := s.sweepCntlr(ctx, st, plan, true, nil)
+	sweep := s.sweepCntlr(ctx, st, plan, true, nil, nil)
 	if !plan.wantAny {
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
 		// cntlr-scoped object has just gone, but the store file and the
