@@ -1,7 +1,9 @@
 # grpc.md — gRPC interceptors
 
 This document owns the four gRPC interceptors every dnv connection and server
-chains, and the message limit every such connection and server sets: the
+chains, the message limit every such connection and server sets, and the
+keepalive of the worker's agent connections with the ping policy every
+server applies: the
 trace-id propagation between context and gRPC metadata, the logging of
 every request and reply message with its record names and ordering, the
 wiring rule that puts both chains and the limit on every dnv client
@@ -172,6 +174,22 @@ syncup, the cntlr report and the pool get reply of a pool at the cardinality
 limits (`architecture.md`, Known limits) — and one limit on both ends means
 that what one end may send the other takes. `GrpcMaxMsgSize` is this
 document's constant; `common/constants.go` is authoritative for its comment.
+
+The worker's connections to the agents also carry a keepalive and a connect
+bound, `common.GrpcKeepaliveDialOptions` (`dnv-worker.md` RW7 says why):
+while a call is open, a connection that has read nothing for
+`GrpcKeepaliveTime` is pinged, and one whose ping is not answered within
+`GrpcKeepaliveTimeout` is closed, failing every call on it; a call that
+must wait for a lost connection to come back fails within
+`GrpcConnectTimeout`; and the pause between reconnect attempts stops
+growing at `GrpcReconnectMaxDelay`. Every dnv server lets a client ping as
+often as every `GrpcKeepaliveMinTime` while a call is open, through the
+same `common.GrpcServerMsgOptions`: a server at gRPC's default ends, after a
+few pings, a connection whose client pings more often than every five
+minutes while the server writes nothing, as during a long syncup or a quiet
+check stream. The other connections carry no keepalive. The five values are
+this document's constants; `common/constants.go` is authoritative for their
+comments.
 
 Who is a server or a client of whom:
 

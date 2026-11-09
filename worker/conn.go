@@ -45,18 +45,21 @@ func newConnCache() *connCache {
 // stream client interceptors, which propagate the RW10 trace id and log every
 // message, and the message limit, which lets the cntlr report of a pool at
 // the cardinality limits back in; the agent's own limit lets that pool's
-// cntlr syncup in.
+// cntlr syncup in. It also carries the keepalive and the connect bound
+// (RW7): a syncup to a machine that stopped answering then fails within the
+// keepalive's bound, not at the syncup's deadline, and the object's rounds,
+// which wait on the same loop, resume (HL4).
 //
 // grpc.NewClient does not block, so this never fails because the agent is
 // down; the first round's stream or syncup reports that instead.
 func dialAgent(addrPort string) (*grpc.ClientConn, error) {
-	conn, err := grpc.NewClient(
-		addrPort,
+	opts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(common.GrpcUnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(common.GrpcStreamClientInterceptor()),
 		common.GrpcClientMsgOption(),
-	)
+	}, common.GrpcKeepaliveDialOptions()...)
+	conn, err := grpc.NewClient(addrPort, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("grpc client %s: %w", addrPort, err)
 	}

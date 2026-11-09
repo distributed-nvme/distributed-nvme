@@ -1652,9 +1652,14 @@ hand-over on, this rule applies unchanged.
 
 RW7. **Connections.** A process-wide cache from `addr_port` to one client
 connection (`grpc.NewClient` with insecure transport credentials, both
-client interceptors and the message limit — `grpc.md`, Wiring),
-reference-counted by the objects using an endpoint and closed when the last
-one stops. Every stream and unary call to one agent multiplexes over that
+client interceptors, the message limit, and the keepalive with its connect
+bound — `grpc.md`, Wiring), reference-counted by the objects using an
+endpoint and closed when the last one stops. The keepalive is what bounds a
+call to a machine that stops answering with no reset: a syncup holds its
+object's loop (RW1), so without it a syncup to such a machine would hold
+the object's rounds for the whole syncup timeout, and a change that came
+every such period would delay the object's health result, and with it a
+failover, with no end. Every stream and unary call to one agent multiplexes over that
 connection. A stream is opened lazily on the first round and after every
 failure, and closed with `CloseSend` plus ctx cancellation on stop (RW11).
 
@@ -2676,7 +2681,10 @@ a cntlr's run of unhealthy health verdicts, to which only rounds add
 (AR10), and for its observation, which the loop sees but which never adds
 to a run (RW23) and is never judged by its age (HL7). A `Syncup*`
 gRPC failure is not by itself a health failure — an unreachable agent
-breaks the stream too.
+breaks the stream too, and a syncup to a machine that stopped answering
+ends within the keepalive's bound (RW7), so the next round fails at once,
+or within the connect bound when it must open a new stream, and gives the
+health result.
 
 HL5. `show_info` false streams carry an `*Info` only when something
 changed; the worker evaluates health on the latest known info, and a reply
@@ -5038,6 +5046,17 @@ counts of its own: a leftover and the counts come only from those levers,
 which no suite case sets, so no suite case runs RW13's count compare.
 
 ## Known limits
+
+* **An agent that is alive but slow holds its object's rounds.** A syncup
+  holds its object's loop (RW1) until the agent answers or the syncup
+  timeout ends it. The keepalive ends it early only when the machine stops
+  answering (RW7); an agent that answers the keepalive but is slow to
+  answer the syncup, such as one whose converge waits on a stalled device,
+  holds its object's rounds, and so its health result, for up to the
+  syncup timeout, and a change that arrives every such period delays them
+  with no end. The other way round, a machine too loaded to answer a ping
+  within the keepalive's timeout loses every call open on its connection,
+  and the worker sends them again on its next round.
 
 * **Slow heartbeat writes can fence a worker its peers saw alive.** VW8
   (a) measures from the start of the last good tick's puts to the end of

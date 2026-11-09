@@ -5,8 +5,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
@@ -267,11 +270,39 @@ func (s *loggingServerStream) SendMsg(m any) error {
 // ---------------------------------------------------------------------------
 
 // GrpcServerMsgOptions are the message limits every dnv gRPC server carries
-// (grpc.md, Wiring): it takes and sends messages up to GrpcMaxMsgSize.
+// (grpc.md, Wiring): it takes and sends messages up to GrpcMaxMsgSize. They
+// also carry the keepalive policy every dnv server applies: a client may ping
+// as often as every GrpcKeepaliveMinTime while a call is open, which the
+// worker's keepalive needs (GrpcKeepaliveDialOptions).
 func GrpcServerMsgOptions() []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(GrpcMaxMsgSize),
 		grpc.MaxSendMsgSize(GrpcMaxMsgSize),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime: GrpcKeepaliveMinTime * time.Second,
+		}),
+	}
+}
+
+// GrpcKeepaliveDialOptions are the keepalive and the connect bound of the
+// worker's connections to the agents (grpc.md, Wiring; dnv-worker.md RW7): a
+// call on a connection to a machine that stopped answering fails within
+// GrpcKeepaliveTime plus GrpcKeepaliveTimeout, and a call that must wait for
+// a lost connection to come back fails within GrpcConnectTimeout, instead of
+// waiting for the call's own deadline; the pause between reconnect attempts
+// stops growing at GrpcReconnectMaxDelay.
+func GrpcKeepaliveDialOptions() []grpc.DialOption {
+	retry := backoff.DefaultConfig
+	retry.MaxDelay = GrpcReconnectMaxDelay * time.Second
+	return []grpc.DialOption{
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:    GrpcKeepaliveTime * time.Second,
+			Timeout: GrpcKeepaliveTimeout * time.Second,
+		}),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           retry,
+			MinConnectTimeout: GrpcConnectTimeout * time.Second,
+		}),
 	}
 }
 

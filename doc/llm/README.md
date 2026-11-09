@@ -21,7 +21,7 @@ documents each own a part:
 - `cdc.md` — `dnv-cdc`: the discovery service and its etcd watcher.
 - `dnvctl.md` — `dnvctl`: invocation, the command tree, output and errors.
 - `log.md` — the JSON logging and the trace id every binary shares.
-- `grpc.md` — the gRPC interceptors every dnv connection and server chains, and the message limit every one sets.
+- `grpc.md` — the gRPC interceptors every dnv connection and server chains, the message limit every one sets, and the keepalive of the worker's agent connections.
 - `osclient.md` — the `OsClient`, the one path to the operating system.
 - `layout.md` — the directory tree, the dependency rules, protobuf generation, and where the documents live.
 - `dependencies.md` — the direct module dependencies and why each is allowed.

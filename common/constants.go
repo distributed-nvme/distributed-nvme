@@ -337,6 +337,26 @@ const (
 	// that hands that chunk to its agent.
 	GrpcMaxMsgSize = 64 * 1024 * 1024
 
+	// gRPC keepalive of the worker's connections to the agents (grpc.md,
+	// Wiring), in seconds: while a call is open, a connection that has read
+	// nothing for GrpcKeepaliveTime is pinged, and one whose ping is not
+	// answered within GrpcKeepaliveTimeout is closed, which fails every call
+	// on it. The time is gRPC's floor for a client, which raises a shorter one
+	// to it; the timeout leaves an agent on a loaded machine room to answer.
+	// GrpcKeepaliveMinTime is how often every dnv server lets a client ping
+	// while a call is open, below the client's time: a server at gRPC's
+	// default ends, after a few pings, a connection that pings more often
+	// than every five minutes while the server writes nothing to it.
+	// GrpcConnectTimeout bounds the first attempt to reconnect a lost
+	// connection, which is what a call waits for at most before it fails, and
+	// GrpcReconnectMaxDelay caps the pause between later attempts, so the
+	// worker reaches an agent that resumes after a long stop within it.
+	GrpcKeepaliveTime     = 10
+	GrpcKeepaliveTimeout  = 10
+	GrpcKeepaliveMinTime  = 5
+	GrpcConnectTimeout    = 10
+	GrpcReconnectMaxDelay = 10
+
 	// The DEFAULT configfs id of the nvmet port an agent converges
 	// (architecture.md, Disk node; Controller node, common: exactly one port
 	// per agent).
