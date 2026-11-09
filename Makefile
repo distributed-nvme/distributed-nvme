@@ -74,9 +74,12 @@ fetch-etcd:
 # environment VERSION is ignored. The binaries are static (cgo off), free of
 # build paths (-trimpath) and stripped (-s -w); Go stamps the module version
 # from the tag, so `go version -m` on each binary still prints it. The archive
-# is reproducible: a fixed owner, sorted entries, the commit time of HEAD as
-# every entry's time, and gzip without a timestamp, so a rebuild on the same
-# commit gives the same checksum.
+# is reproducible: a fixed owner, fixed modes (0644 for a file, 0755 for a
+# directory or a program, whatever the builder's umask, as long as it leaves
+# the owner read, write and execute, and with no setuid or setgid bit), sorted
+# entries, the commit time of HEAD as every entry's time, and gzip without a
+# timestamp, so a rebuild on the same commit with the same Go, tar and gzip
+# gives the same checksum.
 ifneq ($(origin VERSION),command line)
 VERSION := $(shell git describe --tags --exact-match 2>/dev/null)
 endif
@@ -101,7 +104,8 @@ release:
 	cp LICENSE _out/$(RELEASE_DIR)/
 	cp -r deploy _out/$(RELEASE_DIR)/
 	tar -C _out --sort=name --owner=0 --group=0 --numeric-owner \
-		--mtime=@$$(git log -1 --format=%ct) -cf - $(RELEASE_DIR) | gzip -n > _out/$(RELEASE_DIR).tar.gz
+		--mode=go=rX,u+rw,a-st --mtime=@$$(git log -1 --format=%ct) \
+		-cf - $(RELEASE_DIR) | gzip -n > _out/$(RELEASE_DIR).tar.gz
 	cd _out && sha256sum $(RELEASE_DIR).tar.gz > SHA256SUMS
 	@echo "release: _out/$(RELEASE_DIR).tar.gz and _out/SHA256SUMS"
 
