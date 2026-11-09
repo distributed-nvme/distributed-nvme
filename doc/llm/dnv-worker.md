@@ -1122,12 +1122,14 @@ roles of one process share the incarnation's seed.
 VW2. For every configured role the worker keeps `WorkerRegKey` of the role
 and its seed refreshed: the value is a `WorkerReg` carrying the current
 unix seconds as `epoch`, re-put every `--vote-interval` from a ticker, each
-put under `DefaultEtcdOpTimeout`. The **first** put of every role happens
-before the worker observes anything (VW3), so its own registration is part
-of its first scan or its first watch events. A failed put is logged by the
-`etcd put` record and retried at the next tick. The loop records
-`lastOkPut`, the monotonic time of the last tick at which **every** role's
-put succeeded (VW8 (a)).
+put under `DefaultEtcdOpTimeout`. The puts of one tick, one per role, start
+together, and the tick's puts end with the slowest. The **first** put of
+every role happens before the worker observes anything (VW3), so its own
+registration is part of its first scan or its first watch events. A failed
+put is logged by the `etcd put` record and retried at the next tick. The
+loop records `lastOkPut`, the monotonic time at which the puts of the last
+tick in which **every** role's put succeeded started, the first puts at
+start included (VW8 (a)).
 
 ### Observation
 
@@ -1241,7 +1243,14 @@ every heartbeat tick and on every own-key watch event:
   covers a process that was stopped (SIGSTOP, a VM pause): the monotonic
   clock advances meanwhile, and a tick checks (a) before it records its
   own put, so the tick the process resumes with fences although its put
-  lands. A single tick whose puts fail does not fence a worker whose puts
+  lands. A tick's check runs when its puts end and measures from the start
+  of the last tick's puts that all succeeded: a put a peer saw landed no
+  earlier than its tick's start, and a tick's puts all start together
+  (VW2), so the measure is never shorter than the widest gap a peer can
+  see in any role's key, and a slow tick costs the time of its slowest put,
+  not the sum of its puts. The measure still spans two ticks, so writes
+  that succeed slowly can fence a worker no peer saw dead (Known limits).
+  A single tick whose puts fail does not fence a worker whose puts
   return, and are echoed, within the vote interval, and whose observers'
   grace windows, its own included, outlast the dead and live flap they then
   see (VW3, VW5): the next tick finds `lastOkPut` the dead threshold old.
@@ -5029,6 +5038,18 @@ counts of its own: a leftover and the counts come only from those levers,
 which no suite case sets, so no suite case runs RW13's count compare.
 
 ## Known limits
+
+* **Slow heartbeat writes can fence a worker its peers saw alive.** VW8
+  (a) measures from the start of the last good tick's puts to the end of
+  the current tick's, which spans two ticks, while a peer that watches the
+  keys sees the gap between two landings. With the default timers this
+  cannot happen, since a write that succeeds takes less than the operation
+  timeout and two ticks fit inside the limit; with a `--vote-interval`
+  below about two thirds of `DefaultEtcdOpTimeout`, writes that succeed
+  but take most of that timeout can reach the limit, and the worker fences
+  and rejoins though none of its keys was seen dead. The measure is never
+  shorter than what a peer can see, so the fence still comes before any
+  peer's commit.
 
 * **A stuck grow waits while another hold stands on it.** Auto-grow
   withdraws a grown group whose provisioning side's disk node died (AR6)

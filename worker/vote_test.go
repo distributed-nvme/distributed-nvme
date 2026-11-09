@@ -43,6 +43,18 @@ type voteHookStore struct {
 	left      chan struct{}
 	onDelete  func(key string)
 	ops       []string
+	// putDelay holds every Put for that long on delayClk, the fake clock,
+	// before it lands: an etcd that is slow but answers (delayPuts).
+	putDelay time.Duration
+	delayClk *fakeClock
+}
+
+// delayPuts makes every later Put wait d on clk before it lands, unless its
+// context ends first.
+func (s *voteHookStore) delayPuts(clk *fakeClock, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delayClk, s.putDelay = clk, d
 }
 
 func newVoteHookStore() *voteHookStore {
@@ -150,6 +162,16 @@ func (s *voteHookStore) record(op string) {
 func (s *voteHookStore) Put(
 	ctx context.Context, key string, msg proto.Message,
 ) error {
+	s.mu.Lock()
+	clk, delay := s.delayClk, s.putDelay
+	s.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-clk.after(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if release, entered, left, holds := s.gateFor(key); release != nil {
 		close(entered)
 		defer close(left)
@@ -1050,6 +1072,85 @@ func testVoteFenceHeartbeatStalled(t *testing.T) {
 	waitFor(t, "new incarnation", func() bool {
 		return h.vote.currentSeed() == newSeedStr
 	})
+}
+
+// TestVoteSlowTickCountsOnce is VW8 (a) on an etcd that is slow but answers:
+// with three roles and every heartbeat write taking 5.5 s, the puts of one
+// tick run one after another would take 16.5 s, and two such ticks in a row
+// reach fenceThreshold measured from the start of the last good tick's puts
+// to the end of the current one's, though no write failed. One tick's puts
+// run together (VW2), so a tick costs as long as its slowest put and the
+// worker never fences.
+func TestVoteSlowTickCountsOnce(t *testing.T) {
+	synctest.Test(t, testVoteSlowTickCountsOnce)
+}
+
+func testVoteSlowTickCountsOnce(t *testing.T) {
+	h := newVoteHarness(t,
+		common.WorkerRoleDn, common.WorkerRoleCn, common.WorkerRoleSp)
+	own := h.vote.currentSeed()
+	h.store.delayPuts(h.clk, 5500*time.Millisecond)
+	defer releaseDelayedPuts(h)
+	for i := 0; i < 240; i++ { // two minutes of fake time
+		h.clk.advance(500 * time.Millisecond)
+		h.settle()
+	}
+	if got := h.logs.withMsg(msgWorkerFenced); len(got) != 0 {
+		t.Fatalf("slow but successful writes fenced the worker: %v", got)
+	}
+	if got := h.vote.currentSeed(); got != own {
+		t.Fatalf("seed = %s, want %s", got, own)
+	}
+}
+
+// TestVoteFenceMeasuresFromTheTickStart pins what VW8 (a) measures from: the
+// START of the last tick whose puts all succeeded, not their end. One tick's
+// puts take 9 s and land; every later put fails at once. The fence comes at
+// that tick's start plus fenceThreshold, not 9 s later, which is the margin
+// before a peer can commit the worker dead.
+func TestVoteFenceMeasuresFromTheTickStart(t *testing.T) {
+	synctest.Test(t, testVoteFenceMeasuresFromTheTickStart)
+}
+
+func testVoteFenceMeasuresFromTheTickStart(t *testing.T) {
+	h := newVoteHarness(t, common.WorkerRoleDn)
+	interval := h.deps.cfg.VoteInterval
+	h.store.delayPuts(h.clk, 9*time.Second)
+	defer releaseDelayedPuts(h)
+	step := func(d time.Duration) {
+		for ; d > 0; d -= 500 * time.Millisecond {
+			h.clk.advance(500 * time.Millisecond)
+			h.settle()
+		}
+	}
+	// The tick at t=interval starts its puts, which land 9 s later.
+	step(interval + 9500*time.Millisecond)
+	h.store.delayPuts(h.clk, 0)
+	h.store.setPutErr(errors.New("etcd down"))
+	// The good tick started at t=interval: the fence is due at
+	// interval + fenceThreshold, and not one step before it.
+	step(h.deps.cfg.fenceThreshold() - 10*time.Second)
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
+		t.Fatalf("fenced %d times before the good tick's start plus the "+
+			"fence threshold", got)
+	}
+	step(time.Second)
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got == 0 {
+		t.Fatalf("no fence at the good tick's start plus the fence " +
+			"threshold: the measure starts at the end of its puts")
+	}
+}
+
+// releaseDelayedPuts ends a test's put delay and lets the puts it holds land,
+// so the vote worker's own cleanup, whose rejoin may put on the loop
+// goroutine, finishes.
+func releaseDelayedPuts(h *voteHarness) {
+	h.store.delayPuts(h.clk, 0)
+	h.store.setPutErr(nil)
+	for i := 0; i < 40; i++ {
+		h.clk.advance(500 * time.Millisecond)
+		h.settle()
+	}
 }
 
 // TestVoteOneFailedTickDoesNotFence is VW8 (a)'s margin: one tick whose puts

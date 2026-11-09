@@ -49,10 +49,10 @@ const (
 // hbMsg is one heartbeat tick's outcome (VW2).
 type hbMsg struct {
 	gen uint64
-	// tickAt is the monotonic time at which the ticker FIRED, sampled before
-	// the puts: VW2 records "the monotonic time of the last TICK at which
-	// every role's put succeeded", so a put that blocks for its whole op
-	// timeout cannot backdate the gap the NEXT tick measures for VW8(a).
+	// tickAt is the monotonic time at which the tick was received, sampled
+	// before its puts start: VW2 records when the last tick whose puts all
+	// succeeded STARTED them, so a put that blocks for its whole op timeout
+	// cannot backdate the gap the NEXT tick measures for VW8(a).
 	tickAt time.Time
 	// at is the monotonic time after this tick's puts returned — the "now" of
 	// the VW8 checks the tick performs.
@@ -286,8 +286,8 @@ type incarnation struct {
 
 	roles map[string]*roleState
 
-	// lastOkPut is the monotonic time of the last tick at which EVERY role's
-	// put succeeded (VW8a).
+	// lastOkPut is the monotonic time at which the puts of the last tick in
+	// which EVERY role's put succeeded started (VW2, VW8a).
 	lastOkPut time.Time
 
 	// pendingFence is the reason of a fence VW8 demanded that could NOT be
@@ -445,9 +445,11 @@ func (v *voteWorker) startIncarnation(seed string) {
 	v.inc = inc
 	v.setSeed(seed)
 
-	// VW2: the first put round, before any observation.
+	// VW2: the first put round, before any observation. Like every tick's,
+	// its success counts from the time the round started (VW8 (a)).
+	startAt := v.deps.clk.now()
 	if v.putAll(inc) {
-		inc.lastOkPut = v.deps.clk.now()
+		inc.lastOkPut = startAt
 	}
 
 	inc.wg.Add(1)
@@ -488,28 +490,43 @@ func (v *voteWorker) heartbeat(inc *incarnation) {
 }
 
 // putAll re-puts the registration of every configured role and reports
-// whether all of them succeeded (VW2, VW8a). Each put is bounded by
-// common.DefaultEtcdOpTimeout inside etcdutil (EU5); a failed put is logged
+// whether all of them succeeded (VW2, VW8a). The puts of one round run at the
+// same time and the round ends with the slowest, so every put starts at the
+// round's start: the time from a good round's start to the end of a later
+// round is then the widest gap any peer can see in any role's key, which is
+// what VW8 (a) measures, and a slow round is counted once. Each put is bounded
+// by common.DefaultEtcdOpTimeout inside etcdutil (EU5); a failed put is logged
 // by its "etcd put" record and retried at the next tick.
 func (v *voteWorker) putAll(inc *incarnation) bool {
-	allOk := true
-	for _, role := range v.roles {
-		reg := &pb.WorkerReg{Epoch: v.deps.clk.nowUnix()}
-		err := v.deps.store.Put(
-			inc.hbCtx, workerRegKey(role, inc.seed), reg,
-		)
-		if err != nil {
-			allOk = false
-			continue
-		}
-		if inc.markRegistered(role) {
-			slog.InfoContext(inc.hbCtx, msgWorkerRegistered,
-				slog.String("role", role),
-				slog.String("seed", inc.seed),
+	oks := make([]bool, len(v.roles))
+	var wg sync.WaitGroup
+	for idx, role := range v.roles {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reg := &pb.WorkerReg{Epoch: v.deps.clk.nowUnix()}
+			err := v.deps.store.Put(
+				inc.hbCtx, workerRegKey(role, inc.seed), reg,
 			)
+			if err != nil {
+				return
+			}
+			oks[idx] = true
+			if inc.markRegistered(role) {
+				slog.InfoContext(inc.hbCtx, msgWorkerRegistered,
+					slog.String("role", role),
+					slog.String("seed", inc.seed),
+				)
+			}
+		}()
+	}
+	wg.Wait()
+	for _, ok := range oks {
+		if !ok {
+			return false
 		}
 	}
-	return allOk
+	return true
 }
 
 // onHeartbeat applies the self-fence checks of VW8 (a) and (b), which VW8
