@@ -366,32 +366,33 @@ wait for. The leg rows recover once the partition lifts, and the write reads
 back. A fresh check round then names the member md failed, with the leftover
 code, and the `SyncupCntlr` re-sent as the worker would puts it back: the
 arrays read clean and the member is in sync with its failfast flag (CN12,
-CN30). The same put-back of a member failed by hand,
-on a whole array with no IO while the member is out, is one converge whose only
-mdadm commands are the remove and then the add, and the sectors it writes to
-the member are a small part of the array: that count, never a time, tells md's
-re-add from its bitmap from the full copy mdadm makes when it cannot re-add.
-With the port link of one of the primary's data sides taken away on its DN
-while the port listens, the primary's reconnect is refused with DNR and its
-kernel deletes the controller; with the link back, a fresh check round names
-the side with no controller (CN10, CN30), and the `SyncupCntlr` re-sent as
-the worker would connects it, after which the arrays read clean again.
-Read-only fails writes through dm-flakey (CN16's read-only rule, CN19;
-`architecture.md`, [D11]); the data array's member on the DN the partition cut
-is then failed by hand, so the stage's last write reaches the other leg alone,
-and no converge of the primary puts it back before the late flip demotes it.
-The late flip promotes before any side flips, so the promotion assembles no
-array and builds no raid0: both md rows read "no available leg", the ns-dev
-stays parked with its row in error, and the promotion writes no optimized
-group, so the host's path stays inaccessible and its IO would wait rather than
-fail; the namespace row reads OK on the converge and alike in the observation
-a fresh round then reports, made after the converge by a read or by an
-attempt of the connect retry (CN12, CN16's ANA rule, CN28). The connect
-retry, which the late members and the waiting namespace keep registered, then
-assembles the arrays under its own trace ids, with no second `SyncupCntlr`,
-puts the ns-dev on the raid0 and moves the namespace optimized, then stops; and
-a block only the newer leg holds reads as that leg's, the stale member kicked
-(CN10, CN12; `architecture.md`, [D16]).
+CN30). The same put-back of a member failed by hand, on a whole array with no
+IO while the member is out, is one converge whose only mdadm commands are the
+remove and then the add, and the sectors it writes to the member are a small
+part of the array: that count, never a time, tells md's re-add from its bitmap
+from the full copy mdadm makes when it cannot re-add. With the port link of one
+of the primary's data sides taken away on its DN while the port listens, the
+primary's reconnect is refused with DNR and its kernel deletes the controller;
+with the link back, a fresh check round names the side with no controller
+(CN10, CN30), and the `SyncupCntlr` re-sent as the worker would connects it,
+after which the arrays read clean again; a member md fails some seconds later,
+once IO reaches it, is named by a later round and put back by the request
+re-sent on that round's code. Read-only fails writes through dm-flakey (CN16's
+read-only rule, CN19; `architecture.md`, [D11]); the data array's member on the
+DN the partition cut is then failed by hand, so the stage's last write reaches
+the other leg alone, and no converge of the primary puts it back before the
+late flip demotes it. The late flip promotes before any side flips, so the
+promotion assembles no array and builds no raid0: both md rows read "no
+available leg", the ns-dev stays parked with its row in error, and the
+promotion writes no optimized group, so the host's path stays inaccessible and
+its IO would wait rather than fail; the namespace row reads OK on the converge
+and alike in the observation a fresh round then reports, made after the
+converge by a read or by an attempt of the connect retry (CN12, CN16's ANA
+rule, CN28). The connect retry, which the late members and the waiting
+namespace keep registered, then assembles the arrays under its own trace ids,
+with no second `SyncupCntlr`, puts the ns-dev on the raid0 and moves the
+namespace optimized, then stops; and a block only the newer leg holds reads as
+that leg's, the stale member kicked (CN10, CN12; `architecture.md`, [D16]).
 
 **repair** proves on real md the cn agent's part of a repair
 (`architecture.md`, Repair; `cnagent.md` CN12, CN28, CN30), on a pool of its

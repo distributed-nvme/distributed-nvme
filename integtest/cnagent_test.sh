@@ -3846,27 +3846,59 @@ resync_until_clean() { # cnidx sp cntlr rev req secs label
 # the kernel with no converge, so the poll's rounds start the reads it
 # samples (dnagent.md SH29).
 md_wait_clean() { # cnidx sp cntlr secs label grpid…
-	local idx=$1 sp=$2 c=$3 secs=$4 label=$5 out key st det bad
+	local idx=$1 sp=$2 c=$3 secs=$4 label=$5 out bad
 	local deadline=$((SECONDS + secs))
 	shift 5
 	while :; do
 		out=$(cnctl "$idx" check-cntlr --show-info --sp "$sp" --cntlr "$c" \
 			--expect-code 4 2>/dev/null || true)
-		bad=""
-		for key in "$@"; do
-			key=$(d16 "$key")
-			st=$(jq_of "$out" \
-				".cntlr_info.grp_id_to_md_raid[\"$key\"].status // \"ABSENT\"")
-			det=$(jq_of "$out" \
-				".cntlr_info.grp_id_to_md_raid[\"$key\"].details // \"\"")
-			case "$st:$det" in
-			RES_STATUS_OK:*degraded* | RES_STATUS_OK:*recovering* | \
-				RES_STATUS_OK:*resyncing* | RES_STATUS_OK:) bad="$bad $key=[$det]" ;;
-			RES_STATUS_OK:*) ;;
-			*) bad="$bad $key=$st[$det]" ;;
-			esac
-		done
+		bad=$(md_rows_bad "$out" "$@")
 		[ -z "$bad" ] && return 0
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "$label: after $secs s cn$idx's md rows read:$bad"
+		sleep 1
+	done
+}
+
+# md_rows_bad prints, for each md row of a CheckCntlr reply it names that is
+# not the array whole again, " <grpid>=<status>[<details>]", and nothing
+# when every one is (md_wait_clean).
+md_rows_bad() { # json grpid…
+	local out=$1 key st det bad=""
+	shift
+	for key in "$@"; do
+		key=$(d16 "$key")
+		st=$(jq_of "$out" \
+			".cntlr_info.grp_id_to_md_raid[\"$key\"].status // \"ABSENT\"")
+		det=$(jq_of "$out" \
+			".cntlr_info.grp_id_to_md_raid[\"$key\"].details // \"\"")
+		case "$st:$det" in
+		RES_STATUS_OK:*degraded* | RES_STATUS_OK:*recovering* | \
+			RES_STATUS_OK:*resyncing* | RES_STATUS_OK:) bad="$bad $key=[$det]" ;;
+		RES_STATUS_OK:*) ;;
+		*) bad="$bad $key=$st[$det]" ;;
+		esac
+	done
+	printf '%s' "$bad"
+}
+
+# md_resync_until_clean is md_wait_clean that also plays the worker's
+# re-sync (dnv-worker.md RW4): while a round answers the leftover code, as
+# when md fails a member some seconds after a reconnect and the round names
+# it, the SyncupCntlr is re-sent at the stored revision, whose converge puts
+# the member back.
+md_resync_until_clean() { # cnidx sp cntlr rev req secs label grpid…
+	local idx=$1 sp=$2 c=$3 rev=$4 req=$5 secs=$6 label=$7 out bad
+	local deadline=$((SECONDS + secs))
+	shift 7
+	while :; do
+		out=$(cnctl "$idx" check-cntlr --fresh --show-info --revision "$rev" \
+			--sp "$sp" --cntlr "$c" --expect-code 4 2>/dev/null || true)
+		bad=$(md_rows_bad "$out" "$@")
+		[ -z "$bad" ] && return 0
+		if [ "$(jq_of "$out" '.agent_reply.code // 0')" = 4 ]; then
+			cn_syncup_cntlr "$idx" "$req" >/dev/null
+		fi
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "$label: after $secs s cn$idx's md rows read:$bad"
 		sleep 1
@@ -4774,7 +4806,11 @@ case_redund() {
 	log "  CN2's verdict: $vd"
 	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 90 "reconnect"
 	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
-	md_wait_clean 2 "$sp" "$c2" 120 "reconnect" "$A_MGRP" "$A_DGRP"
+	# md can fail the member some seconds after the reconnect, when IO
+	# reaches it, so a round can read clean before the member's fault shows;
+	# the wait re-sends on the leftover code as the worker does.
+	md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 120 "reconnect" \
+		"$A_MGRP" "$A_DGRP"
 
 	stage readonly "SP_LEVEL_READONLY: reads served, writes error ([D11])"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READONLY"'
