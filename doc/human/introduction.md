@@ -21,10 +21,10 @@ knows no tenants and authenticates nobody: the layer above authenticates its
 users and decides which storage pools, subsystems and hosts serve each of
 them. dnv promises that layer that the data of one storage pool is never
 readable from another storage pool, unless that layer exports it there itself,
-for example with a transfer, or a step of a caller breaks the promise, as the
-limits below say. The promise is about what a host can read, not about the
-network or the nodes: the network under dnv and the root user of every node are
-trusted.
+for example with a transfer, or a step of a caller breaks the promise, as
+[dnv's scope and known limits](scope.md) say. The promise is about what a
+host can read, not about the network or the nodes: the network under dnv and
+the root user of every node are trusted.
 
 The words are those of [the core glossary](core_glossary.md), the list to read
 first; any other project word is explained where it first appears.
@@ -225,9 +225,10 @@ destination device while serving IO. The dm-clone pulls what is missing from
 the old side on demand and copies the rest in the background; its metadata
 lives on the disk node's disk, so a reboot resumes the copy. A caller may hand
 the migration the leg's bitmap, the list of the blocks the pool has written on
-the leg, so that the copy skips the rest; the limits below say when to read
-it. When the copy is complete the operator finishes the migration, and the old
-side is removed.
+the leg, so that the copy skips the rest;
+[dnv's scope and known limits](scope.md) say when to read this list. When the copy
+is complete the operator finishes the migration, and the old side is
+removed.
 
 ```mermaid
 flowchart LR
@@ -362,259 +363,22 @@ user and no host beyond its NQN, a name a host can spoof, gRPC is plain text,
 nothing is encrypted, and root on a node can read the old bytes of a recycled
 extent from the raw disk. Deploy dnv on an isolated network you trust.
 
-The limits a user must know:
+What dnv promises, the data loss it accepts, what it does not do, and every
+known limit beyond the sizes below, with its state and what to do about it
+where something can be done, are in
+[dnv's scope and known limits](scope.md). Read it before you deploy dnv.
 
-- One primary per pool bounds a volume's throughput to one controller node:
-  every thin device of a pool is served by its one primary, and slices split
-  the work inside that node, never across nodes; to scale out, spread the
-  pools across controller nodes.
-- No QoS is enforced: nothing in dnv limits the IO rate of a volume or a pool.
-- A snapshot is not atomic across a crash of the primary: it is taken slice by
-  slice, and a crash between two slices, or a slice whose step was skipped or
-  failed, leaves a torn snapshot. The torn mark is held in memory until the
-  snapshot is recorded as created, so a restart, a failover or a cntlr
-  replacement in between can lose it; delete and re-create a torn snapshot.
-- A pool can run out of space: auto-grow is best effort, since a grow can find
-  no disk node with room or a controller node of the pool with no room left for
-  the new group, a slice holds only so many data groups, and nothing reserves
-  space ahead. In a full pool an IO that needs a new block queues for a kernel
-  timeout and then fails; blocks already written keep serving.
-- Corrupt thin pool metadata has no repair path in dnv: repairing it is an
-  operator's job, by hand, onto fresh space.
-- A leg bitmap read too early during a migration can hand a pool another pool's
-  bytes. The optional fast path would skip the blocks of a leg that the thin
-  pool has not written; read while the old side still takes writes, it
-  misses the blocks written after the read, and the pool later reads there
-  what the new side's recycled extents hold. Read it only after the cutover,
-  once the primary's path to the new side is ANA optimized; at that point
-  the new side's dm-clone is in use and refuses the skip, so the fast path
-  skips nothing until the new side is rebuilt, as after a reboot of its disk
-  node.
-- A migration's bitmap appended in more than one piece can hand a pool
-  another pool's bytes: the pieces join byte by byte and carry no block
-  count, so a piece before the last that covers a block count that is not a
-  multiple of 8 shifts every later block of the list, the copy skips blocks
-  the pool wrote, and after the cutover the pool reads there what the new
-  side's recycled extents hold, with no error; in a clone the same shift
-  makes the clone read zeros where the source wrote. Read every piece but
-  the last over a multiple of 8 blocks; one `--bm-hex` of `dnvctl` covers
-  only part of a large leg, so such a leg's list is appended in pieces.
-- A bitmap piece sent again without its position is stored twice: a caller
-  that lost the answer to a piece and sends it again moves every later block
-  of the list, with the same harm as above. `dnvctl` sends the position only
-  when you give `--offset` (clone) or `--bm-idx` (migration); give it
-  whenever you may send a piece again, and a piece already stored is then
-  left as it is.
-- A migration finished with force before its copy is complete can hand a pool
-  another pool's bytes: force skips the check that the copy is complete, the
-  old side is removed, and every region the copy had not reached reads what the
-  new side's recycled extents hold.
-- The forced start, an operator's start of a RAID1 group's array from one leg
-  they name when md will not start it on its own, has sharp edges: it can
-  lose the data that only the other legs held; it restores one group, not the
-  pool, so a start from an older copy gives the pool a mix of older and newer
-  blocks with no error, and in a data group a block the pool first used after
-  that copy left the array reads what the copy holds there, which can be
-  another pool's bytes; a leg that left the array before the forced start and
-  is later put back into the group can be copied over with no error, losing the
-  data only it held; and while one of the group's legs is being replaced it can
-  leave the group down.
-- A group that loses every leg at once under IO, as on a switch reload or a
-  reboot of all its disk nodes, is broken by md: the kernel fails the IO on
-  each lost path, md's own writes when it tears the path down and the rest
-  at the 5 s fast IO fail timeout, so when the last leg fails its IO too md
-  marks the array broken and refuses every write; an idle array whose legs
-  all died keeps running until IO reaches it, a read as well as a write. The
-  primary leaves a broken array as it is
-  when the legs return, so the group stays down until an operator forces a
-  start or the primary role moves to another cntlr, whose build assembles
-  the array again once the legs are back; the broken array marks the primary
-  unhealthy, so the worker fails it over at the primary's threshold, or, in
-  a pool of one cntlr, replaces it at the cntlr threshold. A group of one leg
-  returns the errors to the host, and an error that fails a commit of the
-  slice's thin pool leaves that pool read-only, which nothing in dnv clears
-  and no report of an agent shows; repairing it is an operator's job, as for
-  corrupt thin pool metadata. The broken array refuses the thin pool's
-  commits too, so when it is a data group and its slice's meta group still
-  takes writes, a commit under writes turns that thin pool read-only, as for
-  a group of one leg, and a new primary's build brings the array back but
-  not a writable thin pool; when it is the meta group, the mark that keeps a
-  pool read-only cannot be written either, so a new primary's build brings
-  the pool back writable as of its last commit, without the blocks mapped
-  since; a consequence worked out from md's and dm-thin's code, not
-  measured.
-- Writes to a group with a leg on a dead disk node wait for the kernel's
-  keep-alive to give the leg's connection up, over NVMe/TCP, figures read
-  from the kernel's code and timers, not measured: when the kernel tears the
-  dead path down, about 6 to 10 s after the node died, md's own writes,
-  which it sends with the failfast flag, fail, so md fails the member then
-  and the writes complete on the other leg, and a flush md sent to that leg
-  ends then as well, with no error; what md sends in the second or so
-  between the keep-alive giving up and the teardown, a write or a flush,
-  waits the 5 s fast IO fail timeout more, 11 to 15 s after the node died,
-  and an fsync whose flush is among it waits that long; a group of one leg
-  has no other leg to complete on: its writes and reads wait until the fast
-  IO fail timeout and return the error, with the read-only thin pool of the
-  bullet above when it fails a commit.
-- Restarting a controller node's agent for longer than about 4 to 6 s at the
-  defaults fails over every primary on that node, a figure worked out from
-  the defaults, not measured: the agent answers no check round until the
-  converge it runs at its start has ended, a round runs every 2 s, the
-  primary threshold is 4 s, and two missed rounds in a row fail the primary
-  over. Before maintenance, stop the workers first, as an upgrade does, or
-  create pools with a larger `--thr-primary` of `dnvctl sp create`.
-- A write is durable once a later flush from the host, or a write the host
-  marks to reach stable storage before it completes (FUA), has completed on
-  the primary that took the write, so a completed fsync survives a crash of
-  the primary when that primary completed the flush itself; a primary that
-  dies first loses the writes it had not committed though the host's fsync
-  can still complete, since the host's kernel completes a flush it had to
-  cancel on the dead path with no error, the request carrying no data to
-  retry, and sends a later flush to the new primary, which commits nothing
-  of the dead one's; without a flush, a write that needs a new block of the
-  thin pool, to a block not written before or to one a snapshot shares, is
-  committed about once a second, and a primary that dies before that commit
-  loses it, the block reading as it did before the write, zeros where
-  nothing was written. The volumes report a volatile write cache, so hosts
-  flush as they do to a disk with one.
-- A RAID1 pool survives the loss of any one disk node, but not every loss of
-  two: a group's two legs sit on two disk nodes, and losing both legs of one
-  group loses that slice's thin pool and with it every thin device of the
-  pool, since every thin device is striped across all slices. The pairs of disk
-  nodes that can cause it are at most the pool's group count, so for two
-  random failures among N disk nodes the chance is at most that count
-  divided by N(N-1)/2.
-- Nothing limits recovery load across pools: a dead disk node starts a leg
-  repair, a full copy, in every RAID1 group whose leg it held, and a dead
-  controller node fails over every primary it held, all at about the same
-  time; the agents set no copy speed on md, so md's own limits alone control
-  the copies' speed: the kernel's `dev.raid.speed_limit_min` and
-  `dev.raid.speed_limit_max`, which an array's own `md/sync_speed_min` and
-  `md/sync_speed_max` override until the array stops, as read in the kernel's
-  md source.
-- A RAID1 pool needs four disk nodes per slice at create: the create puts
-  every leg of the pool on a disk node of its own, and each slice has a meta
-  group and a data group of two legs each, so a cluster with fewer disk nodes
-  is refused with RESOURCE_EXHAUSTED; a group added to a slice later may
-  share disk nodes with the pool's other groups.
-- Every controller node has a budget, the space of the pools whose cntlrs it
-  may hold, and the budgets cap a cluster's group space whatever its disks
-  hold: every cntlr of a pool, primary or standby, charges its controller
-  node the full size of the groups of the pool's slices, so the sum of the
-  budgets divided by the cntlr count of the pools is the most group space
-  the cluster holds. The budget
-  is read once, at the node's create, from the `--capacity` its cn agent was
-  started with, unset it takes a default, and no call changes it, so set
-  `--capacity` on every cn agent before its node's create; an auto-grow
-  refused for want of budget shows only in the worker's log.
-- Under the CSI driver every volume is a pool with its own cntlrs and sides,
-  and the counts bound the volumes: a controller node holds at most 256
-  cntlrs, so a cluster holds at most 128 volumes per controller node it has
-  with the default two cntlrs per volume; a cluster holds at most 4096
-  pools; a disk node holds at most 1024 sides, and a RAID1 volume takes four
-  at create, two more for every group auto-grow adds, and one more for every
-  leg a repair adds, since the leg it replaces keeps its side for a time. A
-  volume takes whole extents, one for its meta group and at least one for
-  its first data group on every leg, however small the volume.
-- A host discard frees pool space only where it covers, on every slice, a
-  whole aligned block: a thin pool frees whole blocks only and completes a
-  shorter or misaligned discard with success. A new cluster that names no
-  stripe gets one equal to its block, up to 1 MiB, so at the defaults an
-  aligned 1 MiB discard frees one block. A pool has a stripe smaller than
-  its block when it asks for one or for a block above 1 MiB, the largest
-  stripe, or when its cluster stored a smaller stripe, as a cluster keeps
-  the stripe it was created with; then the striped device hands each slice
-  its share of the range unsplit, so a discard frees a block on one slice
-  only when it covers nearly the slice count times the pool's block size,
-  and `fstrim` can report success and free nothing. These sizes are read
-  from the kernel's source, not measured.
-- A mount on a Kubernetes node survives an outage of every path, however
-  long, since the node plugin's connect never gives up reconnecting, and a
-  cntlr replacement on a pool of one cntlr while the old path lasts until
-  the new one has joined, since the plugin keeps the old path until then.
-  The cost is that IO to a volume none of whose cntlrs comes back waits for
-  ever: a pod blocked in it cannot be stopped until the operator runs
-  `nvme disconnect -n` with the volume's subsystem NQN on the node. A path
-  whose reconnect a cntlr refuses with "do not retry" still ends for good,
-  as when a controller node comes back holding other volumes' cntlrs before
-  the volume's; when the last controller of a subsystem is gone the kernel
-  deletes it, the mount keeps the dead multipath device, and a later connect
-  makes a new one that the mount does not follow, until the pod that uses
-  it, the Kubernetes unit of one or more containers, is deleted and made
-  again.
-- A fault that only a host sees never fails over: the worker reads the
-  agents' reports and the stored records, never a host, so a primary whose
-  agent answers while hosts cannot reach its NVMe/TCP address stays the
-  primary and stays in the cdc's answer, and the host's IO queues as long as
-  a standby path is left. On a pool with
-  an enabled standby that is healthy, the operator disables the primary,
-  which starts a failover with no threshold wait, and enables it again after
-  the failover, since a disabled cntlr is never a candidate and is never
-  replaced; on a pool with no such standby, a pool of one cntlr among them, a
-  disable starts no failover and takes the primary out of the cdc's answer,
-  so a host that follows the discovery log drops its last path.
-- A host on nvme-stas loses every path stacd made when stafd stays away
-  through a start or a reconfiguration of stacd, the pass in which it
-  matches its connections to the discovery log, which a reload, a removed
-  controller, a device audit or one of its timers starts. Read in the source
-  of nvme-stas 2.3.1: stacd reads an unreachable stafd as an empty discovery
-  log, and with the tutorial's setting that lets it disconnect what it
-  connected itself, its start or its next reconfiguration drops those paths.
-  To restart stafd, stop stacd first, which keeps its connections when it
-  stops; restart stafd; once stafd holds its connection to the cdc again,
-  start stacd.
-- In a Kubernetes cluster every pod reaches the gateway, the agents' gRPC
-  ports, etcd, the cdc and the NVMe/TCP ports through its machine's network
-  unless the operator blocks it, with a firewall rule or a network policy
-  that the cluster's network software enforces; the trust dnv puts in the
-  network is then trust in every pod.
-- Back up etcd with its own backup command (`etcdctl snapshot save`) on a
-  schedule: dnv adds nothing to etcd's backup or restore, and a restore
-  brings the desired state back to the backup's time, so what is created
-  after it is lost with its data and a pool whose layout changed since
-  breaks. A restore needs dnv's steps around etcd's: stop every worker, cdc
-  and gateway first, while the agents keep serving; after the restore start
-  etcd with the settings every etcd serving dnv runs with, start the
-  gateways, and run the id step, `dnvctl cluster advance-ids`, for every
-  cluster before any other call but `dnvctl cluster list`, which names the
-  clusters, since without the step a new object can take the ids, and with
-  them the data on the nodes, of one made after the backup, and even with it
-  a pool that created more than 1,048,576 thin devices, snapshots included,
-  after the backup can hand one of their ids, with its data, to a new thin
-  device; then stop each
-  agent, delete the files of its local store, the directory in which it
-  keeps the desired state it last accepted, and start it again; then start
-  the workers and the cdc, let clients call the gateways again, and take a
-  new backup. The suites and the tutorials run etcd as one member, so an
-  etcd of several members is untested.
-- Upgrades are lockstep: every dnv program of one etcd installation stops,
-  its gateways, workers and cdc, the agents of every cluster it holds, and
-  the controller plugin and the node plugins of every CSI driver that talks
-  to its gateways, a stopped node plugin leaving the connections and mounts
-  of its volumes in place; every binary is replaced, `dnvctl` included, and
-  only then does any program start again, the workers stopping first and
-  starting last. There is no rolling upgrade, since no message carries a
-  build version and two builds that differ in a message would misread each
-  other with no error.
-- The programs log to stderr, as JSON, one record per line, at one level
-  with no level flag and no rotation: keep the logs on a filesystem apart
-  from the agents' local stores and etcd's data, and rotate them yourself,
-  since a disk the logs fill is one the stores and etcd cannot write.
-- No metrics endpoint: no dnv program serves metrics, profiles or health over
-  a port, though the CSI driver's manifests add a sidecar that answers the
-  health checks of the kubelet, the Kubernetes program that runs pods, on port
-  9808 or 9809, and the worker's log is the only alert, with its records of
-  the reactions it applied and skipped.
-- 0.1 publishes no throughput or latency figures. The failover pause
-  measured on the lab VMs, as the longest write queued through a failover of
-  a primary whose agent is stopped while its kernel goes on serving, so that
-  the figure leaves out the time the worker takes to judge the primary
-  unhealthy, which a dead controller node adds: for a 4 KiB write with a
-  flush to the raw device of a host under nvme-stas, about 2 s at one slice
-  (commit 1b1cba4), and, on builds of ed69649 with uncommitted changes, about
-  2 s at one slice, 3 s at four slices and, in the one run at 32 slices,
-  22 s; for a 1 MiB write with a flush to a file on a volume mounted under
-  the CSI driver, whose pools have one slice, about 3.6 s (commit 1b1cba4).
+0.1 publishes no throughput or latency figures. The failover pause was
+measured on the lab VMs as the longest write queued through a failover of a
+primary whose agent is stopped while its kernel goes on serving. The figure
+therefore leaves out the time the worker takes to judge the primary
+unhealthy, which a dead controller node adds. For a 4 KiB write with a
+flush to the raw device of a host under nvme-stas, the pause was about 2 s
+at one slice (commit 1b1cba4), and, on builds of ed69649 with uncommitted
+changes, about 2 s at one slice, 3 s at four slices and, in the one run at
+32 slices, 22 s. For a 1 MiB write with a flush to a file on a volume
+mounted under the CSI driver, whose pools have one slice, it was about
+3.6 s (commit 1b1cba4).
 
 The limits dnv enforces, each against the largest size a test has run. The
 Go tests run the control plane against fake agents, test programs that answer
@@ -687,5 +451,5 @@ binaries, where the tutorial expects it.
 Then read [dnv on one machine](tutorial_all_in_one.md), a whole dnv system on
 one Linux machine with a host connected to a volume, and [dnv under Kubernetes
 on one machine](tutorial_csi.md), which adds a one-node Kubernetes and gives a
-pod a dnv volume through the CSI driver. dnv is released under the MIT
-license: [LICENSE](../../LICENSE).
+pod, the Kubernetes unit of one or more containers, a dnv volume through the
+CSI driver. dnv is released under the MIT license: [LICENSE](../../LICENSE).

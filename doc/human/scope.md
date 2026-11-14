@@ -107,10 +107,11 @@ md never trusts an old superblock.
   network section of the operations doc, the document of procedures still
   to be written, with a table of who connects to whom and a firewall
   example.
-- **In Kubernetes every pod reaches dnv's ports.** Every pod reaches the
-  gateway, the agents, etcd, the cdc and the NVMe/TCP ports through its
-  machine's network. Only a firewall rule or a network policy of the
-  operator blocks it. The trust dnv puts in the network is then trust in
+- **In Kubernetes every pod reaches dnv's ports.** A pod is the Kubernetes
+  unit of one or more containers. Every pod reaches the gateway, the
+  agents, etcd, the cdc and the NVMe/TCP ports through its machine's
+  network. Only the operator's firewall rule blocks it, or a network policy
+  that the cluster's network software enforces. The trust dnv puts in the network is then trust in
   every pod. State: procedure to write, a network policy example in the
   CSI tutorial.
 
@@ -140,7 +141,8 @@ the right time.
   the source pool's primary. Not seen in the lab.
 - **A written-block list in pieces can shift.** One piece, one
   `--bm-hex` of dnvctl, covers only part of a large volume or leg, so such
-  a list goes in pieces. A piece carries no block count. A piece before the
+  a list goes in pieces. A piece carries no block count, and dnvctl sends
+  a piece's position only when you give it. A piece before the
   last with a block count that is not a multiple of eight, or a piece sent
   twice without its position, shifts every later block. A migration's copy
   then skips written blocks, and the pool reads old bytes of the new
@@ -155,7 +157,8 @@ the right time.
   eight before the end of the volume, and dnvctl always sends a piece's
   position. Not seen in the lab.
 - **A forced finish of a migration before the copy is whole.** The finish
-  with force skips the proof that the copy is whole. The regions the copy
+  with force skips the proof that the copy is whole, and the old side is
+  removed. The regions the copy
   had not reached read old bytes of the new side's extents, possibly
   another pool's, with no error. State: accepted. The operator asks for
   it with force. Procedure to write, one line in the operations doc: force
@@ -169,8 +172,8 @@ the right time.
 - **A forced start from an older copy restores one group, not the pool.**
   A forced start is an operator's start of a group's RAID1 array from one
   leg they name, when md will not start it by itself. Blocks rewritten
-  since the leg left read old bytes. Blocks first mapped since then read
-  what the leg holds there, possibly another pool's bytes. No error is
+  since the leg left read old bytes. In a data group, blocks first mapped
+  since then read what the leg holds there, possibly another pool's bytes. No error is
   shown. State: accepted. The operator asks for it. Procedure to write:
   the forced-start guide says which leg to choose and what an older copy
   costs.
@@ -232,14 +235,16 @@ Two more things fall under case 1:
 loss in the sense of this document. The application knows. Two cases:
 
 - **A pool runs out of space.** Auto-grow is best effort. A grow fails
-  when it finds no disk node with room or no controller node with budget,
-  or when the slice is at its group bound. Nothing reserves space ahead. A write that needs a
+  when it finds no disk node with room, when one of the pool's controller
+  nodes has no budget left for the new group, or when the slice is at its
+  group bound. Nothing reserves space ahead. A write that needs a
   new block waits for the kernel's no-space timeout and fails. Written
   blocks keep serving. Under the CSI driver the cluster can be
   over-committed. State: accepted. An alert for it is not yet.
-- **Writes wait for the kernel's timers when a disk node dies.** A dead
-  disk node is noticed by the keep-alive alone, about 6 to 10 seconds. md
-  fails the member then, and the writes complete on the other leg. IO sent
+- **Writes wait for the kernel's timers when a disk node dies.** Over
+  NVMe/TCP a dead disk node is noticed by the keep-alive alone, about 6 to
+  10 seconds. md fails the member then, and the writes complete on the
+  other leg. A flush md sent to that leg ends then too, with no error. IO sent
   in the last second before that waits longer, for the fast IO fail
   timeout, the kernel's wait before it fails the IO queued on a lost path:
   5 seconds today, so 11 to 15 seconds in all. An fsync whose flush is in
@@ -284,8 +289,9 @@ error to the host.
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
   mark in memory until the snapshot is recorded as created. An agent
-  restart, a failover or a cntlr replacement in between loses the mark.
-  Delete and re-create a snapshot reported torn. State: fix decided, the
+  restart, a failover or a cntlr replacement in between can lose the
+  mark, and a lost mark leaves no sign. Delete and re-create a snapshot
+  reported torn. State: fix decided, the
   agent saves the mark at once and the worker records it from the first
   report. Not seen in the lab.
 - **A snapshot taken just before a clone into the same volume holds part
@@ -440,13 +446,13 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 |---|---|---|---|
 | A disk fails, one leg of a RAID1 group | md fails the leg. IO goes on over the other leg. Leg repair replaces the leg with a new leg on another disk node, and md copies the data onto it. The old leg becomes a retired leg. | `leg_unhealthy`, 1200 at the default, before the repair starts. | Nothing. In a pool without RAID the data is gone (accepted case 2). |
 | A disk node is down and comes back | md fails its legs after the kernel's keep-alive. IO goes on over the other legs. Back in time, its legs rejoin and md copies the changed regions. Down for long, leg repair moves each leg to another disk node. | `side_unhealthy`, 600 at the default, before the repairs start. | Nothing. A node that never returns needs the node replacement procedure (section 7). |
-| A controller node is down and comes back | Each primary on it is failed over to a standby. Hosts see a pause. Back, its cntlrs are standbys again. A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, plus two check rounds of `cntlr_interval`, 2 each at the default. `cntlr_unhealthy`, 600, before a replacement. | Nothing. |
+| A controller node is down and comes back | Each primary on it is failed over to a standby. Hosts see a pause. Back, its cntlrs are standbys again. A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default; about 4 to 6 seconds in all. `cntlr_unhealthy`, 600, before a replacement. | Nothing. |
 | The network between a controller node and a disk node is cut | As for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. | `leg_unhealthy`, 1200. | Nothing. |
-| The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The host's IO waits on the path. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
+| The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
 | The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over, and their hosts see a pause. With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
 | etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. The workers resume when etcd is back. | None. | Nothing. State: procedure to write, "running while the control plane is down". |
 | A worker, the gateway or the cdc is down and comes back | Another worker takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. | None. | Nothing. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). |
-| An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. A controller node agent away for more than a few seconds has its primaries failed over. | `primary_unhealthy` plus two check rounds, about 4 to 6 seconds at the defaults. | Until the fix, stop the workers first for a planned restart of a controller node agent. State: fix decided, the agent answers "starting" while it restarts (section 6.1). |
+| An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. A controller node agent away for more than a few seconds has its primaries failed over. | `primary_unhealthy` with two check rounds in a row, about 4 to 6 seconds at the defaults. | Until the fix, stop the workers first for a planned restart of a controller node agent. State: fix decided, the agent answers "starting" while it restarts (section 6.1). |
 | A host reboots | Nothing on dnv's side. nvme-stas or the Kubernetes node plugin connects the paths again. | None. | See the host actions in section 7. |
 | All disk nodes of a pool are down at once, as in a switch reload | md marks each array broken under IO. Hosts see IO errors. The broken array makes the primary unhealthy, so the worker fails it over at the primary threshold, even while the nodes are still down. Once the legs are back, the new primary assembles the arrays again. A pool of one cntlr waits for a cntlr replacement at the cntlr threshold. | `primary_unhealthy` for the failover. `cntlr_unhealthy`, 600, for a replacement. | A forced start, when no failover comes. The blocks mapped since the last commit of a broken meta group are gone (accepted case 1). |
 
@@ -524,7 +530,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   blocks every other repair of the group. State: fix decided, the worker
   gives it up past the leg threshold. Not seen in the lab.
 - **After a forced start, members of two identities keep the group down.**
-  mdadm refuses an assembly handed two identities. State: fix decided, the
+  Some legs keep the old identity: the open repair's bad leg, a retired
+  leg whose take-back was refused, a member whose zero failed. mdadm
+  refuses an assembly handed two identities, so a failover or a restart
+  leaves the group down. State: fix decided, the
   primary assembles the members of one identity only. Seen in the lab.
 - **The worker clears a forced-start mark with no start.** md moves a
   broken array between states while it retries a copy. A report from that
@@ -566,8 +575,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   accepted, by design.
 - **A fault only a host sees never fails over.** See the table. On a pool
   with a healthy enabled standby, disabling the primary starts a failover
-  at once, and a disabled cntlr is never replaced, so enable it again
-  after the failover. On a pool with no such standby, a pool of one cntlr
+  at once. A disabled cntlr is never made the primary and never replaced,
+  so enable it again after the failover. On a pool with no such standby, a pool of one cntlr
   among them, a disable starts no failover and takes the primary out of
   the cdc's answer, so a host that follows the discovery log drops its
   last path. State: procedure to write; fix later.
@@ -576,7 +585,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   empty discovery log. With the tutorial's setting, which lets stacd
   disconnect what it connected itself, it drops every path it made at its
   next start or reconfiguration: a reload, a removed controller, a device
-  audit or one of its timers starts one. To restart stafd, stop stacd first, which keeps its
+  audit or one of its timers starts one. This was read in the source of
+  nvme-stas 2.3.1. To restart stafd, stop stacd first, which keeps its
   connections when it stops; restart stafd; once stafd holds its
   connection to the cdc again, start stacd. State: procedure to write,
   the restart order.
@@ -588,7 +598,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   plugin, which takes the cdc list from its deployment on every pass.
 - **A Kubernetes mount does not survive the loss of its subsystem's last
   connection.** The node plugin's connect keeps reconnecting through an
-  outage of every path, however long, and the IO waits. The mount also
+  outage of every path, however long, and the IO waits, for ever if no
+  cntlr of the volume comes back. The mount also
   survives a cntlr replacement on a pool of one cntlr while the old path
   lasts until the new one has joined, since the plugin keeps the old path
   until then. A pod blocked in that IO cannot be
@@ -910,14 +921,16 @@ design:
   kernel's md speed settings bound the copies: the sysctls
   `dev.raid.speed_limit_min` and `dev.raid.speed_limit_max`, which an
   array's own `md/sync_speed_min` and `md/sync_speed_max` override until
-  the array stops. State: accepted. Fix later, after the performance runs:
+  the array stops, as read in the kernel's md source. State: accepted. Fix later, after the performance runs:
   per-pool copy speed settings.
 - **A host discard frees space only over whole aligned blocks on every
   slice.** A thin pool frees whole blocks only, and completes a shorter or
   misaligned discard with success. A cluster created with no stripe gets
   one equal to its block, up to 1 MiB, so at the defaults an aligned 1 MiB
-  discard frees one block. When a pool's stripe is smaller than its block,
-  a discard frees a block on one slice only when it covers nearly the
+  discard frees one block. A pool's stripe is smaller than its block when
+  the pool asks for one, or for a block above 1 MiB, the largest stripe,
+  or when its cluster was created with a smaller stripe, which it keeps.
+  Then a discard frees a block on one slice only when it covers nearly the
   slice count times the block, and `fstrim` can report success and free
   nothing. Read from the kernel's code, not measured. State: accepted.
   Procedure to write, one line on the stripe setting.
