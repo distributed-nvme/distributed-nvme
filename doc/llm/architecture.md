@@ -7002,7 +7002,7 @@ document and only pointed to here.
   observation of every object it holds ages meanwhile and can grow too
   old (`dnv-worker.md` HL7). A `SyncupDn` or `SyncupCn` that the worker
   re-sends at the revision the agent holds keeps no read of a side or a
-  cntlr from ending (`dnagent.md` SH30). Accepted: object locks keep
+  cntlr from ending (`dnagent.md` SH30). What bounds it: object locks keep
   steady-state concurrency, and the zeroing loop's try-acquire rule
   (`dnagent.md` DN9) keeps the one long-running background writer out of
   that queue.

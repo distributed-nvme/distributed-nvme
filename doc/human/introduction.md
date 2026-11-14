@@ -22,7 +22,7 @@ users and decides which storage pools, subsystems and hosts serve each of
 them. dnv promises that layer that the data of one storage pool is never
 readable from another storage pool, unless that layer exports it there itself,
 for example with a transfer, or a step of a caller breaks the promise, as
-[dnv's scope and known limits](scope.md) say. The promise is about what a
+[dnv's scope and known limits](scope.md) says. The promise is about what a
 host can read, not about the network or the nodes: the network under dnv and
 the root user of every node are trusted.
 
@@ -226,7 +226,7 @@ the old side on demand and copies the rest in the background; its metadata
 lives on the disk node's disk, so a reboot resumes the copy. A caller may hand
 the migration the leg's bitmap, the list of the blocks the pool has written on
 the leg, so that the copy skips the rest;
-[dnv's scope and known limits](scope.md) say when to read this list. When the copy
+[dnv's scope and known limits](scope.md) says when to read this list. When the copy
 is complete the operator finishes the migration, and the old side is
 removed.
 
@@ -363,10 +363,11 @@ user and no host beyond its NQN, a name a host can spoof, gRPC is plain text,
 nothing is encrypted, and root on a node can read the old bytes of a recycled
 extent from the raw disk. Deploy dnv on an isolated network you trust.
 
-What dnv promises, the data loss it accepts, what it does not do, and every
-known limit beyond the sizes below, with its state and what to do about it
-where something can be done, are in
-[dnv's scope and known limits](scope.md). Read it before you deploy dnv.
+[dnv's scope and known limits](scope.md) says what dnv promises, the data
+loss it accepts and what it does not do. It also gives every other known
+limit of dnv, with its state and what you can do about it; the sizes
+below and the limits of the test suites are not in it. Read it before you
+deploy dnv.
 
 0.1 publishes no throughput or latency figures. The failover pause was
 measured on the lab VMs as the longest write queued through a failover of a

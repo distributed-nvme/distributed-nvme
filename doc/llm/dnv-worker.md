@@ -5172,7 +5172,8 @@ which no suite case sets, so no suite case runs RW13's count compare.
   hearing progress notifications while it loses events is not found at
   all.
 * **Overlap and gap at every ownership change** (VW7): a few seconds of double
-  driving or of no driving per shard per change. Accepted.
+  driving or of no driving per shard per change; a change is delayed,
+  never skipped.
 * **Undriven windows**: a fresh worker's first grace window; twice the vote
   interval plus the grace time after a crash; the grace time after a graceful
   stop or after a fence — both of which delete their registrations without

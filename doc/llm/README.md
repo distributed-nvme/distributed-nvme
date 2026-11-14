@@ -10,7 +10,8 @@ Read [`core_glossary.md`](../human/core_glossary.md) first: the core words
 in plain language. `glossary.md` defines the full vocabulary the documents
 use. Then read [`scope.md`](../human/scope.md): what dnv promises, the data
 loss it accepts, what it does not do, and every known limit of dnv beyond
-the test suites, with its state. It owns that policy, and a design doc
+the test suites and the enforced sizes, with its state. It owns the
+promise, the accepted loss and the state of each limit; a design doc
 states a limit's mechanism. A change that fixes a known limit, finds a new
 one or moves one to another state edits `scope.md`, and the design doc
 that states the limit's mechanism, in the same change; no lint checks this.

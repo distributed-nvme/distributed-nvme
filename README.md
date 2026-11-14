@@ -19,7 +19,7 @@ a caller breaks this, as [`doc/human/scope.md`](doc/human/scope.md) says.
   of dnv in plain language, the short list to read first.
 - [`doc/human/scope.md`](doc/human/scope.md) — what dnv promises, the data
   loss it accepts, what it does not do, and every known limit of dnv beyond
-  the test suites, with its state.
+  the test suites and the enforced sizes, with its state.
 - [`doc/human/tutorial_all_in_one.md`](doc/human/tutorial_all_in_one.md) — dnv
   on one machine, run from its binaries: the whole system, then a host
   connected to a volume with nvme-stas, every command complete.
