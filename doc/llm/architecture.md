@@ -29,12 +29,10 @@ dnv can be the data plane of a multi-tenant block storage system, for
 example behind Kubernetes or OpenStack Cinder. It knows no tenants and
 authenticates no user: the layer above authenticates its users and decides
 which storage pools, subsystems and hosts serve each of them. What dnv
-promises that layer is that the data of one storage pool is never readable
-from another storage pool, unless that layer exports it there itself, for
-example with a transfer (Transfers), or a caller's step breaks it: a leg
-bitmap read too early for a migration, a forced finish of a migration
-before its copy is whole, or an operator's forced start from an older copy
-(Known limits). The extents a pool frees can go to the
+promises that layer, and the caller's steps that can break the promise,
+are `scope.md`'s: the data of one storage pool is never readable from
+another storage pool, unless that layer exports it there itself, for
+example with a transfer (Transfers). The extents a pool frees can go to the
 sides of any other pool with the bytes they hold, and dm-thin keeps those
 bytes from every host ([D15]): a host reads a pool only through its thin
 devices, a thin device reads a block it has not provisioned as zeros, and
@@ -6880,10 +6878,11 @@ document and the component documents cite it by its id.
 
 ## Known limits
 
-These are the boundaries dnv accepts, stated so that scale, recovery and
-security expectations are explicit rather than discovered. None of them is
-a defect in the mechanisms above. A limit of one component is stated in
-that component's document and only pointed to here.
+These are the limits of the design, each with its mechanism, stated so
+that scale, recovery and security expectations are explicit rather than
+discovered. Whether dnv accepts a limit or fixes it, and its state, is
+`scope.md`'s. A limit of one component is stated in that component's
+document and only pointed to here.
 
 * **One primary per SP is the volume throughput ceiling.** Every td of an
   SP is served by its single primary cntlr; slices shard *within* that CN,

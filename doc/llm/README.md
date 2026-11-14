@@ -8,7 +8,13 @@ name whom is `layout.md`, Human docs and LLM docs.
 
 Read [`core_glossary.md`](../human/core_glossary.md) first: the core words
 in plain language. `glossary.md` defines the full vocabulary the documents
-use. Then read `architecture.md`, the design as a whole: the object model,
+use. Then read [`scope.md`](../human/scope.md): what dnv promises, the data
+loss it accepts, what it does not do, and every known limit of dnv beyond
+the test suites, with its state. It owns that policy, and a design doc
+states a limit's mechanism. A change that fixes a known limit, finds a new
+one or moves one to another state edits `scope.md`, and the design doc
+that states the limit's mechanism, in the same change; no lint checks this.
+Then read `architecture.md`, the design as a whole: the object model,
 the device stacks, naming, the etcd data model, allocation, common
 validation, the `Gateway` API contract, the agent and worker contracts, the
 procedures that span components and the design decisions. The other

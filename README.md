@@ -10,13 +10,16 @@ multi-tenant block storage system, for example behind Kubernetes or OpenStack
 Cinder: it leaves the authentication of users to the layer above, and it keeps
 the data of one storage pool unreadable from any other storage pool unless
 that layer exports it there itself, for example with a transfer, or a step of
-a caller breaks this, as the limits in the introduction say.
+a caller breaks this, as [`doc/human/scope.md`](doc/human/scope.md) says.
 
 - [`doc/human/introduction.md`](doc/human/introduction.md) — what dnv is for,
   its six programs, how it is built up and how it behaves, with diagrams;
   what it needs, what 0.1 is, and how to get it.
 - [`doc/human/core_glossary.md`](doc/human/core_glossary.md) — the core words
   of dnv in plain language, the short list to read first.
+- [`doc/human/scope.md`](doc/human/scope.md) — what dnv promises, the data
+  loss it accepts, what it does not do, and every known limit of dnv beyond
+  the test suites, with its state.
 - [`doc/human/tutorial_all_in_one.md`](doc/human/tutorial_all_in_one.md) — dnv
   on one machine, run from its binaries: the whole system, then a host
   connected to a volume with nvme-stas, every command complete.

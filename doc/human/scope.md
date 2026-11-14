@@ -970,12 +970,12 @@ design:
 ## 11. How this document is kept
 
 - The LLM reads in this order: the core glossary, this document, then the
-  design documents. This document owns the policy: the
-  promise, the accepted loss, the states of the limits. A design document
-  keeps the mechanism of a limit in its own section of known limits.
-- A change that fixes a limit, adds one, or moves one between the states
-  edits this document in the same change. A limit found during the work
-  is written in this document and in the design document's known limits.
-  A review checks it. No lint checks it today.
+  design documents. This document owns the policy: the promise, the
+  accepted loss, the states of the limits. A design document states the
+  mechanism of a limit.
+- A change that fixes a limit, finds a new one, or moves one to another
+  state edits this document, and the design document that states the
+  limit's mechanism, in the same change. A review checks it. No lint
+  checks it today.
 - This document names no release. The introduction says what a release
   holds and gives its figures.
