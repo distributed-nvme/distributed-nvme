@@ -526,8 +526,10 @@ func (s *DnAgentServer) runMigrDst(
 // group is the half that records the last decision: a pass that takes the
 // stacks off the dm-clone moves the namespaces to the inaccessible group even
 // when its reload of a dm-linear is refused, and that dm-linear stays on the
-// dm-clone (a reload fails closed, and a later pass's pre-step resumes it
-// there, unfenceLinears). Read from the table alone, such a dm-linear would
+// dm-clone (a reload fails closed; a later pass's pre-step resumes the
+// primary's there when no dm-error table waits on it, unfenceLinears, and
+// the build reloads any other). Read from the table alone, such a dm-linear
+// would
 // put a stopped pass back on a dm-clone whose source is gone. Any per-CN
 // stack counts, not only the primary's: a primary flip that arrives in a
 // stopped pass then moves the serving path to the new primary at once, the
@@ -556,7 +558,16 @@ func (s *DnAgentServer) migrCloneMapped(
 		if dev == nil {
 			continue
 		}
-		targets, err := s.dm.Table(ctx, name)
+		// A suspended linear with a table waiting is a reload cut after its
+		// load: the waiting table, not the live one, is where its last pass
+		// put the stack. Read from the live table, a promotion onto the
+		// dm-clone cut after its load would read down, and its stack would
+		// be resumed on its dm-error, failing the IO it holds.
+		read := s.dm.Table
+		if dev.Suspended && dev.Waiting {
+			read = s.dm.WaitingTable
+		}
+		targets, err := read(ctx, name)
 		if err != nil {
 			answer = migrCloneUnread
 			continue

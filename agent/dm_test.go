@@ -477,6 +477,12 @@ func TestDmInfoDevNo(t *testing.T) {
 			want: &DmDevInfo{DevNo: "252:2", Suspended: true},
 		},
 		{
+			name: "suspended with a table waiting",
+			dev:  "dnvprobe-susp",
+			run:  exitedWith(0, "dnvprobe-susp/252/2/LIsw\n", ""),
+			want: &DmDevInfo{DevNo: "252:2", Suspended: true, Waiting: true},
+		},
+		{
 			name: "a name that holds the concise escapes",
 			dev:  labOddName,
 			run:  exitedWith(0, labOddName+"/252/0/L--w\n", ""),
@@ -564,6 +570,88 @@ func TestDmInfoDevNo(t *testing.T) {
 					"dmsetup "+strings.Join(argv, " ")+":") {
 					t.Errorf("error %q does not name the read", err)
 				}
+			}
+		})
+	}
+}
+
+// dmsetupRecording answers every dmsetup run with exit status 0, but for
+// the one command line failing, which exits 1, and records each command
+// line it ran in *ran.
+func dmsetupRecording(
+	t *testing.T,
+	failing []string,
+	ran *[][]string,
+) *common.FakeOsClient {
+	t.Helper()
+	return &common.FakeOsClient{
+		RunCommandFn: func(
+			_ context.Context, name string, args []string, _ string,
+		) (string, string, int, error) {
+			if name != "dmsetup" {
+				t.Errorf("ran %s %q, want dmsetup", name, args)
+				return "", "", 127, errors.New("unexpected command")
+			}
+			*ran = append(*ran, slices.Clone(args))
+			if slices.Equal(args, failing) {
+				return "", "refused", 1, errors.New("exit status 1")
+			}
+			return "", "", 0, nil
+		},
+	}
+}
+
+// TestDmResumeClearsTheWaitingTable pins the one rule of a resume: Resume
+// drops the waiting table before it resumes, so it can only make live the
+// table its caller compared, and a clear that fails resumes nothing. A
+// reload's own resume clears nothing, since its waiting table is the one it
+// has just loaded.
+func TestDmResumeClearsTheWaitingTable(t *testing.T) {
+	ctx := context.Background()
+	const dev = "dnv-x"
+	table := ErrorTable(8)
+	for _, tc := range []struct {
+		name    string
+		run     func(*Dm) error
+		failing []string
+		want    [][]string
+		wantErr bool
+	}{
+		{
+			name: "resume",
+			run:  func(d *Dm) error { return d.Resume(ctx, dev) },
+			want: [][]string{{"clear", dev}, {"resume", dev}},
+		},
+		{
+			name:    "resume whose clear fails",
+			run:     func(d *Dm) error { return d.Resume(ctx, dev) },
+			failing: []string{"clear", dev},
+			want:    [][]string{{"clear", dev}},
+			wantErr: true,
+		},
+		{
+			name: "reload",
+			run:  func(d *Dm) error { return d.Reload(ctx, dev, table) },
+			want: [][]string{{"suspend", dev},
+				{"reload", dev, "--table", table}, {"resume", dev}},
+		},
+		{
+			name: "multi-target reload",
+			run: func(d *Dm) error {
+				return d.ReloadMulti(ctx, dev, table+"\n")
+			},
+			want: [][]string{{"suspend", dev}, {"reload", dev},
+				{"resume", dev}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ran [][]string
+			err := tc.run(NewDm(dmsetupRecording(t, tc.failing, &ran)))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want an error: %v", err, tc.wantErr)
+			}
+			if !slices.EqualFunc(ran, tc.want, slices.Equal[[]string]) {
+				t.Fatalf("ran %q, want %q", ran, tc.want)
 			}
 		})
 	}

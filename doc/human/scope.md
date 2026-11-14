@@ -454,6 +454,14 @@ The entries:
   primaries' paths live on the side, until the pool's next revision or an
   agent restart. State: fix decided, the fence comes first, before any
   other step of the failover. Not seen in the lab.
+- **A failback right after a failed fence can write old data.** Silent. A
+  fence that suspends the old primary's path and then fails to load the
+  error table leaves that path suspended on the side, holding the old
+  primary's writes. If the next change makes that controller node the
+  primary again before any later pass fences it, those held writes land on
+  the side after the other primary's newer writes. It needs a failed table
+  load and a failback before any later syncup of the side, whose converge
+  fences the path again first. State: fix later. Not seen in the lab.
 - **dnvctl parses an id with leading zeros as octal.** An id copied from a
   device name can name another object. A forced start or a delete can act
   on the wrong group or leg. State: fix decided, dnvctl refuses such an

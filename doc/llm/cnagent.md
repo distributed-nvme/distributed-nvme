@@ -2399,7 +2399,12 @@ that such a failure, an interrupted `Reload`, or an agent
 killed inside CN14's quiesce bracket left, and every path that meets it
 resumes it — by a reload or by a bare resume, never by leaving it; one
 whose reload keeps failing its load stays suspended, queueing its IO,
-until a reload or a resume of it succeeds. An unwanted one that no path
+until a reload or a resume of it succeeds. A bare resume keeps the live
+table the path compared: it drops a table a stopped reload left waiting
+(`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), so an
+unpark that finds the park's dm-error table waiting under a live table
+that is the one it wants resumes the ns-dev on that table and never on the
+park's. An unwanted one that no path
 of a pass meets — below a layer the chain stopped at, or anywhere on a
 pass whose sweep an unanswered listing stopped (CN21) — is met by the
 first pass whose chain reaches it. `ensureNsDev` bare-resumes a device

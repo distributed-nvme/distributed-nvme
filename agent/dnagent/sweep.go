@@ -413,10 +413,10 @@ func (s *DnAgentServer) runChain(
 	// and not only under a side torn down inside the cutover window: a level
 	// raised to SP_LEVEL_NO_SIDE keeps the linears and takes only the exports
 	// off them ([D12]). A SyncupSide that also ends the source role gets here
-	// with the side's linears already resumed by its pre-step
+	// with the side's linears that its pre-step may resume already resumed
 	// (unfenceLinears), against the tables they were suspended with — the
-	// role ending's own rule (DN12) — so P0 retires only one that resume left
-	// suspended. A linear P0 cannot prove out of suspension stops the descent
+	// role ending's own rule (DN12) — so P0 retires only one that pre-step
+	// left suspended. A linear P0 cannot prove out of suspension stops the descent
 	// before L1, as a layer that left something behind does. Below every
 	// export it removes, P0 also resumes every suspended device of ours its
 	// live tables map down to the disk (releaseStacks): a dm-clone or a side
@@ -746,10 +746,18 @@ func (s *DnAgentServer) retireIfSuspended(
 		err = fmt.Errorf("table has %d targets, want 1", len(targets))
 	}
 	if err == nil {
+		// The dm-error is ensured first: one a removal took away, or never
+		// built, would fail the retire on every pass and stop the sweep
+		// before its first layer for good. When the desired state does not
+		// name it either, this pass, whose listing came before it, leaves it,
+		// and the next pass's sweep removes it.
 		errName := s.nf.DnErrorName(lin.ClusterId, lin.NodeId,
 			lin.Ids[0], lin.Ids[1], lin.Ids[2])
-		err = s.ensureDmLinear(ctx, name, targets[0].Length,
-			s.nf.DmPath(errName))
+		err = s.ensureDmError(ctx, errName, targets[0].Length)
+		if err == nil {
+			err = s.ensureDmLinear(ctx, name, targets[0].Length,
+				s.nf.DmPath(errName))
+		}
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "retiring a suspended dm-linear failed",
@@ -1400,10 +1408,10 @@ func (s *DnAgentServer) sidePreSteps(
 		// must be resumed, or it stays suspended until something else happens
 		// to converge it — and a suspended dm target queues bios with no
 		// timeout ([D12]). The set comes from the enumeration, not from a
-		// remembered cn list. It also resumes a linear that a primary flip's
-		// failed reload left suspended, which releases the old primary's
-		// queued IO onto the side's data: a known limit (unfenceLinears;
-		// dnagent.md, Known limits).
+		// remembered cn list. A linear whose resume would let IO the side
+		// does not want reach its data — one a primary flip's failed reload
+		// left on the side device — is left for its reload onto its
+		// dm-error (unfenceLinears, DN12 rule 2).
 		s.unfenceLinears(ctx, plan, actual)
 	} else if !plan.wantExport {
 		// A source whose level has no export layer ENDS its window: nothing
@@ -1424,8 +1432,8 @@ func (s *DnAgentServer) sidePreSteps(
 	// job; on any other side unfenceLinears, just above, has tried to end it
 	// (a failed reload can leave a device suspended: a reload fails closed,
 	// dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), and one
-	// still suspended — its probe or its resume
-	// failed — is the build phase's to reload or resume.
+	// still suspended — its probe or its resume failed, or unfenceLinears
+	// left it for its reload — is the build phase's to reload or resume.
 	if !plan.wantDm {
 		return
 	}

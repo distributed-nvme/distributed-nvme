@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/bits"
+	"sort"
 	"strconv"
 	"time"
 
@@ -685,6 +686,11 @@ func (s *DnAgentServer) ensureCnDm(
 				fenceStatus(err), fenceDetails(err))
 			continue
 		}
+		if err = s.finishFence(ctx, plan, linName, cnId); err != nil {
+			info.CnIdToDmLinear[cnId] = st.tracker.Err(
+				linKey, linName, err.Error())
+			continue
+		}
 		backing := plan.linearBacking(cnId, cloneLive)
 		err = s.ensureDmLinear(ctx, linName, plan.sectors, backing)
 		info.CnIdToDmLinear[cnId] = st.tracker.FromErr(
@@ -695,38 +701,179 @@ func (s *DnAgentServer) ensureCnDm(
 	}
 }
 
-// unfenceLinears resumes every per-CN dm-linear this side left suspended.
-// The queued IO drains against whatever table is live — for a fenced linear
-// its pre-fence one — which is the same thing the end of the window would
-// have done, only without the dm-error swap the side no longer needs. A
-// linear that a primary flip's failed reload left suspended on its old
-// table still needs that swap, and resuming it here releases the old
-// primary's queued IO onto the side's data ahead of any retry of the
-// reload: a known limit (a reload fails closed; dnagent.md, Known limits).
+// unfenceLinears ends the suspension of every per-CN dm-linear of this side
+// it finds suspended, onto a table the IO the linear holds may go to. A
+// linear whose own dm-error waits is a fence cut after its load: that table
+// is made live (Dm.FinishReload), whatever the CN is now, so the IO held at
+// the fence fails (finishFence). Any other goes onto, for the primary, the
+// device it serves through — the side device, or on a migration destination
+// its dm-clone — and then its own dm-error; for any other CN its own
+// dm-error alone, where the IO fails. It tries those targets in that order,
+// and for each takes the live table when it maps the target, resumed with
+// any waiting table dropped (Dm.Resume), and otherwise a waiting table that
+// maps it, made live (Dm.FinishReload): a promotion cut after its load,
+// whose held IO is then served. So a fenced linear of a migration that is
+// over ends as the end of the window would have ended it, only without the
+// dm-error swap the side no longer needs: a standby's held IO fails, the
+// primary's reaches the device it serves through.
+//
+// Any other suspended linear is left suspended: one that is not the primary
+// and whose live table maps the side device, with no waiting dm-error — a
+// demotion whose load failed — whose resume would let the old primary's
+// queued IO write the side's data; and one whose tables or whose targets'
+// numbers cannot be read. The build phase reloads a wanted one onto the
+// table it wants (ensureDmLinear), and the sweep retires one the desired
+// state no longer names onto its dm-error before it removes it
+// (retireIfSuspended); each reload fails what a fenced linear holds ([D12]).
+// One neither reaches stays suspended and queues its IO, the closed side.
 //
 // The set of devices comes from the ENUMERATION, not from a remembered cn
 // list: a linear built for a CN that has since left standby_id_list is
-// exactly the one a remembered list would miss, and leaving it suspended
-// would queue bios with no timeout ([D12]).
+// exactly the one a remembered list would miss.
 func (s *DnAgentServer) unfenceLinears(
 	ctx context.Context,
 	plan *sidePlan,
 	actual *dnActual,
 ) {
-	ofSide := func(dn common.DmName) bool {
-		return dn.Ids[0] == plan.spId && dn.Ids[1] == plan.sideId
+	names := make([]string, 0)
+	for name, dn := range actual.ours {
+		if dn.Kind == common.DmKindDnLinear && len(dn.Ids) == 3 &&
+			dn.Ids[0] == plan.spId && dn.Ids[1] == plan.sideId {
+			names = append(names, name)
+		}
 	}
-	for _, name := range actual.dmsOfKind(common.DmKindDnLinear, ofSide) {
+	sort.Strings(names)
+	for _, name := range names {
 		dev, err := s.dm.Info(ctx, name)
 		if err != nil || dev == nil || !dev.Suspended {
 			continue
 		}
-		if err := s.dm.Resume(ctx, name); err != nil {
+		finish, resume, reason := s.unfenceStep(
+			ctx, plan, name, actual.ours[name].Ids[2], dev.Waiting)
+		switch {
+		case finish:
+			err = s.dm.FinishReload(ctx, name)
+		case resume:
+			err = s.dm.Resume(ctx, name)
+		default:
+			slog.InfoContext(ctx, "leaving a suspended dm-linear "+
+				"for its reload",
+				slog.String("name", name),
+				slog.String("reason", reason))
+			continue
+		}
+		if err != nil {
 			slog.ErrorContext(ctx, "resuming a fenced dm-linear failed",
 				slog.String("name", name),
 				slog.String("error", err.Error()))
 		}
 	}
+}
+
+// waitsOnOwnError reports whether the table waiting on name, the per-CN
+// dm-linear of cnId on this side, maps that CN's own dm-error: a fence whose
+// reload was cut after its load.
+func (s *DnAgentServer) waitsOnOwnError(
+	ctx context.Context,
+	plan *sidePlan,
+	name string,
+	cnId uint64,
+) (bool, error) {
+	next, err := s.dm.WaitingTable(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	errNo, err := s.dm.DevNo(ctx, s.nf.DmPath(plan.errName(cnId)))
+	if err != nil {
+		return false, err
+	}
+	return linearMaps(next, plan.sectors, errNo), nil
+}
+
+// finishFence ends a fence cut after its load on the per-CN dm-linear of
+// cnId, before the build phase converges it: when the linear is suspended
+// with its own dm-error waiting, it makes that table live
+// (Dm.FinishReload), which fails the IO the linear held at the fence. A
+// resume of the live table instead would drop the dm-error and release that
+// IO onto the side's data, though another CN may have written there since,
+// as on a failback after a demotion whose resume did not run. A linear with
+// a table waiting whose read does not answer is an error: the build leaves
+// it suspended for this pass.
+func (s *DnAgentServer) finishFence(
+	ctx context.Context,
+	plan *sidePlan,
+	name string,
+	cnId uint64,
+) error {
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil || dev == nil || !dev.Suspended || !dev.Waiting {
+		return err
+	}
+	fenced, err := s.waitsOnOwnError(ctx, plan, name, cnId)
+	if err != nil || !fenced {
+		return err
+	}
+	return s.dm.FinishReload(ctx, name)
+}
+
+// unfenceStep is unfenceLinears' choice for the suspended linear name of
+// cnId: finish its waiting table, resume its live one, or neither, with the
+// reason. waiting says a table waits on it.
+func (s *DnAgentServer) unfenceStep(
+	ctx context.Context,
+	plan *sidePlan,
+	name string,
+	cnId uint64,
+	waiting bool,
+) (finish bool, resume bool, reason string) {
+	// A fence in progress first: a dm-error waiting on the linear is a
+	// reload onto it cut after its load, and the IO the linear holds was
+	// held at that fence, so it must fail, whatever the CN is now.
+	if waiting {
+		fenced, err := s.waitsOnOwnError(ctx, plan, name, cnId)
+		if err != nil {
+			return false, false, err.Error()
+		}
+		if fenced {
+			return true, false, ""
+		}
+	}
+	targets := []string{s.nf.DmPath(plan.errName(cnId))}
+	if cnId == plan.primaryCnId {
+		serving := plan.sideDevPath
+		if plan.migrDst != nil {
+			serving = s.nf.DmPath(plan.migrFinalName())
+		}
+		targets = []string{serving, targets[0]}
+	}
+	live, err := s.dm.Table(ctx, name)
+	if err != nil {
+		return false, false, err.Error()
+	}
+	var next []common.DmTarget
+	if waiting {
+		if next, err = s.dm.WaitingTable(ctx, name); err != nil {
+			return false, false, err.Error()
+		}
+	}
+	var unread error
+	for _, target := range targets {
+		devNo, err := s.dm.DevNo(ctx, target)
+		if err != nil {
+			unread = err
+			continue
+		}
+		switch {
+		case linearMaps(live, plan.sectors, devNo):
+			return false, true, ""
+		case waiting && linearMaps(next, plan.sectors, devNo):
+			return true, false, ""
+		}
+	}
+	if unread != nil {
+		return false, false, unread.Error()
+	}
+	return false, false, "neither table maps a device its IO may go to"
 }
 
 func fenceStatus(err error) pb.ResStatus {

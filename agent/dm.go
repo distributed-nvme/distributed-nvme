@@ -29,6 +29,10 @@ func NewDm(oc common.OsClient) *Dm {
 type DmDevInfo struct {
 	Suspended bool
 	ReadOnly  bool
+	// Waiting says a table waits in the device's second slot, the one
+	// dmsetup calls inactive: a reload's load went through and no resume
+	// has made it live (Reload, Resume).
+	Waiting bool
 	// DevNo is the device's "major:minor", the form a dm table names a
 	// device in. Only ListInfo and InfoDevNo read it; Info leaves it empty,
 	// and so does a line whose numbers do not parse.
@@ -39,14 +43,18 @@ type DmDevInfo struct {
 // (I)nactive, (s)uspended, (r)ead-only, read-(w)rite"), e.g. `L--w` for a
 // live, resumed, writeable device and `L-sw` for a suspended one.
 const (
+	dmAttrWaitingIdx   = 1
 	dmAttrSuspendedIdx = 2
 	dmAttrReadOnlyIdx  = 3
 )
 
 // dmAttrInfo reads the flags of one attr column. A column too short to hold
-// a flag reads as resumed and writeable.
+// a flag reads as resumed and writeable, with no table waiting.
 func dmAttrInfo(attr string) *DmDevInfo {
 	info := &DmDevInfo{}
+	if len(attr) > dmAttrWaitingIdx && attr[dmAttrWaitingIdx] == 'I' {
+		info.Waiting = true
+	}
 	if len(attr) > dmAttrSuspendedIdx && attr[dmAttrSuspendedIdx] == 's' {
 		info.Suspended = true
 	}
@@ -365,6 +373,20 @@ func (d *Dm) Table(
 	return common.ParseDmLines(stdout), nil
 }
 
+// WaitingTable returns the parsed table that waits in a device's second slot
+// (`dmsetup table --inactive`), empty when none waits.
+func (d *Dm) WaitingTable(
+	ctx context.Context,
+	name string,
+) ([]common.DmTarget, error) {
+	args := []string{"table", "--inactive", name}
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", args...)
+	if err != nil {
+		return nil, cmdError("dmsetup", args, stdout, stderr, exitCode, err)
+	}
+	return common.ParseDmLines(stdout), nil
+}
+
 // Status returns the raw `dmsetup status` output (the dm-clone hydration
 // line rides into ResInfo.details verbatim; architecture.md,
 // Live-state reporting). Without the noflush flag the kernel commits the
@@ -401,8 +423,10 @@ func (d *Dm) Create(
 	return d.runOk(ctx, "dmsetup", "create", name, "--table", table)
 }
 
-// LoadTable stages an inactive single-target table; it takes effect on the
-// next resume. Never read-only, for the [D11] reasons above.
+// LoadTable stages a single-target table as the device's waiting table,
+// which dmsetup calls the inactive one; Reload's own resume makes it live,
+// and nothing else does (Resume). Never read-only, for the [D11] reasons
+// above.
 func (d *Dm) LoadTable(
 	ctx context.Context,
 	name string,
@@ -421,7 +445,11 @@ func (d *Dm) LoadTable(
 // serve it again and replay onto it the IO the suspend absorbed. A resume that
 // fails can leave the device suspended as well (one killed at the SH15 timeout
 // may also have completed), and so can a suspend killed after it took effect.
-// The device then queues its IO until a later reload or resume of it succeeds;
+// A load that went through and a resume that never reached the kernel —
+// killed or refused before its call, or an agent that stopped between the
+// two commands — leave the new table waiting; Resume clears it, so no later
+// resume makes it live unread. The device then queues its IO until a later
+// reload or resume of it succeeds;
 // the kernel treats a suspend of an already suspended device as a no-op, so
 // running Reload again retries just the load and the resume.
 // Short of a failed command or a restarted agent, no dnv suspension outlives
@@ -443,7 +471,7 @@ func (d *Dm) Reload(
 	if err := d.LoadTable(ctx, name, table); err != nil {
 		return err
 	}
-	return d.Resume(ctx, name)
+	return d.resumeLoaded(ctx, name)
 }
 
 // CreateMulti / ReloadMulti build or swap a **multi-target** table. dmsetup's
@@ -473,15 +501,41 @@ func (d *Dm) ReloadMulti(
 		ctx, tableLines, "dmsetup", "reload", name); err != nil {
 		return err
 	}
-	return d.Resume(ctx, name)
+	return d.resumeLoaded(ctx, name)
 }
 
 func (d *Dm) Suspend(ctx context.Context, name string) error {
 	return d.runOk(ctx, "dmsetup", "suspend", name)
 }
 
+// Resume resumes a device on the live table its caller compared: it first
+// drops any waiting table with `dmsetup clear`, then resumes. A plain
+// `dmsetup resume` makes a waiting table live, and a reload that stopped
+// after its load leaves one, so without the clear a resume meant to keep a
+// fenced device on its dm-error could put it back on the table that maps
+// the side's data (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`,
+// `nvmehost.go`). A clear that fails returns its error and resumes nothing:
+// the device stays suspended, the closed side, as after a reload that fails.
+// Clearing a device with no waiting table changes nothing.
 func (d *Dm) Resume(ctx context.Context, name string) error {
+	if err := d.runOk(ctx, "dmsetup", "clear", name); err != nil {
+		return err
+	}
+	return d.resumeLoaded(ctx, name)
+}
+
+// resumeLoaded is the resume of Reload and ReloadMulti, the resume that keeps
+// the waiting table: the table its own load just put there.
+func (d *Dm) resumeLoaded(ctx context.Context, name string) error {
 	return d.runOk(ctx, "dmsetup", "resume", name)
+}
+
+// FinishReload ends a reload that stopped after its load: a plain resume,
+// which makes the waiting table live. It is for a caller that has read the
+// waiting table (WaitingTable) and wants it live; every other resume goes
+// through Resume, which drops it.
+func (d *Dm) FinishReload(ctx context.Context, name string) error {
+	return d.resumeLoaded(ctx, name)
 }
 
 func (d *Dm) Remove(ctx context.Context, name string) error {

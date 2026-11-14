@@ -677,23 +677,43 @@ resuming the old table after a failed load would leave the old primary live
 on the side device beside the new one, or replay onto the side's data the
 IO the cutover window absorbed. Suspended, the device serves nothing and
 writes nothing; the cost is liveness. Its bios queue with no timeout
-([D12]) until a later reload or resume of it succeeds. On the dn, the build
-phase reloads a device whose live table is not the one it wants and resumes
-one whose live table is, a fenced linear inside its cutover window aside;
-the step before the sweep's first layer reloads onto its dm-error a
-suspended linear it is about to remove or unexport, and resumes, on
-whatever table is live, every other suspended device of the node's under
-an export it is about to remove (DN6); the sweep of a side
-that plays no migration source resumes each per-CN dm-linear of the side it
-finds suspended, on whatever table is live (DN12 rule 2); and the sweep's
-removal of a dm device of any kind resumes one it finds suspended, on
-whatever table is live, before the `dmsetup remove`, which does not succeed
-on a suspended device (`removeDm`). The cn's paths are
-`cnagent.md` CN16's. The rule is the wrappers', so it holds for every reload
-of either role, the ones that fence nothing — a grow, a repoint — included,
-and [D12]'s bound on a suspension holds only as far as the reloads succeed;
-what the rule-2 resume costs when a flip's reload failed its load is a
-known limit (Known limits).
+([D12]) until a later reload or resume of it succeeds.
+
+**A resume keeps the live table.** A load that went through and a resume
+that never reached the kernel — killed or refused before its call, or an
+agent that stopped between the two commands — leave the new table waiting:
+`dmsetup` calls it the inactive table, and a plain `dmsetup resume` makes
+it live. `Dm.Resume` drops a waiting table with `dmsetup clear` and then
+resumes, so a resume keeps the live table and never makes live one a
+stopped reload left waiting. A clear that fails resumes nothing: the device
+stays suspended, as after a reload that fails. Two resumes keep the waiting
+table: the one inside `Dm.Reload` and `Dm.ReloadMulti`, whose waiting table
+is the one its own load has just put there, and `Dm.FinishReload`, which a
+caller uses only after it has read the waiting table (`Dm.WaitingTable`)
+and wants it live, as DN12 rule 2 and DN10's build do. The attr column's
+second place says whether a table waits (`DmDevInfo.Waiting`). Reason: a
+dm-linear whose reload onto the side device stopped after its load, and
+that the next request wants on its dm-error again, would be put on the
+side's data by a plain resume; one rule in the wrapper covers every resume
+of both roles, and one added later cannot forget it.
+
+On the dn, the build phase first finishes on its dm-error a per-CN linear
+whose own dm-error waits (DN10), then reloads a device whose live table is
+not the one it wants and resumes one whose live table is, a fenced linear
+inside its cutover window aside; the step before the sweep's first layer
+reloads onto its dm-error a suspended linear it is about to remove or
+unexport, and resumes, on whatever table is live, every other suspended
+device of the node's under an export it is about to remove (DN6); the sweep
+of a side that plays no migration source finishes a fence cut after its
+load on any per-CN dm-linear of the side it finds suspended, and ends the
+suspension of any other onto a table its held IO may go to, leaving the
+rest for the build phase's reload (DN12 rule 2); and the sweep's removal of
+a dm device of any kind resumes one it finds suspended, on whatever table
+is live, before the `dmsetup remove`, which does not succeed on a suspended
+device (`removeDm`). The cn's paths are `cnagent.md` CN16's. The rule is
+the wrappers', so it holds for every reload of either role, the ones that
+fence nothing — a grow, a repoint — included, and [D12]'s bound on a
+suspension holds only as far as the reloads succeed.
 
 **A refusal a caller decides by is typed.** A command that fails comes
 back as an error of its own type (`CmdError`): its text is the command
@@ -2014,7 +2034,11 @@ top-down. Every position is a dependency, not a preference.
 
 *Before the first layer*, every suspended per-CN dm-linear the pass is
 about to remove, or whose export it is about to remove — wanted or not — is
-put on its dm-error and resumed: DN12's phase 2, brought forward. L1
+put on its dm-error and resumed: DN12's phase 2, brought forward. A
+dm-error that is gone is built first, or the step would fail on every pass;
+when the desired state does not name it, the pass leaves it, listed before
+the step built it, and the next pass's sweep removes it, the read between
+naming it as a leftover. L1
 disables the nvmet namespace above it, and that write first waits for every
 request in flight on the namespace; one whose bio a suspended dm target
 holds never completes, since such a target queues bios with no timeout and
@@ -2028,8 +2052,9 @@ resume would free the device too, but against the table it was suspended
 with — the primary CN's maps the side's data — so what the window absorbed
 would be replayed onto it; against the dm-error it fails instead. The one
 exception is a request that also ends the source role: its pre-step has
-already made that bare resume, which is that role ending's own rule (DN12),
-so this step retires only a linear the resume left suspended. The same step
+already made that bare resume where that role ending's own rule allows it
+(DN12 rule 2), so this step retires only a linear the pre-step left
+suspended. The same step
 then walks the live tables down from the namespace device of every export
 the pass removes — the per-CN linear of a side export, the migration
 source's linear of a `MigrSrcNqn` export, read off its namespace's
@@ -2181,8 +2206,8 @@ On a migration source that is the fence's suspension, deliberate, and
 ending it is the fence's own job (DN12); on any other side DN12 rule 2's
 resume, which the same pass runs just before, has tried to end it (a failed
 reload can leave a device suspended, OS wrappers), and one still suspended
-— its probe or its resume failed — is the build phase's to reload or
-resume.
+— its probe or its resume failed, or the rule left it for its reload onto
+its dm-error — is the build phase's to reload or resume.
 
 **The verdict.** Whatever a pass could not remove, plus any enumeration
 that did not answer, is what the reply's `agent_reply` and the observation
@@ -2460,9 +2485,15 @@ namespace joins `AnaGrpIdOptimized`, standbys join `AnaGrpIdNonOptimized`
 ([D4]; overridden by the migration phases below and by `sp_level`). A
 `primary_cn_id` change reloads the dm-linear tables and rewrites the two
 "ana_grpid"s — nothing else. A reload of the old primary's linear whose
-load fails leaves it suspended on its old table (OS wrappers), where DN12
-rule 2's resume can release its queued IO onto the side's data (Known
-limits).
+load fails leaves it suspended on its old table (OS wrappers); DN12 rule
+2's resume leaves it so while the CN is not the primary, and the next
+converge's reload puts it on its dm-error, which fails the IO it queued;
+a request that makes the CN the primary again first is a known limit
+(Known limits). One whose load went through and
+whose resume never ran has its dm-error waiting: the next pass makes that
+table live before anything else touches the linear (DN12 rule 2,
+`finishFence`), so the IO it held at the fence fails whatever the CN is by
+then.
 
 DN11. **`sp_level` gating** (`architecture.md`, SpLevel; numeric
 comparisons — the enum values are ordered). Levels are desired state:
@@ -2565,19 +2596,46 @@ Four rules keep the suspension bounded, which is what makes it safe:
   normal targets, resumed. The condition is a **state**, not an event:
   every converge of a side whose *effective* `migr_src_conf` is absent —
   dropped, or deferred behind `dst_provisioned` false — clears the window
-  and resumes every per-CN dm-linear of that side it finds suspended
+  and resumes the per-CN dm-linears of that side it finds suspended
   (`unfenceLinears`), unless its sweep could not list the node's dm
   devices (DN6), so nothing has to remember that a window was ever
   opened. The set comes from the **enumeration** of what the node holds,
   not from the plan's cn list: a linear built for a CN that has since left
   `standby_id_list` is exactly the one a remembered list would miss, and
-  leaving it suspended would queue bios with no timeout. The resume alone
-  is enough — the queued IO drains against whatever table is live, here
-  the pre-fence one, and the build phase then reloads the linear onto the
-  target the new desired state wants. The same resume also meets a linear
-  that a primary flip's failed reload left suspended on its old table
-  (DN10), and there it is not enough: it releases the old primary's queued
-  IO onto the side's data ahead of any retry of that reload (Known limits).
+  leaving it suspended would queue bios with no timeout. A linear whose
+  own dm-error waits on it is a fence cut after its load: that table is
+  made live (`Dm.FinishReload`), whatever the CN is now, so the IO held at
+  the fence fails; the build phase does the same before it converges a
+  linear (DN10). Reason: on a failback after a demotion whose resume did
+  not run, that IO is older than what the other primary wrote to the side
+  since. Any other linear ends its suspension onto a table the IO it holds
+  may go to: for the primary the device it serves through — the side
+  device, or on a migration destination its dm-clone — and then its own
+  dm-error; for any other CN its own dm-error alone, where the IO fails.
+  It tries those targets in that order, and for each takes the live table
+  when it maps the target, resumed with any waiting table dropped (OS
+  wrappers), and otherwise a waiting table that maps it, made live
+  (`Dm.FinishReload`): a promotion cut after its load, whose held IO is
+  then served, even in a pass that stops before its build. So a fenced
+  linear of a migration that is over ends as the end of the window would
+  have ended it, without the dm-error swap the side no longer needs: a
+  standby's held IO fails and the primary's reaches the device it serves
+  through. The build phase then reloads the linear onto the target the new
+  desired state wants. It leaves suspended a linear none of whose tables
+  maps such a target — one that is not the primary, live on the side
+  device or the dm-clone with no dm-error waiting, a demotion whose load
+  failed (DN10), whose resume would release the old primary's queued IO
+  onto the side's data; a primary live on a dm-clone of a migration the
+  request no longer names — and one whose tables or targets' numbers do
+  not answer. The build phase reloads a wanted one onto the table it
+  wants, and the step before the sweep's first layer retires one the
+  desired state no longer names onto its dm-error (DN6); either reload
+  fails the IO a fenced linear holds. While no converge's build phase
+  reloads it — one that stops at the side-device gate (rule 4 below), a
+  destination that cannot read where its stacks serve from (DN13), or a
+  build whose step for that CN's dm-error, or whose read of the linear's
+  waiting table, fails (DN10) — such a linear stays suspended and queues
+  its IO, the closed side.
 * Tearing the side down, or taking its exports away, inside the window
   ends the window early, with the same reload. **Before** its first layer
   (DN6) the sweep puts every suspended per-CN linear it is about to
@@ -2586,8 +2644,9 @@ Four rules keep the suspension bounded, which is what makes it safe:
   onto the side's data — because disabling an nvmet namespace first waits
   for every request in flight on it, and one whose bio a suspended dm
   target holds never completes. A request that also ends the role is rule
-  2's case instead: its pre-step resumes the linears onto their pre-fence
-  tables before this step runs. A level with no export layer —
+  2's case first: its pre-step resumes the linears that rule resumes onto
+  their pre-fence tables before this step runs, and this step retires the
+  ones it leaves. A level with no export layer —
   `SP_LEVEL_NO_SIDE`, which keeps the linears and takes only their
   exports, or any level above it — ends the window outright: for a source
   side at such a level the sweep's pre-step marks it over (`endFence`),
@@ -2899,15 +2958,21 @@ serves through it, the stacks sit on their dm-errors with every namespace
 answer — the dm-clone's own, its device number, a dm-linear's or a
 namespace's — and no stack was found serving through it, the pass leaves
 the per-CN stacks exactly as they are and reports them as a background
-read would. One unanswered command must not reload the leg's only serving
-path onto its dm-error, and a stopped pass must not put the stacks back on a
-dm-clone the source connection's answer took them off. The namespace's
-group is the half of that read that records the answer: the pass that
-takes the stacks off moves the namespaces out of `AnaGrpIdOptimized` even
-when its reload of a dm-linear is refused, and that dm-linear stays on the
-dm-clone (a reload fails closed, and a later pass's pre-step resumes it
-there). The read covers only the CNs the side's request lists, so when a
-primary flip also drops the old primary, whose stack goes with it (DN6),
+read would. A dm-linear left suspended with a table waiting, a reload cut
+after its load, is judged by its waiting table, where its last pass put
+the stack: judged by its live table, a promotion onto the dm-clone cut
+after its load would read off the dm-clone, and its stack would be resumed
+on its dm-error, failing the IO it holds. One unanswered command must not
+reload the leg's only serving path onto its dm-error, and a stopped pass
+must not put the stacks back on a dm-clone the source connection's answer
+took them off. The namespace's group is the half of that read that records
+the answer: the pass that takes the stacks off moves the namespaces out of
+`AnaGrpIdOptimized` even when its reload of a dm-linear is refused, and
+that dm-linear stays on the dm-clone (a reload fails closed; a later pass's
+pre-step resumes the primary's there when no dm-error table waits on it,
+DN12 rule 2, and the build reloads any other). The read covers only the
+CNs the side's request lists, so when a primary flip also drops the old
+primary, whose stack goes with it (DN6),
 the read finds no stack serving through the dm-clone and the new primary
 waits on its dm-error for the retry. The source
 connection's own answer, that there is no namespace device to read from —
@@ -3487,10 +3552,12 @@ else reported through `agent_reply` is still a protocol-level refusal.
 * A reload whose load fails leaves its device suspended (OS wrappers), so
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,
-  the linear stays suspended on its old table only until a later converge
-  of the side resumes it there (DN12 rule 2), releasing onto the side's
-  data the IO it queued, ahead of any retry of the reload in that
-  converge's build phase. A flip whose step for the old primary fails
+  the linear stays suspended on the side device, holding the old primary's
+  IO, with no table waiting, which would mark the fence. A request that
+  makes that CN the primary again before a later converge has fenced it
+  resumes it there (DN12 rule 2, or the build phase's resume of a live
+  table it wants), and the held writes land on the side after the other
+  primary's newer ones. A flip whose step for the old primary fails
   before its load — its dm-error step, the read of the dm-error's device
   number or of the linear, or a suspend that failed before the kernel
   carried it out — leaves that linear live on the side device beside the new

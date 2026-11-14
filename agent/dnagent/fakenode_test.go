@@ -207,6 +207,20 @@ type fakeNode struct {
 	cancelCmd map[string]context.CancelFunc
 }
 
+// fakeTable is one loaded table and its read-only flag.
+type fakeTable struct {
+	table    string
+	readOnly bool
+}
+
+// waitingTable is the device's waiting table, "" when none waits.
+func (dm *fakeDm) waitingTable() string {
+	if dm.waiting == nil {
+		return ""
+	}
+	return dm.waiting.table
+}
+
 // fakeSegment is one recorded WriteBlock, in write order: later segments
 // overlay earlier ones.
 type fakeSegment struct {
@@ -218,6 +232,11 @@ type fakeDm struct {
 	table     string
 	readOnly  bool
 	suspended bool
+	// waiting is the table a `dmsetup reload` loaded and no resume has made
+	// live yet, nil when none waits: dmsetup's inactive table. A resume
+	// makes it live, a `dmsetup clear` drops it, and the attr column shows
+	// it in its second place.
+	waiting *fakeTable
 	// dm-clone bookkeeping
 	noHydration       bool
 	noDiscardPassdown bool
@@ -1491,7 +1510,9 @@ func (f *fakeNode) heldBy(path string) string {
 		if f.devNo["/dev/mapper/"+name] == devNo {
 			continue
 		}
-		for _, line := range dmTargets(dm.table) {
+		// A waiting table holds the devices it maps open as the live one
+		// does.
+		for _, line := range dmTargets(dm.table + "\n" + dm.waitingTable()) {
 			fields := strings.Fields(line)
 			if len(fields) < 4 {
 				continue
@@ -1550,8 +1571,12 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 			return "", 1
 		}
 		// The real four-position attr column: live, inactive-table,
-		// suspended, read-only/read-write — e.g. "L--w", "L-sw", "L--r".
+		// suspended, read-only/read-write — e.g. "L--w", "L-sw", "L--r",
+		// "LIsw".
 		attr := []byte("L---")
+		if dm.waiting != nil {
+			attr[1] = 'I'
+		}
 		if dm.suspended {
 			attr[2] = 's'
 		}
@@ -1562,6 +1587,13 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		}
 		return string(attr) + "\n", 0
 	case "table":
+		if len(args) == 3 && args[1] == "--inactive" {
+			dm, ok := f.dms[args[2]]
+			if !ok {
+				return "", 1
+			}
+			return strings.Join(dmTargets(dm.waitingTable()), "\n") + "\n", 0
+		}
 		dm, ok := f.dms[args[1]]
 		if !ok {
 			return "", 1
@@ -1578,10 +1610,22 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		if !ok {
 			return "", 1
 		}
+		if args[0] == "resume" && dm.waiting != nil {
+			// A resume makes the waiting table live, and the IO the
+			// suspend held then goes to it.
+			f.goLive(args[1], dm)
+		}
 		if args[0] == "resume" && dm.suspended {
 			f.releasedOnto[args[1]] = append(f.releasedOnto[args[1]], dm.table)
 		}
 		dm.suspended = args[0] == "suspend"
+		return "", 0
+	case "clear":
+		dm, ok := f.dms[args[1]]
+		if !ok {
+			return "", 1
+		}
+		dm.waiting = nil
 		return "", 0
 	case "remove":
 		name := args[1]
@@ -1677,11 +1721,16 @@ func (f *fakeNode) dmReload(args []string, stdin string) (string, int) {
 	if !ok {
 		return "", 1
 	}
-	dm.table = table
-	dm.readOnly = readOnly
-	applyCloneTable(dm, table)
-	f.devSize["/dev/mapper/"+name] = tableSectors(table) * 512
+	dm.waiting = &fakeTable{table: table, readOnly: readOnly}
 	return "", 0
+}
+
+// goLive makes the waiting table of dm, the device name, its live one.
+func (f *fakeNode) goLive(name string, dm *fakeDm) {
+	dm.table, dm.readOnly = dm.waiting.table, dm.waiting.readOnly
+	dm.waiting = nil
+	applyCloneTable(dm, dm.table)
+	f.devSize["/dev/mapper/"+name] = tableSectors(dm.table) * 512
 }
 
 // tableSectors is the device's size: the sum of its targets' lengths.

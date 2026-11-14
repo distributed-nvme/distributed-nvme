@@ -423,6 +423,14 @@ dn_side_name() { # cluster dn sp side
 		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")" "$(hex16 "$4")"
 }
 
+# dn_linear_name is one CN's per-CN dm-linear on a side (dm kind d1,
+# dnagent.md DN10): the device the CN's export sits on.
+dn_linear_name() { # cluster dn sp side cn
+	printf 'dnv-%s-%s-d1-%s-%s-%s' \
+		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")" "$(hex16 "$4")" \
+		"$(hex16 "$5")"
+}
+
 # ns_by_id is the CN-side device node of a leg: the namespace identity is
 # deterministic per leg, so both sides of a migrating leg land on one
 # multipath device (dnagent_integtest.md, Topology).
@@ -965,7 +973,7 @@ mutations() {
 	    | select(
 	        (["blkdiscard"] | index($cmd))
 	        or ($cmd == "dmsetup" and (["create","reload","remove","suspend",
-	              "resume","message"] | index($verb)))
+	              "resume","clear","message"] | index($verb)))
 	        or ($cmd == "nvme" and (["connect","disconnect"] | index($verb)))
 	        or (["mkdir","rmdir","ln"] | index($cmd))
 	        or ($cmd == "rm")
@@ -975,6 +983,17 @@ mutations() {
 	    inputs
 	    | select(.msg == "os write block") | "write block " + .path' \
 		"$log" || return 1
+}
+
+# dm_verbs_of <trace> <name> — the dmsetup verbs the agent ran on one dm
+# device under one trace id, in order, one per line (the sides case's waiting
+# stage). One jq evaluation (see the note above clone_discards).
+dm_verbs_of() {
+	jq -rn --arg t "$1" --arg name "$2" '
+	    inputs
+	    | select(.trace_id == $t and .msg == "os command"
+	        and .cmd == "dmsetup" and (.args | index($name)) != null)
+	    | .args[0]' "$WORK/agent.log"
 }
 
 # ctrl_of <nqn> <traddr> — the controller device backing one path, so a dead
@@ -2480,6 +2499,48 @@ case_sides() {
 	stage check "converge check rounds on both DNs"
 	converge_check 1 "$sp" "${A_LEG[1]}" "${A_SIDE[1]}" "${siderev[1]}"
 	converge_check 2 "$sp" "${A_LEG[3]}" "${A_SIDE[3]}" "${siderev[3]}"
+
+	# A resume keeps the live table (dnagent.md, OS wrappers — `dm.go`,
+	# `nvmet.go`, `nvmehost.go`): a standby's dm-linear suspended by hand
+	# with the side device's table waiting, as a reload that stopped after
+	# its load leaves it, is resumed on its dm-error by the syncup sent
+	# again, and the waiting table is dropped. A plain resume would make the
+	# waiting table live and put the standby on the side's data.
+	stage waiting "a resume keeps a suspended dm-linear's live table and drops the waiting one"
+	local lin sidedev sideno sectors want attr
+	lin=$(dn_linear_name "$CLUSTER" "${DNID[1]}" "$sp" "${A_SIDE[1]}" \
+		"${A_STANDBY[1]}")
+	sidedev=/dev/mapper/$(dn_side_name "$CLUSTER" "${DNID[1]}" "$sp" \
+		"${A_SIDE[1]}")
+	want=$(sshv 1 "dmsetup table $lin")
+	sectors=$(printf '%s\n' "$want" | awk '{print $2}')
+	sideno=$(sshv 1 "lsblk --nodeps --noheadings --output MAJ:MIN $sidedev" |
+		tr -d ' ')
+	[ -n "$sectors" ] && [ -n "$sideno" ] ||
+		die "waiting: no table of $lin or no number of $sidedev"
+	case $want in
+	*" linear $sideno "*) die "waiting: the standby's $lin maps the side device before the stage" ;;
+	esac
+	sshv 1 "dmsetup suspend $lin && dmsetup reload $lin --table '0 $sectors linear $sideno 0'"
+	attr=$(sshv 1 "dmsetup info -c --noheadings -o attr $lin" | tr -d ' ')
+	assert_eq "${attr:1:2}" Is "waiting: $lin suspended with a table waiting"
+	out=$(ctl 1 syncup-side --revision "${siderev[1]}" \
+		--sp "$sp" --leg "${A_LEG[1]}" --side "${A_SIDE[1]}" \
+		--provisioned=true --ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 \
+		--primary-cn "${A_PRIMARY[1]}" --standby-cn "${A_STANDBY[1]}" \
+		--sp-level readwrite)
+	assert_cn_ok "$out" cn_id_to_dm_linear "${A_STANDBY[1]}" "waiting: leg ${A_LEG[1]}"
+	# The resume alone ends it, and only after the clear: no reload, which a
+	# resume that made the side device's table live would have needed to put
+	# the standby back on its dm-error.
+	assert_eq "$(helper 1 "dm_verbs_of '$TRACE' '$lin'" |
+		grep -Ev '^(info|table|status|ls)$' | paste -sd ' ')" "clear resume" \
+		"waiting: the dmsetup commands the syncup ran on $lin"
+	assert_eq "$(sshv 1 "dmsetup table $lin")" "$want" \
+		"waiting: the live table of $lin after the syncup"
+	attr=$(sshv 1 "dmsetup info -c --noheadings -o attr $lin" | tr -d ' ')
+	assert_eq "${attr:1:2}" -- "waiting: $lin resumed with no table waiting"
 
 	stage teardown "disconnect all 8, then empty both side lists"
 	for i in 1 2 3 4; do

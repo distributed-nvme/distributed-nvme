@@ -236,7 +236,11 @@ pointers; once the sides are gone, they count the whole data area free.
 cross: primary paths are optimized and carry data, standby paths are
 non-optimized and fail a read, being backed by their dm-errors, and every
 export admits exactly one host NQN, its own controller node's (`dnagent.md`
-DN10).
+DN10). A standby's dm-linear suspended by hand with the side device's table
+waiting, as a reload stopped after its load leaves it, comes back resumed on
+its dm-error with no table waiting once its syncup is sent again, by a
+clear and a resume and no reload: a resume keeps the live table
+(`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
 
 **migr_full and migr_bitmap** prove `architecture.md`, Migration, with two
 migrations at once in opposite directions, each node the source of one and the
