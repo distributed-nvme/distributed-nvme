@@ -10,9 +10,13 @@
 //   - no section numbers anywhere: no section sign in an LLM doc or a code
 //     comment, no numbered headings;
 //   - every rule id cited in an LLM doc, a Go file or a shell suite is defined
-//     in an LLM doc (ids are permanent anchors the code relies on);
-//   - every backticked code identifier an LLM doc names, and every backticked
-//     path any doc names, exists in the tree;
+//     in an LLM doc (ids are permanent anchors the code relies on), where an
+//     id defines a rule only at the end of a heading or at the start of a
+//     paragraph or a list item, so a citation that wraps to the start of a
+//     line defines nothing;
+//   - every backticked code identifier an LLM doc names, every bare name of
+//     a source, doc, text or configuration file it names, and every
+//     backticked path any doc names, exists in the tree;
 //   - no numeric literal beside a named constant (the value lives in the code);
 //   - no dates in an LLM doc (history lives in git); history words are
 //     reported with -v only;
@@ -222,12 +226,16 @@ var idPrefixes = []string{
 }
 
 var (
-	// Definition forms: a heading ending in "— ID", a bold bullet "**[Dn]",
-	// and a line-start "ID." / "ID ".
+	// Definition forms: a heading ending in "— ID"; and, at the start of a
+	// paragraph or of a list item, a bold "**[Dn]", an "ID." and a bold
+	// "**ID**" or "**ID.**". A citation that wraps to the start of a line,
+	// "ID says" or "[Dn])", stands in the middle of a paragraph or is in
+	// none of these forms, so it defines nothing.
 	headDefRe  = regexp.MustCompile(`^#{1,6} .*[\x{2013}\x{2014}] *([A-Z][A-Z0-9]{0,3})([0-9]+)[a-z]? *$`)
 	bulletRe   = regexp.MustCompile(`^ {0,6}[-*] +`)
-	brackDefRe = regexp.MustCompile(`^\**\[D([0-9]+)\]`)
-	plainDefRe = regexp.MustCompile(`^\**([A-Z][A-Z0-9]{0,3})([0-9]+)[a-z]?\**[. ]`)
+	brackDefRe = regexp.MustCompile(`^\*\*\[D([0-9]+)\]`)
+	plainDefRe = regexp.MustCompile(`^([A-Z][A-Z0-9]{0,3})([0-9]+)[a-z]?\.`)
+	boldDefRe  = regexp.MustCompile(`^\*\*([A-Z][A-Z0-9]{0,3})([0-9]+)[a-z]?\.?\*\*`)
 	dCiteRe    = regexp.MustCompile(`\[D([0-9]+)\]`)
 	idCiteRe   = regexp.MustCompile(`\b(` + strings.Join(idPrefixes, "|") + `)([0-9]+)[a-z]?\b`)
 )
@@ -235,10 +243,33 @@ var (
 func definedIds(t *testing.T) map[string]bool {
 	defs := map[string]bool{}
 	for _, f := range llmDocFiles(t) {
-		for _, ln := range docProse(readLines(t, f)) {
-			if m := headDefRe.FindStringSubmatch(ln); m != nil {
-				defs[m[1]+m[2]] = true
-			}
+		for id := range idDefinitions(readLines(t, f)) {
+			defs[id] = true
+		}
+	}
+	return defs
+}
+
+// idDefinitions returns the rule ids one doc's lines define. A line starts
+// a paragraph when it is the first line, or follows a blank line, a heading
+// or a fence; a list item starts one of its own.
+func idDefinitions(lines []string) map[string]bool {
+	defs := map[string]bool{}
+	in := false
+	parStart := true
+	for _, ln := range lines {
+		if fenceRe.MatchString(ln) {
+			in = !in
+			parStart = true
+			continue
+		}
+		if in {
+			continue
+		}
+		if m := headDefRe.FindStringSubmatch(ln); m != nil {
+			defs[m[1]+m[2]] = true
+		}
+		if parStart || bulletRe.MatchString(ln) {
 			s := bulletRe.ReplaceAllString(ln, "")
 			if m := brackDefRe.FindStringSubmatch(s); m != nil {
 				defs["[D"+m[1]+"]"] = true
@@ -246,7 +277,11 @@ func definedIds(t *testing.T) map[string]bool {
 			if m := plainDefRe.FindStringSubmatch(s); m != nil {
 				defs[m[1]+m[2]] = true
 			}
+			if m := boldDefRe.FindStringSubmatch(s); m != nil {
+				defs[m[1]+m[2]] = true
+			}
 		}
+		parStart = strings.TrimSpace(ln) == "" || headingRe.MatchString(ln)
 	}
 	return defs
 }
@@ -288,11 +323,18 @@ func TestCitedRuleIdsAreDefined(t *testing.T) {
 // ---- identifiers and paths -------------------------------------------------
 
 var (
-	tickRe   = regexp.MustCompile("`([^`\n]+)`")
-	pathRe   = regexp.MustCompile(`^[A-Za-z0-9_.\-]+(/[A-Za-z0-9_.\-]+)+$`)
-	identRe  = regexp.MustCompile(`^-{0,2}[A-Za-z_][A-Za-z0-9_.]*$`)
-	wordRe   = regexp.MustCompile(`[A-Za-z0-9_]+`)
-	hasUpper = regexp.MustCompile(`[A-Z]`)
+	tickRe = regexp.MustCompile("`([^`\n]+)`")
+	// fileNameRe matches a bare name of a file of the kinds the tree holds:
+	// Go, shell, proto, markdown, YAML, text and configuration files and the
+	// module files. A name of a file made at run time, such as a log, is
+	// left to the other checks. typeFieldRe matches a field of a Go type,
+	// `CnAgentServer.md` for one, which a doc may name in the same shape.
+	fileNameRe  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*\.(go|sh|proto|md|yaml|txt|conf|mod|sum)$`)
+	typeFieldRe = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*\.[a-z]+$`)
+	pathRe      = regexp.MustCompile(`^[A-Za-z0-9_.\-]+(/[A-Za-z0-9_.\-]+)+$`)
+	identRe     = regexp.MustCompile(`^-{0,2}[A-Za-z_][A-Za-z0-9_.]*$`)
+	wordRe      = regexp.MustCompile(`[A-Za-z0-9_]+`)
+	hasUpper    = regexp.MustCompile(`[A-Z]`)
 )
 
 func corpus(t *testing.T) string {
@@ -333,16 +375,18 @@ func isCodeName(tok string) bool {
 // the repository root; a backticked code name of an LLM doc is in some source.
 func TestDocIdentifiersAndPathsExist(t *testing.T) {
 	code := corpus(t)
-	words := map[string]bool{}
-	for _, w := range wordRe.FindAllString(code, -1) {
-		words[w] = true
+	x := &treeIndex{
+		code:      code,
+		words:     map[string]bool{},
+		baseNames: map[string]bool{},
+		okIdent:   allow(t, "ident"),
+		okPath:    allow(t, "path"),
 	}
-	okIdent, okPath := allow(t, "ident"), allow(t, "path")
-	// A bare file name (`osclient_fake.go`) is a claim that the file exists
-	// somewhere in the tree, not that its name appears in some source.
-	baseNames := map[string]bool{}
+	for _, w := range wordRe.FindAllString(code, -1) {
+		x.words[w] = true
+	}
 	for _, f := range walkFiles(t, func(string) bool { return true }) {
-		baseNames[filepath.Base(f)] = true
+		x.baseNames[filepath.Base(f)] = true
 	}
 	var bad []string
 	seen := map[string]bool{}
@@ -350,53 +394,85 @@ func TestDocIdentifiersAndPathsExist(t *testing.T) {
 		llm := isLlmDoc(f)
 		prose := docProse(readLines(t, f))
 		for _, i := range sortedKeys(prose) {
-			ln := prose[i]
-			for _, m := range tickRe.FindAllStringSubmatch(ln, -1) {
+			for _, m := range tickRe.FindAllStringSubmatch(prose[i], -1) {
 				tok := strings.TrimSpace(m[1])
 				if seen[f+"|"+tok] {
 					continue
 				}
-				switch {
-				case pathRe.MatchString(tok) && strings.Contains(filepath.Base(tok), "."):
-					if okPath[tok] {
-						continue
-					}
-					if _, err := os.Stat(filepath.Join(root, tok)); err != nil {
-						seen[f+"|"+tok] = true
-						bad = append(bad, f+":"+itoa(i)+": path `"+tok+"` does not exist")
-					}
-				case llm && isCodeName(tok):
-					if okIdent[tok] {
-						continue
-					}
-					body := strings.TrimLeft(tok, "-")
-					// A flag is matched as text (its dashes split words); an
-					// identifier must exist as a whole word, and a dotted name
-					// as whole words part by part, so `InspectDn` is not found
-					// inside `InspectDnNode`.
-					var found bool
-					switch {
-					case strings.HasPrefix(tok, "--"):
-						found = strings.Contains(code, body)
-					case baseNames[body]:
-						found = true
-					default:
-						found = true
-						for _, w := range wordRe.FindAllString(body, -1) {
-							if !words[w] {
-								found = false
-							}
-						}
-					}
-					if !found {
-						seen[f+"|"+tok] = true
-						bad = append(bad, f+":"+itoa(i)+": `"+tok+"` is in no Go, proto, shell or Makefile source")
-					}
+				if p := x.tokenProblem(tok, llm); p != "" {
+					seen[f+"|"+tok] = true
+					bad = append(bad, f+":"+itoa(i)+": "+p)
 				}
 			}
 		}
 	}
 	report(t, "identifiers and paths", bad)
+}
+
+// treeIndex holds what a backticked token of a doc is looked up in.
+type treeIndex struct {
+	code      string          // every Go, shell, proto, Makefile and JSON source, joined
+	words     map[string]bool // the words of code
+	baseNames map[string]bool // the base name of every file of the tree
+	okIdent   map[string]bool // the allowlist of the check ident
+	okPath    map[string]bool // the allowlist of the check path
+}
+
+// tokenProblem says what is wrong with one backticked token of a doc, or
+// "" when nothing is; llm says whether the doc is an LLM doc.
+func (x *treeIndex) tokenProblem(tok string, llm bool) string {
+	switch {
+	case pathRe.MatchString(tok) && strings.Contains(filepath.Base(tok), "."):
+		if x.okPath[tok] {
+			return ""
+		}
+		if _, err := os.Stat(filepath.Join(root, tok)); err != nil {
+			return "path `" + tok + "` does not exist"
+		}
+	case llm && fileNameRe.MatchString(tok) && !(typeFieldRe.MatchString(tok) && !x.baseNames[tok]):
+		// A bare file name (`osclient_fake.go`) is a claim that the file
+		// exists somewhere in the tree, not that its words appear in some
+		// source; one that starts with an underscore (`_test.go`) is a
+		// suffix of a file name.
+		if x.okPath[tok] {
+			return ""
+		}
+		if strings.HasPrefix(tok, "_") {
+			for b := range x.baseNames {
+				if strings.HasSuffix(b, tok) {
+					return ""
+				}
+			}
+			return "no file name of the tree ends in `" + tok + "`"
+		}
+		if !x.baseNames[tok] {
+			return "file `" + tok + "` is in no directory of the tree"
+		}
+	case llm && isCodeName(tok):
+		if x.okIdent[tok] {
+			return ""
+		}
+		body := strings.TrimLeft(tok, "-")
+		// A flag is matched as text (its dashes split words); an identifier
+		// must exist as a whole word, and a dotted name as whole words part
+		// by part, so `InspectDn` is not found inside `InspectDnNode`.
+		var found bool
+		switch {
+		case strings.HasPrefix(tok, "--"):
+			found = strings.Contains(x.code, body)
+		default:
+			found = true
+			for _, w := range wordRe.FindAllString(body, -1) {
+				if !x.words[w] {
+					found = false
+				}
+			}
+		}
+		if !found {
+			return "`" + tok + "` is in no Go, proto, shell or Makefile source"
+		}
+	}
+	return ""
 }
 
 // ---- values beside constants -----------------------------------------------

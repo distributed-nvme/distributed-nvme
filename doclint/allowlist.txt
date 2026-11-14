@@ -1,2 +1,5 @@
 # doclint exceptions: "<check> <token>", check in
 # ids|ident|path|value|history|identptr|heading|pointer|note
+# The cdc suite writes these two helper scripts on a lab machine at run time.
+path cdc_host.sh
+path cdc_target.sh
