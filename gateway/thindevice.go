@@ -45,8 +45,9 @@ const (
 const msgOriginNotCreated = "origin %s is not created yet; " +
 	"wait for ListThinDevices to report created = true"
 
-// msgSnapshotNotCreated is the detail architecture.md, Thin devices, names
-// for the delete guard that names the blocking snapshot(s).
+// msgSnapshotNotCreated is the detail of a snapshot not yet created that
+// blocks a call: the delete guard of architecture.md, Thin devices, and
+// CreateClone's refusal of such a destination (architecture.md, Clones).
 const msgSnapshotNotCreated = "snapshot %s of %s is not created yet"
 
 // CreateThinDevice is the CreateThinDevice of architecture.md, Thin devices.

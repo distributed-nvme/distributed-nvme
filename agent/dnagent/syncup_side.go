@@ -376,7 +376,15 @@ func (s *DnAgentServer) convergeSideSteps(
 	primary := s.ensureCnDm(ctx, st, plan, info, cloneLive)
 	switch {
 	case plan.migrSrc != nil:
-		s.linkMigrSrc(ctx, st, plan, info)
+		// The link puts the export in the destination's reach, and the copy
+		// may read a region before a write in flight lands on it, so it
+		// waits until every per-CN dm-linear of the side is proven fenced
+		// (DN12).
+		if gap := s.sourceFenceGap(ctx, plan); len(gap) == 0 {
+			s.linkMigrSrc(ctx, st, plan, info)
+		} else {
+			s.holdMigrSrcLink(ctx, st, plan, info, gap)
+		}
 	case plan.migrSrcDeferred:
 		// Serving is untouched; only the reporting differs (architecture.md,
 		// Migration).

@@ -3,6 +3,7 @@ package dnagent
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,9 +26,9 @@ import (
 // what it builds is out of the destination's reach (buildExport): the
 // destination can read through it only once linkMigrSrc runs, after the
 // suspend of step 2 has run, the order [D12]'s reason needs: no write may
-// reach a region of the side's data after the copy has read it. The link
-// does not wait for a suspend to have held (dnagent.md, Known limits). The
-// migration source rows carry a step that failed; the export's row is
+// reach a region of the side's data after the copy has read it, and only
+// once every per-CN dm-linear of the side is proven fenced (sourceFenceGap,
+// DN12). The migration source rows carry a step that failed; the export's row is
 // otherwise left to linkMigrSrc, so that it reports the link.
 func (s *DnAgentServer) buildMigrSrc(
 	ctx context.Context,
@@ -97,6 +98,102 @@ func (s *DnAgentServer) linkMigrSrc(
 	}
 	info.MigrSrcInfo.NvmeofInfo = st.tracker.FromErr(
 		resKeyMigrSrcNvmeof, nqn, "", err)
+}
+
+// sourceFenceGap names the per-CN dm-linears of a migration source's side
+// that are not proven fenced, each with why, sorted, read from the node: every
+// per-CN dm-linear of the side a fresh `dmsetup ls` finds, the ones of CNs the
+// request no longer names included, since a leftover one still maps the side
+// device until the sweep removes it. One is fenced when it is absent,
+// suspended (phase 1 of the fence holds the IO it took, DN12), or not
+// suspended with every target of its live table on its own dm-error. A read
+// that does not answer proves nothing and is a gap too. The port link of
+// step 3 waits for an empty answer (DN12).
+func (s *DnAgentServer) sourceFenceGap(
+	ctx context.Context,
+	plan *sidePlan,
+) []string {
+	dms, err := s.dm.List(ctx)
+	if err != nil {
+		return []string{"dmsetup ls: " + err.Error()}
+	}
+	type linear struct {
+		name string
+		cnId uint64
+	}
+	var linears []linear
+	for name := range dms {
+		dn, ok := common.ParseDmName(name)
+		if !ok || dn.Kind != common.DmKindDnLinear ||
+			dn.ClusterId != plan.clusterId || dn.NodeId != plan.dnId ||
+			len(dn.Ids) != 3 || dn.Ids[0] != plan.spId ||
+			dn.Ids[1] != plan.sideId {
+			continue
+		}
+		linears = append(linears, linear{name, dn.Ids[2]})
+	}
+	sort.Slice(linears, func(i, j int) bool {
+		return linears[i].name < linears[j].name
+	})
+	var gaps []string
+	for _, l := range linears {
+		dev, err := s.dm.Info(ctx, l.name)
+		switch {
+		case err != nil:
+			gaps = append(gaps, l.name+": "+err.Error())
+		case dev == nil || dev.Suspended:
+		default:
+			if why := s.linearUnfenced(
+				ctx, plan, l.name, l.cnId); why != "" {
+				gaps = append(gaps, l.name+": "+why)
+			}
+		}
+	}
+	return gaps
+}
+
+// detailsLinkHeld starts the row of a migration source export left unlinked
+// because a per-CN dm-linear of the side is not proven fenced (DN12); the
+// gap follows (sourceFenceGap).
+const detailsLinkHeld = "not linked until the fence holds: "
+
+// holdMigrSrcLink is the source's step 3 in a pass where a per-CN dm-linear
+// of the side is not proven fenced (sourceFenceGap, DN12): it links nothing.
+// An export an earlier pass linked stays linked, since that pass's fence held
+// and nothing but a request that ends the source role takes a source's
+// dm-linear off its fence; its row reads as the link reads. An export not
+// linked reads RES_STATUS_PENDING naming the gap, as a check round's read of
+// it does (probeStacks), and the side's verdict names it (DN16), so the
+// worker sends the syncup again; a port that is not there reads as
+// linkMigrSrc reads it.
+func (s *DnAgentServer) holdMigrSrcLink(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+	info *pb.SideInfo,
+	gap []string,
+) {
+	if !plan.wantExport {
+		return
+	}
+	nqn := plan.migrSrcNqn()
+	linked, portThere, err := s.nvmet.PortLinkedState(
+		ctx, s.port.PortId, nqn)
+	switch {
+	case err != nil:
+		info.MigrSrcInfo.NvmeofInfo = st.tracker.Err(
+			resKeyMigrSrcNvmeof, nqn, err.Error())
+	case !portThere:
+		info.MigrSrcInfo.NvmeofInfo = st.tracker.Err(
+			resKeyMigrSrcNvmeof, nqn, detailsPortMissing)
+	case linked:
+		info.MigrSrcInfo.NvmeofInfo = st.tracker.Ok(
+			resKeyMigrSrcNvmeof, nqn, "")
+	default:
+		info.MigrSrcInfo.NvmeofInfo = st.tracker.Set(resKeyMigrSrcNvmeof,
+			nqn, pb.ResStatus_RES_STATUS_PENDING,
+			detailsLinkHeld+strings.Join(gap, "; "))
+	}
 }
 
 // ---------------------------------------------------------------------------

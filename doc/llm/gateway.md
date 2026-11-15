@@ -1078,7 +1078,8 @@ are those of `architecture.md`, Subsystems, namespaces.
   validation before any read (GW4), so that a full subsystem never answers
   it with its ceiling; STM: the subsystem by NQN; the `MaxNsCntPerSs`
   ceiling; `ns_idx` unused in this subsystem; no transfer naming the place
-  as its origin (`nsTransferRef`); the td by `td_name`; mint
+  as its origin (`nsTransferRef`); the td by `td_name`; no transfer whose
+  origin namespace lies on that td (`tdTransferRef`); mint
   `ns_id`; defaults: an empty
   `dev_uuid` is a random RFC 4122 version 4 UUID in the canonical dashed
   form, an empty `dev_nguid` a random NGUID in hex; append to `ns_list`.
@@ -1087,7 +1088,8 @@ are those of `architecture.md`, Subsystems, namespaces.
   `DeleteSubsystem`; locate by NQN and `ns_idx`; no transfer naming it as
   its origin (`nsTransferRef`); remove from `ns_list`. Reply `ns_id`.
 * **UpdateNamespaceDev** — locate the namespace; no transfer naming it as
-  its origin (`nsTransferRef`); resolve the new `td_name`; repoint the
+  its origin (`nsTransferRef`); resolve the new `td_name`; no transfer whose
+  origin namespace lies on that td (`tdTransferRef`); repoint the
   namespace's td reference. Reply `ns_id`.
 * **UpdateNamespaceSuspended** — locate the namespace; set `suspended`.
   Reply `ns_id`.
@@ -1114,12 +1116,16 @@ below name.
   confs), and the bound of `architecture.md`, Clones, the destination's
   `common.CloneMetaBytes` at the SP's block size against the data blocks of
   one side, `FAILED_PRECONDITION` naming the largest destination one side
-  holds. Then the DN scan (`pickDns`) for that many legs of
+  holds. The plan also walks `td_name_list` for a snapshot of the
+  destination not yet `created` (`tdUncreatedSnapshots`), refused
+  `FAILED_PRECONDITION` naming it, and records the pool's revision. Then the
+  DN scan (`pickDns`) for that many legs of
   `CloneMetaGrpExtCnt` extents each, with no black list and no location
   excluded, as `architecture.md`, Per-operation allocation, places a clone
   meta group; too few is `RESOURCE_EXHAUSTED`. STM: resolve; token; the same
-  checks again; the cluster id or the leg count other than the scan's is
-  candidate changed; the DN ledger (`newDnLedger`) and every pick
+  checks again; the cluster id, the leg count or the pool's revision other
+  than the plan's is candidate changed, since a snapshot made after the
+  plan's walk moves the revision; the DN ledger (`newDnLedger`) and every pick
   re-verified (`verifyPick`; a moved one is candidate changed);
   mint `clone_id`, then the group's `grp_id`, then per pick, in pick order,
   a `leg_id` and its `side_id` (GW15's order); per pick a `Leg` of one
@@ -1230,8 +1236,9 @@ All pure etcd, the standard mutator shape; the codes are those of
 `architecture.md`, Transfers. **CreateTransfer** refuses an `ori_nqn` that
 breaks the NQN rules of `architecture.md`, Common validation, the
 dnv-namespace one included, resolves the origin namespace per
-`architecture.md`, Transfers, mints `xfer_id` and appends to
-`xfer_name_list`. **DeleteTransfer** with `force` false *finalizes*: it
+`architecture.md`, Transfers, refuses an origin whose td another namespace
+of the SP lies on, walking `nqn_list` (`tdOtherNs`), mints `xfer_id` and
+appends to `xfer_name_list`. **DeleteTransfer** with `force` false *finalizes*: it
 additionally sets `suspended` true on the origin namespace in the same STM;
 with `force` true it *aborts* (the origin untouched); both delete the
 `Transfer` and its list entry and `BumpSpRev`. **GetTransfer** is one STM
@@ -1316,10 +1323,12 @@ rather than a candidate problem.
   with no units leaves it unread); delete the `Migration`, its `MigrBitmap`
   chunks (every index below `bm_cnt`) and its list entry; `BumpSpRev`. Reply
   `migr_id`.
-* **CancelMigration** — STM: resolve; token; the reverse of the create
-  (drop the destination side, release the destination DN's extents and the
-  `meta_units` the `Migration` records with one `BumpDnRev`, delete the
-  `Migration`, its chunks and its list entry); `BumpSpRev`. Reply
+* **CancelMigration** — STM: resolve; token; the migration; its
+  `cutover_pending` clear and `force` false is `FAILED_PRECONDITION`
+  (`migrCancelAllowed`; `architecture.md`, Migrations); the reverse of the
+  create (drop the destination side, release the destination DN's extents
+  and the `meta_units` the `Migration` records with one `BumpDnRev`, delete
+  the `Migration`, its chunks and its list entry); `BumpSpRev`. Reply
   `migr_id`.
 * **GetMigration** — one STM read; the record as stored, `cutover_pending`
   included.

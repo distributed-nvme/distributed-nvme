@@ -1214,8 +1214,9 @@ EOF
 		migr finish --name m0 --rev 7
 	sweep_step 56 CancelMigration \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
-		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\"}" \
-		migr cancel --name m0 --rev 7
+		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\",
+		  \"force\":true}" \
+		migr cancel --name m0 --force --rev 7
 	sweep_step 57 GetMigration \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"migr_name\":\"m0\"}" \

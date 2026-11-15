@@ -361,13 +361,15 @@ func setupFinishMigr(fs *flag.FlagSet) job {
 }
 
 // setupCancelMigr drives CancelMigration, the abort: the destination side is
-// dropped and the source stays the leg's side. It has no --force, because
-// throwing the unfinished COPY away needs no proof about it.
+// dropped and the source stays the leg's side. --force cancels a migration
+// whose cutover has started, which the gateway refuses otherwise.
 func setupCancelMigr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
 	fs.Var(&rev, "rev", "sp_rev token")
 	migrName := fs.String("name", "", "migr_name")
+	force := fs.Bool("force", false,
+		"cancel a migration whose cutover has started")
 	return func(
 		ctx context.Context,
 		client pb.GatewayClient,
@@ -378,6 +380,7 @@ func setupCancelMigr(fs *flag.FlagSet) job {
 			SpName:      *spName,
 			SpRev:       &pb.SpRev{Revision: uint64(rev)},
 			MigrName:    *migrName,
+			Force:       *force,
 		})
 	}
 }

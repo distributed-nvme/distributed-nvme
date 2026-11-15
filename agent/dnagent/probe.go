@@ -3,6 +3,7 @@ package dnagent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -409,6 +410,16 @@ func (s *DnAgentServer) probeStacks(
 					DevicePath: s.nf.DmPath(name),
 					AnaGrpId:   common.AnaGrpIdOptimized,
 				})
+			// An export not linked while a per-CN dm-linear is not proven
+			// fenced is one the converge holds back (DN12), and reads as the
+			// converge reports it (holdMigrSrcLink).
+			if status == pb.ResStatus_RES_STATUS_ERROR &&
+				details == detailsNotLinked {
+				if gap := s.sourceFenceGap(ctx, plan); len(gap) > 0 {
+					status = pb.ResStatus_RES_STATUS_PENDING
+					details = detailsLinkHeld + strings.Join(gap, "; ")
+				}
+			}
 			srcInfo.NvmeofInfo = t.SetReason(
 				resKeyMigrSrcNvmeof, nqn, status, details, reason)
 		}

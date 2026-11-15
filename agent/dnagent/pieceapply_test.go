@@ -58,8 +58,8 @@ func TestPushOntoAServingDmClonePausesItsHolders(t *testing.T) {
 	}
 }
 
-// TestPushOntoASuspendedDmCloneWaitsForItsResume is item 1 of the review: a
-// piece for a suspended dm-clone sends no discard, which would wait for the
+// TestPushOntoASuspendedDmCloneWaitsForItsResume: a piece for a suspended
+// dm-clone sends no discard, which would wait for the
 // resume with the side's lock held, and still counts as applied; the
 // converge that resumes the dm-clone applies it then (DN15).
 func TestPushOntoASuspendedDmCloneWaitsForItsResume(t *testing.T) {

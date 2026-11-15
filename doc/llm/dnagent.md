@@ -2657,7 +2657,22 @@ to serve the leg from, so after a failed build they would leave the leg
 with no usable path until a later converge's build held, which blocks the
 pool's commits on the primary (`architecture.md`, Known limits) and can
 fail over a healthy primary. A serving leg with an error row is the safe
-state, and an operator can cancel the migration.
+state, and an operator can cancel the migration, with force once its
+cutover has started (`architecture.md`, Migrations).
+
+**The port link waits for the fence.** The link puts the export in the
+destination's reach, and the copy may read a region before a write the
+old primary still had in flight through a per-CN dm-linear lands there
+([D12]), so a pass links the export only when every per-CN dm-linear of the
+side that a fresh `dmsetup ls` finds, those of CNs the request no longer
+names included, is proven fenced: absent, suspended (phase 1 below), or
+with every target of its live table on its own dm-error (`sourceFenceGap`).
+A pass with a gap links nothing: an export an earlier pass linked stays
+linked, since that pass's fence held and nothing but a request that ends
+the source role takes a source's dm-linear off its fence, and its row
+reads as the link reads; an export not linked reads `RES_STATUS_PENDING`
+naming the gap, on a converge and on a read alike, and the verdict names
+it (DN16), so the worker sends the syncup again.
 
 **The step-2 fence ([D12]).** Phase 1: suspend each per-CN dm-linear **in
 place**, leaving its table alone, and record when. Phase 2, on the first
@@ -3141,8 +3156,9 @@ the latest, finds the step held. The rule:
   its last commit, and read the regions copied since from the source
   again, over what was written to them. So a pass over such a dm-clone
   counts as held, no retry repeats it, and the side's verdict does not
-  name the row (DN16); an operator's cancel ends the migration, or md
-  fails the leg and leg repair replaces it;
+  name the row (DN16); an operator's forced cancel ends the migration
+  (`architecture.md`, Migrations), or md fails the leg and leg repair
+  replaces it;
 * both rows carry the reason `RES_REASON_AWAITING_CUTOVER` while they read
   the wait for the cutover, and no reason in any other state;
 * the per-CN rows are judged where the rule puts the stacks (above), and,
@@ -3825,13 +3841,6 @@ else reported through `agent_reply` is still a protocol-level refusal.
   long before the removal; and the export two agents link reads old once no
   side of the agent whose port it is left on has looked up its attributes
   within the grace, as when no side of that agent wants it any more.
-* The port link of a migration source's step 3 does not wait for the
-  suspends of step 2 to have held (DN12; `architecture.md`, Migration):
-  when a per-CN dm-linear's suspend fails, or its dm-error fails and the
-  converge skips that linear, the converge still links the migration source
-  export, so the destination's copy can read a region of the side before a
-  write the old primary still had in flight through that linear lands
-  there, and the two sides then differ, which [D12] exists to prevent.
 * The dn sweep's disconnect of a destination's source connection (DN6 L3)
   runs under the DN1 locks, as the cn build's dead-path disconnect does;
   only the cn sweep's runs off them (`cnagent.md` CN10 and CN21). A target

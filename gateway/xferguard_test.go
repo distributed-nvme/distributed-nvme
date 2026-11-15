@@ -24,16 +24,21 @@ import (
 // namespace can be deleted (architecture.md, Transfers).
 func TestANamespaceATransferNamesIsKept(t *testing.T) {
 	env := newVolEnv(t)
+	// Each namespace on a volume of its own: a transfer's origin must be
+	// the only namespace of its volume (tdOtherNs).
 	env.putSubsystem(volNqn, 501, []*pb.Namespace{
 		{NsId: 601, NsIdx: 1, TdId: 900},
-		{NsId: 602, NsIdx: 2, TdId: 900},
-		{NsId: 603, NsIdx: 3, TdId: 900},
+		{NsId: 602, NsIdx: 2, TdId: 905},
+		{NsId: 603, NsIdx: 3, TdId: 906},
 	})
 	env.putSubsystem(volNqnB, 502, []*pb.Namespace{
-		{NsId: 611, NsIdx: 1, TdId: 900},
+		{NsId: 611, NsIdx: 1, TdId: 907},
 	})
 	env.putTd("vol", 900, 7, 0, true)
 	env.putTd("snap", 901, 8, 7, true)
+	env.putTd("vol2", 905, 11, 0, true)
+	env.putTd("vol3", 906, 12, 0, true)
+	env.putTd("vol4", 907, 13, 0, true)
 	volCreateTransfer(env, "xfer-a")
 	// A second transfer whose origin, namespace 2, is then removed behind
 	// the gateway's back: the shape a record changed outside the gateway

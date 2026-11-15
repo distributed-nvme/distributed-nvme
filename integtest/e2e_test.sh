@@ -14587,9 +14587,9 @@ copy_xfer_delete() {
 # has more DN VMs than legs (parse_args refuses such a run), so the location
 # assertion below is always made.
 copy_migration() {
-	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled"
+	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled after its cutover"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
-	local hex v k srcv srck legnqn straddr strsvcid dsttraddr dsttrsvcid
+	local hex v k srcv srck legnqn straddr strsvcid dsttraddr dsttrsvcid t0
 
 	sp_refresh
 	sp_read_roles
@@ -14865,12 +14865,25 @@ copy_migration() {
 	assert_field "$CTL_OUT" '.migr.src_side_id' "$dstside" \
 		"the second migration's source is the first one's destination"
 
-	# Cancelled at once, deliberately: `migr cancel` throws an unfinished copy
-	# away and needs no proof about it (ctl/migr.go's file header — the
-	# request has no force field at all), so waiting for the destination to
-	# zero first would test nothing this step is about.
-	ctl_ok migr cancel --name "$MIGR1"
+	# The cancel after the cutover. From the cutover's transaction on, the
+	# new side may serve and hold the only copy of the writes since, so the
+	# gateway refuses a cancel then, and only a forced one ends the
+	# migration, the old side serving its content as of the cutover
+	# (architecture.md, Migrations). No host IO runs between the create and
+	# the forced cancel, so the content is the same, which check_sha0 below
+	# reads. The forced cancel is timed until the primary's path to the old
+	# side is optimized again.
+	MIGR_HYD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the worker to start the cutover of migration $MIGR1" \
+		migr_cutover_started "$MIGR1"
+	ctl_fail FAILED_PRECONDITION migr cancel --name "$MIGR1"
+	t0=$SECONDS
+	ctl_ok migr cancel --name "$MIGR1" --force
 	assert_field "$CTL_OUT" '.migr_id' "$MIGR1_ID" "CancelMigrationReply.migr_id"
+	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
+	log "  a forced cancel after the cutover: the old side serves again" \
+		"$((SECONDS - t0)) s after the cancel"
 	sp_refresh
 	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[0].side_list | length" 1 \
 		"the cancelled migration's destination side is gone"
@@ -14880,14 +14893,10 @@ copy_migration() {
 		"migr_name_list is empty again"
 	ctl_fail NOT_FOUND migr get --name "$MIGR1"
 
-	# The same wait, for the same reason. This side went ANA-inaccessible
-	# only if the migration's cutover started before the cancel, which a
-	# cancel issued at once almost always beats, as the cutover waits for the
-	# destination's zeroing and for the primary's connect to it. Either way
-	# the cancel only removed the record, and the DN's next syncup is what
-	# puts the namespace back in the optimized group.
-	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
-	check_sha0 "after a migration was cancelled"
+	# The same wait, for the same reason: the cancel only removed the
+	# record, and the DN's next syncup is what puts the namespace back in the
+	# optimized group (above, timed).
+	check_sha0 "after a migration was cancelled after its cutover"
 }
 
 # ---------------------------------------------------------------------------

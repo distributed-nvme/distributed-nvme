@@ -11185,11 +11185,14 @@ func (x *FinishMigrationReply) GetMigrId() uint64 {
 }
 
 type CancelMigrationRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	SpName        string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
-	SpRev         *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
-	MigrName      string                 `protobuf:"bytes,4,opt,name=migr_name,json=migrName,proto3" json:"migr_name,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	SpName      string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
+	SpRev       *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
+	MigrName    string                 `protobuf:"bytes,4,opt,name=migr_name,json=migrName,proto3" json:"migr_name,omitempty"`
+	// force cancels a migration whose cutover has started (architecture.md,
+	// Migrations, CancelMigration).
+	Force         bool `protobuf:"varint,5,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11250,6 +11253,13 @@ func (x *CancelMigrationRequest) GetMigrName() string {
 		return x.MigrName
 	}
 	return ""
+}
+
+func (x *CancelMigrationRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type CancelMigrationReply struct {
@@ -17499,12 +17509,13 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\tmigr_name\x18\x04 \x01(\tR\bmigrName\x12\x14\n" +
 	"\x05force\x18\x05 \x01(\bR\x05force\"/\n" +
 	"\x14FinishMigrationReply\x12\x17\n" +
-	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\"\x90\x01\n" +
+	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\"\xa6\x01\n" +
 	"\x16CancelMigrationRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
 	"\x06sp_rev\x18\x03 \x01(\v2\x06.SpRevR\x05spRev\x12\x1b\n" +
-	"\tmigr_name\x18\x04 \x01(\tR\bmigrName\"/\n" +
+	"\tmigr_name\x18\x04 \x01(\tR\bmigrName\x12\x14\n" +
+	"\x05force\x18\x05 \x01(\bR\x05force\"/\n" +
 	"\x14CancelMigrationReply\x12\x17\n" +
 	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\"n\n" +
 	"\x13GetMigrationRequest\x12!\n" +

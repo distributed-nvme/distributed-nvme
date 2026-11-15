@@ -2715,11 +2715,9 @@ clone hydrates, the destination's thin volumes hold only the regions
 hydrated so far, dm-clone serving the rest from the source (Clones), so a
 snapshot would capture a partial copy; this RPC makes no agent call, so
 hydration is invisible to it: the refusal holds while the `Clone` key
-exists, drain included, and like the `created` one it writes nothing. It
-does not reach a snapshot accepted before `CreateClone` named its origin:
-a slice whose `create_snap` is retried after hydration began captures part
-of the copy (Known limits, "A snapshot accepted before a clone targets its
-origin can hold part of the copy"); `INVALID_ARGUMENT`
+exists, drain included, and like the `created` one it writes nothing. A
+snapshot accepted before `CreateClone` named its origin is the clone's
+refusal (Clones); `INVALID_ARGUMENT`
 `size` zero without `ori_name`, or `size` not a multiple of `slice_cnt`
 times the SP's `DmRaid0Conf.stripe_size` (dm-striped needs equal,
 chunk-aligned members).
@@ -2926,8 +2924,9 @@ rebuilt as `CreateSubsystem` writes it, with the new hosts. Reply `ss_id`.
 when `ns_list` holds `MaxNsCntPerSs` namespaces or more;
 `INVALID_ARGUMENT` `ns_idx` zero, `ns_idx` already used in this subsystem,
 or a supplied `dev_uuid` or `dev_nguid` malformed; `FAILED_PRECONDITION`
-for a place (`nqn`, `ns_idx`) a transfer still names as its origin
-(Transfers). Defaults: an empty
+for a place (`nqn`, `ns_idx`) a transfer still names as its origin, and for
+a td that a transfer's origin namespace lies on (Transfers, The origin is
+its td's only namespace). Defaults: an empty
 `dev_uuid` is a generated RFC 4122 version 4 uuid, an empty `dev_nguid` a
 generated random NGUID in hex. Callers supply both only when the namespace
 must impersonate an existing one — the transfer and clone flow of Transfer
@@ -2952,7 +2951,8 @@ node-local groups of [D4].
 **UpdateNamespaceDev** — repoints the namespace at another td
 (`td_name`), for example to expose a snapshot in place of the origin.
 Errors: `NOT_FOUND` nqn, `ns_idx` or td; `FAILED_PRECONDITION` while a
-transfer names the namespace as its origin (Transfers).
+transfer names the namespace as its origin, and for a td a transfer's
+origin namespace lies on (Transfers).
 STM: update `td_id`, bump `SpRev`; agents reload the namespace's own
 `CnNsDevName` onto the new td's raid0 (a dm reload — the nvmet
 "device_path" never changes, so the switch is invisible to the host).
@@ -3013,7 +3013,9 @@ at `MaxCloneCntPerSp`, or when there are fewer DN candidates (Finding DN
 candidates) than the clone meta group has legs (Per-operation allocation);
 `NOT_FOUND` `dst_td_name`;
 `FAILED_PRECONDITION` the destination td already targeted by another
-clone, or a destination whose
+clone, a destination with a snapshot not yet `created` (Thin devices) — a
+slice of it made after the copy began would hold part of the copy, the
+message naming the snapshot — or a destination whose
 dm-clone metadata one side of a clone meta group cannot hold — the message
 names the largest destination one side holds; `INVALID_ARGUMENT` when
 `src_tr_conf` is empty or longer than `MaxCntlrCntPerSp` or has an entry
@@ -3031,8 +3033,11 @@ Precondition (not verifiable by the control plane, a documented contract,
 [D3]): the destination td must be **empty** — freshly created and never
 written; [D3] says why. Action: allocate the clone's clone meta group on
 DNs (Per-operation allocation), which makes the RPC a candidate unit
-(`gateway.md` GW9). STM: after the refusals of the ceiling, the name, the
-destination and the bound, take `clone_id`, the group's `grp_id`, and per
+(`gateway.md` GW9). The refusal of an uncreated snapshot walks every td of
+the SP, so the plan makes it and the deciding STM holds the plan to the
+pool's revision instead, as `DeleteThinDevice` does (Thin devices). STM:
+after the refusals of the ceiling, the name, the destination and the bound,
+take `clone_id`, the group's `grp_id`, and per
 leg a `leg_id` and its `side_id` from `next_id`, in that order; write the `Clone`
 with its clone meta group — the legs the SP's redundancy gives
 a group, each one `Side` of `CloneMetaGrpExtCnt` extents written
@@ -3259,7 +3264,8 @@ reader and writer of the bytes, served by the primary.*
 
 **CreateTransfer** — Errors: `ALREADY_EXISTS`; `RESOURCE_EXHAUSTED` at
 `MaxXferCntPerSp`; `NOT_FOUND` for an `ori_nqn` or an `ori_ns_idx` the SP
-does not hold; `INVALID_ARGUMENT` for the NQN rules of Common validation on
+does not hold; `FAILED_PRECONDITION` for an origin whose td another
+namespace of the SP also lies on (below); `INVALID_ARGUMENT` for the NQN rules of Common validation on
 `ori_nqn`, the dnv-namespace one included, and for the host-NQN rules on
 `allowed_hosts`, where callers put the destination cntlrs' `CnHostNqn`s.
 Action: STM: `xfer_id` from `next_id`, write the `Transfer`, append the
@@ -3292,6 +3298,18 @@ namespace at a place a transfer still names would become that transfer's
 origin unasked. The guard reads the pool's transfer list and each listed
 transfer in the same STM; a transfer created or deleted meanwhile rewrites
 that list, so the commit fails and the STM runs again.
+
+**The origin is its td's only namespace.** A transfer's origin is the only
+namespace of the SP on its td while the transfer lives: `CreateTransfer`
+refuses an origin whose td another namespace lies on, and
+`CreateNamespace` and `UpdateNamespaceDev` refuse a namespace onto a td a
+transfer's origin lies on, each `FAILED_PRECONDITION`. Reason: the
+transfer parks the origin namespace alone, so host writes through a second
+namespace of the td would change the source in the middle of the clone's
+copy, which the clone misses with no error. Each check reads the pool's
+transfers and their origins' subsystems, or the pool's subsystems, all in
+the same STM.
+
 `UpdateNamespaceSuspended` stays allowed: a suspend parks only the origin's
 own ns-dev, and the td the primary's xfer stack maps does not change.
 
@@ -3400,15 +3418,28 @@ migration's `LocalMigrBmPath` files (Bitmap push protocol; `dnagent.md`
 DN13); the source DN agent sees the pointer disappear and tears the side
 down. Reply `migr_id`.
 
-**CancelMigration** — the mirror rollback: the STM removes the
-**destination** `Side`, the `Migration` and its bitmaps, returns the
-destination DN's extents and the migration's metadata units, and bumps
-`SpRev` and the destination's `DnRev`.
-The source side returns to normal service on the next `SyncupSide` (ANA
-back, the migration export dropped), or, before the cutover, simply keeps
-serving; the destination agent tears its stack down, the
-`LocalMigrBmPath` files included. A cancel needs no cutover, and it is how
-an operator ends a migration whose cutover never comes (Migration).
+**CancelMigration** — Errors: `FAILED_PRECONDITION` once the migration's
+`cutover_pending` is clear, unless `force` is set, decided from the record
+alone. Reason: from the cutover's transaction on, the destination may
+serve and hold the only copy of the leg's writes since, and a cancel throws
+it away: the source then serves its content as of the cutover, so this
+leg loses every write since, and a block the pool first mapped after the
+destination began to serve reads the source's old extent bytes, possibly
+another pool's. In a group with more than one leg the other legs hold those
+writes, md does not know this leg is behind, and reads can return its old
+bytes; the operator repairs the leg (Repairs) before relying on its group. The gateway cannot tell whether the destination has served without
+a call to an agent, and the flag is in etcd and exact, so it refuses from
+the cutover on; `force` is the operator's way out, as for a destination
+that cannot be finished, and costs what this paragraph says. Action: the
+mirror rollback: the STM removes the **destination** `Side`, the
+`Migration` and its bitmaps, returns the destination DN's extents and the
+migration's metadata units, and bumps `SpRev` and the destination's
+`DnRev`. The source side returns to normal service on the next
+`SyncupSide` (ANA back, the migration export dropped), or, before the
+cutover, simply keeps serving; the destination agent tears its stack down,
+the `LocalMigrBmPath` files included. A cancel before the cutover needs no
+force, and it is how an operator ends a migration whose cutover never comes
+(Migration).
 
 **GetMigration** — one STM read; the reply is the record as stored, its
 `cutover_pending` included, which tells whether a finish can succeed yet.
@@ -5371,8 +5402,12 @@ kernel finds a subsystem for a connect only through its port's links, so
 the link alone puts the export in the destination's reach, and the copy
 starts only after the source has run its suspends: [D12]'s reason needs
 that order, since no write may reach a region of the source's data after
-the copy has read it. It is an order, not a gate: a suspend that fails
-does not hold the link back (`dnagent.md`, Known limits). The build goes
+the copy has read it. It is a gate, not only an order: the source links
+the export only in a pass where every per-CN dm-linear of the side, a
+leftover of a CN the request no longer names included, is proven fenced,
+suspended or on its own dm-error; a pass with one that is not leaves the
+export unlinked and names it, so the worker sends the syncup again
+(`dnagent.md` DN12). The build goes
 before step 1 so that none of its commands sits in the migration gap
 (Known limits); a build that fails stops the source's converge before
 step 1 (`dnagent.md` DN12).
@@ -7135,7 +7170,8 @@ document and only pointed to here.
   its gap can open before the primary has connected the destination, and the
   converge that would connect it (`cnagent.md` CN10) needs the cntlr lock a
   waiting call holds, so the cntlr can stay blocked until the migration ends. A
-  cancel gives the primary back its path to the source, which lets the commit
+  cancel, forced since such a record reads as a cutover started (Migrations),
+  gives the primary back its path to the source, which lets the commit
   finish. A finish removes the source's exports. Where the primary holds a live
   path to the destination, the waiting IO goes on there once the destination,
   now the leg's only side, makes that path optimized (`dnagent.md` DN10). Where
@@ -7246,23 +7282,6 @@ document and only pointed to here.
   proven whole. `ThinDevice.created` certifies materialization, not
   point-in-time consistency: a torn snapshot still flips to `created` once
   every slice's volume exists.
-* **A snapshot accepted before a clone targets its origin can hold part of
-  the copy.** `CreateThinDevice` refuses a snapshot of a clone's destination
-  while the `Clone` key exists (Thin devices), but `CreateClone` does not
-  look for an uncreated snapshot of its destination: finding one means
-  walking every td of the SP, the walk `DeleteThinDevice` keeps out of its
-  transaction. The primary's pre-pass sends every ready slice's snapshot
-  message before the same pass builds the dm-clone (`cnagent.md` CN14,
-  CN18); only a slice it skips — its pool not ready, or its thin device
-  unreadable — or whose message fails is retried on a later converge, which
-  can come after hydration has begun. That slice of the snapshot then holds
-  whatever the copy has written into the destination by then, while the
-  slices messaged in time hold the empty td, and the snapshot still flips to
-  `created`, marked torn when the agent that sent the late message saw it
-  make that slice's id while the others already existed (Thin devices).
-  [D3]'s destination is empty, so the exposure is a snapshot of
-  an empty td, and only a snapshot not yet created by the time a clone into
-  that td is created.
 * **A write that needs a new block is durable only after a flush or a
   commit.** dm-thin completes a write that provisions a block — to a block
   never written, or to one a snapshot shares — before it commits the

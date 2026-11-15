@@ -123,8 +123,8 @@ retired leg's age (`dnv-worker.md` AR12). Guest distinctness of a repair's
 fresh new leg in the react case at as many disk-node guests as a group has
 legs, where no guest lies outside the group's, and for a leg repair whose fresh
 leg react's steer pushes to the second tier (E2E4); and the destination of the
-copy case's second migration, created and cancelled at once, which the case
-does not check at all.
+copy case's second migration, cancelled with force after its cutover, which
+the case does not check at all.
 
 ## Topology and parameters
 
@@ -497,9 +497,12 @@ then add of the member under the re-send's id (`cnagent.md` CN12, CN30;
 `dnv-worker.md` RW4, RW10). The leg bitmap is read and pushed only once the
 primary reaches the leg through the new side, and the migration finishes under
 the same leg id with an optimized path before any read (`architecture.md`,
-Migration; `dnagent.md` DN12, DN13); a cancelled one leaves its source
-untouched, the case relying on leg repair leaving a two-sided leg alone
-(`dnv-worker.md` AR8). Two of an operator's repairs (raid1 only) work on one
+Migration; `dnagent.md` DN12, DN13). A second migration, once its cutover has
+started, is refused a plain cancel and ended by a forced one, its source
+serving again, the primary's path to it optimized, with the time from the
+cancel to that path logged, and the volume reading as before, since no host
+IO ran in between (`architecture.md`, Migrations); the case relies on leg
+repair leaving a two-sided leg alone (`dnv-worker.md` AR8). Two of an operator's repairs (raid1 only) work on one
 group, each replacing a leg whose disk node dies as in react, its agent killed
 and its nvmet port removed (`architecture.md`, Repairs, Repair, Retired legs);
 each dying disk node carries no other side of the pool — for the first leg `sp

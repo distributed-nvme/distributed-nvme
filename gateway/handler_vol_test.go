@@ -4851,12 +4851,15 @@ func TestFinishMigrationRefusesAPendingCutoverInPhaseTwo(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// The cutover has started, so only a forced cancel ends it
+	// (migrCancelAllowed).
 	if _, err := env.srv.CancelMigration(
 		env.ctx, &pb.CancelMigrationRequest{
 			ClusterName: env.cluster,
 			SpName:      volSpName,
 			SpRev:       env.token(),
 			MigrName:    "migr-a",
+			Force:       true,
 		}); err != nil {
 		t.Fatalf("CancelMigration: %v", err)
 	}
@@ -4868,26 +4871,44 @@ func TestFinishMigrationRefusesAPendingCutoverInPhaseTwo(t *testing.T) {
 	env.wantNoWrite("the refused FinishMigration", before)
 }
 
-// TestCancelMigrationAfterTheCutover pins that the cancel does not read the
-// flag (architecture.md, Migrations): a cancel after the cutover is the same
-// rollback as one before it, which TestCancelMigrationIsTheExactMirror pins
-// with the flag still set. The leg gets its source back as its only side and
-// dn-c ends as the fixture wrote it, but for its revision.
+// TestCancelMigrationAfterTheCutover pins the cancel's refusal once the
+// cutover has started (architecture.md, Migrations): the new side may hold
+// the only copy of the writes since, so a cancel without force is
+// FAILED_PRECONDITION and writes nothing, and a forced one is the same
+// rollback as one before the cutover, which
+// TestCancelMigrationIsTheExactMirror pins with the flag still set. The leg
+// gets its source back as its only side and dn-c ends as the fixture wrote
+// it, but for its revision.
 func TestCancelMigrationAfterTheCutover(t *testing.T) {
 	env := newVolEnv(t)
 	sliceBefore := env.slice()
 	dnBefore := env.dn(volDnC)
 	created := volCreateMigration(env, "migr-a")
 	volCutover(env, "migr-a")
-	reply, err := env.srv.CancelMigration(
+	before := env.dump()
+	_, err := env.srv.CancelMigration(
 		env.ctx, &pb.CancelMigrationRequest{
 			ClusterName: env.cluster,
 			SpName:      volSpName,
 			SpRev:       env.token(),
 			MigrName:    "migr-a",
 		})
+	if status.Code(err) != codes.FailedPrecondition ||
+		!strings.Contains(err.Error(), "cutover has started") {
+		t.Fatalf("a cancel after the cutover answered %v, want "+
+			"FAILED_PRECONDITION naming the cutover", err)
+	}
+	env.wantNoWrite("the refused CancelMigration", before)
+	reply, err := env.srv.CancelMigration(
+		env.ctx, &pb.CancelMigrationRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       env.token(),
+			MigrName:    "migr-a",
+			Force:       true,
+		})
 	if err != nil {
-		t.Fatalf("CancelMigration: %v", err)
+		t.Fatalf("CancelMigration with force: %v", err)
 	}
 	if reply.GetMigrId() != created.GetMigrId() {
 		t.Errorf("reply migr_id: got %d, want %d",
@@ -5219,11 +5240,16 @@ func TestGetMigration(t *testing.T) {
 func volSeedTokenFixture(env *volEnv) {
 	env.t.Helper()
 	env.putTd("vol", 900, 7, 0, true)
+	// A second volume, which no transfer's origin lies on, for the
+	// namespace create (architecture.md, Transfers).
+	env.putTd("vol2", 905, 11, 0, true)
 	// The transfer's origin is namespace 2, so the namespace cases, which
 	// address namespace 1, meet no transfer guard (architecture.md,
 	// Transfers).
+	// Namespace 1 lies on the second volume, so the transfer's origin,
+	// namespace 2, is alone on its own (architecture.md, Transfers).
 	env.putSubsystem(volNqn, 501, []*pb.Namespace{
-		{NsId: 601, NsIdx: 1, TdId: 900},
+		{NsId: 601, NsIdx: 1, TdId: 905},
 		{NsId: 604, NsIdx: 2, TdId: 900},
 	})
 	mustPut(env.t, env.cli, model.CloneKey(env.cid, volSpId, "clone-a"),
@@ -5323,7 +5349,7 @@ func volTokenCases() []volTokenCase {
 			// refuses it — a check that lives far behind the revision one.
 			bypassCode: codes.FailedPrecondition,
 			bypassMsg: fmt.Sprintf(
-				"thin device vol backs namespace 1 of subsystem %s", volNqn),
+				"thin device vol backs namespace 2 of subsystem %s", volNqn),
 		},
 		{
 			name: "CreateSubsystem",
@@ -5373,7 +5399,7 @@ func volTokenCases() []volTokenCase {
 				_, err := env.srv.CreateNamespace(
 					env.ctx, &pb.CreateNamespaceRequest{
 						ClusterName: env.cluster, SpName: volSpName,
-						SpRev: rev, Nqn: volNqn, NsIdx: 3, TdName: "vol",
+						SpRev: rev, Nqn: volNqn, NsIdx: 3, TdName: "vol2",
 					})
 				return err
 			},
@@ -5397,7 +5423,7 @@ func volTokenCases() []volTokenCase {
 				_, err := env.srv.UpdateNamespaceDev(
 					env.ctx, &pb.UpdateNamespaceDevRequest{
 						ClusterName: env.cluster, SpName: volSpName,
-						SpRev: rev, Nqn: volNqn, NsIdx: 1, TdName: "vol",
+						SpRev: rev, Nqn: volNqn, NsIdx: 1, TdName: "vol2",
 					})
 				return err
 			},
@@ -5549,10 +5575,12 @@ func volTokenCases() []volTokenCase {
 		{
 			name: "CancelMigration",
 			call: func(env *volEnv, rev *pb.SpRev) error {
+				// The fixture's migration has no cutover pending, so the
+				// cancel needs force (migrCancelAllowed).
 				_, err := env.srv.CancelMigration(
 					env.ctx, &pb.CancelMigrationRequest{
 						ClusterName: env.cluster, SpName: volSpName,
-						SpRev: rev, MigrName: "migr-a",
+						SpRev: rev, MigrName: "migr-a", Force: true,
 					})
 				return err
 			},

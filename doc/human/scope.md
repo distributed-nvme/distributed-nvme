@@ -170,12 +170,15 @@ the right time.
   another pool's, with no error. State: accepted. The operator asks for
   it with force. Procedure to write, one line in the operations doc: force
   is right only when an agent cannot answer the proof.
-- **A migration cancel after the new side serves.** Once the new side
-  serves, it holds the only copy of the leg's new writes. A cancel removes
-  that side. The old side serves its content as of the cutover. State: fix
-  decided, the gateway refuses the cancel once the new side has served. A
-  force flag still lets the operator cancel, and the operations doc will
-  say what that loses. Not seen in the lab.
+- **A forced migration cancel after the cutover.** A cancel after the
+  cutover is refused unless forced, as the new side may hold the only copy
+  of the leg's new writes. With force the old side serves its content as
+  of the cutover: the leg loses every write since, and blocks first mapped
+  since read old bytes of the old side's extents, possibly another pool's.
+  In a group of more than one leg the other legs hold those writes, and md
+  does not know this leg is behind, so reads can return its old bytes until
+  the leg is repaired. State: accepted. The operator asks for it with
+  force. Procedure to write: repair the leg right after a forced cancel.
 - **A forced start from an older copy restores one group, not the pool.**
   A forced start is an operator's start of a group's RAID1 array from one
   leg they name, when md will not start it by itself. Blocks rewritten
@@ -304,11 +307,6 @@ the host.
   reported torn. State: fix decided, the
   agent saves the mark at once and the worker records it from the first
   report. Not seen in the lab.
-- **A snapshot taken just before a clone into the same volume holds part
-  of the copy.** Silent. A clone's create does not look for a snapshot of
-  its destination that is not yet created. One slice of that snapshot can
-  be made after the copy began. State: fix decided, the clone's create
-  refuses such a destination. Not seen in the lab.
 
 ### 5.2 The forced start
 
@@ -398,19 +396,6 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-- **A second namespace on a live transfer's volume.** Silent. The gateway
-  guards the namespace a transfer names, not the volume under it. Host
-  writes through a second namespace change the source in the middle of the
-  copy. State: fix decided, the gateway refuses it. Not seen in the lab.
-- **A migration's old side opens its copy export before its writes have
-  stopped.** Silent. On a disk node, each cntlr reaches the side through a
-  device of its own. Before the new side copies, the old side suspends
-  these devices, so that no write is in flight, and then opens the export
-  the new side copies from. A failed suspend is
-  skipped, but the export is opened all the same. The new side can copy a
-  region before a write in flight lands on the old side, and the two sides
-  then differ. State: fix decided, the export waits for every suspend. Not
-  seen in the lab.
 - **A transfer of a volume a clone still fills gives a copy with holes.**
   Silent. The reader sees zeros where the copy has not reached. State: fix
   decided, the gateway refuses such a transfer. Not seen in the lab.
@@ -847,7 +832,7 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 
 - **A pool commit in a migration gap waits for the gap to end.** The gap is
   the time with no usable path from the primary to the moving leg. The gap
-  ends by the disk nodes' steps or by a cancel. Measured at 32 slices: one
+  ends by the disk nodes' steps or by a forced cancel. Measured at 32 slices: one
   to two and a half seconds. State: accepted.
 - **A migrating leg whose serving side's disk node dies waits without
   limit.** A migrating leg has two paths. The one not serving is live but

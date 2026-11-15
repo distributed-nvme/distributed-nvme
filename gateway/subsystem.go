@@ -467,6 +467,12 @@ func (s *Server) CreateNamespace(
 		if !stm.Get(tdKey, td) {
 			return errNotFound("thin device %q not found", req.GetTdName())
 		}
+		if xferName, found, err := tdTransferRef(
+			stm, sc, td.GetTdId()); err != nil {
+			return err
+		} else if found {
+			return errTdOfTransfer(req.GetTdName(), xferName)
+		}
 		devUuid := req.GetDevUuid()
 		if devUuid == "" {
 			if devUuid, err = newDevUuid(); err != nil {
@@ -620,6 +626,12 @@ func (s *Server) UpdateNamespaceDev(
 		td := &pb.ThinDevice{}
 		if !stm.Get(tdKey, td) {
 			return errNotFound("thin device %q not found", req.GetTdName())
+		}
+		if xferName, found, err := tdTransferRef(
+			stm, sc, td.GetTdId()); err != nil {
+			return err
+		} else if found {
+			return errTdOfTransfer(req.GetTdName(), xferName)
 		}
 		nsId = ns.GetNsId()
 		ns.TdId = td.GetTdId()

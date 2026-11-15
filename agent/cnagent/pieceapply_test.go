@@ -42,8 +42,8 @@ func TestPushOntoAServingDmClonePausesItsHolders(t *testing.T) {
 	}
 }
 
-// TestPushOntoASuspendedDmCloneWaitsForItsResume is item 1 of the review on
-// a controller node: a chunk for a suspended dm-clone sends no discard and
+// TestPushOntoASuspendedDmCloneWaitsForItsResume on a controller node: a
+// chunk for a suspended dm-clone sends no discard and
 // still counts as applied; the converge that resumes the dm-clone applies it
 // then (CN22, CN18 step 4).
 func TestPushOntoASuspendedDmCloneWaitsForItsResume(t *testing.T) {

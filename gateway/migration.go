@@ -245,6 +245,26 @@ func migrCutoverStarted(migrName string, migr *pb.Migration) error {
 	return nil
 }
 
+// migrCancelAllowed is CancelMigration's refusal (architecture.md,
+// Migrations): once the migration's cutover has started, the destination may
+// serve and hold the only copy of the writes since, which a cancel throws
+// away, the source then serving its content as of the cutover; only force
+// cancels then.
+func migrCancelAllowed(
+	migrName string,
+	migr *pb.Migration,
+	force bool,
+) error {
+	if migr.GetCutoverPending() || force {
+		return nil
+	}
+	return errPrecondition(
+		"migration %q: the cutover has started, so the new side may hold "+
+			"the only copy of the writes since; finish the migration, or "+
+			"cancel with force to serve the old side as of the cutover",
+		migrName)
+}
+
 // migrCntBelowCeiling is CreateMigration's count ceiling: a pool whose
 // migr_name_list already holds MaxMigrCntPerSp migrations starts no other
 // (architecture.md, Migrations). The planning read and the deciding STM both
@@ -786,9 +806,11 @@ func (s *Server) FinishMigration(
 //
 // It is a single transaction where FinishMigration needs two because it
 // answers a question no agent has to be consulted about: whatever the
-// destination has copied is thrown away, so there is nothing to prove. The
-// source side is left exactly as it was and returns to normal service on its
-// next SyncupSide; the destination DN sees its pointer disappear and tears the
+// destination has copied is thrown away, so there is nothing to prove. Once
+// the cutover has started the destination may serve and hold the only copy
+// of the leg's newest writes, so the cancel is refused then unless forced
+// (migrCancelAllowed). The source side returns to service on its next
+// SyncupSide; the destination DN sees its pointer disappear and tears the
 // stack down, including the migration's local bitmap files (dnagent.md SH7
 // and DN6).
 func (s *Server) CancelMigration(
@@ -819,6 +841,10 @@ func (s *Server) CancelMigration(
 			return err
 		}
 		migrId = migr.GetMigrId()
+		if err := migrCancelAllowed(
+			req.GetMigrName(), migr, req.GetForce()); err != nil {
+			return err
+		}
 		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
 		if err != nil {
 			return err

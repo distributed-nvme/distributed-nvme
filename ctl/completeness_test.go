@@ -324,7 +324,7 @@ var leafFlags = map[string][]string{
 	"migr create": {"name", "src-side", "dn-black", "dn-white",
 		"hyd-threshold", "hyd-batch"},
 	"migr finish":    {"name", "force"},
-	"migr cancel":    {"name"},
+	"migr cancel":    {"name", "force"},
 	"migr get":       {"name"},
 	"migr append-bm": {"name", "bm-hex", "bm-idx"},
 	// repair

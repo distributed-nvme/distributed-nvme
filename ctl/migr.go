@@ -5,12 +5,9 @@
 // the first, and the operator ends the migration by committing (finish) or
 // rolling back (cancel).
 //
-// Two of the RPCs are deliberately NOT symmetric with their siblings, and
+// One of the RPCs is deliberately NOT symmetric with its sibling, and
 // dnvctl.md, The command tree, is exhaustive about it (CT1):
 //
-//   - `migr cancel` has no --force. Throwing an unfinished copy away needs no
-//     proof about the copy, so CancelMigrationRequest has no such field —
-//     unlike FinishMigrationRequest, which does.
 //   - `migr append-bm` has no slice index. A migration copies ONE side, so a
 //     migration `bm_idx` IS an append sequence, numbered by the record's own
 //     `bm_cnt`; AppendCloneBitmap instead addresses a chunk by the pair
@@ -130,9 +127,12 @@ func migrFinishCmd() *cobra.Command {
 }
 
 // migrCancelCmd is CancelMigration, the rollback: the destination side is
-// dropped and the source stays the leg's side. No --force — see the file
-// header; the RPC has no such field and adding a flag for it would send
-// nothing (CT1).
+// dropped and the source stays the leg's side.
+//
+// --force is the only way to cancel once the cutover has started: the
+// gateway refuses it otherwise, since the destination may hold the only copy
+// of the writes since, and with it the source serves its content as of the
+// cutover; what that costs is architecture.md, Migrations.
 func migrCancelCmd() *cobra.Command {
 	cmd := leaf(
 		"cancel",
@@ -147,6 +147,7 @@ func migrCancelCmd() *cobra.Command {
 				SpName:      spOf(),
 				SpRev:       rev,
 				MigrName:    strOf("name"),
+				Force:       boolOf("force"),
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -154,7 +155,12 @@ func migrCancelCmd() *cobra.Command {
 				return client.CancelMigration(ctx, req)
 			}, nil
 		})
-	cmd.Flags().String("name", "", "migr_name")
+	flags := cmd.Flags()
+	flags.String("name", "", "migr_name")
+	flags.Bool("force", false,
+		"cancel after the cutover started: the source serves its content "+
+			"as of the cutover, so the leg loses every write since; repair "+
+			"the leg in a group of more than one leg")
 	return cmd
 }
 

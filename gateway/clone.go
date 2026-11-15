@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -229,10 +230,13 @@ func cloneCreateChecks(
 // Per-operation allocation, places a clone's — one DN per location among the
 // legs, the black list empty and no location excluded, so the legs may land
 // on DNs the pool's other groups already use — and fewer candidates than legs
-// is RESOURCE_EXHAUSTED. The deciding STM runs the same checks again and
-// drops the round as candidate changed when the cluster id or the leg count
-// is no longer the one the scan was drawn for, or when a pick's capacity key
-// has moved (dnLedger.verifyPick).
+// is RESOURCE_EXHAUSTED. The snapshot also walks td_name_list for a snapshot
+// of the destination not yet created (tdUncreatedSnapshots), a refusal too
+// wide for the deciding STM's read set. The deciding STM runs the same
+// checks again and drops the round as candidate changed when the cluster id
+// or the leg count is no longer the one the scan was drawn for, when the
+// pool's revision is no longer the one the walk read, or when a pick's
+// capacity key has moved (dnLedger.verifyPick).
 //
 // One of the section's rules is deliberately NOT enforced here. The
 // destination td MUST be empty, freshly created and never written ([D3]): a
@@ -289,11 +293,13 @@ func (s *Server) CreateClone(
 	what := fmt.Sprintf("clone %q", req.GetCloneName())
 	var cloneId uint64
 	err := candidateUnit(ctx, func() error {
-		// The plan: which cluster to scan and how many legs to place.
+		// The plan: which cluster to scan and how many legs to place, and
+		// the pool's revision the snapshot walk below read.
 		var (
-			planCid  uint64
-			planCc   *pb.ClusterConf
-			planLegs int
+			planCid   uint64
+			planCc    *pb.ClusterConf
+			planLegs  int
+			planSpRev uint64
 		)
 		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 			// openSp, not openSpRead: this is a MUTATOR's planning read, so
@@ -303,13 +309,33 @@ func (s *Server) CreateClone(
 			if err != nil {
 				return err
 			}
-			_, plan, err := cloneCreateChecks(stm, sc, req)
+			td, plan, err := cloneCreateChecks(stm, sc, req)
 			if err != nil {
 				return err
+			}
+			// A snapshot of the destination not yet created would have
+			// some of its slices made after the copy began, holding part
+			// of the copy (architecture.md, Clones). The walk reads the
+			// whole td_name_list, so it runs here and never in the deciding
+			// STM, which holds the plan to the pool's revision instead, as
+			// DeleteThinDevice's does.
+			snapshots, err := tdUncreatedSnapshots(stm, sc,
+				sc.Conf.GetTdNameList(), req.GetDstTdName(), td.GetDevId())
+			if err != nil {
+				return err
+			}
+			if len(snapshots) != 0 {
+				blockers := make([]string, 0, len(snapshots))
+				for _, name := range snapshots {
+					blockers = append(blockers, fmt.Sprintf(
+						msgSnapshotNotCreated, name, req.GetDstTdName()))
+				}
+				return errPrecondition("%s", strings.Join(blockers, "; "))
 			}
 			planCid = sc.Cid
 			planCc = sc.Cc
 			planLegs = plan.Legs
+			planSpRev = sc.Rev.GetRevision()
 			return nil
 		})
 		if err != nil {
@@ -342,10 +368,13 @@ func (s *Server) CreateClone(
 			if err != nil {
 				return err
 			}
-			if sc.Cid != planCid || plan.Legs != len(picks) {
+			if sc.Cid != planCid || plan.Legs != len(picks) ||
+				sc.Rev.GetRevision() != planSpRev {
 				// The scan planned for another cluster or another leg
-				// count; its picks describe a group this transaction is
-				// not building.
+				// count, whose picks describe a group this transaction is
+				// not building, or the pool moved after the plan's
+				// snapshot walk, possibly by a snapshot of the destination
+				// the walk could not see.
 				return errCandidateChanged
 			}
 			slots := sc.Conf.GetCntlidSlotList()

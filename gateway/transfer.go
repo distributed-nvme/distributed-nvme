@@ -78,6 +78,74 @@ func nsTransferRef(
 	return "", false, nil
 }
 
+// tdTransferRef reports the transfer, if any, whose origin namespace lies on
+// the thin device tdId (architecture.md, Transfers): CreateNamespace refuses
+// a second namespace onto that volume, whose host writes would change the
+// source in the middle of the clone's copy. A transfer whose origin
+// subsystem or namespace is not found names no volume and is passed over.
+func tdTransferRef(
+	stm etcdutil.STM,
+	sc *spScope,
+	tdId uint64,
+) (string, bool, error) {
+	for _, name := range sc.Conf.GetXferNameList() {
+		key := model.TransferKey(sc.Cid, sc.SpId(), name)
+		xfer := &pb.Transfer{}
+		if !stm.Get(key, xfer) {
+			return "", false, errAborted("transfer key %q is missing", key)
+		}
+		subsystem := &pb.Subsystem{}
+		if !stm.Get(model.SubsystemKey(
+			sc.Cid, sc.SpId(), xfer.GetOriNqn()), subsystem) {
+			continue
+		}
+		if ns := findNs(subsystem, xfer.GetOriNsIdx()); ns != nil &&
+			ns.GetTdId() == tdId {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// errTdOfTransfer is the refusal of a namespace onto the thin device tdName
+// that a transfer's origin namespace lies on (tdTransferRef): CreateNamespace
+// and UpdateNamespaceDev answer it alike.
+func errTdOfTransfer(tdName string, xferName string) error {
+	return errPrecondition(
+		"thin device %q is the volume of transfer %s's origin namespace; "+
+			"a second namespace would change the source during the copy",
+		tdName, xferName)
+}
+
+// tdOtherNs reports a namespace of the SP other than the place (nqn, nsIdx)
+// that lies on the thin device tdId, walking the SP's subsystems
+// (nqn_list, at most MaxSsCntPerSp keys): CreateTransfer refuses an origin
+// whose volume another namespace already carries, as CreateNamespace refuses
+// one added after (architecture.md, Transfers).
+func tdOtherNs(
+	stm etcdutil.STM,
+	sc *spScope,
+	tdId uint64,
+	nqn string,
+	nsIdx uint32,
+) (string, uint32, bool, error) {
+	for _, other := range sc.Conf.GetNqnList() {
+		key := model.SubsystemKey(sc.Cid, sc.SpId(), other)
+		subsystem := &pb.Subsystem{}
+		if !stm.Get(key, subsystem) {
+			return "", 0, false, errAborted(
+				"subsystem key %q is missing", key)
+		}
+		for _, ns := range subsystem.GetNsList() {
+			if ns.GetTdId() == tdId &&
+				(other != nqn || ns.GetNsIdx() != nsIdx) {
+				return other, ns.GetNsIdx(), true, nil
+			}
+		}
+	}
+	return "", 0, false, nil
+}
+
 // errNsInTransfer is the refusal of a namespace place a transfer names.
 func errNsInTransfer(nqn string, nsIdx uint32, xferName string) error {
 	return errPrecondition(
@@ -160,9 +228,23 @@ func (s *Server) CreateTransfer(
 		) {
 			return errNotFound("subsystem %q not found", req.GetOriNqn())
 		}
-		if findNs(subsystem, req.GetOriNsIdx()) == nil {
+		origin := findNs(subsystem, req.GetOriNsIdx())
+		if origin == nil {
 			return errNotFound("namespace %d not found in subsystem %q",
 				req.GetOriNsIdx(), req.GetOriNqn())
+		}
+		// Host writes through another namespace on the origin's volume
+		// would change the source in the middle of the clone's copy.
+		otherNqn, otherIdx, found, err := tdOtherNs(stm, sc,
+			origin.GetTdId(), req.GetOriNqn(), req.GetOriNsIdx())
+		if err != nil {
+			return err
+		}
+		if found {
+			return errPrecondition(
+				"the origin's volume also backs namespace %d of "+
+					"subsystem %s; a transfer needs it to be the only one",
+				otherIdx, otherNqn)
 		}
 		minter := newSpIdMinter(conf)
 		xferId = minter.mint()

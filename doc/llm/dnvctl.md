@@ -103,8 +103,8 @@ variable named after a leaf flag — and a config-file key of the same name
 reach no request. Binding every flag would let one exported variable decide
 requests nobody typed it for: `DNVCTL_REV` would put its revision on every
 token-carrying write typed without `--rev`, `DNVCTL_FORCE` would force each
-`clone delete` and `migr finish` typed without `--force` and turn such an
-`xfer delete` into an abort, and `DNVCTL_NAME` would stand in for every
+`clone delete`, `migr finish` and `migr cancel` typed without `--force` and
+turn such an `xfer delete` into an abort, and `DNVCTL_NAME` would stand in for every
 untyped `--name`, redirecting a bare `cluster get` or `cluster delete`. A
 revision token is per object and per write, never ambient context.
 
@@ -297,8 +297,8 @@ these exceptions:
   bin shifts of `dn_bin_conf` (`cluster` — `ctl/cluster.go`), and
   `sp create`'s `bdev_conf.bdev_feature_list` (In scope / out of scope).
 
-A leaf has a flag only where its request has a field: `migr cancel` takes no
-`--force` and `migr append-bm` no slice index (`migr` — `ctl/migr.go`). An
+A leaf has a flag only where its request has a field: `migr append-bm`
+takes no slice index (`migr` — `ctl/migr.go`). An
 optional sub-message follows the "not given" convention: it is sent only
 when one of its flags holds a non-zero value, a zero meaning the member was
 not given, except for the token messages (CT3) and where a group below says
@@ -575,10 +575,8 @@ of `allowed_hosts`.
 
 ### `migr` — `ctl/migr.go`
 
-Two leaves are deliberately not symmetric with their siblings, because their
-RPCs are not: `migr cancel` has no `--force` — throwing an unfinished copy
-away needs no proof about the copy — while `migr finish` has one; and
-`migr append-bm` takes no slice index, because a migration copies one side
+One leaf is deliberately not symmetric with its sibling, because its RPC is
+not: `migr append-bm` takes no slice index, because a migration copies one side
 and its chunks are an append sequence, while a clone chunk is addressed by the
 pair of source slice and chunk index (`clone` — `ctl/clone.go`), which also
 states the
@@ -592,7 +590,11 @@ does with a chunk sent again is `architecture.md`, Migrations.
 `migr finish` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished and nothing else: a migration whose cutover
 has not started is refused with `--force` or without, and `migr cancel` is
-the way out (`architecture.md`, Migrations). `migr get` prints the record
+the way out (`architecture.md`, Migrations). `migr cancel` with `--force`
+sends `force` true, the only way to cancel once the cutover has started:
+the old side then serves its content as of the cutover, and what that
+costs, the leg's repair in a group of more than one leg included, is
+`architecture.md`, Migrations. `migr get` prints the record
 as stored, its `cutover_pending` included (CT4), which tells whether a
 finish can succeed yet.
 
