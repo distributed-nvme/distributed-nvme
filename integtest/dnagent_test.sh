@@ -3355,7 +3355,7 @@ migr_src_ns_gone() { # m
 		"$c1" "$k" "$g" "$c2"
 	# The agent's read records the dm-clone's status line whenever the device
 	# is there, whatever its row's status, so its observation still proves the
-	# hydration hydrationComplete (gateway/common.go) reads; wait-hydrated
+	# hydration HydrationComplete (common/dm_status.go) reads; wait-hydrated
 	# samples it with rounds, which start the reads, each answering the
 	# leftover code that names the destination's rows.
 	ctl "$dst" wait-hydrated --sp "$SP" --leg "${MLEG[$m]}" \

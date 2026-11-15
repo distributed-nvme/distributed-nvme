@@ -933,3 +933,151 @@ func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 			"final STM once)", got, revBefore+1)
 	}
 }
+
+// putLatchNamespaces gives the fixture's subsystem two namespaces, one on the
+// fixture clone's destination td (601) and one on another td (602), both
+// suspended, and adds a second subsystem with a suspended namespace on the
+// other td alone, so a latch has one namespace to resume, one to leave and
+// one subsystem not to write.
+func (e *opsEnv) putLatchNamespaces() {
+	e.t.Helper()
+	mustPut(e.t, e.cli, SubsystemKey(e.cid, opsSpId, opsNqn), &pb.Subsystem{
+		SsId: opsSsId, Serial: "s0", Model: "m0",
+		NsList: []*pb.Namespace{
+			{NsId: 1, NsIdx: 1, TdId: 601, Suspended: true},
+			{NsId: 2, NsIdx: 2, TdId: 602, Suspended: true},
+		},
+	})
+	e.addSubsystem(cdcSs2)
+	mustPut(e.t, e.cli, SubsystemKey(e.cid, opsSpId, cdcSs2.nqn), &pb.Subsystem{
+		SsId: cdcSs2.ssId, Serial: "s2", Model: "m0",
+		NsList: []*pb.Namespace{{NsId: 3, NsIdx: 1, TdId: 602, Suspended: true}},
+	})
+}
+
+// TestLatchCopiedClone is CLD13's op: one STM that latches a live clone as
+// DeleteClone does (CLD4, through the shared LatchClone) — the namespaces on
+// its destination resumed and no other, `deleting` set, one SpRev bump whose
+// revision it reports — and that, run again on the latched clone, writes and
+// bumps nothing and reports false, as a repeat DeleteClone does (CLD3).
+func TestLatchCopiedClone(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putDrainClone(false, [][2]uint32{{0, 0}})
+	env.putLatchNamespaces()
+	revBefore := env.spRev()
+	otherKey := SubsystemKey(env.cid, opsSpId, cdcSs2.nqn)
+	otherMod := env.modRev(otherKey)
+
+	latched, revision, err := LatchCopiedClone(env.ctx, env.cli, env.cid,
+		opsSpId, opsSpName, drainCloneName, drainCloneId)
+	if err != nil {
+		t.Fatalf("LatchCopiedClone: %v", err)
+	}
+	if !latched || revision != revBefore+1 {
+		t.Fatalf("LatchCopiedClone = (%v, %d), want (true, %d)",
+			latched, revision, revBefore+1)
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("sp_rev %d after the latch, want %d", got, revBefore+1)
+	}
+	if !env.clone(drainCloneName).GetDeleting() {
+		t.Errorf("the clone is not deleting after the latch")
+	}
+	ss := &pb.Subsystem{}
+	env.get(SubsystemKey(env.cid, opsSpId, opsNqn), ss)
+	for _, ns := range ss.GetNsList() {
+		want := ns.GetTdId() != 601
+		if ns.GetSuspended() != want {
+			t.Errorf("namespace %d on td %d: suspended %v, want %v",
+				ns.GetNsId(), ns.GetTdId(), ns.GetSuspended(), want)
+		}
+	}
+	if got := env.modRev(otherKey); got != otherMod {
+		t.Errorf("a subsystem with no namespace on the destination was " +
+			"written")
+	}
+	if got := env.drainCloneChunkCnt(); got != 1 {
+		t.Errorf("the latch removed chunk keys: %d left, want 1", got)
+	}
+
+	cloneMod := env.modRev(CloneKey(env.cid, opsSpId, drainCloneName))
+	latched, revision, err = LatchCopiedClone(env.ctx, env.cli, env.cid,
+		opsSpId, opsSpName, drainCloneName, drainCloneId)
+	if err != nil || latched || revision != 0 {
+		t.Fatalf("LatchCopiedClone on a latched clone = (%v, %d, %v), "+
+			"want (false, 0, nil)", latched, revision, err)
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("a repeat latch bumped sp_rev to %d", got)
+	}
+	if got := env.modRev(CloneKey(env.cid, opsSpId, drainCloneName)); got !=
+		cloneMod {
+		t.Errorf("a repeat latch wrote the clone")
+	}
+}
+
+// TestLatchCopiedCloneRefusals is CLD13's load: an SP gone, changed or
+// deleting, a clone gone or carrying another id, and a listed subsystem whose
+// key is gone are refused with the op's name, and nothing is written.
+func TestLatchCopiedCloneRefusals(t *testing.T) {
+	guards := []struct {
+		name   string
+		break_ func(env *opsEnv)
+		reason string
+	}{
+		{"sp not found", func(env *opsEnv) {
+			env.delKey(SpConfKey(env.cid, opsSpName))
+		}, "sp not found"},
+		{"sp id changed", func(env *opsEnv) {
+			conf := env.spConf()
+			conf.SpId = opsSpId + 1
+			mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+		}, "sp id changed"},
+		{"sp deleting", func(env *opsEnv) {
+			env.setDeleting()
+		}, "sp deleting"},
+		{"clone not found", func(env *opsEnv) {
+			env.delKey(CloneKey(env.cid, opsSpId, drainCloneName))
+		}, "clone not found"},
+		{"clone id changed", func(env *opsEnv) {
+			clone := env.clone(drainCloneName)
+			clone.CloneId = drainCloneId + 1
+			mustPut(env.t, env.cli,
+				CloneKey(env.cid, opsSpId, drainCloneName), clone)
+		}, "clone id changed"},
+		{"subsystem record missing", func(env *opsEnv) {
+			env.delKey(SubsystemKey(env.cid, opsSpId, cdcSs2.nqn))
+		}, "subsystem record missing"},
+	}
+	for _, guard := range guards {
+		t.Run(guard.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			env.putDrainClone(false, nil)
+			env.putLatchNamespaces()
+			revBefore := env.spRev()
+			guard.break_(env)
+			latched, revision, err := LatchCopiedClone(env.ctx, env.cli,
+				env.cid, opsSpId, opsSpName, drainCloneName, drainCloneId)
+			precondition := wantPrecondition(t, err, opLatchCopiedClone)
+			if precondition.Reason != guard.reason {
+				t.Errorf("Reason: got %q, want %q",
+					precondition.Reason, guard.reason)
+			}
+			if latched || revision != 0 {
+				t.Errorf("a refusal reported (%v, %d)", latched, revision)
+			}
+			if got := env.spRev(); got != revBefore {
+				t.Errorf("a refusal bumped sp_rev to %d", got)
+			}
+			if env.exists(CloneKey(env.cid, opsSpId, drainCloneName)) &&
+				env.clone(drainCloneName).GetDeleting() {
+				t.Errorf("a refusal latched the clone")
+			}
+			ss := &pb.Subsystem{}
+			env.get(SubsystemKey(env.cid, opsSpId, opsNqn), ss)
+			if !ss.GetNsList()[0].GetSuspended() {
+				t.Errorf("a refusal resumed a namespace")
+			}
+		})
+	}
+}

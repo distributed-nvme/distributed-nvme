@@ -50,6 +50,12 @@ const (
 	msgCloneDrainDone   = "clone drained"
 )
 
+// The records of CLD13's latch of a clone whose copy is whole.
+const (
+	msgCloneLatched      = "clone latched"
+	msgCloneLatchSkipped = "clone latch skipped"
+)
+
 // The "step" attribute of those records: CLD7's two states.
 const (
 	cloneDrainStepBm    = "bitmap"
@@ -89,6 +95,61 @@ func (w *spWorker) drainClones(ctx context.Context, state *model.SpState) {
 			continue
 		}
 		w.drainCloneStep(ctx, state, name, clone)
+	}
+}
+
+// latchCopiedClones is CLD13, a step of the pass at every sp_level: each
+// live clone of the SP, in clone_name_list order, whose dm-clone row in the
+// current primary's latest report (primaryInfo) proves the copy whole
+// (common.HydrationComplete, the proof the gateway's unforced DeleteClone
+// asks) is latched through model.LatchCopiedClone, the latch DeleteClone
+// runs (CLD4): the destination's namespaces resumed, `deleting` set, one
+// SpRev bump. The clone drain then starts on the next pass (CLD7). Reason:
+// a whole copy needs its source no more, while a dm-clone that stayed would
+// need the source at every rebuild — a failover, a reboot, a level step —
+// and go out of service while the source is away (cnagent.md CN18).
+//
+// The report's revision is not checked: a copy only advances and a clone id
+// is never used again, so a report that shows the copy of this clone id
+// whole proves it at any later time; the op checks the id again in its STM.
+// A primary that has reported nothing latches nothing, and neither does a
+// row that does not prove the copy whole, which logs nothing: the next pass
+// reads the next report. A deleting clone is skipped here, its drain being
+// under way (CLD7). A latch logs `clone latched` with the revision its own
+// STM committed and the report's; an op that refuses or fails logs `clone
+// latch skipped` with its reason, the op's own for a refusal (MD7), and the
+// next pass judges again; an op that finds the clone already deleting, the
+// gateway's latch or another owner's having come first, logs nothing. No
+// latch is the pass's one action (AR2).
+func (w *spWorker) latchCopiedClones(ctx context.Context, p *spPass) {
+	if p.info == nil {
+		return
+	}
+	rows := p.info.GetCloneIdToDmClone()
+	for _, name := range p.state.Conf.GetCloneNameList() {
+		clone, ok := p.state.Clones[name]
+		if !ok || clone.GetDeleting() {
+			continue
+		}
+		if !common.HydrationComplete(rows[clone.GetCloneId()].GetDetails()) {
+			continue
+		}
+		ids := []slog.Attr{
+			slog.String("clone_name", name),
+			slog.Uint64("clone_id", clone.GetCloneId()),
+			slog.Uint64("cntlr_id", p.primaryId),
+			slog.Uint64("report_revision", p.infoRev),
+		}
+		latched, revision, err := w.reactor().ops.latchCopiedClone(
+			ctx, w.cid, w.spId, w.desired.handle, name, clone.GetCloneId())
+		if err != nil {
+			w.stepFailed(ctx, msgCloneLatchSkipped, err, ids...)
+			continue
+		}
+		if !latched {
+			continue
+		}
+		w.stepAppliedAt(ctx, msgCloneLatched, revision, ids...)
 	}
 }
 

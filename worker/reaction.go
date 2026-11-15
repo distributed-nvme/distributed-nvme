@@ -488,6 +488,19 @@ type reactionOps interface {
 		spId uint64,
 		spName string,
 	) error
+	// latchCopiedClone is the latch of a clone whose copy the primary's
+	// report shows whole (CLD13; MD6's LatchCopiedClone): it latches the
+	// clone cloneName that still carries cloneId as DeleteClone does, and
+	// reports whether it wrote — a clone already deleting is no write — and
+	// the SpRev revision its STM committed.
+	latchCopiedClone(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		spName string,
+		cloneName string,
+		cloneId uint64,
+	) (bool, uint64, error)
 	// drainCloneBm is one clone-drain batch (CLD8): at most
 	// MaxDelBmPerTxn chunk keys, named by the caller's snapshot scan, and no
 	// SpRev read or bump. It returns the SIZE of that batch, not a count of
@@ -799,6 +812,19 @@ func (o *modelReactionOps) finishSpDelete(
 	spName string,
 ) error {
 	return model.FinishSpDelete(ctx, o.cli, cid, shard, spId, spName)
+}
+
+func (o *modelReactionOps) latchCopiedClone(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+) (bool, uint64, error) {
+	return model.LatchCopiedClone(
+		ctx, o.cli, cid, spId, spName, cloneName, cloneId,
+	)
 }
 
 func (o *modelReactionOps) drainCloneBm(
@@ -1225,6 +1251,10 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// operator force-starts a group at the levels where reactions stop; it
 	// is not the pass's one action either.
 	w.clearForcedStarts(ctx, p)
+	// dnv-worker.md CLD13: the latch of a clone whose copy is whole, a step
+	// of the pass at every sp_level too, since it only follows the
+	// primary's report; it is not the pass's one action either.
+	w.latchCopiedClones(ctx, p)
 	if w.reactionSuppressed(ctx, p) {
 		return
 	}

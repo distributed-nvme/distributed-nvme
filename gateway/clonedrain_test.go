@@ -171,6 +171,62 @@ func TestDeleteCloneLatchesOnly(t *testing.T) {
 	}
 }
 
+// TestDeleteCloneOfAWorkerLatchedClone: the worker latches a clone whose
+// copy is whole through the body DeleteClone runs (model.LatchClone, CLD13),
+// so the record it leaves is the one DeleteClone's own latch leaves and the
+// destination's namespaces are resumed. An operator's delete after that
+// latch is CLD3's no-op, with or without force: OK, no write, no bump. Once
+// the drain has removed the record, a delete answers NOT_FOUND, as every
+// delete of an absent object does (gateway.md GW7).
+func TestDeleteCloneOfAWorkerLatchedClone(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	env.putSubsystem(volNqn, 501, []*pb.Namespace{
+		{NsId: 601, NsIdx: 1, TdId: 900, Suspended: true},
+	})
+	reply := volCreateClone(env, "clone-a", "dst")
+	before := env.clone("clone-a")
+	beforeRev := env.spRev()
+
+	latched, revision, err := model.LatchCopiedClone(env.ctx, env.cli,
+		env.cid, volSpId, volSpName, "clone-a", reply.GetCloneId())
+	if err != nil || !latched || revision != beforeRev+1 {
+		t.Fatalf("LatchCopiedClone = (%v, %d, %v), want (true, %d, nil)",
+			latched, revision, err, beforeRev+1)
+	}
+	wantAfter := proto.Clone(before).(*pb.Clone)
+	wantAfter.Deleting = true
+	if got := env.clone("clone-a"); !proto.Equal(got, wantAfter) {
+		t.Errorf("the worker's latch left %v, want %v", got, wantAfter)
+	}
+	if findNs(env.subsystem(volNqn), 1).GetSuspended() {
+		t.Errorf("the worker's latch did not resume the destination namespace")
+	}
+
+	for _, force := range []bool{false, true} {
+		conf, rev := env.spConf(), env.spRev()
+		got, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
+			ClusterName: env.cluster, SpName: volSpName,
+			SpRev:     &pb.SpRev{Revision: rev},
+			CloneName: "clone-a", Force: force,
+		})
+		if err != nil || got.GetCloneId() != reply.GetCloneId() {
+			t.Fatalf("DeleteClone (force %v) of a latched clone = (%v, %v)",
+				force, got, err)
+		}
+		env.wantUntouched(conf, rev)
+	}
+
+	volDrainClone(env, "clone-a")
+	for _, force := range []bool{false, true} {
+		_, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
+			ClusterName: env.cluster, SpName: volSpName,
+			CloneName: "clone-a", Force: force,
+		})
+		volWantCode(t, err, codes.NotFound)
+	}
+}
+
 // TestCloneDrainGivesTheExtentsBack pins where a clone's one charge comes
 // back (architecture.md, Clones): CreateClone charged its clone meta group's
 // sides to their DNs, the latch leaves them where they are — the clone is
@@ -389,8 +445,8 @@ func TestDeleteCloneRepeatIsANoOp(t *testing.T) {
 // `GetCntlrInfo` round trip — and it is exactly what two operators, or an
 // operator and a retrying script, produce. Without the phase-2 check the loser
 // would re-latch: a second `SpRev` bump invalidating every client's token, a
-// second `resumeCloneDstNs` on namespaces the winner already resumed, and a
-// Clone put racing the drain's own batches.
+// second resume (model.LatchClone) on namespaces the winner already resumed,
+// and a Clone put racing the drain's own batches.
 //
 // The loser sends NO `sp_rev`, because GW6 is presence-based: with a token it
 // would be ABORTED on the winner's bump and never reach the branch at all.
@@ -459,6 +515,96 @@ func TestDeleteCloneRacedLatchIsANoOp(t *testing.T) {
 	env.wantUntouched(before, latchRev)
 	if after := env.clone("clone-a"); !proto.Equal(after, clone) {
 		t.Errorf("the loser rewrote the clone: got %v, want %v", after, clone)
+	}
+}
+
+// TestDeleteCloneOfARecreatedCloneIsAborted: phase 2 acts only on the clone
+// phase 1 read. Here the clone is latched and drained while an unforced
+// delete waits in its agent call — the worker's latch of a whole copy does
+// that on its own (dnv-worker.md CLD13) — and a new clone takes the name
+// before phase 2. The agent call proved the old clone's copy, not the new
+// one's, so phase 2 answers ABORTED and leaves the new clone live.
+func TestDeleteCloneOfARecreatedCloneIsAborted(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	addr := fakeAddrPort(t, "cn")
+	agent := startFakeAgent(t, addr, 1<<40)
+	env.putCn(addr, 802, 2)
+	mustPut(t, env.cli, model.CntlrKey(env.cid, volSpId, volCntlrA), &pb.Cntlr{
+		AddrPort:   addr,
+		NvmeTrConf: volTrConf(addr),
+		Primary:    true,
+	})
+	reply := volCreateClone(env, "clone-a", "dst")
+	agent.setInfo(nil, nil, nil, &pb.CntlrInfo{
+		CloneIdToDmClone: map[uint64]*pb.ResInfo{
+			reply.GetCloneId(): {Details: "0 2097152 clone 253:0 253:1 " +
+				"253:2 1024/1024 0 1 no_hydration"},
+		},
+	})
+	unblock := agent.setBlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			CloneName:   "clone-a",
+		})
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for agent.callCount("GetCntlrInfo") == 0 {
+		if time.Now().After(deadline) {
+			unblock()
+			t.Fatalf("the delete never reached the agent call")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, _, err := model.LatchCopiedClone(env.ctx, env.cli, env.cid,
+		volSpId, volSpName, "clone-a", reply.GetCloneId()); err != nil {
+		unblock()
+		t.Fatalf("LatchCopiedClone: %v", err)
+	}
+	volDrainClone(env, "clone-a")
+	again := volCreateClone(env, "clone-a", "dst")
+	if again.GetCloneId() == reply.GetCloneId() {
+		unblock()
+		t.Fatalf("the new clone reuses clone_id %d", again.GetCloneId())
+	}
+	before, rev := env.spConf(), env.spRev()
+	unblock()
+	volWantCode(t, <-done, codes.Aborted)
+	env.wantUntouched(before, rev)
+	if env.clone("clone-a").GetDeleting() {
+		t.Errorf("the new clone was latched on the old clone's proof")
+	}
+}
+
+// TestDeleteCloneAbortsOnALostSubsystem: the latch's shared body
+// (model.LatchClone) refuses a listed subsystem whose key is gone, and
+// DeleteClone answers that refusal ABORTED (architecture.md,
+// UNEXPECTED_ERROR → `ABORTED`), writing nothing.
+func TestDeleteCloneAbortsOnALostSubsystem(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	env.putSubsystem(volNqn, 501, []*pb.Namespace{
+		{NsId: 601, NsIdx: 1, TdId: 900, Suspended: true},
+	})
+	volCreateClone(env, "clone-a", "dst")
+	if err := env.cli.Delete(env.ctx,
+		model.SubsystemKey(env.cid, volSpId, volNqn)); err != nil {
+		t.Fatalf("delete the subsystem key: %v", err)
+	}
+	before, rev := env.spConf(), env.spRev()
+	_, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
+		ClusterName: env.cluster, SpName: volSpName,
+		SpRev:     &pb.SpRev{Revision: rev},
+		CloneName: "clone-a", Force: true,
+	})
+	volWantCode(t, err, codes.Aborted)
+	env.wantUntouched(before, rev)
+	if env.clone("clone-a").GetDeleting() {
+		t.Errorf("a refused latch set deleting")
 	}
 }
 

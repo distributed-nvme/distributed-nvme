@@ -466,9 +466,12 @@ primary reports the origin parked, a wait the case polls, and appended as
 the clone's one chunk; the fallback's source, a namespace the clone reads
 through and so never parked, is refused its read and appends none
 (`architecture.md`, Bitmap reads). A clone pulls the origin through the
-transfer into a fresh thin device served live through the dm-clone
-(`cnagent.md` CN16's clone rule, CN18); its unforced delete rests on the gateway's proof of
-hydration, and with the transfer aborted the destination, read through its own
+transfer into a fresh thin device, whose namespace the case creates once the
+copy is whole, through the dm-clone or the raid0 as the worker's pass falls
+(`cnagent.md` CN16's clone rule, CN18); once the primary reports the copy whole
+the worker latches the clone and drains it with no operator's delete, its log
+holding the latch (`dnv-worker.md` CLD13), the destination namespace staying
+optimized, and with the transfer aborted the destination, read through its own
 raid0 with no source left to read through, holds what hydration copied
 (`architecture.md`, Transfer + clone = cross-SP live migration, [D3]); a source
 on the primary's own kernel that fails routes to a second pool on another
@@ -582,8 +585,11 @@ and the copy whole, the new primary's destination raid0, which its promotion
 created, must have had at most the regions the old primary's last count left
 written into it, where a dm-clone over new metadata would copy every region
 again, and at least the regions the new primary's first count left, which a
-write count that sees the copy reads; the clone's unforced delete must be
-accepted, and the whole destination must read the whole source's digest, which
+write count that sees the copy reads, read on the raid0 whose number the
+dm-clone named while it served, since the worker latches a whole copy and the
+drain removes the dm-clone (`dnv-worker.md` CLD13); the clone's unforced
+delete must be accepted, or answer `NOT_FOUND` once the worker has drained the
+clone, and the whole destination must read the whole source's digest, which
 host1 read before the clone. The worker logs that one failover, the old primary
 returns as a standby once enabled, both cntlrs are listed again, and host0
 still reads its data. Both controller nodes keep their connection to the source

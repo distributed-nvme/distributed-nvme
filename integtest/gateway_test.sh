@@ -4953,7 +4953,7 @@ EOF
 }
 
 # faults_clone_rows overrides the primary cntlr's clone_id_to_dm_clone row
-# with a raw `dmsetup status` line. hydrationComplete reads the SEVENTH field
+# with a raw `dmsetup status` line. common.HydrationComplete reads the SEVENTH field
 # ("<hydrated>/<total>") and requires hydrated >= total with total != 0, so
 # "256/512" is an unfinished copy and "512/512" a finished one.
 faults_clone_rows() { # <cn dir> <sp_id> <cntlr_id> <clone_id> <hydrated/total>

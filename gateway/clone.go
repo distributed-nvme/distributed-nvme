@@ -637,29 +637,44 @@ func (s *Server) DeleteClone(
 		if err != nil {
 			return err
 		}
+		if clone.GetCloneId() != phase1.CloneId {
+			// The clone phase 1 read — for force = false, the one whose copy
+			// the agent call proved whole — is gone, and another took its
+			// name in between: drained after a latch, the worker's own once
+			// its copy was whole among them (dnv-worker.md CLD13), then
+			// created again. The proof is not of this one. ABORTED, as AG4
+			// answers a fact that moved between the phases: the caller
+			// repeats the whole RPC, whose phase 1 reads the new clone.
+			return errAborted("clone %q changed between the phases: "+
+				"clone_id %d, now %d", req.GetCloneName(), phase1.CloneId,
+				clone.GetCloneId())
+		}
 		cloneId = clone.GetCloneId()
 		if clone.GetDeleting() {
 			// CLD3, the raced variant: the flag went up between phase 1 and
 			// here. Same no-op — OK, no writes, no bump.
 			return nil
 		}
-		if err := resumeCloneDstNs(stm, sc, clone.GetDstTdId()); err != nil {
-			return err
-		}
-		// CLD4: the latch, and nothing else. The Clone key stays, rewritten
-		// with the flag, its chunk keys stay, and the name stays in
-		// clone_name_list: a name whose Clone is gone would stay listed for
-		// ever, since the step that removes a name needs the Clone it names
-		// (CLD9), while model.LoadSp merely skips it.
+		// CLD4: the latch, and nothing else, through the body the worker's
+		// latch of a whole copy shares (model.LatchClone, CLD13): the
+		// destination's namespaces resumed, the flag, one bump. The Clone
+		// key stays, rewritten with the flag, its chunk keys stay, and the
+		// name stays in clone_name_list: a name whose Clone is gone would
+		// stay listed for ever, since the step that removes a name needs the
+		// Clone it names (CLD9), while model.LoadSp merely skips it.
 		//
 		// CLD6, SPD5's clone twin: no code path in any component writes
 		// `deleting = false` on an existing Clone, so this is one-way across
 		// restarts of every component. CLD9's emptiness argument depends on
 		// it — an un-latch would let a chunk key appear after the scan that
-		// found none — and so do CLD1's refusals.
-		clone.Deleting = true
-		stm.Put(model.CloneKey(sc.Cid, sc.SpId(), req.GetCloneName()), clone)
-		return bumpSp(stm, opDeleteClone, sc)
+		// found none — and so do CLD1's refusals. Every refusal of the body
+		// is a lost invariant key or revision key, hence ABORTED
+		// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
+		if err := model.LatchClone(stm, opDeleteClone, sc.Cid, sc.Conf,
+			req.GetCloneName(), clone); err != nil {
+			return errAborted("%v", err)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, mapStmErr(err)
@@ -669,7 +684,7 @@ func (s *Server) DeleteClone(
 
 // checkCloneHydrated is the between-the-phases agent call of DeleteClone
 // (AG1, AG3): the primary's `clone_id_to_dm_clone` row carries the raw
-// dm-clone status line, and hydrationComplete refuses to read anything but a
+// dm-clone status line, and common.HydrationComplete refuses to read anything but a
 // finished copy out of it. GetCntlrInfo answers from the agent's latest
 // observation of the cntlr and reads nothing of the node (architecture.md,
 // Live-state reporting). That is still proof: a copy only advances, so an
@@ -708,46 +723,9 @@ func checkCloneHydrated(
 			"clone %q: hydration is unproven, controller node %q did not "+
 				"answer: %v", cloneName, phase1.AddrPort, callErr)
 	}
-	if !hydrationComplete(details) {
+	if !common.HydrationComplete(details) {
 		return errPrecondition(
 			"clone %q has not finished hydrating", cloneName)
-	}
-	return nil
-}
-
-// resumeCloneDstNs clears `suspended` on every namespace of the SP backed by
-// the clone's destination td (architecture.md, Clones: DeleteClone's Action).
-// Only the subsystems that actually change are written back, so an SP with
-// many subsystems produces the smallest write set that still describes the new
-// desired state.
-//
-// A listed nqn whose Subsystem key is gone aborts the RPC (architecture.md,
-// UNEXPECTED_ERROR → `ABORTED`): the SP has lost an invariant key, and
-// half-resuming the namespaces of an SP is worse
-// than refusing — the caller can retry, whereas a namespace left suspended
-// with no clone to explain it never resumes on its own.
-func resumeCloneDstNs(
-	stm etcdutil.STM,
-	sc *spScope,
-	dstTdId uint64,
-) error {
-	for _, nqn := range sc.Conf.GetNqnList() {
-		ssKey := model.SubsystemKey(sc.Cid, sc.SpId(), nqn)
-		subsystem := &pb.Subsystem{}
-		if !stm.Get(ssKey, subsystem) {
-			return errAborted("subsystem key %q is missing", ssKey)
-		}
-		changed := false
-		for _, ns := range subsystem.GetNsList() {
-			if ns.GetTdId() != dstTdId || !ns.GetSuspended() {
-				continue
-			}
-			ns.Suspended = false
-			changed = true
-		}
-		if changed {
-			stm.Put(ssKey, subsystem)
-		}
 	}
 	return nil
 }

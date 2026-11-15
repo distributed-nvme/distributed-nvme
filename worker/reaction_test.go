@@ -320,6 +320,11 @@ type fakeReactionOps struct {
 	// replaced or withdrawn since the snapshot.
 	markErr  error
 	markSkip bool
+	// latchErr fails the latch of a whole copy (CLD13) apart from opErr,
+	// and latchSkip makes it find the clone already deleting, as
+	// model.LatchCopiedClone writes nothing for a clone latched first.
+	latchErr  error
+	latchSkip bool
 	// repairErr fails the leg repair ops (AR8) on the repair they name,
 	// ahead of opErr, so a test can refuse the drive step on one repair
 	// while it drives another. finishRes is what a finish that commits
@@ -755,6 +760,29 @@ func (o *fakeReactionOps) finishSpDelete(
 
 // The two clone-drain ops (CLD8/CLD9). drainCloneBm records the batch it was
 // handed, so a test can pin the cut and the order rather than only the count.
+
+func (o *fakeReactionOps) latchCopiedClone(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+) (bool, uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, reactionCall{
+		op: "latch_clone", cloneName: cloneName, cloneId: cloneId,
+	})
+	if o.latchErr != nil {
+		return false, 0, o.latchErr
+	}
+	if o.latchSkip {
+		return false, 0, nil
+	}
+	o.spRev++
+	return true, o.spRev, nil
+}
 
 func (o *fakeReactionOps) drainCloneBm(
 	ctx context.Context,

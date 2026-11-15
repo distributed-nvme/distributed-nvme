@@ -2693,8 +2693,9 @@ host as they host a leg's (Repair), and get its DN; outside the STM call
 pointer, whose leg is the one the side was found in: a slice's or a clone's
 leg, a new leg, or the retired leg by its own id. Reply `applied_revision`,
 the `SideInfo`, `obs_stamp` and `obs_age`, as `InspectCntlr` replies. Both Inspect RPCs
-are the way to watch clone and migration hydration before `DeleteClone`
-and `FinishMigration`.
+are the way to watch clone and migration hydration: a clone's until the
+worker latches it (Clones) or `DeleteClone`, a migration's before
+`FinishMigration`.
 
 ### Thin devices
 
@@ -2801,8 +2802,9 @@ CN26) — surfacing as `ABORTED` like any other agent RPC failure
 **The client's wait primitive** is `ListThinDevices`: poll until the td
 reads `created` true, then snapshot it. A snapshot of a td that a clone
 targets is refused until that clone has also been deleted and drained,
-which only `DeleteClone` starts (refused until the copy is proven
-complete, unless forced); the client then polls `GetClone` until
+which `DeleteClone` starts (refused until the copy is proven complete,
+unless forced) or the sp worker once the primary reports the copy whole
+(Clones); the client then polls `GetClone` until
 `NOT_FOUND` (Clones). A client whose snapshot request carries a token
 re-reads it from `GetStoragePool` after its last poll: the flip bumps
 `SpRev` (sp role), and so do the clone's latch and the last transaction
@@ -2965,8 +2967,9 @@ cross-SP live migration uses it. Reply `ns_id`.
 
 ### Clones
 
-`DeleteClone` latches and the sp worker drains (`dnv-worker.md`, The clone
-drain). Every clone mutator but `DeleteClone` — `UpdateCloneTrConf`,
+`DeleteClone` latches, or the sp worker latches once the primary's report
+shows the copy whole (`dnv-worker.md` CLD13), and the sp worker drains
+(`dnv-worker.md`, The clone drain). Every clone mutator but `DeleteClone` — `UpdateCloneTrConf`,
 `AppendCloneBitmap`, and the repair calls that write and `DeleteRetiredLeg`
 on its clone meta group (Repairs, Retired legs) — fails
 `FAILED_PRECONDITION` when `Clone.deleting` is true (`dnv-worker.md` CLD1);
@@ -3109,6 +3112,24 @@ bump. It does not delete the `Clone` key, touch a chunk key or shrink
 last transaction, and the resume rides the latch so that it and the
 fan-out exclusion land in one bump (`dnv-worker.md` CLD4); `gateway.md`,
 Clones carries the two phases out. Reply `clone_id`.
+
+**The worker's latch.** The sp worker latches a clone itself once the
+current primary's latest report shows its copy whole, by the proof above,
+with the same transaction, `model.LatchClone` (`dnv-worker.md` CLD13):
+every clone, with no flag. Reason: a whole copy needs its source no more,
+while a dm-clone that stayed would need the source at every rebuild — a
+role move, a CN reboot, a level step — and take the volume out of service
+while the source is away (Known limits). So a clone leaves by itself once
+its copy is whole, its destination's namespaces resumed and then served
+by the destination's raid0; `DeleteClone` without `force` starts the same
+latch at once, and with `force` stops a clone whose copy is not whole. A
+`DeleteClone` of a clone the worker latched is the no-op above, and of
+one whose drain removed it `NOT_FOUND`, as for every absent object; one
+whose clone was drained and created again under the name between its proof
+and its deciding STM is `ABORTED`, the proof being of the old clone. A
+call that needs a live clone — `AppendCloneBitmap`, `UpdateCloneTrConf` —
+may likewise find a whole copy's clone `deleting` or gone; the copy needs
+neither then.
 
 The teardown is the sp worker's clone drain (`dnv-worker.md`, The clone
 drain): from the first post-latch fan-out the clone is absent from every
@@ -5903,18 +5924,24 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   takes writes through a namespace (Bitmap reads; Clones; [D3], [D7]). A
   chunk takes effect whenever
   it arrives: once the ns-devs map the dm-clone, they are paused for each
-  apply (Bitmap push protocol, The apply pauses the writers).
-* When hydration completes: `DeleteTransfer` with `force` false on sp1
-  (it retires the source: `suspended` true) and `DeleteClone` on sp2
-  (`suspended` false, the namespace now backed by the local raid0).
-  `DeleteClone` only latches (Clones), and `CreateTransfer` refuses the sp2
+  apply (Bitmap push protocol, The apply pauses the writers). An append
+  after the copy is whole may find the clone `deleting` or gone
+  (Clones); the copy needs no chunk then.
+* When hydration completes, the sp2 worker latches the clone by itself
+  (Clones): the sp2 namespace's `suspended` goes false, and once the
+  drain ends the namespace is backed by the local raid0 and `GetClone`
+  answers `NOT_FOUND`. The operator runs `DeleteTransfer` with `force`
+  false on sp1 (it retires the source: `suspended` true); a `DeleteClone`
+  on sp2 without `force` starts the same latch at once and answers
+  `NOT_FOUND` once the drain is done. `CreateTransfer` refuses the sp2
   namespace while the clone's record lives (Transfers), so moving the
   volume on to a third SP waits for `GetClone` to answer `NOT_FOUND`. To
   abort instead: **first retire the sp2 namespace** with
   `DeleteNamespace` — not merely suspend it, because `DeleteClone`
   unconditionally sets `suspended` false on the destination td's
   namespaces (Clones), which would resume it optimized over the partial
-  copy and hand the host a second, divergent path; then `DeleteClone` with
+  copy and hand the host a second, divergent path, and so does the
+  worker's latch should the copy become whole meanwhile; then `DeleteClone` with
   `force` true on sp2 and `DeleteTransfer` with `force` true on sp1.
   sp1 resumes serving; the sp2 td and its partial bytes remain until
   deleted, and `DeleteClone` only latches (Clones), so deleting that td
@@ -7875,8 +7902,13 @@ document and only pointed to here.
   which can move the role. A build of the clone's dm-clone that cannot
   connect the source, or finds no source namespace, while the fault
   lasts — after a role move or a CN reboot, among others —
-  takes even a clone that has hydrated in full out of service until the
-  source comes back or the clone is deleted with `force`.
+  takes the clone out of service until the source comes back or the clone
+  is deleted with `force`. A clone whose copy the current primary has
+  reported whole is latched by the worker's next pass that reads the report
+  and passes the pass's gates (`dnv-worker.md` CLD13), and the drain takes
+  the dm-clone off the volume. What is left is a copy no such pass read
+  whole — the role moved or the CN rebooted before it, or a gate of the
+  pass held it — whose new build needs the source again.
 * **Worker membership tolerates, but does not repair, a partitioned
   observer** ([D17]; `dnv-worker.md`, Known limits).
 * **Undriven windows are part of the membership design** (`dnv-worker.md`,

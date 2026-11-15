@@ -1,13 +1,14 @@
-package gateway
+package common
 
 import "testing"
 
 // TestHydrationComplete pins the proof DeleteClone and FinishMigration ask of
-// a dm-clone's row before an unforced delete or finish (architecture.md,
-// Clones): the details parse with common.ParseCloneStatus, the total is not
-// zero, and every region is hydrated. Whatever does not parse is no proof, a
-// count past 64 bits included, and neither is a total of zero; the row's own
-// text ahead of the status line is not read as one.
+// a dm-clone's row before an unforced delete or finish, and the worker before
+// it latches a clone (architecture.md, Clones): the details parse with
+// ParseCloneStatus, the total is not zero, and every region is hydrated.
+// Whatever does not parse is no proof, a count past 64 bits included, and
+// neither is a total of zero; the row's own text ahead of the status line is
+// not read as one.
 func TestHydrationComplete(t *testing.T) {
 	// status is the kernel's line of a dm-clone with the given
 	// "<hydrated>/<total>".
@@ -45,8 +46,8 @@ func TestHydrationComplete(t *testing.T) {
 			status("512/512") + "\n" + status("512/512"), false},
 	}
 	for _, tc := range cases {
-		if got := hydrationComplete(tc.details); got != tc.want {
-			t.Errorf("%s: hydrationComplete(%q) = %v, want %v",
+		if got := HydrationComplete(tc.details); got != tc.want {
+			t.Errorf("%s: HydrationComplete(%q) = %v, want %v",
 				tc.name, tc.details, got, tc.want)
 		}
 	}

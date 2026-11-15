@@ -61,8 +61,9 @@ func cloneSrcTrConfList() []*pb.NvmeTrConf {
 // --auto-resume makes the destination's namespaces serve through the dm-clone
 // while the copy runs, from the moment the clone is built, even while their
 // stored suspended flag is set or an auto_suspend transfer names them
-// (cnagent.md CN16); nothing watches for the copy to finish, and DeleteClone
-// clears the stored flag with or without it.
+// (cnagent.md CN16). Once the primary reports the copy whole the worker
+// latches the clone (dnv-worker.md CLD13), which clears the stored flag with
+// or without --auto-resume, as DeleteClone's latch does.
 func cloneCreateCmd() *cobra.Command {
 	cmd := leaf("create", "create a clone (CreateClone)",
 		func() (job, error) {

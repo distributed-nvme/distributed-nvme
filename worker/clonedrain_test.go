@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -582,6 +583,265 @@ func TestCloneExclusionFromThePlans(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+// cloneStatus is the details of a dm-clone row whose copy stands at
+// progress, "<hydrated>/<total>": the kernel's status line, as the cn agent
+// reports it.
+func cloneStatus(progress string) string {
+	return "0 2097152 clone 8 72/32768 2048 " + progress + " 0 1 " +
+		"no_discard_passdown 4 hydration_threshold 1 " +
+		"hydration_batch_size 1 rw"
+}
+
+// setCloneRow installs one clone's dm-clone row on the primary, the row
+// CLD13 reads.
+func (h *reactHarness) setCloneRow(cloneId uint64, details string) {
+	h.t.Helper()
+	child, ok := h.w.cntlrs[reactCntlrA]
+	if !ok {
+		h.setPrimaryInfo(reactCntlrA, &pb.CntlrInfo{})
+		child = h.w.cntlrs[reactCntlrA]
+	}
+	info := child.driver.lastInfo
+	if info.CloneIdToDmClone == nil {
+		info.CloneIdToDmClone = map[uint64]*pb.ResInfo{}
+	}
+	info.CloneIdToDmClone[cloneId] = &pb.ResInfo{
+		ResName: "clone", Status: pb.ResStatus_RES_STATUS_OK,
+		Details: details,
+	}
+}
+
+// wantLatchRecord asserts exactly one record msg naming the clone name of
+// id cloneId, the primary and its report's revision, and returns it.
+func (h *reactHarness) wantLatchRecord(
+	msg string, name string, cloneId uint64,
+) map[string]any {
+	h.t.Helper()
+	recs := h.logs.withMsg(msg)
+	if len(recs) != 1 {
+		h.t.Fatalf("%q records = %v, want one", msg, recs)
+	}
+	rec := recs[0]
+	if rec["clone_name"] != name || rec["clone_id"] != float64(cloneId) ||
+		rec["cntlr_id"] != float64(reactCntlrA) ||
+		rec["report_revision"] != float64(reactSpRevision) {
+		h.t.Fatalf("record %v does not name clone %s (%d) on cntlr %d's "+
+			"report at revision %d", rec, name, cloneId, reactCntlrA,
+			reactSpRevision)
+	}
+	return rec
+}
+
+// TestCloneLatchedWhenItsCopyIsWhole pins CLD13's trigger: a live clone
+// whose dm-clone row in the current primary's latest report proves the copy
+// whole is latched through the op, handed the clone's name and id, and
+// logged with the revision the op's own STM committed. A copy with regions
+// left, a row absent or that does not parse, a primary with no report and a
+// report that is a standby's latch nothing and log nothing; a deleting clone
+// is not latched again, its drain running instead (CLD7).
+func TestCloneLatchedWhenItsCopyIsWhole(t *testing.T) {
+	t.Run("a whole copy", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, [][2]uint32{{0, 0}})
+		h.reportAt(reactSpRevision)
+		h.setCloneRow(700, cloneStatus("1024/1024"))
+		h.pass()
+		calls := h.wantOps("latch_clone")
+		if calls[0].cloneName != "c0" || calls[0].cloneId != 700 {
+			t.Fatalf("the latch was handed %+v, want c0 (700)", calls[0])
+		}
+		rec := h.wantLatchRecord(msgCloneLatched, "c0", 700)
+		if rec["revision"] != float64(reactSpRevision+1) {
+			t.Fatalf("record %v, want the op's own revision %d", rec,
+				reactSpRevision+1)
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		setup func(h *reactHarness)
+	}{
+		{"one region left", func(h *reactHarness) {
+			h.setCloneRow(700, cloneStatus("1023/1024"))
+		}},
+		{"a total of zero", func(h *reactHarness) {
+			h.setCloneRow(700, cloneStatus("0/0"))
+		}},
+		{"no row", func(h *reactHarness) {
+			h.setCloneRow(701, cloneStatus("1024/1024"))
+		}},
+		{"a row with no status line", func(h *reactHarness) {
+			h.setCloneRow(700, "hydration not enabled")
+		}},
+		{"no report", func(h *reactHarness) {
+			h.inSyncAll = false
+		}},
+		{"a standby's report", func(h *reactHarness) {
+			h.setCloneRow(700, cloneStatus("1024/1024"))
+			h.w.cntlrs[reactCntlrA].plan.primary = false
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			h.withClone("c0", 700, nil)
+			tc.setup(h)
+			h.pass()
+			h.wantOps()
+			h.wantNoRecord(msgCloneLatched)
+			h.wantNoRecord(msgCloneLatchSkipped)
+		})
+	}
+	t.Run("a deleting clone", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, [][2]uint32{{0, 0}})
+		h.latchClone("c0")
+		h.setCloneRow(700, cloneStatus("1024/1024"))
+		h.pass()
+		h.wantOps("drain_clone_bm")
+		h.wantNoRecord(msgCloneLatched)
+	})
+	t.Run("two clones, in list order", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c1", 701, nil)
+		h.withClone("c0", 700, nil)
+		h.withClone("c2", 702, nil)
+		h.setCloneRow(700, cloneStatus("8/8"))
+		h.setCloneRow(701, cloneStatus("8/8"))
+		h.setCloneRow(702, cloneStatus("7/8"))
+		h.pass()
+		calls := h.wantOps("latch_clone", "latch_clone")
+		if calls[0].cloneName != "c1" || calls[1].cloneName != "c0" {
+			t.Fatalf("latched %s then %s, want c1 then c0",
+				calls[0].cloneName, calls[1].cloneName)
+		}
+	})
+}
+
+// TestCloneLatchAtEveryLevel pins CLD13's place in the pass: a step at every
+// sp_level, the levels where reactions are suppressed included (AR3), and
+// not the pass's one action (AR2), so a reaction due in the same pass runs
+// too.
+func TestCloneLatchAtEveryLevel(t *testing.T) {
+	for _, level := range []pb.SpLevel{
+		pb.SpLevel_SP_LEVEL_NO_THINPOOL, pb.SpLevel_SP_LEVEL_DISABLE,
+	} {
+		t.Run(level.String(), func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			h.state.Conf.SpLevel = level
+			h.withClone("c0", 700, nil)
+			h.setCloneRow(700, cloneStatus("1024/1024"))
+			h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+			h.pass()
+			h.wantOps("latch_clone")
+			h.wantApplied()
+		})
+	}
+	t.Run("beside a reaction", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, nil)
+		h.setCloneRow(700, cloneStatus("1024/1024"))
+		// An unhealthy primary with a healthy candidate: AR5's trigger.
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+		h.pass()
+		h.wantOps("latch_clone", "failover")
+	})
+}
+
+// TestCloneLatchOpOutcomes pins CLD13's records of the op: a refusal logs
+// `clone latch skipped` with the op's reason and name, a failure with
+// op_failed and the error, and an op that finds the clone already deleting
+// logs nothing; each pass judges again, so the next one calls the op again.
+func TestCloneLatchOpOutcomes(t *testing.T) {
+	t.Run("a refusal", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, nil)
+		h.reportAt(reactSpRevision)
+		h.setCloneRow(700, cloneStatus("1024/1024"))
+		h.rops.latchErr = &model.ErrPrecondition{
+			Op: "LatchCopiedClone", Reason: "clone id changed",
+		}
+		h.pass()
+		h.wantOps("latch_clone")
+		rec := h.wantLatchRecord(msgCloneLatchSkipped, "c0", 700)
+		if rec["reason"] != "clone id changed" ||
+			rec["op"] != "LatchCopiedClone" {
+			t.Fatalf("record %v, want the op's reason and name", rec)
+		}
+		h.pass()
+		h.wantOps("latch_clone", "latch_clone")
+	})
+	t.Run("a failure", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, nil)
+		h.reportAt(reactSpRevision)
+		h.setCloneRow(700, cloneStatus("1024/1024"))
+		h.rops.latchErr = errors.New("etcd went away")
+		h.pass()
+		rec := h.wantLatchRecord(msgCloneLatchSkipped, "c0", 700)
+		if rec["reason"] != reasonOpFailed ||
+			rec["error"] != "etcd went away" {
+			t.Fatalf("record %v, want op_failed and the error", rec)
+		}
+	})
+	t.Run("a clone latched first", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, nil)
+		h.setCloneRow(700, cloneStatus("1024/1024"))
+		h.rops.latchSkip = true
+		h.pass()
+		h.wantOps("latch_clone")
+		h.wantNoRecord(msgCloneLatched)
+		h.wantNoRecord(msgCloneLatchSkipped)
+	})
+}
+
+// TestCloneLatchBehindThePassGates pins CLD13's place after the pass's
+// gates (AR1): a latch is a write the fan-out must deliver, so a lost listed
+// record, an unreadable bdev_conf, a group with no length to zero, a cluster
+// missing from the cache or an unusable cluster conf each hold it, as they
+// hold the reactions; and a deleting pool runs its drain step alone.
+func TestCloneLatchBehindThePassGates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		block func(h *reactHarness)
+		ops   []string
+	}{
+		{"a lost listed record", func(h *reactHarness) {
+			h.state.Missing = append(h.state.Missing,
+				model.ThinDeviceKey(testCid, testSpId, "lost-td"))
+		}, nil},
+		{"an unreadable bdev_conf", func(h *reactHarness) {
+			h.state.Conf.BdevConf.DmRaid0Conf.StripeSize = 0
+		}, nil},
+		{"a group with no length to zero", func(h *reactHarness) {
+			h.dataGrp().MetaBlocks = 0
+		}, nil},
+		{"the cluster missing from the cache", func(h *reactHarness) {
+			h.deps.conf.mu.Lock()
+			delete(h.deps.conf.entries, testCid)
+			h.deps.conf.mu.Unlock()
+		}, nil},
+		{"an invalid cluster conf", func(h *reactHarness) {
+			cc := reactClusterConf()
+			cc.DnBinConf = nil
+			setCachedConf(h.deps, testCid, cc)
+		}, nil},
+		{"a deleting pool", func(h *reactHarness) {
+			h.latch()
+			h.rops.drainCntlrCnt = 2
+		}, []string{"drain_cntlrs"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			h.withClone("c0", 700, nil)
+			h.setCloneRow(700, cloneStatus("1024/1024"))
+			tc.block(h)
+			h.pass()
+			h.wantOps(tc.ops...)
+			h.wantNoRecord(msgCloneLatched)
 		})
 	}
 }

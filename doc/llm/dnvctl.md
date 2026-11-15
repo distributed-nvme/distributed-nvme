@@ -543,7 +543,10 @@ empty list stays reachable from the CLI (`cloneSrcTrConfList`).
 
 `clone delete` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished; the RPC latches and returns, so a successful
-`clone delete` means teardown started, not gone. What the clone, its
+`clone delete` means teardown started, not gone. A clone whose copy is
+whole leaves by itself: the worker latches it (`dnv-worker.md` CLD13), so
+`clone delete` then answers OK with no write, or `NOT_FOUND` once the
+drain is done. What the clone, its
 destination thin device and the pool answer while the clone drains, and
 the order in which an operator then takes them down, are `architecture.md`,
 Clones. dnvctl adds no wait flag here either (CT8, CT1).

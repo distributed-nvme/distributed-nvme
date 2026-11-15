@@ -9,7 +9,7 @@ SW6); the revision worker with its dn, cn and sp role files (RW1 to RW23);
 health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM7); the automatic
 reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12) and
 the forced-start clear (AR13), the sp drain (SPD1 to SPD15) and the clone
-drain (CLD1 to CLD12); the worker's log records; and the intent of the worker
+drain (CLD1 to CLD13); the worker's log records; and the intent of the worker
 integration suite. It leans on `architecture.md` for the object model, the
 etcd data model, allocation, common validation, the agent contracts, the
 cross-component procedures (failover, migration, teardown by sweep, the
@@ -536,8 +536,12 @@ are resolved inside from `SpConf.event_threshold` with the defaults of
 `SpRev` key; the sp name the `SpConf`. The ops a gateway call runs are
 shared mutations this worker runs too: `GrowSlice` (AR6); the repair ops
 `CreateRepair`, `FinishRepair`, `CancelRepair` and `SetRepairAbort`, which
-it runs on its own repairs (AR8); and `DeleteRetiredLeg`, which its retire
-timer runs (AR12); save `ForceStartGroup`, the body of the gateway's call
+it runs on its own repairs (AR8); `DeleteRetiredLeg`, which its retire
+timer runs (AR12); and `LatchClone`, the latch `DeleteClone` stages, which
+this worker's `LatchCopiedClone` stages in a transaction of its own
+(CLD13) — a body staged into its caller's transaction, not an op, so it
+takes no expected revision, the gateway checking the token itself
+(`gateway.md` GW6); save `ForceStartGroup`, the body of the gateway's call
 of that name, which this worker never runs: its clear of the mark that op
 writes is `ClearForcedStart` (AR13); and save `SetGrpOperatorInCharge`, the
 body of `UpdateGroupOperatorInCharge`, which it never runs either: its pass
@@ -930,6 +934,16 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   otherwise it clears the mark, bumps `SpRev` once, so the fan-out hands
   every cntlr the group without it, and returns that it cleared and the
   revision its bump wrote (AR13).
+* `LatchCopiedClone` takes the clone's name and `clone_id` and no expected
+  revision: the caller's proof is about that id, which no other clone ever
+  carries. It refuses an SP that is gone, whose id changed or that is
+  `deleting`, and a `Clone` that is gone or whose `clone_id` changed; it
+  writes and bumps nothing for a `Clone` already `deleting`; otherwise it
+  stages `LatchClone` — every namespace of the pool on the clone's
+  `dst_td_id` resumed, as one `Subsystem` put per subsystem that changes,
+  a listed subsystem whose key is gone refused ("subsystem record
+  missing"), the `Clone` put with `deleting` true, one `SpRev` bump — and
+  returns that it latched and the revision its bump wrote (CLD13).
 * `SetGrpOperatorInCharge`, the body of `UpdateGroupOperatorInCharge`, takes
   the group's parent and id and the flag's value, and requires the expected
   revision; the any-level SP checks; the pool `RedundMdRaid1`; the parent
@@ -3016,7 +3030,7 @@ cntlr's path is bad. Beside the
 reactions the pass runs the three steps of the procedure Repair of
 `architecture.md` that are the worker's, a repair's stage moves (AR11), the
 retire timer (AR12) and the clear of a forced-start mark (AR13), which are
-no reactions.
+no reactions; nor is its latch of a clone whose copy is whole (CLD13).
 
 ### Pass, priority, suppression
 
@@ -3031,7 +3045,7 @@ repairs and retired legs),
 plus the in-memory latest `CntlrInfo` of the **primary** cntlr
 (pool usage, group rows, AR5's and AR7's rows, and the verdicts on repairs
 and the groups' whole flags and in-sync lists (`GrpInfo`) AR8, AR11, AR12
-and AR13 read)
+and AR13 read, and the dm-clone rows CLD13 reads)
 with the revision of the observation it reports (`architecture.md`,
 Live-state reporting), `now` (unix seconds),
 the two records kept from an earlier pass that a pass decides by — the
@@ -3046,8 +3060,9 @@ While a hold keeps a promotion from the child (RW22's demotion hold, then
 RW14's sides-first hold), the child's info is still a standby's report — a
 leg row there is transport liveness and ANA state, not the health-block
 probe — so the pass has none: AR6 grows nothing, AR8 creates no repair,
-AR11 moves no stage, AR12 deletes no retired leg and AR13 clears no
-forced-start mark, as when the primary has not reported yet. From the
+AR11 moves no stage, AR12 deletes no retired leg, AR13 clears no
+forced-start mark and CLD13 latches no clone, as when the primary has not
+reported yet. From the
 hand-over until the reply to the promotion, the info is still that standby
 report (Known limits, one-pass-old inputs), which holds no group row, a
 standby having no group (`cnagent.md` CN12), and no group's whole flag or
@@ -3096,10 +3111,11 @@ children log
 
 The steps of a live SP's pass run in this order: the re-seed of the health
 memos (HL3), the clone drain's steps (CLD7), the four gates, AR11's stage
-moves and AR13's forced-start clear at every `sp_level`, AR3's
-suppression, AR12's retire timer, and the reactions in AR2's priority. A
-latched SP runs its drain step behind the cluster-conf gate and neither the
-two steps of a repair nor the forced-start clear (SPD6).
+moves, AR13's forced-start clear and CLD13's latch of a whole copy at every
+`sp_level`, AR3's suppression, AR12's retire timer, and the reactions in
+AR2's priority. A latched SP runs its drain step behind the cluster-conf
+gate and neither the two steps of a repair nor the forced-start clear
+(SPD6); it holds no clone to latch, its `clone_name_list` being empty.
 
 AR2. **One action per SP per pass** — "action" meaning a *reaction*
 throughout this rule — evaluated in this priority; the first applicable one
@@ -3116,13 +3132,14 @@ actions are a grow and the withdrawal of a stuck grow (AR6), and leg
 repair's are the finish, the cancel and the try-to-abort of a worker's
 repair and the create of one (AR8). The
 invariant is **at most one applied action per SP per pass**; the clone
-drain's steps, AR11's stage moves, AR12's retire timer and AR13's
-forced-start clear are not actions in this sense and commit alongside one —
-a pass over a live SP can bump `SpRev` once per deleting clone whose final
-STM it commits (CLD9, CLD12), a batch bumping nothing (CLD8), once per stage
-move, once per clear, once for the timer's delete — which an earlier bump
-of the same pass, a stage move's, a clear's or a clone's final STM's, makes
-refuse as stale (AR12) — and once more for its reaction. A
+drain's steps, AR11's stage moves, AR12's retire timer, AR13's
+forced-start clear and CLD13's latch of a whole copy are not actions in
+this sense and commit alongside one — a pass over a live SP can bump
+`SpRev` once per deleting clone whose final STM it commits (CLD9, CLD12), a
+batch bumping nothing (CLD8), once per stage move, once per clear, once per
+clone it latches, once for the timer's delete — which an earlier bump of
+the same pass, a stage move's, a clear's, a latch's or a clone's final
+STM's, makes refuse as stale (AR12) — and once more for its reaction. A
 `reaction skipped` that means "not applicable here, keep looking" does not
 end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
@@ -3880,7 +3897,8 @@ repairs, retired legs, slices, groups, legs, sides — of an SP a
 `DeleteStoragePool` has LATCHED, which is the sp drain and not a reaction
 (the five-empty-lists precondition that let it be latched means it holds no
 td, subsystem, clone, transfer or migration), and it does delete a `Clone` a
-`DeleteClone` has LATCHED — its chunk keys in batches, then the record
+`DeleteClone`, or its own latch of a whole copy (CLD13), has LATCHED — its
+chunk keys in batches, then the record
 together with its `clone_name_list` entry, its clone meta group and that
 group's repair and retired legs, all their sides going back to their DNs —
 which is the clone drain and not a reaction (CLD8, CLD9). And it deletes a
@@ -3980,8 +3998,8 @@ The first old leg nothing keeps is deleted, and the step ends. The delete
 carries the snapshot's `SpRev` revision as its expected revision (MD6), so
 a pool that changed since the snapshot the conditions were judged on
 refuses it, and the next pass judges again; an earlier bump of the same
-pass, a stage move's (AR11), a forced-start clear's (AR13) or a clone's
-final STM's (CLD9), changes it too, so after one the delete is refused as
+pass, a stage move's (AR11), a forced-start clear's (AR13), a clone's
+latch's (CLD13) or a clone's final STM's (CLD9), changes it too, so after one the delete is refused as
 stale and waits a pass. A refusal or a
 failure logs `retired leg kept` with its reason, the op's own for a
 refusal (MD7), and ends the step as well. A delete logs `retired leg
@@ -4284,8 +4302,9 @@ budget fails a test instead of a deployment (SPD1).
 The clone drain is the sp drain's sibling. `DeleteClone` does not sweep a
 clone's bitmap chunks. It LATCHES the clone — `deleting` true, the destination
 namespaces resumed, one `BumpSpRev` (`architecture.md`, Clones; `gateway.md`,
-Clones) — and the sp coordinator removes the chunk keys in batches of a
-constant size and then the clone itself. A sweep of the whole rectangle of
+Clones) — as the sp coordinator latches it itself once the primary's report
+shows the copy whole (CLD13), and the sp coordinator removes the chunk keys
+in batches of a constant size and then the clone itself. A sweep of the whole rectangle of
 chunk keys in one transaction would grow with the slice and chunk ceilings,
 which can still grow; a batch is a constant number of ops whatever they
 become.
@@ -4314,7 +4333,8 @@ CLD4. **The latch, and what it does not remove.** `DeleteClone` latches the
 clone — the destination namespaces resumed, `deleting` true written into
 the `Clone` record, whose key the latch rewrites and does not delete, one
 `SpRev` bump, and no chunk key and no `clone_name_list` entry touched — as
-`gateway.md`, Clones, describes; the drain starts from that
+`gateway.md`, Clones, describes, through `model.LatchClone`, the body
+CLD13's latch stages too; the drain starts from that
 latch, and the surviving name is what CLD9 removes last (SPD11, the sp
 drain's slice-final rule, applying verbatim). Force-deleting an unhydrated
 clone exposes unhydrated data on the resumed namespace.
@@ -4482,13 +4502,49 @@ retired legs, of one side each, its legs never being migrated, so those
 bound the rest (SPD1); a tripwire asserts that arithmetic from the named
 constants and a maximum-shape final STM is committed against a real etcd, as SPD14 does
 for the sp drain. The latch is strictly smaller than a sweep of the whole
-rectangle in one transaction. A batch and the final STM also fit etcd's
+rectangle in one transaction, whether the gateway or CLD13 stages it. A batch and the final STM also fit etcd's
 DEFAULT cap, which asks no deployment change: the requirement is
 `EtcdMaxTxnOps` for the transactions that do NOT fit it, such as
 `CreateStoragePool`'s maximum shape, which is what that number is sized by
 (`gateway.md`, Constants this document owns), the sp drain's D2 batch
 (SPD13) and its repair and retired-leg batches (SPD15), the created flip's
 transaction (RW19) and the clone flip's (MD6).
+
+CLD13. **The worker latches a clone whose copy is whole.** For a live SP,
+right after AR13's forced-start clear and before AR3's suppression — so at
+every `sp_level` — the pass walks the SP's clones in `clone_name_list`
+order and latches each one that is not `deleting` and whose
+`clone_id_to_dm_clone` row, in the current primary's latest report (the
+report AR1 takes), proves the copy whole by the proof the gateway's
+unforced `DeleteClone` asks (`common.HydrationComplete`;
+`architecture.md`, Clones). Every clone is latched so, with no flag. The
+op, `model.LatchCopiedClone`, loads the `SpConf` and the `Clone`, refuses
+as CLD2 refuses a pool gone, changed or `deleting` and a clone gone or
+carrying another `clone_id`, writes nothing for a clone already
+`deleting` — the gateway's latch or another owner's came first — and
+otherwise stages `model.LatchClone`, the latch `DeleteClone` stages
+(CLD4): the destination's namespaces resumed, `deleting` set, one
+`SpRev` bump. The report's revision is not checked: a copy only advances
+and a `clone_id` is never used again, so a report that shows the copy of
+that id whole proves it at any later time, and the op checks the id
+again. A primary that has reported nothing, and a row that proves
+nothing, latch nothing and log nothing; a deleting clone is the drain's
+(CLD7), whose first step comes on the next pass, the latch posting no
+wake-up. A latch logs `clone latched`, naming the clone, the primary and
+the revision of its report, with the revision its own STM committed; an
+op that refuses or fails logs `clone latch skipped` with its reason, the
+op's own for a refusal (MD7), and the next pass judges again; an op that
+finds the clone already `deleting` logs nothing. No latch is the pass's
+one action (AR2). Reasons: a whole copy needs its source no more, while a
+dm-clone that stayed would need the source at every rebuild — a role
+move, a CN reboot, a level step — and take the volume out of service
+while the source is away (`cnagent.md`, Known limits); the resume rides
+the latch as CLD4's does, since the clone record is the only record of
+why the destination's namespaces were suspended, and a clone gone with
+them still suspended would leave them so with nothing to say why; and the
+step only follows the primary's report, as AR11 and AR13 do, while at the
+levels that remove the dm-clone the report proves no copy, and a copy
+proven whole earlier is still whole.
 
 ## Log records
 
@@ -4626,8 +4682,12 @@ op's name as `op` when the op refused the delete, or its error (AR12);
 `forced start cleared` a clear of a forced-start mark whose call wrote,
 with the revision its own STM committed, and `forced start kept` a clear
 AR13 finds due and does not make, with its reason, the op's name as `op`
-when the op refused it, or its error (AR13) — none of these steps is a
-reaction, so none logs a reaction record;
+when the op refused it, or its error (AR13); `clone latched` a latch of
+a clone whose copy is whole whose call wrote, naming the clone, the primary
+and its report's revision, with the revision its own STM committed, and
+`clone latch skipped` a latch CLD13 finds due and does not make, with its
+reason, the op's name as `op` when the op refused it, or its error (CLD13)
+— none of these steps is a reaction, so none logs a reaction record;
 `sp drain step` every D1, repair, retired-leg and D2 step whose call
 succeeded (SPD8), each with its own phase, and `sp drained` a D3 whose call
 succeeded, the step that ends the drain (SPD12), so no step record carries
@@ -4947,7 +5007,10 @@ repair left out of every cntlr's request, the sides of its new leg and
 retired legs driven until the final transaction, and that transaction
 giving them back — since no suite case deletes a clone whose group holds a
 repair or a retired leg; the guards of CLD2 and the gateway halves
-of CLD1 and CLD3, the gateway suite owning the clone latch; the guards no
+of CLD1 and CLD3, the gateway suite owning the clone latch; CLD13, the
+latch of a clone whose copy is whole, since no suite case has a fake report
+a dm-clone's status line, the worker package's scenario tests running it
+against the same fakes in the process; the guards no
 reaction case stages — auto-grow's `data_covered`, `grp_list_full` and
 `meta_ladder_cap` (AR6), cntlr replacement's
 `candidate changed` (AR7) and leg repair's `leg_has_two_sides` (AR8), while
@@ -4957,7 +5020,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Fourteen records no suite case stages: `worker reg watch restarting`, `rev
+Sixteen records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -4971,7 +5034,9 @@ suite case forces that code or sets `leftover_rounds`;
 `migration bitmap read failed`, since no fake refuses a `GetLegBm`;
 `late observation`, since no suite case sets `obs_age_ms` or `obs_none`;
 `dn free count disagrees`, since no suite case sets `disk_counts`;
-`forced start kept`, since every clear the repair case stages commits; and
+`forced start kept`, since every clear the repair case stages commits;
+`clone latched` and `clone latch skipped`, for the reason given for CLD13
+above; and
 `sp group missing`, since no suite case plants a repair or a retired leg
 whose group is missing. `repair stage skipped` is staged only as the
 record of a refused take-back, every stage move the repair and reaction

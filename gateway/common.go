@@ -1033,31 +1033,6 @@ func spSliceCnt(conf *pb.SpConf) int {
 }
 
 // ---------------------------------------------------------------------------
-// dm-clone status (the force = false hydration checks of architecture.md,
-// Clones and Migrations)
-// ---------------------------------------------------------------------------
-
-// hydrationComplete decides whether a dm-clone has finished copying, from the
-// details of its row, which carry the raw `dmsetup status` line
-// (architecture.md, Live-state reporting), read with common.ParseCloneStatus,
-// the parser the agents use. Details that do not parse and a total of zero
-// regions are "not complete": DeleteClone and FinishMigration refuse unless
-// they can PROVE the copy is done, and an unreadable status is not proof
-// (architecture.md, Clones). The zero rule is the gateway's own; the parser
-// reads a count that does not parse, one past 64 bits included, as zero.
-//
-// The row is the one in the agent's latest observation, not a fresh read of
-// the node (architecture.md, Live-state reporting). That is proof enough: a
-// copy only advances, so an observation that lags the node shows less of it,
-// and the refusal it gives is one the caller repeats; an agent that holds no
-// observation of the object yet reports no row, and empty details refuse.
-func hydrationComplete(details string) bool {
-	status, ok := common.ParseCloneStatus(details)
-	return ok && status.TotalRegions != 0 &&
-		status.HydratedRegions >= status.TotalRegions
-}
-
-// ---------------------------------------------------------------------------
 // The observation an Inspect* reply passes on (architecture.md, Live-state
 // reporting)
 // ---------------------------------------------------------------------------

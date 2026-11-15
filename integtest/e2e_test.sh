@@ -4548,41 +4548,58 @@ unreject() {
 	return 0
 }
 
-# clone_dst_wsect prints "<device number> <sectors>": the destination device
-# of this node's one dnv dm-clone, by the number the dm-clone's table names,
-# and the sectors written to that device since it was created, field 7 of
-# its stat. Copy step 7 reads it on a new primary, whose destination raid0 was
-# created with the promotion, so the count is what that primary's dm-clone
-# copied. It fails, saying so, unless exactly one dm-clone of this suite is on
-# the node and its table and the device's stat read.
-clone_dst_wsect() {
-	local names n table dst wsect
+# clone_dst_dev prints the device number of the destination of this node's
+# one dnv dm-clone, as the dm-clone's table names it. Copy step 7 reads it
+# on a new primary while the dm-clone serves: the worker latches a clone
+# once its copy is whole (dnv-worker.md CLD13) and the drain removes the
+# dm-clone, while the destination raid0, whose number this is, stays. It
+# fails, saying so, unless exactly one dm-clone of this suite is on the
+# node and its table names a destination.
+clone_dst_dev() {
+	local names n table dst
 	names=$(dm_kind_names c7)
 	n=$(printf '%s\n' "$names" | grep -c .)
 	if [ "$n" != 1 ]; then
-		echo "clone_dst_wsect: $n dm-clones on this node, want 1:" $names >&2
+		echo "clone_dst_dev: $n dm-clones on this node, want 1:" $names >&2
 		return 1
 	fi
 	table=$(dmsetup table "$names" 2>&1) || {
-		echo "clone_dst_wsect: reading $names's table failed: $table" >&2
+		echo "clone_dst_dev: reading $names's table failed: $table" >&2
 		return 1
 	}
 	dst=$(printf '%s\n' "$table" | awk '$3 == "clone" {print $5; exit}')
 	case "$dst" in
 	[0-9]*:[0-9]*) ;;
 	*)
-		echo "clone_dst_wsect: $names's table names no destination: $table" >&2
+		echo "clone_dst_dev: $names's table names no destination: $table" >&2
 		return 1
 		;;
 	esac
-	wsect=$(awk '{print $7}' "/sys/dev/block/$dst/stat" 2>/dev/null)
+	echo "$dst"
+}
+
+# dev_wsect prints the sectors written to the block device <major:minor>
+# since it was created, field 7 of its stat. Copy step 7 reads it on the
+# destination raid0 of a new primary, which the promotion created, so the
+# count is what that primary's dm-clone copied. It fails, saying so, when
+# the stat does not read.
+dev_wsect() { # <major:minor>
+	local wsect
+	case "${1:-}" in
+	[0-9]*:[0-9]*) ;;
+	*)
+		echo "dev_wsect: '${1:-}' is no device number" >&2
+		return 1
+		;;
+	esac
+	wsect=$(awk '{print $7}' "/sys/dev/block/$1/stat" 2>/dev/null)
 	case "$wsect" in
 	'' | *[!0-9]*)
-		echo "clone_dst_wsect: $dst's write sector count reads '$wsect'" >&2
+		echo "dev_wsect: $1's write sector count reads '$wsect'" >&2
 		return 1
 		;;
 	esac
-	echo "$dst $wsect"
+	echo "$wsect"
 }
 
 # cn_up installs the md mask and starts THIS guest's single cn agent.
@@ -12608,7 +12625,7 @@ case_ops() {
 #      status` line, on a line of its own (cloneDmRow and
 #      probeCloneDm (agent/cnagent/clone.go)), whose seventh field is
 #      `<hydrated>/<total>` — the same field the gateway parses in
-#      hydrationComplete (gateway/common.go). A same-kernel loopback that
+#      HydrationComplete (common/dm_status.go). A same-kernel loopback that
 #      deadlocks under writeback pressure HANGS rather than failing, so a
 #      status line that has not moved for $WAIT_HYDRATE_STALL seconds while
 #      the device itself is RES_STATUS_OK is the second trigger. Without it
@@ -12893,12 +12910,13 @@ COPY_FO_PROV_LAST=""
 # after any text of the row's (architecture.md, Live-state reporting) — the CN
 # for a clone (cloneDmRow and probeCloneDm (agent/cnagent/clone.go)), the DN
 # for a migration's destination side (migrDstSeen (agent/dnagent/migr.go)).
-# The gateway reads field 7 of it, counting from <start> as field 1, in
-# hydrationComplete (gateway/common.go), and refuses both `clone delete` and
-# `migr finish` unless it parses and says done >= total. These two helpers
-# read the same field, so a wait that succeeds here is a wait after which
-# those two RPCs cannot answer FAILED_PRECONDITION for the reason this case
-# cares about.
+# The gateway and the worker read field 7 of it, counting from <start> as
+# field 1, in HydrationComplete (common/dm_status.go): the gateway refuses
+# both `clone delete` and `migr finish` unless it parses and says done >=
+# total, and the worker latches a clone once it does (dnv-worker.md CLD13).
+# These two helpers read the same field, so a wait that succeeds here is a
+# wait after which those two RPCs cannot answer FAILED_PRECONDITION for the
+# reason this case cares about.
 #
 # awk and not `set --`: the details can be several lines, a row's own text
 # ahead of the status line. The gateway reads them with
@@ -12919,7 +12937,7 @@ hyd_fraction() { # <raw dmsetup status details> → "<hydrated>/<total>" | none
 	printf '%s' "${out:-none}"
 }
 
-# hyd_complete is hydrationComplete's own rule, including its two refusals: a
+# hyd_complete is HydrationComplete's own rule, including its two refusals: a
 # value that does not parse and a total of zero are both "not complete",
 # because neither is PROOF that the copy finished.
 hyd_complete() { # <"<hydrated>/<total>">
@@ -13006,7 +13024,13 @@ copy_xfer_host_linked() { # <cn v> <hostnqn>
 # else's problem (its clone meta group, a missing raid0), and building a second
 # storage pool would not fix it. That case simply runs out $WAIT_HYDRATE and
 # dies with the last signature in the transcript.
-copy_clone_progress() { # <cntlr id> <clone id>
+#
+# A clone whose record is deleting or gone also ends the wait as complete:
+# the worker latches a clone once the primary reports its copy whole
+# (dnv-worker.md CLD13), the clone then leaves the primary's request and its
+# rows leave the report, and nothing else in this case latches one while it
+# waits. The digest the case reads later is the proof of the bytes.
+copy_clone_progress() { # <cntlr id> <clone id> <clone name>
 	local tgt tgtdet dm det frac sig
 	COPY_SRC_FAULT=""
 	if ! ctl_try cntlr inspect --id "$1"; then
@@ -13033,6 +13057,17 @@ copy_clone_progress() { # <cntlr id> <clone id>
 	if hyd_complete "$frac"; then
 		return 0
 	fi
+	# Read after the inspect, so a latch that came before or during it, and
+	# took the clone's rows out of the report, is seen here and never read
+	# as a source fault below.
+	if copy_clone_latched "$3"; then
+		sig="clone $3 latched by the worker ($COPY_LATCH_SIG)"
+		if [ "$sig" != "$COPY_HYD_SIG" ]; then
+			COPY_HYD_SIG=$sig
+			log "  clone $2 on cntlr $1: $sig"
+		fi
+		return 0
+	fi
 	# A deferred clone connects no source while it waits for its clone meta
 	# group (cnagent.md CN18).
 	if [ "$tgt" = RES_STATUS_PROVISIONING ]; then
@@ -13055,12 +13090,31 @@ copy_clone_progress() { # <cntlr id> <clone id>
 	return 1
 }
 
+# copy_clone_latched succeeds when the clone <name> is deleting or gone, and
+# sets COPY_LATCH_SIG to which; any other answer, a failed call included, is
+# "not latched", so the wait goes on.
+COPY_LATCH_SIG=""
+copy_clone_latched() { # <clone name>
+	if ctl_try clone get --name "$1"; then
+		[ "$(jq_of "$CTL_OUT" '.clone.deleting')" = true ] || return 1
+		COPY_LATCH_SIG="deleting"
+		return 0
+	fi
+	case "$CTL_ERR" in
+	"dnvctl: NOT_FOUND: "*)
+		COPY_LATCH_SIG="drained"
+		return 0
+		;;
+	esac
+	return 1
+}
+
 # side_hydrated is the migration's twin of the above, one layer down: the
 # destination SIDE's dm-clone lives on its DN, so the row is InspectSide's
 # migr_dst_info.dm_clone_info (SideInfo.MigrDstInfo (pb/schema.proto)) and
 # not a CntlrInfo map. It is exactly what FinishMigration (gateway/migration.go)
 # reads as its own proof — a GetSideInfo of the DESTINATION side, then
-# hydrationComplete on migr_dst_info.dm_clone_info.details — so a
+# HydrationComplete on migr_dst_info.dm_clone_info.details — so a
 # `migr finish` issued after this wait cannot be refused for lack of proof.
 #
 # Until the destination has built its dm-clone, which it does only once the
@@ -14307,7 +14361,7 @@ copy_clone_build() {
 	COPY_SRC_FAULT=""
 	wait_until "$WAIT_HYDRATE" \
 		"clone $CLONE0 (clone_id $CLONE0_ID) to finish hydrating on cntlr $PRIMARY_CNTLR_ID" \
-		copy_clone_progress "$PRIMARY_CNTLR_ID" "$CLONE0_ID"
+		copy_clone_progress "$PRIMARY_CNTLR_ID" "$CLONE0_ID" "$CLONE0"
 	if [ -n "$COPY_SRC_FAULT" ]; then
 		return 1
 	fi
@@ -14365,7 +14419,12 @@ copy_make_clone_td() {
 }
 
 copy_clone() {
-	stage 02 "clone create into $TD_CLONE from the transfer, hydrate, then delete it"
+	stage 02 "clone create into $TD_CLONE from the transfer, hydrate; the worker drains it"
+	local latched_before
+
+	# The worker's `clone latched` records so far: the end of this stage
+	# wants exactly one more, the latch of this case's clone.
+	latched_before=$(worker_msg_cnt "clone latched")
 
 	# The geometry the source describes, read back from the sp rather than
 	# assumed. On the self branch (copy_src_self) the stored stripe is what
@@ -14421,11 +14480,15 @@ copy_clone() {
 	fi
 	log "  clone source branch that ran: $COPY_SRC_BRANCH"
 
-	# The destination namespace, created while the clone is still live. CN16
-	# rule 5 backs it with CnCloneFinalName; when the clone goes, rule 6 moves
-	# the same ns-dev onto $TD_CLONE's own raid0. Both halves are asserted —
-	# this one by the ANA state and the device node, the next stage's by the
-	# digest, which is read only after the transfer is gone (constraint (a)).
+	# The destination namespace, created once the copy is whole. The worker
+	# latches the clone at its first pass after the primary reports the copy
+	# whole (dnv-worker.md CLD13), so this create may find the clone live —
+	# CN16 rule 5 backs the namespace with CnCloneFinalName, and rule 6 then
+	# moves the same ns-dev onto $TD_CLONE's own raid0 — or latched already,
+	# rule 6 alone; copy step 7 creates its namespace before its clone and so
+	# meets both. The namespace is asserted by the ANA state and the device
+	# node here and by the digest in the next stage, which is read only after
+	# the transfer is gone (constraint (a)).
 	ctl_ok ns create --nqn "$SS0" --idx 2 --td "$TD_CLONE" --uuid "$UUID2"
 	NS2_ID=$(jq_of "$CTL_OUT" '.ns_id')
 	case "$NS2_ID" in
@@ -14442,45 +14505,34 @@ copy_clone() {
 	# PRIMARY_TRADDR are this case's own, from the sp_read_roles at the top of
 	# copy_clone; $SS0_ID is setup's.
 	wait_ns_exported "$PRIMARY_CNTLR_ID" \
-		"$SS0 ns 2 ($TD_CLONE, over the live dm-clone) on cn$PRIMARY_CN" \
+		"$SS0 ns 2 ($TD_CLONE) on cn$PRIMARY_CN" \
 		"$SS0_ID" "$NS2_ID"
 	# Neither of these is IO: host_wait_ana reads sysfs and host_dev_present
 	# is a `test -e`, so both are legal while host0's ns 1 is parked.
 	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID2" optimized
 	wait_dev 0 "$UUID2"
-	log "  host0 sees $(host_dev "$UUID2") over the clone (CN16 rule 5);" \
+	log "  host0 sees $(host_dev "$UUID2") on $TD_CLONE;" \
 		"its digest is read in stage 03, after the transfer is aborted"
 
-	# `clone delete` WITHOUT --force is the point: the gateway must prove
-	# hydration from the primary's own clone_id_to_dm_clone row before it
-	# latches (checkCloneHydrated (gateway/clone.go)), so a successful call is
-	# a second, independent confirmation of the wait above.
-	ctl_ok clone get --name "$CLONE0"
-	assert_field "$CTL_OUT" '.clone.deleting' false \
-		"the clone is still live before the delete"
-	ctl_ok clone delete --name "$CLONE0"
-	assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" "DeleteCloneReply.clone_id"
-
-	# CLD4: DeleteClone LATCHES and returns. The record survives with
-	# deleting = true until the sp coordinator has drained its chunk keys, so
-	# the latch is observable — and then the drain's final STM removes it.
-	#
-	# The latch is read through ctl_try, not ctl_ok: the drain is a background
-	# pass and the record may already be gone by the time this line runs, in
-	# which case NOT_FOUND is the right answer and not a failure.
-	if ctl_try clone get --name "$CLONE0"; then
-		assert_field "$CTL_OUT" '.clone.deleting' true \
-			"CLD4: a deleted clone is latched before it is drained"
-		log "  clone $CLONE0 is latched (deleting = true); waiting for the drain"
-	else
-		log "  clone $CLONE0 was already drained when the latch was read"
-	fi
+	# No `clone delete`: the worker latches a clone whose copy the primary
+	# reports whole, with the transaction an unforced delete runs, and its
+	# drain removes the record (dnv-worker.md CLD13, CLD4). The latch is the
+	# worker's alone here, so its log holds one more `clone latched` record
+	# and no `clone latch skipped`.
 	wait_until "$WAIT_DELETE" \
-		"the sp coordinator to drain clone $CLONE0 to NOT_FOUND" clone_gone
+		"the worker to latch clone $CLONE0 and drain it to NOT_FOUND" \
+		clone_gone
+	assert_eq "$(worker_msg_cnt "clone latched")" "$((latched_before + 1))" \
+		"the worker latched clone $CLONE0 itself (dnv-worker.md CLD13)"
+	assert_eq "$(worker_msg_cnt "clone latch skipped")" 0 \
+		"no latch of a whole copy was refused or failed"
 	sp_refresh
 	assert_field "$SP_JSON" '.sp_conf.clone_name_list | length' 0 \
 		"clone_name_list is empty again"
-	log "  $TD_CLONE's namespaces are now backed by its own raid0 (CN16 rule 6)"
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID2" optimized
+	wait_dev 0 "$UUID2"
+	log "  $TD_CLONE's namespaces are now backed by its own raid0 (CN16 rule 6)," \
+		"and host0 still sees ns 2 optimized"
 }
 
 # ---------------------------------------------------------------------------
@@ -16002,11 +16054,12 @@ copy_reuse() {
 #   2. once the throttle is gone and the copy is whole, the new primary's
 #      destination raid0, which the promotion created, has had at most the
 #      regions the old primary's last count left written into it, one block
-#      each (clone_dst_wsect): a dm-clone over new metadata would copy every
+#      each (clone_dst_dev, dev_wsect): a dm-clone over new metadata would copy every
 #      region again, and no host writes there; and at least the regions the
 #      new primary's first count left, which a write count that sees the
 #      copy reads;
-#   3. the clone's unforced delete is accepted, and the whole destination's
+#   3. the clone's unforced delete is accepted, or answers NOT_FOUND once
+#      the worker has latched and drained the whole copy itself, and the whole destination's
 #      digest, read once the clone is gone, is the whole source's, which
 #      host1 read through the source's device before the clone.
 # The worker's log then holds exactly one more failover, the old primary
@@ -16102,6 +16155,7 @@ copy_failover() {
 	stage 07 "a clone's copy, slowed, survives a failover of its primary in its middle"
 	local size mib regions min rate out dev old_id old_cn new_id new_cn new_traddr
 	local fo_before unsynced_before pre new_hyd wsect bound low t_dis t_moved
+	local dst
 	local t_new t_opt pat src_sha prov
 
 	sp_refresh
@@ -16287,6 +16341,12 @@ copy_failover() {
 		log "  the demotion hold of cntlr $old_id ended at its report" \
 			"(dnv-worker.md RW22)"
 	fi
+	# The destination's device number, read while the dm-clone serves with
+	# regions left: once the copy is whole the worker latches the clone
+	# (dnv-worker.md CLD13) and the drain removes the dm-clone, while the
+	# destination raid0 and its write count stay.
+	dst=$(helper_cn "$new_cn" clone_dst_dev) ||
+		die "cn$new_cn: the new primary's dm-clone names no destination device"
 
 	# The copy at full speed, to its end on the new primary.
 	out=$(helper_cn "$SRC_CN" unthrottle) ||
@@ -16301,7 +16361,7 @@ copy_failover() {
 	COPY_SRC_FAULT=""
 	wait_until "$WAIT_HYDRATE" \
 		"clone $CLONE_FO to finish hydrating on the new primary cntlr $new_id" \
-		copy_clone_progress "$new_id" "$CLONE_FO_ID"
+		copy_clone_progress "$new_id" "$CLONE_FO_ID" "$CLONE_FO"
 	[ -z "$COPY_SRC_FAULT" ] ||
 		die "clone $CLONE_FO on the new primary: $COPY_SRC_FAULT"
 
@@ -16312,13 +16372,12 @@ copy_failover() {
 	# count leaves a region to copy (checked above), so the lower bound is
 	# the read's control: a write count that does not see the copy reads
 	# below it.
-	out=$(helper_cn "$new_cn" clone_dst_wsect) ||
-		die "cn$new_cn: the destination raid0's write count could not be read"
-	wsect=${out##* }
+	wsect=$(helper_cn "$new_cn" dev_wsect "$dst") ||
+		die "cn$new_cn: the destination raid0 $dst's write count could not be read"
 	bound=$(((regions - pre) * (SP_BLOCK_SIZE / 512)))
 	low=$(((regions - new_hyd) * (SP_BLOCK_SIZE / 512)))
 	log "  the new primary's dm-clone wrote $wsect sectors into its" \
-		"destination ${out% *}, at least $low and at most $bound allowed"
+		"destination $dst, at least $low and at most $bound allowed"
 	[ "$wsect" -le "$bound" ] ||
 		die "the new primary's dm-clone wrote $wsect sectors into its" \
 			"destination, more than the $((regions - pre)) regions the" \
@@ -16330,8 +16389,21 @@ copy_failover() {
 			"first count left ($low sectors): the write count did not see" \
 			"the copy"
 
-	ctl_ok clone delete --name "$CLONE_FO"
-	assert_field "$CTL_OUT" '.clone_id' "$CLONE_FO_ID" "DeleteCloneReply.clone_id"
+	# The worker latches a whole copy by itself (dnv-worker.md CLD13), so the
+	# operator's unforced delete races it: OK, from the gateway's own proof
+	# or as the no-op on a clone the worker latched, or NOT_FOUND once the
+	# drain is done (architecture.md, Clones).
+	if ctl_try clone delete --name "$CLONE_FO"; then
+		assert_field "$CTL_OUT" '.clone_id' "$CLONE_FO_ID" \
+			"DeleteCloneReply.clone_id"
+	else
+		case "$CTL_ERR" in
+		"dnvctl: NOT_FOUND: "*)
+			log "  clone $CLONE_FO was drained by the worker before the delete"
+			;;
+		*) die "clone delete --name $CLONE_FO: $CTL_ERR" ;;
+		esac
+	fi
 	wait_until "$WAIT_DELETE" \
 		"the sp coordinator to drain clone $CLONE_FO to NOT_FOUND" \
 		clone_gone "$CLONE_FO"

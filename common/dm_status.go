@@ -176,6 +176,27 @@ func ParseCloneStatus(raw string) (*CloneStatus, bool) {
 	return st, true
 }
 
+// HydrationComplete decides whether a dm-clone has finished copying, from the
+// details of its row, which carry the raw `dmsetup status` line
+// (architecture.md, Live-state reporting), read with ParseCloneStatus.
+// Details that do not parse and a total of zero regions are "not complete":
+// the gateway's DeleteClone and FinishMigration refuse, and the worker latches
+// no clone (dnv-worker.md CLD13), unless the line PROVES the copy done, and an
+// unreadable status is not proof (architecture.md, Clones). The zero rule is
+// this function's own; ParseCloneStatus reads a count that does not parse, one
+// past 64 bits included, as zero.
+//
+// The row is the one in the agent's latest observation, not a fresh read of
+// the node (architecture.md, Live-state reporting). That is proof enough: a
+// copy only advances, so an observation that lags the node shows less of it,
+// and the refusal it gives is one the caller repeats; an agent that holds no
+// observation of the object yet reports no row, and empty details refuse.
+func HydrationComplete(details string) bool {
+	status, ok := ParseCloneStatus(details)
+	return ok && status.TotalRegions != 0 &&
+		status.HydratedRegions >= status.TotalRegions
+}
+
 // ThinPoolStatus is what one thin pool's `dmsetup status` line says of its
 // size and state: the metadata pair in dm-thin's fixed metadata blocks
 // (ThinMetaBlockSize), the data pair in the pool's data_block_size, and

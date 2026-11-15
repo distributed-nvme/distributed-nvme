@@ -593,7 +593,7 @@ func (s *Server) CreateMigration(
 // reads nothing of the node (architecture.md, Live-state reporting). That is
 // still proof: a copy only advances, so an observation that lags the node
 // shows less of it, and the refusal it gives is one the caller repeats
-// (hydrationComplete).
+// (common.HydrationComplete).
 //
 // An unreachable agent is FAILED_PRECONDITION, not ABORTED (AG3): the caller
 // cannot prove hydration is done, which is exactly the precondition
@@ -706,7 +706,7 @@ func (s *Server) FinishMigration(
 				"migration %q: disk node %q did not report hydration: %v",
 				req.GetMigrName(), phaseAddr, callErr)
 		}
-		if !hydrationComplete(details) {
+		if !common.HydrationComplete(details) {
 			return nil, errPrecondition(
 				"migration %q has not finished hydrating", req.GetMigrName())
 		}

@@ -2395,7 +2395,8 @@ names it (`ori_nqn`, `ori_ns_idx`) — unless a `clone_list` entry with
 `auto_resume` targets its td, which overrides to not-suspended. (That
 override is the flow of `architecture.md`, Transfer + clone = cross-SP
 live migration: the destination namespace is created suspended and
-serves anyway while the clone runs; `DeleteClone` flips the stored field
+serves anyway while the clone runs; `DeleteClone`, or the worker's
+latch of a whole copy (`dnv-worker.md` CLD13), flips the stored field
 to false in its latch transaction, together with the `deleting` flag, so
 that the override and the clone's disappearance from the plan arrive in
 one syncup. Deferred to the end of the teardown it would leave this
@@ -2754,7 +2755,9 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    installs only once the dm-clone serves: its status shows the hydration
    step 5 enabled and its metadata read-write. With `auto_resume` false
    the namespaces stay effectively suspended until
-   `UpdateNamespaceSuspended`.
+   `UpdateNamespaceSuspended`, or until the clone's latch — the worker's
+   once the copy is whole (`dnv-worker.md` CLD13), or `DeleteClone`'s —
+   clears the stored flag.
 
 **One rule decides the clone's rows.** For a clone whose destination td
 resolves, that carries a clone meta group and that is not deferred, the
@@ -4803,9 +4806,14 @@ stores instead is CN23's.
   dm-clone up with hydration off, by contrast, reads `RES_STATUS_ERROR`
   (above) and moves the role at the primary's threshold, and the new
   primary creates the dm-clone over the clone meta group's metadata and
-  finishes the build (CN18). The clone goes out of service, even one that
-  has hydrated in full, when its dm-clone must be built again while a fault
-  at the source lasts and that build fails step 1 (CN18). A role move, a CN
+  finishes the build (CN18). The clone goes out of service when its
+  dm-clone must be built again while a fault at the source lasts and that
+  build fails step 1 (CN18). A clone whose copy the current primary has
+  reported whole is latched by the worker's next pass that reads the
+  report and passes the pass's gates (`dnv-worker.md` CLD13), and then
+  leaves the request; what is left is a copy no such pass read whole — the
+  role moved or the CN rebooted before it, or a gate held it — whose new
+  build needs the source again. A role move, a CN
   reboot, which takes the dm-clone and the source's controllers together,
   and a level that suppresses the clone, raised and lowered again (CN19),
   each need that build; it fails on a CN with no controller at an endpoint

@@ -273,9 +273,10 @@ to ANA inaccessible on every cntlr. A clone in the destination pool pulls those 
 with dm-clone into a new, empty thin device, keeps the copy's metadata on the
 clone meta group, a group of the pool made for this, and moves its namespace
 to ANA optimized once the dm-clone serves; until that move the host's IO
-queues. When the copy is complete, the operator deletes the transfer, which
-keeps the origin parked, and the clone; the new thin device then serves the
-namespace alone. An abort is lossless only while nothing has written through
+queues. When the copy is complete, the clone leaves by itself: the worker
+sees the whole copy in the primary's report, marks the clone as deleting
+and drains it, and the new thin device then serves the namespace alone. The
+operator deletes the transfer, which keeps the origin parked. An abort is lossless only while nothing has written through
 the destination. The two pools can be in different clusters.
 
 ```mermaid
@@ -300,7 +301,7 @@ flowchart LR
     H["host:<br/>one multipath device<br/>over both pools' exports"]
     ON -.->|"inaccessible"| H
     DNS ==>|"optimized"| H
-    DC -.->|"copy complete"| FIN["delete the transfer (the origin stays parked)<br/>and the clone (the namespace is served<br/>by the new thin device alone)"]
+    DC -.->|"copy complete"| FIN["the worker drains the clone (the namespace<br/>is served by the new thin device alone);<br/>delete the transfer (the origin stays parked)"]
 ```
 
 *A transfer and a clone: the source exports, the destination pulls, the host

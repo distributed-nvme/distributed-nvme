@@ -492,11 +492,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   rewrite fails too, md records a bad block on the leg. One recorded bad
   block makes the leg unhealthy, so leg repair moves it. Slow legs: accepted; migrate the leg's side by
   hand. Not seen in the lab.
-- **A fully copied clone goes out of service when its source is away at a
-  rebuild.** A failover, a reboot or a level step rebuilds the dm-clone,
-  and the build needs the source. State: fix decided, the worker drains a
-  clone once the primary reports its copy whole, so the volume no longer
-  needs the source. Not seen in the lab.
 - **Orphans the sweep never removes.** An export of a side whose build
   stopped before the export named its device. A subsystem for hosts whose
   build stopped before dnv set the model name by which it knows its own
@@ -715,7 +710,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Create, snapshot and delete a volume | `dnvctl td create`, with `--ori` for a snapshot; `dnvctl td delete` | the tutorials, for the create and the delete | done; procedure to write, one line on snapshots |
 | Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts` | the tutorials, for the export | done for the export; procedure to write, one line on `ss set-hosts`. Fix decided: a removed host is cut. |
 | Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | none | procedure to write |
-| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | none; the introduction explains the flow | procedure to write: the whole flow. Fix decided: the gateway guards the list read, and the worker drains a clone whose copy is whole. |
+| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | none; the introduction explains the flow | procedure to write: the whole flow. |
 | Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | none; the introduction explains the flow | procedure to write |
 | Read a volume's written blocks | `dnvctl td get-bm` | none | procedure to write, with the move to another pool |
 | Grow a volume; revert a volume to a snapshot | none | — | not yet |

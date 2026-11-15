@@ -1158,21 +1158,26 @@ below name.
   (`force` true skips the lookup
   entirely: no agent call follows, which is what lets force delete a clone
   whose cntlr is unreachable). Between the phases, `force` false calls
-  `GetCntlrInfo` and judges hydration with `hydrationComplete` on the
+  `GetCntlrInfo` and judges hydration with `common.HydrationComplete` on the
   agent's latest observation of the primary cntlr, which that call answers
   with (`architecture.md`, Clones); incomplete hydration **or an
   unreachable agent** is `FAILED_PRECONDITION`. Phase 2 STM (deciding): full re-resolution and the token check (GW6 — any interleaved
   mutation bumped `SpRev`, so a token the request carried subsumes the
   staleness of phase 1; a token-less request gets the re-resolution only,
-  AG4); `loadClone` again, and if `deleting` became true since phase 1,
+  AG4); `loadClone` again; a clone whose `clone_id` is not the one phase 1
+  read — drained and created again under the name meanwhile, so the proof
+  was of another — is `ABORTED`; if `deleting` became true since phase 1,
   return OK with no writes (the same rule, raced variant); else write
   nothing but the resume, the latch and the bump — `suspended` false on
   every namespace whose `td_id` is the clone's `dst_td_id`, as one
   `Subsystem` put per subsystem that actually changed and none for the rest
-  (`resumeCloneDstNs`; the destination namespaces resume, their data being
-  local, the twin of `DeleteTransfer`'s finalize under Transfers), the
-  `Clone` put with `deleting` true and every other field unchanged, and
-  `BumpSpRev`. Reply `clone_id`.
+  (the destination namespaces resume, their data being local, the twin of
+  `DeleteTransfer`'s finalize under Transfers), the `Clone` put with
+  `deleting` true and every other field unchanged, and `BumpSpRev` — through
+  `model.LatchClone`, the body the worker's latch of a whole copy stages
+  too (`dnv-worker.md` CLD13), whose every refusal, a listed subsystem's key
+  or the revision key gone, is `ABORTED`. Reply `clone_id`. A delete after
+  the worker's latch is the no-op above, and after its drain `NOT_FOUND`.
 
   The latch does NOT delete the `Clone` key, does not touch a chunk key and
   does not shrink `clone_name_list`: the name must survive until the
@@ -1310,7 +1315,7 @@ rather than a candidate problem.
   without, before any agent call (`migrCutoverStarted`; `architecture.md`,
   Migrations); with `force` false, the **destination** side's DN. Between
   the phases, `force` false calls `GetSideInfo` and judges hydration with
-  `hydrationComplete` from `migr_dst_info.dm_clone_info` of the agent's
+  `common.HydrationComplete` from `migr_dst_info.dm_clone_info` of the agent's
   latest observation of the destination side, which that call answers with
   (`architecture.md`, Migrations); incomplete or unreachable is
   `FAILED_PRECONDITION`. Deciding STM: re-resolve and the

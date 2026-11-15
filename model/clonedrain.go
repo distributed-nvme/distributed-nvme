@@ -44,12 +44,141 @@ import (
 // rectangle of chunk keys would grow with both ceilings; incremental deletion
 // makes growth change the batch COUNT and never the transaction's legality.
 
-// The Op names of the two clone-drain ops, the exported function names as
+// The Op names of the clone-drain ops, the exported function names as
 // everywhere else in this package.
 const (
+	opLatchCopiedClone  = "LatchCopiedClone"
 	opDrainCloneBm      = "DrainCloneBm"
 	opFinishCloneDelete = "FinishCloneDelete"
 )
+
+// LatchClone stages the latch of a clone (dnv-worker.md CLD4) into the
+// caller's STM s: `suspended` cleared on every namespace of the pool whose
+// td_id is the clone's dst_td_id, the clone's `deleting` set and its record
+// put back under its name, and one SpRev bump tagged op. conf is the pool's
+// SpConf and clone the Clone, both as s read them; the caller has checked
+// that the clone is not deleting yet.
+//
+// It is the one body of the latch (MD8): the gateway's DeleteClone stages it
+// after its token check, and the worker's LatchCopiedClone after its own
+// loads (CLD13).
+//
+// The resume rides the latch: the clone record is the only record of why the
+// destination's namespaces were suspended (architecture.md, Transfer + clone
+// = cross-SP live migration), and setting `deleting` in the same transaction
+// makes the resume and the clone's exclusion from every cntlr's request
+// (CLD5) arrive in one SpRev bump, hence one syncup. Only the subsystems that
+// change are written back. A listed nqn whose Subsystem key is gone is
+// refused: the pool has lost an invariant key (architecture.md, Key table),
+// and a half-resumed pool is worse than a refusal the caller can repeat,
+// since a namespace left suspended with no clone to explain it never resumes
+// on its own.
+func LatchClone(
+	s etcdutil.STM,
+	op string,
+	cid uint64,
+	conf *pb.SpConf,
+	cloneName string,
+	clone *pb.Clone,
+) error {
+	_, err := latchCloneTo(s, op, cid, conf, cloneName, clone)
+	return err
+}
+
+// latchCloneTo is LatchClone that also returns the revision its bump writes,
+// which LatchCopiedClone hands its caller for the `clone latched` record.
+func latchCloneTo(
+	s etcdutil.STM,
+	op string,
+	cid uint64,
+	conf *pb.SpConf,
+	cloneName string,
+	clone *pb.Clone,
+) (uint64, error) {
+	spId := conf.GetSpId()
+	for _, nqn := range conf.GetNqnList() {
+		key := SubsystemKey(cid, spId, nqn)
+		subsystem := &pb.Subsystem{}
+		if !s.Get(key, subsystem) {
+			return 0, fail(op, "subsystem record missing")
+		}
+		changed := false
+		for _, ns := range subsystem.GetNsList() {
+			if ns.GetTdId() != clone.GetDstTdId() || !ns.GetSuspended() {
+				continue
+			}
+			ns.Suspended = false
+			changed = true
+		}
+		if changed {
+			s.Put(key, subsystem)
+		}
+	}
+	clone.Deleting = true
+	s.Put(CloneKey(cid, spId, cloneName), clone)
+	return bumpSpRevTo(s, op, conf.GetShardCode(), cid, spId)
+}
+
+// LatchCopiedClone is the worker's latch of a clone whose copy the primary's
+// report shows whole (dnv-worker.md CLD13): one STM that loads the SpConf and
+// the Clone and stages LatchClone. It returns whether it wrote and the SpRev
+// revision its STM committed.
+//
+// The caller's proof is about the clone id it read the report for, and a copy
+// only advances, so the proof stands at any later time for that id; the STM
+// therefore checks the id and no revision. It refuses, as the drain ops'
+// load refuses (CLD2), an SP that is gone, whose sp_id changed or that is
+// deleting, and a Clone that is gone or whose clone_id changed: a clone
+// deleted and created again under the name is another clone, which the
+// report did not prove. A Clone already deleting — the gateway's DeleteClone
+// or another owner latched it first — is no refusal: the STM writes and bumps
+// nothing and reports false, as a repeat DeleteClone does (CLD3).
+func LatchCopiedClone(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+) (bool, uint64, error) {
+	latched := false
+	var revision uint64
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		latched, revision = false, 0
+		conf := &pb.SpConf{}
+		if !s.Get(SpConfKey(cid, spName), conf) {
+			return fail(opLatchCopiedClone, "sp not found")
+		}
+		if conf.GetSpId() != spId {
+			return fail(opLatchCopiedClone, "sp id changed")
+		}
+		if conf.GetDeleting() {
+			return fail(opLatchCopiedClone, "sp deleting")
+		}
+		clone := &pb.Clone{}
+		if !s.Get(CloneKey(cid, spId, cloneName), clone) {
+			return fail(opLatchCopiedClone, "clone not found")
+		}
+		if clone.GetCloneId() != cloneId {
+			return fail(opLatchCopiedClone, "clone id changed")
+		}
+		if clone.GetDeleting() {
+			return nil
+		}
+		rev, err := latchCloneTo(
+			s, opLatchCopiedClone, cid, conf, cloneName, clone)
+		if err != nil {
+			return err
+		}
+		latched, revision = true, rev
+		return nil
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	return latched, revision, nil
+}
 
 // loadCloneForOp is CLD2: SPD2's load-and-refuse shape applied to a clone, and
 // inverted exactly as it is there. Normal clone RPCs (CLD1) require the flag

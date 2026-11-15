@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/integtest/agentfake"
 	"github.com/distributed-nvme/distributed-nvme/integtest/plant"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -420,5 +421,91 @@ func TestScenPoolDrainAcrossATakeover(t *testing.T) {
 	if steps(heir, drainPhaseCntlrs) != 0 || steps(heir, drainPhaseSlice) == 0 {
 		t.Errorf("the heir logged %d cntlr and %d slice steps, want none and "+
 			"some", steps(heir, drainPhaseCntlrs), steps(heir, drainPhaseSlice))
+	}
+}
+
+// TestScenWholeCloneLatchesAndDrainsItself is CLD13 end to end, against fake
+// agents: a clone whose primary reports its copy with regions left stays
+// live through several passes; once the report shows the copy whole the
+// coordinator latches it, once — the destination's namespace resumed, the
+// clone out of the primary's next syncup — and the clone drain removes its
+// record and gives its clone meta group back, with no call of the gateway.
+func TestScenWholeCloneLatchesAndDrainsItself(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantScen(t, scenShape{})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	ctx := context.Background()
+
+	// The destination's namespace suspended, as the move flow stores it
+	// before the clone (architecture.md, Transfer + clone = cross-SP live
+	// migration).
+	ssKey := model.SubsystemKey(c.cl.Id, stdSpId, c.ss.Nqn)
+	if err := h.cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		ss := &pb.Subsystem{}
+		if !s.Get(ssKey, ss) {
+			return fmt.Errorf("subsystem %s not found", c.ss.Nqn)
+		}
+		ss.GetNsList()[0].Suspended = true
+		s.Put(ssKey, ss)
+		return nil
+	}); err != nil {
+		t.Fatalf("suspend the namespace: %v", err)
+	}
+	clone := c.putStdClone(t, plant.CloneSpec{
+		Name: "c0", DstTd: "td0", SrcSliceCnt: 1,
+		SrcNqn: "nqn.2026-10.io.dnv-wh:src", SrcNsIdx: 1,
+		SrcStripeSize: 1 << 20, SrcBlockSize: 1 << 16,
+	})
+	primary, primaryKey := c.cntlrAgent(t, c.primary(t))
+	row := fmt.Sprintf("clone_id_to_dm_clone.%d", clone.Id)
+	part := cloneStatus("7/8")
+	setRow(t, primary, primaryKey, row,
+		rowLever(pb.ResStatus_RES_STATUS_OK, part, true))
+	rounds := len(primary.Record(primaryKey).Rounds)
+	h.waitUntil(t, 20*time.Second, "four rounds of the primary that report "+
+		"the copy with regions left", func() (bool, string) {
+		n := len(primary.Record(primaryKey).Rounds) - rounds
+		return n >= 4, fmt.Sprintf("%d rounds", n)
+	})
+	// The coordinator's passes run on the same one-second interval as the
+	// rounds, so several have read the partial copy by now.
+	if n := h.countRecs(w, msgCloneLatched, nil); n != 0 {
+		t.Fatalf("%d %q records with regions left, want none", n,
+			msgCloneLatched)
+	}
+	if state := c.load(t); state.Clones["c0"].GetDeleting() {
+		t.Fatalf("the clone was latched with regions left")
+	}
+
+	setRow(t, primary, primaryKey, row,
+		rowLever(pb.ResStatus_RES_STATUS_OK, cloneStatus("8/8"), true))
+	rec := h.waitRecord(t, 20*time.Second, w, msgCloneLatched, nil)
+	if rec.str("clone_name") != "c0" || rec.num("clone_id") != clone.Id {
+		t.Fatalf("record %v does not name c0 (%d)", rec, clone.Id)
+	}
+	h.waitRecord(t, 20*time.Second, w, msgCloneDrainDone, nil)
+	ss := &pb.Subsystem{}
+	c.mustGet(t, ssKey, ss)
+	if ss.GetNsList()[0].GetSuspended() {
+		t.Errorf("the destination's namespace is still suspended")
+	}
+	if names := c.load(t).Conf.GetCloneNameList(); len(names) != 0 {
+		t.Errorf("the pool still lists clones %v", names)
+	}
+	c.waitConverged(t)
+	msg, _, _ := lastSyncup(primary, primaryKey)
+	if clones := msg.(*pb.SyncupCntlrRequest).GetCloneList(); len(clones) != 0 {
+		t.Errorf("the primary's last syncup still carries clones %v", clones)
+	}
+	if n := h.countRecs(w, msgCloneLatched, nil); n != 1 {
+		t.Errorf("%d %q records, want one", n, msgCloneLatched)
+	}
+	for _, msg := range []string{msgCloneLatchSkipped, msgCloneDrainFailed} {
+		if n := h.countRecs(w, msg, nil); n != 0 {
+			t.Errorf("%d %q records, want none", n, msg)
+		}
 	}
 }
