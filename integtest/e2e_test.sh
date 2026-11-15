@@ -5185,6 +5185,151 @@ wloop_stop() { # [secs]
 	return 0
 }
 
+# --- the cutoff case's fence writer, on host1 ---------------------------------
+#
+# fio writes one thin device in order through the one primary host1 is
+# connected to: one 4 KiB write in flight, each opened O_DIRECT and O_SYNC,
+# so a write returns only once it is durable — one operation, with no
+# separate flush whose failure would leave a written block in doubt — at a
+# fixed rate, with fio's own verify (crc32c over each block, stamped with its
+# offset) and its verify state saved when the job stops, at a write error
+# too. fwrite_verify then reads back, through another primary, every block
+# that saved state says completed, and the rest of the range, from the first
+# failed write on, as zeros. Everything lives in $FWRITE_DIR, which
+# host_cleanup's fwrite_stop removes.
+FWRITE_DIR="$WORK/fwrite"
+
+# fwrite_start starts fio DETACHED (fwrite_run) on the device of <uuid> and
+# answers once it runs: `fwrite=started pid=<pid> node=<node>`.
+fwrite_start() { # <uuid> <range bytes> <iops>
+	local uuid=$1 range=$2 iops=$3 link node pid
+	fwrite_stop >/dev/null
+	mkdir -p "$FWRITE_DIR" || return 1
+	link="/dev/disk/by-id/nvme-uuid.$uuid"
+	node=$(readlink -f "$link" 2>/dev/null) || node=""
+	[ -n "$node" ] && [ -b "$node" ] || {
+		echo "fwrite_start: $link resolves to no block device ('$node')" >&2
+		return 1
+	}
+	nohup bash "$0" fwrite_run "$FWRITE_DIR" "$node" "$range" "$iops" \
+		</dev/null >/dev/null 2>>"$FWRITE_DIR/run.err" &
+	pid=$!
+	echo "$pid" >"$FWRITE_DIR/pid"
+	sleep 1
+	if [ -e "$FWRITE_DIR/rc" ] || ! kill -0 "$pid" 2>/dev/null; then
+		echo "fwrite_start: fio exited at once:" >&2
+		tail -n 20 "$FWRITE_DIR/write.out" "$FWRITE_DIR/run.err" >&2
+		return 1
+	fi
+	printf 'fwrite=started pid=%s node=%s\n' "$pid" "$node"
+	return 0
+}
+
+# fwrite_run is the writer itself, started by fwrite_start: fio in
+# $FWRITE_DIR, where it saves its verify state, and fio's exit code in rc.
+fwrite_run() { # <dir> <node> <range bytes> <iops>
+	local dir=$1 node=$2 range=$3 iops=$4 rc=0
+	cd "$dir" || return 1
+	fio --name=fence --filename="$node" --rw=write --bs=4k --size="$range" \
+		--ioengine=psync --iodepth=1 --direct=1 --sync=1 \
+		--rate_iops="$iops" --verify=crc32c --do_verify=0 \
+		--verify_state_save=1 --continue_on_error=none \
+		>"$dir/write.out" 2>&1 || rc=$?
+	echo "$rc" >"$dir/rc"
+	return 0
+}
+
+# fwrite_stat answers `running=yes|no rc=<fio's exit code, or none>
+# failed_offset=<byte offset of the first failed write, or none>
+# issued=<writes fio issued, or none>`, then the tail of fio's output when it
+# has stopped.
+fwrite_stat() {
+	local pid running=no rc=none off issued
+	[ -d "$FWRITE_DIR" ] || {
+		echo "fwrite=absent"
+		return 0
+	}
+	pid=$(cat "$FWRITE_DIR/pid" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*) ;;
+	*) kill -0 "$pid" 2>/dev/null && running=yes ;;
+	esac
+	[ -e "$FWRITE_DIR/rc" ] && rc=$(cat "$FWRITE_DIR/rc" 2>/dev/null)
+	off=$(sed -n 's/.*io_u error.* write offset=\([0-9][0-9]*\).*/\1/p' \
+		"$FWRITE_DIR/write.out" 2>/dev/null | head -n 1)
+	issued=$(sed -n 's/.*issued rwts: total=[0-9]*,\([0-9][0-9]*\),.*/\1/p' \
+		"$FWRITE_DIR/write.out" 2>/dev/null | head -n 1)
+	printf 'running=%s rc=%s failed_offset=%s issued=%s\n' "$running" \
+		"${rc:-none}" "${off:-none}" "${issued:-none}"
+	if [ "$running" = no ]; then
+		tail -n 12 "$FWRITE_DIR/write.out" 2>/dev/null
+	fi
+	return 0
+}
+
+# fwrite_verify reads back, through whatever path host1 now holds, every
+# write the writer saw succeed — the bytes before <failed offset> — with
+# fio's verify (verify_only, and the saved state, verify_state_load), and
+# checks that the range reads zeros from <failed offset> to its end, with cmp
+# against /dev/zero. The verify's size is <failed offset>: fio's saved state
+# reads one block past the last write it completed (fio 3.41 does so with no
+# error at all), which here is the failed write's block, whose zeros the cmp
+# checks. It answers `verify_rc=<n> verified_bytes=<n> zeros=ok|differ|failed`,
+# then the tail of the verify's errors.
+fwrite_verify() { # <uuid> <range bytes> <failed offset>
+	local uuid=$1 range=$2 off=$3 node vrc=0 bytes zeros=ok
+	node=$(readlink -f "/dev/disk/by-id/nvme-uuid.$uuid" 2>/dev/null) || node=""
+	[ -n "$node" ] && [ -b "$node" ] || {
+		echo "fwrite_verify: no block device for $uuid ('$node')" >&2
+		return 1
+	}
+	cd "$FWRITE_DIR" || return 1
+	fio --name=fence --filename="$node" --rw=write --bs=4k --size="$off" \
+		--ioengine=psync --iodepth=1 --direct=1 --verify=crc32c \
+		--verify_only=1 --verify_state_load=1 --output-format=json \
+		>"$FWRITE_DIR/verify.json" 2>"$FWRITE_DIR/verify.err" || vrc=$?
+	bytes=$(awk '/"read"[[:space:]]*:/ { r = 1 }
+		r && /"io_bytes"/ { gsub(/[^0-9]/, ""); print; exit }' \
+		"$FWRITE_DIR/verify.json")
+	sync
+	echo 3 >/proc/sys/vm/drop_caches
+	if cmp -s -i "$off:0" -n "$((range - off))" "$node" /dev/zero; then
+		zeros=ok
+	else
+		case $? in
+		1) zeros=differ ;;
+		*) zeros=failed ;;
+		esac
+	fi
+	printf 'verify_rc=%s verified_bytes=%s zeros=%s\n' "$vrc" "${bytes:-none}" \
+		"$zeros"
+	tail -n 5 "$FWRITE_DIR/verify.err" 2>/dev/null
+	return 0
+}
+
+# fwrite_stop ends a writer still running and removes $FWRITE_DIR:
+# `fwrite=stopped|absent`. A write queued in the kernel can keep fio in D
+# state until the device answers (E2E7); the kill is sent all the same.
+fwrite_stop() {
+	local pid
+	if [ -d "$FWRITE_DIR" ]; then
+		pid=$(cat "$FWRITE_DIR/pid" 2>/dev/null) || pid=""
+		case "$pid" in
+		'' | *[!0-9]*) ;;
+		*) kill -KILL "$pid" 2>/dev/null ;;
+		esac
+	fi
+	pkill -9 -f "[f]write_run $FWRITE_DIR " >/dev/null 2>&1
+	pkill -9 -f "[f]io --name=fence " >/dev/null 2>&1
+	if [ -d "$FWRITE_DIR" ]; then
+		rm -rf "$FWRITE_DIR"
+		echo "fwrite=stopped"
+	else
+		echo "fwrite=absent"
+	fi
+	return 0
+}
+
 # kmsg_mark writes <tag> into the kernel log and answers `kmsg=marked` only if
 # dmesg then shows it: the witness below counts from the LAST copy of the tag,
 # so a log it cannot read must not pass for a clean one.
@@ -5443,6 +5588,7 @@ connect() { # <traddr> <trsvcid> <subnqn> <hostnqn> <hostid> [extra…]
 host_cleanup() { # [cdc traddr]
 	local stas
 	wloop_stop >/dev/null
+	fwrite_stop >/dev/null
 	stas=$(stas_restore)
 	wipe "${1:-}" >/dev/null
 	unmask >/dev/null
@@ -6373,6 +6519,9 @@ HOST_TOOLS="$HOST_TOOLS du df tail"
 # those steps run, as preflight_stas asks host0 for the cutoff case's own
 # tools.
 HOST_KMSG_TOOLS="dmesg"
+# The cutoff case's fence writer on host1 (stage 10): fio writes and verifies,
+# cmp reads the range after the first failed write.
+HOST_FENCE_TOOLS="fio cmp nohup pkill"
 # cp runs four unprivileged daemons and dnvctl. `ss` is what the helper's
 # `listening` predicate uses; pkill/pgrep are stop_all's fallback sweep.
 #
@@ -6874,6 +7023,17 @@ preflight_host() { # <h>
 	# this suite: a host without it fails here, naming the package.
 	if [ "$h" = 0 ] && run_has_case cutoff; then
 		preflight_stas "$h"
+	fi
+
+	# The cutoff case's fence writer (stage 10) runs fio on host1 and reads
+	# its range back with cmp. Never installed by this suite: a host without
+	# them fails here, naming them.
+	if [ "$h" = 1 ] && run_has_case cutoff; then
+		missing=$(ssh_host "$h" "$(tools_cmd $HOST_FENCE_TOOLS)") ||
+			die "$label: listing the fence writer's tools failed"
+		[ -z "$missing" ] ||
+			die "$label: missing tool(s) for the cutoff case's fence writer:" \
+				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
 	# The copy and react cases' repair steps read host0's kernel log for
@@ -21879,6 +22039,37 @@ CUT_KMSG_TAG=""
 # host0's two stas files as stage 02 found them (stas_conf_sum).
 CUT_STAS_SUM=""
 
+# --- the fence writer (stage 10) ---------------------------------------------
+#
+# f0 is the thin device the fence writer writes through host1, a bare jq
+# identifier as the others are; its namespace is ns idx 3 of $SS0 with
+# $FENCE_UUID, a fixed v4 uuid no other case's namespace carries.
+TD_FENCE=f0
+FENCE_TD_ID=""
+FENCE_NS3_ID=""
+FENCE_UUID=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c04
+
+# The writer's range and rate: FENCE_RANGE_MIB MiB written in order, 4 KiB at
+# a time, FENCE_IOPS writes a second. The range outlasts the cut by a wide
+# margin (cut_fence_writer asserts it against the failover's bound), so the
+# fence falls while fio still writes, and the writes it finishes before the
+# fence take little of the pool.
+FENCE_RANGE_MIB=16
+FENCE_IOPS=25
+
+# Writes fio must finish before the stop: none would leave the verify with
+# nothing to read, and the case could not tell a fence from a dead writer.
+FENCE_WARMUP_SECS=5
+
+# The old primary's id, cn and transport in stage 10, and the new one's.
+FENCE_OLD_ID=""
+FENCE_OLD_CN=""
+FENCE_OLD_TRADDR=""
+FENCE_OLD_TRSVCID=""
+FENCE_NEW_ID=""
+FENCE_NEW_TRADDR=""
+FENCE_NEW_TRSVCID=""
+
 # The cluster's cntlr_interval, read at stage 00.
 CUT_CI=0
 
@@ -22832,6 +23023,230 @@ cut_drop_target() {
 	check_sha0 "after the cutoff case deleted its own namespace and thin device"
 }
 
+# --- step 10: a live writer through the primary while the fence falls ------
+#
+# The cut of stage 04 is taken again, with a writer on the old primary's path
+# when the sides fence it (architecture.md, Failover; [D16]). host1, which
+# runs no nvme-stas and so keeps its one path, is connected to the primary
+# alone with a plain connect, and fio writes a new thin device through it in
+# order, one write in flight, each durable before it returns (fwrite_start).
+# The primary's cn agent is stopped, so its kernel objects go on serving
+# host1 until the sides fence its legs, and the worker fails over. md fails a
+# write only when every member failed it, so a write host1 saw fail landed on
+# no leg; with one write in flight the first failed write is the only one in
+# doubt, and the design says it did not land. So once fio has stopped on a
+# write error, having issued exactly the writes before it and that one, host1
+# moves to the new primary, fio verifies every block before the failed
+# write's offset, and the range reads zeros from that offset on. A writer
+# that never sees an error fails the stage: it cannot pass by missing the
+# fence.
+cut_fence_writer() {
+	stage 10 "a live writer on host1 through the primary while the fence falls"
+	local size out rc off issued line bound range_secs ids
+
+	sp_refresh
+	sp_read_roles
+	CNTLR_FIELD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to be settled before the second cut" \
+		cntlr_field_is "$PRIMARY_CNTLR_ID" settling false
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records before the second cut"
+	FENCE_OLD_ID=$PRIMARY_CNTLR_ID
+	FENCE_OLD_CN=$PRIMARY_CN
+	FENCE_OLD_TRADDR=$PRIMARY_TRADDR
+	FENCE_OLD_TRSVCID=$PRIMARY_TRSVCID
+	FENCE_NEW_ID=$STANDBY_CNTLR_ID
+	FENCE_NEW_TRADDR=$STANDBY_TRADDR
+	FENCE_NEW_TRSVCID=$STANDBY_TRSVCID
+	bound=$((THR_PRIMARY + 3 * CUT_CI + CUT_SLACK))
+	range_secs=$((FENCE_RANGE_MIB * 256 / FENCE_IOPS))
+	assert_ge "$range_secs" \
+		"$((2 * (FENCE_WARMUP_SECS + bound + DEMOTION_HOLD_TIMEOUT + WAIT_SHORT)))" \
+		"the writer's range lasts twice the warm-up, the failover's bound, the demotion hold and one side converge"
+
+	size=$(((FENCE_RANGE_MIB * 1048576 + TD_UNIT - 1) / TD_UNIT * TD_UNIT))
+	ctl_ok td create --name "$TD_FENCE" --size "$size"
+	FENCE_TD_ID=$(jq_of "$CTL_OUT" '.td_id')
+	case "$FENCE_TD_ID" in
+	'' | *[!0-9]* | 0) die "td create returned td_id '$FENCE_TD_ID'" ;;
+	esac
+	wait_until "$WAIT_PROVISION" "$TD_FENCE to report created" \
+		td_created "$TD_FENCE"
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $FENCE_OLD_ID to build a raid0 for both thin devices" \
+		cntlr_raid0_ready "$FENCE_OLD_ID" 2
+	ctl_ok ns create --nqn "$SS0" --idx 3 --td "$TD_FENCE" --uuid "$FENCE_UUID"
+	FENCE_NS3_ID=$(jq_of "$CTL_OUT" '.ns_id')
+	case "$FENCE_NS3_ID" in
+	'' | *[!0-9]* | 0) die "ns create returned ns_id '$FENCE_NS3_ID'" ;;
+	esac
+	wait_ns_exported_all "$SS0" "$SS0_ID" "$FENCE_NS3_ID"
+
+	# host1 holds the primary's path alone: the old primary's is the path
+	# the fence must fail, and with no other path nothing can carry a write
+	# around it.
+	host_connect 1 "$FENCE_OLD_TRADDR" "$FENCE_OLD_TRSVCID" "$SS0"
+	wait_until "$WAIT_HOST" \
+		"host1's path to the primary $FENCE_OLD_TRADDR to be live" \
+		host_path_live 1 "$SS0" "$FENCE_OLD_TRADDR"
+	host_wait_ana 1 "$SS0" "$FENCE_OLD_TRADDR" "$FENCE_UUID" optimized
+	wait_dev 1 "$FENCE_UUID"
+
+	out=$(helper_host 1 fwrite_start "$FENCE_UUID" \
+		"$((FENCE_RANGE_MIB * 1048576))" "$FENCE_IOPS") ||
+		die "host1: starting the fence writer failed (its message is above)"
+	printf '%s\n' "$out" >&2
+	sleep "$FENCE_WARMUP_SECS"
+	out=$(helper_host 1 fwrite_stat) || die "host1: the fwrite_stat verb failed"
+	line=$(printf '%s\n' "$out" | head -n 1)
+	case "$line" in
+	"running=yes rc=none failed_offset=none issued=none") ;;
+	*) die "host1: the fence writer before the stop reads '$line'; it must" \
+		"be running with no error: $out" ;;
+	esac
+
+	CUT_FO_BEFORE=$(worker_failover_cnt)
+	out=$(cn_sig "$FENCE_OLD_CN" STOP) ||
+		die "cn$FENCE_OLD_CN: the sig_pidfile verb failed"
+	assert_eq "$out" "state=T" \
+		"cn$FENCE_OLD_CN's agent after SIGSTOP (/proc shows it stopped)"
+	CUT_T_STOP=$SECONDS
+	REACT_ROLE_LAST=""
+	wait_until "$WAIT_REACT" \
+		"AR5 to move the primary role off the stopped cntlr $FENCE_OLD_ID" \
+		react_primary_moved "$FENCE_OLD_ID"
+	CUT_T_FO=$SECONDS
+	SP_JSON=$CTL_OUT
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$FENCE_NEW_ID" \
+		"AR5 elected the standby, the only candidate"
+	assert_le "$((CUT_T_FO - CUT_T_STOP))" "$bound" \
+		"seconds from the second stop to the failover seen"
+	wait_until "$WAIT_SHORT" "the worker to log the failover it applied" \
+		cut_failover_logged
+	assert_eq "$(worker_failover_cnt)" "$((CUT_FO_BEFORE + 1))" \
+		"the worker applied exactly one failover for the second cut"
+	ids=$(worker_last_failover)
+	assert_eq "$ids" "$FENCE_OLD_ID $FENCE_NEW_ID" \
+		"the worker's last failover record's old_cntlr_id and new_cntlr_id"
+
+	# The fence fails host1's next write: the demotion hold runs to its timer
+	# (the stopped agent never reports), and the sides then fence the old
+	# primary before they open the new one's path (dnagent.md DN10).
+	wait_until "$((DEMOTION_HOLD_TIMEOUT + WAIT_SHORT + CUT_SLACK))" \
+		"host1's fence writer to stop on a write error once the sides fence the stopped primary" \
+		fence_writer_stopped
+	out=$(helper_host 1 fwrite_stat) || die "host1: the fwrite_stat verb failed"
+	printf '%s\n' "$out" >&2
+	line=$(printf '%s\n' "$out" | head -n 1)
+	rc=$(printf '%s\n' "$line" | sed -n 's/.* rc=\([^ ]*\).*/\1/p')
+	off=$(printf '%s\n' "$line" | sed -n 's/.*failed_offset=\([^ ]*\).*/\1/p')
+	issued=$(printf '%s\n' "$line" | sed -n 's/.*issued=\([^ ]*\).*/\1/p')
+	case "$rc" in
+	0) die "host1's fence writer finished its whole range before the fence:" \
+		"the fence fell on no write (raise FENCE_RANGE_MIB)" ;;
+	'' | none | *[!0-9]*) die "host1's fence writer stopped with rc '$rc'" ;;
+	esac
+	case "$off" in
+	'' | none | *[!0-9]*)
+		die "host1's fence writer stopped (rc $rc) with no failed write's" \
+			"offset in its output: $out"
+		;;
+	esac
+	assert_ge "$off" 4096 \
+		"the first failed write's offset (a write finished before the fence)"
+	assert_eq "$issued" "$((off / 4096 + 1))" \
+		"the writes fio issued: every block before the failed write's, and that one (one write in flight, so the failed write is the only one in doubt)"
+	log "  host1's writer saw its first failed write at offset $off, the" \
+		"$((off / 4096 + 1))th write, $((SECONDS - CUT_T_FO))s after the" \
+		"failover was seen"
+
+	# host1 leaves the old primary before its agent runs again.
+	helper_host 1 disconnect_prefix "$SS0" >/dev/null ||
+		die "host1: the disconnect_prefix verb could not be run for $SS0"
+	wait_until "$WAIT_HOST" "host1 to drop its path to $FENCE_OLD_TRADDR" \
+		host_path_gone 1 "$SS0" "$FENCE_OLD_TRADDR"
+	out=$(cn_sig "$FENCE_OLD_CN" CONT) ||
+		die "cn$FENCE_OLD_CN: the sig_pidfile verb failed"
+	case "$out" in
+	state=T | state=gone | state=)
+		die "cn$FENCE_OLD_CN's agent after SIGCONT reads '$out'; it must run again"
+		;;
+	state=*) ;;
+	*) die "cn$FENCE_OLD_CN: sig_pidfile answered '$out'" ;;
+	esac
+
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	stack_wait_reset
+	wait_until "$WAIT_BUILD" \
+		"the new primary cntlr $FENCE_NEW_ID to build its stack and settle" \
+		cut_new_primary_ready "$FENCE_NEW_ID"
+	wait_until "$WAIT_PROVISION" \
+		"the new primary to build the raid0 of $TD0 and $TD_FENCE" \
+		cntlr_raid0_ready "$FENCE_NEW_ID" 2
+	stack_wait_reset
+	wait_until "$WAIT_BUILD" \
+		"the old primary cntlr $FENCE_OLD_ID to tear its stack down and hold the standby shape" \
+		standby_shape_ready
+	assert_eq "$STANDBY_WAIT_ID" "$FENCE_OLD_ID" \
+		"the standby that shape belongs to is the old primary"
+	CNTLR_FIELD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the old primary's err_epoch to clear" \
+		cntlr_field_is "$FENCE_OLD_ID" err_epoch 0
+
+	host_connect 1 "$FENCE_NEW_TRADDR" "$FENCE_NEW_TRSVCID" "$SS0"
+	wait_until "$WAIT_HOST" \
+		"host1's path to the new primary $FENCE_NEW_TRADDR to be live" \
+		host_path_live 1 "$SS0" "$FENCE_NEW_TRADDR"
+	host_wait_ana 1 "$SS0" "$FENCE_NEW_TRADDR" "$FENCE_UUID" optimized
+	wait_dev 1 "$FENCE_UUID"
+	out=$(helper_host 1 fwrite_verify "$FENCE_UUID" \
+		"$((FENCE_RANGE_MIB * 1048576))" "$off") ||
+		die "host1: the fwrite_verify verb failed (its message is above)"
+	printf '%s\n' "$out" >&2
+	line=$(printf '%s\n' "$out" | head -n 1)
+	assert_eq "$line" "verify_rc=0 verified_bytes=$off zeros=ok" \
+		"host1 through the new primary: fio verified every write it saw succeed, the bytes before the first failed write, and the range reads zeros from that write on"
+
+	helper_host 1 disconnect_prefix "$SS0" >/dev/null ||
+		die "host1: the disconnect_prefix verb could not be run for $SS0"
+	wait_until "$WAIT_HOST" "host1 to drop its path to $FENCE_NEW_TRADDR" \
+		host_path_gone 1 "$SS0" "$FENCE_NEW_TRADDR"
+	out=$(helper_host 1 fwrite_stop) || die "host1: the fwrite_stop verb failed"
+	assert_eq "$out" "fwrite=stopped" "host1's fence writer cleared"
+
+	# host0 kept its two plain paths through both cuts; the new primary's is
+	# the optimized one now.
+	host_wait_ana 0 "$SS0" "$FENCE_NEW_TRADDR" "$UUID1" optimized
+	host_wait_ana 0 "$SS0" "$FENCE_OLD_TRADDR" "$UUID1" inaccessible
+	check_sha0 "after the second cut, through the new primary"
+
+	ctl_ok ns delete --nqn "$SS0" --idx 3
+	assert_field "$CTL_OUT" '.ns_id' "$FENCE_NS3_ID" "DeleteNamespaceReply.ns_id"
+	wait_dev_gone 0 "$FENCE_UUID"
+	ctl_ok td delete --name "$TD_FENCE"
+	assert_field "$CTL_OUT" '.td_id' "$FENCE_TD_ID" "DeleteThinDeviceReply.td_id"
+	ctl_ok td list
+	assert_field "$CTL_OUT" '.name_to_td | length' 1 \
+		"only $TD0 is left for the teardown"
+	assert_eq "$(worker_failover_cnt)" "$((CUT_FO_BEFORE + 1))" \
+		"one failover for the second cut, and no other"
+}
+
+# fence_writer_stopped is true once host1's fence writer no longer runs.
+fence_writer_stopped() {
+	local out
+	out=$(helper_host 1 fwrite_stat 2>/dev/null) || return 1
+	case "$(printf '%s\n' "$out" | head -n 1)" in
+	running=no*) return 0 ;;
+	esac
+	return 1
+}
+
 case_cutoff() {
 	CASE=cutoff
 	cut_snapshot
@@ -22844,6 +23259,7 @@ case_cutoff() {
 	cut_etcd_outage
 	cut_stas_down
 	cut_drop_target
+	cut_fence_writer
 	case_finish
 }
 

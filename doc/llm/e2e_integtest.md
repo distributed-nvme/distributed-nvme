@@ -348,12 +348,16 @@ after. A host discovers through the cdc wherever the subsystem has a
 `CdcEntry`, expecting one record per cntlr the listing rule lists
 (`architecture.md` [D18]; `cdc.md` DS3). A step that needs every enabled cntlr
 in the log first waits until each is listed, as a standby whose health epoch
-is set is out of the records until its next clean round. Two connects are
-direct by necessity: to the transfer, which has no `CdcEntry`; and to the copy
-case's second pool, the fallback's source and the source of the failover in
-the middle of a copy, where discovery would also connect host1 to the case's
-own subsystem, which no other step gives host1 a path to, and for the
-fallback would bring in a namespace whose uuid host1 already holds. After
+is set is out of the records until its next clean round. Three connects
+are direct by necessity: to the transfer, which has no `CdcEntry`; to the
+copy case's second pool, the fallback's source and the source of the
+failover in the middle of a copy, where discovery would also connect host1
+to the case's own subsystem, which no other step gives host1 a path to,
+and for the fallback would bring in a namespace whose uuid host1 already
+holds; and the cutoff case's fence writer on host1, first to the old
+primary's transport alone and then to the new primary's, where discovery
+would connect both cntlrs and the writer must hold the old primary's path
+alone. After
 react's failover host0 reconnects through the cdc, whose records leave the
 dead cntlr out: the failover's own transaction rewrote them, and nothing
 clears the dead cntlr's health epoch. Every connect the suite makes sits
@@ -802,9 +806,37 @@ on a record or a reading, never on a time.
 Then the loop stops and its range reads back as its pattern, nvme-stas stops
 and host0's own configuration of it is back byte for byte, host0 reconnects
 through the cdc, and the case deletes its scratch namespace and thin device.
-So the ending finds only setup's subsystem, namespace and thin device, and
-only the suite's own paths on host0, while the primary role stays on the cntlr
-the failover elected.
+
+Last, the cut is taken again with a writer on the path the sides fence
+(`architecture.md`, Failover; `dnagent.md` DN10). A new thin device gets a
+namespace, and host1, which runs no nvme-stas and so keeps its one path, is
+connected to the primary alone with a plain connect. fio writes the device
+through it in order, one block at a time, one write in flight, with
+direct and synchronous IO so each write returns only once it is durable,
+at a fixed
+rate, with fio's own verify and its saved verify state; it must be running
+with no error before the stop. The primary's cn agent is stopped, the
+primary role must move to the standby within the same bound as the first
+cut, with one failover more, and fio must then stop on a write error within
+the demotion hold, one side converge and the driver's polling slack: the
+sides fence the old primary once the hold runs to its timer, and its next
+write fails. A writer that never sees an error fails the case, as does one
+that finished its range first. host1 then leaves the old primary, its agent
+runs again and converges to a standby, the new primary builds its stack, and
+host1 connects to it. fio must have issued exactly the writes before the
+first failed one and that one; it then verifies, with its saved state, every
+block before the failed write's offset — the state reaches one block past
+the last write fio completed, so the verify is bounded at that offset — and
+the range reads zeros from that offset on. md fails a write only
+when every member failed it, so a write the host saw fail landed on no leg;
+with one write in flight the first failed write is the only one in doubt,
+and these checks show it did not land and that every write the host saw
+succeed did. host1 lets go, host0's two plain paths, kept through both cuts,
+serve setup's namespace through the new primary, and the case deletes the
+writer's namespace and thin device. So the ending finds only setup's
+subsystem, namespace and thin device, and only the suite's own paths on
+host0, while the primary role stays on the cntlr the second failover
+elected.
 
 **The ending every case shares** proves that a pool deletes back to nothing:
 only setup's subsystem, namespace and thin device may remain before it; a
@@ -865,7 +897,10 @@ the tool of the kernel-log witness their repairs read; that host0, when the
 cutoff case is in the run, has the tools of the case's write loop and
 kernel-log witness and nvme-stas 2.x installed, both its units known to
 systemd, as a 1.x one would fail later and silently, never connecting,
-nvme-stas being a package the suite never installs; and that the control-plane
+nvme-stas being a package the suite never installs; that host1, when the
+cutoff case is in the run, has the tools of its fence writer, fio, cmp,
+nohup and pkill, which the suite never installs either; and that the
+control-plane
 guest has its tools, its ports free and the free-space floor the space guard
 holds it to, and needs no sudo: the closing trim is the one root command tried
 there and may be refused. The tool check covers only the sweeps after it: the
