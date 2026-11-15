@@ -650,8 +650,30 @@ func (s *CnAgentServer) ensureSubsystem(
 		}
 	}
 	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn, s.port.QidMax)
-	info.SsIdToSubsystem[sp.ssId] = st.tracker.FromErr(ssKey, sp.nqn, "", err)
+	info.SsIdToSubsystem[sp.ssId] = s.linkRow(
+		ctx, ssKey, sp.nqn, s.subsysConf(plan, sp), st, err)
 	return ok && err == nil
+}
+
+// linkRow is a subsystem's row after its port link step: OK when the step
+// held, the read's "the port is not there" when the node's port itself is
+// gone, which a SyncupCntlr cannot make and the cntlr's verdict leaves out
+// (cntlrRowVerdict), and the step's error otherwise.
+func (s *CnAgentServer) linkRow(
+	ctx context.Context,
+	key string,
+	nqn string,
+	conf agent.SubsysConf,
+	st *cntlrState,
+	err error,
+) *pb.ResInfo {
+	if err != nil {
+		if _, details := s.probeExport(ctx, conf); details ==
+			detailsPortMissing {
+			return st.tracker.Err(key, nqn, detailsPortMissing)
+		}
+	}
+	return st.tracker.FromErr(key, nqn, "", err)
 }
 
 // reportNamespaces writes a converge's namespace rows after its ANA loop
@@ -682,10 +704,10 @@ func (s *CnAgentServer) reportNamespaces(
 				st.tracker, np.deferred, key, name, "", err)
 			continue
 		}
-		status, details := s.probeNamespaceObject(
+		status, details, reason := s.probeNamespaceObject(
 			ctx, s.nsConf(np, s.nsRowAnaGrpId(ctx, nil, np)))
-		info.NsIdToNamespace[np.nsId] = deferredSet(
-			st.tracker, np.deferred, key, name, status, details)
+		info.NsIdToNamespace[np.nsId] = deferredSetReason(
+			st.tracker, np.deferred, key, name, status, details, reason)
 	}
 }
 
@@ -694,20 +716,24 @@ func nsResName(nqn string, nsIdx int) string {
 }
 
 // setAna performs one ANA transition, probe-first: a namespace that is absent
-// or already in the target group is left alone (SH16, [D4]).
+// or already in the target group is left alone (SH16, [D4]). It reads the
+// namespace's group alone, strictly (Nvmet.NsAnaGrpId).
 func (s *CnAgentServer) setAna(
 	ctx context.Context,
 	nqn string,
 	nsIdx int,
 	grpId int,
 ) error {
-	state, err := s.nvmet.ProbeNamespace(ctx, nqn, nsIdx)
-	if err != nil {
+	cur, present, err := s.nvmet.NsAnaGrpId(ctx, nqn, nsIdx)
+	switch {
+	case err != nil && grpId != common.AnaGrpIdInaccessible:
 		return err
-	}
-	if !state.Exists || state.AnaGrpId == grpId {
+	case err == nil && (!present || cur == grpId):
 		return nil
 	}
+	// A read that did not answer leaves a move to inaccessible tried all the
+	// same: that is the safe direction, and skipping it would leave a host
+	// sending IO to a path the pass is about to take away.
 	return s.nvmet.SetNsAnaGrpId(ctx, nqn, nsIdx, grpId)
 }
 
@@ -780,43 +806,66 @@ func (s *CnAgentServer) probeExport(
 	if !ok {
 		return pb.ResStatus_RES_STATUS_ERROR, details
 	}
-	linked, err := s.nvmet.PortLinked(ctx, s.port.PortId, conf.Nqn)
-	if err != nil {
+	linked, portThere, err := s.nvmet.PortLinkedState(
+		ctx, s.port.PortId, conf.Nqn)
+	switch {
+	case err != nil:
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
-	}
-	if !linked {
+	case !portThere:
+		// The CN's verdict names the port (dnagent.md SH31), whose SyncupCn
+		// makes it; a SyncupCntlr could only fail its link until then, so
+		// the cntlr's verdict leaves this row out (cntlrRowVerdict).
+		return pb.ResStatus_RES_STATUS_ERROR, detailsPortMissing
+	case !linked:
 		return pb.ResStatus_RES_STATUS_ERROR, "not linked to the port"
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }
 
+// detailsPortMissing is a subsystem's row while the node's nvmet port itself
+// is not there (probeExport).
+const detailsPortMissing = "the port is not there"
+
 // probeNamespaceObject checks one nvmet namespace against its desired
-// identity, backing device and ANA group.
+// identity, backing device and ANA group, and returns its row's status,
+// details and reason. A namespace whose ANA group alone differs while the
+// wanted group is not optimized (agent.AnaServesAsWanted) reads
+// RES_STATUS_OK with RES_REASON_DIFFERS and the difference in its details,
+// which the cntlr's verdict names (CN30); one wanted optimized and not in
+// that group leaves the primary without its optimized path and reads
+// RES_STATUS_ERROR.
 func (s *CnAgentServer) probeNamespaceObject(
 	ctx context.Context,
 	conf agent.NsConf,
-) (pb.ResStatus, string) {
+) (pb.ResStatus, string, pb.ResReason) {
+	none := pb.ResReason_RES_REASON_NONE
 	state, err := s.nvmet.ProbeNamespace(ctx, conf.Nqn, conf.Nsid)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
 	switch {
 	case !state.Exists:
-		return pb.ResStatus_RES_STATUS_MISSING, ""
+		return pb.ResStatus_RES_STATUS_MISSING, "", none
 	case !state.Enabled:
-		return pb.ResStatus_RES_STATUS_ERROR, "namespace not enabled"
+		return pb.ResStatus_RES_STATUS_ERROR, "namespace not enabled", none
 	case state.DevicePath != conf.DevicePath:
-		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
-			"device_path is %q, want %q", state.DevicePath, conf.DevicePath)
+		details := fmt.Sprintf("device_path is %q, want %q",
+			state.DevicePath, conf.DevicePath)
+		return pb.ResStatus_RES_STATUS_ERROR, details, none
 	case conf.Uuid != "" && !equalFoldHex(state.Uuid, conf.Uuid):
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
-			"device_uuid is %q, want %q", state.Uuid, conf.Uuid)
+			"device_uuid is %q, want %q", state.Uuid, conf.Uuid), none
 	case conf.Nguid != "" && !equalFoldHex(state.Nguid, conf.Nguid):
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
-			"device_nguid is %q, want %q", state.Nguid, conf.Nguid)
+			"device_nguid is %q, want %q", state.Nguid, conf.Nguid), none
 	case state.AnaGrpId != conf.AnaGrpId:
-		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
-			"ana_grpid is %d, want %d", state.AnaGrpId, conf.AnaGrpId)
+		details := fmt.Sprintf("ana_grpid is %d, want %d",
+			state.AnaGrpId, conf.AnaGrpId)
+		if !agent.AnaServesAsWanted(state.AnaGrpId, conf.AnaGrpId) {
+			return pb.ResStatus_RES_STATUS_ERROR, details, none
+		}
+		return pb.ResStatus_RES_STATUS_OK, details,
+			pb.ResReason_RES_REASON_DIFFERS
 	}
-	return pb.ResStatus_RES_STATUS_OK, ""
+	return pb.ResStatus_RES_STATUS_OK, "", none
 }

@@ -201,15 +201,16 @@ var (
 )
 
 // PortRedrive is the shared rule of SH31 for the port: the BaseRedrive a probe
-// state calls for, or nil. A transport attribute that differs is left to the
-// row, since nvmet refuses to rewrite one while a subsystem is linked, and a
-// read that did not answer proves nothing.
+// state calls for, or nil. A transport attribute that differs while a
+// subsystem is linked to the port is left to the row, since nvmet refuses to
+// rewrite one then; with none linked a node-level Syncup* rewrites it. A read
+// that did not answer proves nothing.
 func PortRedrive(portName string, state PortState, details string) *BaseRedrive {
 	switch state {
 	case PortAbsent:
 		return &BaseRedrive{"nvmet port " + portName,
 			fmt.Errorf("%w: %s", ErrBaseStateAbsent, details)}
-	case PortAnaStateMismatch:
+	case PortAnaStateMismatch, PortAttrMismatchUnlinked:
 		return &BaseRedrive{"nvmet port " + portName,
 			fmt.Errorf("%w: %s", ErrAnaStateDiffers, details)}
 	}
@@ -227,11 +228,14 @@ const (
 	// fixed ANA groups, is not there: what EnsurePort creates.
 	PortAbsent
 	// PortAttrMismatch is a port that is there with a transport attribute
-	// other than the desired one; the probe does not read its groups. nvmet
-	// refuses every addr_* write while a subsystem is linked to the port
-	// (EACCES), and EnsurePort stops at the write that fails, before the
-	// groups.
+	// other than the desired one while a subsystem is linked to it; the
+	// probe does not read its groups. nvmet refuses every addr_* write while
+	// a subsystem is linked to the port (EACCES), and EnsurePort stops at the
+	// write that fails, before the groups.
 	PortAttrMismatch
+	// PortAttrMismatchUnlinked is PortAttrMismatch on a port no subsystem is
+	// linked to, whose attributes EnsurePort can rewrite.
+	PortAttrMismatchUnlinked
 	// PortAnaStateMismatch is a port whose transport attributes all match
 	// and one of whose fixed ANA groups is not in its fixed state. nvmet
 	// takes an ana_state write whatever is linked to the port, and
@@ -288,8 +292,17 @@ func (n *Nvmet) probePort(
 		// one that reads absent went with its port between the time read
 		// and the attribute read, and the next probe finds the port missing.
 		if !ok || cur != strings.TrimSpace(attr[1]) {
-			return PortAttrMismatch, fmt.Sprintf(
-				"%s is %q, want %q", attr[0], cur, attr[1]), nil
+			details := fmt.Sprintf(
+				"%s is %q, want %q", attr[0], cur, attr[1])
+			linked, _, err := n.listDir(ctx, portPath+"/subsystems")
+			if err != nil {
+				return 0, "", err
+			}
+			if len(linked) == 0 {
+				return PortAttrMismatchUnlinked,
+					details + ", no subsystem linked", nil
+			}
+			return PortAttrMismatch, details, nil
 		}
 	}
 	for _, grpId := range fixedAnaGrpIds {
@@ -562,6 +575,13 @@ type NsState struct {
 	AnaGrpId   int
 }
 
+// ProbeNamespace reads one namespace's state. Every attribute is read
+// strictly (readAttrStrict): only a file that is not there reads as absent,
+// and a read that did not answer is an error, never an empty value. Read
+// loosely, one unanswered read of device_path beside an enable that answers
+// would make EnsureNamespace disable a live export's namespace, and one of
+// enable or ana_grpid would make a caller move a serving namespace's ANA
+// group (dnagent.md SH16, SH31).
 func (n *Nvmet) ProbeNamespace(
 	ctx context.Context,
 	nqn string,
@@ -584,23 +604,35 @@ func (n *Nvmet) ProbeNamespace(
 		{"device_uuid", &state.Uuid},
 		{"device_nguid", &state.Nguid},
 	} {
-		value, _, err := n.readAttr(ctx, nsPath+"/"+field.name)
+		value, _, err := n.readAttrStrict(ctx, nsPath+"/"+field.name)
 		if err != nil {
 			return nil, err
 		}
 		*field.dst = value
 	}
-	enable, _, err := n.readAttr(ctx, nsPath+"/enable")
+	enable, _, err := n.readAttrStrict(ctx, nsPath+"/enable")
 	if err != nil {
 		return nil, err
 	}
 	state.Enabled = enable == "1"
-	grpId, _, err := n.readAttr(ctx, nsPath+"/ana_grpid")
+	grpId, _, err := n.readAttrStrict(ctx, nsPath+"/ana_grpid")
 	if err != nil {
 		return nil, err
 	}
 	state.AnaGrpId, _ = strconv.Atoi(grpId)
 	return state, nil
+}
+
+// AnaServesAsWanted reports whether a namespace in the ANA group cur, wanted
+// in the group want, reads as serving though its group differs: anything but
+// a namespace wanted optimized that is not, which leaves the primary without
+// its optimized path. A namespace wanted non-optimized or inaccessible in
+// another group — still optimized after an ANA move that failed, say — is a
+// difference a converge rewrites, not a fault. Both agents read a namespace
+// whose group alone differs by it (dnagent.md SH31): RES_STATUS_OK with
+// RES_REASON_DIFFERS when it holds, and RES_STATUS_ERROR when it does not.
+func AnaServesAsWanted(cur, want int) bool {
+	return want != common.AnaGrpIdOptimized || cur == want
 }
 
 // SameNsId compares an nvmet namespace identity attribute as the kernel
@@ -893,21 +925,6 @@ func (n *Nvmet) PortLinkedState(
 		return false, false, err
 	}
 	return contains(links, nqn), ok, nil
-}
-
-// NsEnabledStrict reads a namespace's enable under the strict rule
-// (readAttrStrict): a read that did not answer is an error, never "not
-// enabled", as ProbeNamespace's loose read takes it.
-func (n *Nvmet) NsEnabledStrict(
-	ctx context.Context,
-	nqn string,
-	nsid int,
-) (bool, error) {
-	enable, _, err := n.readAttrStrict(ctx, n.NsPath(nqn, nsid)+"/enable")
-	if err != nil {
-		return false, err
-	}
-	return enable == "1", nil
 }
 
 // EnsurePortLink links a subsystem to the port, probe-first. Before it

@@ -39,16 +39,18 @@ const (
 // (suppressedRow; dnv-worker.md HL2); detailsParked is the expected state of
 // an effectively suspended ns-dev (CN28): **live**, its table a dm-linear
 // over the td's dm-error (architecture.md, Namespace suspend semantics).
-// detailsSuspended is what the generic single-device probes report for a device
-// they find dm-suspended on the table they want. A converge and a probe of one
-// cntlr take the same lock, so CN14's quiesce bracket is never observable from
-// outside; what makes the state reachable is an interrupted pass, an agent
-// killed inside that bracket, or a dmsetup command on the device that failed:
-// a resume, or a suspend killed after it took effect. A reload whose load
-// fails leaves its device suspended too (Dm.Reload fails closed), but on its
-// old table, which these probes report as a table mismatch before they read
-// the suspend bit — unless the reload was only clearing a read-only flag. No
-// ns-dev is ever expected in it. None of the three details is a fault.
+// detailsSuspended is what the probes of a dm device report, RES_STATUS_ERROR,
+// for one they find dm-suspended on the table they want: it serves no IO, and
+// the cntlr's verdict names it, so the worker re-sends the SyncupCntlr whose
+// converge resumes it (CN30). A converge and a probe of one cntlr take the
+// same lock, so CN14's quiesce bracket is never observable from outside; what
+// makes the state reachable is an interrupted pass, an agent killed inside
+// that bracket, or a dmsetup command on the device that failed: a resume, or
+// a suspend killed after it took effect. A reload whose load fails leaves its
+// device suspended too (Dm.Reload fails closed), but on its old table, which
+// these probes report as a table mismatch before they read the suspend bit —
+// unless the reload was only clearing a read-only flag. Neither of the other
+// two details is a fault.
 const (
 	detailsSpLevel   = "sp_level"
 	detailsParked    = "parked"
@@ -1082,10 +1084,26 @@ func deferredSet(
 	status pb.ResStatus,
 	details string,
 ) *pb.ResInfo {
+	return deferredSetReason(t, deferred, key, resName, status, details,
+		pb.ResReason_RES_REASON_NONE)
+}
+
+// deferredSetReason is deferredSet for a probe that gives a reason, a
+// namespace whose ANA group alone differs (RES_REASON_DIFFERS): a deferred
+// resource that serves still reports PROVISIONING.
+func deferredSetReason(
+	t *agent.ResTracker,
+	deferred bool,
+	key string,
+	resName string,
+	status pb.ResStatus,
+	details string,
+	reason pb.ResReason,
+) *pb.ResInfo {
 	if deferred && status == pb.ResStatus_RES_STATUS_OK {
 		return t.Provisioning(key, resName, detailsProvisioning)
 	}
-	return t.Set(key, resName, status, details)
+	return t.SetReason(key, resName, status, details, reason)
 }
 
 func (p *cntlrPlan) buildTds() {

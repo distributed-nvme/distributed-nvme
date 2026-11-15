@@ -763,10 +763,10 @@ func cmdWaitHydrated(args []string) {
 			}
 			die("CheckSide failed: %v", err)
 		}
-		if reply.GetAgentReply().GetCode() != 0 {
-			die("agent_reply.code = %d (%s)",
+		if uint(reply.GetAgentReply().GetCode()) != g.expectCode {
+			die("agent_reply.code = %d (%s), want %d",
 				reply.GetAgentReply().GetCode(),
-				reply.GetAgentReply().GetDetails())
+				reply.GetAgentReply().GetDetails(), g.expectCode)
 		}
 		raw = reply.(*pb.CheckSideReply).GetSideInfo().GetMigrDstInfo().
 			GetDmCloneInfo().GetDetails()

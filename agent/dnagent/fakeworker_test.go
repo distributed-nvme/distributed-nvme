@@ -1290,11 +1290,17 @@ func TestFakeWorkerHungConnectAcrossRounds(t *testing.T) {
 		t.Errorf("the pass made %d connects, want the one that hung: the "+
 			"hang spent the budget", n)
 	}
+	// The target in error is named in the reply's code (SH31), so the
+	// worker's next round would send the syncup again too.
 	target := reply.GetSideInfo().GetMigrDstInfo().GetTargetInfo()
-	if code := reply.GetAgentReply().GetCode(); code != 0 ||
-		target.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
-		t.Errorf("syncup reply = code %d, target %v/%q; want code 0 and the "+
-			"target in error", code, target.GetStatus(), target.GetDetails())
+	if code := reply.GetAgentReply().GetCode(); code !=
+		common.ReplyCodeLeftover ||
+		target.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(reply.GetAgentReply().GetDetails(),
+			target.GetResName()+": differs:") {
+		t.Errorf("syncup reply = %v, target %v/%q; want the leftover code "+
+			"naming the target in error", reply.GetAgentReply(),
+			target.GetStatus(), target.GetDetails())
 	}
 
 	// The source answers again; the DN8 retry finishes the destination.

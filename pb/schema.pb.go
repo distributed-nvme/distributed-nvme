@@ -221,6 +221,17 @@ const (
 	// suppresses carry RES_REASON_SP_LEVEL instead. The worker's settle
 	// reads such a row as built (dnv-worker.md HL2).
 	ResReason_RES_REASON_SOURCE_FAULT ResReason = 4
+	// The object is there and serves, and differs from what the desired
+	// state wants in a way a converge rewrites: today a namespace wanted
+	// non-optimized or inaccessible whose ANA group differs, as one still
+	// optimized after a failed move to inaccessible (one wanted optimized
+	// that is not reads RES_STATUS_ERROR instead). Both agents set it on
+	// both channels, on
+	// a RES_STATUS_OK row whose details say what differs, and the object's
+	// read names the row, so the worker re-sends its Syncup* (dnagent.md
+	// SH31). The worker's health reads the status alone, so the row is
+	// healthy.
+	ResReason_RES_REASON_DIFFERS ResReason = 5
 )
 
 // Enum value maps for ResReason.
@@ -231,6 +242,7 @@ var (
 		2: "RES_REASON_AWAITING_CUTOVER",
 		3: "RES_REASON_SP_LEVEL",
 		4: "RES_REASON_SOURCE_FAULT",
+		5: "RES_REASON_DIFFERS",
 	}
 	ResReason_value = map[string]int32{
 		"RES_REASON_NONE":             0,
@@ -238,6 +250,7 @@ var (
 		"RES_REASON_AWAITING_CUTOVER": 2,
 		"RES_REASON_SP_LEVEL":         3,
 		"RES_REASON_SOURCE_FAULT":     4,
+		"RES_REASON_DIFFERS":          5,
 	}
 )
 
@@ -17930,13 +17943,14 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x05*\x94\x01\n" +
+	"\x12RES_STATUS_PENDING\x10\x05*\xac\x01\n" +
 	"\tResReason\x12\x13\n" +
 	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
 	"\x17RES_REASON_THIN_ID_LOST\x10\x01\x12\x1f\n" +
 	"\x1bRES_REASON_AWAITING_CUTOVER\x10\x02\x12\x17\n" +
 	"\x13RES_REASON_SP_LEVEL\x10\x03\x12\x1b\n" +
-	"\x17RES_REASON_SOURCE_FAULT\x10\x04*O\n" +
+	"\x17RES_REASON_SOURCE_FAULT\x10\x04\x12\x16\n" +
+	"\x12RES_REASON_DIFFERS\x10\x05*O\n" +
 	"\bRepStage\x12\x15\n" +
 	"\x11REP_STAGE_CREATED\x10\x00\x12\x15\n" +
 	"\x11REP_STAGE_STARTED\x10\x01\x12\x15\n" +

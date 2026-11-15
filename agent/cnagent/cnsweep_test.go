@@ -728,7 +728,7 @@ func TestDisableCreatesNoParkTarget(t *testing.T) {
 	c5 := errorName(srv, testTd)
 	nsDev := nsDevName(srv, testNs)
 	node.failCmd["dmsetup create "+c5] = "device-mapper: create ioctl failed"
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, leftoverOk: true})
 	if _, ok := node.dms[c5]; ok {
 		t.Fatalf("fixture is wrong: %s exists", c5)
 	}

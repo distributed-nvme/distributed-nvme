@@ -179,7 +179,7 @@ func (s *CnAgentServer) ensureDmMulti(
 		if live, desired := liveConcatSectors(targets),
 			wantConcatSectors(want); live > desired {
 			return false, fmt.Errorf(
-				"refusing to shrink the concat from %d to %d sectors",
+				"%s from %d to %d sectors", detailsConcatNoShrink,
 				live, desired)
 		}
 		return true, s.dm.ReloadMulti(ctx, name, lines)
@@ -293,6 +293,11 @@ func concatMatches(targets []common.DmTarget, want []concatTarget) bool {
 // Probes (CN23/CN29: a probe changes no object of the node)
 // ---------------------------------------------------------------------------
 
+// detailsConcatNoShrink starts the error of a concat that would shrink: no
+// converge cures it, so the cntlr's verdict leaves its row out
+// (cntlrRowVerdict).
+const detailsConcatNoShrink = "refusing to shrink the concat"
+
 // probeDmTarget probes a single-target device over the dm device backingDm,
 // at offsetSectors of it: the backing's number first (dmDevNo), then the
 // device. With no backingDm only the target type and size are compared.
@@ -342,7 +347,7 @@ func (s *CnAgentServer) probeDmArgs(
 			"table is not the desired %s target", targetType)
 	}
 	if dev.Suspended {
-		return pb.ResStatus_RES_STATUS_OK, detailsSuspended
+		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }
@@ -369,11 +374,20 @@ func (s *CnAgentServer) probeDmConcat(
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	if !concatMatches(targets, want) {
+		// A live concat longer than the desired one is the converge's
+		// refusal to shrink it (ensureDmMulti), read with the converge's
+		// text, so the cntlr's verdict leaves it out on both channels.
+		if live, desired := liveConcatSectors(targets),
+			wantConcatSectors(want); live > desired {
+			return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
+				"%s from %d to %d sectors", detailsConcatNoShrink,
+				live, desired)
+		}
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
 			"table does not match the %d group segment(s)", len(want))
 	}
 	if dev.Suspended {
-		return pb.ResStatus_RES_STATUS_OK, detailsSuspended
+		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }

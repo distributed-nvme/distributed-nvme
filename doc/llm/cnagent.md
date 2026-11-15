@@ -733,7 +733,14 @@ build phase — and runs on every converge:
    level's only ANA move. It is the old primary's first step of
    `architecture.md`, Failover, and it precedes the park below for the
    reason given there: the host is told to stop using the path before the
-   path stops working. It is also the one pre-step a converge still runs
+   path stops working. The move reads the namespace's group alone
+   (`Nvmet.NsAnaGrpId`) and is tried even when that read does not answer:
+   inaccessible is the safe direction. A move that fails is only logged,
+   and no later step of the pass tries it again: the namespace serves on in the group it
+   had, its row reads `RES_STATUS_OK` with `RES_REASON_DIFFERS`, and the
+   converge's own verdict names it (CN30), so the worker sends the
+   `SyncupCntlr` again and its pre-step 1 moves it. It is also the one
+   pre-step a converge still runs
    when an unanswered listing has stopped its sweep (CN21): it removes
    nothing, and the build phase that follows parks ns-devs whether or not
    the sweep ran (CN16), so the move has to come first there too.
@@ -3735,7 +3742,10 @@ The rows, each with its `res_name` and what its probe checks:
   "attr_allow_any_host" "0" (one found with it set reports
   `RES_STATUS_ERROR`), cntlid range, serial and model (trimmed,
   `dnagent.md` SH17), allowed hosts exactly as desired, and linked to the
-  port (`probeExport`).
+  port (`probeExport`). While the node's port itself is not there the row
+  reads `RES_STATUS_ERROR` "the port is not there", on a converge too, which
+  reads the subsystem again after a link that failed (`linkRow`); the same
+  holds for a transfer's subsystem.
 * `ns_id_to_namespace`, named by the NQN and the namespace index: the
   nvmet namespace is enabled, with the "device_path", "uuid" and "nguid"
   as desired (the identity compared through `agent.SameNsId` — configfs
@@ -3754,8 +3764,14 @@ The rows, each with its `res_name` and what its probe checks:
   object's own step winning. The
   converge's ANA move goes by what its ns-dev step did instead (CN16), so
   a held ns-dev whose `CnErrorName` number cannot be read goes
-  inaccessible while the row wants the desired group, and the row reads
-  `ERROR` on both channels (CN18). So in
+  inaccessible while the row wants the desired group. A namespace that is
+  there, enabled over the right device with the right identity, and whose
+  "ana_grpid" alone differs while the wanted group is not optimized
+  (`agent.AnaServesAsWanted`) reads `RES_STATUS_OK` with
+  `RES_REASON_DIFFERS` and the difference in its details on both channels,
+  and the cntlr's verdict names it (CN30); one wanted optimized and not in
+  that group leaves the primary without its optimized path and reads
+  `RES_STATUS_ERROR`. So in
   the window of a promotion that came before the sides' ANA flips the
   ns-dev row of a namespace on CN16 rule 6 reads `ERROR` — a clone
   destination's reads `OK` over its park (rule 5) — and the namespace row
@@ -3773,7 +3789,11 @@ The rows, each with its `res_name` and what its probe checks:
   suspended" whatever the plan says; a provisioning-deferred one reports
   `RES_STATUS_PROVISIONING` over its permanent dm-error.
 * `td_id_to_raid0` and `td_id_to_dm_error`, named by the `CnRaid0Name`
-  and the `CnErrorName`: `dmsetup table`.
+  and the `CnErrorName`: `dmsetup table`. Like every other dm device of
+  this map but the ns-dev, which has its own text above, a raid0, a thin
+  volume, a concat or a thin pool found dm-suspended on the table it wants
+  serves no IO and reads `RES_STATUS_ERROR` "suspended", which the cntlr's
+  verdict names (CN30).
 * `td_id_to_thin_info` with its `slice_id_to_dm_thin`, named by the
   `CnThinDevName`: `dmsetup table` (pool and `dev_id`); a created td's
   volume a read reads absent is `RES_STATUS_MISSING` with no reason
@@ -4073,12 +4093,53 @@ leftover of this cntlr from one read.
 
 The node-level verdict of a CN's read also names what of the CN's base
 state (CN5) the read's own probe read wrong in a way a `SyncupCn` would
-cure, of the node's nvmet port: a missing port directory or ANA group, and
-an ANA group in a state other than its fixed one, under the rule both
-roles share (`dnagent.md` SH31). That rule also says how each is rendered, why
-a probe that did not answer and a port transport attribute that differs
-name nothing, and why neither the `SyncupCn` reply nor the observation a
-converge stores carries them.
+cure, of the node's nvmet port: a missing port directory or ANA group, an
+ANA group in a state other than its fixed one, and a transport attribute
+that differs while no subsystem is linked to the port, under the rule both
+roles share (`dnagent.md` SH31). That rule also says how each is
+rendered, why a probe that did not answer and a transport attribute that
+differs while a subsystem is linked name nothing, and why neither the
+`SyncupCn` reply nor the observation a converge stores carries them.
+
+A cntlr's verdict, on a converge and on a read alike, also names each row
+of the pass, of a dm device or nvmet object the cntlr's converge builds
+from devices of its own node, that is not as the desired state wants it
+while every row it is built on reads `RES_STATUS_OK` (`cntlrRowVerdict`;
+`dnagent.md` SH31): the concats over their groups' arrays, the thin pools
+over their concats, the thin volumes over their pools, the thin volume's
+dm-error, the raid0s over their thin volumes, the ns-devs over the
+device their backing names, the subsystems, the namespaces over their
+ns-dev and subsystem, and a transfer's dm-linear over its origin's
+raid0, its subsystem and its namespace over both. It names a row that
+reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
+`RES_STATUS_ERROR`, or `RES_STATUS_OK` with `RES_REASON_DIFFERS` (a
+namespace that serves and whose ANA group differs), as "differs". It
+names no row the level suppresses, no `RES_STATUS_PROVISIONING` row, no
+thin row a converge marks `RES_REASON_THIN_ID_LOST` (CN14), no subsystem
+whose link fails because the node's port is not there ("the port is not
+there", which the CN's verdict names), no concat the agent refuses to
+shrink, and no row of a transfer whose origin the request no longer
+names: no converge of the cntlr cures those. Nor does it name the rows of
+a snapshot not yet created while a slice that is not deferred lacks its
+thin device, or the read of one does not answer (`snapsLackingADevice`):
+a converge then runs CN14's pre-pass, which suspends the origin to make
+the missing ids, so a re-send on every round that a create fails would
+stall the origin's host IO on every round; it waits for the next
+revision. One whose devices are all there sends no message and suspends
+nothing, and is named like any other. A concat the agent refuses to
+shrink reads the refusal on both channels. A read
+cannot tell a thin id the pool has lost from a volume not built yet, and
+names the volume (Known limits). Reason for the rows it is built on: a stack over a group
+whose array does not run waits for that array, which the member rules
+below and CN10's late-member retry cover, and over a broken layer of its
+own only that layer is named, the lowest, whose converge builds the rest.
+Reason for leaving out legs, paths, arrays and clones: their state rests
+on a remote end, and a new syncup does not cure a disk node that is gone;
+the rules below name what a converge can do for them. A converge's own
+code names these rows from its build, so a step that failed or was cut
+off, a resume that failed and an ANA move that failed bring the
+`SyncupCntlr` again on the next round, and the read after a converge whose
+call was cut off names what the converge left undone.
 
 A cntlr's read-only verdict also names each side its converge would
 connect (CN10): each provisioned side of a wanted leg that the leg's
@@ -4181,7 +4242,8 @@ then non-zero, and by each converge whose own removing sweep names it;
 and on each round that answers from an observation that names it and
 is not too old (`dnv-worker.md` HL7), the worker's "re-sync while the code is non-zero" rule (`dnv-worker.md` RW4)
 re-issues the `Syncup*` that sweeps again. A converge's observation
-carries only what its own removing sweep names, so what only a read's
+carries what its own removing sweep names and, for a cntlr, the rows of
+its build the row rule above names, so what only a read's
 verdict names — a connection whose subsystem directory is left
 with no controller (CN21), a side with no controller the converge would
 connect, an md member to put back, a piece of the base state and a stored
@@ -4792,8 +4854,10 @@ stores instead is CN23's.
   answers from a read: a read of the CN that reads absent a piece of its
   base state that a `SyncupCn` would build, or an ANA group in a state
   other than its fixed one on a port whose transport attributes match,
-  names it in its verdict (`dnagent.md` SH31), so while a port `mkdir` or
-  "ana_state" write keeps being refused, the worker re-sends the
+  or a transport attribute that differs while no subsystem is linked,
+  names it in its verdict (`dnagent.md` SH31), so while a port `mkdir`,
+  "ana_state" or transport attribute write keeps being refused, the worker
+  re-sends the
   `SyncupCn` on each such round and each attempt is logged — the agent's
   leftover record of each read names what the read read, and each refused
   command or write is logged as it fails — as for a disk node whose disk
@@ -4802,13 +4866,19 @@ stores instead is CN23's.
   accepts answers without it and starts the read that names it again:
   the piece brings a re-send at most every second round (`dnv-worker.md`
   RW4), and on each round while the agent's saves fail (CN30). A port
-  transport attribute that differs is not re-driven (`dnagent.md` SH31,
-  and its Known limits for one that differs while no subsystem is
-  linked).
+  transport attribute that differs while a subsystem is linked is not
+  re-driven (`dnagent.md` SH31): nvmet refuses its write then.
   Each re-sent `SyncupCn` holds the node write lock (CN1), for its
   converge and its removing node-level sweep when the agent accepts it,
   so a cntlr converge or read that comes after it waits it out, once for each re-send; it keeps
   no cntlr's read from ending (`dnagent.md` SH30).
+* A thin volume whose thin id the pool has lost is named by every read of
+  the cntlr: the read reads it absent and cannot tell a lost id from a
+  volume not built yet, which the converge would build (CN30). The
+  converge then meets the lost id again, marks its row
+  `RES_REASON_THIN_ID_LOST` and names nothing for it, so the worker sends
+  the `SyncupCntlr` on every second round for as long as the id stays
+  lost, which only an operator ends (`dnv-worker.md` HL2).
 * A torn snapshot's mark is best effort. CN14 keeps it in memory from the
   pre-pass run that saw the tear until a request carries the td `created`,
   and the created flip records it from a reply that completes the td

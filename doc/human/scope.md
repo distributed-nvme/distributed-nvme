@@ -451,8 +451,10 @@ The entries:
 - **A failover step that fails before the fence leaves two writers on a
   side.** Silent. At a failover a disk node handles the new primary's path
   first. A failed step for the old primary before its fence leaves both
-  primaries' paths live on the side, until the pool's next revision or an
-  agent restart. State: fix decided, the fence comes first, before any
+  primaries' paths live on the side. The side's check names the old
+  primary's path, which maps the wrong device, and the worker sends the
+  side's syncup again on its next check round, whose converge fences the
+  path; the two writers last until then. State: fix decided, the fence comes first, before any
   other step of the failover. Not seen in the lab.
 - **A failback right after a failed fence can write old data.** Silent. A
   fence that suspends the old primary's path and then fails to load the
@@ -460,8 +462,9 @@ The entries:
   primary's writes. If the next change makes that controller node the
   primary again before any later pass fences it, those held writes land on
   the side after the other primary's newer writes. It needs a failed table
-  load and a failback before any later syncup of the side, whose converge
-  fences the path again first. State: fix later. Not seen in the lab.
+  load and then a failback before the side's next syncup, which the worker
+  sends again on its next check round and whose converge fences the path
+  first. State: fix later. Not seen in the lab.
 - **dnvctl parses an id with leading zeros as octal.** An id copied from a
   device name can name another object. A forced start or a delete can act
   on the wrong group or leg. State: fix decided, dnvctl refuses such an
@@ -536,13 +539,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   and the build needs the source. State: fix decided, the worker drains a
   clone once the primary reports its copy whole, so the volume no longer
   needs the source. Not seen in the lab.
-- **A failed step in a side's last converge is not retried until the
-  pool's next change.** After a short failure the side's converge answers
-  "clean", and the worker sends nothing again until the pool's next
-  change or an agent restart. Seen in a rehearsal on AWS machines: a pool under build
-  never built. State: fix decided, every answer of a side or a cntlr says
-  "not clean" while anything the desired state wants there is absent or
-  differs, so the worker sends the syncup again.
 - **A metadata grow stopped halfway is never finished.** A grow of a
   slice's thin pool metadata takes two table loads. A pass stopped between
   them never runs the second. The thin pool keeps its old metadata size,
@@ -630,13 +626,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   leftovers stand unless forced. Procedure to write: node removal and disk
   reuse. Fix later: a forced node delete for a dead disk node. Not seen in
   the lab.
-- **A port setting that differs is never re-driven.** State: fix decided,
-  the agent answers "not clean" while the setting differs, so the worker
-  sends the syncup again. Not seen in the lab.
-- **A converge whose call was cut off leaves the rest waiting.** The
-  unfinished work waits for the object's next revision. State: fix
-  decided, for sides and cntlrs, by the same "not clean" answer. Not seen
-  in the lab.
 - **An agent restart during a fence can leave devices suspended.** A disk
   node's agent keeps the start of a fence's wait in memory. A restart
   during that wait can leave the old primary's devices on the side

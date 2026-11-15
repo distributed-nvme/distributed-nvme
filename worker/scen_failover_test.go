@@ -1398,3 +1398,54 @@ func TestTakeoverInARepairWait(t *testing.T) {
 		}
 	}
 }
+
+// TestFailoverDemotionWithTheLeftoverCodeEndsTheFirstWait pins the first wait
+// of the hold (RW22) when the old primary answers its demotion with the
+// leftover code: such a reply is accepted (RW5), so it reports the demotion
+// applied and ends the first wait at once, as a reply with code zero does.
+// An agent names in that code whatever its converge left not as wanted
+// (dnagent.md SH31), and the fence keeps the old primary off the sides
+// whatever its namespaces say, so the wait must not run to its timer for it.
+func TestFailoverDemotionWithTheLeftoverCodeEndsTheFirstWait(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, nil)
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	oldAgent, oldKey := c.cntlrAgent(t, 1)
+	// The leftover lever applies each syncup and answers it with the
+	// leftover code, as a converge that left something not as wanted does.
+	foLever(t, oldAgent, oldKey, func(o *agentfake.Object) {
+		o.LeftoverRounds = 1 << 30
+	})
+
+	foSetDisabled(t, c, 1, true)
+	applied := foWaitFailover(t, h, w, 1, 2, 20*time.Second)
+	failRev := applied.num("revision")
+	foWaitCntlrSynced(t, h, w, 1, failRev, 10*time.Second)
+	// The first wait ends when the old primary's reply comes, so the sides
+	// are told the failover's revision before its timer could have run out.
+	var sideIds []uint64
+	for _, side := range stdSides {
+		sideIds = append(sideIds, side.sideId)
+	}
+	for id, rec := range foWaitSidesSynced(t, h, w, failRev, sideIds...) {
+		if took := rec.at.Sub(applied.at); took >= h.tmo.demotionHold {
+			t.Errorf("side %d was told revision %d %v after the commit, "+
+				"want before the first wait's timer of %v", id,
+				rec.num("revision"), took, h.tmo.demotionHold)
+		}
+	}
+	for _, rec := range h.records(w, msgSpDemotionUnsynced) {
+		if rec.num("revision") == failRev {
+			t.Errorf("the first wait ran to its timer although the old "+
+				"primary answered its demotion: %v", rec)
+		}
+	}
+
+	foLever(t, oldAgent, oldKey, func(o *agentfake.Object) {
+		o.LeftoverRounds = 0
+	})
+	c.waitConverged(t)
+}

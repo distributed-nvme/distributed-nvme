@@ -653,8 +653,13 @@ func TestASourceWhoseExportBuildFailsServesOn(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SyncupSide: %v", err)
 			}
-			if reply.GetAgentReply().GetCode() != 0 {
-				t.Fatalf("rejected: %v", reply.GetAgentReply())
+			// The failed build is named, so the worker sends the syncup
+			// again until the build holds (SH31).
+			if got := reply.GetAgentReply(); got.GetCode() !=
+				common.ReplyCodeLeftover ||
+				!strings.Contains(got.GetDetails(), "build refused") {
+				t.Fatalf("reply = %v, want the leftover code naming the "+
+					"failed build", got)
 			}
 			for _, call := range node.Calls() {
 				if strings.Contains(call, "/ana_grpid=") ||
@@ -710,15 +715,22 @@ func TestASourceWhoseExportBuildFailsServesOn(t *testing.T) {
 				{"the standby's dm_linear",
 					info.GetCnIdToDmLinear()[testCn1],
 					pb.ResStatus_RES_STATUS_OK},
+				// The exports serve, their ANA groups differ: OK rows that
+				// say so (RES_REASON_DIFFERS, SH31).
 				{"the primary's nvmeof", info.GetCnIdToNvmeof()[testCn0],
-					pb.ResStatus_RES_STATUS_ERROR},
+					pb.ResStatus_RES_STATUS_OK},
 				{"the standby's nvmeof", info.GetCnIdToNvmeof()[testCn1],
-					pb.ResStatus_RES_STATUS_ERROR},
+					pb.ResStatus_RES_STATUS_OK},
 			} {
 				if row.info.GetStatus() != row.want {
 					t.Errorf("%s row = %v/%q, want %v", row.name,
 						row.info.GetStatus(), row.info.GetDetails(), row.want)
 				}
+			}
+			if got := info.GetCnIdToNvmeof()[testCn0].GetReason(); got !=
+				pb.ResReason_RES_REASON_DIFFERS {
+				t.Errorf("the primary's nvmeof row's reason = %v, want "+
+					"RES_REASON_DIFFERS", got)
 			}
 			if got, want := info.GetCnIdToNvmeof()[testCn0].GetDetails(),
 				fmt.Sprintf("ana_grpid is %d, want %d",
@@ -809,8 +821,14 @@ func TestASourceWhosePortLinkFailsReportsIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if reply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	// The failed link is named (review item 23), so the worker sends the
+	// syncup again, whose converge links the export.
+	if got := reply.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover ||
+		!strings.Contains(got.GetDetails(), srcNqn+": differs:") ||
+		!strings.Contains(got.GetDetails(), "link refused") {
+		t.Fatalf("reply = %v, want the leftover code naming the failed "+
+			"link", got)
 	}
 	srcInfo := reply.GetSideInfo().GetMigrSrcInfo()
 	if row := srcInfo.GetDmLinearInfo(); row.GetStatus() !=
@@ -834,6 +852,20 @@ func TestASourceWhosePortLinkFailsReportsIt(t *testing.T) {
 	node.mu.Unlock()
 	if linked {
 		t.Error("the migration source export is linked to the port")
+	}
+
+	// The port takes the link again; the syncup sent again links it.
+	clearFailAlways(node, "ln -s "+agent.NvmetRoot+"/subsystems/"+srcNqn)
+	if reply, err = srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	node.mu.Lock()
+	_, linked = node.links[portPathOf(common.NvmetPortId)+"/subsystems/"+
+		srcNqn]
+	node.mu.Unlock()
+	if !linked || reply.GetAgentReply().GetCode() != 0 {
+		t.Errorf("the syncup sent again: linked %v, reply %v; want the "+
+			"export linked and code zero", linked, reply.GetAgentReply())
 	}
 }
 

@@ -200,9 +200,13 @@ func unprovisionedSideOf(sideId uint64, addr, svcId string) *pb.Side {
 type reqOpts struct {
 	revision uint64
 	primary  bool
-	disabled bool
-	level    pb.SpLevel
-	raid1    bool
+	// leftoverOk lets syncupBoth and syncupSnapshot accept the leftover
+	// code beside zero: the reply of a converge whose test made a step fail
+	// on purpose, which the cntlr's verdict names (CN30).
+	leftoverOk bool
+	disabled   bool
+	level      pb.SpLevel
+	raid1      bool
 	// suspended is the stored Namespace.suspended flag.
 	suspended bool
 	tds       []*pb.ThinDevice
@@ -488,10 +492,17 @@ func syncupBoth(
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
-	if reply.GetAgentReply().GetCode() != 0 {
+	if !acceptedCode(reply.GetAgentReply(), o.leftoverOk) {
 		t.Fatalf("SyncupCntlr rejected: %v", reply.GetAgentReply())
 	}
 	return reply
+}
+
+// acceptedCode reports whether reply's code is zero, or, when leftoverOk is
+// set, the leftover code.
+func acceptedCode(reply *pb.AgentReply, leftoverOk bool) bool {
+	return reply.GetCode() == 0 ||
+		leftoverOk && reply.GetCode() == common.ReplyCodeLeftover
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,8 +1108,8 @@ func TestAnAbsentBaseStateReDrivesTheSyncupCn(t *testing.T) {
 // again. So a port whose directory's time read, ANA group read or transport
 // attribute read was cut off reads ERROR and leaves the verdict clean. So
 // does a mismatch the verdict leaves to its row: a transport attribute of the
-// port that differs, which nvmet refuses to rewrite while a subsystem is
-// linked to the port.
+// port that differs while a subsystem is linked to the port, which nvmet
+// refuses to rewrite then.
 func TestAnUnansweredBaseStateProbeDoesNotReDrive(t *testing.T) {
 	portPath := agent.NvmetRoot + "/ports/1"
 	for _, tc := range []struct {
@@ -1118,8 +1129,11 @@ func TestAnUnansweredBaseStateProbeDoesNotReDrive(t *testing.T) {
 		}, portPath + "/addr_trtype"},
 		// The mismatch the verdict leaves to its row: nvmet refuses an
 		// addr_* write while a subsystem is linked to the port.
-		{"a port transport attribute that differs", func(node *fakeNode) {
+		{"a port transport attribute that differs while a subsystem is " +
+			"linked", func(node *fakeNode) {
 			node.files[portPath+"/addr_traddr"] = "192.168.10.99"
+			node.links[portPath+"/subsystems/"+testNqn] =
+				agent.NvmetRoot + "/subsystems/" + testNqn
 		}, `addr_traddr is "192.168.10.99"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1199,6 +1213,8 @@ func TestAWrongAnaGroupStateReDrivesTheSyncupCn(t *testing.T) {
 		node.mu.Lock()
 		node.files[statePath] = agent.AnaStateOptimized
 		node.files[portPath+"/addr_traddr"] = "192.168.10.99"
+		node.links[portPath+"/subsystems/"+testNqn] =
+			agent.NvmetRoot + "/subsystems/" + testNqn
 		node.mu.Unlock()
 
 		check := checkCnOnce(t, srv)
@@ -1208,6 +1224,39 @@ func TestAWrongAnaGroupStateReDrivesTheSyncupCn(t *testing.T) {
 		assertErrorDetails(t, check.GetCnInfo().GetPortInfo(),
 			`addr_traddr is "192.168.10.99"`, "port")
 	})
+}
+
+// TestAPortSettingThatDiffersWithNothingLinkedReDrives: a transport
+// attribute of the port that differs while no subsystem is linked to it is
+// named by the node-level verdict (dnagent.md SH31), since nvmet then takes
+// the write, and the re-sent SyncupCn rewrites it.
+func TestAPortSettingThatDiffersWithNothingLinkedReDrives(t *testing.T) {
+	portPath := agent.NvmetRoot + "/ports/1"
+	srv, node := newTestServer(t)
+	cnSyncup(t, srv, 2, false)
+	node.mu.Lock()
+	want := node.files[portPath+"/addr_traddr"]
+	node.files[portPath+"/addr_traddr"] = "192.168.10.99"
+	node.mu.Unlock()
+
+	check := checkCnOnce(t, srv)
+	if got := check.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover || !strings.Contains(got.GetDetails(),
+		`nvmet port 1: differs: addr_traddr is "192.168.10.99"`) {
+		t.Fatalf("check round = %v, want the leftover code naming the "+
+			"port", got)
+	}
+	cnSyncup(t, srv, 2, false)
+	node.mu.Lock()
+	got := node.files[portPath+"/addr_traddr"]
+	node.mu.Unlock()
+	if got != want {
+		t.Errorf("addr_traddr after the re-sent SyncupCn = %q, want %q",
+			got, want)
+	}
+	if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() != 0 {
+		t.Errorf("check round after the rewrite = %v, want code 0", got)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -6156,11 +6205,9 @@ func TestLeftoverSuspendedNsDevIsResumed(t *testing.T) {
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 		raid0 := raid0Name(srv, testTd)
 		node.dms[raid0].suspended = true
-		// The park's asymmetry, pinned on the fixture that already exists:
-		// an ns-dev found suspended is an ERROR whatever the plan says, while
-		// every OTHER dm device still probes OK with `details = "suspended"`.
-		// Deliberate — only the ns-dev has a plan state a suspend could be
-		// mistaken for.
+		// A suspended dm device serves no IO: its row reads ERROR and the
+		// read names it (review item 36), so the worker re-sends the
+		// SyncupCntlr whose converge resumes it.
 		refreshTestCntlr(t, srv)
 		probe, err := srv.GetCntlrInfo(context.Background(),
 			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
@@ -6169,10 +6216,16 @@ func TestLeftoverSuspendedNsDevIsResumed(t *testing.T) {
 			t.Fatalf("GetCntlrInfo: %v", err)
 		}
 		row := probe.GetCntlrInfo().GetTdIdToRaid0()[testTd]
-		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
 			row.GetDetails() != "suspended" {
 			t.Fatalf("suspended raid0 row: %v/%q",
 				row.GetStatus(), row.GetDetails())
+		}
+		if got := probe.GetAgentReply(); got.GetCode() !=
+			common.ReplyCodeLeftover || !strings.Contains(got.GetDetails(),
+			raid0+": differs: suspended") {
+			t.Fatalf("read's code = %v, want the leftover code naming the "+
+				"suspended raid0", got)
 		}
 		node.Reset()
 		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
@@ -7479,6 +7532,16 @@ func TestConcatNeverShrinksWhenALiveGroupDefers(t *testing.T) {
 		!strings.Contains(data.GetDetails(), "refusing to shrink") {
 		t.Fatalf("slice_id_to_data is %v/%q, want the shrink refusal",
 			data.GetStatus(), data.GetDetails())
+	}
+	// No converge cures the refusal, so the cntlr's verdict leaves it out
+	// (CN30): no syncup every round for it, from a converge or a read.
+	if strings.Contains(reply.GetAgentReply().GetDetails(), poolDataName) {
+		t.Fatalf("the converge named the concat it refuses to shrink: %v",
+			reply.GetAgentReply())
+	}
+	if got := readCode(t, srv, 4); strings.Contains(
+		got.GetDetails(), poolDataName) {
+		t.Fatalf("the read named the concat it refuses to shrink: %v", got)
 	}
 }
 

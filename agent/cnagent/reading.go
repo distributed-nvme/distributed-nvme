@@ -131,7 +131,7 @@ func (s *CnAgentServer) readCntlr(
 	rd := s.takeReading(ctx)
 	plan.rd, plan.walk, plan.mdWalks = rd, rd.walk, rd.mdWalks()
 	info, putBack, noCtrl := s.probeCntlr(ctx, st, plan)
-	return info, s.sweepCntlr(ctx, st, plan, false, putBack, noCtrl)
+	return info, s.sweepCntlr(ctx, st, plan, false, info, putBack, noCtrl)
 }
 
 // dmDevAnswer is one own `dmsetup info` of a name: the device, nil when it is

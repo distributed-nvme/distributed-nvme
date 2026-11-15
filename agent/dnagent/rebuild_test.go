@@ -472,6 +472,19 @@ func TestAReadDoesNotNameASideWhoseRecordDisagrees(t *testing.T) {
 		t.Fatalf("side device row %v, want AllocSide's refusal",
 			reply.GetSideInfo().GetSideDevInfo())
 	}
+	// The converge names nothing either: a re-sent request is refused the
+	// same way, and the rows above are judged by the request's geometry.
+	if got := reply.GetAgentReply(); got.GetCode() != 0 {
+		t.Fatalf("converge over a record that disagrees = %v, want code 0",
+			got)
+	}
+	if check, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+		Revision: 2,
+	}, nil); check.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("read over a record that disagrees, its side device "+
+			"there = %v, want code 0", check.GetAgentReply())
+	}
 	node.rebootKernel()
 	check, info := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
@@ -543,37 +556,48 @@ func TestAReadRebuildsAnExportWhosePortLinkFailed(t *testing.T) {
 	}
 }
 
-// TestAReadDoesNotNameAWrongObject: an object that is there but differs
-// from the wanted one reads ERROR, which feeds the side's health epoch, and
-// the verdict leaves it to that row: it names absent objects only. So does a
-// namespace whose enable read did not answer, which the loose probe reads as
-// not enabled.
-func TestAReadDoesNotNameAWrongObject(t *testing.T) {
+// TestAReadNamesAWrongObject: an object that is there but differs from the
+// wanted one is named by the side's verdict, so the worker sends the
+// SyncupSide again (SH31), and that converge cures it. One that cannot serve
+// IO reads ERROR: a dm-linear with another table, a suspended dm-linear, and
+// an export whose enable read did not answer, which the strict read takes as
+// a difference and never as an absence. One that serves reads OK with
+// RES_REASON_DIFFERS: an export in another ANA group.
+func TestAReadNamesAWrongObject(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, testCn1)
 	nsPath := agent.NvmetRoot + "/subsystems/" + nqn + "/namespaces/1"
+	linear := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn1)
 	for _, tc := range []struct {
-		name string
-		arm  func(node *fakeNode)
-		row  func(info *pb.SideInfo) *pb.ResInfo
+		name   string
+		arm    func(node *fakeNode)
+		disarm func(node *fakeNode)
+		row    func(info *pb.SideInfo) *pb.ResInfo
+		status pb.ResStatus
+		named  string
 	}{
 		{"a dm-linear with another table", func(node *fakeNode) {
-			linear := nf.DnLinearName(
-				testCluster, testDn, testSp, testSide, testCn1)
 			node.dms[linear].table = "0 8 linear 7:7 0"
-		}, func(info *pb.SideInfo) *pb.ResInfo {
+		}, func(*fakeNode) {}, func(info *pb.SideInfo) *pb.ResInfo {
 			return info.GetCnIdToDmLinear()[testCn1]
-		}},
+		}, pb.ResStatus_RES_STATUS_ERROR, linear + ": differs: "},
+		{"a suspended dm-linear", func(node *fakeNode) {
+			node.dms[linear].suspended = true
+		}, func(*fakeNode) {}, func(info *pb.SideInfo) *pb.ResInfo {
+			return info.GetCnIdToDmLinear()[testCn1]
+		}, pb.ResStatus_RES_STATUS_ERROR, linear + ": differs: suspended"},
 		{"an export in another ANA group", func(node *fakeNode) {
 			node.files[nsPath+"/ana_grpid"] = "3"
-		}, func(info *pb.SideInfo) *pb.ResInfo {
+		}, func(*fakeNode) {}, func(info *pb.SideInfo) *pb.ResInfo {
 			return info.GetCnIdToNvmeof()[testCn1]
-		}},
+		}, pb.ResStatus_RES_STATUS_OK, nqn + ": differs: ana_grpid is 3"},
 		{"an enable read that did not answer", func(node *fakeNode) {
 			node.killReadAlways[nsPath+"/enable"] = true
+		}, func(node *fakeNode) {
+			delete(node.killReadAlways, nsPath+"/enable")
 		}, func(info *pb.SideInfo) *pb.ResInfo {
 			return info.GetCnIdToNvmeof()[testCn1]
-		}},
+		}, pb.ResStatus_RES_STATUS_ERROR, nqn + ": differs: read "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -581,17 +605,34 @@ func TestAReadDoesNotNameAWrongObject(t *testing.T) {
 			node.mu.Lock()
 			tc.arm(node)
 			node.mu.Unlock()
-			reply, info := checkSideNow(srv, context.Background(),
-				&pb.CheckSideRequest{
-					ClusterId: testCluster, DnId: testDn,
-					SidePointer: sidePtr(testSide), Revision: 1,
-				}, nil)
-			if row := tc.row(info); row.GetStatus() !=
-				pb.ResStatus_RES_STATUS_ERROR {
-				t.Fatalf("fixture is wrong: row %v, want ERROR", row)
+			round := &pb.CheckSideRequest{
+				ClusterId: testCluster, DnId: testDn,
+				SidePointer: sidePtr(testSide), Revision: 1,
 			}
-			if got := reply.GetAgentReply(); got.GetCode() != 0 {
-				t.Fatalf("verdict = %v, want code 0", got)
+			reply, info := checkSideNow(srv, context.Background(), round,
+				nil)
+			if row := tc.row(info); row.GetStatus() != tc.status {
+				t.Fatalf("fixture is wrong: row %v, want %v", row, tc.status)
+			}
+			if got := reply.GetAgentReply(); got.GetCode() !=
+				common.ReplyCodeLeftover ||
+				!strings.Contains(got.GetDetails(), tc.named) {
+				t.Fatalf("verdict = %v, want the leftover code naming %q",
+					got, tc.named)
+			}
+
+			node.mu.Lock()
+			tc.disarm(node)
+			node.mu.Unlock()
+			if _, err := srv.SyncupSide(context.Background(), sideReq(1,
+				testSide, testCn0, []uint64{testCn1},
+				pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if reply, _ = checkSideNow(srv, context.Background(), round,
+				nil); reply.GetAgentReply().GetCode() != 0 {
+				t.Errorf("verdict after the syncup sent again = %v, want "+
+					"code 0", reply.GetAgentReply())
 			}
 		})
 	}

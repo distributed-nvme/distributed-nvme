@@ -254,6 +254,9 @@ func (m *migrDstSeen) cloneRow(plan *sidePlan) (pb.ResStatus, string) {
 		status, note = pb.ResStatus_RES_STATUS_ERROR, m.cloneErr.Error()
 	case m.statusErr != nil:
 		status, note = pb.ResStatus_RES_STATUS_ERROR, m.statusErr.Error()
+	case cloneMetaMode(m.raw) != "":
+		status, note = pb.ResStatus_RES_STATUS_ERROR,
+			detailsCloneMetaMode+cloneMetaMode(m.raw)
 	default:
 		if gap := hydrationGap(plan, m.raw); gap != nil {
 			status, note = pb.ResStatus_RES_STATUS_ERROR, gap.Error()
@@ -277,8 +280,31 @@ func (m *migrDstSeen) cloneRow(plan *sidePlan) (pb.ResStatus, string) {
 func (m *migrDstSeen) held(plan *sidePlan) bool {
 	return m.metaErr == nil && !m.awaitingCutover && !m.connUnread &&
 		m.srcServes() && m.cloneErr == nil && m.statusRead &&
-		m.statusErr == nil && m.hydrationErr == nil &&
-		hydrationGap(plan, m.raw) == nil
+		m.statusErr == nil && (cloneMetaMode(m.raw) != "" ||
+		m.hydrationErr == nil && hydrationGap(plan, m.raw) == nil)
+}
+
+// detailsCloneMetaMode starts the dm-clone row of a destination whose
+// dm-clone's metadata is read-only or failed, the mode after it. dm-clone
+// enters either mode when an operation on its metadata fails, and no step of
+// a converge brings it back: a reload of its table would reopen the metadata
+// from its last commit and read the regions copied since from the source
+// again, losing what was written to them. So the row reads RES_STATUS_ERROR,
+// the side's verdict does not name it (rowVerdict), and the pass counts as
+// held, so no retry repeats it (held).
+const detailsCloneMetaMode = "dm-clone metadata mode "
+
+// cloneMetaMode is the metadata mode of a dm-clone status line when it is
+// read-only or failed, "" otherwise, a line that does not parse included.
+func cloneMetaMode(raw string) string {
+	if common.CloneFailed(raw) {
+		return common.CloneMetadataFail
+	}
+	if status, ok := common.ParseCloneStatus(raw); ok &&
+		status.MetadataMode == common.CloneMetadataReadOnly {
+		return common.CloneMetadataReadOnly
+	}
+	return ""
 }
 
 // reason is the reason of both of the destination's rows (DN18):
@@ -1147,14 +1173,20 @@ func (s *DnAgentServer) settleMigrRetry(
 	info *pb.SideInfo,
 ) {
 	primary := plan.primaryCnId
-	if info.GetCnIdToDmLinear()[primary].GetStatus() ==
-		pb.ResStatus_RES_STATUS_OK &&
-		info.GetCnIdToNvmeof()[primary].GetStatus() ==
-			pb.ResStatus_RES_STATUS_OK {
+	if rowAsWanted(info.GetCnIdToDmLinear()[primary]) &&
+		rowAsWanted(info.GetCnIdToNvmeof()[primary]) {
 		s.stopMigrRetry(st)
 		return
 	}
 	s.startMigrRetry(st, plan)
+}
+
+// rowAsWanted reports whether row reads RES_STATUS_OK with nothing that
+// differs: an export whose ANA move failed reads OK with RES_REASON_DIFFERS,
+// and step (5) has not converged it.
+func rowAsWanted(row *pb.ResInfo) bool {
+	return row.GetStatus() == pb.ResStatus_RES_STATUS_OK &&
+		row.GetReason() != pb.ResReason_RES_REASON_DIFFERS
 }
 
 func (s *DnAgentServer) stopMigrRetry(st *sideState) {

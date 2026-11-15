@@ -2542,6 +2542,38 @@ case_sides() {
 	attr=$(sshv 1 "dmsetup info -c --noheadings -o attr $lin" | tr -d ' ')
 	assert_eq "${attr:1:2}" -- "waiting: $lin resumed with no table waiting"
 
+	# A read names what differs (dnagent.md SH31, DN16): the same dm-linear
+	# suspended by hand serves no IO, so a check round's read of the side
+	# answers the leftover code naming it, and the syncup sent again
+	# resumes it.
+	stage differs "a read names a dm-linear suspended by hand, and the syncup sent again resumes it"
+	local code details
+	sshv 1 "dmsetup suspend $lin"
+	out=$(ctl 1 check-side --fresh --revision "${siderev[1]}" \
+		--sp "$sp" --leg "${A_LEG[1]}" --side "${A_SIDE[1]}" \
+		--expect-code 4)
+	code=$(jq_of "$out" '.agent_reply.code // 0')
+	details=$(jq_of "$out" '.agent_reply.details // ""')
+	assert_eq "$code" 4 "differs: the read's code over the suspended $lin"
+	case $details in
+	*"$lin: differs: suspended"*) ;;
+	*) die "differs: the read's details do not name $lin: $details" ;;
+	esac
+	out=$(ctl 1 syncup-side --revision "${siderev[1]}" \
+		--sp "$sp" --leg "${A_LEG[1]}" --side "${A_SIDE[1]}" \
+		--provisioned=true --ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 \
+		--primary-cn "${A_PRIMARY[1]}" --standby-cn "${A_STANDBY[1]}" \
+		--sp-level readwrite)
+	assert_eq "$(jq_of "$out" '.agent_reply.code // 0')" 0 \
+		"differs: the syncup sent again"
+	attr=$(sshv 1 "dmsetup info -c --noheadings -o attr $lin" | tr -d ' ')
+	assert_eq "${attr:2:1}" - "differs: $lin resumed by the syncup sent again"
+	out=$(ctl 1 check-side --fresh --revision "${siderev[1]}" \
+		--sp "$sp" --leg "${A_LEG[1]}" --side "${A_SIDE[1]}")
+	assert_eq "$(jq_of "$out" '.agent_reply.code // 0')" 0 \
+		"differs: the read after the syncup sent again"
+
 	stage teardown "disconnect all 8, then empty both side lists"
 	for i in 1 2 3 4; do
 		cn_disconnect "$(a_cn_vm "${A_PRIMARY[$i]}")" "$sp" "${A_LEG[$i]}" \
@@ -2635,18 +2667,19 @@ migr_prep_data() { # m
 # The flag is true in every request before the suite plays the cutover and
 # false from it on, as the worker copies it from the migration
 # (dnagent_integtest.md, Conventions, The cutover).
-migr_dst_syncup() { # m revision sp_level cutover_pending
-	local m=$1
-	ctl "${MDSTDN[$m]}" syncup-side --revision "$2" \
+migr_dst_syncup() { # m revision sp_level cutover_pending [ctl flags…]
+	local m=$1 rev=$2 level=$3 pending=$4
+	shift 4
+	ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
 		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
 		--cntlid-slot 1 --primary-cn "${MCN[$m]}" \
-		--sp-level "$3" --provisioned=true \
+		--sp-level "$level" --provisioned=true \
 		--migr-dst "${MID[$m]}:${MSRCSIDE[$m]}:${DNID[${MSRCDN[$m]}]}" \
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
 		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt "$BM_CNT" --cutover-pending="$4"
+		--bm-cnt "$BM_CNT" --cutover-pending="$pending" "$@"
 }
 
 # migr_declare_dst declares the destination and later enables it
@@ -3129,18 +3162,23 @@ migr_src_ns_gone() { # m
 		;;
 	esac
 
-	# The enabling converge's request again, at its own revision.
-	c1=$(migr_dst_syncup "$m" "$rev" readwrite false)
+	# The enabling converge's request again, at its own revision. Every
+	# channel answers the leftover code: the destination's two rows, which a
+	# re-sent syncup would cure once the source serves again, are named
+	# (dnagent.md SH31, DN16).
+	c1=$(migr_dst_syncup "$m" "$rev" readwrite false --expect-code 4)
 	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" inaccessible 30
 	sleep 1.1
 	k=$(ctl "$dst" check-side --fresh --revision "$rev" --show-info \
-		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
+		--expect-code 4)
 	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev" \
 		"migr $m check-side revision"
 	g=$(ctl "$dst" get-side-info \
-		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
+		--expect-code 4)
 	sleep 1.1
-	c2=$(migr_dst_syncup "$m" "$rev" readwrite false)
+	c2=$(migr_dst_syncup "$m" "$rev" readwrite false --expect-code 4)
 	# The reading compared held through all four replies.
 	now=$(helper "$dst" "subsys_shape '$srcnqn'")
 	if [ "$shape" = "1 1 0" ]; then
@@ -3189,9 +3227,11 @@ migr_src_ns_gone() { # m
 	# The agent's read records the dm-clone's status line whenever the device
 	# is there, whatever its row's status, so its observation still proves the
 	# hydration hydrationComplete (gateway/common.go) reads; wait-hydrated
-	# samples it with rounds, which start the reads.
+	# samples it with rounds, which start the reads, each answering the
+	# leftover code that names the destination's rows.
 	ctl "$dst" wait-hydrated --sp "$SP" --leg "${MLEG[$m]}" \
-		--side "${MDSTSIDE[$m]}" --interval 0.5 --timeout 10 >/dev/null
+		--side "${MDSTSIDE[$m]}" --interval 0.5 --timeout 10 \
+		--expect-code 4 >/dev/null
 }
 
 # migr_drop_src drops the source side and the dead source path

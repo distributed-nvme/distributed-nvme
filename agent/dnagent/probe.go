@@ -269,8 +269,10 @@ func (s *DnAgentServer) probeSideDm(
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
 			"table does not match the %d allocated extent run(s)", len(runs))
 	}
+	// A suspended device serves no IO: an error, which the side's verdict
+	// names so that a re-sent SyncupSide resumes it (SH31).
 	if dev.Suspended {
-		return pb.ResStatus_RES_STATUS_OK, "suspended"
+		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }
@@ -395,7 +397,7 @@ func (s *DnAgentServer) probeStacks(
 			resKeyMigrSrcDm, name, status, details)
 		if plan.wantExport {
 			nqn := plan.migrSrcNqn()
-			status, details = s.probeExport(ctx,
+			status, details, reason := s.probeExport(ctx,
 				agent.SubsysConf{
 					Nqn: nqn,
 					AllowedHosts: []string{s.nf.DnHostNqn(
@@ -407,8 +409,8 @@ func (s *DnAgentServer) probeStacks(
 					DevicePath: s.nf.DmPath(name),
 					AnaGrpId:   common.AnaGrpIdOptimized,
 				})
-			srcInfo.NvmeofInfo = t.Set(
-				resKeyMigrSrcNvmeof, nqn, status, details)
+			srcInfo.NvmeofInfo = t.SetReason(
+				resKeyMigrSrcNvmeof, nqn, status, details, reason)
 		}
 	}
 }
@@ -460,7 +462,7 @@ func (s *DnAgentServer) probeCnStacks(
 		info.CnIdToNvmeof = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
 		for _, cnId := range plan.cnIds {
 			nqn := plan.sideNqn(cnId)
-			status, details := s.probeExport(ctx,
+			status, details, reason := s.probeExport(ctx,
 				agent.SubsysConf{
 					Nqn:          nqn,
 					Serial:       fmt.Sprintf(common.IdKeyFmt, plan.legId),
@@ -477,8 +479,9 @@ func (s *DnAgentServer) probeCnStacks(
 					Nguid:      nguid,
 					AnaGrpId:   plan.anaGrpId(cnId, cloneLive),
 				})
-			info.CnIdToNvmeof[cnId] = t.Set(
-				resKeyOf(resKeyNvmeofFmt, cnId), nqn, status, details)
+			info.CnIdToNvmeof[cnId] = t.SetReason(
+				resKeyOf(resKeyNvmeofFmt, cnId), nqn, status, details,
+				reason)
 		}
 	}
 }
@@ -523,94 +526,90 @@ func (s *DnAgentServer) probeDmTarget(
 		}
 	}
 	if dev.Suspended {
-		return pb.ResStatus_RES_STATUS_OK, "suspended"
+		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }
 
-// probeExport checks one nvmet subsystem, its namespace and its port link.
+// detailsSuspended is the row of a dm device the read finds suspended outside
+// a cutover window: it serves no IO, so it reads RES_STATUS_ERROR, which the
+// side's verdict names (rowVerdict).
+const detailsSuspended = "suspended"
+
+// probeExport checks one nvmet subsystem, its namespace and its port link,
+// and returns the export's row: its status, details and reason. An export
+// whose only difference is its namespace's ANA group, and that still serves
+// as wanted (agent.AnaServesAsWanted), reads RES_STATUS_OK with
+// RES_REASON_DIFFERS and the difference in its details, which the side's
+// verdict names (rowVerdict, SH31); one wanted optimized and not reads
+// RES_STATUS_ERROR.
 func (s *DnAgentServer) probeExport(
 	ctx context.Context,
 	subsys agent.SubsysConf,
 	ns agent.NsConf,
-) (pb.ResStatus, string) {
+) (pb.ResStatus, string, pb.ResReason) {
+	none := pb.ResReason_RES_REASON_NONE
 	exists, err := s.nvmet.SubsysExists(ctx, subsys.Nqn)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
 	if !exists {
-		return pb.ResStatus_RES_STATUS_MISSING, ""
+		return pb.ResStatus_RES_STATUS_MISSING, "", none
 	}
 	ok, details, err := s.nvmet.ProbeSubsystem(ctx, subsys)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
 	if !ok {
-		return pb.ResStatus_RES_STATUS_ERROR, details
+		return pb.ResStatus_RES_STATUS_ERROR, details, none
 	}
 	state, err := s.nvmet.ProbeNamespace(ctx, ns.Nqn, ns.Nsid)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
-	}
-	// ProbeNamespace reads the enable loosely, so a read that did not answer
-	// reads "not enabled"; the verdict names that part absent (SH31) only
-	// where a strict read answers it.
-	if state.Exists && !state.Enabled {
-		enabled, err := s.nvmet.NsEnabledStrict(ctx, ns.Nqn, ns.Nsid)
-		if err != nil {
-			return pb.ResStatus_RES_STATUS_ERROR, err.Error()
-		}
-		state.Enabled = enabled
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
 	switch {
 	case !state.Exists:
-		return pb.ResStatus_RES_STATUS_ERROR, detailsNsMissing
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNsMissing, none
 	case !state.Enabled:
-		return pb.ResStatus_RES_STATUS_ERROR, detailsNsNotEnabled
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNsNotEnabled, none
 	case state.DevicePath != ns.DevicePath:
-		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
-			"device_path is %q, want %q", state.DevicePath, ns.DevicePath)
-	case state.AnaGrpId != ns.AnaGrpId:
-		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
-			"ana_grpid is %d, want %d", state.AnaGrpId, ns.AnaGrpId)
+		details := fmt.Sprintf("device_path is %q, want %q",
+			state.DevicePath, ns.DevicePath)
+		return pb.ResStatus_RES_STATUS_ERROR, details, none
 	}
 	linked, portThere, err := s.nvmet.PortLinkedState(
 		ctx, s.port.PortId, ns.Nqn)
 	switch {
 	case err != nil:
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	case !portThere:
 		// The DN's verdict names the port (SH31), whose node-level converge
 		// makes it; a SyncupSide could only fail its link until then.
-		return pb.ResStatus_RES_STATUS_ERROR, detailsPortMissing
+		return pb.ResStatus_RES_STATUS_ERROR, detailsPortMissing, none
 	case !linked:
-		return pb.ResStatus_RES_STATUS_ERROR, detailsNotLinked
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNotLinked, none
 	}
-	return pb.ResStatus_RES_STATUS_OK, ""
+	if state.AnaGrpId != ns.AnaGrpId {
+		details := fmt.Sprintf("ana_grpid is %d, want %d",
+			state.AnaGrpId, ns.AnaGrpId)
+		if !agent.AnaServesAsWanted(state.AnaGrpId, ns.AnaGrpId) {
+			return pb.ResStatus_RES_STATUS_ERROR, details, none
+		}
+		return pb.ResStatus_RES_STATUS_OK, details,
+			pb.ResReason_RES_REASON_DIFFERS
+	}
+	return pb.ResStatus_RES_STATUS_OK, "", none
 }
 
 // probeExport's details for an export whose subsystem is there while a part
 // the export's build makes is not: its namespace, the namespace's enable, or
 // the subsystem's link into a port that is there. A re-sent SyncupSide
-// builds each, so the side's verdict names them (exportPartAbsent,
-// absentVerdict). detailsPortMissing is the link's row while the port itself
-// is not there, which the side's verdict leaves to the DN's (SH31).
+// builds each, so the side's verdict names them (rowVerdict).
+// detailsPortMissing is the link's row while the port itself is not there,
+// which the side's verdict leaves to the DN's (SH31).
 const (
 	detailsNsMissing    = "namespace missing"
 	detailsNsNotEnabled = "namespace not enabled"
 	detailsNotLinked    = "not linked to the port"
 	detailsPortMissing  = "the port is not there"
 )
-
-// exportPartAbsent reports whether an export row is one of probeExport's
-// absent parts above.
-func exportPartAbsent(row *pb.ResInfo) bool {
-	if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
-		return false
-	}
-	switch row.GetDetails() {
-	case detailsNsMissing, detailsNsNotEnabled, detailsNotLinked:
-		return true
-	}
-	return false
-}

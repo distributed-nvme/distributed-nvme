@@ -441,6 +441,10 @@ func (s *CnAgentServer) probePool(
 		targets, "thin-pool", sp.dataSectors, args, len(args)) {
 		return pb.ResStatus_RES_STATUS_ERROR, "table is not the desired pool"
 	}
+	// A suspended pool serves no IO (detailsSuspended).
+	if dev.Suspended {
+		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
+	}
 	// The same noflush read as the converge's (dnagent.md SH17).
 	raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName)
 	if err != nil {

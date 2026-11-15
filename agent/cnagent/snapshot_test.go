@@ -60,7 +60,7 @@ func syncupSnapshot(
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
-	if reply.GetAgentReply().GetCode() != 0 {
+	if !acceptedCode(reply.GetAgentReply(), o.leftoverOk) {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
 	return reply
@@ -158,7 +158,8 @@ func TestSnapshotResumesRaid0AfterAFailedMessage(t *testing.T) {
 	node.failCmdAlways["message "+poolNameOf(srv, testSlice2)+
 		" 0 create_snap"] = "device-mapper: message ioctl failed: File exists"
 	syncupSnapshot(t, srv, node, reqOpts{
-		revision: 3, primary: true, twoSlices: true, tds: snapTds()})
+		revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+		leftoverOk: true})
 
 	origin := raid0Name(srv, testTd)
 	assertOrder(t, node,
@@ -444,7 +445,8 @@ func TestCreatedTdOtherErrorHasNoReason(t *testing.T) {
 			"  failed: Invalid argument"
 	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 		tds: []*pb.ThinDevice{
-			{TdId: testTd, DevId: 1, Size: testTdSize, Created: true}}})
+			{TdId: testTd, DevId: 1, Size: testTdSize, Created: true}},
+		leftoverOk: true})
 
 	row := reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
 		GetSliceIdToDmThin()[testSlice]
@@ -463,7 +465,8 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 	srv, node := newTestServer(t)
 	o := reqOpts{revision: 2, primary: true, subsys: subsysForTd(testSnapTd),
 		tds: []*pb.ThinDevice{
-			{TdId: testSnapTd, DevId: 2, OriId: 7, Size: testTdSize}}}
+			{TdId: testSnapTd, DevId: 2, OriId: 7, Size: testTdSize}},
+		leftoverOk: true}
 	message := "cmd dmsetup message " + poolName(srv) + " 0 create_snap 2 7"
 	reply := syncupBoth(t, srv, o)
 
@@ -541,7 +544,8 @@ func TestSnapshotClaimsASliceEvenWhenItsMessageFailed(t *testing.T) {
 	node.failCmd["message "+poolNameOf(srv, testSlice2)+" 0 create_snap"] =
 		"device-mapper: message ioctl failed: File exists"
 	syncupSnapshot(t, srv, node, reqOpts{
-		revision: 3, primary: true, twoSlices: true, tds: snapTds()})
+		revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+		leftoverOk: true})
 
 	resume := node.indexOfCall("cmd dmsetup resume " + raid0Name(srv, testTd))
 	for _, sliceId := range []uint64{testSlice, testSlice2} {
@@ -634,7 +638,8 @@ func TestSnapshotTornWhenASliceHasItsDevice(t *testing.T) {
 	srv, node := newTestServer(t)
 	node.failCmd["message "+poolNameOf(srv, testSlice)+" 0 create_snap"] =
 		msgIoctlFailed(poolNameOf(srv, testSlice), "Invalid argument")
-	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds()}
+	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+		leftoverOk: true}
 	reply := syncupSnapshot(t, srv, node, o)
 	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
 		"a run that made one id and failed the other")
@@ -663,7 +668,8 @@ func TestSnapshotTornWhenASliceHasItsDevice(t *testing.T) {
 func TestSnapshotTornBesideAPoolNotReady(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, twoSlices: true})
-	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds()}
+	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+		leftoverOk: true}
 	// notReadyRun runs one pass with the pool of slice off not ready, and
 	// checks the pass messaged only slice on.
 	notReadyRun := func(off, on uint64) *pb.CntlrInfo {
@@ -709,7 +715,8 @@ func TestSnapshotNotTornBesideAnUnreadSlice(t *testing.T) {
 	node.killCmdNoEffectAlways["dmsetup info --columns --noheadings -o attr "+
 		thinNameOf(srv, testSnapTd, testSlice2)] = true
 	reply := syncupCntlrAt(t, srv, reqOpts{
-		revision: 3, primary: true, twoSlices: true, tds: snapTds()})
+		revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+		leftoverOk: true})
 
 	if n := len(node.callsMatching(snapMessage(srv, testSlice))); n != 1 {
 		t.Fatalf("slice 0: %d create_snap calls, want 1", n)

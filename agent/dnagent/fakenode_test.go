@@ -242,6 +242,10 @@ type fakeDm struct {
 	noDiscardPassdown bool
 	threshold         uint32
 	batchSize         uint32
+	// metaMode, when set, is the metadata mode the status line ends with:
+	// "rw", "ro", or "Fail", which the kernel prints alone in place of the
+	// line. Unset, the line carries no mode, as the stand-in always printed.
+	metaMode string
 	// discards holds the metadata-only discards (dm-clone hydration
 	// marking, discardRanges); zeroouts holds the DN9 `blkdiscard --zeroout`
 	// side-provisioning writes (cmdBlkdiscard). They are deliberately
@@ -1849,11 +1853,18 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		if len(names) > 0 {
 			features += " " + strings.Join(names, " ")
 		}
+		if dm.metaMode == common.CloneMetadataFail {
+			return fmt.Sprintf("0 %s clone Fail\n", sectors), 0
+		}
+		mode := ""
+		if dm.metaMode != "" {
+			mode = " " + dm.metaMode
+		}
 		return fmt.Sprintf(
 			"0 %s clone 8 1/1024 %s 0/%d 0 %s 4 hydration_threshold %d "+
-				"hydration_batch_size %d\n",
+				"hydration_batch_size %d%s\n",
 			sectors, regionSectors, regions, features,
-			dm.threshold, dm.batchSize), 0
+			dm.threshold, dm.batchSize, mode), 0
 	}
 	return "", 1
 }

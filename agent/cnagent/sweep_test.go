@@ -80,7 +80,7 @@ func syncupCntlrAt(
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
-	if reply.GetAgentReply().GetCode() != 0 {
+	if !acceptedCode(reply.GetAgentReply(), o.leftoverOk) {
 		t.Fatalf("SyncupCntlr rejected: %v", reply.GetAgentReply())
 	}
 	return reply

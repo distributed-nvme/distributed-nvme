@@ -13,6 +13,7 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
 // ---------------------------------------------------------------------------
@@ -1702,6 +1703,7 @@ func (s *CnAgentServer) sweepCntlr(
 	st *cntlrState,
 	plan *cntlrPlan,
 	remove bool,
+	read *pb.CntlrInfo,
 	putBack []string,
 	noCtrl []legSide,
 ) *agent.SweepResult {
@@ -1801,8 +1803,222 @@ func (s *CnAgentServer) sweepCntlr(
 	if !converge && !st.reqFromRpc {
 		storedMarks(plan, res)
 	}
-	res.Log(ctx, s.cntlrIdAttrs(plan)...)
+	if !converge {
+		// A converge names its rows once its build has made them, and logs
+		// then (convergeCntlr).
+		cntlrRowVerdict(plan, read, s.snapsLackingADevice(ctx, plan), res)
+		res.Log(ctx, s.cntlrIdAttrs(plan)...)
+	}
 	return res
+}
+
+// cntlrRowVerdict is what a cntlr's verdict names beyond its sweep's
+// leftovers: each row of the pass, of a dm device or nvmet object the
+// cntlr's converge builds from devices of its own node, that is not as the
+// desired state wants it while everything it is built on is (CN30;
+// dnagent.md SH31). Both a converge and a read take it, each from the rows it
+// just made, so nothing about a failed step is remembered and the two
+// channels name the same node alike. The worker re-sends a Syncup* on a
+// Check reply's code alone, never on its rows (dnv-worker.md RW4), so
+// without the name a step that stopped once — a converge cut off by its
+// call's deadline, an ANA move that failed, a resume that failed — would stay
+// so with code zero until something else moved the cntlr's revision.
+//
+// The rows are the concats, thin pools, raid0s, the thin volume's dm-error
+// and thin devices, ns-devs, namespaces, subsystems, and a transfer's
+// dm-linear, subsystem and namespace. It names a row that reads
+// RES_STATUS_MISSING with no reason, as "absent"; one that reads
+// RES_STATUS_ERROR, or RES_STATUS_OK with RES_REASON_DIFFERS (a namespace
+// whose ANA group differs), as "differs", the first line of the row's
+// details after it. It names a row only while every row it is built on
+// reads RES_STATUS_OK (rowsUnder): a stack over a group whose array does not
+// run waits for that array, which the verdict's md member rules and CN10's
+// late-member retry cover, and over a broken layer of its own only that
+// layer is named, the lowest, whose converge builds the rest. It names no row
+// the level suppresses (RES_REASON_SP_LEVEL), no RES_STATUS_PROVISIONING row,
+// the stack a deferred build holds back on purpose, no thin row whose pool
+// has lost its thin id (RES_REASON_THIN_ID_LOST), and no row of a transfer
+// whose origin the request no longer names, none of which a converge cures. The rows of legs, paths, arrays and clones rest on a remote end, and
+// keep the rules the verdict has for them (sides to connect, md members to
+// put back): a new syncup does not cure a disk node that is gone. A nil info
+// names nothing.
+func cntlrRowVerdict(
+	plan *cntlrPlan,
+	info *pb.CntlrInfo,
+	snapsWaiting map[uint64]bool,
+	res *agent.SweepResult,
+) {
+	if info == nil {
+		return
+	}
+	name := func(row *pb.ResInfo, under ...*pb.ResInfo) {
+		if row != nil && rowsUnder(under) {
+			nameCntlrRow(row, res)
+		}
+	}
+	for _, sp := range plan.slices {
+		var metaGrps, dataGrps []*pb.ResInfo
+		for _, gp := range sp.effMetaGrps {
+			metaGrps = append(metaGrps, info.GetGrpIdToMdRaid()[gp.grpId])
+		}
+		for _, gp := range sp.effDataGrps {
+			dataGrps = append(dataGrps, info.GetGrpIdToMdRaid()[gp.grpId])
+		}
+		meta := info.GetSliceIdToMeta()[sp.sliceId]
+		data := info.GetSliceIdToData()[sp.sliceId]
+		name(meta, metaGrps...)
+		name(data, dataGrps...)
+		name(info.GetSliceIdToDmPool()[sp.sliceId], meta, data)
+	}
+	for _, tp := range plan.tds {
+		name(info.GetTdIdToDmError()[tp.tdId])
+		// A snapshot not yet created that still lacks a device in a slice
+		// is made by CN14's pre-pass, which suspends its origin; a re-send
+		// on every round that its create fails would stall the origin's
+		// host IO on every round. Its rows wait for the next revision, as a
+		// create that fails always did (snapsLackingADevice).
+		if snapsWaiting[tp.tdId] {
+			continue
+		}
+		thins := info.GetTdIdToThinInfo()[tp.tdId].GetSliceIdToDmThin()
+		var under []*pb.ResInfo
+		for _, sp := range plan.slices {
+			name(thins[sp.sliceId], info.GetSliceIdToDmPool()[sp.sliceId])
+			under = append(under, thins[sp.sliceId])
+		}
+		name(info.GetTdIdToRaid0()[tp.tdId], under...)
+	}
+	for _, ssp := range plan.subsystems {
+		subsys := info.GetSsIdToSubsystem()[ssp.ssId]
+		name(subsys)
+		for _, np := range ssp.namespaces {
+			nsDev := info.GetNsIdToDmLinear()[np.nsId]
+			name(nsDev, nsDevUnder(np, info))
+			name(info.GetNsIdToNamespace()[np.nsId], nsDev, subsys)
+		}
+	}
+	for _, xp := range plan.xfers {
+		// A transfer whose origin namespace or thin device the request no
+		// longer names cannot be built by any converge of this request.
+		if xp.ori == nil || xp.ori.td == nil {
+			continue
+		}
+		under := info.GetTdIdToRaid0()[xp.ori.td.tdId]
+		dm := info.GetXferIdToDmLinear()[xp.xferId]
+		subsys := info.GetXferIdToSubsystem()[xp.xferId]
+		name(dm, under)
+		name(subsys)
+		name(info.GetXferIdToNamespace()[xp.xferId], dm, subsys)
+	}
+}
+
+// snapsLackingADevice lists the snapshot tds not yet created of which a
+// slice that is not deferred has no thin device, or one whose read does not
+// answer: a converge of them runs CN14's pre-pass, which suspends the
+// origin's raid0 to make the missing ids (snapshotPrePass), so the cntlr's
+// verdict leaves their rows out (cntlrRowVerdict). A snapshot whose devices
+// are all there makes no message and suspends no origin, so its rows are
+// named like any other. Only a primary builds thin devices.
+func (s *CnAgentServer) snapsLackingADevice(
+	ctx context.Context,
+	plan *cntlrPlan,
+) map[uint64]bool {
+	waiting := map[uint64]bool{}
+	if !plan.primary {
+		return waiting
+	}
+	for _, tp := range plan.tds {
+		if tp.td.GetOriId() == 0 || tp.td.GetCreated() {
+			continue
+		}
+		for _, sp := range plan.slices {
+			if sp.deferred {
+				continue
+			}
+			dev, err := s.dmInfo(ctx, plan.rd,
+				plan.thinName(tp.tdId, sp.sliceId))
+			if err != nil || dev == nil {
+				waiting[tp.tdId] = true
+				break
+			}
+		}
+	}
+	return waiting
+}
+
+// nsDevUnder is the row of what an ns-dev's backing is: the td's raid0, the
+// td's dm-error of a park, or a clone's dm-clone; nil, which counts as
+// there, for a backing that has no row.
+func nsDevUnder(np *nsPlan, info *pb.CntlrInfo) *pb.ResInfo {
+	switch {
+	case np.td == nil:
+		return nil
+	case np.backingName == np.td.raid0Name:
+		return info.GetTdIdToRaid0()[np.td.tdId]
+	case np.backingName == np.td.errorName:
+		return info.GetTdIdToDmError()[np.td.tdId]
+	case np.clone != nil && np.backingName == np.clone.finalName:
+		return info.GetCloneIdToDmClone()[np.clone.cloneId]
+	}
+	return nil
+}
+
+// rowsUnder reports whether every row in under reads RES_STATUS_OK; a nil
+// row is one with no row of its own, which counts as there.
+func rowsUnder(under []*pb.ResInfo) bool {
+	for _, row := range under {
+		if row != nil && row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			return false
+		}
+	}
+	return true
+}
+
+// nameCntlrRow records row in res when cntlrRowVerdict names it.
+func nameCntlrRow(row *pb.ResInfo, res *agent.SweepResult) {
+	var err error
+	switch row.GetStatus() {
+	case pb.ResStatus_RES_STATUS_MISSING:
+		if row.GetReason() != pb.ResReason_RES_REASON_NONE {
+			return
+		}
+		err = errRowAbsent
+	case pb.ResStatus_RES_STATUS_ERROR:
+		if row.GetReason() == pb.ResReason_RES_REASON_THIN_ID_LOST ||
+			row.GetDetails() == detailsPortMissing ||
+			strings.HasPrefix(row.GetDetails(), detailsConcatNoShrink) {
+			return
+		}
+		err = errRowDiffers
+	case pb.ResStatus_RES_STATUS_OK:
+		if row.GetReason() != pb.ResReason_RES_REASON_DIFFERS {
+			return
+		}
+		err = errRowDiffers
+	default:
+		return
+	}
+	if details, _, _ := strings.Cut(row.GetDetails(), "\n"); details != "" {
+		err = fmt.Errorf("%w: %s", err, details)
+	}
+	res.Fail(row.GetResName(), err)
+}
+
+// errRowAbsent and errRowDiffers are the failures cntlrRowVerdict records
+// for the rows it names.
+var (
+	errRowAbsent  = errors.New("absent")
+	errRowDiffers = errors.New("differs")
+)
+
+// sortedIds lists the keys of m in ascending order.
+func sortedIds[V any](m map[uint64]V) []uint64 {
+	ids := make([]uint64, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // errNoController is the failure a cntlr's verdict records for a side of a

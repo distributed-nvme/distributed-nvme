@@ -1585,8 +1585,10 @@ that its `Syncup*` is re-sent (`architecture.md`, Teardown by sweep). Most
 such conditions come only from the verdict a background read gives
 (`dnagent.md` SH29, SH31), so they ride only on the `Check*` and
 `Get*Info` replies that answer from a read's observation; a dn's
-unconfirmed disk identity rides on a converge's too, and a record a
-converge's pass could not free on a converge's alone (`dnagent.md` DN19).
+unconfirmed disk identity, and a row of a side or a cntlr that the
+converge's own build left absent or differing (`dnagent.md` DN16,
+`cnagent.md` CN30), ride on a converge's too, and a record a converge's
+pass could not free on a converge's alone (`dnagent.md` DN19).
 It is logged as
 `syncup leftover` (`log.md`, Leftovers) beside the ordinary
 `syncup result`: nothing agent-side re-drives the sweep for a leftover (the
@@ -2117,7 +2119,13 @@ has reported its demotion's revision, or a newer one, applied, or until
 `DemotionHoldTimeout` has passed, whichever comes first. A cntlr child
 reports as a side child does (RW14): each accepted reply (RW5), a
 `CheckCntlr` one as much as a `SyncupCntlr` one, whose revision is newer
-than the last one it reported. Then the sides are handed the fan-out, and
+than the last one it reported. A reply with `ReplyCodeLeftover` is
+accepted, so a demotion whose converge left something not as wanted,
+which the agent names in that code (`dnagent.md` SH31), ends the wait as
+one with code zero does. Reason: the old primary has taken the demotion's
+request, and the fence keeps it off the sides whatever its namespaces
+still say (`dnagent.md` DN10); waiting the timer out for it would only
+lengthen the failover. Then the sides are handed the fan-out, and
 the other cntlrs follow under the sides-first hold, which takes the sides
 it waits for (RW14) from the side plans the demotion hold kept, the
 newest, and whose bound of one `cntlr_interval` runs from that moment.

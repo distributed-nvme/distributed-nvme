@@ -424,11 +424,12 @@ func (s *CnAgentServer) dropCntlrState(
 // directory or ANA group, which EnsurePort makes; and an ANA group in a state
 // other than its fixed one on a port whose transport attributes all match,
 // which EnsurePort rewrites, since nvmet takes an ana_state write whatever is
-// linked to the port. A probe that did not answer proves nothing, and the
-// next read asks again. A transport attribute of the port that differs is
-// left to its row and not returned: nvmet refuses to rewrite it while a
-// subsystem is linked to the port (EACCES), so that while one is every
-// re-send would fail on it the same way.
+// linked to the port; and a transport attribute of the port that differs
+// while no subsystem is linked to it, which EnsurePort rewrites. A probe that
+// did not answer proves nothing, and the next read asks again. A transport
+// attribute that differs while a subsystem is linked is left to its row and
+// not returned: nvmet refuses to rewrite it then (EACCES), so every re-send
+// would fail on it the same way.
 func (s *CnAgentServer) probeCn(
 	ctx context.Context,
 	st *cnState,
@@ -455,7 +456,8 @@ func (s *CnAgentServer) probeCn(
 	case portState != agent.PortOk:
 		info.PortInfo = t.Err(resKeyPort, portName, details)
 		// The shared rule of dnagent.md SH31: a transport attribute that
-		// differs (PortAttrMismatch) is not re-driven, see above.
+		// differs while a subsystem is linked (PortAttrMismatch) is not
+		// re-driven, see above.
 		if piece := agent.PortRedrive(
 			portName, portState, details); piece != nil {
 			redrive = append(redrive, *piece)

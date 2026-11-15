@@ -820,12 +820,13 @@ func (s *DnAgentServer) freeCloneMetaOf(
 // startup Reconcile.
 //
 // remove = false is the read-only verdict the side's background read takes
-// (SH29): same enumeration, same comparison, nothing touched — plus the two
-// comparisons only the verdict makes, zeroing that should run
-// (zeroingVerdict) and what the read's probe found absent that a re-sent
-// SyncupSide builds (absentVerdict, from read, the read's rows), taken before
-// the result is logged so the pass's one `sweep leftover` record carries
-// them. A converge passes no rows: it has just built what it could.
+// (SH29): same enumeration, same comparison, nothing touched — plus zeroing
+// that should run (zeroingVerdict), a comparison only the read makes, and
+// the rows of the read's probe a re-sent SyncupSide could cure (rowVerdict,
+// from read), taken before the result is logged so the pass's one `sweep
+// leftover` record carries them. A converge passes no rows and logs nothing
+// here: it takes rowVerdict over the rows of its own build once that has
+// run, and logs then (convergeSide).
 func (s *DnAgentServer) sweepSide(
 	ctx context.Context,
 	st *sideState,
@@ -866,9 +867,9 @@ func (s *DnAgentServer) sweepSide(
 		reportChain(chain, res)
 		if verdict {
 			s.zeroingVerdict(ctx, st, plan, res)
-			s.absentVerdict(ctx, plan, read, res)
+			s.rowVerdict(ctx, plan, read, res)
+			res.Log(ctx, sideIdAttrs(plan)...)
 		}
-		res.Log(ctx, sideIdAttrs(plan)...)
 		return res
 	}
 	s.sweepMigrChunks(ctx, st, plan)
@@ -882,7 +883,6 @@ func (s *DnAgentServer) sweepSide(
 	_, _, identified := s.meta.Identity()
 	s.runChain(ctx, chain, actual, res, s.cloneMetaGate(identified))
 	st.tracker.Keep(sideResKeys(plan))
-	res.Log(ctx, sideIdAttrs(plan)...)
 	return res
 }
 
@@ -1769,8 +1769,8 @@ func (s *DnAgentServer) dnVerdict(
 // and sweeps nothing, so naming leftovers for it would report objects it is
 // not allowed to remove.
 //
-// read is what the read's probe just found (probeSide); absentVerdict names
-// from it what a re-sent SyncupSide builds.
+// read is what the read's probe just found (probeSide); rowVerdict names
+// from it what a re-sent SyncupSide would build or rewrite.
 func (s *DnAgentServer) sideVerdict(
 	ctx context.Context,
 	st *sideState,
@@ -1844,79 +1844,141 @@ func (s *DnAgentServer) zeroingVerdict(
 		fmt.Errorf("nothing is zeroing the side"))
 }
 
-// absentVerdict is the other comparison a side's verdict makes beyond the
-// sweep's: what the read found absent that a re-sent SyncupSide builds
-// (SH31, DN16). The worker re-sends a Syncup* on a Check reply's code alone, never
-// on its rows (dnv-worker.md RW4), so a side whose build stopped once — the
-// startup reconcile's while no read of the disk answered, a create that was
-// refused — would stay unbuilt with code zero until something else moved its
-// revision. It reads only the rows the read set, so nothing about the failed
-// build is remembered, and it names a row by its object, the failure text
-// "absent".
+// rowVerdict is what a side's verdict names beyond the sweep's leftovers:
+// each row of the pass that is not as the desired state wants it and that a
+// re-sent SyncupSide could cure (SH31, DN16). Both a converge and a read take
+// it, each from the rows it just made, so nothing about a failed step is
+// remembered and the two channels name the same node alike. The worker
+// re-sends a Syncup* on a Check reply's code alone, never on its rows
+// (dnv-worker.md RW4), so without the name a side whose step stopped once —
+// a side device check that did not answer in the converge a cutover brings,
+// a port link that failed, a device left suspended — would stay so with
+// code zero until something else moved its revision.
 //
-// The side device's row is MISSING for a record that is absent while the
-// side has not provisioned, and for a record that is there over a dm-linear
-// that is not; it is named only where AllocSide would hand a record back
-// (DiskMeta.SideAllocRefusal), so a refused allocation (no room, a record
-// that disagrees with the request, a disk not confirmed) is not re-sent on
-// every round. A provisioned side with no record reads ERROR, not MISSING, and its
-// row feeds leg repair instead. Above the side device a row reads MISSING
-// only once the side is ready (probeSide), and such a row is a dm device
-// or an export the converge builds: the per-CN dm-errors, dm-linears and
-// exports, and a migration source's linear and export. An export is named
-// too when its subsystem is there and a part its build makes is not
-// (exportPartAbsent); one whose link alone is missing while the port itself
-// is not there says so (detailsPortMissing) and is not named, since the DN's
-// verdict names the port. An object that is there but wrong, a dm table that
-// differs say, reads ERROR and is not named: its row feeds the side's health
-// epoch. A migration destination's two rows are left out: their converge
-// stops for reasons of its own (DN13) that a re-send repeats.
-func (s *DnAgentServer) absentVerdict(
+// It names a row by its object:
+//
+//   - Nothing at all while AllocSide would refuse the side
+//     (DiskMeta.SideAllocRefusal) — no room, a record that disagrees with
+//     the request, a disk not confirmed — so a refused allocation is not
+//     re-sent on every round, and no row judged by the request's geometry
+//     over a record of another is named either.
+//   - The side device's row when it reads RES_STATUS_MISSING; and when it reads
+//     RES_STATUS_ERROR over a record of a confirmed disk that is fully
+//     zeroed, so the error is the side device's own: a table that differs, a
+//     suspended device, a check that did not answer. The errors of the
+//     record and the zeroing are not named: a provisioned side whose record
+//     is gone feeds leg repair, a record not fully zeroed is the zeroing
+//     check's (zeroingVerdict), and a read of the disk that did not answer is
+//     the DN's verdict's (DN6's record step).
+//   - Each per-CN dm-error, dm-linear and export row, and a migration
+//     source's and a migration destination's two rows, that reads
+//     RES_STATUS_MISSING or RES_STATUS_ERROR, or
+//     RES_STATUS_OK with RES_REASON_DIFFERS (an export whose ANA group
+//     differs). Two are left out: an export whose port is not there
+//     (detailsPortMissing), which the DN's verdict names, so the sides are
+//     not re-sent for the link alone; and a migration destination's dm-clone
+//     whose metadata is read-only (detailsCloneMetaMode), which no converge
+//     brings back.
+//
+// A RES_STATUS_PROVISIONING row is never named: the stack above a side that
+// is still zeroing, or that the control plane has not released, and the wait
+// of a migration destination for its cutover or for room in the
+// clone-metadata area are holds of the design, which no syncup builds past.
+// A row the level suppresses is not there to read.
+func (s *DnAgentServer) rowVerdict(
 	ctx context.Context,
 	plan *sidePlan,
-	read *pb.SideInfo,
+	info *pb.SideInfo,
 	res *agent.SweepResult,
 ) {
-	absent := func(row *pb.ResInfo) {
-		if row.GetStatus() == pb.ResStatus_RES_STATUS_MISSING {
-			res.Fail(row.GetResName(), errObjectAbsent)
+	// A side AllocSide would refuse — no room, a record that disagrees with
+	// the request, a disk not confirmed — names nothing: a re-sent request
+	// is refused the same way, and every row above it is judged by the
+	// request's geometry, which the record does not have.
+	if s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
+		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) != nil {
+		return
+	}
+	if row := info.GetSideDevInfo(); row != nil {
+		switch row.GetStatus() {
+		case pb.ResStatus_RES_STATUS_MISSING:
+			nameRow(row, res)
+		case pb.ResStatus_RES_STATUS_ERROR:
+			rec, ok, err := s.meta.LookupConfirmedSide(
+				ctx, plan.spId, plan.sideId)
+			if err == nil && ok && sideFullyZeroed(rec) {
+				nameRow(row, res)
+			}
 		}
 	}
-	exportAbsent := func(row *pb.ResInfo) {
-		if exportPartAbsent(row) {
-			res.Fail(row.GetResName(),
-				fmt.Errorf("%w: %s", errObjectAbsent, row.GetDetails()))
-			return
-		}
-		absent(row)
-	}
-	if read.GetSideDevInfo().GetStatus() ==
-		pb.ResStatus_RES_STATUS_MISSING &&
-		s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
-			plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) == nil {
-		absent(read.GetSideDevInfo())
-	}
-	for _, kind := range []struct {
-		rows  map[uint64]*pb.ResInfo
-		check func(*pb.ResInfo)
-	}{
-		{read.GetCnIdToDmError(), absent},
-		{read.GetCnIdToDmLinear(), absent},
-		{read.GetCnIdToNvmeof(), exportAbsent},
+	for _, rows := range []map[uint64]*pb.ResInfo{
+		info.GetCnIdToDmError(),
+		info.GetCnIdToDmLinear(),
+		info.GetCnIdToNvmeof(),
 	} {
-		cnIds := make([]uint64, 0, len(kind.rows))
-		for cnId := range kind.rows {
+		cnIds := make([]uint64, 0, len(rows))
+		for cnId := range rows {
 			cnIds = append(cnIds, cnId)
 		}
 		slices.Sort(cnIds)
 		for _, cnId := range cnIds {
-			kind.check(kind.rows[cnId])
+			nameRow(rows[cnId], res)
 		}
 	}
-	absent(read.GetMigrSrcInfo().GetDmLinearInfo())
-	exportAbsent(read.GetMigrSrcInfo().GetNvmeofInfo())
+	nameRow(info.GetMigrSrcInfo().GetDmLinearInfo(), res)
+	nameRow(info.GetMigrSrcInfo().GetNvmeofInfo(), res)
+	nameRow(info.GetMigrDstInfo().GetTargetInfo(), res)
+	nameRow(info.GetMigrDstInfo().GetDmCloneInfo(), res)
 }
 
-// errObjectAbsent is the failure absentVerdict records for each object it
-// names.
-var errObjectAbsent = errors.New("absent")
+// nameRow records row in res when rowVerdict names it: a row that reads
+// RES_STATUS_MISSING, or an export's that reads RES_STATUS_ERROR because a
+// part its build makes is not there, as "absent"; one that reads
+// RES_STATUS_ERROR otherwise, or RES_STATUS_OK with
+// RES_REASON_DIFFERS, as "differs"; each with the first line of the row's
+// details after it, but for the two rows rowVerdict leaves out. A nil row
+// names nothing.
+func nameRow(row *pb.ResInfo, res *agent.SweepResult) {
+	if row == nil {
+		return
+	}
+	details := row.GetDetails()
+	var err error
+	switch row.GetStatus() {
+	case pb.ResStatus_RES_STATUS_MISSING:
+		err = errObjectAbsent
+	case pb.ResStatus_RES_STATUS_ERROR:
+		switch {
+		case details == detailsPortMissing,
+			strings.HasPrefix(details, detailsCloneMetaMode):
+			return
+		case details == detailsNsMissing, details == detailsNsNotEnabled,
+			details == detailsNotLinked:
+			// A part an export's build makes is not there.
+			err = errObjectAbsent
+		default:
+			err = errObjectDiffers
+		}
+	case pb.ResStatus_RES_STATUS_OK:
+		if row.GetReason() != pb.ResReason_RES_REASON_DIFFERS {
+			return
+		}
+		err = errObjectDiffers
+	default:
+		return
+	}
+	if details != "" {
+		// Only the first line: a dm-clone row carries its raw status line
+		// after it, which the reply has no use for.
+		first, _, _ := strings.Cut(details, "\n")
+		err = fmt.Errorf("%w: %s", err, first)
+	}
+	res.Fail(row.GetResName(), err)
+}
+
+// errObjectAbsent and errObjectDiffers are the failures rowVerdict records
+// for the objects it names.
+var (
+	errObjectAbsent  = errors.New("absent")
+	errObjectDiffers = errors.New("differs")
+)

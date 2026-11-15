@@ -244,6 +244,29 @@ func (s *DnAgentServer) convergeSide(
 	extentSize uint64,
 	connectBudget time.Duration,
 ) (*pb.SideInfo, *agent.SweepResult) {
+	info, sweep, plan := s.convergeSideSteps(
+		ctx, st, extentSize, connectBudget)
+	if plan == nil {
+		return info, sweep
+	}
+	// The converge's code names, beside its sweep's leftovers, every row of
+	// its build a re-sent SyncupSide could cure (SH31), as a read's does: a
+	// step that stopped in this pass is retried by the worker's next round
+	// (dnv-worker.md RW4).
+	s.rowVerdict(ctx, plan, info, sweep)
+	sweep.Log(ctx, sideIdAttrs(plan)...)
+	return info, sweep
+}
+
+// convergeSideSteps is convergeSide's sweep and build. It returns the plan it
+// converged, nil when DN8's side conf gate refused the stored request, which
+// converges nothing and so has no verdict.
+func (s *DnAgentServer) convergeSideSteps(
+	ctx context.Context,
+	st *sideState,
+	extentSize uint64,
+	connectBudget time.Duration,
+) (*pb.SideInfo, *agent.SweepResult, *sidePlan) {
 	// The same refusal as syncupSide's (DN8), for the entrances that do not
 	// come through it: the startup Reconcile, which converges from a stored
 	// file, and reconvergeSide — the DN13 retry and the DN12 fence timer —
@@ -254,7 +277,7 @@ func (s *DnAgentServer) convergeSide(
 	req := st.req.Load()
 	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
 		logInvalidSideConf(ctx, req, err)
-		return &pb.SideInfo{}, &agent.SweepResult{}
+		return &pb.SideInfo{}, &agent.SweepResult{}, nil
 	}
 	plan := newSidePlan(s.nf, req, extentSize)
 	info := &pb.SideInfo{}
@@ -278,7 +301,7 @@ func (s *DnAgentServer) convergeSide(
 		// already removed everything else, dm-clone included: at
 		// this level nothing is wanted but the side device, so the per-CN
 		// linears went first and stopped holding the clone open.
-		return info, sweep
+		return info, sweep, plan
 	}
 	if state != sideDevReady {
 		// The whole per-CN stack is gated together (DN9 step 4): dm-error,
@@ -301,7 +324,7 @@ func (s *DnAgentServer) convergeSide(
 		// builds nothing (dnagent.md, Known limits).
 		s.settleFence(ctx, st, plan)
 		s.reportAboveSideDeferred(st, plan, info, metaWait)
-		return info, sweep
+		return info, sweep, plan
 	}
 
 	// architecture.md, Migration: the source builds its migration source
@@ -319,7 +342,7 @@ func (s *DnAgentServer) convergeSide(
 		if !s.buildMigrSrc(ctx, st, plan, info) {
 			s.settleFence(ctx, st, plan)
 			s.probeCnStacks(ctx, st, plan, info, false)
-			return info, sweep
+			return info, sweep, plan
 		}
 		// Src step 1: hand IO over before the dm-linears are suspended, and
 		// later reloaded onto their dm-errors.
@@ -346,7 +369,7 @@ func (s *DnAgentServer) convergeSide(
 			// probe.
 			s.settleFence(ctx, st, plan)
 			s.probeStacks(ctx, st, plan, info, serving.cloneLive())
-			return info, sweep
+			return info, sweep, plan
 		}
 	}
 	s.ensureCnDm(ctx, st, plan, info, cloneLive)
@@ -369,7 +392,7 @@ func (s *DnAgentServer) convergeSide(
 		// follows its deregistration.
 		s.settleMigrRetry(st, plan, info)
 	}
-	return info, sweep
+	return info, sweep, plan
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,24 +1055,38 @@ func (s *DnAgentServer) ensureCnExports(
 	for _, cnId := range plan.cnIds {
 		nqn := plan.sideNqn(cnId)
 		key := resKeyOf(resKeyNvmeofFmt, cnId)
-		err := s.ensureExport(ctx,
-			agent.SubsysConf{
-				Nqn:          nqn,
-				Serial:       fmt.Sprintf(common.IdKeyFmt, plan.legId),
-				Model:        common.NvmeModel,
-				CntlidMin:    cntlidMin,
-				CntlidMax:    cntlidMax,
-				AllowedHosts: []string{plan.cnHostNqn(cnId)},
-			},
-			agent.NsConf{
-				Nqn:        nqn,
-				Nsid:       sideNsid,
-				DevicePath: s.nf.DmPath(plan.linearName(cnId)),
-				Uuid:       uuid,
-				Nguid:      nguid,
-				AnaGrpId:   plan.anaGrpId(cnId, cloneLive),
-			})
-		info.CnIdToNvmeof[cnId] = st.tracker.FromErr(key, nqn, "", err)
+		subsys := agent.SubsysConf{
+			Nqn:          nqn,
+			Serial:       fmt.Sprintf(common.IdKeyFmt, plan.legId),
+			Model:        common.NvmeModel,
+			CntlidMin:    cntlidMin,
+			CntlidMax:    cntlidMax,
+			AllowedHosts: []string{plan.cnHostNqn(cnId)},
+		}
+		ns := agent.NsConf{
+			Nqn:        nqn,
+			Nsid:       sideNsid,
+			DevicePath: s.nf.DmPath(plan.linearName(cnId)),
+			Uuid:       uuid,
+			Nguid:      nguid,
+			AnaGrpId:   plan.anaGrpId(cnId, cloneLive),
+		}
+		err := s.ensureExport(ctx, subsys, ns)
+		if err == nil {
+			info.CnIdToNvmeof[cnId] = st.tracker.Ok(key, nqn, "")
+			continue
+		}
+		// A step that failed is read as a read reads it, so an export that
+		// serves and differs in its ANA group alone — its move failed —
+		// reads as on the other channel, RES_STATUS_OK with the difference
+		// (SH31); any other keeps the step's own error.
+		status, details, reason := s.probeExport(ctx, subsys, ns)
+		if status == pb.ResStatus_RES_STATUS_OK {
+			info.CnIdToNvmeof[cnId] = st.tracker.SetReason(
+				key, nqn, status, details, reason)
+			continue
+		}
+		info.CnIdToNvmeof[cnId] = st.tracker.Err(key, nqn, err.Error())
 	}
 }
 
@@ -1092,8 +1129,11 @@ func (s *DnAgentServer) moveCnAnaGroups(
 ) {
 	for _, cnId := range plan.cnIds {
 		nqn := plan.sideNqn(cnId)
-		state, err := s.nvmet.ProbeNamespace(ctx, nqn, sideNsid)
-		if err != nil || !state.Exists || state.AnaGrpId == grpId {
+		// The group alone is read, strictly. A read that did not answer
+		// leaves the move tried all the same: src step 1 moves to
+		// inaccessible, the safe direction.
+		cur, present, err := s.nvmet.NsAnaGrpId(ctx, nqn, sideNsid)
+		if err == nil && (!present || cur == grpId) {
 			continue
 		}
 		if err := s.nvmet.SetNsAnaGrpId(

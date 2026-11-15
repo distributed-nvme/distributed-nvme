@@ -4217,8 +4217,9 @@ with `ResStatus`:
 * `RES_STATUS_MISSING` — the agent has not created it, a build still to
   come or a resource its pool's level suppresses (`cnagent.md` CN19). A
   row alone brings no new `Syncup*`: the worker re-sends one on a reply's
-  code, which a read's verdict sets only for the conditions each role
-  names (`dnagent.md` SH31, DN16; `cnagent.md` CN30). A
+  code, which a verdict sets for what a re-sent `Syncup*` would build or
+  rewrite, a side's and a cntlr's on a converge and a read alike, each
+  role saying which rows (`dnagent.md` SH31, DN16; `cnagent.md` CN30). A
   clone's `clone_id_to_target` row also reads it while the node reads the
   clone's source as not connected, not live or with no namespace
   (`cnagent.md` CN18). The row's reason marks a suppressed row, and a
@@ -4226,9 +4227,12 @@ with `ResStatus`:
   source as ready (`cnagent.md` CN18 says which, and when a source still
   coming up reads so); the settle of `dnv-worker.md` HL2 waits for
   neither.
-* `RES_STATUS_ERROR` — tried and failed; `details` says why, or carries
+* `RES_STATUS_ERROR` — tried and failed, or there and unable to serve IO,
+  a dm device left suspended among them; `details` says why, or carries
   the command output — *needs intervention*.
-* `RES_STATUS_OK`.
+* `RES_STATUS_OK` — there and serving; with `RES_REASON_DIFFERS` it serves
+  and differs from what the desired state wants in a way a converge
+  rewrites, the difference in `details`.
 * `RES_STATUS_PROVISIONING` — deliberately not created, being prepared,
   kept unprobed behind a side's provisioning gate that closed again
   (`dnagent.md` DN9), waiting for a free run in a DN's metadata area
@@ -4300,7 +4304,16 @@ migration rows and `dnv-worker.md` RW18 reads; `RES_REASON_SP_LEVEL`, which
 and `RES_REASON_SOURCE_FAULT`, which `cnagent.md` CN18 sets on the clone
 rows the cn agent keeps `MISSING` because it does not read the clone's
 source as ready, CN18 saying which; the settle of `dnv-worker.md` HL2
-reads these two. An agent sets a reason from what its own pass
+reads these two; and `RES_REASON_DIFFERS`, which both agents set on an
+`OK` row of an object that serves and differs — today a namespace wanted
+non-optimized or inaccessible whose ANA group differs, as a namespace
+still optimized after a failed move to inaccessible; one wanted optimized
+that is not leaves the primary without its optimized path and reads
+`RES_STATUS_ERROR` (`dnagent.md` DN18, SH31; `cnagent.md` CN28) — and
+which the object's
+verdict names, so the worker re-sends its
+`Syncup*` (`dnagent.md` SH31); no health rule reads it, so such a row is
+healthy. An agent sets a reason from what its own pass
 established, never from a row's text: `cnagent.md` CN29 says how the cn
 agent does, `dnagent.md` DN13 how the dn agent does.
 
@@ -5343,7 +5356,9 @@ end state (`dnagent.md` DN13):
 3. `nvme connect` to the `MigrSrcNqn` of the cluster,
    `migr_dst_conf.src_dn_id`, the sp and the `migr_id` at
    `migr_dst_conf.src_nvme_tr_conf`, with the host NQN `DnHostNqn` the
-   source admits, retrying until success (`dnagent.md` DN13).
+   source admits. A step that stops is tried again by the destination's
+   retry and by the `SyncupSide` the side's verdict brings, which names
+   what the stop left not as wanted (`dnagent.md` DN13, DN16).
 4. Create the dm-clone `DnMigrFinalName`: metadata the step-2 wrapper,
    destination the local side device `DnSideName`, source the connected
    nvme device, region size `migr_dst_conf.block_size` (the SP's
@@ -7080,9 +7095,12 @@ document and only pointed to here.
   (Migration), and the destination's last step moves that path to optimized, so
   the waiting IO goes on and the commit finishes once the disk nodes have run
   their steps. Where a step of theirs stops instead, as when the destination's
-  connect to the source is still refused once its pass's retries run out, the
-  gap lasts until a later pass of the destination's retry runs it (`dnagent.md`
-  DN13), and a commit waits that long. The pass the cutover brings retries the
+  connect to the source is still refused once its pass's retries run out, or
+  the check of its side device does not answer, the gap lasts until a later
+  pass runs it: the destination's retry, or the `SyncupSide` the side's
+  verdict brings on the worker's next round, since that verdict names what
+  the stop left not as wanted (`dnagent.md` DN13, DN16); a commit waits
+  that long. The pass the cutover brings retries the
   connect longer than any other (`dnagent.md` DN13). A migration whose record
   carries no `cutover_pending` has no cutover to wait at (Upgrade in lockstep):
   its gap can open before the primary has connected the destination, and the

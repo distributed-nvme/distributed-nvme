@@ -1455,6 +1455,11 @@ func (f *fakeNode) cmdLn(args []string) (string, int) {
 	if _, ok := f.links[link]; ok {
 		return "", 1
 	}
+	// `ln -s` into a directory that is not there fails (ENOENT), as a
+	// subsystem's link into a port whose directory is gone does.
+	if dir := parentDir(link); dir != "" && !f.dirs[dir] {
+		return "", 1
+	}
 	f.links[link] = target
 	return "", 0
 }

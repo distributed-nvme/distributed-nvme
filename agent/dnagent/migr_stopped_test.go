@@ -706,10 +706,19 @@ func TestMigrationDestinationStepFiveIsRetried(t *testing.T) {
 			t.Fatalf("fixture is wrong: dm_clone_info = %v/%q, want OK",
 				got.GetStatus(), got.GetDetails())
 		}
+		// The new primary's namespace is not optimized, so its export
+		// does not serve as the primary's: an ERROR row, which the
+		// reply's code names (SH31).
 		if got := info.GetCnIdToNvmeof()[testCn1]; got.GetStatus() !=
 			pb.ResStatus_RES_STATUS_ERROR {
 			t.Errorf("the new primary's nvmeof row = %v/%q, want ERROR",
 				got.GetStatus(), got.GetDetails())
+		}
+		if got := reply.GetAgentReply(); got.GetCode() !=
+			common.ReplyCodeLeftover || !strings.Contains(got.GetDetails(),
+			newPrimary.nqn+": differs:") {
+			t.Errorf("reply = %v, want the leftover code naming %s",
+				got, newPrimary.nqn)
 		}
 		served(t, srv, node, newPrimary)
 	})

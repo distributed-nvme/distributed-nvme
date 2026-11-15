@@ -272,7 +272,7 @@ func (s *CnAgentServer) convergeCntlr(
 	// CN10: the pass's NVMe walk, the sweep's list of connections and where
 	// the build's lookups find their entries until the build marks it stale.
 	plan.walk = s.newPassWalk(ctx)
-	sweep := s.sweepCntlr(ctx, st, plan, true, nil, nil)
+	sweep := s.sweepCntlr(ctx, st, plan, true, nil, nil, nil)
 	if !plan.wantAny {
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
 		// cntlr-scoped object has just gone, but the store file and the
@@ -283,6 +283,12 @@ func (s *CnAgentServer) convergeCntlr(
 		s.dropAllResKeys(st, plan)
 	}
 	s.build(ctx, st, plan, info, budget)
+	// The converge's code names, beside its sweep's leftovers, every row of
+	// its build a re-sent SyncupCntlr could cure (CN30), as a read's does:
+	// a step that stopped in this pass is retried by the worker's next round
+	// (dnv-worker.md RW4).
+	cntlrRowVerdict(plan, info, s.snapsLackingADevice(ctx, plan), sweep)
+	sweep.Log(ctx, s.cntlrIdAttrs(plan)...)
 	return info, sweep
 }
 
@@ -663,8 +669,11 @@ func (s *CnAgentServer) build(
 		// whose load failed. A failed step that did not find its ns-dev
 		// parked keeps the group: a failed read never moves an optimized
 		// namespace back. A namespace the desired state wants inaccessible
-		// is there already: CN9's P1 moved it before anything under it was
-		// touched.
+		// was moved there by CN9's P1 before anything under it was touched;
+		// one whose move failed there serves on in the group it had, its
+		// row reads OK with RES_REASON_DIFFERS, and the converge's own
+		// verdict names it (cntlrRowVerdict), so the worker sends the
+		// SyncupCntlr again and its P1 moves it.
 		for _, np := range plan.namespaces {
 			if np.anaGrpId == common.AnaGrpIdInaccessible {
 				continue

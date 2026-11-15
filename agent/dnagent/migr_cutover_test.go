@@ -411,8 +411,12 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SyncupSide: %v", err)
 			}
-			if code := reply.GetAgentReply().GetCode(); code != 0 {
-				t.Fatalf("rejected: %v", reply.GetAgentReply())
+			// The step that stopped is named, so the worker's next round
+			// sends the syncup again beside the retry (SH31).
+			if code := reply.GetAgentReply().GetCode(); code !=
+				common.ReplyCodeLeftover {
+				t.Fatalf("code = %v, want the leftover code naming the "+
+					"step that stopped", reply.GetAgentReply())
 			}
 			if row := tc.row(reply.GetSideInfo()); row.GetStatus() ==
 				pb.ResStatus_RES_STATUS_OK {
@@ -1005,8 +1009,11 @@ func TestARefusedClearingRequestLeavesTheFlaggedRequestHeld(t *testing.T) {
 		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if got := reply.GetAgentReply().GetCode(); got != 0 {
-		t.Errorf("the request sent again answered code %d, want 0", got)
+	// The connect is still refused, so the target in error is named.
+	if got := reply.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeLeftover {
+		t.Errorf("the request sent again answered code %d, want the "+
+			"leftover code naming the refused target", got)
 	}
 	if got := clock.Now().Sub(start); got !=
 		common.DnMigrCutoverConnectBudget {
@@ -1044,9 +1051,10 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	// The RPC still returns; the connect is retried in the background.
-	if reply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	// The RPC still returns, naming the target in error, so the worker
+	// sends it again; the connect is retried in the background too.
+	if reply.GetAgentReply().GetCode() != common.ReplyCodeLeftover {
+		t.Fatalf("code = %v, want the leftover code", reply.GetAgentReply())
 	}
 	target := reply.GetSideInfo().GetMigrDstInfo().GetTargetInfo()
 	if target.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||

@@ -106,7 +106,8 @@ func TestPromotionAheadOfTheSidesWaitsInaccessible(t *testing.T) {
 			if err != nil {
 				t.Fatalf("promote: %v", err)
 			}
-			if reply.GetAgentReply().GetCode() != 0 {
+			// The step the fault stopped is named (CN30).
+			if !acceptedCode(reply.GetAgentReply(), true) {
 				t.Fatalf("rejected: %v", reply.GetAgentReply())
 			}
 			if _, ok := node.dms[raid0Name(srv, testTd)]; ok {
@@ -357,6 +358,8 @@ func TestAHeldNsDevWithAnUnreadableDmErrorReadsTheSameOnBothChannels(
 	}
 	assertAna(t, node, testNqn, "3", "the held pass")
 	assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=1")
+	// The held namespace is wanted optimized and sits inaccessible: the
+	// primary has no optimized path, so its row reads ERROR (CN28).
 	row := reply.GetCntlrInfo().GetNsIdToNamespace()[testNs]
 	assertRowStatus(t, row, pb.ResStatus_RES_STATUS_ERROR,
 		"the converge's namespace row")

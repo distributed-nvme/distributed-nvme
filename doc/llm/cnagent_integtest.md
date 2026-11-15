@@ -325,7 +325,8 @@ host; the host's path and the CN's leg paths each hold the cap's IO queues
 and the admin queue (`dnagent.md` SH32); revoked again, the connected host keeps its path and its next connect is
 refused; host IO; clean check rounds, the namespace identity included
 (`dnagent.md` SH17); the raw thin-pool status line the auto-grow parses (CN28);
-two subsystems made by hand, one with a namespace over a device that is no
+a raid0 suspended by hand, which a check round's read names with the leftover
+code and the `SyncupCntlr` sent again resumes (CN30); two subsystems made by hand, one with a namespace over a device that is no
 ns-dev and one empty with the kernel's default model, which the teardown's
 node-level sweep leaves alone, and a third with dnv's model and a namespace
 whose device was never written, which it removes (CN21); and a teardown by an empty pointer

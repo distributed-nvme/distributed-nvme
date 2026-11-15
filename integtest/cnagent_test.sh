@@ -4098,6 +4098,22 @@ case_smoke() {
 		grep -qE 'thin-pool .*[0-9]+/[0-9]+[[:space:]]+[0-9]+/[0-9]+' ||
 		die "smoke pool details is not a thin-pool status line: $got"
 
+	# A read names what differs (cnagent.md CN30): the td's raid0
+	# suspended by hand serves no IO, so a check round's read answers the
+	# leftover code naming it, and the SyncupCntlr sent again resumes it.
+	stage differs "a read names a raid0 suspended by hand, and the syncup sent again resumes it"
+	name=$(cn_dm_name c4 "$cn" "$sp" "$S_TD")
+	sshv "$cn" "dmsetup suspend $name"
+	got=$(check_verdict "$cn" "$sp" "$cntlr" "$cntlrrev")
+	case $got in
+	"4 "*"$name: differs: suspended"*) ;;
+	*) die "differs: the read's verdict does not name $name: $got" ;;
+	esac
+	resync_until_clean "$cn" "$sp" "$cntlr" "$cntlrrev" "$req" 30 \
+		"differs: the syncup sent again"
+	assert_eq "$(helper "$cn" "dm_state $name")" live \
+		"differs: $name resumed by the syncup sent again"
+
 	stage revoke "emptying allowed_hosts closes the subsystem to new connections"
 	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = []"
 	bump_cn_rev "$cn"

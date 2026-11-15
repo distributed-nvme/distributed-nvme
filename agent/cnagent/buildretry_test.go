@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -98,7 +99,15 @@ func TestAFailedBuildStepRegistersTheRetry(t *testing.T) {
 			node.mu.Lock()
 			node.failCmd[tc.fail(srv)] = "refused once"
 			node.mu.Unlock()
-			syncupBoth(t, srv, tc.opts)
+			// The failed step is named in the reply's code (CN30) beside
+			// the retry it registers.
+			opts := tc.opts
+			opts.leftoverOk = true
+			if got := syncupBoth(t, srv, opts).GetAgentReply(); got.
+				GetCode() != common.ReplyCodeLeftover {
+				t.Fatalf("reply = %v, want the leftover code naming the "+
+					"failed step", got)
+			}
 			if tc.built(srv, node) {
 				t.Fatalf("fixture is wrong: the step did not fail")
 			}

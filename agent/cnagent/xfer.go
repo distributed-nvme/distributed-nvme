@@ -236,8 +236,13 @@ func (s *CnAgentServer) ensureXfer(
 	nsErr := s.ensureXferNamespace(ctx, plan, xp)
 	linkErr := s.nvmet.EnsurePortLink(
 		ctx, s.port.PortId, xp.nqn, s.port.QidMax)
-	info.XferIdToSubsystem[xp.xferId] = deferredFromErr(
-		st.tracker, xp.deferred, ssKey, xp.nqn, "", linkErr)
+	if linkErr != nil || !xp.deferred {
+		info.XferIdToSubsystem[xp.xferId] = s.linkRow(ctx, ssKey, xp.nqn,
+			s.xferSubsysConf(plan, xp), st, linkErr)
+	} else {
+		info.XferIdToSubsystem[xp.xferId] = deferredFromErr(
+			st.tracker, xp.deferred, ssKey, xp.nqn, "", linkErr)
+	}
 	return xferStep{outcome: xferDevPut, rows: xferRowsNamespace, nsErr: nsErr,
 		exportFailed: nsErr != nil || linkErr != nil}
 }
@@ -272,10 +277,10 @@ func (s *CnAgentServer) reportXferExport(
 			t, xp.deferred, nsKey, nsName, "", step.nsErr)
 		return
 	}
-	status, details := s.probeNamespaceObject(ctx, s.xferNsConf(plan, xp,
-		s.xferRowAnaGrpId(ctx, nil, plan, xp)))
-	info.XferIdToNamespace[xp.xferId] = deferredSet(
-		t, xp.deferred, nsKey, nsName, status, details)
+	status, details, reason := s.probeNamespaceObject(ctx, s.xferNsConf(
+		plan, xp, s.xferRowAnaGrpId(ctx, nil, plan, xp)))
+	info.XferIdToNamespace[xp.xferId] = deferredSetReason(
+		t, xp.deferred, nsKey, nsName, status, details, reason)
 }
 
 // xferDevOnError reports whether a transfer device's live table is an error

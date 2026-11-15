@@ -240,7 +240,10 @@ DN10). A standby's dm-linear suspended by hand with the side device's table
 waiting, as a reload stopped after its load leaves it, comes back resumed on
 its dm-error with no table waiting once its syncup is sent again, by a
 clear and a resume and no reload: a resume keeps the live table
-(`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
+(`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`). The same
+dm-linear suspended by hand then makes a check round's read answer the
+leftover code naming it, and the `SyncupSide` sent again resumes it
+(`dnagent.md` SH31, DN16).
 
 **migr_full and migr_bitmap** prove `architecture.md`, Migration, with two
 migrations at once in opposite directions, each node the source of one and the
@@ -277,7 +280,9 @@ rows — then read one status, with one epoch, on a converge, in the
 observations a fresh round and then an info read report, each made after
 that converge by a read or by an attempt of the connect retry, which a
 destination with no source to read from keeps registered, and on a second
-converge (`dnagent.md` DN13, DN18). The converge takes the primary's stack
+converge (`dnagent.md` DN13, DN18), and each answers the leftover code,
+which names the destination's two rows (`dnagent.md` DN16). The converge
+takes the primary's stack
 off the dm-clone and, with no source to read from, does not read the
 dm-clone's status line, which the agent's reads still record: only a read's
 observation then proves the hydration the gateway reads, and the stage's
