@@ -707,6 +707,12 @@ func (f *fakeNode) fileAnswer(path string) (string, error) {
 		return "", err
 	}
 	data, ok := f.files[path]
+	if !ok && strings.HasPrefix(path, "/sys/dev/block/") &&
+		strings.HasSuffix(path, "/inflight") {
+		// A device's in-flight IO (Dm.InFlight): none, unless a test
+		// plants a count.
+		return "       0        0\n", nil
+	}
 	if !ok {
 		// The absent-file error MUST wrap fs.ErrNotExist. The production
 		// LimitedOsClient returns os.ReadFile's *fs.PathError, and

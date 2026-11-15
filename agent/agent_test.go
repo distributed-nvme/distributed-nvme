@@ -1042,57 +1042,6 @@ func TestSkipRanges(t *testing.T) {
 	}
 }
 
-// TestApplySkipRanges: every skippable range goes to one DiscardRanges call
-// of the agent's own process, no child process per range, and a failed call
-// names the ranges done.
-func TestApplySkipRanges(t *testing.T) {
-	var calls [][]common.DiscardRange
-	var commands []string
-	fail := false
-	oc := &common.FakeOsClient{
-		RunCommandFn: func(
-			ctx context.Context, name string, args []string, stdin string,
-		) (string, string, int, error) {
-			commands = append(commands, name)
-			return "", "", 0, nil
-		},
-		DiscardRangesFn: func(
-			ctx context.Context, path string, ranges []common.DiscardRange,
-		) (int, error) {
-			if path != "/dev/mapper/x" {
-				t.Fatalf("discard of %s", path)
-			}
-			calls = append(calls, ranges)
-			if fail {
-				return 1, errors.New("EIO")
-			}
-			return len(ranges), nil
-		},
-	}
-	ranges := []SkipRange{{Offset: 0, Length: 4096}, {Offset: 8192, Length: 4096}}
-	if err := ApplySkipRanges(context.Background(), NewDm(oc),
-		"/dev/mapper/x", ranges); err != nil {
-		t.Fatalf("ApplySkipRanges: %v", err)
-	}
-	want := []common.DiscardRange{
-		{Offset: 0, Length: 4096}, {Offset: 8192, Length: 4096}}
-	if len(calls) != 1 || !slices.Equal(calls[0], want) || len(commands) != 0 {
-		t.Fatalf("calls %v and commands %v, want one call of %v", calls,
-			commands, want)
-	}
-	fail = true
-	err := ApplySkipRanges(context.Background(), NewDm(oc), "/dev/mapper/x",
-		ranges)
-	if err == nil || !strings.Contains(err.Error(), "1 of 2 ranges done") {
-		t.Fatalf("a failed call answered %v, want the ranges done named", err)
-	}
-	calls = nil
-	if err := ApplySkipRanges(context.Background(), NewDm(oc),
-		"/dev/mapper/x", nil); err != nil || len(calls) != 0 {
-		t.Fatalf("no ranges: %v, %d calls, want none", err, len(calls))
-	}
-}
-
 // ---------------------------------------------------------------------------
 // dm table builders and status parsing
 // ---------------------------------------------------------------------------

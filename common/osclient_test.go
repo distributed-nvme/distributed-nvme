@@ -1806,7 +1806,7 @@ func TestDiscardRanges(t *testing.T) {
 
 // errAfterCtx reads as cancelled through Err once n has reached one, while
 // its Done never closes: it shows the read of ctx before each range on its
-// own, apart from the wait on a range in flight.
+// own.
 type errAfterCtx struct {
 	context.Context
 	n *atomic.Int32
@@ -1834,107 +1834,24 @@ func TestDiscardRangesStopsAtTheNextRange(t *testing.T) {
 		sent.Add(1)
 		return nil
 	}
-	released := 0
 	done, err := discardRanges(errAfterCtx{context.Background(), &sent},
 		path, []DiscardRange{{Offset: 0, Length: 512},
-			{Offset: 1024, Length: 512}}, func() { released++ })
+			{Offset: 1024, Length: 512}})
 	if done != 1 || !errors.Is(err, context.Canceled) {
 		t.Fatalf("discardRanges = %d, %v; want 1, context.Canceled",
 			done, err)
 	}
-	if sent.Load() != 1 || released != 1 {
-		t.Fatalf("sent %d ranges and released %d times, want 1 and 1",
-			sent.Load(), released)
+	if sent.Load() != 1 {
+		t.Fatalf("sent %d ranges, want 1", sent.Load())
 	}
 }
 
-// TestDiscardRangesBoundsAStalledRange: a discard the kernel does not answer
-// is waited for no longer than the soft timeout, or than the caller stays;
-// the call returns an error naming it and sends no later range. The stalled
-// ioctl is left to finish, and only once it has does the device close and
-// the call's slot go back.
-func TestDiscardRangesBoundsAStalledRange(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "dev")
-	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
-		t.Fatalf("planting %s: %v", path, err)
-	}
-	savedIoctl, savedTimeout := blkDiscard, discardSoftTimeout
-	defer func() { blkDiscard, discardSoftTimeout = savedIoctl, savedTimeout }()
-	for _, tc := range []struct {
-		name    string
-		timeout time.Duration
-		cancel  bool
-		want    string
-	}{
-		{"the soft timeout", 50 * time.Millisecond, false, "did not answer"},
-		{"the caller gone", time.Hour, true, context.Canceled.Error()},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			discardSoftTimeout = tc.timeout
-			unblock := make(chan struct{})
-			entered := make(chan *os.File, 2)
-			blkDiscard = func(f *os.File, r DiscardRange) error {
-				entered <- f
-				<-unblock
-				return nil
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tc.cancel {
-				go func() { <-entered; cancel() }()
-			}
-			released := make(chan struct{}, 2)
-			start := time.Now()
-			done, err := discardRanges(ctx, path, []DiscardRange{
-				{Offset: 0, Length: 512}, {Offset: 1024, Length: 512}},
-				func() { released <- struct{}{} })
-			if done != 0 || err == nil ||
-				!strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("discardRanges = %d, %v; want 0 and %q",
-					done, err, tc.want)
-			}
-			if time.Since(start) > 5*time.Second {
-				t.Fatalf("returned after %v", time.Since(start))
-			}
-			var f *os.File
-			if tc.cancel {
-				// The cancelling goroutine took the one entry.
-			} else {
-				f = <-entered
-			}
-			select {
-			case <-released:
-				t.Fatalf("the slot went back while the ioctl still ran")
-			case <-time.After(50 * time.Millisecond):
-			}
-			if f != nil {
-				if _, err := f.Stat(); err != nil {
-					t.Fatalf("the device closed under its ioctl: %v", err)
-				}
-			}
-			close(unblock)
-			select {
-			case <-released:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("the slot never went back after the ioctl ended")
-			}
-			if f != nil {
-				if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
-					t.Fatalf("the device is open after its ioctl: %v", err)
-				}
-			}
-			if len(entered) != 0 {
-				t.Fatalf("a later range was sent")
-			}
-		})
-	}
-}
-
-// TestDiscardRangesSlotIsHeldUntilTheKernelAnswers: with a limit of one, a
-// call whose range was given up on still holds the client's slot, so the
-// next operation waits for the kernel's answer, as it would wait for a
-// command's stuck child.
-func TestDiscardRangesSlotIsHeldUntilTheKernelAnswers(t *testing.T) {
+// TestDiscardRangesWaitsForTheKernel: a discard the kernel answers slowly is
+// waited for past the soft timeout and past a caller that went away, so that
+// when the call returns no discard it sent is still in the kernel; it holds
+// the client's slot and the open device until then, and sends no later
+// range once its caller went away.
+func TestDiscardRangesWaitsForTheKernel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dev")
 	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
 		t.Fatalf("planting %s: %v", path, err)
@@ -1943,22 +1860,65 @@ func TestDiscardRangesSlotIsHeldUntilTheKernelAnswers(t *testing.T) {
 	defer func() { blkDiscard, discardSoftTimeout = savedIoctl, savedTimeout }()
 	discardSoftTimeout = 20 * time.Millisecond
 	unblock := make(chan struct{})
+	entered := make(chan *os.File, 2)
+	var inKernel atomic.Bool
 	blkDiscard = func(f *os.File, r DiscardRange) error {
+		inKernel.Store(true)
+		entered <- f
 		<-unblock
+		inKernel.Store(false)
 		return nil
 	}
 	client := NewLimitedOsClient(1)
-	if _, err := client.DiscardRanges(context.Background(), path,
-		[]DiscardRange{{Offset: 0, Length: 512}}); err == nil {
-		t.Fatalf("the stalled range answered no error")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(),
-		100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, err := client.ReadFile(ctx, path); err == nil {
-		t.Fatalf("an operation got the slot while the ioctl still ran")
+	type result struct {
+		done int
+		err  error
+	}
+	returned := make(chan result, 1)
+	go func() {
+		done, err := client.DiscardRanges(ctx, path, []DiscardRange{
+			{Offset: 0, Length: 512}, {Offset: 1024, Length: 512}})
+		returned <- result{done, err}
+	}()
+	f := <-entered
+	cancel()
+	select {
+	case r := <-returned:
+		t.Fatalf("the call returned %d, %v with its discard in the kernel",
+			r.done, r.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	rctx, rcancel := context.WithTimeout(context.Background(),
+		50*time.Millisecond)
+	defer rcancel()
+	if _, err := client.ReadFile(rctx, path); err == nil {
+		t.Fatalf("an operation got the slot while the discard ran")
+	}
+	if _, err := f.Stat(); err != nil {
+		t.Fatalf("the device closed under its discard: %v", err)
 	}
 	close(unblock)
+	var r result
+	select {
+	case r = <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the call never returned after the kernel answered")
+	}
+	if inKernel.Load() {
+		t.Fatalf("the call returned with its discard in the kernel")
+	}
+	if r.done != 1 || !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("DiscardRanges = %d, %v; want 1, context.Canceled",
+			r.done, r.err)
+	}
+	if len(entered) != 0 {
+		t.Fatalf("a range was sent after the caller went away")
+	}
+	if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("the device is open after the call: %v", err)
+	}
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 	if _, err := client.ReadFile(ctx2, path); err != nil {
@@ -2009,13 +1969,14 @@ func TestDiscardRangesRecord(t *testing.T) {
 	}
 }
 
-// TestDiscardRangesKernelInterface pins what reaches the kernel: an
-// exclusive write open, as `blkdiscard` without `--force` makes, BLKDISCARD's
-// number, its argument as start then length, and the ioctl refused on a file
-// that is no block device, naming the range.
+// TestDiscardRangesKernelInterface pins what reaches the kernel: a write
+// open that is not exclusive, as `blkdiscard --force` makes, so a dm-clone
+// its holders map still takes the discards; BLKDISCARD's number, its
+// argument as start then length, and the ioctl refused on a file that is no
+// block device, naming the range.
 func TestDiscardRangesKernelInterface(t *testing.T) {
-	if discardOpenFlags != os.O_WRONLY|syscall.O_EXCL {
-		t.Fatalf("open flags %#x, want O_WRONLY|O_EXCL", discardOpenFlags)
+	if discardOpenFlags != os.O_WRONLY {
+		t.Fatalf("open flags %#x, want O_WRONLY", discardOpenFlags)
 	}
 	if blkDiscardIoctl != 0x12<<8|119 {
 		t.Fatalf("ioctl %#x, want _IO(0x12, 119)", blkDiscardIoctl)

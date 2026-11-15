@@ -255,10 +255,7 @@ and, like the CN11 probers, takes no SH11 lock at all. A background read
 reads for the round that started it: it carries that round's trace id,
 minting one only when that round had none, so its records, a verdict that
 is not clean among them, name the round that brought them; and it takes
-the SH11 or SH12 locks for that one read. A discard given up on at the
-soft timeout or at the caller's cancel (`osclient.md`, DiscardRanges)
-outlives its RPC inside the `OsClient` itself: its goroutines end when the
-kernel answers it, and no `WaitBackground` joins them.
+the SH11 or SH12 locks for that one read.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
@@ -591,9 +588,8 @@ once, before it (`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for
 a listing, `osclient.md`, ReadDir; for a modification-time read,
 `osclient.md`, ReadMtime; for a device-number read, `osclient.md`,
 ReadDevNo), so a sysfs, configfs or device access the kernel holds returns
-only when the kernel does. The discards of a chunk apply are the exception:
-the call returns at the soft timeout or at the caller's cancel and leaves a
-discard the kernel holds to finish there (`osclient.md`, DiscardRanges). A check round and an info read probe nothing
+only when the kernel does, the discards of a chunk apply included
+(`osclient.md`, DiscardRanges). A check round and an info read probe nothing
 (SH28), so a probe under a lock that runs long holds up the object's next
 observation and the calls that wait for its locks, never the reply to a
 round or an info read, and the worker judges that observation's age
@@ -745,9 +741,9 @@ instead of through a wrapper — `cnagent.md` CN25's read of the `thin_dump`
 file, and the dn's raw-device `ReadBlock`/`WriteBlock` calls of the [D13]
 disk metadata (`DiskMeta`) — takes the same bound from the exported
 `agent.CmdCtx`. `Dm.DiscardRanges` is the one wrapper call that passes its
-caller's ctx on unchanged: the `OsClient` bounds each of its ranges itself
-(`osclient.md`, DiscardRanges). The bound holds in full only for a child the
-signals end.
+caller's ctx on unchanged: the `OsClient` bounds its wait for a slot, and
+waits for each discard it sends as long as the kernel takes (`osclient.md`,
+DiscardRanges). The bound holds in full only for a child the signals end.
 An in-process `OsClient` call — a directory listing, a modification-time
 read, a device-number read, a file, proto or block read or write — is
 bounded only until its syscall starts: its ctx is checked once, before it
@@ -3276,12 +3272,14 @@ done and need a whole re-sync to re-drive (`dnv-worker.md` BM3). Then SH21
 to SH23: persist the chunk at `LocalMigrBmPath`, recompute from the applied
 set's contiguous prefix (SH23; shifted by the leg's `meta_blocks`),
 discard the fully-skippable regions of `DnMigrFinalName`, in one call of
-the agent's own process (`OsClient.DiscardRanges`: one exclusive open and one
-BLKDISCARD per range, no child process). If the
-dm-clone does not currently exist — not built yet, suppressed by
-`sp_level`, or still behind DN13's provisioning gate — the file still
-counts as applied; chunks are re-applied whenever the dm-clone is
-(re)created. A **failed persist is still acked code zero**, with the error
+the agent's own process (`OsClient.DiscardRanges`: one open and one
+BLKDISCARD per range, no child process), with the per-CN dm-linears that
+map the dm-clone paused and its background copy stopped for the moment
+(`architecture.md`, Bitmap push protocol, The apply pauses the writers). If
+the dm-clone does not currently exist — not built yet, suppressed by
+`sp_level`, or still behind DN13's provisioning gate — or is suspended, the
+file still counts as applied; chunks are re-applied whenever DN13 step 4
+creates, resumes or reloads the dm-clone. A **failed persist is still acked code zero**, with the error
 logged and neither the recompute nor the discard attempted
 (`architecture.md`, Bitmap push protocol): not persisted is not applied, so
 the push leaves the applied set as it was (SH21), and a chunk not yet in
@@ -3686,22 +3684,23 @@ else reported through `agent_reply` is still a protocol-level refusal.
 
 ## Known limits
 
-* A migration's bitmap apply takes time that grows with its ranges while
-  no table maps the dm-clone: each push applies the whole skip set under the
-  side's DN1 locks (DN15), each create of the dm-clone does under the
-  converge's locks, and the startup reconcile does for every side under the
-  node write lock. The discards run in the agent's own process, one open
-  and one ioctl per range with no child process each (`osclient.md`,
-  DiscardRanges), but a fragmented source's many ranges hold the locks for
-  as long as the kernel takes over them. Once the primary's per-CN
-  dm-linear maps the dm-clone (DN13 step 5), an apply is refused at the
-  open: it discards nothing, holds the locks only briefly, and the regions
-  it would have marked are copied. A leg bitmap read when `architecture.md`,
-  Migration, allows arrives after that step, so on a migration a discard
-  lands only while no per-CN dm-linear maps the dm-clone: at its create, as
-  after a DN reboot, or while a stopped step has taken the stacks off it. A cancelled push
-  returns at once and leaves the range in flight to the kernel; the ranges
-  it did not reach cost extra copying only, until the next apply.
+* A migration's bitmap apply takes time that grows with its ranges: each
+  push applies the whole skip set under the side's DN1 locks (DN15), each
+  create, resume or reload of the dm-clone does under the converge's locks,
+  and the startup reconcile does for every side under the node write lock.
+  The discards run in the agent's own process, one open and one ioctl per
+  range with no child process each (`osclient.md`, DiscardRanges), but a
+  fragmented source's many ranges hold the locks for as long as the kernel
+  takes over them, and once the primary's per-CN dm-linear maps the
+  dm-clone (DN13 step 5) that dm-linear stays paused for as long, so the
+  leg's IO through this side waits for the apply (`architecture.md`, Bitmap
+  push protocol, The apply pauses the writers). Every apply discards the
+  whole set again, so the pause comes with every push. A copy still in
+  flight when the pause begins holds it for up to the second wait's bound,
+  and one that outlasts that bound ends the apply with no discard: a pause
+  for nothing, and those regions are copied, until the next apply. A
+  cancelled push sends no further range and still waits for the one in the
+  kernel.
 * A reload whose load fails leaves its device suspended (OS wrappers), so
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,

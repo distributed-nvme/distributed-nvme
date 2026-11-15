@@ -71,8 +71,9 @@ func (s *DnAgentServer) pushMigrBitmap(
 
 // applyMigrBitmaps recomputes the skippable regions from every chunk of the
 // applied set and marks them hydrated on the dm-clone. A chunk whose dm-clone
-// does not exist yet still counts as applied; it is re-applied when the
-// dm-clone is (re)created (dnagent.md DN15).
+// does not exist yet, or is suspended, still counts as applied; it is
+// re-applied when the dm-clone is created, resumed or reloaded (dnagent.md
+// DN15).
 func (s *DnAgentServer) applyMigrBitmaps(
 	ctx context.Context,
 	st *sideState,
@@ -98,10 +99,6 @@ func (s *DnAgentServer) applyChunks(
 		return
 	}
 	name := plan.migrFinalName()
-	dev, err := s.dm.Info(ctx, name)
-	if err != nil || dev == nil {
-		return
-	}
 	// Chunks concatenate over the leg's *data* region, so the dm-clone
 	// regions they describe start at the leg's meta_blocks (architecture.md,
 	// Migrations).
@@ -111,8 +108,11 @@ func (s *DnAgentServer) applyChunks(
 		plan.sectors*agent.SectorSize/regionSize,
 		regionSize,
 	)
+	// The apply pauses the per-CN dm-linears that map the dm-clone and
+	// sends nothing to a dm-clone that is absent or suspended
+	// (agent.ApplySkipRanges; DN15).
 	if err := agent.ApplySkipRanges(
-		ctx, s.dm, s.nf.DmPath(name), ranges); err != nil {
+		ctx, s.dm, name, s.nf.DmPath(name), ranges); err != nil {
 		slog.ErrorContext(ctx, "applying migration bitmap failed",
 			slog.String("dm", name),
 			slog.String("error", err.Error()))

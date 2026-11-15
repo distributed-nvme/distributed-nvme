@@ -3183,9 +3183,9 @@ local address space; **1 = the source never wrote there, so the region is
 skippable**. Read as this paragraph says below, they are a pure
 optimization delivered through
 `PushCloneBitmap` (Bitmap push protocol) and are safe to apply at any
-time; one that arrives once the ns-devs map the dm-clone discards nothing
-until the dm-clone is created again (`osclient.md`, DiscardRanges), and the
-copy's durability never depends on them (Clone metadata durability). **A caller reads a source
+time, one that arrives once the ns-devs map the dm-clone included (Bitmap
+push protocol, The apply pauses the writers), and the copy's durability
+never depends on them (Clone metadata durability). **A caller reads a source
 bitmap only once the source takes no more writes**: once every cntlr of
 the source pool has applied the transfer's `auto_suspend` move of the
 origin namespace (Transfers; `cnagent.md` CN16), which can be after
@@ -4457,31 +4457,44 @@ shifted by the leg's `meta_blocks` (Migrations); for a clone from every
 present chunk, read in place, an absent chunk, a short chunk's tail and a
 slice holding no chunk all reading as written — and discarded onto
 `DnMigrFinalName` or `CnCloneFinalName` (raid0 bitmap math). A chunk whose
-dm-clone does not exist yet still counts as applied and is re-applied
-whenever the dm-clone is (re)created, by a new primary or after a CN
-reboot among others (Clone metadata durability). The reply carries only
-`AgentReply`, and a code-zero reply is the acknowledgement that releases
-the worker's next part — not proof that the chunk was applied: a chunk
-whose persist failed is acked code zero too, and heals because it is not
-added to the applied set, even when only the directory sync after its
-rename failed and its file is in place (`dnagent.md` SH21), so the
-object's next accepted `Syncup*` reply reports it missing and the worker
-pushes it again; a clone chunk that grows in place is the exception
-(Grown clone chunks, below). Nothing
-else schedules that re-push — no push outcome schedules a `Syncup*`, and
-the `Check*` rounds carry no applied set — so the chunk waits for whatever
-re-issues the object's `Syncup*` anyway (a revision bump, or a `Check*`
-round the agent answers with another revision or a non-zero code, Check
-streams); until then its regions are copied instead of skipped, which
-costs only the optional bitmap fast path. The files go with their object:
-they are deleted when its pointer leaves the parent's list — save a chunk
-file no memory entry names, such as one the startup reload left unloaded
-or one a push left outside the applied set when its save failed only at
-the directory sync — before the sweep of that pass removes its devices by
-name (Common agent rules; `dnagent.md` SH7), while a role or an
-`sp_level` that merely suppresses the dm-clone keeps them, applied-by-file,
-so that nothing is re-pushed when the suppression lifts. `dnagent.md` DN15 and SH21 to SH23
-and `cnagent.md` CN22 carry the agent side out.
+dm-clone does not exist yet, or is suspended, where a discard would wait
+for the resume with the object's lock held, still counts as applied and is
+re-applied whenever the object's converge creates, resumes or reloads the
+dm-clone, by a new primary or after a CN reboot among others (Clone
+metadata durability).
+
+**The apply pauses the writers.** dm-clone takes a discard of a region not
+yet copied as "copied" without looking at a copy of that region in
+flight, and sends a write to a region it holds as copied straight to the
+destination; a copy still in flight then lands after that write and puts
+the source's bytes over it. So the discards reach a dm-clone only while no
+write can reach it and no copy is in flight on it (`agent.ApplySkipRanges`).
+The agent stops the background copy when it runs and waits, for a short
+bound, until the status shows no copy in flight, going on when the bound
+passes: this wait holds no IO back and keeps the pause that follows short.
+Then it pauses every device whose table maps the dm-clone and that is not
+suspended already — the per-CN dm-linears on a destination side, the
+ns-devs on a controller node — whose suspend waits for the writes they sent
+down and so for the copies those writes wait on; waits again, for no copy
+in flight or the bound; discards, and waits for every discard to leave the
+kernel, since one that marked its regions after the writers resume would
+reopen the race; and only then resumes what it paused and starts the copy
+again. Once the writers resume, a marked region is never copied, since
+dm-clone copies only regions it does not hold as copied, so a chunk lands
+safely while the dm-clone serves; the cost is a short pause of the IO
+through those devices for each apply. A device found suspended is left as
+it is: its IO waits above the dm-clone, and a resume could undo a fence in
+progress. The agent sends no discard over a stack with a suspended device
+mapper device below the dm-clone, where a pause or the discard itself could
+wait, under the object's lock, on IO that only the converge which resumes
+that device ends; nor while IO the pause does not hold, such as a udev
+probe's read of the dm-clone itself, is in flight on the dm-clone, since a
+discard first waits for the reads of the dm-clone's own page cache.
+Whatever the agent cannot make sure of — such a stack or such IO, a device
+with a table waiting, a listing that does not answer, a pause or a stop
+that fails, a copy still in flight at the second bound — sends no discard,
+and those regions are copied; what it paused or stopped and could not
+restore the object's next converge restores.
 
 **Grown clone chunks ([D8]).** `AppendCloneBitmap` may append more bytes
 to a chunk `(src_slice_idx, bm_idx)` that was already pushed and
@@ -5404,11 +5417,9 @@ optional bitmap fast-path: `GetLegBitmap` (paged) → `AppendMigrationBitmap`
 agent persists each chunk at `LocalMigrBmPath` and tries to discard the
 never-written regions so that they are never copied (Migrations, Bitmap
 reads, raid0 bitmap math). A leg bitmap read when this section allows
-(below) arrives after the primary's per-CN dm-linear maps the dm-clone, so
-that discard is refused at its exclusive open (`osclient.md`,
-DiscardRanges) and the regions are copied; the stored chunks land only
-while no per-CN dm-linear maps the dm-clone, as at its create after a DN
-reboot (`dnagent.md`, Known limits).
+(below) arrives after the primary's per-CN dm-linear maps the dm-clone, and
+the chunks land all the same, that dm-linear paused for each apply (Bitmap
+push protocol, The apply pauses the writers).
 A skipped region keeps what the destination's recycled extents held, which
 the pool never reads, since no pool block maps there ([D15]) — provided
 the bitmap is read late enough. **A caller reads the leg bitmap only once
@@ -5809,12 +5820,9 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   → the worker's `PushCloneBitmap` (Bitmap push protocol) → the sp2
   primary persists each chunk at `LocalCloneBmPath` and discards
   (raid0 bitmap math), provided every page was read after the source
-  stopped taking writes (Clones; [D3], [D7]). A chunk takes effect only
-  while no ns-dev maps the dm-clone: before the namespace serves through it
-  (`cnagent.md` CN18 step 6), as at a create of the dm-clone on a new
-  primary or after a CN reboot; once the ns-devs map it, every discard, a
-  reload's included, is refused at its exclusive open (`osclient.md`,
-  DiscardRanges) and those regions are copied.
+  stopped taking writes (Clones; [D3], [D7]). A chunk takes effect whenever
+  it arrives: once the ns-devs map the dm-clone, they are paused for each
+  apply (Bitmap push protocol, The apply pauses the writers).
 * When hydration completes: `DeleteTransfer` with `force` false on sp1
   (it retires the source: `suspended` true) and `DeleteClone` on sp2
   (`suspended` false, the namespace now backed by the local raid0). To
@@ -7025,9 +7033,9 @@ document and only pointed to here.
   (Common validation) wherever the command's child can be killed; one
   blocked in an uninterruptible kernel wait is not (Common validation), nor
   is an in-process sysfs, configfs or device access once its syscall has
-  started (`dnagent.md` SH15), the discards of a chunk apply aside, which
-  give up on a range at the soft timeout or at the caller's cancel
-  (`osclient.md`, DiscardRanges). The cn sweep's `nvme disconnect`, whose
+  started (`dnagent.md` SH15), the discards of a chunk apply included,
+  which wait for the kernel as long as it takes (`osclient.md`,
+  DiscardRanges). The cn sweep's `nvme disconnect`, whose
   delete can wait out the kernel's admin timeout, runs off the locks for
   that reason (`cnagent.md` CN10 and CN21); the disconnects that still run
   under a lock are each role's own limit (`cnagent.md`, Known limits;

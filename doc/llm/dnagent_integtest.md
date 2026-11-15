@@ -290,16 +290,29 @@ hydration poll, which samples until an observation carries that line, finds
 one showing every region hydrated. The state compared is measured, never
 assumed, and one that moves before the comparison ends fails the stage.
 **migr_bitmap** pushes skip-bitmap chunks of its own making, not a bitmap
-read from a pool, to the gated destination, with no revision (`dnagent.md`
-DN15), over the same random source, so every difference is the bitmap's: the applied set lists exactly
-the chunks (SH21, DN14), the must-copy head matches the source, the skipped
-regions differ from the source's fresh random data, keeping what the
-destination's extents held before (`architecture.md`, Side provisioning
-protocol), the enabling converge's own hydration sample counts every skipped
-region, and the log holds one discard that landed on the clone, at the
-range the meta-region shift implies (`dnagent.md` SH22, SH23; `architecture.md`, Bitmap
-push protocol). The discard checks read the agent's JSON log by design: if its
-layout drifts, the reader is adjusted, never the assertion.
+read from a pool, with no revision (`dnagent.md` DN15), over the same random
+source, so every difference is the bitmap's. The first migration's chunks go
+to the gated destination: the applied set lists exactly the chunks (SH21,
+DN14), and the enabling converge's own hydration sample counts every skipped
+region. The second migration's chunk, its whole bitmap, comes only once its
+destination serves, the primary's per-CN dm-linear on the dm-clone, with
+its copy slowed on its source's node from before the enable so that the
+regions the chunk marks are still ahead of the copy (the late push): the
+count of regions the dm-clone holds as copied jumps by at least the regions
+the chunk marks, and the log shows that dm-linear suspended and resumed
+around the apply, the time between logged (`architecture.md`, Bitmap push
+protocol, The apply pauses the writers). For both, the must-copy head
+matches the source, the skipped regions differ from the source's fresh
+random data, keeping what the destination's extents held before
+(`architecture.md`, Side provisioning protocol), and the log holds one
+discard that landed on the clone, at the range the meta-region shift
+implies (`dnagent.md` SH22, SH23; `architecture.md`, Bitmap push protocol).
+The discard and pause checks read the agent's JSON log by design: if its
+layout drifts, the reader is adjusted, never the assertion. The copy is
+slowed by a token bucket on what the source's node sends from its nvme-tcp
+port to the destination's address, and nothing else; the bucket is taken
+off once the chunk is checked, and the cleanup takes it off
+unconditionally.
 
 **teardown** proves `architecture.md`, Teardown by sweep: what cannot go yet
 is reported and finished later, never forgotten (`dnagent.md` DN6, DN7, DN16,

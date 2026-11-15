@@ -328,7 +328,8 @@ func (s *CnAgentServer) convergeNsDev(
 	// device suspended only when one of its commands fails. A device found
 	// suspended and not reloaded — its table already the one this pass wants,
 	// or held — is one a reload that was interrupted or failed left behind,
-	// and it is resumed (CN16).
+	// or one a chunk's apply paused and could not resume
+	// (agent.ApplySkipRanges), and it is resumed (CN16).
 	if dev.Suspended {
 		return outcome, s.dm.Resume(ctx, np.devName)
 	}

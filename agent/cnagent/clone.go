@@ -461,7 +461,7 @@ func (s *CnAgentServer) ensureClone(
 	// dm-clone behind with hydration off — a `dmsetup create` killed after
 	// its ioctl ran — which CN16 does not serve through, and which the
 	// retry's next pass finishes (step 4).
-	created, err := s.ensureDmClone(ctx, plan, cp, srcDev)
+	rebuilt, err := s.ensureDmClone(ctx, plan, cp, srcDev)
 	if err != nil {
 		s.cloneRows(st, cp, info, src, fresh, err.Error())
 		s.startConnectRetry(st, plan)
@@ -474,13 +474,14 @@ func (s *CnAgentServer) ensureClone(
 	}
 
 	// (4) every locally present source chunk, on a pass whose step 3
-	// created or reloaded the dm-clone, or that found it with hydration off:
+	// created, resumed or reloaded the dm-clone, or that found it with
+	// hydration off:
 	// a build that stopped between steps 3 and 5 left it so, and the chunks
 	// it held may not all have landed. Re-applying is idempotent: a chunk
 	// marks hydrated only a region not copied yet whose source is unmapped,
 	// and dm-clone ignores a discard of a region it has copied. A failed
 	// chunk costs an extra copy only, so it is logged.
-	if created || !dm.hydrating {
+	if rebuilt || !dm.hydrating {
 		s.applyCloneChunks(ctx, st, plan, cp)
 	}
 
@@ -611,8 +612,10 @@ func pathStates(view *subsysView) string {
 	return "paths: " + strings.Join(states, ",")
 }
 
-// ensureDmClone converges the dm-clone and reports whether this pass created
-// or reloaded it. Its metadata device is the clone meta group's device, named
+// ensureDmClone converges the dm-clone and reports whether this pass created,
+// resumed or reloaded it: each is a pass after which step 4 applies the
+// stored chunks again (CN22), a resume because a chunk that came while the
+// dm-clone was suspended sent no discard. Its metadata device is the clone meta group's device, named
 // by its number by the rule the pool concats name a group by (grpDevNo). Only
 // the four positional arguments are compared: `dmsetup table` prints the
 // constructor's feature and core arguments back, never the live hydration
@@ -671,7 +674,7 @@ func (s *CnAgentServer) ensureDmClone(
 		fmt.Sprintf("%d", cp.regionSectors)}
 	if dmTableMatches(targets, "clone", cp.sectors, args, len(args)) {
 		if dev.Suspended {
-			return false, s.dm.Resume(ctx, cp.finalName)
+			return true, s.dm.Resume(ctx, cp.finalName)
 		}
 		return false, nil
 	}

@@ -54,6 +54,11 @@ BLOCK_SIZE=1048576
 META_BLOCKS=3
 HYDR_THRESHOLD=1
 HYDR_BATCH=1
+# migr_bitmap's late push (dnagent_integtest.md, Cases, migr_bitmap): the
+# rate the second migration's source replies at (throttle_from), about half
+# a second a region of 1 MiB, so its copy is still short of the 64 regions
+# its chunk marks for the half minute the destination takes to serve.
+LATE_COPY_RATE=16mbit
 
 # The length a worker asks a data group's side to zero (side_conf.zero_bytes,
 # architecture.md, Side provisioning protocol): its meta region and its first
@@ -112,6 +117,10 @@ DNID=("" 0x1 0x2)
 REV=("" 0 0)
 DNREV=("" 0 0)
 LOOP=("" "" "")
+# THROTTLED is the VM whose replies migr_bitmap's late push slows
+# (throttle_from), 0 while none is: on_exit takes the bucket off even when a
+# run fails, since the VMs are shared.
+THROTTLED=0
 
 # The two concurrent, opposite-direction migrations of cases B and C
 # (dnagent_integtest.md, Cases).
@@ -290,6 +299,12 @@ on_exit() {
 		log ""
 		log "########## diagnostics (dnagent_integtest.md, Teardown and cleanup) ##########"
 		diagnostics || true
+		# The one injector a failed run does not leave in place: the next
+		# run's cleanup would remove it, but the VMs are shared, and another
+		# suite run before that would find its traffic slowed.
+		if [ "$THROTTLED" -ne 0 ]; then
+			helper_ok "$THROTTLED" unthrottle >&2
+		fi
 		release_store_tmpfs
 		log ""
 		log "debris left in place on both VMs; failing stage '$STAGE'"
@@ -515,6 +530,9 @@ WORK=/var/tmp/dnv-integtest
 STORE=$WORK/store
 NVMET=/sys/kernel/config/nvmet
 NQN_PREFIX=nqn.2024-01.io.dnv
+# TR_SVC_ID is the agents' nvme-tcp port, the driver's own value
+# (throttle_from).
+TR_SVC_ID=4200
 # PIN_PREFIX is where pin_dev records its holders' pids: outside $WORK,
 # which cleanup removes wholesale, so a pin always outlives what it pins.
 PIN_PREFIX=/var/tmp/dnv-it-pin
@@ -939,6 +957,97 @@ any_clone_discards() {
 	lines=$(discard_lines) || return 1
 	printf '%s\n' "$lines" |
 		grep -E '/dev/mapper/dnv-[0-9a-f]{16}-[0-9a-f]{16}-d3-' || true
+}
+
+# dm_verb_times <trace> <name> — "<verb> <time>" for each dmsetup command the
+# agent ran on one dm device under one trace id, in order: the late push of
+# migr_bitmap reads the pause of a per-CN dm-linear off it. One jq evaluation
+# (see the note above clone_discards).
+dm_verb_times() {
+	jq -rn --arg t "$1" --arg name "$2" '
+	    inputs
+	    | select(.trace_id == $t and .msg == "os command"
+	        and .cmd == "dmsetup" and (.args | index($name)) != null)
+	    | .args[0] + " " + .time' "$WORK/agent.log"
+}
+
+# --- the slowed copy of migr_bitmap's late push (dnagent_integtest.md, Cases,
+# migr_bitmap) -----------------------------------------------------------------
+#
+# A copy over loop devices ends in well under a second, too soon for a piece
+# pushed once the destination serves to find a region left to mark.
+# throttle_from slows what this node sends from its own nvme-tcp port to one
+# address, and nothing else: on the source's node, aimed at the destination's
+# address, it slows the source's replies to the destination's reads, the
+# copy's among them. A root prio qdisc maps every packet to the bands the
+# stock pfifo_fast uses, beside a fourth band only a filter reaches, with a
+# token bucket under it. The qdisc carries a handle of its own, so unthrottle
+# takes only this suite's, and cleanup takes it unconditionally: a bucket
+# left behind would slow every later suite on the VM.
+THROTTLE_HANDLE=4300
+
+# tc_bin resolves the binary, or prints nothing.
+tc_bin() {
+	if command -v tc >/dev/null 2>&1; then
+		echo tc
+	elif [ -x /usr/sbin/tc ]; then
+		echo /usr/sbin/tc
+	else
+		echo ""
+	fi
+}
+
+# throttle_from <ip> <rate> — limits what this node sends from its nvme-tcp
+# port to <ip> to <rate> (a tc rate such as 16mbit) and prints "throttled", or
+# prints "failed" when a step fails, leaving no qdisc of this suite's behind.
+throttle_from() {
+	local tc nic
+	tc=$(tc_bin)
+	nic=$(ip route get "$1" 2>/dev/null |
+		awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+	if [ -n "$tc" ] && [ -n "$nic" ] &&
+		"$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": prio \
+			bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 \
+			>/dev/null 2>&1 &&
+		"$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 tbf \
+			rate "$2" burst 128kb latency 100ms >/dev/null 2>&1 &&
+		"$tc" filter add dev "$nic" parent "$THROTTLE_HANDLE": protocol ip \
+			prio 1 u32 match ip dst "$1"/32 match ip sport "$TR_SVC_ID" 0xffff \
+			flowid "$THROTTLE_HANDLE":4 >/dev/null 2>&1; then
+		echo throttled
+	else
+		unthrottle >/dev/null
+		echo failed
+	fi
+}
+
+# throttle_rules — this suite's root qdisc on any interface of the node, one
+# line per interface, empty when there is none; a listing that fails prints
+# one line saying so, for residue's reason.
+throttle_rules() {
+	local tc out nl=$'\n'
+	tc=$(tc_bin)
+	if [ -z "$tc" ]; then
+		echo "no tc on this node, the throttle is unknown"
+	elif out=$("$tc" qdisc show 2>&1); then
+		printf '%s\n' "$out" |
+			grep -E "^qdisc prio $THROTTLE_HANDLE: dev [^ ]+ root" || true
+	else
+		echo "tc qdisc show failed, the throttle is unknown: ${out//$nl/; }"
+	fi
+}
+
+# unthrottle — removes this suite's root qdisc from every interface that
+# carries it, whoever left it there, and prints "unthrottled".
+unthrottle() {
+	local tc nic
+	tc=$(tc_bin)
+	if [ -n "$tc" ]; then
+		for nic in $(throttle_rules | awk '$1 == "qdisc" {print $5}'); do
+			"$tc" qdisc del dev "$nic" root >/dev/null 2>&1
+		done
+	fi
+	echo unthrottled
 }
 
 # mutations [logfile] — every mutating operation in an agent log (the restart
@@ -1384,6 +1493,9 @@ loop_devs() {
 # because a dm-clone flushes to its source on remove and the source is that
 # export. Everything the side namespaces back is still disabled first.
 cleanup() {
+	# A slowed copy's bucket (throttle_from) goes first and whatever else
+	# fails: left behind it would slow every later suite on the VM.
+	unthrottle >/dev/null
 	pkill -x dnv-agent >/dev/null 2>&1
 	local i
 	for ((i = 0; i < 20; i++)); do
@@ -3059,8 +3171,25 @@ migr_first_hydr() { # m
 	[ -n "$pair" ] ||
 		die "migr $m: the enabling converge's reply carries no hydration count: '$raw'"
 	log "migr $m: first hydration sample ${pair% *}/${pair#* } (the enabling converge's reply)"
-	[ "${pair% *}" -ge "$MIN_FIRST" ] ||
-		die "migr $m: first hydration sample is ${pair% *}/${pair#* }, want >= $MIN_FIRST hydrated"
+	[ "${pair% *}" -ge "${MIN_FIRST[$m]}" ] ||
+		die "migr $m: first hydration sample is ${pair% *}/${pair#* }, want >= ${MIN_FIRST[$m]} hydrated"
+}
+
+# migr_hydrated <m> — the count of regions migration m's dm-clone holds as
+# copied, copied or marked, read off a fresh round (the late push of
+# migr_bitmap, dnagent_integtest.md, Cases). The same `dmsetup status` field
+# as migr_read_through; a count that is not a number fails the stage.
+migr_hydrated() { # m
+	local m=$1 out raw count
+	out=$(ctl "${MDSTDN[$m]}" check-side --fresh --show-info \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+	raw=$(jq_of "$out" '.side_info.migr_dst_info.dm_clone_info.details // ""')
+	count=$(printf '%s' "$raw" | awk '{for (i = 1; i <= NF; i++) if ($i == "clone") { split($(i + 4), a, "/"); print a[1]; exit }}')
+	case "$count" in
+	'' | *[!0-9]*)
+		die "migr $m: no hydrated count in the dm-clone's status: '$raw'" ;;
+	esac
+	echo "$count"
 }
 
 migr_finish_dst() { # m revision
@@ -3272,8 +3401,9 @@ migr_write_probe() { # m
 }
 
 # run_migration_cases is the migration body shared by cases B and C
-# (dnagent_integtest.md, Cases). $SP, $MID, $BM_CNT and the case name are set
-# by the callers; the per-case differences are the three hooks push_bitmaps,
+# (dnagent_integtest.md, Cases). $SP, $MID, $BM_CNT, $MIN_FIRST (one floor
+# per migration) and the case name are set by the callers; the per-case
+# differences are the five hooks push_bitmaps, before_enable, after_serving,
 # after_hydration and verify_data.
 declare -a PAT_SHA=("" "" "")
 declare -a PAT_SHA_HEAD=("" "" "")
@@ -3411,6 +3541,10 @@ run_migration_cases() {
 	pids+=($!)
 	join_jobs "${pids[@]}"
 
+	# The case's own step before the destinations enable: migr_bitmap's
+	# slowed copy for its late push.
+	before_enable
+
 	stage stage3 "both destinations enabled at once, the cutover flag cleared — the concurrency point"
 	bump_rev "${MDSTDN[1]}"
 	rev1=${REV[${MDSTDN[1]}]}
@@ -3423,10 +3557,13 @@ run_migration_cases() {
 	pids+=($!)
 	join_jobs "${pids[@]}"
 	# Case C's skip jump (dnagent_integtest.md, Cases, migr_bitmap), read off
-	# each enabling converge's reply.
-	if [ "$MIN_FIRST" -gt 0 ]; then
-		for m in 1 2; do migr_first_hydr "$m"; done
-	fi
+	# each enabling converge's reply, for a migration whose chunks came
+	# before its destination's build.
+	for m in 1 2; do
+		if [ "${MIN_FIRST[$m]}" -gt 0 ]; then
+			migr_first_hydr "$m"
+		fi
+	done
 
 	stage stage3ana "the destination paths go optimized"
 	pids=()
@@ -3437,6 +3574,10 @@ run_migration_cases() {
 		optimized 30) &
 	pids+=($!)
 	join_jobs "${pids[@]}"
+
+	# The case's own step once the destinations serve: migr_bitmap's late
+	# push onto a dm-clone that serves.
+	after_serving
 
 	stage stage3read "mid-hydration read-through probe"
 	pids=()
@@ -3526,7 +3667,10 @@ case_migr_full() {
 	MID=("" 0x31 0x32)
 	BM_CNT=0
 	READ_THROUGH_MIB=127
-	MIN_FIRST=0
+	MIN_FIRST=("" 0 0)
+
+	before_enable() { :; }
+	after_serving() { :; }
 
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
 		# No chunks at all (dnagent_integtest.md, Cases): the equal-revision
@@ -3591,28 +3735,81 @@ case_migr_bitmap() {
 	MID=("" 0x41 0x42)
 	BM_CNT=2
 	READ_THROUGH_MIB=63
-	MIN_FIRST=64
+	# Migration 1 gets its chunks before its destination's build, migration
+	# 2 only once its destination serves (after_serving), so only the first
+	# can show the skip jump at the enabling converge.
+	MIN_FIRST=("" 64 0)
 
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
-		local revs=("" "$1" "$2") m out
-		for m in 1 2; do
-			# A push carries no revision: it is position-addressed data the
-			# agent takes whenever it knows the migration (dnagent.md DN15).
-			ctl "${MDSTDN[$m]}" push-migr-bm \
-				--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-				--migr "${MID[$m]}" --bm-idx 0 --bitmap-hex "$C_BM0" >/dev/null
-			ctl "${MDSTDN[$m]}" push-migr-bm \
-				--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-				--migr "${MID[$m]}" --bm-idx 1 --bitmap-hex "$C_BM1" >/dev/null
-			# Re-send the gated request verbatim (equal revision, idempotent)
-			# purely to read the applied set back out of the reply.
-			migr_declare_dst "$m" "${revs[$m]}" no_migration true
-			out=$(cat "$REPLY_DIR/dst-$m.json")
-			assert_eq "$(jq_of "$out" '.bm_info.res_id')" "$((MID[m]))" \
-				"migr $m bm_info.res_id"
-			assert_eq "$(jq_of "$out" '.bm_info.bm_idx_list | @csv')" '0,1' \
-				"migr $m bm_info.bm_idx_list"
-		done
+		local revs=("" "$1" "$2") m=1 out
+		# A push carries no revision: it is position-addressed data the
+		# agent takes whenever it knows the migration (dnagent.md DN15).
+		ctl "${MDSTDN[$m]}" push-migr-bm \
+			--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
+			--migr "${MID[$m]}" --bm-idx 0 --bitmap-hex "$C_BM0" >/dev/null
+		ctl "${MDSTDN[$m]}" push-migr-bm \
+			--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
+			--migr "${MID[$m]}" --bm-idx 1 --bitmap-hex "$C_BM1" >/dev/null
+		# Re-send the gated request verbatim (equal revision, idempotent)
+		# purely to read the applied set back out of the reply.
+		migr_declare_dst "$m" "${revs[$m]}" no_migration true
+		out=$(cat "$REPLY_DIR/dst-$m.json")
+		assert_eq "$(jq_of "$out" '.bm_info.res_id')" "$((MID[m]))" \
+			"migr $m bm_info.res_id"
+		assert_eq "$(jq_of "$out" '.bm_info.bm_idx_list | @csv')" '0,1' \
+			"migr $m bm_info.bm_idx_list"
+	}
+
+	# Migration 2's copy is slowed on its source's node (throttle_from) from
+	# before its destination enables, so the regions its chunk marks are
+	# still ahead of the copy when the chunk comes.
+	before_enable() {
+		local m=2
+		stage stage3slow "migration 2's copy slowed on its source's node"
+		THROTTLED=${MSRCDN[$m]}
+		assert_eq "$(helper "${MSRCDN[$m]}" \
+			"throttle_from ${IP[${MDSTDN[$m]}]} $LATE_COPY_RATE")" \
+			throttled "migr $m: the source's replies slowed"
+	}
+
+	# The late push (dnagent_integtest.md, Cases, migr_bitmap): migration
+	# 2's whole bitmap, as one chunk, onto its dm-clone while the primary's
+	# per-CN dm-linear maps it. The agent stops the copy, pauses that
+	# dm-linear, marks the upper 64 regions, and restores both
+	# (architecture.md, Bitmap push protocol, The apply pauses the writers),
+	# so the count of regions held as copied jumps by at least the 64 the
+	# chunk marks, and the pause shows in the agent's log.
+	after_serving() {
+		local m=2 h0 h1 lin times suspended resumed
+		stage stage3late "migration 2's chunk onto its dm-clone that serves"
+		h0=$(migr_hydrated "$m")
+		[ "$h0" -lt 64 ] ||
+			die "migr $m: $h0 regions held as copied before the late push;" \
+				"the slowed copy did not leave the chunk's regions ahead of it"
+		ctl "${MDSTDN[$m]}" push-migr-bm \
+			--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
+			--migr "${MID[$m]}" --bm-idx 0 \
+			--bitmap-hex "$C_BM0$C_BM1" >/dev/null
+		h1=$(migr_hydrated "$m")
+		log "migr $m: late push onto a serving dm-clone: $h0 -> $h1 of 128" \
+			"regions held as copied"
+		[ "$h1" -ge $((h0 + 64)) ] ||
+			die "migr $m: the late push marked $((h1 - h0)) regions, want >= 64"
+		lin=$(dn_linear_name "$CLUSTER" "${DNID[${MDSTDN[$m]}]}" "$SP" \
+			"${MDSTSIDE[$m]}" "${MCN[$m]}")
+		times=$(helper "${MDSTDN[$m]}" "dm_verb_times '$TRACE' '$lin'")
+		suspended=$(printf '%s\n' "$times" | awk '$1 == "suspend" {print $2; exit}')
+		resumed=$(printf '%s\n' "$times" | awk '$1 == "resume" {t = $2} END {print t}')
+		[ -n "$suspended" ] && [ -n "$resumed" ] ||
+			die "migr $m: the late push did not pause and resume the" \
+				"primary's dm-linear $lin: '$times'"
+		log "migr $m: the primary's dm-linear paused for" \
+			"$(( ($(date -d "$resumed" +%s%N) - $(date -d "$suspended" +%s%N)) / 1000000 )) ms"
+		assert_eq "$(helper "${MSRCDN[$m]}" unthrottle)" unthrottled \
+			"migr $m: the source's replies at full speed again"
+		THROTTLED=0
+		assert_eq "$(helper "${MSRCDN[$m]}" throttle_rules)" "" \
+			"migr $m: no bucket left on the source's node"
 	}
 
 	# No source is lost here: migr_full's stage covers it.

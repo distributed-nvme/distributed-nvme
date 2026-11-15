@@ -310,13 +310,14 @@ Upgrade in lockstep). Loading the chunks after the converges would lose none
 of them — a chunk in memory is advertised as applied by the next reply's
 `chunk_id_list` (CN20), so the worker's diff (`dnv-worker.md` BM2) would not
 push it again — but their discards would then wait for the next event that
-re-applies the whole set: a create of that dm-clone, a converge reload of
-its table onto a changed length, devno or region size (step 4 runs on both —
-the converge treats a reload exactly as a create), a build that finds the
-dm-clone with hydration off (step 4 runs then too), or another chunk's own
-push (CN22), each of which lands only while no ns-dev maps the dm-clone
-(`osclient.md`, DiscardRanges). Until then the clone re-copies regions it
-never needed to.
+re-applies the whole set: a create of that dm-clone, a converge resume of
+it or reload of its table onto a changed length, devno or region size (step
+4 runs on each — the converge treats them exactly as a create), a build that
+finds the dm-clone with hydration off (step 4 runs then too), or another
+chunk's own push (CN22), each with the ns-devs paused for the apply when
+they map the dm-clone (`architecture.md`, Bitmap push protocol, The apply
+pauses the writers). Until then the clone re-copies regions it never needed
+to.
 
 A decoded chunk file whose cntlr is not among the loaded cntlr
 requests, or whose `clone_id` is absent from that cntlr's stored
@@ -401,8 +402,9 @@ dm-clone is up with hydration off, as an agent killed between steps 3 and
 metadata where it is gone; a dm-clone
 whose table has drifted — a changed length, devno or region size — is
 reloaded by step 3's probe-first converge (`dnagent.md` SH16) with step
-4's locally held source chunks tried again, which land only while no ns-dev
-maps the dm-clone (`osclient.md`, DiscardRanges). A reboot clears the dm state,
+4's locally held source chunks tried again, the ns-devs paused for the
+apply (`architecture.md`, Bitmap push protocol, The apply pauses the
+writers). A reboot clears the dm state,
 the md arrays and the connections, but not the clone meta group's legs,
 which are sides on disk nodes: the converge connects the legs, assembles
 the group (CN12) and creates the dm-clone over the metadata it holds, so
@@ -2707,7 +2709,9 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    non-zero member the probed status does not already show (probe-first,
    `dnagent.md` SH16; a zero leaves the target's own default in place,
    `architecture.md`, Common validation).
-4. On a pass whose step 3 created or reloaded the dm-clone, or whose read
+4. On a pass whose step 3 created, resumed or reloaded the dm-clone — a
+   dm-clone found suspended on the table it wants is resumed, and a chunk
+   pushed while it was suspended sent no discard (CN22) — or whose read
    before step 3 found hydration off, apply every bitmap chunk of the
    applied set (`dnagent.md` SH21) — the CN22 fold over the
    `(src_slice_idx, bm_idx)`-addressed chunks this node holds, read in
@@ -3433,11 +3437,14 @@ count as written — the safe direction, which can only cost an extra
 copy. The folded bitmap feeds the shared `agent.SkipRanges` with no
 region shift (clones have no meta region — that shift is the dn's) and
 is discarded onto `CnCloneFinalName`, every range in one call of the
-agent's own process (`osclient.md`, DiscardRanges: one exclusive open and one
-BLKDISCARD per range, each bounded by the soft timeout). If the dm-clone does not
-currently exist (standby, not built yet, level-suppressed), the file
-still counts as applied; chunks are re-applied whenever the dm-clone is
-(re)created (CN18 step 4). A failed persist is logged and still acked
+agent's own process (`osclient.md`, DiscardRanges: one open and one
+BLKDISCARD per range, each waited for until the kernel answers), with the ns-devs
+that map the dm-clone paused and its background copy stopped for the moment
+(`architecture.md`, Bitmap push protocol, The apply pauses the writers). If
+the dm-clone does not currently exist (standby, not built yet,
+level-suppressed) or is suspended, the file still counts as applied; chunks
+are re-applied whenever CN18 step 3 creates, resumes or reloads the
+dm-clone (CN18 step 4). A failed persist is logged and still acked
 code zero, with neither the fold nor the discard attempted. For a
 pair the node does not hold yet that heals itself: the chunk stays out
 of the applied set, so it stays out of the clone's `BitmapInfo`
@@ -4529,19 +4536,22 @@ stores instead is CN23's.
   reads the kernel's default model, so once no cntlr claims it and it holds
   no namespace device the node-level sweep reads it as foreign and leaves
   it (CN21); an operator removes it.
-* A clone's bitmap apply takes time that grows with its ranges while no
-  table maps the dm-clone: its create or reload and a build that finds
-  hydration off (CN18 step 4) and a push of a changed chunk (CN22) apply the
-  whole skip
-  set under the cntlr's CN1 locks. The discards run in the agent's own
-  process, one open and one ioctl per range with no child process each
-  (`osclient.md`, DiscardRanges), but a fragmented source's hundreds of
-  thousands of ranges hold the locks for as long as the kernel takes over
-  them. Once the ns-devs map the dm-clone (CN18 step 6), an apply is refused
-  at the open: it discards nothing, holds the locks only briefly, and the
-  regions it would have marked are copied. A cancelled push returns at once
-  and leaves the range in flight to the kernel; the ranges it did not reach
-  cost extra copying only, until the next apply.
+* A clone's bitmap apply takes time that grows with its ranges: its
+  create, resume or reload and a build that finds hydration off (CN18 step
+  4) and a push of a changed chunk (CN22) apply the whole skip set under
+  the cntlr's CN1 locks. The discards run in the agent's own process, one
+  open and one ioctl per range with no child process each (`osclient.md`,
+  DiscardRanges), but a fragmented source's hundreds of thousands of ranges
+  hold the locks for as long as the kernel takes over them, and once the
+  ns-devs map the dm-clone (CN18 step 6) they stay paused for as long, so
+  the volume's IO waits for the apply (`architecture.md`, Bitmap push
+  protocol, The apply pauses the writers). Every apply discards the whole
+  fold again, so the pause comes with every push of a changed chunk. A copy
+  still in flight when the pause begins holds it for up to the second
+  wait's bound, and one that outlasts that bound ends the apply with no
+  discard: a pause for nothing, and those regions are copied, until the
+  next apply. A cancelled push sends no further range and still waits for
+  the one in the kernel.
 * A namespace dropped from a dnv-prefixed subsystem that decodes to
   nothing stays enabled: the sweep is the only remover of a namespace
   (CN21), and it never attributes a subsystem whose NQN carries the dnv

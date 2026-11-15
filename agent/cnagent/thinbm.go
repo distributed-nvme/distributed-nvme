@@ -582,8 +582,10 @@ func foldRegions(
 // ---------------------------------------------------------------------------
 
 // applyCloneChunks folds the source chunks this agent holds and discards
-// the fully-skippable regions of the dm-clone (CN22). Re-applying is harmless:
-// discarding an already-hydrated region is a no-op.
+// the fully-skippable regions of the dm-clone (CN22), pausing the namespace
+// devices that map it and sending nothing to a dm-clone that is absent or
+// suspended (agent.ApplySkipRanges). Re-applying is harmless: discarding an
+// already-hydrated region is a no-op.
 func (s *CnAgentServer) applyCloneChunks(
 	ctx context.Context,
 	st *cntlrState,
@@ -625,7 +627,8 @@ func (s *CnAgentServer) applyCloneChunks(
 		cp.regionCnt, plan.blockSize, geometry, slices)
 	ranges := agent.SkipRanges(folded, 0, cp.regionCnt, plan.blockSize)
 	if err := agent.ApplySkipRanges(
-		ctx, s.dm, s.nf.DmPath(cp.finalName), ranges); err != nil {
+		ctx, s.dm, cp.finalName, s.nf.DmPath(cp.finalName),
+		ranges); err != nil {
 		slog.ErrorContext(ctx, "applying clone bitmap failed",
 			slog.String("dm", cp.finalName),
 			slog.String("error", err.Error()))

@@ -579,9 +579,9 @@ func (d *Dm) DevNo(ctx context.Context, path string) (string, error) {
 // DiscardRanges discards byte ranges of a device in the agent's own process
 // (OsClient.DiscardRanges) — how the agents mark dm-clone regions "already
 // hydrated" (architecture.md, Bitmap push protocol and raid0 bitmap math):
-// one exclusive open and one discard per range, with no child process per
-// range. The OsClient bounds each range by the caller's ctx and the soft
-// timeout itself, so ctx goes on unchanged (osclient.md, DiscardRanges).
+// one open, not exclusive, and one discard per range, with no child process
+// per range. It returns only once every discard it sent has left the kernel
+// (osclient.md, DiscardRanges), so ctx goes on unchanged.
 func (d *Dm) DiscardRanges(
 	ctx context.Context,
 	dev string,
@@ -710,6 +710,32 @@ func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
 		return 0, fmt.Errorf("%s reads %q, not a size", path, text)
 	}
 	return sectors * SectorSize, nil
+}
+
+// InFlight reads the IO a block device has in flight, reads and writes, from
+// "/sys/dev/block/<devNo>/inflight", the counts the block layer keeps of the
+// requests the device has taken and not completed. A device that is not
+// there, or a line that does not read as two counts, is an error.
+func (d *Dm) InFlight(ctx context.Context, devNo string) (uint64, uint64,
+	error) {
+	path := sysDevBlockDir + "/" + devNo + "/inflight"
+	text, ok, err := d.readAttrStrict(ctx, path)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !ok {
+		return 0, 0, fmt.Errorf("block device %s is not there", devNo)
+	}
+	fields := strings.Fields(text)
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("%s reads %q, not two counts", path, text)
+	}
+	reads, rerr := strconv.ParseUint(fields[0], 10, 64)
+	writes, werr := strconv.ParseUint(fields[1], 10, 64)
+	if rerr != nil || werr != nil {
+		return 0, 0, fmt.Errorf("%s reads %q, not two counts", path, text)
+	}
+	return reads, writes, nil
 }
 
 // CloneTable builds a dm-clone table. Hydration and discard passdown are

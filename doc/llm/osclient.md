@@ -97,8 +97,8 @@ the method set is exactly the following, each taking the caller's ctx:
 * `WriteBlock` writes data at a byte offset and fsyncs the file descriptor
   before returning.
 * `DiscardRanges` discards byte ranges of a block device in the caller's own
-  process, one exclusive open and one BLKDISCARD per range, and returns how many it
-  discarded and the first error (DiscardRanges).
+  process, one open, not exclusive, and one BLKDISCARD per range, and returns how
+  many it discarded and the first error (DiscardRanges).
 * `ReadProto` reads a protobuf binary file and deserializes it into a
   non-nil target message.
 * `WriteProto` serializes a message to wire binary and writes it with the
@@ -122,8 +122,7 @@ the method set is exactly the following, each taking the caller's ctx:
   (`semaphore.NewWeighted`) carries the limit. Every public method first
   acquires one unit (blocking, ctx-aware: a cancelled or expired ctx returns
   the ctx error without performing the operation and without logging an
-  operation record) and releases it when it returns, `DiscardRanges` aside,
-  which releases it when its device is closed (DiscardRanges).
+  operation record) and releases it when it returns.
 * `LimitedOsClient` is safe for concurrent use and holds no other mutable
   state. One instance per process is the expected usage.
 
@@ -426,26 +425,24 @@ child process per range would hold the caller's locks for tens of seconds on
 a fragmented source.
 
 * It takes one semaphore slot for the whole call, opens the path once,
-  write-only and, as `blkdiscard` without `--force` does, exclusively, and
-  sends one BLKDISCARD ioctl per range, in the order given, the ctx checked
+  write-only and, as `blkdiscard --force` does, not exclusively, and sends
+  one BLKDISCARD ioctl per range, in the order given, the ctx checked
   before each, so a cancelled caller sends no further range. It returns how
   many ranges it discarded and the first error — a ctx error, the open's,
-  or an ioctl's — after which it discards no more. The exclusive open
-  refuses, EBUSY at once, a device another dm table maps or that anything
-  else holds: a discard onto a dm-clone that the ns-devs map (`cnagent.md`
-  CN18) or that a primary's per-CN dm-linear maps (`dnagent.md` DN13)
-  discards nothing, and those regions are copied instead.
-* Unlike every other method, `DiscardRanges` bounds itself: the caller's
-  ctx needs no deadline of its own, since its wait for a slot and each
-  range are waited for no longer than the ctx and the soft timeout
-  (`CmdSoftTimeout`) allow, and a range's wait returns then: with an error naming the range at the soft
-  timeout, or with the ctx's error. A discard the
-  kernel has not answered by then is left to finish there, as a killed
-  child's ioctl is: its goroutine, its thread and the open device stay
-  until the kernel answers, and only then is the device closed and the
-  call's slot given back, as a command's slot comes back only once its
-  child is reaped (RunCommand). While the device stays open, a
-  `dmsetup remove` of it fails EBUSY.
+  or an ioctl's — after which it discards no more. The open is not
+  exclusive because the dm-clone a chunk marks is held while it serves, by
+  a primary's per-CN dm-linear (`dnagent.md` DN13) or by the ns-devs
+  (`cnagent.md` CN18); the caller pauses those holders around the call
+  instead (`architecture.md`, Bitmap push protocol, The apply pauses the
+  writers).
+* It waits for each range's ioctl to return, however long the kernel
+  takes, and a cancelled ctx stops it only before the next range: when it
+  returns, no discard it sent is still in the kernel, so its caller may
+  resume the writes it paused around the call (`architecture.md`, Bitmap
+  push protocol, The apply pauses the writers). Its wait for a slot is
+  bounded by the ctx and the soft timeout (`CmdSoftTimeout`), as a
+  command's caller's is. It holds its slot and the open device until it
+  returns; while the device is open, a `dmsetup remove` of it fails EBUSY.
 * One `os discard ranges` record covers the call (`log.md`, OS commands and
   file IO), with the path, the range count, the ranges done and at most the
   first `discardLogRanges` ranges, whatever the count.

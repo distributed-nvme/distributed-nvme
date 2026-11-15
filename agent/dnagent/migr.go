@@ -537,14 +537,14 @@ func (s *DnAgentServer) runMigrDst(
 
 	// (4) the dm-clone itself, created with hydration off so the bitmap
 	// chunks land before any region is copied.
-	created, err := s.ensureDmClone(ctx, plan, state.DevicePath)
+	rebuilt, err := s.ensureDmClone(ctx, plan, state.DevicePath)
 	if err != nil {
 		seen.cloneErr = err
 		return seen
 	}
-	if created {
+	if rebuilt {
 		// Re-apply every chunk of the applied set whenever the dm-clone is
-		// (re)created (dnagent.md DN15).
+		// created, resumed or reloaded (dnagent.md DN15).
 		s.applyChunks(ctx, st, plan)
 	}
 	seen.hydrationErr = s.ensureHydration(ctx, plan)
@@ -897,9 +897,12 @@ func metaWrapperMaps(
 		targets[0].Args[1] == strconv.FormatUint(offsetSectors, 10)
 }
 
-// ensureDmClone converges the dm-clone and reports whether this pass created
-// it. The source device number changes across reconnects, so a converged
-// check compares the resolved devices, not just presence.
+// ensureDmClone converges the dm-clone and reports whether this pass created,
+// resumed or reloaded it: each is a pass after which the stored pieces are
+// applied again (DN15), a resume because a piece that came while the dm-clone
+// was suspended sent no discard. The source device number changes across
+// reconnects, so a converged check compares the resolved devices, not just
+// presence.
 func (s *DnAgentServer) ensureDmClone(
 	ctx context.Context,
 	plan *sidePlan,
@@ -969,14 +972,14 @@ func (s *DnAgentServer) ensureDmClone(
 		// closed (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`)
 		// — it is resumed ([D12]).
 		if dev.Suspended {
-			return false, s.dm.Resume(ctx, name)
+			return true, s.dm.Resume(ctx, name)
 		}
 		return false, nil
 	}
 	if err := s.dm.Reload(ctx, name, table); err != nil {
 		return false, err
 	}
-	return false, nil
+	return true, nil
 }
 
 // cloneTableMaps reports whether a live table is the dm-clone ensureDmClone

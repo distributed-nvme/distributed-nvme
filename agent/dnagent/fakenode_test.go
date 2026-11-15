@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -511,6 +512,12 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		return size, nil
 	}
 	data, ok := f.files[path]
+	if !ok && strings.HasPrefix(path, "/sys/dev/block/") &&
+		strings.HasSuffix(path, "/inflight") {
+		// A device's in-flight IO (Dm.InFlight): none, unless a test
+		// plants a count.
+		return "       0        0\n", nil
+	}
 	if !ok {
 		// The absent-file error MUST wrap fs.ErrNotExist. The production
 		// LimitedOsClient returns os.ReadFile's *fs.PathError, and
@@ -1594,6 +1601,11 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		return sb.String(), 0
 	case "info":
 		name := args[len(args)-1]
+		if name == "name,major,minor,attr" {
+			// The whole-node listing (Dm.ListInfo): one line per device,
+			// the name, the major, the minor and the attr column.
+			return f.dmInfoListing(), 0
+		}
 		dm, ok := f.dms[name]
 		if !ok {
 			return "", 1
@@ -1613,8 +1625,18 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		} else {
 			attr[3] = 'w'
 		}
+		// The per-device read with the number (Dm.InfoDevNo): the name, the
+		// major, the minor and the attr column, joined by the separator.
+		if slices.Contains(args, "name,major,minor,attr") {
+			major, minor, _ := strings.Cut(f.devNo["/dev/mapper/"+name], ":")
+			return strings.Join(
+				[]string{name, major, minor, string(attr)}, "/") + "\n", 0
+		}
 		return string(attr) + "\n", 0
 	case "table":
+		if len(args) == 2 && args[1] == "--concise" {
+			return f.dmTableListing()
+		}
 		if len(args) == 3 && args[1] == "--inactive" {
 			dm, ok := f.dms[args[2]]
 			if !ok {
@@ -1628,6 +1650,11 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		}
 		return strings.Join(dmTargets(dm.table), "\n") + "\n", 0
 	case "status":
+		// `dmsetup status [--noflush] <name>`: the read of a dm-clone's copies
+		// in flight carries the flag (agent.ApplySkipRanges).
+		if len(args) == 3 && args[1] == "--noflush" {
+			return f.dmStatus(args[2])
+		}
 		return f.dmStatus(args[1])
 	case "create":
 		return f.dmCreate(args, stdin)
@@ -1710,6 +1737,68 @@ func parseDmCreateArgs(args []string, stdin string) (string, string, bool) {
 		table = strings.TrimRight(stdin, "\n")
 	}
 	return name, table, readOnly
+}
+
+// dmInfoListing answers the whole-node `dmsetup info` of Dm.ListInfo: one
+// "name/major/minor/attr" line per device, sorted by name, or the tool's
+// "No devices found" line on a node with none.
+func (f *fakeNode) dmInfoListing() string {
+	if len(f.dms) == 0 {
+		return "No devices found\n"
+	}
+	names := make([]string, 0, len(f.dms))
+	for name := range f.dms {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var sb strings.Builder
+	for _, name := range names {
+		dm := f.dms[name]
+		attr := []byte("L---")
+		if dm.waiting != nil {
+			attr[1] = 'I'
+		}
+		if dm.suspended {
+			attr[2] = 's'
+		}
+		if dm.readOnly {
+			attr[3] = 'r'
+		} else {
+			attr[3] = 'w'
+		}
+		major, minor, _ := strings.Cut(f.devNo["/dev/mapper/"+name], ":")
+		fmt.Fprintf(&sb, "%s/%s/%s/%s\n", name, major, minor, attr)
+	}
+	return sb.String()
+}
+
+// dmTableListing answers `dmsetup table --concise`: one record per device,
+// "name,uuid,minor,flags" and then one field per live table line, the
+// records joined by ";", as the lab's dmsetup prints them.
+func (f *fakeNode) dmTableListing() (string, int) {
+	if len(f.dms) == 0 {
+		return "No devices found\n", 0
+	}
+	names := make([]string, 0, len(f.dms))
+	for name := range f.dms {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	records := make([]string, 0, len(names))
+	for _, name := range names {
+		dm := f.dms[name]
+		_, minor, _ := strings.Cut(f.devNo["/dev/mapper/"+name], ":")
+		flags := "rw"
+		if dm.readOnly {
+			flags = "ro"
+		}
+		fields := []string{name, "", minor, flags}
+		for _, target := range dmTargets(dm.table) {
+			fields = append(fields, target+" ")
+		}
+		records = append(records, strings.Join(fields, ","))
+	}
+	return strings.Join(records, ";") + "\n", 0
 }
 
 // dmTargets splits a table into its target lines.

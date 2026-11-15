@@ -58,6 +58,7 @@ func TestParseCloneStatus(t *testing.T) {
 		RegionSectors:    2048,
 		HydratedRegions:  4,
 		TotalRegions:     10,
+		HydratingRead:    true,
 		HydrationEnabled: true,
 	}
 	with := func(edit func(st *CloneStatus)) *CloneStatus {
@@ -83,6 +84,12 @@ func TestParseCloneStatus(t *testing.T) {
 			with(func(st *CloneStatus) {
 				st.Threshold, st.BatchSize = 1, 1
 			})},
+		{"copies in flight",
+			"0 20480 clone 8 1/1024 2048 4/10 3 0 0",
+			with(func(st *CloneStatus) { st.Hydrating = 3 })},
+		{"a count of copies in flight that does not parse",
+			"0 20480 clone 8 1/1024 2048 4/10 x 0 0",
+			with(func(st *CloneStatus) { st.HydratingRead = false })},
 		{"the kernel's line, its metadata mode after the core arguments",
 			"0 2097152 clone 8 72/32768 2048 1024/1024 0 1 " +
 				"no_discard_passdown 4 hydration_threshold 1 " +

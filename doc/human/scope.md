@@ -131,13 +131,12 @@ the right time.
   misses the later writes. The copy skips them. The pool then reads old
   bytes of the new side's extents there, with no error. The bytes may be
   another pool's. Until the fix, read the list only after the cutover,
-  once the primary's path to the new side is ANA optimized. Today the new
-  side cannot use a piece that arrives once it serves, so such a read
-  saves no copying until the new side is built again, as after a reboot
-  of its disk node. State: fix decided. The worker reads the list itself
-  once the new side serves, and hands it over in pieces of a fixed size.
-  The new side uses a piece while it serves. No caller reads or hands over
-  a migration's list any more. Not seen in the lab.
+  once the primary's path to the new side is ANA optimized. The new side
+  uses a piece that arrives while it serves: it holds the leg's IO through
+  it for a moment while it marks the piece's blocks. State: fix decided.
+  The worker reads the list itself once the new side serves, and hands it
+  over in pieces of a fixed size. No caller reads or hands over a
+  migration's list any more. Not seen in the lab.
 - **A source volume's written-block list read too early for a clone.**
   The read must come after the source stopped taking writes. An earlier
   read makes the clone serve zeros where the source has data, with no

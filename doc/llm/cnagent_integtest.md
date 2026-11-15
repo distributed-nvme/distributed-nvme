@@ -138,8 +138,8 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   writes again whole. A copy whose reads all fail writes nothing.
 * A new dm-clone is read through its source at once, as udev probes the
   device, and a discard on it waits for those reads, so over a slowed source
-  the chunk's discard can outlast the soft timeout and be given up on
-  (`osclient.md`, DiscardRanges).
+  the chunk's discard waits as long as they take (`osclient.md`,
+  DiscardRanges).
   clone_xfer therefore slows its copy on the write side: a VM's cn agent
   reaches the sides of the dn agent beside it over the loopback device, and
   a token bucket there, kept to the nvme-tcp port, slows what its legs send
@@ -526,7 +526,13 @@ steps); the first hydration sample, a fresh one, already counts the skipped
 half, and the last region the source wrote reads back right, through
 read-through if need be. The copy runs slowed, the destination CN's writes
 to the sides on its own VM held to a low rate (Lab facts), so that the case
-acts in its middle. Once the copy has passed the chunk, the source loses its
+acts in its middle. The chunk, grown by one byte past the clone's regions
+(`architecture.md`, [D8]), is then pushed again while the namespace device
+maps the dm-clone: the log shows the copy stopped, the namespace device
+suspended, the chunk's discard landed, the device resumed and the copy
+started, in that order, the pause's length logged, and the host's path
+stays optimized (`architecture.md`, Bitmap push protocol, The apply pauses
+the writers). Once the copy has passed the chunk, the source loses its
 namespace behind both agents' backs, as it does again once the copy is whole
 (below), and the copy holds at a count past the chunk's (Lab facts). The
 destination's agent then restarts over the held copy and leaves it as it is
@@ -539,8 +545,9 @@ dm-clone's and the group's ok. The source gets its namespace back from the
 transfer's own converge of a re-sent request (CN17), under a new device number
 on the destination, and with no request to the destination the connect retry,
 which a source with no namespace keeps registered, reloads the dm-clone onto
-that number in place, tries the chunk again, a discard the exclusive open
-refuses since the ns-devs map the dm-clone (`osclient.md`, DiscardRanges),
+that number in place, tries the chunk again with the ns-devs paused, which
+marks nothing new since the first build marked the chunk's regions
+(`architecture.md`, Bitmap push protocol, The apply pauses the writers),
 and enables hydration (CN10, CN18), its count at least the held one, and the
 copy goes on. With no request,
 the startup reconcile, or the connect retry its pass registers when a step

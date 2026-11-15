@@ -42,14 +42,22 @@ func ParseDmLines(out string) []DmTarget {
 }
 
 // CloneStatus is the parsed `dmsetup status` line of a dm-clone device: the
-// region size in sectors, the hydration progress in regions, whether
-// hydration is on (no no_hydration feature argument), the two hydration
-// knobs among its core arguments, and the metadata mode the line ends with,
-// one of the CloneMetadata modes, or "" when the line does not end with one.
+// region size in sectors, the hydration progress in regions, the count of
+// regions being copied at the moment of the read, whether hydration is on
+// (no no_hydration feature argument), the two hydration knobs among its core
+// arguments, and the metadata mode the line ends with, one of the
+// CloneMetadata modes, or "" when the line does not end with one.
 type CloneStatus struct {
-	RegionSectors    uint64
-	HydratedRegions  uint64
-	TotalRegions     uint64
+	RegionSectors   uint64
+	HydratedRegions uint64
+	TotalRegions    uint64
+	// Hydrating is the count of regions whose copy is in flight, the
+	// background copy's and the copies writes started; HydratingRead says
+	// the count parsed. A count that does not parse leaves both zero, so a
+	// caller that waits for no copy in flight (agent.ApplySkipRanges) reads
+	// HydratingRead and never a zero alone.
+	Hydrating        uint64
+	HydratingRead    bool
 	HydrationEnabled bool
 	Threshold        uint32
 	BatchSize        uint32
@@ -127,6 +135,10 @@ func ParseCloneStatus(raw string) (*CloneStatus, bool) {
 		if v, err := strconv.ParseUint(total, 10, 64); err == nil {
 			st.TotalRegions = v
 		}
+	}
+	if v, err := strconv.ParseUint(args[4], 10, 64); err == nil {
+		st.Hydrating = v
+		st.HydratingRead = true
 	}
 	featureCnt, err := strconv.Atoi(args[5])
 	if err != nil || featureCnt < 0 || featureCnt > len(args)-6 {

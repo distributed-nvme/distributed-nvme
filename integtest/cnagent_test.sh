@@ -7101,6 +7101,50 @@ case_clone_xfer() {
 	assert_eq "$(sha_range "$hv" "$dev" 1 31)" "$want" \
 		"clone_xfer read-through of MiB 31"
 
+	stage late "stage 5a: a grown chunk onto the dm-clone that serves, its namespace device paused around the apply"
+	# Chunk (0, 0) grown by one byte past this clone's 64 regions
+	# (architecture.md, [D8]): a payload that differs from the stored one,
+	# so cn2 stores it and applies it while the namespace device maps the
+	# dm-clone (cnagent.md CN22). Its discard is the stored chunk's, over
+	# regions the build marked already, so the count of regions held as
+	# copied keeps its value; what the stage reads is the apply on a
+	# dm-clone that serves: the copy stopped and waited out, the namespace
+	# device suspended, the discard landed, the device resumed and the copy
+	# started again, in that order (architecture.md, Bitmap push protocol,
+	# The apply pauses the writers). The copy is still slowed, so the wait
+	# for the copy in flight is a real one. The dn suite's late push proves
+	# the count of a chunk applied while its dm-clone serves.
+	cnctl 2 push-clone-bm --sp "$sp2" --cntlr "$cntlr" \
+		--clone "$C_CLONE" --src-slice-idx 0 --bm-idx 0 \
+		--bitmap-hex 00000000ffffffff00 >/dev/null
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_before "$seq" "^dmsetup message $clonedm 0 disable_hydration\$" \
+		"^dmsetup suspend $nsdev2\$" \
+		"clone_xfer: the copy stopped before the namespace device's pause"
+	assert_before "$seq" "^dmsetup suspend $nsdev2\$" \
+		"^discard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$" \
+		"clone_xfer: the late discard lands inside the pause"
+	assert_before "$seq" \
+		"^discard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$" \
+		"^dmsetup resume $nsdev2\$" \
+		"clone_xfer: the namespace device resumed after the discard"
+	assert_before "$seq" "^dmsetup resume $nsdev2\$" \
+		"^dmsetup message $clonedm 0 enable_hydration\$" \
+		"clone_xfer: the copy started again after the pause"
+	json=$(helper 2 "cn_msg $TRACE 'os command'")
+	log "clone_xfer: the namespace device paused for $(printf '%s\n' "$json" |
+		"$JQ" -rs --arg d "$nsdev2" '
+		    [.[] | select(.cmd == "dmsetup" and (.args | index($d)) != null)]
+		    | ((map(select(.args[0] == "resume"))[-1].time // "") + " " +
+		       (map(select(.args[0] == "suspend"))[0].time // ""))' |
+		{ read -r resumed suspended
+		  echo $(( ($(date -d "$resumed" +%s%N) -
+		      $(date -d "$suspended" +%s%N)) / 1000000 )); }) ms"
+	assert_eq "$(helper 2 "dm_state $nsdev2")" live \
+		"clone_xfer: the namespace device serves after the late push"
+	assert_eq "$(host_ana "$hv" "$nqn" 2)" optimized \
+		"clone_xfer: the host's path to cn2 stays optimized"
+
 	stage hold "stage 5b: the source loses its namespace in the middle of the copy, which then holds"
 	# The copy runs slowed (stage 4). Once it has copied a region past the
 	# chunk's 32, a count that kept metadata shows and freshly formatted
@@ -7207,10 +7251,11 @@ case_clone_xfer() {
 	# old device number and reads nothing from it. cn2 gets no request: the
 	# CN10 retry reads the source ready again, and its pass reloads the
 	# dm-clone onto the source's new number, the one positional argument
-	# that differs, with hydration off, tries the chunk again, which the
-	# exclusive open refuses since the ns-devs still map the dm-clone
-	# (osclient.md, DiscardRanges), and enables hydration (CN18 steps 1, 3,
-	# 4 and 5). The reload suspends the
+	# that differs, with hydration off, tries the chunk again with the
+	# ns-devs paused, which marks nothing new since the first build marked
+	# the chunk's regions (architecture.md, Bitmap push protocol, The apply
+	# pauses the writers), and enables hydration (CN18 steps 1, 3, 4 and
+	# 5). The reload suspends the
 	# dm-clone first, which commits its metadata to the group, so the
 	# reloaded dm-clone loads the held count. One over metadata formatted
 	# anew would count the chunk's 32 and climb from there, copying the
@@ -7259,19 +7304,30 @@ case_clone_xfer() {
 		"clone_xfer: the reloaded dm-clone's metadata device is its group's"
 	# Who did it: every command cn2 ran since the mark, each with its trace
 	# id. The reload, the chunk and the enable are the retry's, under a
-	# trace id of its own, and cn2 saw no SyncupCntlr.
+	# trace id of its own, and cn2 saw no SyncupCntlr. The chunk lands
+	# after the reload with the namespace device paused around it
+	# (architecture.md, Bitmap push protocol, The apply pauses the writers),
+	# before hydration is enabled.
 	cmds=$(helper 2 "cn_cmds_since $mark ''")
 	seq=$(printf '%s\n' "$cmds" | cut -d' ' -f2-)
 	assert_absent "$seq" "^dmsetup create $clonedm( |\$)" \
 		"clone_xfer giveback: no new dm-clone"
 	assert_before "$seq" "^dmsetup reload $clonedm .* $src1 " \
-		"^discard-failed .*/dev/mapper/$clonedm\$" \
-		"clone_xfer giveback: the chunk is tried, and refused, after the reload"
-	assert_before "$seq" "^discard-failed .*/dev/mapper/$clonedm\$" \
+		"^dmsetup suspend $nsdev2\$" \
+		"clone_xfer giveback: the namespace device paused after the reload"
+	assert_before "$seq" "^dmsetup suspend $nsdev2\$" \
+		"^discard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$" \
+		"clone_xfer giveback: the chunk lands inside the pause"
+	assert_before "$seq" \
+		"^discard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$" \
+		"^dmsetup resume $nsdev2\$" \
+		"clone_xfer giveback: the namespace device resumed after the chunk"
+	assert_before "$seq" \
+		"^discard --offset 33554432 --length 33554432 /dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
-		"clone_xfer giveback: the chunk is tried before hydration"
-	assert_absent "$seq" "^discard .*/dev/mapper/$clonedm\$" \
-		"clone_xfer giveback: no discard lands on the mapped dm-clone"
+		"clone_xfer giveback: the chunk lands before hydration"
+	assert_absent "$seq" "^discard-failed .*/dev/mapper/$clonedm\$" \
+		"clone_xfer giveback: no discard of the chunk fails"
 	[ "$(printf '%s\n' "$cmds" | grep -cE "^$TRACE dmsetup reload ")" = 0 ] ||
 		die "clone_xfer giveback: the reload ran under the stage's own" \
 			"trace $TRACE: $cmds"

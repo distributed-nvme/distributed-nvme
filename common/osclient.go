@@ -510,11 +510,11 @@ const discardLogRanges = 64
 // length) byte range its argument holds.
 const blkDiscardIoctl = 0x1277
 
-// discardOpenFlags open the device for DiscardRanges exclusively, as
-// `blkdiscard` without `--force` does: a device another dm table maps, or
-// that anything else holds, is refused EBUSY at once (osclient.md,
-// DiscardRanges).
-const discardOpenFlags = os.O_WRONLY | syscall.O_EXCL
+// discardOpenFlags open the device for DiscardRanges write-only and not
+// exclusively, as `blkdiscard --force` does: the dm-clone a piece marks is
+// held by the devices above it while it serves, and its caller pauses them
+// instead (agent.ApplySkipRanges; osclient.md, DiscardRanges).
+const discardOpenFlags = os.O_WRONLY
 
 // discardArg is BLKDISCARD's argument for one range: its start, then its
 // length, in bytes.
@@ -539,19 +539,17 @@ func (c *LimitedOsClient) DiscardRanges(
 	path string,
 	ranges []DiscardRange,
 ) (int, error) {
-	// The wait for a slot is bounded by the soft timeout too, so a caller
-	// whose ctx has no deadline is bounded here as every wrapper call is
-	// (osclient.md, DiscardRanges).
+	// The wait for a slot is bounded by the soft timeout, so a caller whose
+	// ctx has no deadline waits for one no longer than a command's caller
+	// does (osclient.md, DiscardRanges).
 	actx, cancel := context.WithTimeout(ctx, discardSoftTimeout)
 	err := c.sem.Acquire(actx, 1)
 	cancel()
 	if err != nil {
 		return 0, err
 	}
-	// The slot goes back when the device is closed, which for a range given
-	// up on is when the kernel answers it, as a command's slot goes back
-	// only once its child is reaped (osclient.md, DiscardRanges).
-	done, err := discardRanges(ctx, path, ranges, func() { c.sem.Release(1) })
+	done, err := discardRanges(ctx, path, ranges)
+	c.sem.Release(1)
 	logged := ranges
 	if len(logged) > discardLogRanges {
 		logged = logged[:discardLogRanges]
@@ -570,63 +568,39 @@ func (c *LimitedOsClient) DiscardRanges(
 	return done, err
 }
 
-// discardSoftTimeout bounds each range of DiscardRanges, as CmdSoftTimeout
-// bounds a command. A variable, so the package's tests need not wait it out.
+// discardSoftTimeout bounds DiscardRanges' wait for a semaphore slot, as
+// CmdSoftTimeout bounds a command's caller. A variable, so the package's
+// tests need not wait it out.
 var discardSoftTimeout = CmdSoftTimeout * time.Second
 
-// discardRanges is DiscardRanges without the slot and the record; release
-// runs exactly once, when the device is closed. Each ioctl runs on its own
-// goroutine and is waited for no longer than the ctx and discardSoftTimeout
-// allow: one the kernel has not answered by then is left to finish there,
-// as a killed child's ioctl is, and the device closes, and release runs,
-// once it returns. ctx is read before each range, so a cancelled caller
-// sends no further range.
+// discardRanges is DiscardRanges without the slot and the record. It sends
+// one BLKDISCARD per range, in order, ctx read before each, so a cancelled
+// caller sends no further range; and it waits for each ioctl to return,
+// however long the kernel takes, so that when it returns no discard it sent
+// is still in the kernel: its caller (agent.ApplySkipRanges) resumes the
+// writes to the dm-clone only then, and a discard that marked its regions
+// after that resume could let a copy in flight land over a write.
 func discardRanges(
 	ctx context.Context,
 	path string,
 	ranges []DiscardRange,
-	release func(),
 ) (int, error) {
 	if err := ctx.Err(); err != nil {
-		release()
 		return 0, err
 	}
 	f, err := os.OpenFile(path, discardOpenFlags, 0)
 	if err != nil {
-		release()
 		return 0, err
 	}
-	closeNow := func() {
-		f.Close()
-		release()
-	}
+	defer f.Close()
 	for i, r := range ranges {
 		if err := ctx.Err(); err != nil {
-			closeNow()
 			return i, err
 		}
-		errc := make(chan error, 1)
-		go func() { errc <- blkDiscard(f, r) }()
-		timer := time.NewTimer(discardSoftTimeout)
-		select {
-		case err := <-errc:
-			timer.Stop()
-			if err != nil {
-				closeNow()
-				return i, err
-			}
-		case <-ctx.Done():
-			timer.Stop()
-			go func() { <-errc; closeNow() }()
-			return i, ctx.Err()
-		case <-timer.C:
-			go func() { <-errc; closeNow() }()
-			return i, fmt.Errorf(
-				"BLKDISCARD %s offset=%d length=%d did not answer within %v",
-				path, r.Offset, r.Length, discardSoftTimeout)
+		if err := blkDiscard(f, r); err != nil {
+			return i, err
 		}
 	}
-	closeNow()
 	return len(ranges), nil
 }
 

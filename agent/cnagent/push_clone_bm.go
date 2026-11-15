@@ -88,8 +88,9 @@ func (s *CnAgentServer) pushCloneBitmap(
 	set.Put(chunkKey, req.GetBitmap())
 
 	// A chunk whose dm-clone does not currently exist (standby, not built
-	// yet, level-suppressed) still counts as applied; chunks are re-applied
-	// whenever the dm-clone is (re)created (CN18 step 4).
+	// yet, level-suppressed) or is suspended still counts as applied; chunks
+	// are re-applied whenever the build creates, resumes or reloads the
+	// dm-clone (CN18 step 4).
 	plan := newCntlrPlan(s.nf, current)
 	if cp := plan.cloneById[req.GetCloneId()]; cp != nil {
 		if dev, err := s.dm.Info(ctx, cp.finalName); err == nil &&
