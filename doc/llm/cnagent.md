@@ -3525,8 +3525,10 @@ empty), and so does the read it starts.
 
 ### `GetThinDeviceBm` / `GetLegBm`
 
-CN25. Both serve the gateway's bitmap reads (`architecture.md`, Bitmap
-reads) from a dm-thin metadata snapshot and report failure only through
+CN25. Both serve a bitmap read (`architecture.md`, Bitmap reads) — the
+gateway's `GetThinDeviceBitmap` and the worker's read of a migrating leg
+(`dnv-worker.md` BM7) — from a dm-thin metadata snapshot and report
+failure only through
 the gRPC status (`architecture.md`, Common agent rules — they have no
 `AgentReply`): an unknown cntlr, a non-primary role, a missing pool, or
 a failing command all end the RPC with an Internal status naming the
@@ -3591,7 +3593,8 @@ clears the runtime directory. The command timeouts of
 metadata outgrows what `thin_dump` emits inside `CmdSoftTimeout` fails
 the RPC, and the caller falls back to a full copy — a bitmap read when
 `architecture.md`, Clones or Migration, says is an optimization, never a
-correctness input.
+correctness input; the worker reads a leg's bitmap again on a later round
+(`dnv-worker.md` BM7).
 CN14's sweeps of a pool's thin ids — the activation sweep and the sweep
 after a failed delete — share this reservation machinery and its
 `CmdSoftTimeout` bound: metadata too large to dump inside the bound fails
@@ -3635,9 +3638,35 @@ anyway would report one group's bitmap under another group's offsets and
 return silently wrong data. A leg of a clone meta group (CN12) fails the
 RPC with an Internal status naming its clone, before any snapshot is
 taken: its group backs no pool, so no thin mapping says which of its
-blocks are written, and the gateway refuses that read before it asks
-(`architecture.md`, Bitmap reads), so the refusal here guards the agent's
-own arithmetic, which reads the leg's slice.
+blocks are written, and no migration moves such a leg, so the worker
+never asks for it (`architecture.md`, Bitmap reads); the refusal here
+guards the agent's own arithmetic, which reads the leg's slice.
+Before a data leg's snapshot the read drains the slice's thin devices:
+dm-thin records a new block only once the data write has ended on every
+leg of the group, so in an md-raid1 group a write can have landed on the
+leg while its block is not recorded yet, and a snapshot then would read
+the block as never written; until it is recorded the write is in flight
+on its thin device. The devices are every dm device the node holds whose
+table is a thin target over the slice's `CnPoolFinalName`, found in one
+listing of the node's tables, and so a device the plan does not hold too,
+with their numbers and flags from one listing of the node's devices. A
+device whose in-flight count (`Dm.InFlight`) reads no write is left alone,
+at the cost of that read: every write it took has ended, and a write that
+starts after the read is no concern, as the old side takes no more writes
+by the time the worker reads (`architecture.md`, Migration). A device with
+a write in flight is suspended and then resumed, one at a time; a suspend
+returns only once every write the device sent down has ended, and so has
+its block recorded. A device found suspended holds no write below it and
+is left as it is; a device with a write in flight and a table waiting
+fails the read, as `Dm.Resume` would drop that table, which a reload left
+for the converge that finishes it; a listing that may lack a device fails
+it too. A suspend that fails may still have taken effect, so the device is
+resumed either way, on a context the caller's cancellation does not reach,
+and the read fails; a resume that fails leaves the device suspended for
+the cntlr's next converge and fails the read. The worker reads again
+later, and gives a leg's bitmap up after a few refused reads
+(`dnv-worker.md` BM7). A meta-group leg reads no snapshot and drains
+nothing.
 
 ### Probing and error capture — `probe.go`
 

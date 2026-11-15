@@ -6,7 +6,7 @@ package `model`, the etcd data model as Go together with the internal
 mutations the gateway's handlers share (MD1 to MD9); the `cmd/dnv-worker`
 command (CM1 to CM7); the vote worker (VW1 to VW11); the shard worker (SW1 to
 SW6); the revision worker with its dn, cn and sp role files (RW1 to RW23);
-health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM6); the automatic
+health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM7); the automatic
 reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12) and
 the forced-start clear (AR13), the sp drain (SPD1 to SPD15) and the clone
 drain (CLD1 to CLD12); the worker's log records; and the intent of the worker
@@ -44,7 +44,7 @@ dnv-worker process  (every role by default; one seed per incarnation)
     │           SyncupDn on every revision, DnConf.err_epoch + DnCapacity (HL1)
     ├── role cn: … the shard's cn rev prefix ──▶ per CN: CheckCn / SyncupCn (the cn role)
     └── role sp: … the shard's sp rev prefix ──▶ per SP (RW14): snapshot + fan-out coordinator
-            ├── per side:  goroutine, CheckSide stream, SyncupSide, PushMigrBitmap (BM)
+            ├── per side:  goroutine, CheckSide stream, SyncupSide, GetLegBm, PushMigrBitmap (BM)
             ├── per cntlr: goroutine, CheckCntlr stream, SyncupCntlr, PushCloneBitmap
             └── flips (provisioned, created), sp health (HL2), reactions (AR)
 ```
@@ -389,9 +389,7 @@ visit every pool (`gateway.md` GW19), scanned by no worker; `CntlrKey` and
 `SliceKey`;
 `ThinDeviceKey` and `SubsystemKey`; `CloneKey` and `CloneBitmapKey` — the
 seven-field key, BOTH indexes rendered with `BmIdxFmt` —, `CloneBitmapPrefix`
-and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`, `MigrBitmapKey`,
-`MigrBitmapPrefix` and `ParseBmIdx`, the migration-only six-field key;
-`RepairKey` and `RetiredLegKey`, with `RepairPrefix` and
+and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`; `RepairKey` and `RetiredLegKey`, with `RepairPrefix` and
 `RetiredLegPrefix`, the prefixes MD3's load ranges; `WorkerRegKey`,
 `WorkerRegPrefix` and `ParseWorkerRegKey`.
 
@@ -409,13 +407,11 @@ most `CloneBmChunkBytes` of them, with *s* below the clone's `src_slice_cnt`
 **per source slice** that constant bounds. A chunk's position is fixed by *b*
 alone, so chunks are order-independent and gap-tolerant: an absent chunk, and
 a short chunk's missing tail, read as *written* — the safe direction, the
-region being copied rather than skipped. A migration's chunks keep their
-six-field key and their flat append sequence. The two parsers are not
-interchangeable — `ParseCloneBmKey` takes the seven-field `clone_bitmap` key,
-`ParseBmIdx` the six-field `migration_bitmap` one, each rejecting the
-other's shape
-— and a six-field key under the clone prefix is malformed: it parses as not
-ok and is skipped by MD3's loader.
+region being copied rather than skipped. A migration's bitmap has no key:
+the worker reads it from the primary and holds it in memory (BM7).
+`ParseCloneBmKey` takes the seven-field `clone_bitmap` key alone, and a key
+of another length under the clone prefix is malformed: it parses as not ok
+and is skipped by MD3's loader.
 
 MD3. **SP snapshot.** `LoadSp` reads everything the sp role fans out or
 reacts on, at **one** store revision, into an `SpState`. One `SnapshotRev`
@@ -434,10 +430,9 @@ from `cntlr_id_list`; `Slices` by slice id from `slice_id_list`; `Tds` in
 `Clones`, `Xfers` and `Migrs` by name; `Repairs` by name from
 `repair_name_list` and `RetiredLegs` by leg id from `retired_leg_id_list`,
 keeping only the keys a list names, since no writer leaves another under
-either prefix and nothing could reach one; `CloneBmIdx` and `MigrBmIdx`, the
-chunk addresses present (keys only) with their mod revisions, one `BmChunk`
-per chunk carrying its slice index, its index and its `ModRev`, the slice
-index always zero for a migration chunk; `DnByAddr`, the `DnConf` of every
+either prefix and nothing could reach one; `CloneBmIdx`, the clone chunk
+addresses present (keys only) with their mod revisions, one `BmChunk` per
+chunk carrying its slice index, its index and its `ModRev`; `DnByAddr`, the `DnConf` of every
 side's `addr_port` of the SP, read in this order: the slices' sides, the
 sides of every clone's clone meta group in `clone_name_list` order, a
 latched clone's too, the sides of the repairs' new legs in
@@ -455,18 +450,17 @@ any record of a latched SP the fan-out drives what it can, RW14 leaving
 idle the children the snapshot cannot resolve and logging the keys, and a
 latched SP's drain judges the keys it needs itself (SPD12). `SpRevision` is the revision the loaded
 state belongs to, for RW14's revision guard; the rev key is not a listed
-sub-object, so an absent one is no `Missing` entry. Bitmap **values** are
-never loaded here — pushes read one chunk at a time (BM3). Bitmap indexes
-come from a keys-only scan (`RangeKeysAtRev`, EU2) performed **outside** the
-STM at the same store revision: the STM cannot range, and the pin is what
-keeps the reads consistent — the set of indexes is not append-only, since
-the clone drain deletes chunk keys, nor are the repairs and the retired
-legs, so every scan is served at the snapshot's own revision and never at a
-newer one. One loader serves both prefixes and forks on the key parser
-(MD2): `ParseCloneBmKey` under a `CloneBitmapPrefix`, `ParseBmIdx` —
-reported at slice index zero — under a `MigrBitmapPrefix`. A key the
-prefix's own parser rejects is skipped silently, so one stray key of another
-shape never fails a whole SP load.
+sub-object, so an absent one is no `Missing` entry. Clone bitmap
+**values** are never loaded here — pushes read one chunk at a time (BM3).
+Clone bitmap indexes come from a keys-only scan (`RangeKeysAtRev`, EU2)
+performed **outside** the STM at the same store revision: the STM cannot
+range, and the pin is what keeps the reads consistent — the set of indexes
+is not append-only, since the clone drain deletes chunk keys, nor are the
+repairs and the retired legs, so every scan is served at the snapshot's own
+revision and never at a newer one. The loader parses each key with
+`ParseCloneBmKey` (MD2), and a key it rejects is skipped silently, so one
+stray key of another shape never fails a whole SP load. A migration's
+bitmap is no part of the snapshot (BM7).
 
 MD4. **Capacity keys** (`architecture.md`, Capacity index keys, and
 `architecture.md`, DN bins). `DnBinIdx` maps a free extent count to its bin
@@ -1761,10 +1755,12 @@ stops joins its children, those stops included, with a wait group (SW5).
 RW12. **No backoff anywhere.** The round is the retry cadence for
 everything the loop could not finish — an unreachable agent, a rejected
 syncup, a leftover reply, a health write that did not commit, a missing
-cluster conf. A failed PUSH is the one thing NOT on that list, and not
-because it waits longer: it arms nothing at all (BM6), so no round retries
-it. It is re-planned only when a `Syncup*` of the object issued for some
-other reason is accepted, from the agent's own acknowledged set (BM2).
+cluster conf, a migration's bitmap read that failed, up to the limit BM7
+sets, and the push of a piece of it that failed (BM7). A failed PUSH of a clone chunk is the one
+thing NOT on that list, and not because it waits longer: it arms nothing at
+all (BM6), so no round retries it. It is re-planned only when a `Syncup*`
+of the object issued for some other reason is accepted, from the agent's
+own acknowledged set (BM2).
 
 RW23. **New observations.** Each loop keeps the latest observation time it
 has seen for its object in a round's reply or a `Syncup*` reply
@@ -2224,7 +2220,7 @@ Migration) — and `cutover_pending` from the `Migration`; as
 `dst_side_id`: a `migr_dst_conf` with `migr_id`, `src_side_id`, `src_dn_id`,
 `src_nvme_tr_conf` (the source side's `nvme_tr_conf`), `block_size` from
 `bdev_conf.dm_pool_conf.data_block_size`, `meta_blocks` from the group, the
-migration's `dm_clone_conf`, and `bm_cnt` and `cutover_pending` from the
+migration's `dm_clone_conf`, and `cutover_pending` from the
 `Migration`. The
 migration's `dm_clone_conf` is the one conf still filled in here (a zero
 `hydration_threshold` or `hydration_batch_size` takes its default of
@@ -2310,7 +2306,9 @@ on a destination report of the wait from before the level rose. Its
 reasons are those of `architecture.md`, Migration. Nothing of it is
 remembered across a handoff either: the new owner's first rounds carry
 the full `*Info`, and the cutover runs off the first later replies that
-HL7 lets give a verdict, as the provisioned flip does (above).
+HL7 lets give a verdict, as the provisioned flip does (above). After the
+cutovers of a drain the coordinator offers the destination side's child the
+read of the migration's bitmap (BM7).
 
 RW19. **Created flip.** Every `SyncupCntlrReply`
 and `CheckCntlrReply` with an accepted code (RW18: code zero or
@@ -2841,19 +2839,21 @@ stream, which the unknown marking would then read as clean.
 The worker side of `architecture.md`, Bitmap push protocol, restated as
 rules of the sp children.
 
-BM1. **Sources.** For a side that is a migration's destination: the
-`MigrBitmap` chunks of that migration, indexes from zero below `bm_cnt`.
-For the cntlr that is **primary**: the `CloneBitmap` chunks of every clone
-of the SP that is not deleting (CLD5), each addressed by the pair
-`(src_slice_idx, bm_idx)` (MD2).
-Chunk addresses come from the snapshot's keys-only scans (`MigrBmIdx` and
-`CloneBmIdx`, MD3) — a migration chunk's address is its `bm_idx` alone,
-carried at slice index zero; chunk **values** are read one at a time
-(`Get`) when pushed, at the key the address names.
+BM1. **Sources.** For a side that is a migration's destination: the pieces
+of that migration's bitmap the side's child read from the primary and holds
+in memory (BM7), `bm_idx` from zero; a piece's address is its `bm_idx`
+alone, carried at slice index zero. For the cntlr that is **primary**: the
+`CloneBitmap` chunks of every clone of the SP that is not deleting (CLD5),
+each addressed by the pair `(src_slice_idx, bm_idx)` (MD2). Clone chunk
+addresses come from the snapshot's keys-only scan (`CloneBmIdx`, MD3);
+clone chunk **values** are read one at a time (`Get`) when pushed, at the
+key the address names.
 
 BM2. **Diff.** After every accepted `SyncupSide` reply (RW5): the missing
-set is `MigrBmIdx` of the migration minus `bm_info.bm_idx_list` (only when
-`bm_info.res_id` is the `migr_id`). After every accepted `SyncupCntlr`
+set is the child's pieces of the migration minus `bm_info.bm_idx_list`
+(only when `bm_info.res_id` is the `migr_id`), and empty while the child
+holds no pieces; the child keeps that `bm_info`, which plans the push right
+after its read and on each offer (BM7). After every accepted `SyncupCntlr`
 reply on the primary: per `bm_info_list` entry (its `res_id` the
 `clone_id`), the missing set is `CloneBmIdx` of the clone minus
 `bm_info.chunk_id_list`. A clone reports `chunk_id_list` and leaves
@@ -2887,7 +2887,7 @@ planned from a report the desired state has since superseded is therefore
 either still correct or refused by name; gating it on a revision would only
 ever discard work that was about to be redone anyway.
 
-BM4. **Targets.** Migration chunks go only to the destination side's DN;
+BM4. **Targets.** Migration pieces go only to the destination side's DN;
 clone chunks only to the CN hosting the **primary** cntlr. A standby's
 `bm_info_list` is ignored. After a failover the new primary's syncup reply
 reports an empty or partial set and the pushes follow it there.
@@ -2895,8 +2895,9 @@ reports an empty or partial set and the pushes follow it there.
 BM5. **Grown clone chunks (`architecture.md`, [D8]).** The child memoizes, per
 `res_id`, `src_slice_idx` and `bm_idx` — the `res_id` being the `clone_id`
 here, the `migr_id` for a migration, whose `src_slice_idx` is always zero —
-the etcd mod revision of the chunk it last pushed (`CloneBmIdx` and
-`MigrBmIdx` carry it, MD3); a chunk whose mod revision advanced is re-pushed
+the etcd mod revision of the chunk it last pushed (`CloneBmIdx` carries it,
+MD3; a migration's piece has none and is taken at zero); a chunk whose mod
+revision advanced is re-pushed
 even though the agent acknowledges its address. `AppendCloneBitmap` grows a
 chunk in place, at the pair that already addresses it, so the memo must key on
 the whole pair: judged by `bm_idx` alone it would compare one source slice's
@@ -2906,14 +2907,14 @@ lost whenever the child is restarted on the same worker — an endpoint
 change, a side moved to another record or a request changed at one
 revision (RW14) — as on a handoff; accepted by `architecture.md`, [D8]: a
 chunk the agent has acknowledged can then grow in etcd and stay shorter at
-the agent, which costs copying only. Migration chunks are immutable, so
-nothing can make
-the rule re-push one; `worker/bmpush.go` implements BM1 to BM6 once for both
-kinds and therefore memoizes migration chunks too, where the mod-revision
-comparison is inert.
+the agent, which costs copying only. A migration's pieces never change once
+read (BM7), so nothing can make the rule re-push one; `worker/bmpush.go`
+implements BM1 to BM6 once for both kinds and therefore memoizes migration
+pieces too, where the mod-revision comparison is inert.
 
-BM6. **Failure.** A push that fails — a gRPC error or timeout, a chunk
-whose value can no longer be read from etcd, or a non-zero
+BM6. **Failure.** A push that fails — a gRPC error or timeout, a clone
+chunk whose value can no longer be read from etcd, a migration piece its
+child no longer holds, or a non-zero
 `agent_reply.code` (`ReplyCodeUnknownObject`: the introducing `Syncup*` has
 not been applied yet, or the address is out of range for the object) — is
 logged as `bitmap push failed` (Log records) and **ends that plan**. The
@@ -2923,7 +2924,10 @@ diff (BM2) from the agent's OWN acknowledged set, which is the only place a
 diff has ever come from; a plan rebuilt from a remembered failure would be
 a plan built from the worker's memory instead of from the agent's state.
 The rest of the plan goes with the failed part because the parts are
-ordered (BM3) and a migration's chunks are interpretable only in sequence.
+ordered (BM3) and a migration's pieces are interpretable only in sequence.
+A migration's pieces are the one exception to waiting for a `Syncup*`:
+each offer of BM7 plans them again, as no `SyncupSide` need follow the
+read.
 
 There is no push-specific timer and no push-driven re-sync. When the
 refusal was the agent's own, its `Check*` reply says so too — the same
@@ -2935,9 +2939,63 @@ revision, no re-sync is due and the chunk waits for the next accepted
 none, since a new child starts with a round, which sends a syncup only on a
 code or a revision, RW4), and so do the parts of a plan that a worker's
 failure cut short. That wait is accepted because the skip bitmap is an
-optimization: a chunk that has not arrived leaves its regions hydrated
-instead of discarded (`architecture.md`, Bitmap push protocol), which costs
-copying, never correctness.
+optimization: a chunk or a piece that has not arrived leaves its regions
+hydrated instead of discarded (`architecture.md`, Bitmap push protocol),
+which costs copying, never correctness.
+
+BM7. **The migration bitmap read.** The side child of a migration's
+destination reads the leg's bitmap itself; no caller hands it in. The
+coordinator offers the read after the cutovers of a drain of reports
+(`handleReports`), to each destination side's child whose plan carries
+`cutover_pending` false, when a cntlr that makes the primary in the plan
+the coordinator last decided, and not disabled (`countsPaths`, as for the
+cutover beside RW18's flip), reported a live path to that side in the
+newest report of the drain that carried an info of its own; the offer names
+that cntlr's CN, its pointer and the leg. The child reads only when the
+last reply its loop observed was accepted at the desired revision and its
+`SideInfo` shows the dm-clone — the row `migr_dst_info.dm_clone_info` reads
+OK and its details parse as a dm-clone status line — and only while it
+holds no bitmap of the migration and no read is in flight. Reasons: the
+destination builds its dm-clone only over the source's export, which the
+source links only once every per-CN dm-linear of the side is fenced
+(`dnagent.md` DN12), so the source takes no more writes
+(`architecture.md`, Migration); a reply at the desired revision leaves no
+`SyncupSide` pending, so the applied set the pushes are planned from is the
+agent's latest; and the path keeps the read's commit of the pool from
+blocking on a leg with no path. The read is one `GetLegBm` of the whole leg
+(`block_cnt` zero) to that CN, under the syncup timeout (RW11), on a
+goroutine of the child's pusher, so a slow read holds neither the
+coordinator nor the child's loop, and the child's stop cancels it. The
+reply is cut into pieces of `MigrBmPieceBytes`, each but the last covering
+a multiple of 8 blocks, so they join at the byte (`architecture.md`, Bitmap
+reads); more than `MaxMigrBmCnt` pieces fails the read, as the agent
+refuses a `bm_idx` past it (`dnagent.md` DN15). The pieces live in the
+child's memory alone. Right after the read the child plans the pushes
+(BM2) from the `bm_info` of its last accepted `SyncupSide` reply, or with
+every piece missing when it holds none: a new child whose agent kept the
+desired revision has had no `SyncupSide` reply, and pushes every piece
+again, which the agent takes without applying a piece it holds byte for
+byte (`dnagent.md` DN15). Each later offer to a child that holds the bitmap
+plans the pushes again from that same `bm_info`, leaving out every piece
+this child has delivered with a code-zero reply (the memo of BM5), which
+the set may not list yet: no `SyncupSide` need follow the read, so the
+offer is what retries a push that failed (BM6). A read that fails — the
+call fails or times out, or the bitmap has more than `MaxMigrBmCnt` pieces
+— is logged as `migration bitmap read failed` and leaves no bitmap, and a
+later offer reads again; but a bitmap of too many pieces, and the third
+read in all that the agent refused or did not answer in time, make the
+child give the bitmap up (`given_up` on the record): it holds an empty
+bitmap, reads no more and pushes nothing, and the copy copies every region.
+A call that found the agent unreachable counts for nothing. Reason: a read
+that fails on the agent's side, such as a metadata dump past its timeout,
+fails again, and each try holds the primary's cntlr lock (`cnagent.md`
+CN25). A read that succeeds is logged as `migration bitmap read` with its
+piece count (Log records). The bitmap goes with the child and with the
+migration: a child restarted, a handoff or a worker restart reads it again,
+and a `SyncupSide` reply to a plan that no longer names the migration, at
+its finish or its cancel, drops it, so a read still in flight then keeps
+nothing. A round that finds the agent unreachable clears the condition on
+the dm-clone, as it clears the cutover's wait (RW18).
 
 ## Automatic reactions — `worker/reaction.go`
 
@@ -4531,7 +4589,10 @@ unreadable or gone, or the call failed — or, beside the `bitmap pushed` of a
 non-zero code, the agent's own explanation of it (BM6). The failure record is
 non-normative — it names no decision — and exists because a push with no
 reply has no code to report and must not be logged as a `bitmap pushed` with
-an invented zero.
+an invented zero. `migration bitmap read` a destination side child's read of
+its migration's bitmap, with the CN, the leg and the piece count, and
+`migration bitmap read failed` one that ended with no bitmap, with its error
+and whether the child gave the bitmap up (`given_up`, BM7).
 
 **Reactions and drains.** `reaction applied` a reaction whose op call
 succeeded and `reaction skipped` a reaction the pass does not take, with its
@@ -4790,7 +4851,8 @@ health case and HL2's settle by the reaction case; the rewrite of the
 discovery records by the listing rule (`architecture.md`, [D18]) in a cntlr's
 health write (HL2) and in a failover on either trigger (MD6) by the failover
 case, which finds each in its writer's own transaction, and in a cntlr
-replacement (MD6) by the reaction case; BM1 to BM5 by the bitmap case; AR1
+replacement (MD6) by the reaction case; BM1 to BM5 and BM7's read by the
+bitmap case; AR1
 to AR9, and AR11 on the worker's repairs, by the reaction case, save the
 parts below, AR8's skip
 of a group with an operator's repair, its hold on a group with a
@@ -4892,7 +4954,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Thirteen records no suite case stages: `worker reg watch restarting`, `rev
+Fourteen records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -4903,6 +4965,7 @@ any rev key and no suite case asserts either way; `syncup leftover`, which
 no fake produces on its own, since no fake computes a sweep verdict, and no
 suite case forces that code or sets `leftover_rounds`;
 `bitmap push failed`, for the reason given for BM6 above;
+`migration bitmap read failed`, since no fake refuses a `GetLegBm`;
 `late observation`, since no suite case sets `obs_age_ms` or `obs_none`;
 `dn free count disagrees`, since no suite case sets `disk_counts`;
 `forced start kept`, since every clear the repair case stages commits; and
@@ -5037,10 +5100,13 @@ ends as soon as its lever is cleared or its caller gives up, and a round
 `hang_rounds` holds only when its caller gives up. Among the rows it
 derives, a migration destination whose request carries the side
 provisioned and its cutover pending reports both migration rows waiting
-for the cutover, with the reason the cutover reads, and each cntlr reports
-a path row per side of a slice's leg that has two sides, live once that
-side is provisioned (RW18); a lever's row overrides them, its reason
-included. A cntlr also reports, for each clone its request carries, a
+for the cutover, with the reason the cutover reads, and once the cutover
+is no longer pending reports its dm-clone row OK with a dm-clone status
+line, which BM7's read waits for; each cntlr reports a path row per side
+of a slice's leg that has two sides, live once that side is provisioned
+(RW18); a lever's row overrides them, its reason included. A cntlr
+answers `GetLegBm` with its `leg_bm_hex` lever's bytes for any leg, and
+with an empty bitmap without it (BM7). A cntlr also reports, for each clone its request carries, a
 group row and a leg row per leg of the clone's clone meta
 group, as for a slice's group, the kinds of row the cn agent reports for a
 group (`cnagent.md` CN28), so that a Go case can stage HL2's leg rows and

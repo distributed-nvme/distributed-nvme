@@ -520,7 +520,6 @@ var commands = []command{
 	{"finish-migr", setupFinishMigr},
 	{"cancel-migr", setupCancelMigr},
 	{"get-migr", setupGetMigr},
-	{"append-migr-bm", setupAppendMigrBm},
 	// repair
 	{"create-repair", setupCreateRepair},
 	{"finish-repair", setupFinishRepair},
@@ -537,7 +536,6 @@ var commands = []command{
 	{"set-grp-operator-in-charge", setupSetGrpOperatorInCharge},
 	// bitmap
 	{"get-td-bm", setupGetTdBm},
-	{"get-leg-bm", setupGetLegBm},
 	// harness
 	{"ping", setupPing},
 }

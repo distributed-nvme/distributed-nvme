@@ -1,6 +1,7 @@
 package dnagent
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 
@@ -33,9 +34,9 @@ func (s *DnAgentServer) pushMigrBitmap(
 				sidePointerText(req.GetSidePointer())),
 		}
 	}
-	// The chunk index is bounded as the gateway bounds the appends (DN15):
-	// an index at or past MaxMigrBmCnt names no chunk etcd can hold, and a
-	// file stored for it would stay in the applied set.
+	// The chunk index is bounded as the worker bounds its pieces (DN15): an
+	// index at or past MaxMigrBmCnt names no piece the worker can cut, and
+	// a file stored for it would stay in the applied set.
 	if req.GetBmIdx() >= common.MaxMigrBmCnt {
 		return &pb.PushMigrBitmapReply{
 			AgentReply: agent.UnknownObjectReply(
@@ -44,6 +45,17 @@ func (s *DnAgentServer) pushMigrBitmap(
 				req.GetBmIdx(), req.GetMigrId(),
 				sidePointerText(req.GetSidePointer()), common.MaxMigrBmCnt),
 		}
+	}
+	// A piece the applied set already holds, byte for byte, changes nothing:
+	// it is taken without a save and without an apply, whose pause of the
+	// volume (agent.ApplySkipRanges) it would only repeat. A worker that
+	// does not know the applied set, such as one restarted while the agent
+	// stayed at its revision, pushes every piece again (DN15; dnv-worker.md
+	// BM7).
+	if held, ok := st.chunks.Get(req.GetBmIdx()); ok &&
+		st.chunkMigrId == req.GetMigrId() &&
+		bytes.Equal(held, req.GetBitmap()) {
+		return &pb.PushMigrBitmapReply{AgentReply: agent.OkReply()}
 	}
 	path := s.nf.LocalMigrBmPath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetMigrId(), req.GetBmIdx())

@@ -77,7 +77,7 @@ func dnSelectorFlags(fs *flag.FlagSet) func() *pb.NodeSelector {
 	}
 }
 
-// bitmapArg turns a --bm-hex value into the bytes the Append*Bitmap request
+// bitmapArg turns a --bm-hex value into the bytes the AppendCloneBitmap request
 // carries.
 //
 // An empty value is deliberately NOT a driver error. parseHexBitmap refuses
@@ -402,40 +402,6 @@ func setupGetMigr(fs *flag.FlagSet) job {
 	}
 }
 
-// setupAppendMigrBm drives AppendMigrationBitmap. It is AppendCloneBitmap
-// without the chunk address: a migration copies one side, so its chunks are a
-// single sequence the record's bm_cnt numbers as they arrive (case S stage 14
-// appends two and asserts it reaches 2) — there is no slice to name, and
-// --bm-idx, sent only when given, only names the index a chunk must land at.
-// An empty --bm-hex is again sent as an empty bitmap so the gateway's own
-// refusal is the one under test.
-func setupAppendMigrBm(fs *flag.FlagSet) job {
-	spName := fs.String("sp", "", "sp_name")
-	var rev hexUint
-	fs.Var(&rev, "rev", "sp_rev token")
-	migrName := fs.String("name", "", "migr_name")
-	bmHex := fs.String("bm-hex", "",
-		"bitmap as hex; empty sends an empty bitmap on purpose")
-	var bmIdx optUint32
-	fs.Var(&bmIdx, "bm-idx",
-		"the index the chunk must land at; sent only when given")
-	return func(
-		ctx context.Context,
-		client pb.GatewayClient,
-		g *globals,
-	) (any, error) {
-		return client.AppendMigrationBitmap(
-			ctx, &pb.AppendMigrationBitmapRequest{
-				ClusterName: g.cluster,
-				SpName:      *spName,
-				SpRev:       &pb.SpRev{Revision: uint64(rev)},
-				MigrName:    *migrName,
-				Bitmap:      bitmapArg(*bmHex),
-				BmIdx:       bmIdx.ptr,
-			})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // bitmap reads (architecture.md, Bitmap reads)
 // ---------------------------------------------------------------------------
@@ -467,35 +433,6 @@ func setupGetTdBm(fs *flag.FlagSet) job {
 				StartBlock:  *start,
 				BlockCnt:    *cnt,
 			})
-		if err != nil {
-			return nil, err
-		}
-		return hexBitmapResult(reply.GetBitmap()), nil
-	}
-}
-
-// setupGetLegBm drives GetLegBitmap: the same measurement for one leg of a
-// raid1 group, addressed by leg id rather than by name because a leg has no
-// name. Read-only, no token, same paging window and same hex map as
-// setupGetTdBm.
-func setupGetLegBm(fs *flag.FlagSet) job {
-	spName := fs.String("sp", "", "sp_name")
-	var leg hexUint
-	fs.Var(&leg, "leg", "leg_id")
-	start := fs.Uint64("start", 0, "start_block of the window (0 = from 0)")
-	cnt := fs.Uint64("cnt", 0, "block_cnt of the window (0 = all)")
-	return func(
-		ctx context.Context,
-		client pb.GatewayClient,
-		g *globals,
-	) (any, error) {
-		reply, err := client.GetLegBitmap(ctx, &pb.GetLegBitmapRequest{
-			ClusterName: g.cluster,
-			SpName:      *spName,
-			LegId:       uint64(leg),
-			StartBlock:  *start,
-			BlockCnt:    *cnt,
-		})
 		if err != nil {
 			return nil, err
 		}

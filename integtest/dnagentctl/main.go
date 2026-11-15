@@ -399,7 +399,6 @@ func cmdSyncupSide(args []string) {
 	metaBlocks := fs.Uint64("meta-blocks", 0, "leading regions that always copy")
 	hydrThreshold := fs.Uint("hydr-threshold", 0, "dm-clone hydration threshold")
 	hydrBatch := fs.Uint("hydr-batch", 0, "dm-clone hydration batch size")
-	bmCnt := fs.Uint("bm-cnt", 0, "number of bitmap chunks the CP will push")
 	// The provisioning gates of architecture.md, Side provisioning protocol.
 	// Both default to false, which is proto3's zero and the value the gateway
 	// writes for a brand new side, so every steady-state call site must pass
@@ -494,7 +493,6 @@ func cmdSyncupSide(args []string) {
 				HydrationThreshold: uint32(*hydrThreshold),
 				HydrationBatchSize: uint32(*hydrBatch),
 			},
-			BmCnt:          uint32(*bmCnt),
 			CutoverPending: *cutoverPending,
 		}
 	}

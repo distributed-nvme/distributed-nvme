@@ -2,6 +2,7 @@ package agentfake
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,6 +116,11 @@ type Object struct {
 	BmIdxList   *[]uint32
 	ChunkIdList *[]ChunkId
 
+	// LegBm is what a cntlr's GetLegBm answers, for every leg: the bitmap
+	// the worker reads for a migration (dnv-worker.md BM7). Unset, the
+	// answer is an empty bitmap.
+	LegBm []byte
+
 	// Hang holds the object's Check rounds and its unary Get* calls while it
 	// is set; HangRounds holds the next that many of its rounds, each until
 	// its stream ends; HangSyncup holds its Syncup* while it is set, until
@@ -217,6 +223,7 @@ func (ob *Object) clone() *Object {
 	out.ZeroedBytes = clonePtr(ob.ZeroedBytes)
 	out.ZeroBytes = clonePtr(ob.ZeroBytes)
 	out.ThinMissingSlices = slices.Clone(ob.ThinMissingSlices)
+	out.LegBm = slices.Clone(ob.LegBm)
 	if ob.BmIdxList != nil {
 		list := slices.Clone(*ob.BmIdxList)
 		if list == nil {
@@ -504,6 +511,7 @@ type objectJSON struct {
 	ThinMissingSlices []uint64            `json:"thin_missing_slices,omitempty"`
 	BmIdxList         *[]uint32           `json:"bm_idx_list,omitempty"`
 	ChunkIdList       *[]string           `json:"chunk_id_list,omitempty"`
+	LegBmHex          string              `json:"leg_bm_hex,omitempty"`
 	Hang              bool                `json:"hang,omitempty"`
 	DropStream        bool                `json:"drop_stream,omitempty"`
 	ReplyCode         uint32              `json:"reply_code,omitempty"`
@@ -613,6 +621,13 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 			return nil, fmt.Errorf("%s: %w", where, err)
 		}
 		ob.Status = &resStatus
+	}
+	if oj.LegBmHex != "" {
+		bitmap, err := hex.DecodeString(oj.LegBmHex)
+		if err != nil {
+			return nil, fmt.Errorf("%s: leg_bm_hex: %w", where, err)
+		}
+		ob.LegBm = bitmap
 	}
 	if oj.ChunkIdList != nil {
 		list := make([]ChunkId, 0, len(*oj.ChunkIdList))

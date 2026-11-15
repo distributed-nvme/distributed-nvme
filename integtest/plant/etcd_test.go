@@ -754,25 +754,9 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 			t.Fatalf("PutCloneBitmap %d: %v", i, err)
 		}
 		nextRev(t, "PutCloneBitmap", bitmap.SpRev)
-		if bitmap.Created != chunk.created || bitmap.BmCnt != 0 {
+		if bitmap.Created != chunk.created {
 			t.Errorf("PutCloneBitmap %d = %+v, want created %t", i, bitmap,
 				chunk.created)
-		}
-	}
-	for i, chunk := range []struct {
-		idx     uint32
-		created bool
-		bmCnt   uint32
-	}{{0, true, 1}, {1, true, 2}, {0, false, 2}} {
-		bitmap, err := PutMigrBitmap(ctx, c.cli, c.cl, ref,
-			MigrBitmapSpec{Migr: "m0", BmIdx: chunk.idx, Data: []byte{1}})
-		if err != nil {
-			t.Fatalf("PutMigrBitmap %d: %v", i, err)
-		}
-		nextRev(t, "PutMigrBitmap", bitmap.SpRev)
-		if bitmap.Created != chunk.created || bitmap.BmCnt != chunk.bmCnt {
-			t.Errorf("PutMigrBitmap %d = %+v, want created %t, bm_cnt %d",
-				i, bitmap, chunk.created, chunk.bmCnt)
 		}
 	}
 	if _, err := PutCloneBitmap(ctx, c.cli, c.cl, ref, CloneBitmapSpec{
@@ -845,7 +829,6 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	}
 	if state.Clones["c0"].GetCloneId() != 40 ||
 		state.Xfers["x0"].GetOriNsIdx() != 1 ||
-		state.Migrs["m0"].GetBmCnt() != 2 ||
 		!state.Migrs["m0"].GetCutoverPending() ||
 		state.Migrs["m1"].GetCutoverPending() {
 		t.Fatalf("clones %v, xfers %v, migrs %v", state.Clones, state.Xfers,
@@ -853,9 +836,6 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 	}
 	if got := chunkList(state.CloneBmIdx["c0"], true); got != "0:0,1:0" {
 		t.Fatalf("c0's chunks %s, want 0:0,1:0", got)
-	}
-	if got := chunkList(state.MigrBmIdx["m0"], false); got != "0,1" {
-		t.Fatalf("m0's chunks %s, want 0,1", got)
 	}
 	leg := state.Slices[1].GetDataGrpList()[0].GetLegList()[1]
 	if leg.GetLegId() != 7 || len(leg.GetSideList()) != 2 ||

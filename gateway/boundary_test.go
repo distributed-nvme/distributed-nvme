@@ -1070,7 +1070,7 @@ func TestMigrationCountLimit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Per slice: groups; per migration: bitmap chunks
+// Per slice: groups
 // ---------------------------------------------------------------------------
 
 // bndGrowData is a token-less data grow of one slice.
@@ -1118,46 +1118,6 @@ func TestSliceGroupCountLimit(t *testing.T) {
 	bndWantMsg(t, bndGrowData(env.ctx, env, sliceId),
 		codes.FailedPrecondition, "data groups", "one over the ceiling")
 	bndWantSameDump(t, dump, env.dump())
-}
-
-// bndAppendMigrBm is a token-less AppendMigrationBitmap of one byte.
-func bndAppendMigrBm(ctx context.Context, env *volEnv, name string) error {
-	_, err := env.srv.AppendMigrationBitmap(ctx,
-		&pb.AppendMigrationBitmapRequest{
-			ClusterName: env.cluster,
-			SpName:      volSpName,
-			MigrName:    name,
-			Bitmap:      []byte{0x01},
-		})
-	return err
-}
-
-// TestMigrationBitmapCountLimit is MaxMigrBmCnt through AppendMigrationBitmap:
-// one chunk short, two appends race for the last index, and the next append
-// is refused. TestAppendMigrationBitmapIsAppendOnly holds the rest.
-func TestMigrationBitmapCountLimit(t *testing.T) {
-	env := newVolEnv(t)
-	volCreateMigration(env, "migr-a")
-	for idx := 0; idx < common.MaxMigrBmCnt-1; idx++ {
-		if err := bndAppendMigrBm(env.ctx, env, "migr-a"); err != nil {
-			t.Fatalf("chunk %d: %v", idx, err)
-		}
-	}
-	errA, errB := bndRaceAtRead(t,
-		model.MigrationKey(env.cid, volSpId, "migr-a"),
-		func(ctx context.Context) error {
-			return bndAppendMigrBm(ctx, env, "migr-a")
-		},
-		func() error { return bndAppendMigrBm(env.ctx, env, "migr-a") })
-	wantCode(t, errB, codes.OK, "the append that took the last index")
-	wantCode(t, errA, codes.ResourceExhausted, "the append that raced it")
-	if got := env.migration("migr-a").GetBmCnt(); got != common.MaxMigrBmCnt {
-		t.Fatalf("bm_cnt %d, want %d", got, common.MaxMigrBmCnt)
-	}
-	before, beforeRev := env.spConf(), env.spRev()
-	wantCode(t, bndAppendMigrBm(env.ctx, env, "migr-a"),
-		codes.ResourceExhausted, "one over the ceiling")
-	env.wantUntouched(before, beforeRev)
 }
 
 // ---------------------------------------------------------------------------

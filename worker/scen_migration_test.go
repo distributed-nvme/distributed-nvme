@@ -12,7 +12,7 @@ import (
 )
 
 // The whole-worker scenario cases of a migration (dnv-worker.md, RW15 and
-// RW18's cutover) and of its bitmap push (dnv-worker.md, BM3 and BM6), each
+// RW18's cutover) and of its bitmap push (dnv-worker.md, BM3, BM6 and BM7), each
 // on the standard cluster with a migration planted after it
 // converged: side 10 of leg 6, on dn 1, moves to a new side on dn 3.
 
@@ -334,13 +334,14 @@ func TestScenCutoverRefusedByThePoolLevel(t *testing.T) {
 }
 
 // TestScenMigrationBitmapPushTimesOut pins BM3's deadline, the push timeout
-// of the worker's seam (the case's, not the production one), and BM6: a
-// bitmap push to the destination that its agent holds fails at that deadline
-// with `bitmap push failed`, ends its plan and is not sent again while no
-// syncup reply of the destination re-plans it; the next syncup reply, from a
-// bump of the pool, re-plans it and the chunk is delivered. The destination's
-// zeroing is held, so no flip moves the pool meanwhile. The push timeout is
-// set apart from the syncup and etcd timeouts, so the case fails when the push
+// of the worker's seam (the case's, not the production one), and BM6 and
+// BM7 for a migration's piece: a push to the destination that its agent
+// holds fails at that deadline with `bitmap push failed` and ends its plan,
+// and a later round's offer, with no syncup of the destination in between,
+// pushes the piece again, which is delivered once the agent answers. The
+// piece is the worker's own read of the leg's bitmap from the primary (BM7),
+// which waits for the cutover and for the destination's dm-clone. The push timeout is set
+// apart from the syncup and etcd timeouts, so the case fails when the push
 // waits on either of them instead of its own.
 func TestScenMigrationBitmapPushTimesOut(t *testing.T) {
 	t.Parallel()
@@ -355,30 +356,27 @@ func TestScenMigrationBitmapPushTimesOut(t *testing.T) {
 	w := h.startWorker(t, "w1")
 	h.waitOwnsAll(t, w)
 	c.waitConverged(t)
-	ctx := context.Background()
 
 	migrId, dstSide := c.migrIds(t)
 	dn3 := c.dnAgent(3)
-	slowZeroing(t, dn3, agentfake.SideKey(stdSpId, 6, dstSide), true)
-	m := c.putStdMigr(t, migrId, dstSide)
-	settled := func(rev uint64) func(logRecord) bool {
-		return func(rec logRecord) bool {
-			id, ok := sideIdOf(rec)
-			return ok && id == dstSide && rec.num("code") == 0 &&
-				rec.str("error") == "" && rec.num("revision") >= rev
-		}
-	}
-	h.waitRecord(t, 20*time.Second, w, msgSyncupResult, settled(m.SpRev))
-	bm, err := plant.PutMigrBitmap(ctx, h.cli, c.cl, c.sp.Ref, plant.MigrBitmapSpec{
-		Migr: stdMigrName, BmIdx: 0, Data: []byte{0xff},
+	primary, primaryKey := c.cntlrAgent(t, 1)
+	setLever(t, primary, primaryKey, func(o *agentfake.Object) {
+		o.LegBm = []byte{0xff}
 	})
-	if err != nil {
-		t.Fatalf("PutMigrBitmap: %v", err)
-	}
-	h.waitUntil(t, 20*time.Second, "the push of chunk 0 to reach dn 3",
+	m := c.putStdMigr(t, migrId, dstSide)
+	h.waitRecord(t, 20*time.Second, w, msgFlipApplied, isCutover)
+	h.waitRecord(t, 20*time.Second, w, msgMigrBitmapRead, func(rec logRecord) bool {
+		return rec.num("migr_id") == migrId && rec.num("piece_cnt") == 1
+	})
+	h.waitUntil(t, 20*time.Second, "the push of piece 0 to reach dn 3",
 		func() (bool, string) {
 			return len(hold.arrivals()) == 1, fmt.Sprintf("%d pushes", len(hold.arrivals()))
 		})
+	isDstSyncup := func(rec logRecord) bool {
+		id, ok := sideIdOf(rec)
+		return ok && id == dstSide
+	}
+	syncups := h.countRecs(w, msgSyncupResult, isDstSyncup)
 	sentAt := hold.arrivals()[0]
 	failed := h.waitRecord(t, 3*h.tmo.push+10*time.Second, w, msgBitmapPushFailed,
 		func(rec logRecord) bool {
@@ -402,27 +400,33 @@ func TestScenMigrationBitmapPushTimesOut(t *testing.T) {
 			"the case's push timeout %v (at least %v)", took, h.tmo.push, lo)
 	}
 
-	// Two rounds of the destination, which answer at its revision and so
-	// bring no syncup: nothing re-plans the push (BM6).
-	h.waitRounds(t, dn3, 2, m.dstKey)
-	if n := len(hold.arrivals()); n != 1 {
-		t.Fatalf("%d pushes after the failure with no syncup reply, want "+
-			"the one", n)
-	}
-	if n := h.countRecs(w, msgSyncupResult, settled(bm.SpRev+1)); n != 0 {
-		t.Fatalf("a syncup of the destination after the push's own: the "+
-			"case cannot tell a re-plan from a re-send (%d)", n)
+	// A later round's offer pushes the piece again, with no syncup of the
+	// destination in between: the destination answers its rounds at its
+	// revision, and nothing else bumps the pool (BM7).
+	h.waitUntil(t, 20*time.Second, "the offer's push of piece 0 to reach dn 3",
+		func() (bool, string) {
+			return len(hold.arrivals()) == 2, fmt.Sprintf("%d pushes", len(hold.arrivals()))
+		})
+	if n := h.countRecs(w, msgSyncupResult, isDstSyncup); n != syncups {
+		t.Fatalf("a syncup of the destination after the push was sent: the "+
+			"case cannot tell an offer's re-push from a re-plan (%d, then %d)",
+			syncups, n)
 	}
 
 	hold.open()
-	if _, err := plant.BumpRev(ctx, h.cli, c.cl, plant.RevSp, stdSpShard, stdSpId); err != nil {
-		t.Fatalf("BumpRev: %v", err)
-	}
 	h.waitRecord(t, 20*time.Second, w, msgBitmapPushed, func(rec logRecord) bool {
 		return rec.str("kind") == bmKindMigr && rec.num("migr_id") == migrId &&
 			rec.num("bm_idx") == 0 && rec.num("code") == 0
 	})
 	if n := len(dn3.Record(m.dstKey).Pushes); n != 1 {
 		t.Errorf("dn 3 applied %d pushes of the destination, want 1", n)
+	}
+	if n := h.countRecs(w, msgMigrBitmapRead, func(logRecord) bool { return true }); n != 1 {
+		t.Errorf("%d reads of the bitmap, want the one: the re-push comes "+
+			"from the child's own read", n)
+	}
+	if n := len(hold.arrivals()); n != 2 {
+		t.Errorf("%d pushes reached dn 3, want the held one and the one "+
+			"delivered", n)
 	}
 }

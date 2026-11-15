@@ -25,7 +25,6 @@ func migrDstReq(revision uint64, level pb.SpLevel) *pb.SyncupSideRequest {
 		BlockSize:     testBlockSize,
 		MetaBlocks:    testMetaBlocks,
 		DmCloneConf:   &pb.DmCloneConf{HydrationThreshold: 1, HydrationBatchSize: 1},
-		BmCnt:         1,
 	}
 	return req
 }

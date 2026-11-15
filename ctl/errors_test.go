@@ -199,8 +199,6 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 		{"malformed --bm-hex",
 			[]string{"clone", "append-bm", "--name", "cl0",
 				"--bm-hex", "zz", "--rev", "7"}},
-		{"odd-length --bm-hex",
-			[]string{"migr", "append-bm", "--name", "m0", "--bm-hex", "a5a"}},
 		{"malformed --slots",
 			[]string{"sp", "set-cntlid-slots", "--slots", "0,x"}},
 		{"out-of-range --slots",

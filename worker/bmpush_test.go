@@ -638,66 +638,8 @@ func TestBmPushRecordsCarryATraceId(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // BM1 / BM4 — sources and targets, end to end through the sp children
+// (a migration's: migrbm_test.go)
 // ---------------------------------------------------------------------------
-
-// TestBmMigrTargetIsDestinationDn checks BM1/BM4: a migration's chunks are
-// read from the MigrBitmap keys and pushed only to the DESTINATION side's DN,
-// and only when the reply's bm_info is about that migration.
-func TestBmMigrTargetIsDestinationDn(t *testing.T) {
-	h := newSpHarness(t)
-	h.addFixtureAgents()
-	for idx := uint32(0); idx < 2; idx++ {
-		h.store.seed(t,
-			model.MigrBitmapKey(testCid, testSpId, spMigrName, idx),
-			&pb.MigrBitmap{Bitmap: []byte{byte(idx), 0xff}},
-		)
-	}
-	// The destination agent holds chunk 0 already.
-	h.sides[spDnC].syncupReply = func(
-		req *pb.SyncupSideRequest,
-	) *pb.SyncupSideReply {
-		return &pb.SyncupSideReply{
-			Revision: req.GetRevision(),
-			BmInfo: &pb.BitmapInfo{
-				ResId:     spMigrId,
-				BmIdxList: []uint32{0},
-			},
-		}
-	}
-	// The source agent reports the same set; it must push nothing (BM4).
-	h.sides[spDnB].syncupReply = func(
-		req *pb.SyncupSideRequest,
-	) *pb.SyncupSideReply {
-		return &pb.SyncupSideReply{
-			Revision: req.GetRevision(),
-			BmInfo:   &pb.BitmapInfo{ResId: spMigrId},
-		}
-	}
-	h.start()
-
-	waitFor(t, "the missing chunk pushed", func() bool {
-		return len(h.sides[spDnC].pushes()) > 0
-	})
-	push := h.sides[spDnC].pushes()[0]
-	if push.GetMigrId() != spMigrId || push.GetBmIdx() != 1 {
-		t.Fatalf("push = %v, want the missing chunk 1", push)
-	}
-	if push.GetDnId() != spDnIdC ||
-		push.GetSidePointer().GetSideId() != spSideDst {
-		t.Fatalf("push addressed %v", push)
-	}
-	if len(push.GetBitmap()) != 2 || push.GetBitmap()[0] != 1 {
-		t.Fatalf("push bitmap = %v", push.GetBitmap())
-	}
-	if got := len(h.sides[spDnB].pushes()); got != 0 {
-		t.Fatalf("%d chunks pushed to the SOURCE side's DN", got)
-	}
-	for _, addr := range []string{spDnA, spDnD} {
-		if got := len(h.sides[addr].pushes()); got != 0 {
-			t.Fatalf("%d chunks pushed to an unrelated side", got)
-		}
-	}
-}
 
 // TestBmCloneTargetIsPrimaryCn checks BM1/BM4: a clone's chunks go only to the
 // CN hosting the PRIMARY cntlr, and a standby's bm_info_list is ignored.

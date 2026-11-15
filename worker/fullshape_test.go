@@ -1031,17 +1031,7 @@ func TestFullShapeWidestPool(t *testing.T) {
 	}
 
 	// Drained: emptied as the gateway requires before it latches a pool
-	// (SPD4), latched, and taken apart by the worker's drain. A bitmap chunk
-	// appended first to the finished migration and to a cancelled one, as
-	// AppendMigrationBitmap appends, shows that the finish and the cancel
-	// delete it.
-	for _, migr := range []wideMigr{cut, notCut} {
-		if _, err := plant.PutMigrBitmap(ctx, h.cli, wp.cl, wp.sp.Ref, plant.MigrBitmapSpec{
-			Migr: migr.Name, BmIdx: 0, Data: []byte{0xff},
-		}); err != nil {
-			t.Fatalf("append a bitmap chunk to %s: %v", migr.Name, err)
-		}
-	}
+	// (SPD4), latched, and taken apart by the worker's drain.
 	drainStart := time.Now()
 	wp.drainClones(t)
 	wp.dropChildren(t, cut.Name)
@@ -1370,11 +1360,6 @@ func (wp *widePool) endMigration(
 		model.MaintainDnCapacity(s, cid, dstAddr, wp.cl.Conf, oldDst, newDst)
 	}
 	s.Put(sliceKey, slice)
-	// The chunks go one key at a time below the record's bm_cnt, as the
-	// gateway's dropMigration deletes them: an STM cannot range.
-	for idx := uint32(0); idx < record.GetBmCnt(); idx++ {
-		s.Del(model.MigrBitmapKey(cid, wp.sp.Ref.Id, migr.Name, idx))
-	}
 	s.Del(model.MigrationKey(cid, wp.sp.Ref.Id, migr.Name))
 	conf.MigrNameList = slices.DeleteFunc(slices.Clone(conf.GetMigrNameList()),
 		func(name string) bool { return name == migr.Name })

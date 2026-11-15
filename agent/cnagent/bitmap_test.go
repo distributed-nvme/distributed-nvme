@@ -654,3 +654,191 @@ func TestAbsentMiddleChunkKeepsLaterChunksInPlace(t *testing.T) {
 	assertSkippable(t, b, 2*testChunkBits+7, true)
 	assertSkippable(t, b, 2*testChunkBits+8, false)
 }
+
+// plantDm adds a live dm device with table to the fake node, as a device the
+// plan does not hold, and returns its number.
+func plantDm(node *fakeNode, name, table string) string {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	devNo := node.newDevNo()
+	node.dms[name] = &fakeDm{table: table}
+	node.devNo["/dev/mapper/"+name] = devNo
+	return devNo
+}
+
+// plantWrites gives the dm device name one write in flight, as its
+// /sys/dev/block/<number>/inflight reads (Dm.InFlight).
+func plantWrites(node *fakeNode, name string) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	devNo := node.devNo["/dev/mapper/"+name]
+	node.files["/sys/dev/block/"+devNo+"/inflight"] = "       0        1\n"
+}
+
+// TestLegBitmapDrainsTheThinDevices is CN27's drain: before the snapshot is
+// reserved, every thin device over the slice's pool with a write in flight
+// and not suspended is suspended and then resumed, one at a time, a device
+// the plan does not hold too; one with no write in flight, a suspended one,
+// and a thin device over another pool are left alone.
+func TestLegBitmapDrainsTheThinDevices(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	scriptDump(srv, node, caseBDump)
+	nf := srv.nf
+	thin := nf.CnThinDevName(testCluster, testCn, testSp, testTd, testSlice)
+	pool := nf.CnPoolFinalName(testCluster, testCn, testSp, testSlice)
+	poolNo := node.devNo[nf.DmPath(pool)]
+	if poolNo == "" || node.dms[thin] == nil {
+		t.Fatalf("precondition: no pool %s or thin device %s", pool, thin)
+	}
+	leftover := "leftover-thin"
+	plantDm(node, leftover, "0 2048 thin "+poolNo+" 77")
+	idle := "idle-thin"
+	plantDm(node, idle, "0 2048 thin "+poolNo+" 79")
+	parked := "parked-thin"
+	plantDm(node, parked, "0 2048 thin "+poolNo+" 78")
+	node.dms[parked].suspended = true
+	otherPool := plantDm(node, "other-pool", "0 2048 linear 8:0 0")
+	other := "other-thin"
+	plantDm(node, other, "0 2048 thin "+otherPool+" 1")
+	for _, name := range []string{thin, leftover, parked, other} {
+		plantWrites(node, name)
+	}
+
+	node.Reset()
+	if got := legBm(t, srv, testDataLeg, 0, 0); got !=
+		"f0ffffffffffffffffffffffffffff7f" {
+		t.Fatalf("data-leg bitmap is %q", got)
+	}
+	// One at a time: the first device is resumed before the second is
+	// suspended.
+	assertOrder(t, node,
+		"dmsetup suspend "+thin,
+		"dmsetup resume "+thin,
+		"dmsetup suspend "+leftover,
+		"dmsetup resume "+leftover,
+		"reserve_metadata_snap",
+	)
+	for _, name := range []string{idle, parked, other} {
+		assertNoCall(t, node, "dmsetup suspend "+name)
+		assertNoCall(t, node, "dmsetup resume "+name)
+	}
+	if node.dms[thin].suspended || node.dms[leftover].suspended {
+		t.Fatal("the drain left a thin device suspended")
+	}
+	if !node.dms[parked].suspended {
+		t.Fatal("the drain resumed a device it found suspended")
+	}
+}
+
+// TestLegBitmapRefusedWhenTheDrainFails: a suspend that fails refuses the
+// read before any snapshot is reserved, and the device is resumed all the
+// same, as a failed suspend may still have taken effect (CN27); the read
+// after it succeeds.
+func TestLegBitmapRefusedWhenTheDrainFails(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	scriptDump(srv, node, caseBDump)
+	thin := srv.nf.CnThinDevName(testCluster, testCn, testSp, testTd,
+		testSlice)
+	plantWrites(node, thin)
+
+	node.Reset()
+	node.mu.Lock()
+	node.failCmd["dmsetup suspend "+thin] = "device-mapper: interrupted"
+	node.mu.Unlock()
+	_, err := srv.GetLegBm(context.Background(), &pb.GetLegBmRequest{
+		ClusterId: testCluster, CnId: testCn, SpId: testSp,
+		CntlrId: testCntlr, LegId: testDataLeg,
+	})
+	if err == nil || !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("GetLegBm = %v, want the drain's refusal", err)
+	}
+	assertOrder(t, node, "dmsetup suspend "+thin, "dmsetup resume "+thin)
+	assertNoCall(t, node, "reserve_metadata_snap")
+
+	if got := legBm(t, srv, testDataLeg, 0, 0); got !=
+		"f0ffffffffffffffffffffffffffff7f" {
+		t.Fatalf("the read after the failed drain is %q", got)
+	}
+}
+
+// TestLegBitmapDrainRefusals: a device or table listing that may lack a
+// device, and a thin device with a write in flight and a table waiting,
+// whose resume would drop that table, each fail the read before anything
+// is suspended or reserved (CN27).
+func TestLegBitmapDrainRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(node *fakeNode, thin string)
+		want  string
+	}{
+		{"a table listing that may lack a device",
+			func(node *fakeNode, thin string) {
+				node.tableOmit["leftover-thin"] = true
+			}, "may lack"},
+		{"a device listing that may lack a device",
+			func(node *fakeNode, thin string) {
+				node.infoOmit["leftover-thin"] = true
+			}, "may lack"},
+		{"a thin device with a table waiting",
+			func(node *fakeNode, thin string) {
+				node.dms[thin].waiting = &fakeTable{table: node.dms[thin].table}
+			}, "table waiting"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			scriptDump(srv, node, caseBDump)
+			nf := srv.nf
+			thin := nf.CnThinDevName(testCluster, testCn, testSp, testTd,
+				testSlice)
+			poolNo := node.devNo[nf.DmPath(
+				nf.CnPoolFinalName(testCluster, testCn, testSp, testSlice))]
+			plantDm(node, "leftover-thin", "0 2048 thin "+poolNo+" 77")
+			plantWrites(node, thin)
+			node.mu.Lock()
+			tc.setup(node, thin)
+			node.mu.Unlock()
+
+			node.Reset()
+			_, err := srv.GetLegBm(context.Background(), &pb.GetLegBmRequest{
+				ClusterId: testCluster, CnId: testCn, SpId: testSp,
+				CntlrId: testCntlr, LegId: testDataLeg,
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("GetLegBm = %v, want a refusal naming %q", err,
+					tc.want)
+			}
+			assertNoCall(t, node, "dmsetup suspend")
+			assertNoCall(t, node, "reserve_metadata_snap")
+		})
+	}
+}
+
+// TestLegBitmapRefusedWhenTheResumeFails: a resume that fails after its
+// suspend held refuses the read, with no snapshot reserved; the device stays
+// suspended for the cntlr's next converge, as after any failed resume
+// (CN27).
+func TestLegBitmapRefusedWhenTheResumeFails(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	scriptDump(srv, node, caseBDump)
+	thin := srv.nf.CnThinDevName(testCluster, testCn, testSp, testTd,
+		testSlice)
+	plantWrites(node, thin)
+
+	node.Reset()
+	node.mu.Lock()
+	node.failCmd["dmsetup clear "+thin] = "device-mapper: interrupted"
+	node.mu.Unlock()
+	_, err := srv.GetLegBm(context.Background(), &pb.GetLegBmRequest{
+		ClusterId: testCluster, CnId: testCn, SpId: testSp,
+		CntlrId: testCntlr, LegId: testDataLeg,
+	})
+	if err == nil || !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("GetLegBm = %v, want the drain's refusal", err)
+	}
+	assertOrder(t, node, "dmsetup suspend "+thin, "dmsetup clear "+thin)
+	assertNoCall(t, node, "reserve_metadata_snap")
+}

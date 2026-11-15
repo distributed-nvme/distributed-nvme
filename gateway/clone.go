@@ -857,13 +857,11 @@ func (s *Server) UpdateCloneTrConf(
 // through `loadLiveClone` below, so the optimistic-concurrency guard is
 // unchanged.
 //
-// The two index bounds are INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of
-// GW7's Append*Bitmap row: they judge the indexes of THIS request against a
-// geometry the clone was created with and against a compile-time constant. The
-// chunk-overflow check in the STM IS that row's shape — a ceiling reached by
-// previous appends, exactly like AppendMigrationBitmap's
-// `bm_cnt ≥ MaxMigrBmCnt` — and is the one refusal here that is
-// RESOURCE_EXHAUSTED. The
+// The two index bounds are INVALID_ARGUMENT and not RESOURCE_EXHAUSTED: they
+// judge the indexes of THIS request against a geometry the clone was created
+// with and against a compile-time constant. The chunk-overflow check in the
+// STM is a ceiling reached by previous appends, and is the one refusal here
+// that is RESOURCE_EXHAUSTED. The
 // stateless page cap is INVALID_ARGUMENT again, because a page longer than a
 // whole chunk fits nowhere, whatever is already stored (architecture.md,
 // Clones: AppendCloneBitmap's Errors).
@@ -889,9 +887,7 @@ func (s *Server) AppendCloneBitmap(
 	if err := validateBitmap(req.GetBitmap()); err != nil {
 		return nil, err
 	}
-	// Judged on this request alone, so it is here and NOT in validateBitmap:
-	// that helper is shared with AppendMigrationBitmap, whose chunks carry no
-	// byte cap of their own, and C is a clone chunk's capacity
+	// Judged on this request alone: C is a clone chunk's capacity
 	// (architecture.md, Clones).
 	if len(req.GetBitmap()) > common.CloneBmChunkBytes {
 		return nil, errInvalid(

@@ -234,6 +234,18 @@ func (a *Agent) sideInfoLocked(key string) *pb.SideInfo {
 			DmCloneInfo: a.migrDstRowLocked(
 				key, awaiting, "migr_dst_info.dm_clone_info"),
 		}
+		// Past the cutover a provisioned destination has built its
+		// dm-clone, and its row carries the dm-clone's status line, as the
+		// real agent's does (dnagent.md DN13), which the worker's read of
+		// the migration's bitmap waits for (dnv-worker.md BM7); a lever
+		// that sets the row's details still wins.
+		if !dst.GetCutoverPending() && conf.GetProvisioned() {
+			row := info.MigrDstInfo.DmCloneInfo
+			if row.GetStatus() == pb.ResStatus_RES_STATUS_OK &&
+				row.GetDetails() == "" {
+				row.Details = fakeCloneStatus
+			}
+		}
 	}
 	zeroBytes := conf.GetZeroBytes()
 	ob := a.objLocked(key)
@@ -248,6 +260,12 @@ func (a *Agent) sideInfoLocked(key string) *pb.SideInfo {
 	info.ZeroedBytes = zeroedBytes
 	return info
 }
+
+// fakeCloneStatus is the dm-clone status line a destination past its
+// cutover reports: half its regions copied, the copy on, metadata
+// read-write.
+const fakeCloneStatus = "0 2048 clone 8 1/1024 8 128/256 0 1 " +
+	"no_discard_passdown 4 hydration_threshold 1 hydration_batch_size 1 rw"
 
 // migrDstRowLocked resolves one of a migration destination's two rows: the
 // default OK, or — while awaiting, the side provisioned and its cutover

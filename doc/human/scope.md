@@ -122,21 +122,12 @@ md never trusts an old superblock.
   CSI tutorial.
 
 **Steps of a caller that can break the promise.** A migration and a clone
-can skip the blocks a volume never wrote. Today the caller reads the list
-of written blocks and hands it over, in pieces. The list must be read at
-the right time.
+can skip the blocks a volume never wrote. For a migration the worker
+reads the leg's list of written blocks itself, once the old side takes no
+more writes, and hands it to the new side in pieces of a fixed size. For a
+clone the caller reads the source volume's list and hands it over, in
+pieces, and the list must be read at the right time.
 
-- **A leg's written-block list read too early in a migration.** The read
-  must come after the old side stopped taking writes. An earlier read
-  misses the later writes. The copy skips them. The pool then reads old
-  bytes of the new side's extents there, with no error. The bytes may be
-  another pool's. Until the fix, read the list only after the cutover,
-  once the primary's path to the new side is ANA optimized. The new side
-  uses a piece that arrives while it serves: it holds the leg's IO through
-  it for a moment while it marks the piece's blocks. State: fix decided.
-  The worker reads the list itself once the new side serves, and hands it
-  over in pieces of a fixed size. No caller reads or hands over a
-  migration's list any more. Not seen in the lab.
 - **A source volume's written-block list read too early for a clone.**
   The read must come after the source stopped taking writes. An earlier
   read makes the clone serve zeros where the source has data, with no
@@ -144,25 +135,21 @@ the right time.
   transfer has set the source volume's namespace aside on the source
   pool's primary: the namespace is ANA inaccessible and its device serves
   no IO. Not seen in the lab.
-- **A written-block list in pieces can shift.** One piece, one
-  `--bm-hex` of dnvctl, covers only part of a large volume or leg, so such
-  a list goes in pieces. A clone's list is first cut into chunks, each at
-  a fixed place, and each chunk goes in pieces. A piece carries no block
-  count, and dnvctl sends a piece's position only when you give it. Two
-  mistakes shift the blocks that follow: a piece before the last whose
+- **A clone's written-block list in pieces can shift.** One piece, one
+  `--bm-hex` of dnvctl, covers only part of a large volume, so such a list
+  goes in pieces. A clone's list is first cut into chunks, each at a fixed
+  place, and each chunk goes in pieces. A piece carries no block count,
+  and dnvctl sends a piece's position only when you give it. Two mistakes
+  shift the later blocks of the same chunk: a piece before the last whose
   block count is not a multiple of eight, and a piece sent twice without
-  its position. In a migration's list every later block moves. In a
-  clone's list the later blocks of the same chunk move. A migration's copy
-  then skips written blocks, and the pool reads old bytes of the new
-  side's extents there. A clone reads zeros where the source wrote. No
+  its position. The clone then reads zeros where the source wrote. No
   error shows. Until the fix, read every piece but the last over a
-  multiple of eight blocks. Give dnvctl the piece's position, `--offset`
-  for a clone or `--bm-idx` for a migration, whenever you may send a piece
-  again; a piece sent again with its position is left as it is. State:
-  fix decided. For a migration the worker cuts the pieces itself. For a
-  clone the gateway refuses a read whose block count is not a multiple of
-  eight before the end of the volume, and dnvctl always sends a piece's
-  position. Not seen in the lab.
+  multiple of eight blocks. Give dnvctl the piece's position, `--offset`,
+  whenever you may send a piece again; a piece sent again with its
+  position is left as it is. State: fix decided. The gateway refuses a
+  read whose block count is not a multiple of eight before the end of the
+  volume, and dnvctl always sends a piece's position. Not seen in the
+  lab.
 - **A forced finish of a migration before the copy is whole.** The finish
   with force skips the proof that the copy is whole, and the old side is
   removed. The regions the copy
@@ -724,7 +711,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Create and delete a pool | `dnvctl sp create`, `dnvctl sp delete` | the tutorials | done |
 | Grow a slice | the worker grows it by itself; `dnvctl sp grow-slice` | none | procedure to write, one line: when to grow by hand |
 | Change a pool's level | `dnvctl sp set-level` | none | procedure to write, with the thin pool repair |
-| Move a leg to another disk node | `dnvctl migr create`, `migr append-bm`, `migr finish`, `migr cancel` | none; the introduction explains the flow | procedure to write: the whole flow. Fix decided: the worker reads and hands over the leg's list itself, and `migr append-bm` goes. |
+| Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | none; the introduction explains the flow | procedure to write: the whole flow |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | none | procedure to write |
 | Force-start a group | `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | none | procedure to write: the forced-start guide. Fix decided: an inspect call that shows what the primary reads from each member, and a dry run that says what a start would do and refuse. |
 | Delete a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete` | none | procedure to write, one line |
@@ -741,7 +728,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | none | procedure to write |
 | Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | none; the introduction explains the flow | procedure to write: the whole flow. Fix decided: the gateway guards the list read, and the worker drains a clone whose copy is whole. |
 | Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | none; the introduction explains the flow | procedure to write |
-| Read a volume's written blocks | `dnvctl td get-bm`, `dnvctl td get-leg-bm` | none | procedure to write, with the move. Fix decided: `td get-leg-bm` goes, since the worker reads a leg's list itself. |
+| Read a volume's written blocks | `dnvctl td get-bm` | none | procedure to write, with the move to another pool |
 | Grow a volume; revert a volume to a snapshot | none | — | not yet |
 
 ### Control plane
@@ -958,11 +945,11 @@ design:
   for the create, and once when the worker marks the volume created.
   State: accepted.
 - **Larger counts make larger messages and more connections and kernel
-  objects.** A row's text
-  from a failed command, the answer of a written-block list read and a
-  migration's piece have no cap; a piece above etcd's request size fails. State: accepted. Fix decided: a
-  cap on a row's text, and the worker cuts a migration's pieces to a fixed
-  size.
+  objects.** A row's text from a failed command and the answer of a
+  volume's written-block list read have no cap. A migration reads a leg's
+  list in one answer of at most 64 MiB, so a leg of more than 512 Mi
+  blocks gets no list, and its copy copies every block. State: accepted.
+  Fix decided: a cap on a row's text.
 - **The controller nodes' budgets cap a cluster's space.** A budget is the
   pool space a controller node may serve to hosts. Every cntlr of a pool,
   primary or standby, charges its controller node the full size of the

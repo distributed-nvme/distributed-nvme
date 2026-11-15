@@ -150,12 +150,6 @@ func TestKeyGoldenStrings(t *testing.T) {
 			"dnv migration ebada5168620c5fe 0000000000000011 migr0",
 		},
 		{
-			"MigrBitmapKey",
-			MigrBitmapKey(goldenCid, goldenSpId, "migr0", 1),
-			"dnv migration_bitmap ebada5168620c5fe 0000000000000011 " +
-				"migr0 01",
-		},
-		{
 			"RepairKey",
 			RepairKey(goldenCid, goldenSpId, "rep0"),
 			"dnv repair ebada5168620c5fe 0000000000000011 rep0",
@@ -213,12 +207,6 @@ func TestPrefixesEndInOneSpace(t *testing.T) {
 			"CloneBitmapPrefix",
 			CloneBitmapPrefix(goldenCid, goldenSpId, "clone0"),
 			"dnv clone_bitmap ebada5168620c5fe 0000000000000011 clone0 ",
-		},
-		{
-			"MigrBitmapPrefix",
-			MigrBitmapPrefix(goldenCid, goldenSpId, "migr0"),
-			"dnv migration_bitmap ebada5168620c5fe 0000000000000011 " +
-				"migr0 ",
 		},
 		{
 			"RepairPrefix",
@@ -286,11 +274,6 @@ func TestPrefixIsPrefixOfKey(t *testing.T) {
 			"clone_bitmap",
 			CloneBitmapPrefix(goldenCid, goldenSpId, "clone0"),
 			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 1, 2),
-		},
-		{
-			"migration_bitmap",
-			MigrBitmapPrefix(goldenCid, goldenSpId, "migr0"),
-			MigrBitmapKey(goldenCid, goldenSpId, "migr0", 2),
 		},
 		{
 			"repair",
@@ -561,8 +544,7 @@ func TestParseCdcEntryKeyRejectsMalformed(t *testing.T) {
 	if _, _, _, _, ok := ParseCdcEntryKey(good); !ok {
 		t.Errorf("ParseCdcEntryKey(%q) rejected a good key", good)
 	}
-	// No parser accepts another kind's key, whatever its field count: a
-	// migration_bitmap key has the same six fields as a cdc one.
+	// No parser accepts another kind's key, whatever its field count.
 	foreign := []struct {
 		name string
 		key  string
@@ -570,10 +552,6 @@ func TestParseCdcEntryKeyRejectsMalformed(t *testing.T) {
 		{"dn_rev", DnRevKey(4, goldenCid, goldenSpId)},
 		{"cn_rev", CnRevKey(4, goldenCid, goldenSpId)},
 		{"sp_rev", SpRevKey(4, goldenCid, goldenSpId)},
-		{
-			"migration_bitmap",
-			MigrBitmapKey(goldenCid, goldenSpId, "migr0", 3),
-		},
 		{
 			"clone_bitmap",
 			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 2, 3),
@@ -597,9 +575,6 @@ func TestParseCdcEntryKeyRejectsMalformed(t *testing.T) {
 	}
 	if _, _, _, ok := ParseSpRevKey(good); ok {
 		t.Error("ParseSpRevKey accepted a cdc key")
-	}
-	if _, ok := ParseBmIdx(good); ok {
-		t.Error("ParseBmIdx accepted a cdc key")
 	}
 	if _, _, ok := ParseCloneBmKey(good); ok {
 		t.Error("ParseCloneBmKey accepted a cdc key")
@@ -647,52 +622,6 @@ func TestParseWorkerRegKey(t *testing.T) {
 	}
 }
 
-// TestParseBmIdx round-trips the migration-bitmap parser and checks its
-// rejections (MD2, MD3). The clone keys it must refuse are its neighbours in
-// the key space, not exotica: MD3 runs it over one prefix only, but a parser
-// that accepted the other kind would hand a clone's chunk to a migration's
-// index.
-func TestParseBmIdx(t *testing.T) {
-	for _, bmIdx := range []uint32{0, 1, 15, 16, 255} {
-		migrKey := MigrBitmapKey(goldenCid, goldenSpId, "migr0", bmIdx)
-		got, ok := ParseBmIdx(migrKey)
-		if !ok || got != bmIdx {
-			t.Errorf("ParseBmIdx(%q) = (%d, %v)", migrKey, got, ok)
-		}
-		cloneKey := CloneBitmapKey(goldenCid, goldenSpId, "clone0", 1, bmIdx)
-		if _, ok := ParseBmIdx(cloneKey); ok {
-			t.Errorf("ParseBmIdx accepted a clone key %q", cloneKey)
-		}
-	}
-	head := "dnv migration_bitmap ebada5168620c5fe 0000000000000011 migr0"
-	bad := []struct {
-		name string
-		key  string
-	}{
-		{"empty", ""},
-		{"too few fields", head},
-		{"too many fields", head + " 03 extra"},
-		{"wrong prefix", "xxx migration_bitmap ebada5168620c5fe " +
-			"0000000000000011 migr0 03"},
-		{"not a bitmap kind", MigrationKey(goldenCid, goldenSpId, "migr0") +
-			" 03"},
-		{"clone bitmap kind", "dnv clone_bitmap ebada5168620c5fe " +
-			"0000000000000011 clone0 03"},
-		{"unpadded index", head + " 3"},
-		{"empty index", head + " "},
-		{"non-hex index", head + " zz"},
-		{"empty name", "dnv migration_bitmap ebada5168620c5fe " +
-			"0000000000000011  03"},
-		{"bad cid", "dnv migration_bitmap zzzz 0000000000000011 migr0 03"},
-		{"bad sp id", "dnv migration_bitmap ebada5168620c5fe 11 migr0 03"},
-	}
-	for _, tc := range bad {
-		if _, ok := ParseBmIdx(tc.key); ok {
-			t.Errorf("%s: ParseBmIdx(%q) accepted it", tc.name, tc.key)
-		}
-	}
-}
-
 // TestParseCloneBmKey round-trips the clone-bitmap parser over the whole pair
 // and checks its rejections (MD2, MD3; architecture.md, Bitmap push protocol).
 // The two indexes
@@ -723,7 +652,8 @@ func TestParseCloneBmKey(t *testing.T) {
 		// previous format: malformed here, skipped by loadBmIdx (MD3).
 		{"six fields", head + " 03"},
 		{"too many fields", head + " 02 03 extra"},
-		{"migration key", MigrBitmapKey(goldenCid, goldenSpId, "migr0", 3)},
+		{"migration key", "dnv migration_bitmap " +
+			"ebada5168620c5fe 0000000000000011 migr0 03"},
 		{"seven-field migration key", "dnv migration_bitmap " +
 			"ebada5168620c5fe 0000000000000011 migr0 02 03"},
 		{"wrong prefix", "xxx clone_bitmap ebada5168620c5fe " +

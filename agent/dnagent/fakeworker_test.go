@@ -317,8 +317,8 @@ func assertCleanRound(
 // ---------------------------------------------------------------------------
 
 // TestFakeWorkerPushIndexBound pushes a destination side the chunks of a
-// migration at the bounds of its index, through the gRPC surface. The gateway
-// appends no chunk past MaxMigrBmCnt (architecture.md, Migrations), so the
+// migration at the bounds of its index, through the gRPC surface. The worker
+// cuts no piece past MaxMigrBmCnt (dnv-worker.md BM7), so the
 // first index and the last one a migration can hold are applied, and the
 // index at the limit is refused by name before anything is persisted: it is
 // in no applied set the next SyncupSide reports, so the worker never sees it

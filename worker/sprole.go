@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -302,11 +304,10 @@ type sidePlan struct {
 	// never restarts a child (keepChild).
 	errEpoch uint64
 	// migrName and migrId are set only for a migration DESTINATION side
-	// (BM4: migration chunks go only there); chunks are that migration's
-	// indexes from the snapshot (MD3).
+	// (BM4: a migration's pieces go only there); the pieces are the side
+	// child's own, read from the primary (BM7).
 	migrName string
 	migrId   uint64
-	chunks   []model.BmChunk
 }
 
 // sideOwner names the record a side's health writes go to (HL2): its slice,
@@ -1857,14 +1858,12 @@ func (w *spWorker) addMigrConf(
 				BlockSize:      dataBlockSize(conf.GetBdevConf()),
 				MetaBlocks:     grp.GetMetaBlocks(),
 				DmCloneConf:    migrCloneConf(migr.GetDmCloneConf()),
-				BmCnt:          migr.GetBmCnt(),
 				CutoverPending: pending,
 			}
 			// BM1/BM4: only the destination side's DN receives this
-			// migration's chunks.
+			// migration's pieces.
 			out.migrName = migrName
 			out.migrId = migr.GetMigrId()
-			out.chunks = state.MigrBmIdx[migrName]
 		}
 	}
 	return true
@@ -2658,6 +2657,7 @@ func (w *spWorker) handleReports(first spReport) {
 	w.applyCloneFlip(ctx, cloneSides)
 	w.applyRepairFlips(ctx, repairSides)
 	w.applyCutovers(ctx, paths)
+	w.offerBitmapReads(paths)
 	w.applyCreatedFlip(ctx, tds)
 }
 
@@ -2966,6 +2966,40 @@ func livePathTo(
 	return 0, nil
 }
 
+// offerBitmapReads is the coordinator's half of BM7: for each migration
+// destination side whose plan says the cutover is clear, when a path report
+// of this drain from a cntlr that makes the primary (countsPaths, as for
+// applyCutovers) shows a live path to that side, the side child is offered
+// a read of the migration's bitmap from that cntlr's CN. Only the primary
+// holds the leg's array, whose bitmap the read takes; the child itself waits
+// for its own report to show the dm-clone (offerBitmapRead).
+func (w *spWorker) offerBitmapReads(paths map[uint64]*pathReport) {
+	if len(paths) == 0 {
+		return
+	}
+	for key, child := range w.sides {
+		plan := child.plan
+		if child.driver == nil || plan == nil || plan.migrName == "" ||
+			plan.req.GetMigrDstConf().GetCutoverPending() {
+			continue
+		}
+		cntlrId, rep := livePathTo(paths, key.sideId)
+		if rep == nil {
+			continue
+		}
+		cntlr, ok := w.cntlrs[cntlrId]
+		if !ok || cntlr.driver == nil {
+			continue
+		}
+		child.driver.offerBitmapRead(plan.migrId, plan.migrName, bmSource{
+			addr:  cntlr.driver.addr,
+			cnId:  cntlr.driver.cnId,
+			ptr:   cntlr.driver.ptr,
+			legId: key.legId,
+		})
+	}
+}
+
 // awaitsCutover is condition (2) of applyCutovers, read from the side child
 // of the migration's dst side; a side with no running child does not wait.
 func (w *spWorker) awaitsCutover(ref model.CutoverRef) bool {
@@ -3030,7 +3064,7 @@ func (w *spWorker) currentRevision(ctx context.Context) uint64 {
 }
 
 // ---------------------------------------------------------------------------
-// The side child (RW15, RW17, RW18, HL2, BM1-BM6)
+// The side child (RW15, RW17, RW18, HL2, BM1-BM7)
 // ---------------------------------------------------------------------------
 
 // sideDriver is one side's half of the per-object loop (RW14-RW20). Everything
@@ -3058,6 +3092,13 @@ type sideDriver struct {
 	// (sideAwaitsCutover). The loop writes it; the coordinator reads it for
 	// the cutover beside RW18's flip (applyCutovers).
 	awaiting bool
+	// cloneReady is whether the last reply the loop observed was accepted
+	// at the desired revision and its SideInfo shows the dm-clone
+	// (migrCloneShown): a bitmap read waits for it (BM7). A reply behind the
+	// desired revision is followed by a SyncupSide, whose reply brings the
+	// applied set the pushes after the read are planned from, so the read
+	// waits for that reply too.
+	cloneReady bool
 
 	plan   *sidePlan
 	health *healthMonitor
@@ -3065,6 +3106,20 @@ type sideDriver struct {
 	// synced is the last revision reportSynced handed the coordinator, so a
 	// standing reply does not report every round.
 	synced uint64
+
+	// The migration bitmap of a destination side (BM7), guarded by mu:
+	// bmMigrId and bmMigrName are the migration the rest is about, bmPieces
+	// the leg's bitmap read from the primary and cut into pieces, nil until a
+	// read ended (empty, never nil, once the child gave up reading),
+	// bmReading whether a read is in flight, bmFailures the reads that failed
+	// on the agent's side, and bmApplied the bm_info of the last accepted
+	// SyncupSide reply, the agent's applied set.
+	bmMigrId   uint64
+	bmMigrName string
+	bmPieces   [][]byte
+	bmReading  bool
+	bmFailures int
+	bmApplied  *pb.BitmapInfo
 }
 
 // storeInfo remembers the latest SideInfo (HL5); info returns it. A Check
@@ -3094,6 +3149,12 @@ func (d *sideDriver) awaitsCutover() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.awaiting
+}
+
+func (d *sideDriver) setCloneReady(ready bool) {
+	d.mu.Lock()
+	d.cloneReady = ready
+	d.mu.Unlock()
 }
 
 // newSideDriver builds one side child's driver.
@@ -3150,21 +3211,17 @@ func newSideDriver(
 		},
 		// A migration has one bitmap per leg, addressed by bm_idx alone: the
 		// pusher's shared fetch signature carries a source slice index, and
-		// it is always 0 here (architecture.md, Bitmap push protocol).
+		// it is always 0 here (architecture.md, Bitmap push protocol). The
+		// piece comes from the child's own read (BM7); a piece the child no
+		// longer holds, its migration gone or read again, is not found.
 		fetch: func(
-			ctx context.Context,
+			_ context.Context,
 			name string,
 			_ uint32,
 			bmIdx uint32,
 		) ([]byte, bool, error) {
-			chunk := &pb.MigrBitmap{}
-			found, err := d.deps.store.Get(
-				ctx, model.MigrBitmapKey(d.cid, d.spId, name, bmIdx), chunk,
-			)
-			if err != nil {
-				return nil, false, err
-			}
-			return chunk.GetBitmap(), found, nil
+			piece, ok := d.migrPiece(name, bmIdx)
+			return piece, ok, nil
 		},
 		deliver: func(
 			ctx context.Context,
@@ -3202,7 +3259,7 @@ func (d *sideDriver) install(p *sidePlan) {
 // current is the plan the child drives: whatever the coordinator installed
 // last. Every loop-goroutine entry point takes it exactly once, so a fan-out
 // that changed the plan without changing the desired state — a re-resolution
-// tick, or a bitmap chunk appended at the same revision — still reaches the
+// tick, or a clone chunk appended at the same revision — still reaches the
 // agent on the next round rather than waiting for the next bump.
 func (d *sideDriver) current() *sidePlan {
 	d.mu.Lock()
@@ -3295,29 +3352,259 @@ func migrChunkIds(bmIdxList []uint32) []model.BmChunk {
 	return out
 }
 
-// diffBitmap is BM2 for a migration destination side: the chunks etcd holds
-// minus the ones the agent acknowledges in bm_idx_list, pushed in ascending
-// bm_idx (BM3). Only a destination side pushes at all (BM4), and only when
-// the reply's bm_info is about this side's migration.
+// diffBitmap is BM2 for a migration destination side: it keeps the reply's
+// bm_info, the agent's applied set, when the reply is about this side's
+// migration, and pushes the pieces of the child's read the set lacks (BM7).
+// Only a destination side pushes at all (BM4).
 func (d *sideDriver) diffBitmap(
 	plan *sidePlan,
 	info *pb.BitmapInfo,
 ) {
-	if plan.migrName == "" || len(plan.chunks) == 0 {
+	d.mu.Lock()
+	if d.bmMigrId != 0 && d.bmMigrId != plan.migrId {
+		// The migration left the plan, at its finish or its cancel: its
+		// bitmap goes with it, and a read still in flight finds no
+		// migration to keep its pieces for.
+		d.dropBitmap()
+	}
+	d.mu.Unlock()
+	if plan.migrName == "" || info.GetResId() != plan.migrId {
 		return
 	}
-	if info.GetResId() != plan.migrId {
+	d.mu.Lock()
+	d.bmApplied = info
+	d.mu.Unlock()
+	d.pushMigrPieces(plan.migrId, plan.migrName, false)
+}
+
+// dropBitmap forgets the child's migration bitmap; bmApplied stays, as it
+// names its own migration. Called with mu held.
+func (d *sideDriver) dropBitmap() {
+	d.bmMigrId, d.bmMigrName = 0, ""
+	d.bmPieces, d.bmReading, d.bmFailures = nil, false, 0
+}
+
+// bmSource is where a destination side's child reads its migration's bitmap
+// (BM7): the primary cntlr's CN, and the leg the migration moves.
+type bmSource struct {
+	addr  string
+	cnId  uint64
+	ptr   *pb.CntlrPointer
+	legId uint64
+}
+
+// offerBitmapRead is the coordinator's offer of a read of the migration
+// migrId's bitmap (BM7), made on a report round whose primary shows a live
+// path to this destination side while the migration's cutover is clear. The
+// child reads only once the last reply it observed is at the desired
+// revision and shows the dm-clone (cloneReady), which the destination builds
+// only over the source's export, linked once every per-CN dm-linear of the
+// source is fenced (dnagent.md DN12), and only when it holds no bitmap of
+// that migration and no read is in flight. An offer to a
+// child that holds the bitmap pushes again the pieces the agent's last
+// applied set lacks and this child has no code-zero reply for: no SyncupSide
+// need follow the read, so the offer is what retries a push that failed
+// (BM6, BM7). The read runs on the pusher's lifecycle, so the child's stop
+// ends it.
+func (d *sideDriver) offerBitmapRead(
+	migrId uint64,
+	migrName string,
+	src bmSource,
+) {
+	d.mu.Lock()
+	if !d.cloneReady || d.bmMigrId == migrId && d.bmReading {
+		d.mu.Unlock()
 		return
 	}
-	missing := d.pusher.missing(
-		plan.migrId, plan.chunks, migrChunkIds(info.GetBmIdxList()),
+	if d.bmMigrId == migrId && d.bmPieces != nil {
+		d.mu.Unlock()
+		d.pushMigrPieces(migrId, migrName, true)
+		return
+	}
+	if d.bmMigrId != migrId {
+		d.dropBitmap()
+		d.bmMigrId, d.bmMigrName = migrId, migrName
+	}
+	d.bmReading = true
+	d.mu.Unlock()
+	if !d.pusher.spawn(func(ctx context.Context) {
+		d.readMigrBitmap(ctx, migrId, migrName, src)
+	}) {
+		d.mu.Lock()
+		d.bmReading = false
+		d.mu.Unlock()
+	}
+}
+
+// migrCloneShown reports whether a destination side's report shows its
+// dm-clone: the row reads OK, and its details hold a dm-clone's status line.
+func migrCloneShown(info *pb.SideInfo) bool {
+	row := info.GetMigrDstInfo().GetDmCloneInfo()
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		return false
+	}
+	_, ok := common.ParseCloneStatus(row.GetDetails())
+	return ok
+}
+
+// migrBmReadTries is how many reads of one migration's bitmap may fail on the
+// agent's side before the child gives the bitmap up (BM7).
+const migrBmReadTries = 3
+
+// errMigrBmTooLarge is a leg bitmap of more pieces than an agent takes: no
+// later read of the same leg can do better.
+var errMigrBmTooLarge = errors.New("leg bitmap too large")
+
+// readMigrBitmap is the read of BM7: one GetLegBm of the whole leg from the
+// primary's cn agent, cut into pieces of MigrBmPieceBytes, kept in memory
+// and pushed. A read that fails is logged and leaves no bitmap, so a later
+// offer reads again, unless it is the migrBmReadTries-th that failed on the
+// agent's side — the call reached the agent, which refused or did not answer
+// in time — or the bitmap has too many pieces: the child then holds an empty
+// bitmap, reads no more and pushes nothing, and the copy copies every
+// region. A call that found the agent unreachable counts for nothing.
+func (d *sideDriver) readMigrBitmap(
+	ctx context.Context,
+	migrId uint64,
+	migrName string,
+	src bmSource,
+) {
+	ctx = newTraceCtx(ctx, d.seed)
+	var attrs []any
+	for _, attr := range d.logAttrs() {
+		attrs = append(attrs, attr)
+	}
+	attrs = append(attrs,
+		slog.Uint64("migr_id", migrId),
+		slog.String("cn_addr", src.addr),
+		slog.Uint64("leg_id", src.legId),
 	)
+	pieces, err := d.fetchLegBitmap(ctx, src)
+	givenUp := false
+	d.mu.Lock()
+	if d.bmMigrId == migrId {
+		d.bmReading = false
+		switch {
+		case err == nil:
+			d.bmPieces = pieces
+		case errors.Is(err, errMigrBmTooLarge):
+			givenUp = true
+		case status.Code(err) != codes.Unavailable:
+			d.bmFailures++
+			givenUp = d.bmFailures >= migrBmReadTries
+		}
+		if givenUp {
+			d.bmPieces = [][]byte{}
+		}
+	}
+	d.mu.Unlock()
+	if err != nil {
+		slog.InfoContext(ctx, msgMigrBitmapReadFailed,
+			append(attrs, slog.String("error", err.Error()),
+				slog.Bool("given_up", givenUp))...)
+		return
+	}
+	slog.InfoContext(ctx, msgMigrBitmapRead,
+		append(attrs, slog.Int("piece_cnt", len(pieces)))...)
+	d.pushMigrPieces(migrId, migrName, false)
+}
+
+// migrPieceBytes is the size of every piece but the last of a migration's
+// bitmap: common.MigrBmPieceBytes, a variable only so that a test can cut a
+// small bitmap into several pieces.
+var migrPieceBytes = common.MigrBmPieceBytes
+
+// fetchLegBitmap reads the whole leg's bitmap from the primary's cn agent,
+// under the syncup timeout (RW11's bound for one call to an agent), and cuts
+// it into pieces of migrPieceBytes: every piece but the last covers a
+// multiple of 8 blocks, so the pieces join at the byte (architecture.md,
+// Bitmap push protocol). More than MaxMigrBmCnt pieces is an error, as the
+// destination's agent refuses a piece index past it (dnagent.md DN15).
+func (d *sideDriver) fetchLegBitmap(
+	ctx context.Context,
+	src bmSource,
+) ([][]byte, error) {
+	conn, err := d.deps.conns.acquire(src.addr)
+	if err != nil {
+		// No connection: the agent is out of reach, as a call that fails
+		// with UNAVAILABLE, and the failure counts for nothing (BM7).
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	defer d.deps.conns.release(src.addr)
+	rpcCtx, cancel := context.WithTimeout(ctx, d.deps.tmo.syncup)
+	defer cancel()
+	reply, err := pb.NewControllerNodeAgentClient(conn).GetLegBm(rpcCtx,
+		&pb.GetLegBmRequest{
+			ClusterId: d.cid,
+			CnId:      src.cnId,
+			SpId:      d.spId,
+			CntlrId:   src.ptr.GetCntlrId(),
+			LegId:     src.legId,
+		})
+	if err != nil {
+		return nil, fmt.Errorf("get leg bitmap: %w", err)
+	}
+	bitmap := reply.GetBitmap()
+	if len(bitmap) > migrPieceBytes*common.MaxMigrBmCnt {
+		return nil, fmt.Errorf("%w: %d bytes is more than %d pieces of %d "+
+			"bytes", errMigrBmTooLarge, len(bitmap), common.MaxMigrBmCnt,
+			migrPieceBytes)
+	}
+	// Never nil: an empty bitmap is a read that ended, not one to repeat.
+	pieces := make([][]byte, 0, len(bitmap)/migrPieceBytes+1)
+	for off := 0; off < len(bitmap); off += migrPieceBytes {
+		end := min(off+migrPieceBytes, len(bitmap))
+		pieces = append(pieces, bitmap[off:end])
+	}
+	return pieces, nil
+}
+
+// migrPiece is one piece of the child's read of the migration migrName, for
+// the pusher's fetch.
+func (d *sideDriver) migrPiece(migrName string, bmIdx uint32) ([]byte, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if migrName != d.bmMigrName || int(bmIdx) >= len(d.bmPieces) {
+		return nil, false
+	}
+	return d.bmPieces[bmIdx], true
+}
+
+// pushMigrPieces submits the pieces of the child's read of migrId that the
+// agent's last applied set (bmApplied) does not list, in ascending bm_idx
+// (BM2, BM3, BM7). It runs on a SyncupSide reply's diff, right after the
+// read, and on each offer, which also leaves out every piece this child
+// delivered with a code-zero reply (fromOffer): an offer's set is the last
+// reply's, which may predate those pushes.
+func (d *sideDriver) pushMigrPieces(
+	migrId uint64,
+	migrName string,
+	fromOffer bool,
+) {
+	d.mu.Lock()
+	if d.bmMigrId != migrId || d.bmPieces == nil {
+		d.mu.Unlock()
+		return
+	}
+	chunks := make([]model.BmChunk, len(d.bmPieces))
+	for i := range d.bmPieces {
+		chunks[i] = model.BmChunk{Idx: uint32(i)}
+	}
+	var applied []model.BmChunk
+	if d.bmApplied.GetResId() == migrId {
+		applied = migrChunkIds(d.bmApplied.GetBmIdxList())
+	}
+	d.mu.Unlock()
+	missing := d.pusher.missing(migrId, chunks, applied)
+	if fromOffer {
+		missing = d.pusher.unacked(migrId, missing)
+	}
 	if len(missing) == 0 {
 		return
 	}
 	d.pusher.submit(&bmPlan{
-		resId: plan.migrId,
-		name:  plan.migrName,
+		resId: migrId,
+		name:  migrName,
 		parts: missing,
 	})
 }
@@ -3331,8 +3618,11 @@ func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 	info := d.info()
 	obs, res := sideObservation(r.code, info)
 	d.health.observe(ctx, obs, res)
-	d.reportProvisioned(ctx, r, d.current())
+	plan := d.current()
+	d.reportProvisioned(ctx, r, plan)
 	d.setAwaiting(sideAwaitsCutover(info))
+	d.setCloneReady(accepted(r.code) &&
+		r.revision == plan.req.GetRevision() && migrCloneShown(info))
 	d.reportSynced(ctx, r)
 }
 
@@ -3424,8 +3714,10 @@ func (d *sideDriver) send(ctx context.Context, rep spReport) {
 // and never written to etcd.
 func (d *sideDriver) unreachable(ctx context.Context) {
 	markSideUnknown(d.info())
-	// The rows read UNKNOWN now, which waits for nothing.
+	// The rows read UNKNOWN now, which waits for nothing and shows no
+	// dm-clone.
 	d.setAwaiting(false)
+	d.setCloneReady(false)
 	d.health.observe(ctx, healthUnreachable, "")
 }
 

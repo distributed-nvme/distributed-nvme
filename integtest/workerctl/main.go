@@ -792,10 +792,6 @@ var kinds = map[string]kindInfo{
 		newMsg:        func() proto.Message { return &pb.Migration{} },
 		clusterScoped: true,
 	},
-	"migration_bitmap": {
-		newMsg:        func() proto.Message { return &pb.MigrBitmap{} },
-		clusterScoped: true,
-	},
 	"repair": {
 		newMsg:        func() proto.Message { return &pb.Repair{} },
 		clusterScoped: true,
@@ -2011,36 +2007,29 @@ func cmdPutMigr(g *globals, args []string) {
 	})
 }
 
-// cmdPutBitmap writes one chunk of a clone's or a migration's bitmap through
-// plant.PutCloneBitmap or plant.PutMigrBitmap (architecture.md, Clones and
-// Migrations; BM3).
+// cmdPutBitmap writes one chunk of a clone's bitmap through
+// plant.PutCloneBitmap (architecture.md, Clones; BM3). A migration's bitmap
+// is the worker's own and has no etcd keys (dnv-worker.md BM7).
 func cmdPutBitmap(g *globals, args []string) {
 	fs := newFlagSet("put-bitmap", g)
-	kind := fs.String("kind", "", "clone|migr (required)")
+	kind := fs.String("kind", "", "clone (required)")
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
-	name := fs.String("name", "", "clone_name or migr_name (required)")
+	name := fs.String("name", "", "clone_name (required)")
 	srcSliceIdx := fs.Uint("src-slice-idx", 0,
-		"the source slice the chunk describes (--kind clone only)")
+		"the source slice the chunk describes")
 	bmIdx := fs.Uint("bm-idx", 0, "the chunk index")
 	hexData := fs.String("hex", "", "the chunk payload as hex (required)")
 	fs.Parse(args)
 
-	if *kind != "clone" && *kind != "migr" {
-		usageDie("--kind wants clone or migr, got %q", *kind)
-	}
-	if *kind == "migr" && *srcSliceIdx != 0 {
-		// A migration's chunks address no slice at all, so a non-zero
-		// --src-slice-idx is a mistake in the script rather than a chunk
-		// this command could write.
-		usageDie("--src-slice-idx %d is a clone address; --kind migr has none",
-			*srcSliceIdx)
+	if *kind != "clone" {
+		usageDie("--kind wants clone, got %q", *kind)
 	}
 	if *name == "" {
 		die("--name is required")
 	}
 	// The flags are wider than the library's indexes, so their bound is
 	// checked here, before the conversion could wrap: a chunk key field
-	// holds two hex digits (model.ParseCloneBmKey, model.ParseBmIdx).
+	// holds two hex digits (model.ParseCloneBmKey).
 	if *srcSliceIdx >= 1<<8 {
 		die("--src-slice-idx %d does not fit in the %q key field",
 			*srcSliceIdx, common.BmIdxFmt)
@@ -2059,43 +2048,27 @@ func cmdPutBitmap(g *globals, args []string) {
 	cl := g.loadCluster(ctx, cli)
 	target := resolveSp(ctx, cli, cl, *sp)
 
-	var bitmap plant.Bitmap
-	if *kind == "clone" {
-		bitmap, err = plant.PutCloneBitmap(ctx, cli, cl, target,
-			plant.CloneBitmapSpec{
-				Clone:       *name,
-				SrcSliceIdx: uint32(*srcSliceIdx),
-				BmIdx:       uint32(*bmIdx),
-				Data:        data,
-			})
-	} else {
-		bitmap, err = plant.PutMigrBitmap(ctx, cli, cl, target,
-			plant.MigrBitmapSpec{
-				Migr:  *name,
-				BmIdx: uint32(*bmIdx),
-				Data:  data,
-			})
-	}
+	bitmap, err := plant.PutCloneBitmap(ctx, cli, cl, target,
+		plant.CloneBitmapSpec{
+			Clone:       *name,
+			SrcSliceIdx: uint32(*srcSliceIdx),
+			BmIdx:       uint32(*bmIdx),
+			Data:        data,
+		})
 	if err != nil {
 		die("put-bitmap: %v", err)
 	}
-	out := map[string]any{
+	emit(map[string]any{
 		"sp_name": target.Name,
 		"kind":    *kind,
 		"name":    *name,
-		// The pair a clone chunk was written at; 0 for a migration, whose
-		// chunk addresses no slice (model.BmChunk).
+		// The pair the chunk was written at (model.BmChunk).
 		"src_slice_idx": uint32(*srcSliceIdx),
 		"bm_idx":        uint32(*bmIdx),
 		"bytes":         len(data),
 		"created":       bitmap.Created,
 		"sp_rev":        bitmap.SpRev,
-	}
-	// bm_cnt is Migration's only: a Clone record carries no chunk count.
-	if *kind == "migr" {
-		out["bm_cnt"] = bitmap.BmCnt
-	}
-	emit(out)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -3328,7 +3301,6 @@ func cmdGetSp(g *globals, args []string) {
 		"xfers":        xfers,
 		"migrs":        migrs,
 		"clone_bm_idx": bmIdx(state.CloneBmIdx, true),
-		"migr_bm_idx":  bmIdx(state.MigrBmIdx, false),
 		"missing":      state.Missing,
 	})
 }

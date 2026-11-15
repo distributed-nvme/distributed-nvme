@@ -494,10 +494,14 @@ it re-sent on the code of a later round that answered from that read's
 observation, which names the read's id as the observation's trace id while the
 re-send runs under that later round's own id; and the converge's remove and
 then add of the member under the re-send's id (`cnagent.md` CN12, CN30;
-`dnv-worker.md` RW4, RW10). The leg bitmap is read and pushed only once the
-primary reaches the leg through the new side, and the migration finishes under
-the same leg id with an optimized path before any read (`architecture.md`,
-Migration; `dnagent.md` DN12, DN13). A second migration, once its cutover has
+`dnv-worker.md` RW4, RW10). The worker reads the leg's bitmap itself, once,
+from the primary, after the cutover and once the new side serves through its
+dm-clone, and every piece of it must reach the new side's disk node; the
+record names the leg and the piece count, and the new side's copied count
+after the pieces is logged and not asserted, as the background copy may have
+copied a region before its piece arrived (`dnv-worker.md` BM7; `dnagent.md`
+DN15). The migration finishes under the same leg id with an optimized path
+before any read (`architecture.md`, Migration; `dnagent.md` DN12, DN13). A second migration, once its cutover has
 started, is refused a plain cancel and ended by a forced one, its source
 serving again, the primary's path to it optimized, with the time from the
 cancel to that path logged, and the volume reading as before, since no host
@@ -1017,9 +1021,9 @@ the connect attempted.
 * **The closing trim returns space to the host only where the guests' disks
   pass discards through**; elsewhere the host's free space shrinks by each
   run's real writes.
-* **Without redundancy the suite is smaller**: ops' leg bitmap read, copy's
-  forced drop and two repair stages and react's two leg repair stages, two
-  forced-start stages and take-over stage are skipped.
+* **Without redundancy the suite is smaller**: copy's forced drop and two
+  repair stages and react's two leg repair stages, two forced-start stages
+  and take-over stage are skipped.
 * **How md takes a retired leg back is logged, not asserted.** md catches a
   retired leg taken back up from its write-intent bitmap only while the
   array has stayed degraded since the leg left, and otherwise copies it

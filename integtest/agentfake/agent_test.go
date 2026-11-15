@@ -394,7 +394,6 @@ func syncupSide(
 	if migrId != 0 {
 		req.MigrDstConf = &pb.SyncupSideRequest_MigrDstConf{
 			MigrId: migrId,
-			BmCnt:  2,
 		}
 	}
 	reply, err := client.SyncupSide(context.Background(), req)
@@ -1348,10 +1347,20 @@ func TestSideInfoAwaitsTheCutover(t *testing.T) {
 			wantClone:  [3]any{ok, "", none},
 		},
 		{
+			// Past the cutover the dm-clone's row carries its status line,
+			// which the worker's bitmap read waits for (BM7).
 			name:        "provisioned, the cutover started",
 			provisioned: true,
 			wantTarget:  [3]any{ok, "", none},
-			wantClone:   [3]any{ok, "", none},
+			wantClone:   [3]any{ok, fakeCloneStatus, none},
+		},
+		{
+			name:        "a lever on the dm-clone row's details wins",
+			provisioned: true,
+			behavior: `{"objects": {"side 1:3:5": {"rows": {
+			  "migr_dst_info.dm_clone_info": {"details": "other text"}}}}}`,
+			wantTarget: [3]any{ok, "", none},
+			wantClone:  [3]any{ok, "other text", none},
 		},
 		{
 			name:        "provisioned and pending",
@@ -2999,5 +3008,25 @@ func TestGetSizeAndBitmapStubs(t *testing.T) {
 	}
 	if len(legBm.GetBitmap()) != 0 {
 		t.Errorf("GetLegBm = %v, want an empty bitmap", legBm.GetBitmap())
+	}
+}
+
+// TestGetLegBmAnswersTheLever: a cntlr's leg_bm_hex lever is what GetLegBm
+// answers, for any leg (dnv-worker.md BM7); without it the bitmap is empty.
+func TestGetLegBmAnswersTheLever(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	ctx := context.Background()
+	req := &pb.GetLegBmRequest{ClusterId: 1, CnId: 1, SpId: 1, CntlrId: 1,
+		LegId: 7}
+	got, err := cnClient.GetLegBm(ctx, req)
+	if err != nil || len(got.GetBitmap()) != 0 {
+		t.Fatalf("GetLegBm with no lever = %v, %v; want an empty bitmap",
+			got.GetBitmap(), err)
+	}
+	setBehavior(t, agent, `{"objects": {"cntlr 1:1": {"leg_bm_hex": "aa00ff"}}}`)
+	got, err = cnClient.GetLegBm(ctx, req)
+	if err != nil || string(got.GetBitmap()) != string([]byte{0xaa, 0, 0xff}) {
+		t.Fatalf("GetLegBm = %x, %v; want aa00ff", got.GetBitmap(), err)
 	}
 }

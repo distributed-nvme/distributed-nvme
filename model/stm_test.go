@@ -133,7 +133,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 		XferId: 92,
 	})
 	mustPut(t, cli, MigrationKey(cid, fixtureSpId, "migr0"), &pb.Migration{
-		MigrId: 93, SrcSideId: 62, DstSideId: 63, BmCnt: 2,
+		MigrId: 93, SrcSideId: 62, DstSideId: 63,
 	})
 	// Two chunks of source slice 0 and one of source slice 1: the fixture's
 	// (1, 0) and (0, 0) share a bm_idx and are still two chunks, because a
@@ -143,13 +143,6 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 			t, cli,
 			CloneBitmapKey(cid, fixtureSpId, "clone0", pair[0], pair[1]),
 			&pb.CloneBitmap{Bitmap: []byte{byte(pair[0]), byte(pair[1])}},
-		)
-	}
-	for bmIdx := uint32(0); bmIdx < 2; bmIdx++ {
-		mustPut(
-			t, cli,
-			MigrBitmapKey(cid, fixtureSpId, "migr0", bmIdx),
-			&pb.MigrBitmap{Bitmap: []byte{byte(bmIdx)}},
 		)
 	}
 	for i, addrPort := range []string{
@@ -170,16 +163,6 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	}
 }
 
-// bmIndexes renders a migration chunk list for comparison; a migration chunk
-// names no slice, so its index is its whole address.
-func bmIndexes(chunks []BmChunk) []uint32 {
-	out := make([]uint32, 0, len(chunks))
-	for _, chunk := range chunks {
-		out = append(out, chunk.Idx)
-	}
-	return out
-}
-
 // bmPairs renders a clone chunk list as the (src_slice_idx, bm_idx) addresses
 // it carries (architecture.md, Bitmap push protocol).
 func bmPairs(chunks []BmChunk) [][2]uint32 {
@@ -191,18 +174,6 @@ func bmPairs(chunks []BmChunk) [][2]uint32 {
 }
 
 func equalPairs(got [][2]uint32, want [][2]uint32) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalUint32s(got []uint32, want []uint32) bool {
 	if len(got) != len(want) {
 		return false
 	}
@@ -275,15 +246,6 @@ func TestLoadSpHappyPath(t *testing.T) {
 		[][2]uint32{{0, 0}, {0, 1}, {1, 0}},
 	) {
 		t.Errorf("CloneBmIdx = %v", state.CloneBmIdx)
-	}
-	if !equalUint32s(bmIndexes(state.MigrBmIdx["migr0"]), []uint32{0, 1}) {
-		t.Errorf("MigrBmIdx = %v", state.MigrBmIdx)
-	}
-	for _, chunk := range state.MigrBmIdx["migr0"] {
-		if chunk.SliceIdx != 0 {
-			t.Errorf("migration chunk %d has slice_idx %d, want 0",
-				chunk.Idx, chunk.SliceIdx)
-		}
 	}
 	for _, chunk := range state.CloneBmIdx["clone0"] {
 		if chunk.ModRev <= 0 {
@@ -488,25 +450,26 @@ func TestLoadSpRevAdvances(t *testing.T) {
 	ctx := context.Background()
 	cid := testCid(t)
 	mustPut(t, cli, SpConfKey(cid, fixtureSpName), &pb.SpConf{
-		SpId:         fixtureSpId,
-		MigrNameList: []string{"migr0"},
+		SpId:          fixtureSpId,
+		CloneNameList: []string{"clone0"},
 	})
-	mustPut(t, cli, MigrationKey(cid, fixtureSpId, "migr0"), &pb.Migration{
-		MigrId: 1,
+	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone0"), &pb.Clone{
+		CloneId: 1, SrcSliceCnt: 1,
 	})
-	mustPut(t, cli, MigrBitmapKey(cid, fixtureSpId, "migr0", 0),
-		&pb.MigrBitmap{Bitmap: []byte{1}})
+	mustPut(t, cli, CloneBitmapKey(cid, fixtureSpId, "clone0", 0, 0),
+		&pb.CloneBitmap{Bitmap: []byte{1}})
 
 	first, err := LoadSp(ctx, cli, cid, fixtureSpName)
 	if err != nil {
 		t.Fatalf("LoadSp: %v", err)
 	}
-	if !equalUint32s(bmIndexes(first.MigrBmIdx["migr0"]), []uint32{0}) {
-		t.Fatalf("first MigrBmIdx = %v", first.MigrBmIdx)
+	if !equalPairs(bmPairs(first.CloneBmIdx["clone0"]),
+		[][2]uint32{{0, 0}}) {
+		t.Fatalf("first CloneBmIdx = %v", first.CloneBmIdx)
 	}
 
-	mustPut(t, cli, MigrBitmapKey(cid, fixtureSpId, "migr0", 1),
-		&pb.MigrBitmap{Bitmap: []byte{2}})
+	mustPut(t, cli, CloneBitmapKey(cid, fixtureSpId, "clone0", 0, 1),
+		&pb.CloneBitmap{Bitmap: []byte{2}})
 
 	second, err := LoadSp(ctx, cli, cid, fixtureSpName)
 	if err != nil {
@@ -515,13 +478,15 @@ func TestLoadSpRevAdvances(t *testing.T) {
 	if second.Rev <= first.Rev {
 		t.Errorf("Rev did not advance: %d then %d", first.Rev, second.Rev)
 	}
-	if !equalUint32s(bmIndexes(second.MigrBmIdx["migr0"]), []uint32{0, 1}) {
-		t.Errorf("second MigrBmIdx = %v", second.MigrBmIdx)
+	if !equalPairs(bmPairs(second.CloneBmIdx["clone0"]),
+		[][2]uint32{{0, 0}, {0, 1}}) {
+		t.Errorf("second CloneBmIdx = %v", second.CloneBmIdx)
 	}
 	// The first load's view is unchanged by the later write: it was read at
 	// one revision.
-	if !equalUint32s(bmIndexes(first.MigrBmIdx["migr0"]), []uint32{0}) {
-		t.Errorf("first load's index changed under it: %v", first.MigrBmIdx)
+	if !equalPairs(bmPairs(first.CloneBmIdx["clone0"]),
+		[][2]uint32{{0, 0}}) {
+		t.Errorf("first load's index changed under it: %v", first.CloneBmIdx)
 	}
 }
 

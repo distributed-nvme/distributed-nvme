@@ -71,7 +71,6 @@ func sweepDstReq(
 		DmCloneConf: &pb.DmCloneConf{
 			HydrationThreshold: 1, HydrationBatchSize: 1,
 		},
-		BmCnt: 1,
 	}
 	return req
 }

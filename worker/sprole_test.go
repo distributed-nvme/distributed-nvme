@@ -240,15 +240,11 @@ func spFixture() *model.SpState {
 				MigrId:      spMigrId,
 				SrcSideId:   spSideSrc,
 				DstSideId:   spSideDst,
-				BmCnt:       2,
 				DmCloneConf: &pb.DmCloneConf{},
 			},
 		},
 		CloneBmIdx: map[string][]model.BmChunk{
 			spCloneNm: spCloneChunks,
-		},
-		MigrBmIdx: map[string][]model.BmChunk{
-			spMigrName: {{Idx: 0, ModRev: 21}, {Idx: 1, ModRev: 22}},
 		},
 		DnByAddr: map[string]*pb.DnConf{
 			spDnA: {DnId: spDnIdA},
@@ -417,15 +413,14 @@ func TestSpSideRequestGolden(t *testing.T) {
 				HydrationThreshold: common.DefaultMigrThreshold,
 				HydrationBatchSize: common.DefaultMigrBatchSize,
 			},
-			BmCnt: 2,
 		},
 	}
 	if !proto.Equal(dst.req, want) {
 		t.Fatalf("dst side request =\n%v\nwant\n%v", dst.req, want)
 	}
-	// BM1/BM4: only the destination side carries the migration's chunks.
-	if dst.migrName != spMigrName || dst.migrId != spMigrId ||
-		len(dst.chunks) != 2 {
+	// BM4: only the destination side's plan names the migration whose
+	// pieces its child reads and pushes (BM7).
+	if dst.migrName != spMigrName || dst.migrId != spMigrId {
 		t.Fatalf("dst side migration plan = %+v", dst)
 	}
 
@@ -2609,6 +2604,29 @@ type stubCntlrAgent struct {
 	// pushCode is the AgentReply code every PushCloneBitmap answers with, the
 	// cn twin of stubSideAgent.pushCode.
 	pushCode uint32
+	// legBm answers GetLegBm (dnv-worker.md BM7); nil answers an empty
+	// bitmap. legBmReqs is every request it saw.
+	legBm     func(req *pb.GetLegBmRequest) (*pb.GetLegBmReply, error)
+	legBmReqs []*pb.GetLegBmRequest
+}
+
+func (s *stubCntlrAgent) GetLegBm(
+	ctx context.Context, req *pb.GetLegBmRequest,
+) (*pb.GetLegBmReply, error) {
+	s.mu.Lock()
+	s.legBmReqs = append(s.legBmReqs, req)
+	answer := s.legBm
+	s.mu.Unlock()
+	if answer == nil {
+		return &pb.GetLegBmReply{}, nil
+	}
+	return answer(req)
+}
+
+func (s *stubCntlrAgent) legBmCalls() []*pb.GetLegBmRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*pb.GetLegBmRequest(nil), s.legBmReqs...)
 }
 
 func (s *stubCntlrAgent) SyncupCntlr(

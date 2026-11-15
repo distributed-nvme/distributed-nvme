@@ -1,21 +1,10 @@
-// migr.go is dnvctl.md, `migr` — `ctl/migr.go`: the five RPCs of a
+// migr.go is dnvctl.md, `migr` — `ctl/migr.go`: the four RPCs of a
 // migration, the side → side move of one leg's data inside an SP
 // (architecture.md, Migrations; architecture.md, Migration). The gateway
 // gives the leg a second `Side` on another DN, a dm-clone hydrates it from
-// the first, and the operator ends the migration by committing (finish) or
-// rolling back (cancel).
-//
-// One of the RPCs is deliberately NOT symmetric with its sibling, and
-// dnvctl.md, The command tree, is exhaustive about it (CT1):
-//
-//   - `migr append-bm` has no slice index. A migration copies ONE side, so a
-//     migration `bm_idx` IS an append sequence, numbered by the record's own
-//     `bm_cnt`; AppendCloneBitmap instead addresses a chunk by the pair
-//     (`src_slice_idx`, `bm_idx`), a fixed position inside one source slice's
-//     bitmap. The --bm-idx of `migr append-bm` is no address: sent only
-//     when typed, it names the index the chunk must land at, so a chunk sent
-//     again after a lost answer changes nothing (architecture.md,
-//     Migrations).
+// the first, the worker reads and pushes the leg's bitmap itself, and the
+// operator ends the migration by committing (finish) or rolling back
+// (cancel).
 package ctl
 
 import (
@@ -38,7 +27,6 @@ func registerMigr(root *cobra.Command) {
 		migrFinishCmd(),
 		migrCancelCmd(),
 		migrGetCmd(),
-		migrAppendBmCmd(),
 	))
 }
 
@@ -183,54 +171,5 @@ func migrGetCmd() *cobra.Command {
 			}, nil
 		})
 	cmd.Flags().String("name", "", "migr_name")
-	return cmd
-}
-
-// migrAppendBmCmd is AppendMigrationBitmap: one more immutable chunk of the
-// skip bitmap, stored at `bm_idx = bm_cnt`; a typed --bm-idx must equal
-// it, or name a chunk already stored with the same bytes. The chunks
-// concatenate in bm_idx order into one bitmap over the leg's DATA region,
-// 1 = never written ⇒ skippable, and the destination DN agent shifts by the
-// leg's `meta_blocks` before discarding the fully-skippable dm-clone
-// regions (architecture.md, Migrations; architecture.md, raid0 bitmap math).
-//
-// An empty --bm-hex sends an EMPTY bitmap on purpose rather than being
-// rejected here, so the gateway's own refusal is what the operator sees; a
-// malformed non-empty value is the usage error (exit 2, the rule of
-// dnvctl.md, `clone` — `ctl/clone.go`, for the clone twin). hexBytesOf draws
-// exactly that line.
-func migrAppendBmCmd() *cobra.Command {
-	cmd := leaf(
-		"append-bm",
-		"AppendMigrationBitmap: append one skip-bitmap chunk",
-		func() (job, error) {
-			rev, err := spRev()
-			if err != nil {
-				return nil, err
-			}
-			bitmap, err := hexBytesOf("bm-hex")
-			if err != nil {
-				return nil, err
-			}
-			req := &pb.AppendMigrationBitmapRequest{
-				ClusterName: clusterOf(),
-				SpName:      spOf(),
-				SpRev:       rev,
-				MigrName:    strOf("name"),
-				Bitmap:      bitmap,
-				BmIdx:       optU32Of("bm-idx"),
-			}
-			return func(
-				ctx context.Context, client pb.GatewayClient,
-			) (any, error) {
-				return client.AppendMigrationBitmap(ctx, req)
-			}, nil
-		})
-	flags := cmd.Flags()
-	flags.String("name", "", "migr_name")
-	flags.String("bm-hex", "",
-		"bitmap as hex; empty sends an empty bitmap on purpose")
-	flags.Uint32("bm-idx", 0,
-		"the index the chunk must land at; sent only when given")
 	return cmd
 }

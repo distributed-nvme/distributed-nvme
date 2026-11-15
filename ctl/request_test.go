@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 68 invocations
+// argv for argv. The integration suite asserts the same 66 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -330,18 +330,9 @@ var sweepRows = []sweepRow{
 			TdName:      "t0",
 			BlockCnt:    64,
 		}},
-	{36, "GetLegBitmap",
-		[]string{"td", "get-leg-bm", "--leg", "9", "--start", "0",
-			"--cnt", "64"},
-		&pb.GetLegBitmapRequest{
-			ClusterName: itCluster,
-			SpName:      itSp,
-			LegId:       9,
-			BlockCnt:    64,
-		}},
 
 	// ---- ss ----
-	{37, "CreateSubsystem",
+	{36, "CreateSubsystem",
 		[]string{"ss", "create", "--nqn", itNqn, "--hosts", itHostNqn,
 			"--rev", "7"},
 		&pb.CreateSubsystemRequest{
@@ -351,7 +342,7 @@ var sweepRows = []sweepRow{
 			Nqn:          itNqn,
 			AllowedHosts: []string{itHostNqn},
 		}},
-	{38, "DeleteSubsystem",
+	{37, "DeleteSubsystem",
 		[]string{"ss", "delete", "--nqn", itNqn, "--rev", "7"},
 		&pb.DeleteSubsystemRequest{
 			ClusterName: itCluster,
@@ -359,10 +350,10 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			Nqn:         itNqn,
 		}},
-	{39, "ListSubsystems",
+	{38, "ListSubsystems",
 		[]string{"ss", "list"},
 		&pb.ListSubsystemsRequest{ClusterName: itCluster, SpName: itSp}},
-	{40, "UpdateSubsystemHosts",
+	{39, "UpdateSubsystemHosts",
 		[]string{"ss", "set-hosts", "--nqn", itNqn, "--hosts", "a,b",
 			"--rev", "7"},
 		&pb.UpdateSubsystemHostsRequest{
@@ -374,7 +365,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- ns ----
-	{41, "CreateNamespace",
+	{40, "CreateNamespace",
 		[]string{"ns", "create", "--nqn", itNqn, "--idx", "1", "--td", "t0",
 			"--uuid", itUuid, "--nguid", itNguid, "--rev", "7"},
 		&pb.CreateNamespaceRequest{
@@ -387,7 +378,7 @@ var sweepRows = []sweepRow{
 			DevNguid:    itNguid,
 			TdName:      "t0",
 		}},
-	{42, "DeleteNamespace",
+	{41, "DeleteNamespace",
 		[]string{"ns", "delete", "--nqn", itNqn, "--idx", "1", "--rev", "7"},
 		&pb.DeleteNamespaceRequest{
 			ClusterName: itCluster,
@@ -396,7 +387,7 @@ var sweepRows = []sweepRow{
 			Nqn:         itNqn,
 			NsIdx:       1,
 		}},
-	{43, "UpdateNamespaceDev",
+	{42, "UpdateNamespaceDev",
 		[]string{"ns", "set-dev", "--nqn", itNqn, "--idx", "1", "--td", "t1",
 			"--rev", "7"},
 		&pb.UpdateNamespaceDevRequest{
@@ -407,7 +398,7 @@ var sweepRows = []sweepRow{
 			NsIdx:       1,
 			TdName:      "t1",
 		}},
-	{44, "UpdateNamespaceSuspended",
+	{43, "UpdateNamespaceSuspended",
 		[]string{"ns", "set-suspended", "--nqn", itNqn, "--idx", "1",
 			"--rev", "7"},
 		// --suspended defaults to TRUE on this command alone
@@ -422,7 +413,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- clone ----
-	{45, "CreateClone",
+	{44, "CreateClone",
 		[]string{"clone", "create", "--name", "cl0", "--dst-td", "t1",
 			"--src-nqn", itSrcNqn, "--src-idx", "0", "--src-slices", "1",
 			"--src-stripe", "16384", "--src-block", "1048576", "--rev", "7"},
@@ -438,7 +429,7 @@ var sweepRows = []sweepRow{
 			SrcBlockSize:  1048576,
 			DstTdName:     "t1",
 		}},
-	{46, "DeleteClone",
+	{45, "DeleteClone",
 		[]string{"clone", "delete", "--name", "cl0", "--force", "--rev", "7"},
 		&pb.DeleteCloneRequest{
 			ClusterName: itCluster,
@@ -447,11 +438,11 @@ var sweepRows = []sweepRow{
 			CloneName:   "cl0",
 			Force:       true,
 		}},
-	{47, "GetClone",
+	{46, "GetClone",
 		[]string{"clone", "get", "--name", "cl0"},
 		&pb.GetCloneRequest{
 			ClusterName: itCluster, SpName: itSp, CloneName: "cl0"}},
-	{48, "UpdateCloneTrConf",
+	{47, "UpdateCloneTrConf",
 		[]string{"clone", "set-tr", "--name", "cl0",
 			"--src-tr-addr", "127.0.0.1", "--rev", "7"},
 		&pb.UpdateCloneTrConfRequest{
@@ -464,7 +455,7 @@ var sweepRows = []sweepRow{
 	// The two indexes are given DISTINCT non-zero values: a chunk is
 	// addressed by the pair, and equal values would let a command that wired
 	// --bm-idx to src_slice_idx (or the reverse) pass.
-	{49, "AppendCloneBitmap",
+	{48, "AppendCloneBitmap",
 		[]string{"clone", "append-bm", "--name", "cl0",
 			"--src-slice-idx", "1", "--bm-idx", "2",
 			"--bm-hex", "a5", "--offset", "3", "--rev", "7"},
@@ -480,7 +471,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- xfer ----
-	{50, "CreateTransfer",
+	{49, "CreateTransfer",
 		[]string{"xfer", "create", "--name", "x0", "--ori-nqn", itNqn,
 			"--ori-idx", "1", "--hosts", itHostNqn, "--auto-suspend",
 			"--rev", "7"},
@@ -494,7 +485,7 @@ var sweepRows = []sweepRow{
 			AllowedHosts: []string{itHostNqn},
 			AutoSuspend:  true,
 		}},
-	{51, "DeleteTransfer",
+	{50, "DeleteTransfer",
 		[]string{"xfer", "delete", "--name", "x0", "--rev", "7"},
 		// No --force: the abort path is not taken.
 		&pb.DeleteTransferRequest{
@@ -503,11 +494,11 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			XferName:    "x0",
 		}},
-	{52, "GetTransfer",
+	{51, "GetTransfer",
 		[]string{"xfer", "get", "--name", "x0"},
 		&pb.GetTransferRequest{
 			ClusterName: itCluster, SpName: itSp, XferName: "x0"}},
-	{53, "UpdateTransferHosts",
+	{52, "UpdateTransferHosts",
 		[]string{"xfer", "set-hosts", "--name", "x0", "--hosts", "c",
 			"--rev", "7"},
 		&pb.UpdateTransferHostsRequest{
@@ -519,7 +510,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- migr ----
-	{54, "CreateMigration",
+	{53, "CreateMigration",
 		[]string{"migr", "create", "--name", "m0", "--src-side", "5",
 			"--hyd-threshold", "8", "--hyd-batch", "4", "--rev", "7"},
 		&pb.CreateMigrationRequest{
@@ -533,7 +524,7 @@ var sweepRows = []sweepRow{
 				HydrationBatchSize: 4,
 			},
 		}},
-	{55, "FinishMigration",
+	{54, "FinishMigration",
 		[]string{"migr", "finish", "--name", "m0", "--rev", "7"},
 		&pb.FinishMigrationRequest{
 			ClusterName: itCluster,
@@ -541,7 +532,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			MigrName:    "m0",
 		}},
-	{56, "CancelMigration",
+	{55, "CancelMigration",
 		[]string{"migr", "cancel", "--name", "m0", "--force", "--rev", "7"},
 		&pb.CancelMigrationRequest{
 			ClusterName: itCluster,
@@ -550,24 +541,13 @@ var sweepRows = []sweepRow{
 			MigrName:    "m0",
 			Force:       true,
 		}},
-	{57, "GetMigration",
+	{56, "GetMigration",
 		[]string{"migr", "get", "--name", "m0"},
 		&pb.GetMigrationRequest{
 			ClusterName: itCluster, SpName: itSp, MigrName: "m0"}},
-	{58, "AppendMigrationBitmap",
-		[]string{"migr", "append-bm", "--name", "m0", "--bm-hex", "a5a5",
-			"--bm-idx", "1", "--rev", "7"},
-		&pb.AppendMigrationBitmapRequest{
-			ClusterName: itCluster,
-			SpName:      itSp,
-			SpRev:       wantSpRev(itRevValue),
-			MigrName:    "m0",
-			Bitmap:      []byte{0xa5, 0xa5},
-			BmIdx:       proto.Uint32(1),
-		}},
 
 	// ---- repair ----
-	{59, "CreateRepair",
+	{57, "CreateRepair",
 		[]string{"repair", "create", "--name", "r0", "--grp", "1",
 			"--bad-legs", "2", "--dn-white", itDnAddr, "--rev", "7"},
 		&pb.CreateRepairRequest{
@@ -579,7 +559,7 @@ var sweepRows = []sweepRow{
 			BadLegIdList: []uint64{2},
 			DnSelector:   &pb.NodeSelector{WhiteList: []string{itDnAddr}},
 		}},
-	{60, "FinishRepair",
+	{58, "FinishRepair",
 		[]string{"repair", "finish", "--name", "r0", "--rev", "7"},
 		&pb.FinishRepairRequest{
 			ClusterName: itCluster,
@@ -587,7 +567,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{61, "CancelRepair",
+	{59, "CancelRepair",
 		[]string{"repair", "cancel", "--name", "r0", "--rev", "7"},
 		&pb.CancelRepairRequest{
 			ClusterName: itCluster,
@@ -595,7 +575,7 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{62, "TryToAbortRepair",
+	{60, "TryToAbortRepair",
 		[]string{"repair", "abort", "--name", "r0", "--rev", "7"},
 		&pb.TryToAbortRepairRequest{
 			ClusterName: itCluster,
@@ -603,19 +583,19 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			RepName:     "r0",
 		}},
-	{63, "GetRepair",
+	{61, "GetRepair",
 		[]string{"repair", "get", "--name", "r0"},
 		&pb.GetRepairRequest{
 			ClusterName: itCluster, SpName: itSp, RepName: "r0"}},
-	{64, "ListRepairs",
+	{62, "ListRepairs",
 		[]string{"repair", "list"},
 		&pb.ListRepairsRequest{ClusterName: itCluster, SpName: itSp}},
 
 	// ---- retired-leg ----
-	{65, "ListRetiredLegs",
+	{63, "ListRetiredLegs",
 		[]string{"retired-leg", "list"},
 		&pb.ListRetiredLegsRequest{ClusterName: itCluster, SpName: itSp}},
-	{66, "DeleteRetiredLeg",
+	{64, "DeleteRetiredLeg",
 		[]string{"retired-leg", "delete", "--leg", "3", "--rev", "7"},
 		&pb.DeleteRetiredLegRequest{
 			ClusterName: itCluster,
@@ -625,7 +605,7 @@ var sweepRows = []sweepRow{
 		}},
 
 	// ---- group ----
-	{67, "ForceStartGroup",
+	{65, "ForceStartGroup",
 		[]string{"group", "force-start", "--grp", "1", "--leg", "2",
 			"--rev", "7"},
 		&pb.ForceStartGroupRequest{
@@ -635,7 +615,7 @@ var sweepRows = []sweepRow{
 			GrpId:       1,
 			LegId:       2,
 		}},
-	{68, "UpdateGroupOperatorInCharge",
+	{66, "UpdateGroupOperatorInCharge",
 		[]string{"group", "set-operator-in-charge", "--grp", "1",
 			"--operator-in-charge", "--rev", "7"},
 		// --operator-in-charge typed with no value sends true, as the leaf
@@ -650,7 +630,7 @@ var sweepRows = []sweepRow{
 		}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 68 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 66 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -661,12 +641,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 68 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 66 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 67 that remain.
+// be green over the 65 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 68 {
-		t.Errorf("sweepRows has %d rows, want 68", len(sweepRows))
+	if len(sweepRows) != 66 {
+		t.Errorf("sweepRows has %d rows, want 66", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -692,7 +672,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 67 of the 68, sp_name in 48. It reads the field off
+// fill: cluster_name in 65 of the 66, sp_name in 46. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -711,11 +691,11 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 67 {
-		t.Errorf("%d requests carry cluster_name, want 67", clusterFields)
+	if clusterFields != 65 {
+		t.Errorf("%d requests carry cluster_name, want 65", clusterFields)
 	}
-	if spFields != 48 {
-		t.Errorf("%d requests carry sp_name, want 48", spFields)
+	if spFields != 46 {
+		t.Errorf("%d requests carry sp_name, want 46", spFields)
 	}
 }
 
@@ -855,8 +835,8 @@ func TestTokenCarriersMatchCT3(t *testing.T) {
 			}
 		})
 	}
-	if carriers != 38 {
-		t.Errorf("%d requests carry a revision token, want 38", carriers)
+	if carriers != 37 {
+		t.Errorf("%d requests carry a revision token, want 37", carriers)
 	}
 }
 
@@ -908,8 +888,8 @@ func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
 			}
 		})
 	}
-	if tokenless != 30 {
-		t.Errorf("%d requests carry no revision token, want 30", tokenless)
+	if tokenless != 29 {
+		t.Errorf("%d requests carry no revision token, want 29", tokenless)
 	}
 }
 
@@ -1755,12 +1735,6 @@ func TestIdFlagsAcceptBase0(t *testing.T) {
 		t.Errorf("--id 0x11 sent %d, want 17", side.SideId)
 	}
 
-	leg := runArgv(t, "GetLegBitmap",
-		"td", "get-leg-bm", "--leg", "0xff").(*pb.GetLegBitmapRequest)
-	if leg.LegId != 255 {
-		t.Errorf("--leg 0xff sent %d, want 255", leg.LegId)
-	}
-
 	rep := runArgv(t, "CreateRepair", "repair", "create", "--grp", "0x1",
 		"--bad-legs", "0x2", "--retired-leg", "6").(*pb.CreateRepairRequest)
 	wantRequest(t, rep, &pb.CreateRepairRequest{
@@ -1837,17 +1811,18 @@ func TestBitmapHexToBytes(t *testing.T) {
 		t.Errorf("no --bm-hex sent %v, want an empty bitmap", empty.Bitmap)
 	}
 
-	upper := runArgv(t, "AppendMigrationBitmap",
-		"migr", "append-bm", "--name", "m0", "--bm-hex", "FF00A5").(*pb.AppendMigrationBitmapRequest)
+	upper := runArgv(t, "AppendCloneBitmap",
+		"clone", "append-bm", "--name", "cl0",
+		"--bm-hex", "FF00A5").(*pb.AppendCloneBitmapRequest)
 	if string(upper.Bitmap) != string([]byte{0xff, 0x00, 0xa5}) {
 		t.Errorf("--bm-hex FF00A5 sent %v, want [255 0 165]", upper.Bitmap)
 	}
 }
 
-// TestBitmapPositionPresence pins the two append-bm position flags: each is
-// sent only when typed, so a typed 0 is a real position and an untyped flag
+// TestBitmapPositionPresence pins the append-bm position flag: it is sent
+// only when typed, so a typed 0 is a real position and an untyped flag
 // leaves the field absent, which the gateway reads as "append wherever the
-// bitmap ends" (architecture.md, Clones and Migrations).
+// bitmap ends" (architecture.md, Clones).
 func TestBitmapPositionPresence(t *testing.T) {
 	cloneAbsent := runArgv(t, "AppendCloneBitmap",
 		"clone", "append-bm", "--name", "cl0",
@@ -1867,25 +1842,6 @@ func TestBitmapPositionPresence(t *testing.T) {
 		"--offset", "4096").(*pb.AppendCloneBitmapRequest)
 	if cloneSet.GetOffset() != 4096 {
 		t.Errorf("--offset 4096 sent %d", cloneSet.GetOffset())
-	}
-	migrAbsent := runArgv(t, "AppendMigrationBitmap",
-		"migr", "append-bm", "--name", "m0",
-		"--bm-hex", "a5").(*pb.AppendMigrationBitmapRequest)
-	if migrAbsent.BmIdx != nil {
-		t.Errorf("no --bm-idx sent bm_idx %d, want it absent",
-			migrAbsent.GetBmIdx())
-	}
-	migrZero := runArgv(t, "AppendMigrationBitmap",
-		"migr", "append-bm", "--name", "m0", "--bm-hex", "a5",
-		"--bm-idx", "0").(*pb.AppendMigrationBitmapRequest)
-	if migrZero.BmIdx == nil || migrZero.GetBmIdx() != 0 {
-		t.Errorf("--bm-idx 0 sent %v, want a present 0", migrZero.BmIdx)
-	}
-	migrSet := runArgv(t, "AppendMigrationBitmap",
-		"migr", "append-bm", "--name", "m0", "--bm-hex", "a5",
-		"--bm-idx", "3").(*pb.AppendMigrationBitmapRequest)
-	if migrSet.GetBmIdx() != 3 {
-		t.Errorf("--bm-idx 3 sent %d", migrSet.GetBmIdx())
 	}
 }
 

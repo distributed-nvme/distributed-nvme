@@ -769,7 +769,7 @@ log() { echo "$*" >&2; }
 # dnvctl call of the stage sends it; the gateway's records carry it, and so do
 # an agent's records (the grpc request and reply, and any os command) of the
 # calls the gateway makes to it for such a call: a node create's size probe,
-# an inspect, a get-bm or get-leg-bm, the hydration check of an unforced migr
+# an inspect, a get-bm, the hydration check of an unforced migr
 # finish or clone delete. An inspect and a hydration check answer from the
 # agent's latest observation of the object and run no command (dnagent.md
 # SH28). The worker never sees it: the converge a stage sets off runs under
@@ -6423,8 +6423,9 @@ DIAG_MAX_DN_LOGS=6
 #     the DRIVER, and the helper reads sysfs instead (disconnect_prefix,
 #     port_trsvcid).
 #   - `thin_dump` is run by the cn AGENT, not by this suite's HELPER: for the
-#     bitmap reads the ops and copy cases issue (`td get-bm`, `td get-leg-bm`)
-#     and for its activation sweep of a pool's thin ids (cnagent.md CN14,
+#     bitmap read the ops case issues (`td get-bm`), for the worker's read of
+#     the copy case's migrating leg (dnv-worker.md BM7) and for its
+#     activation sweep of a pool's thin ids (cnagent.md CN14,
 #     CN25), so a controller node needs it, and CN_TOOLS lists it, an
 #     exception to the standard below, so that a guest without it fails
 #     here, naming it, and not at the ops case. `nohup` (dn_up, cn_up) and
@@ -12243,8 +12244,8 @@ ops_levels() {
 # (hexBitmapResult (ctl/root.go)), so it renders as a BARE NUMBER while every
 # uint64 in this file is a quoted string.
 ops_snapshot() {
-	stage 06 "td create --ori (snapshot), td get-bm, td get-leg-bm, a second td"
-	local snapid hex bytes legid t0dev
+	stage 06 "td create --ori (snapshot), td get-bm, a second td"
+	local snapid hex bytes t0dev
 
 	ctl_ok td create --name "$SNAP0" --ori "$TD0" --size 0
 	snapid=$(jq_of "$CTL_OUT" '.td_id')
@@ -12288,34 +12289,6 @@ ops_snapshot() {
 	assert_eq "$((0x${hex:0:2} & 1))" 0 \
 		"block 0 of slice 0 of $TD0 is MAPPED (host0 wrote $BASELINE_MIB MiB at offset 0; on the wire 1 = unmapped)"
 
-	if [ "$REDUND" = raid1 ]; then
-		legid=$(sp_field "[.slice_list[0].data_grp_list[] | .leg_list[]] | .[0].leg_id")
-		case "$legid" in
-		'' | *[!0-9]* | 0) die "slice 0's first data leg has leg_id '$legid'" ;;
-		esac
-		ctl_ok td get-leg-bm --leg "$legid" --start 0 --cnt 0
-		assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-			"td get-leg-bm renders the same CT4 hex map"
-		assert_jq "$CTL_OUT" '(.bitmap_hex | type) == "string"' \
-			"td get-leg-bm's bitmap_hex"
-		# `>= 1`, not `>= 0`: byte_cnt is len() of a Go slice, so `>= 0` holds
-		# for every possible reply including an empty one and could never
-		# fail. It really is non-empty here — `--cnt 0` means "the whole leg"
-		# (tdGetLegBmCmd (ctl/td.go)) and bitmapWindow turns that into gp.dataBlocks
-		# (its call in GetLegBm (agent/cnagent/bitmapread.go)), which for a DATA
-		# group of INIT_EXT_CNT x $EXTENT_SIZE at a 1 MiB pool block is 64
-		# blocks, 8 bytes. The leg is a data leg: it came out of
-		# data_grp_list, and a META leg would answer all-zero instead
-		# (the isMeta branch of GetLegBm (agent/cnagent/bitmapread.go)).
-		bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
-		assert_ge "$bytes" 1 "leg $legid's bitmap byte_cnt"
-		hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
-		assert_eq "${#hex}" "$((bytes * 2))" \
-			"td get-leg-bm's bitmap_hex is two hex digits per byte_cnt byte"
-	else
-		log "  --redund none: a group has one leg and no md bitmap;" \
-			"skipping td get-leg-bm"
-	fi
 
 	# The second thin device is deliberately $TD0's size and not one
 	# TD_UNIT. Step 7 repoints a LIVE namespace at it, and nvmet fixes a
@@ -12787,17 +12760,19 @@ COPY_HYD_MARK=0
 COPY_SRC_START=0
 
 # The two migrations, and the "last observation" scratch of the predicates
-# below (migr_cutover_started, migr_dst_serving, leg_bm_read and
-# side_hydrated share MIGR_HYD_LAST, as no two of their waits overlap). Each
+# below (migr_cutover_started, migr_dst_serving and side_hydrated share
+# MIGR_HYD_LAST, as no two of their waits overlap). Each
 # of those is logged from inside its predicate when the value CHANGES and is
 # never interpolated into a wait_until label: a label is expanded once, at
 # the call, so it can only carry what was there before the first poll.
-# COPY_FLIP_RECS is copy_flip_records' answer, kept in the parent shell so a
-# predicate can hand it to its caller.
+# COPY_FLIP_RECS is copy_flip_records' answer and COPY_BM_RECS
+# copy_bm_records', each kept in the parent shell so a predicate can hand it
+# to its caller.
 MIGR0_ID=""
 MIGR1_ID=""
 MIGR_HYD_LAST=""
 COPY_FLIP_RECS=""
+COPY_BM_RECS=""
 # COPY_CUTOVER_REV is the revision the worker's cutover wrote, which
 # copy_check_cutover reads off its record, and COPY_GAP_READ is
 # copy_gap_reads' answer; copy_check_gap reads both.
@@ -13327,29 +13302,51 @@ copy_check_gap() { # <src v> <src k> <src side> <dst v> <dst k> <dst side> <leg 
 		"the trace id of the destination's optimized write vs its cutover request's: a pass other than the cutover's ended the gap of ${gap} s"
 }
 
-# leg_bm_read is the copy case's leg bitmap read as a poll. The primary's cn
-# agent serves GetLegBm under the cntlr's lock (cnagent.md, CN25), so the
-# read waits while a converge or a background read of the cntlr, which a
-# check round starts, holds that lock (dnagent.md SH29, SH30). The gateway
-# bounds its call to the agent by DefaultGatewayAgentTimeout
-# (common/constants.go), which a longer dnvctl --timeout does not extend, and
-# answers ABORTED when the call fails. If a read the gateway gave up on leaves
-# a metadata snapshot held, which only a reserve killed after its message ran
-# does, the next read's reserve finds it held, releases it and tries once more
-# (cnagent.md, CN25), so the next poll simply asks again. The reply of the
-# read that answers stays in CTL_OUT, and a failure is logged when its message
-# changes.
-leg_bm_read() { # <leg id>
-	local sig
-	if ctl_try td get-leg-bm --leg "$1" --start 0 --cnt 0; then
-		return 0
-	fi
-	sig=${CTL_ERR:-"dnvctl exit code $CTL_RC"}
-	if [ "$sig" != "$MIGR_HYD_LAST" ]; then
-		MIGR_HYD_LAST=$sig
-		log "  td get-leg-bm of leg $1 failed: $sig"
-	fi
-	return 1
+# copy_bm_records sets COPY_BM_RECS to the worker's `migration bitmap read`
+# records of migration <migr id>, one compact JSON object per line: the
+# destination side's child read the leg's bitmap from the primary's cn agent
+# and cut it into pieces (dnv-worker.md BM7, Log records). Fatal on a log it
+# cannot read, as copy_flip_records is.
+copy_bm_records() { # <migr id>
+	local lines
+	case "$1" in
+	'' | *[!0-9]*) die "copy_bm_records: the migration id '$1' is not decimal" ;;
+	esac
+	COPY_BM_RECS=""
+	lines=$(ssh_cp "grep -F '\"msg\":\"migration bitmap read\"' \
+		$WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot read the bitmap read records in $WORK/worker/worker.log on $CP_IP"
+	[ -n "$lines" ] || return 0
+	COPY_BM_RECS=$(printf '%s\n' "$lines" | "$JQ" -R -c \
+		"fromjson? // empty | select(.migr_id == $1)") ||
+		die "copy_bm_records: jq failed on the worker's bitmap read records"
+}
+
+# copy_bm_read_logged is true once the worker's log holds a bitmap read of
+# migration <migr id>.
+copy_bm_read_logged() { # <migr id>
+	copy_bm_records "$1"
+	[ -n "$COPY_BM_RECS" ]
+}
+
+# copy_pieces_taken is true once the dn agent at dn<v> instance <k> has
+# logged a PushMigrBitmap request of migration <migr id> for each of its
+# <cnt> pieces, bm_idx 0 to <cnt> - 1 (dnv-worker.md BM7; dnagent.md DN15).
+# The ids are slog's bare numbers, and a zero bm_idx is left out of the
+# logged message.
+copy_pieces_taken() { # <v> <k> <migr id> <cnt>
+	local lines n
+	lines=$(ssh_dn "$1" "grep -F '/DiskNodeAgent/PushMigrBitmap' \
+		$(dn_log "$2") || [ \$? -eq 1 ]") ||
+		die "cannot read $(dn_log "$2") on ${DN_IP[$1]}"
+	n=$(printf '%s\n' "$lines" | "$JQ" -R -s --argjson m "$3" '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "grpc server request"
+		     and .method == "/DiskNodeAgent/PushMigrBitmap"
+		     and .data.migr_id == $m)
+		 | (.data.bm_idx // 0)] | unique | length') ||
+		die "copy_pieces_taken: jq failed on $(dn_log "$2") of dn$1"
+	[ "$n" -ge "$4" ]
 }
 
 # copy_forced_drop is the copy case's forced drop (e2e_integtest.md, The
@@ -13369,7 +13366,7 @@ leg_bm_read() { # <leg id>
 # than a re-send may still be due, or it would put the member back under a
 # trace id that no re-send on a read's verdict carries and copy_check_drop
 # would fail a put-back that worked. Two can be due. (1) The SyncupCntlr of
-# the pool's latest revision: `migr append-bm` bumps it, and the worker holds
+# the pool's latest revision: the cutover bumps it, and the worker holds
 # the cntlr half of that fan-out until the sides report it, for up to one
 # cntlr_interval (dnv-worker.md, RW14). So the group must read clean at an
 # applied revision no older than the pool's revision of now (grp_md_clean
@@ -14587,9 +14584,10 @@ copy_xfer_delete() {
 # has more DN VMs than legs (parse_args refuses such a run), so the location
 # assertion below is always made.
 copy_migration() {
-	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled after its cutover"
+	stage 04 "migr create, the cutover, the worker's bitmap read, finish — then a second one, cancelled after its cutover"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
-	local hex v k srcv srck legnqn straddr strsvcid dsttraddr dsttrsvcid t0
+	local v k srcv srck legnqn straddr strsvcid dsttraddr dsttrsvcid t0
+	local pieces det
 
 	sp_refresh
 	sp_read_roles
@@ -14676,8 +14674,6 @@ copy_migration() {
 		"GetMigration's migr_id vs the CreateMigration reply"
 	assert_field "$CTL_OUT" '.migr.src_side_id' "$sideid" "the migration's source side"
 	assert_field "$CTL_OUT" '.migr.dst_side_id' "$dstside" "the migration's destination side"
-	assert_field "$CTL_OUT" '.migr.bm_cnt' 0 \
-		"a fresh migration holds no bitmap chunks (uint32, a bare number)"
 	assert_jq "$CTL_OUT" '(.migr.cutover_pending | type) == "boolean"' \
 		"GetMigration renders cutover_pending, a false included (CT4)"
 
@@ -14703,49 +14699,13 @@ copy_migration() {
 		migr_cutover_started "$MIGR0"
 	copy_check_cutover "$MIGR0_ID" "$sideid" "$dstside"
 
-	# THE LEG BITMAP IS READ ONLY ONCE THE PRIMARY REACHES THE LEG THROUGH THE
-	# DESTINATION, and that is a rule, not a stylistic ordering
-	# (architecture.md, Migration). An earlier read can go wrong in two ways
-	# (architecture.md, Known limits).
-	#
-	# It can miss writes. The bitmap tells the destination which blocks it
-	# need not copy, so a read taken while the source still takes writes marks
-	# a block the pool writes in between as never written; the destination
-	# does not copy it, and the pool later reads there whatever the
-	# destination's extent held before — maybe another pool's bytes, as
-	# zeroing covers only a data side's meta region and first data block.
-	#
-	# Or it can stall the primary's cntlr. To read the mappings, GetLegBm
-	# reserves a metadata snapshot of the slice's thin pool, which commits the
-	# pool, and the commit flushes the pool's data device, this leg included.
-	# In the migration gap (dnagent.md, DN12, DN13) the primary holds a live
-	# controller to the leg but no usable path, so nvme multipath requeues the
-	# flush, and GetLegBm waits for it holding the cntlr's lock until the gap
-	# ends; no read of the cntlr runs meanwhile, so the observation the
-	# primary's check rounds answer from ages with it, past the worker's
-	# bound in a long gap (architecture.md, Known limits; dnv-worker.md HL7). The cutover starts only once the
-	# primary holds a live path to the destination, so no connect of the
-	# primary (cnagent.md, CN10) waits behind that lock and the gap ends on the
-	# disk nodes; a read taken in it still holds the primary for the rest of
-	# the gap.
-	#
-	# So the read waits for the destination's dm-clone (migr_dst_serving), and
-	# then for the primary's own path to the destination to read optimized
-	# (cn_wait_ana). The dn agent puts the primary's namespace on the
+	# The destination serves through its dm-clone, and the primary's own path
+	# to it reads optimized: the dn agent puts the primary's namespace on the
 	# destination in the optimized group only while that dm-clone is live
-	# (anaGrpId (agent/dnagent/plan.go)), and from then on the source takes no
-	# write and every write reaches the destination through its dm-clone. The
-	# primary holds its controller to the destination from before the
-	# cutover, so the second wait spans no connect, only the destination's
-	# ANA write reaching the primary's kernel; it keeps WAIT_PROVISION, a
-	# bound and not a latency, as it ends the moment the path reads
-	# optimized. The read itself can still find the cntlr's lock held by a
-	# converge or a background read of the cntlr, so it is a poll under
-	# WAIT_PROVISION too
-	# (leg_bm_read says why). The push may
-	# come at any time: the dn agent applies a chunk to a live dm-clone too,
-	# marking its regions hydrated without copying them (dnagent.md, DN13,
-	# DN15).
+	# (anaGrpId (agent/dnagent/plan.go)). The primary holds its controller to
+	# the destination from before the cutover, so the second wait spans no
+	# connect, only the destination's ANA write reaching the primary's
+	# kernel; it keeps WAIT_PROVISION, a bound and not a latency.
 	legnqn=$(side_to_cn_nqn "$SP_ID" "$legid" "$PRIMARY_CN_ID")
 	case "$legnqn" in
 	*notanid-*) die "side_to_cn_nqn produced '$legnqn'" ;;
@@ -14775,32 +14735,36 @@ copy_migration() {
 	# budget (dnagent.md, DN13), never from a pass of its background retry
 	# or a later request (copy_check_gap).
 	copy_check_gap "$srcv" "$srck" "$sideid" "$v" "$k" "$dstside" "$legnqn"
-	MIGR_HYD_LAST=""
+	# THE WORKER READS THE LEG BITMAP ITSELF, once the cutover is clear, the
+	# destination reports its dm-clone at the desired revision and the
+	# primary reports a live path to it (dnv-worker.md BM7): one GetLegBm of
+	# the whole leg from the primary's cn agent, which first drains the
+	# slice's thin devices (cnagent.md CN27), cut into pieces the worker
+	# pushes to the destination's dn agent, which marks the never-written
+	# regions copied on its dm-clone (dnagent.md DN15). The record names the
+	# leg and the piece count; every piece must reach the destination. The
+	# destination's copied count after the pieces is logged and not
+	# asserted: the background copy runs from the dm-clone's creation, so
+	# it may have copied a region before its piece arrived.
 	wait_until "$WAIT_PROVISION" \
-		"the primary to answer td get-leg-bm for leg $legid" \
-		leg_bm_read "$legid"
-	assert_eq "$CTL_ERR" "" "stderr of: dnvctl td get-leg-bm must be empty"
-	assert_parses "$CTL_OUT" "dnvctl td get-leg-bm"
-	assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-		"td get-leg-bm renders the same CT4 hex map"
-	hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
-
-	# One skip-bitmap chunk, from the reading taken above. A migration's chunks
-	# are a sequence, not a rectangle: `migr append-bm` has no slice index and
-	# stores at bm_idx = bm_cnt (ctl/migr.go's file header). The bitmap is the
-	# LEG's projection, so it came from `td get-leg-bm` and not `td get-bm`.
-	if [ -n "$hex" ]; then
-		ctl_ok migr append-bm --name "$MIGR0" --bm-hex "$hex"
-		assert_field "$CTL_OUT" '.migr_id' "$MIGR0_ID" \
-			"AppendMigrationBitmapReply.migr_id"
-		ctl_ok migr get --name "$MIGR0"
-		assert_field "$CTL_OUT" '.migr.bm_cnt' 1 \
-			"the migration now holds one bitmap chunk"
-	else
-		# An empty --bm-hex sends an EMPTY bitmap on purpose and the gateway
-		# refuses it, so an empty leg bitmap is reported rather than sent.
-		log "  leg $legid's bitmap is empty; skipping migr append-bm" \
-			"(an empty --bm-hex is refused on purpose, ctl/migr.go)"
+		"the worker to read migration $MIGR0's bitmap" \
+		copy_bm_read_logged "$MIGR0_ID"
+	assert_eq "$(printf '%s\n' "$COPY_BM_RECS" | grep -c . || true)" 1 \
+		"the worker's 'migration bitmap read' records of migration $MIGR0"
+	assert_field "$COPY_BM_RECS" '.leg_id' "$legid" \
+		"the bitmap read's leg is the migrating one"
+	pieces=$(jq_of "$COPY_BM_RECS" '.piece_cnt')
+	case "$pieces" in
+	'' | *[!0-9]* | 0) die "the bitmap read's piece_cnt reads '$pieces': $COPY_BM_RECS" ;;
+	esac
+	wait_until "$WAIT_SHORT" \
+		"the destination's dn agent to take all $pieces piece(s) of migration $MIGR0" \
+		copy_pieces_taken "$v" "$k" "$MIGR0_ID" "$pieces"
+	if ctl_try sp inspect-side --id "$dstside"; then
+		det=$(jq_of "$CTL_OUT" \
+			'.side_info.migr_dst_info.dm_clone_info.details // ""')
+		log "  migration $MIGR0: $pieces piece(s) taken; the destination's" \
+			"dm-clone reads $(hyd_fraction "$det") regions copied"
 	fi
 
 	# THE FORCED DROP (raid1 only), after the gap check, so its syncup lies

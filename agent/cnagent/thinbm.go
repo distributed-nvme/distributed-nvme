@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -204,6 +205,94 @@ func (s *CnAgentServer) dumpThinMetadata(
 		}
 	}
 	return sb, nil
+}
+
+// drainThinDevices makes sure, before a leg's bitmap is read (CN27), that
+// no write sent to a thin device over the slice's pool still waits for its
+// block to be recorded. dm-thin records a new block only once the data write
+// has ended on every leg of the group, so in a RAID1 group a write can have
+// landed on one leg while its block is not recorded yet, and the write is
+// still in flight on its thin device until then. A thin device with no write
+// in flight has none: it is left alone, at the cost of one sysfs read. One
+// with writes in flight is suspended and resumed, as a suspend returns only
+// once every write the device sent down has ended; a write that starts after
+// the read of the count is no concern, as the old side takes no more writes
+// by the time the worker reads (dnv-worker.md BM7). The devices come from
+// one listing of the node's tables, each one whose thin target names the
+// pool's device number, so a device the plan does not hold is drained too,
+// and their numbers and flags from one listing of the node's devices; a
+// listing that may lack a device refuses the drain. A suspended device holds
+// no write below it and is left alone. One with a table waiting is refused:
+// Dm.Resume drops a waiting table, which a reload left for the converge that
+// finishes it. A suspend that failed may still have taken effect, so the
+// device is resumed either way, on a ctx the caller's cancellation does not
+// reach. Any failure refuses the read, and the worker reads again later.
+func (s *CnAgentServer) drainThinDevices(
+	ctx context.Context,
+	sp *slicePlan,
+) error {
+	devs, err := s.dm.ListInfo(ctx)
+	if err != nil {
+		return err
+	}
+	if devs.Partial {
+		return fmt.Errorf("the device listing may lack a device")
+	}
+	pool := devs.Devs[sp.poolFinalName]
+	if pool == nil || pool.DevNo == "" {
+		return fmt.Errorf("thin-pool %s: absent or without a number",
+			sp.poolFinalName)
+	}
+	tables, err := s.dm.ListTables(ctx)
+	if err != nil {
+		return err
+	}
+	if tables.Partial {
+		return fmt.Errorf("the table listing may lack a device")
+	}
+	var names []string
+	for name, targets := range tables.Tables {
+		for _, target := range targets {
+			if target.Type == "thin" && len(target.Args) > 0 &&
+				target.Args[0] == pool.DevNo {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		info := devs.Devs[name]
+		if info == nil {
+			return fmt.Errorf("thin device %s: in the table listing, not "+
+				"in the device listing", name)
+		}
+		if info.Suspended {
+			continue
+		}
+		if info.DevNo == "" {
+			return fmt.Errorf("thin device %s: no device number", name)
+		}
+		_, writes, err := s.dm.InFlight(ctx, info.DevNo)
+		if err != nil {
+			return err
+		}
+		if writes == 0 {
+			continue
+		}
+		if info.Waiting {
+			return fmt.Errorf("thin device %s has a table waiting", name)
+		}
+		suspendErr := s.dm.Suspend(ctx, name)
+		resumeErr := s.dm.Resume(context.WithoutCancel(ctx), name)
+		if suspendErr != nil {
+			return suspendErr
+		}
+		if resumeErr != nil {
+			return resumeErr
+		}
+	}
+	return nil
 }
 
 // thinDumpDir is the directory every dump is written into. It sits in /run,

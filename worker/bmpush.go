@@ -12,7 +12,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/model"
 )
 
-// The bitmap pushes of dnv-worker.md (BM1-BM6), the worker half of
+// The bitmap pushes of dnv-worker.md (BM1-BM7), the worker half of
 // architecture.md, Bitmap push protocol: the skip bitmaps of its Clones and
 // Migrations reach the data plane exclusively through the unary
 // PushMigrBitmap / PushCloneBitmap RPCs, never through a Syncup*.
@@ -30,6 +30,13 @@ import (
 // msgBitmapPushed is the record of one delivered chunk (BM3; dnv-worker.md, Log
 // records).
 const msgBitmapPushed = "bitmap pushed"
+
+// msgMigrBitmapRead and msgMigrBitmapReadFailed are the records of a
+// destination side child's read of its migration's bitmap (BM7).
+const (
+	msgMigrBitmapRead       = "migration bitmap read"
+	msgMigrBitmapReadFailed = "migration bitmap read failed"
+)
 
 // msgBitmapPushFailed is the non-normative companion of msgBitmapPushed: a
 // push that never produced an AgentReply has no code to report, so it is
@@ -51,15 +58,16 @@ var errPusherStopped = errors.New("bitmap pusher stopped")
 type bmPart struct {
 	// resId is the migr_id or the clone_id the chunk belongs to.
 	resId uint64
-	// name is the migration / clone name, i.e. the etcd key suffix the chunk
-	// value is read at (BM1: values are read one at a time, when pushed).
+	// name is the migration / clone name: for a clone the etcd key suffix
+	// the chunk value is read at (BM1: values are read one at a time, when
+	// pushed), for a migration the one whose pieces the child holds (BM7).
 	name string
 	// sliceIdx is the SOURCE slice whose bitmap this chunk belongs to for a
 	// clone, and always 0 for a migration, whose one bitmap names no slice.
 	sliceIdx uint32
-	// bmIdx is the chunk index: the append sequence for a migration, the
-	// chunk's fixed position WITHIN source slice sliceIdx's bitmap for a
-	// clone (architecture.md, Bitmap push protocol).
+	// bmIdx is the chunk index: the piece's place in the leg's bitmap for a
+	// migration, the chunk's fixed position WITHIN source slice sliceIdx's
+	// bitmap for a clone (architecture.md, Bitmap push protocol).
 	bmIdx  uint32
 	bitmap []byte
 }
@@ -119,8 +127,10 @@ type bmPusherParams struct {
 	// ids are the object's own ids, as the records of dnv-worker.md, Log
 	// records, carry them.
 	ids []slog.Attr
-	// fetch reads one chunk's VALUE out of etcd (BM1), at the pair that
-	// addresses it. It reports found = false when the key is gone.
+	// fetch reads one chunk's VALUE at the pair that addresses it: a clone
+	// chunk out of etcd (BM1), a migration piece out of the side child's own
+	// read (BM7). It reports found = false when the key is gone or the child
+	// holds no such piece.
 	fetch func(
 		ctx context.Context,
 		name string,
@@ -136,11 +146,14 @@ type bmPusherParams struct {
 	) (uint32, string, error)
 }
 
-// bmPusher is the push engine of one sp child (BM1-BM6). Its public surface is
-// two calls from the child's loop goroutine — missing (BM2/BM5) and submit
-// (BM3) — plus stop, which the coordinator makes after joining the child's
-// loop. A failure raises no flag and re-arms nothing: it is logged, and the
-// next Syncup* reply re-plans the diff from the agent's acknowledged set.
+// bmPusher is the push engine of one sp child (BM1-BM7). Its public surface is
+// missing (BM2/BM5), unacked (BM7) and submit (BM3), which the child's loop
+// goroutine calls and, for a migration, also the child's read goroutine and
+// the coordinator's offer (BM7); spawn, which runs that read; and stop,
+// which the coordinator makes after joining the child's loop. Each takes the
+// engine's lock. A failure raises no flag and re-arms nothing: it is logged,
+// and the next Syncup* reply re-plans the diff from the agent's acknowledged
+// set, as does a migration's next offer (BM7).
 type bmPusher struct {
 	deps     *deps
 	seed     string
@@ -181,7 +194,7 @@ type bmPusher struct {
 	stopped  bool
 }
 
-// newBmPusher builds one child's push engine (BM1-BM6). The engine holds a
+// newBmPusher builds one child's push engine (BM1-BM7). The engine holds a
 // trace id of its own (RW10), and every push mints one of its own under it.
 func newBmPusher(p bmPusherParams) *bmPusher {
 	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), p.seed))
@@ -204,7 +217,8 @@ func newBmPusher(p bmPusherParams) *bmPusher {
 
 // missing is the BM2 diff of one migration / clone, refined by BM5.
 //
-// chunks are the chunks etcd holds (SpState.MigrBmIdx / CloneBmIdx, MD3) and
+// chunks are the chunks there are — a clone's that etcd holds (CloneBmIdx,
+// MD3), a migration's pieces the child read (BM7) — and
 // applied is the agent's acknowledged set, in the same shape: the pairs of
 // BitmapInfo.chunk_id_list for a clone, BitmapInfo.bm_idx_list at slice 0 for
 // a migration. Both sides are compared by the WHOLE (src_slice_idx, bm_idx)
@@ -276,6 +290,43 @@ func (p *bmPusher) submit(plan *bmPlan) {
 	p.wg.Add(1)
 	p.mu.Unlock()
 	go p.run(plan)
+}
+
+// unacked keeps the chunks of resId this engine has not delivered with a
+// code-zero reply (its memo, BM5). An offer re-plans a migration's pieces
+// against the applied set of the last SyncupSide reply, which can predate a
+// piece delivered since; this leaves such a piece out (BM7).
+func (p *bmPusher) unacked(
+	resId uint64,
+	chunks []model.BmChunk,
+) []model.BmChunk {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]model.BmChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if _, ok := p.memo[memoKeyOf(resId, chunk)]; !ok {
+			out = append(out, chunk)
+		}
+	}
+	return out
+}
+
+// spawn runs f on a goroutine of the engine's own, under the engine's ctx,
+// which stop cancels and then joins, as it joins a runner. It reports false,
+// and runs nothing, once the engine is stopping.
+func (p *bmPusher) spawn(f func(ctx context.Context)) bool {
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
+	p.wg.Add(1)
+	p.mu.Unlock()
+	go func() {
+		defer p.wg.Done()
+		f(p.ctx)
+	}()
+	return true
 }
 
 // stop ends the engine and joins its runners. An in-flight push is allowed to
@@ -365,10 +416,11 @@ func (p *bmPusher) pushOne(
 	ctx := newTraceCtx(p.ctx, p.seed)
 	bitmap, found, err := p.fetch(ctx, plan.name, chunk.SliceIdx, chunk.Idx)
 	if err != nil || !found {
-		// The chunk's address came from the coordinator's snapshot, so a
-		// value that cannot be read now is either an etcd failure or a chunk
-		// deleted with its object. Both end this plan; the next Syncup*
-		// reply re-plans from a fresh snapshot.
+		// The chunk's address came from the coordinator's snapshot or the
+		// child's read, so a value that cannot be read now is an etcd
+		// failure, a chunk deleted with its object, or a piece the child no
+		// longer holds. Each ends this plan; the next Syncup* reply re-plans
+		// it.
 		attrs := p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx)
 		if err != nil {
 			attrs = append(attrs, slog.String("error", err.Error()))

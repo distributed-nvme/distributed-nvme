@@ -881,10 +881,8 @@ func TestFinishMigrationTxnBudget(t *testing.T) {
 		fixedWrites: 10,
 		terms: []txnTerm{
 			{"slice", 1, common.MaxSliceCntPerSp, 32},
-			// One delete per bitmap chunk.
-			{"bitmap chunk", 1, common.MaxMigrBmCnt, 4},
 		},
-		maxCompares: 53,
+		maxCompares: 49,
 		overDefault: false,
 	}.check(t)
 }

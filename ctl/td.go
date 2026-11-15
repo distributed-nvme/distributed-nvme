@@ -1,19 +1,16 @@
 // This file is the `td` group: the thin devices of
-// architecture.md, Thin devices, and the two bitmap reads of
-// architecture.md, Bitmap reads (dnvctl.md, `td` — `ctl/td.go`, five RPCs).
+// architecture.md, Thin devices, and the bitmap read of architecture.md,
+// Bitmap reads (dnvctl.md, `td` — `ctl/td.go`, four RPCs).
 //
 // Every request here is SP-scoped, so cluster_name and sp_name come from the
 // global flags --cluster and --sp (dnvctl.md, Global flags, env, config) and
 // never from a local flag; what is left includes the flags that name the
 // device and window the reads. The two mutators carry `sp_rev` from the
-// global --rev, presence-based per CT3; the three reads carry no token at all.
+// global --rev, presence-based per CT3; the two reads carry no token at all.
 //
-// `td get-leg-bm` sits in this group because dnvctl.md, Conventions, puts it
-// here: a leg is not a thin device, but the command is the same measurement
-// through the same CN path as `td get-bm`, and the two are the whole CLI's
-// only deviation from CT4's "print the reply message" — they print
-// hexBitmapResult instead, because protojson renders a bytes field as base64
-// (CT4).
+// `td get-bm` is the whole CLI's only deviation from CT4's "print the reply
+// message" — it prints hexBitmapResult instead, because protojson renders a
+// bytes field as base64 (CT4).
 package ctl
 
 import (
@@ -33,7 +30,6 @@ func registerTd(root *cobra.Command) {
 		tdDeleteCmd(),
 		tdListCmd(),
 		tdGetBmCmd(),
-		tdGetLegBmCmd(),
 	))
 }
 
@@ -172,43 +168,5 @@ func tdGetBmCmd() *cobra.Command {
 	flags.Uint32("slice-idx", 0, "slice_idx within the thin device")
 	flags.Uint64("start", 0, "start_block of the window (0 = from 0)")
 	flags.Uint64("cnt", 0, "block_cnt of the window (0 = the whole slice)")
-	return cmd
-}
-
-// tdGetLegBmCmd is GetLegBitmap: the same measurement for one leg of a raid1
-// group. A leg has no name, so it is addressed by id — a base-0 hexOf value
-// like every other id flag (dnvctl.md, Conventions) — and the request
-// carries no slice_idx, because a leg is not sliced. Read-only, same window
-// flags, same CT4 hex map as `td get-bm`.
-func tdGetLegBmCmd() *cobra.Command {
-	cmd := leaf(
-		"get-leg-bm", "read a raid1 leg's bitmap (GetLegBitmap)",
-		func() (job, error) {
-			legId, err := hexOf("leg")
-			if err != nil {
-				return nil, err
-			}
-			req := &pb.GetLegBitmapRequest{
-				ClusterName: clusterOf(),
-				SpName:      spOf(),
-				LegId:       legId,
-				StartBlock:  u64Of("start"),
-				BlockCnt:    u64Of("cnt"),
-			}
-			return func(
-				ctx context.Context,
-				client pb.GatewayClient,
-			) (any, error) {
-				reply, err := client.GetLegBitmap(ctx, req)
-				if err != nil {
-					return nil, err
-				}
-				return hexBitmapResult(reply.GetBitmap()), nil
-			}, nil
-		})
-	flags := cmd.Flags()
-	flags.String("leg", "", "leg_id (base 0)")
-	flags.Uint64("start", 0, "start_block of the window (0 = from 0)")
-	flags.Uint64("cnt", 0, "block_cnt of the window (0 = the whole leg)")
 	return cmd
 }

@@ -499,10 +499,6 @@ func TestMessageForKey(t *testing.T) {
 		},
 		{"dnv transfer ebada5168620c5fe 0000000000000001 x0", &pb.Transfer{}},
 		{"dnv migration ebada5168620c5fe 0000000000000001 m0", &pb.Migration{}},
-		{
-			"dnv migration_bitmap ebada5168620c5fe 0000000000000001 m0 01",
-			&pb.MigrBitmap{},
-		},
 		{"dnv repair ebada5168620c5fe 0000000000000001 r0", &pb.Repair{}},
 		{
 			"dnv retired_leg ebada5168620c5fe 0000000000000001 " +

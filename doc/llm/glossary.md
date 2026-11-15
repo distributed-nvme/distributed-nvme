@@ -40,7 +40,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **bins, bin ladder** — The free-extent bands disk-node capacity keys are indexed under, defined by the cluster's shift ladder (`DnBinConf`). A scan walks the bins from the smallest that can hold the request, largest free first.
 
-**bitmap chunk** — One stored piece of a skip bitmap. A migration chunk is an immutable append in sequence (`MigrBitmap`, `bm_idx`); a clone chunk is addressed by the pair of source slice and chunk index, self-positioned at a fixed quantum, and may grow in place (`CloneBitmap`, `src_slice_idx`, `bm_idx`).
+**bitmap chunk** — One piece of a skip bitmap. A migration's pieces are cut by the worker from its own read of the leg's bitmap, held in its memory and joined in `bm_idx` order (see `dnv-worker.md` BM7); a clone chunk is stored in etcd, addressed by the pair of source slice and chunk index, self-positioned at a fixed quantum, and may grow in place (`CloneBitmap`, `src_slice_idx`, `bm_idx`).
 
 **bitmap push** — The unary delivery of one chunk to the agent that runs the dm-clone: `PushMigrBitmap` to the destination side's disk node, `PushCloneBitmap` to the primary cntlr's controller node. A push carries no revision and passes no revision gate, refused only for a migration or clone the agent does not know, or for a chunk address out of range — a migration chunk index at or past `MaxMigrBmCnt` (see `dnagent.md` DN15), a clone chunk outside the clone's geometry or with an index at or past `MaxCloneBmCnt` (see `cnagent.md` CN22); the worker keeps one in flight per migration or clone, in ascending address order.
 

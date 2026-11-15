@@ -36,7 +36,6 @@ import (
 // greppable back to the RPC the operator called.
 const (
 	opGetThinDeviceBitmap = "GetThinDeviceBitmap"
-	opGetLegBitmap        = "GetLegBitmap"
 )
 
 // bitmapTarget is everything the phase-2 agent call needs, carried out of the
@@ -198,101 +197,4 @@ func (s *Server) GetThinDeviceBitmap(
 			opGetThinDeviceBitmap, target.AddrPort, err)
 	}
 	return &pb.GetThinDeviceBitmapReply{Bitmap: bitmap}, nil
-}
-
-// GetLegBitmap is the GetLegBitmap of architecture.md, Bitmap reads: the
-// bitmap of one leg's data region, which a migration pages through and feeds
-// to AppendMigrationBitmap.
-//
-// It is GetThinDeviceBitmap's shape with the object named differently. The
-// leg is located by the bounded slice scan of findLeg — every leg of every
-// meta and data group of every slice — because a leg_id is unique inside the
-// SP but carries no hint of which slice holds it (architecture.md, Cntlrs:
-// InspectSide); an unknown id is NOT_FOUND. No
-// slice_idx is taken: the agent derives the owning slice from the leg itself,
-// then walks that slice's pool metadata down through the group geometry to
-// this leg's data region.
-//
-// A leg of a clone's clone meta group is refused FAILED_PRECONDITION
-// (architecture.md, Bitmap reads): no migration moves it, so no caller has a
-// bitmap of it to feed, and it belongs to no slice for the agent to derive.
-// The clones are read only when no slice holds the leg, and the leg is judged
-// before the primary, as a slice's is.
-//
-// The reply is the agent's bytes VERBATIM (GW14) — same convention as
-// GetThinDeviceBitmap, bit k = 1 iff no pool block maps there, LSB-first with
-// zero pad bits, produced by the agent and never touched here.
-func (s *Server) GetLegBitmap(
-	ctx context.Context,
-	req *pb.GetLegBitmapRequest,
-) (*pb.GetLegBitmapReply, error) {
-	if err := validateOptionalName(
-		"cluster_name", req.GetClusterName(),
-	); err != nil {
-		return nil, err
-	}
-	if err := validateName("sp_name", req.GetSpName()); err != nil {
-		return nil, err
-	}
-	var target bitmapTarget
-	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
-		target = bitmapTarget{}
-		sc, err := openSpRead(stm, req.GetClusterName(), req.GetSpName())
-		if err != nil {
-			return err
-		}
-		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
-		if err != nil {
-			return err
-		}
-		if _, ok := findLeg(sc.Conf, slices, req.GetLegId()); !ok {
-			clones, err := loadClones(stm, sc.Cid, sc.Conf)
-			if err != nil {
-				return err
-			}
-			cloneLoc, ok := findCloneLeg(sc.Conf, clones, req.GetLegId())
-			if !ok {
-				return errNotFound("leg %d not found", req.GetLegId())
-			}
-			return errPrecondition(
-				"leg %d belongs to the clone meta group of clone %q, which "+
-					"no migration moves, so its bitmap is never read",
-				req.GetLegId(), cloneLoc.CloneName)
-		}
-		found, err := openBitmapTarget(stm, sc, req.GetSpName())
-		if err != nil {
-			return err
-		}
-		target = found
-		return nil
-	})
-	if err != nil {
-		return nil, mapStmErr(err)
-	}
-	var bitmap []byte
-	err = withCnAgent(ctx, target.AddrPort,
-		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
-			reply, err := client.GetLegBm(
-				ctx,
-				&pb.GetLegBmRequest{
-					ClusterId:  target.Cid,
-					CnId:       target.CnId,
-					SpId:       target.SpId,
-					CntlrId:    target.CntlrId,
-					LegId:      req.GetLegId(),
-					StartBlock: req.GetStartBlock(),
-					BlockCnt:   req.GetBlockCnt(),
-				},
-			)
-			if err != nil {
-				return err
-			}
-			bitmap = reply.GetBitmap()
-			return nil
-		})
-	if err != nil {
-		return nil, errAborted("%s: controller node %q: %v",
-			opGetLegBitmap, target.AddrPort, err)
-	}
-	return &pb.GetLegBitmapReply{Bitmap: bitmap}, nil
 }

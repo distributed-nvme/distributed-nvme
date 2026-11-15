@@ -1066,12 +1066,6 @@ func (g *fakeGateway) GetMigration(
 	return serve[*pb.GetMigrationReply](g, ctx, "GetMigration", req)
 }
 
-func (g *fakeGateway) AppendMigrationBitmap(
-	ctx context.Context, req *pb.AppendMigrationBitmapRequest,
-) (*pb.AppendMigrationBitmapReply, error) {
-	return serve[*pb.AppendMigrationBitmapReply](g, ctx, "AppendMigrationBitmap", req)
-}
-
 func (g *fakeGateway) CreateRepair(
 	ctx context.Context, req *pb.CreateRepairRequest,
 ) (*pb.CreateRepairReply, error) {
@@ -1136,12 +1130,6 @@ func (g *fakeGateway) GetThinDeviceBitmap(
 	ctx context.Context, req *pb.GetThinDeviceBitmapRequest,
 ) (*pb.GetThinDeviceBitmapReply, error) {
 	return serve[*pb.GetThinDeviceBitmapReply](g, ctx, "GetThinDeviceBitmap", req)
-}
-
-func (g *fakeGateway) GetLegBitmap(
-	ctx context.Context, req *pb.GetLegBitmapRequest,
-) (*pb.GetLegBitmapReply, error) {
-	return serve[*pb.GetLegBitmapReply](g, ctx, "GetLegBitmap", req)
 }
 
 // ---------------------------------------------------------------------------

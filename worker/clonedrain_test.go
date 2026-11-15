@@ -79,8 +79,8 @@ func TestCloneDrainDerivation(t *testing.T) {
 		// An slog attribute name is a string literal, so the compiler guards
 		// nothing here: deleting `Clone.bm_cnt` does not stop anyone adding
 		// `slog.Int("bm_cnt", …)` beside chunk_cnt. The record's entry in
-		// dnv-worker.md, Log records, lists chunk_cnt only, and the one
-		// `bm_cnt` left in dnv is Migration's.
+		// dnv-worker.md, Log records, lists chunk_cnt only, and no record
+		// of dnv carries a `bm_cnt` any more.
 		if _, ok := recs[0]["bm_cnt"]; ok {
 			t.Errorf("the clone drain record must carry no bm_cnt attribute")
 		}

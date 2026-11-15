@@ -996,7 +996,6 @@ func PutMigr(
 			MigrId:         out.Id,
 			SrcSideId:      spec.SrcSide,
 			DstSideId:      out.DstSide,
-			BmCnt:          0,
 			MetaUnits:      out.MetaUnits,
 			CutoverPending: spec.CutoverPending,
 		})
@@ -1108,23 +1107,6 @@ func (spec CloneBitmapSpec) Check() error {
 	return checkBmIdx("bm_idx", spec.BmIdx)
 }
 
-// MigrBitmapSpec is one chunk of a migration's bitmap, which keeps its flat
-// append sequence: the new index IS the count.
-type MigrBitmapSpec struct {
-	Migr  string
-	BmIdx uint32
-	Data  []byte
-}
-
-// Check refuses a chunk no key could be written for: a migration key carries
-// the bm_idx field alone (model.ParseBmIdx), as two hex digits.
-func (spec MigrBitmapSpec) Check() error {
-	if spec.Migr == "" {
-		return fmt.Errorf("the migration name is empty")
-	}
-	return checkBmIdx("bm_idx", spec.BmIdx)
-}
-
 // checkBmIdx refuses an index that does not fit a common.BmIdxFmt key field.
 func checkBmIdx(what string, idx uint32) error {
 	if idx >= 1<<8 {
@@ -1134,12 +1116,10 @@ func checkBmIdx(what string, idx uint32) error {
 	return nil
 }
 
-// Bitmap is one planted chunk: whether the key was new, the parent
-// migration's raised bm_cnt (a Clone record carries no chunk count, so it is
-// 0 for a clone chunk) and the pool revision.
+// Bitmap is one planted clone chunk: whether the key was new, and the pool
+// revision.
 type Bitmap struct {
 	Created bool
-	BmCnt   uint32
 	SpRev   uint64
 }
 
@@ -1178,49 +1158,6 @@ func PutCloneBitmap(
 		)
 		out.Created = !s.Get(key, &pb.CloneBitmap{})
 		s.Put(key, &pb.CloneBitmap{Bitmap: spec.Data})
-		out.SpRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
-	if err != nil {
-		return Bitmap{}, err
-	}
-	return out, nil
-}
-
-// PutMigrBitmap writes one chunk of a migration's bitmap, raises `bm_cnt` on
-// the parent Migration when the chunk is new, and bumps SpRev once.
-// Rewriting an existing chunk raises no count but still bumps SpRev.
-func PutMigrBitmap(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cl Cluster,
-	target SpRef,
-	spec MigrBitmapSpec,
-) (Bitmap, error) {
-	if err := spec.Check(); err != nil {
-		return Bitmap{}, err
-	}
-	cid := cl.Id
-	var out Bitmap
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		out = Bitmap{}
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		parentKey := model.MigrationKey(cid, target.Id, spec.Migr)
-		parent := &pb.Migration{}
-		if !s.Get(parentKey, parent) {
-			return fmt.Errorf("%q not found", parentKey)
-		}
-		key := model.MigrBitmapKey(cid, target.Id, spec.Migr, spec.BmIdx)
-		out.Created = !s.Get(key, &pb.MigrBitmap{})
-		s.Put(key, &pb.MigrBitmap{Bitmap: spec.Data})
-		if out.Created {
-			parent.BmCnt++
-			s.Put(parentKey, parent)
-		}
-		out.BmCnt = parent.GetBmCnt()
 		out.SpRev, err = bumpSpRev(s, cid, conf)
 		return err
 	})

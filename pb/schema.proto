@@ -766,7 +766,10 @@ message Migration {
     uint64 src_side_id = 2;
     uint64 dst_side_id = 3;
     DmCloneConf dm_clone_conf = 4;
-    uint32 bm_cnt = 5;
+    reserved 5;
+    reserved "bm_cnt";  // retired with its number, never reused: the worker
+                        // reads a migration's bitmap itself and keeps it in
+                        // memory (dnv-worker.md BM7).
     // The metadata units this migration holds on its destination disk node
     // (architecture.md, Metadata units): common.CloneMetaUnits of the moved
     // side's bytes (its group's ext_cnt times the cluster's extent_size) and
@@ -784,11 +787,6 @@ message Migration {
     // cutover that has started (architecture.md, Upgrade in lockstep).
     // Appended, never renumbered.
     bool cutover_pending = 7;
-}
-
-// {dnv_prefix} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx}
-message MigrBitmap {
-    bytes bitmap = 1;
 }
 
 // The stage of a repair. CreateRepair writes CREATED; the sp worker moves a
@@ -1567,24 +1565,6 @@ message GetMigrationReply {
     Migration migr = 1;
 }
 
-message AppendMigrationBitmapRequest {
-    string cluster_name = 1;
-    string sp_name = 2;
-    SpRev sp_rev = 3;
-    string migr_name = 4;
-    bytes bitmap = 5;
-    // The chunk's index, sent by a caller that may send a chunk again:
-    // present, the chunk is stored only at the index bm_cnt, and a chunk
-    // whose bytes already stand at the index it names changes nothing;
-    // absent, the chunk is stored at bm_cnt whatever was sent before
-    // (architecture.md, Migrations).
-    optional uint32 bm_idx = 6;
-}
-
-message AppendMigrationBitmapReply {
-    uint64 migr_id = 1;
-}
-
 message CreateRepairRequest {
     string cluster_name = 1;
     string sp_name = 2;
@@ -1727,18 +1707,6 @@ message GetThinDeviceBitmapReply {
     bytes bitmap = 1;
 }
 
-message GetLegBitmapRequest {
-    string cluster_name = 1;
-    string sp_name = 2;
-    uint64 leg_id = 3;
-    uint64 start_block = 4;
-    uint64 block_cnt = 5;
-}
-
-message GetLegBitmapReply {
-    bytes bitmap = 1;
-}
-
 service Gateway {
     rpc CreateCluster(CreateClusterRequest) returns (CreateClusterReply) {}
     rpc DeleteCluster(DeleteClusterRequest) returns (DeleteClusterReply) {}
@@ -1807,7 +1775,6 @@ service Gateway {
     rpc FinishMigration(FinishMigrationRequest) returns (FinishMigrationReply) {}
     rpc CancelMigration(CancelMigrationRequest) returns (CancelMigrationReply) {}
     rpc GetMigration(GetMigrationRequest) returns (GetMigrationReply) {}
-    rpc AppendMigrationBitmap(AppendMigrationBitmapRequest) returns (AppendMigrationBitmapReply) {}
 
     rpc CreateRepair(CreateRepairRequest) returns (CreateRepairReply) {}
     rpc FinishRepair(FinishRepairRequest) returns (FinishRepairReply) {}
@@ -1821,7 +1788,6 @@ service Gateway {
     rpc UpdateGroupOperatorInCharge(UpdateGroupOperatorInChargeRequest) returns (UpdateGroupOperatorInChargeReply) {}
 
     rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns (GetThinDeviceBitmapReply) {}
-    rpc GetLegBitmap(GetLegBitmapRequest) returns (GetLegBitmapReply) {}
 }
 
 message GetDnSizeRequest {
@@ -1882,7 +1848,8 @@ message SyncupSideRequest {
         uint64 block_size = 5;
         uint64 meta_blocks = 6;
         DmCloneConf dm_clone_conf = 7;
-        uint32 bm_cnt = 8;  // for the record; read by no agent (dnagent.md DN15 bounds a chunk's index by MaxMigrBmCnt)
+        reserved 8;
+        reserved "bm_cnt";  // retired with its number, never reused
         // The worker copies Migration.cutover_pending here (dnv-worker.md
         // RW15). While it is true a provisioned dst side builds its
         // metadata wrapper and its per-CN stacks, connects to no source and

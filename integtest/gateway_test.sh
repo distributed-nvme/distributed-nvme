@@ -2767,8 +2767,6 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.migrs.m0.src_side_id')" "$srcSide" \
 		"migration src_side_id"
 	assert_ne "$dstSide" "$srcSide" "migration dst_side_id differs from the source"
-	assert_field "$(smoke_jq "$(sp_json sp0)" '.migrs.m0 | @json')" '.bm_cnt' \
-		"0" "migration bm_cnt at creation"
 	# The create writes the record with its cutover pending, which only the
 	# worker's cutover clears (architecture.md, Migrations), and the get
 	# returns the record as stored.
@@ -2816,42 +2814,10 @@ EOF
 	assert_field "$(smoke_jq "$(sp_json sp0)" '.migrs.m0 | @json')" \
 		'.meta_units' "$migrUnits" "migration meta_units"
 	smoke_check_dn_units "$dstAddr" "$migrUnits"
-	# A migration's chunks are an immutable append sequence numbered by
-	# bm_cnt, unlike a clone's slice-addressed ones (architecture.md,
-	# Migrations).
-	gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-hex aa
-	refresh_rev sp0
-	gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-hex bb
-	refresh_rev sp0
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '.migrs.m0.bm_cnt')" "2" \
-		"migration bm_cnt after two appends"
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '.migr_bm_idx.m0 | @json')" '[0,1]' \
-		"the migration's stored chunk indexes"
-	assert_eq "$(key_count migration_bitmap)" "2" "migration_bitmap keys"
-	# A chunk that names its index is placed (architecture.md, Migrations):
-	# at bm_cnt it appends, sent again after a lost answer it writes nothing,
-	# and at any other index it is refused, writing nothing.
-	gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-idx 2 \
-		--bm-hex cc
-	refresh_rev sp0
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '.migrs.m0.bm_cnt')" "3" \
-		"migration bm_cnt after a placed append"
-	assert_no_write "append-migr-bm of a chunk already stored" \
-		gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-idx 1 \
-		--bm-hex bb
-	assert_no_write "append-migr-bm at an index past bm_cnt" \
-		gwx FAILED_PRECONDITION append-migr-bm --sp sp0 --rev "$SP_REV" \
-		--name m0 --bm-idx 4 --bm-hex dd
-	assert_no_write "append-migr-bm of other bytes at a stored index" \
-		gwx FAILED_PRECONDITION append-migr-bm --sp sp0 --rev "$SP_REV" \
-		--name m0 --bm-idx 0 --bm-hex dd
-	assert_eq "$(key_count migration_bitmap)" "3" \
-		"migration_bitmap keys after the placed chunk"
 	out=$(gw get-migr --sp sp0 --name m0)
 	assert_field "$out" '.migr.migr_id' "$migrId" "get-migr migr_id"
 	assert_field "$out" '.migr.src_side_id' "$srcSide" "get-migr src_side_id"
 	assert_field "$out" '.migr.dst_side_id' "$dstSide" "get-migr dst_side_id"
-	assert_field "$out" '.migr.bm_cnt' "3" "get-migr bm_cnt"
 	assert_field "$out" '.migr.cutover_pending' "true" "get-migr cutover_pending"
 	# CancelMigration throws the unfinished copy away: the destination's
 	# extents come back and the source was never touched. It needs no
@@ -2866,8 +2832,6 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.migrs | keys | length')" "0" \
 		"the migration record is gone"
 	assert_eq "$(key_count migration)" "0" "migration keys after the cancel"
-	assert_eq "$(key_count migration_bitmap)" "0" \
-		"migration_bitmap keys after the cancel"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.migr_name_list | length')" \
 		"0" "sp0 migr_name_list after the cancel"
 	for i in 0 1 2 3; do
@@ -2920,8 +2884,6 @@ EOF
 	assert_eq "$(smoke_leg_side_ids sp0 "$srcLeg")" "$dstSide" \
 		"the surviving side is the DESTINATION"
 	assert_eq "$(key_count migration)" "0" "migration keys after the finish"
-	assert_eq "$(key_count migration_bitmap)" "0" \
-		"migration_bitmap keys after the finish"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.migr_name_list | length')" \
 		"0" "sp0 migr_name_list after the finish"
 	for i in 0 1 2 3; do
@@ -3231,7 +3193,7 @@ EOF
 		"Σ DN free after the repairs (the new leg took the bad leg's extents)"
 
 	# -------------------------------------------------------------------
-	stage 17 "get-td-bm / get-leg-bm, the two inspects, a forced start"
+	stage 17 "get-td-bm, the two inspects, a forced start"
 	# -------------------------------------------------------------------
 	# GW14: the agent's bytes travel verbatim, and this fake replies an
 	# empty bitmap, so the pass-through is an empty hex string of length 0.
@@ -3242,9 +3204,6 @@ EOF
 	metaLeg=$(sp_leg_id sp0 meta 0 0)
 	metaSide=$(sp_side_id sp0 meta 0 0)
 	metaAddr=$(sp_side_addr sp0 meta 0 0)
-	out=$(gw get-leg-bm --sp sp0 --leg "$metaLeg")
-	assert_field "$out" '.byte_cnt' "0" "get-leg-bm byte_cnt"
-	assert_field "$out" '.bitmap_hex' "" "get-leg-bm bitmap_hex"
 	# The two inspects need a fake that already knows the object, and no
 	# worker in this suite ever syncs one up — so the state is hand-written,
 	# which is the fake's documented operator-edit path (integtest/fakeagent).
@@ -6358,7 +6317,7 @@ case_restart() {
 	allowed=$(printf '%s\n' cluster_conf dn_global cn_global sp_global \
 		dn_rev cn_rev sp_rev dn_conf cn_conf dn_capacity cn_capacity \
 		sp_conf sp_id_to_name cntlr slice thin_device subsystem cdc \
-		clone clone_bitmap transfer migration migration_bitmap | sort)
+		clone clone_bitmap transfer migration | sort)
 	unexpected=$(printf '%s\n' "$observed" |
 		grep -Fxv -f <(printf '%s\n' "$allowed") || true)
 	[ -z "$unexpected" ] || die "key kinds the DATA does not own:" \

@@ -303,13 +303,20 @@ const (
 	// bitmap. 1 MiB keeps a grown chunk value plus the rev-bump put inside
 	// etcd's default ~1.5 MiB request cap, so a clone append asks nothing of
 	// EtcdMaxRequestBytes, and every PushCloneBitmap message far inside
-	// GrpcMaxMsgSize. It is a clone positioning quantum only — migration
-	// appends have no byte cap.
+	// GrpcMaxMsgSize. It is a clone positioning quantum only.
 	CloneBmChunkBytes = 1 << 20
 
 	DefaultMigrThreshold = 1
 	DefaultMigrBatchSize = 1
-	MaxMigrBmCnt         = 4
+	// MigrBmPieceBytes is the size of every piece of a migration's bitmap
+	// but the last: the worker reads a leg's bitmap whole and cuts it into
+	// such pieces (dnv-worker.md BM7), each a multiple of 8 blocks, so the
+	// pieces join at the byte.
+	MigrBmPieceBytes = 4 << 20
+	// MaxMigrBmCnt bounds a migration piece's bm_idx on the destination's
+	// DN (dnagent.md DN15): MaxMigrBmCnt pieces cover GrpcMaxMsgSize, more
+	// than the largest leg bitmap one GetLegBm reply carries.
+	MaxMigrBmCnt = 16
 
 	DefaultPrimaryUnhealthy    = 4
 	DefaultCntlrUnhealthy      = 600
@@ -333,9 +340,9 @@ const (
 	// default is below the widest cntlr syncup, cntlr report and pool get
 	// reply (architecture.md, Known limits); model's
 	// TestWidestMessagesFitGrpcMaxMsgSize holds each under it. It is at least
-	// EtcdMaxRequestBytes, so a value etcd took, a migration bitmap chunk
-	// among them, also fits a message that carries it alone, such as the push
-	// that hands that chunk to its agent.
+	// EtcdMaxRequestBytes, so a value etcd took, a clone bitmap chunk among
+	// them, also fits a message that carries it alone, such as the push that
+	// hands that chunk to its agent.
 	GrpcMaxMsgSize = 64 * 1024 * 1024
 
 	// gRPC keepalive of the worker's connections to the agents (grpc.md,

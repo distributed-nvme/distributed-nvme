@@ -137,3 +137,49 @@ func TestAReloadedDmCloneGetsItsPiecesAgain(t *testing.T) {
 		"discard --offset 3145728 --length 1048576 "+nf.DmPath(cloneName),
 	)
 }
+
+// TestARepeatedPieceIsNotAppliedAgain is DN15's repeat: a piece the applied
+// set holds byte for byte is answered OK with no save and no apply, so a
+// worker that pushes every piece again, not knowing the applied set, does
+// not pause the volume for nothing; a piece at the same index with other
+// bytes is saved and applied.
+func TestARepeatedPieceIsNotAppliedAgain(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	cloneName := nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId)
+	push := func(bitmap []byte) {
+		t.Helper()
+		reply, err := srv.PushMigrBitmap(ctx, pushReq(0, testMigrId, bitmap))
+		if err != nil || reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("PushMigrBitmap: %v, %v", err, reply.GetAgentReply())
+		}
+	}
+	push([]byte{0x05})
+
+	node.Reset()
+	push([]byte{0x05})
+	if node.hasCall("discard --offset") ||
+		node.hasCall("cmd dmsetup suspend") ||
+		node.hasCall("disable_hydration") {
+		t.Fatalf("a repeated piece was applied again: %q", node.Calls())
+	}
+	piecePath := nf.LocalMigrBmPath(testCluster, testDn, testSp, testMigrId, 0)
+	if node.hasCall("writeproto " + piecePath) {
+		t.Fatalf("a repeated piece was saved again: %q", node.Calls())
+	}
+
+	node.Reset()
+	push([]byte{0x07})
+	assertOrder(t, node,
+		"writeproto "+piecePath,
+		"cmd dmsetup message "+cloneName+" 0 disable_hydration",
+		"discard --offset 3145728 --length 3145728 "+nf.DmPath(cloneName),
+		"cmd dmsetup message "+cloneName+" 0 enable_hydration",
+	)
+}

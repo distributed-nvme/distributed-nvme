@@ -337,15 +337,6 @@ var renderCases = []renderCase{
 		want: `{"bitmap_hex":"a5","byte_cnt":1}` + "\n",
 	},
 	{
-		name: "td get-leg-bm, the hex map",
-		rpc:  "GetLegBitmap",
-		argv: []string{"td", "get-leg-bm", "--leg", "9"},
-		reply: &pb.GetLegBitmapReply{
-			Bitmap: []byte{0xa5},
-		},
-		want: `{"bitmap_hex":"a5","byte_cnt":1}` + "\n",
-	},
-	{
 		// Lowercase, no 0x, and byte_cnt travels alongside so a length check
 		// needs no arithmetic on the hex string.
 		name: "td get-bm, multi-byte bitmap",

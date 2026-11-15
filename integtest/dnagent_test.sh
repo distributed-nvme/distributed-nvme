@@ -2791,7 +2791,7 @@ migr_dst_syncup() { # m revision sp_level cutover_pending [ctl flags…]
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
 		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt "$BM_CNT" --cutover-pending="$pending" "$@"
+		--cutover-pending="$pending" "$@"
 }
 
 # migr_declare_dst declares the destination and later enables it
@@ -2897,7 +2897,7 @@ migr_provision_dst() { # m revision
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
 		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt "$BM_CNT" --cutover-pending=true)
+		--cutover-pending=true)
 	assert_provisioning_or_ok "$out" ".side_info.side_dev_info.status" \
 		"migr $m dst phase 1"
 	# sp_level no_migration already suppresses the clone and the source
@@ -3401,7 +3401,7 @@ migr_write_probe() { # m
 }
 
 # run_migration_cases is the migration body shared by cases B and C
-# (dnagent_integtest.md, Cases). $SP, $MID, $BM_CNT, $MIN_FIRST (one floor
+# (dnagent_integtest.md, Cases). $SP, $MID, $MIN_FIRST (one floor
 # per migration) and the case name are set by the callers; the per-case
 # differences are the five hooks push_bitmaps, before_enable, after_serving,
 # after_hydration and verify_data.
@@ -3665,7 +3665,6 @@ case_migr_full() {
 	CASE=migr_full
 	SP=0xc1
 	MID=("" 0x31 0x32)
-	BM_CNT=0
 	READ_THROUGH_MIB=127
 	MIN_FIRST=("" 0 0)
 
@@ -3733,7 +3732,6 @@ case_migr_bitmap() {
 	CASE=migr_bitmap
 	SP=0xd1
 	MID=("" 0x41 0x42)
-	BM_CNT=2
 	READ_THROUGH_MIB=63
 	# Migration 1 gets its chunks before its destination's build, migration
 	# 2 only once its destination serves (after_serving), so only the first
@@ -3888,13 +3886,12 @@ case_migr_bitmap() {
 
 case_teardown() {
 	CASE=teardown
-	# A migration case's globals: the shared migr_* helpers read $SP, $MID and
-	# $BM_CNT, and migr_declare_dst files its reply under $REPLY_DIR. The ids
+	# A migration case's globals: the shared migr_* helpers read $SP and
+	# $MID, and migr_declare_dst files its reply under $REPLY_DIR. The ids
 	# are this case's own, so a failure never leaves debris another case's
 	# residue assertions would report.
 	SP=0xf1
 	MID=("" 0x61 0x62)
-	BM_CNT=0
 	REPLY_DIR=$(mktemp -d)
 	DIAG_SIDES=()
 
@@ -4176,8 +4173,7 @@ case_restart() {
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
-		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt 1
+		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH"
 	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart dst side_dev"
 	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
@@ -4210,8 +4206,7 @@ case_restart() {
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
-		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt 1)
+		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH")
 	assert_eq "$(jq_of "$out" '.bm_info.bm_idx_list | @csv')" '0' \
 		"restart pre-restart bm_idx_list"
 
@@ -4260,8 +4255,7 @@ case_restart() {
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
-		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt 1)
+		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH")
 	assert_eq "$(jq_of "$out" '.bm_info.bm_idx_list | @csv')" '0' \
 		"restart post-restart bm_idx_list"
 
@@ -4291,8 +4285,7 @@ case_restart() {
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
-		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt 1)
+		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH")
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart re-apply side2"
 	# The post-restart log covers the startup reconcile and these re-applies.
 	# This is also the resume-at-k net (dnagent.md DN9): `blkdiscard` is in

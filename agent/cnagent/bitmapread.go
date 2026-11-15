@@ -9,16 +9,17 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// GetThinDeviceBm / GetLegBm serve the gateway reads of architecture.md,
-// Bitmap reads, from a dm-thin
-// metadata snapshot (CN25-CN27). They carry no AgentReply, so every failure —
+// GetThinDeviceBm / GetLegBm serve the bitmap reads of architecture.md,
+// Bitmap reads — the gateway's of a thin device, the worker's of a migrating
+// leg (dnv-worker.md BM7) — from a dm-thin metadata snapshot (CN25-CN27). They carry no AgentReply, so every failure —
 // unknown cntlr, non-primary role, a missing pool, a failing command — ends
 // the RPC with an Internal status naming the step (architecture.md, Common
 // agent rules). A pool whose
 // metadata outgrows what thin_dump emits inside CmdSoftTimeout fails the RPC
 // and the caller falls back to a full copy: a bitmap read when
 // architecture.md, Clones or Migration, says is an optimization, never a
-// correctness input.
+// correctness input. The worker gives a leg's bitmap up after a few refused
+// reads (dnv-worker.md BM7).
 
 // primaryPlanFor resolves the request's cntlr and returns its plan. Both RPCs
 // need the same three checks, and both must run under the CN1 locks — the
@@ -166,6 +167,13 @@ func (s *CnAgentServer) GetLegBm(
 	if !ok {
 		return nil, status.Errorf(codes.Internal,
 			"group %d is not in its slice's data_grp_list", gp.grpId)
+	}
+	// CN27: a write whose block dm-thin has not recorded yet may already sit
+	// on the leg; the drain ends it, and with it the record, before the
+	// snapshot.
+	if err := s.drainThinDevices(ctx, gp.slice); err != nil {
+		return nil, status.Errorf(codes.Internal,
+			"draining the thin devices: %v", err)
 	}
 	sb, err := s.dumpThinMetadata(ctx, gp.slice)
 	if err != nil {

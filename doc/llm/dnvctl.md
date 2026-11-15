@@ -166,9 +166,9 @@ the same shape as gatewayctl's: the reply is marshalled as protojson with
 proto field names and its unpopulated fields emitted (`marshalOpts`), then
 re-parsed through encoding/json and encoded again, so the document has
 sorted keys, stable spacing, proto field names, proto3 defaults visible and
-uint64 fields as JSON strings. The two bitmap reads, `td get-bm` and
-`td get-leg-bm`, are the one deviation, because protojson renders a bytes
-field as base64: they print a document of two keys, `bitmap_hex`, the
+uint64 fields as JSON strings. The bitmap read, `td get-bm`, is the one
+deviation, because protojson renders a bytes field as base64: it prints a
+document of two keys, `bitmap_hex`, the
 bitmap as lowercase hex with no prefix, and `byte_cnt`, its length in bytes
 (`hexBitmapResult`). Nothing else is ever printed to stdout on an RPC path;
 cobra's stock help and completion write their text there too. There is no
@@ -256,9 +256,8 @@ it reuses gatewayctl's verb and flag vocabulary. The leaves are the RPCs of
 verbs, no compound commands, and cobra's stock `help` and `completion` are
 the only subcommands that are not RPCs. The RPCs without a group of their
 own are homed in a group: `GrowSlice`, `InspectSide`, `FindStoragePoolNames`
-and `UpdateStoragePoolCntlidSlotList` under `sp`, `GetThinDeviceBitmap` and
-`GetLegBitmap` under `td`, `AppendCloneBitmap` under `clone` and
-`AppendMigrationBitmap` under `migr`. A group issues no RPC: typed without a
+and `UpdateStoragePoolCntlidSlotList` under `sp`, `GetThinDeviceBitmap`
+under `td` and `AppendCloneBitmap` under `clone`. A group issues no RPC: typed without a
 verb, or with a verb it lacks, it is a usage error (CT5), never a help
 screen on stdout, unless `--help` is typed.
 
@@ -271,7 +270,7 @@ is the gateway's idempotent no-write (`gateway.md` GW6), not a flip back, so
 the leaf is safe to script. An inspect RPC is an `inspect` leaf
 (`sp inspect-side` for a side), a read the gateway answers from the agent
 that hosts the object, out of that agent's latest observation of it, not
-from etcd. The bitmap RPCs are `get-bm`, `get-leg-bm` and `append-bm`;
+from etcd. The bitmap RPCs are `get-bm` and `append-bm`;
 every other leaf keeps its RPC's verb (`cluster advance-ids`,
 `cluster get-capacity`, `sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
 `group force-start`), save one: `repair abort` is `TryToAbortRepair`, the
@@ -297,8 +296,7 @@ these exceptions:
   bin shifts of `dn_bin_conf` (`cluster` — `ctl/cluster.go`), and
   `sp create`'s `bdev_conf.bdev_feature_list` (In scope / out of scope).
 
-A leaf has a flag only where its request has a field: `migr append-bm`
-takes no slice index (`migr` — `ctl/migr.go`). An
+A leaf has a flag only where its request has a field. An
 optional sub-message follows the "not given" convention: it is sent only
 when one of its flags holds a non-zero value, a zero meaning the member was
 not given, except for the token messages (CT3) and where a group below says
@@ -512,8 +510,9 @@ the client's wait primitive of `architecture.md`, Thin devices: CT4's
 rendering shows `created` and `torn` on every thin device, false included,
 and that same place says when a token read before the poll is stale and
 that a `torn` snapshot is one to delete and re-create.
-`td get-bm` and `td get-leg-bm` print the hex map of CT4; `td get-bm` names
-its device with the group's `--name`, where gatewayctl spells it `--td`.
+`td get-bm` prints the hex map of CT4 and names its device with the
+group's `--name`, where gatewayctl spells it `--td`. A leg's bitmap has no
+leaf: the worker reads it itself (`dnv-worker.md` BM7).
 
 ### `ss` — `ctl/ss.go`
 
@@ -556,15 +555,11 @@ chunk and is sent only when typed, so a typed 0 is a real position and an
 untyped flag leaves the field out; what the gateway does with a page sent
 again is `architecture.md`, Clones. An empty `--bm-hex` sends an empty bitmap on
 purpose, so the gateway's refusal of one stays reachable; a malformed
-non-empty value is a usage error (exit 2). Both `append-bm` leaves take the
-bitmap as one hex string in `--bm-hex`, with no file or stdin input, so the
-kernel's bound on the length of one argument bounds one append to half that
-many bytes of bitmap; a migration's `MaxMigrBmCnt` appends therefore cover a
-leg of a bounded size, and the caller of a larger leg can send only its first
-part: the disk node of the migration's destination side applies the unbroken
-run of chunks from the start (`dnagent.md` SH23) and copies what no chunk
-covers, which costs only the optional bitmap fast path (`architecture.md`,
-Bitmap push protocol).
+non-empty value is a usage error (exit 2). The leaf takes the bitmap as
+one hex string in `--bm-hex`, with no file or stdin input, so the kernel's
+bound on the length of one argument bounds one append to half that many
+bytes of bitmap, and a larger chunk is appended in pages, each but the last
+over a multiple of 8 blocks (`architecture.md`, Known limits).
 
 ### `xfer` — `ctl/xfer.go`
 
@@ -575,17 +570,8 @@ of `allowed_hosts`.
 
 ### `migr` — `ctl/migr.go`
 
-One leaf is deliberately not symmetric with its sibling, because its RPC is
-not: `migr append-bm` takes no slice index, because a migration copies one side
-and its chunks are an append sequence, while a clone chunk is addressed by the
-pair of source slice and chunk index (`clone` — `ctl/clone.go`), which also
-states the
-bound one `--bm-hex` puts on an append, and so on the part of a leg a
-migration's appends can cover; how a caller pages a migration's bitmap into
-appends is `architecture.md`, Bitmap reads. The `--bm-idx` of
-`migr append-bm` is a check, not an address as the clone's is: sent only
-when typed, it is the index the chunk must land at, and what the gateway
-does with a chunk sent again is `architecture.md`, Migrations.
+No leaf carries a migration's bitmap, unlike a clone's: the worker reads
+the leg's bitmap and hands it to the new side itself (`dnv-worker.md` BM7).
 
 `migr finish` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished and nothing else: a migration whose cutover

@@ -16,7 +16,7 @@ import (
 // with errors.Is.
 var ErrNotFound = errors.New("model: not found")
 
-// BmChunk is one chunk of a clone's or a migration's bitmap as MD3 reports it:
+// BmChunk is one chunk of a clone's bitmap as MD3 reports it:
 // the chunk's address parsed out of the key, and the key's mod_revision, which
 // BM5 memoizes to tell a changed bitmap from an unchanged one without reading a
 // single byte of it.
@@ -24,8 +24,10 @@ var ErrNotFound = errors.New("model: not found")
 // For a clone the pair (SliceIdx, Idx) is the chunk's full address: Idx names
 // the chunk's fixed position inside source slice SliceIdx's bitmap
 // (architecture.md, Bitmap push protocol).
-// SliceIdx is ALWAYS 0 for a migration chunk, whose bm_idx is an append
-// sequence over the leg's one bitmap and names no slice.
+// SliceIdx is ALWAYS 0 for a migration piece, which the worker's pusher
+// handles in this shape too: its bm_idx is its place in the leg's one bitmap
+// and names no slice, and it has no key and so no mod_revision (dnv-worker.md
+// BM7).
 type BmChunk struct {
 	SliceIdx uint32
 	Idx      uint32
@@ -43,8 +45,9 @@ type BmChunk struct {
 // record or a latched SP's missing record.
 //
 // Bitmap VALUES are never part of this: a push reads one chunk at a time
-// (BM3). CloneBmIdx and MigrBmIdx carry only which chunks exist, one entry per
-// loaded clone / migration (an empty slice when it has none yet).
+// (BM3). CloneBmIdx carries only which chunks exist, one entry per loaded
+// clone (an empty slice when it has none yet). A migration's bitmap is the
+// worker's own and lives in its memory alone (dnv-worker.md BM7).
 type SpState struct {
 	// Rev is the store revision every field below was read at.
 	Rev int64
@@ -76,12 +79,10 @@ type SpState struct {
 	// the keys a list names are kept.
 	Repairs     map[string]*pb.Repair
 	RetiredLegs map[uint64]*pb.RetiredLeg
-	// CloneBmIdx and MigrBmIdx are keyed by clone / migration name. A
-	// clone's entries carry the (SliceIdx, Idx) pair of every chunk key
-	// found, in ascending pair order; a migration's carry the append
-	// sequence in Idx alone, with SliceIdx 0.
+	// CloneBmIdx is keyed by clone name. A clone's entries carry the
+	// (SliceIdx, Idx) pair of every chunk key found, in ascending pair
+	// order.
 	CloneBmIdx map[string][]BmChunk
-	MigrBmIdx  map[string][]BmChunk
 	// DnByAddr holds one record per distinct Side.addr_port of the SP, the
 	// sides of every clone meta group, the new legs of the repairs and the
 	// retired sides included; CnByAddr one per distinct Cntlr.addr_port.
@@ -104,7 +105,6 @@ func newSpState() *SpState {
 		Repairs:     make(map[string]*pb.Repair),
 		RetiredLegs: make(map[uint64]*pb.RetiredLeg),
 		CloneBmIdx:  make(map[string][]BmChunk),
-		MigrBmIdx:   make(map[string][]BmChunk),
 		DnByAddr:    make(map[string]*pb.DnConf),
 		CnByAddr:    make(map[string]*pb.CnConf),
 	}
@@ -406,15 +406,8 @@ func loadNodes(s etcdutil.STM, cid uint64, state *SpState) {
 }
 
 // bmKeyParser decodes one scanned bitmap key into the chunk address it carries
-// (MD2): ParseCloneBmKey for a clone prefix, migrBmChunk for a migration one.
+// (MD2): ParseCloneBmKey for a clone prefix.
 type bmKeyParser func(key string) (sliceIdx uint32, bmIdx uint32, ok bool)
-
-// migrBmChunk adapts ParseBmIdx to the bmKeyParser shape: a migration bm_idx
-// names no slice, so the chunk's address is (0, bm_idx).
-func migrBmChunk(key string) (uint32, uint32, bool) {
-	bmIdx, ok := ParseBmIdx(key)
-	return 0, bmIdx, ok
-}
 
 // loadBmIdx scans one bitmap prefix keys-only at rev and returns the chunks it
 // found (MD3), decoding each key with the parser of that prefix's kind. A key
@@ -506,19 +499,6 @@ func LoadSp(
 			return nil, err
 		}
 		state.CloneBmIdx[cloneName] = chunks
-	}
-	for _, migrName := range state.Conf.GetMigrNameList() {
-		if _, ok := state.Migrs[migrName]; !ok {
-			continue
-		}
-		chunks, err := loadBmIdx(
-			ctx, cli, MigrBitmapPrefix(cid, spId, migrName), rev,
-			migrBmChunk,
-		)
-		if err != nil {
-			return nil, err
-		}
-		state.MigrBmIdx[migrName] = chunks
 	}
 	return state, nil
 }

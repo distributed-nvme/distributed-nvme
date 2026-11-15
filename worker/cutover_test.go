@@ -129,7 +129,6 @@ func TestSpSideRequestsCarryTheCutoverFlag(t *testing.T) {
 					HydrationThreshold: common.DefaultMigrThreshold,
 					HydrationBatchSize: common.DefaultMigrBatchSize,
 				},
-				BmCnt:          2,
 				CutoverPending: tc.pending,
 			}
 			if got := dst.req.GetMigrDstConf(); !proto.Equal(got, wantDst) {

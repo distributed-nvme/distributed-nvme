@@ -2098,7 +2098,7 @@ push_clone_req_time() { # <agent> <src_slice_idx> <bm_idx>
 case_bitmap() {
 	CASE=bitmap
 
-	stage 1 "an SP with a migration past its cutover and a clone, both with two chunks"
+	stage 1 "an SP with a migration past its cutover and a clone with three chunks"
 	new_cluster bitmap
 	put_dn 1 8
 	put_dn 2 8
@@ -2115,7 +2115,7 @@ case_bitmap() {
 	wait_until "$WAIT_SYNCUP" "every side of slice 1 provisioned" \
 		all_provisioned sp0 1
 	# The migration's destination side S3 lands on dn 2, so dn1 is the only
-	# legal target of a migration chunk (BM4) and dn0, the source, gets none.
+	# legal target of a migration piece (BM4) and dn0, the source, gets none.
 	# It is written as CreateMigration writes it, its cutover pending
 	# (architecture.md, Migrations), and cn0, which holds the primary, has
 	# its path to S3 held down first: the cutover beside the provisioned
@@ -2148,8 +2148,12 @@ EOF
 	assert_eq "$(cntlr_field sp0 1 err_epoch)" 0 \
 		"cntlr 1's err_epoch under an ERROR path row (HL2 judges no path row)"
 	# The primary's path comes up: the coordinator starts the cutover, once,
-	# from that report.
-	clear_behavior cn0
+	# from that report. cn0 now answers GetLegBm with three bytes for any leg,
+	# the bitmap side 3's child reads from the primary once the cutover has
+	# started and side 3 reports its dm-clone (BM7).
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"leg_bm_hex": "aa00ff"}}}
+EOF
 	wait_until "$WAIT_SHORT" "the cutover of m0" \
 		count_ge 1 cutover_record_cnt 1 m0
 	local cut cut_migr cut_src cut_dst cut_cntlr cut_report cut_rev flip_rev
@@ -2226,7 +2230,8 @@ EOF
 	# the whole clone becomes missing at once, which is what makes the
 	# lexicographic order observable.
 	set_behavior cn0 <<'EOF'
-{"objects": {"cntlr 1:1": {"chunk_id_list": ["0:0", "0:1", "1:0"]}}}
+{"objects": {"cntlr 1:1": {"chunk_id_list": ["0:0", "0:1", "1:0"],
+  "leg_bm_hex": "aa00ff"}}}
 EOF
 	# Three chunks at three PAIRS: (0,0) and (0,1) are two chunks of source
 	# slice 0's bitmap, and (1,0) shares bm_idx 0 with (0,0) on another
@@ -2240,8 +2245,7 @@ EOF
 	assert_eq "$(key_cnt clone_bitmap)" 3 \
 		"c0 chunk keys after (0,0), (0,1), (1,0)"
 	# The output key follows the record: a Clone carries no chunk count, so a
-	# clone put emits no bm_cnt at all. The migration half is asserted
-	# below, so the two directions of the same branch are both pinned.
+	# clone put emits no bm_cnt at all.
 	assert_eq "$("$JQ" -r 'has("bm_cnt")' <<<"$clone_put")" false \
 		"a clone put-bitmap must emit no bm_cnt"
 	# The lever must really hold the clone pushes back: seeded in this order
@@ -2250,56 +2254,51 @@ EOF
 	# WRITE order.
 	assert_none_for 3 "clone pushes while cn0's applied set is forced" \
 		reqs_gt 0 cn0 PushCloneBitmap
-	local migr0_out
-	migr0_out=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 0 --hex aa00ff)
-	# A MIGRATION's parent does carry the counter, and put-bitmap raises it —
-	# the other direction of the clone assert above.
-	assert_eq "$("$JQ" -r '.bm_cnt' <<<"$migr0_out")" 1 \
-		"a migr put-bitmap emits the parent's raised bm_cnt"
-	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 1 --hex bb11ee
-	# --src-slice-idx addresses a CLONE chunk; a migration's chunks name no
-	# source slice, so a non-zero one with --kind migr is a driver usage
-	# error and writes nothing — it is refused on the flags alone,
-	# before etcd is opened, so it cannot disturb the pushes step 2 counts.
-	if ctl put-bitmap --sp sp0 --kind migr --name m0 --src-slice-idx 1 \
-		--bm-idx 9 --hex ff >/dev/null 2>&1; then
-		die "put-bitmap --kind migr --src-slice-idx 1: want a usage error"
-	fi
-
-	stage 2 "migration chunks: ordered, one in flight, to the destination only"
+	stage 2 "the migration bitmap: read from the primary, pushed to the destination only"
 	wait_until "$WAIT_SHORT" "dn1: PushMigrBitmap bm_idx 0" \
 		req_ge 1 dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "0"'
-	wait_until "$WAIT_SHORT" "dn1: PushMigrBitmap bm_idx 1" \
-		req_ge 1 dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "1"'
-	local t_req1 t_reply0
-	t_req1=$(push_req_time dn1 PushMigrBitmap 1)
-	t_reply0=$(push_reply_time dn1 PushMigrBitmap 1)
-	ts_ge "$(ts_epoch "$t_req1")" "$(ts_epoch "$t_reply0")" ||
-		die "chunk 1's request ($t_req1) is not after chunk 0's reply ($t_reply0): BM3 wants one push in flight"
+	# BM7: one read of the whole of leg 1, the leg m0 moves, from the
+	# primary's cn agent and for cntlr 1; the standby is never asked.
+	assert_eq "$(reqs cn0 GetLegBm)" 1 "cn0 (the primary): GetLegBm calls"
+	assert_eq "$(reqs cn0 GetLegBm \
+		'(.leg_id // 0) == 1 and (.cntlr_id // 0) == 1
+		 and (.block_cnt // 0) == 0')" 1 \
+		"cn0: the GetLegBm of leg 1, cntlr 1, the whole leg"
+	assert_eq "$(reqs cn1 GetLegBm)" 0 "cn1 (the standby): GetLegBm calls"
+	assert_eq "$(wcount 'select(.msg == "migration bitmap read")
+		| select((.migr_id | tostring) == "3")
+		| select((.leg_id | tostring) == "1")
+		| select((.piece_cnt | tostring) == "1")')" 1 \
+		"migration bitmap read records of m0: one piece of leg 1"
+	assert_ge "$(reqs dn1 PushMigrBitmap \
+		'(.bm_idx // 0) == 0 and (.migr_id | tostring) == "3"
+		 and .bitmap == "<3 bytes>"')" 1 \
+		"dn1: the push of piece 0 carries the three bytes cn0 answered"
 	# BM3: a push carries no revision at all — the field is gone from both
 	# push requests (pb/schema.proto) — so no request dn1 has logged may hold
-	# one. The two waits above are what make this count of 0 evidence: both
-	# chunks' requests are in the log.
+	# one. The wait above is what makes this count of 0 evidence.
 	assert_eq "$(reqs dn1 PushMigrBitmap 'has("revision")')" 0 \
 		"dn1: migration push requests carrying a revision field (BM3: none)"
 	# `bm_info` rides ONLY on a SyncupSideReply (the proto gives CheckSideReply
 	# no such field), and a push arms no re-sync of its own (BM6) — so after a
-	# clean push sequence nothing bumps SpRev and no further SyncupSide is
-	# issued. Force one re-fan, which is what makes BM2's diff observable:
-	# the reply must now report the COMPLETE set [0,1], and the worker must
-	# push nothing more because the diff is empty. That is a stronger check
-	# than merely seeing the set appear on its own.
+	# clean push nothing bumps SpRev and no further SyncupSide is issued. Force
+	# one re-fan, which is what makes BM2's diff observable: the reply must now
+	# list the piece, and the worker must push nothing more and read nothing
+	# again, as the child holds the bitmap (BM7).
 	local pushes_before_refan
 	pushes_before_refan=$(reqs dn1 PushMigrBitmap)
 	ctl bump-rev sp --id 1 --shard 00 >/dev/null
-	wait_until "$WAIT_SHORT" "dn1: a SyncupSide reply reporting bm_idx_list [0,1]" \
-		reply_ge 1 dn1 SyncupSide '(.bm_info.bm_idx_list // []) == [0, 1]'
+	wait_until "$WAIT_SHORT" "dn1: a SyncupSide reply reporting bm_idx_list [0]" \
+		reply_ge 1 dn1 SyncupSide \
+		'has("bm_info") and ((.bm_info.bm_idx_list // []) == [0])'
 	assert_eq "$(reqs dn1 PushMigrBitmap)" "$pushes_before_refan" \
 		"migration pushes after a re-fan whose diff is empty"
 	local pushes
 	pushes=$(reqs dn1 PushMigrBitmap)
 	assert_none_for 3 "further migration pushes once the set matches" \
 		reqs_gt "$pushes" dn1 PushMigrBitmap
+	assert_eq "$(reqs cn0 GetLegBm)" 1 \
+		"cn0: GetLegBm calls after the re-fan (the child holds the bitmap)"
 	assert_eq "$(reqs dn0 PushMigrBitmap)" 0 "dn0 (the source): migration pushes"
 
 	stage 3 "clone chunks: one push per PAIR, lexicographic, to the primary only"
@@ -2355,18 +2354,7 @@ EOF
 	assert_none_for 3 "further clone pushes once the set matches" \
 		reqs_gt "$clone_pushes" cn0 PushCloneBitmap
 
-	stage 4 "a new migration chunk is pushed exactly once, carrying no revision"
-	pushes=$(reqs dn1 PushMigrBitmap)
-	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 2 --hex cc22dd
-	wait_until "$WAIT_SHORT" "dn1: PushMigrBitmap bm_idx 2" \
-		req_ge 1 dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "2"'
-	assert_eq "$(reqs dn1 PushMigrBitmap 'has("revision")')" 0 \
-		"dn1: migration push requests carrying a revision field, chunk 2's included (BM3: none)"
-	sleep 3
-	assert_eq "$(reqs dn1 PushMigrBitmap)" $((pushes + 1)) \
-		"dn1: exactly one new migration push"
-
-	stage 5 "a grown clone chunk is re-pushed at the same pair ([D8], BM5)"
+	stage 4 "a grown clone chunk is re-pushed at the same pair ([D8], BM5)"
 	# The growth stays at the pair (0,0): the memo is per (clone_id,
 	# src_slice_idx, bm_idx), so neither (0,1) — the same slice, another
 	# chunk — nor (1,0) — the same bm_idx, another slice — may move.
@@ -2387,33 +2375,33 @@ EOF
 	assert_eq "$(reqs cn0 PushCloneBitmap "$(clone_pair 1 0)")" "$clone10" \
 		"cn0: chunk (1,0) — the same bm_idx on another slice — was not re-pushed"
 
-	stage 6 "a rejected SyncupSide is re-driven by the CheckSide reply's code (RW4 step 5)"
+	stage 5 "a rejected SyncupSide is re-driven by the CheckSide reply's code (RW4 step 5)"
 	set_behavior dn1 <<'EOF'
 {"objects": {"side 1:1:3": {"reply_code": 1}}}
 EOF
-	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 3 --hex dd33cc
+	ctl bump-rev sp --id 1 --shard 00 >/dev/null
 	local rev
 	rev=$(sp_rev 1)
 	wait_until "$WAIT_SHORT" "dn1: two syncup results at the same revision" \
 		wcount_ge 2 'select(.msg == "syncup result")
 			| select((.revision | tostring) == $r)
 			| select((.side_pointer.side_id // 0 | tostring) == "3")' --arg r "$rev"
+	local pushes_before_clear
+	pushes_before_clear=$(reqs dn1 PushMigrBitmap)
 	clear_behavior dn1
-	wait_until "$WAIT_SHORT" "dn1: PushMigrBitmap bm_idx 3" \
-		req_ge 1 dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "3"'
-	# As in step 2: bm_info rides only on a SyncupSideReply, and once chunk
-	# 3's push lands nothing bumps SpRev, so the worker correctly issues
-	# no further SyncupSide. Force one re-fan to make the completed set
-	# observable, and require that the now-empty diff pushes nothing more.
-	local pushes_after_retry
-	pushes_after_retry=$(reqs dn1 PushMigrBitmap)
-	ctl bump-rev sp --id 1 --shard 00 >/dev/null
-	wait_until "$WAIT_SHORT" "dn1: a SyncupSide reply reporting [0,1,2,3]" \
-		reply_ge 1 dn1 SyncupSide '(.bm_info.bm_idx_list // []) == [0, 1, 2, 3]'
-	assert_eq "$(reqs dn1 PushMigrBitmap)" "$pushes_after_retry" \
-		"migration pushes after the recovery re-fan (the diff is empty)"
+	# The round's reply, at the code the lever no longer forces, re-drives the
+	# SyncupSide, and its accepted reply lists the piece: the diff is empty,
+	# so nothing is pushed again, and the bitmap is not read again.
+	wait_until "$WAIT_SHORT" "dn1: an accepted SyncupSide reply at revision $rev listing [0]" \
+		reply_ge 1 dn1 SyncupSide \
+		'(.revision | tostring) == $r and ((.agent_reply.code // 0) == 0)
+		 and ((.bm_info.bm_idx_list // []) == [0])' --arg r "$rev"
+	assert_none_for 3 "migration pushes after the recovery (the diff is empty)" \
+		reqs_gt "$pushes_before_clear" dn1 PushMigrBitmap
+	assert_eq "$(reqs cn0 GetLegBm)" 1 \
+		"cn0: GetLegBm calls after the recovery (the child holds the bitmap)"
 
-	stage 7 "a primary change moves the clone pushes with it (BM4)"
+	stage 6 "a primary change moves the clone pushes with it (BM4)"
 	# cn0's baseline is taken BEFORE the two set-cntlr calls: taken after cn1
 	# has already received both re-pushes, it would forgive every push the old
 	# primary got in between, which is exactly what "cn0 none after the change"

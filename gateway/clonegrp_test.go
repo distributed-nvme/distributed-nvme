@@ -20,8 +20,8 @@ import (
 // places the group's sides on DNs as a new group's, refuses fewer candidate
 // locations than legs and a destination whose metadata one side cannot hold,
 // and the calls that look an object up by id — the repair calls, the cntlid
-// slot list update, CreateMigration and GetLegBitmap — find a clone meta
-// group's legs and sides after the slices'.
+// slot list update and CreateMigration — find a clone meta group's legs and
+// sides after the slices'.
 
 // volCloneMetaBlocks and volCloneDataBlocks are the layout of a one-extent
 // group at the fixture's geometry, the same as volSlice's meta group: a
@@ -587,33 +587,4 @@ func TestCreateMigrationRefusesACloneSide(t *testing.T) {
 	}
 	volWantCode(t, migrate(side.GetSideId()+1000), codes.NotFound)
 	env.wantNoWrite("the refused CreateMigration", before)
-}
-
-// TestGetLegBitmapRefusesACloneLeg pins the bitmap read's refusal of a leg
-// of a clone meta group (architecture.md, Bitmap reads): no migration moves
-// one, so its bitmap is never read, and the refusal is FAILED_PRECONDITION
-// naming the clone, judged before the primary is asked anything — the
-// fixture's cntlrs are not dialable. A leg id in neither a slice nor a clone
-// stays NOT_FOUND.
-func TestGetLegBitmapRefusesACloneLeg(t *testing.T) {
-	env := newVolEnv(t)
-	env.putTd("dst", 900, 7, 0, true)
-	volCreateClone(env, "clone-a", "dst")
-	legId := volCloneGrpOf(env, "clone-a").GetLegList()[1].GetLegId()
-	read := func(legId uint64) error {
-		_, err := env.srv.GetLegBitmap(env.ctx, &pb.GetLegBitmapRequest{
-			ClusterName: env.cluster,
-			SpName:      volSpName,
-			LegId:       legId,
-		})
-		return err
-	}
-	msg := volWantCode(t, read(legId), codes.FailedPrecondition)
-	want := fmt.Sprintf("leg %d belongs to the clone meta group of clone "+
-		"%q, which no migration moves, so its bitmap is never read", legId,
-		"clone-a")
-	if msg != want {
-		t.Errorf("message: got %q, want %q", msg, want)
-	}
-	volWantCode(t, read(legId+1000), codes.NotFound)
 }

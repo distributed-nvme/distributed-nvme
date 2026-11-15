@@ -439,10 +439,9 @@ var boundRows = []boundRow{
 	{"sp grow-slice", "ext", "ext_cnt", 1, 0, zeroRefused, nil},
 	// Without --ori a thin device needs a size; no maximum.
 	{"td create", "size", "size", 1, 0, zeroRefused, nil},
-	// A bitmap window of block_cnt 0 is the whole slice or leg, a zero the
-	// gateway passes on to the agent; no other value is bounded.
+	// A bitmap window of block_cnt 0 is the whole slice, a zero the gateway
+	// passes on to the agent; no other value is bounded.
 	{"td get-bm", "cnt", "block_cnt", 1, 0, zeroDefault, nil},
-	{"td get-leg-bm", "cnt", "block_cnt", 1, 0, zeroDefault, nil},
 	{"clone create", "src-slices", "src_slice_cnt",
 		1, common.MaxSliceCntPerSp, zeroRefused, nil},
 	{"clone create", "src-stripe", "src_stripe_size",
@@ -469,11 +468,9 @@ var boundRows = []boundRow{
 	{"xfer set-hosts", "hosts", "allowed_hosts",
 		1, common.MaxHostCntPerSs, zeroDefault, hostArg},
 	// An empty bitmap is sent on purpose (dnvctl.md, `clone` —
-	// `ctl/clone.go`); a clone page holds at most one chunk, while a
-	// migration chunk has no byte cap.
+	// `ctl/clone.go`); a clone page holds at most one chunk.
 	{"clone append-bm", "bm-hex", "bitmap",
 		1, common.CloneBmChunkBytes, zeroRefused, bitmapArg},
-	{"migr append-bm", "bm-hex", "bitmap", 1, 0, zeroRefused, bitmapArg},
 	// A slot list is judged by its values, distinct and each below
 	// CnCntlidSlotCnt, so its length has no bound of its own beyond this:
 	// the full new list must not be empty. sp create's empty list is the

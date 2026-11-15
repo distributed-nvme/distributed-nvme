@@ -1106,7 +1106,9 @@ func (a *Agent) GetThinDeviceBm(
 	return &pb.GetThinDeviceBmReply{}, nil
 }
 
-// GetLegBm replies an empty bitmap (the worker never calls it).
+// GetLegBm replies the cntlr's leg_bm_hex lever, an empty bitmap when unset:
+// the worker reads a migration's leg bitmap from the primary (dnv-worker.md
+// BM7).
 func (a *Agent) GetLegBm(
 	ctx context.Context, req *pb.GetLegBmRequest,
 ) (*pb.GetLegBmReply, error) {
@@ -1117,7 +1119,14 @@ func (a *Agent) GetLegBm(
 	if err := a.hangUnary(ctx, CnKey); err != nil {
 		return nil, err
 	}
-	return &pb.GetLegBmReply{}, nil
+	key := CntlrKey(req.GetSpId(), req.GetCntlrId())
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var bitmap []byte
+	if ob := a.objLocked(key); ob != nil {
+		bitmap = append([]byte(nil), ob.LegBm...)
+	}
+	return &pb.GetLegBmReply{Bitmap: bitmap}, nil
 }
 
 // CheckCn serves the CN health stream, one reply per request.

@@ -74,7 +74,6 @@ const (
 	Gateway_FinishMigration_FullMethodName                 = "/Gateway/FinishMigration"
 	Gateway_CancelMigration_FullMethodName                 = "/Gateway/CancelMigration"
 	Gateway_GetMigration_FullMethodName                    = "/Gateway/GetMigration"
-	Gateway_AppendMigrationBitmap_FullMethodName           = "/Gateway/AppendMigrationBitmap"
 	Gateway_CreateRepair_FullMethodName                    = "/Gateway/CreateRepair"
 	Gateway_FinishRepair_FullMethodName                    = "/Gateway/FinishRepair"
 	Gateway_CancelRepair_FullMethodName                    = "/Gateway/CancelRepair"
@@ -86,7 +85,6 @@ const (
 	Gateway_ForceStartGroup_FullMethodName                 = "/Gateway/ForceStartGroup"
 	Gateway_UpdateGroupOperatorInCharge_FullMethodName     = "/Gateway/UpdateGroupOperatorInCharge"
 	Gateway_GetThinDeviceBitmap_FullMethodName             = "/Gateway/GetThinDeviceBitmap"
-	Gateway_GetLegBitmap_FullMethodName                    = "/Gateway/GetLegBitmap"
 )
 
 // GatewayClient is the client API for Gateway service.
@@ -148,7 +146,6 @@ type GatewayClient interface {
 	FinishMigration(ctx context.Context, in *FinishMigrationRequest, opts ...grpc.CallOption) (*FinishMigrationReply, error)
 	CancelMigration(ctx context.Context, in *CancelMigrationRequest, opts ...grpc.CallOption) (*CancelMigrationReply, error)
 	GetMigration(ctx context.Context, in *GetMigrationRequest, opts ...grpc.CallOption) (*GetMigrationReply, error)
-	AppendMigrationBitmap(ctx context.Context, in *AppendMigrationBitmapRequest, opts ...grpc.CallOption) (*AppendMigrationBitmapReply, error)
 	CreateRepair(ctx context.Context, in *CreateRepairRequest, opts ...grpc.CallOption) (*CreateRepairReply, error)
 	FinishRepair(ctx context.Context, in *FinishRepairRequest, opts ...grpc.CallOption) (*FinishRepairReply, error)
 	CancelRepair(ctx context.Context, in *CancelRepairRequest, opts ...grpc.CallOption) (*CancelRepairReply, error)
@@ -160,7 +157,6 @@ type GatewayClient interface {
 	ForceStartGroup(ctx context.Context, in *ForceStartGroupRequest, opts ...grpc.CallOption) (*ForceStartGroupReply, error)
 	UpdateGroupOperatorInCharge(ctx context.Context, in *UpdateGroupOperatorInChargeRequest, opts ...grpc.CallOption) (*UpdateGroupOperatorInChargeReply, error)
 	GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error)
-	GetLegBitmap(ctx context.Context, in *GetLegBitmapRequest, opts ...grpc.CallOption) (*GetLegBitmapReply, error)
 }
 
 type gatewayClient struct {
@@ -721,16 +717,6 @@ func (c *gatewayClient) GetMigration(ctx context.Context, in *GetMigrationReques
 	return out, nil
 }
 
-func (c *gatewayClient) AppendMigrationBitmap(ctx context.Context, in *AppendMigrationBitmapRequest, opts ...grpc.CallOption) (*AppendMigrationBitmapReply, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AppendMigrationBitmapReply)
-	err := c.cc.Invoke(ctx, Gateway_AppendMigrationBitmap_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *gatewayClient) CreateRepair(ctx context.Context, in *CreateRepairRequest, opts ...grpc.CallOption) (*CreateRepairReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateRepairReply)
@@ -841,16 +827,6 @@ func (c *gatewayClient) GetThinDeviceBitmap(ctx context.Context, in *GetThinDevi
 	return out, nil
 }
 
-func (c *gatewayClient) GetLegBitmap(ctx context.Context, in *GetLegBitmapRequest, opts ...grpc.CallOption) (*GetLegBitmapReply, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetLegBitmapReply)
-	err := c.cc.Invoke(ctx, Gateway_GetLegBitmap_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // GatewayServer is the server API for Gateway service.
 // All implementations must embed UnimplementedGatewayServer
 // for forward compatibility.
@@ -910,7 +886,6 @@ type GatewayServer interface {
 	FinishMigration(context.Context, *FinishMigrationRequest) (*FinishMigrationReply, error)
 	CancelMigration(context.Context, *CancelMigrationRequest) (*CancelMigrationReply, error)
 	GetMigration(context.Context, *GetMigrationRequest) (*GetMigrationReply, error)
-	AppendMigrationBitmap(context.Context, *AppendMigrationBitmapRequest) (*AppendMigrationBitmapReply, error)
 	CreateRepair(context.Context, *CreateRepairRequest) (*CreateRepairReply, error)
 	FinishRepair(context.Context, *FinishRepairRequest) (*FinishRepairReply, error)
 	CancelRepair(context.Context, *CancelRepairRequest) (*CancelRepairReply, error)
@@ -922,7 +897,6 @@ type GatewayServer interface {
 	ForceStartGroup(context.Context, *ForceStartGroupRequest) (*ForceStartGroupReply, error)
 	UpdateGroupOperatorInCharge(context.Context, *UpdateGroupOperatorInChargeRequest) (*UpdateGroupOperatorInChargeReply, error)
 	GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error)
-	GetLegBitmap(context.Context, *GetLegBitmapRequest) (*GetLegBitmapReply, error)
 	mustEmbedUnimplementedGatewayServer()
 }
 
@@ -1098,9 +1072,6 @@ func (UnimplementedGatewayServer) CancelMigration(context.Context, *CancelMigrat
 func (UnimplementedGatewayServer) GetMigration(context.Context, *GetMigrationRequest) (*GetMigrationReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMigration not implemented")
 }
-func (UnimplementedGatewayServer) AppendMigrationBitmap(context.Context, *AppendMigrationBitmapRequest) (*AppendMigrationBitmapReply, error) {
-	return nil, status.Error(codes.Unimplemented, "method AppendMigrationBitmap not implemented")
-}
 func (UnimplementedGatewayServer) CreateRepair(context.Context, *CreateRepairRequest) (*CreateRepairReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateRepair not implemented")
 }
@@ -1133,9 +1104,6 @@ func (UnimplementedGatewayServer) UpdateGroupOperatorInCharge(context.Context, *
 }
 func (UnimplementedGatewayServer) GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetThinDeviceBitmap not implemented")
-}
-func (UnimplementedGatewayServer) GetLegBitmap(context.Context, *GetLegBitmapRequest) (*GetLegBitmapReply, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetLegBitmap not implemented")
 }
 func (UnimplementedGatewayServer) mustEmbedUnimplementedGatewayServer() {}
 func (UnimplementedGatewayServer) testEmbeddedByValue()                 {}
@@ -2148,24 +2116,6 @@ func _Gateway_GetMigration_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Gateway_AppendMigrationBitmap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AppendMigrationBitmapRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServer).AppendMigrationBitmap(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Gateway_AppendMigrationBitmap_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServer).AppendMigrationBitmap(ctx, req.(*AppendMigrationBitmapRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _Gateway_CreateRepair_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateRepairRequest)
 	if err := dec(in); err != nil {
@@ -2360,24 +2310,6 @@ func _Gateway_GetThinDeviceBitmap_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GatewayServer).GetThinDeviceBitmap(ctx, req.(*GetThinDeviceBitmapRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Gateway_GetLegBitmap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetLegBitmapRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServer).GetLegBitmap(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Gateway_GetLegBitmap_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServer).GetLegBitmap(ctx, req.(*GetLegBitmapRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2610,10 +2542,6 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Gateway_GetMigration_Handler,
 		},
 		{
-			MethodName: "AppendMigrationBitmap",
-			Handler:    _Gateway_AppendMigrationBitmap_Handler,
-		},
-		{
 			MethodName: "CreateRepair",
 			Handler:    _Gateway_CreateRepair_Handler,
 		},
@@ -2656,10 +2584,6 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetThinDeviceBitmap",
 			Handler:    _Gateway_GetThinDeviceBitmap_Handler,
-		},
-		{
-			MethodName: "GetLegBitmap",
-			Handler:    _Gateway_GetLegBitmap_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

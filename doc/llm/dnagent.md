@@ -1081,7 +1081,7 @@ persist the received `Push*BitmapRequest` verbatim at its `Local*BmPath`
 files present, save those the startup reload leaves unloaded and those a
 failed push left in place for a chunk outside the set, since a push whose
 save fails changes nothing in it (below) —
-`BitmapInfo.bm_idx_list` for a migration, keyed by the append index, and
+`BitmapInfo.bm_idx_list` for a migration, keyed by the piece index, and
 `BitmapInfo.chunk_id_list` for a clone, keyed by the `src_slice_idx` and
 `bm_idx` pair that addresses the chunk. The file name carries that pair too,
 but only as an address: the persisted request's CONTENT is what the startup
@@ -3274,18 +3274,24 @@ DN15. Gate: the side must be known, its `migr_dst_conf.migr_id` must equal
 the request's `migr_id`, and the chunk's `bm_idx` must be below
 `MaxMigrBmCnt` (`ReplyCodeUnknownObject` otherwise, the last refusal naming
 the index and the limit). Only a destination side accepts chunks, and only
-at an index a migration can hold: `AppendMigrationBitmap` refuses an append
-once `bm_cnt` reaches `MaxMigrBmCnt` (`architecture.md`, Migrations), so a
-chunk past it is none of the migration's, and a file persisted for it would
-stay in the applied set (SH21) every `SyncupSide` reply reports. The cn
+at an index a migration can hold: the worker cuts a leg's bitmap into at
+most `MaxMigrBmCnt` pieces (`dnv-worker.md` BM7), so a chunk past it is
+none of the migration's, and a file persisted for it would stay in the
+applied set (SH21) every `SyncupSide` reply reports. The cn
 agent bounds a clone chunk's index the same way (`cnagent.md` CN22). There
 is **no revision gate**: the request carries no `revision` field at all. A
 chunk is position-addressed data keyed by ids that are never reused, and
 applying one never advances the stored revision, so a push the worker
 planned against a report the agent has since replaced with a newer one is
 harmless — while rejecting it would throw away work the worker has already
-done and need a whole re-sync to re-drive (`dnv-worker.md` BM3). Then SH21
-to SH23: persist the chunk at `LocalMigrBmPath`, recompute from the applied
+done and need a whole re-sync to re-drive (`dnv-worker.md` BM3). A chunk
+equal, byte for byte, to the one the applied set holds at its index for
+the same migration is answered code zero with nothing saved and nothing
+applied: a worker that does not know the applied set, as one restarted
+while this agent kept its revision, pushes every piece again
+(`dnv-worker.md` BM7), and applying an unchanged piece again would only
+pause the volume once more, as the cn agent's identical clone chunk does
+not (`cnagent.md` CN22). Otherwise SH21 to SH23: persist the chunk at `LocalMigrBmPath`, recompute from the applied
 set's contiguous prefix (SH23; shifted by the leg's `meta_blocks`),
 discard the fully-skippable regions of `DnMigrFinalName`, in one call of
 the agent's own process (`OsClient.DiscardRanges`: one open and one

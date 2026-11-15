@@ -45,7 +45,6 @@ const (
 	kindCloneBitmap = "clone_bitmap"
 	kindTransfer    = "transfer"
 	kindMigration   = "migration"
-	kindMigrBitmap  = "migration_bitmap"
 	kindRepair      = "repair"
 	kindRetiredLeg  = "retired_leg"
 	kindSpName      = "sp_id_to_name"
@@ -380,29 +379,6 @@ func MigrationKey(cid uint64, spId uint64, migrName string) string {
 	)
 }
 
-// MigrBitmapKey is the key of one chunk of a migration's bitmap (MD2); bm_idx
-// is the append sequence 0….
-func MigrBitmapKey(
-	cid uint64,
-	spId uint64,
-	migrName string,
-	bmIdx uint32,
-) string {
-	return joinKey(
-		common.DnvPrefix, kindMigrBitmap,
-		idField(cid), idField(spId), migrName, bmIdxField(bmIdx),
-	)
-}
-
-// MigrBitmapPrefix is the prefix MD3 scans keys-only to learn which chunks of
-// a migration's bitmap exist.
-func MigrBitmapPrefix(cid uint64, spId uint64, migrName string) string {
-	return prefixOf(
-		common.DnvPrefix, kindMigrBitmap,
-		idField(cid), idField(spId), migrName,
-	)
-}
-
 // RepairKey is the key of one repair of an SP (MD2).
 func RepairKey(cid uint64, spId uint64, repName string) string {
 	return joinKey(
@@ -520,7 +496,7 @@ func parseBin(s string) (uint32, bool) {
 }
 
 // parseBmIdxField parses one common.BmIdxFmt field; chunk counts are bounded
-// by common.MaxCloneBmCnt / common.MaxMigrBmCnt and a clone key's
+// by common.MaxCloneBmCnt and a clone key's
 // src_slice_idx by common.MaxSliceCntPerSp, so the field is always exactly two
 // hex digits.
 func parseBmIdxField(s string) (uint32, bool) {
@@ -597,28 +573,6 @@ func ParseWorkerRegKey(key string) (string, string, bool) {
 		return "", "", false
 	}
 	return role, seed, true
-}
-
-// ParseBmIdx decodes the append sequence out of a MigrBitmap key (MD2). MD3
-// scans that prefix keys-only, so this is the only way the loader learns which
-// chunks exist without reading a single bitmap. It is the migration parser
-// alone: a clone chunk is addressed by a pair and has its own 7-field key and
-// parser (ParseCloneBmKey), which this rejects.
-func ParseBmIdx(key string) (uint32, bool) {
-	fields, ok := parseFields(key, kindMigrBitmap, 6)
-	if !ok {
-		return 0, false
-	}
-	if _, ok := parseId(fields[2]); !ok {
-		return 0, false
-	}
-	if _, ok := parseId(fields[3]); !ok {
-		return 0, false
-	}
-	if fields[4] == "" {
-		return 0, false
-	}
-	return parseBmIdxField(fields[5])
 }
 
 // ParseCloneBmKey decodes the (src_slice_idx, bm_idx) pair that addresses one

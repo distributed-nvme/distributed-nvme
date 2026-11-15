@@ -285,7 +285,6 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"FinishMigration":                 "finish-migr",
 		"CancelMigration":                 "cancel-migr",
 		"GetMigration":                    "get-migr",
-		"AppendMigrationBitmap":           "append-migr-bm",
 		"CreateRepair":                    "create-repair",
 		"FinishRepair":                    "finish-repair",
 		"CancelRepair":                    "cancel-repair",
@@ -297,10 +296,9 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"ForceStartGroup":                 "force-start-grp",
 		"UpdateGroupOperatorInCharge":     "set-grp-operator-in-charge",
 		"GetThinDeviceBitmap":             "get-td-bm",
-		"GetLegBitmap":                    "get-leg-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 68 {
-		t.Fatalf("service Gateway has %d methods, want 68",
+	if len(pb.Gateway_ServiceDesc.Methods) != 66 {
+		t.Fatalf("service Gateway has %d methods, want 66",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
@@ -350,14 +348,6 @@ func (c *recordingClient) CreateThinDevice(
 ) (*pb.CreateThinDeviceReply, error) {
 	c.req = in
 	return &pb.CreateThinDeviceReply{TdId: 1, DevId: 1}, nil
-}
-
-func (c *recordingClient) AppendMigrationBitmap(
-	ctx context.Context, in *pb.AppendMigrationBitmapRequest,
-	_ ...grpc.CallOption,
-) (*pb.AppendMigrationBitmapReply, error) {
-	c.req = in
-	return &pb.AppendMigrationBitmapReply{MigrId: 1}, nil
 }
 
 func (c *recordingClient) AppendCloneBitmap(
@@ -611,19 +601,6 @@ func TestBitmapPositionIsSentOnlyWhenGiven(t *testing.T) {
 	).(*pb.AppendCloneBitmapRequest)
 	if placed.Offset == nil || placed.GetOffset() != 0 {
 		t.Errorf("--offset 0: offset = %v, want a present 0", placed.Offset)
-	}
-	migrBlind := runArgv(t, "append-migr-bm",
-		"--sp", "sp0", "--rev", "3", "--name", "m0", "--bm-hex", "ff",
-	).(*pb.AppendMigrationBitmapRequest)
-	if migrBlind.BmIdx != nil {
-		t.Errorf("no --bm-idx: bm_idx = %d, want absent", migrBlind.GetBmIdx())
-	}
-	migrPlaced := runArgv(t, "append-migr-bm",
-		"--sp", "sp0", "--rev", "3", "--name", "m0", "--bm-hex", "ff",
-		"--bm-idx", "2",
-	).(*pb.AppendMigrationBitmapRequest)
-	if migrPlaced.GetBmIdx() != 2 {
-		t.Errorf("--bm-idx 2: bm_idx = %d", migrPlaced.GetBmIdx())
 	}
 }
 

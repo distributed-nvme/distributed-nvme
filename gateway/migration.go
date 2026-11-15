@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -33,10 +32,9 @@ import (
 // names so a log record names something greppable. GetMigration writes
 // nothing and therefore needs none.
 const (
-	opCreateMigration       = "CreateMigration"
-	opFinishMigration       = "FinishMigration"
-	opCancelMigration       = "CancelMigration"
-	opAppendMigrationBitmap = "AppendMigrationBitmap"
+	opCreateMigration = "CreateMigration"
+	opFinishMigration = "FinishMigration"
+	opCancelMigration = "CancelMigration"
 )
 
 // whatMigrDst leads CreateMigration's capacity refusals, the scan's (pickDns)
@@ -100,15 +98,10 @@ func migrDstCntlidSlot(conf *pb.SpConf, srcSlot uint32) (uint32, error) {
 }
 
 // dropMigration is the teardown both FinishMigration and CancelMigration
-// perform once they have decided which side survives: the Migration record,
-// every chunk of its bitmap and its entry in the SP's name list disappear
-// together, because a migration that no longer owns two sides can never be
-// resumed.
-//
-// The chunks are deleted one key at a time from bm_idx 0 to bm_cnt-1: an STM
-// cannot range (EU4), and bm_cnt is exactly the number of chunks
-// AppendMigrationBitmap ever wrote, since every append takes the next index
-// and a written chunk is immutable (architecture.md, Migrations).
+// perform once they have decided which side survives: the Migration record
+// and its entry in the SP's name list disappear together, because a
+// migration that no longer owns two sides can never be resumed. Its bitmap
+// lives in the worker's memory alone (dnv-worker.md BM7).
 //
 // The caller still writes the SpConf and bumps SpRev — this helper only
 // mutates the conf in memory, so one transaction keeps one write per key.
@@ -116,11 +109,7 @@ func dropMigration(
 	stm etcdutil.STM,
 	sc *spScope,
 	migrName string,
-	bmCnt uint32,
 ) {
-	for idx := uint32(0); idx < bmCnt; idx++ {
-		stm.Del(model.MigrBitmapKey(sc.Cid, sc.SpId(), migrName, idx))
-	}
 	stm.Del(model.MigrationKey(sc.Cid, sc.SpId(), migrName))
 	sc.Conf.MigrNameList = removeName(sc.Conf.GetMigrNameList(), migrName)
 }
@@ -565,7 +554,6 @@ func (s *Server) CreateMigration(
 					SrcSideId:      req.GetSrcSideId(),
 					DstSideId:      dstSideId,
 					DmCloneConf:    req.GetDmCloneConf(),
-					BmCnt:          0,
 					MetaUnits:      units,
 					CutoverPending: true,
 				},
@@ -790,7 +778,7 @@ func (s *Server) FinishMigration(
 			return err
 		}
 		migrDropSide(loc.Leg, migr.GetSrcSideId())
-		dropMigration(stm, sc, req.GetMigrName(), migr.GetBmCnt())
+		dropMigration(stm, sc, req.GetMigrName())
 		stm.Put(model.SliceKey(sc.Cid, sc.SpId(), loc.SliceId), loc.Slice)
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
 		return bumpSp(stm, opFinishMigration, sc)
@@ -880,7 +868,7 @@ func (s *Server) CancelMigration(
 			return err
 		}
 		migrDropSide(loc.Leg, migr.GetDstSideId())
-		dropMigration(stm, sc, req.GetMigrName(), migr.GetBmCnt())
+		dropMigration(stm, sc, req.GetMigrName())
 		stm.Put(model.SliceKey(sc.Cid, sc.SpId(), loc.SliceId), loc.Slice)
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
 		return bumpSp(stm, opCancelMigration, sc)
@@ -895,10 +883,9 @@ func (s *Server) CancelMigration(
 // read-only transaction (architecture.md, STM discipline), so the SpConf that
 // resolves the key and the Migration it addresses are read at one store
 // revision. It carries no token — a read never
-// needs one — and the Migration is replied verbatim, bm_cnt included, which is
-// what tells a caller how many bitmap chunks it has already appended, and
-// cutover_pending as stored, which tells it whether the cutover has started
-// and so whether a FinishMigration can succeed yet.
+// needs one — and the Migration is replied verbatim, cutover_pending as
+// stored, which tells a caller whether the cutover has started and so whether
+// a FinishMigration can succeed yet.
 func (s *Server) GetMigration(
 	ctx context.Context,
 	req *pb.GetMigrationRequest,
@@ -927,92 +914,4 @@ func (s *Server) GetMigration(
 		return nil, mapStmErr(err)
 	}
 	return &pb.GetMigrationReply{Migr: migr}, nil
-}
-
-// AppendMigrationBitmap is the AppendMigrationBitmap of architecture.md,
-// Migrations: it stores one more chunk of the optional "never written,
-// skippable" bitmap the destination uses to avoid copying blocks that hold
-// nothing (architecture.md, raid0 bitmap math).
-//
-// The chunk lands at bm_idx = the CURRENT bm_cnt and the count then advances,
-// which is the whole append rule: a written chunk is immutable, so the index
-// is a consequence of how many chunks exist. The request's optional `bm_idx`
-// chooses no index: it only names the one the caller expects, so a chunk sent
-// again after a lost answer is recognised instead of stored twice
-// (architecture.md, Migrations). The bytes are stored verbatim (GW14) — the
-// gateway rewrites no bit and reads none for its meaning; the destination
-// agent is what shifts them by the leg's meta_blocks and discards the fully
-// skippable regions.
-func (s *Server) AppendMigrationBitmap(
-	ctx context.Context,
-	req *pb.AppendMigrationBitmapRequest,
-) (*pb.AppendMigrationBitmapReply, error) {
-	if err := validateOptionalName(
-		"cluster_name", req.GetClusterName(),
-	); err != nil {
-		return nil, err
-	}
-	if err := validateName("sp_name", req.GetSpName()); err != nil {
-		return nil, err
-	}
-	if err := validateName("migr_name", req.GetMigrName()); err != nil {
-		return nil, err
-	}
-	if err := validateBitmap(req.GetBitmap()); err != nil {
-		return nil, err
-	}
-	var migrId uint64
-	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
-		migrId = 0
-		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev())
-		if err != nil {
-			return err
-		}
-		migr, err := getMigration(stm, sc, req.GetMigrName())
-		if err != nil {
-			return err
-		}
-		migrId = migr.GetMigrId()
-		bmIdx := migr.GetBmCnt()
-		// A chunk that names its index is placed, never appended blind
-		// (architecture.md, Migrations): at bm_cnt it appends; a chunk whose
-		// bytes already stand at that index is one sent again after a lost
-		// answer, so it changes nothing and bumps nothing; any other index
-		// would move every later chunk and is refused. The repeat is judged
-		// before the ceiling, so the last chunk can be sent again.
-		if req.BmIdx != nil && req.GetBmIdx() != bmIdx {
-			if req.GetBmIdx() < bmIdx {
-				stored := &pb.MigrBitmap{}
-				stm.Get(model.MigrBitmapKey(sc.Cid, sc.SpId(),
-					req.GetMigrName(), req.GetBmIdx()), stored)
-				if bytes.Equal(stored.GetBitmap(), req.GetBitmap()) {
-					return nil
-				}
-			}
-			return errPrecondition(
-				"migration %q bm_cnt is %d: a chunk at bm_idx %d is "+
-					"neither the next chunk nor one already stored",
-				req.GetMigrName(), bmIdx, req.GetBmIdx())
-		}
-		if bmIdx >= common.MaxMigrBmCnt {
-			return errExhausted(
-				"migration %q already has %d bitmap chunks, "+
-					"the maximum is %d",
-				req.GetMigrName(), bmIdx, common.MaxMigrBmCnt)
-		}
-		stm.Put(
-			model.MigrBitmapKey(
-				sc.Cid, sc.SpId(), req.GetMigrName(), bmIdx),
-			&pb.MigrBitmap{Bitmap: req.GetBitmap()},
-		)
-		migr.BmCnt = bmIdx + 1
-		stm.Put(
-			model.MigrationKey(sc.Cid, sc.SpId(), req.GetMigrName()), migr)
-		return bumpSp(stm, opAppendMigrationBitmap, sc)
-	})
-	if err != nil {
-		return nil, mapStmErr(err)
-	}
-	return &pb.AppendMigrationBitmapReply{MigrId: migrId}, nil
 }

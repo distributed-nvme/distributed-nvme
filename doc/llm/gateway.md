@@ -151,7 +151,7 @@ count substituted for a zero `slice_cnt`, is carried by `architecture.md`,
 Storage pools (Storage pools and GrowSlice only names where the handler
 substitutes it); `DefaultClusterName`, `ShardBucketSize`, the
 `Max*CntPerCluster` ceilings, the id step's `IdStepStride`,
-`ThinIdStepStride` and `MaxThinDevId`, `MaxCloneBmCnt`, `MaxMigrBmCnt`,
+`ThinIdStepStride` and `MaxThinDevId`, `MaxCloneBmCnt`,
 `MaxRetiredLegPerGrp` and the bounds of `architecture.md`, Common validation,
 are `architecture.md`'s,
 and so are the metadata ceiling `DnCloneMetaUnitCnt` and the unit formula
@@ -348,10 +348,9 @@ is already set, `ForceStartGroup`'s cancel of a group that carries no
 mark, and `UpdateGroupOperatorInCharge` with the value the group's flag
 holds — writes nothing, bumps nothing and replies OK, a token the request
 carried still being checked first: a no-op that bumped would invalidate
-every client's token for nothing. An `AppendCloneBitmap` or
-`AppendMigrationBitmap` that names the position where the same bytes
-already stand writes nothing, bumps nothing and replies OK in the same way
-(`architecture.md`, Clones, Migrations).
+every client's token for nothing. An `AppendCloneBitmap` that names the
+position where the same bytes already stand writes nothing, bumps nothing
+and replies OK in the same way (`architecture.md`, Clones).
 
 GW7. **Error mapping.** This is the gateway's single error table. Handlers
 return a gRPC status error straight from inside their STM closure:
@@ -380,11 +379,11 @@ uncommitted (`dnv-worker.md` EU4).
   a pool that has spent every thin id (`architecture.md`, Thin
   devices), a clone destination whose dm-clone metadata one side of a clone
   meta group cannot hold (`CreateClone`, the message naming the largest
-  destination one side holds), a side or a leg of a clone meta group named
-  to `CreateMigration` or `GetLegBitmap`, a side of a repair's bad leg named
-  to `CreateMigration`, a repair call on the group of a clone being deleted,
+  destination one side holds), a side of a clone meta group named to
+  `CreateMigration`, a side of a repair's bad leg named to
+  `CreateMigration`, a repair call on the group of a clone being deleted,
   and a repair call the repair's stage does not allow (`architecture.md`,
-  Clones, Migrations, Bitmap reads, Repairs).
+  Clones, Migrations, Repairs).
 * `RESOURCE_EXHAUSTED`: a global's `shard_bucket` sum at `Max*CntPerCluster`;
   the per-SP and per-group count ceilings — `cntlr_id_list` at
   `MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at
@@ -397,10 +396,9 @@ uncommitted (`dnv-worker.md` EU4).
   planning read sees them or `model.ReasonRetiredListFull`, which a finish
   committed after that read reaches (Repairs and retired legs); too few
   candidates
-  (`architecture.md`, Per-operation allocation); `AppendMigrationBitmap`'s
-  `bm_cnt` at `MaxMigrBmCnt`; `AppendCloneBitmap`'s stored chunk plus the
-  new page above `CloneBmChunkBytes` — one chunk's ceiling reached by
-  previous appends, the same shape (its four `INVALID_ARGUMENT` refusals
+  (`architecture.md`, Per-operation allocation); `AppendCloneBitmap`'s
+  stored chunk plus the new page above `CloneBmChunkBytes` — one chunk's
+  ceiling reached by previous appends (its four `INVALID_ARGUMENT` refusals
   are an invalid request: the empty `bitmap` of the first case, both
   index bounds — `src_slice_idx` at or above `src_slice_cnt` and `bm_idx` at
   or above `MaxCloneBmCnt`, checked in-STM — and the stateless page cap, a
@@ -630,10 +628,12 @@ through `nextDevId`, advanced once per device. The id step moves the
 counters this rule draws from (GW19).
 
 GW14. **Bitmaps are opaque.** Bitmap bytes cross the gateway VERBATIM
-in both directions: `AppendCloneBitmap` and `AppendMigrationBitmap` store
-what the request carries (Clones, Migrations — the push of those stored
-chunks to the agents is the worker's, `dnv-worker.md` BM1 to BM6, not a
-gateway RPC), and the bitmap reads reply the agent's bytes (Bitmap reads).
+in both directions: `AppendCloneBitmap` stores what the request carries
+(Clones — the push of those stored chunks to the agents is the worker's,
+`dnv-worker.md` BM1 to BM6, not a gateway RPC), and the bitmap read
+replies the agent's bytes (Bitmap reads). A migration's bitmap never
+crosses the gateway: the worker reads it from the agent itself
+(`dnv-worker.md` BM7).
 The wire convention — 1 means unmapped or never written, least significant
 bit first — is produced and consumed by the agents (`architecture.md`, raid0
 bitmap math: the single inversion at the agent boundary); the gateway never
@@ -641,8 +641,7 @@ converts or trims a bit and reads none for its meaning, so it can never
 disagree with the agents about the convention. The one comparison it makes
 is of stored bytes with a request's, byte for byte, to recognise a page sent
 again at the position it names: a clone page with the stored bytes at the
-offset it names, a migration chunk with the chunk at the index it names
-(`architecture.md`, Clones, Migrations).
+offset it names (`architecture.md`, Clones).
 
 ## Handlers by resource group
 
@@ -1200,11 +1199,10 @@ below name.
 * **AppendCloneBitmap** — one chunk of the SOURCE bitmap, addressed by the
   PAIR (`src_slice_idx`, `bm_idx`); how a chunk is positioned and what an
   absent chunk or a short tail means is `architecture.md`, Bitmap push
-  protocol. Validation: `bitmap` non-empty (`validateBitmap`, shared with
-  `AppendMigrationBitmap`), then a page of at most `CloneBmChunkBytes` —
-  handler-local and NOT in `validateBitmap`, because it is judged on this
-  request alone (a page longer than a whole chunk fits nowhere, whatever is
-  already stored) and migration chunks carry no byte cap of their own. STM:
+  protocol. Validation: `bitmap` non-empty (`validateBitmap`), then a page
+  of at most `CloneBmChunkBytes`, judged on this request alone (a page
+  longer than a whole chunk fits nowhere, whatever is already stored).
+  STM:
   resolve; token; the clone (`loadLiveClone`, so an append to a latched
   clone is refused and the clone key is in the STM's read set either way);
   `src_slice_idx` below `src_slice_cnt` (the WHOLE slice bound —
@@ -1320,25 +1318,16 @@ rather than a candidate problem.
   address read before the source leaves the side list, gets back the
   `meta_units` the `Migration` records through `releaseUnits` — a units-only
   change, so that DN is written and re-indexed with no `BumpDnRev`; a record
-  with no units leaves it unread); delete the `Migration`, its `MigrBitmap`
-  chunks (every index below `bm_cnt`) and its list entry; `BumpSpRev`. Reply
-  `migr_id`.
+  with no units leaves it unread); delete the `Migration` and its list
+  entry; `BumpSpRev`. Reply `migr_id`.
 * **CancelMigration** — STM: resolve; token; the migration; its
   `cutover_pending` clear and `force` false is `FAILED_PRECONDITION`
   (`migrCancelAllowed`; `architecture.md`, Migrations); the reverse of the
   create (drop the destination side, release the destination DN's extents
   and the `meta_units` the `Migration` records with one `BumpDnRev`, delete
-  the `Migration`, its chunks and its list entry); `BumpSpRev`. Reply
-  `migr_id`.
+  the `Migration` and its list entry); `BumpSpRev`. Reply `migr_id`.
 * **GetMigration** — one STM read; the record as stored, `cutover_pending`
   included.
-* **AppendMigrationBitmap** — validate non-empty (`validateBitmap`); STM:
-  resolve; token; the migration; with `bm_idx` present, an index other than
-  `bm_cnt` answers OK writing nothing when that chunk holds the same bytes
-  and is `FAILED_PRECONDITION` otherwise (`architecture.md`, Migrations);
-  the `MaxMigrBmCnt` ceiling on `bm_cnt`; put a **new** chunk at the index
-  `bm_cnt` (chunks are immutable, append-only); advance `bm_cnt`;
-  `BumpSpRev`. Reply `migr_id`.
 
 ### Repairs and retired legs
 
@@ -1453,12 +1442,13 @@ retired legs still answer.
 
 ### Bitmap reads
 
-Both are read-only and two-phase: one STM resolves, then one agent call.
-Both address the SP through its **primary** cntlr (`openBitmapTarget`), so
-an SP with none is `FAILED_PRECONDITION`: there is no controller to ask, and
-a promotion makes the retry succeed, which is what a precondition means.
-The codes are those of `architecture.md`, Bitmap reads, and the ones the
-bullets below name.
+`GetThinDeviceBitmap` is read-only and two-phase: one STM resolves, then
+one agent call. It addresses the SP through its **primary** cntlr
+(`openBitmapTarget`), so an SP with none is `FAILED_PRECONDITION`: there is
+no controller to ask, and a promotion makes the retry succeed, which is
+what a precondition means. The codes are those of `architecture.md`,
+Bitmap reads, and the ones the bullet below names. A leg's bitmap has no
+gateway call: the worker reads it from the agent (`dnv-worker.md` BM7).
 
 * **GetThinDeviceBitmap** — STM: resolve; the td by name to its `td_id`;
   the **primary** cntlr to its `addr_port` and, through `CnConfKey`, its
@@ -1468,11 +1458,6 @@ bullets below name.
   (a zero `block_cnt` reads to the end); a failure is `ABORTED`. Reply the
   bitmap **verbatim** — the wire convention is produced by the agent, and
   the gateway never touches bits (GW14).
-* **GetLegBitmap** — the same shape; the leg is located by a slice scan
-  and, only when no slice holds it, among the legs of the clones' clone meta
-  groups, where a find is `FAILED_PRECONDITION` naming the clone, judged
-  before the primary (`NOT_FOUND` when neither holds it); the call is
-  `GetLegBm` with the `leg_id`, `start_block` and `block_cnt`.
 
 ## Agent calls
 
@@ -1536,7 +1521,6 @@ The complete call matrix:
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
 | `GetThinDeviceBitmap` | `GetThinDeviceBm` | after the STM |
-| `GetLegBitmap` | `GetLegBm` | after the STM |
 
 No other `service Gateway` RPC leaves etcd — the matrix is complete.
 
@@ -1621,8 +1605,8 @@ and with `model` calls or planted writes in the worker's place where a
 precondition waits on the worker. Beyond each handler's own rules, they hold,
 through the real handlers, the count ceilings of `architecture.md`,
 Cardinality limits, on a cluster's nodes and pools, a pool's cntlrs and named
-objects, a subsystem's namespaces, a node's sides or cntlrs, a slice's
-groups and a migration bitmap's chunks, and the size edges of
+objects, a subsystem's namespaces, a node's sides or cntlrs and a slice's
+groups, and the size edges of
 `architecture.md`, Size → extents and Group on-leg layout, and of a transport
 service id: a ceiling is filled by real creates, the create that takes its
 last place is accepted and the next is refused with nothing written, and a
@@ -1685,19 +1669,19 @@ gateway, never through `workerctl`.
   every defaultable member of the stored confs resolved on the write path;
   paging with its empty last page and a malformed token; the inspects passing
   the agent's report and revision through verbatim, a revision the pool's rev
-  key has passed, and the bitmap reads passing its bitmap through, which the
+  key has passed, and the bitmap read passing its bitmap through, which the
   fake replies empty, having no setting for its bytes, so the case proves the
   reply's shape and not that the bytes cross unchanged (GW14), and no suite
-  compares the bytes with the agent's: the e2e suite reads non-empty bitmaps
-  from the real agents and the thin bitmap's bit for the block its setup wrote
+  compares the bytes with the agent's: the e2e suite reads a non-empty thin
+  bitmap from the real agents and its bit for the block its setup wrote
   (`e2e_integtest.md`, The cases); the worker flip the snapshot
   precondition waits for; a migration's `cutover_pending` set
   at its create, a cancel while it is pending, and a finish refused while
   it is pending, with `force` and without, before the suite plays the
   destination's provisioned flip and the cutover; the clone's
-  pair-addressed chunks, a page and a migration chunk placed at the position
-  they name, sent again with no write and refused at another position, past
-  the end and inside the stored bytes, its latch with the destination
+  pair-addressed chunks, a page placed at the position it names, sent again
+  with no write and refused at another position, past the end and inside
+  the stored bytes, its latch with the destination
   namespace resumed,
   its repeat delete and its refusals while latched, then its drain; the
   clone's clone meta group, as many legs of `CloneMetaGrpExtCnt` extents

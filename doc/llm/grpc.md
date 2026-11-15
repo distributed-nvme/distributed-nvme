@@ -109,7 +109,8 @@ L1. Every request and reply **message** is logged at Info with
     (the full method string), `data` (`slog.Any` of the message as
     `PbToLogValue` renders it), and "error?" (only when the call or step
     failed). `PbToLogValue` guarantees that `bytes` fields — the `bitmap`
-    payloads of `Push*Bitmap`, `Append*Bitmap` and `Get*Bitmap`/`Get*Bm` —
+    payloads of `Push*Bitmap`, `AppendCloneBitmap` and
+    `GetThinDeviceBitmap`/`Get*Bm` —
     are logged as a byte count only. Only populated fields appear
     (`log.md` R10), so a reply whose fields all hold their zero values
     renders as an empty object; that is acceptable.
