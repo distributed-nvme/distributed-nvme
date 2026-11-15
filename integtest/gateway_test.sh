@@ -3197,9 +3197,19 @@ EOF
 	# -------------------------------------------------------------------
 	# GW14: the agent's bytes travel verbatim, and this fake replies an
 	# empty bitmap, so the pass-through is an empty hex string of length 0.
+	# t0 carries no namespace since stage 11 moved it to t1, so the read
+	# needs no report of a park (architecture.md, Bitmap reads).
 	out=$(gw get-td-bm --sp sp0 --td t0 --slice-idx 0)
 	assert_field "$out" '.byte_cnt' "0" "get-td-bm byte_cnt"
 	assert_field "$out" '.bitmap_hex' "" "get-td-bm bitmap_hex"
+	# t1 carries the namespace, and the fake, which holds no cntlr, reports
+	# no park of it: the read is refused, with nothing written. A window
+	# that does not start at a multiple of 8 blocks is refused before it.
+	assert_no_write "get-td-bm of a volume whose namespace is not parked" \
+		gwx FAILED_PRECONDITION get-td-bm --sp sp0 --td t1 --slice-idx 0
+	assert_no_write "get-td-bm of a window off a multiple of 8 blocks" \
+		gwx INVALID_ARGUMENT get-td-bm --sp sp0 --td t0 --slice-idx 0 \
+		--start 4 --cnt 8
 	local metaLeg metaSide metaAddr
 	metaLeg=$(sp_leg_id sp0 meta 0 0)
 	metaSide=$(sp_side_id sp0 meta 0 0)

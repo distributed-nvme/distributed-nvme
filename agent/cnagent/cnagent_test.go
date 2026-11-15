@@ -6035,9 +6035,10 @@ func TestParkedNamespaceProbe(t *testing.T) {
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 		row := nsDevRow(t, srv)
 		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
-			row.GetDetails() != "" {
-			t.Fatalf("probed serving ns-dev row: %v/%q",
-				row.GetStatus(), row.GetDetails())
+			row.GetDetails() != "" ||
+			row.GetReason() != pb.ResReason_RES_REASON_NONE {
+			t.Fatalf("probed serving ns-dev row: %v/%q/%v",
+				row.GetStatus(), row.GetDetails(), row.GetReason())
 		}
 		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
 			revision: 3, primary: true}))
@@ -6046,9 +6047,10 @@ func TestParkedNamespaceProbe(t *testing.T) {
 		}
 		row = reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs]
 		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
-			row.GetDetails() != "" {
-			t.Fatalf("converged serving ns-dev row: %v/%q",
-				row.GetStatus(), row.GetDetails())
+			row.GetDetails() != "" ||
+			row.GetReason() != pb.ResReason_RES_REASON_NONE {
+			t.Fatalf("converged serving ns-dev row: %v/%q/%v",
+				row.GetStatus(), row.GetDetails(), row.GetReason())
 		}
 	})
 
@@ -6057,11 +6059,13 @@ func TestParkedNamespaceProbe(t *testing.T) {
 		syncupBoth(t, srv, reqOpts{
 			revision: 2, primary: true, suspended: true})
 		assertParked(t, srv, node, testNs, testTd, "fixture")
+		// The reason is what the gateway's bitmap read reads (CN28).
 		row := nsDevRow(t, srv)
 		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
-			row.GetDetails() != "parked" {
-			t.Fatalf("probed parked ns-dev row: %v/%q",
-				row.GetStatus(), row.GetDetails())
+			row.GetDetails() != "parked" ||
+			row.GetReason() != pb.ResReason_RES_REASON_PARKED {
+			t.Fatalf("probed parked ns-dev row: %v/%q/%v",
+				row.GetStatus(), row.GetDetails(), row.GetReason())
 		}
 		// The converge reply says the same thing. It is a second code path
 		// (`nsDevDetails`, not `probeNsDev`), so it needs its own pin —
@@ -6074,9 +6078,10 @@ func TestParkedNamespaceProbe(t *testing.T) {
 		}
 		row = reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs]
 		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
-			row.GetDetails() != "parked" {
-			t.Fatalf("converged parked ns-dev row: %v/%q",
-				row.GetStatus(), row.GetDetails())
+			row.GetDetails() != "parked" ||
+			row.GetReason() != pb.ResReason_RES_REASON_PARKED {
+			t.Fatalf("converged parked ns-dev row: %v/%q/%v",
+				row.GetStatus(), row.GetDetails(), row.GetReason())
 		}
 	})
 

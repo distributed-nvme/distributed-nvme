@@ -237,6 +237,14 @@ const (
 	// the worker re-sends its Syncup* (dnagent.md SH31). The worker's
 	// health reads the status alone, so the row is healthy.
 	ResReason_RES_REASON_DIFFERS ResReason = 5
+	// The ns-dev of an effectively suspended namespace is parked: live, its
+	// table a dm-linear over the td's dm-error (cnagent.md CN16). The cn
+	// agent sets it on both channels, on that RES_STATUS_OK
+	// ns_id_to_dm_linear row beside the details "parked", which are for
+	// people, and the gateway's GetThinDeviceBitmap reads it: a volume's
+	// bitmap is read only while no namespace on it can take a write
+	// (architecture.md, Bitmap reads).
+	ResReason_RES_REASON_PARKED ResReason = 6
 )
 
 // Enum value maps for ResReason.
@@ -248,6 +256,7 @@ var (
 		3: "RES_REASON_SP_LEVEL",
 		4: "RES_REASON_SOURCE_FAULT",
 		5: "RES_REASON_DIFFERS",
+		6: "RES_REASON_PARKED",
 	}
 	ResReason_value = map[string]int32{
 		"RES_REASON_NONE":             0,
@@ -256,6 +265,7 @@ var (
 		"RES_REASON_SP_LEVEL":         3,
 		"RES_REASON_SOURCE_FAULT":     4,
 		"RES_REASON_DIFFERS":          5,
+		"RES_REASON_PARKED":           6,
 	}
 )
 
@@ -17623,14 +17633,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x05*\xac\x01\n" +
+	"\x12RES_STATUS_PENDING\x10\x05*\xc3\x01\n" +
 	"\tResReason\x12\x13\n" +
 	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
 	"\x17RES_REASON_THIN_ID_LOST\x10\x01\x12\x1f\n" +
 	"\x1bRES_REASON_AWAITING_CUTOVER\x10\x02\x12\x17\n" +
 	"\x13RES_REASON_SP_LEVEL\x10\x03\x12\x1b\n" +
 	"\x17RES_REASON_SOURCE_FAULT\x10\x04\x12\x16\n" +
-	"\x12RES_REASON_DIFFERS\x10\x05*O\n" +
+	"\x12RES_REASON_DIFFERS\x10\x05\x12\x15\n" +
+	"\x11RES_REASON_PARKED\x10\x06*O\n" +
 	"\bRepStage\x12\x15\n" +
 	"\x11REP_STAGE_CREATED\x10\x00\x12\x15\n" +
 	"\x11REP_STAGE_STARTED\x10\x01\x12\x15\n" +

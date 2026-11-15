@@ -1587,7 +1587,8 @@ func TestLeafFlagsIgnoreTheEnvironment(t *testing.T) {
 			wantRequest(t, runArgv(t, "AppendCloneBitmap",
 				"clone", "append-bm", "--name", "cl0"),
 				&pb.AppendCloneBitmapRequest{
-					ClusterName: itCluster, SpName: itSp, CloneName: "cl0"})
+					ClusterName: itCluster, SpName: itSp, CloneName: "cl0",
+					Offset: proto.Uint32(0)})
 			wantRequest(t, runArgv(t, "UpdateSubsystemHosts",
 				"ss", "set-hosts", "--nqn", "n0"),
 				&pb.UpdateSubsystemHostsRequest{
@@ -1819,17 +1820,17 @@ func TestBitmapHexToBytes(t *testing.T) {
 	}
 }
 
-// TestBitmapPositionPresence pins the append-bm position flag: it is sent
-// only when typed, so a typed 0 is a real position and an untyped flag
-// leaves the field absent, which the gateway reads as "append wherever the
-// bitmap ends" (architecture.md, Clones).
+// TestBitmapPositionPresence pins the append-bm position flag: it is always
+// sent, 0 when not typed, so dnvctl never sends a page without its position,
+// which the gateway would read as "append wherever the chunk ends" and store
+// twice when sent again (architecture.md, Clones, Known limits).
 func TestBitmapPositionPresence(t *testing.T) {
-	cloneAbsent := runArgv(t, "AppendCloneBitmap",
+	cloneUntyped := runArgv(t, "AppendCloneBitmap",
 		"clone", "append-bm", "--name", "cl0",
 		"--bm-hex", "a5").(*pb.AppendCloneBitmapRequest)
-	if cloneAbsent.Offset != nil {
-		t.Errorf("no --offset sent offset %d, want it absent",
-			cloneAbsent.GetOffset())
+	if cloneUntyped.Offset == nil || cloneUntyped.GetOffset() != 0 {
+		t.Errorf("no --offset sent %v, want a present 0",
+			cloneUntyped.Offset)
 	}
 	cloneZero := runArgv(t, "AppendCloneBitmap",
 		"clone", "append-bm", "--name", "cl0", "--bm-hex", "a5",

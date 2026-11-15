@@ -842,3 +842,25 @@ func TestLegBitmapRefusedWhenTheResumeFails(t *testing.T) {
 	assertOrder(t, node, "dmsetup suspend "+thin, "dmsetup clear "+thin)
 	assertNoCall(t, node, "reserve_metadata_snap")
 }
+
+// TestBitmapWindowRefusesAnOverflow: a window whose start plus count passes
+// 2^64 is refused as past the end, not wrapped into a small sum, which would
+// size a bitmap of the request's choosing (CN26, CN27).
+func TestBitmapWindowRefusesAnOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		start, cnt, total uint64
+		ok                bool
+	}{
+		{0, 0, 64, true},
+		{8, 56, 64, true},
+		{8, 57, 64, false},
+		{8, ^uint64(0) - 7, 64, false},
+		{65, 0, 64, false},
+	} {
+		_, _, err := bitmapWindow(tc.start, tc.cnt, tc.total)
+		if (err == nil) != tc.ok {
+			t.Errorf("bitmapWindow(%d, %d, %d) = %v, want ok %v",
+				tc.start, tc.cnt, tc.total, err, tc.ok)
+		}
+	}
+}

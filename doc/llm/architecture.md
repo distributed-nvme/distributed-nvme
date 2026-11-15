@@ -3188,18 +3188,19 @@ optimization delivered through
 `PushCloneBitmap` (Bitmap push protocol) and are safe to apply at any
 time, one that arrives once the ns-devs map the dm-clone included (Bitmap
 push protocol, The apply pauses the writers), and the copy's durability
-never depends on them (Clone metadata durability). **A caller reads a source
-bitmap only once the source takes no more writes**: once every cntlr of
-the source pool has applied the transfer's `auto_suspend` move of the
-origin namespace (Transfers; `cnagent.md` CN16), which can be after
-`CreateTransfer` has replied, and only for a thin device that no clone
-targets and that has no namespace but the one the transfer names. A page
-read before that marks as never written every block the source writes
-afterwards, and the clone
-then serves zeros there (Known limits); a source that keeps taking
-writes, one under a transfer with `auto_suspend` false among them, gets no
-bitmap and is copied whole. Nothing in the gateway or the agents orders
-the read, and a reply carries no mark of when it was read.
+never depends on them (Clone metadata durability). **The gateway reads a
+source bitmap only once the source takes no more writes**:
+`GetThinDeviceBitmap` is refused until the source pool's primary reports
+every namespace on the thin device parked (Bitmap reads). For a
+transfer's origin, the only namespace of its volume (Transfers), that is
+once the primary has applied the transfer's `auto_suspend` move of it
+(`cnagent.md` CN16), which can be after `CreateTransfer` has replied; a
+thin device no namespace exports is read at once. A page read while the
+source still took writes would mark as never written every block the
+source wrote afterwards, and the clone would serve zeros there. A source
+that keeps taking writes, one under a transfer with `auto_suspend` false
+among them, gets no bitmap and is copied whole. A thin device a clone
+fills is refused too, as its dm-clone still writes it.
 
 A slice's bitmap is split into up to `MaxCloneBmCnt` fixed-capacity chunks
 of `CloneBmChunkBytes` each: chunk (s, b) holds the bytes of source slice
@@ -3783,9 +3784,35 @@ side down (Teardown by sweep). Reply `leg_id`.
 **GetThinDeviceBitmap** — inputs `td_name`, `slice_idx`, `start_block` and
 `block_cnt`. Errors: `NOT_FOUND` td; `FAILED_PRECONDITION` when the SP has
 no primary cntlr; `INVALID_ARGUMENT` `slice_idx` at or above the SP's slice
-count (judged after the td and the primary); `ABORTED` when the agent call
-fails. The gateway resolves the primary cntlr's CN in an STM, then,
-outside it, calls the agent's `GetThinDeviceBm`, which computes from a
+count (judged after the td and the primary); `INVALID_ARGUMENT` a
+`start_block` that is not a multiple of 8 or lies past the slice's part of
+the td (the td's `size` over the slice count and the pool's `block_size`,
+as the agent sizes it), a `block_cnt` past what is left of that part, and
+a `block_cnt` that is not a multiple of 8, save zero and a window that ends
+where that part ends; `FAILED_PRECONDITION` for a td a clone fills, for a
+td with a namespace of the SP that the desired state does not keep
+effectively suspended (its `suspended` set, or a transfer with
+`auto_suspend` naming it; `cnagent.md` CN16), and while such a namespace
+does not read parked in the primary's report, the primary refuses the
+cntlr or does not answer the report's call; `ABORTED` when the bitmap call
+fails. Reason for the window: a page that starts off a byte cannot be
+placed at a byte of a chunk, and a short page before the last puts its pad
+bits in the middle of one (below); the count is compared with what is
+left, never summed with the start, which could wrap. Reason for the rest:
+a bitmap read while the td can still change marks as never written every
+block written after it, and the clone serves zeros there (Clones). The
+gateway resolves the primary cntlr's CN, the clones and the namespaces on
+the td in an STM, then, outside it and when the td has a namespace, calls
+the agent's `GetCntlrInfo`: every such namespace's ns-dev row must read
+`RES_STATUS_OK` with `RES_REASON_PARKED` (`cnagent.md` CN28). Only the
+primary's ns-dev serves a namespace's IO (Primary cntlr, Standby cntlr), so
+its park is enough; the report answers from the primary's latest
+observation, so a park that has not reached it yet is refused and the
+caller reads again, and a park the desired state has since lifted was
+refused already in the STM. A transfer's own export is not checked: a
+host its `allowed_hosts` admit can still write the origin through it
+(Known limits). Then it calls the agent's
+`GetThinDeviceBm`, which computes from a
 dm-thin metadata snapshot of that slice's pool the mapping bitmap of the
 td's thin volume in that slice (`cnagent.md` CN25, CN26): bit k, for block
 `start_block` plus k of `block_size` bytes, is **1 iff the block is
@@ -3827,10 +3854,10 @@ and cuts it at multiples of `MigrBmPieceBytes` bytes (`dnv-worker.md`
 BM7). The pages of one clone chunk join the same way (Clones), and there
 the caller pages: a bitmap read pads the last byte of its reply with zero
 bits and a page carries no block count, so a page over a block count that
-is not a multiple of 8, appended before the chunk's last page, puts its
-pad bits in the middle of the chunk and shifts every later bit; a caller
-that appends a clone chunk in more than one page reads every page but the
-last over a multiple of 8 blocks (Known limits).
+is not a multiple of 8, appended before the chunk's last page, would put
+its pad bits in the middle of the chunk and shift every later bit. So
+`GetThinDeviceBitmap` reads no such page but the slice's last
+(GetThinDeviceBitmap above).
 
 ## Agent services and agent behavior
 
@@ -5858,8 +5885,10 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   (paged) → `AppendCloneBitmap` with that slice as `src_slice_idx` on sp2
   → the worker's `PushCloneBitmap` (Bitmap push protocol) → the sp2
   primary persists each chunk at `LocalCloneBmPath` and discards
-  (raid0 bitmap math), provided every page was read after the source
-  stopped taking writes (Clones; [D3], [D7]). A chunk takes effect whenever
+  (raid0 bitmap math); the gateway answers each page only once sp1's
+  primary reports the origin parked, so no page is read while the source
+  takes writes through a namespace (Bitmap reads; Clones; [D3], [D7]). A
+  chunk takes effect whenever
   it arrives: once the ns-devs map the dm-clone, they are paused for each
   apply (Bitmap push protocol, The apply pauses the writers).
 * When hydration completes: `DeleteTransfer` with `force` false on sp1
@@ -7204,16 +7233,14 @@ document and only pointed to here.
   on, in its snapshot or in the suspend of a thin device whose writes wait
   there, and a thin device's bitmap read can block in the gap of any leg the
   pool it reads sits on.
-* **A clone chunk whose pages before the last cover block counts that are
-  not multiples of 8 can skip written blocks.** Nothing checks a page's
-  size: a page carries no block count, so the gateway cannot, and it joins
-  a clone chunk's pages byte by byte (Clones). A short page before the
-  last shifts every later bit of the chunk, so a block the source wrote
-  can read as never written, and the copy skips it: the clone serves zeros
-  where the source wrote, with no error. One `--bm-hex` of dnvctl covers
-  only a bounded part of a chunk (`dnvctl.md`, The command tree), so an
-  operator who appends a larger chunk through dnvctl pages it and meets
-  this unless every page but the last covers a multiple of 8 blocks.
+* **A host a transfer admits can write its origin while a clone copies
+  it.** A transfer exports its origin's volume read-write through its own
+  subsystem to the hosts its `allowed_hosts` name (Transfers), meant to be
+  the destination pool's controller nodes, whose dm-clone only reads it. A
+  host listed there by mistake can write the volume after the source
+  bitmap was read, as the gateway checks the pool's namespaces and not the
+  transfer's own export (Bitmap reads), and the clone then serves zeros
+  where that host wrote. Nothing checks what `allowed_hosts` name.
 * **A clone bitmap page sent again without its position is stored
   twice.** `AppendCloneBitmap` places a page only when the request names
   its position (Clones). Without it the page lands at the end, so a caller
@@ -7222,8 +7249,9 @@ document and only pointed to here.
   since the page's own commit raised the revision. Every later bit of that
   clone chunk then moves, so blocks the source wrote can read as never
   written and the copy skips them, with no error: the clone serves zeros
-  there. dnvctl sends the position only when its flag is typed
-  (`dnvctl.md`, `clone` — `ctl/clone.go`).
+  there. dnvctl always sends the position (`dnvctl.md`, `clone` —
+  `ctl/clone.go`), so only a caller of the API that leaves it out meets
+  this.
 * **A forced finish before the copy is whole serves the destination's
   recycled bytes.** `FinishMigration` with `force` skips the proof that the
   copy is complete and nothing else (Migrations), so after the cutover it
@@ -7232,18 +7260,6 @@ document and only pointed to here.
   copy had not reached reads what the destination's extents held, which
   may be another pool's bytes ([D15]); only the first blocks of a new data
   side are zeroed (Side provisioning protocol).
-* **A source bitmap read too early makes a clone skip blocks the source
-  wrote later.** Nothing orders a `GetThinDeviceBitmap` read against the
-  transfer it feeds, and the reply carries no mark of when it was read; the
-  caller keeps the order (Clones). A page read while the source still took
-  writes marks as never written every block the source wrote after it; the
-  destination's primary discards those regions on its dm-clone while no
-  ns-dev maps it, which marks them copied without copying (Bitmap push
-  protocol), and the clone serves
-  zeros there with no error, since its destination td was empty ([D3]). The
-  loss is certain for a chunk that reaches the primary before the dm-clone
-  is built, since the chunks it holds are applied before the copy starts
-  (`cnagent.md` CN18).
 * **A recycled tail can fail a fresh leg.** No tail of a new side is
   zeroed ([D15]): an md superblock of a format that sits at the end of a
   device, which a host of an earlier pool wrote there, can make a fresh

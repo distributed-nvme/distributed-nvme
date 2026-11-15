@@ -446,9 +446,11 @@ the level ladder down to disabled and back, each rung awaited on the primary's
 rows missing, each with the level's reason and the marker "sp_level" as its
 details (`cnagent.md` CN19; `architecture.md`, SpLevel), the read-only rung
 reading the data and keeping a write off the media (`cnagent.md` CN16's
-read-only rule; `architecture.md`, [D11]); a snapshot and both bitmap reads,
-the thin bitmap clear at the block setup wrote (`architecture.md`, Bitmap
-reads; `cnagent.md` CN26, CN27); a namespace suspend that parks rather than
+read-only rule; `architecture.md`, [D11]); a snapshot and a bitmap read,
+refused for the volume a host's namespace serves and answered for the
+snapshot, which no namespace exports, its bitmap clear at the block setup
+wrote (`architecture.md`, Bitmap reads; `cnagent.md` CN26); a namespace
+suspend that parks rather than
 removes, and a repoint there and back (`architecture.md`, Namespace suspend
 semantics); and a disabled disk node and controller node, invisible to the
 agents, each proved by a refused allocation that writes nothing
@@ -459,9 +461,13 @@ migration and an operator's repairs — and that a clone's copy survives a
 failover, each judged by a record or a device read back. A transfer,
 auto-suspended, parks the origin namespace and carries its identity, so host1,
 the only host connected to it, reads the origin through it (`architecture.md`,
-Transfers; `cnagent.md` CN17). A clone pulls the origin through the transfer
-into a fresh thin device served live through the dm-clone (`cnagent.md` CN16's
-clone rule, CN18); its unforced delete rests on the gateway's proof of
+Transfers; `cnagent.md` CN17). The origin's bitmap is read once the
+primary reports the origin parked, a wait the case polls, and appended as
+the clone's one chunk; the fallback's source, a namespace the clone reads
+through and so never parked, is refused its read and appends none
+(`architecture.md`, Bitmap reads). A clone pulls the origin through the
+transfer into a fresh thin device served live through the dm-clone
+(`cnagent.md` CN16's clone rule, CN18); its unforced delete rests on the gateway's proof of
 hydration, and with the transfer aborted the destination, read through its own
 raid0 with no source left to read through, holds what hydration copied
 (`architecture.md`, Transfer + clone = cross-SP live migration, [D3]); a source

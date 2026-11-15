@@ -312,6 +312,14 @@ enum ResReason {
     // the worker re-sends its Syncup* (dnagent.md SH31). The worker's
     // health reads the status alone, so the row is healthy.
     RES_REASON_DIFFERS = 5;
+    // The ns-dev of an effectively suspended namespace is parked: live, its
+    // table a dm-linear over the td's dm-error (cnagent.md CN16). The cn
+    // agent sets it on both channels, on that RES_STATUS_OK
+    // ns_id_to_dm_linear row beside the details "parked", which are for
+    // people, and the gateway's GetThinDeviceBitmap reads it: a volume's
+    // bitmap is read only while no namespace on it can take a write
+    // (architecture.md, Bitmap reads).
+    RES_REASON_PARKED = 6;
 }
 
 message ResInfo {

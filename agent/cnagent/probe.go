@@ -313,8 +313,9 @@ func (s *CnAgentServer) probeCntlr(
 	// Namespace devices, then the host-facing nvmet objects.
 	for _, np := range plan.namespaces {
 		status, details := s.probeNsDev(ctx, plan.rd, np)
-		info.NsIdToDmLinear[np.nsId] = deferredSet(t, np.deferred,
-			resKeyOf(resKeyNsDevFmt, np.nsId), np.devName, status, details)
+		info.NsIdToDmLinear[np.nsId] = deferredSetReason(t, np.deferred,
+			resKeyOf(resKeyNsDevFmt, np.nsId), np.devName, status, details,
+			nsDevReason(status, details))
 	}
 	for _, ssp := range plan.subsystems {
 		status, details := s.probeExport(ctx, s.subsysConf(plan, ssp))

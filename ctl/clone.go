@@ -13,6 +13,7 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -201,11 +202,14 @@ func cloneSetTrCmd() *cobra.Command {
 // C = common.CloneBmChunkBytes. Chunks are self-positioned, so an operator may
 // send them in any order and leave whole chunks unsent; only the PAGES of ONE
 // chunk must arrive in slice-bitmap order, because the gateway appends each
-// page at that chunk's current length. --offset, sent only when typed, names
-// the page's byte offset in the chunk, so a page sent again after a lost answer
-// changes nothing and a page at a wrong offset is refused (architecture.md,
-// Clones). The Clone record carries no chunk count: how many chunks a clone
-// holds is how many chunk keys it has.
+// page at that chunk's current length. --offset names the page's byte offset
+// in the chunk and is always sent, 0 when it is not typed, so a page sent
+// again after a lost answer changes nothing and a page at a wrong offset —
+// a later page sent with no --offset among them — is refused by the gateway,
+// or taken with no write when its bytes equal those at that offset, never
+// appended twice (architecture.md, Clones). dnvctl checks nothing itself
+// (CT8). The Clone record carries no chunk count: how many chunks a
+// clone holds is how many chunk keys it has.
 //
 // --bm-hex splits the two failure kinds dnvctl.md, `clone` — `ctl/clone.go`,
 // insists on: an EMPTY value sends an empty bitmap on purpose, so the
@@ -233,7 +237,7 @@ func cloneAppendBmCmd() *cobra.Command {
 				SrcSliceIdx: u32Of("src-slice-idx"),
 				BmIdx:       u32Of("bm-idx"),
 				Bitmap:      bitmap,
-				Offset:      optU32Of("offset"),
+				Offset:      proto.Uint32(u32Of("offset")),
 			}
 			return func(ctx context.Context, client pb.GatewayClient) (
 				any, error,
@@ -248,6 +252,7 @@ func cloneAppendBmCmd() *cobra.Command {
 	flags.String("bm-hex", "",
 		"bitmap as hex; empty sends an empty bitmap on purpose")
 	flags.Uint32("offset", 0,
-		"the page's byte offset in the chunk; sent only when given")
+		"the page's byte offset in the chunk; 0, the chunk's start, when "+
+			"not given")
 	return cmd
 }

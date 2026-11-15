@@ -551,15 +551,20 @@ Clones. dnvctl adds no wait flag here either (CT8, CT1).
 `clone append-bm` addresses a chunk by the pair `--src-slice-idx` and
 `--bm-idx`, never by either alone; what a chunk is and how its pages append
 is `architecture.md`, Clones. `--offset` names a page's position in its
-chunk and is sent only when typed, so a typed 0 is a real position and an
-untyped flag leaves the field out; what the gateway does with a page sent
-again is `architecture.md`, Clones. An empty `--bm-hex` sends an empty bitmap on
+chunk and is always sent, 0, the chunk's start, when it is not typed, so
+dnvctl never sends a page without its position: a page sent again changes
+nothing, and a later page sent with no `--offset` is refused by the
+gateway, or taken with no write when its bytes equal those at the chunk's
+start, but never appended where the chunk ends; dnvctl checks nothing
+itself (CT8), and what the gateway does with each is `architecture.md`,
+Clones. An empty `--bm-hex` sends an empty bitmap on
 purpose, so the gateway's refusal of one stays reachable; a malformed
 non-empty value is a usage error (exit 2). The leaf takes the bitmap as
 one hex string in `--bm-hex`, with no file or stdin input, so the kernel's
 bound on the length of one argument bounds one append to half that many
-bytes of bitmap, and a larger chunk is appended in pages, each but the last
-over a multiple of 8 blocks (`architecture.md`, Known limits).
+bytes of bitmap, and a larger chunk is appended in pages, each read over a
+multiple of 8 blocks but the slice's last, which the gateway enforces
+on the read (`architecture.md`, Bitmap reads).
 
 ### `xfer` — `ctl/xfer.go`
 

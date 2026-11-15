@@ -12261,7 +12261,14 @@ ops_snapshot() {
 	assert_field "$CTL_OUT" ".name_to_td.$SNAP0.ori_id" "$t0dev" \
 		"$SNAP0's ori_id is $TD0's dev_id (uint32s, so bare numbers)"
 
-	ctl_ok td get-bm --name "$TD0" --slice-idx 0 --start 0 --cnt 0
+	# The gateway reads a volume's bitmap only while every namespace on it
+	# is parked on the primary (architecture.md, Bitmap reads): $TD0's
+	# namespace serves host0, so its read is refused, and the read goes to
+	# the snapshot, which no namespace exports and which maps what $TD0
+	# mapped when it was taken.
+	ctl_fail FAILED_PRECONDITION td get-bm --name "$TD0" --slice-idx 0 \
+		--start 0 --cnt 0
+	ctl_ok td get-bm --name "$SNAP0" --slice-idx 0 --start 0 --cnt 0
 	bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
 	assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
 		"byte_cnt is a Go int and renders as a bare number, not a quoted uint64"
@@ -12287,7 +12294,7 @@ ops_snapshot() {
 	# the low bit of the first two hex digits. bitmap_hex is at least two
 	# digits here — the two assertions above pin byte_cnt >= 1 and the length.
 	assert_eq "$((0x${hex:0:2} & 1))" 0 \
-		"block 0 of slice 0 of $TD0 is MAPPED (host0 wrote $BASELINE_MIB MiB at offset 0; on the wire 1 = unmapped)"
+		"block 0 of slice 0 of $SNAP0 is MAPPED (host0 wrote $BASELINE_MIB MiB at offset 0 of $TD0 before the snapshot; on the wire 1 = unmapped)"
 
 
 	# The second thin device is deliberately $TD0's size and not one
@@ -12760,8 +12767,8 @@ COPY_HYD_MARK=0
 COPY_SRC_START=0
 
 # The two migrations, and the "last observation" scratch of the predicates
-# below (migr_cutover_started, migr_dst_serving and side_hydrated share
-# MIGR_HYD_LAST, as no two of their waits overlap). Each
+# below (migr_cutover_started, migr_dst_serving, side_hydrated and
+# copy_src_bm_read share MIGR_HYD_LAST, as no two of their waits overlap). Each
 # of those is logged from inside its predicate when the value CHANGES and is
 # never interpolated into a wait_until label: a label is expanded once, at
 # the call, so it can only carry what was there before the first poll.
@@ -13347,6 +13354,25 @@ copy_pieces_taken() { # <v> <k> <migr id> <cnt>
 		 | (.data.bm_idx // 0)] | unique | length') ||
 		die "copy_pieces_taken: jq failed on $(dn_log "$2") of dn$1"
 	[ "$n" -ge "$4" ]
+}
+
+# copy_src_bm_read is copy step 2's read of the source's slice-0 bitmap as a
+# poll: the gateway refuses it FAILED_PRECONDITION until the source pool's
+# primary reports the source's namespace parked (architecture.md, Bitmap
+# reads), and a refusal is logged when its message changes. The reply of the
+# read that answers stays in CTL_OUT.
+copy_src_bm_read() {
+	local sig
+	if ctl_try --sp "$COPY_SRC_SP" td get-bm --name "$COPY_SRC_TD" \
+		--slice-idx 0 --start 0 --cnt 0; then
+		return 0
+	fi
+	sig=${CTL_ERR:-"dnvctl exit code $CTL_RC"}
+	if [ "$sig" != "$MIGR_HYD_LAST" ]; then
+		MIGR_HYD_LAST=$sig
+		log "  td get-bm of $COPY_SRC_TD refused: $sig"
+	fi
+	return 1
 }
 
 # copy_forced_drop is the copy case's forced drop (e2e_integtest.md, The
@@ -14223,28 +14249,46 @@ copy_clone_build() {
 	# --cnt 0 is the whole slice, and an EMPTY bitmap would be refused by the
 	# gateway on purpose ("bitmap must not be empty"), so the byte count is
 	# asserted before it is sent rather than after it is refused.
-	ctl_ok --sp "$COPY_SRC_SP" td get-bm --name "$COPY_SRC_TD" \
-		--slice-idx 0 --start 0 --cnt 0
-	bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
-	assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-		"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
-	assert_ge "$bytes" 1 \
-		"slice 0 of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
-	assert_le "$bytes" 1048576 \
-		"one chunk may not exceed common.CloneBmChunkBytes (AppendCloneBitmap (gateway/clone.go))"
-	hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
-	assert_eq "${#hex}" "$((bytes * 2))" \
-		"bitmap_hex is two hex digits per byte_cnt byte"
+	#
+	# The gateway reads the source's bitmap only while every namespace on it
+	# is parked on its pool's primary (architecture.md, Bitmap reads). The
+	# self branch's source is the transfer's origin, which the transfer's
+	# --auto-suspend parks; the primary's report shows the park a round or
+	# so after host0 saw the namespace go inaccessible, so the read is
+	# polled. The sp1 branch's source is a plain namespace the clone reads
+	# through, never parked: its read is refused, no chunk is appended, and
+	# the clone copies every region.
+	if [ "$COPY_SRC_BRANCH" = sp1 ]; then
+		ctl_fail FAILED_PRECONDITION --sp "$COPY_SRC_SP" td get-bm \
+			--name "$COPY_SRC_TD" --slice-idx 0 --start 0 --cnt 0
+		log "  the sp1 source's namespace is not parked: no bitmap chunk," \
+			"the clone copies every region"
+	else
+		MIGR_HYD_LAST=""
+		wait_until "$WAIT_PROVISION" \
+			"the gateway to read the bitmap of the parked source $COPY_SRC_TD" \
+			copy_src_bm_read
+		bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
+		assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
+			"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
+		assert_ge "$bytes" 1 \
+			"slice 0 of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
+		assert_le "$bytes" 1048576 \
+			"one chunk may not exceed common.CloneBmChunkBytes (AppendCloneBitmap (gateway/clone.go))"
+		hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
+		assert_eq "${#hex}" "$((bytes * 2))" \
+			"bitmap_hex is two hex digits per byte_cnt byte"
 
-	# The chunk is addressed by the PAIR (src_slice_idx, bm_idx), never by
-	# either alone (ctl/clone.go's append-bm comment; CN22 bounds them
-	# independently). Chunk (0, 0) is the first CloneBmChunkBytes of source
-	# slice 0's bitmap, which is the whole of it at every shape this suite
-	# builds.
-	ctl_ok clone append-bm --name "$CLONE0" --src-slice-idx 0 --bm-idx 0 \
-		--bm-hex "$hex"
-	assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
-		"AppendCloneBitmapReply.clone_id"
+		# The chunk is addressed by the PAIR (src_slice_idx, bm_idx), never by
+		# either alone (ctl/clone.go's append-bm comment; CN22 bounds them
+		# independently). Chunk (0, 0) is the first CloneBmChunkBytes of source
+		# slice 0's bitmap, which is the whole of it at every shape this suite
+		# builds.
+		ctl_ok clone append-bm --name "$CLONE0" --src-slice-idx 0 --bm-idx 0 \
+			--bm-hex "$hex"
+		assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
+			"AppendCloneBitmapReply.clone_id"
+	fi
 
 	# UpdateCloneTrConf with the SAME transport: the RPC exists for a source
 	# that moved, and re-sending the current one is the only way to exercise

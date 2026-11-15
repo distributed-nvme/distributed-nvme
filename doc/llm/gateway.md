@@ -1443,7 +1443,8 @@ retired legs still answer.
 ### Bitmap reads
 
 `GetThinDeviceBitmap` is read-only and two-phase: one STM resolves, then
-one agent call. It addresses the SP through its **primary** cntlr
+the agent calls, the report of a park when a namespace exports the td and
+the read. It addresses the SP through its **primary** cntlr
 (`openBitmapTarget`), so an SP with none is `FAILED_PRECONDITION`: there is
 no controller to ask, and a promotion makes the retry succeed, which is
 what a precondition means. The codes are those of `architecture.md`,
@@ -1453,7 +1454,23 @@ gateway call: the worker reads it from the agent (`dnv-worker.md` BM7).
 * **GetThinDeviceBitmap** — STM: resolve; the td by name to its `td_id`;
   the **primary** cntlr to its `addr_port` and, through `CnConfKey`, its
   `cn_id`; `slice_idx` within the SP's slice count, else
-  `INVALID_ARGUMENT`. Then `GetThinDeviceBm` with the cluster id, `cn_id`,
+  `INVALID_ARGUMENT`; the window (`checkBitmapWindow`): a `start_block`
+  that is not a multiple of 8 or lies past the slice's part of the td
+  (`size` over the slice count and the pool's `data_block_size`), a
+  `block_cnt` past what is left of it, and a `block_cnt` that is not a
+  multiple of 8, save zero and a window ending at that part's end, are
+  `INVALID_ARGUMENT`; a clone whose `dst_td_id` is the td's
+  (`tdCloneRef`) is `FAILED_PRECONDITION` naming it; the namespaces of the
+  SP whose `td_id` is the td's (`volumeNamespaces`), one the desired state
+  does not keep effectively suspended `FAILED_PRECONDITION`, a listed
+  subsystem or transfer whose key is gone `ABORTED`. Then, when there is
+  any, `GetCntlrInfo` of the primary (`checkVolumeParked`): each one's
+  `ns_id_to_dm_linear` row must read `RES_STATUS_OK` with
+  `RES_REASON_PARKED`, else `FAILED_PRECONDITION` naming the namespace, as
+  is a reply with a non-zero code or a call that fails, as for
+  `DeleteClone`'s proof: the read is not proven safe yet
+  (`architecture.md`, Bitmap reads). Then
+  `GetThinDeviceBm` with the cluster id, `cn_id`,
   `sp_id`, `cntlr_id`, `td_id`, `slice_idx`, `start_block` and `block_cnt`
   (a zero `block_cnt` reads to the end); a failure is `ABORTED`. Reply the
   bitmap **verbatim** — the wire convention is produced by the agent, and
@@ -1482,9 +1499,12 @@ keeps no connection cache like the worker's (`dnv-worker.md` RW7).
 AG3. **Failure mapping.** A transport or non-OK status maps to the code the
 RPC's specification names: `ABORTED` everywhere except the `force` false
 checks of `DeleteClone` and `FinishMigration`, where an unreachable agent is
-`FAILED_PRECONDITION` (the caller cannot prove hydration is done), and
+`FAILED_PRECONDITION` (the caller cannot prove hydration is done),
 `ForceStartGroup`'s check of the group's array, where it is
-`FAILED_PRECONDITION` too (the caller cannot prove the array does not run).
+`FAILED_PRECONDITION` too (the caller cannot prove the array does not run),
+and `GetThinDeviceBitmap`'s check of the parks, where it is
+`FAILED_PRECONDITION` as well (the caller cannot prove the volume takes no
+writes); that check also refuses a reply with a non-zero code.
 The agent-side `AgentReply.code` convention does not apply to `Get*Size`,
 `Get*Info` or `Get*Bm` beyond what their replies define: `ForceStartGroup`'s
 check reads the group's row whatever the reply's code, and a `GetCntlrInfo`
@@ -1520,7 +1540,7 @@ The complete call matrix:
 | `DeleteClone` with `force` false | `GetCntlrInfo` | between the STMs |
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
-| `GetThinDeviceBitmap` | `GetThinDeviceBm` | after the STM |
+| `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
 
 No other `service Gateway` RPC leaves etcd — the matrix is complete.
 
@@ -1671,7 +1691,9 @@ gateway, never through `workerctl`.
   the agent's report and revision through verbatim, a revision the pool's rev
   key has passed, and the bitmap read passing its bitmap through, which the
   fake replies empty, having no setting for its bytes, so the case proves the
-  reply's shape and not that the bytes cross unchanged (GW14), and no suite
+  reply's shape and not that the bytes cross unchanged (GW14), refused with
+  nothing written for a td whose namespace the fake reports no park of and
+  for a window off a multiple of 8 blocks, and no suite
   compares the bytes with the agent's: the e2e suite reads a non-empty thin
   bitmap from the real agents and its bit for the block its setup wrote
   (`e2e_integtest.md`, The cases); the worker flip the snapshot

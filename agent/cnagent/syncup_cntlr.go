@@ -638,6 +638,14 @@ func (s *CnAgentServer) build(
 			// A deferred namespace is built exactly as the effective plan
 			// wants it — on the td's dm-error — but nothing under it can
 			// serve, so it reports PROVISIONING rather than OK ([D15]).
+			if err == nil && !np.deferred {
+				// Built as wanted; a parked one says so by its reason.
+				details := nsDevDetails(np)
+				info.NsIdToDmLinear[np.nsId] = st.tracker.SetReason(key,
+					np.devName, pb.ResStatus_RES_STATUS_OK, details,
+					nsDevReason(pb.ResStatus_RES_STATUS_OK, details))
+				continue
+			}
 			info.NsIdToDmLinear[np.nsId] = deferredFromErr(
 				st.tracker, np.deferred, key, np.devName,
 				nsDevDetails(np), err)
@@ -1009,6 +1017,17 @@ func nsDevDetails(np *nsPlan) string {
 		return detailsParked
 	}
 	return ""
+}
+
+// nsDevReason is the reason of an ns-dev row: RES_REASON_PARKED beside the
+// details of a parked ns-dev that reads OK, which the gateway's
+// GetThinDeviceBitmap reads (CN28; architecture.md, Bitmap reads), and
+// none otherwise.
+func nsDevReason(status pb.ResStatus, details string) pb.ResReason {
+	if status == pb.ResStatus_RES_STATUS_OK && details == detailsParked {
+		return pb.ResReason_RES_REASON_PARKED
+	}
+	return pb.ResReason_RES_REASON_NONE
 }
 
 // reportCloneDeferred fills the two rows of a clone whose destination td or

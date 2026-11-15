@@ -3824,7 +3824,9 @@ The rows, each with its `res_name` and what its probe checks:
   the read's error when that status read fails on a dm-clone that is there
   or whose absence is not confirmed; an effectively suspended ns-dev is
   expected live on the td's `CnErrorName` and reports `RES_STATUS_OK` with the details
-  "parked"; a dm-suspended ns-dev is `RES_STATUS_ERROR` "unexpectedly
+  "parked" and `RES_REASON_PARKED`, on a converge's report and a read's
+  alike, which the gateway's bitmap read of the td reads (`architecture.md`,
+  Bitmap reads); a dm-suspended ns-dev is `RES_STATUS_ERROR` "unexpectedly
   suspended" whatever the plan says; a provisioning-deferred one reports
   `RES_STATUS_PROVISIONING` over its permanent dm-error.
 * `td_id_to_raid0` and `td_id_to_dm_error`, named by the `CnRaid0Name`

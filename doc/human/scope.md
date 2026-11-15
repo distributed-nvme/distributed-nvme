@@ -125,31 +125,26 @@ md never trusts an old superblock.
 can skip the blocks a volume never wrote. For a migration the worker
 reads the leg's list of written blocks itself, once the old side takes no
 more writes, and hands it to the new side in pieces of a fixed size. For a
-clone the caller reads the source volume's list and hands it over, in
-pieces, and the list must be read at the right time.
+clone the caller reads the source volume's list and hands it over in
+pieces; the gateway answers the read only while every namespace on the
+volume is set aside on the primary, and only in pieces that join, and
+dnvctl always sends a piece's position.
 
-- **A source volume's written-block list read too early for a clone.**
-  The read must come after the source stopped taking writes. An earlier
-  read makes the clone serve zeros where the source has data, with no
-  error. State: fix decided, the gateway refuses the read until the
-  transfer has set the source volume's namespace aside on the source
-  pool's primary: the namespace is ANA inaccessible and its device serves
-  no IO. Not seen in the lab.
-- **A clone's written-block list in pieces can shift.** One piece, one
-  `--bm-hex` of dnvctl, covers only part of a large volume, so such a list
-  goes in pieces. A clone's list is first cut into chunks, each at a fixed
-  place, and each chunk goes in pieces. A piece carries no block count,
-  and dnvctl sends a piece's position only when you give it. Two mistakes
-  shift the later blocks of the same chunk: a piece before the last whose
-  block count is not a multiple of eight, and a piece sent twice without
-  its position. The clone then reads zeros where the source wrote. No
-  error shows. Until the fix, read every piece but the last over a
-  multiple of eight blocks. Give dnvctl the piece's position, `--offset`,
-  whenever you may send a piece again; a piece sent again with its
-  position is left as it is. State: fix decided. The gateway refuses a
-  read whose block count is not a multiple of eight before the end of the
-  volume, and dnvctl always sends a piece's position. Not seen in the
-  lab.
+- **A host a transfer lets in can write the source while a clone copies
+  it.** A transfer exports the source volume to the hosts you list, meant
+  to be the other pool's controller nodes, which only read it. The gateway
+  checks that every namespace on the volume is set aside, but not the
+  transfer's own export. A host you list there by mistake can write the
+  volume after its list was read, and the clone then reads zeros where
+  that host wrote, with no error. State: accepted. Procedure to write, one
+  line in the operations doc: list only the other pool's controller nodes.
+- **A clone's list piece sent twice without its position is stored
+  twice.** dnvctl always sends a piece's position, so this needs a program
+  that calls the gateway itself and leaves the position out. Every later
+  block of that chunk then moves, and the clone reads zeros where the
+  source wrote, with no error. State: accepted. The position is optional in
+  the call so that older callers keep working.
+
 - **A forced finish of a migration before the copy is whole.** The finish
   with force skips the proof that the copy is whole, and the old side is
   removed. The regions the copy

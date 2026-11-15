@@ -201,10 +201,13 @@ func bitmapWindow(
 	if blockCnt == 0 {
 		return startBlock, total - startBlock, nil
 	}
-	if startBlock+blockCnt > total {
+	// blockCnt is compared with what is left, never summed with
+	// startBlock: a sum past 2^64 wraps, and a count that wrapped would size
+	// a bitmap of the request's own choosing.
+	if blockCnt > total-startBlock {
 		return 0, 0, status.Errorf(codes.Internal,
-			"window [%d,%d) is past the end (%d blocks)",
-			startBlock, startBlock+blockCnt, total)
+			"window of %d blocks from %d is past the end (%d blocks)",
+			blockCnt, startBlock, total)
 	}
 	return startBlock, blockCnt, nil
 }
