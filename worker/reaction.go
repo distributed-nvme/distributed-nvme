@@ -35,8 +35,6 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -1613,61 +1611,21 @@ type poolUsage struct {
 	totalData uint64
 }
 
-// parseThinPoolStatus parses one raw `dmsetup status` line of a thin pool
-// (AR6). The fields after the `thin-pool` token are
-//
-//	<transaction_id> <used_meta>/<total_meta> <used_data>/<total_data> …
-//
-// so the token is located rather than a fixed column counted: the line may or
-// may not be prefixed with the device name and the start/length pair, and
-// everything after the two ratios (held metadata root, the rw/ro and discard
-// flags, needs_check, the low watermark) is of no interest here.
-//
-// A pool that has failed reports `thin-pool Fail` and parses as garbage, which
-// is exactly right: a failed pool is not grown, it is reported.
+// parseThinPoolStatus is common.ParseThinPoolStatus in AR6's shape: the
+// four counts of one thin pool's `dmsetup status` line. A pool that has failed
+// reports `thin-pool Fail` and does not parse, which is exactly right: a
+// failed pool is not grown, it is reported.
 func parseThinPoolStatus(details string) (poolUsage, bool) {
-	fields := strings.Fields(details)
-	token := -1
-	for idx, field := range fields {
-		if field == "thin-pool" {
-			token = idx
-			break
-		}
-	}
-	if token < 0 || len(fields) < token+4 {
-		return poolUsage{}, false
-	}
-	usedMeta, totalMeta, ok := parseRatio(fields[token+2])
-	if !ok {
-		return poolUsage{}, false
-	}
-	usedData, totalData, ok := parseRatio(fields[token+3])
+	st, ok := common.ParseThinPoolStatus(details)
 	if !ok {
 		return poolUsage{}, false
 	}
 	return poolUsage{
-		usedMeta:  usedMeta,
-		totalMeta: totalMeta,
-		usedData:  usedData,
-		totalData: totalData,
+		usedMeta:  st.UsedMetaBlocks,
+		totalMeta: st.TotalMetaBlocks,
+		usedData:  st.UsedDataBlocks,
+		totalData: st.TotalDataBlocks,
 	}, true
-}
-
-// parseRatio parses one `<used>/<total>` field of a thin-pool status line.
-func parseRatio(field string) (uint64, uint64, bool) {
-	used, total, found := strings.Cut(field, "/")
-	if !found {
-		return 0, 0, false
-	}
-	usedVal, err := strconv.ParseUint(used, 10, 64)
-	if err != nil {
-		return 0, 0, false
-	}
-	totalVal, err := strconv.ParseUint(total, 10, 64)
-	if err != nil {
-		return 0, 0, false
-	}
-	return usedVal, totalVal, true
 }
 
 // parsePoolStatus is parseThinPoolStatus plus AR6's "an unparsable line is

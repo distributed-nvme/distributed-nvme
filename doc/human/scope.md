@@ -499,10 +499,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   and the build needs the source. State: fix decided, the worker drains a
   clone once the primary reports its copy whole, so the volume no longer
   needs the source. Not seen in the lab.
-- **A metadata grow stopped halfway is never finished.** A grow of a
-  slice's thin pool metadata takes two table loads. A pass stopped between
-  them never runs the second. The thin pool keeps its old metadata size,
-  and its row reads ok. State: fix decided. Not seen in the lab.
 - **Orphans the sweep never removes.** An export of a side whose build
   stopped before the export named its device. A subsystem for hosts whose
   build stopped before dnv set the model name by which it knows its own

@@ -333,6 +333,12 @@ type fakeDm struct {
 	snapshot bool
 	// heldRoot models a reserved metadata snapshot.
 	heldRoot bool
+	// poolMetaBlocks is a thin-pool's total metadata blocks, as dm-thin
+	// takes them from its metadata device at the create and at each
+	// resume, and never otherwise (poolTakeMeta). poolNeedsCheck is the
+	// needs_check flag, under which a resume grows nothing.
+	poolMetaBlocks uint64
+	poolNeedsCheck bool
 }
 
 type fakeArray struct {
@@ -1707,6 +1713,9 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 			// A resume makes the waiting table live.
 			f.goLive(args[1], dm)
 		}
+		if args[0] == "resume" {
+			f.poolTakeMeta(dm)
+		}
 		dm.suspended = args[0] == "suspend"
 		return "", 0
 	case "clear":
@@ -1964,6 +1973,7 @@ func (f *fakeNode) dmCreate(args []string, stdin string) (string, int) {
 		return "", code
 	}
 	f.dms[name] = dm
+	f.poolTakeMeta(dm)
 	path := "/dev/mapper/" + name
 	devNo := f.newDevNo()
 	f.devNo[path] = devNo
@@ -1991,6 +2001,32 @@ func (f *fakeNode) dmReload(args []string, stdin string) (string, int) {
 	}
 	dm.waiting = &fakeTable{table: table, readOnly: readOnly}
 	return "", 0
+}
+
+// fakeThinMetaMaxBlocks is the kernel's DM_SM_METADATA_MAX_BLOCKS, written
+// out here and not taken from common, so the fake does not prove the agent's
+// arithmetic with the agent's own function.
+const fakeThinMetaMaxBlocks = 255 * (16384 - 64)
+
+// poolTakeMeta is dm-thin taking a thin-pool's metadata device, at its
+// create and at each resume (pool_preresume, maybe_resize_metadata_dev): the
+// total grows to what the device holds in whole 4 KiB blocks, capped as the
+// kernel caps it, never shrinks, and stays put under needs_check. Called
+// with f.mu held; a device that is no thin-pool, or whose metadata device is
+// gone, is left alone.
+func (f *fakeNode) poolTakeMeta(dm *fakeDm) {
+	fields := strings.Fields(dm.table)
+	if len(fields) < 4 || fields[2] != "thin-pool" || dm.poolNeedsCheck {
+		return
+	}
+	meta := f.dmByDevNo(fields[3])
+	if meta == nil {
+		return
+	}
+	blocks := min(tableSectors(meta.table)/8, fakeThinMetaMaxBlocks)
+	if blocks > dm.poolMetaBlocks {
+		dm.poolMetaBlocks = blocks
+	}
 }
 
 // goLive makes the waiting table of dm, the device name, its live one.
@@ -2291,11 +2327,17 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 			held = "123"
 		}
 		// The thin-pool auto-grow (dnv-worker.md AR6)
-		// parses the two used/total pairs out of this.
+		// parses the two used/total pairs out of this, and
+		// the converge and the read compare the metadata total with
+		// the metadata device (CN13).
+		check := "-"
+		if dm.poolNeedsCheck {
+			check = "needs_check"
+		}
 		return fmt.Sprintf(
-			"0 %s thin-pool 0 12/1024 5/%s %s rw discard_passdown "+
-				"queue_if_no_space - 1024\n",
-			sectors, fields[6], held), 0
+			"0 %s thin-pool 0 12/%d 5/%s %s rw discard_passdown "+
+				"queue_if_no_space %s 1024\n",
+			sectors, dm.poolMetaBlocks, fields[6], held, check), 0
 	case "clone":
 		if dm.metaMode == common.CloneMetadataFail {
 			return fmt.Sprintf("0 %s clone Fail\n", sectors), 0

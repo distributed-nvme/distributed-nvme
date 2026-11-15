@@ -175,3 +175,88 @@ func ParseCloneStatus(raw string) (*CloneStatus, bool) {
 	}
 	return st, true
 }
+
+// ThinPoolStatus is what one thin pool's `dmsetup status` line says of its
+// size and state: the metadata pair in dm-thin's fixed metadata blocks
+// (ThinMetaBlockSize), the data pair in the pool's data_block_size, and
+// whether the line carries needs_check.
+type ThinPoolStatus struct {
+	UsedMetaBlocks  uint64
+	TotalMetaBlocks uint64
+	UsedDataBlocks  uint64
+	TotalDataBlocks uint64
+	// NeedsCheck is the line's needs_check flag: dm-thin then grows no
+	// metadata device at a resume (maybe_resize_metadata_dev), whatever its
+	// size.
+	NeedsCheck bool
+}
+
+// ParseThinPoolStatus parses one raw `dmsetup status` line of a thin pool.
+// The fields after the `thin-pool` token are
+//
+//	<transaction_id> <used_meta>/<total_meta> <used_data>/<total_data> …
+//
+// so the token is located rather than a fixed column counted: the line may
+// or may not be prefixed with the device name and the start/length pair.
+// Of what follows the two ratios — the held metadata root, the rw/ro and
+// discard flags, needs_check, the low watermark — only needs_check is read.
+// A pool that has failed reports `thin-pool Fail` and does not parse.
+func ParseThinPoolStatus(raw string) (*ThinPoolStatus, bool) {
+	fields := strings.Fields(raw)
+	token := -1
+	for idx, field := range fields {
+		if field == "thin-pool" {
+			token = idx
+			break
+		}
+	}
+	if token < 0 || len(fields) < token+4 {
+		return nil, false
+	}
+	usedMeta, totalMeta, ok := parseStatusRatio(fields[token+2])
+	if !ok {
+		return nil, false
+	}
+	usedData, totalData, ok := parseStatusRatio(fields[token+3])
+	if !ok {
+		return nil, false
+	}
+	st := &ThinPoolStatus{
+		UsedMetaBlocks:  usedMeta,
+		TotalMetaBlocks: totalMeta,
+		UsedDataBlocks:  usedData,
+		TotalDataBlocks: totalData,
+	}
+	for _, field := range fields[token+4:] {
+		if field == "needs_check" {
+			st.NeedsCheck = true
+		}
+	}
+	return st, true
+}
+
+// parseStatusRatio parses one `<used>/<total>` field of a status line.
+func parseStatusRatio(field string) (uint64, uint64, bool) {
+	used, total, found := strings.Cut(field, "/")
+	if !found {
+		return 0, 0, false
+	}
+	usedVal, err := strconv.ParseUint(used, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	totalVal, err := strconv.ParseUint(total, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return usedVal, totalVal, true
+}
+
+// ThinMetaBlocks is the total metadata blocks a thin pool reports once it
+// has taken a metadata device of sectors 512-byte sectors, as dm-thin
+// counts them at a resume (get_metadata_dev_size_in_blocks) and at its
+// format: the device's size capped at ThinMetaMaxBlocks blocks of
+// ThinMetaBlockSize.
+func ThinMetaBlocks(sectors uint64) uint64 {
+	return min(sectors/(ThinMetaBlockSize/512), ThinMetaMaxBlocks)
+}

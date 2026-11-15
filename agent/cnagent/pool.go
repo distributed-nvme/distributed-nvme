@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -89,8 +90,14 @@ func (s *CnAgentServer) ensureSlice(
 			poolKey, sp.poolFinalName, err.Error())
 		return false
 	}
-	info.SliceIdToDmPool[sp.sliceId] = st.tracker.Ok(
-		poolKey, sp.poolFinalName, raw)
+	// A pool still short of its metadata device — the reload above did not
+	// grow it — says so as the read does (probePool).
+	reason := pb.ResReason_RES_REASON_NONE
+	if poolMetaShort(raw, sp.metaSectors) {
+		reason = pb.ResReason_RES_REASON_DIFFERS
+	}
+	info.SliceIdToDmPool[sp.sliceId] = st.tracker.SetReason(
+		poolKey, sp.poolFinalName, pb.ResStatus_RES_STATUS_OK, raw, reason)
 	return true
 }
 
@@ -136,7 +143,11 @@ func (s *CnAgentServer) poolArgs(
 // changes nothing in the pool's own four arguments, and dm-thin picks up a
 // resized metadata or data device solely in `pool_preresume` — i.e. on a
 // suspend/resume. Without it an operator's metadata grow reports success while
-// the pool keeps running on the old size (CN13).
+// the pool keeps running on the old size (CN13). A pass that grew the
+// metadata concat and stopped before the pool's reload leaves a pool whose
+// table matches; the next pass finds it by the pool's own status, its total
+// metadata blocks short of what dm-thin takes from the concat
+// (poolMetaShort), and reloads it then.
 //
 // The Create branch — and **only** it — arms CN14's activation sweep. The
 // fan-outs that skip a `delete` on every cntlr (a demote and a delete
@@ -179,6 +190,16 @@ func (s *CnAgentServer) ensurePool(
 		return nil
 	}
 	if concatGrew {
+		return s.dm.Reload(ctx, sp.poolFinalName, table)
+	}
+	// A status that cannot be read is no reason to reload: the row's own
+	// status read reports it after this.
+	if raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName); err == nil &&
+		poolMetaShort(raw, sp.metaSectors) {
+		slog.InfoContext(ctx, "thin-pool metadata short of its device",
+			slog.String("pool", sp.poolFinalName),
+			slog.String("status", raw),
+			slog.Uint64("meta_sectors", sp.metaSectors))
 		return s.dm.Reload(ctx, sp.poolFinalName, table)
 	}
 	// dm-thin appends status-derived feature arguments to its table output,
@@ -421,36 +442,63 @@ func (s *CnAgentServer) probePool(
 	ctx context.Context,
 	plan *cntlrPlan,
 	sp *slicePlan,
-) (pb.ResStatus, string) {
+) (pb.ResStatus, string, pb.ResReason) {
+	const none = pb.ResReason_RES_REASON_NONE
 	dev, err := s.dmInfo(ctx, plan.rd, sp.poolFinalName)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
 	if dev == nil {
-		return pb.ResStatus_RES_STATUS_MISSING, ""
+		return pb.ResStatus_RES_STATUS_MISSING, "", none
 	}
 	args, err := s.poolArgs(ctx, plan, sp)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
 	targets, err := s.dmTable(ctx, plan.rd, sp.poolFinalName)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
 	if !dmTableMatches(
 		targets, "thin-pool", sp.dataSectors, args, len(args)) {
-		return pb.ResStatus_RES_STATUS_ERROR, "table is not the desired pool"
+		return pb.ResStatus_RES_STATUS_ERROR, "table is not the desired pool",
+			none
 	}
 	// A suspended pool serves no IO (detailsSuspended).
 	if dev.Suspended {
-		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
+		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended, none
 	}
 	// The same noflush read as the converge's (dnagent.md SH17).
 	raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
-	return pb.ResStatus_RES_STATUS_OK, raw
+	// A pool short of its metadata device serves; the reason makes the
+	// verdict name the row, so the worker re-sends the SyncupCntlr whose
+	// converge reloads it (ensurePool; CN30). The details stay the raw
+	// status line, which the worker's auto-grow parses (dnv-worker.md AR6).
+	if poolMetaShort(raw, sp.metaSectors) {
+		return pb.ResStatus_RES_STATUS_OK, raw,
+			pb.ResReason_RES_REASON_DIFFERS
+	}
+	return pb.ResStatus_RES_STATUS_OK, raw, none
+}
+
+// poolMetaShort reports whether a thin pool's status line shows fewer total
+// metadata blocks than dm-thin takes from a metadata device of metaSectors,
+// the slice's metadata concat (common.ThinMetaBlocks): the state a pass
+// leaves that grew the concat and stopped before the pool's reload, as only a
+// resume makes dm-thin take a larger device (CN13). It is the kernel's own
+// arithmetic, so a pool that took its device is never short. A line that
+// does not parse, a failed pool's among them, is not short, and neither is
+// one with needs_check: dm-thin grows no metadata device then, and a reload
+// would change nothing.
+func poolMetaShort(raw string, metaSectors uint64) bool {
+	st, ok := common.ParseThinPoolStatus(raw)
+	if !ok || st.NeedsCheck {
+		return false
+	}
+	return st.TotalMetaBlocks < common.ThinMetaBlocks(metaSectors)
 }
 
 func (s *CnAgentServer) probeThin(

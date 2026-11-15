@@ -2062,7 +2062,20 @@ nothing in it, since the metadata device is named there, not sized;
 dm-thin takes the data size from the table's length and reads the
 metadata device's size, each only when the pool resumes, so the converge
 that appended the groups reloads the pool even over an unchanged table
-(`concatGrew`); no pool message is involved. A deferred group (CN9) is left
+(`concatGrew`); no pool message is involved. A pass that grew the metadata
+concat and stopped before the pool's reload, as one killed between the
+two does, leaves a pool whose table matches; so every converge also reads
+the pool's status (noflush) and reloads the pool while its total metadata
+blocks are fewer than dm-thin takes from the concat — the concat's size
+capped at `ThinMetaMaxBlocks` blocks of `ThinMetaBlockSize`, the kernel's
+own arithmetic (`common.ThinMetaBlocks`), so a pool that took its device
+is never reloaded again. A status line that does not parse, a failed
+pool's among them, or that carries needs_check is not judged: dm-thin
+grows no metadata device under needs_check, and a reload would change
+nothing on every pass. A read makes the same comparison and reports such
+a pool's row `RES_STATUS_OK` with `RES_REASON_DIFFERS`, its details still
+the raw status line, so its verdict names the row (CN30) and the worker
+sends the `SyncupCntlr` whose converge reloads it. A deferred group (CN9) is left
 out of both concats and out of the pool sizing until it clears, and so
 is every group after it in the same list — the concat takes each list's
 leading run of non-deferred groups, never a filtered subset, because a
@@ -3844,7 +3857,10 @@ The rows, each with its `res_name` and what its probe checks:
   `dmsetup status` with the `--noflush` flag (`dnagent.md` SH17); the
   details are the raw status line — the worker
   parses data and metadata used and total out of it for the auto-grow of
-  `architecture.md`, Automatic reactions. The serving pool stays
+  `architecture.md`, Automatic reactions. A pool whose metadata total is
+  short of its metadata device reads `RES_STATUS_OK` with
+  `RES_REASON_DIFFERS` and the same raw line, on a converge and a read
+  alike (CN13). The serving pool stays
   `RES_STATUS_OK` with that raw line even while a deferred group waits to
   be grown in (CN13): `PROVISIONING` never marks the serving pool, because
   it would switch auto-grow off.
@@ -4052,12 +4068,14 @@ its details and the converge pass continues with the remaining resources.
 Two things qualify that. The details are for people: where the worker must
 tell one cause of a row's status from another, the row says so in its reason
 (`architecture.md`, Live-state reporting), never in the text. The cn agent
-sets three reasons: CN14's lost thin id, from the command wrapper's typed
+sets five reasons: CN14's lost thin id, from the command wrapper's typed
 error (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`); and,
 from its own pass's state, CN19's level, from the level the pass's plan
-reads, and CN18's source fault, which marks the clone rows this node keeps
+reads, CN18's source fault, which marks the clone rows this node keeps
 missing because it does not read the clone's source as ready, from step 1's
-reading of the source. And a clone's two rows take their status from CN18's
+reading of the source, CN28's differs, on a namespace whose ANA group
+differs and on a thin pool short of its metadata device (CN13), and CN28's
+parked, on a parked ns-dev. And a clone's two rows take their status from CN18's
 shared rule, from the live state, on a converge and a read alike, a failed
 command's output joining their details. Probes create, change and remove no
 object of the node — the one file the CN's read writes itself is the store's
@@ -4155,7 +4173,8 @@ ns-dev and subsystem, and a transfer's dm-linear over its origin's
 raid0, its subsystem and its namespace over both. It names a row that
 reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
 `RES_STATUS_ERROR`, or `RES_STATUS_OK` with `RES_REASON_DIFFERS` (a
-namespace that serves and whose ANA group differs), as "differs". It
+namespace that serves and whose ANA group differs, or a thin pool short of
+its metadata device, CN13), as "differs". It
 names no row the level suppresses, no `RES_STATUS_PROVISIONING` row, no
 thin row a converge marks `RES_REASON_THIN_ID_LOST` (CN14), no subsystem
 whose link fails because the node's port is not there ("the port is not

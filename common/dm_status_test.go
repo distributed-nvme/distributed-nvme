@@ -237,3 +237,56 @@ func TestCloneFailed(t *testing.T) {
 		}
 	}
 }
+
+// TestParseThinPoolStatus pins the thin-pool line's four counts and its
+// needs_check flag, with and without the device's name and range ahead of
+// the target, and a failed pool's line, which does not parse.
+func TestParseThinPoolStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want *ThinPoolStatus
+	}{
+		{"a bare line", "0 1024 thin-pool 3 12/4096 5/62 - rw " +
+			"discard_passdown queue_if_no_space - 1024",
+			&ThinPoolStatus{12, 4096, 5, 62, false}},
+		{"named, with needs_check", "pool: 0 1024 thin-pool 3 12/4096 5/62 " +
+			"- ro discard_passdown queue_if_no_space needs_check 1024",
+			&ThinPoolStatus{12, 4096, 5, 62, true}},
+		{"a failed pool", "0 1024 thin-pool Fail", nil},
+		{"no pool", "0 1024 linear 8:0 0", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ParseThinPoolStatus(tc.line)
+			if tc.want == nil {
+				if ok {
+					t.Fatalf("parsed %+v, want no parse", got)
+				}
+				return
+			}
+			if !ok || *got != *tc.want {
+				t.Fatalf("got %+v %v, want %+v", got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// TestThinMetaBlocks pins dm-thin's sizing of a metadata device: whole
+// blocks of ThinMetaBlockSize, capped at ThinMetaMaxBlocks
+// (get_metadata_dev_size_in_blocks).
+func TestThinMetaBlocks(t *testing.T) {
+	for _, tc := range []struct{ sectors, want uint64 }{
+		{0, 0},
+		{7, 0},
+		{8, 1},
+		{4096 * 8, 4096},
+		{ThinMetaMaxBlocks * 8, ThinMetaMaxBlocks},
+		{ThinMetaMaxBlocks*8 + 8, ThinMetaMaxBlocks},
+		{1 << 40, ThinMetaMaxBlocks},
+	} {
+		if got := ThinMetaBlocks(tc.sectors); got != tc.want {
+			t.Errorf("ThinMetaBlocks(%d) = %d, want %d", tc.sectors, got,
+				tc.want)
+		}
+	}
+}

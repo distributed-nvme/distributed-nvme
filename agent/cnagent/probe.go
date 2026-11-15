@@ -165,9 +165,9 @@ func (s *CnAgentServer) probeCntlr(
 			ctx, plan, sp.poolDataName, poolSegments(sp.effDataGrps))
 		info.SliceIdToData[sp.sliceId] = t.Set(
 			dataKey, sp.poolDataName, status, details)
-		status, details = s.probePool(ctx, plan, sp)
-		info.SliceIdToDmPool[sp.sliceId] = t.Set(
-			poolKey, sp.poolFinalName, status, details)
+		status, details, reason := s.probePool(ctx, plan, sp)
+		info.SliceIdToDmPool[sp.sliceId] = t.SetReason(
+			poolKey, sp.poolFinalName, status, details, reason)
 	}
 
 	// Thin volumes.

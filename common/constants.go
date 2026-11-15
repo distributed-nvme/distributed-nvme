@@ -62,6 +62,11 @@ const (
 	// block size / ThinMetaBlockSize of them (dnv-worker.md AR6;
 	// model.GrowPending).
 	ThinMetaBlockSize = 4096
+	// ThinMetaMaxBlocks is the most metadata blocks a thin pool uses, however
+	// large its metadata device: dm-thin caps the device at
+	// DM_SM_METADATA_MAX_SECTORS, 255 x (2^14 - 64) blocks of
+	// ThinMetaBlockSize (ThinMetaBlocks; cnagent.md CN13).
+	ThinMetaMaxBlocks = 255 * ((1 << 14) - 64)
 
 	// MinChunkBlockCnt, MaxChunkBlockCnt and DefaultChunkBlockCnt are the
 	// bounds and the default of redund_md_raid1.bitmap_chunk_block_cnt, the

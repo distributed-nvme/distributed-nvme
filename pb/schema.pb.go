@@ -231,7 +231,10 @@ const (
 	// optimized path: a namespace wanted
 	// non-optimized or inaccessible whose ANA group differs, as one still
 	// optimized after a failed move to inaccessible (one wanted optimized
-	// that is not reads RES_STATUS_ERROR instead). Both agents set it on
+	// that is not reads RES_STATUS_ERROR instead), and a thin pool whose
+	// metadata total is short of its metadata device, which a reload
+	// finishes (cnagent.md CN13), its details the raw status line, which
+	// shows the short total. Both agents set it on
 	// both channels, on a RES_STATUS_OK row whose details say what
 	// differs, and the object's verdict names the row on both channels, so
 	// the worker re-sends its Syncup* (dnagent.md SH31). The worker's

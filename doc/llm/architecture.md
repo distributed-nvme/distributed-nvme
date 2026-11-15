@@ -4356,12 +4356,13 @@ rows the cn agent keeps `MISSING` because it does not read the clone's
 source as ready, CN18 saying which; the settle of `dnv-worker.md` HL2
 reads these two; and `RES_REASON_DIFFERS`, which both agents set on an
 `OK` row of an object that is there and differs without leaving a primary
-short of its optimized path. The one such object is a
-namespace wanted non-optimized or inaccessible whose ANA group differs,
-as one still optimized after a failed move to inaccessible; one wanted
-optimized that is not leaves the primary without its optimized path and
-reads `RES_STATUS_ERROR` instead (`dnagent.md` DN18, SH31; `cnagent.md`
-CN28). The object's verdict names a `RES_REASON_DIFFERS` row, so the
+short of its optimized path. There are two such objects: a namespace
+wanted non-optimized or inaccessible whose ANA group differs, as one still
+optimized after a failed move to inaccessible, where one wanted optimized
+that is not leaves the primary without its optimized path and reads
+`RES_STATUS_ERROR` instead (`dnagent.md` DN18, SH31; `cnagent.md` CN28);
+and a thin pool whose metadata total is short of its metadata device,
+which a reload finishes (`cnagent.md` CN13). The object's verdict names a `RES_REASON_DIFFERS` row, so the
 worker re-sends its `Syncup*` (`dnagent.md` SH31); no health rule reads
 it, so such a row is healthy. An agent sets a reason from what its own pass
 established, never from a row's text: `cnagent.md` CN29 says how the cn

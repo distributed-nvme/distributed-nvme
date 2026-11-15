@@ -753,3 +753,165 @@ func assertCloneRows(
 		}
 	}
 }
+
+// metaGrownReq is the fixture's request at revision with a second meta group
+// appended to the slice, a metadata grow (CN13).
+func metaGrownReq(revision uint64) *pb.SyncupCntlrRequest {
+	grown := cntlrReq(reqOpts{revision: revision, primary: true})
+	slice := grown.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)]
+	slice.MetaGrpList = append(slice.MetaGrpList, &pb.Group{
+		GrpId:      testMetaGrp + 0x100,
+		ExtCnt:     1,
+		MetaBlocks: 1,
+		DataBlocks: 63,
+		LegList: []*pb.Leg{legOf(testMetaLeg+0x100,
+			sideOf(testMetaSide+0x200, testIp2, testSvcId2))},
+	})
+	return grown
+}
+
+// poolRow is the slice's pool row of one read of the cntlr.
+func poolRow(t *testing.T, srv *CnAgentServer) *pb.ResInfo {
+	t.Helper()
+	return checkRound(t, srv, 3).GetSliceIdToDmPool()[testSlice]
+}
+
+// TestAStoppedMetadataGrowIsFinished is CN13's finish of a metadata grow
+// that stopped halfway: a pass that grew the metadata concat and stopped
+// before the pool's reload, as one killed between the two does, leaves a
+// pool whose table matches and whose metadata total is short of the concat.
+// A read reports the pool row OK with RES_REASON_DIFFERS, its details still
+// the raw status line, and its verdict names the row (CN30); the next pass
+// reloads the pool, whose total then matches what dm-thin takes from the
+// concat; and a pass after that reloads nothing.
+func TestAStoppedMetadataGrowIsFinished(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	pool := node.dms[poolName(srv)]
+	before := pool.poolMetaBlocks
+	grown := metaGrownReq(3)
+	if _, err := srv.SyncupCntlr(context.Background(), grown); err != nil {
+		t.Fatalf("grow: %v", err)
+	}
+	metaName := srv.nf.CnPoolMetaName(testCluster, testCn, testSp, testSlice)
+	want := common.ThinMetaBlocks(tableSectors(node.dms[metaName].table))
+	if pool.poolMetaBlocks != want || want <= before {
+		t.Fatalf("fixture: the grow left %d metadata blocks, want %d above "+
+			"%d", pool.poolMetaBlocks, want, before)
+	}
+	// The pass that stopped: the concat grown, the pool not resumed.
+	pool.poolMetaBlocks = before
+
+	row := poolRow(t, srv)
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+		row.GetReason() != pb.ResReason_RES_REASON_DIFFERS ||
+		!strings.Contains(row.GetDetails(), "thin-pool") {
+		t.Fatalf("the read's pool row: %v", row)
+	}
+	verdict := checkCntlrVerdict(t, srv, 3)
+	if verdict.GetCode() != common.ReplyCodeLeftover ||
+		!strings.Contains(verdict.GetDetails(), poolName(srv)+": differs") {
+		t.Fatalf("the read's verdict: %v, want the pool row named", verdict)
+	}
+
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), grown); err != nil {
+		t.Fatalf("the next pass: %v", err)
+	}
+	assertOrder(t, node, "cmd dmsetup reload "+poolName(srv))
+	if pool.poolMetaBlocks != want {
+		t.Fatalf("after the next pass: %d metadata blocks, want %d",
+			pool.poolMetaBlocks, want)
+	}
+	if row := poolRow(t, srv); row.GetReason() !=
+		pb.ResReason_RES_REASON_NONE {
+		t.Fatalf("the read after the reload: %v", row)
+	}
+
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), grown); err != nil {
+		t.Fatalf("a pass after: %v", err)
+	}
+	assertNoCall(t, node, "cmd dmsetup reload "+poolName(srv))
+}
+
+// TestAShortPoolUnderNeedsCheckIsLeftAlone: under needs_check dm-thin grows
+// no metadata device at a resume, so a pool short of its concat with the
+// flag set is not reloaded, which would change nothing on every pass, and
+// its read row carries no reason (CN13).
+func TestAShortPoolUnderNeedsCheckIsLeftAlone(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	pool := node.dms[poolName(srv)]
+	before := pool.poolMetaBlocks
+	grown := metaGrownReq(3)
+	if _, err := srv.SyncupCntlr(context.Background(), grown); err != nil {
+		t.Fatalf("grow: %v", err)
+	}
+	pool.poolMetaBlocks = before
+	pool.poolNeedsCheck = true
+
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), grown); err != nil {
+		t.Fatalf("the next pass: %v", err)
+	}
+	assertNoCall(t, node, "cmd dmsetup reload "+poolName(srv))
+	if row := poolRow(t, srv); row.GetReason() !=
+		pb.ResReason_RES_REASON_NONE {
+		t.Fatalf("the read of a pool under needs_check: %v", row)
+	}
+	if verdict := checkCntlrVerdict(t, srv, 3); verdict.GetCode() != 0 {
+		t.Fatalf("the read's verdict under needs_check: %v, want clean",
+			verdict)
+	}
+}
+
+// TestPoolMetaShort pins the rule of CN13's check on its own: a parsed line
+// whose metadata total is below what dm-thin takes from the device is
+// short; one at it, one under needs_check, a failed pool's and one that does
+// not parse are not.
+func TestPoolMetaShort(t *testing.T) {
+	line := func(total uint64, check string) string {
+		return fmt.Sprintf("0 1024 thin-pool 0 12/%d 5/62 - rw "+
+			"discard_passdown queue_if_no_space %s 1024", total, check)
+	}
+	const sectors = 4096 * 8
+	for _, tc := range []struct {
+		name  string
+		raw   string
+		short bool
+	}{
+		{"short", line(1024, "-"), true},
+		{"at the device's size", line(4096, "-"), false},
+		{"short under needs_check", line(1024, "needs_check"), false},
+		{"a failed pool", "0 1024 thin-pool Fail", false},
+		{"no pool line", "", false},
+	} {
+		if got := poolMetaShort(tc.raw, sectors); got != tc.short {
+			t.Errorf("%s: poolMetaShort = %v, want %v", tc.name, got,
+				tc.short)
+		}
+	}
+}
+
+// TestAPoolStatusThatFailsReloadsNothing: a converge whose pool status read
+// fails does not reload the pool for its metadata — it cannot judge it —
+// and the pool's row reports the failed read (CN13).
+func TestAPoolStatusThatFailsReloadsNothing(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	key := "dmsetup status --noflush " + poolName(srv)
+	node.failCmdAlways[key] = "device-mapper: status ioctl failed"
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(),
+		cntlrReq(reqOpts{revision: 3, primary: true}))
+	delete(node.failCmdAlways, key)
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	assertNoCall(t, node, "cmd dmsetup reload "+poolName(srv))
+	row := reply.GetCntlrInfo().GetSliceIdToDmPool()[testSlice]
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("the pool row after a failed status read: %v", row)
+	}
+}

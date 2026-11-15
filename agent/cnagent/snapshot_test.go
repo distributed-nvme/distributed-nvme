@@ -675,10 +675,13 @@ func TestSnapshotTornBesideAPoolNotReady(t *testing.T) {
 	notReadyRun := func(off, on uint64) *pb.CntlrInfo {
 		t.Helper()
 		node.Reset()
-		node.failCmd["dmsetup status --noflush "+poolNameOf(srv, off)] =
-			"device-mapper: status ioctl on " + poolNameOf(srv, off) +
-				"  failed: Input/output error"
+		// Every status read of the pass fails: the converge reads the
+		// pool's status before its row's (ensurePool, CN13).
+		key := "dmsetup status --noflush " + poolNameOf(srv, off)
+		node.failCmdAlways[key] = "device-mapper: status ioctl on " +
+			poolNameOf(srv, off) + "  failed: Input/output error"
 		info := syncupCntlrAt(t, srv, o).GetCntlrInfo()
+		delete(node.failCmdAlways, key)
 		assertMissingDetails(t, info.GetTdIdToThinInfo()[testSnapTd].
 			GetSliceIdToDmThin()[off], "thin pool missing",
 			fmt.Sprintf("snap thin slice %#x, its pool not ready", off))
