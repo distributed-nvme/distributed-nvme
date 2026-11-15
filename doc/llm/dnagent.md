@@ -2843,7 +2843,7 @@ report `RES_STATUS_PROVISIONING` with details "side provisioning" — at or
 above it the level comes first and no `migr_dst_info` row is emitted at all
 (DN18). Bitmap chunks pushed meanwhile are still persisted and counted as
 applied (DN15) and are applied when the dm-clone is finally created
-(`architecture.md`, Migration, says when a caller may read the leg bitmap
+(`architecture.md`, Migration, says when the worker reads the leg bitmap
 they come from). Cancelling the migration inside this window is the DN9
 cancel-and-wait path: the goroutine is stopped and waited for before
 `DnSideName` is removed.
@@ -3373,7 +3373,9 @@ after it, so the two channels name one node alike:
   dm-linear and export rows and a migration destination's target and
   dm-clone rows that read `RES_STATUS_MISSING` or `RES_STATUS_ERROR`, the
   primary's dm-linear that reads `RES_STATUS_PENDING` because its path
-  waits for the fence (DN10), or `RES_STATUS_OK` with
+  waits for the fence (DN10), a migration source's export that reads
+  `RES_STATUS_PENDING` because its link waits for the fence (DN12), or
+  `RES_STATUS_OK` with
   `RES_REASON_DIFFERS` — an export that serves and whose ANA group
   differs. A part an export's build makes that is
   not there — its namespace, the namespace's enable, its link into a port
@@ -3707,7 +3709,8 @@ else reported through `agent_reply` is still a protocol-level refusal.
 ## Known limits
 
 * A migration's bitmap apply takes time that grows with its ranges: each
-  push applies the whole skip set under the side's DN1 locks (DN15), each
+  push of a piece not held byte for byte applies the whole skip set under
+  the side's DN1 locks (DN15), each
   create, resume or reload of the dm-clone does under the converge's locks,
   and the startup reconcile does for every side under the node write lock.
   The discards run in the agent's own process, one open and one ioctl per
@@ -3717,7 +3720,8 @@ else reported through `agent_reply` is still a protocol-level refusal.
   dm-clone (DN13 step 5) that dm-linear stays paused for as long, so the
   leg's IO through this side waits for the apply (`architecture.md`, Bitmap
   push protocol, The apply pauses the writers). Every apply discards the
-  whole set again, so the pause comes with every push. A copy still in
+  whole set again, so the pause comes with every push of a new or changed
+  piece. A copy still in
   flight when the pause begins holds it for up to the second wait's bound,
   and one that outlasts that bound ends the apply with no discard: a pause
   for nothing, and those regions are copied, until the next apply. A

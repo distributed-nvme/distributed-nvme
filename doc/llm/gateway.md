@@ -23,8 +23,9 @@ logging; and on `layout.md` for package placement and the dependency rules.
 (`architecture.md`, System overview). It reads and writes etcd, and calls
 agents only for `GetDnSize` and `GetCnSize`, the `Get*Info` behind its
 `Inspect*` RPCs, behind the `force` false hydration checks of
-`DeleteClone` and `FinishMigration` and behind `ForceStartGroup`'s check
-of the group's array, and the `Get*Bm` bitmap reads (Agent calls). It is
+`DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s check
+of the group's array and behind `GetThinDeviceBitmap`'s check of the
+parks, and the `GetThinDeviceBm` bitmap read (Agent calls). It is
 one of the three co-located control-plane processes — gateway, worker,
 cdc — that any number of control-plane servers may run.
 This document covers `gateway/` and `cmd/dnv-gateway` only: `dnvctl` is a
@@ -86,8 +87,9 @@ authoritative for their comments.
 `DefaultGatewayAgentTimeout` is the per-call budget, in seconds, of the
 gateway's agent RPCs — `GetDnSize` and `GetCnSize`, the `Get*Info` behind
 `Inspect*`, behind the `force` false checks of `DeleteClone` and
-`FinishMigration` and behind `ForceStartGroup`'s check of the group's
-array, and the `Get*Bm` bitmap reads — applied as a timeout around each
+`FinishMigration`, behind `ForceStartGroup`'s check of the group's
+array and behind `GetThinDeviceBitmap`'s check of the parks, and the
+`GetThinDeviceBm` bitmap read — applied as a timeout around each
 dial and call (AG2). It equals `DefaultEtcdOpTimeout`, so a hung agent and
 a hung etcd bound an RPC alike.
 
@@ -96,8 +98,8 @@ quantum that positions it; the chunk rule it sizes is `architecture.md`,
 Bitmap push protocol. Its size keeps a grown chunk value plus the rev-bump
 put of one `AppendCloneBitmap` inside etcd's default request cap, so a clone
 append asks nothing of `EtcdMaxRequestBytes`, and every `PushCloneBitmap`
-message far inside `GrpcMaxMsgSize`. It is a clone positioning quantum only
-— migration appends carry no byte cap.
+message far inside `GrpcMaxMsgSize`. It is a clone positioning quantum
+only; a migration's bitmap never crosses the gateway (`dnv-worker.md` BM7).
 
 `EtcdMaxTxnOps` is a deployment requirement, not a client setting: every
 etcd serving dnv runs with `--max-txn-ops` at this value or higher, well
@@ -399,7 +401,7 @@ uncommitted (`dnv-worker.md` EU4).
   (`architecture.md`, Per-operation allocation); `AppendCloneBitmap`'s
   stored chunk plus the new page above `CloneBmChunkBytes` — one chunk's
   ceiling reached by previous appends (its four `INVALID_ARGUMENT` refusals
-  are an invalid request: the empty `bitmap` of the first case, both
+  are an invalid request: an empty `bitmap`, both
   index bounds — `src_slice_idx` at or above `src_slice_cnt` and `bm_idx` at
   or above `MaxCloneBmCnt`, checked in-STM — and the stateless page cap, a
   page longer than `CloneBmChunkBytes` judged on the request alone because a
@@ -473,9 +475,9 @@ and fails `ErrPrecondition` "candidate changed" when one is gone; when the
 pick's DN no longer has the free metadata units the round needs, which
 `verifyPick` reads from the DN's record because a write that changes only
 units leaves the key where it is (`architecture.md`, Metadata units); or
-when the RPC's own plan re-check fails — `CreateStoragePool`'s and
-`CreateClone`'s cluster id and leg count (`architecture.md`, Storage pools,
-Per-operation allocation), and the gain checks of `CreateCntlr`,
+when the RPC's own plan re-check fails — `CreateStoragePool`'s cluster id
+and leg count and `CreateClone`'s cluster id, leg count and pool revision
+(`architecture.md`, Storage pools, Per-operation allocation, Clones), and the gain checks of `CreateCntlr`,
 `CreateMigration` and `CreateRepair` (`architecture.md`, Per-operation
 allocation). `CreateRepair`'s op fails it too for a pick deleted, disabled
 or otherwise taken out of allocation, or short of extents, since the scan
@@ -1118,9 +1120,10 @@ below name.
   confs), and the bound of `architecture.md`, Clones, the destination's
   `common.CloneMetaBytes` at the SP's block size against the data blocks of
   one side, `FAILED_PRECONDITION` naming the largest destination one side
-  holds. The plan also walks `td_name_list` for a snapshot of the
-  destination not yet `created` (`tdUncreatedSnapshots`), refused
-  `FAILED_PRECONDITION` naming it, and records the pool's revision. Then the
+  holds. The planning read also walks `td_name_list` for a snapshot of
+  the destination not yet `created` (`tdUncreatedSnapshots`), refused
+  `FAILED_PRECONDITION` naming it, and records the pool's revision; the
+  deciding STM does not repeat that walk. Then the
   DN scan (`pickDns`) for that many legs of
   `CloneMetaGrpExtCnt` extents each, with no black list and no location
   excluded, as `architecture.md`, Per-operation allocation, places a clone
@@ -1701,7 +1704,8 @@ gateway, never through `workerctl`.
   key has passed, and the bitmap read passing its bitmap through, which the
   fake replies empty, having no setting for its bytes, so the case proves the
   reply's shape and not that the bytes cross unchanged (GW14), refused with
-  nothing written for a td whose namespace the fake reports no park of and
+  nothing written for a td whose namespace the desired state does not keep
+  suspended — the primary's report of a park is staged by no case — and
   for a window off a multiple of 8 blocks, and no suite
   compares the bytes with the agent's: the e2e suite reads a non-empty thin
   bitmap from the real agents and its bit for the block its setup wrote

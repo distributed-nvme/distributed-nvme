@@ -3440,8 +3440,9 @@ place (`architecture.md`, [D8]); a byte-identical payload is already
 persisted and counted as applied, and is skipped outright, though its
 apply may not have run — one skipped because the dm-clone's `dmsetup info`
 did not answer, or whose discard failed, waits for the next event that
-applies the whole set (a create or reload of the dm-clone or a build that
-finds hydration off, CN18 step 4, or another chunk's push, below), at the
+applies the whole set (a create, resume or reload of the dm-clone or a
+build that finds hydration off, CN18 step 4, or another chunk's push,
+below), at the
 cost of
 copying only — then recompute
 and apply. Clone chunks are self-positioned by the pair (`dnagent.md` SH22): the chunk

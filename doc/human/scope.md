@@ -127,22 +127,28 @@ reads the leg's list of written blocks itself, once the old side takes no
 more writes, and hands it to the new side in pieces of a fixed size. For a
 clone the caller reads the source volume's list and hands it over in
 pieces; the gateway answers the read only while every namespace on the
-volume is set aside on the primary, and only in pieces that join, and
-dnvctl always sends a piece's position.
+volume is set aside on the primary, that is, ANA inaccessible with its
+device serving no IO, and only in pieces that each cover a multiple of
+eight blocks but the last, so that they join end to end; and dnvctl
+always sends a piece's position.
 
 - **A host a transfer lets in can write the source while a clone copies
   it.** A transfer exports the source volume to the hosts you list, meant
   to be the other pool's controller nodes, which only read it. The gateway
   checks that every namespace on the volume is set aside, but not the
   transfer's own export. A host you list there by mistake can write the
-  volume after its list was read, and the clone then reads zeros where
-  that host wrote, with no error. State: accepted. Procedure to write, one
-  line in the operations doc: list only the other pool's controller nodes.
+  volume after its list was read. The clone then reads zeros where that
+  host wrote a block the list marked never written, and the older bytes
+  where it wrote a region the copy had already taken, with no error. State: accepted, because the gateway
+  cannot tell a reading controller node's connection from a writing
+  host's. Procedure to write, one line in the operations doc: list only
+  the other pool's controller nodes.
 - **A clone's list piece sent twice without its position is stored
   twice.** dnvctl always sends a piece's position, so this needs a program
-  that calls the gateway itself and leaves the position out. Every later
-  block of that chunk then moves, and the clone reads zeros where the
-  source wrote, with no error. State: accepted. The position is optional in
+  that calls the gateway itself and leaves the position out. A clone's
+  list is cut into parts at fixed places, and each part goes in pieces;
+  every later block of that part then moves, and the clone reads zeros
+  where the source wrote, with no error. State: accepted. The position is optional in
   the call so that older callers keep working.
 
 - **A forced finish of a migration before the copy is whole.** The finish
@@ -174,8 +180,8 @@ dnvctl always sends a piece's position.
 
 dnv accepts data loss in four cases, and where an operator asks for it,
 as with the forced finish and the forced start of section 3. Any other
-data loss is a defect, unless section 5 marks it accepted and gives the
-reason. Sections 3 and 5 list the data-loss defects known today.
+data loss is a defect, unless section 3 or 5 marks it accepted and gives
+the reason. Section 5 lists the data-loss defects known today.
 
 1. **Every leg of a group is lost for good.** In a RAID1 pool no disk node
    holds two legs of one group. Losing fewer disk nodes than a group has
@@ -378,7 +384,15 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-None known today.
+- **A migration under way across an upgrade can place pieces of its list
+  wrongly.** The new side keeps the pieces of the list of written blocks
+  that the older build sent, and the worker sends only the pieces it does
+  not see there. A new piece that follows an older piece of another length
+  lands at the wrong place. The copy can then skip a block the source
+  wrote, and the pool reads there the old bytes of the new side's extents,
+  possibly another pool's, with no error. State: procedure, finish
+  or cancel every migration before an upgrade. Fix later. Not seen in the
+  lab.
 
 ### 5.4 Hosts and the Kubernetes driver
 
@@ -492,6 +506,16 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   rewrite fails too, md records a bad block on the leg. One recorded bad
   block makes the leg unhealthy, so leg repair moves it. Slow legs: accepted; migrate the leg's side by
   hand. Not seen in the lab.
+- **A whole copy still needs its source until the worker drains the
+  clone.** The worker drains a clone once it reads the primary's report of
+  the whole copy. If the primary moves to another cntlr, as in a failover,
+  or its controller node reboots before that read, or the worker's own
+  checks of the pool stop it, the new build of the dm-clone needs the
+  source, and the volume waits while the source is away; so does an
+  operator who steps the pool's level down past the clone and back before
+  that read. State: accepted: the window is short, but the operator's
+  level step can hold it open as long as the level stays. Not seen in the
+  lab.
 - **Orphans the sweep never removes.** An export of a side whose build
   stopped before the export named its device. A subsystem for hosts whose
   build stopped before dnv set the model name by which it knows its own
@@ -861,8 +885,9 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   would need a map of the units in etcd that every allocation and release
   keeps. Not seen in the lab.
 - **Smaller bounded waits.** An agent that marks the regions of a piece
-  of a written-block list holds that object's other work until the marks
-  are done. A grow whose new group cannot get ready waits while a repair,
+  of a written-block list holds that object's other work, and while the
+  copy serves pauses the volume's IO, until the marks are done; a copy
+  still in flight first holds the pause for a short bound. A grow whose new group cannot get ready waits while a repair,
   a retired leg, a forced-start mark, the operator-in-charge flag or a
   migration acts on that group. The hold delays the cntlrs' syncups by up to one
   check interval. A repair waits while its array does not run. A clone

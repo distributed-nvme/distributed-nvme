@@ -311,8 +311,8 @@ The discard and pause checks read the agent's JSON log by design: if its
 layout drifts, the reader is adjusted, never the assertion. The copy is
 slowed by a token bucket on what the source's node sends from its nvme-tcp
 port to the destination's address, and nothing else; the bucket is taken
-off once the chunk is checked, and the cleanup takes it off
-unconditionally.
+off once the chunk is checked, a failing run takes it off at its exit, and
+the cleanup takes it off first, whatever else fails.
 
 **teardown** proves `architecture.md`, Teardown by sweep: what cannot go yet
 is reported and finished later, never forgotten (`dnagent.md` DN6, DN7, DN16,
@@ -387,7 +387,9 @@ that pass is as good as that line.
 ## Teardown and cleanup
 
 Cleanup runs unconditionally at the start of every run and at its end only on
-success; a failing run leaves its debris and dumps the tail of each agent's
+success, its first step taking off migr_bitmap's token bucket; a failing run
+leaves its debris, save that bucket, which it takes off at its exit since
+other suites share the VMs, and dumps the tail of each agent's
 log, the dm, nvmet and host state of both VMs, a listing of each local store
 and of any file system mounted under the work directory, the failing stage's
 trace id and, when the failing case is zeroing, a migration case, teardown or

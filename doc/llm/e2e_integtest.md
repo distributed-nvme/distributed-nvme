@@ -504,8 +504,10 @@ observation, which names the read's id as the observation's trace id while the
 re-send runs under that later round's own id; and the converge's remove and
 then add of the member under the re-send's id (`cnagent.md` CN12, CN30;
 `dnv-worker.md` RW4, RW10). The worker reads the leg's bitmap itself, once,
-from the primary, after the cutover and once the new side serves through its
-dm-clone, and every piece of it must reach the new side's disk node; the
+from the primary, once the cutover is clear, the new side reports its
+dm-clone at the desired revision and the primary reports a live path to it
+(`dnv-worker.md` BM7), and every piece of it must reach the new side's disk
+node; the
 record names the leg and the piece count, and the new side's copied count
 after the pieces is logged and not asserted, as the background copy may have
 copied a region before its piece arrived (`dnv-worker.md` BM7; `dnagent.md`

@@ -545,7 +545,8 @@ empty list stays reachable from the CLI (`cloneSrcTrConfList`).
 proof that the copy finished; the RPC latches and returns, so a successful
 `clone delete` means teardown started, not gone. A clone whose copy is
 whole leaves by itself: the worker latches it (`dnv-worker.md` CLD13), so
-`clone delete` then answers OK with no write, or `NOT_FOUND` once the
+`clone delete` then answers OK with no write — `ABORTED` for a `--rev`
+read before the latch, whose bump makes it stale — or `NOT_FOUND` once the
 drain is done. What the clone, its
 destination thin device and the pool answer while the clone drains, and
 the order in which an operator then takes them down, are `architecture.md`,

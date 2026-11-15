@@ -3362,9 +3362,10 @@ func (d *sideDriver) diffBitmap(
 ) {
 	d.mu.Lock()
 	if d.bmMigrId != 0 && d.bmMigrId != plan.migrId {
-		// The migration left the plan, at its finish or its cancel: its
-		// bitmap goes with it, and a read still in flight finds no
-		// migration to keep its pieces for.
+		// The migration left the plan at its finish: its bitmap goes with
+		// it, and a read still in flight finds no migration to keep its
+		// pieces for. A cancel removes the destination side, so its child
+		// stops instead, and the bitmap goes with the child (RW14).
 		d.dropBitmap()
 	}
 	d.mu.Unlock()
@@ -3515,7 +3516,7 @@ func (d *sideDriver) readMigrBitmap(
 var migrPieceBytes = common.MigrBmPieceBytes
 
 // fetchLegBitmap reads the whole leg's bitmap from the primary's cn agent,
-// under the syncup timeout (RW11's bound for one call to an agent), and cuts
+// under the syncup timeout (RW5's bound for one call to an agent), and cuts
 // it into pieces of migrPieceBytes: every piece but the last covers a
 // multiple of 8 blocks, so the pieces join at the byte (architecture.md,
 // Bitmap push protocol). More than MaxMigrBmCnt pieces is an error, as the

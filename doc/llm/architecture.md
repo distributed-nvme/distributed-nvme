@@ -91,15 +91,17 @@ through viper (Components: invocation reference):
   reads and writes etcd, and calls agents only for `GetDnSize` and
   `GetCnSize`, the `Get*Info` behind its `Inspect*` RPCs, behind the
   `force` false hydration checks of `DeleteClone` and `FinishMigration`
-  (Clones, Migrations) and behind `ForceStartGroup`'s check that the
-  group's array does not run (Repairs), and the `Get*Bm` bitmap reads
-  (Bitmap reads). The worker never calls `Get*Info`: it watches through
+  (Clones, Migrations), behind `ForceStartGroup`'s check that the
+  group's array does not run (Repairs) and behind `GetThinDeviceBitmap`'s
+  check that the volume's namespaces are parked, and `GetThinDeviceBm` for
+  that read (Bitmap reads). The worker never calls `Get*Info`: it watches through
   `Check*` (Check streams, dn / cn roles). `gateway.md` owns it.
 * `dnv-worker` is one binary with the roles `dn`, `cn` and `sp`, any subset
   per instance. It watches the revision keys in etcd, shards the work by
   shard code, drives agents through the unary `SyncupDn`, `SyncupSide`,
   `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap` and `PushMigrBitmap`
-  (Bitmap push protocol) and watches them through the `CheckDn`,
+  (Bitmap push protocol) and `GetLegBm` for a migration's bitmap
+  (`dnv-worker.md` BM7), and watches them through the `CheckDn`,
   `CheckSide`, `CheckCn` and `CheckCntlr` streams (Check streams). It also
   performs health checking and the automatic reactions — primary election,
   replacements, thin-pool auto-grow, leg repair (Automatic reactions).
@@ -2793,8 +2795,8 @@ suppressing `sp_level`, or a clone that targets the td while its dm-clone
 does not serve, the normal state through the clone's build (`cnagent.md`
 CN16).
 `CreateClone` with an uncreated destination is allowed ([D3]: the
-destination td is empty by construction). `GetThinDeviceBitmap` is not
-gated, and a slice whose pool does not hold the id yet fails in the agent,
+destination td is empty by construction). `GetThinDeviceBitmap` does not
+read `created`, and a slice whose pool does not hold the id yet fails in the agent,
 which reports the `dev_id` absent from the metadata snapshot (`cnagent.md`
 CN26) — surfacing as `ABORTED` like any other agent RPC failure
 (UNEXPECTED_ERROR → `ABORTED`).
@@ -3040,7 +3042,10 @@ written; [D3] says why. Action: allocate the clone's clone meta group on
 DNs (Per-operation allocation), which makes the RPC a candidate unit
 (`gateway.md` GW9). The refusal of an uncreated snapshot walks every td of
 the SP, so the plan makes it and the deciding STM holds the plan to the
-pool's revision instead, as `DeleteThinDevice` does (Thin devices). STM:
+cluster, the leg count and the pool's revision instead; unlike
+`DeleteThinDevice` (Thin devices), it does not check the pool's `sp_id`,
+so a same-name pool created again at the same revision between the plan
+and the deciding STM passes. STM:
 after the refusals of the ceiling, the name, the destination and the bound,
 take `clone_id`, the group's `grp_id`, and per
 leg a `leg_id` and its `side_id` from `next_id`, in that order; write the `Clone`
@@ -3125,8 +3130,9 @@ by the destination's raid0; `DeleteClone` without `force` starts the same
 latch at once, and with `force` stops a clone whose copy is not whole. A
 `DeleteClone` of a clone the worker latched is the no-op above, and of
 one whose drain removed it `NOT_FOUND`, as for every absent object; one
-whose clone was drained and created again under the name between its proof
-and its deciding STM is `ABORTED`, the proof being of the old clone. A
+whose clone was drained and created again under the name between its first
+read and its deciding STM is `ABORTED`, with or without `force`, as what
+that read found, the proof included, is of the old clone. A
 call that needs a live clone — `AppendCloneBitmap`, `UpdateCloneTrConf` —
 may likewise find a whole copy's clone `deleting` or gone; the copy needs
 neither then.
@@ -3213,9 +3219,10 @@ optimization delivered through
 time, one that arrives once the ns-devs map the dm-clone included (Bitmap
 push protocol, The apply pauses the writers), and the copy's durability
 never depends on them (Clone metadata durability). **The gateway reads a
-source bitmap only once the source takes no more writes**:
+source bitmap only once no namespace of the pool can write the source**:
 `GetThinDeviceBitmap` is refused until the source pool's primary reports
-every namespace on the thin device parked (Bitmap reads). For a
+every namespace on the thin device parked (Bitmap reads); a transfer's own
+export is not checked (Known limits). For a
 transfer's origin, the only namespace of its volume (Transfers), that is
 once the primary has applied the transfer's `auto_suspend` move of it
 (`cnagent.md` CN16), which can be after `CreateTransfer` has replied; a
@@ -3444,8 +3451,7 @@ metadata units back, the migration's `meta_units` leaving its
 name from `migr_name_list`; bump `SpRev`. The destination agent reloads its per-cntlr dm-linears from the
 dm-clone straight onto the side device and drops the dm-clone, the
 metadata wrapper and its slot, the nvme host connection and the
-migration's `LocalMigrBmPath` files (Bitmap push protocol; `dnagent.md`
-DN13); the source DN agent sees the pointer disappear and tears the side
+migration's `LocalMigrBmPath` files (`dnagent.md` DN13); the source DN agent sees the pointer disappear and tears the side
 down. Reply `migr_id`.
 
 **CancelMigration** — Errors: `FAILED_PRECONDITION` once the migration's
@@ -3476,7 +3482,7 @@ force, and it is how an operator ends a migration whose cutover never comes
 
 **The migration bitmap.** No call of the gateway carries it and etcd
 holds none of it. The sp worker reads the leg's bitmap once the copy may
-start (Migration, Phase 2) and pushes it to the destination DN in pieces
+start (Migration; `dnv-worker.md` BM7) and pushes it to the destination DN in pieces
 (Bitmap push protocol; `dnv-worker.md` BM7). The pieces concatenate, in
 `bm_idx` order, into one bitmap over the **leg's data region**: bit k
 covers `block_size` bytes, and **1 means never written, hence
@@ -4121,11 +4127,13 @@ its pad bits in the middle of the chunk and shift every later bit. So
 * `GetCnInfo` and `GetCntlrInfo` return the agent's latest observation of
   the CN or the cntlr, as `GetDnInfo` does (`agent_reply`, `revision`, the
   info, `obs_stamp`).
-* `GetThinDeviceBm` and `GetLegBm` serve the gateway's bitmap reads
-  (Bitmap reads) from a dm-thin metadata snapshot, reserved, dumped and
-  released after every reserve that succeeded or did not answer
-  (`cnagent.md` CN25 to CN27): the per-slice td mapping
-  bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the
+* `GetThinDeviceBm` serves the gateway's `GetThinDeviceBitmap` and
+  `GetLegBm` the sp worker's read of a migration's bitmap (Bitmap reads;
+  `dnv-worker.md` BM7), each from a dm-thin metadata snapshot, reserved,
+  dumped and released after every reserve that succeeded or did not answer
+  (`cnagent.md` CN25 to CN27): the per-slice td mapping bitmap, or the
+  leg-projected pool mapping bitmap; `GetLegBm` first suspends and resumes
+  the pool's thin devices that have writes in flight (`cnagent.md` CN27). Reply bitmaps use the
   wire convention **1 = unmapped**.
 * `CheckCn` and `CheckCntlr` are the health streams, one per CN or per
   cntlr, with the protocol of Check streams. Request: the ids, `revision`,
@@ -4387,7 +4395,10 @@ migration rows and `dnv-worker.md` RW18 reads; `RES_REASON_SP_LEVEL`, which
 and `RES_REASON_SOURCE_FAULT`, which `cnagent.md` CN18 sets on the clone
 rows the cn agent keeps `MISSING` because it does not read the clone's
 source as ready, CN18 saying which; the settle of `dnv-worker.md` HL2
-reads these two; and `RES_REASON_DIFFERS`, which both agents set on an
+reads these two; `RES_REASON_PARKED`, which `cnagent.md` CN28 sets on
+the `OK` ns-dev row of an effectively suspended namespace and the
+gateway's `GetThinDeviceBitmap` reads (Bitmap reads); and
+`RES_REASON_DIFFERS`, which both agents set on an
 `OK` row of an object that is there and differs without leaving a primary
 short of its optimized path. There are two such objects: a namespace
 wanted non-optimized or inaccessible whose ANA group differs, as one still
@@ -4568,8 +4579,9 @@ kernel, since one that marked its regions after the writers resume would
 reopen the race; and only then resumes what it paused and starts the copy
 again. Once the writers resume, a marked region is never copied, since
 dm-clone copies only regions it does not hold as copied, so a chunk lands
-safely while the dm-clone serves; the cost is a short pause of the IO
-through those devices for each apply. A device found suspended is left as
+safely while the dm-clone serves; the cost is a pause of the IO through
+those devices for each apply, which lasts for the second wait, up to its
+bound, and then as long as the discards take (`dnagent.md`, Known limits). A device found suspended is left as
 it is: its IO waits above the dm-clone, and a resume could undo a fence in
 progress. The agent sends no discard over a stack with a suspended device
 mapper device below the dm-clone, where a pause or the discard itself could
@@ -5508,10 +5520,11 @@ cn agent (`GetLegBm`, Bitmap reads), cuts it into pieces and pushes them
 with `PushMigrBitmap` (Bitmap push protocol; `dnv-worker.md` BM7); the
 destination agent persists each piece at `LocalMigrBmPath` and tries to
 discard the never-written regions so that they are never copied
-(Migrations, raid0 bitmap math). The read comes after the primary's per-CN
-dm-linear maps the dm-clone, and the pieces land all the same, that
-dm-linear paused for each apply (Bitmap push protocol, The apply pauses
-the writers).
+(Migrations, raid0 bitmap math). The read usually comes after the
+primary's per-CN dm-linear maps the dm-clone, though the worker does not
+wait for it; the pieces land either way, any dm-linear that maps the
+dm-clone paused for each apply (Bitmap push protocol, The apply pauses the
+writers).
 A skipped region keeps what the destination's recycled extents held, which
 the pool never reads, since no pool block maps there ([D15]) — provided
 the bitmap is read late enough. **The worker reads the leg bitmap only once
@@ -5928,9 +5941,9 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   after the copy is whole may find the clone `deleting` or gone
   (Clones); the copy needs no chunk then.
 * When hydration completes, the sp2 worker latches the clone by itself
-  (Clones): the sp2 namespace's `suspended` goes false, and once the
-  drain ends the namespace is backed by the local raid0 and `GetClone`
-  answers `NOT_FOUND`. The operator runs `DeleteTransfer` with `force`
+  (Clones): the sp2 namespace's `suspended` goes false and, from the
+  latch's fan-out on, the namespace is backed by the local raid0; once the
+  drain ends `GetClone` answers `NOT_FOUND`. The operator runs `DeleteTransfer` with `force`
   false on sp1 (it retires the source: `suspended` true); a `DeleteClone`
   on sp2 without `force` starts the same latch at once and answers
   `NOT_FOUND` once the drain is done. `CreateTransfer` refuses the sp2
@@ -6419,9 +6432,19 @@ controller-node syncup and nothing enforces it (Controller node, common).
 An etcd key of a kind no build writes any more stays where an older build
 left it, unread: an older build kept a migration's bitmap in etcd, under
 keys of the kind migration_bitmap, which no later build reads or deletes,
-as no code deletes a pool's keys by their prefix; a migration under way at
-the upgrade gets its bitmap from the worker's own read instead
-(`dnv-worker.md` BM7), and the keys stay until an operator deletes them.
+as no code deletes a pool's keys by their prefix, and they stay until an
+operator deletes them. A migration under way at the upgrade keeps the
+chunks its destination already holds, which the agent reloads at startup
+and lists as applied (`dnagent.md` DN2), and the worker pushes the pieces
+of its own read either at the indexes those chunks leave free, when it
+holds the destination's applied set, or at every index, each piece
+replacing the older chunk there one push at a time, when it holds none, as
+after its own restart (`dnv-worker.md` BM7): either way an apply can join a
+piece with an older chunk that is not `MigrBmPieceBytes` long, so a later
+bit lands at the wrong place, and the copy can then skip a block the
+source wrote, which reads what the destination's recycled
+extents held, possibly another pool's bytes. So a migration is finished or
+cancelled before an upgrade (Known limits).
 
 A kind of object a build does not build, it does not take over either: a
 dm device, a loop device or a mount that an older build left under a name
@@ -6830,9 +6853,10 @@ document and the component documents cite it by its id.
   What a recycled extent holds stays in a leg's data region, where no pool
   reads it, as long as every copy below the pool carries each block the
   pool has written: a migration skips only regions no pool block maps,
-  which is why Migration says when a caller may read its leg bitmap, a
-  forced finish of a migration before its copy is whole breaks the
-  condition for its leg (Migrations), and a
+  which is why Migration says when the worker reads a leg's bitmap, a
+  forced finish of a migration before its copy is whole and a forced
+  cancel of one after its cutover break the condition for its leg
+  (Migrations), and a
   forced start from an older copy breaks the condition for its group
   (Known limits). Root
   on a node can read those bytes from the raw leg, as it can read anything
@@ -7283,7 +7307,15 @@ document and only pointed to here.
   host listed there by mistake can write the volume after the source
   bitmap was read, as the gateway checks the pool's namespaces and not the
   transfer's own export (Bitmap reads), and the clone then serves zeros
-  where that host wrote. Nothing checks what `allowed_hosts` name.
+  where that host wrote a block the bitmap marked never written, and the
+  old bytes where it wrote a region the copy had already read. Nothing
+  checks what `allowed_hosts` name.
+* **A migration under way across an upgrade can place its pieces
+  wrongly** (Upgrade in lockstep): its destination keeps the bitmap chunks
+  an older build pushed, and the worker's pieces either fill the indexes
+  they leave free or replace them one push at a time, so an apply can join
+  a piece with an older chunk of another length.
+  A migration is finished or cancelled before an upgrade.
 * **A clone bitmap page sent again without its position is stored
   twice.** `AppendCloneBitmap` places a page only when the request names
   its position (Clones). Without it the page lands at the end, so a caller

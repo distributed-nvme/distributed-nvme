@@ -137,9 +137,10 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   reads of one region leaves part of a block that the region's next copy
   writes again whole. A copy whose reads all fail writes nothing.
 * A new dm-clone is read through its source at once, as udev probes the
-  device, and a discard on it waits for those reads, so over a slowed source
-  the chunk's discard waits as long as they take (`osclient.md`,
-  DiscardRanges).
+  device, and a discard on it would wait for those reads, so the apply
+  sends no discard while they are in flight (`architecture.md`, Bitmap push
+  protocol, The apply pauses the writers): over a slowed source the chunk
+  would not land.
   clone_xfer therefore slows its copy on the write side: a VM's cn agent
   reaches the sides of the dn agent beside it over the loopback device, and
   a token bucket there, kept to the nvme-tcp port, slows what its legs send

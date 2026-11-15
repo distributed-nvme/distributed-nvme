@@ -25,7 +25,8 @@ carries; and on `layout.md` for package placement and the dependency rules.
 the desired state in etcd (`architecture.md`, System overview): it watches
 the revision keys, shards the work by shard code, drives agents through the
 unary `SyncupDn`/`SyncupSide`/`SyncupCn`/`SyncupCntlr` and `Push*Bitmap`
-calls, watches them through the `Check*` streams, maintains the health fields
+calls and the `GetLegBm` of a migration's bitmap read (BM7), watches them
+through the `Check*` streams, maintains the health fields
 and capacity keys, flips `Side.provisioned` and `ThinDevice.created`, moves
 the stages of repairs and runs the retire timer, and performs the automatic
 reactions. It never serves gRPC, never calls
@@ -55,8 +56,9 @@ may import is `layout.md`, Dependency rules.
 
 Out of scope here: the gateway (request validation, the public RPCs, and
 the agent calls it makes: the `Get*Info` info reads, which serve its
-inspects, its hydration checks and its forced start's check of a group's
-array, and the `Get*Size` and `Get*Bm` calls),
+inspects, its hydration checks, its forced start's check of a group's
+array and its bitmap read's check of the parks, and the `Get*Size` calls
+and `GetThinDeviceBm`),
 `dnv-cdc`, `dnvctl`. Where the
 worker performs an "internal" variant of a gateway mutation (Automatic
 reactions), the STM body lives in `model` and the gateway adds only
@@ -942,8 +944,9 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   stages `LatchClone` — every namespace of the pool on the clone's
   `dst_td_id` resumed, as one `Subsystem` put per subsystem that changes,
   a listed subsystem whose key is gone refused ("subsystem record
-  missing"), the `Clone` put with `deleting` true, one `SpRev` bump — and
-  returns that it latched and the revision its bump wrote (CLD13).
+  missing"), the `Clone` put with `deleting` true, one `SpRev` bump, a
+  revision key that is gone refused ("sp rev not found") — and returns that
+  it latched and the revision its bump wrote (CLD13).
 * `SetGrpOperatorInCharge`, the body of `UpdateGroupOperatorInCharge`, takes
   the group's parent and id and the flag's value, and requires the expected
   revision; the any-level SP checks; the pool `RedundMdRaid1`; the parent
@@ -2951,11 +2954,12 @@ refusal was the agent's own, its `Check*` reply says so too — the same
 rejection code, or a stored revision behind the desired one — and RW4 step
 5 issues the `Syncup*` whose accepted reply re-plans within the round. When
 the push failed on the wire while the agent is healthy and at the desired
-revision, no re-sync is due and the chunk waits for the next accepted
+revision, no re-sync is due and a clone's chunk waits for the next accepted
 `Syncup*` from any cause (a revision bump or a leftover; a handoff sends
 none, since a new child starts with a round, which sends a syncup only on a
 code or a revision, RW4), and so do the parts of a plan that a worker's
-failure cut short. That wait is accepted because the skip bitmap is an
+failure cut short; a migration's piece waits for the next offer instead
+(BM7). That wait is accepted because the skip bitmap is an
 optimization: a chunk or a piece that has not arrived leaves its regions
 hydrated instead of discarded (`architecture.md`, Bitmap push protocol),
 which costs copying, never correctness.
@@ -2980,7 +2984,7 @@ source links only once every per-CN dm-linear of the side is fenced
 `SyncupSide` pending, so the applied set the pushes are planned from is the
 agent's latest; and the path keeps the read's commit of the pool from
 blocking on a leg with no path. The read is one `GetLegBm` of the whole leg
-(`block_cnt` zero) to that CN, under the syncup timeout (RW11), on a
+(`block_cnt` zero) to that CN, under `DefaultWorkerSyncupTimeout` (RW5), on a
 goroutine of the child's pusher, so a slow read holds neither the
 coordinator nor the child's loop, and the child's stop cancels it. The
 reply is cut into pieces of `MigrBmPieceBytes`, each but the last covering
@@ -2992,8 +2996,9 @@ child's memory alone. Right after the read the child plans the pushes
 every piece missing when it holds none: a new child whose agent kept the
 desired revision has had no `SyncupSide` reply, and pushes every piece
 again, which the agent takes without applying a piece it holds byte for
-byte (`dnagent.md` DN15). Each later offer to a child that holds the bitmap
-plans the pushes again from that same `bm_info`, leaving out every piece
+byte (`dnagent.md` DN15). Each later offer to a child that holds the bitmap,
+made while the same condition on its last reply holds, plans the pushes
+again from that same `bm_info`, leaving out every piece
 this child has delivered with a code-zero reply (the memo of BM5), which
 the set may not list yet: no `SyncupSide` need follow the read, so the
 offer is what retries a push that failed (BM6). A read that fails — the
@@ -3010,8 +3015,8 @@ CN25). A read that succeeds is logged as `migration bitmap read` with its
 piece count (Log records). The bitmap goes with the child and with the
 migration: a child restarted, a handoff or a worker restart reads it again,
 and a `SyncupSide` reply to a plan that no longer names the migration, at
-its finish or its cancel, drops it, so a read still in flight then keeps
-nothing. A round that finds the agent unreachable clears the condition on
+its finish, drops it, as a cancel, which removes the destination side,
+stops its child (RW14), so a read still in flight then keeps nothing. A round that finds the agent unreachable clears the condition on
 the dm-clone, as it clears the cutover's wait (RW18).
 
 ## Automatic reactions — `worker/reaction.go`
@@ -5009,7 +5014,8 @@ giving them back — since no suite case deletes a clone whose group holds a
 repair or a retired leg; the guards of CLD2 and the gateway halves
 of CLD1 and CLD3, the gateway suite owning the clone latch; CLD13, the
 latch of a clone whose copy is whole, since no suite case has a fake report
-a dm-clone's status line, the worker package's scenario tests running it
+a finished copy on a cntlr's `clone_id_to_dm_clone` row, the worker
+package's scenario tests running it
 against the same fakes in the process; the guards no
 reaction case stages — auto-grow's `data_covered`, `grp_list_full` and
 `meta_ladder_cap` (AR6), cntlr replacement's

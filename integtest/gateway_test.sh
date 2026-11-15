@@ -3213,9 +3213,11 @@ EOF
 	out=$(gw get-td-bm --sp sp0 --td t0 --slice-idx 0)
 	assert_field "$out" '.byte_cnt' "0" "get-td-bm byte_cnt"
 	assert_field "$out" '.bitmap_hex' "" "get-td-bm bitmap_hex"
-	# t1 carries the namespace, and the fake, which holds no cntlr, reports
-	# no park of it: the read is refused, with nothing written. A window
-	# that does not start at a multiple of 8 blocks is refused before it.
+	# t1 carries the namespace, which cl0's latch resumed and nothing has
+	# suspended since, so the read is refused because the desired state
+	# does not keep it suspended, with nothing written; that refusal comes
+	# before the park check, which no case reaches. A window that does not
+	# start at a multiple of 8 blocks is refused before both.
 	assert_no_write "get-td-bm of a volume whose namespace is not parked" \
 		gwx FAILED_PRECONDITION get-td-bm --sp sp0 --td t1 --slice-idx 0
 	assert_no_write "get-td-bm of a window off a multiple of 8 blocks" \

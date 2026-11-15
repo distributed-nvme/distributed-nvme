@@ -16,7 +16,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **anti-affinity, tier 1, tier 2** — The allocator's rule that one scan keeps at most one candidate per location, so the legs one allocation round places never share a failure domain. An operation that adds to existing placements excludes their locations at tier 1 and rescans without the exclusion at tier 2 when tier 1 yields fewer candidates than it must place, so the new placement may share a domain already held.
 
-**applied set** — The bitmap chunks an agent reports as held for a migration or a clone (`bm_idx_list` for a migration, `chunk_id_list` for a clone), derived from the chunk files present in its local store, save those `dnagent.md` SH21 names. The worker pushes the chunks etcd holds that the applied set lacks.
+**applied set** — The bitmap chunks an agent reports as held for a migration or a clone (`bm_idx_list` for a migration, `chunk_id_list` for a clone), derived from the chunk files present in its local store, save those `dnagent.md` SH21 names. The worker pushes the clone chunks etcd holds, and the migration pieces its side child read and holds, that the applied set lacks (see `dnv-worker.md` BM2, BM7).
 
 **attach, detach** — Kubernetes' binding of a volume to one node, and its undo, through the CSI driver's controller plugin, which sets the volume's subsystem's allowed hosts to that node's host NQN alone, and empties them (see `csi.md` CSI10).
 
@@ -540,7 +540,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **sides first, sides-first hold** — The second wait of the hold, which every fan-out of a pool goes through: the cntlrs' syncups wait until every running side child, a retired side's aside, whose side had no health epoch in the load the wait took its sides from has reported the revision applied, or one cntlr interval has passed since that wait began, a timer release being logged (see hold; `dnv-worker.md` RW14). The wait takes its sides when it begins and again at a bump, a fan-out of a newer revision; a side that turns unhealthy in between is still waited for, so one whose agent stops answering can hold the cntlrs for the whole interval. It narrows the races of a cntlr outrunning its sides' exports and ANA flips, and is no correctness dependency.
 
-**skip bitmap** — The chunked bitmap of a clone's or a migration's source that the worker pushes, a set bit marking a source block as never written: the agent folds the chunks it holds through raid0 bitmap math and discards on the dm-clone every region all of whose source bits are set, so a missing chunk only costs extra copying; `architecture.md`, Migration, says when a caller may read a migration's.
+**skip bitmap** — The chunked bitmap of a clone's or a migration's source that the worker pushes, a set bit marking a source block as never written: the agent folds the chunks it holds through raid0 bitmap math and discards on the dm-clone every region all of whose source bits are set, so a missing chunk only costs extra copying; `architecture.md`, Migration, says when the worker reads a migration's.
 
 **slice** — `Slice`, a vertical shard of a storage pool: one thin pool on the primary, built from the slice's own meta and data groups; every thin device of the pool is striped across all slices.
 
