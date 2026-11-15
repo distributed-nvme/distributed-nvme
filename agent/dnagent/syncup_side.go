@@ -7,6 +7,7 @@ import (
 	"math/bits"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -372,7 +373,7 @@ func (s *DnAgentServer) convergeSideSteps(
 			return info, sweep, plan
 		}
 	}
-	s.ensureCnDm(ctx, st, plan, info, cloneLive)
+	primary := s.ensureCnDm(ctx, st, plan, info, cloneLive)
 	switch {
 	case plan.migrSrc != nil:
 		s.linkMigrSrc(ctx, st, plan, info)
@@ -382,7 +383,7 @@ func (s *DnAgentServer) convergeSideSteps(
 		s.reportMigrSrcDeferred(st, plan, info)
 	}
 	if plan.wantExport {
-		s.ensureCnExports(ctx, st, plan, info, cloneLive)
+		s.ensureCnExports(ctx, st, plan, info, cloneLive, primary)
 	}
 	if dstSettles {
 		// The per-CN stacks have been converged where the destination rule
@@ -668,19 +669,26 @@ func sideDmConverged(
 // Per-CN dm stacks (DN10)
 // ---------------------------------------------------------------------------
 
+// ensureCnDm converges each CN's dm-error and dm-linear, in plan.cnIds'
+// order: the other CNs first, the primary last. It reports what the
+// primary's step left of its path (primaryPath), which decides its
+// namespace's ANA group (servingAnaGrpId). The primary's path opens only
+// once every other dm-linear of the side is fenced (ensurePrimaryLinear,
+// DN10).
 func (s *DnAgentServer) ensureCnDm(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
 	cloneLive bool,
-) {
+) primaryPath {
 	// The src cutover (architecture.md, Migration, src step 2) fences the
 	// per-CN linears in two phases: hold
 	// them suspended for at least common.SuspendSeconds, then reload them
 	// onto their dm-errors ([D12]). fencing is true only during phase 1.
 	fencing := plan.migrSrc != nil && s.beginFence(st)
 
+	primary := pathClosed
 	info.CnIdToDmError = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
 	info.CnIdToDmLinear = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
 	for _, cnId := range plan.cnIds {
@@ -692,9 +700,15 @@ func (s *DnAgentServer) ensureCnDm(
 
 		linName := plan.linearName(cnId)
 		linKey := resKeyOf(resKeyDmLinearFmt, cnId)
+		backing := plan.linearBacking(cnId, cloneLive)
 		if err != nil {
 			info.CnIdToDmLinear[cnId] = st.tracker.Err(
 				linKey, linName, "dm-error missing: "+err.Error())
+			// The step is skipped, and a primary's dm-linear that already
+			// serves goes on serving (DN10).
+			if !fencing && plan.opensPath(cnId, backing) {
+				primary = s.linearPath(ctx, plan, linName, backing)
+			}
 			continue
 		}
 		if fencing {
@@ -712,9 +726,28 @@ func (s *DnAgentServer) ensureCnDm(
 		if err = s.finishFence(ctx, plan, linName, cnId); err != nil {
 			info.CnIdToDmLinear[cnId] = st.tracker.Err(
 				linKey, linName, err.Error())
+			if plan.opensPath(cnId, backing) {
+				primary = s.linearPath(ctx, plan, linName, backing)
+			}
 			continue
 		}
-		backing := plan.linearBacking(cnId, cloneLive)
+		if plan.opensPath(cnId, backing) {
+			path, gap, err := s.ensurePrimaryLinear(
+				ctx, plan, linName, backing)
+			primary = path
+			switch {
+			case err != nil:
+				info.CnIdToDmLinear[cnId] = st.tracker.Err(
+					linKey, linName, err.Error())
+			case gap != "":
+				info.CnIdToDmLinear[cnId] = st.tracker.Set(linKey, linName,
+					pb.ResStatus_RES_STATUS_PENDING, detailsFenceUnproven+gap)
+			default:
+				info.CnIdToDmLinear[cnId] = st.tracker.Ok(
+					linKey, linName, "")
+			}
+			continue
+		}
 		err = s.ensureDmLinear(ctx, linName, plan.sectors, backing)
 		info.CnIdToDmLinear[cnId] = st.tracker.FromErr(
 			linKey, linName, "", err)
@@ -722,6 +755,261 @@ func (s *DnAgentServer) ensureCnDm(
 	if fencing {
 		s.armFenceTimer(st, plan)
 	}
+	return primary
+}
+
+// detailsFenceUnproven starts the row of a primary's dm-linear whose path a
+// pass keeps closed because another dm-linear of the side is not proven
+// fenced (DN10); the dm-linears not fenced, or the read that did not answer,
+// follow. The row reads RES_STATUS_PENDING, and the side's verdict names it
+// (DN16), so the worker sends the syncup again.
+const detailsFenceUnproven = "path closed until the fence is proven: "
+
+// ensurePrimaryLinear converges the primary's dm-linear onto backing, the
+// device the primary serves through, with the fence first (DN10): a
+// dm-linear that serves there already (linearStand.serves) stays, whatever
+// the other dm-linears read (a read that did not answer must not cut a
+// serving primary from its leg). Any other change that would let IO reach
+// backing — a create, a reload, the resume of one suspended there, the
+// finish of a reload cut after its load — waits until every other dm-linear
+// of the side is proven fenced (fenceGap). Until then the step changes
+// nothing that serves: an absent dm-linear is created on the primary's own
+// dm-error, and one whose live table is there stays there, resumed, unless
+// a reload onto backing waits on it; any other is left as it is, one
+// suspended on backing, or with its reload onto backing cut after its load,
+// holding the primary's own IO for the pass that opens it. It reports what
+// the step left of the path, and the fence's gap when that kept it closed.
+func (s *DnAgentServer) ensurePrimaryLinear(
+	ctx context.Context,
+	plan *sidePlan,
+	name string,
+	backing string,
+) (primaryPath, string, error) {
+	servingNo, err := s.dm.DevNo(ctx, backing)
+	if err != nil {
+		return s.linearPath(ctx, plan, name, backing), "", err
+	}
+	l, err := s.readLinear(ctx, name)
+	if err != nil {
+		return pathUnread, "", err
+	}
+	if l.serves(plan, servingNo) {
+		return pathOpen, "", nil
+	}
+	if gap := s.fenceGap(ctx, plan); gap != "" {
+		if l.cutOnto(plan, servingNo) {
+			return pathOpen, gap, nil
+		}
+		errPath := s.nf.DmPath(plan.errName(plan.primaryCnId))
+		errNo, err := s.dm.DevNo(ctx, errPath)
+		switch {
+		case err != nil:
+			return pathClosed, gap, err
+		case l.dev == nil || linearMaps(l.live, plan.sectors, errNo):
+			return pathClosed, gap, s.ensureDmLinear(
+				ctx, name, plan.sectors, errPath)
+		}
+		return pathClosed, gap, nil
+	}
+	if err := s.ensureDmLinear(
+		ctx, name, plan.sectors, backing); err != nil {
+		return s.linearPath(ctx, plan, name, backing), "", err
+	}
+	return pathOpen, "", nil
+}
+
+// linearStand is where a per-CN dm-linear stands: absent (dev nil), or its
+// state, its live table and, while it is suspended with a table waiting, the
+// waiting one.
+type linearStand struct {
+	dev  *agent.DmDevInfo
+	live []common.DmTarget
+	next []common.DmTarget
+}
+
+// readLinear reads where the dm-linear name stands.
+func (s *DnAgentServer) readLinear(
+	ctx context.Context,
+	name string,
+) (linearStand, error) {
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil || dev == nil {
+		return linearStand{}, err
+	}
+	l := linearStand{dev: dev}
+	if l.live, err = s.dm.Table(ctx, name); err != nil {
+		return linearStand{}, err
+	}
+	if dev.Suspended && dev.Waiting {
+		if l.next, err = s.dm.WaitingTable(ctx, name); err != nil {
+			return linearStand{}, err
+		}
+	}
+	return l, nil
+}
+
+// serves says the dm-linear serves through devNo: live, resumed and
+// writable on it.
+func (l linearStand) serves(plan *sidePlan, devNo string) bool {
+	return l.dev != nil && !l.dev.Suspended && !l.dev.ReadOnly &&
+		linearMaps(l.live, plan.sectors, devNo)
+}
+
+// cutOnto says a reload of the dm-linear onto devNo was cut after its load:
+// suspended, with a table onto devNo waiting, which the next pass makes live
+// (DN12 rule 2).
+func (l linearStand) cutOnto(plan *sidePlan, devNo string) bool {
+	return l.dev != nil && l.dev.Suspended && l.dev.Waiting &&
+		linearMaps(l.next, plan.sectors, devNo)
+}
+
+// path is the primary's path through devNo as l stands (primaryPath): open
+// when the dm-linear serves through devNo, or will once a reload onto it cut
+// after its load is finished, and closed otherwise. The primary's namespace
+// takes the optimized group only over an open path (servingAnaGrpId): a
+// host sent there is served, or waits for the finish, and never meets the
+// dm-error's failures. One held suspended on devNo with no table waiting —
+// a path the fence keeps closed, or a reload whose load failed — is closed:
+// the cntlr counts an optimized path's leg as available and would read
+// through it, and its reads would wait for as long as the fence is not
+// proven. A reload cut after its load is the one exception: the pass that
+// loaded it opened the path by DN10's rule — after the fence check held,
+// or by a finished migration's repoint, which adds no writer — and its
+// group is the record a migration destination's stopped pass reads its
+// last decision from (migrCloneMapped), so while a later fence check fails
+// its hosts wait in it until the check holds again.
+func (l linearStand) path(plan *sidePlan, devNo string) primaryPath {
+	if l.serves(plan, devNo) || l.cutOnto(plan, devNo) {
+		return pathOpen
+	}
+	return pathClosed
+}
+
+// linearPath reads the primary's path through backing (linearStand.path).
+// The answer is pathUnread only where a read that did not answer leaves it
+// open: a dm-linear that is absent, suspended with no table waiting, or
+// live on the primary's own dm-error with none waiting is closed whatever
+// backing's number would say.
+func (s *DnAgentServer) linearPath(
+	ctx context.Context,
+	plan *sidePlan,
+	name string,
+	backing string,
+) primaryPath {
+	l, err := s.readLinear(ctx, name)
+	if err != nil {
+		return pathUnread
+	}
+	if l.dev == nil || l.dev.Suspended && !l.dev.Waiting {
+		return pathClosed
+	}
+	if devNo, err := s.dm.DevNo(ctx, backing); err == nil {
+		return l.path(plan, devNo)
+	}
+	errNo, err := s.dm.DevNo(ctx, s.nf.DmPath(plan.errName(plan.primaryCnId)))
+	if err == nil && !l.dev.Waiting &&
+		linearMaps(l.live, plan.sectors, errNo) {
+		return pathClosed
+	}
+	return pathUnread
+}
+
+// keptAnaGrpId is the group a namespace keeps (anaGrpKeep): the one it is
+// in, and inaccessible for one that is not there yet or whose group does not
+// answer, which the namespace's own step then reads again and reports.
+func (s *DnAgentServer) keptAnaGrpId(ctx context.Context, nqn string) int {
+	grpId, present, err := s.nvmet.NsAnaGrpId(ctx, nqn, sideNsid)
+	if err != nil || !present {
+		return common.AnaGrpIdInaccessible
+	}
+	return grpId
+}
+
+// fenceGap reads, from a fresh `dmsetup ls`, whether every per-CN dm-linear
+// of the side but the primary's is fenced (DN10), the ones the desired state
+// no longer names included: absent, or with its live table on its own CN's
+// dm-error. A table waiting on another CN's suspended dm-linear does not
+// count: nothing but its own CN's promotion finishes it (unfenceLinears),
+// and a resume drops it (agent.Dm.Resume). It returns "" when that is
+// proven, and otherwise what is not: each dm-linear that is not fenced, or
+// whose read did not answer, which proves nothing.
+func (s *DnAgentServer) fenceGap(ctx context.Context, plan *sidePlan) string {
+	dms, err := s.dm.List(ctx)
+	if err != nil {
+		return "dmsetup ls: " + err.Error()
+	}
+	type other struct {
+		name string
+		cnId uint64
+	}
+	var others []other
+	for name := range dms {
+		dn, ok := common.ParseDmName(name)
+		if !ok || dn.Kind != common.DmKindDnLinear ||
+			dn.ClusterId != plan.clusterId || dn.NodeId != plan.dnId ||
+			len(dn.Ids) != 3 || dn.Ids[0] != plan.spId ||
+			dn.Ids[1] != plan.sideId || dn.Ids[2] == plan.primaryCnId {
+			continue
+		}
+		others = append(others, other{name, dn.Ids[2]})
+	}
+	sort.Slice(others, func(i, j int) bool {
+		return others[i].name < others[j].name
+	})
+	var gaps []string
+	for _, o := range others {
+		if why := s.linearUnfenced(ctx, plan, o.name, o.cnId); why != "" {
+			gaps = append(gaps, o.name+": "+why)
+		}
+	}
+	return strings.Join(gaps, "; ")
+}
+
+// linearUnfenced says why the per-CN dm-linear name of cnId is not proven
+// fenced, or "" when it is: absent, or with every target of its live table on
+// cnId's own dm-error, suspended or not. A dm-linear suspended on the side
+// device is not fenced: its resume would let the IO it holds reach the
+// side.
+func (s *DnAgentServer) linearUnfenced(
+	ctx context.Context,
+	plan *sidePlan,
+	name string,
+	cnId uint64,
+) string {
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		return err.Error()
+	}
+	if dev == nil {
+		return ""
+	}
+	errNo, err := s.dm.DevNo(ctx, s.nf.DmPath(plan.errName(cnId)))
+	if err != nil {
+		return err.Error()
+	}
+	live, err := s.dm.Table(ctx, name)
+	if err != nil {
+		return err.Error()
+	}
+	if !mapsOnly(live, errNo) {
+		return "not on its dm-error"
+	}
+	return ""
+}
+
+// mapsOnly reports whether every target of a table is a linear target over
+// devNo, and there is at least one.
+func mapsOnly(targets []common.DmTarget, devNo string) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	for _, target := range targets {
+		if target.Type != "linear" || len(target.Args) == 0 ||
+			target.Args[0] != devNo {
+			return false
+		}
+	}
+	return true
 }
 
 // unfenceLinears ends the suspension of every per-CN dm-linear of this side
@@ -765,14 +1053,28 @@ func (s *DnAgentServer) unfenceLinears(
 			names = append(names, name)
 		}
 	}
-	sort.Strings(names)
+	// The primary's last, so its path opens only after every other has been
+	// fenced (DN10).
+	primary := plan.linearName(plan.primaryCnId)
+	sort.Slice(names, func(i, j int) bool {
+		if (names[i] == primary) != (names[j] == primary) {
+			return names[j] == primary
+		}
+		return names[i] < names[j]
+	})
 	for _, name := range names {
 		dev, err := s.dm.Info(ctx, name)
 		if err != nil || dev == nil || !dev.Suspended {
 			continue
 		}
-		finish, resume, reason := s.unfenceStep(
+		finish, resume, opens, reason := s.unfenceStep(
 			ctx, plan, name, actual.ours[name].Ids[2], dev.Waiting)
+		if opens {
+			if gap := s.fenceGap(ctx, plan); gap != "" {
+				finish, resume, reason = false, false,
+					detailsFenceUnproven+gap
+			}
+		}
 		switch {
 		case finish:
 			err = s.dm.FinishReload(ctx, name)
@@ -841,24 +1143,26 @@ func (s *DnAgentServer) finishFence(
 
 // unfenceStep is unfenceLinears' choice for the suspended linear name of
 // cnId: finish its waiting table, resume its live one, or neither, with the
-// reason. waiting says a table waits on it.
+// reason. waiting says a table waits on it. opens says the table it makes
+// live maps the device the primary serves through, which DN10's fence check
+// then guards.
 func (s *DnAgentServer) unfenceStep(
 	ctx context.Context,
 	plan *sidePlan,
 	name string,
 	cnId uint64,
 	waiting bool,
-) (finish bool, resume bool, reason string) {
+) (finish bool, resume bool, opens bool, reason string) {
 	// A fence in progress first: a dm-error waiting on the linear is a
-	// reload onto it cut after its load, and the IO the linear holds was
+	// reload onto it cut after its load, and the IO the linear held was
 	// held at that fence, so it must fail, whatever the CN is now.
 	if waiting {
 		fenced, err := s.waitsOnOwnError(ctx, plan, name, cnId)
 		if err != nil {
-			return false, false, err.Error()
+			return false, false, false, err.Error()
 		}
 		if fenced {
-			return true, false, ""
+			return true, false, false, ""
 		}
 	}
 	targets := []string{s.nf.DmPath(plan.errName(cnId))}
@@ -871,32 +1175,41 @@ func (s *DnAgentServer) unfenceStep(
 	}
 	live, err := s.dm.Table(ctx, name)
 	if err != nil {
-		return false, false, err.Error()
+		return false, false, false, err.Error()
 	}
 	var next []common.DmTarget
 	if waiting {
 		if next, err = s.dm.WaitingTable(ctx, name); err != nil {
-			return false, false, err.Error()
+			return false, false, false, err.Error()
 		}
 	}
 	var unread error
-	for _, target := range targets {
+	for i, target := range targets {
 		devNo, err := s.dm.DevNo(ctx, target)
 		if err != nil {
+			// With a table waiting, a number that does not answer stops the
+			// choice: a later target taken in its stead would drop that
+			// table, which may map this one, unread. Without one, the next
+			// target is tried, as for a dm-clone not built yet.
+			if waiting {
+				return false, false, false, err.Error()
+			}
 			unread = err
 			continue
 		}
+		serving := cnId == plan.primaryCnId && i == 0
 		switch {
 		case linearMaps(live, plan.sectors, devNo):
-			return false, true, ""
+			return false, true, serving, ""
 		case waiting && linearMaps(next, plan.sectors, devNo):
-			return true, false, ""
+			return true, false, serving, ""
 		}
 	}
 	if unread != nil {
-		return false, false, unread.Error()
+		return false, false, false, unread.Error()
 	}
-	return false, false, "neither table maps a device its IO may go to"
+	return false, false, false,
+		"neither table maps a device its IO may go to"
 }
 
 func fenceStatus(err error) pb.ResStatus {
@@ -1048,6 +1361,7 @@ func (s *DnAgentServer) ensureCnExports(
 	plan *sidePlan,
 	info *pb.SideInfo,
 	cloneLive bool,
+	primary primaryPath,
 ) {
 	uuid, nguid := plan.nsIdentity()
 	cntlidMin, cntlidMax := plan.cntlidRange()
@@ -1069,7 +1383,10 @@ func (s *DnAgentServer) ensureCnExports(
 			DevicePath: s.nf.DmPath(plan.linearName(cnId)),
 			Uuid:       uuid,
 			Nguid:      nguid,
-			AnaGrpId:   plan.anaGrpId(cnId, cloneLive),
+			AnaGrpId:   plan.servingAnaGrpId(cnId, cloneLive, primary),
+		}
+		if ns.AnaGrpId == anaGrpKeep {
+			ns.AnaGrpId = s.keptAnaGrpId(ctx, nqn)
 		}
 		err := s.ensureExport(ctx, subsys, ns)
 		if err == nil {

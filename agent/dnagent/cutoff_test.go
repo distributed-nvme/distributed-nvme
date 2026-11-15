@@ -310,8 +310,9 @@ func TestARestartCompletesACutOffFinish(t *testing.T) {
 // leave its namespace optimized: the fence that keeps a demoted primary off
 // the leg would be undone, and the IO the linear held while suspended would
 // land on the side's data. The pass is cut off at the old primary's reload
-// onto its dm-error, after the new primary's dm-linear went onto the side
-// device.
+// onto its dm-error, which comes before the new primary's path opens
+// (DN10), so the cut leaves the new primary on its dm-error; the restart
+// fences the old primary and then opens the new one's path.
 func TestARestartKeepsACutOffFailoversFence(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := srv.nf
@@ -326,9 +327,9 @@ func TestARestartKeepsACutOffFailoversFence(t *testing.T) {
 
 	node.Reset()
 	cutOffSyncupSide(t, srv, node, failoverReq(2), "dmsetup reload "+oldLin)
-	if !linearMapsDm(node, newLin, sideDev) {
-		t.Fatal("fixture is wrong: the cut-off pass did not put the new " +
-			"primary's dm-linear on the side device")
+	if linearMapsDm(node, newLin, sideDev) {
+		t.Fatal("the cut-off pass opened the new primary's path before " +
+			"the old primary's fence")
 	}
 
 	stopTestServer(t, srv)

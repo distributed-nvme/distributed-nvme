@@ -4238,9 +4238,13 @@ with `ResStatus`:
   (`dnagent.md` DN9), waiting for a free run in a DN's metadata area
   (Metadata units), or waiting for a migration's cutover (Migration):
   **healthy, not ready, no action needed**.
-* `RES_STATUS_PENDING` — the primary's prober for the leg has not
-  completed a round, or none is registered yet: **no verdict, no action
-  needed**. Only the primary's leg report produces it (`cnagent.md` CN11).
+* `RES_STATUS_PENDING` — waiting on something else before it can be
+  judged or built: on a cntlr's leg, the primary's prober for the leg has
+  not completed a round, or none is registered yet (`cnagent.md` CN11);
+  on a side, the primary's dm-linear, whose path stays closed until every
+  other dm-linear of the side is proven fenced (`dnagent.md` DN10). **No
+  verdict, no action needed** from health; the side's row is named, so
+  the worker sends its `SyncupSide` again (`dnagent.md` DN16).
 
 `epoch` is the unix seconds of the last status change; a change of
 `details` or of `reason` alone does not move it. The `revision`
@@ -5035,20 +5039,32 @@ candidate is.
 primary. One converge pass, with no waits and no suspensions ([D12]) as
 far as its reloads succeed, in this order:
 
-1. Reload the new primary CN's dm-linear so that it sits on the side
-   device.
-2. Reload the old primary CN's dm-linear onto its dm-error device.
-3. Move the new primary CN's namespace from non-optimized to optimized.
-4. Move the old primary CN's namespace from optimized to non-optimized.
+1. Reload the old primary CN's dm-linear onto its dm-error device: the
+   fence.
+2. Reload the new primary CN's dm-linear so that it sits on the side
+   device — only once every other dm-linear of the side is proven on its
+   own dm-error; otherwise it stays on its own dm-error.
+3. Move the old primary CN's namespace from optimized to non-optimized.
+4. Move the new primary CN's namespace from non-optimized to optimized —
+   only while its dm-linear serves on the side device, or heads there with
+   a reload onto it cut after its load; otherwise to inaccessible, and
+   while a read of its dm-linear does not answer it keeps its group
+   (`dnagent.md` DN10).
 
 The agent does all four in a single `SyncupSide` converge — the two
-reloads before the two ANA writes, and within each pair the new primary's
-CN first, the order in which the dn agent walks the request's CNs — so for
-the moment between its reload and its ANA move the old primary's path
-fails IO (`dnagent.md` DN10). A reload fails closed (`dnagent.md`, OS
+reloads before the two ANA writes, and within each pair the old primary's
+CN first: the dn agent walks the request's standbys first and the primary
+last (`dnagent.md` DN10). So for the moment between its reload and its
+ANA move the old primary's path fails IO, and the side never has two
+writers: a step of the fence that fails keeps the new primary's path
+closed and, short of the two cases step 4 names, its namespace
+inaccessible, so hosts queue their IO, and its row names the wait, so the
+worker sends the `SyncupSide` again until a converge completes the
+fence. A reload fails closed (`dnagent.md`, OS
 wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`): one whose load fails
-leaves the device suspended on its old table, queueing its IO; what that
-costs when it is the reload of step 2 is `dnagent.md`, Known limits.
+leaves the device suspended on its old table, queueing its IO, which
+counts as not fenced; what a failback costs after it is `dnagent.md`,
+Known limits.
 
 **Why the fan-out needs no order to be write-safe ([D16]).** The sp worker
 pushes the failover's `SyncupSide` calls with no order among the sides,
@@ -5056,12 +5072,13 @@ and each wait of its fan-out ends at its bound whether the reports it
 waits for came or not, so mid-failover the old primary can still hold a
 live path to one leg while the new primary already owns another. Two
 mechanisms make that harmless, and both are load-bearing: (a) each side's
-flip is **atomic within one DN converge** — the old primary's dm-linear
-reloads onto dm-error in the same pass that puts the new primary's onto
-the side device — so a single leg never has two writers, short of a reload
-whose load fails (the known limit above) or of an old primary's step that
-fails before its load, which can leave that linear live (`dnagent.md`,
-Known limits); and (b) across the legs of a
+flip **fences first, within one DN converge** — the old primary's
+dm-linear reloads onto dm-error before the same pass puts the new
+primary's onto the side device, and the new primary's path opens only
+once every other dm-linear of the side is proven on its dm-error
+(`dnagent.md` DN10) — so a single leg never has two writers: a fence step
+that fails keeps the new primary's path closed, its namespace
+inaccessible, until a later converge completes the fence; and (b) across the legs of a
 group, **md's own arbitration** decides: a leg whose superblock still
 claims a clean full array is not started degraded on its own ("Make sure
 all groups are available"), and once both legs are reachable the event
@@ -6740,7 +6757,7 @@ document and the component documents cite it by its id.
   stale superblock there; dm-clone then writes each metadata block before
   it reads it, which is what lets the group's array be created clean as
   a data group's is (`cnagent.md` CN12).
-* **[D16] Failover fencing has no epoch; safety = per-side atomic flip + md
+* **[D16] Failover fencing has no epoch; safety = per-side fence-first flip + md
   arbitration.** Among the nodes a failover moves — the cntlrs and the
   sides — the only coordination is the revisioned fan-out of sp role,
   unordered among the sides; toward hosts the failover also withdraws the
@@ -6772,10 +6789,9 @@ document and the component documents cite it by its id.
   the awaited reports came or not, and nothing below relies on them.
   Correctness rests on two things (Failover, "Make sure all groups are
   available"): each DN converges its side's old-primary-to-dm-error and
-  new-primary-to-side-device reloads in one pass, so one leg never has
-  two writers — short of a reload of the old
-  primary's linear whose load fails, or of a step for that linear that
-  fails before the load and can leave it live (`dnagent.md`, Known limits);
+  new-primary-to-side-device reloads in one pass, the fence first, and
+  opens the new primary's path only once every other dm-linear of the side
+  is proven fenced, so one leg never has two writers (`dnagent.md` DN10);
   and
   mdadm's assembly rules arbitrate across legs — a stale leg whose
   superblock claims a clean full array will not start degraded alone, and

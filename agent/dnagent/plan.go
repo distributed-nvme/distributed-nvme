@@ -179,8 +179,11 @@ func newSidePlan(
 	return p
 }
 
-// cnIdsOf lists the CNs a side exports to: the primary first, then the
-// standbys ascending, deduplicated.
+// cnIdsOf lists the CNs a side exports to: the standbys ascending,
+// deduplicated, then the primary last. A pass converges the stacks in this
+// order, so every other CN's dm-linear is fenced before the primary's path
+// opens, and every other namespace leaves the optimized group before the
+// primary's joins it (DN10).
 func cnIdsOf(conf *pb.SyncupSideRequest_SideConf) []uint64 {
 	standbys := make([]uint64, 0, len(conf.GetStandbyIdList()))
 	seen := map[uint64]struct{}{conf.GetPrimaryCnId(): {}}
@@ -194,7 +197,7 @@ func cnIdsOf(conf *pb.SyncupSideRequest_SideConf) []uint64 {
 	sort.Slice(standbys, func(i, j int) bool {
 		return standbys[i] < standbys[j]
 	})
-	return append([]uint64{conf.GetPrimaryCnId()}, standbys...)
+	return append(standbys, conf.GetPrimaryCnId())
 }
 
 func (p *sidePlan) errName(cnId uint64) string {
@@ -327,6 +330,60 @@ func (p *sidePlan) anaGrpId(cnId uint64, cloneLive bool) int {
 		return common.AnaGrpIdOptimized
 	}
 	return common.AnaGrpIdNonOptimized
+}
+
+// primaryPath is what a pass found of the primary's path (DN10), which
+// decides its namespace's ANA group (servingAnaGrpId).
+type primaryPath int
+
+const (
+	// pathClosed: the primary's dm-linear does not head to the device the
+	// primary serves through.
+	pathClosed primaryPath = iota
+	// pathOpen: it serves there, or heads there with a reload onto it cut
+	// after its load (linearStand.path).
+	pathOpen
+	// pathUnread: a read of it did not answer, so the pass cannot tell; its
+	// namespace keeps the group it has, since a read that did not answer
+	// must not cut a serving primary from its leg.
+	pathUnread
+)
+
+// anaGrpKeep is servingAnaGrpId's answer for a namespace that keeps the
+// group it has (keptAnaGrpId); it is no group's id.
+const anaGrpKeep = 0
+
+// servingAnaGrpId is the group a CN's namespace takes in a pass (DN10):
+// anaGrpId's, except that the primary's namespace takes the optimized group
+// only while its dm-linear heads to the device the primary serves through —
+// the side device, or a migration destination's dm-clone — and is
+// inaccessible while it does not, so no host is pointed at a path that
+// returns errors; while a read of it did not answer, it keeps its group
+// (anaGrpKeep). path is what this converge's step left, or what this read
+// read.
+func (p *sidePlan) servingAnaGrpId(
+	cnId uint64,
+	cloneLive bool,
+	path primaryPath,
+) int {
+	grpId := p.anaGrpId(cnId, cloneLive)
+	if grpId != common.AnaGrpIdOptimized {
+		return grpId
+	}
+	switch path {
+	case pathClosed:
+		return common.AnaGrpIdInaccessible
+	case pathUnread:
+		return anaGrpKeep
+	}
+	return grpId
+}
+
+// opensPath reports whether a CN's dm-linear, mapping backing, serves the
+// side's data: the primary's onto the device it serves through, which DN10's
+// fence check guards, and not a dm-linear on its own dm-error.
+func (p *sidePlan) opensPath(cnId uint64, backing string) bool {
+	return cnId == p.primaryCnId && backing != p.nf.DmPath(p.errName(cnId))
 }
 
 // withMigrSrc gives a plan whose migration-source name helpers resolve, so a

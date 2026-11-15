@@ -432,6 +432,7 @@ func (s *DnAgentServer) probeCnStacks(
 	// whether one is already running rather than going through beginFence.
 	fencing := plan.migrSrc != nil && s.inFence(st)
 
+	primary := pathClosed
 	info.CnIdToDmError = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
 	info.CnIdToDmLinear = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
 	for _, cnId := range plan.cnIds {
@@ -442,6 +443,7 @@ func (s *DnAgentServer) probeCnStacks(
 			resKeyOf(resKeyDmErrorFmt, cnId), errName, status, details)
 
 		linName := plan.linearName(cnId)
+		backing := plan.linearBacking(cnId, cloneLive)
 		// Inside the cutover grace window the linear is suspended on purpose,
 		// on whatever table it carries, so the test is phase 1's: reporting
 		// the window as a table mismatch would make a healthy cutover look
@@ -450,7 +452,22 @@ func (s *DnAgentServer) probeCnStacks(
 			status, details = s.probeFencedLinear(ctx, linName)
 		} else {
 			status, details = s.probeDmTarget(ctx, linName, "linear",
-				plan.sectors, plan.linearBacking(cnId, cloneLive))
+				plan.sectors, backing)
+		}
+		// The primary's path is judged by the converge's rule (DN10): one
+		// that does not serve and that the fence keeps closed reads as the
+		// converge leaves it, RES_STATUS_PENDING with the gap, and its
+		// namespace's group follows its path.
+		if !fencing && plan.opensPath(cnId, backing) {
+			if status == pb.ResStatus_RES_STATUS_OK {
+				primary = pathOpen
+			} else {
+				primary = s.linearPath(ctx, plan, linName, backing)
+				if gap := s.fenceGap(ctx, plan); gap != "" {
+					status, details = pb.ResStatus_RES_STATUS_PENDING,
+						detailsFenceUnproven+gap
+				}
+			}
 		}
 		info.CnIdToDmLinear[cnId] = t.Set(
 			resKeyOf(resKeyDmLinearFmt, cnId), linName, status, details)
@@ -462,6 +479,10 @@ func (s *DnAgentServer) probeCnStacks(
 		info.CnIdToNvmeof = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
 		for _, cnId := range plan.cnIds {
 			nqn := plan.sideNqn(cnId)
+			grpId := plan.servingAnaGrpId(cnId, cloneLive, primary)
+			if grpId == anaGrpKeep {
+				grpId = s.keptAnaGrpId(ctx, nqn)
+			}
 			status, details, reason := s.probeExport(ctx,
 				agent.SubsysConf{
 					Nqn:          nqn,
@@ -477,7 +498,7 @@ func (s *DnAgentServer) probeCnStacks(
 					DevicePath: s.nf.DmPath(plan.linearName(cnId)),
 					Uuid:       uuid,
 					Nguid:      nguid,
-					AnaGrpId:   plan.anaGrpId(cnId, cloneLive),
+					AnaGrpId:   grpId,
 				})
 			info.CnIdToNvmeof[cnId] = t.SetReason(
 				resKeyOf(resKeyNvmeofFmt, cnId), nqn, status, details,
@@ -528,8 +549,16 @@ func (s *DnAgentServer) probeDmTarget(
 	if dev.Suspended {
 		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
 	}
+	// A read-only dm-linear is not as wanted: its converge reloads it
+	// (ensureDmLinear), and nvmet cannot write through it.
+	if targetType == "linear" && dev.ReadOnly {
+		return pb.ResStatus_RES_STATUS_ERROR, detailsReadOnly
+	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }
+
+// detailsReadOnly is the row of a dm-linear the read finds read-only.
+const detailsReadOnly = "read-only"
 
 // detailsSuspended is the row of a dm device the read finds suspended outside
 // a cutover window: it serves no IO, so it reads RES_STATUS_ERROR, which the

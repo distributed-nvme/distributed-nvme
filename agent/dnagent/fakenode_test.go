@@ -171,6 +171,11 @@ type fakeNode struct {
 	// would pass against an agent that quietly assumed the other.
 	killCmdNoEffect       map[string]bool
 	killCmdNoEffectAlways map[string]bool
+	// killCmdNoEffectNth kills, with no effect, the n-th command that
+	// matches a key, counting from 1, and then drops the key: a test walks
+	// each read of a pass in turn by raising n until no command is killed
+	// (takeKillNth).
+	killCmdNoEffectNth map[string]int
 	// failRead / killRead are the ReadFile counterparts, matched on a
 	// substring of the path. failRead* returns an error that is NOT
 	// fs.ErrNotExist (an unreadable attribute), killRead* returns
@@ -329,6 +334,7 @@ func newFakeNode() *fakeNode {
 		killCmdAlways:         make(map[string]bool),
 		killCmdNoEffect:       make(map[string]bool),
 		killCmdNoEffectAlways: make(map[string]bool),
+		killCmdNoEffectNth:    make(map[string]int),
 		failRead:              make(map[string]bool),
 		failReadAlways:        make(map[string]bool),
 		killRead:              make(map[string]bool),
@@ -698,6 +704,23 @@ func (f *fakeNode) inProcessHookErr(line string, failed error) error {
 	return nil
 }
 
+// takeKillNth counts line against killCmdNoEffectNth and reports whether
+// it is the one to kill. The caller holds f.mu.
+func (f *fakeNode) takeKillNth(line string) bool {
+	for key, n := range f.killCmdNoEffectNth {
+		if !strings.Contains(line, key) {
+			continue
+		}
+		if n <= 1 {
+			delete(f.killCmdNoEffectNth, key)
+			return true
+		}
+		f.killCmdNoEffectNth[key] = n - 1
+		return false
+	}
+	return false
+}
+
 // takeFailCmd reports whether a failCmd key matches line, with that key's
 // stderr, and spends one of the failures the key was armed with
 // (failCmdLeft). Called with f.mu held.
@@ -1046,7 +1069,8 @@ func (f *fakeNode) runCommand(
 	// and after them: a key registered in both fails rather than being
 	// killed. "No effect" returns before the dispatch; "killed" runs the
 	// dispatch and throws the answer away.
-	killedNoEffect := takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways, line)
+	killedNoEffect := takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways,
+		line) || f.takeKillNth(line)
 	var killed bool
 	if !killedNoEffect {
 		killed = takeKill(f.killCmd, f.killCmdAlways, line)

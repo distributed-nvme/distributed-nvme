@@ -1446,6 +1446,9 @@ func (s *DnAgentServer) sidePreSteps(
 		if !s.dmMapsUnwanted(ctx, name, actual, wanted) {
 			continue
 		}
+		// The primary's repoint needs no fence check (DN10): its dm-linear
+		// serves through the finished migration's dm-clone, which writes to
+		// the side device, so moving it onto the side device adds no writer.
 		if err := s.ensureDmLinear(ctx, name, plan.sectors,
 			plan.linearBacking(cnId, false)); err != nil {
 			slog.ErrorContext(ctx, "repointing a per-cn dm-linear failed",
@@ -1872,8 +1875,9 @@ func (s *DnAgentServer) zeroingVerdict(
 //     the DN's verdict's (DN6's record step).
 //   - Each per-CN dm-error, dm-linear and export row, and a migration
 //     source's and a migration destination's two rows, that reads
-//     RES_STATUS_MISSING or RES_STATUS_ERROR, or
-//     RES_STATUS_OK with RES_REASON_DIFFERS (an export whose ANA group
+//     RES_STATUS_MISSING or RES_STATUS_ERROR, the primary's dm-linear that
+//     reads RES_STATUS_PENDING because its path waits for the fence (DN10),
+//     or RES_STATUS_OK with RES_REASON_DIFFERS (an export whose ANA group
 //     differs). Two are left out: an export whose port is not there
 //     (detailsPortMissing), which the DN's verdict names, so the sides are
 //     not re-sent for the link alone; and a migration destination's dm-clone
@@ -1934,7 +1938,7 @@ func (s *DnAgentServer) rowVerdict(
 // nameRow records row in res when rowVerdict names it: a row that reads
 // RES_STATUS_MISSING, or an export's that reads RES_STATUS_ERROR because a
 // part its build makes is not there, as "absent"; one that reads
-// RES_STATUS_ERROR otherwise, or RES_STATUS_OK with
+// RES_STATUS_ERROR or RES_STATUS_PENDING otherwise, or RES_STATUS_OK with
 // RES_REASON_DIFFERS, as "differs"; each with the first line of the row's
 // details after it, but for the two rows rowVerdict leaves out. A nil row
 // names nothing.
@@ -1947,7 +1951,7 @@ func nameRow(row *pb.ResInfo, res *agent.SweepResult) {
 	switch row.GetStatus() {
 	case pb.ResStatus_RES_STATUS_MISSING:
 		err = errObjectAbsent
-	case pb.ResStatus_RES_STATUS_ERROR:
+	case pb.ResStatus_RES_STATUS_ERROR, pb.ResStatus_RES_STATUS_PENDING:
 		switch {
 		case details == detailsPortMissing,
 			strings.HasPrefix(details, detailsCloneMetaMode):

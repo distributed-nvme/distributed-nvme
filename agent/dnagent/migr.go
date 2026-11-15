@@ -543,23 +543,28 @@ func (s *DnAgentServer) runMigrDst(
 
 // migrCloneMapped reads whether the per-CN stacks serve through the dm-clone,
 // which is there: up when a per-CN dm-linear of the plan maps it and that
-// CN's namespace is in the optimized group, down when every read answered and
-// no stack does — an absent dm-linear maps nothing, and an absent namespace
-// is in no group — and unread when a read the answer needs did not answer.
-// The group is read strictly (NsAnaGrpId), so a group read that did not
-// answer leaves the answer unread: taken as a group that is not optimized, it
-// would reload the leg's only serving path onto its dm-error. The namespace's
-// group is the half that records the last decision: a pass that takes the
-// stacks off the dm-clone moves the namespaces to the inaccessible group even
-// when its reload of a dm-linear is refused, and that dm-linear stays on the
-// dm-clone (a reload fails closed; a later pass's pre-step resumes the
-// primary's there when no dm-error table waits on it, unfenceLinears, and
-// the build reloads any other). Read from the table alone, such a dm-linear
-// would
-// put a stopped pass back on a dm-clone whose source is gone. Any per-CN
+// CN's namespace is in the optimized or the non-optimized group, down when
+// every read answered and no stack does — an absent dm-linear maps nothing,
+// and an absent namespace is in no group — and unread when a read the
+// answer needs did not answer. The group is read strictly (NsAnaGrpId), so a
+// group read that did not answer leaves the answer unread: taken as a group
+// that is not optimized, it would reload the leg's only serving path onto
+// its dm-error. The namespace's group is the half that records the last
+// decision: a pass that takes the stacks off the dm-clone moves every
+// namespace to the inaccessible group even when its reload of a dm-linear is
+// refused, and that dm-linear stays on the dm-clone (a reload fails closed;
+// a later pass's pre-step resumes the primary's there when no dm-error table
+// waits on it, unfenceLinears, and the build reloads any other). Read from
+// the table alone, such a dm-linear would put a stopped pass back on a
+// dm-clone whose source is gone. A pass that serves through the dm-clone
+// puts the primary's namespace in the optimized group while its path is
+// open (DN10) and every other in the non-optimized one, so a non-optimized
+// namespace over the dm-clone is a stack of such a pass: a CN the primary
+// flip demoted, whose fence failed, while the new primary's path waits for
+// that fence in the inaccessible group. Any per-CN
 // stack counts, not only the primary's: a primary flip that arrives in a
-// stopped pass then moves the serving path to the new primary at once, the
-// old primary's stack still serving through the dm-clone. Only plan.cnIds
+// stopped pass then moves the serving path to the new primary once its
+// fence holds, the old primary's stack still mapping the dm-clone. Only plan.cnIds
 // are read, so when a flip also drops the old primary, whose stack the
 // pass's sweep removes, the read finds none on the dm-clone and the new
 // primary waits on its dm-error for the retry. It only reads: the read a
@@ -607,7 +612,8 @@ func (s *DnAgentServer) migrCloneMapped(
 			answer = migrCloneUnread
 			continue
 		}
-		if present && grpId == common.AnaGrpIdOptimized {
+		if present && (grpId == common.AnaGrpIdOptimized ||
+			grpId == common.AnaGrpIdNonOptimized) {
 			return migrCloneUp
 		}
 	}

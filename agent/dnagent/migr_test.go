@@ -1734,8 +1734,8 @@ func TestMigrationSourceFence(t *testing.T) {
 			agent.NvmetRoot,
 			nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0),
 			common.AnaGrpIdInaccessible),
-		"cmd dmsetup suspend "+linName,
 		"cmd dmsetup suspend "+stbName,
+		"cmd dmsetup suspend "+linName,
 		"cmd ln -s "+agent.NvmetRoot+"/subsystems/"+srcNqn+" "+
 			portPathOf(common.NvmetPortId)+"/subsystems/"+srcNqn,
 	)

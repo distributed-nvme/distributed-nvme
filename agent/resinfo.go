@@ -17,8 +17,9 @@ import (
 // caller names one through ErrReason, MissingReason or SetReason.
 //
 // The agent emits MISSING/ERROR/OK/PROVISIONING, the cn agent also PENDING on a
-// primary's leg rows (cnagent.md CN11), and never UNKNOWN (that one is
-// worker-only).
+// primary's leg rows (cnagent.md CN11) and the dn agent on the primary's
+// dm-linear whose path waits for the fence (dnagent.md DN10), and never
+// UNKNOWN (that one is worker-only).
 //
 // One tracker belongs to one synced object (a DN, a side, …). State is
 // in-memory: after a restart the epochs restart at the reconcile time, which
@@ -141,8 +142,9 @@ func (t *ResTracker) SetReason(
 }
 
 // Ok / Missing / Err / Provisioning are the four outcomes every agent may
-// report. The fifth, RES_STATUS_PENDING, has no helper: only the cn agent's
-// primary leg report produces it, through Set (cnagent.md CN11).
+// report. The fifth, RES_STATUS_PENDING, has no helper: the cn agent's
+// primary leg report and the dn agent's primary dm-linear row produce it,
+// through Set (cnagent.md CN11, dnagent.md DN10).
 func (t *ResTracker) Ok(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_OK, details)
 }

@@ -2527,7 +2527,11 @@ not completed a round (or none is registered yet) — a first round stalled
 past `CnLegProbeStallSeconds` reads `ERROR` — and a fresh prober starts at
 every promotion and agent restart (`cnagent.md` CN11); were that row to
 read `OK`, every promotion's fresh probers would clear a dead leg's
-`err_epoch` and restart AR8 case 1's `leg_unhealthy` clock. A round that
+`err_epoch` and restart AR8 case 1's `leg_unhealthy` clock. On a side,
+`PENDING` is the primary's dm-linear while its path waits for the fence
+(`dnagent.md` DN10): the side's code names it, so the round sends the
+`SyncupSide` again (RW4), and the dm-linear that could not be fenced reads
+`ERROR`. A round that
 answers from an observation no round asked for sets and clears none of the
 three, whatever its rows (HL7).
 `ReplyCodeLeftover` is not a rejection: its rows are evaluated exactly as a

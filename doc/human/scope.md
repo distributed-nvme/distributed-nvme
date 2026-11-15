@@ -448,23 +448,16 @@ The entries:
   last, over the pool's data written there since. State:
   fix decided, the zeroing never writes a side that is provisioned. Not
   seen in the lab.
-- **A failover step that fails before the fence leaves two writers on a
-  side.** Silent. At a failover a disk node handles the new primary's path
-  first. A failed step for the old primary before its fence leaves both
-  primaries' paths live on the side. The side's check names the old
-  primary's path, which maps the wrong device, and the worker sends the
-  side's syncup again on its next check round, whose converge fences the
-  path; the two writers last until then. State: fix decided, the fence comes first, before any
-  other step of the failover. Not seen in the lab.
 - **A failback right after a failed fence can write old data.** Silent. A
   fence that suspends the old primary's path and then fails to load the
   error table leaves that path suspended on the side, holding the old
   primary's writes. If the next change makes that controller node the
   primary again before any later pass fences it, those held writes land on
-  the side after the other primary's newer writes. It needs a failed table
-  load and then a failback before the side's next syncup, which the worker
-  sends again on its next check round and whose converge fences the path
-  first. State: fix later. Not seen in the lab.
+  the side. The other primary could not write this side meanwhile, but it
+  wrote the group's other leg, so the two legs can hold different data. It
+  needs a failed table load and then a failback before the side's next
+  syncup, which the worker sends again on its next check round and whose
+  converge fences the path first. State: fix later. Not seen in the lab.
 - **dnvctl parses an id with leading zeros as octal.** An id copied from a
   device name can name another object. A forced start or a delete can act
   on the wrong group or leg. State: fix decided, dnvctl refuses such an

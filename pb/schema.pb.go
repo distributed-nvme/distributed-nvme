@@ -126,11 +126,15 @@ const (
 	// PROVISIONING means deliberately not created / being prepared;
 	// healthy; no action needed
 	ResStatus_RES_STATUS_PROVISIONING ResStatus = 4
-	// PENDING means the primary's health prober for the leg has not
-	// completed a round since it started (at the leg's build, a
-	// promotion or an agent restart), or no prober is registered yet:
-	// no verdict, no action needed. Produced only by the cn agent's
-	// leg report on a primary (cnagent.md CN11).
+	// PENDING means waiting on something else before it can be judged or
+	// built: on a cntlr's leg row, the primary's health prober for the leg
+	// has not completed a round since it started (at the leg's build, a
+	// promotion or an agent restart), or no prober is registered yet
+	// (cnagent.md CN11); on a side, the primary's dm-linear, whose path
+	// stays closed until every other dm-linear of the side is proven
+	// fenced (dnagent.md DN10). No verdict, no action needed from health;
+	// the side's verdict names its row, so the worker re-sends the
+	// SyncupSide.
 	ResStatus_RES_STATUS_PENDING ResStatus = 5
 )
 
