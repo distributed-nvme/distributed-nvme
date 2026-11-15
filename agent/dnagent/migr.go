@@ -83,6 +83,18 @@ func (s *DnAgentServer) linkMigrSrc(
 	}
 	nqn := plan.migrSrcNqn()
 	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, nqn, s.port.QidMax)
+	if err != nil {
+		// A link that failed because the port itself is not there reads as
+		// the read reads it, which the side's verdict leaves to the DN's
+		// (SH31).
+		_, portThere, perr := s.nvmet.PortLinkedState(
+			ctx, s.port.PortId, nqn)
+		if perr == nil && !portThere {
+			info.MigrSrcInfo.NvmeofInfo = st.tracker.Err(
+				resKeyMigrSrcNvmeof, nqn, detailsPortMissing)
+			return
+		}
+	}
 	info.MigrSrcInfo.NvmeofInfo = st.tracker.FromErr(
 		resKeyMigrSrcNvmeof, nqn, "", err)
 }

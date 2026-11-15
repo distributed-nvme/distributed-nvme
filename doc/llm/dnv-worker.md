@@ -2124,8 +2124,13 @@ accepted, so a demotion whose converge left something not as wanted,
 which the agent names in that code (`dnagent.md` SH31), ends the wait as
 one with code zero does. Reason: the old primary has taken the demotion's
 request, and the fence keeps it off the sides whatever its namespaces
-still say (`dnagent.md` DN10); waiting the timer out for it would only
-lengthen the failover. Then the sides are handed the fan-out, and
+still say (`dnagent.md` DN10), so no side has two writers; and the hold
+is bounded in time anyway. A leftover that names a namespace whose move
+to inaccessible failed gains nothing from the wait: the same demotion
+converge parks that namespace's ns-dev on the td's dm-error (`cnagent.md`
+CN16), so a host still on that path reads IO errors from then on whether
+the hold ends or not, and the next round's re-send to the demoted cntlr
+(RW4) runs either way. Then the sides are handed the fan-out, and
 the other cntlrs follow under the sides-first hold, which takes the sides
 it waits for (RW14) from the side plans the demotion hold kept, the
 newest, and whose bound of one `cntlr_interval` runs from that moment.

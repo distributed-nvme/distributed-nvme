@@ -261,3 +261,37 @@ func TestASourceStepOneMovesWhenANamespaceReadFails(t *testing.T) {
 			suspend)
 	}
 }
+
+// A migration source whose link of its export fails because the node's
+// nvmet port is not there reads that on the converge as the read does, "the
+// port is not there", and its code names it not: the DN's verdict names the
+// port, and the side is not sent again for the link alone (SH31).
+func TestASourceExportOverAMissingPortIsNotNamed(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	portPath := agent.NvmetRoot + "/ports/1"
+	node.mu.Lock()
+	for path := range node.links {
+		if strings.HasPrefix(path, portPath+"/subsystems/") {
+			delete(node.links, path)
+		}
+	}
+	node.cmdRmdir([]string{portPath})
+	node.mu.Unlock()
+
+	reply, err := srv.SyncupSide(ctx, migrSrcReq(2))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	row := reply.GetSideInfo().GetMigrSrcInfo().GetNvmeofInfo()
+	if row.GetDetails() != detailsPortMissing {
+		t.Fatalf("the source export's row is %v, want %q", row,
+			detailsPortMissing)
+	}
+	if strings.Contains(reply.GetAgentReply().GetDetails(),
+		row.GetResName()) {
+		t.Errorf("the converge named the source export: %v",
+			reply.GetAgentReply())
+	}
+}

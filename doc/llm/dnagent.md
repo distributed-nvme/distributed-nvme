@@ -383,8 +383,9 @@ on disk first, a crash mid-converge is nothing worse than a startup
 reconcile that completes the pass. Per-resource `RES_STATUS_ERROR`
 outcomes do not block persistence — the errors travel in the `*Info`, the
 worker's health loop reads them, and the worker re-sends a request at the
-same revision only on a reply's code, which the converge's and the read's
-verdicts set for what a re-send would build or rewrite (SH31, DN16); such
+same revision only on a reply's code, which the verdicts set for what a
+re-send would build or rewrite: a side's converge and read alike, a DN's
+read alone for its port (SH31, DN16); such
 a re-send re-applies idempotently. The gates' rejections — stale revision, unknown pointer,
 invalid stored conf (SH9) — never reach persistence.
 
@@ -610,7 +611,7 @@ agent emits `RES_STATUS_MISSING`, `RES_STATUS_ERROR`, `RES_STATUS_OK` and
 primary's leg rows (`cnagent.md` CN11) and the dn agent on the primary's
 dm-linear whose path waits for the fence (DN10), and never
 `RES_STATUS_UNKNOWN` (worker-only). `RES_STATUS_PENDING` means *waiting on
-something else before it can be judged or built — no verdict*: on a leg
+something else before it can be judged or built — no health verdict*: on a leg
 row, the primary's prober for the leg has not completed a round since it
 started (a build, a promotion or an agent restart), and it neither sets nor
 clears `Leg.err_epoch` (`architecture.md`, Live-state reporting and sp
@@ -1186,9 +1187,10 @@ finds it too old brings none (`dnv-worker.md` HL7), and a read that round
 starts stores the node's state at the revision the agent now holds, the
 cut-off syncup's own (SH8), so the rounds after it answer at that
 revision, and the syncup comes again once that read's verdict names what
-the cut-off converge left not as wanted (SH31); a scope whose rows the
-verdict does not cover, a DN's or a CN's, waits for its desired revision
-to move on. A syncup's reply to a request
+the cut-off converge left not as wanted (SH31). A DN's or a CN's read
+names the leftovers a cut-off sweep did not remove, and of its build only
+the node's port (SH31, DN16, `cnagent.md` CN30), so the rest of a cut-off
+DN or CN build waits for its desired revision to move on. A syncup's reply to a request
 the agent accepted carries the stamp of the observation its converge
 stored, with no converge start, and the time the agent saved the request
 to its local store (SH5), which every accepted request has. A reply that
@@ -1317,8 +1319,9 @@ names what its pass found not as the desired state wants it, absent or
 different, where a re-sent `Syncup*` of the same scope would cure it. For
 a side and a cntlr both a converge and a read name it, each from the rows
 it has just made, so the converge's own code names what its steps left
-undone — a step that failed or was cut off, a device left suspended, a
-namespace whose ANA move failed — and the worker's next round sends the
+undone — a step whose command failed or was cut off by its own deadline
+(SH15), a device left suspended, a namespace whose ANA move failed — and
+the worker's next round sends the
 `Syncup*` again; each role lists the rows, a side's in DN16 and a
 cntlr's in `cnagent.md` CN30. An object that serves but differs, a
 namespace whose ANA group is not the wanted one while the wanted one is
@@ -1331,10 +1334,14 @@ is an error, never an empty value (`agent.Nvmet.ProbeNamespace` reads
 strictly): read as empty, it would make a converge disable a live
 export's namespace or move a serving namespace's ANA group. A move to the
 inaccessible group reads the namespace's group alone and is tried even
-when that read does not answer, since inaccessible is the safe direction. A verdict names nothing a re-sent request
+when that read does not answer, since inaccessible is the safe direction;
+on a side, a per-CN export the pass wants inaccessible is moved so even
+when the export's own step stopped at a read of another attribute
+(DN10). A verdict names nothing a re-sent request
 would refuse at a gate (DN8, SH9) or at `AllocSide`, nothing the design
-holds back on purpose — a side still zeroing, a layer whose own layer
-below is not there, what the level switches off — and no state a converge
+holds back on purpose — a side still zeroing, a cntlr's layer whose own
+layer below is not there (`cnagent.md` CN30), what the level switches off
+— and no state a converge
 does not cure, such as a dm-clone whose metadata is read-only (DN13). A
 disk whose identity is not confirmed is named by DN6's record step, for
 its own reason.
@@ -1361,7 +1368,9 @@ What a verdict adds is rendered as an enumeration that did not answer is
 (DN19): "enumeration failed" with the object's name, then "absent" or
 "differs", with the row's or the probe's words after it where it has some.
 A piece that can never be built — a `mkdir` refused every time, say — is
-re-sent on each round, and each attempt is logged. Reason: without the name
+re-sent on each round where the converge names it too, as a side's and a
+cntlr's rows; a DN's or a CN's port, which only the read names, at most
+every second round (`dnv-worker.md` RW4); each attempt is logged. Reason: without the name
 in the code nothing would re-send the `Syncup*` until the object's revision
 moved for another reason or the agent restarted, and an object a reboot or
 one failed command left unbuilt or wrong would stay so.
@@ -2059,10 +2068,10 @@ top-down. Every position is a dependency, not a preference.
 *Before the first layer*, every suspended per-CN dm-linear the pass is
 about to remove, or whose export it is about to remove — wanted or not — is
 put on its dm-error and resumed: DN12's phase 2, brought forward. A
-dm-error that is gone is built first, or the step would fail on every pass;
-when the desired state does not name it, the pass leaves it, listed before
-the step built it, and the next pass's sweep removes it, the read between
-naming it as a leftover. L1
+dm-error that is gone is built first, or the step would fail on every pass.
+When the desired state does not name that dm-error, this pass leaves it,
+since the pass's listing was taken before the step built it; the next
+pass's sweep removes it, and a read between names it as a leftover. L1
 disables the nvmet namespace above it, and that write first waits for every
 request in flight on the namespace; one whose bio a suspended dm target
 holds never completes, since such a target queues bios with no timeout and
@@ -2524,8 +2533,9 @@ then.
 
 **The fence comes first.** A pass converges the per-CN stacks in
 `cnIdsOf`'s order — the standbys ascending, the primary last — so every
-other CN's dm-linear is fenced, and every other namespace has left the
-optimized group, before the primary's path opens. The primary's path is
+other CN's dm-linear is fenced before the primary's path opens, and every
+other namespace has left the optimized group before the primary's joins
+it. The primary's path is
 its dm-linear on the device it serves through: the side device, or a
 migration destination's dm-clone (DN13). A dm-linear that serves there
 already — live, resumed and writable on it — stays, whatever the other
@@ -2555,20 +2565,26 @@ side device (DN6) opens no path, since the dm-clone writes to the side
 device, and needs no check. The primary's namespace joins the optimized
 group only while its dm-linear serves through the serving device, or
 heads there with a reload onto it cut after its load
-(`servingAnaGrpId`), and is inaccessible otherwise, so a host is never
-pointed at a path that returns errors, nor at one held suspended for the
-fence, which the cntlr would count as an available leg and read through
-(`cnagent.md` CN12). A reload cut after its load is the one exception to
-the second: the pass that loaded it opened the path by this rule — after
-the check held, or by a finished migration's repoint, which adds no
-writer — and its group is the record a migration destination's stopped
-pass reads (DN13), so while a later fence check fails, hosts sent there
-wait until the check holds and a pass finishes the reload. While a read
-of the primary's own dm-linear, or of the serving device's number, does
-not answer, and the dm-linear does not show the path closed by itself —
-absent, suspended with no table waiting, or live on the primary's own
-dm-error with none waiting — the pass cannot tell where the path is, and
-the namespace keeps the group it has (`keptAnaGrpId`).
+(`servingAnaGrpId`), and is inaccessible otherwise. So the primary's
+cntlr is not pointed at a path that returns errors, nor at one held
+suspended for the fence, which it would count as an available leg and
+read through (`cnagent.md` CN12). The move to inaccessible is tried even
+when the export's own step stops at a read of the namespace that did not
+answer, as SH31's moves are; only a move the kernel refuses leaves the
+group, and the export's row then reads it, which the side's verdict
+names. One held path is pointed at
+all the same: a reload onto the serving device cut after its load. The
+pass that loaded it opened the path by this rule — after the check held,
+or by a finished migration's repoint, which adds no writer — and its
+group is the record a migration destination's stopped pass reads (DN13).
+So while a later fence check fails, the cntlr's reads there wait until
+the check holds and a pass finishes the reload. While a read of the
+primary's own dm-linear, or of the serving device's number, does not
+answer, the pass cannot tell where the path is, and the namespace keeps
+the group it has (`keptAnaGrpId`). When only the serving device's number
+does not answer, the dm-linear can still show the path closed by itself
+— absent, suspended with no table waiting, or live on the primary's own
+dm-error with none waiting — and the namespace then goes inaccessible.
 
 DN11. **`sp_level` gating** (`architecture.md`, SpLevel; numeric
 comparisons — the enum values are ordered). Levels are desired state:
@@ -2637,7 +2653,9 @@ nothing an earlier pass did of steps 1 and 2 and the port link: it only
 stops its own pass. The port link itself comes after steps 1 and 2, so its
 failure cannot stop them; its row, the export's, reads `RES_STATUS_ERROR`
 with the refusal, and the verdict names it too, so the next converge links
-the export. Reason: steps 1 and 2 cut the primary's
+the export — unless the node's port itself is gone: the row then reads
+"the port is not there", which the DN's verdict names instead (DN16).
+Reason: steps 1 and 2 cut the primary's
 path through this side, and without the export the destination has nothing
 to serve the leg from, so after a failed build they would leave the leg
 with no usable path until a later converge's build held, which blocks the
@@ -2695,28 +2713,30 @@ Four rules keep the suspension bounded, which is what makes it safe:
   when it maps the target, resumed with any waiting table dropped (OS
   wrappers), and otherwise a waiting table that maps it, made live
   (`Dm.FinishReload`): a promotion cut after its load, whose held IO is
-  then served, even in a pass that stops before its build. The primary's
-  linear comes last, and its resume or finish onto the device it serves
-  through opens its path, so it waits for DN10's fence check like the
-  build's step: while the check fails the linear stays suspended for the
-  build. So a fenced
-  linear of a migration that is over ends as the end of the window would
-  have ended it, without the dm-error swap the side no longer needs: a
-  standby's held IO fails and the primary's reaches the device it serves
-  through. The build phase then reloads the linear onto the target the new
-  desired state wants. It leaves suspended a linear none of whose tables
-  maps such a target — one that is not the primary, live on the side
-  device or the dm-clone with no dm-error waiting, a demotion whose load
-  failed (DN10), whose resume would release the old primary's queued IO
-  onto the side's data; a primary live on a dm-clone of a migration the
-  request no longer names — and one whose tables do not answer, or that
-  has a table waiting and a target whose number does not answer, since
-  the waiting table may map that target; with none waiting, a target whose
-  number does not answer is passed over for the next, as a migration
-  destination's dm-clone not built yet is. The build phase reloads a wanted one onto the table it
-  wants, and the step before the sweep's first layer retires one the
-  desired state no longer names onto its dm-error (DN6); either reload
-  fails the IO a fenced linear holds. While no converge's build phase
+  then served, even in a pass that stops before its build. So a fenced
+  linear of a migration that is over ends its suspension without the
+  dm-error swap the side no longer needs: a standby's held IO fails on its
+  dm-error, and the primary's reaches the device it serves through. The
+  build phase then reloads the linear onto the target the new desired
+  state wants.
+
+  Four kinds of linear stay suspended through this step. The first is the
+  primary's, while DN10's fence check fails: it comes last, and its
+  resume or finish onto the device it serves through opens its path, so
+  it waits for the check as the build's step does. The second is one none
+  of whose tables maps such a target: a linear that is not the primary,
+  live on the side device or the dm-clone with no dm-error waiting — a
+  demotion whose load failed (DN10), whose resume would release the old
+  primary's queued IO onto the side's data — or a primary live on a
+  dm-clone of a migration the request no longer names. The third is one
+  whose tables do not answer. The fourth is one with a table waiting and
+  a target whose number does not answer, since the waiting table may map
+  that target; with no table waiting, such a target is passed over for
+  the next, as a migration destination's dm-clone not built yet is. The
+  build phase reloads a wanted one onto the table it wants, and the step
+  before the sweep's first layer retires one the desired state no longer
+  names onto its dm-error (DN6); either reload fails the IO a fenced
+  linear holds. While no converge's build phase
   reloads it — one that stops at the side-device gate (rule 4 below), a
   destination that cannot read where its stacks serve from (DN13), or a
   build whose step for that CN's dm-error, or whose read of the linear's
@@ -3042,17 +3062,17 @@ serving path neither onto the dm-clone nor off it.** Where the per-CN
 stacks go is read instead from the dm-clone and the side's per-CN stacks
 as the pass finds them (`migrDstStopped`): when a stack serves through the
 dm-clone — its dm-linear maps it and its namespace is in
-`AnaGrpIdOptimized`, or in `AnaGrpIdNonOptimized`, which only a pass that
-serves through the dm-clone gives a namespace: a CN a primary flip demoted
-whose fence failed, while the new primary's path waits for that fence in
-`AnaGrpIdInaccessible` (DN10) — the primary's goes or stays on it as after the whole
-sequence; when the dm-clone is absent, or every read answered and no stack
+`AnaGrpIdOptimized` or `AnaGrpIdNonOptimized` — the primary's goes or
+stays on it as after the whole sequence; when the dm-clone is absent, or every read answered and no stack
 serves through it, the stacks sit on their dm-errors with every namespace
 `AnaGrpIdInaccessible` (step 1); when a read the answer needs did not
 answer — the dm-clone's own, its device number, a dm-linear's or a
 namespace's — and no stack was found serving through it, the pass leaves
 the per-CN stacks exactly as they are and reports them as a background
-read would. A dm-linear left suspended with a table waiting, a reload cut
+read would. Only a pass that serves through the dm-clone puts a namespace in
+`AnaGrpIdNonOptimized`: over the dm-clone, that is a CN a primary flip
+demoted whose fence failed, while the new primary's path waits for that
+fence in `AnaGrpIdInaccessible` (DN10). A dm-linear left suspended with a table waiting, a reload cut
 after its load, is judged by its waiting table, where its last pass put
 the stack: judged by its live table, a promotion onto the dm-clone cut
 after its load would read off the dm-clone, and its stack would be resumed
@@ -3546,11 +3566,11 @@ needed, and the worker never turns one into an `err_epoch`
   gives, judged by the dm-clone's presence only where a pass that stopped
   or waits for the cutover cannot read where the stacks are, DN13). A
   read-only dm-linear reads `RES_STATUS_ERROR`, details "read-only": its
-  converge reloads it. The
-  primary's dm-linear that does not serve through the device it serves
-  through is judged by DN10's fence check, as the converge judges it:
-  while the check fails it reads `RES_STATUS_PENDING`, details "path
-  closed until the fence is proven: " and the dm-linears not fenced. A
+  converge reloads it. When the primary's dm-linear does not serve
+  through the side device or the dm-clone, its row is judged by DN10's
+  fence check, as the converge judges it: while the check fails it reads
+  `RES_STATUS_PENDING`, details "path closed until the fence is proven: "
+  and the dm-linears not fenced. A
   device suspended outside a cutover window serves no IO and reads
   `RES_STATUS_ERROR`, details "suspended", as a side device does. Inside
   the cutover window of
@@ -3686,7 +3706,8 @@ else reported through `agent_reply` is still a protocol-level refusal.
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,
   the linear stays suspended on the side device, holding the old primary's
-  IO, with no table waiting, which would mark the fence. A request that
+  IO. No dm-error table waits on it, so nothing marks it as a fence cut
+  after its load (DN12 rule 2). A request that
   makes that CN the primary again before a later converge has fenced it
   resumes it there (DN12 rule 2, or the build phase's resume of a live
   table it wants), and the held writes land on the side: DN10's fence

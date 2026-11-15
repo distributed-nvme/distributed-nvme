@@ -448,16 +448,17 @@ The entries:
   last, over the pool's data written there since. State:
   fix decided, the zeroing never writes a side that is provisioned. Not
   seen in the lab.
-- **A failback right after a failed fence can write old data.** Silent. A
-  fence that suspends the old primary's path and then fails to load the
-  error table leaves that path suspended on the side, holding the old
-  primary's writes. If the next change makes that controller node the
-  primary again before any later pass fences it, those held writes land on
-  the side. The other primary could not write this side meanwhile, but it
-  wrote the group's other leg, so the two legs can hold different data. It
-  needs a failed table load and then a failback before the side's next
-  syncup, which the worker sends again on its next check round and whose
-  converge fences the path first. State: fix later. Not seen in the lab.
+- **Making the old primary the primary again right after a failed fence
+  can write old data.** Silent. A fence that suspends the old primary's
+  path and then fails to load the error target leaves that path suspended
+  on the side, holding the old primary's writes. If the next change makes
+  that controller node the primary again before any later converge fences
+  it, those held writes land on the side. The other primary could not
+  write this side meanwhile, but it wrote the group's other leg, so the
+  two legs can hold different data. Two things must happen. A table load
+  fails. Then a change makes that controller node the primary again
+  before the syncup of the next check round fences the path. State: fix
+  later. Not seen in the lab.
 - **dnvctl parses an id with leading zeros as octal.** An id copied from a
   device name can name another object. A forced start or a delete can act
   on the wrong group or leg. State: fix decided, dnvctl refuses such an
@@ -619,6 +620,15 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   leftovers stand unless forced. Procedure to write: node removal and disk
   reuse. Fix later: a forced node delete for a dead disk node. Not seen in
   the lab.
+- **A node's own converge whose call was cut off leaves part of its
+  build waiting.** When the call of a disk node's or a controller node's
+  own syncup is cut off, what its converge did not build, other than the
+  node's nvmet port, waits for the node's next revision. What it did not
+  remove is a leftover, which the next check round names, and the worker
+  sends the syncup again. Sides and cntlrs do not wait: their next check
+  round names what is left, but for the parts of a snapshot not yet made,
+  which wait for the next revision. State: fix later. Not seen in the
+  lab.
 - **An agent restart during a fence can leave devices suspended.** A disk
   node's agent keeps the start of a fence's wait in memory. A restart
   during that wait can leave the old primary's devices on the side

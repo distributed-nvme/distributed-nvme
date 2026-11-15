@@ -201,6 +201,33 @@ func TestAFailingSnapshotIsNotSentAgainEveryRound(t *testing.T) {
 	}
 }
 
+// The snapshot's dm-error is one of the rows that wait with it: a re-send
+// for it would run the same pre-pass that suspends the origin.
+func TestAWaitingSnapshotsDmErrorIsNotNamed(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	node.failCmdAlways["message "+poolNameOf(srv, testSlice2)+
+		" 0 create_snap"] = "device-mapper: message ioctl failed: " +
+		"No space left on device"
+	snapErr := errorName(srv, testSnapTd)
+	node.failCmdAlways["dmsetup create "+snapErr] = "refused"
+	reply := syncupSnapshot(t, srv, node, reqOpts{
+		revision: 3, primary: true, twoSlices: true, tds: snapTds()})
+	if row := reply.GetCntlrInfo().GetTdIdToDmError()[testSnapTd]; row.
+		GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("fixture is wrong: the snapshot's dm-error row is %v", row)
+	}
+	if got := reply.GetAgentReply(); strings.Contains(got.GetDetails(),
+		snapErr) {
+		t.Errorf("the converge named the waiting snapshot's dm-error: %v",
+			got)
+	}
+	if got := readCode(t, srv, 3); strings.Contains(got.GetDetails(),
+		snapErr) {
+		t.Errorf("the read named the waiting snapshot's dm-error: %v", got)
+	}
+}
+
 // dropPort removes the node's nvmet port, its links and its attributes, as
 // a port whose mkdir the kernel refused leaves it.
 func dropPort(node *fakeNode) {

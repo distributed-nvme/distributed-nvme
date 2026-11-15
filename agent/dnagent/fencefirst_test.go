@@ -1205,3 +1205,46 @@ func TestAnUnreadSideNumberStillClosesAClosedPath(t *testing.T) {
 		})
 	}
 }
+
+// A primary's path the fence keeps closed takes its namespace out of the
+// optimized group even when the export's step stops at a read of another of
+// the namespace's attributes: the move to inaccessible is tried on its own,
+// as no CN may be pointed at a path the fence holds closed (DN10).
+func TestAClosedPathLeavesTheOptimizedGroupWhenANamespaceReadFails(
+	t *testing.T,
+) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	n := newFenceNames(srv)
+	if grp := anaGrpOf(t, srv, node, n.oldNqn); grp !=
+		common.AnaGrpIdOptimized {
+		t.Fatalf("fixture is wrong: the serving primary is in group %d", grp)
+	}
+	// The primary's dm-linear held suspended on the side device, and the
+	// other's read not answering: the fence check fails and the path stays
+	// closed.
+	node.mu.Lock()
+	node.dms[n.oldLin].suspended = true
+	node.mu.Unlock()
+	setFailAlways(node, "dmsetup table "+n.newLin, "refused")
+	uuidRead := srv.nvmet.NsPath(n.oldNqn, sideNsid) + "/device_uuid"
+	setHook(node, node.killReadAlways, uuidRead)
+	reply, err := srv.SyncupSide(ctx, sideReq(1, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE))
+	clearHook(node, node.killReadAlways, uuidRead)
+	clearFailAlways(node, "dmsetup table "+n.newLin)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if row := reply.GetSideInfo().GetCnIdToDmLinear()[testCn0]; row.
+		GetStatus() != pb.ResStatus_RES_STATUS_PENDING {
+		t.Fatalf("fixture is wrong: the primary's row is %v/%q",
+			row.GetStatus(), row.GetDetails())
+	}
+	if grp := anaGrpOf(t, srv, node, n.oldNqn); grp !=
+		common.AnaGrpIdInaccessible {
+		t.Errorf("the closed path's namespace is in group %d, want "+
+			"inaccessible", grp)
+	}
+}

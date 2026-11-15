@@ -132,9 +132,10 @@ const (
 	// promotion or an agent restart), or no prober is registered yet
 	// (cnagent.md CN11); on a side, the primary's dm-linear, whose path
 	// stays closed until every other dm-linear of the side is proven
-	// fenced (dnagent.md DN10). No verdict, no action needed from health;
-	// the side's verdict names its row, so the worker re-sends the
-	// SyncupSide.
+	// fenced (dnagent.md DN10). It sets no health epoch: on a leg it
+	// neither sets nor clears one, and a side whose only row not OK is
+	// pending reads as a clean round (dnv-worker.md HL2). The side's
+	// verdict names its row, so the worker re-sends the SyncupSide.
 	ResStatus_RES_STATUS_PENDING ResStatus = 5
 )
 
@@ -225,16 +226,16 @@ const (
 	// suppresses carry RES_REASON_SP_LEVEL instead. The worker's settle
 	// reads such a row as built (dnv-worker.md HL2).
 	ResReason_RES_REASON_SOURCE_FAULT ResReason = 4
-	// The object is there and serves, and differs from what the desired
-	// state wants in a way a converge rewrites: today a namespace wanted
+	// The object is there and differs from what the desired state wants
+	// in a way a converge rewrites and that leaves no primary without its
+	// optimized path: a namespace wanted
 	// non-optimized or inaccessible whose ANA group differs, as one still
 	// optimized after a failed move to inaccessible (one wanted optimized
 	// that is not reads RES_STATUS_ERROR instead). Both agents set it on
-	// both channels, on
-	// a RES_STATUS_OK row whose details say what differs, and the object's
-	// read names the row, so the worker re-sends its Syncup* (dnagent.md
-	// SH31). The worker's health reads the status alone, so the row is
-	// healthy.
+	// both channels, on a RES_STATUS_OK row whose details say what
+	// differs, and the object's verdict names the row on both channels, so
+	// the worker re-sends its Syncup* (dnagent.md SH31). The worker's
+	// health reads the status alone, so the row is healthy.
 	ResReason_RES_REASON_DIFFERS ResReason = 5
 )
 

@@ -4230,9 +4230,10 @@ with `ResStatus`:
 * `RES_STATUS_ERROR` — tried and failed, or there and unable to serve IO,
   a dm device left suspended among them; `details` says why, or carries
   the command output — *needs intervention*.
-* `RES_STATUS_OK` — there and serving; with `RES_REASON_DIFFERS` it serves
-  and differs from what the desired state wants in a way a converge
-  rewrites, the difference in `details`.
+* `RES_STATUS_OK` — there and serving; with `RES_REASON_DIFFERS` it is
+  there and differs from what the desired state wants in a way a converge
+  rewrites and that leaves no primary without its optimized path, the
+  difference in `details`.
 * `RES_STATUS_PROVISIONING` — deliberately not created, being prepared,
   kept unprobed behind a side's provisioning gate that closed again
   (`dnagent.md` DN9), waiting for a free run in a DN's metadata area
@@ -4242,9 +4243,11 @@ with `ResStatus`:
   judged or built: on a cntlr's leg, the primary's prober for the leg has
   not completed a round, or none is registered yet (`cnagent.md` CN11);
   on a side, the primary's dm-linear, whose path stays closed until every
-  other dm-linear of the side is proven fenced (`dnagent.md` DN10). **No
-  verdict, no action needed** from health; the side's row is named, so
-  the worker sends its `SyncupSide` again (`dnagent.md` DN16).
+  other dm-linear of the side is proven fenced (`dnagent.md` DN10). It
+  sets no health epoch: on a leg it neither sets nor clears one, and a
+  side whose only row not ok is pending reads as a clean round
+  (`dnv-worker.md` HL2). The side's verdict names the pending row, so the
+  worker sends its `SyncupSide` again (`dnagent.md` DN16).
 
 `epoch` is the unix seconds of the last status change; a change of
 `details` or of `reason` alone does not move it. The `revision`
@@ -4309,15 +4312,15 @@ and `RES_REASON_SOURCE_FAULT`, which `cnagent.md` CN18 sets on the clone
 rows the cn agent keeps `MISSING` because it does not read the clone's
 source as ready, CN18 saying which; the settle of `dnv-worker.md` HL2
 reads these two; and `RES_REASON_DIFFERS`, which both agents set on an
-`OK` row of an object that serves and differs — today a namespace wanted
-non-optimized or inaccessible whose ANA group differs, as a namespace
-still optimized after a failed move to inaccessible; one wanted optimized
-that is not leaves the primary without its optimized path and reads
-`RES_STATUS_ERROR` (`dnagent.md` DN18, SH31; `cnagent.md` CN28) — and
-which the object's
-verdict names, so the worker re-sends its
-`Syncup*` (`dnagent.md` SH31); no health rule reads it, so such a row is
-healthy. An agent sets a reason from what its own pass
+`OK` row of an object that is there and differs without leaving a primary
+short of its optimized path. The one such object is a
+namespace wanted non-optimized or inaccessible whose ANA group differs,
+as one still optimized after a failed move to inaccessible; one wanted
+optimized that is not leaves the primary without its optimized path and
+reads `RES_STATUS_ERROR` instead (`dnagent.md` DN18, SH31; `cnagent.md`
+CN28). The object's verdict names a `RES_REASON_DIFFERS` row, so the
+worker re-sends its `Syncup*` (`dnagent.md` SH31); no health rule reads
+it, so such a row is healthy. An agent sets a reason from what its own pass
 established, never from a row's text: `cnagent.md` CN29 says how the cn
 agent does, `dnagent.md` DN13 how the dn agent does.
 
@@ -4701,11 +4704,12 @@ device is there, the next enumeration finds it.
   on, and a `Check*` round or a `Get*Info` answers from the latest one,
   removing nothing. A change that no converge makes shows in the verdict
   once a read has found it, and a converge's observation carries its own
-  sweep's code, so a condition only the read-only verdict names
-  (`dnagent.md` DN16; `cnagent.md` CN30) shows once a read has run after
-  that converge. A leftover that has since gone stops being reported once a
-  read or a converge finds it gone, and one that is still there keeps being
-  reported without anything having remembered it.
+  sweep's code, a side's and a cntlr's with the rows of its build named
+  too, so a condition only the read-only verdict names (`dnagent.md` DN16;
+  `cnagent.md` CN30) shows once a read has run after that converge. A
+  leftover that has since gone stops being reported once a read or a
+  converge finds it gone, and one that is still there keeps being reported
+  without anything having remembered it.
 * **A leftover travels as `ReplyCodeLeftover`.** It is the one
   per-resource outcome that cannot ride in the `*Info` rows of Live-state
   reporting: those rows are keyed by the ids of *wanted* objects, and a
@@ -5055,10 +5059,11 @@ The agent does all four in a single `SyncupSide` converge — the two
 reloads before the two ANA writes, and within each pair the old primary's
 CN first: the dn agent walks the request's standbys first and the primary
 last (`dnagent.md` DN10). So for the moment between its reload and its
-ANA move the old primary's path fails IO, and the side never has two
-writers: a step of the fence that fails keeps the new primary's path
-closed and, short of the two cases step 4 names, its namespace
-inaccessible, so hosts queue their IO, and its row names the wait, so the
+ANA move the old primary's path fails IO. The side never has two
+writers. When a step of the fence fails, the new primary's path stays
+closed. Its namespace goes inaccessible, short of the cases step 4
+names, so the new primary's cntlr counts that leg unavailable, and the
+cntlr's reads of it wait. The dm-linear's row names the wait, so the
 worker sends the `SyncupSide` again until a converge completes the
 fence. A reload fails closed (`dnagent.md`, OS
 wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`): one whose load fails
@@ -5077,8 +5082,8 @@ dm-linear reloads onto dm-error before the same pass puts the new
 primary's onto the side device, and the new primary's path opens only
 once every other dm-linear of the side is proven on its dm-error
 (`dnagent.md` DN10) — so a single leg never has two writers: a fence step
-that fails keeps the new primary's path closed, its namespace
-inaccessible, until a later converge completes the fence; and (b) across the legs of a
+that fails keeps the new primary's path closed, until a later converge
+completes the fence; and (b) across the legs of a
 group, **md's own arbitration** decides: a leg whose superblock still
 claims a clean full array is not started degraded on its own ("Make sure
 all groups are available"), and once both legs are reachable the event

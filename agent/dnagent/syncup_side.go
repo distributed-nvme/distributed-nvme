@@ -1393,12 +1393,22 @@ func (s *DnAgentServer) ensureCnExports(
 			info.CnIdToNvmeof[cnId] = st.tracker.Ok(key, nqn, "")
 			continue
 		}
+		// A namespace the pass wants inaccessible is moved there even when
+		// the export's step stopped before its own move — a read of another
+		// attribute that did not answer, say — as no CN may be pointed at a
+		// path that returns errors or that the fence holds closed (DN10).
+		if ns.AnaGrpId == common.AnaGrpIdInaccessible {
+			s.moveAnaGroup(ctx, nqn, ns.AnaGrpId)
+		}
 		// A step that failed is read as a read reads it, so an export that
 		// serves and differs in its ANA group alone — its move failed —
 		// reads as on the other channel, RES_STATUS_OK with the difference
-		// (SH31); any other keeps the step's own error.
+		// (SH31), and one whose link failed because the port itself is not
+		// there reads "the port is not there", which the side's verdict
+		// leaves to the DN's; any other keeps the step's own error.
 		status, details, reason := s.probeExport(ctx, subsys, ns)
-		if status == pb.ResStatus_RES_STATUS_OK {
+		if status == pb.ResStatus_RES_STATUS_OK ||
+			details == detailsPortMissing {
 			info.CnIdToNvmeof[cnId] = st.tracker.SetReason(
 				key, nqn, status, details, reason)
 			continue
@@ -1445,21 +1455,28 @@ func (s *DnAgentServer) moveCnAnaGroups(
 	grpId int,
 ) {
 	for _, cnId := range plan.cnIds {
-		nqn := plan.sideNqn(cnId)
-		// The group alone is read, strictly. A read that did not answer
-		// leaves the move tried all the same: src step 1 moves to
-		// inaccessible, the safe direction.
-		cur, present, err := s.nvmet.NsAnaGrpId(ctx, nqn, sideNsid)
-		if err == nil && (!present || cur == grpId) {
-			continue
-		}
-		if err := s.nvmet.SetNsAnaGrpId(
-			ctx, nqn, sideNsid, grpId); err != nil {
-			slog.ErrorContext(ctx, "ana transition failed",
-				slog.String("nqn", nqn),
-				slog.Int("ana_grpid", grpId),
-				slog.String("error", err.Error()))
-		}
+		s.moveAnaGroup(ctx, plan.sideNqn(cnId), grpId)
+	}
+}
+
+// moveAnaGroup moves the per-CN namespace of nqn into grpId, when it is
+// there and in another group. The group alone is read, strictly. A read
+// that did not answer leaves the move tried all the same: its callers move
+// to inaccessible, the safe direction.
+func (s *DnAgentServer) moveAnaGroup(
+	ctx context.Context,
+	nqn string,
+	grpId int,
+) {
+	cur, present, err := s.nvmet.NsAnaGrpId(ctx, nqn, sideNsid)
+	if err == nil && (!present || cur == grpId) {
+		return
+	}
+	if err := s.nvmet.SetNsAnaGrpId(ctx, nqn, sideNsid, grpId); err != nil {
+		slog.ErrorContext(ctx, "ana transition failed",
+			slog.String("nqn", nqn),
+			slog.Int("ana_grpid", grpId),
+			slog.String("error", err.Error()))
 	}
 }
 

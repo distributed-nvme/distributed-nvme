@@ -670,10 +670,11 @@ func (s *CnAgentServer) build(
 		// parked keeps the group: a failed read never moves an optimized
 		// namespace back. A namespace the desired state wants inaccessible
 		// was moved there by CN9's P1 before anything under it was touched;
-		// one whose move failed there serves on in the group it had, its
-		// row reads OK with RES_REASON_DIFFERS, and the converge's own
-		// verdict names it (cntlrRowVerdict), so the worker sends the
-		// SyncupCntlr again and its P1 moves it.
+		// one whose move failed there stays in the group it had, over a
+		// ns-dev the pass may park, as a demotion's does; its row reads OK
+		// with RES_REASON_DIFFERS, and the converge's own verdict names it
+		// (cntlrRowVerdict), so the worker sends the SyncupCntlr again and
+		// its P1 moves it.
 		for _, np := range plan.namespaces {
 			if np.anaGrpId == common.AnaGrpIdInaccessible {
 				continue

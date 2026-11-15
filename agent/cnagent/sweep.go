@@ -1871,15 +1871,16 @@ func cntlrRowVerdict(
 		name(info.GetSliceIdToDmPool()[sp.sliceId], meta, data)
 	}
 	for _, tp := range plan.tds {
-		name(info.GetTdIdToDmError()[tp.tdId])
 		// A snapshot not yet created that still lacks a device in a slice
 		// is made by CN14's pre-pass, which suspends its origin; a re-send
 		// on every round that its create fails would stall the origin's
-		// host IO on every round. Its rows wait for the next revision, as a
-		// create that fails always did (snapsLackingADevice).
+		// host IO on every round. Its rows, its dm-error's among them, wait
+		// for the next revision, as a create that fails always did
+		// (snapsLackingADevice).
 		if snapsWaiting[tp.tdId] {
 			continue
 		}
+		name(info.GetTdIdToDmError()[tp.tdId])
 		thins := info.GetTdIdToThinInfo()[tp.tdId].GetSliceIdToDmThin()
 		var under []*pb.ResInfo
 		for _, sp := range plan.slices {

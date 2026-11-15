@@ -287,6 +287,23 @@ func TestAReadReDrivesAnAbsentPort(t *testing.T) {
 					t.Fatalf("side verdict while the port is gone = %v, "+
 						"want code 0", got)
 				}
+				// The side's converge reads its failed links alike: the
+				// export row says the port is gone, and its code names it
+				// not, so the sides are not sent again for the link alone.
+				conv, err := srv.SyncupSide(ctx, sideReq(1, testSide,
+					testCn0, []uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE))
+				if err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+				if row := conv.GetSideInfo().GetCnIdToNvmeof()[testCn0]; row.
+					GetDetails() != detailsPortMissing {
+					t.Fatalf("the converge's export row %v, want %q", row,
+						detailsPortMissing)
+				}
+				if got := conv.GetAgentReply(); got.GetCode() != 0 {
+					t.Fatalf("side converge while the port is gone = %v, "+
+						"want code 0", got)
+				}
 			}
 			node.Reset()
 			if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
