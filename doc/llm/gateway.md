@@ -1106,7 +1106,10 @@ below name.
   STM runs again, in its order: the `MaxCloneCntPerSp` ceiling, checked
   ahead of the name; the name free; the destination td by name; a
   destination td that any `Clone.dst_td_id` names (walk `clone_name_list`, a
-  draining clone included) refused; then the group's plan (`planCloneGrp`) —
+  draining clone included) refused; a destination td a transfer's origin
+  namespace lies on (`tdTransferRef`, walking `xfer_name_list`) refused
+  `FAILED_PRECONDITION` naming the transfer; then the group's plan
+  (`planCloneGrp`) —
   `model.ValidateClusterConf` and `model.ValidateBdevConf` of the stored
   confs (GW11), the legs `legCntOf` gives the SP's stored conf, the layout
   `model.GroupBlocks` gives a group of `CloneMetaGrpExtCnt` extents (a
@@ -1235,8 +1238,9 @@ All pure etcd, the standard mutator shape; the codes are those of
 breaks the NQN rules of `architecture.md`, Common validation, the
 dnv-namespace one included, resolves the origin namespace per
 `architecture.md`, Transfers, refuses an origin whose td another namespace
-of the SP lies on, walking `nqn_list` (`tdOtherNs`), mints `xfer_id` and
-appends to `xfer_name_list`. **DeleteTransfer** with `force` false *finalizes*: it
+of the SP lies on, walking `nqn_list` (`tdOtherNs`), and one whose td a
+clone's `dst_td_id` names, walking `clone_name_list` (`tdCloneRef`), both
+`FAILED_PRECONDITION`, mints `xfer_id` and appends to `xfer_name_list`. **DeleteTransfer** with `force` false *finalizes*: it
 additionally sets `suspended` true on the origin namespace in the same STM;
 with `force` true it *aborts* (the origin untouched); both delete the
 `Transfer` and its list entry and `BumpSpRev`. **GetTransfer** is one STM

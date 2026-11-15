@@ -16,7 +16,8 @@ import (
 // xferServed reports whether this cntlr backs the transfer device with real
 // data. A standby exports a plain dm-error table of the same size, and so does
 // a primary once the level suppresses thin pools — or, per [D15], one whose origin
-// td is still provisioning-deferred and therefore has no raid0 to map — or one
+// td is still provisioning-deferred and therefore has no raid0 to map, or is
+// the destination of a clone whose raid0 still has holes (CN17) — or one
 // whose origin no longer resolves in this request (CN29): the plan cannot say
 // what it maps, and a linear still mapping a td that left the request would
 // hold that td's raid0 open against L6's removal. The CN9 pre-step then sizes

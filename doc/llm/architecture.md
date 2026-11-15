@@ -3012,7 +3012,10 @@ at `MaxCloneCntPerSp`, or when there are fewer DN candidates (Finding DN
 candidates) than the clone meta group has legs (Per-operation allocation);
 `NOT_FOUND` `dst_td_name`;
 `FAILED_PRECONDITION` the destination td already targeted by another
-clone, a destination with a snapshot not yet `created` (Thin devices) — a
+clone, a destination td that a transfer's origin namespace lies on, the
+message naming the transfer, as the clone would fill it under the
+transfer's export, which would serve its holes (Transfers), a destination
+with a snapshot not yet `created` (Thin devices) — a
 slice of it made after the copy began would hold part of the copy, the
 message naming the snapshot — or a destination whose
 dm-clone metadata one side of a clone meta group cannot hold — the message
@@ -3264,7 +3267,16 @@ reader and writer of the bytes, served by the primary.*
 **CreateTransfer** — Errors: `ALREADY_EXISTS`; `RESOURCE_EXHAUSTED` at
 `MaxXferCntPerSp`; `NOT_FOUND` for an `ori_nqn` or an `ori_ns_idx` the SP
 does not hold; `FAILED_PRECONDITION` for an origin whose td another
-namespace of the SP also lies on (below); `INVALID_ARGUMENT` for the NQN rules of Common validation on
+namespace of the SP also lies on (below), and for an origin whose td is a
+clone's destination, for as long as the clone's record exists, the message
+naming the clone: that td's raid0 has holes below the dm-clone until the
+copy is whole, and the transfer would export them, so a third pool's copy
+would read zeros there. Should a record written before this refusal hold
+such a pair, the primary holds the transfer on its error table and
+inaccessible (`cnagent.md` CN17), which stops new damage but does not repair
+it: a copy that already read through the transfer took zeros for regions not
+yet filled and marked them copied, so it is aborted and done again;
+`INVALID_ARGUMENT` for the NQN rules of Common validation on
 `ori_nqn`, the dnv-namespace one included, and for the host-NQN rules on
 `allowed_hosts`, where callers put the destination cntlrs' `CnHostNqn`s.
 Action: STM: `xfer_id` from `next_id`, write the `Transfer`, append the
@@ -5894,7 +5906,10 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   apply (Bitmap push protocol, The apply pauses the writers).
 * When hydration completes: `DeleteTransfer` with `force` false on sp1
   (it retires the source: `suspended` true) and `DeleteClone` on sp2
-  (`suspended` false, the namespace now backed by the local raid0). To
+  (`suspended` false, the namespace now backed by the local raid0).
+  `DeleteClone` only latches (Clones), and `CreateTransfer` refuses the sp2
+  namespace while the clone's record lives (Transfers), so moving the
+  volume on to a third SP waits for `GetClone` to answer `NOT_FOUND`. To
   abort instead: **first retire the sp2 namespace** with
   `DeleteNamespace` — not merely suspend it, because `DeleteClone`
   unconditionally sets `suspended` false on the destination td's

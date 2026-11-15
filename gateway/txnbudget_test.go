@@ -762,12 +762,13 @@ func (shape txnShape) check(t *testing.T) {
 }
 
 // TestCreateCloneTxnBudget is CreateClone's tripwire: its STM reads every
-// other clone of the pool for the one-destination rule and charges every
-// leg's DN its clone meta group's side as a new group's legs are charged
-// (dnLedger): a leg's DN is verified, written, re-indexed and bumped. It reads
-// no cntlr and no CN. A clone meta group has the legs the pool's redundancy
-// gives a group, at most MaxAllocLegPerGrp (SPD1 cites it here), each on a
-// distinct DN.
+// other clone of the pool for the one-destination rule, every transfer and
+// its origin's subsystem for the rule that no transfer exports the
+// destination (tdTransferRef), and charges every leg's DN its clone meta
+// group's side as a new group's legs are charged (dnLedger): a leg's DN is
+// verified, written, re-indexed and bumped. It reads no cntlr and no CN. A
+// clone meta group has the legs the pool's redundancy gives a group, at most
+// MaxAllocLegPerGrp (SPD1 cites it here), each on a distinct DN.
 func TestCreateCloneTxnBudget(t *testing.T) {
 	txnShape{
 		name: "CreateClone",
@@ -781,12 +782,37 @@ func TestCreateCloneTxnBudget(t *testing.T) {
 			// The one-destination walk: every clone the pool already has,
 			// one short of the ceiling the create refuses at.
 			{"other clone", 1, common.MaxCloneCntPerSp - 1, 63},
+			// The Transfer key and its origin's Subsystem key.
+			{"transfer", 2, common.MaxXferCntPerSp, 4},
 			// The DnConf, the scan's dn_capacity key and the DnRev read;
 			// the DnConf put, the dn_capacity delete and put, and the DnRev
 			// put.
 			{"leg DN", 7, common.MaxAllocLegPerGrp, 2},
 		},
-		maxCompares: 85,
+		maxCompares: 93,
+		overDefault: false,
+	}.check(t)
+}
+
+// TestCreateTransferTxnBudget is CreateTransfer's tripwire: its STM reads
+// the origin's subsystem, every other subsystem of the pool for the rule that
+// the origin is its volume's only namespace (tdOtherNs), and every clone for
+// the rule that no clone fills the volume (tdCloneRef), and writes the
+// Transfer, the SpConf and the SpRev.
+func TestCreateTransferTxnBudget(t *testing.T) {
+	txnShape{
+		name: "CreateTransfer",
+		stm:  "transfer.go's CreateTransfer",
+		// ClusterConf, SpConf, SpRev, the new Transfer key (absent, which
+		// still costs a compare) and the origin's Subsystem.
+		fixedReads: 5,
+		// The Transfer, SpConf and SpRev puts.
+		fixedWrites: 3,
+		terms: []txnTerm{
+			{"other subsystem", 1, common.MaxSsCntPerSp - 1, 3},
+			{"clone", 1, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 75,
 		overDefault: false,
 	}.check(t)
 }

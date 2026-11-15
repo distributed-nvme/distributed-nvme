@@ -713,11 +713,12 @@ const (
 	// (gateway/txnbudget_test.go's TestFlipCloneProvisionedTxnBudget; model's
 	// TestFlipCloneProvisionedAtTheCloneCeiling commits it).
 	//
-	// Two transactions that read every clone of the pool stay under etcd's
+	// Three transactions that read every clone of the pool stay under etcd's
 	// default: CreateClone, which also verifies and charges the DN of each
-	// leg of its clone meta group (85 COMPARES, TestCreateCloneTxnBudget),
-	// and UpdateStoragePoolCntlidSlotList (105,
-	// TestUpdateCntlidSlotListTxnBudget). The cntlr mutators
+	// leg of its clone meta group and reads every transfer (93 COMPARES,
+	// TestCreateCloneTxnBudget), CreateTransfer (75,
+	// TestCreateTransferTxnBudget), and UpdateStoragePoolCntlidSlotList
+	// (105, TestUpdateCntlidSlotListTxnBudget). The cntlr mutators
 	// read no clone, since a clone charges no CN: the gateway's CreateCntlr
 	// and DeleteCntlr commit 60 COMPARES each at the ceilings
 	// (TestCreateCntlrTxnBudget, TestDeleteCntlrTxnBudget), and the worker's

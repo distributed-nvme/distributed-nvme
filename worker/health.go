@@ -1265,7 +1265,9 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // level suppresses its pools settles before the zeroing ends only at
 // SP_LEVEL_DISABLE, or with no namespace and no transfer: [D15]'s deferral
 // does not depend on the level, and its ns-devs, namespaces and transfers
-// read PROVISIONING while a slice is deferred.
+// read PROVISIONING while a slice is deferred. A transfer of a td a clone
+// still fills reads PROVISIONING for the whole copy (CN17), a pair only a
+// record written before the gateway refused it can hold.
 func primaryShapeBuilt(info *pb.CntlrInfo) bool {
 	for _, m := range cntlrHealthMaps(info) {
 		if m.label == "grp_id_to_md_raid" {

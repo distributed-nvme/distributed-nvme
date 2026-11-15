@@ -2507,6 +2507,12 @@ EOF
 	refresh_rev sp0
 	assert_field "$(smoke_ns sp0 "$nqn" 1)" '.suspended' "false" \
 		"the origin namespace is live again before the finalize"
+	# While x0 exports t1, no clone may fill t1 under that export
+	# (architecture.md, Clones).
+	assert_no_write "create-clone into the volume a live transfer exports" \
+		gwx FAILED_PRECONDITION create-clone --sp sp0 --rev "$SP_REV" \
+		--name clx --dst-td t1 --src-nqn "$srcNqn" --src-idx 1 \
+		--src-slices 1 --src-stripe 1048576 --src-block 1048576
 	out=$(gw delete-xfer --sp sp0 --rev "$SP_REV" --name x0)
 	refresh_rev sp0
 	assert_field "$out" '.xfer_id' "$xferId" "delete-xfer reply xfer_id"
@@ -2573,6 +2579,11 @@ EOF
 	assert_field "$clone" '.dst_td_id' "$t1Id" "clone dst_td_id is t1's"
 	assert_field "$clone" '.src_nqn' "$srcNqn" "clone src_nqn"
 	assert_field "$clone" '.src_ns_idx' "1" "clone src_ns_idx"
+	# While cl0 fills t1, no transfer may export t1's namespace: it would
+	# export the holes below the dm-clone (architecture.md, Transfers).
+	assert_no_write "create-xfer of a volume a clone fills" \
+		gwx FAILED_PRECONDITION create-xfer --sp sp0 --rev "$SP_REV" \
+		--name xc --ori-nqn "$nqn" --ori-idx 1 --hosts "$host2"
 	assert_field "$clone" '.src_slice_cnt' "$MAX_SLICE_CNT" \
 		"clone src_slice_cnt"
 	assert_field "$clone" '.src_stripe_size' "1048576" "clone src_stripe_size"

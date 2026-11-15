@@ -246,6 +246,19 @@ func (s *Server) CreateTransfer(
 					"subsystem %s; a transfer needs it to be the only one",
 				otherIdx, otherNqn)
 		}
+		// A volume a clone still fills has holes below its dm-clone, and
+		// the transfer would export the raid0 under it (architecture.md,
+		// Transfers). The refusal lasts as long as the clone's record.
+		cloneName, filled, err := tdCloneRef(stm, sc, origin.GetTdId())
+		if err != nil {
+			return err
+		}
+		if filled {
+			return errPrecondition(
+				"the origin's volume is the destination of clone %q; a "+
+					"transfer would export the holes below its dm-clone "+
+					"until the clone's record is gone", cloneName)
+		}
 		minter := newSpIdMinter(conf)
 		xferId = minter.mint()
 		stm.Put(key, &pb.Transfer{

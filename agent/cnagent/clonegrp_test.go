@@ -817,15 +817,18 @@ func TestACloneWaitsForItsCloneMetaGroup(t *testing.T) {
 
 // TestACloneMetaGroupThatProvisionsDefersOnlyItsNamespaces: a clone meta
 // group that still provisions defers its destination td's namespaces below
-// SP_LEVEL_NO_CLONE only, and never a transfer of them (CN9, CN17, CN19). At
+// SP_LEVEL_NO_CLONE only, and a transfer of them waits as every transfer of
+// a clone's destination does (CN9, CN17, CN19). At
 // SP_LEVEL_NO_CLONE the level wins: the clone's dm row reads the level, and
 // the destination namespace stays optimized over the td's dm-error (CN16
 // rule 4), its rows OK on both channels. When the level is lowered while
 // the group still provisions, the namespace is deferred: the pass moves it
 // inaccessible at its start and builds no dm-clone (CN16 rule 0, CN19).
-// Below the level, a transfer of the destination namespace maps the td's
-// raid0 and serves, its rows OK and its namespace optimized, while the
-// namespace itself waits inaccessible with its rows PROVISIONING.
+// Below the level, a transfer of the destination namespace waits as the
+// namespace itself does: the td's raid0 has holes below the dm-clone, so the
+// transfer device carries an error table, its rows read PROVISIONING and its
+// namespace stays inaccessible (CN17); once the clone leaves the request the
+// transfer maps the raid0 and serves, optimized.
 func TestACloneMetaGroupThatProvisionsDefersOnlyItsNamespaces(t *testing.T) {
 	zeroingClone := func() *pb.Clone {
 		clone := cloneWithGrp(false)
@@ -888,25 +891,41 @@ func TestACloneMetaGroupThatProvisionsDefersOnlyItsNamespaces(t *testing.T) {
 			"converge": reply.GetCntlrInfo(), "check round": probed} {
 			assertProvisioning(t, rows.GetNsIdToNamespace()[testNs],
 				label+" namespace row")
-			assertOk(t, rows.GetXferIdToDmLinear()[testXfer],
+			assertProvisioning(t, rows.GetXferIdToDmLinear()[testXfer],
 				label+" transfer device row")
-			assertOk(t, rows.GetXferIdToSubsystem()[testXfer],
-				label+" transfer subsystem row")
-			assertOk(t, rows.GetXferIdToNamespace()[testXfer],
+			assertProvisioning(t, rows.GetXferIdToNamespace()[testXfer],
 				label+" transfer namespace row")
 		}
+		want := fmt.Sprintf("0 %d error", testTdSize/512)
+		if got := node.dms[xferName(srv, testXfer)].table; got != want {
+			t.Fatalf("the transfer device is %q, want the error table %q",
+				got, want)
+		}
+		xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
+		assertAna(t, node, xferNqn, "3", "the waiting transfer")
+		assertAna(t, node, testNqn, "3", "the deferred namespace")
+
+		// The clone gone, the transfer maps the raid0 and serves.
+		node.Reset()
+		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+			reqOpts{revision: 3, primary: true, xfers: xfers}))
+		if err != nil {
+			t.Fatalf("the clone gone: %v", err)
+		}
+		assertOk(t, reply.GetCntlrInfo().GetXferIdToDmLinear()[testXfer],
+			"the transfer device row once the clone is gone")
+		assertOk(t, reply.GetCntlrInfo().GetNsIdToNamespace()[testNs],
+			"the destination namespace row once the clone is gone")
 		raid0No := devNoOf(node, raid0Name(srv, testTd))
 		if raid0No == "" {
-			t.Fatalf("the destination td has no raid0")
+			t.Fatalf("the td has no raid0")
 		}
 		if got := node.dms[xferName(srv, testXfer)].table; got !=
 			nsDevTableOn(raid0No) {
 			t.Fatalf("the transfer device is %q, want it on the raid0 %q",
 				got, nsDevTableOn(raid0No))
 		}
-		xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
-		assertAna(t, node, xferNqn, "1", "the transfer")
-		assertAna(t, node, testNqn, "3", "the deferred namespace")
+		assertAna(t, node, xferNqn, "1", "the transfer once the clone is gone")
 	})
 }
 
@@ -1070,5 +1089,78 @@ func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 					"retry")
 			}
 		})
+	}
+}
+
+// TestATransferOfAVolumeACloneFillsWaits is CN17's rule for a clone that
+// serves: its destination's raid0 has holes below the dm-clone until the
+// copy is whole, so a transfer of the destination namespace keeps an error
+// table, its rows PROVISIONING and its namespace inaccessible, while the
+// clone's record stays in the request, on a converge and a read alike.
+func TestATransferOfAVolumeACloneFillsWaits(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
+	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+		clones: []*pb.Clone{cloneOf()}, xfers: xfers})
+	if _, ok := node.dms[cloneName(srv, testClone)]; !ok {
+		t.Fatal("fixture: the clone's dm-clone was not built")
+	}
+	probed := checkRound(t, srv, 2)
+	for label, rows := range map[string]*pb.CntlrInfo{
+		"converge": reply.GetCntlrInfo(), "check round": probed} {
+		assertProvisioning(t, rows.GetXferIdToDmLinear()[testXfer],
+			label+" transfer device row")
+		assertProvisioning(t, rows.GetXferIdToNamespace()[testXfer],
+			label+" transfer namespace row")
+	}
+	want := fmt.Sprintf("0 %d error", testTdSize/512)
+	if got := node.dms[xferName(srv, testXfer)].table; got != want {
+		t.Fatalf("the transfer device is %q, want the error table %q",
+			got, want)
+	}
+	assertAna(t, node, srv.nf.XferNqn(testCluster, testSp, testXfer), "3",
+		"the transfer of a volume a clone fills")
+}
+
+// TestATransferThatServedStopsWhenACloneFillsItsVolume: a record written
+// before the gateway refused the pair can add a clone of a volume whose
+// transfer already serves. The primary stops serving the transfer as for
+// any other reason (CN17): its namespace moves inaccessible first (CN9's
+// pre-step 1), then the device reloads onto an error table, so no IO
+// reaches the error table through an optimized path, and nothing reads the
+// holes below the dm-clone.
+func TestATransferThatServedStopsWhenACloneFillsItsVolume(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
+	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+		xfers: xfers})
+	assertOk(t, reply.GetCntlrInfo().GetXferIdToDmLinear()[testXfer],
+		"fixture: the transfer device row")
+	xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
+	assertAna(t, node, xferNqn, "1", "fixture: the serving transfer")
+	xferDev := xferName(srv, testXfer)
+	if strings.HasSuffix(node.dms[xferDev].table, " error") {
+		t.Fatalf("fixture: the transfer device is on an error table")
+	}
+
+	node.Reset()
+	reply = syncupBoth(t, srv, reqOpts{revision: 3, primary: true,
+		clones: []*pb.Clone{cloneOf()}, xfers: xfers})
+	assertProvisioning(t, reply.GetCntlrInfo().GetXferIdToDmLinear()[testXfer],
+		"the transfer device row once a clone fills the volume")
+	want := fmt.Sprintf("0 %d error", testTdSize/512)
+	if got := node.dms[xferDev].table; got != want {
+		t.Fatalf("the transfer device is %q, want the error table %q",
+			got, want)
+	}
+	assertAna(t, node, xferNqn, "3", "the transfer once a clone fills it")
+	moved := node.indexOfCall("writedirect " + anaPath(xferNqn, 1) + "=3")
+	reload := node.indexOfCall("cmd dmsetup reload " + xferDev)
+	if moved < 0 || reload < 0 || moved > reload {
+		t.Fatalf("the transfer moved inaccessible at %d and reloaded at "+
+			"%d, want the move first\ncalls:\n%s",
+			moved, reload, strings.Join(node.Calls(), "\n"))
 	}
 }

@@ -207,6 +207,19 @@ func cloneCreateChecks(
 				req.GetDstTdName(), name)
 		}
 	}
+	// The other order of CreateTransfer's refusal: a volume a transfer
+	// exports would be filled under that export, which would serve its holes
+	// (architecture.md, Clones, Transfers).
+	xferName, exported, err := tdTransferRef(stm, sc, td.GetTdId())
+	if err != nil {
+		return nil, cloneGrpPlan{}, err
+	}
+	if exported {
+		return nil, cloneGrpPlan{}, errPrecondition(
+			"thin device %q is the volume of transfer %s's origin "+
+				"namespace; a clone would fill it under the transfer's export",
+			req.GetDstTdName(), xferName)
+	}
 	plan, err := planCloneGrp(
 		sc.Cc, sc.Conf, td, req.GetCloneName(), req.GetDstTdName())
 	if err != nil {

@@ -1313,10 +1313,14 @@ func (p *cntlrPlan) buildXfers() {
 			xp.sectors = xp.ori.sectors
 			// [D15]: the origin td's raid0 does not exist while the td
 			// provisions, so the transfer device carries an error table and
-			// its namespace stays inaccessible. The transfer maps that raid0
-			// and no dm-clone, so a clone meta group that still provisions,
-			// which defers the origin namespace (CN9), defers no transfer.
-			xp.deferred = xp.ori.td != nil && xp.ori.td.deferred
+			// its namespace stays inaccessible. A td a clone still fills
+			// waits the same way, whether or not its clone meta group still
+			// provisions: its raid0 has
+			// holes below the dm-clone, which a transfer must never export
+			// (CN17; the gateway refuses such a pair, a record written
+			// before that refusal can still hold one).
+			xp.deferred = xp.ori.td != nil &&
+				(xp.ori.td.deferred || p.cloneByTd[xp.ori.td.tdId] != nil)
 		}
 		p.xfers = append(p.xfers, xp)
 		p.xferById[xp.xferId] = xp

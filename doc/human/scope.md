@@ -378,9 +378,7 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-- **A transfer of a volume a clone still fills gives a copy with holes.**
-  Silent. The reader sees zeros where the copy has not reached. State: fix
-  decided, the gateway refuses such a transfer. Not seen in the lab.
+None known today.
 
 ### 5.4 Hosts and the Kubernetes driver
 

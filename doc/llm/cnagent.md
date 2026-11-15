@@ -631,8 +631,10 @@ per-side. The exclusions:
   those namespaces and register the CN10 retry for a wait that ends with
   the sides' provisioned flip, a new revision. At `SP_LEVEL_NO_CLONE` and
   above no dm-clone is wanted, so the level wins and CN16 rule 4 or an
-  earlier one backs them (CN19). A transfer of such a namespace maps the
-  td's raid0, not the dm-clone, and is not deferred with it (CN17).
+  earlier one backs them (CN19). A transfer of such a namespace is
+  deferred too, as is every transfer whose origin td a `clone_list` entry
+  targets: that td's raid0 has holes below the dm-clone until the copy is
+  whole (CN17).
 * an unprovisioned new leg of a repair defers only itself — a new leg is
   a candidate of the assembly only once it is available (CN12), so the
   group's own assembly is unaffected — and `leg_id_to_leg` reports it
@@ -2560,8 +2562,9 @@ inaccessible on standbys (below). The origin namespace's own retirement is
 CN16's effective-suspend rule. A cntlr that keeps the transfer device but
 stops serving it — demoted to standby, or at a level from
 `SP_LEVEL_NO_THINPOOL` up to but excluding `SP_LEVEL_DISABLE`, or the
-origin td provisioning-deferred, or, on a primary too, an origin that no
-longer resolves (CN29) — reloads the live `CnXferFinalName` onto an error
+origin td provisioning-deferred or the destination of a `clone_list`
+entry (below), or, on a primary too, an origin that no longer resolves
+(CN29) — reloads the live `CnXferFinalName` onto an error
 table of its own size, as CN9's pre-step 3, before any layer touches what
 is under it: a linear still mapping the origin td's raid0 holds it open
 and the raid0's removal would fail EBUSY (CN19's no-thin-pool level). On
@@ -2595,7 +2598,14 @@ nothing remembered. A transfer whose origin td is provisioning-deferred
 (CN9) is deferred with it: its three rows report
 `RES_STATUS_PROVISIONING` and its namespace stays `AnaGrpIdInaccessible`
 — mapping a linear over a raid0 that does not exist yet would only
-produce an `ERROR` and an `err_epoch`.
+produce an `ERROR` and an `err_epoch`. So is a transfer whose origin td
+is the destination of a `clone_list` entry (the plan's `cloneByTd`, as
+CN16's clone rule keys on it): that td's raid0 has holes below the
+dm-clone until the copy is whole, which a transfer must never export, and
+the transfer waits on its error table until the clone leaves the request.
+The gateway refuses such a pair in either order (`architecture.md`,
+Transfers, Clones); a record written before those refusals can still hold
+one.
 
 **A transfer turns optimized only over what the desired state wants**, by
 CN16's rule and for its reasons. The build's transfer loop moves a

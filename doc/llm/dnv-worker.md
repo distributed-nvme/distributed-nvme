@@ -2614,7 +2614,10 @@ connect retry, a device a background read probes absent, a clone whose
 destination td or clone meta group still zeroes, whose two rows read
 `PROVISIONING` below `SP_LEVEL_NO_CLONE`, a clone with no dm-clone while its
 clone meta group is not ready, whose dm-clone row reads `MISSING` with no
-reason — is the cn agent's (`cnagent.md` CN9, CN10, CN16, CN17, CN18); a
+reason, a transfer of a thin device a clone still fills, whose rows read
+`PROVISIONING` for the whole copy (a pair only a record written before the
+gateway refused it can hold) — is the cn agent's (`cnagent.md` CN9, CN10,
+CN16, CN17, CN18); a
 primary showing such a row stays settling, held to the longer threshold, until
 it clears. Five kinds of row are left out of that test, each for one reason.
 Leg rows: a repair's new leg still zeroing reads `PROVISIONING` there for
@@ -5458,9 +5461,12 @@ which no suite case sets, so no suite case runs RW13's count compare.
   before its RW18 flip and
   that never finishes zeroing while it is the only side of a leg in the first
   group of its list, which keeps that slice's pools and every td
-  `PROVISIONING` the same way, or a clone whose clone meta group no
+  `PROVISIONING` the same way, a clone whose clone meta group no
   cntlr can assemble, which keeps its dm-clone row `MISSING` with no
-  reason (HL2; `cnagent.md` CN18; `architecture.md`, Known limits) — keeps
+  reason, or a transfer of a thin device a clone still fills, which a
+  record written before the gateway refused such a pair can hold and whose
+  rows read `PROVISIONING` for the whole copy (HL2; `cnagent.md` CN17,
+  CN18; `architecture.md`, Known limits) — keeps
   the SP on it that long once it is unhealthy, where a settled primary is
   judged by `primary_unhealthy` alone; an old primary that recovered
   meanwhile gets the role back only then, and not while the new primary

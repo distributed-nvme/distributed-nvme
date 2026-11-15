@@ -178,3 +178,86 @@ func TestTheOriginsVolumeTakesNoSecondNamespace(t *testing.T) {
 	}
 	env2.wantUntouched(before, beforeRev)
 }
+
+// TestNoTransferOfAVolumeACloneFills pins architecture.md, Transfers and
+// Clones: a volume a clone fills has holes below its dm-clone, so
+// CreateTransfer refuses an origin on it with FAILED_PRECONDITION naming the
+// clone, and CreateClone refuses a destination a transfer exports, naming the
+// transfer; neither writes. The refusal lasts as long as the clone's record:
+// once the record is gone, the transfer is accepted.
+func TestNoTransferOfAVolumeACloneFills(t *testing.T) {
+	t.Run("a transfer of a clone's destination", func(t *testing.T) {
+		env := newVolEnv(t)
+		env.putSubsystem(volNqn, 501, []*pb.Namespace{
+			{NsId: 601, NsIdx: 1, TdId: 900, Suspended: true}})
+		env.putTd("vol", 900, 7, 0, true)
+		volCreateClone(env, "clone-a", "vol")
+		before := env.spConf()
+		beforeRev := env.spRev()
+		_, err := env.srv.CreateTransfer(env.ctx, &pb.CreateTransferRequest{
+			ClusterName: env.cluster, SpName: volSpName,
+			SpRev:    &pb.SpRev{Revision: beforeRev},
+			XferName: "xfer-a", OriNqn: volNqn, OriNsIdx: 1,
+			AllowedHosts: []string{volHostA}, AutoSuspend: true,
+		})
+		msg := volWantCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(msg, `clone "clone-a"`) {
+			t.Errorf("CreateTransfer refusal %q must name the clone", msg)
+		}
+		env.wantUntouched(before, beforeRev)
+
+		// A clone latched for deletion still fills the volume until the
+		// drain removes its record (CLD9), so the refusal stands.
+		if _, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
+			ClusterName: env.cluster, SpName: volSpName,
+			SpRev:     &pb.SpRev{Revision: env.spRev()},
+			CloneName: "clone-a", Force: true,
+		}); err != nil {
+			t.Fatalf("DeleteClone: %v", err)
+		}
+		latched := &pb.Clone{}
+		env.get(model.CloneKey(env.cid, volSpId, "clone-a"), latched)
+		if !latched.GetDeleting() {
+			t.Fatalf("clone-a not latched: %v", latched)
+		}
+		before, beforeRev = env.spConf(), env.spRev()
+		_, err = env.srv.CreateTransfer(env.ctx, &pb.CreateTransferRequest{
+			ClusterName: env.cluster, SpName: volSpName,
+			SpRev:    &pb.SpRev{Revision: beforeRev},
+			XferName: "xfer-a", OriNqn: volNqn, OriNsIdx: 1,
+			AllowedHosts: []string{volHostA}, AutoSuspend: true,
+		})
+		msg = volWantCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(msg, `clone "clone-a"`) {
+			t.Errorf("CreateTransfer refusal %q must name the latched clone",
+				msg)
+		}
+		env.wantUntouched(before, beforeRev)
+
+		// The clone's record gone, as the drain's final step leaves it.
+		if err := env.cli.Delete(env.ctx,
+			model.CloneKey(env.cid, volSpId, "clone-a")); err != nil {
+			t.Fatalf("delete the clone key: %v", err)
+		}
+		conf := env.spConf()
+		conf.CloneNameList = nil
+		env.putSpConf(conf)
+		volCreateTransfer(env, "xfer-a")
+	})
+	t.Run("a clone into a transfer's volume", func(t *testing.T) {
+		env := newVolEnv(t)
+		env.putSubsystem(volNqn, 501, []*pb.Namespace{
+			{NsId: 601, NsIdx: 1, TdId: 900}})
+		env.putTd("vol", 900, 7, 0, true)
+		volCreateTransfer(env, "xfer-a")
+		before := env.spConf()
+		beforeRev := env.spRev()
+		_, err := env.srv.CreateClone(env.ctx,
+			volCloneRequest(env, "clone-a", "vol"))
+		msg := volWantCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(msg, "xfer-a") {
+			t.Errorf("CreateClone refusal %q must name the transfer", msg)
+		}
+		env.wantUntouched(before, beforeRev)
+	})
+}
