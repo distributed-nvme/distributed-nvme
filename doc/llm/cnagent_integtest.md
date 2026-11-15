@@ -585,7 +585,10 @@ comparison ends fails the stage. The finalize takes the clone down in layer
 order, the clone, its source connection, then its group's device and its leg
 (`cnagent.md` L3, L5, L9, L10), leftover while the leg's disconnect runs and
 while the source's does, unless the source's controller was already gone, and
-the group waits for a pass that finds the source's connection gone. The half
+the group waits for a pass that finds the source's connection gone; that pass
+may be the agent's own retry (`cnagent.md` CN10), under a trace id of its own,
+so the order is read from every command the controller node runs after the
+finalize begins. The half
 the source wrote reads back intact through the destination, which then takes a
 write, while the half it never wrote stays unmapped and zero there, the
 destination starting empty (`architecture.md`, [D3]); and at teardown both CNs

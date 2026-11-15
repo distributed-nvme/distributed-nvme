@@ -7683,7 +7683,12 @@ case_clone_xfer() {
 	# none. That pass issues no disconnect of the source and goes on down to
 	# the group and its leg. Both are CN21's, and the stage takes whichever
 	# the timing gives it, telling them apart by whether the first reply names
-	# the source's connection.
+	# the source's connection. The layers under L5 may come down in the
+	# agent's own CN10 retry, which the leftover registers and which runs
+	# under a fresh trace id of its own (CN2), before the stage's re-send:
+	# the order is therefore read from every command cn2 runs after a mark
+	# taken here, not from the stage's trace alone.
+	mark=$(helper 2 cn_log_lines)
 	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 || true)
 	[ -n "$out" ] ||
 		die "clone_xfer: the finalize printed no reply — the call never reached the agent"
@@ -7728,7 +7733,7 @@ case_clone_xfer() {
 		"clone_xfer: cn2 holds no controller of the source connection"
 	assert_eq "$(helper 2 "ctrl_of '$legnqn' '${IP[2]}'")" none \
 		"clone_xfer: cn2 holds no controller of the clone meta group's leg"
-	seq=$(helper 2 "cn_events $TRACE")
+	seq=$(helper 2 "cn_cmds_since $mark ''" | cut -d' ' -f2-)
 	assert_before "$seq" "^dmsetup reload $nsdev2 " "^dmsetup remove $clonedm\$" \
 		"clone_xfer: the ns-dev leaves the clone before the clone goes"
 	# The dm-clone goes before its clone meta group, which its removal writes
