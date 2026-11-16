@@ -223,6 +223,11 @@ type cntlrState struct {
 	// lock; every converge cancels those its plan no longer probes
 	// (convergeCntlr), and the cntlr's drop cancels the rest (CN7).
 	probers map[uint64]*legProber
+	// cutters are CN10's path watchers of the legs whose path the primary
+	// may cut, keyed by leg_id (keepPathWatchers). Like the probers they
+	// hold no lock; every converge keeps them in step with its plan, and
+	// the cntlr's drop stops them all.
+	cutters map[uint64]*pathWatcher
 
 	// retrying/cancel drive the CN10/CN18 background connect retry.
 	retrying bool
@@ -396,6 +401,7 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 		forcedStarts: make(map[uint64]uint64),
 		mdChecks:     make(map[uint64]mdCheckRun),
 		probers:      make(map[uint64]*legProber),
+		cutters:      make(map[uint64]*pathWatcher),
 	}
 	st.storeReq(req)
 	return st

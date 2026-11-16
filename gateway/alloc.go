@@ -219,7 +219,7 @@ func candAddrs(cands []model.Cand) []string {
 //
 // bump holds the DNs a side was charged to or released from: a DnRev bump is
 // how such a change reaches the dn agent. A DN whose only change is its used
-// metadata units (chargeUnits, releaseUnits) is written and re-indexed, its
+// metadata units (chargeUnits) is written and re-indexed, its
 // capacity value carrying the new count, but not bumped: nothing the node is
 // sent depends on the count (architecture.md, Metadata units).
 type dnLedger struct {
@@ -247,17 +247,17 @@ type dnLedger struct {
 // validation), so the ledger refuses with the same errAborted the allocating
 // paths already give (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 //
-// Five handlers build a ledger — CreateStoragePool, CreateClone, and
-// CreateMigration, FinishMigration and CancelMigration — and each builds it
-// before staging its first write, so a refusal here returns having written
-// nothing rather than relying on the transaction being abandoned (EU4).
+// Three handlers build a ledger — CreateStoragePool, CreateClone and
+// CreateMigration — and each builds it before staging its first write, so a
+// refusal here returns having written nothing rather than relying on the
+// transaction being abandoned (EU4). FinishMigration and CancelMigration
+// write through model.EndMigrationIn, which gates the conf the same way.
 // DeleteStoragePool builds none: it latches, and the worker's drain returns
 // the extents (dnv-worker.md, The sp drain); nor does DeleteClone, whose
 // drain gives the clone meta group back (dnv-worker.md, The clone drain).
-// Three of the five reach a conf gate before this one anyway
+// Each of the three reaches a conf gate before this one anyway
 // (CreateStoragePool's own, CreateClone's in planCloneGrp, CreateMigration's
-// in its plan, through migrMetaUnitsOf and pickDns); the other two have none,
-// which is what this covers.
+// in its plan, through migrMetaUnitsOf and pickDns).
 func newDnLedger(
 	s etcdutil.STM,
 	cid uint64,
@@ -421,24 +421,6 @@ func (l *dnLedger) chargeUnits(
 			what, addrPort, free, units)
 	}
 	dn.UsedMetaUnits += units
-	return nil
-}
-
-// releaseUnits is chargeUnits' reverse (architecture.md, Metadata units): the
-// DN's used units drop by units and stop at zero (model.ReleaseMetaUnits), so
-// a count that is already short never wraps around into one that refuses
-// every later charge. Like chargeUnits it marks no revision bump, and zero
-// units read and write nothing: a Migration whose record carries no
-// meta_units leaves its destination DN exactly as it was.
-func (l *dnLedger) releaseUnits(addrPort string, units uint64) error {
-	if units == 0 {
-		return nil
-	}
-	dn, err := l.get(addrPort)
-	if err != nil {
-		return err
-	}
-	dn.UsedMetaUnits = model.ReleaseMetaUnits(dn.GetUsedMetaUnits(), units)
 	return nil
 }
 

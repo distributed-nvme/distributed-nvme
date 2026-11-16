@@ -865,13 +865,19 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   the time with no usable path from the primary to the moving leg. The gap
   ends by the disk nodes' steps or by a forced cancel. Measured at 32 slices: one
   to two and a half seconds. State: accepted.
-- **A migrating leg whose serving side's disk node dies waits without
-  limit.** A migrating leg has two paths. The one not serving is live but
-  inaccessible. The kernel keeps the leg's IO queued as long as that path
-  stays live. md never fails the member. In a pool without RAID, all of
-  the pool's IO waits.
-  State: fix decided; a lab test first, then the reaction is chosen. Read
-  from the kernel's code; not seen in the lab.
+- **A migrating leg whose destination dies after the cutover, before its
+  copy is whole, keeps its group one leg short.** When a migrating leg's
+  serving disk node dies, the primary cuts the leg's other path while
+  another leg of the group is in sync, so within seconds the write goes to
+  the group's other legs instead of waiting (the kernel would keep it
+  queued on a path that is live but inaccessible). Leg repair then ends the migration in the direction that
+  loses nothing: a cancel before the cutover, a finish after it when the
+  destination's copy is whole, and then repairs the leg. After the cutover
+  with a copy not whole, neither side alone holds the leg's data, so the
+  worker does neither and logs why. The group serves on its other legs
+  until the destination comes back and the copy goes on, or an operator
+  ends the migration. State: accepted. The waiting write was seen in the
+  lab, and a disconnect by hand ended it.
 - **The failover pause is the full stack build on the new primary.** A
   standby holds no array and no thin pool. The write in flight waits until
   the new primary has built the whole stack. The figures are in the

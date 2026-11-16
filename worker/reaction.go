@@ -67,6 +67,10 @@ const (
 	reactionRepairFinish = "repair_finish"
 	reactionRepairCancel = "repair_cancel"
 	reactionRepairAbort  = "repair_abort"
+	// The ends of a bad leg's migration that leg repair runs before it
+	// repairs the leg (AR8).
+	reactionMigrationCancel = "migration_cancel"
+	reactionMigrationFinish = "migration_finish"
 )
 
 // The "reason" attribute of `reaction skipped`. A model.ErrPrecondition
@@ -92,8 +96,13 @@ const (
 	// reasonRedundNone is AR8's "RedundNone groups only log" (AR9).
 	reasonRedundNone = "redund_none"
 	// reasonTwoSides is AR8's "a leg with two sides has a user migration in
-	// flight and is left alone".
+	// flight and is left alone": the create refuses such a leg, and a bad
+	// one whose migration the snapshot does not name is left so.
 	reasonTwoSides = "leg_has_two_sides"
+	// reasonMigrCopyNotWhole is AR8's wait on a bad leg whose migration's
+	// cutover has started while the destination's latest report does not
+	// show its copy whole: neither side alone is the leg.
+	reasonMigrCopyNotWhole = "migration_copy_not_whole"
 	// reasonGrpOperatorInCharge is AR8's hold on a group whose
 	// operator_in_charge flag is set (architecture.md, Repairs): an operator
 	// has taken the group's repair over from the worker, so leg repair
@@ -414,6 +423,29 @@ type reactionOps interface {
 		repName string,
 		cc *pb.ClusterConf,
 	) (uint64, error)
+	// cancelMigration and finishMigration are AR8's ends of a bad leg's
+	// migration (MD6's CancelMigration and FinishMigration): migrId is the
+	// record the pass read.
+	cancelMigration(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		migrName string,
+		migrId uint64,
+		cc *pb.ClusterConf,
+	) error
+	finishMigration(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		migrName string,
+		migrId uint64,
+		cc *pb.ClusterConf,
+	) error
 	// cancelAndCreateRepair is the drive step's joined cancel of an ABORTED
 	// worker's repair and create of the next (MD6's CancelAndCreateRepair);
 	// it returns the cancelled rep_id, the new rep_id and new leg id.
@@ -776,6 +808,34 @@ func (o *modelReactionOps) cancelRepair(
 	return model.CancelRepair(
 		ctx, o.cli, cid, shard, spId, spName, 0, repName, cc,
 	)
+}
+
+func (o *modelReactionOps) cancelMigration(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	migrName string,
+	migrId uint64,
+	cc *pb.ClusterConf,
+) error {
+	return model.CancelMigration(
+		ctx, o.cli, cid, shard, spId, spName, migrName, migrId, cc)
+}
+
+func (o *modelReactionOps) finishMigration(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	migrName string,
+	migrId uint64,
+	cc *pb.ClusterConf,
+) error {
+	return model.FinishMigration(
+		ctx, o.cli, cid, shard, spId, spName, migrName, migrId, cc)
 }
 
 func (o *modelReactionOps) cancelAndCreateRepair(
@@ -2496,16 +2556,18 @@ func (t *repairTarget) parent() model.GrpParent {
 // with the smallest leg_id, across the slices' groups and the clone meta
 // groups alike. It reports whether the pass ends here.
 //
-// The create's conditions run in AR8's order: an md-raid1 pool; a leg with
-// exactly one side; a group whose operator_in_charge flag is clear; a group
-// with no forced-start mark; the gate on the group's row (grpRowHold); the
-// healthy-leg test (otherLegHealthy); a group with no repair. A clone being
+// The create's conditions run in AR8's order: an md-raid1 pool; a group
+// whose operator_in_charge flag is clear; a group with no forced-start
+// mark; a leg with exactly one side, a bad leg with two having its
+// migration ended first (endLegMigration); the gate on the group's row
+// (grpRowHold); the healthy-leg test (otherLegHealthy); a group with no
+// repair. A clone being
 // deleted is no candidate at all (repairCandidates), and a pool being
 // deleted runs its drain and no reaction (SPD6), so neither needs a test
 // here. Every condition after the first is a property of ONE leg or ONE
 // group that the pass reads in its snapshot, so it is checked before any
 // scan and holds only that group (AR2), and each can hold for a very long
-// time: a two-sided leg has a user migration in flight (hours); a group
+// time: a two-sided leg whose migration cannot be ended waits for it; a group
 // whose flag is set waits until the operator clears it, however long that
 // is; a group with a forced-start mark waits until the mark goes — the
 // worker clears it once the primary reports the group's row OK with a
@@ -2542,6 +2604,22 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			)
 			return true
 		}
+		if len(target.leg.GetSideList()) == 2 && target.clone == nil &&
+			!target.ranges {
+			// AR8: a bad leg with two sides has a migration in flight,
+			// which leg repair ends in its safe direction first, so that
+			// the next pass repairs a leg of one side; the operator's
+			// holds apply to it as to a create.
+			if reason, attrs := operatorHold(target); reason != "" {
+				w.reactionSkipped(ctx, reactionRepairCreate, reason,
+					withAttr(ids, attrs...)...)
+				continue
+			}
+			if w.endLegMigration(ctx, p, target, ids) {
+				return true
+			}
+			continue
+		}
 		if reason, attrs := repairHold(p, target); reason != "" {
 			w.reactionSkipped(ctx, reactionRepairCreate, reason,
 				withAttr(ids, attrs...)...)
@@ -2569,20 +2647,12 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 	return false
 }
 
-// repairHold is AR8's per-candidate conditions after the redundancy, in their
-// order: a leg with two sides, the operator-in-charge flag, a forced-start
-// mark, the gate on the group's row and the healthy-leg test; it returns the
-// reason the first that holds logs and the attributes it adds, "" when none
-// holds. tryLegRepair logs it and moves the scan on; the joined cancel and
-// create of a worker's aborted repair (nextTarget) asks it too, and the
-// group's own repair, which that transaction cancels, is no hold there.
-func repairHold(p *spPass, target *repairTarget) (string, []slog.Attr) {
-	if len(target.leg.GetSideList()) != 1 {
-		// AR8: two sides means a user migration is in flight on this
-		// leg, and model.CreateRepair refuses such a bad leg. The next
-		// candidate may still be repairable.
-		return reasonTwoSides, nil
-	}
+// operatorHold is AR8's two holds of a group the operator is acting on, in
+// their order: the operator-in-charge flag and a forced-start mark; it
+// returns the reason the first that holds logs and the attributes it adds,
+// "" when neither holds. The create asks them (repairHold), and so does the
+// end of a bad leg's migration (endLegMigration).
+func operatorHold(target *repairTarget) (string, []slog.Attr) {
 	if target.grp.GetOperatorInCharge() {
 		// AR8: an operator has taken the group's repair over from the
 		// worker (architecture.md, Repairs), so leg repair creates no
@@ -2614,6 +2684,113 @@ func repairHold(p *spPass, target *repairTarget) (string, []slog.Attr) {
 		// pass's alone, since no STM of the create reads the mark.
 		return reasonGrpForcedStart, []slog.Attr{
 			slog.Uint64("forced_leg_id", mark.GetLegId())}
+	}
+	return "", nil
+}
+
+// endLegMigration is AR8's end of a bad leg's migration, in its safe
+// direction, before leg repair repairs the leg: with the migration's
+// cutover still pending, the worker cancels it (model.CancelMigration),
+// since the source holds every write and the destination serves nothing;
+// once the cutover has started, it finishes it (model.FinishMigration) when
+// the destination side's latest report shows its copy whole
+// (common.HydrationComplete, the proof the gateway's finish reads), since
+// the destination then holds every block; with a copy not shown whole it
+// does neither and logs `reaction skipped` (migration_copy_not_whole):
+// the source misses the writes since the cutover, and the destination the
+// blocks not yet copied, which hold old bytes on its disk, so neither side
+// alone is the leg. A leg whose migration the snapshot does not name logs
+// leg_has_two_sides. The end is the pass's one action (AR2): one that
+// commits ends the pass, as does one that fails otherwise than by a
+// refusal, whose transaction may have committed; a refusal holds this leg
+// alone. It reports whether the pass ends here.
+func (w *spWorker) endLegMigration(
+	ctx context.Context,
+	p *spPass,
+	target *repairTarget,
+	ids []slog.Attr,
+) bool {
+	migrName, migr := legMigration(p.state, target.leg)
+	if migr == nil {
+		w.reactionSkipped(ctx, reactionRepairCreate, reasonTwoSides, ids...)
+		return false
+	}
+	ids = withAttr(ids,
+		slog.String("migr_name", migrName),
+		slog.Uint64("migr_id", migr.GetMigrId()),
+	)
+	kind, end := reactionMigrationCancel, w.reactor().ops.cancelMigration
+	if !migr.GetCutoverPending() {
+		if !dstCopyWhole(w, target.leg, migr) {
+			w.reactionSkipped(ctx, reactionRepairCreate,
+				reasonMigrCopyNotWhole, ids...)
+			return false
+		}
+		kind, end = reactionMigrationFinish, w.reactor().ops.finishMigration
+	}
+	err := end(ctx, w.cid, w.shard, w.spId, w.desired.handle, migrName,
+		migr.GetMigrId(), p.cc)
+	if err != nil {
+		w.reactionFailed(ctx, kind, err, ids...)
+		var pre *model.ErrPrecondition
+		return !errors.As(err, &pre)
+	}
+	w.reactionApplied(ctx, kind, ids...)
+	return true
+}
+
+// legMigration is the migration of the snapshot one of whose two sides is
+// a side of leg, by its name, or "" and nil.
+func legMigration(
+	state *model.SpState,
+	leg *pb.Leg,
+) (string, *pb.Migration) {
+	for _, name := range state.Conf.GetMigrNameList() {
+		migr, ok := state.Migrs[name]
+		if !ok {
+			continue
+		}
+		for _, side := range leg.GetSideList() {
+			if side.GetSideId() == migr.GetSrcSideId() ||
+				side.GetSideId() == migr.GetDstSideId() {
+				return name, migr
+			}
+		}
+	}
+	return "", nil
+}
+
+// dstCopyWhole says whether the latest report the destination side's child
+// holds shows the migration's copy whole: its dm-clone row's status line
+// with every region hydrated (common.HydrationComplete), as the gateway's
+// finish reads it from the disk node. A destination with no running child,
+// or one that has not reported, shows nothing.
+func dstCopyWhole(w *spWorker, leg *pb.Leg, migr *pb.Migration) bool {
+	child, ok := w.sides[sideKey{legId: leg.GetLegId(),
+		sideId: migr.GetDstSideId()}]
+	if !ok || child.driver == nil {
+		return false
+	}
+	return common.HydrationComplete(child.driver.info().GetMigrDstInfo().
+		GetDmCloneInfo().GetDetails())
+}
+
+// repairHold is AR8's per-candidate conditions after the redundancy, in their
+// order: a leg with two sides, the operator-in-charge flag, a forced-start
+// mark, the gate on the group's row and the healthy-leg test; it returns the
+// reason the first that holds logs and the attributes it adds, "" when none
+// holds. tryLegRepair logs it and moves the scan on; the joined cancel and
+// create of a worker's aborted repair (nextTarget) asks it too, and the
+// group's own repair, which that transaction cancels, is no hold there.
+func repairHold(p *spPass, target *repairTarget) (string, []slog.Attr) {
+	if len(target.leg.GetSideList()) != 1 {
+		// AR8: two sides means a user migration is in flight on this
+		// leg, and model.CreateRepair refuses such a bad leg. The next
+		// candidate may still be repairable.
+		return reasonTwoSides, nil
+	}
+	if reason, attrs := operatorHold(target); reason != "" {
+		return reason, attrs
 	}
 	if reason := grpRowHold(p, target.grp.GetGrpId()); reason != "" {
 		// AR8's gate: the create runs only while the group's row in
@@ -4358,8 +4535,9 @@ func (w *spWorker) reactionSkipped(
 // refused, whose name tells its refusal from the same reason found by the
 // pass's own check; anything else is a transient failure that additionally
 // carries the error text. Whether the pass ends is the caller's: AR2 ends it
-// on a refusal, save the drive step's (driveFailed) and the create's under
-// the group's operator_in_charge flag (createRepair).
+// on a refusal, save the drive step's (driveFailed), the create's under the
+// group's operator_in_charge flag (createRepair), the joined create's
+// (cancelRepair) and a migration end's (endLegMigration).
 func (w *spWorker) reactionFailed(
 	ctx context.Context,
 	kind string,

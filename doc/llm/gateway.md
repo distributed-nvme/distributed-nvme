@@ -556,9 +556,9 @@ before the merge that gives its scans their leg count and that the geometry
 rules of `architecture.md`, Common validation, judge, and again in its STM
 before any group geometry) and the `GrowSlice` handler (before any group
 geometry), in `newDnLedger` — the DN ledger `CreateStoragePool`,
-`CreateClone`, `CreateMigration`, `FinishMigration` and `CancelMigration`
-build before staging their first write, for the same
-capacity-key reason —
+`CreateClone` and `CreateMigration` build before staging their first
+write, for the same capacity-key reason —, at the top of
+`model.EndMigrationIn` for `FinishMigration` and `CancelMigration`,
 in the planning read of `FinishRepair`, `CancelRepair` and
 `DeleteRetiredLeg` (`releaseConfGate`), whose `model` ops give a side back
 through the drains' ledger by the same capacity keys (`FinishRepair`'s op
@@ -1336,20 +1336,22 @@ rather than a candidate problem.
   `FAILED_PRECONDITION`. Deciding STM: re-resolve and the
   token; the migration's `cutover_pending` again, since a cancel and a
   create under the same name between the phases leave a pending record
-  there; apply the finish of `architecture.md`, Migrations (the destination
-  side becomes the leg's side, the source side is removed, the source DN's
-  bookkeeping is released with `BumpDnRev`, and the destination DN, its
-  address read before the source leaves the side list, gets back the
-  `meta_units` the `Migration` records through `releaseUnits` — a units-only
-  change, so that DN is written and re-indexed with no `BumpDnRev`; a record
-  with no units leaves it unread); delete the `Migration` and its list
-  entry; `BumpSpRev`. Reply `migr_id`.
+  there; apply the finish of `architecture.md`, Migrations, through
+  `model.EndMigrationIn`, the write the sp worker's finish runs too
+  (`dnv-worker.md` MD6): the destination side becomes the leg's side, the
+  source side is removed, the source DN's bookkeeping is released with
+  `BumpDnRev`, and the destination DN gets back the `meta_units` the
+  `Migration` records — a units-only change, so that DN is written and
+  re-indexed with no `BumpDnRev`; a record with no units leaves it unread;
+  the `Migration` and its list entry are deleted; `BumpSpRev`. The write's
+  errors are lost invariants, `ABORTED`. Reply `migr_id`.
 * **CancelMigration** — STM: resolve; token; the migration; its
   `cutover_pending` clear and `force` false is `FAILED_PRECONDITION`
   (`migrCancelAllowed`; `architecture.md`, Migrations); the reverse of the
-  create (drop the destination side, release the destination DN's extents
+  create through `model.EndMigrationIn`, the write the sp worker's cancel
+  runs too (drop the destination side, release the destination DN's extents
   and the `meta_units` the `Migration` records with one `BumpDnRev`, delete
-  the `Migration` and its list entry); `BumpSpRev`. Reply `migr_id`.
+  the `Migration` and its list entry; `BumpSpRev`). Reply `migr_id`.
 * **GetMigration** — one STM read; the record as stored, `cutover_pending`
   included.
 

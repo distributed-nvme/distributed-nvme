@@ -399,6 +399,7 @@ func (s *CnAgentServer) dropCntlrState(
 ) {
 	s.stopConnectRetry(st)
 	s.stopLegProbers(st, nil)
+	s.keepPathWatchers(st, nil)
 	req := st.loadReq()
 	ptr := req.GetCntlrPointer()
 	paths := []string{s.nf.LocalCntlrPath(

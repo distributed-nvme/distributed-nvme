@@ -549,6 +549,36 @@ func (o *fakeReactionOps) createRepair(
 	return 887, 888, err
 }
 
+func (o *fakeReactionOps) cancelMigration(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	migrName string,
+	migrId uint64,
+	cc *pb.ClusterConf,
+) error {
+	return o.recordRepair(reactionCall{
+		op: "cancel_migration", repName: migrName, repId: migrId, cc: cc,
+	})
+}
+
+func (o *fakeReactionOps) finishMigration(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	migrName string,
+	migrId uint64,
+	cc *pb.ClusterConf,
+) error {
+	return o.recordRepair(reactionCall{
+		op: "finish_migration", repName: migrName, repId: migrId, cc: cc,
+	})
+}
+
 func (o *fakeReactionOps) cancelAndCreateRepair(
 	ctx context.Context,
 	cid uint64,

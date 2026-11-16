@@ -249,10 +249,11 @@ func TestLegRepairRedundNoneEndsThePass(t *testing.T) {
 }
 
 // TestLegRepairCreateConditionsInOrder pins the order of AR8's create
-// conditions: an md-raid1 pool, a leg with one side, the group's
-// operator_in_charge flag clear, no forced-start mark on the group, the
-// group's row OK in a report of the snapshot's revision or later, the
-// healthy-leg test, and no repair on the group. With every hold
+// conditions: an md-raid1 pool, the group's operator_in_charge flag clear,
+// no forced-start mark on the group, a leg with one side (a leg with two
+// whose migration the snapshot does not name is left so), the group's row
+// OK in a report of the snapshot's revision or later, the healthy-leg test,
+// and no repair on the group. With every hold
 // armed the first one is logged; each case lifts the hold the case before it
 // logged, so the next one shows, and the last case creates. Each hold runs
 // no scan and no op.
@@ -270,12 +271,6 @@ func TestLegRepairCreateConditionsInOrder(t *testing.T) {
 			}
 		}, reasonRedundNone},
 		{func(h *reactHarness) {
-			leg := h.legOf(reactDataLegA)
-			leg.SideList = append(leg.SideList, &pb.Side{
-				SideId: 999, AddrPort: reactDnD,
-			})
-		}, reasonTwoSides},
-		{func(h *reactHarness) {
 			// An operator has taken the group's repair over.
 			h.dataGrp().OperatorInCharge = true
 		}, reasonGrpOperatorInCharge},
@@ -284,6 +279,13 @@ func TestLegRepairCreateConditionsInOrder(t *testing.T) {
 			// primary's report has not caught up with.
 			withMark(h.dataGrp(), reactDataLegB)
 		}, reasonGrpForcedStart},
+		{func(h *reactHarness) {
+			// A second side the snapshot names no migration of.
+			leg := h.legOf(reactDataLegA)
+			leg.SideList = append(leg.SideList, &pb.Side{
+				SideId: 999, AddrPort: reactDnD,
+			})
+		}, reasonTwoSides},
 		{func(h *reactHarness) {
 			h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_ERROR)
 		}, reasonGrpRowError},

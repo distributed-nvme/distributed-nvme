@@ -152,7 +152,9 @@ no transport-health gate skips a round.
 The two sides of a migrating leg share one subsystem NQN
 (`architecture.md`, [D1]), so `nvme disconnect --nqn` would kill both
 paths. When a leg's desired side set shrinks (after `FinishMigration`),
-the cn agent must disconnect only the dead side's controller:
+and when a primary cuts a migrating leg's live path (CN10, The cut of a
+migrating leg's path), the cn agent must disconnect only that side's
+controller:
 `nvmehost.go`'s `DisconnectDevice` issues `nvme disconnect --device` for
 one controller device, found by the sysfs walk of CN10 and never by nvme
 list-subsys: match "subsysnqn" under "/sys/class/nvme-subsystem" against
@@ -977,7 +979,9 @@ cntlr's read names each side the converge would connect (CN30; on a
 primary, a one-sided leg's once its row stops reading `OK`): the
 provisioned sides of a wanted leg that the leg's subsystem holds no
 controller for, in any state, where no controller's address read failed to
-answer (`sidesToConnect`, the connect step's own test).
+answer, save on a primary the sides of a migrating leg whose serving path
+is down (`sidesToConnect`, the connect step's own test; The cut of a
+migrating leg's path, below).
 
 **Dead paths**: a controller of the leg NQN whose traddr and trsvcid
 match no desired side (the source side after `FinishMigration` — its
@@ -1022,6 +1026,52 @@ every controller of one NQN in the one subsystem (`architecture.md`,
 [D1]). CN18's source step reads its source through the same lookup, and
 the CN28 rows that come from it — a standby's leg, a clone's target —
 read `ERROR` naming the read too.
+
+**The cut of a migrating leg's path.** On a primary, a leg with two sides
+— a migration's — of an md-raid1 group, one of whose paths is down (its
+controller "connecting", as the kernel's reconnect loop leaves a path
+whose disk node stopped answering, or "dead"; a "resetting" one is not
+yet down, and a "deleting" one is on its way out) while every live path of
+the leg reads ANA inaccessible gets its live paths disconnected by device
+(`pathsToCut`). A path watcher per such leg does it: a goroutine the
+converge starts, and keeps in step with its plan as it keeps the probers
+(`keepPathWatchers`), that looks the leg up in a walk of its own every
+probe interval (CN11) and takes no lock, since a converge can wait behind a
+read wedged on the leg's own pool (Known limits); the converge makes the
+same cut on its pass, and a cntlr's read names each path it would cut
+(CN30). Each cut is logged (`leg path cut`, or `cutting a leg path failed`,
+which the next tick or converge tries again). The converge connects no
+side of such a leg while its serving path is down — a down path whose last
+ANA state, which a down controller keeps, read optimized or non-optimized
+(`sidesToConnect`) — since the other side's path would come up
+inaccessible and be cut again; a down path that last read inaccessible
+never served, so the other side is connected as usual. The test reads the
+node alone, and nothing is remembered. Reason: the kernel counts a live
+inaccessible path as one IO may still go to, so with the serving path down
+a write to the leg waits without limit, md never fails the member and the
+group's writes stop; with the live path cut, once the down path's fast IO
+fail time has passed, a write fails at once, md fails the member and the
+write completes on the group's other legs (seen in the lab on the 7.0
+kernel; the 7.4 kernel stops counting such a path). The leg then behaves
+as a leg with one path, whose death md and the leg probe already handle,
+and the worker's leg repair ends its migration in its safe direction
+before it repairs it, or waits, logged, after a cutover whose copy is not
+whole (`dnv-worker.md` AR8). One rule covers the case before the cutover
+(the source serves, the destination's path is inaccessible) and after it
+(the destination serves). The cut is made only while md holds another
+member of the group in sync, read from sysfs just before it
+(`otherMemberInSync`): md fails the cut leg's member, and with no other
+member in sync the cut would end the wait in an IO error on the array's
+last member, where waiting lets the write complete once the disk node
+returns. Not on a standby, which holds no array, so
+nothing of it waits, and whose two paths keep it ready for a promotion;
+not for a group that is not md-raid1, which has no other leg to take the
+write, so a cut would turn the wait into IO errors to the hosts; not while
+a live path reads optimized or non-optimized; and not in the migration's
+gap, both paths live and inaccessible. A cut before the cutover also holds
+the cutover back, which waits for the primary's live path to the
+destination (`dnv-worker.md` RW18): a destination cannot copy from a dead
+source.
 
 **The disconnect registry.** The CN21 sweep's `nvme disconnect --nqn` —
 L10's legs, L5's clone sources and the node-level pass's unowned sources —
@@ -4600,9 +4650,16 @@ primary's leg row stays its prober's. Reason for a primary's bound: one
 with thousands of legs would otherwise read every leg's controllers on
 every read. A controller in any state is not named,
 since one that is connecting reconnects by itself, and neither is a side
-not provisioned, a leg the level suppresses or a leg whose disconnect is in
-flight: the converge connects none of them. The converge's reply carries
-none of them, as for every condition only a read names (below).
+not provisioned, a leg the level suppresses, a leg whose disconnect is in
+flight or, on a primary, a side of an md-raid1 group's leg with two sides
+one of whose paths is down (CN10, The cut of a migrating leg's path): the
+converge connects
+none of them. The same lookup names, on a primary, each side whose live
+path the converge would cut (CN10, same part), as "enumeration failed"
+with the leg's subsystem NQN, " at " and the side's address, then "path to
+cut", so that the worker's re-send brings the converge that cuts it. The
+converge's reply carries none of them, as for every condition only a read
+names (below).
 
 A cntlr's read-only verdict also names each md member that its
 converge's member reconciliation would fail early (CN12, The early fail):
@@ -4773,6 +4830,18 @@ stores instead is CN23's.
 
 ## Known limits
 
+* The cut of a migrating leg's path (CN10) leaves three cases. A
+  destination that dies inside the migration's gap, both paths
+  inaccessible, last read inaccessible, so the hold does not keep the
+  source's path out: each converge connects it again and the path watcher
+  cuts it again, until the destination returns or the migration ends. A
+  serving path whose controller the kernel deleted, a reconnect refused
+  with do-not-retry, beside a live inaccessible path is no down path, so
+  nothing is cut and a write waits until a converge's connect gets the
+  serving side back. And a gap long enough for an IO the primary had in
+  flight on the source to time out resets the source's controller to
+  "connecting", so the destination's path is cut; it comes back once the
+  source reconnects, and md copies the member back.
 * Over a slice's pool that reads needs_check, the verdict names no thin row
   (CN13, CN30): a thin volume of a created td that was there and is gone,
   removed by hand say, reads `RES_STATUS_MISSING` and is built again only
@@ -5275,7 +5344,8 @@ stores instead is CN23's.
   and a converge that wants one of them back waits as well, about an
   admin timeout for every `disconnectConcurrency` stuck deletes ahead of
   it. Two disconnects still run inline and can meet the same wait under
-  their locks: the build's dead-path `nvme disconnect --device` of a
+  their locks (the cut of a migrating leg's path runs in its path watcher
+  too, which takes none, CN10): the build's dead-path `nvme disconnect --device` of a
   migration's departed side (CN10) — the source after `FinishMigration`,
   the destination after `CancelMigration` — whose disk node tears that
   side's export down on the same change, and the dn sweep's disconnect of

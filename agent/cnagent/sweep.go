@@ -1698,7 +1698,9 @@ func (s *CnAgentServer) unownedSrcNqns(
 // noCtrl are the sides of wanted legs with no controller that the converge
 // would connect (sidesToConnect, CN30), named as failures for the same
 // reason: the kernel deletes a controller whose reconnect nvmet refused for
-// good, and only a converge connects it again. A converge passes none.
+// good, and only a converge connects it again; and, marked cut, the sides
+// whose live path the converge would cut (pathsToCut, CN10), which only a
+// converge does either. A converge passes none.
 func (s *CnAgentServer) sweepCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -1798,8 +1800,11 @@ func (s *CnAgentServer) sweepCntlr(
 	}
 	for _, ls := range noCtrl {
 		tr := ls.side.GetNvmeTrConf()
-		res.Fail(ls.nqn+" at "+tr.GetTrAddr()+":"+tr.GetTrSvcId(),
-			errNoController)
+		why := errNoController
+		if ls.cut {
+			why = errPathToCut
+		}
+		res.Fail(ls.nqn+" at "+tr.GetTrAddr()+":"+tr.GetTrSvcId(), why)
 	}
 	if !converge && !st.reqFromRpc {
 		storedMarks(plan, res)
@@ -2029,8 +2034,12 @@ func sortedIds[V any](m map[uint64]V) []uint64 {
 }
 
 // errNoController is the failure a cntlr's verdict records for a side of a
-// wanted leg that the converge would connect (sweepCntlr).
-var errNoController = errors.New("no controller")
+// wanted leg that the converge would connect (sweepCntlr); errPathToCut the
+// one it records for a side whose path the converge would cut (pathsToCut).
+var (
+	errNoController = errors.New("no controller")
+	errPathToCut    = errors.New("path to cut")
+)
 
 // wantedProbers is the set of legs the CN11 health prober still covers: a
 // standby runs none, a level at or above SP_LEVEL_NO_SIDE runs none, and a

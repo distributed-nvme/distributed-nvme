@@ -49,34 +49,6 @@ const whatMigrDst = "migration destination"
 // and leave no unambiguous survivor for FinishMigration to keep.
 const migrMaxLegSideCnt = 2
 
-// migrSideIdx is the position of one side inside a leg's side_list, or -1.
-// FinishMigration uses it to assert that the two sides of a migration really
-// do share one leg before it removes either of them.
-func migrSideIdx(leg *pb.Leg, sideId uint64) int {
-	for idx, side := range leg.GetSideList() {
-		if side.GetSideId() == sideId {
-			return idx
-		}
-	}
-	return -1
-}
-
-// migrDropSide removes one side from a leg's side_list, which is how both
-// terminal RPCs end a migration: Finish drops the source, Cancel the
-// destination, and the survivor is the leg's only side again.
-//
-// Every caller has already located that side in this very leg, so a side that
-// is not there is impossible; the guard is what keeps that impossibility from
-// becoming a slice-index panic inside a gRPC handler.
-func migrDropSide(leg *pb.Leg, sideId uint64) {
-	idx := migrSideIdx(leg, sideId)
-	if idx < 0 {
-		return
-	}
-	sideList := leg.GetSideList()
-	leg.SideList = append(sideList[:idx], sideList[idx+1:]...)
-}
-
 // migrDstCntlidSlot is the destination side's cntlid slot (GW18): the first
 // entry of the SP's cntlid_slot_list that differs from the source side's.
 //
@@ -95,23 +67,6 @@ func migrDstCntlidSlot(conf *pb.SpConf, srcSlot uint32) (uint32, error) {
 	return 0, errPrecondition(
 		"cntlid_slot_list holds no slot other than the source side's %d",
 		srcSlot)
-}
-
-// dropMigration is the teardown both FinishMigration and CancelMigration
-// perform once they have decided which side survives: the Migration record
-// and its entry in the SP's name list disappear together, because a
-// migration that no longer owns two sides can never be resumed. Its bitmap
-// lives in the worker's memory alone (dnv-worker.md BM7).
-//
-// The caller still writes the SpConf and bumps SpRev — this helper only
-// mutates the conf in memory, so one transaction keeps one write per key.
-func dropMigration(
-	stm etcdutil.STM,
-	sc *spScope,
-	migrName string,
-) {
-	stm.Del(model.MigrationKey(sc.Cid, sc.SpId(), migrName))
-	sc.Conf.MigrNameList = removeName(sc.Conf.GetMigrNameList(), migrName)
 }
 
 // migrSrcLocation locates a CreateMigration source side and asserts its leg
@@ -727,61 +682,16 @@ func (s *Server) FinishMigration(
 			return err
 		}
 		migrId = migr.GetMigrId()
-		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
-		if err != nil {
-			return err
-		}
-		loc, ok := findSide(sc.Conf, slices, migr.GetSrcSideId())
-		if !ok {
-			return errAborted(
-				"migration %q source side %d is in no leg",
-				req.GetMigrName(), migr.GetSrcSideId())
-		}
-		dstIdx := migrSideIdx(loc.Leg, migr.GetDstSideId())
-		if dstIdx < 0 {
-			// The two sides must share one leg: they export the same NQN and
-			// the CN aggregates them as the paths of one namespace. If they
-			// do not, the leg is not in the shape architecture.md, Migrations,
-			// finishes.
-			return errAborted(
-				"migration %q sides %d and %d are not in one leg",
-				req.GetMigrName(), migr.GetSrcSideId(), migr.GetDstSideId())
-		}
-		// Read before the source is dropped, which shifts the side list.
-		dstAddr := loc.Leg.GetSideList()[dstIdx].GetAddrPort()
 		// The source's extents go back to its DN and its pointer disappears,
 		// which is what makes the src agent tear the side down on its next
-		// syncup: one DnConf write, one capacity key, one DnRev bump for that
-		// DN (architecture.md, Revision keys and the sync fan-out;
-		// architecture.md, Capacity index keys). The destination becomes the
-		// leg's only side and stays on its DN, whose dm-clone run is done
-		// with: the units CreateMigration charged there, as the Migration
-		// records them, come back in the same flush (architecture.md,
-		// Metadata units). That DN's only change is its used units, so it is
-		// written and re-indexed but not bumped.
-		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
-		if err != nil {
-			return err
-		}
-		if err := ledger.release(
-			loc.Side.GetAddrPort(), sc.SpId(), loc.Side.GetSideId(),
-			loc.Grp.GetExtCnt(),
-		); err != nil {
-			return err
-		}
-		if err := ledger.releaseUnits(
-			dstAddr, migr.GetMetaUnits(),
-		); err != nil {
-			return err
-		}
-		if err := ledger.flush(opFinishMigration); err != nil {
-			return err
-		}
-		migrDropSide(loc.Leg, migr.GetSrcSideId())
-		dropMigration(stm, sc, req.GetMigrName())
-		stm.Put(model.SliceKey(sc.Cid, sc.SpId(), loc.SliceId), loc.Slice)
-		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
-		return bumpSp(stm, opFinishMigration, sc)
+		// syncup; the destination becomes the leg's only side, and the units
+		// CreateMigration charged on its DN come back without a bump of that
+		// DN (model.EndMigrationIn; architecture.md, Metadata units). The
+		// write is the one the worker's finish runs too (dnv-worker.md AR8).
+		// Its errors are lost invariants, ABORTED (mapStmErr).
+		return model.EndMigrationIn(stm, opFinishMigration, sc.Cid,
+			sc.Shard(), req.GetSpName(), sc.Conf, req.GetMigrName(), migr,
+			false, sc.Cc)
 	})
 	if err != nil {
 		return nil, mapStmErr(err)
@@ -833,45 +743,15 @@ func (s *Server) CancelMigration(
 			req.GetMigrName(), migr, req.GetForce()); err != nil {
 			return err
 		}
-		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
-		if err != nil {
-			return err
-		}
-		loc, ok := findSide(sc.Conf, slices, migr.GetDstSideId())
-		if !ok {
-			return errAborted(
-				"migration %q destination side %d is in no leg",
-				req.GetMigrName(), migr.GetDstSideId())
-		}
 		// The destination's extents and its metadata units return to its DN
 		// and its pointer goes, which is the whole rollback: the source side
-		// was never touched, so it needs nothing done to it here
-		// (architecture.md, Migrations; Metadata units). The units are the
-		// ones the Migration records, and the DN's one DnRev bump covers
-		// them with its extents.
-		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
-		if err != nil {
-			return err
-		}
-		if err := ledger.release(
-			loc.Side.GetAddrPort(), sc.SpId(), loc.Side.GetSideId(),
-			loc.Grp.GetExtCnt(),
-		); err != nil {
-			return err
-		}
-		if err := ledger.releaseUnits(
-			loc.Side.GetAddrPort(), migr.GetMetaUnits(),
-		); err != nil {
-			return err
-		}
-		if err := ledger.flush(opCancelMigration); err != nil {
-			return err
-		}
-		migrDropSide(loc.Leg, migr.GetDstSideId())
-		dropMigration(stm, sc, req.GetMigrName())
-		stm.Put(model.SliceKey(sc.Cid, sc.SpId(), loc.SliceId), loc.Slice)
-		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
-		return bumpSp(stm, opCancelMigration, sc)
+		// was never touched (model.EndMigrationIn; architecture.md,
+		// Migrations; Metadata units). The write is the one the worker's
+		// cancel runs too (dnv-worker.md AR8). Its errors are lost
+		// invariants, ABORTED (mapStmErr).
+		return model.EndMigrationIn(stm, opCancelMigration, sc.Cid,
+			sc.Shard(), req.GetSpName(), sc.Conf, req.GetMigrName(), migr,
+			true, sc.Cc)
 	})
 	if err != nil {
 		return nil, mapStmErr(err)

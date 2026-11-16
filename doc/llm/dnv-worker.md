@@ -969,6 +969,18 @@ list; the flip, which reads the repair's key alone, and
   applied any, since the primary reads the request, and returns how many it
   applied and the revision its bump wrote, writing nothing when it applied
   none (AR16).
+* `CancelMigration` and `FinishMigration` take a migration's name and the
+  `migr_id` the pass read, and require the SP not `deleting` and its
+  `sp_level` below `SP_LEVEL_NO_THINPOOL`, the record still under the name
+  with that id ("migration gone"), and for a cancel the cutover still
+  pending ("cutover started"), for a finish the cutover started ("cutover
+  pending"); each then runs `EndMigrationIn`, the write the gateway's
+  `CancelMigration` and `FinishMigration` run after their own checks: the
+  dropped side's extents back to its DN, which is bumped, the migration's
+  metadata units back to the destination's DN, which a finish does not
+  bump, the side out of its leg, the record and its name in
+  `migr_name_list` deleted, and `SpRev` bumped (AR8; `architecture.md`,
+  Migrations).
 * `ClearCntlrDemotion` takes a cntlr id and a revision, and clears the
   cntlr's `demoted_revision` only while the record still carries that
   revision, with no expected revision and no bump of any revision, since no
@@ -3178,7 +3190,9 @@ and the groups' whole flags, in-sync lists, refusals and acted marks
 (`GrpInfo`) AR8, AR11, AR12, AR13, AR14 and AR17 read, the group rows AR15
 and AR17 read, and the dm-clone rows CLD13 reads)
 with the revision of the observation it reports (`architecture.md`,
-Live-state reporting), `now` (unix seconds),
+Live-state reporting), the latest report each migration destination
+side's child holds, whose dm-clone row AR8 reads before it finishes a bad
+leg's migration, `now` (unix seconds),
 the two records kept from an earlier pass that a pass decides by — the
 coordinator's records of the last failover it applied (AR5's second
 refusal) and of the last replacement of a primary it applied (AR7's second
@@ -3264,7 +3278,8 @@ STM (MD6, MD7); success logs `reaction applied` and the resulting `SpRev`
 bump re-fans the SP (RW14), so the next pass sees the new state. Auto-grow's
 actions are a grow and the withdrawal of a stuck grow (AR6), and leg
 repair's are the finish, the cancel and the try-to-abort of a worker's
-repair and the create of one (AR8); the cancel joined to the next create
+repair, the create of one and the end of a bad leg's migration (AR8); the
+cancel joined to the next create
 (AR8's drive step) is one action in one transaction, which logs `reaction
 applied` twice, for the cancel and for the create. The
 invariant is **at most one applied action per SP per pass**; the clone
@@ -3294,7 +3309,9 @@ cluster — and must not disable AR7 and AR8 for the duration); AR7's
 the scan to the next cntlr, and its scan that finds no CN, which moves the
 pass on to AR8; AR8's refusal of a drive step by its op, which
 holds that repair's group and moves the walk to the next repair, and its
-cancel's wait on `grp_row_stale` (`repair_cancel`), which does the same; and
+cancel's wait on `grp_row_stale` (`repair_cancel`), which does the same;
+AR8's `migration_copy_not_whole` and a refusal of a bad leg's migration end
+by its op, which hold that leg alone and move the scan on; and
 AR8's `leg_has_two_sides`, `grp_operator_in_charge`, whether the pass's
 own check or the create's op finds it, `grp_forced_start`, its gate on the
 group's row (`grp_row_error`, `grp_row_missing`, `grp_row_unknown`,
@@ -3903,9 +3920,11 @@ skipped` with its reason:
    pass, since redundancy is pool-wide and no later candidate differs; a
    `RedundNone` group has no redundancy to re-home, and an operator moves
    its data;
-2. the leg has exactly one side: `leg_has_two_sides` otherwise, since a leg
-   with two sides has a user migration in flight and `CreateRepair` refuses
-   such a bad leg;
+2. the leg has exactly one side: a leg with two sides has a migration in
+   flight, which `CreateRepair` refuses, so leg repair ends the migration
+   first (A bad leg with two sides, below), once conditions 4 and 5 pass,
+   and logs `leg_has_two_sides` when the snapshot names no migration of
+   the leg;
 3. for a clone meta group, the clone is not being deleted: such a clone's
    legs are no candidates at all, so nothing is logged, since its group
    goes back to its DNs in CLD9's transaction and `CreateRepair` refuses
@@ -3948,8 +3967,9 @@ skipped` with its reason:
 
 Conditions 2 to 8 are each one leg's or one group's, read in the pass's
 snapshot before any scan, and each holds that group only: the scan goes
-on to the next candidate leg (AR2). Each can hold for a long time — a user
-migration for hours, the `operator_in_charge` flag until the operator
+on to the next candidate leg (AR2). Each can hold for a long time — a
+migration that cannot be ended until its copy is whole, the
+`operator_in_charge` flag until the operator
 clears it, a forced-start mark until the mark goes in one of
 the three ways condition 5 names, an array that does not run until
 its legs come back or an operator acts, a group with no healthy leg until
@@ -3960,6 +3980,36 @@ reads no mark: the worker's own repair of a group with a mark moves on as
 any other does, save that `SetRepairAbort` refuses its try-to-abort while
 the mark names its new leg (MD6), a refusal that holds that group only, the
 next pass trying again while the trigger holds.
+
+**A bad leg with two sides.** A leg that needs repair and has two sides —
+the source and the destination of a migration the snapshot names — gets
+its migration ended in its safe direction before any repair, after the
+operator's two holds (conditions 4 and 5) and none of the others: while the
+migration's cutover is pending the pass cancels it (`CancelMigration`),
+since the source holds every write and the destination serves nothing;
+once the cutover has started it finishes it (`FinishMigration`) when the
+latest report the destination side's child holds shows its dm-clone's
+copy whole (`common.HydrationComplete`, the proof the gateway's finish
+reads from the disk node), since the destination then holds every block;
+with a copy not shown whole it does neither and logs `reaction skipped`
+(`repair_create`, `migration_copy_not_whole`), since the source misses the
+writes since the cutover and the destination the blocks not yet copied,
+which on its disk hold old bytes, so neither side alone is the leg (Known
+limits). Each logs `reaction applied` (`migration_cancel`,
+`migration_finish`) naming the migration, and is the pass's one action
+(AR2); a refusal of its op holds this leg alone, and the scan goes on,
+while any other failure ends the pass, its transaction maybe committed. A
+leg that is a candidate only for md bad-block ranges serves, so its
+migration is left to run (`leg_has_two_sides`). The finish trusts the
+destination's latest report of its copy as the gateway's finish does. The
+next pass finds a leg of one side and repairs it as any other. Reason:
+repairing a leg of two sides would retire a leg with a migration under
+it, which could later be taken back or force-started over blocks it never
+copied; ending the migration first keeps every later step on legs of one
+side, and the two safe directions are exactly the cases where one side is
+the whole leg. A migrating leg whose serving path dies is first cut down to
+one path by the primary (`cnagent.md` CN10, The cut of a migrating leg's
+path), so md fails its member and the leg's probe reads it dead.
 
 The create then runs `FindDnCandidatesAntiAffine` with the group's
 `ext_cnt`, a candidate count of `dn_batch_size`, a required count of one
@@ -5043,11 +5093,13 @@ and with the op's name as `op` when a `model` op refused it
 from the op, and only the op's refusal always ends the pass, save a refusal
 of AR8's drive step, which holds that repair's group alone, the
 create's refusal under the group's `operator_in_charge` flag, which holds
-that group alone, and a refusal of the create joined to a cancel, after
-which the cancel runs alone (AR2, AR8); each
+that group alone, a refusal of the create joined to a cancel, after
+which the cancel runs alone, and a refusal of a bad leg's migration end,
+which holds that leg alone (AR2, AR8); each
 record names its reaction's kind, auto-grow's being three, a data grow, a
 metadata grow and the withdrawal of a stuck grow (AR6), and leg repair's
-four, its create and the three steps of its drive step (AR8), and the record of a finish also
+six, its create, the three steps of its drive step and the cancel and the
+finish of a bad leg's migration (AR8), and the record of a finish also
 names the retired leg it gave back, if any, that of a try-to-abort its
 trigger, and that of a cancel joined to the next create the disk nodes
 its scan avoided (`avoided_addr_ports`); an op
@@ -6087,6 +6139,18 @@ which no suite case sets, so no suite case runs RW13's count compare.
   source connection the dn sweep runs under the side's lock, races the
   source disk node's `SyncupDn`, which no hold orders either and which takes
   that export away (`dnagent.md`, Known limits).
+* **A bad leg whose migration's cutover has started is left alone while
+  its copy is not shown whole.** AR8 ends a bad leg's migration only in a
+  direction that loses nothing: a cancel before the cutover, a finish after
+  it when the destination's latest report shows its copy whole. After the
+  cutover with a copy not shown whole, the source misses the writes since
+  the cutover and the destination the blocks not yet copied, so the pass
+  logs `migration_copy_not_whole` on every pass and the group runs one leg
+  short until the destination returns and its copy goes on, or an operator
+  ends the migration (`architecture.md`, Known limits). Replacing such a
+  leg with both sides retired as a partial copy is an open question. A
+  destination whose child has not reported since the worker started shows
+  no copy either, so its migration waits as well until it reports.
 * **A replacement of the primary fanned out by a coordinator that has just
   started holds nothing.** RW22 finds a deleted primary only through its
   running child, and a replacement leaves no record of the cntlr it

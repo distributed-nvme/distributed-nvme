@@ -384,7 +384,7 @@ func (s *CnAgentServer) ensureLeg(
 		return nil, err
 	}
 	connected := false
-	for _, side := range sidesToConnect(lp, view) {
+	for _, side := range sidesToConnect(lp, view, plan.primary) {
 		tr := side.GetNvmeTrConf()
 		plan.walk.stale = true
 		if err := s.connectWithin(ctx, budget, agent.TrConf{
@@ -400,6 +400,15 @@ func (s *CnAgentServer) ensureLeg(
 	if connected {
 		if view, err = s.awaitNsHead(
 			ctx, budget, plan.walk, lp.nqn, sideNsid); err != nil {
+			return nil, err
+		}
+	}
+	if cut := pathsToCut(plan.primary, lp, view); len(cut) > 0 &&
+		s.otherMemberInSync(ctx, lp) {
+		s.cutPaths(ctx, lp, cut)
+		plan.walk.stale = true
+		if view, err = s.lookupSubsys(
+			ctx, plan.walk, lp.nqn, sideNsid); err != nil {
 			return nil, err
 		}
 	}
@@ -435,9 +444,17 @@ const sideNsid = 1
 // connect could only fail); the provisioned sides of the same leg connect
 // normally, which is what keeps a migrating leg serving through its src side
 // while its dst side provisions. A view with a controller whose address read
-// did not answer gives none: that controller may be any side's path.
-func sidesToConnect(lp *legPlan, view *subsysView) []*pb.Side {
+// did not answer gives none: that controller may be any side's path. On a
+// primary, a leg of an md-raid1 group with two sides whose serving path is
+// down (servingPathDown) gives none either (CN10, The cut of a migrating
+// leg's path): the other side's path would come up inaccessible and be cut
+// again, so it waits for the serving path to be live again or for the
+// migration's end.
+func sidesToConnect(lp *legPlan, view *subsysView, primary bool) []*pb.Side {
 	if view.unknownCtrl() != nil {
+		return nil
+	}
+	if cuttable(primary, lp) && servingPathDown(lp, view) {
 		return nil
 	}
 	var out []*pb.Side
@@ -449,6 +466,255 @@ func sidesToConnect(lp *legPlan, view *subsysView) []*pb.Side {
 		}
 	}
 	return out
+}
+
+// pathDown says whether a controller is a path that does not serve:
+// connecting, as the kernel's reconnect loop leaves a path whose disk node
+// stopped answering, or dead. A resetting one is not yet: the kernel's error
+// recovery moves it on to live or to connecting within seconds; and a
+// deleting one is on its way out, as a disconnect leaves it.
+func pathDown(ctrl ctrlView) bool {
+	return ctrl.state == "connecting" || ctrl.state == "dead"
+}
+
+// legCtrls are the controllers of view that are paths to a side of lp, by
+// address; a gone controller or one whose address is unknown is none.
+func legCtrls(lp *legPlan, view *subsysView) []ctrlView {
+	if view == nil || !view.found {
+		return nil
+	}
+	var out []ctrlView
+	for _, ctrl := range view.ctrls {
+		if ctrl.gone || ctrl.addrUnknown != nil {
+			continue
+		}
+		for _, side := range lp.sides {
+			tr := side.GetNvmeTrConf()
+			if ctrl.trAddr == tr.GetTrAddr() &&
+				ctrl.trSvcId == tr.GetTrSvcId() {
+				out = append(out, ctrl)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// servingPathDown says whether a path of lp in view is down (pathDown)
+// whose last ANA state, which a down controller keeps, was optimized or
+// non-optimized: the side that served, or was ready to. A down path that
+// last read inaccessible was the side that did not serve, so the other side
+// may serve and is connected as usual.
+func servingPathDown(lp *legPlan, view *subsysView) bool {
+	for _, ctrl := range legCtrls(lp, view) {
+		if pathDown(ctrl) && ctrl.anaState != "inaccessible" {
+			return true
+		}
+	}
+	return false
+}
+
+// pathsToCut is CN10's cut of a migrating leg's path: on a primary, for a
+// leg with two sides one of whose paths is down (pathDown) while every
+// live path of the leg reads ANA inaccessible, the live paths, which the
+// converge disconnects; none otherwise. Reason: the kernel counts a live
+// inaccessible path as one IO may still go to, so with the serving path
+// down a write to the leg waits without limit and md never fails the
+// member, and the group's writes stop; with the live path cut, the leg
+// behaves as a leg with one path, whose death md and the leg probe already
+// handle (seen in the lab on the 7.0 kernel). Not on a standby, which holds
+// no array, so nothing of it waits and its two paths keep it ready for a
+// promotion; not for a leg of a group that is not md-raid1, which has no
+// other leg to take the write, so a cut would turn the wait into IO errors
+// to the hosts; not while a live path reads optimized or non-optimized,
+// which serves or is ready to; and not in the migration's gap, where both
+// paths are live and inaccessible. The test reads the node alone.
+func pathsToCut(primary bool, lp *legPlan, view *subsysView) []ctrlView {
+	if !cuttable(primary, lp) || view.unknownCtrl() != nil {
+		return nil
+	}
+	ctrls := legCtrls(lp, view)
+	down := false
+	var live []ctrlView
+	for _, ctrl := range ctrls {
+		switch {
+		case pathDown(ctrl):
+			down = true
+		case ctrl.state == "live":
+			if ctrl.anaState != "inaccessible" {
+				return nil
+			}
+			live = append(live, ctrl)
+		}
+	}
+	if !down {
+		return nil
+	}
+	return live
+}
+
+// cuttable says whether CN10's cut can apply to lp at all: on a primary, a
+// leg with two sides of an md-raid1 group.
+func cuttable(primary bool, lp *legPlan) bool {
+	return primary && lp.twoSided() && lp.grp != nil && lp.grp.raid1
+}
+
+// pathWatcher is CN10's watcher of one leg whose path the primary may cut
+// (cuttable): a goroutine that looks the leg up in a walk of its own every
+// probe interval and cuts what pathsToCut names, taking no lock, so a cut
+// does not wait for a converge, which a background read wedged on the
+// leg's own pool can keep from starting (cnagent.md, Known limits). key is
+// the leg's NQN and its sides' addresses, so a leg whose sides change gets
+// a new watcher.
+type pathWatcher struct {
+	key    string
+	cancel context.CancelFunc
+}
+
+// pathWatchKey is the key of lp's watcher.
+func pathWatchKey(lp *legPlan) string {
+	key := lp.nqn
+	for _, side := range lp.sides {
+		tr := side.GetNvmeTrConf()
+		key += "|" + tr.GetTrAddr() + ":" + tr.GetTrSvcId()
+	}
+	return key
+}
+
+// keepPathWatchers keeps the cntlr's path watchers in step with plan: one
+// for each leg the plan builds whose path the primary may cut (cuttable),
+// started when missing or when the leg's key changed, and every other one
+// stopped; a nil plan, the cntlr's drop, stops them all. It reads the plan
+// alone.
+func (s *CnAgentServer) keepPathWatchers(st *cntlrState, plan *cntlrPlan) {
+	wanted := make(map[uint64]*legPlan)
+	if plan != nil && plan.wantLeg {
+		for _, lp := range plan.legs {
+			if cuttable(plan.primary, lp) && !lp.provisioning {
+				wanted[lp.legId] = lp
+			}
+		}
+	}
+	s.mu.Lock()
+	var cancels []context.CancelFunc
+	for legId, watcher := range st.cutters {
+		if lp, ok := wanted[legId]; ok && pathWatchKey(lp) == watcher.key {
+			delete(wanted, legId)
+			continue
+		}
+		cancels = append(cancels, watcher.cancel)
+		delete(st.cutters, legId)
+	}
+	interval := s.probeInterval
+	for legId, lp := range wanted {
+		ctx, cancel := context.WithCancel(s.rootCtx)
+		st.cutters[legId] = &pathWatcher{key: pathWatchKey(lp),
+			cancel: cancel}
+		go s.pathWatchLoop(ctx, lp, interval)
+	}
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+// pathWatchLoop is one path watcher's loop (pathWatcher): every interval a
+// lookup of the leg in a fresh walk, and the cut pathsToCut names.
+func (s *CnAgentServer) pathWatchLoop(
+	ctx context.Context,
+	lp *legPlan,
+	interval time.Duration,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		tickCtx := common.WithTraceId(ctx, common.NewTraceId())
+		view, err := s.lookupSubsys(tickCtx, s.newPassWalk(tickCtx), lp.nqn,
+			sideNsid)
+		if err != nil {
+			continue
+		}
+		if cut := pathsToCut(true, lp, view); len(cut) > 0 &&
+			s.otherMemberInSync(tickCtx, lp) {
+			s.cutPaths(tickCtx, lp, cut)
+		}
+	}
+}
+
+// otherMemberInSync says whether md holds a member of lp's group other than
+// lp's own in sync (MdMember.inSync), read from sysfs in a walk of its own:
+// the cut of lp's path (CN10) makes md fail lp's member, which only another
+// member in sync can take the writes from; with none, the cut would end the
+// wait in an IO error on the array's last member. A read that does not
+// answer, and an array that does not run, say no.
+func (s *CnAgentServer) otherMemberInSync(
+	ctx context.Context,
+	lp *legPlan,
+) bool {
+	if lp.grp == nil {
+		return false
+	}
+	walk, err := s.md.Walk(ctx)
+	if err != nil {
+		return false
+	}
+	detail, err := s.md.Detail(ctx, walk, lp.grp.memberNames())
+	if err != nil || detail == nil || !detail.Exists {
+		return false
+	}
+	for _, member := range detail.Members {
+		if member.DmName != lp.name && member.inSync() {
+			return true
+		}
+	}
+	return false
+}
+
+// cutPaths disconnects each controller of cut, by its device, and logs it;
+// a disconnect that fails is logged, and the next converge tries again.
+// Each device is looked up once more, in a fresh walk, just before its
+// disconnect, and disconnected only while it is still a path of the leg at
+// the same address: the path watcher and a converge can both cut, and the
+// kernel gives a device name freed by one to the next controller connected.
+func (s *CnAgentServer) cutPaths(
+	ctx context.Context,
+	lp *legPlan,
+	cut []ctrlView,
+) {
+	for _, ctrl := range cut {
+		view, err := s.lookupSubsys(ctx, s.newPassWalk(ctx), lp.nqn,
+			sideNsid)
+		if err != nil {
+			continue
+		}
+		still := false
+		for _, cur := range view.ctrls {
+			if cur.name == ctrl.name && cur.trAddr == ctrl.trAddr &&
+				cur.trSvcId == ctrl.trSvcId && !cur.gone {
+				still = true
+			}
+		}
+		if !still {
+			continue
+		}
+		err = s.host.DisconnectDevice(ctx, ctrl.name)
+		if err != nil {
+			slog.ErrorContext(ctx, "cutting a leg path failed",
+				slog.String("nqn", lp.nqn),
+				slog.String("device", ctrl.name),
+				slog.String("error", err.Error()))
+			continue
+		}
+		slog.InfoContext(ctx, "leg path cut",
+			slog.String("nqn", lp.nqn),
+			slog.String("device", ctrl.name),
+			slog.String("addr", ctrl.trAddr+":"+ctrl.trSvcId))
+	}
 }
 
 // connectWithin is the CN10 connect of one side of a leg, and the CN18

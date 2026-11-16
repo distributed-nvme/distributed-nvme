@@ -5227,9 +5227,15 @@ The four reactions:
   cancels it once aborted; each of those steps, like the create, is the
   pass's one action. A group with an operator's repair is left to it,
   since a group has one repair at a time (Repairs); a pass that would
-  otherwise create a worker's repair for the group logs the wait.
-  There is no migration reaction (`dnv-worker.md`, Automatic reactions —
-  `worker/reaction.go`).
+  otherwise create a worker's repair for the group logs the wait. A bad
+  leg with two sides, a migration's, gets its migration ended first in its
+  safe direction: cancelled while its cutover is pending, finished once
+  the destination's latest report shows its copy whole, with the same
+  transaction as the gateway's `CancelMigration` and `FinishMigration`
+  (Migrations); after a cutover whose copy is not shown whole the worker
+  does neither and logs why (Known limits). The next pass repairs a leg of
+  one side. No reaction starts a migration (`dnv-worker.md`, Automatic
+  reactions — `worker/reaction.go`).
 
 The worker never deletes user data on its own (`dnv-worker.md` AR9): the
 retire timer, a step of the pass and no reaction, deletes a retired leg
@@ -8070,6 +8076,16 @@ document and only pointed to here.
   (Clones), so only a forced delete of a clone still copying can see IO
   errors on its destination until the primary's next converge removes the
   dm-clone.
+* **A migrating leg whose destination dies after the cutover, before its
+  copy is whole, keeps its group one leg short** (`dnv-worker.md` AR8 and
+  Known limits). The primary cuts the leg's other path (`cnagent.md` CN10),
+  so md fails the member and the group serves on its other legs, but
+  neither side alone is the leg then: the source misses the writes since
+  the cutover, and the destination the blocks not yet copied, which hold
+  old bytes on its disk. The worker neither cancels nor finishes, and logs
+  why; the group stays one leg short until the destination returns and the
+  copy goes on, or an operator ends the migration, whose force costs what
+  CancelMigration and FinishMigration say.
 * **A replacement of the primary fanned out by a worker that has just
   started can fence the old primary first** (`dnv-worker.md` RW22 and
   Known limits). A replacement deletes the old cntlr and leaves no record

@@ -34,11 +34,14 @@ import (
 // id sweeps (the activation sweep and the sweep after a failed delete) —
 // never from here (CN29).
 
-// legSide is one side of a leg, by its leg's subsystem NQN: a side with no
-// controller that a cntlr's verdict names (probeCntlr, sweepCntlr).
+// legSide is one side of a leg, by its leg's subsystem NQN, that a cntlr's
+// verdict names (probeCntlr, sweepCntlr): a side with no controller that
+// the converge would connect, or, with cut set, a side whose path the
+// converge would cut (pathsToCut).
 type legSide struct {
 	nqn  string
 	side *pb.Side
+	cut  bool
 }
 
 // probeCntlr writes the rows of one read of the cntlr from plan, whose
@@ -50,7 +53,8 @@ type legSide struct {
 // read, and from a lookup in the call's walk of each such member's leg and
 // of the legs that could be its copy source. And
 // it returns each provisioned side of a wanted leg that the converge would
-// connect, the leg's lookup having answered (sidesToConnect, CN30), which the
+// connect, the leg's lookup having answered (sidesToConnect, CN30), and each
+// side whose live path the converge would cut (pathsToCut, CN10), which the
 // verdict names too.
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
@@ -107,8 +111,22 @@ func (s *CnAgentServer) probeCntlr(
 			view, lookupErr = s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
 		}
 		if lookupErr == nil && view != nil {
-			for _, side := range sidesToConnect(lp, view) {
+			for _, side := range sidesToConnect(lp, view, plan.primary) {
 				noCtrl = append(noCtrl, legSide{nqn: lp.nqn, side: side})
+			}
+			cut := pathsToCut(plan.primary, lp, view)
+			if len(cut) > 0 && !s.otherMemberInSync(ctx, lp) {
+				cut = nil
+			}
+			for _, ctrl := range cut {
+				for _, side := range lp.sides {
+					tr := side.GetNvmeTrConf()
+					if ctrl.trAddr == tr.GetTrAddr() &&
+						ctrl.trSvcId == tr.GetTrSvcId() {
+						noCtrl = append(noCtrl, legSide{nqn: lp.nqn,
+							side: side, cut: true})
+					}
+				}
 			}
 		}
 		if !plan.primary {
