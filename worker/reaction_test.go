@@ -247,8 +247,10 @@ type reactionCall struct {
 	// The plan a replacement was scanned against (AR7's spCnAddrs).
 	spCn []string
 	// The plan a repair's create was scanned against (AR8's black list),
-	// which the op holds the group's DNs against.
-	grpDn []string
+	// which the op holds the group's DNs against, and whether it repairs
+	// the bad leg for md's bad-block ranges alone.
+	grpDn     []string
+	badBlocks bool
 	// The cluster conf the clone drain's final STM (CLD7) or an SPD15
 	// batch was handed.
 	cc *pb.ClusterConf
@@ -329,6 +331,9 @@ type fakeReactionOps struct {
 	// from opErr.
 	arrayMade    [][]model.GrpRef
 	arrayMadeErr error
+	// mdChecks records each AR16 write's edits; mdChecksErr fails it.
+	mdChecks    [][]model.MdCheckEdit
+	mdChecksErr error
 	// partial records each partial mark of AR11 (setNewLegsPartial), the
 	// repair's name and the legs it marks and clears, apart from calls as
 	// arrayMade is; partialErr fails the write.
@@ -539,6 +544,7 @@ func (o *fakeReactionOps) createRepair(
 		op: "create_repair", repName: repName, sliceId: parent.SliceId,
 		cloneName: parent.CloneName, grpId: grpId, badLegId: badLegId,
 		legs: []model.Cand{newLeg.Dn}, grpDn: newLeg.GrpDnAddrs, cc: cc,
+		badBlocks: newLeg.BadBlocks,
 	})
 	return 887, 888, err
 }
@@ -666,6 +672,24 @@ func (o *fakeReactionOps) markGroupsArrayMade(
 	}
 	o.spRev++
 	return len(refs), o.spRev, nil
+}
+
+func (o *fakeReactionOps) updateMdChecks(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	edits []model.MdCheckEdit,
+) (int, uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.mdChecks = append(o.mdChecks, edits)
+	if o.mdChecksErr != nil {
+		return 0, 0, o.mdChecksErr
+	}
+	o.spRev++
+	return len(edits), o.spRev, nil
 }
 
 func (o *fakeReactionOps) clearForcedStart(

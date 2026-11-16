@@ -247,6 +247,7 @@ func (s *CnAgentServer) convergeCntlr(
 	// request's marks, read before a request that does not count as
 	// delivered drops them from the plan, which only stops this pass acting.
 	keepForcedStarts(st, plan)
+	keepMdChecks(st, plan)
 	if !st.reqFromRpc {
 		plan.dropForcedStartMarks()
 	}
@@ -408,6 +409,11 @@ func (s *CnAgentServer) build(
 			}
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, line, err)
+			if !running {
+				// CN12, The md check: an array the pass left not running
+				// holds no check of this incarnation's.
+				forgetMdCheck(st, gp)
+			}
 			// CN28: the array's reading and the repair's verdict, from the
 			// array as the pass left it, for a group whose row reads OK.
 			// CN12: the forced start that ran its assembly acted on the
@@ -416,8 +422,11 @@ func (s *CnAgentServer) build(
 				st.forcedStarts[gp.grpId] = gp.mark.GetRevision()
 			}
 			if err == nil {
+				// CN12, The md check: started, stopped or adopted from
+				// the array as the pass left it.
+				s.stepMdCheck(ctx, st, gp, detail)
 				reportGrpReading(info, gp, detail, refusals,
-					actedMark(st, gp))
+					actedMark(st, gp), mdCheckDone(st, gp))
 			}
 			if gp.hasLateMember(available, running) ||
 				gp.markWaits(running, forcedStarted) ||

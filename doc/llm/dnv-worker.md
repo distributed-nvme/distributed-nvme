@@ -617,7 +617,7 @@ three epoch writes take an SP that exists with its id, at any level and
 while it is deleting, as the other epoch writes read their record whatever
 its pool's state. A clone parent being deleted is refused by every repair
 op, save the epoch writes, which accept it as their clone twins do, and
-the flip, `ClearForcedStart`, `MarkGroupsArrayMade` and
+the flip, `ClearForcedStart`, `MarkGroupsArrayMade`, `UpdateMdChecks` and
 `SetNewLegsPartial`, which skip it:
 its group goes back with its repair and retired legs in CLD9's
 transaction. A repair or a retired
@@ -802,7 +802,10 @@ list; the flip, which reads the repair's key alone, and
   (`ReasonGrpHasRepair`); the bad leg in `leg_list` with
   exactly one side ("bad leg has no single side": a second side is a
   migration's destination, and a migration holds its leg) and its
-  `err_epoch` set ("bad leg is healthy: use a migration"). From a retired
+  `err_epoch` set ("bad leg is healthy: use a migration"), save for a
+  reserved name whose create says it repairs the leg for md's bad-block
+  ranges, which the primary's reading names and no record holds (AR8, A leg
+  with bad-block ranges). From a retired
   leg it requires a name without the reserved prefix, since the worker's
   repair always takes a fresh leg; the leg listed in the pool's and the
   group's lists and of this group, with a side whose `err_epoch` is clear,
@@ -952,6 +955,17 @@ list; the flip, which reads the repair's key alone, and
   returns that revision. A cancel clears
   the mark and bumps `SpRev` and returns zero, and a group with no mark is
   answered with no write and no bump.
+* `UpdateMdChecks` takes a list of edits, each a group's `GrpRef`, the md
+  check schedule the caller read and the one it writes, and no expected
+  revision: each edit is a compare and set. It requires the any-level SP
+  checks, skips, and fails nothing, an edit whose group no longer holds the
+  schedule read, an edit that asks for a check while a group of the SP's
+  slices carries a request, the edits before it applied, a parent or a
+  group that is gone and a clone parent `deleting`, writes each other
+  edit's schedule, bumps `SpRev` once when it
+  applied any, since the primary reads the request, and returns how many it
+  applied and the revision its bump wrote, writing nothing when it applied
+  none (AR16).
 * `MarkGroupsArrayMade` takes a list of `GrpRef`s, each a group's parent
   and id, and no expected revision: the flag only records that the array
   ran, which no later write of the pool makes false. It requires the
@@ -3192,8 +3206,8 @@ The steps of a live SP's pass run in this order: the re-seed of the health
 memos (HL3), the clone drain's steps (CLD7), the four gates, AR11's stage
 moves, AR14's record of refused member adds, AR15's flag that a group's
 array has run, AR13's forced-start clear and CLD13's latch of a whole copy
-at every `sp_level`, AR3's suppression, AR12's retire timer, and the
-reactions in AR2's priority. A latched SP runs its drain step behind the
+at every `sp_level`, AR3's suppression, AR12's retire timer, AR16's md
+check schedule, and the reactions in AR2's priority. A latched SP runs its drain step behind the
 cluster-conf gate and neither the two steps of a repair, the record, the
 flag nor the forced-start clear (SPD6); it holds no clone to latch, its `clone_name_list` being empty.
 
@@ -3213,12 +3227,13 @@ repair's are the finish, the cancel and the try-to-abort of a worker's
 repair and the create of one (AR8). The
 invariant is **at most one applied action per SP per pass**; the clone
 drain's steps, AR11's stage moves, AR12's retire timer, AR13's
-forced-start clear, AR14's record, AR15's flag and CLD13's latch of a
-whole copy are not actions in this sense and commit alongside one — a pass
-over a live SP can bump `SpRev` once per deleting clone whose final STM it
-commits (CLD9, CLD12), a batch bumping nothing (CLD8), once per stage move,
-once for the flag's write, once per clear, once per clone it latches, once
-for the timer's delete — which an earlier bump of the same pass, a stage
+forced-start clear, AR14's record, AR15's flag, AR16's schedule and
+CLD13's latch of a whole copy are not actions in this sense and commit
+alongside one — a pass over a live SP can bump `SpRev` once per deleting
+clone whose final STM it commits (CLD9, CLD12), a batch bumping nothing
+(CLD8), once per stage move, once for the flag's write, once per clear,
+once per clone it latches, once for the timer's delete, once for the
+schedule's write — which an earlier bump of the same pass, a stage
 move's, the flag's, a clear's, a latch's or a clone's final STM's, makes
 refuse as stale (AR12) — and once more for its reaction. A
 `reaction skipped` that means "not applicable here, keep looking" does not
@@ -3966,6 +3981,27 @@ and for another in-sync member that is a copy source (`cnagent.md` CN12); the le
 probe sees the death before md does. The rule is the pass's alone: `CreateRepair`
 does not re-check it, and an operator's create is not held by it.
 
+**A leg with bad-block ranges.** The primary's reading of a group counts
+md's bad-block ranges on each member (`leg_id_to_bad_blocks`; `cnagent.md`
+CN12, The md check): md could neither read those sectors nor write them
+again from another member. No health rule reads the count — the leg's row
+stays as its probe reads it, and the leg serves every other region — so it
+is a copy source of another leg's repair like any healthy leg. A leg with
+ranges, no health epoch and no trigger of its own is a candidate of its own
+while another leg of its `leg_list` has no `err_epoch`, is held in sync and
+has no ranges (a clean leg); the candidate takes conditions 2 to 9 as any
+other, and the create tells `CreateRepair` that it repairs the leg for its
+ranges, which waives the op's refusal of a bad leg with no health epoch
+under the worker's name alone (MD6). A leg with ranges and no clean leg
+beside it is no candidate, and nothing is logged: a copy would put the same
+ranges on the new leg, and the lost regions cannot come back. The
+try-to-abort's "bad leg healthy" trigger spares a repair whose bad leg the
+reading names ranges on while a clean leg stands; it asks for the abort once
+the clean leg gains ranges too or the reading names none. Reasons: the
+ranges are lost regions, not a dead leg, so they must not shorten a health
+clock or keep the leg from feeding another leg's repair; and only a clean
+copy can replace them.
+
 **A clone meta group.** Leg repair runs on it as on a slice's group, through
 the same ops, which find the group through its parent (MD6). There the
 healthy-leg test also keeps the clone's progress: on the zeroed first data
@@ -4234,6 +4270,62 @@ as a stage move's does, and, like every bump, holds the gates that ask for
 a report of an observation at the snapshot's revision — AR6's withdrawal of
 a stuck grow, AR8's and AR12's gate on a group's row — until the primary
 reports at the new one.
+
+AR16. **The md check schedule.** For a live md-raid1 SP of a cluster
+whose `md_check_conf.interval_days` is not zero, right after AR12's retire
+timer — so only where reactions run (AR3), since a check needs the arrays
+running — the pass edits the md check schedule (`Group.md_check`) of the
+groups of its slices, in `slice_id_list` order, meta groups before data
+groups, in one `model.UpdateMdChecks`, which raises `SpRev` once when it
+applies an edit:
+
+1. a group whose request (`request_epoch`) the current primary's latest
+   reading names done (`md_check_done_epoch`; `cnagent.md` CN12, The md
+   check), or whose request has stood `MdCheckRequestBound` or longer, has
+   the request ended and its next time (`next_epoch`) set one interval
+   ahead of now; any other group whose request stands while it no longer
+   suits a check by its record (step 3's test, its row and its reading
+   aside) has the request withdrawn and its time kept, so it is asked for
+   again once it suits, and the primary stops a check it started for it;
+2. a group never scheduled — no `next_epoch` and no request — gets its
+   first time: half an interval ahead of now plus a share of one interval
+   drawn from the group's id, so a new pool's groups spread over half an
+   interval to one and a half, and a worker that takes the pool over draws
+   the same;
+3. while no request stands in the pool after step 1, the group whose time is
+   the earliest of those at or before now that a check suits is asked for
+   one: its request is now. A check suits a group with more than one leg,
+   none of them with two sides, no repair, no forced-start mark and no
+   operator-in-charge flag, whose row in the primary's latest report reads
+   `RES_STATUS_OK` and whose reading says whole.
+
+Each edit carries the schedule the snapshot read, and the op applies it
+only while the group still holds it, and a new request only while no group
+of the SP's slices carries one, the call's other edits applied; so two
+owners of the SP (VW7) never both end a check, and never have two requests
+standing (MD6). A write logs `md checks
+scheduled` with the groups it ended, stamped and asked for, the primary,
+the revision of its report, how many edits it applied and the revision
+the op's STM committed; a write that fails logs `md checks kept` with its
+reason, and the next pass tries again. Reasons: md's check reads every
+member of the array and rewrites a sector one member could not read from
+another; a sector whose rewrite fails too goes into that member's
+bad-block list, which the primary's reading of the group counts
+(`cnagent.md` CN12, CN28), so leg repair replaces the leg from a leg clean
+of ranges (AR8, A leg with bad-block ranges),
+and a sector whose rewrite lands is healed, which ends the drop of a
+member md fails on that sector (`cnagent.md`, Known limits). One check at a
+time per SP bounds the load, since a check reads every leg of a group across
+the network at md's own speed settings; a group in a repair, a migration or
+a forced start is in the middle of another copy, and a migrating leg would
+be read whole through the destination's dm-clone and so copied entirely.
+The bound ends a request the primary never reports done — a failover drops
+md's check, and the new primary starts one only for a request it still
+finds — so one group cannot stop the schedule of its SP. A clone meta group
+is not checked: a clone lives only until its copy is whole. The write is no
+reaction and not the pass's one action (AR2); like every bump, its `SpRev`
+bump holds the gates that ask for a report at the snapshot's revision
+until the primary reports at the new one.
 
 ### The sp drain
 
@@ -4879,7 +4971,11 @@ array made` a write of the flag that a group's array has run whose call
 wrote, naming the groups, the primary and its report's revision, with how
 many it set and the revision its own STM committed, and `groups array made
 kept` a write whose call failed, with its error, or with its reason and
-`op` when the op refused it (AR15); `clone latched` a
+`op` when the op refused it (AR15); `md checks scheduled` a write of the md
+check schedule whose call wrote, naming the groups it ended, stamped and
+asked for, the primary and its report's revision, with how many edits it
+applied and the revision its own STM committed, and `md checks kept` a
+write whose call failed, with its error (AR16); `clone latched` a
 latch of
 a clone whose copy is whole whose call wrote, naming the clone, the primary
 and its report's revision, with the revision its own STM committed, and
@@ -5132,8 +5228,9 @@ forced-start mark and its hold on a group whose `operator_in_charge` flag
 is set, the drive step's try-to-abort and cancel running under the
 flag, AR11, its record of a
 refused take-back included, AR12
-and AR13, its clear at a level where reactions stop included, by the
-repair case, and
+and AR13, its clear at a level where reactions stop included, and AR16's
+stamp, request and end of a check the fake primary reads done at once, by
+the repair case, and
 AR10 on the failover's threshold trigger,
 with AR5 at the default primary threshold (`architecture.md`, Common
 validation), by the failover case; SPD6 to SPD13, CLD5 and CLD7 to CLD12
@@ -5145,7 +5242,8 @@ and CLD4; MD2 to MD6, EU1 to EU6 and CM1 to CM6 by every case, every launch
 and the driver, save the parts below; and the log records by every
 assertion. Left to the unit tests: AR6's withdrawal of a stuck grow
 (`WithdrawGrow`, MD6) and its check of the CNs' budgets before a grow,
-AR2's pass-on of an empty scan, and EU4's and EU6's run again on a
+AR16's end of a request past its bound and its pass over a group a check
+does not suit, AR2's pass-on of an empty scan, and EU4's and EU6's run again on a
 future revision, which the suite's one-member etcd never answers; VW8 (b),
 (c) and (d), because a broken watch with live puts cannot
 be induced from outside the process; that the drain's wake-up runs no
@@ -5252,9 +5350,10 @@ above;
 `sp group missing`, since no suite case plants a repair or a retired leg
 whose group is missing; `member add refused`, since no fake agent reports
 a group's refusal (AR14); `repair leg partial kept`, since every partial
-mark the repair case stages commits (AR11); and `groups array made kept`,
+mark the repair case stages commits (AR11); `groups array made kept`,
 since every
-write of the flag the suite makes commits (AR15). `repair stage skipped` is
+write of the flag the suite makes commits (AR15); and `md checks kept`,
+since every write of the schedule the repair case stages commits (AR16). `repair stage skipped` is
 staged only as the record of a refused take-back, every stage move the
 repair and reaction cases stage committing.
 
@@ -5319,9 +5418,13 @@ later release, the clone drain's among them, finds what it gives back.
 for it, which a case that means to stage what `CreateMigration` writes
 does. Of the `set-*` writes only `set-epoch` writes one record and
 nothing else; `set-operator-in-charge` writes the group's record and bumps
-the pool's revision under its op's checks (below), and every other
-`set-*` bumps the pool's revision too, save `set-free`, which maintains
-the capacity key. `set-epoch` is raw: it
+the pool's revision under its op's checks (below), `set-md-check` writes a
+group's md check schedule through the op AR16 runs, which bumps it too,
+`set-md-check-days` rewrites the cluster's stored md check interval, which
+a gateway writes only at the cluster's create, keeping the cluster's id and
+bumping nothing, and every other `set-*` bumps the pool's revision too,
+save `set-free`, which maintains the capacity key. `put-cluster` stores
+the md check off unless a case asks for it. `set-epoch` is raw: it
 plants one `err_epoch`, on a cntlr, or on a leg or a side of a
 slice or of a clone's clone meta group, and touches
 neither a revision nor a `CdcEntry` nor a `settling` flag, so a case can

@@ -446,9 +446,10 @@ func TestRepairOfAnotherGroupIsNone(t *testing.T) {
 // member keeps the data: one md marks in sync, of a leg_list leg other than
 // the bad leg, available with an OK row. The bad leg goes first: failed and
 // removed when it cannot take a member (it does not serve, or its row is not
-// OK), removed when md has moved it out of its place already, left alone when
-// md does not hold it; and when it serves with an OK row it stays and the
-// repair waits. The add fails the bad leg only in a pass whose add's
+// OK), or when md records bad-block ranges on its member while the other
+// member carries none, removed when md has moved it out of its place
+// already, left alone when md does not hold it; and when it serves with an
+// OK row it stays and the repair waits. The add fails the bad leg only in a pass whose add's
 // conditions hold, so a case whose new leg cannot be added runs no mdadm at
 // all, its bad leg's prober not counting it dead (the early fail is
 // TestADeadBadLegIsFailedOnce's). A
@@ -497,6 +498,31 @@ func TestRepairAddsTheNewLeg(t *testing.T) {
 			}, true, false},
 		{"bad leg serves with an ok row", pb.RepStage_REP_STAGE_CREATED,
 			false, allLegs, nil, nil, false, false},
+		// md's bad-block ranges on the bad leg's member: the leg serves
+		// with an OK row, yet the repair replaces it while the other
+		// member is clean of ranges, and waits while it carries some too
+		// (CN12, The md check).
+		{"bad leg with bad blocks", pb.RepStage_REP_STAGE_CREATED, false,
+			allLegs, func(f *repFix) {
+				f.node.mu.Lock()
+				_, array := f.node.arrayByDev(f.mdDev)
+				array.badBlocks = map[string]string{f.leg1: "24064 128\n"}
+				f.node.publishArray(array)
+				f.node.mu.Unlock()
+			},
+			func(f *repFix) []string {
+				return []string{f.fail(f.leg1), f.remove(f.leg1),
+					f.add(f.newLegDev)}
+			}, true, false},
+		{"both legs with bad blocks", pb.RepStage_REP_STAGE_CREATED, false,
+			allLegs, func(f *repFix) {
+				f.node.mu.Lock()
+				_, array := f.node.arrayByDev(f.mdDev)
+				array.badBlocks = map[string]string{
+					f.leg1: "24064 128\n", f.leg2: "40000 8\n"}
+				f.node.publishArray(array)
+				f.node.mu.Unlock()
+			}, nil, false, false},
 		{"new leg not available", pb.RepStage_REP_STAGE_CREATED, false,
 			allLegs, func(f *repFix) {
 				f.badLegDead()

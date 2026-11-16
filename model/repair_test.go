@@ -157,6 +157,21 @@ func (e *opsEnv) createRepairNamed(
 	return repId, legId
 }
 
+// TestCreateRepairOfALegWithRanges: under the worker's reserved name, a
+// create that says it repairs the bad leg for md's bad-block ranges takes a
+// bad leg with no health epoch (dnv-worker.md AR8).
+func TestCreateRepairOfALegWithRanges(t *testing.T) {
+	env := newOpsEnv(t)
+	env.setLegErr(opsDataLegB, 0)
+	newLeg := RepairNewLeg{Dn: env.dnCand(opsDnC),
+		GrpDnAddrs: env.grpDnAddrs(opsDataGrpId), BadBlocks: true}
+	if _, _, err := CreateRepair(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, noExpectRev, opsWorkerRepName, opsSliceParent,
+		opsDataGrpId, opsDataLegB, newLeg, env.cc); err != nil {
+		t.Fatalf("CreateRepair of a leg with ranges: %v", err)
+	}
+}
+
 // toStage moves the repair name to stage through the ops: the abort flag
 // first for ABORTED.
 func (e *opsEnv) toStage(name string, repId uint64, stage pb.RepStage) {
@@ -474,6 +489,18 @@ func TestCreateRepairPreconditions(t *testing.T) {
 		{"a healthy bad leg", func(env *opsEnv, _ *repairCall) {
 			env.setLegErr(opsDataLegB, 0)
 		}, "bad leg is healthy: use a migration"},
+		// The worker's repair of a leg for md's bad-block ranges alone
+		// waives the health epoch under its reserved name only.
+		{"a healthy bad leg, the ranges claimed by an operator's name",
+			func(env *opsEnv, call *repairCall) {
+				env.setLegErr(opsDataLegB, 0)
+				call.newLeg.BadBlocks = true
+			}, "bad leg is healthy: use a migration"},
+		{"a healthy bad leg, a reserved name without the ranges",
+			func(env *opsEnv, call *repairCall) {
+				env.setLegErr(opsDataLegB, 0)
+				call.name = opsWorkerRepName
+			}, "bad leg is healthy: use a migration"},
 		{"retired leg not found", func(_ *opsEnv, call *repairCall) {
 			call.newLeg = RepairNewLeg{RetiredLegId: opsRetiredLeg}
 		}, ReasonRetiredLegNotFound},

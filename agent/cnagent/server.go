@@ -190,6 +190,17 @@ type cntlrState struct {
 	// written under this cntlr's object lock or the node write lock, as
 	// tornTds is.
 	forcedStarts map[uint64]uint64
+	// mdChecks holds, per group id, the md check this incarnation started,
+	// or adopted running, for a request of the group (Group.md_check), and
+	// whether it saw that check end (CN12, The md check). In memory only: an
+	// agent restart forgets it, and a check md still runs is then adopted
+	// again, while one that ended is started again. A converge drops the
+	// entry of a group whose array does not run or that the request no
+	// longer lists for a primary (keepMdChecks, stepMdCheck), and both
+	// channels mark an entry done (noteMdCheck) and report it
+	// (mdCheckDone). It is read and written under this cntlr's object lock
+	// or the node write lock, as forcedStarts is.
+	mdChecks map[uint64]mdCheckRun
 	// reqFromRpc says whether req counts as delivered (CN8): a
 	// revision-gated SyncupCntlr of THIS incarnation stored it, whose save
 	// held, and no SyncupCntlr newer than it has been refused for a failed
@@ -383,6 +394,7 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 		pendingSweep: make(map[uint64]bool),
 		tornTds:      make(map[uint64]bool),
 		forcedStarts: make(map[uint64]uint64),
+		mdChecks:     make(map[uint64]mdCheckRun),
 		probers:      make(map[uint64]*legProber),
 	}
 	st.storeReq(req)

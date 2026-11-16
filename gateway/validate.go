@@ -567,6 +567,11 @@ func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 	if err := validateHealthCheckConf(req.GetHealthCheckConf()); err != nil {
 		return err
 	}
+	if days := req.GetMdCheckConf().GetIntervalDays(); days >
+		common.MaxMdCheckDays {
+		return errInvalid("md_check_conf.interval_days %d is above %d",
+			days, common.MaxMdCheckDays)
+	}
 	return validateQosRatio(req.GetQosRatio())
 }
 

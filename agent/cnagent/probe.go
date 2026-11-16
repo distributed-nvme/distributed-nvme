@@ -144,7 +144,9 @@ func (s *CnAgentServer) probeCntlr(
 				putBack = append(putBack, verdictName{
 					kind: agent.LeftoverKindMdBroken, name: broken.Dev})
 			}
-			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp))
+			noteMdCheck(st, gp, detail)
+			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp),
+				mdCheckDone(st, gp))
 		case plan.primary:
 			info.GrpIdToMdRaid[gp.grpId] = suppressedRow(t, key, gp.resName)
 		}

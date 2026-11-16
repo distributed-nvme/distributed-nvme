@@ -76,6 +76,7 @@ func (s *Server) CreateCluster(
 		DnBinConf:       req.GetDnBinConf(),
 		AllocConf:       req.GetAllocConf(),
 		HealthCheckConf: req.GetHealthCheckConf(),
+		MdCheckConf:     req.GetMdCheckConf(),
 	})
 	var cid uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {

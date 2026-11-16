@@ -535,6 +535,16 @@ func TestResolveClusterConf(t *testing.T) {
 		common.DefaultDnBin3Shift {
 		t.Error("ResolveClusterConf(nil) is not the pure defaults")
 	}
+	// The md check setting: absent takes the default, present stays as
+	// given, its zero included (the check off).
+	if got.GetMdCheckConf().GetIntervalDays() != common.DefaultMdCheckDays {
+		t.Errorf("an absent md_check_conf resolved to %v", got.GetMdCheckConf())
+	}
+	off := ResolveClusterConf(&pb.ClusterConf{MdCheckConf: &pb.MdCheckConf{}})
+	if off.GetMdCheckConf() == nil ||
+		off.GetMdCheckConf().GetIntervalDays() != 0 {
+		t.Errorf("a zero md_check_conf resolved to %v", off.GetMdCheckConf())
+	}
 	// What CreateCluster stores is what its readers accept: the two families
 	// are each other's mirror image (architecture.md, Common validation), so a
 	// resolved conf must validate.
@@ -688,6 +698,28 @@ func TestValidateClusterConf(t *testing.T) {
 			tweak: func(cc *pb.ClusterConf) {
 				cc.BdevConf = nil
 			},
+		},
+		{
+			// A cluster a build before the md check created: no check.
+			name: "no md_check_conf",
+			tweak: func(cc *pb.ClusterConf) {
+				cc.MdCheckConf = nil
+			},
+		},
+		{
+			name: "md check off",
+			tweak: func(cc *pb.ClusterConf) {
+				cc.MdCheckConf = &pb.MdCheckConf{}
+			},
+		},
+		{
+			name: "an md check interval above the cap",
+			tweak: func(cc *pb.ClusterConf) {
+				cc.MdCheckConf = &pb.MdCheckConf{
+					IntervalDays: common.MaxMdCheckDays + 1}
+			},
+			wantErr: "invalid stored conf: md_check_conf.interval_days " +
+				"366 is above 365",
 		},
 		{
 			name: "extent_size zero",

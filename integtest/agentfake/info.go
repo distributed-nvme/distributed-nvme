@@ -522,13 +522,15 @@ func (a *Agent) grpRowsLocked(
 
 // grpReadingLocked is a primary's reading of one group (cntlrInfoLocked):
 // whole, with every leg of its leg_list in sync, naming the group's
-// forced-start mark in the request as the one it acted on, each part
-// overridden by the grps lever's entry for the group. The list is built afresh, so a reply the
+// forced-start mark in the request as the one it acted on and its md check
+// request as done (cnagent.md CN12, The md check), each part overridden by
+// the grps lever's entry for the group. The list is built afresh, so a reply the
 // grpc codec touches cannot reach back into the levers.
 func (a *Agent) grpReadingLocked(key string, grp *pb.Group) *pb.CntlrInfo_GrpInfo {
 	reading := &pb.CntlrInfo_GrpInfo{
 		Whole:               true,
 		ForcedStartRevision: grp.GetForcedStart().GetRevision(),
+		MdCheckDoneEpoch:    grp.GetMdCheck().GetRequestEpoch(),
 	}
 	for _, leg := range grp.GetLegList() {
 		reading.InSyncLegIdList = append(
@@ -550,6 +552,9 @@ func (a *Agent) grpReadingLocked(key string, grp *pb.Group) *pb.CntlrInfo_GrpInf
 	}
 	if lever.Acted != nil {
 		reading.ForcedStartRevision = *lever.Acted
+	}
+	if lever.MdDone != nil {
+		reading.MdCheckDoneEpoch = *lever.MdDone
 	}
 	return reading
 }

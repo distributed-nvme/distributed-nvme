@@ -100,6 +100,13 @@ func clusterCreateCmd() *cobra.Command {
 			if extentSize := u64Of("extent-size"); extentSize != 0 {
 				req.DnBinConf = &pb.DnBinConf{ExtentSize: extentSize}
 			}
+			// Sent only when typed, since its zero turns the check off and
+			// an absent setting takes the gateway's default.
+			if invoked.Changed("md-check-days") {
+				req.MdCheckConf = &pb.MdCheckConf{
+					IntervalDays: u32Of("md-check-days"),
+				}
+			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
 			) (any, error) {
@@ -115,6 +122,10 @@ func clusterCreateCmd() *cobra.Command {
 	flags.Uint64("extent-size", 0,
 		fmt.Sprintf("dn_bin_conf.extent_size in bytes (0 = not sent; the "+
 			"gateway default is %d)", common.DefaultDnExtSize))
+	flags.Uint32("md-check-days", 0,
+		fmt.Sprintf("md_check_conf.interval_days, the days between two md "+
+			"checks of a group; 0 turns the check off (sent only when "+
+			"given; the gateway default is %d)", common.DefaultMdCheckDays))
 	return cmd
 }
 

@@ -378,6 +378,13 @@ type MdMember struct {
 	// moved out of its slot once no IO to it was pending, or one md holds
 	// with no place to copy into.
 	Slot string
+	// BadBlocks is how many ranges md's bad-block list records for the
+	// member, acknowledged (dev-*/bad_blocks) or not yet written to its
+	// superblock (dev-*/unacknowledged_bad_blocks): md records one where
+	// it could neither read a sector nor write it again from another
+	// member, as its check does (CN12, The md check). Read for a running
+	// array only, and zero for a member that publishes neither list.
+	BadBlocks int
 }
 
 // mdSlotNone is what dev-*/slot reads for a member that holds no place in
@@ -439,7 +446,15 @@ type MdDetail struct {
 	Degraded      int
 	SyncAction    string
 	SyncCompleted string
-	Members       []MdMember
+	// LastSyncAction is md/last_sync_action verbatim, the action md last
+	// ran or stopped ("check" after a check, "none" before any); SyncMin is
+	// md/sync_min verbatim, where md's next requested check starts: md sets
+	// it back to 0 when a check runs to its end and leaves it where a check
+	// it stopped had come to. Both read for a running array only, "" where md
+	// publishes none.
+	LastSyncAction string
+	SyncMin        string
+	Members        []MdMember
 	// Foreign is set when a member is not a dm device (ListArrays' rule):
 	// an array holding one is never ours to reconcile.
 	Foreign bool
@@ -873,6 +888,14 @@ func (m *Md) readDetail(
 			ctx, mdDir+"/sync_completed"); err != nil {
 			return nil, err
 		}
+		if detail.LastSyncAction, _, err = m.cmd.ReadAttr(
+			ctx, mdDir+"/last_sync_action"); err != nil {
+			return nil, err
+		}
+		if detail.SyncMin, _, err = m.cmd.ReadAttr(
+			ctx, mdDir+"/sync_min"); err != nil {
+			return nil, err
+		}
 	}
 	for _, member := range members {
 		devNo, err := m.presentAttr(ctx, member.dir+"/block/dev")
@@ -887,17 +910,42 @@ func (m *Md) readDetail(
 		if err != nil {
 			return nil, err
 		}
+		badBlocks := 0
+		if mdRunning(state) {
+			for _, list := range []string{
+				"/bad_blocks", "/unacknowledged_bad_blocks",
+			} {
+				ranges, _, err := m.cmd.ReadAttr(ctx, member.dir+list)
+				if err != nil {
+					return nil, err
+				}
+				badBlocks += mdRanges(ranges)
+			}
+		}
 		detail.Members = append(detail.Members, MdMember{
-			DevNo:  devNo,
-			DmName: member.dmName,
-			State:  memberState,
-			Slot:   slot,
+			DevNo:     devNo,
+			DmName:    member.dmName,
+			State:     memberState,
+			Slot:      slot,
+			BadBlocks: badBlocks,
 		})
 		if member.dmName == "" {
 			detail.Foreign = true
 		}
 	}
 	return detail, nil
+}
+
+// mdRanges counts the ranges of one bad-block list as md prints it: one
+// "<sector> <length>" line per range.
+func mdRanges(list string) int {
+	n := 0
+	for _, line := range strings.Split(list, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // presentAttr reads an attribute the kernel publishes whenever its directory
@@ -2706,8 +2754,10 @@ type repBadLeg struct {
 // sync, of a leg_list leg other than a bad leg, on a leg that can take a
 // member (keepsData). Then each bad leg md still holds goes out first: one
 // out of its place is removed; one in its place that cannot take a member is
-// failed and removed; one in its place that can take a member, serving with
-// an OK row, stays, and the repair waits, so the step does nothing at all.
+// failed and removed, and so is one whose member carries md bad-block ranges
+// (CN12, The md check) while another leg_list member md holds in sync
+// carries none (cleanKeeper); any other in its place, serving with an OK
+// row, stays, and the repair waits, so the step does nothing at all.
 // So this step fails the bad leg only in a pass whose add's conditions
 // hold, so that the new leg can follow at once; a remove or an add that md
 // refuses still leaves the new leg out of that pass (cnagent.md CN12). A
@@ -2756,13 +2806,31 @@ func repSteps(
 		switch {
 		case member.Slot == mdSlotNone:
 			step.out = append(step.out, repBadLeg{lp: lp})
-		case takes(lp):
+		case takes(lp) && (member.BadBlocks == 0 || !cleanKeeper(gp, held)):
 			return repStep{}
 		default:
 			step.out = append(step.out, repBadLeg{lp: lp, fail: true})
 		}
 	}
 	return step
+}
+
+// cleanKeeper says whether md holds in sync a member of the group's leg_list,
+// other than a bad leg of its repair, that carries no bad-block range: the
+// copy of a repair that replaces a leg for its ranges reads from such a
+// member, so the ranges do not come back on the new leg (CN12, The md
+// check).
+func cleanKeeper(gp *grpPlan, held map[string]MdMember) bool {
+	for _, lp := range gp.legs {
+		if gp.isBadLeg(lp.legId) {
+			continue
+		}
+		if member, ok := held[lp.name]; ok && member.inSync() &&
+			member.BadBlocks == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // deadMembers are the members CN12's member reconciliation fails early
@@ -3312,6 +3380,7 @@ func reportGrpReading(
 	detail *MdDetail,
 	refusals grpRefusals,
 	acted uint64,
+	mdDone uint64,
 ) {
 	if detail == nil {
 		return
@@ -3321,14 +3390,22 @@ func reportGrpReading(
 		Whole:               detail.Degraded == 0,
 		Refusal:             refusals.grp,
 		ForcedStartRevision: acted,
+		MdCheckDoneEpoch:    mdDone,
 	}
 	legs := gp.legs
 	if gp.rep != nil {
 		legs = append(slices.Clone(gp.legs), gp.rep.newLegs...)
 	}
 	for _, lp := range legs {
-		if member, ok := held[lp.name]; ok && member.inSync() {
+		member, ok := held[lp.name]
+		if ok && member.inSync() {
 			reading.InSyncLegIdList = append(reading.InSyncLegIdList, lp.legId)
+		}
+		if ok && member.BadBlocks > 0 {
+			if reading.LegIdToBadBlocks == nil {
+				reading.LegIdToBadBlocks = make(map[uint64]uint32)
+			}
+			reading.LegIdToBadBlocks[lp.legId] = uint32(member.BadBlocks)
 		}
 	}
 	slices.Sort(reading.InSyncLegIdList)

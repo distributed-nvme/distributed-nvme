@@ -2200,6 +2200,59 @@ registers the CN10 background retry for it (the forced start, above). "mdadm
 node a sweep stops is the one sysfs named — never the `CnMdDevName` link under
 "/dev/md", which depends on udev having run.
 
+**The md check.** The worker asks for md's check of one group at a time
+through the group's `md_check.request_epoch` (`dnv-worker.md` AR16). A
+group suits a check, from the request alone, while it has no repair, no
+forced-start mark, no operator-in-charge flag and no leg with two sides,
+which a check would read whole through the destination's dm-clone
+(`mdCheckSuits`). A primary's converge, from the array as the pass left it,
+while the array runs (`stepMdCheck`): with a request, a check md already
+runs that this agent process has no memory of is adopted as the request's;
+one it has not started yet is started, when the group suits a check and the
+array runs whole with two members or more, every one in sync, by writing 0
+to "md/sync_min", where md would otherwise resume a check it stopped, and
+then "check" to "md/sync_action"; md runs it at its own speed settings. A
+check of the request is stopped (writing "idle") while the group does not
+suit a check or the array is degraded, so a repair's copy never waits
+behind it, and forgotten, so it starts again once the group suits one.
+With no request, a check this process started is stopped; one it adopted,
+such as an operator's, is left to run; the memory goes either way. Both
+channels end a check of the request once md reads "idle" again
+(`noteMdCheck`): done when md ran it to its end — its last action
+("md/last_sync_action") the check, "md/sync_min" back at 0 and the array
+whole — and forgotten otherwise, md having stopped it, as it does when a
+member fails, so that a later converge starts it again from the array's
+start; the group's reading names a done request (CN28). The agent keeps
+which request a check was for, whether it started it, and whether it ended,
+in memory alone (`cntlrState.mdChecks`), as it keeps the acted forced-start
+mark: a converge forgets it once the array does not run or a step of the
+group fails, at a level that builds no group, once the request no longer
+lists the group, and once the cntlr is no primary; a restart forgets it,
+after which a check md still runs is adopted again and one that ended is
+started again. Reason: md runs the check itself, so the agent only starts,
+stops and reads it, and the worker's schedule must not depend on one
+process's memory.
+
+md's check reads every member and rewrites from another member a sector one
+member cannot read; a read error in a check does not fail a failfast
+member. A sector whose rewrite lands is healed and recorded nowhere; one
+whose rewrite fails too goes into that member's bad-block list, md marks
+the member "write_error" and "want_replacement", keeps it in sync and reads
+that range from the other members from then on (read in the kernel's md
+raid1 code and seen in the lab on the 7.0 kernel). The reading of a running
+array therefore counts each member's ranges, in "dev-*/bad_blocks" and
+"dev-*/unacknowledged_bad_blocks", by leg (CN28), and no leg row changes for
+them: the worker's leg repair reads the count and replaces such a leg from a
+leg clean of ranges, while the leg, which serves every other region, stays
+a copy source of another leg's repair (`dnv-worker.md` AR8). A repair's bad
+leg whose member carries ranges is failed out of the array for the new leg
+though it serves with an OK row, as one that cannot take a member is, while
+another `leg_list` member md holds in sync carries none (`repSteps`,
+`cleanKeeper`); with none such, the repair waits, since its copy would bring
+the ranges back. md's "mismatch_cnt" is not health: the legs differ
+wherever the pool has not written ([D15]), so it counts those regions too
+(`architecture.md`, Known limits).
+
 CN13. Per-slice pools (`pool.go`; primary only). Per slice of
 `id_to_slice`: the multi-target dm-linears `CnPoolMetaName` (meta group
 devices, `meta_grp_list` order) and `CnPoolDataName` (data group
@@ -4307,6 +4360,12 @@ leaves the check stream nothing to send (`dnagent.md` SH26); and
 `leg_list` member of another identity, naming the first such member, its
 identity and the array's, empty when nothing holds an add back, text for
 people that the worker logs (`dnv-worker.md` AR14); and
+`md_check_done_epoch`, the request of the group's md check that this
+agent process saw end (CN12, The md check), while the cntlr's request
+counts as delivered and carries that request, zero otherwise, which the
+worker's schedule ends the request on (`dnv-worker.md` AR16);
+`leg_id_to_bad_blocks`, the count of md's bad-block ranges on the member of
+each leg that has one or more (CN12, The md check); and
 `forced_start_revision`, the revision of the group's forced-start mark
 whose forced start this agent process ran its assembly for (the acted
 mark), while the cntlr's request counts as delivered (CN8) and carries a
@@ -4716,10 +4775,16 @@ stores instead is CN23's.
   remember past attempts (`architecture.md`, Teardown by sweep); it shows
   as the agent's leftover record naming the same member after each
   failure, each followed by the worker's re-sent `SyncupCntlr` (`log.md`,
-  Leftovers). The leg repair does not act on it, since the leg's row
-  reads `OK` (`dnv-worker.md` AR8), nor can an operator's repair, which
-  refuses a bad leg with no health epoch and points the operator to a
-  migration of the leg's side instead (`architecture.md`, Repairs).
+  Leftovers). It lasts until the group's next md check (CN12, The md
+  check; `dnv-worker.md` AR16), which rewrites the sector from the other
+  member: a sector whose rewrite lands is healed, and one whose rewrite
+  fails becomes a bad-block range on the member, which the group's reading
+  counts, so leg repair then replaces the leg while another leg is clean of
+  ranges. Until that check the leg repair does not act on it, since the
+  leg's row reads `OK` (`dnv-worker.md` AR8), nor can an
+  operator's repair, which refuses a bad leg with no health epoch and points
+  the operator to a migration of the leg's side instead (`architecture.md`,
+  Repairs); in a cluster whose check is off it lasts for good.
 * The leg probe reports failed or stalled, never slow: the CN11 probe reads
   `ERROR` on an attempt that fails or on one in flight longer than
   `CnLegProbeStallSeconds`, `PENDING` before its first attempt completes,

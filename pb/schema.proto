@@ -192,6 +192,22 @@ message Group {
     // record without it decodes as false, and the worker sets it at the
     // group's first OK row. Appended, never renumbered.
     bool array_made = 11;
+    // The group's md check (dnv-worker.md AR16): written by the sp worker
+    // alone. A record without it reads as a group never scheduled.
+    // Appended, never renumbered.
+    MdCheck md_check = 12;
+}
+
+// The schedule of one group's md check (Group.md_check; dnv-worker.md AR16).
+message MdCheck {
+    // When the group's next check is due, in Unix seconds; zero while the
+    // sp worker has not scheduled the group yet.
+    uint64 next_epoch = 1;
+    // Set while the sp worker asks the primary to run the check, to the
+    // time it asked; the primary runs md's check for it and reports it done
+    // (CntlrInfo.GrpInfo.md_check_done_epoch; cnagent.md CN12). Zero when
+    // no check is asked for.
+    uint64 request_epoch = 2;
 }
 
 // The mark of a forced start (Group.forced_start): the leg the primary
@@ -499,6 +515,19 @@ message CntlrInfo {
         // memory alone, so an agent restart forgets it. Appended, never
         // renumbered.
         uint64 forced_start_revision = 4;
+        // The request_epoch of the group's md check (Group.md_check) whose
+        // check this agent process started, or adopted running, and saw
+        // end, while the cntlr's request still carries that request; zero
+        // otherwise. The sp worker ends the request once a reading names it
+        // (cnagent.md CN12; dnv-worker.md AR16). Kept in memory alone, so an
+        // agent restart forgets it. Appended, never renumbered.
+        uint64 md_check_done_epoch = 5;
+        // The bad-block ranges md records on the member of each leg of the
+        // group the running array holds (dev-*/bad_blocks and
+        // dev-*/unacknowledged_bad_blocks), for the legs that have one or
+        // more (cnagent.md CN12, CN28); the sp worker's leg repair reads it
+        // (dnv-worker.md AR8). Appended, never renumbered.
+        map<uint64, uint32> leg_id_to_bad_blocks = 6;
     }
     map<uint64, ResInfo> ss_id_to_subsystem = 1;
     map<uint64, ResInfo> ns_id_to_namespace = 2;
@@ -569,6 +598,15 @@ message HealthCheckConf {
     uint32 cntlr_interval = 4;
 }
 
+// The md check of a cluster's groups (dnv-worker.md AR16; architecture.md,
+// The md check).
+message MdCheckConf {
+    // The days from one md check of a group to the next; zero turns the
+    // check off. CreateCluster stores the default when the request carries
+    // no MdCheckConf, and refuses a value above common.MaxMdCheckDays.
+    uint32 interval_days = 1;
+}
+
 // {dnv_prefix} cluster_conf {cluster_name}
 message ClusterConf {
     uint64 creation_epoch = 1;
@@ -577,6 +615,9 @@ message ClusterConf {
     DnBinConf dn_bin_conf = 4;
     AllocConf alloc_conf = 5;
     HealthCheckConf health_check_conf = 6;
+    // A cluster created without it, by a build before the md check, reads
+    // a zero interval: no check. Appended, never renumbered.
+    MdCheckConf md_check_conf = 7;
 }
 
 // {dnv_prefix} dn_global {cluster_id}
@@ -976,6 +1017,9 @@ message CreateClusterRequest {
     DnBinConf dn_bin_conf = 4;
     AllocConf alloc_conf = 5;
     HealthCheckConf health_check_conf = 6;
+    // Absent: the default interval; present: as given, zero for no check.
+    // Appended, never renumbered.
+    MdCheckConf md_check_conf = 7;
 }
 
 message CreateClusterReply {

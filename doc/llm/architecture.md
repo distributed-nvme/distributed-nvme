@@ -1257,7 +1257,7 @@ this document relies on:
 
 | message | key | notes |
 |---|---|---|
-| `ClusterConf` | {p} cluster_conf {cluster_name} | the only **name**-keyed message; holds `creation_epoch` (the second `cluster_id` input, cluster_id derivation) and the cluster-wide QoS, bdev, bin, alloc and health-check confs |
+| `ClusterConf` | {p} cluster_conf {cluster_name} | the only **name**-keyed message; holds `creation_epoch` (the second `cluster_id` input, cluster_id derivation) and the cluster-wide QoS, bdev, bin, alloc, health-check and md check confs |
 | `DnGlobal` | {p} dn_global {cluster_id} | `next_id`, `shard_bucket` |
 | `CnGlobal` | {p} cn_global {cluster_id} | idem |
 | `SpGlobal` | {p} sp_global {cluster_id} | idem |
@@ -1961,6 +1961,10 @@ harmless. A migration destination takes its run before it zeroes
   * `health_check_conf.dn_interval`, `cn_interval`, `side_interval` and
     `cntlr_interval`, in seconds: `MinHealthCheckInterval` to
     `MaxHealthCheckInterval`, default `DefaultHealthCheckInterval`;
+  * `md_check_conf.interval_days`, the days between two md checks of a
+    group (The md check): at most `MaxMdCheckDays`, zero for no check;
+    a `CreateClusterRequest` without the message gets
+    `DefaultMdCheckDays`, and one with it keeps its value, zero included;
   * the list `count`: at most `MaxListCnt`, default `DefaultListCnt`.
 * **Geometry rules.** Beyond the bounds above, `CreateCluster` and
   `CreateStoragePool` hold the geometry of the `bdev_conf` they store to
@@ -2066,7 +2070,7 @@ harmless. A migration destination takes its run before it zeroes
   live storage pools and move the bin ladder every capacity key was written
   under (DN bins). There is no compatibility shim: a cluster whose stored
   conf holds zeros is refused loudly and must be recreated.
-* Two stored messages are deliberately exempt, because they are policy
+* Three stored messages are deliberately exempt, because they are policy
   timers and knobs rather than geometry — nothing is formatted or addressed
   with them: `EventThreshold` is stored exactly as sent (so an operator
   reads back what they asked for) and resolved member-wise when read
@@ -2074,6 +2078,9 @@ harmless. A migration destination takes its run before it zeroes
   sent too — the sp worker resolves a migration's as it builds the
   `SyncupSide` request (`dnv-worker.md` RW15), while a zero in a clone's
   simply leaves the dm-clone target's own default in place (Clones).
+  A third, `md_check_conf`, is a policy knob too: its zero, or its
+  absence in a conf a build before the md check stored, means no check
+  (The md check).
 * `CmdSoftTimeout` and `CmdHardTimeout` bound the shell commands an agent
   runs, a child blocked in an uninterruptible kernel wait aside. A command
   they end did not answer: its resource reports `RES_STATUS_ERROR` with
@@ -2151,7 +2158,7 @@ allocation + shard buckets). Reply `cluster_id`. Nothing downstream
 resolves again: a zero read back out of this key is corruption and is
 refused, not substituted (Common validation).
 `ClusterConf` is **write-once**: `qos_ratio`, `bdev_conf`, `dn_bin_conf`,
-`alloc_conf` and `health_check_conf` can only be set here — no RPC updates
+`alloc_conf`, `health_check_conf` and `md_check_conf` can only be set here — no RPC updates
 a `ClusterConf`, deliberately; changing them means creating a new
 cluster. (`bdev_conf` defaults can still be overridden per SP at
 `CreateStoragePool`, Storage pools.)
@@ -6070,6 +6077,30 @@ a side goes back by its group's `ext_cnt`, which is gone once the group is
 clone meta group's repair and retired legs with the group (`dnv-worker.md`
 CLD9).
 
+### The md check
+
+A cluster's `md_check_conf.interval_days` (Common validation) sets how
+often each group of an md-raid1 SP's slices gets md's own check: the sp
+worker keeps each group's schedule in its record (`Group.md_check`) and asks
+the primary for one check at a time per SP, which the schedule's write
+itself holds to (`dnv-worker.md` AR16, MD6); the
+primary starts md's check, md runs it at md's own speed settings, and the
+primary reports the request done once md ran the check to its end, and
+starts again a check md stopped (`cnagent.md` CN12, The md check); the
+worker then ends the request and sets the group's next time. md's check rewrites from another member a sector one member cannot
+read: a rewrite that lands heals the sector, and one that fails records a
+bad-block range on the member, which the primary's reading of the group
+counts, so leg repair replaces that leg from a leg clean of such ranges;
+the leg's row stays as its probe reads it, so no health rule sees the
+ranges, and the leg remains a copy source of another leg's repair
+(`dnv-worker.md` AR8). Reason: md fails a
+failfast member on a read error and puts nothing back over the bad sector
+(`cnagent.md`, Known limits), so without a check a bad region is found only
+when a read meets it, possibly once the other copy is gone. A zero turns
+the check off; a cluster created by a build before the check reads zero.
+Clone meta groups are not checked. A slow leg reads healthy: nothing
+measures a leg's speed.
+
 ### Transfer + clone = cross-SP live migration
 
 A clone's source can be *any* NVMe-oF namespace; when the source is a dnv
@@ -7609,10 +7640,10 @@ document and only pointed to here.
   mismatches.** The legs of a data group or of a clone meta group are
   never zeroed past their first data block, so they may differ wherever
   the pool or the clone's dm-clone has not written ([D15]), and an md
-  "check" of the array, such as a distribution's periodic scrub, reports
-  mismatches there. They are harmless, since neither the pool nor the
-  dm-clone reads a block it has not written through the array
-  (`cnagent.md` CN12), and dnv runs no check of its own.
+  "check" of the array, dnv's own (The md check) or a distribution's
+  periodic scrub, reports mismatches there. They are harmless, since
+  neither the pool nor the dm-clone reads a block it has not written
+  through the array (`cnagent.md` CN12), and no rule reads the count.
 * **Writes to a group wait out the keep-alive when a disk node dies, and
   IO that follows the keep-alive's expiry waits the fast IO fail timeout
   too.** A leg's connection carries a fast IO fail timeout and a

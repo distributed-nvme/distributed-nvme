@@ -507,17 +507,23 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   later, the primary starts from the leg md recorded as last in sync. Seen
   in the lab: the cn agent suite and the end-to-end suite break a group
   this way and bring it back with a forced start.
-- **A member md keeps dropping is put back without end.** md drops a leg on
-  any read error. The agent puts it back after every drop, and the leg row
-  reads ok, so no repair acts. A leg with slow IO reads ok too, and every
-  write of the group waits for it. State: fix decided, a scheduled md
-  check. The worker asks the primary to run md's check on each group in
-  turn, at an interval in days that is a cluster setting fixed when the
-  cluster is created, 30 by default, zero for off. The check rewrites a
-  sector one leg cannot read with the data of the other leg; when that
-  rewrite fails too, md records a bad block on the leg. One recorded bad
-  block makes the leg unhealthy, so leg repair moves it. Slow legs: accepted; migrate the leg's side by
-  hand. Not seen in the lab.
+- **A member md keeps dropping is put back until the group's next md
+  check; a slow leg reads ok.** md drops a leg on any read error, and the
+  agent puts it back, while the leg row reads ok. The worker asks the
+  primary to run md's check on each group in turn, at an interval in days
+  that is a cluster setting fixed when the cluster is created, 30 by
+  default, zero for off. The check reads every leg and rewrites a sector
+  one leg cannot read with the data of the other leg. A rewrite that works
+  heals the sector, and the drops end. A rewrite that fails makes md record
+  a bad block on the leg, and leg repair then moves the leg, copying from
+  another leg of the group that has no bad block; where every leg has one,
+  the regions are lost and nothing moves. Between two checks the drops go on, each a
+  resync of a small part of the leg. A cluster created before this setting
+  existed, or with zero, has no check. A leg with slow IO reads ok, and
+  every write of the group waits for it. State: accepted for the time
+  between two checks and for slow legs; migrate the leg's side by hand.
+  Seen in the lab: a check over a sector that fails reads healed it, and
+  over a sector that fails reads and writes recorded a bad block.
 - **A whole copy still needs its source until the worker drains the
   clone.** The worker drains a clone once it reads the primary's report of
   the whole copy. If the primary moves to another cntlr, as in a failover,
@@ -1058,7 +1064,8 @@ design:
 - **A pool's thin ids run out; a slice's data space is capped at
   creation.** State: accepted, by design.
 - **An md check counts mismatches on never-written blocks.** The count
-  means nothing. State: accepted. Procedure to write, one line.
+  means nothing, and dnv reads it for nothing. State: accepted. Procedure
+  to write, one line.
 - **A retired leg taken back is copied whole unless the array stayed
   degraded.** State: accepted.
 - **Steady control-plane cost.** The reaction pass reads the whole pool

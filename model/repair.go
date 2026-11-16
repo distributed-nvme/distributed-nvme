@@ -394,6 +394,11 @@ type RepairNewLeg struct {
 	// the bad leg once the repair is aborted (cnagent.md CN12). The sp
 	// worker's repairs never carry it.
 	Force bool
+	// BadBlocks says that the sp worker repairs the bad leg for md's
+	// bad-block ranges on its member, which the primary's report names and
+	// no record holds (dnv-worker.md AR8): the op then takes a bad leg with
+	// no health epoch, under the worker's reserved name only.
+	BadBlocks bool
 }
 
 // CreateRepair creates the repair repName of the group grpId, which parent
@@ -518,7 +523,7 @@ func CreateRepair(
 		if len(bad.GetSideList()) != 1 {
 			return fail(opCreateRepair, "bad leg has no single side")
 		}
-		if bad.GetErrEpoch() == 0 {
+		if bad.GetErrEpoch() == 0 && !(reserved && newLeg.BadBlocks) {
 			return fail(opCreateRepair,
 				"bad leg is healthy: use a migration")
 		}

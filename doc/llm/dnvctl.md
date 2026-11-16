@@ -293,6 +293,8 @@ these exceptions:
 * the repeated `src_tr_conf` of `clone create` and `clone set-tr` is filled
   by one prefixed set of transport flags with one element, or with none when
   all four are emptied (`clone` — `ctl/clone.go`);
+* `cluster create`'s `--md-check-days` is sent whenever it is typed, zero
+  included (`cluster` — `ctl/cluster.go`);
 * the members no flag reaches are never sent: `cluster create`'s
   `qos_ratio`, `bdev_conf`, `alloc_conf`, `health_check_conf` and the four
   bin shifts of `dn_bin_conf` (`cluster` — `ctl/cluster.go`), and
@@ -415,7 +417,14 @@ leaf flag's (CT9), which matters most here because the value is write-once:
 no request, so no stale variable sizes every cluster created under it, and
 text that is not a uint64 is a pflag parse error (exit 2, no RPC).
 
-No `cluster create` flag reaches the request's other conf members.
+`--md-check-days` is the one exception to the "not given" convention: it
+sends an `md_check_conf` carrying `interval_days` whenever it is typed, zero
+included, and none when it is not. Reason: a zero turns the md check off,
+while a request without the message takes the gateway's default
+(`architecture.md`, Common validation, The md check), so the zero must
+reach the gateway. dnvctl checks no bound on it (CT8).
+
+No other `cluster create` flag reaches the request's other conf members.
 `bdev_conf`, `alloc_conf` and `health_check_conf` are stored as the
 gateway's resolved defaults — the cluster's `bdev_conf` is only the per-pool
 default set, which `sp create`'s own `bdev_conf` flags override member by

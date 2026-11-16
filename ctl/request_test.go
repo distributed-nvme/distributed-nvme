@@ -1433,6 +1433,25 @@ func TestClusterCreateExtentSize(t *testing.T) {
 	})
 }
 
+// TestClusterCreateMdCheckDays: --md-check-days is sent only when typed, a
+// typed zero included, since its zero turns the md check off while an
+// absent md_check_conf takes the gateway's default (dnvctl.md,
+// Conventions, the exception); the value travels unchecked (CT8).
+func TestClusterCreateMdCheckDays(t *testing.T) {
+	bare := runArgv(t, "CreateCluster",
+		"cluster", "create", "--name", "c1").(*pb.CreateClusterRequest)
+	if bare.MdCheckConf != nil {
+		t.Errorf("a bare cluster create sent md_check_conf %v, want it "+
+			"absent", bare.MdCheckConf)
+	}
+	for _, days := range []uint32{0, 7, 400} {
+		req := runArgv(t, "CreateCluster", "cluster", "create", "--name",
+			"c1", "--md-check-days",
+			strconv.FormatUint(uint64(days), 10)).(*pb.CreateClusterRequest)
+		wantRequest(t, req.MdCheckConf, &pb.MdCheckConf{IntervalDays: days})
+	}
+}
+
 // TestClusterNameFallback is the first field→flag exception of dnvctl.md,
 // Conventions, in all three states: --name wins, an empty --name falls back
 // to the global --cluster, and `cluster list` — the one request with no

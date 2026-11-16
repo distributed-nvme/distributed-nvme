@@ -34,6 +34,18 @@ const (
 	MaxHealthCheckInterval     = 3600
 	MinHealthCheckInterval     = 1
 	DefaultHealthCheckInterval = 2
+
+	// The md check of a cluster's groups (ClusterConf.md_check_conf;
+	// dnv-worker.md AR16): the days between two checks of one group, the
+	// default a cluster created without the setting stores and the largest
+	// a create takes; zero turns the check off.
+	DefaultMdCheckDays = 30
+	MaxMdCheckDays     = 365
+	// MdCheckRequestBound is how long the sp worker lets one check request
+	// stand before it ends the request unfinished and schedules the next
+	// (dnv-worker.md AR16), in seconds: two days, far more than md takes to
+	// read a group at its own minimum speed.
+	MdCheckRequestBound = 2 * 24 * 3600
 	// ObsMaxAgeIntervals is how many of an object's health-check intervals
 	// the observation a round's reply answers from may be old before the
 	// worker counts the round as a missed one (dnv-worker.md HL7).

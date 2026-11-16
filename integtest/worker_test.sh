@@ -3907,6 +3907,68 @@ EOF
 		reaction_ge $((creates + 1)) repair_create
 	[ -n "$(grp_rep_name sp0 1 meta 1)" ] ||
 		die "the meta group names no repair after the worker's create"
+
+	stage 10 "the md check schedule (AR16): every group stamped, a due one asked for, done and ended"
+	# Every leg serves again, so the data group reads whole and suits a
+	# check; the meta group's repair keeps it out of the schedule's request,
+	# not out of its stamp.
+	repair_levers '' '' ''
+	local now next grp due_at
+	now=$(date +%s)
+	ctl set-md-check-days --days 1 >/dev/null
+	wait_until "$WAIT_SYNCUP" "every group of slice 1 stamped" \
+		all_md_stamped sp0 1
+	for grp in 1 2; do
+		read -r next _ <<<"$(md_check_of sp0 1 "$grp")"
+		assert_ge "$next" $((now + 43200)) "group $grp's first check time"
+		assert_ge $((now + 129600 + 120)) "$next" \
+			"one and a half days past group $grp's first check time"
+	done
+	due_at=$(date +%s)
+	ctl set-md-check --sp sp0 --grp 2 --next-age 60 >/dev/null
+	# The fake primary reads a request done at once, so the next pass ends
+	# it and sets the next time one day on.
+	wait_until "$WAIT_SYNCUP" "group 2's check asked for, done and ended" \
+		md_check_ended sp0 1 2 $((due_at + 86400))
+	assert_ge "$(md_sched_cnt requested_grp_id 2)" 1 \
+		"\`md checks scheduled\` records asking for group 2"
+	assert_ge "$(md_sched_cnt ended_grp_ids 2)" 1 \
+		"\`md checks scheduled\` records ending group 2's request"
+	ctl set-md-check-days --days 0 >/dev/null
+}
+
+# md_check_of prints one group's md check schedule (Group.md_check) out of
+# a Slice as "<next_epoch> <request_epoch>", zeros where unset.
+md_check_of() { # <sp> <slice> <grp id>
+	slice_json "$1" "$2" | "$JQ" -r --arg g "$3" '
+		[ (.meta_grp_list[]?, .data_grp_list[]?)
+		  | select((.grp_id | tostring) == $g) | .md_check ] | first
+		| "\((.next_epoch // 0) | tonumber) \((.request_epoch // 0) | tonumber)"'
+}
+
+# all_md_stamped succeeds once every group of a slice has a next check time.
+all_md_stamped() { # <sp> <slice>
+	slice_json "$1" "$2" | "$JQ" -e '
+		[ (.meta_grp_list[]?, .data_grp_list[]?)
+		  | ((.md_check.next_epoch // 0) | tonumber) ] | all(. > 0)' \
+		>/dev/null
+}
+
+# md_check_ended succeeds once a group stands with no request and a next
+# check time at or past a given one.
+md_check_ended() { # <sp> <slice> <grp id> <next at least>
+	local next request
+	read -r next request <<<"$(md_check_of "$1" "$2" "$3")"
+	[ "$request" = 0 ] && [ "$next" -ge "$4" ]
+}
+
+# md_sched_cnt counts the `md checks scheduled` records (dnv-worker.md
+# AR16) whose field — requested_grp_id or the list ended_grp_ids — names a
+# group.
+md_sched_cnt() { # <field> <grp id>
+	wcount 'select(.msg == "md checks scheduled")
+		| select(([.[$f]] | flatten | map(tostring)) | index($g))' \
+		--arg f "$1" --arg g "$2"
 }
 
 # state_rev_ge succeeds once a fake stores a request of one object at

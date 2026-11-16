@@ -542,8 +542,8 @@ are a member from the request, else from the owning
 stripe, from the block, all applied by
 the RPC that writes the conf. This rule is where each handler carries that
 out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
-settles `bdev_conf`, `dn_bin_conf`, `alloc_conf` and `health_check_conf`
-(Clusters); `CreateStoragePool` stores `model.ResolveBdevConf` of the merge
+settles `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf` and
+`md_check_conf` (Clusters); `CreateStoragePool` stores `model.ResolveBdevConf` of the merge
 `mergeSpBdevConf` makes over the cluster's conf (`architecture.md`, Storage
 pools; Storage pools and GrowSlice). A handler that then COMPUTES with a
 stored member validates it first and REFUSES rather than guessing around a
@@ -674,8 +674,10 @@ and field-level rules stay in the cited section of `architecture.md`,
   this attempt reuse it (`architecture.md`, Clusters), and build the message
   to store outside it too, for the same reason: it is
   `model.ResolveClusterConf` of the request's conf members plus that epoch,
-  so `bdev_conf`, `dn_bin_conf`, `alloc_conf` and `health_check_conf` land
-  concrete and only `qos_ratio` and the epoch pass through as given (GW11;
+  so `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf` and
+  `md_check_conf` land concrete — an absent `md_check_conf` as the default
+  interval, a present one as given, its zero included — and only
+  `qos_ratio` and the epoch pass through as given (GW11;
   validation first, resolution second — never the other way round). STM:
   `ClusterConfKey` of the name present is `ALREADY_EXISTS`; compute the
   cluster id from the name and the epoch; any of `DnGlobalKey`, `CnGlobalKey`

@@ -455,6 +455,15 @@ namespace keep registered, then assembles the arrays under its own trace ids,
 with no second `SyncupCntlr`, puts the ns-dev on the raid0 and moves the
 namespace optimized, then stops; and a block only the newer leg holds reads as
 that leg's, the stale member kicked (CN10, CN12; `architecture.md`, [D16]).
+Last, md's check (CN12, The md check): eight sectors of one data side fail in
+that disk node's export to the primary alone, and the suite, playing the
+worker, puts an md check request on the data group and reads the cntlr until
+its reading names the request done. Sectors that fail reads and take writes
+(dm-flakey) are healed by the check, which md's mismatch count shows it read:
+no bad-block range, and the leg's row OK. Sectors that fail both (dm error)
+leave a bad-block range on the member, which the reading counts (CN28), the
+leg's row still OK. The export's table comes back after; the range stays with the array,
+which the teardown removes.
 
 **repair** proves on real md the cn agent's part of a repair
 (`architecture.md`, Repair; `cnagent.md` CN12, CN28, CN30), on a pool of its

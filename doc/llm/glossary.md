@@ -346,6 +346,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **md assembly mask, md udev mask** — The udev rule every node running a dnv agent carries so that only the agent assembles dnv md arrays: ordered before the stock incremental-assembly rule, it marks a device whose array name carries the dnv prefix not ready, and the stock rule skips it (see `architecture.md`, Components: invocation reference). The cn, end-to-end and csi suites install it for their run.
 
+**md check** — md's own "check" of one group's array, which the sp worker asks the primary for, one group at a time per pool, on a schedule a cluster setting sets: md reads every member, rewrites from another member a sector one member cannot read, and records a bad-block range on a member whose rewrite fails; leg repair replaces such a leg from a leg clean of ranges (see `architecture.md`, The md check).
+
 **md walk** — The cn agent's read of the node's md arrays from "/sys/block": every array node, each array's "md" directory and the dm name of each member, never a member device itself, so it cannot block on a dead leg. One serves all the groups of a converge or of a cntlr's background read; a read's is part of its reading and serves its verdict too (see `cnagent.md` CN12).
 
 **mechanism, policy** — The split of the agent code: what both roles need verbatim is mechanism and lives in `agent`, and what knows which resource to build is policy and lives in `dnagent` or `cnagent`.

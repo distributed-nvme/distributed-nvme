@@ -241,7 +241,18 @@ func ResolveClusterConf(cc *pb.ClusterConf) *pb.ClusterConf {
 		DnBinConf:       ResolveDnBinConf(cc.GetDnBinConf()),
 		AllocConf:       ResolveAllocConf(cc.GetAllocConf()),
 		HealthCheckConf: ResolveHealthCheckConf(cc.GetHealthCheckConf()),
+		MdCheckConf:     ResolveMdCheckConf(cc.GetMdCheckConf()),
 	}
+}
+
+// ResolveMdCheckConf returns the md check setting a create stores
+// (dnv-worker.md AR16): an absent one takes common.DefaultMdCheckDays, and a
+// present one is kept as given, its zero turning the check off.
+func ResolveMdCheckConf(conf *pb.MdCheckConf) *pb.MdCheckConf {
+	if conf == nil {
+		return &pb.MdCheckConf{IntervalDays: common.DefaultMdCheckDays}
+	}
+	return &pb.MdCheckConf{IntervalDays: conf.GetIntervalDays()}
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +377,14 @@ func ValidateClusterConf(cc *pb.ClusterConf) error {
 		); err != nil {
 			return err
 		}
+	}
+	// An absent md check setting is a cluster a build before the md check
+	// created, and reads as no check, as zero does; only a value no create
+	// takes is refused.
+	if days := cc.GetMdCheckConf().GetIntervalDays(); days >
+		common.MaxMdCheckDays {
+		return invalidConf("md_check_conf.interval_days %d is above %d",
+			days, common.MaxMdCheckDays)
 	}
 	if cc.GetBdevConf() != nil {
 		return ValidateBdevConf(cc.GetBdevConf())

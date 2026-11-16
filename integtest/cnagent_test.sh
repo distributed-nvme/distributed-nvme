@@ -1654,6 +1654,16 @@ md_sync_speed() {
 	echo "min=$(tr -d ' ' <"$dir/sync_speed_min") max=$(tr -d ' ' <"$dir/sync_speed_max")"
 }
 
+# md_mismatch <dm name> — md/mismatch_cnt of the array that holds the dm
+# device <dm name> as a member: the sectors md's last check or repair found
+# different, or could not read on one member.
+md_mismatch() {
+	local where node dmk
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	cat "/sys/block/$node/md/mismatch_cnt"
+}
+
 # md_sync_action <dm name> <action> — writes md/sync_action of the array that
 # holds the dm device <dm name> as a member and prints what it then reads.
 # "frozen" stops md's copy and keeps it from starting again, so a broken
@@ -2217,6 +2227,42 @@ unpartition_from() {
 		done
 	fi
 	echo unpartitioned
+}
+
+# bad_sectors <dm name> <sector> <kind> — reloads one single-target
+# dm-linear so that eight sectors from <sector> fail (cnagent.md CN12, The md
+# check): kind flakey fails their reads and lets writes land (dm-flakey with
+# error_reads), as a disk sector its rewrite heals does; kind error fails
+# both, as a sector nothing can rewrite. The rest keeps the linear's own
+# mapping, and the device stays live across the swap (suspend, reload,
+# resume). The table it found goes to <dm name>.table under $WORK, which
+# good_sectors puts back. Prints the new table.
+bad_sectors() {
+	local name=$1 start=$2 kind=$3 table len dev off bad
+	table=$(dmsetup table "$name") || return 1
+	set -- $table
+	[ "$3" = linear ] || { echo "bad_sectors: $name is not one linear: $table" >&2; return 1; }
+	len=$2 dev=$4 off=$5
+	printf '%s\n' "$table" >"$WORK/$name.table"
+	case "$kind" in
+	flakey) bad="$start 8 flakey $dev $((off + start)) 0 86400 1 error_reads" ;;
+	error) bad="$start 8 error" ;;
+	*) echo "bad_sectors: unknown kind $kind" >&2; return 1 ;;
+	esac
+	printf '0 %s linear %s %s\n%s\n%s %s linear %s %s\n' "$start" "$dev" "$off" \
+		"$bad" "$((start + 8))" "$((len - start - 8))" "$dev" "$((off + start + 8))" |
+		dmsetup load "$name" || return 1
+	dmsetup suspend --nolockfs "$name" && dmsetup resume "$name" || return 1
+	dmsetup table "$name"
+}
+
+# good_sectors <dm name> — puts back the table bad_sectors found.
+good_sectors() {
+	local name=$1
+	dmsetup load "$name" <"$WORK/$name.table" || return 1
+	dmsetup suspend --nolockfs "$name" && dmsetup resume "$name" || return 1
+	rm -f "$WORK/$name.table"
+	dmsetup table "$name"
 }
 
 # partition_rules <ip> — the rules unpartition_from is supposed to have taken.
@@ -5350,6 +5396,9 @@ case_redund() {
 	converge_check 1 "$sp" "$c1" "$rev1"
 	converge_check 2 "$sp" "$c2" "$rev2"
 
+	stage mdcheck "md's check heals a sector that takes a write and records one that does not, on the leg's row (CN12, The md check)"
+	redund_md_check "$sp" "$c1" "$c2" "$req1" "$req2"
+
 	stage teardown "empty cntlr lists, then empty side lists"
 	host_disconnect "$hv" "$nqn"
 	cn_drop 1
@@ -5358,6 +5407,74 @@ case_redund() {
 	dn_drop 2
 	assert_no_residue "$sp"
 	sshv_ok "$hv" "rm -f $WORK/pattern-redund.bin $WORK/probe-redund.bin"
+}
+
+# redund_md_check is redund's mdcheck stage (cnagent_integtest.md, Cases,
+# redund; cnagent.md CN12, The md check). Eight sectors of DN2's data side
+# fail in its export to the primary alone, inside the data region; the
+# suite plays the worker and asks the primary for md's check of the data
+# group (Group.md_check), then reads the cntlr until its reading names the
+# request done. First the sectors fail reads and take writes: md's check
+# rewrites them from DN1's leg, records nothing, and the leg's row stays OK.
+# Then they fail writes too: the check records a bad-block range on the
+# member, which the reading counts, the leg's row still OK. The
+# export gets its own table back after; md keeps the range, which the
+# teardown takes with the array.
+redund_md_check() { # sp c1 c2 req1 req2
+	local sp=$1 pidx preq pc lin sector out epoch row bad deadline grp leg2 mm
+	if [ "$("$JQ" -r '.cntlr.primary // false' "$4")" = true ]; then
+		pidx=1 preq=$4 pc=$2
+	else
+		pidx=2 preq=$5 pc=$3
+	fi
+	lin=$(dn_lin_name 2 "$sp" "${A_DSIDE[2]}" "$pidx")
+	# The leg's first data block plus 64 KiB: past md's data offset, at a
+	# 64 KiB boundary, where md's check reads in such steps.
+	sector=$((RAID1_META_BLOCKS * BLOCK_SIZE / 512 + 128))
+	grp=".id_to_slice[\"$(hex16 "$A_SLICE")\"].data_grp_list[0]"
+	leg2=$(d16 "${A_DLEG[2]}")
+	for epoch in 1000 2000; do
+		if [ "$epoch" = 1000 ]; then
+			helper_ok 2 "bad_sectors '$lin' $sector flakey" >/dev/null ||
+				die "mdcheck: the flakey segment on $lin"
+		else
+			helper_ok 2 "good_sectors '$lin'" >/dev/null &&
+				helper_ok 2 "bad_sectors '$lin' $sector error" >/dev/null ||
+				die "mdcheck: the error segment on $lin"
+		fi
+		req_set "$preq" "$grp.md_check = {\"next_epoch\": \"1\", \"request_epoch\": \"$epoch\"}"
+		bump_cn_rev "$pidx"
+		cn_syncup_cntlr "$pidx" "$preq" >/dev/null
+		deadline=$((SECONDS + 60))
+		while :; do
+			out=$(cnctl "$pidx" check-cntlr --fresh --revision "${CNREV[$pidx]}" \
+				--show-info --sp "$sp" --cntlr "$pc")
+			[ "$(jq_of "$out" "(.cntlr_info.grp_id_to_grp_info // {})[\"$(d16 "$A_DGRP")\"].md_check_done_epoch // \"0\"")" = "$epoch" ] &&
+				break
+			[ "$SECONDS" -lt "$deadline" ] ||
+				die "mdcheck: no reading named the check of request $epoch done"
+			sleep 1
+		done
+		row=$(jq_of "$out" ".cntlr_info.leg_id_to_leg[\"$leg2\"].status")
+		bad=$(jq_of "$out" "(.cntlr_info.grp_id_to_grp_info[\"$(d16 "$A_DGRP")\"].leg_id_to_bad_blocks // {})[\"$leg2\"] // 0")
+		if [ "$epoch" = 1000 ]; then
+			assert_eq "$bad" 0 "mdcheck: bad-block ranges after a check that healed"
+			assert_eq "$row" RES_STATUS_OK "mdcheck: DN2 data leg's row after a check that healed"
+			# The check did read the failing sectors: md counts the step
+			# it could not read on one member as a mismatch.
+			mm=$(helper "$pidx" "md_mismatch '$(cn_dm_name c9 "$pidx" "$sp" "${A_DLEG[2]}")'") ||
+				die "mdcheck: reading the data array's mismatch_cnt"
+			[ "$mm" -ge 8 ] ||
+				die "mdcheck: mismatch_cnt after the check is '$mm', want 8 or more: the check read no failing sector"
+		else
+			[ "$bad" -ge 1 ] ||
+				die "mdcheck: bad-block ranges after a check whose rewrite failed: got '$bad', want 1 or more"
+			# The ranges touch no row: the worker reads the count.
+			assert_eq "$row" RES_STATUS_OK "mdcheck: DN2 data leg's row with a bad-block range"
+		fi
+	done
+	helper_ok 2 "good_sectors '$lin'" >/dev/null ||
+		die "mdcheck: putting $lin's table back"
 }
 
 # ---------------------------------------------------------------------------

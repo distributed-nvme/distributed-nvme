@@ -78,6 +78,8 @@ type GrpReading struct {
 	Whole  *bool
 	InSync *[]uint64
 	Acted  *uint64
+	// MdDone overrides the md check request the reading names done.
+	MdDone *uint64
 }
 
 // DiskCounts are the disk counts a dn reports (dnagent.md DN18), the lever
@@ -503,6 +505,7 @@ type grpReadingJSON struct {
 	Whole  *bool     `json:"whole,omitempty"`
 	InSync *[]uint64 `json:"in_sync,omitempty"`
 	Acted  *uint64   `json:"acted,omitempty"`
+	MdDone *uint64   `json:"md_done,omitempty"`
 }
 
 // diskCountsJSON is the behavior file's disk_counts.
@@ -705,7 +708,8 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 			ob.Grps = make(map[uint64]GrpReading)
 		}
 		ob.Grps[grpId] = GrpReading{
-			Whole: gj.Whole, InSync: gj.InSync, Acted: gj.Acted}
+			Whole: gj.Whole, InSync: gj.InSync, Acted: gj.Acted,
+			MdDone: gj.MdDone}
 	}
 	return ob, nil
 }

@@ -382,6 +382,17 @@ type fakeArray struct {
 	degraded      int
 	syncAction    string
 	syncCompleted string
+	// lastSyncAction is md/last_sync_action, published with the three
+	// above: a write of "check" or "idle" to md/sync_action sets it, as
+	// md's action_store does, and a test may script it.
+	lastSyncAction string
+	// syncMin is md/sync_min, "0" when empty; a write to it sets it.
+	syncMin string
+	// badBlocks scripts dev-*/bad_blocks per member path, the list as md
+	// prints it, one "<sector> <length>" line per range; a member without
+	// an entry publishes an empty list. Published for a running array only,
+	// with an empty dev-*/unacknowledged_bad_blocks.
+	badBlocks map[string]string
 	// memberState scripts dev-*/state per member path; a member without an
 	// entry reads what the kernel shows for dnv's members (memberStateOf).
 	memberState map[string]string
@@ -1012,8 +1023,46 @@ func (f *fakeNode) writeFileDirect(
 	if err := f.cntlidRefusal(path, data); err != nil {
 		return err
 	}
+	if f.mdSyncActionWrite(path, data) {
+		return nil
+	}
 	f.files[path] = configfsNormalize(path, data)
 	return nil
+}
+
+// mdSyncActionWrite models a write to a running array's md/sync_action
+// (md's action_store) or md/sync_min: "check" starts a check, which reads
+// "check" until a test ends it (setMdSync), and sets md/last_sync_action to
+// it; "idle" stops it; a sync_min write sets sync_min. It reports whether
+// path was such an attribute. The caller holds f.mu.
+func (f *fakeNode) mdSyncActionWrite(path, data string) bool {
+	attr := "/md/sync_action"
+	node, ok := strings.CutSuffix(path, attr)
+	if !ok {
+		attr = "/md/sync_min"
+		if node, ok = strings.CutSuffix(path, attr); !ok {
+			return false
+		}
+	}
+	node = strings.TrimPrefix(node, sysfsBlockDir+"/")
+	for _, array := range f.arrays {
+		if array.node != node {
+			continue
+		}
+		value := strings.TrimSpace(data)
+		if attr == "/md/sync_min" {
+			array.syncMin = value
+			f.publishArray(array)
+			return true
+		}
+		array.syncAction = value
+		if value == mdActionCheck {
+			array.lastSyncAction = value
+		}
+		f.publishArray(array)
+		return true
+	}
+	return false
 }
 
 // cntlidRefusal models nvmet's store handlers for a subsystem's cntlid bounds
@@ -3085,6 +3134,16 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 		f.files[mdDir+"/degraded"] = strconv.Itoa(array.degraded) + "\n"
 		f.files[mdDir+"/sync_action"] = array.syncAction + "\n"
 		f.files[mdDir+"/sync_completed"] = array.syncCompleted + "\n"
+		last := array.lastSyncAction
+		if last == "" {
+			last = "none"
+		}
+		f.files[mdDir+"/last_sync_action"] = last + "\n"
+		syncMin := array.syncMin
+		if syncMin == "" {
+			syncMin = "0"
+		}
+		f.files[mdDir+"/sync_min"] = syncMin + "\n"
 	}
 	for i, member := range array.members {
 		devDir := mdDir + "/dev-" + f.kernelName(member)
@@ -3101,6 +3160,10 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 		f.dirs[devDir+"/block"] = true
 		f.files[devDir+"/state"] = f.memberStateOf(array, member) + "\n"
 		f.files[devDir+"/slot"] = memberSlotOf(array, member, i) + "\n"
+		if mdRunning(array.arrayState) {
+			f.files[devDir+"/bad_blocks"] = array.badBlocks[member]
+			f.files[devDir+"/unacknowledged_bad_blocks"] = ""
+		}
 		if devNo := f.devNo[member]; devNo != "" {
 			f.files[devDir+"/block/dev"] = devNo + "\n"
 		}
@@ -3241,6 +3304,10 @@ func (f *fakeNode) setMdSync(
 	array.degraded = degraded
 	array.syncAction = action
 	array.syncCompleted = completed
+	if action != mdActionIdle && action != "frozen" {
+		// md sets last_sync_action when a sync starts.
+		array.lastSyncAction = action
+	}
 	f.publishArray(array)
 }
 

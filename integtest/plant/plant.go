@@ -82,7 +82,8 @@ type Cluster struct {
 	Conf *pb.ClusterConf
 }
 
-// ClusterSpec is what PutCluster stores. A zero member is resolved the way
+// ClusterSpec is what PutCluster stores. A zero member but MdCheckDays is
+// resolved the way
 // CreateCluster resolves it (model.ResolveClusterConf), so the zero spec with
 // a name plants a cluster of the defaults; note that the default extent size
 // is common.DefaultDnExtSize, not the common.MinDnExtSize workerctl's flag
@@ -107,6 +108,11 @@ type ClusterSpec struct {
 	// DnBatch and CnBatch are alloc_conf's batch sizes.
 	DnBatch uint32
 	CnBatch uint32
+	// MdCheckDays is md_check_conf.interval_days, stored as given: zero, a
+	// suite's default, turns the md check off (dnv-worker.md AR16), where
+	// the gateway's CreateCluster stores its default for a request without
+	// the setting.
+	MdCheckDays uint32
 }
 
 // PutCluster implements CreateCluster (architecture.md, Clusters and
@@ -160,6 +166,7 @@ func PutCluster(
 			SideInterval:  spec.SideInterval,
 			CntlrInterval: spec.CntlrInterval,
 		},
+		MdCheckConf: &pb.MdCheckConf{IntervalDays: spec.MdCheckDays},
 	}
 	// This library plays the gateway, so it must store what CreateCluster
 	// stores: a FULLY RESOLVED conf (architecture.md, Common validation).

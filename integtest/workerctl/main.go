@@ -973,6 +973,8 @@ var commands = []command{
 	{"abort-repair", cmdAbortRepair},
 	{"force-start", cmdForceStart},
 	{"set-operator-in-charge", cmdSetOperatorInCharge},
+	{"set-md-check-days", cmdSetMdCheckDays},
+	{"set-md-check", cmdSetMdCheck},
 	{"delete-retired-leg", cmdDeleteRetiredLeg},
 	{"list-repairs", cmdListRepairs},
 	{"put-retired-leg", cmdPutRetiredLeg},
@@ -2943,6 +2945,61 @@ func cmdSetOperatorInCharge(g *globals, args []string) {
 		"grp_id":             idHex(uint64(grpId)),
 		"operator_in_charge": *on,
 		"sp_rev":             spRev,
+	})
+}
+
+// cmdSetMdCheckDays rewrites the case's cluster's md check interval
+// through plant.SetMdCheckDays (dnv-worker.md AR16).
+func cmdSetMdCheckDays(g *globals, args []string) {
+	fs := newFlagSet("set-md-check-days", g)
+	days := fs.Uint("days", 0, "md_check_conf.interval_days; 0 is off")
+	fs.Parse(args)
+
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	if err := plant.SetMdCheckDays(ctx, cli, cl, uint32(*days)); err != nil {
+		die("set-md-check-days: %v", err)
+	}
+	emit(map[string]any{"md_check_days": *days})
+}
+
+// cmdSetMdCheck writes one group's md check schedule through
+// plant.SetMdCheck (dnv-worker.md AR16): its next time, given as seconds
+// before now, and its request, given the same way or left at zero.
+func cmdSetMdCheck(g *globals, args []string) {
+	fs := newFlagSet("set-md-check", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	var grpId hexUint
+	fs.Var(&grpId, "grp", "grp_id of the group (required)")
+	nextAge := fs.Int64("next-age", 0,
+		"seconds before now the next check is due (negative: ahead)")
+	requestAge := fs.Int64("request-age", -1,
+		"seconds before now the request was made (-1: no request)")
+	fs.Parse(args)
+
+	if uint64(grpId) == 0 {
+		usageDie("set-md-check: --grp is required")
+	}
+	now := time.Now().Unix()
+	schedule := &pb.MdCheck{NextEpoch: uint64(now - *nextAge)}
+	if *requestAge >= 0 {
+		schedule.RequestEpoch = uint64(now - *requestAge)
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
+	spRev, err := plant.SetMdCheck(ctx, cli, cl, target, uint64(grpId),
+		schedule)
+	if err != nil {
+		die("set-md-check: %v", err)
+	}
+	emit(map[string]any{
+		"grp_id":        idHex(uint64(grpId)),
+		"next_epoch":    schedule.GetNextEpoch(),
+		"request_epoch": schedule.GetRequestEpoch(),
+		"sp_rev":        spRev,
 	})
 }
 

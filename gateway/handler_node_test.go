@@ -300,6 +300,8 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 			SideInterval:  common.DefaultHealthCheckInterval,
 			CntlrInterval: 14,
 		},
+		// No md check setting asked for: the default interval.
+		MdCheckConf: &pb.MdCheckConf{IntervalDays: common.DefaultMdCheckDays},
 	}, "stored cluster_conf")
 
 	// next_id starts at 1 and the bucket is ShardBucketSize zeros
@@ -384,6 +386,8 @@ func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 			SideInterval:  2,
 			CntlrInterval: 2,
 		},
+		// An absent md check setting takes the default interval.
+		MdCheckConf: &pb.MdCheckConf{IntervalDays: 30},
 	}, "the cluster_conf stored for an empty request")
 
 	// The other side of the same rule: what CreateCluster writes is exactly
@@ -392,6 +396,37 @@ func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 	// validation).
 	if err := model.ValidateClusterConf(cc); err != nil {
 		t.Errorf("the conf CreateCluster stored does not validate: %v", err)
+	}
+}
+
+// TestCreateClusterMdCheckConf: a present md check setting is stored as
+// given, its zero turning the check off, and one above MaxMdCheckDays is
+// INVALID_ARGUMENT with nothing written (dnv-worker.md AR16).
+func TestCreateClusterMdCheckConf(t *testing.T) {
+	s := newTestServer(t)
+	for _, days := range []uint32{0, 1, common.MaxMdCheckDays} {
+		name := hnodeName(fmt.Sprintf("mdcheck-%d", days))
+		_, err := s.CreateCluster(context.Background(),
+			&pb.CreateClusterRequest{ClusterName: name,
+				MdCheckConf: &pb.MdCheckConf{IntervalDays: days}})
+		wantCode(t, err, codes.OK, "CreateCluster with md_check_conf")
+		cc := &pb.ClusterConf{}
+		hnodeGet(t, s, model.ClusterConfKey(name), cc)
+		if got := cc.GetMdCheckConf(); got == nil ||
+			got.GetIntervalDays() != days {
+			t.Errorf("md_check_conf %v stored, want interval_days %d", got,
+				days)
+		}
+	}
+	name := hnodeName("mdcheck-over")
+	_, err := s.CreateCluster(context.Background(),
+		&pb.CreateClusterRequest{ClusterName: name,
+			MdCheckConf: &pb.MdCheckConf{
+				IntervalDays: common.MaxMdCheckDays + 1}})
+	wantCode(t, err, codes.InvalidArgument,
+		"CreateCluster with md_check_conf above the cap")
+	if hnodeExists(t, s, model.ClusterConfKey(name)) {
+		t.Errorf("a refused create wrote its cluster_conf")
 	}
 }
 
