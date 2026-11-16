@@ -111,8 +111,8 @@ md never trusts an old superblock.
   log in to etcd with no password and no certificate, so etcd must accept
   such clients and stay on the trusted network. Deploy dnv on an isolated
   network you trust. State: accepted. Procedure to write: the
-  network section of the operations doc, the document of procedures still
-  to be written, with a table of who connects to whom and a firewall
+  network section of [the operations doc](operations.md), the document of
+  procedures an operator follows by hand, with a table of who connects to whom and a firewall
   example.
 - **In Kubernetes every pod reaches dnv's ports.** Every pod reaches the gateway, the
   agents, etcd, the cdc and the NVMe/TCP ports through its machine's
@@ -174,9 +174,9 @@ always sends a piece's position.
   since then read what the leg holds there, possibly another pool's bytes.
   No error is shown. A start from a half-copied leg that md marked in sync
   does the same over the regions md never copied (section 5.2). State:
-  accepted. The operator asks for it. Procedure to write: the forced-start
-  guide, a document still to write, says which leg to choose and what an
-  older copy costs.
+  accepted. The operator asks for it. Procedure:
+  [the forced-start guide](operations.md#the-forced-start-guide) says which
+  leg to choose and what an older copy costs.
 
 ## 4. Data loss dnv accepts
 
@@ -231,8 +231,8 @@ Two more things belong with case 1:
 - **A clone whose clone meta group is lost stops.** The clone meta group
   holds the dm-clone's metadata. With no cntlr able to assemble it, no dm-clone is built. The
   clone's namespaces stay inaccessible and host IO queues. State:
-  accepted. Procedure to write: the forced-start guide covers the way
-  back.
+  accepted. Procedure: [the forced-start guide](operations.md#the-forced-start-guide), "A lost clone meta
+  group"; not tested.
 
 **An error is not a loss.** A write that fails with an error is not a data
 loss in the sense of this document. The application knows. Two cases:
@@ -339,17 +339,19 @@ The entries:
   When the mark names the half-copied leg instead, hosts read, over the
   regions md never copied, whatever that leg's disk held there, possibly
   another pool's bytes, with no error. Both legs show the same change
-  count. State: procedure to write, the forced-start guide: choose the leg
-  that died last, from the leg rows; `dnvctl group inspect` shows each
-  leg's bad-block count and md's view of it. Seen in the lab.
+  count. State: procedure,
+  [the forced-start guide](operations.md#the-forced-start-guide): name the
+  leg md copied from, not the new leg it copied onto; `dnvctl group
+  inspect` shows each leg's bad-block count and md's view of it. Seen in
+  the lab.
 - **A failed stop during a forced start keeps a bad-block list.** When the
   named leg carries a bad-block list, the forced start starts the array,
   stops it at once, and starts it again with the list dropped. If that stop
   fails, the array runs with the list, and the legs added to it copy the
   list's regions as bad too. Hosts then get IO errors over those regions,
-  though the named leg holds their data. State: accepted, with a procedure
-  to write: stop the group's arrays with a level step and mark the group
-  again. Forty such stops in the lab never failed.
+  though the named leg holds their data. State: accepted; no tested
+  procedure, and [the forced-start guide](operations.md#the-forced-start-guide)
+  says to stop and ask for help. Forty such stops in the lab never failed.
 - **A forced-start mark cleared during a change of the pool's owner.**
   Silent. A pool's owner is the worker that drives it. At an owner change
   the new owner sends a request that drops the mark. If the controller
@@ -477,7 +479,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   recorded that the array ran); the group stays down until a leg with a superblock is back, the
   named leg among them, which a new mark can name. If that leg is gone for
   good, the data on the zeroed legs can be reached only by hand with mdadm.
-  State: procedure to write, the forced-start guide. Not seen in the lab.
+  State: procedure, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
+  leg was wiped". Not seen in the lab.
 - **A read-only or corrupt thin pool has no repair path.** A failed commit
   leaves a slice's thin pool read-only. Corrupt thin pool metadata has no
   check and no repair flow in dnv. State: procedure to write, the repair
@@ -488,9 +491,11 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 - **A group whose in-sync leg dies during a copy waits for a forced
   start.** A repair finishes once the primary reports the new leg in place,
   while md may still copy onto it. The old leg dies during the copy. md
-  will not start from the half-copied leg. State: procedure to write, the
-  forced-start guide. Fix later, the primary starts from the leg md
-  recorded as last in sync. Not seen in the lab.
+  will not start from the half-copied leg. State: procedure,
+  [the forced-start guide](operations.md#the-forced-start-guide). Fix
+  later, the primary starts from the leg md recorded as last in sync. Seen
+  in the lab: the cn agent suite and the end-to-end suite break a group
+  this way and bring it back with a forced start.
 - **A member md keeps dropping is put back without end.** md drops a leg on
   any read error. The agent puts it back after every drop, and the leg row
   reads ok, so no repair acts. A leg with slow IO reads ok too, and every
@@ -553,17 +558,18 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   only where md recorded the other legs as failed.** When both legs of
   the group's list are dead, the group otherwise waits for its legs. An
   operator's forced start from the new leg waits too, for the leg of the
-  list that is not the repair's bad leg. State: procedure to write, one
-  line in the forced-start guide. Not seen in the lab.
+  list that is not the repair's bad leg. State: procedure, one line in
+  [the forced-start guide](operations.md#the-forced-start-guide). Not seen in the lab.
 - **After a forced start, a leg of the old identity can keep the group
   down.** A forced start from another leg leaves the repair's bad leg with
   the array's old identity. The primary does not add that leg back, since
   it may hold data the array lacks. After the repair is cancelled, the next
   assembly, as after a failover or a restart, finds legs of two identities
-  and leaves the group down, its row in error. State: procedure to write,
-  the forced-start guide: create a repair whose bad leg is the leg not
-  wanted, which keeps its data as a retired leg, or force-start the group
-  from the leg wanted. Not seen in the lab.
+  and leaves the group down, its row in error. A repair that would keep
+  that leg's data is refused while the leg reads healthy, which it does,
+  and a forced start from the leg wanted wipes it. State: open question;
+  [the forced-start guide](operations.md#the-forced-start-guide) says to
+  stop and ask for help. Not seen in the lab.
 - **A primary that keeps a leaving member is failed over, and the new
   primary leaves that member out.** The primary never fails a member that
   is leaving the group while no member that stays is in sync on a working
@@ -579,10 +585,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   so does a mark written over an array that runs. While it stays, the
   worker makes no leg repair of the group, and the primary acts on the mark
   at the array's next stop. State: accepted; the operator cancels the mark
-  (forced-start guide, to write). Not seen in the lab.
+  ([the forced-start guide](operations.md#the-forced-start-guide), "A forced start that waits"). Not seen in
+  the lab.
 - **A forced start waits on a primary whose layers above hold the broken
   array.** Only a failover or a level step that stops the pools lets it
-  run. State: procedure to write, one line in the forced-start guide.
+  run. State: procedure, [the forced-start guide](operations.md#the-forced-start-guide), "A forced start that
+  waits".
 - **An open repair, or the operator-in-charge flag, holds the worker's
   repair.** A group has one repair at a time. State: accepted, by design.
 - **A pool with a lost record waits for an operator.** A pool's record
@@ -693,7 +701,9 @@ what exists today. "Tool" is a dnvctl command, a gateway call, or what the
 worker does by itself. "Doc" names the document with the steps. The two
 tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
-names the document to write; it does not exist yet. Every row with no tool
+names [the operations doc](operations.md), the procedures an operator
+follows by hand, which holds the forced-start guide so far and gets the
+others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
 
@@ -721,8 +731,8 @@ steps; the section "Steps known today" below gives the longer ones.
 | Change a pool's level | `dnvctl sp set-level` | none | procedure to write, with the thin pool repair |
 | Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | none; the introduction explains the flow | procedure to write: the whole flow |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | none | procedure to write |
-| Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | none | procedure to write: the forced-start guide. |
-| Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself | none | procedure to write: when to keep a leg, when to clear the flag |
+| Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | [the forced-start guide](operations.md#the-forced-start-guide) | none |
+| Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself | [the forced-start guide](operations.md#the-forced-start-guide), "Keeping the old copies", for a forced start | procedure to write: when to keep a leg apart from a forced start |
 | Replace a cntlr by hand | `dnvctl cntlr set-enabled`, `dnvctl cntlr delete`, `dnvctl cntlr create` | none | procedure to write |
 | Change a pool's cntlid slots, the ranges of NVMe controller ids its exports use | `dnvctl sp set-cntlid-slots` | none | procedure to write, one line |
 | Change a pool's thresholds | none | — | not yet |
@@ -764,8 +774,8 @@ steps; the section "Steps known today" below gives the longer ones.
 
 ### Steps known today
 
-These are the longer steps written so far. The operations doc will hold
-the full procedures.
+These are the longer steps written so far. [The operations doc](operations.md)
+will hold the full procedures.
 
 **Back up and restore etcd.** Back up etcd with its own backup command,
 `etcdctl snapshot save`, on a schedule. dnv adds nothing to etcd's backup

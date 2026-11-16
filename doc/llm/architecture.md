@@ -3809,7 +3809,9 @@ whose groups have no repair to take over; `NOT_FOUND` when `grp_id` is in
 no group of the pool's slices or clones; `FAILED_PRECONDITION` when the
 group's clone is being deleted. The call takes the pool at every
 `sp_level`, since an operator sets the flag at a level where reactions stop
-before lowering it, and at those levels the flag stops nothing. No finish,
+before lowering it, and at those levels the flag stops nothing but the
+primary's re-assembly of a broken array of the group (`cnagent.md` CN12,
+The re-assembly). No finish,
 cancel or other step clears the flag, only this call: while it stands the
 worker creates no repair of the group, however long the operator leaves it.
 Action: STM: set the group's `operator_in_charge` to the request's value; a
@@ -7712,10 +7714,13 @@ document and only pointed to here.
   leg last and leaves it out; once a cancel has made it a leg of the
   `leg_list` like any other, the next assembly, after a failover, a
   restart or a level step, finds two identities among the legs that decide
-  it, and the group stays down, its row `ERROR`, until the operator creates
-  a repair whose bad leg is the leg of the identity not wanted, which keeps
-  its data at the finish, or force-starts the group from the leg wanted
-  (`cnagent.md` CN12).
+  it, and the group stays down, its row `ERROR`, until the operator
+  force-starts the group from the leg wanted, which wipes the other leg,
+  or creates a repair whose bad leg is the leg of the identity not wanted,
+  which keeps its data at the finish; `CreateRepair` refuses that create
+  while the leg has no health epoch, which a leg that serves and passes
+  its probe does not get, so for such a leg the forced start is the one
+  way (`cnagent.md` CN12).
 * **A forced start and the re-assembly wait on a primary whose layers
   above hold the broken array.** At a level that builds thin pools, a slice's group array that
   does not run is held open by the devices its slice's pool is built over,

@@ -20,6 +20,10 @@ a caller breaks this, as [`doc/human/scope.md`](doc/human/scope.md) says.
 - [`doc/human/scope.md`](doc/human/scope.md) — what dnv promises, the data
   loss it accepts, what it does not do, and every known limit of dnv beyond
   the test suites and the enforced sizes, with its state.
+- [`doc/human/operations.md`](doc/human/operations.md) — the procedures an
+  operator follows by hand, starting with the forced-start guide: how to
+  bring back a group whose every leg failed, which leg to choose, and which
+  steps can lose data.
 - [`doc/human/tutorial_all_in_one.md`](doc/human/tutorial_all_in_one.md) — dnv
   on one machine, run from its binaries: the whole system, then a host
   connected to a volume with nvme-stas, every command complete.

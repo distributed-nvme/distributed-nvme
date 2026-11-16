@@ -1588,9 +1588,11 @@ dm-clone (CN18).
   group's error for the pass, as a failed add is. A refused member is named
   in the group's reading (`GrpInfo.refusal`, CN28), a text for people, and
   the read's verdict does not name it (CN30), so no syncup comes for it on
-  every round; it stays out until the operator replaces it with a repair,
-  whose finish keeps its data as a retired leg, or starts the group from it
-  with a forced start. Reason: a member of another identity is of an older
+  every round; it stays out until the operator starts the group from it
+  with a forced start, or replaces it with a repair, whose finish keeps its
+  data as a retired leg, once the leg carries a health epoch:
+  `CreateRepair` refuses a bad leg with none (`architecture.md`, Repairs),
+  and a leg md refuses for its identity can serve and pass its probe. Reason: a member of another identity is of an older
   history, as a forced start from another leg leaves the open repair's bad
   leg, which the move of the repair to ABORTED then makes a member like any
   other; it can hold data the array lacks, and md's copy would overwrite it

@@ -702,7 +702,8 @@ func placeFreshLeg(
 // It checks the token first (checkSpRev) and takes a pool at any level that
 // is not being deleted (loadSpConfAnyLevel): an operator sets the flag at a
 // level where reactions stop before lowering it, which leaves the worker no
-// pass to create its repair in, and at those levels the flag stops nothing.
+// pass to create its repair in, and at those levels the flag stops nothing
+// but the primary's re-assembly of a broken array of the group.
 // The pool must be md-raid1, whose groups have repairs to take over, and the
 // group one its parent holds and not a deleting clone's (loadGrpOf). A group
 // whose flag already equals on is answered as done and written to not at
