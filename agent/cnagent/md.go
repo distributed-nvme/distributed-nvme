@@ -1157,6 +1157,7 @@ func (s *CnAgentServer) ensureGroup(
 	gp *grpPlan,
 	available map[uint64]bool,
 	legRows map[uint64]*pb.ResInfo,
+	dead map[uint64]bool,
 ) (
 	detail *MdDetail,
 	running, forcedStarted bool,
@@ -1196,7 +1197,7 @@ func (s *CnAgentServer) ensureGroup(
 		return nil, false, false, grpRefusals{}, markedErr(gp, err)
 	}
 	changed, refusals, err := s.reconcileMembers(
-		ctx, gp, detail, available, legRows)
+		ctx, gp, detail, available, legRows, dead)
 	if err != nil {
 		return nil, true, forcedStarted, grpRefusals{}, err
 	}
@@ -2107,7 +2108,12 @@ func (s *CnAgentServer) stopGroupArray(ctx context.Context, dev string) error {
 // (hasCopySource) —
 // which mdadm turns into a re-add that md resyncs from its write-intent
 // bitmap. md keeps its claim on a failed member until the member is removed,
-// so an --add alone is refused. The put-back is an mdadm child the soft
+// so an --add alone is refused. Before the put-back it fails, and does not
+// remove, a leg_list member whose leg is dead while another member keeps
+// the data (deadMembers, from dead, the legs CnAgentServer.deadLegs read at
+// the pass's start), so the death reaches the survivor's superblock on an
+// idle array, and the put-back takes the member back from the bitmap once
+// its leg serves again. The put-back is an mdadm child the soft
 // timeout can kill, never a write to the member's sysfs state, which the
 // agent's own process would make and which waits on md's lock for as long as
 // a superblock write is stuck on a member.
@@ -2166,6 +2172,7 @@ func (s *CnAgentServer) reconcileMembers(
 	detail *MdDetail,
 	available map[uint64]bool,
 	legRows map[uint64]*pb.ResInfo,
+	dead map[uint64]bool,
 ) (bool, grpRefusals, error) {
 	// A Foreign array never gets here (ensureGroup), so every member has a
 	// dm name.
@@ -2218,6 +2225,19 @@ func (s *CnAgentServer) reconcileMembers(
 	sources := func(lp *legPlan) bool {
 		return copySourceLeg(available[lp.legId], legRows[lp.legId])
 	}
+	// The early fail of a dead leg's member (deadMembers): failed, not
+	// removed, so the put-back takes it back once its leg serves again. No
+	// later step of the pass reads the member's state: its leg does not
+	// serve, so it is neither a copy source nor a leg that takes a member.
+	failed := make(map[string]bool)
+	for _, lp := range deadMembers(gp, held, func(lp *legPlan) bool {
+		return dead[lp.legId] && !available[lp.legId]
+	}, sources) {
+		if err := run(s.md.Fail, lp.path); err != nil {
+			return changed, grpRefusals{}, err
+		}
+		failed[lp.name] = true
+	}
 	// The put-back's remove. A removed member is no longer held, so the
 	// add loops below add it in this same pass.
 	for _, lp := range putBackLegs(gp, held, takes, sources) {
@@ -2256,6 +2276,12 @@ func (s *CnAgentServer) reconcileMembers(
 	step, rep, err := s.takeBackStep(ctx, gp, held, takes, step)
 	if err != nil {
 		return changed, grpRefusals{}, err
+	}
+	for i := range step.out {
+		// A bad leg the early fail failed this pass is not failed again.
+		if failed[step.out[i].lp.name] {
+			step.out[i].fail = false
+		}
 	}
 	for _, out := range step.out {
 		if out.fail {
@@ -2474,9 +2500,11 @@ type repBadLeg struct {
 // out of its place is removed; one in its place that cannot take a member is
 // failed and removed; one in its place that can take a member, serving with
 // an OK row, stays, and the repair waits, so the step does nothing at all.
-// So the bad leg is failed only in a pass whose add's conditions hold, so
-// that the new leg can follow at once; a remove or an add that md refuses
-// still leaves the new leg out of that pass (cnagent.md CN12). Any other
+// So this step fails the bad leg only in a pass whose add's conditions
+// hold, so that the new leg can follow at once; a remove or an add that md
+// refuses still leaves the new leg out of that pass (cnagent.md CN12). A
+// bad leg whose leg is dead is failed earlier, and stays in the array, by
+// the early fail (deadMembers). Any other
 // repair adds nothing. Both callers then put the step through CN12's
 // take-back check (takeBackStep), which reads the members' superblocks and so
 // stays out of this decision from one reading of sysfs.
@@ -2527,6 +2555,38 @@ func repSteps(
 		}
 	}
 	return step
+}
+
+// deadMembers are the members CN12's member reconciliation fails early
+// (cnagent.md CN12, The early fail): each leg_list member, an open repair's
+// bad leg included, that md holds in its place and does not show faulty
+// (MdMember.holdsPlace), whose leg is gone — not available this pass and its
+// prober at deadLegRounds failed rounds in a row (CnAgentServer.deadLegs) —
+// while another member md holds in sync is a copy source (hasCopySource): of
+// a leg_list leg or an open repair's new leg, on a leg that serves and whose
+// row does not read ERROR. md learns that a member is dead only from IO to
+// it, so on an idle array it goes on counting a dead member in sync, and its
+// survivor's superblock still records both: mdadm then refuses to start the
+// survivor alone after a failover or a reboot. The fail writes the death
+// into the survivor's superblock. The copy source is on a leg that serves,
+// which a member this step takes is not, so the step never fails the member
+// that keeps the data, nor leaves the array with no member in sync. gone and
+// sources are the converge's or the read's view (CN30).
+func deadMembers(
+	gp *grpPlan,
+	held map[string]MdMember,
+	gone func(*legPlan) bool,
+	sources func(*legPlan) bool,
+) []*legPlan {
+	var out []*legPlan
+	for _, lp := range gp.legs {
+		member, ok := held[lp.name]
+		if ok && member.holdsPlace() && gone(lp) &&
+			hasCopySource(gp, held, sources, lp.name) {
+			out = append(out, lp)
+		}
+	}
+	return out
 }
 
 // hasCopySource reports whether a member other than name can feed the copy
@@ -2801,8 +2861,10 @@ func errInSyncGuard(member, dev string) error {
 }
 
 // putBackNames is what a cntlr's verdict names beside its leftovers for one
-// md group (cnagent.md CN30): the dm name of each member that the converge's
-// member reconciliation would put back or add (CN12) — a leg_list member
+// md group (cnagent.md CN30): the dm name of each member the converge's
+// member reconciliation would fail early (deadMembers, with dead, the read's
+// CnAgentServer.deadLegs, and legServes for the leg's availability), then of
+// each member it would put back or add (CN12) — a leg_list member
 // other than an open repair's bad leg that md has failed and moved out of its
 // slot, or that the running array lacks, on a leg that can take it, beside a
 // copy source (hasCopySource) — then
@@ -2822,10 +2884,11 @@ func errInSyncGuard(member, dev string) error {
 // every read, and each round that answers from such a read brings the
 // SyncupCntlr again (cnagent.md, Known limits). A converge's code never
 // names it (convergeCntlr), so the round that answers from the re-send's
-// observation brings none for it. Except for the repair's removals above
-// (abortRemovals, startedBadLegs), a member that still holds its slot, one
-// being recovered, or one md holds without a place and has not failed is
-// never named, nor a new leg whose add waits for its bad leg. The late-member
+// observation brings none for it. Except for the early fail's members and
+// the repair's removals above (deadMembers; abortRemovals, startedBadLegs),
+// a member that still holds its slot, one being recovered, or one md holds
+// without a place and has not failed is never named, nor a new leg whose add
+// waits for its bad leg. The late-member
 // retry reads none of this: it counts a leg_list member by its leg's
 // availability, never by what md holds on it (hasLateMember).
 //
@@ -2848,6 +2911,7 @@ func (s *CnAgentServer) putBackNames(
 	gp *grpPlan,
 	detail *MdDetail,
 	legRows map[uint64]*pb.ResInfo,
+	dead map[uint64]bool,
 ) ([]string, grpRefusals) {
 	if detail == nil {
 		return nil, grpRefusals{}
@@ -2876,6 +2940,14 @@ func (s *CnAgentServer) putBackNames(
 	}
 	var names []string
 	var refusals grpRefusals
+	// The early fail's members (deadMembers), by the read's view of a leg
+	// that serves and of a copy source. No later step reads what md would
+	// show of them after the fail: each is on a leg that does not serve.
+	for _, lp := range deadMembers(gp, held, func(lp *legPlan) bool {
+		return dead[lp.legId] && !serves(lp)
+	}, sources) {
+		names = append(names, lp.name)
+	}
 	arrayUuid := s.arrayUuidOnce(detail)
 	for _, lp := range gp.legs {
 		if gp.isBadLeg(lp.legId) {

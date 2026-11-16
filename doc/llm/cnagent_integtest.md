@@ -206,6 +206,13 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   primary, freeze md's copy once the array reads broken, wait for broken to
   hold, and mark while the leg is still dead,
   so that the forced start stops the array before the leg is back.
+* A few seconds after md's copy onto a member ends, md clears the bits of
+  its write-intent bitmap in a write to every member, so a leg cut then
+  gets an IO and md fails its member by itself, seen about 8 s after such a
+  cut on kernel 7.0.0-42: a stage that needs an array with no IO
+  waits until the bitmap on every member reads no dirty chunk. Once it does,
+  and the array reads clean, only the agent's probe writes to the legs, and
+  none goes through md.
 * An assembly with the run and force flags from one member whose superblock
   counts two working members starts the array degraded; a zero of a device
   with no superblock answers success; and a member zeroed and then added is
@@ -363,7 +370,11 @@ Started from one leg with the agent's assemble command (`cnagent.md` CN12's
 assembly case), mdadm refuses, its own message saying it needs every member to
 start the array, writes nothing to that leg's superblock and leaves no array
 holding either leg; started from both legs, the array runs clean, both members
-in sync, with nothing to rebuild. The command is the agent's: the promotion
+in sync, with nothing to rebuild. With one leg then failed and the array
+stopped, the survivor's superblock counts itself alone and the failed leg's
+still counts both: the failed leg alone is refused, and the survivor alone
+starts the array, degraded, its member in sync, the fact the early fail
+rests on (`cnagent.md` CN12, The early fail). The command is the agent's: the promotion
 below holds each assemble command the agent runs from both legs to the
 arguments the same rule builds for that group, and the unit tests hold the
 agent's start from one leg to the same rule. It then builds md-raid1 groups
@@ -379,7 +390,10 @@ pre-step), stops the arrays and keeps the legs; the promote assembles both
 (CN12's assembly case), each with the arguments the first stage's rule builds
 for its own group, the data surviving. With the primary's legs into one DN cut
 under a host write, every fresh check round reads both md rows OK until the
-data row reports degraded and the dead legs' rows error (CN12, CN28, CN29).
+data row reports degraded and the dead legs' rows error (CN12, CN28, CN29);
+once a dead leg's probe has failed twice, a round may also name, with the
+leftover code, a member of it md still holds in its place, for the early
+fail no converge of that stage runs (CN12, CN30), and names nothing else.
 Once the write completes on the surviving leg, the agent's log holds no mdadm
 command under the stage's trace id, under which each read those rounds start
 logs (`dnagent.md` SH29): that covers every such read that has ended by then,
@@ -392,7 +406,19 @@ CN30). The same put-back of a member failed by hand, on a whole array with no
 IO while the member is out, is one converge whose only mdadm commands are the
 remove and then the add, and the sectors it writes to the member are a small
 part of the array: that count, never a time, tells md's re-add from its bitmap
-from the full copy mdadm makes when it cannot re-add. With the port link of one
+from the full copy mdadm makes when it cannot re-add. With the same legs cut
+again and no IO to the arrays — the cut waits until md's write-intent bitmap
+on every member reads no dirty chunk and both arrays read clean, since md
+clears the bitmap a few seconds after a copy ends in a write to every
+member, which a cut leg would fail — a fresh check round names each member md has
+not failed by itself once its leg's probe has failed twice (CN11, CN30), the
+stage logging how long after the cut, and the `SyncupCntlr` re-sent as the
+worker would fails each named member in md once and removes none (CN12, The
+early fail): both md rows read OK, and the survivor's superblock records the
+death, its array state counting itself alone. With the legs back, the
+re-sends, or the CN10 retry that converge registered, put the members back,
+and the data member takes back a small part of the array, counted in sectors
+as before. With the port link of one
 of the primary's data sides taken away on its DN while the port listens, the
 primary's reconnect is refused with DNR and its kernel deletes the controller;
 with the link back, a fresh check round names the side with no controller

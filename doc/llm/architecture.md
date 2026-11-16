@@ -5394,7 +5394,14 @@ runs. The assemble leaves the degraded start to mdadm: a lone
 survivor whose superblock still counts a clean full array is refused, and
 the group is then not available this pass. That refusal is the cross-leg
 half of failover safety ([D16]) — a stale leg cannot be started alone,
-and once both legs are back the event counts pick the newer one. Only an
+and once both legs are back the event counts pick the newer one. md
+writes a member's death into the other members' superblocks when it
+fails the member, which on an idle array happens when the primary fails
+it: above all by the early fail of a member whose leg is dead while
+another member keeps the data (`cnagent.md` CN12, The early fail), and by
+a repair's or a removal's own fail. The survivor then starts alone, and
+the dead leg, whose own superblock still counts both, stays refused
+alone. Only an
 operator's forced start overrides that arbitration, from the one leg the
 operator names, and only while its mark stands (Repair, Forced start). The
 cases, the guards around the create, the sysfs read of the members and
@@ -5758,10 +5765,12 @@ the other parts rely on this much of them.
   reports a leg row for it (Primary cntlr), so the sp worker judges a new
   leg as it judges a leg.
 * For a CREATED repair whose flag is clear, the primary adds the new leg to
-  the running array under the conditions of `cnagent.md` CN12, and it fails
-  the bad leg only in a pass where the new leg can follow at once. It never
-  fails a bad leg that still serves with an `OK` leg row, so such a repair
-  waits in CREATED (Known limits).
+  the running array under the conditions of `cnagent.md` CN12, and its add
+  fails the bad leg only in a pass where the new leg can follow at once; a
+  bad leg whose leg is dead it fails earlier and keeps in the array, as any
+  `leg_list` member (`cnagent.md` CN12, The early fail). It never fails a
+  bad leg that still serves with an `OK` leg row, so such a repair waits in
+  CREATED (Known limits).
 * While the repair is CREATED or STARTED, no add and no put-back takes the
   bad leg back into the array. An assembly can still take it in; md then
   lets go of it only through the add, in the pass that adds the new leg,
@@ -6235,7 +6244,7 @@ has just died and neither its health epoch, nor the group's row, nor the
 legs md holds in sync show it yet, or when the report that holds a leg in
 sync predates a copy onto that leg (`dnv-worker.md`, Known limits: "The
 gate can read a row that is about to turn" and "The in-sync half of the
-healthy-leg test reads md, which learns of a death only from IO"). A
+healthy-leg test reads md, which learns of a death late"). A
 dm-clone leaves read-write mode when an operation on its metadata device
 fails; in read-only or failed metadata mode
 it reads `RES_STATUS_ERROR` and serves no namespace, and nothing the agent
@@ -7628,8 +7637,9 @@ document and only pointed to here.
   forced start (Repair, Forced start), the group stays down, and the worker
   repairs nothing of it (`dnv-worker.md`, Known limits). An idle array
   whose legs all died keeps running until IO reaches it, a read as well as
-  a write, since md learns of a dead member from IO alone (`cnagent.md`
-  CN12). A broken array refuses the thin pool's commits too. When it is a
+  a write, since md learns of a dead member from IO, and the primary's
+  early fail of a member whose leg is dead waits for another member that
+  keeps the data (`cnagent.md` CN12, The early fail). A broken array refuses the thin pool's commits too. When it is a
   data group and the slice's meta group still takes writes, a commit under
   writes leaves the slice's thin pool read-only with its needs_check flag
   set, as a `RedundNone` group's failed commit does (A pool commit in a

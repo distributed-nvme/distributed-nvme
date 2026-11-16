@@ -387,6 +387,7 @@ func (s *CnAgentServer) build(
 	plan.mdWalks = &mdWalkOnce{md: s.md}
 	late := false
 	if plan.wantGrp {
+		dead := s.deadLegs(st)
 		for _, gp := range plan.grps {
 			if gp.deferred {
 				// [D15]: a leg of leg_list is still provisioning, so there is no
@@ -398,7 +399,7 @@ func (s *CnAgentServer) build(
 				continue
 			}
 			detail, running, forcedStarted, refusals, err := s.ensureGroup(
-				ctx, plan, gp, available, info.LegIdToLeg)
+				ctx, plan, gp, available, info.LegIdToLeg, dead)
 			// CN28: an OK row carries the array's state line, as a read's
 			// does, when the pass read the array as it left it.
 			line := ""

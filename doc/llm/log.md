@@ -316,8 +316,8 @@ each sweep or read whose verdict was not clean, the worker's once per such
 calls do NOT remove is in both logs at every re-send, which is exactly
 what distinguishes it from one the next pass removed. A leftover that only a
 background read's verdict names, and that the `Syncup*` it brings does not
-report — an md member that syncup's converge puts back or adds
-(`cnagent.md` CN12), or a subsystem directory that outlives its last
+report — an md member that syncup's converge fails early, puts back or
+adds (`cnagent.md` CN12), or a subsystem directory that outlives its last
 controller — is in the agent's record alone, under the trace id of the
 round that started the read. The worker re-sends the `Syncup*` on the
 round that answers from that read's observation, under that round's own

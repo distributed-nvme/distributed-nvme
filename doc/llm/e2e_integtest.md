@@ -653,8 +653,9 @@ proved by an unchanged count of the worker's failover records. A group with
 no healthy leg: the disk nodes of both of the same group's legs die the same
 way, one right after the other, while the pool holds no repair, and no host IO
 runs until the group is whole again, as md learns of a dead member only from an
-IO to it (`cnagent_integtest.md`, Lab facts) and so keeps the array running for
-the leg that comes back; past the side threshold the group's legs and retired
+IO to it (`cnagent_integtest.md`, Lab facts) or from the primary's early fail,
+which never fails the last member md holds in sync (`cnagent.md` CN12), and so
+keeps the array running for the leg that comes back; past the side threshold the group's legs and retired
 legs and the pool's revision must be unchanged, no repair of the group may
 exist, and the worker must have logged that no leg of the group is healthy
 (`dnv-worker.md` AR8); with the disk node that died last back, the worker must

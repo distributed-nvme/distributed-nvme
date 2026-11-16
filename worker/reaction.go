@@ -2523,9 +2523,11 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			// health epoch can still be half copied — a new leg a finish
 			// put in its place while md copies onto it — and repairing
 			// the only leg md holds in sync loses the group at the next
-			// failover. md learns that a member is dead only from IO to
-			// it, so an idle array whose legs are all dead still runs and
-			// its row reads OK, which the gate lets through. The leg
+			// failover. md learns that a member is dead from IO to it, or
+			// from the primary's early fail, which needs another member
+			// that keeps the data (cnagent.md CN12), so an idle array whose
+			// legs are all dead still runs and its row reads OK, which the
+			// gate lets through. The leg
 			// epochs come from the primary's probe of each leg, which runs
 			// with or without IO, so this test sees what the row does not;
 			// and a primary whose own network fails, which reads every leg
@@ -3547,8 +3549,10 @@ func (w *spWorker) retireOldLeg(ctx context.Context, p *spPass) {
 // may be deleted, else the reason it is kept. Reason (AR12): its data
 // exists twice elsewhere only while the group is whole, so a group waiting
 // for its legs keeps its retired legs; md learns that a member is dead
-// only from IO, so an idle array over a dead leg still reads whole, while
-// the legs' and sides' err_epochs come from probes that run without IO; and
+// only from IO or from the primary's early fail, which waits for two failed
+// probe rounds (cnagent.md CN12), so an idle array over a dead leg can still
+// read whole, while the legs' and sides' err_epochs come from probes that
+// run without IO; and
 // a row turns UNKNOWN when the primary's stream dies, while a plain field
 // such as the whole flag does not. So the leg is kept while
 // its group is not found or is a deleting clone's, which DeleteRetiredLeg

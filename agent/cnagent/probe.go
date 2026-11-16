@@ -117,6 +117,10 @@ func (s *CnAgentServer) probeCntlr(
 
 	// Groups — the reading's md walk serves all of them and the concat rows
 	// below (Md.Detail, mdDevNo).
+	var dead map[uint64]bool
+	if plan.wantGrp {
+		dead = s.deadLegs(st)
+	}
 	for _, gp := range plan.grps {
 		key := resKeyOf(resKeyGrpFmt, gp.grpId)
 		switch {
@@ -128,7 +132,7 @@ func (s *CnAgentServer) probeCntlr(
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
 			names, refusals := s.putBackNames(
-				ctx, plan, gp, detail, info.LegIdToLeg)
+				ctx, plan, gp, detail, info.LegIdToLeg, dead)
 			putBack = append(putBack, names...)
 			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp))
 		case plan.primary:

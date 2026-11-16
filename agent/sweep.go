@@ -27,9 +27,9 @@ import (
 // so an operator reading either can tell which enumeration found it.
 // LeftoverKindMdMember is the one label no sweep's attribution produces: it
 // names an md member that a cn agent's cntlr verdict reports so that the
-// worker re-sends the SyncupCntlr whose converge puts the member back, adds
-// it to an array that lacks it, or removes a repair's member md holds without
-// a place (cnagent.md CN30).
+// worker re-sends the SyncupCntlr whose converge fails it early for its dead
+// leg, puts the member back, adds it to an array that lacks it, or removes a
+// repair's member md holds without a place (cnagent.md CN30).
 const (
 	LeftoverKindDm       = "dm"
 	LeftoverKindMd       = "md"

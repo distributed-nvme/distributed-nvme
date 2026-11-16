@@ -3928,8 +3928,10 @@ no leg in sync, so the group waits for one that does. Reason: a leg with an
 once every leg of its `leg_list` carries one, a repair would start
 replacing the last legs that may still hold it with a fresh leg holding
 none of it, and its copy would read a dead member, which breaks the array.
-The gate does not cover the case: md learns that a member is dead only from
-IO to it, so an idle array whose legs have all died still runs and its row
+The gate does not cover the case: md learns that a member is dead from IO
+to it, or from the primary's early fail of a member whose leg is dead, which
+needs another member that keeps the data (`cnagent.md` CN12, The early
+fail), so an idle array whose legs have all died still runs and its row
 reads `OK`. The legs' `err_epoch`s come from the primary's probe of each
 leg, which runs whether or not the array has IO (`cnagent.md` CN11; HL2),
 so this test sees what the row does not; and a primary whose own network
@@ -3939,8 +3941,10 @@ be half copied — a repair's new leg that a finish put in place while md
 copies onto it (`architecture.md`, Repair), or a leg md has failed out of
 the array whose probe passes again — and repairing the only leg md holds in
 sync loses the group at the next failover. The `err_epoch` half stays
-because md still holds a dead member in sync on an idle array, where only
-the leg's probe sees the death. The rule is the pass's alone: `CreateRepair`
+because md still holds a dead member in sync on an idle array until the
+primary's early fail, which waits for two failed probe rounds and for
+another member that keeps the data (`cnagent.md` CN12), where the leg's
+probe sees the death first. The rule is the pass's alone: `CreateRepair`
 does not re-check it, and an operator's create is not held by it.
 
 **A clone meta group.** Leg repair runs on it as on a slice's group, through
@@ -4092,8 +4096,10 @@ only from an observation at the snapshot's revision or later, since an
 older report's whole flag can be from before the group's last repair began,
 read while the bad leg was still in sync, while a finish has since put in
 its place a new leg md may still copy onto; and md learns
-that a member is dead only from IO, so an idle array over a dead leg still
-reads whole, while the leg epochs come from probes that run without IO.
+that a member is dead only from IO or from the primary's early fail, which
+waits for two failed probe rounds (`cnagent.md` CN12), so an idle array
+over a dead leg can still read whole, while the leg epochs come from probes
+that run without IO.
 The first old leg nothing keeps is deleted, and the step ends. The delete
 carries the snapshot's `SpRev` revision as its expected revision (MD6), so
 a pool that changed since the snapshot the conditions were judged on
@@ -5679,10 +5685,14 @@ which no suite case sets, so no suite case runs RW13's count compare.
   and a leg that dies within that window before a pass that finds
   another leg of its group due meets it at any threshold.
 * **The in-sync half of the healthy-leg test reads md, which learns of a
-  death only from IO.** A leg counts as its group's healthy leg only while
+  death late.** A leg counts as its group's healthy leg only while
   the current primary's latest report holds it in sync and it has no
   `err_epoch` (AR8). md holds a member in sync once its copy has ended and
-  until md sees it die, which on an idle array it does not, so a leg whose
+  until md sees it die, which on an idle array it does only when the
+  primary fails it in md: by the early fail, at the first converge after
+  two failed probe rounds — one a check round's verdict brings, or the
+  primary's own background retry — and only while another member keeps
+  the data, or by a repair's step (`cnagent.md` CN12), so a leg whose
   member dies with no IO goes on counting by the report until its probe
   fails and HL2 stamps its `err_epoch`, the window that "The gate can read
   a row that is about to turn", above, describes. A half-copied leg —

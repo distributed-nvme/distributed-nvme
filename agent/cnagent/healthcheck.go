@@ -120,6 +120,9 @@ type legProber struct {
 	inflightSince time.Time
 	completed     bool
 	lastErr       error
+	// failedRounds is the number of completed rounds in a row that failed,
+	// zero after a round that succeeds (deadRounds).
+	failedRounds int
 }
 
 // snapshot is the lock-free readers' view: {inflightSince, completed, lastErr}.
@@ -127,6 +130,20 @@ func (p *legProber) snapshot() (time.Time, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.inflightSince, p.completed, p.lastErr
+}
+
+// deadRounds is CN11's count of the prober's failed rounds in a row at now:
+// the completed rounds in a row that failed, plus one for a round in flight
+// longer than stall, which then counts once, whether it ends in an error or
+// is still in flight.
+func (p *legProber) deadRounds(now time.Time, stall time.Duration) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := p.failedRounds
+	if !p.inflightSince.IsZero() && now.Sub(p.inflightSince) > stall {
+		n++
+	}
+	return n
 }
 
 func (p *legProber) begin(now time.Time) {
@@ -141,6 +158,11 @@ func (p *legProber) finish(err error) {
 	p.inflightSince = time.Time{}
 	p.completed = true
 	p.lastErr = err
+	if err != nil {
+		p.failedRounds++
+	} else {
+		p.failedRounds = 0
+	}
 }
 
 // startLegProber registers one leg's prober when the wrapper converges. The
@@ -257,6 +279,34 @@ func healthBlockPayload(cnId uint64, unixNano int64) []byte {
 	binary.BigEndian.PutUint64(
 		buf[len(common.LegHealthMagic)+8:], uint64(unixNano))
 	return buf
+}
+
+// deadLegRounds is how many failed rounds in a row of a leg's prober make it
+// dead to the member reconciliation (CN11, CN12): one failure can be a
+// passing fault, two in a row with the leg not available are its death.
+const deadLegRounds = 2
+
+// deadLegs are the legs of the cntlr whose probers count deadLegRounds or
+// more failed rounds in a row now (legProber.deadRounds), read once at the
+// start of a converge's or a read's groups so every step of the pass sees
+// one set (CN11, CN12). A leg with no prober, as on a standby or before a new
+// primary's first round, is never in it.
+func (s *CnAgentServer) deadLegs(st *cntlrState) map[uint64]bool {
+	s.mu.Lock()
+	probers := make([]*legProber, 0, len(st.probers))
+	for _, prober := range st.probers {
+		probers = append(probers, prober)
+	}
+	stall := s.probeStall
+	s.mu.Unlock()
+	now := s.now()
+	dead := make(map[uint64]bool)
+	for _, prober := range probers {
+		if prober.deadRounds(now, stall) >= deadLegRounds {
+			dead[prober.legId] = true
+		}
+	}
+	return dead
 }
 
 // legProbeOutcome is the CN28 rule: an attempt in flight longer than

@@ -1521,6 +1521,30 @@ md_array_state() {
 	cat "/sys/block/$node/md/array_state" || return 1
 }
 
+# md_bitmap_dirty <dm name> — the count of dirty chunks in the write-intent
+# bitmap on the dm device <dm name>, as mdadm --examine-bitmap reads it from
+# the device. md sets a chunk's bit on the device before a write to it and
+# clears it, in a write of its own to every member, over a few of its
+# daemon's periods after the write ends; 0 means md has no bitmap write left
+# to send until the next write to the array. It fails, saying so, when the
+# read fails, does not end within its bound, or prints no count.
+md_bitmap_dirty() {
+	local out n
+	out=$(timeout 30 mdadm --examine-bitmap "/dev/mapper/$1" 2>&1) || {
+		echo "md_bitmap_dirty: mdadm --examine-bitmap of $1 failed: $out" >&2
+		return 1
+	}
+	n=$(printf '%s\n' "$out" |
+		sed -n 's/^ *Bitmap : .*, \([0-9][0-9]*\) dirty .*/\1/p' | head -1)
+	case "$n" in
+	'' | *[!0-9]*)
+		echo "md_bitmap_dirty: no dirty count for $1: $out" >&2
+		return 1
+		;;
+	esac
+	echo "$n"
+}
+
 # md_examine <dm name> — one line "role=<role> recovery=<sectors|none>
 # uuid=<array uuid> bbl=<entries> events=<n>" of the md superblock on the dm
 # device <dm name>, from the human-readable mdadm --examine, the one form
@@ -3886,6 +3910,26 @@ check_verdict() { # cnidx sp cntlr rev
 		"$(jq_of "$out" '.agent_reply.details // ""')"
 }
 
+# verdict_names_only dies unless a check_verdict line is clean ("0 …") or the
+# leftover code whose every entry is one of the given entries.
+verdict_names_only() { # verdict label entry…
+	local vd=$1 label=$2 details entry want ok
+	shift 2
+	case "$vd" in
+	"0 "*) return 0 ;;
+	"4 leftover("*"): "*) ;;
+	*) die "$label: the check round reads '$vd'" ;;
+	esac
+	details=${vd#4 leftover(*): }
+	while IFS= read -r entry; do
+		ok=""
+		for want in "$@"; do
+			[ "$entry" = "$want" ] && ok=1
+		done
+		[ -n "$ok" ] || die "$label: the verdict names '$entry': $vd"
+	done < <(printf '%s\n' "$details" | sed 's/, /\n/g')
+}
+
 # resync_until_clean plays the worker's re-sync on a cntlr's verdict
 # (dnv-worker.md RW4): a check round, and while it answers the leftover code,
 # the SyncupCntlr re-sent at the stored revision, until a round reads clean.
@@ -4399,6 +4443,47 @@ redund_md_refusal() {
 	*) die "both: $md reads '$st', want degraded 0, idle, both members in_sync" ;;
 	esac
 
+	# The survivor of a member md has failed starts alone: md writes the
+	# death into the members that stay when it fails a member, as the
+	# primary's early fail makes it do on an idle array (cnagent.md CN12,
+	# The early fail), and the failed member's own superblock, which md no
+	# longer writes, still counts both, so it alone is still refused.
+	out=$(helper "$vm" "mdr_run '$dev' --fail '$leg1'")
+	assert_eq "$(mdr_rc "$out")" 0 "survivor: mdadm --fail of one leg ($out)"
+	out=$(helper "$vm" "mdr_run --stop '$dev'")
+	assert_eq "$(mdr_rc "$out")" 0 "survivor: mdadm --stop ($out)"
+	rc=0
+	got=$(mdr_wait_held "$vm" "" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" "survivor: no array holds a leg after the stop"
+	ex0=$(helper "$vm" "mdr_examine $leg0") || die "survivor: examine $leg0"
+	ex1=$(helper "$vm" "mdr_examine $leg1") || die "survivor: examine $leg1"
+	assert_eq "$(mdr_field "$ex0" "Array State")" "A." \
+		"survivor: the survivor's superblock records the death"
+	assert_eq "$(mdr_field "$ex1" "Array State")" AA \
+		"survivor: the failed leg's superblock still counts both"
+	out=$(helper "$vm" "mdr_run $(md_assemble_args "$dev" "$name" "$leg1")")
+	assert_eq "$(mdr_rc "$out")" 1 \
+		"survivor: mdadm --assemble from the failed leg alone ($out)"
+	rc=0
+	got=$(mdr_wait_held "$vm" "" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" \
+		"survivor: no array holds a leg after the failed leg's refused start"
+	out=$(helper "$vm" "mdr_run $(md_assemble_args "$dev" "$name" "$leg0")")
+	assert_eq "$(mdr_rc "$out")" 0 \
+		"survivor: mdadm --assemble from the survivor alone ($out)"
+	helper "$vm" "wait_dev '$dev' 20" >/dev/null ||
+		die "survivor: no md node $dev on vm$vm"
+	rc=0
+	got=$(mdr_wait_held "$vm" "md* clean holder,mdstat,member $(mdr_members \
+		"$leg0")" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" "survivor: the array runs on the survivor alone"
+	md=${got%% *}
+	st=$(helper "$vm" "mdr_md $md") || die "survivor: the md attributes of $md"
+	case "$st" in
+	*" degraded=1 "*"members=dev-"*":in_sync"*) ;;
+	*) die "survivor: $md reads '$st', want degraded 1, the survivor in_sync" ;;
+	esac
+
 	out=$(helper "$vm" "mdr_run --stop '$dev'")
 	assert_eq "$(mdr_rc "$out")" 0 "teardown: mdadm --stop ($out)"
 	rc=0
@@ -4420,6 +4505,7 @@ case_redund() {
 	local req1="$WORK/req-redund-cn1.json" req2="$WORK/req-redund-cn2.json"
 	local out dev want got seq rev1 rev2 i nsdev
 	local writer deadline mkey dkey lkey mst dst ldet n rules mark cmds name
+	local mname vd
 	local grp md2 la lb nsdev1 err1 raid01 info1
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
@@ -4667,10 +4753,22 @@ case_redund() {
 	leg_wait_not_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
 	mkey=$(d16 "$A_MGRP")
 	dkey=$(d16 "$A_DGRP")
+	name=$(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")
+	mname=$(cn_dm_name c9 2 "$sp" "${A_MLEG[1]}")
 	deadline=$((SECONDS + 90))
 	while :; do
+		# From the second failed round of a dead leg's probe, the round
+		# also names a member of it that md still holds in its place, for
+		# the early fail (cnagent.md CN12, CN30), which no converge of this
+		# stage runs: the leftover code is taken, naming DN1's members
+		# alone.
 		out=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --show-info \
-			--sp "$sp" --cntlr "$c2")
+			--sp "$sp" --cntlr "$c2" --expect-code 4 2>/dev/null || true)
+		[ -n "$out" ] || die "degrade: CN2's check round did not answer"
+		vd="$(jq_of "$out" '.agent_reply.code // 0') $(jq_of "$out" \
+			'.agent_reply.details // ""')"
+		verdict_names_only "$vd" "degrade" "md_member:$name" \
+			"md_member:$mname"
 		mst=$(jq_of "$out" \
 			".cntlr_info.grp_id_to_md_raid[\"$mkey\"].status // \"ABSENT\"")
 		dst=$(jq_of "$out" \
@@ -4760,8 +4858,8 @@ case_redund() {
 	# round then names it with the leftover code: a drop changes no desired
 	# state, so nothing else would bring the converge that puts it back.
 	# The round names nothing but DN1's members.
+	local details entry mrd
 	name=$(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")
-	local mname details entry vd mrd
 	mname=$(cn_dm_name c9 2 "$sp" "${A_MLEG[1]}")
 	deadline=$((SECONDS + 30))
 	while :; do
@@ -4854,6 +4952,153 @@ case_redund() {
 	[ $((delta * 8)) -lt "$full" ] ||
 		die "resync: the put-back wrote $delta sectors to the member, not" \
 			"under an eighth of the array's $full: a full copy, not a re-add"
+
+	stage early "an idle member whose leg dies is failed, not removed, and put back from the bitmap (CN11, CN12, CN30)"
+	# No IO reaches the arrays here, so md learns nothing of the death by
+	# itself and goes on counting both members in sync. The degrade stage's
+	# partition takes CN2's two legs into DN1 away again. Once a leg's probe
+	# has failed twice in a row and the leg does not serve, CN2's check round
+	# names its member (cnagent.md CN30), and the SyncupCntlr the worker
+	# re-sends on that code fails the member in md and removes nothing
+	# (cnagent.md CN12, The early fail): the survivor's superblock then
+	# records the death, which lets the survivor start alone, as the
+	# mdrefuse stage shows on loop devices. md fails a member itself if an
+	# IO reaches it, which the bitmap's own writes can make, so each member
+	# is either named or already failed by md, and at least one is named.
+	# got keeps the degrade stage's digest, which the readonly stage reads.
+	local cut m named seen sname ex quiet dirty ast loud
+	# The stages before end with md's copies onto these members, after which
+	# md clears its write-intent bitmap over a few of its 5 s periods, in a
+	# write to every member; one that reaches a cut leg makes md fail the
+	# member itself (seen in the lab, about 8 s after a cut made at once).
+	# So the cut waits for every member's bitmap to read no dirty chunk and
+	# both arrays to read clean, from where no IO reaches the arrays.
+	deadline=$((SECONDS + 90))
+	while :; do
+		quiet=1
+		for m in "$mname" "$name" "$(cn_dm_name c9 2 "$sp" "${A_MLEG[2]}")" \
+			"$(cn_dm_name c9 2 "$sp" "${A_DLEG[2]}")"; do
+			dirty=$(helper 2 "md_bitmap_dirty $m") ||
+				die "early: reading the bitmap on $m failed"
+			ast=$(helper 2 "md_array_state $m") ||
+				die "early: reading the array state of $m failed"
+			if [ "$dirty" != 0 ] || [ "$ast" != clean ]; then
+				quiet=""
+				loud="$m reads $dirty dirty chunks, array state $ast"
+			fi
+		done
+		[ -n "$quiet" ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "early: after 90 s an array is not quiet: $loud"
+		sleep 1
+	done
+	mrd=$(helper 2 "md_member_read $name") ||
+		die "early: reading DN1's data member failed: $mrd"
+	before=$(member_field "$mrd" wsect)
+	assert_eq "$(helper 1 "partition_from ${IP[2]}")" partitioned \
+		"early: the partition rule was not installed"
+	cut=$SECONDS
+	leg_wait_not_live 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 60
+	leg_wait_not_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
+	deadline=$((SECONDS + 90))
+	while :; do
+		vd=$(check_verdict 2 "$sp" "$c2" "$rev2")
+		verdict_names_only "$vd" "early" "md_member:$name" \
+			"md_member:$mname"
+		named=""
+		seen=0
+		for m in "$mname" "$name"; do
+			case "$vd, " in
+			"4 "*"md_member:$m, "*)
+				named="$named $m"
+				seen=$((seen + 1))
+				continue
+				;;
+			esac
+			mrd=$(helper 2 "md_member_read $m") ||
+				die "early: reading the member $m failed: $mrd"
+			case ",$(member_field "$mrd" state)," in
+			*,faulty,*) seen=$((seen + 1)) ;;
+			esac
+		done
+		[ "$seen" = 2 ] && [ -n "$named" ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "early: after 90 s CN2's check round reads '$vd', with" \
+				"$seen of DN1's two members named or failed by md"
+		sleep 1
+	done
+	log "  named $((SECONDS - cut)) s after the cut:$named"
+	# No CN10 retry runs here: only a converge that finds a late member
+	# registers one, and the resync stage's converges found every leg
+	# available; this converge registers it, under trace ids of its own.
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" "early: the meta row"
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "early: the data row"
+	seq=$(helper 2 "cn_events $TRACE")
+	# md can still fail a named member itself before the converge reads
+	# the array, which then leaves it; at least one is the converge's.
+	n=0
+	for m in $named; do
+		case "$(event_cnt "$seq" "^mdadm .* --fail /dev/mapper/$m\$")" in
+		0) log "  $m failed by md before the converge" ;;
+		1) n=$((n + 1)) ;;
+		*) die "early: the converge failed $m more than once" ;;
+		esac
+		mrd=$(helper 2 "md_member_read $m") ||
+			die "early: the failed member $m left the array: $mrd"
+		case ",$(member_field "$mrd" state)," in
+		*,faulty,*) ;;
+		*) die "early: the member $m reads $mrd after the converge" ;;
+		esac
+	done
+	[ "$n" -ge 1 ] || die "early: the converge failed none of$named"
+	assert_eq "$(event_cnt "$seq" '^mdadm .* --remove ')" 0 \
+		"early: a converge removed a member"
+	# The death in the survivor's superblock: DN2's member of the same
+	# group counts one member, itself.
+	for m in $named; do
+		case "$m" in
+		"$mname") sname=$(cn_dm_name c9 2 "$sp" "${A_MLEG[2]}") ;;
+		*) sname=$(cn_dm_name c9 2 "$sp" "${A_DLEG[2]}") ;;
+		esac
+		ex=$(helper 2 "mdr_examine /dev/mapper/$sname") ||
+			die "early: examining the survivor $sname failed"
+		case "$(mdr_field "$ex" "Array State")" in
+		A. | .A) ;;
+		*) die "early: the survivor $sname reads array state" \
+			"'$(mdr_field "$ex" "Array State")', want the death recorded" ;;
+		esac
+	done
+	# The legs back: the put-back takes each failed member back from md's
+	# bitmap, as after any fail (the readd stage), by the converge of a
+	# re-send or of the CN10 retry the converge above registered for its
+	# late members, whose own trace ids the stage's counts do not read; so
+	# the sectors written to the data member tell the bitmap's catch-up from
+	# a full copy, as in the resync stage, the probe's own writes included.
+	assert_eq "$(helper 1 "unpartition_from ${IP[2]}")" unpartitioned \
+		"early: the partition rule was not removed"
+	rules=$(helper 1 "partition_rules ${IP[2]}")
+	[ -z "$rules" ] || die "early: vm1 still holds partition rules: $rules"
+	leg_wait_live 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 60
+	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
+	md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 120 "early" \
+		"$A_MGRP" "$A_DGRP"
+	for m in "$mname" "$name"; do
+		mrd=$(helper 2 "md_member_read $m") ||
+			die "early: $m is not in CN2's array: $mrd"
+		member_in_sync "$mrd" ||
+			die "early: $m put back reads $mrd, want in_sync with failfast"
+	done
+	mrd=$(helper 2 "md_member_read $name") ||
+		die "early: reading DN1's data member failed: $mrd"
+	after=$(member_field "$mrd" wsect)
+	delta=$((after - before))
+	full=$((RAID1_EXT2_DATA * BLOCK_SIZE / 512))
+	log "  DN1's data member took $delta sectors back; a full copy writes" \
+		"$full"
+	[ $((delta * 8)) -lt "$full" ] ||
+		die "early: DN1's data member took $delta sectors back, not under" \
+			"an eighth of the array's $full: a full copy, not a re-add"
 
 	stage reconnect "a side whose controller the kernel deleted is named and connected again (CN10, CN30)"
 	# DN1's export of CN2's data leg 1 loses its port link while the port

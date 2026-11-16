@@ -1088,7 +1088,12 @@ the content. Both halves are issued as direct syscalls, outside the
 commands and file IO) on the prober's fresh per-attempt trace id (CN2).
 The loop is single-flight: a blocked IO simply delays the next round.
 Probers publish since when an attempt has been in flight, whether any
-has completed, and the last error; the CN28 probe reports, per leg: an
+has completed, the last error and how many completed rounds in a row
+failed, which a round that succeeds sets to zero. The member
+reconciliation reads that count, plus one for a round in flight longer
+than `CnLegProbeStallSeconds`, which a failed end of that round then does
+not count again, and takes a leg at two or more that is not available as
+dead (CN12, The early fail). The CN28 probe reports, per leg: an
 attempt in flight longer than `CnLegProbeStallSeconds` ⇒
 `RES_STATUS_ERROR` "health probe stalled"; else the last completed
 outcome; before any completion — or before a prober is registered — ⇒
@@ -1467,6 +1472,8 @@ dm-clone (CN18).
   repair's new leg (A group's repair, below) — is `--fail`ed and
   `--remove`d by the dm path sysfs named, while another member keeps the
   data (the in-sync guard, below); then a repair's removals; then a
+  `leg_list` member whose leg is dead is `--fail`ed and not removed, while
+  another member keeps the data (The early fail, below); then a
   `leg_list` member md has failed and moved out of its slot ("faulty" in its
   "state", its "slot" none), on a leg that can take it, is `--remove`d; then
   an available `leg_list` member the array lacks, one just removed included,
@@ -1491,8 +1498,9 @@ dm-clone (CN18).
   included — and the group's error names the member and the array. The
   test is made once, before the first `--fail` of the pass: the member
   it asks for stays in `leg_list`, so the pass fails it only as an open
-  repair's bad leg, and then only while another member keeps the data (A
-  group's repair, below), and the answer is the same for every member
+  repair's bad leg or as a member whose leg is dead, and then only while
+  another member keeps the data (A group's repair, The early fail,
+  below), and the answer is the same for every member
   that leaves, whatever that member's own state. Reason: md answers a
   fail of the last in-sync member of a mirror by marking the whole array
   broken (CN29), so without the guard the fail of a member the group does
@@ -1542,6 +1550,30 @@ dm-clone (CN18).
   copy would read a dead member that still reads in sync and break the
   array.
 
+  **The early fail.** A `leg_list` member, an open repair's bad leg
+  included, that md holds in its place and does not show faulty (a slot
+  number, no "faulty" in its "state"), whose leg is dead, is `--fail`ed
+  and not removed, while another member is a copy source (above). A leg
+  is **dead** when it is not available this pass and its prober counts
+  two failed rounds in a row (CN11), the set of such legs read once at the
+  start of the pass's groups. Each such member is failed in the order of
+  `leg_list`, after a repair's removals and before the put-back; when the
+  repair's add then takes the same bad leg out in the pass, it is removed
+  with no second `--fail`. A member it fails is on a leg that does not
+  serve, so it is never a copy source: the step never fails the member
+  that keeps the data. Reason: md learns that a member is dead only from
+  IO to it, so on an idle array it goes on counting a dead member in sync,
+  and the survivor's superblock records both members in sync; mdadm then
+  refuses to start the survivor alone after a failover or a reboot
+  (`architecture.md`, Make sure all groups are available). The fail writes
+  the death into the survivor's superblock, and leaves the member in the
+  array, faulty, so the put-back takes it back from md's bitmap once its
+  leg can take it again. Two failed rounds, not one, so a single passing
+  fault of the probe fails no member; and a leg that is available keeps
+  its member whatever its probe says, since the leg repair (`dnv-worker.md`
+  AR8) is what handles a leg whose disk returns errors. A standby, and a
+  new primary before its probers have failed twice, fail nothing this way.
+
   **The identity check.** The add of a `leg_list` member the array lacks,
   one the put-back just removed included, first takes the member's superblock
   read (The superblock read, below): one with no superblock is added, and md
@@ -1586,11 +1618,11 @@ dm-clone (CN18).
   Every `leg_list` name is wanted, available or not: a leg this pass cannot
   use (no path both live and optimized, or its CN10 converge failing: a
   connect, an "address" read that did not answer, its multipath namespace or
-  its wrapper) is never added, and a member md still holds for it is neither
-  failed nor removed, whatever its state, but for an open repair's bad leg,
-  which the repair's add takes out, and which the converge removes when md
-  holds it without a place once the repair has started in md (A group's
-  repair, below). `--fail` and
+  its wrapper) is never added, and a member md still holds for it is never
+  removed, whatever its state, and failed only when its leg is dead (The
+  early fail, above), but for an open repair's bad leg, which the repair's
+  add takes out, and which the converge removes when md holds it without a
+  place once the repair has started in md (A group's repair, below). `--fail` and
   `--remove` open the member's path (no IO) and act on its device number. A
   `--remove` issued within seconds of the member's side dying, while a
   superblock write is stuck on that member, sleeps in md's suspend until the
@@ -1659,12 +1691,15 @@ dm-clone (CN18).
     place that cannot take a member — it does not serve, or its leg row
     does not read `OK` — is `--fail`ed and `--remove`d; one in its place
     that serves with an `OK` row stays, and the repair waits, adding
-    nothing. So the bad leg is failed only in a pass whose add's
-    conditions hold, so that the new leg can follow at once. Reason: the
+    nothing. So the add fails the bad leg only in a pass whose add's
+    conditions hold, so that the new leg can follow at once; a bad leg
+    whose leg is dead is failed earlier by the early fail (above), which
+    keeps it in the array, as any `leg_list` member. Reason: the
     leg row made the leg bad and md may never see that, since md learns
-    that a member is dead only from IO, so waiting for md could never start
-    the repair; failing the bad leg before the add can follow gains nothing
-    and leaves the group on one copy; and a copy that reads a dead member
+    that a member is dead only from IO or the early fail, so waiting for
+    md could never start the repair; failing a bad leg that still serves
+    before the add can follow gains nothing and leaves the group on one
+    copy; and a copy that reads a dead member
     breaks the array, so the member that keeps the data must be on a leg
     that can take a member. md refuses to remove a failed member while
     IO to it is pending: that refusal is the group's error for the pass
@@ -4259,8 +4294,9 @@ per-resource outcome that cannot ride in a row, carried as
 reporting; CN20, CN30). What of the CN's base state a read names under
 the shared port rule (`dnagent.md` SH31) travels in both: the port row
 reads `ERROR`, and the verdict names it too. And so does an md member
-that a cntlr's converge would put back or add (CN12) on a leg that can
-take it, or remove for a repair: its group's row reads `OK`, and a
+that a cntlr's converge would fail early for its dead leg, put back or add
+(CN12) on a leg that can take it, or remove for a repair: its group's row
+reads `OK`, and a
 read's verdict names the member (CN30), unless CN12's in-sync guard
 holds over its array, whose row then reads `ERROR` and whose members the
 verdict does not name.
@@ -4372,6 +4408,12 @@ flight: the converge connects none of them. The converge's reply carries
 none of them, as for every condition only a read names (below).
 
 A cntlr's read-only verdict also names each md member that its
+converge's member reconciliation would fail early (CN12, The early fail):
+a `leg_list` member of a wanted group's running array whose leg is dead,
+read with the leg's serving as a read reads it (below), while another
+member is a copy source read the same way; the converge it brings fails
+the member, and once md shows the member faulty the read names it no
+more. It also names each md member that its
 converge's member reconciliation would put
 back or add (CN12): a `leg_list` member of a wanted group's running
 array that md has failed and moved out of its slot, or that the array
@@ -4382,8 +4424,9 @@ another member is a copy source (CN12), its leg read as serving the same
 way and its leg row not `ERROR`. It
 reads them from the arrays and the leg rows of the read's own probe and,
 for each such member whose leg row reads `OK` and for each copy source
-it weighs, from a lookup of the leg's subsystem in the read's walk. An open repair's bad leg is not one
-of them (CN12), nor a member the array lacks whose superblock carries
+it weighs, from a lookup of the leg's subsystem in the read's walk. An open repair's bad leg is not
+among the members it would put back or add (CN12), though the early fail
+names it as any `leg_list` member, nor is a member the array lacks whose superblock carries
 another identity, which CN12's identity check refuses: the read makes that
 check as the converge does, so it never names such a member and reports the
 same refusal in the group's reading (CN28); a superblock read of that check
@@ -4462,7 +4505,8 @@ carries what its own removing sweep names and, for a cntlr, the rows of
 its build the row rule above names, so what only a read's
 verdict names — a connection whose subsystem directory is left
 with no controller (CN21), a side with no controller the converge would
-connect, an md member to put back, a piece of the base state and a stored
+connect, an md member to fail early or put back, a piece of the base
+state and a stored
 forced-start mark (all above) — brings by itself the
 `Syncup*` on every second
 round at most (`dnv-worker.md` RW4 step 5, and RW5 for the subsystem
@@ -4558,7 +4602,14 @@ stores instead is CN23's.
   that answers from such a read brings a converge that refuses again. So
   does a member's copy source on such a leg (CN12): the read counts the
   source and names the member, while the converge, whose leg fails at the
-  connect, counts none and adds nothing.
+  connect, counts none and adds nothing, or, for the early fail of a member
+  whose leg is dead, fails nothing.
+* A leg whose probe round hangs without end never counts as dead (CN11,
+  CN12, The early fail): the round in flight past `CnLegProbeStallSeconds`
+  counts once, and a leg needs two failed rounds. So the early fail never
+  fails the member of a leg whose IO hangs rather than fails, as through a
+  path that is live but ANA inaccessible; md does not learn of that leg
+  either, until IO to it ends.
 * A side whose controller is gone and whose connect keeps failing is named
   on every read (CN30). A side whose disk node dies keeps its controller,
   connecting, since a leg's controller has no controller-loss timeout

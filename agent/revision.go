@@ -67,7 +67,7 @@ func OkReply() *pb.AgentReply {
 // arrives among the failures, rendered like an enumeration that did not
 // answer. One condition arrives among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background
-// read names as one its converge would put back or add, under
+// read names as one its converge would fail early, put back or add, under
 // LeftoverKindMdMember (cnagent.md CN30). Only a read's verdict names these
 // conditions, save two of the dn's: the unconfirmed disk identity, which the
 // converge's own code names too, since the record step that reports it runs

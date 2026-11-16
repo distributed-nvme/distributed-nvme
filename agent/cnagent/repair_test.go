@@ -448,8 +448,10 @@ func TestRepairOfAnotherGroupIsNone(t *testing.T) {
 // removed when it cannot take a member (it does not serve, or its row is not
 // OK), removed when md has moved it out of its place already, left alone when
 // md does not hold it; and when it serves with an OK row it stays and the
-// repair waits. The bad leg is failed only in a pass whose add's conditions
-// hold, so a case whose new leg cannot be added runs no mdadm at all. A
+// repair waits. The add fails the bad leg only in a pass whose add's
+// conditions hold, so a case whose new leg cannot be added runs no mdadm at
+// all, its bad leg's prober not counting it dead (the early fail is
+// TestADeadBadLegIsFailedOnce's). A
 // STARTED repair's new leg the array lacks is added as a leg_list member is;
 // an aborting or aborted repair's is never added. Each case reads the
 // converge's own verdict, from the array as the converge left it.
