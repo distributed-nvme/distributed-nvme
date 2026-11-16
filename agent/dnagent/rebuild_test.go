@@ -470,8 +470,8 @@ func TestAReadReDrivesAWrongAnaGroupState(t *testing.T) {
 
 // TestAReadDoesNotNameASideWhoseRecordDisagrees: a side whose record holds
 // another extent count than its request, over a side device that is gone.
-// AllocSide refuses that record on every pass, so the verdict leaves it to
-// the converge's row.
+// AllocSide refuses that record on every pass, so the read's row reads the
+// refusal as the converge's does, and the verdict names nothing.
 func TestAReadDoesNotNameASideWhoseRecordDisagrees(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -507,8 +507,10 @@ func TestAReadDoesNotNameASideWhoseRecordDisagrees(t *testing.T) {
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 		Revision: 2,
 	}, nil)
-	if info.GetSideDevInfo().GetStatus() != pb.ResStatus_RES_STATUS_MISSING {
-		t.Fatalf("fixture is wrong: side device row %v, want MISSING",
+	// The read reads the refusal, as the converge does (DN9).
+	if info.GetSideDevInfo().GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(info.GetSideDevInfo().GetDetails(), "allocated") {
+		t.Fatalf("side device row %v, want ERROR with the refusal",
 			info.GetSideDevInfo())
 	}
 	if got := check.GetAgentReply(); got.GetCode() != 0 {
@@ -718,8 +720,8 @@ func TestAReadRebuildsAHalfBuiltExport(t *testing.T) {
 }
 
 // TestAReadDoesNotNameASideOnAnotherNodesDisk: a side not provisioned, with
-// no record, on a disk whose header names another node. Its row reads
-// MISSING, but AllocSide refuses another node's disk, so the verdict leaves
+// no record, on a disk whose header names another node. AllocSide refuses
+// another node's disk, so its row reads that refusal, and the verdict leaves
 // it alone.
 func TestAReadDoesNotNameASideOnAnotherNodesDisk(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -751,8 +753,10 @@ func TestAReadDoesNotNameASideOnAnotherNodesDisk(t *testing.T) {
 		ClusterId: testCluster, DnId: testDn + 100,
 		SidePointer: sidePtr(testSide2), Revision: 1,
 	}, nil)
-	if info.GetSideDevInfo().GetStatus() != pb.ResStatus_RES_STATUS_MISSING {
-		t.Fatalf("fixture is wrong: side device row %v, want MISSING",
+	// The read reads the refusal, as the converge does (DN9).
+	if info.GetSideDevInfo().GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(info.GetSideDevInfo().GetDetails(), "foreign disk") {
+		t.Fatalf("side device row %v, want ERROR with the refusal",
 			info.GetSideDevInfo())
 	}
 	if got := reply.GetAgentReply(); got.GetCode() != 0 {

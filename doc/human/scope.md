@@ -562,9 +562,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   as an error. A host of a running pool can write the same at any time, so
   zeroing the end of each new side would close only half of it. Not seen
   in the lab.
-- **A refused side allocation never makes leg repair move the leg.** The
-  leg's health goes on and off with each round. State: fix decided, the
-  agent reports the refusal as an error too. Not seen in the lab.
 - **A disk node that cannot serve a new leg gets a new repair after each
   cancel.** State: fix decided, the create skips a disk node whose side
   of the group reads error. Not seen in the lab.

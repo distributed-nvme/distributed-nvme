@@ -2410,10 +2410,16 @@ and `side_dev_info` reads `RES_STATUS_PROVISIONING` with the details
 other refusal of the run reads `RES_STATUS_ERROR` with the refusal. Every
 row above is a *converge* outcome. A background read (DN16, SH29) allocates
 nothing, so "no record" at `provisioned` false reads `RES_STATUS_MISSING`
-there — the converge that would allocate has not run yet, and `n` must
-never be taken from the request. While an allocation would succeed, the
+there while an allocation would succeed — the converge that would allocate
+has not run yet, and `n` must never be taken from the request — and the
 read's verdict names that row, so the worker re-sends the `SyncupSide`
-whose converge allocates (SH31, DN16).
+whose converge allocates (SH31, DN16). While `AllocSide` would refuse the
+side — no room, a disk not confirmed — and while a record disagrees with
+the request, the read reads `RES_STATUS_ERROR` with the refusal, as the
+converge does. Reason: a converge's error and a read's missing would set
+and clear the side's health epoch in turn, so no threshold would ever pass
+and leg repair would never move a leg whose side the disk cannot hold
+(`dnv-worker.md` HL2, AR8).
 
 **The zeroing registry** (the dn twin of the DN8 retry registry):
 
@@ -3351,7 +3357,9 @@ repeat the wait. Each read takes the area's answer afresh from the loaded
 table, and the retry from its registry, like the rest, so a destination
 whose run the area could supply, or that no retry covers — one whose passes
 all stopped before the run's step (DN13) —, and that still zeroes nothing
-is named like any other side.
+is named like any other side. A record that `AllocSide` refuses, as one
+that disagrees with the request, adds nothing either: no converge starts its
+zeroing, and a re-sent request is refused the same way.
 
 Both verdicts also name what their read found that a re-sent `Syncup*`
 would cure (SH31). A DN's names its port under SH31's rule. A side's
@@ -3552,12 +3560,16 @@ needed, and the worker never turns one into an `err_epoch`
   what the worker does with it is `dnv-worker.md` HL1's.
 * `SideInfo.side_dev_info`, named `DnSideName`: the volume-table record —
   its runs, `zero_bytes` and `zeroed_bytes` — and the live table, judged by
-  the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned` false
-  (no converge has allocated one yet, or the header has gone blank under
-  the side: a blank header reads as an unformatted disk with no records,
-  and the meta row's probe drops a table loaded before the header went
-  blank — the side's device is still there all the same, and its DN9
-  goroutine, if one is running, ends at its next re-read of the record) and
+  the DN9 matrix: a record that disagrees with the request, or that sits
+  on a disk not confirmed, and no record at `provisioned` false where
+  `AllocSide` would refuse the side (no room, a disk not confirmed, the
+  header gone blank under the side: a blank header reads as an unformatted
+  disk with no records, and the meta row's probe drops a table loaded
+  before the header went blank — the side's device is still there all the
+  same, and its DN9 goroutine, if one is running, ends at its next re-read
+  of the record) ⇒ `RES_STATUS_ERROR` with the refusal, as the converge
+  reads it (DN9); no record ⇒ `RES_STATUS_MISSING` at `provisioned` false
+  otherwise (no converge has allocated one yet) and
   `RES_STATUS_ERROR`, details "record missing", at `provisioned` true (a
   lost or foreign disk, or that same blank header, under which the side's
   devices keep serving its data: nothing removes a device the side still

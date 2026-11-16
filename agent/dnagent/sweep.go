@@ -1833,6 +1833,13 @@ func (s *DnAgentServer) zeroingVerdict(
 	if err != nil || !ok || sideFullyZeroed(rec) {
 		return
 	}
+	// A record AllocSide refuses — it disagrees with the request — starts
+	// no zeroing, and a re-sent request is refused the same way, as
+	// rowVerdict leaves such a side.
+	if s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
+		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) != nil {
+		return
+	}
 	s.mu.Lock()
 	running, retrying := st.zeroing, st.retrying
 	s.mu.Unlock()

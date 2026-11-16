@@ -143,8 +143,11 @@ func (s *DnAgentServer) probeSide(
 // Unlike ensureSideDev it never allocates and never starts or stops the
 // zeroing goroutine (DN16, SH29). That is why "record absent at
 // provisioned = false" reports MISSING with empty details rather than the
-// matrix's "zeroing 0/n MiB": with no record the only available length is
-// the request's, and the etcd flag is a gate, never evidence (DN9). Nor does
+// matrix's "zeroing 0/n MiB" while an allocation would succeed: with no
+// record the only available length is the request's, and the etcd flag is a
+// gate, never evidence (DN9). A side AllocSide would refuse — no room, a
+// disk not confirmed, a record that disagrees with the request — reads
+// ERROR with the refusal, as the converge does (SideAllocRefusal). Nor does
 // it take a migration destination's run in the clone-metadata area: it reads
 // the area's refusal of the run (migrMetaRefusal), and reports a destination
 // the area has no free run for as the converge does, PROVISIONING with the
@@ -165,10 +168,21 @@ func (s *DnAgentServer) probeSideDev(
 		return sideDevFailed, nil
 	}
 	if !ok {
-		if plan.provisioned {
+		switch {
+		case plan.provisioned:
 			info.SideDevInfo = t.Err(resKeySideDev, name, tagRecordMissing)
-		} else {
-			info.SideDevInfo = t.Missing(resKeySideDev, name, "")
+		default:
+			// A side the disk would refuse to allocate — no room, say —
+			// reads ERROR with the refusal, as the converge's AllocSide
+			// reports it (DN9), so the two channels agree and the side's
+			// health epoch is not cleared by every read.
+			if refusal := s.meta.SideAllocRefusal(ctx, plan.spId,
+				plan.sideId, plan.conf.GetExtCnt(),
+				plan.conf.GetZeroBytes()); refusal != nil {
+				info.SideDevInfo = t.Err(resKeySideDev, name, refusal.Error())
+			} else {
+				info.SideDevInfo = t.Missing(resKeySideDev, name, "")
+			}
 		}
 		return sideDevFailed, nil
 	}
@@ -178,6 +192,15 @@ func (s *DnAgentServer) probeSideDev(
 	// request — the disk is authoritative ([D13]).
 	zeroed, zero := sideZeroedBytes(rec), sideZeroBytes(rec)
 	info.ZeroedBytes, info.ZeroBytes = zeroed, zero
+	// A record that disagrees with the request, or one on a disk not
+	// confirmed, reads ERROR with the refusal, as the converge's AllocSide
+	// refuses it (DN9), whatever its device reads; the counters above are
+	// the record's all the same.
+	if refusal := s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
+		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()); refusal != nil {
+		info.SideDevInfo = t.Err(resKeySideDev, name, refusal.Error())
+		return sideDevFailed, nil
+	}
 	if !sideFullyZeroed(rec) {
 		// The device is judged on every read, provisioning or not: DN18 reads
 		// this row off the volume-table record, its zeroed count and
