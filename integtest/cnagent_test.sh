@@ -6118,6 +6118,184 @@ repair_forced_start() {
 		"repair forced: the standby"
 }
 
+# repair_reassembly is repair's re-assembly stage (cnagent_integtest.md,
+# Cases, repair; cnagent.md CN12, The re-assembly), the operator's way of the
+# forced-start guide: under the pool, both legs' exports to CN2 error every
+# IO and a host write breaks the data group's array; the exports come back,
+# and the pool, whose devices hold the array open, leaves it broken; the
+# level that takes the pools away frees it, and the level step's own
+# converge stops it and assembles it again, with no mark. Broken once more
+# at that level, the array is named by CN2's check round, and the
+# SyncupCntlr re-sent as the worker would assembles it again. The pool comes
+# back and the host reads its data. It
+# works on case_repair's pool, host and request files, and moves on its
+# rev2, which bash's dynamic scope hands it.
+repair_reassembly() {
+	local f out seq grp md2dev legs leg side addr idx member vd st node mrd
+	local deadline
+	local -a lins=() sides=() dnidxs=() members=()
+	grp=".id_to_slice[\"$(hex16 "$A_SLICE")\"].data_grp_list[0]"
+	md2dev=$(jq_of "$md2" .dev_path)
+
+	stage reassembly "a broken array whose legs come back is assembled again once the level frees it, with no mark"
+	md_wait_clean 2 "$sp" "$c2" 120 "repair reassembly" "$A_DGRP"
+	legs=$("$JQ" -r "$grp.leg_list[] | [.leg_id,
+		.side_list[0].side_id, .side_list[0].addr_port] | @tsv" "$req2")
+	while IFS=$'\t' read -r leg side addr; do
+		case "$addr" in
+		"${IP[1]}:"*) idx=1 ;;
+		"${IP[2]}:"*) idx=2 ;;
+		*) die "repair reassembly: leg $leg's side is on no lab DN: $addr" ;;
+		esac
+		lins+=("$(dn_lin_name "$idx" "$sp" "$side" 2)")
+		sides+=("$leg $side")
+		dnidxs+=("$idx")
+		members+=("$(cn_dm_name c9 2 "$sp" "$leg")")
+	done <<<"$legs"
+	[ "${#members[@]}" = 2 ] ||
+		die "repair reassembly: the data group has ${#members[@]} legs, want 2"
+	# Both exports to CN2 error every IO, then a host write fails on both
+	# members: md fails the first and marks the array broken at the second,
+	# the last one in sync (cnagent.md CN29). The write goes to a region the
+	# host wrote already, so the thin pool maps nothing new, and with both
+	# exports erroring nothing of it lands.
+	for idx in 0 1; do
+		assert_eq "$(helper "${dnidxs[$idx]}" "dm_error_load ${lins[$idx]}")" \
+			loaded "repair reassembly: ${lins[$idx]} erroring"
+	done
+	assert_eq "$(helper "$hv" "write_probe '$dev' 0")" eio \
+		"repair reassembly: the host's write"
+	deadline=$((SECONDS + 60))
+	while :; do
+		st=$(helper 2 "md_array_state ${members[0]}") ||
+			die "repair reassembly: reading the array's state failed"
+		[ "$st" = broken ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "repair reassembly: after 60 s the array reads '$st'"
+		sleep 1
+	done
+	# The exports come back: each DN's next converge of its side puts its
+	# own table back, and each leg's prober then passes again.
+	for idx in 0 1; do
+		read -r leg side <<<"${sides[$idx]}"
+		dn_side "${dnidxs[$idx]}" "$sp" "$leg" "$side" 2 \
+			"$RAID1_DGRP_ZERO_BYTES" "${CNID[2]}" "${CNID[1]}"
+		case "$(helper "${dnidxs[$idx]}" "dm_table ${lins[$idx]}")" in
+		*" linear "*) ;;
+		*) die "repair reassembly: ${lins[$idx]} is not its linear again" ;;
+		esac
+		leg_wait_not_error 2 "$sp" "$c2" "$leg" 30 \
+			"repair reassembly: leg $leg's probe"
+	done
+	node=$(helper 2 "md_member_of ${members[0]}") ||
+		die "repair reassembly: the array's node did not read"
+	node=${node%% *}
+	# The pool holds the array open: a converge leaves it broken, its row
+	# naming the holder, and the read names nothing for it.
+	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 2>/dev/null || true)
+	assert_map_status "$out" grp_id_to_md_raid "$A_DGRP" RES_STATUS_ERROR \
+		"held open by" "repair reassembly: the array the pool holds"
+	vd=$(check_verdict 2 "$sp" "$c2" "$rev2")
+	case "$vd" in
+	*md_broken:*) die "repair reassembly: the read names the held array: $vd" ;;
+	esac
+	# The level that takes the pools away frees the array: the level step's
+	# own converge sweeps the pool's devices before it builds the groups
+	# (cnagent.md CN9), so it stops the array and assembles it again.
+	for f in "$req1" "$req2"; do
+		req_set "$f" '.sp_level = "SP_LEVEL_NO_THINPOOL"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 \
+		"repair reassembly: the level with no pool"
+	md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 120 \
+		"repair reassembly" "$A_DGRP"
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_before "$seq" "^mdadm --stop /dev/$node\$" \
+		"^mdadm --assemble $md2dev " "repair reassembly: the stop, then the assemble"
+	assert_eq "$(event_cnt "$seq" '^mdadm --zero-superblock ')" 0 \
+		"repair reassembly: superblocks zeroed"
+	assert_eq "$(event_cnt "$seq" '^mdadm --assemble .* --run')" 0 \
+		"repair reassembly: assemblies with --run"
+	for member in "${members[@]}"; do
+		mrd=$(helper 2 "md_member_read $member") ||
+			die "repair reassembly: $member is not in the array: $mrd"
+		member_in_sync "$mrd" ||
+			die "repair reassembly: $member reads $mrd, want in_sync"
+	done
+	# Once more at this level, with no converge to come: a write through
+	# the array itself breaks it, the exports come back, and the read names
+	# the array by its node (cnagent.md CN30); the SyncupCntlr the worker
+	# re-sends on that code stops it and assembles it again.
+	md_wait_clean 2 "$sp" "$c2" 120 "repair reassembly" "$A_DGRP"
+	for idx in 0 1; do
+		assert_eq "$(helper "${dnidxs[$idx]}" "dm_error_load ${lins[$idx]}")" \
+			loaded "repair reassembly: ${lins[$idx]} erroring again"
+	done
+	assert_eq "$(helper 2 "write_probe '$md2dev' 0")" eio \
+		"repair reassembly: the write through the array"
+	deadline=$((SECONDS + 60))
+	while :; do
+		st=$(helper 2 "md_array_state ${members[0]}") ||
+			die "repair reassembly: reading the array's state failed"
+		[ "$st" = broken ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "repair reassembly: after 60 s the array reads '$st'"
+		sleep 1
+	done
+	# The wait is the verdict's: the read names the array once both legs'
+	# probes pass again, which a wait for a clean round would take for a
+	# failure.
+	for idx in 0 1; do
+		read -r leg side <<<"${sides[$idx]}"
+		dn_side "${dnidxs[$idx]}" "$sp" "$leg" "$side" 2 \
+			"$RAID1_DGRP_ZERO_BYTES" "${CNID[2]}" "${CNID[1]}"
+	done
+	node=$(helper 2 "md_member_of ${members[0]}") ||
+		die "repair reassembly: the array's node did not read"
+	node=${node%% *}
+	deadline=$((SECONDS + 60))
+	while :; do
+		vd=$(check_verdict 2 "$sp" "$c2" "$rev2")
+		case "$vd" in
+		"4 "*"md_broken:/dev/$node"*) break ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "repair reassembly: after 60 s CN2's check round reads" \
+				"'$vd', want md_broken:/dev/$node"
+		sleep 1
+	done
+	log "  CN2's verdict: $vd"
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 \
+		"repair reassembly: the named array"
+	md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 120 \
+		"repair reassembly: the named array" "$A_DGRP"
+	seq=$(helper 2 "cn_events $TRACE")
+	[ "$(event_cnt "$seq" "^mdadm --stop /dev/$node\$")" -ge 1 ] ||
+		die "repair reassembly: the named array was not stopped"
+	for member in "${members[@]}"; do
+		mrd=$(helper 2 "md_member_read $member") ||
+			die "repair reassembly: $member is not in the array: $mrd"
+		member_in_sync "$mrd" ||
+			die "repair reassembly: $member reads $mrd, want in_sync"
+	done
+	# The pool back over the array assembled again: the host reads its data.
+	for f in "$req1" "$req2"; do
+		req_set "$f" '.sp_level = "SP_LEVEL_READWRITE"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 \
+		"repair reassembly: the pool back"
+	host_wait_ana "$hv" "$nqn" 2 optimized 30
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
+		"repair reassembly: the host's data"
+}
+
 # repair_array_made is repair's last stage before its teardown
 # (cnagent_integtest.md, Cases, repair; cnagent.md CN12, case 1): CN2 stops
 # the data group's array, every member of its leg_list is zeroed by hand, as
@@ -6567,6 +6745,7 @@ case_repair() {
 	converge_check 1 "$sp" "$c1" "$rev1"
 	converge_check 2 "$sp" "$c2" "$rev2"
 
+	repair_reassembly
 	repair_array_made
 
 	stage teardown "empty cntlr lists, then empty side lists"

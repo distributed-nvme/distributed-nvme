@@ -344,9 +344,10 @@ maintenance never bump (`architecture.md`, Revision keys and the sync
 fan-out), and neither does a write that changes only a DN's
 `used_meta_units`: the DN ledger writes such a node and rewrites its
 capacity value, and bumps no revision for it (`architecture.md`, Metadata
-units). Nor do `UpdateGroupOperatorInCharge` and `UpdateRetiredLegKeep`,
-whose flags no agent reads (`architecture.md`, Revision keys and the sync
-fan-out, Repairs, Retired legs), so a token survives their writes.
+units). Nor does `UpdateRetiredLegKeep`, whose flag no agent reads
+(`architecture.md`, Revision keys and the sync fan-out, Retired legs), so a
+token survives its writes; `UpdateGroupOperatorInCharge` bumps, since the
+primary reads its flag (`architecture.md`, Repairs).
 `AdvanceClusterIds`, the id step, bumps nothing either: no agent reads a
 counter (`architecture.md`, Clusters). A flag update that asks for the
 state the record already holds —
@@ -1453,7 +1454,7 @@ pool's repairs, retired legs and groups still answer.
   clone through `refuseDeletingClone`. Last `model.SetGrpOperatorInCharge`
   with the group's parent and the request's value, which re-checks the
   token, the pool, the group and its clone in its STM, answers a group whose
-  flag already holds the value with no write, and bumps no `SpRev` for a
+  flag already holds the value with no write, and bumps `SpRev` for a
   write (GW6). Reply `grp_id`.
 * **GetRepair** — one snapshot: resolve, then the `Repair` through
   `repair_name_list` (`loadListedRepair`: a name not listed is `NOT_FOUND`, a
@@ -1791,8 +1792,8 @@ gateway, never through `workerctl`.
   committed, replaced, and cancelled, a cancel of no mark writing nothing;
   a group's operator-in-charge flag (`architecture.md`, Repairs) — set,
   read back on the group's record and through the gateway's own read of
-  the pool, and cleared, at the level that stops group arrays too, no write
-  bumping `SpRev`, a repeated set and a repeated clear writing nothing, and
+  the pool, and cleared, at the level that stops group arrays too, each
+  write bumping `SpRev`, a repeated set and a repeated clear writing nothing, and
   refused for an unknown group, an unknown pool and a stale token;
   and the sp latch with the refusals it brings, then its drain, after
   which every extent, metadata unit and capacity key is back and no dnv key

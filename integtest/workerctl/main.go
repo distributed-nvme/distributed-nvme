@@ -2916,8 +2916,8 @@ func cmdForceStart(g *globals, args []string) {
 // UpdateGroupOperatorInCharge, with no revision token; the flag is set
 // unless --operator-in-charge=false clears it, as dnvctl's
 // group set-operator-in-charge spells it. It prints the pool's revision
-// after the write, which the write leaves as it was, so a case can check
-// that no fan-out follows it (architecture.md, Repairs).
+// after the write, which a write raises by one, so a case can check that the
+// flag's fan-out follows it (architecture.md, Repairs).
 func cmdSetOperatorInCharge(g *globals, args []string) {
 	fs := newFlagSet("set-operator-in-charge", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")

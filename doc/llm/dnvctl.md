@@ -672,8 +672,9 @@ give-back its undo, the reverse of `cntlr set-enabled`, whose default true
 is the undo. The leaf sends the value given, never a toggle (Conventions).
 The flag is a field of the group record too, so `sp get` shows a slice
 group's flag and `clone get` a clone meta group's, as they show the mark
-(CT4); what the flag stops, and why its write leaves the pool's revision as
-it is, are `architecture.md`, Repairs.
+(CT4); what the flag stops, and why its write bumps the pool's revision,
+so that a `--rev` token given before it is stale after it, are
+`architecture.md`, Repairs.
 
 ## Integration test plan
 

@@ -666,8 +666,8 @@ func ForceStartGroup(
 // UpdateGroupOperatorInCharge runs, which the worker suite drives with no
 // gateway. The group is looked up among the pool's slices and then its
 // clones, as the gateway looks a group up (findPlantedGrp), and the op runs
-// with no revision token. It returns the pool's revision after it, which the
-// write leaves as it was (architecture.md, Repairs).
+// with no revision token. It returns the pool's revision after it, which a
+// write raises by one (architecture.md, Repairs).
 func SetOperatorInCharge(
 	ctx context.Context,
 	cli *etcdutil.Client,

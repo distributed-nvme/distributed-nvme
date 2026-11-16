@@ -706,9 +706,10 @@ func placeFreshLeg(
 // The pool must be md-raid1, whose groups have repairs to take over, and the
 // group one its parent holds and not a deleting clone's (loadGrpOf). A group
 // whose flag already equals on is answered as done and written to not at
-// all. A write raises no revision: no agent reads the flag, and the worker
-// reads every record afresh each pass (dnv-worker.md AR1), so a caller's
-// token stays valid across the flag's writes.
+// all. A write raises SpRev, so the flag reaches the pool's cntlrs: the
+// primary leaves a broken array of a group the operator has taken over as
+// it is (cnagent.md CN12, The re-assembly). A caller's token is then stale
+// after the write, as after any write that raises SpRev.
 func SetGrpOperatorInCharge(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -745,7 +746,7 @@ func SetGrpOperatorInCharge(
 		}
 		grp.OperatorInCharge = on
 		holder.put(s)
-		return nil
+		return BumpSpRev(s, opSetGrpOperatorInCharge, shard, cid, spId)
 	})
 }
 

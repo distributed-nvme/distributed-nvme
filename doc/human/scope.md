@@ -451,16 +451,22 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 
 ### 6.1 Cases where dnv does not come back alone today
 
-- **A broken array is not re-assembled when its legs return.** The primary
-  leaves a broken array as it is. The group stays down until a failover or
-  a cntlr replacement builds it again on another cntlr, or an operator runs
-  a forced start. State: fix decided, the primary stops the array and
-  assembles it again only on an unambiguous reading: every kept member
-  answers, with one identity and no half-copied member. Anything else
-  waits for the operator. The operator-in-charge flag, an operator's mark
-  on a group that keeps the worker's repairs off it, stops it too. A lab
-  fact on md's behaviour comes first. Read from the kernel's code; not
-  seen in the lab.
+- **A broken array that the pool holds is not re-assembled in place.**
+  When every leg of a group fails under IO, md marks the array broken.
+  When the legs return, the primary stops the array and assembles it
+  again by itself, but only where nothing holds the array open, as at a
+  level that builds no thin pool, and only when every leg of the group
+  serves, its health check passes, and its md superblock reads as a full
+  member of one array, with no bad-block list; a leg with no md superblock
+  is copied onto afterwards. The operator-in-charge flag, an operator's mark on a
+  group that keeps the worker's repairs off it, stops it too. At a level
+  that builds thin pools the pool holds every array, and md cannot stop
+  an array that is held. The group then stays down until a failover or a
+  cntlr replacement builds it again on another cntlr, or an operator runs
+  a forced start; a pool with one cntlr waits for the cntlr replacement.
+  State: open question, whether the primary should take the pool and the
+  volumes above down to assemble the array in place. md's stop and plain
+  assemble were seen in the lab on loop devices.
 - **A forced start cut short after its zeroing can leave no leg to start
   from.** The forced start zeroes the md superblock of every other member
   it keeps, except the open repair's bad leg. When the operator withdraws

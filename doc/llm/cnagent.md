@@ -1438,7 +1438,9 @@ dm-clone (CN18).
   Running means "array_state" is clean, active, active-idle, write-pending,
   readonly or read-auto; an array in any other state (inactive, broken, …)
   is left exactly as it is and its state is the group's error, unless the
-  group's forced-start mark stands, whose start stops it first (below). A
+  group's forced-start mark stands, whose start stops it first (below), or
+  the array reads broken and the re-assembly stops it and assembles it
+  again (below). A
   read of the matched array that did not answer is an error, never absent.
   A matched array whose "array_state" has gone by that read (stopped since
   the walk) reads absent — unless an array of the walk is unanswered, which makes it
@@ -2014,6 +2016,57 @@ dm-clone (CN18).
   reads an array md left absent `RES_STATUS_MISSING`, and one it left
   inactive, as a refused assembly can, `RES_STATUS_ERROR` with its state
   (CN28; Known limits).
+
+  **The re-assembly.** A group's array that reads broken, with no
+  forced-start mark in the group's record and the group's
+  `operator_in_charge` flag clear, is stopped and assembled again by the
+  assembly above, in the same pass, once nothing speaks against it: the
+  array holds no member that is not a leg wrapper of this pool (the
+  forced start's refusal to stop such an array, above), no device holds
+  it open (its sysfs "holders" directory is empty), and the reading of
+  its members is clear — every member the group keeps, its `leg_list`
+  legs and the new legs of its open repair, is on a leg that is available
+  and whose leg row does not read `ERROR`, the copy source's test (above),
+  and its superblock reads (The superblock read, below); every superblock
+  read is a full member's, a place in the array and no copy position,
+  with no bad-block list, all of one identity; no new leg the repair took
+  back from a retired leg carries one, since only the take-back check (A
+  group's repair, below) may let such a leg in; and at least one member
+  carries a superblock, a member that carries none being left to the
+  member reconciliation's add, as at any assembly. Otherwise the array stays as
+  it is and the group's error names it broken and says why. A mark held
+  from a request that does not count as delivered, which the pass does
+  not act on, holds the re-assembly too, since the operator's choice of a
+  leg may still stand. Reason: a broken array is md's own record that
+  every member failed under IO, or the last one in sync; a stop writes
+  nothing to full members that come back, and mdadm's plain assemble then
+  starts the array from the newest members and leaves an older one out,
+  which the member reconciliation adds back from md's bitmap
+  (`cnagent_integtest.md`, Lab facts). A half-copied member, a bad-block
+  list and two identities are the cases where only the operator knows
+  which leg holds the data, and a member not read may hold the newest
+  copy. A leg row that reads `ERROR`, as a disk that returns errors on
+  writes leaves it, keeps the re-assembly off, since the array would
+  break again at the next write and a stop and an assembly would follow
+  on every round. The reading is made before the stop: a stop with a
+  half-copied member back can write a bad-block list onto it (Known
+  limits), a member the reading refuses already; once stopped, the
+  group's array is absent and its assembly is the ordinary one above,
+  whose failures retry as any build failure does. md refuses to stop an array a device holds open: at a level that
+  builds thin pools the slice's pool devices hold every group array, and
+  at a level that builds clones the dm-clone holds its clone meta group's
+  array, so the re-assembly acts only where nothing holds the array, as
+  after an operator steps the level down; elsewhere the broken group's
+  `ERROR` row brings the failover or the cntlr replacement, whose new
+  primary assembles the group once its legs are back (`architecture.md`,
+  Known limits). A stop or an assembly that fails, and a listing of the
+  holders that does not answer, are build failures and register the CN10
+  retry; a reading that is not clear registers none, the late-member
+  retry and the read's verdict (CN30) bringing the converge once it is.
+  An array that reads inactive, as a refused assembly leaves it, is not
+  re-assembled: the same assembly would be refused again. A Warn record
+  ("broken array assembled again") names the group, the node stopped and
+  the node started, once the assembled array is there.
 
   A group whose `leg_list` holds a provisioning leg (CN9) is
   **deferred**: no superblock read is taken and none of `--create`,
@@ -4299,7 +4352,9 @@ that a cntlr's converge would fail early for its dead leg, put back or add
 reads `OK`, and a
 read's verdict names the member (CN30), unless CN12's in-sync guard
 holds over its array, whose row then reads `ERROR` and whose members the
-verdict does not name.
+verdict does not name. A broken array the converge would assemble again
+(CN12, The re-assembly) travels in both too: its group's row reads
+`ERROR` with its state, and the verdict names the array.
 
 ### The read-only verdict
 
@@ -4476,6 +4531,26 @@ that array as it is, so a name would bring a `SyncupCntlr` on every
 round for a converge that refuses again; the first read that finds the
 guard let go names the group's members again.
 
+A cntlr's read-only verdict also names each broken array its converge
+would assemble again (CN12, The re-assembly), under a kind of its own
+(`agent.LeftoverKindMdBroken`) by the array's node: one that reads broken,
+with no forced-start mark in its group's record and the group's
+`operator_in_charge` flag clear, that no device holds open and whose
+members' reading is clear, each member's leg read as serving as above.
+The read reads each member's superblock for it, as the converge does, so
+it names no array whose re-assembly the converge would refuse by what a
+read can see,
+which would bring a `SyncupCntlr` on every round; a read of the holders
+or of a superblock that did not answer names nothing, and the next read
+reads again. A step only the converge takes, the connect of a provisioned
+side that has no controller, can still fail; the converge then reads the
+leg not available and refuses an array the read names, on every read, as
+for a member it would put back (Known limits). The group's row stays
+`ERROR` with the array's state.
+Reason: nothing else brings the converge once the reading turns clear
+while the array's legs serve, since a broken array changes no desired
+state and its legs are no late members then.
+
 A cntlr's read-only verdict also names each forced-start mark of the
 request the agent holds while that request does not count as delivered
 (CN8), on each group a converge would build that is not
@@ -4603,7 +4678,10 @@ stores instead is CN23's.
   does a member's copy source on such a leg (CN12): the read counts the
   source and names the member, while the converge, whose leg fails at the
   connect, counts none and adds nothing, or, for the early fail of a member
-  whose leg is dead, fails nothing.
+  whose leg is dead, fails nothing. So does a broken array the read names
+  for CN12's re-assembly while one of its members' legs fails at the
+  connect: the converge reads that leg not available and leaves the array
+  as it is.
 * A leg whose probe round hangs without end never counts as dead (CN11,
   CN12, The early fail): the round in flight past `CnLegProbeStallSeconds`
   counts once, and a leg needs two failed rounds. So the early fail never
@@ -4666,7 +4744,10 @@ stores instead is CN23's.
   stop the forced start begins with fails on that primary on every pass
   while the mark stands (CN12), until a failover or a cntlr replacement
   (`dnv-worker.md` AR5, AR7) moves the role to a cntlr that holds no array
-  of the group, or the level takes the pools, or the clones, away.
+  of the group, or the level takes the pools, or the clones, away. The
+  re-assembly of a broken array meets the same holder (CN12, The
+  re-assembly) and leaves such an array as it is, its converge's row naming
+  the holders, until the same failover, cntlr replacement or level step.
 * A mark the primary did not act on stays until the operator withdraws it
   or the array stops: the worker clears only a mark the group's reading
   names as the acted mark (CN28; `dnv-worker.md` AR13), which the agent

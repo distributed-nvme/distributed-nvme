@@ -916,8 +916,9 @@ func grpRowRefusal(info *pb.CntlrInfo, grpId uint64) error {
 // level where reactions stop before lowering it. model.SetGrpOperatorInCharge,
 // the deciding STM, makes its own checks again, the token first (GW6), and
 // answers a group whose flag already holds the request's value with no
-// write. No write of the flag bumps SpRev, so a token the caller holds stays
-// valid across the call.
+// write. A write of the flag bumps SpRev, since the primary reads the flag
+// (cnagent.md CN12, The re-assembly), so a token the caller holds is stale
+// after the call.
 func (s *Server) UpdateGroupOperatorInCharge(
 	ctx context.Context,
 	req *pb.UpdateGroupOperatorInChargeRequest,

@@ -3851,12 +3851,13 @@ EOF
 	stage 9 "an operator in charge of a group: no create while the flag stands, the worker's own repair still driven, the create once it is cleared"
 	# The operator sets the meta group's flag while the level stops
 	# reactions and lowers the level after, which leaves the worker no pass
-	# to create a repair in (architecture.md, Repairs). The write raises no
-	# revision: no agent reads the flag.
+	# to create a repair in (architecture.md, Repairs). The write raises the
+	# pool's revision once, so the flag reaches the cntlrs, whose primary
+	# reads it (cnagent.md CN12, The re-assembly).
 	local rev_before flagged creates holds aborts cancels
 	rev_before=$(sp_rev_num 1)
 	flagged=$(ctl set-operator-in-charge --sp sp0 --grp 1)
-	assert_field "$flagged" .sp_rev "$rev_before" \
+	assert_field "$flagged" .sp_rev "$((rev_before + 1))" \
 		"the pool's revision after the flag's write"
 	assert_eq "$(grp_in_charge sp0 1 meta 1)" true "the meta group's flag"
 	creates=$(reaction_cnt repair_create)
@@ -3894,11 +3895,11 @@ EOF
 		"worker's repairs while the flag stands"
 	assert_eq "$(grp_rep_name sp0 1 meta 1)" "" \
 		"the meta group's repair while the flag stands"
-	# The operator clears the flag, again with no revision, and the worker
-	# creates its repair of leg 1.
+	# The operator clears the flag, again raising the revision once, and
+	# the worker creates its repair of leg 1.
 	rev_before=$(sp_rev_num 1)
 	flagged=$(ctl set-operator-in-charge --sp sp0 --grp 1 --operator-in-charge=false)
-	assert_field "$flagged" .sp_rev "$rev_before" \
+	assert_field "$flagged" .sp_rev "$((rev_before + 1))" \
 		"the pool's revision after the flag's clear"
 	assert_eq "$(grp_in_charge sp0 1 meta 1)" false \
 		"the meta group's flag after its clear"

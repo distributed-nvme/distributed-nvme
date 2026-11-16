@@ -65,10 +65,12 @@ func OkReply() *pb.AgentReply {
 // forced-start mark of a cntlr's request that does not count as delivered
 // (cnagent.md CN8, CN10, CN12, CN30). Each
 // arrives among the failures, rendered like an enumeration that did not
-// answer. One condition arrives among the
+// answer. Two conditions arrive among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background
 // read names as one its converge would fail early, put back or add, under
-// LeftoverKindMdMember (cnagent.md CN30). Only a read's verdict names these
+// LeftoverKindMdMember, and a broken array its converge would assemble
+// again, under LeftoverKindMdBroken (cnagent.md CN30). Only a read's verdict
+// names these
 // conditions, save two of the dn's: the unconfirmed disk identity, which the
 // converge's own code names too, since the record step that reports it runs
 // in the converge, and the record a pass could not free, which only a
@@ -78,7 +80,8 @@ func OkReply() *pb.AgentReply {
 // A leftover is the one per-resource outcome that cannot ride in the *Info
 // rows (SH14, CN29, DN19): the rows are keyed by the ids of WANTED objects,
 // and a leftover is by definition something nothing wanted names — the md
-// member above is the one wanted object listed among them. It is never
+// member and the broken array above are the wanted objects listed among
+// them. It is never
 // stored as work owed — the agent recomputes it by enumerating the node in
 // every converge and every background read, and keeps it only as the code of
 // the object's observation (dnagent.md SH28, SH29), so the worker's ordinary

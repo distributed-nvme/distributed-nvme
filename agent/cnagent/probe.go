@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -54,10 +55,10 @@ func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
-) (*pb.CntlrInfo, []string, []legSide) {
+) (*pb.CntlrInfo, []verdictName, []legSide) {
 	t := st.tracker
 	info := newCntlrInfo()
-	var putBack []string
+	var putBack []verdictName
 	var noCtrl []legSide
 
 	// Legs — the wrapper table plus the CN11 prober outcome on a primary,
@@ -128,12 +129,20 @@ func (s *CnAgentServer) probeCntlr(
 			info.GrpIdToMdRaid[gp.grpId] = t.Provisioning(
 				key, gp.resName, detailsProvisioning)
 		case plan.wantGrp:
-			status, details, detail := s.probeGroup(ctx, plan, gp)
+			status, details, detail, broken := s.probeGroup(ctx, plan, gp)
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
 			names, refusals := s.putBackNames(
 				ctx, plan, gp, detail, info.LegIdToLeg, dead)
-			putBack = append(putBack, names...)
+			for _, name := range names {
+				putBack = append(putBack, verdictName{
+					kind: agent.LeftoverKindMdMember, name: name})
+			}
+			if broken != nil && s.reassemblyNamed(
+				ctx, plan, gp, broken, info.LegIdToLeg) {
+				putBack = append(putBack, verdictName{
+					kind: agent.LeftoverKindMdBroken, name: broken.Dev})
+			}
 			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp))
 		case plan.primary:
 			info.GrpIdToMdRaid[gp.grpId] = suppressedRow(t, key, gp.resName)
@@ -354,4 +363,34 @@ func cloneSourceLive(view *subsysView, cp *clonePlan) bool {
 		}
 	}
 	return true
+}
+
+// verdictName is one md condition a read's verdict names beside the
+// leftovers (CN30): its leftover kind and its name.
+type verdictName struct {
+	kind string
+	name string
+}
+
+// reassemblyNamed reports whether a read's verdict names the group's broken
+// array (CN30): the converge would try CN12's re-assembly (reassembles) and
+// its refusal finds nothing against it, read with the read's leg rows and,
+// only then, legServes for a member's leg, as copySourceLeg's test. A read
+// that did not answer names nothing; the next read reads again.
+func (s *CnAgentServer) reassemblyNamed(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	broken *MdDetail,
+	legRows map[uint64]*pb.ResInfo,
+) bool {
+	if !reassembles(gp, broken) {
+		return false
+	}
+	why, err := s.reassemblyRefusal(ctx, plan, gp, broken,
+		func(lp *legPlan) bool {
+			return legRows[lp.legId].GetStatus() !=
+				pb.ResStatus_RES_STATUS_ERROR && s.legServes(ctx, plan, lp)
+		})
+	return err == nil && why == ""
 }

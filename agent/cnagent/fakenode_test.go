@@ -823,12 +823,42 @@ func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
 		// of it here took the wrong path, and it does not answer.
 		return nil, context.DeadlineExceeded
 	}
+	if rest, ok := strings.CutPrefix(path, sysfsBlockDir+"/"); ok {
+		if node, ok := strings.CutSuffix(rest, "/holders"); ok {
+			for key, array := range f.arrays {
+				if array.node == node &&
+					f.dirs[sysfsBlockDir+"/"+node] {
+					return f.holdersOf(key), nil
+				}
+			}
+		}
+	}
 	if !f.dirs[path] {
 		return nil, fmt.Errorf("no such directory: %s: %w", path,
 			fs.ErrNotExist)
 	}
 	f.countHeadListing(path)
 	return f.children(path), nil
+}
+
+// holdersOf is the sysfs holders directory of the array at key: the kernel
+// names of the dm devices whose live or waiting table maps the array's
+// number, as heldBy finds the first of them, sorted. Called with f.mu held.
+func (f *fakeNode) holdersOf(key string) []string {
+	array := f.arrays[key]
+	var out []string
+	for name, dm := range f.dms {
+		for _, line := range dmTargets(dm.table + "\n" + dm.waitingTable()) {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 && array.devNo != "" &&
+				slices.Contains(fields[3:], array.devNo) {
+				out = append(out, f.kernelName("/dev/mapper/"+name))
+				break
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // readMtime answers OsClient.ReadMtime, an mtime read in the agent's own

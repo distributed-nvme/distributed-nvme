@@ -1685,10 +1685,11 @@ func (s *CnAgentServer) unownedSrcNqns(
 // over the listings of the read's reading (plan.rd, plan.walk; CN30). A
 // converge passes no reading and lists the node itself (enumerateCn).
 //
-// putBack are the md members the verdict names beside the leftovers, by dm
-// name, each a member the converge would put back, add or remove for a
-// repair (putBackNames, CN30): what the call's probe read, so nothing here
-// reads them again. A
+// putBack are the md conditions the verdict names beside the leftovers:
+// each md member, by dm name, the converge would fail early, put back, add
+// or remove for a repair (putBackNames), and each broken array, by its node,
+// the converge would assemble again (reassemblyNamed; CN30): what the call's
+// probe read, so nothing here reads them again. A
 // converge passes none: it has just tried to put them back, and its rows say
 // how that went. The verdict also names each forced-start mark of a request
 // that does not count as delivered (cntlrState.reqFromRpc; storedMarks;
@@ -1704,7 +1705,7 @@ func (s *CnAgentServer) sweepCntlr(
 	plan *cntlrPlan,
 	remove bool,
 	read *pb.CntlrInfo,
-	putBack []string,
+	putBack []verdictName,
 	noCtrl []legSide,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
@@ -1792,8 +1793,8 @@ func (s *CnAgentServer) sweepCntlr(
 		// runs on every converge.
 		st.tracker.Keep(cntlrResKeys(plan))
 	}
-	for _, name := range putBack {
-		res.Add(agent.LeftoverKindMdMember, name)
+	for _, vn := range putBack {
+		res.Add(vn.kind, vn.name)
 	}
 	for _, ls := range noCtrl {
 		tr := ls.side.GetNvmeTrConf()

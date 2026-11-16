@@ -385,9 +385,10 @@ func TestForceStartGroup(t *testing.T) {
 }
 
 // TestSetOperatorInCharge drives a group's operator_in_charge flag through
-// SetOperatorInCharge: the flag of a slice's group is set and cleared with
-// the pool's revision left as it was, a second set writes nothing, a clone's
-// group is found among the clones, and an unknown group is refused.
+// SetOperatorInCharge: the flag of a slice's group is set and cleared, each
+// write raising the pool's revision by one, a second set writes nothing and
+// leaves the revision, a clone's group is found among the clones, and an
+// unknown group is refused.
 func TestSetOperatorInCharge(t *testing.T) {
 	ctx := testCtx(t)
 	c := plantSmallCluster(t, ctx, true)
@@ -408,9 +409,13 @@ func TestSetOperatorInCharge(t *testing.T) {
 	for i, on := range []bool{true, true, false} {
 		storeBefore := storeRev()
 		spRev, err := SetOperatorInCharge(ctx, c.cli, c.cl, ref, 5, on)
-		if err != nil || spRev != revBefore {
-			t.Fatalf("SetOperatorInCharge(%t) = %d, %v; want the pool "+
-				"left at %d", on, spRev, err, revBefore)
+		want := revBefore + 1
+		if i == 2 {
+			want = revBefore + 2
+		}
+		if err != nil || spRev != want {
+			t.Fatalf("SetOperatorInCharge(%t) = %d, %v; want the pool at %d",
+				on, spRev, err, want)
 		}
 		if got := dataFlag(); got != on {
 			t.Fatalf("group 5's flag = %t, want %t", got, on)

@@ -5122,11 +5122,6 @@ type volTokenCase struct {
 	// separates a mutator's own verdict from a revision check that never
 	// should have run.
 	bypassMsg string
-	// noBump marks the one mutator whose success bumps no SpRev:
-	// UpdateGroupOperatorInCharge, whose flag no agent reads
-	// (architecture.md, Revision keys and the sync fan-out). Its bypass is
-	// judged by the write it made and an SpRev that did not move.
-	noBump bool
 }
 
 // volTokenCases is the mutator list both GW6 tests run: every SP-scoped
@@ -5496,7 +5491,6 @@ func volTokenCases() []volTokenCase {
 				return err
 			},
 			bypassCode: codes.OK,
-			noBump:     true,
 		},
 	}
 }
@@ -5564,9 +5558,8 @@ func TestVolumeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 // exactly the outcome its own rules produce against volSeedTokenFixture
 // (architecture.md, `service Gateway` — RPC specifications): a clean run and a
 // single bump (architecture.md, Revision keys and the sync fan-out) for the
-// twenty the fixture satisfies that bump, a clean run that wrote and bumped
-// nothing for UpdateGroupOperatorInCharge, whose write that rule exempts,
-// and that mutator's OWN code and sentence for the six it does not. What may
+// twenty-one the fixture satisfies, and that mutator's OWN code and sentence
+// for the six it does not. What may
 // never come back is ABORTED "stale revision"; FinishMigration's case shows why
 // the message and not only the code has to be compared, since its precondition
 // speaks ABORTED too.
@@ -5595,19 +5588,6 @@ func TestVolumeMutatorsWithoutATokenSkipTheCheck(t *testing.T) {
 			if tc.bypassCode == codes.OK {
 				if err != nil {
 					t.Fatalf("an absent token must not refuse: %v", err)
-				}
-				if tc.noBump {
-					// The write is the evidence the mutator ran to its end,
-					// since no revision says so.
-					if got := env.spRev(); got != beforeRev {
-						t.Errorf("sp_rev: got %d, want %d (this mutator "+
-							"bumps nothing)", got, beforeRev)
-					}
-					if !volGrpOf(t, env.slice(), volDataGrpId).
-						GetOperatorInCharge() {
-						t.Errorf("the bypassed write left the flag clear")
-					}
-					return
 				}
 				// The bump is what makes the success load-bearing here: the
 				// mutator ran to the end of its transaction, wrote, and told

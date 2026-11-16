@@ -14,7 +14,7 @@ import (
 // model, CreateRepair's refusal of the sp worker's repair under it
 // (architecture.md, Repairs). Every refusal and every write of an equal value
 // is checked to have written nothing at all, by the store's revision, and
-// every write to have left SpRev where it was.
+// every write to have raised SpRev by one, so the flag reaches the cntlrs.
 
 // setInCharge is SetGrpOperatorInCharge on a group of the fixture slice with
 // no expected revision.
@@ -53,9 +53,9 @@ func (e *opsEnv) putOperatorInCharge(grpId uint64, repName string) {
 }
 
 // TestSetGrpOperatorInCharge: the write sets the group's flag with nothing
-// else of the slice changed, and the clear clears it, neither raising SpRev;
-// a write of the value the group already holds, set or clear, writes nothing
-// at all.
+// else of the slice changed, and the clear clears it, each raising SpRev by
+// one; a write of the value the group already holds, set or clear, writes
+// nothing at all.
 func TestSetGrpOperatorInCharge(t *testing.T) {
 	env := newOpsEnv(t)
 	want := env.slice()
@@ -68,9 +68,9 @@ func TestSetGrpOperatorInCharge(t *testing.T) {
 	if env.inCharge(opsMetaGrpId) {
 		t.Errorf("the meta group carries the flag")
 	}
-	if env.spRev() != revBefore {
+	if env.spRev() != revBefore+1 {
 		t.Errorf("SpRev after the write: got %d, want %d", env.spRev(),
-			revBefore)
+			revBefore+1)
 	}
 	storeBefore := env.storeRev()
 	env.mustSetInCharge(opsDataGrpId, true)
@@ -82,9 +82,9 @@ func TestSetGrpOperatorInCharge(t *testing.T) {
 	if env.inCharge(opsDataGrpId) {
 		t.Errorf("the clear left the flag")
 	}
-	if env.spRev() != revBefore {
+	if env.spRev() != revBefore+2 {
 		t.Errorf("SpRev after the clear: got %d, want %d", env.spRev(),
-			revBefore)
+			revBefore+2)
 	}
 	storeBefore = env.storeRev()
 	env.mustSetInCharge(opsDataGrpId, false)
@@ -95,9 +95,9 @@ func TestSetGrpOperatorInCharge(t *testing.T) {
 }
 
 // TestSetGrpOperatorInChargeTakesTheToken: a matching expected revision
-// writes the flag, and, since no write of the flag raises SpRev, the same
-// token clears it again; a stale one is refused first, on a write and on a
-// clear alike, and so is one on a write that would change nothing.
+// writes the flag, which raises SpRev, so the same token is then stale and
+// refused first, on a write and on a clear alike, and so is one on a write
+// that would change nothing; the token the write left clears the flag.
 func TestSetGrpOperatorInChargeTakesTheToken(t *testing.T) {
 	env := newOpsEnv(t)
 	token := env.spRev()
@@ -110,14 +110,14 @@ func TestSetGrpOperatorInChargeTakesTheToken(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		before := env.storeRev()
 		err := SetGrpOperatorInCharge(env.ctx, env.cli, env.cid, opsShard,
-			opsSpId, opsSpName, token+9, opsSliceParent, opsDataGrpId, on)
+			opsSpId, opsSpName, token, opsSliceParent, opsDataGrpId, on)
 		env.wantNoWrite(err, opSetGrpOperatorInCharge, ReasonStaleRevision,
 			before)
 	}
 	if err := SetGrpOperatorInCharge(env.ctx, env.cli, env.cid, opsShard,
-		opsSpId, opsSpName, token, opsSliceParent, opsDataGrpId,
+		opsSpId, opsSpName, token+1, opsSliceParent, opsDataGrpId,
 		false); err != nil || env.inCharge(opsDataGrpId) {
-		t.Errorf("the clear with the same token: %v, flag %v", err,
+		t.Errorf("the clear with the write's token: %v, flag %v", err,
 			env.inCharge(opsDataGrpId))
 	}
 }
@@ -246,8 +246,8 @@ func TestSetGrpOperatorInChargeAtEveryLevel(t *testing.T) {
 
 // TestSetGrpOperatorInChargeOfACloneMetaGroup is the flag through a clone
 // parent: the write puts it on the clone's record where a slice's group would
-// have its slice's, leaves the slice alone, raises no SpRev, and the clear
-// takes it off again.
+// have its slice's, leaves the slice's record alone, raises SpRev, and the
+// clear takes it off again.
 func TestSetGrpOperatorInChargeOfACloneMetaGroup(t *testing.T) {
 	env := newOpsEnv(t)
 	env.putGrpClone(opsCloneName, opsCloneId, opsCloneGrp(true), false)
@@ -265,9 +265,9 @@ func TestSetGrpOperatorInChargeOfACloneMetaGroup(t *testing.T) {
 	if got := env.slice(); !proto.Equal(got, slice) {
 		t.Errorf("the clone's flag wrote the slice: %v", got)
 	}
-	if env.spRev() != revBefore {
+	if env.spRev() != revBefore+1 {
 		t.Errorf("SpRev after the clone's write: got %d, want %d",
-			env.spRev(), revBefore)
+			env.spRev(), revBefore+1)
 	}
 	if err := SetGrpOperatorInCharge(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, noExpectRev, parent, opsCloneGrpId,

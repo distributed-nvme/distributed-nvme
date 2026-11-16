@@ -281,9 +281,10 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **operator in charge** — An operator's take-over of an md-raid1 group's
   repair from the sp worker: the group's flag, `Group.operator_in_charge`,
   which the operator sets and clears, keeps the worker from creating a
-  repair of the group, and auto-grow from withdrawing a stuck grow of it
-  (`dnv-worker.md` AR6), while it stands (Repairs,
-  `UpdateGroupOperatorInCharge`).
+  repair of the group, auto-grow from withdrawing a stuck grow of it
+  (`dnv-worker.md` AR6), and the primary from assembling a broken array of
+  the group again (`cnagent.md` CN12, The re-assembly), while it stands
+  (Repairs, `UpdateGroupOperatorInCharge`).
 * **array made** — The flag that an md-raid1 group's array has run,
   `Group.array_made`: the sp worker sets it from the first report of the
   primary that reads the group's row `OK` (`dnv-worker.md` AR15), and
@@ -1362,10 +1363,9 @@ suffix) and `SpRev.sp_name` (the `SpConf` key suffix) [D10]. Rules:
   agent needs to hear of either. Nor does a write that changes only a
   DN's `used_meta_units` (Metadata units): no agent reads the count, so a
   DN whose only change is its used units is written and its capacity key
-  rewritten, and its revision stays; nor does a write of a group's
-  `operator_in_charge` flag, which no agent reads either (Repairs,
-  UpdateGroupOperatorInCharge), nor a write of a retired leg's `keep` flag
-  (Retired legs, UpdateRetiredLegKeep). Every `SpConf` or sub-object
+  rewritten, and its revision stays; nor does a write of a retired leg's
+  `keep` flag, which no agent reads either (Retired legs,
+  UpdateRetiredLegKeep). Every `SpConf` or sub-object
   mutation of
   `service Gateway` — RPC specifications bumps `SpRev` unless the RPC's
   spec says otherwise.
@@ -3815,11 +3815,13 @@ worker creates no repair of the group, however long the operator leaves it.
 Action: STM: set the group's `operator_in_charge` to the request's value; a
 group that already holds that value is answered OK with no write, a token
 the request carried still being checked first (`gateway.md` GW6). The write
-does not bump `SpRev`. Reason: no agent reads the flag, and the sp worker
-reads every record afresh at the start of each pass (`dnv-worker.md` AR1),
-so its next pass sees the flag with no fan-out; the flag still rides to the
-cntlrs in its group's record at the pool's next bump, unread, and a token a
-caller holds stays valid across the flag's writes. Reply `grp_id`.
+bumps `SpRev`. Reason: the primary reads the flag: while it stands, the
+primary leaves a broken array of the group as it is instead of assembling
+it again (`cnagent.md` CN12, The re-assembly), so the flag must reach the
+cntlrs in the group's record; the sp worker reads every record afresh at
+the start of each pass (`dnv-worker.md` AR1) and sees it there too. A token
+a caller holds is stale after the write, as after any write that bumps
+`SpRev`. Reply `grp_id`.
 
 **InspectGroup** — inputs `grp_id`, and `leg_id` and `force` for the dry
 run: a read-only look at an md-raid1 group's members through its primary,
@@ -5401,7 +5403,10 @@ it: above all by the early fail of a member whose leg is dead while
 another member keeps the data (`cnagent.md` CN12, The early fail), and by
 a repair's or a removal's own fail. The survivor then starts alone, and
 the dead leg, whose own superblock still counts both, stays refused
-alone. Only an
+alone. A group array that reads broken, which md leaves after every member
+failed under IO, is stopped and assembled again the same way when nothing
+holds it open and the reading of its members is clear (`cnagent.md` CN12,
+The re-assembly). Only an
 operator's forced start overrides that arbitration, from the one leg the
 operator names, and only while its mark stands (Repair, Forced start). The
 cases, the guards around the create, the sysfs read of the members and
@@ -7627,9 +7632,13 @@ document and only pointed to here.
   timeout fail the IO on every leg (`dnagent.md` SH20; the entry above), md
   has no member left to serve a write, marks the array broken and refuses
   every write (`cnagent.md` CN29), and a `RedundNone` group returns the
-  errors to the host. The primary leaves a broken array as it is when the
-  legs return: only a forced start's stop acts on it (`cnagent.md` CN12,
-  CN29). The broken group's row is an `ERROR` row of the primary's own, so
+  errors to the host. When the legs return, the primary stops the broken
+  array and assembles it again by itself only where no device holds it
+  open, as at a level that builds no thin pool, and only on a clear
+  reading of every member (`cnagent.md` CN12, The re-assembly); at a level
+  that builds thin pools the pool's devices hold it, and otherwise only a
+  forced start's stop acts on it (`cnagent.md` CN12, CN29). The broken
+  group's row is an `ERROR` row of the primary's own, so
   its health epoch is set (`dnv-worker.md` HL2) and a failover
   (`dnv-worker.md` AR5) or, for a sole primary, a cntlr replacement
   (`dnv-worker.md` AR7) moves the role, and the new primary's build
@@ -7707,15 +7716,19 @@ document and only pointed to here.
   a repair whose bad leg is the leg of the identity not wanted, which keeps
   its data at the finish, or force-starts the group from the leg wanted
   (`cnagent.md` CN12).
-* **A forced start waits on a primary whose layers above hold the broken
-  array.** At a level that builds thin pools, a slice's group array that
+* **A forced start and the re-assembly wait on a primary whose layers
+  above hold the broken array.** At a level that builds thin pools, a slice's group array that
   does not run is held open by the devices its slice's pool is built over,
   and at a level that builds clones, a clone meta group's array is held
   open by the clone's dm-clone, which serves on or is left as it is over a
   group that is not ready (`cnagent.md` CN18); so the primary cannot stop
   it and the forced start waits on that primary until a failover or a cntlr
   replacement moves the role or the level stops the pools, or the clones
-  (`cnagent.md` CN12). A
+  (`cnagent.md` CN12); the re-assembly leaves such an array as it is, its
+  converge's row naming the holders, and the failover or the cntlr replacement that
+  its `ERROR` row brings assembles the group on the next primary once the
+  legs are back. A pool with one cntlr waits for the cntlr replacement,
+  at the cntlr threshold. A
   level where reactions stop lets the primary stop such an array, and
   keeps failovers off while the group is down.
 * **A forced-start mark can stand over an array that runs.** The

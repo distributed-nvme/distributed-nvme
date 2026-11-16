@@ -283,8 +283,8 @@ logs for the same thing.
   and `cntlr_id` or `side_id` for an object-level one — then `leftover_cnt`,
   `leftovers` (the sorted "kind:name" entries joined by a space; `kind` is
   one of the `LeftoverKind*` labels of `agent/sweep.go`, and a cntlr's
-  read-only verdict lists there, under a kind of its own, the md members
-  `cnagent.md` CN30 names) and
+  read-only verdict lists there, each under a kind of its own, the md
+  members and the broken arrays `cnagent.md` CN30 names) and
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
   the dn, a disk whose identity is not confirmed or a side with bytes
@@ -317,7 +317,8 @@ calls do NOT remove is in both logs at every re-send, which is exactly
 what distinguishes it from one the next pass removed. A leftover that only a
 background read's verdict names, and that the `Syncup*` it brings does not
 report — an md member that syncup's converge fails early, puts back or
-adds (`cnagent.md` CN12), or a subsystem directory that outlives its last
+adds, or a broken array it assembles again (`cnagent.md` CN12), or a
+subsystem directory that outlives its last
 controller — is in the agent's record alone, under the trace id of the
 round that started the read. The worker re-sends the `Syncup*` on the
 round that answers from that read's observation, under that round's own

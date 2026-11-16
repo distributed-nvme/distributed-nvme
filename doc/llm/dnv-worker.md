@@ -986,8 +986,8 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   the group's parent and id and the flag's value, and requires the expected
   revision; the any-level SP checks; the pool `RedundMdRaid1`; the parent
   holding the group, a clone parent not `deleting`. It sets the group's
-  `operator_in_charge` to the value and writes the parent with no `SpRev`
-  bump, as the call's spec says (`architecture.md`, Repairs); a group whose
+  `operator_in_charge` to the value, writes the parent and bumps `SpRev`,
+  as the call's spec says (`architecture.md`, Repairs); a group whose
   flag already holds the value is answered with no write.
 * `SetNewLegsPartial` takes the repair's name and `rep_id`, a list of its
   new legs' ids to mark and one to clear, and no expected revision: the
@@ -1053,9 +1053,8 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   `SpConf`, `SpName` and `SpRev` and decrements the shard's entry of
   `SpGlobal.shard_bucket`. It is the one write of the storage pool drain
   that does not bump `SpRev` — it deletes the key, which is the shard
-  worker's stop signal (RW14); the health epoch writers,
-  `SetGrpOperatorInCharge` and `DrainCloneBm` bump none either (their
-  entries).
+  worker's stop signal (RW14); the health epoch writers and
+  `DrainCloneBm` bump none either (their entries).
 * `DrainCloneBm` takes the clone and a list of chunks and requires the clone
   drain checks of CLD2 (`SpConf` exists and is not itself deleting, `sp_id`
   unchanged, `Clone` exists, `clone_id` unchanged, `deleting` true) and at
@@ -5035,8 +5034,8 @@ revision gate being per object and not per cluster.
   cleared too, though not while the primary's reports are of an observation older than
   the mark, nor while its report of the mark's revision reads the group's
   row other than `OK`; and a group's `operator_in_charge` flag is set while
-  reactions stop and cleared later, each write leaving the pool's revision
-  as it was: while it stands leg repair holds the group's due leg on every
+  reactions stop and cleared later, each write raising the pool's revision
+  once: while it stands leg repair holds the group's due leg on every
   pass, ahead of the group's repair, and creates no repair, while the drive
   step still tries to abort the worker's own repair of the group once its
   bad leg reads healthy again and cancels it once the primary confirms; once
@@ -5293,10 +5292,11 @@ past its metadata area (`architecture.md`, Metadata units), so that a
 later release, the clone drain's among them, finds what it gives back.
 `put-migr` sets the migration's `cutover_pending` only when a case asks
 for it, which a case that means to stage what `CreateMigration` writes
-does. Of the `set-*` writes only `set-epoch` and `set-operator-in-charge`
-write one record and nothing else, the latter under its op's checks
-(below); every other `set-*` bumps the pool's revision too, save
-`set-free`, which maintains the capacity key. `set-epoch` is raw: it
+does. Of the `set-*` writes only `set-epoch` writes one record and
+nothing else; `set-operator-in-charge` writes the group's record and bumps
+the pool's revision under its op's checks (below), and every other
+`set-*` bumps the pool's revision too, save `set-free`, which maintains
+the capacity key. `set-epoch` is raw: it
 plants one `err_epoch`, on a cntlr, or on a leg or a side of a
 slice or of a clone's clone meta group, and touches
 neither a revision nor a `CdcEntry` nor a `settling` flag, so a case can

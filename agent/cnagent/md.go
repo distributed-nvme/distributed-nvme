@@ -318,6 +318,32 @@ func (m *Md) Gone(ctx context.Context, dev string) (bool, error) {
 	return state == "clear", nil
 }
 
+// Holders are the kernel names of the devices that hold the array dev open,
+// from its sysfs holders directory: the dm devices built over it, such as a
+// slice's pool devices or a clone's dm-clone; none when nothing does. mdadm
+// stops an array only while nothing holds it (cnagent.md CN12, The
+// re-assembly). A listing that did not answer is an error, and so is an
+// array whose directory is gone, which a caller that read it there a moment
+// ago cannot tell from a listing that lies.
+func (m *Md) Holders(ctx context.Context, dev string) ([]string, error) {
+	name := dev
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	if name == "" {
+		return nil, fmt.Errorf("md device %q has no node name", dev)
+	}
+	holders, ok, err := m.cmd.ListDir(
+		ctx, sysfsBlockDir+"/"+name+"/holders")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("array %s has no holders directory", dev)
+	}
+	return holders, nil
+}
+
 // NameInUse reports whether a named array node, /dev/md/<name>, resolves to a
 // block device — whether an array already runs under that name. It is an
 // lsblk of the node, which reads no member device; a run that did not answer
@@ -1183,6 +1209,9 @@ func (s *CnAgentServer) ensureGroup(
 	case forced:
 		detail, forcedStarted, err = s.forcedStartPass(ctx, plan, gp, walk,
 			detail, available)
+	case reassembles(gp, detail):
+		detail, err = s.reassemblePass(ctx, plan, gp, walk, detail,
+			available, legRows)
 	case !detail.Exists:
 		err = s.assembleGroup(ctx, gp, available)
 		if err == nil {
@@ -1242,8 +1271,9 @@ func (s *CnAgentServer) startedArray(
 // member reconciliation is for a running mirror, and an --add, --fail or
 // --remove on an array that has not started could only change which members
 // an operator's start would find. Its state is the group's error. Only the
-// stop of CN12's forced start, while the group's mark stands, acts on such
-// an array, and before this test (ensureGroup).
+// stop of CN12's forced start, while the group's mark stands, and the stop
+// of CN12's re-assembly of a broken array (reassemblePass) act on such an
+// array, both before this test (ensureGroup).
 func runningArrayErr(detail *MdDetail) error {
 	if detail.Foreign {
 		return detail.foreignErr()
@@ -1605,6 +1635,184 @@ func (s *CnAgentServer) forcedStartPass(
 	}
 	return found, true, nil
 }
+
+// mdStateBroken is the array_state of an array md has marked broken, which
+// refuses every write: every member has failed under IO, or the last one md
+// held in sync (CN29).
+const mdStateBroken = "broken"
+
+// reassembles reports whether ensureGroup's pass tries CN12's re-assembly of
+// the group's array: it reads broken, holds no member that is not a dm
+// device, the group's record carries no forced-start mark, and the operator
+// has not taken the group over (Group.operator_in_charge). A mark acts in the
+// re-assembly's place; one held from a request that does not count as
+// delivered, which the pass does not act on (dropForcedStartMarks), holds it
+// too, since the operator's choice of a leg may still stand.
+func reassembles(gp *grpPlan, detail *MdDetail) bool {
+	return detail.Exists && detail.State == mdStateBroken &&
+		!detail.Foreign && gp.grp.GetForcedStart() == nil &&
+		!gp.grp.GetOperatorInCharge()
+}
+
+// reassemblyRefusal is "" when CN12's re-assembly may stop the group's
+// broken array and assemble it again, and otherwise why not, the converge's
+// (reassemblePass) and the read's (probeCntlr) alike: the array holds a
+// member that is no leg wrapper of this pool, which the sweep's rule leaves
+// alone (MdDetail.strangerErr); a device holds the array open (Md.Holders),
+// so mdadm cannot stop it; or the reading of the members is not clear.
+// Clear is: every member the group keeps — its leg_list legs and the new
+// legs of its open repair — is on a leg that serves and whose row does not
+// read ERROR (usable: copySourceLeg's test, the converge's or the read's),
+// and its superblock reads; every superblock read is a full member's
+// (mdSuperblock.notFullMember) with no bad-block list, all of one identity;
+// no new leg the repair took back from a retired leg carries one, which
+// only the take-back check may let in (takeBackStep); and at least one
+// member carries a superblock. A member that carries none is left out of
+// the assembly and added after it, as at any assembly (assembleGroup).
+// Reason: mdadm's plain assemble then starts the array from the newest
+// members and leaves an older one out (cnagent_integtest.md, Lab facts),
+// while a half-copied member, a bad-block list or two identities are the
+// cases where only the operator knows which leg holds the data, and an
+// unread member may hold the newest copy; the leg row keeps a disk that
+// returns errors out, since its array would break again at the next write
+// and a stop and an assembly would follow on every round. An error is a
+// read that did not answer: the holders' listing.
+func (s *CnAgentServer) reassemblyRefusal(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	detail *MdDetail,
+	usable func(*legPlan) bool,
+) (string, error) {
+	if err := detail.strangerErr(
+		plan.clusterId, plan.cnId, plan.spId); err != nil {
+		return err.Error(), nil
+	}
+	holders, err := s.md.Holders(ctx, detail.Dev)
+	if err != nil {
+		return "", err
+	}
+	if len(holders) > 0 {
+		return fmt.Sprintf("held open by %s, so it cannot be stopped",
+			strings.Join(holders, ", ")), nil
+	}
+	uuid := ""
+	var first *legPlan
+	for _, lp := range inspectedLegs(gp) {
+		if lp.provisioning || !usable(lp) {
+			return fmt.Sprintf("leg %#x does not serve, or its row reads "+
+				"ERROR", lp.legId), nil
+		}
+		reading := s.md.ReadMember(ctx, lp.path)
+		if reading.Err != nil {
+			return fmt.Sprintf("the superblock read of leg %#x: %v",
+				lp.legId, reading.Err), nil
+		}
+		sb := reading.Sb
+		if sb == nil {
+			continue
+		}
+		if gp.rep != nil && gp.rep.takenBack(lp.legId) &&
+			!slices.Contains(gp.legs, lp) {
+			return fmt.Sprintf("leg %#x, taken back from a retired leg, "+
+				"carries a superblock", lp.legId), nil
+		}
+		if why := sb.notFullMember(); why != "" {
+			return fmt.Sprintf("leg %#x is not a full member: %s",
+				lp.legId, why), nil
+		}
+		if sb.BadBlocks > 0 {
+			return fmt.Sprintf("leg %#x carries a bad-block list of %d "+
+				"entries", lp.legId, sb.BadBlocks), nil
+		}
+		switch {
+		case uuid == "":
+			uuid, first = sb.Uuid, lp
+		case sb.Uuid != uuid:
+			return fmt.Sprintf("members of two identities: leg %#x "+
+				"carries %s and leg %#x %s", first.legId, uuid, lp.legId,
+				sb.Uuid), nil
+		}
+	}
+	if uuid == "" {
+		return "no member carries a superblock", nil
+	}
+	return "", nil
+}
+
+// brokenLeftError is the group's error of a pass whose re-assembly refused
+// (reassemblyRefusal): the array stays as it is, as before CN12's
+// re-assembly, and its text keeps runningArrayErr's words and adds why. It
+// registers no retry: the read's verdict names the array once its reading is
+// clear (CN30), and a leg_list member that does not serve is late
+// (hasLateMember).
+func brokenLeftError(detail *MdDetail, why string) error {
+	return fmt.Errorf("array %s is %s; not assembled again: %s",
+		detail.Dev, detail.State, why)
+}
+
+// reassemblePass is ensureGroup's part for a group whose array reads broken
+// with no forced-start mark and no operator in charge (reassembles; cnagent.md
+// CN12, The re-assembly): once reassemblyRefusal finds nothing against it, the
+// array is stopped (stopGroupArray) and assembled again by CN12's assembly
+// (assembleGroup), whose plain assemble starts it from the members md holds
+// newest, and it is read again (startedArray). A refusal leaves it as it is
+// (brokenLeftError). A stop or an assembly that fails is a build failure
+// (asBuildErr), which registers the CN10 retry; an assembly that leaves an
+// array that does not run is the group's error by runningArrayErr, as it is
+// after any assembly.
+func (s *CnAgentServer) reassemblePass(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	walk *MdWalk,
+	detail *MdDetail,
+	available map[uint64]bool,
+	legRows map[uint64]*pb.ResInfo,
+) (*MdDetail, error) {
+	why, err := s.reassemblyRefusal(ctx, plan, gp, detail,
+		func(lp *legPlan) bool {
+			return copySourceLeg(available[lp.legId], legRows[lp.legId])
+		})
+	if err != nil {
+		return nil, asBuildErr(err)
+	}
+	if why != "" {
+		return nil, brokenLeftError(detail, why)
+	}
+	if err := s.stopGroupArray(ctx, detail.Dev); err != nil {
+		return nil, asBuildErr(err)
+	}
+	if err := s.md.Refresh(ctx, walk); err != nil {
+		return nil, asBuildErr(err)
+	}
+	found, err := s.md.Detail(ctx, walk, gp.memberNames())
+	if err != nil {
+		return nil, asBuildErr(err)
+	}
+	if found.Exists {
+		return nil, asBuildErr(fmt.Errorf(
+			"array %s is still there after its stop: %s", found.Dev,
+			found.State))
+	}
+	if err := s.assembleGroup(ctx, gp, available); err != nil {
+		return nil, asBuildErr(err)
+	}
+	found, err = s.startedArray(ctx, gp, walk)
+	if err != nil {
+		return nil, asBuildErr(err)
+	}
+	slog.WarnContext(ctx, msgReassembly, append(s.cntlrIdAttrs(plan),
+		slog.Uint64("grp_id", gp.grpId),
+		slog.String("stopped", detail.Dev),
+		slog.String("started", found.Dev))...)
+	return found, nil
+}
+
+// msgReassembly is the Warn record of CN12's re-assembly, made once the
+// array it assembled again is there: it names the group, the broken
+// array's node it stopped and the node the assembly started.
+const msgReassembly = "broken array assembled again"
 
 // forcedStartError is the group's error of a pass that CN12's forced start
 // ended (forcedStartPass), or that a read before it, or a running array's
@@ -3026,7 +3234,9 @@ func (s *CnAgentServer) legServes(
 // report the same row. The array it read OK is returned too, for the
 // verdict, and nil whenever the row is not that: the verdict names no member
 // of a group the guard holds, whose converge would refuse again, so no
-// syncup comes for it on every round.
+// syncup comes for it on every round. The fourth value is an array of the
+// group that reads broken, for the verdict's re-assembly name
+// (reassemblyNamed), and nil for any other row.
 //
 // Like ensureGroup it is only ever reached for a non-deferred group ([D15]), and
 // like ensureGroup it states the leg-count invariant rather than trusting the
@@ -3035,40 +3245,44 @@ func (s *CnAgentServer) probeGroup(
 	ctx context.Context,
 	plan *cntlrPlan,
 	gp *grpPlan,
-) (pb.ResStatus, string, *MdDetail) {
+) (pb.ResStatus, string, *MdDetail, *MdDetail) {
 	if !gp.raid1 {
 		if len(gp.legs) != 1 {
 			return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
-				"RedundNone group has %d legs, want 1", len(gp.legs)), nil
+				"RedundNone group has %d legs, want 1", len(gp.legs)), nil, nil
 		}
 		status, details := s.probeDmTarget(ctx, plan.rd, gp.dmName, "linear",
 			gp.dataSectors, gp.legs[0].name, gp.dataOffsetSectors)
-		return status, details, nil
+		return status, details, nil, nil
 	}
 	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), nil
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), nil, nil
 	}
 	detail, err := s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), nil
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), nil, nil
 	}
 	if !detail.Exists || detail.State == "clear" {
-		return pb.ResStatus_RES_STATUS_MISSING, "", nil
+		return pb.ResStatus_RES_STATUS_MISSING, "", nil, nil
 	}
 	if detail.Foreign {
-		return pb.ResStatus_RES_STATUS_ERROR, detail.foreignErr().Error(), nil
+		return pb.ResStatus_RES_STATUS_ERROR, detail.foreignErr().Error(), nil, nil
 	}
 	if !mdRunning(detail.State) {
-		return pb.ResStatus_RES_STATUS_ERROR, detail.State, nil
+		var broken *MdDetail
+		if detail.State == mdStateBroken {
+			broken = detail
+		}
+		return pb.ResStatus_RES_STATUS_ERROR, detail.State, nil, broken
 	}
 	if leaver := inSyncGuard(gp, detail, func(lp *legPlan) bool {
 		return s.legServes(ctx, plan, lp)
 	}); leaver != "" {
 		return pb.ResStatus_RES_STATUS_ERROR,
-			errInSyncGuard(leaver, detail.Dev).Error(), nil
+			errInSyncGuard(leaver, detail.Dev).Error(), nil, nil
 	}
-	return pb.ResStatus_RES_STATUS_OK, mdStateLine(detail), detail
+	return pb.ResStatus_RES_STATUS_OK, mdStateLine(detail), detail, nil
 }
 
 // reportGrpReading writes, beside a group's rows, what the primary reads of

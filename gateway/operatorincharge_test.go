@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -13,7 +14,7 @@ import (
 
 // UpdateGroupOperatorInCharge (architecture.md, Repairs; gateway.md, Repairs
 // and retired legs), on the fixture of handler_vol_test.go. Every write is
-// asserted against the store and an SpRev that did not move, and every
+// asserted against the store and an SpRev raised by one, and every
 // refusal and every write of the value a group already holds by a store
 // whose revision did not move, a refusal by its code and its message too.
 
@@ -74,9 +75,10 @@ func oicWantNoWrite(
 
 // TestUpdateGroupOperatorInChargeWritesTheFlag pins the call's action
 // (architecture.md, Repairs): the set puts the data group's flag in one
-// transaction with nothing else of the slice changed and no SpRev bump, so
-// the same token then clears it; a set or a clear of the value the group
-// already holds writes nothing at all.
+// transaction with nothing else of the slice changed and SpRev raised by
+// one, so the flag reaches the cntlrs and the first token is then stale;
+// each write under the current token sets or clears it, and a set or a
+// clear of the value the group already holds writes nothing at all.
 func TestUpdateGroupOperatorInChargeWritesTheFlag(t *testing.T) {
 	env := newVolEnv(t)
 	want := env.slice()
@@ -99,13 +101,18 @@ func TestUpdateGroupOperatorInChargeWritesTheFlag(t *testing.T) {
 		t.Errorf("store revision: got %d, want %d (one transaction)", got,
 			storeBefore+1)
 	}
-	if got := env.spRev(); got != tok.GetRevision() {
-		t.Errorf("sp_rev: got %d, want %d (the write bumps nothing)", got,
-			tok.GetRevision())
+	if got := env.spRev(); got != tok.GetRevision()+1 {
+		t.Errorf("sp_rev: got %d, want %d (the write raises it)", got,
+			tok.GetRevision()+1)
+	}
+	stale := oicRequest(env, false)
+	stale.SpRev = tok
+	if _, err := env.srv.UpdateGroupOperatorInCharge(
+		env.ctx, stale); status.Code(err) != codes.Aborted {
+		t.Errorf("the clear with the first token: %v, want ABORTED", err)
 	}
 	for _, on := range []bool{true, false} {
 		req := oicRequest(env, on)
-		req.SpRev = tok
 		if _, err := env.srv.UpdateGroupOperatorInCharge(
 			env.ctx, req); err != nil {
 			t.Fatalf("the write of %v with the first token: %v", on, err)
@@ -116,6 +123,7 @@ func TestUpdateGroupOperatorInChargeWritesTheFlag(t *testing.T) {
 		if oicFlag(env, volMetaGrpId) {
 			t.Errorf("the meta group carries the flag")
 		}
+		req.SpRev = env.token()
 		before, storeBefore := env.dump(), volStoreRev(env)
 		if _, err := env.srv.UpdateGroupOperatorInCharge(
 			env.ctx, req); err != nil {
@@ -124,16 +132,16 @@ func TestUpdateGroupOperatorInChargeWritesTheFlag(t *testing.T) {
 		oicWantNoWrite(env, fmt.Sprintf("a repeated write of %v", on),
 			before, storeBefore)
 	}
-	if got := env.spRev(); got != tok.GetRevision() {
+	if got := env.spRev(); got != tok.GetRevision()+2 {
 		t.Errorf("sp_rev after the clear: got %d, want %d", got,
-			tok.GetRevision())
+			tok.GetRevision()+2)
 	}
 }
 
 // TestUpdateGroupOperatorInChargeAtEveryLevel pins the call's levels
 // (architecture.md, Repairs): the set and the clear are taken at every
 // sp_level, the levels where reactions stop and those where no group array
-// is built among them, each with no SpRev bump.
+// is built among them, each raising SpRev by one.
 func TestUpdateGroupOperatorInChargeAtEveryLevel(t *testing.T) {
 	env := newVolEnv(t)
 	for _, level := range []pb.SpLevel{
@@ -156,8 +164,8 @@ func TestUpdateGroupOperatorInChargeAtEveryLevel(t *testing.T) {
 					level, got)
 			}
 		}
-		if got := env.spRev(); got != rev {
-			t.Errorf("sp_rev at %s: got %d, want %d", level, got, rev)
+		if got := env.spRev(); got != rev+2 {
+			t.Errorf("sp_rev at %s: got %d, want %d", level, got, rev+2)
 		}
 	}
 }
@@ -342,8 +350,8 @@ func TestUpdateGroupOperatorInChargeOnACloneMetaGroup(t *testing.T) {
 	if got := env.slice(); !proto.Equal(got, slice) {
 		t.Errorf("the clone's flag wrote the slice: %v", got)
 	}
-	if got := env.spRev(); got != rev {
-		t.Errorf("sp_rev: got %d, want %d", got, rev)
+	if got := env.spRev(); got != rev+1 {
+		t.Errorf("sp_rev: got %d, want %d", got, rev+1)
 	}
 	volLatchClone(env, "clone-a")
 	for _, on := range []bool{true, false} {

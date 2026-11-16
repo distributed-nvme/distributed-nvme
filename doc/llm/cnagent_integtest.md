@@ -26,7 +26,8 @@ dying while md copies onto a repair's new leg, where a forced start refuses the
 half-copied leg and starts from the leg that died, a take-back refused for a
 retired leg of another identity, a forced start that drops the named leg's
 bad-block list and one refused for a named leg older than a member it would
-zero, then forced, a group whose array has run whose legs all read blank,
+zero, then forced, a broken array whose legs come back assembled again
+with no mark, a group whose array has run whose legs all read blank,
 the clone's source lost and given back, and
 the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
@@ -206,6 +207,17 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   primary, freeze md's copy once the array reads broken, wait for broken to
   hold, and mark while the leg is still dead,
   so that the forced start stops the array before the leg is back.
+* A broken RAID1 array whose members come back stays broken, and a read
+  of it gets an IO error; a stop writes nothing to the members, and a
+  plain assemble of them, with no run and no force flag, starts the array
+  again. When both members died at once under a write, both superblocks
+  still record a clean array of both at one change count, and the
+  assemble starts it from both, in sync. When one died, writes went on,
+  and then the other died, the last one's superblock records itself alone
+  at a higher change count, and the assemble starts the array from it
+  alone and leaves the older one out, for the member reconciliation's add
+  (`cnagent.md` CN12, The re-assembly). Seen on loop devices with dnv's
+  create options, kernel 7.0.0-42, mdadm 4.5.
 * A few seconds after md's copy onto a member ends, md clears the bits of
   its write-intent bitmap in a write to every member, so a leg cut then
   gets an IO and md fails its member by itself, seen about 8 s after such a
@@ -536,7 +548,22 @@ moves past leg 1's; with the arrays stopped and leg 1 back, both
 superblocks of one identity, a mark naming leg 1 is refused, the row
 naming the change count, with nothing zeroed or assembled, and the same
 mark with the operator's force zeroes the other leg and starts the array
-from leg 1; the host reads its data unchanged (`cnagent.md` CN12). Before
+from leg 1; the host reads its data unchanged (`cnagent.md` CN12). Then
+the re-assembly, the way the forced-start guide gives an operator: both
+legs' exports to the primary error every IO, and a host write to a region
+it wrote before fails, which leaves the data group's array broken under
+the pool; with both exports back and both legs' rows no longer `ERROR`,
+a converge leaves the array broken, its row naming the pool's device that
+holds it open, and a check round does not name it; the step to the level
+that takes the pools away is a converge that sweeps the pool's devices
+before it builds the groups, so it stops the array and assembles it
+again, with no zeroed superblock and no run flag, both members in sync
+after md's copy (`cnagent.md` CN12, The re-assembly). Broken once more at
+that level by a write through the array itself, with the exports back, the
+array is named by a fresh check round, by its node under its own kind
+(`cnagent.md` CN30), and the `SyncupCntlr` re-sent as the worker would
+assembles it again. The pool comes back at the level that builds it, and
+the host reads its data unchanged. Before
 its teardown, with the arrays stopped, every member of the data group is
 zeroed by hand, as a forced start cut short after its zeroing leaves them,
 and the request carries the flag that the group's array has run: the

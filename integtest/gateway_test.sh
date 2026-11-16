@@ -3423,11 +3423,11 @@ EOF
 	stage 18 "set-grp-operator-in-charge: set, read back, repeat, clear"
 	# -------------------------------------------------------------------
 	# The operator-in-charge flag of a group (architecture.md, Repairs): one
-	# write of the group's record that bumps no SpRev, since no agent reads
-	# the flag, so the token the stage holds stays valid across every write
-	# of it; a write of the value the group already holds writes nothing;
-	# and the call takes the pool at every level, the one where no group
-	# array is built among them.
+	# write of the group's record that bumps SpRev, since the primary reads
+	# the flag (cnagent.md CN12, The re-assembly), so the stage takes the
+	# token each write leaves; a write of the value the group already holds
+	# writes nothing; and the call takes the pool at every level, the one
+	# where no group array is built among them.
 	local oicMetaGrp oicStore oicGet
 	oicMetaGrp=$(sp_grp_id sp0 meta 0)
 	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "false" \
@@ -3439,7 +3439,8 @@ EOF
 		"set-grp-operator-in-charge reply grp_id"
 	assert_eq "$(store_rev)" "$((oicStore + 1))" \
 		"the set is one transaction"
-	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "the set bumps no SpRev"
+	assert_eq "$(sp_rev_of sp0)" "$((SP_REV + 1))" "the set bumps SpRev once"
+	refresh_rev sp0
 	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "true" \
 		"the set put the data group's flag"
 	assert_eq "$(smoke_grp_field sp0 "$oicMetaGrp" operator_in_charge)" \
@@ -3480,6 +3481,9 @@ EOF
 	out=$(gw set-grp-operator-in-charge --sp sp0 --rev "$SP_REV" \
 		--grp "$dataGrp" --operator-in-charge=false)
 	assert_field "$out" '.grp_id' "$dataGrp" "the clear's reply grp_id"
+	assert_eq "$(sp_rev_of sp0)" "$((SP_REV + 1))" \
+		"the clear at SP_LEVEL_NO_REDUND bumps SpRev once"
+	refresh_rev sp0
 	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" \
 		"false" "the clear at SP_LEVEL_NO_REDUND cleared the flag"
 	assert_no_write "a repeated clear" \
@@ -3489,8 +3493,9 @@ EOF
 		--grp "$dataGrp" >/dev/null
 	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" "true" \
 		"the set at SP_LEVEL_NO_REDUND put the flag"
-	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
-		"the writes at SP_LEVEL_NO_REDUND bump no SpRev"
+	assert_eq "$(sp_rev_of sp0)" "$((SP_REV + 1))" \
+		"the set at SP_LEVEL_NO_REDUND bumps SpRev once"
+	refresh_rev sp0
 	# The level's write leaves the group's record, and so the flag, as it
 	# was; then the flag is cleared under the token that write moved.
 	gw set-sp-level --sp sp0 --rev "$SP_REV" --level READWRITE >/dev/null
@@ -3501,7 +3506,9 @@ EOF
 		--grp "$dataGrp" --operator-in-charge=false >/dev/null
 	assert_eq "$(smoke_grp_field sp0 "$dataGrp" operator_in_charge)" \
 		"false" "the data group's flag ends clear"
-	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "the last clear bumps no SpRev"
+	assert_eq "$(sp_rev_of sp0)" "$((SP_REV + 1))" \
+		"the last clear bumps SpRev once"
+	refresh_rev sp0
 
 	# -------------------------------------------------------------------
 	stage 19 "advance-ids: every counter moves, no revision, new ids above"
