@@ -224,6 +224,24 @@ func TestForcedStartClearedFromTheReport(t *testing.T) {
 		{"the named leg in sync, its row absent", func(h *reactHarness) {
 			h.setGrpInfo(reactDataGrp, false, reactDataLegB)
 		}},
+		// Everything else reads done, but the primary's reading names no
+		// mark it acted on: md moves a broken array between states while it
+		// retries a copy, so only the primary's own start proves the mark
+		// done (cnagent.md CN12).
+		{"the mark never acted on", func(h *reactHarness) {
+			h.setGrpInfo(reactDataGrp, true, reactDataLegA, reactDataLegB)
+			h.setLegRow(reactDataLegA, pb.ResStatus_RES_STATUS_OK)
+			h.setLegRow(reactDataLegB, pb.ResStatus_RES_STATUS_OK)
+			h.setActed(reactDataGrp, 0)
+		}},
+		// The primary acted on an earlier mark, and the operator wrote this
+		// one over the array it started.
+		{"another mark acted on", func(h *reactHarness) {
+			h.setGrpInfo(reactDataGrp, true, reactDataLegA, reactDataLegB)
+			h.setLegRow(reactDataLegA, pb.ResStatus_RES_STATUS_OK)
+			h.setLegRow(reactDataLegB, pb.ResStatus_RES_STATUS_OK)
+			h.setActed(reactDataGrp, reactMarkRevision-3)
+		}},
 		{"no report", func(h *reactHarness) {
 			h.inSyncAll = false
 			delete(h.w.cntlrs, reactCntlrA)
@@ -251,6 +269,7 @@ func TestForcedStartClearedFromTheReport(t *testing.T) {
 								InSyncLegIdList: []uint64{
 									reactDataLegA, reactDataLegB,
 								},
+								ForcedStartRevision: reactMarkRevision,
 							},
 						},
 					},

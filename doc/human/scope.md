@@ -573,10 +573,14 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   group from the legs of the group's list and the open repair's new legs,
   which leave that member out. State: fix later, to be judged with
   the forced start's second pass. Not seen in the lab.
-- **The worker clears a forced-start mark with no start.** md moves a
-  broken array between states while it retries a copy. A report from that
-  window looks like a running array. State: fix decided, the primary
-  reports the mark it acted on. Seen in the lab.
+- **A forced-start mark the primary did not act on waits for the
+  operator.** The worker clears a mark only when the primary reports that
+  its own forced start of that mark started the array. The primary keeps
+  this in memory, so a mark whose start an agent restart forgot stays, and
+  so does a mark written over an array that runs. While it stays, the
+  worker makes no leg repair of the group, and the primary acts on the mark
+  at the array's next stop. State: accepted; the operator cancels the mark
+  (forced-start guide, to write). Not seen in the lab.
 - **A forced start waits on a primary whose layers above hold the broken
   array.** Only a failover or a level step that stops the pools lets it
   run. State: procedure to write, one line in the forced-start guide.

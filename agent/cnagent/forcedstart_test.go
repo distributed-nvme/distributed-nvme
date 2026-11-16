@@ -212,6 +212,127 @@ func TestForcedStartFromANamedLeg(t *testing.T) {
 	}
 }
 
+// markOf is the request with the group's mark naming legId at a mark
+// revision of its own, as the fan-out carries a mark written before the
+// request's revision.
+func markOf(
+	req *pb.SyncupCntlrRequest,
+	legId, revision uint64,
+) *pb.SyncupCntlrRequest {
+	dataGrpOf(req).ForcedStart = &pb.ForcedStart{
+		LegId: legId, Revision: revision}
+	return req
+}
+
+// actedRevision is the mark revision a report's reading of the data group
+// names as the one the primary acted on, zero for none or no reading.
+func actedRevision(info *pb.CntlrInfo) uint64 {
+	return info.GetGrpIdToGrpInfo()[testDataGrp].GetForcedStartRevision()
+}
+
+// TestForcedStartReportsTheMarkItActedOn pins the acted mark (cnagent.md
+// CN12, CN28): a forced start that starts the array makes the group's
+// reading name the mark's revision, on the converge and on the read, for as
+// long as the request carries a mark of that revision, while the array runs
+// on with the mark waiting; a mark written since, or the clear, reads zero,
+// and the memory goes with the clear, so the same revision back reads zero.
+// A mark written over an array that runs was never acted on and reads zero,
+// and so does the start a restart forgot.
+func TestForcedStartReportsTheMarkItActedOn(t *testing.T) {
+	t.Run("the start", func(t *testing.T) {
+		f := downNoRepair(t)
+		info := f.syncup(t, markOf(noRepairReq(4), testDataLeg2, 4))
+		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+		if got := actedRevision(info); got != 4 {
+			t.Fatalf("the converge that started the array reads acted "+
+				"mark %d, want 4", got)
+		}
+		if read, _ := f.read(t, 4); actedRevision(read) != 4 {
+			t.Fatalf("the read after the start reads acted mark %d, want 4",
+				actedRevision(read))
+		}
+		info = f.syncup(t, markOf(noRepairReq(5), testDataLeg2, 4))
+		if got := actedRevision(info); got != 4 {
+			t.Fatalf("a converge of the same mark reads acted mark %d, "+
+				"want 4", got)
+		}
+		info = f.syncup(t, markOf(noRepairReq(6), testDataLeg2, 6))
+		if got := actedRevision(info); got != 0 {
+			t.Fatalf("a mark written over the running array reads acted "+
+				"mark %d, want 0", got)
+		}
+		info = f.syncup(t, noRepairReq(7))
+		if got := actedRevision(info); got != 0 {
+			t.Fatalf("the clear reads acted mark %d, want 0", got)
+		}
+		info = f.syncup(t, markOf(noRepairReq(8), testDataLeg2, 4))
+		if got := actedRevision(info); got != 0 {
+			t.Fatalf("the cleared mark's revision back reads acted mark %d, "+
+				"want 0: the clear left the memory", got)
+		}
+	})
+	t.Run("a mark over a running array", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		f.syncup(t, quietLevel(3))
+		f.node.Reset()
+		info := f.syncup(t, withMark(quietLevel(4), testDataLeg2))
+		f.assertMarkLeftWaiting(t, f.leg2)
+		if got := actedRevision(info); got != 0 {
+			t.Fatalf("a mark the primary never acted on reads acted mark "+
+				"%d, want 0", got)
+		}
+		if read, _ := f.read(t, 4); actedRevision(read) != 0 {
+			t.Fatalf("the read reads acted mark %d, want 0",
+				actedRevision(read))
+		}
+	})
+	// A read can meet a request whose mark no converge has judged yet: the
+	// memory of an older mark names nothing then, before keepForcedStarts
+	// drops it.
+	// A request that does not count as delivered names none either, on
+	// the read as on its converge, which acts on no mark.
+	t.Run("a newer mark before its converge", func(t *testing.T) {
+		for _, tc := range []struct {
+			mark      *pb.ForcedStart
+			delivered bool
+			want      uint64
+		}{
+			{&pb.ForcedStart{LegId: testDataLeg2, Revision: 4}, true, 4},
+			{&pb.ForcedStart{LegId: testDataLeg2, Revision: 6}, true, 0},
+			{nil, true, 0},
+			{&pb.ForcedStart{LegId: testDataLeg2, Revision: 4}, false, 0},
+		} {
+			st := &cntlrState{
+				forcedStarts: map[uint64]uint64{testDataGrp: 4},
+				reqFromRpc:   tc.delivered,
+			}
+			gp := &grpPlan{grpId: testDataGrp, mark: tc.mark}
+			if got := actedMark(st, gp); got != tc.want {
+				t.Errorf("actedMark with the memory at 4, the mark %v and "+
+					"delivered %v = %d, want %d", tc.mark, tc.delivered,
+					got, tc.want)
+			}
+		}
+	})
+	t.Run("a restart forgets the start", func(t *testing.T) {
+		f := downNoRepair(t)
+		req := markOf(noRepairReq(4), testDataLeg2, 4)
+		if got := actedRevision(f.syncup(t, req)); got != 4 {
+			t.Fatalf("the start reads acted mark %d, want 4", got)
+		}
+		fresh := newCnServer(f.node)
+		fresh.retryInterval = time.Hour
+		reconcileForTest(t, fresh)
+		f.srv = fresh
+		info := f.syncup(t, markOf(noRepairReq(5), testDataLeg2, 4))
+		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+		if got := actedRevision(info); got != 0 {
+			t.Fatalf("after a restart the running array reads acted mark "+
+				"%d, want 0", got)
+		}
+	})
+}
+
 // TestForcedStartFromARepairNewLeg pins the forced start from the new leg
 // of the group's open repair, taken from a retired leg: the bad leg, dead,
 // is neither waited for nor zeroed, leg 2 is zeroed, the array starts from

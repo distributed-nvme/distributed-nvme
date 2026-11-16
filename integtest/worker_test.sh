@@ -3731,9 +3731,16 @@ case_repair() {
 	assert_eq "$(grp_mark sp0 1 meta 1)" "1 $mark_rev" \
 		"the meta group's mark while its start is not done"
 	# The primary holds leg 2 in sync, on a leg whose row reads OK, and leg
-	# 1 still out of sync: the array runs on a member that serves, so the
-	# mark is cleared (AR13), its bump hands every cntlr the group without
-	# it, and leg repair creates its repair of leg 1.
+	# 1 still out of sync: the array runs on a member that serves. While
+	# the primary's reading names no mark it acted on, the mark stands
+	# (AR13, cnagent.md CN28); once it names this one, the mark is cleared,
+	# its bump hands every cntlr the group without it, and leg repair
+	# creates its repair of leg 1.
+	repair_levers "$(leg_down 1)" '' '"1": {"in_sync": [2], "acted": 0}'
+	assert_none_for 4 "a clear of a mark the primary never acted on" \
+		forced_rec_ge 1 "forced start cleared" 1 1 "$mark_rev"
+	assert_eq "$(grp_mark sp0 1 meta 1)" "1 $mark_rev" \
+		"the meta group's mark while the primary names no start of it"
 	repair_levers "$(leg_down 1)" '' '"1": {"in_sync": [2]}'
 	wait_until "$WAIT_SHORT" "the mark on leg 1 cleared" \
 		forced_rec_ge 1 "forced start cleared" 1 1 "$mark_rev"

@@ -3332,32 +3332,33 @@ func (w *spWorker) clearGrpForcedStart(
 // forcedStartDone is AR13's test of one mark on the group grpId against
 // p.info, the current primary's latest report (primaryInfo): the group's row
 // (grp_id_to_md_raid) reads RES_STATUS_OK, so its array runs (cnagent.md
-// CN28); md holds in sync (grp_id_to_grp_info's in_sync_leg_id_list, which
-// lists a repair's new leg as well as a leg of the group's leg_list,
-// cnagent.md CN28) a leg whose own row (leg_id_to_leg) in the same report
-// reads RES_STATUS_OK, the named leg or any other; and the report is of an
+// CN28); the group's reading (grp_id_to_grp_info) names the mark's revision
+// as the mark the primary acted on (forced_start_revision), so the
+// primary's own forced start of this mark started the array (cnagent.md
+// CN12); md holds in sync (the reading's in_sync_leg_id_list, which lists a
+// repair's new leg as well as a leg of the group's leg_list, cnagent.md
+// CN28) a leg whose own row (leg_id_to_leg) in the same report reads
+// RES_STATUS_OK, the named leg or any other; and the report is of an
 // observation made at the mark's revision or later. The revision is the
 // mark's, not the snapshot's as AR8's gate reads it (grpRowHold): the mark
 // carries the SpRev revision its own write committed, so a report from
-// before the write, of an array that ran before the operator asked for the
-// start, never clears it, and a later bump of the pool does not hold the
-// clear back once a report from after the write shows the array running.
+// before the write never clears it, and a later bump of the pool does not
+// hold the clear back once a report from after the write shows the start.
 // An absent row reads RES_STATUS_UNKNOWN, so it holds.
 //
-// Reason for any leg: an array that runs on a member md holds in sync on a
-// leg that serves needs no forced start, and the primary never stops a
-// running array for one (cnagent.md CN12); a mark left standing over it,
-// its named leg out of sync — dead after the start, or failed by md before
-// a mark written over a row that did not read OK — would hold leg repair
-// off the group (AR8) and start the array from that leg, stale by then, at
-// its next stop. The leg's own row must read OK, the named leg's too,
-// because, while md retries a copy whose only source died, md still holds
-// that dead member in sync and the array's state swings back to running,
-// so a member in sync on a leg that does not serve proves nothing; the
-// operator names that dead source when the mark is written while it is
-// dead, as the forced start of a group whose latest leg died mid-copy asks.
-// After a real start the named leg serves, so its row reads OK once the
-// primary has probed it.
+// Reason for the acted mark: while md retries a copy whose only source
+// died, it moves a broken array between states, so a report from that
+// window looks like a running array, and only the primary knows whether
+// its forced start ran. A mark the primary never acted on, as one written
+// over an array that runs or one whose start an agent restart forgot,
+// stays until the operator withdraws it: while it stands the worker
+// creates no repair of the group (AR8), and at the array's next stop the
+// primary acts on it, refusing a named leg older than a member it would
+// zero (cnagent.md CN12). Reason for an in-sync leg whose own row reads
+// OK: md holds a dead source in sync while it retries the copy, so a
+// member in sync on a leg that does not serve proves nothing; after a real
+// start the named leg serves, so its row reads OK once the primary has
+// probed it.
 func forcedStartDone(p *spPass, grpId uint64, mark *pb.ForcedStart) bool {
 	if p.infoRev < mark.GetRevision() {
 		return false
@@ -3366,8 +3367,11 @@ func forcedStartDone(p *spPass, grpId uint64, mark *pb.ForcedStart) bool {
 		pb.ResStatus_RES_STATUS_OK {
 		return false
 	}
-	for _, legId := range p.info.GetGrpIdToGrpInfo()[grpId].
-		GetInSyncLegIdList() {
+	reading := p.info.GetGrpIdToGrpInfo()[grpId]
+	if reading.GetForcedStartRevision() != mark.GetRevision() {
+		return false
+	}
+	for _, legId := range reading.GetInSyncLegIdList() {
 		if p.info.GetLegIdToLeg()[legId].GetStatus() ==
 			pb.ResStatus_RES_STATUS_OK {
 			return true

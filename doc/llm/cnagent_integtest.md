@@ -469,8 +469,10 @@ leg left as it is, starts the array from the named leg alone with either
 form of the forced assembly, and the repair's add adds the blank new leg, in
 that order, under one forced start record naming the leg and the zeroed
 member; md copies it whole, the reading names both legs in sync and the
-repair verdict says started, and with the mark withdrawn, as the worker's
-clear withdraws it, and the pools back, the host reads its data unchanged.
+mark's revision as the mark the primary acted on, the repair verdict says
+started, and with the mark withdrawn, as the worker's clear withdraws it,
+and the pools back, the reading names no acted mark and the host reads its
+data unchanged.
 The finish makes leg 2 a retired leg. Then a restore from an older copy:
 new data over the host's first block, the level that stops group arrays,
 and a fourth repair whose bad leg is the leg holding that data and whose new

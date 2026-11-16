@@ -18538,8 +18538,9 @@ react_fs_try_start() { # <leg id>
 # (react_fs_try_start), whose reply names the group and the revision of the
 # mark, then the mark as `sp get` shows it on the group, the named leg and
 # that revision. The worker clears a mark once the primary reports the array
-# running with a member in sync on a leg whose own row reads OK
-# (dnv-worker.md AR13), a converge and a
+# running with a member in sync on a leg whose own row reads OK and names
+# the mark as the one its forced start acted on (dnv-worker.md AR13), a
+# converge and a
 # pass at the least, so the read right after the call finds it; should the
 # clear have come first, the worker's record of it must be in its log
 # instead. It fills REACT_FS_MARK_REV, REACT_FS_CN_MARK and REACT_FS_WK_MARK.

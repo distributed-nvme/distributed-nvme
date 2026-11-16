@@ -177,6 +177,19 @@ type cntlrState struct {
 	// info (tornMark). It is read and written under this cntlr's object lock
 	// or the node write lock, as pendingSweep is.
 	tornTds map[uint64]bool
+	// forcedStarts holds, per group id, the revision of the forced-start
+	// mark whose forced start this incarnation ran its assembly for, the
+	// acted mark (CN12). In memory only: an agent restart forgets it, and
+	// the mark then waits for the operator's cancel (cnagent.md, Known
+	// limits). A forced start that runs its assembly sets it
+	// (grpPlan.forcedRan), and nothing but the request clears it: every
+	// converge drops the entry of a group whose request carries no mark or a
+	// mark of another revision (keepForcedStarts). Both channels report it in
+	// the group's reading of a running array while the request, counting as
+	// delivered, carries a mark of that revision (actedMark). It is read and
+	// written under this cntlr's object lock or the node write lock, as
+	// tornTds is.
+	forcedStarts map[uint64]uint64
 	// reqFromRpc says whether req counts as delivered (CN8): a
 	// revision-gated SyncupCntlr of THIS incarnation stored it, whose save
 	// held, and no SyncupCntlr newer than it has been refused for a failed
@@ -369,6 +382,7 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 		chunks:       make(map[uint64]*agent.CloneChunkSet),
 		pendingSweep: make(map[uint64]bool),
 		tornTds:      make(map[uint64]bool),
+		forcedStarts: make(map[uint64]uint64),
 		probers:      make(map[uint64]*legProber),
 	}
 	st.storeReq(req)

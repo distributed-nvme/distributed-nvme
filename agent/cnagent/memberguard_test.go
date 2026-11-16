@@ -194,6 +194,19 @@ func TestForcedStartDropsABadBlockList(t *testing.T) {
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"its stop to drop the list failed", "grp data")
 		assertNoCall(t, f.node, "--update="+mdUpdateForceNoBbl)
+		// The first run started the array, so the mark was acted on though
+		// the pass ended in an error: the next converge finds the array
+		// running, leaves the mark waiting and names it as acted
+		// (cnagent.md CN28), for the worker's clear.
+		f.node.mu.Lock()
+		delete(f.node.failCmdAlways, "cmd mdadm --stop ")
+		f.node.mu.Unlock()
+		info = f.syncup(t, markOf(quietReq(5), testDataLeg2, 4))
+		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+		if got := actedRevision(info); got != 4 {
+			t.Fatalf("the converge after the failed stop reads acted mark "+
+				"%d, want 4", got)
+		}
 	})
 }
 

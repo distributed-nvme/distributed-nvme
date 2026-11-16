@@ -1029,7 +1029,8 @@ func (h *reactHarness) pass() {
 // info when it has no child, and on every primary child, each group of the
 // state the pass loads that the info holds no reading of reads whole with
 // every leg_list leg in sync, each of those legs with no row of its own
-// reading OK (leg_id_to_leg), and each group with no row reads OK.
+// reading OK (leg_id_to_leg), and names the group's forced-start mark, if
+// any, as the mark the primary acted on; each group with no row reads OK.
 func (h *reactHarness) fillGrpInfo() {
 	h.ops.mu.Lock()
 	state := h.ops.state
@@ -1067,7 +1068,10 @@ func (h *reactHarness) fillGrpInfo() {
 			if _, ok := info.GrpIdToGrpInfo[grp.GetGrpId()]; ok {
 				continue
 			}
-			reading := &pb.CntlrInfo_GrpInfo{Whole: true}
+			reading := &pb.CntlrInfo_GrpInfo{
+				Whole:               true,
+				ForcedStartRevision: grp.GetForcedStart().GetRevision(),
+			}
 			for _, leg := range grp.GetLegList() {
 				reading.InSyncLegIdList = append(
 					reading.InSyncLegIdList, leg.GetLegId())
@@ -1084,7 +1088,9 @@ func (h *reactHarness) fillGrpInfo() {
 }
 
 // setGrpInfo installs one group's reading (grp_id_to_grp_info) on the
-// primary: whether its array is whole and the legs md holds in sync.
+// primary: whether its array is whole and the legs md holds in sync, and the
+// fixture's mark revision as the mark the primary acted on (setActed
+// changes it).
 func (h *reactHarness) setGrpInfo(grpId uint64, whole bool, inSync ...uint64) {
 	h.t.Helper()
 	child, ok := h.w.cntlrs[reactCntlrA]
@@ -1098,7 +1104,21 @@ func (h *reactHarness) setGrpInfo(grpId uint64, whole bool, inSync ...uint64) {
 	}
 	info.GrpIdToGrpInfo[grpId] = &pb.CntlrInfo_GrpInfo{
 		Whole: whole, InSyncLegIdList: inSync,
+		ForcedStartRevision: reactMarkRevision,
 	}
+}
+
+// setActed sets the mark revision a group's reading on the primary names as
+// the mark the primary acted on, zero for none (cnagent.md CN28).
+func (h *reactHarness) setActed(grpId, revision uint64) {
+	h.t.Helper()
+	info := h.w.cntlrs[reactCntlrA].driver.lastInfo
+	reading, ok := info.GrpIdToGrpInfo[grpId]
+	if !ok {
+		h.t.Fatalf("group %d has no reading to set the acted mark on",
+			grpId)
+	}
+	reading.ForcedStartRevision = revision
 }
 
 // setPrimaryInfo installs the CntlrInfo a cntlr's child last reported (AR1),

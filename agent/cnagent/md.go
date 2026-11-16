@@ -1898,6 +1898,12 @@ func (s *CnAgentServer) forcedAssemble(
 	named *legPlan,
 	before *mdSuperblock,
 ) (update string, err error) {
+	// The mark is acted on from here, whatever the runs bring: a run killed
+	// at its timeout, or a read after it that fails, can leave the array
+	// started with an error, and while the mark stands no other step brings
+	// the group's array up on this node (ensureGroup), so an array that runs
+	// then is this start's (cnagent.md CN12, CN28).
+	gp.forcedRan = true
 	first := s.md.AssembleForced(ctx, gp.devPath, gp.mdArrayName,
 		named.path, mdUpdateUuid)
 	started := first == nil
@@ -2973,20 +2979,25 @@ func (s *CnAgentServer) probeGroup(
 // its repair's new legs whose members md marks in sync (MdMember.inSync), in
 // ascending leg id, so a reading that does not change reads the same.
 // refusal is the take-back check's (takeBackStep) for the verdict, which a
-// converge's member reconciliation and a read's putBackNames return.
+// converge's member reconciliation and a read's putBackNames return. acted
+// is the revision of the group's mark whose forced start this incarnation
+// ran (actedMark), zero for none, which the reading carries for the sp
+// worker's clear (dnv-worker.md AR13).
 func reportGrpReading(
 	info *pb.CntlrInfo,
 	gp *grpPlan,
 	detail *MdDetail,
 	refusals grpRefusals,
+	acted uint64,
 ) {
 	if detail == nil {
 		return
 	}
 	held := heldMembers(detail)
 	reading := &pb.CntlrInfo_GrpInfo{
-		Whole:   detail.Degraded == 0,
-		Refusal: refusals.grp,
+		Whole:               detail.Degraded == 0,
+		Refusal:             refusals.grp,
+		ForcedStartRevision: acted,
 	}
 	legs := gp.legs
 	if gp.rep != nil {

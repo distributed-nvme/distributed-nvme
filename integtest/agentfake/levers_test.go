@@ -889,14 +889,16 @@ func TestLeversSafeUnderConcurrentUse(t *testing.T) {
 // repairs lever's verdict on a repair by its rep_name, keyed by the repair's
 // rep_id, its refusal text included, and no verdict for a repair the lever
 // does not name; and on a primary, a reading of every group of the request,
-// whole with every leg_list leg in sync unless the grps lever says
-// otherwise, half by half. A standby reports neither verdicts nor readings.
+// whole with every leg_list leg in sync and naming the group's
+// forced-start mark as the one it acted on, unless the grps lever says
+// otherwise, part by part. A standby reports neither verdicts nor
+// readings.
 func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 	const behavior = `{"objects": {"cntlr 1:1": {
 	  "repairs": {"r0": {"started": true}, "gone": {"abort_confirmed": true},
 	              "r2": {"refusal": "leg 0x2ca holds newer data"}},
 	  "grps": {"12": {"whole": false}, "0x15": {"in_sync": []},
-	           "71": {"whole": false, "in_sync": [712]}}}}}`
+	           "71": {"whole": false, "in_sync": [712], "acted": 0}}}}}`
 	for _, shape := range []struct {
 		name     string
 		primary  bool
@@ -933,6 +935,19 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 					{LegId: 714},
 				}},
 			}
+			// Marks on groups 11 and 71: the default names 11's, and the
+			// lever says 71's was never acted on.
+			for _, slice := range req.GetIdToSlice() {
+				for _, grp := range append(slice.GetMetaGrpList(),
+					slice.GetDataGrpList()...) {
+					if grp.GetGrpId() == 11 || grp.GetGrpId() == 71 {
+						grp.ForcedStart = &pb.ForcedStart{
+							LegId:    grp.GetLegList()[0].GetLegId(),
+							Revision: 7,
+						}
+					}
+				}
+			}
 			reply, err := cnClient.SyncupCntlr(ctx, req)
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
@@ -963,18 +978,21 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 				grpId  uint64
 				whole  bool
 				inSync []uint64
+				acted  uint64
 			}{
-				{11, true, []uint64{101, 102}},
-				{12, false, []uint64{103, 104}},
-				{21, true, nil},
-				{71, false, []uint64{712}},
+				{11, true, []uint64{101, 102}, 7},
+				{12, false, []uint64{103, 104}, 0},
+				{21, true, nil, 0},
+				{71, false, []uint64{712}, 0},
 			} {
 				got := info.GetGrpIdToGrpInfo()[tc.grpId]
 				if got.GetWhole() != tc.whole ||
 					fmt.Sprint(got.GetInSyncLegIdList()) !=
-						fmt.Sprint(tc.inSync) {
-					t.Errorf("group %d reading = %v, want whole %v in sync %v",
-						tc.grpId, got, tc.whole, tc.inSync)
+						fmt.Sprint(tc.inSync) ||
+					got.GetForcedStartRevision() != tc.acted {
+					t.Errorf("group %d reading = %v, want whole %v in sync "+
+						"%v acted %d", tc.grpId, got, tc.whole, tc.inSync,
+						tc.acted)
 				}
 			}
 		})

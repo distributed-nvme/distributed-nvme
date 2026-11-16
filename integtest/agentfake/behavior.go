@@ -67,11 +67,15 @@ type RepairVerdict struct {
 
 // GrpReading overrides a primary's reading of one group's running array in
 // grp_id_to_grp_info (architecture.md, Repair): Whole, whether the array is
-// whole, and InSync, the leg ids md holds in sync. A nil field keeps the
-// default reading: whole, with every leg of the group's leg_list in sync.
+// whole, InSync, the leg ids md holds in sync, and Acted, the revision of
+// the forced-start mark the primary acted on (cnagent.md CN28). A nil field
+// keeps the default reading: whole, with every leg of the group's leg_list
+// in sync, and the revision of the group's mark in the request, as a
+// primary whose forced start acted on it at once.
 type GrpReading struct {
 	Whole  *bool
 	InSync *[]uint64
+	Acted  *uint64
 }
 
 // DiskCounts are the disk counts a dn reports (dnagent.md DN18), the lever
@@ -250,6 +254,7 @@ func (ob *Object) clone() *Object {
 		out.Grps = make(map[uint64]GrpReading, len(ob.Grps))
 		for grpId, reading := range ob.Grps {
 			reading.Whole = clonePtr(reading.Whole)
+			reading.Acted = clonePtr(reading.Acted)
 			if reading.InSync != nil {
 				list := slices.Clone(*reading.InSync)
 				if list == nil {
@@ -488,6 +493,7 @@ type repairVerdictJSON struct {
 type grpReadingJSON struct {
 	Whole  *bool     `json:"whole,omitempty"`
 	InSync *[]uint64 `json:"in_sync,omitempty"`
+	Acted  *uint64   `json:"acted,omitempty"`
 }
 
 // diskCountsJSON is the behavior file's disk_counts.
@@ -688,7 +694,8 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 		if ob.Grps == nil {
 			ob.Grps = make(map[uint64]GrpReading)
 		}
-		ob.Grps[grpId] = GrpReading{Whole: gj.Whole, InSync: gj.InSync}
+		ob.Grps[grpId] = GrpReading{
+			Whole: gj.Whole, InSync: gj.InSync, Acted: gj.Acted}
 	}
 	return ob, nil
 }

@@ -15783,9 +15783,17 @@ type CntlrInfo_GrpInfo struct {
 	// it may hold data the array lacks (cnagent.md CN12). Text for
 	// people and for the sp worker's log; no rule reads it. Appended,
 	// never renumbered.
-	Refusal       string `protobuf:"bytes,3,opt,name=refusal,proto3" json:"refusal,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Refusal string `protobuf:"bytes,3,opt,name=refusal,proto3" json:"refusal,omitempty"`
+	// The revision of the group's forced-start mark whose forced start
+	// this agent process ran its assembly for, the acted mark, while the
+	// cntlr's request, counting as delivered, still carries a mark with
+	// that revision; zero otherwise. The sp worker clears a mark only once the reading names
+	// its revision (cnagent.md CN12, CN28; dnv-worker.md AR13). Kept in
+	// memory alone, so an agent restart forgets it. Appended, never
+	// renumbered.
+	ForcedStartRevision uint64 `protobuf:"varint,4,opt,name=forced_start_revision,json=forcedStartRevision,proto3" json:"forced_start_revision,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *CntlrInfo_GrpInfo) Reset() {
@@ -15837,6 +15845,13 @@ func (x *CntlrInfo_GrpInfo) GetRefusal() string {
 		return x.Refusal
 	}
 	return ""
+}
+
+func (x *CntlrInfo_GrpInfo) GetForcedStartRevision() uint64 {
+	if x != nil {
+		return x.ForcedStartRevision
+	}
+	return 0
 }
 
 type SyncupSideRequest_SideConf struct {
@@ -16484,7 +16499,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aI\n" +
 	"\x11CnIdToNvmeofEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
-	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\xc1\x1a\n" +
+	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\xf6\x1a\n" +
 	"\tCntlrInfo\x12L\n" +
 	"\x12ss_id_to_subsystem\x18\x01 \x03(\v2\x1f.CntlrInfo.SsIdToSubsystemEntryR\x0fssIdToSubsystem\x12L\n" +
 	"\x12ns_id_to_namespace\x18\x02 \x03(\v2\x1f.CntlrInfo.NsIdToNamespaceEntryR\x0fnsIdToNamespace\x12J\n" +
@@ -16517,11 +16532,12 @@ const file_pb_schema_proto_rawDesc = "" +
 	"RepairInfo\x12\x18\n" +
 	"\astarted\x18\x01 \x01(\bR\astarted\x12'\n" +
 	"\x0fabort_confirmed\x18\x02 \x01(\bR\x0eabortConfirmed\x12\x18\n" +
-	"\arefusal\x18\x03 \x01(\tR\arefusal\x1ag\n" +
+	"\arefusal\x18\x03 \x01(\tR\arefusal\x1a\x9b\x01\n" +
 	"\aGrpInfo\x12\x14\n" +
 	"\x05whole\x18\x01 \x01(\bR\x05whole\x12,\n" +
 	"\x13in_sync_leg_id_list\x18\x02 \x03(\x04R\x0finSyncLegIdList\x12\x18\n" +
-	"\arefusal\x18\x03 \x01(\tR\arefusal\x1aL\n" +
+	"\arefusal\x18\x03 \x01(\tR\arefusal\x122\n" +
+	"\x15forced_start_revision\x18\x04 \x01(\x04R\x13forcedStartRevision\x1aL\n" +
 	"\x14SsIdToSubsystemEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aL\n" +

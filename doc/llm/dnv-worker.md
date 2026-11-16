@@ -3070,8 +3070,8 @@ transfers and clones, and AR6 sums its tds' sizes; AR11 and AR12 read its
 repairs and retired legs),
 plus the in-memory latest `CntlrInfo` of the **primary** cntlr
 (pool usage, group rows, AR5's and AR7's rows, the verdicts on repairs
-and the groups' whole flags, in-sync lists and refusals (`GrpInfo`) AR8,
-AR11, AR12, AR13 and AR14 read, the group rows AR15 reads, and the
+and the groups' whole flags, in-sync lists, refusals and acted marks
+(`GrpInfo`) AR8, AR11, AR12, AR13 and AR14 read, the group rows AR15 reads, and the
 dm-clone rows CLD13 reads)
 with the revision of the observation it reports (`architecture.md`,
 Live-state reporting), `now` (unix seconds),
@@ -4044,11 +4044,14 @@ before data groups, then the clone meta groups in `clone_name_list` order,
 and clears each forced-start mark (`architecture.md`, Repair) that the
 current primary's latest report (the report AR1 takes) shows done: the
 group's row (`grp_id_to_md_raid`) reads `RES_STATUS_OK`, the group's
-in-sync list (`grp_id_to_grp_info`), which names a repair's new leg as it
-names a leg of the group's `leg_list` (`cnagent.md` CN28), holds a leg
-whose own row (`leg_id_to_leg`) in that report reads `RES_STATUS_OK`, the
-leg the mark names or another, and the report is of an observation made
-at the mark's revision or later. The revision is the mark's, not the
+reading (`grp_id_to_grp_info`) names the mark's revision as the mark the
+primary acted on (`forced_start_revision`), so the primary's own forced
+start of this mark started the array (`cnagent.md` CN12, CN28), the
+reading's in-sync list, which names a repair's new leg as it names a leg
+of the group's `leg_list` (`cnagent.md` CN28), holds a leg whose own row
+(`leg_id_to_leg`) in that report reads `RES_STATUS_OK`, the leg the mark
+names or another, and the report is of an observation made at the mark's
+revision or later. The revision is the mark's, not the
 snapshot's that AR8's gate reads: the mark carries the revision its own
 write committed,
 so a report of the array as it ran before the operator's call never clears
@@ -4068,14 +4071,19 @@ leg, the mark's revision, the primary, the revision of its report and the
 revision the op's own STM committed. Reasons: a mark that stayed would
 start the group's array again from the named leg at its next fault, from a
 leg that may be stale by then, and the operator uses the forced start at
-the levels where reactions stop. Reason for any leg: an array that runs
-on a member md holds in sync on a leg that serves needs no forced start,
-and the primary never stops a running array for one (`cnagent.md` CN12),
-while a mark left standing over it — its named leg dead after the start,
-or failed by md before a mark written over a row that did not read `OK` —
-would hold leg repair off the group (AR8) and start the array from that
-leg, stale by then, at its next stop. Reason for the leg's own row, the
-named leg's included: md keeps a dead member in sync while it retries a
+the levels where reactions stop. Reason for the acted mark: while md
+retries a copy whose only source died, it moves a broken array between
+states, so a report from that window looks like a running array, and only
+the primary knows whether its forced start ran. A mark the primary never
+acted on — one written over an array that runs, or one whose start an
+agent restart forgot, since the primary keeps the acted mark in memory
+alone — stays until the operator withdraws it (`architecture.md`, Known
+limits): while it stands leg repair holds the group (AR8), and at the
+array's next stop the primary acts on it, refusing a named leg older than
+a member it would zero (`cnagent.md` CN12). Reason for any leg: after the
+start the named leg can die while the array runs on another member md
+holds in sync on a leg that serves, which needs no forced start. Reason
+for the leg's own row, the named leg's included: md keeps a dead member in sync while it retries a
 copy whose only source died, the array's state swinging back to running,
 and the named leg is that dead member when the mark is written while it is
 dead, as `architecture.md`, Known limits, advises; after a start the named
@@ -4932,13 +4940,15 @@ revision gate being per object and not per cluster.
   a retired leg; the mark of an operator's forced start is cleared
   once a report of an observation at or after its revision holds the named
   leg in sync on a leg row that reads `OK`, the primary having been carried
-  the mark first; while a mark stands, it rides to every cntlr and holds
+  the mark first and its reading naming the mark as the one it acted on;
+  while a mark stands, it rides to every cntlr and holds
   leg repair's create of its
   leg, ahead of the healthy-leg test, as long as the primary holds no leg
   in sync; once it holds the group's other leg in sync on a leg that
-  serves, the named leg still out of sync, the mark is cleared, the clear
-  hands every cntlr the group without the mark, and leg repair's create
-  runs in a later pass; at a level where reactions stop a mark is
+  serves, the named leg still out of sync, the mark stands while the
+  primary's reading names no mark it acted on, and once the reading names
+  this one, the mark is cleared, the clear hands every cntlr the group
+  without the mark, and leg repair's create runs in a later pass; at a level where reactions stop a mark is
   cleared too, though not while the primary's reports are of an observation older than
   the mark, nor while its report of the mark's revision reads the group's
   row other than `OK`; and a group's `operator_in_charge` flag is set while
@@ -5279,10 +5289,11 @@ carries, as the cn agent connects and probes a new leg as it does a leg of
 the group (`architecture.md`, Repair). While its request marks it primary
 and not disabled, as the cn agent reads a primary (`cnagent.md` CN9), it
 reports every group of the request as whole, with every leg of its `leg_list`
-held in sync, and no verdict on a repair; the levers `repairs`,
-a verdict by a repair's name, the text of a refused take-back included,
-that the fake reports under the repair's
-`rep_id`, and `grps`, a group's whole flag or in-sync list by `grp_id`,
+held in sync and the group's forced-start mark, if any, named as the mark
+it acted on (`cnagent.md` CN28), and no verdict on a repair; the levers
+`repairs`, a verdict by a repair's name, the text of a refused take-back
+included, that the fake reports under the repair's `rep_id`, and `grps`, a
+group's whole flag, in-sync list or acted mark (`acted`) by `grp_id`,
 change what a primary reports, and a standby reports neither. It stamps
 every reply as an agent does
 (`dnagent.md` SH28): a round or an info read about an object it knows, and
@@ -5548,11 +5559,10 @@ which no suite case sets, so no suite case runs RW13's count compare.
   it stays dead, from the retired leg taken back by a repair, which brings
   back the older copy. The worker's part is the clear of the mark once the
   primary reports the group's row `OK` with a member in sync on a leg whose
-  own row reads `OK` (AR13), which a report from md's retries of the copy
-  can show with no start only while the dead member md holds in sync still
-  has a leg row that reads `OK`, before the primary's probe finds it dead
-  (`cnagent.md`, Known limits), and leg repair's hold on the group while
-  the mark stands (AR8); it never writes a mark of its own.
+  own row reads `OK` and names the mark as the one it acted on (AR13), which
+  no report from md's retries of the copy names with no start, and leg
+  repair's hold on the group while the mark stands (AR8); it never writes a
+  mark of its own.
 * **The gate can read a row that is about to turn.** A leg that dies
   under a running array while it is the array's only in-sync member on a
   live leg, as when the group's other leg is the one due for repair,

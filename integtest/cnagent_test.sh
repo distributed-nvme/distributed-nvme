@@ -5182,6 +5182,13 @@ mark_set() { # file [leg [force]]
 	req_set "$1" "$grp.forced_start = {\"leg_id\": \"$(d16 "$2")\", \"revision\": \"$(($("$JQ" -r .revision "$1") + 1))\", \"force\": $force}"
 }
 
+# grp_acted prints the revision a reply's reading of one group names as the
+# forced-start mark the primary acted on, 0 for none or no reading
+# (cnagent.md CN28).
+grp_acted() { # json grpid
+	jq_of "$1" "(.cntlr_info.grp_id_to_grp_info // {})[\"$(d16 "$2")\"].forced_start_revision // \"0\""
+}
+
 # grp_reading prints a reply's reading of one group's array as "<whole>
 # <leg ids in sync, ascending, comma separated, in decimal>", or "none"
 # (cnagent.md CN28).
@@ -5414,6 +5421,11 @@ repair_forced_start() {
 		"repair forced: the restored array's reading"
 	assert_eq "$(rep_verdict "$out" "$zrep")" "true false" \
 		"repair forced: the verdict"
+	# The read names the mark this agent process acted on, which the
+	# worker's clear asks for (cnagent.md CN28; dnv-worker.md AR13).
+	assert_eq "$(grp_acted "$out" "$A_DGRP")" \
+		"$("$JQ" -r "$grp.forced_start.revision" "$req2")" \
+		"repair forced: the acted mark on the read"
 	# The worker's clear (dnv-worker.md AR13), the row OK with Y in sync;
 	# then the pools back and the host's data unchanged.
 	for f in "$req1" "$req2"; do
@@ -5425,6 +5437,8 @@ repair_forced_start() {
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" slice_id_to_dm_pool "$A_SLICE" "repair forced: the pool"
 	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "repair forced"
+	assert_eq "$(grp_acted "$out" "$A_DGRP")" 0 \
+		"repair forced: the acted mark after the clear"
 	host_wait_ana "$hv" "$nqn" 2 optimized 30
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" "repair forced readback"

@@ -1940,8 +1940,10 @@ dm-clone (CN18).
 
   The agent never clears the mark: the worker clears it from the primary's
   report once the row reads `OK` with a member in sync on a leg whose own
-  row reads `OK` (`dnv-worker.md` AR13), and until then a pass that
-  finds the array not running starts it again from the same leg. A pass
+  row reads `OK` and the group's reading names the mark as the acted mark,
+  the one whose forced start this agent process ran (CN28;
+  `dnv-worker.md` AR13), and until then a pass that finds the
+  array not running starts it again from the same leg. A pass
   whose forced start ends in an error registers the CN10 background
   retry: its wait for a
   member that is not available — the named leg, or one of step 3 — as a
@@ -4127,7 +4129,18 @@ leaves the check stream nothing to send (`dnagent.md` SH26); and
 `refusal`, the text of CN12's identity check when it refuses the add of a
 `leg_list` member of another identity, naming the first such member, its
 identity and the array's, empty when nothing holds an add back, text for
-people that the worker logs (`dnv-worker.md` AR14). The repair
+people that the worker logs (`dnv-worker.md` AR14); and
+`forced_start_revision`, the revision of the group's forced-start mark
+whose forced start this agent process ran its assembly for (the acted
+mark), while the cntlr's request counts as delivered (CN8) and carries a
+mark of that revision, zero otherwise, which the worker's clear asks for
+(`dnv-worker.md` AR13). The agent keeps the acted mark in memory alone: a
+forced start sets it once it runs its assembly, whatever comes of the
+runs, since while the mark stands no other step brings the group's array
+up on the node, so an array that runs then is that start's; every
+converge drops it once the request's mark is gone or carries another
+revision, and a restart forgets it. The read and the converge name it
+alike. The repair
 verdict, in `rep_id_to_repair_info` by `rep_id`: `started`, for an open
 repair, when every new leg holds a place — a "slot" number and not faulty
 — and md holds nothing on a bad leg; `abort_confirmed`, for a CREATED
@@ -4558,27 +4571,30 @@ stores instead is CN23's.
   while the mark stands (CN12), until a failover or a cntlr replacement
   (`dnv-worker.md` AR5, AR7) moves the role to a cntlr that holds no array
   of the group, or the level takes the pools, or the clones, away.
-* A mark can meet md mid-retry: while md retries a copy whose only source
-  is dead, the array can read write-pending or active between its reads of
-  broken, both of which CN12 counts as running, for as long as the
-  half-copied member stays in the array (`cnagent_integtest.md`, Lab
-  facts), so a pass that comes then leaves the mark waiting, its row `OK`,
-  and registers the CN10 retry, whose converge acts on the mark once it
-  reads the array not running (CN12). md never fails its last in-sync
-  member, so a report from that window reads the dead source in sync, and
-  the worker's clear takes the forced start as done while that source's
-  own leg row still reads `OK`, before the leg's probe finds it dead
-  (`dnv-worker.md` AR13; CN11): the mark goes, and the array stays down
-  until the operator marks it again.
+* A mark the primary did not act on stays until the operator withdraws it
+  or the array stops: the worker clears only a mark the group's reading
+  names as the acted mark (CN28; `dnv-worker.md` AR13), which the agent
+  keeps in memory alone, so a mark whose start an agent restart forgot
+  stays, and so does a mark written over an array that runs, which the
+  gateway lets through when the report it reads shows the group's row
+  other than `OK` (`architecture.md`, Repairs, `ForceStartGroup`), as
+  while md, retrying a copy whose only source is dead, shows the array
+  broken between its reads of write-pending or active, both of which CN12
+  counts as running (`cnagent_integtest.md`, Lab facts). While such a mark
+  stands the worker creates no repair of the group (`dnv-worker.md` AR8)
+  and the primary converges every retry interval (next); at the array's
+  next stop, as when md's retry ends in broken, the primary acts on it,
+  refusing a named leg older than a member it would zero (CN12).
 * A mark over an array that runs costs a converge every
   `CnConnectRetryInterval` while the mark stands and the array runs: the
   pass that finds the array running registers the CN10 retry for the mark
   (CN12), and the worker clears the mark only from a report that shows the
   start done (`dnv-worker.md` AR13). No report shows it while the group's
-  row does not read `OK` — as while the in-sync guard holds, a member
-  change fails, or the array holds a member that is not a dm device
-  (CN12) — or while every leg md holds in sync has a leg row that does not
-  read `OK`; the retry then runs until that ends and the clear comes, the
+  reading names no acted mark (above), while the group's row does not read
+  `OK` — as while the in-sync guard holds, a member change fails, or the
+  array holds a member that is not a dm device (CN12) — or while every leg
+  md holds in sync has a leg row that does not read `OK`; the retry then
+  runs until that ends and the clear comes, the
   mark goes another way (`architecture.md`, Repairs, `ForceStartGroup`;
   Repair, Forced start), a converge reads the array not running and runs
   the forced start, or the cntlr builds the group's array no more (CN12),

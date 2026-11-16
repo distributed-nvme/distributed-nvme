@@ -4469,9 +4469,10 @@ nodes).
 `CntlrInfo` also carries two maps of fields that are no rows: the
 primary's verdict on each repair, keyed by `rep_id`
 (`rep_id_to_repair_info`), with the refusal of a take-back beside it,
-and, keyed by `grp_id` (`grp_id_to_grp_info`),
-whether each group's running array is whole and which legs md holds in
-sync, both only for a group whose row reads `OK`. No health rule reads
+and, keyed by `grp_id` (`grp_id_to_grp_info`), the group's reading:
+whether each group's running array is whole, which legs md holds in
+sync, the refusal of a member's add, and the forced-start mark the
+primary acted on, all only for a group whose row reads `OK`. No health rule reads
 them, so they set no `err_epoch`; the sp worker reads them as fields
 (Repair).
 
@@ -5705,11 +5706,13 @@ to one repair: the `rep_id` key ties it to one record across a finish or a
 cancel and a new create under the same name, and *abort confirmed*
 answers the flag in the cntlr's own request, which ties it to the flag.
 From the same arrays the primary reports, per group, whether the array is
-whole and which legs md holds in sync (`cnagent.md` CN28). Reason: the
-group row's text says degraded and how far a copy has come, but that text
-is for people and the suites, and the worker reads fields: the retire
-timer the first (`dnv-worker.md` AR12), the healthy-leg test and the
-forced-start clear the second (`dnv-worker.md` AR8, AR13).
+whole, which legs md holds in sync and the forced-start mark it acted on
+(`cnagent.md` CN28). Reason: the group row's text says degraded and how
+far a copy has come, but that text is for people and the suites, and the
+worker reads fields: the retire timer the first (`dnv-worker.md` AR12),
+the healthy-leg test and the forced-start clear the second
+(`dnv-worker.md` AR8, AR13), and the forced-start clear the third as well
+(Forced start).
 
 **What the sp worker does.** Its leg repair creates the worker's repairs
 and finishes, cancels and tries to abort them, each step a reaction
@@ -5855,18 +5858,23 @@ half-copied leg needed anyway; zeroing before the assembly keeps every
 pass whole, since a member zeroed in a pass that then ends comes back blank
 and is added fresh; and the new identity
 keeps md from taking a leg of the old history back from the bitmap as in
-sync while it holds other data. The sp worker clears the mark once the
-current primary's report, of an observation made at the mark's revision or
-later, reads the group's row `OK` with a leg md holds in sync whose own row
-in that report reads `OK`, the named leg or another, at every `sp_level`
-(`dnv-worker.md` AR13), and its clear raises `SpRev`, so every cntlr is
-handed the group without the mark.
+sync while it holds other data. The primary keeps in memory the mark
+whose forced start it ran, the acted mark, and reports it in the group's
+reading while its request carries that mark
+(`cnagent.md` CN28). The sp worker clears the mark once the current
+primary's report, of an observation made at the mark's revision or later,
+reads the group's row `OK`, names the mark as the acted mark, and holds a
+leg md holds in sync whose own row in that report reads `OK`, the named
+leg or another, at every `sp_level` (`dnv-worker.md` AR13), and its clear
+raises `SpRev`, so every cntlr is handed the group without the mark.
 Reasons: a mark that stayed would start the array again from the named leg
-at the group's next fault, from a leg that may be stale by then; an array
-that runs on a member md holds in sync on a leg that serves needs no forced
-start, whether the named leg died after the start or the mark was written
-over a running array, and a mark left over it would also hold leg repair
-off the group (`dnv-worker.md` AR8); the leg's own row must read `OK`, the
+at the group's next fault, from a leg that may be stale by then; only the
+primary knows whether its forced start ran, since md moves a broken array
+between states while it retries a copy and a report from that window looks
+like a running array, so a mark the primary never acted on stays until the
+operator withdraws it or the array stops (Known limits); an array that runs on a member md
+holds in sync on a leg that serves needs no more, whether or not the named
+leg died after the start; the leg's own row must read `OK`, the
 named leg's too, since md keeps a dead member in sync while it retries a
 copy whose only source died, and the named leg is that member when the
 mark is written while it is dead (Known limits); the revision keeps a
@@ -7581,14 +7589,14 @@ document and only pointed to here.
   operator retries, and a row of another status, stale or not — a read
   that did not answer, a member change the converge could not make, the
   in-sync guard (`cnagent.md` CN12) — lets a mark be written for an array
-  that runs, which the primary leaves waiting. The sp worker clears such a
-  mark at the first report of the mark's revision or later that reads the
-  group's row `OK` with a leg md holds in sync whose own leg row in that
-  report reads `OK` (`dnv-worker.md` AR13), so an
-  operator who still wants the start calls again once the array is down;
-  until then, or the operator's cancel, the mark
-  holds leg repair off the group (`dnv-worker.md` AR8), and a mark that
-  meets neither acts once the array no longer runs, starting the array
+  that runs, which the primary leaves waiting. The sp worker never clears
+  such a mark, since the primary did not act on it (`dnv-worker.md` AR13),
+  and neither does it clear a mark whose start an agent restart forgot,
+  since the primary keeps the acted mark in memory alone (`cnagent.md`
+  CN28): until the operator's cancel the mark holds leg repair off the
+  group (`dnv-worker.md` AR8), the primary converges every retry interval
+  (`cnagent.md`, Known limits), and the mark acts once the array no
+  longer runs, starting the array
   from the named leg, which may be stale by then, unless a member the start
   would zero is a full member of the named leg's identity with a higher
   change count, which refuses the start without the mark's force (Repairs,

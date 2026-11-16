@@ -273,6 +273,10 @@ type grpPlan struct {
 	// does not count as delivered (cntlrState.reqFromRpc) holds none
 	// (dropForcedStartMarks).
 	mark *pb.ForcedStart
+	// forcedRan says that this pass's forced start ran its assembly
+	// (forcedAssemble), whatever came of it, so the converge records the
+	// mark as the one this incarnation acted on (cntlrState.forcedStarts).
+	forcedRan bool
 
 	// deferred is the [D15] group gate: some leg of leg_list is provisioning, so
 	// the group builds no md array and no CnGrpName, and is left out of the

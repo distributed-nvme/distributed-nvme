@@ -130,7 +130,7 @@ func (s *CnAgentServer) probeCntlr(
 			names, refusals := s.putBackNames(
 				ctx, plan, gp, detail, info.LegIdToLeg)
 			putBack = append(putBack, names...)
-			reportGrpReading(info, gp, detail, refusals)
+			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp))
 		case plan.primary:
 			info.GrpIdToMdRaid[gp.grpId] = suppressedRow(t, key, gp.resName)
 		}

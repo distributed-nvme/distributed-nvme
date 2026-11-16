@@ -298,6 +298,9 @@ func TestRepairFieldNumbers(t *testing.T) {
 		{grpInfo, "whole", 1, protoreflect.BoolKind, single, false},
 		{grpInfo, "in_sync_leg_id_list", 2, protoreflect.Uint64Kind, list,
 			false},
+		{grpInfo, "refusal", 3, protoreflect.StringKind, single, false},
+		{grpInfo, "forced_start_revision", 4, protoreflect.Uint64Kind,
+			single, false},
 	} {
 		fd := tc.md.Fields().ByName(tc.name)
 		if fd == nil {

@@ -465,6 +465,14 @@ message CntlrInfo {
         // people and for the sp worker's log; no rule reads it. Appended,
         // never renumbered.
         string refusal = 3;
+        // The revision of the group's forced-start mark whose forced start
+        // this agent process ran its assembly for, the acted mark, while the
+        // cntlr's request, counting as delivered, still carries a mark with
+        // that revision; zero otherwise. The sp worker clears a mark only once the reading names
+        // its revision (cnagent.md CN12, CN28; dnv-worker.md AR13). Kept in
+        // memory alone, so an agent restart forgets it. Appended, never
+        // renumbered.
+        uint64 forced_start_revision = 4;
     }
     map<uint64, ResInfo> ss_id_to_subsystem = 1;
     map<uint64, ResInfo> ns_id_to_namespace = 2;

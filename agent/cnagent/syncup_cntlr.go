@@ -243,6 +243,10 @@ func (s *CnAgentServer) convergeCntlr(
 	// data. Such a pass converges every group as with no mark, and the
 	// cntlr's read names the mark, so the worker re-sends the SyncupCntlr
 	// (storedMarks).
+	// CN12: the memory of the marks this incarnation acted on follows the
+	// request's marks, read before a request that does not count as
+	// delivered drops them from the plan, which only stops this pass acting.
+	keepForcedStarts(st, plan)
 	if !st.reqFromRpc {
 		plan.dropForcedStartMarks()
 	}
@@ -405,8 +409,14 @@ func (s *CnAgentServer) build(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, line, err)
 			// CN28: the array's reading and the repair's verdict, from the
 			// array as the pass left it, for a group whose row reads OK.
+			// CN12: the forced start that ran its assembly acted on the
+			// mark, whether or not the rest of the pass went through.
+			if gp.forcedRan {
+				st.forcedStarts[gp.grpId] = gp.mark.GetRevision()
+			}
 			if err == nil {
-				reportGrpReading(info, gp, detail, refusals)
+				reportGrpReading(info, gp, detail, refusals,
+					actedMark(st, gp))
 			}
 			if gp.hasLateMember(available, running) ||
 				gp.markWaits(running, forcedStarted) ||
@@ -923,6 +933,39 @@ func keepTornMarks(st *cntlrState, plan *cntlrPlan) {
 			delete(st.tornTds, tdId)
 		}
 	}
+}
+
+// keepForcedStarts drops the memory of a forced start (cntlrState.
+// forcedStarts) of each group whose request carries no mark, or a mark of
+// another revision, and of each group the request no longer lists: the
+// worker has cleared or the operator withdrawn the mark the start acted on,
+// or written a new one, which this incarnation has not acted on. Every
+// converge runs it, from the request alone.
+func keepForcedStarts(st *cntlrState, plan *cntlrPlan) {
+	for grpId, revision := range st.forcedStarts {
+		if gp := plan.grpById[grpId]; gp == nil ||
+			gp.mark.GetRevision() != revision {
+			delete(st.forcedStarts, grpId)
+		}
+	}
+}
+
+// actedMark is the revision a group's reading reports as the mark this
+// incarnation acted on (CN28): the revision of the group's mark in the plan,
+// when this incarnation's forced start acted on a mark of that revision and
+// the held request counts as delivered (cntlrState.reqFromRpc), and zero
+// otherwise, the same on a read as on a converge. A mark written or replaced
+// since reads zero before any converge has dropped the memory
+// (keepForcedStarts), and a request that does not count as delivered,
+// whose converge acts on no mark (dropForcedStartMarks), reports none on
+// either channel.
+func actedMark(st *cntlrState, gp *grpPlan) uint64 {
+	revision := gp.mark.GetRevision()
+	if revision == 0 || !st.reqFromRpc ||
+		st.forcedStarts[gp.grpId] != revision {
+		return 0
+	}
+	return revision
 }
 
 // suspendSnapOrigin quiesces the origin td's raid0 and returns its name, or
