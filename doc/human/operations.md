@@ -31,10 +31,12 @@ volumes then stop.
 A forced start is the operator's way back. The operator writes a mark on
 the group, the forced-start mark, that names one leg. The primary then
 starts the array from that leg alone. It wipes the md superblock of every
-other leg of the group, except the bad leg of the group's open repair (see
-the words below). md then copies the named leg onto each wiped leg. A
-forced start can lose data: everything the wiped legs hold that the named
-leg does not hold.
+other leg the group keeps: the legs of the group's list, and the new legs
+of the group's open repair (see the words below), a retired leg the
+repair took back among them. It does not wipe the open repair's bad leg,
+nor the new leg of a repair created with its abort flag set. md then
+copies the named leg onto each wiped leg. A forced start can lose data:
+everything the wiped legs hold that the named leg does not hold.
 
 ### Words of this guide
 
@@ -47,7 +49,7 @@ leg does not hold.
   leg: the retired leg becomes the repair's new leg.
 - A **member** is a leg that md counts in the group's array.
 - A member's **superblock** is md's record at the start of the leg. It
-  holds the array's identity, md's change count (md calls it the event
+  holds the array's identity (a number md gives each array), md's change count (md calls it the event
   count), the member's place in the array, and its copy position when md
   was copying onto it.
 - A **full member** has a place in the array and no copy position. A
@@ -98,17 +100,19 @@ gateway.
    thin pools and clones go away. Nothing then holds the group's array
    open, so the primary can stop it. No reaction runs, so no failover or
    repair moves the group while you work. Hosts get IO errors. Do not step
-   higher: from `NO_REDUND` up, no group array is built, and the gateway
-   refuses the mark.
+   further down: at `NO_REDUND`, `NO_MIGRATION`, `NO_SIDE` and `DISABLE` no
+   group array is built, and the gateway refuses the mark.
 2. Read the legs' rows and health epochs while the legs are still down.
-   `dnvctl sp get` shows the health epochs on the group's legs, or
-   `dnvctl clone get --name <clone>` for a clone's group. The worker clears
+   `dnvctl sp get` shows the health epochs on the group's legs. For a
+   clone meta group, the group that holds a clone's copy records,
+   `dnvctl clone get --name <clone>` shows them. The worker clears
    a leg's health epoch once the primary reads the leg well again, so you
    cannot read it later.
 3. Read the group (above).
 
-The suites raise the level before a leg dies. Raising it after, as here,
-is not tested.
+For a forced start, the suites step the level down before a leg dies.
+Stepping it down after, as here, is tested only for "A broken array that
+comes back by itself".
 
 ### Which leg to choose
 
@@ -120,8 +124,10 @@ Confirm: `dnvctl group inspect --grp <group id>`.
 What dnv does alone: a broken array makes the primary unhealthy. Unless
 the level stops reactions, the worker fails the primary over, about 6 to
 10 seconds later at the default settings. The new primary assembles the
-group once its legs are back, if md will start it. dnv never starts an
-array from one leg without an operator.
+group once its legs are back, if md will start it. Without an operator,
+md starts an array from one leg alone only when that leg's superblock
+records the other legs as failed. dnv never chooses between legs that each
+may hold the newest data.
 
 Choose the leg with these rules:
 
@@ -138,12 +144,13 @@ Choose the leg with these rules:
    rows and health epochs, read while the legs were down, show which leg
    died while md copied. If you cannot tell, stop.
 4. A leg of another identity is from before an earlier forced start.
+   Nothing compares it with the others: a mark naming it wipes the legs of
+   the current identity, with no refusal and no warning in the dry run.
    Compare it by hand.
 5. The named leg may be dead when you write the mark. The primary then
    waits for it and starts from it when it comes back.
-6. The start waits for every other leg it keeps, except the open repair's
-   bad leg. A leg that will never come back blocks it: see "A forced start
-   that waits".
+6. The start waits for every other leg it would wipe. A leg that will
+   never come back blocks it: see "A forced start that waits".
 
 Safe steps:
 
@@ -159,16 +166,22 @@ Safe steps:
    clears the mark once the primary reports that it acted on it, and that
    the array runs with a member in sync on a leg whose row reads ok.
 5. Read the group again. md is copying onto the other legs. Wait until
-   every leg is in sync.
+   every leg is in sync. Check that no leg shows a bad-block list. If the
+   named leg's list is still there, the start's second run, which drops
+   it, did not happen, and hosts get IO errors over the list's regions.
+   No procedure for this is tested: stop. No such case was seen in the
+   lab.
 6. Step the level back:
    `dnvctl sp set-level --level READWRITE`, or the level the pool had.
 7. Write to a volume from a host. A thin pool that comes back read-only
-   needs the repair by hand of the scope page, section 6.1.
+   has no repair procedure yet (the scope page, section 6.1): stop.
 
 Steps that can lose data:
 
-- Every forced start wipes the other legs of the group, except the bad
-  leg of the open repair. Whatever only they held is lost.
+- Every forced start wipes the other legs the group keeps, the new legs
+  of its open repair included. Whatever only they held is lost.
+- A mark naming a leg of another identity wipes the legs of the current
+  identity with no refusal: their newer data is lost.
 - The force flag (`--force`) starts the array from a leg older than a leg
   it wipes. That leg serves and holds newer data, and you choose to give
   that data up. Use it only when the newer data is known to be bad.
@@ -346,25 +359,22 @@ Causes and steps:
   mark acts at the array's next stop, from a leg that may be stale by
   then. The worker also makes no leg repair of the group while it stands.
   Not tested.
-- A leg the start keeps does not serve. The start waits for it. Bring the
+- A leg the start would wipe does not serve. The start waits for it. Bring the
   leg back. If it will never come back, replace it with a repair:
   `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg
   id>`. The start does not wait for an open repair's bad leg, but it waits
   until the repair's new leg serves. The group must have no other open
-  repair. Not tested.
+  repair. The repair is also refused while the group holds two retired
+  legs, and every mark keeps them; deleting one may delete the copy you
+  need, so stop instead. Not tested.
 - A start from a repair's new leg waits the same way for the leg of the
   list that is not the repair's bad leg.
-- The array runs, but the start kept the named leg's bad-block list.
-  Hosts get IO errors over the list's regions, and the read shows the list
-  on the members. The start drops the list with a stop and a second start,
-  and that stop failed. There is no tested procedure for this case: stop.
-  Forty such stops in the lab never failed.
 
 Steps that can lose data: a mark left standing over a running array (see
 above).
 
-When to stop: the mark stays after a cancel, the array runs and the row
-still reads error, or the start kept a bad-block list.
+When to stop: the mark stays after a cancel, or the array runs and the
+row still reads error.
 
 ### A lost clone meta group
 
@@ -410,8 +420,9 @@ refusal in the primary's report for the group;
 What dnv does alone: the primary leaves that leg out, since it may hold
 data the array lacks.
 
-Safe steps: none is tested. A repair whose bad leg is that leg is refused
-while the leg reads healthy, which it does. Stop and ask for help.
+Safe steps: none is tested. While the array runs, the gateway refuses a
+mark, and a repair whose bad leg is that leg is refused while the leg
+reads healthy, which it does. Stop and ask for help.
 
 Steps that can lose data: a forced start from the leg you want wipes the
 other leg and what only it holds.
@@ -457,8 +468,10 @@ their keep flags.
 
 What dnv does alone: the write of a mark sets the keep flag on the
 group's retired legs, on the legs its repairs took back, and on the bad leg
-of its open repair. So the worker does not delete those copies. The legs of
-the group's list are not kept: the start wipes them.
+of its open repair. So the worker does not delete those legs. The flag
+does not protect a leg from the start itself: the start wipes the legs of
+the group's list and the new legs of its open repair, a taken-back leg
+among them, and only their records stay.
 
 Safe steps:
 
@@ -468,7 +481,9 @@ Safe steps:
   a leg.
 
 Steps that can lose data: `dnvctl retired-leg keep --leg <leg id> --clear`
-lets the worker delete the leg once it is old enough, and
+lets the worker delete the leg once it is old enough. It can go sooner:
+when the group holds two retired legs, the next finish of a repair of the
+group gives back the oldest leg that is not kept.
 `dnvctl retired-leg delete --leg <leg id>` deletes it at once. Either way
 its copy is gone.
 
@@ -486,7 +501,7 @@ Confirm: `dnvctl sp get` shows the group's flag
 (`operator_in_charge`) and its repair.
 
 What dnv does alone: with the operator-in-charge flag set, the worker
-creates no repair of the group and does not withdraw a stuck grow of it.
+creates no repair of the group.
 The primary leaves a broken array of the group as it is. Failover and the
 other reactions go on. The worker still drives a repair of its own that
 exists.
@@ -496,13 +511,19 @@ Safe steps:
 1. Set the flag: `dnvctl group set-operator-in-charge --grp <group id>`.
 2. If the worker's repair has not started, abort it with
    `dnvctl repair abort --name <name>`, then drop it with
-   `dnvctl repair cancel --name <name>`. The primary confirms an abort only
-   from a running array. A repair that has started cannot be aborted:
-   finish it with `dnvctl repair finish --name <name>`.
+   `dnvctl repair cancel --name <name>`. The cancel is refused until the
+   primary confirms the abort, which it does only from a running array.
+   At levels where reactions run, the worker may cancel its aborted repair
+   itself, and your cancel then answers that the repair is gone. A repair
+   that has started cannot be aborted: finish it with
+   `dnvctl repair finish --name <name>`.
 3. Create your own repair.
 4. Clear the flag with `--operator-in-charge=false` when you are done.
 
-Steps that can lose data: none of these steps.
+Steps that can lose data: finishing a repair when the group already holds
+two retired legs deletes the oldest one that is not kept, and its copy
+with it. Keep the retired legs you may need first ("Keeping the old
+copies").
 
 When to stop: the group's array does not run and the worker's repair
 waits for an abort it cannot get.

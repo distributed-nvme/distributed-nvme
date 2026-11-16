@@ -21425,9 +21425,12 @@ react_fs_restore() {
 
 	# The refusal, in the primary's verdict and in the worker's log, with the
 	# repair still CREATED, the bad leg's member still in the array, and no
-	# command of the primary's since the create on that member or on the
-	# newer leg's: no add, and no fail or removal of the
-	# bad leg in a pass that adds nothing (cnagent.md CN12).
+	# command of the primary's since the create on the newer leg's member
+	# and none on the bad leg's but the early fail: no add, and no removal
+	# of the bad leg in a pass that adds nothing. The bad leg is dead while
+	# leg $keeper keeps the data on a quiet array, so the primary may fail
+	# its member once, and keeps it in the array (cnagent.md CN12, The
+	# early fail).
 	REACT_FS_LAST=""
 	REACT_FS_REFUSAL=""
 	wait_until "$WAIT_PROVISION" \
@@ -21445,21 +21448,29 @@ react_fs_restore() {
 	# CN12).
 	mst=${mrd%% *}
 	case ",${mst#state=}," in
-	*,faulty,*) mst=out ;;
+	*,faulty,*) mst=failed ;;
 	*,in_sync,*) mst=in ;;
 	*) mst=out ;;
 	esac
-	if [ "$mst" = in ]; then
-		log "  leg $bad's member on the primary: ${mrd% wsect=*}"
-	else
-		log "!!! leg $bad's member on the primary reads '${mrd% wsect=*}'," \
-			"not in sync or faulty: an IO to it failed after all, which the" \
-			"quiet array was to avoid; the primary's commands on it are" \
-			"checked next"
-	fi
+	case "$mst" in
+	in) log "  leg $bad's member on the primary: ${mrd% wsect=*}" ;;
+	failed) log "  leg $bad's member on the primary, failed by the early" \
+		"fail or by md: ${mrd% wsect=*}" ;;
+	*) log "!!! leg $bad's member on the primary reads '${mrd% wsect=*}'," \
+		"neither in sync nor failed; the primary's commands on it are" \
+		"checked next" ;;
+	esac
 	recs=$(react_fs_cmds_on "$REACT_FS_CN_MARK" "$bad" "$newer")
-	assert_eq "$recs" "[]" \
-		"the primary's md commands on the members of legs $bad and $newer since the take-back's create"
+	bmem="/dev/mapper/$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$bad")"
+	rest=$(printf '%s' "$recs" | "$JQ" -c --arg m "$bmem" \
+		'[.[] | select((.args | endswith(" --fail " + $m)) | not)]')
+	efail=$(printf '%s' "$recs" | "$JQ" -r --arg m "$bmem" \
+		'[.[] | select(.args | endswith(" --fail " + $m))] | length')
+	assert_eq "$rest" "[]" \
+		"the primary's md commands on the members of legs $bad and $newer since the take-back's create, the early fail aside"
+	[ "$efail" -le 1 ] ||
+		die "the primary failed leg $bad's member $efail times: $recs"
+	log "  the primary's early fails of leg $bad's member: $efail"
 	wait_until "$WAIT_REACT" \
 		"the worker to log repair stage skipped (take_back_refused) for group $REACT_GRP_ID (dnv-worker.md AR11)" \
 		react_fs_refusal_logged "$REACT_GRP_ID"

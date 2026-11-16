@@ -30,7 +30,7 @@ import (
 // keeps the bad leg as a retired leg, whose side keeps its data on its DN
 // until it is deleted or a repair of the group takes it back.
 //
-// The seven calls that write run the repair operations of model (gateway.md,
+// The eight calls that write run the repair operations of model (gateway.md,
 // Scope and placement: reused, never duplicated), each behind a planning
 // snapshot: the snapshot resolves the cluster and the SP, checks the token
 // and makes the checks whose codes model cannot give, and the op re-checks
@@ -460,7 +460,7 @@ func repairCreateChecks(
 // refused (model.ReasonRetiredLegsKept, FAILED_PRECONDITION) when every one
 // is kept, and the reply names the given-back leg
 // in given_back_leg_id, zero when the finish gave none back, so the operator
-// learns which kept copy went.
+// learns which older copy went; a kept leg is never given back.
 func (s *Server) FinishRepair(
 	ctx context.Context,
 	req *pb.FinishRepairRequest,

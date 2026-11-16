@@ -617,14 +617,16 @@ three epoch writes take an SP that exists with its id, at any level and
 while it is deleting, as the other epoch writes read their record whatever
 its pool's state. A clone parent being deleted is refused by every repair
 op, save the epoch writes, which accept it as their clone twins do, and
-the flip, `ClearForcedStart` and `MarkGroupsArrayMade`, which skip it:
+the flip, `ClearForcedStart`, `MarkGroupsArrayMade` and
+`SetNewLegsPartial`, which skip it:
 its group goes back with its repair and retired legs in CLD9's
 transaction. A repair or a retired
 leg the pool lists whose key is missing is refused ("repair record missing", "retired leg record
 missing") by every op that reaches it through the pool's list, a lost
 invariant key (`architecture.md`, Key table), never `ReasonRepairNotFound`
 or `ReasonRetiredLegNotFound`, which name an object the pool does not
-list; the flip, which reads the repair's key alone, skips it as gone.
+list; the flip, which reads the repair's key alone, and
+`SetNewLegsPartial` skip it as gone.
 
 * `SetDnErrEpoch` and `SetCnErrEpoch` require the record to exist. With a
   non-zero epoch they set it only when the stored value is zero (the threshold
@@ -1053,8 +1055,9 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   `SpConf`, `SpName` and `SpRev` and decrements the shard's entry of
   `SpGlobal.shard_bucket`. It is the one write of the storage pool drain
   that does not bump `SpRev` — it deletes the key, which is the shard
-  worker's stop signal (RW14); the health epoch writers and
-  `DrainCloneBm` bump none either (their entries).
+  worker's stop signal (RW14); the health epoch writers,
+  `SetRetiredLegKeep`, `SetNewLegsPartial` and `DrainCloneBm` bump none
+  either (their entries).
 * `DrainCloneBm` takes the clone and a list of chunks and requires the clone
   drain checks of CLD2 (`SpConf` exists and is not itself deleting, `sp_id`
   unchanged, `Clone` exists, `clone_id` unchanged, `deleting` true) and at
@@ -3878,7 +3881,7 @@ pass (AR2).
 The new leg is always fresh, and the
 create proceeds while the group holds `MaxRetiredLegPerGrp` retired legs,
 since the worker cannot wait for an operator: the finish then gives back
-the oldest that is not kept, and waits when every one is kept (below). The
+the oldest that is not kept, and waits when every one is kept (above). The
 new leg's side provisions (`architecture.md`, Side
 provisioning protocol), RW18 flips it in the repair, the cntlrs connect to
 it, and the primary adds it to the array under the conditions of
@@ -3929,8 +3932,8 @@ replacing the last legs that may still hold it with a fresh leg holding
 none of it, and its copy would read a dead member, which breaks the array.
 The gate does not cover the case: md learns that a member is dead from IO
 to it, or from the primary's early fail of a member whose leg is dead, which
-needs another member that keeps the data (`cnagent.md` CN12, The early
-fail), so an idle array whose legs have all died still runs and its row
+needs another in-sync member that is a copy source (`cnagent.md` CN12, The
+early fail), so an idle array whose legs have all died still runs and its row
 reads `OK`. The legs' `err_epoch`s come from the primary's probe of each
 leg, which runs whether or not the array has IO (`cnagent.md` CN11; HL2),
 so this test sees what the row does not; and a primary whose own network
@@ -3941,9 +3944,9 @@ copies onto it (`architecture.md`, Repair), or a leg md has failed out of
 the array whose probe passes again — and repairing the only leg md holds in
 sync loses the group at the next failover. The `err_epoch` half stays
 because md still holds a dead member in sync on an idle array until the
-primary's early fail, which waits for two failed probe rounds and for
-another member that keeps the data (`cnagent.md` CN12), where the leg's
-probe sees the death first. The rule is the pass's alone: `CreateRepair`
+primary's early fail, which waits for more than one failed probe round
+and for another in-sync member that is a copy source (`cnagent.md` CN12); the leg's
+probe sees the death before md does. The rule is the pass's alone: `CreateRepair`
 does not re-check it, and an operator's create is not held by it.
 
 **A clone meta group.** Leg repair runs on it as on a slice's group, through
@@ -4021,11 +4024,11 @@ too, and logs `repair stage skipped` with the reason `take_back_refused`
 and the refusal's text, on every pass while it stands; every other verdict
 that says neither logs nothing, and so does a verdict on a repair past
 CREATED, even one that carries a refusal. Reason: the primary refuses to
-add a new leg taken from a retired leg whose md superblock carries another
-identity than the member that keeps the data, unless the repair carries
-the operator's force, or the same identity and a higher events count (what
-that count proves is `cnagent.md`, Known limits), the repair then waits in
-CREATED with no
+add a new leg taken from a retired leg in two cases. One is a superblock
+of another identity than the member that keeps the data, unless the repair
+carries the operator's force. The other is a superblock of the same
+identity with a higher events count, force or not (what that count proves
+is `cnagent.md`, Known limits). The repair then waits in CREATED with no
 row in error, and the record tells the operator why, so that they abort and
 cancel it. The repair of
 a deleting clone's group, or of a clone the snapshot does not hold, is
@@ -4042,7 +4045,8 @@ RW16), and AR8's drive step leaves a repair this pass moved to the next
 pass, which reads its new stage. The reasons are `architecture.md`, Repair.
 A latched SP moves no stage: its drain deletes its repairs (SPD6, SPD15).
 
-Before the moves, from the same report, the walk keeps the partial mark of
+Before the moves, from the same report, when it carries repair verdicts,
+the walk keeps the partial mark of
 each new leg of a repair, at any stage, that the repair took back from a
 retired leg (`new_leg_id_to_retired_epoch`): a leg the verdict names as
 held by md (`held_new_leg_id_list`) and the group's reading does not hold
@@ -4096,7 +4100,7 @@ older report's whole flag can be from before the group's last repair began,
 read while the bad leg was still in sync, while a finish has since put in
 its place a new leg md may still copy onto; and md learns
 that a member is dead only from IO or from the primary's early fail, which
-waits for two failed probe rounds (`cnagent.md` CN12), so an idle array
+waits for more than one failed probe round (`cnagent.md` CN12), so an idle array
 over a dead leg can still read whole, while the leg epochs come from probes
 that run without IO.
 The first old leg nothing keeps is deleted, and the step ends. The delete
@@ -4150,19 +4154,21 @@ leg that may be stale by then, and the operator uses the forced start at
 the levels where reactions stop. Reason for the acted mark: while md
 retries a copy whose only source died, it moves a broken array between
 states, so a report from that window looks like a running array, and only
-the primary knows whether its forced start ran. A mark the primary never
-acted on — one written over an array that runs, or one whose start an
-agent restart forgot, since the primary keeps the acted mark in memory
-alone — stays until the operator withdraws it (`architecture.md`, Known
-limits): while it stands leg repair holds the group (AR8), and at the
-array's next stop the primary acts on it, refusing a named leg older than
-a member it would zero (`cnagent.md` CN12). Reason for any leg: after the
+the primary knows whether its forced start ran. A mark the primary does
+not report as acted on — one written over an array that runs, or one whose
+start an agent restart forgot, since the primary keeps the acted mark in
+memory alone — stays until the operator withdraws it or the array's next stop
+(`architecture.md`, Known limits): while it stands leg repair holds the
+group (AR8), and at the array's next stop the primary acts on it,
+refusing a named leg older than a member it would zero unless the mark
+carries the force (`cnagent.md` CN12), after which the clear above
+applies. Reason for any leg: after the
 start the named leg can die while the array runs on another member md
 holds in sync on a leg that serves, which needs no forced start. Reason
 for the leg's own row, the named leg's included: md keeps a dead member in sync while it retries a
 copy whose only source died, the array's state swinging back to running,
 and the named leg is that dead member when the mark is written while it is
-dead, as `architecture.md`, Known limits, advises; after a start the named
+dead, as `cnagent.md`, Known limits, advises; after a start the named
 leg serves, and its row reads `OK` once the primary's probe has passed on
 it (`cnagent.md` CN11). The clear is
 no reaction and not the pass's one action (AR2); its `SpRev` bump makes AR12's delete of the same
@@ -4180,11 +4186,9 @@ and the refusal's text, on every pass while it stands. Nothing moves, and
 no op runs. Reason: the group runs degraded while the refusal stands, and
 no reaction cures it, since the leg itself is healthy and leg repair
 (AR8) acts on a leg's health epoch; the record is how the operator reads
-why the group does not become whole: the refused member may hold data the
-array lacks, so the operator replaces it with a repair, whose finish keeps
-its data as a retired leg, or starts the group from it with a forced start
-(`architecture.md`, Repair). The record is no reaction and not the pass's
-one action (AR2).
+why the group does not become whole; what can take that member in is
+`cnagent.md` CN12's, The identity check. The record is no reaction and not
+the pass's one action (AR2).
 
 AR15. **The flag that a group's array has run.** For a live md-raid1 SP,
 right after AR14 and before AR3's suppression — so at every `sp_level` —
@@ -4200,10 +4204,10 @@ report and the revision the op's STM committed; a write that fails logs
 Reasons: a group's row reads `OK` only while its array runs (`cnagent.md`
 CN28), and a group id is never used again, so a report of any revision
 proves that the array ran; the primary never creates an array for a group
-that carries the flag (`cnagent.md` CN12, case 1), whose legs that then
+that carries the flag (`cnagent.md` CN12), whose legs that then
 read no superblock were zeroed by a forced start and hold data; and the
-flag rides to every cntlr in the group's parent record. A record from
-before the flag existed reads false, and the first OK row sets it. No other write
+flag rides to every cntlr in the group's parent record. A record that
+does not carry the flag reads false, and the first OK row sets it. No other write
 sets the flag, the forced start's mark included: a mark the primary
 refuses, as one naming a leg with no superblock, must not keep a group
 whose array never ran from its first create (`architecture.md`, Known
@@ -4843,7 +4847,8 @@ repair's verdict that carries the primary's refusal of a take-back, with
 leg partial` a write of the partial marks of taken-back new legs whose
 call wrote, naming the repair, the legs it marks and clears, the primary
 and its report's revision, and `repair leg partial kept` a write whose
-call failed, with its error (AR11);
+call failed, with its error, or with its reason and `op` when the op
+refused it (AR11);
 `retired leg deleted` a retire timer's delete whose call succeeded and
 `retired leg kept` an old retired leg the timer keeps, with its reason, the
 op's name as `op` when the op refused the delete, or its error (AR12);
@@ -4856,7 +4861,8 @@ the primary, its report's revision and the refusal's text (AR14); `groups
 array made` a write of the flag that a group's array has run whose call
 wrote, naming the groups, the primary and its report's revision, with how
 many it set and the revision its own STM committed, and `groups array made
-kept` a write whose call failed, with its error (AR15); `clone latched` a
+kept` a write whose call failed, with its error, or with its reason and
+`op` when the op refused it (AR15); `clone latched` a
 latch of
 a clone whose copy is whole whose call wrote, naming the clone, the primary
 and its report's revision, with the revision its own STM committed, and
@@ -4900,8 +4906,10 @@ assertions over the JSON logs. A fake agent's report reads every group's
 row `OK`, so a pool's first pass over it sets the flag that the groups'
 arrays have run, one `SpRev` bump (AR15): a case that holds `SpRev` still
 across its steps waits for the flag on every group of its pool, the
-clones' meta groups included, before it reads its baseline, and the whole-worker cases count a cluster converged only once
-every group of an md-raid1 pool carries it.
+clones' meta groups included, before it reads its baseline, and the
+Go tests that run whole workers count a cluster converged only once every
+group of an md-raid1 pool carries it, a deleting clone's meta group
+aside.
 
 **What the Go cases prove.** Most of the worker package's Go tests drive its
 layers directly, over an in-memory store on a fake clock or over the package's
@@ -5643,14 +5651,14 @@ which no suite case sets, so no suite case runs RW13's count compare.
   CN12 and its Known limits) or an operator force-starts it
   (`architecture.md`, Repair) — from the leg that died, which holds the
   latest data, the mark written while that leg is still dead so that the
-  start runs once it is back (`architecture.md`, Known limits), or, while
+  start runs once it is back (`cnagent.md`, Known limits), or, while
   it stays dead, from the retired leg taken back by a repair, which brings
   back the older copy. The worker's part is the clear of the mark once the
   primary reports the group's row `OK` with a member in sync on a leg whose
-  own row reads `OK` and names the mark as the one it acted on (AR13), which
-  no report from md's retries of the copy names with no start, and leg
-  repair's hold on the group while the mark stands (AR8); it never writes a
-  mark of its own.
+  own row reads `OK` and names the mark as the one it acted on (AR13); a
+  report read while md retries the copy, before any start, names no mark.
+  The worker also holds leg repair off the group while the mark stands
+  (AR8), and it never writes a mark of its own.
 * **The gate can read a row that is about to turn.** A leg that dies
   under a running array while it is the array's only in-sync member on a
   live leg, as when the group's other leg is the one due for repair,
@@ -5690,9 +5698,11 @@ which no suite case sets, so no suite case runs RW13's count compare.
   `err_epoch` (AR8). md holds a member in sync once its copy has ended and
   until md sees it die, which on an idle array it does only when the
   primary fails it in md: by the early fail, at the first converge after
-  two failed probe rounds — one a check round's verdict brings, or the
-  primary's own background retry — and only while another member keeps
-  the data, or by a repair's step (`cnagent.md` CN12), so a leg whose
+  the leg's probe has failed more than once in a row — one a check
+  round's verdict brings, or the primary's own background retry — and
+  only while the leg is not available and another in-sync member is a
+  copy source, or by a repair's step
+  (`cnagent.md` CN12), so a leg whose
   member dies with no IO goes on counting by the report until its probe
   fails and HL2 stamps its `err_epoch`, the window that "The gate can read
   a row that is about to turn", above, describes. A half-copied leg —

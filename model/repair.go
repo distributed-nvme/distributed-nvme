@@ -1261,11 +1261,10 @@ const reasonMarkNamesNewLeg = "the group's forced-start mark names the new leg"
 // and an aborted repair is aborted. A CREATED repair whose flag is already
 // set is answered as done and written to not at all, so a repeated request
 // raises no revision. A flag not yet set is refused while the group's
-// forced-start mark names the repair's new leg (forcedStartNames): the flag
-// takes that leg out of the members the forced start keeps, and a forced
-// start that has zeroed the other members before an assembly that failed
-// leaves that leg the one full member, so the abort must not withdraw the
-// operator's mark as a side effect. The operator withdraws the mark first
+// forced-start mark names the repair's new leg (forcedStartNames): the
+// abort ends in ABORTED, which takes that leg out of the group, so the mark
+// could never act, and a forced start that has zeroed the other members
+// before an assembly that failed leaves that leg the one full member. The operator withdraws the mark first
 // (ForceStartGroup with cancel), or lets the forced start finish.
 func SetRepairAbort(
 	ctx context.Context,

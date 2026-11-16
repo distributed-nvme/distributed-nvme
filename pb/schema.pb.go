@@ -1534,8 +1534,10 @@ type Group struct {
 	// false while none stands: UpdateGroupOperatorInCharge sets and clears
 	// it, and while it is set the worker creates no repair of the group and
 	// CreateRepair refuses a name with the reserved prefix (architecture.md,
-	// Repairs). No agent reads it, so its write raises no SpRev, and a
-	// record without it decodes as false. Appended, never renumbered.
+	// Repairs). The primary reads it too: while it is set the primary
+	// leaves a broken array of the group as it is (cnagent.md CN12, The
+	// re-assembly), so its write raises SpRev. A record without it decodes
+	// as false. Appended, never renumbered.
 	OperatorInCharge bool `protobuf:"varint,10,opt,name=operator_in_charge,json=operatorInCharge,proto3" json:"operator_in_charge,omitempty"`
 	// Set once the group's array has run: the sp worker sets it from a
 	// report of the primary whose row of the group reads OK, and nothing
@@ -16566,11 +16568,12 @@ type CntlrInfo_RepairInfo struct {
 	Started        bool                   `protobuf:"varint,1,opt,name=started,proto3" json:"started,omitempty"`
 	AbortConfirmed bool                   `protobuf:"varint,2,opt,name=abort_confirmed,json=abortConfirmed,proto3" json:"abort_confirmed,omitempty"`
 	// Why the primary does not add the repair's new leg, taken from a
-	// retired leg, empty when nothing holds the add back: its md events
-	// count is above that of a member md holds in sync, so it holds
-	// newer data than the array (cnagent.md CN12). Text for people and
-	// for the sp worker's log; no rule reads it. Appended, never
-	// renumbered.
+	// retired leg, empty when nothing holds the add back: its md
+	// superblock carries another identity than the member md holds in
+	// sync, and the repair carries no force, or the same identity and an
+	// events count above that member's, so it holds newer data than the
+	// array (cnagent.md CN12). Text for people and for the sp worker's
+	// log; no rule reads it. Appended, never renumbered.
 	Refusal string `protobuf:"bytes,3,opt,name=refusal,proto3" json:"refusal,omitempty"`
 	// The repair's new legs whose members the running array holds, in
 	// any state — in sync, copying, a spare or failed — ascending: md

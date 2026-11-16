@@ -673,11 +673,10 @@ before each such repair leave the group at the retired-leg bound, so its finish
 gives back the group's oldest retired leg that is not kept and the group must
 hold exactly the retired legs that rule leaves, judged as after the first
 repair (`architecture.md`, Repairs, FinishRepair). The first forced start
-keeps every retired leg of the group and, through its repair, the leg that
-repair retires (`architecture.md`, Retired legs): before the second, every
-retired leg must read kept, and the step clears the flag of every one but
-the first forced start's retired leg, as an operator would once it has
-judged them, so that the second repair's finish has one to give back. The pool's level is raised to the
+keeps every retired leg of the group, the leg its repair's finish retired
+before the mark among them (`architecture.md`, Retired legs): before the
+second, every retired leg must read kept, and the step clears the flag of
+every one but that leg, as an operator would once they have judged them, so that the second repair's finish has one to give back. The pool's level is raised to the
 one where reactions stop before the leg md holds in sync dies, while every leg
 row and the group's row read OK, because an array that does not run turns the
 group's row into an error, which sets the primary's health epoch, and a
@@ -715,7 +714,9 @@ read on the primary, must carry another identity than the array's, since it
 left before the forced start, must be refused — the primary's
 verdict carries the refusal, the worker logs it and moves no stage
 (`cnagent.md` CN12; `dnv-worker.md` AR11), and the primary neither adds that
-leg nor takes the bad leg out — and its abort and cancel give the leg back as a
+leg nor takes the bad leg out, its one command on the bad leg's member, at
+most, the early fail of a dead leg's member it keeps in the array
+(`cnagent.md` CN12, The early fail) — and its abort and cancel give the leg back as a
 retired leg with its kept time (`architecture.md`, Repairs, CancelRepair),
 host0 still reading the restored copy. Each forced start is judged by the
 agent's record of the start and by the zeroed leg in sync, never by an exit

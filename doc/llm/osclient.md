@@ -97,8 +97,8 @@ the method set is exactly the following, each taking the caller's ctx:
   callers use only for regions no dm table references.
 * `ReadBlockDirect` reads exactly the requested length at a byte offset of
   a block device with O_DIRECT in the caller's own process; offset and
-  length must be multiples of 4096 and the length not zero; a short read is
-  an error (ReadBlockDirect).
+  length must be multiples of the alignment `LegHealthBlockSize` names and
+  the length not zero; a short read is an error (ReadBlockDirect).
 * `WriteBlock` writes data at a byte offset and fsyncs the file descriptor
   before returning.
 * `DiscardRanges` discards byte ranges of a block device in the caller's own
@@ -437,10 +437,10 @@ cache.
 * It cannot be cut off once the pread has started: it waits for as long as
   the device holds the IO, and holds its slot until then, as a command
   whose child sits in an uninterruptible kernel wait does (RunCommand).
-  Its one caller reads only a leg that serves this pass, so the wait needs a
-  fault between the caller's read of the leg's path and the read itself;
-  the leg probe, whose IO waits by design, never uses it (Exported raw
-  helpers and the probe-IO carve-out).
+  Its one caller reads only a leg that serves, but a disk node that stalls
+  while the leg's path stays live holds the read without limit, and with
+  it the slot; the leg probe, whose IO waits by design, never uses it
+  (Exported raw helpers and the probe-IO carve-out).
 * One `os read block direct` record covers the call, with `path`, `offset`
   and `length` — **never** `data` (`log.md`, OS commands and file IO).
 
@@ -478,9 +478,9 @@ a fragmented source.
 
 The `OsClient` interface's direct read (ReadBlockDirect) holds a semaphore
 slot, and a prober must never hold one (below), so the CN11 leg-health
-prober reads through a raw helper instead. The two raw bodies are exported from `common/osclient.go` as plain
-package-level functions instead. They take no ctx, acquire **no** semaphore
-slot, and log **nothing**:
+prober reads through a raw helper. The two raw bodies are exported from
+`common/osclient.go` as plain package-level functions. They take no ctx,
+acquire **no** semaphore slot, and log **nothing**:
 
 * `WriteBlockAt` pwrites data at a byte offset and fsyncs the file
   descriptor before returning. Buffered IO; a fresh fd per call, never a
@@ -497,8 +497,9 @@ slot, and log **nothing**:
 The alignment is the probe's natural unit, the size `LegHealthBlockSize`
 names: O_DIRECT alignment is per-device, and that unit satisfies every device
 dnv touches. `LimitedOsClient.WriteBlock` is a thin wrapper over
-`WriteBlockAt` (the semaphore plus the `os write block` record);
-`ReadBlockDirectAt` has no `OsClient` wrapper at all. The buffered
+`WriteBlockAt` (the semaphore plus the `os write block` record), and
+`LimitedOsClient.ReadBlockDirect` wraps `ReadBlockDirectAt` the same way
+(ReadBlockDirect). The buffered
 `readBlockAt` behind `ReadBlock` stays **unexported** — nothing outside the
 `OsClient` may bypass it for metadata IO (`architecture.md`, [D13]).
 
@@ -559,7 +560,8 @@ sanctioned direct-syscall path in dnv:
   hence the helpers, not a second `OsClient` and not a probe budget.
 * *Who may call them.* Only the cn agent's lock-free prober goroutines
   (`cnagent.md` CN1 and CN11), through the small fakeable probe-IO
-  dependency defined in `healthcheck.go`. These two helpers are the
+  dependency defined in `healthcheck.go`, and the `OsClient`'s own
+  wrappers. These two helpers are the
   only block-IO syscalls any package outside `common` may call; every other
   caller — the dn `diskmeta.go` header/volume-table path above all — keeps
   using the `OsClient` methods of "ReadBlock / WriteBlock".

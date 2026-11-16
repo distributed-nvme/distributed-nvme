@@ -1438,8 +1438,9 @@ func (s *CnAgentServer) assembleGroup(
 		// start zeroed that the member reconciliation has not added back,
 		// which still holds its data: a mark that goes before the start, or
 		// a zeroed member that dies before its add, leaves one, and the
-		// group's flag that its array has run, which the mark's write sets,
-		// tells it from a fresh side (below; architecture.md, Known limits).
+		// group's flag that its array has run, which the sp worker sets from
+		// the first report that reads the group's row OK, tells it from a
+		// fresh side (below; architecture.md, Known limits).
 		// A read that failed never reaches here: it is the reading's error
 		// above, never "no superblock". Only a slice's meta group's members
 		// are zeroed whole; a data group's and a clone meta group's are
@@ -1578,9 +1579,8 @@ func assemblyIdentity(gp *grpPlan, cands []assemblyCand) (string, error) {
 
 // msgForcedStart is the Warn record of a forced start that started the
 // group's array from its named leg (CN12): it names the group, the leg, the
-// members whose zero mdadm answered with success (ZeroSuperblock: a member
-// whose read failed is among them though it keeps its superblock) and the
-// superblock update of the assembly that started it.
+// members whose zero the read after it proved, and the superblock update of
+// the assembly that started it.
 const msgForcedStart = "forced start"
 
 // forcedStartPass is ensureGroup's part while the group's forced-start mark

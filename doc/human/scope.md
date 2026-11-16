@@ -326,20 +326,22 @@ The entries:
   running can leave legs that read as fresh.** Silent. The worker records
   that a group's array has run at the first report that reads the group
   running. An array can be created and break before any report reads
-  it. When a forced start on such a group zeroes the other members and is
-  cut short, and the named leg is then lost, every leg reads new, and the
-  primary creates an array over them with no copy. Hosts read a mix of the
-  legs' data. It needs four rare events in a row. State: accepted, written
-  as a limit. Not seen in the lab.
+  it. When a forced start on such a group wipes the other legs and stops
+  short, the primary would create a new array over them only if every leg
+  of the group's list served with no md superblock. A forced start keeps
+  the named leg's superblock, so no way to reach this is known. If one
+  exists, hosts read a mix of the legs' data. State: accepted, written as a
+  limit. Not seen in the lab.
 - **A half-copied leg can look whole.** While md copies from the one leg it
   holds in sync and that leg dies, md can end the copy by marking the leg it
   copied onto in sync, with the regions it never copied in that leg's
-  bad-block list. The leg that died gets a bad-block list too. The forced
+  bad-block list, when the leg that died comes back before the broken array
+  is stopped. The leg that died gets a bad-block list too. The forced
   start drops the named leg's list, which is right for the leg that died.
   When the mark names the half-copied leg instead, hosts read, over the
   regions md never copied, whatever that leg's disk held there, possibly
   another pool's bytes, with no error. Both legs show the same change
-  count. State: procedure,
+  count. State: procedure written,
   [the forced-start guide](operations.md#the-forced-start-guide): name the
   leg md copied from, not the new leg it copied onto; `dnvctl group
   inspect` shows each leg's bad-block count and md's view of it. Seen in
@@ -466,9 +468,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   an array that is held. The group then stays down until a failover or a
   cntlr replacement builds it again on another cntlr, or an operator runs
   a forced start; a pool with one cntlr waits for the cntlr replacement.
-  State: open question, whether the primary should take the pool and the
-  volumes above down to assemble the array in place. md's stop and plain
-  assemble were seen in the lab on loop devices.
+  State: fix later: no way is chosen yet; whether the primary should take
+  the pool and the volumes above down to assemble the array in place is an
+  open question. Seen in the lab: on
+  loop devices, and in the cn agent suite after a level step.
 - **A forced start cut short after its zeroing can leave no leg to start
   from.** The forced start zeroes the md superblock of every other member
   it keeps, except the open repair's bad leg. When the operator withdraws
@@ -476,10 +479,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   carry no superblock but still hold data. The primary does not create a
   new array over them, since the group's array has run before, so no data
   is lost (section 5.2 has the one case where the worker has not yet
-  recorded that the array ran); the group stays down until a leg with a superblock is back, the
-  named leg among them, which a new mark can name. If that leg is gone for
+  recorded that the array ran); the group stays down until a leg with a
+  superblock is back, such as the named leg, which a new mark can name. If that leg is gone for
   good, the data on the zeroed legs can be reached only by hand with mdadm.
-  State: procedure, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
+  State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
   leg was wiped". Not seen in the lab.
 - **A read-only or corrupt thin pool has no repair path.** A failed commit
   leaves a slice's thin pool read-only. Corrupt thin pool metadata has no
@@ -491,7 +494,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 - **A group whose in-sync leg dies during a copy waits for a forced
   start.** A repair finishes once the primary reports the new leg in place,
   while md may still copy onto it. The old leg dies during the copy. md
-  will not start from the half-copied leg. State: procedure,
+  will not start from the half-copied leg. State: procedure written,
   [the forced-start guide](operations.md#the-forced-start-guide). Fix
   later, the primary starts from the leg md recorded as last in sync. Seen
   in the lab: the cn agent suite and the end-to-end suite break a group
@@ -558,7 +561,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   only where md recorded the other legs as failed.** When both legs of
   the group's list are dead, the group otherwise waits for its legs. An
   operator's forced start from the new leg waits too, for the leg of the
-  list that is not the repair's bad leg. State: procedure, one line in
+  list that is not the repair's bad leg. State: procedure written, one line in
   [the forced-start guide](operations.md#the-forced-start-guide). Not seen in the lab.
 - **After a forced start, a leg of the old identity can keep the group
   down.** A forced start from another leg leaves the repair's bad leg with
@@ -567,7 +570,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   assembly, as after a failover or a restart, finds legs of two identities
   and leaves the group down, its row in error. A repair that would keep
   that leg's data is refused while the leg reads healthy, which it does,
-  and a forced start from the leg wanted wipes it. State: open question;
+  and a forced start from the leg wanted wipes it. State: fix later: no
+  way to fix it is known yet, and
   [the forced-start guide](operations.md#the-forced-start-guide) says to
   stop and ask for help. Not seen in the lab.
 - **A primary that keeps a leaving member is failed over, and the new
@@ -576,8 +580,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   leg. While it keeps such a member, the group's row reads error, so the
   primary is failed over at its threshold. The new primary assembles the
   group from the legs of the group's list and the open repair's new legs,
-  which leave that member out. State: fix later, to be judged with
-  the forced start's second pass. Not seen in the lab.
+  which leave that member out. State: fix later. Not seen in the lab.
 - **A forced-start mark the primary did not act on waits for the
   operator.** The worker clears a mark only when the primary reports that
   its own forced start of that mark started the array. The primary keeps
@@ -589,7 +592,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   the lab.
 - **A forced start waits on a primary whose layers above hold the broken
   array.** Only a failover or a level step that stops the pools lets it
-  run. State: procedure, [the forced-start guide](operations.md#the-forced-start-guide), "A forced start that
+  run. State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A forced start that
   waits".
 - **An open repair, or the operator-in-charge flag, holds the worker's
   repair.** A group has one repair at a time. State: accepted, by design.
@@ -932,15 +935,19 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   auto-grow of the metadata is its cure. Not seen in the lab.
 - **A repair that waits gives no reason.** State: fix decided, the primary
   reports the reason and the worker logs it. Seen in the lab.
-- **A retired leg's partial mark can miss a short hold.** The worker marks
-  a taken-back leg partial when md holds it but not in sync, from the
-  report it reads each pass. A hold md begins and ends between two passes,
-  or a failed add that still wrote md's record onto the leg, leaves no
+- **A retired leg's partial mark can miss a short stay in the array.** A
+  repair can take a retired leg back as its new leg. When md has counted
+  that leg as a member but not copied all of it, the worker marks the leg
+  partial, and a forced start then refuses to name it unless forced. The
+  worker sees this only in the primary's reports, which it reads every few
+  seconds. When md counts the leg and lets it go between two such reads,
+  or a failed add still wrote md's record onto the leg, the leg gets no
   mark. The leg's own md superblock still shows what md left, which the
   forced start's read refuses, so a start from it fails with a reason.
   State: accepted. Not seen in the lab.
 - **A retired leg's record does not say whether the leg was in sync when
-  it left.** The record says whether the leg is kept, and whether md wrote
+  it left.** The record says whether the leg is kept, that is, held back
+  from the worker's deletion by the operator or a forced start, and whether md wrote
   onto it as a repair's new leg that was then cancelled (its partial
   mark). It does not say whether a leg a repair replaced was in sync when
   it left the array. The worker's repair at the bound can then give back

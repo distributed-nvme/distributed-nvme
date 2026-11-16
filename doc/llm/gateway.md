@@ -562,7 +562,7 @@ capacity-key reason —
 in the planning read of `FinishRepair`, `CancelRepair` and
 `DeleteRetiredLeg` (`releaseConfGate`), whose `model` ops give a side back
 through the drains' ledger by the same capacity keys (`FinishRepair`'s op
-gives back the oldest retired leg's side that is not kept when a worker's
+gives back the side of the oldest retired leg that is not kept when a worker's
 repair finishes at the retired-leg bound, and the gate runs whether or not
 a side goes back),
 and in the scans `pickDns` and `pickCn`
@@ -1208,7 +1208,8 @@ below name.
   drain, and the drain's final emptiness guard rests on "after the latch,
   no chunk key can ever appear again". `GetClone` and `DeleteClone`'s own
   phase 1 keep using plain `loadClone`. The eight repair calls that write,
-  which change a clone meta group or its repair, refuse a deleting clone
+  which change a clone meta group, its repair or one of its retired legs,
+  refuse a deleting clone
   the same way, in their `model` op, and `CreateRepair`, `ForceStartGroup`
   and `UpdateGroupOperatorInCharge` first in their planning read
   (`refuseDeletingClone`; Repairs and retired legs).
@@ -1486,8 +1487,9 @@ pool's repairs, retired legs and groups still answer.
   not name it yet, its disk node and health epochs and its row; the
   array's state; the retired legs' ids; the stamp; both revisions; and
   the dry run: the first planning refusal, else `ForceStartGroup`'s
-  judgement of the group's row (`grpRowRefusal`), else the agent's, each
-  refusal in the gateway's own words. Nothing is written.
+  judgement of the group's row (`grpRowRefusal`), each in the gateway's
+  own words, else the agent's dry run as the agent wrote it. Nothing is
+  written.
 * **UpdateRetiredLegKeep** — DeleteRetiredLeg's planning read with no conf
   gate, then `model.SetRetiredLegKeep` with the request's value, which
   re-checks the token, the pool, the leg and its group and clone in its
@@ -1549,7 +1551,9 @@ chained and the message limit set, closed when the call returns. The
 interceptors and the limit are mandatory on every dnv connection
 (`grpc.md`, Wiring), and the interceptors forward the request's trace id
 (`grpc.md` T3). The gateway dials per call and closes after the call: it
-keeps no connection cache like the worker's (`dnv-worker.md` RW7).
+keeps no connection cache like the worker's (`dnv-worker.md` RW7). One
+handler, `InspectGroup`, makes two calls on one dial, under the one
+timeout of that dial (InspectGroup, below).
 
 AG3. **Failure mapping.** A transport or non-OK status maps to the code the
 RPC's specification names: `ABORTED` everywhere except the `force` false

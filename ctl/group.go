@@ -13,9 +13,9 @@
 // repair's bad leg excepted, and md copies each of them whole from the named
 // leg (architecture.md, Repair, Forced start). The mark is a field of the
 // group record, so `sp get` shows a slice group's and `clone get` a clone meta
-// group's (CT4); the sp worker clears it once the primary reports the array
-// running with a member in sync on a leg whose own row reads OK
-// (dnv-worker.md AR13). A start from an older copy restores the group alone,
+// group's (CT4); the sp worker clears it once the primary reports that it
+// acted on the mark and that the array runs with a member in sync on a leg
+// whose own row reads OK (dnv-worker.md AR13). A start from an older copy restores the group alone,
 // not the pool, whose other groups keep their newer state
 // (architecture.md, Known limits).
 //

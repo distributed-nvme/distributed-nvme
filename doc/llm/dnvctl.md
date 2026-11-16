@@ -606,8 +606,9 @@ the operator's short verb and `repair get` shows the outcome.
 than one reaches the gateway, which refuses it (CT8), and its new leg is
 the retired leg `--retired-leg` names or, when that is zero or not given,
 a fresh leg the `--dn-black` and `--dn-white` selector steers; `--force`
-lets the primary copy over a leg of another md identity, the retired leg
-taken back and the bad leg after an abort (`architecture.md`, Repair), and
+lets the primary copy over a leg that carries another md identity, when
+the retired leg taken back or the bad leg after an abort does
+(`architecture.md`, Repair), and
 its help says that what such a leg holds is lost. dnvctl
 checks no stage: a call the repair's stage does not allow is the gateway's
 refusal, which names the stage (`architecture.md`, Repairs).

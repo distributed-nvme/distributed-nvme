@@ -266,8 +266,8 @@ func startedBadLeg(rep *pb.Repair, legId uint64) bool {
 // forcedStartNames reports whether grp carries a forced-start mark that
 // names legId. FinishRepair clears such a mark for the repair's bad leg,
 // which the finish retires, and SetRepairAbort refuses the abort flag while
-// such a mark names the repair's new leg, which the flag would take out of
-// the members the forced start keeps. A mark that names a leg the forced
+// such a mark names the repair's new leg, which the abort, once ABORTED,
+// takes out of the group. A mark that names a leg the forced
 // start no longer keeps can never be acted on, and while the group's array
 // does not run no report clears it (dnv-worker.md AR13), so it would be the
 // group's error on every pass and hold leg repair off the group until the

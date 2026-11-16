@@ -12,8 +12,9 @@ import (
 // ---------------------------------------------------------------------------
 // The reading of a member (cnagent.md CN12)
 //
-// The assembly, the forced start, the take-back check and the add of a
-// leg_list member decide from one reading of each member's superblock area,
+// The assembly, the forced start, the re-assembly, the inspect, the
+// take-back check and the add of a leg_list member decide from one reading
+// of each member's superblock area,
 // which the agent reads itself (Md.ReadMember): one O_DIRECT read of the area
 // where md's version-1.2 superblock sits, 4096 bytes into the member, and, when
 // the superblock says its bad-block list is not empty, one more of the window

@@ -232,7 +232,8 @@ const (
 	// reasonTakeBackRefused is a verdict on a CREATED repair that says
 	// neither started nor abort confirmed and carries the primary's refusal
 	// of the add of the repair's new leg, a leg taken from a retired leg
-	// whose md events count is above the array's (cnagent.md CN12): no stage
+	// whose md superblock carries another identity, with no force on the
+	// repair, or an events count above the array's (cnagent.md CN12): no stage
 	// moves, and the record carries the refusal's text on every pass while
 	// the verdict stands, so that the operator reads why the repair waits
 	// (AR11).
@@ -3294,9 +3295,10 @@ func (w *spWorker) moveRepairStages(ctx context.Context, p *spPass) {
 			stage = pb.RepStage_REP_STAGE_ABORTED
 		case verdict.GetRefusal() != "":
 			// The primary refuses the add of the repair's new leg, a leg
-			// taken from a retired leg whose md events count is above the
-			// array's (cnagent.md CN12), and gives neither verdict while it
-			// does. Nothing moves; the record carries the refusal on every
+			// taken from a retired leg whose md superblock carries another
+			// identity, with no force on the repair, or an events count
+			// above the array's (cnagent.md CN12), and gives neither verdict
+			// while it does. Nothing moves; the record carries the refusal on every
 			// pass while it stands, so the operator reads why the repair
 			// waits and can abort and cancel it.
 			w.repairStageSkipped(ctx, reasonTakeBackRefused,

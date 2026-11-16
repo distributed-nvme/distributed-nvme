@@ -21,8 +21,9 @@ import (
 // superblock reads (Md.ReadMember) of the take-back check, of a repair's new
 // leg taken from a retired leg and of the member that keeps the data
 // (takeBackStep), and of the identity check, of a leg_list member the array
-// lacks (legListAddRefusal), both through putBackNames, which read those
-// member devices. No
+// lacks (legListAddRefusal), both through putBackNames, and the re-assembly's
+// listing of a broken array's holders and reads of every member the group
+// keeps (reassemblyNamed), which read those member devices. No
 // function here creates, changes or removes an object of the node, as a
 // cntlr's background read must not (CN23; dnagent.md SH29). A thin pool's
 // `dmsetup status` carries the noflush flag and commits nothing, though it
