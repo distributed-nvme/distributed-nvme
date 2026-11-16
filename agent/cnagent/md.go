@@ -1406,8 +1406,9 @@ func (s *CnAgentServer) assembleGroup(
 		// leg is a freshly provisioned side — short of a member a forced
 		// start zeroed that the member reconciliation has not added back,
 		// which still holds its data: a mark that goes before the start, or
-		// a zeroed member that dies before its add, leaves one, and nothing
-		// here tells it from a fresh side (architecture.md, Known limits).
+		// a zeroed member that dies before its add, leaves one, and the
+		// group's flag that its array has run, which the mark's write sets,
+		// tells it from a fresh side (below; architecture.md, Known limits).
 		// A read that failed never reaches here: it is the reading's error
 		// above, never "no superblock". Only a slice's meta group's members
 		// are zeroed whole; a data group's and a clone meta group's are
@@ -1429,6 +1430,22 @@ func (s *CnAgentServer) assembleGroup(
 			return fmt.Errorf(
 				"only %d of %d legs available and none carries a superblock",
 				len(members), len(gp.legs))
+		}
+		// Never for a group whose array has run (Group.array_made, which
+		// the sp worker sets from the first report that reads the group's
+		// row OK, dnv-worker.md AR15): its legs that read no superblock
+		// were zeroed by a forced start that ended before its assembly, or
+		// before the add of each, and hold data, and a create over them
+		// would serve a mix with no error. The
+		// refusal is a build failure (asBuildErr), so the pass registers
+		// the CN10 retry, whose converge takes a leg with a superblock in
+		// case 2 once one is available, as a repair's new leg the forced
+		// start named; otherwise the operator's mark acts.
+		if gp.grp.GetArrayMade() {
+			return fmt.Errorf(
+				"the array of group %#x has run before and no member "+
+					"carries a superblock: its legs hold data, so no new "+
+					"array is created", gp.grpId)
 		}
 		// Nor while an array already runs under the group's name. Detail
 		// finds the array by its members, so one holding NONE of the
@@ -1601,10 +1618,12 @@ type forcedStartError struct{ err error }
 var errArrayNameInUse = errors.New("holding none of the group's legs")
 
 // mdStateError marks an md read that answered with a state the pass leaves
-// alone: two arrays that both hold legs of the group (MdWalk.Match), or an
-// md attribute that does not parse (readDetail). Only an operator ends the
-// first, and nothing the pass does changes the second, so neither registers
-// the retry (asBuildErr).
+// alone: two arrays that both hold legs of the group (MdWalk.Match), an md
+// attribute that does not parse (readDetail, Md.ArrayUuid), or the group's
+// members of two identities among the legs that decide its assembly
+// (assemblyIdentity). Only an operator ends the first and the third, and
+// nothing the pass does changes the second, so none registers the retry
+// (asBuildErr).
 type mdStateError struct{ err error }
 
 func (e mdStateError) Error() string { return e.err.Error() }

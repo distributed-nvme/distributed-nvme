@@ -538,3 +538,68 @@ func TestLegRepairCreateHoldsWhileAForcedStartStands(t *testing.T) {
 		h.wantApplied(reactionRepairFinish)
 	})
 }
+
+// TestArrayMadeFromTheReport pins AR15: a group of an md-raid1 pool whose
+// flag is clear and whose row in the primary's latest report reads OK gets
+// the flag through one op naming every such group with its parent, logged
+// with the op's revision; a group whose row does not read OK is not named,
+// nor one that carries the flag; an op that fails is logged as kept; and a
+// RedundNone pool, whose groups have no array, writes nothing.
+func TestArrayMadeFromTheReport(t *testing.T) {
+	setup := func(t *testing.T) *reactHarness {
+		h := newReactHarness(t, reactFixture(t))
+		h.dataGrp().ArrayMade = false
+		h.slice().MetaGrpList[0].ArrayMade = false
+		h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_OK)
+		h.setGrpRow(reactMetaGrp, pb.ResStatus_RES_STATUS_ERROR)
+		return h
+	}
+	t.Run("a group that carries the flag", func(t *testing.T) {
+		h := setup(t)
+		h.dataGrp().ArrayMade = true
+		h.pass()
+		if len(h.rops.arrayMade) != 0 {
+			t.Fatalf("writes = %v, want none", h.rops.arrayMade)
+		}
+	})
+	t.Run("marked", func(t *testing.T) {
+		h := setup(t)
+		h.pass()
+		if len(h.rops.arrayMade) != 1 {
+			t.Fatalf("writes = %v, want one", h.rops.arrayMade)
+		}
+		want := []model.GrpRef{{
+			Parent: model.GrpParent{SliceId: reactSliceId},
+			GrpId:  reactDataGrp,
+		}}
+		if got := h.rops.arrayMade[0]; len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("refs = %v, want %v", got, want)
+		}
+		recs := h.logs.withMsg(msgGroupsArrayMade)
+		if len(recs) != 1 || recs[0]["set"] != float64(1) {
+			t.Fatalf("records = %v, want one naming one group", recs)
+		}
+		h.wantNoRecord(msgGroupsArrayMadeKept)
+	})
+	t.Run("the op fails", func(t *testing.T) {
+		h := setup(t)
+		h.rops.arrayMadeErr = errors.New("etcd down")
+		h.pass()
+		if recs := h.logs.withMsg(msgGroupsArrayMadeKept); len(recs) != 1 ||
+			recs[0]["reason"] != reasonOpFailed {
+			t.Fatalf("records = %v, want one kept with %s", recs,
+				reasonOpFailed)
+		}
+		h.wantNoRecord(msgGroupsArrayMade)
+	})
+	t.Run("RedundNone", func(t *testing.T) {
+		h := setup(t)
+		h.state.Conf.BdevConf.RedundConf = &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundNone{
+				RedundNone: &pb.RedundNone{}}}
+		h.pass()
+		if len(h.rops.arrayMade) != 0 {
+			t.Fatalf("writes = %v, want none", h.rops.arrayMade)
+		}
+	})
+}

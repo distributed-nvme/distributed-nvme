@@ -91,8 +91,10 @@ ETCD_MAX_TXN_OPS=
 # common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
 # MUST run with (dnv-worker.md, Constants this document owns), read by
 # read_constants() like ETCD_MAX_TXN_OPS. The request that SIZES it is the
-# provisioned flip over every slice of a pool at the widest shape, which
-# model's TestFlipProvisionedAtTheSliceCeiling commits. No request of this
+# write of the flag that a group's array has run over every slice and every
+# clone of a pool at the widest shape, which model's
+# TestMarkGroupsArrayMadeAtTheRequestCeiling commits, a little above the
+# provisioned flip over every slice. No request of this
 # suite comes near etcd's default; the flag is passed so that every etcd this
 # tree starts gets it from the same constant.
 ETCD_MAX_REQUEST_BYTES=

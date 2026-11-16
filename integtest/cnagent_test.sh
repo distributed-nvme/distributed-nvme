@@ -1577,6 +1577,18 @@ md_examine() {
 	echo "role=${role// /_} recovery=${rec:-none} uuid=$uuid bbl=${bbl:-0} events=$ev"
 }
 
+# md_zero <dm name> — zeroes the md superblock on the dm device <dm name>
+# with mdadm --zero-superblock, as a forced start zeroes a member it keeps,
+# and prints "zeroed". It fails, saying so, when mdadm refuses, as it does
+# on a member a running array holds, or does not end within its bound.
+md_zero() {
+	timeout 30 mdadm --zero-superblock "/dev/mapper/$1" >/dev/null 2>&1 || {
+		echo "md_zero: mdadm --zero-superblock of $1 failed" >&2
+		return 1
+	}
+	echo zeroed
+}
+
 # md_bad_block_add <dm name> <sector> <sectors> — records a bad block on the
 # member <dm name> of a running array through its md/dev-*/bad_blocks, as md
 # records one it could not write, and prints the member's in-memory list. md
@@ -5818,6 +5830,51 @@ repair_forced_start() {
 		"repair forced: the standby"
 }
 
+# repair_array_made is repair's last stage before its teardown
+# (cnagent_integtest.md, Cases, repair; cnagent.md CN12, case 1): CN2 stops
+# the data group's array, every member of its leg_list is zeroed by hand, as
+# a forced start cut short after its zeroing leaves them, and the request
+# carries the flag that the group's array has run. The primary then creates
+# no array over the blank legs, which hold data, and says why. The pool is
+# torn down next, so the blank legs are never served. It works on
+# case_repair's pool and request files, and moves on its rev2, which bash's
+# dynamic scope hands it.
+repair_array_made() {
+	local f out seq leg name grp md2dev
+	grp=".id_to_slice[\"$(hex16 "$A_SLICE")\"].data_grp_list[0]"
+	md2dev=$(jq_of "$md2" .dev_path)
+
+	stage made "a group whose array has run gets no new array over blank legs"
+	for f in "$req1" "$req2"; do
+		req_set "$f" '.sp_level = "SP_LEVEL_NO_REDUND"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 \
+		"repair made: the level with no group array"
+	for leg in $("$JQ" -r "$grp.leg_list[].leg_id" "$req2"); do
+		name=$(cn_dm_name c9 2 "$sp" "$leg")
+		assert_eq "$(helper 2 "md_zero $name")" zeroed \
+			"repair made: leg $leg's superblock zeroed"
+		assert_eq "$(helper 2 "md_examine $name")" none \
+			"repair made: leg $leg's superblock after the zero"
+	done
+	for f in "$req1" "$req2"; do
+		req_set "$f" "$grp.array_made = true | .sp_level = \"SP_LEVEL_NO_THINPOOL\""
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_status "$out" grp_id_to_md_raid "$A_DGRP" RES_STATUS_ERROR \
+		"has run before" "repair made: the refusal"
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" '^mdadm --create ')" 0 \
+		"repair made: arrays created over the blank legs"
+	assert_eq "$(event_cnt "$seq" "^mdadm --assemble $md2dev ")" 0 \
+		"repair made: assemblies of the data array"
+}
+
 case_repair() {
 	CASE=repair
 	DIAG_CNTLRS=()
@@ -6221,6 +6278,8 @@ case_repair() {
 	stage check "converge check rounds on both CNs"
 	converge_check 1 "$sp" "$c1" "$rev1"
 	converge_check 2 "$sp" "$c2" "$rev2"
+
+	repair_array_made
 
 	stage teardown "empty cntlr lists, then empty side lists"
 	host_disconnect "$hv" "$nqn"

@@ -418,3 +418,34 @@ func TestPutBackMakesTheIdentityCheck(t *testing.T) {
 		t.Fatalf("the converge's refusal is %q, the read's %q", got, refusal)
 	}
 }
+
+// TestNoCreateOnceTheArrayRan pins CN12's refusal of case 1's create for a
+// group whose array has run (Group.array_made): with every leg available
+// and none carrying a superblock, as a forced start cut short after its
+// zeroes leaves them, the group's row reads ERROR, no array is created, and
+// the retry is registered, whose converge takes a leg with a superblock once
+// one is available; the same group without the flag is created.
+func TestNoCreateOnceTheArrayRan(t *testing.T) {
+	for _, made := range []bool{true, false} {
+		f := downNoRepair(t)
+		f.node.mu.Lock()
+		delete(f.node.superblocks, f.leg1)
+		delete(f.node.superblocks, f.leg2)
+		f.node.mu.Unlock()
+		req := quietReq(4)
+		dataGrpOf(req).ArrayMade = made
+		info := f.syncup(t, req)
+		if !made {
+			if !f.node.hasCall("cmd mdadm --create " + f.mdDev) {
+				t.Fatalf("a group with no flag got no create")
+			}
+			continue
+		}
+		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
+			"has run before", "grp data")
+		assertNoCall(t, f.node, "cmd mdadm --create "+f.mdDev)
+		if !retrying(t, f.srv) {
+			t.Fatalf("the refused create registered no retry")
+		}
+	}
+}

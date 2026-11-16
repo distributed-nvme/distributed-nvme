@@ -1179,7 +1179,17 @@ dm-clone (CN18).
      with any member missing, the group is simply unavailable this pass
      ("only k of n legs available and none carries a superblock"),
      because creating over a subset would mint a fresh array while an
-     absent leg may carry the real one. Nor while the `CnMdDevName` node
+     absent leg may carry the real one. Never for a group whose array has
+     run (`Group.array_made`, which the sp worker sets from the first
+     report that reads the group's row `OK`, `dnv-worker.md` AR15): its
+     legs that carry no
+     superblock were zeroed by a forced start that ended before its
+     assembly or before each one's add, and hold data, so the converge
+     reads the group's row `ERROR` ("has run before") and a read reads it
+     `MISSING`, no array running, and the refusal registers the CN10 retry,
+     as a failed build does (below), until a leg with a superblock is
+     available, which case 2 takes, or the operator's forced start
+     (`architecture.md`, Known limits). Nor while the `CnMdDevName` node
      already resolves to a device (`Md.NameInUse`, an `lsblk` of the node,
      which reads no member; one that did not answer is an error that
      refuses the create this pass, like a superblock read that did not
@@ -1197,9 +1207,8 @@ dm-clone (CN18).
      needs a stale node of this very name — which, short of the case the
      guard exists for and of the members a forced start zeroed, a group
      whose legs carry no superblock has never had an array to leave.
-     `--assume-clean` is correct here, short of a member the forced start
-     (below) zeroed that the member reconciliation has not added back,
-     which still holds its data (`architecture.md`, Known limits): a side
+     `--assume-clean` is correct here, the flag above keeping out a group
+     whose members a forced start (below) zeroed: a side
      is never
      exported before the provisioning protocol has written zeros over at
      least its meta region and its first data block and the side's
@@ -1291,7 +1300,8 @@ dm-clone (CN18).
   (next). A
   group's build that fails with its legs as they are registers the CN10
   retry too: its md walk or array read that did not answer, its create,
-  assembly or superblock probe that failed or did not answer, its start
+  assembly or superblock probe that failed or did not answer, its refusal
+  to create over a group whose array has run (case 1), its start
   that did not show, and a `RedundNone` group's dm-linear step. Reason:
   the group's error is a row, which re-drives nothing, and a grow's new
   group under a pool that serves (CN13) has no namespace that waits for

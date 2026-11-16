@@ -57,6 +57,7 @@ func cloneMetaGrp(grpId uint64, legs []*pb.Leg) *pb.Group {
 		MetaBlocks: 7,
 		DataBlocks: 1017,
 		LegList:    legs,
+		ArrayMade:  true,
 	}
 }
 

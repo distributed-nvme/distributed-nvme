@@ -1212,6 +1212,34 @@ func TestFlipCloneProvisionedTxnBudget(t *testing.T) {
 	}.check(t)
 }
 
+// TestMarkGroupsArrayMadeTxnBudget is the tripwire of
+// model.MarkGroupsArrayMade, the sp worker's write of the flag that a
+// group's array has run (dnv-worker.md AR15): one STM reads every parent its
+// refs name and writes every one it flags, and the refs of one call can name
+// a group of every slice and the meta group of every clone of the pool — a
+// pool whose records come from before the flag existed gets them all in its
+// first pass — which takes it past etcd's default cap.
+// model/arraymade_test.go's TestMarkGroupsArrayMadeAtTheCeiling commits this
+// shape against a real etcd.
+func TestMarkGroupsArrayMadeTxnBudget(t *testing.T) {
+	txnShape{
+		name: "MarkGroupsArrayMade",
+		stm:  "model.MarkGroupsArrayMade's STM, loadGrpHolder and bumpSpRevTo",
+		// SpConf and SpRev.
+		fixedReads: 2,
+		// SpRev.
+		fixedWrites: 1,
+		terms: []txnTerm{
+			// The Slice read and put, once for all of its groups.
+			{"slice", 2, common.MaxSliceCntPerSp, 32},
+			// The Clone read and put.
+			{"clone", 2, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 195,
+		overDefault: true,
+	}.check(t)
+}
+
 // TestStartCutoverTxnBudget is the tripwire of model.StartCutover, the sp
 // worker's cutover (dnv-worker.md RW18, MD6): it reads one record of each
 // kind it re-checks and writes two, whatever the pool's shape, so no ceiling

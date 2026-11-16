@@ -1537,8 +1537,16 @@ type Group struct {
 	// Repairs). No agent reads it, so its write raises no SpRev, and a
 	// record without it decodes as false. Appended, never renumbered.
 	OperatorInCharge bool `protobuf:"varint,10,opt,name=operator_in_charge,json=operatorInCharge,proto3" json:"operator_in_charge,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Set once the group's array has run: the sp worker sets it from a
+	// report of the primary whose row of the group reads OK, and nothing
+	// clears it (dnv-worker.md AR15). The primary never creates an array
+	// for a group that carries it (cnagent.md CN12, case 1): its legs that
+	// read no superblock were zeroed by a forced start and hold data. A
+	// record without it decodes as false, and the worker sets it at the
+	// group's first OK row. Appended, never renumbered.
+	ArrayMade     bool `protobuf:"varint,11,opt,name=array_made,json=arrayMade,proto3" json:"array_made,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Group) Reset() {
@@ -1630,6 +1638,13 @@ func (x *Group) GetForcedStart() *ForcedStart {
 func (x *Group) GetOperatorInCharge() bool {
 	if x != nil {
 		return x.OperatorInCharge
+	}
+	return false
+}
+
+func (x *Group) GetArrayMade() bool {
+	if x != nil {
+		return x.ArrayMade
 	}
 	return false
 }
@@ -16385,7 +16400,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\x12\x17\n" +
 	"\aleg_idx\x18\x02 \x01(\rR\x06legIdx\x12\"\n" +
 	"\tside_list\x18\x03 \x03(\v2\x05.SideR\bsideList\x12\x1b\n" +
-	"\terr_epoch\x18\x04 \x01(\x04R\berrEpoch\"\xd9\x02\n" +
+	"\terr_epoch\x18\x04 \x01(\x04R\berrEpoch\"\xf8\x02\n" +
 	"\x05Group\x12\x15\n" +
 	"\x06grp_id\x18\x01 \x01(\x04R\x05grpId\x12\x17\n" +
 	"\aext_cnt\x18\x02 \x01(\x04R\x06extCnt\x12\x1f\n" +
@@ -16398,7 +16413,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x13retired_leg_id_list\x18\b \x03(\x04R\x10retiredLegIdList\x12/\n" +
 	"\fforced_start\x18\t \x01(\v2\f.ForcedStartR\vforcedStart\x12,\n" +
 	"\x12operator_in_charge\x18\n" +
-	" \x01(\bR\x10operatorInChargeJ\x04\b\x06\x10\aR\x0espare_leg_list\"V\n" +
+	" \x01(\bR\x10operatorInCharge\x12\x1d\n" +
+	"\n" +
+	"array_made\x18\v \x01(\bR\tarrayMadeJ\x04\b\x06\x10\aR\x0espare_leg_list\"V\n" +
 	"\vForcedStart\x12\x15\n" +
 	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12\x14\n" +

@@ -614,9 +614,10 @@ const (
 	// addition of gateway.md, Constants this document owns, and the
 	// arithmetic tripwired against it is that section's for CreateStoragePool,
 	// DeleteThinDevice, CreateCntlr and DeleteCntlr, dnv-worker.md's for the
-	// created flip (RW19), for the cntlr replacement and the clone flip (MD6)
-	// and for the two drains — SPD13/SPD14 for the sp drain, CLD11 for the
-	// clone drain.
+	// created flip (RW19), for the cntlr replacement and the clone flip (MD6),
+	// for the write of the flag that a group's array has run (AR15) and for
+	// the two drains — SPD13/SPD14 for the sp drain, CLD11 for the clone
+	// drain.
 	//
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -712,6 +713,16 @@ const (
 	//
 	// (gateway/txnbudget_test.go's TestFlipCloneProvisionedTxnBudget; model's
 	// TestFlipCloneProvisionedAtTheCloneCeiling commits it).
+	// The write of the flag that a group's array has run is another
+	// (dnv-worker.md AR15): one STM reads and writes every Slice and Clone
+	// its refs name, with the SpConf read and SpRev, so a write over every
+	// slice and every clone of a pool, which a pool whose records come from
+	// before the flag existed gets in its first pass, commits
+	//
+	//	3 + 2 x MaxSliceCntPerSp + 2 x MaxCloneCntPerSp = 195 COMPARES
+	//
+	// (gateway/txnbudget_test.go's TestMarkGroupsArrayMadeTxnBudget; model's
+	// TestMarkGroupsArrayMadeAtTheCeiling commits it).
 	//
 	// Three transactions that read every clone of the pool stay under etcd's
 	// default: CreateClone, which also verifies and charges the DN of each
@@ -732,11 +743,12 @@ const (
 	// (gateway/txnbudget_test.go's TestReplaceCntlrTxnBudget; model's
 	// TestReplaceCntlrAtTheCeiling commits it).
 	//
-	// DeleteThinDevice stays below all six — the create, D2, the sp drain's
-	// repair and retired-leg batches (dnv-worker.md SPD15) and the two flips
-	// — whatever the td count: its deciding STM commits having
-	// read the fixed resolution and token keys, the target td and one key per
-	// subsystem and per clone of the SP, so with its three writes it is
+	// DeleteThinDevice stays below all seven — the create, D2, the sp
+	// drain's repair and retired-leg batches (dnv-worker.md SPD15), the two
+	// flips and the array_made write — whatever the td count: its deciding
+	// STM commits having read the fixed resolution and token keys, the
+	// target td and one key per subsystem and per clone of the SP, so with
+	// its three writes it is
 	// 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the ceilings
 	// (gateway/txnbudget_test.go's TestDeleteThinDeviceBudget). The
 	// walk over every td for uncreated snapshots is a read-only plan outside
@@ -759,12 +771,15 @@ const (
 	// logs a warning at start), and etcdutil.New sets the client's send limit
 	// to it (the client default is 2 MiB).
 	//
-	// It is SIZED by the provisioned flip (dnv-worker.md RW18) over every
-	// slice of a pool at the widest shape: FlipProvisioned writes each slice
-	// it touches once, in one transaction, and MaxSliceCntPerSp widest slices
-	// are about 14.5 MiB. model's TestFlipProvisionedAtTheSliceCeiling commits
-	// it; the Go test launchers pass it, and the shell suites read it from
-	// `workerctl constants`.
+	// It is SIZED by the write of the flag that a group's array has run
+	// (dnv-worker.md AR15) over every slice and every clone of a pool at the
+	// widest shape: MarkGroupsArrayMade writes each slice and clone it
+	// touches once, in one transaction, and MaxSliceCntPerSp widest slices
+	// with MaxCloneCntPerSp widest clones are about 15.1 MiB. The provisioned
+	// flip (RW18), which writes every slice alone, is about 14.9 MiB. model's
+	// TestMarkGroupsArrayMadeAtTheRequestCeiling and
+	// TestFlipProvisionedAtTheSliceCeiling commit them; the Go test launchers
+	// pass it, and the shell suites read it from `workerctl constants`.
 	EtcdMaxRequestBytes = 32 * 1024 * 1024
 	// MaxFlipCreatedPerTxn is the most candidates ONE created-flip
 	// transaction carries (dnv-worker.md RW19). model.FlipCreated

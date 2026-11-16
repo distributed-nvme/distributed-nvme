@@ -8,7 +8,8 @@ command (CM1 to CM7); the vote worker (VW1 to VW11); the shard worker (SW1 to
 SW6); the revision worker with its dn, cn and sp role files (RW1 to RW23);
 health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM7); the automatic
 reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12),
-the forced-start clear (AR13) and the record of a refused member add (AR14),
+the forced-start clear (AR13), the record of a refused member add (AR14)
+and the flag that a group's array has run (AR15),
 the sp drain (SPD1 to SPD15) and the clone
 drain (CLD1 to CLD13); the worker's log records; and the intent of the worker
 integration suite. It leans on `architecture.md` for the object model, the
@@ -94,21 +95,23 @@ a constant the block holds for the gateway
 (`gateway.md`, Constants this document owns) because the transaction it
 is sized by is `CreateStoragePool` at its widest shape, while the sp drain's
 slice batch (SPD13, SPD14), its repair and retired-leg batches (SPD15), the
-created flip's transaction (RW19) and the clone flip's (MD6) are the other
-bounded transactions it has to cover, and
+created flip's transaction (RW19), the clone flip's (MD6) and the write of
+`array_made` (AR15) are the other bounded transactions it has to cover, and
 the cntlr replacement's (MD6, AR7) and the clone drain's batch and final
 transaction (CLD11) are checked against it but fit etcd's default cap;
 `EtcdMaxRequestBytes`, the `--max-request-bytes` requirement on every etcd
-serving dnv and the etcd client's send limit (EU1), sized by the provisioned
-flip (RW18) whose sides span every slice of a pool at the widest shape —
-`MaxGrpCntPerSlice` groups in each list, `MaxAllocLegPerGrp` legs, a
-repair's name and `MaxRetiredLegPerGrp` retired-leg ids per group,
-`MaxMigrCntPerSp` legs with a migration's second side, every string at its
-bound of `architecture.md`, Common validation, every id at its widest —
-since the flip writes each slice
-it touches once, in one transaction; it is above etcd's default and above
-the request size etcd recommends, which etcd notes when it starts, and a
-unit test commits that flip against a real etcd started with it;
+serving dnv and the etcd client's send limit (EU1), sized by the write of
+`array_made` (AR15) over every slice and every clone of a pool at the
+widest shape — `MaxGrpCntPerSlice` groups in each list, `MaxAllocLegPerGrp`
+legs, a repair's name and `MaxRetiredLegPerGrp` retired-leg ids per group,
+`MaxMigrCntPerSp` legs with a migration's second side, `MaxCloneCntPerSp`
+clones of one such group each, every string at its bound of
+`architecture.md`, Common validation, every id at its widest — since the
+write puts each slice and clone it touches once, in one transaction; the
+provisioned flip (RW18), which writes every slice alone, is a little
+below it; both are above etcd's default and above the request size etcd
+recommends, which etcd notes when it starts, and a unit test commits each
+against a real etcd started with it;
 `MaxFlipCreatedPerTxn`, the most candidates one created-flip transaction
 carries (RW19); and the three role names `WorkerRoleDn`, `WorkerRoleCn` and
 `WorkerRoleSp`. One constant of this document's sits outside that region,
@@ -366,7 +369,8 @@ allocator of `architecture.md`, Finding DN candidates, and `architecture.md`,
 Finding CN candidates), `ops.go` (the internal mutations of MD6),
 `repair.go` (MD6's repair and retired-leg ops, `architecture.md`, Repair),
 `forcedstart.go` (MD6's forced-start ops, `architecture.md`, Repair),
-`drain.go` (MD6's sp-drain ops, The sp drain), `clonedrain.go` (MD6's
+`arraymade.go` (MD6's write of the flag that a group's array has run,
+AR15), `drain.go` (MD6's sp-drain ops, The sp drain), `clonedrain.go` (MD6's
 clone-drain ops, The clone drain). Unit tests are colocated.
 
 MD2. **Keys.** One function per key of `architecture.md`, Key table, one per
@@ -611,8 +615,9 @@ three epoch writes take an SP that exists with its id, at any level and
 while it is deleting, as the other epoch writes read their record whatever
 its pool's state. A clone parent being deleted is refused by every repair
 op, save the epoch writes, which accept it as their clone twins do, and
-the flip and `ClearForcedStart`, which skip it: its group goes back with
-its repair and retired legs in CLD9's transaction. A repair or a retired
+the flip, `ClearForcedStart` and `MarkGroupsArrayMade`, which skip it:
+its group goes back with its repair and retired legs in CLD9's
+transaction. A repair or a retired
 leg the pool lists whose key is missing is refused ("repair record missing", "retired leg record
 missing") by every op that reaches it through the pool's list, a lost
 invariant key (`architecture.md`, Key table), never `ReasonRepairNotFound`
@@ -924,11 +929,23 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   the repair the group names while it is CREATED or STARTED, whatever its
   abort flag says (`ReasonLegNotNamable`), the repair read through the
   pool's list as every op reads one whenever the group names one; it sets the
-  group's `forced_start` to the leg and the revision its own `SpRev` bump
-  writes,
-  replacing a mark that stands, and returns that revision. A cancel clears
+  group's `forced_start` to the leg, the force and the revision its own
+  `SpRev` bump writes, replacing a mark that stands, and returns that
+  revision. A cancel clears
   the mark and bumps `SpRev` and returns zero, and a group with no mark is
   answered with no write and no bump.
+* `MarkGroupsArrayMade` takes a list of `GrpRef`s, each a group's parent
+  and id, and no expected revision: the flag only records that the array
+  ran, which no later write of the pool makes false. It requires the
+  any-level SP checks, skips, and fails nothing, a parent or a group that
+  is gone and a clone parent `deleting`, sets `array_made` on each group
+  that does not carry it, bumps `SpRev` once when it set any, so the
+  fan-out hands every cntlr the groups with the flag, and returns how many
+  it set and the revision its bump wrote, writing nothing when it set none
+  (AR15). Its one STM reads and writes each parent once, so a write that
+  flags a group of each of `MaxSliceCntPerSp` slices and the meta group of
+  each of `MaxCloneCntPerSp` clones is past etcd's default transaction cap
+  (Constants this document owns).
 * `ClearForcedStart` takes a `ForcedStartRef` — the group's parent and id,
   and the leg and the revision of the mark the caller judged — and no
   expected revision: the worker converges on what the store holds. It
@@ -3038,7 +3055,8 @@ reactions the pass runs the three steps of the procedure Repair of
 `architecture.md` that are the worker's, a repair's stage moves (AR11), the
 retire timer (AR12) and the clear of a forced-start mark (AR13), which are
 no reactions; nor is its record of a refused member add (AR14), nor its
-latch of a clone whose copy is whole (CLD13).
+flag that a group's array has run (AR15), nor its latch of a clone whose
+copy is whole (CLD13).
 
 ### Pass, priority, suppression
 
@@ -3051,9 +3069,10 @@ and AR7's row classes attribute rows through its tds, subsystems,
 transfers and clones, and AR6 sums its tds' sizes; AR11 and AR12 read its
 repairs and retired legs),
 plus the in-memory latest `CntlrInfo` of the **primary** cntlr
-(pool usage, group rows, AR5's and AR7's rows, and the verdicts on repairs
-and the groups' whole flags and in-sync lists (`GrpInfo`) AR8, AR11, AR12
-and AR13 read, and the dm-clone rows CLD13 reads)
+(pool usage, group rows, AR5's and AR7's rows, the verdicts on repairs
+and the groups' whole flags, in-sync lists and refusals (`GrpInfo`) AR8,
+AR11, AR12, AR13 and AR14 read, the group rows AR15 reads, and the
+dm-clone rows CLD13 reads)
 with the revision of the observation it reports (`architecture.md`,
 Live-state reporting), `now` (unix seconds),
 the two records kept from an earlier pass that a pass decides by — the
@@ -3069,8 +3088,8 @@ RW14's sides-first hold), the child's info is still a standby's report — a
 leg row there is transport liveness and ANA state, not the health-block
 probe — so the pass has none: AR6 grows nothing, AR8 creates no repair,
 AR11 moves no stage, AR12 deletes no retired leg, AR13 clears no
-forced-start mark and CLD13 latches no clone, as when the primary has not
-reported yet. From the
+forced-start mark, AR14 logs no refusal, AR15 sets no flag and CLD13
+latches no clone, as when the primary has not reported yet. From the
 hand-over until the reply to the promotion, the info is still that standby
 report (Known limits, one-pass-old inputs), which holds no group row, a
 standby having no group (`cnagent.md` CN12), and no group's whole flag or
@@ -3119,11 +3138,12 @@ children log
 
 The steps of a live SP's pass run in this order: the re-seed of the health
 memos (HL3), the clone drain's steps (CLD7), the four gates, AR11's stage
-moves, AR13's forced-start clear and CLD13's latch of a whole copy at every
-`sp_level`, AR3's suppression, AR12's retire timer, and the reactions in
-AR2's priority. A latched SP runs its drain step behind the cluster-conf
-gate and neither the two steps of a repair nor the forced-start clear
-(SPD6); it holds no clone to latch, its `clone_name_list` being empty.
+moves, AR14's record of refused member adds, AR15's flag that a group's
+array has run, AR13's forced-start clear and CLD13's latch of a whole copy
+at every `sp_level`, AR3's suppression, AR12's retire timer, and the
+reactions in AR2's priority. A latched SP runs its drain step behind the
+cluster-conf gate and neither the two steps of a repair, the record, the
+flag nor the forced-start clear (SPD6); it holds no clone to latch, its `clone_name_list` being empty.
 
 AR2. **One action per SP per pass** — "action" meaning a *reaction*
 throughout this rule — evaluated in this priority; the first applicable one
@@ -3141,13 +3161,14 @@ repair's are the finish, the cancel and the try-to-abort of a worker's
 repair and the create of one (AR8). The
 invariant is **at most one applied action per SP per pass**; the clone
 drain's steps, AR11's stage moves, AR12's retire timer, AR13's
-forced-start clear and CLD13's latch of a whole copy are not actions in
-this sense and commit alongside one — a pass over a live SP can bump
-`SpRev` once per deleting clone whose final STM it commits (CLD9, CLD12), a
-batch bumping nothing (CLD8), once per stage move, once per clear, once per
-clone it latches, once for the timer's delete — which an earlier bump of
-the same pass, a stage move's, a clear's, a latch's or a clone's final
-STM's, makes refuse as stale (AR12) — and once more for its reaction. A
+forced-start clear, AR14's record, AR15's flag and CLD13's latch of a
+whole copy are not actions in this sense and commit alongside one — a pass
+over a live SP can bump `SpRev` once per deleting clone whose final STM it
+commits (CLD9, CLD12), a batch bumping nothing (CLD8), once per stage move,
+once for the flag's write, once per clear, once per clone it latches, once
+for the timer's delete — which an earlier bump of the same pass, a stage
+move's, the flag's, a clear's, a latch's or a clone's final STM's, makes
+refuse as stale (AR12) — and once more for its reaction. A
 `reaction skipped` that means "not applicable here, keep looking" does not
 end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
@@ -4008,15 +4029,16 @@ The first old leg nothing keeps is deleted, and the step ends. The delete
 carries the snapshot's `SpRev` revision as its expected revision (MD6), so
 a pool that changed since the snapshot the conditions were judged on
 refuses it, and the next pass judges again; an earlier bump of the same
-pass, a stage move's (AR11), a forced-start clear's (AR13), a clone's
-latch's (CLD13) or a clone's final STM's (CLD9), changes it too, so after one the delete is refused as
-stale and waits a pass. A refusal or a
+pass, a stage move's (AR11), the flag's write (AR15), a forced-start
+clear's (AR13), a clone's latch's (CLD13) or a clone's final STM's (CLD9),
+changes it too, so after one the delete is refused as stale and waits a
+pass. A refusal or a
 failure logs `retired leg kept` with its reason, the op's own for a
 refusal (MD7), and ends the step as well. A delete logs `retired leg
 deleted`.
 
-AR13. **Forced-start clear.** For a live SP, right after AR11's stage
-moves and before AR3's suppression — so at every `sp_level` — the pass
+AR13. **Forced-start clear.** For a live SP, right after AR15's flag
+and before AR3's suppression — so at every `sp_level` — the pass
 walks the SP's groups, the slices' in `slice_id_list` order, meta groups
 before data groups, then the clone meta groups in `clone_name_list` order,
 and clears each forced-start mark (`architecture.md`, Repair) that the
@@ -4080,6 +4102,34 @@ its data as a retired leg, or starts the group from it with a forced start
 (`architecture.md`, Repair). The record is no reaction and not the pass's
 one action (AR2).
 
+AR15. **The flag that a group's array has run.** For a live md-raid1 SP,
+right after AR14 and before AR3's suppression — so at every `sp_level` —
+the pass collects the groups of its slices, in `slice_id_list` order, meta
+groups before data groups, then the clone meta groups of the clones that
+are not deleting, in `clone_name_list` order, that do not carry
+`array_made` and whose row (`grp_id_to_md_raid`) in the current primary's
+latest report reads `RES_STATUS_OK`, and sets the flag on all of them with
+one `model.MarkGroupsArrayMade`, which raises `SpRev` once. A write logs
+`groups array made` with the groups, the primary, the revision of its
+report and the revision the op's STM committed; a write that fails logs
+`groups array made kept` with its reason, and the next pass tries again.
+Reasons: a group's row reads `OK` only while its array runs (`cnagent.md`
+CN28), and a group id is never used again, so a report of any revision
+proves that the array ran; the primary never creates an array for a group
+that carries the flag (`cnagent.md` CN12, case 1), whose legs that then
+read no superblock were zeroed by a forced start and hold data; and the
+flag rides to every cntlr in the group's parent record. A record from
+before the flag existed reads false, and the first OK row sets it. No other write
+sets the flag, the forced start's mark included: a mark the primary
+refuses, as one naming a leg with no superblock, must not keep a group
+whose array never ran from its first create (`architecture.md`, Known
+limits). The write is no reaction and not the pass's one action
+(AR2); its `SpRev` bump makes AR12's delete of the same pass wait a pass,
+as a stage move's does, and, like every bump, holds the gates that ask for
+a report of an observation at the snapshot's revision — AR6's withdrawal of
+a stuck grow, AR8's and AR12's gate on a group's row — until the primary
+reports at the new one.
+
 ### The sp drain
 
 `DeleteStoragePool` does not tear an SP down. It LATCHES it — `deleting`
@@ -4126,7 +4176,9 @@ a latched SP has exactly one future.
 
 SPD6. **Entry and cadence.** AR3 splits: a pass over an SP with `deleting`
 true runs at most ONE drain step, no reaction, neither of the two pass steps
-of a repair (AR11, AR12) and no forced-start clear (AR13), regardless of
+of a repair (AR11, AR12), no forced-start clear (AR13), no record of a
+refused member add (AR14) and no write of the flag that a group's array
+has run (AR15), regardless of
 `sp_level` suppression — "at most", because the gates ahead of the branch
 still apply: a pass whose `LoadSp` failed, or whose cluster conf is missing
 or unusable, runs nothing at all and retries on the next tick. (The SP's OWN
@@ -4310,8 +4362,9 @@ read and deleted and its one side's DN, at most `MaxDelRepPerTxn` or
 `MaxDelRetiredLegPerTxn` of them: a repair has one new leg of one side.
 D1, D3 and the latch are trivially legal. SPD14 is the tripwire pair that
 keeps it so. The D2 batch is one of the bounded transactions above etcd's
-default cap — the SPD15 batches, the created flip's transaction (RW19) and
-the clone flip's (MD6) are the others — and not the one `EtcdMaxTxnOps` is
+default cap — the SPD15 batches, the created flip's transaction (RW19),
+the clone flip's (MD6) and the write of `array_made` (AR15) are the
+others — and not the one `EtcdMaxTxnOps` is
 sized by: that is `CreateStoragePool`'s widest shape (`gateway.md`,
 Constants this document owns).
 
@@ -4534,7 +4587,8 @@ DEFAULT cap, which asks no deployment change: the requirement is
 `CreateStoragePool`'s maximum shape, which is what that number is sized by
 (`gateway.md`, Constants this document owns), the sp drain's D2 batch
 (SPD13) and its repair and retired-leg batches (SPD15), the created flip's
-transaction (RW19) and the clone flip's (MD6).
+transaction (RW19), the clone flip's (MD6) and the write of `array_made`
+(AR15).
 
 CLD13. **The worker latches a clone whose copy is whole.** For a live SP,
 right after AR13's forced-start clear and before AR3's suppression — so at
@@ -4708,7 +4762,14 @@ op's name as `op` when the op refused the delete, or its error (AR12);
 `forced start cleared` a clear of a forced-start mark whose call wrote,
 with the revision its own STM committed, and `forced start kept` a clear
 AR13 finds due and does not make, with its reason, the op's name as `op`
-when the op refused it, or its error (AR13); `clone latched` a latch of
+when the op refused it, or its error (AR13); `member add refused` a
+group whose primary refuses a `leg_list` member's add, naming the group,
+the primary, its report's revision and the refusal's text (AR14); `groups
+array made` a write of the flag that a group's array has run whose call
+wrote, naming the groups, the primary and its report's revision, with how
+many it set and the revision its own STM committed, and `groups array made
+kept` a write whose call failed, with its error (AR15); `clone latched` a
+latch of
 a clone whose copy is whole whose call wrote, naming the clone, the primary
 and its report's revision, with the revision its own STM committed, and
 `clone latch skipped` a latch CLD13 finds due and does not make, with its
@@ -4747,7 +4808,12 @@ error paths of etcd itself (quorum loss, compaction races) are out of
 scope. It runs on one server as a plain user,
 because nothing it exercises needs root: real etcd, several real workers, fake
 agents driven by a behavior file, etcd driven by a fake-gateway CLI, and
-assertions over the JSON logs.
+assertions over the JSON logs. A fake agent's report reads every group's
+row `OK`, so a pool's first pass over it sets the flag that the groups'
+arrays have run, one `SpRev` bump (AR15): a case that holds `SpRev` still
+across its steps waits for the flag on every group of its pool, the
+clones' meta groups included, before it reads its baseline, and the whole-worker cases count a cluster converged only once
+every group of an md-raid1 pool carries it.
 
 **What the Go cases prove.** Most of the worker package's Go tests drive its
 layers directly, over an in-memory store on a fake clock or over the package's
@@ -5047,7 +5113,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Seventeen records no suite case stages: `worker reg watch restarting`, `rev
+Eighteen records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -5065,10 +5131,11 @@ suite case forces that code or sets `leftover_rounds`;
 `clone latched` and `clone latch skipped`, for the reason given for CLD13
 above;
 `sp group missing`, since no suite case plants a repair or a retired leg
-whose group is missing; and `member add refused`, since no fake agent reports
-a group's refusal (AR14). `repair stage skipped` is staged only as the
-record of a refused take-back, every stage move the repair and reaction
-cases stage committing.
+whose group is missing; `member add refused`, since no fake agent reports
+a group's refusal (AR14); and `groups array made kept`, since every
+write of the flag the suite makes commits (AR15). `repair stage skipped` is
+staged only as the record of a refused take-back, every stage move the
+repair and reaction cases stage committing.
 
 Out of scope: real agents, and real hosts, whose drop of a path the discovery
 records withdraw is the e2e suite's to show (`e2e_integtest.md`, The cases);

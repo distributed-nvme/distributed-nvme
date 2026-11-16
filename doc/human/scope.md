@@ -322,15 +322,15 @@ cases below can lose data. The words of this section:
 
 The entries:
 
-- **A forced start cut short after its zeroing leaves legs that read as
-  fresh.** Silent. The forced start zeroes the md superblock of every other
-  member it keeps, except the open repair's bad leg. When the operator
-  withdraws the mark, or a zeroed member dies before its add, the zeroed
-  members look new. Once every leg of the group's list reads new while no
-  leg with a superblock is available, the primary creates an array over
-  them with no copy, and hosts read a mix of the legs' data. State: fix
-  decided, a group that once had an array never gets a new one. Seen in
-  the lab.
+- **A forced start cut short on a group that never reported its array
+  running can leave legs that read as fresh.** Silent. The worker records
+  that a group's array has run at the first report that reads the group
+  running. An array can be created and break before any report reads
+  it. When a forced start on such a group zeroes the other members and is
+  cut short, and the named leg is then lost, every leg reads new, and the
+  primary creates an array over them with no copy. Hosts read a mix of the
+  legs' data. It needs four rare events in a row. State: accepted, written
+  as a limit. Not seen in the lab.
 - **The worker deletes a retired leg that holds the newest copy.** Silent.
   The worker deletes a retired leg after seven days on a whole group. At
   the bound of two retired legs, the finish of a repair the worker started
@@ -468,6 +468,17 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   on a group that keeps the worker's repairs off it, stops it too. A lab
   fact on md's behaviour comes first. Read from the kernel's code; not
   seen in the lab.
+- **A forced start cut short after its zeroing can leave no leg to start
+  from.** The forced start zeroes the md superblock of every other member
+  it keeps, except the open repair's bad leg. When the operator withdraws
+  the mark, or a zeroed member dies before its add, the zeroed members
+  carry no superblock but still hold data. The primary does not create a
+  new array over them, since the group's array has run before, so no data
+  is lost (section 5.2 has the one case where the worker has not yet
+  recorded that the array ran); the group stays down until a leg with a superblock is back, the
+  named leg among them, which a new mark can name. If that leg is gone for
+  good, the data on the zeroed legs can be reached only by hand with mdadm.
+  State: procedure to write, the forced-start guide. Not seen in the lab.
 - **A read-only or corrupt thin pool has no repair path.** A failed commit
   leaves a slice's thin pool read-only. Corrupt thin pool metadata has no
   check and no repair flow in dnv. State: procedure to write, the repair

@@ -194,6 +194,13 @@ const (
 	msgRetiredLegKept     = "retired leg kept"
 )
 
+// The records of AR15, the flag that a group's array has run (Log records):
+// a write that set it, and a write that failed.
+const (
+	msgGroupsArrayMade     = "groups array made"
+	msgGroupsArrayMadeKept = "groups array made kept"
+)
+
 // msgMemberAddRefused is the record of a group whose reading carries the
 // primary's refusal of a leg_list member's add (dnv-worker.md AR14; Log
 // records): no step, a record for the operator.
@@ -428,6 +435,17 @@ type reactionOps interface {
 		spName string,
 		ref model.ForcedStartRef,
 	) (bool, uint64, error)
+	// markGroupsArrayMade is AR15's write (MD6's MarkGroupsArrayMade): it
+	// sets array_made on the groups refs names that do not carry it, and
+	// reports how many it set and the SpRev revision its STM committed.
+	markGroupsArrayMade(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		refs []model.GrpRef,
+	) (int, uint64, error)
 	// deleteRetiredLeg is the retire timer's delete (MD6's DeleteRetiredLeg)
 	// of the retired leg legId, which the op refuses unless the pool's
 	// SpRev still holds expectRev, the revision the pass's snapshot read.
@@ -740,6 +758,18 @@ func (o *modelReactionOps) clearForcedStart(
 	ref model.ForcedStartRef,
 ) (bool, uint64, error) {
 	return model.ClearForcedStart(ctx, o.cli, cid, shard, spId, spName, ref)
+}
+
+func (o *modelReactionOps) markGroupsArrayMade(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	refs []model.GrpRef,
+) (int, uint64, error) {
+	return model.MarkGroupsArrayMade(
+		ctx, o.cli, cid, shard, spId, spName, refs)
 }
 
 func (o *modelReactionOps) deleteRetiredLeg(
@@ -1255,6 +1285,10 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// member's add, at every sp_level, since it follows the primary's report
 	// alone; it changes nothing.
 	w.logMemberAddRefusals(ctx, p)
+	// dnv-worker.md AR15: the flag that a group's array has run, a step of
+	// the pass at every sp_level, since it only follows the primary's
+	// report; it is not the pass's one action either.
+	w.markArrayMade(ctx, p)
 	// dnv-worker.md AR13: the forced-start clear, a step of the pass at every
 	// sp_level too, since a clear only follows the primary's report and the
 	// operator force-starts a group at the levels where reactions stop; it
@@ -3038,6 +3072,75 @@ func (w *spWorker) logMemberAddRefusals(ctx context.Context, p *spPass) {
 			slog.Uint64("report_revision", p.infoRev),
 			slog.String("refusal", readings[grpId].GetRefusal()))
 	}
+}
+
+// markArrayMade is AR15: for an md-raid1 SP, the groups of its slices and
+// the clone meta groups of its clones that are not deleting, which do not
+// carry array_made yet and whose row in the current primary's latest report
+// (grp_id_to_md_raid) reads RES_STATUS_OK, get the flag in one write
+// (model.MarkGroupsArrayMade), in the order the pass walks them: the
+// slices' in slice_id_list order, meta groups before data groups, then the
+// clone meta groups in clone_name_list order. Reason: a group's row reads OK
+// only while its array runs (cnagent.md CN28), and a group id is never used
+// again, so a report of any revision proves that the group's array ran; the
+// primary never creates an array for a group that carries the flag
+// (cnagent.md CN12, case 1), since its legs that then read no superblock
+// were zeroed by a forced start and hold data. A write logs `groups array
+// made` with the groups and the revision its STM committed; a write that
+// fails logs `groups array made kept` with its reason, and the next pass
+// tries again. The write is no reaction and not the pass's one action (AR2);
+// its SpRev bump makes AR12's delete of the same pass wait a pass, as a
+// stage move's does.
+func (w *spWorker) markArrayMade(ctx context.Context, p *spPass) {
+	if p.info == nil || !isMdRaid1(p.state.Conf) {
+		return
+	}
+	rows := p.info.GetGrpIdToMdRaid()
+	var refs []model.GrpRef
+	var ids []uint64
+	due := func(grp *pb.Group, parent model.GrpParent) {
+		if grp == nil || grp.GetArrayMade() ||
+			rows[grp.GetGrpId()].GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			return
+		}
+		refs = append(refs, model.GrpRef{Parent: parent, GrpId: grp.GetGrpId()})
+		ids = append(ids, grp.GetGrpId())
+	}
+	for _, sliceId := range p.state.Conf.GetSliceIdList() {
+		slice, ok := p.state.Slices[sliceId]
+		if !ok {
+			continue
+		}
+		for _, grp := range allGroups(slice) {
+			due(grp, model.GrpParent{SliceId: sliceId})
+		}
+	}
+	for _, cloneName := range p.state.Conf.GetCloneNameList() {
+		clone, ok := p.state.Clones[cloneName]
+		if !ok || clone.GetDeleting() {
+			continue
+		}
+		due(clone.GetMetaGrp(), model.GrpParent{CloneName: cloneName})
+	}
+	if len(refs) == 0 {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.Any("grp_ids", ids),
+		slog.Uint64("cntlr_id", p.primaryId),
+		slog.Uint64("report_revision", p.infoRev),
+	}
+	set, revision, err := w.reactor().ops.markGroupsArrayMade(
+		ctx, w.cid, w.shard, w.spId, w.desired.handle, refs)
+	if err != nil {
+		w.stepFailed(ctx, msgGroupsArrayMadeKept, err, attrs...)
+		return
+	}
+	if set == 0 {
+		return
+	}
+	w.stepAppliedAt(ctx, msgGroupsArrayMade, revision,
+		withAttr(attrs, slog.Int("set", set))...)
 }
 
 // moveRepairStages is the stage move of architecture.md, Repair: each

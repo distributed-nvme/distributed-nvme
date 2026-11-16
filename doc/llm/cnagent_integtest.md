@@ -26,7 +26,8 @@ dying while md copies onto a repair's new leg, where a forced start refuses the
 half-copied leg and starts from the leg that died, a take-back refused for a
 retired leg of another identity, a forced start that drops the named leg's
 bad-block list and one refused for a named leg older than a member it would
-zero, then forced, the clone's source lost and given back, and
+zero, then forced, a group whose array has run whose legs all read blank,
+the clone's source lost and given back, and
 the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
 thinbm, clone_xfer, restart — each under pool ids of its own and each leaving
@@ -504,7 +505,12 @@ moves past leg 1's; with the arrays stopped and leg 1 back, both
 superblocks of one identity, a mark naming leg 1 is refused, the row
 naming the change count, with nothing zeroed or assembled, and the same
 mark with the operator's force zeroes the other leg and starts the array
-from leg 1; the host reads its data unchanged (`cnagent.md` CN12).
+from leg 1; the host reads its data unchanged (`cnagent.md` CN12). Before
+its teardown, with the arrays stopped, every member of the data group is
+zeroed by hand, as a forced start cut short after its zeroing leaves them,
+and the request carries the flag that the group's array has run: the
+primary creates no array over the blank legs and reads the group's row
+`ERROR` "has run before" (`cnagent.md` CN12, case 1).
 
 **teardown** proves `architecture.md`, Teardown by sweep, on a CN: a teardown
 finishes when what lies under it is gone, long gone, under load or unreachable,

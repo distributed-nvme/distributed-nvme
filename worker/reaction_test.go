@@ -124,11 +124,14 @@ func reactGroup(
 	if err != nil {
 		t.Fatalf("group blocks: %v", err)
 	}
+	// A group of a running pool: its array has run, so AR15 has nothing to
+	// write and makes no SpRev bump the other steps' tests would count.
 	grp := &pb.Group{
 		GrpId:      grpId,
 		ExtCnt:     extCnt,
 		MetaBlocks: metaBlocks,
 		DataBlocks: dataBlocks,
+		ArrayMade:  true,
 	}
 	for idx := range legIds {
 		grp.LegList = append(grp.LegList, &pb.Leg{
@@ -320,6 +323,12 @@ type fakeReactionOps struct {
 	// replaced or withdrawn since the snapshot.
 	markErr  error
 	markSkip bool
+	// arrayMade records each of AR15's writes of the flag that a group's
+	// array has run, apart from calls, since every pass over a fixture whose
+	// groups carry no flag makes one; arrayMadeErr fails the write, apart
+	// from opErr.
+	arrayMade    [][]model.GrpRef
+	arrayMadeErr error
 	// latchErr fails the latch of a whole copy (CLD13) apart from opErr,
 	// and latchSkip makes it find the clone already deleting, as
 	// model.LatchCopiedClone writes nothing for a clone latched first.
@@ -604,6 +613,24 @@ func (o *fakeReactionOps) setRepairStage(
 	}
 	o.spRev++
 	return nil
+}
+
+func (o *fakeReactionOps) markGroupsArrayMade(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	refs []model.GrpRef,
+) (int, uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.arrayMade = append(o.arrayMade, refs)
+	if o.arrayMadeErr != nil {
+		return 0, 0, o.arrayMadeErr
+	}
+	o.spRev++
+	return len(refs), o.spRev, nil
 }
 
 func (o *fakeReactionOps) clearForcedStart(

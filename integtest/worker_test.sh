@@ -68,8 +68,10 @@ ETCD_MAX_TXN_OPS=
 # common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
 # MUST run with (dnv-worker.md, Constants this document owns), read by
 # read_constants() like ETCD_MAX_TXN_OPS. The request that SIZES it is the
-# provisioned flip over every slice of a pool at the widest shape, which
-# model's TestFlipProvisionedAtTheSliceCeiling commits. No request of this
+# write of the flag that a group's array has run over every slice and every
+# clone of a pool at the widest shape, which model's
+# TestMarkGroupsArrayMadeAtTheRequestCeiling commits, a little above the
+# provisioned flip over every slice. No request of this
 # suite comes near etcd's default; the flag is passed so that every etcd this
 # tree starts gets it from the same constant.
 ETCD_MAX_REQUEST_BYTES=
@@ -1344,6 +1346,32 @@ all_provisioned() { # <sp> <slice>
 	[ "$got" = true ]
 }
 
+# all_array_made is true once every group of the slice carries array_made,
+# which the sp worker sets, raising SpRev once, at the first report of the
+# primary that reads the group's row OK (dnv-worker.md AR15): a case that
+# holds SpRev still waits for it before it reads its baseline.
+all_array_made() { # <sp> <slice>
+	local got
+	got=$(slice_json "$1" "$2" | "$JQ" -r '
+		[ (.meta_grp_list[]?, .data_grp_list[]?) | .array_made == true ]
+		| all') || return 1
+	[ "$got" = true ]
+}
+
+# sp_array_made is all_array_made over a whole pool: every group of each of
+# its slices and the clone meta group of each clone that is not deleting,
+# which the sp worker flags in the same pass (dnv-worker.md AR15). A case
+# whose pool holds a clone and that holds SpRev still waits for it.
+sp_array_made() { # <sp>
+	local got
+	got=$(ctl get-sp --sp "$1" | "$JQ" -r '
+		[ (.slices[]? | (.meta_grp_list[]?, .data_grp_list[]?)),
+		  (.clones[]? | select((.deleting // false) | not)
+		   | .meta_grp | select(. != null))
+		  | .array_made == true ] | all') || return 1
+	[ "$got" = true ]
+}
+
 td_created() { # <sp> <td name>
 	local got
 	got=$(ctl get-td --sp "$1" --name "$2" | "$JQ" -r .created) || return 1
@@ -1633,6 +1661,8 @@ case_smoke() {
 	stage 5 "the provisioned flip (RW18)"
 	wait_until "$WAIT_SHORT" "every side of slice 1 provisioned" \
 		all_provisioned sp0 1
+	wait_until "$WAIT_SHORT" "every group of slice 1 flagged array made (AR15)" \
+		all_array_made sp0 1
 	local rev
 	rev=$(sp_rev 1)
 	assert_ge "$rev" 2 "SpRev after the provisioned flip"
@@ -1996,6 +2026,8 @@ EOF
 		"slice 1: non-zero err_epochs before the injections"
 	assert_eq "$(nonzero_epochs "$(ctl get-cntlr --sp sp0)")" 0 \
 		"cntlrs: non-zero err_epochs before the injections"
+	wait_until "$WAIT_SHORT" "every group of slice 1 flagged array made (AR15)" \
+		all_array_made sp0 1
 	local sprev
 	sprev=$(sp_rev 1)
 
@@ -2221,6 +2253,10 @@ EOF
 	# exists to push, so that no stage below counts across one of its bumps.
 	wait_until "$WAIT_SYNCUP" "c0's clone meta group provisioned" \
 		clone_provisioned sp0 c0
+	# So is the flag that each group's array has run, c0's among them,
+	# whose write bumps SpRev too (dnv-worker.md AR15).
+	wait_until "$WAIT_SHORT" "every group of sp0 flagged array made (AR15)" \
+		sp_array_made sp0
 	# Hold the clone pushes back while the three chunks are seeded: the fake's
 	# chunk_id_list lever (dnv-worker.md, Integration test plan, The fake agent)
 	# forces cn0 to report exactly the pairs about to be written as already
@@ -2537,6 +2573,8 @@ case_reaction() {
 {"objects": {"cntlr 1:1": {"thin_ok": true}}}
 EOF
 	wait_until "$WAIT_SHORT" "td0 created true" td_created sp0 td0
+	wait_until "$WAIT_SHORT" "every group of slice 1 flagged array made (AR15)" \
+		all_array_made sp0 1
 	local sprev
 	sprev=$(sp_rev 1)
 	log "  SpRev after the fixture: $sprev"
@@ -4139,6 +4177,8 @@ EOF
 	# The listing rule rides the health write: the STM that sets or clears
 	# a standby's err_epoch rewrites the entry, so the two keys carry one
 	# mod_revision, and no health write bumps SpRev (HL3).
+	wait_until "$WAIT_SHORT" "every group of slice 1 flagged array made (AR15)" \
+		all_array_made sp0 1
 	local sprev reactions c2_unreach c2_recov
 	sprev=$(sp_rev 1)
 	reactions=$(reaction_any_cnt)
@@ -4683,7 +4723,12 @@ case_hold() {
 	wait_until "$WAIT_SYNCUP" "every side of slice 1 provisioned" \
 		all_provisioned sp0 1
 	# Settled before anything is timed: the fan-out of the last provisioned
-	# flip has reached both cntlrs, so no hold of the fixture's is pending.
+	# flip and of the flag's write has reached both cntlrs, so no hold of
+	# the fixture's is pending. The pass that writes the flag runs once a
+	# cntlr_interval, which is long here.
+	wait_until $((2 * ci + WAIT_SHORT)) \
+		"every group of slice 1 flagged array made (AR15)" \
+		all_array_made sp0 1
 	rev=$(sp_rev 1)
 	want_number "$rev" "sp0's SpRev once every side is provisioned"
 	wait_until $((ci + WAIT_SHORT)) "cn0: a SyncupCntlr at revision $rev" \
@@ -5274,6 +5319,10 @@ case_drain() {
 	done
 	assert_eq "$(clone_flip_cnt c0)" 2 \
 		"flip applied kind=provisioned records naming c0 (one per side)"
+	# The flag that each group's array has run, c0's among them, bumps
+	# SpRev once more (dnv-worker.md AR15).
+	wait_until "$WAIT_SHORT" "every group of sp3 flagged array made (AR15)" \
+		sp_array_made sp3
 	local rev_quiet
 	rev_quiet=$(sp_rev_num 4)
 	assert_none_for 3 "an SpRev bump of sp3 with nothing left to flip" \
@@ -5910,6 +5959,8 @@ EOF
 	sp_owner=$(owner_of sp 00)
 	[ -n "$sp_owner" ] || die "no owner for (sp, 00)"
 	log "  (sp, 00) is owned by $sp_owner"
+	wait_until "$WAIT_SHORT" "every group of slice 1 flagged array made (AR15)" \
+		all_array_made sp0 1
 	local rev
 	rev=$(sp_rev 1)
 	sig_dir "$sp_owner" KILL
@@ -5990,6 +6041,8 @@ EOF
 		req_ge 1 dn0 SyncupSide "$unprov" --arg sid 1
 	wait_until "$WAIT_SYNCUP" "dn1: sp1's side 2, provisioned false" \
 		req_ge 1 dn1 SyncupSide "$unprov" --arg sid 2
+	wait_until "$WAIT_SHORT" "every group of sp1's slice 1 flagged array made (AR15)" \
+		all_array_made sp1 1
 	local sp1_rev sp1_flips
 	sp1_rev=$(sp_rev 2)
 	sp1_flips=$(flip_records 2 | wc -l | tr -d ' ')

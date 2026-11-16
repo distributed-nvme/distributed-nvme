@@ -163,9 +163,12 @@ func startEtcdOnce(bin string) (string, func(), error) {
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		// dnv also requires --max-request-bytes=EtcdMaxRequestBytes
 		// (dnv-worker.md, Constants this document owns): the server's own
-		// default is below the provisioned flip over every slice of a pool
-		// at the widest shape, which SIZES that requirement and which THIS
-		// package commits in TestFlipProvisionedAtTheSliceCeiling.
+		// default is below the write of the flag that a group's array has
+		// run over every slice and every clone of a pool at the widest
+		// shape, which SIZES that requirement and which THIS package
+		// commits in TestMarkGroupsArrayMadeAtTheRequestCeiling, and below
+		// the provisioned flip over every slice, which it commits in
+		// TestFlipProvisionedAtTheSliceCeiling.
 		"--max-request-bytes", strconv.Itoa(common.EtcdMaxRequestBytes),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

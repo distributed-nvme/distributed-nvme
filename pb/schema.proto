@@ -182,6 +182,14 @@ message Group {
     // Repairs). No agent reads it, so its write raises no SpRev, and a
     // record without it decodes as false. Appended, never renumbered.
     bool operator_in_charge = 10;
+    // Set once the group's array has run: the sp worker sets it from a
+    // report of the primary whose row of the group reads OK, and nothing
+    // clears it (dnv-worker.md AR15). The primary never creates an array
+    // for a group that carries it (cnagent.md CN12, case 1): its legs that
+    // read no superblock were zeroed by a forced start and hold data. A
+    // record without it decodes as false, and the worker sets it at the
+    // group's first OK row. Appended, never renumbered.
+    bool array_made = 11;
 }
 
 // The mark of a forced start (Group.forced_start): the leg the primary

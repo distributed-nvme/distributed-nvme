@@ -118,9 +118,11 @@ or written per DN costs one compare per DN of the widest shape. Other
 bounded transactions exceed etcd's default too without sizing this number:
 the sp drain's D2 batch (`dnv-worker.md` SPD13), its repair and retired-leg
 batches (`dnv-worker.md` SPD15), the created flip's transaction
-(`dnv-worker.md` RW19) and the clone flip's, whose one STM reads and writes
-every clone its sides belong to (`dnv-worker.md` MD6); each of the five is
-held to its count by a test pair like the create's.
+(`dnv-worker.md` RW19), the clone flip's, whose one STM reads and writes
+every clone its sides belong to (`dnv-worker.md` MD6), and the worker's
+write of the flag that a group's array has run, whose one STM reads and
+writes every slice and clone its groups belong to (`dnv-worker.md` AR15);
+each of the six is held to its count by a test pair like the create's.
 `CreateClone`, which also charges its clone meta group's DNs, and
 `UpdateStoragePoolCntlidSlotList` read every clone of the SP and stay under
 etcd's default; so do
@@ -131,7 +133,8 @@ at most the one parent record of its group, never a walk of the slices or
 the clones, at most one repair, at most the group's retired legs, which
 `MaxRetiredLegPerGrp` bounds, and at most one DN.
 Each of these is held to its count by a tripwire. `DeleteThinDevice` stays below
-all six — the create, the D2 batch, the two SPD15 batches and the two flips
+all seven — the create, the D2 batch, the two SPD15 batches, the two flips
+and the flag's write
 — whatever the td count: its deciding STM commits having read no td but its
 target, because the walk for uncreated snapshots is a read-only plan outside
 it, verified by the pool's identity and revision (Thin devices). The clone
@@ -1427,8 +1430,8 @@ retired legs still answer.
   `DeleteClone`. Outside any STM, `checkGrpArrayDown` reads the
   primary's report (Agent calls). Last `model.ForceStartGroup` with the
   group's parent, the leg, the cancel flag and the force, which writes the
-  mark, the force in it, with the
-  revision its own bump commits and re-checks the token, the pool, the
+  mark, the force in it, with the revision its own bump commits, and
+  re-checks the token, the pool, the
   group and the leg in its STM; its `model.ReasonLegNotNamable`, a leg a
   write took away after the planning read, is answered
   `FAILED_PRECONDITION` in the gateway's words (`modelReason`). A cancel

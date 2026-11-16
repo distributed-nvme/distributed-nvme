@@ -1420,7 +1420,20 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 	}
 	state := c.load(t)
 	conv.spRev = state.SpRevision
+	raid1 := isMdRaid1(state.Conf)
+	deleting := make(map[uint64]bool)
+	for _, name := range state.Conf.GetCloneNameList() {
+		if clone := state.Clones[name]; clone.GetDeleting() {
+			deleting[clone.GetMetaGrp().GetGrpId()] = true
+		}
+	}
 	for _, grp := range poolGrps(state) {
+		if raid1 && !grp.GetArrayMade() && !deleting[grp.GetGrpId()] {
+			// AR15's write of the flag raises SpRev once, at the first
+			// report that reads the group's row OK; a deleting clone's
+			// group gets none.
+			note("group %d: array_made not set", grp.GetGrpId())
+		}
 		for _, leg := range grp.GetLegList() {
 			if leg.GetErrEpoch() != 0 {
 				note("leg %d: err_epoch %d", leg.GetLegId(), leg.GetErrEpoch())
@@ -1485,7 +1498,8 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 // key holds, with the planted content (a dn's side list and a cn's cntlr list
 // as their records hold them, a side provisioned, a cntlr in the role its
 // record gives it); every side is provisioned, the thin device created, the
-// primary settled (HL2), and no health epoch is set; and after that every
+// primary settled (HL2), every group of an md-raid1 pool flagged as one whose
+// array has run (AR15), and no health epoch is set; and after that every
 // object's fake gets two more check rounds and no syncup, so the rounds
 // answer the revision the worker wants (RW4 step 5).
 func (c *stdCluster) waitConverged(t *testing.T) convergence {

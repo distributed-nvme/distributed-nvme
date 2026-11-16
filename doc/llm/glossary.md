@@ -16,6 +16,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **anti-affinity, tier 1, tier 2** — The allocator's rule that one scan keeps at most one candidate per location, so the legs one allocation round places never share a failure domain. An operation that adds to existing placements excludes their locations at tier 1 and rescans without the exclusion at tier 2 when tier 1 yields fewer candidates than it must place, so the new placement may share a domain already held.
 
+**array made** — The flag that an md-raid1 group's array has run, `Group.array_made`. The sp worker sets it, in one write over every group due, from the first report of the primary that reads the group's row `OK`, since a row reads `OK` only while the array runs and a group id is never used again; nothing clears it, and no other write sets it. The primary never creates an array for a group that carries it: a member of such a group that reads no superblock was zeroed by a forced start and holds data (see `dnv-worker.md` AR15; `cnagent.md` CN12, case 1).
+
 **applied set** — The bitmap chunks an agent reports as held for a migration or a clone (`bm_idx_list` for a migration, `chunk_id_list` for a clone), derived from the chunk files present in its local store, save those `dnagent.md` SH21 names. The worker pushes the clone chunks etcd holds, and the migration pieces its side child read and holds, that the applied set lacks (see `dnv-worker.md` BM2, BM7).
 
 **attach, detach** — Kubernetes' binding of a volume to one node, and its undo, through the CSI driver's controller plugin, which sets the volume's subsystem's allowed hosts to that node's host NQN alone, and empties them (see `csi.md` CSI10).

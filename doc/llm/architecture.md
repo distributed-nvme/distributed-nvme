@@ -281,6 +281,11 @@ always means the SP's `DmPoolConf.data_block_size`.
   repair of the group, and auto-grow from withdrawing a stuck grow of it
   (`dnv-worker.md` AR6), while it stands (Repairs,
   `UpdateGroupOperatorInCharge`).
+* **array made** — The flag that an md-raid1 group's array has run,
+  `Group.array_made`: the sp worker sets it from the first report of the
+  primary that reads the group's row `OK` (`dnv-worker.md` AR15), and
+  nothing clears it. The primary never creates an array for a group
+  that carries it ("Make sure all groups are available").
 * **shard code** — A uint32 below `ShardBucketSize`, formatted with
   `ShardCodeFmt`. Every DN, CN and SP gets one at creation; workers and the
   cdc split ownership by shard code.
@@ -383,12 +388,12 @@ their values:
   `CreateStoragePool` (Storage pools, Components: invocation reference;
   `gateway.md`, Constants this document owns) and pinned by a test;
   `EtcdMaxRequestBytes` is the `--max-request-bytes` every etcd serving
-  dnv must be started with, sized by the widest provisioned flip and
-  pinned by a test (`dnv-worker.md`, Constants this document owns);
-  the sp drain's batches, the created flip's transaction and the clone
-  flip's are bounded transactions over etcd's default `--max-txn-ops` too
-  (`gateway.md`, Constants this document owns; `dnv-worker.md` SPD13,
-  SPD15, RW19, MD6). `MaxDelGrpPerTxn` is the groups one sp
+  dnv must be started with, sized by the worker's widest write of
+  `array_made` and pinned by a test (`dnv-worker.md`, Constants this document owns);
+  the sp drain's batches, the created flip's transaction, the clone
+  flip's and the worker's write of `array_made` are bounded transactions
+  over etcd's default `--max-txn-ops` too (`gateway.md`, Constants this
+  document owns; `dnv-worker.md` SPD13, SPD15, RW19, MD6, AR15). `MaxDelGrpPerTxn` is the groups one sp
   drain batch removes (`dnv-worker.md` SPD10), `MaxDelRepPerTxn` and
   `MaxDelRetiredLegPerTxn` the repairs and the retired legs one batch of
   its repair and retired-leg phases removes (`dnv-worker.md` SPD15),
@@ -5258,10 +5263,15 @@ can see IO errors until the old primary applies its demotion or is stopped.
 
 The primary builds each `RedundMdRaid1` group from the legs that are
 available to it: it creates the array only when every leg of the group is
-available and none carries an md superblock — a leg without one is a
-freshly provisioned side, whose meta region Side provisioning protocol has
-zeroed, short of a member an operator's forced start zeroed that the member
-reconciliation has not added back yet (Known limits); a read of a
+available, none carries an md superblock and the group's array has never
+run (`Group.array_made`, which the sp worker sets once the primary reports
+the group's row `OK`) — a
+leg without a superblock in a group whose array
+never ran is a freshly provisioned side, whose meta region Side
+provisioning protocol has zeroed, while in a group whose array ran it is a
+member an operator's forced start zeroed and the member reconciliation has
+not added back yet, which holds data, so the group waits instead (Known
+limits); a read of a
 member's superblock that fails is no answer and refuses the create
 (`cnagent.md` CN12, The superblock read), the superblock check
 being the evidence the CN actually has ([D15]) — and otherwise assembles
@@ -5776,8 +5786,8 @@ carries the operator's force, and with it md copies the leg whole (What the
 primary does).
 
 **Forced start.** `ForceStartGroup` writes the group's forced-start mark,
-the leg it names and the `SpRev` revision its write committed, in the
-group's record, so the fan-out hands it to every cntlr; a new primary after
+the leg it names, the operator's force and the `SpRev` revision its write
+committed, in the group's record, so the fan-out hands it to every cntlr; a new primary after
 a failover or a cntlr replacement acts on it as it finds its own node, which
 holds no array of the group until that primary builds one (Known limits). A
 primary acts on a mark only from a request that counts as delivered
@@ -7131,8 +7141,9 @@ document and only pointed to here.
   leg's, which the worker reads whole and which fails once it passes
   `GrpcMaxMsgSize`, a leg of more than `MaxMigrBmCnt` times
   `MigrBmPieceBytes` bytes of bitmap (`dnv-worker.md` BM7).
-  One etcd request grows with the slices it writes, the widest a
-  provisioned flip over every slice, which sizes `EtcdMaxRequestBytes`
+  One etcd request grows with the slices and clones it writes; the widest,
+  the worker's write of `array_made` over every slice and clone, a little
+  above a provisioned flip over every slice, sizes `EtcdMaxRequestBytes`
   (`dnv-worker.md`, Constants this document owns).
 * **No measurement backs the IO queue cap's default.** Every
   path to a subsystem holds one TCP connection per IO queue, and an agent
@@ -7517,19 +7528,30 @@ document and only pointed to here.
   bitmap only while the array has stayed degraded since the member left;
   when the array has been whole since, md copies a retired leg that a
   repair takes back as it copies a fresh leg (Repair).
-* **A forced start that ends after its zero can leave legs that read as
-  fresh.** The forced start zeroes the superblock of every other member it
-  keeps before it assembles the array (Repair, Forced start), and nothing
-  but the add that follows marks such a member as one that holds data: its
-  data region stays as it was. When the mark goes before a start, as by the
-  operator's cancel, or a zeroed member dies before its add and comes back
-  while the array does not run, the primary reads that member as a freshly
-  provisioned side ("Make sure all groups are available"). Once every
-  `leg_list` leg of the group reads so, as when its other leg is one an
-  earlier forced start zeroed and that was never added back, while no leg
-  that carries a superblock is available, the primary creates the array
-  over them with no copy, and the array serves a mix of their data with no
-  error (`cnagent.md` CN12).
+* **A forced start that ends after its zero can leave the group with no
+  leg to start from.** The forced start zeroes the superblock of every
+  other member it keeps before it assembles the array (Repair, Forced
+  start), and nothing but the add that follows marks such a member as one
+  that holds data: its data region stays as it was. When the mark goes
+  before a start, as by the operator's cancel, or a zeroed member dies
+  before its add, the zeroed members read as carrying no superblock. The
+  primary creates no array over them, since the group's array has run
+  (`Group.array_made`; "Make sure all groups are available"), and the group
+  waits for a leg with a superblock, the named leg among them, which a new
+  mark can name. When that leg is gone for good, no call starts the group:
+  its data is on the zeroed legs, reachable only by hand with mdadm, by a
+  create with the group's own options from one of them (`cnagent.md` CN12).
+  The flag comes from the first report that reads the group's row `OK`
+  (`dnv-worker.md` AR15), not from the mark: a group whose array was
+  created and broke before any report read it running carries no flag, so
+  after a forced start cut short there, with the named leg gone, its
+  zeroed members read as fresh legs and the primary creates an array over
+  them with no copy, and hosts read a mix of the legs' data. That needs a
+  create, a break before the first report, a forced start cut short and
+  the loss of the named leg, so it is left. A mark that set the flag would
+  close it, and would keep a group whose array never ran from its first
+  create for good once a mark the primary refused, as one naming a leg
+  with no superblock, had been written on it.
 * **After a forced start, a leg of the old identity can keep the group
   down at the next assembly.** A forced start from another leg leaves the
   open repair's bad leg with the array's old identity (Repair, Forced

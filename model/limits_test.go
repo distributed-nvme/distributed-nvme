@@ -488,6 +488,111 @@ func shapeOf(slices []*pb.Slice) sliceShape {
 	return shape
 }
 
+// TestMarkGroupsArrayMadeAtTheRequestCeiling commits the widest etcd request
+// dnv makes, the one that SIZES EtcdMaxRequestBytes (dnv-worker.md,
+// Constants this document owns): the write of the flag that a group's array
+// has run (dnv-worker.md AR15) over MaxSliceCntPerSp widest slices and the
+// meta groups of MaxCloneCntPerSp widest clones, which writes every slice and
+// every clone of the pool in one transaction, the provisioned flip's slices
+// and the clones beside them. Like the flip's test it runs on an etcd of its
+// own (newPrivateTestClient). The builder gives every group of a slice the
+// same widest id, so one ref per slice flags one group and writes the whole
+// slice, as a ref per group would.
+func TestMarkGroupsArrayMadeAtTheRequestCeiling(t *testing.T) {
+	cli := newPrivateTestClient(t)
+	cid := testCid(t)
+	ctx := context.Background()
+	const shard = uint32(7)
+	const spId = uint64(math.MaxUint64)
+	const spName = "sp"
+
+	b := newWidestBuilder(t, 0)
+	slices := make([]*pb.Slice, common.MaxSliceCntPerSp)
+	for i := range slices {
+		slices[i] = &pb.Slice{}
+		b.build(slices[i])
+	}
+	withMigrationSides(slices)
+	var refs []GrpRef
+	var keys []string
+	payload := 0
+	for i, slice := range slices {
+		sliceId := math.MaxUint64 - uint64(i)
+		for _, grp := range append(slice.GetMetaGrpList(),
+			slice.GetDataGrpList()...) {
+			grp.ArrayMade = false
+		}
+		refs = append(refs, GrpRef{
+			Parent: GrpParent{SliceId: sliceId},
+			GrpId:  slice.GetMetaGrpList()[0].GetGrpId(),
+		})
+		key := SliceKey(cid, spId, sliceId)
+		keys = append(keys, key)
+		payload += len(key) + proto.Size(slice)
+		mustPut(t, cli, key, slice)
+	}
+	slicePayload := payload
+	for i := range common.MaxCloneCntPerSp {
+		clone := &pb.Clone{}
+		b.build(clone)
+		clone.Deleting = false
+		clone.GetMetaGrp().ArrayMade = false
+		name := fmt.Sprintf("%0*d", common.MaxStrSize, i)
+		refs = append(refs, GrpRef{
+			Parent: GrpParent{CloneName: name},
+			GrpId:  clone.GetMetaGrp().GetGrpId(),
+		})
+		key := CloneKey(cid, spId, name)
+		keys = append(keys, key)
+		payload += len(key) + proto.Size(clone)
+		mustPut(t, cli, key, clone)
+	}
+	mustPut(t, cli, SpConfKey(cid, spName), &pb.SpConf{SpId: spId})
+	mustPut(t, cli, SpRevKey(shard, cid, spId), &pb.SpRev{
+		SpName: spName, Revision: 1,
+	})
+	// The fixture stays a reproduction: the records it writes are above the
+	// slices alone, which the provisioned flip writes, and, with an eighth
+	// more for the rest of the request, within EtcdMaxRequestBytes.
+	t.Logf("the write carries %s, the slices alone %s", mib(payload),
+		mib(slicePayload))
+	if payload <= slicePayload ||
+		payload+payload/8 > common.EtcdMaxRequestBytes {
+		t.Fatalf("the records are %s: they must be above the slices' %s "+
+			"and, with an eighth more for the rest of the request, within "+
+			"EtcdMaxRequestBytes %s", mib(payload), mib(slicePayload),
+			mib(common.EtcdMaxRequestBytes))
+	}
+
+	set, revision, err := MarkGroupsArrayMade(ctx, cli, cid, shard, spId,
+		spName, refs)
+	if err != nil {
+		t.Fatalf("MarkGroupsArrayMade over %d widest slices and %d widest "+
+			"clones: %v (\"trying to send message larger than max\" is the "+
+			"client's send limit, \"request is too large\" or \"received "+
+			"message larger than max\" etcd's --max-request-bytes)",
+			len(slices), common.MaxCloneCntPerSp, err)
+	}
+	if set != len(refs) || revision == 0 {
+		t.Errorf("set %d groups at revision %d, want all %d and a bump",
+			set, revision, len(refs))
+	}
+	// One transaction wrote every record: they share one mod revision.
+	var first int64
+	for i, key := range keys {
+		kvs, _, err := cli.RangeKeys(ctx, key)
+		if err != nil || len(kvs) != 1 {
+			t.Fatalf("RangeKeys %q: %d keys, %v", key, len(kvs), err)
+		}
+		if i == 0 {
+			first = kvs[0].ModRev
+		} else if kvs[0].ModRev != first {
+			t.Errorf("%q at mod revision %d, want %d: the write took more "+
+				"than one transaction", key, kvs[0].ModRev, first)
+		}
+	}
+}
+
 // widestPoolShape is the shape of a pool's slices at the limits: every slice
 // of MaxSliceCntPerSp holds MaxGrpCntPerSlice groups in each of its two
 // lists, every group MaxAllocLegPerGrp legs of one side each, and
@@ -649,9 +754,10 @@ func checkWidestMessages(t *testing.T, b *widestBuilder) {
 	}
 }
 
-// TestFlipProvisionedAtTheSliceCeiling commits the transaction that SIZES
-// EtcdMaxRequestBytes (dnv-worker.md, Constants this document owns): the
-// provisioned flip (dnv-worker.md RW18) of one side in each of
+// TestFlipProvisionedAtTheSliceCeiling commits the second widest etcd
+// request, a little below the one that SIZES EtcdMaxRequestBytes
+// (TestMarkGroupsArrayMadeAtTheRequestCeiling; dnv-worker.md, Constants this
+// document owns): the provisioned flip (dnv-worker.md RW18) of one side in each of
 // MaxSliceCntPerSp widest slices, which writes every slice of the pool in one
 // transaction. It needs both halves of the requirement: the test etcd's
 // --max-request-bytes and the client's send limit, which etcdutil.New sets
