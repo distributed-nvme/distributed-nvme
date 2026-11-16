@@ -93,8 +93,9 @@ through viper (Components: invocation reference):
   `force` false hydration checks of `DeleteClone` and `FinishMigration`
   (Clones, Migrations), behind `ForceStartGroup`'s check that the
   group's array does not run (Repairs) and behind `GetThinDeviceBitmap`'s
-  check that the volume's namespaces are parked, and `GetThinDeviceBm` for
-  that read (Bitmap reads). The worker never calls `Get*Info`: it watches through
+  check that the volume's namespaces are parked, `GetThinDeviceBm` for
+  that read (Bitmap reads), and `GetCntlrInfo` and `InspectGrp` behind
+  `InspectGroup` (Repairs). The worker never calls `Get*Info`: it watches through
   `Check*` (Check streams, dn / cn roles). `gateway.md` owns it.
 * `dnv-worker` is one binary with the roles `dn`, `cn` and `sp`, any subset
   per instance. It watches the revision keys in etcd, shards the work by
@@ -1472,7 +1473,8 @@ transaction for its cluster and then one per pool, which take the cluster
 id the first one derived (Clusters). Network calls to agents (`GetDnSize` and
 `GetCnSize`, the `Get*Info` behind `Inspect*`, behind the `force` false
 hydration checks of Clones and Migrations and behind `ForceStartGroup`'s
-check of the group's array (Repairs), the bitmap reads) must happen
+check of the group's array (Repairs), the bitmap reads, the inspect of a
+group) must happen
 **outside** the STM, before or after it; when such a call needs
 `cluster_id`, a plain pre-read of `ClusterConf` provides it and the in-STM
 read stays authoritative.
@@ -3819,6 +3821,44 @@ so its next pass sees the flag with no fan-out; the flag still rides to the
 cntlrs in its group's record at the pool's next bump, unread, and a token a
 caller holds stays valid across the flag's writes. Reply `grp_id`.
 
+**InspectGroup** — inputs `grp_id`, and `leg_id` and `force` for the dry
+run: a read-only look at an md-raid1 group's members through its primary,
+for an operator choosing the leg of a forced start. It takes no token and
+runs at every `sp_level` and on a pool being deleted, as a read does.
+Errors: `INVALID_ARGUMENT` when the pool is `RedundNone`; `NOT_FOUND`
+when `grp_id` is in no group of the pool's slices or clones;
+`FAILED_PRECONDITION` when the pool has no primary cntlr; `ABORTED` when
+the primary's agent does not answer, refuses the read or does not end it
+within the call's time (`cnagent.md` CN31). The gateway reads the group's
+legs, its open repair's new legs, its retired legs and the pool's
+revision from the records, then asks the primary's agent for its latest
+report (`GetCntlrInfo`) and for its read of the members (`InspectGrp`).
+Reply, per member the group keeps, each leg of its `leg_list` and each
+new leg of its open repair: the agent's read — whether the leg serves,
+its md superblock read (identity, change count, role, copy position,
+bad-block count) or why there is none, and md's state and slot for it in
+the group's array — with the leg's disk node and its and its side's health
+epochs from the records and its row from the primary's report; a leg the
+records hold and the request the primary holds does not yet is listed
+with no read; the array's state; the retired legs' ids, which no cntlr
+connects, so none is read; the report's stamp; the revision of the request
+the primary holds and the pool's revision, so a reader sees a request
+still on its way; and, with `leg_id`, the dry run: what a forced start
+from that leg would do, with `force` as `ForceStartGroup`'s force — the
+first refusal `ForceStartGroup` would make (a pool being deleted, the
+level, a clone being deleted, the leg, the partial mark among the leg's,
+the group's row in the report reading `OK` or absent), else the agent's
+dry run, its refusal word for word the real start's, or the members it
+would zero, in order, the assembly's update and whether it stops an array
+that does not run first (`cnagent.md` CN12, CN31). Nothing is written and
+no mdadm command runs. Reasons: the choice of a forced start's leg rests
+on the members' superblocks, which no row shows, and the dry run runs the
+start's own checks, so what it says is what the start does with the node
+and the request as they are at the read, save that a leg the converge
+would connect first reads as not serving, so the dry run says the start
+waits for it; it recommends no leg, since the choice weighs what the
+operator knows of the outage.
+
 **GetRepair** — STM read of the `Repair` named; `NOT_FOUND` for a name not
 in `repair_name_list`, and a listed name whose key is missing is `ABORTED`
 (Key table). Reply `rep_name` and the `Repair`.
@@ -4084,8 +4124,9 @@ its pad bits in the middle of the chunk and shift every later bit. So
   The exact reply fields are listed per RPC under `service DiskNodeAgent` and
   `service ControllerNodeAgent`. `PushMigrBitmapReply` and
   `PushCloneBitmapReply` carry only `AgentReply`; `GetDnSize`, `GetCnSize`,
-  `GetThinDeviceBm` and `GetLegBm` return only their payload (`size`,
-  `bitmap`) and report failure through the gRPC status. A worker issues the
+  `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` return only their payload
+  (`size`, `bitmap`, the members' reads) and report failure through the
+  gRPC status. A worker issues the
   `Syncup*` calls for one object sequentially — the next revision only after
   the previous call returned.
 * **Error capture.** Shell execution uses the command timeouts (Common
@@ -4210,6 +4251,11 @@ its pad bits in the middle of the chunk and shift every later bit. So
   leg-projected pool mapping bitmap; `GetLegBm` first suspends and resumes
   the pool's thin devices that have writes in flight (`cnagent.md` CN27). Reply bitmaps use the
   wire convention **1 = unmapped**.
+* `InspectGrp` serves the gateway's `InspectGroup` (Repairs): on the
+  primary, for each member an md-raid1 group keeps, whether the leg serves,
+  its md superblock read and md's view of it, the array's state, and, with
+  a leg, the dry run of a forced start from it (`cnagent.md` CN31). It
+  runs no mdadm command and writes nothing.
 * `CheckCn` and `CheckCntlr` are the health streams, one per CN or per
   cntlr, with the protocol of Check streams. Request: the ids, `revision`,
   `show_info` and `trace_id` (the sending round's id); reply:
@@ -5855,7 +5901,10 @@ history, of another identity: the primary refuses its add unless the repair
 carries the operator's force, and with it md copies the leg whole (What the
 primary does).
 
-**Forced start.** `ForceStartGroup` writes the group's forced-start mark,
+**Forced start.** The operator chooses the leg with `InspectGroup`, which
+shows what the primary reads from each member and, from a named leg, what
+the start would do (Repairs). `ForceStartGroup` writes the group's
+forced-start mark,
 the leg it names, the operator's force and the `SpRev` revision its write
 committed, in the group's record, so the fan-out hands it to every cntlr; a new primary after
 a failover or a cntlr replacement acts on it as it finds its own node, which

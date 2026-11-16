@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1005,4 +1006,168 @@ func TestForceStartGroupCarriesTheForce(t *testing.T) {
 		t.Fatalf("a cancel with force: %v, want INVALID_ARGUMENT", err)
 	}
 	env.wantNoWrite("a cancel with force", dump)
+}
+
+// TestInspectGroup pins InspectGroup (architecture.md, Repairs): it asks the
+// primary's agent for the group's members with the request's leg and force,
+// adds each leg's disk node and health epochs from the records and its row
+// from the primary's report, lists the retired legs, passes the agent's dry
+// run through, carries the gateway's own refusal of the leg in the dry run
+// in its place, and writes nothing.
+func TestInspectGroup(t *testing.T) {
+	env := newVolEnv(t)
+	agent := fsPrimary(env)
+	agent.setInfo(nil, nil, nil, &pb.CntlrInfo{
+		GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+			volDataGrpId: {Status: pb.ResStatus_RES_STATUS_ERROR},
+		},
+		LegIdToLeg: map[uint64]*pb.ResInfo{
+			volDataLegA: {Status: pb.ResStatus_RES_STATUS_OK},
+		},
+	})
+	agent.mu.Lock()
+	agent.inspectGrp = &pb.InspectGrpReply{
+		ArrayState: "broken",
+		MemberList: []*pb.InspectedMember{
+			{LegId: volDataLegA, Kind: "leg", Available: true,
+				HasSuperblock: true, Uuid: "u", Events: 9},
+		},
+		DryRun: &pb.ForcedStartDryRun{
+			ZeroLegIdList: []uint64{volDataLegB}, Update: "uuid",
+		},
+	}
+	agent.mu.Unlock()
+	repPutRetired(env, volDataGrpId, 900, volSide(901, volDnC), 11)
+	before := env.dump()
+	reply, err := env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
+		ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
+		LegId: volDataLegA, Force: true,
+	})
+	if err != nil {
+		t.Fatalf("InspectGroup: %v", err)
+	}
+	env.wantNoWrite("InspectGroup", before)
+	agent.mu.Lock()
+	reqs := agent.inspectReqs
+	agent.mu.Unlock()
+	if len(reqs) != 1 || reqs[0].GetGrpId() != volDataGrpId ||
+		reqs[0].GetLegId() != volDataLegA || !reqs[0].GetForce() {
+		t.Fatalf("InspectGrp requests %v, want the group, leg and force",
+			reqs)
+	}
+	if reply.GetArrayState() != "broken" || len(reply.GetLegList()) != 2 {
+		t.Fatalf("reply %v, want the agent's array and both legs", reply)
+	}
+	leg := reply.GetLegList()[0]
+	if leg.GetMember().GetUuid() != "u" || leg.GetAddrPort() == "" ||
+		leg.GetRow().GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("leg %v, want the agent's read, its disk node and its row",
+			leg)
+	}
+	// Leg B, which the agent's held request does not name, is listed from
+	// the records with no read.
+	if m := reply.GetLegList()[1].GetMember(); m.GetLegId() != volDataLegB ||
+		m.GetReadError() != notInRequest {
+		t.Errorf("leg B reads %v, want it listed as not in the request", m)
+	}
+	if reply.GetAppliedRevision() == 0 || reply.GetSpRevision() == 0 {
+		t.Errorf("revisions applied %d, pool %d, want both",
+			reply.GetAppliedRevision(), reply.GetSpRevision())
+	}
+	if got := reply.GetRetiredLegIdList(); len(got) != 1 || got[0] != 900 {
+		t.Errorf("retired legs %v, want [900]", got)
+	}
+	if dry := reply.GetDryRun(); dry.GetRefusal() != "" ||
+		len(dry.GetZeroLegIdList()) != 1 {
+		t.Errorf("dry run %v, want the agent's", dry)
+	}
+
+	// A leg the forced start may not name: the gateway's own refusal
+	// stands in the dry run.
+	reply, err = env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
+		ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
+		LegId: 999999,
+	})
+	if err != nil {
+		t.Fatalf("InspectGroup of an unknown leg: %v", err)
+	}
+	if dry := reply.GetDryRun(); !strings.HasPrefix(dry.GetRefusal(),
+		"leg 999999 is neither in the leg_list") ||
+		len(dry.GetZeroLegIdList()) != 0 || dry.GetStopsArray() {
+		t.Errorf("dry run %v, want the gateway's refusal of the leg in its "+
+			"own words", dry)
+	}
+
+	// The primary's report reads the group's row OK: the dry run carries
+	// ForceStartGroup's refusal of an array that runs.
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_OK)
+	reply, err = env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
+		ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
+		LegId: volDataLegA,
+	})
+	if err != nil {
+		t.Fatalf("InspectGroup over a running array: %v", err)
+	}
+	if dry := reply.GetDryRun(); !strings.Contains(dry.GetRefusal(),
+		"reads its row RES_STATUS_OK") {
+		t.Errorf("dry run %v, want the refusal of an array that runs", dry)
+	}
+
+	// The level that builds no group array: ForceStartGroup's level gate.
+	conf := env.spConf()
+	conf.SpLevel = pb.SpLevel_SP_LEVEL_NO_REDUND
+	mustPut(env.t, env.cli, model.SpConfKey(env.cid, volSpName), conf)
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
+	reply, err = env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
+		ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
+		LegId: volDataLegA,
+	})
+	if err != nil {
+		t.Fatalf("InspectGroup at the level with no group array: %v", err)
+	}
+	if dry := reply.GetDryRun(); !strings.Contains(dry.GetRefusal(),
+		"where no group array is built") {
+		t.Errorf("dry run %v, want the level's refusal", dry)
+	}
+}
+
+// TestInspectGroupListsAnOpenRepairsNewLeg pins the legs InspectGroup lists
+// (architecture.md, Repairs): the new leg of the group's repair is listed
+// after the leg_list legs while the repair is CREATED or STARTED, and not
+// once it is ABORTED, when it is no member of the group.
+func TestInspectGroupListsAnOpenRepairsNewLeg(t *testing.T) {
+	for _, tc := range []struct {
+		stage  pb.RepStage
+		listed bool
+	}{
+		{pb.RepStage_REP_STAGE_CREATED, true},
+		{pb.RepStage_REP_STAGE_STARTED, true},
+		{pb.RepStage_REP_STAGE_ABORTED, false},
+	} {
+		t.Run(tc.stage.String(), func(t *testing.T) {
+			env := newVolEnv(t)
+			fsPrimary(env)
+			repPutRepair(env, "rep-i", volDataGrpId, volDataLegB, tc.stage,
+				801, volSide(802, volDnC))
+			reply, err := env.srv.InspectGroup(env.ctx,
+				&pb.InspectGroupRequest{
+					ClusterName: env.cluster, SpName: volSpName,
+					GrpId: volDataGrpId,
+				})
+			if err != nil {
+				t.Fatalf("InspectGroup: %v", err)
+			}
+			var ids []uint64
+			for _, leg := range reply.GetLegList() {
+				ids = append(ids, leg.GetMember().GetLegId())
+			}
+			want := []uint64{volDataLegA, volDataLegB}
+			if tc.listed {
+				want = append(want, 801)
+			}
+			if !slices.Equal(ids, want) {
+				t.Errorf("legs %v, want %v", ids, want)
+			}
+		})
+	}
 }

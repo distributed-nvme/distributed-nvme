@@ -270,7 +270,9 @@ is the gateway's idempotent no-write (`gateway.md` GW6), not a flip back, so
 the leaf is safe to script. An inspect RPC is an `inspect` leaf
 (`sp inspect-side` for a side), a read the gateway answers from the agent
 that hosts the object, out of that agent's latest observation of it, not
-from etcd. The bitmap RPCs are `get-bm` and `append-bm`;
+from etcd; `group inspect` is the one whose agent reads the group's
+members then and there, beside the records' view (`architecture.md`,
+Repairs). The bitmap RPCs are `get-bm` and `append-bm`;
 every other leaf keeps its RPC's verb (`cluster advance-ids`,
 `cluster get-capacity`, `sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
 `group force-start`), save one: `repair abort` is `TryToAbortRepair`, the
@@ -649,6 +651,15 @@ delete leaf's do, and the help says what a start from an older copy
 restores. The mark is a field of the group record, so `sp get`
 shows a slice group's mark as stored and `clone get` a clone meta group's
 (CT4); what ends a mark is `architecture.md`, Repair.
+
+`group inspect` sends `InspectGroup`, a read with no token: the group's
+primary reads each member the group keeps, its md superblock and md's view
+of it, and the reply adds each leg's row and health (`architecture.md`,
+Repairs). With `--leg` it is the dry run of `group force-start` from that
+leg, `--force` as that leaf's: the reply says what the start would do, or
+the refusal it would meet, and nothing runs. The dry run is this leaf and
+not a `--dry-run` of `group force-start`, since a leaf sends one RPC
+(CT1). dnvctl checks nothing (CT8).
 
 `group set-operator-in-charge` sends `UpdateGroupOperatorInCharge`, which
 sets or clears the group's operator-in-charge flag, the operator's take-over

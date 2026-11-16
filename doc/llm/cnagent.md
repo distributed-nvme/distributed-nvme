@@ -224,7 +224,8 @@ and probe helpers (`ensureDmSingle`, `ensureDmError`, `ensureDmLinear`,
 stays in `clone.go`); `thinbm.go` the thin-metadata snapshot reader
 behind `GetThinDeviceBm` and `GetLegBm` (CN25 to CN27) and the
 clone-geometry fold of `architecture.md`, raid0 bitmap math;
-`bitmapread.go` those two RPC entry points; `check.go` the check rounds;
+`bitmapread.go` those two RPC entry points; `inspect.go` the `InspectGrp`
+entry point (CN31); `check.go` the check rounds;
 `observation.go` what the check rounds and the info reads answer from,
 the background reads and the converge marks, as the cn holds them
 (`dnagent.md` SH28 to SH30); `probe.go` the probes. Package boundaries
@@ -250,8 +251,8 @@ marks (`dnagent.md` SH30); and the CN10 disconnect registry, all in
 memory only, never persisted. Three more in-memory-only
 fields of a cntlr's state sit outside that mutex, touched only under the
 cntlr's object lock or the node write lock: the marks of CN14's
-activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`) and
-`reqFromRpc`, which says whether the request this process holds counts
+activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`), CN12's acted marks
+(`forcedStarts`) and `reqFromRpc`, which says whether the request this process holds counts
 as delivered (CN8, CN12, CN14). Each state's request is an atomic
 pointer, stored and loaded without that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
@@ -267,7 +268,7 @@ lock is held across OS calls but the `LockSet`'s own.
 CN1. Lock mapping (instantiates `dnagent.md` SH10 to SH13): `SyncupCn` and the startup
 reconcile — node write; `SyncupCntlr`, `PushCloneBitmap`, one background
 read of a cntlr (`dnagent.md` SH29), one background connect-retry
-attempt, `GetThinDeviceBm` and `GetLegBm` — node
+attempt, `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` — node
 read plus that cntlr's object lock (key = the cluster, cn, sp and cntlr
 ids); one background read of a CN — node read; `GetCnSize`, `GetCnInfo`,
 `GetCntlrInfo` and one `CheckCn` or `CheckCntlr` round — no lock, since
@@ -3765,6 +3766,46 @@ the cntlr's next converge and fails the read. The worker reads again
 later, and gives a leg's bitmap up after a few refused reads
 (`dnv-worker.md` BM7). A meta-group leg reads no snapshot and drains
 nothing.
+
+### `InspectGrp` — `inspect.go`
+
+CN31. `InspectGrp`: the primary's look at one md-raid1 group's members,
+for an operator choosing the leg of a forced start (`architecture.md`,
+Repairs, `InspectGroup`). It answers only a cntlr whose held request makes
+it the primary. It holds the node read lock and the cntlr's object lock,
+as `GetLegBm` does, only while it reads the plan of the held request, the
+group's array and which legs serve, so no converge changes them under that
+read; the superblock reads and the dry run run after the locks are let
+go, in a goroutine the call waits for until its deadline, the call
+answering `DEADLINE_EXCEEDED` when a read does not end by then. Reason: a
+read of a member whose disk node stalls can block without limit, and a
+lock held through it would wedge every converge and read of the node; a
+read that outlives the call ends on its own, its answer dropped. For every
+member the group keeps — each leg of its `leg_list`, the repair's bad leg
+named as such, then each new leg of its repair while the repair is open,
+since an ABORTED repair's new legs are no members of the group — it
+reports whether the leg serves, by the read path's test (`legServes`),
+which builds nothing, so a leg the converge would connect first reads as
+not serving; the leg's superblock read (The superblock read, CN12) when it
+serves, its error otherwise; and md's state and slot for the leg in the
+group's array that is there. It reports the array's state, none when no
+array of the group is there, and the read's error when that read fails,
+the members being read all the same. With a leg in the request it also
+runs the forced start's checks (CN12, the forced start) on a mark of its
+own naming that leg, with the operator's force when the request sets it,
+and reports what the start would do: an array of the group that runs, or
+a read of the array that failed, is the refusal, as the primary leaves a
+mark waiting over a running array and the read's error ends the real
+start; an array that is there and does not run is stopped first, so the
+reply says so, unless it holds a member that is no leg wrapper of this
+pool, which the real start refuses to stop (`MdDetail.strangerErr`), word
+for word; then the start's checks, whose first that does not hold is the
+refusal, word for word the real start's, or else the members it would
+zero, in order, and the assembly's update. The real start and this dry run
+run one function (`planForcedStart`), so a broken check fails the tests of
+both. It runs no mdadm command and writes nothing, the mark of its own
+included, which no request carries and nothing keeps. It recommends no
+leg.
 
 ### Probing and error capture — `probe.go`
 

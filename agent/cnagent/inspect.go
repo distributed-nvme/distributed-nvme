@@ -1,0 +1,261 @@
+package cnagent
+
+import (
+	"context"
+	"fmt"
+	"slices"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/distributed-nvme/distributed-nvme/pb"
+)
+
+// The member kinds InspectGrp names (InspectedMember.kind).
+const (
+	inspectKindLeg    = "leg"
+	inspectKindBadLeg = "bad leg"
+	inspectKindNewLeg = "new leg"
+)
+
+// InspectGrp is cnagent.md CN31, the inspect of one md-raid1 group on the
+// primary: for every member the group keeps — its leg_list legs and the new
+// legs of its open repair — whether the leg serves, its superblock read
+// (Md.ReadMember, the read every md decision of CN12 takes) and md's view of
+// it in the group's array that is there; and, with a leg in the request,
+// what CN12's forced start from that leg would do (planForcedStart), with no
+// mdadm command and no write.
+//
+// It holds the node read lock and the cntlr's object lock, as GetLegBm
+// does, only while it reads the cntlr's plan, the array and which legs
+// serve; the superblock reads and the dry run's run after the locks are
+// let go, in a goroutine the call waits for until its own deadline. Reason:
+// a read of a member whose disk node stalls can block without limit, and a
+// lock held through it would wedge every converge and read of the node
+// behind it; a read that outlives the call ends on its own, its answer
+// dropped. A converge between the two halves can change the node, so the
+// reply is a look at the node at about the time of the call, as every read
+// is. It reads and reports nothing else: the gateway adds the records' and
+// the report's view (gateway.md, Repairs and retired legs).
+func (s *CnAgentServer) InspectGrp(
+	ctx context.Context,
+	req *pb.InspectGrpRequest,
+) (*pb.InspectGrpReply, error) {
+	look, err := s.inspectLook(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	done := make(chan *pb.InspectGrpReply, 1)
+	go func() {
+		done <- s.inspectRead(ctx, look, req.GetLegId(), req.GetForce())
+	}()
+	select {
+	case reply := <-done:
+		return reply, nil
+	case <-ctx.Done():
+		return nil, status.Errorf(codes.DeadlineExceeded,
+			"reading the members of group %d did not end: %v",
+			req.GetGrpId(), ctx.Err())
+	}
+}
+
+// inspectLook is what InspectGrp reads under the locks: the cntlr's plan of
+// the group, the group's array, the error of a read of the array that
+// failed, and the legs that serve.
+type inspectLook struct {
+	plan      *cntlrPlan
+	gp        *grpPlan
+	detail    *MdDetail
+	detailErr error
+	serves    map[uint64]bool
+}
+
+// inspectLook takes InspectGrp's locked half (InspectGrp).
+func (s *CnAgentServer) inspectLook(
+	ctx context.Context,
+	req *pb.InspectGrpRequest,
+) (*inspectLook, error) {
+	s.locks.Node().RLock()
+	defer s.locks.Node().RUnlock()
+	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
+		req.GetSpId(), req.GetCntlrId())
+	if s.getCntlr(key) == nil {
+		return nil, status.Errorf(codes.Internal,
+			"unknown cntlr (sp %d, cntlr %d)",
+			req.GetSpId(), req.GetCntlrId())
+	}
+	objLock := s.locks.Obj(key)
+	objLock.Lock()
+	defer objLock.Unlock()
+
+	plan, err := s.primaryPlanFor(req.GetClusterId(), req.GetCnId(),
+		req.GetSpId(), req.GetCntlrId())
+	if err != nil {
+		return nil, err
+	}
+	gp := plan.grpById[req.GetGrpId()]
+	if gp == nil {
+		return nil, status.Errorf(codes.Internal,
+			"unknown group %d", req.GetGrpId())
+	}
+	if !gp.raid1 {
+		return nil, status.Errorf(codes.Internal,
+			"group %d is not md-raid1: it has no array", gp.grpId)
+	}
+	look := &inspectLook{
+		plan:   plan,
+		gp:     gp,
+		detail: &MdDetail{},
+		serves: make(map[uint64]bool),
+	}
+	plan.walk = s.newPassWalk(ctx)
+	plan.mdWalks = &mdWalkOnce{md: s.md}
+	walk, err := plan.mdWalks.get(ctx)
+	if err == nil {
+		look.detail, err = s.md.Detail(ctx, walk, gp.memberNames())
+	}
+	if err != nil {
+		// The members are read all the same: their superblocks do not
+		// depend on the array, which only an operator may have to sort out.
+		look.detail, look.detailErr = &MdDetail{}, err
+	}
+	for _, lp := range inspectedLegs(gp) {
+		look.serves[lp.legId] = !lp.provisioning && s.legServes(ctx, plan, lp)
+	}
+	return look, nil
+}
+
+// inspectedLegs are the members InspectGrp reads: the group's leg_list
+// legs, then the new legs of its repair while the repair is open; an
+// ABORTED repair's new legs are no members of the group.
+func inspectedLegs(gp *grpPlan) []*legPlan {
+	legs := append([]*legPlan(nil), gp.legs...)
+	if gp.rep != nil && gp.rep.open() {
+		legs = append(legs, gp.rep.newLegs...)
+	}
+	return legs
+}
+
+// inspectRead is InspectGrp's unlocked half: each member's read and, with a
+// leg, the dry run.
+func (s *CnAgentServer) inspectRead(
+	ctx context.Context,
+	look *inspectLook,
+	legId uint64,
+	force bool,
+) *pb.InspectGrpReply {
+	reply := &pb.InspectGrpReply{}
+	var held map[string]MdMember
+	switch {
+	case look.detailErr != nil:
+		reply.ArrayState = "not read: " + look.detailErr.Error()
+	case look.detail.Exists:
+		reply.ArrayState = look.detail.State
+		held = heldMembers(look.detail)
+	}
+	for _, lp := range inspectedLegs(look.gp) {
+		reply.MemberList = append(reply.MemberList,
+			s.inspectMember(ctx, look, lp, held))
+	}
+	if legId != 0 {
+		reply.DryRun = s.forcedStartDryRun(ctx, look, legId, force)
+	}
+	return reply
+}
+
+// inspectMember is one member of InspectGrp: whether its leg serves
+// (legServes, the read path's test, which builds nothing), its superblock
+// read when it does, and md's state and slot for it in the array held.
+func (s *CnAgentServer) inspectMember(
+	ctx context.Context,
+	look *inspectLook,
+	lp *legPlan,
+	held map[string]MdMember,
+) *pb.InspectedMember {
+	gp := look.gp
+	member := &pb.InspectedMember{LegId: lp.legId, Kind: inspectKindLeg}
+	switch {
+	case !slices.Contains(gp.legs, lp):
+		member.Kind = inspectKindNewLeg
+	case gp.isBadLeg(lp.legId):
+		member.Kind = inspectKindBadLeg
+	}
+	if md, ok := held[lp.name]; ok {
+		member.MdState = md.State
+		member.MdSlot = md.Slot
+	}
+	switch {
+	case lp.provisioning:
+		member.ReadError = "not read: the leg is still provisioning"
+		return member
+	case !look.serves[lp.legId]:
+		member.ReadError = "not read: the leg does not serve"
+		return member
+	}
+	member.Available = true
+	reading := s.md.ReadMember(ctx, lp.path)
+	if reading.Err != nil {
+		member.ReadError = reading.Err.Error()
+		return member
+	}
+	if sb := reading.Sb; sb != nil {
+		member.HasSuperblock = true
+		member.Uuid = sb.Uuid
+		member.Events = sb.Events
+		member.Role = mdRoleText(sb.Role)
+		member.Recovering = sb.Recovering
+		member.RecoveryOffset = sb.RecoveryOffset
+		member.BadBlocks = uint32(sb.BadBlocks)
+	}
+	return member
+}
+
+// forcedStartDryRun is InspectGrp's dry run: what CN12's forced start would
+// do from a mark naming legId, with the operator's force when force is set,
+// from the same checks the real start runs (forcedStartPass,
+// planForcedStart) on a mark of the call's own, which no request carries
+// and nothing keeps. An array of the group that runs is the refusal, since
+// the primary leaves a mark waiting while it runs (grpPlan.markWaits); one
+// that is there and does not run is stopped first (forcedStartPass), unless
+// it holds a member that is no leg wrapper of this pool, which the real
+// start refuses to stop (MdDetail.strangerErr); a read of the array that
+// failed is the refusal, as it is the real start's error (markedErr).
+func (s *CnAgentServer) forcedStartDryRun(
+	ctx context.Context,
+	look *inspectLook,
+	legId uint64,
+	force bool,
+) *pb.ForcedStartDryRun {
+	gp, detail, plan := look.gp, look.detail, look.plan
+	dry := &pb.ForcedStartDryRun{}
+	switch {
+	case look.detailErr != nil:
+		dry.Refusal = look.detailErr.Error()
+		return dry
+	case detail.Exists && mdRunning(detail.State):
+		dry.Refusal = fmt.Sprintf("the array of group %#x runs (%s): the "+
+			"primary leaves a mark waiting while it runs", gp.grpId,
+			detail.State)
+		return dry
+	case detail.Exists:
+		if err := detail.strangerErr(
+			plan.clusterId, plan.cnId, plan.spId); err != nil {
+			dry.Refusal = err.Error()
+			return dry
+		}
+		dry.StopsArray = true
+	}
+	gp.mark = &pb.ForcedStart{LegId: legId, Force: force}
+	fp, err := s.planForcedStart(ctx, gp, look.serves)
+	if err != nil {
+		// The real start stops the array before these checks
+		// (forcedStartPass), so stops_array stands beside the refusal.
+		dry.Refusal = err.Error()
+		return dry
+	}
+	for _, lp := range fp.zero {
+		dry.ZeroLegIdList = append(dry.ZeroLegIdList, lp.legId)
+	}
+	dry.Update = fp.update()
+	return dry
+}

@@ -25,7 +25,8 @@ agents only for `GetDnSize` and `GetCnSize`, the `Get*Info` behind its
 `Inspect*` RPCs, behind the `force` false hydration checks of
 `DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s check
 of the group's array and behind `GetThinDeviceBitmap`'s check of the
-parks, and the `GetThinDeviceBm` bitmap read (Agent calls). It is
+parks, the `GetThinDeviceBm` bitmap read, and the `InspectGrp` read behind
+`InspectGroup` (Agent calls). It is
 one of the three co-located control-plane processes — gateway, worker,
 cdc — that any number of control-plane servers may run.
 This document covers `gateway/` and `cmd/dnv-gateway` only: `dnvctl` is a
@@ -89,9 +90,10 @@ authoritative for their comments.
 gateway's agent RPCs — `GetDnSize` and `GetCnSize`, the `Get*Info` behind
 `Inspect*`, behind the `force` false checks of `DeleteClone` and
 `FinishMigration`, behind `ForceStartGroup`'s check of the group's
-array and behind `GetThinDeviceBitmap`'s check of the parks, and the
-`GetThinDeviceBm` bitmap read — applied as a timeout around each
-dial and call (AG2). It equals `DefaultEtcdOpTimeout`, so a hung agent and
+array and behind `GetThinDeviceBitmap`'s check of the parks, the
+`GetThinDeviceBm` bitmap read, and the `GetCntlrInfo` and `InspectGrp`
+behind `InspectGroup` — applied as a timeout around each dial and its
+calls (AG2), so `InspectGroup`'s two calls share one budget. It equals `DefaultEtcdOpTimeout`, so a hung agent and
 a hung etcd bound an RPC alike.
 
 `CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk and the
@@ -1373,8 +1375,8 @@ reasons `model` exports for them, `model.ReasonRepairExists`,
 `mapModelErr` (`modelReason`) with the code and the words the gateway's own
 check of the same refusal gives. `ForceStartGroup` alone reads an agent
 between its planning read and its op (Agent calls).
-The three reads open with `openSpRead`, so a deleting pool's repairs and
-retired legs still answer.
+The three reads and `InspectGroup` open with `openSpRead`, so a deleting
+pool's repairs, retired legs and groups still answer.
 
 * **CreateRepair** — the pure checks first (GW4): `rep_name` by the common
   name rule and without the reserved prefix, `common.RepNameReservedPrefix`,
@@ -1464,6 +1466,27 @@ retired legs still answer.
   conf gate, then `model.DeleteRetiredLeg`, which gives the side back through
   the drains' DN ledger with one `BumpDnRev`;
   `model.ReasonRetiredLegNotFound` is `NOT_FOUND`. Reply `leg_id`.
+* **InspectGroup** — read-only. The pure checks (GW4): the names. One
+  snapshot behind `openSpRead`, with no token and no deleting gate, makes
+  the refusals of `architecture.md`, Repairs, in its order: a `RedundNone`
+  pool, the group through `locateGrp`; then reads the group's legs, its
+  open repair's new legs (`grpRepair`), its retired legs and the pool's
+  `SpRev`; with a leg in the request, it makes `ForceStartGroup`'s
+  planning refusals of a write from that leg — the pool being deleted,
+  the level, a clone being deleted, `forceStartLegChecks` — keeping the
+  first for the reply instead of failing the call (`forceStartRefusal`);
+  and it finds the primary and its CN (`grpPrimaryTarget`), a pool with
+  none being `FAILED_PRECONDITION`. Then one connection to the primary's
+  agent: `GetCntlrInfo`, for each leg's row, the report's stamp and the
+  revision of the request the agent holds, and `InspectGrp` (`cnagent.md`
+  CN31), with the request's leg and force; a transport failure or an
+  agent's error is `ABORTED`. Reply each leg of the records with the
+  agent's read of it, or with no read when the agent's held request does
+  not name it yet, its disk node and health epochs and its row; the
+  array's state; the retired legs' ids; the stamp; both revisions; and
+  the dry run: the first planning refusal, else `ForceStartGroup`'s
+  judgement of the group's row (`grpRowRefusal`), else the agent's, each
+  refusal in the gateway's own words. Nothing is written.
 * **UpdateRetiredLegKeep** — DeleteRetiredLeg's planning read with no conf
   gate, then `model.SetRetiredLegKeep` with the request's value, which
   re-checks the token, the pool, the leg and its group and clone in its
@@ -1571,6 +1594,7 @@ The complete call matrix:
 | `DeleteClone` with `force` false | `GetCntlrInfo` | between the STMs |
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
+| `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
 
 No other `service Gateway` RPC leaves etcd — the matrix is complete.

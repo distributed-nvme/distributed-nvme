@@ -1802,6 +1802,51 @@ message UpdateRetiredLegKeepReply {
     uint64 leg_id = 1;
 }
 
+message InspectGroupRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    uint64 grp_id = 3;
+    // With a leg id, the reply says what a forced start from that leg would
+    // do (the dry run), with the operator's force when force is set.
+    uint64 leg_id = 4;
+    bool force = 5;
+}
+
+// One leg of a group as InspectGroup shows it: the primary's read of the
+// member, and what etcd and the primary's latest report say of the leg.
+message InspectedLeg {
+    InspectedMember member = 1;
+    // The disk node of the leg's side, and the leg's and that side's health
+    // epochs, from the pool's records.
+    string addr_port = 2;
+    uint64 leg_err_epoch = 3;
+    uint64 side_err_epoch = 4;
+    // The leg's row in the primary's latest report, absent when the report
+    // holds none.
+    ResInfo row = 5;
+}
+
+message InspectGroupReply {
+    uint64 grp_id = 1;
+    // The primary cntlr the gateway asked.
+    uint64 cntlr_id = 2;
+    string array_state = 3;
+    repeated InspectedLeg leg_list = 4;
+    // The group's retired legs, which no cntlr connects: their records'
+    // leg ids, with no read.
+    repeated uint64 retired_leg_id_list = 5;
+    // Set only when the request names a leg.
+    ForcedStartDryRun dry_run = 6;
+    // The stamp of the primary's report the rows come from.
+    ObsStamp obs_stamp = 7;
+    // The revision of the request the primary holds, which its members and
+    // the dry run are read from, and the pool's revision at the gateway's
+    // read: below it, a newer request is on its way, which the start acts
+    // on.
+    uint64 applied_revision = 8;
+    uint64 sp_revision = 9;
+}
+
 message GetThinDeviceBitmapRequest {
     string cluster_name = 1;
     string sp_name = 2;
@@ -1895,6 +1940,7 @@ service Gateway {
     rpc ForceStartGroup(ForceStartGroupRequest) returns (ForceStartGroupReply) {}
     rpc UpdateGroupOperatorInCharge(UpdateGroupOperatorInChargeRequest) returns (UpdateGroupOperatorInChargeReply) {}
     rpc UpdateRetiredLegKeep(UpdateRetiredLegKeepRequest) returns (UpdateRetiredLegKeepReply) {}
+    rpc InspectGroup(InspectGroupRequest) returns (InspectGroupReply) {}
 
     rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns (GetThinDeviceBitmapReply) {}
 }
@@ -2199,6 +2245,74 @@ message GetLegBmReply {
     bytes bitmap = 1;
 }
 
+// One member of a group as the primary reads it for InspectGrp (cnagent.md
+// CN12, the superblock read): a leg of the group's leg_list or a new leg of
+// its repair.
+message InspectedMember {
+    uint64 leg_id = 1;
+    // "leg", "bad leg" (a leg of leg_list that is the repair's bad leg) or
+    // "new leg".
+    string kind = 2;
+    // The leg serves by the read path's test, which builds nothing: every
+    // controller of its subsystem known, a namespace and a live, optimized
+    // path; so its superblock is read. A leg the converge would connect
+    // first reads false.
+    bool available = 3;
+    // Why the superblock read did not answer, or why no read was made: ""
+    // when it answered.
+    string read_error = 4;
+    // The superblock read's answer: has_superblock false is a member with no
+    // md superblock; the rest describe the one it found.
+    bool has_superblock = 5;
+    string uuid = 6;
+    uint64 events = 7;
+    // md's role of the member: a place number, "spare" or "faulty".
+    string role = 8;
+    bool recovering = 9;
+    uint64 recovery_offset = 10;
+    uint32 bad_blocks = 11;
+    // md's view of the member in the group's array that is there: its
+    // state words and its slot, both "" when md holds no member on the leg.
+    string md_state = 12;
+    string md_slot = 13;
+}
+
+// What CN12's forced start would do from a mark naming one leg, with no
+// mdadm command run (cnagent.md CN12, InspectGrp).
+message ForcedStartDryRun {
+    // Why the start would not run, "" when it would.
+    string refusal = 1;
+    // The members it would zero, in order.
+    repeated uint64 zero_leg_id_list = 2;
+    // The assembly's update: "uuid", or "uuid,force-no-bbl" when the named
+    // leg carries a bad-block list.
+    string update = 3;
+    // An array of the group is there and does not run, so the start stops
+    // it first, before the checks a refusal may come from; false when the
+    // gateway's own refusal stands, as no mark would be written.
+    bool stops_array = 4;
+}
+
+message InspectGrpRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    uint64 sp_id = 3;
+    uint64 cntlr_id = 4;
+    uint64 grp_id = 5;
+    // With a leg id, the reply also says what a forced start from that leg
+    // would do, with the operator's force when force is set.
+    uint64 leg_id = 6;
+    bool force = 7;
+}
+
+message InspectGrpReply {
+    // The state of the group's array that is there, "" when there is none.
+    string array_state = 1;
+    repeated InspectedMember member_list = 2;
+    // Set only when the request names a leg.
+    ForcedStartDryRun dry_run = 3;
+}
+
 message CheckCnRequest {
     uint64 cluster_id = 1;
     uint64 cn_id = 2;
@@ -2241,6 +2355,7 @@ service ControllerNodeAgent {
     rpc GetCntlrInfo(GetCntlrInfoRequest) returns (GetCntlrInfoReply) {}
     rpc GetThinDeviceBm(GetThinDeviceBmRequest) returns (GetThinDeviceBmReply) {}
     rpc GetLegBm(GetLegBmRequest) returns (GetLegBmReply) {}
+    rpc InspectGrp(InspectGrpRequest) returns (InspectGrpReply) {}
     rpc CheckCn(stream CheckCnRequest) returns (stream CheckCnReply) {}
     rpc CheckCntlr(stream CheckCntlrRequest) returns (stream CheckCntlrReply) {}
 }

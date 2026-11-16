@@ -218,6 +218,7 @@ var commands = []command{
 	{"check-cntlr", cmdCheckCntlr},
 	{"get-td-bm", cmdGetTdBm},
 	{"get-leg-bm", cmdGetLegBm},
+	{"inspect-grp", cmdInspectGrp},
 	{"wait-hydrated", cmdWaitHydrated},
 	{"md-name", cmdMdName},
 	{"host-id", cmdHostId},
@@ -630,6 +631,42 @@ func cmdGetLegBm(args []string) {
 		die("GetLegBm failed: %v", err)
 	}
 	emitBitmap(reply.GetBitmap())
+}
+
+// cmdInspectGrp reads a group's members through the primary (InspectGrp,
+// cnagent.md), with the forced start's dry run from --leg when it is given,
+// and prints the reply as JSON.
+func cmdInspectGrp(args []string) {
+	var g globals
+	fs := newFlagSet("inspect-grp", &g)
+	sp, cntlr := cntlrPointerFlags(fs)
+	var grp, leg hexUint
+	fs.Var(&grp, "grp", "group id")
+	fs.Var(&leg, "leg", "the dry run's named leg (optional)")
+	force := fs.Bool("force", false, "the dry run with the force")
+	fs.Parse(args)
+
+	conn, client, err := g.dial()
+	if err != nil {
+		die("%v", err)
+	}
+	defer conn.Close()
+	ctx, cancel := g.rpcCtx()
+	defer cancel()
+
+	reply, err := client.InspectGrp(ctx, &pb.InspectGrpRequest{
+		ClusterId: uint64(g.cluster),
+		CnId:      uint64(g.cn),
+		SpId:      uint64(*sp),
+		CntlrId:   uint64(*cntlr),
+		GrpId:     uint64(grp),
+		LegId:     uint64(leg),
+		Force:     *force,
+	})
+	if err != nil {
+		die("InspectGrp failed: %v", err)
+	}
+	emit(reply)
 }
 
 // cloneSample reads one hydration sample out of the details of a clone's

@@ -209,6 +209,30 @@ func setupKeepRetiredLeg(fs *flag.FlagSet) job {
 	}
 }
 
+// setupInspectGrp drives InspectGroup. --grp is the group's grp_id; --leg,
+// when given, asks for the forced start's dry run from that leg, with
+// --force as the forced start's force.
+func setupInspectGrp(fs *flag.FlagSet) job {
+	spName := fs.String("sp", "", "sp_name")
+	var grp, leg hexUint
+	fs.Var(&grp, "grp", "grp_id of the group")
+	fs.Var(&leg, "leg", "leg_id of the dry run's named leg (optional)")
+	force := fs.Bool("force", false, "the dry run with the force")
+	return func(
+		ctx context.Context,
+		client pb.GatewayClient,
+		g *globals,
+	) (any, error) {
+		return client.InspectGroup(ctx, &pb.InspectGroupRequest{
+			ClusterName: g.cluster,
+			SpName:      *spName,
+			GrpId:       uint64(grp),
+			LegId:       uint64(leg),
+			Force:       *force,
+		})
+	}
+}
+
 // setupForceStartGrp drives ForceStartGroup. --grp is the group's grp_id and
 // --leg the leg its array starts from; --cancel withdraws the group's mark
 // instead and is sent with --leg as typed, so the suite can send a leg with

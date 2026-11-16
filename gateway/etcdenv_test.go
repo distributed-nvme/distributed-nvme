@@ -484,6 +484,10 @@ type fakeAgent struct {
 	// from its latest observation (architecture.md, Live-state reporting),
 	// and every Inspect* reply passes the stamp on with its age.
 	stamp *pb.ObsStamp
+	// inspectGrp is the reply every InspectGrp call gets, and inspectReqs
+	// every InspectGrp request, in call order.
+	inspectGrp  *pb.InspectGrpReply
+	inspectReqs []*pb.InspectGrpRequest
 }
 
 // enter is what every fake method runs first: it records the call and the T3
@@ -711,6 +715,22 @@ func (f *fakeCnServer) GetCntlrInfo(
 		CntlrInfo:  f.agent.cntlrInfo,
 		ObsStamp:   f.agent.stamp,
 	}, nil
+}
+
+func (f *fakeCnServer) InspectGrp(
+	ctx context.Context,
+	req *pb.InspectGrpRequest,
+) (*pb.InspectGrpReply, error) {
+	if err := f.agent.enter(ctx, "InspectGrp"); err != nil {
+		return nil, err
+	}
+	f.agent.mu.Lock()
+	defer f.agent.mu.Unlock()
+	f.agent.inspectReqs = append(f.agent.inspectReqs, req)
+	if f.agent.inspectGrp == nil {
+		return &pb.InspectGrpReply{}, nil
+	}
+	return f.agent.inspectGrp, nil
 }
 
 func (f *fakeCnServer) GetThinDeviceBm(

@@ -1126,6 +1126,12 @@ func (g *fakeGateway) UpdateGroupOperatorInCharge(
 	return serve[*pb.UpdateGroupOperatorInChargeReply](g, ctx, "UpdateGroupOperatorInCharge", req)
 }
 
+func (g *fakeGateway) InspectGroup(
+	ctx context.Context, req *pb.InspectGroupRequest,
+) (*pb.InspectGroupReply, error) {
+	return serve[*pb.InspectGroupReply](g, ctx, "InspectGroup", req)
+}
+
 func (g *fakeGateway) UpdateRetiredLegKeep(
 	ctx context.Context, req *pb.UpdateRetiredLegKeepRequest,
 ) (*pb.UpdateRetiredLegKeepReply, error) {

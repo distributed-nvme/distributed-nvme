@@ -5398,6 +5398,26 @@ repair_forced_start() {
 	# CN12); a converge before that starts the array and leaves Z to the
 	# late-member retry.
 	leg_wait_not_error 2 "$sp" "$c2" "$yleg" 30 "repair forced: Y's probe"
+	# The inspect and its dry run (cnagent.md CN31) say what the
+	# start below does, running no mdadm command: Z zeroed under the uuid
+	# update. Y's read matches md's own examine of it.
+	out=$(cnctl 2 inspect-grp --sp "$sp" --cntlr "$c2" --grp "$A_DGRP" \
+		--leg "$yleg")
+	log "  the inspect: $out"
+	assert_eq "$(jq_of "$out" '.dry_run.refusal // ""')" "" \
+		"repair forced: the dry run's refusal"
+	assert_eq "$(jq_of "$out" '(.dry_run.zero_leg_id_list // []) | join(",")')" \
+		"$(d16 "$zleg")" "repair forced: the dry run's zeroed legs"
+	assert_eq "$(jq_of "$out" '.dry_run.update // ""')" uuid \
+		"repair forced: the dry run's update"
+	uuy=${exy#* uuid=}
+	uuy=${uuy%% *}
+	assert_eq "$(jq_of "$out" "[.member_list[] | select(.leg_id == \"$(d16 "$yleg")\")
+		| \"\(.uuid) \(.events)\"][0]")" "$uuy ${exy##*events=}" \
+		"repair forced: the inspect's read of Y against md's examine"
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
+		"repair forced: mdadm commands of the inspect"
 	for f in "$req1" "$req2"; do mark_set "$f" "$yleg"; done
 	bump_cn_rev 2
 	rev2=${CNREV[2]}

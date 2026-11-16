@@ -85,6 +85,7 @@ const (
 	Gateway_ForceStartGroup_FullMethodName                 = "/Gateway/ForceStartGroup"
 	Gateway_UpdateGroupOperatorInCharge_FullMethodName     = "/Gateway/UpdateGroupOperatorInCharge"
 	Gateway_UpdateRetiredLegKeep_FullMethodName            = "/Gateway/UpdateRetiredLegKeep"
+	Gateway_InspectGroup_FullMethodName                    = "/Gateway/InspectGroup"
 	Gateway_GetThinDeviceBitmap_FullMethodName             = "/Gateway/GetThinDeviceBitmap"
 )
 
@@ -158,6 +159,7 @@ type GatewayClient interface {
 	ForceStartGroup(ctx context.Context, in *ForceStartGroupRequest, opts ...grpc.CallOption) (*ForceStartGroupReply, error)
 	UpdateGroupOperatorInCharge(ctx context.Context, in *UpdateGroupOperatorInChargeRequest, opts ...grpc.CallOption) (*UpdateGroupOperatorInChargeReply, error)
 	UpdateRetiredLegKeep(ctx context.Context, in *UpdateRetiredLegKeepRequest, opts ...grpc.CallOption) (*UpdateRetiredLegKeepReply, error)
+	InspectGroup(ctx context.Context, in *InspectGroupRequest, opts ...grpc.CallOption) (*InspectGroupReply, error)
 	GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error)
 }
 
@@ -829,6 +831,16 @@ func (c *gatewayClient) UpdateRetiredLegKeep(ctx context.Context, in *UpdateReti
 	return out, nil
 }
 
+func (c *gatewayClient) InspectGroup(ctx context.Context, in *InspectGroupRequest, opts ...grpc.CallOption) (*InspectGroupReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InspectGroupReply)
+	err := c.cc.Invoke(ctx, Gateway_InspectGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *gatewayClient) GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetThinDeviceBitmapReply)
@@ -909,6 +921,7 @@ type GatewayServer interface {
 	ForceStartGroup(context.Context, *ForceStartGroupRequest) (*ForceStartGroupReply, error)
 	UpdateGroupOperatorInCharge(context.Context, *UpdateGroupOperatorInChargeRequest) (*UpdateGroupOperatorInChargeReply, error)
 	UpdateRetiredLegKeep(context.Context, *UpdateRetiredLegKeepRequest) (*UpdateRetiredLegKeepReply, error)
+	InspectGroup(context.Context, *InspectGroupRequest) (*InspectGroupReply, error)
 	GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error)
 	mustEmbedUnimplementedGatewayServer()
 }
@@ -1117,6 +1130,9 @@ func (UnimplementedGatewayServer) UpdateGroupOperatorInCharge(context.Context, *
 }
 func (UnimplementedGatewayServer) UpdateRetiredLegKeep(context.Context, *UpdateRetiredLegKeepRequest) (*UpdateRetiredLegKeepReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateRetiredLegKeep not implemented")
+}
+func (UnimplementedGatewayServer) InspectGroup(context.Context, *InspectGroupRequest) (*InspectGroupReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method InspectGroup not implemented")
 }
 func (UnimplementedGatewayServer) GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetThinDeviceBitmap not implemented")
@@ -2330,6 +2346,24 @@ func _Gateway_UpdateRetiredLegKeep_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Gateway_InspectGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InspectGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).InspectGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_InspectGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).InspectGroup(ctx, req.(*InspectGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Gateway_GetThinDeviceBitmap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetThinDeviceBitmapRequest)
 	if err := dec(in); err != nil {
@@ -2618,6 +2652,10 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateRetiredLegKeep",
 			Handler:    _Gateway_UpdateRetiredLegKeep_Handler,
+		},
+		{
+			MethodName: "InspectGroup",
+			Handler:    _Gateway_InspectGroup_Handler,
 		},
 		{
 			MethodName: "GetThinDeviceBitmap",
@@ -2994,6 +3032,7 @@ const (
 	ControllerNodeAgent_GetCntlrInfo_FullMethodName    = "/ControllerNodeAgent/GetCntlrInfo"
 	ControllerNodeAgent_GetThinDeviceBm_FullMethodName = "/ControllerNodeAgent/GetThinDeviceBm"
 	ControllerNodeAgent_GetLegBm_FullMethodName        = "/ControllerNodeAgent/GetLegBm"
+	ControllerNodeAgent_InspectGrp_FullMethodName      = "/ControllerNodeAgent/InspectGrp"
 	ControllerNodeAgent_CheckCn_FullMethodName         = "/ControllerNodeAgent/CheckCn"
 	ControllerNodeAgent_CheckCntlr_FullMethodName      = "/ControllerNodeAgent/CheckCntlr"
 )
@@ -3010,6 +3049,7 @@ type ControllerNodeAgentClient interface {
 	GetCntlrInfo(ctx context.Context, in *GetCntlrInfoRequest, opts ...grpc.CallOption) (*GetCntlrInfoReply, error)
 	GetThinDeviceBm(ctx context.Context, in *GetThinDeviceBmRequest, opts ...grpc.CallOption) (*GetThinDeviceBmReply, error)
 	GetLegBm(ctx context.Context, in *GetLegBmRequest, opts ...grpc.CallOption) (*GetLegBmReply, error)
+	InspectGrp(ctx context.Context, in *InspectGrpRequest, opts ...grpc.CallOption) (*InspectGrpReply, error)
 	CheckCn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCnRequest, CheckCnReply], error)
 	CheckCntlr(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCntlrRequest, CheckCntlrReply], error)
 }
@@ -3102,6 +3142,16 @@ func (c *controllerNodeAgentClient) GetLegBm(ctx context.Context, in *GetLegBmRe
 	return out, nil
 }
 
+func (c *controllerNodeAgentClient) InspectGrp(ctx context.Context, in *InspectGrpRequest, opts ...grpc.CallOption) (*InspectGrpReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InspectGrpReply)
+	err := c.cc.Invoke(ctx, ControllerNodeAgent_InspectGrp_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controllerNodeAgentClient) CheckCn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCnRequest, CheckCnReply], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &ControllerNodeAgent_ServiceDesc.Streams[0], ControllerNodeAgent_CheckCn_FullMethodName, cOpts...)
@@ -3140,6 +3190,7 @@ type ControllerNodeAgentServer interface {
 	GetCntlrInfo(context.Context, *GetCntlrInfoRequest) (*GetCntlrInfoReply, error)
 	GetThinDeviceBm(context.Context, *GetThinDeviceBmRequest) (*GetThinDeviceBmReply, error)
 	GetLegBm(context.Context, *GetLegBmRequest) (*GetLegBmReply, error)
+	InspectGrp(context.Context, *InspectGrpRequest) (*InspectGrpReply, error)
 	CheckCn(grpc.BidiStreamingServer[CheckCnRequest, CheckCnReply]) error
 	CheckCntlr(grpc.BidiStreamingServer[CheckCntlrRequest, CheckCntlrReply]) error
 	mustEmbedUnimplementedControllerNodeAgentServer()
@@ -3175,6 +3226,9 @@ func (UnimplementedControllerNodeAgentServer) GetThinDeviceBm(context.Context, *
 }
 func (UnimplementedControllerNodeAgentServer) GetLegBm(context.Context, *GetLegBmRequest) (*GetLegBmReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetLegBm not implemented")
+}
+func (UnimplementedControllerNodeAgentServer) InspectGrp(context.Context, *InspectGrpRequest) (*InspectGrpReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method InspectGrp not implemented")
 }
 func (UnimplementedControllerNodeAgentServer) CheckCn(grpc.BidiStreamingServer[CheckCnRequest, CheckCnReply]) error {
 	return status.Error(codes.Unimplemented, "method CheckCn not implemented")
@@ -3347,6 +3401,24 @@ func _ControllerNodeAgent_GetLegBm_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControllerNodeAgent_InspectGrp_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InspectGrpRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControllerNodeAgentServer).InspectGrp(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControllerNodeAgent_InspectGrp_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControllerNodeAgentServer).InspectGrp(ctx, req.(*InspectGrpRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ControllerNodeAgent_CheckCn_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(ControllerNodeAgentServer).CheckCn(&grpc.GenericServerStream[CheckCnRequest, CheckCnReply]{ServerStream: stream})
 }
@@ -3399,6 +3471,10 @@ var ControllerNodeAgent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetLegBm",
 			Handler:    _ControllerNodeAgent_GetLegBm_Handler,
+		},
+		{
+			MethodName: "InspectGrp",
+			Handler:    _ControllerNodeAgent_InspectGrp_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

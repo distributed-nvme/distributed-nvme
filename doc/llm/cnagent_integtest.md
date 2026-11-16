@@ -464,7 +464,10 @@ superblock carrying a recovery offset. A mark naming the half-copied new leg
 stops the broken array and is refused: the group's row reads ERROR naming
 the recovery offset, and nothing is zeroed or assembled. With the dead leg's
 export back and its leg row no longer in error, so that it can feed a copy
-(`cnagent.md` CN12), a mark naming it reads its superblock, zeroes the new leg alone, the bad
+(`cnagent.md` CN12), the inspect's dry run from that leg says what the start
+does, the new leg zeroed under the identity update, with no mdadm command
+run, and its read of the leg matches md's own examine (`cnagent.md` CN31);
+a mark naming it reads its superblock, zeroes the new leg alone, the bad
 leg left as it is, starts the array from the named leg alone with either
 form of the forced assembly, and the repair's add adds the blank new leg, in
 that order, under one forced start record naming the leg and the zeroed

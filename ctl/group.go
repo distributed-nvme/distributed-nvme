@@ -1,7 +1,8 @@
-// group.go is dnvctl.md, `group` — `ctl/group.go`: the two RPCs of a raid1
-// group itself, ForceStartGroup, the forced start of the group's array, and
+// group.go is dnvctl.md, `group` — `ctl/group.go`: the three RPCs of a raid1
+// group itself, ForceStartGroup, the forced start of the group's array,
 // UpdateGroupOperatorInCharge, the operator's take-over of the group's repair
-// from the sp worker (architecture.md, Repairs).
+// from the sp worker, and InspectGroup, the primary's read of the group's
+// members with the forced start's dry run (architecture.md, Repairs).
 //
 // ForceStartGroup writes a mark on the group record that names one leg, and
 // the group's primary starts the array from that leg alone while the group's
@@ -39,8 +40,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// registerGroup adds the `group` noun to the root. Both leaves carry an
-// `sp_rev` token when --rev is given (CT3).
+// registerGroup adds the `group` noun to the root. The two writes carry an
+// `sp_rev` token when --rev is given (CT3); the inspect, a read, carries
+// none.
 func registerGroup(root *cobra.Command) {
 	root.AddCommand(group(
 		"group",
@@ -48,7 +50,53 @@ func registerGroup(root *cobra.Command) {
 			"(architecture.md, Repairs)",
 		groupForceStartCmd(),
 		groupSetOperatorInChargeCmd(),
+		groupInspectCmd(),
 	))
+}
+
+// groupInspectCmd is InspectGroup: the group's primary reads each member
+// the group keeps — its md superblock, md's view of it, its leg's row and
+// health — so an operator can choose the leg of a forced start; with --leg
+// the reply also says what a forced start from that leg would do, with
+// --force as `group force-start --force` would, and runs nothing (the dry
+// run). It writes nothing and recommends no leg. dnvctl checks nothing
+// (CT8).
+func groupInspectCmd() *cobra.Command {
+	cmd := leaf(
+		"inspect",
+		"InspectGroup: read every member of a raid1 group through its "+
+			"primary; with --leg, say what a forced start from that leg "+
+			"would do, running nothing",
+		func() (job, error) {
+			grpId, err := hexOf("grp")
+			if err != nil {
+				return nil, err
+			}
+			legId, err := hexOf("leg")
+			if err != nil {
+				return nil, err
+			}
+			req := &pb.InspectGroupRequest{
+				ClusterName: clusterOf(),
+				SpName:      spOf(),
+				GrpId:       grpId,
+				LegId:       legId,
+				Force:       boolOf("force"),
+			}
+			return func(
+				ctx context.Context, client pb.GatewayClient,
+			) (any, error) {
+				return client.InspectGroup(ctx, req)
+			}, nil
+		})
+	flags := cmd.Flags()
+	flags.String("grp", "", "grp_id of the group (base 0)")
+	flags.String("leg", "",
+		"leg_id of the leg a forced start would start from; the dry run "+
+			"(base 0; none for the read alone)")
+	flags.Bool("force", false,
+		"the dry run with the forced start's force")
+	return cmd
 }
 
 // groupForceStartCmd is ForceStartGroup.

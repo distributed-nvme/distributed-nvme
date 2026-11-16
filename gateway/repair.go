@@ -707,15 +707,35 @@ func forceStartChecks(
 	); err != nil {
 		return nil, grpLocation{}, grpReportTarget{}, err
 	}
-	cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+	tgt, err := grpPrimaryTarget(stm, sc, spName, grpId,
+		"whose report could show that the array of group %d does not run")
 	if err != nil {
 		return nil, grpLocation{}, grpReportTarget{}, err
 	}
+	return sc, loc, tgt, nil
+}
+
+// grpPrimaryTarget is the pool's primary cntlr and its CN, whose agent the
+// forced start and the inspect of a group ask (ForceStartGroup,
+// InspectGroup), inside the caller's snapshot. A pool with no primary is
+// FAILED_PRECONDITION, the message's why, a format with the group's id,
+// saying what the primary was wanted for; a primary whose CN is missing is
+// ABORTED.
+func grpPrimaryTarget(
+	stm etcdutil.STM,
+	sc *spScope,
+	spName string,
+	grpId uint64,
+	why string,
+) (grpReportTarget, error) {
+	cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return grpReportTarget{}, err
+	}
 	cntlrId, cntlr, ok := primaryCntlr(sc.Conf, cntlrs)
 	if !ok {
-		return nil, grpLocation{}, grpReportTarget{}, errPrecondition(
-			"storage pool %q has no primary cntlr whose report could show "+
-				"that the array of group %d does not run", spName, grpId)
+		return grpReportTarget{}, errPrecondition(
+			"storage pool %q has no primary cntlr "+why, spName, grpId)
 	}
 	cn := &pb.CnConf{}
 	cnKey := model.CnConfKey(sc.Cid, cntlr.GetAddrPort())
@@ -723,10 +743,10 @@ func forceStartChecks(
 		// A live cntlr names its CN, and DeleteControllerNode refuses a CN
 		// that hosts one, so the CN's absence is a lost invariant key
 		// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
-		return nil, grpLocation{}, grpReportTarget{}, errAborted(
+		return grpReportTarget{}, errAborted(
 			"cn_conf key %q is missing", cnKey)
 	}
-	return sc, loc, grpReportTarget{
+	return grpReportTarget{
 		ClusterId: sc.Cid,
 		SpId:      sc.SpId(),
 		CntlrId:   cntlrId,
@@ -838,7 +858,7 @@ func checkGrpArrayDown(
 	tgt grpReportTarget,
 	grpId uint64,
 ) error {
-	runs, absent := false, false
+	var rowErr error
 	callErr := withCnAgent(ctx, tgt.AddrPort,
 		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
 			reply, err := client.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
@@ -852,9 +872,7 @@ func checkGrpArrayDown(
 			if err != nil {
 				return err
 			}
-			row, ok := reply.GetCntlrInfo().GetGrpIdToMdRaid()[grpId]
-			absent = !ok || row == nil
-			runs = row.GetStatus() == pb.ResStatus_RES_STATUS_OK
+			rowErr = grpRowRefusal(reply.GetCntlrInfo(), grpId)
 			return nil
 		})
 	if callErr != nil {
@@ -862,12 +880,21 @@ func checkGrpArrayDown(
 			"group %d: its array is not proven down, controller node %q "+
 				"did not answer: %v", grpId, tgt.AddrPort, callErr)
 	}
-	if absent {
+	return rowErr
+}
+
+// grpRowRefusal is ForceStartGroup's judgement of the group's row in the
+// primary's report (checkGrpArrayDown), which InspectGroup's dry run makes
+// too: a report with no row of the group, and a row that reads OK, refuse;
+// nil otherwise.
+func grpRowRefusal(info *pb.CntlrInfo, grpId uint64) error {
+	row, ok := info.GetGrpIdToMdRaid()[grpId]
+	if !ok || row == nil {
 		return errPrecondition(
 			"group %d: its array is not proven down, the primary's latest "+
 				"report holds no row of the group", grpId)
 	}
-	if runs {
+	if row.GetStatus() == pb.ResStatus_RES_STATUS_OK {
 		return errPrecondition(
 			"group %d runs: the primary's latest report reads its row "+
 				"RES_STATUS_OK", grpId)

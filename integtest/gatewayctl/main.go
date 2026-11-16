@@ -533,6 +533,7 @@ var commands = []command{
 	{"keep-retired-leg", setupKeepRetiredLeg},
 	// forced start
 	{"force-start-grp", setupForceStartGrp},
+	{"inspect-grp", setupInspectGrp},
 	// operator in charge
 	{"set-grp-operator-in-charge", setupSetGrpOperatorInCharge},
 	// bitmap

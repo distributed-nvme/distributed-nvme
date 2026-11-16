@@ -822,8 +822,9 @@ const (
 	// agent RPCs (GetDnSize/GetCnSize, the Get*Info behind Inspect*, behind
 	// the force = false checks of DeleteClone/FinishMigration and behind
 	// ForceStartGroup's check of the group's array, the Get*Bm bitmap
-	// reads), in seconds. Applied with context.WithTimeout
-	// around each dial+call (AG2); chosen equal to DefaultEtcdOpTimeout so a
+	// reads, and the GetCntlrInfo and InspectGrp behind InspectGroup), in
+	// seconds. Applied with context.WithTimeout around each dial and its
+	// calls (AG2), so InspectGroup's two calls share one budget; chosen equal to DefaultEtcdOpTimeout so a
 	// hung agent and a hung etcd bound an RPC alike. A Get*Info answers from
 	// the agent's latest observation and reads nothing of the node
 	// (dnagent.md SH28), so for it the budget bounds the dial and a hung

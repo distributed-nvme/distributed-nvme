@@ -295,11 +295,12 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"DeleteRetiredLeg":                "delete-retired-leg",
 		"UpdateRetiredLegKeep":            "keep-retired-leg",
 		"ForceStartGroup":                 "force-start-grp",
+		"InspectGroup":                    "inspect-grp",
 		"UpdateGroupOperatorInCharge":     "set-grp-operator-in-charge",
 		"GetThinDeviceBitmap":             "get-td-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 67 {
-		t.Fatalf("service Gateway has %d methods, want 67",
+	if len(pb.Gateway_ServiceDesc.Methods) != 68 {
+		t.Fatalf("service Gateway has %d methods, want 68",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
@@ -378,6 +379,14 @@ func (c *recordingClient) ForceStartGroup(
 ) (*pb.ForceStartGroupReply, error) {
 	c.req = in
 	return &pb.ForceStartGroupReply{GrpId: in.GetGrpId(), Revision: 3}, nil
+}
+
+func (c *recordingClient) InspectGroup(
+	ctx context.Context, in *pb.InspectGroupRequest,
+	_ ...grpc.CallOption,
+) (*pb.InspectGroupReply, error) {
+	c.req = in
+	return &pb.InspectGroupReply{GrpId: in.GetGrpId()}, nil
 }
 
 func (c *recordingClient) UpdateRetiredLegKeep(

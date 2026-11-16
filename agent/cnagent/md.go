@@ -1740,27 +1740,104 @@ func storedMarks(plan *cntlrPlan, res *agent.SweepResult) {
 	}
 }
 
-// forceStartGroup is CN12's forced start, which replaces the assembly while
-// the group's mark stands and no array of the group is there: the named leg
-// is a member the forced start keeps (forcedStartLegs), other than the bad
-// leg of a STARTED repair (isStartedBadLeg), available this pass, and its
-// reading (ReadMember) answers and shows a full member, one md held in a
-// place with no copy position (mdSuperblock.notFullMember); every other
+// forcedStartPlan is what CN12's forced start would do from its checks
+// (planForcedStart): the named leg and its superblock read, and the members
+// it would zero, in the order it would zero them.
+type forcedStartPlan struct {
+	named *legPlan
+	sb    *mdSuperblock
+	zero  []*legPlan
+}
+
+// update is the assembly's update the plan's start runs first, then, with
+// a bad-block list on the named leg, the second run's (forcedAssemble).
+func (fp *forcedStartPlan) update() string {
+	if fp.sb.BadBlocks > 0 {
+		return mdUpdateUuid + "," + mdUpdateForceNoBbl
+	}
+	return mdUpdateUuid
+}
+
+// planForcedStart is the checks of CN12's forced start, with no mdadm
+// command and no write, for the mark the group's plan carries: the named
+// leg is a member the forced start keeps (forcedStartLegs), other than the
+// bad leg of a STARTED repair (isStartedBadLeg), available, and its
+// superblock read (ReadMember) answers and shows a full member, one md held
+// in a place with no copy position (mdSuperblock.notFullMember); every other
 // member the forced start keeps but the open repair's bad leg is available
-// and its reading answers, each read before any is zeroed; none of them is a
-// full member of the named leg's identity with a higher change count, unless
-// the mark carries the operator's force (olderNamedLeg); each of those has
-// its superblock zeroed and read back, and the zero counts only when the
-// read answers with no superblock; and the array starts from the named leg
-// alone under a new identity (forcedAssemble), with the leg's bad-block list
-// dropped when its reading shows one. Each step that does not hold is the
-// group's error and ends the pass for the group, the zero before any
-// assembly, so no pass starts the array beside a member it has not zeroed;
-// the mark stands and the next pass, which the CN10 retry brings
-// (forcedStartRetries, hasLateMember), tries again from the first step. A
-// member zeroed by a pass that ends later is blank at the next, and its zero
-// goes through again. ensureGroup's member reconciliation then adds the
-// zeroed members, which md copies whole.
+// and its read answers, each read before any is zeroed; and none of them is
+// a full member of the named leg's identity with a higher change count,
+// unless the mark carries the operator's force (olderNamedLeg). The first
+// check that does not hold is its error, the group's. The real start
+// (forceStartGroup) and the dry run of InspectGrp both run it, so a broken
+// check fails the tests of both.
+func (s *CnAgentServer) planForcedStart(
+	ctx context.Context,
+	gp *grpPlan,
+	available map[uint64]bool,
+) (*forcedStartPlan, error) {
+	named, kept := gp.forcedStartLegs()
+	if named == nil && gp.isStartedBadLeg(gp.mark.GetLegId()) {
+		return nil, fmt.Errorf(
+			"forced start names leg %#x, the bad leg of group %#x's "+
+				"started repair, which the finish retires",
+			gp.mark.GetLegId(), gp.grpId)
+	}
+	if named == nil {
+		return nil, fmt.Errorf(
+			"forced start names leg %#x, which group %#x does not keep",
+			gp.mark.GetLegId(), gp.grpId)
+	}
+	if !available[named.legId] {
+		return nil, errForcedStartWaits(named)
+	}
+	reading := s.md.ReadMember(ctx, named.path)
+	if reading.Err != nil {
+		return nil, fmt.Errorf("forced start: leg %#x: %w", named.legId,
+			reading.Err)
+	}
+	sb := reading.Sb
+	if gap := sb.notFullMember(); gap != "" {
+		return nil, fmt.Errorf(
+			"forced start: leg %#x is not a full member: %s",
+			named.legId, gap)
+	}
+	fp := &forcedStartPlan{named: named, sb: sb}
+	for _, lp := range kept {
+		if lp == named || gp.isBadLeg(lp.legId) {
+			continue
+		}
+		if !available[lp.legId] {
+			return nil, errForcedStartWaits(lp)
+		}
+		other := s.md.ReadMember(ctx, lp.path)
+		if other.Err != nil {
+			return nil, fmt.Errorf("forced start: member leg %#x: %w",
+				lp.legId, other.Err)
+		}
+		if refusal := olderNamedLeg(gp, named, sb, lp,
+			other.Sb); refusal != "" {
+			return nil, errors.New(refusal)
+		}
+		fp.zero = append(fp.zero, lp)
+	}
+	return fp, nil
+}
+
+// forceStartGroup is CN12's forced start, which replaces the assembly while
+// the group's mark stands and no array of the group is there: its checks
+// (planForcedStart) hold; each member they would zero has its superblock
+// zeroed and read back, and the zero counts only when the read answers with
+// no superblock; and the array starts from the named leg alone under a new
+// identity (forcedAssemble), with the leg's bad-block list dropped when its
+// read shows one. Each step that does not hold is the group's error and
+// ends the pass for the group, the zero before any assembly, so no pass
+// starts the array beside a member it has not zeroed; the mark stands and
+// the next pass, which the CN10 retry brings (forcedStartRetries,
+// hasLateMember), tries again from the first step. A member zeroed by a
+// pass that ends later is blank at the next, and its zero goes through
+// again. ensureGroup's member reconciliation then adds the zeroed members,
+// which md copies whole.
 func (s *CnAgentServer) forceStartGroup(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -1768,52 +1845,12 @@ func (s *CnAgentServer) forceStartGroup(
 	walk *MdWalk,
 	available map[uint64]bool,
 ) error {
-	named, kept := gp.forcedStartLegs()
-	if named == nil && gp.isStartedBadLeg(gp.mark.GetLegId()) {
-		return fmt.Errorf(
-			"forced start names leg %#x, the bad leg of group %#x's "+
-				"started repair, which the finish retires",
-			gp.mark.GetLegId(), gp.grpId)
+	fp, err := s.planForcedStart(ctx, gp, available)
+	if err != nil {
+		return err
 	}
-	if named == nil {
-		return fmt.Errorf(
-			"forced start names leg %#x, which group %#x does not keep",
-			gp.mark.GetLegId(), gp.grpId)
-	}
-	if !available[named.legId] {
-		return errForcedStartWaits(named)
-	}
-	reading := s.md.ReadMember(ctx, named.path)
-	if reading.Err != nil {
-		return fmt.Errorf("forced start: leg %#x: %w", named.legId,
-			reading.Err)
-	}
-	sb := reading.Sb
-	if gap := sb.notFullMember(); gap != "" {
-		return fmt.Errorf("forced start: leg %#x is not a full member: %s",
-			named.legId, gap)
-	}
-	var zero []*legPlan
-	for _, lp := range kept {
-		if lp == named || gp.isBadLeg(lp.legId) {
-			continue
-		}
-		if !available[lp.legId] {
-			return errForcedStartWaits(lp)
-		}
-		other := s.md.ReadMember(ctx, lp.path)
-		if other.Err != nil {
-			return fmt.Errorf("forced start: member leg %#x: %w",
-				lp.legId, other.Err)
-		}
-		if refusal := olderNamedLeg(gp, named, sb, lp,
-			other.Sb); refusal != "" {
-			return errors.New(refusal)
-		}
-		zero = append(zero, lp)
-	}
-	zeroed := make([]uint64, 0, len(zero))
-	for _, lp := range zero {
+	zeroed := make([]uint64, 0, len(fp.zero))
+	for _, lp := range fp.zero {
 		if err := s.md.ZeroSuperblock(ctx, lp.path); err != nil {
 			return err
 		}
@@ -1828,13 +1865,13 @@ func (s *CnAgentServer) forceStartGroup(
 		}
 		zeroed = append(zeroed, lp.legId)
 	}
-	update, err := s.forcedAssemble(ctx, plan, gp, walk, named, sb)
+	update, err := s.forcedAssemble(ctx, plan, gp, walk, fp.named, fp.sb)
 	if err != nil {
 		return err
 	}
 	slog.WarnContext(ctx, msgForcedStart, append(s.cntlrIdAttrs(plan),
 		slog.Uint64("grp_id", gp.grpId),
-		slog.Uint64("leg_id", named.legId),
+		slog.Uint64("leg_id", fp.named.legId),
 		slog.Any("zeroed", zeroed),
 		slog.String("update", update))...)
 	return nil

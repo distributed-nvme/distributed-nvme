@@ -340,7 +340,8 @@ The entries:
   regions md never copied, whatever that leg's disk held there, possibly
   another pool's bytes, with no error. Both legs show the same change
   count. State: procedure to write, the forced-start guide: choose the leg
-  that died last, from the leg rows. Seen in the lab.
+  that died last, from the leg rows; `dnvctl group inspect` shows each
+  leg's bad-block count and md's view of it. Seen in the lab.
 - **A failed stop during a forced start keeps a bad-block list.** When the
   named leg carries a bad-block list, the forced start starts the array,
   stops it at once, and starts it again with the list dropped. If that stop
@@ -714,7 +715,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Change a pool's level | `dnvctl sp set-level` | none | procedure to write, with the thin pool repair |
 | Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | none; the introduction explains the flow | procedure to write: the whole flow |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | none | procedure to write |
-| Force-start a group | `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | none | procedure to write: the forced-start guide. Fix decided: an inspect call that shows what the primary reads from each member, and a dry run that says what a start would do and refuse. |
+| Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | none | procedure to write: the forced-start guide. |
 | Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself | none | procedure to write: when to keep a leg, when to clear the flag |
 | Replace a cntlr by hand | `dnvctl cntlr set-enabled`, `dnvctl cntlr delete`, `dnvctl cntlr create` | none | procedure to write |
 | Change a pool's cntlid slots, the ranges of NVMe controller ids its exports use | `dnvctl sp set-cntlid-slots` | none | procedure to write, one line |

@@ -289,7 +289,8 @@ type fakeNode struct {
 	failWriteAlways map[string]string
 	// gate blocks a command until the channel is closed (lock tests). It, and
 	// hardGate and cancelCmd below, also match an mtime read by its line
-	// (readMtime).
+	// (readMtime); hardGate also matches a superblock read by its line
+	// (readSuperblockArea).
 	gate map[string]chan struct{}
 	// hardGate blocks a command until the channel is closed and — unlike gate
 	// — ignores ctx cancellation, modelling the real child of
@@ -2798,6 +2799,19 @@ func (f *fakeNode) readSuperblockArea(
 		return nil, err
 	}
 	line := fmt.Sprintf("readsb %s off=%d len=%d", path, offset, length)
+	f.mu.Lock()
+	var hard chan struct{}
+	for key, ch := range f.hardGate {
+		if strings.Contains(line, key) {
+			hard = ch
+			break
+		}
+	}
+	f.mu.Unlock()
+	if hard != nil {
+		// A read of a member whose disk node stalls: it ignores ctx.
+		<-hard
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("%s", line)
