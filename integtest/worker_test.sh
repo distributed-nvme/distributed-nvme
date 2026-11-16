@@ -3081,6 +3081,70 @@ EOF
 	assert_none_for 4 "a repair of L1 once it reads healthy" \
 		reaction_ge $((creates + 1)) repair_create
 
+	stage 9b "AR2: a pool that cannot grow still gets an unhealthy leg repaired"
+	# The pool breaches its watermark while one DN alone has room: a data
+	# grow, which needs one DN per leg, finds too few and is skipped with no
+	# candidate, and the pass goes on to leg repair (AR2), whose new leg
+	# needs one DN. A pass that ended at the grow's short scan would never
+	# reach the repair. The meta pair stays far below its own watermark.
+	ctl set-free dn --id 4 --free-ext 8
+	ctl set-free dn --id 3 --free-ext 0
+	ctl set-free dn --id 1 --free-ext 0
+	ctl set-free dn --id 2 --free-ext 0
+	# The budgets of the CNs that host sp0's cntlrs, so that the grow is
+	# skipped at the DN scan and not for `cn free_ext_cnt too low`; cn 1
+	# keeps the zero budget step 10 needs.
+	ctl set-free cn --id 2 --free-ext 64
+	ctl set-free cn --id 3 --free-ext 64
+	ctl set-lwm --sp sp0 --pct "$LWM"
+	local nocands
+	nocands=$(reaction_skip_cnt grow_data "no candidate")
+	grows=$(reaction_cnt grow_data)
+	creates=$(reaction_cnt repair_create)
+	line=$(thin_pool_line 100 $((2 * META_BLOCKS_PER_GRP)) 300 "$total_data")
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {
+  "slice_id_to_dm_pool.1": {"status": "OK", "details": "$line"},
+  "leg_id_to_leg.1": {"status": "ERROR", "details": "no healthy path"}}}}}
+EOF
+	wait_until "$WAIT_SHORT" "reaction skipped kind=grow_data reason=no candidate" \
+		reaction_skip_ge $((nocands + 1)) grow_data "no candidate"
+	wait_until $((6 + WAIT_SHORT)) "reaction applied kind=repair_create on G1 beside the skipped grow" \
+		reaction_ge $((creates + 1)) repair_create
+	local g1b_rep
+	g1b_rep=$(grp_rep_name sp0 1 meta 1)
+	case "$g1b_rep" in
+	__internal__*) ;;
+	*) die "G1's repair is named '$g1b_rep', want the reserved prefix" ;;
+	esac
+	assert_eq "$(repair_json sp0 "$g1b_rep" | "$JQ" -r '.new_leg_list[0].side_list[0].addr_port')" \
+		"$(dn_addr 4)" "the G1 new leg's DN (the only one with room)"
+	nocands=$(reaction_skip_cnt grow_data "no candidate")
+	wait_until "$WAIT_SHORT" "the grow still skipped with no candidate after the create" \
+		reaction_skip_ge $((nocands + 1)) grow_data "no candidate"
+	assert_eq "$(reaction_cnt grow_data)" "$grows" "data grows while one DN has room"
+	# Clean up as step 9 does: L1 reads healthy, the repair is aborted and
+	# cancelled, dn 4 gets its extents back; the pool row goes, and the
+	# watermark goes back above any usage.
+	ctl set-lwm --sp sp0 --pct 101
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true}}}
+EOF
+	wait_until "$WAIT_SHORT" "L1's err_epoch cleared" leg_epoch_clear sp0 1 1
+	wait_until "$WAIT_SHORT" "reaction applied kind=repair_abort of G1's second repair" \
+		repair_rec_ge 1 repair_abort "$g1b_rep" '.trigger == "bad_leg_healthy"'
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true,
+  "repairs": {"$g1b_rep": {"abort_confirmed": true}}}}}
+EOF
+	wait_until "$WAIT_SHORT" "reaction applied kind=repair_cancel of G1's second repair" \
+		repair_rec_ge 1 repair_cancel "$g1b_rep" 'true'
+	repair_gone sp0 "$g1b_rep" || die "G1's second repair outlived its cancel"
+	assert_eq "$(dn_free 4)" 8 "dn 4 got the new leg's extents back"
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true}}}
+EOF
+
 	stage 10 "AR3 suppression: sp_level and a disabled cntlr"
 	prim=$(sp_primary sp0)
 	prim_id=${prim%% *}

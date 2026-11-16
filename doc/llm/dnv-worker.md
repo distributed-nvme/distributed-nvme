@@ -5193,10 +5193,14 @@ revision gate being per object and not per cluster.
   primary whose clone's target row reads missing stays settling while the
   row carries no reason and settles once it carries the source-fault
   reason; leg repair's repair of a leg due on case 1 is created with a fresh
-  new leg, moved to STARTED by the primary's verdict and finished, retiring
+  new leg, the wait the primary reports for it logged once over several
+  passes, moved to STARTED by the primary's verdict and finished, retiring
   the leg, and one due on case 2 is tried to abort once its bad leg reads
   healthy again before the copy starts, confirmed, moved to ABORTED and
-  cancelled;
+  cancelled; and a pool whose data grow finds one DN with room, where its
+  two legs need two, has the grow skipped with no candidate before and
+  after leg repair creates, on that DN, the repair of a leg due on case 1:
+  the pass goes on past the short scan (AR2);
 * repair — an operator's repair, driven through the model operations the
   gateway runs: its new leg's side is driven, zeroed and flipped
   provisioned in the repair and the repair carried to every cntlr; leg
@@ -5315,7 +5319,8 @@ and the driver, save the parts below; and the log records by every
 assertion. Left to the unit tests: AR6's withdrawal of a stuck grow
 (`WithdrawGrow`, MD6) and its check of the CNs' budgets before a grow,
 AR16's end of a request past its bound and its pass over a group a check
-does not suit, AR2's pass-on of an empty scan, and EU4's and EU6's run again on a
+does not suit, AR2's pass-on of a leg repair create's scan that finds no
+DN and the pass's memo of empty scans, and EU4's and EU6's run again on a
 future revision, which the suite's one-member etcd never answers; VW8 (b),
 (c) and (d), because a broken watch with live puts cannot
 be induced from outside the process; that the drain's wake-up runs no
