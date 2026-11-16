@@ -2623,30 +2623,46 @@ not logged — and its child logs the rows of the later replies as a
 standby's.
 
 **Row classes.** The `ERROR` rows a cntlr is judged by — every map of rows
-but `leg_id_to_leg` and `side_id_to_path` — are of two classes. A **shared-state**
-row belongs to the stack of a td whose `created` is set and whose thin row, in
-some slice, reads `ERROR` with the reason `RES_REASON_THIN_ID_LOST`
-(`architecture.md`, Live-state reporting): the cn agent sets it when dm-thin
-refuses a created td's thin table with ENODATA because the slice's pool has
-lost its id (`cnagent.md` CN14). The class reads that field, never a row's
-details:
-a control-plane decision does not parse a tool's English. The stack is the
-td's own rows — its thin rows, its raid0 and its dm-error — and every row
-of an object that exists for it alone: the ns-dev and the nvmet namespace
-of each of its namespaces, the three rows of a transfer out of one of
-them, the two of a clone onto it. The pool lives on the SP's legs, so
-whichever cntlr holds the primary role reads the same rows, and no
-failover brings the td back: an operator does (`architecture.md`, Known
-limits). Every other `ERROR` row is the cntlr's **own**. Both classes set
+but `leg_id_to_leg` and `side_id_to_path` — are of two classes. A
+**shared-state** row is one of two kinds. It belongs to the stack of a td
+whose `created` is set and whose thin row, in some slice, reads `ERROR`
+with the reason `RES_REASON_THIN_ID_LOST` (`architecture.md`, Live-state
+reporting): the cn agent sets it when dm-thin refuses a created td's thin
+table with ENODATA because the slice's pool has lost its id (`cnagent.md`
+CN14). Or it is the pool row of a slice that reads `ERROR` with the reason
+`RES_REASON_POOL_NEEDS_CHECK`, a thin row of that slice, or a row of the
+stack of a td whose thin row in that slice does not read `OK`: dm-thin keeps
+needs_check in the pool's metadata, so the pool opens read-only on every
+node until an operator repairs it, and a thin volume it cannot make fails
+there alike (`cnagent.md` CN13). The class reads those fields, never a
+row's details: a control-plane decision does not parse a tool's English.
+The stack is the td's own rows — its thin rows, its raid0 and its dm-error
+— and every row of an object that exists for it alone: the ns-dev and the
+nvmet namespace of each of its namespaces, the three rows of a transfer out
+of one of them, the two of a clone onto it. The pool lives on the SP's
+legs, so whichever cntlr holds the primary role reads the same rows, and no
+failover brings the td or the pool back: an operator does
+(`architecture.md`, Known limits). A pool row that carries
+`RES_REASON_POOL_FAILED` — dm-thin failed the loaded pool, or a status read
+could not read its metadata — is not of the class: the failure is a state of
+the loaded pool alone, and a new primary opens the pool from its last
+commit; where needs_check reached the metadata it opens read-only, which the
+class then holds, so a failover over a failed pool can cure it and is not
+repeated over a pool that opens with needs_check. A pool whose metadata no
+primary can read fails its build instead, a row of no reason, and only AR5's
+and AR7's second refusals bound what that costs. Every other `ERROR` row is
+the cntlr's **own**. Both classes set
 `Cntlr.err_epoch` as the rules above say — the row stays visible and the
 epoch set — and the class steers AR5 and AR7 alone: a report whose
 `ERROR` rows are all shared-state is no failover trigger, nor a
 replacement one for a primary with no failover candidate. Only a
-converge's observation carries the reason (`dnagent.md` SH28). A
+converge's observation carries the lost thin id's reason (`dnagent.md`
+SH28); both channels carry needs_check's. A
 background read's probe finds the volume absent and reads it `MISSING`
 with empty details and no reason, while the raid0 over it still reads
 `ERROR`, so a report from a read's observation of the same loss holds own
-rows only. It is the second refusals that bound what those
+rows only, unless that slice's pool reads needs_check, which holds the
+stack of every td whose thin row there does not read `OK`. It is the second refusals that bound what those
 rows cost: AR5's keeps the role from moving back and forth over them, and
 AR7's, once a primary with no failover candidate has been replaced over
 them, keeps its replacement, which reads the same rows, from being
@@ -3210,7 +3226,7 @@ end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, which can hold for as long as the error does — an
-operator's intervention, for a lost thin id; AR6's `grow_pending`,
+operator's intervention, for a lost thin id or a pool's needs_check; AR6's `grow_pending`,
 `data_covered`, `grp_list_full`, `meta_ladder_cap`, `no_data_group` and the
 CN budget's `cn free_ext_cnt too low` when the pass's own check finds them,
 ahead of any scan and any transaction, and its scan that finds fewer DNs
@@ -3439,14 +3455,15 @@ limits):
   it by (every map of rows but `leg_id_to_leg` and `side_id_to_path`) is of
   HL2's shared-state class:
   `reaction skipped` (`shared_state`, with the primary's `cntlr_id` and the
-  smallest such `td_id`), judged ahead of the candidate, so a primary with
-  none logs this rather than `no candidate`; nor does AR7 replace such a
-  primary once it is due for replacement (AR7). The next primary would read
-  the same rows from the same pool: failing over would move the host paths
-  and nothing else, and the promoted cntlr, never settling, would lose the
-  role again at `cntlr_unhealthy` — to the peer whose standby report had
-  cleared its `err_epoch` — once per window, for as long as the td stayed
-  lost.
+  smallest `slice_id` whose pool reads needs_check, or with none, the
+  smallest `td_id` whose thin id is lost), judged ahead of the candidate, so
+  a primary with none logs this rather than `no candidate`; nor does AR7
+  replace such a primary once it is due for replacement (AR7). The next
+  primary would read the same rows from the same pool: failing over would
+  move the host paths and nothing else, and the promoted cntlr, never
+  settling, would lose the role again at `cntlr_unhealthy` — to the peer
+  whose standby report had cleared its `err_epoch` — once per window, for
+  as long as the td stayed lost or the pool kept its needs_check.
 * **The same error.** The failover this coordinator last applied took the
   role from the candidate, the primary's `err_epoch` was set less than
   `cntlr_unhealthy` after that failover, and every `ERROR` row of the
@@ -3634,10 +3651,10 @@ due for replacement is still replaced, and with none the pass goes on
 
 * **Shared state.** A primary whose latest report has `ERROR` rows of HL2's
   shared-state class alone is not replaced — `reaction skipped`
-  (`shared_state`, with its `old_cntlr_id` and the smallest such `td_id`).
-  The replacement would read the same rows from the same pool. The report
-  carries the lost-id reason only while it comes from a converge's
-  observation (HL2). A `Check*` reply carries an info when the info of the
+  (`shared_state`, with its `old_cntlr_id` and the `slice_id` or `td_id`
+  AR5's record names). The replacement would read the same rows from the
+  same pool. The report carries the lost-id reason only while it comes from
+  a converge's observation, and needs_check's on both channels (HL2). A `Check*` reply carries an info when the info of the
   observation it answers from differs from the last one its stream sent,
   and always on a fresh stream's first reply (HL5; `dnagent.md` SH26), and
   a read that a later round starts replaces the converge's observation with

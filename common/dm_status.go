@@ -206,10 +206,30 @@ type ThinPoolStatus struct {
 	TotalMetaBlocks uint64
 	UsedDataBlocks  uint64
 	TotalDataBlocks uint64
-	// NeedsCheck is the line's needs_check flag: dm-thin then grows no
-	// metadata device at a resume (maybe_resize_metadata_dev), whatever its
-	// size.
+	// NeedsCheck is the line's needs_check flag, which dm-thin keeps in the
+	// pool's metadata: the pool is read-only on every node that opens it
+	// until the flag is cleared, and dm-thin grows no metadata device at a
+	// resume (maybe_resize_metadata_dev), whatever its size.
 	NeedsCheck bool
+}
+
+// ThinPoolFault is the word a thin pool's `dmsetup status` line carries in
+// place of its numbers (pool_status): "Fail" when dm-thin has failed the
+// loaded pool, and "Error" when the status read could not read the pool's
+// metadata. It is "" for any other line, a parsed one among them.
+func ThinPoolFault(raw string) string {
+	fields := strings.Fields(raw)
+	for idx, field := range fields {
+		if field != "thin-pool" {
+			continue
+		}
+		if len(fields) == idx+2 &&
+			(fields[idx+1] == "Fail" || fields[idx+1] == "Error") {
+			return fields[idx+1]
+		}
+		return ""
+	}
+	return ""
 }
 
 // ParseThinPoolStatus parses one raw `dmsetup status` line of a thin pool.
@@ -219,9 +239,13 @@ type ThinPoolStatus struct {
 //
 // so the token is located rather than a fixed column counted: the line may
 // or may not be prefixed with the device name and the start/length pair.
-// Of what follows the two ratios — the held metadata root, the rw/ro and
-// discard flags, needs_check, the low watermark — only needs_check is read.
-// A pool that has failed reports `thin-pool Fail` and does not parse.
+// Of what follows the two ratios — the held metadata root, the mode word
+// (rw, ro or out_of_data_space), the discard and no-space words,
+// needs_check, the low watermark — only needs_check is read: dm-thin prints
+// ro both for a pool out of metadata space and for a read-only one, and only
+// the second carries needs_check, since dnv's table never asks for
+// read-only. A line that carries `Fail` or `Error` in place of its numbers
+// (ThinPoolFault) does not parse.
 func ParseThinPoolStatus(raw string) (*ThinPoolStatus, bool) {
 	fields := strings.Fields(raw)
 	token := -1

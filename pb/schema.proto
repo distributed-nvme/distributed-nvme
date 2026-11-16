@@ -339,6 +339,22 @@ enum ResReason {
     // bitmap is read only while no namespace on it can take a write
     // (architecture.md, Bitmap reads).
     RES_REASON_PARKED = 6;
+    // A slice's thin pool whose metadata carries dm-thin's needs_check
+    // flag: the pool is read-only and stays so on every node that opens it,
+    // until an operator repairs its metadata. The cn agent sets it on both
+    // channels, on that RES_STATUS_ERROR slice_id_to_dm_pool row, its
+    // details the raw status line (cnagent.md CN13), and the worker's
+    // shared-state class reads it, so no failover or cntlr replacement
+    // follows it (dnv-worker.md HL2).
+    RES_REASON_POOL_NEEDS_CHECK = 7;
+    // A slice's thin pool that dm-thin failed (its status line reads Fail),
+    // or whose status read could not read its metadata (Error). The cn agent
+    // sets it on both channels, on that RES_STATUS_ERROR slice_id_to_dm_pool
+    // row, its details the raw status line (cnagent.md CN13). The failure
+    // lives in the loaded pool alone, so it is the cntlr's own fault: a new
+    // primary opens the pool from its last commit. The verdict does not
+    // name the row, since no converge opens the pool again (CN30).
+    RES_REASON_POOL_FAILED = 8;
 }
 
 message ResInfo {

@@ -1569,21 +1569,24 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 			p.judged.runs[p.primaryId] < failoverRun {
 			return false
 		}
-		// AR5's first refusal: a report whose every ERROR row belongs to the
-		// stack of a created td whose thin id the pool no longer holds (HL2's
-		// shared-state rows) is no trigger. The pool lives on the legs, so the
+		// AR5's first refusal: a report whose every ERROR row is of HL2's
+		// shared-state class — the stack of a created td whose thin id the
+		// pool no longer holds, or a pool whose metadata carries needs_check
+		// with the thin rows over it — is no trigger. The pool lives on the
+		// legs, so the
 		// next primary reads the same rows: a failover moves the host paths
 		// and nothing else, and the promoted cntlr, never settling, lost the
 		// role again at cntlr_unhealthy — to the peer its promotion had made
-		// clean — once per window, for as long as the td stayed lost. The
+		// clean — once per window, for as long as the td stayed lost or the
+		// pool kept its needs_check. The
 		// err_epoch stays set, and every pass says why AR5 moves nothing, as
 		// AR8 does for what only an operator can repair, and goes on (AR2) —
 		// to AR7, which declines to replace a primary with no candidate on
 		// the same report (replaceTarget).
-		if tdIds := sharedStateTds(p.info, p.state); len(tdIds) != 0 {
+		if shared := sharedStateOf(p.info, p.state); shared.holds() {
 			w.reactionSkipped(ctx, reactionFailover, reasonSharedState,
 				slog.Uint64("cntlr_id", p.primaryId),
-				slog.Uint64("td_id", tdIds[0]),
+				shared.attr(),
 			)
 			return false
 		}
@@ -1679,7 +1682,7 @@ type failoverMemo struct {
 // settles, sooner once it has. An enabled primary whose report HL2's classes
 // call shared state is not failed over at all (the first refusal); this keeps
 // an error they do not name — a background read's report of a lost thin id,
-// which carries no reason (sharedStateTds), among them — from sending the
+// which carries no reason (sharedStateOf), among them — from sending the
 // role back to the cntlr it last left while the new primary fails no row the
 // old one did not: in an SP of two cntlrs it moves the role once, and in a
 // larger one it can first move it on to a cntlr that has not held it. A
@@ -1720,9 +1723,12 @@ type poolUsage struct {
 }
 
 // parseThinPoolStatus is common.ParseThinPoolStatus in AR6's shape: the
-// four counts of one thin pool's `dmsetup status` line. A pool that has failed
-// reports `thin-pool Fail` and does not parse, which is exactly right: a
-// failed pool is not grown, it is reported.
+// four counts of one thin pool's `dmsetup status` line. A failed pool's line
+// (`thin-pool Fail`) does not parse, and its row reads RES_STATUS_ERROR
+// (cnagent.md CN13), which tryGrow skips before it parses anything: a
+// failed pool is not grown, it is reported. A pool read-only for want of
+// metadata space reads RES_STATUS_OK and parses, its metadata use at its
+// total, so its metadata grow is the cure.
 func parseThinPoolStatus(details string) (poolUsage, bool) {
 	st, ok := common.ParseThinPoolStatus(details)
 	if !ok {
@@ -1813,8 +1819,8 @@ func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 		}
 		// Each kind is tried on its own: AR6's pending rule is per kind,
 		// so a data grow the CN has not acted on yet must not shadow a
-		// metadata breach of the same pool — metadata filling up puts the
-		// pool into needs_check and the whole SP read-only.
+		// metadata breach of the same pool — metadata filling up makes the
+		// pool read-only until its metadata grows.
 		if usage.usedData*100 > lwm*usage.totalData &&
 			w.runGrow(ctx, p, sliceId, slice, false, usage) {
 			return true
@@ -2239,12 +2245,12 @@ func (w *spWorker) replaceTarget(
 		// primary's latest (AR1); no standby's is read, and none carries a
 		// thin row (cnagent.md CN14), so a standby's ERROR rows are its own.
 		//
-		// The first is AR5's first (sharedStateTds): a primary whose every
-		// ERROR row belongs to the stack of a created td whose thin id the
-		// pool no longer holds is not replaced. The replacement would read
-		// the same rows from the same pool. The report carries the lost-id
-		// reason only while it is a converge's observation (dnv-worker.md,
-		// Known limits).
+		// The first is AR5's first (sharedStateOf): a primary whose every
+		// ERROR row is of HL2's shared-state class is not replaced. The
+		// replacement would read the same rows from the same pool. The
+		// report carries the lost-id reason only while it is a converge's
+		// observation (dnv-worker.md, Known limits), and needs_check's on
+		// both channels.
 		//
 		// The second is AR5's second, for a replacement
 		// (errorFollowedReplacement): a background read's observation of the
@@ -2253,10 +2259,10 @@ func (w *spWorker) replaceTarget(
 		// reading the same rows, would be replaced in turn once per
 		// cntlr_unhealthy, for as long as the td stayed lost.
 		if cntlrId == p.primaryId {
-			if tdIds := sharedStateTds(p.info, p.state); len(tdIds) != 0 {
+			if shared := sharedStateOf(p.info, p.state); shared.holds() {
 				w.reactionSkipped(ctx, reactionReplaceCntlr, reasonSharedState,
 					slog.Uint64("old_cntlr_id", cntlrId),
-					slog.Uint64("td_id", tdIds[0]),
+					shared.attr(),
 				)
 				continue
 			}

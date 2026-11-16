@@ -253,7 +253,17 @@ func TestParseThinPoolStatus(t *testing.T) {
 		{"named, with needs_check", "pool: 0 1024 thin-pool 3 12/4096 5/62 " +
 			"- ro discard_passdown queue_if_no_space needs_check 1024",
 			&ThinPoolStatus{12, 4096, 5, 62, true}},
+		{"read-only without needs_check, a held root",
+			"0 1024 thin-pool 3 4096/4096 5/62 77 ro discard_passdown " +
+				"queue_if_no_space - 1024",
+			&ThinPoolStatus{4096, 4096, 5, 62, false}},
+		{"out of data space", "0 1024 thin-pool 3 12/4096 62/62 - " +
+			"out_of_data_space discard_passdown queue_if_no_space - 1024",
+			&ThinPoolStatus{12, 4096, 62, 62, false}},
+		{"no mode word", "0 1024 thin-pool 3 12/4096 5/62",
+			&ThinPoolStatus{12, 4096, 5, 62, false}},
 		{"a failed pool", "0 1024 thin-pool Fail", nil},
+		{"a status read that failed", "0 1024 thin-pool Error", nil},
 		{"no pool", "0 1024 linear 8:0 0", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,6 +278,27 @@ func TestParseThinPoolStatus(t *testing.T) {
 				t.Fatalf("got %+v %v, want %+v", got, ok, tc.want)
 			}
 		})
+	}
+}
+
+// TestThinPoolFault pins the two words dm-thin prints in place of a pool's
+// numbers (pool_status): Fail for a pool it failed, Error for a status read
+// that could not read the metadata; every other line has none.
+func TestThinPoolFault(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"0 1024 thin-pool Fail", "Fail"},
+		{"pool: 0 1024 thin-pool Error", "Error"},
+		{"0 1024 thin-pool Fail\n", "Fail"},
+		{"0 1024 thin-pool 3 12/4096 5/62 - rw discard_passdown " +
+			"queue_if_no_space - 1024", ""},
+		{"0 1024 thin-pool", ""},
+		{"0 1024 clone Fail", ""},
+		{"", ""},
+	} {
+		if got := ThinPoolFault(tc.line); got != tc.want {
+			t.Errorf("ThinPoolFault(%q) = %q, want %q", tc.line, got,
+				tc.want)
+		}
 	}
 }
 

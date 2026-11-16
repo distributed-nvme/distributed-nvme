@@ -346,6 +346,11 @@ type fakeDm struct {
 	// needs_check flag, under which a resume grows nothing.
 	poolMetaBlocks uint64
 	poolNeedsCheck bool
+	// poolMode is the mode word of the pool's status line, "rw" when
+	// empty and "ro" under poolNeedsCheck; poolFault, when set, is the word
+	// the line carries in place of its numbers ("Fail", "Error").
+	poolMode  string
+	poolFault string
 }
 
 type fakeArray struct {
@@ -2372,14 +2377,21 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		// parses the two used/total pairs out of this, and
 		// the converge and the read compare the metadata total with
 		// the metadata device (CN13).
-		check := "-"
+		if dm.poolFault != "" {
+			return fmt.Sprintf("0 %s thin-pool %s\n", sectors,
+				dm.poolFault), 0
+		}
+		check, mode := "-", "rw"
+		if dm.poolMode != "" {
+			mode = dm.poolMode
+		}
 		if dm.poolNeedsCheck {
-			check = "needs_check"
+			check, mode = "needs_check", "ro"
 		}
 		return fmt.Sprintf(
-			"0 %s thin-pool 0 12/%d 5/%s %s rw discard_passdown "+
+			"0 %s thin-pool 0 12/%d 5/%s %s %s discard_passdown "+
 				"queue_if_no_space %s 1024\n",
-			sectors, dm.poolMetaBlocks, fields[6], held, check), 0
+			sectors, dm.poolMetaBlocks, fields[6], held, mode, check), 0
 	case "clone":
 		if dm.metaMode == common.CloneMetadataFail {
 			return fmt.Sprintf("0 %s clone Fail\n", sectors), 0

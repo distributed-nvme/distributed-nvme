@@ -4520,7 +4520,10 @@ read it (Clones, Migrations).
 `reason` (`ResReason`) is the cause of a row's status that a control-plane
 decision reads: `RES_REASON_NONE` on a row no rule gives a reason;
 `RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets on an `ERROR` row
-and `dnv-worker.md` HL2 reads; `RES_REASON_AWAITING_CUTOVER`, which
+and `dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
+`RES_REASON_POOL_FAILED`, which `cnagent.md` CN13 sets on an `ERROR` pool row
+whose status line carries needs_check, or `Fail` or `Error` in place of its
+numbers, the first of which `dnv-worker.md` HL2 reads; `RES_REASON_AWAITING_CUTOVER`, which
 `dnagent.md` DN13 sets on a migration destination's two `PROVISIONING`
 migration rows and `dnv-worker.md` RW18 reads; `RES_REASON_SP_LEVEL`, which
 `cnagent.md` CN19 sets on every `MISSING` row its pool's level suppresses;
@@ -7386,9 +7389,19 @@ document and only pointed to here.
 * **No thin-metadata repair path is specified.** Pool metadata is redundant
   at the block layer (meta groups can be `RedundMdRaid1`), but there is no
   "thin_check"-on-activate or "thin_repair" flow for a pool whose dm-thin
-  metadata is corrupt. A pool-metadata `RES_STATUS_ERROR` is therefore an
-  operator-intervention event (activate read-only, "thin_repair" onto fresh
-  space by hand).
+  metadata carries needs_check or is corrupt. A pool whose metadata
+  carries needs_check — dm-thin sets it after a failed metadata operation —
+  reads `RES_STATUS_ERROR` with `RES_REASON_POOL_NEEDS_CHECK` (`cnagent.md`
+  CN13), which no failover cures, since every node that opens the pool
+  reads the flag on its metadata (`dnv-worker.md` HL2). Metadata corrupt
+  past the open fails the pool's build on every primary, a row of the
+  cntlr's own with no reason, and corruption found while the pool runs,
+  whose needs_check write fails, reads `RES_REASON_POOL_FAILED`; either way
+  each primary meets it again, and only `dnv-worker.md` AR5's and AR7's
+  second refusals bound the failovers and replacements it costs. Each is an
+  operator-intervention event (the pool's level raised to stop its thin
+  pools, "thin_check", then "thin_repair" onto fresh space, or the flag
+  cleared when the check passes, by hand).
 * **The fabric is trusted.** dnv authenticates no user and no host beyond
   its NQN: gRPC is plaintext (`grpc.md`, Wiring), dnv's etcd client
   presents no client certificate and no username or password, so etcd must
@@ -7480,7 +7493,7 @@ document and only pointed to here.
   it up, so the waiting commit fails, and dm-thin drops the block mappings made
   since the last commit and leaves the pool read-only with its needs_check flag
   set, which nothing clears (No thin-metadata repair path is specified, above),
-  while the pool's row still reads OK (`cnagent.md` CN28). On such a group,
+  and the pool's row reads it (`cnagent.md` CN13). On such a group,
   with no live path to the destination, a finish fails the commit and a cancel
   ends the block with the pool intact. Meanwhile a node write queued behind the
   blocked call, a `SyncupCn`, holds up every later call of that agent that

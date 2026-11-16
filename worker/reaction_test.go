@@ -4008,3 +4008,142 @@ func TestReached(t *testing.T) {
 		})
 	}
 }
+
+// okStackInfo is lostStackInfo(true) with every row OK: the primary's report
+// of sharedStateFixture's stack with nothing wrong, for a test to break one
+// row of.
+func okStackInfo() *pb.CntlrInfo {
+	info := lostStackInfo(true)
+	info.SliceIdToDmPool = map[uint64]*pb.ResInfo{reactSliceId: resOk("pool")}
+	for _, m := range cntlrHealthMaps(info) {
+		for key, row := range m.rows {
+			m.rows[key] = resOk(row.GetResName())
+		}
+	}
+	for _, thin := range info.GetTdIdToThinInfo() {
+		for key, row := range thin.GetSliceIdToDmThin() {
+			thin.SliceIdToDmThin[key] = resOk(row.GetResName())
+		}
+	}
+	return info
+}
+
+// TestReactionPoolNeedsCheckIsNotATrigger pins HL2's shared-state class for
+// a slice's pool whose metadata carries dm-thin's needs_check: its pool row
+// reads RES_STATUS_ERROR with RES_REASON_POOL_NEEDS_CHECK (cnagent.md
+// CN13), the flag is on the pool's metadata, so every cntlr that takes the
+// role opens the pool read-only alike, and neither AR5 nor AR7 moves the
+// role for it; the class also holds the thin rows of that slice and the
+// stack of a td whose thin row there fails. A failed pool
+// (RES_REASON_POOL_FAILED) is the cntlr's own: a new primary opens the pool
+// from its last commit, so it fails over; and so does the needs_check pool
+// with an own row beside it.
+func TestReactionPoolNeedsCheckIsNotATrigger(t *testing.T) {
+	checked := func() *pb.ResInfo {
+		row := resErr("pool", "0 1024 thin-pool 0 12/4096 5/62 - ro "+
+			"discard_passdown queue_if_no_space needs_check 1024")
+		row.Reason = pb.ResReason_RES_REASON_POOL_NEEDS_CHECK
+		return row
+	}
+	for _, tc := range []struct {
+		name     string
+		mutate   func(info *pb.CntlrInfo)
+		failover bool
+	}{
+		{"the pool row alone", func(info *pb.CntlrInfo) {
+			info.SliceIdToDmPool[reactSliceId] = checked()
+		}, false},
+		{"a thin row of that slice", func(info *pb.CntlrInfo) {
+			info.SliceIdToDmPool[reactSliceId] = checked()
+			info.TdIdToThinInfo[reactOtherTd].SliceIdToDmThin[reactSliceId] =
+				resErr("thin2", "create_thin: read-only pool")
+		}, false},
+		{"the stack of a td whose thin row there fails", func(
+			info *pb.CntlrInfo,
+		) {
+			info.SliceIdToDmPool[reactSliceId] = checked()
+			info.TdIdToThinInfo[reactOtherTd].SliceIdToDmThin[reactSliceId] =
+				resStatus("thin2", pb.ResStatus_RES_STATUS_MISSING)
+			info.TdIdToRaid0[reactOtherTd] = resErr("raid0-2", "x")
+			info.NsIdToDmLinear[reactOtherNs] = resErr("nsdev2", "x")
+		}, false},
+		{"an own row beside it", func(info *pb.CntlrInfo) {
+			info.SliceIdToDmPool[reactSliceId] = checked()
+			info.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
+		}, true},
+		{"a raid0 whose thins read ok", func(info *pb.CntlrInfo) {
+			info.SliceIdToDmPool[reactSliceId] = checked()
+			info.TdIdToRaid0[reactOtherTd] = resErr("raid0-2", "x")
+		}, true},
+		{"the reason on a row that is not ERROR", func(info *pb.CntlrInfo) {
+			// The thin row would be of the class were the pool row ERROR.
+			row := checked()
+			row.Status = pb.ResStatus_RES_STATUS_OK
+			info.SliceIdToDmPool[reactSliceId] = row
+			info.TdIdToThinInfo[reactOtherTd].SliceIdToDmThin[reactSliceId] =
+				resErr("thin2", "create_thin: read-only pool")
+		}, true},
+		{"a thin row of another slice", func(info *pb.CntlrInfo) {
+			// Slice 10's pool reads needs_check; a thin row of slice 11
+			// fails for a reason of its own.
+			info.SliceIdToDmPool[reactSliceId] = checked()
+			info.SliceIdToDmPool[reactSliceId+1] = resOk("pool11")
+			info.TdIdToThinInfo[reactOtherTd].SliceIdToDmThin[reactSliceId+1] =
+				resErr("thin2-11", "x")
+		}, true},
+		{"the stack of a td whose thin row fails in another slice", func(
+			info *pb.CntlrInfo,
+		) {
+			// The td's thin row in slice 10, whose pool reads needs_check,
+			// reads ok; the one in slice 11 is missing: its raid0 is the
+			// cntlr's own.
+			info.SliceIdToDmPool[reactSliceId] = checked()
+			info.SliceIdToDmPool[reactSliceId+1] = resOk("pool11")
+			info.TdIdToThinInfo[reactOtherTd].SliceIdToDmThin[reactSliceId+1] =
+				resStatus("thin2-11", pb.ResStatus_RES_STATUS_MISSING)
+			info.TdIdToRaid0[reactOtherTd] = resErr("raid0-2", "x")
+		}, true},
+		{"a failed pool", func(info *pb.CntlrInfo) {
+			row := resErr("pool", "0 1024 thin-pool Fail")
+			row.Reason = pb.ResReason_RES_REASON_POOL_FAILED
+			info.SliceIdToDmPool[reactSliceId] = row
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, sharedStateFixture(t))
+			h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+				common.DefaultPrimaryUnhealthy)
+			info := okStackInfo()
+			tc.mutate(info)
+			h.setPrimaryInfo(reactCntlrA, info)
+			h.pass()
+			if tc.failover {
+				h.wantOps("failover")
+				h.wantApplied(reactionFailover)
+				return
+			}
+			h.wantOps()
+			h.wantSkipped(reactionFailover, "shared_state")
+			rec := h.logs.withMsg(msgReactionSkipped)[0]
+			if got, _ := rec["slice_id"].(float64); uint64(got) !=
+				reactSliceId {
+				t.Fatalf("slice_id = %v, want %d", rec["slice_id"],
+					reactSliceId)
+			}
+		})
+	}
+
+	t.Run("no replacement of a sole primary", func(t *testing.T) {
+		h := newReactHarness(t, sharedStateFixture(t))
+		h.state.Cntlrs[reactCntlrB].Disabled = true
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy)
+		h.cnCands(reactCnC)
+		info := okStackInfo()
+		info.SliceIdToDmPool[reactSliceId] = checked()
+		h.setPrimaryInfo(reactCntlrA, info)
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionReplaceCntlr, "shared_state")
+	})
+}

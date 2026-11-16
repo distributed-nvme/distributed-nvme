@@ -1094,7 +1094,7 @@ func resStatus(name string, status pb.ResStatus) *pb.ResInfo {
 // resLostId is the thin row of a converge's report whose build found the thin
 // id gone from its slice's pool: RES_STATUS_ERROR with the reason
 // RES_REASON_THIN_ID_LOST (cnagent.md CN14), which HL2's shared-state class
-// reads (sharedStateTds), and details holding what the command printed.
+// reads (sharedStateOf), and details holding what the command printed.
 func resLostId(name string, details string) *pb.ResInfo {
 	res := resErr(name, details)
 	res.Reason = pb.ResReason_RES_REASON_THIN_ID_LOST

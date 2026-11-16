@@ -992,7 +992,7 @@ func cntlrHealthMaps(info *pb.CntlrInfo) []cntlrRowMap {
 		{"ns_id_to_dm_linear", info.GetNsIdToDmLinear()},
 		{"td_id_to_raid0", info.GetTdIdToRaid0()},
 		{"td_id_to_dm_error", info.GetTdIdToDmError()},
-		{"slice_id_to_dm_pool", info.GetSliceIdToDmPool()},
+		{poolMapLabel, info.GetSliceIdToDmPool()},
 		{"slice_id_to_meta", info.GetSliceIdToMeta()},
 		{"slice_id_to_data", info.GetSliceIdToData()},
 		{"grp_id_to_md_raid", info.GetGrpIdToMdRaid()},
@@ -1018,7 +1018,7 @@ const thinMapLabel = "slice_id_to_dm_thin"
 // reply: any RES_STATUS_ERROR row of the latest known CntlrInfo OTHER than
 // leg_id_to_leg, whose rows belong to the legs (below), and side_id_to_path
 // (cntlrHealthMaps). A row of either of
-// HL2's classes counts (sharedStateTds): the class steers AR5 and AR7, not
+// HL2's classes counts (sharedStateOf): the class steers AR5 and AR7, not
 // the verdict, so the row stays visible and the epoch set.
 func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 	if !accepted(code) {
@@ -1064,29 +1064,42 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 	return rows
 }
 
-// sharedStateTds applies HL2's two row classes to one CntlrInfo. A row is of
-// the shared-state class when it belongs to the stack of a created td (state)
-// whose thin row, in some slice, reads RES_STATUS_ERROR with the reason
-// RES_REASON_THIN_ID_LOST (architecture.md, Live-state reporting): the cn
-// agent's build of a created td's thin volume found the id gone from its
-// slice's pool (cnagent.md CN14). The reason is a field of the row, never a
-// text in its details, and only a converge's observation carries it: a
-// background read's probe finds the volume absent and reads it MISSING, so a
-// round carries the reason only while it answers from the converge's
-// observation, until the next read replaces it (dnagent.md SH28, SH29). The
-// class holds the td's own rows — its thin rows, its raid0 and its dm-error —
-// and every row of an object that exists for it alone — the ns-dev and the
-// nvmet namespace of each of its namespaces, the three rows of a transfer out
-// of one of them, the two of a clone onto it. The pool lives on the SP's legs,
-// so whichever cntlr holds the primary role reads the same rows, and no
-// failover or replacement brings the td, or anything over it, back: an
-// operator does (architecture.md, Known limits).
+// sharedStateOf applies HL2's two row classes to one CntlrInfo. A row is of
+// the shared-state class in two cases, each read from the rows' reasons,
+// never from a text in their details:
+//
+//   - it belongs to the stack of a created td (state) whose thin row, in
+//     some slice, reads RES_STATUS_ERROR with the reason
+//     RES_REASON_THIN_ID_LOST (architecture.md, Live-state reporting): the
+//     cn agent's build of a created td's thin volume found the id gone from
+//     its slice's pool (cnagent.md CN14). Only a converge's observation
+//     carries that reason: a background read's probe finds the volume
+//     absent and reads it MISSING, so a round carries the reason only while
+//     it answers from the converge's observation, until the next read
+//     replaces it (dnagent.md SH28, SH29).
+//   - it is the pool row of a slice that reads RES_STATUS_ERROR with
+//     RES_REASON_POOL_NEEDS_CHECK (cnagent.md CN13), a thin row of that
+//     slice, or a row of the stack of a td whose thin row in that slice
+//     does not read RES_STATUS_OK: dm-thin keeps needs_check in the pool's
+//     metadata, so the pool is read-only on every node that opens it, and a
+//     thin volume it cannot make fails there alike. Both channels carry
+//     this reason.
+//
+// A td's stack is its own rows — its thin rows, its raid0 and its dm-error
+// — and every row of an object that exists for it alone — the ns-dev and
+// the nvmet namespace of each of its namespaces, the three rows of a
+// transfer out of one of them, the two of a clone onto it. The pool lives
+// on the SP's legs, so whichever cntlr holds the primary role reads the same
+// rows, and no failover or replacement brings the td, or the pool, back: an
+// operator does (architecture.md, Known limits). A pool that dm-thin failed
+// (RES_REASON_POOL_FAILED) is not of the class: the failure lives in the
+// loaded pool alone, and a new primary opens the pool from its last commit.
 // Every other ERROR row is the cntlr's own.
-// It returns those tds, ascending, when the info carries ERROR rows and every
-// one of them is of the shared-state class, and nil when one is the cntlr's
-// own or there is none. Both classes set Cntlr.err_epoch alike
+// It returns the class's causes when the info carries ERROR rows and every
+// one of them is of the shared-state class, and none when one is the
+// cntlr's own or there is none. Both classes set Cntlr.err_epoch alike
 // (cntlrObservation): the class steers AR5 and AR7 alone.
-func sharedStateTds(info *pb.CntlrInfo, state *model.SpState) []uint64 {
+func sharedStateOf(info *pb.CntlrInfo, state *model.SpState) sharedState {
 	lost := make(map[uint64]bool)
 	for _, td := range state.Tds {
 		if !td.GetCreated() {
@@ -1100,21 +1113,66 @@ func sharedStateTds(info *pb.CntlrInfo, state *model.SpState) []uint64 {
 			}
 		}
 	}
-	if len(lost) == 0 {
-		return nil
+	checked := make(map[uint64]bool)
+	for sliceId, res := range info.GetSliceIdToDmPool() {
+		if res.GetStatus() == pb.ResStatus_RES_STATUS_ERROR &&
+			res.GetReason() == pb.ResReason_RES_REASON_POOL_NEEDS_CHECK {
+			checked[sliceId] = true
+		}
+	}
+	if len(lost) == 0 && len(checked) == 0 {
+		return sharedState{}
+	}
+	held := make(map[uint64]bool)
+	for tdId, thin := range info.GetTdIdToThinInfo() {
+		for sliceId, res := range thin.GetSliceIdToDmThin() {
+			if checked[sliceId] &&
+				res.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+				held[tdId] = true
+			}
+		}
 	}
 	stacks := newTdStacks(state)
 	for _, row := range cntlrErrorRows(info) {
-		tdId, ok := stacks.owner(row)
-		if !ok || !lost[tdId] {
-			return nil
+		if (row.label == poolMapLabel || row.label == thinMapLabel) &&
+			checked[row.key] {
+			continue
 		}
+		if tdId, ok := stacks.owner(row); ok && (lost[tdId] || held[tdId]) {
+			continue
+		}
+		return sharedState{}
 	}
-	return sortedKeys(lost)
+	return sharedState{tdIds: sortedKeys(lost), sliceIds: sortedKeys(checked)}
 }
 
+// sharedState is what sharedStateOf finds: the created tds whose thin id a
+// pool lost, and the slices whose pool reads needs_check, when they account
+// for every ERROR row of a report.
+type sharedState struct {
+	tdIds    []uint64
+	sliceIds []uint64
+}
+
+// holds reports whether the report's ERROR rows are all of the class.
+func (s sharedState) holds() bool {
+	return len(s.tdIds) != 0 || len(s.sliceIds) != 0
+}
+
+// attr is the cause a `reaction skipped` record names: the first slice
+// whose pool reads needs_check, else the first td whose thin id is lost.
+func (s sharedState) attr() slog.Attr {
+	if len(s.sliceIds) != 0 {
+		return slog.Uint64("slice_id", s.sliceIds[0])
+	}
+	return slog.Uint64("td_id", s.tdIds[0])
+}
+
+// poolMapLabel labels a CntlrInfo's pool rows (cntlrHealthMaps).
+const poolMapLabel = "slice_id_to_dm_pool"
+
 // tdStacks maps the rows of the objects that exist for one td alone to that
-// td (sharedStateTds), from the SP's desired state: a namespace to its td, a
+// td (sharedStateOf), from the SP's desired state: a namespace to its td, a
 // transfer to the td of the namespace it exports, a clone to its destination.
 type tdStacks struct {
 	ns    map[uint64]uint64

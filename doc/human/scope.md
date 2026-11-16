@@ -485,12 +485,20 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
   leg was wiped". Not seen in the lab.
 - **A read-only or corrupt thin pool has no repair path.** A failed commit
-  leaves a slice's thin pool read-only. Corrupt thin pool metadata has no
+  leaves a slice's thin pool read-only, with dm-thin's mark that its
+  metadata needs a check. The mark is kept in the pool's metadata, so the
+  pool opens read-only on every controller node. The primary reports the
+  pool as an error, and the worker logs it and starts no failover, since a
+  new primary would meet the same pool. Corrupt thin pool metadata has no
   check and no repair flow in dnv. State: procedure to write, the repair
   by hand onto fresh space, with the level steps, the names of the devices
   involved, and the tools thin_check and thin_repair, with a test of the
-  cn agent suite. Fix
-  decided: the agent reports the pool's mode (section 9).
+  cn agent suite. A pool that dm-thin failed without that mark, or that is
+  read-only because its metadata is full, is not this case: the first is
+  failed over, since a new primary opens the pool from its last commit, and
+  the second gets more metadata from the auto-grow. Seen in the lab: a
+  pool with the mark opened read-only, a failed pool opened again as
+  writable, and a full one became writable after its metadata grew.
 - **A group whose in-sync leg dies during a copy waits for a forced
   start.** A repair finishes once the primary reports the new leg in place,
   while md may still copy onto it. The old leg dies during the copy. md
@@ -924,15 +932,6 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   on port 9808 or 9809. State: not yet; log
   handling goes into the operations doc. Fix decided: one gateway read,
   with its dnvctl command, lists what is wrong across the cluster.
-- **A read-only thin pool reads ok.** dm-thin turns a pool read-only on a
-  failed commit. The pool's row stays ok; only its text, dm-thin's own
-  status line, says so, and the worker reads only the usage numbers.
-  State: fix decided, the agent reports the pool's mode. With the fix, a
-  pool that dm-thin marks as needing a check, or a failed pool, will be an
-  error row of a fault a failover cannot cure: a new primary would meet
-  the same pool, so the worker will log it and start no failover. A pool
-  that is read-only because its metadata is full will stay ok, and the
-  auto-grow of the metadata is its cure. Not seen in the lab.
 - **A repair that waits gives no reason.** State: fix decided, the primary
   reports the reason and the worker logs it. Seen in the lab.
 - **A retired leg's partial mark can miss a short stay in the array.** A

@@ -90,15 +90,48 @@ func (s *CnAgentServer) ensureSlice(
 			poolKey, sp.poolFinalName, err.Error())
 		return false
 	}
-	// A pool still short of its metadata device — the reload above did not
-	// grow it — says so as the read does (probePool).
-	reason := pb.ResReason_RES_REASON_NONE
-	if poolMetaShort(raw, sp.metaSectors) {
-		reason = pb.ResReason_RES_REASON_DIFFERS
-	}
+	// The row by the pool's mode, as the read reads it (poolHealth). A pool
+	// that does not write is still a pool: the thin volumes over it report
+	// their own state, so the converge goes on over it.
+	status, reason := poolHealth(raw, sp.metaSectors)
 	info.SliceIdToDmPool[sp.sliceId] = st.tracker.SetReason(
-		poolKey, sp.poolFinalName, pb.ResStatus_RES_STATUS_OK, raw, reason)
+		poolKey, sp.poolFinalName, status, raw, reason)
 	return true
+}
+
+// poolHealth is CN13's pool row from one `dmsetup status` line of a pool
+// whose table is as wanted, the converge's and the read's alike:
+//
+//   - a line that carries `Fail` or `Error` in place of its numbers
+//     (common.ThinPoolFault) reads RES_STATUS_ERROR with
+//     RES_REASON_POOL_FAILED: dm-thin failed the loaded pool, or could not
+//     read its metadata. The failure lives in the loaded pool alone, so it
+//     is the cntlr's own: a new primary opens the pool from its last commit.
+//   - a line with needs_check reads RES_STATUS_ERROR with
+//     RES_REASON_POOL_NEEDS_CHECK: the flag is in the pool's metadata, so
+//     the pool is read-only on every node that opens it until an operator
+//     repairs it, and the worker's shared-state class reads the reason
+//     (dnv-worker.md HL2).
+//   - any other line reads RES_STATUS_OK: a pool that writes, one out of
+//     data space, and one read-only for want of metadata space, whose cure
+//     is the metadata auto-grow (dnv-worker.md AR6), which an error row
+//     would stop; with RES_REASON_DIFFERS while it is short of its metadata
+//     device (poolMetaShort), so the verdict names it (CN30).
+//
+// The details are the raw line in every case.
+func poolHealth(raw string, metaSectors uint64) (pb.ResStatus, pb.ResReason) {
+	if common.ThinPoolFault(raw) != "" {
+		return pb.ResStatus_RES_STATUS_ERROR,
+			pb.ResReason_RES_REASON_POOL_FAILED
+	}
+	if st, ok := common.ParseThinPoolStatus(raw); ok && st.NeedsCheck {
+		return pb.ResStatus_RES_STATUS_ERROR,
+			pb.ResReason_RES_REASON_POOL_NEEDS_CHECK
+	}
+	if poolMetaShort(raw, metaSectors) {
+		return pb.ResStatus_RES_STATUS_OK, pb.ResReason_RES_REASON_DIFFERS
+	}
+	return pb.ResStatus_RES_STATUS_OK, pb.ResReason_RES_REASON_NONE
 }
 
 // poolArgs is the dm thin-pool table's arguments: these four, and nothing
@@ -473,15 +506,13 @@ func (s *CnAgentServer) probePool(
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
-	// A pool short of its metadata device serves; the reason makes the
+	// The row by the pool's mode, as the converge reads it (poolHealth). A
+	// pool short of its metadata device serves; the reason makes the
 	// verdict name the row, so the worker re-sends the SyncupCntlr whose
 	// converge reloads it (ensurePool; CN30). The details stay the raw
 	// status line, which the worker's auto-grow parses (dnv-worker.md AR6).
-	if poolMetaShort(raw, sp.metaSectors) {
-		return pb.ResStatus_RES_STATUS_OK, raw,
-			pb.ResReason_RES_REASON_DIFFERS
-	}
-	return pb.ResStatus_RES_STATUS_OK, raw, none
+	status, reason := poolHealth(raw, sp.metaSectors)
+	return status, raw, reason
 }
 
 // poolMetaShort reports whether a thin pool's status line shows fewer total

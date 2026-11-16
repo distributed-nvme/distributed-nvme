@@ -837,8 +837,9 @@ func TestAStoppedMetadataGrowIsFinished(t *testing.T) {
 
 // TestAShortPoolUnderNeedsCheckIsLeftAlone: under needs_check dm-thin grows
 // no metadata device at a resume, so a pool short of its concat with the
-// flag set is not reloaded, which would change nothing on every pass, and
-// its read row carries no reason (CN13).
+// flag set is not reloaded, which would change nothing on every pass; its
+// read row reads the flag (RES_REASON_POOL_NEEDS_CHECK), not the short
+// total, and the verdict names nothing (CN13, CN30).
 func TestAShortPoolUnderNeedsCheckIsLeftAlone(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -857,7 +858,7 @@ func TestAShortPoolUnderNeedsCheckIsLeftAlone(t *testing.T) {
 	}
 	assertNoCall(t, node, "cmd dmsetup reload "+poolName(srv))
 	if row := poolRow(t, srv); row.GetReason() !=
-		pb.ResReason_RES_REASON_NONE {
+		pb.ResReason_RES_REASON_POOL_NEEDS_CHECK {
 		t.Fatalf("the read of a pool under needs_check: %v", row)
 	}
 	if verdict := checkCntlrVerdict(t, srv, 3); verdict.GetCode() != 0 {

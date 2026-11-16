@@ -2236,6 +2236,26 @@ unreadable, and what CN12's `--assume-clean` rests on. A pool out of data
 space queues writes and then fails them when its own timeout runs out
 (`architecture.md`, Known limits).
 
+The pool's row (`slice_id_to_dm_pool`) reads the status line's state, on the
+converge and on the read alike, its details always the raw line
+(`poolHealth`). A line that carries `Fail` in place of its numbers — dm-thin
+failed the loaded pool — or `Error` — the status read could not read the
+pool's metadata — reads `RES_STATUS_ERROR` with `RES_REASON_POOL_FAILED`: the
+failure is a state of the loaded pool alone, and a new primary opens the
+pool from its last commit, so it is the cntlr's own fault (`dnv-worker.md`
+HL2). A line with needs_check reads `RES_STATUS_ERROR` with
+`RES_REASON_POOL_NEEDS_CHECK`: dm-thin keeps that flag in the pool's
+metadata and opens the pool read-only wherever it is opened, until an
+operator repairs the metadata (`architecture.md`, Known limits), so no
+failover cures it, and the worker's shared-state class reads the reason
+(`dnv-worker.md` HL2). Every other line reads `RES_STATUS_OK`: a pool that
+writes; one out of data space; and one whose mode reads `ro` with no
+needs_check, which is a pool out of metadata space, since the table never
+asks for read-only. dm-thin makes that pool writable again when a resume
+finds a larger metadata device, so its cure is the metadata auto-grow
+(`dnv-worker.md` AR6), which an error row would stop. The verdict names
+neither error row (CN30): a converge opens no pool again.
+
 `GrowSlice` arrives as longer group lists: the converge reloads the
 concats with the appended targets and then reloads the pool. The pool
 table carries the data length and the low-water mark derived from the
@@ -2270,8 +2290,8 @@ provisioning — out-of-order provisioning of two appended groups simply
 waits for the earlier one. A grown group whose leg never provisions can be
 withdrawn by the worker under the conditions of `dnv-worker.md` AR6, which
 removes it from the request before any array is built from it. The serving pool's `slice_id_to_dm_pool` row
-keeps reporting `RES_STATUS_OK` with its raw `dmsetup status` line
-throughout — the auto-grow of `architecture.md`, Automatic reactions,
+keeps reading by its mode (above), `RES_STATUS_OK` for a pool that writes,
+with its raw `dmsetup status` line throughout — the auto-grow of `architecture.md`, Automatic reactions,
 parses that line, and a `PROVISIONING` pool row would silently switch
 auto-grow off. In the pool layers `PROVISIONING` marks only the deferred
 resources, never the live ones. A concat may only ever grow, and the agent
@@ -4098,13 +4118,16 @@ The rows, each with its `res_name` and what its probe checks:
   `dmsetup status` with the `--noflush` flag (`dnagent.md` SH17); the
   details are the raw status line — the worker
   parses data and metadata used and total out of it for the auto-grow of
-  `architecture.md`, Automatic reactions. A pool whose metadata total is
-  short of its metadata device reads `RES_STATUS_OK` with
-  `RES_REASON_DIFFERS` and the same raw line, on a converge and a read
-  alike (CN13). The serving pool stays
-  `RES_STATUS_OK` with that raw line even while a deferred group waits to
-  be grown in (CN13): `PROVISIONING` never marks the serving pool, because
-  it would switch auto-grow off.
+  `architecture.md`, Automatic reactions. The row reads as CN13 says,
+  on a converge and a read alike: `RES_STATUS_ERROR` with
+  `RES_REASON_POOL_FAILED` for a line that carries `Fail` or `Error` in
+  place of its numbers, `RES_STATUS_ERROR` with
+  `RES_REASON_POOL_NEEDS_CHECK` for one with needs_check, and
+  `RES_STATUS_OK` otherwise, with `RES_REASON_DIFFERS` while its metadata
+  total is short of its metadata device; the details are the raw line in
+  every case. A serving pool keeps its row so even while a deferred group
+  waits to be grown in (CN13): `PROVISIONING` never marks the serving pool,
+  because it would switch auto-grow off.
 * `slice_id_to_meta` and `slice_id_to_data`, named by the `CnPoolMetaName`
   and the `CnPoolDataName`: the multi-target `dmsetup table` matches the
   group concat, each target naming its group's device by number (CN13);
@@ -4329,14 +4352,15 @@ its details and the converge pass continues with the remaining resources.
 Two things qualify that. The details are for people: where the worker must
 tell one cause of a row's status from another, the row says so in its reason
 (`architecture.md`, Live-state reporting), never in the text. The cn agent
-sets five reasons: CN14's lost thin id, from the command wrapper's typed
+sets seven reasons: CN14's lost thin id, from the command wrapper's typed
 error (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`); and,
 from its own pass's state, CN19's level, from the level the pass's plan
 reads, CN18's source fault, which marks the clone rows this node keeps
 missing because it does not read the clone's source as ready, from step 1's
 reading of the source, CN28's differs, on a namespace whose ANA group
-differs and on a thin pool short of its metadata device (CN13), and CN28's
-parked, on a parked ns-dev. And a clone's two rows take their status from CN18's
+differs and on a thin pool short of its metadata device (CN13), CN28's
+parked, on a parked ns-dev, and CN13's needs_check and failed pool, from the
+pool's status line. And a clone's two rows take their status from CN18's
 shared rule, from the live state, on a converge and a read alike, a failed
 command's output joining their details. Probes create, change and remove no
 object of the node — the one file the CN's read writes itself is the store's
@@ -4440,7 +4464,9 @@ reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
 namespace that serves and whose ANA group differs, or a thin pool short of
 its metadata device, CN13), as "differs". It
 names no row the level suppresses, no `RES_STATUS_PROVISIONING` row, no
-thin row a converge marks `RES_REASON_THIN_ID_LOST` (CN14), no subsystem
+thin row a converge marks `RES_REASON_THIN_ID_LOST` (CN14), no pool row that
+reads needs_check or failed (`RES_REASON_POOL_NEEDS_CHECK`,
+`RES_REASON_POOL_FAILED`, CN13), no subsystem
 whose link fails because the node's port is not there ("the port is not
 there", which the CN's verdict names), no concat the agent refuses to
 shrink, and no row of a transfer whose origin the request no longer
@@ -4657,6 +4683,14 @@ stores instead is CN23's.
 
 ## Known limits
 
+* Over a slice's pool that reads needs_check, the verdict names no thin row
+  (CN13, CN30): a thin volume of a created td that was there and is gone,
+  removed by hand say, reads `RES_STATUS_MISSING` and is built again only
+  by the converge of the next revision, though dm-thin would open it on the
+  read-only pool; and the worker's shared-state class holds its stack
+  (`dnv-worker.md` HL2), so no failover rebuilds it either. Naming such
+  rows would re-send the `SyncupCntlr` on every round for a td not yet
+  created there, whose `create_thin` the read-only pool refuses each time.
 * A superblock read of a member whose disk node stalls while the leg's
   path stays live and optimized waits without limit (CN12, The superblock
   read; `osclient.md`, ReadBlockDirect): a converge's assembly, forced

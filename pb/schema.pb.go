@@ -248,6 +248,22 @@ const (
 	// bitmap is read only while no namespace on it can take a write
 	// (architecture.md, Bitmap reads).
 	ResReason_RES_REASON_PARKED ResReason = 6
+	// A slice's thin pool whose metadata carries dm-thin's needs_check
+	// flag: the pool is read-only and stays so on every node that opens it,
+	// until an operator repairs its metadata. The cn agent sets it on both
+	// channels, on that RES_STATUS_ERROR slice_id_to_dm_pool row, its
+	// details the raw status line (cnagent.md CN13), and the worker's
+	// shared-state class reads it, so no failover or cntlr replacement
+	// follows it (dnv-worker.md HL2).
+	ResReason_RES_REASON_POOL_NEEDS_CHECK ResReason = 7
+	// A slice's thin pool that dm-thin failed (its status line reads Fail),
+	// or whose status read could not read its metadata (Error). The cn agent
+	// sets it on both channels, on that RES_STATUS_ERROR slice_id_to_dm_pool
+	// row, its details the raw status line (cnagent.md CN13). The failure
+	// lives in the loaded pool alone, so it is the cntlr's own fault: a new
+	// primary opens the pool from its last commit. The verdict does not
+	// name the row, since no converge opens the pool again (CN30).
+	ResReason_RES_REASON_POOL_FAILED ResReason = 8
 )
 
 // Enum value maps for ResReason.
@@ -260,6 +276,8 @@ var (
 		4: "RES_REASON_SOURCE_FAULT",
 		5: "RES_REASON_DIFFERS",
 		6: "RES_REASON_PARKED",
+		7: "RES_REASON_POOL_NEEDS_CHECK",
+		8: "RES_REASON_POOL_FAILED",
 	}
 	ResReason_value = map[string]int32{
 		"RES_REASON_NONE":             0,
@@ -269,6 +287,8 @@ var (
 		"RES_REASON_SOURCE_FAULT":     4,
 		"RES_REASON_DIFFERS":          5,
 		"RES_REASON_PARKED":           6,
+		"RES_REASON_POOL_NEEDS_CHECK": 7,
+		"RES_REASON_POOL_FAILED":      8,
 	}
 )
 
@@ -18694,7 +18714,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x05*\xc3\x01\n" +
+	"\x12RES_STATUS_PENDING\x10\x05*\x80\x02\n" +
 	"\tResReason\x12\x13\n" +
 	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
 	"\x17RES_REASON_THIN_ID_LOST\x10\x01\x12\x1f\n" +
@@ -18702,7 +18722,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x13RES_REASON_SP_LEVEL\x10\x03\x12\x1b\n" +
 	"\x17RES_REASON_SOURCE_FAULT\x10\x04\x12\x16\n" +
 	"\x12RES_REASON_DIFFERS\x10\x05\x12\x15\n" +
-	"\x11RES_REASON_PARKED\x10\x06*O\n" +
+	"\x11RES_REASON_PARKED\x10\x06\x12\x1f\n" +
+	"\x1bRES_REASON_POOL_NEEDS_CHECK\x10\a\x12\x1a\n" +
+	"\x16RES_REASON_POOL_FAILED\x10\b*O\n" +
 	"\bRepStage\x12\x15\n" +
 	"\x11REP_STAGE_CREATED\x10\x00\x12\x15\n" +
 	"\x11REP_STAGE_STARTED\x10\x01\x12\x15\n" +
