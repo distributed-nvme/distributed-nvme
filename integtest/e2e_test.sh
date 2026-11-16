@@ -422,7 +422,8 @@ THR_CUT_SHOW="$THR_CUT_SHOW --thr-side $THR_CUT_SIDE --thr-leg $THR_CUT_LEG"
 # time out of `sp get`, which is also the proof that $THR split into eight
 # words instead of arriving as one; react's progress messages name the
 # individual threshold the operator is waiting on (primary_unhealthy in step
-# 3, cntlr_unhealthy in step 4, side/leg_unhealthy in steps 5 to 9); and
+# 3, cntlr_unhealthy in step 4, side/leg_unhealthy in steps 5 to 9,
+# leg_unhealthy in step 10); and
 # three numbers are computed from them. Two are react step 6's, on a group
 # with no healthy leg: a wait, its watch for side_unhealthy plus a few
 # passes, which must outlast the threshold it proves AR8 holds through,
@@ -885,11 +886,12 @@ on_exit() {
 		log ""
 		log "########## diagnostics ##########"
 		diagnostics || true
-		# The two injectors a failed run does not leave in place (E2E6): the
-		# next run's cleanup would remove them, but a token bucket on a
-		# controller node's port would slow every suite run before that, and
-		# a reject rule on one would refuse its connects to the disk nodes'
-		# ports. The diagnostics above have shown both.
+		# The three injectors a failed run does not leave in place (E2E6):
+		# the next run's cleanup would remove them, but a token bucket on a
+		# controller node's port would slow every suite run before that, a
+		# reject rule on one would refuse its connects to the disk nodes'
+		# ports, and a silencing rule on a disk node would stall every
+		# connect to its port. The diagnostics above have shown all three.
 		if [ "${COPY_FO_THROTTLE_CN:--1}" -ge 0 ]; then
 			log ""
 			log "--- taking the copy case's throttle off cn$COPY_FO_THROTTLE_CN"
@@ -899,6 +901,11 @@ on_exit() {
 			log ""
 			log "--- taking the react case's reject rule off cn$REACT_OIC_REJECT_CN"
 			helper_cn "$REACT_OIC_REJECT_CN" unreject >&2 || true
+		fi
+		if [ "${REACT_MC_SILENT_DN:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the react case's silencing rule off dn$REACT_MC_SILENT_DN"
+			helper_dn "$REACT_MC_SILENT_DN" unsilence >&2 || true
 		fi
 		log ""
 		if [ "$dirty" -eq 1 ]; then
@@ -1691,6 +1698,9 @@ derive_params() {
 	# Steps 5 to 8 steer so that a later step can kill that leg's DN alone;
 	# step 9 so that every DN the fresh leg can land on carries no side, and
 	# its reject rule lists them all and refuses no connect to a live side.
+	# Step 10 steers its migration's destination the same way, so that the
+	# silence of that DN takes down the one leg, and dies when the steer
+	# leaves none on a VM outside the group's.
 	# Copy step 6 does too:
 	# it needs step 5's fresh new leg on a DN that carries no other side, so
 	# that killing that DN takes down the new leg alone. The bound does not
@@ -1750,9 +1760,9 @@ derive_params() {
 			log "         needs step 5's new leg on a side-less disk node;" \
 				"below the bound nothing makes the"
 			log "         scan pick one, and step 6 DIES on an occupied one." \
-				"React steps 5 to 9 need"
+				"React steps 5 to 10 need"
 			log "         a side-less disk node for each worker's repair's" \
-				"fresh leg, and DIE without one."
+				"fresh leg or migration destination, and DIE without one."
 			if [ "$DNS_PER_VM" -lt "$create_bound" ]; then
 				log "         It is also below the create's own bound" \
 					"$create_bound, so \`sp create\` may itself fail"
@@ -2481,9 +2491,11 @@ cn_wait_ana() { # <v> <nqn> <traddr> <trsvcid> <want> [secs]
 # not: host_sha_probe detaches its own and answers inside its budget,
 # host_make_pattern writes a file on the host's own disk,
 # host_write_probe writes only where dm-flakey fails the bio instead of
-# requeueing it (its header says why that is safe), and the cutoff case's
-# write loop (wloop_start in the host helper) runs detached and reports
-# through files, because its writes are meant to queue through a failover.
+# requeueing it (its header says why that is safe), and the write loop
+# (wloop_start in the host helper) runs detached and reports through files,
+# because its writes are meant to queue: through a failover in the cutoff
+# case, and on md until the primary cuts a migrating leg's path in react's
+# step 10.
 # ---------------------------------------------------------------------------
 
 # ssh_host_watched is ssh_host under a watchdog on the DRIVER: WAIT_HOST
@@ -3663,6 +3675,21 @@ losetup_list() {
 	return 0
 }
 
+# --- nftables ----------------------------------------------------------------
+
+# nft_bin prints the nft binary, or nothing on a node without one. Both node
+# roles carry one rule of the react case's: a controller node its reject rule
+# (reject_to) and a disk node its silencing rule (silence_port).
+nft_bin() {
+	if command -v nft >/dev/null 2>&1; then
+		echo nft
+	elif [ -x /usr/sbin/nft ]; then
+		echo /usr/sbin/nft
+	else
+		echo ""
+	fi
+}
+
 # --- the dump's reads that can wait in the kernel ------------------------------
 
 # DIAG_READ_SECS bounds a node dump's two detached reads (diag_kernel_reads):
@@ -3967,6 +3994,124 @@ side_sha() { # <sp hex16> <side hex16>:<MiB>…
 	return 0
 }
 
+# --- the react case's silencing rule (e2e_integtest.md, The cases, react) ---
+#
+# React step 10 silences one dn instance's nvmet port, as a disk node whose
+# power went away looks from the wire. silence_port puts one nftables table
+# of this suite's own on the guest, whose two rules drop every TCP packet
+# that comes in to the port's address and port and every one the guest sends
+# from them, with no answer, so a connection to the port stalls and a new
+# connect to it is never answered. Every other port passes, the instance's
+# gRPC port among them, so its agent goes on answering the worker, and so
+# does every other instance's nvmet port on the guest. The table carries a
+# name of its own, so unsilence takes only this suite's, and every cleanup
+# takes it off before any guest lets go of anything (dn_cleanup_phase0): a
+# rule left behind would stall every later suite's connects to that port.
+SILENCE_TABLE=dnv_e2e_silence
+
+# silence_port <addr> <port> drops the traffic of one nvmet port of this
+# guest, in one nft transaction that replaces any table of this suite's,
+# and prints "silenced <addr>:<port>"; when a step fails it prints "failed:"
+# and that step's words, and leaves no table of this suite's behind.
+silence_port() {
+	local nft addr=${1:-} port=${2:-} err nl=$'\n'
+	nft=$(nft_bin)
+	if [ -z "$nft" ]; then
+		unsilence >/dev/null
+		echo "failed: no nft on this node"
+		return 0
+	fi
+	case "$addr" in
+	'' | *[!0-9.]* | .* | *. | *..*)
+		unsilence >/dev/null
+		echo "failed: '$addr' names no IPv4 address"
+		return 0
+		;;
+	esac
+	case "$port" in
+	'' | *[!0-9]*)
+		unsilence >/dev/null
+		echo "failed: '$port' names no port"
+		return 0
+		;;
+	esac
+	if err=$(printf '%s\n' \
+		"add table inet $SILENCE_TABLE" \
+		"delete table inet $SILENCE_TABLE" \
+		"table inet $SILENCE_TABLE {" \
+		"	chain inbound {" \
+		"		type filter hook input priority 0; policy accept;" \
+		"		ip daddr $addr tcp dport $port counter drop" \
+		"	}" \
+		"	chain outbound {" \
+		"		type filter hook output priority 0; policy accept;" \
+		"		ip saddr $addr tcp sport $port counter drop" \
+		"	}" \
+		"}" | "$nft" -f - 2>&1); then
+		echo "silenced $addr:$port"
+	else
+		unsilence >/dev/null
+		echo "failed: ${err//$nl/; }"
+	fi
+	return 0
+}
+
+# silence_rules prints this suite's table, its two rules' counters included,
+# on one line, and nothing when there is none, as reject_rules does for the
+# reject rule: a listing that fails prints one line saying so, so an empty
+# answer must mean none, and a node without nft prints nothing, as only nft
+# puts the table there.
+silence_rules() {
+	local nft out hit nl=$'\n'
+	nft=$(nft_bin)
+	[ -n "$nft" ] || return 0
+	if ! out=$("$nft" list tables 2>&1); then
+		echo "nft list tables failed, the silencing rule is unknown: ${out//$nl/; }"
+		return 0
+	fi
+	hit=$(printf '%s\n' "$out" | grep -cxF "table inet $SILENCE_TABLE" || true)
+	[ "$hit" != 0 ] || return 0
+	if out=$("$nft" list table inet "$SILENCE_TABLE" 2>&1); then
+		printf '%s\n' "$out" | tr -s ' \t\n' ' '
+		echo
+	else
+		echo "table inet $SILENCE_TABLE stands, and its listing failed:" \
+			"${out//$nl/; }"
+	fi
+	return 0
+}
+
+# unsilence removes this suite's table, whoever left it there, which gives
+# the port its traffic back, and prints "unsilenced".
+unsilence() {
+	local nft
+	nft=$(nft_bin)
+	if [ -n "$nft" ]; then
+		"$nft" delete table inet "$SILENCE_TABLE" >/dev/null 2>&1 || true
+	fi
+	echo unsilenced
+	return 0
+}
+
+# dn_cleanup_phase0 is the disk node's step that comes before every other
+# guest's in the cleanup (cleanup_all): the silencing rule goes, whether or
+# not this run set it, as the copy case's throttle and the react case's
+# reject rule go first on a controller node (cn_cleanup_phase1), so that
+# the hosts and the controller nodes let go of their paths to a port that
+# answers again. The reading after the removal decides the sentinel, so a
+# rule still on leaves the verb unfinished.
+dn_cleanup_phase0() {
+	local left
+	unsilence >/dev/null
+	left=$(silence_rules)
+	if [ -n "$left" ]; then
+		echo "dn_cleanup_phase0: the react case's silencing rule is still on: $left" >&2
+		return 1
+	fi
+	echo phase0
+	return 0
+}
+
 # dn_cleanup is the disk-node half of e2e_integtest.md, "Cleanup, and why the
 # order is what it is". The order is integtest/dnagent_test.sh's
 # cleanup with one change: the side subsystems' CONTROLLERS are not
@@ -4076,6 +4221,8 @@ diag() {
 	nvmet_tree
 	echo "--- losetup -a ---"
 	losetup_list
+	echo "--- the react case's silencing rule (empty: none) ---"
+	silence_rules
 	echo "--- df -h /var/tmp ---"
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
@@ -4420,17 +4567,6 @@ unthrottle() {
 # (cn_cleanup_phase1): a rule left behind would refuse every later suite's
 # connects to those ports.
 REJECT_TABLE=dnv_e2e_reject
-
-# nft_bin prints the nft binary, or nothing on a node without one.
-nft_bin() {
-	if command -v nft >/dev/null 2>&1; then
-		echo nft
-	elif [ -x /usr/sbin/nft ]; then
-		echo /usr/sbin/nft
-	else
-		echo ""
-	fi
-}
 
 # reject_to <addr:port>[,<addr:port>…] makes this node refuse its own TCP
 # connects to each listed IPv4 address and port, in one nft transaction that
@@ -5032,19 +5168,21 @@ stas_journal() {
 	return 0
 }
 
-# --- the cutoff case's write loop and kernel-log witness ---------------------
+# --- the write loop and the kernel-log witness --------------------------------
 #
 # The loop is the second host process this suite leaves running detached, and
 # like host_sha_probe's reader it reports through files, because its writes
 # are MEANT to block: through the stall between the old primary's path going
 # and the new primary's namespace turning optimized, a write is queued in the
-# kernel, not failed. Each write is ONE 4 KiB dd with conv=fsync and no
-# direct flag (rule 1), copied from slot <i mod slots> of a pattern file to the
-# same slot of the device, whose range the case pre-filled with that pattern,
-# so the range digests to the pattern at the end — a write that landed zeros or
-# in the wrong place shows there. Each finished write appends one line, `ok
-# <i> <slot> <t0> <t1>` or `fail … rc=<status>`, its times bash's EPOCHREALTIME
-# in microseconds.
+# kernel, not failed. The react case's migrating-leg step (react_migr_cut)
+# runs it too, one loop at a time on host0, where a write waits on md until
+# the primary cuts the leg's path. Each write is ONE 4 KiB dd with
+# conv=fsync and no direct flag (rule 1), copied from slot <i mod slots> of a
+# pattern file to the same slot of the device, whose range the case filled
+# with that pattern before the start, so the range digests to the pattern at
+# the end — a write that landed zeros or in the wrong place shows there. Each
+# finished write appends one line, `ok <i> <slot> <t0> <t1>` or `fail …
+# rc=<status>`, its times bash's EPOCHREALTIME in microseconds.
 #
 # THREE GUARDS keep it from writing anywhere else. First, it writes only to
 # the kernel name the by-id link resolved to at its start. Its dd never
@@ -5690,15 +5828,16 @@ diag() {
 	echo "--- stas ---"
 	stas_state
 	# The cutoff case's own state on this host: whether a stas copy is still
-	# taken (the case did not get to restore it), the config stas runs on, the
-	# daemons' journal, and the write loop's summary and logs.
+	# taken (the case did not get to restore it), the config stas runs on and
+	# the daemons' journal; then the write loop's summary and logs, the
+	# cutoff case's loop or the react case's migrating-leg step's.
 	echo "--- stas backup taken: $([ -f "$STAS_BACKUP/.taken" ] && echo yes || echo no) ---"
 	echo "--- /etc/stas/stafd.conf and stacd.conf, comments dropped ---"
 	grep -v -e '^#' -e '^[[:space:]]*$' /etc/stas/stafd.conf /etc/stas/stacd.conf \
 		2>/dev/null || true
 	echo "--- stafd/stacd journal ---"
 	stas_journal | tail -n 60
-	echo "--- cutoff write loop ---"
+	echo "--- write loop (the cutoff case's or react's migrating-leg step's) ---"
 	wloop_stat
 	logtail 20 "$WLOOP_DIR/log" "$WLOOP_DIR/dd.err" "$WLOOP_DIR/run.err"
 	echo "--- blocked tasks ---"
@@ -6557,6 +6696,11 @@ CN_COPY_TOOLS="tc ip"
 # The cleanup's unreject needs it only where the rule can be, and a node
 # without nft cannot carry it.
 CN_REACT_TOOLS="nft"
+# nft on a DN: the react case's silencing rule (silence_port), which
+# preflight_node asks of a DN only when that case runs with md-raid1, where
+# its migrating-leg step runs, as it asks a CN for the reject rule's. The
+# cleanup's unsilence needs it only where the rule can be.
+DN_REACT_TOOLS="nft"
 # The hosts run no dnv binary at all. nvme: every connect and disconnect.
 # uuidgen: /etc/nvme/hostid when it is absent. systemctl: the nvmf-connect mask
 # and the stafd/stacd check. dd + sha256sum: the host IO helpers. udevadm is
@@ -6575,6 +6719,10 @@ HOST_TOOLS="$HOST_TOOLS du df tail"
 # those steps run, as preflight_stas asks host0 for the cutoff case's own
 # tools.
 HOST_KMSG_TOOLS="dmesg"
+# The write loop (wloop_start) of the react case's migrating-leg step, which
+# preflight_host asks of host0 only when that case runs with md-raid1, as
+# preflight_stas asks it for the cutoff case's loop.
+HOST_WLOOP_TOOLS="nohup readlink"
 # The cutoff case's fence writer on host1 (stage 10): fio writes and verifies,
 # cmp reads the range after the first failed write.
 HOST_FENCE_TOOLS="fio cmp nohup pkill"
@@ -6866,6 +7014,10 @@ preflight_node() { # <role: dn|cn> <index>
 	local sshw=ssh_dn helperw=helper_dn target="" want_tools=$DN_TOOLS
 	if [ "$role" = dn ]; then
 		target=${DN[$v]}
+		if run_has_case react && [ "$REDUND" = raid1 ] &&
+			[ "$DN_VM_CNT" -gt "$LEGS" ]; then
+			want_tools="$want_tools $DN_REACT_TOOLS"
+		fi
 	else
 		sshw=ssh_cn
 		helperw=helper_cn
@@ -7103,6 +7255,17 @@ preflight_host() { # <h>
 		[ -z "$missing" ] ||
 			die "$label: missing tool(s) for the repair steps' kernel-log" \
 				"witness: $(printf '%s' "$missing" | tr '\n' ' ')"
+	fi
+
+	# The react case's migrating-leg step runs the write loop on host0 with
+	# md-raid1 and more DN VMs than legs (react_migr_cut).
+	if [ "$h" = 0 ] && [ "$REDUND" = raid1 ] && run_has_case react &&
+		[ "$DN_VM_CNT" -gt "$LEGS" ]; then
+		missing=$(ssh_host "$h" "$(tools_cmd $HOST_WLOOP_TOOLS)") ||
+			die "$label: listing the write loop's tools failed"
+		[ -z "$missing" ] ||
+			die "$label: missing tool(s) for the react case's write loop:" \
+				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
 	# Rule 6: nvme-cli's autoconnector matches the discovery AEN this
@@ -7586,6 +7749,13 @@ cleanup_all() {
 			fi
 		done
 	fi
+
+	# The react case's silencing rule comes off every DN VM before any guest
+	# lets go of anything (dn_cleanup_phase0 says why).
+	log "--- cleanup: dn phase 0 (the silencing rule, before anything goes)"
+	for v in "${!DN[@]}"; do
+		cleanup_verb ssh_dn "$v" "dn$v" phase0 dn_cleanup_phase0
+	done
 
 	log "--- cleanup: hosts (they hold the controllers)"
 	for v in "${!HOST[@]}"; do
@@ -16498,8 +16668,9 @@ case_copy() {
 
 # ---------------------------------------------------------------------------
 # Case: react — the four automatic reactions, AR5 to AR8, two forced
-# starts (AR13, CN12) and an operator's take-over of a group's repair from
-# the worker (architecture.md, Repairs)
+# starts (AR13, CN12), an operator's take-over of a group's repair from
+# the worker (architecture.md, Repairs) and a migrating leg whose serving
+# disk node goes silent (CN10, AR8)
 # (e2e_integtest.md, The cases, react)
 # ---------------------------------------------------------------------------
 #
@@ -16908,6 +17079,68 @@ REACT_OIC_UNTIL=0
 # repair with its abort flag set, before the operator's abort, 0 otherwise.
 REACT_OIC_FIRST=0
 
+# Step 10's migrating leg whose serving disk node goes silent (cnagent.md
+# CN10; dnv-worker.md AR8), on slice 0's first data group. REACT_MC_MIGR is
+# the migration's name, a bare word like copy's, free in this case's own
+# etcd. REACT_MC_SILENT_DN is the --dn guest whose silencing rule stands
+# (silence_port), -1 while none does: react_mc_unsilence takes the rule
+# off, and on_exit takes it off the guest of a run that failed with it on
+# (E2E6). It is set before the rule goes in, so a call that put the rule in
+# and then failed still leaves its guest named.
+REACT_MC_MIGR=m0
+REACT_MC_SILENT_DN=-1
+
+# common.CnLegProbeInterval — the cn agent's probe interval, at which its
+# path watcher looks a migrating leg up (cnagent.md CN10, CN11).
+CN_LEG_PROBE_INTERVAL=5
+# common.DefaultNvmeFastIoFailTmo — the fast IO fail time of every path a
+# cn agent connects to a side (NvmeHost.Connect (agent/nvmehost.go)): an IO
+# with no live path fails once the down path has been reconnecting this
+# long (cnagent.md CN10).
+NVME_FAST_IO_FAIL_TMO=5
+
+# The loop's range: the first stripe of ns 1, in 4 KiB slots, which setup's
+# pattern fills. The first stripe of $TD0 is slice 0's (the strided host IO
+# below says why), and slice 0's first data group holds it, as copy step 5
+# and react steps 5 to 9 read it, so every write of the loop goes to the
+# group the step migrates a leg of.
+# Each write puts back the bytes setup wrote, so check_sha0 still reads
+# SHA0 at the end, and a write that landed zeros shows there.
+REACT_MC_SLOTS=$((STRIPE_SIZE / 4096))
+
+# Writes the loop must finish after md has failed the member, and again
+# after md holds the group whole, before the step goes on: the positive
+# control of every zero-failure reading, as a loop stalled on the leg would
+# pass them with nothing written. A count of this suite's choosing, not a
+# constant of the tree.
+REACT_MC_WRITES=20
+
+# The bounds of step 10's two waits on the primary after the silence, beside
+# the shared ones. The cut: the path watcher's next look at the leg once its
+# serving path reads connecting, one probe interval, and WAIT_SHORT for the
+# disconnect, its log record and the driver's polling (cnagent.md CN10).
+# md's fail of the member, counted from the cut: the loop's write that waits
+# on the leg fails once the down path's fast IO fail time has run, which
+# began before the cut, and md fails the member on that failed write, so
+# that time and WAIT_SHORT again.
+REACT_MC_CUT_WAIT=$((CN_LEG_PROBE_INTERVAL + WAIT_SHORT))
+REACT_MC_FAIL_WAIT=$((NVME_FAST_IO_FAIL_TMO + WAIT_SHORT))
+
+# The loop's self-stop, in seconds: the bounds of every wait from its start
+# to its stop in step 10, summed, and one WAIT_BUILD more for the time the
+# polls and the readings between the waits take themselves, as CUT_LOOP_MAX
+# is sized. The sum is the cut (REACT_MC_CUT_WAIT) and md's fail of the
+# member (REACT_MC_FAIL_WAIT); the loop's writes after that fail, after the
+# worker's repair and after md holds the group whole again (WAIT_HOST each);
+# the worker's finish of
+# the migration and its create of the repair (WAIT_REACT each); and the
+# repair's finish, md's copy onto the fresh leg and the two cntlrs' drop of
+# the retired leg (WAIT_PROVISION each). So it outlives a passing step
+# however slow its waits, and still ends a failed one left in place. A wait
+# added between the start and the stop adds its bound here.
+REACT_MC_LOOP_MAX=$((REACT_MC_CUT_WAIT + REACT_MC_FAIL_WAIT + 3 * WAIT_HOST +
+	2 * WAIT_REACT + 4 * WAIT_PROVISION + WAIT_BUILD))
+
 # The "last observation" scratch of this section's predicates, same discipline
 # as ANA_LAST / SHA_LAST / MIGR_HYD_LAST: each is logged from inside its own
 # predicate when the value CHANGES and is never interpolated into a wait_until
@@ -16922,6 +17155,7 @@ REACT_MEMBER_LAST=""
 REACT_NO_REP_LAST=""
 REACT_FS_LAST=""
 REACT_OIC_LAST=""
+REACT_MC_LAST=""
 # The driver-clock instant react_wait_no_repair stops waiting for the pool's
 # repairs to end and dies naming them.
 REACT_NO_REP_UNTIL=0
@@ -17817,7 +18051,7 @@ react_new_leg_placed() { # <position> <leg id> <addrs> <vms>
 	log "  leg $2 on $addr took position $1 of group $REACT_GRP_ID"
 }
 
-# react_wait_no_repair is the first act of react steps 5 to 9, ahead of
+# react_wait_no_repair is the first act of react steps 5 to 10, ahead of
 # their readings and of their pick of legs: it waits until the pool holds no
 # repair at all, sp_conf.repair_name_list empty in `sp get`, logs every
 # repair it sees meanwhile, and dies naming the ones still there after
@@ -18177,7 +18411,8 @@ react_steer() { # <group vms>
 	done
 	[ "$free" -gt 0 ] ||
 		die "every enabled disk node holds a side, so the worker's repair" \
-			"would put its fresh leg beside another side"
+			"would put its fresh leg, or a migration its destination, beside" \
+			"another side"
 	REACT_STEER_OUT=$out
 	log "  disabled the disk nodes that hold a side:$REACT_STEERED;" \
 		"$free enabled disk node(s) hold none, $out of them on a guest" \
@@ -22015,9 +22250,742 @@ react_take_over() {
 }
 
 # --- step 10 ----------------------------------------------------------------
+#
+# A MIGRATING LEG WHOSE SERVING DISK NODE GOES SILENT (cnagent.md CN10;
+# dnv-worker.md AR8), on the group steps 5 to 9 repaired: slice 0's first
+# data group, which holds the first stripe of $TD0. The pool stays at
+# READWRITE throughout.
+#
+# THE MIGRATION. A side of the group's first leg migrates to a disk node that
+# holds no side, on a guest outside the group's: the step steers the
+# destination there as steps 5 to 9 steer a fresh leg (react_steer), so that
+# the silence below takes down that one leg alone, and so that the
+# destination cannot share a guest with its source, with which it would
+# collide on the side export's NQN, which names no disk node (E2E4). With no
+# more DN VMs than legs per group no guest lies outside the group's, and the
+# step is skipped, logged. The step then waits until the cutover has
+# started, the destination serves through its dm-clone, the primary's path
+# to it reads optimized and its path to the source inaccessible, the standby
+# holds both paths live, the worker has read the leg's bitmap, the copy is
+# whole, and md holds the group whole on the primary. The destination is
+# then the leg's serving side and holds every block, so the worker's end of
+# the migration after the fault must be a finish (dnv-worker.md AR8).
+#
+# THE SILENCE. With no host IO running, the destination's nvmet port drops
+# all its traffic on its guest, both ways (silence_port), as a disk node
+# whose power went away looks from the wire, while its agent goes on
+# answering the worker. The primary's controller to the destination goes to
+# connecting once its keep-alive goes unanswered, and so do the standby's.
+# The step does not check which of AR8's two cases brings the leg to
+# repair: the leg's epoch past the leg threshold, or its side's past the
+# side threshold beside it (dnv-worker.md AR8).
+#
+# THE CUT. The array has no IO in flight to the leg when the path dies, and
+# its next write would wait on the leg without limit while the primary keeps
+# its live, inaccessible path to the source (cnagent.md CN10). So the write
+# loop (wloop_start) starts on host0 only once the primary's controller to
+# the destination reads connecting: a write already sent when the traffic
+# stops fails back once that controller's error recovery ends it, and md
+# fails the member on it with no cut at all (seen in the lab on the 7.0
+# kernel), so only a write sent once the path is down shows what the cut
+# does. The loop rewrites setup's own bytes over the first stripe of ns 1
+# (REACT_MC_SLOTS). The primary must then cut its path to the source, its
+# cn agent's log recording the cut, while the standby keeps its own; md on
+# the primary must fail the leg's member; and the loop must go on finishing
+# writes after that, none of them failing.
+#
+# THE WORKER. Past the leg threshold the worker finishes the migration, the
+# destination's latest report showing its copy whole: one `reaction applied`
+# record of kind migration_finish naming the migration, and no cancel. The
+# leg keeps the destination's side alone, and the worker repairs it as in
+# step 5: a repair of its own with a fresh leg, created, started and
+# finished, the leg retired with the destination's side, and the group's
+# retired legs held to the give-back rule (react_retired_want). The fresh
+# leg is not steered, as no later step kills a disk node, so where it lands
+# is asserted as react_new_leg_placed asserts it without a steer.
+#
+# THE END. The traffic comes back once the repair is finished, before the
+# step waits on the cntlrs to drop the retired leg: a silenced port answers
+# no reconnect at all, where the ports steps 5 to 9 remove refuse one at
+# once. The cntlrs start their teardown of the retired leg as soon as the
+# finish reaches them, so it begins while the port is still silent; the step
+# only does not wait on it then. The traffic does not come back before the
+# finish, as the cn agent's put-back would then take the member back into
+# md. md must then hold
+# the group whole on the fresh leg, the loop must go on finishing writes, and
+# neither cntlr may hold the retired leg. The loop then stops on its stop
+# file with no write failed by its records; host0's kernel log since a mark
+# taken before the silence must report no failed IO; host0 reads SHA0 back,
+# over the range the loop rewrote; and no failover may happen across the
+# step.
+
+# react_mc_path_is is true once cn<v>'s path to <traddr>:<trsvcid> of the
+# leg subsystem <nqn> reads the controller state <want>, as path_field reads
+# it: live, connecting, or none for no such path. The state is logged as it
+# changes.
+react_mc_path_is() { # <v> <nqn> <traddr> <trsvcid> <want>
+	local st sig
+	st=$(cn_path_field "$1" "$2" "$3" "$4" State)
+	sig="cn$1's path to $3:$4 reads ${st:-unread}"
+	if [ "$sig" != "$REACT_MC_LAST" ]; then
+		REACT_MC_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$st" = "$5" ]
+}
+
+# react_mc_cut_cnt prints how many `leg path cut` records the primary's cn
+# agent log holds after line <mark> (react_cn_log_mark) that name the leg
+# subsystem <nqn> and the address <traddr:trsvcid>, each a cut of that path
+# (cnagent.md CN10). Fatal on a log it cannot read, as react_fs_cmds_on is.
+react_mc_cut_cnt() { # <mark> <nqn> <traddr:trsvcid>
+	local lines n
+	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$(($1 + 1)) $(cn_log) | \
+		grep -F -e '\"msg\":\"leg path cut\"'; \
+		s=(\${PIPESTATUS[@]}); [ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]") ||
+		die "cannot read $(cn_log) on cn$PRIMARY_CN after line $1"
+	n=$(printf '%s\n' "$lines" | "$JQ" -R -s --arg nqn "$2" --arg a "$3" '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "leg path cut" and .nqn == $nqn and .addr == $a)]
+		| length') ||
+		die "react_mc_cut_cnt: the records of $(cn_log) on cn$PRIMARY_CN do not parse"
+	echo "$n"
+}
+
+# react_mc_cut_seen is the cut's wait: true once one reading of the
+# primary's paths of the leg subsystem <nqn> holds no path to the source
+# <src traddr>:<src trsvcid> and still holds its path to the destination
+# <dst traddr>:<dst trsvcid>, connecting, and the primary's log holds a
+# `leg path cut` record of the source's path after line <mark>
+# (react_mc_cut_cnt). The destination's path is read in the same listing
+# because a listing that failed reads no path at all, which must not pass
+# for the cut. The readings are logged as they change.
+react_mc_cut_seen() { # <mark> <nqn> <src traddr> <src trsvcid> <dst traddr> <dst trsvcid>
+	local json src dst n sig
+	json=$(cn_subsys_json "$PRIMARY_CN")
+	src=$(path_field "$json" "$2" "$3" "$4" State)
+	dst=$(path_field "$json" "$2" "$5" "$6" State)
+	n=$(react_mc_cut_cnt "$1" "$2" "$3:$4") || exit 1
+	sig="cn$PRIMARY_CN's path to the source $3:$4 reads $src, to the"
+	sig="$sig destination $5:$6 $dst; leg path cut records of the source's"
+	sig="$sig path: $n"
+	if [ "$sig" != "$REACT_MC_LAST" ]; then
+		REACT_MC_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$src" = none ] && [ "$dst" = connecting ] && [ "$n" -ge 1 ]
+}
+
+# react_mc_member_failed is md's fail of the leg's member: true once md on
+# the primary shows the member <dm name> faulty and not in sync
+# (md_member_read; cnagent.md CN12), which it goes on showing until the
+# repair takes the member out, as the leg cannot take it back. A read that
+# fails is one more poll. The reading is logged as it changes.
+react_mc_member_failed() { # <dm name>
+	local mem sig
+	mem=$(helper_cn "$PRIMARY_CN" md_member_read "$1" 2>/dev/null) ||
+		mem="state=unread"
+	sig="md on cn$PRIMARY_CN holds the member $1 at ${mem%% wsect=*}"
+	if [ "$sig" != "$REACT_MC_LAST" ]; then
+		REACT_MC_LAST=$sig
+		log "  $sig"
+	fi
+	case "$mem" in
+	state=*in_sync*) return 1 ;;
+	state=*faulty*) return 0 ;;
+	esac
+	return 1
+}
+
+# react_mc_finished is the worker's end of the migration: true once its log
+# holds, after line <mark> (worker_log_mark), a `reaction applied` record of
+# kind migration_finish for leg <leg id> of slice 0's first data group
+# (dnv-worker.md AR8). It dies on a record of kind migration_cancel for the
+# leg, as a cancel is no safe end of a migration whose cutover has started.
+# The counts are logged as they change.
+react_mc_finished() { # <mark> <leg id>
+	local fin can sig
+	fin=$(worker_grp_reaction_cnt "$1" "reaction applied" kind \
+		migration_finish "$REACT_GRP_ID" "$2") || exit 1
+	can=$(worker_grp_reaction_cnt "$1" "reaction applied" kind \
+		migration_cancel "$REACT_GRP_ID" "$2") || exit 1
+	sig="the worker's records for leg $2: $fin migration_finish,"
+	sig="$sig $can migration_cancel"
+	if [ "$sig" != "$REACT_MC_LAST" ]; then
+		REACT_MC_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$can" = 0 ] ||
+		die "the worker cancelled the migration of leg $2 after its cutover" \
+			"had started, where it ends such a migration only by a finish," \
+			"once the destination's copy reads whole (dnv-worker.md AR8)"
+	[ "$fin" -ge 1 ]
+}
+
+# react_mc_loop_verdict is what every reading of step 10's write loop
+# asserts, as cut_loop_verdict does for the cutoff case's, from the summary
+# the same reader fills (cut_wloop_read): no write failed, and the loop is
+# still there. A failed write stops the run at once, from inside a poll as
+# well, printing the failed records and dd's stderr.
+react_mc_loop_verdict() { # <when>
+	if [ "$CUT_FAIL" != 0 ]; then
+		printf '%s\n' "$CUT_WLOOP_OUT" >&2
+		die "host0's write loop recorded $CUT_FAIL FAILED write(s) $1." \
+			"The records above carry each one's slot, its start and end in" \
+			"microseconds and dd's status; the kernel's side is in host0's" \
+			"dmesg. md on the primary must fail the migrating leg's member" \
+			"and complete each write on the group's other leg (cnagent.md" \
+			"CN10)"
+	fi
+	[ "$CUT_RUNNING" = yes ] ||
+		die "host0's write loop is not running $1 (its last summary:" \
+			"${CUT_WLOOP_OUT%%$'\n'*}); its run.err and log tail are in" \
+			"host0's diagnostics below"
+}
+
+# react_mc_loop_reaches is true once the loop has finished <n> writes, with
+# the verdict on every reading.
+react_mc_loop_reaches() { # <n> <when>
+	cut_wloop_read || return 1
+	react_mc_loop_verdict "$2"
+	[ "$CUT_OK" -ge "$1" ]
+}
+
+# react_mc_watched runs <predicate> <args…>, one of step 10's waits while
+# the loop runs, with a reading of the loop and its verdict in front, so a
+# write that fails while the step waits on something else stops the run at
+# that poll. A reading that fails is left to the next poll.
+react_mc_watched() { # <when> <predicate> [args…]
+	local when=$1
+	shift
+	if cut_wloop_read; then
+		react_mc_loop_verdict "$when"
+	fi
+	"$@"
+}
+
+# react_mc_silence silences the nvmet port <traddr>:<trsvcid> on --dn guest
+# <v> (silence_port) and dies unless the rule went in. REACT_MC_SILENT_DN
+# names the guest before the call, so a run that fails from here on takes
+# the rule off at its exit (on_exit, E2E6).
+react_mc_silence() { # <v> <traddr> <trsvcid>
+	local out
+	REACT_MC_SILENT_DN=$1
+	out=$(helper_dn "$1" silence_port "$2" "$3") ||
+		die "dn$1: the silence_port verb could not be run"
+	assert_eq "$out" "silenced $2:$3" \
+		"dn$1: the silencing rule over the migration destination's nvmet port"
+	log "  dn$1 drops every packet to and from $2:$3"
+}
+
+# react_mc_unsilence takes the silencing rule off the guest
+# REACT_MC_SILENT_DN names (unsilence), checks that the guest's listing
+# shows no table of this suite's any more (silence_rules), and then names
+# no guest. It does nothing while no guest is named.
+react_mc_unsilence() {
+	local v=$REACT_MC_SILENT_DN out
+	[ "$v" -ge 0 ] || return 0
+	out=$(helper_dn "$v" unsilence) ||
+		die "dn$v: the unsilence verb could not be run"
+	assert_eq "$out" unsilenced "dn$v: the silencing rule taken off"
+	out=$(helper_dn "$v" silence_rules) ||
+		die "dn$v: the silence_rules verb could not be run"
+	assert_eq "$out" "" "dn$v: this suite's silencing rule after unsilence"
+	REACT_MC_SILENT_DN=-1
+	log "  dn$v drops no packet of its nvmet ports any more"
+}
+
+react_migr_cut() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== react step 10 (a migrating leg whose serving disk node goes" \
+			"silent) SKIPPED: --redund $REDUND. The primary cuts a path of" \
+			"an md-raid1 group's leg alone (cnagent.md CN10), and leg repair" \
+			"only logs a RedundNone group (dnv-worker.md AR8)."
+		return 0
+	fi
+	if [ "$DN_VM_CNT" -le "$LEGS" ]; then
+		log ""
+		log "=== react step 10 (a migrating leg whose serving disk node goes" \
+			"silent) SKIPPED: $DN_VM_CNT DN VM(s) and $LEGS leg(s) per group," \
+			"so no guest lies outside the group's, and a migration" \
+			"destination beside its source would collide with it on the" \
+			"side export's NQN (E2E4)."
+		return 0
+	fi
+	stage 10 "a migrating leg whose serving disk node goes silent: the primary cuts its other path, md fails the member while host0's writes go on, and the worker finishes the migration and repairs the leg"
+	local i n pos legid legidx sideid saddr stay stayaddr before_addrs
+	local before_vms before_retired before_epochs given want_retired
+	local before_primary before_failovers sliceid migrid dstside dstaddr
+	local dstvm dstv dstk hits srctraddr srctrsvcid dsttraddr dsttrsvcid
+	local legnqn sbnqn sbcnid legdm rev want tag wkmark cnmark t0 ok0 cnt
+	local recs rec started epoch retired after_addrs after_vms id msg out
+	local cmds newleg
+
+	# The readings the step is judged against, after the pool holds no
+	# repair (react_wait_no_repair), as in steps 5 to 9.
+	react_wait_no_repair
+	sp_refresh
+	sp_read_roles
+	copy_primary_cn_id
+	before_primary=$PRIMARY_CNTLR_ID
+	before_failovers=$(worker_failover_cnt)
+	assert_eq "$(sp_field "$COPY_GRP0.grp_id")" "$REACT_GRP_ID" \
+		"slice 0's first data group is still the one step 01 recorded"
+	sliceid=$(sp_field '.sp_conf.slice_id_list[0]')
+	n=$(sp_field "$COPY_GRP0.leg_list | length")
+	assert_eq "$n" "$LEGS" "slice 0's first data group's legs"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"group $REACT_GRP_ID has no repair before the step"
+	assert_field "$SP_JSON" "$COPY_GRP0.forced_start" null \
+		"group $REACT_GRP_ID carries no forced-start mark before the step"
+	assert_field "$SP_JSON" "$COPY_GRP0.operator_in_charge" false \
+		"group $REACT_GRP_ID's operator_in_charge flag before the step"
+	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE \
+		"sp_level before the step"
+	assert_field "$SP_JSON" '.sp_conf.migr_name_list | length' 0 \
+		"the pool holds no migration before the step"
+
+	# The leg that migrates: the group's first, each of whose legs has one
+	# side here. The other keeps the data through the fault, in sync, as the
+	# cut (cnagent.md CN10) and the worker's healthy-leg test
+	# (dnv-worker.md AR8) both need.
+	pos=0
+	legid=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_id")
+	legidx=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_idx")
+	stay=$(sp_field "[$COPY_GRP0.leg_list[].leg_id | select(. != \"$legid\")][0]")
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].side_list | length" 1 \
+		"the leg to migrate has exactly one side before the migration"
+	sideid=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].side_id")
+	saddr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].addr_port")
+	srctraddr=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].nvme_tr_conf.tr_addr")
+	srctrsvcid=$(sp_field "$COPY_GRP0.leg_list[$pos].side_list[0].nvme_tr_conf.tr_svc_id")
+	stayaddr=$(sp_field \
+		"[$COPY_GRP0.leg_list[] | select(.leg_id == \"$stay\") | .side_list[0].addr_port][0]")
+	case "$legid:$legidx:$sideid:$stay" in
+	*[!0-9:]* | :* | *: | *::* | 0:* | *:0)
+		die "the leg to migrate reads leg '$legid', leg_idx '$legidx', side" \
+			"'$sideid', and the group's other leg '$stay'"
+		;;
+	esac
+	case "$srctraddr:$srctrsvcid:$stayaddr" in
+	*null* | :* | *::* | *:)
+		die "the source side $sideid reads nvmet address '$srctraddr' and" \
+			"port '$srctrsvcid', and leg $stay's side sits on '$stayaddr'"
+		;;
+	esac
+	for ((i = 0; i < n; i++)); do
+		COPY_REP_LAST=""
+		id=$(sp_field "$COPY_GRP0.leg_list[$i].leg_id")
+		wait_until "$WAIT_PROVISION" \
+			"leg $id of group $REACT_GRP_ID to read healthy before the step" \
+			copy_rep_leg_epoch "$i" "$id" healthy
+	done
+
+	# The retired legs the repair's finish is judged against, as in step 5.
+	# At the bound a worker's finish gives back the oldest that is not
+	# kept, and is refused when every one is kept (architecture.md,
+	# Repairs, FinishRepair), which would hold the step's repair STARTED.
+	before_retired=$(sp_field "$COPY_GRP0 | [.retired_leg_id_list[]] | sort | tojson")
+	react_retired_read
+	before_epochs=$REACT_RETIRED
+	given=$(react_retired_given "$before_epochs")
+	cnt=$(jq_of "$before_epochs" 'length')
+	if [ "$cnt" -ge "$MAX_RETIRED_LEG_PER_GRP" ] && [ -z "$given" ]; then
+		die "group $REACT_GRP_ID holds $cnt retired legs and every one is" \
+			"kept ($before_epochs), so the finish of the worker's repair" \
+			"would be refused (architecture.md, Repairs, FinishRepair)"
+	fi
+
+	# The leg's subsystem on each cntlr's node, and its member on the
+	# primary.
+	ctl_ok cn get --addr "$STANDBY_ADDR"
+	sbcnid=$(jq_of "$CTL_OUT" '.cn_conf.cn_id')
+	case "$sbcnid" in
+	'' | *[!0-9]* | 0) die "cn$STANDBY_CN ($STANDBY_ADDR) reports cn_id '$sbcnid'" ;;
+	esac
+	legnqn=$(side_to_cn_nqn "$SP_ID" "$legid" "$PRIMARY_CN_ID")
+	sbnqn=$(side_to_cn_nqn "$SP_ID" "$legid" "$sbcnid")
+	legdm=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$legid")
+
+	# THE MIGRATION (see the step's header): the steer, the create, the
+	# steer off, and where the destination landed.
+	before_addrs=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
+	before_vms=$(sp_field \
+		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
+	log "  group $REACT_GRP_ID: side $sideid of leg $legid (position $pos)" \
+		"migrates off $saddr, and leg $stay keeps the data; the group holds" \
+		"$before_addrs on VMs $before_vms"
+	react_steer "$before_vms"
+	if [ "$REACT_STEER_OUT" = 0 ]; then
+		react_unsteer
+		die "the steer left no enabled disk node without a side on a guest" \
+			"outside group $REACT_GRP_ID's ($before_vms), so the migration's" \
+			"destination could land on a guest the group holds, beside its" \
+			"source (E2E4)"
+	fi
+	ctl_ok migr create --name "$REACT_MC_MIGR" --src-side "$sideid"
+	migrid=$(jq_of "$CTL_OUT" '.migr_id')
+	case "$migrid" in
+	'' | *[!0-9]* | 0) die "migr create returned migr_id '$migrid'" ;;
+	esac
+	# The create took the destination's side, so allocation is over.
+	react_unsteer
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].side_list | length" 2 \
+		"the migrating leg now has two sides"
+	dstside=$(sp_field \
+		"$COPY_GRP0.leg_list[$pos] | [.side_list[] | select(.side_id != \"$sideid\")] | .[0].side_id")
+	dstaddr=$(sp_field \
+		"$COPY_GRP0.leg_list[$pos] | [.side_list[] | select(.side_id != \"$sideid\")] | .[0].addr_port")
+	dsttraddr=$(sp_field \
+		"$COPY_GRP0.leg_list[$pos] | [.side_list[] | select(.side_id == \"$dstside\")] | .[0].nvme_tr_conf.tr_addr")
+	dsttrsvcid=$(sp_field \
+		"$COPY_GRP0.leg_list[$pos] | [.side_list[] | select(.side_id == \"$dstside\")] | .[0].nvme_tr_conf.tr_svc_id")
+	case "$dstside" in
+	'' | *[!0-9]* | 0) die "the migration destination side has side_id '$dstside'" ;;
+	esac
+	case "$dsttraddr:$dsttrsvcid" in
+	*null* | :* | *:)
+		die "the destination side $dstside reads nvmet address" \
+			"'$dsttraddr' and port '$dsttrsvcid'"
+		;;
+	esac
+	dstvm=${dstaddr%:*}
+	case ",$before_addrs," in
+	*",$dstaddr,"*)
+		die "the migration destination $dstaddr is a disk node group" \
+			"$REACT_GRP_ID holds, which CreateMigration's black list rules out"
+		;;
+	esac
+	case ",$before_vms," in
+	*",$dstvm,"*)
+		die "the migration destination $dstaddr is on a DN VM group" \
+			"$REACT_GRP_ID occupies ($before_vms), while the steer left" \
+			"$REACT_STEER_OUT disk node(s) without a side outside them for" \
+			"the allocator's first tier (architecture.md, Per-operation" \
+			"allocation)"
+		;;
+	esac
+	hits=$(sp_field "[$SP_SIDE_PATH | select(.addr_port == \"$dstaddr\")] | length")
+	assert_eq "$hits" 1 \
+		"sides of the pool's legs on the destination's disk node $dstaddr (the destination's alone, so its silence takes down one leg)"
+	dstv=$(dn_vm_of_addr "$dstaddr")
+	dstk=$(dn_inst_of_addr "$dstaddr")
+	assert_ne "$dstv" none "the destination $dstaddr names one of the --dn guests"
+	assert_ne "$dstk" none "the destination $dstaddr names a dn instance index"
+	diag_note_dn "$dstv" "$dstk"
+	log "  migration $REACT_MC_MIGR (migr_id $migrid): destination side" \
+		"$dstside on dn$dstv instance $dstk ($dstaddr), nvmet port" \
+		"$dsttraddr:$dsttrsvcid"
+
+	# The destination serves, with its copy whole, and both cntlrs hold both
+	# paths (see the step's header).
+	MIGR_HYD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the worker to start the cutover of migration $REACT_MC_MIGR" \
+		migr_cutover_started "$REACT_MC_MIGR"
+	MIGR_HYD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the migration's destination side $dstside to serve through its dm-clone" \
+		migr_dst_serving "$dstside"
+	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid" optimized \
+		"$WAIT_PROVISION"
+	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$srctraddr" "$srctrsvcid" \
+		inaccessible "$WAIT_PROVISION"
+	REACT_MC_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the standby's path to the source $srctraddr:$srctrsvcid to read live" \
+		react_mc_path_is "$STANDBY_CN" "$sbnqn" "$srctraddr" "$srctrsvcid" live
+	REACT_MC_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the standby's path to the destination $dsttraddr:$dsttrsvcid to read live" \
+		react_mc_path_is "$STANDBY_CN" "$sbnqn" "$dsttraddr" "$dsttrsvcid" live
+	wait_until "$WAIT_PROVISION" \
+		"the worker to read migration $REACT_MC_MIGR's bitmap" \
+		copy_bm_read_logged "$migrid"
+	MIGR_HYD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the migration's destination side $dstside to hydrate" \
+		side_hydrated "$dstside"
+	sp_refresh
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"cn$PRIMARY_CN to apply revision $rev and md to hold group $REACT_GRP_ID whole, in sync on legs $want" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
+
+	# THE SILENCE, with no host IO running (see the step's header).
+	tag="dnv-e2e-react-migr-cut-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$tag"
+	wkmark=$(worker_log_mark)
+	cnmark=$(react_cn_log_mark)
+	t0=$SECONDS
+	react_mc_silence "$dstv" "$dsttraddr" "$dsttrsvcid"
+	REACT_MC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"cn$PRIMARY_CN's controller to the destination $dsttraddr:$dsttrsvcid to read connecting, its keep-alive unanswered" \
+		react_mc_path_is "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid" \
+		connecting
+	log "  the primary's path to the destination reads connecting" \
+		"$((SECONDS - t0)) s after the silence"
+
+	# THE CUT, with the loop writing (see the step's header).
+	out=$(helper_host 0 wloop_start "$UUID1" "$PATTERN0" "$REACT_MC_SLOTS" \
+		"$REACT_MC_LOOP_MAX") ||
+		die "host0: starting the write loop failed (its message is above)"
+	printf '%s\n' "$out" >&2
+	REACT_MC_LAST=""
+	wait_until "$REACT_MC_CUT_WAIT" \
+		"cn$PRIMARY_CN to cut its path to the source $srctraddr:$srctrsvcid of leg $legid, whose serving path is down (cnagent.md CN10)" \
+		react_mc_watched "while the primary cuts the leg's path" \
+		react_mc_cut_seen "$cnmark" "$legnqn" "$srctraddr" "$srctrsvcid" \
+		"$dsttraddr" "$dsttrsvcid"
+	log "  the primary cut its path to the source $((SECONDS - t0)) s after" \
+		"the silence"
+	out=$(cn_path_field "$STANDBY_CN" "$sbnqn" "$srctraddr" "$srctrsvcid" State)
+	assert_eq "$out" live \
+		"the standby cn$STANDBY_CN's path to the source $srctraddr:$srctrsvcid after the primary's cut (a standby cuts no path, cnagent.md CN10)"
+	REACT_MC_LAST=""
+	wait_until "$REACT_MC_FAIL_WAIT" \
+		"md on cn$PRIMARY_CN to fail leg $legid's member $legdm" \
+		react_mc_watched "while md fails the member" \
+		react_mc_member_failed "$legdm"
+	cut_wloop_read || die "host0: the write loop's summary could not be read"
+	react_mc_loop_verdict "once md failed the member"
+	ok0=$CUT_OK
+	log "  md failed the member $((SECONDS - t0)) s after the silence; the" \
+		"loop had finished $ok0 write(s), the longest ${CUT_MAX_MS} ms"
+	wait_until "$WAIT_HOST" \
+		"host0's write loop to finish $REACT_MC_WRITES more writes once md failed the member" \
+		react_mc_loop_reaches "$((ok0 + REACT_MC_WRITES))" \
+		"after md failed the member"
+	log "  host0's write loop: $CUT_OK write(s) done, none failed, the" \
+		"longest ${CUT_MAX_MS} ms, the last ${CUT_IDLE_MS} ms ago"
+
+	# THE WORKER'S FINISH of the migration (see the step's header).
+	REACT_MC_LAST=""
+	msg="the worker to finish migration $REACT_MC_MIGR of leg $legid, the"
+	msg="$msg destination's copy whole, once the leg's health epoch is"
+	msg="$msg ${THR_LEG}s old (dnv-worker.md AR8)"
+	wait_until "$WAIT_REACT" "$msg" \
+		react_mc_watched "while the worker ends the migration" \
+		react_mc_finished "$wkmark" "$legid"
+	log "  the worker finished the migration $((SECONDS - t0)) s after the" \
+		"silence"
+	recs=$(worker_grp_records "$wkmark" "reaction applied" "$REACT_GRP_ID")
+	rec=$(printf '%s\n' "$recs" | "$JQ" -c --argjson l "$legid" \
+		'select(.kind == "migration_finish" and .leg_id == $l)') ||
+		die "jq failed on the worker's records of group $REACT_GRP_ID"
+	assert_eq "$(printf '%s\n' "$rec" | grep -c . || true)" 1 \
+		"the worker's migration_finish records of leg $legid since the silence"
+	assert_field "$rec" '.migr_name' "$REACT_MC_MIGR" \
+		"the finish record names the migration"
+	assert_field "$rec" '.migr_id' "$migrid" "and its migr_id"
+	cnt=$(worker_grp_reaction_cnt "$wkmark" "reaction skipped" reason \
+		migration_copy_not_whole "$REACT_GRP_ID" "$legid")
+	log "  the worker held the end of the migration $cnt time(s) on a copy" \
+		"not shown whole"
+	ctl_fail NOT_FOUND migr get --name "$REACT_MC_MIGR"
+	sp_refresh
+	assert_field "$SP_JSON" '.sp_conf.migr_name_list | length' 0 \
+		"migr_name_list is empty again"
+	id=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_id")
+	if [ "$id" = "$legid" ]; then
+		assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].side_list | length" 1 \
+			"the leg is back to one side"
+		assert_field "$SP_JSON" \
+			"$COPY_GRP0.leg_list[$pos].side_list[0].side_id" "$dstside" \
+			"and that side is the migration's destination"
+	else
+		log "  the worker's repair of leg $legid was finished before this" \
+			"read; its retired leg's record shows its side below"
+	fi
+
+	# THE WORKER'S REPAIR of the leg, now of one side (see the step's
+	# header). The group's disk nodes and guests the fresh leg is placed
+	# outside are the other leg's and the destination's.
+	after_addrs="$stayaddr,$dstaddr"
+	after_vms="${stayaddr%:*},$dstvm"
+	REACT_REP_NAME=""
+	REACT_REP_LAST=""
+	msg="AR8 to create a repair of group $REACT_GRP_ID for leg $legid, of the"
+	msg="$msg destination's side alone"
+	wait_until "$WAIT_REACT" "$msg" \
+		react_mc_watched "while the worker creates its repair" \
+		react_rep_open "$pos" "$legid"
+	REACT_NEW_LEG=""
+	REACT_NEW_SIDE=""
+	REACT_NEW_ADDR=""
+	if [ -n "$REACT_REP_NAME" ]; then
+		react_rep_name_ok "$REACT_REP_NAME"
+		react_rep_read "$legid" "$before_retired"
+	fi
+	REACT_REP_LAST=""
+	msg="the worker to move repair ${REACT_REP_NAME:-of group $REACT_GRP_ID}"
+	msg="$msg to STARTED and finish it: the new leg's side zeroes and is"
+	msg="$msg flipped provisioned, the primary adds the new leg to the array,"
+	msg="$msg and leg $legid becomes a retired leg"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		react_mc_watched "while the worker repairs the leg" \
+		react_rep_done "$legid"
+	cut_wloop_read || die "host0: the write loop's summary could not be read"
+	react_mc_loop_verdict "once the worker finished its repair"
+	wait_until "$WAIT_HOST" \
+		"host0's write loop to finish $REACT_MC_WRITES more writes once the worker finished its repair" \
+		react_mc_loop_reaches "$((CUT_OK + REACT_MC_WRITES))" \
+		"after the worker finished its repair"
+	started=$(worker_rep_started "$wkmark" "$REACT_GRP_ID")
+	if [ -z "$REACT_REP_NAME" ]; then
+		REACT_REP_NAME=${started%%$'\n'*}
+		[ -n "$REACT_REP_NAME" ] ||
+			die "leg $legid is retired, but the worker's log holds no" \
+				"repair of group $REACT_GRP_ID moved to STARTED since the" \
+				"silence"
+		react_rep_name_ok "$REACT_REP_NAME"
+	fi
+	cnt=$(printf '%s\n' "$started" | grep -cxF -- "$REACT_REP_NAME" || true)
+	assert_eq "$cnt" 1 \
+		"the worker's repair stage moved records of $REACT_REP_NAME to STARTED since the silence (dnv-worker.md AR11)"
+
+	# What the finish wrote (architecture.md, Repairs, FinishRepair), as in
+	# step 5.
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
+		"the group still has $LEGS leg(s)"
+	newleg=$(sp_field "$COPY_GRP0.leg_list[$pos].leg_id")
+	case "$newleg" in
+	'' | *[!0-9]* | 0) die "the leg in leg $legid's place has leg_id '$newleg'" ;;
+	esac
+	assert_ne "$newleg" "$legid" \
+		"the leg in the migrated leg's position is a different leg"
+	if [ -n "$REACT_NEW_LEG" ]; then
+		assert_eq "$newleg" "$REACT_NEW_LEG" \
+			"the leg in leg $legid's position is the repair's new leg"
+	fi
+	REACT_NEW_LEG=$newleg
+	assert_field "$SP_JSON" "$COPY_GRP0.leg_list[$pos].leg_idx" "$legidx" \
+		"the new leg takes leg $legid's leg_idx"
+	assert_jq "$before_retired" "([\"$newleg\"] - .) | length == 1" \
+		"the new leg $newleg is none of the group's retired legs: the worker's repair takes a fresh leg"
+	REACT_STEER_OUT=""
+	react_new_leg_placed "$pos" "$newleg" "$after_addrs" "$after_vms"
+	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
+		"the group names no repair after the finish"
+	given=$(react_retired_given "$before_epochs")
+	want_retired=$(react_retired_want "$before_epochs" "$legid")
+	assert_jq "$SP_JSON" \
+		"($COPY_GRP0 | [.retired_leg_id_list[]] | sort) == $want_retired" \
+		"the group's retired legs are the ones it had plus leg $legid, less the oldest not kept when it held $MAX_RETIRED_LEG_PER_GRP (architecture.md, Repairs, FinishRepair)"
+	ctl_ok repair list
+	assert_field "$CTL_OUT" \
+		"[.name_to_repair[] | select(.grp_id == \"$REACT_GRP_ID\")] | length" 0 \
+		"ListRepairs holds no repair of group $REACT_GRP_ID"
+	ctl_ok retired-leg list
+	if [ -n "$given" ]; then
+		assert_field "$CTL_OUT" ".leg_id_to_retired_leg | has(\"$given\")" \
+			false "ListRetiredLegs no longer holds leg $given, the oldest retired leg the finish gave back"
+		log "  the finish gave back leg $given, the group's oldest retired leg not kept"
+	fi
+	retired=".leg_id_to_retired_leg[\"$legid\"]"
+	assert_field "$CTL_OUT" "$retired.grp_id" "$REACT_GRP_ID" \
+		"ListRetiredLegs holds leg $legid, naming group $REACT_GRP_ID"
+	assert_field "$CTL_OUT" "$retired.leg_idx" "$legidx" \
+		"and the leg_idx it left"
+	assert_field "$CTL_OUT" "$retired.side.side_id" "$dstside" \
+		"the retired leg keeps the migration's destination side, which the finish of the migration left it"
+	assert_field "$CTL_OUT" "$retired.side.addr_port" "$dstaddr" \
+		"on the silenced disk node"
+	assert_field "$CTL_OUT" "$retired.slice_id" "$sliceid" \
+		"its group's parent is slice 0"
+	epoch=$(jq_of "$CTL_OUT" "$retired.retired_epoch")
+	case "$epoch" in
+	'' | *[!0-9]* | 0) die "the retired leg's retired_epoch reads '$epoch'" ;;
+	esac
+	log "  leg $newleg took leg $legid's place; leg $legid is retired at" \
+		"$epoch with the destination's side $dstside"
+
+	# THE END (see the step's header): the traffic back, md whole on the
+	# fresh leg, the loop still writing, the retired leg dropped, then the
+	# loop's stop and the checks.
+	out=$(helper_dn "$dstv" silence_rules) ||
+		die "dn$dstv: the silence_rules verb could not be run"
+	log "  the silencing rule on dn$dstv before it comes off: $out"
+	react_mc_unsilence
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	want=$(sp_field "$COPY_GRP0 | [.leg_list[].leg_id] | sort | tojson")
+	MD_STATE_LAST=""
+	COPY_REP_LAST=""
+	msg="cn$PRIMARY_CN to apply revision $rev and md to hold group"
+	msg="$msg $REACT_GRP_ID whole, in sync on legs $want, the fresh leg"
+	msg="$msg $newleg copied whole"
+	wait_until "$WAIT_PROVISION" "$msg" \
+		react_mc_watched "while md copies onto the fresh leg" \
+		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
+	cut_wloop_read || die "host0: the write loop's summary could not be read"
+	react_mc_loop_verdict "once md held the group whole"
+	ok0=$CUT_OK
+	wait_until "$WAIT_HOST" \
+		"host0's write loop to finish $REACT_MC_WRITES more writes once md held the group whole" \
+		react_mc_loop_reaches "$((ok0 + REACT_MC_WRITES))" \
+		"after md held the group whole"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to hold every leg and no longer the retired leg $legid" \
+		react_mc_watched "while the primary drops the retired leg" \
+		copy_rep_dropped full "$PRIMARY_CNTLR_ID" "$legid"
+	stack_wait_reset
+	wait_until "$WAIT_PROVISION" \
+		"the standby cntlr $STANDBY_CNTLR_ID to hold every leg and no longer the retired leg $legid" \
+		react_mc_watched "while the standby drops the retired leg" \
+		copy_rep_dropped legs "$STANDBY_CNTLR_ID" "$legid"
+
+	out=$(helper_host 0 wloop_stop) || die "host0: the wloop_stop verb failed"
+	assert_eq "$out" "wloop=stopped" \
+		"host0: the write loop stops on its stop file, with no write of it left waiting"
+	cut_wloop_read || die "host0: the write loop's last summary could not be read"
+	if [ "$CUT_FAIL" != 0 ]; then
+		printf '%s\n' "$CUT_WLOOP_OUT" >&2
+		die "host0's write loop recorded $CUT_FAIL FAILED write(s) by its stop"
+	fi
+	assert_ge "$CUT_OK" "$((ok0 + REACT_MC_WRITES))" \
+		"writes host0's loop finished by its stop"
+	log "  host0's write loop stopped: $CUT_OK write(s) done, none failed," \
+		"the longest ${CUT_MAX_MS} ms"
+	check_sha0 "after the write loop rewrote its range through the silence of migration $REACT_MC_MIGR's destination and the worker's repair"
+	host_kmsg_clean 0 "$tag" "across the silence of migration $REACT_MC_MIGR's destination"
+	cnt=$(react_mc_cut_cnt "$cnmark" "$legnqn" "$srctraddr:$srctrsvcid")
+	assert_eq "$cnt" 1 \
+		"cn$PRIMARY_CN's cuts of its path to the source since the silence: one, as the converge connects no side of a leg whose serving path is down (cnagent.md CN10)"
+	cmds=$(react_fs_cmds_on "$cnmark" "$legid")
+	log "  cn$PRIMARY_CN's mdadm commands on leg $legid's member since the" \
+		"silence: $cmds"
+
+	sp_refresh
+	sp_read_roles
+	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE \
+		"sp_level after the step"
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary after the step is the one it started with"
+	assert_eq "$(worker_failover_cnt)" "$before_failovers" \
+		"the worker's applied failovers across the silence of migration $REACT_MC_MIGR's destination"
+	log "  no failover during the step: the worker applied $before_failovers" \
+		"before it and none since"
+}
+
+# --- step 11 ----------------------------------------------------------------
 
 react_drop_target() {
-	stage 10 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
+	stage 11 "delete ns idx 2 and $TD_REACT, leaving $SS0 ns 1 and $TD0"
 	ctl_ok ns delete --nqn "$SS0" --idx 2
 	assert_field "$CTL_OUT" '.ns_id' "$REACT_NS2_ID" \
 		"DeleteNamespaceReply.ns_id"
@@ -22046,6 +23014,7 @@ case_react() {
 	react_fs_data_leg
 	react_fs_restore
 	react_take_over
+	react_migr_cut
 	react_drop_target
 	case_finish
 }

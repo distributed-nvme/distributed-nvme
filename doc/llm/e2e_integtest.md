@@ -47,8 +47,12 @@ no repair, no forced start and no take-over:
   killed cn agent moves the primary role and then loses its cntlr, a killed dn
   agent with its nvmet port removed loses its leg to the worker's repair with
   a fresh leg, the dead leg kept as a retired leg, a group whose legs all lose
-  their disk nodes gets no repair until one comes back, and strided writes
-  that push a thin pool past its low water mark gain its slice a data group.
+  their disk nodes gets no repair until one comes back, strided writes
+  that push a thin pool past its low water mark gain its slice a data group,
+  and a migrating leg whose serving disk node goes silent after the cutover
+  is cut down to one path by the primary, so md fails its member while a
+  host's writes go on finishing, and the worker finishes the migration and
+  repairs the leg.
 * **A group md will not start comes back from one leg** (`architecture.md`,
   Repair; `cnagent.md` CN12), on react's pool, at the level where reactions
   stop. When the leg md holds in sync dies while md copies onto a repair's
@@ -124,7 +128,11 @@ fresh new leg in the react case at as many disk-node guests as a group has
 legs, where no guest lies outside the group's, and for a leg repair whose fresh
 leg react's steer pushes to the second tier (E2E4); and the destination of the
 copy case's second migration, cancelled with force after its cutover, which
-the case does not check at all.
+the case does not check at all. The cut of a migrating leg's path while its
+source serves, and leg repair's cancel of a migration whose cutover is
+pending and its wait on a copy not shown whole (`cnagent.md` CN10;
+`dnv-worker.md` AR8): react's migrating leg loses its destination after the
+cutover, with its copy whole.
 
 ## Topology and parameters
 
@@ -266,7 +274,11 @@ asserted so only with more disk-node guests than legs, the skip logged
 otherwise, and a leg repair whose fresh leg react steers onto a side-less
 disk node (The cases, react) only while the steer leaves such a node enabled
 on a guest outside the group's, since the steer can itself push the pick to
-the second tier; the skip is logged then too.
+the second tier; the skip is logged then too. React's migrating leg, which
+migrates a side, runs only with more disk-node guests than legs per group,
+skipped and logged otherwise, and steers its destination onto a side-less
+disk node outside the group's guests, failing when the steer leaves none
+there.
 
 E2E5. **Sparse backing files and allocation caps.**
 Backing files are created sparse but for the backing pattern, one random
@@ -292,18 +304,21 @@ cleanup's verdict is the exit status: a run whose end cleanup left a verb
 unfinished or one of the suite's own nvmet ports standing fails, after
 cleaning, while a run that fails an assertion removes nothing but the copy
 case's throttle and the react case's reject rule, each of which it takes off
-the controller node that carries it, as a slowed port would slow, and a
-refused one fail, every suite that runs before the next cleanup.
+the controller node that carries it, and the react case's silencing rule,
+which it takes off the disk node that carries it, as a slowed port would
+slow, a refused one fail and a silenced one stall every suite that runs
+before the next cleanup.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every write is
 buffered and synced and every read that must reach the media follows a cache
 drop. Two host processes run detached, as their IO may block and `timeout`
 cannot bound a task in uninterruptible sleep: the read-only level's read, which
-answers "blocked" within its own budget, and the cutoff case's write loop,
-whose writes are meant to queue through a failover. The loop reports through
-files and keeps to its own namespace: it writes only to the device the
-namespace's link named at its start, never creating that device node, and
+answers "blocked" within its own budget, and the write loop, whose writes are
+meant to queue: through a failover in the cutoff case, and in react's
+migrating leg on md until the primary cuts the leg's path. The loop reports
+through files and keeps to its own namespace: it writes only to the device
+the namespace's link named at its start, never creating that device node, and
 checks before every write that the device still carries the namespace's uuid.
 It stops on its stop file, with its work directory, or by itself after a bound
 sized to outlive a passing run, so that a failed run left in place stops
@@ -601,8 +616,9 @@ removal of the second pool, here as after the fallback, drops it on every
 controller node before the pool's subsystem goes.
 
 **react** proves the four reactions on real faults, an operator's forced
-start of a group md will not start, and an operator's take-over of a group's
-repair from the worker, on a pool of the run's slice count but at most
+start of a group md will not start, an operator's take-over of a group's
+repair from the worker, and the cut of a migrating leg whose serving disk
+node goes silent, on a pool of the run's slice count but at most
 `REACT_SLICE_CAP` slices (Topology and parameters), each by the record it
 writes, one action per pass making every wait a threshold plus a few passes
 (`dnv-worker.md` AR2); its own build may have reacted, so each reaction is
@@ -765,7 +781,42 @@ member (`architecture.md`, Repair), host0 must read both namespaces' data
 unchanged with no failed IO in its kernel log, and no failover may happen
 across the take-over. As in the leg repairs before, host0 makes no IO from the
 kill until md holds the group whole, so the stage proves the take-over at the
-read-write level, not IO during it.
+read-write level, not IO during it. The migrating leg (raid1 only, and only
+with more disk-node guests than legs per group, E2E4) runs after the take-over,
+on the same group at the read-write level, and takes away the disk node that
+serves a leg in the middle of its migration (`cnagent.md` CN10; `dnv-worker.md`
+AR8). A side of one of the group's legs migrates to a disk node that holds no
+side, on a guest outside the group's, steered there as the fresh legs before
+are, so that its silence takes down that one leg; the stage waits until the
+cutover has started, the destination serves through its dm-clone with its copy
+whole, the primary's path to it reads optimized and its path to the source
+inaccessible, the standby holds both paths live, the worker has read the leg's
+bitmap and md holds the group whole, so that the destination is the leg's
+serving side and holds every block. With no host IO running, the destination's
+nvmet port then drops all its traffic on its guest, both ways, as a disk node
+whose power went away looks from the wire, while its agent goes on answering
+the worker. Once the primary's controller to the destination reads connecting, a
+detached write loop on host0 (E2E7) rewrites setup's bytes over a range of ns 1
+the group holds. It starts only then: a write already sent when the traffic
+stops fails back once the controller's error recovery ends it, and md fails the
+member on that write with no cut (seen in the lab on the 7.0 kernel), so only a
+write sent once the path is down meets the wait the cut ends. The primary must
+cut its live path to the source, which its cn agent logs once and only once,
+since the converge connects no side of a leg whose serving path is down
+(`cnagent.md` CN10), while the standby keeps its own; md on the primary must fail the leg's member; and the loop must
+go on finishing writes, none of them failing. The worker must then finish the
+migration, the destination's latest report showing its copy whole — one record
+of that finish, naming the migration, and no cancel — the leg keeping the
+destination's side alone, and then repair the leg with a repair of its own and
+a fresh leg, created, started and finished as in the leg repairs before, the
+leg retired with the destination's side and the group's retired legs held to
+the give-back rule, while the loop runs with no write failed, and the loop must
+finish more writes once the repair is finished. The traffic comes back once
+the repair is finished; md must then hold the group whole on the fresh leg, the
+loop must still finish writes, and no cntlr may hold the retired leg. The loop
+stops on its stop file with no write failed by its records, host0's kernel log
+since a mark taken before the silence must report no failed IO, host0 reads its
+data unchanged, and no failover may happen across the stage.
 
 **cutoff** proves that a primary cut off from the control plane fails over as
 a pause for a host that follows the discovery log (`architecture.md`,
@@ -902,9 +953,9 @@ left standing. Data is checked against a pattern the system never sees,
 removals by the nodes' own listings and `NOT_FOUND`, reactions by the records
 they write. A pass may have taken the clone fallback, whose branch is logged,
 and a skipped check — a raid1-only step without redundancy, a
-guest-distinctness check without headroom, setup's disk-node look at side
-zeroing after a build whose reactions changed its legs — is a logged line, not
-a proof.
+guest-distinctness check or react's migrating leg without headroom, setup's
+disk-node look at side zeroing after a build whose reactions changed its
+legs — is a logged line, not a proof.
 
 ## Preflight
 
@@ -918,8 +969,10 @@ guest answers passwordless ssh; that a node guest has what the sweeps and the
 agents need — sudo, the tools of both roles (on a controller node, also the
 thin metadata reader the cn agent runs, those of the copy case's throttle when
 that case is in the run and the one of the react case's reject rule when that
-case runs with md-raid1), every module either loaded or built in, dm-flakey
-among them for the read-only level, and the nvmet tree, native multipath on a
+case runs with md-raid1, and on a disk node the one of the react case's
+silencing rule when that case runs with md-raid1 and more DN VMs than legs),
+every module either loaded or built in, dm-flakey among them for the
+read-only level, and the nvmet tree, native multipath on a
 disk node too, where a migration destination reads ANA through it, md support
 and a stock md assembly rule the mask can switch off (`architecture.md`,
 Components: invocation reference), hole punching, memory and free space, none
@@ -929,7 +982,9 @@ rewrite an existing port of its id (`dnagent.md` SH19); that a host is a clean
 initiator — sudo, nvme-tcp and multipath, its identity files, generated if
 absent and never overwritten, nvme-stas inactive and the masked autoconnector
 (E2E10); that host0, when the copy or the react case runs with md-raid1, has
-the tool of the kernel-log witness their repairs read; that host0, when the
+the tool of the kernel-log witness their repairs read, and with the react
+case and more DN VMs than legs the tools of the write loop its migrating leg
+runs; that host0, when the
 cutoff case is in the run, has the tools of the case's write loop and
 kernel-log witness and nvme-stas 2.x installed, both its units known to
 systemd, as a 1.x one would fail later and silently, never connecting,
@@ -953,11 +1008,15 @@ setup. A verb's bound detects a wedge but cannot end a task in uninterruptible
 sleep, which a removal or a scan against a suspended device creates, so every
 node guest resumes suspended devices before it removes anything. The order
 rests on one principle, a holder goes before what it holds, and on what this
-lab does when it is broken. Hosts go before every target, as they hold the
+lab does when it is broken. First every disk node takes the react case's
+silencing rule off, whether or not this run set it, so that the hosts and the
+controller nodes let go of their paths to ports that answer, and that step
+does not finish while a reading still shows the rule. Hosts go before every
+target, as they hold the
 controllers, and a subsystem removed under a live controller kills it with DNR
 while its port keeps listening and leaves it retrying once the port has
-nothing left (`cnagent_integtest.md`, Lab facts). On a host the cutoff case's
-write loop stops first, so that nothing writes into a device while its paths
+nothing left (`cnagent_integtest.md`, Lab facts). On a host the write loop
+stops first, so that nothing writes into a device while its paths
 go, then nvme-stas, so that nothing reconnects what the sweep drops, the host's
 own nvme-stas configuration going back while the work directory still holds
 its copy and an nvme-stas the suite never started being left alone; then the
@@ -1025,9 +1084,10 @@ names the stage, its trace id and the case, and the last ANA state, controller
 and path state the probes read, which tell no path from a path without the
 namespace and a live path from a retrying one; each guest's kernel, device,
 nvmet and log state follows, a host's with its nvme-stas state, configuration
-and journal and the cutoff case's write-loop records, and a controller node's
+and journal and the write loop's records, a controller node's
 with its recorded agent's process state, which shows an agent the cutoff case
-left stopped, the copy case's throttle and the react case's reject rule; the
+left stopped, the copy case's throttle and the react case's reject rule, and
+a disk node's with the react case's silencing rule; the
 failure line ends with the
 filter that pulls the stage's
 records. When the stage connected, the host's kernel log is the record of what
@@ -1051,8 +1111,8 @@ the connect attempted.
   pass discards through**; elsewhere the host's free space shrinks by each
   run's real writes.
 * **Without redundancy the suite is smaller**: copy's forced drop and two
-  repair stages and react's two leg repair stages, two forced-start stages
-  and take-over stage are skipped.
+  repair stages and react's two leg repair stages, two forced-start stages,
+  take-over stage and migrating-leg stage are skipped.
 * **How md takes a retired leg back is logged, not asserted.** md catches a
   retired leg taken back up from its write-intent bitmap only while the
   array has stayed degraded since the leg left, and otherwise copies it
@@ -1088,7 +1148,7 @@ the connect attempted.
   delete the suite asserts only that the path is not live, then disconnects the
   survivor by device; a wait after a disconnect, the suite's own or
   nvme-stas's, demands the path gone, which a wrong address also satisfies.
-* **A blocked probe, abandoned host IO, or the write the cutoff case's loop had
+* **A blocked probe, abandoned host IO, or the write a write loop had
   queued when it was stopped leaves an unkillable dd or sync behind** (E2E7)
   until its device or path serves IO again.
 * **react is capped below the ceiling.** At the widest shape a primary's build

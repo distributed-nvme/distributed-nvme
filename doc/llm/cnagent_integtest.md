@@ -774,10 +774,11 @@ any dm or nvmet residue fails it, since reporting it is not success.
 Error paths beyond the nine above; QoS, not enforced (`cnagent.md` CN6);
 `GrowSlice`; a leg gaining or losing a second side, whose disk node part the dn
 suite's migrations prove, but for a cancel, which only the e2e suite's
-cancelled migration exercises, and whose cn agent part — the connect per side
-and the disconnect of a dead path by device (`cnagent.md` CN10) — the unit
-tests prove, the e2e suite's migrations exercising it, and the path rows of a
-leg with two sides (`cnagent.md` CN28), which the unit tests cover; levels but
+cancelled migration exercises, and whose cn agent part — the connect per side,
+the disconnect of a dead path by device and the cut of a migrating leg's path
+(`cnagent.md` CN10) — the unit tests prove, the e2e suite's migrations
+exercising it, and the path rows of a leg with two sides (`cnagent.md` CN28),
+which the unit tests cover; levels but
 read-write, read-only and the no-clone gate, save what repair's forced-start
 stages read of the two levels they use to free the data array: the pool row the
 level that builds no thin pool suppresses, and the group array the level that
