@@ -1891,6 +1891,10 @@ func undecodable() proto.Message {
 func TestFailover(t *testing.T) {
 	env := newOpsEnv(t)
 	env.setCntlrErr(opsCntlrA, 1000)
+	// A demotion left on the new primary's record from an earlier failover.
+	stale := env.cntlr(opsCntlrB)
+	stale.DemotedRevision = 7
+	mustPut(t, env.cli, CntlrKey(env.cid, opsSpId, opsCntlrB), stale)
 	revBefore := env.spRev()
 	now := uint64(1000 + common.DefaultPrimaryUnhealthy)
 	if err := Failover(
@@ -1918,6 +1922,15 @@ func TestFailover(t *testing.T) {
 	}
 	if got := env.spRev(); got != revBefore+1 {
 		t.Errorf("SpRev: got %d, want %d", got, revBefore+1)
+	}
+	// RW22: the old primary's record names the failover's revision as its
+	// demotion, and the new primary's names none.
+	if got := env.cntlr(opsCntlrA).GetDemotedRevision(); got != revBefore+1 {
+		t.Errorf("the old primary's demoted_revision: got %d, want %d", got,
+			revBefore+1)
+	}
+	if got := env.cntlr(opsCntlrB).GetDemotedRevision(); got != 0 {
+		t.Errorf("the new primary's demoted_revision: got %d, want 0", got)
 	}
 	// Re-running is refused: the old cntlr is not primary any more.
 	err := Failover(
@@ -3352,5 +3365,40 @@ func TestReplaceCntlrAtTheCeiling(t *testing.T) {
 			!proto.Equal(list[len(list)-1], opsTrConf(newCnAddr)) {
 			t.Errorf("%s: %v, want the new cntlr listed last", key, list)
 		}
+	}
+}
+
+// TestClearCntlrDemotion: the clear writes zero only while the record still
+// carries the revision it was given, bumps no revision, and finds nothing to
+// do on a cntlr that is gone.
+func TestClearCntlrDemotion(t *testing.T) {
+	env := newOpsEnv(t)
+	cntlr := env.cntlr(opsCntlrA)
+	cntlr.DemotedRevision = 40
+	mustPut(t, env.cli, CntlrKey(env.cid, opsSpId, opsCntlrA), cntlr)
+	spRev := env.spRev()
+	store := env.storeRev()
+	cleared, err := ClearCntlrDemotion(env.ctx, env.cli, env.cid, opsSpId,
+		opsCntlrA, 39)
+	if err != nil || cleared || env.storeRev() != store {
+		t.Fatalf("a clear of another revision: cleared %v, err %v; want "+
+			"no write", cleared, err)
+	}
+	cleared, err = ClearCntlrDemotion(env.ctx, env.cli, env.cid, opsSpId,
+		opsCntlrA, 40)
+	if err != nil || !cleared {
+		t.Fatalf("the clear: cleared %v, err %v", cleared, err)
+	}
+	if got := env.cntlr(opsCntlrA); got.GetDemotedRevision() != 0 ||
+		!got.GetPrimary() {
+		t.Errorf("the record after the clear: %v", got)
+	}
+	if env.spRev() != spRev {
+		t.Errorf("SpRev moved: %d, want %d", env.spRev(), spRev)
+	}
+	cleared, err = ClearCntlrDemotion(env.ctx, env.cli, env.cid, opsSpId,
+		999, 40)
+	if err != nil || cleared {
+		t.Fatalf("a cntlr that is gone: cleared %v, err %v", cleared, err)
 	}
 }

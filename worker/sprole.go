@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -99,6 +100,11 @@ const (
 	// hold of deps (common.DemotionHoldTimeout in production), and the sides
 	// are sent the fan-out all the same.
 	msgSpDemotionUnsynced = "sp demotion unsynced"
+	// msgSpDemotionClearFailed is a clear of a demoted cntlr's
+	// demoted_revision, at the end of RW22's demotion hold, that failed: the
+	// record keeps it, and a later fan-out with no report of the cntlr at
+	// that revision runs the hold again.
+	msgSpDemotionClearFailed = "sp demotion clear failed"
 )
 
 // spConfRefusal is the memo that keeps a steady invalid stored conf to one
@@ -182,6 +188,17 @@ type spOps interface {
 		ref model.CutoverRef,
 		cntlrId uint64,
 	) (uint64, error)
+	// clearCntlrDemotion is the end of RW22's demotion hold on a cntlr whose
+	// record named the demotion (MD6's ClearCntlrDemotion): it clears
+	// demoted_revision while the record still carries revision, bumps
+	// nothing, and reports whether it wrote.
+	clearCntlrDemotion(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		cntlrId uint64,
+		revision uint64,
+	) (bool, error)
 }
 
 // modelSpOps is the production spOps.
@@ -228,6 +245,16 @@ func (o *modelSpOps) flipRepairProvisioned(
 	return model.FlipRepairProvisioned(
 		ctx, o.cli, cid, shard, spId, spName, ref,
 	)
+}
+
+func (o *modelSpOps) clearCntlrDemotion(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	cntlrId uint64,
+	revision uint64,
+) (bool, error) {
+	return model.ClearCntlrDemotion(ctx, o.cli, cid, spId, cntlrId, revision)
 }
 
 func (o *modelSpOps) flipCreated(
@@ -356,7 +383,10 @@ type cntlrPlan struct {
 	// settling is the loaded record's flag (HL2): the child seeds its
 	// monitor's memo from it whenever it takes this plan.
 	settling bool
-	req      *pb.SyncupCntlrRequest
+	// demotedRev is the loaded record's demoted_revision (RW22), which the
+	// request leaves out.
+	demotedRev uint64
+	req        *pb.SyncupCntlrRequest
 	// sliceIds are the SP's slice ids, ascending: RW19's condition (3)
 	// compares them with a reply's slice_id_to_dm_thin key set.
 	sliceIds []uint64
@@ -391,6 +421,11 @@ type spPlan struct {
 	// leaves a child idle: no request, so a running one is stopped (RW14). A
 	// nonzero count makes the coordinator re-resolve on its ticker.
 	unresolved int
+	// listed are the cntlr ids the SpConf lists, and deleting the SpConf's
+	// latch: RW22 reads a primary the plan no longer names as deleted only
+	// when the conf no longer lists it and the SP is not being drained.
+	listed   map[uint64]bool
+	deleting bool
 }
 
 // cloneOwner names the clone whose clone meta group holds a leg: the name that
@@ -978,6 +1013,11 @@ func (w *spWorker) buildPlan(
 		legClone:  make(map[uint64]cloneOwner),
 		legRepair: make(map[uint64]repairOwner),
 		tdRefs:    make(map[uint64]model.TdRef),
+		listed:    make(map[uint64]bool),
+		deleting:  conf.GetDeleting(),
+	}
+	for _, cntlrId := range conf.GetCntlrIdList() {
+		plan.listed[cntlrId] = true
 	}
 	for i, td := range state.Tds {
 		if td.GetCreated() {
@@ -1948,11 +1988,12 @@ func (w *spWorker) buildCntlrPlans(
 			continue
 		}
 		out := &cntlrPlan{
-			addr:     cntlr.GetAddrPort(),
-			cnId:     cnId,
-			cntlrId:  cntlrId,
-			primary:  cntlr.GetPrimary(),
-			settling: cntlr.GetSettling(),
+			addr:       cntlr.GetAddrPort(),
+			cnId:       cnId,
+			cntlrId:    cntlrId,
+			primary:    cntlr.GetPrimary(),
+			settling:   cntlr.GetSettling(),
+			demotedRev: cntlr.GetDemotedRevision(),
 			req: &pb.SyncupCntlrRequest{
 				ClusterId: w.cid,
 				CnId:      cnId,
@@ -1974,8 +2015,12 @@ func (w *spWorker) buildCntlrPlans(
 			sliceIds: sliceIds,
 		}
 		// As for the sides: the cntlr requests of one SP share the whole
-		// loaded state, so each child gets its own copy to marshal.
+		// loaded state, so each child gets its own copy to marshal. The
+		// record's demoted_revision is the worker's alone (RW22): its clear
+		// bumps no revision, and a request that changed under one revision
+		// would restart the child (keepChild).
 		out.req = proto.Clone(out.req).(*pb.SyncupCntlrRequest)
+		out.req.Cntlr.DemotedRevision = 0
 		if out.primary {
 			// BM4: clone chunks go only to the CN hosting the primary.
 			out.clones = clonePlans
@@ -2004,6 +2049,9 @@ type cntlrHold struct {
 	// demoted maps each cntlr RW22's demotion hold waits for to the revision
 	// of its demotion; nil when that hold is over, or never began.
 	demoted map[uint64]uint64
+	// marks maps each demoted cntlr whose record names a demotion
+	// (demoted_revision) to that revision, which the hold's end clears.
+	marks map[uint64]uint64
 	// sides are the side plans RW22's demotion hold keeps back.
 	sides map[sideKey]*sidePlan
 }
@@ -2054,23 +2102,49 @@ func (w *spWorker) demoting() bool {
 
 // demotions is RW22's test, each demoted cntlr mapped to the revision of its
 // demotion: a cntlr whose child was last handed a primary plan and whose plan
-// in this fan-out is a standby's. A cntlr with no running child leaves the
-// coordinator nothing to send a demotion through, whatever an earlier child of
-// its told the agent, and a cntlr replacement deletes the old cntlr, so
-// neither is a demotion.
+// in this fan-out is a standby's; a cntlr whose plan is a standby's and whose
+// record names a demotion (demoted_revision) that its child has not reported
+// applied, or that has no child — as after a restart or a handoff during a
+// failover — unless the demotion hold already waits for it at that
+// revision or a newer one; and a cntlr whose child was last handed a
+// primary plan and that the SpConf no longer lists, in an SP that is not
+// being drained: one a replacement of the primary deleted. A primary the
+// conf still lists but the plan leaves idle (RW14), and one a drain
+// deletes, are no demotion.
 func (w *spWorker) demotions(plan *spPlan) map[uint64]uint64 {
-	var demoted map[uint64]uint64
+	demoted := make(map[uint64]uint64)
 	for cntlrId, next := range plan.cntlrs {
-		child, ok := w.cntlrs[cntlrId]
-		if !ok || !child.plan.primary || next.primary {
+		if next.primary {
 			continue
 		}
-		if demoted == nil {
-			demoted = make(map[uint64]uint64)
+		child, ok := w.cntlrs[cntlrId]
+		heldAt, held := w.held.demotedOf()[cntlrId]
+		switch {
+		case ok && child.plan.primary:
+		case next.demotedRev != 0 && (!ok || child.synced < next.demotedRev) &&
+			!(held && heldAt >= next.demotedRev):
+		default:
+			continue
 		}
 		demoted[cntlrId] = next.req.GetRevision()
 	}
+	for cntlrId, child := range w.cntlrs {
+		if child.plan.primary && !plan.listed[cntlrId] && !plan.deleting {
+			demoted[cntlrId] = w.desired.revision
+		}
+	}
+	if len(demoted) == 0 {
+		return nil
+	}
 	return demoted
+}
+
+// demotedOf is the hold's demoted map, nil for no hold.
+func (h *cntlrHold) demotedOf() map[uint64]uint64 {
+	if h == nil {
+		return nil
+	}
+	return h.demoted
 }
 
 // holdDemotion is RW22's demotion hold: every cntlr the fan-out demotes is
@@ -2110,6 +2184,14 @@ func (w *spWorker) holdDemotion(plan *spPlan, fresh map[uint64]uint64) {
 	}
 	for cntlrId, revision := range fresh {
 		held.demoted[cntlrId] = revision
+	}
+	for cntlrId := range held.demoted {
+		if next, ok := plan.cntlrs[cntlrId]; ok && next.demotedRev != 0 {
+			if held.marks == nil {
+				held.marks = make(map[uint64]uint64)
+			}
+			held.marks[cntlrId] = next.demotedRev
+		}
 	}
 	held.revision = w.desired.revision
 	held.sides = plan.sides
@@ -2178,10 +2260,35 @@ func (w *spWorker) endDemotion(ctx context.Context, expired bool) {
 	held.timer.stop()
 	held.timer = w.deps.clk.newTimer(w.tickPeriod())
 	sides := held.sides
+	marks := held.marks
 	held.demoted = nil
+	held.marks = nil
 	held.sides = nil
 	held.awaited = awaitedSides(sides)
 	w.handSides(sides)
+	w.clearDemotions(ctx, marks)
+}
+
+// clearDemotions clears the demoted_revision of each cntlr whose record
+// named the demotion the hold has just ended (RW22), in ascending cntlr id,
+// each only while its record still carries the revision the hold read, in a
+// write that bumps nothing. A clear that fails is logged; the record keeps
+// the revision, and a later fan-out that finds no report of the cntlr at it
+// runs the hold again.
+func (w *spWorker) clearDemotions(ctx context.Context, marks map[uint64]uint64) {
+	for _, cntlrId := range sortedIds(slices.Collect(maps.Keys(marks))) {
+		_, err := w.ops.clearCntlrDemotion(ctx, w.cid, w.spId, cntlrId,
+			marks[cntlrId])
+		if err != nil {
+			slog.InfoContext(ctx, msgSpDemotionClearFailed,
+				slog.Uint64("cluster_id", w.cid),
+				slog.Uint64("sp_id", w.spId),
+				slog.Uint64("cntlr_id", cntlrId),
+				slog.Uint64("revision", marks[cntlrId]),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // releaseSynced releases the cntlr half RW14's barrier holds once every side

@@ -3782,9 +3782,18 @@ type Cntlr struct {
 	// AR5 holds a settling primary to cntlr_unhealthy instead of
 	// primary_unhealthy when that is the longer. Existing records decode
 	// false = settled.
-	Settling      bool `protobuf:"varint,7,opt,name=settling,proto3" json:"settling,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Settling bool `protobuf:"varint,7,opt,name=settling,proto3" json:"settling,omitempty"`
+	// The pool revision of the failover that made this cntlr a standby,
+	// written in the failover's own transaction (model.Failover), zero when
+	// none is pending: the sp worker runs its demotion hold from it even
+	// when no child of its handed this cntlr its primary plan, as after a
+	// restart or a handoff (dnv-worker.md RW22), and clears it, in a write
+	// that bumps no revision, once that hold ends. A failover that makes
+	// the cntlr the primary again clears it too. The worker's alone: the
+	// cntlr's request leaves it out. Appended, never renumbered.
+	DemotedRevision uint64 `protobuf:"varint,8,opt,name=demoted_revision,json=demotedRevision,proto3" json:"demoted_revision,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Cntlr) Reset() {
@@ -3864,6 +3873,13 @@ func (x *Cntlr) GetSettling() bool {
 		return x.Settling
 	}
 	return false
+}
+
+func (x *Cntlr) GetDemotedRevision() uint64 {
+	if x != nil {
+		return x.DemotedRevision
+	}
+	return 0
 }
 
 // {dnv_prefix} slice {cluster_id} {sp_id} {slice_id}
@@ -17804,7 +17820,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x0exfer_name_list\x18\x0f \x03(\tR\fxferNameList\x12$\n" +
 	"\x0emigr_name_list\x18\x10 \x03(\tR\fmigrNameList\x12(\n" +
 	"\x10repair_name_list\x18\x11 \x03(\tR\x0erepairNameList\x12-\n" +
-	"\x13retired_leg_id_list\x18\x12 \x03(\x04R\x10retiredLegIdList\"\xe3\x01\n" +
+	"\x13retired_leg_id_list\x18\x12 \x03(\x04R\x10retiredLegIdList\"\x8e\x02\n" +
 	"\x05Cntlr\x12\x1b\n" +
 	"\taddr_port\x18\x01 \x01(\tR\baddrPort\x12-\n" +
 	"\fnvme_tr_conf\x18\x02 \x01(\v2\v.NvmeTrConfR\n" +
@@ -17814,7 +17830,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\aprimary\x18\x04 \x01(\bR\aprimary\x12\x1a\n" +
 	"\bdisabled\x18\x05 \x01(\bR\bdisabled\x12\x1b\n" +
 	"\terr_epoch\x18\x06 \x01(\x04R\berrEpoch\x12\x1a\n" +
-	"\bsettling\x18\a \x01(\bR\bsettling\"|\n" +
+	"\bsettling\x18\a \x01(\bR\bsettling\x12)\n" +
+	"\x10demoted_revision\x18\b \x01(\x04R\x0fdemotedRevision\"|\n" +
 	"\x05Slice\x12\x1b\n" +
 	"\tslice_idx\x18\x01 \x01(\rR\bsliceIdx\x12*\n" +
 	"\rmeta_grp_list\x18\x02 \x03(\v2\x06.GroupR\vmetaGrpList\x12*\n" +

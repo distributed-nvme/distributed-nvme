@@ -1744,11 +1744,20 @@ func Failover(
 		// The new primary is settling until it reports its stack built and
 		// clean as primary, and AR5 judges it by primary_unhealthy alone only
 		// after that (HL2); a standby's flag steers nothing, so the old one's
-		// is cleared only for tidiness.
+		// is cleared only for tidiness. The old primary's record carries the
+		// revision this transaction writes as its demotion, so that a
+		// coordinator with no child of it still runs the demotion hold
+		// (dnv-worker.md RW22); the new primary's is no longer demoted.
+		revision, err := bumpSpRevTo(s, opFailover, shard, cid, spId)
+		if err != nil {
+			return err
+		}
 		old.Primary = false
 		old.Settling = false
+		old.DemotedRevision = revision
 		fresh.Primary = true
 		fresh.Settling = true
+		fresh.DemotedRevision = 0
 		s.Put(oldKey, old)
 		s.Put(newKey, fresh)
 		// The listing rule ([D18]) in the same transaction: an old primary
@@ -1757,11 +1766,42 @@ func Failover(
 		// (dnv-worker.md RW22); its next clean round lists it again as a
 		// standby. The new primary was listed already, as every candidate
 		// is.
-		if err := rewriteCdcEntries(s, opFailover, cid, conf); err != nil {
-			return err
-		}
-		return BumpSpRev(s, opFailover, shard, cid, spId)
+		return rewriteCdcEntries(s, opFailover, cid, conf)
 	})
+}
+
+// ClearCntlrDemotion clears the demoted_revision of cntlr cntlrId once the
+// sp worker's demotion hold for it has ended (dnv-worker.md RW22): only
+// while the record still carries revision, so that a later failover's value
+// is never lost. It bumps no revision: no agent reads the field, which the
+// cntlr's request leaves out. It reports whether it wrote; a cntlr that is
+// gone is no error, there being nothing left to clear.
+func ClearCntlrDemotion(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	cntlrId uint64,
+	revision uint64,
+) (bool, error) {
+	cleared := false
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		cleared = false
+		key := CntlrKey(cid, spId, cntlrId)
+		cntlr := &pb.Cntlr{}
+		if !s.Get(key, cntlr) ||
+			cntlr.GetDemotedRevision() != revision {
+			return nil
+		}
+		cntlr.DemotedRevision = 0
+		s.Put(key, cntlr)
+		cleared = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return cleared, nil
 }
 
 // ---------------------------------------------------------------------------

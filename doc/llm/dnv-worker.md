@@ -715,7 +715,9 @@ list; the flip, which reads the repair's key alone, and
   not reached for a settling primary" (AR5); the new cntlr is not `primary`,
   not `disabled`, has `err_epoch` zero **and** has the smallest `cntlr_id`
   among all such cntlrs. It flips both `primary` booleans, sets the new
-  cntlr's `settling` and clears the old one's (HL2), rewrites the SP's
+  cntlr's `settling` and clears the old one's (HL2), writes the revision
+  its own bump writes into the old cntlr's `demoted_revision` and clears the
+  new one's (RW22), rewrites the SP's
   `CdcEntry` records as `SetCntlrErrEpoch` does — which takes an enabled old
   primary with an `err_epoch` out of them, until its next clean round lists
   it again as a standby (HL2), while a disabled one left them with its
@@ -967,6 +969,10 @@ list; the flip, which reads the repair's key alone, and
   applied any, since the primary reads the request, and returns how many it
   applied and the revision its bump wrote, writing nothing when it applied
   none (AR16).
+* `ClearCntlrDemotion` takes a cntlr id and a revision, and clears the
+  cntlr's `demoted_revision` only while the record still carries that
+  revision, with no expected revision and no bump of any revision, since no
+  agent reads the field; a cntlr that is gone is no error (RW22).
 * `CancelAndCreateRepair` runs `CancelRepair`'s checks and writes and then
   `CreateRepair`'s, over the state the cancel left, in one STM with no
   expected revision, each raising `SpRev`; a refusal of either commits
@@ -2084,10 +2090,10 @@ hands it to the old primary before the sides fence its legs. The fence-first win
 errors on its still-optimized path from the time the sides' flips fence its
 legs until its agent has applied its demotion (`architecture.md`, Failover, and
 `architecture.md`, [D16]) — therefore remains only for an old primary that
-does not apply its demotion within RW22's wait, or whose failover a
-coordinator fans out with no running child of it last handed a primary
-plan, as after a shard loss before the demotion hold ends, or before that
-coordinator's first hold has started its cntlr children (Known limits).
+does not apply its demotion within RW22's wait, and for a replaced primary
+whose replacement a coordinator that has just started fans out, or whose
+record a replacement deleted inside the demotion hold before the pool's
+owner changed (Known limits).
 Hosts that follow the discovery log have dropped the path of one that
 cannot be reached by the end of the whole wait (RW22; `architecture.md`,
 Known limits). The wait is the demotion hold's own cost: a failover whose
@@ -2195,10 +2201,20 @@ agent answers the first Check at that revision with a clean standby shape,
 RW4 step 5 finds nothing to re-sync, and HL2 would settle the promoted
 cntlr on that reply.
 
-RW22. **Demotion hold.** A fan-out **demotes** a cntlr when the cntlr's
-running child was last handed a primary plan and the fan-out's plan makes it
-a standby; only a failover does so in production, on either of AR5's
-triggers. Such a fan-out runs a demotion hold ahead of RW14's sides-first
+RW22. **Demotion hold.** A fan-out **demotes** a cntlr in three cases: the
+cntlr's running child was last handed a primary plan and the fan-out's plan
+makes it a standby, which only a failover does in production, on either of
+AR5's triggers; the fan-out's plan makes it a standby and its record names
+a demotion (`demoted_revision`, which `model.Failover` writes in the
+failover's own transaction, MD6) that its child has not reported applied,
+or that no child of the coordinator's could report, unless the demotion
+hold already waits for it at that revision or a newer one; and the cntlr's
+running child was last handed a primary plan and the `SpConf` no longer
+lists it, in an SP that is not being drained, as after a cntlr replacement
+of the primary (AR7), which deleted it. A primary the conf still lists but
+the fan-out leaves idle (RW14), and one the sp drain deletes (SPD8), are no
+demotion. Such a fan-out runs a
+demotion hold ahead of RW14's sides-first
 hold: the demoted cntlr is handed its plan at once (RW6), and the side half
 and every other cntlr's request are held until each demoted cntlr's child
 has reported its demotion's revision, or a newer one, applied, or until
@@ -2255,21 +2271,36 @@ hold is pending ends that hold: its timer stops, the demotion hold keeps
 the newest plans, and the sides-first hold begins again when the demotion
 hold ends.
 
-Two cases are no demotion. A cntlr replacement deletes the old cntlr, whose
-child the diff stops (RW14), so its fan-out keeps RW14's order, unless it
+The record's demotion is what a coordinator with no running child of the
+old primary demotes it by: one that has just started, after a restart or a
+handoff, as when the failover's owner lost the shard before its demotion
+hold ended, and one whose pass did not decide the failover, as in an
+overlap (VW7). The failover's transaction writes it, so every coordinator
+from then on finds it; the demoted cntlr is handed its standby plan at once,
+a new child started for it, and the hold waits for that child's report as
+for any other. The demotion hold's end clears `demoted_revision` on each
+demoted cntlr whose record named it (`model.ClearCntlrDemotion`), only while
+the record still carries the revision the hold read, in a write that bumps
+no revision, since no agent reads the field: the cntlr's request leaves it
+out (RW16), so the clear changes no request. A clear that fails is logged
+`sp demotion clear failed` and the record keeps the field, so a later
+fan-out that finds no report of the cntlr at that revision runs the hold
+again, which costs one more wait. A failover that makes a cntlr the primary
+again clears its field in the same transaction.
+
+A cntlr replacement of the primary deletes the old cntlr, whose child the
+diff stops (RW14), so nothing reports for it and its demotion hold runs to
+its timer, holding the sides and the new primary. Reason: the old
+controller node's teardown of its stack, which the cn role's own syncup
+brings, then usually comes before the sides fence it, so hosts on the old
+path see their IO wait for the new path instead of failing on the fence. A
+replacement of a standby is no demotion and keeps RW14's order, unless it
 comes during a demotion hold, which holds it like any other fan-out
-(above). And a
-cntlr with no running child — every cntlr of a coordinator that has just
-started, after a restart or a handoff, until its first hold starts the
-cntlr children, and one left idle (RW14) — leaves this coordinator nothing
-to send a demotion through, whether or not an earlier child of its told
-the agent it was the primary, so a failover that a coordinator fans out before
-its first hold has started the cntlr children runs in RW14's order. Nothing
-of the demotion hold is persisted either: a new owner or a restarted worker
-cannot know an earlier owner's demotion, so a failover whose owner loses
-the shard before its demotion hold ends is fenced in RW14's order as well
-(Known limits). The demotion hold is no correctness dependency (`architecture.md`, [D16]): at its end
-the sides go whether the old primary reported or not.
+(above). A coordinator that has just started after a replacement of the
+primary has neither a child of the deleted cntlr nor its record, so its
+fan-out keeps RW14's order (Known limits). The demotion hold is no
+correctness dependency (`architecture.md`, [D16]): at its end the sides go
+whether the old primary reported or not.
 
 RW15. **Side request.** A `SyncupSideRequest` carrying `cluster_id`,
 `dn_id`, the `side_pointer` (sp id, leg id, side id), `revision` (the
@@ -2321,7 +2352,9 @@ length to zero, was refused by RW14's gate instead.
 
 RW16. **Cntlr request.** A `SyncupCntlrRequest` carrying `cluster_id`,
 `cn_id`, the `cntlr_pointer` (sp id, cntlr id), the revision, `bdev_conf`
-from the `SpConf`, `sp_level`, `cntlr` (the `Cntlr` record), `id_to_slice`
+from the `SpConf`, `sp_level`, `cntlr` (the `Cntlr` record, its
+`demoted_revision` left out: RW22's field is the worker's alone, and its
+clear bumps no revision), `id_to_slice`
 keyed by the slice id rendered with `IdKeyFmt` — the key the cn agent reads
 —, `td_list` in `td_name_list` order, `nqn_to_subsystem`, `clone_list`,
 `xfer_list` and `name_to_repair`, every repair of the SP by its name, at
@@ -3660,7 +3693,9 @@ endpoints the scan was, and its STM refuses the pick as `candidate changed`
 (MD5, MD6) when the SP holds a cntlr on a CN outside it — one the gateway's
 `CreateCntlr` committed after the pass's snapshot, whose CN and domain the
 scan could not exclude: `reaction skipped` (`candidate changed`), and the next
-pass plans from a snapshot that holds it.
+pass plans from a snapshot that holds it. The fan-out of a replacement of
+the primary runs RW22's demotion hold for the deleted cntlr before it tells
+the sides.
 
 The new CN takes no clone's metadata: a primary on it builds every clone
 of the SP over the clone's clone meta group (`cnagent.md` CN18), so the
@@ -4983,7 +5018,10 @@ end of RW22's demotion
 hold by its timer, one record per demotion hold and never per round, and expected
 at every failover whose old primary does not report its demotion applied
 within the wait — always for an old primary on a dead CN, or one cut off
-from the worker (RW22).
+from the worker — and at every replacement of the primary, whose deleted
+cntlr reports nothing (RW22); `sp demotion clear failed` a clear of a
+demoted cntlr's `demoted_revision` at the end of that hold that failed,
+with its error (RW22).
 
 **Bitmap pushes.** `bitmap pushed` every push that got a reply, with the
 agent's code (BM3); `bitmap push failed` a push that got none — the chunk
@@ -5407,7 +5445,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Nineteen records no suite case stages: `worker reg watch restarting`, `rev
+Twenty-one records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -5424,6 +5462,7 @@ suite case forces that code or sets `leftover_rounds`;
 `forced start kept`, since every clear the repair case stages commits;
 `clone latched` and `clone latch skipped`, for the reason given for CLD13
 above;
+`sp demotion clear failed`, since no suite case fails an etcd write;
 `sp group missing`, since no suite case plants a repair or a retired leg
 whose group is missing; `member add refused`, since no fake agent reports
 a group's refusal (AR14); `repair leg partial kept`, since every partial
@@ -6030,9 +6069,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
   once their epochs are stamped and loaded: their own `err_epoch` reports
   them (HL2).
   A failed-over primary is fenced before it has applied its demotion
-  only when it does not apply it within that wait, or when a coordinator
-  fans its failover out with no running child of it last handed a primary
-  plan (below). Hosts that follow the discovery log have dropped the path
+  only when it does not apply it within that wait; a replaced primary is
+  fenced at the end of that wait, or at once by a coordinator that fans
+  the replacement out with no running child of it (below). Hosts that follow the discovery log have dropped the path
   of one that cannot be reached by the end of the whole wait (RW22), a
   stale discovery view aside (`architecture.md`, Known limits); one whose
   agent applies its demotion late — a converge that waits for the cntlr's
@@ -6048,21 +6087,19 @@ which no suite case sets, so no suite case runs RW13's count compare.
   source connection the dn sweep runs under the side's lock, races the
   source disk node's `SyncupDn`, which no hold orders either and which takes
   that export away (`dnagent.md`, Known limits).
-* **A failover fanned out with no child that was handed the primary plan
-  can be fenced first.** RW22 finds a demotion only through the old
-  primary's running child last handed a primary plan, and nothing of the
-  demotion hold is persisted. A coordinator that has just started, after a restart
-  or a handoff, has no cntlr child until its first hold starts them, so a
-  failover that reaches it before then runs in RW14's order: one the other
-  owner of an overlap decided (VW7), or one its own pass decided on a
-  disabled primary (AR5). And a coordinator whose first fan-out already
-  carries the failover, as when the failover's owner lost the shard before
-  its demotion hold ended, never hands the old primary the primary plan at all, so
-  that fan-out runs in RW14's order too. Its sides can then fence the old
-  primary before that primary has applied its demotion: RW14's fence-first
-  window, for any host still on the old primary's path, which a host that
-  follows the discovery log may drop only after the fence
-  (`architecture.md`, Known limits).
+* **A replacement of the primary fanned out by a coordinator that has just
+  started holds nothing.** RW22 finds a deleted primary only through its
+  running child, and a replacement leaves no record of the cntlr it
+  deleted. A coordinator that has just started, after a restart or a
+  handoff, has no cntlr child until its first hold starts them, so a
+  replacement of the primary whose fan-out reaches it then runs in RW14's
+  order, and its sides can fence the old primary while that primary still
+  serves its hosts: RW14's fence-first window, for any host still on the
+  old primary's path (`architecture.md`, Known limits). A failover has
+  this window only when a replacement deletes its old primary inside the
+  demotion hold and the pool's owner changes before the hold ends, since
+  the record goes with the cntlr; otherwise its record names the demotion
+  (RW22).
 * **A lost thin id costs a failover or a replacement, and the second refusals
   that bound them are a memory.** A report marks a created td's lost thin
   id, with its thin row's reason, only when it comes from a converge's

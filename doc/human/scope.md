@@ -880,14 +880,16 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 - **Hosts still on the old primary's path see IO errors from the fence.**
   The worker hands the old primary its demotion first and holds the sides
   for three seconds at most. A host that follows the discovery log drops
-  the path inside that hold. Three windows remain. A slow old primary
-  misses the hold: state accepted. The worker's coordinator, the part of
-  the worker that drives one pool, runs no hold after a restart during the
-  failover: state fix decided, the demotion is written into the cntlr's
-  record. A cntlr replacement of a primary that still serves runs no hold:
-  state fix decided, the replacement waits for the hold first. What stays:
-  a Kubernetes host on an unreachable old node sees errors until the new
-  path shows the volume. Not seen in the lab.
+  the path inside that hold. The failover writes the demotion into the old
+  cntlr's record, so a worker that restarts or takes the pool over during
+  the failover holds the sides too. A cntlr replacement of the primary
+  holds the sides for the same three seconds, so the old controller node
+  usually tears its stack down first. Two windows remain, both accepted. A
+  slow old primary misses the hold. A worker that restarts or takes the
+  pool over just after a replacement of the primary holds nothing, since
+  the replaced cntlr leaves no record. What stays besides: a Kubernetes
+  host on an unreachable old node sees errors until the new path shows the
+  volume. Not seen in the lab.
 - **A node clock that steps back delays a failover.** The worker reads how
   old an agent's report is by the node's clock. After the clock steps
   back, reports read younger by up to the step, so a node whose reads hang

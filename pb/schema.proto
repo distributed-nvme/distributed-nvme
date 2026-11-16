@@ -776,6 +776,15 @@ message Cntlr {
     // primary_unhealthy when that is the longer. Existing records decode
     // false = settled.
     bool settling = 7;
+    // The pool revision of the failover that made this cntlr a standby,
+    // written in the failover's own transaction (model.Failover), zero when
+    // none is pending: the sp worker runs its demotion hold from it even
+    // when no child of its handed this cntlr its primary plan, as after a
+    // restart or a handoff (dnv-worker.md RW22), and clears it, in a write
+    // that bumps no revision, once that hold ends. A failover that makes
+    // the cntlr the primary again clears it too. The worker's alone: the
+    // cntlr's request leaves it out. Appended, never renumbered.
+    uint64 demoted_revision = 8;
 }
 
 // {dnv_prefix} slice {cluster_id} {sp_id} {slice_id}

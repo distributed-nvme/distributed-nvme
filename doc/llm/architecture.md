@@ -334,6 +334,12 @@ always means the SP's `DmPoolConf.data_block_size`.
   the op that makes the cntlr primary, cleared by the worker's clean
   health verdict that proves the role, in a write that bumps no revision,
   or by the failover that demotes it.
+* **demoted_revision** — `Cntlr.demoted_revision`: the revision of the
+  failover that made the cntlr a standby, written by that failover's
+  transaction and cleared by the sp worker, in a write that bumps no
+  revision, once its demotion hold for the cntlr ends (`dnv-worker.md`
+  RW22), or by a failover that makes the cntlr the primary again. The
+  worker's alone: the cntlr's request leaves it out.
 
 Ownership hierarchy (etcd side):
 
@@ -5064,10 +5070,13 @@ dependency ([D16]):
   cntlr its demotion at once, and holds every side request and every other
   cntlr request until the demoted cntlr has reported the new revision
   applied, or for `DemotionHoldTimeout` at most (`dnv-worker.md` RW22).
-  The worker judges no reachability: a reachable old primary that applies
-  its demotion within the bound is ANA inaccessible before any side fences
-  it, and the bound lets the hosts of an unreachable one drop the path the
-  failover withdrew (Failover, [D16]).
+  The failover's transaction writes its revision into the old primary's
+  record (`Cntlr.demoted_revision`), so a worker that takes the pool over,
+  or restarts, during the failover runs the same hold, and the hold's end
+  clears it. The worker judges no reachability: a reachable old primary
+  that applies its demotion within the bound is ANA inaccessible before any
+  side fences it, and the bound lets the hosts of an unreachable one drop
+  the path the failover withdrew (Failover, [D16]).
 * **Sides first.** The cntlrs' requests are then held until the sides
   `dnv-worker.md` RW14 waits for have reported the new revision applied,
   or for one `cntlr_interval` at most, counted from the end of the
@@ -5075,10 +5084,12 @@ dependency ([D16]):
   `dnv-worker.md` RW14 says which sides are waited for, when the hold
   releases and what it costs.
 
-A cntlr replacement is no demotion: it deletes the old cntlr, whose stack
-goes with its CN's `SyncupCn` (dn / cn roles), so the sp role has no
-request to hand that cntlr first, and a replacement starts no demotion
-hold of its own.
+A cntlr replacement of the primary deletes the old cntlr, whose stack goes
+with its CN's `SyncupCn` (dn / cn roles), so the sp role has no request to
+hand that cntlr first; its fan-out still holds the sides and the other
+cntlrs for `DemotionHoldTimeout`, so that the old CN's teardown usually
+comes before the sides fence it (`dnv-worker.md` RW22). A replacement of a
+standby holds nothing more than the sides-first hold.
 
 Bitmap chunks travel over the dedicated `PushCloneBitmap` and
 `PushMigrBitmap` calls instead of the `Syncup*` requests (Bitmap push
@@ -5199,8 +5210,8 @@ The four reactions:
   transaction doing what `DeleteCntlr` and `CreateCntlr` do without
   `DeleteCntlr`'s not-primary and disabled preconditions, the rewrite of
   the discovery records by [D18] included (`dnv-worker.md` MD6). It
-  deletes the old cntlr rather than demoting it, so it starts no demotion
-  hold of its own (sp role).
+  deletes the old cntlr rather than demoting it; a replacement of the
+  primary still holds the sides for the demotion hold's time (sp role).
 * **Leg repair** (`dnv-worker.md` AR8): a leg of a slice's group or of a
   clone's clone meta group unhealthy for `leg_unhealthy`, or unhealthy
   while its side has been unhealthy for `side_unhealthy`, gets a worker's
@@ -5284,7 +5295,9 @@ revision):
    CN10; `cnagent.md`, Known limits); a transfer the new primary serves
    waits the same way (`cnagent.md` CN17).
 
-The failover's own transaction marks the new primary settling; until it
+The failover's own transaction writes its revision into the old primary's
+`demoted_revision`, which the sp role's demotion hold reads (sp role), and
+marks the new primary settling; until it
 has reported its stack built and clean as primary, a failover of it for
 being unhealthy waits `cntlr_unhealthy` instead of `primary_unhealthy`
 when that is the longer, unless it is disabled (`dnv-worker.md` HL2, AR5).
@@ -5382,9 +5395,8 @@ not applied its demotion: a path nothing following the discovery log
 manages, a path the Kubernetes driver keeps while its node holds no path to
 a listed cntlr that shows the volume's namespace, a discovery view a cdc
 instance keeps stale, a demotion its agent cannot apply within the demotion
-hold, or a failover fanned out with no demotion hold by a coordinator that
-has just started, after a restart or a handoff, as when the failover's owner
-lost the shard before its demotion hold ended (Known limits). Its md arrays
+hold. A replacement of the primary fanned out by a worker that has just
+started fences an old primary that still serves (Known limits). Its md arrays
 fail once the sides have fenced its legs ([D16], whose write-safety the
 paragraph above explains), and the errors nvmet returns on the
 still-optimized path are target-internal (DNR), not path errors — host
@@ -8058,15 +8070,16 @@ document and only pointed to here.
   (Clones), so only a forced delete of a clone still copying can see IO
   errors on its destination until the primary's next converge removes the
   dm-clone.
-* **A failover with no demotion hold can fence the old primary first**
-  (`dnv-worker.md` RW22 and Known limits). When the SP's shard changes
-  owner, or its worker restarts, before a failover's demotion hold ends,
-  or a coordinator that has just started fans a failover out before its
-  first hold has started its cntlr children, the sides can fence the old
-  primary before it has applied its demotion, and until it has, it answers
-  IO errors on its still-optimized path to every host still on that path.
-  A host that follows the discovery log still drops the path the failover
-  withdrew, possibly only after the fence (Failover).
+* **A replacement of the primary fanned out by a worker that has just
+  started can fence the old primary first** (`dnv-worker.md` RW22 and
+  Known limits). A replacement deletes the old cntlr and leaves no record
+  of it, so a worker that restarts, or takes the pool over, before it has
+  fanned the replacement out tells the sides at once, and they can fence
+  the old primary while it still serves; until its CN tears its stack
+  down, it answers IO errors on its still-optimized path to every host
+  still on that path. A failover has this window only when a replacement
+  deletes its old primary inside the demotion hold and the worker changes
+  then; otherwise the old primary's record names the demotion.
 * **Read-only reaches a CN only with its converge.** A CN that has not yet
   converged to a revision carrying `SP_LEVEL_READONLY` keeps serving
   writes until it syncs; there is no DN-side enforcement point that could

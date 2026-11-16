@@ -1119,22 +1119,24 @@ func TestTakeoverBeforeTheFailoverCommit(t *testing.T) {
 	foWaitCntlrSynced(t, h, peer, 2, applied.num("revision"), 10*time.Second)
 }
 
-// TestTakeoverAfterTheCommitInTheFirstWait pins RW22's rule that nothing of
-// the hold is persisted: the owner commits a failover and crashes inside its
-// first wait, which the old primary's held demotion keeps open, before any
-// side was told the failover's revision. The worker that takes the pool's
-// shard over has no cntlr child it handed a primary plan, so it runs no
-// first wait and fans the failover out in RW14's order: the sides first, and
-// the cntlrs, the promotion included, only once its second wait ends, here
-// at its timer, since one side's syncup is held as well. The cluster's
-// cntlr interval, the bound of the new owner's second wait, is long enough
-// for the three other sides to answer inside it on a loaded machine.
+// TestTakeoverAfterTheCommitInTheFirstWait pins RW22's demotion read from
+// the record: the owner commits a failover and crashes inside its first
+// wait, which the old primary's held demotion keeps open, before any side
+// was told the failover's revision. The worker that takes the pool's shard
+// over has no cntlr child it handed a primary plan, but the old primary's
+// record names the demotion (demoted_revision), so it hands the old primary
+// its standby plan at once and runs the first wait itself, here to its
+// timer, since the old primary's syncups stay held; then the sides are told,
+// and the cntlrs, the promotion included, only once its second wait ends,
+// again at its timer, since one side's syncup is held as well. The new
+// owner's own pass may replace the unhealthy old cntlr inside the first
+// wait, which then keeps waiting for it at the replacement's revision. The
+// end of the first wait clears the record's demotion, or the replacement has
+// deleted the record.
 func TestTakeoverAfterTheCommitInTheFirstWait(t *testing.T) {
 	t.Parallel()
 	tmo := harnessTimeouts()
-	// A first wait long enough to crash the owner inside it, and longer
-	// than the new owner, which runs none, takes to tell the sides; it
-	// costs no time, since the crash ends the owner's first wait.
+	// A first wait long enough to crash the owner inside it.
 	tmo.demotionHold = 6 * time.Second
 	h := newWorkerHarness(t, harnessOpts{tmo: &tmo})
 	c := h.plantStd(t, nil)
@@ -1149,6 +1151,10 @@ func TestTakeoverAfterTheCommitInTheFirstWait(t *testing.T) {
 	foFailPrimaryByRow(t, c)
 	applied := foWaitFailover(t, h, owner, 1, 2, 40*time.Second)
 	failRev := applied.num("revision")
+	if got := c.cntlr(t, 1).GetDemotedRevision(); got != failRev {
+		t.Fatalf("the old primary's demoted_revision is %d, want the "+
+			"failover's %d", got, failRev)
+	}
 	h.waitUntil(t, 10*time.Second, "the old primary's held demotion",
 		func() (bool, string) {
 			for _, msg := range oldAgent.Record(oldKey).Syncups {
@@ -1173,40 +1179,55 @@ func TestTakeoverAfterTheCommitInTheFirstWait(t *testing.T) {
 	}
 
 	ownedAt := foWaitTakesPool(t, h, peer, crashedAt)
+	demoted := h.waitRecord(t, 20*time.Second, peer, msgSpDemotionUnsynced,
+		func(rec logRecord) bool {
+			ids, _ := rec.attrs["cntlr_ids"].Any().([]uint64)
+			return rec.num("revision") >= failRev && slices.Contains(ids, 1)
+		})
+	if took := demoted.at.Sub(ownedAt); took < tmo.demotionHold/2 {
+		t.Errorf("the new owner's first wait ended %v after it took the "+
+			"pool, want about %v", took, tmo.demotionHold)
+	}
+	holdRev := demoted.num("revision")
 	unsynced := h.waitRecord(t, 20*time.Second, peer, msgSpSidesUnsynced,
-		func(rec logRecord) bool { return rec.num("revision") == failRev })
+		func(rec logRecord) bool { return rec.num("revision") == holdRev })
 	if n := unsynced.num("side_cnt"); n != 1 {
 		t.Errorf("the new owner's second wait ended with %d sides unsynced, "+
 			"want the held side 8", n)
 	}
-	if recs := foRecordsAt(h, peer, msgSpDemotionUnsynced, failRev); len(recs) != 0 {
-		t.Errorf("the new owner ran a first wait of its own")
-	}
-	var sidesTook time.Duration
-	for id, rec := range foWaitSidesSynced(t, h, peer, failRev, 9, 10, 11) {
+	for id, rec := range foWaitSidesSynced(t, h, peer, holdRev, 9, 10, 11) {
+		if rec.at.Before(demoted.at) {
+			t.Errorf("side %d was told the failover before the new owner's "+
+				"first wait ended", id)
+		}
 		if !rec.at.Before(unsynced.at) {
 			t.Errorf("side %d was told the failover only after the new "+
 				"owner's second wait ended", id)
 		}
-		took := rec.at.Sub(ownedAt)
-		if took >= tmo.demotionHold {
-			t.Errorf("side %d was told the failover %v after the new owner "+
-				"took the pool, a first wait's length", id, took)
-		}
-		sidesTook = max(sidesTook, took)
 	}
 	for _, rec := range h.records(peer, msgSyncupResult) {
-		if id, ok := foCntlrIdOf(rec); ok && rec.num("revision") >= failRev &&
-			rec.at.Before(unsynced.at) {
+		if id, ok := foCntlrIdOf(rec); ok && id != 1 &&
+			rec.num("revision") >= failRev && rec.at.Before(unsynced.at) {
 			t.Errorf("cntlr %d had a syncup at revision %d before the new "+
 				"owner's second wait ended", id, rec.num("revision"))
 		}
 	}
 	promoted := foWaitCntlrSynced(t, h, peer, 2, failRev, 10*time.Second)
-	t.Logf("the new owner took the pool %v after the crash, told the sides "+
-		"within %v and promoted cntlr 2 %v after it took the pool",
+	h.waitUntil(t, 10*time.Second, "the old primary's demotion cleared",
+		func() (bool, string) {
+			rec := &pb.Cntlr{}
+			found, err := h.cli.Get(context.Background(),
+				model.CntlrKey(c.cl.Id, stdSpId, 1), rec)
+			if err != nil {
+				return false, err.Error()
+			}
+			return !found || rec.GetDemotedRevision() == 0,
+				fmt.Sprintf("demoted_revision %d", rec.GetDemotedRevision())
+		})
+	t.Logf("the new owner took the pool %v after the crash, ended its first "+
+		"wait %v and promoted cntlr 2 %v after it took the pool",
 		ownedAt.Sub(crashedAt).Round(time.Millisecond),
-		sidesTook.Round(time.Millisecond),
+		demoted.at.Sub(ownedAt).Round(time.Millisecond),
 		promoted.at.Sub(ownedAt).Round(time.Millisecond))
 
 	foLever(t, oldAgent, oldKey, func(o *agentfake.Object) { o.HangSyncup = false })

@@ -2744,6 +2744,50 @@ type fakeSpOps struct {
 	provisionedRev uint64
 	// order names every flip and cutover call, in call order.
 	order []string
+	// clears records every clearCntlrDemotion call; clearErr, when set, is
+	// what each returns.
+	clears   []demotionClear
+	clearErr error
+}
+
+// demotionClear is one clearCntlrDemotion call of the coordinator.
+type demotionClear struct {
+	cntlrId  uint64
+	revision uint64
+}
+
+func (o *fakeSpOps) clearCntlrDemotion(
+	ctx context.Context, cid uint64, spId uint64, cntlrId uint64,
+	revision uint64,
+) (bool, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.clears = append(o.clears, demotionClear{cntlrId, revision})
+	if o.clearErr != nil {
+		return false, o.clearErr
+	}
+	// As model.ClearCntlrDemotion: the record loses the revision only while
+	// it still carries it, and the store's revision does not move.
+	cntlr, ok := o.state.Cntlrs[cntlrId]
+	if !ok || cntlr.GetDemotedRevision() != revision {
+		return false, nil
+	}
+	next := *o.state
+	next.Cntlrs = make(map[uint64]*pb.Cntlr, len(o.state.Cntlrs))
+	for id, rec := range o.state.Cntlrs {
+		next.Cntlrs[id] = rec
+	}
+	cleared := proto.Clone(cntlr).(*pb.Cntlr)
+	cleared.DemotedRevision = 0
+	next.Cntlrs[cntlrId] = cleared
+	o.state = &next
+	return true, nil
+}
+
+func (o *fakeSpOps) clearCalls() []demotionClear {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]demotionClear(nil), o.clears...)
 }
 
 // cutoverCall is one startCutover call of the coordinator.
@@ -6374,8 +6418,9 @@ func (o *fakeSpOps) commitBump() uint64 {
 
 // commitFailover applies what model.Failover commits to the stored state,
 // copy-on-write as putCntlrErrEpoch does: the role moves from oldId to newId,
-// the new primary is settling and the old one no longer (HL2), and SpRev
-// bumps. It returns the new revision.
+// the new primary is settling and the old one no longer (HL2), the old one's
+// record names the new revision as its demotion and the new one's none
+// (RW22), and SpRev bumps. It returns the new revision.
 func (o *fakeSpOps) commitFailover(oldId uint64, newId uint64) uint64 {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -6384,12 +6429,14 @@ func (o *fakeSpOps) commitFailover(oldId uint64, newId uint64) uint64 {
 	for id, cntlr := range o.state.Cntlrs {
 		next.Cntlrs[id] = cntlr
 	}
+	next.SpRevision++
 	old := proto.Clone(o.state.Cntlrs[oldId]).(*pb.Cntlr)
 	old.Primary, old.Settling = false, false
+	old.DemotedRevision = next.SpRevision
 	fresh := proto.Clone(o.state.Cntlrs[newId]).(*pb.Cntlr)
 	fresh.Primary, fresh.Settling = true, true
+	fresh.DemotedRevision = 0
 	next.Cntlrs[oldId], next.Cntlrs[newId] = old, fresh
-	next.SpRevision++
 	o.state = &next
 	return next.SpRevision
 }
@@ -7317,8 +7364,9 @@ func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
 		return n
 	}
 	// run drives a one-cntlr SP for three windows of cntlr_unhealthy past its
-	// primary's first error, and returns the harness, the replacements the
-	// passes applied and that error's err_epoch. A replacement lands on the
+	// primary's first error, plus two demotion holds and a pass interval, and
+	// returns the harness, the replacements the passes applied and that
+	// error's err_epoch. A replacement lands on the
 	// first of replCnA and replCnB its scan does not black-list, and the
 	// cntlr on ownOn also fails a row of its own ("" for none). A nonzero
 	// bumpOn is a cntlr the run bumps the SP for once a pass has refused to
@@ -7376,7 +7424,12 @@ func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
 			return h.ops.cntlrErrEpoch(spCntlrPrimary) != 0
 		})
 		epoch := h.ops.cntlrErrEpoch(spCntlrPrimary)
-		end := epoch + 3*pingPongCntlrUnhealthy + pingPongInterval
+		// Each replacement of the primary holds the sides and the new
+		// primary for the demotion hold's time (RW22), so the run's two
+		// replacements each push the next window back by one hold, and the
+		// last window's pass by one pass interval.
+		hold := uint64(h.deps.tmo.demotionHold / time.Second)
+		end := epoch + 3*pingPongCntlrUnhealthy + 2*pingPongInterval + 2*hold
 		if bumpOn != 0 {
 			h.advanceUntil("AR7's second refusal", 5*time.Second,
 				func() bool {
