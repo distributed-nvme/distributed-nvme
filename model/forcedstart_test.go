@@ -22,7 +22,7 @@ import (
 func (e *opsEnv) forceStart(grpId, legId uint64, cancel bool) (uint64, error) {
 	e.t.Helper()
 	return ForceStartGroup(e.ctx, e.cli, e.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, opsSliceParent, grpId, legId, cancel)
+		opsSpName, noExpectRev, opsSliceParent, grpId, legId, cancel, false)
 }
 
 // mustForceStart is forceStart failing the test on an error.
@@ -126,31 +126,32 @@ func TestForceStartGroupTakesTheToken(t *testing.T) {
 	env := newOpsEnv(t)
 	if _, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, env.spRev(), opsSliceParent, opsDataGrpId,
-		opsDataLegA, false); err != nil {
+		opsDataLegA, false, false); err != nil {
 		t.Fatalf("ForceStartGroup with the token: %v", err)
 	}
 	for _, cancel := range []bool{false, true} {
 		before := env.storeRev()
 		_, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 			opsSpId, opsSpName, env.spRev()+9, opsSliceParent, opsDataGrpId,
-			opsDataLegB, cancel)
+			opsDataLegB, cancel, false)
 		env.wantNoWrite(err, opForceStartGroup, ReasonStaleRevision, before)
 	}
 	if _, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, env.spRev(), opsSliceParent, opsDataGrpId, 0,
-		true); err != nil || env.mark(opsDataGrpId) != nil {
+		true, false); err != nil || env.mark(opsDataGrpId) != nil {
 		t.Errorf("the cancel with the token: %v, mark %v", err,
 			env.mark(opsDataGrpId))
 	}
 }
 
 // TestForceStartGroupNamesARepairsNewLeg: the mark may name the new leg of
-// the group's open repair while its abort flag is clear, and not once the
-// flag is set on the CREATED repair, which takes the leg out of the members
-// the forced start keeps; the abort itself waits for the mark's cancel
+// the group's open repair whatever its abort flag says, the CREATED
+// repair's once the flag is set too, since after a forced start from it the
+// leg can be the group's one full member (namesNewLegs); the abort itself
+// waits for the mark's cancel
 // (TestSetRepairAbortRefusedWhileAMarkNamesTheNewLeg). A STARTED repair's
-// new leg may be named whatever its flag says (keepsNewLegs), and an
-// ABORTED repair's may not.
+// new leg may be named whatever its flag says, and an ABORTED repair's may
+// not.
 func TestForceStartGroupNamesARepairsNewLeg(t *testing.T) {
 	env := newOpsEnv(t)
 	_, newLegId := env.createRepair(func() RepairNewLeg {
@@ -169,9 +170,15 @@ func TestForceStartGroupNamesARepairsNewLeg(t *testing.T) {
 		opsSpId, opsSpName, noExpectRev, opsRepName); err != nil {
 		t.Fatalf("SetRepairAbort: %v", err)
 	}
-	before := env.storeRev()
-	_, err := env.forceStart(opsDataGrpId, newLegId, false)
-	env.wantNoWrite(err, opForceStartGroup, ReasonLegNotNamable, before)
+	revision = env.mustForceStart(opsDataGrpId, newLegId)
+	if mark := env.mark(opsDataGrpId); mark.GetLegId() != newLegId ||
+		mark.GetRevision() != revision {
+		t.Errorf("the aborting repair's mark: got %v, want leg %d at %d",
+			mark, newLegId, revision)
+	}
+	if _, err := env.forceStart(opsDataGrpId, 0, true); err != nil {
+		t.Fatalf("the cancel of the aborting repair's mark: %v", err)
+	}
 
 	rep := env.repair(opsRepName)
 	rep.RepStage = pb.RepStage_REP_STAGE_STARTED
@@ -188,8 +195,8 @@ func TestForceStartGroupNamesARepairsNewLeg(t *testing.T) {
 
 	rep.RepStage = pb.RepStage_REP_STAGE_ABORTED
 	mustPut(env.t, env.cli, RepairKey(env.cid, opsSpId, opsRepName), rep)
-	before = env.storeRev()
-	_, err = env.forceStart(opsDataGrpId, newLegId, false)
+	before := env.storeRev()
+	_, err := env.forceStart(opsDataGrpId, newLegId, false)
 	env.wantNoWrite(err, opForceStartGroup, ReasonLegNotNamable, before)
 }
 
@@ -305,7 +312,7 @@ func TestForceStartGroupPreconditions(t *testing.T) {
 			before := env.storeRev()
 			_, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 				opsSpId, opsSpName, c.expectRev, c.parent, c.grpId, c.legId,
-				false)
+				false, false)
 			env.wantNoWrite(err, opForceStartGroup, tc.reason, before)
 		})
 	}
@@ -405,7 +412,7 @@ func TestForceStartGroupCancelPreconditions(t *testing.T) {
 			parent, grpId := tc.setup(env)
 			before := env.storeRev()
 			_, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
-				opsSpId, opsSpName, noExpectRev, parent, grpId, 0, true)
+				opsSpId, opsSpName, noExpectRev, parent, grpId, 0, true, false)
 			env.wantNoWrite(err, opForceStartGroup, tc.reason, before)
 		})
 	}
@@ -598,7 +605,7 @@ func TestForcedStartOfACloneMetaGroup(t *testing.T) {
 	slice := env.slice()
 	revision, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, noExpectRev, parent, opsCloneGrpId,
-		opsCloneLegB, false)
+		opsCloneLegB, false, false)
 	if err != nil {
 		t.Fatalf("ForceStartGroup of the clone's group: %v", err)
 	}
@@ -624,7 +631,7 @@ func TestForcedStartOfACloneMetaGroup(t *testing.T) {
 			err)
 	}
 	_, err = ForceStartGroup(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, parent, opsCloneGrpId, opsCloneLegA, false)
+		opsSpName, noExpectRev, parent, opsCloneGrpId, opsCloneLegA, false, false)
 	env.wantNoWrite(err, opForceStartGroup, "clone deleting", before)
 	clone.Deleting = false
 	mustPut(t, env.cli, CloneKey(env.cid, opsSpId, opsCloneName), clone)
@@ -635,5 +642,27 @@ func TestForcedStartOfACloneMetaGroup(t *testing.T) {
 	if mark := env.clone(opsCloneName).GetMetaGrp().GetForcedStart(); mark !=
 		nil {
 		t.Errorf("the clear left the clone's mark %v", mark)
+	}
+}
+
+// TestForceStartGroupCarriesTheForce: the mark carries the operator's force
+// as the call gives it (cnagent.md CN12), and a later write without it
+// replaces the mark with one that carries none.
+func TestForceStartGroupCarriesTheForce(t *testing.T) {
+	env := newOpsEnv(t)
+	revision, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, noExpectRev, opsSliceParent, opsDataGrpId,
+		opsDataLegA, false, true)
+	if err != nil {
+		t.Fatalf("ForceStartGroup with force: %v", err)
+	}
+	if mark := env.mark(opsDataGrpId); !mark.GetForce() ||
+		mark.GetLegId() != opsDataLegA || mark.GetRevision() != revision {
+		t.Fatalf("the forced mark: %v, want leg %d at %d with force", mark,
+			opsDataLegA, revision)
+	}
+	env.mustForceStart(opsDataGrpId, opsDataLegA)
+	if mark := env.mark(opsDataGrpId); mark.GetForce() {
+		t.Fatalf("the replacing mark keeps the force: %v", mark)
 	}
 }

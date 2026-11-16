@@ -325,7 +325,7 @@ var leafFlags = map[string][]string{
 	"migr get":    {"name"},
 	// repair
 	"repair create": {"name", "grp", "bad-legs", "retired-leg",
-		"dn-black", "dn-white"},
+		"dn-black", "dn-white", "force"},
 	"repair finish": {"name"},
 	"repair cancel": {"name"},
 	"repair abort":  {"name"},
@@ -335,7 +335,7 @@ var leafFlags = map[string][]string{
 	"retired-leg list":   {},
 	"retired-leg delete": {"leg"},
 	// group
-	"group force-start":            {"grp", "leg", "cancel"},
+	"group force-start":            {"grp", "leg", "cancel", "force"},
 	"group set-operator-in-charge": {"grp", "operator-in-charge"},
 }
 

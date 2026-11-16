@@ -2,6 +2,8 @@ package cnagent
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,7 +135,11 @@ type fakeNode struct {
 	// inactive array at its node that holds the member and refusedLeavesAlso
 	// beside it, as an array the stock incremental rule assembled does: a
 	// device there that is no dm device makes that array foreign.
-	bblRefused        map[string]bool
+	bblRefused map[string]bool
+	// zeroNoEffect are the members whose `mdadm --zero-superblock` answers
+	// success and writes nothing, as mdadm answers a zero whose read of the
+	// member fails (cnagent.md CN12).
+	zeroNoEffect      map[string]bool
 	refusedLeaves     bool
 	refusedLeavesAlso []string
 	// stopDeleting makes a successful `mdadm --stop` leave the array's
@@ -445,6 +451,7 @@ func newFakeNode() *fakeNode {
 		assembleDrop:  make(map[string]bool),
 		sbFacts:       make(map[string]fakeSuperblock),
 		bblRefused:    make(map[string]bool),
+		zeroNoEffect:  make(map[string]bool),
 		cloneHydrated: make(map[string]uint64),
 		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
 		files:         make(map[string]string),
@@ -532,6 +539,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
+		ReadBlockDirectFn: f.readSuperblockArea,
 		DiscardRangesFn:   f.discardRanges,
 		ReadProtoFn:       f.readProto,
 		WriteProtoFn:      f.writeProto,
@@ -628,7 +636,7 @@ var readOnlyPrefixes = []string{
 	"cmd ls ", "list ", "mtime ", "cmd lsblk ", "cmd stat ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	"cmd dmsetup ls", "cmd nvme list-subsys",
-	"cmd mdadm --detail", "cmd mdadm --examine",
+	"cmd mdadm --detail", "readsb ",
 	"cmd thin_dump ", "read ", "readproto ", "readblock ", "readblockdirect ",
 }
 
@@ -711,6 +719,9 @@ func (f *fakeNode) fileAnswer(path string) (string, error) {
 	}
 	if err, ok := f.errFiles[path]; ok {
 		return "", err
+	}
+	if uuid, ok := f.mdUuidAnswer(path); ok {
+		return uuid, nil
 	}
 	data, ok := f.files[path]
 	if !ok && strings.HasPrefix(path, "/sys/dev/block/") &&
@@ -2382,16 +2393,6 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 
 func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 	switch {
-	case contains(args, "--examine"):
-		dev := args[len(args)-1]
-		if !f.superblocks[dev] {
-			f.dispatchStderr = "mdadm: No md superblock detected on " + dev
-			return "", 1
-		}
-		if contains(args, "--export") {
-			return "MD_LEVEL=raid1\nMD_DEVICES=2\nMD_NAME=dnv-x\n", 0
-		}
-		return f.mdExamineText(dev), 0
 	case contains(args, "--zero-superblock"):
 		return f.mdZeroSuperblock(args[len(args)-1])
 	case contains(args, "--create"):
@@ -2532,6 +2533,15 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	if len(members) == 0 {
 		return "", 1
 	}
+	// mdadm refuses an assembly handed members of two identities, in every
+	// order of the list (cnagent_integtest.md, Lab facts).
+	for _, member := range members[1:] {
+		if f.fakeIdentityOf(member) != f.fakeIdentityOf(members[0]) {
+			f.dispatchStderr = "mdadm: superblock on " + member +
+				" doesn't match others - assembly aborted"
+			return "", 1
+		}
+	}
 	// md starts no array from a half-copied member alone, --run and --force
 	// or not.
 	if len(members) == 1 && f.sbFacts[members[0]].recovery != "" {
@@ -2555,6 +2565,9 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	if contains(args, "--update=force-no-bbl") {
 		for _, member := range members {
 			delete(f.bblRefused, member)
+			facts := f.sbFacts[member]
+			facts.badBlocks = 0
+			f.sbFacts[member] = facts
 		}
 	}
 	for _, member := range members {
@@ -2623,29 +2636,42 @@ func (f *fakeNode) leaveDeleted(node string) {
 	}
 }
 
-// fakeStampedUuid is the identity the human-readable `mdadm --examine`
-// prints of a member whose superblock a test stamped by hand, which names no
-// array of the fake's (fakeNode.memberArray).
+// fakeStampedUuid is the identity of a member whose superblock a test
+// stamped by hand, and of an array a test seeded or installed by hand, which
+// names no array of the fake's (fakeNode.memberArray, fakeArray.uuid).
 const fakeStampedUuid = "uuid-stamped"
 
-// fakeSuperblock is what the human-readable `mdadm --examine` prints of a
-// member's superblock beyond the fake's fixed lines (fakeNode.sbFacts).
+// fakeSuperblock is what a member's superblock says beyond its identity
+// (fakeNode.sbFacts), which the fake renders as md lays it out
+// (fakeSuperblockArea).
 type fakeSuperblock struct {
-	// role is the "Device Role" line; "" reads "Active device 0".
+	// role is the role as mdadm's "Device Role" line spells it: "Active
+	// device N", "spare" or "faulty"; "" reads "Active device 0".
 	role string
-	// recovery is the "Recovery Offset" line, "" for none: a half-copied
-	// member.
+	// recovery is the copy position as mdadm's "Recovery Offset" line
+	// spells it, "N sectors", "" for none: a half-copied member.
 	recovery string
 	events   uint64
+	// badBlocks is the length of the member's bad-block list.
+	badBlocks int
 }
 
-// setSuperblock stamps a superblock on a member device with the facts the
-// human-readable `mdadm --examine` prints of it.
+// setSuperblock stamps a superblock on a member device with the facts it
+// says.
 func (f *fakeNode) setSuperblock(dev string, sb fakeSuperblock) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.superblocks[dev] = true
 	f.sbFacts[dev] = sb
+}
+
+// sameArrayAs gives dev's superblock the identity other's carries, as a
+// member that left other's array keeps it: a retired leg of the group's own
+// history.
+func (f *fakeNode) sameArrayAs(dev, other string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.memberArray[dev] = f.fakeIdentityOf(other)
 }
 
 // hasSuperblock reports whether a member device carries md metadata.
@@ -2655,39 +2681,157 @@ func (f *fakeNode) hasSuperblock(dev string) bool {
 	return f.superblocks[dev]
 }
 
-// mdExamineText is the human-readable `mdadm --examine` of a member that
-// carries a superblock, in the lab mdadm's layout: "key : value" lines, the
-// key padded on its left; a "Recovery Offset" line only on a half-copied
-// member.
-func (f *fakeNode) mdExamineText(dev string) string {
-	sb := f.sbFacts[dev]
-	role := sb.role
-	if role == "" {
-		role = "Active device 0"
+// fakeUuidBytes are the 16 bytes of a fake identity, as a superblock and
+// md/uuid carry them.
+func fakeUuidBytes(id string) []byte {
+	sum := md5.Sum([]byte(id))
+	return sum[:]
+}
+
+// fakeUuidText is a fake identity as the agent reads it, in mdadm's
+// spelling (mdUuidText).
+func fakeUuidText(id string) string {
+	return mdUuidText(fakeUuidBytes(id))
+}
+
+// fakeIdentityOf is the identity a member's superblock carries: the array's
+// that wrote it, else fakeStampedUuid. Called with f.mu held.
+func (f *fakeNode) fakeIdentityOf(dev string) string {
+	if id := f.memberArray[dev]; id != "" {
+		return id
 	}
-	uuid := f.memberArray[dev]
-	if uuid == "" {
-		uuid = fakeStampedUuid
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s:\n", dev)
-	fmt.Fprintf(&b, "          Magic : a92b4efc\n")
-	fmt.Fprintf(&b, "        Version : 1.2\n")
-	fmt.Fprintf(&b, "    Feature Map : 0x1\n")
-	fmt.Fprintf(&b, "     Array UUID : %s\n", uuid)
-	fmt.Fprintf(&b, "     Raid Level : raid1\n")
-	fmt.Fprintf(&b, "   Raid Devices : 2\n")
-	fmt.Fprintf(&b, "    Data Offset : 6144 sectors\n")
+	return fakeStampedUuid
+}
+
+// fakeBblSectors is where the fake puts a member's bad-block list, in
+// sectors from the superblock, as mdadm places it on a dnv leg (the lab's
+// "512 entries available at offset 16 sectors").
+const fakeBblSectors = 16
+
+// fakeSuperblockArea renders the area at mdSbOffset of a member that carries
+// a superblock, in the kernel's layout of struct mdp_superblock_1 with a
+// checksum md would accept: identity id, sb's role, copy position, events
+// count and bad-block list, and, for a member whose bad-block log the kernel
+// refuses (bblRefused), a list whose first entry has length zero, as lab
+// fact 10 shows it.
+func fakeSuperblockArea(id string, sb fakeSuperblock, refused bool) []byte {
+	le := binary.LittleEndian
+	area := make([]byte, mdSbAreaLen)
+	const maxDev = 128
+	le.PutUint32(area[mdSbMagicAt:], mdSbMagic)
+	le.PutUint32(area[mdSbMajorVersionAt:], 1)
+	features := uint32(1)
+	copy(area[mdSbSetUuidAt:], fakeUuidBytes(id))
+	le.PutUint64(area[mdSbSuperOffsetAt:], mdSbOffsetSectors)
 	if sb.recovery != "" {
-		fmt.Fprintf(&b, "Recovery Offset : %s\n", sb.recovery)
+		features |= mdFeatureRecoveryOffset
+		n, _ := strconv.ParseUint(strings.Fields(sb.recovery)[0], 10, 64)
+		le.PutUint64(area[mdSbRecoveryOffsetAt:], n)
 	}
-	fmt.Fprintf(&b, "          State : clean\n")
-	fmt.Fprintf(&b, "         Events : %d\n", sb.events)
-	fmt.Fprintf(&b, "\n")
-	fmt.Fprintf(&b, "   Device Role : %s\n", role)
-	fmt.Fprintf(&b, "   Array State : AA "+
-		"('A' == active, '.' == missing, 'R' == replacing)\n")
-	return b.String()
+	le.PutUint32(area[mdSbDevNumberAt:], 0)
+	le.PutUint16(area[mdSbBblogSizeAt:], 8)
+	le.PutUint32(area[mdSbBblogOffsetAt:], fakeBblSectors)
+	if sb.badBlocks > 0 || refused {
+		features |= mdFeatureBadBlocks
+	}
+	le.PutUint32(area[mdSbFeatureMapAt:], features)
+	le.PutUint64(area[mdSbEventsAt:], sb.events)
+	le.PutUint32(area[mdSbMaxDevAt:], maxDev)
+	for i := 0; i < maxDev; i++ {
+		le.PutUint16(area[mdSbHeaderLen+2*i:], mdRoleSpare)
+	}
+	le.PutUint16(area[mdSbHeaderLen:], fakeRoleOf(sb.role))
+	le.PutUint32(area[mdSbCsumAt:],
+		mdSbChecksum(area[:mdSbHeaderLen+2*maxDev]))
+	return area
+}
+
+// fakeRoleOf is the role word of a role spelled as mdadm prints it.
+func fakeRoleOf(role string) uint16 {
+	switch {
+	case role == "":
+		return 0
+	case role == "spare":
+		return mdRoleSpare
+	case role == "faulty":
+		return mdRoleFaulty
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(role, "Active device "))
+	if err != nil {
+		panic("fakeRoleOf: " + role)
+	}
+	return uint16(n)
+}
+
+// fakeBadBlockList renders the window that holds a member's bad-block list:
+// an entry of length zero first for a log the kernel refuses, n entries of 8
+// sectors, then the end mark.
+func fakeBadBlockList(n int, refused bool) []byte {
+	le := binary.LittleEndian
+	window := make([]byte, mdDirectAlign)
+	for i := range window {
+		window[i] = 0xff
+	}
+	at := 0
+	if refused {
+		le.PutUint64(window[at:], 0)
+		at += 8
+	}
+	for i := 0; i < n; i++ {
+		le.PutUint64(window[at:], uint64(4096+8*i)<<10|8)
+		at += 8
+	}
+	return window
+}
+
+// readSuperblockArea answers OsClient.ReadBlockDirect, which only the
+// reading of a member asks for (Md.ReadMember): the superblock area at
+// mdSbOffset — zeros for a member that carries none — and the window of its
+// bad-block list. It records "readsb <path> off=<o> len=<l>", and the
+// command hooks match that line as they match a command line: a fail hook
+// answers an I/O error, as a member whose disk returns errors does, and a
+// kill hook a read that did not answer.
+func (f *fakeNode) readSuperblockArea(
+	ctx context.Context, path string, offset uint64, length uint64,
+) ([]byte, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	line := fmt.Sprintf("readsb %s off=%d len=%d", path, offset, length)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("%s", line)
+	f.recordTrace(ctx, line)
+	for key := range f.failCmd {
+		if strings.Contains(line, key) {
+			delete(f.failCmd, key)
+			return nil, errors.New("input/output error")
+		}
+	}
+	for key := range f.failCmdAlways {
+		if strings.Contains(line, key) {
+			return nil, errors.New("input/output error")
+		}
+	}
+	if takeKillNth(f.killCmdNth, line) ||
+		takeKill(f.killCmd, f.killCmdAlways, line) {
+		return nil, context.DeadlineExceeded
+	}
+	if _, ok := f.devNo[path]; !ok {
+		return nil, fmt.Errorf("open %s: no such device", path)
+	}
+	switch offset {
+	case mdSbOffset:
+		if !f.superblocks[path] {
+			return make([]byte, length), nil
+		}
+		return fakeSuperblockArea(f.fakeIdentityOf(path), f.sbFacts[path],
+			f.bblRefused[path]), nil
+	case (mdSbOffsetSectors + fakeBblSectors) * 512:
+		return fakeBadBlockList(f.sbFacts[path].badBlocks,
+			f.bblRefused[path]), nil
+	}
+	return make([]byte, length), nil
 }
 
 // mdZeroSuperblock is `mdadm --zero-superblock`: refused for a member an
@@ -2703,6 +2847,12 @@ func (f *fakeNode) mdZeroSuperblock(dev string) (string, int) {
 		}
 	}
 	if !f.superblocks[dev] {
+		f.dispatchStderr = "mdadm: Unrecognised md component device - " + dev
+		return "", 0
+	}
+	if f.zeroNoEffect[dev] {
+		// mdadm's read of the member failed, which it takes for no
+		// superblock: success, and nothing written.
 		f.dispatchStderr = "mdadm: Unrecognised md component device - " + dev
 		return "", 0
 	}
@@ -2907,6 +3057,35 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 		f.dirs[devDir+"/block/dm"] = true
 		f.files[devDir+"/block/dm/name"] = dmName + "\n"
 	}
+}
+
+// mdUuidAnswer is a read of an array's md/uuid: the identity of the array
+// published under that node — fakeStampedUuid for one a test seeded or
+// installed by hand — dashed as the kernel spells it. It is answered on the
+// read, not kept among the files, so that the model's directory listings,
+// which scan every file, stay as fast as before. Called with f.mu held.
+func (f *fakeNode) mdUuidAnswer(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, sysfsBlockDir+"/")
+	if !ok {
+		return "", false
+	}
+	node, ok := strings.CutSuffix(rest, "/md/uuid")
+	if !ok || !f.dirs[sysfsBlockDir+"/"+node+"/md"] {
+		return "", false
+	}
+	for _, array := range f.arrays {
+		if array.node != node {
+			continue
+		}
+		id := array.uuid
+		if id == "" {
+			id = fakeStampedUuid
+		}
+		raw := fakeUuidBytes(id)
+		return fmt.Sprintf("%x-%x-%x-%x-%x\n", raw[0:4], raw[4:6],
+			raw[6:8], raw[8:10], raw[10:16]), true
+	}
+	return "", false
 }
 
 // memberStateOf is a member's dev-*/state: the scripted one, else what the

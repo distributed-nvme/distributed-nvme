@@ -24,7 +24,9 @@ promotion that outruns the sides' flip, md's refusal to start an array from one
 clean leg, a repair's bad leg that does not serve, the leg that keeps the data
 dying while md copies onto a repair's new leg, where a forced start refuses the
 half-copied leg and starts from the leg that died, a take-back refused for a
-retired leg newer than the array, the clone's source lost and given back, and
+retired leg of another identity, a forced start that drops the named leg's
+bad-block list and one refused for a named leg older than a member it would
+zero, then forced, the clone's source lost and given back, and
 the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
 thinbm, clone_xfer, restart — each under pool ids of its own and each leaving
@@ -160,10 +162,24 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   open, so a namespace that comes back does so under a new device number,
   which the dm-clone does not read until it is reloaded onto it. clone_xfer
   measures both rather than assume them.
-* The human-readable `mdadm --examine` of a member prints its role, a
-  recovery offset only on a member md was copying onto, its events count
-  and its array's identity; the export form prints no role and no recovery
-  offset (`cnagent.md` CN12).
+* md's version-1.2 superblock sits 4096 bytes into a member, in the
+  kernel's layout of `struct mdp_superblock_1`, with a checksum the agent's
+  own read checks; a member md was copying onto carries a copy position
+  (feature bit 2), and a bad-block list that is not empty sets feature bit
+  8, the list 16 sectors after the superblock on the lab's arrays. A
+  running array's "md/uuid" spells the identity the superblock carries,
+  dashed. mdadm's examine answers a read of the member that fails as it
+  answers a member with no superblock (`cnagent.md` CN12, The superblock
+  read). A zero of a superblock leaves md's write-intent bitmap beside it.
+* A start with the run and force flags under a new identity keeps a member's
+  bad-block list; a stop right after it and a second start with the list
+  dropped (`--update=force-no-bbl`) start the array from the member under
+  the new identity with no list, and the drop takes the member's bad-block
+  log away for good, so md fails it on an error instead of recording one;
+  mdadm's no-degraded flag works only with a scan, so no start can drop the
+  list without starting the array. Forty such stops right after a start
+  never met udev holding the array (`cnagent.md` CN12, the forced
+  start).
 * When the leg md copies from dies, md can retry the copy onto the
   half-copied member for as long as that member stays in the array, and
   writes its superblock to the dead member as it does: the array reads
@@ -180,12 +196,14 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   read as a bad block on the half-copied member and mark it in sync, its
   superblock then showing no recovery offset (`cnagent.md`, Known limits),
   and the stop can leave the leg that came back with a bad-block log: one
-  of empty entries the kernel refuses to import, which the forced start's
-  second assembly form drops, or one of real entries, the regions md could
-  not read, which an assembly takes in, the first form included
-  (`cnagent.md`, Known limits). repair's forced-start stages therefore make
+  of empty entries the kernel refuses to import, or one of real entries,
+  the regions md could not read, which an assembly takes in; the forced
+  start drops either (`cnagent.md` CN12, the forced start). Writing "frozen" to the array's "md/sync_action" stops those retries,
+  and the array then reads broken until it is stopped, the half-copied
+  member keeping its recovery offset. repair's forced-start stages therefore make
   the leg die by an error table under the disk node's export of it to the
-  primary, wait for broken to hold, and mark while the leg is still dead,
+  primary, freeze md's copy once the array reads broken, wait for broken to
+  hold, and mark while the leg is still dead,
   so that the forced start stops the array before the leg is back.
 * An assembly with the run and force flags from one member whose superblock
   counts two working members starts the array degraded; a zero of a device
@@ -266,7 +284,8 @@ its info-read commands are plain memory reads.
   and the listed loops as their positive controls, and repair's forced-start
   stages' counts carry theirs from the same stream: refuse's counts of
   zeroes and assemblies the stop it counts once, and takeback's count of
-  mdadm commands against the data array the take-back check's two examines.
+  mdadm commands against the data array the take-back check's two
+  superblock reads.
   Other negatives pass on a read that failed, and so prove less: the
   partition stages' waits for a path to leave live and the finalize's
   checks for a controller of the clone's
@@ -438,12 +457,13 @@ array the death breaks. A third repair, whose bad leg is leg 2, adds a new
 leg on DN2 and the worker's move makes it STARTED, while md copies slowly
 from the leg the finish put in place, the one leg that keeps the data; that
 leg's export to the primary then fails every IO mid-copy, as a disk that
-returns errors does, until md settles the array broken, the new leg's
+returns errors does, until md reads the array broken, when the case freezes
+md's copy so that its retries do not move the state again, the new leg's
 superblock carrying a recovery offset. A mark naming the half-copied new leg
 stops the broken array and is refused: the group's row reads ERROR naming
 the recovery offset, and nothing is zeroed or assembled. With the dead leg's
 export back and its leg row no longer in error, so that it can feed a copy
-(`cnagent.md` CN12), a mark naming it examines it, zeroes the new leg alone, the bad
+(`cnagent.md` CN12), a mark naming it reads its superblock, zeroes the new leg alone, the bad
 leg left as it is, starts the array from the named leg alone with either
 form of the forced assembly, and the repair's add adds the blank new leg, in
 that order, under one forced start record naming the leg and the zeroed
@@ -455,20 +475,36 @@ new data over the host's first block, the level that stops group arrays,
 and a fourth repair whose bad leg is the leg holding that data and whose new
 leg is leg 1, the retired leg from before it, taken back, with a mark naming
 leg 1. At the level that builds no thin pool the forced start zeroes the
-other leg of `leg_list` alone and starts the array from leg 1, the repair
+other leg of `leg_list` alone, a full member of another identity, whose
+change count it does not compare, and starts the array from leg 1, the repair
 verdict says started, and after the finish and with the pools back the host
 reads the first block from before the new data. Last the take-back: a fifth
 repair takes back the leg with the newer data while its bad leg does not
-serve the primary, and the converge refuses it — no mdadm command against
-the array, md still holding the bad leg, the repair verdict neither
-started nor abort confirmed and its refusal naming the leg with its events
-count, as the leg's own superblock reads it and above leg 1's, and leg 1 as
+serve the primary, and the converge refuses it, as its superblock carries
+the identity of the array before the restore's forced start — no mdadm
+command against the array, md still holding the bad leg, the repair verdict
+neither started nor abort confirmed and its refusal naming the leg with its
+identity beside the array's, as mdadm's examine reads both, and leg 1 as
 the leg that keeps the data — and a fresh read, once the taken-back leg's
 prober has read it, reports the same refusal with a clean verdict, though
 md can fail the bad leg in between, which raises the array's count
 (`cnagent.md` CN28, CN30); the abort confirms with no refusal, and
 after the cancel, the bad leg serving again and put back if md failed it,
-the host reads the restored copy.
+the host reads the restored copy. Then a bad-block list: md records a bad
+block on the new leg of the third repair, in sync beside leg 1, and writes
+it into that leg's superblock; at the level that stops group arrays, and
+then the one that builds no thin pool, a mark naming that leg reads its
+superblock and its list, zeroes leg 1, starts the array from the leg under
+a new identity, stops it and starts it again with the list dropped, then
+adds leg 1, under one record naming both updates, and the leg's superblock
+shows no list; the host reads its data unchanged. Last an older named leg:
+leg 1 dies for the primary alone and the host's write of its first block,
+its own bytes again, makes md fail it, so the other leg's change count
+moves past leg 1's; with the arrays stopped and leg 1 back, both
+superblocks of one identity, a mark naming leg 1 is refused, the row
+naming the change count, with nothing zeroed or assembled, and the same
+mark with the operator's force zeroes the other leg and starts the array
+from leg 1; the host reads its data unchanged (`cnagent.md` CN12).
 
 **teardown** proves `architecture.md`, Teardown by sweep, on a CN: a teardown
 finishes when what lies under it is gone, long gone, under load or unreachable,
@@ -600,8 +636,8 @@ pass smoke's per-CN check.
 state as the host reads on; every snapshot, on both sides of the restart, is a
 fresh round's reply, and the reloaded infos, revisions included, equal the
 snapshots but for the status epochs (`dnagent.md` SH14) and the replies'
-stamps, which differ by nature; mdadm runs nothing but its superblock examine
-(CN12); equal-revision re-sends leave the new logs free of any mutation, an
+stamps, which differ by nature; mdadm runs nothing, the agent reading
+superblocks itself (CN12); equal-revision re-sends leave the new logs free of any mutation, an
 activation sweep's included (`dnagent.md` SH16; `cnagent.md` CN14); and a
 `SyncupCn` below the revision those re-sends stored is refused as stale in a
 normal reply (`dnagent.md` SH8, SH9; CN4).
@@ -685,12 +721,15 @@ wait and no candidate of an assembly, a converge's read of the array again that
 fails or finds it not running, an aborted repair's new leg as an extra and a
 repair on a clone meta group, all of which the unit tests cover (CN12); of a
 forced start, the second form of its assembly, the stop a pool's concat
-refuses, a zero that fails or is killed, a new leg of a CREATED repair whose
-abort flag is set, which it neither names nor zeroes, a STARTED repair's new
+refuses, a zero that fails or is killed or that its read back does not
+prove, a superblock read that fails, a new leg of a CREATED repair whose
+abort flag is set, which it zeroes not and starts from only when the mark
+names it, a STARTED repair's new
 leg, which it keeps whatever the flag says, its late member and the retry its
 other errors register, and of the take-back check, a new leg with no
 superblock, a STARTED repair's add with no member to compare with, a keeper
-whose examine finds no superblock and an examine that did not answer, all of
+whose superblock read finds none and a superblock read that did not answer,
+and the identity check of a `leg_list` member's add, all of
 which the unit tests cover (CN12); a torn snapshot, which needs two slices,
 whose mark the unit tests cover (CN14); the lingering-clone hold's scope per
 thin device, left to the unit tests (CN18); the other states of the clone's

@@ -603,7 +603,10 @@ the operator's short verb and `repair get` shows the outcome.
 `repair create` sends `--bad-legs` as the list it is, so a count other
 than one reaches the gateway, which refuses it (CT8), and its new leg is
 the retired leg `--retired-leg` names or, when that is zero or not given,
-a fresh leg the `--dn-black` and `--dn-white` selector steers. dnvctl
+a fresh leg the `--dn-black` and `--dn-white` selector steers; `--force`
+lets the primary copy over a leg of another md identity, the retired leg
+taken back and the bad leg after an abort (`architecture.md`, Repair), and
+its help says that what such a leg holds is lost. dnvctl
 checks no stage: a call the repair's stage does not allow is the gateway's
 refusal, which names the stage (`architecture.md`, Repairs).
 `repair finish` prints the reply as it is, `given_back_leg_id` included
@@ -625,8 +628,12 @@ group's array (`architecture.md`, Repairs). It names the group by `--grp`
 alone, with no flag for the slice or clone that holds it, because the
 gateway finds the group's parent itself, and the leg the array starts from
 by `--leg`. With `--cancel` it withdraws the group's mark instead and names
-no leg. dnvctl checks neither pairing: a non-zero `--leg` beside `--cancel`,
-and a write with no `--leg`, reach the gateway, which refuses them (CT8).
+no leg. `--force` puts the operator's force on the mark, so that the start
+goes on from a named leg whose change count is below that of a full member
+of the same array, which it overwrites (`architecture.md`, Repair, Forced
+start). dnvctl checks none of the pairings: a non-zero `--leg` or a
+`--force` beside `--cancel`, and a write with no `--leg`, reach the gateway,
+which refuses them (CT8).
 The forced start overwrites the other members it keeps, the open repair's
 bad leg excepted, with a full copy of the named leg (`architecture.md`,
 Repair, Forced start), and a start from an older copy restores that group

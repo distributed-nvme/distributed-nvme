@@ -232,7 +232,7 @@ var renderCases = []renderCase{
 			},
 		},
 		want: `{"rep_name":"r0","repair":{"bad_leg_id_list":["3"],` +
-			`"clone_name":"","grp_id":"2",` +
+			`"clone_name":"","force":false,"grp_id":"2",` +
 			`"new_leg_id_to_retired_epoch":{"4":"5"},"new_leg_list":[],` +
 			`"rep_id":"9","rep_stage":"REP_STAGE_STARTED","slice_id":"1",` +
 			`"try_to_abort":true}}` + "\n",
@@ -284,7 +284,8 @@ var renderCases = []renderCase{
 		},
 		want: `{"cntlr_list":[],"slice_list":[{"data_grp_list":[` +
 			`{"data_blocks":"0","ext_cnt":"0",` +
-			`"forced_start":{"leg_id":"5","revision":"12"},"grp_id":"2",` +
+			`"forced_start":{"force":false,"leg_id":"5","revision":"12"},` +
+			`"grp_id":"2",` +
 			`"leg_list":[],"meta_blocks":"0","operator_in_charge":true,` +
 			`"rep_name":"","retired_leg_id_list":[]}],"meta_grp_list":[` +
 			`{"data_blocks":"0","ext_cnt":"0","forced_start":null,` +

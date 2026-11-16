@@ -371,6 +371,11 @@ type RepairNewLeg struct {
 	RetiredLegId uint64
 	Dn           Cand
 	GrpDnAddrs   []string
+	// Force is the operator's force (Repair.force): the primary copies over
+	// a leg of another md identity, the new leg taken from RetiredLegId and
+	// the bad leg once the repair is aborted (cnagent.md CN12). The sp
+	// worker's repairs never carry it.
+	Force bool
 }
 
 // CreateRepair creates the repair repName of the group grpId, which parent
@@ -428,8 +433,8 @@ type RepairNewLeg struct {
 // free leg_idx of the group; its side is unprovisioned until the sp worker's
 // provisioned flip.
 //
-// It writes the Repair, CREATED with its flag clear, the parent with the
-// group's rep_name set, the SpConf with the name listed and next_id moved,
+// It writes the Repair, CREATED with its flag clear and newLeg's force, the
+// parent with the group's rep_name set, the SpConf with the name listed and next_id moved,
 // the disk node's bookkeeping for a fresh leg, and bumps SpRev.
 func CreateRepair(
 	ctx context.Context,
@@ -503,6 +508,7 @@ func CreateRepair(
 			BadLegIdList: []uint64{badLegId},
 			SliceId:      parent.SliceId,
 			CloneName:    parent.CloneName,
+			Force:        newLeg.Force,
 		}
 		if newLeg.RetiredLegId != 0 {
 			if reserved {

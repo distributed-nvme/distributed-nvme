@@ -650,7 +650,7 @@ func ForceStartGroup(
 		return 0, 0, err
 	}
 	revision, err := model.ForceStartGroup(ctx, cli, cl.Id, target.Shard,
-		target.Id, target.Name, 0, parent, grpId, legId, cancel)
+		target.Id, target.Name, 0, parent, grpId, legId, cancel, false)
 	if err != nil {
 		return 0, 0, err
 	}

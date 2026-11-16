@@ -1639,9 +1639,14 @@ func (x *Group) GetOperatorInCharge() bool {
 // of its open repair, and the SpRev revision the write of the mark committed,
 // from which on a report can clear it (dnv-worker.md AR13).
 type ForcedStart struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	LegId         uint64                 `protobuf:"varint,1,opt,name=leg_id,json=legId,proto3" json:"leg_id,omitempty"`
-	Revision      uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	LegId    uint64                 `protobuf:"varint,1,opt,name=leg_id,json=legId,proto3" json:"leg_id,omitempty"`
+	Revision uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	// The operator's force (ForceStartGroupRequest.force): the start goes on
+	// from a named leg whose md change count is below that of a full member
+	// of the same identity the start would zero (cnagent.md CN12). Appended,
+	// never renumbered.
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1688,6 +1693,13 @@ func (x *ForcedStart) GetRevision() uint64 {
 		return x.Revision
 	}
 	return 0
+}
+
+func (x *ForcedStart) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type Namespace struct {
@@ -4333,8 +4345,14 @@ type Repair struct {
 	// its leg id: CancelRepair turns such a leg back into its retired leg
 	// with this time. A fresh new leg has no entry.
 	NewLegIdToRetiredEpoch map[uint64]uint64 `protobuf:"bytes,9,rep,name=new_leg_id_to_retired_epoch,json=newLegIdToRetiredEpoch,proto3" json:"new_leg_id_to_retired_epoch,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// The operator's force (CreateRepairRequest.force): the primary adds a
+	// new leg taken from a retired leg, or after an abort the bad leg, whose
+	// md superblock carries another identity than the running array's,
+	// which md copies over (cnagent.md CN12). Never set on a worker's
+	// repair. Appended, never renumbered.
+	Force         bool `protobuf:"varint,10,opt,name=force,proto3" json:"force,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Repair) Reset() {
@@ -4428,6 +4446,13 @@ func (x *Repair) GetNewLegIdToRetiredEpoch() map[uint64]uint64 {
 		return x.NewLegIdToRetiredEpoch
 	}
 	return nil
+}
+
+func (x *Repair) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 // {dnv_prefix} retired_leg {cluster_id} {sp_id} {leg_id}
@@ -11382,8 +11407,12 @@ type CreateRepairRequest struct {
 	BadLegIdList []uint64               `protobuf:"varint,6,rep,packed,name=bad_leg_id_list,json=badLegIdList,proto3" json:"bad_leg_id_list,omitempty"`
 	// The retired leg of the group the new leg is taken from; zero: a fresh
 	// leg, placed by dn_selector.
-	RetiredLegId  uint64        `protobuf:"varint,7,opt,name=retired_leg_id,json=retiredLegId,proto3" json:"retired_leg_id,omitempty"`
-	DnSelector    *NodeSelector `protobuf:"bytes,8,opt,name=dn_selector,json=dnSelector,proto3" json:"dn_selector,omitempty"`
+	RetiredLegId uint64        `protobuf:"varint,7,opt,name=retired_leg_id,json=retiredLegId,proto3" json:"retired_leg_id,omitempty"`
+	DnSelector   *NodeSelector `protobuf:"bytes,8,opt,name=dn_selector,json=dnSelector,proto3" json:"dn_selector,omitempty"`
+	// Let the primary copy over a leg of another md identity: the new leg
+	// taken from retired_leg_id, and the bad legs once the repair is
+	// aborted (Repair.force). Appended, never renumbered.
+	Force         bool `protobuf:"varint,9,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11472,6 +11501,13 @@ func (x *CreateRepairRequest) GetDnSelector() *NodeSelector {
 		return x.DnSelector
 	}
 	return nil
+}
+
+func (x *CreateRepairRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type CreateRepairReply struct {
@@ -12307,7 +12343,11 @@ type ForceStartGroupRequest struct {
 	// The leg the group's array starts from; zero with cancel.
 	LegId uint64 `protobuf:"varint,5,opt,name=leg_id,json=legId,proto3" json:"leg_id,omitempty"`
 	// Withdraw the group's mark instead of writing one.
-	Cancel        bool `protobuf:"varint,6,opt,name=cancel,proto3" json:"cancel,omitempty"`
+	Cancel bool `protobuf:"varint,6,opt,name=cancel,proto3" json:"cancel,omitempty"`
+	// Start from the named leg even when a full member the start would zero
+	// holds a higher md change count of the same identity
+	// (ForcedStart.force); false with cancel. Appended, never renumbered.
+	Force         bool `protobuf:"varint,7,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -12380,6 +12420,13 @@ func (x *ForceStartGroupRequest) GetLegId() uint64 {
 func (x *ForceStartGroupRequest) GetCancel() bool {
 	if x != nil {
 		return x.Cancel
+	}
+	return false
+}
+
+func (x *ForceStartGroupRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
 	}
 	return false
 }
@@ -15715,8 +15762,15 @@ type CntlrInfo_GrpInfo struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Whole           bool                   `protobuf:"varint,1,opt,name=whole,proto3" json:"whole,omitempty"`
 	InSyncLegIdList []uint64               `protobuf:"varint,2,rep,packed,name=in_sync_leg_id_list,json=inSyncLegIdList,proto3" json:"in_sync_leg_id_list,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Why the primary does not add a leg of the group's leg_list that
+	// the array lacks, empty when nothing holds an add back: its md
+	// superblock carries another identity than the running array's, so
+	// it may hold data the array lacks (cnagent.md CN12). Text for
+	// people and for the sp worker's log; no rule reads it. Appended,
+	// never renumbered.
+	Refusal       string `protobuf:"bytes,3,opt,name=refusal,proto3" json:"refusal,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CntlrInfo_GrpInfo) Reset() {
@@ -15761,6 +15815,13 @@ func (x *CntlrInfo_GrpInfo) GetInSyncLegIdList() []uint64 {
 		return x.InSyncLegIdList
 	}
 	return nil
+}
+
+func (x *CntlrInfo_GrpInfo) GetRefusal() string {
+	if x != nil {
+		return x.Refusal
+	}
+	return ""
 }
 
 type SyncupSideRequest_SideConf struct {
@@ -16337,10 +16398,11 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x13retired_leg_id_list\x18\b \x03(\x04R\x10retiredLegIdList\x12/\n" +
 	"\fforced_start\x18\t \x01(\v2\f.ForcedStartR\vforcedStart\x12,\n" +
 	"\x12operator_in_charge\x18\n" +
-	" \x01(\bR\x10operatorInChargeJ\x04\b\x06\x10\aR\x0espare_leg_list\"@\n" +
+	" \x01(\bR\x10operatorInChargeJ\x04\b\x06\x10\aR\x0espare_leg_list\"V\n" +
 	"\vForcedStart\x12\x15\n" +
 	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\x12\x1a\n" +
-	"\brevision\x18\x02 \x01(\x04R\brevision\"\xa2\x01\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"\xa2\x01\n" +
 	"\tNamespace\x12\x13\n" +
 	"\x05ns_id\x18\x01 \x01(\x04R\x04nsId\x12\x15\n" +
 	"\x06ns_idx\x18\x02 \x01(\rR\x05nsIdx\x12\x13\n" +
@@ -16405,7 +16467,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aI\n" +
 	"\x11CnIdToNvmeofEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
-	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\xa7\x1a\n" +
+	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\xc1\x1a\n" +
 	"\tCntlrInfo\x12L\n" +
 	"\x12ss_id_to_subsystem\x18\x01 \x03(\v2\x1f.CntlrInfo.SsIdToSubsystemEntryR\x0fssIdToSubsystem\x12L\n" +
 	"\x12ns_id_to_namespace\x18\x02 \x03(\v2\x1f.CntlrInfo.NsIdToNamespaceEntryR\x0fnsIdToNamespace\x12J\n" +
@@ -16438,10 +16500,11 @@ const file_pb_schema_proto_rawDesc = "" +
 	"RepairInfo\x12\x18\n" +
 	"\astarted\x18\x01 \x01(\bR\astarted\x12'\n" +
 	"\x0fabort_confirmed\x18\x02 \x01(\bR\x0eabortConfirmed\x12\x18\n" +
-	"\arefusal\x18\x03 \x01(\tR\arefusal\x1aM\n" +
+	"\arefusal\x18\x03 \x01(\tR\arefusal\x1ag\n" +
 	"\aGrpInfo\x12\x14\n" +
 	"\x05whole\x18\x01 \x01(\bR\x05whole\x12,\n" +
-	"\x13in_sync_leg_id_list\x18\x02 \x03(\x04R\x0finSyncLegIdList\x1aL\n" +
+	"\x13in_sync_leg_id_list\x18\x02 \x03(\x04R\x0finSyncLegIdList\x12\x18\n" +
+	"\arefusal\x18\x03 \x01(\tR\arefusal\x1aL\n" +
 	"\x14SsIdToSubsystemEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aL\n" +
@@ -16681,7 +16744,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\rdm_clone_conf\x18\x04 \x01(\v2\f.DmCloneConfR\vdmCloneConf\x12\x1d\n" +
 	"\n" +
 	"meta_units\x18\x06 \x01(\x04R\tmetaUnits\x12'\n" +
-	"\x0fcutover_pending\x18\a \x01(\bR\x0ecutoverPendingJ\x04\b\x05\x10\x06R\x06bm_cnt\"\xb6\x03\n" +
+	"\x0fcutover_pending\x18\a \x01(\bR\x0ecutoverPendingJ\x04\b\x05\x10\x06R\x06bm_cnt\"\xcc\x03\n" +
 	"\x06Repair\x12\x15\n" +
 	"\x06rep_id\x18\x01 \x01(\x04R\x05repId\x12\x15\n" +
 	"\x06grp_id\x18\x02 \x01(\x04R\x05grpId\x12&\n" +
@@ -16694,7 +16757,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\bslice_id\x18\a \x01(\x04R\asliceId\x12\x1d\n" +
 	"\n" +
 	"clone_name\x18\b \x01(\tR\tcloneName\x12`\n" +
-	"\x1bnew_leg_id_to_retired_epoch\x18\t \x03(\v2#.Repair.NewLegIdToRetiredEpochEntryR\x16newLegIdToRetiredEpoch\x1aI\n" +
+	"\x1bnew_leg_id_to_retired_epoch\x18\t \x03(\v2#.Repair.NewLegIdToRetiredEpochEntryR\x16newLegIdToRetiredEpoch\x12\x14\n" +
+	"\x05force\x18\n" +
+	" \x01(\bR\x05force\x1aI\n" +
 	"\x1bNewLegIdToRetiredEpochEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xb6\x01\n" +
@@ -17221,7 +17286,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\tmigr_name\x18\x03 \x01(\tR\bmigrName\"3\n" +
 	"\x11GetMigrationReply\x12\x1e\n" +
 	"\x04migr\x18\x01 \x01(\v2\n" +
-	".MigrationR\x04migr\"\x9f\x02\n" +
+	".MigrationR\x04migr\"\xb5\x02\n" +
 	"\x13CreateRepairRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
@@ -17231,7 +17296,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x0fbad_leg_id_list\x18\x06 \x03(\x04R\fbadLegIdList\x12$\n" +
 	"\x0eretired_leg_id\x18\a \x01(\x04R\fretiredLegId\x12.\n" +
 	"\vdn_selector\x18\b \x01(\v2\r.NodeSelectorR\n" +
-	"dnSelector\"H\n" +
+	"dnSelector\x12\x14\n" +
+	"\x05force\x18\t \x01(\bR\x05force\"H\n" +
 	"\x11CreateRepairReply\x12\x15\n" +
 	"\x06rep_id\x18\x01 \x01(\x04R\x05repId\x12\x1c\n" +
 	"\n" +
@@ -17288,14 +17354,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x06sp_rev\x18\x03 \x01(\v2\x06.SpRevR\x05spRev\x12\x15\n" +
 	"\x06leg_id\x18\x04 \x01(\x04R\x05legId\".\n" +
 	"\x15DeleteRetiredLegReply\x12\x15\n" +
-	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\"\xb9\x01\n" +
+	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\"\xcf\x01\n" +
 	"\x16ForceStartGroupRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
 	"\x06sp_rev\x18\x03 \x01(\v2\x06.SpRevR\x05spRev\x12\x15\n" +
 	"\x06grp_id\x18\x04 \x01(\x04R\x05grpId\x12\x15\n" +
 	"\x06leg_id\x18\x05 \x01(\x04R\x05legId\x12\x16\n" +
-	"\x06cancel\x18\x06 \x01(\bR\x06cancel\"I\n" +
+	"\x06cancel\x18\x06 \x01(\bR\x06cancel\x12\x14\n" +
+	"\x05force\x18\a \x01(\bR\x05force\"I\n" +
 	"\x14ForceStartGroupReply\x12\x15\n" +
 	"\x06grp_id\x18\x01 \x01(\x04R\x05grpId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\"\xc4\x01\n" +

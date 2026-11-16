@@ -2478,3 +2478,19 @@ func TestRepairCallsResolveThePool(t *testing.T) {
 	}
 	env.wantNoWrite("the refused calls", before)
 }
+
+// TestCreateRepairCarriesTheForce pins the operator's force of the call: the
+// repair record carries it (Repair.force), which the primary reads at the
+// take-back and at the add of the bad leg after an abort (cnagent.md CN12).
+func TestCreateRepairCarriesTheForce(t *testing.T) {
+	env := newVolEnv(t)
+	repSetLegEpoch(env, volDataGrpId, volDataLegA, repEpoch)
+	req := repRequest(env)
+	req.Force = true
+	if _, err := env.srv.CreateRepair(env.ctx, req); err != nil {
+		t.Fatalf("CreateRepair with force: %v", err)
+	}
+	if !env.repair("rep-a").GetForce() {
+		t.Fatalf("the repair %v carries no force", env.repair("rep-a"))
+	}
+}

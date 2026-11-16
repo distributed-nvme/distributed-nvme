@@ -4236,7 +4236,7 @@ md_bad_blocks() {
 # name> records of that member, read with mdadm's human-readable --examine,
 # the one form that prints the member's role and recovery offset beside its
 # events count (cnagent.md CN12): "role=<r> recovery=<sectors|none>
-# events=<n>", the role with its spaces turned to underscores
+# uuid=<array uuid> events=<n>", the role with its spaces turned to underscores
 # ("Active_device_0", "spare"), and recovery none for a member whose
 # superblock records no copy in progress. A device with no superblock prints
 # "none". mdadm gives a read of the member that fails the same answer as a
@@ -4248,10 +4248,10 @@ md_bad_blocks() {
 # bounds. It fails, saying so, on a device that is not there, on that
 # answer over a member whose first blocks do not read or a drop that fails,
 # on an examine that fails any other way and on an answer that lacks the
-# role or the events count. The examine reads the member device, so it is
-# for a member whose disk node serves.
+# role, the array's identity or the events count. The examine reads the
+# member device, so it is for a member whose disk node serves.
 md_examine() {
-	local out rc rd role rec ev nl=$'\n'
+	local out rc rd role rec ev uuid nl=$'\n'
 	if [ ! -b "/dev/mapper/$1" ]; then
 		echo "md_examine: /dev/mapper/$1 is not a block device" >&2
 		return 1
@@ -4299,7 +4299,13 @@ md_examine() {
 		echo "md_examine: /dev/mapper/$1's superblock names no role" >&2
 		return 1
 	fi
-	echo "role=${role// /_} recovery=${rec:-none} events=$ev"
+	uuid=$(printf '%s\n' "$out" |
+		awk -F' : ' '$1 ~ /^ *Array UUID$/ {print $2; exit}')
+	if [ -z "$uuid" ]; then
+		echo "md_examine: /dev/mapper/$1's superblock names no array uuid" >&2
+		return 1
+	fi
+	echo "role=${role// /_} recovery=${rec:-none} uuid=$uuid events=$ev"
 }
 
 # --- the copy case's slowed source (e2e_integtest.md, The cases, copy) ------
@@ -18628,8 +18634,8 @@ react_fs_mark_gone() { # <leg id> <revision>
 # zero of the named leg's member may run at all, and the worker must log
 # one `forced start cleared` record for the group (dnv-worker.md AR13). An
 # exit status other than zero of the assemble or of an add is logged and
-# judged by nothing, as are the agent's other commands, its examines aside,
-# which are not logged. Neither leg's member may hold an md bad block in
+# judged by nothing, as are the agent's other commands; its superblock reads
+# run no command (cnagent.md CN12). Neither leg's member may hold an md bad block in
 # the started array (md_bad_blocks): md serves such a region as an IO error,
 # and a named leg that came back before its broken array was stopped can
 # bring real entries into the start (cnagent.md, Known limits).
@@ -18745,8 +18751,9 @@ react_fs_proof() { # <named leg id> <zeroed leg id>
 
 # react_fs_cmds_on prints, as one compact JSON array, the md commands the
 # primary's cn agent ran after line <mark> of its log on the member of any
-# of the legs <leg id>…, its examines aside, each with its arguments and
-# exit status: `[]` when it ran none. Step 8 reads it for a take-back the
+# of the legs <leg id>…, any examine aside, each with its arguments and
+# exit status; the agent's superblock reads run no command (cnagent.md
+# CN12): `[]` when it ran none. Step 8 reads it for a take-back the
 # primary refuses, which adds nothing and takes no bad leg out (cnagent.md
 # CN12). The log is read as react_fs_proof reads it.
 react_fs_cmds_on() { # <mark> <leg id>…
@@ -21051,19 +21058,19 @@ react_fs_data_leg() {
 # wrote, which the retired leg kept, in place of the new ones.
 #
 # THE REFUSAL. The leg the second fault's repair retired holds the new bytes
-# and an md events count above the restored array's, as the old array went
-# through far more changes than the one the restore started. Its disk node
+# and the superblock of the array as it was before the forced start, whose
+# new identity the restored array carries. Its disk node
 # comes back, the level goes up again, and one leg of the group loses its
 # disk node, so that an operator's repair can name that leg bad and take the
 # newer leg back. md would take such a leg in as a new member and copy the
 # array over its newer bytes, with no error, so the primary keeps it out of
 # the array, says why in its verdict, and the worker logs the refusal and
 # moves no stage (cnagent.md CN12; dnv-worker.md AR11). The step logs both
-# events counts read on the primary and fails on the premise when the newer
-# leg's is not above, then reads the refusal in the primary's verdict and in
+# superblocks read on the primary and fails on the premise when the two
+# carry one identity, then reads the refusal in the primary's verdict and in
 # the worker's log, the repair still CREATED, the bad leg's member still in
 # the array, and no md command of the primary's on that member or on the
-# newer leg's since the create but the examines. The bad leg's md state is
+# newer leg's since the create. The bad leg's md state is
 # logged, not asserted: the array is quiet, so md should still hold that leg
 # in sync, but md fails a member on its own whenever an IO to it fails, and
 # what the step judges is the primary's commands. The repair is aborted and
@@ -21087,7 +21094,7 @@ react_fs_restore() {
 	stage 08 "a forced start from a retired leg's older copy, then a take-back of a newer retired leg refused"
 	local n data old other fresh newer newer_vm newer_inst dpos didx
 	local oldside oldaddr freshaddr naddr oldep newep rep_id rep1_id
-	local cand pos side addr bad bpos bvm binst keeper nline kline nev kev
+	local cand pos side addr bad bpos bvm binst keeper nline kline nuu kuu
 	local recs mrd mst msg rev want tag dev1 before_primary before_failovers
 
 	react_wait_no_repair
@@ -21355,8 +21362,9 @@ react_fs_restore() {
 	assert_field "$CTL_OUT" ".repair.new_leg_id_to_retired_epoch[\"$newer\"]" \
 		"$newep" "leg $newer's retired_epoch, kept for a cancel"
 
-	# The premise: both events counts, read on the primary from the two
-	# superblocks, the newer leg's above the array's.
+	# The premise: both superblocks, read on the primary, of two identities:
+	# the newer leg's from before the forced start, the array's the one it
+	# gave.
 	REACT_FS_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the primary to connect leg $newer, the repair's new leg, and read its superblock" \
@@ -21365,25 +21373,22 @@ react_fs_restore() {
 	kline=$(helper_cn "$PRIMARY_CN" md_examine \
 		"$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$keeper")") ||
 		die "examining leg $keeper's member on cn$PRIMARY_CN failed: $kline"
-	nev=$(kv_of "$nline" events)
-	kev=$(kv_of "$kline" events)
-	case "$nev:$kev" in
-	*[!0-9:]* | :* | *:)
-		die "the events counts read '$nev' (leg $newer) and '$kev' (leg $keeper)"
-		;;
-	esac
-	log "  md events: leg $newer, taken back, $nev ($nline); leg $keeper, in" \
-		"sync in the array, $kev ($kline)"
-	[ "$nev" -gt "$kev" ] ||
-		die "leg $newer's md events count $nev is not above leg $keeper's" \
-			"$kev, the premise of the refusal: either the old array's changes" \
-			"did not outnumber the restored one's, or the primary added leg" \
-			"$newer before this read, its superblock then the array's"
+	nuu=$(kv_of "$nline" uuid)
+	kuu=$(kv_of "$kline" uuid)
+	[ -n "$nuu" ] && [ -n "$kuu" ] ||
+		die "the identities read '$nuu' (leg $newer) and '$kuu' (leg $keeper)"
+	log "  md superblocks: leg $newer, taken back, $nline; leg $keeper, in" \
+		"sync in the array, $kline"
+	[ "$nuu" != "$kuu" ] ||
+		die "legs $newer and $keeper carry one identity, $nuu, the premise" \
+			"of the refusal: either the forced start gave the array no new" \
+			"identity, or the primary added leg $newer before this read, its" \
+			"superblock then the array's"
 
 	# The refusal, in the primary's verdict and in the worker's log, with the
 	# repair still CREATED, the bad leg's member still in the array, and no
 	# command of the primary's since the create on that member or on the
-	# newer leg's but the examines: no add, and no fail or removal of the
+	# newer leg's: no add, and no fail or removal of the
 	# bad leg in a pass that adds nothing (cnagent.md CN12).
 	REACT_FS_LAST=""
 	REACT_FS_REFUSAL=""
@@ -21416,7 +21421,7 @@ react_fs_restore() {
 	fi
 	recs=$(react_fs_cmds_on "$REACT_FS_CN_MARK" "$bad" "$newer")
 	assert_eq "$recs" "[]" \
-		"the primary's md commands on the members of legs $bad and $newer since the take-back's create, examines aside"
+		"the primary's md commands on the members of legs $bad and $newer since the take-back's create"
 	wait_until "$WAIT_REACT" \
 		"the worker to log repair stage skipped (take_back_refused) for group $REACT_GRP_ID (dnv-worker.md AR11)" \
 		react_fs_refusal_logged "$REACT_GRP_ID"

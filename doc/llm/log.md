@@ -181,7 +181,8 @@ implements them:
 * a device-number read made in the caller's own process (`ReadDevNo`) logs
   `os read devno` with `path`, `devno` (the number read as "major:minor",
   empty when the read failed) and "error?";
-* a raw block read logs `os read block` and a raw block write
+* a raw block read logs `os read block`, a raw block read with O_DIRECT
+  (`ReadBlockDirect`) `os read block direct` and a raw block write
   `os write block`, each with `path`, `offset`, `length` and "error?" —
   **never** `data`;
 * a set of discards made in the caller's own process (`DiscardRanges`)
@@ -194,9 +195,10 @@ implements them:
 
 Command stdin, stdout and stderr, and the names of a directory listing, are
 logged in full; the `TruncForLog` truncation applies to file data only. The
-two raw-block records — the DN's on-disk metadata path (`architecture.md`,
-[D13]) — deliberately carry no `data` attribute at all: the blocks are
-large, opaque, and may hold arbitrary user data.
+three raw-block records — the DN's on-disk metadata path (`architecture.md`,
+[D13]) and the CN's superblock read (`cnagent.md` CN12) — deliberately carry
+no `data` attribute at all: the blocks are large, opaque, and may hold
+arbitrary user data.
 
 Two block-IO records are emitted **outside** `LimitedOsClient`, by the cn
 agent's `directLegProbeIO`, because the CN11 leg health probers deliberately

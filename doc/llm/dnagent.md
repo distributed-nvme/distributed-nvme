@@ -798,9 +798,9 @@ These primitives must honour it, because each one's caller answers an
 * `Md.Detail`, a lookup in an `Md.Walk` of "/sys/block" through
   `Cmd.ListDir` and `readAttrStrict` (`cnagent.md` CN12), whose "absent"
   sends `ensureGroup` into an assembly;
-* `Md.HasSuperblock` (`cnagent.md` CN12: `mdadm --examine` opens the member
-  device, so on a leg whose DN side is gone it blocks past the soft timeout
-  and gets killed — and a killed examine read as "no superblock" would make
+* `Md.ReadMember` (`cnagent.md` CN12, The superblock read: the read of a
+  member's superblock area, on a leg whose DN side is gone, can fail or not
+  answer — and a read that failed taken as "no superblock" would make
   `assembleGroup` run `mdadm --create --assume-clean` over live data);
 * `Md.NameInUse` (`cnagent.md` CN12: an `lsblk` of the array's node under
   "/dev/md" whose "not in use" is what lets `assembleGroup` run
@@ -870,7 +870,7 @@ the port probe, whether its port's directory is there (`OsClient.ReadMtime`,
 SH18), and the size of its `--disk`: the number of the device the `--disk`
 path names (`OsClient.ReadDevNo`), then the size sysfs keeps under that
 number, the file `lsblk` reads it from; the cn's are `cnagent.md` CN28's,
-and CN12's `mdadm --examine` and `lsblk` of the array node — the walk of
+and CN12's superblock read and `lsblk` of the array node — the walk of
 "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact —
 the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`

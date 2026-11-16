@@ -744,60 +744,45 @@ func TestMdStateLine(t *testing.T) {
 	}
 }
 
-// TestMdHasSuperblockKilledIsAnError pins the most destructive reading of a
-// killed probe in the tree. `mdadm --examine` opens and reads the member
-// device, so it blocks on a dead leg until failfast, and its answer selects
-// between the two assembly cases of cnagent.md CN12: create, or assemble. "No
-// superblock" on every available member means case 1, and case 1 is `mdadm
-// --create --assume-clean` — over whatever those members already hold. So a
-// kill read as "no superblock" does not leak anything; it destroys the
-// group's data.
-//
-// The second half drives a whole converge, because the property that matters
-// is not that the primitive returns an error but that the decision above it
-// refuses: with no answer this pass cannot tell case 1 from case 2, and
-// guessing is not allowed.
-func TestMdHasSuperblockKilledIsAnError(t *testing.T) {
-	ctx := context.Background()
-	const member = "/dev/mapper/dnv-leg-a"
-	node := newFakeNode()
-	md := NewMd(node.osClient())
-
-	// The tool ran and answered: this device carries no md metadata. That is
-	// the case 1 answer of cnagent.md CN12, not a failure — a freshly zeroed
-	// side.
-	has, err := md.HasSuperblock(ctx, member)
-	if err != nil {
-		t.Fatalf("a device without a superblock errored: %v", err)
-	}
-	if has {
-		t.Fatal("a device without a superblock read as carrying one")
-	}
-	node.superblocks[member] = true
-	if has, err = md.HasSuperblock(ctx, member); err != nil || !has {
-		t.Fatalf("a device carrying a superblock read as (%v, %v)", has, err)
-	}
-	node.killCmdAlways["mdadm --examine"] = true
-	if has, err = md.HasSuperblock(ctx, member); err == nil {
-		t.Fatalf("a killed `mdadm --examine` read as has=%v, which is the "+
-			"answer that creates over live data", has)
-	}
-
-	// The refusal, through the converge that would otherwise create. Every
-	// `--examine` of the pass is killed, so no member can be told apart from
-	// a freshly zeroed one.
-	srv, srvNode := newTestServer(t)
-	srvNode.killCmdAlways["mdadm --examine"] = true
-	reply := syncupBoth(t, srv, reqOpts{
-		revision: 2, primary: true, raid1: true, twoLegs: true})
-	created := srvNode.callsMatching("cmd mdadm --create")
-	if len(created) != 0 {
-		t.Fatalf("an array was created although no member could be "+
-			"examined: %v", created)
-	}
-	info := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
-	if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
-		t.Fatalf("the group reported %v, want ERROR", info.GetStatus())
+// TestReadMemberFailureNeverCreates pins the most destructive reading of a
+// member read that did not answer, or that failed. The reading selects
+// between the two assembly cases of cnagent.md CN12: create, or assemble.
+// "No superblock" on every available member means case 1, and case 1 is
+// `mdadm --create --assume-clean` — over whatever those members already
+// hold. mdadm answers a read that fails with an IO error exactly as it
+// answers a member with no superblock, which is why the agent reads the
+// area itself (Md.ReadMember): a kill or an IO error read as "no
+// superblock" would destroy the group's data. The property is that the
+// decision above the read refuses: with no answer this pass cannot tell
+// case 1 from case 2, and guessing is not allowed.
+func TestReadMemberFailureNeverCreates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hook func(node *fakeNode)
+	}{
+		{"killed", func(node *fakeNode) {
+			node.killCmdAlways["readsb "] = true
+		}},
+		{"io error", func(node *fakeNode) {
+			node.failCmdAlways["readsb "] = ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, srvNode := newTestServer(t)
+			tc.hook(srvNode)
+			reply := syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true})
+			created := srvNode.callsMatching("cmd mdadm --create")
+			if len(created) != 0 {
+				t.Fatalf("an array was created although no member could "+
+					"be read: %v", created)
+			}
+			info := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+			if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("the group reported %v, want ERROR",
+					info.GetStatus())
+			}
+		})
 	}
 }
 

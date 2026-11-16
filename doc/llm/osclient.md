@@ -32,7 +32,8 @@ it.
   nvmet-configfs work, for its listings of sysfs and of its local store, for
   the dn's read of an nvmet subsystem directory's age, for both roles' read
   of whether their nvmet port's directory is there, for the dn's read of its
-  disk's device number, for both roles' discards on a dm-clone, and for
+  disk's device number, for both roles' discards on a dm-clone, for the
+  cn's direct read of an md member's superblock area, and for
   persisting the `Local*Path` protobuf state
   files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
   maker and mount commands, its sysfs and mount table reads and its read of
@@ -94,6 +95,10 @@ the method set is exactly the following, each taking the caller's ctx:
 * `ReadBlock` reads exactly the requested length at a byte offset of a block
   device (or regular file); a short read is an error; buffered IO, which
   callers use only for regions no dm table references.
+* `ReadBlockDirect` reads exactly the requested length at a byte offset of
+  a block device with O_DIRECT in the caller's own process; offset and
+  length must be multiples of 4096 and the length not zero; a short read is
+  an error (ReadBlockDirect).
 * `WriteBlock` writes data at a byte offset and fsyncs the file descriptor
   before returning.
 * `DiscardRanges` discards byte ranges of a block device in the caller's own
@@ -417,6 +422,28 @@ methods.
   `length` only (Logging). Metadata blocks are large and uninteresting in a
   log, and a device region may hold arbitrary user data.
 
+### ReadBlockDirect
+
+How the cn agent reads an md member's superblock area (`cnagent.md` CN12,
+The superblock read): metadata another writer puts on the device with IO of
+its own, past any page cache — the kernel writes an md superblock with bios
+of its own — so a buffered read could answer an old copy from the page
+cache.
+
+* It takes one semaphore slot, checks the ctx error after acquiring it,
+  and runs the body of the probe's helper `ReadBlockDirectAt`: the
+  alignment check before the open, an O_RDONLY, O_DIRECT and O_CLOEXEC open,
+  one pread into an aligned buffer, a short read an error, the close.
+* It cannot be cut off once the pread has started: it waits for as long as
+  the device holds the IO, and holds its slot until then, as a command
+  whose child sits in an uninterruptible kernel wait does (RunCommand).
+  Its one caller reads only a leg that serves this pass, so the wait needs a
+  fault between the caller's read of the leg's path and the read itself;
+  the leg probe, whose IO waits by design, never uses it (Exported raw
+  helpers and the probe-IO carve-out).
+* One `os read block direct` record covers the call, with `path`, `offset`
+  and `length` — **never** `data` (`log.md`, OS commands and file IO).
+
 ### DiscardRanges
 
 How the agents mark dm-clone regions "already hydrated" (`architecture.md`,
@@ -449,9 +476,9 @@ a fragmented source.
 
 ### Exported raw helpers and the probe-IO carve-out
 
-The `OsClient` interface carries no direct read: the CN11 leg-health prober
-is the only caller of one, and a prober must never hold a semaphore slot
-(below). The two raw bodies are exported from `common/osclient.go` as plain
+The `OsClient` interface's direct read (ReadBlockDirect) holds a semaphore
+slot, and a prober must never hold one (below), so the CN11 leg-health
+prober reads through a raw helper instead. The two raw bodies are exported from `common/osclient.go` as plain
 package-level functions instead. They take no ctx, acquire **no** semaphore
 slot, and log **nothing**:
 
@@ -562,8 +589,9 @@ attributes as the block records, same "never `data`" rule. The "probe …"
 prefix is load-bearing: the cn suite's mutation grep (`mutations` in
 `integtest/cnagent_test.sh`; `cnagent_integtest.md`, Conventions) names
 `os write block` explicitly, and the continuous health probes must fall out
-of that grep **by construction** rather than by a path-based exemption; no
-agent emits an "os read block direct" record. `os write block` is the dn
+of that grep **by construction** rather than by a path-based exemption; an
+`os read block direct` record is the cn agent's superblock read
+(ReadBlockDirect), a read and never a probe's. `os write block` is the dn
 agent's `diskmeta.go` record, so a "probe …" record and an "os …" record can
 never be confused for one another.
 
@@ -595,8 +623,8 @@ any age a caller judges by, so with a zero default every unit test that met
 an export without namespace one would read it as old and remove it, and a
 "not exist" default would pass every such export over as gone. It is
 exported — not a `_test.go` file — so
-tests in other packages can reuse it. It has no
-field for the direct read: the probe read is not on the interface, and probe
+tests in other packages can reuse it. Its field for the direct read serves
+`ReadBlockDirect` alone: the probe read is not on the interface, and probe
 IO is faked through the cn agent's own probe-IO dependency (`cnagent.md`,
 Leg-probe IO leaves the `OsClient`, and Server type and lock mapping), not
 through this double.

@@ -122,6 +122,15 @@ type OsClient interface {
 	// callers use it only for regions no dm table references.
 	ReadBlock(ctx context.Context, path string, offset uint64, length uint64) (data []byte, err error)
 
+	// ReadBlockDirect reads exactly length bytes at byte offset from a
+	// block device with O_DIRECT in the caller's own process, so no page
+	// cache answers it: the bytes are those on the device now. offset and
+	// length must be multiples of 4096 and length must not be zero, checked
+	// before the device is opened. A short read is an error. The read
+	// cannot be cut off once it has started: it waits for as long as the
+	// device holds the IO (osclient.md, ReadBlockDirect).
+	ReadBlockDirect(ctx context.Context, path string, offset uint64, length uint64) (data []byte, err error)
+
 	// WriteBlock writes data at byte offset and fsyncs the file
 	// descriptor before returning.
 	WriteBlock(ctx context.Context, path string, offset uint64, data []byte) (err error)
@@ -462,6 +471,39 @@ func (c *LimitedOsClient) ReadBlock(
 		slog.Uint64("length", length),
 	}
 	slog.InfoContext(ctx, "os read block", appendErr(attrs, err)...)
+
+	return data, err
+}
+
+// ReadBlockDirect is the O_DIRECT twin of ReadBlock for metadata another
+// writer puts on the device with its own IO, past any page cache: the md
+// superblock area of a member, which the kernel writes with bios of its own,
+// so a buffered read can answer an old copy (osclient.md, ReadBlockDirect).
+// It runs the same body as the probe's ReadBlockDirectAt, but as an OsClient
+// operation: under one semaphore slot and with its "os read block direct"
+// record.
+func (c *LimitedOsClient) ReadBlockDirect(
+	ctx context.Context,
+	path string,
+	offset uint64,
+	length uint64,
+) ([]byte, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	data, err := ReadBlockDirectAt(path, offset, length)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Uint64("offset", offset),
+		slog.Uint64("length", length),
+	}
+	slog.InfoContext(ctx, "os read block direct", appendErr(attrs, err)...)
 
 	return data, err
 }

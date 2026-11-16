@@ -2159,3 +2159,22 @@ func TestRepairOpsRefuseADeletingClone(t *testing.T) {
 		opsSpName, noExpectRev, opsRetiredLeg, env.cc)
 	env.wantNoWrite(err, opDeleteRetiredLeg, "clone deleting", before)
 }
+
+// TestCreateRepairCarriesTheForce: the repair record carries the operator's
+// force from its create (RepairNewLeg.Force), which the primary reads at
+// the take-back and at the add of the bad leg after an abort (cnagent.md
+// CN12); a repair created without it carries none.
+func TestCreateRepairCarriesTheForce(t *testing.T) {
+	for _, force := range []bool{true, false} {
+		env := newOpsEnv(t)
+		env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide,
+			opsDnC, 1, opsRetiredEpoch)
+		env.createRepair(func() RepairNewLeg {
+			return RepairNewLeg{RetiredLegId: opsRetiredLeg, Force: force}
+		})
+		if got := env.repair(opsRepName).GetForce(); got != force {
+			t.Errorf("the repair created with force %v carries %v", force,
+				got)
+		}
+	}
+}

@@ -57,11 +57,13 @@ func registerGroup(root *cobra.Command) {
 // the clones, as it does a repair's, so the leaf takes no parent. --leg is
 // the leg the array starts from: a leg of the group's leg list other than
 // the bad leg of a started repair, or the new leg of its open repair while
-// that repair is started or is created with its abort flag clear, as the
-// gateway's refusal says. --cancel withdraws the group's mark instead of
-// writing one. dnvctl checks neither pairing: a --cancel with a non-zero
-// --leg, and a write with no --leg, are forwarded, and the gateway refuses
-// them (CT8).
+// that repair is created or started, as the gateway's refusal says. --cancel withdraws the group's mark instead of
+// writing one. --force puts the operator's force on the mark: the start goes
+// on from a named leg whose md change count is below that of a full member
+// of the same array the start would zero (cnagent.md CN12). dnvctl checks
+// none of the pairings: a --cancel with a non-zero --leg or with --force,
+// and a write with no --leg, are forwarded, and the gateway refuses them
+// (CT8).
 //
 // The forced start destroys what every other leg the forced start keeps
 // holds, an open repair's bad leg excepted, and dnvctl asks for no
@@ -97,6 +99,7 @@ func groupForceStartCmd() *cobra.Command {
 				GrpId:       grpId,
 				LegId:       legId,
 				Cancel:      boolOf("cancel"),
+				Force:       boolOf("force"),
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -111,6 +114,9 @@ func groupForceStartCmd() *cobra.Command {
 			"--cancel)")
 	flags.Bool("cancel", false,
 		"withdraw the group's forced-start mark instead of writing one")
+	flags.Bool("force", false,
+		"start even when a member the start overwrites holds a higher md "+
+			"change count of the same array, so newer data, which is lost")
 	return cmd
 }
 

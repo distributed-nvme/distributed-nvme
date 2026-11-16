@@ -395,7 +395,7 @@ func TestCloneMetaGroupWaitsForItsSides(t *testing.T) {
 	mdPath := cloneMdPath(srv)
 	assertNoCall(t, node, "cmd mdadm --create "+mdPath)
 	for _, legId := range []uint64{testCloneLeg, testCloneLeg2} {
-		assertNoCall(t, node, "cmd mdadm --examine --export "+
+		assertNoCall(t, node, "readsb "+
 			srv.nf.DmPath(legName(srv, legId)))
 	}
 	assertNoCall(t, node, "--nqn "+legNqn(srv, testCloneLeg2)+" --hostnqn")

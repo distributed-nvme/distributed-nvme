@@ -282,7 +282,10 @@ func (s *Server) CreateRepair(
 		if err != nil {
 			return mapStmErr(err)
 		}
-		newLeg := model.RepairNewLeg{RetiredLegId: req.GetRetiredLegId()}
+		newLeg := model.RepairNewLeg{
+			RetiredLegId: req.GetRetiredLegId(),
+			Force:        req.GetForce(),
+		}
 		if newLeg.RetiredLegId == 0 {
 			// The group has no repair, the snapshot's refusal, so its DN
 			// set is its legs'; the scan black-lists it and the op checks
@@ -609,6 +612,10 @@ func (s *Server) ForceStartGroup(
 		return nil, errInvalid(
 			"leg_id must name the leg the group's array starts from")
 	}
+	if req.GetCancel() && req.GetForce() {
+		return nil, errInvalid("force is set with cancel: a cancel " +
+			"starts nothing")
+	}
 	var sc *spScope
 	var loc grpLocation
 	var tgt grpReportTarget
@@ -628,15 +635,15 @@ func (s *Server) ForceStartGroup(
 	revision, err := model.ForceStartGroup(
 		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
 		req.GetSpRev().GetRevision(), loc.parent(), req.GetGrpId(),
-		req.GetLegId(), req.GetCancel(),
+		req.GetLegId(), req.GetCancel(), req.GetForce(),
 	)
 	if modelReason(err) == model.ReasonLegNotNamable {
 		return nil, errPrecondition(
 			"leg %d is no leg the forced start of group %d may name any "+
 				"more: neither a leg of its leg_list, other than the bad "+
 				"leg of a started repair, nor a new leg of its repair "+
-				"while that repair is started or is created with its "+
-				"abort flag clear", req.GetLegId(), req.GetGrpId())
+				"while that repair is created or started",
+			req.GetLegId(), req.GetGrpId())
 	}
 	if err != nil {
 		return nil, mapModelErr(err)
@@ -723,16 +730,16 @@ func forceStartChecks(
 
 // forceStartLegChecks refuses a leg the forced-start mark may not name
 // (architecture.md, Repairs): one in neither the group's leg_list nor the
-// new legs of its repair is NOT_FOUND; a new leg of a repair whose abort
-// flag is set, an ABORTED one or a CREATED one, is FAILED_PRECONDITION,
-// since the abort takes that leg out of the members the forced start keeps,
-// the members the group keeps but the new legs of a CREATED repair whose
-// abort flag is set (architecture.md, Repair, Forced start; cnagent.md
-// CN12), while a STARTED repair's new leg may be named whatever its flag
-// says, since no abort takes a STARTED repair back; and so is the bad leg of
-// a STARTED repair, which left the array before md began copying onto the
-// new leg and which the finish retires. model.ForceStartGroup makes the same
-// tests in its own STM (model.ReasonLegNotNamable).
+// new legs of its repair is NOT_FOUND; a new leg of an ABORTED repair is
+// FAILED_PRECONDITION, since the abort took it out of the group, while a new
+// leg of a CREATED or a STARTED repair may be named whatever its abort flag
+// says: a forced start from a CREATED repair's new leg that zeroed the other
+// members can leave it the group's one full member, and an abort set once
+// the mark was withdrawn must not leave the group with no leg to start from
+// (architecture.md, Repair, Forced start; cnagent.md CN12); and so is the
+// bad leg of a STARTED repair, which left the array before md began copying
+// onto the new leg and which the finish retires. model.ForceStartGroup makes
+// the same tests in its own STM (model.ReasonLegNotNamable).
 func forceStartLegChecks(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -760,12 +767,11 @@ func forceStartLegChecks(
 		if leg.GetLegId() != legId {
 			continue
 		}
-		if rep.GetRepStage() != pb.RepStage_REP_STAGE_STARTED &&
-			rep.GetTryToAbort() {
+		if rep.GetRepStage() == pb.RepStage_REP_STAGE_ABORTED {
 			return errPrecondition(
-				"leg %d is the new leg of the repair %q, which is %s with "+
-					"its abort flag set: the forced start of group %d "+
-					"keeps no such member", legId,
+				"leg %d is the new leg of the repair %q, which is %s: "+
+					"the abort took it out of group %d, so the forced "+
+					"start may not name it", legId,
 				grp.GetRepName(), rep.GetRepStage(), grp.GetGrpId())
 		}
 		return nil

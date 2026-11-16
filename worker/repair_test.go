@@ -1702,3 +1702,41 @@ func TestSpRetiredSideMonitor(t *testing.T) {
 		}
 	}
 }
+
+// TestMemberAddRefusedIsLogged pins AR14: a group whose reading in the
+// primary's report carries a refusal of a member's add logs `member add
+// refused`, naming the group, the primary and the refusal, on every pass
+// while it stands, and moves nothing; a reading without one logs nothing.
+func TestMemberAddRefusedIsLogged(t *testing.T) {
+	const refusal = "leg 0x7 carries another array's superblock"
+	h := newReactHarness(t, reactFixture(t))
+	if _, ok := h.w.cntlrs[reactCntlrA]; !ok {
+		h.setPrimaryInfo(reactCntlrA, &pb.CntlrInfo{})
+	}
+	info := h.w.cntlrs[reactCntlrA].driver.lastInfo
+	if info.GrpIdToGrpInfo == nil {
+		info.GrpIdToGrpInfo = map[uint64]*pb.CntlrInfo_GrpInfo{}
+	}
+	info.GrpIdToGrpInfo[reactDataGrp] = &pb.CntlrInfo_GrpInfo{
+		Refusal: refusal}
+	h.pass()
+	h.pass()
+	h.wantOps()
+	recs := h.logs.withMsg(msgMemberAddRefused)
+	if len(recs) != 2 {
+		t.Fatalf("records %v, want one a pass", recs)
+	}
+	for _, rec := range recs {
+		if rec["grp_id"] != float64(reactDataGrp) ||
+			rec["refusal"] != refusal ||
+			rec["cntlr_id"] != float64(reactCntlrA) {
+			t.Fatalf("record %v, want group %d with %q", rec, reactDataGrp,
+				refusal)
+		}
+	}
+	info.GrpIdToGrpInfo[reactDataGrp] = &pb.CntlrInfo_GrpInfo{}
+	h.pass()
+	if got := len(h.logs.withMsg(msgMemberAddRefused)); got != 2 {
+		t.Fatalf("%d records after the refusal went, want 2", got)
+	}
+}

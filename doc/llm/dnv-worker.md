@@ -7,8 +7,9 @@ mutations the gateway's handlers share (MD1 to MD9); the `cmd/dnv-worker`
 command (CM1 to CM7); the vote worker (VW1 to VW11); the shard worker (SW1 to
 SW6); the revision worker with its dn, cn and sp role files (RW1 to RW23);
 health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM7); the automatic
-reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12) and
-the forced-start clear (AR13), the sp drain (SPD1 to SPD15) and the clone
+reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12),
+the forced-start clear (AR13) and the record of a refused member add (AR14),
+the sp drain (SPD1 to SPD15) and the clone
 drain (CLD1 to CLD13); the worker's log records; and the intent of the worker
 integration suite. It leans on `architecture.md` for the object model, the
 etcd data model, allocation, common validation, the agent contracts, the
@@ -869,8 +870,8 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   listed and its key present; a clone parent existing and not `deleting`;
   `REP_STAGE_CREATED`, any other stage refused with its name; and, for a
   flag not yet set, its parent holding its group and the group's
-  forced-start mark naming no new leg of the repair, which the flag would
-  take out of the members the forced start keeps (`architecture.md`,
+  forced-start mark naming no new leg of the repair, so that the abort
+  never ends a forced start the operator asked for (`architecture.md`,
   Repairs). It sets `try_to_abort` and bumps `SpRev`, and returns the
   `rep_id`; a flag already set is answered with no write and no bump.
 * `SetRepairStage` takes the name, the `rep_id` the primary's verdict named
@@ -912,15 +913,16 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   its own, so a flip over every repair of a pool would be as wide as the
   pool's groups.
 * `ForceStartGroup`, the body of the gateway's call of that name, takes the
-  group's parent and id, the leg and the cancel flag, and requires the
+  group's parent and id, the leg, the cancel flag and the force, and
+  requires the
   expected revision; the any-level SP checks; for a write, an `sp_level`
   below `SP_LEVEL_NO_REDUND` ("sp level builds no group array"); the pool
   `RedundMdRaid1`; the parent holding the group, a clone parent not
   `deleting`. A write requires the leg to be one the mark may name
   (`architecture.md`, Repair, Forced start), a leg of the group's
   `leg_list` other than the bad leg of a STARTED repair, or a new leg of
-  the repair the group names while it is STARTED or is CREATED with its
-  abort flag clear (`ReasonLegNotNamable`), the repair read through the
+  the repair the group names while it is CREATED or STARTED, whatever its
+  abort flag says (`ReasonLegNotNamable`), the repair read through the
   pool's list as every op reads one whenever the group names one; it sets the
   group's `forced_start` to the leg and the revision its own `SpRev` bump
   writes,
@@ -3035,7 +3037,8 @@ cntlr's path is bad. Beside the
 reactions the pass runs the three steps of the procedure Repair of
 `architecture.md` that are the worker's, a repair's stage moves (AR11), the
 retire timer (AR12) and the clear of a forced-start mark (AR13), which are
-no reactions; nor is its latch of a clone whose copy is whole (CLD13).
+no reactions; nor is its record of a refused member add (AR14), nor its
+latch of a clone whose copy is whole (CLD13).
 
 ### Pass, priority, suppression
 
@@ -3952,9 +3955,11 @@ too, and logs `repair stage skipped` with the reason `take_back_refused`
 and the refusal's text, on every pass while it stands; every other verdict
 that says neither logs nothing, and so does a verdict on a repair past
 CREATED, even one that carries a refusal. Reason: the primary refuses to
-add a new leg taken from a retired leg whose md events count is above that
-of the member that keeps the data (what that count proves is
-`architecture.md`, Known limits), the repair then waits in CREATED with no
+add a new leg taken from a retired leg whose md superblock carries another
+identity than the member that keeps the data, unless the repair carries
+the operator's force, or the same identity and a higher events count (what
+that count proves is `cnagent.md`, Known limits), the repair then waits in
+CREATED with no
 row in error, and the record tells the operator why, so that they abort and
 cancel it. The repair of
 a deleting clone's group, or of a clone the snapshot does not hold, is
@@ -4058,6 +4063,22 @@ no reaction and not the pass's one action (AR2); its `SpRev` bump makes AR12's d
 pass wait a pass, as a stage move's does, and leg repair's create, which
 reads the mark in the pass's snapshot, still holds the group in that pass
 (AR8). A latched SP clears no mark: its drain deletes its groups.
+
+AR14. **Member add refusals.** For a live SP, right after AR11's stage
+moves and before AR3's suppression — so at every `sp_level` — the pass logs
+`member add refused` for each group, in ascending grp_id, whose reading in
+the current primary's latest report (`grp_id_to_grp_info`) carries the
+primary's refusal of a `leg_list` member's add (`cnagent.md` CN12, The
+identity check), naming the group, the primary, the revision of its report
+and the refusal's text, on every pass while it stands. Nothing moves, and
+no op runs. Reason: the group runs degraded while the refusal stands, and
+no reaction cures it, since the leg itself is healthy and leg repair
+(AR8) acts on a leg's health epoch; the record is how the operator reads
+why the group does not become whole: the refused member may hold data the
+array lacks, so the operator replaces it with a repair, whose finish keeps
+its data as a retired leg, or starts the group from it with a forced start
+(`architecture.md`, Repair). The record is no reaction and not the pass's
+one action (AR2).
 
 ### The sp drain
 
@@ -5026,7 +5047,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Sixteen records no suite case stages: `worker reg watch restarting`, `rev
+Seventeen records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -5042,9 +5063,10 @@ suite case forces that code or sets `leftover_rounds`;
 `dn free count disagrees`, since no suite case sets `disk_counts`;
 `forced start kept`, since every clear the repair case stages commits;
 `clone latched` and `clone latch skipped`, for the reason given for CLD13
-above; and
+above;
 `sp group missing`, since no suite case plants a repair or a retired leg
-whose group is missing. `repair stage skipped` is staged only as the
+whose group is missing; and `member add refused`, since no fake agent reports
+a group's refusal (AR14). `repair stage skipped` is staged only as the
 record of a refused take-back, every stage move the repair and reaction
 cases stage committing.
 

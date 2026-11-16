@@ -1522,14 +1522,17 @@ md_array_state() {
 }
 
 # md_examine <dm name> — one line "role=<role> recovery=<sectors|none>
-# events=<n>" of the md superblock on the dm device <dm name>, from the
-# human-readable mdadm --examine, the one form that prints a member's role
-# and its recovery offset (cnagent_integtest.md, Lab facts), the role's
-# spaces read as underscores; "none" when mdadm finds no superblock. It
-# fails, saying so, when the device is not there, the examine does not end
-# within its bound, or a superblock lacks a role or an events count.
+# uuid=<array uuid> bbl=<entries> events=<n>" of the md superblock on the dm
+# device <dm name>, from the human-readable mdadm --examine, the one form
+# that prints a member's role and its recovery offset (cnagent_integtest.md,
+# Lab facts), the role's spaces read as underscores, and the length of its
+# bad-block list from mdadm --examine-badblocks; "none" when mdadm finds no
+# superblock. It is the suite's own reading, beside the agent's (cnagent.md
+# CN12, The superblock read). It fails, saying so, when the device is not
+# there, the examine does not end within its bound, or a superblock lacks a
+# role, an identity or an events count.
 md_examine() {
-	local out rc=0 role rec ev
+	local out rc=0 role rec ev uuid bbl
 	[ -b "/dev/mapper/$1" ] || {
 		echo "md_examine: no /dev/mapper/$1 on this node" >&2
 		return 1
@@ -1563,7 +1566,33 @@ md_examine() {
 		echo "md_examine: $1's superblock reads no device role" >&2
 		return 1
 	}
-	echo "role=${role// /_} recovery=${rec:-none} events=$ev"
+	uuid=$(printf '%s\n' "$out" | awk -F' : ' '
+		{ k = $1; sub(/^ +/, "", k) } k == "Array UUID" { print $2; exit }')
+	[ -n "$uuid" ] || {
+		echo "md_examine: $1's superblock reads no array uuid" >&2
+		return 1
+	}
+	bbl=$(timeout 30 mdadm --examine-badblocks "/dev/mapper/$1" 2>/dev/null |
+		grep -c ' for ') || true
+	echo "role=${role// /_} recovery=${rec:-none} uuid=$uuid bbl=${bbl:-0} events=$ev"
+}
+
+# md_bad_block_add <dm name> <sector> <sectors> — records a bad block on the
+# member <dm name> of a running array through its md/dev-*/bad_blocks, as md
+# records one it could not write, and prints the member's in-memory list. md
+# writes the list into the member's superblock at its next superblock
+# update. It fails, saying so, on a member no array holds or a write md
+# refuses.
+md_bad_block_add() {
+	local where node dmk
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	echo "$2 $3" >"/sys/block/$node/md/dev-$dmk/bad_blocks" || {
+		echo "md_bad_block_add: md refused $2 $3 on $1" >&2
+		return 1
+	}
+	tr '\n' ' ' <"/sys/block/$node/md/dev-$dmk/bad_blocks"
+	echo
 }
 
 # md_sync_speed <dm name> <min> <max> — writes md/sync_speed_min and
@@ -1587,6 +1616,23 @@ md_sync_speed() {
 		return 1
 	}
 	echo "min=$(tr -d ' ' <"$dir/sync_speed_min") max=$(tr -d ' ' <"$dir/sync_speed_max")"
+}
+
+# md_sync_action <dm name> <action> — writes md/sync_action of the array that
+# holds the dm device <dm name> as a member and prints what it then reads.
+# "frozen" stops md's copy and keeps it from starting again, so a broken
+# array whose copy md would retry from a dead source holds still. It fails,
+# saying so, on a member no array holds or a write md refuses.
+md_sync_action() {
+	local where node dmk dir
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	dir=/sys/block/$node/md
+	echo "$2" >"$dir/sync_action" || {
+		echo "md_sync_action: writing '$2' to $dir/sync_action failed" >&2
+		return 1
+	}
+	cat "$dir/sync_action"
 }
 
 # dm_error_load <name> — swaps one dm device's table for an error target of
@@ -2432,6 +2478,8 @@ events() {
 	        "write " + .path + " " + (.data // "")
 	      elif .msg == "os read dir" then
 	        "list " + .path
+	      elif .msg == "os read block direct" then
+	        "readsb " + .path + " off=\(.offset) len=\(.length)"
 	      else empty end' "$1" || return 1
 }
 
@@ -2513,12 +2561,13 @@ cn_requests_since() {
 # `probe write block` / `probe read block direct`, which are not in this grep
 # list by construction. So no path-based exemption is needed, and
 # `os write block` is a mutation without qualification. The OsClient's other
-# block record, `os read block`, is a read and not in the list; the cn agent
-# issues neither, and the probers' `ReadBlockDirectAt` logs nothing
-# (osclient.md, Exported raw helpers and the probe-IO carve-out).
-# Probe commands (lsblk, dmsetup info|table|status|ls, the `ls` of configfs,
-# stat, mdadm --examine, nvme list-subsys) are expected and deliberately not
-# in the list. Every other directory listing,
+# block records, `os read block` and `os read block direct`, are reads and
+# not in the list; the cn agent issues the second alone, its superblock read
+# of an md member (cnagent.md CN12), and the probers' `ReadBlockDirectAt`
+# logs nothing (osclient.md, Exported raw helpers and the probe-IO
+# carve-out). Probe commands (lsblk, dmsetup info|table|status|ls, the `ls`
+# of configfs, stat, nvme list-subsys) are expected and deliberately not in
+# the list. Every other directory listing,
 # of sysfs or of the local store, is an `os read dir` record, a read and never
 # a mutation. The cn agent reads md state from sysfs and never runs
 # `mdadm --detail`, which is a read too.
@@ -5104,19 +5153,21 @@ repair_taken_back() { # file name leg
 }
 
 # mark_set puts the forced-start mark naming <leg> on the A-shaped data group
-# of a request file, as the fan-out carries it (architecture.md, Repair), or,
-# with the file alone, takes it away, as the worker's clear does
-# (dnv-worker.md AR13). The mark's revision is the worker's to compare with a
+# of a request file, as the fan-out carries it (architecture.md, Repair),
+# with the operator's force when the third word is "force", or, with the
+# file alone, takes it away, as the worker's clear does (dnv-worker.md
+# AR13). The mark's revision is the worker's to compare with a
 # report, which no cn agent reads, so the next revision of the file stands
 # in for it.
-mark_set() { # file [leg]
-	local grp
+mark_set() { # file [leg [force]]
+	local grp force=false
 	grp=".id_to_slice[\"$(hex16 "$A_SLICE")\"].data_grp_list[0]"
 	if [ $# -eq 1 ]; then
 		req_set "$1" "del($grp.forced_start)"
 		return
 	fi
-	req_set "$1" "$grp.forced_start = {\"leg_id\": \"$(d16 "$2")\", \"revision\": \"$(($("$JQ" -r .revision "$1") + 1))\"}"
+	[ "${3:-}" = force ] && force=true
+	req_set "$1" "$grp.forced_start = {\"leg_id\": \"$(d16 "$2")\", \"revision\": \"$(($("$JQ" -r .revision "$1") + 1))\", \"force\": $force}"
 }
 
 # grp_reading prints a reply's reading of one group's array as "<whole>
@@ -5138,7 +5189,8 @@ grp_reading() { # json grpid
 repair_forced_start() {
 	local zleg=0x17 zside=0x18 zrep=0x19 vrep=0x1a trep=0x1b
 	local out seq f md2dev md2name yname zname oname l2name ylin st exz exy
-	local exo evy evo rec deadline refusal old0 newx mrd forced held
+	local exo uuy uuo rec deadline refusal old0 newx mrd forced held
+	local oline exo2 exz2 bb uuz frozen
 	md2dev=$(jq_of "$md2" .dev_path)
 	md2name=$(jq_of "$md2" .array_name)
 	yname=$(cn_dm_name c9 2 "$sp" "$yleg")
@@ -5228,19 +5280,28 @@ repair_forced_start() {
 	# CN2's path to it stays live and optimized.
 	# md can retry the copy from the dead Y for as long as Z stays in the
 	# array, the array reading write-pending and active between its reads of
-	# broken, which CN12 counts as running; the stage waits until it reads
-	# broken ten seconds in a row (cnagent_integtest.md, Lab facts). A
+	# broken, which CN12 counts as running, for minutes on end
+	# (cnagent_integtest.md, Lab facts). Once it first reads broken, the
+	# stage freezes md's copy (md/sync_action), which keeps it from starting
+	# again, and waits until the array reads broken ten seconds in a row: a
 	# converge that read a running state would leave the mark to the CN10
 	# retry (cnagent.md CN12), whose attempts carry trace ids of their own,
-	# which the next stages' counts do not read: the hold makes that
-	# unlikely and does not rule it out.
+	# which the next stages' counts do not read. The agent never writes
+	# sync_action; the freeze only holds still the state that md's retries
+	# keep moving, which CN12's retry handles in production.
 	assert_eq "$(helper 1 "dm_error_load $ylin")" loaded \
 		"repair copydeath: Y's export to cn2 erroring"
 	deadline=$((SECONDS + 180))
 	held=0
+	frozen=""
 	while [ "$held" -lt 10 ]; do
 		st=$(helper 2 "md_array_state $zname") ||
 			die "repair copydeath: reading the array of the new leg failed"
+		if [ "$st" = broken ] && [ -z "$frozen" ]; then
+			frozen=$(helper 2 "md_sync_action $zname frozen") ||
+				die "repair copydeath: freezing md's copy failed: $frozen"
+			log "  md's copy frozen: $frozen"
+		fi
 		if [ "$st" = broken ]; then
 			held=$((held + 1))
 		else
@@ -5292,7 +5353,7 @@ repair_forced_start() {
 
 	stage forced "Y back, a forced start from it restores the group"
 	# Y comes back: DN1's next converge of its side puts its own table back.
-	# The mark names Y now. The forced start examines it, zeroes Z, which the
+	# The mark names Y now. The forced start reads it, zeroes Z, which the
 	# group keeps as the STARTED repair's new leg (leg 2, the bad leg, is
 	# left alone), and starts the array from Y alone under a new identity,
 	# then the repair's add adds the blank Z, which md copies whole
@@ -5317,9 +5378,9 @@ repair_forced_start() {
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair forced"
 	seq=$(helper 2 "cn_events $TRACE")
-	assert_before "$seq" "^mdadm --examine /dev/mapper/$yname\$" \
+	assert_before "$seq" "^readsb /dev/mapper/$yname off=4096 " \
 		"^mdadm --zero-superblock /dev/mapper/$zname\$" \
-		"repair forced: Y examined, then Z zeroed"
+		"repair forced: Y read, then Z zeroed"
 	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$zname\$" \
 		"$forced" "repair forced: Z zeroed, then the start from Y"
 	assert_before "$seq" "$forced" \
@@ -5437,12 +5498,14 @@ repair_forced_start() {
 	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
 		"repair restore: the copy from before X"
 
-	stage takeback "a take-back of the retired leg newer than the array is refused"
+	stage takeback "a take-back of the retired leg of another identity is refused"
 	# The take-back of Y, with a repair whose bad leg Z stops serving CN2:
-	# the add's conditions hold, and the check refuses Y, whose events count
-	# is above O's. Nothing changes in the array, the refusal is in the
-	# verdict, and a read reports it too and names nothing (cnagent.md CN12,
-	# CN28, CN30).
+	# the add's conditions hold, and the check refuses Y, whose superblock
+	# carries the identity the forced start from Y gave the array, while the
+	# array runs under the one the restore's forced start from O gave it, so
+	# Y may hold data the array lacks. Nothing changes in the array, the
+	# refusal is in the verdict, and a read reports it too and names nothing
+	# (cnagent.md CN12, CN28, CN30).
 	dn_side 2 "$sp" "$zleg" "$zside" 2 "$RAID1_DGRP_ZERO_BYTES" \
 		"${CNID[1]}" "${CNID[2]}"
 	leg_wait_ana 2 "$sp" "$zleg" "${CNID[2]}" 2 non-optimized 20
@@ -5457,11 +5520,12 @@ repair_forced_start() {
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair takeback: the refusal"
 	seq=$(helper 2 "cn_events $TRACE")
-	# The check's two examines, Y's and then O's, are the positive control
-	# of the count below: the stream holds the refusing converge's records.
-	assert_before "$seq" "^mdadm --examine /dev/mapper/$yname\$" \
-		"^mdadm --examine /dev/mapper/$oname\$" \
-		"repair takeback: Y examined, then O"
+	# The check's two superblock reads, Y's and then O's, are the positive
+	# control of the count below: the stream holds the refusing converge's
+	# records.
+	assert_before "$seq" "^readsb /dev/mapper/$yname off=4096 " \
+		"^readsb /dev/mapper/$oname off=4096 " \
+		"repair takeback: Y read, then O"
 	assert_eq "$(event_cnt "$seq" "^mdadm $md2dev ")" 0 \
 		"repair takeback: mdadm commands against the data array"
 	assert_eq "$(rep_verdict "$out" "$trep")" "false false" \
@@ -5469,21 +5533,22 @@ repair_forced_start() {
 	refusal=$(rep_refusal "$out" "$trep")
 	log "  the refusal: $refusal"
 	case "$refusal" in
-	*"taken from a retired leg holds newer data"*) ;;
+	*"taken from a retired leg carries another array's superblock"*) ;;
 	*) die "repair takeback: the verdict's refusal reads '$refusal'" ;;
 	esac
 	exy=$(helper 2 "md_examine $yname") || die "repair takeback: examining Y failed"
 	exo=$(helper 2 "md_examine $oname") || die "repair takeback: examining O failed"
 	log "  Y: $exy; O: $exo"
-	evy=${exy##*events=}
-	evo=${exo##*events=}
-	[ "$evy" -gt "$evo" ] ||
-		die "repair takeback: Y's events count $evy is not above O's $evo"
-	# The refusal names Y with Y's count, which nothing writes while md does
-	# not hold Y, read as the examine reads it, and the leg that keeps the
-	# data, whose count, which md raises as the array runs, it leaves out
-	# (cnagent.md CN28).
-	assert_eq "$refusal" "leg $yleg taken from a retired leg holds newer data than the array: its md events count $evy is above that of leg ${A_DLEG[1]}" \
+	uuy=${exy#* uuid=}
+	uuy=${uuy%% *}
+	uuo=${exo#* uuid=}
+	uuo=${uuo%% *}
+	[ "$uuy" != "$uuo" ] ||
+		die "repair takeback: Y and O both carry the identity $uuy"
+	# The refusal names Y with its identity, which nothing writes while md
+	# does not hold Y, and the leg that keeps the data with the array's, as
+	# mdadm's examine reads both (cnagent.md CN28).
+	assert_eq "$refusal" "leg $yleg taken from a retired leg carries another array's superblock, $uuy, beside the $uuo of leg ${A_DLEG[1]}, so it may hold data the array lacks; a repair with force copies over it" \
 		"repair takeback: the refusal's text"
 	# A read tests the add's conditions as a read can, Y's own leg row OK
 	# among them (cnagent.md CN30), so it reports the refusal once Y's
@@ -5492,7 +5557,7 @@ repair_forced_start() {
 	out=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --show-info \
 		--sp "$sp" --cntlr "$c2") ||
 		die "repair takeback: the read's verdict is not clean: $out"
-	# The read examines both superblocks again and reports the converge's
+	# The read reads both superblocks again and reports the converge's
 	# refusal word for word, though md may have raised the array's count in
 	# between, as when it fails the bad leg Z on an IO.
 	assert_eq "$(rep_refusal "$out" "$trep")" "$refusal" \
@@ -5547,6 +5612,204 @@ repair_forced_start() {
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
 		"repair takeback: the restored copy after the cancel"
+	stage badblocks "a forced start drops the named leg's bad-block list"
+	# Z, in sync beside O, gets a bad block of its own through md, which
+	# writes it into Z's superblock; with the arrays stopped, a mark naming
+	# Z starts the array from it under a new identity, a start that keeps the
+	# list, so the forced start stops it and starts it again with the list
+	# dropped (cnagent.md CN12, the forced start). O and Z carry the same
+	# change count, so the start needs no force.
+	bb=$(helper 2 "md_bad_block_add $zname 4096 8") ||
+		die "repair badblocks: recording a bad block on Z failed: $bb"
+	log "  Z's bad blocks in md: $bb"
+	# A write after which md writes the superblocks, away from the bad block:
+	# MiB 0 again, its own bytes.
+	sshv "$hv" "dd if=$dev of=$WORK/mib0-repair.bin bs=1M count=1 status=none" ||
+		die "repair badblocks: reading MiB 0 failed"
+	write_range "$hv" "$WORK/mib0-repair.bin" "$dev" 1 0 ||
+		die "repair badblocks: rewriting MiB 0 failed"
+	deadline=$((SECONDS + 30))
+	while :; do
+		exz=$(helper 2 "md_examine $zname") ||
+			die "repair badblocks: examining Z failed"
+		case "$exz" in *" bbl=0 "*) ;; *) break ;; esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "repair badblocks: after 30 s Z's superblock reads" \
+				"'$exz', want its bad block"
+		sleep 1
+	done
+	log "  Z's superblock: $exz"
+	for f in "$req1" "$req2"; do
+		req_set "$f" '.sp_level = "SP_LEVEL_NO_REDUND"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 \
+		"repair badblocks: the level with no group array"
+	assert_eq "$(helper 2 "md_array_state $zname")" none \
+		"repair badblocks: the level stops the array"
+	exz=$(helper 2 "md_examine $zname") ||
+		die "repair badblocks: examining Z after the stop failed"
+	case "$exz" in
+	*" bbl=0 "*) die "repair badblocks: the stop dropped Z's list: $exz" ;;
+	esac
+
+	stage badstart "the forced start from the leg with the list drops it"
+	# Under a trace of its own, so that the counts and the order below read
+	# the forced start's converge alone, never the stop the level made.
+	for f in "$req1" "$req2"; do
+		mark_set "$f" "$zleg"
+		req_set "$f" '.sp_level = "SP_LEVEL_NO_THINPOOL"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" \
+		"repair badblocks: the start from Z"
+	seq=$(helper 2 "cn_events $TRACE")
+	[ "$(event_cnt "$seq" "^readsb /dev/mapper/$zname ")" -ge 2 ] ||
+		die "repair badblocks: Z's superblock and list not both read"
+	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$oname\$" \
+		"^mdadm $(md_forced_args "$md2dev" "$md2name" uuid \
+			"/dev/mapper/$zname")\$" \
+		"repair badblocks: O zeroed, then the start from Z"
+	assert_before "$seq" "^mdadm $(md_forced_args "$md2dev" "$md2name" uuid \
+		"/dev/mapper/$zname")\$" "^mdadm --stop /dev/md" \
+		"repair badblocks: the start, then its stop"
+	assert_before "$seq" "^mdadm --stop /dev/md" \
+		"^mdadm $(md_forced_args "$md2dev" "$md2name" force-no-bbl \
+			"/dev/mapper/$zname")\$" \
+		"repair badblocks: the stop, then the start without the list"
+	assert_before "$seq" "^mdadm $(md_forced_args "$md2dev" "$md2name" \
+		force-no-bbl "/dev/mapper/$zname")\$" \
+		"^mdadm $md2dev --add --failfast /dev/mapper/$oname\$" \
+		"repair badblocks: the start without the list, then O added"
+	rec=$(helper 2 "cn_msg $TRACE 'forced start'") ||
+		die "repair badblocks: reading the cn log failed"
+	assert_eq "$(printf '%s\n' "$rec" | "$JQ" -sr \
+		'map("\(.leg_id) \(.update)") | join(";")')" \
+		"$(d16 "$zleg") uuid,force-no-bbl" \
+		"repair badblocks: the forced start record"
+	md_wait_clean 2 "$sp" "$c2" 120 "repair badblocks" "$A_DGRP"
+	exz=$(helper 2 "md_examine $zname") ||
+		die "repair badblocks: examining Z after the start failed"
+	log "  Z's superblock after the start: $exz"
+	case "$exz" in
+	*" bbl=0 "*) ;;
+	*) die "repair badblocks: Z keeps its list after the start: $exz" ;;
+	esac
+	for f in "$req1" "$req2"; do
+		mark_set "$f"
+		req_set "$f" '.sp_level = "SP_LEVEL_READWRITE"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" slice_id_to_dm_pool "$A_SLICE" \
+		"repair badblocks: the pool"
+	host_wait_ana "$hv" "$nqn" 2 optimized 30
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
+		"repair badblocks: the host's data"
+
+	stage older "a forced start from a leg older than a member it zeroes is refused unless forced"
+	# O, in sync beside Z, dies for CN2 alone, and the host's write of MiB 0,
+	# its own bytes again, fails it in md, so Z's superblock moves on and
+	# O's stays behind. With the arrays stopped and O back, a mark naming O
+	# is refused, since Z is a full member of the same array with a higher
+	# change count, which holds newer data (cnagent.md CN12, the forced
+	# start); the mark's force lets the start go on, and since the write
+	# changed no byte, the host reads its data unchanged.
+	oline=$(dn_lin_name 1 "$sp" "${A_DSIDE[1]}" 2)
+	assert_eq "$(helper 1 "dm_error_load $oline")" loaded \
+		"repair older: O's export to cn2 erroring"
+	write_range "$hv" "$WORK/mib0-repair.bin" "$dev" 1 0 ||
+		die "repair older: the host's write failed"
+	deadline=$((SECONDS + 30))
+	while :; do
+		mrd=$(helper 2 "md_member_read $oname" 2>/dev/null) || mrd=""
+		case ",$(member_field "$mrd" state)," in *,faulty,*) break ;; esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "repair older: after 30 s md holds O as '$mrd', want faulty"
+		sleep 1
+	done
+	for f in "$req1" "$req2"; do
+		req_set "$f" '.sp_level = "SP_LEVEL_NO_REDUND"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 \
+		"repair older: the level with no group array"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	case "$(helper 1 "dm_table $oline")" in
+	*" linear "*) ;;
+	*) die "repair older: DN1's export of O to cn2 is not its linear again" ;;
+	esac
+	leg_wait_not_error 2 "$sp" "$c2" "${A_DLEG[1]}" 30 "repair older: O's probe"
+	exo2=$(helper 2 "md_examine $oname") || die "repair older: examining O failed"
+	exz2=$(helper 2 "md_examine $zname") || die "repair older: examining Z failed"
+	log "  O: $exo2; Z: $exz2"
+	[ "${exo2#* uuid=}" != "$exo2" ] && [ "${exz2#* uuid=}" != "$exz2" ] ||
+		die "repair older: O or Z carries no superblock"
+	uuo=${exo2#* uuid=}
+	uuo=${uuo%% *}
+	uuz=${exz2#* uuid=}
+	uuz=${uuz%% *}
+	assert_eq "$uuo" "$uuz" "repair older: O and Z of one array"
+	[ "${exz2##*events=}" -gt "${exo2##*events=}" ] ||
+		die "repair older: Z's change count is not above O's"
+
+	stage olderstart "a mark naming the older leg is refused, then forced"
+	# Under a trace of its own, as badstart is.
+	for f in "$req1" "$req2"; do
+		mark_set "$f" "${A_DLEG[1]}"
+		req_set "$f" '.sp_level = "SP_LEVEL_NO_THINPOOL"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_status "$out" grp_id_to_md_raid "$A_DGRP" RES_STATUS_ERROR \
+		"is a full member with md change count" "repair older: the refusal"
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_before "$seq" "^readsb /dev/mapper/$oname off=4096 " \
+		"^readsb /dev/mapper/$zname off=4096 " \
+		"repair older: O read, then Z"
+	assert_eq "$(event_cnt "$seq" '^mdadm --zero-superblock ')" 0 \
+		"repair older: superblocks zeroed by the refused start"
+	# The meta group's array, which this level builds again, is assembled
+	# beside it; the data group's is not.
+	assert_eq "$(event_cnt "$seq" "^mdadm --assemble $md2dev ")" 0 \
+		"repair older: assemblies of the data array by the refused start"
+	for f in "$req1" "$req2"; do
+		mark_set "$f" "${A_DLEG[1]}" force
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" \
+		"repair older: the forced start with force"
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$zname\$" \
+		"^mdadm $(md_forced_args "$md2dev" "$md2name" "(uuid|force-no-bbl)" \
+			"/dev/mapper/$oname")\$" \
+		"repair older: Z zeroed, then the start from O"
+	md_wait_clean 2 "$sp" "$c2" 120 "repair older" "$A_DGRP"
+	for f in "$req1" "$req2"; do
+		mark_set "$f"
+		req_set "$f" '.sp_level = "SP_LEVEL_READWRITE"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" slice_id_to_dm_pool "$A_SLICE" "repair older: the pool"
+	host_wait_ana "$hv" "$nqn" 2 optimized 30
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
+		"repair older: the host's data"
+
 	# CN1, the standby, takes the pool as the stages leave it.
 	bump_cn_rev 1
 	rev1=${CNREV[1]}

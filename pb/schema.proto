@@ -191,6 +191,11 @@ message Group {
 message ForcedStart {
     uint64 leg_id = 1;
     uint64 revision = 2;
+    // The operator's force (ForceStartGroupRequest.force): the start goes on
+    // from a named leg whose md change count is below that of a full member
+    // of the same identity the start would zero (cnagent.md CN12). Appended,
+    // never renumbered.
+    bool force = 3;
 }
 
 message Namespace {
@@ -445,6 +450,13 @@ message CntlrInfo {
     message GrpInfo {
         bool whole = 1;
         repeated uint64 in_sync_leg_id_list = 2;
+        // Why the primary does not add a leg of the group's leg_list that
+        // the array lacks, empty when nothing holds an add back: its md
+        // superblock carries another identity than the running array's, so
+        // it may hold data the array lacks (cnagent.md CN12). Text for
+        // people and for the sp worker's log; no rule reads it. Appended,
+        // never renumbered.
+        string refusal = 3;
     }
     map<uint64, ResInfo> ss_id_to_subsystem = 1;
     map<uint64, ResInfo> ns_id_to_namespace = 2;
@@ -842,6 +854,12 @@ message Repair {
     // its leg id: CancelRepair turns such a leg back into its retired leg
     // with this time. A fresh new leg has no entry.
     map<uint64, uint64> new_leg_id_to_retired_epoch = 9;
+    // The operator's force (CreateRepairRequest.force): the primary adds a
+    // new leg taken from a retired leg, or after an abort the bad leg, whose
+    // md superblock carries another identity than the running array's,
+    // which md copies over (cnagent.md CN12). Never set on a worker's
+    // repair. Appended, never renumbered.
+    bool force = 10;
 }
 
 // {dnv_prefix} retired_leg {cluster_id} {sp_id} {leg_id}
@@ -1587,6 +1605,10 @@ message CreateRepairRequest {
     // leg, placed by dn_selector.
     uint64 retired_leg_id = 7;
     NodeSelector dn_selector = 8;
+    // Let the primary copy over a leg of another md identity: the new leg
+    // taken from retired_leg_id, and the bad legs once the repair is
+    // aborted (Repair.force). Appended, never renumbered.
+    bool force = 9;
 }
 
 message CreateRepairReply {
@@ -1682,6 +1704,10 @@ message ForceStartGroupRequest {
     uint64 leg_id = 5;
     // Withdraw the group's mark instead of writing one.
     bool cancel = 6;
+    // Start from the named leg even when a full member the start would zero
+    // holds a higher md change count of the same identity
+    // (ForcedStart.force); false with cancel. Appended, never renumbered.
+    bool force = 7;
 }
 
 message ForceStartGroupReply {

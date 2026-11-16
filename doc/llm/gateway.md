@@ -1389,7 +1389,9 @@ retired legs still answer.
   `pickDns` for one DN of the group's `ext_cnt`, and no metadata units.
   Last the call of `model.CreateRepair` with the group's
   parent, the bad leg and the new leg — the retired leg's id, or the pick
-  and the plan — whose candidate changed sends the round back (GW9) and
+  and the plan — with the request's `force`, which the record keeps
+  (`architecture.md`, Repair), whose candidate changed sends the round
+  back (GW9) and
   whose `model.ReasonRepairExists`, `model.ReasonRetiredLegNotFound` and
   `model.ReasonRetiredListFull`, met by a write committed after the
   snapshot, are answered as the planning read answers them. Reply `rep_id`
@@ -1413,7 +1415,8 @@ retired legs still answer.
   forced-start mark names the repair's new leg (`architecture.md`,
   Repairs); the op's reasons answer as FinishRepair's do. Reply `rep_id`.
 * **ForceStartGroup** — two-phase (AG4). The pure checks first (GW4): the
-  names, and a `leg_id` that is set with `cancel` or zero without it.
+  names, a `leg_id` that is set with `cancel` or zero without it, and a
+  `force` set with `cancel`, each `INVALID_ARGUMENT`.
   Then the planning read (`forceStartChecks`) behind `openSp` makes the
   refusals of `architecture.md`, Repairs, in its order: the level gate at
   `SP_LEVEL_NO_REDUND`, a `RedundNone` pool, the group through
@@ -1423,7 +1426,8 @@ retired legs still answer.
   agent call, a primary's CN that is missing being `ABORTED` as in
   `DeleteClone`. Outside any STM, `checkGrpArrayDown` reads the
   primary's report (Agent calls). Last `model.ForceStartGroup` with the
-  group's parent, the leg and the flag, which writes the mark with the
+  group's parent, the leg, the cancel flag and the force, which writes the
+  mark, the force in it, with the
   revision its own bump commits and re-checks the token, the pool, the
   group and the leg in its STM; its `model.ReasonLegNotNamable`, a leg a
   write took away after the planning read, is answered

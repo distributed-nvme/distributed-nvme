@@ -704,8 +704,9 @@ that retired leg back and stays created over an array that does not run, a
 forced start from the repair's new leg must start the array, the repair must
 start and be finished, and host0 must read the bytes that retired leg kept, not
 the new ones (`architecture.md`, Repairs, CreateRepair, FinishRepair); a repair
-that takes back the retired leg holding the new bytes, whose md events count,
-read on the primary, must be above the array's, must be refused — the primary's
+that takes back the retired leg holding the new bytes, whose md superblock,
+read on the primary, must carry another identity than the array's, since it
+left before the forced start, must be refused — the primary's
 verdict carries the refusal, the worker logs it and moves no stage
 (`cnagent.md` CN12; `dnv-worker.md` AR11), and the primary neither adds that
 leg nor takes the bad leg out — and its abort and cancel give the leg back as a
@@ -1054,14 +1055,6 @@ the connect attempted.
   way ends with the same bytes; the case logs which way md went, from
   mdadm's word on the add and the sectors written to the returned leg, and
   asserts the whole group and the data, not the way.
-* **react's refused repair of a newer retired leg rests on md's counts of
-  changes.** The primary refuses a retired leg taken back only while its md
-  events count is above the array's (`cnagent.md` CN12; `architecture.md`,
-  Known limits). The case expects that of the retired leg holding the newer
-  bytes, as the array it left went through far more changes than the one
-  the restore started, but nothing forces it; so the case reads both counts
-  on the primary and fails on that premise, naming both, before it waits
-  for the refusal.
 * **react's take-over holds the worker's repair created only on the
   primary's controller node.** The reject rule refuses that node's connects
   alone, so a failover inside the hold hands the group to a primary the

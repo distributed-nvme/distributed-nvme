@@ -339,12 +339,16 @@ func (gp *grpPlan) isBadLeg(legId uint64) bool {
 
 // forcedStartLegs are the legs CN12's forced start works on while the
 // group's mark stands: kept, the members the forced start keeps — the
-// group's leg_list legs, then the new legs of its open repair unless that
-// repair is CREATED with its abort flag in the request (repPlan.aborting) —
-// and named, the one of them the mark names. A new leg of an aborting repair
-// is a member the group keeps (memberNames), by which Md.Detail still finds
-// an array, but no member the forced start keeps, since the abort takes it
-// out of the group, so it is neither named nor zeroed. A STARTED repair's
+// group's leg_list legs, then the new legs of its open repair, but those of
+// a repair CREATED with its abort flag in the request (repPlan.aborting)
+// unless the mark names one — and named, the one of them the mark names. A
+// new leg of an aborting repair is a member the group keeps (memberNames),
+// by which Md.Detail still finds an array, but no member the forced start
+// keeps unless the mark names it, since the abort takes it out of the group,
+// so another mark neither names nor zeroes it; a mark may name it, since a
+// forced start from it that zeroed the other members can leave it the
+// group's one full member, and an abort set once that mark was withdrawn
+// would otherwise leave no leg to start the group from. A STARTED repair's
 // new leg is kept whatever its flag says: a STARTED repair is never aborted,
 // and its finish makes that leg a leg_list leg, so one left unzeroed would
 // keep the old identity beside the named leg's new one. The bad leg of a
@@ -357,8 +361,12 @@ func (gp *grpPlan) forcedStartLegs() (named *legPlan, kept []*legPlan) {
 		return nil, nil
 	}
 	kept = append(kept, gp.legs...)
-	if rp := gp.openRep(); rp != nil && !rp.aborting() {
-		kept = append(kept, rp.newLegs...)
+	if rp := gp.openRep(); rp != nil {
+		for _, lp := range rp.newLegs {
+			if !rp.aborting() || lp.legId == gp.mark.GetLegId() {
+				kept = append(kept, lp)
+			}
+		}
 	}
 	for _, lp := range kept {
 		if lp.legId == gp.mark.GetLegId() {
@@ -565,6 +573,14 @@ func (rp *repPlan) aborting() bool {
 func (rp *repPlan) takenBack(legId uint64) bool {
 	_, ok := rp.rep.GetNewLegIdToRetiredEpoch()[legId]
 	return ok
+}
+
+// force reports whether the repair carries the operator's force
+// (Repair.force): CN12's take-back check lets a new leg of another identity
+// in (takeBackRefusal), and the member reconciliation the repair's bad leg
+// once the repair is aborted (legListAddRefusal).
+func (rp *repPlan) force() bool {
+	return rp.rep.GetForce()
 }
 
 // tdPlan is one thin device: its per-slice thin volumes, its raid0 and its

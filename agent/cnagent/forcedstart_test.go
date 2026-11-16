@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -123,10 +124,21 @@ func zeroOf(member string) string {
 	return "cmd mdadm --zero-superblock " + member
 }
 
-// examineOf is the human-readable `mdadm --examine` of member, which the
-// assembly's `--examine --export` never matches.
+// examineOf is the read of member's superblock area (Md.ReadMember), the
+// reading every md decision of CN12 takes.
 func examineOf(member string) string {
-	return "cmd mdadm --examine " + member
+	return "readsb " + member + " off=4096 len=4096"
+}
+
+// examinedMembers are the members whose superblock area the calls read, in
+// order.
+func examinedMembers(node *fakeNode) []string {
+	var out []string
+	for _, call := range node.callsMatching("readsb /") {
+		member, _, _ := strings.Cut(strings.TrimPrefix(call, "readsb "), " ")
+		out = append(out, member)
+	}
+	return out
 }
 
 // assertForcedRecord checks the one forced start record the converge
@@ -254,7 +266,7 @@ func TestForcedStartRefusesANamedLegThatIsNotFull(t *testing.T) {
 			f.node.mu.Lock()
 			f.node.killCmdAlways[examineOf(f.leg2)] = true
 			f.node.mu.Unlock()
-		}, "mdadm --examine"},
+		}, "not read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := downNoRepair(t)
@@ -515,6 +527,11 @@ func splitAfterTheStop(
 // reconciliation goes through.
 func TestForcedStartRetriesASecondArrayThatRuns(t *testing.T) {
 	f, node, split := splitAfterTheStop(t, "clean")
+	// Leg 2 carries the second array's identity, so that the reconciliation
+	// over it takes leg 2 as its own member (legListAddRefusal).
+	f.node.mu.Lock()
+	delete(f.node.memberArray, f.leg2)
+	f.node.mu.Unlock()
 	f.syncup(t, withMark(quietLevel(4), testDataLeg2))
 	if !f.node.hasCall("cmd mdadm --stop " + node) {
 		t.Fatalf("no stop of the broken array, which the first read " +
@@ -856,7 +873,6 @@ func TestForcedStartActsOnlyOnADeliveredMark(t *testing.T) {
 		if !f.node.hasCall(plain) {
 			t.Fatalf("%s: no assembly of the group as with no mark", label)
 		}
-		assertNoCall(t, f.node, examineOf(f.leg2))
 		assertNoCall(t, f.node, "--zero-superblock")
 		assertNoCall(t, f.node, " --run --force")
 	}
@@ -1100,7 +1116,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 			f.add(f.leg1))
 		assertNoCall(t, f.node, "cmd mdadm --stop ")
 		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
-		assertForcedRecord(t, logs, testDataLeg2, mdUpdateForceNoBbl,
+		assertForcedRecord(t, logs, testDataLeg2, mdUpdateUuid+","+mdUpdateForceNoBbl,
 			testDataLeg)
 		f.assertNewIdentity(t, oldUuid)
 	})
@@ -1248,28 +1264,36 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 			f.forced(f.leg2, mdUpdateForceNoBbl),
 			f.add(f.leg1))
 		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
-		assertForcedRecord(t, logs, testDataLeg2, mdUpdateForceNoBbl,
+		assertForcedRecord(t, logs, testDataLeg2, mdUpdateUuid+","+mdUpdateForceNoBbl,
 			testDataLeg)
 		f.assertNewIdentity(t, oldUuid)
 	})
 }
 
 // TestForcedStartLeavesAnAbortingRepairsNewLeg pins the forced start's kept
-// set: a new leg of a CREATED repair whose abort flag the request carries
-// is a member the group keeps (memberNames) but none the forced start keeps
-// (forcedStartLegs), so a mark naming it is the group's error and a mark
-// naming leg 2 zeroes neither it nor the repair's bad leg.
+// set: a new leg of a CREATED repair whose abort flag the request carries is
+// a member the group keeps (memberNames) but none the forced start keeps
+// unless the mark names it (forcedStartLegs): a mark naming leg 2 zeroes
+// neither it nor the repair's bad leg, and a mark naming it starts the array
+// from it, zeroing leg 2 and leaving the bad leg as it is, since after a
+// forced start from it that did not start the array it can be the group's
+// one full member.
 func TestForcedStartLeavesAnAbortingRepairsNewLeg(t *testing.T) {
 	t.Run("named", func(t *testing.T) {
 		f := downFix(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, true,
 			repOpts{standby: true}))
+		f.badLegDead()
 		f.node.setSuperblock(f.newLegDev, fakeSuperblock{events: 9})
 		info := f.syncup(t, withMark(
 			repairReq(4, pb.RepStage_REP_STAGE_CREATED, true), repNewLeg))
-		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
-			"does not keep", "grp data")
-		assertNoCall(t, f.node, "--zero-superblock")
-		assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev)
+		assertOrder(t, f.node,
+			examineOf(f.newLegDev),
+			examineOf(f.leg2),
+			zeroOf(f.leg2),
+			f.forced(f.newLegDev, mdUpdateUuid),
+			f.add(f.leg2))
+		assertNoCall(t, f.node, zeroOf(f.leg1))
+		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	})
 	t.Run("not zeroed", func(t *testing.T) {
 		f := downFix(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, true,
@@ -1345,7 +1369,7 @@ func TestForcedStartLevelBuildsNoGroup(t *testing.T) {
 		levelReq(4, pb.SpLevel_SP_LEVEL_NO_REDUND), testDataLeg2))
 	assertNoCall(t, f.node, "--zero-superblock")
 	assertNoCall(t, f.node, "cmd mdadm --assemble")
-	assertNoCall(t, f.node, "cmd mdadm --examine")
+	assertNoCall(t, f.node, "readsb ")
 	assertMissingSpLevel(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 }
 
@@ -1505,6 +1529,7 @@ func TestTakeBackCheck(t *testing.T) {
 				role: "Active device 1", events: 10})
 			if tc.newSb != nil {
 				f.node.setSuperblock(f.newLegDev, *tc.newSb)
+				f.node.sameArrayAs(f.newLegDev, f.leg2)
 			}
 			req := func(revision uint64) *pb.SyncupCntlrRequest {
 				if tc.fresh {
@@ -1526,11 +1551,7 @@ func TestTakeBackCheck(t *testing.T) {
 						after, before)
 				}
 			}
-			var examined []string
-			for _, call := range f.node.callsMatching("cmd mdadm --examine /") {
-				examined = append(examined,
-					strings.TrimPrefix(call, "cmd mdadm --examine "))
-			}
+			examined := examinedMembers(f.node)
 			if wantExamined := tc.examined(f); !slices.Equal(examined,
 				wantExamined) {
 				t.Fatalf("the converge examined %v, want %v", examined,
@@ -1589,6 +1610,7 @@ func TestTakeBackCheckRefusalBesideAChange(t *testing.T) {
 		role: "Active device 1", events: 10})
 	f.node.setSuperblock(f.newLegDev, fakeSuperblock{
 		role: "Active device 1", events: 50})
+	f.node.sameArrayAs(f.newLegDev, f.leg2)
 	f.node.setMemberState(f.mdDev, f.leg1, "faulty")
 	f.node.setMemberSlot(f.mdDev, f.leg1, mdSlotNone)
 	f.node.Reset()
@@ -1641,7 +1663,7 @@ func TestTakeBackCheckExamineKilled(t *testing.T) {
 			info := f.syncup(t,
 				takenBackReq(3, pb.RepStage_REP_STAGE_CREATED, false))
 			assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
-				"mdadm --examine", "grp data")
+				"not read", "grp data")
 			f.assertMdCalls(t, "the converge")
 			probeLegs(t, f.srv, repNewLeg)
 			read, reply := f.read(t, 3)
@@ -1658,9 +1680,8 @@ func TestTakeBackCheckExamineKilled(t *testing.T) {
 }
 
 // TestTakeBackCheckKeeperWithoutSuperblock pins the take-back check's wait
-// when the examine of the member that keeps the data finds no superblock,
-// the answer of a read that failed once the path's failfast expired: with
-// nothing to compare the newer new leg with, the converge adds nothing,
+// when the reading of the member that keeps the data finds no superblock:
+// with nothing to compare the newer new leg with, the converge adds nothing,
 // takes no bad leg out and reports no refusal, the group's row OK; the read
 // names nothing and reports no refusal.
 func TestTakeBackCheckKeeperWithoutSuperblock(t *testing.T) {
@@ -1678,11 +1699,7 @@ func TestTakeBackCheckKeeperWithoutSuperblock(t *testing.T) {
 	if after := f.members(); !slices.Equal(after, before) {
 		t.Fatalf("the array's members changed to %v, want %v", after, before)
 	}
-	var examined []string
-	for _, call := range f.node.callsMatching("cmd mdadm --examine /") {
-		examined = append(examined,
-			strings.TrimPrefix(call, "cmd mdadm --examine "))
-	}
+	examined := examinedMembers(f.node)
 	if want := []string{f.newLegDev, f.leg2}; !slices.Equal(examined, want) {
 		t.Fatalf("the converge examined %v, want %v", examined, want)
 	}
@@ -1702,74 +1719,49 @@ func TestTakeBackCheckKeeperWithoutSuperblock(t *testing.T) {
 	assertVerdict(t, read, "the waiting repair, read", false, false)
 }
 
-// TestMdExamine pins the human-readable examine (Md.Examine): a device
-// with no superblock reads nil, a killed run is an error, and the role, the
-// recovery offset, the events count and the array's identity read from
-// mdadm's own layout, a superblock whose role, events count or identity does
-// not read being an error.
-func TestMdExamine(t *testing.T) {
+// TestReadMemberFromTheFake pins the reading of a member (Md.ReadMember)
+// against the fake's rendering of md's layout: a device with no superblock
+// reads none, a killed read and a read that fails are errors, never "no
+// superblock", and the role, the copy position, the change count, the
+// identity and the bad-block list read back as the test stamped them. The
+// parse of areas md itself wrote is TestParseMdSuperblockLabAreas's.
+func TestReadMemberFromTheFake(t *testing.T) {
 	ctx := context.Background()
 	const member = "/dev/mapper/dnv-leg-a"
 	node := newFakeNode()
+	node.devNo[member] = node.newDevNo()
 	md := NewMd(node.osClient())
-	sb, err := md.Examine(ctx, member)
-	if err != nil || sb != nil {
-		t.Fatalf("a device without a superblock read as (%v, %v)", sb, err)
+	if got := md.ReadMember(ctx, member); got.Err != nil || got.Sb != nil {
+		t.Fatalf("a device without a superblock read as %+v", got)
 	}
 	node.setSuperblock(member, fakeSuperblock{
-		role: "Active device 1", recovery: "45056 sectors", events: 4321})
-	sb, err = md.Examine(ctx, member)
-	if err != nil || sb.Role != "Active device 1" ||
-		sb.RecoveryOffset != "45056 sectors" || sb.Events != 4321 ||
-		sb.Uuid != fakeStampedUuid {
-		t.Fatalf("the examine read %+v, %v", sb, err)
+		role: "Active device 1", recovery: "45056 sectors", events: 4321,
+		badBlocks: 2})
+	got := md.ReadMember(ctx, member)
+	if got.Err != nil || got.Sb == nil || got.Sb.Role != 1 ||
+		!got.Sb.Recovering || got.Sb.RecoveryOffset != 45056 ||
+		got.Sb.Events != 4321 || got.Sb.BadBlocks != 2 ||
+		got.Sb.Uuid != fakeUuidText(fakeStampedUuid) {
+		t.Fatalf("the reading is %+v, %v", got.Sb, got.Err)
 	}
-	if gap := notFullMember(sb); gap == "" {
+	if gap := got.Sb.notFullMember(); gap == "" {
 		t.Fatalf("a half-copied member read as full")
 	}
 	node.setSuperblock(member, fakeSuperblock{
 		role: "Active device 0", events: 12})
-	if sb, err = md.Examine(ctx, member); err != nil ||
-		notFullMember(sb) != "" {
-		t.Fatalf("a full member read as %+v, %v", sb, err)
+	if got = md.ReadMember(ctx, member); got.Err != nil ||
+		got.Sb.notFullMember() != "" {
+		t.Fatalf("a full member read as %+v, %v", got.Sb, got.Err)
 	}
-	node.killCmdAlways["mdadm --examine"] = true
-	if sb, err = md.Examine(ctx, member); err == nil {
-		t.Fatalf("a killed examine read as %+v", sb)
+	node.failCmdAlways["readsb "+member] = ""
+	if got = md.ReadMember(ctx, member); got.Err == nil ||
+		!errors.Is(got.Err, errNotRead) {
+		t.Fatalf("a read that fails read as %+v", got)
 	}
-
-	lab := strings.Join([]string{
-		"/dev/dm-3:",
-		"          Magic : a92b4efc",
-		"        Version : 1.2",
-		"    Feature Map : 0x3",
-		"     Array UUID : c3e4f71d:6b3fa8d8:d0d4e115:d8fe68cd",
-		"           Name : any:dnv-00000000000003a1-00-00",
-		"  Creation Time : Mon Oct 26 19:56:11 2026",
-		"    Data Offset : 6144 sectors",
-		"   Super Offset : 8 sectors",
-		"Recovery Offset : 45056 sectors",
-		"    Update Time : Mon Oct 26 20:01:02 2026",
-		"       Checksum : 1b2c3d4e - correct",
-		"         Events : 4321",
-		"",
-		"",
-		"   Device Role : Active device 1",
-		"   Array State : AA ('A' == active, '.' == missing, " +
-			"'R' == replacing)",
-	}, "\n")
-	sb, err = parseMdExamine("/dev/dm-3", lab)
-	if err != nil || sb.Role != "Active device 1" ||
-		sb.RecoveryOffset != "45056 sectors" || sb.Events != 4321 ||
-		sb.Uuid != "c3e4f71d:6b3fa8d8:d0d4e115:d8fe68cd" {
-		t.Fatalf("the lab layout read %+v, %v", sb, err)
-	}
-	for _, drop := range []string{"         Events : 4321",
-		"   Device Role : Active device 1",
-		"     Array UUID : c3e4f71d:6b3fa8d8:d0d4e115:d8fe68cd"} {
-		if _, err := parseMdExamine("/dev/dm-3",
-			strings.Replace(lab, drop, "", 1)); err == nil {
-			t.Fatalf("an examine without %q read", strings.TrimSpace(drop))
-		}
+	delete(node.failCmdAlways, "readsb "+member)
+	node.killCmdAlways["readsb "+member] = true
+	if got = md.ReadMember(ctx, member); got.Err == nil ||
+		!errors.Is(got.Err, errNotRead) {
+		t.Fatalf("a killed read read as %+v", got)
 	}
 }

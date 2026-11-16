@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -251,11 +252,11 @@ func TestForceStartGroupLevelGate(t *testing.T) {
 
 // TestForceStartGroupNamesARepairsNewLeg pins the second leg the mark may
 // name (architecture.md, Repairs): the new leg of the group's open repair,
-// but that of a CREATED repair whose abort flag is set; the abort is refused
-// while the mark names that leg, goes through once the mark is withdrawn,
-// and a mark naming that leg is refused while the repair stays CREATED; once
-// the primary's started verdict moves the repair to STARTED, which the
-// flag does not hold back, the mark may name that leg again.
+// whatever its abort flag says; the abort is refused while the mark names
+// that leg and goes through once the mark is withdrawn, and a mark naming
+// that leg is then taken again, since after a forced start from it the leg
+// can be the group's one full member; once the primary's started verdict
+// moves the repair to STARTED, the mark may name that leg too.
 func TestForceStartGroupNamesARepairsNewLeg(t *testing.T) {
 	env := newVolEnv(t)
 	agent := fsPrimary(env)
@@ -283,16 +284,18 @@ func TestForceStartGroupNamesARepairsNewLeg(t *testing.T) {
 	if _, err := repAbort(env, "rep-a"); err != nil {
 		t.Fatalf("TryToAbortRepair after the cancel: %v", err)
 	}
-	before = env.dump()
-	_, err = env.srv.ForceStartGroup(env.ctx, fsRequest(env, newLegId))
-	msg = volWantCode(t, err, codes.FailedPrecondition)
-	if want := fmt.Sprintf("leg %d is the new leg of the repair %q, which "+
-		"is REP_STAGE_CREATED with its abort flag set: the forced start of "+
-		"group %d keeps no such member", newLegId,
-		"rep-a", volDataGrpId); msg != want {
-		t.Errorf("message:\n got %q\nwant %q", msg, want)
+	if _, err := env.srv.ForceStartGroup(
+		env.ctx, fsRequest(env, newLegId)); err != nil {
+		t.Fatalf("ForceStartGroup of the aborting repair's new leg: %v",
+			err)
 	}
-	env.wantNoWrite("the refused ForceStartGroup", before)
+	if mark := fsMark(env, volDataGrpId); mark.GetLegId() != newLegId {
+		t.Errorf("the aborting repair's mark: got %v, want leg %d", mark,
+			newLegId)
+	}
+	if _, err := env.srv.ForceStartGroup(env.ctx, fsCancel(env)); err != nil {
+		t.Fatalf("the cancel of the aborting repair's mark: %v", err)
+	}
 	rep := env.repair("rep-a")
 	rep.RepStage = pb.RepStage_REP_STAGE_STARTED
 	mustPut(env.t, env.cli, model.RepairKey(env.cid, volSpId, "rep-a"), rep)
@@ -614,11 +617,11 @@ func fsRefusals() []fsRefusal {
 				"nor a new leg of its repair", volMetaLegA, volDataGrpId),
 		},
 		{
-			name: "the new leg of an aborting repair",
+			name: "the new leg of an aborted repair",
 			setup: func(env *volEnv, _ *fakeAgent,
 				req *pb.ForceStartGroupRequest) {
 				repPutRepair(env, "rep-z", volDataGrpId, volDataLegB,
-					pb.RepStage_REP_STAGE_CREATED, 801, volSide(802, volDnC))
+					pb.RepStage_REP_STAGE_ABORTED, 801, volSide(802, volDnC))
 				rep := env.repair("rep-z")
 				rep.TryToAbort = true
 				mustPut(env.t, env.cli,
@@ -628,8 +631,8 @@ func fsRefusals() []fsRefusal {
 			},
 			code: codes.FailedPrecondition,
 			msg: fmt.Sprintf("leg %d is the new leg of the repair %q, "+
-				"which is REP_STAGE_CREATED with its abort flag set: the "+
-				"forced start of group %d keeps no such member",
+				"which is REP_STAGE_ABORTED: the abort took it out of "+
+				"group %d, so the forced start may not name it",
 				801, "rep-z", volDataGrpId),
 		},
 		{
@@ -895,7 +898,7 @@ func TestForceStartGroupAnswersALegTakenAway(t *testing.T) {
 	if want := fmt.Sprintf("leg %d is no leg the forced start of group %d "+
 		"may name any more: neither a leg of its leg_list, other than the "+
 		"bad leg of a started repair, nor a new leg of its repair while "+
-		"that repair is started or is created with its abort flag clear",
+		"that repair is created or started",
 		volDataLegA, volDataGrpId); msg != want {
 		t.Errorf("message:\n got %q\nwant %q", msg, want)
 	}
@@ -938,4 +941,30 @@ func TestForceStartGroupResolvesThePool(t *testing.T) {
 		}
 	}
 	env.wantNoWrite("the refused calls", before)
+}
+
+// TestForceStartGroupCarriesTheForce pins the operator's force of the call
+// (cnagent.md CN12): a write with force puts it on the mark, and a cancel
+// with force is INVALID_ARGUMENT before any read, with nothing written.
+func TestForceStartGroupCarriesTheForce(t *testing.T) {
+	env := newVolEnv(t)
+	agent := fsPrimary(env)
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
+	req := fsRequest(env, volDataLegA)
+	req.Force = true
+	if _, err := env.srv.ForceStartGroup(env.ctx, req); err != nil {
+		t.Fatalf("ForceStartGroup with force: %v", err)
+	}
+	if mark := fsMark(env, volDataGrpId); !mark.GetForce() {
+		t.Fatalf("the mark %v carries no force", mark)
+	}
+	dump := env.dump()
+	cancel := fsCancel(env)
+	cancel.Force = true
+	_, err := env.srv.ForceStartGroup(env.ctx, cancel)
+	if status.Code(err) != codes.InvalidArgument ||
+		!strings.Contains(err.Error(), "force is set with cancel") {
+		t.Fatalf("a cancel with force: %v, want INVALID_ARGUMENT", err)
+	}
+	env.wantNoWrite("a cancel with force", dump)
 }

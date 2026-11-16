@@ -27,17 +27,17 @@ const (
 
 // ReasonLegNotNamable is the Reason ForceStartGroup carries for a leg the
 // mark may not name: one in neither the group's leg_list nor the new legs of
-// the repair it names, a new leg of an ABORTED repair or of a CREATED one
-// whose abort flag is set, which is no member the forced start keeps
-// (keepsNewLegs), or the bad leg of a STARTED repair, which the finish
-// retires (architecture.md, Repairs). It is exported for the tests and for
+// the repair it names, a new leg of an ABORTED repair, which is no member of
+// the group (namesNewLegs), or the bad leg of a STARTED repair, which the
+// finish retires (architecture.md, Repairs). It is exported for the tests and for
 // the gateway's switch on model reasons: the gateway names the leg with its
 // own code from its planning read, and meets this only when a write since
 // that read took the leg away.
 const ReasonLegNotNamable = "leg not namable"
 
 // ForceStartGroup writes the forced-start mark on the group grpId held by
-// parent, naming legId, and returns the revision the mark carries: the SpRev
+// parent, naming legId with the operator's force (ForcedStart.force), and
+// returns the revision the mark carries: the SpRev
 // revision its own transaction commits, so a report of an observation made
 // before the write can never clear it. A mark already on the group is
 // replaced. With cancel the mark is withdrawn instead and the result is
@@ -64,6 +64,7 @@ func ForceStartGroup(
 	grpId uint64,
 	legId uint64,
 	cancel bool,
+	force bool,
 ) (uint64, error) {
 	revision := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
@@ -111,7 +112,8 @@ func ForceStartGroup(
 		if err != nil {
 			return err
 		}
-		grp.ForcedStart = &pb.ForcedStart{LegId: legId, Revision: revision}
+		grp.ForcedStart = &pb.ForcedStart{
+			LegId: legId, Revision: revision, Force: force}
 		holder.put(s)
 		return nil
 	})
@@ -123,8 +125,8 @@ func ForceStartGroup(
 
 // forcedStartNamable reports whether a forced-start mark of grp may name
 // legId, read inside the caller's STM: a leg of the group's leg_list but the
-// bad leg of a STARTED repair, or a new leg of the group's open repair but
-// one of a CREATED repair whose abort flag is set (keepsNewLegs). The bad
+// bad leg of a STARTED repair, or a new leg of the group's open repair, CREATED
+// or STARTED, whatever its abort flag says (namesNewLegs). The bad
 // leg of a STARTED repair left the array before
 // md began copying onto the new leg, so it is older than the array, and the
 // finish retires it, so an array started from it alone would be left with
@@ -151,21 +153,22 @@ func forcedStartNamable(
 	if inLegList {
 		return !startedBadLeg(rep, legId), nil
 	}
-	return newLegOf(rep, legId) != nil && keepsNewLegs(rep), nil
+	return newLegOf(rep, legId) != nil && namesNewLegs(rep), nil
 }
 
-// keepsNewLegs reports whether the forced start keeps rep's new legs
-// (architecture.md, Repair, Forced start): those of an open repair but a
-// CREATED one whose abort flag is set, which the abort takes out of the
-// group. A STARTED repair's new legs are kept whatever the flag says, since
-// no abort takes a STARTED repair back and its finish makes them leg_list
-// legs; an ABORTED repair is open no more.
-func keepsNewLegs(rep *pb.Repair) bool {
+// namesNewLegs reports whether a forced-start mark may name rep's new legs
+// (architecture.md, Repair, Forced start): those of an open repair, CREATED
+// or STARTED, whatever its abort flag says. A CREATED repair's new leg whose
+// abort flag is set is no member the forced start keeps unless the mark
+// names it, but the mark may name it: after a forced start from it that
+// zeroed the other members and did not start the array, it can be the
+// group's one full member, and an abort the operator set once the mark was
+// withdrawn would otherwise leave no leg a mark may name. An ABORTED repair
+// is open no more, and its new legs are no members of the group.
+func namesNewLegs(rep *pb.Repair) bool {
 	switch rep.GetRepStage() {
-	case pb.RepStage_REP_STAGE_STARTED:
+	case pb.RepStage_REP_STAGE_STARTED, pb.RepStage_REP_STAGE_CREATED:
 		return true
-	case pb.RepStage_REP_STAGE_CREATED:
-		return !rep.GetTryToAbort()
 	}
 	return false
 }

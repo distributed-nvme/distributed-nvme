@@ -1801,6 +1801,42 @@ func TestForceStartCancelIsSentAsTyped(t *testing.T) {
 	})
 }
 
+// TestForceFlagsAreSent covers the operator's force of `group force-start`
+// and `repair create` (dnvctl.md, `group` — `ctl/group.go`, `repair` —
+// `ctl/repair.go`): --force sends force true, a leaf without it false, and a
+// --force beside --cancel is sent as typed for the gateway to refuse (CT8).
+func TestForceFlagsAreSent(t *testing.T) {
+	start := runArgv(t, "ForceStartGroup", "group", "force-start",
+		"--grp", "1", "--leg", "2", "--force")
+	wantRequest(t, start, &pb.ForceStartGroupRequest{
+		ClusterName: itCluster,
+		SpName:      itSp,
+		GrpId:       1,
+		LegId:       2,
+		Force:       true,
+	})
+	both := runArgv(t, "ForceStartGroup", "group", "force-start",
+		"--grp", "1", "--cancel", "--force")
+	wantRequest(t, both, &pb.ForceStartGroupRequest{
+		ClusterName: itCluster,
+		SpName:      itSp,
+		GrpId:       1,
+		Cancel:      true,
+		Force:       true,
+	})
+	rep := runArgv(t, "CreateRepair", "repair", "create", "--name", "r",
+		"--grp", "1", "--bad-legs", "2", "--retired-leg", "3", "--force")
+	wantRequest(t, rep, &pb.CreateRepairRequest{
+		ClusterName:  itCluster,
+		SpName:       itSp,
+		RepName:      "r",
+		GrpId:        1,
+		BadLegIdList: []uint64{2},
+		RetiredLegId: 3,
+		Force:        true,
+	})
+}
+
 // TestBitmapHexToBytes covers hexBytesOf's two accepted inputs: an EMPTY
 // value sends an empty bitmap on purpose (so the gateway's "must not be
 // empty" refusal stays reachable), and a well-formed value is decoded as

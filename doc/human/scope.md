@@ -172,9 +172,11 @@ always sends a piece's position.
   leg they name, when md will not start it by itself. Blocks rewritten
   since the leg left read old bytes. In a data group, blocks first mapped
   since then read what the leg holds there, possibly another pool's bytes.
-  No error is shown. State: accepted. The operator asks for it. Procedure
-  to write: the forced-start guide, a document still to write, says which
-  leg to choose and what an older copy costs.
+  No error is shown. A start from a half-copied leg that md marked in sync
+  does the same over the regions md never copied (section 5.2). State:
+  accepted. The operator asks for it. Procedure to write: the forced-start
+  guide, a document still to write, says which leg to choose and what an
+  older copy costs.
 
 ## 4. Data loss dnv accepts
 
@@ -299,9 +301,7 @@ the host.
 ### 5.2 The forced start
 
 A forced start is the way back when every leg of a group failed. The
-cases below can lose data. All but the last are fixed together, as one plan,
-"forced start, second pass", with the forced-start guide of section 7.
-The last is accepted. The words of this section:
+cases below can lose data. The words of this section:
 
 - A repair is one run of leg repair on a group, by the worker or by an
   operator's call. A retired leg is a leg that left its group after a
@@ -313,23 +313,15 @@ The last is accepted. The words of this section:
   md's record at the start of the leg: the array's identity, md's change
   count, which md calls the event count, and the member's copy position,
   how far md has copied onto it. md also keeps a bad-block list, the
-  sectors of a member it could not read.
+  sectors of a member it could not read. A forced start gives the array a
+  new identity, so a leg from before it has another identity. dnv reads
+  each superblock itself, so a read that fails is never taken for a blank
+  leg.
 - An operator asks for a forced start with a mark on the group, the
   forced-start mark, that names the leg. The primary acts on the mark.
 
 The entries:
 
-- **A repair copies over a retired leg from before a forced start.**
-  Silent. After a forced start the array has a new md identity. A retired
-  leg from before it can hold newer data. A repair can take that leg back
-  and md copies the array over it. State: fix decided, the primary refuses
-  a leg of another identity unless forced. Seen in the lab.
-- **After a forced start, an aborted repair's bad leg is copied over.**
-  Silent. The bad leg is the leg a repair replaces. The open repair's bad
-  leg can hold the newest data. When the operator then aborts the repair
-  (`dnvctl repair abort`), the primary adds the bad leg to the array with
-  no check. State: fix decided, the same identity check. Seen
-  in the lab.
 - **A forced start cut short after its zeroing leaves legs that read as
   fresh.** Silent. The forced start zeroes the md superblock of every other
   member it keeps, except the open repair's bad leg. When the operator
@@ -344,33 +336,27 @@ The entries:
   the bound of two retired legs, the finish of a repair the worker started
   deletes the oldest at any age. No setting keeps such a leg. State: fix
   decided, a keep flag on the retired leg. Not seen in the lab.
-- **A forced-start mark can zero members that hold newer data.** Silent.
-  A mark can wait over a running array. When the array later stops, the
-  forced start zeroes the other members, which may hold newer data.
-  Nothing compares the named leg with the members it zeroes. State: fix decided, the primary reads every member once, and
-  refuses a named leg with a lower change count than a member md copied
-  whole, unless forced. Not seen in the lab.
-- **A failed read of a member's superblock reads as "no superblock".**
-  Silent. mdadm answers the same for an IO error and for a blank member. A
-  leg with data is then taken as blank and copied over. State: fix
-  decided, the agent reads the superblock area itself and refuses on a
-  failed read. Not seen in the lab.
-- **A half-copied leg looks whole, and a forced start keeps a bad-block
-  list.** While md copies from the one leg it holds in sync and that leg
-  dies, md records each region it cannot read as bad on every member it
-  has not failed, that leg included. When that leg comes back before the
-  broken array is stopped, the record reaches its superblock, and a forced
-  start from it keeps the record. The host then sees IO errors over
-  regions the leg really holds. State: fix decided, the forced start reads the copy position and the bad-block
-  list, refuses a half-copied leg, and drops the list. Seen in the lab.
+- **A half-copied leg can look whole.** While md copies from the one leg it
+  holds in sync and that leg dies, md can end the copy by marking the leg it
+  copied onto in sync, with the regions it never copied in that leg's
+  bad-block list. The leg that died gets a bad-block list too. The forced
+  start drops the named leg's list, which is right for the leg that died.
+  When the mark names the half-copied leg instead, hosts read, over the
+  regions md never copied, whatever that leg's disk held there, possibly
+  another pool's bytes, with no error. Both legs show the same change
+  count. State: procedure to write, the forced-start guide: choose the leg
+  that died last, from the leg rows. Seen in the lab.
 - **A retired leg given back by a cancel may be partly overwritten.**
   Silent at a later forced start. State: fix decided, a "partial" flag on
   the retired leg. Not seen in the lab.
-- **A zero of a member whose IO fails reads as done.** When the agent
-  zeroes the superblock of a member whose IO fails, mdadm reports success
-  but writes nothing. The member keeps its old identity, and a later
-  assembly gets two identities. State: fix decided, the agent reads the
-  area back after the zero. Not seen in the lab.
+- **A failed stop during a forced start keeps a bad-block list.** When the
+  named leg carries a bad-block list, the forced start starts the array,
+  stops it at once, and starts it again with the list dropped. If that stop
+  fails, the array runs with the list, and the legs added to it copy the
+  list's regions as bad too. Hosts then get IO errors over those regions,
+  though the named leg holds their data. State: accepted, with a procedure
+  to write: stop the group's arrays with a level step and mark the group
+  again. Forty such stops in the lab never failed.
 - **A forced-start mark cleared during a change of the pool's owner.**
   Silent. A pool's owner is the worker that drives it. At an owner change
   the new owner sends a request that drops the mark. If the controller
@@ -553,21 +539,21 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 - **A repair whose new leg the primary never reports stays open.** It
   blocks every other repair of the group. State: fix decided, the worker
   gives it up past the leg threshold. Not seen in the lab.
-- **After a forced start, members of two identities keep the group down.**
-  Some legs keep the old identity: the open repair's bad leg, a retired
-  leg whose take-back was refused, a member whose zero wrote nothing. mdadm
-  refuses an assembly handed two identities, so a failover or a restart
-  leaves the group down. An abort after a forced start from the repair's
-  new leg can leave no member to start the group from; its data is then
-  reachable only with mdadm by hand. State: fix decided, the primary
-  assembles the members of one identity only, and a mark may name a
-  repair's new leg. Seen in the lab.
 - **A repair's new leg that holds the whole data starts the array alone
   only where md recorded the other legs as failed.** When both legs of
   the group's list are dead, the group otherwise waits for its legs. An
   operator's forced start from the new leg waits too, for the leg of the
   list that is not the repair's bad leg. State: procedure to write, one
   line in the forced-start guide. Not seen in the lab.
+- **After a forced start, a leg of the old identity can keep the group
+  down.** A forced start from another leg leaves the repair's bad leg with
+  the array's old identity. The primary does not add that leg back, since
+  it may hold data the array lacks. After the repair is cancelled, the next
+  assembly, as after a failover or a restart, finds legs of two identities
+  and leaves the group down, its row in error. State: procedure to write,
+  the forced-start guide: create a repair whose bad leg is the leg not
+  wanted, which keeps its data as a retired leg, or force-start the group
+  from the leg wanted. Not seen in the lab.
 - **A primary that keeps a leaving member is failed over, and the new
   primary leaves that member out.** The primary never fails a member that
   is leaving the group while no member that stays is in sync on a working

@@ -44,6 +44,9 @@ func registerRepair(root *cobra.Command) {
 // one is the gateway's INVALID_ARGUMENT (CT8). The new leg is the retired leg
 // --retired-leg of the group, or, when that is zero or not given, a fresh leg
 // the --dn-black / --dn-white selector steers (nil when both are empty).
+// --force lets the primary copy over a leg of another md array: the retired
+// leg taken back, and the bad leg once the repair is aborted (cnagent.md
+// CN12).
 func repairCreateCmd() *cobra.Command {
 	cmd := leaf(
 		"create",
@@ -74,6 +77,7 @@ func repairCreateCmd() *cobra.Command {
 				BadLegIdList: badLegIds,
 				RetiredLegId: retiredLegId,
 				DnSelector:   selectorOf("dn"),
+				Force:        boolOf("force"),
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -89,6 +93,9 @@ func repairCreateCmd() *cobra.Command {
 	flags.String("retired-leg", "",
 		"retired_leg_id taken back as the new leg (base 0; 0 = a fresh leg)")
 	selectorFlags(flags, "dn")
+	flags.Bool("force", false,
+		"copy over a leg of another md array, the retired leg taken back "+
+			"and the bad leg after an abort, losing what it holds")
 	return cmd
 }
 

@@ -1498,7 +1498,7 @@ func TestRepairAssembly(t *testing.T) {
 			strings.Contains(call, f.newLegDev) {
 			t.Fatalf("the assembly is %q, want leg 2 alone", call)
 		}
-		assertNoCall(t, f.node, "--examine --export "+f.newLegDev)
+		assertNoCall(t, f.node, "readsb "+f.newLegDev)
 	})
 	t.Run("unavailable new leg", func(t *testing.T) {
 		f := failover(t, pb.RepStage_REP_STAGE_STARTED)
@@ -1508,7 +1508,7 @@ func TestRepairAssembly(t *testing.T) {
 			strings.Contains(call, f.newLegDev) {
 			t.Fatalf("the assembly is %q, want leg 2 alone", call)
 		}
-		assertNoCall(t, f.node, "--examine --export "+f.newLegDev)
+		assertNoCall(t, f.node, "readsb "+f.newLegDev)
 	})
 	for _, tc := range []struct {
 		name string

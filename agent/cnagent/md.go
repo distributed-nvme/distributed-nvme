@@ -35,10 +35,13 @@ import (
 // assembly from taking it as in sync (CN12).
 type Md struct {
 	cmd *agent.Cmd
+	// oc reads a member's superblock area itself (ReadMember), the one read
+	// of Md that is no command and no sysfs attribute.
+	oc common.OsClient
 }
 
 func NewMd(oc common.OsClient) *Md {
-	return &Md{cmd: agent.NewCmd(oc)}
+	return &Md{cmd: agent.NewCmd(oc), oc: oc}
 }
 
 // ---------------------------------------------------------------------------
@@ -69,11 +72,11 @@ func NewMd(oc common.OsClient) *Md {
 //
 // `mdadm --detail` (and `--detail --scan`) would be the obvious source and is
 // deliberately never run by this agent: it loads a superblock from whichever
-// member opens first, a dead one included. Of Md's probes only `mdadm
-// --examine` still reads a member — the assembly's (HasSuperblock), and the
-// forced start's and the take-back check's (Examine) — and only that of a leg
-// available this pass, or, in a read, of a leg whose path the read finds
-// serving.
+// member opens first, a dead one included. Of Md's reads only the
+// superblock read (ReadMember) reads a member — the assembly's, the forced
+// start's, the take-back check's and the identity check's — and only that of
+// a leg available this pass, or, in a read, of a leg whose path the read
+// finds serving.
 // ---------------------------------------------------------------------------
 
 const sysfsBlockDir = "/sys/block"
@@ -885,6 +888,25 @@ func (m *Md) presentAttr(ctx context.Context, path string) (string, error) {
 	return value, nil
 }
 
+// ArrayUuid reads a running array's identity from its md/uuid, in mdadm's
+// spelling (mdSysfsUuid): a sysfs read that touches no member, which CN12's
+// identity check on a leg_list member's add compares the member's reading
+// with (legListAddRefusal). A value that does not parse is an md state the
+// pass leaves alone (mdStateError).
+func (m *Md) ArrayUuid(ctx context.Context, dev string) (string, error) {
+	path := mdDirOf(strings.TrimPrefix(dev, "/dev/")) + "/uuid"
+	value, err := m.presentAttr(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	uuid := mdSysfsUuid(value)
+	if uuid == "" {
+		return "", mdStateError{fmt.Errorf(
+			"%s md/uuid %q does not parse", dev, value)}
+	}
+	return uuid, nil
+}
+
 // foreignErr names the first member of a Foreign array that is not a dm
 // device.
 func (d *MdDetail) foreignErr() error {
@@ -953,148 +975,15 @@ func mdStateLine(d *MdDetail) string {
 	return strings.Join(parts, ", ") + " (" + d.SyncCompleted + ")"
 }
 
-// HasSuperblock reports whether a member device carries an md superblock.
-// `mdadm --examine` exits non-zero on a device without one, which is the
-// "no superblock" answer of the assembly cases (cnagent.md CN12) rather than
-// an error.
-//
-// A run that did not answer is an error and must never read as "no
-// superblock": `--examine` opens and reads the member device, so on a leg
-// whose DN side has gone it blocks until failfast and gets killed — and if
-// that happened to every member of an available group,
-// assembleGroup would take the answer as case 1 and `mdadm --create
-// --assume-clean` over live data.
-//
-// An answer is not always the truth either: once the path's failfast has
-// expired, or while the member's disk returns errors behind a path that
-// stays live, the read fails with an IO error, and mdadm answers that
-// exactly as it answers a member without a superblock ("No md superblock
-// detected", exit status 1), which reads here as false. Only a leg that read
-// available earlier in the pass is probed, and availability reads the path
-// alone, so it takes a failfast expiring between that read and this answer,
-// or a disk that fails while its path serves (cnagent.md CN12, Known
-// limits).
-func (m *Md) HasSuperblock(ctx context.Context, dev string) (bool, error) {
-	_, ok, err := m.cmd.RunProbe(ctx, "mdadm", "--examine", "--export", dev)
-	if err != nil {
-		return false, err
-	}
-	return ok, nil
-}
-
-// MdExamine is what CN12 reads of one member's md superblock: its role, its
-// recovery offset, its events count and its array's identity, from the
-// human-readable `mdadm --examine`, the one form that prints the first two
-// (`--export` prints the events count alone).
-type MdExamine struct {
-	// Role is the "Device Role" line verbatim: "Active device N" for a member
-	// md held in place N when it last wrote the superblock, "spare" for a
-	// member md added and never copied onto.
-	Role string
-	// RecoveryOffset is the "Recovery Offset" line verbatim, "" when the
-	// superblock has none: md writes one on a member it was copying onto,
-	// saying how far the copy got — the largest sector number once md has
-	// run the copy to its end over regions it could not read — so a
-	// half-copied member carries one and a full member none.
-	RecoveryOffset string
-	// Events is the "Events" line: md's count of changes to the array's
-	// state, which it writes into every member's superblock as it changes,
-	// so a member that left the array keeps the count it had then.
-	Events uint64
-	// Uuid is the "Array UUID" line verbatim: the identity of the array the
-	// member belongs to, which an assembly with mdadm's uuid update replaces.
-	// mdadm writes an assembly's update into each member's superblock before
-	// the kernel takes the member, so a forced assembly the kernel refused
-	// has already given its member the new identity (forcedAssemble).
-	Uuid string
-}
-
-// mdActiveRole is the start of the role of a member md held in a place.
-const mdActiveRole = "Active device "
-
-// notFullMember is why a superblock does not show a full member of its
-// array, which CN12's forced start asks of its named leg: "" for one that
-// holds a place with no recovery offset, else what it shows instead. A nil
-// superblock is a device that carries none.
-func notFullMember(sb *MdExamine) string {
-	switch {
-	case sb == nil:
-		return "no md superblock"
-	case sb.RecoveryOffset != "":
-		return "recovery offset " + sb.RecoveryOffset
-	case !strings.HasPrefix(sb.Role, mdActiveRole):
-		return "device role " + sb.Role
-	}
-	return ""
-}
-
-// Examine reads a member's md superblock with the human-readable `mdadm
-// --examine` (MdExamine), and returns nil with no error for a device that
-// carries none, which mdadm answers with a non-zero exit as it does for
-// HasSuperblock. A run that did not answer is an error, never "no
-// superblock", for HasSuperblock's reason, and so is an answer whose role,
-// events count or identity does not read: a superblock read wrong must never
-// pass for a full member, for an older one or for one whose identity
-// changed. A read that fails with an IO error reads as no superblock here
-// too (HasSuperblock), so only a leg that serves this pass is examined.
-func (m *Md) Examine(ctx context.Context, dev string) (*MdExamine, error) {
-	out, ok, err := m.cmd.RunProbe(ctx, "mdadm", "--examine", dev)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-	return parseMdExamine(dev, out)
-}
-
-// parseMdExamine reads the "key : value" lines of a human-readable `mdadm
-// --examine`, the key padded on its left and the value running to the end of
-// the line. A role, an events count or an identity it does not find is an
-// error.
-func parseMdExamine(dev, out string) (*MdExamine, error) {
-	sb := &MdExamine{}
-	events := ""
-	for _, line := range strings.Split(out, "\n") {
-		key, value, ok := strings.Cut(line, " : ")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		switch strings.TrimSpace(key) {
-		case "Device Role":
-			sb.Role = value
-		case "Recovery Offset":
-			sb.RecoveryOffset = value
-		case "Events":
-			events = value
-		case "Array UUID":
-			sb.Uuid = value
-		}
-	}
-	if sb.Role == "" {
-		return nil, fmt.Errorf("mdadm --examine %s: no device role", dev)
-	}
-	if sb.Uuid == "" {
-		return nil, fmt.Errorf("mdadm --examine %s: no array uuid", dev)
-	}
-	count, err := strconv.ParseUint(events, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("mdadm --examine %s: events %q: %w",
-			dev, events, err)
-	}
-	sb.Events = count
-	return sb, nil
-}
-
 // ZeroSuperblock wipes a member's md superblock, which only CN12's forced
 // start asks for (Md). mdadm refuses a member an array holds, a broken
 // array included, and answers success for a device that carries none, so a
 // zero repeated over a member an earlier pass zeroed goes through. mdadm
-// takes a read of the member that fails with an IO error for a device that
-// carries none too, and answers success with nothing written, so a member
-// whose IO fails keeps its superblock though the call returns no error
-// (cnagent.md CN12, Known limits).
+// also takes a read of the member that fails with an IO error for a device
+// that carries none, and answers success with nothing written, so the
+// forced start reads each member back after its zero (ReadMember) and takes
+// the zero as done only when the read answers with no superblock
+// (forceStartGroup).
 func (m *Md) ZeroSuperblock(ctx context.Context, dev string) error {
 	return m.cmd.RunOk(ctx, "mdadm", "--zero-superblock", dev)
 }
@@ -1271,22 +1160,22 @@ func (s *CnAgentServer) ensureGroup(
 ) (
 	detail *MdDetail,
 	running, forcedStarted bool,
-	refusal string,
+	refusals grpRefusals,
 	err error,
 ) {
 	if !gp.raid1 {
-		return nil, false, false, "",
+		return nil, false, false, grpRefusals{},
 			asBuildErr(s.ensureLinearGroup(ctx, gp, available))
 	}
 	// A walk or an array read that did not answer leaves the group unbuilt
 	// for the pass, a build failure as a failed create is (asBuildErr).
 	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
-		return nil, false, false, "", markedErr(gp, asBuildErr(err))
+		return nil, false, false, grpRefusals{}, markedErr(gp, asBuildErr(err))
 	}
 	detail, err = s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil {
-		return nil, false, false, "", markedErr(gp, asBuildErr(err))
+		return nil, false, false, grpRefusals{}, markedErr(gp, asBuildErr(err))
 	}
 	forced := gp.mark != nil && !(detail.Exists && mdRunning(detail.State))
 	switch {
@@ -1304,24 +1193,24 @@ func (s *CnAgentServer) ensureGroup(
 		err = runningArrayErr(detail)
 	}
 	if err != nil {
-		return nil, false, false, "", markedErr(gp, err)
+		return nil, false, false, grpRefusals{}, markedErr(gp, err)
 	}
-	changed, refusal, err := s.reconcileMembers(
+	changed, refusals, err := s.reconcileMembers(
 		ctx, gp, detail, available, legRows)
 	if err != nil {
-		return nil, true, forcedStarted, "", err
+		return nil, true, forcedStarted, grpRefusals{}, err
 	}
 	if !changed {
-		return detail, true, forcedStarted, refusal, nil
+		return detail, true, forcedStarted, refusals, nil
 	}
 	if err := s.md.RefreshArray(ctx, walk, detail.Dev); err != nil {
-		return nil, true, forcedStarted, "", nil
+		return nil, true, forcedStarted, grpRefusals{}, nil
 	}
 	detail, err = s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil || !detail.Exists || runningArrayErr(detail) != nil {
-		return nil, true, forcedStarted, "", nil
+		return nil, true, forcedStarted, grpRefusals{}, nil
 	}
-	return detail, true, forcedStarted, refusal, nil
+	return detail, true, forcedStarted, refusals, nil
 }
 
 // startedArray reads the group's array again after this pass's assembly or
@@ -1434,35 +1323,38 @@ func errNoAvailableLeg() error {
 	return fmt.Errorf("no available leg")
 }
 
-// assembleGroup is the case selection of cnagent.md CN12: probe each
-// available member for an md superblock and either create the array or
-// assemble it from the members that have one. The candidates are the
-// available leg_list legs and the available new legs of an open repair: a
-// new leg that carries a superblock is handed to the assembly beside the
-// leg_list legs that carry one, after them, and mdadm and the kernel judge
-// its membership from the superblocks, so a half-copied new leg resumes its
-// copy and never starts the array alone, and a whole one can start it when
-// no leg_list leg is available, if md recorded the other legs as failed. A
-// new leg never counts toward case 1, whose create holds only when no
-// candidate carries a superblock, and is never one of its members.
+// assembleGroup is the case selection of cnagent.md CN12: read each available
+// member's superblock area (ReadMember) and either create the array or
+// assemble it from the members that carry a superblock of one identity. The
+// candidates are the available leg_list legs and the available new legs of an
+// open repair: a new leg that carries a superblock is handed to the assembly
+// beside the leg_list legs that carry one, after them, and mdadm and the
+// kernel judge its membership from the superblocks, so a half-copied new leg
+// resumes its copy and never starts the array alone, and a whole one can
+// start it when no leg_list leg is available, if md recorded the other legs
+// as failed. A new leg never counts toward case 1, whose create holds only
+// when no candidate carries a superblock, and is never one of its members.
+//
+// A reading whose read failed or did not answer aborts the whole assembly:
+// with no answer this pass cannot tell case 1 from case 2, and guessing case
+// 1 creates over live data. mdadm refuses an assembly handed members of two
+// identities, so case 2 hands it only the members of one (assemblyIdentity),
+// and the others stay out: a leg_list member of another identity is refused
+// at its add (legListAddRefusal) and a taken-back new leg at the take-back
+// check (takeBackStep), both named in the primary's report.
 func (s *CnAgentServer) assembleGroup(
 	ctx context.Context,
 	gp *grpPlan,
 	available map[uint64]bool,
 ) error {
 	var members []string
-	var withSuperblock []string
-	// A probe that did not answer aborts the whole assembly: with no answer
-	// this pass cannot tell case 1 from case 2, and guessing case 1 creates
-	// over live data.
-	probe := func(lp *legPlan) error {
-		has, err := s.md.HasSuperblock(ctx, lp.path)
-		if err != nil {
-			return err
+	var cands []assemblyCand
+	read := func(lp *legPlan, tier int) error {
+		reading := s.md.ReadMember(ctx, lp.path)
+		if reading.Err != nil {
+			return reading.Err
 		}
-		if has {
-			withSuperblock = append(withSuperblock, lp.path)
-		}
+		cands = append(cands, assemblyCand{lp: lp, tier: tier, sb: reading.Sb})
 		return nil
 	}
 	for _, lp := range gp.legs {
@@ -1470,7 +1362,11 @@ func (s *CnAgentServer) assembleGroup(
 			continue
 		}
 		members = append(members, lp.path)
-		if err := probe(lp); err != nil {
+		tier := assemblyTierLegList
+		if gp.rep != nil && gp.rep.badLegIds[lp.legId] {
+			tier = assemblyTierBadLeg
+		}
+		if err := read(lp, tier); err != nil {
 			return err
 		}
 	}
@@ -1479,12 +1375,16 @@ func (s *CnAgentServer) assembleGroup(
 			if !available[lp.legId] {
 				continue
 			}
-			if err := probe(lp); err != nil {
+			if err := read(lp, assemblyTierNewLeg); err != nil {
 				return err
 			}
 		}
 	}
-	if len(members) == 0 && len(withSuperblock) == 0 {
+	uuid, err := assemblyIdentity(gp, cands)
+	if err != nil {
+		return err
+	}
+	if len(members) == 0 && uuid == "" {
 		return errNoAvailableLeg()
 	}
 	conf := MdCreateConf{
@@ -1494,38 +1394,37 @@ func (s *CnAgentServer) assembleGroup(
 		BitmapChunkKiB: gp.bitmapChunkKiB,
 		DataOffsetKiB:  gp.dataOffsetKiB,
 	}
-	if len(withSuperblock) == 0 {
+	if uuid == "" {
 		// Case 1: --assume-clean is correct only when **every** member was
-		// probed. A side is never exported before the provisioning protocol
+		// read. A side is never exported before the provisioning protocol
 		// (architecture.md, Side provisioning protocol) has zeroed its meta
 		// region, where the md superblock sits, and its first data block,
 		// and its `provisioned` gate has opened ([D15]); the effective
 		// desired state defers any group whose legs are still provisioning
 		// ([D15]); ids are never reused; and the agent zeroes a superblock
 		// only in the forced start (forceStartGroup) — so a superblock-free
-		// leg is a freshly provisioned side — short of a read that failed
-		// after the path's failfast, which mdadm answers the same way
-		// (HasSuperblock), and of a member a forced start zeroed that the
-		// member reconciliation has not added back, which still holds its
-		// data: a mark that goes before the start, or a zeroed member that
-		// dies before its add, leaves one, and nothing here tells it from a
-		// fresh side (architecture.md, Known limits). Only a slice's meta
-		// group's members are zeroed
-		// whole; a data group's and a clone meta group's are zeroed no
-		// further than their first data block, and the rest may differ
-		// between them, which a clean create does not resync: nothing dnv
-		// stacks on a data group's array reads such a block before writing
-		// it through the array, because dm-thin writes a block whole before
-		// anything reads it ([D15]); and the dm-clone over a clone meta
-		// group's array finds the zeroed first data block, where its
-		// superblock goes, formats its metadata there and reads only
-		// metadata blocks it has written through the array (CN18). But that
-		// argument covers the legs
-		// actually examined. An unavailable member may be the one carrying
-		// the group's data (its DN rebooting, its path mid-ANA-move), and
-		// creating over the survivors would resync the data away. cnagent.md
-		// CN12 puts a single available member in case 2 (assemble, and mdadm
-		// decides on a degraded start), never in case 1.
+		// leg is a freshly provisioned side — short of a member a forced
+		// start zeroed that the member reconciliation has not added back,
+		// which still holds its data: a mark that goes before the start, or
+		// a zeroed member that dies before its add, leaves one, and nothing
+		// here tells it from a fresh side (architecture.md, Known limits).
+		// A read that failed never reaches here: it is the reading's error
+		// above, never "no superblock". Only a slice's meta group's members
+		// are zeroed whole; a data group's and a clone meta group's are
+		// zeroed no further than their first data block, and the rest may
+		// differ between them, which a clean create does not resync:
+		// nothing dnv stacks on a data group's array reads such a block
+		// before writing it through the array, because dm-thin writes a
+		// block whole before anything reads it ([D15]); and the dm-clone
+		// over a clone meta group's array finds the zeroed first data
+		// block, where its superblock goes, formats its metadata there and
+		// reads only metadata blocks it has written through the array
+		// (CN18). But that argument covers the legs actually read. An
+		// unavailable member may be the one carrying the group's data (its
+		// DN rebooting, its path mid-ANA-move), and creating over the
+		// survivors would resync the data away. cnagent.md CN12 puts a
+		// single available member in case 2 (assemble, and mdadm decides on
+		// a degraded start), never in case 1.
 		if len(members) != len(gp.legs) {
 			return fmt.Errorf(
 				"only %d of %d legs available and none carries a superblock",
@@ -1556,10 +1455,77 @@ func (s *CnAgentServer) assembleGroup(
 		conf.AssumeClean = true
 		return s.md.Create(ctx, conf, members)
 	}
-	// Case 2: assemble from the members that carry metadata; anything left
-	// out — a freshly provisioned addition or a stale-metadata re-add — is
-	// re-added by reconcileMembers (cnagent.md CN12).
+	// Case 2: assemble from the members that carry a superblock of the
+	// array's identity; anything left out — a freshly provisioned addition,
+	// a stale-metadata re-add or a leg of another identity — is for the
+	// member reconciliation (reconcileMembers, cnagent.md CN12).
+	var withSuperblock []string
+	for _, c := range cands {
+		if c.sb != nil && c.sb.Uuid == uuid {
+			withSuperblock = append(withSuperblock, c.lp.path)
+		}
+	}
 	return s.md.Assemble(ctx, gp.devPath, gp.mdArrayName, withSuperblock)
+}
+
+// The sets an assembly's candidates fall in, in order of trust
+// (assemblyIdentity): the leg_list legs other than a bad leg of the group's
+// repair, the open repair's new legs, and the repair's bad leg, at any stage
+// of the repair, an ABORTED one's included.
+const (
+	assemblyTierLegList = iota
+	assemblyTierNewLeg
+	assemblyTierBadLeg
+)
+
+// assemblyCand is one candidate of an assembly with its reading: sb nil for
+// a member that carries no superblock.
+type assemblyCand struct {
+	lp   *legPlan
+	tier int
+	sb   *mdSuperblock
+}
+
+// assemblyIdentity is the identity case 2 of CN12's assembly hands mdadm the
+// members of: that of the first set, in order of trust, in which a candidate
+// carries a superblock — the leg_list legs other than a bad leg of the
+// group's repair, then the open repair's new legs, then the repair's bad
+// leg, whatever the repair's stage. "" when no candidate carries one, which
+// is case 1. Two identities inside that first set are the group's error,
+// which the operator ends (mdStateError: no retry): a repair whose bad leg is
+// the leg of the identity not wanted moves it to the last set, keeping its
+// data, and a forced start names the leg to start from. Reason: mdadm refuses
+// an assembly handed members of two identities, as a forced start leaves them
+// when it starts the array from one leg under a new identity and the
+// repair's bad leg keeps the old one, or a taken-back leg its own; a majority
+// alone would tie one against one in a group of two legs. The bad leg is the
+// leg the repair replaces, also once an abort let it stay, which a forced
+// start from another leg left out of the array, and the new legs join only
+// by the repair, so the leg_list legs that stay decide first.
+func assemblyIdentity(gp *grpPlan, cands []assemblyCand) (string, error) {
+	for tier := assemblyTierLegList; tier <= assemblyTierBadLeg; tier++ {
+		uuid := ""
+		var first *legPlan
+		for _, c := range cands {
+			if c.tier != tier || c.sb == nil {
+				continue
+			}
+			switch {
+			case uuid == "":
+				uuid, first = c.sb.Uuid, c.lp
+			case c.sb.Uuid != uuid:
+				return "", mdStateError{fmt.Errorf(
+					"members of two identities: leg %#x carries %s and "+
+						"leg %#x %s; a forced start names the leg to start "+
+						"group %#x from", first.legId, uuid, c.lp.legId,
+					c.sb.Uuid, gp.grpId)}
+			}
+		}
+		if uuid != "" {
+			return uuid, nil
+		}
+	}
+	return "", nil
 }
 
 // msgForcedStart is the Warn record of a forced start that started the
@@ -1758,19 +1724,24 @@ func storedMarks(plan *cntlrPlan, res *agent.SweepResult) {
 // forceStartGroup is CN12's forced start, which replaces the assembly while
 // the group's mark stands and no array of the group is there: the named leg
 // is a member the forced start keeps (forcedStartLegs), other than the bad
-// leg of a STARTED repair (isStartedBadLeg), available this pass,
-// and its superblock shows a full member, one md held in a place with no
-// recovery offset (notFullMember); every other member the forced start
-// keeps but the open repair's bad leg is available, each checked before any
-// is zeroed; each of those has its superblock zeroed; and the array starts
-// from the named leg alone under a new identity (forcedAssemble). Each step
-// that does not hold is the group's error and ends the pass for the group,
-// the zero before any assembly, so no pass starts the array beside a member
-// it has not zeroed; the mark stands and the next pass, which the CN10 retry
-// brings (forcedStartRetries, hasLateMember), tries again from the first
-// step. A member zeroed by a pass that ends later is blank at the next, and
-// its zero goes through again. ensureGroup's member reconciliation then adds
-// the zeroed members, which md copies whole.
+// leg of a STARTED repair (isStartedBadLeg), available this pass, and its
+// reading (ReadMember) answers and shows a full member, one md held in a
+// place with no copy position (mdSuperblock.notFullMember); every other
+// member the forced start keeps but the open repair's bad leg is available
+// and its reading answers, each read before any is zeroed; none of them is a
+// full member of the named leg's identity with a higher change count, unless
+// the mark carries the operator's force (olderNamedLeg); each of those has
+// its superblock zeroed and read back, and the zero counts only when the
+// read answers with no superblock; and the array starts from the named leg
+// alone under a new identity (forcedAssemble), with the leg's bad-block list
+// dropped when its reading shows one. Each step that does not hold is the
+// group's error and ends the pass for the group, the zero before any
+// assembly, so no pass starts the array beside a member it has not zeroed;
+// the mark stands and the next pass, which the CN10 retry brings
+// (forcedStartRetries, hasLateMember), tries again from the first step. A
+// member zeroed by a pass that ends later is blank at the next, and its zero
+// goes through again. ensureGroup's member reconciliation then adds the
+// zeroed members, which md copies whole.
 func (s *CnAgentServer) forceStartGroup(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -1793,11 +1764,13 @@ func (s *CnAgentServer) forceStartGroup(
 	if !available[named.legId] {
 		return errForcedStartWaits(named)
 	}
-	sb, err := s.md.Examine(ctx, named.path)
-	if err != nil {
-		return err
+	reading := s.md.ReadMember(ctx, named.path)
+	if reading.Err != nil {
+		return fmt.Errorf("forced start: leg %#x: %w", named.legId,
+			reading.Err)
 	}
-	if gap := notFullMember(sb); gap != "" {
+	sb := reading.Sb
+	if gap := sb.notFullMember(); gap != "" {
 		return fmt.Errorf("forced start: leg %#x is not a full member: %s",
 			named.legId, gap)
 	}
@@ -1809,12 +1782,30 @@ func (s *CnAgentServer) forceStartGroup(
 		if !available[lp.legId] {
 			return errForcedStartWaits(lp)
 		}
+		other := s.md.ReadMember(ctx, lp.path)
+		if other.Err != nil {
+			return fmt.Errorf("forced start: member leg %#x: %w",
+				lp.legId, other.Err)
+		}
+		if refusal := olderNamedLeg(gp, named, sb, lp,
+			other.Sb); refusal != "" {
+			return errors.New(refusal)
+		}
 		zero = append(zero, lp)
 	}
 	zeroed := make([]uint64, 0, len(zero))
 	for _, lp := range zero {
 		if err := s.md.ZeroSuperblock(ctx, lp.path); err != nil {
 			return err
+		}
+		back := s.md.ReadMember(ctx, lp.path)
+		if back.Err != nil {
+			return fmt.Errorf("forced start: the zero of leg %#x is not "+
+				"proven: %w", lp.legId, back.Err)
+		}
+		if back.Sb != nil {
+			return fmt.Errorf("forced start: leg %#x still carries a "+
+				"superblock of %s after its zero", lp.legId, back.Sb.Uuid)
 		}
 		zeroed = append(zeroed, lp.legId)
 	}
@@ -1830,21 +1821,52 @@ func (s *CnAgentServer) forceStartGroup(
 	return nil
 }
 
+// olderNamedLeg is CN12's refusal of a named leg older than a member the
+// forced start would zero, "" when none holds: the other member is a full
+// member of the named leg's identity with a higher change count, and the
+// mark carries no force. Within one identity md raises the count on every
+// change of the array, so such a member holds newer data than the named
+// leg, which the zero and the copy from the named leg would lose; across
+// identities the counts mean nothing, and a member that is not full (a
+// half-copied one, a spare) holds no whole copy, so neither is compared.
+func olderNamedLeg(
+	gp *grpPlan,
+	named *legPlan,
+	namedSb *mdSuperblock,
+	other *legPlan,
+	otherSb *mdSuperblock,
+) string {
+	if gp.mark.GetForce() || otherSb == nil ||
+		otherSb.notFullMember() != "" || otherSb.Uuid != namedSb.Uuid ||
+		otherSb.Events <= namedSb.Events {
+		return ""
+	}
+	return fmt.Sprintf("forced start: leg %#x is a full member with md "+
+		"change count %d, above the %d of named leg %#x of the same "+
+		"array, so it holds newer data, which the start would copy over; "+
+		"a forced start with force goes on", other.legId, otherSb.Events,
+		namedSb.Events, named.legId)
+}
+
 // forcedAssemble is the assembly of CN12's forced start (forceStartGroup):
 // the array starts from the named leg alone (AssembleForced) under a new
-// identity (mdUpdateUuid), and update is the superblock update of the run
-// that started it. When that run fails, the same pass reads what it left
-// (forcedStartLeft): an array that does not run is stopped, and one that
-// runs, which a run killed at the soft timeout can have started in the
-// kernel, is taken as started. Otherwise the pass assembles again with the
-// named leg's bad-block log dropped in place of the new identity
-// (mdUpdateForceNoBbl), mdadm taking one update a run, but only when the
-// named leg's superblock, examined again, reads an identity other than the
-// one before holds, the forced start's examine of the leg ahead of the first
-// run. mdadm writes an assembly's update into the member's superblock before
-// the kernel takes the member, so a run the kernel refused for that log has
-// already given the leg its new identity, which the second run keeps; a run
-// that failed before the write leaves the old one, under which a second run
+// identity (mdUpdateUuid), and update is the superblock update, or the two,
+// of the runs that started it. When that run fails, the same pass reads what
+// it left (forcedStartLeft): an array that does not run is stopped, and one
+// that runs, which a run killed at the soft timeout can have started in the
+// kernel, is taken as started.
+//
+// A second run drops the named leg's bad-block list (mdUpdateForceNoBbl), as
+// mdadm takes one update a run, in two cases. When the first run started
+// the array and the leg's reading before it (before) showed a list: such a
+// start keeps the list, and the array would serve IO errors over regions the
+// leg holds, so the array, under its new identity, is stopped and started
+// again. And when the first run failed and the named leg's superblock, read
+// again, carries an identity other than before's: mdadm writes an
+// assembly's update into the member's superblock before the kernel takes
+// the member, so a run the kernel refused for its bad-block list has already
+// given the leg its new identity, which the second run keeps; a run that
+// failed before the write leaves the old one, under which a second run
 // would start the array, so its failure is the group's error and the next
 // pass runs the first form again. A second run that fails is read again the
 // same way, and is otherwise the group's error with both runs' outputs. So
@@ -1855,40 +1877,81 @@ func (s *CnAgentServer) forcedAssemble(
 	gp *grpPlan,
 	walk *MdWalk,
 	named *legPlan,
-	before *MdExamine,
+	before *mdSuperblock,
 ) (update string, err error) {
 	first := s.md.AssembleForced(ctx, gp.devPath, gp.mdArrayName,
 		named.path, mdUpdateUuid)
-	if first == nil {
-		return mdUpdateUuid, nil
-	}
-	started, err := s.forcedStartLeft(ctx, plan, gp, walk)
-	if err != nil {
-		return "", fmt.Errorf("%w; %w", first, err)
+	started := first == nil
+	if !started {
+		started, err = s.forcedStartLeft(ctx, plan, gp, walk)
+		if err != nil {
+			return "", fmt.Errorf("%w; %w", first, err)
+		}
 	}
 	if started {
-		return mdUpdateUuid, nil
+		if before.BadBlocks == 0 {
+			return mdUpdateUuid, nil
+		}
+		if err := s.stopStartedArray(ctx, plan, gp, walk); err != nil {
+			return "", fmt.Errorf("forced start: the array started from "+
+				"leg %#x under its new identity keeps the leg's bad-block "+
+				"list, and its stop to drop the list failed: %w",
+				named.legId, err)
+		}
+	} else {
+		after := s.md.ReadMember(ctx, named.path)
+		if after.Err != nil {
+			return "", fmt.Errorf("%w; %w", first, after.Err)
+		}
+		if after.Sb == nil || after.Sb.Uuid == before.Uuid {
+			return "", first
+		}
 	}
-	after, err := s.md.Examine(ctx, named.path)
-	if err != nil {
-		return "", fmt.Errorf("%w; %w", first, err)
-	}
-	if after == nil || after.Uuid == before.Uuid {
-		return "", first
-	}
+	update = mdUpdateUuid + "," + mdUpdateForceNoBbl
 	second := s.md.AssembleForced(ctx, gp.devPath, gp.mdArrayName,
 		named.path, mdUpdateForceNoBbl)
 	if second == nil {
-		return mdUpdateForceNoBbl, nil
+		return update, nil
 	}
 	started, err = s.forcedStartLeft(ctx, plan, gp, walk)
 	if err != nil {
-		return "", fmt.Errorf("%w; %w; %w", first, second, err)
+		return "", fmt.Errorf("%w; %w", second, err)
 	}
 	if started {
-		return mdUpdateForceNoBbl, nil
+		return update, nil
 	}
-	return "", fmt.Errorf("%w; %w", first, second)
+	if first != nil {
+		return "", fmt.Errorf("%w; %w", first, second)
+	}
+	return "", second
+}
+
+// stopStartedArray stops the array the first run of a forced assembly
+// started (forcedAssemble), found by the members the group keeps as the
+// forced start's own stop finds it, under the same member test
+// (MdDetail.strangerErr) and verify (stopGroupArray). An array that is
+// already gone counts as stopped.
+func (s *CnAgentServer) stopStartedArray(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	walk *MdWalk,
+) error {
+	if err := s.md.Refresh(ctx, walk); err != nil {
+		return err
+	}
+	detail, err := s.md.Detail(ctx, walk, gp.memberNames())
+	if err != nil {
+		return err
+	}
+	if !detail.Exists {
+		return nil
+	}
+	if err := detail.strangerErr(
+		plan.clusterId, plan.cnId, plan.spId); err != nil {
+		return err
+	}
+	return s.stopGroupArray(ctx, detail.Dev)
 }
 
 // errForcedStartWait marks the group's error while CN12's forced start waits
@@ -1908,8 +1971,7 @@ func errForcedStartWaits(lp *legPlan) error {
 // forcedStartLeft is what a forced assembly that failed left of the group's
 // array (forcedAssemble): started reports an array that runs, and one that
 // does not run — a failed assembly can leave an inactive array holding the
-// named leg — is stopped, so that the next assembly, and the examine before
-// it, find the leg free. An array holding a member that is not a dm device
+// named leg — is stopped, so that the next assembly finds the leg free. An array holding a member that is not a dm device
 // is the group's error whether it runs or not, as in ensureGroup, and one
 // that does not run is stopped only when the sweep would call it ours: one
 // that holds any other member is the group's error, and nothing stops it
@@ -2042,7 +2104,7 @@ func (s *CnAgentServer) reconcileMembers(
 	detail *MdDetail,
 	available map[uint64]bool,
 	legRows map[uint64]*pb.ResInfo,
-) (bool, string, error) {
+) (bool, grpRefusals, error) {
 	// A Foreign array never gets here (ensureGroup), so every member has a
 	// dm name.
 	held := heldMembers(detail)
@@ -2058,9 +2120,10 @@ func (s *CnAgentServer) reconcileMembers(
 	if leaver := inSyncGuard(gp, detail, func(lp *legPlan) bool {
 		return available[lp.legId]
 	}); leaver != "" {
-		return false, "", errInSyncGuard(leaver, detail.Dev)
+		return false, grpRefusals{}, errInSyncGuard(leaver, detail.Dev)
 	}
 	changed := false
+	var refusals grpRefusals
 	run := func(verb func(context.Context, string, string) error,
 		path string) error {
 		changed = true
@@ -2074,16 +2137,16 @@ func (s *CnAgentServer) reconcileMembers(
 		}
 		path := s.nf.DmPath(member.DmName)
 		if err := run(s.md.Fail, path); err != nil {
-			return changed, "", err
+			return changed, grpRefusals{}, err
 		}
 		if err := run(s.md.Remove, path); err != nil {
-			return changed, "", err
+			return changed, grpRefusals{}, err
 		}
 	}
 	for _, lp := range append(abortRemovals(gp, held),
 		startedBadLegs(gp, held)...) {
 		if err := run(s.md.Remove, lp.path); err != nil {
-			return changed, "", err
+			return changed, grpRefusals{}, err
 		}
 		delete(held, lp.name)
 	}
@@ -2097,18 +2160,29 @@ func (s *CnAgentServer) reconcileMembers(
 	// add loops below add it in this same pass.
 	for _, lp := range putBackLegs(gp, held, takes, sources) {
 		if err := run(s.md.Remove, lp.path); err != nil {
-			return changed, "", err
+			return changed, grpRefusals{}, err
 		}
 		delete(held, lp.name)
 	}
+	arrayUuid := s.arrayUuidOnce(detail)
 	for _, lp := range gp.legs {
 		if _, ok := held[lp.name]; ok || !available[lp.legId] ||
 			gp.isBadLeg(lp.legId) ||
 			!hasCopySource(gp, held, sources, lp.name) {
 			continue
 		}
+		why, err := s.legListAddRefusal(ctx, gp, lp, arrayUuid)
+		if err != nil {
+			return changed, grpRefusals{}, err
+		}
+		if why != "" {
+			if refusals.grp == "" {
+				refusals.grp = why
+			}
+			continue
+		}
 		if err := run(s.md.Add, lp.path); err != nil {
-			return changed, "", err
+			return changed, grpRefusals{}, err
 		}
 	}
 	step := repSteps(gp, held, func(lp *legPlan) bool {
@@ -2117,26 +2191,98 @@ func (s *CnAgentServer) reconcileMembers(
 	// The take-back check comes before the bad leg goes out: a refused add
 	// leaves the step, and a step it leaves with no add is empty, so the bad
 	// leg stays in its place unless another new leg is added.
-	step, refusal, err := s.takeBackStep(ctx, gp, held, takes, step)
+	step, rep, err := s.takeBackStep(ctx, gp, held, takes, step)
 	if err != nil {
-		return changed, "", err
+		return changed, grpRefusals{}, err
 	}
 	for _, out := range step.out {
 		if out.fail {
 			if err := run(s.md.Fail, out.lp.path); err != nil {
-				return changed, "", err
+				return changed, grpRefusals{}, err
 			}
 		}
 		if err := run(s.md.Remove, out.lp.path); err != nil {
-			return changed, "", err
+			return changed, grpRefusals{}, err
 		}
 	}
 	for _, lp := range step.add {
 		if err := run(s.md.Add, lp.path); err != nil {
-			return changed, "", err
+			return changed, grpRefusals{}, err
 		}
 	}
-	return changed, refusal, nil
+	refusals.rep = rep
+	return changed, refusals, nil
+}
+
+// grpRefusals are the refusals of one pass over a group that the primary
+// reports beside the group's reading (CN28): rep is the take-back check's
+// (takeBackStep), which the repair's verdict carries, and grp the identity
+// check's on a leg_list member's add (legListAddRefusal), which the group's
+// reading carries. "" where nothing holds an add back.
+type grpRefusals struct {
+	rep string
+	grp string
+}
+
+// arrayUuidOnce reads the identity of the group's running array once, at
+// its first use (Md.ArrayUuid): a pass whose leg_list members all sit in the
+// array reads nothing.
+func (s *CnAgentServer) arrayUuidOnce(
+	detail *MdDetail,
+) func(context.Context) (string, error) {
+	var uuid string
+	var err error
+	read := false
+	return func(ctx context.Context) (string, error) {
+		if !read {
+			uuid, err = s.md.ArrayUuid(ctx, detail.Dev)
+			read = true
+		}
+		return uuid, err
+	}
+}
+
+// legListAddRefusal is CN12's identity check on the add of a leg_list member
+// that the running array lacks, the converge's (reconcileMembers) and the
+// read's (putBackNames) alike, "" for a member the add may take: one whose
+// reading shows no superblock, which md copies whole, or one of the array's
+// identity (arrayUuid), which md takes back from its bitmap or copies whole.
+// A member whose superblock carries another identity is of an older
+// history, as a forced start from another leg leaves the open repair's bad
+// leg and the move to ABORTED then makes it a member like any other, and it
+// can hold data the array lacks, which md's copy would overwrite with no
+// error; so its add is refused, and the refusal names it, unless it is a bad
+// leg of the group's repair, at any stage, and that repair carries the
+// operator's force. The refusal stays while the leg does: the operator
+// replaces it with a repair, which keeps its data as a retired leg, or
+// starts the group from it with a forced start. A reading whose read failed
+// or did not answer, or an array identity that did not read, is the error.
+func (s *CnAgentServer) legListAddRefusal(
+	ctx context.Context,
+	gp *grpPlan,
+	lp *legPlan,
+	arrayUuid func(context.Context) (string, error),
+) (string, error) {
+	reading := s.md.ReadMember(ctx, lp.path)
+	if reading.Err != nil {
+		return "", reading.Err
+	}
+	if reading.Sb == nil {
+		return "", nil
+	}
+	uuid, err := arrayUuid(ctx)
+	if err != nil {
+		return "", err
+	}
+	if reading.Sb.Uuid == uuid {
+		return "", nil
+	}
+	if gp.rep != nil && gp.rep.badLegIds[lp.legId] && gp.rep.force() {
+		return "", nil
+	}
+	return fmt.Sprintf("leg %#x carries another array's superblock, %s, "+
+		"beside the running array's %s, so it may hold data the array "+
+		"lacks; it is not added", lp.legId, reading.Sb.Uuid, uuid), nil
 }
 
 // heldMembers is an array's members by dm name.
@@ -2406,25 +2552,28 @@ func dataKeeper(
 
 // takeBackStep is CN12's take-back check on a repair's step (repSteps), the
 // converge's and the read's alike: a new leg taken from a retired leg
-// (repPlan.takenBack) is added only while its md events count is not above
-// that of the member that keeps the data (dataKeeper), both read from their
-// superblocks (Md.Examine). A leg whose count is above holds newer data than
-// the array, which md's copy overwrites however mdadm takes the add, so its
-// add is refused: it leaves the step's adds, and the refusal, naming it, its
-// count and the keeper (takeBackRefusal), is what the repair's verdict
-// carries (repairVerdict), the
-// first refused leg's should there be more than one. A new leg that carries
-// no superblock is copied whole and never refused. One that carries one
-// while no member keeps the data, as a STARTED repair's add can meet, waits
-// with no refusal, since there is nothing to compare it with; so does one
-// whose keeper's examine finds no superblock. A step left with no add is no
-// step at all, so a refused add never takes the bad leg out (repSteps).
-// Nothing is kept: each converge and each read checks again.
+// (repPlan.takenBack) is added only while its superblock carries the
+// identity of the member that keeps the data (dataKeeper) and a change count
+// that is not above that member's, both read from their superblock areas
+// (ReadMember). A leg of another identity is of an older history, from
+// before a forced start, and can hold data the array lacks; a leg whose
+// count is above holds newer data than the array; md's copy overwrites
+// either however mdadm takes the add, so its add is refused, the first
+// unless the repair carries the operator's force (repPlan.force): it leaves
+// the step's adds, and the refusal, naming it (takeBackRefusal), is what the
+// repair's verdict carries (repairVerdict), the first refused leg's should
+// there be more than one. A new leg that carries no superblock is copied
+// whole and never refused. One that carries one while no member keeps the
+// data, as a STARTED repair's add can meet, waits with no refusal, since
+// there is nothing to compare it with; so does one whose keeper reads no
+// superblock. A step left with no add is no step at all, so a refused add
+// never takes the bad leg out (repSteps). Nothing is kept: each converge and
+// each read checks again.
 //
 // takes is the caller's test of a leg that can take a member, which the
 // keeper passed, and the new leg passed the caller's availability test to be
-// in the step, so only a leg that serves is examined. An examine that did
-// not answer is the error, with no step and no refusal.
+// in the step, so only a leg that serves is read. A reading whose read
+// failed or did not answer is the error, with no step and no refusal.
 func (s *CnAgentServer) takeBackStep(
 	ctx context.Context,
 	gp *grpPlan,
@@ -2442,10 +2591,11 @@ func (s *CnAgentServer) takeBackStep(
 			add = append(add, lp)
 			continue
 		}
-		sb, err := s.md.Examine(ctx, lp.path)
-		if err != nil {
-			return repStep{}, "", err
+		reading := s.md.ReadMember(ctx, lp.path)
+		if reading.Err != nil {
+			return repStep{}, "", reading.Err
 		}
+		sb := reading.Sb
 		if sb == nil {
 			add = append(add, lp)
 			continue
@@ -2454,16 +2604,18 @@ func (s *CnAgentServer) takeBackStep(
 		if keeper == nil {
 			continue
 		}
-		keeperSb, err := s.md.Examine(ctx, keeper.path)
-		if err != nil {
-			return repStep{}, "", err
+		keeperReading := s.md.ReadMember(ctx, keeper.path)
+		if keeperReading.Err != nil {
+			return repStep{}, "", keeperReading.Err
 		}
+		keeperSb := keeperReading.Sb
 		if keeperSb == nil {
 			continue
 		}
-		if sb.Events > keeperSb.Events {
+		if why := takeBackRefusal(gp, lp, sb, keeper,
+			keeperSb); why != "" {
 			if refusal == "" {
-				refusal = takeBackRefusal(lp, sb, keeper)
+				refusal = why
 			}
 			continue
 		}
@@ -2477,17 +2629,38 @@ func (s *CnAgentServer) takeBackStep(
 }
 
 // takeBackRefusal is the text of CN12's take-back refusal (takeBackStep),
-// one text for the converge and the read: the refused new leg, its events
-// count and the leg that keeps the data. The keeper's own count stays out of
-// it: md raises it as the array runs, so a text that carried it would differ
-// from read to read while a refusal stands, the check stream would send the
-// cntlr's info on every round (dnagent.md SH26), and the converge and the
-// read would not report the same refusal (CN28); the new leg's count does
-// not move, since nothing writes a leg md does not hold.
-func takeBackRefusal(lp *legPlan, sb *MdExamine, keeper *legPlan) string {
-	return fmt.Sprintf("leg %#x taken from a retired leg holds newer data "+
-		"than the array: its md events count %d is above that of leg %#x",
-		lp.legId, sb.Events, keeper.legId)
+// one text for the converge and the read, "" for a leg the check lets in:
+// the refused new leg and the leg that keeps the data, with the new leg's
+// identity beside the array's, or its change count. The keeper's own count
+// stays out of it: md raises it as the array runs, so a text that carried it
+// would differ from read to read while a refusal stands, the check stream
+// would send the cntlr's info on every round (dnagent.md SH26), and the
+// converge and the read would not report the same refusal (CN28); the new
+// leg's count does not move, since nothing writes a leg md does not hold.
+// The repair's force lets a leg of another identity in, never one of the
+// array's own history with a count above.
+func takeBackRefusal(
+	gp *grpPlan,
+	lp *legPlan,
+	sb *mdSuperblock,
+	keeper *legPlan,
+	keeperSb *mdSuperblock,
+) string {
+	if sb.Uuid != keeperSb.Uuid {
+		if gp.rep.force() {
+			return ""
+		}
+		return fmt.Sprintf("leg %#x taken from a retired leg carries "+
+			"another array's superblock, %s, beside the %s of leg %#x, so "+
+			"it may hold data the array lacks; a repair with force copies "+
+			"over it", lp.legId, sb.Uuid, keeperSb.Uuid, keeper.legId)
+	}
+	if sb.Events > keeperSb.Events {
+		return fmt.Sprintf("leg %#x taken from a retired leg holds newer "+
+			"data than the array: its md events count %d is above that "+
+			"of leg %#x", lp.legId, sb.Events, keeper.legId)
+	}
+	return ""
 }
 
 // legTakesMember is CN12's test of a leg whose member the reconciliation puts
@@ -2595,24 +2768,27 @@ func errInSyncGuard(member, dev string) error {
 // availability, never by what md holds on it (hasLateMember).
 //
 // The new legs it would add pass the converge's take-back check first
-// (takeBackStep), whose examines of a new leg taken from a retired leg and
-// of the member that keeps the data a read makes as the converge does, so
+// (takeBackStep), whose superblock reads of a new leg taken from a retired
+// leg and of the member that keeps the data a read makes as the converge
+// does, so
 // the verdict never names a leg whose add the converge would refuse, which
 // would bring a SyncupCntlr on every round, and the read reports the same
 // refusal, returned here for the repair's verdict, once the new leg's own
 // leg row reads OK (takes), where the converge makes the check on an
-// available leg whatever its row reads (cnagent.md CN28, CN30). An examine
-// that did not answer names no new leg and reports no refusal; the next
-// read examines again.
+// available leg whatever its row reads (cnagent.md CN28, CN30). A superblock
+// read that did not answer names no new leg and reports no refusal; the
+// next read reads again. A leg_list member the array lacks passes the
+// identity check (legListAddRefusal) the same way, whose refusal the group's
+// reading carries.
 func (s *CnAgentServer) putBackNames(
 	ctx context.Context,
 	plan *cntlrPlan,
 	gp *grpPlan,
 	detail *MdDetail,
 	legRows map[uint64]*pb.ResInfo,
-) ([]string, string) {
+) ([]string, grpRefusals) {
 	if detail == nil {
-		return nil, ""
+		return nil, grpRefusals{}
 	}
 	held := heldMembers(detail)
 	// serves is legServes, once per leg; takes is legTakesMember as a read
@@ -2637,6 +2813,8 @@ func (s *CnAgentServer) putBackNames(
 			pb.ResStatus_RES_STATUS_ERROR && serves(lp)
 	}
 	var names []string
+	var refusals grpRefusals
+	arrayUuid := s.arrayUuidOnce(detail)
 	for _, lp := range gp.legs {
 		if gp.isBadLeg(lp.legId) {
 			continue
@@ -2645,6 +2823,19 @@ func (s *CnAgentServer) putBackNames(
 			continue
 		}
 		if !takes(lp) || !hasCopySource(gp, held, sources, lp.name) {
+			continue
+		}
+		// The converge's add takes the member's superblock read and makes
+		// the identity check, a member it puts back included, which its
+		// put-back has removed by then; the read checks both alike.
+		why, err := s.legListAddRefusal(ctx, gp, lp, arrayUuid)
+		if err != nil {
+			continue
+		}
+		if why != "" {
+			if refusals.grp == "" {
+				refusals.grp = why
+			}
 			continue
 		}
 		names = append(names, lp.name)
@@ -2656,15 +2847,16 @@ func (s *CnAgentServer) putBackNames(
 	for _, lp := range putBackLegs(gp, held, takes, sources) {
 		delete(held, lp.name)
 	}
-	step, refusal, err := s.takeBackStep(ctx, gp, held, takes,
+	step, rep, err := s.takeBackStep(ctx, gp, held, takes,
 		repSteps(gp, held, takes, takes, sources))
 	if err != nil {
-		return names, ""
+		return names, refusals
 	}
 	for _, lp := range step.add {
 		names = append(names, lp.name)
 	}
-	return names, refusal
+	refusals.rep = rep
+	return names, refusals
 }
 
 // legServes is the part of a leg's availability (CN12) that a call can read
@@ -2767,13 +2959,16 @@ func reportGrpReading(
 	info *pb.CntlrInfo,
 	gp *grpPlan,
 	detail *MdDetail,
-	refusal string,
+	refusals grpRefusals,
 ) {
 	if detail == nil {
 		return
 	}
 	held := heldMembers(detail)
-	reading := &pb.CntlrInfo_GrpInfo{Whole: detail.Degraded == 0}
+	reading := &pb.CntlrInfo_GrpInfo{
+		Whole:   detail.Degraded == 0,
+		Refusal: refusals.grp,
+	}
 	legs := gp.legs
 	if gp.rep != nil {
 		legs = append(slices.Clone(gp.legs), gp.rep.newLegs...)
@@ -2787,7 +2982,7 @@ func reportGrpReading(
 	info.GrpIdToGrpInfo[gp.grpId] = reading
 	if gp.rep != nil {
 		info.RepIdToRepairInfo[gp.rep.repId] = repairVerdict(
-			gp, held, refusal)
+			gp, held, refusals.rep)
 	}
 }
 

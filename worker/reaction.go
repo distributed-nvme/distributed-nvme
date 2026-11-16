@@ -194,6 +194,11 @@ const (
 	msgRetiredLegKept     = "retired leg kept"
 )
 
+// msgMemberAddRefused is the record of a group whose reading carries the
+// primary's refusal of a leg_list member's add (dnv-worker.md AR14; Log
+// records): no step, a record for the operator.
+const msgMemberAddRefused = "member add refused"
+
 // The records of the forced-start clear (dnv-worker.md AR13; Log records), a
 // step of the pass beside a repair's two and, like them, no reaction: a clear
 // that wrote, and a clear the step finds due and does not make.
@@ -1246,6 +1251,10 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// an operator may need to finish a repair at the levels where reactions
 	// stop (AR3); none of them is the pass's one action (AR2).
 	w.moveRepairStages(ctx, p)
+	// dnv-worker.md AR14: the record of a group whose primary refuses a
+	// member's add, at every sp_level, since it follows the primary's report
+	// alone; it changes nothing.
+	w.logMemberAddRefusals(ctx, p)
 	// dnv-worker.md AR13: the forced-start clear, a step of the pass at every
 	// sp_level too, since a clear only follows the primary's report and the
 	// operator force-starts a group at the levels where reactions stop; it
@@ -2998,6 +3007,36 @@ func repairIds(repName string, rep *pb.Repair) []slog.Attr {
 		slog.String("rep_name", repName),
 		slog.Uint64("rep_id", rep.GetRepId()),
 		slog.Uint64("grp_id", rep.GetGrpId()),
+	}
+}
+
+// logMemberAddRefusals is AR14: for each group whose reading in the current
+// primary's latest report carries the primary's refusal of a leg_list
+// member's add — a member whose md superblock carries another array's
+// identity, which may hold data the array lacks (cnagent.md CN12) — the
+// pass logs `member add refused`, naming the group, the primary, the
+// report's revision and the refusal's text, on every pass while it stands,
+// in ascending grp_id. Reason: the group runs degraded while the refusal
+// stands and no reaction cures it, since the leg itself is healthy, so the
+// record is how the operator reads why the group does not become whole; the
+// operator replaces the leg with a repair, which keeps its data as a retired
+// leg, or starts the group from it with a forced start. Nothing moves.
+func (w *spWorker) logMemberAddRefusals(ctx context.Context, p *spPass) {
+	readings := p.info.GetGrpIdToGrpInfo()
+	ids := make([]uint64, 0, len(readings))
+	for grpId, reading := range readings {
+		if reading.GetRefusal() != "" {
+			ids = append(ids, grpId)
+		}
+	}
+	slices.Sort(ids)
+	for _, grpId := range ids {
+		slog.WarnContext(ctx, msgMemberAddRefused,
+			slog.Uint64("sp_id", w.spId),
+			slog.Uint64("grp_id", grpId),
+			slog.Uint64("cntlr_id", p.primaryId),
+			slog.Uint64("report_revision", p.infoRev),
+			slog.String("refusal", readings[grpId].GetRefusal()))
 	}
 }
 
