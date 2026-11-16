@@ -21141,9 +21141,9 @@ react_fs_restore() {
 	assert_field "$SP_JSON" \
 		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$old\")] | length" \
 		1 "step 07's leg $old is still one of the group's retired legs"
-	# Step 07's forced start kept every retired leg of the group, and the
-	# finish of its repair retired leg $old kept too (architecture.md,
-	# Retired legs; Repair, Forced start). The operator, having judged
+	# Step 07's forced start kept every retired leg of the group, $old among
+	# them: its repair's finish retired that leg before the mark was written
+	# (architecture.md, Retired legs; Repair, Forced start). The operator, having judged
 	# them, clears the flag of every one but $old: the worker's repair
 	# below, at the retired-leg bound, then gives one back, and $old, which
 	# the restore needs, stays kept.
