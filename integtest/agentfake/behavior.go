@@ -57,12 +57,14 @@ type ChunkId struct {
 // of a repair whose flag is set is confirmed; and Refusal, the text of the
 // primary's refusal of the add of a new leg taken from a retired leg that
 // holds newer data than the array (cnagent.md CN12), empty when it refuses
-// nothing. The fake reports each as the lever says, with no check that a
-// real primary would give that combination.
+// nothing; and Held, the new legs md holds a member on in any state
+// (held_new_leg_id_list). The fake reports each as the lever says, with no
+// check that a real primary would give that combination.
 type RepairVerdict struct {
 	Started        bool
 	AbortConfirmed bool
 	Refusal        string
+	Held           []uint64
 }
 
 // GrpReading overrides a primary's reading of one group's running array in
@@ -249,7 +251,13 @@ func (ob *Object) clone() *Object {
 		counts.SideRecsMatch = clonePtr(ob.DiskCounts.SideRecsMatch)
 		out.DiskCounts = &counts
 	}
-	out.Repairs = maps.Clone(ob.Repairs)
+	if ob.Repairs != nil {
+		out.Repairs = make(map[string]RepairVerdict, len(ob.Repairs))
+		for repName, verdict := range ob.Repairs {
+			verdict.Held = slices.Clone(verdict.Held)
+			out.Repairs[repName] = verdict
+		}
+	}
 	if ob.Grps != nil {
 		out.Grps = make(map[uint64]GrpReading, len(ob.Grps))
 		for grpId, reading := range ob.Grps {
@@ -484,9 +492,10 @@ type rowJSON struct {
 
 // repairVerdictJSON is one entry of the behavior file's "repairs" map.
 type repairVerdictJSON struct {
-	Started        bool   `json:"started,omitempty"`
-	AbortConfirmed bool   `json:"abort_confirmed,omitempty"`
-	Refusal        string `json:"refusal,omitempty"`
+	Started        bool     `json:"started,omitempty"`
+	AbortConfirmed bool     `json:"abort_confirmed,omitempty"`
+	Refusal        string   `json:"refusal,omitempty"`
+	Held           []uint64 `json:"held,omitempty"`
 }
 
 // grpReadingJSON is one entry of the behavior file's "grps" map.
@@ -681,6 +690,7 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 			Started:        rj.Started,
 			AbortConfirmed: rj.AbortConfirmed,
 			Refusal:        rj.Refusal,
+			Held:           slices.Clone(rj.Held),
 		}
 	}
 	for key, gj := range oj.Grps {

@@ -35,6 +35,15 @@ const (
 // that read took the leg away.
 const ReasonLegNotNamable = "leg not namable"
 
+// ReasonLegPartial is the Reason ForceStartGroup carries when the mark would
+// name, with no force, a new leg of the group's repair that carries the
+// partial mark (Repair.new_leg_id_to_partial): md held that leg as a new leg
+// once and wrote its superblock and possibly part of the array onto it, so
+// it is no longer the whole copy it was taken back as. It is exported
+// because the gateway answers it FAILED_PRECONDITION in its own words
+// (gateway.md GW7) when a write marked the leg after its planning read.
+const ReasonLegPartial = "leg partial"
+
 // ForceStartGroup writes the forced-start mark on the group grpId held by
 // parent, naming legId with the operator's force (ForcedStart.force), and
 // returns the revision the mark carries: the SpRev
@@ -50,7 +59,8 @@ const ReasonLegNotNamable = "leg not namable"
 // at an sp_level at or above SP_LEVEL_NO_REDUND, where no group array is
 // built; a cancel runs at every level, since a mark that stands acts once
 // the level is lowered. The leg must be one the mark may name
-// (ReasonLegNotNamable). A write also keeps the group's other copies: keep
+// (ReasonLegNotNamable), and with no force not a new leg of the group's
+// repair that carries the partial mark (ReasonLegPartial). A write also keeps the group's other copies: keep
 // on each of its retired legs and keep_bad_legs on its open repair
 // (keepGroupCopies); a cancel clears neither. The gateway's planning read
 // refuses the rest of the call's cases, the group's row among them, which
@@ -108,6 +118,16 @@ func ForceStartGroup(
 		}
 		if !namable {
 			return fail(opForceStartGroup, ReasonLegNotNamable)
+		}
+		if !force && grp.GetRepName() != "" {
+			rep, err := loadRepair(
+				s, opForceStartGroup, cid, conf, grp.GetRepName())
+			if err != nil {
+				return err
+			}
+			if rep.GetNewLegIdToPartial()[legId] {
+				return fail(opForceStartGroup, ReasonLegPartial)
+			}
 		}
 		if err := keepGroupCopies(s, cid, conf, grp); err != nil {
 			return err

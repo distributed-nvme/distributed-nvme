@@ -85,6 +85,7 @@ func widestCounts() map[protoreflect.FullName]int {
 		"Repair.bad_leg_id_list":             1,
 		"Repair.new_leg_id_to_retired_epoch": 1,
 		"Repair.new_leg_id_to_keep":          1,
+		"Repair.new_leg_id_to_partial":       1,
 		// One side per leg; withMigrationSides gives MaxMigrCntPerSp legs of
 		// the pool their second.
 		"Leg.side_list": 1,
@@ -137,6 +138,8 @@ func widestCounts() map[protoreflect.FullName]int {
 		"CntlrInfo.rep_id_to_repair_info":       repsPerSp,
 		"CntlrInfo.grp_id_to_grp_info":          grpsPerSp,
 		"CntlrInfo.GrpInfo.in_sync_leg_id_list": common.MaxAllocLegPerGrp + 1,
+		// The new legs of a repair md holds: one per repair.
+		"CntlrInfo.RepairInfo.held_new_leg_id_list": 1,
 		// A migration's list; a cntlr reports the bitmaps of clones only.
 		"BitmapInfo.bm_idx_list":   0,
 		"BitmapInfo.chunk_id_list": common.MaxSliceCntPerSp * common.MaxCloneBmCnt,

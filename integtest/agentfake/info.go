@@ -575,9 +575,10 @@ func (a *Agent) repairRowsLocked(
 			continue
 		}
 		info.RepIdToRepairInfo[rep.GetRepId()] = &pb.CntlrInfo_RepairInfo{
-			Started:        verdict.Started,
-			AbortConfirmed: verdict.AbortConfirmed,
-			Refusal:        verdict.Refusal,
+			Started:          verdict.Started,
+			AbortConfirmed:   verdict.AbortConfirmed,
+			Refusal:          verdict.Refusal,
+			HeldNewLegIdList: slices.Clone(verdict.Held),
 		}
 	}
 }

@@ -190,8 +190,11 @@ const (
 const (
 	msgRepairStageMoved   = "repair stage moved"
 	msgRepairStageSkipped = "repair stage skipped"
-	msgRetiredLegDeleted  = "retired leg deleted"
-	msgRetiredLegKept     = "retired leg kept"
+	// AR11's partial mark of a taken-back new leg md holds.
+	msgRepairLegPartial     = "repair leg partial"
+	msgRepairLegPartialKept = "repair leg partial kept"
+	msgRetiredLegDeleted    = "retired leg deleted"
+	msgRetiredLegKept       = "retired leg kept"
 )
 
 // The records of AR15, the flag that a group's array has run (Log records):
@@ -422,6 +425,21 @@ type reactionOps interface {
 		repId uint64,
 		stage pb.RepStage,
 	) error
+	// setNewLegsPartial is AR11's partial mark (MD6's SetNewLegsPartial):
+	// each leg of mark that the repair repName, still carrying repId, took
+	// back from a retired leg gets new_leg_id_to_partial, and each leg of
+	// clear loses it, a mark already there, a clear of none and a stale
+	// repair being skipped. It returns how many marks it changed.
+	setNewLegsPartial(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		spName string,
+		repName string,
+		repId uint64,
+		mark []uint64,
+		clear []uint64,
+	) (int, error)
 	// clearForcedStart is the forced-start clear (AR13; MD6's
 	// ClearForcedStart): it withdraws the mark ref names, on the group ref
 	// names in its parent, unless the store no longer holds that mark as
@@ -734,6 +752,20 @@ func (o *modelReactionOps) setRepairAbort(
 	return model.SetRepairAbort(
 		ctx, o.cli, cid, shard, spId, spName, 0, repName,
 	)
+}
+
+func (o *modelReactionOps) setNewLegsPartial(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	mark []uint64,
+	clear []uint64,
+) (int, error) {
+	return model.SetNewLegsPartial(
+		ctx, o.cli, cid, spId, spName, repName, repId, mark, clear)
 }
 
 func (o *modelReactionOps) setRepairStage(
@@ -3147,6 +3179,72 @@ func (w *spWorker) markArrayMade(ctx context.Context, p *spPass) {
 		withAttr(attrs, slog.Int("set", set))...)
 }
 
+// markPartialLegs is AR11's partial mark, run before the stage moves from
+// the same report: for each repair the pool lists, in repair_name_list order,
+// whatever its stage, among the new legs the repair took back from a retired
+// leg, those its verdict names as held (held_new_leg_id_list) and the
+// group's reading does not hold in sync (in_sync_leg_id_list) and that carry
+// no partial mark get it, and those the reading holds in sync and that carry
+// it lose it, through model.SetNewLegsPartial. Reason: md writes its
+// superblock onto a member at its add, and part of the array while it
+// copies, so a leg md holds but not in sync is no longer the copy it was
+// taken back as, while one it holds in sync holds the array's whole data;
+// the cancel gives the leg back as a retired leg with the mark, and a forced
+// start refuses to name a marked leg unless forced (architecture.md, Retired
+// legs). The mark follows only the report a pass reads: a hold md begins
+// and ends between two passes leaves none (architecture.md, Known limits).
+// A repair of a deleting clone, or one the snapshot does not hold, is passed
+// over: the clone drain gives its legs back. A write logs `repair leg
+// partial` with the legs it marks and clears; a failed one logs `repair leg
+// partial kept` with its error. No write raises a revision, and none is the
+// pass's one action (AR2).
+func (w *spWorker) markPartialLegs(
+	ctx context.Context,
+	p *spPass,
+	verdicts map[uint64]*pb.CntlrInfo_RepairInfo,
+) {
+	for _, repName := range p.state.Conf.GetRepairNameList() {
+		rep, ok := p.state.Repairs[repName]
+		if !ok || repairCloneDeleting(p.state, rep) {
+			continue
+		}
+		inSync := p.info.GetGrpIdToGrpInfo()[rep.GetGrpId()].
+			GetInSyncLegIdList()
+		var mark, clear []uint64
+		for _, legId := range sortedKeys(rep.GetNewLegIdToRetiredEpoch()) {
+			synced := slices.Contains(inSync, legId)
+			marked := rep.GetNewLegIdToPartial()[legId]
+			held := slices.Contains(
+				verdicts[rep.GetRepId()].GetHeldNewLegIdList(), legId)
+			switch {
+			case synced && marked:
+				clear = append(clear, legId)
+			case held && !synced && !marked:
+				mark = append(mark, legId)
+			}
+		}
+		if len(mark) == 0 && len(clear) == 0 {
+			continue
+		}
+		ids := withAttr(repairIds(repName, rep),
+			slog.Any("marked", mark),
+			slog.Any("cleared", clear),
+			slog.Uint64("cntlr_id", p.primaryId),
+			slog.Uint64("report_revision", p.infoRev),
+		)
+		changed, err := w.reactor().ops.setNewLegsPartial(
+			ctx, w.cid, w.spId, w.desired.handle, repName, rep.GetRepId(),
+			mark, clear)
+		if err != nil {
+			w.stepFailed(ctx, msgRepairLegPartialKept, err, ids...)
+			continue
+		}
+		if changed > 0 {
+			w.stepApplied(ctx, msgRepairLegPartial, ids...)
+		}
+	}
+}
+
 // moveRepairStages is the stage move of architecture.md, Repair: each
 // CREATED repair, in repair_name_list order, whose rep_id keys a verdict in
 // the current primary's latest report (rep_id_to_repair_info) moves to
@@ -3176,6 +3274,7 @@ func (w *spWorker) moveRepairStages(ctx context.Context, p *spPass) {
 	if len(verdicts) == 0 {
 		return
 	}
+	w.markPartialLegs(ctx, p, verdicts)
 	for _, repName := range p.state.Conf.GetRepairNameList() {
 		rep, ok := p.state.Repairs[repName]
 		if !ok || rep.GetRepStage() != pb.RepStage_REP_STAGE_CREATED {

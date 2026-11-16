@@ -3400,6 +3400,20 @@ retired_leg_listed() { # <sp> <leg id>
 		'.retired_legs | has($l)' >/dev/null
 }
 
+# repair_leg_partial is true once the repair <rep name> carries the partial
+# mark of its new leg <leg id> (dnv-worker.md AR11).
+repair_leg_partial() { # <sp> <rep name> <leg id>
+	repairs_json "$1" | "$JQ" -e --arg r "$2" --arg l "$3" \
+		'.repairs[$r].new_leg_id_to_partial[$l] == true' >/dev/null
+}
+
+# retired_leg_partial prints the partial mark of the retired leg <leg id>,
+# true or false.
+retired_leg_partial() { # <sp> <leg id>
+	repairs_json "$1" | "$JQ" -r --arg l "$(printf '%016x' "$2")" \
+		'.retired_legs[$l].partial // false'
+}
+
 retired_leg_gone() { # <sp> <leg id>
 	repairs_json "$1" | "$JQ" -e --arg l "$(printf '%016x' "$2")" \
 		'.retired_legs | has($l) | not' >/dev/null
@@ -3646,7 +3660,7 @@ case_repair() {
 	assert_eq "$(dn_free 3)" $((dn3_free + 1)) \
 		"dn 3 got the retired side's extents back"
 
-	stage 6 "a take-back the primary refuses, logged on every pass, then aborted and cancelled"
+	stage 6 "a take-back the primary refuses, logged on every pass, then aborted and cancelled; a take-back md holds, marked partial"
 	# A young retired leg of the data group, which the timer passes over
 	# (AR12), on dn 1, which holds no leg of the group since leg 3's delete,
 	# and an operator's repair r2 that takes it back as its new leg.
@@ -3680,6 +3694,28 @@ case_repair() {
 	repair_gone sp0 r2 || die "r2 outlived its cancel"
 	retired_leg_listed sp0 80 ||
 		die "leg 0x50 is no retired leg again after r2's cancel"
+	assert_eq "$(retired_leg_partial sp0 80)" false \
+		"leg 0x50's partial mark after a repair md never held it in"
+	# md holds a taken-back leg once it adds it, in any state, and writes
+	# its superblock onto it: the worker marks the leg partial in the
+	# repair from the primary's verdict (AR11), and the cancel gives it back
+	# as a partial retired leg (architecture.md, Retired legs).
+	repair_levers "$(leg_down 4)" '"r3": {"held": [80]}' ''
+	wait_until "$WAIT_SHORT" "leg 4's err_epoch set again" leg_epoch_set sp0 1 4
+	ctl create-repair --sp sp0 --name r3 --grp 2 --bad-leg 4 \
+		--retired-leg 0x50 >/dev/null
+	wait_until "$WAIT_SHORT" "r3's new leg 0x50 marked partial" \
+		repair_leg_partial sp0 r3 80
+	ctl abort-repair --sp sp0 --name r3 >/dev/null
+	repair_levers "$(leg_down 4)" '"r3": {"abort_confirmed": true}' ''
+	wait_until "$WAIT_SHORT" "r3 at REP_STAGE_ABORTED" \
+		repair_stage_is sp0 r3 REP_STAGE_ABORTED
+	clear_behavior cn0
+	wait_until "$WAIT_SHORT" "leg 4's err_epoch cleared" leg_epoch_clear sp0 1 4
+	ctl cancel-repair --sp sp0 --name r3 >/dev/null
+	repair_gone sp0 r3 || die "r3 outlived its cancel"
+	assert_eq "$(retired_leg_partial sp0 80)" true \
+		"leg 0x50's partial mark after r3's cancel"
 
 	stage 7 "a forced start: cleared from the primary's report, holding leg repair while it stands"
 	# Every leg in sync and the group's row OK: the primary's first report

@@ -66,6 +66,7 @@ const (
 	opFlipRepairProvisioned  = "FlipRepairProvisioned"
 	opSetGrpOperatorInCharge = "SetGrpOperatorInCharge"
 	opSetRetiredLegKeep      = "SetRetiredLegKeep"
+	opSetNewLegsPartial      = "SetNewLegsPartial"
 )
 
 // ReasonRepairExists is the Reason CreateRepair carries when the pool already
@@ -420,8 +421,8 @@ type RepairNewLeg struct {
 // leg of the group other than the bad one, since the group's legs sit on
 // different disk nodes after the finish. It keeps its leg id, its leg_idx
 // and its side, whose disk node already holds its pointer and its extents,
-// and the repair keeps its retired_epoch and, when it carries one, its keep
-// flag for CancelRepair. Its record and its
+// and the repair keeps its retired_epoch and, when it carries them, its keep
+// flag and its partial mark for CancelRepair. Its record and its
 // list entries go in the same transaction, and the repair takes one id, its
 // rep_id. It is allowed while the group holds common.MaxRetiredLegPerGrp
 // retired legs, since the finish then retires one leg and the repair took
@@ -546,9 +547,12 @@ func CreateRepair(
 			rep.NewLegIdToRetiredEpoch = map[uint64]uint64{
 				newLegId: retired.GetRetiredEpoch()}
 			// A kept leg taken back stays kept should the repair be
-			// cancelled (CancelRepair).
+			// cancelled (CancelRepair), and a partial one stays partial.
 			if retired.GetKeep() {
 				rep.NewLegIdToKeep = map[uint64]bool{newLegId: true}
+			}
+			if retired.GetPartial() {
+				rep.NewLegIdToPartial = map[uint64]bool{newLegId: true}
 			}
 		} else {
 			leg, err := placeFreshLeg(
@@ -805,6 +809,88 @@ func SetRetiredLegKeep(
 	})
 }
 
+// SetNewLegsPartial sets the partial mark (Repair.new_leg_id_to_partial) of
+// each new leg of the repair repName that mark names and that the repair
+// took from a retired leg, clears it from each leg clear names, and returns
+// how many marks it changed: the sp worker's write from the primary's report
+// (dnv-worker.md AR11). A taken-back leg md holds but not in sync — copying,
+// a spare, failed — has md's superblock and possibly part of the array on
+// it, so it is no longer the copy it was, and a cancel gives it back as a
+// retired leg with partial set (CancelRepair); one md holds in sync holds the
+// array's whole data, so its mark goes. A fresh new leg is never marked: its
+// cancel gives its side back.
+//
+// It takes no expected revision and checks the pool at any level that is not
+// being deleted (loadSpConfAnyLevel). It skips, and fails nothing, a repair
+// the pool no longer lists, one whose rep_id is not repId (finished or
+// cancelled and created again under the name), a deleting clone's, a leg
+// that is no new leg the repair took back, a mark that is there already and
+// a clear of a mark that is not: the worker converges on what the store
+// holds. A write raises no revision: no agent reads the mark, and the worker
+// and the gateway read the record.
+func SetNewLegsPartial(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	mark []uint64,
+	clear []uint64,
+) (int, error) {
+	changed := 0
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		changed = 0
+		conf, err := loadSpConfAnyLevel(
+			s, opSetNewLegsPartial, cid, spName, spId)
+		if err != nil {
+			return err
+		}
+		if !containsName(conf.GetRepairNameList(), repName) {
+			return nil
+		}
+		rep := &pb.Repair{}
+		if !s.Get(RepairKey(cid, spId, repName), rep) ||
+			rep.GetRepId() != repId {
+			return nil
+		}
+		if cloneName := rep.GetCloneName(); cloneName != "" {
+			clone := &pb.Clone{}
+			if !s.Get(CloneKey(cid, spId, cloneName), clone) ||
+				clone.GetDeleting() {
+				return nil
+			}
+		}
+		for _, legId := range mark {
+			if _, reused := rep.GetNewLegIdToRetiredEpoch()[legId]; !reused ||
+				rep.GetNewLegIdToPartial()[legId] {
+				continue
+			}
+			if rep.NewLegIdToPartial == nil {
+				rep.NewLegIdToPartial = map[uint64]bool{}
+			}
+			rep.NewLegIdToPartial[legId] = true
+			changed++
+		}
+		for _, legId := range clear {
+			if !rep.GetNewLegIdToPartial()[legId] {
+				continue
+			}
+			delete(rep.NewLegIdToPartial, legId)
+			changed++
+		}
+		if changed > 0 {
+			s.Put(RepairKey(cid, spId, repName), rep)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
 // FinishRepairResult is what FinishRepair did: the finished repair's rep_id,
 // the leg id of the leg it retired, and the leg id of the retired leg it gave
 // back to make room for that one, zero when it gave none back.
@@ -1024,8 +1110,8 @@ func oldestRetiredLeg(
 //
 // A new leg taken from a retired leg goes back as that retired leg, never
 // destroyed: a RetiredLeg under its leg id with the retired_epoch and the
-// keep flag the repair kept, its own leg_idx, its side as it is now and the
-// repair's parent,
+// keep flag and the partial mark the repair kept, its own leg_idx, its side
+// as it is now and the repair's parent,
 // listed again in the group's and the pool's lists. A fresh new leg's sides
 // give their disk nodes back the group's ext_cnt and their pointers, through
 // the DN ledger the drains use, with each node's capacity key and DnRev. The
@@ -1093,6 +1179,7 @@ func CancelRepair(
 				SliceId:      rep.GetSliceId(),
 				CloneName:    rep.GetCloneName(),
 				Keep:         rep.GetNewLegIdToKeep()[leg.GetLegId()],
+				Partial:      rep.GetNewLegIdToPartial()[leg.GetLegId()],
 			})
 			grp.RetiredLegIdList = append(
 				grp.RetiredLegIdList, leg.GetLegId())

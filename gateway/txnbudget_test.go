@@ -1122,6 +1122,17 @@ func TestRepairOpsTxnBudget(t *testing.T) {
 			maxCompares: 5,
 		},
 		{
+			name: "SetNewLegsPartial",
+			stm:  "model.SetNewLegsPartial's STM",
+			// SpConf, the Repair and, for a clone meta group's repair, its
+			// Clone.
+			fixedReads: 3,
+			// The Repair, and no SpRev: no agent reads the mark; a write
+			// that changes no mark writes nothing.
+			fixedWrites: 1,
+			maxCompares: 4,
+		},
+		{
 			name: "SetRetiredLegKeep",
 			stm:  "model.SetRetiredLegKeep's STM and loadGrpOf",
 			// SpRev, SpConf, the RetiredLeg and the parent.

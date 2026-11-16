@@ -329,6 +329,11 @@ type fakeReactionOps struct {
 	// from opErr.
 	arrayMade    [][]model.GrpRef
 	arrayMadeErr error
+	// partial records each partial mark of AR11 (setNewLegsPartial), the
+	// repair's name and the legs it marks and clears, apart from calls as
+	// arrayMade is; partialErr fails the write.
+	partial    []partialCall
+	partialErr error
 	// latchErr fails the latch of a whole copy (CLD13) apart from opErr,
 	// and latchSkip makes it find the clone already deleting, as
 	// model.LatchCopiedClone writes nothing for a clone latched first.
@@ -613,6 +618,36 @@ func (o *fakeReactionOps) setRepairStage(
 	}
 	o.spRev++
 	return nil
+}
+
+// partialCall is one setNewLegsPartial the fake recorded.
+type partialCall struct {
+	repName string
+	repId   uint64
+	mark    []uint64
+	clear   []uint64
+}
+
+func (o *fakeReactionOps) setNewLegsPartial(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	spName string,
+	repName string,
+	repId uint64,
+	mark []uint64,
+	clear []uint64,
+) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.partial = append(o.partial, partialCall{
+		repName: repName, repId: repId,
+		mark: slices.Clone(mark), clear: slices.Clone(clear),
+	})
+	if o.partialErr != nil {
+		return 0, o.partialErr
+	}
+	return len(mark) + len(clear), nil
 }
 
 func (o *fakeReactionOps) markGroupsArrayMade(

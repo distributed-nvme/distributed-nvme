@@ -1429,7 +1429,8 @@ retired legs still answer.
   `SP_LEVEL_NO_REDUND`, a `RedundNone` pool, the group through
   `locateGrp`, a deleting clone through `refuseDeletingClone`, the leg
   through the group's `leg_list` and the repair it names (`grpRepair`;
-  `forceStartLegChecks`), and the primary, whose `CnConf` it reads for the
+  `forceStartLegChecks`), a new leg the repair took back that carries the
+  partial mark refused with no force (`errPartialLeg`), and the primary, whose `CnConf` it reads for the
   agent call, a primary's CN that is missing being `ABORTED` as in
   `DeleteClone`. Outside any STM, `checkGrpArrayDown` reads the
   primary's report (Agent calls). Last `model.ForceStartGroup` with the
@@ -1437,8 +1438,9 @@ retired legs still answer.
   mark, the force in it, with the revision its own bump commits, and
   re-checks the token, the pool, the
   group and the leg in its STM; its `model.ReasonLegNotNamable`, a leg a
-  write took away after the planning read, is answered
-  `FAILED_PRECONDITION` in the gateway's words (`modelReason`). A cancel
+  write took away after the planning read, and its
+  `model.ReasonLegPartial`, a leg a write marked partial since, are
+  answered `FAILED_PRECONDITION` in the gateway's words (`modelReason`). A cancel
   stops the planning read after the clone, reads no agent, and the op
   answers a group with no mark with no write and no bump. Reply `grp_id`
   and `revision` as the op returns it.

@@ -341,9 +341,6 @@ The entries:
   another pool's bytes, with no error. Both legs show the same change
   count. State: procedure to write, the forced-start guide: choose the leg
   that died last, from the leg rows. Seen in the lab.
-- **A retired leg given back by a cancel may be partly overwritten.**
-  Silent at a later forced start. State: fix decided, a "partial" flag on
-  the retired leg. Not seen in the lab.
 - **A failed stop during a forced start keeps a bad-block list.** When the
   named leg carries a bad-block list, the forced start starts the array,
   stops it at once, and starts it again with the list dropped. If that stop
@@ -918,9 +915,20 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   auto-grow of the metadata is its cure. Not seen in the lab.
 - **A repair that waits gives no reason.** State: fix decided, the primary
   reports the reason and the worker logs it. Seen in the lab.
-- **A retired leg's record does not say whether it is a whole copy.**
-  State: fix decided, a keep flag and a partial flag on the retired leg,
-  with the plan "forced start, second pass".
+- **A retired leg's partial mark can miss a short hold.** The worker marks
+  a taken-back leg partial when md holds it but not in sync, from the
+  report it reads each pass. A hold md begins and ends between two passes,
+  or a failed add that still wrote md's record onto the leg, leaves no
+  mark. The leg's own md superblock still shows what md left, which the
+  forced start's read refuses, so a start from it fails with a reason.
+  State: accepted. Not seen in the lab.
+- **A retired leg's record does not say whether the leg was in sync when
+  it left.** The record says whether the leg is kept, and whether md wrote
+  onto it as a repair's new leg that was then cancelled (its partial
+  mark). It does not say whether a leg a repair replaced was in sync when
+  it left the array. The worker's repair at the bound can then give back
+  the only whole older copy; the leg md keeps in sync still holds the data.
+  State: accepted. Not seen in the lab.
 - **A disk node's full store disk is offered until a save fails.** A quiet
   node with a full store disk reads ok and is offered for new sides. The
   first refused request marks it. State: accepted; a small window. Not

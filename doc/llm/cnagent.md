@@ -4145,10 +4145,14 @@ verdict, in `rep_id_to_repair_info` by `rep_id`: `started`, for an open
 repair, when every new leg holds a place — a "slot" number and not faulty
 — and md holds nothing on a bad leg; `abort_confirmed`, for a CREATED
 repair whose abort flag is in the cntlr's own request, when md holds
-nothing on a new leg; and `refusal`, the text of CN12's take-back check
+nothing on a new leg; `refusal`, the text of CN12's take-back check
 when it refuses the add of a new leg taken from a retired leg, naming that
 leg, its identity beside the keeper's or its events count, and the leg
-that keeps the data, empty when nothing holds the add back. The
+that keeps the data, empty when nothing holds the add back; and
+`held_new_leg_id_list`, the repair's new legs md holds a member on in any
+state, ascending, since md has written its superblock onto each, which
+the worker records as a taken-back leg's partial mark (`dnv-worker.md`
+AR11). The
 refusal is text for people: the worker logs a CREATED repair's verdict
 that carries one and moves no stage for it (`dnv-worker.md` AR11), no rule
 decides anything on its text, and it is never the group's error (CN12). An

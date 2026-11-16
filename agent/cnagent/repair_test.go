@@ -355,6 +355,9 @@ func TestRepairNewLegIsConnectedAndProbed(t *testing.T) {
 	f.assertMdCalls(t, "the waiting repair")
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	assertVerdict(t, info, "the waiting repair", false, false)
+	if got := verdict(info).GetHeldNewLegIdList(); len(got) != 0 {
+		t.Fatalf("the waiting repair names held new legs %v", got)
+	}
 	assertReading(t, info, "the waiting repair", true,
 		testDataLeg, testDataLeg2)
 	if retrying(t, f.srv) {
@@ -551,6 +554,16 @@ func TestRepairAddsTheNewLeg(t *testing.T) {
 				}
 			}
 			assertVerdict(t, info, "the converge", tc.started, tc.confirmed)
+			// The verdict names the new leg as held exactly when md holds
+			// a member on it, in any state.
+			var wantHeld []uint64
+			if slices.Contains(f.members(), f.newLegDev) {
+				wantHeld = []uint64{repNewLeg}
+			}
+			if got := verdict(info).GetHeldNewLegIdList(); !slices.Equal(
+				got, wantHeld) {
+				t.Fatalf("held new legs %v, want %v", got, wantHeld)
+			}
 		})
 	}
 }

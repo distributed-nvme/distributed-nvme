@@ -234,6 +234,7 @@ var renderCases = []renderCase{
 		want: `{"rep_name":"r0","repair":{"bad_leg_id_list":["3"],` +
 			`"clone_name":"","force":false,"grp_id":"2",` +
 			`"keep_bad_legs":false,"new_leg_id_to_keep":{},` +
+			`"new_leg_id_to_partial":{},` +
 			`"new_leg_id_to_retired_epoch":{"4":"5"},"new_leg_list":[],` +
 			`"rep_id":"9","rep_stage":"REP_STAGE_STARTED","slice_id":"1",` +
 			`"try_to_abort":true}}` + "\n",

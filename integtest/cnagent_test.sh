@@ -5149,6 +5149,13 @@ rep_verdict() { # json repid
 	jq_of "$1" "(.cntlr_info.rep_id_to_repair_info // {})[\"$(d16 "$2")\"] as \$v | if \$v == null then \"none\" else \"\(\$v.started // false) \(\$v.abort_confirmed // false)\" end"
 }
 
+# rep_held prints the new legs a reply's verdict on one repair names as held
+# by md in any state, ascending, comma separated, in decimal, "" for none or
+# no verdict (cnagent.md CN28).
+rep_held() { # json repid
+	jq_of "$1" "((.cntlr_info.rep_id_to_repair_info // {})[\"$(d16 "$2")\"].held_new_leg_id_list // []) | join(\",\")"
+}
+
 # rep_refusal prints a reply's take-back refusal on one repair, the text of
 # its verdict's refusal field, empty when the verdict carries none or there
 # is no verdict (cnagent.md CN28).
@@ -5421,6 +5428,8 @@ repair_forced_start() {
 		"repair forced: the restored array's reading"
 	assert_eq "$(rep_verdict "$out" "$zrep")" "true false" \
 		"repair forced: the verdict"
+	assert_eq "$(rep_held "$out" "$zrep")" "$(d16 "$zleg")" \
+		"repair forced: the new leg md holds"
 	# The read names the mark this agent process acted on, which the
 	# worker's clear asks for (cnagent.md CN28; dnv-worker.md AR13).
 	assert_eq "$(grp_acted "$out" "$A_DGRP")" \

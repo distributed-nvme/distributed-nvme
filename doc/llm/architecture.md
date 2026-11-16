@@ -259,7 +259,8 @@ always means the SP's `DmPoolConf.data_block_size`.
   its DN with its extents and the data as it was when the leg left the
   array — a whole copy only where the leg was in sync when it left, with
   no copy onto it pending (Known limits) — save what md wrote on it while
-  it was the new leg of a repair that was then cancelled, and a forced
+  it was the new leg of a repair that was then cancelled, which its
+  `partial` mark records when the worker saw md hold it, and a forced
   start's zero of its
   superblock, when that forced start kept it and the leg left before md
   added it (Repair; Known limits); its `retired_epoch` is the
@@ -3622,9 +3623,10 @@ Action. A new leg from a retired leg allocates nothing: the retired leg's
 record and its entries in the group's and the pool's lists go, and its leg —
 its leg id, its `leg_idx` and its side, whose DN already holds the side's
 pointer and extents — becomes the new leg; the repair keeps the retired
-leg's `retired_epoch` in `new_leg_id_to_retired_epoch`, and its `keep`, when
-it carries one, in `new_leg_id_to_keep`, for a cancel, and takes one id, its
-`rep_id`. That create is allowed while the group holds
+leg's `retired_epoch` in `new_leg_id_to_retired_epoch`, and its `keep` and
+its `partial` mark, when it carries them, in `new_leg_id_to_keep` and
+`new_leg_id_to_partial`, for a cancel and for the forced start's refusal,
+and takes one id, its `rep_id`. That create is allowed while the group holds
 `MaxRetiredLegPerGrp` retired legs, since the finish then retires one leg as
 the create took one; so, with the give-back of a worker's finish, a finish
 never passes the bound, and a repair waits in STARTED for room only while
@@ -3699,12 +3701,13 @@ which kept copy went.
 `repair_name_list`; `FAILED_PRECONDITION` for a stage other than
 `REP_STAGE_ABORTED`, naming the stage, and when the group's clone is
 being deleted. Action: STM: a new leg taken from a retired leg goes back
-as that retired leg, with the `retired_epoch` and the `keep` the repair
-kept, its own
+as that retired leg, with the `retired_epoch`, the `keep` and the
+`partial` mark the repair kept, its own
 `leg_idx`, its side as it is now and the repair's parent, listed again in
 the group's and the pool's lists — a cancel never destroys the kept copy,
-though md may have written on it, and a forced start may have zeroed its
-superblock, while it was the repair's new leg (Repair); a fresh new leg's
+though md may have written on it, which `partial` then says, and a forced
+start may have zeroed its superblock, while it was the repair's new leg
+(Repair); a fresh new leg's
 side gives its DN the group's `ext_cnt` and
 its pointer back, with the DN's capacity key and `DnRev`; the `Repair` and
 its list entry go, the group's `rep_name` is cleared, and `SpRev` is
@@ -3742,7 +3745,10 @@ the new leg of the group's repair; `FAILED_PRECONDITION` when it is the new
 leg of a `REP_STAGE_ABORTED` repair, which the abort took out of the group
 (Repair, Forced start); `FAILED_PRECONDITION`
 when it is the bad leg of a `REP_STAGE_STARTED` repair, which the mark may
-not name (Repair, Forced start); `FAILED_PRECONDITION`
+not name (Repair, Forced start); `FAILED_PRECONDITION`, unless `force` is
+set, when it is a new leg the group's repair took back that carries the
+`partial` mark (Retired legs), since md wrote onto it once and it is no
+longer the whole copy it was; `FAILED_PRECONDITION`
 when the pool has no primary cntlr; `FAILED_PRECONDITION` when the
 primary's latest report reads the group's row `RES_STATUS_OK`, its array
 running, when that report holds no row of the group, or when the primary's
@@ -3750,7 +3756,8 @@ agent does not answer; and
 `FAILED_PRECONDITION` when a write after the call's first read made the leg
 one the mark may not name, as the stage move to ABORTED of the repair
 whose new leg it is or to STARTED of the repair whose bad leg it is does,
-which the deciding STM checks again (`model.ReasonLegNotNamable`). A
+which the deciding STM checks again (`model.ReasonLegNotNamable`), or
+marked it partial, which it checks too (`model.ReasonLegPartial`). A
 request with `cancel` meets the first and only the `RedundNone`, group and
 clone refusals after it. Reasons: a forced start is for an array md will
 not start by itself, and the primary never stops an
@@ -3777,7 +3784,8 @@ once the level is lowered, so it must be possible to withdraw it where it
 cannot be written. No confirm flag guards the call: its name, and its help in
 `dnvctl`, say what it destroys, as for the delete calls; `force` lets the
 start go on over a member that holds newer data of the same array (Repair,
-Forced start). Action: STM:
+Forced start), and lets the mark name a taken-back leg that carries the
+partial mark (Retired legs). Action: STM:
 without `cancel`, set the group's `forced_start` to the leg's id, the
 `SpRev` revision the same STM's bump writes and the force, replacing a mark
 that stands, and set `keep` on every retired leg the group lists, `keep`
@@ -3831,7 +3839,19 @@ repair of its group takes it back as the new leg, when the operator
 deletes it, when the sp worker's retire timer does, when the finish of a
 worker's repair of its group gives it back as the group's oldest retired
 leg that is not kept at the bound (FinishRepair), or when its pool's or its clone's drain
-deletes it (Repair, Deletes). A retired leg that carries `keep` is never
+deletes it (Repair, Deletes). A retired leg that carries `partial` was the
+new leg of a repair, taken back from it, that md held but not in sync
+before the repair was cancelled: md wrote its superblock and possibly part
+of the array onto it, so it is no longer the whole copy it was taken back
+as. The sp worker marks such a leg in the repair from the primary's report
+its pass reads, and clears the mark once md holds the leg in sync, when it
+holds the array's whole data (`dnv-worker.md` AR11); the cancel gives the
+leg back with the mark, a repair that takes it back again carries the
+mark, and a forced start refuses to name a new leg that carries it unless
+forced (Repairs, `ForceStartGroup`). The mark is a record for the
+operator, not the guard: the agent's own read of the leg's superblock at a
+forced start refuses a leg md left half copied or as a spare, marked or
+not (`cnagent.md` CN12; Known limits). A retired leg that carries `keep` is never
 taken by the retire timer nor given back at the bound: a forced start of
 its group sets it on every retired leg the group lists, and the finish of
 a repair whose bad legs the forced start kept sets it on the bad leg, since
@@ -7709,7 +7729,21 @@ document and only pointed to here.
   `MaxRetiredLegPerGrp` retired legs, a finish can give back the one that
   is a whole copy and keep the partial ones. The in-sync leg keeps the
   data, so no data is lost; a retired leg's record does not say whether
-  it is a whole copy.
+  the leg was in sync when it left: its `partial` mark records only that
+  md held it as a taken-back new leg (Retired legs).
+* **A taken-back leg md held only briefly can come back with no partial
+  mark.** The worker sets the mark from the report each pass reads
+  (`dnv-worker.md` AR11), and the primary's latest report replaces the one
+  before it, so a hold md begins and ends between two passes leaves no
+  mark: md adds the leg and fails it at once, say, and the abort's own
+  removal of the failed member comes before the next pass, whose report
+  then confirms the abort with no leg held; nor does a failed `mdadm
+  --add` that wrote the member's superblock before the kernel refused it.
+  The cancel then gives the leg back with no mark (Retired legs). Its own
+  superblock still says what md left on it, a half-copied member or a
+  spare, which the agent's read at a later forced start refuses
+  (`cnagent.md` CN12), so the start fails with a reason, and no data is
+  served from it.
 * **A whole new leg starts its array alone only where md recorded the
   other legs as failed.** When both `leg_list` legs of a group are dead,
   an assembly starts the array degraded from a repair's new leg that holds

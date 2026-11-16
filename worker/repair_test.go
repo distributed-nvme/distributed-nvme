@@ -1755,3 +1755,98 @@ func TestMemberAddRefusedIsLogged(t *testing.T) {
 		t.Fatalf("%d records after the refusal went, want 2", got)
 	}
 }
+
+// TestPartialMarkFromTheVerdict pins AR11's partial mark: a new leg the
+// repair took back from a retired leg, which the primary's verdict names as
+// held and the group's reading does not hold in sync, is marked through the
+// op, whatever the repair's stage, and logged; a marked leg the reading
+// holds in sync loses its mark; a fresh new leg, a leg already marked, a
+// held leg in sync with no mark and a verdict that names no held leg write
+// nothing; an op that fails is logged as kept.
+func TestPartialMarkFromTheVerdict(t *testing.T) {
+	// build has leg B alone in sync and the new leg held, not in sync.
+	build := func(t *testing.T, stage pb.RepStage) (*reactHarness,
+		*pb.Repair) {
+		h := newReactHarness(t, reactFixture(t))
+		rep := withReactRepair(h, stage, false)
+		rep.NewLegIdToRetiredEpoch = map[uint64]uint64{reactNewLeg: 11}
+		h.setVerdict(reactRepId, false, false)
+		h.w.cntlrs[reactCntlrA].driver.lastInfo.
+			RepIdToRepairInfo[reactRepId].HeldNewLegIdList =
+			[]uint64{reactNewLeg}
+		h.setGrpInfo(reactDataGrp, false, reactDataLegB)
+		return h, rep
+	}
+	wantCall := func(t *testing.T, h *reactHarness, mark, clear []uint64) {
+		t.Helper()
+		if len(h.rops.partial) != 1 ||
+			h.rops.partial[0].repName != reactRepName ||
+			h.rops.partial[0].repId != reactRepId ||
+			!slices.Equal(h.rops.partial[0].mark, mark) ||
+			!slices.Equal(h.rops.partial[0].clear, clear) {
+			t.Fatalf("partial writes = %+v, want mark %v clear %v of %s",
+				h.rops.partial, mark, clear, reactRepName)
+		}
+		if recs := h.logs.withMsg(msgRepairLegPartial); len(recs) != 1 {
+			t.Fatalf("%q records = %v, want one", msgRepairLegPartial, recs)
+		}
+	}
+	for _, stage := range []pb.RepStage{
+		pb.RepStage_REP_STAGE_CREATED, pb.RepStage_REP_STAGE_STARTED,
+	} {
+		t.Run("marked at "+stage.String(), func(t *testing.T) {
+			h, _ := build(t, stage)
+			h.pass()
+			wantCall(t, h, []uint64{reactNewLeg}, nil)
+		})
+	}
+	// md holds the leg in sync now: it holds the array's whole data, so its
+	// mark goes.
+	t.Run("cleared once in sync", func(t *testing.T) {
+		h, rep := build(t, pb.RepStage_REP_STAGE_STARTED)
+		rep.NewLegIdToPartial = map[uint64]bool{reactNewLeg: true}
+		h.setGrpInfo(reactDataGrp, true, reactDataLegB, reactNewLeg)
+		h.pass()
+		wantCall(t, h, nil, []uint64{reactNewLeg})
+	})
+	for _, tc := range []struct {
+		name string
+		edit func(h *reactHarness, rep *pb.Repair)
+	}{
+		{"a fresh new leg", func(h *reactHarness, rep *pb.Repair) {
+			rep.NewLegIdToRetiredEpoch = nil
+		}},
+		{"marked already", func(h *reactHarness, rep *pb.Repair) {
+			rep.NewLegIdToPartial = map[uint64]bool{reactNewLeg: true}
+		}},
+		// The array runs from the taken-back leg, in sync: a whole copy,
+		// as after a forced start from it.
+		{"held in sync", func(h *reactHarness, rep *pb.Repair) {
+			h.setGrpInfo(reactDataGrp, false, reactNewLeg)
+		}},
+		{"no held leg", func(h *reactHarness, rep *pb.Repair) {
+			h.w.cntlrs[reactCntlrA].driver.lastInfo.
+				RepIdToRepairInfo[reactRepId].HeldNewLegIdList = nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rep := build(t, pb.RepStage_REP_STAGE_CREATED)
+			tc.edit(h, rep)
+			h.pass()
+			if len(h.rops.partial) != 0 {
+				t.Fatalf("partial writes = %+v, want none", h.rops.partial)
+			}
+			h.wantNoRecord(msgRepairLegPartial)
+		})
+	}
+	t.Run("the op fails", func(t *testing.T) {
+		h, _ := build(t, pb.RepStage_REP_STAGE_CREATED)
+		h.rops.partialErr = errors.New("etcd down")
+		h.pass()
+		if recs := h.logs.withMsg(msgRepairLegPartialKept); len(recs) != 1 {
+			t.Fatalf("%q records = %v, want one", msgRepairLegPartialKept,
+				recs)
+		}
+		h.wantNoRecord(msgRepairLegPartial)
+	})
+}

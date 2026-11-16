@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -640,6 +641,9 @@ func (s *Server) ForceStartGroup(
 		req.GetSpRev().GetRevision(), loc.parent(), req.GetGrpId(),
 		req.GetLegId(), req.GetCancel(), req.GetForce(),
 	)
+	if modelReason(err) == model.ReasonLegPartial {
+		return nil, errPartialLeg(req.GetLegId(), "")
+	}
 	if modelReason(err) == model.ReasonLegNotNamable {
 		return nil, errPrecondition(
 			"leg %d is no leg the forced start of group %d may name any "+
@@ -699,7 +703,7 @@ func forceStartChecks(
 		return sc, loc, grpReportTarget{}, nil
 	}
 	if err := forceStartLegChecks(
-		stm, sc, loc.Grp, req.GetLegId(),
+		stm, sc, loc.Grp, req.GetLegId(), req.GetForce(),
 	); err != nil {
 		return nil, grpLocation{}, grpReportTarget{}, err
 	}
@@ -741,13 +745,16 @@ func forceStartChecks(
 // the mark was withdrawn must not leave the group with no leg to start from
 // (architecture.md, Repair, Forced start; cnagent.md CN12); and so is the
 // bad leg of a STARTED repair, which left the array before md began copying
-// onto the new leg and which the finish retires. model.ForceStartGroup makes
-// the same tests in its own STM (model.ReasonLegNotNamable).
+// onto the new leg and which the finish retires. With no force, a new leg
+// the repair took back that carries the partial mark is FAILED_PRECONDITION
+// (errPartialLeg). model.ForceStartGroup makes the same tests in its own STM
+// (model.ReasonLegNotNamable, model.ReasonLegPartial).
 func forceStartLegChecks(
 	stm etcdutil.STM,
 	sc *spScope,
 	grp *pb.Group,
 	legId uint64,
+	force bool,
 ) error {
 	rep, err := grpRepair(stm, sc, grp)
 	if err != nil {
@@ -777,11 +784,32 @@ func forceStartLegChecks(
 					"start may not name it", legId,
 				grp.GetRepName(), rep.GetRepStage(), grp.GetGrpId())
 		}
+		if !force && rep.GetNewLegIdToPartial()[legId] {
+			return errPartialLeg(legId, grp.GetRepName())
+		}
 		return nil
 	}
 	return errNotFound(
 		"leg %d is neither in the leg_list of group %d nor a new leg of "+
 			"its repair", legId, grp.GetGrpId())
+}
+
+// errPartialLeg is the forced start's refusal, with no force, of a new leg
+// the repair repName took back from a retired leg and that carries the
+// partial mark (architecture.md, Repairs, ForceStartGroup): md held the leg
+// once and wrote its superblock and possibly part of the array onto it, so
+// it is no longer the whole copy it was. repName is "" when the deciding STM
+// found the mark after the planning read.
+func errPartialLeg(legId uint64, repName string) error {
+	of := "its repair"
+	if repName != "" {
+		of = "the repair " + strconv.Quote(repName)
+	}
+	return errPrecondition(
+		"leg %d, the new leg %s took back from a retired leg, is partial: "+
+			"md held it once and wrote onto it, so it is no longer the "+
+			"whole copy it was; a forced start with force names it anyway",
+		legId, of)
 }
 
 // checkGrpArrayDown is ForceStartGroup's agent call between its two phases

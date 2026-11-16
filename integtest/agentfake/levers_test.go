@@ -895,7 +895,8 @@ func TestLeversSafeUnderConcurrentUse(t *testing.T) {
 // readings.
 func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 	const behavior = `{"objects": {"cntlr 1:1": {
-	  "repairs": {"r0": {"started": true}, "gone": {"abort_confirmed": true},
+	  "repairs": {"r0": {"started": true, "held": [105]},
+	              "gone": {"abort_confirmed": true},
 	              "r2": {"refusal": "leg 0x2ca holds newer data"}},
 	  "grps": {"12": {"whole": false}, "0x15": {"in_sync": []},
 	           "71": {"whole": false, "in_sync": [712], "acted": 0}}}}}`
@@ -964,8 +965,10 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 			wantKeys(t, "rep_id_to_repair_info",
 				info.GetRepIdToRepairInfo(), 9, 11)
 			if v := info.GetRepIdToRepairInfo()[9]; !v.GetStarted() ||
-				v.GetAbortConfirmed() || v.GetRefusal() != "" {
-				t.Errorf("verdict on rep 9 = %v, want started", v)
+				v.GetAbortConfirmed() || v.GetRefusal() != "" ||
+				fmt.Sprint(v.GetHeldNewLegIdList()) != "[105]" {
+				t.Errorf("verdict on rep 9 = %v, want started, leg 105 held",
+					v)
 			}
 			if v := info.GetRepIdToRepairInfo()[11]; v.GetStarted() ||
 				v.GetAbortConfirmed() ||

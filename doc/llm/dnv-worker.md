@@ -807,7 +807,8 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   on a DN that holds no leg of the group but the bad one; it deletes the
   `RetiredLeg` key and takes it out of both lists, the leg keeping its leg
   id, its `leg_idx` and its side, the repair keeping its `retired_epoch`
-  and, when it carries one, its `keep` (`new_leg_id_to_keep`),
+  and, when it carries them, its `keep` (`new_leg_id_to_keep`) and its
+  `partial` mark (`new_leg_id_to_partial`),
   and takes one id, the `rep_id` — at `MaxRetiredLegPerGrp` too, since the
   finish then retires one leg as this took one. A fresh leg under an
   operator's name requires the group below `MaxRetiredLegPerGrp` retired
@@ -869,9 +870,9 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   checks; the repair listed and its key present; `REP_STAGE_ABORTED`, any
   other stage refused with its name; its parent holding its group, a clone
   parent not `deleting`; the group naming the repair. A new leg taken from
-  a retired leg goes back as that `RetiredLeg`, with the `retired_epoch`
-  and the `keep` the repair kept, its own `leg_idx`, its side as it is now
-  and the
+  a retired leg goes back as that `RetiredLeg`, with the `retired_epoch`,
+  the `keep` and the `partial` mark the repair kept, its own `leg_idx`, its
+  side as it is now and the
   repair's parent, listed again in both lists; a fresh new leg's side goes
   back to its DN as `DrainSpSlice` gives a popped group's back: per
   DISTINCT DN the group's `ext_cnt` back, pointer out, capacity, one
@@ -938,7 +939,9 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   `leg_list` other than the bad leg of a STARTED repair, or a new leg of
   the repair the group names while it is CREATED or STARTED, whatever its
   abort flag says (`ReasonLegNotNamable`), the repair read through the
-  pool's list as every op reads one whenever the group names one; it sets the
+  pool's list as every op reads one whenever the group names one, and,
+  with no force, not a new leg that carries the repair's partial mark
+  (`ReasonLegPartial`); it sets the
   group's `forced_start` to the leg, the force and the revision its own
   `SpRev` bump writes, replacing a mark that stands, sets `keep` on every
   retired leg the group lists, `keep` in `new_leg_id_to_keep` for each new
@@ -986,6 +989,15 @@ list; the flip, which reads the repair's key alone, skips it as gone.
   `operator_in_charge` to the value and writes the parent with no `SpRev`
   bump, as the call's spec says (`architecture.md`, Repairs); a group whose
   flag already holds the value is answered with no write.
+* `SetNewLegsPartial` takes the repair's name and `rep_id`, a list of its
+  new legs' ids to mark and one to clear, and no expected revision: the
+  worker converges on what the store holds. It requires the any-level SP
+  checks. It skips, and fails nothing, a name the pool does not list, a
+  repair whose `rep_id` is another, a deleting clone's repair, a leg the
+  repair did not take back from a retired leg, a mark already there and a
+  clear of none; it sets or clears `new_leg_id_to_partial` on the rest and
+  writes the `Repair` with no `SpRev` bump, as no agent reads the mark, and
+  returns how many marks it changed (AR11).
 * `SetRetiredLegKeep`, the body of `UpdateRetiredLegKeep`, takes the
   retired leg's id and the flag's value, and requires the expected
   revision; the any-level SP checks; the leg listed in the pool's list
@@ -4027,6 +4039,29 @@ RW16), and AR8's drive step leaves a repair this pass moved to the next
 pass, which reads its new stage. The reasons are `architecture.md`, Repair.
 A latched SP moves no stage: its drain deletes its repairs (SPD6, SPD15).
 
+Before the moves, from the same report, the walk keeps the partial mark of
+each new leg of a repair, at any stage, that the repair took back from a
+retired leg (`new_leg_id_to_retired_epoch`): a leg the verdict names as
+held by md (`held_new_leg_id_list`) and the group's reading does not hold
+in sync (`in_sync_leg_id_list`) is marked, and a marked leg the reading
+holds in sync loses its mark, through `model.SetNewLegsPartial` (MD6), one
+call per repair, naming its `rep_id`. Reason: md writes its superblock onto
+a member at its add, and part of the array while it copies, so a leg md
+holds but not in sync is no longer the copy it was taken back as, while
+one it holds in sync holds the array's whole data, as after a forced start
+from it; the cancel gives the leg back as a retired leg with the mark, and
+a forced start refuses to name a marked leg unless forced
+(`architecture.md`, Retired legs). The mark follows the report the pass
+reads alone, so a hold md begins and ends between two passes leaves none
+(`architecture.md`, Known limits). A fresh new leg is never marked: its
+cancel gives its side back. The repair of a deleting clone, or of a clone
+the snapshot does not hold, is passed over. A write logs `repair leg
+partial`, naming the repair, the legs it marks and clears, the primary and
+the revision of its report; a write that fails logs `repair leg partial
+kept` with its error, and the next pass judges again from its own report.
+The write raises no revision, since no agent reads the mark, and is no
+action (AR2).
+
 AR12. **Retire timer.** For a live SP where reactions run — after AR3's
 suppression — and before the reactions, the pass deletes at most one
 retired leg, whoever's repair retired it, through `model.DeleteRetiredLeg`
@@ -4799,7 +4834,11 @@ reads from the stored state;
 skipped` a move AR11 finds due and does not make, with its reason, the
 op's name as `op` when the op refused it, or its error, and a CREATED
 repair's verdict that carries the primary's refusal of a take-back, with
-`take_back_refused` and the refusal's text as `refusal` (AR11);
+`take_back_refused` and the refusal's text as `refusal` (AR11); `repair
+leg partial` a write of the partial marks of taken-back new legs whose
+call wrote, naming the repair, the legs it marks and clears, the primary
+and its report's revision, and `repair leg partial kept` a write whose
+call failed, with its error (AR11);
 `retired leg deleted` a retire timer's delete whose call succeeded and
 `retired leg kept` an old retired leg the timer keeps, with its reason, the
 op's name as `op` when the op refused the delete, or its error (AR12);
@@ -4973,7 +5012,9 @@ revision gate being per object and not per cluster.
   once the group reads whole; a repair that takes a retired leg back, whose
   add the primary's verdict refuses, stays CREATED while every pass logs
   the refusal's text, and is aborted and cancelled, giving the leg back as
-  a retired leg; the mark of an operator's forced start is cleared
+  a retired leg with no partial mark; a second take-back of that leg, which
+  the primary's verdict names as held by md, is marked partial and, aborted
+  and cancelled, gives the leg back as a partial retired leg; the mark of an operator's forced start is cleared
   once a report of an observation at or after its revision holds the named
   leg in sync on a leg row that reads `OK`, the primary having been carried
   the mark first and its reading naming the mark as the one it acted on;
@@ -5161,7 +5202,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Eighteen records no suite case stages: `worker reg watch restarting`, `rev
+Nineteen records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -5180,7 +5221,9 @@ suite case forces that code or sets `leftover_rounds`;
 above;
 `sp group missing`, since no suite case plants a repair or a retired leg
 whose group is missing; `member add refused`, since no fake agent reports
-a group's refusal (AR14); and `groups array made kept`, since every
+a group's refusal (AR14); `repair leg partial kept`, since every partial
+mark the repair case stages commits (AR11); and `groups array made kept`,
+since every
 write of the flag the suite makes commits (AR15). `repair stage skipped` is
 staged only as the record of a refused take-back, every stage move the
 repair and reaction cases stage committing.
@@ -5330,7 +5373,8 @@ reports every group of the request as whole, with every leg of its `leg_list`
 held in sync and the group's forced-start mark, if any, named as the mark
 it acted on (`cnagent.md` CN28), and no verdict on a repair; the levers
 `repairs`, a verdict by a repair's name, the text of a refused take-back
-included, that the fake reports under the repair's `rep_id`, and `grps`, a
+and the new legs md holds (`held`) included, that the fake reports under the
+repair's `rep_id`, and `grps`, a
 group's whole flag, in-sync list or acted mark (`acted`) by `grp_id`,
 change what a primary reports, and a standby reports neither. It stamps
 every reply as an agent does

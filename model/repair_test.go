@@ -2110,7 +2110,7 @@ func TestRepairReasonsAreDistinct(t *testing.T) {
 		ReasonRetiredListFull, ReasonGrpHasRepair, ReasonStaleRevision,
 		ReasonCandidateChanged, ReasonNoIdLeft, ReasonLegNotNamable,
 		ReasonGrpOperatorInCharge, ReasonRetiredLegsKept,
-		ReasonRetiredLegKept,
+		ReasonRetiredLegKept, ReasonLegPartial,
 	} {
 		if seen[reason] {
 			t.Errorf("reason %q is used twice", reason)

@@ -201,8 +201,9 @@ message ForcedStart {
     uint64 revision = 2;
     // The operator's force (ForceStartGroupRequest.force): the start goes on
     // from a named leg whose md change count is below that of a full member
-    // of the same identity the start would zero (cnagent.md CN12). Appended,
-    // never renumbered.
+    // of the same identity the start would zero (cnagent.md CN12), and the
+    // mark may name a taken-back leg that carries the partial mark
+    // (Repair.new_leg_id_to_partial). Appended, never renumbered.
     bool force = 3;
 }
 
@@ -450,6 +451,12 @@ message CntlrInfo {
         // for the sp worker's log; no rule reads it. Appended, never
         // renumbered.
         string refusal = 3;
+        // The repair's new legs whose members the running array holds, in
+        // any state — in sync, copying, a spare or failed — ascending: md
+        // has written its superblock onto each, so a taken-back leg is no
+        // longer the copy it was. The sp worker marks such a leg partial
+        // (dnv-worker.md AR11). Appended, never renumbered.
+        repeated uint64 held_new_leg_id_list = 4;
     }
     // What the primary reads of one group's running array: whether it is
     // whole, every place holding a member in sync, and the leg ids, of
@@ -887,6 +894,12 @@ message Repair {
     // back as a retired leg with keep set, as it gives its retired_epoch
     // back. Appended, never renumbered.
     map<uint64, bool> new_leg_id_to_keep = 12;
+    // The partial mark of each new leg taken from a retired leg, keyed by
+    // its leg id, true alone: set by CreateRepair from a retired leg that
+    // carried it, and by the sp worker once the primary's report shows md
+    // holding the leg (dnv-worker.md AR11); CancelRepair gives the leg back
+    // as a retired leg with partial set. Appended, never renumbered.
+    map<uint64, bool> new_leg_id_to_partial = 13;
 }
 
 // {dnv_prefix} retired_leg {cluster_id} {sp_id} {leg_id}
@@ -914,6 +927,14 @@ message RetiredLeg {
     // and UpdateRetiredLegKeep sets or clears it. Appended, never
     // renumbered.
     bool keep = 7;
+    // md held the leg as a repair's new leg, taken back from this retired
+    // leg, before the repair was cancelled: md wrote its superblock and
+    // possibly part of the array onto it, so it is no longer the whole copy
+    // it was. CancelRepair copies it from Repair.new_leg_id_to_partial, and
+    // CreateRepair copies it back into the repair that takes the leg back.
+    // A forced start refuses to name such a leg unless forced. Appended,
+    // never renumbered.
+    bool partial = 8;
 }
 
 // {dnv_prefix} sp_id_to_name {cluster_id} {sp_id}
@@ -1740,8 +1761,9 @@ message ForceStartGroupRequest {
     // Withdraw the group's mark instead of writing one.
     bool cancel = 6;
     // Start from the named leg even when a full member the start would zero
-    // holds a higher md change count of the same identity
-    // (ForcedStart.force); false with cancel. Appended, never renumbered.
+    // holds a higher md change count of the same identity, or the leg is a
+    // taken-back leg that carries the partial mark (ForcedStart.force);
+    // false with cancel. Appended, never renumbered.
     bool force = 7;
 }
 

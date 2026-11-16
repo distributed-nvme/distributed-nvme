@@ -3023,8 +3023,12 @@ func reportGrpReading(
 // a CREATED repair whose abort flag is in the cntlr's own request, when md
 // holds nothing on a new leg, the flag tying the confirmation to the flag the
 // sp worker set. The two never hold together, and an aborted repair has
-// neither. A repair with no new leg is never started. refusal is the
-// take-back check's refusal of the new leg's add (takeBackStep), "" when
+// neither. held_new_leg_id_list names, ascending, every new leg md holds a
+// member on in any state (MdMember, held at all): md has written its
+// superblock onto it, which the sp worker records as a taken-back leg's
+// partial mark (dnv-worker.md AR11). A repair with no new leg is never
+// started. refusal is the take-back check's refusal of the new leg's add
+// (takeBackStep), "" when
 // nothing holds it back: text for people, which the sp worker logs while
 // the repair waits (dnv-worker.md AR11) and no rule decides anything on, and
 // never an error on the group's row, which would fail the primary over for a
@@ -3037,6 +3041,7 @@ func repairVerdict(
 	rp := gp.rep
 	started := rp.open() && len(rp.newLegs) > 0
 	confirmed := rp.aborting()
+	var heldNew []uint64
 	for _, lp := range rp.newLegs {
 		member, ok := held[lp.name]
 		if !ok || !member.holdsPlace() {
@@ -3044,6 +3049,7 @@ func repairVerdict(
 		}
 		if ok {
 			confirmed = false
+			heldNew = append(heldNew, lp.legId)
 		}
 	}
 	for _, lp := range gp.legs {
@@ -3051,9 +3057,11 @@ func repairVerdict(
 			started = false
 		}
 	}
+	slices.Sort(heldNew)
 	return &pb.CntlrInfo_RepairInfo{
-		Started:        started,
-		AbortConfirmed: confirmed,
-		Refusal:        refusal,
+		Started:          started,
+		AbortConfirmed:   confirmed,
+		Refusal:          refusal,
+		HeldNewLegIdList: heldNew,
 	}
 }

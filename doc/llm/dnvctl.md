@@ -619,7 +619,7 @@ worker's repair gave a retired leg back (`architecture.md`, Repairs).
 `retired-leg delete` names the retired leg by its own leg id, `--leg`; a
 retired leg is taken back by `repair create --retired-leg` rather than by
 a leaf of this group (`architecture.md`, Retired legs). `retired-leg list`
-is not paged, and prints each leg's `keep` flag. `retired-leg keep` sends
+is not paged, and prints each leg's `keep` flag and its `partial` mark. `retired-leg keep` sends
 `UpdateRetiredLegKeep` with `keep` true, which keeps the leg from the sp
 worker's retire timer and from the give-back at the retired-leg bound,
 and with `--clear` sends it false (`architecture.md`, Retired legs); it
@@ -636,7 +636,8 @@ by `--leg`. With `--cancel` it withdraws the group's mark instead and names
 no leg. `--force` puts the operator's force on the mark, so that the start
 goes on from a named leg whose change count is below that of a full member
 of the same array, which it overwrites (`architecture.md`, Repair, Forced
-start). dnvctl checks none of the pairings: a non-zero `--leg` or a
+start), and so that the mark may name a taken-back leg that carries the
+partial mark (`architecture.md`, Retired legs). dnvctl checks none of the pairings: a non-zero `--leg` or a
 `--force` beside `--cancel`, and a write with no `--leg`, reach the gateway,
 which refuses them (CT8).
 The forced start overwrites the other members it keeps, the open repair's

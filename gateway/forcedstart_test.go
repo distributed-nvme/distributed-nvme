@@ -309,6 +309,44 @@ func TestForceStartGroupNamesARepairsNewLeg(t *testing.T) {
 	}
 }
 
+// TestForceStartGroupRefusesAPartialLeg pins the refusal of a partial leg
+// (architecture.md, Repairs, ForceStartGroup): a mark naming a new leg the
+// repair took back, which carries the partial mark, is FAILED_PRECONDITION
+// with nothing written, and goes through with the force.
+func TestForceStartGroupRefusesAPartialLeg(t *testing.T) {
+	env := newVolEnv(t)
+	agent := fsPrimary(env)
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
+	created := repCreate(env, "rep-a", volDataLegA, volDnC)
+	newLegId := created.GetNewLegId()
+	// The leg stands in for a taken-back one: the repair keeps its time and
+	// its partial mark.
+	rep := env.repair("rep-a")
+	rep.NewLegIdToRetiredEpoch = map[uint64]uint64{newLegId: 11}
+	rep.NewLegIdToPartial = map[uint64]bool{newLegId: true}
+	mustPut(env.t, env.cli, model.RepairKey(env.cid, volSpId, "rep-a"), rep)
+	before := env.dump()
+	_, err := env.srv.ForceStartGroup(env.ctx, fsRequest(env, newLegId))
+	msg := volWantCode(t, err, codes.FailedPrecondition)
+	// The planning read refuses it, naming the repair; the deciding STM's
+	// refusal of a leg marked since that read names none.
+	if !strings.Contains(msg, "is partial") ||
+		!strings.Contains(msg, `the repair "rep-a"`) {
+		t.Errorf("the refusal's message %q does not say that leg of the "+
+			"repair \"rep-a\" is partial", msg)
+	}
+	env.wantNoWrite("the refused ForceStartGroup", before)
+	req := fsRequest(env, newLegId)
+	req.Force = true
+	if _, err := env.srv.ForceStartGroup(env.ctx, req); err != nil {
+		t.Fatalf("the forced mark on the partial leg: %v", err)
+	}
+	if mark := fsMark(env, volDataGrpId); mark.GetLegId() != newLegId ||
+		!mark.GetForce() {
+		t.Errorf("the mark: got %v, want leg %d with force", mark, newLegId)
+	}
+}
+
 // TestForceStartGroupGoesOnWithoutAnOkRow pins the readings of the
 // primary's report that let the mark be written (architecture.md, Repairs):
 // a group row in any status but OK, whatever the reply's code, an
