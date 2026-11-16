@@ -704,6 +704,13 @@ func (w *revWorker) syncup(
 	w.seeObservation(reply)
 	w.syncupObs = reply.obsTime
 	w.logSyncupResult(ctx, revision, obsTraceId, reply, nil)
+	if w.ctx.Err() != nil {
+		// RW11: a reply that arrives after the stop is logged and judged no
+		// further, as fail reports nothing on the way out: its health write
+		// would run under the cancelled stop ctx and log a failure that is
+		// none, and the next owner's rounds find the verdict again (RW12).
+		return
+	}
 	if !accepted(reply.code) {
 		w.logSyncupRejected(ctx, revision, reply)
 		// HL1/HL2: a rejection neither sets nor clears health; observe is
@@ -781,6 +788,13 @@ func (w *revWorker) recv(
 		case <-timer.C:
 			return nil, errRoundTimeout
 		case next := <-w.desiredCh:
+			if next == w.desired {
+				// RW3: an unchanged desired state does nothing, so the
+				// round goes on: a parent that hands every child its
+				// unchanged state on a tick must not abandon the rounds
+				// that would find a frozen agent unreachable.
+				continue
+			}
 			// RW6: apply and sync AT ONCE — this reply may be a whole
 			// interval away (RW9) and the parent's change must not wait for
 			// it. The round ends: its reply answers the request built from

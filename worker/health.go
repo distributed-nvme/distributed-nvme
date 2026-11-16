@@ -87,6 +87,7 @@ type healthWriter interface {
 		ctx context.Context,
 		cid uint64,
 		addrPort string,
+		dnId uint64,
 		epoch uint64,
 		cc *pb.ClusterConf,
 	) error
@@ -94,6 +95,7 @@ type healthWriter interface {
 		ctx context.Context,
 		cid uint64,
 		addrPort string,
+		cnId uint64,
 		epoch uint64,
 	) error
 	setCntlrErrEpoch(
@@ -188,19 +190,21 @@ func (w *modelHealthWriter) setDnErrEpoch(
 	ctx context.Context,
 	cid uint64,
 	addrPort string,
+	dnId uint64,
 	epoch uint64,
 	cc *pb.ClusterConf,
 ) error {
-	return model.SetDnErrEpoch(ctx, w.cli, cid, addrPort, epoch, cc)
+	return model.SetDnErrEpoch(ctx, w.cli, cid, addrPort, dnId, epoch, cc)
 }
 
 func (w *modelHealthWriter) setCnErrEpoch(
 	ctx context.Context,
 	cid uint64,
 	addrPort string,
+	cnId uint64,
 	epoch uint64,
 ) error {
-	return model.SetCnErrEpoch(ctx, w.cli, cid, addrPort, epoch)
+	return model.SetCnErrEpoch(ctx, w.cli, cid, addrPort, cnId, epoch)
 }
 
 func (w *modelHealthWriter) setCntlrErrEpoch(
@@ -619,7 +623,8 @@ func newDnMonitor(
 					"dn err_epoch cluster %016x: %w", cid, err,
 				)
 			}
-			return d.health.setDnErrEpoch(ctx, cid, addrPort(), epoch, cc)
+			return d.health.setDnErrEpoch(
+				ctx, cid, addrPort(), dnId, epoch, cc)
 		},
 		load: func(ctx context.Context) (uint64, bool, error) {
 			conf, revision, found, revFound, err := readDnRecord(
@@ -631,6 +636,9 @@ func newDnMonitor(
 			if onRecord != nil {
 				onRecord(conf, revision, found, revFound)
 			}
+			// A record that names another dn_id is another node's at the
+			// address: missing, for this monitor (HL1).
+			found = found && conf.GetDnId() == dnId
 			return conf.GetErrEpoch(), found, nil
 		},
 	}
@@ -654,14 +662,15 @@ func newCnMonitor(
 		cid:    cid,
 		attrs:  []slog.Attr{slog.Uint64("cn_id", cnId)},
 		write: func(ctx context.Context, epoch uint64, _ bool) error {
-			return d.health.setCnErrEpoch(ctx, cid, addrPort(), epoch)
+			return d.health.setCnErrEpoch(ctx, cid, addrPort(), cnId, epoch)
 		},
 		load: func(ctx context.Context) (uint64, bool, error) {
 			conf := &pb.CnConf{}
 			found, err := d.store.Get(
 				ctx, model.CnConfKey(cid, addrPort()), conf,
 			)
-			return conf.GetErrEpoch(), found, err
+			// As the DN's: another node's record is missing (HL1).
+			return conf.GetErrEpoch(), found && conf.GetCnId() == cnId, err
 		},
 	}
 }

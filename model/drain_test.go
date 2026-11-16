@@ -1157,9 +1157,9 @@ func TestDrainToleratesALostNodeRecord(t *testing.T) {
 		_, err := DrainSpCntlrs(
 			env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName)
 		precondition := wantPrecondition(t, err, opDrainSpCntlrs)
-		if precondition.Reason != "cntlr not found" {
-			t.Errorf("Reason: got %q, want %q",
-				precondition.Reason, "cntlr not found")
+		if want := fmt.Sprintf("cntlr %d not found", opsCntlrA); precondition.
+			Reason != want {
+			t.Errorf("Reason: got %q, want %q", precondition.Reason, want)
 		}
 		if !env.exists(CntlrKey(env.cid, opsSpId, opsCntlrB)) {
 			t.Errorf("a refused D1 deleted the other cntlr")

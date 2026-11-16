@@ -201,11 +201,15 @@ func (d *dnDriver) syncup(
 		return nil, fmt.Errorf("read dn record: %w", err)
 	}
 	d.noteRecord(dnConf, revision, found, revFound)
-	if !found {
+	// A record that names another dn_id is another node's, created at the
+	// address after this one's delete: missing for this loop (RW13), so its
+	// syncup never sends the other node's side list under this node's id.
+	if !found || dnConf.GetDnId() != d.dnId {
 		slog.InfoContext(ctx, "dn conf missing",
 			slog.Uint64("cluster_id", d.cid),
 			slog.Uint64("dn_id", d.dnId),
 			slog.String("addr_port", d.addr),
+			slog.Uint64("found_dn_id", dnConf.GetDnId()),
 		)
 		return nil, nil
 	}

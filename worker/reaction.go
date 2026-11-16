@@ -1497,7 +1497,7 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 // coordinator (SW3). Any other failure is recorded as RW14 records a
 // fan-out's, and the pass simply runs again on the next tick (RW12).
 func (w *spWorker) loadPassState(ctx context.Context) (*model.SpState, bool) {
-	state, err := w.ops.loadSp(ctx, w.cid, w.desired.handle)
+	state, err := w.loadOwnSp(ctx)
 	if err != nil {
 		if !errors.Is(err, model.ErrNotFound) {
 			slog.InfoContext(ctx, msgSpLoadFailed,

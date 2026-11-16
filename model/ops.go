@@ -925,7 +925,8 @@ func spFootprint(
 		key := SliceKey(cid, conf.GetSpId(), sliceId)
 		slice := &pb.Slice{}
 		if !s.Get(key, slice) {
-			return 0, fail(op, "slice not found")
+			// The reason names the lost key's id (dnv-worker.md SPD12).
+			return 0, fail(op, fmt.Sprintf("slice %d not found", sliceId))
 		}
 		grpLists := [][]*pb.Group{
 			slice.GetMetaGrpList(),
@@ -961,13 +962,17 @@ func SetDnErrEpoch(
 	cli *etcdutil.Client,
 	cid uint64,
 	addrPort string,
+	dnId uint64,
 	epoch uint64,
 	cc *pb.ClusterConf,
 ) error {
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		key := DnConfKey(cid, addrPort)
 		dn := &pb.DnConf{}
-		if !s.Get(key, dn) {
+		// A record at the address that names another dn_id is another
+		// node's, created at the address after this one's delete: not
+		// found, as no record is (dnv-worker.md HL1).
+		if !s.Get(key, dn) || dn.GetDnId() != dnId {
 			return fail(opSetDnErrEpoch, "dn not found")
 		}
 		value, changed := applyErrEpoch(dn.GetErrEpoch(), epoch)
@@ -992,12 +997,13 @@ func SetCnErrEpoch(
 	cli *etcdutil.Client,
 	cid uint64,
 	addrPort string,
+	cnId uint64,
 	epoch uint64,
 ) error {
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		key := CnConfKey(cid, addrPort)
 		cn := &pb.CnConf{}
-		if !s.Get(key, cn) {
+		if !s.Get(key, cn) || cn.GetCnId() != cnId {
 			return fail(opSetCnErrEpoch, "cn not found")
 		}
 		value, changed := applyErrEpoch(cn.GetErrEpoch(), epoch)

@@ -629,7 +629,9 @@ or `ReasonRetiredLegNotFound`, which name an object the pool does not
 list; the flip, which reads the repair's key alone, and
 `SetNewLegsPartial` skip it as gone.
 
-* `SetDnErrEpoch` and `SetCnErrEpoch` require the record to exist. With a
+* `SetDnErrEpoch` and `SetCnErrEpoch` require the record to exist and to
+  name the `dn_id` or `cn_id` the caller gives, a record of another node at
+  the address being refused as an absent one is. With a
   non-zero epoch they set it only when the stored value is zero (the threshold
   clock never restarts); with a zero epoch they clear it. They run
   `MaintainDnCapacity` or `MaintainCnCapacity` over the old and new records.
@@ -1495,7 +1497,9 @@ during the wait logs neither.
 SW4. **Compaction and watch errors.** Rescan the prefix: start workers for
 keys not known; update known ones whose revision or handle differ; stop
 workers whose key is absent from the scan, without waiting, as a delete
-does (SW3); restart the watch from the new revision plus one. A failing
+does (SW3), while a known key that is present with a value that does not
+decode keeps its worker, its desired state unchanged (SW2); restart the
+watch from the new revision plus one. A failing
 rescan is retried every `--vote-interval` — never a hot loop.
 
 SW5. **Graceful stop.** Cancel the watch, stop every revision worker in
@@ -1592,7 +1596,10 @@ RW3. **Coalescing.** Desired changes arrive from the parent (shard worker
 or SP coordinator) over a channel of capacity one that is overwritten, so
 the loop only ever sees the latest revision — every request carries the
 complete state, intermediate revisions need not be sent (`architecture.md`,
-Common agent rules).
+Common agent rules). A desired state equal to the one the loop holds does
+nothing, inside a round too: the round waiting for its reply goes on, so a
+parent that hands every child its unchanged state on a tick never abandons
+the rounds that would find a frozen agent unreachable.
 
 RW4. **Round**, every interval (RW9):
 1. no stream: open one over the cached connection (RW7); a failure to open
@@ -1846,7 +1853,11 @@ operator pulls one incarnation's records by its prefix.
 
 RW11. **Graceful stop.** On ctx cancellation the loop finishes an in-flight
 unary call (its own deadline bounds the wait; the stop ctx is not the RPC
-ctx), then `CloseSend`s and cancels the stream, releases the connection and
+ctx), logs its `syncup result` and judges its reply no further — no health
+verdict and no report, as a failed round reports nothing on the way out,
+though the bitmap compare of a side's or a cntlr's syncup still runs on the
+reply and can start a push that the stop then waits for (Known limits,
+Undriven windows) — then `CloseSend`s and cancels the stream, releases the connection and
 logs `revision worker stopped`. A loop cancelled while it still waits for
 its predecessor (RW1) has done nothing yet: it returns once its predecessor
 has stopped, and logs neither `revision worker started` nor
@@ -1906,7 +1917,9 @@ RW13. Inputs: `cluster_id` and `dn_id` from the key, `addr_port` and
 the cache and, at one store revision (EU4), the `DnConf` at `DnConfKey` of
 the cluster and endpoint together with the `DnRev` of the DN that record
 names, so that the record comes with the revision it belongs to (a missing
-`DnConf`: log, skip, retry next round; a read that fails fails the syncup,
+`DnConf`, or one that names another `dn_id` — another node created at the
+address after this one's delete —: log, skip, retry next round; a read that
+fails fails the syncup,
 whose `syncup result` names the read's error, and the next round retries);
 it sends a `SyncupDnRequest` carrying `cluster_id`, `dn_id`, the revision,
 `side_pointer_list` from the record's `side_ptr_list` and `extent_size` from
@@ -1960,7 +1973,8 @@ so storing the agent's count would need a new kind of write.
 ### cn role — `worker/cnrole.go`
 
 The mirror image, without RW13's count compare: the `CnConf` at
-`CnConfKey`, read alone with a plain `Get`, a `SyncupCnRequest` carrying
+`CnConfKey`, read alone with a plain `Get` (missing, or naming another
+`cn_id`: log `cn conf missing`, skip, retry), a `SyncupCnRequest` carrying
 `cluster_id`, `cn_id`, the revision, `cntlr_pointer_list` from the record's
 `cntlr_ptr_list` and `qos_ratio` from the `ClusterConf`, a `CheckCnRequest`,
 and health per HL1.
@@ -1969,7 +1983,12 @@ and health per HL1.
 
 RW14. The SP revision worker is a **coordinator**. On every desired change
 (an `SpRev` put: `revision` plus `sp_name`) it loads the SP with
-`model.LoadSp` (MD3), resolves the `dn_id` of every side of the SP
+`model.LoadSp` (MD3) — a loaded `SpConf` whose `sp_id` is not the
+coordinator's reads as the SP gone, in the fan-out as in the reaction
+pass's load, since the name was deleted and created again for another
+pool, whose state sent under this pool's revision would make the agents
+refuse the new pool's own requests (`dnagent.md` SH8) — resolves the
+`dn_id` of every side of the SP
 (through `DnByAddr` by the side's `addr_port`) and every cntlr's
 `cn_id`, builds every `SyncupSideRequest` and every
 `SyncupCntlrRequest` once (RW15, RW16), keeping
@@ -2413,7 +2432,7 @@ destination side's latest `SideInfo` reads `migr_dst_info.target_info`
 `RES_STATUS_PROVISIONING` with the reason `RES_REASON_AWAITING_CUTOVER`
 (`dnagent.md` DN13, DN18), and a cntlr that the plan the coordinator last
 decided makes primary — the primary HL2 records leg rows from — and not
-`disabled` reported the
+`disabled` reported, in a reply at that plan's revision (HL2), the
 destination side's `side_id_to_path` row `RES_STATUS_OK` (`cnagent.md` CN28)
 in the drain of reports the coordinator is handling, read from a reply's own
 info: for a round, what its stream last carried; for a `SyncupCntlr` reply,
@@ -2520,7 +2539,9 @@ record of its own. Watch errors and compaction are handled like SW4.
 HL1. **Nodes (dn/cn roles).** Evaluated per round and per syncup reply on
 the node's own stream; written through `model.SetDnErrEpoch` and
 `SetCnErrEpoch`, which maintain the capacity key in the same STM (MD4;
-`architecture.md`, Capacity index keys). The effect of each reply or
+`architecture.md`, Capacity index keys) and refuse, as for no record, a
+record at the address that names another node's id; the monitor's load of
+the record reads such a record as missing too. The effect of each reply or
 missed round on `DnConf.err_epoch` or `CnConf.err_epoch`:
 
 * the stream cannot be opened, breaks, or no reply arrives within the round
@@ -2637,9 +2658,17 @@ The rules are the same for every kind of record:
 * `Leg.err_epoch` is set to now (if zero) when the **primary** cntlr's
   `leg_id_to_leg` row of the leg reads `RES_STATUS_ERROR` (the health-block
   probe of `architecture.md`, Group on-leg layout: meta region, data region,
-  health block; repairs' new legs included) — a standby's leg row
-  is logged, never recorded — and cleared when the primary reports the row
-  `RES_STATUS_OK`. A retired leg has no leg row: no cntlr connects it.
+  health block; repairs' new legs included) — a standby's leg row, and a
+  disabled primary's, which runs the standby shape (`cnagent.md` CN9), is
+  logged, never recorded — and cleared when the primary reports the row
+  `RES_STATUS_OK`. The rows count only from a reply at the revision of the
+  plan the cntlr's child drives, the test the settle makes: a promoted
+  cntlr's reply at the revision before still describes a standby. RW18's
+  path rows are read under the same two gates. So while the primary's agent
+  stays behind that revision, as while it refuses the plan's `SyncupCntlr`
+  (RW5), no leg row and no path row of it counts: a leg that dies meanwhile
+  gets no epoch, so leg repair (AR8) waits, and a cutover waits too. A retired
+  leg has no leg row: no cntlr connects it.
 * `Side.err_epoch` is set to now (if zero) when its `CheckSide` stream cannot
   be opened, breaks or misses a round — a round whose observation HL7 finds
   too old included — or `side_dev_info` or any
@@ -4669,7 +4698,11 @@ missing `DnConf` or `CnConf`: those are the RECEIVING ledger, there is
 nothing left to credit, and skipping keeps the SP deletable (`releaseCn`'s
 stance). The cost of the refusal is that such an SP stays latched — the
 latch is one-way (SPD5) and nothing else removes the keys — so the drain
-names the missing key on every tick in `sp drain failed`, and an operator
+names the missing key on every tick in `sp drain failed` — the first
+step's refusal names the lost cntlr's or slice's id in its reason
+(`cntlr N not found`, `slice N not found`), and a later step's names the
+lost record's kind, the record carrying `slice_id` where the step drains a
+slice — and an operator
 restores it by hand — a raw etcd put of the `Cntlr`, `Slice`, `Repair` or
 `RetiredLeg` record — to let it finish. That is a louder and more
 recoverable state than a silent ledger drift, which is why it is the
@@ -6345,7 +6378,7 @@ which no suite case sets, so no suite case runs RW13's count compare.
   the agent's, and a failed save repeats its own at Error on each round
   that re-sends the refused request (RW5); a
   `dn conf missing` or `cn conf missing` while the node's
-  `DnConf` or `CnConf` is absent (RW13); a `late observation` while an
+  `DnConf` or `CnConf` is absent or names another node (RW13); a `late observation` while an
   object's observations stay older than an interval (HL7), which as a
   rule comes once per round beside each `syncup rejected` of an object
   the agent holds, a stale revision's and a failed save's among them,

@@ -139,11 +139,13 @@ func (d *cnDriver) syncup(
 		// (RW12).
 		return nil, fmt.Errorf("read cn record: %w", err)
 	}
-	if !found {
+	// As the dn loop's: another node's record at the address is missing.
+	if !found || cnConf.GetCnId() != d.cnId {
 		slog.InfoContext(ctx, "cn conf missing",
 			slog.Uint64("cluster_id", d.cid),
 			slog.Uint64("cn_id", d.cnId),
 			slog.String("addr_port", d.addr),
+			slog.Uint64("found_cn_id", cnConf.GetCnId()),
 		)
 		return nil, nil
 	}

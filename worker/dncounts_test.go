@@ -501,8 +501,6 @@ func TestDnRoleComparesAtTheRecordRevision(t *testing.T) {
 		{name: "side records that do not match",
 			info: countsInfo(80, 100, false), dnId: testDnId, dnRev: 42},
 		{name: "no counts", info: noCounts, dnId: testDnId, dnRev: 42},
-		{name: "another dn's record", info: countsInfo(80, 100, true),
-			dnId: testDnId + 1, dnRev: 42},
 		{name: "a DnRev past the revision driven",
 			info: countsInfo(80, 100, true), dnId: testDnId, dnRev: 43},
 	} {

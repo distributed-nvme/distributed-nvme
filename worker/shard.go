@@ -193,6 +193,11 @@ func (w *shardWorker) watch(
 // waiting for those stops, like a delete (applyEvent).
 func (w *shardWorker) applyScan(kvs []etcdutil.KV) {
 	seen := make(map[revObjKey]desiredState, len(kvs))
+	// present are the keys the scan holds whose value does not decode: a
+	// malformed value is logged and skipped (SW2), and a key that is present
+	// keeps its running loop, its desired state unchanged (SW4), as the
+	// vote worker's rescan keeps a member whose value it cannot read.
+	present := make(map[revObjKey]bool)
 	for _, kv := range kvs {
 		key, ok := w.parseKey(kv.Key)
 		if !ok {
@@ -200,12 +205,13 @@ func (w *shardWorker) applyScan(kvs []etcdutil.KV) {
 		}
 		msg := w.kind.newMsg()
 		if err := w.deps.store.Decode(w.ctx, kv, msg); err != nil {
-			// The etcdutil record carries the decode error (SW2: a malformed
-			// value is logged and skipped).
+			// The etcdutil record carries the decode error.
+			present[key] = true
 			continue
 		}
 		desired, ok := w.parseValue(kv.Key, msg)
 		if !ok {
+			present[key] = true
 			continue
 		}
 		seen[key] = desired
@@ -214,7 +220,7 @@ func (w *shardWorker) applyScan(kvs []etcdutil.KV) {
 		w.start(key, desired)
 	}
 	for key, entry := range w.workers {
-		if _, ok := seen[key]; ok {
+		if _, ok := seen[key]; ok || present[key] {
 			continue
 		}
 		delete(w.workers, key)

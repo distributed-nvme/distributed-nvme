@@ -986,7 +986,7 @@ func TestSetDnErrEpoch(t *testing.T) {
 	revBefore := env.dnRev(opsDnA)
 	// Set: the record takes the epoch and loses its capacity key.
 	if err := SetDnErrEpoch(
-		env.ctx, env.cli, env.cid, opsDnA, 1000, env.cc,
+		env.ctx, env.cli, env.cid, opsDnA, env.dn(opsDnA).GetDnId(), 1000, env.cc,
 	); err != nil {
 		t.Fatalf("SetDnErrEpoch: %v", err)
 	}
@@ -1001,7 +1001,7 @@ func TestSetDnErrEpoch(t *testing.T) {
 	}
 	// A second, later observation never restarts the clock.
 	if err := SetDnErrEpoch(
-		env.ctx, env.cli, env.cid, opsDnA, 2000, env.cc,
+		env.ctx, env.cli, env.cid, opsDnA, env.dn(opsDnA).GetDnId(), 2000, env.cc,
 	); err != nil {
 		t.Fatalf("SetDnErrEpoch again: %v", err)
 	}
@@ -1010,7 +1010,7 @@ func TestSetDnErrEpoch(t *testing.T) {
 	}
 	// Clear: the capacity key comes back.
 	if err := SetDnErrEpoch(
-		env.ctx, env.cli, env.cid, opsDnA, 0, env.cc,
+		env.ctx, env.cli, env.cid, opsDnA, env.dn(opsDnA).GetDnId(), 0, env.cc,
 	); err != nil {
 		t.Fatalf("SetDnErrEpoch clear: %v", err)
 	}
@@ -1023,7 +1023,7 @@ func TestSetDnErrEpoch(t *testing.T) {
 	if got := env.dnRev(opsDnA); got != revBefore {
 		t.Errorf("clearing must not bump DnRev either: got %d", got)
 	}
-	err := SetDnErrEpoch(env.ctx, env.cli, env.cid, "dn-x:9000", 1, env.cc)
+	err := SetDnErrEpoch(env.ctx, env.cli, env.cid, "dn-x:9000", 0, 1, env.cc)
 	wantPrecondition(t, err, opSetDnErrEpoch)
 }
 
@@ -1042,7 +1042,7 @@ func TestSetCnErrEpoch(t *testing.T) {
 	capKey := CnCapacityKey(env.cid, opsCnFree, opsCnA)
 	revBefore := env.cnRev(opsCnA)
 	if err := SetCnErrEpoch(
-		env.ctx, env.cli, env.cid, opsCnA, 1000,
+		env.ctx, env.cli, env.cid, opsCnA, env.cn(opsCnA).GetCnId(), 1000,
 	); err != nil {
 		t.Fatalf("SetCnErrEpoch: %v", err)
 	}
@@ -1053,14 +1053,15 @@ func TestSetCnErrEpoch(t *testing.T) {
 		t.Errorf("an unhealthy CN must have no capacity key")
 	}
 	if err := SetCnErrEpoch(
-		env.ctx, env.cli, env.cid, opsCnA, 2000,
+		env.ctx, env.cli, env.cid, opsCnA, env.cn(opsCnA).GetCnId(), 2000,
 	); err != nil {
 		t.Fatalf("SetCnErrEpoch again: %v", err)
 	}
 	if got := env.cn(opsCnA).GetErrEpoch(); got != 1000 {
 		t.Errorf("the threshold clock must not restart: got %d", got)
 	}
-	if err := SetCnErrEpoch(env.ctx, env.cli, env.cid, opsCnA, 0); err != nil {
+	if err := SetCnErrEpoch(env.ctx, env.cli, env.cid, opsCnA,
+		env.cn(opsCnA).GetCnId(), 0); err != nil {
 		t.Fatalf("SetCnErrEpoch clear: %v", err)
 	}
 	if !env.exists(capKey) {
@@ -1069,7 +1070,7 @@ func TestSetCnErrEpoch(t *testing.T) {
 	if got := env.cnRev(opsCnA); got != revBefore {
 		t.Errorf("err_epoch must not bump CnRev: got %d", got)
 	}
-	err := SetCnErrEpoch(env.ctx, env.cli, env.cid, "cn-x:9000", 1)
+	err := SetCnErrEpoch(env.ctx, env.cli, env.cid, "cn-x:9000", 0, 1)
 	wantPrecondition(t, err, opSetCnErrEpoch)
 }
 

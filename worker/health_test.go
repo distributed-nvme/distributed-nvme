@@ -734,6 +734,7 @@ func (w *nodeStoreHealthWriter) setDnErrEpoch(
 	ctx context.Context,
 	cid uint64,
 	addrPort string,
+	dnId uint64,
 	epoch uint64,
 	cc *pb.ClusterConf,
 ) error {
@@ -744,13 +745,15 @@ func (w *nodeStoreHealthWriter) setDnErrEpoch(
 	if err != nil {
 		return err
 	}
-	return w.fakeHealthWriter.setDnErrEpoch(ctx, cid, addrPort, epoch, cc)
+	return w.fakeHealthWriter.setDnErrEpoch(ctx, cid, addrPort, dnId, epoch,
+		cc)
 }
 
 func (w *nodeStoreHealthWriter) setCnErrEpoch(
 	ctx context.Context,
 	cid uint64,
 	addrPort string,
+	cnId uint64,
 	epoch uint64,
 ) error {
 	if err := w.refusal(); err != nil {
@@ -760,7 +763,7 @@ func (w *nodeStoreHealthWriter) setCnErrEpoch(
 	if err != nil {
 		return err
 	}
-	return w.fakeHealthWriter.setCnErrEpoch(ctx, cid, addrPort, epoch)
+	return w.fakeHealthWriter.setCnErrEpoch(ctx, cid, addrPort, cnId, epoch)
 }
 
 // put rewrites the err_epoch of the conf stored at key, straight in the fake

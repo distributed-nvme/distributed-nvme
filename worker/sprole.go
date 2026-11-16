@@ -536,12 +536,12 @@ type spReport struct {
 	legRows []legRow
 	// paths is the primary cntlr's path rows as its reply's own info
 	// carried them, for the cutover beside RW18's flip; nil when the reply
-	// carried no info of its own or came from a standby or a disabled
-	// primary.
+	// carried no info of its own, came from a standby or a disabled
+	// primary, or answered another revision than its plan's (HL2).
 	paths *pathReport
 	// cntlrId is the cntlr whose reply produced the report: its legRows are
 	// recorded only while the coordinator's latest plan for that cntlr makes
-	// it the primary (recordsLegRows).
+	// it the primary and not disabled (recordsLegRows).
 	cntlrId uint64
 	// synced is a side child's first accepted reply at a revision: the
 	// revision its agent now holds, which RW14's sides-first barrier waits
@@ -843,7 +843,7 @@ func (w *spWorker) attrs() []any {
 func (w *spWorker) fanOut() {
 	ctx := newTraceCtx(w.ctx, w.seed)
 	w.fanWanted = false
-	state, err := w.ops.loadSp(ctx, w.cid, w.desired.handle)
+	state, err := w.loadOwnSp(ctx)
 	if err != nil {
 		if errors.Is(err, model.ErrNotFound) {
 			// RW14: the SP is being deleted. The children keep driving what
@@ -959,6 +959,26 @@ func (w *spWorker) fanOut() {
 	w.confRefusal.fanOut = ""
 	plan := w.buildPlan(ctx, state)
 	w.applyPlan(ctx, plan)
+}
+
+// loadOwnSp is MD3's load of the coordinator's SP by its name, a record
+// that names another sp_id reading as model.ErrNotFound: the name was
+// deleted and created again for another pool, and this coordinator's pool
+// is gone (RW14). Sent on, the new pool's state would go to the agents
+// under the old pool's revision, which can be the higher, and an agent
+// that accepts it refuses the new pool's own requests as older (dnagent.md
+// SH8). The fan-out and the reaction pass load through it alike.
+func (w *spWorker) loadOwnSp(ctx context.Context) (*model.SpState, error) {
+	state, err := w.ops.loadSp(ctx, w.cid, w.desired.handle)
+	if err != nil {
+		return nil, err
+	}
+	if state.Conf.GetSpId() != w.spId {
+		return nil, fmt.Errorf("sp %q is sp_id %d, not %d: %w",
+			w.desired.handle, state.Conf.GetSpId(), w.spId,
+			model.ErrNotFound)
+	}
+	return state, nil
 }
 
 // checkListedRecords is MD3's gate on an SP whose records are not whole: it
@@ -2424,10 +2444,11 @@ func (w *spWorker) countsPaths(cntlrId uint64) bool {
 // held plan and its child holds the standby plan, so its rows are dropped.
 // The reports travel over a buffered channel, so rows a cntlr built as the
 // primary can be read after it was handed the standby plan: they are dropped
-// the same way.
+// the same way. A disabled primary runs the standby shape (cnagent.md CN9),
+// so its rows are a standby's path checks, not the probe's, and are dropped
+// as well (effectivePrimary).
 func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
-	plan := w.latestCntlrPlan(cntlrId)
-	return plan != nil && plan.primary
+	return w.latestCntlrPlan(cntlrId).effectivePrimary()
 }
 
 // applyPlan is RW14's child diff: new => start; gone => stop (RW11), off the
@@ -3002,8 +3023,9 @@ func (w *spWorker) applyRepairFlips(
 // SideInfo reads the target row PROVISIONING with the reason
 // RES_REASON_AWAITING_CUTOVER (sideDriver.awaitsCutover); (3) a cntlr the
 // plan the coordinator last decided makes the primary, and not disabled
-// (countsPaths), reported a live path to the dst side in the newest reply of
-// this drain that carried an info of its own (paths). Only the primary holds
+// (countsPaths), reported a live path to the dst side, at that plan's
+// revision (HL2), in the newest reply of this drain that carried an info of
+// its own (paths). Only the primary holds
 // the arrays and the thin pools a cutover's gap can block, so a standby's
 // path counts for nothing, nor does a disabled primary's, as it runs the
 // standby shape (cnagent.md CN9), and after a failover the cutover waits for
@@ -4330,16 +4352,18 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	}
 	// A subset of createdTdIds, so it adds no reason to send of its own.
 	rep.tornTdIds = tornTds(info, rep.createdTdIds)
-	if plan.primary {
+	if plan.effectivePrimary() && r.revision == plan.req.GetRevision() {
+		// HL2: leg rows and path rows count only from a reply at the plan's
+		// own revision, the test canSettle makes: a promoted cntlr's reply
+		// at the revision before its promotion still describes a standby,
+		// whose leg rows are path checks, not the probe's. And only from a
+		// plan that makes the cntlr the primary and not disabled: a
+		// disabled primary's agent runs the standby shape (cnagent.md
+		// CN9). The cutover reads the reply's own info, never the latest
+		// known state, which can be another reply's (ownInfo).
 		rep.legRows = d.legRows(info)
-		// The cutover reads the reply's own info, never the latest known
-		// state, which can be another reply's (ownInfo), and only a reply
-		// to a plan that makes the cntlr the primary and not disabled: a
-		// disabled primary's agent runs the standby shape (countsPaths).
-		if plan.effectivePrimary() {
-			rep.paths = newPathReport(r.revision, d.ownInfo(r))
-		}
-	} else {
+		rep.paths = newPathReport(r.revision, d.ownInfo(r))
+	} else if !plan.effectivePrimary() {
 		d.logStandbyLegRows(ctx, info, plan.cntlrId)
 	}
 	if r.revision > d.synced {

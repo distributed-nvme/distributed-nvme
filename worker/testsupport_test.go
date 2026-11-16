@@ -713,6 +713,7 @@ func (w *fakeHealthWriter) setDnErrEpoch(
 	ctx context.Context,
 	cid uint64,
 	addrPort string,
+	dnId uint64,
 	epoch uint64,
 	cc *pb.ClusterConf,
 ) error {
@@ -722,7 +723,8 @@ func (w *fakeHealthWriter) setDnErrEpoch(
 }
 
 func (w *fakeHealthWriter) setCnErrEpoch(
-	ctx context.Context, cid uint64, addrPort string, epoch uint64,
+	ctx context.Context, cid uint64, addrPort string, cnId uint64,
+	epoch uint64,
 ) error {
 	return w.record(healthWrite{
 		record: healthRecordCn, cid: cid, addr: addrPort, epoch: epoch,

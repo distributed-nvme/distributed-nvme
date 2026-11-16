@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/protobuf/proto"
 
@@ -162,7 +163,10 @@ func DrainSpCntlrs(
 		for _, cntlrId := range cntlrIds {
 			cntlr := &pb.Cntlr{}
 			if !s.Get(CntlrKey(cid, spId, cntlrId), cntlr) {
-				return fail(opDrainSpCntlrs, "cntlr not found")
+				// The reason names the lost key's id, which the operator puts
+				// back by hand (dnv-worker.md SPD12).
+				return fail(opDrainSpCntlrs,
+					fmt.Sprintf("cntlr %d not found", cntlrId))
 			}
 			cntlrs = append(cntlrs, cntlr)
 		}
