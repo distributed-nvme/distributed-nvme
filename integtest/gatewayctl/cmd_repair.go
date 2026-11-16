@@ -183,6 +183,32 @@ func setupDeleteRetiredLeg(fs *flag.FlagSet) job {
 	}
 }
 
+// setupKeepRetiredLeg drives UpdateRetiredLegKeep. --leg is the retired
+// leg's leg_id; --clear sends false, so that the suite can clear the flag,
+// and the bare command sets it.
+func setupKeepRetiredLeg(fs *flag.FlagSet) job {
+	spName := fs.String("sp", "", "sp_name")
+	var rev hexUint
+	fs.Var(&rev, "rev", "sp_rev token")
+	var leg hexUint
+	fs.Var(&leg, "leg", "leg_id of the retired leg")
+	clear := fs.Bool("clear", false, "clear the keep flag instead of setting it")
+	return func(
+		ctx context.Context,
+		client pb.GatewayClient,
+		g *globals,
+	) (any, error) {
+		return client.UpdateRetiredLegKeep(ctx,
+			&pb.UpdateRetiredLegKeepRequest{
+				ClusterName: g.cluster,
+				SpName:      *spName,
+				SpRev:       &pb.SpRev{Revision: uint64(rev)},
+				LegId:       uint64(leg),
+				Keep:        !*clear,
+			})
+	}
+}
+
 // setupForceStartGrp drives ForceStartGroup. --grp is the group's grp_id and
 // --leg the leg its array starts from; --cancel withdraws the group's mark
 // instead and is sent with --leg as typed, so the suite can send a leg with

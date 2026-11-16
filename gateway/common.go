@@ -119,7 +119,8 @@ func mapStmErr(err error) error {
 // mapModelErr maps an error returned by one of the model ops the gateway runs
 // as a deciding STM — GrowSlice and the repair operations CreateRepair,
 // FinishRepair, CancelRepair, SetRepairAbort, DeleteRetiredLeg,
-// ForceStartGroup and SetGrpOperatorInCharge — each of which runs its own
+// ForceStartGroup, SetGrpOperatorInCharge and SetRetiredLegKeep — each of
+// which runs its own
 // STM, onto GW7. The repair handlers answer the reasons model exports for
 // the NOT_FOUND, ALREADY_EXISTS and RESOURCE_EXHAUSTED codes, and
 // ForceStartGroup its leg taken away since its planning read, themselves

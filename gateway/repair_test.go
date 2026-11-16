@@ -2003,6 +2003,55 @@ func TestDeleteRetiredLegGivesTheSideBack(t *testing.T) {
 	}
 }
 
+// TestUpdateRetiredLegKeep pins UpdateRetiredLegKeep (architecture.md,
+// Retired legs): it sets and clears a retired leg's keep flag, answers with
+// the leg, raises no revision, so the caller's token stays valid, and
+// answers a leg the pool does not list NOT_FOUND with nothing written.
+func TestUpdateRetiredLegKeep(t *testing.T) {
+	env := newVolEnv(t)
+	repPutRetired(env, volDataGrpId, 900, volSide(901, volDnC), 11)
+	keep := func(legId uint64, on bool) (*pb.UpdateRetiredLegKeepReply,
+		error) {
+		return env.srv.UpdateRetiredLegKeep(env.ctx,
+			&pb.UpdateRetiredLegKeepRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				LegId:       legId,
+				Keep:        on,
+			})
+	}
+	retired := func() *pb.RetiredLeg {
+		got := &pb.RetiredLeg{}
+		if !env.exists(model.RetiredLegKey(env.cid, volSpId, 900), got) {
+			t.Fatalf("the retired leg's key is gone")
+		}
+		return got
+	}
+	revBefore := env.spRev()
+	reply, err := keep(900, true)
+	if err != nil {
+		t.Fatalf("UpdateRetiredLegKeep true: %v", err)
+	}
+	if reply.GetLegId() != 900 || !retired().GetKeep() {
+		t.Fatalf("reply %v, keep %v: want leg 900 kept", reply,
+			retired().GetKeep())
+	}
+	if rev := env.spRev(); rev != revBefore {
+		t.Errorf("sp_rev: got %d, want %d", rev, revBefore)
+	}
+	if _, err := keep(900, false); err != nil {
+		t.Fatalf("UpdateRetiredLegKeep false: %v", err)
+	}
+	if retired().GetKeep() {
+		t.Errorf("the clear left the flag")
+	}
+	before := env.dump()
+	_, err = keep(999, true)
+	volWantCode(t, err, codes.NotFound)
+	env.wantNoWrite("the refused UpdateRetiredLegKeep", before)
+}
+
 // TestCreateMigrationAndARepair pins CreateMigration beside a repair
 // (architecture.md, Migrations): a side of the repair's bad leg is refused
 // FAILED_PRECONDITION, since the repair replaces that leg; the side of the

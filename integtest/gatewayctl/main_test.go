@@ -293,12 +293,13 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"ListRepairs":                     "list-repairs",
 		"ListRetiredLegs":                 "list-retired-legs",
 		"DeleteRetiredLeg":                "delete-retired-leg",
+		"UpdateRetiredLegKeep":            "keep-retired-leg",
 		"ForceStartGroup":                 "force-start-grp",
 		"UpdateGroupOperatorInCharge":     "set-grp-operator-in-charge",
 		"GetThinDeviceBitmap":             "get-td-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 66 {
-		t.Fatalf("service Gateway has %d methods, want 66",
+	if len(pb.Gateway_ServiceDesc.Methods) != 67 {
+		t.Fatalf("service Gateway has %d methods, want 67",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {
@@ -377,6 +378,14 @@ func (c *recordingClient) ForceStartGroup(
 ) (*pb.ForceStartGroupReply, error) {
 	c.req = in
 	return &pb.ForceStartGroupReply{GrpId: in.GetGrpId(), Revision: 3}, nil
+}
+
+func (c *recordingClient) UpdateRetiredLegKeep(
+	ctx context.Context, in *pb.UpdateRetiredLegKeepRequest,
+	_ ...grpc.CallOption,
+) (*pb.UpdateRetiredLegKeepReply, error) {
+	c.req = in
+	return &pb.UpdateRetiredLegKeepReply{LegId: in.GetLegId()}, nil
 }
 
 func (c *recordingClient) UpdateGroupOperatorInCharge(
@@ -468,6 +477,35 @@ func TestForceStartGrpRequest(t *testing.T) {
 	if cancel.SpRev == nil || cancel.GetSpRev().GetRevision() != 0 {
 		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
 			cancel.SpRev)
+	}
+}
+
+// TestKeepRetiredLegRequest pins the request keep-retired-leg builds: the
+// leg, keep true for the bare command and false with --clear, and a token
+// message that is present, a zero one when --rev is not given.
+func TestKeepRetiredLegRequest(t *testing.T) {
+	req := runArgv(t, "keep-retired-leg",
+		"--sp", "sp0", "--rev", "7", "--leg", "0x12",
+	).(*pb.UpdateRetiredLegKeepRequest)
+	want := &pb.UpdateRetiredLegKeepRequest{
+		ClusterName: defaultCluster,
+		SpName:      "sp0",
+		SpRev:       &pb.SpRev{Revision: 7},
+		LegId:       0x12,
+		Keep:        true,
+	}
+	if !proto.Equal(req, want) {
+		t.Errorf("request:\n got %v\nwant %v", req, want)
+	}
+	clear := runArgv(t, "keep-retired-leg",
+		"--sp", "sp0", "--leg", "0x12", "--clear",
+	).(*pb.UpdateRetiredLegKeepRequest)
+	if clear.GetKeep() {
+		t.Errorf("--clear built %v, want keep false", clear)
+	}
+	if clear.SpRev == nil || clear.GetSpRev().GetRevision() != 0 {
+		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
+			clear.SpRev)
 	}
 }
 

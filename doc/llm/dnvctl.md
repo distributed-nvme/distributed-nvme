@@ -619,7 +619,12 @@ worker's repair gave a retired leg back (`architecture.md`, Repairs).
 `retired-leg delete` names the retired leg by its own leg id, `--leg`; a
 retired leg is taken back by `repair create --retired-leg` rather than by
 a leaf of this group (`architecture.md`, Retired legs). `retired-leg list`
-is not paged.
+is not paged, and prints each leg's `keep` flag. `retired-leg keep` sends
+`UpdateRetiredLegKeep` with `keep` true, which keeps the leg from the sp
+worker's retire timer and from the give-back at the retired-leg bound,
+and with `--clear` sends it false (`architecture.md`, Retired legs); it
+sends the value typed, never a toggle, and a `retired-leg delete` still
+deletes a kept leg.
 
 ### `group` — `ctl/group.go`
 

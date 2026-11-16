@@ -40,7 +40,8 @@ import (
 // refusal of the worker's under the group's operator_in_charge flag
 // (ReasonGrpOperatorInCharge), the create's new leg, always fresh and
 // allowed at the retired-leg bound for the worker's, and the finish of the
-// worker's, which gives back the group's oldest retired leg at the bound.
+// worker's, which gives back the group's oldest retired leg that is not kept
+// at the bound.
 //
 // Each operation names the check of the pool it makes. CreateRepair takes a
 // pool that is not being deleted below its level gate. The others take a
@@ -64,6 +65,7 @@ const (
 	opSetRetiredSideErrEpoch = "SetRetiredSideErrEpoch"
 	opFlipRepairProvisioned  = "FlipRepairProvisioned"
 	opSetGrpOperatorInCharge = "SetGrpOperatorInCharge"
+	opSetRetiredLegKeep      = "SetRetiredLegKeep"
 )
 
 // ReasonRepairExists is the Reason CreateRepair carries when the pool already
@@ -83,6 +85,21 @@ const ReasonRepairNotFound = "repair not found"
 // ReasonRetiredLegNotFound is ReasonRepairNotFound for a retired leg named
 // by its leg id: CreateRepair's retired leg and DeleteRetiredLeg's.
 const ReasonRetiredLegNotFound = "retired leg not found"
+
+// ReasonRetiredLegsKept is the Reason FinishRepair carries for the sp
+// worker's repair at the retired-leg bound when every retired leg of the
+// group carries keep, so none can be given back to make room for the bad
+// leg it retires. It is exported because the sp worker logs it as the
+// reason it holds the finish (dnv-worker.md AR8): the repair stays STARTED
+// until an operator clears a flag or deletes a retired leg.
+const ReasonRetiredLegsKept = "retired legs kept"
+
+// ReasonRetiredLegKept is the Reason DeleteRetiredLeg carries for the sp
+// worker's retire timer when the leg carries keep in the op's own STM: an
+// operator may keep the leg after the snapshot the timer judged it on, and
+// the keep raises no revision, so the timer's expected revision cannot
+// catch it. The operator's delete never asks for it.
+const ReasonRetiredLegKept = "retired leg carries keep"
 
 // ReasonRetiredListFull is the Reason CreateRepair carries when it would take
 // a fresh new leg, under an operator's name, for a group that already holds
@@ -403,14 +420,16 @@ type RepairNewLeg struct {
 // leg of the group other than the bad one, since the group's legs sit on
 // different disk nodes after the finish. It keeps its leg id, its leg_idx
 // and its side, whose disk node already holds its pointer and its extents,
-// and the repair keeps its retired_epoch for CancelRepair. Its record and its
+// and the repair keeps its retired_epoch and, when it carries one, its keep
+// flag for CancelRepair. Its record and its
 // list entries go in the same transaction, and the repair takes one id, its
 // rep_id. It is allowed while the group holds common.MaxRetiredLegPerGrp
 // retired legs, since the finish then retires one leg and the repair took
 // one. A fresh leg under an operator's name is refused for a group that
 // holds that many (ReasonRetiredListFull); under the worker's name it is
 // allowed there, since the worker cannot wait for an operator, and the
-// finish gives back the group's oldest retired leg (FinishRepair).
+// finish gives back the group's oldest retired leg that is not kept
+// (FinishRepair).
 //
 // A fresh leg is checked against the plan before the pick. A disk node of the
 // group outside newLeg.GrpDnAddrs joined the group after the caller's
@@ -514,7 +533,7 @@ func CreateRepair(
 			if reserved {
 				return fail(opCreateRepair, reasonReservedNameRetiredLeg)
 			}
-			leg, epoch, err := takeRetiredLeg(
+			leg, retired, err := takeRetiredLeg(
 				s, cid, conf, grp, badLegId, newLeg.RetiredLegId)
 			if err != nil {
 				return err
@@ -524,7 +543,13 @@ func CreateRepair(
 			}
 			newLegId = leg.GetLegId()
 			rep.NewLegList = []*pb.Leg{leg}
-			rep.NewLegIdToRetiredEpoch = map[uint64]uint64{newLegId: epoch}
+			rep.NewLegIdToRetiredEpoch = map[uint64]uint64{
+				newLegId: retired.GetRetiredEpoch()}
+			// A kept leg taken back stays kept should the repair be
+			// cancelled (CancelRepair).
+			if retired.GetKeep() {
+				rep.NewLegIdToKeep = map[uint64]bool{newLegId: true}
+			}
 		} else {
 			leg, err := placeFreshLeg(
 				s, cid, spId, conf, grp, planned, newLeg.Dn, cc, reserved)
@@ -560,18 +585,18 @@ func takeRetiredLeg(
 	grp *pb.Group,
 	badLegId uint64,
 	legId uint64,
-) (*pb.Leg, uint64, error) {
+) (*pb.Leg, *pb.RetiredLeg, error) {
 	retired, err := loadRetiredLeg(s, opCreateRepair, cid, conf, legId)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	if retired.GetGrpId() != grp.GetGrpId() ||
 		!containsId(grp.GetRetiredLegIdList(), legId) {
-		return nil, 0, fail(opCreateRepair, "retired leg of another group")
+		return nil, nil, fail(opCreateRepair, "retired leg of another group")
 	}
 	side := retired.GetSide()
 	if side.GetErrEpoch() != 0 {
-		return nil, 0, fail(opCreateRepair, "retired side is unhealthy")
+		return nil, nil, fail(opCreateRepair, "retired side is unhealthy")
 	}
 	for _, leg := range grp.GetLegList() {
 		if leg.GetLegId() == badLegId {
@@ -579,7 +604,7 @@ func takeRetiredLeg(
 		}
 		for _, legSide := range leg.GetSideList() {
 			if legSide.GetAddrPort() == side.GetAddrPort() {
-				return nil, 0, fail(opCreateRepair,
+				return nil, nil, fail(opCreateRepair,
 					"retired side shares a dn with the group")
 			}
 		}
@@ -592,7 +617,7 @@ func takeRetiredLeg(
 		LegIdx:   retired.GetLegIdx(),
 		SideList: []*pb.Side{side},
 	}
-	return leg, retired.GetRetiredEpoch(), nil
+	return leg, retired, nil
 }
 
 // placeFreshLeg is CreateRepair's fresh new leg: it applies the retired-leg
@@ -720,6 +745,66 @@ func SetGrpOperatorInCharge(
 	})
 }
 
+// SetRetiredLegKeep sets the keep flag of the retired leg legId to keep: the
+// body of the gateway's UpdateRetiredLegKeep (architecture.md, Retired
+// legs). While the flag is set the sp worker's retire timer passes the leg
+// over and FinishRepair never gives it back at the bound
+// (oldestRetiredLeg); DeleteRetiredLeg still deletes it as asked.
+//
+// It checks the token first (checkSpRev) and takes a pool at any level that
+// is not being deleted (loadSpConfAnyLevel), and a retired leg the pool
+// lists (ReasonRetiredLegNotFound) whose group its parent still holds and
+// lists it, and that is not a deleting clone's (loadGrpOf): the clone
+// drain's final transaction gives that one back. A leg whose flag already
+// equals keep is answered as done and written to not at all. A write raises
+// no revision: no agent reads the flag, and the worker reads every record
+// afresh each pass (dnv-worker.md AR1), so a caller's token stays valid
+// across the flag's writes.
+func SetRetiredLegKeep(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	legId uint64,
+	keep bool,
+) error {
+	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		if err := checkSpRev(
+			s, opSetRetiredLegKeep, shard, cid, spId, expectRev,
+		); err != nil {
+			return err
+		}
+		conf, err := loadSpConfAnyLevel(
+			s, opSetRetiredLegKeep, cid, spName, spId)
+		if err != nil {
+			return err
+		}
+		retired, err := loadRetiredLeg(
+			s, opSetRetiredLegKeep, cid, conf, legId)
+		if err != nil {
+			return err
+		}
+		_, grp, err := loadGrpOf(s, opSetRetiredLegKeep, cid, spId,
+			retiredParent(retired), retired.GetGrpId())
+		if err != nil {
+			return err
+		}
+		if !containsId(grp.GetRetiredLegIdList(), legId) {
+			return fail(opSetRetiredLegKeep,
+				"group does not list the retired leg")
+		}
+		if retired.GetKeep() == keep {
+			return nil
+		}
+		retired.Keep = keep
+		s.Put(RetiredLegKey(cid, spId, legId), retired)
+		return nil
+	})
+}
+
 // FinishRepairResult is what FinishRepair did: the finished repair's rep_id,
 // the leg id of the leg it retired, and the leg id of the retired leg it gave
 // back to make room for that one, zero when it gave none back.
@@ -745,8 +830,10 @@ type FinishRepairResult struct {
 // place in the array it fills, and keeps its leg id, its side and its
 // err_epoch. The bad leg becomes a RetiredLeg under its own leg id: its
 // side, as it is, keeps its pointer and its extents on its disk node, with
-// the group's id, its leg_idx, the parent and now as its retired_epoch; the
-// bad leg's own err_epoch goes with the leg. The Repair key and its list
+// the group's id, its leg_idx, the parent, now as its retired_epoch, and
+// keep when the repair carries keep_bad_legs, which a forced start of the
+// group sets (ForceStartGroup); the bad leg's own err_epoch goes with the
+// leg. The Repair key and its list
 // entry go, the group's rep_name is cleared, the retired leg joins the
 // group's and the pool's lists, and SpRev is bumped. A forced-start mark of
 // the group that names the bad leg goes too, since the finish retires the
@@ -758,7 +845,9 @@ type FinishRepairResult struct {
 // and a new leg taken from a retired leg left a place. The sp worker's
 // repair, whose name carries common.RepNameReservedPrefix, took a fresh leg
 // at the bound, so when its group holds that many retired legs the finish
-// first gives back the group's oldest one (oldestRetiredLeg), as
+// first gives back the group's oldest one that does not carry keep
+// (oldestRetiredLeg), and refuses with ReasonRetiredLegsKept, giving back
+// nothing, when every one carries it; the give-back runs as
 // DeleteRetiredLeg gives one back: its side returns the group's ext_cnt and
 // its pointer to its disk node, with the node's capacity key and DnRev,
 // through the DN ledger the drains use, and its record and its two list
@@ -837,6 +926,9 @@ func FinishRepair(
 			if err != nil {
 				return err
 			}
+			if oldest == nil {
+				return fail(opFinishRepair, ReasonRetiredLegsKept)
+			}
 			rel = newDnReleaser(s, cid, cc)
 			side := oldest.GetSide()
 			rel.release(
@@ -856,6 +948,7 @@ func FinishRepair(
 			RetiredEpoch: now,
 			SliceId:      rep.GetSliceId(),
 			CloneName:    rep.GetCloneName(),
+			Keep:         rep.GetKeepBadLegs(),
 		})
 		grp.RetiredLegIdList = append(grp.RetiredLegIdList, badLegId)
 		grp.RepName = ""
@@ -884,12 +977,14 @@ func FinishRepair(
 
 // oldestRetiredLeg is the retired leg FinishRepair gives back for the
 // worker's repair at the bound: of the retired legs grp lists, read inside the
-// caller's STM, the one with the smallest retired_epoch, and of those the
-// smallest leg id, so the choice depends on the records alone and never on
-// the order of the list. Each listed id must be in the pool's list with its
-// record (loadRetiredLeg), and its record must name the group. The caller
-// gives a group at the bound, so the list holds at least one leg
-// (TestRepairReasonsAreDistinct keeps the bound above zero).
+// caller's STM, that do not carry keep, the one with the smallest
+// retired_epoch, and of those the smallest leg id, so the choice depends on
+// the records alone and never on the order of the list. Each listed id must
+// be in the pool's list with its record (loadRetiredLeg), and its record
+// must name the group. A nil leg, with no error, says that every retired
+// leg of the group is kept, which the caller refuses
+// (ReasonRetiredLegsKept): a reaction never deletes a leg an operator or a
+// forced start kept.
 func oldestRetiredLeg(
 	s etcdutil.STM,
 	cid uint64,
@@ -905,6 +1000,9 @@ func oldestRetiredLeg(
 		}
 		if retired.GetGrpId() != grp.GetGrpId() {
 			return 0, nil, fail(opFinishRepair, "retired leg of another group")
+		}
+		if retired.GetKeep() {
+			continue
 		}
 		if best == nil ||
 			retired.GetRetiredEpoch() < best.GetRetiredEpoch() ||
@@ -925,8 +1023,9 @@ func oldestRetiredLeg(
 // the array, so taking it away changes nothing the array holds.
 //
 // A new leg taken from a retired leg goes back as that retired leg, never
-// destroyed: a RetiredLeg under its leg id with the retired_epoch the repair
-// kept, its own leg_idx, its side as it is now and the repair's parent,
+// destroyed: a RetiredLeg under its leg id with the retired_epoch and the
+// keep flag the repair kept, its own leg_idx, its side as it is now and the
+// repair's parent,
 // listed again in the group's and the pool's lists. A fresh new leg's sides
 // give their disk nodes back the group's ext_cnt and their pointers, through
 // the DN ledger the drains use, with each node's capacity key and DnRev. The
@@ -993,6 +1092,7 @@ func CancelRepair(
 				RetiredEpoch: epoch,
 				SliceId:      rep.GetSliceId(),
 				CloneName:    rep.GetCloneName(),
+				Keep:         rep.GetNewLegIdToKeep()[leg.GetLegId()],
 			})
 			grp.RetiredLegIdList = append(
 				grp.RetiredLegIdList, leg.GetLegId())
@@ -1200,7 +1300,11 @@ func SetRepairStage(
 // RetiredLeg key and its two list entries go, and SpRev is bumped. The
 // operator's delete and the sp worker's retire timer run it alike, and
 // FinishRepair gives a retired leg back the same way for the sp worker's
-// repair at the bound.
+// repair at the bound. With refuseKept, the timer's call, a leg that
+// carries keep is refused (ReasonRetiredLegKept) and nothing is written: a
+// keep written after the timer's snapshot raises no revision, so only this
+// check inside the STM sees it. The operator's delete passes false and
+// deletes a kept leg as asked.
 //
 // cc is the cluster's stored conf, gated at the top of the STM as the drains
 // gate it.
@@ -1214,6 +1318,7 @@ func DeleteRetiredLeg(
 	expectRev uint64,
 	legId uint64,
 	cc *pb.ClusterConf,
+	refuseKept bool,
 ) error {
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		if err := ValidateClusterConf(cc); err != nil {
@@ -1232,6 +1337,9 @@ func DeleteRetiredLeg(
 		retired, err := loadRetiredLeg(s, opDeleteRetiredLeg, cid, conf, legId)
 		if err != nil {
 			return err
+		}
+		if refuseKept && retired.GetKeep() {
+			return fail(opDeleteRetiredLeg, ReasonRetiredLegKept)
 		}
 		holder, grp, err := loadGrpOf(s, opDeleteRetiredLeg, cid, spId,
 			retiredParent(retired), retired.GetGrpId())

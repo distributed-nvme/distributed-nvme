@@ -84,6 +84,7 @@ const (
 	Gateway_DeleteRetiredLeg_FullMethodName                = "/Gateway/DeleteRetiredLeg"
 	Gateway_ForceStartGroup_FullMethodName                 = "/Gateway/ForceStartGroup"
 	Gateway_UpdateGroupOperatorInCharge_FullMethodName     = "/Gateway/UpdateGroupOperatorInCharge"
+	Gateway_UpdateRetiredLegKeep_FullMethodName            = "/Gateway/UpdateRetiredLegKeep"
 	Gateway_GetThinDeviceBitmap_FullMethodName             = "/Gateway/GetThinDeviceBitmap"
 )
 
@@ -156,6 +157,7 @@ type GatewayClient interface {
 	DeleteRetiredLeg(ctx context.Context, in *DeleteRetiredLegRequest, opts ...grpc.CallOption) (*DeleteRetiredLegReply, error)
 	ForceStartGroup(ctx context.Context, in *ForceStartGroupRequest, opts ...grpc.CallOption) (*ForceStartGroupReply, error)
 	UpdateGroupOperatorInCharge(ctx context.Context, in *UpdateGroupOperatorInChargeRequest, opts ...grpc.CallOption) (*UpdateGroupOperatorInChargeReply, error)
+	UpdateRetiredLegKeep(ctx context.Context, in *UpdateRetiredLegKeepRequest, opts ...grpc.CallOption) (*UpdateRetiredLegKeepReply, error)
 	GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error)
 }
 
@@ -817,6 +819,16 @@ func (c *gatewayClient) UpdateGroupOperatorInCharge(ctx context.Context, in *Upd
 	return out, nil
 }
 
+func (c *gatewayClient) UpdateRetiredLegKeep(ctx context.Context, in *UpdateRetiredLegKeepRequest, opts ...grpc.CallOption) (*UpdateRetiredLegKeepReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateRetiredLegKeepReply)
+	err := c.cc.Invoke(ctx, Gateway_UpdateRetiredLegKeep_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *gatewayClient) GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetThinDeviceBitmapReply)
@@ -896,6 +908,7 @@ type GatewayServer interface {
 	DeleteRetiredLeg(context.Context, *DeleteRetiredLegRequest) (*DeleteRetiredLegReply, error)
 	ForceStartGroup(context.Context, *ForceStartGroupRequest) (*ForceStartGroupReply, error)
 	UpdateGroupOperatorInCharge(context.Context, *UpdateGroupOperatorInChargeRequest) (*UpdateGroupOperatorInChargeReply, error)
+	UpdateRetiredLegKeep(context.Context, *UpdateRetiredLegKeepRequest) (*UpdateRetiredLegKeepReply, error)
 	GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error)
 	mustEmbedUnimplementedGatewayServer()
 }
@@ -1101,6 +1114,9 @@ func (UnimplementedGatewayServer) ForceStartGroup(context.Context, *ForceStartGr
 }
 func (UnimplementedGatewayServer) UpdateGroupOperatorInCharge(context.Context, *UpdateGroupOperatorInChargeRequest) (*UpdateGroupOperatorInChargeReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateGroupOperatorInCharge not implemented")
+}
+func (UnimplementedGatewayServer) UpdateRetiredLegKeep(context.Context, *UpdateRetiredLegKeepRequest) (*UpdateRetiredLegKeepReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateRetiredLegKeep not implemented")
 }
 func (UnimplementedGatewayServer) GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetThinDeviceBitmap not implemented")
@@ -2296,6 +2312,24 @@ func _Gateway_UpdateGroupOperatorInCharge_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Gateway_UpdateRetiredLegKeep_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateRetiredLegKeepRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).UpdateRetiredLegKeep(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_UpdateRetiredLegKeep_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).UpdateRetiredLegKeep(ctx, req.(*UpdateRetiredLegKeepRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Gateway_GetThinDeviceBitmap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetThinDeviceBitmapRequest)
 	if err := dec(in); err != nil {
@@ -2580,6 +2614,10 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateGroupOperatorInCharge",
 			Handler:    _Gateway_UpdateGroupOperatorInCharge_Handler,
+		},
+		{
+			MethodName: "UpdateRetiredLegKeep",
+			Handler:    _Gateway_UpdateRetiredLegKeep_Handler,
 		},
 		{
 			MethodName: "GetThinDeviceBitmap",

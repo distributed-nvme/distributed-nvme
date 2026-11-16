@@ -23,7 +23,7 @@
 # needed on the VM — both binaries are built here and scp'd.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 66 commands marshals its argv into exactly the intended request
+# of the 67 commands marshals its argv into exactly the intended request
 # proto, asserted FIELD FOR FIELD against the fake's state.json — a
 # whole-object comparison, so an unexpected key fails as loudly as a wrong
 # value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
@@ -49,7 +49,7 @@
 #
 # Round trips: ctl_exec does ONE ssh per dnvctl invocation and brings back five
 # things — state.json before, the exit code, stderr, stdout, state.json after.
-# That is what keeps a 66-step sweep to 66 ssh calls, and it is why every
+# That is what keeps a 67-step sweep to 67 ssh calls, and it is why every
 # ctl_ok/ctl_fail/ctl_usage MUST run in the PARENT shell: the five results land
 # in globals, and a subshell would drop them (and would swallow a die).
 #
@@ -907,8 +907,8 @@ EOF
 	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
 	# TestClusterCreateExtentSize says the same, and also carries the "no
 	# --extent-size sends no dn_bin_conf" half).
-	# The step keeps its number because the audit below pins 66 steps over
-	# 66 distinct RPCs.
+	# The step keeps its number because the audit below pins 67 steps over
+	# 67 distinct RPCs.
 	sweep_step 01 CreateCluster \
 		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
 		cluster create --name c1 --extent-size 67108864
@@ -1253,13 +1253,19 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"leg_id\":\"3\"}" \
 		retired-leg delete --leg 3 --rev 7
+	# The keep of a retired leg: the bare leaf sets the flag, keep true
+	# beside the token; --clear is behavior stage 10.
+	sweep_step 65 UpdateRetiredLegKeep \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"leg_id\":\"3\",\"keep\":true}" \
+		retired-leg keep --leg 3 --rev 7
 
 	# --- `group` — `ctl/group.go` --------------------------------------
 	# The write form of the forced start: the group and the named leg as
 	# uint64 strings beside the token, and no cancel key, since the fake
 	# records a false bool as no key at all. The withdrawing form, --cancel,
 	# is behavior stage 8: the audit below pins one step per RPC.
-	sweep_step 65 ForceStartGroup \
+	sweep_step 66 ForceStartGroup \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",\"leg_id\":\"2\"}" \
 		group force-start --grp 1 --leg 2 --rev 7
@@ -1267,19 +1273,19 @@ EOF
 	# value reaches the wire as operator_in_charge true beside the token.
 	# The leaf without the flag, which sends the same true, and the =false
 	# spelling that gives the group back are behavior stage 9.
-	sweep_step 66 UpdateGroupOperatorInCharge \
+	sweep_step 67 UpdateGroupOperatorInCharge \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",
 		  \"operator_in_charge\":true}" \
 		group set-operator-in-charge --grp 1 --operator-in-charge --rev 7
 
 	# -------------------------------------------------------------------
-	stage audit "all 66 steps left one request record under their trace id"
+	stage audit "all 67 steps left one request record under their trace id"
 	# -------------------------------------------------------------------
 	# CT1's completeness claim, made on the WIRE rather than from a table:
-	# 66 distinct RPCs, 66 distinct trace ids, one interceptor record each.
-	# One log read serves all 66 assertions.
-	assert_eq "${#SWEEP_TRACES[@]}" "66" "the sweep ran 66 steps"
+	# 67 distinct RPCs, 67 distinct trace ids, one interceptor record each.
+	# One log read serves all 67 assertions.
+	assert_eq "${#SWEEP_TRACES[@]}" "67" "the sweep ran 67 steps"
 	local records idx want
 	records=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request") | .trace_id + " " + .method')
@@ -1290,7 +1296,7 @@ EOF
 	done
 	local distinct
 	distinct=$(printf '%s\n' "${SWEEP_RPCS[@]}" | sort -u | grep -c . || true)
-	assert_eq "$distinct" "66" "the 66 steps drove 66 DISTINCT RPCs"
+	assert_eq "$distinct" "67" "the 67 steps drove 67 DISTINCT RPCs"
 }
 
 # ---------------------------------------------------------------------------
@@ -1403,7 +1409,7 @@ EOF
 	# -------------------------------------------------------------------
 	stage 8 "group force-start --cancel: cancel true, and no leg_id key"
 	# -------------------------------------------------------------------
-	# The withdrawing form of the forced start, which sweep step 65 (the
+	# The withdrawing form of the forced start, which sweep step 66 (the
 	# write) has no room for: --cancel reaches the wire as cancel true
 	# beside the token, and a leaf typed with no --leg sends leg_id zero,
 	# which the fake records as no key. dnvctl checks no pairing (CT8): a
@@ -1439,6 +1445,16 @@ EOF
 	# error that sends nothing, never a take-over.
 	ctl_usage UpdateGroupOperatorInCharge \
 		group set-operator-in-charge --grp 1 --operator-in-charge false
+
+	# -------------------------------------------------------------------
+	stage 10 "retired-leg keep: bare sets the flag, --clear clears it"
+	# -------------------------------------------------------------------
+	# The sweep's step 65 sends keep true; --clear sends false, which the
+	# fake records as no key at all.
+	ctl_ok retired-leg keep --leg 3 --clear
+	assert_count_delta UpdateRetiredLegKeep 1 "the clear is one RPC"
+	assert_req UpdateRetiredLegKeep \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"leg_id\":\"3\"}"
 }
 
 # ---------------------------------------------------------------------------

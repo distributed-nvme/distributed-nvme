@@ -1,14 +1,14 @@
 // client_test.go is the other half of the argv → request tests'
-// recordingClient: one method per RPC of `service Gateway`, all 66 of them,
+// recordingClient: one method per RPC of `service Gateway`, all 67 of them,
 // each a single call into rpcCall.
 //
 // They are uniform on purpose. A method that did anything of its own would be
 // a place for a test to accidentally assert against the stub instead of
 // against dnvctl, and the whole value of the recorder is that it records and
 // nothing else. The list is also a second, independent census of the service:
-// if pb ever grows a 67th RPC, this type stops satisfying pb.GatewayClient
+// if pb ever grows a 68th RPC, this type stops satisfying pb.GatewayClient
 // through its own methods and falls through to the embedded nil — which
-// the CT1 test's len(Methods) == 66 pin catches first, at the same commit.
+// the CT1 test's len(Methods) == 67 pin catches first, at the same commit.
 package ctl
 
 import (
@@ -667,6 +667,16 @@ func (c *recordingClient) UpdateGroupOperatorInCharge(
 	return rpcCall(
 		c, "UpdateGroupOperatorInCharge", in,
 		&pb.UpdateGroupOperatorInChargeReply{})
+}
+
+func (c *recordingClient) UpdateRetiredLegKeep(
+	_ context.Context,
+	in *pb.UpdateRetiredLegKeepRequest,
+	_ ...grpc.CallOption,
+) (*pb.UpdateRetiredLegKeepReply, error) {
+	return rpcCall(
+		c, "UpdateRetiredLegKeep", in,
+		&pb.UpdateRetiredLegKeepReply{})
 }
 
 func (c *recordingClient) GetThinDeviceBitmap(

@@ -233,6 +233,7 @@ var renderCases = []renderCase{
 		},
 		want: `{"rep_name":"r0","repair":{"bad_leg_id_list":["3"],` +
 			`"clone_name":"","force":false,"grp_id":"2",` +
+			`"keep_bad_legs":false,"new_leg_id_to_keep":{},` +
 			`"new_leg_id_to_retired_epoch":{"4":"5"},"new_leg_list":[],` +
 			`"rep_id":"9","rep_stage":"REP_STAGE_STARTED","slice_id":"1",` +
 			`"try_to_abort":true}}` + "\n",
@@ -316,6 +317,16 @@ var renderCases = []renderCase{
 		argv:  []string{"group", "set-operator-in-charge", "--grp", "2"},
 		reply: &pb.UpdateGroupOperatorInChargeReply{GrpId: 2},
 		want:  `{"grp_id":"2"}` + "\n",
+	},
+	{
+		// The keep's reply: the retired leg alone, a uint64 string, with no
+		// revision, as no write of the flag raises one (architecture.md,
+		// Retired legs).
+		name:  "retired-leg keep, the reply",
+		rpc:   "UpdateRetiredLegKeep",
+		argv:  []string{"retired-leg", "keep", "--leg", "3", "--clear"},
+		reply: &pb.UpdateRetiredLegKeepReply{LegId: 3},
+		want:  `{"leg_id":"3"}` + "\n",
 	},
 	{
 		// An empty map renders as {} rather than null, and the reply's only

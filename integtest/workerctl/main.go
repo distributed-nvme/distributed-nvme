@@ -2979,7 +2979,7 @@ func cmdDeleteRetiredLeg(g *globals, args []string) {
 	cl := g.loadCluster(ctx, cli)
 	target := resolveSp(ctx, cli, cl, *sp)
 	if err := model.DeleteRetiredLeg(ctx, cli, cl.Id, target.Shard,
-		target.Id, target.Name, 0, uint64(leg), cl.Conf); err != nil {
+		target.Id, target.Name, 0, uint64(leg), cl.Conf, false); err != nil {
 		die("delete-retired-leg: %v", err)
 	}
 	spRev, err := plant.SpRevision(ctx, cli, cl, target)

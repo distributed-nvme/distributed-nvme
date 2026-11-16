@@ -448,7 +448,9 @@ type reactionOps interface {
 	) (int, uint64, error)
 	// deleteRetiredLeg is the retire timer's delete (MD6's DeleteRetiredLeg)
 	// of the retired leg legId, which the op refuses unless the pool's
-	// SpRev still holds expectRev, the revision the pass's snapshot read.
+	// SpRev still holds expectRev, the revision the pass's snapshot read,
+	// and refuses for a leg that carries keep in its own STM
+	// (model.ReasonRetiredLegKept), since a keep raises no revision.
 	deleteRetiredLeg(
 		ctx context.Context,
 		cid uint64,
@@ -783,7 +785,7 @@ func (o *modelReactionOps) deleteRetiredLeg(
 	cc *pb.ClusterConf,
 ) error {
 	return model.DeleteRetiredLeg(
-		ctx, o.cli, cid, shard, spId, spName, expectRev, legId, cc,
+		ctx, o.cli, cid, shard, spId, spName, expectRev, legId, cc, true,
 	)
 }
 
@@ -2725,7 +2727,7 @@ func grpRowHold(p *spPass, grpId uint64) string {
 // and the pass's now, with the reserved prefix that marks it as the worker's
 // own. It always takes a fresh leg, also while the group holds
 // common.MaxRetiredLegPerGrp retired legs: its finish then gives back the
-// group's oldest one (finishRepair). The black list is also the plan the op
+// group's oldest one that is not kept (finishRepair). The black list is also the plan the op
 // is handed: model.CreateRepair refuses the pick as `candidate changed` when
 // the group holds a DN outside it — one that joined after this pass's
 // snapshot, whose domain the scan could not exclude — or when the pick
@@ -2952,9 +2954,11 @@ func repairGroup(state *model.SpState, rep *pb.Repair) *pb.Group {
 // finishRepair runs the drive step's finish of the STARTED worker's repair
 // repName (model.FinishRepair) at the pass's now, under the cluster's stored
 // conf. Its record names the leg it retired and, when the group held
-// common.MaxRetiredLegPerGrp retired legs, the oldest one it gave back to its
-// disk node (given_back_leg_id), which a worker's repair created at that
-// bound makes room with (architecture.md, Repair). It reports whether the
+// common.MaxRetiredLegPerGrp retired legs, the oldest one that is not kept
+// it gave back to its disk node (given_back_leg_id), which a worker's repair
+// created at that bound makes room with (architecture.md, Repair). With every
+// retired leg kept the op refuses (model.ReasonRetiredLegsKept), and the
+// refusal holds this repair alone (driveFailed). It reports whether the
 // pass ends here.
 func (w *spWorker) finishRepair(
 	ctx context.Context,
@@ -3395,12 +3399,14 @@ func repairCloneDeleting(state *model.SpState, rep *pb.Repair) bool {
 // retireOldLeg is the retire timer (AR12), a step of the pass where
 // reactions run (AR3): at most one retired leg a pass, the oldest first by
 // retired_epoch, then by leg id, is deleted (model.DeleteRetiredLeg) when it
-// is at least common.RetiredLegMaxAge old, whoever's repair retired it, and
-// retireHold finds nothing to keep it. Its delete carries the
-// snapshot's SpRevision as its expected revision, so a pool changed since the
-// snapshot that judged the leg refuses it and the next pass judges again. A
-// leg younger than the age is passed over silently; an old one that a hold
-// keeps logs `retired leg kept` with the hold's reason on every pass. The
+// is at least common.RetiredLegMaxAge old, whoever's repair retired it, does
+// not carry keep, and retireHold finds nothing to keep it. Its delete carries
+// the snapshot's SpRevision as its expected revision, so a pool changed
+// since the snapshot that judged the leg refuses it and the next pass judges
+// again. A leg younger than the age, and a leg that carries keep, which an
+// operator or a forced start set and which may stand for months, is passed
+// over silently; an old one that a hold keeps logs `retired leg kept` with
+// the hold's reason on every pass. The
 // delete is not the pass's one action (AR2), and the data of the leg it
 // deletes is held twice elsewhere, so it is no reaction (AR9).
 func (w *spWorker) retireOldLeg(ctx context.Context, p *spPass) {
@@ -3411,7 +3417,7 @@ func (w *spWorker) retireOldLeg(ctx context.Context, p *spPass) {
 	})
 	for _, legId := range legIds {
 		retired, ok := p.state.RetiredLegs[legId]
-		if !ok || !reached(
+		if !ok || retired.GetKeep() || !reached(
 			p.now, retired.GetRetiredEpoch(), common.RetiredLegMaxAge,
 		) {
 			continue

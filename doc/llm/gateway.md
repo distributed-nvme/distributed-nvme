@@ -36,8 +36,9 @@ with `dnvctl`.
 The STM bodies of the public RPCs live in the per-resource files of
 `gateway/`. The `model` operations a handler runs as its deciding STM —
 `GrowSlice`, the repair operations `FinishRepair`, `CancelRepair` and
-`SetRepairAbort` and the retired-leg operation `DeleteRetiredLeg`, which
-take the group of either kind through the parent their record holds, and
+`SetRepairAbort` and the retired-leg operations `DeleteRetiredLeg` and
+`SetRetiredLegKeep`, which take the group of either kind through the parent
+their record holds, and
 `CreateRepair`, which
 writes the `Repair` record, with `ForceStartGroup` and `SetGrpOperatorInCharge`,
 which take it through the parent their caller found (`dnv-worker.md` MD6)
@@ -263,10 +264,10 @@ STM is a `model` op; `openSpRead` — resolution without the gate and
 without the token check — opens every SP-scoped read-only RPC and
 `DeleteClone`'s phase 1 (Clones); `openSpFlags` is `openSp` with the gate
 selectable, and `DeleteStoragePool` is its one caller with the gate off
-(Storage pools and GrowSlice). `GrowSlice` and the seven repair calls that
+(Storage pools and GrowSlice). `GrowSlice` and the eight repair calls that
 run a `model` op — `CreateRepair`, `FinishRepair`, `CancelRepair`,
-`TryToAbortRepair`, `DeleteRetiredLeg`, `ForceStartGroup` and
-`UpdateGroupOperatorInCharge` — resolve in their planning `Snapshot` only
+`TryToAbortRepair`, `DeleteRetiredLeg`, `ForceStartGroup`,
+`UpdateGroupOperatorInCharge` and `UpdateRetiredLegKeep` — resolve in their planning `Snapshot` only
 (Storage pools and GrowSlice, Repairs and retired legs) —
 `CreateRepair` in a fresh one each round of its candidate unit (GW9): their
 later transactions — the deciding STM, which is their `model` op (Scope and
@@ -321,8 +322,8 @@ them — and the hydration check's agent call all come ahead of it (Clones).
 
 The `model` mutations the gateway runs (Scope and placement) — `GrowSlice`,
 `CreateRepair`, `FinishRepair`, `CancelRepair`, `SetRepairAbort`,
-`DeleteRetiredLeg`, `ForceStartGroup` and `SetGrpOperatorInCharge` — take
-an expected revision and re-check it first inside their own STM, zero
+`DeleteRetiredLeg`, `ForceStartGroup`, `SetGrpOperatorInCharge` and
+`SetRetiredLegKeep` — take an expected revision and re-check it first inside their own STM, zero
 skipping the check (`dnv-worker.md` MD6); a mismatch is an
 `ErrPrecondition` with `ReasonStaleRevision`. The gateway passes the
 token's revision, which is zero exactly when the request carried no token
@@ -341,17 +342,18 @@ maintenance never bump (`architecture.md`, Revision keys and the sync
 fan-out), and neither does a write that changes only a DN's
 `used_meta_units`: the DN ledger writes such a node and rewrites its
 capacity value, and bumps no revision for it (`architecture.md`, Metadata
-units). Nor does `UpdateGroupOperatorInCharge`, whose flag no agent reads
-(`architecture.md`, Revision keys and the sync fan-out, Repairs), so a
-token survives its writes.
+units). Nor do `UpdateGroupOperatorInCharge` and `UpdateRetiredLegKeep`,
+whose flags no agent reads (`architecture.md`, Revision keys and the sync
+fan-out, Repairs, Retired legs), so a token survives their writes.
 `AdvanceClusterIds`, the id step, bumps nothing either: no agent reads a
 counter (`architecture.md`, Clusters). A flag update that asks for the
 state the record already holds —
 `UpdateDiskNodeDisabled`, `UpdateControllerNodeDisabled`,
 `UpdateCntlrEnabled`, `TryToAbortRepair` on a CREATED repair whose flag
 is already set, `ForceStartGroup`'s cancel of a group that carries no
-mark, and `UpdateGroupOperatorInCharge` with the value the group's flag
-holds — writes nothing, bumps nothing and replies OK, a token the request
+mark, `UpdateGroupOperatorInCharge` with the value the group's flag holds
+and `UpdateRetiredLegKeep` with the value the leg's flag holds — writes
+nothing, bumps nothing and replies OK, a token the request
 carried still being checked first: a no-op that bumped would invalidate
 every client's token for nothing. An `AppendCloneBitmap` that names the
 position where the same bytes already stand writes nothing, bumps nothing
@@ -557,8 +559,9 @@ capacity-key reason —
 in the planning read of `FinishRepair`, `CancelRepair` and
 `DeleteRetiredLeg` (`releaseConfGate`), whose `model` ops give a side back
 through the drains' ledger by the same capacity keys (`FinishRepair`'s op
-gives back the oldest retired leg's side when a worker's repair finishes at
-the retired-leg bound, and the gate runs whether or not a side goes back),
+gives back the oldest retired leg's side that is not kept when a worker's
+repair finishes at the retired-leg bound, and the gate runs whether or not
+a side goes back),
 and in the scans `pickDns` and `pickCn`
 (where a zero batch size would silently make the scan width zero and turn
 every allocation into `RESOURCE_EXHAUSTED`), in `CreateMigration`'s plan
@@ -1201,7 +1204,7 @@ below name.
   cosmetic: a racing append could otherwise write a chunk key behind the
   drain, and the drain's final emptiness guard rests on "after the latch,
   no chunk key can ever appear again". `GetClone` and `DeleteClone`'s own
-  phase 1 keep using plain `loadClone`. The seven repair calls that write,
+  phase 1 keep using plain `loadClone`. The eight repair calls that write,
   which change a clone meta group or its repair, refuse a deleting clone
   the same way, in their `model` op, and `CreateRepair`, `ForceStartGroup`
   and `UpdateGroupOperatorInCharge` first in their planning read
@@ -1346,7 +1349,7 @@ rather than a candidate problem.
 
 ### Repairs and retired legs
 
-The codes are those of `architecture.md`, Repairs and Retired legs. The seven
+The codes are those of `architecture.md`, Repairs and Retired legs. The eight
 calls that write run the `model` repair operations as their deciding STMs
 (Scope and placement), each behind a planning read in a read-only snapshot
 opened with `openSp` — resolution, the `deleting` gate, then the token
@@ -1404,8 +1407,9 @@ retired legs still answer.
   clock in unix seconds as the retired leg's `retired_epoch` and that conf.
   The planning read does not look the name up, so a name the pool does not list
   is the op's `model.ReasonRepairNotFound`, `NOT_FOUND`; a stage other than
-  STARTED, which the message names, and a deleting clone are the op's
-  `FAILED_PRECONDITION`. Reply `rep_id`, `retired_leg_id` and
+  STARTED, which the message names, a deleting clone, and a worker's repair
+  at the retired-leg bound whose group's retired legs all carry `keep`
+  (`model.ReasonRetiredLegsKept`) are the op's `FAILED_PRECONDITION`. Reply `rep_id`, `retired_leg_id` and
   `given_back_leg_id`, as the op returns them (`architecture.md`, Repairs).
 * **CancelRepair** — the planning read, the stored `ClusterConf` gated there
   (`releaseConfGate`, GW11); then `model.CancelRepair`, which gives a fresh
@@ -1458,6 +1462,12 @@ retired legs still answer.
   conf gate, then `model.DeleteRetiredLeg`, which gives the side back through
   the drains' DN ledger with one `BumpDnRev`;
   `model.ReasonRetiredLegNotFound` is `NOT_FOUND`. Reply `leg_id`.
+* **UpdateRetiredLegKeep** — DeleteRetiredLeg's planning read with no conf
+  gate, then `model.SetRetiredLegKeep` with the request's value, which
+  re-checks the token, the pool, the leg and its group and clone in its
+  STM, answers a leg whose flag already holds the value with no write, and
+  bumps no `SpRev` for a write (GW6); `model.ReasonRetiredLegNotFound` is
+  `NOT_FOUND`. Reply `leg_id`.
 
 ### Bitmap reads
 
@@ -1744,10 +1754,10 @@ gateway, never through `workerctl`.
   one moved to STARTED, its abort refused for the stage, and finished, the
   new leg in the bad leg's place and the bad leg retired with its side kept
   on its DN, the reply naming no retired leg given back; the retired leg
-  listed,
-  taken back as a third repair's new leg with nothing allocated and given
-  back as it was by that repair's cancel, then deleted, its side given
-  back; a group's forced start (`architecture.md`, Repairs, Repair) —
+  listed, kept with no revision moved, taken back as a third repair's new
+  leg with nothing allocated and its keep remembered, and given back as it
+  was, kept, by that repair's cancel, its keep then cleared, then deleted,
+  its side given back; a group's forced start (`architecture.md`, Repairs, Repair) —
   refused for a leg sent with the cancel flag, an unknown group, a leg of
   another group, the level that stops group arrays and an array the
   primary's report, seeded in the fake, shows running, then, with the

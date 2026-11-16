@@ -50,8 +50,11 @@ const ReasonLegNotNamable = "leg not namable"
 // at an sp_level at or above SP_LEVEL_NO_REDUND, where no group array is
 // built; a cancel runs at every level, since a mark that stands acts once
 // the level is lowered. The leg must be one the mark may name
-// (ReasonLegNotNamable). The gateway's planning read refuses the rest of the
-// call's cases, the group's row among them, which no transaction sees.
+// (ReasonLegNotNamable). A write also keeps the group's other copies: keep
+// on each of its retired legs and keep_bad_legs on its open repair
+// (keepGroupCopies); a cancel clears neither. The gateway's planning read
+// refuses the rest of the call's cases, the group's row among them, which
+// no transaction sees.
 func ForceStartGroup(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -106,6 +109,9 @@ func ForceStartGroup(
 		if !namable {
 			return fail(opForceStartGroup, ReasonLegNotNamable)
 		}
+		if err := keepGroupCopies(s, cid, conf, grp); err != nil {
+			return err
+		}
 		// STM.Put marshals at the call, so the revision goes into the mark
 		// before the parent is staged.
 		revision, err = bumpSpRevTo(s, opForceStartGroup, shard, cid, spId)
@@ -121,6 +127,62 @@ func ForceStartGroup(
 		return 0, err
 	}
 	return revision, nil
+}
+
+// keepGroupCopies is the keep a mark's write sets, inside the caller's STM:
+// keep on every retired leg grp lists; on the repair the group names, keep
+// for each of its new legs taken from a retired leg (new_leg_id_to_keep),
+// whose cancel then gives the leg back kept, whatever the repair's stage;
+// and keep_bad_legs on that repair while it is open, CREATED or STARTED,
+// whose finish then retires its bad legs with keep (FinishRepair). Reason:
+// after a start from another leg, every retired copy of the group, a
+// taken-back one included, and every leg the open repair replaces can hold
+// newer data than the restored array, so none of them goes until an
+// operator says (architecture.md, Repair, Forced start). A record that
+// already carries its flags is not written.
+func keepGroupCopies(
+	s etcdutil.STM,
+	cid uint64,
+	conf *pb.SpConf,
+	grp *pb.Group,
+) error {
+	for _, legId := range grp.GetRetiredLegIdList() {
+		retired, err := loadRetiredLeg(s, opForceStartGroup, cid, conf, legId)
+		if err != nil {
+			return err
+		}
+		if retired.GetKeep() {
+			continue
+		}
+		retired.Keep = true
+		s.Put(RetiredLegKey(cid, conf.GetSpId(), legId), retired)
+	}
+	if grp.GetRepName() == "" {
+		return nil
+	}
+	rep, err := loadRepair(s, opForceStartGroup, cid, conf, grp.GetRepName())
+	if err != nil {
+		return err
+	}
+	changed := false
+	for legId := range rep.GetNewLegIdToRetiredEpoch() {
+		if rep.GetNewLegIdToKeep()[legId] {
+			continue
+		}
+		if rep.NewLegIdToKeep == nil {
+			rep.NewLegIdToKeep = map[uint64]bool{}
+		}
+		rep.NewLegIdToKeep[legId] = true
+		changed = true
+	}
+	if namesNewLegs(rep) && !rep.GetKeepBadLegs() {
+		rep.KeepBadLegs = true
+		changed = true
+	}
+	if changed {
+		s.Put(RepairKey(cid, conf.GetSpId(), grp.GetRepName()), rep)
+	}
+	return nil
 }
 
 // forcedStartNamable reports whether a forced-start mark of grp may name

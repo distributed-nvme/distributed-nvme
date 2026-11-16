@@ -530,6 +530,7 @@ var commands = []command{
 	// retired leg
 	{"list-retired-legs", setupListRetiredLegs},
 	{"delete-retired-leg", setupDeleteRetiredLeg},
+	{"keep-retired-leg", setupKeepRetiredLeg},
 	// forced start
 	{"force-start-grp", setupForceStartGrp},
 	// operator in charge

@@ -16759,8 +16759,8 @@ REACT_REP_MARK=0
 REACT_NEW_LEG=""
 REACT_NEW_SIDE=""
 REACT_NEW_ADDR=""
-# The group's retired legs, each leg id to its retired_epoch, as
-# react_retired_read last read them.
+# The group's retired legs, each leg id to its retired_epoch and its keep
+# flag, as react_retired_read last read them.
 REACT_RETIRED=""
 
 # AR8 on a group with no healthy leg (step 6), the readings its outage's
@@ -17694,12 +17694,12 @@ react_rep_read() { # <leg id> <retired ids>
 }
 
 # react_retired_read fills REACT_RETIRED with the retired legs of slice 0's
-# first data group as a jq object literal, each leg id to its retired_epoch:
-# the ids the group's retired_leg_id_list in $SP_JSON names, the times from
-# `retired-leg list`, whose reply it leaves in CTL_OUT. It dies when a listed
-# leg has no record there, or one that names another group or carries no
-# retired_epoch. The times are what a finish's give-back orders the retired
-# legs by (react_retired_given).
+# first data group as a jq object literal, each leg id to {e: its
+# retired_epoch, k: its keep flag}: the ids the group's retired_leg_id_list
+# in $SP_JSON names, the times and flags from `retired-leg list`, whose reply
+# it leaves in CTL_OUT. It dies when a listed leg has no record there, or one
+# that names another group or carries no retired_epoch. The times order a
+# finish's give-back, which never takes a kept leg (react_retired_given).
 react_retired_read() {
 	local ids bad
 	ids=$(sp_field "$COPY_GRP0 | [.retired_leg_id_list[]] | tojson")
@@ -17713,7 +17713,8 @@ react_retired_read() {
 			"\`retired-leg list\` holds with no record, with another group" \
 			"or with no retired_epoch"
 	REACT_RETIRED=$(jq_of "$CTL_OUT" ".leg_id_to_retired_leg as \$m
-		| [$ids[] | {key: ., value: \$m[.].retired_epoch}] | from_entries
+		| [$ids[] | {key: ., value: {e: \$m[.].retired_epoch,
+			k: (\$m[.].keep // false)}}] | from_entries
 		| tojson")
 }
 
@@ -17721,14 +17722,32 @@ react_retired_read() {
 # gives back from a group that holds the retired legs <retired>, a jq object
 # literal from react_retired_read, or nothing when it gives none back. At
 # common.MaxRetiredLegPerGrp retired legs the finish first gives back the
-# oldest, the one with the smallest retired_epoch and, among equal times,
-# the smallest leg id; below it the finish gives none back (architecture.md,
+# oldest that does not carry keep, the one with the smallest retired_epoch
+# and, among equal times, the smallest leg id; below it the finish gives
+# none back, and with every one kept it is refused (architecture.md,
 # Repairs, FinishRepair). Ids and times are decimal strings (dnvctl.md CT4)
 # with no leading zero, so each compares by its length first.
 react_retired_given() { # <retired>
 	jq_of "$1" "to_entries
 		| if length >= $MAX_RETIRED_LEG_PER_GRP
-		  then sort_by([(.value | length), .value, (.key | length), .key])
+		  then map(select(.value.k | not))
+		       | sort_by([(.value.e | length), .value.e, (.key | length),
+		           .key])
+		       | (.[0].key // \"\")
+		  else \"\" end"
+}
+
+# react_retired_oldest prints the oldest of the retired legs <retired>, a
+# jq object literal from react_retired_read, kept or not, ordered as
+# react_retired_given orders them, or nothing when the group holds fewer
+# than common.MaxRetiredLegPerGrp: the leg an operator deletes to free room
+# at the bound, which the operator's delete takes even when it is kept
+# (architecture.md, Retired legs).
+react_retired_oldest() { # <retired>
+	jq_of "$1" "to_entries
+		| if length >= $MAX_RETIRED_LEG_PER_GRP
+		  then sort_by([(.value.e | length), .value.e, (.key | length),
+		           .key])
 		       | .[0].key
 		  else \"\" end"
 }
@@ -18222,10 +18241,11 @@ react_fs_repair() { # <stay leg id> <bad leg id>
 	given=$(react_retired_given "$before_epochs")
 	[ -n "$given" ] ||
 		die "group $REACT_GRP_ID holds the retired legs $before_retired," \
-			"below the retired-leg bound of $MAX_RETIRED_LEG_PER_GRP, before" \
-			"the worker's repair of leg $bad: the react steps before leave" \
-			"it at the bound, where a worker's finish gives back the group's" \
-			"oldest retired leg (architecture.md, Repairs, FinishRepair)"
+			"below the retired-leg bound of $MAX_RETIRED_LEG_PER_GRP or every" \
+			"one kept, before the worker's repair of leg $bad: the react" \
+			"steps before leave it at the bound with one not kept, where a" \
+			"worker's finish gives back the group's oldest retired leg that" \
+			"is not kept (architecture.md, Repairs, FinishRepair)"
 	log "  group $REACT_GRP_ID holds the retired legs $before_retired, at the" \
 		"bound: the finish of the worker's repair of leg $bad gives back" \
 		"leg $given, the oldest"
@@ -21097,6 +21117,7 @@ react_fs_restore() {
 	local oldside oldaddr freshaddr naddr oldep newep rep_id rep1_id
 	local cand pos side addr bad bpos bvm binst keeper nline kline nuu kuu
 	local recs mrd mst msg rev want tag dev1 before_primary before_failovers
+	local kleg
 
 	react_wait_no_repair
 	sp_refresh
@@ -21120,6 +21141,22 @@ react_fs_restore() {
 	assert_field "$SP_JSON" \
 		"[$COPY_GRP0.retired_leg_id_list[] | select(. == \"$old\")] | length" \
 		1 "step 07's leg $old is still one of the group's retired legs"
+	# Step 07's forced start kept every retired leg of the group, and the
+	# finish of its repair retired leg $old kept too (architecture.md,
+	# Retired legs; Repair, Forced start). The operator, having judged
+	# them, clears the flag of every one but $old: the worker's repair
+	# below, at the retired-leg bound, then gives one back, and $old, which
+	# the restore needs, stays kept.
+	ctl_ok retired-leg list
+	for kleg in $(sp_field "$COPY_GRP0.retired_leg_id_list | join(\" \")"); do
+		assert_field "$CTL_OUT" ".leg_id_to_retired_leg[\"$kleg\"].keep" \
+			true "retired leg $kleg kept since step 07's forced start"
+	done
+	for kleg in $(sp_field "$COPY_GRP0.retired_leg_id_list | join(\" \")"); do
+		[ "$kleg" = "$old" ] && continue
+		ctl_ok retired-leg keep --leg "$kleg" --clear
+		log "  retired leg $kleg's keep cleared"
+	done
 	dpos=$(react_fs_pos "$data")
 	didx=$(sp_field "$COPY_GRP0.leg_list[$dpos].leg_idx")
 	other=$(sp_field \
@@ -21603,11 +21640,11 @@ react_take_over() {
 	# The retired-leg bound (see the step's header). Every disk node is back
 	# since step 8, so the deleted leg's side goes back to a live agent.
 	react_retired_read
-	given=$(react_retired_given "$REACT_RETIRED")
+	given=$(react_retired_oldest "$REACT_RETIRED")
 	if [ -n "$given" ]; then
 		log "  group $REACT_GRP_ID holds the retired legs $REACT_RETIRED, at" \
-			"the bound: deleting leg $given, the oldest, so that the" \
-			"operator's repair may take a fresh leg"
+			"the bound: deleting leg $given, the oldest, kept or not, so" \
+			"that the operator's repair may take a fresh leg"
 		ctl_ok retired-leg delete --leg "$given"
 		assert_field "$CTL_OUT" '.leg_id' "$given" "DeleteRetiredLegReply.leg_id"
 		sp_refresh

@@ -267,7 +267,8 @@ always means the SP's `DmPoolConf.data_block_size`.
   no migration moves it. A later operator's repair of the same group may
   take it back as its new leg; the retire timer, `DeleteRetiredLeg`, the
   finish of a worker's repair of the group at the bound, or its pool's or
-  its clone's drain deletes it (Retired legs, Repair).
+  its clone's drain deletes it, the timer and that finish never one that
+  carries `keep` (Retired legs, Repair).
 * **forced start** — An operator's start of an md-raid1 group's array from
   one leg they name, for an array md will not start by itself: the
   group's **forced-start mark**, `Group.forced_start`, holds the named leg
@@ -1361,7 +1362,9 @@ suffix) and `SpRev.sp_name` (the `SpConf` key suffix) [D10]. Rules:
   DN whose only change is its used units is written and its capacity key
   rewritten, and its revision stays; nor does a write of a group's
   `operator_in_charge` flag, which no agent reads either (Repairs,
-  UpdateGroupOperatorInCharge). Every `SpConf` or sub-object mutation of
+  UpdateGroupOperatorInCharge), nor a write of a retired leg's `keep` flag
+  (Retired legs, UpdateRetiredLegKeep). Every `SpConf` or sub-object
+  mutation of
   `service Gateway` — RPC specifications bumps `SpRev` unless the RPC's
   spec says otherwise.
 * The request-side `DnRev`, `CnRev` and `SpRev` fields are
@@ -1459,7 +1462,8 @@ there. Doing it in-STM also makes the transaction fail correctly when the
 cluster is concurrently deleted or recreated. `GrowSlice` and the repair
 calls whose deciding STM is a `model` operation — `CreateRepair`,
 `FinishRepair`, `CancelRepair`, `TryToAbortRepair`, `DeleteRetiredLeg`,
-`ForceStartGroup` and `UpdateGroupOperatorInCharge` — are the exceptions:
+`ForceStartGroup`, `UpdateGroupOperatorInCharge` and
+`UpdateRetiredLegKeep` — are the exceptions:
 they make that read in a planning snapshot, `CreateRepair` with a fresh new
 leg in a fresh one each round of its candidate unit (`gateway.md` GW5,
 GW9). `AdvanceClusterIds` commits one
@@ -2977,8 +2981,9 @@ cross-SP live migration uses it. Reply `ns_id`.
 `DeleteClone` latches, or the sp worker latches once the primary's report
 shows the copy whole (`dnv-worker.md` CLD13), and the sp worker drains
 (`dnv-worker.md`, The clone drain). Every clone mutator but `DeleteClone` — `UpdateCloneTrConf`,
-`AppendCloneBitmap`, and the repair calls that write and `DeleteRetiredLeg`
-on its clone meta group (Repairs, Retired legs) — fails
+`AppendCloneBitmap`, and the repair calls that write, `DeleteRetiredLeg`
+and `UpdateRetiredLegKeep` on its clone meta group (Repairs, Retired legs)
+— fails
 `FAILED_PRECONDITION` when `Clone.deleting` is true (`dnv-worker.md` CLD1);
 `CreateClone` needs no check of its own, the surviving `Clone` key keeping
 same-name creation refused until the drain's last transaction
@@ -3539,6 +3544,7 @@ pass built from a snapshot older than the flag must not slip through.
 Third, a worker's repair always takes a fresh new leg, and may take one
 while its group is at the retired-leg bound. Fourth, the finish of a
 worker's repair at that bound gives back the group's oldest retired leg
+that does not carry `keep`, and is refused when every one carries it
 (FinishRepair). The other calls that address a repair take a pool at
 every level and a repair of either kind, so that an operator can still
 finish, abort or cancel any repair at the levels where reactions stop.
@@ -3606,8 +3612,8 @@ fresh new leg: `RESOURCE_EXHAUSTED` when the group holds
 message saying to delete one (Retired legs), or when no DN is a candidate
 (Per-operation allocation). A worker's repair takes its fresh new leg at
 that bound too: the worker cannot wait for an operator to free room, and
-its finish gives back the group's oldest retired leg (FinishRepair).
-`CreateRepair` reads no report, so the group's row cannot gate an
+its finish gives back the group's oldest retired leg that does not carry
+`keep` (FinishRepair). `CreateRepair` reads no report, so the group's row cannot gate an
 operator's create: a repair of a group whose array does not run waits in
 CREATED until it runs, and the operator aborts it if they change their mind
 (Repair).
@@ -3616,11 +3622,13 @@ Action. A new leg from a retired leg allocates nothing: the retired leg's
 record and its entries in the group's and the pool's lists go, and its leg —
 its leg id, its `leg_idx` and its side, whose DN already holds the side's
 pointer and extents — becomes the new leg; the repair keeps the retired
-leg's `retired_epoch` in `new_leg_id_to_retired_epoch` for a cancel, and
-takes one id, its `rep_id`. That create is allowed while the group holds
+leg's `retired_epoch` in `new_leg_id_to_retired_epoch`, and its `keep`, when
+it carries one, in `new_leg_id_to_keep`, for a cancel, and takes one id, its
+`rep_id`. That create is allowed while the group holds
 `MaxRetiredLegPerGrp` retired legs, since the finish then retires one leg as
 the create took one; so, with the give-back of a worker's finish, a finish
-never passes the bound, and a repair never waits in STARTED for room. A
+never passes the bound, and a repair waits in STARTED for room only while
+every retired leg of its group carries `keep` (FinishRepair). A
 fresh new leg is one DN, planned in every round from a fresh read of the
 group (Per-operation allocation). The deciding STM is handed the DNs that
 read found in the group, and refuses as candidate changed, so that its
@@ -3639,13 +3647,17 @@ group's `rep_name`, lists the name in `repair_name_list`, and bumps
 
 **FinishRepair** — Errors: `NOT_FOUND` for a name not in
 `repair_name_list`; `FAILED_PRECONDITION` for a stage other than
-`REP_STAGE_STARTED`, naming the stage, and when the group's clone is
-being deleted. Action: the STM, given its caller's clock as the time,
+`REP_STAGE_STARTED`, naming the stage, when the group's clone is
+being deleted, and for a worker's repair whose group holds
+`MaxRetiredLegPerGrp` retired legs that all carry `keep`
+(`model.ReasonRetiredLegsKept`), since none can make room. Action: the STM, given its caller's clock as the time,
 puts the new leg in the bad leg's position in `leg_list` with the bad
 leg's `leg_idx`, keeping its own leg id, side and `err_epoch`; puts the
 bad leg as a `RetiredLeg` under its own leg id, with its side as it is,
-the group's id, its `leg_idx`, the repair's parent and the time as its
-`retired_epoch`, and lists it in the group's and the pool's
+the group's id, its `leg_idx`, the repair's parent, the time as its
+`retired_epoch` and `keep` when the repair carries `keep_bad_legs`, which a
+forced start of the group sets (Repair, Forced start), and lists it in the
+group's and the pool's
 `retired_leg_id_list`; deletes the `Repair` and its `repair_name_list`
 entry; clears the group's `rep_name`, and its forced-start mark when the
 mark names the bad leg, which the finish retires; bumps `SpRev`. The bad
@@ -3657,8 +3669,9 @@ pass and hold leg repair off the group (`dnv-worker.md` AR8) until the
 operator withdrew it; a mark that names the new leg stays, the leg keeping
 its id in its new place. For a worker's repair whose group holds
 `MaxRetiredLegPerGrp` retired legs, the same STM
-first gives back the group's oldest retired leg, the one with the
-smallest `retired_epoch` and, among equal times, the smallest leg id,
+first gives back the group's oldest retired leg that does not carry
+`keep`, the one with the smallest `retired_epoch` and, among equal times,
+the smallest leg id,
 chosen inside the transaction from the records the group lists, so the
 choice never depends on the order of the list: its side gives its DN the
 group's `ext_cnt` and its pointer back, with the DN's capacity key and
@@ -3666,8 +3679,13 @@ group's `ext_cnt` and its pointer back, with the DN's capacity key and
 pool's `retired_leg_id_list` go, as `DeleteRetiredLeg` deletes one. An
 operator's repair gives none back: its fresh new leg was refused at the
 bound, and a new leg taken from a retired leg left a place. So no finish
-passes the bound. Reason: the worker cannot wait for an operator to free
-room, and the retire timer never runs on a group with a repair; at the
+passes the bound. When every retired leg of the group carries `keep`, the
+worker's finish is refused and gives nothing back, and the sp worker's
+pass logs the wait (`dnv-worker.md` AR8) until an operator clears a flag
+or deletes a retired leg. Reason: the worker cannot wait for an operator
+to free room, but a reaction never deletes a leg that an operator or a
+forced start kept, and the retire timer never runs on a group with a
+repair; at the
 finish the group keeps its in-sync leg and its newer retired legs, which
 hold a whole copy only where the leg was in sync when it left, with no copy
 onto it pending (Known limits), and a cancelled repair costs no retired
@@ -3681,7 +3699,8 @@ which kept copy went.
 `repair_name_list`; `FAILED_PRECONDITION` for a stage other than
 `REP_STAGE_ABORTED`, naming the stage, and when the group's clone is
 being deleted. Action: STM: a new leg taken from a retired leg goes back
-as that retired leg, with the `retired_epoch` the repair kept, its own
+as that retired leg, with the `retired_epoch` and the `keep` the repair
+kept, its own
 `leg_idx`, its side as it is now and the repair's parent, listed again in
 the group's and the pool's lists — a cancel never destroys the kept copy,
 though md may have written on it, and a forced start may have zeroed its
@@ -3761,7 +3780,11 @@ start go on over a member that holds newer data of the same array (Repair,
 Forced start). Action: STM:
 without `cancel`, set the group's `forced_start` to the leg's id, the
 `SpRev` revision the same STM's bump writes and the force, replacing a mark
-that stands;
+that stands, and set `keep` on every retired leg the group lists, `keep`
+for each new leg the group's repair took back from a retired leg, at any
+stage, so its cancel gives it back kept, and `keep_bad_legs` on that repair
+while it is CREATED or STARTED (Repair, Forced start); a cancel clears
+none of them;
 with `cancel`, clear the mark and bump `SpRev`, and answer a group with no
 mark OK with no write and no bump, a token the request carried still being
 checked first (`gateway.md` GW6). The mark rides to every cntlr in its
@@ -3807,8 +3830,15 @@ so a finish loses nothing. It ends when an operator's
 repair of its group takes it back as the new leg, when the operator
 deletes it, when the sp worker's retire timer does, when the finish of a
 worker's repair of its group gives it back as the group's oldest retired
-leg at the bound (FinishRepair), or when its pool's or its clone's drain
-deletes it (Repair, Deletes). It is no leg: no migration moves it
+leg that is not kept at the bound (FinishRepair), or when its pool's or its clone's drain
+deletes it (Repair, Deletes). A retired leg that carries `keep` is never
+taken by the retire timer nor given back at the bound: a forced start of
+its group sets it on every retired leg the group lists, and the finish of
+a repair whose bad legs the forced start kept sets it on the bad leg, since
+after a start from another leg any of them can hold newer data than the
+restored array, and an operator sets or clears it with
+`UpdateRetiredLegKeep`; only the operator's delete, a take-back or a
+drain ends such a leg. It is no leg: no migration moves it
 (Migrations) and the leg bitmap read does not find it (Bitmap reads). A group holds at most `MaxRetiredLegPerGrp` of them: a retired
 side keeps its extents and its place in its DN's `side_ptr_list`, and the
 drains' transactions and the messages that carry the lists need a bound;
@@ -3827,7 +3857,21 @@ group's clone is being deleted. Action: STM: the side gives its DN the group's `
 and its pointer back, with the DN's capacity key and `DnRev`; the
 `RetiredLeg` and its entries in the group's and the pool's
 `retired_leg_id_list` go; `SpRev` is bumped. The DN's agent then tears the
-side down (Teardown by sweep). Reply `leg_id`.
+side down (Teardown by sweep). A leg that carries `keep` is deleted as
+asked. Reply `leg_id`.
+
+**UpdateRetiredLegKeep** — inputs `leg_id` and `keep`, the value the
+retired leg's flag takes. Runs at every `sp_level`, as `DeleteRetiredLeg`
+does. Errors: `NOT_FOUND` when `leg_id` is not in `retired_leg_id_list`;
+`FAILED_PRECONDITION` when its group's clone is being deleted. Action:
+STM: set the leg's `keep` to the request's value; a leg that already holds
+that value is answered OK with no write, a token the request carried still
+being checked first (`gateway.md` GW6). The write does not bump `SpRev`.
+Reason: no agent reads the flag, and the sp worker reads every record
+afresh at the start of each pass (`dnv-worker.md` AR1), so a token a caller
+holds stays valid across the flag's writes; the retire timer's delete
+checks the flag again in its own transaction, so a keep written after the
+pass's snapshot still holds (`dnv-worker.md` AR12). Reply `leg_id`.
 
 ### Bitmap reads
 
@@ -5093,7 +5137,8 @@ The worker never deletes user data on its own (`dnv-worker.md` AR9): the
 retire timer, a step of the pass and no reaction, deletes a retired leg
 only once its data is held twice elsewhere (`dnv-worker.md` AR12), and the
 finish of a worker's repair at the retired-leg bound gives back only a copy
-older than the newest one its group keeps (Repairs).
+older than the newest one its group keeps (Repairs); neither takes a leg
+that carries `keep` (Retired legs).
 
 ## Procedures
 
@@ -5596,7 +5641,8 @@ a create at the levels where reactions stop and while the group's
 `operator_in_charge` flag is set (Repairs). Such a repair
 always takes a fresh new leg, and is created even while its group holds
 `MaxRetiredLegPerGrp` retired legs; its finish on a group at that bound
-gives back the group's oldest retired leg in the same transaction
+gives back the group's oldest retired leg that does not carry `keep` in
+the same transaction, and waits in STARTED while every one carries it
 (Repairs, FinishRepair). The give-back happens only at that finish, so a
 worker's repair that is aborted and cancelled costs the group no retired
 copy. The operator drives a worker's repair with the gateway's calls, which
@@ -5753,7 +5799,8 @@ the group's `rep_name` is cleared (Repairs). The bad leg's side stays on
 its DN. Reason: the bad leg's data is kept, so the finish loses nothing,
 even while md still copies onto the new leg. The finish of a worker's
 repair whose group is at the retired-leg bound first gives back the
-group's oldest retired leg, so the group keeps its newer retired legs,
+group's oldest retired leg that is not kept, so the group keeps its newer
+retired legs and its kept ones,
 whole copies or not (Repairs, FinishRepair; Known limits). A retired leg
 that left the array that runs has
 an md event count behind that array's, since at the least its own failure
@@ -5802,6 +5849,15 @@ failed save (`dnagent.md` SH5), can carry a mark the worker has cleared,
 or the operator withdrawn, since: the request that clears it did not
 reach the agent or was the one refused; a start from that
 mark's leg, stale by then, would zero the member with the newest data.
+The same write keeps the group's other copies: it sets `keep` on every
+retired leg the group lists, on each new leg the group's repair took back
+from a retired leg, which that repair's cancel then gives back kept, and
+`keep_bad_legs` on the repair while it is open, whose finish then retires
+its bad legs with `keep` (Retired legs). Reason: after
+a start from another leg, each of them can hold newer data than the
+restored array, which only the operator can judge, so neither the retire
+timer nor the give-back at the bound takes one; the operator clears the
+flag with `UpdateRetiredLegKeep` or deletes the leg once it has judged.
 While the mark stands and
 no array of the group runs, the primary starts the array from the named leg
 alone: it stops a group array that does not run, reads the md superblock of
@@ -5894,9 +5950,9 @@ leg with an older full copy to start from, which restores that group alone
 and not the pool (Known limits).
 
 **The retire timer.** The sp worker deletes a retired leg
-(`DeleteRetiredLeg`) once it has aged on a whole, healthy group that has
-no repair, so a group waiting for its legs keeps its retired legs
-(`dnv-worker.md` AR12).
+(`DeleteRetiredLeg`) that carries no `keep` once it has aged on a whole,
+healthy group that has no repair, so a group waiting for its legs keeps
+its retired legs (`dnv-worker.md` AR12).
 
 **Repairs and migrations.** A repair's bad leg has one side, and
 `CreateMigration` refuses it, as `CreateRepair` refuses a bad leg with two
@@ -7647,7 +7703,8 @@ document and only pointed to here.
   refused, since it reads as no full member.
 * **The finish of a worker's repair at the retired-leg bound can give back
   the only whole older copy.** That finish chooses the retired leg to give
-  back by its time alone (Repairs), and no finish waits for md's resync,
+  back by its time alone among the legs that are not kept (Repairs), and
+  no finish waits for md's resync,
   so a newer retired leg can hold part of the data: once a group holds
   `MaxRetiredLegPerGrp` retired legs, a finish can give back the one that
   is a whole copy and keep the partial ones. The in-sync leg keeps the
@@ -7668,9 +7725,12 @@ document and only pointed to here.
   retired side keeps its extents and its place in its DN's
   `side_ptr_list`, and the retire timer deletes one only on a group whose
   array is whole, with no repair and no leg health epoch, and only where
-  reactions run; so a group that does not come back whole keeps its
-  retired legs until the operator deletes them or a worker's repair of the
-  group finishes and gives back the oldest, and an operator's repair with
+  reactions run, and never one that carries `keep`; so a group that does
+  not come back whole keeps its retired legs until the operator deletes
+  them or a worker's repair of the group finishes and gives back the
+  oldest that is not kept, a group whose retired legs are all kept holds
+  its worker's repair in STARTED until the operator clears a flag or
+  deletes one, and an operator's repair with
   a fresh new leg is refused on a group that holds `MaxRetiredLegPerGrp` of
   them (Retired legs, Repair; `dnv-worker.md` AR12).
 * **A stale discovery view keeps a withdrawn path.** A cdc twin that has

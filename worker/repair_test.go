@@ -643,6 +643,21 @@ func TestRetireTimer(t *testing.T) {
 		h.wantNoRecord(msgRetiredLegKept)
 	})
 
+	// A leg that carries keep, an operator's or a forced start's, is passed
+	// over with no record at any age, as a young one is; with the flag
+	// cleared the next pass deletes it.
+	t.Run("a kept leg", func(t *testing.T) {
+		h := retireCase(t)
+		h.state.RetiredLegs[retireLegA].Keep = true
+		h.pass()
+		h.wantOps()
+		h.wantNoRecord(msgRetiredLegKept)
+		h.wantNoRecord(msgRetiredLegDeleted)
+		h.state.RetiredLegs[retireLegA].Keep = false
+		h.pass()
+		h.wantOps("delete_retired_leg")
+	})
+
 	// The clock decides: a second short of the age, nothing and no record;
 	// once the clock has moved one second on, the next pass deletes it.
 	t.Run("the clock reaches the age", func(t *testing.T) {

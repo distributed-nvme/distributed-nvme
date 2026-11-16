@@ -331,11 +331,6 @@ The entries:
   primary creates an array over them with no copy. Hosts read a mix of the
   legs' data. It needs four rare events in a row. State: accepted, written
   as a limit. Not seen in the lab.
-- **The worker deletes a retired leg that holds the newest copy.** Silent.
-  The worker deletes a retired leg after seven days on a whole group. At
-  the bound of two retired legs, the finish of a repair the worker started
-  deletes the oldest at any age. No setting keeps such a leg. State: fix
-  decided, a keep flag on the retired leg. Not seen in the lab.
 - **A half-copied leg can look whole.** While md copies from the one leg it
   holds in sync and that leg dies, md can end the copy by marking the leg it
   copied onto in sync, with the regions it never copied in that leg's
@@ -723,7 +718,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | none; the introduction explains the flow | procedure to write: the whole flow |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | none | procedure to write |
 | Force-start a group | `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | none | procedure to write: the forced-start guide. Fix decided: an inspect call that shows what the primary reads from each member, and a dry run that says what a start would do and refuse. |
-| Delete a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete` | none | procedure to write, one line |
+| Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself | none | procedure to write: when to keep a leg, when to clear the flag |
 | Replace a cntlr by hand | `dnvctl cntlr set-enabled`, `dnvctl cntlr delete`, `dnvctl cntlr create` | none | procedure to write |
 | Change a pool's cntlid slots, the ranges of NVMe controller ids its exports use | `dnvctl sp set-cntlid-slots` | none | procedure to write, one line |
 | Change a pool's thresholds | none | — | not yet |

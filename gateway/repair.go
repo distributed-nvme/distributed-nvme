@@ -14,9 +14,10 @@ import (
 
 // This file is architecture.md, Repairs and Retired legs (gateway.md, Repairs
 // and retired legs): the eight RPCs of a repair of an md-raid1 group's leg;
-// ForceStartGroup, the forced start of a group's array from one leg; and
+// ForceStartGroup, the forced start of a group's array from one leg;
 // UpdateGroupOperatorInCharge, an operator's take-over of a group's repair
-// from the sp worker.
+// from the sp worker; and UpdateRetiredLegKeep, the keep flag of a retired
+// leg.
 // CreateRepair creates an operator's repair only, since it refuses the
 // reserved prefix of the sp worker's own repairs (validateRepName); the calls
 // that address a repair by its name take both kinds, so an operator can
@@ -37,7 +38,7 @@ import (
 // The three reads are one snapshot each over the pool's lists.
 
 // repairOpenSp is the planning read of FinishRepair, CancelRepair,
-// TryToAbortRepair and DeleteRetiredLeg: openSp — the resolution, the
+// TryToAbortRepair, DeleteRetiredLeg and UpdateRetiredLegKeep: openSp — the resolution, the
 // deleting gate and the token check, in that order (GW5, GW6) — in a
 // read-only snapshot. Its scope hands the model op the cluster id, the
 // shard, the sp id and, for FinishRepair, CancelRepair and DeleteRetiredLeg,
@@ -453,8 +454,10 @@ func repairCreateChecks(
 // other than STARTED or a deleting clone FAILED_PRECONDITION naming the
 // stage or the clone's state (GW7). The name passes the common name rule
 // alone (validateRepairRef), so an operator can finish a repair the sp
-// worker created; that finish gives back the group's oldest retired leg when
-// the group holds MaxRetiredLegPerGrp of them, and the reply names that leg
+// worker created; that finish gives back the group's oldest retired leg that
+// is not kept when the group holds MaxRetiredLegPerGrp of them, and is
+// refused (model.ReasonRetiredLegsKept, FAILED_PRECONDITION) when every one
+// is kept, and the reply names the given-back leg
 // in given_back_leg_id, zero when the finish gave none back, so the operator
 // learns which kept copy went.
 func (s *Server) FinishRepair(
@@ -1062,7 +1065,7 @@ func (s *Server) DeleteRetiredLeg(
 	}
 	err = model.DeleteRetiredLeg(
 		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
-		req.GetSpRev().GetRevision(), req.GetLegId(), sc.Cc,
+		req.GetSpRev().GetRevision(), req.GetLegId(), sc.Cc, false,
 	)
 	if modelReason(err) == model.ReasonRetiredLegNotFound {
 		return nil, errRetiredLegNotFound(req.GetLegId())
@@ -1071,6 +1074,46 @@ func (s *Server) DeleteRetiredLeg(
 		return nil, mapModelErr(err)
 	}
 	return &pb.DeleteRetiredLegReply{LegId: req.GetLegId()}, nil
+}
+
+// UpdateRetiredLegKeep is the UpdateRetiredLegKeep of architecture.md,
+// Retired legs: the keep flag of a retired leg, set to keep the leg from the
+// sp worker's retire timer and from the give-back at the retired-leg bound,
+// and cleared to let them take it again, at every sp_level. The shape is
+// DeleteRetiredLeg's behind the same planning read (repairOpenSp);
+// model.SetRetiredLegKeep, the deciding STM, makes its own checks again, the
+// token first (GW6), answers an id the pool does not list with
+// model.ReasonRetiredLegNotFound, NOT_FOUND here, and a leg whose flag
+// already holds the request's value with no write. No write of the flag
+// bumps SpRev, so a token the caller holds stays valid across the call.
+func (s *Server) UpdateRetiredLegKeep(
+	ctx context.Context,
+	req *pb.UpdateRetiredLegKeepRequest,
+) (*pb.UpdateRetiredLegKeepReply, error) {
+	if err := validateOptionalName(
+		"cluster_name", req.GetClusterName(),
+	); err != nil {
+		return nil, err
+	}
+	if err := validateName("sp_name", req.GetSpName()); err != nil {
+		return nil, err
+	}
+	sc, err := s.repairOpenSp(
+		ctx, req.GetClusterName(), req.GetSpName(), req.GetSpRev())
+	if err != nil {
+		return nil, err
+	}
+	err = model.SetRetiredLegKeep(
+		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
+		req.GetSpRev().GetRevision(), req.GetLegId(), req.GetKeep(),
+	)
+	if modelReason(err) == model.ReasonRetiredLegNotFound {
+		return nil, errRetiredLegNotFound(req.GetLegId())
+	}
+	if err != nil {
+		return nil, mapModelErr(err)
+	}
+	return &pb.UpdateRetiredLegKeepReply{LegId: req.GetLegId()}, nil
 }
 
 // validateRepairRef is the pure check of a request that addresses an

@@ -84,6 +84,7 @@ func widestCounts() map[protoreflect.FullName]int {
 		"Repair.new_leg_list":                1,
 		"Repair.bad_leg_id_list":             1,
 		"Repair.new_leg_id_to_retired_epoch": 1,
+		"Repair.new_leg_id_to_keep":          1,
 		// One side per leg; withMigrationSides gives MaxMigrCntPerSp legs of
 		// the pool their second.
 		"Leg.side_list": 1,

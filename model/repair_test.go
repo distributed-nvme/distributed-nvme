@@ -1165,7 +1165,8 @@ func TestRepairOpsAtAnyLevel(t *testing.T) {
 				opsDnC, 1, opsRetiredEpoch)
 			disable(env)
 			return DeleteRetiredLeg(env.ctx, env.cli, env.cid, opsShard,
-				opsSpId, opsSpName, noExpectRev, opsRetiredLeg, env.cc)
+				opsSpId, opsSpName, noExpectRev, opsRetiredLeg, env.cc,
+				false)
 		}},
 		{"FlipRepairProvisioned", func(env *opsEnv) error {
 			repId, legId := env.createRepair(func() RepairNewLeg {
@@ -1727,7 +1728,7 @@ func TestDeleteRetiredLeg(t *testing.T) {
 		opsRetiredEpoch)
 	dnCRev, revBefore := env.dnRev(opsDnC), env.spRev()
 	if err := DeleteRetiredLeg(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, opsRetiredLeg, env.cc); err != nil {
+		opsSpName, noExpectRev, opsRetiredLeg, env.cc, false); err != nil {
 		t.Fatalf("DeleteRetiredLeg: %v", err)
 	}
 	dn := env.dn(opsDnC)
@@ -1794,7 +1795,7 @@ func TestDeleteRetiredLegPreconditions(t *testing.T) {
 			}
 			before := env.storeRev()
 			err := DeleteRetiredLeg(env.ctx, env.cli, env.cid, opsShard,
-				opsSpId, opsSpName, tc.expect, legId, env.cc)
+				opsSpId, opsSpName, tc.expect, legId, env.cc, false)
 			env.wantNoWrite(err, opDeleteRetiredLeg, tc.reason, before)
 		})
 	}
@@ -2108,7 +2109,8 @@ func TestRepairReasonsAreDistinct(t *testing.T) {
 		ReasonRepairExists, ReasonRepairNotFound, ReasonRetiredLegNotFound,
 		ReasonRetiredListFull, ReasonGrpHasRepair, ReasonStaleRevision,
 		ReasonCandidateChanged, ReasonNoIdLeft, ReasonLegNotNamable,
-		ReasonGrpOperatorInCharge,
+		ReasonGrpOperatorInCharge, ReasonRetiredLegsKept,
+		ReasonRetiredLegKept,
 	} {
 		if seen[reason] {
 			t.Errorf("reason %q is used twice", reason)
@@ -2121,8 +2123,8 @@ func TestRepairReasonsAreDistinct(t *testing.T) {
 	}
 }
 
-// TestRepairOpsRefuseADeletingClone: the finish, the cancel and the delete of
-// a retired leg refuse a clone meta group's records once the clone is being
+// TestRepairOpsRefuseADeletingClone: the finish, the cancel, the delete of a
+// retired leg and the write of its keep flag refuse a clone meta group's records once the clone is being
 // deleted, with nothing written; the clone drain's final transaction gives
 // them back.
 func TestRepairOpsRefuseADeletingClone(t *testing.T) {
@@ -2156,8 +2158,11 @@ func TestRepairOpsRefuseADeletingClone(t *testing.T) {
 		opsSpName, noExpectRev, "started", env.cc)
 	env.wantNoWrite(err, opCancelRepair, "clone deleting", before)
 	err = DeleteRetiredLeg(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, opsRetiredLeg, env.cc)
+		opsSpName, noExpectRev, opsRetiredLeg, env.cc, false)
 	env.wantNoWrite(err, opDeleteRetiredLeg, "clone deleting", before)
+	err = SetRetiredLegKeep(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		opsSpName, noExpectRev, opsRetiredLeg, true)
+	env.wantNoWrite(err, opSetRetiredLegKeep, "clone deleting", before)
 }
 
 // TestCreateRepairCarriesTheForce: the repair record carries the operator's

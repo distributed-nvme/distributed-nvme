@@ -3130,13 +3130,24 @@ EOF
 		"$badAddr still holds the retired side"
 
 	# -------------------------------------------------------------------
-	stage 16 "retired legs: list, take one back and cancel, delete"
+	stage 16 "retired legs: list, keep, take one back and cancel, clear, delete"
 	# -------------------------------------------------------------------
 	out=$(gw list-retired-legs --sp sp0)
 	assert_field "$out" '.leg_id_to_retired_leg | keys | @json' \
 		"[\"$badLeg\"]" "list-retired-legs names the bad leg alone"
 	assert_field "$out" ".leg_id_to_retired_leg[\"$badLeg\"].retired_epoch" \
 		"$retiredEpoch" "list-retired-legs retired_epoch"
+	# The keep flag (architecture.md, Retired legs): set with no revision
+	# raised, so the caller's token stays valid, and carried through the
+	# take-back and the cancel below.
+	local revKeep
+	revKeep=$SP_REV
+	out=$(gw keep-retired-leg --sp sp0 --rev "$SP_REV" --leg "$badLeg")
+	assert_field "$out" '.leg_id' "$badLeg" "keep-retired-leg reply leg_id"
+	refresh_rev sp0
+	assert_eq "$SP_REV" "$revKeep" "sp0's revision after keep-retired-leg"
+	retired=$(raw_key "$retKey")
+	assert_field "$retired" '.keep' true "the retired leg after its keep"
 	# A repair of the group may take its retired leg back as its new leg
 	# (architecture.md, Repairs): the leg that r1 put in place is the bad
 	# leg now, and nothing is allocated.
@@ -3155,6 +3166,8 @@ EOF
 		"r2's new leg keeps the retired side"
 	assert_field "$rep" ".new_leg_id_to_retired_epoch[\"$badLeg\"]" \
 		"$retiredEpoch" "r2 keeps the retired leg's time for a cancel"
+	assert_field "$rep" ".new_leg_id_to_keep[\"$badLeg\"]" true \
+		"r2 keeps the retired leg's keep for a cancel"
 	assert_eq "$(key_count retired_leg)" "0" \
 		"retired_leg keys after the retired leg was taken"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" \
@@ -3178,6 +3191,11 @@ EOF
 	smoke_check_dn_moves "$dnBefore" "" 0 0 0 "after cancel-repair r2"
 	wctl set-epoch leg --sp sp0 --slice "$slice" --id "$repLeg" --clear \
 		>/dev/null
+	out=$(gw keep-retired-leg --sp sp0 --rev "$SP_REV" --leg "$badLeg" \
+		--clear)
+	assert_field "$out" '.leg_id' "$badLeg" "keep-retired-leg --clear leg_id"
+	assert_field "$(raw_key "$retKey")" '.keep // false' false \
+		"the retired leg after the clear of its keep"
 	# The delete gives the retired side back to its DN (architecture.md,
 	# Retired legs), with one DnRev bump.
 	dnBefore=$(smoke_dn_ledgers)

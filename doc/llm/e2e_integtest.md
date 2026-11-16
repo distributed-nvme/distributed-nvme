@@ -669,9 +669,14 @@ one leg is slowed on the primary, so that the leg md holds in sync dies in the
 middle of it; that fresh leg is steered alone onto its disk node as before, so
 a later death of its disk node takes down that leg alone; and the repairs
 before each such repair leave the group at the retired-leg bound, so its finish
-gives back the group's oldest retired leg and the group must hold exactly the
-retired legs that rule leaves, judged as after the first repair
-(`architecture.md`, Repairs, FinishRepair). The pool's level is raised to the
+gives back the group's oldest retired leg that is not kept and the group must
+hold exactly the retired legs that rule leaves, judged as after the first
+repair (`architecture.md`, Repairs, FinishRepair). The first forced start
+keeps every retired leg of the group and, through its repair, the leg that
+repair retires (`architecture.md`, Retired legs): before the second, every
+retired leg must read kept, and the step clears the flag of every one but
+the first forced start's retired leg, as an operator would once it has
+judged them, so that the second repair's finish has one to give back. The pool's level is raised to the
 one where reactions stop before the leg md holds in sync dies, while every leg
 row and the group's row read OK, because an array that does not run turns the
 group's row into an error, which sets the primary's health epoch, and a
@@ -721,8 +726,10 @@ come back in the end, as only a live agent removes the side of a retired leg
 the pool's drain gives back. The take-over (raid1 only; `architecture.md`,
 Repairs) runs with the pool at the read-write level when its stage starts and
 when it ends, as the stage changes no level, and with the same group below the
-retired-leg bound, its oldest retired leg deleted, as an operator's repair
-takes a fresh leg only below it (`architecture.md`, Repairs, CreateRepair). One
+retired-leg bound, its oldest retired leg deleted, kept or not, as an
+operator's repair takes a fresh leg only below it and the operator's delete
+takes a kept leg as asked (`architecture.md`, Repairs, CreateRepair; Retired
+legs). One
 of the group's legs dies as in the leg repairs before, and the worker's repair,
 its fresh leg steered alone onto its disk node, must stay created: before the
 kill the primary's controller node refuses its own TCP connects to the nvmet

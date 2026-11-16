@@ -1456,6 +1456,22 @@ func TestLegRepairDriveRefusalHoldsOnlyItsGroup(t *testing.T) {
 		h.wantApplied(reactionRepairCancel)
 	})
 
+	// Every retired leg of the group kept: the finish at the bound waits,
+	// logged with the op's reason on every pass, until an operator clears a
+	// flag or deletes a retired leg (AR8).
+	t.Run("every retired leg kept", func(t *testing.T) {
+		h, metaRep, _ := build(t)
+		h.rops.repairErr = map[string]error{
+			metaRep: &model.ErrPrecondition{
+				Op: "FinishRepair", Reason: model.ReasonRetiredLegsKept,
+			},
+		}
+		h.pass()
+		h.wantOps("finish_repair", "cancel_repair")
+		h.wantSkippedBy(reactionRepairFinish, model.ReasonRetiredLegsKept,
+			"FinishRepair")
+	})
+
 	t.Run("a refusal, then the create", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		metaRep := common.WorkerRepName(testSpId, reactMetaGrp, 1)

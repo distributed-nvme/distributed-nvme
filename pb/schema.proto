@@ -876,6 +876,17 @@ message Repair {
     // which md copies over (cnagent.md CN12). Never set on a worker's
     // repair. Appended, never renumbered.
     bool force = 10;
+    // Set by ForceStartGroup on the group's open repair: FinishRepair makes
+    // each bad leg a retired leg with keep set, since after a forced start
+    // from another leg the leg it replaces can hold newer data than the
+    // array (architecture.md, Repair, Forced start). Appended, never
+    // renumbered.
+    bool keep_bad_legs = 11;
+    // The keep flag of each new leg taken from a retired leg that carried
+    // it, keyed by its leg id, true alone: CancelRepair gives such a leg
+    // back as a retired leg with keep set, as it gives its retired_epoch
+    // back. Appended, never renumbered.
+    map<uint64, bool> new_leg_id_to_keep = 12;
 }
 
 // {dnv_prefix} retired_leg {cluster_id} {sp_id} {leg_id}
@@ -896,6 +907,13 @@ message RetiredLeg {
     // The parent of the group, as Repair.slice_id and Repair.clone_name.
     uint64 slice_id = 5;
     string clone_name = 6;
+    // Keep the leg until an operator deletes it: neither the retire timer
+    // nor the give-back at the retired-leg bound takes it (architecture.md,
+    // Retired legs). ForceStartGroup sets it on every retired leg of the
+    // group, FinishRepair on the bad leg of a repair with keep_bad_legs,
+    // and UpdateRetiredLegKeep sets or clears it. Appended, never
+    // renumbered.
+    bool keep = 7;
 }
 
 // {dnv_prefix} sp_id_to_name {cluster_id} {sp_id}
@@ -1642,8 +1660,9 @@ message FinishRepairRequest {
 message FinishRepairReply {
     uint64 rep_id = 1;
     uint64 retired_leg_id = 2;
-    // The group's oldest retired leg, which the finish of a worker's repair
-    // deleted so that the group stays within MaxRetiredLegPerGrp, its side
+    // The group's oldest retired leg that is not kept, which the finish of
+    // a worker's repair deleted so that the group stays within
+    // MaxRetiredLegPerGrp, its side
     // given back to its disk node; zero when the finish gave none back.
     // Appended, never renumbered.
     uint64 given_back_leg_id = 3;
@@ -1747,6 +1766,20 @@ message UpdateGroupOperatorInChargeReply {
     uint64 grp_id = 1;
 }
 
+message UpdateRetiredLegKeepRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    uint64 leg_id = 4;
+    // The value the retired leg's keep takes: true sets it, false clears
+    // it.
+    bool keep = 5;
+}
+
+message UpdateRetiredLegKeepReply {
+    uint64 leg_id = 1;
+}
+
 message GetThinDeviceBitmapRequest {
     string cluster_name = 1;
     string sp_name = 2;
@@ -1839,6 +1872,7 @@ service Gateway {
     rpc DeleteRetiredLeg(DeleteRetiredLegRequest) returns (DeleteRetiredLegReply) {}
     rpc ForceStartGroup(ForceStartGroupRequest) returns (ForceStartGroupReply) {}
     rpc UpdateGroupOperatorInCharge(UpdateGroupOperatorInChargeRequest) returns (UpdateGroupOperatorInChargeReply) {}
+    rpc UpdateRetiredLegKeep(UpdateRetiredLegKeepRequest) returns (UpdateRetiredLegKeepReply) {}
 
     rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns (GetThinDeviceBitmapReply) {}
 }

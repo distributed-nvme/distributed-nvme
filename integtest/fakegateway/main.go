@@ -1126,6 +1126,12 @@ func (g *fakeGateway) UpdateGroupOperatorInCharge(
 	return serve[*pb.UpdateGroupOperatorInChargeReply](g, ctx, "UpdateGroupOperatorInCharge", req)
 }
 
+func (g *fakeGateway) UpdateRetiredLegKeep(
+	ctx context.Context, req *pb.UpdateRetiredLegKeepRequest,
+) (*pb.UpdateRetiredLegKeepReply, error) {
+	return serve[*pb.UpdateRetiredLegKeepReply](g, ctx, "UpdateRetiredLegKeep", req)
+}
+
 func (g *fakeGateway) GetThinDeviceBitmap(
 	ctx context.Context, req *pb.GetThinDeviceBitmapRequest,
 ) (*pb.GetThinDeviceBitmapReply, error) {

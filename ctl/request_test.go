@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 66 invocations
+// argv for argv. The integration suite asserts the same 67 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -603,9 +603,20 @@ var sweepRows = []sweepRow{
 			SpRev:       wantSpRev(itRevValue),
 			LegId:       3,
 		}},
+	{65, "UpdateRetiredLegKeep",
+		[]string{"retired-leg", "keep", "--leg", "3", "--rev", "7"},
+		// The leaf without --clear sets the flag (dnvctl.md, `retired-leg`
+		// — `ctl/retiredleg.go`).
+		&pb.UpdateRetiredLegKeepRequest{
+			ClusterName: itCluster,
+			SpName:      itSp,
+			SpRev:       wantSpRev(itRevValue),
+			LegId:       3,
+			Keep:        true,
+		}},
 
 	// ---- group ----
-	{65, "ForceStartGroup",
+	{66, "ForceStartGroup",
 		[]string{"group", "force-start", "--grp", "1", "--leg", "2",
 			"--rev", "7"},
 		&pb.ForceStartGroupRequest{
@@ -615,7 +626,7 @@ var sweepRows = []sweepRow{
 			GrpId:       1,
 			LegId:       2,
 		}},
-	{66, "UpdateGroupOperatorInCharge",
+	{67, "UpdateGroupOperatorInCharge",
 		[]string{"group", "set-operator-in-charge", "--grp", "1",
 			"--operator-in-charge", "--rev", "7"},
 		// --operator-in-charge typed with no value sends true, as the leaf
@@ -630,7 +641,7 @@ var sweepRows = []sweepRow{
 		}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 66 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 67 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -641,12 +652,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 66 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 67 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 65 that remain.
+// be green over the 66 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 66 {
-		t.Errorf("sweepRows has %d rows, want 66", len(sweepRows))
+	if len(sweepRows) != 67 {
+		t.Errorf("sweepRows has %d rows, want 67", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -672,7 +683,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 65 of the 66, sp_name in 46. It reads the field off
+// fill: cluster_name in 66 of the 67, sp_name in 47. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -691,11 +702,11 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 65 {
-		t.Errorf("%d requests carry cluster_name, want 65", clusterFields)
+	if clusterFields != 66 {
+		t.Errorf("%d requests carry cluster_name, want 66", clusterFields)
 	}
-	if spFields != 46 {
-		t.Errorf("%d requests carry sp_name, want 46", spFields)
+	if spFields != 47 {
+		t.Errorf("%d requests carry sp_name, want 47", spFields)
 	}
 }
 
@@ -835,8 +846,8 @@ func TestTokenCarriersMatchCT3(t *testing.T) {
 			}
 		})
 	}
-	if carriers != 37 {
-		t.Errorf("%d requests carry a revision token, want 37", carriers)
+	if carriers != 38 {
+		t.Errorf("%d requests carry a revision token, want 38", carriers)
 	}
 }
 

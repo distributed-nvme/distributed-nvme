@@ -1030,9 +1030,10 @@ func TestSpDrainRetiredLegBatchBudget(t *testing.T) {
 // holds its group and at most one DN, whatever the pool's shape, so no
 // ceiling of the pool is a factor. The one factor is the group's retired
 // legs, which FinishRepair reads to pick the one it gives back for the sp
-// worker's repair at the bound. A repair's parent is one slice or one clone,
-// which the operations read by the name the record or the caller keeps,
-// never by a walk. model/repair_test.go, model/forcedstart_test.go and
+// worker's repair at the bound, and ForceStartGroup reads and writes to keep
+// them. A repair's parent is one slice or one clone, which the operations
+// read by the name the record or the caller keeps, never by a walk.
+// model/repair_test.go, model/forcedstart_test.go, model/keep_test.go and
 // model/operatorincharge_test.go commit each against a real etcd,
 // FinishRepair at its widest in TestFinishRepairGivesBackTheOldestRetiredLeg.
 func TestRepairOpsTxnBudget(t *testing.T) {
@@ -1096,14 +1097,20 @@ func TestRepairOpsTxnBudget(t *testing.T) {
 		},
 		{
 			name: "ForceStartGroup",
-			stm:  "model.ForceStartGroup's STM and forcedStartNamable",
+			stm:  "model.ForceStartGroup's STM, forcedStartNamable and keepGroupCopies",
 			// SpRev, SpConf, the parent and, when the group names a
 			// repair, the Repair, which the leg check reads for a new leg
 			// and for a leg_list leg alike (a STARTED repair's bad leg).
 			fixedReads: 4,
-			// The parent and SpRev; a cancel of no mark writes neither.
-			fixedWrites: 2,
-			maxCompares: 6,
+			// The parent and SpRev, and the open repair's keep_bad_legs; a
+			// cancel of no mark writes none of them.
+			fixedWrites: 3,
+			terms: []txnTerm{
+				// Every RetiredLeg the group lists, read and written with
+				// keep.
+				{"retired leg", 2, common.MaxRetiredLegPerGrp, 2},
+			},
+			maxCompares: 11,
 		},
 		{
 			name: "ClearForcedStart",
@@ -1112,6 +1119,16 @@ func TestRepairOpsTxnBudget(t *testing.T) {
 			fixedReads: 3,
 			// The parent and SpRev; a skipped ref writes neither.
 			fixedWrites: 2,
+			maxCompares: 5,
+		},
+		{
+			name: "SetRetiredLegKeep",
+			stm:  "model.SetRetiredLegKeep's STM and loadGrpOf",
+			// SpRev, SpConf, the RetiredLeg and the parent.
+			fixedReads: 4,
+			// The RetiredLeg, and no SpRev: no write of the flag raises
+			// it; a write of the value the leg holds writes nothing.
+			fixedWrites: 1,
 			maxCompares: 5,
 		},
 		{
