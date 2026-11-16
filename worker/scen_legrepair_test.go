@@ -243,7 +243,8 @@ func TestScenLegRepairAbortedWhenTheBadLegReturns(t *testing.T) {
 // nor probed, has none; once that epoch is side_unhealthy old the worker
 // tries to abort the repair, the primary confirms, and the drive step
 // cancels it, giving the side back. The leg, still bad, gets a second repair
-// on the other DN outside the group, the dead DN being out of allocation.
+// on the other DN outside the group, in the cancel's own transaction, whose
+// scan avoided the dead DN.
 func TestScenLegRepairAbortsANewLegWhoseDnDiesWhileZeroing(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
@@ -290,6 +291,16 @@ func TestScenLegRepairAbortsANewLegWhoseDnDiesWhileZeroing(t *testing.T) {
 			aborted.attrs, triggerNewLegUnhealthy, newLeg)
 	}
 	c.cancelByVerdict(t, w, repName)
+	cancelled := h.waitRecord(t, 5*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool {
+			return rec.str("kind") == reactionRepairCancel &&
+				rec.str("rep_name") == repName
+		})
+	avoided, _ := cancelled.attrs["avoided_addr_ports"].Any().([]string)
+	if !slices.Contains(avoided, stdDnAddr(deadDn)) {
+		t.Fatalf("the cancel %v avoided no dn %d: not joined to the next "+
+			"create", cancelled.attrs, deadDn)
+	}
 
 	second := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
 		func(rec logRecord) bool {

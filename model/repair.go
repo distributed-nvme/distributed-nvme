@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/protobuf/proto"
 
@@ -15,8 +16,8 @@ import (
 // Repairs; Retired legs; Repair). The gateway's calls run them as their
 // deciding STMs, SetGrpOperatorInCharge, an operator's take-over of a group
 // from the sp worker, among them. The sp worker runs CreateRepair,
-// FinishRepair, CancelRepair and SetRepairAbort on its own repairs only
-// (dnv-worker.md AR8), and the stage move, the retire timer's delete, the
+// FinishRepair, CancelRepair, CancelAndCreateRepair and SetRepairAbort on
+// its own repairs only (dnv-worker.md AR8), and the stage move, the retire timer's delete, the
 // epoch writes and the provisioned flip on every repair (dnv-worker.md MD6).
 //
 // A repair is a record of its own (RepairKey) that names one bad leg of the
@@ -476,14 +477,42 @@ func CreateRepair(
 	newLeg RepairNewLeg,
 	cc *pb.ClusterConf,
 ) (uint64, uint64, error) {
+	var repId, newLegId uint64
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		var err error
+		repId, newLegId, err = createRepairIn(s, cid, shard, spId, spName,
+			expectRev, repName, parent, grpId, badLegId, newLeg, cc)
+		return err
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return repId, newLegId, nil
+}
+
+// createRepairIn is CreateRepair's transaction body, run in the caller's
+// STM: the joined cancel and create of CancelAndCreateRepair runs it after
+// cancelRepairIn in one transaction.
+func createRepairIn(
+	s etcdutil.STM,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	repName string,
+	parent GrpParent,
+	grpId uint64,
+	badLegId uint64,
+	newLeg RepairNewLeg,
+	cc *pb.ClusterConf,
+) (repId uint64, newLegId uint64, retErr error) {
 	planned := make(map[string]struct{}, len(newLeg.GrpDnAddrs))
 	for _, addrPort := range newLeg.GrpDnAddrs {
 		planned[addrPort] = struct{}{}
 	}
 	reserved := common.HasRepNameReservedPrefix(repName)
-	repId, newLegId := uint64(0), uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		repId, newLegId = 0, 0
+	err := func() error {
 		if err := checkSpRev(
 			s, opCreateRepair, shard, cid, spId, expectRev,
 		); err != nil {
@@ -576,7 +605,7 @@ func CreateRepair(
 		conf.RepairNameList = append(conf.RepairNameList, repName)
 		s.Put(SpConfKey(cid, spName), conf)
 		return BumpSpRev(s, opCreateRepair, shard, cid, spId)
-	})
+	}()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1138,9 +1167,33 @@ func CancelRepair(
 	repName string,
 	cc *pb.ClusterConf,
 ) (uint64, error) {
-	repId := uint64(0)
+	var repId uint64
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		repId = 0
+		var err error
+		repId, err = cancelRepairIn(s, cid, shard, spId, spName, expectRev,
+			repName, cc)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return repId, nil
+}
+
+// cancelRepairIn is CancelRepair's transaction body, run in the caller's
+// STM: CancelAndCreateRepair runs it ahead of createRepairIn in one
+// transaction.
+func cancelRepairIn(
+	s etcdutil.STM,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	repName string,
+	cc *pb.ClusterConf,
+) (repId uint64, retErr error) {
+	err := func() error {
 		if err := ValidateClusterConf(cc); err != nil {
 			return fail(opCancelRepair, err.Error())
 		}
@@ -1203,7 +1256,7 @@ func CancelRepair(
 		}
 		repId = rep.GetRepId()
 		return BumpSpRev(s, opCancelRepair, shard, cid, spId)
-	})
+	}()
 	if err != nil {
 		return 0, err
 	}
@@ -1693,4 +1746,60 @@ func FlipRepairProvisioned(
 		return false, 0, err
 	}
 	return flipped, revision, nil
+}
+
+// CreateRefused reports whether err is CreateRepair's refusal, an
+// ErrPrecondition of its op, as the create half of CancelAndCreateRepair
+// returns one: the sp worker then cancels alone (dnv-worker.md AR8).
+func CreateRefused(err error) bool {
+	var pre *ErrPrecondition
+	return errors.As(err, &pre) && pre.Op == opCreateRepair
+}
+
+// RepairCreate names the repair CancelAndCreateRepair creates: CreateRepair's
+// arguments past the pool's.
+type RepairCreate struct {
+	RepName  string
+	Parent   GrpParent
+	GrpId    uint64
+	BadLegId uint64
+	NewLeg   RepairNewLeg
+}
+
+// CancelAndCreateRepair cancels the ABORTED repair cancelName and creates
+// the repair next in ONE transaction: CancelRepair's checks and writes, then
+// CreateRepair's over the state the cancel left, each raising SpRev, so a
+// refusal of either commits neither. The sp worker runs it on its own
+// repair whose new leg read unhealthy (dnv-worker.md AR8): the next create's
+// plan black-lists that leg's disk node, which only the repair record being
+// cancelled names, so the fact is used in the transaction that deletes it
+// and no memory of the failure is kept. It returns the cancelled repair's
+// rep_id, then the new repair's rep_id and its new leg's id.
+func CancelAndCreateRepair(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cancelName string,
+	next RepairCreate,
+	cc *pb.ClusterConf,
+) (uint64, uint64, uint64, error) {
+	var cancelled, repId, newLegId uint64
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		var err error
+		if cancelled, err = cancelRepairIn(s, cid, shard, spId, spName, 0,
+			cancelName, cc); err != nil {
+			return err
+		}
+		repId, newLegId, err = createRepairIn(s, cid, shard, spId, spName, 0,
+			next.RepName, next.Parent, next.GrpId, next.BadLegId, next.NewLeg,
+			cc)
+		return err
+	})
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return cancelled, repId, newLegId, nil
 }

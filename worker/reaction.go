@@ -409,6 +409,19 @@ type reactionOps interface {
 		repName string,
 		cc *pb.ClusterConf,
 	) (uint64, error)
+	// cancelAndCreateRepair is the drive step's joined cancel of an ABORTED
+	// worker's repair and create of the next (MD6's CancelAndCreateRepair);
+	// it returns the cancelled rep_id, the new rep_id and new leg id.
+	cancelAndCreateRepair(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		cancelName string,
+		next model.RepairCreate,
+		cc *pb.ClusterConf,
+	) (uint64, uint64, uint64, error)
 	// setRepairAbort is the try-to-abort of a CREATED worker's repair (AR8's
 	// drive step); it returns the repair's rep_id.
 	setRepairAbort(
@@ -723,7 +736,7 @@ func (o *modelReactionOps) createRepair(
 	newLeg model.RepairNewLeg,
 	cc *pb.ClusterConf,
 ) (uint64, uint64, error) {
-	// expectRev 0 for the four repair ops, as for growSlice: the worker
+	// expectRev 0 for the worker's repair ops, as for growSlice: the worker
 	// holds no client token and converges on what etcd holds (MD6).
 	return model.CreateRepair(
 		ctx, o.cli, cid, shard, spId, spName, 0, repName, parent, grpId,
@@ -758,6 +771,20 @@ func (o *modelReactionOps) cancelRepair(
 	return model.CancelRepair(
 		ctx, o.cli, cid, shard, spId, spName, 0, repName, cc,
 	)
+}
+
+func (o *modelReactionOps) cancelAndCreateRepair(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cancelName string,
+	next model.RepairCreate,
+	cc *pb.ClusterConf,
+) (uint64, uint64, uint64, error) {
+	return model.CancelAndCreateRepair(
+		ctx, o.cli, cid, shard, spId, spName, cancelName, next, cc)
 }
 
 func (o *modelReactionOps) setRepairAbort(
@@ -2494,96 +2521,9 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			)
 			return true
 		}
-		if len(target.leg.GetSideList()) != 1 {
-			// AR8: two sides means a user migration is in flight on this
-			// leg, and model.CreateRepair refuses such a bad leg. The next
-			// candidate may still be repairable.
-			w.reactionSkipped(
-				ctx, reactionRepairCreate, reasonTwoSides, ids...,
-			)
-			continue
-		}
-		if target.grp.GetOperatorInCharge() {
-			// AR8: an operator has taken the group's repair over from the
-			// worker (architecture.md, Repairs), so leg repair creates no
-			// repair for it until the operator clears the flag. Only the
-			// create is held: the drive step above still drives the
-			// worker's own repair of the group, and every other reaction
-			// runs. The hold comes before the forced-start hold, since the
-			// flag is the operator's own and lasts longer than a mark, so
-			// the record names the flag whenever both stand. The hold is
-			// THIS group's (AR2), so the scan goes on; a create from a
-			// snapshot older than the flag meets model.CreateRepair's
-			// refusal instead (createRepair).
-			w.reactionSkipped(ctx, reactionRepairCreate,
-				reasonGrpOperatorInCharge, ids...,
-			)
-			continue
-		}
-		if mark := target.grp.GetForcedStart(); mark != nil {
-			// AR8: an operator's forced-start mark stands on the group
-			// (architecture.md, Repair), so the operator is acting on it
-			// and leg repair leaves it alone until the mark goes: the
-			// worker clears it once the primary reports the group's row OK
-			// with a member in sync on a leg whose own row reads OK (AR13),
-			// the operator withdraws it, or a finish of the group's repair,
-			// the drive step's own included, withdraws a mark that names
-			// the bad leg it retires (MD6); a try-to-abort is refused while
-			// the mark names the repair's new leg. The hold
-			// comes before the gate on the group's row, which already holds
-			// the group while its array does not run, so the record names
-			// the operator's hold whatever the row says. The hold is THIS
-			// group's (AR2), so the scan goes on; like the gate it is the
-			// pass's alone, since no STM of the create reads the mark.
-			w.reactionSkipped(ctx, reactionRepairCreate, reasonGrpForcedStart,
-				withAttr(ids, slog.Uint64("forced_leg_id", mark.GetLegId()))...,
-			)
-			continue
-		}
-		if reason := grpRowHold(p, target.grp.GetGrpId()); reason != "" {
-			// AR8's gate: the create runs only while the group's row in
-			// the primary's latest report reads OK, so its array runs,
-			// whole or degraded (cnagent.md CN28), in a report of the
-			// snapshot's revision or later. A repair made over an array
-			// that does not run would sit CREATED, since the primary adds
-			// a new leg only to a running array, and would race its own
-			// try-to-abort when the bad leg returns. A running array can
-			// still read ERROR — a read of it that did not answer, a
-			// foreign member or a second array holding the group's legs,
-			// a member change the converge could not make, or CN12's
-			// in-sync guard — and no other status says the array runs, so
-			// every status but OK holds. The hold is THIS group's (AR2)
-			// and lasts as long as the row stays so, so the scan goes on.
-			// No STM sees a report, so the gate is the pass's alone: an
-			// operator's CreateRepair is not held by it.
-			w.reactionSkipped(ctx, reactionRepairCreate, reason, ids...)
-			continue
-		}
-		if !otherLegHealthy(p, target) {
-			// AR8's healthy-leg test, on every group: every other leg of
-			// the group's leg_list has a health epoch or is not held in
-			// sync by the current primary's latest report, so a repair
-			// would start replacing the last legs that may still hold what
-			// was written on the group with a fresh leg holding none of
-			// it, and its copy would read a dead member. A leg with no
-			// health epoch can still be half copied — a new leg a finish
-			// put in its place while md copies onto it — and repairing
-			// the only leg md holds in sync loses the group at the next
-			// failover. md learns that a member is dead from IO to it, or
-			// from the primary's early fail, which needs another member
-			// that keeps the data (cnagent.md CN12), so an idle array whose
-			// legs are all dead still runs and its row reads OK, which the
-			// gate lets through. The leg
-			// epochs come from the primary's probe of each leg, which runs
-			// with or without IO, so this test sees what the row does not;
-			// and a primary whose own network fails, which reads every leg
-			// unhealthy at once, leaves the group as it is too. The group
-			// waits until one of those legs answers again and md holds it
-			// in sync; the next candidate, in another group, may still be
-			// repairable.
-			w.reactionSkipped(
-				ctx, reactionRepairCreate, reasonNoHealthyLeg, ids...,
-			)
+		if reason, attrs := repairHold(p, target); reason != "" {
+			w.reactionSkipped(ctx, reactionRepairCreate, reason,
+				withAttr(ids, attrs...)...)
 			continue
 		}
 		if repName := target.grp.GetRepName(); repName != "" {
@@ -2606,6 +2546,97 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 		}
 	}
 	return false
+}
+
+// repairHold is AR8's per-candidate conditions after the redundancy, in their
+// order: a leg with two sides, the operator-in-charge flag, a forced-start
+// mark, the gate on the group's row and the healthy-leg test; it returns the
+// reason the first that holds logs and the attributes it adds, "" when none
+// holds. tryLegRepair logs it and moves the scan on; the joined cancel and
+// create of a worker's aborted repair (nextTarget) asks it too, and the
+// group's own repair, which that transaction cancels, is no hold there.
+func repairHold(p *spPass, target *repairTarget) (string, []slog.Attr) {
+	if len(target.leg.GetSideList()) != 1 {
+		// AR8: two sides means a user migration is in flight on this
+		// leg, and model.CreateRepair refuses such a bad leg. The next
+		// candidate may still be repairable.
+		return reasonTwoSides, nil
+	}
+	if target.grp.GetOperatorInCharge() {
+		// AR8: an operator has taken the group's repair over from the
+		// worker (architecture.md, Repairs), so leg repair creates no
+		// repair for it until the operator clears the flag. Only the
+		// create is held: the drive step above still drives the
+		// worker's own repair of the group, and every other reaction
+		// runs. The hold comes before the forced-start hold, since the
+		// flag is the operator's own and lasts longer than a mark, so
+		// the record names the flag whenever both stand. The hold is
+		// THIS group's (AR2), so the scan goes on; a create from a
+		// snapshot older than the flag meets model.CreateRepair's
+		// refusal instead (createRepair).
+		return reasonGrpOperatorInCharge, nil
+	}
+	if mark := target.grp.GetForcedStart(); mark != nil {
+		// AR8: an operator's forced-start mark stands on the group
+		// (architecture.md, Repair), so the operator is acting on it
+		// and leg repair leaves it alone until the mark goes: the
+		// worker clears it once the primary reports the group's row OK
+		// with a member in sync on a leg whose own row reads OK (AR13),
+		// the operator withdraws it, or a finish of the group's repair,
+		// the drive step's own included, withdraws a mark that names
+		// the bad leg it retires (MD6); a try-to-abort is refused while
+		// the mark names the repair's new leg. The hold
+		// comes before the gate on the group's row, which already holds
+		// the group while its array does not run, so the record names
+		// the operator's hold whatever the row says. The hold is THIS
+		// group's (AR2), so the scan goes on; like the gate it is the
+		// pass's alone, since no STM of the create reads the mark.
+		return reasonGrpForcedStart, []slog.Attr{
+			slog.Uint64("forced_leg_id", mark.GetLegId())}
+	}
+	if reason := grpRowHold(p, target.grp.GetGrpId()); reason != "" {
+		// AR8's gate: the create runs only while the group's row in
+		// the primary's latest report reads OK, so its array runs,
+		// whole or degraded (cnagent.md CN28), in a report of the
+		// snapshot's revision or later. A repair made over an array
+		// that does not run would sit CREATED, since the primary adds
+		// a new leg only to a running array, and would race its own
+		// try-to-abort when the bad leg returns. A running array can
+		// still read ERROR — a read of it that did not answer, a
+		// foreign member or a second array holding the group's legs,
+		// a member change the converge could not make, or CN12's
+		// in-sync guard — and no other status says the array runs, so
+		// every status but OK holds. The hold is THIS group's (AR2)
+		// and lasts as long as the row stays so, so the scan goes on.
+		// No STM sees a report, so the gate is the pass's alone: an
+		// operator's CreateRepair is not held by it.
+		return reason, nil
+	}
+	if !otherLegHealthy(p, target) {
+		// AR8's healthy-leg test, on every group: every other leg of
+		// the group's leg_list has a health epoch or is not held in
+		// sync by the current primary's latest report, so a repair
+		// would start replacing the last legs that may still hold what
+		// was written on the group with a fresh leg holding none of
+		// it, and its copy would read a dead member. A leg with no
+		// health epoch can still be half copied — a new leg a finish
+		// put in its place while md copies onto it — and repairing
+		// the only leg md holds in sync loses the group at the next
+		// failover. md learns that a member is dead from IO to it, or
+		// from the primary's early fail, which needs another member
+		// that keeps the data (cnagent.md CN12), so an idle array whose
+		// legs are all dead still runs and its row reads OK, which the
+		// gate lets through. The leg
+		// epochs come from the primary's probe of each leg, which runs
+		// with or without IO, so this test sees what the row does not;
+		// and a primary whose own network fails, which reads every leg
+		// unhealthy at once, leaves the group as it is too. The group
+		// waits until one of those legs answers again and md holds it
+		// in sync; the next candidate, in another group, may still be
+		// repairable.
+		return reasonNoHealthyLeg, nil
+	}
+	return "", nil
 }
 
 // repairCandidates is AR8's trigger scan over BOTH group lists of every slice
@@ -3104,14 +3135,84 @@ func (w *spWorker) finishRepair(
 
 // cancelRepair runs the drive step's cancel of the ABORTED worker's repair
 // repName (model.CancelRepair), under the cluster's stored conf, which gives
-// its fresh new leg's side back to its disk node. It reports whether the pass
-// ends here.
+// its fresh new leg's side back to its disk node. When its new leg failed
+// and its bad leg still needs a repair (nextTarget), the cancel and the
+// create of the group's next repair run in one transaction
+// (model.CancelAndCreateRepair), its scan black-listing the failed new
+// leg's disk nodes, which only the record the cancel deletes names; with no
+// other disk node, the cancel runs alone. While the primary's report is
+// older than the pool's last change, the cancel waits for it, as the
+// create would (grpRowHold): cancelling alone then would drop the one record
+// of the failed disk node. A scan that fails ends the pass, the repair left
+// to the next one. A refusal of the joined create other than a changed
+// candidate, which the next pass plans again, is logged and the cancel runs
+// alone in this pass, since the refused transaction committed nothing. It
+// reports whether the pass ends here.
 func (w *spWorker) cancelRepair(
 	ctx context.Context,
 	p *spPass,
 	repName string,
 	ids []slog.Attr,
 ) bool {
+	target, avoid, hold := nextTarget(p, p.state.Repairs[repName])
+	if hold != "" {
+		w.reactionSkipped(ctx, reactionRepairCancel, hold, ids...)
+		return false
+	}
+	if target != nil {
+		plan := grpAddrs(target.grp)
+		cands, err := w.reactor().ops.findDnCandidates(
+			ctx, w.cid, p.cc, target.grp.GetExtCnt(),
+			int(p.cc.GetAllocConf().GetDnBatchSize()), 1,
+			append(slices.Clone(plan), avoid...),
+			grpLocations(p.state, target.grp),
+		)
+		if err != nil {
+			w.reactionFailed(ctx, reactionRepairCreate, err,
+				target.ids()...)
+			return true
+		}
+		if picks := model.PickRandom(cands, 1); len(picks) != 0 {
+			next := model.RepairCreate{
+				RepName: common.WorkerRepName(
+					w.spId, target.grp.GetGrpId(), p.now),
+				Parent:   target.parent(),
+				GrpId:    target.grp.GetGrpId(),
+				BadLegId: target.leg.GetLegId(),
+				NewLeg: model.RepairNewLeg{Dn: picks[0],
+					GrpDnAddrs: plan, BadBlocks: target.ranges},
+			}
+			_, repId, newLegId, err := w.reactor().ops.cancelAndCreateRepair(
+				ctx, w.cid, w.shard, w.spId, w.desired.handle, repName,
+				next, p.cc,
+			)
+			var pre *model.ErrPrecondition
+			switch {
+			case err == nil:
+				w.reactionApplied(ctx, reactionRepairCancel,
+					withAttr(ids, slog.Any("avoided_addr_ports", avoid))...)
+				w.reactionApplied(ctx, reactionRepairCreate,
+					withAttr(target.ids(),
+						slog.String("rep_name", next.RepName),
+						slog.Uint64("rep_id", repId),
+						slog.Uint64("new_leg_id", newLegId),
+						slog.String("addr_port", picks[0].AddrPort),
+					)...,
+				)
+				return true
+			case model.CreateRefused(err) && errors.As(err, &pre) &&
+				pre.Reason != model.ReasonCandidateChanged:
+				// The create half refused, for a reason the next pass
+				// would meet again, and the transaction committed
+				// nothing: the cancel runs alone, as with no join.
+				w.reactionFailed(ctx, reactionRepairCreate, err,
+					withAttr(target.ids(),
+						slog.String("rep_name", next.RepName))...)
+			default:
+				return w.driveFailed(ctx, reactionRepairCancel, err, ids)
+			}
+		}
+	}
 	_, err := w.reactor().ops.cancelRepair(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle, repName, p.cc,
 	)
@@ -3120,6 +3221,71 @@ func (w *spWorker) cancelRepair(
 	}
 	w.reactionApplied(ctx, reactionRepairCancel, ids...)
 	return true
+}
+
+// nextTarget plans the create the drive step joins to the cancel of the
+// ABORTED worker's repair rep (AR8; model.CancelAndCreateRepair): the bad
+// leg it repairs and the disk nodes of the aborted repair's new legs due on
+// a repair clock (newLegDue), the same test as the try-to-abort's
+// new_leg_unhealthy, which the next create's scan keeps the new leg off. It
+// plans nothing — the cancel then runs alone — when no new leg is due, when
+// the bad leg no longer needs a repair (it came back) or another leg of the
+// group does, or when a condition of repairHold holds; for the gate's
+// grp_row_stale alone it returns that reason instead, so that the cancel
+// waits for the primary's next report rather than drop the failed disk
+// node.
+func nextTarget(p *spPass, rep *pb.Repair) (*repairTarget, []string, string) {
+	if rep == nil {
+		return nil, nil, ""
+	}
+	var avoid []string
+	for _, leg := range rep.GetNewLegList() {
+		if !newLegDue(p, leg) {
+			continue
+		}
+		for _, side := range leg.GetSideList() {
+			avoid = append(avoid, side.GetAddrPort())
+		}
+	}
+	grp := repairGroup(p.state, rep)
+	if len(avoid) == 0 || grp == nil || len(rep.GetBadLegIdList()) != 1 {
+		return nil, nil, ""
+	}
+	var badLeg *pb.Leg
+	for _, leg := range grp.GetLegList() {
+		if leg.GetLegId() == rep.GetBadLegIdList()[0] {
+			badLeg = leg
+		}
+	}
+	if badLeg == nil {
+		return nil, nil, ""
+	}
+	target := &repairTarget{sliceId: rep.GetSliceId(), grp: grp, leg: badLeg}
+	if name := rep.GetCloneName(); name != "" {
+		target.clone = &cloneOwner{name: name,
+			id: p.state.Clones[name].GetCloneId()}
+	}
+	switch {
+	case legNeedsRepair(p, badLeg):
+	case legRanges(p, grp, badLeg.GetLegId()) &&
+		otherLegClean(p, grp, badLeg.GetLegId()):
+		target.ranges = true
+	default:
+		return nil, nil, ""
+	}
+	for _, leg := range grp.GetLegList() {
+		if leg.GetLegId() != badLeg.GetLegId() && legNeedsRepair(p, leg) {
+			return nil, nil, ""
+		}
+	}
+	switch reason, _ := repairHold(p, target); reason {
+	case "":
+		return target, avoid, ""
+	case reasonGrpRowStale:
+		return nil, nil, reason
+	default:
+		return nil, nil, ""
+	}
 }
 
 // abortRepair runs the drive step's try-to-abort of the CREATED worker's

@@ -2210,3 +2210,55 @@ func TestCreateRepairCarriesTheForce(t *testing.T) {
 		}
 	}
 }
+
+// TestCancelAndCreateRepair: the joined op cancels the aborted repair, its
+// fresh new leg's side given back, and creates the next repair of the bad
+// leg in the same transaction; a create that the op
+// refuses — a new leg on a disk node of the group — commits neither, so
+// the aborted repair stands.
+func TestCancelAndCreateRepair(t *testing.T) {
+	env := newOpsEnv(t)
+	repId, _ := env.createRepairNamed(opsWorkerRepName, func() RepairNewLeg {
+		return env.freshLeg(opsDnC)
+	})
+	env.toStage(opsWorkerRepName, repId, pb.RepStage_REP_STAGE_ABORTED)
+	next := func(dn string) RepairCreate {
+		return RepairCreate{RepName: opsWorkerRepName + "-2",
+			Parent: opsSliceParent, GrpId: opsDataGrpId,
+			BadLegId: opsDataLegB, NewLeg: env.freshLeg(dn)}
+	}
+	store := env.storeRev()
+	if _, _, _, err := CancelAndCreateRepair(env.ctx, env.cli, env.cid,
+		opsShard, opsSpId, opsSpName, opsWorkerRepName, next(opsDnA),
+		env.cc); err == nil {
+		t.Fatalf("a next repair on a disk node of the group was created")
+	}
+	if env.storeRev() != store ||
+		env.repair(opsWorkerRepName).GetRepStage() !=
+			pb.RepStage_REP_STAGE_ABORTED {
+		t.Fatalf("a refused create committed the cancel")
+	}
+
+	cancelled, nextId, _, err := CancelAndCreateRepair(env.ctx, env.cli,
+		env.cid, opsShard, opsSpId, opsSpName, opsWorkerRepName,
+		next(opsDnD), env.cc)
+	if err != nil || cancelled != repId {
+		t.Fatalf("CancelAndCreateRepair: cancelled %d, err %v", cancelled,
+			err)
+	}
+	if env.exists(RepairKey(env.cid, opsSpId, opsWorkerRepName)) {
+		t.Errorf("the aborted repair survived")
+	}
+	if dn := env.dn(opsDnC); dn.GetFreeExtCnt() != opsDnFree {
+		t.Errorf("dn-c free %d, want its extents back", dn.GetFreeExtCnt())
+	}
+	created := env.repair(opsWorkerRepName + "-2")
+	if created.GetRepId() != nextId ||
+		created.GetNewLegList()[0].GetSideList()[0].GetAddrPort() != opsDnD {
+		t.Errorf("the next repair %v", created)
+	}
+	if grp := findGroup(env.slice(), opsDataGrpId); grp.GetRepName() !=
+		opsWorkerRepName+"-2" {
+		t.Errorf("the group names %q", grp.GetRepName())
+	}
+}

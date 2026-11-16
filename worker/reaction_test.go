@@ -549,6 +549,26 @@ func (o *fakeReactionOps) createRepair(
 	return 887, 888, err
 }
 
+func (o *fakeReactionOps) cancelAndCreateRepair(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cancelName string,
+	next model.RepairCreate,
+	cc *pb.ClusterConf,
+) (uint64, uint64, uint64, error) {
+	err := o.recordRepair(reactionCall{
+		op: "cancel_and_create_repair", repName: cancelName,
+		sliceId: next.Parent.SliceId, cloneName: next.Parent.CloneName,
+		grpId: next.GrpId, badLegId: next.BadLegId,
+		legs: []model.Cand{next.NewLeg.Dn}, grpDn: next.NewLeg.GrpDnAddrs,
+		cc: cc, badBlocks: next.NewLeg.BadBlocks,
+	})
+	return 886, 887, 888, err
+}
+
 func (o *fakeReactionOps) finishRepair(
 	ctx context.Context,
 	cid uint64,

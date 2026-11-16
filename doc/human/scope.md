@@ -562,12 +562,24 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   as an error. A host of a running pool can write the same at any time, so
   zeroing the end of each new side would close only half of it. Not seen
   in the lab.
-- **A disk node that cannot serve a new leg gets a new repair after each
-  cancel.** State: fix decided, the create skips a disk node whose side
-  of the group reads error. Not seen in the lab.
+- **A disk node that cannot serve a new leg can still get the group's
+  next repair.** When the worker gives up a repair because its new leg
+  failed, it cancels the repair and creates the next one in the same step,
+  never on that disk node. When the next repair cannot be made at that
+  moment — no other disk node has room, or the group waits for something
+  else, such as an operator — the worker cancels alone, and the next
+  repair may go to the same node again, until an operator disables the
+  node or it recovers. Only the repair just cancelled names its disk node,
+  so two failing disk nodes can take turns. State: accepted: the worker
+  keeps no memory of failed work, and an operator can disable the node.
+  Not seen in the lab.
 - **A repair whose new leg the primary never reports stays open.** It
-  blocks every other repair of the group. State: fix decided, the worker
-  gives it up past the leg threshold. Not seen in the lab.
+  blocks every other repair of the group. This happens only while the
+  primary does not apply the syncup that carries the repair. The worker's
+  request to abort the repair reaches the primary only in a later syncup
+  that carries the repair too, so giving up on a timer would not end the
+  wait, and it would abort repairs that a slow primary still carries out.
+  State: accepted. Not seen in the lab.
 - **A repair's new leg that holds the whole data starts the array alone
   only where md recorded the other legs as failed.** When both legs of
   the group's list are dead, the group otherwise waits for its legs. An

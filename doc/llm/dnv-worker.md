@@ -966,6 +966,10 @@ list; the flip, which reads the repair's key alone, and
   applied any, since the primary reads the request, and returns how many it
   applied and the revision its bump wrote, writing nothing when it applied
   none (AR16).
+* `CancelAndCreateRepair` runs `CancelRepair`'s checks and writes and then
+  `CreateRepair`'s, over the state the cancel left, in one STM with no
+  expected revision, each raising `SpRev`; a refusal of either commits
+  neither (AR8's drive step).
 * `MarkGroupsArrayMade` takes a list of `GrpRef`s, each a group's parent
   and id, and no expected revision: the flag only records that the array
   ran, which no later write of the pool makes false. It requires the
@@ -3224,7 +3228,9 @@ STM (MD6, MD7); success logs `reaction applied` and the resulting `SpRev`
 bump re-fans the SP (RW14), so the next pass sees the new state. Auto-grow's
 actions are a grow and the withdrawal of a stuck grow (AR6), and leg
 repair's are the finish, the cancel and the try-to-abort of a worker's
-repair and the create of one (AR8). The
+repair and the create of one (AR8); the cancel joined to the next create
+(AR8's drive step) is one action in one transaction, which logs `reaction
+applied` twice, for the cancel and for the create. The
 invariant is **at most one applied action per SP per pass**; the clone
 drain's steps, AR11's stage moves, AR12's retire timer, AR13's
 forced-start clear, AR14's record, AR15's flag, AR16's schedule and
@@ -3251,7 +3257,8 @@ cluster — and must not disable AR7 and AR8 for the duration); AR7's
 `shared_state` and `same_error`, which can hold as long as AR5's and move
 the scan to the next cntlr, and its scan that finds no CN, which moves the
 pass on to AR8; AR8's refusal of a drive step by its op, which
-holds that repair's group and moves the walk to the next repair; and
+holds that repair's group and moves the walk to the next repair, and its
+cancel's wait on `grp_row_stale` (`repair_cancel`), which does the same; and
 AR8's `leg_has_two_sides`, `grp_operator_in_charge`, whether the pass's
 own check or the create's op finds it, `grp_forced_start`, its gate on the
 group's row (`grp_row_error`, `grp_row_missing`, `grp_row_unknown`,
@@ -3778,7 +3785,36 @@ stage it left. For each other repair:
   Reason: a reaction never deletes a leg that an operator or a forced start
   kept, and the bound must hold.
 * **ABORTED**: the pass cancels it (`CancelRepair`, with the cluster's
-  stored conf), which gives its fresh new leg's side back to its DN.
+  stored conf), which gives its fresh new leg's side back to its DN. When a
+  new leg of the repair is due on the clocks the try-to-abort reads (the
+  next case), and the bad leg still needs a repair — by the triggers above,
+  or for md's bad-block ranges beside a clean leg — while no other leg of
+  the group needs one by those triggers and no condition of the create
+  (below, 2 to 7) holds, the pass plans the group's next repair with those
+  new legs' disk nodes added to the scan's black list, and runs the cancel
+  and that create in one transaction (`CancelAndCreateRepair`), logging
+  `reaction applied` for each: the cancel's names the nodes it avoided, the
+  create's carries what a create's does. Reason: the failed new leg's disk
+  node is named only in the record the cancel deletes, so a create in a
+  later pass would draw from the same scan and could pick it again, after
+  each cancel for as long as it passes its check rounds; joining the two
+  uses the fact in the transaction that deletes it, and keeps no memory of
+  the failure. This create comes ahead of a leg with a smaller `leg_id` in
+  another group, since the fact is there only now and the group held a
+  repair already. When the first condition of the create that holds is the
+  gate's `grp_row_stale` — the primary's report older than the snapshot, as
+  it is right after the stage move's `SpRev` bump — the pass logs `reaction
+  skipped` (`repair_cancel`, `grp_row_stale`) and the repair waits for the
+  primary's next report, since a cancel alone would drop the fact; the wait
+  lasts as long as the create's own would, so a primary that keeps refusing
+  syncups, as one whose local store fails does, keeps the repair and its
+  new leg's extents until then. A scan that fails logs the create's failure
+  and ends the pass, the repair left to the next one. A refusal of the
+  joined create, other than a changed candidate, which the next pass plans
+  again, is logged and the cancel runs alone in the same pass, since the
+  refused transaction committed nothing. A scan that finds no other disk
+  node, or any other condition that holds, leaves the cancel alone, and the
+  next pass's create may pick the same node again.
 * **CREATED, its abort flag clear**: the pass tries to abort it
   (`SetRepairAbort`) on the first of three triggers, in this order: its bad
   leg reads healthy again, its `err_epoch` clear, with no clock and no
@@ -4937,14 +4973,16 @@ that its report is older than the snapshot),
 and with the op's name as `op` when a `model` op refused it
 (`ErrPrecondition`, MD7): one reason can come from the pass's own check or
 from the op, and only the op's refusal always ends the pass, save a refusal
-of AR8's drive step, which holds that repair's group alone, and the
+of AR8's drive step, which holds that repair's group alone, the
 create's refusal under the group's `operator_in_charge` flag, which holds
-that group alone (AR2, AR8); each
+that group alone, and a refusal of the create joined to a cancel, after
+which the cancel runs alone (AR2, AR8); each
 record names its reaction's kind, auto-grow's being three, a data grow, a
 metadata grow and the withdrawal of a stuck grow (AR6), and leg repair's
 four, its create and the three steps of its drive step (AR8), and the record of a finish also
-names the retired leg it gave back, if any, and that of a try-to-abort its
-trigger; an op
+names the retired leg it gave back, if any, that of a try-to-abort its
+trigger, and that of a cancel joined to the next create the disk nodes
+its scan avoided (`avoided_addr_ports`); an op
 call that failed otherwise is also logged `reaction skipped`, with its
 error, and its transaction may still have committed, which the next pass
 reads from the stored state;
@@ -5727,25 +5765,30 @@ which no suite case sets, so no suite case runs RW13's count compare.
   nothing of it, as when the primary never applies the syncup that carries
   the repair, never asks for an abort. The repair stays CREATED, and keeps
   the worker from creating another repair for its group, until the primary
-  reports the new leg holding a place in the array or confirms an abort. An abort, whether the operator asks for
-  it or one of AR8's other triggers does, ends the wait only once the
-  primary applies a syncup that carries the abort flag and confirms the
-  abort, since only the primary's verdict moves the stage
-  (`architecture.md`, Repair). The wait holds that group only (AR2).
-* **A DN that stays healthy but cannot serve a new leg gets a new
-  worker's repair after each cancel.** The create's black list holds the
-  DNs of the group's own legs alone (AR8), and a side's health epoch takes
-  no capacity key from its DN (MD4), so after the try-to-abort, the
-  primary's confirmation and the cancel, the next create's scan can offer
-  the same DN again, the only offer when it is the only candidate. A DN
-  that cannot zero a new leg's side, which then reads `ERROR`, or that the
-  primary cannot connect to, thus gets a new worker's repair about once
-  per `side_unhealthy` or `leg_unhealthy`, each costing a zeroing and the
-  `SpRev` bumps of its steps, until an operator disables the DN, which
-  takes it out of allocation, or the DN recovers. The worker remembers no
-  DN a repair failed on: a pass carries from earlier passes only what AR1
-  names, and a remembered failure would outlive the fault it records. The
-  cycle holds that group only (AR2).
+  reports the new leg holding a place in the array or confirms an abort. An
+  abort, whether the operator asks for it or one of AR8's other triggers
+  does, ends the wait only once the primary applies a syncup that carries
+  the abort flag and confirms the abort, since only the primary's verdict
+  moves the stage (`architecture.md`, Repair). The wait holds that group
+  only (AR2). A give-up on a clock would not end it: the primary reports a
+  row of every new leg of every repair its request carries (`cnagent.md`
+  CN28), so a new leg has no row only while the primary has not applied the
+  syncup that carries the repair, and the abort flag reaches the primary
+  only in a later syncup that carries the repair too; and it would abort a
+  repair that a slow primary still carries out.
+* **A DN that stays healthy but cannot serve a new leg can still get the
+  group's next worker's repair.** AR8 joins the cancel of a repair whose
+  new leg is due to the next create, which black-lists that leg's DN; when
+  that create cannot be made then — a scan that finds no other DN, a
+  condition of the create other than a stale report, or a refusal of the
+  create — the cancel runs alone, and the next pass's create, whose black
+  list holds the DNs of the group's own legs alone, can pick the same DN
+  again, about once per `side_unhealthy` or `leg_unhealthy`, until an
+  operator disables it or it recovers. A DN that failed the repair before
+  the one just cancelled is no longer named anywhere, so two failing DNs
+  can take turns. The worker remembers no DN a repair failed on: a pass
+  carries from earlier passes only what AR1 names. The cycle holds that
+  group only (AR2).
 * **A group whose array does not run, or that has no healthy leg, is never
   repaired on its own.** AR8's gate creates no repair for a group whose
   row does not read `OK`, as a stopped or broken array's does not
