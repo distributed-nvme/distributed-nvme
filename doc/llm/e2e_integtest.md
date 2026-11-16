@@ -847,12 +847,17 @@ runs again and converges to a standby, the new primary builds its stack, and
 host1 connects to it. fio must have issued exactly the writes before the
 first failed one and that one; it then verifies, with its saved state, every
 block before the failed write's offset — the state reaches one block past
-the last write fio completed, so the verify is bounded at that offset — and
-the range reads zeros from that offset on. md fails a write only
-when every member failed it, so a write the host saw fail landed on no leg;
-with one write in flight the first failed write is the only one in doubt,
-and these checks show it did not land and that every write the host saw
-succeed did. host1 lets go, host0's two plain paths, kept through both cuts,
+the last write fio completed, so the verify is bounded at that offset; the
+failed write's own block reads zeros or that write's own bytes, told by
+fio's verify header for that offset; and the range reads zeros after it.
+An error tells the host a write's outcome is unknown, not that nothing was
+written: a write in flight as the sides fence the old primary can land on
+the legs and still be reported failed, as one 32-slice run showed. With one
+write in flight the first failed write is the only one in doubt, and these
+checks show that every write the host saw succeed landed and that nothing
+written after the failed one did. Either outcome of the failed write lands
+before the new primary serves, whose path opens only once the old one is
+fenced (`dnagent.md` DN10). host1 lets go, host0's two plain paths, kept through both cuts,
 serve setup's namespace through the new primary, and the case deletes the
 writer's namespace and thin device. So the ending finds only setup's
 subsystem, namespace and thin device, and only the suite's own paths on

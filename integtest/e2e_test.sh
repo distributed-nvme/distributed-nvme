@@ -5286,15 +5286,21 @@ fwrite_stat() {
 
 # fwrite_verify reads back, through whatever path host1 now holds, every
 # write the writer saw succeed — the bytes before <failed offset> — with
-# fio's verify (verify_only, and the saved state, verify_state_load), and
-# checks that the range reads zeros from <failed offset> to its end, with cmp
-# against /dev/zero. The verify's size is <failed offset>: fio's saved state
-# reads one block past the last write it completed (fio 3.41 does so with no
-# error at all), which here is the failed write's block, whose zeros the cmp
-# checks. It answers `verify_rc=<n> verified_bytes=<n> zeros=ok|differ|failed`,
-# then the tail of the verify's errors.
+# fio's verify (verify_only, and the saved state, verify_state_load); reads
+# the failed write's own 4 KiB block, which may hold zeros or, as a write an
+# error was reported for may still have landed, that write's own bytes,
+# told by fio's verify header at its start (the magic `ca ac` and, at byte
+# 16, the block's offset as a little-endian 64-bit number); and checks that
+# the range reads zeros from the next block to its end, with cmp against
+# /dev/zero. The verify's size is <failed offset>: fio's saved state reads
+# one block past the last write it completed (fio 3.41 does so with no
+# error at all), which here is the failed write's block, which the header
+# read judges. It answers `verify_rc=<n> verified_bytes=<n>
+# failed_block=zeros|landed|other|failed zeros=ok|differ|failed`, then the
+# tail of the verify's errors.
 fwrite_verify() { # <uuid> <range bytes> <failed offset>
-	local uuid=$1 range=$2 off=$3 node vrc=0 bytes zeros=ok
+	local uuid=$1 range=$2 off=$3 node vrc=0 bytes zeros=ok blk="" want
+	local failed_block
 	node=$(readlink -f "/dev/disk/by-id/nvme-uuid.$uuid" 2>/dev/null) || node=""
 	[ -n "$node" ] && [ -b "$node" ] || {
 		echo "fwrite_verify: no block device for $uuid ('$node')" >&2
@@ -5310,7 +5316,29 @@ fwrite_verify() { # <uuid> <range bytes> <failed offset>
 		"$FWRITE_DIR/verify.json")
 	sync
 	echo 3 >/proc/sys/vm/drop_caches
-	if cmp -s -i "$off:0" -n "$((range - off))" "$node" /dev/zero; then
+	if cmp -s -i "$off:0" -n 4096 "$node" /dev/zero; then
+		failed_block=zeros
+	else
+		case $? in
+		1)
+			blk=$(dd if="$node" bs=4096 skip="$((off / 4096))" count=1 \
+				status=none 2>/dev/null | od -A n -t x1 -N 24 -v |
+				tr -d ' \n') || blk=""
+			want=$(printf '%016x' "$off" | sed 's/../& /g' |
+				awk '{for (i = NF; i > 0; i--) printf "%s", $i}')
+			if [ "${blk:0:4}" = caac ] && [ "${blk:32:16}" = "$want" ]; then
+				failed_block=landed
+			elif [ -n "$blk" ]; then
+				failed_block=other
+			else
+				failed_block=failed
+			fi
+			;;
+		*) failed_block=failed ;;
+		esac
+	fi
+	if cmp -s -i "$((off + 4096)):0" -n "$((range - off - 4096))" "$node" \
+		/dev/zero; then
 		zeros=ok
 	else
 		case $? in
@@ -5318,8 +5346,8 @@ fwrite_verify() { # <uuid> <range bytes> <failed offset>
 		*) zeros=failed ;;
 		esac
 	fi
-	printf 'verify_rc=%s verified_bytes=%s zeros=%s\n' "$vrc" "${bytes:-none}" \
-		"$zeros"
+	printf 'verify_rc=%s verified_bytes=%s failed_block=%s zeros=%s\n' \
+		"$vrc" "${bytes:-none}" "$failed_block" "$zeros"
 	tail -n 5 "$FWRITE_DIR/verify.err" 2>/dev/null
 	return 0
 }
@@ -23298,8 +23326,23 @@ cut_fence_writer() {
 		die "host1: the fwrite_verify verb failed (its message is above)"
 	printf '%s\n' "$out" >&2
 	line=$(printf '%s\n' "$out" | head -n 1)
-	assert_eq "$line" "verify_rc=0 verified_bytes=$off zeros=ok" \
-		"host1 through the new primary: fio verified every write it saw succeed, the bytes before the first failed write, and the range reads zeros from that write on"
+	# The failed write's own block may hold its bytes: an error tells the
+	# host the write's outcome is unknown, not that nothing was written, and
+	# with one write in flight it is the only one in doubt. Every block
+	# after it must read zeros, as fio issued nothing past it.
+	case "$line" in
+	"verify_rc=0 verified_bytes=$off failed_block=zeros zeros=ok")
+		log "  the failed write at offset $off did not land" ;;
+	"verify_rc=0 verified_bytes=$off failed_block=landed zeros=ok")
+		log "  the failed write at offset $off landed whole, its own bytes" \
+			"with fio's header for that offset" ;;
+	*)
+		die "host1 through the new primary: got '$line', want" \
+			"'verify_rc=0 verified_bytes=$off failed_block=zeros|landed" \
+			"zeros=ok': fio verifies every write it saw succeed, the" \
+			"bytes before the first failed write; that write's block holds" \
+			"zeros or its own bytes; and the range reads zeros after it" ;;
+	esac
 
 	helper_host 1 disconnect_prefix "$SS0" >/dev/null ||
 		die "host1: the disconnect_prefix verb could not be run for $SS0"
