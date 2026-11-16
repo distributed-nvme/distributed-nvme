@@ -331,6 +331,32 @@ var renderCases = []renderCase{
 		want:  `{"leg_id":"3"}` + "\n",
 	},
 	{
+		// The registry read: the roles and the seeds sort as keys, each
+		// epoch is a uint64 string, a registration whose value did not
+		// decode shows its epoch as "0", and a role with no registration
+		// shows as an empty seed map, not null.
+		name: "worker list, the reply",
+		rpc:  "ListWorkers",
+		argv: []string{"worker", "list"},
+		reply: &pb.ListWorkersReply{
+			RoleToWorkers: map[string]*pb.RoleWorkers{
+				"sp": {SeedToReg: map[string]*pb.WorkerReg{
+					"s2": {Epoch: 1700000002},
+					"s1": {},
+				}},
+				"cn": {},
+				"dn": {SeedToReg: map[string]*pb.WorkerReg{
+					"d1": {Epoch: 1700000001},
+				}},
+			},
+		},
+		want: `{"role_to_workers":{` +
+			`"cn":{"seed_to_reg":{}},` +
+			`"dn":{"seed_to_reg":{"d1":{"epoch":"1700000001"}}},` +
+			`"sp":{"seed_to_reg":{"s1":{"epoch":"0"},` +
+			`"s2":{"epoch":"1700000002"}}}}}` + "\n",
+	},
+	{
 		// An empty map renders as {} rather than null, and the reply's only
 		// field being empty does not make the document empty.
 		name:  "ss list, empty map",

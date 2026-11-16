@@ -772,6 +772,12 @@ func (g *fakeGateway) GetClusterCapacity(
 	return serve[*pb.GetClusterCapacityReply](g, ctx, "GetClusterCapacity", req)
 }
 
+func (g *fakeGateway) ListWorkers(
+	ctx context.Context, req *pb.ListWorkersRequest,
+) (*pb.ListWorkersReply, error) {
+	return serve[*pb.ListWorkersReply](g, ctx, "ListWorkers", req)
+}
+
 func (g *fakeGateway) CreateDiskNode(
 	ctx context.Context, req *pb.CreateDiskNodeRequest,
 ) (*pb.CreateDiskNodeReply, error) {

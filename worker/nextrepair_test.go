@@ -34,6 +34,8 @@ func TestLegRepairCancelJoinsTheNextCreate(t *testing.T) {
 	t.Run("the new leg due", func(t *testing.T) {
 		h, rep := build(t)
 		rep.NewLegList[0].ErrEpoch = h.ago(common.DefaultLegUnhealthy)
+		h.state.DnByAddr[reactDnA] = &pb.DnConf{Location: "rack0"}
+		h.state.DnByAddr[reactDnB] = &pb.DnConf{Location: "rack1"}
 		h.pass()
 		calls := h.wantOps("cancel_and_create_repair")
 		if calls[0].badLegId != reactDataLegA ||
@@ -45,6 +47,13 @@ func TestLegRepairCancelJoinsTheNextCreate(t *testing.T) {
 		if !slices.Contains(q.black, reactDnC) {
 			t.Fatalf("scan black list %v, want the aborted new leg's dn",
 				q.black)
+		}
+		// The group's locations, from the node records the pass reads for
+		// the scan (AR1, passNodes).
+		if !slices.Contains(q.excludeLocs, "rack0") ||
+			!slices.Contains(q.excludeLocs, "rack1") {
+			t.Fatalf("scan excluded %q, want the group's two racks",
+				q.excludeLocs)
 		}
 		recs := h.wantApplied(reactionRepairCancel, reactionRepairCreate)
 		if recs[1]["slice_id"] != float64(reactSliceId) ||

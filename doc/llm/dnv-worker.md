@@ -74,8 +74,9 @@ validation and reply mapping on top (MD8).
 The worker's constants are one region of the constant block in
 `common/constants.go`, which is authoritative for their comments: `DefaultVoteWorkerInterval`, the seconds between two refreshes of a
 worker's registry key (VW2), a registration not refreshed for twice that long
-being dead (VW3); `DefaultVoteWorkerGraceTime`, the seconds an observed
-membership transition must hold before it is committed into the effective
+being dead (VW3); `DefaultVoteWorkerGraceTime` and
+`DefaultVoteWorkerLeaveGraceTime`, the seconds an observed join and an
+observed leave must hold before they are committed into the effective
 membership (VW5); `RetiredLegMaxAge`, the age from its `retired_epoch` at
 which the retire timer may delete a retired leg (AR12);
 `DefaultWorkerSyncupTimeout` and `DefaultWorkerPushTimeout`,
@@ -399,7 +400,9 @@ visit every pool (`gateway.md` GW19), scanned by no worker; `CntlrKey` and
 seven-field key, BOTH indexes rendered with `BmIdxFmt` —, `CloneBitmapPrefix`
 and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`; `RepairKey` and `RetiredLegKey`, with `RepairPrefix` and
 `RetiredLegPrefix`, the prefixes MD3's load ranges; `WorkerRegKey`,
-`WorkerRegPrefix` and `ParseWorkerRegKey`.
+`WorkerRegPrefix` and `ParseWorkerRegKey`; and `WorkerRegistryPrefix`, the
+whole registry, every role at once, which only the gateway's `ListWorkers`
+ranges (`gateway.md`, Worker registry).
 
 `ClusterId` is the derivation of `architecture.md`, cluster_id derivation,
 verbatim. Formats are exactly those of `architecture.md`, Key grammar:
@@ -458,7 +461,11 @@ any record of a latched SP the fan-out drives what it can, RW14 leaving
 idle the children the snapshot cannot resolve and logging the keys, and a
 latched SP's drain judges the keys it needs itself (SPD12). `SpRevision` is the revision the loaded
 state belongs to, for RW14's revision guard; the rev key is not a listed
-sub-object, so an absent one is no `Missing` entry. Clone bitmap
+sub-object, so an absent one is no `Missing` entry. `LoadSpWithoutNodes` is the
+same load without the node records, the reaction pass's (AR1): it leaves
+`DnByAddr` and `CnByAddr` empty and reports no node key in `Missing`, and
+`LoadNodesAt` reads them into that state later, by the same snapshot pinned
+to its `Rev`. Clone bitmap
 **values** are never loaded here — pushes read one chunk at a time (BM3).
 Clone bitmap indexes come from a keys-only scan (`RangeKeysAtRev`, EU2)
 performed **outside** the STM at the same store revision: the STM cannot
@@ -1148,10 +1155,11 @@ CM1. **Flags.** One cobra root command, no subcommands; every flag is also a
 config key and an environment variable under the prefix `DNV_WORKER_`. The
 flags name the etcd endpoints (required), the roles this process carries
 (every role by default, each registered and driven independently, VW10), the
-two vote timers (VW2, VW5), the etcd dial timeout (EU1) and an optional viper
-config file; `cmd/dnv-worker` holds their names and defaults. The two vote
-timers exist as flags so the worker suite can run membership cases in
-seconds; production runs the defaults.
+three vote timers — the vote interval (VW2), a join's grace and a leave's
+grace (VW5) — the etcd dial timeout (EU1) and an optional viper config file;
+`cmd/dnv-worker` holds their names and defaults. The vote timers exist as
+flags so the worker suite can run membership cases in seconds; production
+runs the defaults.
 
 CM2. **Binding.** As `cmd/dnv-agent` binds (`dnagent.md`, `cmd/dnv-agent` —
 cobra + viper): the flags bound through viper, the environment prefix, a
@@ -1160,18 +1168,25 @@ read when set; required values are checked after binding so a file or the
 environment satisfies them.
 
 CM3. **Validation.** `--etcd-endpoints` non-empty; `--roles` a non-empty,
-duplicate-free subset of the three roles; both timers positive;
-`--vote-grace-time` SHOULD exceed twice `--vote-interval` (a warning is
-logged otherwise — a grace window not longer than the dead threshold is
-legal but pointless, and with one not longer than one vote interval the
-peers of a worker cut off from etcd can commit it dead about when it fences
-itself, or before, since VW8 (a) waits one interval past the dead
-threshold).
+duplicate-free subset of the three roles; `--vote-interval` and
+`--vote-grace-time` positive; `--vote-grace-time` SHOULD exceed twice
+`--vote-interval` (a warning is logged otherwise — a join's grace window
+not longer than the dead threshold is legal but pointless);
+`--vote-leave-grace-time` MUST exceed `--vote-interval` plus
+`DefaultEtcdOpTimeout`, the start being refused otherwise. The leave grace
+is a safety bound: a worker cut off from etcd fences itself (VW8 (a)) at the
+latest one vote interval past the dead threshold, plus the etcd budget of
+the put whose end runs the check, after the start of its last tick whose
+puts landed, while its peers commit it dead one dead threshold plus one
+leave grace after the last of those puts they saw, which landed no earlier
+than that start; a longer leave grace has the fence come first, so that a
+peer takes the shards of a worker that has stopped starting work on them
+(its calls in flight may still finish, the overlap VW7 accepts).
 
 CM4. **Startup.** Install the default JSON logger (`common`'s `init`), mint
 a startup trace id, build the `etcdutil` client (EU1), then call
 `worker.Run` with the client and a `Config` carrying the endpoints, the
-roles and the two timers (the endpoints feed the `worker starting` record's
+roles and the three vote timers (the endpoints feed the `worker starting` record's
 `endpoints` attribute). `Run` starts the `ClusterConf` cache (RW21) and the
 vote worker and blocks until the ctx ends. Startup never fails because etcd
 is unreachable: the vote layer stays fenced (VW8) and retries every
@@ -1197,7 +1212,7 @@ peer has taken its shard: the overlap an ownership change accepts (VW7).
 
 CM6. **Logging.** JSON on stderr, Info level by default (`log.md`, R2 and R6).
 The `worker starting` record carries `roles`, `seed`, `endpoints`,
-`vote_interval` and `grace_time`; `worker stopping` carries `seed`. Every
+`vote_interval`, `grace_time` and `leave_grace_time`; `worker stopping` carries `seed`. Every
 round, syncup, push, flip and reaction runs under a trace id minted per RW10,
 so the seed prefix in an agent's `trace_id` attributes the request to this
 process. The parts of an incarnation that outlive one unit of work hold an
@@ -1298,9 +1313,12 @@ VW5. Per registration the observer also keeps the effective state, member or
 nonmember (initially nonmember), and at most one **pending** grace timer with
 a target state. On every observed transition of a key: cancel the key's
 pending timer; let the target be member if the key is now observed live, else
-nonmember; start a new timer of `--vote-grace-time` with that target — on
-**every** transition, even when the target already equals the key's effective
-state. Every observed transition of one registration — appear, disappear,
+nonmember; start a new timer with that target, of `--vote-grace-time` for a
+member target and of `--vote-leave-grace-time`, the shorter by default, for
+a nonmember one — on **every** transition, even when the target already
+equals the key's effective state. A leave waits the shorter grace because
+the shards of a dead worker are driven by no one until it is committed,
+while a join moves shards away from workers that drive them. Every observed transition of one registration — appear, disappear,
 reappear — therefore starts that registration's own timer, and the change is
 committed only if it still holds when the timer fires: a flapping worker never
 becomes effective and never blocks others. The always-arm rule is what VW7's
@@ -1393,8 +1411,8 @@ every heartbeat tick and on every own-key watch event:
 * (d) its own observer commits its own registration nonmember (VW5, VW6):
   in some role this observer has observed its own key dead (VW3) — no put
   of it seen for the dead threshold, or the key absent from a rescan — and
-  the disappear has then held for the grace time; by the first path that
-  is one dead threshold plus one grace time after the last own put this
+  the disappear has then held for the leave grace; by the first path that
+  is one dead threshold plus one leave grace after the last own put this
   observer saw. The commit takes the fence exit instead of the collection,
   because the key's owner is alive and still heartbeating (VW5). Its
   `reason` names the cause where the signals of (a) and (b) can tell it,
@@ -1456,7 +1474,13 @@ itself, and diffs that set against its running shard workers: newly owned,
 start one (SW1) and log `shard owned`; no longer owned, stop it gracefully
 (SW5) and log `shard released`. A shard's owner changes only when the owner
 leaves or a new member outranks it, so a membership change among n members
-moves about one n-th of the shards and never reshuffles the rest.
+moves about one n-th of the shards and never reshuffles the rest. On each
+heartbeat tick, while its own registration of a role is an effective member,
+the worker logs `role under two workers` at Warn when that role has fewer
+than two effective members, once each time the count falls below two: no
+other worker would drive the role's shards if this one stopped. The tick,
+not the commit, judges the count, so the commits of one grace window, which
+fire one by one, are judged together.
 
 VW10. **Roles are independent**: each role has its own registry prefix,
 watch, last own echo (VW8 (b)), tracking entries, timers, effective set,
@@ -3206,14 +3230,16 @@ copy is whole (CLD13).
 ### Pass, priority, suppression
 
 AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
-`cntlr_interval` (its own ticker). A pass starts with a fresh `SnapshotRev`
-(EU4) of `SpConf`, every `Cntlr` and every `Slice` of the SP — the records
-the reactions read, and with the `Clone`s the ones this worker itself
-writes the `err_epoch`s into — and the sub-objects `SpConf` lists (AR5's
-and AR7's row classes attribute rows through its tds, subsystems,
-transfers and clones, and AR6 sums its tds' sizes; AR11 and AR12 read its
-repairs and retired legs),
-plus the in-memory latest `CntlrInfo` of the **primary** cntlr
+`cntlr_interval` (its own ticker), the first one a random part of one
+interval after the coordinator starts, so that the pools a worker takes
+over together are not loaded in step. A pass starts with a fresh
+`SnapshotRev` (EU4) of `SpConf`, every `Cntlr` and every `Slice` of the
+SP — the records the reactions read, and with the `Clone`s the ones this
+worker itself writes the `err_epoch`s into — and the sub-objects `SpConf`
+lists (AR5's and AR7's row classes attribute rows through its tds,
+subsystems, transfers and clones, and AR6 sums its tds' sizes; AR11 and
+AR12 read its repairs and retired legs), MD3's load without the node
+records (`LoadSpWithoutNodes`), plus the in-memory latest `CntlrInfo` of the **primary** cntlr
 (pool usage, group rows, AR5's and AR7's rows, the verdicts on repairs
 and the groups' whole flags, in-sync lists, refusals and acted marks
 (`GrpInfo`) AR8, AR11, AR12, AR13, AR14 and AR17 read, the group rows AR15
@@ -3225,7 +3251,12 @@ leg's migration, `now` (unix seconds),
 the two records kept from an earlier pass that a pass decides by — the
 coordinator's records of the last failover it applied (AR5's second
 refusal) and of the last replacement of a primary it applied (AR7's second
-refusal) — and a copy of AR10's memo of the coordinator's own verdicts. The
+refusal) — and a copy of AR10's memo of the coordinator's own verdicts.
+An idle pass reads no node record; a step that is about to allocate or
+needs a node's record reads them, once a pass, at the revision of the
+pass's load (`LoadNodesAt`): AR6's CN budget check, its withdrawal once a
+side qualifies, and AR7's and AR8's locations. A failed read is that step's
+failed reaction, which ends the pass (AR2). The
 snapshot re-seeds the SP's health memos first, ahead of every gate below
 (HL3); it seeds nothing into AR10's memo, because a stored epoch is no
 verdict of this coordinator's. The primary is the one the snapshot names,
@@ -3370,7 +3401,8 @@ one group excepted, because it means the store has overtaken the pass's
 snapshot.
 Everything else ends the pass: every `ErrPrecondition` but a drive
 step's and the create's `grp_operator_in_charge`, every allocator scan
-that fails and every transient op failure — `GrowSlice`'s
+that fails, every failed read of the node records (AR1) and every
+transient op failure — `GrowSlice`'s
 refusal from inside its transaction among them, though it carries the
 `grow_pending`, `grp_list_full` or `cn free_ext_cnt too low` of the pass's
 own check (its record names the op, Log records): that check found the
@@ -3404,7 +3436,7 @@ An SP with `deleting` true is not suppressed
 here: it runs at most one DRAIN step per
 pass and no reaction at all, at ANY `sp_level`, because a doomed SP must
 drain whatever level an operator left it at — "at most", because the AR1
-gates that sit ahead of the branch still apply: a pass whose `LoadSp`
+gates that sit ahead of the branch still apply: a pass whose load (AR1)
 failed, or whose cluster conf is missing or unusable, runs no step at all
 (the SP's own records, `bdev_conf` and group-length gates sit *behind*
 it, deliberately — SPD6). A
@@ -3659,10 +3691,11 @@ candidate`), and the pass goes on (AR2), sparing the scan of a later grow of
 the pass that asks for no less room. Ahead of the scan the pass checks the
 CN budget by the rule `GrowSlice` applies in its transaction
 (`model.CnBudgetShort`): every cntlr of the SP stacks the new group, so a
-CN of the pass's snapshot whose free extents are below its charge makes
-the grow impossible however many DNs have room, and logs `reaction
-skipped` (`cn free_ext_cnt too low`, naming the CN) with no scan; a CN
-missing from the snapshot counts as short, as the transaction refuses it. A slice whose list of that kind
+CN whose record, read for the check at the revision of the pass's load
+(AR1), shows free extents below its charge makes the grow impossible
+however many DNs have room, and logs `reaction skipped`
+(`cn free_ext_cnt too low`, naming the CN) with no scan; a CN missing from
+that read counts as short, as the transaction refuses it. A slice whose list of that kind
 already holds `MaxGrpCntPerSlice` groups (`architecture.md`, GrowSlice)
 grows that kind again only once the withdrawal of a stuck grow (below) has
 taken its newest group back: until then a breach of that kind that is not
@@ -3686,7 +3719,8 @@ newest group of the grow's kind, with one side per leg, and with no repair,
 retired leg, forced-start mark or operator in charge. The side: one of the
 group's sides is not `provisioned`, has been unhealthy for `side_unhealthy`
 with this coordinator's own unhealthy verdict on it (AR10), and sits on a
-disk node whose record carries a health epoch in the pass's snapshot.
+disk node whose record, read at the revision of the pass's load (AR1)
+only once such a side qualifies, carries a health epoch.
 Together these say that the side's disk node died while the side zeroed, or
 that a live disk node with an error row of its own — a store that refuses
 writes (`dnagent.md` DN18), or a disk, header or port fault — holds a side
@@ -3707,6 +3741,19 @@ the node itself unhealthy, it finishes the zeroing, and the grow completes
 by itself (`architecture.md`, GrowSlice). The trigger is part of auto-grow,
 so it runs only while the pool's usage of that kind is past its mark.
 
+**The time a grow takes.** Every pass that reads the primary's pool rows,
+at every `sp_level`, times the grows: the first pass that reads a pool's
+data or metadata past its mark notes the time and the total it read, and a
+later pass that reads a larger total logs `grow done` with the slice, the
+kind (`grow_data` or `grow_meta`), the two totals and the seconds between
+the two passes, the time from the first sight of the breach to the pool
+the primary reports grown, which spans the worker's grow, the CN's
+convergence and the primary's next report. A note is dropped with nothing
+logged when a pass reads the pool under its mark at the same total, the
+slice gone or the automation off. The notes live in the coordinator's
+memory: a restart of it, or of its worker, or a move of the shard loses
+them, and logs nothing for those grows. The step changes nothing.
+
 ### Cntlr replacement
 
 AR7. When a cntlr has `err_epoch` set, `now` minus it at least
@@ -3718,7 +3765,8 @@ other cntlr unhealthy or disabled): the candidates are
 all groups of its slices), a candidate count of `cn_batch_size`, a black list
 of the old cntlr's `addr_port`, the SP's other cntlrs' endpoints as the SP's
 CN endpoints and those CNs' locations excluded — the locations out of the
-pass's own snapshot (MD3; a CN missing from it contributes none), the old
+node records the pass reads at the revision of its load (AR1, MD3; a CN
+missing from them contributes none), the old
 cntlr adding none of its own because it is the one leaving, so its domain is
 excluded only when a survivor shares it (unlike AR8's create, whose new leg
 also avoids the failing leg's domain: excluding the old cntlr's domain here would
@@ -4043,8 +4091,8 @@ path), so md fails its member and the leg's probe reads it dead.
 The create then runs `FindDnCandidatesAntiAffine` with the group's
 `ext_cnt`, a candidate count of `dn_batch_size`, a required count of one
 and a black list of the DNs of the group's legs; tier 1 also excludes their
-locations, taken from the pass's own `DnByAddr`, a DN missing from it
-contributing none, and a tier-2 rescan without the location exclusion runs
+locations, taken from the node records the pass reads at the revision of
+its load (AR1, MD3), a DN missing from them contributing none, and a tier-2 rescan without the location exclusion runs
 when tier 1 offers none of the **one** DN this step places, never when it
 merely falls short of the candidate count (`architecture.md`, Per-operation
 allocation), so a cluster with one failure domain still repairs. It picks
@@ -4557,8 +4605,8 @@ of a repair (AR11, AR12), no forced-start clear (AR13), no record of a
 refused member add (AR14) or of a repair that waits (AR17) and no write of
 the flag that a group's array has run (AR15), regardless of
 `sp_level` suppression — "at most", because the gates ahead of the branch
-still apply: a pass whose `LoadSp` failed, or whose cluster conf is missing
-or unusable, runs nothing at all and retries on the next tick. (The SP's OWN
+still apply: a pass whose load (AR1) failed, or whose cluster conf is
+missing or unusable, runs nothing at all and retries on the next tick. (The SP's OWN
 gates, its records, its `bdev_conf` and its groups' lengths (AR1), are
 deliberately NOT among them: the drain reads no geometry and judges the
 lost keys it needs itself (SPD12), and gating it there would make an SP whose stored
@@ -5030,7 +5078,9 @@ for every round, while a round's own id is the `trace_id` inside its request
 the process's start and its graceful stop (CM4, CM5, CM6);
 `worker registered` the first successful put of a role (VW2);
 `membership observed` every observed transition and `membership committed`
-every commit that changes the effective membership (VW3, VW6); `shard owned`
+every commit that changes the effective membership (VW3, VW6);
+`role under two workers`, at Warn, a role this worker serves with fewer than
+two effective members (VW9); `shard owned`
 and `shard released` the ownership diff, the owner being the logging worker
 itself and a release logged after the join (VW9, SW5); `worker fenced` the
 fence, its `reason` naming the cause as VW8 lists them and the record naming
@@ -5141,7 +5191,9 @@ error, and its transaction may still have committed, which the next pass
 reads from the stored state;
 `repair waits` a repair the primary holds back, with its stage and the
 text as `waits`, once per change of its `rep_id`, its stage or the text
-(AR17);
+(AR17); `grow done` a grow timed from the first pass that read its pool
+past the mark to the pass that read the pool larger, with the slice, the
+kind, the two totals and the seconds (AR6);
 `repair stage moved` a stage move whose call succeeded and `repair stage
 skipped` a move AR11 finds due and does not make, with its reason, the
 op's name as `op` when the op refused it, or its error, and a CREATED
@@ -5849,8 +5901,8 @@ which no suite case sets, so no suite case runs RW13's count compare.
   driving or of no driving per shard per change; a change is delayed,
   never skipped.
 * **Undriven windows**: a fresh worker's first grace window; twice the vote
-  interval plus the grace time after a crash; the grace time after a graceful
-  stop or after a fence — both of which delete their registrations without
+  interval plus the leave grace after a crash; the leave grace after a
+  graceful stop or after a fence — both of which delete their registrations without
   waiting for their drain (CM5, VW8), so the window does not wait out the
   drain's in-flight calls; and, on a worker that keeps running, the wait
   for the shard workers it released, which holds the next owned set it is
@@ -6396,17 +6448,20 @@ which no suite case sets, so no suite case runs RW13's count compare.
   repair's stage moves once per repair (AR11) and the retire timer's once
   per retired leg (AR12).
 * **A reaction pass reads the pool from etcd every interval.** The pass
-  starts with a fresh snapshot of the SP (AR1), which `model.LoadSp` reads
-  one key per record — the `SpConf` and its revision key, every cntlr,
-  slice, thin device, subsystem, transfer, clone and migration it lists, a
-  range each for its repairs and its retired legs, the record of every node
-  its legs and cntlrs sit on, and a keys-only scan per clone and migration
-  for their bitmap chunks — so over a dozen reads for a small pool and over
-  a hundred at the slice ceiling, each point read and each record decoded
+  starts with a fresh snapshot of the SP (AR1), which
+  `model.LoadSpWithoutNodes` reads one key per record — the `SpConf` and
+  its revision key, every cntlr, slice, thin device, subsystem, transfer,
+  clone and migration it lists, a range each for its repairs and its
+  retired legs, and a keys-only scan per clone and migration for their
+  bitmap chunks — so about a dozen reads for a small pool and over a
+  hundred at the slice ceiling, each point read and each record decoded
   from a range logged as an `etcd get`, and each range, the keys-only scans
   included, as an `etcd range` (`log.md`, etcd), once per `cntlr_interval`
-  per pool, with no random offset between pools. The cost is steady, and
-  nearly every pass acts on nothing. A cluster with no room adds the
+  per pool; the records of the nodes its legs and cntlrs sit on are read
+  only by a pass with a step that needs them (AR1), and each coordinator's
+  first pass waits a random part of one interval, so the pools of one
+  worker are not read in step. The cost is steady, and nearly every pass
+  acts on nothing. A cluster with no room adds the
   scans: every pass scans the capacity index once for each grow that is
   due, and once, or twice when the scan's second tier runs, for a cntlr
   replacement that is due and for each group whose leg repair waits for a

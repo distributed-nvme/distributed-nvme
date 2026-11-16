@@ -250,8 +250,9 @@ that make the `ClusterConf` read in a planning snapshot — is
 `architecture.md`, `service Gateway` — RPC specifications, and STM
 discipline. GW11's resolution of conf defaults is a different operation, and
 the text says which it means. `resolveCluster` makes the first read of every
-handler's STM and planning snapshot, except `CreateCluster`'s and
-`ListClusters`' — the two RPCs that resolve no cluster — the pool
+handler's STM and planning snapshot, except `CreateCluster`'s,
+`ListClusters`' and `ListWorkers`' — the three RPCs that resolve no
+cluster — the pool
 transactions of `AdvanceClusterIds` (GW19), and the later transactions of
 the RPCs named below: `model.ClusterConfKey` of the `cluster_name`,
 defaulted to `common.DefaultClusterName`, yielding the `ClusterConf` and the
@@ -278,7 +279,9 @@ the `ClusterConf` where they use it, from that snapshot and never read
 `ClusterConf` themselves. The **paged** `List*` RPCs use plain
 reads, not an STM (`architecture.md`, page_token; GW10). So does
 `GetClusterCapacity`, whose two ranges follow the same plain `ClusterConf`
-read the cluster-scoped lists make (Clusters). `ListThinDevices`,
+read the cluster-scoped lists make (Clusters), and so does `ListWorkers`,
+whose one range needs no `ClusterConf` read (Worker registry).
+`ListThinDevices`,
 `ListSubsystems`, `ListRepairs`, `ListRetiredLegs` and the single-object
 `Get*` RPCs are one-STM consistency reads (Thin devices, Subsystems and
 namespaces, Clones, Repairs and retired legs).
@@ -693,8 +696,8 @@ and field-level rules stay in the cited section of `architecture.md`,
 * **GetCluster** — one STM: the `ClusterConf`, the cluster id, the three
   globals (a missing global is `ABORTED`). Reply the name, the cluster id,
   the conf and the globals.
-* **ListClusters** — no cluster resolution (with `CreateCluster`, one of
-  the two RPCs that resolve no cluster, GW5); a paged
+* **ListClusters** — no cluster resolution (with `CreateCluster` and
+  `ListWorkers`, one of the three RPCs that resolve no cluster, GW5); a paged
   plain range over `ClusterConfPrefix` (GW10); the names are the key
   suffixes.
 * **AdvanceClusterIds** — validate the name (GW4); GW19's transactions.
@@ -720,6 +723,24 @@ error), and that transaction puts nothing. The pool transactions read no
 `ClusterConf`: the first transaction's cluster id names their keys, and a
 pool of a recreated cluster lives under another id. No transaction reads or
 bumps a rev key. An error in any transaction ends the RPC there.
+
+### Worker registry
+
+`gateway/worker.go` holds the one RPC of the worker registry, which belongs
+to no cluster (`architecture.md`, Worker registry).
+
+* **ListWorkers** — no validation, since the request has no field, and no
+  cluster resolution (GW5); one plain range of
+  `model.WorkerRegistryPrefix`, every role at once, outside any STM, as the
+  paged lists range their prefixes (GW10), and a failed range is `ABORTED`
+  as `pageNames` answers one (GW7). Not paged. Each key goes through
+  `model.ParseWorkerRegKey`, and one it refuses is skipped; each value is
+  decoded through `etcdutil`, and one that does not decode is listed as a
+  fresh empty `WorkerReg`, never as the message the failed decode half
+  filled — the reasons are `architecture.md`, Worker registry. Reply every
+  role of `common.WorkerRoleDn`, `common.WorkerRoleCn` and
+  `common.WorkerRoleSp`, each with its registrations by seed, and empty
+  when it has none. Nothing is written and no revision moves.
 
 ### Disk nodes
 

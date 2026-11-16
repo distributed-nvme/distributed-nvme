@@ -447,6 +447,9 @@ THR=$THR_QUIET
 # self-fence and rejoin from both (CUT_FENCE_WAIT, CUT_REJOIN_WAIT).
 VOTE_INTERVAL=2
 VOTE_GRACE=6
+# The leave grace must exceed the vote interval plus the etcd operation
+# timeout, 10 s (dnv-worker.md CM3).
+VOTE_LEAVE_GRACE=13
 
 # The roles the one worker carries (start_worker): the outage stage wants the
 # rejoin records of each (worker_rejoined).
@@ -6183,15 +6186,16 @@ start_gateway() {
 		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT"
 }
 
-# One worker with all three role loops. --vote-interval and
-# --vote-grace-time are short because the react case's four reactions cannot
+# One worker with all three role loops. --vote-interval, --vote-grace-time
+# and --vote-leave-grace-time are short because the react case's four reactions cannot
 # fire faster than the vote loop, and every react bound is threshold plus a
 # few intervals.
 start_worker() {
 	remote_start "$CP" worker worker.log \
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--roles ${WORKER_ROLES// /,}" \
-		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE"
+		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE" \
+		"--vote-leave-grace-time $VOTE_LEAVE_GRACE"
 }
 
 # One cdc, serving every shard: --range is left at its default
@@ -22159,11 +22163,12 @@ CUT_SLACK=15
 
 # The outage stage's two waits on the worker (architecture.md, Running
 # without the control plane). With etcd stopped every heartbeat put waits out
-# its whole etcd budget, so the self-fence comes from the worker's own
-# observer (dnv-worker.md VW8): its own key goes dead one dead threshold, two
-# vote intervals, after the last echo, which is at most one interval old at
-# the stop, and the commit of that one grace window later takes the fence
-# exit. The rejoin waits for the etcd client's own reconnect once etcd listens
+# its whole etcd budget. The self-fence comes from the end of such a put
+# (dnv-worker.md VW8 (a)), or from the worker's own observer (VW8 (d)),
+# whichever is first: its own key goes dead one dead threshold, two vote
+# intervals, after the last echo, which is at most one interval old at the
+# stop, and the commit of that one leave grace later takes the fence exit;
+# the wait is sized for the second. The rejoin waits for the etcd client's own reconnect once etcd listens
 # again, which the client's connect backoff can hold back for several seconds
 # (WAIT_SHORT), then one grace window from the new seed's first put (VW7).
 # That backoff grows with the time etcd stays away: the stage starts etcd
@@ -22171,7 +22176,7 @@ CUT_SLACK=15
 # hold the reconnect back longer than WAIT_SHORT, and long enough for the new
 # seed to fence once more (VW8), which fails the stage (cut_rejoined).
 # CUT_SLACK covers the driver's polling in both.
-CUT_FENCE_WAIT=$((3 * VOTE_INTERVAL + VOTE_GRACE + CUT_SLACK))
+CUT_FENCE_WAIT=$((3 * VOTE_INTERVAL + VOTE_LEAVE_GRACE + CUT_SLACK))
 CUT_REJOIN_WAIT=$((WAIT_SHORT + VOTE_GRACE + CUT_SLACK))
 
 # The loop's self-stop, in seconds: the bounds of every wait from its start in

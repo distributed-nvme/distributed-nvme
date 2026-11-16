@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	mrand "math/rand/v2"
 	"sync"
 	"time"
 
@@ -38,6 +39,7 @@ const (
 
 	msgMembershipObserved  = "membership observed"
 	msgMembershipCommitted = "membership committed"
+	msgRoleUnderTwoWorkers = "role under two workers"
 
 	msgShardOwned    = "shard owned"
 	msgShardReleased = "shard released"
@@ -68,9 +70,10 @@ type Config struct {
 	// threshold is 2 x this and is never a constant of its own (dnv-worker.md,
 	// Constants this document owns).
 	VoteInterval time.Duration
-	// GraceTime is how long an observed membership transition must hold
-	// before it is committed (VW5).
-	GraceTime time.Duration
+	// GraceTime is how long an observed join must hold before it is
+	// committed, and LeaveGraceTime how long an observed leave must (VW5).
+	GraceTime      time.Duration
+	LeaveGraceTime time.Duration
 	// Endpoints are the etcd endpoints the client was built with. The worker
 	// never dials them itself; they exist for the "worker starting" record
 	// (CM6).
@@ -203,6 +206,21 @@ type deps struct {
 	// vote tests can substitute recording fakes for the real shard and
 	// revision workers.
 	kinds func(role string) (revKind, bool)
+	// passOffset is the wait for a coordinator's first reaction pass, given
+	// the pass interval (AR1): randomPassOffset in Run. nil starts the pass
+	// ticker at once, which the unit tests rely on to count passes.
+	passOffset func(period time.Duration) time.Duration
+}
+
+// randomPassOffset is a random wait in (0, period], the offset of a
+// coordinator's first reaction pass (AR1): the coordinators a worker starts
+// together, as when it takes a shard over, then do not load their pools in
+// step.
+func randomPassOffset(period time.Duration) time.Duration {
+	if period <= 0 {
+		return period
+	}
+	return time.Duration(mrand.Int64N(int64(period))) + 1
 }
 
 // timeouts are the worker's four fixed timeouts: the per-call deadlines of a
@@ -292,9 +310,10 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 		return err
 	}
 	return run(ctx, cli, cfg, seed, runEnv{
-		clk:  realClock{},
-		dial: dialAgent,
-		tmo:  prodTimeouts(),
+		clk:        realClock{},
+		dial:       dialAgent,
+		tmo:        prodTimeouts(),
+		passOffset: randomPassOffset,
 	})
 }
 
@@ -303,9 +322,10 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 // fixed timeouts. Run passes the production ones; the worker's whole-worker
 // Go tests pass their own (dnv-worker.md, Integration test plan).
 type runEnv struct {
-	clk  clock
-	dial func(addrPort string) (*grpc.ClientConn, error)
-	tmo  timeouts
+	clk        clock
+	dial       func(addrPort string) (*grpc.ClientConn, error)
+	tmo        timeouts
+	passOffset func(period time.Duration) time.Duration
 }
 
 // run is Run from the minted seed on: the worker under seed, with env's
@@ -327,6 +347,8 @@ func run(
 		clk:    env.clk,
 		tmo:    env.tmo,
 		kinds:  kindFor,
+
+		passOffset: env.passOffset,
 	}
 	d.conns.dial = env.dial
 	d.conf = newConfCache(d)
@@ -337,6 +359,7 @@ func run(
 		slog.Any("endpoints", cfg.Endpoints),
 		slog.Float64("vote_interval", cfg.VoteInterval.Seconds()),
 		slog.Float64("grace_time", cfg.GraceTime.Seconds()),
+		slog.Float64("leave_grace_time", cfg.LeaveGraceTime.Seconds()),
 	)
 
 	// The cache and the vote layer live as long as ctx. The cache is stopped

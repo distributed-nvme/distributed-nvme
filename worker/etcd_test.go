@@ -632,10 +632,11 @@ func TestVoteWorkerAgainstEtcd(t *testing.T) {
 	logs := captureLogs(t)
 
 	cfg := Config{
-		Roles:        []string{common.WorkerRoleDn},
-		VoteInterval: 100 * time.Millisecond,
-		GraceTime:    400 * time.Millisecond,
-		Endpoints:    []string{testEndpoint},
+		Roles:          []string{common.WorkerRoleDn},
+		VoteInterval:   100 * time.Millisecond,
+		GraceTime:      400 * time.Millisecond,
+		LeaveGraceTime: 400 * time.Millisecond,
+		Endpoints:      []string{testEndpoint},
 	}
 	d := &deps{
 		cfg:    cfg,

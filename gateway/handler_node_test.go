@@ -883,7 +883,7 @@ func TestGetClusterReadsConfAndGlobals(t *testing.T) {
 }
 
 // TestListClustersPagesAndRejectsABadToken pins GW10 and architecture.md,
-// page_token, on the one list that
+// page_token, on the one paged list that
 // resolves no cluster at all: a page is the key suffixes under the ClusterConf
 // prefix, the next token is the last key of the page, and a token that is not
 // base64 is INVALID_ARGUMENT rather than an empty first page.

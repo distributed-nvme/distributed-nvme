@@ -2710,9 +2710,14 @@ type fakeSpOps struct {
 	mu    sync.Mutex
 	state *model.SpState
 	err   error
-	// loads counts loadSp calls — the fan-out's and the reaction pass's —
-	// so a test can tell that ticks have run.
+	// loads counts loadSp and loadPassSp calls — the fan-out's and the
+	// reaction pass's — so a test can tell that ticks have run; passLoads
+	// counts the loadPassSp calls alone, and nodeLoads the loadNodes calls,
+	// which fail with nodesErr when it is set.
 	loads       int
+	passLoads   int
+	nodeLoads   int
+	nodesErr    error
 	provisioned [][]model.SideRef
 	// cloneProvisioned records every flipCloneProvisioned call, as
 	// provisioned records flipProvisioned's, and repairProvisioned every
@@ -2822,6 +2827,55 @@ func (o *fakeSpOps) loadSp(
 		o.onLoad(o.state)
 	}
 	return o.state, nil
+}
+
+// loadPassSp is loadSp's state without the node records, as
+// model.LoadSpWithoutNodes leaves them: a shallow copy whose node maps are
+// empty, until loadNodes copies the fixture's in.
+func (o *fakeSpOps) loadPassSp(
+	ctx context.Context, cid uint64, spName string,
+) (*model.SpState, error) {
+	o.mu.Lock()
+	o.passLoads++
+	o.mu.Unlock()
+	state, err := o.loadSp(ctx, cid, spName)
+	if err != nil || state == nil {
+		return state, err
+	}
+	pass := *state
+	pass.DnByAddr = make(map[string]*pb.DnConf)
+	pass.CnByAddr = make(map[string]*pb.CnConf)
+	return &pass, nil
+}
+
+func (o *fakeSpOps) loadNodes(
+	ctx context.Context, cid uint64, state *model.SpState,
+) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.nodeLoads++
+	if o.nodesErr != nil {
+		return o.nodesErr
+	}
+	for addr, dn := range o.state.DnByAddr {
+		state.DnByAddr[addr] = dn
+	}
+	for addr, cn := range o.state.CnByAddr {
+		state.CnByAddr[addr] = cn
+	}
+	return nil
+}
+
+func (o *fakeSpOps) passLoadCnt() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.passLoads
+}
+
+func (o *fakeSpOps) nodeLoadCnt() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.nodeLoads
 }
 
 func (o *fakeSpOps) loadCnt() int {

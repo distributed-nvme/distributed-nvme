@@ -18,7 +18,7 @@
 //     `sp create` — there is no SP yet to have a revision. `sp get` is where
 //     the operator read the number they pass back as --rev (CT3).
 //   - The two parse helpers below are prefixed `sp` because ctl/ is a single
-//     package and the fourteen group files must not collide (dnvctl.md,
+//     package and the fifteen group files must not collide (dnvctl.md,
 //     Files).
 
 package ctl

@@ -1119,6 +1119,22 @@ message GetClusterCapacityReply {
     map<string, CnCapacityEntry> addr_port_to_cn = 4;
 }
 
+// ListWorkersRequest names nothing: the worker registry is cluster-independent
+// (architecture.md, Key table), so the read takes no cluster_name.
+message ListWorkersRequest {}
+
+// RoleWorkers is one role's registrations as stored, keyed by the seed out of
+// each WorkerReg key.
+message RoleWorkers {
+    map<string, WorkerReg> seed_to_reg = 1;
+}
+
+// ListWorkersReply carries every role of common.WorkerRole*, each present even
+// when it has no registration, keyed by the role out of the key.
+message ListWorkersReply {
+    map<string, RoleWorkers> role_to_workers = 1;
+}
+
 message CreateDiskNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
@@ -1947,6 +1963,8 @@ service Gateway {
     rpc ListClusters(ListClustersRequest) returns (ListClustersReply) {}
     rpc AdvanceClusterIds(AdvanceClusterIdsRequest) returns (AdvanceClusterIdsReply) {}
     rpc GetClusterCapacity(GetClusterCapacityRequest) returns (GetClusterCapacityReply) {}
+
+    rpc ListWorkers(ListWorkersRequest) returns (ListWorkersReply) {}
 
     rpc CreateDiskNode(CreateDiskNodeRequest) returns (CreateDiskNodeReply) {}
     rpc DeleteDiskNode(DeleteDiskNodeRequest) returns (DeleteDiskNodeReply) {}

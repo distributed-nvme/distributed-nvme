@@ -78,7 +78,7 @@ dnvctl has no lab address worth baking in, and it is one address, with no
 multi-gateway failover list, because operators front the gateways
 themselves. `--cluster` and `--sp` are the scope global flags: they fill
 `cluster_name` and `sp_name` of every request that has the field — all
-requests but one carry a cluster name, and most carry a pool name — so
+requests but two carry a cluster name, and most carry a pool name — so
 neither is a leaf flag (Conventions). `--rev` is the revision token (CT3):
 only the token-carrying mutators take it, it is a usage error on every other
 leaf, and it is read off the command line alone. The rest steer the
@@ -130,8 +130,8 @@ already passed. A zero or negative `--timeout` is a deadline already passed
 by its own value: the call fails DEADLINE_EXCEEDED (exit 1).
 
 A `--cluster` or `--sp` left empty is sent empty; a command whose request
-lacks the field, such as `cluster list` or `sp find-names`, ignores the
-global flag (CT8).
+lacks the field, such as `cluster list`, `worker list` or `sp find-names`,
+ignores the global flag (CT8).
 
 ### Connection
 
@@ -250,7 +250,8 @@ The check itself — made only when the token message is present — is
 
 **Groups and leaves.** The tree is noun-grouped, "dnvctl <group> <verb>",
 one group per resource — `cluster`, `dn`, `cn`, `sp`, `cntlr`, `td`, `ss`,
-`ns`, `clone`, `xfer`, `migr`, `repair`, `retired-leg` and `group` — and
+`ns`, `clone`, `xfer`, `migr`, `repair`, `retired-leg`, `group` and
+`worker` — and
 it reuses gatewayctl's verb and flag vocabulary. The leaves are the RPCs of
 `service Gateway`, one leaf per RPC and nothing else (CT1): no convenience
 verbs, no compound commands, and cobra's stock `help` and `completion` are
@@ -311,7 +312,8 @@ with their types and defaults, are the code's, and `--help` lists them.
 `--addr`, because a node's name is its ip:port; `sp` with the global `--sp`;
 `cntlr` with `--id`; `td`, `clone`, `xfer`, `migr` and `repair` with
 `--name`; `ss` with `--nqn`; `ns` with `--nqn` and `--idx`; `retired-leg`
-with `--leg`; `group` with `--grp`. `sp inspect-side` takes its side id as
+with `--leg`; `group` with `--grp`; `worker` with none, since its one leaf
+reads the whole registry. `sp inspect-side` takes its side id as
 `--id`, deliberately the same spelling as the `cntlr` group's, as in
 gatewayctl: the RPC, not the flag, says what the id means.
 
@@ -388,8 +390,9 @@ no token field; on the wire the integration suite makes the first claim, sends
 
 ### `cluster` — `ctl/cluster.go`
 
-`cluster list` is the one request with no `cluster_name`: it ignores both
-scope global flags.
+`cluster list` is one of the two requests with no `cluster_name`, with
+`worker list` (`worker` — `ctl/worker.go`): it ignores both scope global
+flags.
 
 One `cluster create` flag, and only one, reaches a `ClusterConf` member:
 `--extent-size` sets `dn_bin_conf.extent_size`, the DN and CN allocation
@@ -685,6 +688,17 @@ group's flag and `clone get` a clone meta group's, as they show the mark
 (CT4); what the flag stops, and why its write bumps the pool's revision,
 so that a `--rev` token given before it is stale after it, are
 `architecture.md`, Repairs.
+
+### `worker` — `ctl/worker.go`
+
+`worker list` sends `ListWorkers`, the read of the worker registry, and
+takes no flag: its request has no field, so it ignores both scope global
+flags, and the list is not paged. It prints the reply as it is (CT4): every
+role, an empty one included, and under each role every registration by
+seed, with the `epoch` its worker last wrote by its own clock. The listing
+is the registrations as stored, not any worker's effective membership, and
+a dead worker's key stays in it until a peer deletes it; what it shows and
+what it does not is `architecture.md`, Worker registry.
 
 ## Integration test plan
 

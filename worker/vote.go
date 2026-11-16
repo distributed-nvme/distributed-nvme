@@ -233,6 +233,11 @@ type roleState struct {
 	// it distrusts. Refreshing it from a scan would hide exactly the case
 	// (b) is the backstop for.
 	lastOwnEcho time.Time
+
+	// underTwo is whether the last heartbeat tick judged the role served by
+	// fewer than two effective members while this worker's own registration
+	// was one (warnUnderTwo).
+	underTwo bool
 }
 
 // entryFor returns the tracking entry of a seed, creating it on first sight.
@@ -550,6 +555,32 @@ func (v *voteWorker) onHeartbeat(msg hbMsg) {
 	}
 	if msg.ok {
 		inc.lastOkPut = msg.tickAt
+	}
+	v.warnUnderTwo(inc)
+}
+
+// warnUnderTwo logs `role under two workers` at Warn when a role this worker
+// serves has fewer than two effective members, once each time the count
+// falls below two (VW9): no other worker would drive the role's shards if
+// this one stopped. It is judged on the heartbeat tick, so that the commits
+// of one grace window, which fire one by one, are judged together, and only
+// while this worker's own registration is an effective member, so that its
+// first grace window logs nothing.
+func (v *voteWorker) warnUnderTwo(inc *incarnation) {
+	for _, rs := range inc.roles {
+		own, ok := rs.entries[inc.seed]
+		if !ok || !own.effective {
+			continue
+		}
+		cnt := len(rs.members())
+		under := cnt < 2
+		if under && !rs.underTwo {
+			slog.WarnContext(inc.ctx, msgRoleUnderTwoWorkers,
+				slog.String("role", rs.role),
+				slog.Int("member_cnt", cnt),
+			)
+		}
+		rs.underTwo = under
 	}
 }
 
@@ -914,9 +945,14 @@ func (v *voteWorker) observed(
 	entry.stopGrace()
 	entry.graceGen++
 	entry.graceTarget = live
+	grace := v.deps.cfg.GraceTime
+	if !live {
+		// VW5: a leave commits after the leave grace, the shorter, so a
+		// dead worker's shards move sooner.
+		grace = v.deps.cfg.LeaveGraceTime
+	}
 	entry.grace = v.armTimer(
-		inc.gen, timerGrace, rs.role, entry.seed, entry.graceGen,
-		v.deps.cfg.GraceTime,
+		inc.gen, timerGrace, rs.role, entry.seed, entry.graceGen, grace,
 	)
 }
 
@@ -990,16 +1026,16 @@ func (v *voteWorker) commit(
 // gave up on me" path runs instead. It is reachable whenever that commit comes
 // before a VW8 check has fenced the worker. A role's own key goes dead the
 // dead threshold after this observer last saw it put (VW3) and is committed
-// one grace window later, while VW8 waits one vote interval longer than the
-// dead threshold — (a) from the start of the last tick whose puts all landed,
-// (b) from that role's last echo — and a tick runs its checks only after its
-// puts returned. So for a role whose own key has gone dead at its deadline,
-// while puts return promptly, the commit comes first with a grace window
-// shorter than one to two vote intervals when the puts land and only that
-// role's watch is silent, depending on where its last echo fell between two
-// ticks, and with one shorter than one interval less the echo's lag behind its
-// tick when the puts fail; a tick's puts that block on an unreachable etcd
-// allow a longer one.
+// one leave grace later (VW5), while VW8 waits one vote interval longer than
+// the dead threshold — (a) from the start of the last tick whose puts all
+// landed, (b) from that role's last echo — and a tick runs its checks only
+// after its puts returned. So for a role whose own key has gone dead at its
+// deadline, while puts return promptly, the commit comes first with a leave
+// grace shorter than one to two vote intervals when the puts land and only
+// that role's watch is silent, depending on where its last echo fell between
+// two ticks, and with one shorter than one interval less the echo's lag
+// behind its tick when the puts fail; a tick's puts that block on an
+// unreachable etcd allow a longer one.
 //
 // The reason names the CAUSE, not the consequence, wherever VW8 can tell them
 // apart. A fence a failed seed mint had deferred is retried first, under that

@@ -306,12 +306,16 @@ func (h *workerHarness) startWorker(
 	))
 	w.cancel = cancel
 	cfg := Config{
-		Roles:        roles,
-		VoteInterval: h.vote,
-		GraceTime:    h.grace,
-		Endpoints:    []string{h.endpoint},
+		Roles:          roles,
+		VoteInterval:   h.vote,
+		GraceTime:      h.grace,
+		LeaveGraceTime: h.grace,
+		Endpoints:      []string{h.endpoint},
 	}
-	env := runEnv{clk: realClock{}, dial: w.conns.dial, tmo: h.tmo}
+	env := runEnv{
+		clk: realClock{}, dial: w.conns.dial, tmo: h.tmo,
+		passOffset: randomPassOffset,
+	}
 	go func() {
 		defer close(w.done)
 		_ = run(ctx, cli, cfg, w.seed, env)

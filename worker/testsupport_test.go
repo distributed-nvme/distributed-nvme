@@ -1053,10 +1053,11 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // membership case runs in a few fake-clock steps.
 func testConfig(roles ...string) Config {
 	return Config{
-		Roles:        roles,
-		VoteInterval: 10 * time.Second,
-		GraceTime:    60 * time.Second,
-		Endpoints:    []string{"127.0.0.1:2379"},
+		Roles:          roles,
+		VoteInterval:   10 * time.Second,
+		GraceTime:      60 * time.Second,
+		LeaveGraceTime: 60 * time.Second,
+		Endpoints:      []string{"127.0.0.1:2379"},
 	}
 }
 

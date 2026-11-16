@@ -4,13 +4,15 @@
 // the retire timer (AR12), and the clear of a forced-start mark (AR13).
 //
 // A pass is stateless by construction, but for two records: it starts from a
-// fresh model.LoadSp snapshot, the in-memory CntlrInfo the PRIMARY cntlr's
+// fresh model.LoadSpWithoutNodes snapshot (the node records read later, by
+// the steps that need them: passNodes), the in-memory CntlrInfo the PRIMARY cntlr's
 // child last reported and a copy of AR10's memo of this coordinator's own
 // verdicts (verdictMemo), decides ONE action (AR2), and
 // forgets everything again — everything but AR5's record of the last failover
 // it applied (failoverMemo) and AR7's of the last replacement of a primary
 // (replaceMemo), which say why the role moved or the primary was replaced,
-// facts no etcd record keeps.
+// facts no etcd record keeps, and AR6's notes of the passes that first read
+// a pool past its mark (timeGrows), which only time a grow.
 // Two owners overlapping on one SP therefore cannot apply an action twice —
 // every action is a model op that re-validates its own preconditions inside
 // its STM (MD6/MD7), and the loser gets model.ErrPrecondition back, except
@@ -36,6 +38,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -283,6 +286,10 @@ const (
 	// msgPoolStatusUnparsable is AR6's "an unparsable line is skipped and
 	// logged once per change".
 	msgPoolStatusUnparsable = "pool status unparsable"
+	// msgGrowDone is AR6's timing of a grow: the time from the first pass
+	// that read a pool past its mark to the pass that read it larger
+	// (timeGrows).
+	msgGrowDone = "grow done"
 )
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1083,28 @@ type reactor struct {
 	// that waits for one reason is logged once per change of its rep_id,
 	// its stage or the reason and not once per pass (AR17).
 	waits map[string]repairWait
+	// grows is, per slice and kind, the pass that first read the pool past
+	// its mark and the total it read then, which `grow done` times (AR6,
+	// timeGrows). It lives in memory only. growsLooked is whether a pass of
+	// this coordinator has read the pool rows yet: a breach the first such
+	// pass reads began before it, at a time no record keeps, so its note
+	// carries no time and its grow is not timed.
+	grows       map[growKey]growWatch
+	growsLooked bool
+}
+
+// growKey names one kind of one slice's pool: its data or its metadata.
+type growKey struct {
+	sliceId uint64
+	meta    bool
+}
+
+// growWatch is when a pass first read a pool past its mark, and the total
+// that pass read; a zero since is a breach older than the coordinator's
+// first reading, which is not timed.
+type growWatch struct {
+	since time.Time
+	total uint64
 }
 
 // repairWait is what AR17's record of one repair said: the repair's rep_id
@@ -1089,7 +1118,8 @@ type repairWait struct {
 // newReactor builds a reactor over one model surface.
 func newReactor(ops reactionOps) *reactor {
 	return &reactor{ops: ops, badLine: make(map[uint64]string),
-		waits: make(map[string]repairWait)}
+		waits: make(map[string]repairWait),
+		grows: make(map[growKey]growWatch)}
 }
 
 // reactor returns the coordinator's reaction state, building the production one
@@ -1326,6 +1356,33 @@ type spPass struct {
 	// scans again.
 	growShort   uint64
 	repairShort []emptyScan
+	// nodesRead is whether passNodes has read the node records into state
+	// this pass.
+	nodesRead bool
+}
+
+// passNodes reads the pool's node records into the pass's state, once a
+// pass, at the revision of the pass's load (MD3): the pass loads the pool
+// without them (AR1), and only a step that is about to allocate or that
+// needs a node's record reads them — AR6's CN budget check and withdrawal,
+// AR7's and AR8's locations. A failed read is recorded as the step's failed
+// reaction and false is returned, after which the step ends the pass, as
+// after a failed scan (AR2).
+func (w *spWorker) passNodes(
+	ctx context.Context,
+	p *spPass,
+	kind string,
+	ids ...slog.Attr,
+) bool {
+	if p.nodesRead {
+		return true
+	}
+	if err := w.ops.loadNodes(ctx, w.cid, p.state); err != nil {
+		w.reactionFailed(ctx, kind, err, ids...)
+		return false
+	}
+	p.nodesRead = true
+	return true
 }
 
 // emptyScan is one leg-repair create scan that came back empty (spPass).
@@ -1358,8 +1415,9 @@ func (e emptyScan) covers(extCnt uint64, black []string) bool {
 // coordinator's own cntlr_interval ticker (AR1, AR2).
 //
 // The snapshot is taken fresh here rather than reused from the fan-out: a pass
-// must see the err_epochs this same worker wrote since (HL3), and model.LoadSp
-// is one Snapshot (EU4) even though it loads more than a pass reads.
+// must see the err_epochs this same worker wrote since (HL3), and
+// model.LoadSpWithoutNodes is one Snapshot (EU4) even though it loads more
+// than a pass reads.
 //
 // A drain step's wake-up runs the drain half of this pass alone, in the same
 // order and behind the same gates (drainTick): the load, the clone drain, and
@@ -1457,6 +1515,10 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// dnv-worker.md AR17: the record of a repair the primary holds back, at
 	// every sp_level for the same reason; it changes nothing.
 	w.logRepairWaits(ctx, p)
+	// dnv-worker.md AR6: the timing of a grow, at every sp_level, since an
+	// operator grows a pool at the levels where reactions stop too; it
+	// changes nothing.
+	w.timeGrows(ctx, p)
 	// dnv-worker.md AR15: the flag that a group's array has run, a step of
 	// the pass at every sp_level, since it only follows the primary's
 	// report; it is not the pass's one action either.
@@ -1497,7 +1559,7 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 // coordinator (SW3). Any other failure is recorded as RW14 records a
 // fan-out's, and the pass simply runs again on the next tick (RW12).
 func (w *spWorker) loadPassState(ctx context.Context) (*model.SpState, bool) {
-	state, err := w.loadOwnSp(ctx)
+	state, err := w.loadOwnSp(ctx, true)
 	if err != nil {
 		if !errors.Is(err, model.ErrNotFound) {
 			slog.InfoContext(ctx, msgSpLoadFailed,
@@ -1911,6 +1973,84 @@ func (w *spWorker) parsePoolStatus(
 	return poolUsage{}, false
 }
 
+// timeGrows is AR6's timing of a grow, a step of every pass that reads the
+// primary's pool rows, at every sp_level: it changes nothing. A pass that
+// reads a pool, its data or its metadata, past the mark notes the time and
+// the total it read, once; a later pass that reads a larger total logs
+// `grow done` with the seconds between the two passes, the time a grow took
+// from the first sight of the breach to the pool the primary reports grown,
+// and forgets the note. A note is forgotten with nothing logged when a pass
+// reads the pool under its mark again at the same total, or the slice gone,
+// or the automation off. Notes live in the coordinator's memory, so a
+// restart of it or of its worker, or a move of its shard, loses them; and a
+// breach that the coordinator's first reading of the pool rows already
+// finds gets a note with no time, whose grow is not timed either, since the
+// breach began before that reading.
+func (w *spWorker) timeGrows(ctx context.Context, p *spPass) {
+	r := w.reactor()
+	lwm := uint64(
+		p.state.Conf.GetBdevConf().GetDmPoolConf().GetLowWaterMarkPct(),
+	)
+	listed := make(map[uint64]bool)
+	for _, id := range p.state.Conf.GetSliceIdList() {
+		listed[id] = true
+	}
+	for key := range r.grows {
+		if !listed[key.sliceId] || lwm > 100 {
+			delete(r.grows, key)
+		}
+	}
+	if lwm > 100 || p.info == nil {
+		return
+	}
+	now := w.deps.clk.now()
+	first := !r.growsLooked
+	r.growsLooked = true
+	for sliceId, row := range p.info.GetSliceIdToDmPool() {
+		if !listed[sliceId] || row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			continue
+		}
+		usage, ok := parseThinPoolStatus(row.GetDetails())
+		if !ok {
+			continue
+		}
+		for _, kind := range []struct {
+			key         growKey
+			used, total uint64
+			name        string
+		}{
+			{growKey{sliceId, false}, usage.usedData, usage.totalData,
+				reactionGrowData},
+			{growKey{sliceId, true}, usage.usedMeta, usage.totalMeta,
+				reactionGrowMeta},
+		} {
+			past := kind.used*100 > lwm*kind.total
+			watch, noted := r.grows[kind.key]
+			switch {
+			case noted && kind.total > watch.total && watch.since.IsZero():
+				delete(r.grows, kind.key)
+			case noted && kind.total > watch.total:
+				slog.InfoContext(ctx, msgGrowDone,
+					slog.Uint64("cluster_id", w.cid),
+					slog.Uint64("sp_id", w.spId),
+					slog.Uint64("slice_id", sliceId),
+					slog.String("kind", kind.name),
+					slog.Uint64("old_total", watch.total),
+					slog.Uint64("new_total", kind.total),
+					slog.Float64("seconds", now.Sub(watch.since).Seconds()),
+				)
+				delete(r.grows, kind.key)
+			case noted && !past:
+				delete(r.grows, kind.key)
+			case !noted && past && first:
+				r.grows[kind.key] = growWatch{total: kind.total}
+			case !noted && past:
+				r.grows[kind.key] = growWatch{since: now, total: kind.total}
+			}
+		}
+	}
+}
+
 // tryGrow is AR6. It reports whether the pass ends here.
 //
 // Slices are walked in SpConf.slice_id_list order and DATA is checked before
@@ -2010,9 +2150,16 @@ func (w *spWorker) runGrow(
 		// every other reaction, is untouched — unless the grow waits on a side of
 		// the new group unhealthy on a disk node that carries a health epoch,
 		// dead or with an error row such as its store's, which only withdrawing
-		// the group ends (withdrawTarget).
-		if grp, ok := withdrawTarget(p, slice, isMeta); ok {
-			return w.withdrawGrow(ctx, p, sliceId, isMeta, grp, usage)
+		// the group ends (withdrawTarget). Only a side that qualifies
+		// makes the pass read the disk nodes' records (passNodes), so a grow
+		// that stays pending on the CN costs no node read.
+		if grp, addrs := withdrawTarget(p, slice, isMeta); len(addrs) > 0 {
+			if !w.passNodes(ctx, p, reactionGrowWithdraw, sliceAttr) {
+				return true
+			}
+			if dnStamped(p.state, addrs) {
+				return w.withdrawGrow(ctx, p, sliceId, isMeta, grp, usage)
+			}
 		}
 		w.reactionSkipped(ctx, kind, reasonGrowPending, sliceAttr)
 		return false
@@ -2044,6 +2191,9 @@ func (w *spWorker) runGrow(
 	// room. A lack of budget can last, so the pass goes on; the same refusal
 	// from inside the transaction means the CN changed since the snapshot and
 	// ends the pass (AR2).
+	if !w.passNodes(ctx, p, kind, sliceAttr) {
+		return true
+	}
 	order, charges := model.SpCnCharges(p.state.Conf, p.state.Cntlrs, extCnt)
 	if addr, free, short := model.CnBudgetShort(
 		order, charges, p.state.CnByAddr,
@@ -2102,13 +2252,15 @@ func (w *spWorker) runGrow(
 	return true
 }
 
-// withdrawTarget is AR6's withdrawal trigger on a pending grow: the newest
-// group of the kind, when every leg has one side, a leg's side is still not
-// provisioned and has been unhealthy for side_unhealthy, with this
-// coordinator's own verdict on it (AR10), its disk node carries a health
-// epoch in the pass's snapshot, no repair, retired leg, forced-start mark or
-// operator acts on the group, and the primary's report is of an observation
-// made at the snapshot's revision or later. Such a side's disk node died
+// withdrawTarget is AR6's withdrawal trigger on a pending grow, but for the
+// disk node's record: the newest group of the kind, when every leg has one
+// side, no repair, retired leg, forced-start mark or operator acts on the
+// group, and the primary's report is of an observation made at the
+// snapshot's revision or later, with the disk nodes of its sides that are
+// still not provisioned and have been unhealthy for side_unhealthy, with
+// this coordinator's own verdict on them (AR10); none, nil. The group is
+// withdrawn when one of those disk nodes carries a health epoch, which the
+// caller reads after passNodes (dnStamped). Such a side's disk node died
 // while it zeroed, or is live with an error row of its own, such as its
 // store's, beside a side unhealthy for its own reason: the side does not
 // provision while that holds, so no cntlr builds the group, the grow stays
@@ -2121,35 +2273,45 @@ func withdrawTarget(
 	p *spPass,
 	slice *pb.Slice,
 	isMeta bool,
-) (*pb.Group, bool) {
+) (*pb.Group, []string) {
 	grps := slice.GetDataGrpList()
 	if isMeta {
 		grps = slice.GetMetaGrpList()
 	}
 	if len(grps) < 2 || p.infoRev < p.state.SpRevision {
-		return nil, false
+		return nil, nil
 	}
 	grp := grps[len(grps)-1]
 	if grp.GetRepName() != "" || len(grp.GetRetiredLegIdList()) > 0 ||
 		grp.GetForcedStart() != nil || grp.GetOperatorInCharge() {
-		return nil, false
+		return nil, nil
 	}
 	for _, leg := range grp.GetLegList() {
 		if len(leg.GetSideList()) != 1 {
-			return nil, false
+			return nil, nil
 		}
 	}
+	var addrs []string
 	for _, leg := range grp.GetLegList() {
 		side := leg.GetSideList()[0]
 		key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
-		dn := p.state.DnByAddr[side.GetAddrPort()]
 		if !side.GetProvisioned() && p.judged.sides[key] &&
-			reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) &&
-			dn.GetErrEpoch() != 0 {
-			return grp, true
+			reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) {
+			addrs = append(addrs, side.GetAddrPort())
 		}
 	}
-	return nil, false
+	return grp, addrs
+}
+
+// dnStamped reports whether one of the disk nodes at addrs carries a health
+// epoch in the node records passNodes read into state.
+func dnStamped(state *model.SpState, addrs []string) bool {
+	for _, addr := range addrs {
+		if state.DnByAddr[addr].GetErrEpoch() != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // withdrawGrow runs AR6's withdrawal as the pass's one action (AR2): it ends
@@ -2309,6 +2471,9 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	// `candidate changed` when the SP has gained a cntlr the snapshot did not
 	// hold; the next pass plans from a snapshot that holds it.
 	spCnAddrs := otherCntlrAddrs(p, oldId)
+	if !w.passNodes(ctx, p, reactionReplaceCntlr, ids...) {
+		return true
+	}
 	cands, err := w.reactor().ops.findCnCandidates(
 		ctx, w.cid, footprint, batch,
 		[]string{old.GetAddrPort()}, spCnAddrs,
@@ -2468,9 +2633,9 @@ func otherCntlrAddrs(p *spPass, oldId uint64) []string {
 
 // otherCntlrLocations is AR7's tier-1 exclusion (architecture.md, Per-operation
 // allocation): the failure domain of every CN otherCntlrAddrs names, resolved
-// through the pass's OWN snapshot of the node records — MD3 reads one CnConf
-// per distinct Cntlr.addr_port in the same transaction as the cntlrs — so it
-// costs no further read. A CN missing from that snapshot contributes no
+// through the node records passNodes read at the revision of the pass's load
+// — MD3 reads one CnConf per distinct Cntlr.addr_port — so they agree with
+// the cntlrs the pass decided on. A CN missing from that read contributes no
 // location; it is excluded by address anyway. The old cntlr adds no location of
 // its own, on purpose: it is the one leaving, and the replacement is kept off
 // the domains the SP keeps — so the old cntlr's domain is excluded only when a
@@ -3104,6 +3269,9 @@ func (w *spWorker) createRepair(
 			return false
 		}
 	}
+	if !w.passNodes(ctx, p, reactionRepairCreate, ids...) {
+		return true
+	}
 	cands, err := w.reactor().ops.findDnCandidates(
 		ctx, w.cid, p.cc, extCnt, batch, 1,
 		plan, grpLocations(p.state, target.grp),
@@ -3153,11 +3321,10 @@ func (w *spWorker) createRepair(
 
 // grpLocations is AR8's tier-1 exclusion (architecture.md, Per-operation
 // allocation): the failure domain of every DN grpAddrs names, resolved through
-// the pass's OWN snapshot of the node records — MD3 reads one DnConf per side
-// addr_port of the SP in the same transaction as the slices — so the
-// locations come out of the state the pass already decided on and cost no
-// further read. A DN missing from that snapshot contributes no location; it
-// is black-listed by address anyway.
+// the node records passNodes read at the revision of the pass's load — MD3
+// reads one DnConf per side addr_port of the SP — so the locations agree with
+// the slices the pass decided on. A DN missing from that read contributes no
+// location; it is black-listed by address anyway.
 //
 // With the default `location = addr_port` this excludes exactly the
 // black-listed DNs' own domains.
@@ -3359,6 +3526,9 @@ func (w *spWorker) cancelRepair(
 	}
 	if target != nil {
 		plan := grpAddrs(target.grp)
+		if !w.passNodes(ctx, p, reactionRepairCreate, target.ids()...) {
+			return true
+		}
 		cands, err := w.reactor().ops.findDnCandidates(
 			ctx, w.cid, p.cc, target.grp.GetExtCnt(),
 			int(p.cc.GetAllocConf().GetDnBatchSize()), 1,

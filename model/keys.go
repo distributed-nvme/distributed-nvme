@@ -425,6 +425,14 @@ func WorkerRegPrefix(role string) string {
 	return prefixOf(common.DnvPrefix, kindWorkerReg, role)
 }
 
+// WorkerRegistryPrefix is the prefix of the whole worker registry, every role
+// at once: the one range of the gateway's ListWorkers (gateway/worker.go). No
+// worker ranges or watches it; each role's vote layer keeps to its own
+// WorkerRegPrefix.
+func WorkerRegistryPrefix() string {
+	return prefixOf(common.DnvPrefix, kindWorkerReg)
+}
+
 // ---------------------------------------------------------------------------
 // Parsers (MD2)
 // ---------------------------------------------------------------------------

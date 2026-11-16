@@ -1243,7 +1243,8 @@ this document relies on:
   {p} cluster_conf {cluster_name} is the only name-keyed message; every
   other cluster-scoped key is `cluster_id`-keyed (`WorkerReg`, Key table, is
   the one cluster-independent key and carries neither). So any RPC beyond
-  `CreateCluster` and `ListClusters` must first read `ClusterConf` to learn
+  `CreateCluster`, `ListClusters` and `ListWorkers`, which reads only
+  `WorkerReg` keys (Worker registry), must first read `ClusterConf` to learn
   `creation_epoch`, derive `cluster_id`, and only then build its keys (STM
   discipline, `service Gateway` — RPC specifications).
 * **Delete and recreate under the same name yields a fresh `cluster_id`,**
@@ -1287,7 +1288,7 @@ this document relies on:
 | `Repair` | {p} repair {cluster_id} {sp_id} {rep_name} | its new leg embedded, with its side; listed in `SpConf.repair_name_list` and named by its group's `rep_name` (Repairs) |
 | `RetiredLeg` | {p} retired_leg {cluster_id} {sp_id} {leg_id} | keyed by the leg's own id, its side embedded; listed in `SpConf.retired_leg_id_list` and in its group's `retired_leg_id_list` (Retired legs) |
 | `SpName` | {p} sp_id_to_name {cluster_id} {sp_id} | reverse lookup for admin and log analysis; needed because `SpRev`, which also carries `sp_name`, can only be addressed with the SP's shard code [D10] |
-| `WorkerReg` | {p} worker {role} {seed} | the worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `--vote-interval`, whose default is `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or by peers once committed dead (Membership and shard ownership; `dnv-worker.md` VW2, VW4, VW6 and CM5) |
+| `WorkerReg` | {p} worker {role} {seed} | the worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `--vote-interval`, whose default is `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or by peers once committed dead (Membership and shard ownership; `dnv-worker.md` VW2, VW4, VW6 and CM5); the gateway's `ListWorkers` reads the whole registry for the operator (Worker registry) |
 
 An **invariant key** is one the data model guarantees present while its
 parent exists: the rev keys, the globals, the record of every object a
@@ -1454,7 +1455,8 @@ of {p} cluster_conf {cluster_name} first (`NOT_FOUND` if absent) to derive
 the `cluster_id` its prefix is built from (cluster_id derivation).
 `ListThinDevices` and `ListSubsystems` take no page arguments and are each
 one STM snapshot read (Thin devices; Subsystems, namespaces; `gateway.md`
-GW5).
+GW5). `ListWorkers` takes no page arguments either and is one plain range
+of the worker registry, outside any STM (Worker registry).
 
 ### STM discipline
 
@@ -2108,8 +2110,9 @@ every create but `CreateCluster` — `FAILED_PRECONDITION` when a `next_id`
 it draws from has fewer ids left than it takes (Globals: id allocation +
 shard buckets).
 `cluster_name` defaults to `DefaultClusterName` for
-every RPC that takes one. Every RPC except `CreateCluster` and
-`ListClusters` starts by reading the `ClusterConf` of its `cluster_name`
+every RPC that takes one. Every RPC except `CreateCluster`,
+`ListClusters` and `ListWorkers` starts by reading the `ClusterConf` of its
+`cluster_name`
 (`NOT_FOUND` if absent) — not only as an existence check, but because the
 `cluster_id` derived from its `creation_epoch` (cluster_id derivation) is
 the prefix of every other key the RPC touches. An RPC that names an SP then
@@ -2193,9 +2196,10 @@ and the four messages; `creation_epoch` is visible inside the returned
 Defaults: a zero `count` takes `DefaultListCnt`; the token is empty.
 Action: no STM; range the `cluster_conf` prefix and return up to `count`
 cluster names plus the next token (page_token; `gateway.md` GW10). This is
-the one list that needs no `cluster_id`, because `ClusterConf` is the only
-name-keyed message; `GetCluster` turns a listed name into its
-`cluster_id`.
+the one paged list that needs no `cluster_id`, because `ClusterConf` is the
+only name-keyed message; `GetCluster` turns a listed name into its
+`cluster_id`. `ListWorkers`, which is not paged, needs none either: it
+reads no cluster at all (Worker registry).
 
 **AdvanceClusterIds** — the id step of etcd backup and restore: it moves
 every id counter of the cluster (Globals: id allocation + shard buckets)
@@ -2249,6 +2253,44 @@ cluster's room is bounded by its controller nodes as well as its disk
 nodes. Each record is decoded through the etcd door, which logs it as it
 logs every decoded value, so on a cluster at the node ceilings this is a
 heavy read meant for an occasional poll, not a hot path.
+
+### Worker registry
+
+**ListWorkers** — the operator's read of the worker registry (`WorkerReg`,
+Key table): the registrations of the `dnv-worker` processes, role by role
+(Workers). It takes no `cluster_name` and resolves no cluster, because the
+registry belongs to the workers, not to a cluster; it carries no token and
+takes no page arguments.
+Errors: only the common ones; a failed range is `ABORTED`.
+Action: no STM. One plain range of the whole registry, every role at once,
+as the paged lists range (page_token): a transaction cannot range, and the
+reply is a snapshot of the keys, not an invariant. The reply carries each
+of the three roles, a role with no registration as an empty one, so an
+empty role shows; under each role, every registration keyed by its seed,
+with its `WorkerReg` as stored. The `epoch` is the unix seconds its worker
+wrote at its last put, by that worker's clock: informational, never a
+liveness verdict (`dnv-worker.md` VW4). A key the registry's key format
+refuses — a role outside the three, an empty seed, a field too many or too
+few — is skipped: no dnv component writes one, and the vote layer, which
+parses the registry's keys the same way, skips it too. A value that does
+not decode as `WorkerReg` is listed with an empty one, whose epoch is zero:
+the vote layer counts every key its scan finds, whatever the value holds
+(`dnv-worker.md` VW3), so such a key keeps its worker in every observer's
+view and the listing shows it. Not paged: the registry holds one key per
+worker process and role.
+The listing is not any worker's effective membership and says nothing of
+which worker owns which shard. Membership is each worker's own view, into
+which a change is committed only after it has held for a grace window
+(Membership and shard ownership; `dnv-worker.md` VW5, VW6), so the listing
+can differ from it either way: a worker that has just registered is listed
+before any peer counts it a member, and a worker that died stays listed,
+with the last epoch it wrote, until a peer commits it dead and deletes its
+key (`dnv-worker.md` VW6). A worker that shuts down or fences deletes its own
+keys, best effort (`dnv-worker.md` CM5, VW8), and a fenced worker comes
+back under a new seed, so one process can be listed under two seeds until
+its old key is gone. A live worker's epoch moves at every vote interval and
+a dead one's stops, so comparing the epochs hints at a dead worker's key;
+it decides nothing, since each epoch is its writer's clock.
 
 ### Disk nodes
 
@@ -5009,8 +5051,10 @@ role it carries, keeps its registration (`WorkerReg`, Key table) refreshed
 every vote interval and watches the registry of that role; an observer
 judges a registration live or dead by its own clock since the put it last
 saw, never by the stored epoch, and commits a change into its **effective
-membership** only once the change has held for the grace time, so a
-flapping worker never becomes effective and never blocks others
+membership** only once the change has held for its grace time — a join's,
+or a leave's, by default the shorter, so that a dead worker's shards are
+driven again sooner — so a flapping worker never becomes effective and never blocks
+others
 (`dnv-worker.md` VW3, VW5). Per role and shard the effective member with
 the largest ticket — a hash of its seed, the role and the shard code —
 owns the shard: deterministic on every worker, no coordinator, and a
@@ -6514,7 +6558,8 @@ take new ids. Then, in this order:
 1. Restore etcd and start it as every etcd serving dnv is deployed
    (Components: invocation reference), then start the gateways.
 2. Run the id step, `AdvanceClusterIds` (Clusters), for every cluster
-   before any other call but `ListClusters`, which names the clusters. It
+   before any other call but `ListClusters`, which names the clusters, and
+   `ListWorkers`, which reads no cluster. It
    moves every id counter far forward, so no id handed out after the backup
    is handed out again, unless a counter handed out more since the backup
    than the step moves it by, which a pool's thin ids can (Clusters; Known
@@ -7234,7 +7279,8 @@ document and the component documents cite it by its id.
   table) every vote interval; observers judge liveness by their own
   monotonic clock since the last put they saw, a registration not refreshed
   for the dead threshold being dead; every observed transition must hold
-  for the grace time before it changes the observer's effective membership;
+  for its grace time, a leave's by default shorter than a join's, before it
+  changes the observer's effective membership;
   ownership is the largest sha256 ticket of seed, role and shard among
   effective members; and a worker whose own heartbeat stops reaching etcd
   or stops being echoed by the watch of one of its roles, or whose key a

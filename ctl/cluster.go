@@ -8,10 +8,11 @@
 // root.go's clusterNameOf implements that fallback; the flag itself is
 // declared here because only this group has it.
 //
-// `cluster list` is the single exception in the whole CLI: ListClustersRequest
-// is the only Gateway request with no cluster_name field at all, so the global
-// --cluster is simply ignored there (dnvctl.md, `cluster` — `ctl/cluster.go`)
-// and --name is not declared on it.
+// `cluster list` is the one leaf of this group whose request,
+// ListClustersRequest, has no cluster_name field at all (the other in the
+// whole CLI is `worker list`, ctl/worker.go), so the global --cluster is
+// simply ignored there (dnvctl.md, `cluster` — `ctl/cluster.go`) and --name is
+// not declared on it.
 //
 // One conf flag (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
 // declares --extent-size, which fills dn_bin_conf.extent_size and nothing
@@ -166,7 +167,7 @@ func clusterGetCmd() *cobra.Command {
 	return cmd
 }
 
-// clusterListCmd drives ListClusters, the one request with no cluster_name: it
+// clusterListCmd drives ListClusters, a request with no cluster_name: it
 // takes the page flags and nothing else, and declares no --name at all so that
 // `cluster list --name x` is a usage error rather than a silently dropped
 // value.

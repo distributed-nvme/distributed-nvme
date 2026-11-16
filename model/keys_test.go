@@ -223,6 +223,7 @@ func TestPrefixesEndInOneSpace(t *testing.T) {
 			WorkerRegPrefix(common.WorkerRoleDn),
 			"dnv worker dn ",
 		},
+		{"WorkerRegistryPrefix", WorkerRegistryPrefix(), "dnv worker "},
 	}
 	for _, tc := range cases {
 		if tc.got != tc.want {
@@ -289,6 +290,21 @@ func TestPrefixIsPrefixOfKey(t *testing.T) {
 			"worker",
 			WorkerRegPrefix(common.WorkerRoleCn),
 			WorkerRegKey(common.WorkerRoleCn, "seed0"),
+		},
+		{
+			"worker registry, dn",
+			WorkerRegistryPrefix(),
+			WorkerRegKey(common.WorkerRoleDn, "seed0"),
+		},
+		{
+			"worker registry, cn",
+			WorkerRegistryPrefix(),
+			WorkerRegKey(common.WorkerRoleCn, "seed0"),
+		},
+		{
+			"worker registry, sp",
+			WorkerRegistryPrefix(),
+			WorkerRegKey(common.WorkerRoleSp, "seed0"),
 		},
 		{
 			"cluster_conf",

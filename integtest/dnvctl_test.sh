@@ -23,7 +23,7 @@
 # needed on the VM — both binaries are built here and scp'd.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 68 commands marshals its argv into exactly the intended request
+# of the 69 commands marshals its argv into exactly the intended request
 # proto, asserted FIELD FOR FIELD against the fake's state.json — a
 # whole-object comparison, so an unexpected key fails as loudly as a wrong
 # value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
@@ -49,7 +49,7 @@
 #
 # Round trips: ctl_exec does ONE ssh per dnvctl invocation and brings back five
 # things — state.json before, the exit code, stderr, stdout, state.json after.
-# That is what keeps a 68-step sweep to 68 ssh calls, and it is why every
+# That is what keeps a 69-step sweep to 69 ssh calls, and it is why every
 # ctl_ok/ctl_fail/ctl_usage MUST run in the PARENT shell: the five results land
 # in globals, and a subshell would drop them (and would swallow a die).
 #
@@ -907,8 +907,8 @@ EOF
 	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
 	# TestClusterCreateExtentSize says the same, and also carries the "no
 	# --extent-size sends no dn_bin_conf" half).
-	# The step keeps its number because the audit below pins 68 steps over
-	# 68 distinct RPCs.
+	# The step keeps its number because the audit below pins 69 steps over
+	# 69 distinct RPCs.
 	sweep_step 01 CreateCluster \
 		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
 		cluster create --name c1 --extent-size 67108864
@@ -1285,13 +1285,21 @@ EOF
 		  \"operator_in_charge\":true}" \
 		group set-operator-in-charge --grp 1 --operator-in-charge --rev 7
 
+	# --- `worker` — `ctl/worker.go` ------------------------------------
+	# The registry read has no request field at all: the global --cluster
+	# and --sp of the prefix reach nothing, so the recorded request is the
+	# empty object.
+	sweep_step 69 ListWorkers \
+		'{}' \
+		worker list
+
 	# -------------------------------------------------------------------
-	stage audit "all 68 steps left one request record under their trace id"
+	stage audit "all 69 steps left one request record under their trace id"
 	# -------------------------------------------------------------------
 	# CT1's completeness claim, made on the WIRE rather than from a table:
-	# 68 distinct RPCs, 68 distinct trace ids, one interceptor record each.
-	# One log read serves all 68 assertions.
-	assert_eq "${#SWEEP_TRACES[@]}" "68" "the sweep ran 68 steps"
+	# 69 distinct RPCs, 69 distinct trace ids, one interceptor record each.
+	# One log read serves all 69 assertions.
+	assert_eq "${#SWEEP_TRACES[@]}" "69" "the sweep ran 69 steps"
 	local records idx want
 	records=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request") | .trace_id + " " + .method')
@@ -1302,7 +1310,7 @@ EOF
 	done
 	local distinct
 	distinct=$(printf '%s\n' "${SWEEP_RPCS[@]}" | sort -u | grep -c . || true)
-	assert_eq "$distinct" "68" "the 68 steps drove 68 DISTINCT RPCs"
+	assert_eq "$distinct" "69" "the 69 steps drove 69 DISTINCT RPCs"
 }
 
 # ---------------------------------------------------------------------------

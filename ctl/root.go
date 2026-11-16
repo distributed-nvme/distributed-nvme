@@ -4,7 +4,7 @@
 //
 //	dnvctl <group> <verb> [flags]
 //
-// This file owns everything the fourteen group files share: the cobra root and
+// This file owns everything the fifteen group files share: the cobra root and
 // its persistent flags, the viper binding (CT9), the dial block (CT2), the
 // per-invocation trace id (CT2), the result-emit pipeline (CT4), the error
 // rendering and the exit codes (CT5).
@@ -192,6 +192,7 @@ func NewRootCmd() *cobra.Command {
 	registerRepair(root)
 	registerRetiredLeg(root)
 	registerGroup(root)
+	registerWorker(root)
 	return root
 }
 
@@ -497,7 +498,7 @@ func timeoutOf() (time.Duration, error) {
 // line and nothing else — never through viper, which is what keeps
 // DNVCTL_<LEAF> and a config-file key of the same name out of every request
 // (CT9). It is package state for the reason viper is (one invocation per
-// process), and it saves the fourteen group files' build closures a
+// process), and it saves the fifteen group files' build closures a
 // parameter.
 var invoked *pflag.FlagSet
 

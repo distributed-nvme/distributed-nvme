@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 68 invocations
+// argv for argv. The integration suite asserts the same 69 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -102,7 +102,8 @@ var sweepRows = []sweepRow{
 		&pb.GetClusterRequest{ClusterName: itCluster}},
 	{4, "ListClusters",
 		[]string{"cluster", "list", "--count", "2", "--page-token", "pt0"},
-		// The one request with no cluster_name field at all.
+		// One of the two requests with no cluster_name field at all, with
+		// `worker list`'s.
 		&pb.ListClustersRequest{Count: 2, PageToken: "pt0"}},
 	{5, "AdvanceClusterIds",
 		[]string{"cluster", "advance-ids", "--name", "c1"},
@@ -649,9 +650,16 @@ var sweepRows = []sweepRow{
 			GrpId:            1,
 			OperatorInCharge: true,
 		}},
+
+	// ---- worker ----
+	{69, "ListWorkers",
+		[]string{"worker", "list"},
+		// No field at all: the registry belongs to no cluster, so the global
+		// --cluster and --sp of the prefix reach nothing.
+		&pb.ListWorkersRequest{}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 68 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 69 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -662,12 +670,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 68 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 69 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 67 that remain.
+// be green over the 68 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 68 {
-		t.Errorf("sweepRows has %d rows, want 68", len(sweepRows))
+	if len(sweepRows) != 69 {
+		t.Errorf("sweepRows has %d rows, want 69", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -693,7 +701,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 67 of the 68, sp_name in 48. It reads the field off
+// fill: cluster_name in 67 of the 69, sp_name in 48. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -909,8 +917,8 @@ func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
 			}
 		})
 	}
-	if tokenless != 30 {
-		t.Errorf("%d requests carry no revision token, want 30", tokenless)
+	if tokenless != 31 {
+		t.Errorf("%d requests carry no revision token, want 31", tokenless)
 	}
 }
 
@@ -1454,7 +1462,7 @@ func TestClusterCreateMdCheckDays(t *testing.T) {
 
 // TestClusterNameFallback is the first field→flag exception of dnvctl.md,
 // Conventions, in all three states: --name wins, an empty --name falls back
-// to the global --cluster, and `cluster list` — the one request with no
+// to the global --cluster, and `cluster list` — a request with no
 // cluster_name — declares no --name at all, so naming one is a usage error
 // rather than a silently dropped value.
 func TestClusterNameFallback(t *testing.T) {
@@ -1496,13 +1504,16 @@ func TestClusterNameFallback(t *testing.T) {
 // TestGlobalsAreIgnoredWhereTheFieldIsAbsent is the other half of dnvctl.md,
 // Global flags, env, config: a --cluster or --sp left empty is sent empty,
 // and a command whose request lacks the field simply ignores it (CT8). The
-// proof that `cluster list`, `sp list` and `sp find-names` ignore --sp is
-// structural — their requests have no sp_name field — so what is asserted
-// here is that naming the global flags does not turn into some OTHER field
-// of those requests.
+// proof that `cluster list`, `worker list`, `sp list` and `sp find-names`
+// ignore --sp is structural — their requests have no sp_name field — so what
+// is asserted here is that naming the global flags does not turn into some
+// OTHER field of those requests.
 func TestGlobalsAreIgnoredWhereTheFieldIsAbsent(t *testing.T) {
 	list := runArgv(t, "ListClusters", "cluster", "list").(*pb.ListClustersRequest)
 	wantRequest(t, list, &pb.ListClustersRequest{})
+
+	workers := runArgv(t, "ListWorkers", "worker", "list").(*pb.ListWorkersRequest)
+	wantRequest(t, workers, &pb.ListWorkersRequest{})
 
 	spList := runArgv(t, "ListStoragePools", "sp", "list").(*pb.ListStoragePoolsRequest)
 	wantRequest(t, spList, &pb.ListStoragePoolsRequest{

@@ -250,9 +250,9 @@ func (s *Server) GetCluster(
 	return reply, nil
 }
 
-// ListClusters is the ListClusters of architecture.md, Clusters: the one list
-// — indeed the one RPC other than CreateCluster — that resolves no cluster at
-// all (GW5).
+// ListClusters is the ListClusters of architecture.md, Clusters: a list that
+// resolves no cluster at all (GW5), as CreateCluster does not either, and
+// ListWorkers, which reads the worker registry and no cluster's records.
 //
 // It needs none: ClusterConf is the only name-keyed message, so its prefix can
 // be ranged without a cluster_id, and the names it returns are the key

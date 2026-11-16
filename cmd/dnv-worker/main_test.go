@@ -37,6 +37,7 @@ var cm1Flags = []string{
 	"roles",
 	"vote-grace-time",
 	"vote-interval",
+	"vote-leave-grace-time",
 }
 
 // parse binds one invocation's flags into a fresh viper, as the dnv-agent
@@ -154,6 +155,11 @@ func TestDefaults(t *testing.T) {
 	if want := common.DefaultVoteWorkerGraceTime * time.Second; opts.graceTime !=
 		want {
 		t.Errorf("vote-grace-time default = %v, want %v", opts.graceTime, want)
+	}
+	if want := common.DefaultVoteWorkerLeaveGraceTime * time.Second; opts.
+		leaveGraceTime != want {
+		t.Errorf("vote-leave-grace-time default = %v, want %v",
+			opts.leaveGraceTime, want)
 	}
 	if want := common.DefaultEtcdDialTimeout * time.Second; opts.dialTimeout !=
 		want {
@@ -296,6 +302,24 @@ func TestValidationRejections(t *testing.T) {
 				"--etcd-endpoints", "127.0.0.1:2379", "--vote-grace-time", "0",
 			},
 			want: "--vote-grace-time must be at least 1 second",
+		},
+		{
+			// 10 s of vote interval plus 10 s of etcd operation timeout:
+			// a leave grace of 20 s would move shards on one late refresh.
+			name: "a leave grace at the late refresh's floor",
+			args: []string{
+				"--etcd-endpoints", "127.0.0.1:2379",
+				"--vote-leave-grace-time", "20",
+			},
+			want: "--vote-leave-grace-time must exceed the vote interval " +
+				"plus the etcd operation timeout, 20 seconds, got 20",
+		},
+		{
+			name: "a leave grace below a longer vote interval's floor",
+			args: []string{
+				"--etcd-endpoints", "127.0.0.1:2379", "--vote-interval", "30",
+			},
+			want: "--vote-leave-grace-time must exceed",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

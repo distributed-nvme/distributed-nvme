@@ -1,8 +1,9 @@
 // cmd_node.go holds the subcommands of the three node-shaped scopes of the
 // driver's subcommand table — the cluster, the disk node and the controller
-// node (architecture.md, Clusters, Disk nodes and Controller nodes) — plus the
-// `ping` liveness probe the suite polls each gateway with (gateway.md,
-// Integration test plan, What a pass means).
+// node (architecture.md, Clusters, Disk nodes and Controller nodes) — with
+// the read of the worker registry beside the cluster's, plus the `ping`
+// liveness probe the suite polls each gateway with (gateway.md, Integration
+// test plan, What a pass means).
 //
 // The DN and CN halves are exact mirrors: the two proto message families
 // differ only in the name and in which revision token they carry (DnRev vs
@@ -141,9 +142,9 @@ func setupGetClusterCapacity(fs *flag.FlagSet) job {
 }
 
 // setupListClusters drives ListClusters. The request is cluster-independent —
-// it is the one RPC of this file with no cluster_name field — so it takes only
-// the page flags; --page-token also carries the deliberately malformed '!!'
-// of case S stage 2.
+// with ListWorkers' it is one of the two RPCs of this file with no
+// cluster_name field — so it takes only the page flags; --page-token also
+// carries the deliberately malformed '!!' of case S stage 2.
 func setupListClusters(fs *flag.FlagSet) job {
 	count := fs.Uint("count", 0, "max entries per page (0 = server default)")
 	pageToken := fs.String("page-token", "",
@@ -169,6 +170,18 @@ func setupAdvanceClusterIds(fs *flag.FlagSet) job {
 		return client.AdvanceClusterIds(ctx, &pb.AdvanceClusterIdsRequest{
 			ClusterName: clusterNameOf(g, *name),
 		})
+	}
+}
+
+// setupListWorkers drives ListWorkers, the read of the worker registry
+// (gateway.md, Worker registry). The registry belongs to no cluster, so the
+// request has no field and the subcommand no flag; the global --cluster is
+// ignored.
+func setupListWorkers(fs *flag.FlagSet) job {
+	return func(
+		ctx context.Context, client pb.GatewayClient, g *globals,
+	) (any, error) {
+		return client.ListWorkers(ctx, &pb.ListWorkersRequest{})
 	}
 }
 

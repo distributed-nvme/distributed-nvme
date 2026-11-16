@@ -635,8 +635,14 @@ const (
 	// registration not refreshed for 2 × this is dead (VW3).
 	DefaultVoteWorkerInterval = 10
 	// Seconds an observed membership transition must hold before it is
-	// committed into the effective membership (VW5).
-	DefaultVoteWorkerGraceTime = 60
+	// committed into the effective membership (VW5): a join's, and a
+	// leave's, the shorter, so that a dead worker's pools move to another
+	// worker sooner, at the defaults. A leave grace must exceed the vote
+	// interval plus DefaultEtcdOpTimeout, so that a worker cut off from
+	// etcd fences itself before its peers commit it dead (VW8;
+	// dnv-worker.md CM3).
+	DefaultVoteWorkerGraceTime      = 60
+	DefaultVoteWorkerLeaveGraceTime = 25
 	// RetiredLegMaxAge is the age, in seconds from its retired_epoch, at
 	// which the sp worker's retire timer may delete a retired leg: seven
 	// days. The kept copy is stale by then, and the timer deletes one only

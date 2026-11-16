@@ -462,6 +462,8 @@ var commands = []command{
 	{"get-cluster-capacity", setupGetClusterCapacity},
 	{"list-clusters", setupListClusters},
 	{"advance-cluster-ids", setupAdvanceClusterIds},
+	// worker
+	{"list-workers", setupListWorkers},
 	// dn
 	{"create-dn", setupCreateDn},
 	{"delete-dn", setupDeleteDn},

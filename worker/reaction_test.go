@@ -2198,9 +2198,9 @@ func TestReactionRoleNotHandedBackOverTheSameError(t *testing.T) {
 	})
 }
 
-// loadHookOps runs a hook inside the next loadSp, ahead of the load itself: a
-// write a child makes while a pass is between reading the children's write
-// counts and loading the SP.
+// loadHookOps runs a hook inside the next loadSp or loadPassSp, ahead of the
+// load itself: a write a child makes while a pass is between reading the
+// children's write counts and loading the SP.
 type loadHookOps struct {
 	*fakeSpOps
 	hook func()
@@ -2216,6 +2216,18 @@ func (o *loadHookOps) loadSp(
 		hook()
 	}
 	return o.fakeSpOps.loadSp(ctx, cid, spName)
+}
+
+func (o *loadHookOps) loadPassSp(
+	ctx context.Context,
+	cid uint64,
+	spName string,
+) (*model.SpState, error) {
+	if hook := o.hook; hook != nil {
+		o.hook = nil
+		hook()
+	}
+	return o.fakeSpOps.loadPassSp(ctx, cid, spName)
 }
 
 // TestReactionPassReseedsHealthEveryLoad pins the pass's half of HL3's
@@ -2828,8 +2840,8 @@ func TestReactionReplaceCntlrBlackList(t *testing.T) {
 
 // TestReactionReplaceCntlrExcludesCntlrLocations pins AR7's tier-1 exclusion
 // (architecture.md, Per-operation allocation): the cn scan carries the
-// locations of the SP's OTHER cntlrs' CNs, read from the pass's own snapshot of
-// the node records (MD3) rather than from a second etcd round-trip, so the
+// locations of the SP's OTHER cntlrs' CNs, read from the node records the
+// pass reads at the revision of its load (MD3, passNodes), so the
 // replacement lands outside the failure domains the surviving cntlrs occupy
 // whenever tier 1 finds a CN. The old cntlr adds no location of its own — it is
 // the one leaving — so its domain is excluded only through a survivor that

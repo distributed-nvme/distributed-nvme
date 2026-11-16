@@ -268,6 +268,48 @@ func TestLoadSpHappyPath(t *testing.T) {
 	}
 }
 
+// TestLoadSpWithoutNodesThenTheNodes pins MD3's load of a reaction pass: the
+// load without the node records leaves both maps empty and reports no node
+// key missing, though a DnConf is gone, and LoadNodesAt then reads the node
+// records at the load's revision, a CnConf written after the load read as it
+// was and the missing DnConf reported then.
+func TestLoadSpWithoutNodesThenTheNodes(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	writeSp(t, cli, cid)
+	if err := cli.Delete(ctx, DnConfKey(cid, fixtureDnAddrC)); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	state, err := LoadSpWithoutNodes(ctx, cli, cid, fixtureSpName)
+	if err != nil {
+		t.Fatalf("LoadSpWithoutNodes: %v", err)
+	}
+	if len(state.DnByAddr) != 0 || len(state.CnByAddr) != 0 ||
+		len(state.Missing) != 0 {
+		t.Fatalf("node records %v %v, missing %v; want none",
+			state.DnByAddr, state.CnByAddr, state.Missing)
+	}
+	if len(state.Cntlrs) != 2 || len(state.Slices) != 1 {
+		t.Fatalf("Cntlrs %v Slices %v, want the pool as LoadSp reads it",
+			state.Cntlrs, state.Slices)
+	}
+	mustPut(t, cli, CnConfKey(cid, fixtureCnAddrB), &pb.CnConf{
+		CnId: 2, Location: "moved", FreeExtCnt: 50,
+	})
+	if err := LoadNodesAt(ctx, cli, cid, state); err != nil {
+		t.Fatalf("LoadNodesAt: %v", err)
+	}
+	if got := state.CnByAddr[fixtureCnAddrB].GetLocation(); got != "rack1" {
+		t.Errorf("CnConf location %q, want the load revision's rack1", got)
+	}
+	if len(state.DnByAddr) != 3 ||
+		!equalStrings(state.Missing, []string{DnConfKey(cid, fixtureDnAddrC)}) {
+		t.Errorf("DnByAddr %v, missing %v; want three and dn-c missing",
+			state.DnByAddr, state.Missing)
+	}
+}
+
 // TestLoadSpNotFound checks the MD3 sentinel: a deleted SP is not an error the
 // worker retries, it is "nothing left to drive".
 func TestLoadSpNotFound(t *testing.T) {

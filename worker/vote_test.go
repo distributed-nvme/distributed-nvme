@@ -702,6 +702,96 @@ func testVoteAppearCommitDisappearGC(t *testing.T) {
 	}
 }
 
+// TestVoteLeaveWaitsTheLeaveGrace checks VW5's two graces: a join commits
+// after --vote-grace-time and not after the shorter leave grace, and a leave
+// commits after --vote-leave-grace-time and not after the join's grace.
+func TestVoteLeaveWaitsTheLeaveGrace(t *testing.T) {
+	synctest.Test(t, testVoteLeaveWaitsTheLeaveGrace)
+}
+
+func testVoteLeaveWaitsTheLeaveGrace(t *testing.T) {
+	cfg := testConfig(common.WorkerRoleDn)
+	cfg.LeaveGraceTime = 25 * time.Second
+	h := newVoteHarnessCfg(t, cfg, newVoteHookStore())
+	peer := seedOf(7)
+
+	// The join, observed at 0 s, waits the 60 s grace: nothing at 35 s.
+	h.beat(common.WorkerRoleDn, peer)
+	h.keepAlive(common.WorkerRoleDn, peer, cfg.LeaveGraceTime+cfg.VoteInterval)
+	if got := h.committed(common.WorkerRoleDn, peer); len(got) != 0 {
+		t.Fatalf("a join committed %v after the leave grace", got)
+	}
+	h.keepAlive(common.WorkerRoleDn, peer,
+		cfg.GraceTime-cfg.LeaveGraceTime-cfg.VoteInterval)
+	if recs := h.committed(common.WorkerRoleDn, peer); len(recs) != 1 ||
+		recs[0]["state"] != stateMember {
+		t.Fatalf("peer commits = %v, want the member commit at 60 s", recs)
+	}
+
+	// The last put was at 55 s: the peer is dead at 75 s, and its leave
+	// commits 25 s later, at 100 s, not at 135 s.
+	h.advance(2 * cfg.VoteInterval)
+	if states := h.observedStates(common.WorkerRoleDn, peer); states[len(
+		states)-1] != stateDead {
+		t.Fatalf("peer observed %v, want a trailing dead", states)
+	}
+	h.advance(cfg.LeaveGraceTime - cfg.VoteInterval)
+	if got := len(h.committed(common.WorkerRoleDn, peer)); got != 1 {
+		t.Fatalf("the leave committed 20 s after the peer died")
+	}
+	h.advance(cfg.VoteInterval)
+	if recs := h.committed(common.WorkerRoleDn, peer); len(recs) != 2 ||
+		recs[1]["state"] != stateNonmember {
+		t.Fatalf("peer commits = %v, want the nonmember commit 25 s after "+
+			"the peer died", recs)
+	}
+}
+
+// TestVoteWarnsARoleUnderTwoWorkers checks the Warn record of VW9: nothing
+// during the worker's first grace window, one record once it serves the role
+// alone, none while a peer is a member too, and one more once the peer's
+// leave leaves it alone again.
+func TestVoteWarnsARoleUnderTwoWorkers(t *testing.T) {
+	synctest.Test(t, testVoteWarnsARoleUnderTwoWorkers)
+}
+
+func testVoteWarnsARoleUnderTwoWorkers(t *testing.T) {
+	cfg := testConfig(common.WorkerRoleDn)
+	cfg.LeaveGraceTime = 25 * time.Second
+	h := newVoteHarnessCfg(t, cfg, newVoteHookStore())
+	peer := seedOf(7)
+	warns := func() []map[string]any {
+		return h.logs.withMsg(msgRoleUnderTwoWorkers)
+	}
+
+	h.advance(cfg.GraceTime - cfg.VoteInterval)
+	if got := warns(); len(got) != 0 {
+		t.Fatalf("records %v during the first grace window", got)
+	}
+	h.advance(2 * cfg.VoteInterval)
+	if got := warns(); len(got) != 1 || got[0]["role"] != common.WorkerRoleDn ||
+		got[0]["member_cnt"] != float64(1) || got[0]["level"] != "WARN" {
+		t.Fatalf("records %v, want one Warn for the lone dn worker", got)
+	}
+
+	h.beat(common.WorkerRoleDn, peer)
+	h.keepAlive(common.WorkerRoleDn, peer, cfg.GraceTime+2*cfg.VoteInterval)
+	if recs := h.committed(common.WorkerRoleDn, peer); len(recs) != 1 {
+		t.Fatalf("peer commits = %v, want the member commit", recs)
+	}
+	if got := len(warns()); got != 1 {
+		t.Fatalf("%d records while a peer is a member, want the first one", got)
+	}
+
+	h.advance(2*cfg.VoteInterval + cfg.LeaveGraceTime + cfg.VoteInterval)
+	if recs := h.committed(common.WorkerRoleDn, peer); len(recs) != 2 {
+		t.Fatalf("peer commits = %v, want the nonmember commit too", recs)
+	}
+	if got := warns(); len(got) != 2 || got[1]["member_cnt"] != float64(1) {
+		t.Fatalf("records %v, want a second one after the peer's leave", got)
+	}
+}
+
 // TestVoteFlappingNeverCommits checks VW5: a registration that flaps faster
 // than the grace time never changes anybody's effective membership.
 func TestVoteFlappingNeverCommits(t *testing.T) {
@@ -1513,10 +1603,11 @@ func testVoteFenceKeyDeleted(t *testing.T) {
 // longer than the dead threshold is "legal but pointless".
 func staleOwnKeyConfig() Config {
 	return Config{
-		Roles:        []string{common.WorkerRoleDn},
-		VoteInterval: 10 * time.Second,
-		GraceTime:    time.Second,
-		Endpoints:    []string{"127.0.0.1:2379"},
+		Roles:          []string{common.WorkerRoleDn},
+		VoteInterval:   10 * time.Second,
+		GraceTime:      time.Second,
+		LeaveGraceTime: time.Second,
+		Endpoints:      []string{"127.0.0.1:2379"},
 	}
 }
 
@@ -1629,6 +1720,7 @@ func TestVoteOwnKeyCommitNamesTheHeartbeatStall(t *testing.T) {
 func testVoteOwnKeyCommitNamesTheHeartbeatStall(t *testing.T) {
 	cfg := staleOwnKeyConfig()
 	cfg.GraceTime = 4 * time.Second
+	cfg.LeaveGraceTime = 4 * time.Second
 	h := newVoteHarnessCfg(t, cfg, newVoteHookStore())
 	own := h.vote.currentSeed()
 	interval := h.deps.cfg.VoteInterval
@@ -1717,6 +1809,7 @@ func testVoteOwnKeyCommitJudgesItsOwnRole(t *testing.T) {
 	cfg := staleOwnKeyConfig()
 	cfg.Roles = []string{common.WorkerRoleDn, common.WorkerRoleCn}
 	cfg.GraceTime = 5 * time.Second
+	cfg.LeaveGraceTime = 5 * time.Second
 	store := newVoteHookStore()
 	h := newVoteHarnessCfg(t, cfg, store)
 	own := h.vote.currentSeed()

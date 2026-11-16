@@ -134,6 +134,17 @@ type spOps interface {
 		cid uint64,
 		spName string,
 	) (*model.SpState, error)
+	// loadPassSp is MD3's load without the node records, the load of a
+	// reaction pass (AR1): a step that needs a node record reads them with
+	// loadNodes (passNodes).
+	loadPassSp(
+		ctx context.Context,
+		cid uint64,
+		spName string,
+	) (*model.SpState, error)
+	// loadNodes reads the node records of a state loadPassSp returned into
+	// it, at the revision of that load (MD3).
+	loadNodes(ctx context.Context, cid uint64, state *model.SpState) error
 	// flipProvisioned is RW18/MD6; it returns the sides it actually wrote,
 	// which is what the "flip applied" record (dnv-worker.md, Log records)
 	// names (one per side), and the revision its STM committed, which each
@@ -212,6 +223,22 @@ func (o *modelSpOps) loadSp(
 	spName string,
 ) (*model.SpState, error) {
 	return model.LoadSp(ctx, o.cli, cid, spName)
+}
+
+func (o *modelSpOps) loadPassSp(
+	ctx context.Context,
+	cid uint64,
+	spName string,
+) (*model.SpState, error) {
+	return model.LoadSpWithoutNodes(ctx, o.cli, cid, spName)
+}
+
+func (o *modelSpOps) loadNodes(
+	ctx context.Context,
+	cid uint64,
+	state *model.SpState,
+) error {
+	return model.LoadNodesAt(ctx, o.cli, cid, state)
 }
 
 func (o *modelSpOps) flipProvisioned(
@@ -760,8 +787,25 @@ func (w *spWorker) run() {
 	}()
 	w.fanOut()
 	period := w.tickPeriod()
-	ticker := w.deps.clk.newTicker(period)
-	defer func() { ticker.stop() }()
+	// AR1: the first pass comes deps.passOffset after the start, a random
+	// part of one interval, and the ticker starts with it.
+	var (
+		first  *timerHandle
+		ticker *tickerHandle
+	)
+	if w.deps.passOffset != nil {
+		first = w.deps.clk.newTimer(w.deps.passOffset(period))
+	} else {
+		ticker = w.deps.clk.newTicker(period)
+	}
+	defer func() {
+		if first != nil {
+			first.stop()
+		}
+		if ticker != nil {
+			ticker.stop()
+		}
+	}()
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -788,7 +832,12 @@ func (w *spWorker) run() {
 			// for the SP, CLD7 for a clone). No reaction runs and no health
 			// memo is re-seeded: both keep the cntlr_interval pass.
 			w.drainTick(newTraceCtx(w.ctx, w.seed))
-		case <-ticker.C:
+		case <-timerChan(first):
+			first = nil
+			period = w.tickPeriod()
+			ticker = w.deps.clk.newTicker(period)
+			w.tick()
+		case <-tickerChan(ticker):
 			w.tick()
 			if next := w.tickPeriod(); next != period {
 				// RW9: the interval is re-read from the cache, so a
@@ -799,6 +848,22 @@ func (w *spWorker) run() {
 			}
 		}
 	}
+}
+
+// timerChan is t's channel, or nil, which never fires, for no timer.
+func timerChan(t *timerHandle) <-chan time.Time {
+	if t == nil {
+		return nil
+	}
+	return t.C
+}
+
+// tickerChan is t's channel, or nil, which never fires, for no ticker.
+func tickerChan(t *tickerHandle) <-chan time.Time {
+	if t == nil {
+		return nil
+	}
+	return t.C
 }
 
 // tick is the coordinator's own cadence (RW14, RW20/AR1): re-resolve the
@@ -843,7 +908,7 @@ func (w *spWorker) attrs() []any {
 func (w *spWorker) fanOut() {
 	ctx := newTraceCtx(w.ctx, w.seed)
 	w.fanWanted = false
-	state, err := w.loadOwnSp(ctx)
+	state, err := w.loadOwnSp(ctx, false)
 	if err != nil {
 		if errors.Is(err, model.ErrNotFound) {
 			// RW14: the SP is being deleted. The children keep driving what
@@ -967,9 +1032,17 @@ func (w *spWorker) fanOut() {
 // is gone (RW14). Sent on, the new pool's state would go to the agents
 // under the old pool's revision, which can be the higher, and an agent
 // that accepts it refuses the new pool's own requests as older (dnagent.md
-// SH8). The fan-out and the reaction pass load through it alike.
-func (w *spWorker) loadOwnSp(ctx context.Context) (*model.SpState, error) {
-	state, err := w.ops.loadSp(ctx, w.cid, w.desired.handle)
+// SH8). The fan-out and the reaction pass load through it alike, the pass
+// (pass true) without the node records (AR1).
+func (w *spWorker) loadOwnSp(
+	ctx context.Context,
+	pass bool,
+) (*model.SpState, error) {
+	load := w.ops.loadSp
+	if pass {
+		load = w.ops.loadPassSp
+	}
+	state, err := load(ctx, w.cid, w.desired.handle)
 	if err != nil {
 		return nil, err
 	}

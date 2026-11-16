@@ -100,6 +100,9 @@ ALL_PORTS=(12379 12380 29600 29601 29602 29603 29700 29701 29702)
 # Test-time constants (dnv-worker.md, Integration test plan, Topology).
 VOTE_INTERVAL=2
 VOTE_GRACE=6
+# The leave grace must exceed the vote interval plus the etcd operation
+# timeout, 10 s (dnv-worker.md CM3).
+VOTE_LEAVE_GRACE=13
 HEALTH_INTERVAL=1     # every health_check_conf.*_interval
 THRESHOLDS=2,4,3,6    # primary, cntlr, side, leg
 LWM=50                # low_water_mark_pct
@@ -112,7 +115,9 @@ CHUNK_BLOCKS=128      # bitmap_chunk_block_cnt
 # fraction is in BLOCK_SIZE blocks.
 THIN_META_BLOCK_SIZE=4096
 WAIT_SHORT=5
-WAIT_MEMBERSHIP=20
+# A killed worker's leave commits up to two vote intervals plus the leave
+# grace after the kill (VW3, VW5); the wait keeps eight seconds over that.
+WAIT_MEMBERSHIP=$((2 * VOTE_INTERVAL + VOTE_LEAVE_GRACE + 8))
 WAIT_SYNCUP=65
 # The hold case's cntlr_interval, the bound of RW14's sides-first hold
 # (spWorker.tickPeriod). It is long beside HEALTH_INTERVAL, which the case
@@ -774,7 +779,8 @@ start_worker() { # <w>
 	remote_start "$1" worker.log \
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--roles dn,cn,sp --vote-interval $VOTE_INTERVAL" \
-		"--vote-grace-time $VOTE_GRACE"
+		"--vote-grace-time $VOTE_GRACE" \
+		"--vote-leave-grace-time $VOTE_LEAVE_GRACE"
 	seen_worker "$1"
 }
 
@@ -5844,7 +5850,7 @@ case_vote() {
 		log "   proven deterministically by case F step 1)"
 	fi
 
-	stage 5 "SIGKILL: dead after 2x the interval, nonmember one grace later"
+	stage 5 "SIGKILL: dead after 2x the interval, nonmember one leave grace later"
 	local seed2 kill_at
 	seed2=$(seed_of w2)
 	kill_at=$(sig_dir_at w2 KILL)
@@ -5882,10 +5888,10 @@ case_vote() {
 		"w4's log ends with worker stopping"
 	wait_until "$WAIT_SHORT" "w4's registrations to disappear at once" \
 		worker_not_listed "$seed4_now"
-	# Both survivors commit it, each inside one grace window; w1's record is
+	# Both survivors commit it, each inside one leave grace; w1's record is
 	# then the one the latency comparison below reads.
 	for w in w1 w3; do
-		wait_until $((VOTE_GRACE + 2)) "$w: membership committed nonmember for w4" \
+		wait_until $((VOTE_LEAVE_GRACE + 2)) "$w: membership committed nonmember for w4" \
 			membership_committed_all_roles "$w" "$seed4_now" nonmember
 	done
 	local term_commit term_latency
@@ -5897,30 +5903,30 @@ case_vote() {
 	# The bounds are DERIVED here, from the rules this step tests (CM5, VW3).
 	#
 	# SIGTERM deletes the registrations at once (CM5), so a peer sees the
-	# disappear immediately and commits one grace window later:
-	#     term_latency ~ VOTE_GRACE, and always < VOTE_GRACE + 2.
+	# disappear immediately and commits one leave grace later (VW5):
+	#     term_latency ~ VOTE_LEAVE_GRACE, and always < VOTE_LEAVE_GRACE + 2.
 	# SIGKILL deletes nothing, so a peer must first watch the registration go
-	# stale at lastSeen + 2*VOTE_INTERVAL and only then run the grace window.
+	# stale at lastSeen + 2*VOTE_INTERVAL and only then run the leave grace.
 	# Measured from the SIGNAL, that is
-	#     2*VOTE_INTERVAL + VOTE_GRACE - (time since the victim's last put)
+	#     2*VOTE_INTERVAL + VOTE_LEAVE_GRACE - (time since the victim's last put)
 	# and the victim heartbeats every VOTE_INTERVAL, so the true window is
-	#     [VOTE_INTERVAL + VOTE_GRACE, 2*VOTE_INTERVAL + VOTE_GRACE]
-	# = [8, 10] s at this suite's timers. Where inside that window a run lands
-	# depends on where the kill fell in the victim's heartbeat cycle, so the
-	# floor asserted below is VOTE_INTERVAL + VOTE_GRACE and the ceiling
-	# carries the same 2 s of slack as SIGTERM's.
+	#     [VOTE_INTERVAL + VOTE_LEAVE_GRACE, 2*VOTE_INTERVAL + VOTE_LEAVE_GRACE]
+	# = [15, 17] s at this suite's timers. Where inside that window a run
+	# lands depends on where the kill fell in the victim's heartbeat cycle, so
+	# the floor asserted below is VOTE_INTERVAL + VOTE_LEAVE_GRACE and the
+	# ceiling carries the same 2 s of slack as SIGTERM's.
 	#
 	# What the step actually proves is the ORDERING — a graceful stop is
 	# committed measurably sooner because it skips the dead-detection window —
 	# so that is asserted explicitly alongside the derived bounds.
 	local kill_floor
-	kill_floor=$((VOTE_INTERVAL + VOTE_GRACE))
-	ts_lt "$term_latency" $((VOTE_GRACE + 2)) ||
-		die "SIGTERM commit latency ${term_latency}s, want < $((VOTE_GRACE + 2))s"
+	kill_floor=$((VOTE_INTERVAL + VOTE_LEAVE_GRACE))
+	ts_lt "$term_latency" $((VOTE_LEAVE_GRACE + 2)) ||
+		die "SIGTERM commit latency ${term_latency}s, want < $((VOTE_LEAVE_GRACE + 2))s"
 	ts_ge "$kill_latency" "$kill_floor" ||
-		die "SIGKILL commit latency ${kill_latency}s, want >= ${kill_floor}s (VOTE_INTERVAL + VOTE_GRACE)"
-	ts_lt "$kill_latency" $((2 * VOTE_INTERVAL + VOTE_GRACE + 2)) ||
-		die "SIGKILL commit latency ${kill_latency}s exceeds 2*VOTE_INTERVAL + VOTE_GRACE"
+		die "SIGKILL commit latency ${kill_latency}s, want >= ${kill_floor}s (VOTE_INTERVAL + VOTE_LEAVE_GRACE)"
+	ts_lt "$kill_latency" $((2 * VOTE_INTERVAL + VOTE_LEAVE_GRACE + 2)) ||
+		die "SIGKILL commit latency ${kill_latency}s exceeds 2*VOTE_INTERVAL + VOTE_LEAVE_GRACE"
 	ts_lt "$term_latency" "$kill_latency" ||
 		die "SIGTERM (${term_latency}s) was not committed sooner than SIGKILL (${kill_latency}s): the CM5 key delete bought nothing"
 	wait_until "$WAIT_MEMBERSHIP" "the two-member table over w1 w3" \

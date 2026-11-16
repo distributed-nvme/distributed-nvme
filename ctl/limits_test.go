@@ -130,7 +130,7 @@ var listRows = []listRow{
 	{"cluster list", "ListClusters", "cluster_name",
 		func(i int) string { return fmt.Sprintf("c%05d", i) },
 		func(count uint32, token string) proto.Message {
-			// The one request with no cluster_name.
+			// The one paged list request with no cluster_name.
 			return &pb.ListClustersRequest{Count: count, PageToken: token}
 		},
 		func(names []string, token string) proto.Message {

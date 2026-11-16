@@ -1686,6 +1686,18 @@ case_smoke() {
 		"get-cluster-capacity: no disk node yet"
 	assert_eq "$(jq_of "$out" '.addr_port_to_cn | length')" "0" \
 		"get-cluster-capacity: no controller node yet"
+	# The registry read (architecture.md, Worker registry), the one read
+	# beside the cluster's that names no cluster: the suite runs no worker
+	# and the case started from a wiped store, so every role shows, each with
+	# no registration, and the read writes nothing.
+	local regRev
+	regRev=$(store_rev)
+	out=$(gw list-workers)
+	assert_eq "$(store_rev)" "$regRev" "list-workers: store revision must not move"
+	assert_eq "$(jq_of "$out" '.role_to_workers | keys | @json')" \
+		'["cn","dn","sp"]' "list-workers shows every role"
+	assert_eq "$(jq_of "$out" '[.role_to_workers[].seed_to_reg | length] | add')" \
+		"0" "list-workers: no worker registered"
 	# The name is the key (architecture.md, Clusters), so a second create is
 	# ALREADY_EXISTS and must not stamp a second epoch over the first.
 	assert_no_write "duplicate create-cluster" \

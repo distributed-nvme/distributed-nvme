@@ -467,6 +467,42 @@ func LoadSp(
 	cid uint64,
 	spName string,
 ) (*SpState, error) {
+	return loadSp(ctx, cli, cid, spName, true)
+}
+
+// LoadSpWithoutNodes is LoadSp without the node records (MD3): the load of
+// the sp worker's reaction pass (dnv-worker.md AR1), whose steps read the
+// node records with LoadNodesAt only when one needs them. DnByAddr and
+// CnByAddr stay empty, and no node key lands in SpState.Missing.
+func LoadSpWithoutNodes(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spName string,
+) (*SpState, error) {
+	return loadSp(ctx, cli, cid, spName, false)
+}
+
+// LoadNodesAt reads the node records of state into it, at state.Rev, the
+// revision of the load that returned state (MD3): LoadSp's last read, run
+// later for a state LoadSpWithoutNodes returned.
+func LoadNodesAt(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	state *SpState,
+) error {
+	return loadNodesAt(ctx, cli, cid, state)
+}
+
+// loadSp is LoadSp, and with nodes false LoadSpWithoutNodes.
+func loadSp(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spName string,
+	nodes bool,
+) (*SpState, error) {
 	var state *SpState
 	rev, err := cli.SnapshotRev(ctx, func(s etcdutil.STM) error {
 		loaded, err := loadSpConf(s, cid, spName)
@@ -483,8 +519,10 @@ func LoadSp(
 	if err := loadRepairs(ctx, cli, cid, state); err != nil {
 		return nil, err
 	}
-	if err := loadNodesAt(ctx, cli, cid, state); err != nil {
-		return nil, err
+	if nodes {
+		if err := loadNodesAt(ctx, cli, cid, state); err != nil {
+			return nil, err
+		}
 	}
 	spId := state.Conf.GetSpId()
 	for _, cloneName := range state.Conf.GetCloneNameList() {

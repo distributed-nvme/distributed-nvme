@@ -83,8 +83,10 @@ func addFlags(cmd *cobra.Command) {
 		"seconds between two registry heartbeats; "+
 			"a registration unrefreshed for twice this long is dead")
 	flags.Int("vote-grace-time", common.DefaultVoteWorkerGraceTime,
-		"seconds an observed membership change must hold "+
-			"before it is committed")
+		"seconds an observed join must hold before it is committed")
+	flags.Int("vote-leave-grace-time", common.DefaultVoteWorkerLeaveGraceTime,
+		"seconds an observed leave must hold before it is committed; "+
+			"more than the vote interval plus the etcd operation timeout")
 	flags.Int("etcd-dial-timeout", common.DefaultEtcdDialTimeout,
 		"seconds to wait for the initial etcd dial (0 = the built-in default)")
 	flags.String("config", "", "optional viper config file")
@@ -118,9 +120,11 @@ type options struct {
 	// roles is the parsed --roles list: non-empty, duplicate-free, a subset
 	// of workerRoles, in the order given (CM3).
 	roles []string
-	// voteInterval and graceTime are the two vote timers (VW2, VW5).
-	voteInterval time.Duration
-	graceTime    time.Duration
+	// voteInterval, graceTime and leaveGraceTime are the vote timers (VW2,
+	// VW5): the heartbeat period, a join's grace and a leave's.
+	voteInterval   time.Duration
+	graceTime      time.Duration
+	leaveGraceTime time.Duration
 	// dialTimeout bounds the initial etcd dial (EU1, EU5). A non-positive
 	// value is passed through: etcdutil.New substitutes
 	// common.DefaultEtcdDialTimeout for it.
@@ -153,11 +157,23 @@ func optionsFromViper() (*options, error) {
 		return nil, fmt.Errorf(
 			"--vote-grace-time must be at least 1 second, got %d", graceTime)
 	}
+	// A worker cut off from etcd fences itself by one vote interval past the
+	// dead threshold plus one put's etcd budget; a leave grace no longer than
+	// the interval plus that budget would let its peers commit it dead
+	// before it fences (VW8; dnv-worker.md CM3).
+	leaveGraceTime := viper.GetInt("vote-leave-grace-time")
+	if floor := voteInterval + common.DefaultEtcdOpTimeout; leaveGraceTime <= floor {
+		return nil, fmt.Errorf(
+			"--vote-leave-grace-time must exceed the vote interval plus the "+
+				"etcd operation timeout, %d seconds, got %d", floor,
+			leaveGraceTime)
+	}
 	return &options{
-		endpoints:    endpoints,
-		roles:        roles,
-		voteInterval: time.Duration(voteInterval) * time.Second,
-		graceTime:    time.Duration(graceTime) * time.Second,
+		endpoints:      endpoints,
+		roles:          roles,
+		voteInterval:   time.Duration(voteInterval) * time.Second,
+		graceTime:      time.Duration(graceTime) * time.Second,
+		leaveGraceTime: time.Duration(leaveGraceTime) * time.Second,
 		dialTimeout: time.Duration(viper.GetInt("etcd-dial-timeout")) *
 			time.Second,
 		graceTooShort: graceTime <= 2*voteInterval,
@@ -258,10 +274,11 @@ func run(cmd *cobra.Command, args []string) error {
 	// worker.Run closes the client as the last step of its CM5 drain, so it
 	// is deliberately not closed here.
 	return worker.Run(ctx, cli, worker.Config{
-		Roles:        opts.roles,
-		VoteInterval: opts.voteInterval,
-		GraceTime:    opts.graceTime,
-		Endpoints:    opts.endpoints,
+		Roles:          opts.roles,
+		VoteInterval:   opts.voteInterval,
+		GraceTime:      opts.graceTime,
+		LeaveGraceTime: opts.leaveGraceTime,
+		Endpoints:      opts.endpoints,
 	})
 }
 
