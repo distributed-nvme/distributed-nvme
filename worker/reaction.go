@@ -211,6 +211,11 @@ const (
 	msgMdChecksKept = "md checks kept"
 )
 
+// msgRepairWaits is AR17's record of a repair the primary holds back
+// (dnv-worker.md, Log records): no step, a record for the operator, once
+// per change of the repair's stage or of the reason.
+const msgRepairWaits = "repair waits"
+
 // msgMemberAddRefused is the record of a group whose reading carries the
 // primary's refusal of a leg_list member's add (dnv-worker.md AR14; Log
 // records): no step, a record for the operator.
@@ -986,9 +991,9 @@ func (o *modelReactionOps) finishCloneDelete(
 // The reactor: the little state a stateless pass still keeps
 // ---------------------------------------------------------------------------
 
-// reactor is the sp coordinator's reaction half (AR1-AR13): the model surface,
-// plus the two memos that exist only to keep the log honest and the two records
-// AR5 and AR7 decide by. Apart from AR10's memo of the coordinator's own
+// reactor is the sp coordinator's reaction half (AR1-AR17): the model
+// surface, plus the three memos that exist only to keep the log honest and
+// the two records AR5 and AR7 decide by. Apart from AR10's memo of the coordinator's own
 // verdicts (verdictMemo), which gates every threshold reaction, no other
 // decision is taken from a memo — AR6's pending rule and AR8's repair rules
 // are reconstructed from etcd and the primary's report on every pass (AR6,
@@ -1007,11 +1012,24 @@ type reactor struct {
 	// lastReplace is AR7's record of the last replacement of a primary this
 	// coordinator applied (errorFollowedReplacement); nil before the first.
 	lastReplace *replaceMemo
+	// waits is the last `repair waits` record per repair name, so a repair
+	// that waits for one reason is logged once per change of its rep_id,
+	// its stage or the reason and not once per pass (AR17).
+	waits map[string]repairWait
+}
+
+// repairWait is what AR17's record of one repair said: the repair's rep_id
+// and stage and the reason it waits.
+type repairWait struct {
+	repId  uint64
+	stage  pb.RepStage
+	reason string
 }
 
 // newReactor builds a reactor over one model surface.
 func newReactor(ops reactionOps) *reactor {
-	return &reactor{ops: ops, badLine: make(map[uint64]string)}
+	return &reactor{ops: ops, badLine: make(map[uint64]string),
+		waits: make(map[string]repairWait)}
 }
 
 // reactor returns the coordinator's reaction state, building the production one
@@ -1376,6 +1394,9 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// member's add, at every sp_level, since it follows the primary's report
 	// alone; it changes nothing.
 	w.logMemberAddRefusals(ctx, p)
+	// dnv-worker.md AR17: the record of a repair the primary holds back, at
+	// every sp_level for the same reason; it changes nothing.
+	w.logRepairWaits(ctx, p)
 	// dnv-worker.md AR15: the flag that a group's array has run, a step of
 	// the pass at every sp_level, since it only follows the primary's
 	// report; it is not the pass's one action either.
@@ -3363,6 +3384,90 @@ func (w *spWorker) logMemberAddRefusals(ctx context.Context, p *spPass) {
 			slog.Uint64("report_revision", p.infoRev),
 			slog.String("refusal", readings[grpId].GetRefusal()))
 	}
+}
+
+// logRepairWaits is AR17: for each repair of repair_name_list, an
+// operator's or the worker's own, at any stage, that the pass did not move
+// and whose group is not a deleting clone's, nor a clone's the snapshot
+// does not hold (repairCloneDeleting), the reason the current primary's
+// latest report gives that it holds the repair back (repairWaitReason) is
+// logged `repair waits`, naming the repair, its stage, the text as waits,
+// the primary and its report's revision, once per change of the repair's
+// rep_id, its stage or the text: the memo (reactor.waits) keeps a repair's
+// last record through passes that find no reason, so a text that alternates
+// with none, as a read's verdict with a converge that fails can, is logged
+// once, and drops a repair the pass moved or skips or the snapshot no
+// longer holds. A pass with no report of the primary logs nothing and keeps
+// the memo. Reason: a repair that waits changes nothing in etcd, so without
+// the record the operator cannot tell why it does not move; one record per
+// change keeps a long wait from filling the log. Nothing moves, and no op
+// runs.
+func (w *spWorker) logRepairWaits(ctx context.Context, p *spPass) {
+	if p.info == nil {
+		return
+	}
+	memo := w.reactor().waits
+	kept := make(map[string]bool)
+	for _, repName := range p.state.Conf.GetRepairNameList() {
+		rep, ok := p.state.Repairs[repName]
+		if !ok || p.moved[repName] || repairCloneDeleting(p.state, rep) {
+			continue
+		}
+		kept[repName] = true
+		reason := repairWaitReason(p, rep)
+		if reason == "" {
+			continue
+		}
+		note := repairWait{repId: rep.GetRepId(), stage: rep.GetRepStage(),
+			reason: reason}
+		if memo[repName] == note {
+			continue
+		}
+		memo[repName] = note
+		slog.LogAttrs(ctx, slog.LevelInfo, msgRepairWaits, withAttr(
+			[]slog.Attr{slog.Uint64("sp_id", w.spId)},
+			withAttr(repairIds(repName, rep),
+				slog.String("stage", rep.GetRepStage().String()),
+				slog.String("waits", reason),
+				slog.Uint64("cntlr_id", p.primaryId),
+				slog.Uint64("report_revision", p.infoRev),
+			)...)...)
+	}
+	for repName := range memo {
+		if !kept[repName] {
+			delete(memo, repName)
+		}
+	}
+}
+
+// repairWaitReason is why the current primary's latest report says it holds
+// the repair rep back (AR17), "" when it does not: nothing while its verdict
+// says started or abort confirmed, which moves the repair (AR11); the
+// verdict's waits text when it carries one (cnagent.md CN12, Why a repair
+// waits); and otherwise, for a CREATED repair, the group's row when it reads
+// other than RES_STATUS_OK, since the primary adds a new leg and confirms an
+// abort only on a running array and sends no verdict for a group whose
+// array does not run. A take-back's refusal is AR11's record, not this one.
+func repairWaitReason(p *spPass, rep *pb.Repair) string {
+	verdict := p.info.GetRepIdToRepairInfo()[rep.GetRepId()]
+	if verdict.GetStarted() || verdict.GetAbortConfirmed() {
+		return ""
+	}
+	if waits := verdict.GetWaits(); waits != "" {
+		return waits
+	}
+	if rep.GetRepStage() != pb.RepStage_REP_STAGE_CREATED {
+		return ""
+	}
+	row, ok := p.info.GetGrpIdToMdRaid()[rep.GetGrpId()]
+	if !ok || row.GetStatus() == pb.ResStatus_RES_STATUS_OK {
+		return ""
+	}
+	reason := "the group's row reads " + row.GetStatus().String()
+	if details := row.GetDetails(); details != "" {
+		reason += ": " + details
+	}
+	return reason
 }
 
 // markArrayMade is AR15: for an md-raid1 SP, the groups of its slices and

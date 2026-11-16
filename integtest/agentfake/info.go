@@ -584,6 +584,7 @@ func (a *Agent) repairRowsLocked(
 			AbortConfirmed:   verdict.AbortConfirmed,
 			Refusal:          verdict.Refusal,
 			HeldNewLegIdList: slices.Clone(verdict.Held),
+			Waits:            verdict.Waits,
 		}
 	}
 }

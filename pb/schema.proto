@@ -492,6 +492,14 @@ message CntlrInfo {
         // longer the copy it was. The sp worker marks such a leg partial
         // (dnv-worker.md AR11). Appended, never renumbered.
         repeated uint64 held_new_leg_id_list = 4;
+        // Why the primary holds the repair at its stage while the group's
+        // array runs, empty when nothing does: a new leg it cannot add yet,
+        // no member to feed a copy or to keep the data, a bad leg md still
+        // holds in its place while it serves, or a new leg md still holds
+        // under an abort (cnagent.md CN12). Text for people and for the sp
+        // worker's log (dnv-worker.md AR17); no rule reads it. A take-back's
+        // refusal is refusal's, not this. Appended, never renumbered.
+        string waits = 5;
     }
     // What the primary reads of one group's running array: whether it is
     // whole, every place holding a member in sync, and the leg ids, of

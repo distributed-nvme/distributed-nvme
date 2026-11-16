@@ -57,14 +57,17 @@ type ChunkId struct {
 // of a repair whose flag is set is confirmed; and Refusal, the text of the
 // primary's refusal of the add of a new leg taken from a retired leg that
 // holds newer data than the array (cnagent.md CN12), empty when it refuses
-// nothing; and Held, the new legs md holds a member on in any state
-// (held_new_leg_id_list). The fake reports each as the lever says, with no
-// check that a real primary would give that combination.
+// nothing; Held, the new legs md holds a member on in any state
+// (held_new_leg_id_list); and Waits, the text of why the primary holds the
+// repair back (cnagent.md CN12, Why a repair waits). The fake reports each
+// as the lever says, with no check that a real primary would give that
+// combination.
 type RepairVerdict struct {
 	Started        bool
 	AbortConfirmed bool
 	Refusal        string
 	Held           []uint64
+	Waits          string
 }
 
 // GrpReading overrides a primary's reading of one group's running array in
@@ -498,6 +501,7 @@ type repairVerdictJSON struct {
 	AbortConfirmed bool     `json:"abort_confirmed,omitempty"`
 	Refusal        string   `json:"refusal,omitempty"`
 	Held           []uint64 `json:"held,omitempty"`
+	Waits          string   `json:"waits,omitempty"`
 }
 
 // grpReadingJSON is one entry of the behavior file's "grps" map.
@@ -694,6 +698,7 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 			AbortConfirmed: rj.AbortConfirmed,
 			Refusal:        rj.Refusal,
 			Held:           slices.Clone(rj.Held),
+			Waits:          rj.Waits,
 		}
 	}
 	for key, gj := range oj.Grps {

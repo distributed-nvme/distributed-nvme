@@ -2538,6 +2538,11 @@ repair_rec_ge() { # <n> <kind> <rep name> <filter>
 	count_ge "$n" repair_rec_cnt "$@"
 }
 
+repair_waits_cnt() { # <rep name> <waits text>
+	wcount 'select(.msg == "repair waits") | select(.rep_name == $r and .waits == $w)' \
+		--arg r "$1" --arg w "$2"
+}
+
 # pool_behavior writes the primary cntlr's dm-pool status row on the fake that
 # hosts it. Every AR6 step drives the reaction through this one line.
 pool_behavior() { # <cn dir> <sp id> <cntlr id> <line>
@@ -2951,6 +2956,18 @@ EOF
 		"the new leg's side was created with provisioned false"
 	wait_until "$WAIT_SYNCUP" "RW18 to flip the new leg's side" \
 		repair_side_provisioned sp0 "$g2_rep"
+	# The primary says why it holds the repair back: one `repair waits`
+	# record over several passes, not one per pass (AR17).
+	local g2_waits="the fake primary holds the repair back"
+	set_behavior "$prim_dir" <<EOF
+{"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {"leg_id_to_leg.3":
+  {"status": "ERROR", "details": "no healthy path"}},
+  "repairs": {"$g2_rep": {"waits": "$g2_waits"}}}}}
+EOF
+	wait_until "$WAIT_SHORT" "a \`repair waits\` record of the worker's repair" \
+		count_ge 1 repair_waits_cnt "$g2_rep" "$g2_waits"
+	assert_none_for 3 "a second \`repair waits\` record for the same text" \
+		count_ge 2 repair_waits_cnt "$g2_rep" "$g2_waits"
 	# The primary reports the new leg holding a place in the array: the stage
 	# moves to STARTED (AR11), and the next pass's drive step finishes the
 	# repair (AR8).

@@ -16740,8 +16740,16 @@ type CntlrInfo_RepairInfo struct {
 	// longer the copy it was. The sp worker marks such a leg partial
 	// (dnv-worker.md AR11). Appended, never renumbered.
 	HeldNewLegIdList []uint64 `protobuf:"varint,4,rep,packed,name=held_new_leg_id_list,json=heldNewLegIdList,proto3" json:"held_new_leg_id_list,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Why the primary holds the repair at its stage while the group's
+	// array runs, empty when nothing does: a new leg it cannot add yet,
+	// no member to feed a copy or to keep the data, a bad leg md still
+	// holds in its place while it serves, or a new leg md still holds
+	// under an abort (cnagent.md CN12). Text for people and for the sp
+	// worker's log (dnv-worker.md AR17); no rule reads it. A take-back's
+	// refusal is refusal's, not this. Appended, never renumbered.
+	Waits         string `protobuf:"bytes,5,opt,name=waits,proto3" json:"waits,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CntlrInfo_RepairInfo) Reset() {
@@ -16800,6 +16808,13 @@ func (x *CntlrInfo_RepairInfo) GetHeldNewLegIdList() []uint64 {
 		return x.HeldNewLegIdList
 	}
 	return nil
+}
+
+func (x *CntlrInfo_RepairInfo) GetWaits() string {
+	if x != nil {
+		return x.Waits
+	}
+	return ""
 }
 
 // What the primary reads of one group's running array: whether it is
@@ -17564,7 +17579,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aI\n" +
 	"\x11CnIdToNvmeofEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
-	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\xf5\x1c\n" +
+	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\x8b\x1d\n" +
 	"\tCntlrInfo\x12L\n" +
 	"\x12ss_id_to_subsystem\x18\x01 \x03(\v2\x1f.CntlrInfo.SsIdToSubsystemEntryR\x0fssIdToSubsystem\x12L\n" +
 	"\x12ns_id_to_namespace\x18\x02 \x03(\v2\x1f.CntlrInfo.NsIdToNamespaceEntryR\x0fnsIdToNamespace\x12J\n" +
@@ -17592,13 +17607,14 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x04torn\x18\x02 \x01(\bR\x04torn\x1aL\n" +
 	"\x14SliceIdToDmThinEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
-	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1a\x99\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1a\xaf\x01\n" +
 	"\n" +
 	"RepairInfo\x12\x18\n" +
 	"\astarted\x18\x01 \x01(\bR\astarted\x12'\n" +
 	"\x0fabort_confirmed\x18\x02 \x01(\bR\x0eabortConfirmed\x12\x18\n" +
 	"\arefusal\x18\x03 \x01(\tR\arefusal\x12.\n" +
-	"\x14held_new_leg_id_list\x18\x04 \x03(\x04R\x10heldNewLegIdList\x1a\xe9\x02\n" +
+	"\x14held_new_leg_id_list\x18\x04 \x03(\x04R\x10heldNewLegIdList\x12\x14\n" +
+	"\x05waits\x18\x05 \x01(\tR\x05waits\x1a\xe9\x02\n" +
 	"\aGrpInfo\x12\x14\n" +
 	"\x05whole\x18\x01 \x01(\bR\x05whole\x12,\n" +
 	"\x13in_sync_leg_id_list\x18\x02 \x03(\x04R\x0finSyncLegIdList\x12\x18\n" +

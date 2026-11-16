@@ -8,8 +8,9 @@ command (CM1 to CM7); the vote worker (VW1 to VW11); the shard worker (SW1 to
 SW6); the revision worker with its dn, cn and sp role files (RW1 to RW23);
 health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM7); the automatic
 reactions (AR1 to AR10) with the two pass steps of a repair (AR11, AR12),
-the forced-start clear (AR13), the record of a refused member add (AR14)
-and the flag that a group's array has run (AR15),
+the forced-start clear (AR13), the record of a refused member add (AR14),
+the flag that a group's array has run (AR15), the md check schedule
+(AR16) and the record of a repair that waits (AR17),
 the sp drain (SPD1 to SPD15) and the clone
 drain (CLD1 to CLD13); the worker's log records; and the intent of the worker
 integration suite. It leans on `architecture.md` for the object model, the
@@ -3141,8 +3142,8 @@ repairs and retired legs),
 plus the in-memory latest `CntlrInfo` of the **primary** cntlr
 (pool usage, group rows, AR5's and AR7's rows, the verdicts on repairs
 and the groups' whole flags, in-sync lists, refusals and acted marks
-(`GrpInfo`) AR8, AR11, AR12, AR13 and AR14 read, the group rows AR15 reads, and the
-dm-clone rows CLD13 reads)
+(`GrpInfo`) AR8, AR11, AR12, AR13, AR14 and AR17 read, the group rows AR15
+and AR17 read, and the dm-clone rows CLD13 reads)
 with the revision of the observation it reports (`architecture.md`,
 Live-state reporting), `now` (unix seconds),
 the two records kept from an earlier pass that a pass decides by — the
@@ -3158,9 +3159,10 @@ RW14's sides-first hold), the child's info is still a standby's report — a
 leg row there is transport liveness and ANA state, not the health-block
 probe — so the pass has none: AR6 grows nothing, AR8 creates no repair,
 AR11 moves no stage, AR12 deletes no retired leg, AR13 clears no
-forced-start mark, AR14 logs no refusal, AR15 sets no flag and CLD13
-latches no clone, as when the primary has not reported yet. From the
-hand-over until the reply to the promotion, the info is still that standby
+forced-start mark, AR14 logs no refusal, AR15 sets no flag, AR17 logs no
+wait and CLD13 latches no clone, as when the primary has not reported
+yet. From the hand-over until the reply to the promotion, the info is still
+that standby
 report (Known limits, one-pass-old inputs), which holds no group row, a
 standby having no group (`cnagent.md` CN12), and no group's whole flag or
 in-sync list, so AR8's gate holds the create (`grp_row_absent`) until the
@@ -3208,11 +3210,12 @@ children log
 
 The steps of a live SP's pass run in this order: the re-seed of the health
 memos (HL3), the clone drain's steps (CLD7), the four gates, AR11's stage
-moves, AR14's record of refused member adds, AR15's flag that a group's
-array has run, AR13's forced-start clear and CLD13's latch of a whole copy
-at every `sp_level`, AR3's suppression, AR12's retire timer, AR16's md
-check schedule, and the reactions in AR2's priority. A latched SP runs its drain step behind the
-cluster-conf gate and neither the two steps of a repair, the record, the
+moves, AR14's record of refused member adds, AR17's record of repairs
+that wait, AR15's flag that a group's array has run, AR13's forced-start
+clear and CLD13's latch of a whole copy at every `sp_level`, AR3's
+suppression, AR12's retire timer, AR16's md check schedule, and the
+reactions in AR2's priority. A latched SP runs its drain step behind the
+cluster-conf gate and neither the two steps of a repair, the records, the
 flag nor the forced-start clear (SPD6); it holds no clone to latch, its `clone_name_list` being empty.
 
 AR2. **One action per SP per pass** — "action" meaning a *reaction*
@@ -3233,9 +3236,9 @@ repair and the create of one (AR8); the cancel joined to the next create
 applied` twice, for the cancel and for the create. The
 invariant is **at most one applied action per SP per pass**; the clone
 drain's steps, AR11's stage moves, AR12's retire timer, AR13's
-forced-start clear, AR14's record, AR15's flag, AR16's schedule and
-CLD13's latch of a whole copy are not actions in this sense and commit
-alongside one — a pass over a live SP can bump `SpRev` once per deleting
+forced-start clear, AR14's and AR17's records, AR15's flag, AR16's
+schedule and CLD13's latch of a whole copy are not actions in this sense
+and commit alongside one — a pass over a live SP can bump `SpRev` once per deleting
 clone whose final STM it commits (CLD9, CLD12), a batch bumping nothing
 (CLD8), once per stage move, once for the flag's write, once per clear,
 once per clone it latches, once for the timer's delete, once for the
@@ -4280,7 +4283,7 @@ why the group does not become whole; what can take that member in is
 the pass's one action (AR2).
 
 AR15. **The flag that a group's array has run.** For a live md-raid1 SP,
-right after AR14 and before AR3's suppression — so at every `sp_level` —
+right after AR17 and before AR3's suppression — so at every `sp_level` —
 the pass collects the groups of its slices, in `slice_id_list` order, meta
 groups before data groups, then the clone meta groups of the clones that
 are not deleting, in `clone_name_list` order, that do not carry
@@ -4363,6 +4366,33 @@ reaction and not the pass's one action (AR2); like every bump, its `SpRev`
 bump holds the gates that ask for a report at the snapshot's revision
 until the primary reports at the new one.
 
+AR17. **Repair waits.** For a live SP, right after AR14 and before AR3's
+suppression — so at every `sp_level` — the pass logs `repair waits` for
+each repair of `repair_name_list`, an operator's or the worker's own, at
+any stage, that the pass did not move (AR11) and whose group is neither a
+deleting clone's nor a clone's the snapshot does not hold, when the current
+primary's latest report says why it holds the repair back, naming the
+repair, its stage, the text as `waits`, the primary and the revision of its
+report. The text is nothing while the repair's verdict says started or
+abort confirmed; else the verdict's `waits` text when it carries one
+(`cnagent.md` CN12, Why a repair waits); else, for a CREATED repair, the
+group's row when it reads other than `RES_STATUS_OK`, its status and
+details, since the primary adds a new leg and confirms an abort only on a
+running array and gives no verdict for a group whose array does not run
+(`cnagent.md` CN28). A take-back's refusal is AR11's record, not this one.
+The record is written once per change of the repair's `rep_id`, its stage
+or the text: the coordinator keeps the last record per repair name in
+memory, through passes that find no text and passes with no report of the
+primary, which log nothing, so a text that alternates with none, as a
+read's verdict can with a converge that fails, is logged once; it drops the
+record of a repair the pass moved or skips or the snapshot no longer holds.
+The memory decides nothing and lives with the coordinator, so a restart or
+a handoff logs each wait once more. Reason: a repair that waits changes
+nothing in etcd, so without the record the operator cannot tell why it does
+not move, and a record per pass would fill the log through a long wait.
+Nothing moves, and no op runs; the record is no reaction and not the pass's
+one action (AR2).
+
 ### The sp drain
 
 `DeleteStoragePool` does not tear an SP down. It LATCHES it — `deleting`
@@ -4410,8 +4440,8 @@ a latched SP has exactly one future.
 SPD6. **Entry and cadence.** AR3 splits: a pass over an SP with `deleting`
 true runs at most ONE drain step, no reaction, neither of the two pass steps
 of a repair (AR11, AR12), no forced-start clear (AR13), no record of a
-refused member add (AR14) and no write of the flag that a group's array
-has run (AR15), regardless of
+refused member add (AR14) or of a repair that waits (AR17) and no write of
+the flag that a group's array has run (AR15), regardless of
 `sp_level` suppression — "at most", because the gates ahead of the branch
 still apply: a pass whose `LoadSp` failed, or whose cluster conf is missing
 or unusable, runs nothing at all and retries on the next tick. (The SP's OWN
@@ -4986,6 +5016,9 @@ its scan avoided (`avoided_addr_ports`); an op
 call that failed otherwise is also logged `reaction skipped`, with its
 error, and its transaction may still have committed, which the next pass
 reads from the stored state;
+`repair waits` a repair the primary holds back, with its stage and the
+text as `waits`, once per change of its `rep_id`, its stage or the text
+(AR17);
 `repair stage moved` a stage move whose call succeeded and `repair stage
 skipped` a move AR11 finds due and does not make, with its reason, the
 op's name as `op` when the op refused it, or its error, and a CREATED
@@ -5259,7 +5292,8 @@ health write (HL2) and in a failover on either trigger (MD6) by the failover
 case, which finds each in its writer's own transaction, and in a cntlr
 replacement (MD6) by the reaction case; BM1 to BM5 and BM7's read by the
 bitmap case; AR1
-to AR9, and AR11 on the worker's repairs, by the reaction case, save the
+to AR9, AR11 on the worker's repairs and AR17's record of a wait the fake
+primary reports, once over several passes, by the reaction case, save the
 parts below, AR8's skip
 of a group with an operator's repair, its hold on a group with a
 forced-start mark and its hold on a group whose `operator_in_charge` flag
@@ -5544,8 +5578,8 @@ and not disabled, as the cn agent reads a primary (`cnagent.md` CN9), it
 reports every group of the request as whole, with every leg of its `leg_list`
 held in sync and the group's forced-start mark, if any, named as the mark
 it acted on (`cnagent.md` CN28), and no verdict on a repair; the levers
-`repairs`, a verdict by a repair's name, the text of a refused take-back
-and the new legs md holds (`held`) included, that the fake reports under the
+`repairs`, a verdict by a repair's name, the text of a refused take-back,
+the new legs md holds (`held`) and the text of a wait (`waits`) included, that the fake reports under the
 repair's `rep_id`, and `grps`, a
 group's whole flag, in-sync list or acted mark (`acted`) by `grp_id`,
 change what a primary reports, and a standby reports neither. It stamps

@@ -947,8 +947,6 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   on port 9808 or 9809. State: not yet; log
   handling goes into the operations doc. Fix decided: one gateway read,
   with its dnvctl command, lists what is wrong across the cluster.
-- **A repair that waits gives no reason.** State: fix decided, the primary
-  reports the reason and the worker logs it. Seen in the lab.
 - **A retired leg's partial mark can miss a short stay in the array.** A
   repair can take a retired leg back as its new leg. When md has counted
   that leg as a member but not copied all of it, the worker marks the leg

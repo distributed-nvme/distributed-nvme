@@ -2253,6 +2253,35 @@ the ranges back. md's "mismatch_cnt" is not health: the legs differ
 wherever the pool has not written ([D15]), so it counts those regions too
 (`architecture.md`, Known limits).
 
+**Why a repair waits.** The step that adds a repair's new legs
+(`repSteps`) and the take-back check after it (`takeBackStep`) name why they
+hold the repair back, from the same reading and the same tests they decide
+by, and the repair's verdict carries the text as `waits` (CN28), on a read
+and on a converge alike: for a STARTED repair, or a CREATED one whose abort
+flag the request does not carry, the first new leg the array lacks that the
+step cannot add — its side not provisioned yet, or the leg not available
+otherwise (on a read: its leg row does not read `OK` or the leg does not
+serve, CN30) — and, for a STARTED repair, the first new leg no member in
+sync can feed (`hasCopySource`); for such a CREATED repair, no member in
+sync on a leg whose row reads `OK` and that serves to keep the data
+(`keepsData`), as on a new primary before its first probe round (CN11), a
+bad leg md holds in its place while it serves, or a bad leg with md
+bad-block ranges while no other member in sync is clean of them
+(`cleanKeeper`); and, for a new leg taken from a retired leg, no member
+that keeps the data whose superblock the check can compare it with. A
+verdict that says neither started nor abort confirmed with none of these
+names what md still holds (`heldWaits`): for a repair whose abort flag the
+request carries, the first new leg md holds without a place, which keeps
+the abort from being confirmed; and for an open repair whose every new leg
+holds a place, the first bad leg md still holds, which keeps the verdict
+from saying started. A verdict that moves the repair names nothing. The
+take-back check's refusal is the verdict's `refusal`, not this text. Like
+the refusal, the text is for people: the worker logs it (`dnv-worker.md`
+AR17) and no rule reads it. Reason: a repair that waits changes nothing in
+etcd, so without the text the operator cannot tell why it does not move.
+An array that does not run gives no verdict (CN28); the worker names the
+group's row for it instead.
+
 CN13. Per-slice pools (`pool.go`; primary only). Per slice of
 `id_to_slice`: the multi-target dm-linears `CnPoolMetaName` (meta group
 devices, `meta_grp_list` order) and `CnPoolDataName` (data group
@@ -4388,7 +4417,8 @@ that keeps the data, empty when nothing holds the add back; and
 `held_new_leg_id_list`, the repair's new legs md holds a member on in any
 state, ascending, since md has written its superblock onto each, which
 the worker records as a taken-back leg's partial mark (`dnv-worker.md`
-AR11). The
+AR11); and `waits`, why the primary holds the repair back, empty when
+nothing does (CN12, Why a repair waits). The
 refusal is text for people: the worker logs a CREATED repair's verdict
 that carries one and moves no stage for it (`dnv-worker.md` AR11), no rule
 decides anything on its text, and it is never the group's error (CN12). An
@@ -4400,10 +4430,11 @@ absent, stopped or broken array, the guard's `ERROR`, a deferred group, a
 a converge take both from the array their group row reads, a converge from
 the array as the pass leaves it (CN12), and each refusal from the one
 check both make, through one function, so the two channels report the
-same fields for the same array, except the refusals: a converge makes a
-check on a leg once the leg is available, and a read only once the leg's
-own row reads `OK` (CN30), so while that row does not read `OK` a converge
-reports a refusal that a read leaves empty.
+same fields for the same array, except the refusals and `waits`: a
+converge makes a check on a leg, and counts a new leg it could add, once
+the leg is available, and a read only once the leg's own row reads `OK`
+(CN30), so while that row does not read `OK` a converge reports a refusal
+that a read leaves empty, and the two can name different waits.
 
 CN29. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output in

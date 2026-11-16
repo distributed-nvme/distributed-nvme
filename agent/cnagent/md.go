@@ -2554,7 +2554,7 @@ func (s *CnAgentServer) reconcileMembers(
 			return changed, grpRefusals{}, err
 		}
 	}
-	refusals.rep = rep
+	refusals.rep, refusals.waits = rep, step.waits
 	return changed, refusals, nil
 }
 
@@ -2562,10 +2562,12 @@ func (s *CnAgentServer) reconcileMembers(
 // reports beside the group's reading (CN28): rep is the take-back check's
 // (takeBackStep), which the repair's verdict carries, and grp the identity
 // check's on a leg_list member's add (legListAddRefusal), which the group's
-// reading carries. "" where nothing holds an add back.
+// reading carries. "" where nothing holds an add back. waits is why the
+// repair's step waits (repStep.waits), which the verdict carries too.
 type grpRefusals struct {
-	rep string
-	grp string
+	rep   string
+	grp   string
+	waits string
 }
 
 // arrayUuidOnce reads the identity of the group's running array once, at
@@ -2731,10 +2733,39 @@ func putBackLegs(
 
 // repStep is what CN12's add of a repair's new legs does in one converge:
 // the bad legs it takes out of the array first, each failed first when md
-// still holds it in a place, and the new legs it adds.
+// still holds it in a place, and the new legs it adds; and waits, why the
+// step holds the repair back, "" when nothing does (CN12, Why a repair
+// waits): text for people, which the repair's verdict carries.
 type repStep struct {
-	out []repBadLeg
-	add []*legPlan
+	out   []repBadLeg
+	add   []*legPlan
+	waits string
+}
+
+// The texts of repStep.waits and of the verdict's waits (CN12, Why a repair
+// waits), each naming the leg it is about as md.go's other texts do.
+const (
+	waitsNewLegUnprovisioned = "new leg %#x: its side is not provisioned yet"
+	waitsNewLegUnavailable   = "new leg %#x is not available"
+	waitsNoCopySource        = "new leg %#x: no member in sync can feed its copy"
+	waitsNoKeeper            = "no member in sync is on a leg whose row " +
+		"reads OK and that serves, to keep the data"
+	waitsBadLegServes  = "bad leg %#x holds its place in the array and serves"
+	waitsNoCleanKeeper = "bad leg %#x carries md bad-block ranges, and no " +
+		"other member in sync is clean of them"
+	waitsTakeBackKeeper = "new leg %#x, taken from a retired leg, waits for " +
+		"a member that keeps the data to compare its superblock with"
+	waitsNewLegHeld = "md still holds new leg %#x without a place"
+	waitsBadLegHeld = "md still holds bad leg %#x"
+)
+
+// newLegWaits is the wait of a new leg the array lacks and the step cannot
+// add: its side is not provisioned yet, or it is not available otherwise.
+func newLegWaits(lp *legPlan) string {
+	if lp.provisioning {
+		return fmt.Sprintf(waitsNewLegUnprovisioned, lp.legId)
+	}
+	return fmt.Sprintf(waitsNewLegUnavailable, lp.legId)
 }
 
 type repBadLeg struct {
@@ -2772,31 +2803,40 @@ func repSteps(
 	avail, takes, sources func(*legPlan) bool,
 ) repStep {
 	rp := gp.rep
-	if rp == nil {
+	started := rp != nil &&
+		rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED
+	if rp == nil || !(started || rp.mayAdd()) {
 		return repStep{}
 	}
 	var step repStep
 	for _, lp := range rp.newLegs {
-		if _, ok := held[lp.name]; !ok && avail(lp) {
+		if _, ok := held[lp.name]; ok {
+			continue
+		}
+		if avail(lp) {
 			step.add = append(step.add, lp)
+		} else if step.waits == "" {
+			step.waits = newLegWaits(lp)
 		}
 	}
 	if len(step.add) == 0 {
-		return repStep{}
+		return repStep{waits: step.waits}
 	}
-	if rp.rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED {
+	if started {
 		// A STARTED repair's new leg joins as a leg_list member does, once
 		// another member can feed its copy (hasCopySource).
 		var add []*legPlan
 		for _, lp := range step.add {
 			if hasCopySource(gp, held, sources, lp.name) {
 				add = append(add, lp)
+			} else if step.waits == "" {
+				step.waits = fmt.Sprintf(waitsNoCopySource, lp.legId)
 			}
 		}
-		return repStep{add: add}
+		return repStep{add: add, waits: step.waits}
 	}
-	if !rp.mayAdd() || !keepsData(gp, held, takes) {
-		return repStep{}
+	if !keepsData(gp, held, takes) {
+		return repStep{waits: waitsNoKeeper}
 	}
 	for _, lp := range gp.legs {
 		member, ok := held[lp.name]
@@ -2806,8 +2846,10 @@ func repSteps(
 		switch {
 		case member.Slot == mdSlotNone:
 			step.out = append(step.out, repBadLeg{lp: lp})
-		case takes(lp) && (member.BadBlocks == 0 || !cleanKeeper(gp, held)):
-			return repStep{}
+		case takes(lp) && member.BadBlocks == 0:
+			return repStep{waits: fmt.Sprintf(waitsBadLegServes, lp.legId)}
+		case takes(lp) && !cleanKeeper(gp, held):
+			return repStep{waits: fmt.Sprintf(waitsNoCleanKeeper, lp.legId)}
 		default:
 			step.out = append(step.out, repBadLeg{lp: lp, fail: true})
 		}
@@ -2983,7 +3025,12 @@ func (s *CnAgentServer) takeBackStep(
 		return step, "", nil
 	}
 	var add []*legPlan
-	refusal := ""
+	refusal, waits := "", step.waits
+	keeperWaits := func(lp *legPlan) {
+		if waits == "" {
+			waits = fmt.Sprintf(waitsTakeBackKeeper, lp.legId)
+		}
+	}
 	for _, lp := range step.add {
 		if !gp.rep.takenBack(lp.legId) {
 			add = append(add, lp)
@@ -3000,6 +3047,7 @@ func (s *CnAgentServer) takeBackStep(
 		}
 		keeper := dataKeeper(gp, held, takes)
 		if keeper == nil {
+			keeperWaits(lp)
 			continue
 		}
 		keeperReading := s.md.ReadMember(ctx, keeper.path)
@@ -3008,6 +3056,7 @@ func (s *CnAgentServer) takeBackStep(
 		}
 		keeperSb := keeperReading.Sb
 		if keeperSb == nil {
+			keeperWaits(lp)
 			continue
 		}
 		if why := takeBackRefusal(gp, lp, sb, keeper,
@@ -3020,10 +3069,42 @@ func (s *CnAgentServer) takeBackStep(
 		add = append(add, lp)
 	}
 	if len(add) == 0 {
-		return repStep{}, refusal, nil
+		return repStep{waits: waits}, refusal, nil
 	}
-	step.add = add
+	step.add, step.waits = add, waits
 	return step, refusal, nil
+}
+
+// heldWaits is the wait of a verdict that says neither started nor abort
+// confirmed while the step holds nothing back (repairVerdict): for a repair
+// whose abort flag the request carries, the first new leg md holds without
+// a place, which keeps the abort from being confirmed; and for an open
+// repair whose every new leg holds a place, the first bad leg md still
+// holds, which keeps the verdict from saying started (startedBadLegs). ""
+// when neither holds.
+func heldWaits(gp *grpPlan, held map[string]MdMember) string {
+	rp := gp.rep
+	if rp.aborting() {
+		for _, lp := range rp.newLegs {
+			if member, ok := held[lp.name]; ok && !member.holdsPlace() {
+				return fmt.Sprintf(waitsNewLegHeld, lp.legId)
+			}
+		}
+	}
+	if !rp.open() || len(rp.newLegs) == 0 {
+		return ""
+	}
+	for _, lp := range rp.newLegs {
+		if member, ok := held[lp.name]; !ok || !member.holdsPlace() {
+			return ""
+		}
+	}
+	for _, lp := range gp.legs {
+		if _, ok := held[lp.name]; ok && rp.badLegIds[lp.legId] {
+			return fmt.Sprintf(waitsBadLegHeld, lp.legId)
+		}
+	}
+	return ""
 }
 
 // takeBackRefusal is the text of CN12's take-back refusal (takeBackStep),
@@ -3265,7 +3346,7 @@ func (s *CnAgentServer) putBackNames(
 	for _, lp := range step.add {
 		names = append(names, lp.name)
 	}
-	refusals.rep = rep
+	refusals.rep, refusals.waits = rep, step.waits
 	return names, refusals
 }
 
@@ -3412,7 +3493,7 @@ func reportGrpReading(
 	info.GrpIdToGrpInfo[gp.grpId] = reading
 	if gp.rep != nil {
 		info.RepIdToRepairInfo[gp.rep.repId] = repairVerdict(
-			gp, held, refusals.rep)
+			gp, held, refusals.rep, refusals.waits)
 	}
 }
 
@@ -3432,11 +3513,16 @@ func reportGrpReading(
 // nothing holds it back: text for people, which the sp worker logs while
 // the repair waits (dnv-worker.md AR11) and no rule decides anything on, and
 // never an error on the group's row, which would fail the primary over for a
-// refusal the next primary makes again.
+// refusal the next primary makes again. waits is why the repair's step
+// waits (repStep.waits), "" for a step that holds nothing back; for a
+// verdict that neither starts nor confirms an abort, with no such text, it
+// is what md still holds that keeps the verdict back (heldWaits) (CN12, Why
+// a repair waits).
 func repairVerdict(
 	gp *grpPlan,
 	held map[string]MdMember,
 	refusal string,
+	waits string,
 ) *pb.CntlrInfo_RepairInfo {
 	rp := gp.rep
 	started := rp.open() && len(rp.newLegs) > 0
@@ -3458,10 +3544,14 @@ func repairVerdict(
 		}
 	}
 	slices.Sort(heldNew)
+	if !started && !confirmed && waits == "" {
+		waits = heldWaits(gp, held)
+	}
 	return &pb.CntlrInfo_RepairInfo{
 		Started:          started,
 		AbortConfirmed:   confirmed,
 		Refusal:          refusal,
 		HeldNewLegIdList: heldNew,
+		Waits:            waits,
 	}
 }

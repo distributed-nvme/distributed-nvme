@@ -1804,7 +1804,7 @@ func TestTakeBackCheckExamineKilled(t *testing.T) {
 // when the reading of the member that keeps the data finds no superblock:
 // with nothing to compare the newer new leg with, the converge adds nothing,
 // takes no bad leg out and reports no refusal, the group's row OK; the read
-// names nothing and reports no refusal.
+// names nothing and reports no refusal; both say why the repair waits.
 func TestTakeBackCheckKeeperWithoutSuperblock(t *testing.T) {
 	f := newRepFix(t, allLegs...)
 	f.badLegDead()
@@ -1829,6 +1829,8 @@ func TestTakeBackCheckKeeperWithoutSuperblock(t *testing.T) {
 		t.Fatalf("the converge's refusal is %q, want none", got)
 	}
 	assertVerdict(t, info, "the waiting repair", false, false)
+	waits := fmt.Sprintf(waitsTakeBackKeeper, repNewLeg)
+	wantWaits(t, info, "the waiting repair", waits)
 	probeLegs(t, f.srv, repNewLeg)
 	read, reply := f.read(t, 3)
 	if reply.GetCode() != 0 {
@@ -1838,6 +1840,7 @@ func TestTakeBackCheckKeeperWithoutSuperblock(t *testing.T) {
 		t.Fatalf("the read's refusal is %q, want none", got)
 	}
 	assertVerdict(t, read, "the waiting repair, read", false, false)
+	wantWaits(t, read, "the waiting repair, read", waits)
 }
 
 // TestReadMemberFromTheFake pins the reading of a member (Md.ReadMember)
