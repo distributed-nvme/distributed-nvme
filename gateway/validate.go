@@ -511,7 +511,7 @@ func validateStripeProduct(stripe uint64, sliceCnt int) error {
 		"bdev_conf.dm_raid0_conf.stripe_size %d times slice_cnt %d is %d "+
 			"bytes, over %d, the most data one NVMe/TCP command may carry "+
 			"to a controller node: the pool's volumes would report it as "+
-			"their optimal IO size, and hosts would send reads the "+
+			"their optimal IO size, and hosts would send commands the "+
 			"controller node refuses; the largest stripe_size that fits "+
 			"is %d",
 		stripe, sliceCnt, product, common.MaxNvmeTcpCmdBytes,

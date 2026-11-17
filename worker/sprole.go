@@ -3553,8 +3553,9 @@ func migrChunkIds(bmIdxList []uint32) []model.BmChunk {
 
 // diffBitmap is BM2 for a migration destination side: when the reply's
 // bm_info, the agent's applied set, is about this side's migration, it
-// pushes the pieces of the child's read the set lacks or this child has not
-// delivered (BM7). Only a destination side pushes at all (BM4).
+// pushes the child's read from the lowest piece the set lacks or this child
+// has not delivered to the read's last piece (BM2). Only a destination side
+// pushes at all (BM4).
 func (d *sideDriver) diffBitmap(
 	plan *sidePlan,
 	info *pb.BitmapInfo,

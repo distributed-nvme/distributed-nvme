@@ -161,7 +161,8 @@ func planCloneGrp(
 // in its order, behind the resolution and the token check openSp makes: the
 // MaxCloneCntPerSp ceiling, ahead of the name so a pool at the ceiling hears
 // the ceiling; the name free; the destination td by name; a destination no
-// other clone names; the clone meta group's plan and bound (planCloneGrp);
+// other clone names; a destination no transfer's origin namespace lies on
+// (tdTransferRef); the clone meta group's plan and bound (planCloneGrp);
 // and the optimal IO size the clone's dm-clone would report
 // (cloneIoSizeCheck). The planning read and the deciding STM both run it, so
 // a refusal reached in either has the same words, and the planning read
@@ -262,7 +263,7 @@ func cloneIoSizeCheck(conf *pb.SpConf, req *pb.CreateCloneRequest) error {
 			"the pool's %d-byte block when that multiple is below one "+
 			"block or not a whole number of blocks), over %d, the most "+
 			"data one NVMe/TCP command may carry to a controller node: "+
-			"hosts would send reads the controller node refuses",
+			"hosts would send commands the controller node refuses",
 		req.GetCloneName(), req.GetSrcStripeSize(), req.GetSrcSliceCnt(),
 		req.GetSrcStripeSize()*uint64(req.GetSrcSliceCnt()),
 		req.GetSpName(), dstStripe, dstSliceCnt, dstStripe*dstSliceCnt,

@@ -267,7 +267,8 @@ once a second. A primary that dies before that commit loses the write, and
 the block reads as it did before the write: zeros where nothing was
 written. This is the behaviour of a disk with a volatile write cache, not
 a loss in the sense of this document. A flush that completes although its
-primary died is a defect; section 5.1 has it.
+primary died is a defect, and so is a durable write lost in a failover
+while the old primary still serves; section 5.1 has both.
 
 ## 5. Data loss outside the accepted cases
 
@@ -290,21 +291,32 @@ the host.
   under test. Read from the kernel's code; not seen in the lab.
 - **A failover while the old primary still serves can lose a write the
   host was told was done.** Silent. A failover fences the old primary's
-  paths to the legs of a group one after another. A host still writing
-  through the old primary can have a write that lands only on the leg
-  fenced last: md fails the other leg and completes the write to the host
-  from the one copy, but its record of that failure cannot be written,
-  since the last leg is fenced by then. The legs then look equal to md,
-  and when the new primary starts the array, md copies its first member
-  over the other. If the first member is the leg that missed the write,
-  the write is gone. It needs the old primary to keep serving until the
-  fence, which it does only when it has not applied its demotion, as a
-  controller node whose agent is stopped or cut off from the control plane
-  but not from the hosts, and a host still writing through it. Seen once
-  in the lab, in the e2e suite at 32 slices, and shown with md alone: each
-  run that fenced md's first member first lost the last completed write,
-  and each run that fenced it last kept it. State: fix later; the fix
-  fences, in each group, the leg md copies from last.
+  paths to the legs of a group at different moments, in no set order. A
+  host still writing through the old primary can have a write that lands
+  only on the leg fenced last: md fails the other leg and completes the
+  write to the host from the one copy, but its record of that failure
+  cannot be written, since the last leg is fenced by then. The legs then
+  look equal to md, and when the new primary starts the array, md copies
+  its first member over the other. If the first member is the leg that
+  missed the write, the write is gone. On a meta group the lost write is
+  part of the slice's thin pool metadata: the pool comes back as of an
+  earlier commit, and the blocks mapped since are gone. On a clone meta
+  group the clone forgets parts it had copied and copies them from its
+  source again, over what hosts wrote there. These two are read from the
+  kernel's code, not seen in the lab. The loss needs a host still writing
+  through the old primary, and the old primary to keep serving until the
+  fence. The old primary does so when it has not applied its demotion, as
+  on a controller node whose agent is stopped or cut off from the control
+  plane but not from the hosts. A cntlr replacement of the primary can
+  lose a write the same way: the replaced primary serves until its
+  controller node tears its stack down, which a stopped or cut-off agent
+  never does. Seen once in the lab, in the e2e suite at 32 slices, and
+  shown with md alone: each run that fenced md's first member first lost
+  the last completed write, and each run that fenced it last kept it.
+  State: fix later. The fix waits for a plan of its own: it changes the
+  order of the fence, and it needs to know which leg md copies from, which
+  no record holds today. The proposed fix fences, in each group, that leg
+  last.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
@@ -455,7 +467,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 | A controller node is down and comes back | Each primary on it that has a healthy enabled standby is failed over to it. Hosts see a pause. A pool of one cntlr waits for a cntlr replacement. Back, the cntlrs that were failed over are standbys. A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default. A missed round counts only once its own wait of one interval has run out, so a failover comes about 6 to 10 seconds after the node dies. `cntlr_unhealthy`, 600, before a replacement. | Nothing. |
 | The network between a controller node and a disk node is cut | When the controller node holds the primary, as for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. A cut from a node that holds only standbys changes nothing. | `leg_unhealthy`, 1200. | Nothing. |
 | The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
-| The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8). With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
+| The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and can lose a write it was told was done (section 5.1). With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
 | etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure to write, "running while the control plane is down". |
 | A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. | Nothing. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). |
 | An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. A controller node agent away for more than a few seconds has its primaries failed over. | `primary_unhealthy` with two check rounds in a row. A stopped agent's rounds fail at once, so a failover comes about 4 to 8 seconds after the agent stops, at the defaults. | Until the fix, stop the workers first for a planned restart of a controller node agent. State: fix decided, the agent answers "starting" while it restarts (section 6.1). |
@@ -712,7 +724,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   dropped. A cdc cut off from etcd keeps listing a failed-over primary. The
   Kubernetes node plugin keeps a cdc address an old attach named. Such a
   host writes to the fenced old primary and gets IO errors in the failover
-  window. State: procedure to write for the first two; fix decided for the
+  window, and can lose a write it was told was done (section 5.1). State: procedure to write for the first two; fix decided for the
   plugin, which takes the cdc list from its deployment on every pass.
 - **A Kubernetes mount waits for ever when no cntlr of its volume comes
   back.** The node plugin's connect keeps reconnecting through an outage
@@ -747,7 +759,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   answers "starting" until its first converge ends, and the worker holds
   its verdict on that node's cntlrs for a bounded time, a cluster setting
   fixed when the cluster is created, 120 seconds by default. Worked out
-  from the defaults; not seen in the lab.
+  from the defaults; not seen in the lab. A host still writing through
+  such a primary can also lose a write it was told was done (section 5.1).
 - **A corrupt cdc entry withdraws its subsystem from hosts.** A cdc entry
   is the record in etcd that the cdc serves for one subsystem. Only a hand
   edit or a bug corrupts it. State: accepted.
@@ -933,15 +946,18 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   cntlr's record, so a worker that restarts or takes the pool over during
   the failover holds the sides too. A cntlr replacement of the primary
   holds the sides for the same three seconds, so the old controller node
-  usually tears its stack down first. Three windows remain, all accepted.
-  A slow old primary misses the hold. A replaced primary whose controller
-  node takes longer than the hold to tear its stack down is fenced while
-  it still serves.
+  usually tears its stack down first. Three windows remain, all accepted
+  for their IO errors; in each, a write the host was told was done can
+  also be lost (section 5.1). A slow old primary misses the hold. A
+  replaced primary whose controller node takes longer than the hold to
+  tear its stack down is fenced while it still serves.
   A worker that restarts or takes the pool over within those three
   seconds after a replacement of the primary does not hold the sides,
   since the replaced cntlr leaves no record. What stays besides: a
   Kubernetes host on an unreachable old node sees errors until the new
-  path shows the volume. Not seen in the lab.
+  path shows the volume, and can lose a write the same way. The e2e suite
+  shows the first window, with an old primary whose agent is stopped; the
+  other windows and the Kubernetes case are not seen in the lab.
 - **A node clock that steps back delays a failover.** The worker reads how
   old an agent's report is by the node's clock. After the clock steps
   back, reports read younger by up to the step, so a node whose reads hang
@@ -1068,8 +1084,9 @@ design:
   TCP connection per IO queue, and the agent caps the queues of a
   subsystem; no host with many CPUs has been measured for it. State:
   accepted; a measurement item of the performance plan.
-- **A pool of more than four slices takes a smaller stripe, so that its
-  hosts' reads stay within what a controller node takes.** The stripe
+- **At the defaults, a pool of more than four slices takes a smaller
+  stripe, so that its hosts' reads and writes stay within what a
+  controller node takes.** The stripe
   tells the host the volume's best IO size, the stripe times the slice
   count, and the host reads ahead twice that size and, when it is above
   4 MiB, sends commands up to it. A controller node's kernel refuses, over
@@ -1083,19 +1100,21 @@ design:
   the slice count is above 4 MiB is refused with the reason and the
   largest stripe that fits. This fixes the IO errors, at a price: in a
   pool of more than four slices at the defaults a whole block a host
-  writes is split over slices, so the thin pool no longer skips the zero
+  writes is split over slices, so the thin pool does not skip the zero
   fill of a block written whole and the first write of a block costs
   more, and a discard frees space only over a longer range (the discard
   entry below). State: accepted. A pool created before dnv held the
-  stripe to this bound keeps its stripe, since a pool's layout never
-  changes, and its hosts still get IO errors on large reads. State for
-  such a pool: procedure to write; its one step: on every host, set
-  `max_sectors_kb` to at most 4096 for the device of each of the pool's
-  namespaces and for each of that device's hidden path devices, one per
-  controller node (`nvme<X>c<Y>n<Z>` under `/sys/block`), before the
-  first large read and again whenever a reconnect adds a path. The
-  namespace device alone is not enough: a path device joins the requests
-  it is sent up to its own limit, as read from the kernel's code.
+  stripe to this bound, whose stripe times its slice count is above
+  4 MiB, keeps its stripe, since a pool's layout never changes. Its hosts
+  still get IO errors on a direct read or write over 4 MiB, and a buffered
+  write fails at its flush; a buffered read still succeeds, more slowly.
+  State for such a pool: procedure written,
+  [A pool made before the stripe bound](operations.md#a-pool-made-before-the-stripe-bound):
+  on every host, set the largest command (`max_sectors_kb`) to 4 MiB on
+  each hidden path device of the pool's namespaces, one per controller
+  node, and let a udev rule set it on each path that comes later. Seen in
+  the lab: the setting on the path devices is enough, and the setting on
+  the namespace's device alone changes nothing.
 - **A clone between pools of some slice counts is refused.** A clone's
   device on the controller node tells the host a best IO size made from
   both pools: the least common multiple, the smallest size that is a whole
@@ -1116,8 +1135,8 @@ design:
   when either pool was created before the bound above with more than four
   slices of the default stripe. State: accepted.
 - **A migration in a pool whose block is above 4 MiB can be sent commands
-  its new side refuses.** During a migration the new side's copy device on
-  its disk node tells the controller node a best IO size of at least one
+  its new side refuses.** During a migration the device on the new side's
+  disk node that pulls the data from the old side tells the controller node a best IO size of at least one
   block, so the controller node's path to it can carry commands up to the
   block, above what the disk node's kernel takes. Read from the kernel's
   code, not seen in the lab. The default block is 1 MiB. State: fix later,
@@ -1150,15 +1169,17 @@ design:
 - **A host discard frees space only over whole aligned blocks on every
   slice.** A thin pool frees whole blocks only, and completes a shorter or
   misaligned discard with success. A cluster created with no stripe gets
-  one equal to its block, up to 1 MiB, so at the defaults an aligned 1 MiB
-  discard frees one block. A pool's stripe is smaller than its block when
-  the pool or its cluster names a smaller stripe, when the pool's block
-  is larger than its cluster's stripe, as every block above 1 MiB is, or
-  when the pool has more than four slices at the defaults, whose stripe is
-  narrowed to keep the stripe times the slice count at 4 MiB. Then
-  a discard frees a block on one slice only when it covers nearly the
-  slice count times the block, and `fstrim` can report success and free
-  nothing. Read from the kernel's code, not measured. State: accepted.
+  one equal to its block, up to 1 MiB, so in a pool of at most four
+  slices at the defaults an aligned 1 MiB discard frees one block. A
+  pool's stripe is smaller than its block when its block is above 1 MiB,
+  the largest stripe dnv takes, or when the pool names a smaller stripe.
+  A pool that
+  names no stripe takes its cluster's, narrowed as the stripe entry above
+  says. That stripe is smaller than the pool's block when the cluster's
+  stripe already is, or when the narrowing cuts it below the block, as at
+  the defaults with more than four slices. Then a discard frees a
+  block on one slice only when it covers nearly the slice count times the
+  block, and `fstrim` can report success and free nothing. Read from the kernel's code, not measured. State: accepted.
   Procedure to write, one line on the stripe setting.
 - **Every controller node of a cluster runs one kernel series.** From
   kernel 6.19 on, md records a new array's block size in bytes of its

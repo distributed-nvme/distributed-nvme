@@ -495,7 +495,8 @@ pick's DN no longer has the free metadata units the round needs, which
 units leaves the key where it is (`architecture.md`, Metadata units); or
 when the RPC's own plan re-check fails — `CreateStoragePool`'s cluster id
 and leg count and `CreateClone`'s cluster id, `sp_id`, leg count and pool revision
-(`architecture.md`, Storage pools, Per-operation allocation, Clones), and the gain checks of `CreateCntlr`,
+(`architecture.md`, Storage pools; `architecture.md`, Per-operation
+allocation; `architecture.md`, Clones), and the gain checks of `CreateCntlr`,
 `CreateMigration` and `CreateRepair` (`architecture.md`, Per-operation
 allocation). `CreateRepair`'s op fails it too for a pick deleted, disabled
 or otherwise taken out of allocation, or short of extents, since the scan
@@ -551,7 +552,8 @@ are a member from the request, else from the owning
 `ClusterConf`, else from a constant of `common/constants.go` or, for the
 stripe, from the block, all applied by
 the RPC that writes the conf; a pool's stripe from its cluster is then
-narrowed to its slice count (`architecture.md`, Common validation). This
+narrowed where its product with the slice count is over the bound
+(`architecture.md`, Common validation, the stripe's product). This
 rule is where each handler carries that out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
 settles `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf` and
 `md_check_conf` (Clusters); `CreateStoragePool` stores `resolveSpBdevConf`'s
@@ -823,8 +825,8 @@ delete, get, list, update-disabled and inspect.
   `DefaultCntlrCntPerSp` and `DefaultSliceCntPerSp`, and it is the
   substituted count the plan and the STM's slice loop build the SP from.
   A stripe the request names is then judged against that count by
-  `validateStripeProduct`, the stripe's product of `architecture.md`,
-  Common validation, before any read.
+  `validateStripeProduct` (`architecture.md`, Common validation, the
+  stripe's product) before any read.
 
   Pre-STM plan (`planSpGroups`), in GW15's order: per slice the meta group
   (one extent) first, then the data group (`init_ext_cnt` extents) — extent
@@ -853,14 +855,15 @@ delete, get, list, update-disabled and inspect.
   request over the cluster's at the substituted slice count — merge first
   so an omitted member still inherits from the cluster, resolve second so
   what is stored is concrete, and narrow an inherited stripe last
-  (`architecture.md`, Storage pools and Common validation; GW11) — and
-  fail the unit right there, before a single other key is read, when this
-  transaction's cluster id or that conf's leg count no longer matches the
-  one the scan drew its picks for; `validateMergedBdevConf` on that conf and
-  `validatePrimaryThreshold` on the `ClusterConf` this STM read, once more
-  each (`ClusterConf` is write-once, so for an unchanged cluster id these
-  repeat the verdicts of the pre-read, but the in-STM read is the
-  authoritative one); `SpConfKey` present is `ALREADY_EXISTS`; mint `sp_id`
+  (`architecture.md`, Storage pools; `architecture.md`, Common validation;
+  GW11) — and fail the unit right there, before a single other key is
+  read, when this transaction's cluster id or that conf's leg count no
+  longer matches the one the scan drew its picks for;
+  `validateMergedBdevConf` on that conf and `validatePrimaryThreshold` on
+  the `ClusterConf` this STM read, once more each (`ClusterConf` is
+  write-once, so for an unchanged cluster id these repeat the verdicts of
+  the pre-read, but the in-STM read is the authoritative one);
+  `SpConfKey` present is `ALREADY_EXISTS`; mint `sp_id`
   and the shard from `SpGlobal` (GW12), then every `cntlr_id` in pick order
   (GW15); `model.ValidateClusterConf` before the cluster's `extent_size` is
   used (a zero is `ABORTED`, GW11); then per slice its `slice_id` and, in
@@ -1171,10 +1174,11 @@ below name.
   `common.CloneMetaBytes` at the SP's block size against the data blocks of
   one side, `FAILED_PRECONDITION` naming the largest destination one side
   holds; then `cloneIoSizeCheck`, `model.CloneOptimalIo` of the request's
-  source geometry and the SP's stored stripe, slice count and block against
-  `MaxNvmeTcpCmdBytes`, `FAILED_PRECONDITION` naming both products, the
-  size and the bound (`architecture.md`, Clones). The planning read also
-  walks `td_name_list` for a snapshot of
+  `src_stripe_size` and `src_slice_cnt` and the SP's stored stripe, slice
+  count and block against `MaxNvmeTcpCmdBytes`, `FAILED_PRECONDITION`
+  naming both products, the size, the pool's block and the bound
+  (`architecture.md`, Clones). The planning read also walks
+  `td_name_list` for a snapshot of
   the destination not yet `created` (`tdUncreatedSnapshots`), refused
   `FAILED_PRECONDITION` naming it, and records the pool's `sp_id` and
   revision; the deciding STM does not repeat that walk. Then the
@@ -1183,11 +1187,11 @@ below name.
   excluded, as `architecture.md`, Per-operation allocation, places a clone
   meta group; too few is `RESOURCE_EXHAUSTED`. STM: resolve; token; the same
   checks again; the cluster id, the `sp_id`, the leg count or the pool's
-  revision other than the plan's is candidate changed, since a snapshot
-  made after the plan's walk moves the revision and a pool created again
-  under the same name starts its revision at one; a token-carrying request
-  passes the token check against one that stands at the plan's revision,
-  and re-plans like a token-less one. Then the DN ledger
+  revision other than the plan's is candidate changed (`architecture.md`,
+  Clones, says why the plan is held to the `sp_id` and the revision); a
+  token-carrying request whose name resolves to a pool created again at
+  the plan's revision passes the token check and re-plans like a
+  token-less one. Then the DN ledger
   (`newDnLedger`) and every pick
   re-verified (`verifyPick`; a moved one is candidate changed);
   mint `clone_id`, then the group's `grp_id`, then per pick, in pick order,
@@ -1821,9 +1825,9 @@ gateway, never through `workerctl`.
   at its create, a cancel while it is pending, and a finish refused while
   it is pending, with `force` and without, before the suite plays the
   destination's provisioned flip and the cutover; a clone of
-  `MaxSliceCntPerSp` source slices of the largest source stripe, whose
-  dm-clone would report an optimal IO size over `MaxNvmeTcpCmdBytes`,
-  refused with nothing written; the clone's
+  `MaxSliceCntPerSp` source slices of the largest stripe a source may
+  have, whose dm-clone would report an optimal IO size over
+  `MaxNvmeTcpCmdBytes`, refused with nothing written; the clone's
   pair-addressed chunks, a page placed at the position it names, sent again
   with no write and refused at another position, past the end and inside
   the stored bytes, its latch with the destination

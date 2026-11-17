@@ -150,9 +150,9 @@ type bmPusherParams struct {
 	) (uint32, string, error)
 }
 
-// bmPusher is the push engine of one sp child (BM1-BM7). Its public surface is
-// missing (BM2/BM5), unacked (BM7) and submit (BM3), which the child's loop
-// goroutine calls and, for a migration, also the child's read goroutine;
+// bmPusher is the push engine of one sp child (BM1-BM7). Its public surface
+// is missing (BM2/BM5), unacked (BM2/BM5) and submit (BM3), which the child's
+// loop goroutine calls and, for a migration, also the child's read goroutine;
 // offer, which the coordinator's offer of a migration calls (BM7); spawn,
 // which runs that read; and stop, which the coordinator makes after joining
 // the child's loop. Each takes the engine's lock. A failure raises no flag
@@ -531,7 +531,8 @@ func (p *bmPusher) memoize(resId uint64, chunk model.BmChunk) {
 // the agent does before it saves a piece (dnagent.md DN15); and a piece
 // pushed again may be one the agent's set lacks. So each counts as delivered
 // only once a later push of it is answered code zero, and a push that fails
-// leaves them to the next offer (BM6, BM7). The runner pushes one piece of a
+// leaves them to the next offer, or to an accepted SyncupSide reply that
+// comes first (BM2, BM6, BM7). The runner pushes one piece of a
 // migration at a time, so no other push of it runs meanwhile (BM3).
 func (p *bmPusher) forgetFrom(resId uint64, bmIdx uint32) {
 	p.mu.Lock()

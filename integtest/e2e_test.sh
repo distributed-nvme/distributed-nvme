@@ -57,7 +57,8 @@
 #     it starts it again on the same data.
 #     The cleanup's pkill sweeps run whether or not a pid file exists, so they
 #     also reach a crashed run's processes whose pid files are gone, and each
-#     pattern is qualified by $WORK or by the etcd name, so it never touches
+#     pattern is qualified by $WORK, by the etcd name or, for fio's fence and
+#     stamp jobs, by a job name only this suite uses, so it never touches
 #     another suite's processes.
 #  4. nvmet teardown order: rmdir ports/<id>/ana_groups/3 and .../2 BEFORE
 #     rmdir ports/<id>, or the rmdir fails with "Directory not empty" and the
@@ -322,7 +323,9 @@ EXTENT_SIZE=67108864
 # The stored stripe is at most common.MaxDmRaid0StripeSize = 1 MiB and a power
 # of two, so it divides TD_SLICE_BYTES (below), and it meets the bounds
 # validateCloneGeometry puts on a clone's src_stripe_size, so the sp is one
-# `clone create` accepts as its source.
+# `clone create` accepts as its source, and cloned into itself its dm-clone's
+# optimal IO size, the sp's own product or one region, stays within
+# cloneIoSizeCheck's bound (gateway/clone.go).
 STRIPE_SIZE=0
 # The cluster's stored stripe, read back at setup step 4 and checked against
 # model.DefaultStripeSize of the default block, which `workerctl constants`
@@ -1918,8 +1921,9 @@ derive_params() {
 	# would cross. On top of it, 16 MiB for each dn agent: an agent's log
 	# grows with the case's length and the sides it serves, and at the
 	# widest pool, 180 agents, the copy case's logs alone come to about
-	# 20 MiB an agent, over 3 GiB. The copy case's stamps and the clone's copy of its source
-	# are not in it: they grow with the slices, so copy_clone_stamp and
+	# 20 MiB an agent, over 3 GiB. The copy case's stamps, which are host
+	# writes, and its first clone's hydration, the copy of its source, are
+	# not in it: they grow with the slices, so copy_clone_stamp and
 	# copy_mstamp_create add them to that case's cap.
 	#
 	# The react twins of the first and the third, REACT_SP_ZERO_BYTES and
@@ -1935,10 +1939,12 @@ derive_params() {
 	# whatever stripe the pool stores; setup_create_sp holds it to the stored
 	# stripe once the pool exists. It is the stripe's ceiling and not the
 	# stored stripe so that every td keeps whole MiB per slice: a td of four
-	# TD_UNIT then holds four pool blocks per slice, of which setup's pattern
-	# writes only the first, which leaves the copy case's appended bitmap
-	# chunks blocks to skip (copy_clone_build). Its react twin is
-	# REACT_TD_UNIT, at the end.
+	# TD_UNIT then holds four pool blocks per slice, of which the copy case's
+	# stamp over its first half, setup's pattern inside it, writes the first
+	# two at two slices or more, which leaves the copy case's appended bitmap
+	# chunks two blocks a slice to skip (copy_clone_stamp, copy_clone_build);
+	# at one slice setup's pattern writes all four and nothing is skipped.
+	# Its react twin is REACT_TD_UNIT, at the end.
 	TD_UNIT=$((SLICE_CNT * TD_SLICE_BYTES))
 
 	# The run's shape, and react's beside it (e2e_integtest.md, Topology and
@@ -5631,8 +5637,9 @@ wloop_stop() { # [secs]
 # fixed rate, with fio's own verify (crc32c over each block, stamped with its
 # offset) and its verify state saved when the job stops, at a write error
 # too. fwrite_verify then reads back, through another primary, every block
-# that saved state says completed, and the rest of the range, from the first
-# failed write on, as zeros. Everything lives in $FWRITE_DIR, which
+# that saved state says completed, the first failed write's own block as
+# zeros or that write's own bytes, and the rest of the range after it as
+# zeros. Everything lives in $FWRITE_DIR, which
 # host_cleanup's fwrite_stop removes.
 FWRITE_DIR="$WORK/fwrite"
 
@@ -10577,11 +10584,13 @@ setup_connect_host0() {
 	log "  host0 device $(host_dev "$UUID1") via nvme controller" \
 		"$(host_ctrl 0 "$SS0" "$PRIMARY_TRADDR") (optimized)"
 
-	# The sizes host0's block layer took from the namespace: its optimal IO
-	# size is the pool's stripe times its slice count, and no number of the
-	# head or of either path may pass common.MaxNvmeTcpCmdBytes, or host0's
-	# reads would carry commands a controller node refuses (architecture.md,
-	# Common validation, the stripe's product).
+	# The sizes host0's block layer took from the namespace: the path through
+	# the primary takes the pool's stripe times its slice count as its
+	# optimal IO size, the head takes the sizes of one path, and the
+	# standby's path may carry none. No number of the head or of either path
+	# may pass common.MaxNvmeTcpCmdBytes, or host0's reads would carry
+	# commands a controller node refuses (architecture.md, Common
+	# validation, the stripe's product).
 	host_io_sizes_check 0 "$UUID1" "$CNTLR_CNT" "ns 1 of $SS0"
 }
 
@@ -13261,8 +13270,10 @@ case_ops() {
 #     copy step 1's `xfer create --auto-suspend` until the transfer is
 #     deleted. The trap is real (rule 5 of the
 #     header): host_drop_caches issues a `sync`, and every read helper in this
-#     file drops caches first. So this case does ALL of its host0 IO after the
-#     transfer is deleted, and the clone's data is proved there. It costs
+#     file drops caches first. So this case does no host0 IO from copy step
+#     1's `xfer create` until the transfer is deleted — the clone's stamp is
+#     written and read back before the create (copy_clone_stamp) — and the
+#     clone's data is proved after the delete. It costs
 #     nothing: the destination thin device keeps the bytes whether or not the
 #     dm-clone is still above it.
 #     What is gained is a STRICTLY STRONGER assertion. Reading $TD_CLONE while
@@ -13357,10 +13368,13 @@ case_ops() {
 #    only cost an extra copy"), so chunks of only the slices one region spans
 #    are legal and correct, but their effect on the region set is not
 #    something `cntlr inspect` reports. What IS asserted is that each RPC
-#    that reaches the clone before its copy is whole is accepted and echoes
-#    the clone id, that one which comes later is refused only for the
-#    worker's latch (copy_clone_refused), and that the destination reads the
-#    source's digest, which a region skipped over written data would break.
+#    that reaches the clone before the worker latches it is accepted and
+#    echoes the clone id, that one refused is refused only for the worker's
+#    latch (copy_clone_refused), and that the destination reads the
+#    source's digest, which a region skipped over written data would break,
+#    and, with the origin as source, that the destination verifies the
+#    clone's stamp block by block and reads the unwritten rest as zeros
+#    (copy_clone_stamp_check).
 #  * That a grown sp still puts every side on a distinct DN. GrowSlice passes
 #    a nil black list (GrowSlice (gateway/storagepool.go)) — but nothing in this
 #    case grows the sp, so the create-time property still holds and the
@@ -13531,8 +13545,8 @@ COPY_HYD_SIG=""
 COPY_HYD_MARK=0
 COPY_SRC_START=0
 # COPY_CLONE_DRAINED is 1 once copy_clone_refused has accepted a refused
-# write to the clone, its copy whole and the clone drained before the write
-# reached it, and 0 otherwise; copy_clone_build clears it and reads it.
+# write to the clone, the worker having latched it, its copy whole, before the
+# write reached it, and 0 otherwise; copy_clone_build clears it and reads it.
 COPY_CLONE_DRAINED=0
 
 # The two migrations, and the "last observation" scratch of the predicates
@@ -14674,10 +14688,11 @@ host_stamp() { # <write|verify> <h> <uuid> <bytes> <what>
 # copy_clone_stamp stamps the clone's source before the transfer parks it:
 # host0 writes the first half of $TD0, COPY_CSTAMP_BYTES, with fio's verify
 # headers and reads it back, and reads SHA0 again from the device, as the
-# stamp overwrites the start of setup's pattern. The second half stays as
-# setup left it: at two slices or more never written, so the clone's
-# appended bitmaps still mark regions of it skippable, and copy step 3 reads
-# it as zeros through the clone; at one slice $TD0 is four blocks, all of
+# stamp overwrites setup's pattern, all of it at two slices or more and its
+# first half at one. The second half stays as setup left it: at two slices
+# or more never written, so the clone's appended bitmaps still mark regions
+# of it skippable, and copy step 3 reads it as zeros through the clone; at
+# one slice $TD0 is four blocks, all of
 # them setup's pattern, so the stamp covers half of it, nothing is left
 # unwritten and nothing is skipped, and SHA0 still covers the whole volume.
 copy_clone_stamp() {
@@ -15183,8 +15198,8 @@ copy_clone_write() { # <latched before> <what> <dnvctl args…>
 # source is parked from copy step 1 on, so they go first and the appends
 # follow the create with no wait between them. A copy can still win the race,
 # at many slices most often, where a region spans the most source slices and
-# so the most chunks: the run then logs what it does not test, sends nothing
-# more to the clone and waits for no hydration, as the clone is gone; copy
+# so the most chunks: the run then logs the refusal, sends nothing more to
+# the clone and waits for no hydration, as the clone is gone; copy
 # step 3's reads of the destination are the proof of the bytes either way.
 #
 # It returns 1 — WITHOUT dying — when and only when copy_clone_progress named
@@ -15315,14 +15330,14 @@ copy_clone_build() { # <latched before>
 	if [ "$COPY_CLONE_DRAINED" = 1 ]; then
 		log "  the clone's copy was whole before slice $idx's chunk reached it:" \
 			"the worker latched and drained clone $CLONE0, so this run does" \
-			"not test the skip of unwritten regions"
+			"not test the skip of unwritten regions or UpdateCloneTrConf"
 	fi
 
 	# UpdateCloneTrConf with the SAME transport: the RPC exists for a source
 	# that moved, and re-sending the current one is the only way to exercise
 	# it without moving anything. ensureCloneSource (agent/cnagent/clone.go)
 	# skips an entry it is already connected to, so this cannot
-	# disturb a connection that is already up. A clone whose copy is whole
+	# disturb a connection that is already up. A clone the worker latched
 	# before it arrives refuses it as it refuses a chunk.
 	if [ "$COPY_CLONE_DRAINED" = 0 ]; then
 		if copy_clone_write "$before" "the set-tr of the same transport" \
@@ -15424,7 +15439,8 @@ copy_clone() {
 	# stripe passes it; the assert_le states the clone's bound where the
 	# clone is made. The same branch clones the sp into itself, so the
 	# clone's optimal IO size is the sp's own product, which its create kept
-	# within MaxNvmeTcpCmdBytes (cloneIoSizeCheck (gateway/clone.go)).
+	# within MaxNvmeTcpCmdBytes, or one region where that product is not a
+	# whole number of regions (cloneIoSizeCheck (gateway/clone.go)).
 	sp_refresh
 	sp_read_roles
 	SP_STRIPE_SIZE=$(sp_field '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size')
@@ -15477,9 +15493,9 @@ copy_clone() {
 	# whole (dnv-worker.md CLD13), so this create may find the clone live —
 	# CN16 rule 5 backs the namespace with CnCloneFinalName, and rule 6 then
 	# moves the same ns-dev onto $TD_CLONE's own raid0 — or latched, or
-	# drained when its copy was whole before copy_clone_build's last write
-	# reached it, rule 6 alone; copy step 7 creates its namespace before its
-	# clone and so meets both. The namespace is asserted by the ANA state and
+	# drained, as copy_clone_refused leaves it, rule 6 alone; copy step 7
+	# creates its namespace before its clone and so meets both. The
+	# namespace is asserted by the ANA state and
 	# the device node here and by the digest in the next stage, which is read
 	# only after the transfer is gone (constraint (a)).
 	ctl_ok ns create --nqn "$SS0" --idx 2 --td "$TD_CLONE" --uuid "$UUID2"
@@ -15842,10 +15858,14 @@ copy_migr_unthrottle() { # <v>
 # logged a whole discard on migration <migr id>'s dm-clone, the pieces'
 # apply (dnagent.md DN15; osclient.md, DiscardRanges): an "os discard ranges"
 # record of that device's path with no error and every range done.
-# COPY_MIGR_DISCARDED is how many regions, one SP block each, those records
-# marked copied, each counted once. An apply that sends no discard logs
-# "applying migration bitmap failed", which is logged here when it changes,
-# as the wait then runs out.
+# COPY_MIGR_DISCARDED is how many regions, one SP block each, the ranges
+# those records list marked copied, each counted once; a record lists at
+# most discardLogRanges (common/osclient.go) of its ranges, so this is a
+# lower bound. An apply that fails logs "applying migration bitmap failed",
+# which is logged here when it changes, as the wait then runs out; one that
+# finds the dm-clone absent or suspended sends nothing and logs nothing, and
+# the converge that creates or resumes it applies the pieces again
+# (ApplySkipRanges (agent/bitmap.go)).
 COPY_MIGR_DISCARDED=""
 COPY_MIGR_APPLY_LAST=""
 COPY_MIGR_CAPPED=""
@@ -16340,11 +16360,14 @@ copy_migration() {
 # kill's. The quiet thresholds keep every reaction off the pool for longer
 # than the two steps run: the worker's own leg repair waits side_unhealthy
 # ($THR_SIDE s) from a side's epoch and leaves a group with an operator's
-# repair alone (dnv-worker.md AR8), so it cannot race the operator's creates,
-# and the retire timer deletes only a retired leg RetiredLegMaxAge old
-# (dnv-worker.md AR12), so the retired legs stay the operator's. No failover
-# is expected, and none may happen: leg rows do not count toward a cntlr's
-# health (dnv-worker.md HL2).
+# repair alone (dnv-worker.md AR8), so it cannot race the operator's creates
+# — save step 5's new leg once step 6 kills its disk node in md's copy: md's
+# bad-block ranges make it a candidate at once, with no threshold, and the
+# group's operator_in_charge flag holds it instead (dnv-worker.md AR8, A leg
+# with bad-block ranges) — and the retire timer deletes only a retired leg
+# RetiredLegMaxAge old (dnv-worker.md AR12), so the retired legs stay the
+# operator's. No failover is expected, and none may happen: leg rows do not
+# count toward a cntlr's health (dnv-worker.md HL2).
 #
 # MD'S COPY IS SLOWED. Step 6 needs md's copy onto this step's new leg still
 # running when it kills that leg's disk node. So before the create this step
@@ -25339,15 +25362,18 @@ cut_drop_target() {
 # alone with a plain connect, and fio writes a new thin device through it in
 # order, one write in flight, each durable before it returns (fwrite_start).
 # The primary's cn agent is stopped, so its kernel objects go on serving
-# host1 until the sides fence its legs, and the worker fails over. md fails a
-# write only when every member failed it, so a write host1 saw fail landed on
-# no leg; with one write in flight the first failed write is the only one in
-# doubt, and the design says it did not land. So once fio has stopped on a
-# write error, having issued exactly the writes before it and that one, host1
-# moves to the new primary, fio verifies every block before the failed
-# write's offset, and the range reads zeros from that offset on. A writer
-# that never sees an error fails the stage: it cannot pass by missing the
-# fence.
+# host1 until the sides fence its legs, and the worker fails over. An error
+# tells host1 a write's outcome is unknown, not that nothing was written, so
+# with one write in flight the first failed write is the one host1 is told
+# is in doubt: once fio has stopped on a write error, having issued exactly
+# the writes before it and that one, host1 moves to the new primary, fio
+# verifies every block before the failed write's offset, that write's own
+# block reads zeros or its own bytes, and the range reads zeros after it. A
+# write the old primary acknowledged can still be lost at this failover, a
+# known defect (architecture.md, Known limits, A failover while the old
+# primary serves can lose an acknowledged write), and fails the verify. A
+# writer that never sees an error fails the stage: it cannot pass by missing
+# the fence.
 cut_fence_writer() {
 	stage 10 "a live writer on host1 through the primary while the fence falls"
 	local size out rc off issued line bound range_secs ids
@@ -25519,8 +25545,9 @@ cut_fence_writer() {
 	line=$(printf '%s\n' "$out" | head -n 1)
 	# The failed write's own block may hold its bytes: an error tells the
 	# host the write's outcome is unknown, not that nothing was written, and
-	# with one write in flight it is the only one in doubt. Every block
-	# after it must read zeros, as fio issued nothing past it.
+	# with one write in flight it is the only one the host is told is in
+	# doubt. Every block after it must read zeros, as fio issued nothing
+	# past it.
 	case "$line" in
 	"verify_rc=0 verified_bytes=$off failed_block=zeros zeros=ok")
 		log "  the failed write at offset $off did not land" ;;

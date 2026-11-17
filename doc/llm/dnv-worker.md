@@ -416,8 +416,9 @@ visit every pool (`gateway.md` GW19), scanned by no worker; `CntlrKey` and
 seven-field key, BOTH indexes rendered with `BmIdxFmt` —, `CloneBitmapPrefix`
 and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`;
 `LegacyMigrBitmapKey`, the key under which an older build kept one chunk
-of a migration's bitmap, at an index below `LegacyMigrBmCnt`, of a kind no
-build writes: only `EndMigrationIn` names it, to delete it
+of a migration's bitmap, at an index below `LegacyMigrBmCnt`, of a kind
+this design neither writes nor reads: only `EndMigrationIn` names it, to
+delete it
 (`architecture.md`, Upgrade in lockstep); `RepairKey` and `RetiredLegKey`, with `RepairPrefix` and
 `RetiredLegPrefix`, the prefixes MD3's load ranges; `WorkerRegKey`,
 `WorkerRegPrefix` and `ParseWorkerRegKey`; and `WorkerRegistryPrefix`, the
@@ -1629,14 +1630,15 @@ during the pause (HL7); and the latest `Syncup*` reply's observation time,
 because the round right after that reply, when it answers from that observation, is
 late by the loop's own wait when that `Syncup*` ended a round (RW4 step 5,
 RW6), which the late record leaves out (HL7).
-BM5's mod-revision memo survives rounds too, but it belongs to the pusher,
-and AR10's memo of the health verdicts the rounds reach belongs to the sp
-coordinator: it holds health verdicts — the objects the coordinator last judged
-unhealthy and each cntlr's run of unhealthy verdicts from rounds — and no
-work owed. A dn loop's count compare (RW13) keeps a cache of the record as
-well — its free and total extents with the `DnRev` revision read with them,
-replaced by every read of the record that answers — and two memos of its
-compares that owe nothing: its run of disagreeing compares, and whether
+BM5's memo survives rounds too, but it belongs to the pusher. AR10's memo
+of the health verdicts the rounds reach belongs to the sp coordinator: it
+holds health verdicts — the
+objects the coordinator last judged unhealthy and each cntlr's run of
+unhealthy verdicts from rounds — and no work owed. A dn loop's count
+compare (RW13) keeps a cache of the record as well — its free and total
+extents with the `DnRev` revision read with them, replaced by every read
+of the record that answers — and two memos of its compares that owe
+nothing: its run of disagreeing compares, and whether
 that run was logged. The memos of what was LOGGED — RW9's two, plus, on a
 cntlr child, the last standby leg row logged per leg, so HL2's standing row
 does not repeat every round — never record what is owed, and neither does
@@ -3125,7 +3127,10 @@ in `bm_idx` order; a clone's chunks are self-positioned pairs, so there the
 order is deterministic and nothing more. Different migrations and clones
 push independently and MAY run concurrently toward one agent
 (`architecture.md`, Bitmap push protocol); within one object the child
-sequences them.
+sequences them: a plan made for an object while one of its plans runs
+waits until that one ends, and replaces any plan already waiting, so the
+pushes of one object never overlap and the plan that waits is always the
+newest (`bmPusher.submit`).
 
 **Neither request carries a revision**, and no agent gates one on a
 revision. A chunk is position-addressed data keyed by a `migr_id` or
@@ -3167,7 +3172,8 @@ when that push is answered code zero. Reasons: whatever the reply, the
 push may have taken the chunks at its index and above out of the agent's
 set, which the agent does before it saves a piece (`dnagent.md` DN15),
 and a piece pushed again may be one the agent's set lacks; so a push that
-fails leaves the piece and those above it to the next offer (BM6, BM7). A
+fails leaves the piece and those above it to the next offer, or to an
+accepted `SyncupSide` reply that comes first (BM2, BM6, BM7). A
 memo lost with its child costs nothing more for a migration, whose pieces
 a new child reads and pushes again (BM7).
 
@@ -3179,15 +3185,20 @@ not been applied yet, or the address is out of range for the object) — is
 logged as `bitmap push failed` (Log records) and **ends that plan**; a
 migration piece is also refused `ReplyCodeSaveFailed` when its agent
 could not remove the chunks at its index and above, or could not save
-it (`dnagent.md` DN15), so no piece above it is pushed until it is
-pushed again. The
+it (`dnagent.md` DN15), and its plan pushes no piece above it. The
 remaining parts are not sent, nothing is re-armed and no flag is raised
 anywhere. The next accepted `Syncup*` reply for the object re-plans the
 diff (BM2) from the agent's OWN acknowledged set, together with, for a
 migration, every piece the memo of BM5 does not list; the pushes after a
 migration's read and on its offers are planned without the agent's set
-(BM7). A plan rebuilt from a remembered failure would be a plan built from
-the worker's memory instead of from the agent's state.
+(BM7). For a clone, a plan rebuilt from a remembered failure would be a
+plan built from the worker's memory instead of from the agent's state. A
+migration's reply and offer plans read the memo, the worker's record of
+the agent's code-zero answers (BM5), because no `SyncupSide` need follow
+the read and the agent's set cannot tell a piece of this read from a
+chunk an older build left at the same index (BM2, BM7); a piece the memo does not list is pushed again, at worst one
+the agent holds byte for byte and takes without a save (`dnagent.md`
+DN15).
 The rest of the plan goes with the failed part because the parts are
 ordered (BM3) and a migration's pieces are interpretable only in sequence.
 A migration's pieces are the one exception to waiting for a `Syncup*`:
@@ -3200,16 +3211,17 @@ rejection code, or a stored revision behind the desired one — and RW4 step
 5 issues the `Syncup*` whose accepted reply re-plans within the round. A
 migration piece refused because its agent could not remove the chunks at
 its index and above, or could not save it (`dnagent.md` DN15), has no
-such echo; it waits for the next offer (BM7). When
+such echo; it waits for the next offer (BM7), or for an accepted
+`SyncupSide` reply that comes first (BM2). When
 the push failed on the wire while the agent is healthy and at the desired
 revision, no re-sync is due and a clone's chunk waits for the next accepted
 `Syncup*` from any cause (a revision bump or a leftover; a handoff sends
 none, since a new child starts with a round, which sends a syncup only on a
 code or a revision, RW4), and so do the parts of a plan that a worker's
-failure cut short; a migration's piece waits for the next offer instead
-(BM7). That wait is accepted because the skip bitmap is an
-optimization: a chunk or a piece that has not arrived leaves its regions
-hydrated instead of discarded (`architecture.md`, Bitmap push protocol),
+failure cut short; a migration's piece waits for the next offer instead,
+or for an accepted `SyncupSide` reply that comes first (BM2, BM7). That
+wait is accepted because the skip bitmap is an optimization: a chunk or a
+piece that has not arrived leaves its regions hydrated instead of discarded (`architecture.md`, Bitmap push protocol),
 which costs copying, never correctness.
 
 BM7. **The migration bitmap read.** The side child of a migration's

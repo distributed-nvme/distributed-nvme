@@ -479,8 +479,9 @@ exactly when the object has failed to go. The exception is a file no memory
 entry names — a chunk the startup reload skipped (DN2, `cnagent.md` CN2),
 or one a push left outside the applied set when its save failed only at
 the directory sync (DN15, `cnagent.md` CN22), that no push has rewritten
-since; the `side-*` or `cntlr-*` file of an object the reload skipped
-that no `SyncupSide` or `SyncupCntlr` has rebuilt; or the one a
+or, for a migration, removed since; the `side-*` or `cntlr-*` file of an
+object the reload skipped that no `SyncupSide` or `SyncupCntlr` has
+rebuilt; or the one a
 `SyncupSide` or `SyncupCntlr` for an object the agent does not hold left
 behind when it was refused for a save whose rename held and whose
 directory sync failed (SH5): it is not deleted when its object's pointer
@@ -1091,7 +1092,8 @@ persist the received `Push*BitmapRequest` verbatim at its `Local*BmPath`
 (via `WriteProto`) **before** applying; the applied set is derived from the
 files present, save those the startup reload leaves unloaded and those a
 failed push left in place for a chunk outside the set, since a push whose
-save fails adds nothing to it (below) —
+save fails adds nothing to it, and it still lists the migration chunks
+whose files a removal that failed deleted (below). The set is reported as
 `BitmapInfo.bm_idx_list` for a migration, keyed by the piece index, and
 `BitmapInfo.chunk_id_list` for a clone, keyed by the `src_slice_idx` and
 `bm_idx` pair that addresses the chunk. The file name carries that pair too,
@@ -1099,14 +1101,20 @@ but only as an address: the persisted request's CONTENT is what the startup
 reload decodes it from. A file that reload leaves unloaded — one that does
 not decode, DN2's skips while a `dn-*` or `side-*` file does not load, and
 `cnagent.md` CN2's while a `cn-*` or `cntlr-*` file does not — is in no
-applied set until a push rewrites it or a later restart loads it. A push
-whose save failed only at the directory sync, after its rename, leaves
-its file in place and applies nothing (DN15, `cnagent.md` CN22): a clone
-chunk stays in the applied set as it held it before that push — out of
-the set if it was out, in it at the bytes it held if it was in, which for
-a chunk that grows in place are its older bytes — and a migration chunk
-is out of it, as the push took the chunk at its index out before its save
-(DN15), until a push rewrites it or a later restart loads it.
+applied set until a push rewrites it or a later restart loads it, unless
+a migration push removes it first (DN15). A push whose save failed only at
+the directory sync, after its rename, leaves its file in place and applies
+nothing (DN15, `cnagent.md` CN22). A clone chunk then stays in the
+applied set as it held it before that push: out of the set if it was out,
+in it at the bytes it held if it was in, which for a chunk that grows in
+place are its older bytes. A migration chunk is out of the set, as the
+push took the chunk at its index out before its save (DN15). Either stays
+so until a push rewrites the file or a later restart loads it, unless a
+later migration push removes a migration chunk's file first (DN15). A
+migration push whose removal fails leaves the applied set as it was, even
+where it deleted some of the chunk files at its index and above, until a
+push at or below their indexes takes them out of it or a restart reloads
+the set from the files present (DN15, DN2).
 
 SH22. Of `architecture.md`, raid0 bitmap math, this file holds the
 migration's chunk placement (concatenation in `bm_idx` order,
@@ -1126,13 +1134,21 @@ The dn supplies only the positioning parameters (it shifts by the leg's
 
 SH23. Migration chunks are interpretable only as a contiguous prefix from
 `bm_idx` zero; the apply computation uses the longest contiguous prefix of
-the applied set's chunks (`ChunkSet.ContiguousPrefix`, SH21) — the worker's
-ascending, one-in-flight push leaves a gap only where a piece's save
-failed, until it pushes that piece again (DN15, `dnv-worker.md` BM2). A
-saved chunk first takes every chunk above it out of the set (DN15), so a
-piece is placed only behind pieces of the same read or older chunks equal
-to them byte for byte, never behind an older chunk of another length. The
-applied set still reports every chunk in it, not only that prefix.
+the applied set's chunks (`ChunkSet.ContiguousPrefix`, SH21). A push whose
+save fails opens no gap: it takes the chunks at its index and above out of
+the set before its save and is refused (DN15), so the set then ends below
+that index until the worker pushes the piece again (`dnv-worker.md` BM6,
+BM7). A gap opens where a chunk goes while chunks above it stay or are
+saved after it, as with a startup reload that leaves a chunk's file
+unloaded (SH21), a crash of the machine before a push's save holds
+(DN15), or the two workers that both drive the side for a moment in an
+ownership change (`dnv-worker.md` VW7), when one saves a piece above an
+index from which a push of the other took the chunks out; it lasts until
+a push at or below it removes the chunks above it (DN15). A saved chunk first takes
+every chunk above it out of the set (DN15), so a piece is placed only
+behind pieces of the same read or older chunks equal to them byte for
+byte, never behind an older chunk of another length. The applied set still
+reports every chunk in it, not only that prefix.
 
 ### Check-stream rules
 
@@ -1588,7 +1604,7 @@ still names is where a lost `--local-store` leaves one — known by its
 pointer alone (DN6) — until its `SyncupSide`, which DN8 admits only after
 that `SyncupDn`, converges from the request it carries and rewrites its
 file; that reply's `bm_info` acknowledges no chunk, so the worker pushes
-each chunk of the migration again (DN15). A skipped side the re-sent list
+each chunk of the migration again (`dnv-worker.md` BM2; DN15). A skipped side the re-sent list
 no longer names is in no list and not loaded, so that DN's node-level sweep
 removes its resources by name (DN6); its files wait for a later restart,
 whose pass finds its pointer absent and drops them (SH7).
@@ -1610,8 +1626,10 @@ whose stored length to zero DN8's side conf gate refuses converges and
 sweeps nothing of that side. Then every chunk that was kept is re-applied
 (SH21 to SH23); that step deletes nothing. The chunks an older build left
 for a migration under way at the upgrade are loaded and re-applied like
-any other, at the places that build gave them; the first piece the worker
-saves takes out every one at its index or above (DN15). A chunk whose side is not
+any other, at the places that build gave them; the first piece of the
+worker's that this agent saves, one that is not byte for byte the chunk it
+holds at that index, takes out every chunk at its index or above before
+its save (DN15). A chunk whose side is not
 loaded is no orphan while a
 `side-*` file does not load and the chunk's loaded DN still names its side:
 that file names no side, so it may be this side's, and the chunk is
@@ -1790,7 +1808,7 @@ at that point. The files deleted are the ones its memory entry names — the
 request's own path and its chunk set's files — so a file no memory entry
 names stays: a chunk DN2's reload skipped, or one a push left outside the
 applied set when its save failed only at the directory sync (DN15), that
-no push has rewritten since; every file of a side DN2 skipped that no
+no push has rewritten or removed since; every file of a side DN2 skipped that no
 `SyncupSide` has rebuilt, which the process does not hold at all; and the
 `side-*` file a `SyncupSide` left for a side the process does not hold
 when its save failed only at the directory sync (SH5). They wait for a
@@ -3329,7 +3347,8 @@ are of any length (`architecture.md`, Upgrade in lockstep) — so it would
 join the new piece at the wrong place, and the copy would never copy the
 regions it then marks skippable; the worker pushes every piece above one
 it pushes, in rising order (`dnv-worker.md` BM2), so the drop costs a save
-for each of them, and only when a piece changes. The chunk at the index
+and an apply, with its pause of the volume, for each of them, and only
+when a piece changes. The chunk at the index
 goes too, so that a save that fails leaves no older chunk there. The
 removal comes before the save and syncs no directory: the save's
 directory sync makes it durable with the new file (`architecture.md`,
@@ -3340,9 +3359,13 @@ a removal that fails, or a save that fails after it, refuses the push
 with `ReplyCodeSaveFailed`, its `details` naming the index and the error.
 A code-zero reply would let the worker push the next piece, whose save
 could put it above an older chunk the removal left or a crash brought
-back; the refusal ends the worker's plan (`dnv-worker.md` BM6) and its
-next offer pushes the piece again (`dnv-worker.md` BM7). A removal that
-fails saves, takes out and applies nothing. Then SH21 to SH23: persist
+back; the refusal ends the worker's plan, and its next offer, or an
+accepted `SyncupSide` reply that comes first, pushes the piece again
+(`dnv-worker.md` BM6, BM7). A removal that
+fails saves and applies nothing and leaves the applied set as it was, even
+where `rm` deleted some of the files before its error; the next push of
+that piece removes them again and takes them out of the set. Then SH21 to
+SH23: persist
 the chunk at `LocalMigrBmPath`, recompute from the applied
 set's contiguous prefix (SH23; shifted by the leg's `meta_blocks`),
 discard the fully-skippable regions of `DnMigrFinalName`, in one call of
@@ -3596,9 +3619,11 @@ needed, and the worker never turns one into an `err_epoch`
   epoch where it is. A removal that fails leaves the file until the next
   startup deletes it (SH6). A read writes no probe file while the second
   state is clear. Reason: the worker pushes a piece whose save failed
-  again only on an offer of its migration or after a later accepted syncup
-  of its side (DN15; `dnv-worker.md` BM2, BM7), which a quiet node does not
-  get, so without the probe the row of a quiet node would read the
+  again only after a later accepted syncup of its side or on an offer of
+  its migration, and an offer pushes only while the primary reports a
+  live path to the side and the side shows its dm-clone (DN15;
+  `dnv-worker.md` BM2, BM7); a quiet node gets neither while the offers
+  pause, so without the probe the row of such a node would read the
   refusal, with an old error, until the next save of anything, and the
   worker would offer the node for no new side for that long; and the bytes are random, since a file system
   that compresses or shares blocks stores zeros in next to no room. The row

@@ -98,10 +98,16 @@ func (c *ChunkSet) Indexes() []uint32 {
 // ContiguousPrefix concatenates the longest run of chunks starting at
 // bm_idx 0. Migration chunks are interpretable only as such a prefix: chunk
 // k's first bit sits at the summed bit length of chunks 0…k−1, so a gap makes
-// every later chunk unplaceable (SH23). The worker's ascending, one-in-flight
-// push leaves a gap only where a piece's save failed, until it pushes that
-// piece again (SH23, DN15); the applied set (Indexes) still reports every
-// chunk in the set, not only this prefix.
+// every later chunk unplaceable (SH23). A push whose save fails opens no
+// gap, since it takes the chunks at its index and above out of the set
+// before its save and is refused (DN15). A gap opens where a chunk goes
+// while chunks above it stay or are saved after it, as with a startup
+// reload that leaves a file unloaded, a crash before a push's save holds, or
+// the two workers that both drive the side for a moment in an ownership
+// change (dnv-worker.md VW7), when one saves a piece above an index from
+// which a push of the other took the chunks out; it lasts until a push at
+// or below it removes the chunks above it (SH21, SH23). The applied set (Indexes) still reports every chunk in the set, not
+// only this prefix.
 func (c *ChunkSet) ContiguousPrefix() []byte {
 	var out []byte
 	for bmIdx := uint32(0); ; bmIdx++ {

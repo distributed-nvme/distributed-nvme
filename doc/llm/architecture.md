@@ -1285,7 +1285,7 @@ this document relies on:
 | `CloneBitmap` | {p} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx} | one chunk of source slice `src_slice_idx`'s bitmap, self-positioned at byte `bm_idx` times `CloneBmChunkBytes` within it (Bitmap push protocol); `src_slice_idx` is below `src_slice_cnt`, itself at most `MaxSliceCntPerSp`, and `bm_idx` is below `MaxCloneBmCnt` |
 | `Transfer` | {p} transfer {cluster_id} {sp_id} {xfer_name} | |
 | `Migration` | {p} migration {cluster_id} {sp_id} {migr_name} | carries `meta_units`, the destination's metadata units, written by `CreateMigration` (Metadata units), and `cutover_pending`, which `CreateMigration` writes set and only the sp worker's cutover clears (Migration) |
-| (none) | {p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx} | one chunk of an older build's migration bitmap, `bm_idx` below `model.LegacyMigrBmCnt`; no build writes or reads it, and `model.EndMigrationIn` deletes it with its migration (Upgrade in lockstep) |
+| (none) | {p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx} | one chunk of an older build's migration bitmap, `bm_idx` below `model.LegacyMigrBmCnt`; this design neither writes nor reads it, and `model.EndMigrationIn` deletes it with its migration (Upgrade in lockstep) |
 | `Repair` | {p} repair {cluster_id} {sp_id} {rep_name} | its new leg embedded, with its side; listed in `SpConf.repair_name_list` and named by its group's `rep_name` (Repairs) |
 | `RetiredLeg` | {p} retired_leg {cluster_id} {sp_id} {leg_id} | keyed by the leg's own id, its side embedded; listed in `SpConf.retired_leg_id_list` and in its group's `retired_leg_id_list` (Retired legs) |
 | `SpName` | {p} sp_id_to_name {cluster_id} {sp_id} | reverse lookup for admin and log analysis; needed because `SpRev`, which also carries `sp_name`, can only be addressed with the SP's shard code [D10] |
@@ -1933,8 +1933,9 @@ harmless. A migration destination takes its run before it zeroes
   paged list RPCs resolve it per request, cut one page with it and throw it
   away (page_token; `gateway.md` GW4). The bounds and the defaults are
   constants of `common/constants.go`, save the stripe's default, which
-  follows the block and, for a pool, its slice count, and a clone's
-  hydration defaults, which are the dm-clone target's own:
+  follows a cluster's block and, for a pool, its cluster's stored stripe
+  and its slice count (below), and a clone's hydration defaults, which are
+  the dm-clone target's own:
   * `dn_bin_conf.extent_size`: `MinDnExtSize` to `MaxDnExtSize`, default
     `DefaultDnExtSize`;
   * `alloc_conf.dn_batch_size`: `MinAllocDnBatchSize` to
@@ -1967,10 +1968,11 @@ harmless. A migration destination takes its run before it zeroes
     default it stored, so refusing an inherited stripe would refuse every
     pool that names none and whose slice count times the cluster's stripe
     is over the bound; powers of two keep the narrowed stripe a divisor of
-    the block, as every stored stripe is. A pool whose narrowed
-    stripe is below its block gives up the two gains of the reason above
-    (Known limits). A stripe the request names is never narrowed: the
-    operator asked for it, and the bound below judges it;
+    every block at least as large, as the geometry rules require of every
+    stripe. A pool whose
+    narrowed stripe is below its block gives up the two gains of the
+    reason above (Known limits). A stripe the request names is never
+    narrowed: the operator asked for it, and the bound below judges it;
   * `redund_md_raid1.bitmap_chunk_block_cnt`: `MinChunkBlockCnt` to
     `MaxChunkBlockCnt`, default `DefaultChunkBlockCnt`;
   * the `DmCloneConf` hydration pair, of a clone and of a migration alike:
@@ -2481,9 +2483,9 @@ stripe's product).
 Defaults: `cntlr_cnt` is `DefaultCntlrCntPerSp`; `slice_cnt` is
 `DefaultSliceCntPerSp`; `cntlid_slot_list` is every slot below
 `CnCntlidSlotCnt`; `bdev_conf` is taken member-wise from
-`ClusterConf.bdev_conf`, then from the constants or, for the stripe, from
-the block, a stripe the request does not name then narrowed to the slice
-count (Common validation) (a `redund_conf` unset in
+`ClusterConf.bdev_conf`, whose stripe is stored concrete (Clusters), then
+from the constants, a stripe the request does not name then narrowed to
+the slice count (Common validation) (a `redund_conf` unset in
 both the request and the cluster conf means `redund_none`; dnvctl defaults
 it to `redund_md_raid1` on the CLI). What is stored is the result of that
 merge, every defaultable member
@@ -3150,22 +3152,9 @@ slice of it made after the copy began would hold part of the copy, the
 message naming the snapshot — a destination whose
 dm-clone metadata one side of a clone meta group cannot hold — the message
 names the largest destination one side holds — or a clone whose dm-clone
-would report an optimal IO size over `MaxNvmeTcpCmdBytes` (Common
-validation, the stripe's product), judged after the metadata bound from
-the source geometry the request names and the destination pool's stored
-one, the message naming both products, the size and the bound. That size
-is the kernel's: the least common multiple of the source's
-`src_stripe_size` times `src_slice_cnt` and the pool's stripe times its
-slice count, where that multiple is at least one region, the pool's block,
-and a whole number of regions, else the block. Reason: a host that reads
-the identity of the clone's namespace while the dm-clone serves under it
-takes that size, and keeps it after the clone ends until it reads the
-identity again, so the clone's hosts would send commands the controller
-node refuses although each pool alone keeps the bound. The price: pools
-whose slice counts are powers of two clone into each other freely at the
-defaults, but a clone that involves another slice count can be refused, a
-one-slice volume into some such pools among them, and every clone into a
-pool whose block is over the bound is; `INVALID_ARGUMENT` when
+would report an optimal IO size over `MaxNvmeTcpCmdBytes` (the optimal IO
+size paragraph below), the message naming both products, the size, the
+pool's block and the bound; `INVALID_ARGUMENT` when
 `src_tr_conf` is empty or longer than `MaxCntlrCntPerSp` or has an entry
 that is empty or has a member left blank (Common validation), `src_nqn` is
 invalid, `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
@@ -3211,6 +3200,24 @@ extent and on the block, a region being one block, so it is lowest at the
 smallest extent and the smallest block. It is a property of the request against
 the pool's own geometry, which no capacity frees, hence
 `FAILED_PRECONDITION`.
+
+The optimal IO size: a clone's dm-clone is held to the bound of Common
+validation, the stripe's product. `CreateClone` judges the dm-clone's
+optimal IO size after the metadata bound, from the source geometry the
+request names and the destination pool's stored one. That size is the
+kernel's: the least
+common multiple of the source's `src_stripe_size` times `src_slice_cnt`
+and the pool's stripe times its slice count, where that multiple is at
+least one region, the pool's block, and a whole number of regions, else
+the block. Reason: a host that reads the identity of the clone's
+namespace while the dm-clone serves under it takes that size, and keeps it
+after the clone ends until it reads the identity again, so the clone's
+hosts would send commands the controller node refuses although each pool
+alone keeps the bound. The price: pools whose slice counts are powers of
+two clone into each other freely at the defaults, but a clone that
+involves another slice count can be refused, a one-slice volume into some
+such pools among them, and every clone into a pool whose block is over the
+bound is refused.
 
 On the primary cntlr the clone's build ends in the stack of fig.
 `090Clone`: the dm-clone `CnCloneFinalName` — its metadata the device of
@@ -3622,8 +3629,9 @@ force, and it is how an operator ends a migration whose cutover never comes
 **GetMigration** — one STM read; the reply is the record as stored, its
 `cutover_pending` included, which tells whether a finish can succeed yet.
 
-**The migration bitmap.** No call of the gateway carries it and etcd
-holds none of it. The sp worker reads the leg's bitmap once the copy may
+**The migration bitmap.** No call of the gateway carries it, and this
+design keeps none of it in etcd (an older build's keys of it are deleted
+when the migration ends, Upgrade in lockstep). The sp worker reads the leg's bitmap once the copy may
 start (Migration; `dnv-worker.md` BM7) and pushes it to the destination DN in pieces
 (Bitmap push protocol; `dnv-worker.md` BM7). The pieces concatenate, in
 `bm_idx` order, into one bitmap over the **leg's data region**: bit k
@@ -4298,7 +4306,11 @@ its pad bits in the middle of the chunk and shift every later bit. So
   the applied set keeps a clone chunk as it held it before that push, and
   holds no migration chunk at that index or above, which the push took out
   first, until a push rewrites the file or a later restart loads it
-  (`dnagent.md` SH21, DN15). Re-applying a chunk is always
+  (`dnagent.md` SH21, DN15). A migration push whose removal fails leaves
+  the applied set as it was, though the removal may have deleted some of
+  those chunks' files, until a push at or below their indexes takes them
+  out or a restart reloads the set (`dnagent.md` SH21, DN15). Re-applying
+  a chunk is always
   harmless — discarding an already-hydrated dm-clone region again is a
   no-op, which holds only because every dnv dm-clone carries
   `no_discard_passdown` ([D7]; `cnagent.md` CN18). Bitmap push protocol
@@ -4340,12 +4352,14 @@ its pad bits in the middle of the chunk and shift every later bit. So
 * `PushMigrBitmap` delivers one piece of a migration's bitmap
   (`side_pointer`, `migr_id`, `bm_idx`, `bitmap`) to the
   **destination**-side agent, per Bitmap push protocol: a `bm_idx` at or
-  above `MaxMigrBmCnt` is refused (`dnagent.md` DN15); a piece equal to
-  the one held is taken as it is; any other first removes the stored
-  chunks at its `bm_idx` and above, the push refused when that removal
-  fails; persist the piece at `LocalMigrBmPath`, then recompute and
-  discard the fully skippable dm-clone regions (Migrations, raid0 bitmap
-  math). Reply `agent_reply` only.
+  above `MaxMigrBmCnt` is refused (`dnagent.md` DN15); a piece equal,
+  byte for byte, to the one held at its index is answered OK with nothing
+  removed, saved or applied; any other first removes the stored
+  chunks at its `bm_idx` and above; persist the piece at
+  `LocalMigrBmPath`, the push refused with `ReplyCodeSaveFailed` when
+  the removal or the save fails; then recompute and discard the fully
+  skippable dm-clone regions (Migrations, raid0 bitmap math). Reply
+  `agent_reply` only.
 * `GetDnInfo` and `GetSideInfo` return the agent's latest observation of
   the DN or the side from memory, without changing anything, reading the
   node or starting a read (`agent_reply`, `revision`, the info,
@@ -4805,8 +4819,8 @@ independent. A migration's pieces are also all pushed right after the
 worker's read, whatever the set lists, and again on each of its later
 report rounds from the lowest piece the worker has not delivered, unless
 its earlier pushes are still under way; every
-migration plan runs from its lowest piece to the read's last, as the agent
-takes out of its set every chunk above a piece it saves. A failure ends
+migration plan runs from the lowest piece it pushes to the read's last,
+as the agent takes out of its set every chunk above a piece it saves. A failure ends
 that object's plan and is remembered nowhere: the object's next accepted
 `Syncup*` reply reports its applied set again, and what is still missing
 is planned again from that, or for a migration from its next round
@@ -4821,11 +4835,13 @@ non-zero `code` (`dnagent.md` DN15, `cnagent.md` CN22). A chunk equal,
 byte for byte, to the one it holds at that address is answered OK and
 neither saved nor applied again. Otherwise a migration's agent first
 removes the chunks stored at the piece's index and above, files and set
-alike, since each of them was placed behind the chunk the piece replaces,
-which may be of another length; a removal that fails, or a save that
+alike: each chunk above it sits behind the chunk the piece replaces,
+which may be of another length, and the chunk at its index must not
+outlive a save that fails; a removal that fails, or a save that
 fails after it, refuses the push with `ReplyCodeSaveFailed`, so the worker
-pushes no later piece over a chunk the removal left or a crash before
-the save's directory sync brought back (`dnagent.md` DN15). Then it
+pushes no later piece, which the agent would save behind a chunk the
+removal left or a crash before the save's directory sync brought back
+(`dnagent.md` DN15). Then it
 **persists before it applies**: the chunk goes
 to its `LocalMigrBmPath` or `LocalCloneBmPath`
 file first, with the atomic, durable replace of Common agent rules, and
@@ -5492,14 +5508,15 @@ leaves the device suspended on its old table, queueing its IO, which
 counts as not fenced; what a failback costs after it is `dnagent.md`,
 Known limits.
 
-**Why the fan-out needs no order to be write-safe ([D16]).** The sp worker
-pushes the failover's `SyncupSide` calls with no order among the sides,
-and each wait of its fan-out ends at its bound whether the reports it
-waits for came or not, so mid-failover the old primary can still hold a
-live path to one leg while the new primary already owns another. Two
-mechanisms make that harmless, and both are load-bearing: (a) each side's
-flip **fences first, within one DN converge** — the old primary's
-dm-linear reloads onto dm-error before the same pass puts the new
+**What makes the unordered fan-out write-safe, and where it is not ([D16]).**
+The sp worker pushes the failover's `SyncupSide` calls with no order among
+the sides, and each wait of its fan-out ends at its bound whether the
+reports it waits for came or not, so mid-failover the old primary can
+still hold a live path to one leg while the new primary already owns
+another. Two mechanisms make that harmless, save the case the end of this
+paragraph names, and both are load-bearing: (a) each side's flip
+**fences first, within one DN converge** — the old primary's dm-linear
+reloads onto dm-error before the same pass puts the new
 primary's onto the side device, and the new primary's path opens only
 once every other dm-linear of the side is proven on its dm-error
 (`dnagent.md` DN10) — so a single leg never has two writers: a fence step
@@ -5555,11 +5572,12 @@ demotion hold. A primary that a cntlr replacement deleted is in the same
 place, with no demotion to apply, when its CN's teardown outlasts the
 demotion hold or the pool's coordinator changes before that hold ends
 (Known limits). The md arrays of such an old primary fail once the sides
-have fenced its legs ([D16], whose write-safety the paragraph above
-explains), and the errors nvmet returns on the still-optimized path are
-target-internal (DNR), not path errors — host multipath does **not** retry
-them on the new primary's path, so applications can see IO errors until
-the old primary applies its demotion, tears its stack down or is stopped.
+have fenced its legs ([D16], whose write-safety, and its gap, the
+paragraph above explains), and the errors nvmet returns on the
+still-optimized path are target-internal (DNR), not path errors — host
+multipath does **not** retry them on the new primary's path, so
+applications can see IO errors until the old primary applies its
+demotion, tears its stack down or is stopped.
 [D16] records why that residue is accepted.
 
 #### "Make sure all groups are available"
@@ -6314,9 +6332,13 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   `src_nqn` the transfer's `XferNqn`, `src_ns_idx` the `ori_ns_idx`, the
   source geometry `src_slice_cnt`, `src_stripe_size` and `src_block_size`
   the slice count, raid0 stripe and pool block size of sp1,
-  `dst_td_name`, `auto_resume` true), which sp2 refuses where the clone's
-  dm-clone would report an optimal IO size over the stripe's product bound
-  (Clones), so the two pools' geometries must stack within it. The
+  `dst_td_name`, `auto_resume` true). `CreateClone` refuses a clone
+  whose dm-clone would report an optimal IO size over the stripe's
+  product bound (Clones), judged from the source geometry the request
+  names and sp2's stored one, so the operator checks before
+  `CreateTransfer` that the two pools' geometries stack within that
+  bound: a refusal after it leaves sp1's origin namespace parked, with no
+  path optimized, until `DeleteTransfer` with `force` true on sp1. The
   clone's clone meta group is
   allocated with it on sp2's DNs (Clones), and the sp2 primary builds the
   clone only once every side of that group is provisioned (Side
@@ -6494,7 +6516,11 @@ by itself and hand dm-clone metadata older than the copy, which would
 show regions copied since as not copied, and dm-clone would copy them from
 the source again over what the hosts wrote there. That gate is the same
 dependency on mdadm's behaviour that [D16] states for every group (Known
-limits); a group without redundancy has one leg and no such case.
+limits), with the same gap: where a fence cuts md's record of a failed
+leg off, the start's resync can copy the stale leg over the others, with
+the same result (Known limits, A failover while the old primary serves
+can lose an acknowledged write); a group without redundancy has one leg
+and no such case.
 
 **The source bitmaps are no part of it.** Read when Clones says, they
 mark only regions the source never wrote ([D3]), so they may keep arriving
@@ -6834,8 +6860,8 @@ refuses (Common validation): the worker copies it into every
 controller-node syncup and nothing enforces it (Controller node, common).
 An older build kept a migration's bitmap in etcd, under keys of the kind
 migration_bitmap, one per chunk at an index below `model.LegacyMigrBmCnt`,
-the bound its gateway held the chunks to. No build writes or reads that
-kind; the transaction that ends a migration, a finish or a cancel of the
+the bound its gateway held the chunks to. This design neither writes nor
+reads that kind; the transaction that ends a migration, a finish or a cancel of the
 gateway or of the worker, deletes those keys of its migration with the
 record (`dnv-worker.md` MD2, MD6). Reason: every way a migration ends runs
 that one write, and a delete inside it cannot be lost to a crash, which a
@@ -7360,7 +7386,12 @@ document and the component documents cite it by its id.
   mdadm's assembly rules arbitrate across legs — a stale leg whose
   superblock claims a clean full array will not start degraded alone, and
   event counts plus resync direction repair divergence once both legs
-  return. md's assembly behaviour is therefore a load-bearing external
+  return. That arbitration holds only where md's record of a failed leg
+  reaches a surviving leg; a fence can cut that record off while an old
+  primary that still serves acknowledges a write, which can then be lost
+  (Known limits, A failover while the old primary serves can lose an
+  acknowledged write), a defect and not one of the two costs accepted
+  below. md's assembly behaviour is therefore a load-bearing external
   dependency, which the cn suite's redund case asserts on the lab's mdadm
   (`cnagent_integtest.md`, Cases): mdadm refuses to start an array from one
   leg whose superblock still counts a clean full array, and once both legs
@@ -7552,25 +7583,26 @@ document and only pointed to here.
   pool's stripe times its slice count is held to the bound (Common
   validation, the stripe's product), and a clone's dm-clone too (Clones).
   The price: a pool whose slice count times its cluster's stripe is over
-  the bound takes a stripe below its block, so a whole block a host writes
-  is split over slices, dm-thin's skip of the zero fill of a block written
-  whole is lost ([D15]) and first writes cost more, and a discard frees a
-  block only over a longer host range (the discard entry below). A stored
+  the bound takes a stripe below its cluster's, and so below its own block
+  wherever that block is at least its cluster's stripe, as at the
+  defaults; there a whole block a host writes is split over slices,
+  dm-thin's skip of the zero fill of a block written whole is lost
+  ([D15]) and first writes cost more, and a discard frees a block only
+  over a longer host range (the discard entry below). A stored
   pool whose product is over the bound keeps it, since a stored geometry
-  never changes (Common validation): its hosts send reads its controller
-  nodes refuse unless each host holds the largest request
-  (`max_sectors_kb`) of every path device of the pool's namespaces, not
-  only the multipath head, to the bound, since a path's queue merges the
-  requests the head sends it up to the path's own largest request, which
-  the optimal IO size raises on the path as on the head (read in the
-  kernel's block layer, not seen in the lab); and a clone into or out of
-  it is refused wherever its dm-clone would report more (Clones).
+  never changes (Common validation): its hosts send reads and writes its
+  controller nodes refuse unless each host holds the largest request
+  (`max_sectors_kb`) of every path device of the pool's namespaces to the
+  bound, which the multipath head's setting alone does not do (seen in
+  the lab; the operator's steps are `operations.md`, A pool made before
+  the stripe bound); and a clone into or out of it is refused wherever
+  its dm-clone would report more (Clones).
 * **A migration's destination in a pool whose block is over
   `MaxNvmeTcpCmdBytes` can be sent commands it refuses.** A migration's
   dm-clone on the destination disk node has the pool's block as its region
-  and so reports an optimal IO size of at least one block (Clones), which
-  its export passes to the controller node's leg path; that path then lets
-  one request grow to the block, past the bound. No rule bounds the block
+  (Migration) and so reports an optimal IO size of at least one block
+  (Clones), which its export passes to the controller node's leg path;
+  that path then lets one request grow to the block, past the bound. No rule bounds the block
   by it, since that would change the block rule every pool's geometry
   rests on; the default block is within it. Read in the kernel's sources,
   not seen in the lab. Every clone into such a pool is refused (Clones).
@@ -7831,26 +7863,30 @@ document and only pointed to here.
   one. Read in the kernel's dm-thin, nvmet, block and NVMe host sources,
   not measured.
 * **A failover while the old primary serves can lose an acknowledged
-  write.** The failover's fan-out reaches a group's sides in no order
-  (Failover, [D16]), and while the old primary has not applied its
-  demotion its kernel goes on serving a host still on its path. A write
-  whose copy to one leg waits on that leg's fence and then fails, while its
-  copy to another leg landed before that leg's fence, is acknowledged: md
-  fails the first leg (failfast) and completes the write from the copy that
-  landed. md's record of that failure, its superblock and bitmap writes to
+  write.** The fan-out of a failover, or of a cntlr replacement of the
+  primary, reaches a group's sides in no order (sp role; Failover,
+  [D16]), and an old primary that has not applied its demotion, or a
+  primary a cntlr replacement deleted whose CN has not torn its stack
+  down, goes on serving a host still on its path (Failover, What hosts see
+  at a failover). A write whose copy to one leg waits on that leg's fence and then
+  fails, while its copy to another leg landed before that leg's fence, is
+  acknowledged: md fails the first leg (failfast) and completes the write
+  from the copy that landed. md's record of that failure, its superblock and bitmap writes to
   the surviving leg, then fails when that leg is fenced too, and md never
   fails its last member, so both legs keep equal superblocks. The new
   primary's start of the array (`cnagent.md` CN12, case 2) finds it not
   clean and resyncs from the lowest in-sync slot; when that slot is the leg
   that missed the write, the write is lost, with no error. The same on a
-  meta group would roll the thin pool back to its commit before (read from
-  the code). Seen in the e2e
+  meta group would roll the thin pool back to its commit before, and on a
+  clone meta group would hand dm-clone metadata older than the copy, so
+  dm-clone copies regions from the source again over what hosts wrote
+  there (Clone metadata durability; read from the code). Seen in the e2e
   cutoff case at 32 slices, and pinned with md alone on the lab kernel:
   every run that fenced the slot-0 leg first lost the last acknowledged
   write, and every run that fenced it last kept it, whichever leg slot 0
-  was. The worker's records name no leg's slot: only the inspect call
-  reads it (`cnagent.md` CN12, InspectGrp), on an operator's request, so
-  the fan-out cannot order the fence by it.
+  was. The worker's records name no leg's slot, and only the inspect call
+  reports it (`cnagent.md` CN31), on an operator's request, so the fan-out
+  cannot order the fence by it.
 * **md's assembly behaviour is pinned in the lab only.** The cross-leg
   half of failover safety ([D16], "Make sure all groups are available")
   rests on mdadm refusing to start an array from a lone survivor whose
@@ -8236,7 +8272,9 @@ document and only pointed to here.
   withdrawn path, A path that nothing following the discovery log manages
   is never dropped or A cdc address an old attach named can hold every path
   drop on a host, above, or one whose discovery-log follower drops the path
-  later than the demotion hold ends (Failover).
+  later than the demotion hold ends (Failover). Such a host can also lose
+  an acknowledged write (A failover while the old primary serves can lose
+  an acknowledged write, above).
 * **A cntlr replacement of a serving primary can still fence it first.** A
   replacement deletes the cntlr it replaces, so that cntlr gets no
   demotion; the replacement's fan-out holds the sides and the other cntlrs
@@ -8253,7 +8291,10 @@ document and only pointed to here.
   node drops the old path, which it does once the replacement's path shows
   the namespace, if that comes first; after the teardown the old path
   reconnects and its IO waits, unless the old port refuses the reconnect
-  with DNR (A mount does not survive the loss of its last path).
+  with DNR (A mount does not survive the loss of its last path). A host
+  on the old primary's path can also lose an acknowledged write (A
+  failover while the old primary serves can lose an acknowledged write,
+  above).
 * **A DN's metadata area can refuse a migration the count allowed.** A
   migration's run is contiguous, and a release can commit before the DN
   frees the run, so an area whose free units lie in runs too short, or
@@ -8320,7 +8361,9 @@ document and only pointed to here.
   before that fan-out's demotion hold has ended, the new coordinator tells
   the sides at once, and they can fence the old primary while it still
   serves; until its CN tears its stack down, it answers IO errors on its
-  still-optimized path to every host still on that path. A failover has
+  still-optimized path to every host still on that path, and such a host
+  can also lose an acknowledged write (A failover while the old primary
+  serves can lose an acknowledged write, above). A failover has
   this window only when a replacement deletes its old primary inside the
   demotion hold and the pool's coordinator changes before that hold ends;
   otherwise the old primary's record names the demotion.
@@ -8354,8 +8397,8 @@ document and only pointed to here.
   largest stripe, makes one aligned host block one pool block; a pool that
   names no stripe takes its cluster's stored stripe instead, whatever its
   own block, narrowed where its slice count times that stripe is over the
-  stripe's product bound (Common validation, Storage pools), so such a pool
-  at the defaults has a stripe below its block. Read in the kernel's
+  stripe's product bound (Common validation; Storage pools), so such a pool
+  of more than four slices at the defaults has a stripe below its block. Read in the kernel's
   dm-thin and dm-stripe sources, not in the lab.
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node

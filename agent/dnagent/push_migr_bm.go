@@ -83,8 +83,9 @@ func (s *DnAgentServer) pushMigrBitmap(
 		// Not persisted ⇒ not applied: the push leaves the applied set
 		// without a chunk at its index or above, even when only the
 		// directory sync after the rename failed and its file is in place.
-		// It is refused, so the worker's plan ends and its next offer
-		// pushes the piece again (dnv-worker.md BM6, BM7): the removal
+		// It is refused, so the worker's plan ends and its next offer, or
+		// an accepted SyncupSide reply that comes first, pushes the piece
+		// again (dnv-worker.md BM6, BM7): the removal
 		// above is durable only with the directory sync of a save that
 		// holds, and a crash of the machine before one can bring the
 		// removed chunks back, so a code-zero reply would let the worker
@@ -164,8 +165,10 @@ func (s *DnAgentServer) applyChunks(
 // DN2's reload skipped and the one a push left in place when its save
 // failed only at the directory sync, since a push whose save fails adds
 // nothing to the set, and has taken out of it every chunk at its index or
-// above (DN15). So the set survives an agent restart, and a chunk left out
-// is pushed again.
+// above (DN15); and it still lists the chunks whose files a failed removal
+// deleted, until a push at or below their indexes takes them out of it or a
+// restart reloads the set from the files present (DN15, DN2). So the set
+// survives an agent restart, and a chunk left out is pushed again.
 func (s *DnAgentServer) bitmapInfo(st *sideState) *pb.BitmapInfo {
 	dst := st.req.Load().GetMigrDstConf()
 	if dst == nil {
@@ -196,8 +199,10 @@ func (s *DnAgentServer) chunkPaths(st *sideState) []string {
 // dropChunksFrom removes the push's migration's chunk files at its bm_idx
 // and every index above it, up to MaxMigrBmCnt, by their paths, so a file
 // the startup reload left unloaded goes too; then it takes those indexes
-// out of the set (DN15). A removal that fails leaves the set as it was. The
-// rm syncs no directory: the save that follows makes the removal durable.
+// out of the set (DN15). A removal that fails leaves the set as it was, even
+// where rm deleted some of the files before its error; the next push of the
+// piece removes them again. The rm syncs no directory: the save that follows
+// makes the removal durable.
 func (s *DnAgentServer) dropChunksFrom(
 	ctx context.Context,
 	st *sideState,

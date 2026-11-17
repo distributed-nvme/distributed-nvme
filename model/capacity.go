@@ -166,9 +166,9 @@ func DefaultStripeSize(blockSize uint64) uint64 {
 // IO size the pool's volumes report to hosts, is at most
 // common.MaxNvmeTcpCmdBytes, else the largest power of two whose product
 // with sliceCnt is, never below common.MinDmRaid0StripeSize. A sliceCnt of 0
-// is read as 1. Every stored cluster stripe is a power of two that divides
-// its block, so the narrowed stripe is a smaller power of two and divides
-// the pool's block too.
+// is read as 1. A narrowed stripe is a power of two, so it divides every
+// power-of-two block at least that large, as the geometry rules hold the
+// pool's block to be (architecture.md, Common validation).
 func FitStripe(stripe uint64, sliceCnt uint32) uint64 {
 	fit := uint64(common.MaxNvmeTcpCmdBytes) / uint64(max(sliceCnt, 1))
 	if stripe <= fit {

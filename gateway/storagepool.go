@@ -179,7 +179,8 @@ func redundKindSet(conf *pb.RedundConf) bool {
 // unset in both is redund_none. resolveSpBdevConf passes the result through
 // model.ResolveSpBdevConf, which settles any member still zero on both sides
 // against the constants of architecture.md, Common validation, and narrows
-// a stripe the request did not name to the pool's slice count; the three
+// a stripe the request did not name where its product with the pool's slice
+// count needs it; the three
 // rungs (request, cluster, default) therefore all land in the stored
 // message.
 //
@@ -264,8 +265,9 @@ func mergeRedundConf(
 
 // resolveSpBdevConf is the bdev_conf a CreateStoragePool of sliceCnt slices
 // stores: the request merged over the cluster's conf (mergeSpBdevConf) and
-// resolved, a stripe the request did not name narrowed to the slice count
-// (model.ResolveSpBdevConf; architecture.md, Common validation). The
+// resolved, a stripe the request did not name narrowed where its product
+// with the slice count needs it (model.ResolveSpBdevConf; architecture.md,
+// Common validation). The
 // planning pre-read and the deciding STM both call it, so the two compute
 // one conf from one ClusterConf.
 func resolveSpBdevConf(
@@ -283,8 +285,9 @@ func resolveSpBdevConf(
 // the cluster's conf and resolved. The request itself was judged only between
 // the members it states; a member it omits is inherited, and whether that one
 // meets the rest shows only here. The refusal says so, because the value it
-// names may be one the request never sent; a block the cluster's stripe does
-// not divide, in a request that names no stripe, gets the way out named too.
+// names may be one the request never sent; a block the stripe it would take
+// does not divide — the cluster's, narrowed where its product needs it — in a
+// request that names no stripe, gets the way out named too.
 // The stripe's bound on its product with the slice count is judged here as
 // the guard of what is stored; a stripe the request did not name is narrowed
 // to meet it, so only a named one can break it, and the pure check before

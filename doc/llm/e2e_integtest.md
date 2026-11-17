@@ -38,14 +38,17 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   which is what the suite observes.
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, or,
-  in the copy case, the digest read again once the clone's stamp has
-  overwritten the pattern's start, through slice grows and the level ladder, failovers, the worker's leg repairs, an
+  in the copy case, the digest read again once the clone's fio stamp has
+  overwritten setup's pattern, all of it at two slices or more, through
+  slice grows and the level ladder, failovers, the worker's leg repairs, an
   operator's repairs, one of which takes a retired leg back, a forced start
   of a group's array from the leg that holds its data, a restore of the
   group from the older copy a retired leg kept, which brings back what that
   leg holds, an operator's take-over of a group's repair from the worker,
-  and all between; and what a clone and a migration move is checked block by
-  block, through stamps that fio writes and verifies (The cases, copy).
+  and all between; and fio stamps, data that fio writes and verifies, check
+  block by block the stamped part of what a clone copies, read through its
+  destination, and the blocks a migration copies last, read through the
+  moved leg's new side (The cases, copy).
 * **A clone's copy survives a failover of its primary** (`architecture.md`,
   Clone metadata durability). A primary disabled in the middle of a slowed
   copy hands the copy to the new primary, which loads the metadata the
@@ -202,8 +205,10 @@ does only while its slice count times that stripe is within
 driver checks at preflight. The numbers that follow from the slice count are
 worked out for react beside the run's, and the dn agents per disk-node guest
 stay the run's. A thin device's size is a whole number of the suite's own
-unit, `MaxDmRaid0StripeSize` per slice, which every stripe a pool stores
-divides, so the sizes do not depend on the stripe the pool takes and keep
+unit, `MaxDmRaid0StripeSize` per slice, which every stripe this suite's
+pools store divides, as each is a power of two no larger
+(`architecture.md`, Common validation, Geometry rules), so the sizes do
+not depend on the stripe the pool takes and keep
 the pool blocks per slice the copy case's skip needs (The cases, copy).
 
 **The placement bound.** A create puts every side on a disk node of its own and
@@ -231,10 +236,13 @@ wait, a wide margin rather than a proof, as a failover or a repair of the
 worker's they did not ask for would invalidate their absolute counts and the
 steps they wait on, and copy's repairs need their dead legs left to the
 operator, so that the worker's own repair cannot race an operator's create
-(`dnv-worker.md` AR8); under it such a reaction is a finding about the lab,
-and copy's one failover is the disable it makes itself, which waits out no
-threshold (`dnv-worker.md` AR5). react builds under the short reacting
-set, as cntlr replacement and leg repair wait out thresholds whose defaults lie
+(`dnv-worker.md` AR8). A leg md records bad-block ranges on can be a candidate
+of that repair with no threshold, so copy holds that repair off the leg's
+group with the group's `operator_in_charge` flag instead (The cases, copy).
+Under the quiet set a failover or a repair the case did not ask for is a
+finding about the lab, and copy's one failover is the disable it makes itself,
+which waits out no threshold (`dnv-worker.md` AR5). react builds under the
+short reacting set, as cntlr replacement and leg repair wait out thresholds whose defaults lie
 beyond any wait the suite could afford (`dnv-worker.md` AR7, AR8). cutoff
 builds under the cutoff set, as its failover must come within seconds of the
 cut: its primary threshold is the shortest the gateway accepts on the suite's
@@ -310,8 +318,8 @@ allocates too. The allocation caps, one per backing file and one for the
 whole run at what the pool's own sides zero plus slack, a part of which
 grows with the disk node count for the agents' logs, count both and the
 pattern, and are asserted after every case; the copy case's run cap also
-takes, on every leg, its two stamps and the clone's copy of its source,
-which grow with the slices and stay allocated until the case ends.
+takes, on every leg, its two fio stamps and its first clone's copy of its
+source, which grow with the slices and stay allocated until the case ends.
 
 E2E6. **Cleanup runs unconditionally at the start, and only on success at the
 end.** `cleanup_all` runs before anything is built, between cases, at the end
@@ -340,11 +348,12 @@ meant to queue through a failover in the cutoff case, and in react's
 migrating leg on md until the primary cuts the leg's path; and the cutoff
 case's fence writer on host1, which stops on its first failed write or at
 the end of its range. The fence writer runs fio, not dd, and writes and
-verifies with direct IO (The cases), and so do the copy case's stamps, each
-written or read back by one fio run under the watchdog below. The loop reports
-through files and keeps to its own namespace: it writes only to the device
-the namespace's link named at its start, never creating that device node, and
-checks before every write that the device still carries the namespace's uuid.
+verifies with direct IO (The cases), and so do the copy case's fio stamps,
+each written or read back by one fio run under the watchdog below. The loop
+reports through files and keeps to its own namespace: it writes only to the
+device the namespace's link named at its start, never creating that device
+node, and checks before every write that the device still carries the
+namespace's uuid.
 It stops on its stop file, with its work directory, or by itself after a bound
 sized to outlive a passing run, so that a failed run left in place stops
 writing. Every other host read, cache drop and device write, except the
@@ -365,8 +374,9 @@ cutoff run left stopped acts on its termination. The cleanup's pattern
 sweeps, which also reach a crashed run's processes whose pid files are gone,
 sit in helper files on the guest
 behind helper verbs, bracketed so they never match the ssh command's own shell,
-and qualified by the suite's work directory or its etcd name so they never
-touch another suite's processes.
+and qualified by the suite's work directory or its etcd name or, for the fio
+of the cutoff case's writer and of a fio stamp, by a job name only this suite
+uses, so they never touch another suite's processes.
 
 E2E9. **One dnv suite runs at a time in the lab** (`layout.md`, Directory
 tree). The suite occupies every guest it names; no other suite binds its
@@ -421,12 +431,13 @@ committing the transaction the first is sized by at two cntlrs, short of the
 widest shape, must not hand-copy; `MaxAllocLegPerGrp`, cross-checked against
 the leg count; `DefaultHealthCheckInterval`, the check interval every cluster
 of the suite stores, from which the cutoff set's primary threshold is derived
-and against which every set's primary threshold is checked; and
-`DefaultPrimaryUnhealthy`
-and `DemotionHoldTimeout`, which the run only prints, the second beside the
-cutoff case's timings; and `DefaultStripeSize`, the stripe every cluster of
+and against which every set's primary threshold is checked;
+`DefaultPrimaryUnhealthy`, which the run only prints; `DemotionHoldTimeout`,
+which the run prints beside the cutoff case's timings and from which that
+case computes its wait for its writer's failed write and the least time the
+writer's range must last; `DefaultStripeSize`, the stripe every cluster of
 the suite stores, which the react case's stripe also mirrors, the preflight
-holding that copy to the value read, and `MaxNvmeTcpCmdBytes`, which the
+holding that copy to the value read; and `MaxNvmeTcpCmdBytes`, which the
 pool's stripe times its slice count and the IO sizes host0 reads are held
 to. The meta region of the
 create's data groups, which the tree computes rather than names, is mirrored
@@ -462,9 +473,9 @@ the wait is followed and reported; a thin device with its raid0
 (`dnv-worker.md` RW19; `cnagent.md` CN15); and a namespace over it, under a
 subsystem admitting both hosts, that host0 reaches through the cdc, the export
 gate and the connect verdict and sees optimized through the primary and
-inaccessible through the standby (`cnagent.md` CN16), the optimal IO size and
-the largest request its block layer takes for the namespace's head device and
-both path devices within `MaxNvmeTcpCmdBytes`. Before any host writes to
+inaccessible through the standby (`cnagent.md` CN16), host0's block layer
+taking an optimal IO size and a largest request within `MaxNvmeTcpCmdBytes` for
+the namespace's head device and both path devices. Before any host writes to
 the pool, host0 reads the thin device whole as zeros, which dm-thin returns for
 every block no host has written (`architecture.md` [D15]), while each side read
 through its device on its disk node shows how far its zeroing went: a data
@@ -509,32 +520,40 @@ agents, each proved by a refused allocation that writes nothing
 **copy** proves the four RPC groups that move bytes — transfer, clone,
 migration and an operator's repairs — and that a clone's copy survives a
 failover, each judged by a record or a device read back. A clone and a
-migration are also judged block by block, by stamps: data fio writes through
-host0 with its own verify headers, each block carrying its offset and a
-checksum of its content, in requests within `MaxNvmeTcpCmdBytes`, and reads
-back whole with fio's verify, through any device that keeps the offsets.
-Before the transfer host0 stamps the first half of the origin's thin device
-and reads it back, and the case reads the digest again and holds every later
-read to that digest in place of setup's, as the stamp overwrites the start
-of setup's pattern; the second half stays as setup left it, never written at
-two slices or more, while at one slice the device is setup's pattern whole,
-so nothing of it is left unwritten and the digest still covers all of it. A transfer, auto-suspended, parks the origin
-namespace and carries its identity, so host1, the only host connected to it,
-reads the origin through it (`architecture.md`,
-Transfers; `cnagent.md` CN17). Before the clone is created the origin's
-bitmap is read, slice by slice, once the primary reports the origin parked, a
+migration are also judged block by block, by fio stamps: data fio writes
+through host0 with its own verify headers, each block carrying its offset
+and a checksum of its content, in requests within `MaxNvmeTcpCmdBytes`, and
+reads back whole with fio's verify, through any device that keeps the
+offsets. Before the transfer host0 writes a fio stamp over the first half of
+the origin's thin device and reads it back. The case then reads the digest
+again and holds every later read to it in place of setup's, as the fio
+stamp overwrites setup's pattern: all of it at two slices or more, and its
+first half at one. The device's second half stays as setup left it: never
+written at two slices or more, and at one slice setup's pattern, which
+there fills the whole device, so that at one slice no part of the device
+is left unwritten and the digest covers all of it. A transfer,
+auto-suspended, parks the origin namespace and carries its identity, so
+host1, the only host connected to it, reads the origin through it
+(`architecture.md`, Transfers; `cnagent.md` CN17). Before the clone is
+created the origin's bitmap is read, slice by slice, once the primary
+reports the origin parked, a
 wait the case polls, for every source slice one destination region spans,
 and right after the create those bitmaps are appended as the clone's chunks,
 one per slice, so that a region a narrowed stripe spreads over several slices
 can still be skipped (`architecture.md`, raid0 bitmap math). The reads need
 no clone, so they all come before the create and the appends follow it at
-once, as a small copy can be whole within seconds of the create. When the
-copy is whole before one of the case's writes to the clone, a chunk or its
-transport sent again, the worker latches and drains the clone, which refuses
-the write: the case accepts the refusal only with the clone gone and one
-more latch in the worker's log, logs what the run does not test, the skip
-or the transport sent again, sends the clone nothing more and waits for no
-hydration. The fallback's source, a namespace the clone reads through and so
+once, as a small copy can be whole within seconds of the create. The worker
+latches the clone once its copy is whole (`dnv-worker.md` CLD13), and a
+latched clone refuses a write (`dnv-worker.md` CLD1), so one of the case's
+writes to the clone, a chunk or its transport sent again, can be refused.
+The case accepts such a refusal only with the clone gone and one more latch
+in the worker's log, logs it, sends the clone nothing more and waits for no
+hydration: either refusal leaves the transport sent again untested, and a
+refused chunk the skip too. A chunk the gateway accepts reaches the clone
+only through the worker's push (`dnv-worker.md` BM2), and dm-clone drops a
+discard of a region it has copied (`cnagent.md` CN18), so a chunk pushed
+once the copy is whole lets the clone skip nothing, which no step checks or
+logs. The fallback's source, a namespace the clone reads through and so
 never parked, is refused its read and appends none (`architecture.md`,
 Bitmap reads). A clone pulls the origin through the
 transfer into a fresh thin device, whose namespace the case creates once the
@@ -547,33 +566,32 @@ holding the latch (`dnv-worker.md` CLD13), the destination namespace staying
 optimized, and with the transfer aborted the destination, read through its own
 raid0 with no source left to read through, holds what hydration copied
 (`architecture.md`, Transfer + clone = cross-SP live migration, [D3]): when
-the origin is the source, the destination reads the stamp back with fio's
-verify, and the rest of the device, never written, as zeros, the regions the
-appended bitmaps let the clone skip among them; a source
-on the primary's own kernel that fails routes to a second pool on another
-controller node (Known limits), whose source carries no stamp and is held to
-its digest alone; and whichever the source, the origin then reads the stamp
-back again. Before the first migration host0 stamps a thin device and
-namespace of their own whole and reads them back, once the primary's report
-of slice 0's pool shows room for them under the mark of auto-grow
-(`dnv-worker.md` AR6), as a grow would change every later count: thin
-allocates their blocks after the origin's, so the leg's copy reaches them
-last, and a namespace of their own keeps the case's digest and every later
-stage as they were. Over the lab's network a leg's copy is whole before the
-worker's bitmap pieces reach the new side, so no piece would keep a region
-from being copied; so before the create the source side's disk node gets a
-token bucket on what that side's nvmet port sends to the other disk-node
-guests, among which the new side lies, at a suite rate of about a second a
-region, which leaves the controller nodes' paths to the side alone. The new
-side reads a region it has not copied yet from the old one, for its copy and
-for udev's reads of the dm-clone and of each device its cutover pass puts
-over it alike, and the device-mapper command that put a device there waits
-for udev's reads of it. Under the bucket a fair queue serves each connection
-in turn, so such a read does not wait behind a region in flight on another
-of the new side's connections; on the region's own connection it still
-waits behind it, and a command that waits for enough such reads outlasts
-the dn agent's command timeout and stops the cutover's pass (`dnagent.md`
-DN13), which fails the case through the gap check below (Known limits). A
+the origin is the source, the destination reads the fio stamp back with
+fio's verify, and the rest of the device, never written, as zeros, the
+regions the appended bitmaps let the clone skip among them; a source on the
+primary's own kernel that fails routes to a second pool on another
+controller node (Known limits), whose source carries no fio stamp and is
+held to its digest alone; and whichever the source, the origin then reads
+the fio stamp back again. Before the first migration host0 writes a fio
+stamp over the whole of a thin device of its own, exported as a namespace
+of its own, and reads it back, once the primary's report
+of slice 0's pool shows room for the stamp's blocks under the mark of
+auto-grow (`dnv-worker.md` AR6), as a grow would change every later count:
+thin allocates the stamp's blocks after the origin's, so the leg's copy
+reaches them last, and a thin device and namespace of its own keep the
+case's digest and every later stage as they were. Over the lab's network a
+leg's copy is whole before the worker's bitmap pieces reach the new side,
+so no piece would keep a region from being copied; so before the create the
+source side's disk node gets a token bucket on what that side's nvmet port
+sends to the other disk-node guests, among which the new side lies, at a suite
+rate of about a second a region, which leaves the controller nodes' paths to
+the side alone. The new side reads a region it has not copied yet from the old
+one, for its copy and for udev's reads of the dm-clone and of each device its
+cutover pass puts over it alike, and the device-mapper command that put a
+device there waits for udev's reads of it. Under the bucket a fair queue
+serves each connection in turn, so such a read waits only behind a region
+in flight on its own connection; that wait can still stop the cutover's
+pass and fail the case through the gap check below (Known limits). A
 migration moves a side to a disk node outside its group, on a distinct
 cntlid slot; its cutover comes only once the primary
 holds a live path to the new side, and the worker's record of it names the
@@ -614,14 +632,15 @@ passing, as no piece would then have kept a region from being copied, and a
 fault in the pieces would pass with it (`dnv-worker.md` BM7; `dnagent.md`
 DN15). The bucket then comes off. The migration finishes under the same leg id
 with an optimized path before any read (`architecture.md`, Migration;
-`dnagent.md` DN12, DN13), and host0 reads the migration's stamp back whole
-through the moved leg's new side: with raid1 md reads a group's data from
+`dnagent.md` DN12, DN13), and host0 reads the migration's fio stamp back
+whole through the moved leg's new side: with raid1 md reads a group's data from
 either member, so for that read the group's other leg's member carries md's
 write-mostly flag on the primary, which leaves md the moved leg to read from;
 the flag must still stand once the read is done and is cleared before the read
-is judged, so a read that fails leaves no flag behind. The stamp's namespace
-and thin device are then deleted. A second migration, once its cutover has
-started, is refused a plain cancel and ended by a forced one, its source
+is judged, so a read that fails leaves no flag behind. The fio stamp's
+namespace and thin device are then deleted. A second migration, once its
+cutover has started, is refused a plain cancel and ended by a forced one, its
+source
 serving again, the primary's path to it optimized, with the time from the
 cancel to that path logged, and the volume reading as before, since no host
 IO ran in between (`architecture.md`, Migrations); the case relies on leg
@@ -646,11 +665,12 @@ repair's new leg has died in the middle of md's copy onto it, so that the group
 has stayed degraded since the retired leg left, the one whole copy on the leg
 that stayed: md's copy onto that new leg is slowed on the primary until its
 disk node has died, the case failing rather than passing when the copy has
-ended before the kill; the group's operator-in-charge flag stands from before
+ended before the kill; the group's `operator_in_charge` flag stands from before
 the kill to the step's end, since md records a bad-block range on the new leg
 when its disk node dies in md's copy, which makes that leg a candidate of the
 worker's own leg repair at once (`dnv-worker.md` AR8, A leg with bad-block
-ranges), and the flag holds that create alone; a create from a retired leg
+ranges), and the flag holds off the worker's create alone, not the
+operator's repair; a create from a retired leg
 needs the retired side's health epoch clear, so the retired leg's disk node
 returns first; the repair
 keeps the retired time for a cancel, must reach STARTED, and its finish must
@@ -667,20 +687,24 @@ side out of its disk node's record with the group's extents; that node's
 returning agent must then remove the side no record names (`dnagent.md` DN6)
 until its counts agree with its record (`dnagent.md` DN18), and the primary
 must hold every leg again. The quiet thresholds keep the worker's own leg
-repair off the dead legs, so that it cannot race the operator's creates
-(`dnv-worker.md` AR8), and the retire timer deletes only an old retired leg
+repair off the first dead leg, and the group's `operator_in_charge` flag keeps
+it off the first repair's new leg once that leg dies, as md's bad-block ranges
+make it a candidate with no threshold, so that the worker's repair cannot race
+the operator's creates (`dnv-worker.md` AR8), and the retire timer deletes
+only an old retired leg
 (`dnv-worker.md` AR12), so the worker only moves the repairs' stages and every
 other step is the operator's. A second clone's copy survives a failover of the
 primary in its middle (`architecture.md`, Clone metadata durability): its
 source is a second pool's, on a controller node with no cntlr of the case's
-pool, so the failover moves the clone and not its source, one slice of the
-case's pool's stripe, so that the clone stacks to the case's pool's own
-product at every slice count (`architecture.md`, Clones), and host0's IO
-sizes for the destination are read within the bound while it copies; host1
-writes a few MiB at the source's start, which keeps its pool below the mark of auto-grow
-(`dnv-worker.md` AR6), and no bitmap chunk is pushed, so every region is copied
-and no discard on the dm-clone waits for reads of the slowed source
-(`cnagent_integtest.md`, Lab facts); a token bucket on the source's controller
+pool, so that the failover moves the clone and not its source, and of one
+slice with the case's pool's stripe, so that the optimal IO size the
+clone's dm-clone reports stays within `MaxNvmeTcpCmdBytes` at every slice
+count (`architecture.md`, Clones); host0's IO sizes for the destination are
+read within that bound while it copies; host1 writes a few MiB at the source's
+start, which keeps its pool below the mark of auto-grow (`dnv-worker.md` AR6),
+and no bitmap chunk is pushed, so every region is copied and no discard on the
+dm-clone waits for reads of the slowed source (`cnagent_integtest.md`, Lab
+facts); a token bucket on the source's controller
 node, kept to the source's address and port, slows what the source sends to a
 rate at which the copy takes about the same time at every slice count, one
 region in flight, since a copy of a few MiB over the lab's network would
@@ -698,7 +722,7 @@ every side of the clone meta group provisioned — with no limit on either, such
 a command lengthening the wait by the retry. The primary is disabled once a
 quarter of the copy's regions are copied, which fails it over at once
 (`dnv-worker.md` AR5); the new primary's first count must be at least the last
-count read on the old one and leave a region to copy; with the throttle gone
+count read on the old one and leave a region to copy; with the bucket gone
 and the copy whole, the new primary's destination raid0, which its promotion
 created, must have had at most the regions the old primary's last count left
 written into it, where a dm-clone over new metadata would copy every region
@@ -1015,13 +1039,15 @@ fio's verify header for that offset; and the range reads zeros after it.
 An error tells the host a write's outcome is unknown, not that nothing was
 written: a write in flight as the sides fence the old primary can land on
 the legs and still be reported failed, as one 32-slice run showed. With one
-write in flight the first failed write is the only one in doubt, and these
-checks show that every write the host saw succeed landed and that nothing
-written after the failed one did. Either outcome of the failed write lands
-before the new primary serves, whose path opens only once the old one is
-fenced (`dnagent.md` DN10). host1 lets go, host0's two plain paths, kept through both cuts,
-serve setup's namespace through the new primary, and the case deletes the
-writer's namespace and thin device. So the ending finds only setup's
+write in flight the first failed write is the only one the host is told is
+in doubt, and these checks show that every write the host saw succeed
+landed and that nothing written after the failed one did; a write the old
+primary acknowledged can still be lost to a known defect, and the case then
+fails (Known limits). Either outcome of the failed write lands before the
+new primary serves, whose path opens only once the old one is fenced
+(`dnagent.md` DN10). host1 lets go, host0's two plain paths, kept through
+both cuts, serve setup's namespace through the new primary, and the case
+deletes the writer's namespace and thin device. So the ending finds only setup's
 subsystem, namespace and thin device, and only the suite's own paths on
 host0, while the primary role stays on the cntlr the second failover
 elected.
@@ -1043,17 +1069,21 @@ RW13); no node guest holds a dnv dm device, nvmet subsystem or md array,
 the last proving on a disk node that its mask held; and the space guard
 holds — each backing file's allocation, which bounds what its disk node
 zeroes and what is written into its sides, since both allocate, the run's
-allocation at what the pool's own sides zero and the backing pattern plus
-slack, and every node's and the control-plane guest's free space at
-preflight's floors.
+allocation within the case's run cap (E2E5), and every node's and the
+control-plane guest's free space at preflight's floors.
 
 **What a pass means.** Exit status zero and PASS mean that every assertion of
 every case held in a run that stops at its first failure, and that the end
 cleanup then finished on every guest with none of the suite's own nvmet ports
 left standing. Data is checked against a pattern the system never sees,
 removals by the nodes' own listings and `NOT_FOUND`, reactions by the records
-they write. A pass may have taken the clone fallback, whose branch is logged,
-and a skipped check — a raid1-only step without redundancy, a
+they write. A pass may have taken the clone fallback, whose branch is logged.
+It may have left `UpdateCloneTrConf` untested, and after a refused chunk the
+skip of unwritten regions too, where the clone's copy outran the case's
+writes to it, whose refusal is logged too; and it may have left the skip
+untested where the copy outran the worker's push of a chunk the gateway
+accepted, which no line logs (Known limits). A skipped check — a
+raid1-only step without redundancy, a
 guest-distinctness check or react's migrating leg without headroom, setup's
 disk-node look at side zeroing after a build whose reactions changed its
 legs — is a logged line, not a proof.
@@ -1085,8 +1115,8 @@ rewrite an existing port of its id (`dnagent.md` SH19); that a host is a clean
 initiator — sudo, nvme-tcp and multipath, its identity files, generated if
 absent and never overwritten, nvme-stas inactive and the masked autoconnector
 (E2E10); that host0, when the copy case is in the run, has the tools of its
-stamps, fio, cmp, readlink and pkill; that host0, when the copy or the react
-case runs with md-raid1, has
+fio stamps, fio, cmp, readlink and pkill; that host0, when the copy or the
+react case runs with md-raid1, has
 the tool of the kernel-log witness their repairs read, and, when the react
 case runs with md-raid1 and more DN VMs than legs, the tools of the write
 loop its migrating leg runs; that host0, when the
@@ -1122,10 +1152,11 @@ Hosts go before every target, as they hold the
 controllers, and a subsystem removed under a live controller kills it with DNR
 while its port keeps listening and leaves it retrying once the port has
 nothing left (`cnagent_integtest.md`, Lab facts). On a host the write loop,
-the fence writer and any stamp's fio stop first, so that nothing writes into
-a device while its paths go, then nvme-stas, so that nothing reconnects what the sweep drops, the host's
-own nvme-stas configuration going back while the work directory still holds
-its copy and an nvme-stas the suite never started being left alone; then the
+the fence writer and the fio of any fio stamp stop first, so that nothing
+writes into a device while its paths go, then nvme-stas, so that nothing
+reconnects what the sweep drops, the host's own nvme-stas configuration
+going back while the work directory still holds its copy and an nvme-stas
+the suite never started being left alone; then the
 host drops the suite's and dnv's NQNs and its discovery controller, never
 every controller, unmasks, and keeps its identity files, node identity rather
 than run state, the dnv prefix also taking the cdc suite's subsystems on a
@@ -1207,7 +1238,20 @@ the connect attempted.
 * **The clone source may fall back.** Whether one kernel can be initiator and
   target for the same bytes is the lab kernel's property, so a source that
   never connects or stops hydrating routes to a fallback pool on another
-  controller node, which proves the same assertions against its own pattern.
+  controller node, which proves the same assertions against its own pattern
+  but not the clone's fio stamp, the zeros of its unwritten part or the skip
+  of unwritten regions, which only a clone of the origin has (The cases,
+  copy).
+* **A clone's copy can outrun the case's writes to it.** The bitmap chunks
+  and the transport sent again follow the create at once, but one that
+  reaches the clone after the worker has latched it, which the worker does
+  once its copy is whole, is refused, most often at many slices, where a
+  region spans the most source slices. The run then logs the refusal and
+  leaves `UpdateCloneTrConf` untested after either refusal, and after a
+  refused chunk the skip of unwritten regions too. A chunk the gateway
+  accepts reaches the clone only through the worker's push
+  (`dnv-worker.md` BM2), so a copy whole before that push lets the clone
+  skip nothing either, which no step checks or logs (The cases, copy).
 * **The copy case's failover moves the clone, never its source.** The
   source is a second pool's, on a controller node outside the case's pool,
   so a failover of a pool whose own transfer is the source, which moves the
@@ -1252,18 +1296,19 @@ the connect attempted.
   copy.** The bucket holds the leg's copy to about a minute, a suite choice,
   and the worker reads the bitmap a few check rounds after the cutover, so
   pieces that come later than the whole copy fail the copy case rather than
-  pass it untested. The stamp's blocks are the leg's last written ones, and a
-  fault of the pieces shows in the stamp's read only for a block the copy had
-  not reached when they landed. md's write-mostly flag is read before and
-  after the stamp's read, not during it.
+  pass it untested. The blocks of the migration's fio stamp are the leg's
+  last written ones, and a fault of the pieces shows in that fio stamp's read
+  only for a block the copy had not reached when they landed. md's
+  write-mostly flag is read before and after that read, not during it.
 * **The migration's bucket can stop the new side's cutover pass.** The fair
-  queue under it splits connections, not the requests of one connection, so
-  a udev read that shares the connection of a region in flight waits behind
-  that region, and a device-mapper command of the pass that waits for enough
-  such reads outlasts the dn agent's command timeout. The case then fails on
-  the migration gap rather than passing. How often this happens under the
-  suite's rate is not measured; such a stop shows in the new side's dn log as
-  a killed command under the trace of its cutover request.
+  queue under it splits connections, not the requests of one connection, so a
+  udev read that shares the connection of a region in flight waits behind that
+  region, and a device-mapper command of the pass that waits for enough such
+  reads outlasts the dn agent's command timeout (`architecture.md`, Common
+  validation), which stops the pass (`dnagent.md` DN13). The case then fails
+  on the migration gap rather than passing. How often this happens
+  under the suite's rate is not measured; such a stop shows in the new side's
+  dn log as a killed command under the trace of its cutover request.
 * **An array both inactive and over members mdadm cannot read is named by
   neither source**, so the cleanup skips it and an operator must find it.
 * **A host controller outlives a target that stops listening**
@@ -1306,6 +1351,12 @@ the connect attempted.
   times neither the drop nor the fence. On a host that drops the path after
   the fence, a write sent in between fails (`architecture.md`, Known limits),
   and with it the case.
+* **The cutoff case's writer can meet a known defect.** A failover while
+  the old primary still serves can lose a write it acknowledged
+  (`architecture.md`, Known limits, A failover while the old primary serves
+  can lose an acknowledged write), and the case's second cut is such a
+  failover; fio's verify then fails the case on a block before the failed
+  write, a failure of that defect and not of the suite.
 * **The drop is asserted only on paths nvme-stas made.** host0 lets go of its
   own paths before nvme-stas starts, so a path nvme-stas took over is not
   exercised, and one it does not manage it never drops (`architecture.md`,

@@ -12,7 +12,7 @@ const olderMigrName = "migr-other"
 
 // seedOlderBitmapKeys puts the keys an older build kept a migration's
 // bitmap under, at every index it could write, for migrName; the value
-// stands for that build's chunk, a message no build decodes any more.
+// stands for that build's chunk, a message this build never decodes.
 func seedOlderBitmapKeys(t *testing.T, env *opsEnv, migrName string) {
 	t.Helper()
 	for bmIdx := range uint32(LegacyMigrBmCnt) {

@@ -8,10 +8,10 @@
 # sha256 already matches the pin is never re-downloaded, so a repeat run
 # needs no network and a fresh checkout still works.
 #
-# Several suites, or a suite and `make fetch-etcd`, may start at once on one
-# cache: fetch_etcd holds an exclusive flock on the cache directory from its
-# first look at the cache to its last check, so one caller at a time checks,
-# downloads and extracts. The others wait, at most ETCD_LOCK_WAIT seconds,
+# Several fetches, by suites or by `make fetch-etcd`, may start at once on
+# one cache: fetch_etcd holds an exclusive flock on the cache directory from
+# its first look at the cache to its last check, so one caller at a time
+# checks, downloads and extracts. The others wait, at most ETCD_LOCK_WAIT seconds,
 # and then find the release in place, or fetch it themselves when the caller
 # before them failed. A reader that takes no lock, such as `path` below,
 # never sees a half-extracted release: the release directory is moved into

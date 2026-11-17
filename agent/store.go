@@ -285,9 +285,12 @@ func (s *Store) Row(t *ResTracker) *pb.ResInfo {
 // is clear it writes nothing and returns nil. A node's background read calls
 // it every read (dnagent.md DN18, cnagent.md CN28): the worker pushes a chunk
 // whose save failed again only after a later accepted syncup of its object
-// or, for a migration piece, on an offer of its migration (dnagent.md DN15,
-// cnagent.md CN22), and a quiet node gets neither, so without the probe the
-// store row of a quiet node would read the refusal until the next save of
+// or, for a migration piece, on an offer of its migration, which pushes
+// only while the primary reports a live path to the destination side and
+// that side shows its dm-clone (dnagent.md DN15, cnagent.md CN22;
+// dnv-worker.md BM7), and a
+// quiet node gets neither while the offers pause, so without the probe the
+// store row of such a node would read the refusal until the next save of
 // anything. The probe makes the write the refused save made, a temp file,
 // its fsync, the rename and the directory's fsync, under the same bound, of
 // random bytes, at least as many as that save tried to write, so that no

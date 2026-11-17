@@ -450,13 +450,12 @@ func loadBmIdx(
 // common.MaxRetiredLegPerGrp retired legs per group, too many for a point
 // read each in the load's time budget. The node records follow in a snapshot
 // pinned to the same revision, since the repairs' new legs and the retired
-// legs name nodes too. The bitmap indexes are last, two keys-only scans per
-// clone / migration pinned the same way: an STM cannot range, and MD3
-// accepts the split because the pin is what keeps the reads consistent —
-// none of the ranged key sets is append-only: the clone drain deletes chunk
-// keys (CLD8), FinishMigration/CancelMigration delete a migration's whole run
-// (architecture.md, Migrations), and repairs and retired legs come and go,
-// so a newer view could disagree with the snapshot.
+// legs name nodes too. The bitmap indexes are last, one keys-only scan per
+// clone pinned the same way: an STM cannot range, and MD3 accepts the split
+// because the pin is what keeps the reads consistent — none of the ranged
+// key sets is append-only: the clone drain deletes chunk keys (CLD8), and
+// repairs and retired legs come and go, so a newer view could disagree with
+// the snapshot.
 //
 // A missing SpConf returns ErrNotFound (the SP is being deleted; the delete of
 // its rev key follows). Every other listed key that is absent lands in

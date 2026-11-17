@@ -438,10 +438,10 @@ func TestMigrBmAFailedPushIsFollowedByEveryLaterPiece(t *testing.T) {
 
 // TestMigrBmARePushForgetsThePiecesAboveIt: a SyncupSide reply whose applied
 // set lacks piece 1 pushes pieces 1 and 2 again. The agent takes piece 2 out
-// of its set when it saves piece 1 (dnagent.md DN15), so the delivery of
-// piece 1 makes the child forget it delivered piece 2; when the push of
-// piece 2 then fails, the next offer pushes it again, with no SyncupSide in
-// between (BM5, BM6, BM7).
+// of its set when it saves piece 1 (dnagent.md DN15), so the push of piece
+// 1 makes the child forget it delivered piece 2, whatever its reply
+// (forgetFrom); when the push of piece 2 then fails, the next offer pushes
+// it again, with no SyncupSide in between (BM5, BM6, BM7).
 func TestMigrBmARePushForgetsThePiecesAboveIt(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		smallPieces(t, 4)

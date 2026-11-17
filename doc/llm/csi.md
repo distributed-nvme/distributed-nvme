@@ -112,14 +112,15 @@ count, a first data group of one part in `volumeSteps` of the volume rounded up
 to whole extents and at least one, dnv's default auto-grow mark whatever the
 cluster stores, since a cluster's mark can switch auto-grow off and the volume
 model needs it on, and the cluster's defaults for the rest. The thin device,
-named as the volume, sized to the request rounded up to the pool's unit, the
-stripe size, read from the cluster before the pool exists, which a one-slice
-pool takes unnarrowed (`architecture.md`, Common validation): the required
-bytes rounded up, or the limit rounded down when only
-a limit is given, or the driver's default when neither is, and OUT_OF_RANGE
-when no multiple of the unit fits the range. The subsystem with the volume's
-NQN and no host. The namespace at index one with the volume's uuid. A step that
-finds its object there reads it back and goes on when it matches; a pool of
+named as the volume and sized in whole units of the pool's stripe size: the
+required bytes rounded up, or the limit rounded down when only a limit is
+given, or the driver's default when neither is, and OUT_OF_RANGE when no
+multiple of the unit fits the range. The driver reads that stripe from the
+cluster on every create, ahead of the pool's step, as a one-slice pool that
+names no stripe takes its cluster's stripe unnarrowed (`architecture.md`,
+Common validation). The subsystem with the volume's NQN and no host. The
+namespace at index one with the volume's uuid. A step that finds its object
+there reads it back and goes on when it matches; a pool of
 another redundancy is ALREADY_EXISTS, the spec's word for an incompatible
 volume of the same name, and so are a thin device of another size and a
 namespace that is not the volume's; a pool's cntlr count is not compared, since
@@ -494,10 +495,13 @@ installed, an image built on the suite's machine reaches every node
 without a registry, and a pod runs from it on each host and is then
 removed. On that floor it proves the driver: a claim becomes a pool that
 a pod reads and writes on either host, as a filesystem and as a raw block
-device; a failover under IO loses no write, for one pool at a time, since no
-case stops the cn agent of a controller node that holds many pools; eight
-volumes live at once; the upstream conformance test passes; and every delete
-leaves nothing behind.
+device; a failover under IO fails no write and the data written before it
+reads back, for one pool at a time, since no case stops the cn agent of a
+controller node that holds many pools; eight volumes live at once; the
+upstream conformance test passes; and every delete leaves nothing behind.
+No case reads back a write made during a failover, which a failover can lose
+(`architecture.md`, Known limits, A failover while the old primary serves
+can lose an acknowledged write).
 
 ### Topology and parameters
 

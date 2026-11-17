@@ -531,3 +531,123 @@ waits for an abort it cannot get.
 Tested: the worker suite, `integtest/worker_test.sh`, the gateway suite and
 the end-to-end suite check the flag. That the primary leaves a broken array
 alone under the flag is checked only by the agent's unit tests.
+
+## A pool made before the stripe bound
+
+Words: a pool's **stripe** is the size of the piece of a volume that each
+slice holds in turn. A controller node's kernel refuses, over TCP, a
+command that carries more than 4 MiB of data. dnv keeps a new pool's
+stripe times its slice count at 4 MiB or less, so that its hosts never
+send such a command. A pool made before dnv kept that bound keeps its
+stripe, since a pool's layout never changes. On a host, a namespace's
+device `nvme<X>n<Z>` tells its **best IO size**, the stripe times the
+slice count, in `/sys/block/<device>/queue/optimal_io_size`. Under it,
+the kernel has one hidden **path device** for each controller node's
+connection, `nvme<X>c<Y>n<Z>`, listed in `/sys/block/<device>/multipath/`.
+Each path device has its own **largest command** in
+`queue/max_sectors_kb`, which the kernel raises to the best IO size. A
+path device's largest command is the one that counts. The namespace
+device's own setting does not limit what a path device sends.
+
+Symptom: a host of the pool gets IO errors. A direct read or write over
+4 MiB fails, and a buffered write fails at its flush (`fsync`), so data an
+application wrote can be missing. A buffered read still succeeds, more
+slowly, and its failed readahead shows in the kernel log. The host's
+kernel log shows `I/O Error (sct 0x0 / sc 0xf) DNR` on a path device.
+
+Confirm: `dnvctl sp get` shows the pool's stripe as
+`sp_conf.bdev_conf.dm_raid0_conf.stripe_size` and its slices in
+`sp_conf.slice_id_list`. The stripe times the slice count is over
+4194304. On the host, `cat /sys/block/<device>/queue/optimal_io_size`
+prints the same product, and
+`cat /sys/block/<device>/multipath/*/queue/max_sectors_kb` prints values
+over 4096.
+
+What dnv does alone: nothing. The pool's stripe never changes.
+
+Safe steps, as root on every host of the pool:
+
+1. Set the largest command of each path device of each of the pool's
+   namespaces to 4 MiB:
+   `for f in /sys/block/<device>/multipath/*/queue/max_sectors_kb; do echo 4096 > $f; done`.
+   A setting on the namespace's device alone changes nothing.
+2. Hold the setting for path devices that come later. Path devices come
+   with each new connection of the host to a controller node. The host
+   makes one when it starts, when the operator or a cntlr replacement
+   creates a cntlr of the pool, when the cdc lists again a cntlr it left
+   out while that cntlr was unhealthy or disabled, and after the kernel
+   drops a lost connection. Path devices also come when a namespace is
+   created in a subsystem the host is connected to. The kernel sends no
+   udev event for a path device. It sends one for the controller's
+   connection, before it finds the namespaces behind it, and one for a
+   new namespace's device, which can come before all of its paths are
+   found. So write this script to `/usr/local/sbin/dnv-path-max4m` and
+   make it executable (`chmod 755`):
+
+   ```sh
+   #!/bin/sh
+   # Hold the largest command of each path device under $1 to 4 MiB. $1 is a
+   # controller, as nvme3, or a namespace's device, as nvme0n2. The kernel
+   # can add path devices after the event, so try for five seconds.
+   case $1 in
+   nvme*n*) g="/sys/block/$1/multipath/*/queue/max_sectors_kb" ;;
+   *) g="/sys/class/nvme/$1/nvme*c*n*/queue/max_sectors_kb" ;;
+   esac
+   i=0
+   while [ $i -lt 20 ]; do
+       for f in $g; do
+           [ -e "$f" ] && echo 4096 > "$f"
+       done
+       sleep 0.25
+       i=$((i + 1))
+   done
+   ```
+
+   Then write these two lines for each subsystem of the pool to
+   `/etc/udev/rules.d/99-dnv-path-max4m.rules`, with the subsystem's NQN
+   from `sp_conf.nqn_list` of `dnvctl sp get`, and run
+   `udevadm control --reload`:
+
+   ```
+   ACTION=="change", SUBSYSTEM=="nvme", ENV{NVME_EVENT}=="connected", ATTR{subsysnqn}=="<subsystem NQN>", RUN+="/usr/local/sbin/dnv-path-max4m %k"
+   ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="nvme*n*", ATTRS{subsysnqn}=="<subsystem NQN>", RUN+="/usr/local/sbin/dnv-path-max4m %k"
+   ```
+
+   A new path device can carry a large command before the script sets
+   it: up to a quarter of a second once the script runs, and longer when
+   udev starts the script late. That command fails. A path to a standby
+   carries no IO until a failover, so this short gap matters only for a
+   path to the primary. A path device the kernel finds after the
+   script's five seconds keeps its large setting: the check under
+   Confirm shows it, and step 1 sets it.
+
+   The rules do not cover two cases. A subsystem created later needs its
+   own two lines in the rules file of every host. A host added later to
+   a subsystem of the pool needs the script and the rules file before it
+   connects.
+3. To leave the old pool for good, copy the data at the file level from a
+   host into a volume of a new pool, and then delete the old pool. A
+   clone out of the old pool is refused when the clone's dm-clone device,
+   on the new pool's primary, would tell its hosts a best IO size over
+   4 MiB. The refusal names both pools' stripe times slice count.
+
+Steps that can lose data: steps 1 and 2 write no data. In step 3, delete
+the old pool only after the copy is read back on the new volume.
+
+When to stop: the IO errors go on while every path device of the
+namespace reads 4096. Then their cause is another one: ask for help.
+
+Tested: the lab, by hand on kernel 7.0.0-42. The test used no dnv pool,
+since dnv refuses to make one now. It used a namespace of five slices at
+a 1 MiB stripe, built by hand: a dm-stripe over five thin volumes,
+exported by nvmet over TCP. Before step 1, an 8 MiB direct read and
+write failed and a buffered write failed at its flush. The setting on
+the namespace's device alone changed nothing. After step 1 as written,
+all three passed. With the first rule line and the script, a second path
+joined, a controller was reset, and a controller was disconnected by
+hand and the host connected again: every path device read 4096, and
+the three reads and writes passed after the reset and after the new
+connection. With both lines and the script as written, a second
+namespace created on the controller node while the host was connected
+over two paths had both its path devices set, and an 8 MiB direct read
+of it passed. Step 3 is not tested.

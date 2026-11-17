@@ -94,7 +94,7 @@ func TestCreateStoragePoolRefusesANamedStripeOverTheBound(t *testing.T) {
 			for _, want := range []string{
 				"stripe_size 1048576 times slice_cnt 5 is 5242880 bytes",
 				fmt.Sprintf("over %d", common.MaxNvmeTcpCmdBytes),
-				"hosts would send reads the controller node refuses",
+				"hosts would send commands the controller node refuses",
 				"the largest stripe_size that fits is 524288",
 			} {
 				if !strings.Contains(msg, want) {
@@ -216,6 +216,7 @@ func TestCreateCloneRefusesAnOptimalIoSizeOverTheBound(t *testing.T) {
 					tc.dstStripe*uint64(tc.dstSliceCnt)),
 				tc.wantSize,
 				fmt.Sprintf("over %d", common.MaxNvmeTcpCmdBytes),
+				"hosts would send commands the controller node refuses",
 			} {
 				if !strings.Contains(msg, want) {
 					t.Errorf("message %q does not say %q", msg, want)
