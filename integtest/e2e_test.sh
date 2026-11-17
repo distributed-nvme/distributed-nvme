@@ -927,16 +927,22 @@ on_exit() {
 		log ""
 		log "########## diagnostics ##########"
 		diagnostics || true
-		# The three injectors a failed run does not leave in place (E2E6):
+		# The four injectors a failed run does not leave in place (E2E6):
 		# the next run's cleanup would remove them, but a token bucket on a
-		# controller node's port would slow every suite run before that, a
-		# reject rule on one would refuse its connects to the disk nodes'
-		# ports, and a silencing rule on a disk node would stall every
-		# connect to its port. The diagnostics above have shown all three.
+		# node's port would slow every suite run before that, the clone's on
+		# a controller node and the migration's on a disk node, a reject
+		# rule on a controller node would refuse its connects to the disk
+		# nodes' ports, and a silencing rule on a disk node would stall every
+		# connect to its port. The diagnostics above have shown all four.
 		if [ "${COPY_FO_THROTTLE_CN:--1}" -ge 0 ]; then
 			log ""
 			log "--- taking the copy case's throttle off cn$COPY_FO_THROTTLE_CN"
 			helper_cn "$COPY_FO_THROTTLE_CN" unthrottle >&2 || true
+		fi
+		if [ "${COPY_MIGR_THROTTLE_DN:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the copy case's migration cap off dn$COPY_MIGR_THROTTLE_DN"
+			helper_dn "$COPY_MIGR_THROTTLE_DN" unthrottle >&2 || true
 		fi
 		if [ "${REACT_OIC_REJECT_CN:--1}" -ge 0 ]; then
 			log ""
@@ -1358,6 +1364,9 @@ read_constants() {
 			"be at most $MAX_NVME_TCP_CMD_BYTES: re-derive REACT_SLICE_CAP" \
 			"and REACT_STRIPE_SIZE"
 	fi
+	# The copy case's stamps send requests of STAMP_BS (its comment).
+	assert_le "$STAMP_BS" "$MAX_NVME_TCP_CMD_BYTES" \
+		"STAMP_BS, the copy case's stamp request size, within common.MaxNvmeTcpCmdBytes"
 	# The cutoff set's primary threshold, and with it the set's argv (see
 	# THE CUTOFF SET above).
 	THR_CUT_PRIMARY=$((2 * DEFAULT_HC_INTERVAL))
@@ -1906,12 +1915,17 @@ derive_params() {
 	# and a data side's meta region. The cp's etcd and logs are the heaviest
 	# contributors after a smoke case; 4 GiB leaves room for the copy and
 	# react cases, which write more, while still being a number a real leak
-	# would cross.
+	# would cross. On top of it, 16 MiB for each dn agent: an agent's log
+	# grows with the case's length and the sides it serves, and at the
+	# widest pool, 180 agents, the copy case's logs alone come to about
+	# 20 MiB an agent, over 3 GiB. The copy case's stamps and the clone's copy of its source
+	# are not in it: they grow with the slices, so copy_clone_stamp and
+	# copy_mstamp_create add them to that case's cap.
 	#
 	# The react twins of the first and the third, REACT_SP_ZERO_BYTES and
 	# REACT_RUN_CAP_BYTES, are at the end; RUN_SLACK_BYTES serves both.
 	SP_ZERO_BYTES=$((LEGS * SLICE_CNT * (EXTENT_SIZE + DATA_ZERO_BYTES)))
-	RUN_SLACK_BYTES=$((4 << 30))
+	RUN_SLACK_BYTES=$(((4 << 30) + DN_TOTAL * (16 << 20)))
 	RUN_CAP_BYTES=$((SP_ZERO_BYTES + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
 
 	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
@@ -3801,6 +3815,192 @@ nft_bin() {
 	fi
 }
 
+# --- the copy case's slowed copies (e2e_integtest.md, The cases, copy) ------
+#
+# A copy over the lab's network is too quick for two steps: a clone's of a
+# few MiB ends in well under a second, too soon for copy step 7 to fail the
+# primary over in the middle of it, and a migration's of one extent is whole
+# before the worker's bitmap pieces reach the new side (copy step 4). Both
+# verbs slow what this node sends from one address and port, and nothing
+# else: a root prio qdisc on the interface that reaches the peer, whose map
+# sends every packet to the bands the stock pfifo_fast uses, beside a fourth
+# band that only a filter reaches, with a token bucket under it. Both node
+# roles carry them.
+#
+# throttle_from runs on the controller node of step 7's second-pool source
+# and slows everything the source's nvmet port sends, the copy's reads among
+# them, and leaves the node's own legs and every other port alone. The
+# bucket's queue is bounded in time, so a small reply of that port, a
+# keep-alive's or a connect's, waits behind the copy's data for about a
+# second at most.
+#
+# throttle_to runs on the disk node of step 4's migration source and slows
+# only what that side's nvmet port sends to the addresses it lists, the other
+# disk-node guests, among which the destination lies, so the controller
+# nodes' paths to the side keep their speed. Under its bucket a fair queue
+# (sfq) serves each connection in turn: the destination reads a region it has
+# not copied yet from the source, for its copy and for udev's reads of its
+# dm-clone and of every device its pass puts over it alike, and the
+# device-mapper command that put a device there waits for udev's reads of
+# it. sfq keeps such a short read from waiting behind the region in flight
+# on another of the destination's connections, but not behind one on its own
+# connection, about a second at this suite's rate; a command that waits for
+# enough of those outlasts the dn agent's command timeout and stops the
+# cutover's pass, and copy_check_gap then fails the case (e2e_integtest.md,
+# Known limits).
+#
+# The qdisc carries a handle of its own, so unthrottle takes only this
+# suite's, and every cleanup takes it first (cn_cleanup_phase1,
+# dn_cleanup_phase0): a bucket left behind would slow every later suite's
+# traffic from that port. THROTTLE_BUCKET is the handle of throttle_to's
+# bucket, whose one class carries the fair queue.
+THROTTLE_HANDLE=4300
+THROTTLE_BUCKET=4301
+
+# tc_bin prints the tc binary, or nothing on a node without one.
+tc_bin() {
+	if command -v tc >/dev/null 2>&1; then
+		echo tc
+	elif [ -x /usr/sbin/tc ]; then
+		echo /usr/sbin/tc
+	else
+		echo ""
+	fi
+}
+
+# nic_to <ip> prints the interface this node sends to <ip> through.
+nic_to() {
+	ip route get "$1" 2>/dev/null |
+		awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+}
+
+# throttle_from <src ip> <src port> <peer ip> <rate> limits what this node
+# sends from <src ip>:<src port> to <rate>, a tc rate such as 1600kbit, and
+# prints "throttled <interface>"; when a step fails it prints "failed:" and
+# that step's words, and leaves no qdisc of this suite's behind.
+throttle_from() {
+	local tc nic err
+	tc=$(tc_bin)
+	nic=$(nic_to "$3")
+	if [ -z "$tc" ] || [ -z "$nic" ]; then
+		echo "failed: tc '$tc', the interface to $3 '$nic'"
+		return 0
+	fi
+	if err=$("$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": \
+		prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 2>&1) &&
+		err=$("$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 tbf \
+			rate "$4" burst 64kb latency 1s 2>&1) &&
+		err=$("$tc" filter add dev "$nic" parent "$THROTTLE_HANDLE": \
+			protocol ip prio 1 u32 match ip src "$1"/32 \
+			match ip sport "$2" 0xffff flowid "$THROTTLE_HANDLE":4 2>&1); then
+		echo "throttled $nic"
+	else
+		unthrottle >/dev/null
+		echo "failed: $err"
+	fi
+	return 0
+}
+
+# throttle_to <src ip> <src port> <rate> <to ip>[,<to ip>…] limits what this
+# node sends from <src ip>:<src port> to the listed IPv4 addresses, all
+# together, to <rate>, a tc rate such as 8000kbit, one filter per address and
+# the fair queue under the bucket, and prints "throttled <interface>". Every
+# address must be reached through one interface. The addresses reach it as
+# one word, as reject_to's pairs do. When a step fails it prints "failed:"
+# and that step's words, and leaves no qdisc of this suite's behind.
+throttle_to() {
+	local tc nic n to err="" ok=1 nl=$'\n'
+	local src=${1:-} sport=${2:-} rate=${3:-}
+	local -a tos
+	IFS=, read -r -a tos <<<"${4:-}"
+	tc=$(tc_bin)
+	if [ -z "$tc" ] || [ "${#tos[@]}" -eq 0 ]; then
+		echo "failed: tc '$tc', the addresses '${4:-}'"
+		return 0
+	fi
+	case "$sport" in
+	'' | *[!0-9]*)
+		echo "failed: '$sport' names no port"
+		return 0
+		;;
+	esac
+	nic=$(nic_to "${tos[0]}")
+	for to in "$src" "${tos[@]}"; do
+		case "$to" in
+		'' | *[!0-9.]* | .* | *. | *..*)
+			echo "failed: '$to' names no IPv4 address"
+			return 0
+			;;
+		esac
+	done
+	for to in "${tos[@]}"; do
+		n=$(nic_to "$to")
+		if [ -z "$n" ] || [ "$n" != "$nic" ]; then
+			echo "failed: the interface to $to is '$n', not '$nic'"
+			return 0
+		fi
+	done
+	if ! err=$("$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": \
+		prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 2>&1) ||
+		! err=$("$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 \
+			handle "$THROTTLE_BUCKET": tbf rate "$rate" burst 64kb \
+			latency 1s 2>&1) ||
+		! err=$("$tc" qdisc add dev "$nic" parent "$THROTTLE_BUCKET":1 \
+			sfq 2>&1); then
+		ok=0
+	else
+		for to in "${tos[@]}"; do
+			if ! err=$("$tc" filter add dev "$nic" \
+				parent "$THROTTLE_HANDLE": protocol ip prio 1 u32 \
+				match ip src "$src"/32 match ip sport "$sport" 0xffff \
+				match ip dst "$to"/32 flowid "$THROTTLE_HANDLE":4 2>&1); then
+				ok=0
+				break
+			fi
+		done
+	fi
+	if [ "$ok" = 1 ]; then
+		echo "throttled $nic"
+	else
+		unthrottle >/dev/null
+		echo "failed: ${err//$nl/; }"
+	fi
+	return 0
+}
+
+# throttle_rules prints this suite's root qdisc on any interface of the node,
+# one line per interface, and nothing when there is none. Reading it after
+# unthrottle is what turns "we ran the delete" into "the qdisc is gone", so a
+# listing that fails prints one line saying so: an empty answer must mean
+# none. A node without tc prints nothing, as only tc puts the qdisc there.
+throttle_rules() {
+	local tc out nl=$'\n'
+	tc=$(tc_bin)
+	[ -n "$tc" ] || return 0
+	if out=$("$tc" qdisc show 2>&1); then
+		printf '%s\n' "$out" |
+			grep -E "^qdisc prio $THROTTLE_HANDLE: dev [^ ]+ root" || true
+	else
+		echo "tc qdisc show failed, the throttle is unknown: ${out//$nl/; }"
+	fi
+	return 0
+}
+
+# unthrottle removes this suite's root qdisc from every interface that carries
+# it, whoever left it there, which gives the interface back the kernel's
+# default root qdisc, and prints "unthrottled".
+unthrottle() {
+	local tc nic
+	tc=$(tc_bin)
+	if [ -n "$tc" ]; then
+		for nic in $(throttle_rules | awk '$1 == "qdisc" {print $5}'); do
+			"$tc" qdisc del dev "$nic" root >/dev/null 2>&1
+		done
+	fi
+	echo unthrottled
+	return 0
+}
+
 # --- the dump's reads that can wait in the kernel ------------------------------
 
 # DIAG_READ_SECS bounds a node dump's two detached reads (diag_kernel_reads):
@@ -4105,6 +4305,28 @@ side_sha() { # <sp hex16> <side hex16>:<MiB>…
 	return 0
 }
 
+# migr_clone_status <sp hex16> <migr hex16> prints the status line of the
+# migration's dm-clone on this guest, read live with --noflush so that it
+# commits nothing, or "missing:<n>" when not exactly one device carries it
+# (DnMigrFinalName is dnv-<cluster>-<dn>-d3-<sp>-<migr>, so the sp and the
+# migration are fields 5 and 6 under -F-, compared as strings as side_sha
+# compares them), or "unread" when the read failed. The copy case reads it
+# right after the worker's pieces of a slowed copy have landed, where an
+# observation an agent took a round earlier could predate them.
+migr_clone_status() { # <sp hex16> <migr hex16>
+	local names n out
+	names=$(dm_kind_names d3 |
+		awk -F- -v sp="$1" -v m="$2" '("" $5) == ("" sp) && ("" $6) == ("" m)')
+	n=$(printf '%s\n' "$names" | grep -c . || true)
+	if [ "$n" != 1 ]; then
+		echo "missing:$n"
+		return 0
+	fi
+	out=$(timeout 10 dmsetup status --noflush "$names" 2>/dev/null) || out=""
+	echo "${out:-unread}"
+	return 0
+}
+
 # --- the react case's silencing rule (e2e_integtest.md, The cases, react) ---
 #
 # React step 10 silences one dn instance's nvmet port, as a disk node whose
@@ -4205,18 +4427,25 @@ unsilence() {
 }
 
 # dn_cleanup_phase0 is the disk node's step that comes before every other
-# guest's in the cleanup (cleanup_all): the silencing rule goes, whether or
-# not this run set it, as the copy case's throttle and the react case's
-# reject rule go first on a controller node (cn_cleanup_phase1), so that
-# the hosts and the controller nodes let go of their paths to a port that
-# answers again. The reading after the removal decides the sentinel, so a
-# rule still on leaves the verb unfinished.
+# guest's in the cleanup (cleanup_all): the silencing rule and the copy
+# case's migration throttle go, whether or not this run set them, as the
+# copy case's clone throttle and the react case's reject rule go first on a
+# controller node (cn_cleanup_phase1), so that the hosts and the controller
+# nodes let go of their paths to a port that answers again, and no removal
+# waits on a slowed migration source. The readings after the removals decide
+# the sentinel, so a rule or a throttle still on leaves the verb unfinished.
 dn_cleanup_phase0() {
 	local left
 	unsilence >/dev/null
+	unthrottle >/dev/null
 	left=$(silence_rules)
 	if [ -n "$left" ]; then
 		echo "dn_cleanup_phase0: the react case's silencing rule is still on: $left" >&2
+		return 1
+	fi
+	left=$(throttle_rules)
+	if [ -n "$left" ]; then
+		echo "dn_cleanup_phase0: the copy case's migration throttle is still on: $left" >&2
 		return 1
 	fi
 	echo phase0
@@ -4334,6 +4563,8 @@ diag() {
 	losetup_list
 	echo "--- the react case's silencing rule (empty: none) ---"
 	silence_rules
+	echo "--- the copy case's migration throttle (empty: none) ---"
+	throttle_rules
 	echo "--- df -h /var/tmp ---"
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
@@ -4400,6 +4631,31 @@ md_member_fail() {
 	where=$(md_member_of "$1") || return 1
 	read -r node dmk <<<"$where"
 	mdadm "/dev/$node" --fail "/dev/mapper/$1" >&2 || return 1
+	md_member_read "$1"
+}
+
+# md_write_mostly <dm name> <on|off> sets or clears md's write-mostly flag on
+# the member <dm name>, through the member's md/dev-*/state ("writemostly",
+# "-writemostly"), and prints md_member_read's line. md reads an array's
+# data from a member without the flag while one serves, so with the flag on
+# every member but one, a read of the array reads that one. It fails, saying
+# so, on a device or an array that is not there and on a write that fails.
+md_write_mostly() {
+	local where node dmk word
+	case "${2:-}" in
+	on) word=writemostly ;;
+	off) word=-writemostly ;;
+	*)
+		echo "md_write_mostly: '${2:-}' is neither on nor off" >&2
+		return 1
+		;;
+	esac
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	echo "$word" >"/sys/block/$node/md/dev-$dmk/state" || {
+		echo "md_write_mostly: writing '$word' to $node's dev-$dmk/state failed" >&2
+		return 1
+	}
 	md_member_read "$1"
 }
 
@@ -4567,100 +4823,6 @@ md_examine() {
 		return 1
 	fi
 	echo "role=${role// /_} recovery=${rec:-none} uuid=$uuid events=$ev"
-}
-
-# --- the copy case's slowed source (e2e_integtest.md, The cases, copy) ------
-#
-# A clone's copy over the lab's network ends in well under a second, too soon
-# for copy step 7 to fail the primary over in the middle of it. throttle_from
-# slows what this node sends from one address and port, and nothing else: a
-# root prio qdisc on the interface that reaches <peer ip>, whose map sends
-# every packet to the bands the stock pfifo_fast uses, beside a fourth band
-# that only a filter reaches, with a token bucket under it. On the node of the
-# step's second-pool source it slows what the source's nvmet port sends, the
-# copy's reads among them, and leaves the node's own legs and every other
-# port alone. The bucket's queue is bounded in time, so a small reply of that
-# port, a keep-alive's or a connect's, waits behind the copy's data for about
-# a second at most. The qdisc carries a handle of its own, so unthrottle takes
-# only this suite's, and every cleanup takes it first (cn_cleanup_phase1): a
-# bucket left behind would slow every later suite's traffic to that port.
-THROTTLE_HANDLE=4300
-
-# tc_bin prints the tc binary, or nothing on a node without one.
-tc_bin() {
-	if command -v tc >/dev/null 2>&1; then
-		echo tc
-	elif [ -x /usr/sbin/tc ]; then
-		echo /usr/sbin/tc
-	else
-		echo ""
-	fi
-}
-
-# nic_to <ip> prints the interface this node sends to <ip> through.
-nic_to() {
-	ip route get "$1" 2>/dev/null |
-		awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
-}
-
-# throttle_from <src ip> <src port> <peer ip> <rate> limits what this node
-# sends from <src ip>:<src port> to <rate>, a tc rate such as 1600kbit, and
-# prints "throttled <interface>"; when a step fails it prints "failed:" and
-# that step's words, and leaves no qdisc of this suite's behind.
-throttle_from() {
-	local tc nic err
-	tc=$(tc_bin)
-	nic=$(nic_to "$3")
-	if [ -z "$tc" ] || [ -z "$nic" ]; then
-		echo "failed: tc '$tc', the interface to $3 '$nic'"
-		return 0
-	fi
-	if err=$("$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": \
-		prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 2>&1) &&
-		err=$("$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 tbf \
-			rate "$4" burst 64kb latency 1s 2>&1) &&
-		err=$("$tc" filter add dev "$nic" parent "$THROTTLE_HANDLE": \
-			protocol ip prio 1 u32 match ip src "$1"/32 \
-			match ip sport "$2" 0xffff flowid "$THROTTLE_HANDLE":4 2>&1); then
-		echo "throttled $nic"
-	else
-		unthrottle >/dev/null
-		echo "failed: $err"
-	fi
-	return 0
-}
-
-# throttle_rules prints this suite's root qdisc on any interface of the node,
-# one line per interface, and nothing when there is none. Reading it after
-# unthrottle is what turns "we ran the delete" into "the qdisc is gone", so a
-# listing that fails prints one line saying so: an empty answer must mean
-# none. A node without tc prints nothing, as only tc puts the qdisc there.
-throttle_rules() {
-	local tc out nl=$'\n'
-	tc=$(tc_bin)
-	[ -n "$tc" ] || return 0
-	if out=$("$tc" qdisc show 2>&1); then
-		printf '%s\n' "$out" |
-			grep -E "^qdisc prio $THROTTLE_HANDLE: dev [^ ]+ root" || true
-	else
-		echo "tc qdisc show failed, the throttle is unknown: ${out//$nl/; }"
-	fi
-	return 0
-}
-
-# unthrottle removes this suite's root qdisc from every interface that carries
-# it, whoever left it there, which gives the interface back the kernel's
-# default root qdisc, and prints "unthrottled".
-unthrottle() {
-	local tc nic
-	tc=$(tc_bin)
-	if [ -n "$tc" ]; then
-		for nic in $(throttle_rules | awk '$1 == "qdisc" {print $5}'); do
-			"$tc" qdisc del dev "$nic" root >/dev/null 2>&1
-		done
-	fi
-	echo unthrottled
-	return 0
 }
 
 # --- the react case's reject rule (e2e_integtest.md, The cases, react) ------
@@ -4915,8 +5077,8 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 # on every
 # CN goes in phase 1 before any transfer subsystem is dropped in phase 2.
 #
-# The copy case's throttle goes first and unconditionally, whether or not
-# this run used it: a run killed before its exit path, or one whose exit path
+# The copy case's clone throttle goes first and unconditionally, whether or
+# not this run used it: a run killed before its exit path, or one whose exit path
 # could not reach the guest, leaves it behind, and a clone final removed
 # through a slowed source waits for the copy's region in flight. The react
 # case's reject rule goes with it, for the same reasons: left behind, it
@@ -4941,7 +5103,7 @@ cn_cleanup_phase1() {
 	dm_remove_kind c7 # clone final, while its :4: source connection is up
 	left=$(throttle_rules)
 	if [ -n "$left" ]; then
-		echo "cn_cleanup_phase1: the copy case's throttle is still on: $left" >&2
+		echo "cn_cleanup_phase1: the copy case's clone throttle is still on: $left" >&2
 		return 1
 	fi
 	left=$(reject_rules)
@@ -5015,7 +5177,7 @@ diag() {
 	nvmet_tree
 	echo "--- losetup -a ---"
 	losetup_list
-	echo "--- the copy case's throttle (empty: none) ---"
+	echo "--- the copy case's clone throttle (empty: none) ---"
 	throttle_rules
 	echo "--- the react case's reject rule (empty: none) ---"
 	reject_rules
@@ -5633,6 +5795,115 @@ fwrite_stop() {
 	return 0
 }
 
+# --- the copy case's stamps, on host0 -----------------------------------------
+#
+# A stamp is data fio writes with its own verify headers: crc32c over every
+# 4 KiB, each 4 KiB stamped with its own offset, so a later read through any
+# device that keeps the offsets, the volume written or a clone of it, checks
+# every block's place and content. Each verb runs fio once and waits for it:
+# direct IO, one request of <bs> bytes in flight, from the device's start,
+# with no saved verify state (the write is whole or the stage fails). The
+# verify is the same job with verify_only, the same job name and options
+# giving every block the same verify header, and must read the whole size
+# back. Both run in $STAMP_DIR, which each verb removes when fio is done and
+# host_cleanup's stamp_stop removes too.
+STAMP_DIR="$WORK/stamp"
+
+# stamp_fio <write|verify> <node> <size bytes> <bs bytes> runs the job and
+# answers `rc=<fio's exit code> bytes=<io_bytes of the job's write or read
+# side, or none>`, then the tail of fio's errors. The write leaves out fio's
+# verify phase (do_verify=0); the verify keeps it, as verify_only runs that
+# phase alone and do_verify=0 would skip it, reading nothing.
+stamp_fio() {
+	local mode=$1 node=$2 size=$3 bs=$4 rc=0 side=write bytes
+	local -a extra=(--do_verify=0)
+	if [ "$mode" = verify ]; then
+		extra=(--verify_only=1)
+		side=read
+	fi
+	rm -rf "$STAMP_DIR"
+	mkdir -p "$STAMP_DIR" || return 1
+	(
+		cd "$STAMP_DIR" || exit 1
+		fio --name=stamp --filename="$node" --rw=write --bs="$bs" \
+			--size="$size" --ioengine=psync --iodepth=1 --direct=1 \
+			--verify=crc32c --verify_interval=4096 \
+			--verify_state_save=0 "${extra[@]}" --output-format=json \
+			>"$STAMP_DIR/out.json" 2>"$STAMP_DIR/err"
+	) || rc=$?
+	bytes=$(awk -v side="\"$side\"" '
+		$0 ~ side "[[:space:]]*:" { r = 1 }
+		r && /"io_bytes"/ { gsub(/[^0-9]/, ""); print; exit }' \
+		"$STAMP_DIR/out.json" 2>/dev/null)
+	printf 'rc=%s bytes=%s\n' "$rc" "${bytes:-none}"
+	tail -n 5 "$STAMP_DIR/err" 2>/dev/null
+	rm -rf "$STAMP_DIR"
+	return 0
+}
+
+# stamp_node <uuid> prints the block device the namespace's uuid link names.
+stamp_node() {
+	local link="/dev/disk/by-id/nvme-uuid.$1" node
+	node=$(readlink -f "$link" 2>/dev/null) || node=""
+	if [ -z "$node" ] || [ ! -b "$node" ]; then
+		echo "stamp: $link resolves to no block device ('$node')" >&2
+		return 1
+	fi
+	echo "$node"
+}
+
+# stamp_write <uuid> <size bytes> <bs bytes> stamps the first <size> bytes of
+# the namespace whose uuid is <uuid>: `stamp=written rc=<n> bytes=<n>`.
+stamp_write() {
+	local node out
+	node=$(stamp_node "$1") || return 1
+	out=$(stamp_fio write "$node" "$2" "$3") || return 1
+	echo "stamp=written $out"
+}
+
+# stamp_verify <uuid> <size bytes> <bs bytes> reads the first <size> bytes of
+# the namespace back with fio's verify: `stamp=verified rc=<n> bytes=<n>`.
+# It reads through the namespace's own device, with no cache.
+stamp_verify() {
+	local node out
+	node=$(stamp_node "$1") || return 1
+	out=$(stamp_fio verify "$node" "$2" "$3") || return 1
+	echo "stamp=verified $out"
+}
+
+# stamp_zeros <uuid> <from bytes> <to bytes> reads the namespace's bytes from
+# <from> to <to> after a cache drop and answers `zeros=ok|differ|failed`, cmp
+# against /dev/zero as fwrite_verify reads its tail.
+stamp_zeros() {
+	local node
+	node=$(stamp_node "$1") || return 1
+	sync
+	echo 3 >/proc/sys/vm/drop_caches
+	if cmp -s -i "$2:0" -n "$(($3 - $2))" "$node" /dev/zero; then
+		echo "zeros=ok"
+	else
+		case $? in
+		1) echo "zeros=differ" ;;
+		*) echo "zeros=failed" ;;
+		esac
+	fi
+	return 0
+}
+
+# stamp_stop ends a stamp's fio a failed run left and removes $STAMP_DIR:
+# `stamp=stopped|absent`. A fio in D state stays until its device answers
+# (E2E7); the kill is sent all the same.
+stamp_stop() {
+	pkill -9 -f "[f]io --name=stamp " >/dev/null 2>&1
+	if [ -d "$STAMP_DIR" ]; then
+		rm -rf "$STAMP_DIR"
+		echo "stamp=stopped"
+	else
+		echo "stamp=absent"
+	fi
+	return 0
+}
+
 # kmsg_mark writes <tag> into the kernel log and answers `kmsg=marked` only if
 # dmesg then shows it: the witness below counts from the LAST copy of the tag,
 # so a log it cannot read must not pass for a clean one.
@@ -5893,6 +6164,7 @@ host_cleanup() { # [cdc traddr]
 	local stas
 	wloop_stop >/dev/null
 	fwrite_stop >/dev/null
+	stamp_stop >/dev/null
 	stas=$(stas_restore)
 	wipe "${1:-}" >/dev/null
 	unmask >/dev/null
@@ -6837,11 +7109,15 @@ DN_TOOLS="$NODE_TOOLS truncate wipefs dd sha256sum mdadm udevadm"
 # install_udev_rule and remove_udev_rule.
 # thin_dump: the cn agent's thin metadata reads (above).
 CN_TOOLS="$NODE_TOOLS mdadm udevadm thin_dump"
-# tc and ip: the copy case's throttle (throttle_from), which preflight_node asks
-# of a CN only when that case is in the run, as preflight_stas asks host0 for
-# nvme-stas only when the cutoff case is. The cleanup's unthrottle needs them
-# only where the throttle can be, and a node without tc cannot carry it.
+# tc and ip: the copy case's throttles, the clone's on a CN (throttle_from)
+# and the migration's on a DN (throttle_to), which preflight_node asks of
+# every node of that role only when that case is in the run, as
+# preflight_stas asks host0 for nvme-stas only when the cutoff case is: the
+# migration's source is any disk node the pool's create picked. The
+# cleanup's unthrottle needs them only where a throttle can be, and a node
+# without tc cannot carry one.
 CN_COPY_TOOLS="tc ip"
+DN_COPY_TOOLS="tc ip"
 # nft: the react case's reject rule (reject_to), which preflight_node asks of
 # a CN only when that case runs with md-raid1, where its take-over step runs.
 # The cleanup's unreject needs it only where the rule can be, and a node
@@ -6879,6 +7155,10 @@ HOST_WLOOP_TOOLS="nohup readlink"
 # The cutoff case's fence writer on host1 (stage 10): fio writes and verifies,
 # cmp reads the range after the first failed write.
 HOST_FENCE_TOOLS="fio cmp nohup pkill"
+# The copy case's stamps on host0 (stamp_write, stamp_verify): fio writes and
+# verifies them, cmp reads the clone's unwritten part as zeros, readlink
+# finds the device of a namespace's uuid link, and pkill is stamp_stop's.
+HOST_STAMP_TOOLS="fio cmp readlink pkill"
 # cp runs four unprivileged daemons and dnvctl. `ss` is what the helper's
 # `listening` predicate uses; pkill/pgrep are stop_all's fallback sweep.
 #
@@ -7167,6 +7447,9 @@ preflight_node() { # <role: dn|cn> <index>
 	local sshw=ssh_dn helperw=helper_dn target="" want_tools=$DN_TOOLS
 	if [ "$role" = dn ]; then
 		target=${DN[$v]}
+		if run_has_case copy; then
+			want_tools="$want_tools $DN_COPY_TOOLS"
+		fi
 		if run_has_case react && [ "$REDUND" = raid1 ] &&
 			[ "$DN_VM_CNT" -gt "$LEGS" ]; then
 			want_tools="$want_tools $DN_REACT_TOOLS"
@@ -7394,6 +7677,17 @@ preflight_host() { # <h>
 			die "$label: listing the fence writer's tools failed"
 		[ -z "$missing" ] ||
 			die "$label: missing tool(s) for the cutoff case's fence writer:" \
+				"$(printf '%s' "$missing" | tr '\n' ' ')"
+	fi
+
+	# The copy case's stamps (stamp_write, stamp_verify) run fio on host0
+	# and read the clone's unwritten part with cmp. Never installed by this
+	# suite either.
+	if [ "$h" = 0 ] && run_has_case copy; then
+		missing=$(ssh_host "$h" "$(tools_cmd $HOST_STAMP_TOOLS)") ||
+			die "$label: listing the stamps' tools failed"
+		[ -z "$missing" ] ||
+			die "$label: missing tool(s) for the copy case's stamps:" \
 				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
@@ -7903,9 +8197,10 @@ cleanup_all() {
 		done
 	fi
 
-	# The react case's silencing rule comes off every DN VM before any guest
-	# lets go of anything (dn_cleanup_phase0 says why).
-	log "--- cleanup: dn phase 0 (the silencing rule, before anything goes)"
+	# The react case's silencing rule and the copy case's migration throttle
+	# come off every DN VM before any guest lets go of anything
+	# (dn_cleanup_phase0 says why).
+	log "--- cleanup: dn phase 0 (the silencing rule and the migration throttle, before anything goes)"
 	for v in "${!DN[@]}"; do
 		cleanup_verb ssh_dn "$v" "dn$v" phase0 dn_cleanup_phase0
 	done
@@ -13061,8 +13356,10 @@ case_ops() {
 #    (CN22, architecture.md, raid0 bitmap math: "the safe direction, which can
 #    only cost an extra copy"), so chunks of only the slices one region spans
 #    are legal and correct, but their effect on the region set is not
-#    something `cntlr inspect` reports. What IS asserted is that each RPC is
-#    accepted and echoes the clone id, and that the destination reads the
+#    something `cntlr inspect` reports. What IS asserted is that each RPC
+#    that reaches the clone before its copy is whole is accepted and echoes
+#    the clone id, that one which comes later is refused only for the
+#    worker's latch (copy_clone_refused), and that the destination reads the
 #    source's digest, which a region skipped over written data would break.
 #  * That a grown sp still puts every side on a distinct DN. GrowSlice passes
 #    a nil black list (GrowSlice (gateway/storagepool.go)) — but nothing in this
@@ -13074,7 +13371,7 @@ case_ops() {
 #
 # $TD_CLONE must be a bare jq identifier for the same reason $TD0 is: `td
 # list` is keyed by td_name and every filter reaches a row as
-# `.name_to_td.<name>`. c0, m0, m1, x0, k0, r0 and r1 are this case's names;
+# `.name_to_td.<name>`. c0, c2, m0, m1, x0, k0, r0 and r1 are this case's names;
 # ops used s0 and t1 and they died with its sp. r0 is copy step 5's repair
 # and r1 copy step 6's, whose rep_names follow the common name rule and avoid
 # the reserved prefix (architecture.md, Common validation), as an operator's
@@ -13101,6 +13398,50 @@ TD_SRC=t0
 # from $UUID1 and $UUID2: host1 holds the transfer's namespace (which carries
 # $UUID1, constraint (b)) at the same time as this one.
 UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
+
+# --- the stamps and the migration's cap (e2e_integtest.md, The cases, copy) -
+#
+# A stamp is data host0 writes with fio's own verify headers and reads back
+# with fio's verify (stamp_write, stamp_verify in the host helper), in
+# requests of STAMP_BS, a suite choice within MaxNvmeTcpCmdBytes, so that no
+# request of theirs is refused whatever the pool's stripe. WAIT_STAMP is the
+# watchdog of ssh_host_watched for one such fio run, a stamp written or read
+# whole, which at the ceiling is hundreds of MiB.
+#
+# The clone's stamp is the first half of $TD0 (copy_clone_stamp), written
+# before the transfer; COPY_CSTAMP_BYTES is its size. The migration's stamp
+# is a thin device and a namespace of their own, $TD_MSTAMP as $SS0's ns
+# MSTAMP_IDX with the fifth fixed uuid, $UUID_MSTAMP, written whole before
+# the first migration and deleted once it is checked, so that SHA0, the
+# pool's objects and every later stage stay as they were
+# (copy_mstamp_create). COPY_MSTAMP_UNITS TD_UNITs give it that many pool
+# blocks in every slice, which thin allocates after $TD0's and the clone's,
+# so the migrating leg copies them last, its highest about thirty
+# regions in: 24, a suite choice, which with $TD0's at most four keeps slice
+# 0's pool, 61 data blocks under md-raid1, under the mark of auto-grow
+# (dnv-worker.md AR6) at every slice count, as copy_mstamp_create asserts
+# from the stored numbers and then reads on the primary.
+#
+# COPY_MIGR_RATE_KBIT is the cap on what the migration source's nvmet port
+# sends to the other disk-node guests while the first migration copies
+# (throttle_to), in tc's kbit, a suite choice: about a second for one region
+# of a DATA_BLOCK_SIZE block, so the leg's copy takes about a minute and the
+# worker's bitmap pieces, read a few check rounds after the cutover, reach
+# the destination while it copies. COPY_MIGR_THROTTLE_DN is the --dn guest
+# the cap is on, -1 while none is: on_exit takes it off even when a run
+# fails (E2E6).
+STAMP_BS=$((1 << 20))
+WAIT_STAMP=300
+COPY_CSTAMP_BYTES=0
+TD_MSTAMP=c2
+MSTAMP_IDX=3
+UUID_MSTAMP=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c05
+COPY_MSTAMP_UNITS=24
+COPY_MSTAMP_BYTES=0
+MSTAMP_TD_ID=""
+MSTAMP_NS_ID=""
+COPY_MIGR_RATE_KBIT=8000
+COPY_MIGR_THROTTLE_DN=-1
 
 # --- budgets ----------------------------------------------------------------
 #
@@ -13189,6 +13530,10 @@ COPY_SRC_FAULT=""
 COPY_HYD_SIG=""
 COPY_HYD_MARK=0
 COPY_SRC_START=0
+# COPY_CLONE_DRAINED is 1 once copy_clone_refused has accepted a refused
+# write to the clone, its copy whole and the clone drained before the write
+# reached it, and 0 otherwise; copy_clone_build clears it and reads it.
+COPY_CLONE_DRAINED=0
 
 # The two migrations, and the "last observation" scratch of the predicates
 # below (migr_cutover_started, migr_dst_serving, side_hydrated and
@@ -13766,8 +14111,12 @@ copy_check_gap() { # <src v> <src k> <src side> <dst v> <dst k> <dst side> <leg 
 	gap=$(awk -v a="$e1" -v b="$e0" 'BEGIN { printf "%.3f", a - b }')
 	log "  the migration gap of leg $7: ${gap} s, from the source's" \
 		"inaccessible write at $t0 to the destination's optimized write at $t1"
+	# A mismatch under the copy case's migration bucket (throttle_to) may be
+	# a device-mapper command of the cutover's pass that waited for udev's
+	# reads through the slowed source past the agent's command timeout; the
+	# destination's dn log shows it under the cutover request's trace.
 	assert_eq "$(jq_of "$dst" '.write_trace // ""')" "$trace" \
-		"the trace id of the destination's optimized write vs its cutover request's: a pass other than the cutover's ended the gap of ${gap} s"
+		"the trace id of the destination's optimized write vs its cutover request's: a pass other than the cutover's ended the gap of ${gap} s (look for a killed os command under trace $trace in $(dn_log "$5") on ${DN_IP[$4]})"
 }
 
 # copy_bm_records sets COPY_BM_RECS to the worker's `migration bitmap read`
@@ -14274,6 +14623,124 @@ copy_primary_cn_id() {
 }
 
 # ---------------------------------------------------------------------------
+# The stamps (e2e_integtest.md, The cases, copy)
+# ---------------------------------------------------------------------------
+#
+# host_stamp_run runs stamp_write or stamp_verify (the host helper) on
+# host<h> for the first <bytes> bytes of the namespace whose uuid is <uuid>,
+# under the watchdog with WAIT_STAMP, and keeps the helper's answer in
+# STAMP_OUT and the status in STAMP_RC: the caller may have to undo a step of
+# its own before it judges them (host_stamp_judge). host_stamp is the two in
+# one. A stamp's fio is host IO like any other, so rule 5 holds: none runs on
+# a host whose namespace is parked or suspended.
+STAMP_OUT=""
+STAMP_RC=0
+
+host_stamp_run() { # <write|verify> <h> <uuid> <bytes>
+	STAMP_RC=0
+	STAMP_OUT=$(ssh_host_watched "$2" \
+		"bash $HELPER stamp_$1 $3 $4 $STAMP_BS" "$WAIT_STAMP") || STAMP_RC=$?
+}
+
+# host_stamp_judge dies unless the run host_stamp_run kept ended with fio's
+# exit code 0 and <bytes> bytes written or read back, the whole stamp.
+host_stamp_judge() { # <write|verify> <h> <bytes> <what>
+	local word line
+	case "$1" in
+	write) word=written ;;
+	*) word=verified ;;
+	esac
+	if [ "$STAMP_RC" = "$HOST_WATCH_RC" ]; then
+		die "host$2: fio's $1 of $4 did not finish within ${WAIT_STAMP}s," \
+			"and its ssh session was abandoned (rule 5): the likely cause" \
+			"is IO in D state on host$2, listed in its diagnostics below"
+	fi
+	[ "$STAMP_RC" = 0 ] ||
+		die "host$2: the stamp_$1 verb for $4 failed (status $STAMP_RC): $STAMP_OUT"
+	line=$(printf '%s\n' "$STAMP_OUT" | head -n 1)
+	if [ "$line" != "stamp=$word rc=0 bytes=$3" ]; then
+		printf '%s\n' "$STAMP_OUT" >&2
+		die "host$2: fio's $1 of $4 reads '$line'; it must exit 0 having" \
+			"$word all $3 bytes (its errors are above)"
+	fi
+	log "  host$2: $4, $3 bytes $word by fio"
+}
+
+host_stamp() { # <write|verify> <h> <uuid> <bytes> <what>
+	host_stamp_run "$1" "$2" "$3" "$4"
+	host_stamp_judge "$1" "$2" "$4" "$5"
+}
+
+# copy_clone_stamp stamps the clone's source before the transfer parks it:
+# host0 writes the first half of $TD0, COPY_CSTAMP_BYTES, with fio's verify
+# headers and reads it back, and reads SHA0 again from the device, as the
+# stamp overwrites the start of setup's pattern. The second half stays as
+# setup left it: at two slices or more never written, so the clone's
+# appended bitmaps still mark regions of it skippable, and copy step 3 reads
+# it as zeros through the clone; at one slice $TD0 is four blocks, all of
+# them setup's pattern, so the stamp covers half of it, nothing is left
+# unwritten and nothing is skipped, and SHA0 still covers the whole volume.
+copy_clone_stamp() {
+	local dev sha rc=0
+	COPY_CSTAMP_BYTES=$((TD0_SIZE / 2))
+	assert_eq "$((COPY_CSTAMP_BYTES % STAMP_BS))" 0 \
+		"the clone's stamp, half of $TD0, is a whole number of fio requests"
+	# The stamp lands on every leg of $TD0's slices, and the clone then
+	# copies the whole of $TD0 onto every leg of $TD_CLONE's: LEGS x the two,
+	# which grow with the slices, as the migration's stamp does. The case's
+	# run cap takes them on top of the slack (E2E5), as copy_mstamp_create
+	# does that stamp; sp_shape gives the next case its own cap.
+	RUN_CAP_BYTES=$((RUN_CAP_BYTES + LEGS * (COPY_CSTAMP_BYTES + TD0_SIZE)))
+	log "  the run cap takes the clone's stamp and the clone's copy of $TD0" \
+		"on all $LEGS leg(s): $RUN_CAP_BYTES bytes"
+	host_stamp write 0 "$UUID1" "$COPY_CSTAMP_BYTES" \
+		"the clone's stamp over the first half of $TD0"
+	host_stamp verify 0 "$UUID1" "$COPY_CSTAMP_BYTES" \
+		"the clone's stamp read back from $TD0"
+	dev=$(host_dev "$UUID1")
+	host_drop_caches 0 >/dev/null || rc=$?
+	host_watch_verdict "$rc" 0 "the cache drop after the clone's stamp" ||
+		die "host0: the cache drop after the clone's stamp failed"
+	sha=$(host_sha_range 0 "$dev" "$BASELINE_MIB") || rc=$?
+	host_watch_verdict "$rc" 0 "the read of the first $BASELINE_MIB MiB of $dev" ||
+		die "host0: reading the first $BASELINE_MIB MiB of $dev failed"
+	case "$sha" in
+	'' | *[!0-9a-f]*) die "host0: the digest after the clone's stamp is '$sha'" ;;
+	esac
+	assert_eq "${#sha}" 64 "the digest after the clone's stamp is 64 hex digits"
+	assert_ne "$sha" "$SHA0" \
+		"the first $BASELINE_MIB MiB of $TD0 after the clone's stamp over them"
+	SHA0=$sha
+	log "  SHA0 is read again from $dev after the stamp: $SHA0"
+}
+
+# copy_clone_stamp_check is copy step 3's read of the clone's stamp through
+# the clone's own namespace, once the transfer is gone: fio's verify over
+# the stamped half, and the rest of the volume, from the end of the stamp or
+# of setup's pattern, whichever is further, as zeros, the regions the
+# clone's bitmaps skipped among them. Only the self branch's source carries
+# the stamp.
+copy_clone_stamp_check() {
+	local from out
+	host_stamp verify 0 "$UUID2" "$COPY_CSTAMP_BYTES" \
+		"the clone's stamp read through $TD_CLONE"
+	from=$COPY_CSTAMP_BYTES
+	[ "$from" -ge "$((BASELINE_MIB << 20))" ] || from=$((BASELINE_MIB << 20))
+	if [ "$from" -ge "$TD0_SIZE" ]; then
+		log "  nothing of $TD0 was left unwritten at $SLICE_CNT slice(s):" \
+			"its whole $TD0_SIZE bytes are the stamp and setup's pattern"
+		return 0
+	fi
+	out=$(ssh_host_watched 0 \
+		"bash $HELPER stamp_zeros $UUID2 $from $TD0_SIZE" "$WAIT_STAMP") ||
+		die "host0: reading $TD_CLONE from byte $from to $TD0_SIZE failed: $out"
+	assert_eq "$out" "zeros=ok" \
+		"$TD_CLONE reads zeros from byte $from to $TD0_SIZE, the part of $TD0 never written"
+	log "  $TD_CLONE reads zeros from byte $from to $TD0_SIZE, where $TD0" \
+		"was never written"
+}
+
+# ---------------------------------------------------------------------------
 # Copy step 1 — the transfer
 # ---------------------------------------------------------------------------
 #
@@ -14288,7 +14755,7 @@ copy_primary_cn_id() {
 # host_dev_present, never wait_dev_gone (the rule in host_dev_present's
 # comment; wait_dev_gone would burn its budget and die).
 copy_transfer() {
-	stage 01 "xfer create --auto-suspend, then host1 reads $TD0 through it"
+	stage 01 "host0 stamps $TD0, xfer create --auto-suspend, then host1 reads $TD0 through it"
 	local dev
 
 	# PRIMARY_* were filled by setup, but a case that starts from whatever the
@@ -14296,6 +14763,10 @@ copy_transfer() {
 	# roles here so every transport below is this case's own observation.
 	sp_refresh
 	sp_read_roles
+
+	# The clone's stamp, while host0 may still write $TD0: the transfer
+	# below parks the origin (copy_clone_stamp).
+	copy_clone_stamp
 
 	ctl_ok xfer create --name "$XFER0" --ori-nqn "$SS0" --ori-idx 1 \
 		--hosts "${HOST_NQN[1]}" --auto-suspend
@@ -14656,15 +15127,73 @@ copy_src_sp_teardown() {
 	log "  $SP_SRC drained; its disk nodes are back in the pool of free DNs"
 }
 
-# copy_clone_build creates the clone from whatever COPY_SRC_* currently
-# describes, feeds it the bitmap chunks of the source slices one destination
-# region spans, re-points it at the same transport and waits for hydration.
+# copy_clone_refused judges a refused write to the clone, the one way such a
+# refusal is legal here: the copy was whole first, so the worker latched the
+# clone (dnv-worker.md CLD13), and a latched clone takes no write
+# (loadLiveClone (gateway/clone.go)), FAILED_PRECONDITION while it drains and
+# NOT_FOUND once it is gone. It waits the drain out, then wants more
+# `clone latched` records in the worker's log than <latched before>, the
+# count copy_clone read before the create; any other refusal, or a clone
+# gone with no latch of the worker's, is a die. <what> names the write in
+# the messages. On success the clone is drained and COPY_CLONE_DRAINED is 1.
+copy_clone_refused() { # <latched before> <what>
+	local err=$CTL_ERR n
+	case "$err" in
+	"dnvctl: NOT_FOUND: clone \"$CLONE0\" not found "* | \
+		"dnvctl: FAILED_PRECONDITION: clone \"$CLONE0\" is being deleted "*) ;;
+	*) die "$2 was refused: ${err:-dnvctl exit code $CTL_RC}" ;;
+	esac
+	wait_until "$WAIT_DELETE" \
+		"the worker to drain clone $CLONE0 to NOT_FOUND after $2 was refused" \
+		clone_gone
+	n=$(worker_msg_cnt "clone latched") ||
+		die "the worker's 'clone latched' records could not be counted"
+	[ "$n" -gt "$1" ] ||
+		die "$2 was refused ($err) and clone $CLONE0 is gone, but the" \
+			"worker's log holds $n 'clone latched' record(s), as before the" \
+			"create: the worker did not latch it"
+	COPY_CLONE_DRAINED=1
+}
+
+# copy_clone_write runs one dnvctl write to the clone: on success it holds
+# the reply as ctl_ok does and returns 0, and on a refusal it returns 1 once
+# copy_clone_refused has accepted the refusal, or dies.
+copy_clone_write() { # <latched before> <what> <dnvctl args…>
+	local before=$1 what=$2
+	shift 2
+	ctl_exec "$@"
+	if [ "$CTL_RC" != 0 ]; then
+		copy_clone_refused "$before" "$what"
+		return 1
+	fi
+	assert_eq "$CTL_ERR" "" "stderr of: dnvctl $* must be empty"
+	assert_parses "$CTL_OUT" "dnvctl $*"
+}
+
+# copy_clone_build reads the bitmaps of the source slices one destination
+# region spans, creates the clone from whatever COPY_SRC_* currently
+# describes, feeds it those bitmaps as its chunks, re-points it at the same
+# transport and waits for hydration. <latched before> is the worker's count
+# of `clone latched` records copy_clone read before any clone of the stage.
+#
+# THE READS COME BEFORE THE CREATE, AND THE APPENDS RIGHT AFTER IT. A small
+# destination's copy can be whole within seconds of the create, and once it
+# is, the worker latches and drains the clone, which then refuses every
+# write (copy_clone_refused). The reads need no clone, and the self branch's
+# source is parked from copy step 1 on, so they go first and the appends
+# follow the create with no wait between them. A copy can still win the race,
+# at many slices most often, where a region spans the most source slices and
+# so the most chunks: the run then logs what it does not test, sends nothing
+# more to the clone and waits for no hydration, as the clone is gone; copy
+# step 3's reads of the destination are the proof of the bytes either way.
 #
 # It returns 1 — WITHOUT dying — when and only when copy_clone_progress named
 # a source fault. Every other failure is a die, because every other failure is
 # a bug the fallback cannot fix.
-copy_clone_build() {
-	local hex bytes idx spans
+copy_clone_build() { # <latched before>
+	local before=$1 hex bytes idx spans
+	local -a bm_hex=()
+	COPY_CLONE_DRAINED=0
 	log ""
 	log "  --- clone source branch: $COPY_SRC_BRANCH"
 	log "      src_nqn       $COPY_SRC_NQN, ns $COPY_SRC_IDX"
@@ -14672,6 +15201,64 @@ copy_clone_build() {
 		"stripe $COPY_SRC_STRIPE, block $COPY_SRC_BLOCK"
 	log "      src transport tcp/ipv4 $COPY_SRC_TRADDR:$COPY_SRC_TRSVCID"
 	log "      expected digest of the first $BASELINE_MIB MiB: $COPY_SRC_SHA"
+
+	# One bitmap chunk from each SOURCE slice that one destination region
+	# spans. A region, the destination pool's block, is skipped only when the
+	# bitmaps of every source slice it maps to say unwritten, and the fold
+	# reads a slice with no chunk as written (CN22; architecture.md, raid0
+	# bitmap math): a region of SP_BLOCK_SIZE over a COPY_SRC_STRIPE stripe
+	# spans that many consecutive chunks, each on the next slice, so slices 0
+	# to spans-1 are the ones the regions that start at slice 0 cover, and
+	# with their chunks those regions are skippable where the source is
+	# unwritten. One slice when the stripe is the block, eight at the
+	# ceiling's 128 KiB stripe under a 1 MiB block. The wire convention of
+	# every bitmap RPC is 1 = unwritten/skippable and GetThinDeviceBitmap
+	# already answers in it (architecture.md, Bitmap reads: "agents and
+	# callers invert once at the boundary"), so each reply is fed straight
+	# through with no inversion here.
+	#
+	# --cnt 0 is the whole slice, and an EMPTY bitmap would be refused by the
+	# gateway on purpose ("bitmap must not be empty"), so the byte count is
+	# asserted when it is read rather than after it is refused.
+	#
+	# The gateway reads the source's bitmap only while every namespace on it
+	# is parked on its pool's primary (architecture.md, Bitmap reads). The
+	# self branch's source is the transfer's origin, which the transfer's
+	# --auto-suspend parks; the primary's report shows the park a round or
+	# so after host0 saw the namespace go inaccessible, so each read is
+	# polled. The sp1 branch's source is a plain namespace the clone reads
+	# through, never parked: its read is refused, no chunk is appended, and
+	# the clone copies every region.
+	if [ "$COPY_SRC_BRANCH" = sp1 ]; then
+		ctl_fail FAILED_PRECONDITION --sp "$COPY_SRC_SP" td get-bm \
+			--name "$COPY_SRC_TD" --slice-idx 0 --start 0 --cnt 0
+		log "  the sp1 source's namespace is not parked: no bitmap chunk," \
+			"the clone copies every region"
+	else
+		spans=$((SP_BLOCK_SIZE / COPY_SRC_STRIPE))
+		[ "$spans" -ge 1 ] || spans=1
+		[ "$spans" -le "$COPY_SRC_SLICES" ] || spans=$COPY_SRC_SLICES
+		log "  one ${SP_BLOCK_SIZE}-byte region spans $spans source slice(s)" \
+			"of a ${COPY_SRC_STRIPE}-byte stripe: reading slices 0 to" \
+			"$((spans - 1)) before the clone is created"
+		for ((idx = 0; idx < spans; idx++)); do
+			MIGR_HYD_LAST=""
+			wait_until "$WAIT_PROVISION" \
+				"the gateway to read slice $idx's bitmap of the parked source $COPY_SRC_TD" \
+				copy_src_bm_read "$idx"
+			bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
+			assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
+				"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
+			assert_ge "$bytes" 1 \
+				"slice $idx of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
+			assert_le "$bytes" 1048576 \
+				"one chunk may not exceed common.CloneBmChunkBytes (AppendCloneBitmap (gateway/clone.go))"
+			hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
+			assert_eq "${#hex}" "$((bytes * 2))" \
+				"bitmap_hex is two hex digits per byte_cnt byte"
+			bm_hex[idx]=$hex
+		done
+	fi
 
 	# All four --src-tr-* are passed. trConfFlags (ctl/root.go) declares
 	# DEFAULTS (tcp/ipv4/127.0.0.1/4420) rather than empty
@@ -14710,84 +15297,53 @@ copy_clone_build() {
 		 and .clone.src_tr_conf_list[0].tr_svc_id == \"$COPY_SRC_TRSVCID\"" \
 		"src_tr_conf_list is the one transport the flags described"
 
-	# One bitmap chunk from each SOURCE slice that one destination region
-	# spans. A region, the destination pool's block, is skipped only when the
-	# bitmaps of every source slice it maps to say unwritten, and the fold
-	# reads a slice with no chunk as written (CN22; architecture.md, raid0
-	# bitmap math): a region of SP_BLOCK_SIZE over a COPY_SRC_STRIPE stripe
-	# spans that many consecutive chunks, each on the next slice, so slices 0
-	# to spans-1 are the ones the regions that start at slice 0 cover, and
-	# with their chunks those regions are skippable where the source is
-	# unwritten. One slice when the stripe is the block, eight at the
-	# ceiling's 128 KiB stripe under a 1 MiB block. The wire convention of
-	# every bitmap RPC is 1 = unwritten/skippable and GetThinDeviceBitmap
-	# already answers in it (architecture.md, Bitmap reads: "agents and
-	# callers invert once at the boundary"), so each reply is fed straight
-	# through with no inversion here.
-	#
-	# --cnt 0 is the whole slice, and an EMPTY bitmap would be refused by the
-	# gateway on purpose ("bitmap must not be empty"), so the byte count is
-	# asserted before it is sent rather than after it is refused.
-	#
-	# The gateway reads the source's bitmap only while every namespace on it
-	# is parked on its pool's primary (architecture.md, Bitmap reads). The
-	# self branch's source is the transfer's origin, which the transfer's
-	# --auto-suspend parks; the primary's report shows the park a round or
-	# so after host0 saw the namespace go inaccessible, so each read is
-	# polled. The sp1 branch's source is a plain namespace the clone reads
-	# through, never parked: its read is refused, no chunk is appended, and
-	# the clone copies every region.
-	if [ "$COPY_SRC_BRANCH" = sp1 ]; then
-		ctl_fail FAILED_PRECONDITION --sp "$COPY_SRC_SP" td get-bm \
-			--name "$COPY_SRC_TD" --slice-idx 0 --start 0 --cnt 0
-		log "  the sp1 source's namespace is not parked: no bitmap chunk," \
-			"the clone copies every region"
-	else
-		spans=$((SP_BLOCK_SIZE / COPY_SRC_STRIPE))
-		[ "$spans" -ge 1 ] || spans=1
-		[ "$spans" -le "$COPY_SRC_SLICES" ] || spans=$COPY_SRC_SLICES
-		log "  one ${SP_BLOCK_SIZE}-byte region spans $spans source slice(s)" \
-			"of a ${COPY_SRC_STRIPE}-byte stripe: appending slices 0 to" \
-			"$((spans - 1))"
-		for ((idx = 0; idx < spans; idx++)); do
-			MIGR_HYD_LAST=""
-			wait_until "$WAIT_PROVISION" \
-				"the gateway to read slice $idx's bitmap of the parked source $COPY_SRC_TD" \
-				copy_src_bm_read "$idx"
-			bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
-			assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-				"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
-			assert_ge "$bytes" 1 \
-				"slice $idx of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
-			assert_le "$bytes" 1048576 \
-				"one chunk may not exceed common.CloneBmChunkBytes (AppendCloneBitmap (gateway/clone.go))"
-			hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
-			assert_eq "${#hex}" "$((bytes * 2))" \
-				"bitmap_hex is two hex digits per byte_cnt byte"
-
-			# The chunk is addressed by the PAIR (src_slice_idx, bm_idx),
-			# never by either alone (ctl/clone.go's append-bm comment; CN22
-			# bounds them independently). Chunk (idx, 0) is the first
-			# CloneBmChunkBytes of source slice idx's bitmap, which is the
-			# whole of it at every shape this suite builds.
-			ctl_ok clone append-bm --name "$CLONE0" --src-slice-idx "$idx" \
-				--bm-idx 0 --bm-hex "$hex"
-			assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
-				"AppendCloneBitmapReply.clone_id"
-		done
+	# The chunks read above, back to back. The chunk is addressed by the
+	# PAIR (src_slice_idx, bm_idx), never by either alone (ctl/clone.go's
+	# append-bm comment; CN22 bounds them independently). Chunk (idx, 0) is
+	# the first CloneBmChunkBytes of source slice idx's bitmap, which is the
+	# whole of it at every shape this suite builds.
+	if [ "${#bm_hex[@]}" -gt 0 ]; then
+		log "  appending the chunks of slices 0 to $((${#bm_hex[@]} - 1))"
+	fi
+	for ((idx = 0; idx < ${#bm_hex[@]}; idx++)); do
+		copy_clone_write "$before" "slice $idx's chunk" \
+			clone append-bm --name "$CLONE0" --src-slice-idx "$idx" \
+			--bm-idx 0 --bm-hex "${bm_hex[idx]}" || break
+		assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
+			"AppendCloneBitmapReply.clone_id"
+	done
+	if [ "$COPY_CLONE_DRAINED" = 1 ]; then
+		log "  the clone's copy was whole before slice $idx's chunk reached it:" \
+			"the worker latched and drained clone $CLONE0, so this run does" \
+			"not test the skip of unwritten regions"
 	fi
 
 	# UpdateCloneTrConf with the SAME transport: the RPC exists for a source
 	# that moved, and re-sending the current one is the only way to exercise
 	# it without moving anything. ensureCloneSource (agent/cnagent/clone.go)
 	# skips an entry it is already connected to, so this cannot
-	# disturb a connection that is already up.
-	ctl_ok clone set-tr --name "$CLONE0" \
-		--src-tr-type tcp --src-adr-fam ipv4 \
-		--src-tr-addr "$COPY_SRC_TRADDR" --src-tr-svc-id "$COPY_SRC_TRSVCID"
-	assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
-		"UpdateCloneTrConfReply.clone_id"
+	# disturb a connection that is already up. A clone whose copy is whole
+	# before it arrives refuses it as it refuses a chunk.
+	if [ "$COPY_CLONE_DRAINED" = 0 ]; then
+		if copy_clone_write "$before" "the set-tr of the same transport" \
+			clone set-tr --name "$CLONE0" \
+			--src-tr-type tcp --src-adr-fam ipv4 \
+			--src-tr-addr "$COPY_SRC_TRADDR" \
+			--src-tr-svc-id "$COPY_SRC_TRSVCID"; then
+			assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
+				"UpdateCloneTrConfReply.clone_id"
+		else
+			log "  the clone's copy was whole before the set-tr reached it:" \
+				"the worker latched and drained clone $CLONE0, so this run" \
+				"does not test UpdateCloneTrConf"
+		fi
+	fi
 
+	if [ "$COPY_CLONE_DRAINED" = 1 ]; then
+		log "  clone $CLONE0 is drained already: no hydration wait; copy" \
+			"step 3's reads of $TD_CLONE are the proof of the bytes"
+		return 0
+	fi
 	COPY_SRC_START=$SECONDS
 	COPY_HYD_MARK=$SECONDS
 	COPY_HYD_SIG=""
@@ -14856,7 +15412,8 @@ copy_clone() {
 	local latched_before
 
 	# The worker's `clone latched` records so far: the end of this stage
-	# wants exactly one more, the latch of this case's clone.
+	# wants exactly one more, the latch of this case's clone, and
+	# copy_clone_refused wants it already when the clone refuses a write.
 	latched_before=$(worker_msg_cnt "clone latched")
 
 	# The geometry the source describes, read back from the sp rather than
@@ -14905,10 +15462,10 @@ copy_clone() {
 		copy_xfer_host_linked "$PRIMARY_CN" "$PRIMARY_CN_NQN"
 
 	copy_src_self
-	if ! copy_clone_build; then
+	if ! copy_clone_build "$latched_before"; then
 		copy_clone_abandon
 		copy_src_sp_build
-		copy_clone_build ||
+		copy_clone_build "$latched_before" ||
 			die "the fallback source $SS_SRC also failed: $COPY_SRC_FAULT." \
 				"Both clone sources are exhausted; this is not a lab" \
 				"limitation the suite knows how to work around"
@@ -14919,11 +15476,12 @@ copy_clone() {
 	# latches the clone at its first pass after the primary reports the copy
 	# whole (dnv-worker.md CLD13), so this create may find the clone live —
 	# CN16 rule 5 backs the namespace with CnCloneFinalName, and rule 6 then
-	# moves the same ns-dev onto $TD_CLONE's own raid0 — or latched already,
-	# rule 6 alone; copy step 7 creates its namespace before its clone and so
-	# meets both. The namespace is asserted by the ANA state and the device
-	# node here and by the digest in the next stage, which is read only after
-	# the transfer is gone (constraint (a)).
+	# moves the same ns-dev onto $TD_CLONE's own raid0 — or latched, or
+	# drained when its copy was whole before copy_clone_build's last write
+	# reached it, rule 6 alone; copy step 7 creates its namespace before its
+	# clone and so meets both. The namespace is asserted by the ANA state and
+	# the device node here and by the digest in the next stage, which is read
+	# only after the transfer is gone (constraint (a)).
 	ctl_ok ns create --nqn "$SS0" --idx 2 --td "$TD_CLONE" --uuid "$UUID2"
 	NS2_ID=$(jq_of "$CTL_OUT" '.ns_id')
 	case "$NS2_ID" in
@@ -15040,7 +15598,16 @@ copy_xfer_delete() {
 		"host0 to read the copied bytes back from $dev ($TD_CLONE)"
 	log "  the $COPY_SRC_BRANCH source's first $BASELINE_MIB MiB are in" \
 		"$TD_CLONE, byte for byte"
+	# The clone's stamp through the destination, and then on its source again.
+	if [ "$COPY_SRC_BRANCH" = self ]; then
+		copy_clone_stamp_check
+	else
+		log "  the $COPY_SRC_BRANCH source carries no stamp: $TD_CLONE is held" \
+			"to that source's digest alone"
+	fi
 	check_sha0 "after the transfer was aborted"
+	host_stamp verify 0 "$UUID1" "$COPY_CSTAMP_BYTES" \
+		"the clone's stamp read again from its source $TD0"
 
 	# This case's own objects go before case_finish, whose pre-check allows
 	# exactly one subsystem, one namespace and one thin device through.
@@ -15053,6 +15620,268 @@ copy_xfer_delete() {
 	if [ "$COPY_SRC_SP_BUILT" = 1 ]; then
 		copy_src_sp_teardown
 	fi
+}
+
+# ---------------------------------------------------------------------------
+# Copy step 4's stamp and cap
+# ---------------------------------------------------------------------------
+
+# copy_mstamp_create builds the migration's stamp: $TD_MSTAMP,
+# COPY_MSTAMP_UNITS TD_UNITs, as $SS0's ns MSTAMP_IDX, which host0 takes up
+# on the controller it holds, as copy step 2's ns 2, and writes whole with
+# fio and reads back. First it holds slice 0's pool to the mark of
+# auto-grow (dnv-worker.md AR6), as a grow here would change the pool every
+# later count reads: from the stored numbers, $TD0's blocks there, a block a
+# TD_UNIT of the clone's stamp or setup's pattern, whichever is longer, with
+# the stamp's, times 100, at most the mark times the data blocks slice 0's
+# groups hold; and on the primary, whose report must show room for the
+# stamp's blocks (copy_pool_room), which it does once copy step 3's
+# $TD_CLONE has left the pool.
+copy_mstamp_create() {
+	local lwm held covered td0_blocks slice0
+	lwm=$(sp_field '.sp_conf.bdev_conf.dm_pool_conf.low_water_mark_pct')
+	held=$(sp_field '[.slice_list[0].data_grp_list[].data_blocks | tonumber] | add')
+	case "$lwm" in
+	'' | *[!0-9]*) die "\`sp get\` reports low_water_mark_pct '$lwm'" ;;
+	esac
+	case "$held" in
+	'' | *[!0-9]*) die "\`sp get\` reports slice 0's data blocks as '$held'" ;;
+	esac
+	covered=$COPY_CSTAMP_BYTES
+	[ "$covered" -ge "$((BASELINE_MIB << 20))" ] || covered=$((BASELINE_MIB << 20))
+	td0_blocks=$(((covered + TD_UNIT - 1) / TD_UNIT))
+	assert_le "$(((td0_blocks + COPY_MSTAMP_UNITS) * 100))" "$((lwm * held))" \
+		"slice 0's pool blocks, $td0_blocks of $TD0 and $COPY_MSTAMP_UNITS of the stamp, times 100, against ${lwm}% of its $held data blocks times 100 (dnv-worker.md AR6)"
+	slice0=$(sp_field '.sp_conf.slice_id_list[0]')
+	case "$slice0" in
+	'' | *[!0-9]* | 0) die "sp_conf.slice_id_list[0] is '$slice0', not a decimal id" ;;
+	esac
+	COPY_POOL_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"slice 0's pool on cntlr $PRIMARY_CNTLR_ID to have room for the migration's stamp under ${lwm}%" \
+		copy_pool_room "$PRIMARY_CNTLR_ID" "$slice0" "$lwm"
+	COPY_MSTAMP_BYTES=$((COPY_MSTAMP_UNITS * TD_UNIT))
+	assert_eq "$((COPY_MSTAMP_BYTES % STAMP_BS))" 0 \
+		"the migration's stamp is a whole number of fio requests"
+
+	ctl_ok td create --name "$TD_MSTAMP" --size "$COPY_MSTAMP_BYTES"
+	MSTAMP_TD_ID=$(jq_of "$CTL_OUT" '.td_id')
+	case "$MSTAMP_TD_ID" in
+	'' | *[!0-9]* | 0) die "td create returned td_id '$MSTAMP_TD_ID'" ;;
+	esac
+	wait_until "$WAIT_PROVISION" "$TD_MSTAMP to report created" \
+		td_created "$TD_MSTAMP"
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to build raid0s for $TD0 and $TD_MSTAMP" \
+		cntlr_raid0_ready "$PRIMARY_CNTLR_ID" 2
+	ctl_ok ns create --nqn "$SS0" --idx "$MSTAMP_IDX" --td "$TD_MSTAMP" \
+		--uuid "$UUID_MSTAMP"
+	MSTAMP_NS_ID=$(jq_of "$CTL_OUT" '.ns_id')
+	case "$MSTAMP_NS_ID" in
+	'' | *[!0-9]* | 0) die "ns create returned ns_id '$MSTAMP_NS_ID'" ;;
+	esac
+	# The gate before the host's wait, as at copy step 2's ns 2.
+	wait_ns_exported "$PRIMARY_CNTLR_ID" \
+		"$SS0 ns $MSTAMP_IDX ($TD_MSTAMP) on cn$PRIMARY_CN" \
+		"$SS0_ID" "$MSTAMP_NS_ID"
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID_MSTAMP" optimized
+	wait_dev 0 "$UUID_MSTAMP"
+	# The stamp lands on every leg of every slice, LEGS x its bytes, which
+	# the case's space guard still counts once its thin device is gone, as a
+	# thin delete hands no block back to a backing file. The case's run cap
+	# takes it on top of the slack (E2E5): at the widest pool the slack alone
+	# would leave it little room over the copy case's other writes. sp_shape
+	# gives the next case its own cap.
+	RUN_CAP_BYTES=$((RUN_CAP_BYTES + LEGS * COPY_MSTAMP_BYTES))
+	log "  the run cap takes the stamp on all $LEGS leg(s): $RUN_CAP_BYTES bytes"
+	host_stamp write 0 "$UUID_MSTAMP" "$COPY_MSTAMP_BYTES" \
+		"the migration's stamp, $TD_MSTAMP written whole"
+	host_stamp verify 0 "$UUID_MSTAMP" "$COPY_MSTAMP_BYTES" \
+		"the migration's stamp read back before the migration"
+}
+
+# copy_pool_room is true when the primary's report of slice <slice id>'s
+# pool, its data ratio read as react_pool_frac reads it, leaves room for the
+# migration's stamp under the mark <lwm>: (used + COPY_MSTAMP_UNITS) x 100
+# at most <lwm> x total. The ratio is logged when it changes.
+COPY_POOL_LAST=""
+
+copy_pool_room() { # <cntlr id> <slice id> <lwm>
+	local det frac used total
+	ctl_try cntlr inspect --id "$1" || return 1
+	det=$(jq_of "$CTL_OUT" \
+		".cntlr_info.slice_id_to_dm_pool[\"$2\"].details // \"\"")
+	frac=$(react_pool_frac "$det" 3)
+	used=${frac%%/*}
+	total=${frac##*/}
+	case "$used$total" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$total" -gt 0 ] || return 1
+	if [ "$frac" != "$COPY_POOL_LAST" ]; then
+		COPY_POOL_LAST=$frac
+		log "  slice 0's pool on cntlr $1: data $frac blocks"
+	fi
+	[ "$(((used + COPY_MSTAMP_UNITS) * 100))" -le "$(($3 * total))" ]
+}
+
+# copy_mstamp_check reads the migration's stamp back whole once the first
+# migration has finished, through the moved leg <leg id>'s new side. Under
+# md-raid1 md reads a group's data from either member, so the group's other
+# leg's member is set write-mostly on the primary for the read, which leaves
+# md the moved leg's member, which must read in sync, to read from, and the
+# flag must still be on once the read is done; it is cleared before the read
+# is judged, so a read that fails leaves no flag behind. Then the stamp's namespace and thin device
+# go, which leaves the pool's objects as they were before the step.
+copy_mstamp_check() { # <leg id>
+	local other name moved mrd state after
+	if [ "$REDUND" != raid1 ]; then
+		host_stamp verify 0 "$UUID_MSTAMP" "$COPY_MSTAMP_BYTES" \
+			"the migration's stamp read through leg $1's new side, the group's only leg"
+	else
+		other=$(sp_field \
+			"$COPY_GRP0 | [.leg_list[] | select(.leg_id != \"$1\")] | .[0].leg_id")
+		case "$other" in
+		'' | *[!0-9]*) die "group $COPY_GRP0 names no leg but $1: '$other'" ;;
+		esac
+		name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$other")
+		case "$name" in
+		*notanid-*) die "cn_leg_name produced '$name'" ;;
+		esac
+		# md falls back on a write-mostly member when no other is in sync, so
+		# the moved leg's own member must be.
+		moved=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$1")
+		case "$moved" in
+		*notanid-*) die "cn_leg_name produced '$moved'" ;;
+		esac
+		mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$moved") ||
+			die "leg $1's member $moved is not in its array on cn$PRIMARY_CN: $mrd"
+		state=${mrd%% *}
+		case ",${state#state=}," in
+		*,in_sync,*) ;;
+		*) die "leg $1's member $moved reads '$mrd' before the stamp's read, want in_sync" ;;
+		esac
+		mrd=$(helper_cn "$PRIMARY_CN" md_write_mostly "$name" on) ||
+			die "cn$PRIMARY_CN: setting write-mostly on leg $other's member $name failed: $mrd"
+		state=${mrd%% *}
+		case ",${state#state=}," in
+		*,write_mostly,*) ;;
+		*) die "leg $other's member $name reads '$mrd' once write-mostly is set" ;;
+		esac
+		log "  leg $other's member $name is write-mostly on the primary," \
+			"so md reads leg $1's new side: $mrd"
+		host_stamp_run verify 0 "$UUID_MSTAMP" "$COPY_MSTAMP_BYTES"
+		# stdout only: ssh_sudo logs its command line on stderr, and that
+		# line would stand in for the state the next check reads.
+		after=$(helper_cn "$PRIMARY_CN" md_member_read "$name") ||
+			after="unread: $after"
+		mrd=$(helper_cn "$PRIMARY_CN" md_write_mostly "$name" off) ||
+			die "cn$PRIMARY_CN: clearing write-mostly on leg $other's member $name failed: $mrd"
+		state=${mrd%% *}
+		case ",${state#state=}," in
+		*,write_mostly,*)
+			die "leg $other's member $name reads '$mrd' once write-mostly is cleared"
+			;;
+		esac
+		log "  write-mostly is off leg $other's member $name again: $mrd"
+		host_stamp_judge verify 0 "$COPY_MSTAMP_BYTES" \
+			"the migration's stamp read through leg $1's new side"
+		state=${after%% *}
+		case ",${state#state=}," in
+		*,write_mostly,*) ;;
+		*)
+			die "leg $other's member $name read '$after' right after the" \
+				"stamp's read: the write-mostly flag did not hold through it," \
+				"so md may have read the stamp from that leg"
+			;;
+		esac
+	fi
+	ctl_ok ns delete --nqn "$SS0" --idx "$MSTAMP_IDX"
+	assert_field "$CTL_OUT" '.ns_id' "$MSTAMP_NS_ID" "DeleteNamespaceReply.ns_id"
+	wait_dev_gone 0 "$UUID_MSTAMP"
+	ctl_ok td delete --name "$TD_MSTAMP"
+	assert_field "$CTL_OUT" '.td_id' "$MSTAMP_TD_ID" "DeleteThinDeviceReply.td_id"
+	log "  the migration's stamp, ns $MSTAMP_IDX and $TD_MSTAMP, is gone"
+}
+
+# copy_migr_throttle caps what the source side's nvmet port, <addr>:<port>
+# on dn<v>, sends to every other disk-node guest at COPY_MIGR_RATE_KBIT
+# (throttle_to): the destination is a guest outside the group's (E2E4), so
+# it is among them, and no other guest takes anything from that port.
+copy_migr_throttle() { # <v> <addr> <port>
+	local w tos="" out
+	for w in "${!DN_IP[@]}"; do
+		[ "$w" = "$1" ] && continue
+		tos="${tos:+$tos,}${DN_IP[$w]}"
+	done
+	[ -n "$tos" ] || die "no disk-node guest but dn$1 to cap the migration's copy to"
+	COPY_MIGR_THROTTLE_DN=$1
+	out=$(helper_dn "$1" throttle_to "$2" "$3" "${COPY_MIGR_RATE_KBIT}kbit" "$tos") ||
+		die "dn$1: the throttle_to verb could not be run"
+	case "$out" in
+	"throttled "*) ;;
+	*) die "dn$1: capping what $2:$3 sends to $tos at ${COPY_MIGR_RATE_KBIT}kbit: $out" ;;
+	esac
+	COPY_MIGR_CAPPED=$tos
+	log "  dn$1 sends from the source side's port $2:$3 to $tos at" \
+		"${COPY_MIGR_RATE_KBIT}kbit until the worker's pieces have landed"
+}
+
+# copy_migr_unthrottle takes the cap off dn<v> and reads that it is gone.
+copy_migr_unthrottle() { # <v>
+	local out
+	out=$(helper_dn "$1" unthrottle) ||
+		die "dn$1: the unthrottle verb could not be run"
+	assert_eq "$out" unthrottled "dn$1: the migration's cap taken off"
+	assert_eq "$(helper_dn "$1" throttle_rules)" "" "no throttle left on dn$1"
+	COPY_MIGR_THROTTLE_DN=-1
+	COPY_MIGR_CAPPED=""
+}
+
+# copy_migr_discarded is true once the dn agent at dn<v> instance <k> has
+# logged a whole discard on migration <migr id>'s dm-clone, the pieces'
+# apply (dnagent.md DN15; osclient.md, DiscardRanges): an "os discard ranges"
+# record of that device's path with no error and every range done.
+# COPY_MIGR_DISCARDED is how many regions, one SP block each, those records
+# marked copied, each counted once. An apply that sends no discard logs
+# "applying migration bitmap failed", which is logged here when it changes,
+# as the wait then runs out.
+COPY_MIGR_DISCARDED=""
+COPY_MIGR_APPLY_LAST=""
+COPY_MIGR_CAPPED=""
+
+copy_migr_discarded() { # <v> <k> <migr id>
+	local lines name n fail
+	name="d3-$(hex16 "$SP_ID")-$(hex16 "$3")"
+	case "$name" in
+	*notanid-*) die "copy_migr_discarded: hex16 could not format sp $SP_ID migration $3" ;;
+	esac
+	lines=$(ssh_dn "$1" "grep -F -e '\"msg\":\"os discard ranges\"' \
+		-e '\"msg\":\"applying migration bitmap failed\"' \
+		$(dn_log "$2") || [ \$? -eq 1 ]") || return 1
+	fail=$(printf '%s\n' "$lines" | "$JQ" -R -s -r --arg s "$name" '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "applying migration bitmap failed"
+		     and ((.dm // "") | endswith($s)))
+		 | .error // ""] | last // ""') || fail=""
+	if [ -n "$fail" ] && [ "$fail" != "$COPY_MIGR_APPLY_LAST" ]; then
+		COPY_MIGR_APPLY_LAST=$fail
+		log "  dn$1 instance $2: applying the pieces failed: $fail"
+	fi
+	n=$(printf '%s\n' "$lines" | "$JQ" -R -s --arg s "$name" \
+		--argjson b "$SP_BLOCK_SIZE" '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "os discard ranges"
+		     and ((.path // "") | endswith($s))
+		     and .error == null and (.range_cnt // 0) > 0
+		     and .done == .range_cnt)
+		 | .ranges[] | range(.[0] / $b; (.[0] + .[1]) / $b)]
+		| unique | length') || return 1
+	case "$n" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	COPY_MIGR_DISCARDED=$n
+	[ "$n" -gt 0 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -15100,6 +15929,23 @@ copy_xfer_delete() {
 # removal at the finish is what the DN acts on, one syncup later. So the
 # proof is the PRIMARY CN's own view of its path (cn_wait_ana).
 #
+# THE STAMP AND THE CAP. Before the create host0 writes a thin device and
+# namespace of their own whole with fio's verify headers (copy_mstamp_create),
+# whose blocks sit after $TD0's in slice 0's pool and so in the leg, and the
+# disk node of the source side gets a cap on what that side's nvmet port
+# sends to the other disk-node guests (throttle_to), so the destination's
+# copy takes about a second a region: over the lab's network the whole leg's
+# copy is done before the worker's bitmap pieces arrive, and then no piece
+# keeps a region from being copied. The pieces must mark
+# never-written regions copied on the dm-clone (copy_migr_discarded), and the
+# dm-clone, read on its disk node right after, must still have regions to
+# copy: a copy already whole when the pieces landed fails the step, as a run
+# that passed then would claim a skip it never made, and a mutant of the
+# pieces would pass with it. The cap comes off at once, and the rest of the
+# copy runs at full speed. After the finish host0 reads the stamp back whole
+# with fio's verify, through the moved leg's new side (copy_mstamp_check),
+# and the stamp's namespace and thin device go, before the second migration.
+#
 # The worker will not interfere, and that holds for a reason that does not
 # depend on a number: AR8 leaves a leg with two sides alone outright, as a
 # leg with two sides has a user migration in flight (dnv-worker.md AR8), so
@@ -15126,14 +15972,18 @@ copy_xfer_delete() {
 # has more DN VMs than legs (parse_args refuses such a run), so the location
 # assertion below is always made.
 copy_migration() {
-	stage 04 "migr create, the cutover, the worker's bitmap read, finish — then a second one, cancelled after its cutover"
+	stage 04 "a stamp, migr create under a cap, the cutover, the worker's bitmap read, finish, the stamp read back — then a second one, cancelled after its cutover"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
 	local v k srcv srck legnqn straddr strsvcid dsttraddr dsttrsvcid t0
-	local pieces det
+	local pieces det frac srctraddr srctrsvcid tcut
 
 	sp_refresh
 	sp_read_roles
 	copy_primary_cn_id
+	# The migration's stamp, while host IO is still legal: its blocks sit
+	# after $TD0's in the leg the step moves (copy_mstamp_create).
+	copy_mstamp_create
+	sp_refresh
 	gid=$(sp_field "$COPY_GRP0.grp_id")
 	legid=$(sp_field "$COPY_GRP0.leg_list[0].leg_id")
 	sideid=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].side_id")
@@ -15159,6 +16009,20 @@ copy_migration() {
 		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
 	log "  migrating side $sideid of leg $legid (group $gid) off dn$v" \
 		"instance $k ($saddr); the group holds $before_addrs on VMs $before_vms"
+
+	# THE CAP, before the create, so that no part of the destination's copy,
+	# which starts at the cutover, runs at full speed.
+	srctraddr=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_addr")
+	srctrsvcid=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_svc_id")
+	case "$srctraddr" in
+	'' | null) die "the source side $sideid carries no nvme_tr_conf.tr_addr" ;;
+	esac
+	case "$srctrsvcid" in
+	'' | null | *[!0-9]*)
+		die "the source side $sideid carries nvme_tr_conf.tr_svc_id '$srctrsvcid'"
+		;;
+	esac
+	copy_migr_throttle "$srcv" "$srctraddr" "$srctrsvcid"
 
 	ctl_ok migr create --name "$MIGR0" --src-side "$sideid"
 	MIGR0_ID=$(jq_of "$CTL_OUT" '.migr_id')
@@ -15239,6 +16103,7 @@ copy_migration() {
 	wait_until "$WAIT_PROVISION" \
 		"the worker to start the cutover of migration $MIGR0" \
 		migr_cutover_started "$MIGR0"
+	tcut=$SECONDS
 	copy_check_cutover "$MIGR0_ID" "$sideid" "$dstside"
 
 	# The destination serves through its dm-clone, and the primary's own path
@@ -15262,6 +16127,13 @@ copy_migration() {
 	case "$dsttrsvcid" in
 	'' | null) die "the destination side $dstside carries no nvme_tr_conf.tr_svc_id" ;;
 	esac
+	case ",$COPY_MIGR_CAPPED," in
+	*",$dsttraddr,"*) ;;
+	*)
+		die "the destination $dsttraddr is not among the addresses the cap" \
+			"on dn$srcv holds to ${COPY_MIGR_RATE_KBIT}kbit ($COPY_MIGR_CAPPED)"
+		;;
+	esac
 	MIGR_HYD_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the migration's destination side $dstside to serve through its dm-clone" \
@@ -15284,10 +16156,15 @@ copy_migration() {
 	# slice's thin devices (cnagent.md CN27), cut into pieces the worker
 	# pushes to the destination's dn agent, which marks the never-written
 	# regions copied on its dm-clone (dnagent.md DN15). The record names the
-	# leg and the piece count; every piece must reach the destination. The
-	# destination's copied count after the pieces is logged and not
-	# asserted: the background copy runs from the dm-clone's creation, so
-	# it may have copied a region before its piece arrived.
+	# leg and the piece count; every piece must reach the destination, and
+	# their apply must mark regions copied (copy_migr_discarded). The
+	# background copy runs from the dm-clone's creation, held to about a
+	# region a second by the cap, so the dm-clone's copied count, read on its
+	# disk node right after the apply, must leave regions to copy: a copy
+	# that was whole when the pieces landed is a die, not a warning, as a
+	# pass would then claim a skip of the pieces that no region needed, and a
+	# mutant that marks a written region copied would pass with it. The cap
+	# then comes off.
 	wait_until "$WAIT_PROVISION" \
 		"the worker to read migration $MIGR0's bitmap" \
 		copy_bm_read_logged "$MIGR0_ID"
@@ -15302,12 +16179,31 @@ copy_migration() {
 	wait_until "$WAIT_SHORT" \
 		"the destination's dn agent to take all $pieces piece(s) of migration $MIGR0" \
 		copy_pieces_taken "$v" "$k" "$MIGR0_ID" "$pieces"
-	if ctl_try sp inspect-side --id "$dstside"; then
-		det=$(jq_of "$CTL_OUT" \
-			'.side_info.migr_dst_info.dm_clone_info.details // ""')
-		log "  migration $MIGR0: $pieces piece(s) taken; the destination's" \
-			"dm-clone reads $(hyd_fraction "$det") regions copied"
+	COPY_MIGR_DISCARDED=""
+	COPY_MIGR_APPLY_LAST=""
+	wait_until "$WAIT_SHORT" \
+		"the destination's dn agent to mark migration $MIGR0's never-written regions copied" \
+		copy_migr_discarded "$v" "$k" "$MIGR0_ID"
+	det=$(helper_dn "$v" migr_clone_status "$(hex16 "$SP_ID")" \
+		"$(hex16 "$MIGR0_ID")") ||
+		die "dn$v: the migr_clone_status verb could not be run"
+	frac=$(hyd_fraction "$det")
+	case "$frac" in
+	*/*) ;;
+	*) die "dn$v: migration $MIGR0's dm-clone status reads '$det'" ;;
+	esac
+	log "  migration $MIGR0: $pieces piece(s) taken $((SECONDS - tcut)) s" \
+		"after the cutover; they marked $COPY_MIGR_DISCARDED never-written" \
+		"region(s) copied, and the dm-clone then reads $frac regions copied"
+	if hyd_complete "$frac"; then
+		die "migration $MIGR0's dm-clone reads $frac regions copied right" \
+			"after the worker's pieces landed, $((SECONDS - tcut)) s after the" \
+			"cutover: the copy was whole, or all but, before them, so no piece" \
+			"kept a region from being copied and the stamp's check proves" \
+			"nothing of them. The cap of ${COPY_MIGR_RATE_KBIT}kbit on dn$srcv" \
+			"did not hold the copy back long enough"
 	fi
+	copy_migr_unthrottle "$srcv"
 
 	# THE FORCED DROP (raid1 only), after the gap check, so its syncup lies
 	# outside the window that check reads, and before the finish, while the
@@ -15355,6 +16251,7 @@ copy_migration() {
 	strsvcid=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_svc_id")
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
 	check_sha0 "after a migration committed onto a new disk node"
+	copy_mstamp_check "$legid"
 
 	# The rollback. The destination side of the FIRST migration is now the
 	# leg's only side, so it is the source of the second — which proves that
@@ -16208,6 +17105,20 @@ copy_reuse() {
 		"and that side is leg $newleg's"
 	diag_note_dn "$nv" "$nk"
 
+	# The group's operator_in_charge flag holds the worker's own repair off
+	# it while this step takes the retired leg back: md records a bad-block
+	# range on the new leg when its disk node dies in md's copy, and that
+	# makes the leg a candidate of the worker's leg repair at once, with no
+	# threshold, beside the clean leg (dnv-worker.md AR8, A leg with
+	# bad-block ranges). The flag holds the worker's create alone; this
+	# step's own repair goes on. It is cleared at the step's end.
+	ctl_ok group set-operator-in-charge --grp "$gid"
+	assert_field "$CTL_OUT" '.grp_id' "$gid" \
+		"UpdateGroupOperatorInChargeReply.grp_id"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.operator_in_charge" true \
+		"group $gid's operator_in_charge flag, set before its new leg dies"
+
 	COPY_REP_LAST=""
 	copy_rep_copying "$newleg" ||
 		die "md finished, or stopped, its copy onto leg $newleg before its" \
@@ -16435,6 +17346,12 @@ copy_reuse() {
 		"the primary after the two repairs is the one step 5 started with (a dead leg must not fail the primary over)"
 	assert_eq "$(worker_failover_cnt)" "$COPY_REP_FAILOVERS" \
 		"the worker's applied failovers across the two repair steps (a dead leg must not fail the primary over)"
+	ctl_ok group set-operator-in-charge --grp "$gid" --operator-in-charge=false
+	assert_field "$CTL_OUT" '.grp_id' "$gid" \
+		"UpdateGroupOperatorInChargeReply.grp_id"
+	sp_refresh
+	assert_field "$SP_JSON" "$COPY_GRP0.operator_in_charge" false \
+		"group $gid's operator_in_charge flag, cleared at the step's end"
 	check_sha0 "at the end of the repair steps"
 	host_kmsg_clean 0 "$COPY_REP_TAG" "at the end of the repair steps"
 }
