@@ -1932,8 +1932,8 @@ harmless. A migration destination takes its run before it zeroes
   paged list RPCs resolve it per request, cut one page with it and throw it
   away (page_token; `gateway.md` GW4). The bounds and the defaults are
   constants of `common/constants.go`, save the stripe's default, which
-  follows the block, and a clone's hydration defaults, which are the
-  dm-clone target's own:
+  follows the block and, for a pool, its slice count, and a clone's
+  hydration defaults, which are the dm-clone target's own:
   * `dn_bin_conf.extent_size`: `MinDnExtSize` to `MaxDnExtSize`, default
     `DefaultDnExtSize`;
   * `alloc_conf.dn_batch_size`: `MinAllocDnBatchSize` to
@@ -1949,15 +1949,27 @@ harmless. A migration destination takes its run before it zeroes
     Automatic reactions **off** (`pb/schema.proto`); the agent then passes
     a zero `low_water_mark` to the thin-pool table — no dm events;
   * `dm_raid0_conf.stripe_size`, a multiple of `MinDmRaid0StripeSize`:
-    `MinDmRaid0StripeSize` to `MaxDmRaid0StripeSize`, default the conf's
-    `data_block_size`, at most `MaxDmRaid0StripeSize`
+    `MinDmRaid0StripeSize` to `MaxDmRaid0StripeSize`. A cluster's default
+    is the conf's `data_block_size`, at most `MaxDmRaid0StripeSize`
     (`model.DefaultStripeSize`). Reason: a whole aligned block written in
     one request then reaches one slice's dm-thin unsplit, and dm-thin skips
     the zero fill of a block one write covers whole ([D15]); and one aligned
     host block is one pool block for a discard (Known limits). A pool that
     names no stripe takes its cluster's stored stripe, whether or not it
-    names a block (Storage pools), so a pool whose block is smaller than
-    that stripe names its stripe too, or is refused;
+    names a block (Storage pools), narrowed to the largest power of two
+    whose product with the pool's slice count is within the stripe's
+    product bound below (`model.FitStripe`), and a stripe that already fits
+    is kept. So a cluster's stored stripe is the largest a pool that names
+    none takes, and a pool whose block is smaller than the stripe it would
+    take names its stripe too, or is refused. Reason for the narrowing: a
+    cluster's stored stripe cannot tell a stripe its operator named from the
+    default it stored, so refusing an inherited stripe would refuse every
+    pool that names none and whose slice count times the cluster's stripe
+    is over the bound; powers of two keep the narrowed stripe a divisor of
+    the block, as every stored stripe is. A pool whose narrowed
+    stripe is below its block gives up the two gains of the reason above
+    (Known limits). A stripe the request names is never narrowed: the
+    operator asked for it, and the bound below judges it;
   * `redund_md_raid1.bitmap_chunk_block_cnt`: `MinChunkBlockCnt` to
     `MaxChunkBlockCnt`, default `DefaultChunkBlockCnt`;
   * the `DmCloneConf` hydration pair, of a clone and of a migration alike:
@@ -2008,15 +2020,36 @@ harmless. A migration destination takes its run before it zeroes
   sets both; every rule is then judged again on the `bdev_conf` the create
   RPC stores — `CreateCluster`'s resolved against the constants and, for
   the stripe, the block,
-  `CreateStoragePool`'s merged over `ClusterConf.bdev_conf` and resolved
-  (Storage pools) — because only that message shows what an omitted member
-  becomes. An SP therefore cannot inherit a member these rules refuse, even
-  from a cluster whose stored conf breaks them. An SP whose stored geometry
+  `CreateStoragePool`'s merged over `ClusterConf.bdev_conf` and resolved,
+  an inherited stripe narrowed (Storage pools) — because only that message
+  shows what an omitted member becomes. An SP therefore cannot inherit a
+  member these rules refuse, even from a cluster whose stored conf breaks
+  them. An SP whose stored geometry
   breaks them keeps it, and no RPC judges a stored SP's `bdev_conf` against
   them: `CreateClone` still refuses one whose stripe or block breaks the
   source rules of raid0 bitmap math as a source, and one whose
   `data_block_size` is not a power of two still fails, at its dm-clone,
   every clone into it and every migration of one of its sides.
+* **The stripe's product.** `CreateStoragePool` holds a pool's
+  `stripe_size` times its slice count, the slice count after its default,
+  to at most `MaxNvmeTcpCmdBytes`, the most data one NVMe/TCP command may
+  carry to a node's kernel target (`INVALID_ARGUMENT` otherwise). A stripe
+  the request names is judged before any read, the message naming the
+  product, the bound, the reason and the largest stripe that fits
+  (`model.FitStripe` of the named stripe); an inherited stripe is narrowed
+  to fit (the stripe bullet above) and never refused; and the merged conf
+  is judged again, as the guard of what is stored. Reason: the product is
+  the optimal IO size dm-stripe reports for every volume of the pool,
+  nvmet passes it to the host, and a host lets one request grow to it where
+  it is over the host's own default largest request, while nvmet over TCP
+  refuses a command that carries more than the bound with an IO error that
+  is not retried (Known limits). A refusal and not a warning, since a
+  larger product gives hosts IO errors on the kernels in use; the bound is
+  the kernel's, not a dnv setting. `CreateClone` holds a clone's dm-clone
+  to the same bound (Clones). A stored pool whose product is over the bound
+  keeps it, as it keeps the rest of its geometry, and no RPC judges it but
+  `CreateClone`, which refuses a clone into or out of it wherever its
+  dm-clone would report more (Clones; Known limits).
 * `EventThreshold.leg_unhealthy` must be greater than
   `EventThreshold.side_unhealthy` after the defaults above are resolved
   (`INVALID_ARGUMENT` otherwise): the leg repair of Automatic reactions
@@ -2155,7 +2188,9 @@ the message says the defaults were filled in), or when
 Defaults: the defaults of Common validation for every `ClusterConf`
 member, applied **here** and stored concrete — `ClusterConf` is
 write-once, so this is the only chance its members ever get to be
-resolved (Common validation; `gateway.md` GW11). `creation_epoch` is
+resolved (Common validation; `gateway.md` GW11). The stored stripe is the
+largest a pool that names none takes: such a pool takes it narrowed to its
+slice count (Common validation). `creation_epoch` is
 **not** a request field: the gateway stamps it, the wall clock in
 nanoseconds, once, immediately before entering the STM, and derives
 `cluster_id` from it (cluster_id derivation). Internal STM retries of that
@@ -2438,12 +2473,16 @@ cluster's `extent_size` holds that few `data_block_size` blocks — or when
 or fewer entries than `cntlr_cnt`; and for any violation of Common
 validation in `bdev_conf` or `event_threshold`, the `bdev_conf` geometry
 rules being judged on the merged conf the SP stores as well, and
-`primary_unhealthy` against the cluster's `cntlr_interval` (step 2).
+`primary_unhealthy` against the cluster's `cntlr_interval` (step 2); and
+when a `stripe_size` the request names times the slice count is over
+`MaxNvmeTcpCmdBytes`, judged before any read (Common validation, the
+stripe's product).
 Defaults: `cntlr_cnt` is `DefaultCntlrCntPerSp`; `slice_cnt` is
 `DefaultSliceCntPerSp`; `cntlid_slot_list` is every slot below
 `CnCntlidSlotCnt`; `bdev_conf` is taken member-wise from
 `ClusterConf.bdev_conf`, then from the constants or, for the stripe, from
-the block (a `redund_conf` unset in
+the block, a stripe the request does not name then narrowed to the slice
+count (Common validation) (a `redund_conf` unset in
 both the request and the cluster conf means `redund_none`; dnvctl defaults
 it to `redund_md_raid1` on the CLI). What is stored is the result of that
 merge, every defaultable member
@@ -2471,8 +2510,9 @@ Action:
    `init_ext_cnt` times that pre-read's `extent_size`
    (`INVALID_ARGUMENT`), which no DN could hold, so the scan would
    otherwise answer it first. Then merge and resolve `bdev_conf` against
-   that pre-read: the result gives the scan its leg count, and the
-   geometry rules judge it right there (`INVALID_ARGUMENT`, and the
+   that pre-read, an inherited stripe narrowed: the result gives the scan
+   its leg count, and the geometry rules and the stripe's product judge it
+   right there (`INVALID_ARGUMENT`, and the
    message says it concerns the merged conf: a member the request omitted
    is inherited, and only the merge shows whether it meets the ones the
    request set), so a request whose merge breaks a rule is
@@ -2491,9 +2531,10 @@ Action:
    below still decide, since only they see a pool created after these
    reads. In the STM, in this order:
    merge and resolve `bdev_conf` against the `ClusterConf` this
-   transaction read, **before any id is minted**, and refuse the picks
-   right there if the leg count or the `cluster_id` moved since the scan;
-   the geometry rules on that resolved `bdev_conf` once more
+   transaction read, an inherited stripe narrowed as before, **before any
+   id is minted**, and refuse the picks right there if the leg count or the
+   `cluster_id` moved since the scan; the geometry rules and the stripe's
+   product on that resolved `bdev_conf` once more
    (`ClusterConf` is write-once, so for an unchanged `cluster_id` this
    repeats the pre-read's verdict, but this read is the authoritative
    one), and the primary threshold against that `ClusterConf`; the
@@ -3101,9 +3142,25 @@ message naming the transfer, as the clone would fill it under the
 transfer's export, which would serve its holes (Transfers), a destination
 with a snapshot not yet `created` (Thin devices) — a
 slice of it made after the copy began would hold part of the copy, the
-message naming the snapshot — or a destination whose
+message naming the snapshot — a destination whose
 dm-clone metadata one side of a clone meta group cannot hold — the message
-names the largest destination one side holds; `INVALID_ARGUMENT` when
+names the largest destination one side holds — or a clone whose dm-clone
+would report an optimal IO size over `MaxNvmeTcpCmdBytes` (Common
+validation, the stripe's product), judged after the metadata bound from
+the source geometry the request names and the destination pool's stored
+one, the message naming both products, the size and the bound. That size
+is the kernel's: the least common multiple of the source's
+`src_stripe_size` times `src_slice_cnt` and the pool's stripe times its
+slice count, where that multiple is at least one region, the pool's block,
+and a whole number of regions, else the block. Reason: a host that reads
+the identity of the clone's namespace while the dm-clone serves under it
+takes that size, and keeps it after the clone ends until it reads the
+identity again, so the clone's hosts would send commands the controller
+node refuses although each pool alone keeps the bound. The price: pools
+whose slice counts are powers of two clone into each other freely at the
+defaults, but a clone that involves another slice count can be refused, a
+one-slice volume into some such pools among them, and every clone into a
+pool whose block is over the bound is; `INVALID_ARGUMENT` when
 `src_tr_conf` is empty or longer than `MaxCntlrCntPerSp` or has an entry
 that is empty or has a member left blank (Common validation), `src_nqn` is
 invalid, `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
@@ -3125,8 +3182,8 @@ cluster, the leg count and the pool's revision instead; unlike
 `DeleteThinDevice` (Thin devices), it does not check the pool's `sp_id`,
 so a same-name pool created again at the same revision between the plan
 and the deciding STM passes. STM:
-after the refusals of the ceiling, the name, the destination and the bound,
-take `clone_id`, the group's `grp_id`, and per
+after the refusals of the ceiling, the name, the destination, the bound and
+the optimal IO size, take `clone_id`, the group's `grp_id`, and per
 leg a `leg_id` and its `side_id` from `next_id`, in that order; write the `Clone`
 with its clone meta group — the legs the SP's redundancy gives
 a group, each one `Side` of `CloneMetaGrpExtCnt` extents written
@@ -6229,7 +6286,10 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   `src_nqn` the transfer's `XferNqn`, `src_ns_idx` the `ori_ns_idx`, the
   source geometry `src_slice_cnt`, `src_stripe_size` and `src_block_size`
   the slice count, raid0 stripe and pool block size of sp1,
-  `dst_td_name`, `auto_resume` true). The clone's clone meta group is
+  `dst_td_name`, `auto_resume` true), which sp2 refuses where the clone's
+  dm-clone would report an optimal IO size over the stripe's product bound
+  (Clones), so the two pools' geometries must stack within it. The
+  clone's clone meta group is
   allocated with it on sp2's DNs (Clones), and the sp2 primary builds the
   clone only once every side of that group is provisioned (Side
   provisioning protocol): it assembles the group, connects to the
@@ -7443,20 +7503,43 @@ document and only pointed to here.
   want more queues per path, and a node with many paths fewer; an
   operator who measures sets the flag. A subsystem linked before the cap
   changed keeps its old cap until it is unlinked everywhere or removed.
-* **The default stripe gives hosts large IO hints, and a controller node
-  refuses the reads they bring.** dm-stripe reports the stripe as a device's
-  smallest efficient IO and the stripe times the slice count as its optimal
-  IO, and nvmet passes both to the host, which sets its read-ahead to at
-  least twice the optimal IO and, above 4 MiB, lets one request grow to it.
-  nvmet over TCP refuses a command whose data is longer than 4 MiB with the
-  status "Data SGL Length Invalid" and logs "failed to map data", on every
-  kernel that carries the upstream bound of a command's data length. With
-  the stripe equal to the default block (Common validation), a pool of five
-  or more slices has hosts send reads of more than 4 MiB, which fail with an
-  IO error; a filesystem maker takes its alignment from the same hints. Seen
-  in the lab: a command of 4 MiB passes, one block more is refused. A pool
-  that names a smaller stripe keeps smaller hints, and the lab's kernels
-  have no port setting that would tell a host a smaller largest transfer.
+* **A pool's IO hints are held to what a controller node takes, at a
+  price.** dm-stripe reports the stripe as a device's smallest efficient IO
+  and the stripe times the slice count as its optimal IO, and nvmet passes
+  both to the host, which sets its read-ahead to at least twice the optimal
+  IO and, where the optimal IO is over its own default largest request,
+  lets one request grow to it; a filesystem maker takes its alignment from
+  the same hints. nvmet over TCP refuses a command whose data is longer
+  than `MaxNvmeTcpCmdBytes` with the status "Data SGL Length Invalid" and
+  logs "failed to map data", on every kernel that carries the upstream
+  bound of a command's data length, and the lab's kernels have no port
+  setting that would tell a host a smaller largest transfer. Seen in the
+  lab: a command at the bound passes, one block more is refused. So a
+  pool's stripe times its slice count is held to the bound (Common
+  validation, the stripe's product), and a clone's dm-clone too (Clones).
+  The price: a pool whose slice count times its cluster's stripe is over
+  the bound takes a stripe below its block, so a whole block a host writes
+  is split over slices, dm-thin's skip of the zero fill of a block written
+  whole is lost ([D15]) and first writes cost more, and a discard frees a
+  block only over a longer host range (the discard entry below). A stored
+  pool whose product is over the bound keeps it, since a stored geometry
+  never changes (Common validation): its hosts send reads its controller
+  nodes refuse unless each host holds the largest request
+  (`max_sectors_kb`) of every path device of the pool's namespaces, not
+  only the multipath head, to the bound, since a path's queue merges the
+  requests the head sends it up to the path's own largest request, which
+  the optimal IO size raises on the path as on the head (read in the
+  kernel's block layer, not seen in the lab); and a clone into or out of
+  it is refused wherever its dm-clone would report more (Clones).
+* **A migration's destination in a pool whose block is over
+  `MaxNvmeTcpCmdBytes` can be sent commands it refuses.** A migration's
+  dm-clone on the destination disk node has the pool's block as its region
+  and so reports an optimal IO size of at least one block (Clones), which
+  its export passes to the controller node's leg path; that path then lets
+  one request grow to the block, past the bound. No rule bounds the block
+  by it, since that would change the block rule every pool's geometry
+  rests on; the default block is within it. Read in the kernel's sources,
+  not seen in the lab. Every clone into such a pool is refused (Clones).
 * **A CSI volume costs the cluster a pool** (`csi.md`, The volume model).
 * **A RAID1 pool needs as many disk nodes per slice at create as its meta
   and data groups have legs together.** `CreateStoragePool` puts every leg
@@ -8221,8 +8304,10 @@ document and only pointed to here.
   cluster conf that names no stripe, when its block is no larger than the
   largest stripe, makes one aligned host block one pool block; a pool that
   names no stripe takes its cluster's stored stripe instead, whatever its
-  own block (Common validation, Storage pools). Read in the kernel's dm-thin
-  and dm-stripe sources, not in the lab.
+  own block, narrowed where its slice count times that stripe is over the
+  stripe's product bound (Common validation, Storage pools), so such a pool
+  at the defaults has a stripe below its block. Read in the kernel's
+  dm-thin and dm-stripe sources, not in the lab.
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node
   the full size of the groups of the pool's slices (Terminology and object

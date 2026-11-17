@@ -161,9 +161,10 @@ func planCloneGrp(
 // in its order, behind the resolution and the token check openSp makes: the
 // MaxCloneCntPerSp ceiling, ahead of the name so a pool at the ceiling hears
 // the ceiling; the name free; the destination td by name; a destination no
-// other clone names; and the clone meta group's plan and bound
-// (planCloneGrp). The planning read and the deciding STM both run it, so a
-// refusal reached in either has the same words, and the planning read
+// other clone names; the clone meta group's plan and bound (planCloneGrp);
+// and the optimal IO size the clone's dm-clone would report
+// (cloneIoSizeCheck). The planning read and the deciding STM both run it, so
+// a refusal reached in either has the same words, and the planning read
 // answers every one of them ahead of the scan (GW9).
 func cloneCreateChecks(
 	stm etcdutil.STM,
@@ -225,7 +226,47 @@ func cloneCreateChecks(
 	if err != nil {
 		return nil, cloneGrpPlan{}, err
 	}
+	if err := cloneIoSizeCheck(sc.Conf, req); err != nil {
+		return nil, cloneGrpPlan{}, err
+	}
 	return td, plan, nil
+}
+
+// cloneIoSizeCheck is CreateClone's refusal of a clone whose dm-clone would
+// report an optimal IO size over common.MaxNvmeTcpCmdBytes (architecture.md,
+// Clones): a host of the clone's namespace lets one request grow to that
+// size, and the controller node's kernel refuses a command that carries
+// more. The size is model.CloneOptimalIo of the source geometry the request
+// names and the destination pool's stored stripe, slice count and block,
+// which planCloneGrp has validated by now. It is FAILED_PRECONDITION, as the
+// metadata bound of planCloneGrp is: the request against the pool's own
+// geometry, which no capacity changes.
+func cloneIoSizeCheck(conf *pb.SpConf, req *pb.CreateCloneRequest) error {
+	bdev := spBdevConf(conf)
+	dstStripe := bdev.GetDmRaid0Conf().GetStripeSize()
+	dstSliceCnt := uint64(spSliceCnt(conf))
+	dstBlock := model.PoolBlockSize(bdev)
+	size := model.CloneOptimalIo(
+		req.GetSrcStripeSize(), req.GetSrcSliceCnt(),
+		dstStripe, uint32(dstSliceCnt), dstBlock)
+	if size <= common.MaxNvmeTcpCmdBytes {
+		return nil
+	}
+	// validateCloneGeometry bounds the source factors and the stored pool's
+	// come from a create that bounded them, so neither product overflows.
+	return errPrecondition(
+		"clone %q: the source's src_stripe_size %d times src_slice_cnt %d "+
+			"is %d bytes and storage pool %q's stripe_size %d times its "+
+			"slice count %d is %d bytes, so its dm-clone would report an "+
+			"optimal IO size of %d bytes (their least common multiple, or "+
+			"the pool's %d-byte block when that multiple is below one "+
+			"block or not a whole number of blocks), over %d, the most "+
+			"data one NVMe/TCP command may carry to a controller node: "+
+			"hosts would send reads the controller node refuses",
+		req.GetCloneName(), req.GetSrcStripeSize(), req.GetSrcSliceCnt(),
+		req.GetSrcStripeSize()*uint64(req.GetSrcSliceCnt()),
+		req.GetSpName(), dstStripe, dstSliceCnt, dstStripe*dstSliceCnt,
+		size, dstBlock, common.MaxNvmeTcpCmdBytes)
 }
 
 // CreateClone is the CreateClone of architecture.md, Clones: one Clone record

@@ -123,6 +123,15 @@ DNV_PREFIX=dnv
 # geometry instead of the boundary it is named for.
 MAX_SLICE_CNT=
 
+# common.MaxNvmeTcpCmdBytes — the most data one NVMe/TCP command may carry to
+# a node's kernel, which CreateClone holds a clone's dm-clone optimal IO size
+# to (architecture.md, Clones; cloneIoSizeCheck). Stage 13's clone at
+# MAX_SLICE_CNT slices takes the widest source stripe that keeps the source's
+# product within it, CLONE_SRC_STRIPE, and a clone of 1 MiB stripes at that
+# slice count is refused first. read_constants() fills both at preflight.
+MAX_NVME_TCP_CMD_BYTES=
+CLONE_SRC_STRIPE=
+
 # common.DefaultHealthCheckInterval — what every health_check_conf member of a
 # cluster created without one is stored as (GW11), and case S stage 1 pins the
 # stored conf to it. It is NOT typed here either: read_constants() fills it
@@ -1020,6 +1029,16 @@ read_constants() {
 		;;
 	esac
 	log "  stage 13's --src-slices = common.MaxSliceCntPerSp = $MAX_SLICE_CNT"
+	MAX_NVME_TCP_CMD_BYTES=$(jq_of "$json" .MaxNvmeTcpCmdBytes)
+	case "$MAX_NVME_TCP_CMD_BYTES" in
+	'' | *[!0-9]* | 0)
+		die "workerctl constants: MaxNvmeTcpCmdBytes is" \
+			"'$MAX_NVME_TCP_CMD_BYTES' in $json"
+		;;
+	esac
+	CLONE_SRC_STRIPE=$((MAX_NVME_TCP_CMD_BYTES / MAX_SLICE_CNT))
+	log "  stage 13's --src-stripe = common.MaxNvmeTcpCmdBytes /" \
+		"$MAX_SLICE_CNT = $CLONE_SRC_STRIPE"
 	DEFAULT_HEALTH_INTERVAL=$(jq_of "$json" .DefaultHealthCheckInterval)
 	case "$DEFAULT_HEALTH_INTERVAL" in
 	'' | *[!0-9]*)
@@ -2542,11 +2561,21 @@ EOF
 	# -------------------------------------------------------------------
 	stage 13 "create-clone cl0 at the geometry bounds, its bitmap, its delete"
 	# -------------------------------------------------------------------
-	# The three source bounds at their limits (validateCloneGeometry):
-	# MaxSliceCntPerSp slices, a 256 x 4 KiB stripe and a 16384 x 64 KiB
-	# block, which is also an exact multiple of the stripe. The slice bound is
-	# the source's own, independent of sp0's SP_SLICE_CNT.
-	#
+	# The source bounds at their limits (validateCloneGeometry):
+	# MaxSliceCntPerSp slices and a 16384 x 64 KiB block, which is also an
+	# exact multiple of the stripe. The slice bound is the source's own,
+	# independent of sp0's SP_SLICE_CNT. The stripe is the widest whose
+	# product with that slice count keeps the bound on a clone's optimal IO
+	# size (cloneIoSizeCheck): with sp0's one slice of the default stripe
+	# the clone then reports exactly MaxNvmeTcpCmdBytes. The stripe bound's
+	# own limit, 1 MiB, at this slice count reports eight times that, which
+	# is refused first and writes nothing.
+	assert_no_write "create-clone over the bound on its optimal IO size" \
+		gwx FAILED_PRECONDITION create-clone --sp sp0 --rev "$SP_REV" \
+		--name cl0 --dst-td t1 --src-nqn "$srcNqn" --src-idx 1 \
+		--src-slices "$MAX_SLICE_CNT" \
+		--src-stripe 1048576 --src-block 1073741824
+
 	# Every CN's CnRev first: a clone meta group is in no cntlr's footprint,
 	# so a clone charges no CN and none moves (architecture.md, Per-operation
 	# allocation). Every DN's ledger too: the clone's clone meta group takes
@@ -2557,7 +2586,7 @@ EOF
 	dnBefore=$(smoke_dn_ledgers)
 	out=$(gw create-clone --sp sp0 --rev "$SP_REV" --name cl0 --dst-td t1 \
 		--src-nqn "$srcNqn" --src-idx 1 --src-slices "$MAX_SLICE_CNT" \
-		--src-stripe 1048576 --src-block 1073741824)
+		--src-stripe "$CLONE_SRC_STRIPE" --src-block 1073741824)
 	refresh_rev sp0
 	local cloneId clone
 	cloneId=$(jq_of "$out" '.clone_id')
@@ -2600,7 +2629,8 @@ EOF
 		--name xc --ori-nqn "$nqn" --ori-idx 1 --hosts "$host2"
 	assert_field "$clone" '.src_slice_cnt' "$MAX_SLICE_CNT" \
 		"clone src_slice_cnt"
-	assert_field "$clone" '.src_stripe_size' "1048576" "clone src_stripe_size"
+	assert_field "$clone" '.src_stripe_size' "$CLONE_SRC_STRIPE" \
+		"clone src_stripe_size"
 	assert_field "$clone" '.src_block_size' "1073741824" "clone src_block_size"
 	assert_eq "$(smoke_jq "$clone" '.src_tr_conf_list | length')" "1" \
 		"clone src_tr_conf_list"
@@ -2725,7 +2755,7 @@ EOF
 		gwx ALREADY_EXISTS create-clone --sp sp0 --rev "$SP_REV" --name cl0 \
 		--dst-td t1 --src-nqn "$srcNqn" --src-idx 1 \
 		--src-slices "$MAX_SLICE_CNT" \
-		--src-stripe 1048576 --src-block 1073741824
+		--src-stripe "$CLONE_SRC_STRIPE" --src-block 1073741824
 	# The drain is the sp coordinator's, and this suite runs no worker: the
 	# worker-role stand-in finishes it, exactly as `wctl drain-sp` does for the
 	# sp drain. The REAL coordinator draining a real clone is the drain case

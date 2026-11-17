@@ -113,7 +113,9 @@ to whole extents and at least one, dnv's default auto-grow mark whatever the
 cluster stores, since a cluster's mark can switch auto-grow off and the volume
 model needs it on, and the cluster's defaults for the rest. The thin device,
 named as the volume, sized to the request rounded up to the pool's unit, the
-stripe size: the required bytes rounded up, or the limit rounded down when only
+stripe size, read from the cluster before the pool exists, which a one-slice
+pool takes unnarrowed (`architecture.md`, Common validation): the required
+bytes rounded up, or the limit rounded down when only
 a limit is given, or the driver's default when neither is, and OUT_OF_RANGE
 when no multiple of the unit fits the range. The subsystem with the volume's
 NQN and no host. The namespace at index one with the volume's uuid. A step that

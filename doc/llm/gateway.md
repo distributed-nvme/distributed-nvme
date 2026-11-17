@@ -397,7 +397,9 @@ uncommitted (`dnv-worker.md` EU4).
   a pool that has spent every thin id (`architecture.md`, Thin
   devices), a clone destination whose dm-clone metadata one side of a clone
   meta group cannot hold (`CreateClone`, the message naming the largest
-  destination one side holds), a side of a clone meta group named to
+  destination one side holds), a clone whose dm-clone would report an
+  optimal IO size over `MaxNvmeTcpCmdBytes` (`CreateClone`,
+  `cloneIoSizeCheck`), a side of a clone meta group named to
   `CreateMigration`, a side of a repair's bad leg named to
   `CreateMigration`, a repair call on the group of a clone being deleted,
   and a repair call the repair's stage does not allow (`architecture.md`,
@@ -548,12 +550,14 @@ are `architecture.md`, Common validation, and its order after
 are a member from the request, else from the owning
 `ClusterConf`, else from a constant of `common/constants.go` or, for the
 stripe, from the block, all applied by
-the RPC that writes the conf. This rule is where each handler carries that
-out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
+the RPC that writes the conf; a pool's stripe from its cluster is then
+narrowed to its slice count (`architecture.md`, Common validation). This
+rule is where each handler carries that out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
 settles `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf` and
-`md_check_conf` (Clusters); `CreateStoragePool` stores `model.ResolveBdevConf` of the merge
-`mergeSpBdevConf` makes over the cluster's conf (`architecture.md`, Storage
-pools; Storage pools and GrowSlice). A handler that then COMPUTES with a
+`md_check_conf` (Clusters); `CreateStoragePool` stores `resolveSpBdevConf`'s
+conf, `model.ResolveSpBdevConf` of the merge `mergeSpBdevConf` makes over
+the cluster's conf (`architecture.md`, Storage pools; Storage pools and
+GrowSlice). A handler that then COMPUTES with a
 stored member validates it first and REFUSES rather than guessing around a
 zero: `model.ValidateClusterConf` in `CreateDiskNode` and
 `CreateControllerNode` (before dividing a reported size by `extent_size`),
@@ -600,9 +604,10 @@ never fires; each op gates the conf it is handed as the drains do, whoever
 calls it.
 
 The resolvers and validators are `model`'s. `model.ResolveBdevConf` is the
-write-time resolver `CreateStoragePool` stores through, and
-`model.ResolveClusterConf` applies it to a `ClusterConf`'s own `bdev_conf`
-too. The stored-conf validators `model.ValidateBdevConf` and
+write-time resolver of a `bdev_conf`: `model.ResolveClusterConf` applies it
+to a `ClusterConf`'s own, and `model.ResolveSpBdevConf`, which
+`CreateStoragePool` stores through, applies it to the merge and then
+narrows an inherited stripe with `model.FitStripe`. The stored-conf validators `model.ValidateBdevConf` and
 `model.ValidateClusterConf` begin every message with "invalid stored conf: "
 and name the proto field. `ValidateBdevConf` checks the defaultable members
 for PRESENCE only — the bitmap chunk count solely when the oneof did choose
@@ -817,6 +822,9 @@ delete, get, list, update-disabled and inspect.
   `slice_cnt` are replaced — before the bound above each is judged — by
   `DefaultCntlrCntPerSp` and `DefaultSliceCntPerSp`, and it is the
   substituted count the plan and the STM's slice loop build the SP from.
+  A stripe the request names is then judged against that count by
+  `validateStripeProduct`, the stripe's product of `architecture.md`,
+  Common validation, before any read.
 
   Pre-STM plan (`planSpGroups`), in GW15's order: per slice the meta group
   (one extent) first, then the data group (`init_ext_cnt` extents) — extent
@@ -827,8 +835,9 @@ delete, get, list, update-disabled and inspect.
   Over a plain pre-read of `ClusterConf` (`spPreReadCluster`) they are
   `model.ValidateClusterConf` (a stored conf that fails it is `ABORTED`,
   GW11), the overflow of `init_ext_cnt` times that conf's `extent_size`,
-  the same merge and resolution the STM makes below, which gives the scans
-  their leg count (`legCntOf`) and which `validateMergedBdevConf` judges,
+  the same merge and resolution the STM makes below (`resolveSpBdevConf`),
+  which gives the scans their leg count (`legCntOf`) and which
+  `validateMergedBdevConf` judges, the stripe's product included,
   and `validatePrimaryThreshold`; then come the name (`spNameUnused`) on a
   plain read of its own, and on another of `SpGlobal` the pool count
   ceiling and then whether its id counter has an id left
@@ -839,11 +848,12 @@ delete, get, list, update-disabled and inspect.
   a new SP has no migration, and a CN counts none; too few at any point is
   `RESOURCE_EXHAUSTED`.
 
-  STM, in this order: resolve; build the `bdev_conf` to store as
-  `model.ResolveBdevConf` of `mergeSpBdevConf` of the request over the
-  cluster's — merge first so an omitted member still inherits from the
-  cluster, resolve second so what is stored is concrete (`architecture.md`,
-  Storage pools; GW11) — and
+  STM, in this order: resolve; build the `bdev_conf` to store with
+  `resolveSpBdevConf`, `model.ResolveSpBdevConf` of `mergeSpBdevConf` of the
+  request over the cluster's at the substituted slice count — merge first
+  so an omitted member still inherits from the cluster, resolve second so
+  what is stored is concrete, and narrow an inherited stripe last
+  (`architecture.md`, Storage pools and Common validation; GW11) — and
   fail the unit right there, before a single other key is read, when this
   transaction's cluster id or that conf's leg count no longer matches the
   one the scan drew its picks for; `validateMergedBdevConf` on that conf and
@@ -1158,7 +1168,11 @@ below name.
   confs), and the bound of `architecture.md`, Clones, the destination's
   `common.CloneMetaBytes` at the SP's block size against the data blocks of
   one side, `FAILED_PRECONDITION` naming the largest destination one side
-  holds. The planning read also walks `td_name_list` for a snapshot of
+  holds; then `cloneIoSizeCheck`, `model.CloneOptimalIo` of the request's
+  source geometry and the SP's stored stripe, slice count and block against
+  `MaxNvmeTcpCmdBytes`, `FAILED_PRECONDITION` naming both products, the
+  size and the bound (`architecture.md`, Clones). The planning read also
+  walks `td_name_list` for a snapshot of
   the destination not yet `created` (`tdUncreatedSnapshots`), refused
   `FAILED_PRECONDITION` naming it, and records the pool's revision; the
   deciding STM does not repeat that walk. Then the
@@ -1748,11 +1762,14 @@ one etcd, configured with the request caps every etcd serving dnv must have
 (its transaction-op cap at `EtcdMaxTxnOps` and its request-size cap at
 `EtcdMaxRequestBytes`, which the suite reads from the `workerctl` it has
 just built instead of copying the numbers, as it reads `MaxSliceCntPerSp`
-for the clone it creates at that ceiling, `DefaultHealthCheckInterval` for
+for the clone it creates at that ceiling and `MaxNvmeTcpCmdBytes` for that
+clone's source stripe, the widest that keeps the clone's optimal IO size
+within the bound, `DefaultHealthCheckInterval` for
 the health intervals the smoke case expects in the stored `ClusterConf`,
 `DefaultDmPoolDataBlockSize` and the `DefaultStripeSize` that block gives
 for the block and stripe the smoke case expects in the stored cluster and
-pool confs, a DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
+pool confs (its pools have one slice, so a pool's stripe is the
+cluster's), a DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
 `DnCloneMetaUnit`, for the area the ceiling case fills, and the id step's
 strides `IdStepStride` and `ThinIdStepStride`, which its smoke case checks
 the moved counters against); three gateway instances on one launch line that
@@ -1794,7 +1811,10 @@ gateway, never through `workerctl`.
   precondition waits for; a migration's `cutover_pending` set
   at its create, a cancel while it is pending, and a finish refused while
   it is pending, with `force` and without, before the suite plays the
-  destination's provisioned flip and the cutover; the clone's
+  destination's provisioned flip and the cutover; a clone of
+  `MaxSliceCntPerSp` source slices of the largest source stripe, whose
+  dm-clone would report an optimal IO size over `MaxNvmeTcpCmdBytes`,
+  refused with nothing written; the clone's
   pair-addressed chunks, a page placed at the position it names, sent again
   with no write and refused at another position, past the end and inside
   the stored bytes, its latch with the destination

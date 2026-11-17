@@ -64,10 +64,21 @@ const (
 	MaxDmPoolDataBlockSize     = 1 * 1024 * 1024 * 1024
 	MinDmPoolDataBlockSize     = 64 * 1024
 	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
-	// A stripe left unset is the data block size, at most
-	// MaxDmRaid0StripeSize (model.DefaultStripeSize).
+	// A cluster that names no stripe stores its data block size, at most
+	// MaxDmRaid0StripeSize (model.DefaultStripeSize). A pool that names none
+	// takes the cluster's, narrowed so that the stripe times the pool's slice
+	// count stays within MaxNvmeTcpCmdBytes (model.FitStripe).
 	MaxDmRaid0StripeSize = 1 * 1024 * 1024
 	MinDmRaid0StripeSize = 4 * 1024
+	// MaxNvmeTcpCmdBytes is the most data one NVMe/TCP command may carry to a
+	// node's kernel target: nvmet-tcp refuses a larger one with an IO error
+	// that is not retried. The value is the kernel's, not a dnv setting. A
+	// host lets one request grow to the optimal IO size its namespace
+	// reports when that is larger, so CreateStoragePool holds a pool's
+	// stripe times its slice count, the optimal IO size of its volumes, to
+	// this bound, and CreateClone holds a clone's dm-clone to it
+	// (architecture.md, Common validation and Clones).
+	MaxNvmeTcpCmdBytes = 4 * 1024 * 1024
 	// ThinMetaBlockSize is dm-thin's fixed metadata block size: a thin pool
 	// counts its metadata used and total in these blocks, never in its
 	// data_block_size, and a meta group's data region holds data_blocks x

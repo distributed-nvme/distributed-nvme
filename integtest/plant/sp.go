@@ -462,10 +462,12 @@ func PutSp(
 	bdev.RedundConf = RedundConf(plan.raid1, chunkBlocks)
 	// The gateway's resolve-at-write, mirrored (architecture.md, Common
 	// validation): CreateStoragePool stores the merge passed through
-	// model.ResolveBdevConf, so PutSp does too — the cluster's bdev_conf is
-	// already concrete, but the SP's redund kind was just rebuilt above and
-	// the merge's own constants rung still has to fire.
-	bdev = model.ResolveBdevConf(bdev)
+	// model.ResolveSpBdevConf, so PutSp does too — the cluster's bdev_conf is
+	// already concrete, but the SP's redund kind was just rebuilt above, the
+	// merge's own constants rung still has to fire, and the cluster's stripe,
+	// which no SpSpec names, is narrowed to the pool's slice count as the
+	// gateway narrows a stripe its request does not name.
+	bdev = model.ResolveSpBdevConf(bdev, uint32(len(plan.slices)), false)
 	if err := model.ValidateClusterConf(cc); err != nil {
 		return Sp{}, err
 	}

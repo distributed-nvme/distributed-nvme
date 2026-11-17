@@ -1119,9 +1119,13 @@ func cmdPing(g *globals, args []string) {
 // the demotion hold's wait (dnv-worker.md RW22), and the age at which the
 // retire timer deletes a retired leg (dnv-worker.md AR12), which the worker
 // suite's repair case plants a retired leg older than. Then the default
-// thin block and the stripe a conf that names none takes with it
+// thin block and the stripe a cluster conf that names none takes with it
 // (model.DefaultStripeSize), which the gateway suite's smoke case pins the
-// stored confs to. The
+// stored confs to; a pool that names none takes that stripe narrowed to its
+// slice count (model.FitStripe). Then MaxNvmeTcpCmdBytes, the most data one
+// NVMe/TCP command may carry to a node's kernel: the e2e suite holds the IO
+// sizes its hosts read to it, and the gateway suite sizes its stage-13
+// clone's source stripe by it. The
 // next two are a DN's metadata area (architecture.md, Metadata units): the
 // ceiling of a DN's used units and the unit. The gateway suite's ceiling case
 // fills a DN's area to that ceiling with a migration it sizes in that unit.
@@ -1150,6 +1154,7 @@ func cmdConstants(g *globals, args []string) {
 		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
 		"DefaultStripeSize": model.DefaultStripeSize(
 			common.DefaultDmPoolDataBlockSize),
+		"MaxNvmeTcpCmdBytes":      common.MaxNvmeTcpCmdBytes,
 		"DefaultPrimaryUnhealthy": common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":     common.DemotionHoldTimeout,
 		"RetiredLegMaxAge":        common.RetiredLegMaxAge,

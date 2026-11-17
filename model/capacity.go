@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"math"
+	"math/bits"
 
 	"google.golang.org/protobuf/proto"
 
@@ -148,13 +150,101 @@ func ResolveHealthCheckConf(conf *pb.HealthCheckConf) *pb.HealthCheckConf {
 	}
 }
 
-// DefaultStripeSize is the stripe a bdev conf that names none takes
-// (architecture.md, Common validation): its data block size, at most
+// DefaultStripeSize is the stripe a cluster's bdev conf that names none
+// takes (architecture.md, Common validation): its data block size, at most
 // MaxDmRaid0StripeSize. A whole aligned block then reaches one slice's
 // dm-thin unsplit, which skips the zero fill of a block written whole, and
-// the stripe always divides the block, since both are powers of two.
+// the stripe always divides the block, since both are powers of two. A pool
+// that names no stripe takes the cluster's through FitStripe.
 func DefaultStripeSize(blockSize uint64) uint64 {
 	return min(blockSize, uint64(common.MaxDmRaid0StripeSize))
+}
+
+// FitStripe is the stripe a pool of sliceCnt slices takes from its
+// cluster's stored stripe when its create names none (architecture.md,
+// Common validation): stripe itself when stripe times sliceCnt, the optimal
+// IO size the pool's volumes report to hosts, is at most
+// common.MaxNvmeTcpCmdBytes, else the largest power of two whose product
+// with sliceCnt is, never below common.MinDmRaid0StripeSize. A sliceCnt of 0
+// is read as 1. Every stored cluster stripe is a power of two that divides
+// its block, so the narrowed stripe is a smaller power of two and divides
+// the pool's block too.
+func FitStripe(stripe uint64, sliceCnt uint32) uint64 {
+	fit := uint64(common.MaxNvmeTcpCmdBytes) / uint64(max(sliceCnt, 1))
+	if stripe <= fit {
+		return stripe
+	}
+	if fit < common.MinDmRaid0StripeSize {
+		return common.MinDmRaid0StripeSize
+	}
+	return uint64(1) << (bits.Len64(fit) - 1)
+}
+
+// ResolveSpBdevConf is the bdev_conf a pool of sliceCnt slices stores
+// (architecture.md, Storage pools): ResolveBdevConf of merged, the request's
+// conf merged member-wise over its cluster's, with the stripe then narrowed
+// by FitStripe unless the request named it. A stripe the request names is
+// the operator's and is judged, never narrowed (architecture.md, Common
+// validation). The gateway's CreateStoragePool and the suites' planter
+// (integtest/plant) both store what this returns.
+func ResolveSpBdevConf(
+	merged *pb.BdevConf,
+	sliceCnt uint32,
+	stripeNamed bool,
+) *pb.BdevConf {
+	resolved := ResolveBdevConf(merged)
+	if !stripeNamed {
+		resolved.DmRaid0Conf.StripeSize = FitStripe(
+			resolved.DmRaid0Conf.StripeSize, sliceCnt)
+	}
+	return resolved
+}
+
+// CloneOptimalIo is the optimal IO size the dm-clone of a clone reports, and
+// with it the hosts of the clone's namespace (architecture.md, Clones). The
+// kernel stacks the two devices under the dm-clone to the least common
+// multiple L of their optimal IO sizes: the source's, srcStripe times
+// srcSliceCnt, and the destination raid0's, dstStripe times dstSliceCnt.
+// dm-clone keeps L when it is at least one region, the destination's block
+// dstBlock, and a whole number of regions, and reports one region
+// otherwise. A zero optimal IO size takes no part in the multiple, as in the
+// kernel's stacking; a multiple past uint64 reads as math.MaxUint64.
+func CloneOptimalIo(
+	srcStripe uint64,
+	srcSliceCnt uint32,
+	dstStripe uint64,
+	dstSliceCnt uint32,
+	dstBlock uint64,
+) uint64 {
+	lcm := lcmNotZero(
+		mulSat(srcStripe, uint64(srcSliceCnt)),
+		mulSat(dstStripe, uint64(dstSliceCnt)))
+	if dstBlock == 0 || (lcm >= dstBlock && lcm%dstBlock == 0) {
+		return lcm
+	}
+	return dstBlock
+}
+
+// mulSat is a times b, or math.MaxUint64 when the product is past uint64.
+func mulSat(a uint64, b uint64) uint64 {
+	hi, lo := bits.Mul64(a, b)
+	if hi != 0 {
+		return math.MaxUint64
+	}
+	return lo
+}
+
+// lcmNotZero is the kernel's lcm_not_zero: the least common multiple of a
+// and b, or the one that is not zero when the other is.
+func lcmNotZero(a uint64, b uint64) uint64 {
+	if a == 0 || b == 0 {
+		return max(a, b)
+	}
+	x, y := a, b
+	for y != 0 {
+		x, y = y, x%y
+	}
+	return mulSat(a/x, b)
 }
 
 // ResolveBdevConf returns a copy of conf with every defaultable member

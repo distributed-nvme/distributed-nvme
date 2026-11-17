@@ -580,13 +580,16 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
-// the others, for computed values). It prints sixteen keys, and the suites
-// read fourteen of them and stop when one is missing: thirteen at preflight,
+// the others, for computed values). It prints nineteen keys, and the suites
+// read seventeen of them and stop when one is missing: sixteen at preflight,
 // and RetiredLegMaxAge, which the worker suite's repair case reads.
 // Every suite that starts an etcd — the worker, gateway, cdc and e2e suites —
 // launches it with EtcdMaxTxnOps and EtcdMaxRequestBytes. The e2e suite
-// cross-checks MaxAllocLegPerGrp. The gateway suite creates its stage-13
-// clone at MaxSliceCntPerSp, checks the health intervals a new cluster stores
+// cross-checks MaxAllocLegPerGrp and holds its hosts' IO sizes to
+// MaxNvmeTcpCmdBytes. The gateway suite creates its stage-13 clone at
+// MaxSliceCntPerSp with a source stripe sized by MaxNvmeTcpCmdBytes, pins
+// its smoke case's stored confs to DefaultDmPoolDataBlockSize and
+// DefaultStripeSize, checks the health intervals a new cluster stores
 // against DefaultHealthCheckInterval, fills a DN's metadata area in its
 // ceiling case to DnCloneMetaUnitCnt in units of DnCloneMetaUnit, and checks
 // the counters the id step moves against IdStepStride and ThinIdStepStride. The
@@ -594,7 +597,7 @@ func TestKeyPrefix(t *testing.T) {
 // DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases.
 // The cdc suite's flood case fills the pending cap, CdcMaxPendingConnCnt, and
 // waits by the pre-Connect deadline, DefaultCdcPendingTmoMs. One of those
-// fourteen dropped or renamed here would otherwise surface only when a suite
+// seventeen dropped or renamed here would otherwise surface only when a suite
 // is run, at its preflight or in that case. No suite reads the other two,
 // MaxDelGrpPerTxn and MaxDelBmPerTxn; they are pinned as well, because a case
 // may size itself against them.
@@ -630,6 +633,7 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
 		"DefaultStripeSize": model.DefaultStripeSize(
 			common.DefaultDmPoolDataBlockSize),
+		"MaxNvmeTcpCmdBytes":      common.MaxNvmeTcpCmdBytes,
 		"DefaultPrimaryUnhealthy": common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":     common.DemotionHoldTimeout,
 		"RetiredLegMaxAge":        common.RetiredLegMaxAge,

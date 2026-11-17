@@ -486,7 +486,14 @@ hundred included (CT8); which zeros the gateway fills with a default and
 which it refuses is `architecture.md`, Storage pools and `architecture.md`,
 Common validation. A `--block-size` the cluster's stripe does not divide
 needs a `--stripe-size` with it: the pool inherits that stripe otherwise,
-and the gateway refuses the pair, naming the way out.
+and the gateway refuses the pair, naming the way out. With no
+`--stripe-size` the pool takes the cluster's stripe narrowed to its slice
+count, so `cluster get` can show a larger stripe than `sp get` does; a
+`--stripe-size` whose product with the slice count is over the bound of
+`architecture.md`, Common validation, the stripe's product, is refused
+before anything is read, the message naming the largest stripe that fits,
+and leaving the flag out takes the narrowed stripe instead. dnvctl checks
+neither (CT8).
 
 `sp delete` latches and returns, so a successful `sp delete` means teardown
 started, not gone; the drain, and what the pool answers while it runs, are
@@ -553,6 +560,12 @@ unlike the flag updates `gateway.md` GW6 makes a no-op.
 `src_tr_conf`, and as an empty list — never a default transport — when all
 four `src-` transport flags are emptied, so the gateway's refusal of an
 empty list stays reachable from the CLI (`cloneSrcTrConfList`).
+`clone create` forwards `--src-slices`, `--src-stripe` and `--src-block` as
+typed (CT8); a source whose geometry and the destination pool's would give
+the clone's dm-clone an optimal IO size over the bound is refused
+`FAILED_PRECONDITION` with both products named (`architecture.md`,
+Clones), and no flag changes that: the source is a pool that already
+exists, so the clone goes to a pool whose geometry stacks within the bound.
 
 `clone delete` with `--force` sends `force` true, which skips the gateway's
 proof that the copy finished; the RPC latches and returns, so a successful

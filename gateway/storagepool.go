@@ -147,7 +147,7 @@ func spDefaultCntlidSlots() []uint32 {
 // the request wins unless it left the member at the proto3 zero that means
 // "unset" (architecture.md, Common validation). A member zero on BOTH sides is
 // settled afterwards, by
-// model.ResolveBdevConf — never here, so that "inherit from the cluster" stays
+// model.ResolveSpBdevConf — never here, so that "inherit from the cluster" stays
 // distinguishable from "take the default".
 func spMergeUint64(reqValue uint64, clusterValue uint64) uint64 {
 	if reqValue != 0 {
@@ -176,11 +176,12 @@ func redundKindSet(conf *pb.RedundConf) bool {
 // bdev_conf CreateStoragePool STORES is
 // the member-wise merge of the request over ClusterConf.bdev_conf, plus the
 // one structural default of architecture.md, Storage pools — a redund_conf
-// unset in both is redund_none. The caller passes the result through
-// model.ResolveBdevConf, which settles any member still zero on both sides
-// against the constants of architecture.md, Common validation, and the stripe
-// against the block; the three rungs (request, cluster, default) therefore
-// all land in the stored message.
+// unset in both is redund_none. resolveSpBdevConf passes the result through
+// model.ResolveSpBdevConf, which settles any member still zero on both sides
+// against the constants of architecture.md, Common validation, and narrows
+// a stripe the request did not name to the pool's slice count; the three
+// rungs (request, cluster, default) therefore all land in the stored
+// message.
 //
 // The merge is stored rather than re-resolved at read time because an SP's
 // geometry must be immutable: legCntOf, model.GroupBlocks and every thin
@@ -261,16 +262,43 @@ func mergeRedundConf(
 	return proto.Clone(clusterConf).(*pb.RedundConf)
 }
 
+// resolveSpBdevConf is the bdev_conf a CreateStoragePool of sliceCnt slices
+// stores: the request merged over the cluster's conf (mergeSpBdevConf) and
+// resolved, a stripe the request did not name narrowed to the slice count
+// (model.ResolveSpBdevConf; architecture.md, Common validation). The
+// planning pre-read and the deciding STM both call it, so the two compute
+// one conf from one ClusterConf.
+func resolveSpBdevConf(
+	req *pb.BdevConf,
+	cluster *pb.BdevConf,
+	sliceCnt int,
+) *pb.BdevConf {
+	return model.ResolveSpBdevConf(mergeSpBdevConf(req, cluster),
+		uint32(sliceCnt), req.GetDmRaid0Conf().GetStripeSize() != 0)
+}
+
 // validateMergedBdevConf judges the geometry rules of architecture.md, Common
 // validation, on the bdev_conf a
-// CreateStoragePool would store: the request merged over the cluster's conf
-// and resolved. The request itself was judged only between the members it
-// states; a member it omits is inherited, and whether that one meets the rest
-// shows only here. The refusal says so, because the value it names may be one
-// the request never sent; a block the cluster's stripe does not divide, in a
-// request that names no stripe, gets the way out named too.
-func validateMergedBdevConf(bdev *pb.BdevConf, req *pb.BdevConf) error {
+// CreateStoragePool of sliceCnt slices would store: the request merged over
+// the cluster's conf and resolved. The request itself was judged only between
+// the members it states; a member it omits is inherited, and whether that one
+// meets the rest shows only here. The refusal says so, because the value it
+// names may be one the request never sent; a block the cluster's stripe does
+// not divide, in a request that names no stripe, gets the way out named too.
+// The stripe's bound on its product with the slice count is judged here as
+// the guard of what is stored; a stripe the request did not name is narrowed
+// to meet it, so only a named one can break it, and the pure check before
+// any read refuses that one first.
+func validateMergedBdevConf(
+	bdev *pb.BdevConf,
+	req *pb.BdevConf,
+	sliceCnt int,
+) error {
 	err := validateBdevConf(bdev)
+	if err == nil {
+		err = validateStripeProduct(
+			bdev.GetDmRaid0Conf().GetStripeSize(), sliceCnt)
+	}
 	if err == nil {
 		return nil
 	}
@@ -279,8 +307,9 @@ func validateMergedBdevConf(bdev *pb.BdevConf, req *pb.BdevConf) error {
 	stripe := bdev.GetDmRaid0Conf().GetStripeSize()
 	if req.GetDmRaid0Conf().GetStripeSize() == 0 && stripe != 0 &&
 		block%stripe != 0 {
-		hint = "; the stripe_size is the cluster's: name one that divides " +
-			"the data_block_size"
+		hint = "; the stripe_size is the cluster's, narrowed to the " +
+			"slice count where its product needs it: name one that " +
+			"divides the data_block_size"
 	}
 	return errInvalid("bdev_conf merged over the cluster's: %s%s",
 		status.Convert(err).Message(), hint)
@@ -470,6 +499,14 @@ func (s *Server) CreateStoragePool(
 	if err := validateBdevConf(req.GetBdevConf()); err != nil {
 		return nil, err
 	}
+	// A stripe the request names is judged against the substituted slice
+	// count before any read (architecture.md, Common validation): its
+	// product breaks the bound whatever the cluster stores.
+	if err := validateStripeProduct(
+		req.GetBdevConf().GetDmRaid0Conf().GetStripeSize(), sliceCnt,
+	); err != nil {
+		return nil, err
+	}
 	if err := validateEventThreshold(req.GetEventThreshold()); err != nil {
 		return nil, err
 	}
@@ -520,15 +557,15 @@ func (s *Server) CreateStoragePool(
 				"init_ext_cnt %d times extent_size %d overflows",
 				req.GetInitExtCnt(), extentSize)
 		}
-		scanBdev := model.ResolveBdevConf(mergeSpBdevConf(
-			req.GetBdevConf(), scanCc.GetBdevConf()))
+		scanBdev := resolveSpBdevConf(
+			req.GetBdevConf(), scanCc.GetBdevConf(), sliceCnt)
 		// The geometry rules of architecture.md, Common validation, on the
 		// conf this SP would store, judged BEFORE
 		// the scans: a scan run first would answer a request whose merge
 		// breaks one RESOURCE_EXHAUSTED on a cluster short of nodes, sending
 		// the operator to add capacity for a pool that is refused anyway.
 		if err := validateMergedBdevConf(
-			scanBdev, req.GetBdevConf()); err != nil {
+			scanBdev, req.GetBdevConf(), sliceCnt); err != nil {
 			return err
 		}
 		// The primary threshold against the cluster's cntlr_interval
@@ -603,8 +640,8 @@ func (s *Server) CreateStoragePool(
 			// Resolve AFTER the merge, never before: resolving the request
 			// first would turn every member it omitted into a constant and
 			// destroy inheritance from the cluster.
-			bdev := model.ResolveBdevConf(
-				mergeSpBdevConf(req.GetBdevConf(), cc.GetBdevConf()))
+			bdev := resolveSpBdevConf(
+				req.GetBdevConf(), cc.GetBdevConf(), sliceCnt)
 			if cid != scanCid || legCntOf(bdev) != legs {
 				// The scan planned for another cluster or another leg count;
 				// its picks describe an SP this transaction is not building.
@@ -618,7 +655,7 @@ func (s *Server) CreateStoragePool(
 			// judged here too because this read, not that one, is
 			// authoritative.
 			if err := validateMergedBdevConf(
-				bdev, req.GetBdevConf()); err != nil {
+				bdev, req.GetBdevConf(), sliceCnt); err != nil {
 				return err
 			}
 			if err := validatePrimaryThreshold(

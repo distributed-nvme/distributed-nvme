@@ -144,6 +144,17 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 		t.Fatalf("cntlr_list has %d entries, want %d",
 			len(get.GetCntlrList()), common.MaxCntlrCntPerSp)
 	}
+	// The request names no stripe, so the pool takes the cluster's 1 MiB
+	// narrowed to the slice ceiling (architecture.md, Common validation):
+	// 128 KiB, whose product with 32 slices is exactly the bound a host's
+	// commands to a controller node keep.
+	if stripe := conf.GetBdevConf().GetDmRaid0Conf().GetStripeSize(); stripe != 128*1024 {
+		t.Errorf("stored stripe %d at %d slices, want 131072: the "+
+			"cluster's %d narrowed to the bound %d",
+			stripe, common.MaxSliceCntPerSp,
+			env.cc.GetBdevConf().GetDmRaid0Conf().GetStripeSize(),
+			common.MaxNvmeTcpCmdBytes)
+	}
 
 	// architecture.md, Per-operation allocation, at the ceiling: one side per leg,
 	// one DN per side, no DN twice.

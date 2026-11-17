@@ -1055,22 +1055,65 @@ design:
   node's create. An auto-grow refused for want of budget shows only in
   the worker's log. State: accepted. Fix decided: a node created without
   a budget gets the largest one.
-- **The default cap on IO queues is unmeasured. The default stripe makes
-  hosts send reads that a controller node refuses.** Each path holds one
+- **The default cap on IO queues is unmeasured.** Each path holds one
   TCP connection per IO queue, and the agent caps the queues of a
   subsystem; no host with many CPUs has been measured for it. State:
-  accepted; a measurement item of the performance plan. The stripe tells
-  the host the device's best IO size, the stripe times the slice count,
-  and the host reads ahead twice that size and sends commands up to it. A
-  controller node's kernel refuses, over TCP, a command that carries more
-  than 4 MiB of data, since a kernel fix of 2026 that the distributions'
-  kernels carry. So a host that reads a large file on a pool of five or
-  more slices at the default stripe of 1 MiB gets IO errors. Seen in the
-  lab on kernel 7.0.0-42. State: fix decided, the default stripe keeps the
-  stripe times the slice count at 4 MiB, and a pool that names a larger
-  product is refused; the price is that a whole block a host writes is
-  split over slices, so the first write of a block costs more. Procedure
-  to write, one line on the stripe setting.
+  accepted; a measurement item of the performance plan.
+- **A pool of more than four slices takes a smaller stripe, so that its
+  hosts' reads stay within what a controller node takes.** The stripe
+  tells the host the volume's best IO size, the stripe times the slice
+  count, and the host reads ahead twice that size and, when it is above
+  4 MiB, sends commands up to it. A controller node's kernel refuses, over
+  TCP, a command that carries more than 4 MiB of data, since a kernel fix
+  of 2026 that the distributions' kernels carry; seen in the lab on kernel
+  7.0.0-42, where a pool of five slices at a 1 MiB stripe gave its host IO
+  errors. So a pool that names no stripe takes its cluster's stripe, 1 MiB
+  at the defaults, halved until the stripe times the slice count is at
+  most 4 MiB: 512 KiB at five to eight slices, 256 KiB at nine to sixteen
+  and 128 KiB above. A pool create that names a stripe whose product with
+  the slice count is above 4 MiB is refused with the reason and the
+  largest stripe that fits. This fixes the IO errors, at a price: in a
+  pool of more than four slices at the defaults a whole block a host
+  writes is split over slices, so the thin pool no longer skips the zero
+  fill of a block written whole and the first write of a block costs
+  more, and a discard frees space only over a longer range (the discard
+  entry below). State: accepted. A pool created before dnv held the
+  stripe to this bound keeps its stripe, since a pool's layout never
+  changes, and its hosts still get IO errors on large reads. State for
+  such a pool: procedure to write; its one step: on every host, set
+  `max_sectors_kb` to at most 4096 for the device of each of the pool's
+  namespaces and for each of that device's hidden path devices, one per
+  controller node (`nvme<X>c<Y>n<Z>` under `/sys/block`), before the
+  first large read and again whenever a reconnect adds a path. The
+  namespace device alone is not enough: a path device joins the requests
+  it is sent up to its own limit, as read from the kernel's code.
+- **A clone between pools of some slice counts is refused.** A clone's
+  device on the controller node tells the host a best IO size made from
+  both pools: the least common multiple, the smallest size that is a whole
+  multiple of each, of the source's stripe times its slice count and the
+  destination's, or one
+  block of the destination when that multiple is not a whole number of
+  blocks. When it is above 4 MiB, the clone's hosts would send commands
+  the controller node refuses, while the clone copies and after it, until
+  the host reads the namespace's identity again; seen in the lab with a
+  one-slice source of 1 MiB into a pool of five slices of 512 KiB. So the
+  gateway refuses such a clone, and names both products. Pools whose slice
+  counts are powers of two, 1, 2, 4, 8, 16 and 32, clone into each other
+  freely at the defaults. At the defaults a one-slice volume goes only
+  into a pool of 1 to 4, 6, 8, 12, 16, 24 or 32 slices, and the same
+  holds the other way; a clone between a one-slice volume and a pool of
+  any other slice count is refused. So is every clone into a pool whose
+  block is above 4 MiB, and every clone into a pool of the default block
+  when either pool was created before the bound above with more than four
+  slices of the default stripe. State: accepted.
+- **A migration in a pool whose block is above 4 MiB can be sent commands
+  its new side refuses.** During a migration the new side's copy device on
+  its disk node tells the controller node a best IO size of at least one
+  block, so the controller node's path to it can carry commands up to the
+  block, above what the disk node's kernel takes. Read from the kernel's
+  code, not seen in the lab. The default block is 1 MiB. State: fix later,
+  when a lab shows it; the fix would bound the block, which changes the
+  rule every pool's layout rests on.
 - **A CSI volume costs a pool.** Under the CSI driver every volume is a
   pool with its own cntlrs and sides, so the ceilings of the introduction's
   table bound the volume count. A controller node holds at most 256
@@ -1100,8 +1143,10 @@ design:
   misaligned discard with success. A cluster created with no stripe gets
   one equal to its block, up to 1 MiB, so at the defaults an aligned 1 MiB
   discard frees one block. A pool's stripe is smaller than its block when
-  the pool or its cluster names a smaller stripe, or when the pool's block
-  is larger than its cluster's stripe, as every block above 1 MiB is. Then
+  the pool or its cluster names a smaller stripe, when the pool's block
+  is larger than its cluster's stripe, as every block above 1 MiB is, or
+  when the pool has more than four slices at the defaults, whose stripe is
+  narrowed to keep the stripe times the slice count at 4 MiB. Then
   a discard frees a block on one slice only when it covers nearly the
   slice count times the block, and `fstrim` can report success and free
   nothing. Read from the kernel's code, not measured. State: accepted.

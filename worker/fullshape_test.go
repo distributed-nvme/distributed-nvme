@@ -792,6 +792,20 @@ func (wp *widePool) assertWideShape(t *testing.T) {
 			t.Errorf("the pool holds %d %s, want %d", c.got, c.what, c.want)
 		}
 	}
+	// The planter narrows the cluster's stripe to the pool's slice count as
+	// CreateStoragePool does (model.ResolveSpBdevConf; architecture.md,
+	// Common validation): at the slice ceiling the cluster's own stripe
+	// would give the pool's volumes an optimal IO size over the bound.
+	clusterStripe := wp.cl.Conf.GetBdevConf().GetDmRaid0Conf().GetStripeSize()
+	stripe := state.Conf.GetBdevConf().GetDmRaid0Conf().GetStripeSize()
+	if want := model.FitStripe(
+		clusterStripe, common.MaxSliceCntPerSp,
+	); stripe != want || stripe*common.MaxSliceCntPerSp >
+		common.MaxNvmeTcpCmdBytes {
+		t.Errorf("the planted pool's stripe is %d, want the cluster's %d "+
+			"narrowed to %d slices, %d", stripe, clusterStripe,
+			common.MaxSliceCntPerSp, want)
+	}
 	grps := make([]*pb.Group, 0, 2*len(state.Slices)+len(state.Clones))
 	for _, slice := range state.Slices {
 		sliceGrps := append(append([]*pb.Group(nil), slice.GetMetaGrpList()...), slice.GetDataGrpList()...)

@@ -188,6 +188,11 @@ func (c *controller) CreateVolume(
 		return nil, err
 	}
 	extent := cc.GetDnBinConf().GetExtentSize()
+	// The cluster's stripe is the pool's: the pool below has one slice and
+	// names no stripe, and CreateStoragePool narrows a cluster's stripe only
+	// for a pool whose stripe times its slice count would pass
+	// common.MaxNvmeTcpCmdBytes (model.FitStripe), which one slice of at most
+	// MaxDmRaid0StripeSize never does.
 	unit := cc.GetBdevConf().GetDmRaid0Conf().GetStripeSize()
 	if extent == 0 || unit == 0 {
 		return nil, status.Errorf(codes.Internal,

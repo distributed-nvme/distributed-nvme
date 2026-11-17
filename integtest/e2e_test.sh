@@ -172,6 +172,14 @@ MAX_ALLOC_LEG_PER_GRP=
 DEFAULT_HC_INTERVAL=
 DEFAULT_PRIMARY_UNHEALTHY=
 DEMOTION_HOLD_TIMEOUT=
+# The two that bound a pool's stripe, from the same JSON:
+# model.DefaultStripeSize of common.DefaultDmPoolDataBlockSize, the stripe
+# every cluster of this suite stores (setup step 4 checks it), and
+# common.MaxNvmeTcpCmdBytes, the most data one NVMe/TCP command may carry to
+# a node's kernel, which a pool's stripe times its slice count and the IO
+# sizes host0 reads (host_io_sizes_check) are held to.
+DEFAULT_STRIPE_SIZE=
+MAX_NVME_TCP_CMD_BYTES=
 
 # ---------------------------------------------------------------------------
 # Constants: paths (e2e_integtest.md, Topology and parameters)
@@ -244,12 +252,17 @@ TRSVCID_MAX=$((DN_TRSVCID_BASE + MAX_DNS_PER_VM - 1))
 # Constants: the shape of the run (E2E12)
 #
 # A shell suite cannot import package common, so every number a Go constant
-# owns is repeated here WITH the constant it mirrors. Six of them are not
-# repeated at all but read from `workerctl constants` above: three because
+# owns is repeated here WITH the constant it mirrors. Eight of them are read
+# from `workerctl constants` above rather than trusted from a copy
+# (DefaultStripeSize is also mirrored as REACT_STRIPE_SIZE, which
+# read_constants holds to it): three because
 # they are deployment requirements rather than choices (EtcdMaxTxnOps,
-# EtcdMaxRequestBytes, MaxAllocLegPerGrp), and the three health timers, which
+# EtcdMaxRequestBytes, MaxAllocLegPerGrp), the three health timers, which
 # the cutoff case reads (DefaultHealthCheckInterval, DefaultPrimaryUnhealthy,
-# DemotionHoldTimeout).
+# DemotionHoldTimeout), and the two that bound a pool's stripe: the stripe a
+# cluster stores when its create names none (DefaultStripeSize) and the most
+# data one NVMe/TCP command may carry to a node's kernel (MaxNvmeTcpCmdBytes),
+# which the IO sizes host0 reads are held to.
 # ---------------------------------------------------------------------------
 
 # common.MaxSliceCntPerSp — the widest sp the gateway accepts, enforced by
@@ -265,9 +278,22 @@ SLICE_CNT_DEFAULT=32
 # time a primary's build at the ceiling holds the reads of its cntlr off, while
 # the observation its check rounds answer from grows older than the worker's
 # bound (dnv-worker.md HL7), so at the ceiling its own build can fail over
-# again and again (e2e_integtest.md, Topology and parameters). A choice of
-# this suite; it mirrors no Go constant.
-REACT_SLICE_CAP=8
+# again and again (e2e_integtest.md, Topology and parameters). And its strided
+# writes need its pool's stripe to be REACT_STRIPE_SIZE, the cluster's own:
+# a pool that names no stripe takes the cluster's narrowed to the largest
+# power of two whose product with its slice count is at most
+# common.MaxNvmeTcpCmdBytes (model.FitStripe), so the cluster's 1 MiB stays
+# whole only up to four slices; read_constants checks that product. A choice
+# of this suite; it mirrors no Go constant.
+REACT_SLICE_CAP=4
+
+# The stripe react's pool stores and its strided writes are written for
+# (react_chunk_write): model.DefaultStripeSize of
+# common.DefaultDmPoolDataBlockSize, the stripe this suite's clusters store,
+# which react's pool takes whole at REACT_SLICE_CAP slices or fewer.
+# read_constants checks both against the tree; react's stage 01
+# (react_target) checks the pool's stored value.
+REACT_STRIPE_SIZE=1048576
 
 # common.MinDnExtSize — 64 MiB, the smallest extent validateDnBinConf
 # (gateway/validate.go) accepts. Small extents are what keep the run's
@@ -279,24 +305,39 @@ REACT_SLICE_CAP=8
 # applied by `cluster create --extent-size` against an EMPTY etcd.
 EXTENT_SIZE=67108864
 
-# The sp's dm-striped chunk. dm-striped maps chunk c of a td to slice
-# c mod slice_cnt (architecture.md, raid0 bitmap math, and
-# regionSkippable's comment in agent/cnagent/thinbm.go), and stripe index i
-# is slice_idx i because the
-# plan sorts its slices by slice_idx (buildSlices, agent/cnagent/plan.go) and
-# raid0Args emits them in that order (agent/cnagent/td.go), so with a
-# 1 MiB stripe every offset k x (slice_cnt x 1 MiB) lands in slice 0 —
-# which is how the react case drives ONE slice's pool over its low-water mark
-# (e2e_integtest.md, The cases, react).
+# The active case's sp's dm-striped chunk, READ BACK from the pool its
+# `sp create` stored (setup_create_sp), never sent: the create names no
+# stripe, so the pool takes its cluster's stored stripe, CLUSTER_STRIPE,
+# narrowed to the largest power of two whose product with its slice count is
+# at most common.MaxNvmeTcpCmdBytes (model.FitStripe; architecture.md, Common
+# validation) — the cluster's 1 MiB up to four slices, 128 KiB at the
+# ceiling — so a host's commands stay within what a controller node takes.
+# A named 1 MiB stripe at five slices or more is refused. dm-striped maps
+# chunk c of a td to slice c mod slice_cnt (architecture.md, raid0 bitmap
+# math, and regionSkippable's comment in agent/cnagent/thinbm.go), and stripe
+# index i is slice_idx i because the plan sorts its slices by slice_idx
+# (buildSlices, agent/cnagent/plan.go) and raid0Args emits them in that order
+# (agent/cnagent/td.go), so the first STRIPE_SIZE bytes of a td are slice 0's.
 #
-# 1 MiB is also the ceiling, and the sp's own: validateBdevConf
-# (gateway/validate.go) refuses a stripe above common.MaxDmRaid0StripeSize =
-# 1 MiB or not a multiple of 4 KiB, and a data block size that is not a
-# multiple of the stripe. Those are the bounds validateCloneGeometry puts on a
-# clone's src_stripe_size (256 x 4 KiB = 1048576) and src_block_size, so a
-# stripe the sp accepts is one `clone create` accepts as its source, and
-# raising this value fails `sp create` itself with INVALID_ARGUMENT.
-STRIPE_SIZE=1048576
+# The stored stripe is at most common.MaxDmRaid0StripeSize = 1 MiB and a power
+# of two, so it divides TD_SLICE_BYTES (below), and it meets the bounds
+# validateCloneGeometry puts on a clone's src_stripe_size, so the sp is one
+# `clone create` accepts as its source.
+STRIPE_SIZE=0
+# The cluster's stored stripe, read back at setup step 4 and checked against
+# model.DefaultStripeSize of the default block, which `workerctl constants`
+# prints (DEFAULT_STRIPE_SIZE): the largest stripe a pool that names none
+# takes (architecture.md, Clusters).
+CLUSTER_STRIPE=0
+
+# The bytes per slice of TD_UNIT (derive_params): common.MaxDmRaid0StripeSize,
+# the largest stripe any pool stores. Every stored stripe is a power of two
+# at most this, so slice_cnt x TD_SLICE_BYTES is a whole number of every
+# pool's slice_cnt x stripe_size, the unit CreateThinDevice
+# (gateway/thindevice.go) sizes a td in, and the suite's td sizes stay whole
+# MiB at every slice count, as setup_create_sp checks against the stored
+# stripe.
+TD_SLICE_BYTES=1048576
 
 # `sp create --init-ext-cnt`: extents per data group. 0 is refused by the
 # gateway, and this value also fixes AR6's grow size — a data grow appends a
@@ -1293,6 +1334,30 @@ read_constants() {
 		DemotionHoldTimeout) DEMOTION_HOLD_TIMEOUT=$val ;;
 		esac
 	done
+	for key in DefaultStripeSize MaxNvmeTcpCmdBytes; do
+		val=$(jq_of "$json" ".$key")
+		case "$val" in
+		'' | *[!0-9]* | 0)
+			die "workerctl constants: $key is '$val' in $json"
+			;;
+		esac
+		case "$key" in
+		DefaultStripeSize) DEFAULT_STRIPE_SIZE=$val ;;
+		MaxNvmeTcpCmdBytes) MAX_NVME_TCP_CMD_BYTES=$val ;;
+		esac
+	done
+	# react's strided writes are written for REACT_STRIPE_SIZE, which its
+	# pool takes whole only if the cluster stores it and REACT_SLICE_CAP
+	# slices of it stay within the bound (REACT_SLICE_CAP's comment).
+	if [ "$DEFAULT_STRIPE_SIZE" != "$REACT_STRIPE_SIZE" ] ||
+		[ $((REACT_SLICE_CAP * REACT_STRIPE_SIZE)) -gt \
+			"$MAX_NVME_TCP_CMD_BYTES" ]; then
+		die "react needs a $REACT_STRIPE_SIZE-byte stripe at" \
+			"REACT_SLICE_CAP $REACT_SLICE_CAP slices, but a cluster stores" \
+			"$DEFAULT_STRIPE_SIZE and a pool's stripe times its slices may" \
+			"be at most $MAX_NVME_TCP_CMD_BYTES: re-derive REACT_SLICE_CAP" \
+			"and REACT_STRIPE_SIZE"
+	fi
 	# The cutoff set's primary threshold, and with it the set's argv (see
 	# THE CUTOFF SET above).
 	THR_CUT_PRIMARY=$((2 * DEFAULT_HC_INTERVAL))
@@ -1851,9 +1916,16 @@ derive_params() {
 
 	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
 	# multiple of slice_cnt x stripe_size, computed from the SP's stored
-	# values. Every `td create --size` in this suite is a multiple of TD_UNIT.
-	# Its react twin is REACT_TD_UNIT, at the end.
-	TD_UNIT=$((SLICE_CNT * STRIPE_SIZE))
+	# values. Every `td create --size` in this suite is a multiple of TD_UNIT,
+	# one TD_SLICE_BYTES per slice, which is a whole number of that unit
+	# whatever stripe the pool stores; setup_create_sp holds it to the stored
+	# stripe once the pool exists. It is the stripe's ceiling and not the
+	# stored stripe so that every td keeps whole MiB per slice: a td of four
+	# TD_UNIT then holds four pool blocks per slice, of which setup's pattern
+	# writes only the first, which leaves the copy case's appended bitmap
+	# chunks blocks to skip (copy_clone_build). Its react twin is
+	# REACT_TD_UNIT, at the end.
+	TD_UNIT=$((SLICE_CNT * TD_SLICE_BYTES))
 
 	# The run's shape, and react's beside it (e2e_integtest.md, Topology and
 	# parameters): react builds min(SLICE_CNT, REACT_SLICE_CAP) slices on the
@@ -1870,7 +1942,7 @@ derive_params() {
 	REACT_GRP_CNT=$((2 * REACT_SLICE_CNT))
 	REACT_SP_ZERO_BYTES=$((LEGS * REACT_SLICE_CNT * (EXTENT_SIZE + DATA_ZERO_BYTES)))
 	REACT_RUN_CAP_BYTES=$((REACT_SP_ZERO_BYTES + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
-	REACT_TD_UNIT=$((REACT_SLICE_CNT * STRIPE_SIZE))
+	REACT_TD_UNIT=$((REACT_SLICE_CNT * TD_SLICE_BYTES))
 	# The two copies of the formulas must agree, and at a slice count no
 	# larger than the cap they can be compared: react's set is then the run's.
 	local run_set="$RUN_GRP_CNT/$RUN_SP_ZERO_BYTES/$RUN_SHAPE_CAP_BYTES/$RUN_TD_UNIT"
@@ -2166,6 +2238,44 @@ wait_dev_gone() { # <h> <uuid> [secs]
 	wait_until "${3:-$WAIT_HOST}" \
 		"host$1 to lose $(host_dev "$2")" \
 		host_dev_absent "$1" "$2"
+}
+
+# host_io_sizes_check holds the IO sizes host <h> took for the namespace
+# <uuid> to common.MaxNvmeTcpCmdBytes (architecture.md, Common validation, the
+# stripe's product, and Clones): queue/optimal_io_size, and
+# queue/max_sectors_kb in bytes, of the namespace's head device and of each
+# of its path devices (the helper's io_sizes). A host lets one request grow
+# to the optimal IO size where that is over its own default largest
+# request, and a controller node refuses a command that carries more than
+# the bound, so a number over it here is a read that would fail; the head
+# takes its sizes from one path, so every path is read too. <paths> is the
+# fewest path devices the namespace must show, so that the check reads the
+# paths the caller knows to be there and cannot pass on none.
+host_io_sizes_check() { # <h> <uuid> <paths> <what>
+	local h=$1 uuid=$2 want=$3 what=$4 out role name oio msk heads=0 paths=0
+	out=$(helper_host "$h" io_sizes "$uuid") ||
+		die "host$h: io_sizes $uuid failed for $what (its message is above)"
+	while read -r role name oio msk; do
+		[ -n "$role" ] || continue
+		case "$oio$msk" in
+		'' | *[!0-9]*)
+			die "host$h: io_sizes printed '$role $name $oio $msk' for $what"
+			;;
+		esac
+		log "  host$h $what: $role $name optimal_io_size $oio," \
+			"max_sectors_kb $msk"
+		assert_le "$oio" "$MAX_NVME_TCP_CMD_BYTES" \
+			"host$h $what: $role $name queue/optimal_io_size, within common.MaxNvmeTcpCmdBytes"
+		assert_le "$((msk * 1024))" "$MAX_NVME_TCP_CMD_BYTES" \
+			"host$h $what: $role $name queue/max_sectors_kb x 1024, within common.MaxNvmeTcpCmdBytes"
+		case "$role" in
+		head) heads=$((heads + 1)) ;;
+		path) paths=$((paths + 1)) ;;
+		*) die "host$h: io_sizes printed role '$role' for $what" ;;
+		esac
+	done <<<"$out"
+	assert_eq "$heads" 1 "host$h $what: the namespace's head device read"
+	assert_ge "$paths" "$want" "host$h $what: the namespace's path devices read"
 }
 
 # ---------------------------------------------------------------------------
@@ -2564,9 +2674,10 @@ host_make_pattern() { # <h> <path> <countMiB>
 }
 
 # host_write_range copies <countMiB> from <src> to <dst> at <seekMiB> MiB. The
-# seek is what the react case's AR6 trigger needs: with STRIPE_SIZE = 1 MiB a
-# 1 MiB write at every offset k x (SLICE_CNT x STRIPE_SIZE) lands in slice 0,
-# because dm-striped maps chunk c of a td to slice c mod slice_cnt.
+# seek is what the react case's AR6 trigger needs: with react's stripe of
+# REACT_STRIPE_SIZE = 1 MiB a 1 MiB write at every offset
+# k x (SLICE_CNT x REACT_STRIPE_SIZE) lands in slice 0, because dm-striped
+# maps chunk c of a td to slice c mod slice_cnt.
 #
 # It runs under ssh_host_watched: a write over a path that went
 # ANA-inaccessible requeues exactly as a read does (the section header). Every
@@ -5792,6 +5903,45 @@ host_cleanup() { # [cdc traddr]
 	fi
 	rm -rf "$WORK"
 	echo cleaned
+	return 0
+}
+
+# io_sizes prints the IO sizes the host's block layer took for the namespace
+# whose uuid is <uuid>, one line per block device that carries it:
+# `<head|path> <name> <queue/optimal_io_size> <queue/max_sectors_kb>`. The
+# head is the device the by-id uuid link resolves to; the paths are the
+# hidden per-controller devices (nvme<X>c<Y>n<Z>), found both under the
+# head's multipath directory, where the kernel has one, and by their own
+# uuid attribute, each named once. It judges nothing: the driver holds the
+# numbers to the bound (host_io_sizes_check).
+io_sizes() { # <uuid>
+	local uuid=$1 link node head d cur oio msk seen=" "
+	link="/dev/disk/by-id/nvme-uuid.$uuid"
+	node=$(readlink -f "$link" 2>/dev/null) || node=""
+	[ -n "$node" ] && [ -b "$node" ] || {
+		echo "io_sizes: $link resolves to no block device ('$node')" >&2
+		return 1
+	}
+	head=${node##*/}
+	for d in "/sys/block/$head" "/sys/block/$head/multipath/"* \
+		/sys/block/nvme*c*n*; do
+		[ -d "$d/queue" ] || continue
+		d=$(readlink -f "$d") || continue
+		case "$seen" in
+		*" ${d##*/} "*) continue ;;
+		esac
+		cur=""
+		{ read -r cur <"$d/uuid"; } 2>/dev/null || cur=""
+		[ "$cur" = "$uuid" ] || continue
+		seen="$seen${d##*/} "
+		read -r oio <"$d/queue/optimal_io_size" || return 1
+		read -r msk <"$d/queue/max_sectors_kb" || return 1
+		if [ "${d##*/}" = "$head" ]; then
+			echo "head ${d##*/} $oio $msk"
+		else
+			echo "path ${d##*/} $oio $msk"
+		fi
+	done
 	return 0
 }
 
@@ -9309,7 +9459,16 @@ setup_create_cluster() {
 		"the default bin ladder survives an extent-size-only create (bin2)"
 	assert_field "$CTL_OUT" '.cluster_conf.dn_bin_conf.bin3_shift' 12 \
 		"the default bin ladder survives an extent-size-only create (bin3)"
-	log "  cluster_id $CLUSTER_ID = $(hex16 "$CLUSTER_ID") in every NQN"
+	# The stripe the create resolved for the stripe it was not given: the
+	# default block's (model.DefaultStripeSize), the largest stripe a pool
+	# that names none takes (architecture.md, Clusters). setup_create_sp
+	# holds the pool's stored stripe to it.
+	CLUSTER_STRIPE=$(jq_of "$CTL_OUT" \
+		'.cluster_conf.bdev_conf.dm_raid0_conf.stripe_size')
+	assert_eq "$CLUSTER_STRIPE" "$DEFAULT_STRIPE_SIZE" \
+		"cluster_conf's stripe_size is model.DefaultStripeSize of the default block"
+	log "  cluster_id $CLUSTER_ID = $(hex16 "$CLUSTER_ID") in every NQN;" \
+		"stored stripe $CLUSTER_STRIPE"
 }
 
 # ---------------------------------------------------------------------------
@@ -9512,11 +9671,16 @@ setup_create_sp() {
 	# effect: no RPC changes an event_threshold after CreateStoragePool, so the
 	# set this call carries is the set the case lives with. The four read-backs
 	# below are against the ACTIVE variables, so they follow the choice.
+	#
+	# No --stripe-size: the pool takes the cluster's stripe narrowed to its
+	# slice count, which the stored conf is checked against below. A named
+	# 1 MiB stripe would be refused at five slices or more (architecture.md,
+	# Common validation).
 	# shellcheck disable=SC2086
 	ctl_timeout 180 ctl_ok sp create \
 		--cntlr-cnt "$CNTLR_CNT" --slice-cnt "$SLICE_CNT" \
 		--init-ext-cnt "$INIT_EXT_CNT" --slots "$SLOTS" \
-		--redund "$REDUND" --stripe-size "$STRIPE_SIZE" $THR
+		--redund "$REDUND" $THR
 	SP_ID=$(jq_of "$CTL_OUT" '.sp_id')
 	case "$SP_ID" in
 	'' | *[!0-9]*) die "sp create returned sp_id '$SP_ID'" ;;
@@ -9615,12 +9779,33 @@ setup_create_sp() {
 		"every side carries cntlid_slot_list[0] = $slot0"
 
 	# --- the conf that was actually stored ---------------------------------
-	# ResolveBdevConf (model/capacity.go) keeps a non-zero stripe_size
-	# verbatim, so this is the value the react case's
-	# strided writes depend on: with a 1 MiB stripe, every offset
-	# k x (slice_cnt x 1 MiB) lands in slice 0.
-	assert_field "$SP_JSON" '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size' \
-		"$STRIPE_SIZE" "the sp's dm-striped chunk"
+	# The stripe, read back into STRIPE_SIZE: the cluster's CLUSTER_STRIPE
+	# narrowed to the largest power of two whose product with the slice count
+	# is within common.MaxNvmeTcpCmdBytes (model.FitStripe; architecture.md,
+	# Common validation). Held to that rule by its properties rather than by
+	# a copy of the arithmetic: within the bound, at most the cluster's, a
+	# power of two, and the largest such — the cluster's own, or one whose
+	# double would pass the bound. TD_UNIT, sized before the pool existed,
+	# must be a whole number of the unit CreateThinDevice sizes in.
+	STRIPE_SIZE=$(sp_field '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size')
+	case "$STRIPE_SIZE" in
+	'' | *[!0-9]* | 0) die "the sp stores stripe_size '$STRIPE_SIZE'" ;;
+	esac
+	assert_le "$((SLICE_CNT * STRIPE_SIZE))" "$MAX_NVME_TCP_CMD_BYTES" \
+		"the sp's stripe $STRIPE_SIZE x $SLICE_CNT slices, its volumes' optimal IO size, is within common.MaxNvmeTcpCmdBytes"
+	assert_le "$STRIPE_SIZE" "$CLUSTER_STRIPE" \
+		"the sp's stripe is at most the cluster's $CLUSTER_STRIPE"
+	assert_eq "$((STRIPE_SIZE & (STRIPE_SIZE - 1)))" 0 \
+		"the sp's stripe $STRIPE_SIZE is a power of two"
+	if [ "$STRIPE_SIZE" != "$CLUSTER_STRIPE" ]; then
+		assert_ge "$((2 * SLICE_CNT * STRIPE_SIZE))" \
+			"$((MAX_NVME_TCP_CMD_BYTES + 1))" \
+			"the sp's stripe $STRIPE_SIZE is the largest the bound allows at $SLICE_CNT slices"
+	fi
+	assert_eq "$((TD_UNIT % (SLICE_CNT * STRIPE_SIZE)))" 0 \
+		"TD_UNIT $TD_UNIT is a whole number of slice_cnt x stripe_size"
+	log "  stored stripe $STRIPE_SIZE (the cluster's $CLUSTER_STRIPE at" \
+		"$SLICE_CNT slices); td unit $TD_UNIT"
 	# The geometry the space guard and setup step 11 mirror rather than read
 	# (DATA_BLOCK_SIZE, DATA_META_BLOCKS; derive_params), held to what the
 	# create stored, so a change in the tree fails here by name and not as a
@@ -9926,8 +10111,9 @@ setup_wait_stack() {
 
 setup_create_td() {
 	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
-	# multiple of slice_cnt x stripe_size, which is TD_UNIT (32 MiB at the
-	# default shape). t0 is four of them, 128 MiB.
+	# multiple of slice_cnt x stripe_size, of which TD_UNIT (32 MiB at the
+	# default shape) is a whole number (setup_create_sp checks it). t0 is four
+	# of them, 128 MiB.
 	TD0_SIZE=$((4 * TD_UNIT))
 	stage 08 "td create --name $TD0 --size $TD0_SIZE ($((TD0_SIZE / 1048576)) MiB, 4 x TD_UNIT)"
 	ctl_ok td create --name "$TD0" --size "$TD0_SIZE"
@@ -10025,7 +10211,7 @@ setup_export_ns() {
 # ---------------------------------------------------------------------------
 
 setup_connect_host0() {
-	stage 10 "host0 discovers $SS0 through the cdc on $CP_IP:$CDC_PORT and connects"
+	stage 10 "host0 discovers $SS0 through the cdc on $CP_IP:$CDC_PORT and connects; its IO sizes stay within the bound"
 
 	# Both cntlrs listed first: host0 connects both transports below and
 	# asserts a path through each, and a standby whose err_epoch a missed
@@ -10095,6 +10281,13 @@ setup_connect_host0() {
 		"host0's path to the standby cn$STANDBY_CN"
 	log "  host0 device $(host_dev "$UUID1") via nvme controller" \
 		"$(host_ctrl 0 "$SS0" "$PRIMARY_TRADDR") (optimized)"
+
+	# The sizes host0's block layer took from the namespace: its optimal IO
+	# size is the pool's stripe times its slice count, and no number of the
+	# head or of either path may pass common.MaxNvmeTcpCmdBytes, or host0's
+	# reads would carry commands a controller node refuses (architecture.md,
+	# Common validation, the stripe's product).
+	host_io_sizes_check 0 "$UUID1" "$CNTLR_CNT" "ns 1 of $SS0"
 }
 
 # ---------------------------------------------------------------------------
@@ -12866,9 +13059,11 @@ case_ops() {
 #  * That `clone append-bm` made the copy skip anything. The fold counts an
 #    absent chunk, a short chunk and a slice with no chunk at all as WRITTEN
 #    (CN22, architecture.md, raid0 bitmap math: "the safe direction, which can
-#    only cost an extra copy"), so one chunk of one slice is legal and correct
-#    but its effect on the region set is not something `cntlr inspect` reports.
-#    What IS asserted is that the RPC is accepted and echoes the clone id.
+#    only cost an extra copy"), so chunks of only the slices one region spans
+#    are legal and correct, but their effect on the region set is not
+#    something `cntlr inspect` reports. What IS asserted is that each RPC is
+#    accepted and echoes the clone id, and that the destination reads the
+#    source's digest, which a region skipped over written data would break.
 #  * That a grown sp still puts every side on a distinct DN. GrowSlice passes
 #    a nil black list (GrowSlice (gateway/storagepool.go)) — but nothing in this
 #    case grows the sp, so the create-time property still holds and the
@@ -12962,8 +13157,9 @@ SP_BLOCK_SIZE=""
 # the source's pattern, which copy step 3 holds the clone's destination to over
 # its first $BASELINE_MIB MiB; copy step 7 fills these again for its own
 # source and holds its destination to the whole source's digest instead.
-# COPY_SRC_SP and COPY_SRC_TD name the sp and thin device whose slice-0 bitmap
-# copy step 2 appends; copy step 7 appends none.
+# COPY_SRC_SP and COPY_SRC_TD name the sp and thin device whose bitmaps, of
+# the slices one destination region spans, copy step 2 appends; copy step 7
+# appends none.
 COPY_SRC_BRANCH=""
 COPY_SRC_NQN=""
 COPY_SRC_IDX=1
@@ -13621,21 +13817,21 @@ copy_pieces_taken() { # <v> <k> <migr id> <cnt>
 	[ "$n" -ge "$4" ]
 }
 
-# copy_src_bm_read is copy step 2's read of the source's slice-0 bitmap as a
-# poll: the gateway refuses it FAILED_PRECONDITION until the source pool's
-# primary reports the source's namespace parked (architecture.md, Bitmap
-# reads), and a refusal is logged when its message changes. The reply of the
-# read that answers stays in CTL_OUT.
-copy_src_bm_read() {
+# copy_src_bm_read is copy step 2's read of one slice's bitmap of the source,
+# slice 0 unless named, as a poll: the gateway refuses it FAILED_PRECONDITION
+# until the source pool's primary reports the source's namespace parked
+# (architecture.md, Bitmap reads), and a refusal is logged when its message
+# changes. The reply of the read that answers stays in CTL_OUT.
+copy_src_bm_read() { # [<slice idx>]
 	local sig
 	if ctl_try --sp "$COPY_SRC_SP" td get-bm --name "$COPY_SRC_TD" \
-		--slice-idx 0 --start 0 --cnt 0; then
+		--slice-idx "${1:-0}" --start 0 --cnt 0; then
 		return 0
 	fi
 	sig=${CTL_ERR:-"dnvctl exit code $CTL_RC"}
 	if [ "$sig" != "$MIGR_HYD_LAST" ]; then
 		MIGR_HYD_LAST=$sig
-		log "  td get-bm of $COPY_SRC_TD refused: $sig"
+		log "  td get-bm of $COPY_SRC_TD slice ${1:-0} refused: $sig"
 	fi
 	return 1
 }
@@ -14253,6 +14449,15 @@ copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
 
 	# --slots 0: cntlr_cnt must not exceed len(cntlid_slot_list)
 	# (CreateStoragePool (gateway/storagepool.go)), and one cntlr needs one slot.
+	# --stripe-size names sp0's stored stripe, STRIPE_SIZE: a clone of this
+	# one-slice pool into sp0 then stacks to sp0's own stripe times its slice
+	# count, the least common multiple of the two pools' products, and
+	# reports it as its optimal IO size, or one region where that is not a
+	# whole number of them; sp0's create kept that product within
+	# MaxNvmeTcpCmdBytes, so CreateClone takes it at every slice count
+	# (cloneIoSizeCheck
+	# (gateway/clone.go); architecture.md, Clones). The cluster's 1 MiB here
+	# would stack to 5 MiB, over the bound, into a pool of five slices.
 	# $THR is UNQUOTED so its eight words split, exactly as setup_create_sp
 	# passes it — and it is the same set, because sp_thresholds chose it for the
 	# copy case and this pool lives inside that case. That is the QUIET set, and
@@ -14452,14 +14657,14 @@ copy_src_sp_teardown() {
 }
 
 # copy_clone_build creates the clone from whatever COPY_SRC_* currently
-# describes, feeds it one bitmap chunk, re-points it at the same transport and
-# waits for hydration.
+# describes, feeds it the bitmap chunks of the source slices one destination
+# region spans, re-points it at the same transport and waits for hydration.
 #
 # It returns 1 — WITHOUT dying — when and only when copy_clone_progress named
 # a source fault. Every other failure is a die, because every other failure is
 # a bug the fallback cannot fix.
 copy_clone_build() {
-	local hex bytes
+	local hex bytes idx spans
 	log ""
 	log "  --- clone source branch: $COPY_SRC_BRANCH"
 	log "      src_nqn       $COPY_SRC_NQN, ns $COPY_SRC_IDX"
@@ -14505,11 +14710,20 @@ copy_clone_build() {
 		 and .clone.src_tr_conf_list[0].tr_svc_id == \"$COPY_SRC_TRSVCID\"" \
 		"src_tr_conf_list is the one transport the flags described"
 
-	# One bitmap chunk, from the SOURCE thin device's slice 0. The wire
-	# convention of every bitmap RPC is 1 = unwritten/skippable and
-	# GetThinDeviceBitmap already answers in it (architecture.md, Bitmap reads:
-	# "agents and callers invert once at the boundary"), so the
-	# reply is fed straight through with no inversion here.
+	# One bitmap chunk from each SOURCE slice that one destination region
+	# spans. A region, the destination pool's block, is skipped only when the
+	# bitmaps of every source slice it maps to say unwritten, and the fold
+	# reads a slice with no chunk as written (CN22; architecture.md, raid0
+	# bitmap math): a region of SP_BLOCK_SIZE over a COPY_SRC_STRIPE stripe
+	# spans that many consecutive chunks, each on the next slice, so slices 0
+	# to spans-1 are the ones the regions that start at slice 0 cover, and
+	# with their chunks those regions are skippable where the source is
+	# unwritten. One slice when the stripe is the block, eight at the
+	# ceiling's 128 KiB stripe under a 1 MiB block. The wire convention of
+	# every bitmap RPC is 1 = unwritten/skippable and GetThinDeviceBitmap
+	# already answers in it (architecture.md, Bitmap reads: "agents and
+	# callers invert once at the boundary"), so each reply is fed straight
+	# through with no inversion here.
 	#
 	# --cnt 0 is the whole slice, and an EMPTY bitmap would be refused by the
 	# gateway on purpose ("bitmap must not be empty"), so the byte count is
@@ -14519,7 +14733,7 @@ copy_clone_build() {
 	# is parked on its pool's primary (architecture.md, Bitmap reads). The
 	# self branch's source is the transfer's origin, which the transfer's
 	# --auto-suspend parks; the primary's report shows the park a round or
-	# so after host0 saw the namespace go inaccessible, so the read is
+	# so after host0 saw the namespace go inaccessible, so each read is
 	# polled. The sp1 branch's source is a plain namespace the clone reads
 	# through, never parked: its read is refused, no chunk is appended, and
 	# the clone copies every region.
@@ -14529,30 +14743,38 @@ copy_clone_build() {
 		log "  the sp1 source's namespace is not parked: no bitmap chunk," \
 			"the clone copies every region"
 	else
-		MIGR_HYD_LAST=""
-		wait_until "$WAIT_PROVISION" \
-			"the gateway to read the bitmap of the parked source $COPY_SRC_TD" \
-			copy_src_bm_read
-		bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
-		assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-			"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
-		assert_ge "$bytes" 1 \
-			"slice 0 of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
-		assert_le "$bytes" 1048576 \
-			"one chunk may not exceed common.CloneBmChunkBytes (AppendCloneBitmap (gateway/clone.go))"
-		hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
-		assert_eq "${#hex}" "$((bytes * 2))" \
-			"bitmap_hex is two hex digits per byte_cnt byte"
+		spans=$((SP_BLOCK_SIZE / COPY_SRC_STRIPE))
+		[ "$spans" -ge 1 ] || spans=1
+		[ "$spans" -le "$COPY_SRC_SLICES" ] || spans=$COPY_SRC_SLICES
+		log "  one ${SP_BLOCK_SIZE}-byte region spans $spans source slice(s)" \
+			"of a ${COPY_SRC_STRIPE}-byte stripe: appending slices 0 to" \
+			"$((spans - 1))"
+		for ((idx = 0; idx < spans; idx++)); do
+			MIGR_HYD_LAST=""
+			wait_until "$WAIT_PROVISION" \
+				"the gateway to read slice $idx's bitmap of the parked source $COPY_SRC_TD" \
+				copy_src_bm_read "$idx"
+			bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
+			assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
+				"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
+			assert_ge "$bytes" 1 \
+				"slice $idx of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
+			assert_le "$bytes" 1048576 \
+				"one chunk may not exceed common.CloneBmChunkBytes (AppendCloneBitmap (gateway/clone.go))"
+			hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
+			assert_eq "${#hex}" "$((bytes * 2))" \
+				"bitmap_hex is two hex digits per byte_cnt byte"
 
-		# The chunk is addressed by the PAIR (src_slice_idx, bm_idx), never by
-		# either alone (ctl/clone.go's append-bm comment; CN22 bounds them
-		# independently). Chunk (0, 0) is the first CloneBmChunkBytes of source
-		# slice 0's bitmap, which is the whole of it at every shape this suite
-		# builds.
-		ctl_ok clone append-bm --name "$CLONE0" --src-slice-idx 0 --bm-idx 0 \
-			--bm-hex "$hex"
-		assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
-			"AppendCloneBitmapReply.clone_id"
+			# The chunk is addressed by the PAIR (src_slice_idx, bm_idx),
+			# never by either alone (ctl/clone.go's append-bm comment; CN22
+			# bounds them independently). Chunk (idx, 0) is the first
+			# CloneBmChunkBytes of source slice idx's bitmap, which is the
+			# whole of it at every shape this suite builds.
+			ctl_ok clone append-bm --name "$CLONE0" --src-slice-idx "$idx" \
+				--bm-idx 0 --bm-hex "$hex"
+			assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
+				"AppendCloneBitmapReply.clone_id"
+		done
 	fi
 
 	# UpdateCloneTrConf with the SAME transport: the RPC exists for a source
@@ -14641,9 +14863,11 @@ copy_clone() {
 	# assumed. On the self branch (copy_src_self) the stored stripe is what
 	# the clone sends as src_stripe_size, and validateCloneGeometry's ceiling
 	# for that is 256 x 4 KiB = 1 MiB. validateBdevConf holds the sp's own
-	# stripe to the same 1 MiB (common.MaxDmRaid0StripeSize), so a larger
-	# STRIPE_SIZE fails at `sp create` and never reaches this stage; the
-	# assert_le states the clone's bound where the clone is made.
+	# stripe to the same 1 MiB (common.MaxDmRaid0StripeSize), so no stored
+	# stripe passes it; the assert_le states the clone's bound where the
+	# clone is made. The same branch clones the sp into itself, so the
+	# clone's optimal IO size is the sp's own product, which its create kept
+	# within MaxNvmeTcpCmdBytes (cloneIoSizeCheck (gateway/clone.go)).
 	sp_refresh
 	sp_read_roles
 	SP_STRIPE_SIZE=$(sp_field '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size')
@@ -14652,7 +14876,7 @@ copy_clone() {
 	'' | *[!0-9]*) die "$SP reports a non-numeric bdev_conf geometry" ;;
 	esac
 	assert_eq "$SP_STRIPE_SIZE" "$STRIPE_SIZE" \
-		"the sp's stored stripe_size is what --stripe-size asked for"
+		"the sp's stored stripe_size is the one setup read back"
 	assert_le "$SP_STRIPE_SIZE" 1048576 \
 		"src_stripe_size may not exceed 256 x 4 KiB (validateCloneGeometry)"
 
@@ -14724,6 +14948,14 @@ copy_clone() {
 	wait_dev 0 "$UUID2"
 	log "  host0 sees $(host_dev "$UUID2") on $TD_CLONE;" \
 		"its digest is read in stage 03, after the transfer is aborted"
+	# The clone's namespace as host0 took it, the ns-dev on the dm-clone or
+	# already on the raid0 as the worker's pass falls: its optimal IO size is
+	# the dm-clone's, the least common multiple of the source's and the
+	# destination's stripe times slice count or one region, which
+	# CreateClone held to common.MaxNvmeTcpCmdBytes (cloneIoSizeCheck
+	# (gateway/clone.go); architecture.md, Clones), and host0 keeps it until
+	# it reads the namespace's identity again.
+	host_io_sizes_check 0 "$UUID2" 1 "the clone's ns 2 of $SS0"
 
 	# No `clone delete`: the worker latches a clone whose copy the primary
 	# reports whole, with the transaction an unforced delete runs, and its
@@ -14744,6 +14976,9 @@ copy_clone() {
 	wait_dev 0 "$UUID2"
 	log "  $TD_CLONE's namespaces are now backed by its own raid0 (CN16 rule 6)," \
 		"and host0 still sees ns 2 optimized"
+	# And after the clone: the sizes host0 holds for the namespace are still
+	# within the bound.
+	host_io_sizes_check 0 "$UUID2" 1 "ns 2 of $SS0 after the clone"
 }
 
 # ---------------------------------------------------------------------------
@@ -16380,8 +16615,9 @@ copy_failover() {
 	esac
 
 	# The two thin devices' size: COPY_FO_MIN_MIB rounded up to a whole
-	# number of TD_UNIT, the unit of sp0's thin devices, which is a whole
-	# number of the second pool's one-slice unit too.
+	# number of TD_UNIT, the suite's unit of sp0's thin devices, which is a
+	# whole number of the second pool's one-slice unit too, that pool's
+	# stripe being sp0's (copy_src_sp_build).
 	size=$((COPY_FO_MIN_MIB * 1048576))
 	size=$(((size + TD_UNIT - 1) / TD_UNIT * TD_UNIT))
 	mib=$((size / 1048576))
@@ -16485,6 +16721,11 @@ copy_failover() {
 	log "  clone wait: $prov, $(copy_fo_secs "$COPY_FO_T0" "$t_opt") s to" \
 		"host0 reading the destination namespace optimized"
 	wait_dev 0 "$UUID2"
+	# The IO sizes host0 took for the destination namespace while the clone
+	# copies, its source the second pool's one slice of sp0's stripe: within
+	# common.MaxNvmeTcpCmdBytes (cloneIoSizeCheck (gateway/clone.go);
+	# architecture.md, Clones).
+	host_io_sizes_check 0 "$UUID2" 1 "the copying clone's ns 2 of $SS0"
 
 	# The copy, slowed, copies a quarter of its regions on the primary, two
 	# at least.
@@ -17109,7 +17350,7 @@ NVME_FAST_IO_FAIL_TMO=5
 # group the step migrates a leg of.
 # Each write puts back the bytes setup wrote, so check_sha0 still reads
 # SHA0 at the end, and a write that landed zeros shows there.
-REACT_MC_SLOTS=$((STRIPE_SIZE / 4096))
+REACT_MC_SLOTS=$((REACT_STRIPE_SIZE / 4096))
 
 # Writes the loop must finish after md has failed the member, and again
 # after md holds the group whole, before the step goes on: the positive
@@ -19549,16 +19790,18 @@ react_target() {
 	# used/total pair counts in. A different stripe would still land in slice 0
 	# (the mapping is chunk c -> stripe c mod N for any chunk size) but would
 	# no longer make the count a block count. Both values are shape choices of
-	# THIS file rather than immovable facts: $STRIPE_SIZE is the constant
-	# setup passes as `sp create --stripe-size`, and the block size is what the
-	# gateway resolves when no --block-size is given — dnvctl has that flag
-	# (spCreateCmd (ctl/sp.go)) and this suite deliberately never passes it,
-	# so the stored value is common.DefaultDmPoolDataBlockSize.
+	# THIS file rather than immovable facts: the stripe is the cluster's,
+	# which react's pool takes whole at REACT_SLICE_CAP slices or fewer
+	# (REACT_SLICE_CAP's comment; read_constants checks it against the
+	# tree), and the block size is what the gateway resolves when no
+	# --block-size is given — dnvctl has that flag (spCreateCmd (ctl/sp.go))
+	# and this suite deliberately never passes it, so the stored value is
+	# common.DefaultDmPoolDataBlockSize.
 	stripe=$(sp_field '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size')
 	block=$(sp_field '.sp_conf.bdev_conf.dm_pool_conf.data_block_size')
 	assert_eq "$stripe" "$STRIPE_SIZE" "the sp's stored dm-striped chunk"
-	assert_eq "$stripe" 1048576 \
-		"the react case's strided writes are written for a 1 MiB stripe"
+	assert_eq "$stripe" "$REACT_STRIPE_SIZE" \
+		"the react case's strided writes are written for a 1 MiB stripe, which a pool of $SLICE_CNT slices takes whole"
 	assert_eq "$block" 1048576 \
 		"the pool's data_block_size (one strided write must be one thin block)"
 	REACT_STRIDE_MIB=$((SLICE_CNT * stripe / 1048576))
@@ -24643,8 +24886,9 @@ log_topology() {
 		"and nothing else may react while it is stopped)"
 	log "  placement: $DNS_PER_VM dnagent(s) per DN VM (E2E3 bound" \
 		"$DNS_PER_VM_BOUND), $DN_TOTAL disk nodes on $DN_VM_CNT DN VM(s)"
-	log "  sizes:     extent $EXTENT_SIZE, stripe $STRIPE_SIZE," \
-		"td unit $RUN_TD_UNIT, backing $BACKING_SIZE per disk node"
+	log "  sizes:     extent $EXTENT_SIZE, stripe the cluster's narrowed to" \
+		"the slice count (read back at sp create), td unit $RUN_TD_UNIT," \
+		"backing $BACKING_SIZE per disk node"
 	log "  zeroing:   a meta side whole, a data side $DATA_ZERO_BYTES bytes" \
 		"(its meta region and first data block); run cap $RUN_SHAPE_CAP_BYTES bytes"
 	log "  cases:     ${ONLY:-${CASES[*]}}"

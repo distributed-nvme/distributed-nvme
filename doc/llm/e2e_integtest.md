@@ -13,7 +13,7 @@ facts the suites driving real agents share.
 One storage pool at the widest shape the tree builds, on real guests with no
 fakes, driven end to end through the shipped operator CLI while two real kernel
 NVMe hosts read and write its namespaces. A green run at the default shape is
-ten statements; a smaller shape proves no ceiling, and one without redundancy
+eleven statements; a smaller shape proves no ceiling, and one without redundancy
 no repair, no forced start, no take-over and no cut of a migrating leg's path:
 
 * **The ceiling is real.** `MaxSliceCntPerSp` slices with md-raid1, every side
@@ -21,6 +21,14 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   one primary, and a create that commits on a real etcd the `CreateStoragePool`
   transaction `EtcdMaxTxnOps` is sized by, at two cntlrs rather than the widest
   shape's cntlr ceiling: a pool no other suite builds on real agents.
+* **A host's commands stay within what a controller node takes.** The pool
+  names no stripe and stores the cluster's narrowed to its slice count, its
+  stripe times its slice count within `MaxNvmeTcpCmdBytes` (`architecture.md`,
+  Common validation, the stripe's product), and the optimal IO size and the
+  largest request host0's block layer takes for the pool's namespace, its
+  head device and every path device, and for a clone's namespace while the
+  clone copies and after it (`architecture.md`, Clones), are within that
+  bound, at every slice count the run builds.
 * **The operator surface works against a real control plane.** Every `Gateway`
   RPC but the cluster and node deletions and listings, the id step and the
   capacity read of the layer above, `GetClusterCapacity`, is issued by the
@@ -185,9 +193,16 @@ at parse time. The react case builds its pool at the slice count but at most
 holds the reads of its cntlr off (`dnagent.md` SH29, SH30), so the observation
 its check rounds answer from ages past the worker's bound and its rounds count
 as missed (`dnv-worker.md` HL7) for longer than react's primary and cntlr
-thresholds, and the suite cannot shorten that hold (Known limits). The numbers
-that follow from the slice count are worked out for react beside the run's, and
-the dn agents per disk-node guest stay the run's.
+thresholds, and the suite cannot shorten that hold (Known limits); and react's
+strided writes need its pool to take the cluster's stripe whole, which a pool
+does only while its slice count times that stripe is within
+`MaxNvmeTcpCmdBytes` (`architecture.md`, Common validation), a product the
+driver checks at preflight. The numbers that follow from the slice count are
+worked out for react beside the run's, and the dn agents per disk-node guest
+stay the run's. A thin device's size is a whole number of the suite's own
+unit, `MaxDmRaid0StripeSize` per slice, which every stripe a pool stores
+divides, so the sizes do not depend on the stripe the pool takes and keep
+the pool blocks per slice the copy case's skip needs (The cases, copy).
 
 **The placement bound.** A create puts every side on a disk node of its own and
 a scan keeps one disk node per location (`architecture.md`, Per-operation
@@ -392,7 +407,7 @@ infrastructure and the whole of setup, which clears every id the last case
 read; that rebuild is also where the next case's thresholds take effect.
 
 E2E12. **The shell literals mirror named constants and say so.** Every number a
-Go constant owns is repeated beside a comment naming the constant, except six
+Go constant owns is repeated beside a comment naming the constant, except eight
 read from `workerctl constants` at the driver's preflight: `EtcdMaxTxnOps` and
 `EtcdMaxRequestBytes`, which etcd must be started with and which this suite,
 committing the transaction the first is sized by at two cntlrs, short of the
@@ -402,9 +417,15 @@ of the suite stores, from which the cutoff set's primary threshold is derived
 and against which every set's primary threshold is checked; and
 `DefaultPrimaryUnhealthy`
 and `DemotionHoldTimeout`, which the run only prints, the second beside the
-cutoff case's timings. The meta region of the create's data groups, which the
-tree computes rather than names, is mirrored the same way and checked against
-the stored pool once it is created.
+cutoff case's timings; and `DefaultStripeSize`, the stripe every cluster of
+the suite stores, which the react case's stripe also mirrors, the preflight
+holding that copy to the value read, and `MaxNvmeTcpCmdBytes`, which the
+pool's stripe times its slice count and the IO sizes host0 reads are held
+to. The meta region of the
+create's data groups, which the tree computes rather than names, is mirrored
+the same way and checked against the stored pool once it is created; the
+pool's stripe, which its create does not name, is read back and held to the
+narrowing's rule by its properties rather than by a copy of the arithmetic.
 
 ## The cases
 
@@ -424,7 +445,9 @@ not-yet-serving agent causes (`gateway.md` AG3), with its base rows and its
 store row OK and each disk node on its own nvmet port (`dnagent.md` DN5, CM2;
 `cnagent.md` CN5); the create read back field by field — each side on its own
 disk node, each group across guests, the cntlrs on distinct nodes with one
-primary, and the slots (`architecture.md`, cntlid slots); every side
+primary, the slots (`architecture.md`, cntlid slots), and the stripe, the
+cluster's narrowed to the slice count, its product with the slice count
+within `MaxNvmeTcpCmdBytes` (`architecture.md`, Common validation); every side
 provisioned (`architecture.md`, Side provisioning protocol); the primary's
 stack complete and the standby holding legs with no group or pool (`cnagent.md`
 CN10, CN12, CN13), read from the live shape so that a primary role moving under
@@ -432,7 +455,9 @@ the wait is followed and reported; a thin device with its raid0
 (`dnv-worker.md` RW19; `cnagent.md` CN15); and a namespace over it, under a
 subsystem admitting both hosts, that host0 reaches through the cdc, the export
 gate and the connect verdict and sees optimized through the primary and
-inaccessible through the standby (`cnagent.md` CN16). Before any host writes to
+inaccessible through the standby (`cnagent.md` CN16), the optimal IO size and
+the largest request its block layer takes for the namespace's head device and
+both path devices within `MaxNvmeTcpCmdBytes`. Before any host writes to
 the pool, host0 reads the thin device whole as zeros, which dm-thin returns for
 every block no host has written (`architecture.md` [D15]), while each side read
 through its device on its disk node shows how far its zeroing went: a data
@@ -479,14 +504,19 @@ migration and an operator's repairs — and that a clone's copy survives a
 failover, each judged by a record or a device read back. A transfer,
 auto-suspended, parks the origin namespace and carries its identity, so host1,
 the only host connected to it, reads the origin through it (`architecture.md`,
-Transfers; `cnagent.md` CN17). The origin's bitmap is read once the
-primary reports the origin parked, a wait the case polls, and appended as
-the clone's one chunk; the fallback's source, a namespace the clone reads
-through and so never parked, is refused its read and appends none
-(`architecture.md`, Bitmap reads). A clone pulls the origin through the
+Transfers; `cnagent.md` CN17). The origin's bitmap is read, slice by slice,
+once the primary reports the origin parked, a wait the case polls, and the
+bitmaps of every source slice one destination region spans are appended as
+the clone's chunks, one per slice, so that a region a narrowed stripe spreads
+over several slices can still be skipped (`architecture.md`, raid0 bitmap
+math); the fallback's source, a namespace the clone reads through and so
+never parked, is refused its read and appends none (`architecture.md`,
+Bitmap reads). A clone pulls the origin through the
 transfer into a fresh thin device, whose namespace the case creates once the
 copy is whole, through the dm-clone or the raid0 as the worker's pass falls
-(`cnagent.md` CN16's clone rule, CN18); once the primary reports the copy whole
+(`cnagent.md` CN16's clone rule, CN18), host0's IO sizes for it within
+`MaxNvmeTcpCmdBytes` then and again once the clone is gone (`architecture.md`,
+Clones); once the primary reports the copy whole
 the worker latches the clone and drains it with no operator's delete, its log
 holding the latch (`dnv-worker.md` CLD13), the destination namespace staying
 optimized, and with the transfer aborted the destination, read through its own
@@ -578,8 +608,11 @@ repair off the dead legs, so that it cannot race the operator's creates
 other step is the operator's. A second clone's copy survives a failover of the
 primary in its middle (`architecture.md`, Clone metadata durability): its
 source is a second pool's, on a controller node with no cntlr of the case's
-pool, so the failover moves the clone and not its source; host1 writes a few
-MiB at the source's start, which keeps its pool below the mark of auto-grow
+pool, so the failover moves the clone and not its source, one slice of the
+case's pool's stripe, so that the clone stacks to the case's pool's own
+product at every slice count (`architecture.md`, Clones), and host0's IO
+sizes for the destination are read within the bound while it copies; host1
+writes a few MiB at the source's start, which keeps its pool below the mark of auto-grow
 (`dnv-worker.md` AR6), and no bitmap chunk is pushed, so every region is copied
 and no discard on the dm-clone waits for reads of the slowed source
 (`cnagent_integtest.md`, Lab facts); a token bucket on the source's controller
@@ -1164,8 +1197,9 @@ the connect attempted.
   set's cntlr threshold is still shorter than the stretch of rounds a build at
   the ceiling makes count as missed, so there react's build can fail over
   again and again. Hence react builds at most `REACT_SLICE_CAP` slices
-  (Topology and parameters), and its reactions are not exercised at the
-  ceiling, though the cutoff case's failover is. Below the cap its build may
+  (Topology and parameters), which also keeps the cluster's stripe whole for
+  its strided writes, and its reactions are not exercised at the ceiling,
+  though the cutoff case's failover is. Below the cap its build may
   react too, which each reaction's delta from values read just before its
   trigger absorbs (The cases).
 * **The widest build is bounded by the primary's process spawning, not its

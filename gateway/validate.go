@@ -17,20 +17,21 @@ import (
 // read, so a malformed request is refused without touching the store.
 // Validation that depends on stored state — a cntlid slot already in use, an
 // ns_idx already taken, a size that must divide the SP's stripe — is not here;
-// it happens inside the RPC's STM. CreateStoragePool also runs two checks
-// that depend on the cluster it reads: validateBdevConf on the bdev_conf it
-// merges over the cluster's, and validatePrimaryThreshold against the
-// cluster's cntlr_interval — each once over the conf its plain pre-read
-// returned, before its scans, and once more inside its STM. The geometry rules
-// of architecture.md, Common validation, must hold for what the SP stores,
-// and only the merge shows what an omitted member becomes.
+// it happens inside the RPC's STM. CreateStoragePool also runs checks that
+// depend on the cluster it reads: validateBdevConf and the stripe's product
+// (validateMergedBdevConf) on the bdev_conf it merges over the cluster's, and
+// validatePrimaryThreshold against the cluster's cntlr_interval — each once
+// over the conf its plain pre-read returned, before its scans, and once more
+// inside its STM. The geometry rules of architecture.md, Common validation,
+// must hold for what the SP stores, and only the merge shows what an omitted
+// member becomes.
 //
 // The rule for bounded numerics is that of architecture.md, Common validation:
 // a proto3 zero means "unset" and asks for the default, so zero is always
 // accepted here and only a non-zero value outside [Min, Max] is refused.
 // Nothing in this file rewrites a request — the
 // handler resolves an accepted request into the concrete message it stores
-// (model.ResolveClusterConf, model.ResolveBdevConf), which is why validation
+// (model.ResolveClusterConf, model.ResolveSpBdevConf), which is why validation
 // must run FIRST: after resolution every member is non-zero and every bound
 // check below would be a tautology.
 
@@ -486,6 +487,36 @@ func validateBdevConf(conf *pb.BdevConf) error {
 // chunk it computes without overflowing: a 4 GiB one wraps to zero and is
 // refused, and md stores the chunk as a 32-bit byte count anyway.
 const maxMdBitmapChunk = uint64(1) << 30
+
+// validateStripeProduct is the bound of architecture.md, Common validation,
+// on a pool's stripe times its slice count: that product is the optimal IO
+// size the pool's volumes report, a host lets one request grow to it when it
+// is over common.MaxNvmeTcpCmdBytes, and the controller node's kernel refuses
+// a command that carries more. A zero stripe is unset and takes part in no
+// rule. The message names the largest stripe that fits, which model.FitStripe
+// gives a stripe the request does not name. It has two callers:
+// CreateStoragePool on the stripe its request names, before any read, and
+// validateMergedBdevConf (gateway/storagepool.go) on the conf the pool would
+// store. Both run it after validateBdevConf and the slice_cnt bound, so the
+// product cannot overflow.
+func validateStripeProduct(stripe uint64, sliceCnt int) error {
+	if stripe == 0 || sliceCnt < 1 {
+		return nil
+	}
+	product := stripe * uint64(sliceCnt)
+	if product <= common.MaxNvmeTcpCmdBytes {
+		return nil
+	}
+	return errInvalid(
+		"bdev_conf.dm_raid0_conf.stripe_size %d times slice_cnt %d is %d "+
+			"bytes, over %d, the most data one NVMe/TCP command may carry "+
+			"to a controller node: the pool's volumes would report it as "+
+			"their optimal IO size, and hosts would send reads the "+
+			"controller node refuses; the largest stripe_size that fits "+
+			"is %d",
+		stripe, sliceCnt, product, common.MaxNvmeTcpCmdBytes,
+		model.FitStripe(stripe, uint32(sliceCnt)))
+}
 
 // validateEventThreshold checks the four thresholds and their one cross-field
 // rule that reads the request alone (architecture.md, Common validation; the
