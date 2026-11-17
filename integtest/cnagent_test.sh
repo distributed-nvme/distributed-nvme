@@ -3363,6 +3363,27 @@ diag() {
 	return 0
 }
 
+# degrade_diag — what case A's degrade prints when its host write did not
+# block: each md member's state, each nvme controller's state and address,
+# and, on the VM that partitions, the partition rule's packet counters. They
+# tell the stage's two ways to miss apart, which its log could not before: a
+# partition that did not take (no packets counted, the path still live) and
+# a member md had failed before the write (the member faulty, the path still
+# live).
+degrade_diag() {
+	local f ipt
+	for f in /sys/block/md*/md/dev-*/state /sys/block/md*/md/array_state; do
+		[ -e "$f" ] && echo "${f#/sys/block/}: $(cat "$f" 2>/dev/null)"
+	done
+	for f in /sys/class/nvme/nvme*; do
+		[ -e "$f/state" ] &&
+			echo "${f##*/}: $(cat "$f/state" 2>/dev/null) $(tr '\n' ' ' <"$f/address" 2>/dev/null)"
+	done
+	ipt=$(iptables_bin)
+	[ -n "$ipt" ] && "$ipt" -L INPUT -v -n -x 2>/dev/null | grep -F DROP
+	return 0
+}
+
 "$@"
 HELPER_EOF
 }
@@ -4785,8 +4806,11 @@ case_redund() {
 	# is a screen, not a proof (wait_write_blocked says how it can miss):
 	# past it, a partition that did not take is still stopped where the
 	# path must leave `live`, but a member md had failed before it is not.
-	helper "$hv" "wait_write_blocked '$dev' 20" >/dev/null ||
+	if ! helper "$hv" "wait_write_blocked '$dev' 20" >/dev/null; then
+		helper_ok "$hv" degrade_diag
+		helper_ok 1 degrade_diag
 		die "degrade: the background host write never blocked on the dead member"
+	fi
 	kill -0 "$writer" 2>/dev/null ||
 		die "degrade: the background host write completed although DN1's" \
 			"member is partitioned away"

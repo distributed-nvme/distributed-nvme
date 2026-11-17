@@ -416,6 +416,10 @@ once a dead leg's probe has failed enough rounds, a round may also name,
 with the leftover code, a member of that leg md still holds in its place,
 since the early fail would fail it (CN12, CN30); no converge of that stage
 runs, and the round names nothing else.
+The stage first checks that the host write is stuck on the dead member; if
+it is not, the stage prints each md member's state, each controller's state
+and the partition rule's packet counters before it fails, which tell a
+partition that did not take from a member md had failed before the write.
 Once the write completes on the surviving leg, the agent's log holds no mdadm
 command under the stage's trace id, under which each read those rounds start
 logs (`dnagent.md` SH29): that covers every such read that has ended by then,
