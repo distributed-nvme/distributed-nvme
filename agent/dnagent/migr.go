@@ -908,7 +908,9 @@ func (s *DnAgentServer) holdMigrMeta(
 // target reads its metadata device from sector 0 and takes no offset
 // argument (DN13); AllocCloneMeta zeroes a freshly chosen slot's first 8 KiB
 // before its record is persisted, so stale bytes in that slot can never be
-// misparsed as a valid dm-clone superblock.
+// misparsed as a valid dm-clone superblock. A wrapper that reads read-only
+// is reloaded and made writable (makeWritable), as step (2)'s read wants it
+// (migrMetaRead).
 func (s *DnAgentServer) ensureMigrMeta(
 	ctx context.Context,
 	plan *sidePlan,
@@ -943,7 +945,10 @@ func (s *DnAgentServer) ensureMigrMeta(
 	}
 	if !metaWrapperMaps(targets, sectors, devNo, offsetSectors) ||
 		dev.ReadOnly {
-		return s.dm.Reload(ctx, name, table)
+		if err := s.dm.Reload(ctx, name, table); err != nil {
+			return err
+		}
+		return s.makeWritable(ctx, name, dev)
 	}
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)

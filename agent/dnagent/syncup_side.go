@@ -2,6 +2,7 @@ package dnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/bits"
@@ -581,7 +582,10 @@ func (s *DnAgentServer) ensureSideDev(
 
 // ensureSideDm converges the aggregate dm-linear against the record's extent
 // runs, probe-first. It is ensureDmLinear's multi-segment sibling: dmsetup's
-// --table takes one line only, so the table travels through stdin.
+// --table takes one line only, so the table travels through stdin. One that
+// reads read-only is reloaded and made writable (makeWritable), though the
+// side device's row does not read the flag (probeSideDm); a clear that fails
+// is logged, and the step holds.
 func (s *DnAgentServer) ensureSideDm(
 	ctx context.Context,
 	plan *sidePlan,
@@ -609,7 +613,21 @@ func (s *DnAgentServer) ensureSideDm(
 		return err
 	}
 	if !sideDmConverged(targets, runs, devNo) || dev.ReadOnly {
-		return s.dm.ReloadMulti(ctx, name, table)
+		if err := s.dm.ReloadMulti(ctx, name, table); err != nil {
+			return err
+		}
+		// A clear that fails is logged and fails nothing: the devices above
+		// open the side device by its number and their bios only warn, so
+		// the flag stops none of them, only the zeroing of a side still
+		// zeroing (DN9), and the next converge, which finds it read-only
+		// still, clears it again (DN10, A read-only device is made writable).
+		if err := s.makeWritable(ctx, name, dev); err != nil {
+			slog.ErrorContext(ctx, "clearing the read-only flag of a side "+
+				"device failed",
+				slog.String("name", name),
+				slog.String("error", err.Error()))
+		}
+		return nil
 	}
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
@@ -848,7 +866,14 @@ func (s *DnAgentServer) readLinear(
 }
 
 // serves says the dm-linear serves through devNo: live, resumed and
-// writable on it.
+// writable on it. Writable is the converge's test, not the kernel's: the
+// reads, writes and discards of a namespace already enabled over a read-only
+// dm-linear go on, since the block layer only warns, but the read names such
+// a dm-linear and the converge's step for it is a reload and a clear of the
+// flag (makeWritable), a change of the primary's dm-linear that waits for
+// the fence check as any other does (DN10). Until a pass makes it writable,
+// its path counts closed on both channels, so its namespace leaves the
+// optimized group while the fence check or the clear fails.
 func (l linearStand) serves(plan *sidePlan, devNo string) bool {
 	return l.dev != nil && !l.dev.Suspended && !l.dev.ReadOnly &&
 		linearMaps(l.live, plan.sectors, devNo)
@@ -1301,7 +1326,8 @@ func (s *DnAgentServer) ensureDmError(
 // exactly this table reload plus an ana_grpid rewrite — nothing else (DN10).
 //
 // nvmet opens the backing device read-write; dnv never makes any DN device
-// read-only ([D11]).
+// read-only ([D11]). One that reads read-only, which an operator's
+// `blockdev --setro` makes, is reloaded and made writable (makeWritable).
 func (s *DnAgentServer) ensureDmLinear(
 	ctx context.Context,
 	name string,
@@ -1328,7 +1354,10 @@ func (s *DnAgentServer) ensureDmLinear(
 		return err
 	}
 	if !linearMaps(targets, sectors, devNo) || dev.ReadOnly {
-		return s.dm.Reload(ctx, name, table)
+		if err := s.dm.Reload(ctx, name, table); err != nil {
+			return err
+		}
+		return s.makeWritable(ctx, name, dev)
 	}
 	// A device found suspended — one a crash caught mid-reload, or one a
 	// failed reload left suspended on the table that is wanted again (a
@@ -1339,6 +1368,42 @@ func (s *DnAgentServer) ensureDmLinear(
 		return s.dm.Resume(ctx, name)
 	}
 	return nil
+}
+
+// makeWritable ends the reload a converge gives a device it found as dev:
+// one that read read-only has the block layer's own read-only flag cleared
+// (Dm.SetWritable), since dmsetup reads a device read-only while its table's
+// mode or that flag says so, and a reload of a read-write table clears only
+// the first (DN10, A read-only device is made writable). A clear that fails
+// comes back as a writableError, which the caller decides by.
+func (s *DnAgentServer) makeWritable(
+	ctx context.Context,
+	name string,
+	dev *agent.DmDevInfo,
+) error {
+	if !dev.ReadOnly {
+		return nil
+	}
+	if err := s.dm.SetWritable(ctx, s.nf.DmPath(name)); err != nil {
+		return writableError{err}
+	}
+	return nil
+}
+
+// writableError is a clear of a device's read-only flag that failed after
+// the reload before it went through (makeWritable): the device is there,
+// resumed and on the table it wants. Its text is blockdev's error.
+type writableError struct{ err error }
+
+func (e writableError) Error() string { return e.err.Error() }
+
+func (e writableError) Unwrap() error { return e.err }
+
+// onlyClearFailed reports whether err is a failed clear of a read-only flag
+// and nothing else (writableError).
+func onlyClearFailed(err error) bool {
+	var clear writableError
+	return errors.As(err, &clear)
 }
 
 // linearMaps reports whether a live table is the one ensureDmLinear builds

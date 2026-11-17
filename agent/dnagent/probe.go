@@ -268,7 +268,9 @@ func (s *DnAgentServer) probeSideDev(
 }
 
 // probeSideDm compares the live aggregate table against the record's runs —
-// the same comparison the converge pass makes.
+// the same comparison the converge pass makes. It does not read the
+// read-only flag, for which the converge also reloads the device and makes
+// it writable (ensureSideDm, DN10).
 func (s *DnAgentServer) probeSideDm(
 	ctx context.Context,
 	plan *sidePlan,
@@ -585,8 +587,11 @@ func (s *DnAgentServer) probeDmTarget(
 	if dev.Suspended {
 		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
 	}
-	// A read-only dm-linear is not as wanted: its converge reloads it
-	// (ensureDmLinear), and nvmet cannot write through it.
+	// A read-only dm-linear is not as wanted: nvmet refuses to enable a
+	// namespace over it (EACCES), though the reads, writes and discards of a
+	// namespace already enabled over it go on, since the block layer only
+	// warns. Its converge reloads it and makes it writable (ensureDmLinear,
+	// makeWritable).
 	if targetType == "linear" && dev.ReadOnly {
 		return pb.ResStatus_RES_STATUS_ERROR, detailsReadOnly
 	}

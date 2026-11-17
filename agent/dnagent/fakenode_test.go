@@ -239,9 +239,16 @@ type fakeSegment struct {
 }
 
 type fakeDm struct {
-	table     string
-	readOnly  bool
-	suspended bool
+	table string
+	// readOnly is the live table's mode, which a load with --readonly sets
+	// and a resume onto a read-write table clears; bdevReadOnly is the block
+	// layer's own read-only flag of the device, which `blockdev --setro`
+	// sets and only `blockdev --setrw` clears, a reload and a resume leaving
+	// it as it is. dmsetup reads the device read-only while either is set
+	// (readsReadOnly), as kernel 7.0.0-42 does.
+	readOnly     bool
+	bdevReadOnly bool
+	suspended    bool
 	// waiting is the table a `dmsetup reload` loaded and no resume has made
 	// live yet, nil when none waits: dmsetup's inactive table. A resume
 	// makes it live, a `dmsetup clear` drops it, and the attr column shows
@@ -789,8 +796,31 @@ func (f *fakeNode) writeFileDirect(
 	if err := f.cntlidRefusal(path, data); err != nil {
 		return err
 	}
+	if err := f.enableRefusal(path, data); err != nil {
+		return err
+	}
 	f.files[path] = configfsNormalize(path, data)
 	return nil
+}
+
+// enableRefusal models nvmet's enable of a namespace over a read-only
+// device: nvmet_bdev_ns_enable opens "device_path" by path for reading and
+// writing (bdev_file_open_by_path), which refuses a read-only device with
+// EACCES, and the namespace stays disabled. A dm device reads read-only while
+// its table's mode or the block layer's own flag says so (readsReadOnly).
+func (f *fakeNode) enableRefusal(path, data string) error {
+	if !strings.HasSuffix(path, "/enable") || strings.TrimSpace(data) != "1" {
+		return nil
+	}
+	dev := strings.TrimSpace(f.files[parentDir(path)+"/device_path"])
+	if !strings.HasPrefix(dev, "/dev/mapper/") {
+		return nil
+	}
+	dm, ok := f.dms[strings.TrimPrefix(dev, "/dev/mapper/")]
+	if !ok || !dm.readsReadOnly() {
+		return nil
+	}
+	return &fs.PathError{Op: "write", Path: path, Err: syscall.EACCES}
 }
 
 // cntlidRefusal models nvmet's store handlers for a subsystem's cntlid bounds
@@ -1189,8 +1219,40 @@ func (f *fakeNode) dispatch(
 		return f.cmdDmsetup(args, stdin)
 	case "nvme":
 		return f.cmdNvme(args)
+	case "blockdev":
+		return f.cmdBlockdev(args)
 	}
 	return "", 127
+}
+
+// cmdBlockdev is `blockdev --setro|--setrw <path>` of a dm device: the block
+// layer's own read-only flag (fakeDm.bdevReadOnly).
+func (f *fakeNode) cmdBlockdev(args []string) (string, int) {
+	if len(args) != 2 {
+		return "", 1
+	}
+	dm, ok := f.dms[strings.TrimPrefix(args[1], "/dev/mapper/")]
+	if !ok || !strings.HasPrefix(args[1], "/dev/mapper/") {
+		f.dispatchStderr = "blockdev: cannot open " + args[1] +
+			": No such file or directory"
+		return "", 1
+	}
+	switch args[0] {
+	case "--setro":
+		dm.bdevReadOnly = true
+	case "--setrw":
+		dm.bdevReadOnly = false
+	default:
+		return "", 1
+	}
+	return "", 0
+}
+
+// readsReadOnly says dmsetup reads the device read-only: its live table's
+// mode or the block layer's own flag of the device says so, the attr
+// column's "r" and the concise listing's "ro".
+func (dm *fakeDm) readsReadOnly() bool {
+	return dm.readOnly || dm.bdevReadOnly
 }
 
 func (f *fakeNode) children(path string) []string {
@@ -1623,7 +1685,7 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		if dm.suspended {
 			attr[2] = 's'
 		}
-		if dm.readOnly {
+		if dm.readsReadOnly() {
 			attr[3] = 'r'
 		} else {
 			attr[3] = 'w'
@@ -1765,7 +1827,7 @@ func (f *fakeNode) dmInfoListing() string {
 		if dm.suspended {
 			attr[2] = 's'
 		}
-		if dm.readOnly {
+		if dm.readsReadOnly() {
 			attr[3] = 'r'
 		} else {
 			attr[3] = 'w'
@@ -1793,7 +1855,7 @@ func (f *fakeNode) dmTableListing() (string, int) {
 		dm := f.dms[name]
 		_, minor, _ := strings.Cut(f.devNo["/dev/mapper/"+name], ":")
 		flags := "rw"
-		if dm.readOnly {
+		if dm.readsReadOnly() {
 			flags = "ro"
 		}
 		fields := []string{name, "", minor, flags}

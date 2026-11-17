@@ -864,10 +864,12 @@ func TestAFlipInAStoppedDestinationPassOpensOnceTheFenceHolds(t *testing.T) {
 	}
 }
 
-// A read-only dm-linear is not as wanted on either channel: its converge
-// reloads it, and nvmet cannot write through it. The primary's that is
-// read-only on the side device, while another dm-linear's read does not
-// answer, reads alike on the converge and on the read.
+// A read-only dm-linear is not as wanted on either channel: nvmet refuses to
+// enable a namespace over it, though the reads, writes and discards of one
+// already enabled go on, and its converge reloads it and makes it writable.
+// The primary's that is read-only on the side device, while another
+// dm-linear's read does not answer, reads alike on the converge and on the
+// read.
 func TestAReadOnlyPrimaryReadsAlikeOnBothChannels(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, 1, testSide)

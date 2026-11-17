@@ -720,7 +720,9 @@ func (s *DnAgentServer) resumeIfSuspended(
 // the deferred bios fail instead ([D12]).
 //
 // It reports whether the device is now known not to be suspended — absent,
-// never suspended, or retired. A probe that did not answer is none of those.
+// never suspended, or retired, a device whose reload onto its dm-error went
+// through and whose clear of its read-only flag alone failed among them
+// (makeWritable). A probe that did not answer is none of those.
 func (s *DnAgentServer) retireIfSuspended(
 	ctx context.Context,
 	name string,
@@ -757,6 +759,17 @@ func (s *DnAgentServer) retireIfSuspended(
 		if err == nil {
 			err = s.ensureDmLinear(ctx, name, targets[0].Length,
 				s.nf.DmPath(errName))
+		}
+		if onlyClearFailed(err) {
+			// The reload onto its dm-error went through and resumed it, all
+			// this step needs: the flag stops nothing of the teardown that
+			// follows, and the build phase clears it again on a dm-linear
+			// the side still wants (DN6, DN10).
+			slog.ErrorContext(ctx, "clearing the read-only flag of a "+
+				"retired dm-linear failed",
+				slog.String("name", name),
+				slog.String("error", err.Error()))
+			return true
 		}
 	}
 	if err != nil {

@@ -2235,7 +2235,10 @@ descent before L1, as a layer that left something behind does: no layer
 runs, every unwanted object of the scope is named as a leftover, and the
 next pass tries again. In the node-level scope that is every unwanted
 object of the node, so one device below one export that keeps failing
-holds every layer of the node's sweep.
+holds every layer of the node's sweep. A linear whose reload onto its
+dm-error went through is retired even when the clear of its read-only flag
+that follows fails, which is logged: the flag stops nothing of the
+teardown (DN10, A read-only device is made writable).
 
 L1. The `SideToCnNqn` exports and the `MigrSrcNqn` export: an enabled nvmet
 namespace holds its backing device open, and removing the subsystem is what
@@ -2583,7 +2586,10 @@ disk cannot hold (`dnv-worker.md` HL2, AR8).
   `side_dev_info` (`RES_STATUS_ERROR`) and is retried no sooner than
   `DnZeroRetryInterval` later — never a hot loop. While such a failure is
   outstanding `RES_STATUS_ERROR` wins over the matrix's
-  `RES_STATUS_PROVISIONING`; the next successful batch clears it. Partial
+  `RES_STATUS_PROVISIONING`; the next successful batch clears it. A side
+  device an operator set read-only fails every batch, since the kernel
+  refuses a zeroing of a read-only device (EPERM), until a converge clears
+  the flag (DN10, A read-only device is made writable). Partial
   zeros are harmless: `zeroed_bytes` advances only after a batch succeeds,
   so a failed or interrupted batch is zeroed again from the stored count,
   which is also where a restart resumes.
@@ -2682,8 +2688,22 @@ the side but the primary's, the ones the request no longer names
 included, is absent or has every target of its live table on its own
 CN's dm-error, suspended or not. A dm-linear suspended on the side device
 is not fenced, since a resume would let the IO it holds reach the side,
-and a read that did not answer proves nothing. While the check fails the
-primary's step changes nothing that serves (`ensurePrimaryLinear`): an
+and a read that did not answer proves nothing.
+Writable, in the test of a dm-linear that serves, is the converge's test,
+not the kernel's: the reads, writes and discards of a namespace already
+enabled over a read-only dm-linear go on, since the block layer only
+warns (DN10, A read-only device is made writable), but the step for such
+a dm-linear is a reload and a clear of the flag, one of the changes that
+wait for the check. A pass that cannot make it writable, while the check
+fails or when the clear fails, therefore counts its path closed, on the
+converge and on the read alike, and its namespace leaves the optimized
+group although its IO would still go through, until a pass makes it
+writable. Reason: that costs availability only when an operator's
+`blockdev --setro` meets a second fault, a failed clear or another
+dm-linear not proven fenced, and counting such a dm-linear as serving
+would change the fence code for a state only an operator makes.
+While the check fails the primary's step changes nothing that serves
+(`ensurePrimaryLinear`): an
 absent dm-linear is created on the primary's own dm-error, one whose live
 table is there stays there, resumed, unless a reload onto the serving
 device waits on it, and any other is left as it is — one suspended on the
@@ -2720,6 +2740,74 @@ does not answer, the dm-linear can still show the path closed by itself
 — absent, suspended with no table waiting, or live on the primary's own
 dm-error with none waiting — and the namespace then goes inaccessible.
 
+**A read-only device is made writable.** A converge that reloads a device
+of the side because it reads read-only — a per-CN dm-linear, a migration
+source's dm-linear (DN12), a destination's metadata wrapper (DN13) or the
+side device (DN9) — reloads it onto the table it wants and then clears the
+block layer's read-only flag of the device with `blockdev --setrw`
+(`Dm.SetWritable`, `makeWritable`). A device that reads writable gets no
+clear, and a reload that fails runs none. What a clear that fails does
+follows what the flag stops on the device:
+
+* a per-CN or migration source dm-linear: the flag fails the enable of a
+  namespace over it, so the clear is part of its step, and a clear that
+  fails fails the step. The converge's reply names its row with blockdev's
+  error, the read after it names the dm-linear read-only again (DN18), and
+  the worker's re-send on that round reloads it and tries the clear again;
+  the cost lasts only while blockdev keeps failing on a device that is
+  there, a fault of the node.
+* the wrapper: the flag stops nothing dnv does there, since dnv writes its
+  run through the disk, the dm-clone opens it by its number and its
+  metadata bios only warn, but step (2)'s read names a read-only wrapper
+  (DN13), so a clear that fails fails step (2) too, with blockdev's error
+  in the destination's rows (DN18). On the pass the cutover brings, that
+  leaves the dm-clone unbuilt and the migration gap going on until a pass's
+  clear works: each re-send reloads the wrapper and tries the clear again,
+  so the cost lasts only while blockdev keeps failing, a fault of the node.
+  Reason: it is the smallest rule that keeps the two channels alike. A
+  converge that went on past a failed clear would read step (2) as held
+  where the read reads it stopped; the other way, a step (2) that reads the
+  flag on neither channel, changes both channels' step (2) for a case that
+  needs both an operator's flag and a fault of the node.
+* the side device: the devices above it open it by its number and their
+  bios only warn, so a clear that fails is logged and the side device's
+  step holds; the clear alone never closes DN9's gate, and the next
+  converge, which finds the device read-only still, clears it again. Its
+  row does not read the flag (DN18), so the read names nothing for it. On a
+  side still zeroing the flag costs more: the kernel refuses a zeroing of a
+  read-only device (EPERM), so every DN9 batch fails and the row reads
+  `ERROR` with blkdiscard's output, which no verdict names (DN16), and the
+  side does not provision until a converge that comes for another reason
+  clears the flag.
+* a per-CN dm-linear a pass reloads outside its build — the fence's phase 2
+  in a pass that builds no per-CN stack (`settleFence`, DN12), and the
+  sweep's retire and repoint (DN6) — goes through the same step, and there
+  a clear that fails is logged. The retire counts a dm-linear resumed on
+  its dm-error as retired (DN6), and the build phase of a converge that
+  still wants the dm-linear reloads it and clears it again.
+
+No dm-error and no dm-clone is reloaded for the flag, and no read names
+either for it. A dm-error is reached only by the bios device-mapper remaps
+onto it, which the flag does not stop. On a dm-clone the flag fails DN15's
+discards, which the agent sends from its own process (EPERM, logged), each
+after a pause of the side's IO spent for nothing: the copy then also reads
+from the source the regions those discards would have marked. That costs
+copy time and no data, for a state only an operator makes, so no step is
+added for it. Reason for the clear: the flag refuses a user-space write or
+discard to the device node (EPERM), a zeroing of the device in the kernel
+(EPERM), which is how the BLKZEROOUT ioctl and nvmet's Write Zeroes zero,
+and nvmet's enable of a namespace over the device (EACCES); the reads,
+writes and discards that reach the device as bios, those of a namespace
+already enabled over it and those device-mapper remaps onto it, go on,
+since the block layer only warns. dmsetup reads a device read-only while
+its table's mode or the block layer's own flag of the device says so, and a
+reload of a read-write table clears only the first; the lab fact is
+`cnagent.md` CN10's, A read-only device is made writable. dnv never makes a
+device read-only ([D11]); an operator's `blockdev --setro` does, and
+without the clear the read's name of such a device would bring a
+`SyncupSide` on every second round that cures nothing (`dnv-worker.md`
+RW4).
+
 DN11. **`sp_level` gating** (`architecture.md`, SpLevel; numeric
 comparisons — the enum values are ordered). Levels are desired state:
 raising tears layers down, lowering rebuilds them; bitmap chunks stay
@@ -2737,19 +2825,22 @@ The CN-only intermediate levels (`SP_LEVEL_NO_CLONE`,
 either — on the DN, every level below `SP_LEVEL_NO_MIGRATION` behaves like
 `SP_LEVEL_READWRITE`.
 
-**dnv has no DN-side read-only mechanism at all** (`architecture.md`, [D11]). nvmet opens a
-namespace's backing device for reading and writing, so the top device of
-any export can never be read-only; and a read-only flag *below* the top
-does not stop writes that device-mapper remaps onto it, because the
-kernel's check runs at top-level bio submission only. The DN could not fail
-writes even if it wanted to: md superblock and bitmap writes, resync,
-failover assembly and the health-check block writes of `architecture.md`,
-Group on-leg layout: meta region, data region, health block, must keep
-flowing at every read-only level. Per-CN dm-linears and `DnSideName` are
-therefore always writeable, whatever the level. `SP_LEVEL_READONLY` is
-enforced solely on the CN's user-facing namespaces, by reloading each
-`CnNsDevName` onto a dm-flakey table that errors writes (reads pass, writes
-error).
+**dnv has no DN-side read-only mechanism at all** (`architecture.md`,
+[D11]). nvmet opens a namespace's backing device for reading and writing,
+so no export's namespace can be enabled over a read-only top device; and a
+read-only flag does not stop the reads, writes and discards of a namespace
+already enabled over the device, nor the writes device-mapper remaps onto a
+device *below* the top, because the block layer only warns on a bio that
+writes to a read-only device. The DN could not fail writes even if it
+wanted to: md superblock and bitmap writes, resync, failover assembly and
+the health-check block writes of `architecture.md`, Group on-leg layout:
+meta region, data region, health block, must keep flowing at every
+read-only level. dnv therefore never makes a per-CN dm-linear or
+`DnSideName` read-only, whatever the level, and a converge clears an
+operator's flag on them (DN10, A read-only device is made writable).
+`SP_LEVEL_READONLY` is enforced solely on the CN's user-facing namespaces,
+by reloading each `CnNsDevName` onto a dm-flakey table that errors writes
+(reads pass, writes error).
 
 DN12. **Migration source** (`migr_src_conf` set): the three src steps of
 `architecture.md`, Migration, numbered as there and run in the order given
@@ -3764,8 +3855,11 @@ needed, and the worker never turns one into an `err_epoch`
   desired role; on a migration destination, the backing DN13's shared rule
   gives, judged by the dm-clone's presence only where a pass that stopped
   or waits for the cutover cannot read where the stacks are, DN13). A
-  read-only dm-linear reads `RES_STATUS_ERROR`, details "read-only": its
-  converge reloads it. When the primary's dm-linear does not serve
+  read-only dm-linear reads `RES_STATUS_ERROR`, details "read-only":
+  nvmet refuses to enable a namespace over it, though the reads, writes
+  and discards of one already enabled go on, and its converge reloads it
+  and makes it writable (DN10, A read-only device is made writable). When
+  the primary's dm-linear does not serve
   through the side device or the dm-clone, its row is judged by DN10's
   fence check, as the converge judges it: while the check fails it reads
   `RES_STATUS_PENDING`, details "path closed until the fence is proven: "
@@ -3845,7 +3939,10 @@ back on purpose, which the pass reports instead: the per-CN stacks and the
 migration roles above a side device short of ready (DN9, DN10), the
 per-CN stacks of a migration source whose step 3 build failed (DN12), and
 the per-CN stacks of a migration destination whose stopped pass could not
-read where they are (DN13). The rows of a migration destination take
+read where they are (DN13). A failed clear of the side device's read-only
+flag marks no row: it is logged, and `side_dev_info` reads as its other
+checks read (DN10, "A read-only device is made writable"). The rows of a
+migration destination take
 their status from DN13's shared rule, a failed step reading as not held
 with the command's output in their details, and a migration source's
 per-CN dm-linears inside the cutover window from phase 1's test (DN12).

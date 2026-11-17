@@ -4308,7 +4308,8 @@ its pad bits in the middle of the chunk and shift every later bit. So
   validation); failures are captured into the affected resource's
   `ResInfo` as `RES_STATUS_ERROR` with what failed in `details` rather than
   crashing the reconcile — the agent always converges as much as it can
-  and reports the rest. `cnagent.md` CN29 says when a row also carries a
+  and reports the rest; `dnagent.md` DN19 lists the DN's exceptions.
+  `cnagent.md` CN29 says when a row also carries a
   `reason` (Live-state reporting). A DN's metadata area that has no free
   run for a migration is no failure: it is a wait, reported
   `RES_STATUS_PROVISIONING` (Metadata units). The rows of a clone and of a
@@ -6664,12 +6665,22 @@ never by a block-device read-only flag, and never on the DN ([D11]). An
 effectively suspended namespace is exempt at every level: it is parked on
 the td's dm-error and inaccessible (Namespace suspend semantics), so it
 serves no reads to keep and no writes to fail — the CN16 parked rule is
-evaluated above the dm-flakey one. Two kernel facts rule out a bdev flag at
-any layer: nvmet opens a namespace's backing device for both read and write
-("BLK_OPEN_READ | BLK_OPEN_WRITE"), so the top device of an export can
-never be read-only; and a read-only flag **below** the top does not stop
-writes that device-mapper remaps onto it, since "bio_check_ro()" runs at
-top-level bio submission only. The DN, moreover, cannot fail writes at all
+evaluated above the dm-flakey one. Three kernel facts rule out a bdev flag
+at any layer. First, nvmet opens a namespace's backing device for both read
+and write ("BLK_OPEN_READ | BLK_OPEN_WRITE"), and that open fails with
+EACCES on a read-only device, so no namespace can be enabled over a
+read-only top device. Second, the flag fails no read, write or discard that
+reaches the device as a bio, one of a namespace already enabled over it or
+one device-mapper remaps onto it from above: "bio_check_ro()" runs at every
+bio submission, prints a warning once per device and lets the bio through.
+What the flag does refuse is a user-space write or discard to the device
+node (EPERM), a zeroing of the device in the kernel (EPERM), which is how
+the BLKZEROOUT ioctl and nvmet's Write Zeroes command zero, the nvmet enable
+above, and md's add of a member to a running array (EROFS). Third, md starts
+an array over a read-only member read-only, and a read-only array fails
+every write sent to it and makes no superblock, bitmap or resync write of
+its own, so a flag on a member stops the array, not only its users' writes.
+The DN, moreover, cannot fail writes at all
 — md superblock and bitmap writes, resync, failover assembly and the
 health-block writes of Group on-leg layout: meta region, data region,
 health block must keep flowing at these levels — so the DN's behavior below
@@ -7236,13 +7247,16 @@ document and the component documents cite it by its id.
   block-device read-only flag cannot work anywhere in the stack: nvmet
   opens a namespace's backing device for reading and writing, so an
   export's top device fails "echo 1 > namespaces/1/enable" with EACCES when
-  it is read-only; and a read-only flag below the top is bypassed entirely
-  by device-mapper remapping. Nor can the DN fail writes as a substitute:
-  md superblock and bitmap writes, resync, failover assembly and the health
-  probe of Group on-leg layout: meta region, data region, health block must
-  keep flowing at every read-only level. Consequently the DN has **no**
-  read-only behavior at all — every level below `SP_LEVEL_NO_MIGRATION`
-  behaves there like `SP_LEVEL_READWRITE` — and hydration is never paused.
+  it is read-only; and the flag fails no read, write or discard that
+  reaches the device as a bio, from a namespace already enabled over it or
+  from device-mapper remapping onto it from above, since the block layer
+  only warns, once per device (SpLevel). Nor can the DN fail writes as a
+  substitute: md superblock and bitmap writes, resync, failover assembly
+  and the health probe of Group on-leg layout: meta region, data region,
+  health block must keep flowing at every read-only level. Consequently the
+  DN has **no** read-only behavior at all — every level below
+  `SP_LEVEL_NO_MIGRATION` behaves there like `SP_LEVEL_READWRITE` — and
+  hydration is never paused.
 * **[D12] Fencing ends in a table reload onto an error target, and any
   suspension before it is bounded.** A path being decommissioned is taken
   out of service by reloading it onto its dm-error: dm-error's map

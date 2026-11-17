@@ -440,8 +440,9 @@ func (d *Dm) status(ctx context.Context, args ...string) (string, error) {
 
 // Create builds a device from a single-target table. dnv never passes
 // `--readonly`: nvmet opens a namespace's backing device read-write, and a
-// read-only flag below the top of a stack is bypassed by dm remapping anyway,
-// so no dnv device is ever created read-only ([D11]).
+// read-only flag below the top of a stack does not stop the writes dm remaps
+// onto it anyway, since the block layer only warns, so no dnv device is ever
+// created read-only ([D11]).
 func (d *Dm) Create(
 	ctx context.Context,
 	name string,

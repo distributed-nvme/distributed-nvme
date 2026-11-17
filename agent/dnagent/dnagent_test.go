@@ -2838,8 +2838,9 @@ func TestDisableLevelKeepsZeroing(t *testing.T) {
 // TestReadOnlyLevelIsNoOpOnDn pins DN11/[D11]: SP_LEVEL_READONLY — and every
 // CN-only level below SP_LEVEL_NO_MIGRATION — has no DN-side behavior at all.
 // Read-only is enforced on the CN's user-facing namespaces; the DN cannot
-// enforce it (nvmet needs a writeable backing bdev, dm remaps bypass mid-stack
-// read-only flags, and md metadata/resync writes must keep flowing).
+// enforce it (nvmet needs a writeable backing bdev, a mid-stack read-only flag
+// does not stop the writes dm remaps onto it, and md metadata/resync writes
+// must keep flowing).
 func TestReadOnlyLevelIsNoOpOnDn(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -2881,10 +2882,10 @@ func TestReadOnlyLevelIsNoOpOnDn(t *testing.T) {
 		if _, ok := node.dms[sideDevName]; !ok {
 			t.Errorf("%v removed the side device", level)
 		}
-		if node.dms[linName].readOnly {
+		if node.dms[linName].readsReadOnly() {
 			t.Errorf("%v made the dm-linear read-only", level)
 		}
-		if node.dms[sideDevName].readOnly {
+		if node.dms[sideDevName].readsReadOnly() {
 			t.Errorf("%v made the side device read-only", level)
 		}
 	}
