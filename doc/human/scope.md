@@ -268,7 +268,7 @@ the block reads as it did before the write: zeros where nothing was
 written. This is the behaviour of a disk with a volatile write cache, not
 a loss in the sense of this document. A flush that completes although its
 primary died is a defect; section 5.1 has it. So is a durable write lost
-in a failover while the old primary still serves, but for the few cases
+in a failover while the old primary still serves, but for the cases
 section 5.1 lists and accepts.
 
 ## 5. Data loss outside the accepted cases
@@ -291,7 +291,7 @@ the host.
   programs cannot fix this. State: fix later; a change inside dm-thin is
   under test. Read from the kernel's code; not seen in the lab.
 - **A failover while the old primary still serves can lose a write the
-  host was told was done, in a few cases.** Silent. A host still writing
+  host was told was done, in some cases.** Silent. A host still writing
   through the old primary can have a write that lands on one leg of a
   group and fails on another, where the fence came first: md fails that
   other leg and completes the write to the host from the one copy. md then
@@ -312,12 +312,21 @@ the host.
   handed out by a worker that started or took the pool over within the
   three-second hold (section 8), which holds nothing. A disk node does not
   report its fence within that interval, or reports the failover without
-  having fenced, as one whose side device failed does. A leg that md
-  brought back in a lower place after the primary's last report, so the
-  worker fences it before the leg it read as the one md copies from. For
-  the late disk node and the leg brought back, the write is lost only when
-  that fence falls in the few milliseconds after the other leg failed the
-  write and before md recorded the failure. On a meta group the lost write is part of the slice's thin
+  having fenced, as one whose side device failed does. At 32 slices a
+  late disk node is the common case: in the lab, the wait ended at its
+  interval in every failover of a pool of 32 slices, with 15 to 51 of
+  roughly 64 sides it waited for not yet reported, so the worker kept the
+  order only for the groups whose sides reported in time. md brought a leg
+  into sync in a lower place after the primary's last report: a leg the
+  primary put back into the array, or the spare leg a leg repair put in.
+  The worker then fences that leg before the leg it read as the one md
+  copies from. For the late disk node and the leg brought into sync, the
+  write is lost only when, of the two legs, the one md copies from is
+  fenced first. A fence holds the old primary's IO to its leg while the
+  disk node reloads the path. When the other leg's fence comes in that
+  time, after the write landed there, md cannot record the failure on it.
+  That time is short, but it lasts until a later converge when the reload
+  fails. On a meta group the lost write is part of the slice's thin
   pool metadata: the pool comes back as of an earlier commit, and the
   blocks mapped since are gone. On a clone meta group the clone forgets
   parts it had copied and copies them from its source again, over what
@@ -332,8 +341,13 @@ the host.
   the lab, in the e2e suite at 32 slices, with the paths fenced in no
   order, and shown with md alone: each run that began fencing md's first
   member first lost the last completed write, and each run that began it
-  last kept it. State: accepted: each case needs a second fault at the
-  moment of the failover, or an upgrade under way.
+  last kept it. State: accepted. The first three cases need a worker
+  restart, a worker taking the pool over, or an upgrade at the moment of
+  the failover. A disk node that reports without having fenced needs a
+  second fault, and a leg brought into sync needs md to change the array
+  between the primary's last report and the failover. A late disk node
+  needs no fault at 32 slices; whether the wait should grow with the pool
+  is not decided yet.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
@@ -1013,12 +1027,14 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   pre-assembles its arrays.
 - **Hosts still on the old primary's path see IO errors from the fence.**
   The worker hands the old primary its demotion first and holds the sides
-  for three seconds at most. A host that follows the discovery log drops
-  the path inside that hold. The failover writes the demotion into the old
-  cntlr's record, so a worker that restarts or takes the pool over during
-  the failover holds the sides too. A cntlr replacement of the primary
-  holds the sides for the same three seconds, so the old controller node
-  usually tears its stack down first. Three windows remain, all accepted
+  for three seconds at most. It holds the sides of the legs md copies from
+  up to one interval more, 2 seconds at the default (section 5.1). A host
+  that follows the discovery log drops the path inside the three seconds.
+  The failover writes the demotion into the old cntlr's record, so a
+  worker that restarts or takes the pool over during the failover holds
+  the sides too. A cntlr replacement of the primary holds the sides the
+  same way, so the old controller node usually tears its stack down
+  first. Three windows remain, all accepted
   for their IO errors; in each, a write the host was told was done can
   also be lost, in the cases section 5.1 lists. A slow old primary misses the hold. A
   replaced primary whose controller node takes longer than the hold to

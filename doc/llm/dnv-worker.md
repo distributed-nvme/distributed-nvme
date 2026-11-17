@@ -2243,10 +2243,14 @@ primary is failed over inside such a hold whenever AR5 has a candidate, the
 failover's demotion hold ending that sides-first hold (RW22). Every hold
 that takes its set from a load made once the epoch is stamped — its
 fan-out's when it begins, a bump's that replaces its plans, or, when it
-begins as a demotion hold ends, that of the newest plans the demotion hold
-kept (RW22) — leaves the side out, and the bad leg of a repair keeps its
-side's epoch until its finish makes it a retired leg, whose side no hold
-waits for, so a bad leg costs no hold. The
+begins as a demotion hold or a fence round ends, that of the newest plans
+that hold or round kept (RW22, RW24) — leaves the side out, and the bad
+leg of a repair keeps its side's epoch until its finish makes it a retired
+leg, whose side no hold waits for, so a bad leg costs no such hold. RW24's
+fence round is the exception: it waits for every side of a leg md holds in
+sync by the fence readings, whatever its epoch, so a dead disk node's side,
+or a bad leg's, whose leg md still holds in sync costs a failover, or a
+replacement of the primary, the round's bound of one `cntlr_interval`. The
 price of leaving a side out is the narrowing itself: a side the load found
 unhealthy that answers after all is not waited for, and the three races
 above stay open for it. The cost is also paid in normal
@@ -2476,15 +2480,16 @@ fence round ended` (Log records). Reason: a write in flight through an
 old primary that still serves fails on every leg the round fences and
 lands on the fence-last leg, so every write md acknowledged is on that
 leg. md's record of the failed legs then reaches the fence-last leg
-before its fence, which comes only once the round's sides have reported
-theirs, so its event count is the highest and the new primary's start
-takes it; and where a fence cuts that record off all the same, the
+before its fence, so its event count is the highest and the new primary's
+start takes it; and where a fence cuts that record off all the same, the
 superblocks read equal and the start copies the lowest slot, the
 fence-last leg (`architecture.md`, [D16]). md can acknowledge a write
 from any leg it holds in sync, so the round waits for those legs' sides
-whatever their health records say. The round costs a failover the syncup
-round trip of the slowest side it waits for, one `cntlr_interval` at
-most; a round side that does not report within the bound, a side that
+whatever their health records say. The fence-last leg's fence comes once
+the round's sides have reported theirs, or at the round's bound: the
+round costs a failover the syncup round trip of the slowest side it waits
+for, one `cntlr_interval` at most, and a round side not fenced by the
+bound can be fenced after the fence-last leg. Such a side, a side that
 reports the revision without its fence, and the fan-outs with no round
 leave the loss open (Known limits).
 
@@ -6769,10 +6774,14 @@ which no suite case sets, so no suite case runs RW13's count compare.
   reports nothing (RW22). A side whose
   `err_epoch` the fan-out's load holds is not waited for, so a dead disk
   node delays its pool's fan-outs only until its sides' epochs are stamped
-  and loaded, and the side of a repair's bad leg there delays none (AR8);
+  and loaded, and the side of a repair's bad leg there delays none (AR8),
+  save in RW24's fence round, which waits for the side of a leg md holds
+  in sync by the fence readings whatever its epoch, so such a side costs a
+  failover or a replacement of the primary the round's bound of one
+  `cntlr_interval`;
   a side so found that
-  answers after all is not waited for either, and the races the hold
-  narrows stay open for it (RW14). Nor does `sp sides unsynced` count such
+  answers after all is not waited for by the other holds either, and the
+  races the hold narrows stay open for it (RW14). Nor does `sp sides unsynced` count such
   a side, so an alert on that record does not see a dead disk node's sides
   once their epochs are stamped and loaded: their own `err_epoch` reports
   them (HL2).
@@ -6808,13 +6817,21 @@ which no suite case sets, so no suite case runs RW13's count compare.
   side device that failed (`dnagent.md` DN9) or a dm-error that could not
   be built leaves the old primary's dm-linear live, and a later re-send
   fences it. A side of the round that does not report within one
-  `cntlr_interval` is not waited for further. In each case a side can be
-  fenced after the fence-last leg; a write is lost only when that fence
-  falls after the fence-last leg's failed the write and before md's record
-  of that failure reaches the side, a matter of milliseconds, since the
-  start then copies the fence-last leg, which missed the write
-  (`architecture.md`, Known limits, A failover while the old primary
-  serves can lose an acknowledged write). A fence reading older than md's
+  `cntlr_interval` is not waited for further, and on the lab at 32 slices
+  that is the usual case: every copy and cutoff failover of the e2e suite
+  ended its round by the bound, with 15 to 51 of the round's awaited sides
+  not reported, the sides' syncups at that revision converging in a median
+  of 2.5 to 3.1 s and at most 4.8 s, so there the order holds only for the
+  groups whose sides report within one `cntlr_interval`. In each case a
+  side can be fenced after the fence-last leg. A write is lost when that
+  side's fence falls after the write's copy landed on the side and before
+  md's record of the fence-last leg's failure reaches it, since the start
+  then copies the fence-last leg, which missed the write. That window
+  opens when the fence-last leg's fence begins to hold IO and lasts about
+  as long as that fence holds it: its reload, or until a later converge
+  when its load fails (`dnagent.md` DN10; `architecture.md`, Known limits,
+  A failover while the old primary serves can lose an acknowledged write).
+  A fence reading older than md's
   last change is harmless one way and narrows the guard the other way. A
   member md failed since is no longer in sync, so the round fences the leg
   md writes alone, whose writes then fail, and md's record lands on it. A

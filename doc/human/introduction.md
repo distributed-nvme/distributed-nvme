@@ -180,10 +180,14 @@ and thin pools; its legs stay connected. Then the fence: each disk node
 reloads the old primary's path onto an error target and the new primary's
 onto the side device, and moves ANA with them. In each RAID1 group the worker
 fences the leg md copies from last: it tells that leg's disk node only once
-the other legs' disk nodes report their fence done, or after one interval.
-So a write that an old primary still serving completed is on that leg, the
-one the new primary's start of the array copies from, but for the few
-cases [the scope page](scope.md#51-hosts-flushes-and-snapshots) lists. Then the new primary assembles
+the other legs' disk nodes report their fence done, or after one interval,
+2 seconds at the default. The order keeps a write that an old primary
+still serving completed on that leg, the one the new primary's start of the
+array copies from, but only in the groups whose other disk nodes report in
+time. At 32 slices on the lab VMs the wait ran out in most failovers, so
+the order held only for part of the groups.
+[The scope page](scope.md#51-hosts-flushes-and-snapshots) says when a write
+can still be lost. Then the new primary assembles
 the arrays, builds the thin pools and the striped devices, and only then moves
 its namespaces to ANA optimized. In the common case, a dead controller node,
 the host sees a pause, not errors: its IO queues until the new primary moves

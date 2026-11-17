@@ -4775,10 +4775,12 @@ primary's verdict on each repair, keyed by `rep_id`
 (`rep_id_to_repair_info`), with the refusal of a take-back beside it,
 and, keyed by `grp_id` (`grp_id_to_grp_info`), the group's reading:
 whether each group's running array is whole, which legs md holds in
-sync, the refusal of a member's add, and the forced-start mark the
-primary acted on, all only for a group whose row reads `OK`. No health rule reads
+sync and md's slot of each, the refusal of a member's add, the
+forced-start mark the primary acted on, the md check it saw end, and the
+count of bad-block ranges on each member that has one, all only for a
+group whose row reads `OK` (`cnagent.md` CN28). No health rule reads
 them, so they set no `err_epoch`; the sp worker reads them as fields
-(Repair).
+(Repair; The md check; Failover, for the fence round).
 
 ### Bitmap push protocol
 
@@ -5271,9 +5273,12 @@ round's order is part of the write safety ([D16]):
 * **Fence-last legs last.** At the demotion hold's end, in each RAID1
   group, the sides of the fence-last leg — the leg md holds in sync in the
   lowest slot, by the primary's reports — are held until the other sides
-  of the fence round have reported the new revision applied, or for one
-  `cntlr_interval` at most, so that a write md acknowledged is on the leg
-  the new primary's start copies from (`dnv-worker.md` RW24; Failover).
+  the round waits for (those the sides-first hold would wait for, and
+  every side of a leg md holds in sync by those reports, whatever its
+  health record, a retired side aside) have reported the new revision
+  applied, or for one `cntlr_interval` at most, so that a write md
+  acknowledged is on the leg the new primary's start copies from
+  (`dnv-worker.md` RW24; Failover).
 * **Sides first.** The cntlrs' requests are then held until the sides
   `dnv-worker.md` RW14 waits for have reported the new revision applied,
   or for one `cntlr_interval` at most, counted from the end of the fence
@@ -6590,9 +6595,9 @@ show regions copied since as not copied, and dm-clone would copy them from
 the source again over what the hosts wrote there. That gate is the same
 dependency on mdadm's behaviour that [D16] states for every group (Known
 limits), with the same gap: where a fence cuts md's record of a failed
-leg off and the fence round did not fence the fence-last leg last
-(`dnv-worker.md` RW24), the start's resync can copy the stale leg over the
-others, with the same result (Known limits, A failover while the old
+leg off and the leg the start copies from was not the last of the group's
+legs to be fenced (`dnv-worker.md` RW24), the start's resync can copy the
+stale leg over the others, with the same result (Known limits, A failover while the old
 primary serves can lose an acknowledged write); a group without redundancy has one leg
 and no such case.
 
@@ -7985,19 +7990,26 @@ document and only pointed to here.
   by a put-back or a repair's new leg, is fenced in the round, or not
   waited for when its side has a health epoch, while the reading's
   fence-last leg is fenced last. Such a late or reversed fence loses the
-  write only when it falls after the fence-last leg's failed the write and
-  before md's record of that failure reaches the side, which md writes as
-  soon as it fails a member. When the
-  resync copies the leg that missed the write, the write is lost, with no
-  error. The same on a meta group would roll the thin pool back to its
+  write when, of the two legs, the one fenced first is the one the start
+  copies from: its fence holds the write's copy while the copy to the
+  other leg lands, and the other leg's fence then falls before md's record
+  of the first leg's failure reaches it. That window lasts about as long
+  as the first fence holds IO: its reload, or until a later converge when
+  its load fails (`dnagent.md` DN10). The resync then copies the leg that
+  missed the write, and the write is lost, with no error. The same on a
+  meta group would roll the thin pool back to its
   commit before, and on a clone meta group would hand dm-clone metadata
   older than the copy, so dm-clone copies regions from the source again
   over what hosts wrote there (Clone metadata durability; read from the
-  code). Seen in the e2e cutoff case at 32 slices, with the sides fenced in
-  no order, and pinned with md alone on the lab kernel by
-  `integtest/md_fence_order.sh`: every run that began the slot-0 leg's
-  fence first lost the last acknowledged write, and every run that began
-  it last kept it, whichever leg slot 0 was.
+  code). A fan-out with no order loses the write this way, as
+  `integtest/md_fence_order.sh` pins with md alone on the lab kernel:
+  every run that began the slot-0 leg's fence first lost the last
+  acknowledged write, and every run that began it last kept it, whichever
+  leg slot 0 was. On the lab at 32 slices every copy and cutoff failover
+  of the e2e suite ended its round by the bound, with 15 to 51 of the
+  round's awaited sides not reported, so there the order held only for
+  the groups whose sides reported in time (`dnv-worker.md`, Known limits);
+  the cutoff case's fence writer lost no acknowledged write in those runs.
 * **md's assembly behaviour is pinned in the lab only.** The cross-leg
   half of failover safety ([D16], "Make sure all groups are available")
   rests on mdadm refusing to start an array from a lone survivor whose

@@ -5266,8 +5266,9 @@ stores instead is CN23's.
   the namespace row `OK` (CN28). The first CN10 retry attempt after those
   flips have reached this CN builds the stack, puts the ns-devs on the
   raid0 and moves the namespaces to optimized (`architecture.md`,
-  Failover). So the pause runs past the demotion hold by the sides-first
-  hold's wait (`dnv-worker.md` RW14), the promotion's own converge, one
+  Failover). So the pause runs past the demotion hold by the fence round's
+  wait, when one runs (`dnv-worker.md` RW24), the sides-first hold's wait
+  (`dnv-worker.md` RW14), the promotion's own converge, one
   `CnConnectRetryInterval` and the converge of the attempt after it, more
   when the ANA flips reach this CN only after that attempt has begun; each
   converge grows with the slice count.
