@@ -1288,7 +1288,7 @@ this document relies on:
 | `Repair` | {p} repair {cluster_id} {sp_id} {rep_name} | its new leg embedded, with its side; listed in `SpConf.repair_name_list` and named by its group's `rep_name` (Repairs) |
 | `RetiredLeg` | {p} retired_leg {cluster_id} {sp_id} {leg_id} | keyed by the leg's own id, its side embedded; listed in `SpConf.retired_leg_id_list` and in its group's `retired_leg_id_list` (Retired legs) |
 | `SpName` | {p} sp_id_to_name {cluster_id} {sp_id} | reverse lookup for admin and log analysis; needed because `SpRev`, which also carries `sp_name`, can only be addressed with the SP's shard code [D10] |
-| `WorkerReg` | {p} worker {role} {seed} | the worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `--vote-interval`, whose default is `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or by peers once committed dead (Membership and shard ownership; `dnv-worker.md` VW2, VW4, VW6 and CM5); the gateway's `ListWorkers` reads the whole registry for the operator (Worker registry) |
+| `WorkerReg` | {p} worker {role} {seed} | the worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `--vote-interval`, whose default is `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or fence, or by peers once committed dead (Membership and shard ownership; `dnv-worker.md` VW2, VW4, VW6, VW8 and CM5); the gateway's `ListWorkers` reads the whole registry for the operator (Worker registry) |
 
 An **invariant key** is one the data model guarantees present while its
 parent exists: the rev keys, the globals, the record of every object a
@@ -1491,11 +1491,13 @@ read stays authoritative.
 ### UNEXPECTED_ERROR → `ABORTED`
 
 The catch-all `ABORTED` covers STM-client errors (not app logic inside the
-STM), protobuf (de)serialization errors and etcd connection errors, plus the
-specific `ABORTED` cases listed per RPC (missing invariant keys, agent RPC
-failures where specified, stale revision tokens). A **stored** conf that
-fails the stored-conf validators (`gateway.md`, The handler pattern)
-belongs here too: it is a lost invariant like a missing key, never
+STM), protobuf (de)serialization errors — save in `ListWorkers`, which
+lists a registration whose value does not decode (Worker registry) — and
+etcd connection errors, plus the specific `ABORTED` cases listed per RPC
+(missing invariant keys, agent RPC failures where specified, stale revision
+tokens). A **stored**
+conf that fails the stored-conf validators (`gateway.md`, The handler
+pattern) belongs here too: it is a lost invariant like a missing key, never
 `INVALID_ARGUMENT`, because nothing about the request is wrong. A merged
 `bdev_conf` that breaks a geometry rule of Common validation is the
 request's `INVALID_ARGUMENT` all the same, even where the member that
@@ -1923,8 +1925,10 @@ harmless. A migration destination takes its run before it zeroes
   **request**: a non-zero value outside its bounds is rejected, while a
   proto3 zero is always accepted — it means "unset" and asks for the
   default, which the create RPC substitutes once and for all (the resolution
-  rule below, which also names the two stored messages it exempts). The list
-  `count` is different: it reaches no create RPC and is stored nowhere — the
+  rule below, which also names the two stored messages it exempts), save
+  `md_check_conf.interval_days`, whose zero in a present message turns the
+  md check off (below). The list `count` is different: it reaches no
+  create RPC and is stored nowhere — the
   paged list RPCs resolve it per request, cut one page with it and throw it
   away (page_token; `gateway.md` GW4). The bounds and the defaults are
   constants of `common/constants.go`, save the stripe's default, which
@@ -2067,7 +2071,8 @@ harmless. A migration destination takes its run before it zeroes
   a zero still means "give me the default", and only the accepted request
   is resolved — resolving first would make every bound check a tautology.
 * A zero read back **out of** etcd is therefore invalid, not "unset".
-  Every reader refuses the object rather than substituting: the gateway
+  Every reader refuses the object rather than substituting (the next
+  bullet's exempt messages and an `md_check_conf` zero aside): the gateway
   with `ABORTED` (UNEXPECTED_ERROR → `ABORTED`), the worker by skipping that
   object's pass (one Error record, nothing sent, retried next round;
   `dnv-worker.md` RW9, RW14 and AR1), an agent by refusing the `Syncup*`
@@ -2076,9 +2081,10 @@ harmless. A migration destination takes its run before it zeroes
   of failing, and a stored zero pins the geometry to whatever default the
   **reading** binary carries — so changing a constant would re-geometry
   live storage pools and move the bin ladder every capacity key was written
-  under (DN bins). There is no compatibility shim: a cluster whose stored
-  conf holds zeros is refused loudly and must be recreated.
-* Three stored messages are deliberately exempt, because they are policy
+  under (DN bins). There is no compatibility shim, `md_check_conf` aside
+  (next bullet): a cluster whose stored conf holds zeros is refused loudly
+  and must be recreated.
+* Two stored messages are deliberately exempt, because they are policy
   timers and knobs rather than geometry — nothing is formatted or addressed
   with them: `EventThreshold` is stored exactly as sent (so an operator
   reads back what they asked for) and resolved member-wise when read
@@ -2086,9 +2092,12 @@ harmless. A migration destination takes its run before it zeroes
   sent too — the sp worker resolves a migration's as it builds the
   `SyncupSide` request (`dnv-worker.md` RW15), while a zero in a clone's
   simply leaves the dm-clone target's own default in place (Clones).
-  A third, `md_check_conf`, is a policy knob too: its zero, or its
-  absence in a conf a build before the md check stored, means no check
-  (The md check).
+  `md_check_conf` is a policy knob too, but not exempt: `CreateCluster`
+  resolves it, an absent one to `DefaultMdCheckDays` and a present one as
+  given, its zero included (`gateway.md` GW11). Its read differs as well:
+  its zero, or its absence in a conf a build before the md check stored,
+  is no corruption but no check (The md check), and the stored-conf
+  validator refuses only a value above `MaxMdCheckDays`.
 * `CmdSoftTimeout` and `CmdHardTimeout` bound the shell commands an agent
   runs, a child blocked in an uninterruptible kernel wait aside. A command
   they end did not answer: its resource reports `RES_STATUS_ERROR` with
@@ -2165,7 +2174,8 @@ STM creates `ClusterConf` (the **resolved** members plus the stamped
 first `next_id` with every `shard_bucket` entry zero (Globals: id
 allocation + shard buckets). Reply `cluster_id`. Nothing downstream
 resolves again: a zero read back out of this key is corruption and is
-refused, not substituted (Common validation).
+refused, not substituted, save an `md_check_conf` zero, which means no
+check (Common validation).
 `ClusterConf` is **write-once**: `qos_ratio`, `bdev_conf`, `dn_bin_conf`,
 `alloc_conf`, `health_check_conf` and `md_check_conf` can only be set here — no RPC updates
 a `ClusterConf`, deliberately; changing them means creating a new
@@ -2277,7 +2287,7 @@ not decode as `WorkerReg` is listed with an empty one, whose epoch is zero:
 the vote layer counts every key its scan finds, whatever the value holds
 (`dnv-worker.md` VW3), so such a key keeps its worker in every observer's
 view and the listing shows it. Not paged: the registry holds one key per
-worker process and role.
+worker incarnation (seed) and role.
 The listing is not any worker's effective membership and says nothing of
 which worker owns which shard. Membership is each worker's own view, into
 which a change is committed only after it has held for a grace window
@@ -3658,7 +3668,10 @@ which the group's `rep_name` lets the transaction check without a scan —;
 `NOT_FOUND` when the bad leg is not in the
 group's `leg_list`; `FAILED_PRECONDITION` when the bad leg has two sides
 (a migration holds the leg), or when its `err_epoch` is zero, the message
-saying to use a migration: a healthy leg is moved, not repaired. Then,
+saying to use a migration: a healthy leg is moved, not repaired — save a
+worker's repair whose create says it repairs the leg for md's bad-block
+ranges, which the primary's reading names and no record holds (The md
+check; `dnv-worker.md` MD6). Then,
 for a new leg from a retired leg: `FAILED_PRECONDITION` for a worker's
 repair, which always takes a fresh new leg, since md writes onto the new
 leg, so taking a retired leg back writes over its kept copy, and only an
@@ -5051,11 +5064,10 @@ role it carries, keeps its registration (`WorkerReg`, Key table) refreshed
 every vote interval and watches the registry of that role; an observer
 judges a registration live or dead by its own clock since the put it last
 saw, never by the stored epoch, and commits a change into its **effective
-membership** only once the change has held for its grace time — a join's,
-or a leave's, by default the shorter, so that a dead worker's shards are
-driven again sooner — so a flapping worker never becomes effective and never blocks
-others
-(`dnv-worker.md` VW3, VW5). Per role and shard the effective member with
+membership** only once the change has held for its grace time, a join's
+or a leave's; a leave's is the shorter by default, so that a dead worker's
+shards are driven again sooner. A flapping worker thus never becomes
+effective and never blocks others (`dnv-worker.md` VW3, VW5). Per role and shard the effective member with
 the largest ticket — a hash of its seed, the role and the shard code —
 owns the shard: deterministic on every worker, no coordinator, and a
 membership change moves only the shards whose winner changed
@@ -5109,11 +5121,13 @@ is resolved by reading the `DnConf` or `CnConf` at the record's endpoint
 demotion hold and the sides-first hold, and neither is a correctness
 dependency ([D16]):
 
-* **Demotion first.** A fan-out that makes a primary a standby — in
-  production only a failover does, on either of its triggers — hands that
-  cntlr its demotion at once, and holds every side request and every other
-  cntlr request until the demoted cntlr has reported the new revision
-  applied, or for `DemotionHoldTimeout` at most (`dnv-worker.md` RW22).
+* **Demotion first.** A fan-out that demotes a primary — in production
+  one that follows a failover, on either of its triggers, which makes the
+  primary a standby, or a cntlr replacement of the primary, which deletes
+  it (below) — hands a cntlr it makes a standby its demotion at once, and
+  holds every side request and every other cntlr request until each
+  demoted cntlr has reported the new revision applied, or for
+  `DemotionHoldTimeout` at most (`dnv-worker.md` RW22).
   The failover's transaction writes its revision into the old primary's
   record (`Cntlr.demoted_revision`), so a worker that takes the pool over,
   or restarts, during the failover runs the same hold, and the hold's end
@@ -5130,10 +5144,12 @@ dependency ([D16]):
 
 A cntlr replacement of the primary deletes the old cntlr, whose stack goes
 with its CN's `SyncupCn` (dn / cn roles), so the sp role has no request to
-hand that cntlr first; its fan-out still holds the sides and the other
-cntlrs for `DemotionHoldTimeout`, so that the old CN's teardown usually
-comes before the sides fence it (`dnv-worker.md` RW22). A replacement of a
-standby holds nothing more than the sides-first hold.
+hand that cntlr first and nothing reports for it; its fan-out still holds
+the sides and the other cntlrs for the whole `DemotionHoldTimeout`, so that
+the old CN's teardown usually comes before the sides fence it
+(`dnv-worker.md` RW22). A replacement of a standby holds nothing more than
+the sides-first hold, unless it comes during a demotion hold, which holds
+it like any other fan-out.
 
 Bitmap chunks travel over the dedicated `PushCloneBitmap` and
 `PushMigrBitmap` calls instead of the `Syncup*` requests (Bitmap push
@@ -5258,28 +5274,35 @@ The four reactions:
   primary still holds the sides for the demotion hold's time (sp role).
 * **Leg repair** (`dnv-worker.md` AR8): a leg of a slice's group or of a
   clone's clone meta group unhealthy for `leg_unhealthy`, or unhealthy
-  while its side has been unhealthy for `side_unhealthy`, gets a worker's
-  repair (Repair) with a fresh new leg, by an internal `CreateRepair`, while
-  the group's array runs, another leg of the group is healthy and held in
-  sync, the group has no repair, no forced-start mark stands on it (Repair,
-  Forced start) and its `operator_in_charge` flag is clear (Repairs), since
-  the operator is acting on the group then.
-  The worker then drives its own repair:
-  it finishes it once the primary has reported it started, tries to abort
-  it while it is CREATED when its bad leg reads healthy again or its new leg
-  or another leg of the group stays unhealthy on the same clocks, and
-  cancels it once aborted; each of those steps, like the create, is the
-  pass's one action. A group with an operator's repair is left to it,
-  since a group has one repair at a time (Repairs); a pass that would
-  otherwise create a worker's repair for the group logs the wait. A bad
-  leg with two sides, a migration's, gets its migration ended first in its
-  safe direction: cancelled while its cutover is pending, finished once
-  the destination's latest report shows its copy whole, with the same
-  transaction as the gateway's `CancelMigration` and `FinishMigration`
+  while its side has been unhealthy for `side_unhealthy`, or a leg md
+  records bad-block ranges on while another leg of the group is clean —
+  with no health epoch, held in sync and with no ranges (The md check) —
+  gets a worker's repair (Repair) with a fresh new leg, by an internal
+  `CreateRepair`, while the group's array runs, another leg of the group is
+  healthy and held in sync, the group has no repair, no forced-start mark
+  stands on it (Repair, Forced start) and its `operator_in_charge` flag is
+  clear (Repairs), since the operator is acting on the group then. The
+  worker then drives its own repair: it finishes it once the primary has
+  reported it started; it tries to abort it while it is CREATED when its
+  bad leg reads healthy again, or when its new leg or another leg of the
+  group stays unhealthy on the same clocks; and it cancels it once aborted.
+  The bad leg's return asks for the abort only in a pass whose primary's
+  report reads the group's array running at the revision the pass read or
+  later, and never for a leg repaired for its bad-block ranges while a
+  clean leg stands. Each of those steps, like the create, is the pass's one
+  action. A group with an operator's repair is left to it, since a group
+  has one repair at a time (Repairs); a pass that would otherwise create a
+  worker's repair for the group logs the wait. A bad leg with two sides, a
+  migration's, gets its migration ended first in its safe direction:
+  cancelled while its cutover is pending, finished once the destination's
+  latest report shows its copy whole, through the same write as the
+  gateway's `CancelMigration` and `FinishMigration`, `model.EndMigrationIn`
   (Migrations); after a cutover whose copy is not shown whole the worker
   does neither and logs why (Known limits). The next pass repairs a leg of
-  one side. No reaction starts a migration (`dnv-worker.md`, Automatic
-  reactions — `worker/reaction.go`).
+  one side. A leg that needs repair only for its bad-block ranges still
+  serves, so its migration runs on and its repair waits for the migration's
+  end. No reaction starts a migration (`dnv-worker.md`,
+  Automatic reactions — `worker/reaction.go`).
 
 The worker never deletes user data on its own (`dnv-worker.md` AR9): the
 retire timer, a step of the pass and no reaction, deletes a retired leg
@@ -5444,14 +5467,16 @@ What is left is an old primary still on a host's path at the fence that has
 not applied its demotion: a path nothing following the discovery log
 manages, a path the Kubernetes driver keeps while its node holds no path to
 a listed cntlr that shows the volume's namespace, a discovery view a cdc
-instance keeps stale, a demotion its agent cannot apply within the demotion
-hold. A replacement of the primary fanned out by a worker that has just
-started fences an old primary that still serves (Known limits). Its md arrays
-fail once the sides have fenced its legs ([D16], whose write-safety the
-paragraph above explains), and the errors nvmet returns on the
-still-optimized path are target-internal (DNR), not path errors — host
-multipath does **not** retry them on the new primary's path, so applications
-can see IO errors until the old primary applies its demotion or is stopped.
+instance keeps stale, or a demotion its agent cannot apply within the
+demotion hold. A primary that a cntlr replacement deleted is in the same
+place, with no demotion to apply, when its CN's teardown outlasts the
+demotion hold or the pool's coordinator changes before that hold ends
+(Known limits). The md arrays of such an old primary fail once the sides
+have fenced its legs ([D16], whose write-safety the paragraph above
+explains), and the errors nvmet returns on the still-optimized path are
+target-internal (DNR), not path errors — host multipath does **not** retry
+them on the new primary's path, so applications can see IO errors until
+the old primary applies its demotion, tears its stack down or is stopped.
 [D16] records why that residue is accepted.
 
 #### "Make sure all groups are available"
@@ -5857,8 +5882,10 @@ the other parts rely on this much of them.
   fails the bad leg only in a pass where the new leg can follow at once; a
   bad leg that is dead it fails earlier and keeps in the array, as any
   `leg_list` member (`cnagent.md` CN12, The early fail). It never fails a
-  bad leg that still serves with an `OK` leg row, so such a repair waits in
-  CREATED (Known limits).
+  bad leg that still serves with an `OK` leg row, save one whose member
+  carries md bad-block ranges while another `leg_list` member md holds in
+  sync carries none (`cnagent.md` CN12, The md check); any other such
+  repair waits in CREATED (Known limits).
 * While the repair is CREATED or STARTED, no add and no put-back takes the
   bad leg back into the array. An assembly can still take it in; md then
   lets go of it only through the add, in the pass that adds the new leg,
@@ -6149,8 +6176,10 @@ itself holds to (`dnv-worker.md` AR16, MD6); the
 primary starts md's check, md runs it at md's own speed settings, and the
 primary reports the request done once md ran the check to its end, and
 starts again a check md stopped (`cnagent.md` CN12, The md check); the
-worker then ends the request and sets the group's next time. md's check rewrites from another member a sector one member cannot
-read: a rewrite that lands heals the sector, and one that fails records a
+worker then ends the request and sets the group's next time, as it does
+for a request that has stood `MdCheckRequestBound`; the schedule runs only
+where reactions run (`dnv-worker.md` AR16). md's check rewrites from
+another member a sector one member cannot read: a rewrite that lands heals the sector, and one that fails records a
 bad-block range on the member, which the primary's reading of the group
 counts, so leg repair replaces that leg from a leg clean of such ranges;
 the leg's row stays as its probe reads it, so no health rule sees the
@@ -6510,7 +6539,7 @@ and the data plane goes on serving what it last applied:
   connection broke or the budget ended.
 * **A worker** fences itself once its heartbeat has not reached etcd for as
   long as `dnv-worker.md` VW8 tolerates, and then drives nothing until one
-  grace window after its first put lands again (`dnv-worker.md` VW7); a
+  join grace window after its first put lands again (`dnv-worker.md` VW7); a
   worker whose heartbeat lands again sooner, such as over a leader
   election, does not fence. No health epoch, flip, reaction or drain step
   can commit meanwhile, so a fault meets no reaction: a primary that fails
@@ -6524,7 +6553,7 @@ When etcd answers again, each program comes back by itself once its own etcd
 client has reconnected, on that client's own schedule, and no operator step
 is needed. The gateway answers its next call. The cdc resumes its watch, or
 rescans and sends an AEN to every host whose view moved (`cdc.md` DS10). A
-worker that fenced drives again no sooner than one grace window after its
+worker that fenced drives again no sooner than one join grace window after its
 new seed's first successful put (`dnv-worker.md` VW7), and an incarnation
 that started while etcd was away can fence once more first
 (`dnv-worker.md` VW8). Once it drives, it opens every check stream afresh
@@ -7299,7 +7328,8 @@ document and the component documents cite it by its id.
   keep theirs, undetected; the epoch in the value is therefore
   informational. The costs, all accepted: a key a
   scan finds untracked needs a whole dead threshold before it can be
-  declared dead; a fresh worker drives nothing for its first grace window;
+  declared dead; a fresh worker drives nothing for its first join grace
+  window;
   ownership changes overlap or gap by a few seconds across workers, safe
   for the reasons and within the bounds of `dnv-worker.md` VW7; and dead
   keys are garbage-collected by their observers instead of expiring — which
@@ -7488,11 +7518,11 @@ document and only pointed to here.
   carries needs_check — dm-thin sets it after a failed metadata operation —
   reads `RES_STATUS_ERROR` with `RES_REASON_POOL_NEEDS_CHECK` (`cnagent.md`
   CN13), which no failover cures, since every node that opens the pool
-  reads the flag on its metadata (`dnv-worker.md` HL2). Metadata corrupt
-  past the open fails the pool's build on every primary, a row of the
-  cntlr's own with no reason, and corruption found while the pool runs,
+  reads the flag on its metadata (`dnv-worker.md` HL2). Metadata so
+  corrupt that dm-thin cannot open the pool fails the pool's build on every
+  primary, a row of the cntlr's own with no reason, and corruption found while the pool runs,
   whose needs_check write fails, reads `RES_REASON_POOL_FAILED`; either way
-  each primary meets it again, and only `dnv-worker.md` AR5's and AR7's
+  each primary that reads the corrupt metadata meets it again, and only `dnv-worker.md` AR5's and AR7's
   second refusals bound the failovers and replacements it costs. Each is an
   operator-intervention event (the pool's level raised to stop its thin
   pools, "thin_check", then "thin_repair" onto fresh space, or the flag
@@ -7704,8 +7734,8 @@ document and only pointed to here.
   mismatches.** The legs of a data group or of a clone meta group are
   never zeroed past their first data block, so they may differ wherever
   the pool or the clone's dm-clone has not written ([D15]), and an md
-  "check" of the array, dnv's own (The md check) or a distribution's
-  periodic scrub, reports mismatches there. They are harmless, since
+  "check" of the array, dnv's own on a slice's group (The md check) or a
+  distribution's periodic scrub of any group, reports mismatches there. They are harmless, since
   neither the pool nor the dm-clone reads a block it has not written
   through the array (`cnagent.md` CN12), and no rule reads the count.
 * **Writes to a group wait out the keep-alive when a disk node dies, and
@@ -7789,17 +7819,20 @@ document and only pointed to here.
   to a level that builds no group device, waits in CREATED until the array
   runs, which an operator's forced start can bring about (Repair, Forced
   start), and an abort of it is confirmed only then, since only a running
-  array gives a verdict (Repair). A repair whose bad leg md still
-  holds in its place, serving with an `OK` leg row, waits in CREATED too,
-  until it is aborted: an operator's by the operator, and a worker's by the
-  worker once the bad leg's health epoch clears (`dnv-worker.md` AR8). A
-  bad leg that md holds out of its place,
-  as after md failed it, or does not hold, as after an assembly left it
-  out, holds the repair back in no way: the add removes it if md holds it
-  and adds the new leg, even when the bad leg reads healthy again
-  (`cnagent.md` CN12). Meanwhile a waiting repair is the group's one
-  repair, and the worker's leg repair creates no other for the group
-  (`dnv-worker.md` AR8).
+  array gives a verdict (Repair). A repair whose bad leg md still holds in
+  its place, serving with an `OK` leg row, waits in CREATED too, until it
+  is aborted: an operator's by the operator, and a worker's by the worker
+  once the bad leg's health epoch clears, in a pass whose primary's report
+  reads the group's array running at the revision the pass read or later
+  (`dnv-worker.md` AR8). The one exception is a bad leg whose member
+  carries md bad-block ranges while another `leg_list` member md holds in
+  sync carries none: the primary fails it out for the new leg (`cnagent.md`
+  CN12, The md check). A bad leg that md holds out of its place, as after
+  md failed it, or does not hold, as after an assembly left it out, holds
+  the repair back in no way: the add removes it if md holds it and adds the
+  new leg, even when the bad leg reads healthy again (`cnagent.md` CN12).
+  Meanwhile a waiting repair is the group's one repair, and the worker's
+  leg repair creates no other for the group (`dnv-worker.md` AR8).
 * **A retired leg taken back is copied whole unless the array stayed
   degraded.** md catches a returning member up from its write-intent
   bitmap only while the array has stayed degraded since the member left;
@@ -8068,16 +8101,17 @@ document and only pointed to here.
   is never dropped or A cdc address an old attach named can hold every path
   drop on a host, above, or one whose discovery-log follower drops the path
   later than the demotion hold ends (Failover).
-* **A cntlr replacement of a serving primary can fence it first.** A
-  replacement deletes the cntlr it replaces, so its fan-out starts no
-  demotion hold and keeps the sides-first order (`dnv-worker.md` RW14,
-  RW22). When the replaced cntlr is a primary that still serves — the
-  sole-primary replacement of Automatic reactions — its sides drop its
-  exports in no order with its CN's teardown of its stack, which the CN
-  learns of from its own node's syncup, and until that teardown it answers
-  IO errors on its still-optimized path to every host still on it. The case
-  needs a pool with no failover candidate; the replacement's path comes with
-  its build. A node of the Kubernetes driver keeps the old primary's path
+* **A cntlr replacement of a serving primary can still fence it first.** A
+  replacement deletes the cntlr it replaces, so that cntlr gets no
+  demotion; the replacement's fan-out holds the sides and the other cntlrs
+  for `DemotionHoldTimeout`, which no report ends (`dnv-worker.md` RW22),
+  so that its CN, which learns of the replacement from its own node's
+  syncup, usually tears its stack down first. A teardown slower than that
+  bound, or a coordinator that changes before the hold ends (below), lets
+  the sides drop its exports first, and until that teardown it answers IO
+  errors on its still-optimized path to every host still on it. The case
+  needs a pool with no failover candidate — the sole-primary replacement
+  of Automatic reactions; the replacement's path comes with its build. A node of the Kubernetes driver keeps the old primary's path
   until the replacement's path shows the volume's namespace (`csi.md`
   CSI15), so its IO can meet those errors until that teardown, or until the
   node drops the old path, which it does once the replacement's path shows
@@ -8122,26 +8156,38 @@ document and only pointed to here.
   (Clones), so only a forced delete of a clone still copying can see IO
   errors on its destination until the primary's next converge removes the
   dm-clone.
-* **A migrating leg whose destination dies after the cutover, before its
-  copy is whole, keeps its group one leg short** (`dnv-worker.md` AR8 and
-  Known limits). The primary cuts the leg's other path (`cnagent.md` CN10),
-  so md fails the member and the group serves on its other legs, but
-  neither side alone is the leg then: the source misses the writes since
-  the cutover, and the destination the blocks not yet copied, which hold
-  old bytes on its disk. The worker neither cancels nor finishes, and logs
-  why; the group stays one leg short until the destination returns and the
-  copy goes on, or an operator ends the migration, whose force costs what
-  CancelMigration and FinishMigration say.
-* **A replacement of the primary fanned out by a worker that has just
-  started can fence the old primary first** (`dnv-worker.md` RW22 and
-  Known limits). A replacement deletes the old cntlr and leaves no record
-  of it, so a worker that restarts, or takes the pool over, before it has
-  fanned the replacement out tells the sides at once, and they can fence
-  the old primary while it still serves; until its CN tears its stack
-  down, it answers IO errors on its still-optimized path to every host
-  still on that path. A failover has this window only when a replacement
-  deletes its old primary inside the demotion hold and the worker changes
-  then; otherwise the old primary's record names the demotion.
+* **A migrating leg whose serving side dies waits without limit where
+  nothing else of its group is in sync, and one whose destination dies
+  after the cutover, before its copy is whole, keeps its group one leg
+  short** (`cnagent.md` CN10; `dnv-worker.md` AR8 and Known limits). In an
+  md-raid1 group where md holds another member in sync, the primary cuts
+  the leg's other path (`cnagent.md` CN10), so md fails the member and the
+  group serves on its other legs. Where it does not cut — a `RedundNone`
+  group, which leg repair never touches (`dnv-worker.md` AR9), or one with
+  no other member in sync — a write to the leg waits on the live
+  inaccessible path until the serving side returns, on a kernel that
+  counts such a path (`cnagent.md` CN10). When the destination dies after
+  the cutover, before its copy is whole, neither side alone is the leg:
+  the source misses the writes since the cutover, and the destination the
+  blocks not yet copied, which hold old bytes on its disk. The worker
+  neither cancels nor finishes, and logs why; the group stays one leg
+  short until both sides answer and the primary puts the leg back, the
+  copy then going on to its end (`cnagent.md` CN12), or until an operator
+  ends the migration, whose `force` costs what `CancelMigration` and
+  `FinishMigration` say (Migrations).
+* **A replacement of the primary can fence the old primary first when the
+  pool's coordinator changes during its demotion hold**
+  (`dnv-worker.md` RW22 and Known limits). A replacement deletes the old
+  cntlr and leaves no record of it, and a coordinator that has just
+  started has no child of it, so when the pool's coordinator restarts, or
+  the pool's shard changes owner, after a replacement of the primary and
+  before that fan-out's demotion hold has ended, the new coordinator tells
+  the sides at once, and they can fence the old primary while it still
+  serves; until its CN tears its stack down, it answers IO errors on its
+  still-optimized path to every host still on that path. A failover has
+  this window only when a replacement deletes its old primary inside the
+  demotion hold and the pool's coordinator changes before that hold ends;
+  otherwise the old primary's record names the demotion.
 * **Read-only reaches a CN only with its converge.** A CN that has not yet
   converged to a revision carrying `SP_LEVEL_READONLY` keeps serving
   writes until it syncs; there is no DN-side enforcement point that could

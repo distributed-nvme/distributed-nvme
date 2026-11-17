@@ -14,7 +14,7 @@ One storage pool at the widest shape the tree builds, on real guests with no
 fakes, driven end to end through the shipped operator CLI while two real kernel
 NVMe hosts read and write its namespaces. A green run at the default shape is
 ten statements; a smaller shape proves no ceiling, and one without redundancy
-no repair, no forced start and no take-over:
+no repair, no forced start, no take-over and no cut of a migrating leg's path:
 
 * **The ceiling is real.** `MaxSliceCntPerSp` slices with md-raid1, every side
   on a disk node of its own, every group's array and every slice's thin pool on
@@ -310,13 +310,16 @@ slow, a refused one fail and a silenced one stall every suite that runs
 before the next cleanup.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
-(`dnagent_integtest.md`, Assumptions and preflight checks), so every write is
-buffered and synced and every read that must reach the media follows a cache
-drop. Two host processes run detached, as their IO may block and `timeout`
+(`dnagent_integtest.md`, Assumptions and preflight checks), so every dd write
+is buffered and synced and every dd read that must reach the media follows a
+cache drop. Three host processes run detached, as their IO may block and `timeout`
 cannot bound a task in uninterruptible sleep: the read-only level's read, which
-answers "blocked" within its own budget, and the write loop, whose writes are
-meant to queue: through a failover in the cutoff case, and in react's
-migrating leg on md until the primary cuts the leg's path. The loop reports
+answers "blocked" within its own budget; the write loop, whose writes are
+meant to queue through a failover in the cutoff case, and in react's
+migrating leg on md until the primary cuts the leg's path; and the cutoff
+case's fence writer on host1, which stops on its first failed write or at
+the end of its range. The fence writer runs fio, not dd, and writes and
+verifies with direct IO (The cases). The loop reports
 through files and keeps to its own namespace: it writes only to the device
 the namespace's link named at its start, never creating that device node, and
 checks before every write that the device still carries the namespace's uuid.
@@ -982,9 +985,9 @@ rewrite an existing port of its id (`dnagent.md` SH19); that a host is a clean
 initiator — sudo, nvme-tcp and multipath, its identity files, generated if
 absent and never overwritten, nvme-stas inactive and the masked autoconnector
 (E2E10); that host0, when the copy or the react case runs with md-raid1, has
-the tool of the kernel-log witness their repairs read, and with the react
-case and more DN VMs than legs the tools of the write loop its migrating leg
-runs; that host0, when the
+the tool of the kernel-log witness their repairs read, and, when the react
+case runs with md-raid1 and more DN VMs than legs, the tools of the write
+loop its migrating leg runs; that host0, when the
 cutoff case is in the run, has the tools of the case's write loop and
 kernel-log witness and nvme-stas 2.x installed, both its units known to
 systemd, as a 1.x one would fail later and silently, never connecting,
@@ -1016,8 +1019,8 @@ target, as they hold the
 controllers, and a subsystem removed under a live controller kills it with DNR
 while its port keeps listening and leaves it retrying once the port has
 nothing left (`cnagent_integtest.md`, Lab facts). On a host the write loop
-stops first, so that nothing writes into a device while its paths
-go, then nvme-stas, so that nothing reconnects what the sweep drops, the host's
+and the fence writer stop first, so that nothing writes into a device
+while its paths go, then nvme-stas, so that nothing reconnects what the sweep drops, the host's
 own nvme-stas configuration going back while the work directory still holds
 its copy and an nvme-stas the suite never started being left alone; then the
 host drops the suite's and dnv's NQNs and its discovery controller, never
@@ -1027,9 +1030,10 @@ shared host (E2E9). A copy it cannot put back keeps the work directory, which
 then holds the host's only copy of its files, and the host's verb ends without
 its sentinel, saying where the copy is, so the sweep reports itself unfinished
 and the next one tries again. A failed cutoff run, which can leave its loop
-running, nvme-stas on the suite's settings and its agent stopped (E2E6), is
-thus recovered by the next start cleanup or a cleanup-only run, whose stop
-continues the agent first (E2E8). Every controller node goes before any disk
+and its fence writer running, nvme-stas on the suite's settings and its
+agent stopped, and a failed react run, which can leave its loop running
+(E2E6), are thus recovered by the next start cleanup or a cleanup-only
+run, whose stop continues the agent first (E2E8). Every controller node goes before any disk
 node, as its stacks sit on the disk nodes' sides, in the cn agent suite's order
 (`cnagent_integtest.md`, Teardown and cleanup) and in two phases across all of
 them, so that every clone final is gone, removed while its transfer source is

@@ -21,7 +21,8 @@ failover safety rests on, the refusal before redund builds its pool and the
 kick in its late flip (`architecture.md`, [D16]). It proves the happy path;
 error paths are out of scope but for the stale probe, the dead leg, the
 promotion that outruns the sides' flip, md's refusal to start an array from one
-clean leg, a repair's bad leg that does not serve, the leg that keeps the data
+clean leg, md's check over sectors that fail reads, and over sectors that fail
+writes too, a repair's bad leg that does not serve, the leg that keeps the data
 dying while md copies onto a repair's new leg, where a forced start refuses the
 half-copied leg and starts from the leg that died, a take-back refused for a
 retired leg of another identity, a forced start that drops the named leg's
@@ -456,11 +457,13 @@ with no second `SyncupCntlr`, puts the ns-dev on the raid0 and moves the
 namespace optimized, then stops; and a block only the newer leg holds reads as
 that leg's, the stale member kicked (CN10, CN12; `architecture.md`, [D16]).
 Last, md's check (CN12, The md check): eight sectors of one data side fail in
-that disk node's export to the primary alone, and the suite, playing the
+its disk node's export to the primary alone, and the suite, playing the
 worker, puts an md check request on the data group and reads the cntlr until
-its reading names the request done. Sectors that fail reads and take writes
-(dm-flakey) are healed by the check, which md's mismatch count shows it read:
-no bad-block range, and the leg's row OK. Sectors that fail both (dm error)
+its reading names the request done. Over sectors that fail reads and take
+writes (dm-flakey), the check rewrites them and records no bad-block range:
+the reading names it done, which needs md to run it to its end with the array
+whole, so it read those sectors and md failed no member; the leg's row stays
+OK. Sectors that fail both (dm error)
 leave a bad-block range on the member, which the reading counts (CN28), the
 leg's row still OK. The export's table comes back after; the range stays with the array,
 which the teardown removes.
@@ -771,7 +774,7 @@ any dm or nvmet residue fails it, since reporting it is not success.
 
 ## Out of scope
 
-Error paths beyond the nine above; QoS, not enforced (`cnagent.md` CN6);
+Error paths beyond those that Goal and scope lists; QoS, not enforced (`cnagent.md` CN6);
 `GrowSlice`; a leg gaining or losing a second side, whose disk node part the dn
 suite's migrations prove, but for a cancel, which only the e2e suite's
 cancelled migration exercises, and whose cn agent part — the connect per side,

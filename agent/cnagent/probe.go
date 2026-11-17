@@ -13,7 +13,10 @@ import (
 // stay outside it: the status of each thin pool and dm-clone; the configfs
 // of the exports; the attributes of the array the md walk matched to a group
 // (Md.Detail) and
-// that array's number (mdDevNo); the entry of each NVMe subsystem a lookup
+// that array's number (mdDevNo); on a primary, the md walk and array read of
+// CN10's cut test (otherMemberInSync), taken afresh for each leg whose paths
+// pathsToCut names, its answer deciding whether the verdict names them; the
+// entry of each NVMe subsystem a lookup
 // uses — its NQN once more, its namespace and its controllers
 // (lookupSubsys); the own read of a dm name that a partial info listing, or
 // the table listing, lacks (cnReading); the fresh `dmsetup info` that

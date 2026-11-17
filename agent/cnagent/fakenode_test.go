@@ -391,7 +391,8 @@ type fakeArray struct {
 	// badBlocks scripts dev-*/bad_blocks per member path, the list as md
 	// prints it, one "<sector> <length>" line per range; a member without
 	// an entry publishes an empty list. Published for a running array only,
-	// with an empty dev-*/unacknowledged_bad_blocks.
+	// with the same ranges in dev-*/unacknowledged_bad_blocks, as md lists
+	// a range there too until it writes the range to the superblock.
 	badBlocks map[string]string
 	// memberState scripts dev-*/state per member path; a member without an
 	// entry reads what the kernel shows for dnv's members (memberStateOf).
@@ -3162,7 +3163,8 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 		f.files[devDir+"/slot"] = memberSlotOf(array, member, i) + "\n"
 		if mdRunning(array.arrayState) {
 			f.files[devDir+"/bad_blocks"] = array.badBlocks[member]
-			f.files[devDir+"/unacknowledged_bad_blocks"] = ""
+			f.files[devDir+"/unacknowledged_bad_blocks"] =
+				array.badBlocks[member]
 		}
 		if devNo := f.devNo[member]; devNo != "" {
 			f.files[devDir+"/block/dev"] = devNo + "\n"

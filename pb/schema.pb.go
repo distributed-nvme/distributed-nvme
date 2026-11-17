@@ -16994,9 +16994,9 @@ type CntlrInfo_GrpInfo struct {
 	// agent restart forgets it. Appended, never renumbered.
 	MdCheckDoneEpoch uint64 `protobuf:"varint,5,opt,name=md_check_done_epoch,json=mdCheckDoneEpoch,proto3" json:"md_check_done_epoch,omitempty"`
 	// The bad-block ranges md records on the member of each leg of the
-	// group the running array holds (dev-*/bad_blocks and
-	// dev-*/unacknowledged_bad_blocks), for the legs that have one or
-	// more (cnagent.md CN12, CN28); the sp worker's leg repair reads it
+	// group the running array holds (dev-*/bad_blocks, which lists every
+	// range, acknowledged or not), for the legs that have one or more
+	// (cnagent.md CN12, CN28); the sp worker's leg repair reads it
 	// (dnv-worker.md AR8). Appended, never renumbered.
 	LegIdToBadBlocks map[uint64]uint32 `protobuf:"bytes,6,rep,name=leg_id_to_bad_blocks,json=legIdToBadBlocks,proto3" json:"leg_id_to_bad_blocks,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	unknownFields    protoimpl.UnknownFields

@@ -2253,8 +2253,8 @@ func (h *cntlrHold) demotedOf() map[uint64]uint64 {
 // A fan-out during the demotion hold replaces what is held and hands a demoted
 // cntlr its newest plan at once. A further demotion joins the hold and re-arms
 // its timer, so every demoted agent gets the whole wait before its sides are
-// told; demotions come only from failovers, so this cannot hold the sides for
-// long. A demoted cntlr that a newer plan makes the primary again leaves the
+// told; demotions come only from failovers and replacements of the primary,
+// so this cannot hold the sides for long. A demoted cntlr that a newer plan makes the primary again leaves the
 // demotion hold and is held like any other cntlr. One the plan no longer names
 // — a cntlr replacement that deleted it — stays in the demotion hold: its agent
 // may still export its namespaces optimized, and with its child gone only the
@@ -3096,9 +3096,9 @@ func (w *spWorker) applyRepairFlips(
 // SideInfo reads the target row PROVISIONING with the reason
 // RES_REASON_AWAITING_CUTOVER (sideDriver.awaitsCutover); (3) a cntlr the
 // plan the coordinator last decided makes the primary, and not disabled
-// (countsPaths), reported a live path to the dst side, at that plan's
-// revision (HL2), in the newest reply of this drain that carried an info of
-// its own (paths). Only the primary holds
+// (countsPaths), reported a live path to the dst side, in a reply at the
+// revision of the plan its own child drives (HL2), in the newest reply of
+// this drain that carried an info of its own (paths). Only the primary holds
 // the arrays and the thin pools a cutover's gap can block, so a standby's
 // path counts for nothing, nor does a disabled primary's, as it runs the
 // standby shape (cnagent.md CN9), and after a failover the cutover waits for

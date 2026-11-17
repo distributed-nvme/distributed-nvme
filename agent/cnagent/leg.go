@@ -501,10 +501,10 @@ func legCtrls(lp *legPlan, view *subsysView) []ctrlView {
 }
 
 // servingPathDown says whether a path of lp in view is down (pathDown)
-// whose last ANA state, which a down controller keeps, was optimized or
-// non-optimized: the side that served, or was ready to. A down path that
-// last read inaccessible was the side that did not serve, so the other side
-// may serve and is connected as usual.
+// whose last ANA state, which a down controller keeps, was anything but
+// inaccessible: the side that served, or was ready to. A down path that last
+// read inaccessible was not serving when it went down, so the other side may
+// serve and is connected as usual.
 func servingPathDown(lp *legPlan, view *subsysView) bool {
 	for _, ctrl := range legCtrls(lp, view) {
 		if pathDown(ctrl) && ctrl.anaState != "inaccessible" {
@@ -526,7 +526,7 @@ func servingPathDown(lp *legPlan, view *subsysView) bool {
 // no array, so nothing of it waits and its two paths keep it ready for a
 // promotion; not for a leg of a group that is not md-raid1, which has no
 // other leg to take the write, so a cut would turn the wait into IO errors
-// to the hosts; not while a live path reads optimized or non-optimized,
+// to the hosts; not while a live path reads anything but inaccessible,
 // which serves or is ready to; and not in the migration's gap, where both
 // paths are live and inaccessible. The test reads the node alone.
 func pathsToCut(primary bool, lp *legPlan, view *subsysView) []ctrlView {
@@ -562,8 +562,10 @@ func cuttable(primary bool, lp *legPlan) bool {
 // pathWatcher is CN10's watcher of one leg whose path the primary may cut
 // (cuttable): a goroutine that looks the leg up in a walk of its own every
 // probe interval and cuts what pathsToCut names, taking no lock, so a cut
-// does not wait for a converge, which a background read wedged on the
-// leg's own pool can keep from starting (cnagent.md, Known limits). key is
+// does not wait for a converge, which can wait for the cntlr's object lock
+// (CN1) behind a background read whose status read of the leg's own pool
+// waits behind a commit that waits on the leg (CN28, The reading;
+// dnagent.md SH17). key is
 // the leg's NQN and its sides' addresses, so a leg whose sides change gets
 // a new watcher.
 type pathWatcher struct {

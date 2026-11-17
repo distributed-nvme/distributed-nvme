@@ -55,11 +55,11 @@ const (
 )
 
 // The "kind" attribute of the two records (AR2; dnv-worker.md, Log records).
-// Every reaction the worker can run is one of these nine; nothing else is
+// Every reaction the worker can run is one of these eleven; nothing else is
 // ever logged as a kind. grow_withdraw is auto-grow's withdrawal of a stuck
-// grow (AR6). The last four are leg repair's (AR8): the create of a
-// worker's repair, and the three steps that drive one, its finish, its cancel
-// and its try-to-abort.
+// grow (AR6). The last six are leg repair's (AR8): the create of a worker's
+// repair, the three steps that drive one, its finish, its cancel and its
+// try-to-abort, and the cancel and the finish of a bad leg's migration.
 const (
 	reactionFailover     = "failover"
 	reactionGrowData     = "grow_data"
@@ -3435,10 +3435,16 @@ func abortTrigger(p *spPass, rep *pb.Repair) (string, uint64) {
 		return "", 0
 	}
 	bad := rep.GetBadLegIdList()
+	// A bad leg with no health epoch is one repaired for md's bad-block
+	// ranges, or one that came back; the test reads the ranges, so it waits
+	// while the pass holds no current reading of the group's running array
+	// (grpRowHold): a pass with no report of the primary, a standby's report
+	// in a promotion's hand-over and an array that does not run read none.
+	read := grpRowHold(p, grp.GetGrpId()) == ""
 	for _, leg := range sortedLegs(grp.GetLegList()) {
 		if slices.Contains(bad, leg.GetLegId()) && leg.GetErrEpoch() == 0 &&
-			!(legRanges(p, grp, leg.GetLegId()) &&
-				otherLegClean(p, grp, leg.GetLegId())) {
+			read && !(legRanges(p, grp, leg.GetLegId()) &&
+			otherLegClean(p, grp, leg.GetLegId())) {
 			return triggerBadLegHealthy, leg.GetLegId()
 		}
 	}

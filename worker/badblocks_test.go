@@ -68,7 +68,9 @@ func TestLegRepairOfALegWithRanges(t *testing.T) {
 // for its ranges: while the reading names the ranges and another leg is
 // clean, the bad leg's clear health epoch asks nothing; once the clean leg
 // gains ranges too, or the reading names none on the bad leg, the repair is
-// asked to abort as one whose bad leg came back.
+// asked to abort as one whose bad leg came back; and a pass whose primary's
+// report holds no current reading of the group's running array asks nothing,
+// as it reads no ranges.
 func TestLegRepairOfRangesAborts(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -96,6 +98,33 @@ func TestLegRepairOfRangesAborts(t *testing.T) {
 			if rec["trigger"] != triggerBadLegHealthy {
 				t.Fatalf("applied = %v", rec)
 			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		row  func(h *reactHarness)
+	}{
+		{"no report of the primary", func(h *reactHarness) {
+			delete(h.w.cntlrs, reactCntlrA)
+		}},
+		{"an array that does not run", func(h *reactHarness) {
+			h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_ERROR)
+		}},
+		{"a reading older than the snapshot", func(h *reactHarness) {
+			h.state.SpRevision++
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			h.judgeStored = false
+			withWorkerRepair(h, pb.RepStage_REP_STAGE_CREATED, false)
+			h.legOf(reactDataLegA).ErrEpoch = 0
+			h.dnCands(reactDnD)
+			h.inSyncAll = false
+			h.fillGrpInfo()
+			tc.row(h)
+			h.pass()
+			h.wantOps()
 		})
 	}
 }

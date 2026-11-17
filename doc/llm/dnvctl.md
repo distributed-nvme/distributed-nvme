@@ -294,8 +294,6 @@ these exceptions:
 * the repeated `src_tr_conf` of `clone create` and `clone set-tr` is filled
   by one prefixed set of transport flags with one element, or with none when
   all four are emptied (`clone` — `ctl/clone.go`);
-* `cluster create`'s `--md-check-days` is sent whenever it is typed, zero
-  included (`cluster` — `ctl/cluster.go`);
 * the members no flag reaches are never sent: `cluster create`'s
   `qos_ratio`, `bdev_conf`, `alloc_conf`, `health_check_conf` and the four
   bin shifts of `dn_bin_conf` (`cluster` — `ctl/cluster.go`), and
@@ -390,15 +388,16 @@ no token field; on the wire the integration suite makes the first claim, sends
 
 ### `cluster` — `ctl/cluster.go`
 
-`cluster list` is one of the two requests with no `cluster_name`, with
-`worker list` (`worker` — `ctl/worker.go`): it ignores both scope global
-flags.
+`cluster list` and `worker list` (`worker` — `ctl/worker.go`) are the two
+commands whose request has no `cluster_name`: they ignore both scope
+global flags.
 
-One `cluster create` flag, and only one, reaches a `ClusterConf` member:
-`--extent-size` sets `dn_bin_conf.extent_size`, the DN and CN allocation
-unit (`architecture.md`, Size → extents), which `DefaultDnExtSize` fixes
-otherwise. A pool of `MaxSliceCntPerSp` slices takes a meta group and a data
-group per slice, each with one side per leg, so on lab-sized backing devices
+Two `cluster create` flags reach a `ClusterConf` member: `--md-check-days`
+(below) and `--extent-size`, which sets `dn_bin_conf.extent_size`, the DN
+and CN allocation unit (`architecture.md`, Size → extents), which
+`DefaultDnExtSize` fixes otherwise. A pool of `MaxSliceCntPerSp` slices
+takes a meta group and a data group per slice, each with one side per
+leg, so on lab-sized backing devices
 the unit has to come down to `MinDnExtSize` — that is why the flag exists. A
 non-zero value sends a `dn_bin_conf` carrying `extent_size` and nothing
 else; zero sends no `dn_bin_conf` at all, which is the pure-defaults request
@@ -420,11 +419,11 @@ leaf flag's (CT9), which matters most here because the value is write-once:
 no request, so no stale variable sizes every cluster created under it, and
 text that is not a uint64 is a pflag parse error (exit 2, no RPC).
 
-`--md-check-days` is the one exception to the "not given" convention: it
+`--md-check-days` does not follow the "not given" convention: it
 sends an `md_check_conf` carrying `interval_days` whenever it is typed, zero
 included, and none when it is not. Reason: a zero turns the md check off,
 while a request without the message takes the gateway's default
-(`architecture.md`, Common validation, The md check), so the zero must
+(`architecture.md`, Common validation and The md check), so the zero must
 reach the gateway. dnvctl checks no bound on it (CT8).
 
 No other `cluster create` flag reaches the request's other conf members.
@@ -758,8 +757,9 @@ codes, CT7's empty stderr, CT8's parse-only refusals, CT9's precedence of flag
 over environment, and the field and flag rules of Conventions. What one step
 per RPC has no room for is left to the unit tests: the transport conf's nil
 rule and a clone's empty source list, a bare `cluster create` sending no
-`dn_bin_conf`, the silence of the environment and the config file on leaf flags
-(CT9), `--timeout` refused or clamped from every carrier, the code name of
+`dn_bin_conf` and no `md_check_conf`, a typed `--md-check-days` sent as
+typed (its zero included), the silence of the environment and the config
+file on leaf flags (CT9), `--timeout` refused or clamped from every carrier, the code name of
 every gRPC code (CT5), and the `--rev` refusal on the leaves with no token
 field other than the one the suite types it on, which the unit tests pin
 on every such leaf (CT1).

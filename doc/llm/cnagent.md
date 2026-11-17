@@ -151,16 +151,16 @@ no transport-health gate skips a round.
 
 The two sides of a migrating leg share one subsystem NQN
 (`architecture.md`, [D1]), so `nvme disconnect --nqn` would kill both
-paths. When a leg's desired side set shrinks (after `FinishMigration`),
-and when a primary cuts a migrating leg's live path (CN10, The cut of a
-migrating leg's path), the cn agent must disconnect only that side's
-controller:
+paths. When a leg's desired side set shrinks (after `FinishMigration` or
+`CancelMigration`), and when a primary cuts a migrating leg's live path
+(CN10, The cut of a migrating leg's path), the cn agent must disconnect
+only the controller of the side that leaves or is cut:
 `nvmehost.go`'s `DisconnectDevice` issues `nvme disconnect --device` for
 one controller device, found by the sysfs walk of CN10 and never by nvme
 list-subsys: match "subsysnqn" under "/sys/class/nvme-subsystem" against
 the leg NQN, then for each controller entry inside that subsystem
 directory read its "address" and parse it as comma-separated key=value
-pairs (traddr, trsvcid) to find the dead side's controller — never by
+pairs (traddr, trsvcid) to find that side's controller — never by
 field position; a controller whose "address" did not answer, or is
 absent, is never taken for it (CN10). `dnagent.md` SH20 places the
 wrapper among the nvme-host wrappers.
@@ -189,9 +189,10 @@ shape while it is being built.
 CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with two cn
 differences. `--capacity` is optional, since zero is a value (CN3). And
 `agent.Serve` gets no `dnagent.md` SH27 background waiter: the cn joins
-no background task — its CN11 probers, its sweep's background
-`nvme disconnect` (CN10), its connect retry (CN10, CN18) and its
-background reads are cancelled at `rootCtx` and never joined, for the
+no background task — its CN11 probers, its CN10 path watchers, its
+sweep's background `nvme disconnect` (CN10), its connect retry (CN10,
+CN18) and its background reads are cancelled at `rootCtx` and never
+joined, for the
 reasons `dnagent.md` SH27 gives.
 
 ## The cn role — package `cnagent`
@@ -213,7 +214,7 @@ probers and their `LegProbeIO`
 (direct syscalls, never the `OsClient`); `md.go` the mdadm wrapper, the
 sysfs reads of the arrays, the assembly cases, the member reconciliation
 with a group's repair (CN12) and what the primary reports beside a
-group's row (CN28); `pool.go` the
+group's row (CN28); `mdcheck.go` CN12's md check; `pool.go` the
 concats, thin pools and thin volumes;
 `td.go` the
 raid0, dm-error, ns-dev and flakey tables; `clone.go` CN18; `xfer.go` the
@@ -246,16 +247,16 @@ A leaf mutex
 guards the in-memory mirrors of the local store — two maps: cn requests,
 and cntlr states (last accepted request, `ResInfo` tracker, a per-clone
 `CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and what
-mirrors nothing: in each cntlr's state the connect-retry and prober
-registries; in each CN's and each
+mirrors nothing: in each cntlr's state the connect-retry, prober and
+path-watcher registries; in each CN's and each
 cntlr's state its observation slot, which holds its latest observation
 and its running background read (`dnagent.md` SH28, SH29); the converge
 marks (`dnagent.md` SH30); and the CN10 disconnect registry, all in
-memory only, never persisted. Four more in-memory-only
+memory only, never persisted. Five more in-memory-only
 fields of a cntlr's state sit outside that mutex, touched only under the
 cntlr's object lock or the node write lock: the marks of CN14's
 activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`), CN12's acted marks
-(`forcedStarts`) and `reqFromRpc`, which says whether the request this process holds counts
+(`forcedStarts`), CN12's md checks (`mdChecks`) and `reqFromRpc`, which says whether the request this process holds counts
 as delivered (CN8, CN12, CN14). Each state's request is an atomic
 pointer, stored and loaded without that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
@@ -264,8 +265,9 @@ own lock; the chunk sets are touched only under the cntlr's object lock,
 or under the node write lock, which excludes it. A buffered channel of
 `disconnectConcurrency` slots caps how many of the disconnect registry's
 disconnects run at once. `rootCtx` anchors the CN10 and CN18 connect-retry
-loops, the CN10 background disconnects, the CN11 probers and the
-background reads, so shutdown cancels them and joins none (CN-CM2). No cn
+loops, the CN10 background disconnects and path watchers, the CN11
+probers and the background reads, so shutdown cancels them and joins none
+(CN-CM2). No cn
 lock is held across OS calls but the `LockSet`'s own.
 
 CN1. Lock mapping (instantiates `dnagent.md` SH10 to SH13): `SyncupCn` and the startup
@@ -288,6 +290,9 @@ can starve neither the lock hierarchy nor the node's OS-command budget — which
 is what keeps the teardown `nvme disconnect` that releases it runnable. That
 disconnect takes no lock either: the sweep issues it through the CN10
 disconnect registry, and under its locks the pass only probes the connection.
+The CN10 path watchers take no lock either (CN10, The cut of a migrating
+leg's path); their lookups, md reads and disconnects take `OsClient`
+slots.
 
 ### Startup reconcile
 
@@ -481,7 +486,7 @@ local state needs nothing
 yet — resources come with its first `SyncupCntlr`; the accepted request
 the agent holds for the CN is what makes the pointer known (CN8). A local
 cntlr whose pointer left the list is forgotten: its cntlr file and chunk files are deleted, its
-connect retry, its leg probers and its running read are cancelled, its memory entry and object lock are dropped
+connect retry, its leg probers, its path watchers (CN10) and its running read are cancelled, its memory entry and object lock are dropped
 (`dnagent.md` SH7) — and nothing of its is removed from the node by this
 step. The diff also drops the object lock entry of every pointer that
 left the list since the request the agent held for the CN before this
@@ -812,7 +817,9 @@ could only fail and arm the retry registry. Provisioned sides of the same
 leg connect normally, which is what keeps a two-side migrating leg
 serving while its destination side zeroes, and what connects every cntlr
 to the destination once it is provisioned, before the migration's
-cutover (`architecture.md`, Migration). A leg all of whose sides are
+cutover (`architecture.md`, Migration), save a primary's leg of an
+md-raid1 group while its serving path is down (The cut of a migrating
+leg's path, below). A leg all of whose sides are
 unprovisioned is provisioning (CN9): no connection, no `CnLegName`
 wrapper, no prober, and `leg_id_to_leg` reports `RES_STATUS_PROVISIONING`
 (CN28). All sides of a leg share that one NQN, so the kernel merges them
@@ -979,9 +986,9 @@ cntlr's read names each side the converge would connect (CN30; on a
 primary, a one-sided leg's once its row stops reading `OK`): the
 provisioned sides of a wanted leg that the leg's subsystem holds no
 controller for, in any state, where no controller's address read failed to
-answer, save on a primary the sides of a migrating leg whose serving path
-is down (`sidesToConnect`, the connect step's own test; The cut of a
-migrating leg's path, below).
+answer, save on a primary the sides of a migrating leg of an md-raid1
+group whose serving path is down (`sidesToConnect`, the connect step's own
+test; The cut of a migrating leg's path, below).
 
 **Dead paths**: a controller of the leg NQN whose traddr and trsvcid
 match no desired side (the source side after `FinishMigration` — its
@@ -1033,26 +1040,32 @@ controller "connecting", as the kernel's reconnect loop leaves a path
 whose disk node stopped answering, or "dead"; a "resetting" one is not
 yet down, and a "deleting" one is on its way out) while every live path of
 the leg reads ANA inaccessible gets its live paths disconnected by device
-(`pathsToCut`). A path watcher per such leg does it: a goroutine the
-converge starts, and keeps in step with its plan as it keeps the probers
-(`keepPathWatchers`), that looks the leg up in a walk of its own every
-probe interval (CN11) and takes no lock, since a converge can wait behind a
-read wedged on the leg's own pool (Known limits); the converge makes the
-same cut on its pass, and a cntlr's read names each path it would cut
-(CN30). Each cut is logged (`leg path cut`, or `cutting a leg path failed`,
-which the next tick or converge tries again). The converge connects no
-side of such a leg while its serving path is down — a down path whose last
-ANA state, which a down controller keeps, read optimized or non-optimized
-(`sidesToConnect`) — since the other side's path would come up
-inaccessible and be cut again; a down path that last read inaccessible
-never served, so the other side is connected as usual. The test reads the
+(`pathsToCut`), and nothing while a controller's "address" read did not
+answer, as for the connect (above). A path watcher does it, one per leg
+with two sides of an md-raid1 group on a primary, while the leg is not
+provisioning and the level builds legs: a goroutine each converge starts
+and stops from its plan alone, before its sweep (`keepPathWatchers`), as
+it trims the probers, that looks the leg
+up in a walk of its own every probe interval (CN11) and takes no lock,
+since a converge can wait for the cntlr's object lock (CN1) behind a read
+whose status read of the leg's own pool waits behind a commit that waits
+on the leg (CN28, The reading; `dnagent.md` SH17); the converge
+makes the same cut on its pass, and a cntlr's read names each path it
+would cut (CN30). Each cut is logged (`leg path cut`, or `cutting a leg
+path failed`, which the next tick or converge tries again). The converge
+connects no side of such a leg while its serving path is down — a down
+path whose last ANA state, which a down controller keeps, read anything
+but inaccessible (`sidesToConnect`) — since the other side's path would
+come up inaccessible and be cut again; a down path that last read
+inaccessible was not serving when it went down, so the other side is
+connected as usual. The test reads the
 node alone, and nothing is remembered. Reason: the kernel counts a live
 inaccessible path as one IO may still go to, so with the serving path down
 a write to the leg waits without limit, md never fails the member and the
 group's writes stop; with the live path cut, once the down path's fast IO
 fail time has passed, a write fails at once, md fails the member and the
 write completes on the group's other legs (seen in the lab on the 7.0
-kernel; the 7.4 kernel stops counting such a path). The leg then behaves
+kernel; by its source, the kernel stops counting such a path from 7.4). The leg then behaves
 as a leg with one path, whose death md and the leg probe already handle,
 and the worker's leg repair ends its migration in its safe direction
 before it repairs it, or waits, logged, after a cutover whose copy is not
@@ -1067,7 +1080,7 @@ returns. Not on a standby, which holds no array, so
 nothing of it waits, and whose two paths keep it ready for a promotion;
 not for a group that is not md-raid1, which has no other leg to take the
 write, so a cut would turn the wait into IO errors to the hosts; not while
-a live path reads optimized or non-optimized; and not in the migration's
+a live path reads anything but inaccessible; and not in the migration's
 gap, both paths live and inaccessible. A cut before the cutover also holds
 the cutover back, which waits for the primary's live path to the
 destination (`dnv-worker.md` RW18): a destination cannot copy from a dead
@@ -1212,7 +1225,8 @@ dm-clone (CN18).
   and those of an open repair's new legs once the repair's add has run
   (A group's repair, below). Every member carries md's failfast flag, from
   its create or its add, so that an IO error on a member fails that member
-  at once, with no retry. Reason: a
+  at once, with no retry; a read error in md's own check does not fail it
+  (The md check). Reason: a
   disk node that stays connected but never completes IO then costs the
   array that member instead of hanging the whole array; the fast IO fail
   timeout every connection is made with (`dnagent.md` SH20) covers only a
@@ -1758,8 +1772,11 @@ dm-clone (CN18).
     same pass: one md holds out of its place is `--remove`d; one in its
     place that cannot take a member — it does not serve, or its leg row
     does not read `OK` — is `--fail`ed and `--remove`d; one in its place
-    that serves with an `OK` row stays, and the repair waits, adding
-    nothing. So the add fails the bad leg only in a pass whose add's
+    that serves with an `OK` row is `--fail`ed and `--remove`d too while
+    its member carries md bad-block ranges and another `leg_list` member
+    md holds in sync, bad legs aside, carries none (The md check); any
+    other in its place that serves with an `OK` row stays, and the repair
+    waits, adding nothing. So the add fails the bad leg only in a pass whose add's
     conditions hold, so that the new leg can follow at once; a bad leg
     whose leg is dead is failed earlier by the early fail (above), which
     keeps it in the array, as any `leg_list` member. Reason: the
@@ -2253,72 +2270,90 @@ node a sweep stops is the one sysfs named — never the `CnMdDevName` link under
 **The md check.** The worker asks for md's check of one group at a time
 through the group's `md_check.request_epoch` (`dnv-worker.md` AR16). A
 group suits a check, from the request alone, while it has no repair, no
-forced-start mark, no operator-in-charge flag and no leg with two sides,
-which a check would read whole through the destination's dm-clone
-(`mdCheckSuits`). A primary's converge, from the array as the pass left it,
-while the array runs (`stepMdCheck`): with a request, a check md already
-runs that this agent process has no memory of is adopted as the request's;
-one it has not started yet is started, when the group suits a check and the
-array runs whole with two members or more, every one in sync, by writing 0
-to "md/sync_min", where md would otherwise resume a check it stopped, and
-then "check" to "md/sync_action"; md runs it at its own speed settings. A
-check of the request is stopped (writing "idle") while the group does not
-suit a check or the array is degraded, so a repair's copy never waits
-behind it, and forgotten, so it starts again once the group suits one.
-With no request, a check this process started is stopped; one it adopted,
-such as an operator's, is left to run; the memory goes either way. Both
+forced-start mark in its record, no operator-in-charge flag and no leg
+with two sides, which a check would read whole through the destination's
+dm-clone (`mdCheckSuits`); the mark of a request that does not count as
+delivered keeps the check off too, though the pass does not act on it
+(CN8; The forced start, above). A primary's converge, from the array as
+the pass left it, while the array runs (`stepMdCheck`): with a request,
+a check md runs is stopped (writing "idle") while the group does not suit
+a check or the array is degraded, whoever started it, an operator
+included, so that, while a request stands, a repair's copy does not wait
+behind it, and forgotten once the stop is written, so it starts again
+once the group suits one; otherwise one this agent process has no memory of is
+adopted as the request's. While md reads "idle" and this process holds no
+check for the request, one is started, when the group suits a check and
+the array runs whole with two members or more, every one in sync, by
+writing 0 to "md/sync_min", where md would otherwise resume a check it
+stopped, and then "check" to "md/sync_action"; md runs it at its own speed
+settings. With no request, a check this process started and md still
+runs is stopped, and the memory of it goes once the stop is written: a
+stop whose write fails keeps the memory, so the next converge tries the
+stop again. Any other check, such as an operator's this process adopted,
+is left to run, and the memory of it goes at once. Every write that fails
+is logged, and the next converge tries it again. Both
 channels end a check of the request once md reads "idle" again
 (`noteMdCheck`): done when md ran it to its end — its last action
 ("md/last_sync_action") the check, "md/sync_min" back at 0 and the array
 whole — and forgotten otherwise, md having stopped it, as it does when a
 member fails, so that a later converge starts it again from the array's
 start; the group's reading names a done request (CN28). The agent keeps
-which request a check was for, whether it started it, and whether it ended,
-in memory alone (`cntlrState.mdChecks`), as it keeps the acted forced-start
-mark: a converge forgets it once the array does not run or a step of the
-group fails, at a level that builds no group, once the request no longer
-lists the group, and once the cntlr is no primary; a restart forgets it,
-after which a check md still runs is adopted again and one that ended is
-started again. Reason: md runs the check itself, so the agent only starts,
-stops and reads it, and the worker's schedule must not depend on one
-process's memory.
+which request a check was for, whether it started it, and whether md ran
+it to its end, in memory alone (`cntlrState.mdChecks`), as it keeps the
+acted forced-start mark: a converge forgets it once the pass leaves the
+array not running, finds the array holding a member that is not a dm
+device, cannot read the array, before its own member changes or after
+them, at a level that builds no group, once the request no longer lists the group,
+once the group's request names another check or none (above), and once
+the cntlr is no primary; a member change that fails on a running array
+keeps it; a restart forgets it, after which a check md still runs is
+adopted again and one that ended is started again. Reason: md runs the
+check itself, so the agent only starts, stops and reads it; the schedule
+lives in the group's record (`dnv-worker.md` AR16), whose bound ends a
+request no process reports done, so a memory a restart loses costs one
+check run again.
 
 md's check reads every member and rewrites from another member a sector one
 member cannot read; a read error in a check does not fail a failfast
-member. A sector whose rewrite lands is healed and recorded nowhere; one
-whose rewrite fails too goes into that member's bad-block list, md marks
+member. A sector whose rewrite lands is healed, and md counts it only in
+"mismatch_cnt", which is no health (below); one whose rewrite fails too goes into that member's bad-block list, md marks
 the member "write_error" and "want_replacement", keeps it in sync and reads
 that range from the other members from then on (read in the kernel's md
 raid1 code and seen in the lab on the 7.0 kernel). The reading of a running
-array therefore counts each member's ranges, in "dev-*/bad_blocks" and
-"dev-*/unacknowledged_bad_blocks", by leg (CN28), and no leg row changes for
-them: the worker's leg repair reads the count and replaces such a leg from a
+array therefore counts each member's ranges, by leg, in "dev-*/bad_blocks",
+which lists every range md records, acknowledged or not (CN28), and no leg
+row changes for them: the worker's leg repair reads the count and replaces such a leg from a
 leg clean of ranges, while the leg, which serves every other region, stays
 a copy source of another leg's repair (`dnv-worker.md` AR8). A repair's bad
 leg whose member carries ranges is failed out of the array for the new leg
 though it serves with an OK row, as one that cannot take a member is, while
-another `leg_list` member md holds in sync carries none (`repSteps`,
-`cleanKeeper`); with none such, the repair waits, since its copy would bring
+another `leg_list` member md holds in sync, bad legs aside, carries none
+(`repSteps`, `cleanKeeper`); with none such, the repair waits, since its copy would bring
 the ranges back. md's "mismatch_cnt" is not health: the legs differ
 wherever the pool has not written ([D15]), so it counts those regions too
 (`architecture.md`, Known limits).
 
 **Why a repair waits.** The step that adds a repair's new legs
-(`repSteps`) and the take-back check after it (`takeBackStep`) name why they
-hold the repair back, from the same reading and the same tests they decide
-by, and the repair's verdict carries the text as `waits` (CN28), on a read
-and on a converge alike: for a STARTED repair, or a CREATED one whose abort
+(`repSteps`) and the take-back check after it (`takeBackStep`) name one
+reason they hold the repair back, from the same reading and the same tests
+they decide by, and the repair's verdict carries the text as `waits`
+(CN28), on a read and on a converge alike. The reasons, in the order the
+tests meet them: for a STARTED repair, or a CREATED one whose abort
 flag the request does not carry, the first new leg the array lacks that the
 step cannot add — its side not provisioned yet, or the leg not available
 otherwise (on a read: its leg row does not read `OK` or the leg does not
-serve, CN30) — and, for a STARTED repair, the first new leg no member in
-sync can feed (`hasCopySource`); for such a CREATED repair, no member in
+serve, CN30); for a STARTED repair, the first new leg no member in
+sync can feed (`hasCopySource`). For such a CREATED repair: no member in
 sync on a leg whose row reads `OK` and that serves to keep the data
-(`keepsData`), as on a new primary before its first probe round (CN11), a
-bad leg md holds in its place while it serves, or a bad leg with md
-bad-block ranges while no other member in sync is clean of them
-(`cleanKeeper`); and, for a new leg taken from a retired leg, no member
-that keeps the data whose superblock the check can compare it with. A
+(`keepsData`), as on a new primary before its first probe round (CN11); a
+bad leg md holds in its place while it serves and carries no bad-block
+range; or one that serves with ranges while no other `leg_list` member md
+holds in sync, bad legs aside, is clean of them (`cleanKeeper`). Last, for
+a new leg taken from a retired leg, no member that keeps the data whose
+superblock the check can compare it with. The text is the first reason
+met, save that for a CREATED repair the keeper reason of `keepsData`, or a
+bad leg's reason, replaces one about a new leg the step cannot add; the
+take-back check's keeper reason replaces none. A
 verdict that says neither started nor abort confirmed with none of these
 names what md still holds (`heldWaits`): for a repair whose abort flag the
 request carries, the first new leg md holds without a place, which keeps
@@ -2330,7 +2365,7 @@ the refusal, the text is for people: the worker logs it (`dnv-worker.md`
 AR17) and no rule reads it. Reason: a repair that waits changes nothing in
 etcd, so without the text the operator cannot tell why it does not move.
 An array that does not run gives no verdict (CN28); the worker names the
-group's row for it instead.
+group's row instead for a CREATED repair (`dnv-worker.md` AR17).
 
 CN13. Per-slice pools (`pool.go`; primary only). Per slice of
 `id_to_slice`: the multi-target dm-linears `CnPoolMetaName` (meta group
@@ -2369,8 +2404,8 @@ space queues writes and then fails them when its own timeout runs out
 (`architecture.md`, Known limits).
 
 The pool's row (`slice_id_to_dm_pool`) reads the status line's state, on the
-converge and on the read alike, its details always the raw line
-(`poolHealth`). A line that carries `Fail` in place of its numbers — dm-thin
+converge and on the read alike, its details the raw line (`poolHealth`); a
+status read that fails reads `RES_STATUS_ERROR` with its error. A line that carries `Fail` in place of its numbers — dm-thin
 failed the loaded pool — or `Error` — the status read could not read the
 pool's metadata — reads `RES_STATUS_ERROR` with `RES_REASON_POOL_FAILED`: the
 failure is a state of the loaded pool alone, and a new primary opens the
@@ -2421,10 +2456,11 @@ the grow completes on the converge that follows the last leg's
 provisioning — out-of-order provisioning of two appended groups simply
 waits for the earlier one. A grown group whose leg never provisions can be
 withdrawn by the worker under the conditions of `dnv-worker.md` AR6, which
-removes it from the request before any array is built from it. The serving pool's `slice_id_to_dm_pool` row
-keeps reading by its mode (above), `RES_STATUS_OK` for a pool that writes,
-with its raw `dmsetup status` line throughout — the auto-grow of `architecture.md`, Automatic reactions,
-parses that line, and a `PROVISIONING` pool row would silently switch
+removes it from the request before any array is built from it. The
+serving pool's `slice_id_to_dm_pool` row reads by its mode (above) —
+`RES_STATUS_OK` for a pool that writes — and carries its raw
+`dmsetup status` line throughout: the auto-grow of `architecture.md`,
+Automatic reactions, parses that line, and a `PROVISIONING` pool row would silently switch
 auto-grow off. In the pool layers `PROVISIONING` marks only the deferred
 resources, never the live ones. A concat may only ever grow, and the agent
 enforces that rather than trusting the plan: when the live table totals more sectors
@@ -3731,10 +3767,11 @@ of the record kind (`LeftoverKindRecord`), as does the read-only verdict
 the files on disk with nothing short of a restart ever listing them
 again, and no reply naming them.
 
-The connect retry's registration and the leg probers are not swept —
-they are goroutines, not objects on the node. A cntlr that is dropped
-loses all of them in CN7's drop step; a cntlr at `SP_LEVEL_DISABLE` loses
-the retry in CN19; and
+The connect retry's registration, the leg probers and the path watchers
+(CN10) are not swept — they are goroutines, not objects on the node. A
+cntlr that is dropped loses all of them in CN7's drop step; a cntlr at
+`SP_LEVEL_DISABLE` loses the retry in CN19; every converge keeps the path
+watchers in step with its plan before its sweep (CN10); and
 every converge trims the probers to the legs the plan still
 probes (CN11) before its sweep, whether or not the sweep's chain runs or
 reaches L10: the trim decides from the plan alone and removes nothing
@@ -4149,7 +4186,10 @@ of a `leg_list` member the array lacks, each of a leg whose own row reads
 every member a broken array's group keeps, each of a leg whose row does
 not read `ERROR` and that serves, all of which read member devices and so
 can wait on them, beside its listing of the array's holders in sysfs,
-which reads no member (CN12, CN30).
+which reads no member (CN12, CN30); and, on a primary, the md walk and
+array read of CN10's cut test (`otherMemberInSync`), taken afresh for each
+leg whose paths `pathsToCut` names, its answer deciding whether the
+verdict names them.
 
 **Device numbers.** A dm table names each device it maps by its number.
 The number the agent writes into a table, or checks a live table
@@ -4434,13 +4474,13 @@ member md has failed in its place and one it copies onto, and not a member
 without a place; `in_sync_leg_id_list`, the ids of the group's `leg_list` legs and of
 its repair's new legs whose members md marks in sync and not faulty,
 ascending, so that an array that has not changed reads the same and
-leaves the check stream nothing to send (`dnagent.md` SH26); and
+leaves the check stream nothing to send (`dnagent.md` SH26);
 `refusal`, the text of CN12's identity check when it refuses the add of a
 `leg_list` member of another identity, naming the first such member, its
 identity and the array's, empty when nothing holds an add back, text for
-people that the worker logs (`dnv-worker.md` AR14); and
+people that the worker logs (`dnv-worker.md` AR14);
 `md_check_done_epoch`, the request of the group's md check that this
-agent process saw end (CN12, The md check), while the cntlr's request
+agent process saw run to its end (CN12, The md check), while the cntlr's request
 counts as delivered and carries that request, zero otherwise, which the
 worker's schedule ends the request on (`dnv-worker.md` AR16);
 `leg_id_to_bad_blocks`, the count of md's bad-block ranges on the member of
@@ -4463,7 +4503,7 @@ repair whose abort flag is in the cntlr's own request, when md holds
 nothing on a new leg; `refusal`, the text of CN12's take-back check
 when it refuses the add of a new leg taken from a retired leg, naming that
 leg, its identity beside the keeper's or its events count, and the leg
-that keeps the data, empty when nothing holds the add back; and
+that keeps the data, empty when nothing holds the add back;
 `held_new_leg_id_list`, the repair's new legs md holds a member on in any
 state, ascending, since md has written its superblock onto each, which
 the worker records as a taken-back leg's partial mark (`dnv-worker.md`
@@ -4562,7 +4602,8 @@ removed or built (CN23). Details and log record are CN20's. A
 CN's read
 lists the node with the node-level sweep's enumeration (CN21). A cntlr's
 read takes its verdict's dm, md and nvme listings from its reading
-(CN28): the dm devices
+(CN28), save CN10's cut test, which reads the group's array in an md walk
+of its own (`otherMemberInSync`): the dm devices
 and their numbers from its `dmsetup info` listing, a `dmsetup table`
 listing that did not answer failing the verdict as well; the arrays from
 its md walk, under `ListArrays`' strict rule (CN12); and the connections
@@ -4652,10 +4693,11 @@ every read. A controller in any state is not named,
 since one that is connecting reconnects by itself, and neither is a side
 not provisioned, a leg the level suppresses, a leg whose disconnect is in
 flight or, on a primary, a side of an md-raid1 group's leg with two sides
-one of whose paths is down (CN10, The cut of a migrating leg's path): the
-converge connects
-none of them. The same lookup names, on a primary, each side whose live
-path the converge would cut (CN10, same part), as "enumeration failed"
+whose serving path is down — a down path whose last ANA state was not
+inaccessible (CN10, The cut of a migrating leg's path): the converge
+connects none of them. The same lookup names, on a primary, each side whose
+live path the converge would cut (CN10, The cut of a migrating leg's path),
+as "enumeration failed"
 with the leg's subsystem NQN, " at " and the side's address, then "path to
 cut", so that the worker's re-send brings the converge that cuts it. The
 converge's reply carries none of them, as for every condition only a read
@@ -4831,21 +4873,29 @@ stores instead is CN23's.
 ## Known limits
 
 * The cut of a migrating leg's path (CN10) leaves three cases. A
-  destination that dies inside the migration's gap, both paths
-  inaccessible, last read inaccessible, so the hold does not keep the
-  source's path out: each converge connects it again and the path watcher
-  cuts it again, until the destination returns or the migration ends. A
-  serving path whose controller the kernel deleted, a reconnect refused
-  with do-not-retry, beside a live inaccessible path is no down path, so
-  nothing is cut and a write waits until a converge's connect gets the
-  serving side back. And a gap long enough for an IO the primary had in
-  flight on the source to time out resets the source's controller to
-  "connecting", so the destination's path is cut; it comes back once the
-  source reconnects, and md copies the member back.
+  destination that dies inside the migration's gap, while both paths read
+  inaccessible, leaves a down path whose last ANA state is inaccessible,
+  so the connect test (`sidesToConnect`) does not keep the source's path
+  out: each converge connects the source again, and the converge or the
+  path watcher cuts it again, until the destination returns or the
+  migration ends. A serving path whose
+  controller the kernel deleted, a reconnect refused with do-not-retry,
+  beside a live inaccessible path is no down path, so nothing is cut and a
+  write waits until a converge's connect gets the serving side back or leg
+  repair ends the migration (`dnv-worker.md` AR8), which it does not after
+  a cutover whose copy is not whole. And a gap long enough
+  for an IO the primary had in flight on the source to time out resets the
+  source's controller to "connecting", so the destination's path is cut; as
+  in the first case, a source path that last read inaccessible does not
+  keep the destination's path out, so each converge connects it again and
+  the cut follows, until the source reconnects, the destination's last
+  step ends the gap, or the migration ends; md then copies the member
+  back.
 * Over a slice's pool that reads needs_check, the verdict names no thin row
   (CN13, CN30): a thin volume of a created td that was there and is gone,
   removed by hand say, reads `RES_STATUS_MISSING` and is built again only
-  by the converge of the next revision, though dm-thin would open it on the
+  by a converge something else brings — the next revision's, a re-send for
+  another row or a CN10 retry — though dm-thin would open it on the
   read-only pool; and the worker's shared-state class holds its stack
   (`dnv-worker.md` HL2), so no failover rebuilds it either. Naming such
   rows would re-send the `SyncupCntlr` on every round for a td not yet
@@ -4865,7 +4915,8 @@ stores instead is CN23's.
   more slot.
 * A member md keeps failing while its leg's probe passes is put back
   again after every failure: md fails a member with the failfast flag on
-  any read error from it (CN12), so one bad sector outside the health
+  any read error from it outside md's own check (CN12, The md check), so
+  one bad sector outside the health
   block is enough, while the CN11 probe, which reads the health block
   alone, passes, and the leg can take the member back, unless CN12's
   in-sync guard holds over its array. Each failure then
@@ -4875,16 +4926,19 @@ stores instead is CN23's.
   remember past attempts (`architecture.md`, Teardown by sweep); it shows
   as the agent's leftover record naming the same member after each
   failure, each followed by the worker's re-sent `SyncupCntlr` (`log.md`,
-  Leftovers). It lasts until the group's next md check (CN12, The md
-  check; `dnv-worker.md` AR16), which rewrites the sector from the other
-  member: a sector whose rewrite lands is healed, and one whose rewrite
+  Leftovers). It lasts until an md check of the group (CN12, The md check;
+  `dnv-worker.md` AR16) reaches the sector before a host read fails the
+  member again — a member failure stops the check, and the next starts
+  from the array's start — and rewrites the sector from the other member: a sector whose rewrite lands is healed, and one whose rewrite
   fails becomes a bad-block range on the member, which the group's reading
   counts, so leg repair then replaces the leg while another leg is clean of
   ranges. Until that check the leg repair does not act on it, since the
-  leg's row reads `OK` (`dnv-worker.md` AR8), nor can an
-  operator's repair, which refuses a bad leg with no health epoch and points
-  the operator to a migration of the leg's side instead (`architecture.md`,
-  Repairs); in a cluster whose check is off it lasts for good.
+  leg's row reads `OK` (`dnv-worker.md` AR8). An operator's repair cannot
+  act on it before the check or after it: it refuses a bad leg with no
+  health epoch, the waiver for bad-block ranges being the worker's alone
+  (`dnv-worker.md` AR8), and points the operator to a migration of the
+  leg's side instead (`architecture.md`, Repairs). In a cluster whose
+  check is off it lasts for good.
 * The leg probe reports failed or stalled, never slow: the CN11 probe reads
   `ERROR` on an attempt that fails or on one in flight longer than
   `CnLegProbeStallSeconds`, `PENDING` before its first attempt completes,
@@ -5344,8 +5398,7 @@ stores instead is CN23's.
   and a converge that wants one of them back waits as well, about an
   admin timeout for every `disconnectConcurrency` stuck deletes ahead of
   it. Two disconnects still run inline and can meet the same wait under
-  their locks (the cut of a migrating leg's path runs in its path watcher
-  too, which takes none, CN10): the build's dead-path `nvme disconnect --device` of a
+  their locks: the build's dead-path `nvme disconnect --device` of a
   migration's departed side (CN10) — the source after `FinishMigration`,
   the destination after `CancelMigration` — whose disk node tears that
   side's export down on the same change, and the dn sweep's disconnect of
@@ -5353,7 +5406,10 @@ stores instead is CN23's.
   node drops the migration export on the same change. One end of each
   pair is a disk node's `SyncupDn`, which the sides-first hold does not
   order (`dnv-worker.md` RW14). Neither is moved off its locks, and the
-  second can cost a `SyncupSide` its worker deadline.
+  second can cost a `SyncupSide` its worker deadline. The converge's cut
+  of a migrating leg's live path (CN10) runs inline under its locks too,
+  though its target keeps its export; the path watcher makes the same cut
+  with no lock.
 * A clone source judged unused can be adopted before its disconnect is
   registered: a cntlr-level L5 reads the stored requests and the live
   dm-clone tables, probes the source, and only then sets its disconnect

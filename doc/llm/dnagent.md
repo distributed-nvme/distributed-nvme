@@ -242,16 +242,18 @@ run goroutines outside any RPC: the DN8 retry of a migration destination
 (so nicknamed for the DN8-gated converge it re-runs; the retry loop itself
 is specified in DN13), the DN12 fence timer, the DN9 side-zeroing workers,
 the background reads the check rounds start (SH29), the cn's connect retry,
-the CN11 leg probers and the cn sweep's
+the CN11 leg probers, the CN10 path watchers and the cn sweep's
 background `nvme disconnect` (`cnagent.md` CN10, CN18). Every one of them
 derives its ctx from the server's **`rootCtx`** — the process-lifetime ctx
 captured at `Reconcile`, which `Serve` derives from its own ctx and cancels
 before returning — and, the background disconnect and the background reads
 aside, mints a fresh trace id per attempt (`common.NewTraceId`), taking the
-SH11 locks for the attempt only, never across the whole task. The
+SH11 locks, where it takes any, for the attempt only, never across the
+whole task. The
 background disconnect is one command of the pass that set it going: it
 carries that pass's trace id, minting one only when that pass had none,
-and, like the CN11 probers, takes no SH11 lock at all. A background read
+and, like the CN11 probers and the CN10 path watchers, takes no SH11 lock
+at all. A background read
 reads for the round that started it: it carries that round's trace id,
 minting one only when that round had none, so its records, a verdict that
 is not clean among them, name the round that brought them; and it takes
@@ -289,7 +291,9 @@ finishes whether or not anybody waits for it, and a join could hold shutdown
 for the kernel's whole admin timeout. Nor is the cn's connect retry
 (`cnagent.md` CN10, CN18): an attempt of it runs
 the bounded commands of an ordinary pass, which the cancellation of
-`rootCtx` ends, and nothing waits for them. Nor are the cn's background
+`rootCtx` ends, and nothing waits for them. Nor are the cn's path
+watchers (`cnagent.md` CN10): a tick runs bounded commands too, which the
+same cancellation ends. Nor are the cn's background
 reads (SH29): a read runs bounded commands too, which the same
 cancellation ends, and its children hold nothing a restarted agent needs.
 Object-scoped tasks that hold a device open are additionally cancelled
@@ -1069,7 +1073,8 @@ blocked inside the kernel.
 `DisconnectDevice` is `nvme disconnect --device` for retiring **one**
 controller of an NQN whose other paths must live — the two sides of
 a migrating leg share a subsystem NQN (`architecture.md`, [D1]), so the cn
-agent cannot use `--nqn` to drop a dead side; which controller it selects,
+agent cannot use `--nqn` to drop a dead side or cut a live one
+(`cnagent.md` CN10); which controller it selects,
 and by which reads, is the cn role's rule (`cnagent.md`,
 `NvmeHost.DisconnectDevice`).
 
@@ -2413,13 +2418,14 @@ nothing, so "no record" at `provisioned` false reads `RES_STATUS_MISSING`
 there while an allocation would succeed — the converge that would allocate
 has not run yet, and `n` must never be taken from the request — and the
 read's verdict names that row, so the worker re-sends the `SyncupSide`
-whose converge allocates (SH31, DN16). While `AllocSide` would refuse the
-side — no room, a disk not confirmed — and while a record disagrees with
-the request, the read reads `RES_STATUS_ERROR` with the refusal, as the
-converge does. Reason: a converge's error and a read's missing would set
-and clear the side's health epoch in turn, so no threshold would ever pass
-and leg repair would never move a leg whose side the disk cannot hold
-(`dnv-worker.md` HL2, AR8).
+whose converge allocates (SH31, DN16). While a side with no record at
+`provisioned` false is one `AllocSide` would refuse — no room, a disk not
+confirmed — and while a record disagrees with the request or sits on a
+disk not confirmed, the read reads `RES_STATUS_ERROR` with the refusal, as
+the converge does. Reason: a converge's error and a read's missing would set
+and clear the side's health epoch in turn, so no threshold would ever pass,
+and leg repair would never try to abort a repair whose new leg's side the
+disk cannot hold (`dnv-worker.md` HL2, AR8).
 
 **The zeroing registry** (the dn twin of the DN8 retry registry):
 

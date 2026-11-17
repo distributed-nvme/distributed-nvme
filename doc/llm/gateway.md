@@ -43,7 +43,9 @@ their record holds, and
 `CreateRepair`, which
 writes the `Repair` record, with `ForceStartGroup` and `SetGrpOperatorInCharge`,
 which take it through the parent their caller found (`dnv-worker.md` MD6)
-— are reused, never duplicated (`dnv-worker.md` MD8).
+— and `model.EndMigrationIn`, the write that ends a migration, which
+`FinishMigration` and `CancelMigration` run inside their deciding STM, are
+reused, never duplicated (`dnv-worker.md` MD8).
 
 The package's files follow `layout.md`, Directory tree: serving and the
 trace-id mint (GW1 to GW3); the shared handler helpers — resolution, the
@@ -221,12 +223,15 @@ RPC are under Handlers by resource group.
 
 GW4. **Request validation first.** `validate.go` implements the table of
 `architecture.md`, Common validation, as pure functions with no I/O: string
-sizes and patterns, the NQN rules, bounded numerics — a zero passes as
+sizes and patterns, the NQN rules and bounded numerics. A zero passes as
 "give me the default", and for every member that ends up in a stored conf
-substituting that default is GW11's job on the write path, never this one's
-— an empty `bdev_feature_list`, an all-zero `qos_ratio`, and the `bdev_conf`
-geometry rules, which `CreateCluster` judges once more on its resolved conf,
-still before any read (Clusters). The list `count` is the one bounded
+substituting that default is GW11's job on the write path, never this
+one's. `md_check_conf.interval_days` is the one exception: its zero in a
+present message is kept as no check (GW11). `validate.go` also refuses a
+`bdev_feature_list` that is not empty and a `qos_ratio` that is not all
+zero, and it checks the `bdev_conf` geometry rules, which `CreateCluster`
+judges once more on its resolved conf, still before any read (Clusters).
+The list `count` is the one bounded
 numeric GW11 does not cover, because it reaches no stored message at all:
 `pageLimit` refuses a value above `MaxListCnt` (`INVALID_ARGUMENT`, never a
 silent cap) and turns a zero into `DefaultListCnt` per request, and
@@ -558,9 +563,9 @@ shifting the STORED ladder), in `CreateStoragePool` (on its plain pre-read,
 before the merge that gives its scans their leg count and that the geometry
 rules of `architecture.md`, Common validation, judge, and again in its STM
 before any group geometry) and the `GrowSlice` handler (before any group
-geometry), in `newDnLedger` — the DN ledger `CreateStoragePool`,
+geometry), in `newDnLedger` (the DN ledger `CreateStoragePool`,
 `CreateClone` and `CreateMigration` build before staging their first
-write, for the same capacity-key reason —, at the top of
+write, for the same capacity-key reason), at the top of
 `model.EndMigrationIn` for `FinishMigration` and `CancelMigration`,
 in the planning read of `FinishRepair`, `CancelRepair` and
 `DeleteRetiredLeg` (`releaseConfGate`), whose `model` ops give a side back
@@ -607,8 +612,9 @@ md-raid1, a `redund_none` pool having no bitmap to size; the ranges of
 error. `ValidateClusterConf` adds `dn_bin_conf.extent_size` non-zero —
 non-zero only, because a DN header may legitimately be formatted at an
 unusual size — the shift ladder of `architecture.md`, DN bins, the two batch
-sizes, the four intervals, and `ValidateBdevConf` of `bdev_conf` when the
-cluster carries one. The ladder predicate is one unexported function shared
+sizes, the four intervals, `md_check_conf.interval_days` no greater than
+`MaxMdCheckDays` (a zero or an absent message passing, as no check), and
+`ValidateBdevConf` of `bdev_conf` when the cluster carries one. The ladder predicate is one unexported function shared
 with `model.ResolveDnBinConf`, so resolver and validator cannot drift; the
 all-zero shift set a `ClusterConf` written without a `dn_bin_conf` would
 carry is therefore NOT valid stored state.
@@ -679,8 +685,8 @@ and field-level rules stay in the cited section of `architecture.md`,
   `model.ResolveClusterConf` of the request's conf members plus that epoch,
   so `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf` and
   `md_check_conf` land concrete — an absent `md_check_conf` as the default
-  interval, a present one as given, its zero included — and only
-  `qos_ratio` and the epoch pass through as given (GW11;
+  interval, a present one as given, its zero included — while `qos_ratio`
+  and the epoch, which have no default, always pass through as given (GW11;
   validation first, resolution second — never the other way round). STM:
   `ClusterConfKey` of the name present is `ALREADY_EXISTS`; compute the
   cluster id from the name and the epoch; any of `DnGlobalKey`, `CnGlobalKey`
@@ -1370,9 +1376,10 @@ rather than a candidate problem.
   `cutover_pending` clear and `force` false is `FAILED_PRECONDITION`
   (`migrCancelAllowed`; `architecture.md`, Migrations); the reverse of the
   create through `model.EndMigrationIn`, the write the sp worker's cancel
-  runs too (drop the destination side, release the destination DN's extents
-  and the `meta_units` the `Migration` records with one `BumpDnRev`, delete
-  the `Migration` and its list entry; `BumpSpRev`). Reply `migr_id`.
+  runs too (`dnv-worker.md` MD6): drop the destination side, release the
+  destination DN's extents and the `meta_units` the `Migration` records
+  with one `BumpDnRev`, delete the `Migration` and its list entry;
+  `BumpSpRev`. Reply `migr_id`.
 * **GetMigration** — one STM read; the record as stored, `cutover_pending`
   included.
 
@@ -1771,7 +1778,8 @@ gateway, never through `workerctl`.
   `UpdateSubsystemHosts` sets it, once more while a cntlr is disabled,
   which a list of every cntlr would fail, but only the list's length as
   the cntlr mutators change it, and the entry gone with its subsystem;
-  every defaultable member of the stored confs resolved on the write path;
+  every defaultable member of the stored confs resolved on the write path
+  but `md_check_conf`, which the Go cases pin;
   paging with its empty last page and a malformed token; the inspects passing
   the agent's report and revision through verbatim, a revision the pool's rev
   key has passed, and the bitmap read passing its bitmap through, which the

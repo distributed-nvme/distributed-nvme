@@ -14,15 +14,18 @@
 // simply ignored there (dnvctl.md, `cluster` — `ctl/cluster.go`) and --name is
 // not declared on it.
 //
-// One conf flag (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
+// Two conf flags (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
 // declares --extent-size, which fills dn_bin_conf.extent_size and nothing
-// else. The ClusterConf's other conf members — qos_ratio, bdev_conf,
-// alloc_conf and health_check_conf — have no flag at all, so a created
-// cluster still takes the gateway's pure defaults for them, and for
-// dn_bin_conf too whenever --extent-size is left at its zero. Cluster-scoped
-// is the whole of that claim: `sp create` does declare flags that fill an
-// SP's OWN bdev_conf (dnvctl.md, `sp` — `ctl/sp.go`), which is a different
-// message from the cluster-wide one this command leaves untouched.
+// else, and --md-check-days, which fills md_check_conf.interval_days. The
+// ClusterConf's other conf members — qos_ratio, bdev_conf, alloc_conf and
+// health_check_conf — have no flag at all, so a created cluster still takes
+// the gateway's defaults for the last three and an unset qos_ratio, which
+// has no default; it takes the default dn_bin_conf too whenever
+// --extent-size is left at its zero, and the default md_check_conf whenever
+// --md-check-days is not typed. Cluster-scoped is the whole of that claim:
+// `sp create` does declare flags that fill an SP's OWN bdev_conf (dnvctl.md,
+// `sp` — `ctl/sp.go`), which is a different message from the cluster-wide
+// one this command leaves untouched.
 
 package ctl
 
@@ -65,11 +68,13 @@ func clusterNameFlag(cmd *cobra.Command) {
 
 // clusterCreateCmd drives CreateCluster.
 //
-// --extent-size is the one cluster-conf value dnvctl exposes. It follows the
-// `sp create` convention for an optional sub-message (spCreateCmd's
-// --stripe-size and --block-size): zero means "not given", so dn_bin_conf is
-// built only when the flag is non-zero and an untouched create sends no
-// dn_bin_conf at all.
+// --extent-size is one of the two cluster-conf values dnvctl exposes. It
+// follows the `sp create` convention for an optional sub-message
+// (spCreateCmd's --stripe-size and --block-size): zero means "not given", so
+// dn_bin_conf is built only when the flag is non-zero and an untouched create
+// sends no dn_bin_conf at all. --md-check-days, the other, does not follow
+// it: its zero turns the md check off, so it is sent whenever typed
+// (TestClusterCreateMdCheckDays).
 //
 // The four bin shifts are deliberately NOT exposed, and the message this
 // builds carries only extent_size. model.ResolveDnBinConf takes the shift set

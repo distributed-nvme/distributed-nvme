@@ -5764,12 +5764,13 @@ connect() { # <traddr> <trsvcid> <subnqn> <hostnqn> <hostid> [extra…]
 	return 0
 }
 
-# host_cleanup is a holder-first sweep of its own. The cutoff case's write loop
-# goes first, so nothing writes into a device while the sweep takes its paths
-# away; then the case's nvme-stas, so no stacd reconnects what `wipe` drops
+# host_cleanup is a holder-first sweep of its own. The write loop (the cutoff
+# case's, or the react case's migrating-leg step's) and the cutoff case's fence
+# writer go first, so nothing writes into a device while the sweep takes its
+# paths away; then the case's nvme-stas, so no stacd reconnects what `wipe` drops
 # and no stafd re-creates the discovery controller, and its config is put back
 # while $WORK still holds the copy; then the connections; and $WORK last.
-# A run that never reached the cutoff case finds neither and moves on.
+# A run that never reached those steps finds none of them and moves on.
 #
 # A copy stas_restore could not put back keeps $WORK, which then holds the
 # only copy of the host's own two files, and the sweep ends non-zero WITHOUT
@@ -6697,9 +6698,10 @@ CN_COPY_TOOLS="tc ip"
 # without nft cannot carry it.
 CN_REACT_TOOLS="nft"
 # nft on a DN: the react case's silencing rule (silence_port), which
-# preflight_node asks of a DN only when that case runs with md-raid1, where
-# its migrating-leg step runs, as it asks a CN for the reject rule's. The
-# cleanup's unsilence needs it only where the rule can be.
+# preflight_node asks of a DN only when that case runs with md-raid1 and more
+# DN VMs than legs, where its migrating-leg step runs (react_migr_cut), as it
+# asks a CN for the reject rule's. The cleanup's unsilence needs it only
+# where the rule can be.
 DN_REACT_TOOLS="nft"
 # The hosts run no dnv binary at all. nvme: every connect and disconnect.
 # uuidgen: /etc/nvme/hostid when it is absent. systemctl: the nvmf-connect mask
@@ -6720,8 +6722,9 @@ HOST_TOOLS="$HOST_TOOLS du df tail"
 # tools.
 HOST_KMSG_TOOLS="dmesg"
 # The write loop (wloop_start) of the react case's migrating-leg step, which
-# preflight_host asks of host0 only when that case runs with md-raid1, as
-# preflight_stas asks it for the cutoff case's loop.
+# preflight_host asks of host0 only when that case runs with md-raid1 and more
+# DN VMs than legs, where that step runs (react_migr_cut), as preflight_stas
+# asks it for the cutoff case's loop.
 HOST_WLOOP_TOOLS="nohup readlink"
 # The cutoff case's fence writer on host1 (stage 10): fio writes and verifies,
 # cmp reads the range after the first failed write.

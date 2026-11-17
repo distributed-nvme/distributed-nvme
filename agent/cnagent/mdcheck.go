@@ -54,8 +54,9 @@ func (m *Md) SetSyncMin(ctx context.Context, dev, sector string) error {
 //   - while md checks the array, a check this incarnation has no memory of
 //     is adopted as the request's; while the group stops suiting a check
 //     (mdCheckSuits) or the array is degraded, the check is stopped (idle)
-//     and forgotten, so a repair's copy never waits behind it, and it starts
-//     again once the group suits a check;
+//     and forgotten once the stop is written, so that, while a request
+//     stands, a repair's copy does not wait behind it, and it starts again
+//     once the group suits a check;
 //   - while md is idle, a check the request has ends (noteMdCheck); one it
 //     has not is started — sync_min written back to 0, then "check" — when
 //     the array runs whole with every member in sync and the group suits a
@@ -81,11 +82,14 @@ func (s *CnAgentServer) stepMdCheck(
 	req := gp.grp.GetMdCheck().GetRequestEpoch()
 	run, have := st.mdChecks[gp.grpId]
 	if have && run.epoch != req {
-		delete(st.mdChecks, gp.grpId)
 		if req == 0 && run.started && !run.done &&
-			detail.SyncAction == mdActionCheck {
-			s.setSyncAction(ctx, gp, detail, mdActionIdle)
+			detail.SyncAction == mdActionCheck &&
+			!s.setSyncAction(ctx, gp, detail, mdActionIdle) {
+			// The stop failed: the memory stays, so the next converge
+			// tries it again.
+			return
 		}
+		delete(st.mdChecks, gp.grpId)
 		have = false
 	}
 	if req == 0 {
@@ -141,9 +145,11 @@ func keepMdChecks(st *cntlrState, plan *cntlrPlan) {
 // mdCheckSuits says whether the group suits a check from the request alone:
 // no repair, no forced-start mark, no operator-in-charge flag, and no leg
 // with two sides, which a check would read whole through the destination's
-// dm-clone and so copy entirely.
+// dm-clone and so copy entirely. The mark is the group record's, so a stored
+// request's counts too, though the converge does not act on it (CN8).
 func mdCheckSuits(gp *grpPlan) bool {
-	if gp.rep != nil || gp.mark != nil || gp.grp.GetOperatorInCharge() {
+	if gp.rep != nil || gp.grp.GetForcedStart() != nil ||
+		gp.grp.GetOperatorInCharge() {
 		return false
 	}
 	for _, lp := range gp.legs {

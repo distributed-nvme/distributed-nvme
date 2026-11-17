@@ -896,7 +896,8 @@ case_sweep() {
 EOF
 
 	# --- `cluster` — `ctl/cluster.go` ----------------------------------
-	# --extent-size is the one conf flag of `cluster create`: it fills
+	# --extent-size is one of the two conf flags of `cluster create`, the
+	# other being --md-check-days, which this step does not type: it fills
 	# dn_bin_conf.extent_size and nothing else, so the recorded request must
 	# show dn_bin_conf carrying that single member and no NON-ZERO bin shift
 	# beside it. Non-zero is as far as any assertion reaches: bin0..bin3_shift

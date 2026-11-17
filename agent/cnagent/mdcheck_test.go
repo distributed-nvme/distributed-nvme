@@ -3,6 +3,7 @@ package cnagent
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -104,6 +105,22 @@ func TestMdCheckAdoptsStopsAndLeavesAlone(t *testing.T) {
 		if got := syncActionWrites(f); len(got) != 1 ||
 			got[0] != mdActionIdle {
 			t.Fatalf("writes %v, want one idle", got)
+		}
+	})
+	t.Run("a stop that fails is tried again", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		f.syncup(t, quietLevel(3))
+		f.syncup(t, withMdCheck(quietLevel(4), 1000))
+		key := "/md/sync_action=" + mdActionIdle
+		f.node.failWriteAlways[key] = "device busy"
+		f.syncup(t, quietLevel(5))
+		delete(f.node.failWriteAlways, key)
+		f.node.Reset()
+		f.syncup(t, quietLevel(6))
+		if got := syncActionWrites(f); len(got) != 1 ||
+			got[0] != mdActionIdle {
+			t.Fatalf("writes %v after a failed stop, want the stop "+
+				"tried again", got)
 		}
 	})
 	t.Run("the array degraded", func(t *testing.T) {
@@ -282,6 +299,25 @@ func TestMdCheckLeavesAnAdoptedCheckAndStopsAnUnsuitedGroup(t *testing.T) {
 		if got := syncActionWrites(f); len(got) == 0 ||
 			got[0] != mdActionIdle {
 			t.Fatalf("writes %v, want the check stopped", got)
+		}
+	})
+	t.Run("a stored request's mark", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		f.syncup(t, quietLevel(3))
+		req := withMark(withMdCheck(quietLevel(4), 1000), testDataLeg2)
+		path := f.srv.nf.LocalCntlrPath(testCluster, testCn, testSp, testCntlr)
+		if err := f.srv.store.Save(f.ctx, path, req); err != nil {
+			t.Fatalf("saving the marked request: %v", err)
+		}
+		f.node.Reset()
+		fresh := newCnServer(f.node)
+		fresh.retryInterval = time.Hour
+		reconcileForTest(t, fresh)
+		for _, write := range syncActionWrites(f) {
+			if write == mdActionCheck {
+				t.Fatalf("the startup reconcile of a request whose group " +
+					"carries a mark started a check")
+			}
 		}
 	})
 	t.Run("a level that stops the arrays", func(t *testing.T) {

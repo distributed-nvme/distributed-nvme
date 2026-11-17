@@ -379,11 +379,12 @@ type MdMember struct {
 	// with no place to copy into.
 	Slot string
 	// BadBlocks is how many ranges md's bad-block list records for the
-	// member, acknowledged (dev-*/bad_blocks) or not yet written to its
-	// superblock (dev-*/unacknowledged_bad_blocks): md records one where
-	// it could neither read a sector nor write it again from another
+	// member, in dev-*/bad_blocks, which lists every range, acknowledged or
+	// not yet written to the superblock (dev-*/unacknowledged_bad_blocks
+	// lists the second kind again, so it is not added): md records one
+	// where it could neither read a sector nor write it again from another
 	// member, as its check does (CN12, The md check). Read for a running
-	// array only, and zero for a member that publishes neither list.
+	// array only, and zero for a member that publishes no list.
 	BadBlocks int
 }
 
@@ -912,15 +913,11 @@ func (m *Md) readDetail(
 		}
 		badBlocks := 0
 		if mdRunning(state) {
-			for _, list := range []string{
-				"/bad_blocks", "/unacknowledged_bad_blocks",
-			} {
-				ranges, _, err := m.cmd.ReadAttr(ctx, member.dir+list)
-				if err != nil {
-					return nil, err
-				}
-				badBlocks += mdRanges(ranges)
+			ranges, _, err := m.cmd.ReadAttr(ctx, member.dir+"/bad_blocks")
+			if err != nil {
+				return nil, err
 			}
+			badBlocks = mdRanges(ranges)
 		}
 		detail.Members = append(detail.Members, MdMember{
 			DevNo:     devNo,

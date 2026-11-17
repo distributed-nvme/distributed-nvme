@@ -225,9 +225,10 @@ func ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf {
 }
 
 // ResolveClusterConf is what CreateCluster STORES: a copy of cc with
-// bdev_conf, dn_bin_conf, alloc_conf and health_check_conf fully concrete, and
-// creation_epoch and qos_ratio exactly as given (neither is defaultable). A
-// nil cc resolves to the pure defaults.
+// bdev_conf, dn_bin_conf, alloc_conf, health_check_conf and md_check_conf
+// fully concrete (ResolveMdCheckConf keeps a present md_check_conf's zero, no
+// check), and creation_epoch and qos_ratio exactly as given (neither is
+// defaultable). A nil cc resolves to the pure defaults.
 //
 // ClusterConf is write-once (architecture.md, Clusters: no UpdateCluster* RPC
 // exists), so this is

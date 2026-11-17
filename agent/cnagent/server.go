@@ -41,7 +41,7 @@ type CnAgentServer struct {
 
 	// mu guards the in-memory mirrors of the local store below — the two
 	// maps — and what mirrors nothing: in each cntlr's state the
-	// connect-retry and prober registries, in each
+	// connect-retry, prober and path-watcher (cutters) registries, in each
 	// CN's and each cntlr's state its observation slot (obs), the converge
 	// marks (marks) and the CN10 disconnect registry. It does not guard the
 	// request each state holds, which is an atomic pointer (cnState.req,
@@ -77,9 +77,9 @@ type CnAgentServer struct {
 	disconnectSlots chan struct{}
 
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the
-	// CN10/CN18 connect retries, the CN10 background disconnects, the CN11
-	// probers and the background reads (SH29) hang off it, so shutdown
-	// cancels them.
+	// CN10/CN18 connect retries, the CN10 background disconnects and path
+	// watchers, the CN11 probers and the background reads (SH29) hang off
+	// it, so shutdown cancels them.
 	rootCtx context.Context
 
 	// probeInterval / probeStall / retryInterval are fields rather than

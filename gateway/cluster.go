@@ -55,8 +55,9 @@ import (
 // member with a constant and make the bound checks tautologies.
 //
 // Nothing downstream resolves again. A zero read back out of this key is
-// corruption, and the worker and the agents refuse it rather than guessing —
-// which is what makes a cluster's extent size and bin ladder immutable
+// corruption, and the worker and the agents refuse it rather than guessing,
+// save md_check_conf's zero, which means no md check (architecture.md,
+// Common validation) — which is what makes a cluster's extent size and bin ladder immutable
 // facts rather than whatever the reading binary's constants happen to say.
 func (s *Server) CreateCluster(
 	ctx context.Context,

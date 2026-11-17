@@ -5396,7 +5396,7 @@ case_redund() {
 	converge_check 1 "$sp" "$c1" "$rev1"
 	converge_check 2 "$sp" "$c2" "$rev2"
 
-	stage mdcheck "md's check heals a sector that takes a write and records one that does not, on the leg's row (CN12, The md check)"
+	stage mdcheck "md's check rewrites a sector that takes a write and records one that does not in the group's reading, the leg's row OK (CN12, The md check)"
 	redund_md_check "$sp" "$c1" "$c2" "$req1" "$req2"
 
 	stage teardown "empty cntlr lists, then empty side lists"
@@ -5415,7 +5415,8 @@ case_redund() {
 # suite plays the worker and asks the primary for md's check of the data
 # group (Group.md_check), then reads the cntlr until its reading names the
 # request done. First the sectors fail reads and take writes: md's check
-# rewrites them from DN1's leg, records nothing, and the leg's row stays OK.
+# rewrites them from DN1's leg, records no bad-block range (md counts the
+# step in mismatch_cnt alone), and the leg's row stays OK.
 # Then they fail writes too: the check records a bad-block range on the
 # member, which the reading counts, the leg's row still OK. The
 # export gets its own table back after; md keeps the range, which the
@@ -5458,14 +5459,17 @@ redund_md_check() { # sp c1 c2 req1 req2
 		row=$(jq_of "$out" ".cntlr_info.leg_id_to_leg[\"$leg2\"].status")
 		bad=$(jq_of "$out" "(.cntlr_info.grp_id_to_grp_info[\"$(d16 "$A_DGRP")\"].leg_id_to_bad_blocks // {})[\"$leg2\"] // 0")
 		if [ "$epoch" = 1000 ]; then
-			assert_eq "$bad" 0 "mdcheck: bad-block ranges after a check that healed"
-			assert_eq "$row" RES_STATUS_OK "mdcheck: DN2 data leg's row after a check that healed"
-			# The check did read the failing sectors: md counts the step
-			# it could not read on one member as a mismatch.
+			assert_eq "$bad" 0 "mdcheck: bad-block ranges after a check that rewrote the sectors"
+			assert_eq "$row" RES_STATUS_OK "mdcheck: DN2 data leg's row after a check that rewrote the sectors"
+			# md counts a step it could not read on one member as a
+			# mismatch. The count also takes the regions the pool never
+			# wrote, which differ between the legs (cnagent.md CN12), so
+			# it is a weak witness; the done reading above, which needs
+			# the check run to its end with the array whole, is the proof.
 			mm=$(helper "$pidx" "md_mismatch '$(cn_dm_name c9 "$pidx" "$sp" "${A_DLEG[2]}")'") ||
 				die "mdcheck: reading the data array's mismatch_cnt"
 			[ "$mm" -ge 8 ] ||
-				die "mdcheck: mismatch_cnt after the check is '$mm', want 8 or more: the check read no failing sector"
+				die "mdcheck: mismatch_cnt after the check is '$mm', want 8 or more"
 		else
 			[ "$bad" -ge 1 ] ||
 				die "mdcheck: bad-block ranges after a check whose rewrite failed: got '$bad', want 1 or more"

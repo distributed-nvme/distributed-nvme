@@ -484,21 +484,23 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   good, the data on the zeroed legs can be reached only by hand with mdadm.
   State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
   leg was wiped". Not seen in the lab.
-- **A read-only or corrupt thin pool has no repair path.** A failed commit
-  leaves a slice's thin pool read-only, with dm-thin's mark that its
+- **A thin pool marked for a metadata check, or with corrupt metadata, has
+  no repair path.** A failed commit leaves a slice's thin pool read-only,
+  with dm-thin's mark that its
   metadata needs a check. The mark is kept in the pool's metadata, so the
   pool opens read-only on every controller node. The primary reports the
   pool as an error, and the worker logs it and starts no failover, since a
-  new primary would meet the same pool. Corrupt thin pool metadata has no
-  check and no repair flow in dnv. State: procedure to write, the repair
-  by hand onto fresh space, with the level steps, the names of the devices
-  involved, and the tools thin_check and thin_repair, with a test of the
-  cn agent suite. A pool that dm-thin failed without that mark, or that is
-  read-only because its metadata is full, is not this case: the first is
-  failed over, since a new primary opens the pool from its last commit, and
-  the second gets more metadata from the auto-grow. Seen in the lab: a
-  pool with the mark opened read-only, a failed pool opened again as
-  writable, and a full one became writable after its metadata grew.
+  new primary would meet the same pool. A pool that dm-thin failed
+  without that mark, or that is read-only because its metadata is full,
+  is not this case: the first is failed over, since a new primary opens
+  the pool from its last commit, and the second gets more metadata from
+  the auto-grow. Corrupt thin pool metadata has no check and no repair
+  flow in dnv. State: procedure to write, the repair by hand onto fresh
+  space, with the level steps, the names of the devices involved, and the
+  tools thin_check and thin_repair, with a test of the cn agent suite.
+  Seen in the lab: a pool with the mark opened read-only, a failed pool
+  opened again as writable, and a full one became writable after its
+  metadata grew.
 - **A group whose in-sync leg dies during a copy waits for a forced
   start.** A repair finishes once the primary reports the new leg in place,
   while md may still copy onto it. The old leg dies during the copy. md
@@ -507,9 +509,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   later, the primary starts from the leg md recorded as last in sync. Seen
   in the lab: the cn agent suite and the end-to-end suite break a group
   this way and bring it back with a forced start.
-- **A member md keeps dropping is put back until the group's next md
-  check; a slow leg reads ok.** md drops a leg on any read error, and the
-  agent puts it back, while the leg row reads ok. The worker asks the
+- **A member md keeps dropping is put back until an md check reaches the
+  bad sector; a slow leg reads ok.** md drops a leg on a read error of
+  normal IO, and the agent puts it back, while the leg row reads ok.
+  The worker asks the
   primary to run md's check on each group in turn, at an interval in days
   that is a cluster setting fixed when the cluster is created, 30 by
   default, zero for off. The check reads every leg and rewrites a sector
@@ -517,13 +520,18 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   heals the sector, and the drops end. A rewrite that fails makes md record
   a bad block on the leg, and leg repair then moves the leg, copying from
   another leg of the group that has no bad block; where every leg has one,
-  the regions are lost and nothing moves. Between two checks the drops go on, each a
-  resync of a small part of the leg. A cluster created before this setting
-  existed, or with zero, has no check. A leg with slow IO reads ok, and
-  every write of the group waits for it. State: accepted for the time
-  between two checks and for slow legs; migrate the leg's side by hand.
-  Seen in the lab: a check over a sector that fails reads healed it, and
-  over a sector that fails reads and writes recorded a bad block.
+  nothing moves, and a region recorded on every leg is lost. Between two
+  checks the drops go on, each a resync of a small part of the leg. A
+  drop stops a running check, and the next try starts again from the
+  leg's start, so a sector on which reads fail often enough can keep the
+  check from reaching it. The worker gives that check up after two days
+  and asks again one interval later. A cluster created before this
+  setting existed, or with zero, has no check. A leg with slow IO reads
+  ok, and every write of the group waits for it. State: accepted for the
+  time between two checks and for slow legs; migrate the leg's side by
+  hand. Seen in the lab: a check over a sector that fails reads healed
+  it, and over a sector that fails reads and writes recorded a bad block.
+  Not seen in the lab: drops that keep a check from reaching its sector.
 - **A whole copy still needs its source until the worker drains the
   clone.** The worker drains a clone once it reads the primary's report of
   the whole copy. If the primary moves to another cntlr, as in a failover,
@@ -531,7 +539,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   checks of the pool stop it, the new build of the dm-clone needs the
   source, and the volume waits while the source is away; so does an
   operator who steps the pool's level down past the clone and back before
-  that read. State: accepted: the window is short, but the operator's
+  that read. State: accepted. The window is short, but the operator's
   level step can hold it open as long as the level stays. Not seen in the
   lab.
 - **Orphans the sweep never removes.** An export of a side whose build
@@ -562,17 +570,32 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   as an error. A host of a running pool can write the same at any time, so
   zeroing the end of each new side would close only half of it. Not seen
   in the lab.
-- **A disk node that cannot serve a new leg can still get the group's
-  next repair.** When the worker gives up a repair because its new leg
-  failed, it cancels the repair and creates the next one in the same step,
-  never on that disk node. When the next repair cannot be made at that
-  moment — no other disk node has room, or the group waits for something
-  else, such as an operator — the worker cancels alone, and the next
-  repair may go to the same node again, until an operator disables the
-  node or it recovers. Only the repair just cancelled names its disk node,
-  so two failing disk nodes can take turns. State: accepted: the worker
-  keeps no memory of failed work, and an operator can disable the node.
+- **A disk node that stays healthy but cannot serve a new leg can still
+  get the group's next repair.** When the worker gives up a repair because
+  its new leg failed, it cancels the repair and creates the next one in
+  the same step, never on that disk node. When the next repair cannot be
+  made at that moment, the worker cancels alone. That happens when no
+  other disk node has room, or when the group waits for something else,
+  such as an operator. The next repair may then go to the same node
+  again, until an operator disables the node or it recovers. When the
+  group waits only for a newer report of the primary, the worker keeps the
+  repair and waits instead. Only the repair just cancelled names its disk
+  node, so two failing disk nodes can take turns. State: accepted. The
+  worker keeps no memory of failed work, and an operator can disable the
+  node.
   Not seen in the lab.
+- **A repair made for a leg's bad blocks can be called off after md
+  refuses its new leg.** md keeps a bad-block list for each leg: the places
+  it could not read or write. When a leg has such places and another leg of
+  the group has none, the worker repairs that leg. Just before it adds the
+  new leg, the primary takes the leg with bad blocks out of md. When md
+  then refuses the new leg, the next report names no bad blocks on the old
+  leg, since md no longer holds it, and the worker calls the repair off.
+  The primary then puts the old leg back into md, and the group runs on
+  its other legs until it does. A new repair comes only when a report
+  names the bad blocks again, or when the leg's health fails. State:
+  accepted. It needs md to refuse an add, which is rare, and nothing is
+  lost. Not seen in the lab.
 - **A repair whose new leg the primary never reports stays open.** It
   blocks every other repair of the group. This happens only while the
   primary does not apply the syncup that carries the repair. The worker's
@@ -865,19 +888,30 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   the time with no usable path from the primary to the moving leg. The gap
   ends by the disk nodes' steps or by a forced cancel. Measured at 32 slices: one
   to two and a half seconds. State: accepted.
-- **A migrating leg whose destination dies after the cutover, before its
-  copy is whole, keeps its group one leg short.** When a migrating leg's
-  serving disk node dies, the primary cuts the leg's other path while
-  another leg of the group is in sync, so within seconds the write goes to
-  the group's other legs instead of waiting (the kernel would keep it
-  queued on a path that is live but inaccessible). Leg repair then ends the migration in the direction that
-  loses nothing: a cancel before the cutover, a finish after it when the
-  destination's copy is whole, and then repairs the leg. After the cutover
-  with a copy not whole, neither side alone holds the leg's data, so the
-  worker does neither and logs why. The group serves on its other legs
-  until the destination comes back and the copy goes on, or an operator
-  ends the migration. State: accepted. The waiting write was seen in the
-  lab, and a disconnect by hand ended it.
+- **A migrating leg whose serving disk node dies waits without limit
+  where its group has no other leg in sync, as in a pool without RAID.
+  One whose destination dies after the cutover, before its copy is whole,
+  keeps its group one leg short.** A migrating leg has two paths, and the
+  one that does not serve is live but ANA inaccessible. The kernel keeps
+  the leg's IO queued as long as that path stays live. When the serving
+  disk node dies, the primary cuts that other path while another leg of
+  the group is in sync. Within seconds md fails the leg, and the write
+  goes to the group's other legs. Leg repair then ends the migration in
+  the direction that loses nothing: a cancel before the cutover, or a
+  finish after it when the destination's copy is whole. Then it repairs
+  the leg. After the cutover with a copy not whole, neither side alone
+  holds the leg's data, so the worker does neither and logs why. The group
+  serves on its other legs until the destination comes back. The primary
+  then puts the leg back into the array, and the copy goes on to its end.
+  Before that, an operator can end the migration. Where no other leg is in
+  sync, as in a pool without RAID, the primary does not cut the path,
+  since the write would fail. The IO then waits until the disk node comes
+  back. State: accepted. Seen in the lab: in a RAID1 pool, after the
+  cutover with the copy whole, all traffic to the NVMe-oF port of the
+  serving disk node was dropped. The primary cut the other path, md
+  failed the leg, host writes went on and none failed, and the worker
+  finished the migration and repaired the leg. The waiting write was seen in the lab
+  too, and a disconnect by hand ended it.
 - **The failover pause is the full stack build on the new primary.** A
   standby holds no array and no thin pool. The write in flight waits until
   the new primary has built the whole stack. The figures are in the
@@ -890,12 +924,15 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   cntlr's record, so a worker that restarts or takes the pool over during
   the failover holds the sides too. A cntlr replacement of the primary
   holds the sides for the same three seconds, so the old controller node
-  usually tears its stack down first. Two windows remain, both accepted. A
-  slow old primary misses the hold. A worker that restarts or takes the
-  pool over just after a replacement of the primary holds nothing, since
-  the replaced cntlr leaves no record. What stays besides: a Kubernetes
-  host on an unreachable old node sees errors until the new path shows the
-  volume. Not seen in the lab.
+  usually tears its stack down first. Three windows remain, all accepted.
+  A slow old primary misses the hold. A replaced primary whose controller
+  node takes longer than the hold to tear its stack down is fenced while
+  it still serves.
+  A worker that restarts or takes the pool over within those three
+  seconds after a replacement of the primary does not hold the sides,
+  since the replaced cntlr leaves no record. What stays besides: a
+  Kubernetes host on an unreachable old node sees errors until the new
+  path shows the volume. Not seen in the lab.
 - **A node clock that steps back delays a failover.** The worker reads how
   old an agent's report is by the node's clock. After the clock steps
   back, reports read younger by up to the step, so a node whose reads hang
@@ -1079,7 +1116,7 @@ design:
 - **A pool's thin ids run out; a slice's data space is capped at
   creation.** State: accepted, by design.
 - **An md check counts mismatches on never-written blocks.** The count
-  means nothing, and dnv reads it for nothing. State: accepted. Procedure
+  means nothing, and dnv does not read it. State: accepted. Procedure
   to write, one line.
 - **A retired leg taken back is copied whole unless the array stayed
   degraded.** State: accepted.
