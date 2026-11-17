@@ -164,7 +164,8 @@ func mapModelErr(err error) error {
 // units the round needs (verifyPick reads them from the node's record, since a
 // write that changes only units leaves the key where it is; architecture.md,
 // Metadata units), or when what the scan was planned from has moved under it:
-// CreateStoragePool's and CreateClone's cluster_id or leg count, CreateCntlr's
+// CreateStoragePool's cluster_id or leg count, CreateClone's cluster_id, leg
+// count, sp_id or SpRev revision (the plan's snapshot walk), CreateCntlr's
 // SP, which as the closure reads it has a cntlr on a CN the scan's read of its
 // cntlrs did not, or CreateMigration's group, which as the closure reads it
 // occupies a DN the scan's read of it did not. model.CreateRepair's fresh new

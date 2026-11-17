@@ -31,8 +31,11 @@ const opWithdrawGrow = "WithdrawGrow"
 //     builds a group only once no leg has every side unprovisioned, so the
 //     group was never assembled (cnagent.md CN9), and a provisioned flip that
 //     commits first makes this transaction refuse;
-//   - the grow is still pending against poolTotal, the total of that kind the
-//     primary reported (GrowPending): the pool does not count the group;
+//   - the pool does not count the group: poolTotal, the total of that kind
+//     the primary reported, is no larger than what the groups before it
+//     imply (GrowUncounted, the pending rule without its metadata cap
+//     clause, so a meta group behind groups that already hold dm-thin's
+//     largest metadata total, never pending, is still withdrawn);
 //   - the group has no repair, no retired leg, no forced-start mark and no
 //     operator in charge: an operator or a repair acts on it, so it is left
 //     to them.
@@ -90,7 +93,7 @@ func WithdrawGrow(
 		if grp.GetGrpId() != grpId {
 			return fail(opWithdrawGrow, "not the newest group")
 		}
-		if !GrowPending(
+		if !GrowUncounted(
 			slice, isMeta, poolTotal, PoolBlockSize(conf.GetBdevConf()),
 		) {
 			return fail(opWithdrawGrow, "grow not pending")

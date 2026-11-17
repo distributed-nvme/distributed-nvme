@@ -289,8 +289,10 @@ func cloneIoSizeCheck(conf *pb.SpConf, req *pb.CreateCloneRequest) error {
 // wide for the deciding STM's read set. The deciding STM runs the same
 // checks again and drops the round as candidate changed when the cluster id
 // or the leg count is no longer the one the scan was drawn for, when the
-// pool's revision is no longer the one the walk read, or when a pick's
-// capacity key has moved (dnLedger.verifyPick).
+// pool's sp_id or revision is no longer the one the walk read, or when a
+// pick's capacity key has moved (dnLedger.verifyPick). The sp_id is checked
+// as DeleteThinDevice checks it: a pool created again under the same name
+// starts its SpRev at one, so its revision alone could match the plan's.
 //
 // One of the section's rules is deliberately NOT enforced here. The
 // destination td MUST be empty, freshly created and never written ([D3]): a
@@ -348,11 +350,12 @@ func (s *Server) CreateClone(
 	var cloneId uint64
 	err := candidateUnit(ctx, func() error {
 		// The plan: which cluster to scan and how many legs to place, and
-		// the pool's revision the snapshot walk below read.
+		// the pool's sp_id and revision the snapshot walk below read.
 		var (
 			planCid   uint64
 			planCc    *pb.ClusterConf
 			planLegs  int
+			planSpId  uint64
 			planSpRev uint64
 		)
 		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
@@ -371,8 +374,8 @@ func (s *Server) CreateClone(
 			// some of its slices made after the copy began, holding part
 			// of the copy (architecture.md, Clones). The walk reads the
 			// whole td_name_list, so it runs here and never in the deciding
-			// STM, which holds the plan to the pool's revision instead, as
-			// DeleteThinDevice's does.
+			// STM, which holds the plan to the pool's sp_id and revision
+			// instead, as DeleteThinDevice's does.
 			snapshots, err := tdUncreatedSnapshots(stm, sc,
 				sc.Conf.GetTdNameList(), req.GetDstTdName(), td.GetDevId())
 			if err != nil {
@@ -389,6 +392,7 @@ func (s *Server) CreateClone(
 			planCid = sc.Cid
 			planCc = sc.Cc
 			planLegs = plan.Legs
+			planSpId = sc.SpId()
 			planSpRev = sc.Rev.GetRevision()
 			return nil
 		})
@@ -422,13 +426,16 @@ func (s *Server) CreateClone(
 			if err != nil {
 				return err
 			}
-			if sc.Cid != planCid || plan.Legs != len(picks) ||
+			if sc.Cid != planCid || sc.SpId() != planSpId ||
+				plan.Legs != len(picks) ||
 				sc.Rev.GetRevision() != planSpRev {
 				// The scan planned for another cluster or another leg
 				// count, whose picks describe a group this transaction is
 				// not building, or the pool moved after the plan's
 				// snapshot walk, possibly by a snapshot of the destination
-				// the walk could not see.
+				// the walk could not see, or the name now resolves to a
+				// pool created again whose SpRev happens to stand at the
+				// plan's revision, whose tds the walk never read.
 				return errCandidateChanged
 			}
 			slots := sc.Conf.GetCntlidSlotList()

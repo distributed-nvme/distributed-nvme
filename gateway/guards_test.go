@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -122,6 +123,117 @@ func TestCreateCloneSeesASnapshotMadeAfterItsPlan(t *testing.T) {
 	if env.exists(model.CloneKey(env.cid, volSpId, "clone-a"),
 		&pb.Clone{}) {
 		t.Fatal("the clone was created over the uncreated snapshot")
+	}
+}
+
+// TestCreateCloneReplansAfterAPoolRecreate: the deciding transaction holds
+// the plan to the pool's sp_id as well as to its revision (architecture.md,
+// Clones), as DeleteThinDevice's does. Between the plan and the deciding
+// transaction the pool is deleted and created again under the same name: a
+// new sp_id, its SpRev at the plan's revision, the destination created and
+// an uncreated snapshot of it that the plan's walk never read. The round is
+// planned again, and its walk refuses naming the snapshot; the new pool
+// takes no clone and its records do not move. A token does not help: it is
+// the plan's revision, which the new pool also stands at, so both modes run.
+// The new pool is written directly, the state a delete and a create inside
+// one plan-to-transaction gap would leave, and only the keys the request
+// reads are rewritten.
+func TestCreateCloneReplansAfterAPoolRecreate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token bool
+	}{
+		{name: "without a token"},
+		{name: "with the token", token: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.putTd("dst", 900, 7, 0, true)
+			// The placement of TestCreateCloneSeesASnapshotMadeAfterItsPlan,
+			// whose scan reads dn-c after the plan.
+			env.setDnBatchSize(1)
+			env.setDnFree(volDnC, volDnCFree)
+			env.setDnFree(volDnD, volDnCFree-1)
+			planRev := env.spRev()
+			newSpId := volSpId + 1
+			recreated := volSpConf()
+			recreated.SpId = newSpId
+			recreated.NextId = volNextId + 2
+			recreated.NextDevId = volNextDevId + 2
+			recreated.TdNameList = []string{"dst", "snap"}
+			prev := slog.Default()
+			hook := &volReadHook{
+				Handler: prev.Handler(),
+				key:     model.DnConfKey(env.cid, volDnC),
+				actor: func() {
+					for _, key := range []string{
+						model.ThinDeviceKey(env.cid, volSpId, "dst"),
+						model.SpRevKey(volShard, env.cid, volSpId),
+						model.SpNameKey(env.cid, volSpId),
+						model.SpConfKey(env.cid, volSpName),
+					} {
+						if err := env.cli.Delete(env.ctx, key); err != nil {
+							t.Errorf("Delete %s: %v", key, err)
+						}
+					}
+					mustPut(t, env.cli, model.SpConfKey(env.cid, volSpName),
+						recreated)
+					mustPut(t, env.cli, model.SpNameKey(env.cid, newSpId),
+						&pb.SpName{SpName: volSpName})
+					mustPut(t, env.cli,
+						model.SpRevKey(volShard, env.cid, newSpId),
+						&pb.SpRev{SpName: volSpName, Revision: planRev})
+					mustPut(t, env.cli,
+						model.ThinDeviceKey(env.cid, newSpId, "dst"),
+						&pb.ThinDevice{
+							TdId: volNextId, DevId: 1, Size: volTdSize,
+							Created: true,
+						})
+					mustPut(t, env.cli,
+						model.ThinDeviceKey(env.cid, newSpId, "snap"),
+						&pb.ThinDevice{
+							TdId: volNextId + 1, DevId: 2, OriId: 1,
+							Size: volTdSize,
+						})
+				},
+			}
+			slog.SetDefault(slog.New(hook))
+			defer slog.SetDefault(prev)
+			ctx, cancel := context.WithTimeout(
+				context.WithValue(env.ctx, volReadHookKey{}, true),
+				30*time.Second)
+			defer cancel()
+			req := volCloneRequest(env, "clone-a", "dst")
+			if !tc.token {
+				req.SpRev = nil
+			}
+			_, err := env.srv.CreateClone(ctx, req)
+			slog.SetDefault(prev)
+			if !hook.fired.Load() {
+				t.Fatalf("the request never read dn-c: nothing was raced")
+			}
+			msg := volWantCode(t, err, codes.FailedPrecondition)
+			if want := "snapshot snap of dst is not created yet"; msg != want {
+				t.Errorf("message: got %q, want %q", msg, want)
+			}
+			if env.exists(model.CloneKey(env.cid, newSpId, "clone-a"),
+				&pb.Clone{}) {
+				t.Error("the clone was created in the new pool over its " +
+					"uncreated snapshot")
+			}
+			conf := &pb.SpConf{}
+			env.get(model.SpConfKey(env.cid, volSpName), conf)
+			if !proto.Equal(conf, recreated) {
+				t.Errorf("the new pool's sp_conf moved on a refusal:\n got "+
+					"%v\nwant %v", conf, recreated)
+			}
+			rev := &pb.SpRev{}
+			env.get(model.SpRevKey(volShard, env.cid, newSpId), rev)
+			if rev.GetRevision() != planRev {
+				t.Errorf("the new pool's sp_rev: got %d, want %d (a "+
+					"refusal must not bump)", rev.GetRevision(), planRev)
+			}
+		})
 	}
 }
 

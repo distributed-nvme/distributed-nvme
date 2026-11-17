@@ -2706,7 +2706,9 @@ the rung, a refusal of the rung would leave the pool short of metadata
 room, and a rung cut to fit would make the ladder irregular. The ceiling
 is dm-thin's exact maximum and not its warning line, so that every grow
 it allows adds metadata room the pool then reports, and the grow's
-pending rule (`dnv-worker.md` AR6) clears.
+pending rule (`dnv-worker.md` AR6) clears. On a pool that already reports
+dm-thin's maximum, this ceiling, or the `MaxGrpCntPerSlice` refusal on a
+full meta list, and not the pending rule, refuses the next meta grow.
 
 Action: allocate legs for one new group. `is_meta` selects the list, and
 the new group's size is always computed, never taken from the request: a
@@ -2995,8 +2997,10 @@ the SP it resolves is not the one the plan walked (`cluster_id`, `sp_id`: a
 recreated SP's `SpRev` starts again at one) or its
 `SpRev.revision` is not the one the plan read. A request carrying the token
 is then refused `ABORTED` ("stale revision") by the token check, which runs
-first and which the plan passed at the old revision; a token-less request
-re-plans, and the new plan finds the snapshot (`gateway.md`, Thin devices,
+first and which the plan passed at the old revision, unless the name
+resolves to a pool created again at the plan's revision, which passes the
+token check and re-plans; a token-less request re-plans, and the new plan
+finds the snapshot (`gateway.md`, Thin devices,
 and GW9 carry the plan and the deciding STM).
 
 Action: STM: remove from `td_name_list`, delete the key, bump `SpRev`.
@@ -3178,10 +3182,11 @@ written; [D3] says why. Action: allocate the clone's clone meta group on
 DNs (Per-operation allocation), which makes the RPC a candidate unit
 (`gateway.md` GW9). The refusal of an uncreated snapshot walks every td of
 the SP, so the plan makes it and the deciding STM holds the plan to the
-cluster, the leg count and the pool's revision instead; unlike
-`DeleteThinDevice` (Thin devices), it does not check the pool's `sp_id`,
-so a same-name pool created again at the same revision between the plan
-and the deciding STM passes. STM:
+cluster, the pool's `sp_id`, the leg count and the pool's revision
+instead. It checks the `sp_id` for the reason `DeleteThinDevice` does
+(Thin devices): a pool created again under the same name starts its
+`SpRev` at one, so its revision alone could match the plan's, while its
+tds are ones the plan's walk never read. STM:
 after the refusals of the ceiling, the name, the destination, the bound and
 the optimal IO size, take `clone_id`, the group's `grp_id`, and per
 leg a `leg_id` and its `side_id` from `next_id`, in that order; write the `Clone`
@@ -5317,7 +5322,10 @@ The four reactions:
   grow whose new group still holds a provisioning leg completes by itself
   when the leg clears (`cnagent.md` CN13, [D15]), and one whose leg never
   clears can be withdrawn and grown again on other disk nodes, under the
-  conditions of `dnv-worker.md` AR6. A data grow stops once the slice's data
+  conditions of `dnv-worker.md` AR6. On a pool that reports the most
+  metadata dm-thin uses, a ceiling of GrowSlice refuses every further meta
+  grow, and the newest meta group of a stuck grow can still be withdrawn
+  (`dnv-worker.md` AR6). A data grow stops once the slice's data
   covers what the pool's thin devices can use (`dnv-worker.md` AR6), so no
   data grow starts past that cover, though the last one can pass it by up to
   a group. Auto-grow is best-effort, so a pool can fill (Known limits).

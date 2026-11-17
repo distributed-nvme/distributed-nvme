@@ -2124,9 +2124,10 @@ func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 //     short): the record is emitted and false is returned, so the walk goes
 //     on to the other kind, the next slice and finally to AR7 and AR8, which
 //     a lack that lasts must not switch off;
-//   - the grow is pending and its newest group is to be withdrawn
-//     (withdrawTarget): the withdrawal is the pass's one action, and true is
-//     returned whatever its outcome (withdrawGrow);
+//   - the pool does not count the newest group of the kind (growUncounted)
+//     and that group is to be withdrawn (withdrawTarget): the withdrawal is
+//     the pass's one action, and true is returned whatever its outcome
+//     (withdrawGrow);
 //   - the grow ran and did not complete — an ErrPrecondition from inside
 //     the transaction, a failed scan or op: AR2 ends the pass, so that a pass
 //     whose snapshot the store has overtaken, or that may have touched etcd,
@@ -2145,14 +2146,16 @@ func (w *spWorker) runGrow(
 	}
 	sliceAttr := slog.Uint64("slice_id", sliceId)
 	blockSize := dataBlockSize(p.state.Conf.GetBdevConf())
-	if growPending(slice, isMeta, usage, blockSize) {
-		// AR6: while pending, no grow of THAT KIND starts. Another kind, and
-		// every other reaction, is untouched — unless the grow waits on a side of
-		// the new group unhealthy on a disk node that carries a health epoch,
-		// dead or with an error row such as its store's, which only withdrawing
-		// the group ends (withdrawTarget). Only a side that qualifies
-		// makes the pass read the disk nodes' records (passNodes), so a grow
-		// that stays pending on the CN costs no node read.
+	if growUncounted(slice, isMeta, usage, blockSize) {
+		// AR6: the pool does not count the newest group of the kind. If the
+		// group waits on a side unhealthy on a disk node that carries a
+		// health epoch, dead or with an error row such as its store's, only
+		// withdrawing the group ends the wait (withdrawTarget). Only a side
+		// that qualifies makes the pass read the disk nodes' records
+		// (passNodes), so a grow that stays pending on the CN costs no node
+		// read. The trigger reads the pending rule without its metadata cap
+		// clause, so a newest meta group on a pool that reports dm-thin's
+		// largest metadata total, which is never pending, is still withdrawn.
 		if grp, addrs := withdrawTarget(p, slice, isMeta); len(addrs) > 0 {
 			if !w.passNodes(ctx, p, reactionGrowWithdraw, sliceAttr) {
 				return true
@@ -2161,8 +2164,15 @@ func (w *spWorker) runGrow(
 				return w.withdrawGrow(ctx, p, sliceId, isMeta, grp, usage)
 			}
 		}
-		w.reactionSkipped(ctx, kind, reasonGrowPending, sliceAttr)
-		return false
+		// While pending, no grow of THAT KIND starts. Another kind, and
+		// every other reaction, is untouched. A meta grow on a pool at the
+		// cap is not pending and goes on to a ceiling of architecture.md,
+		// GrowSlice (the ladder cap, or the group ceiling on a full list),
+		// which refuses it (growExtCnt).
+		if growPending(slice, isMeta, usage, blockSize) {
+			w.reactionSkipped(ctx, kind, reasonGrowPending, sliceAttr)
+			return false
+		}
 	}
 	if !isMeta && dataCovered(p.state, slice, blockSize) {
 		// AR6's covered rule: the slice's data groups already hold what the
@@ -2252,10 +2262,10 @@ func (w *spWorker) runGrow(
 	return true
 }
 
-// withdrawTarget is AR6's withdrawal trigger on a pending grow, but for the
-// disk node's record: the newest group of the kind, when every leg has one
-// side, no repair, retired leg, forced-start mark or operator acts on the
-// group, and the primary's report is of an observation made at the
+// withdrawTarget is AR6's withdrawal trigger on a grow whose group the pool
+// does not count (growUncounted), but for the disk node's record: the newest
+// group of the kind, when every leg has one side, no repair, retired leg,
+// forced-start mark or operator acts on the group, and the primary's report is of an observation made at the
 // snapshot's revision or later, with the disk nodes of its sides that are
 // still not provisioned and have been unhealthy for side_unhealthy, with
 // this coordinator's own verdict on them (AR10); none, nil. The group is
@@ -2263,8 +2273,8 @@ func (w *spWorker) runGrow(
 // caller reads after passNodes (dnStamped). Such a side's disk node died
 // while it zeroed, or is live with an error row of its own, such as its
 // store's, beside a side unhealthy for its own reason: the side does not
-// provision while that holds, so no cntlr builds the group, the grow stays
-// pending, and no leg repair or operator repair can replace a side of a leg
+// provision while that holds, so no cntlr builds the group, the pool never
+// counts it, and no leg repair or operator repair can replace a side of a leg
 // still provisioning. A leg with two sides carries a migration, which owns
 // both sides until its finish or cancel, so its group is left alone.
 // model.WithdrawGrow re-checks inside its STM every condition but the
@@ -2317,7 +2327,9 @@ func dnStamped(state *model.SpState, addrs []string) bool {
 // withdrawGrow runs AR6's withdrawal as the pass's one action (AR2): it ends
 // the pass whatever its outcome, as a grow's op does. The next pass that
 // finds the pool past its mark finds the grow no longer pending and grows
-// again; the disk node, whose health epoch withdrawTarget required, has no
+// again, unless a ceiling of architecture.md, GrowSlice, refuses it, as one
+// does every meta grow on a pool that reports dm-thin's largest metadata
+// total; the disk node, whose health epoch withdrawTarget required, has no
 // capacity key and is offered for no new side.
 func (w *spWorker) withdrawGrow(
 	ctx context.Context,
@@ -2350,6 +2362,21 @@ func poolTotal(usage poolUsage, isMeta bool) uint64 {
 		return usage.totalMeta
 	}
 	return usage.totalData
+}
+
+// growUncounted is the pending rule without its metadata cap clause
+// (model.GrowUncounted): the pool does not count the newest group of the
+// kind. It is the pass's side of the condition model.WithdrawGrow re-checks
+// inside its STM, so the trigger and the transaction cannot disagree.
+func growUncounted(
+	slice *pb.Slice,
+	isMeta bool,
+	usage poolUsage,
+	blockSize uint64,
+) bool {
+	return model.GrowUncounted(
+		slice, isMeta, poolTotal(usage, isMeta), blockSize,
+	)
 }
 
 // growPending is AR6's stateless pending rule as the pass's cheap pre-check:

@@ -2709,6 +2709,44 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 		h.wantApplied(reactionRepairCreate)
 	})
 
+	t.Run("leg repair while the meta groups pass dm-thin's cap", func(
+		t *testing.T,
+	) {
+		h := newReactHarness(t, reactFixture(t))
+		h.dnCands(reactDnC)
+		// A hand-made slice the ladder never builds: the meta group before
+		// the newest already holds more metadata blocks than dm-thin uses,
+		// and the pool reports exactly that maximum, as it does for any
+		// metadata device that large (common.ThinMetaBlocks). No grow can
+		// raise the total, so the meta grow is not pending (AR6), and the
+		// ladder's cap is what holds it.
+		h.slice().MetaGrpList = []*pb.Group{
+			reactGroup(
+				t, reactMetaGrp, 256,
+				[]uint64{reactMetaLegA, reactMetaLegB},
+				[]uint64{reactSideMetaA, reactSideMetaB},
+				[]string{reactDnA, reactDnB},
+			),
+			reactGroup(
+				t, 23, 256, []uint64{310, 311}, []uint64{410, 411},
+				[]string{reactDnA, reactDnB},
+			),
+		}
+		if sum := reactMetaBlocks(t, 256); sum < common.ThinMetaMaxBlocks {
+			t.Fatalf("the first meta group holds %d metadata blocks, not "+
+				"past the cap %d", sum, common.ThinMetaMaxBlocks)
+		}
+		metaTotal := uint64(common.ThinMetaMaxBlocks)
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK, poolLine(
+			metaTotal*90/100, metaTotal, 1, reactDataBlocks(t, 2),
+		))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.pass()
+		h.wantOps("create_repair")
+		h.wantSkipped(reactionGrowMeta, reasonMetaLadderCap)
+		h.wantApplied(reactionRepairCreate)
+	})
+
 	t.Run("leg repair while the data group list is full", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.dnCands(reactDnC, reactDnD)
@@ -3527,6 +3565,78 @@ func TestReactionGrowWithdrawWaits(t *testing.T) {
 			h.pass()
 			h.wantOps()
 			h.wantSkipped(reactionGrowData, reasonGrowPending)
+		})
+	}
+}
+
+// TestReactionGrowWithdrawsAMetaGroupAtTheCap pins AR6's withdrawal on a pool
+// at dm-thin's metadata cap: a hand-made slice the ladder never builds, whose
+// meta group before the newest already holds more metadata blocks than
+// dm-thin uses, on a pool that reports that maximum. The meta grow is not
+// pending, yet the pool does not count the newest group, so a side of it
+// that never provisioned, unhealthy on a disk node that carries a health
+// epoch, has the group withdrawn as the pass's one action, with the reported
+// total. With no health epoch on the disk node, nothing is withdrawn and the
+// grow goes on to the ladder's cap, which holds it, not the pending rule.
+func TestReactionGrowWithdrawsAMetaGroupAtTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stamped bool
+	}{
+		{name: "a disk node with a health epoch", stamped: true},
+		{name: "a disk node with no health epoch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			epoch := h.ago(9000)
+			grp := reactGroup(t, reactMetaGrp+7, 256,
+				[]uint64{reactMetaLegA + 7, reactMetaLegB + 7},
+				[]uint64{reactSideMetaA + 7, reactSideMetaB + 7},
+				[]string{reactDnC, reactDnD})
+			dead := grp.GetLegList()[1].GetSideList()[0]
+			dead.Provisioned = false
+			dead.ErrEpoch = epoch
+			h.state.DnByAddr[reactDnD] = &pb.DnConf{}
+			if tc.stamped {
+				h.state.DnByAddr[reactDnD].ErrEpoch = epoch
+			}
+			h.slice().MetaGrpList = []*pb.Group{
+				reactGroup(
+					t, reactMetaGrp, 256,
+					[]uint64{reactMetaLegA, reactMetaLegB},
+					[]uint64{reactSideMetaA, reactSideMetaB},
+					[]string{reactDnA, reactDnB},
+				),
+				grp,
+			}
+			if sum := reactMetaBlocks(t, 256); sum < common.ThinMetaMaxBlocks {
+				t.Fatalf("the first meta group holds %d metadata blocks, "+
+					"not past the cap %d", sum, common.ThinMetaMaxBlocks)
+			}
+			metaTotal := uint64(common.ThinMetaMaxBlocks)
+			if model.GrowPending(h.slice(), true, metaTotal, reactBlockSize) {
+				t.Fatalf("the meta grow is pending: the test does not " +
+					"reach the cap clause")
+			}
+			h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK, poolLine(
+				metaTotal*90/100, metaTotal, 1, reactDataBlocks(t, 2),
+			))
+			h.pass()
+			if !tc.stamped {
+				h.wantOps()
+				h.wantSkipped(reactionGrowMeta, reasonMetaLadderCap)
+				return
+			}
+			calls := h.wantOps("withdraw_grow")
+			if calls[0].grpId != grp.GetGrpId() || !calls[0].isMeta {
+				t.Fatalf("withdrew %+v, want meta group %d", calls[0],
+					grp.GetGrpId())
+			}
+			if calls[0].poolTotal != metaTotal {
+				t.Fatalf("pool total %d, want the reported %d",
+					calls[0].poolTotal, metaTotal)
+			}
+			h.wantApplied(reactionGrowWithdraw)
 		})
 	}
 }

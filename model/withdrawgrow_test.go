@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -196,6 +197,64 @@ func TestWithdrawGrowOfAMetaGroup(t *testing.T) {
 	if !proto.Equal(env.slice(), sliceBefore) {
 		t.Errorf("slice after the withdrawal:\n got %v\nwant %v",
 			env.slice(), sliceBefore)
+	}
+}
+
+// TestWithdrawGrowAtTheMetaCap pins the withdrawal's own reading of the
+// pending rule (dnv-worker.md AR6): a hand-made slice whose meta group before
+// the newest already holds more than dm-thin uses, on a pool that reports
+// dm-thin's largest metadata total, has no meta grow pending, yet the pool
+// does not count the newest group, so a newest group that never provisioned
+// is still withdrawn.
+func TestWithdrawGrowAtTheMetaCap(t *testing.T) {
+	env := newOpsEnv(t)
+	grpId, err := GrowSlice(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, true, opsNotPending, env.cc,
+		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+	)
+	if err != nil {
+		t.Fatalf("GrowSlice: %v", err)
+	}
+	metaBlocks, dataBlocks, err := GroupBlocks(
+		16, opsExtSize, opsSpConf().GetBdevConf())
+	if err != nil {
+		t.Fatalf("group blocks: %v", err)
+	}
+	slice := env.slice()
+	first := slice.GetMetaGrpList()[0]
+	first.ExtCnt = 16
+	first.MetaBlocks = metaBlocks
+	first.DataBlocks = dataBlocks
+	if sum := dataBlocks * opsBlockSize / common.ThinMetaBlockSize; sum <
+		common.ThinMetaMaxBlocks {
+		t.Fatalf("the first meta group holds %d metadata blocks, not past "+
+			"the cap %d", sum, common.ThinMetaMaxBlocks)
+	}
+	mustPut(t, env.cli, SliceKey(env.cid, opsSpId, opsSliceId), slice)
+	if GrowPending(slice, true, common.ThinMetaMaxBlocks, opsBlockSize) {
+		t.Fatalf("the meta grow is pending: the test does not reach the " +
+			"cap clause")
+	}
+	spRev := env.spRev()
+	got, err := WithdrawGrow(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, true, grpId, common.ThinMetaMaxBlocks, env.cc,
+	)
+	if err != nil {
+		t.Fatalf("WithdrawGrow: %v", err)
+	}
+	if got != grpId {
+		t.Errorf("grp_id: got %d, want %d", got, grpId)
+	}
+	want := proto.Clone(slice).(*pb.Slice)
+	want.MetaGrpList = want.MetaGrpList[:1]
+	if !proto.Equal(env.slice(), want) {
+		t.Errorf("slice after the withdrawal:\n got %v\nwant %v",
+			env.slice(), want)
+	}
+	if env.spRev() != spRev+1 {
+		t.Errorf("sp_rev: got %d, want %d", env.spRev(), spRev+1)
 	}
 }
 

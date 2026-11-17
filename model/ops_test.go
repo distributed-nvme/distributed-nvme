@@ -922,8 +922,8 @@ func TestPoolBlockSize(t *testing.T) {
 // itself: dm-thin's largest metadata device, 255 index entries of 2^14 - 64
 // metadata blocks of 4 KiB. A total one block below it still grows and a
 // total at it does not. A cap of 16 GiB would let both grow, and a grow from
-// groups that already fill dm-thin's largest device would stay pending for
-// ever, since dm-thin reports no more metadata than that device holds.
+// groups that already fill dm-thin's largest device would add metadata room
+// dm-thin never uses.
 func TestMetaLadderExtCnt(t *testing.T) {
 	total := uint64(1)
 	for _, want := range []uint64{1, 2, 4, 8} {
@@ -2433,7 +2433,10 @@ func TestGrowSliceRefusesASecondGrowForOneBreach(t *testing.T) {
 }
 
 // TestGrowPending walks AR6's stateless pending rule, which GrowSlice applies
-// as its precondition and worker/reaction.go as its pre-check.
+// as its precondition and worker/reaction.go as its pre-check, up to its
+// metadata clause: a pool that reports dm-thin's largest metadata total has
+// no meta grow pending, yet does not count the newest meta group
+// (GrowUncounted, which WithdrawGrow asks).
 func TestGrowPending(t *testing.T) {
 	slice := opsSlice()
 	// One group of a kind: the sum is over an empty set, so the first grow of
@@ -2462,6 +2465,53 @@ func TestGrowPending(t *testing.T) {
 	}
 	if GrowPending(slice, true, metaBlocks+1, opsBlockSize) {
 		t.Errorf("meta: %d blocks must not be pending", metaBlocks+1)
+	}
+
+	// A hand-made slice whose meta group before the newest already holds
+	// more than dm-thin uses: 16257 blocks of 1 MiB are 16257 x 256 metadata
+	// blocks, past common.ThinMetaMaxBlocks. The pool reports the cap, as
+	// common.ThinMetaBlocks gives for any device that large, and no grow can
+	// raise it, so nothing is pending; one block below the cap is still the
+	// plain rule.
+	capped := opsSlice()
+	capped.MetaGrpList[0].DataBlocks = 16257
+	capped.MetaGrpList = append(capped.MetaGrpList, &pb.Group{
+		GrpId: 997, ExtCnt: 16, MetaBlocks: 3, DataBlocks: 16381,
+	})
+	if sum := uint64(16257) * opsBlockSize / common.ThinMetaBlockSize; sum <
+		common.ThinMetaMaxBlocks {
+		t.Fatalf("the fixture's first meta group holds %d metadata blocks, "+
+			"not past the cap %d", sum, common.ThinMetaMaxBlocks)
+	}
+	if GrowPending(capped, true, common.ThinMetaMaxBlocks, opsBlockSize) {
+		t.Errorf("meta: a pool at the cap of %d blocks must not be pending",
+			common.ThinMetaMaxBlocks)
+	}
+	// The cap clause is the pending rule's alone: the pool still does not
+	// count the newest group, so its withdrawal stays open.
+	if !GrowUncounted(capped, true, common.ThinMetaMaxBlocks, opsBlockSize) {
+		t.Errorf("meta: a pool at the cap of %d blocks must not count the "+
+			"newest group", common.ThinMetaMaxBlocks)
+	}
+	if GrowUncounted(slice, true, metaBlocks+1, opsBlockSize) {
+		t.Errorf("meta: %d blocks count the newest group", metaBlocks+1)
+	}
+	if GrowUncounted(opsSlice(), true, 0, opsBlockSize) {
+		t.Errorf("meta: a slice's first group is never uncounted")
+	}
+	if !GrowPending(capped, true, common.ThinMetaMaxBlocks-1, opsBlockSize) {
+		t.Errorf("meta: %d blocks, below the cap and the groups' sum, must "+
+			"be pending", common.ThinMetaMaxBlocks-1)
+	}
+	// The cap is the metadata's alone: a data total of the same count is
+	// still held to the data groups' sum.
+	capped.DataGrpList[0].DataBlocks = 2 * common.ThinMetaMaxBlocks
+	capped.DataGrpList = append(capped.DataGrpList, &pb.Group{
+		GrpId: 996, ExtCnt: opsDataExtCnt, MetaBlocks: 3, DataBlocks: 4093,
+	})
+	if !GrowPending(capped, false, common.ThinMetaMaxBlocks, opsBlockSize) {
+		t.Errorf("data: a total of %d blocks below the data groups' sum "+
+			"must be pending", common.ThinMetaMaxBlocks)
 	}
 }
 
@@ -2522,6 +2572,58 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 	precondition := wantPrecondition(t, err, opGrowSlice)
 	if precondition.Reason != "meta ladder at the dm-thin metadata cap" {
 		t.Errorf("Reason: got %q", precondition.Reason)
+	}
+	if got := env.spRev(); got != revBefore {
+		t.Errorf("an aborted grow must not bump SpRev: got %d", got)
+	}
+}
+
+// TestGrowSliceMetaPastTheCapIsNotPending: a hand-made slice whose meta
+// groups before the newest already hold more than dm-thin uses, on a pool
+// that reports dm-thin's largest metadata total. No grow can raise that
+// total, so the pending rule does not hold the grow (dnv-worker.md AR6), and
+// the refusal is the meta ladder's cap of architecture.md, GrowSlice; the
+// refusal writes nothing.
+func TestGrowSliceMetaPastTheCapIsNotPending(t *testing.T) {
+	env := newOpsEnv(t)
+	slice := env.slice()
+	for idx := 0; idx < 2; idx++ {
+		metaBlocks, dataBlocks, err := GroupBlocks(
+			16, opsExtSize, opsSpConf().GetBdevConf())
+		if err != nil {
+			t.Fatalf("group blocks: %v", err)
+		}
+		grp := proto.Clone(slice.GetMetaGrpList()[0]).(*pb.Group)
+		grp.GrpId = 6000 + uint64(idx)
+		grp.ExtCnt = 16
+		grp.MetaBlocks = metaBlocks
+		grp.DataBlocks = dataBlocks
+		if idx == 0 {
+			slice.MetaGrpList[0] = grp
+		} else {
+			slice.MetaGrpList = append(slice.MetaGrpList, grp)
+		}
+	}
+	if sum := slice.GetMetaGrpList()[0].GetDataBlocks() * opsBlockSize /
+		common.ThinMetaBlockSize; sum < common.ThinMetaMaxBlocks {
+		t.Fatalf("the first meta group holds %d metadata blocks, not past "+
+			"the cap %d", sum, common.ThinMetaMaxBlocks)
+	}
+	mustPut(t, env.cli, SliceKey(env.cid, opsSpId, opsSliceId), slice)
+	revBefore := env.spRev()
+	_, err := GrowSlice(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, true, common.ThinMetaMaxBlocks, env.cc,
+		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+	)
+	precondition := wantPrecondition(t, err, opGrowSlice)
+	if precondition.Reason != "meta ladder at the dm-thin metadata cap" {
+		t.Errorf("Reason: got %q, want the meta ladder's cap",
+			precondition.Reason)
+	}
+	if got := env.slice(); !proto.Equal(got, slice) {
+		t.Errorf("a refused grow changed the slice:\n got %v\nwant %v",
+			got, slice)
 	}
 	if got := env.spRev(); got != revBefore {
 		t.Errorf("an aborted grow must not bump SpRev: got %d", got)

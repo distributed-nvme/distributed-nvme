@@ -83,12 +83,14 @@ const (
 	// counts its metadata used and total in these blocks, never in its
 	// data_block_size, and a meta group's data region holds data_blocks x
 	// block size / ThinMetaBlockSize of them (dnv-worker.md AR6;
-	// model.GrowPending).
+	// model.GrowUncounted).
 	ThinMetaBlockSize = 4096
 	// ThinMetaMaxBlocks is the most metadata blocks a thin pool uses, however
 	// large its metadata device: dm-thin caps the device at
 	// DM_SM_METADATA_MAX_SECTORS, 255 x (2^14 - 64) blocks of
-	// ThinMetaBlockSize (ThinMetaBlocks; cnagent.md CN13).
+	// ThinMetaBlockSize (ThinMetaBlocks; cnagent.md CN13). A pool that
+	// reports this total has no meta grow pending (model.GrowPending;
+	// dnv-worker.md AR6), since no grow can raise it.
 	ThinMetaMaxBlocks = 255 * ((1 << 14) - 64)
 
 	// MinChunkBlockCnt, MaxChunkBlockCnt and DefaultChunkBlockCnt are the

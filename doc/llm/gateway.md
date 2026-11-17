@@ -494,7 +494,7 @@ pick's DN no longer has the free metadata units the round needs, which
 `verifyPick` reads from the DN's record because a write that changes only
 units leaves the key where it is (`architecture.md`, Metadata units); or
 when the RPC's own plan re-check fails — `CreateStoragePool`'s cluster id
-and leg count and `CreateClone`'s cluster id, leg count and pool revision
+and leg count and `CreateClone`'s cluster id, `sp_id`, leg count and pool revision
 (`architecture.md`, Storage pools, Per-operation allocation, Clones), and the gain checks of `CreateCntlr`,
 `CreateMigration` and `CreateRepair` (`architecture.md`, Per-operation
 allocation). `CreateRepair`'s op fails it too for a pick deleted, disabled
@@ -1079,7 +1079,9 @@ origin's size; a fresh device asking for a zero `size` is
   `sp_id`, and the `SpRev.revision` it read. STM: resolve; token; a cluster
   id, `sp_id` or `SpRev.revision` other than the plan's is candidate
   changed, re-plan — a token-carrying request fails the token check ahead
-  of it, `ABORTED`, no re-plan. Then the td (`NOT_FOUND`); `FAILED_PRECONDITION` when it is
+  of it, `ABORTED`, no re-plan, unless the name resolves to a pool created
+  again at the plan's revision, which passes the token check and re-plans.
+  Then the td (`NOT_FOUND`); `FAILED_PRECONDITION` when it is
   referenced by any `Namespace.td_id` (walk `nqn_list` to each `Subsystem`'s
   `ns_list`), by any `Clone.dst_td_id` (walk `clone_name_list`), or when a
   td the plan named still has this td's `dev_id` as its `ori_id` and
@@ -1174,15 +1176,19 @@ below name.
   size and the bound (`architecture.md`, Clones). The planning read also
   walks `td_name_list` for a snapshot of
   the destination not yet `created` (`tdUncreatedSnapshots`), refused
-  `FAILED_PRECONDITION` naming it, and records the pool's revision; the
-  deciding STM does not repeat that walk. Then the
+  `FAILED_PRECONDITION` naming it, and records the pool's `sp_id` and
+  revision; the deciding STM does not repeat that walk. Then the
   DN scan (`pickDns`) for that many legs of
   `CloneMetaGrpExtCnt` extents each, with no black list and no location
   excluded, as `architecture.md`, Per-operation allocation, places a clone
   meta group; too few is `RESOURCE_EXHAUSTED`. STM: resolve; token; the same
-  checks again; the cluster id, the leg count or the pool's revision other
-  than the plan's is candidate changed, since a snapshot made after the
-  plan's walk moves the revision; the DN ledger (`newDnLedger`) and every pick
+  checks again; the cluster id, the `sp_id`, the leg count or the pool's
+  revision other than the plan's is candidate changed, since a snapshot
+  made after the plan's walk moves the revision and a pool created again
+  under the same name starts its revision at one; a token-carrying request
+  passes the token check against one that stands at the plan's revision,
+  and re-plans like a token-less one. Then the DN ledger
+  (`newDnLedger`) and every pick
   re-verified (`verifyPick`; a moved one is candidate changed);
   mint `clone_id`, then the group's `grp_id`, then per pick, in pick order,
   a `leg_id` and its `side_id` (GW15's order); per pick a `Leg` of one

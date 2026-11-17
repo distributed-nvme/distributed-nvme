@@ -430,7 +430,7 @@ func CloneMetaSideZeroBytes(grp *pb.Group, blockSize uint64) (uint64, error) {
 // (metaSizeCap), which is where architecture.md, GrowSlice, refuses to grow
 // further. What is compared with the cap is the total in bytes of the meta
 // groups' extents, which is never smaller than the pool's metadata device,
-// the concat of their data regions (GrowPending), so a total below the cap
+// the concat of their data regions (GrowUncounted), so a total below the cap
 // means a device below it. The cap is judged on the total before the grow,
 // so the rung it allows may carry the total past the cap; when that rung
 // carries the metadata device past the cap as well, dm-thin uses only the
@@ -472,8 +472,11 @@ func MetaLadderExtCnt(currentTotal uint64, extentSize uint64) (uint64, bool) {
 // lies above this cap. The cap is that exact size and not the warning line:
 // meta groups whose extent total lies between the two may already make a
 // metadata device that fills what dm-thin uses, and a grow from them would
-// stay pending for ever, since the metadata total the pool reports could
-// not pass what those groups already hold (dnv-worker.md, AR6).
+// add room dm-thin never uses. So every grow the ladder allows adds metadata
+// room the pool then reports, and the grow's pending rule clears
+// (dnv-worker.md, AR6). That rule also reads a pool that reports the cap as
+// not pending (GrowPending), so on a slice whose groups already reach the
+// cap this ladder cap refuses the next meta grow.
 const metaSizeCap = uint64(255) * (1<<14 - 64) * common.ThinMetaBlockSize
 
 // ---------------------------------------------------------------------------
@@ -2045,26 +2048,61 @@ func PoolBlockSize(bdevConf *pb.BdevConf) uint64 {
 }
 
 // GrowPending is AR6's stateless pending rule: a grow of a kind is pending
-// while the pool's REPORTED total of that kind is no larger than the total
-// implied by the slice's groups of that kind excluding the newest one.
+// while the pool does not count the newest group of that kind (GrowUncounted)
+// and, for metadata, the pool reports less than common.ThinMetaMaxBlocks.
 //
 //	data: total_data ≤ Σ data_blocks over all data groups but the last
 //	meta: total_meta ≤ Σ data_blocks × block_size / ThinMetaBlockSize
-//	      over all meta groups but the last
+//	      over all meta groups but the last,
+//	      and total_meta < common.ThinMetaMaxBlocks
 //
 // It is a memo reconstructed from facts (AR6), so a worker restart or a
 // shard handoff cannot issue a second grow, and a grow deferred on the CN
 // ([D15]) stays pending the same way because its totals have not moved.
 //
-// With zero or one group of a kind the sum is over an empty set and nothing is
-// pending — the first grow of a slice must never be held back by its own
-// (as yet unreported) group.
+// A pool that reports common.ThinMetaMaxBlocks total metadata blocks has no
+// meta grow pending, whatever its meta groups hold: dm-thin uses no more of
+// a metadata device however large (common.ThinMetaBlocks, the cn agent's
+// arithmetic, cnagent.md CN13), so no grow can raise that total. The check is
+// strict at the cap: groups before the newest that already hold the cap or
+// more make the sum at least the reported total, and the plain rule would
+// read such a pool pending for ever. The meta ladder never builds such a
+// slice (metaSizeCap), and a ceiling of GrowSlice (the ladder cap, or the
+// group ceiling on a full list), not this rule, is what refuses the next
+// meta grow. The cap clause is the pending rule's alone: such a pool still
+// does not count its newest meta group, so WithdrawGrow, which asks
+// GrowUncounted, can still take back one that never provisioned.
 //
 // It lives here, not in worker/reaction.go, because both sides of AR6 apply
 // it: the pass as its cheap pre-check on the snapshot it holds, and GrowSlice
 // as the precondition AR2 requires it to re-validate inside its STM. One rule,
 // one implementation.
 func GrowPending(
+	slice *pb.Slice,
+	isMeta bool,
+	reportedTotal uint64,
+	blockSize uint64,
+) bool {
+	if !GrowUncounted(slice, isMeta, reportedTotal, blockSize) {
+		return false
+	}
+	return !isMeta || reportedTotal < common.ThinMetaMaxBlocks
+}
+
+// GrowUncounted reports whether the pool does not count the newest group of
+// a kind: its REPORTED total of that kind is no larger than the total implied
+// by the slice's groups of that kind excluding the newest one. It is AR6's
+// pending rule without the metadata cap clause (GrowPending), and the
+// condition WithdrawGrow re-checks and the worker's withdrawal trigger reads
+// (dnv-worker.md AR6): a pool that reports dm-thin's largest metadata total
+// has no meta grow pending, yet it does not count a newest meta group behind
+// groups that already hold that total, so such a group that never
+// provisioned can still be withdrawn.
+//
+// With zero or one group of a kind the sum is over an empty set and the result
+// is false — the first grow of a slice must never be held back by its own
+// (as yet unreported) group, and a slice's first group is never withdrawn.
+func GrowUncounted(
 	slice *pb.Slice,
 	isMeta bool,
 	reportedTotal uint64,

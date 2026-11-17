@@ -782,9 +782,10 @@ list; the flip, which reads the repair's key alone, and
   checked as the preamble's ops check theirs, which the worker passes as
   zero; the SP's `bdev_conf` and the cluster conf both valid;
   the slice to exist; the group to be the newest of its kind in the slice,
-  with an older one before it ("no grown group" otherwise); a grow of that
-  kind pending against the pool total (AR6's rule, `GrowPending`), so the
-  pool does not count the group; one side per leg ("a leg has two sides"
+  with an older one before it ("no grown group" otherwise); the pool not
+  counting the group: the pool total no larger than the groups before it
+  imply (AR6's pending rule without its metadata cap clause,
+  `GrowUncounted`); one side per leg ("a leg has two sides"
   otherwise: a migration is in flight); a leg whose only side is not
   `provisioned`, so no cntlr ever built the group (`cnagent.md` CN9; "no leg
   provisioning" otherwise); and the group to carry no repair
@@ -3711,8 +3712,21 @@ total is no larger than the total implied by the slice's groups of that kind
 **excluding the newest one**: for data, the total data is at most the sum of
 `data_blocks` over all data groups but the last; for metadata, the total
 metadata is at most the sum over all meta groups but the last of `data_blocks`
-times the block size divided by `ThinMetaBlockSize`. While pending, no grow of
-that kind starts — this is the "one grow per pool at a time" of
+times the block size divided by `ThinMetaBlockSize`, and is below
+`ThinMetaMaxBlocks`. A pool that reports `ThinMetaMaxBlocks` total metadata
+blocks has no meta grow pending, whatever its meta groups hold: dm-thin uses
+no more metadata however large the device (`common.ThinMetaBlocks`, as
+`cnagent.md` CN13 reads it), so no grow can raise that total, and meta groups
+before the newest that already hold that much would otherwise keep the grow
+pending for ever. The meta ladder builds no such slice, and a ceiling of
+`architecture.md`, GrowSlice (the ladder's cap, or the `MaxGrpCntPerSlice`
+refusal on a full list), not this rule, refuses the next meta grow. Without
+that cap clause the rule reads whether the pool counts the slice's newest
+group of the kind (`model.GrowUncounted`), which is what the withdrawal of a
+stuck grow (below) asks, so on a pool that reports `ThinMetaMaxBlocks` a
+newest meta group that never provisions can still be taken back. While
+pending, no grow of that kind starts — this is the "one grow per pool at a
+time" of
 `architecture.md`, Automatic reactions, reconstructed from etcd and the status
 line on every pass as a memo built from facts, so a worker restart or a
 handoff cannot issue a second grow; a grow deferred on the CN
@@ -3745,14 +3759,17 @@ and, for data, not covered, since the covered test comes first and logs
 `model.GrpListFull`, and ends the pass, as its in-STM `grow_pending` does
 (AR2).
 
-**The withdrawal of a stuck grow.** A grow whose new group holds a leg that
-never provisions stays pending for good: no cntlr builds a group with a leg
-whose every side is still not provisioned (`cnagent.md` CN9), so the pool's
-total never moves, and neither leg repair nor an operator's repair can
-replace a side of such a leg, since both need the leg's health epoch, which
-a provisioning leg never gets (HL2). The pass withdraws a grow when three
-things hold. The grow: it is pending, and the primary's report is of an
-observation made at the snapshot's revision or later. The group: it is the
+**The withdrawal of a stuck grow.** The pool never counts a new group that
+holds a leg that never provisions: no cntlr builds a group with a leg whose
+every side is still not provisioned (`cnagent.md` CN9), so the pool's total
+never moves, and the grow stays pending for good, save a meta grow on a pool
+that reports `ThinMetaMaxBlocks`, which is not pending (above). Neither leg
+repair nor an operator's repair can replace a side of such a leg, since both
+need the leg's health epoch, which a provisioning leg never gets (HL2). The
+pass withdraws a grow when three things hold. The grow: the pool does not
+count its group (the pending rule's sums, without its cap clause), and the
+primary's report is of an observation made at the snapshot's revision or
+later. The group: it is the
 newest group of the grow's kind, with one side per leg, and with no repair,
 retired leg, forced-start mark or operator in charge. The side: one of the
 group's sides is not `provisioned`, has been unhealthy for `side_unhealthy`
@@ -3771,9 +3788,11 @@ the disk nodes and the CNs; the group never held data, since no array was
 built from it. A leg with two sides carries a migration, which owns both
 sides until its finish or its cancel (`architecture.md`, Migrations), so its
 group is never withdrawn. The next pass that finds the pool past its mark
-grows again, the grow no longer pending, and the disk node, whose health
-epoch the trigger required, has no capacity key while that epoch stands, so
-it is offered for no new side. A disk node can also come back first: when it
+grows again, the grow no longer pending, unless a ceiling of
+`architecture.md`, GrowSlice, refuses it, as one does every meta grow on a
+pool that reports `ThinMetaMaxBlocks`; the disk node, whose health epoch the
+trigger required, has no capacity key while that epoch stands, so it is
+offered for no new side. A disk node can also come back first: when it
 does so before a pass finds both its side unhealthy past the threshold and
 the node itself unhealthy, it finishes the zeroing, and the grow completes
 by itself (`architecture.md`, GrowSlice). The trigger is part of auto-grow,
@@ -5949,11 +5968,13 @@ which no suite case sets, so no suite case runs RW13's count compare.
   coordinator's own unhealthy verdict on it and its disk node carries a
   health epoch of its own, only on a primary's report of the snapshot's
   revision or later, and only while the pool is past its mark, which a
-  `low_water_mark_pct` above 100 never is: until then the grow stays
-  pending, no grow of that kind runs on the slice, and the group keeps its
-  extents on the disk nodes and its share of every CN's budget. A side whose
-  disk node passes its own rounds, one that zeroes very slowly or fails its
-  zeroing there, is never withdrawn, and its grow waits for the zeroing. An
+  `low_water_mark_pct` above 100 never is: until then no grow of that kind
+  runs on the slice, held by the pending rule or, on a pool that reports
+  `ThinMetaMaxBlocks`, by a ceiling of `architecture.md`, GrowSlice, and the
+  group keeps its extents on the disk nodes and its share of every CN's
+  budget. A side whose disk node passes its own rounds, one that zeroes
+  very slowly or fails its zeroing there, is never withdrawn, and its grow
+  waits for the zeroing. An
   operator's `GrowSlice` stacked on top of the stuck group is a later group
   of the list, so the stuck one is not the newest any more and is not
   withdrawn while that later group stands.
