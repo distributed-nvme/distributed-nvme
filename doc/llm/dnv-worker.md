@@ -2248,10 +2248,13 @@ begins as a demotion hold or a fence round ends, that of the newest plans
 that hold or round kept (RW22, RW24) — leaves the side out, and the bad
 leg of a repair keeps its side's epoch until its finish makes it a retired
 leg, whose side no hold waits for, so a bad leg costs no such hold. RW24's
-fence round is the exception: it waits for every side of a leg md holds in
-sync by the fence readings, whatever its epoch, so a dead disk node's side,
-or a bad leg's, whose leg md still holds in sync costs a failover, or a
-replacement of the primary, the round's bound of one `cntlr_interval`. The
+fence round is the exception: it waits, whatever a side's epoch, for the
+sides of every leg md holds in sync by the fence readings save each group's
+fence-last leg, whose sides it holds and never waits for. So a side that
+does not report, a dead disk node's or a bad leg's, costs a failover, or a
+replacement of the primary, the round's bound of one `cntlr_interval` while
+the fence readings hold its leg in sync and that leg is not its group's
+fence-last leg. The
 price of leaving a side out is the narrowing itself: a side the load found
 unhealthy that answers after all is not waited for, and the three races
 above stay open for it. The cost is also paid in normal
@@ -2495,8 +2498,10 @@ the round's sides have reported theirs, or at the round's bound: the
 round costs a failover the syncup round trip of the slowest side it waits
 for, one `cntlr_interval` at most, and a round side not fenced by the
 bound can be fenced after the fence-last leg. Such a side, a side that
-reports the revision without its fence, and the fan-outs with no round
-leave the loss open (Known limits).
+reports the revision without its fence, a member md brings into sync in a
+lower slot after the group's fence reading, and a group whose fence no
+round orders — its fan-out runs none, or the coordinator has no fence
+reading of the group — leave the loss open (Known limits).
 
 RW15. **Side request.** A `SyncupSideRequest` carrying `cluster_id`,
 `dn_id`, the `side_pointer` (sp id, leg id, side id), `revision` (the
@@ -6784,10 +6789,11 @@ which no suite case sets, so no suite case runs RW13's count compare.
   `err_epoch` the fan-out's load holds is not waited for, so a dead disk
   node delays its pool's fan-outs only until its sides' epochs are stamped
   and loaded, and the side of a repair's bad leg there delays none (AR8),
-  save in RW24's fence round, which waits for the side of a leg md holds
-  in sync by the fence readings whatever its epoch, so such a side costs a
-  failover or a replacement of the primary the round's bound of one
-  `cntlr_interval`;
+  save in RW24's fence round, which waits for the sides of a leg md holds
+  in sync by the fence readings whatever their epoch, unless that leg is its
+  group's fence-last leg, whose sides the round holds and never waits for;
+  so a dead disk node's side the round waits for costs a failover or a
+  replacement of the primary the round's bound of one `cntlr_interval`;
   a side so found that
   answers after all is not waited for by the other holds either, and the
   races the hold narrows stay open for it (RW14). Nor does `sp sides unsynced` count such
@@ -6817,22 +6823,30 @@ which no suite case sets, so no suite case runs RW13's count compare.
   that export away (`dnagent.md`, Known limits).
 * **The fence round orders only what the coordinator saw, and counts a
   report as a fence** (RW24). A coordinator with no fence reading of a
-  group — no report of the primary since it started, after a worker restart or a
-  handoff — has no fence-last leg for it, so a failover or a replacement
-  of the primary that it fans out hands that group's sides at once, as
-  does a replacement of the primary fanned out with no demotion hold
-  (below). A side of the round counts as fenced once it reports the
+  group — no report of the primary that read the group since it started,
+  after a worker restart or a handoff — has no fence-last leg for it, so a
+  failover or a replacement of the primary that it fans out hands that
+  group's sides at once, as does a replacement of the primary fanned out
+  with no demotion hold (below). A report reads a group only while the
+  group's array row reads `OK` (`cnagent.md` CN28), so a primary that has
+  reported since the coordinator started can still have left a group with
+  no fence reading. A side of the round counts as fenced once it reports the
   revision applied, which a converge that could not fence does too: a
   side device that failed (`dnagent.md` DN9) or a dm-error that could not
   be built leaves the old primary's dm-linear live, and a later re-send
   fences it. A side of the round that does not report within one
-  `cntlr_interval` is not waited for further, and on the lab at 32 slices
-  that is the usual case: every copy and cutoff failover of the e2e suite
-  ended its round by the bound, with 15 to 51 of the round's awaited sides
-  not reported, the sides' syncups at that revision converging in a median
-  of 2.5 to 3.1 s and at most 4.8 s, so there the order holds only for the
-  groups whose sides report within one `cntlr_interval`. In each case a
-  side can be fenced after the fence-last leg. A write is lost when that
+  `cntlr_interval` is not waited for further. On the lab at 32 slices every
+  copy and cutoff failover of the e2e suite, in one full run and two runs
+  of the cutoff case alone, ended its round by the bound, with 15 to 51 of
+  the round's awaited sides not reported, and in the full run's three such
+  failovers the sides' syncups at each one's revision converged in a
+  median of 2.5 to 3.1 s and at most 4.8 s. So there the round ensures the
+  order only for the groups whose sides report within one
+  `cntlr_interval`. The runs timed the sides' reports and converges, not
+  their fence steps: a side reports with the accepted reply at the end of
+  its converge (RW14), and its fence is one step inside that converge
+  (`dnagent.md` DN10). A side that reports without its fence, or not
+  within the bound, can be fenced after the fence-last leg. A write is lost when that
   side's fence falls after the write's copy landed on the side and before
   md's record of the fence-last leg's failure reaches it, since the start
   then copies the fence-last leg, which missed the write. That window

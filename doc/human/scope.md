@@ -307,8 +307,10 @@ the host.
   learns which leg md copies from in the primary's reports, and keeps it
   in memory only. The loss stays possible in these cases. The worker that
   hands the sides a failover or a cntlr replacement of the primary has had
-  no report from the old primary as the primary since it started or took
-  the pool over, so it does not know the leg. A worker that restarts or
+  no report on a group from the old primary as the primary since it
+  started or took the pool over, so it does not know that group's leg. A
+  report covers a group only while the primary's row for the group's
+  array has the status ok. A worker that restarts or
   takes the pool over during the waits of a failover or a replacement,
   before the leg md copies from is told, is such a worker. A disk node
   does not report its fence within the one interval the worker waits, or
@@ -316,11 +318,14 @@ the host.
   failed does. On the lab VMs, where 45 disk nodes share each VM that
   runs disk nodes, a late disk node was the common case at 32 slices: the
   wait ended at its interval in every failover of a pool of 32 slices,
-  with 15 to 51 of roughly 64 sides it waited for not yet reported, so
-  the worker kept the order only for the groups whose sides reported in
-  time. md brought a leg into sync in a lower place after the primary's
-  last report: a leg the primary put back into the array, or the spare
-  leg a leg repair put in.
+  with 15 to 51 of roughly 64 sides it waited for not yet reported. So
+  there the worker ensured the order only in the groups whose sides
+  reported in time. The runs timed the disk nodes' reports, which come at
+  the end of each converge, not the moment of each fence. md brought a leg
+  into sync in a lower place after the primary's last report on the
+  group: a leg the primary put back into the array, or the new leg of a
+  leg repair, which can be a leg that an earlier repair took out of the
+  group.
   The worker then fences that leg before the leg it read as the one md
   copies from. For the late disk node and the leg brought into sync, the
   write is lost only when, of the two legs, the one md copies from is
@@ -1100,8 +1105,12 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   copy serves pauses the volume's IO, until the marks are done; a copy
   still in flight first holds the pause for a short bound. A grow whose new group cannot get ready waits while a repair,
   a retired leg, a forced-start mark, the operator-in-charge flag or a
-  migration acts on that group. The hold delays the cntlrs' syncups by up to one
-  check interval. A repair waits while its array does not run. A clone
+  migration acts on that group. Outside a failover and a cntlr replacement
+  of the primary, the hold delays the cntlrs' syncups by up to one check
+  interval. In those two, the cntlrs but the old primary also wait for its
+  demotion, three seconds at most, and for the other legs' disk nodes to
+  report their fence, one more interval at most (the failover entries
+  above). A repair waits while its array does not run. A clone
   source the agent reads as unused can be cut under a new dm-clone until
   the next converge. The read-only level reaches a controller node only
   with its converge. The cdc answers nothing before its first etcd scan,

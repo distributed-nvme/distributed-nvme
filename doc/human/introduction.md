@@ -185,7 +185,7 @@ the other legs' disk nodes report their fence done, or after one interval,
 still serving completed on that leg, the one the new primary's start of the
 array copies from, but only in the groups whose other disk nodes report in
 time. At 32 slices on the lab VMs the wait ran out in most failovers, so
-the order held only for part of the groups.
+there the worker ensured the order only for part of the groups.
 [The scope page](scope.md#51-hosts-flushes-and-snapshots) says when a write
 can still be lost. Then the new primary assembles
 the arrays, builds the thin pools and the striped devices, and only then moves
@@ -320,8 +320,10 @@ moves over.*
 
 ## Requirements
 
-dnv is tested on Ubuntu 26.04 LTS with the kernel 7.0.0-38-generic, the lab
-VMs' distribution and kernel.
+dnv is tested on Ubuntu 26.04 LTS with the kernel 7.0.0-42-generic, the lab VMs'
+distribution and kernel. The md behaviour that a failover's order of fences
+rests on was checked by hand on that kernel, on one lab VM
+([the scope page](scope.md#notes-on-the-maintenance-tools)).
 
 Tools: nvme-cli, mdadm, nvme-stas, a 2.x version with its daemons stafd and
 stacd, dmsetup, and thin-provisioning-tools, whose thin_dump the agents run,

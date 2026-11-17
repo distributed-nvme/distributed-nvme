@@ -7987,8 +7987,9 @@ document and only pointed to here.
   and md's record of the failed legs reaches it before its fence. The loss
   stays open where the round does not order a group's fence: a failover
   or a replacement of the primary whose coordinator has no fence reading
-  of the group, having no report of the old primary since it started,
-  after a worker restart or a handoff; a replacement
+  of the group, having had no report of the old primary that read the
+  group since it started, after a worker restart or a handoff, as while
+  the group's array row did not read `OK` (`cnagent.md` CN28); a replacement
   of the primary fanned out by a coordinator that has just started, which
   runs no demotion hold (A replacement of the primary can fence the old
   primary first when the pool's coordinator changes during its demotion
@@ -8019,9 +8020,11 @@ document and only pointed to here.
   first, which the script prints and does not judge, lost that write in
   every lab run. On the lab at 32 slices every copy and cutoff failover
   of the e2e suite ended its round by the bound, with 15 to 51 of the
-  round's awaited sides not reported, so there the order held only for
-  the groups whose sides reported in time (`dnv-worker.md`, Known limits);
-  the cutoff case's fence writer lost no acknowledged write in those runs.
+  round's awaited sides not reported, so there the round ensured the
+  order only for the groups whose sides reported in time; the runs timed
+  the sides' reports and converges, not their fence steps (`dnv-worker.md`,
+  Known limits), and the cutoff case's fence writer lost no acknowledged
+  write in those runs.
 * **md's assembly behaviour is pinned in the lab only.** The cross-leg
   half of failover safety ([D16], "Make sure all groups are available")
   rests on mdadm refusing to start an array from a lone survivor whose
