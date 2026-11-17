@@ -30,8 +30,10 @@ import (
 // function here creates, changes or removes an object of the node, as a
 // cntlr's background read must not (CN23; dnagent.md SH29). A thin pool's
 // `dmsetup status` carries the noflush flag and commits nothing, though it
-// waits behind a commit already running on that pool; a dm-clone's still
-// makes the kernel commit the clone's metadata (dnagent.md SH17). In
+// waits behind a commit already running on that pool; so does a dm-clone's,
+// but one that finds the copy whole reads once more without the flag, which
+// makes the kernel commit the clone's metadata (Dm.CloneStatus, dnagent.md
+// SH17). In
 // particular `reserve_metadata_snap`, a pool message that commits the pool,
 // runs only inside `dumpThinMetadata` — the CN25 bitmap reads and CN14's thin
 // id sweeps (the activation sweep and the sweep after a failed delete) —

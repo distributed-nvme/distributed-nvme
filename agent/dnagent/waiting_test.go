@@ -244,12 +244,18 @@ func TestADestinationCutAfterItsLoadThenStoppedKeepsItsHeldIO(t *testing.T) {
 			"after its load")
 	}
 
-	node.failCmdAlways["dmsetup status "+names.clone] = "refused"
+	statusRead := "dmsetup status --noflush " + names.clone
+	before := len(node.callsMatching(statusRead))
+	node.failCmdAlways[statusRead] = "refused"
 	if _, err := srv.SyncupSide(ctx, migrDstReq(3,
 		pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	delete(node.failCmdAlways, "dmsetup status "+names.clone)
+	delete(node.failCmdAlways, statusRead)
+	if len(node.callsMatching(statusRead)) == before {
+		t.Fatal("fixture is wrong: the pass read no dm-clone status, so " +
+			"no refusal stopped it")
+	}
 	node.mu.Lock()
 	cloneNo := node.devNo[nf.DmPath(names.clone)]
 	errNo := node.devNo[nf.DmPath(names.dmErr)]
@@ -400,7 +406,7 @@ func TestACutPromotionIsFinishedWhenTheNextPassStops(t *testing.T) {
 			}},
 		{name: "at a dm-clone status read", dst: true,
 			stop: func(_ *common.NameFmt, names migrDstNames) string {
-				return "dmsetup status " + names.clone
+				return "dmsetup status --noflush " + names.clone
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -443,11 +449,16 @@ func TestACutPromotionIsFinishedWhenTheNextPassStops(t *testing.T) {
 			}
 
 			stop := tc.stop(nf, names)
+			before := len(node.callsMatching(stop))
 			node.failCmdAlways[stop] = "refused"
 			if _, err := srv.SyncupSide(ctx, req); err != nil {
 				t.Fatalf("SyncupSide: %v", err)
 			}
 			delete(node.failCmdAlways, stop)
+			if len(node.callsMatching(stop)) == before {
+				t.Fatalf("fixture is wrong: the pass never ran %q, so no "+
+					"refusal stopped it", stop)
+			}
 			node.mu.Lock()
 			servingNo := node.devNo[nf.DmPath(serving)]
 			node.mu.Unlock()
@@ -493,12 +504,18 @@ func TestAStoppedDestinationReadsAWaitingTable(t *testing.T) {
 	}
 
 	node.failCmd["dmsetup ls"] = "refused once"
-	node.failCmdAlways["dmsetup status "+names.clone] = "refused"
+	statusRead := "dmsetup status --noflush " + names.clone
+	before := len(node.callsMatching(statusRead))
+	node.failCmdAlways[statusRead] = "refused"
 	if _, err := srv.SyncupSide(ctx, migrDstReq(3,
 		pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	delete(node.failCmdAlways, "dmsetup status "+names.clone)
+	delete(node.failCmdAlways, statusRead)
+	if len(node.callsMatching(statusRead)) == before {
+		t.Fatal("fixture is wrong: the pass read no dm-clone status, so " +
+			"no refusal stopped it")
+	}
 	node.mu.Lock()
 	_, listed := node.failCmd["dmsetup ls"]
 	cloneNo := node.devNo[nf.DmPath(names.clone)]

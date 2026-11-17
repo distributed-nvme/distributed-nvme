@@ -275,7 +275,7 @@ func TestAStoppedStepKeepsALiveCloneServing(t *testing.T) {
 		{"the dm-clone's table read is killed",
 			cmdKilled, "dmsetup table " + names.clone, killed, nil, ""},
 		{"the dm-clone's status read is killed",
-			cmdKilled, "dmsetup status " + names.clone, killed, nil, ""},
+			cmdKilled, "dmsetup status --noflush " + names.clone, killed, nil, ""},
 		// Nothing answers for the dm-clone at all, its own probe included:
 		// the per-CN layer is left exactly as it is, and the destination's
 		// rows stay the step's own, not the read-only probe's.

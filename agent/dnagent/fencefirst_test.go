@@ -782,7 +782,7 @@ func TestADestinationKeepsItsRecordAcrossAnUnansweredRead(t *testing.T) {
 		if unspent {
 			break
 		}
-		stop := "dmsetup status " + names.clone
+		stop := "dmsetup status --noflush " + names.clone
 		setHook(node, node.killCmdNoEffectAlways, stop)
 		node.Reset()
 		if _, err := srv.SyncupSide(ctx,

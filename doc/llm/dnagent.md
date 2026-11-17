@@ -907,9 +907,23 @@ since then counts used until the next commit, so the thin-pool auto-grow
 committed counts would, and data no differently. A read with the flag still
 takes the pool's metadata lock for reading, so it waits behind a commit
 already running on that pool, and on that commit's IO. A dm-clone's status
-read carries no flag: unless the device is suspended, the kernel first
-commits the clone's metadata, which flushes the clone's destination once
-that metadata has changed, and a probe that reads it waits on that IO. Probe
+read carries the flag too, so it commits nothing and waits on no flush of
+the clone's destination, which a commit of the clone's metadata makes first;
+its counts are those of memory, which dm-clone commits on its own about
+once a second. A converge's or a read's status read of a dm-clone that
+finds the copy whole is followed by one read without the flag
+(`Dm.CloneStatus`), whose commit flushes the destination and records the
+last copied regions, and its line is the answer; when that read fails,
+the status read fails with it and answers no line, so a row reports the
+error and never the line read with the flag. The reads inside a bitmap
+chunk's apply, which report nothing, take the read with the flag alone
+(`agent.ApplySkipRanges`). Reason: the clone drain
+and a migration's finish act on a report that says the copy is whole
+(`dnv-worker.md`, The clone drain; `architecture.md`, Migrations), and a
+node that died before that commit would come back with
+those regions neither recorded as copied nor sure to be on the
+destination; once the copy is whole the metadata no longer changes, so the
+second read commits at most the last transaction. Probe
 reads MUST tolerate padded or normalized read-back; compare canonically,
 never byte-wise:
 
@@ -3212,7 +3226,8 @@ the latest, finds the step held. The rule:
   they are, by the dm-clone's presence.
 
 `dm_clone_info` carries the raw status line whenever the converge or read
-that made the row read it, whatever the row's status, because
+that made the row read it, whatever the row's status — the line SH17's
+status read answers, none when its read without the flag failed — because
 `FinishMigration` judges hydration from it (`architecture.md`, Migrations): a read reads the line whenever
 the dm-clone is there, short of the wait for the cutover, which reads
 nothing past step (2), and a converge only once its steps through step (4)
@@ -3505,8 +3520,9 @@ comes from the DN, nor a side whose stored request DN8's side conf gate
 refuses, which converges and sweeps nothing for the same reason.
 
 A read never creates, changes or removes an object of the node, though one
-that reads a migration destination's dm-clone status makes the kernel commit
-the clone's metadata (SH17); a check round and an info read change nothing
+that finds a migration destination's copy whole reads the dm-clone's status
+once more without the noflush flag, which makes the kernel commit the
+clone's metadata (SH17); a check round and an info read change nothing
 at all, save that a round starts a read. In particular a read never
 allocates a record and never registers a DN9 zeroing goroutine (registration
 happens only on a converge path), and it reports `RES_STATUS_MISSING` for a
@@ -3721,7 +3737,8 @@ needed, and the worker never turns one into an `err_epoch`
   shared rule's. `RES_STATUS_PROVISIONING` while DN9's gate is closed on
   the destination side, details "side provisioning".
 * `migr_dst_info.dm_clone_info`, named `DnMigrFinalName`: step (2)'s and
-  step (4)'s reads, then `dmsetup status`, none past step (2) while the
+  step (4)'s reads, then `dmsetup status` with the noflush flag, and once
+  more without it when the copy reads whole (SH17), none past step (2) while the
   cutover is pending; its status and its reason are DN13's shared rule's,
   and the details carry the raw status line whenever it was read,
   whatever the row's status (`architecture.md`, Live-state reporting —

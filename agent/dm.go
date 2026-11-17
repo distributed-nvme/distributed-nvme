@@ -390,16 +390,43 @@ func (d *Dm) WaitingTable(
 // Status returns the raw `dmsetup status` output (the dm-clone hydration
 // line rides into ResInfo.details verbatim; architecture.md,
 // Live-state reporting). Without the noflush flag the kernel commits the
-// target's metadata before it answers (dnagent.md SH17).
+// target's metadata before it answers (dnagent.md SH17); only
+// CloneStatus's read of a whole copy wants that.
 func (d *Dm) Status(ctx context.Context, name string) (string, error) {
 	return d.status(ctx, "status", name)
 }
 
 // StatusNoFlush returns the raw `dmsetup status --noflush` output: the read
-// of a thin pool's status, which with the flag commits nothing (dnagent.md
-// SH17). It still waits behind a commit already running on that pool.
+// of a thin pool's status, the first read of a dm-clone's (CloneStatus) and
+// the reads inside a bitmap chunk's apply (cloneStatusNow), which with the
+// flag commit nothing (dnagent.md SH17). It still waits
+// behind the metadata write of a commit already running on that device.
 func (d *Dm) StatusNoFlush(ctx context.Context, name string) (string, error) {
 	return d.status(ctx, "status", "--noflush", name)
+}
+
+// CloneStatus returns the raw status line of a dm-clone: a `dmsetup status
+// --noflush`, which commits nothing, so the read never waits on the flush of
+// the copy's destination that a commit starts with, though it still waits
+// behind the metadata write of a commit already running; and, when that
+// line shows the copy whole, a `dmsetup status` with the flush, whose line
+// it returns. The kernel commits a dm-clone's metadata about once a second
+// on its own, and every commit flushes the destination first, so a line
+// that says whole is only a reading of memory until a commit; the flushing
+// read makes the copied regions and their record durable before any caller
+// reports the copy whole (dnagent.md SH17). Once the copy is whole the
+// metadata no longer changes, so that read commits at most the last
+// transaction.
+func (d *Dm) CloneStatus(ctx context.Context, name string) (string, error) {
+	raw, err := d.StatusNoFlush(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	st, ok := common.ParseCloneStatus(raw)
+	if !ok || st.TotalRegions == 0 || st.HydratedRegions != st.TotalRegions {
+		return raw, nil
+	}
+	return d.Status(ctx, name)
 }
 
 // status runs one `dmsetup status` with args and returns its trimmed output.

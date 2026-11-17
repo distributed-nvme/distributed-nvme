@@ -525,7 +525,7 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 					"-o attr " + clone) {
 					t.Fatalf("the check round never confirmed the absence")
 				}
-				want := "dmsetup status " + clone
+				want := "dmsetup status --noflush " + clone
 				assertErrorDetails(t, converged, want, "ns-dev")
 				assertErrorDetails(t, probed, want, "probed ns-dev")
 				if got := node.dms[nsDev].table; got != onOldClone {
@@ -571,10 +571,10 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 	) {
 		t.Helper()
 		clone := cloneName(srv, testClone)
-		status := "cmd dmsetup status " + clone
+		status := "cmd dmsetup status --noflush " + clone
 		info := "cmd dmsetup info --columns --noheadings -o attr " + clone
-		node.blockCmd("dmsetup status " + clone)
-		t.Cleanup(func() { node.releaseCmd("dmsetup status " + clone) })
+		node.blockCmd("dmsetup status --noflush " + clone)
+		t.Cleanup(func() { node.releaseCmd("dmsetup status --noflush " + clone) })
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -584,7 +584,7 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 		node.mu.Lock()
 		removeCloneDevice(node, srv)
 		node.mu.Unlock()
-		node.releaseCmd("dmsetup status " + clone)
+		node.releaseCmd("dmsetup status --noflush " + clone)
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
@@ -699,7 +699,7 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 	) {
 		t.Helper()
 		clone := cloneName(srv, testClone)
-		status := "dmsetup status " + clone
+		status := "dmsetup status --noflush " + clone
 		info := "dmsetup info --columns --noheadings -o attr " + clone
 		confirm := 2
 		if round {

@@ -656,3 +656,85 @@ func TestDmResumeClearsTheWaitingTable(t *testing.T) {
 		})
 	}
 }
+
+// TestDmCloneStatusFlushesOnlyAWholeCopy pins Dm.CloneStatus (dnagent.md
+// SH17): a dm-clone's status is read with `--noflush`, which commits nothing;
+// a line that shows the copy whole is read once more without the flag, whose
+// commit flushes the copy's destination and records the copy before a caller
+// reports it whole, and that second line is the answer: after a commit that
+// failed it reads less than whole. A copy not yet whole, a copy of no
+// regions and a failed dm-clone get the one read; a read that fails answers
+// its error, and so does a failed second read, which leaves the copy
+// unproven.
+func TestDmCloneStatusFlushesOnlyAWholeCopy(t *testing.T) {
+	ctx := context.Background()
+	const name = "dnv-clone"
+	line := func(hydrated, total int) string {
+		return fmt.Sprintf("0 8388608 clone 8 72/32768 8 %d/%d 0 "+
+			"3 no_hydration no_discard_passdown hydration_threshold 1 "+
+			"hydration_batch_size 1 rw\n", hydrated, total)
+	}
+	// reloaded is the flushing read's line after a commit that failed: the
+	// kernel prints success, with the bitmap it read back from the metadata
+	// device and the metadata read-only.
+	reloaded := strings.Replace(line(1000, 1024), " rw\n", " ro\n", 1)
+	for _, tc := range []struct {
+		name string
+		// runs answers each status read in order: the no-flush one, then
+		// the flushing one.
+		runs []osRun
+		want []string
+		line string
+		err  bool
+	}{
+		{"a copy that runs", []osRun{exitedWith(0, line(10, 1024), "")},
+			[]string{"status --noflush " + name}, line(10, 1024), false},
+		{"a whole copy", []osRun{exitedWith(0, line(1024, 1024), ""),
+			exitedWith(0, line(1024, 1024), "")},
+			[]string{"status --noflush " + name, "status " + name},
+			line(1024, 1024), false},
+		{"a whole copy whose commit failed", []osRun{
+			exitedWith(0, line(1024, 1024), ""),
+			exitedWith(0, reloaded, "")},
+			[]string{"status --noflush " + name, "status " + name},
+			reloaded, false},
+		{"a copy of no regions", []osRun{exitedWith(0, line(0, 0), "")},
+			[]string{"status --noflush " + name}, line(0, 0), false},
+		{"a failed dm-clone", []osRun{
+			exitedWith(0, "0 8388608 clone Fail\n", "")},
+			[]string{"status --noflush " + name}, "0 8388608 clone Fail",
+			false},
+		{"a read that fails", []osRun{exitedWith(1, "", "no such device")},
+			[]string{"status --noflush " + name}, "", true},
+		{"a whole copy whose flushing read fails",
+			[]osRun{exitedWith(0, line(1024, 1024), ""),
+				exitedWith(1, "", "io error")},
+			[]string{"status --noflush " + name, "status " + name}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ran []string
+			oc := &common.FakeOsClient{
+				RunCommandFn: func(
+					ctx context.Context, cmd string, args []string, _ string,
+				) (string, string, int, error) {
+					if cmd != "dmsetup" || len(ran) >= len(tc.runs) {
+						t.Fatalf("unexpected run %s %q", cmd, args)
+					}
+					run := tc.runs[len(ran)]
+					ran = append(ran, strings.Join(args, " "))
+					return run.stdout, run.stderr, run.exitCode, run.err
+				},
+			}
+			got, err := NewDm(oc).CloneStatus(ctx, name)
+			if !slices.Equal(ran, tc.want) {
+				t.Fatalf("ran %q, want %q", ran, tc.want)
+			}
+			if (err != nil) != tc.err {
+				t.Fatalf("err %v, want error %v", err, tc.err)
+			}
+			if !tc.err && got != strings.TrimSpace(tc.line) {
+				t.Fatalf("answer %q, want %q", got, tc.line)
+			}
+		})
+	}
+}

@@ -3214,7 +3214,9 @@ row when that row is not `OK`. The reads of the dm-clone that the rows are
 written from are reads, not such steps, and the row takes them by the
 rule above: when one does not answer, its error is the dm-clone row's own
 details. `clone_id_to_dm_clone` carries the raw status line whenever the
-pass read it, whatever its status, because `DeleteClone`'s hydration
+pass read it, whatever its status — the line `dnagent.md` SH17's status
+read answers, none when its read without the flag failed — because
+`DeleteClone`'s hydration
 check reads it (`architecture.md`, Clones). Where the namespaces serve
 from does not follow the rows: CN16 rule 5 reads the dm-clone's status
 itself. A dm-clone up with hydration off therefore reads
@@ -3896,9 +3898,9 @@ gate's Error record and its empty rows alone. A CN's
 read
 takes no reading: its probe runs first and its verdict second. A read
 never creates, changes or removes an object of the node, though a
-cntlr's read makes the kernel commit the metadata of each dm-clone whose
-status it reads; its status reads of thin pools commit nothing
-(`dnagent.md` SH17).
+cntlr's read makes the kernel commit the metadata of each dm-clone it
+reads whole; its other status reads, of thin pools and of every dm-clone
+whose copy does not read whole, commit nothing (`dnagent.md` SH17).
 
 ### `CheckCn` / `CheckCntlr`
 
@@ -4167,9 +4169,12 @@ did not answer makes every row whose first read goes to it
 
 Outside the reading stay: the `dmsetup status` of each thin pool, and of
 each dm-clone once for its rows and once more for each namespace it backs
-(CN16 rule 5), because a status read can wait on IO: a thin pool's waits
-behind a commit already running on that pool, and a dm-clone's makes the
-kernel commit the clone's metadata (`dnagent.md` SH17). Read per device,
+(CN16 rule 5), each of them with the noflush flag and, for a dm-clone whose
+copy reads whole, once more without it (`dnagent.md` SH17), because a
+status read can wait on IO: a thin pool's and a dm-clone's wait behind a
+commit already running on that device, and the status read of a dm-clone
+whose copy reads whole makes the kernel commit the clone's metadata. Read
+per device,
 a read's status reads wait only on its own cntlr's pools and dm-clones; one
 read over the whole node would wait behind a commit on any pool or dm-clone
 of the node, another cntlr's too. Also outside stay the configfs reads of
@@ -4448,7 +4453,9 @@ The rows, each with its `res_name` and what its probe checks:
   `MISSING`.
 * `clone_id_to_dm_clone`, named by the `CnCloneFinalName`:
   `dmsetup info` — the reading's in a read — then
-  `dmsetup status` of a dm-clone that is there, and after a status read
+  `dmsetup status` with the noflush flag of a dm-clone that is there, and
+  once more without it when the copy reads whole (`dnagent.md` SH17),
+  whose line is the one used, and after a status read
   that failed the fresh `dmsetup info` of CN16 rule 5 and CN18 step 2; its
   status and its reason are CN18's shared rule's, which reads the
   dm-clone's hydration and its metadata mode from the status line, and the
@@ -4549,9 +4556,9 @@ object of the node — the one file the CN's read writes itself is the store's
 probe file (the store row above) — the metadata-snapshot reserve runs only
 inside `dumpThinMetadata` (the CN25 bitmap reads and CN14's sweeps of a
 pool's thin ids — the activation sweep and the sweep after a failed delete),
-never from `probe.go` — though a status read of a dm-clone makes the kernel
-commit the clone's metadata, where a thin pool's commits nothing
-(`dnagent.md` SH17). `RES_STATUS_PROVISIONING` is never produced by this
+never from `probe.go` — though a status read of a dm-clone whose copy
+reads whole makes the kernel commit the clone's metadata, where every other
+status read commits nothing (`dnagent.md` SH17). `RES_STATUS_PROVISIONING` is never produced by this
 path: it is assigned by the CN9 gate, not by a failed command; and
 `RES_STATUS_PENDING` is produced by the CN11 registry alone, never by a
 failed command. The group row's probe opens no md member device: it is

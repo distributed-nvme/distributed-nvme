@@ -645,7 +645,7 @@ func (s *DnAgentServer) runMigrDst(
 		s.applyChunks(ctx, st, plan)
 	}
 	seen.hydrationErr = s.ensureHydration(ctx, plan)
-	seen.raw, seen.statusErr = s.dm.Status(ctx, plan.migrFinalName())
+	seen.raw, seen.statusErr = s.dm.CloneStatus(ctx, plan.migrFinalName())
 	seen.statusRead = seen.statusErr == nil
 	return seen
 }
@@ -1158,7 +1158,7 @@ func (s *DnAgentServer) ensureHydration(
 	plan *sidePlan,
 ) error {
 	name := plan.migrFinalName()
-	raw, err := s.dm.Status(ctx, name)
+	raw, err := s.dm.CloneStatus(ctx, name)
 	if err != nil {
 		return err
 	}

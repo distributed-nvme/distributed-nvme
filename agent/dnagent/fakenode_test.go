@@ -150,6 +150,10 @@ type fakeNode struct {
 	// (inProcessHookErr).
 	failCmd       map[string]string
 	failCmdAlways map[string]string
+	// cloneHydrated is the hydrated region count a dm-clone's status
+	// prints, by dm name, capped at its region total (setCloneHydrated);
+	// zero, a copy that has not begun, when unset.
+	cloneHydrated map[string]uint64
 	// failCmdLeft, when set for a failCmd key, is how many matching
 	// commands that key fails before it is spent; a key it does not name
 	// fails one (takeFailCmd).
@@ -329,6 +333,7 @@ func newFakeNode() *fakeNode {
 		pendingNs:     make(map[string]*pendingNs),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
+		cloneHydrated: make(map[string]uint64),
 		failCmdLeft:   make(map[string]int),
 
 		killCmd:               make(map[string]bool),
@@ -1650,8 +1655,9 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		}
 		return strings.Join(dmTargets(dm.table), "\n") + "\n", 0
 	case "status":
-		// `dmsetup status [--noflush] <name>`: the read of a dm-clone's copies
-		// in flight carries the flag (agent.ApplySkipRanges).
+		// `dmsetup status [--noflush] <name>`: a dm-clone's first read
+		// carries the flag (Dm.CloneStatus, dnagent.md SH17), as does the
+		// read of its copies in flight (agent.ApplySkipRanges).
 		if len(args) == 3 && args[1] == "--noflush" {
 			return f.dmStatus(args[2])
 		}
@@ -1910,6 +1916,14 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 	return "", 0
 }
 
+// setCloneHydrated sets the hydrated count a dm-clone's status prints,
+// capped at its region total.
+func (f *fakeNode) setCloneHydrated(name string, count uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cloneHydrated[name] = count
+}
+
 func (f *fakeNode) dmStatus(name string) (string, int) {
 	dm, ok := f.dms[name]
 	if !ok {
@@ -1973,10 +1987,11 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		if dm.metaMode != "" {
 			mode = " " + dm.metaMode
 		}
+		hydrated := min(f.cloneHydrated[name], regions)
 		return fmt.Sprintf(
-			"0 %s clone 8 1/1024 %s 0/%d 0 %s 4 hydration_threshold %d "+
+			"0 %s clone 8 1/1024 %s %d/%d 0 %s 4 hydration_threshold %d "+
 				"hydration_batch_size %d%s\n",
-			sectors, regionSectors, regions, features,
+			sectors, regionSectors, hydrated, regions, features,
 			dm.threshold, dm.batchSize, mode), 0
 	}
 	return "", 1

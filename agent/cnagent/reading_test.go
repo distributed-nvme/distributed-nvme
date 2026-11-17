@@ -986,7 +986,7 @@ func TestACntlrReadTakesTheCloneFromTheReading(t *testing.T) {
 		assertNoCall(t, node, "cmd dmsetup ls")
 		for call, want := range map[string]int{
 			"cmd dmsetup status --noflush " + poolName(srv): 1,
-			"cmd dmsetup status " + clone:                   2,
+			"cmd dmsetup status --noflush " + clone:         2,
 			"cmd dmsetup status ":                           3,
 		} {
 			if got := callCnt(node, call); got != want {
@@ -1005,8 +1005,11 @@ func TestACntlrReadTakesTheCloneFromTheReading(t *testing.T) {
 // reads (dnagent.md SH17; CN28): a thin pool's status read passes
 // `--noflush`, in the converge's pool step and in the probe of the cntlr's
 // read, which a check round and an info read answer from, so none of them
-// commits the pool; a dm-clone's status reads pass no flag. The primary
-// holds a built, hydrating clone, so every entrance reads both kinds.
+// commits the pool; a dm-clone's status read passes it too while its copy
+// runs, and once the copy reads whole it is followed by one read with the
+// flush (Dm.CloneStatus), which commits the copy's record before the copy
+// is reported whole. The primary holds a built clone, hydrating and then
+// whole, so every entrance reads both kinds.
 func TestPoolStatusReadsCarryNoFlush(t *testing.T) {
 	srv, node := newTestServer(t)
 	o := reqOpts{revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}}
@@ -1019,7 +1022,7 @@ func TestPoolStatusReadsCarryNoFlush(t *testing.T) {
 		read func()
 	}{
 		{"a converge", func() {
-			o.revision = 3
+			o.revision++
 			syncupCntlrAt(t, srv, o)
 		}},
 	}
@@ -1029,36 +1032,60 @@ func TestPoolStatusReadsCarryNoFlush(t *testing.T) {
 			read func()
 		}{entrance.name, func() { entrance.read(t, srv) }})
 	}
-	for _, entrance := range entrances {
-		node.Reset()
-		entrance.read()
-		poolReads, cloneReads := 0, 0
-		for _, call := range node.callsMatching("cmd dmsetup status ") {
-			fields := strings.Fields(call)
-			flagged := slices.Contains(fields, "--noflush")
-			switch name := fields[len(fields)-1]; name {
-			case pool:
-				poolReads++
-				if len(fields) != 5 || fields[3] != "--noflush" {
-					t.Errorf("%s: %q: a pool's status read without "+
-						"--noflush commits the pool", entrance.name, call)
-				}
-			case clone:
-				cloneReads++
-				if flagged {
-					t.Errorf("%s: %q: a dm-clone's status read carries "+
-						"--noflush", entrance.name, call)
-				}
-			default:
-				if flagged {
-					t.Errorf("%s: %q: --noflush on a device that is no "+
-						"thin pool", entrance.name, call)
+	for _, whole := range []bool{false, true} {
+		if whole {
+			node.setCloneHydrated(t, clone, 1<<30)
+		}
+		for _, entrance := range entrances {
+			node.Reset()
+			entrance.read()
+			poolReads, cloneReads, cloneFlushes := 0, 0, 0
+			flushedAfterRead := true
+			lastClone := ""
+			for _, call := range node.callsMatching("cmd dmsetup status ") {
+				fields := strings.Fields(call)
+				flagged := slices.Contains(fields, "--noflush")
+				switch name := fields[len(fields)-1]; name {
+				case pool:
+					poolReads++
+					if len(fields) != 5 || fields[3] != "--noflush" {
+						t.Errorf("%s: %q: a pool's status read without "+
+							"--noflush commits the pool", entrance.name, call)
+					}
+				case clone:
+					if flagged {
+						cloneReads++
+					} else {
+						cloneFlushes++
+						if lastClone != "noflush" {
+							flushedAfterRead = false
+						}
+					}
+					lastClone = map[bool]string{true: "noflush", false: "flush"}[flagged]
+				default:
+					if flagged {
+						t.Errorf("%s: %q: --noflush on a device that is no "+
+							"thin pool", entrance.name, call)
+					}
 				}
 			}
-		}
-		if poolReads == 0 || cloneReads == 0 {
-			t.Errorf("%s: %d pool and %d dm-clone status reads: the case "+
-				"is vacuous", entrance.name, poolReads, cloneReads)
+			if poolReads == 0 || cloneReads == 0 {
+				t.Errorf("%s (whole %v): %d pool and %d dm-clone status "+
+					"reads: the case is vacuous", entrance.name, whole,
+					poolReads, cloneReads)
+			}
+			switch {
+			case !whole && cloneFlushes != 0:
+				t.Errorf("%s: %d flushing reads of a dm-clone whose copy "+
+					"runs, want none", entrance.name, cloneFlushes)
+			case whole && cloneFlushes != cloneReads:
+				t.Errorf("%s: %d flushing reads after %d no-flush reads of "+
+					"a whole copy, want one after each", entrance.name,
+					cloneFlushes, cloneReads)
+			case !flushedAfterRead:
+				t.Errorf("%s: a flushing read came without a no-flush read "+
+					"before it", entrance.name)
+			}
 		}
 	}
 }

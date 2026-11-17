@@ -134,6 +134,7 @@ func TestADestinationWaitsForTheCutover(t *testing.T) {
 	}
 	for _, call := range []string{
 		"cmd nvme connect", "cmd dmsetup status " + names.clone,
+		"cmd dmsetup status --noflush " + names.clone,
 	} {
 		if node.hasCall(call) {
 			t.Errorf("a destination waiting for the cutover ran %q", call)
@@ -170,6 +171,7 @@ func TestADestinationWaitsForTheCutover(t *testing.T) {
 	}
 	for _, call := range []string{
 		"list /sys/class/nvme-subsystem/", "cmd dmsetup status " + names.clone,
+		"cmd dmsetup status --noflush " + names.clone,
 	} {
 		if node.hasCall(call) {
 			t.Errorf("a round of a destination waiting for the cutover "+

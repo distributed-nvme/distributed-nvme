@@ -7768,9 +7768,10 @@ document and only pointed to here.
   the pool, the bitmap reads of a thin device and of a data leg (`cnagent.md`
   CN25) and the thin id sweeps (`cnagent.md` CN14) among them; a reload or
   suspend of the pool; a commit of a clone's dm-clone, which flushes the td it
-  writes into and so commits the pool, whether a status read of the dm-clone
-  makes it (`dnagent.md` SH17) or dm-clone makes it on its own once its
-  metadata has changed, as it does while hydration runs; and dm-thin's own
+  writes into and so commits the pool, whether a status read of a dm-clone
+  whose copy reads whole makes it (`dnagent.md` SH17) or dm-clone makes it
+  on its own once its metadata has changed, as it does while hydration
+  runs; and dm-thin's own
   periodic commit once any write has mapped new blocks, a host's write or a
   clone's hydration copy into the td alike. While a commit waits, the rest of
   that pool's IO waits too, and so does a status read of the pool, which takes

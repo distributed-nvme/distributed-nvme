@@ -12,8 +12,10 @@ import (
 
 // The probe map of DN18. No function here creates, changes or removes an
 // object of the node, as the background read behind the check rounds must not
-// (DN16, SH29); reading a migration destination's dm-clone status still makes
-// the kernel commit the clone's metadata (SH17). What a probe can change is
+// (DN16, SH29); a migration destination's dm-clone status is read with the
+// noflush flag and commits nothing, but a read that finds the copy whole
+// reads once more without it, which makes the kernel commit the clone's
+// metadata (Dm.CloneStatus, SH17). What a probe can change is
 // the agent's own view of the disk (probeDn), and the one file a read writes
 // itself is the store's probe file, while the store refuses writes, which the
 // read removes once the write holds (agent.Store.Probe, DN18). A migration
@@ -359,7 +361,7 @@ func (s *DnAgentServer) probeMigrDst(
 			return seen
 		}
 	}
-	seen.raw, seen.statusErr = s.dm.Status(ctx, name)
+	seen.raw, seen.statusErr = s.dm.CloneStatus(ctx, name)
 	seen.statusRead = seen.statusErr == nil
 	return seen
 }

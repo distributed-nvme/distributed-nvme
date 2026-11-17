@@ -745,7 +745,7 @@ func (s *CnAgentServer) cloneServes(
 	ctx context.Context,
 	cp *clonePlan,
 ) (bool, error) {
-	raw, err := s.dm.Status(ctx, cp.finalName)
+	raw, err := s.dm.CloneStatus(ctx, cp.finalName)
 	if err != nil {
 		if dev, infoErr := s.dm.Info(
 			ctx, cp.finalName); infoErr == nil && dev == nil {
@@ -760,7 +760,7 @@ func (s *CnAgentServer) cloneStatus(
 	ctx context.Context,
 	cp *clonePlan,
 ) (*common.CloneStatus, error) {
-	raw, err := s.dm.Status(ctx, cp.finalName)
+	raw, err := s.dm.CloneStatus(ctx, cp.finalName)
 	if err != nil {
 		return nil, err
 	}
@@ -841,8 +841,8 @@ func (dm cloneDmRead) serves() bool {
 // Absence is confirmed, never assumed, by cloneServes's rule: after a status
 // read that fails, a fresh `dmsetup info` of the device, never the reading's,
 // that finds it gone makes the read an absence, and anything else keeps it an
-// error. Reading the status makes the kernel commit the clone's metadata
-// (dnagent.md SH17).
+// error. The status read commits the clone's metadata only once the copy
+// reads whole (Dm.CloneStatus; dnagent.md SH17).
 func (s *CnAgentServer) probeCloneDm(
 	ctx context.Context,
 	rd *cnReading,
@@ -855,7 +855,7 @@ func (s *CnAgentServer) probeCloneDm(
 	if dev == nil {
 		return cloneDmRead{}
 	}
-	raw, err := s.dm.Status(ctx, cp.finalName)
+	raw, err := s.dm.CloneStatus(ctx, cp.finalName)
 	if err != nil {
 		if gone, infoErr := s.dm.Info(
 			ctx, cp.finalName); infoErr == nil && gone == nil {
