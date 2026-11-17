@@ -473,7 +473,10 @@ const (
 	// revision is the one the agent still holds, zero when it holds none.
 	// The details carry the save's error. It is neither a stale revision nor
 	// an invalid conf: the request is current and usable, and the agent
-	// cannot keep it.
+	// cannot keep it. A dn agent refuses with it too a migration bitmap
+	// piece whose push could not first remove the chunks stored at its
+	// index and above, or could not then save the piece (dnagent.md DN15);
+	// a push reply carries no revision.
 	ReplyCodeSaveFailed = 5
 
 	// Seconds between background retries of a migration destination whose

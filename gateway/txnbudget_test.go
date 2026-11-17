@@ -893,22 +893,25 @@ func TestDeleteCntlrTxnBudget(t *testing.T) {
 // TestFinishMigrationTxnBudget is FinishMigration's tripwire for its deciding
 // STM: besides the source DN it releases, it reads and writes the destination
 // DN, which gets back the migration's metadata units — a units-only change,
-// so one capacity put, no delete and no DnRev.
+// so one capacity put, no delete and no DnRev — and it deletes the keys an
+// older build kept the migration's bitmap under (model.EndMigrationIn).
 func TestFinishMigrationTxnBudget(t *testing.T) {
 	txnShape{
 		name: "FinishMigration",
-		stm:  "migration.go's FinishMigration and dnLedger",
+		stm:  "migration.go's FinishMigration, dnLedger and model.EndMigrationIn",
 		// ClusterConf, SpConf, SpRev, the Migration, the source DnConf and
 		// DnRev, and the destination DnConf.
 		fixedReads: 7,
 		// The source DnConf, dn_capacity delete and put and DnRev; the
-		// destination DnConf and dn_capacity put; the Migration delete and
-		// the Slice, SpConf and SpRev puts.
-		fixedWrites: 10,
+		// destination DnConf and dn_capacity put; the Migration delete, the
+		// deletes of the four keys an older build kept the migration's
+		// bitmap under (model.LegacyMigrBmCnt), and the Slice, SpConf and
+		// SpRev puts.
+		fixedWrites: 14,
 		terms: []txnTerm{
 			{"slice", 1, common.MaxSliceCntPerSp, 32},
 		},
-		maxCompares: 49,
+		maxCompares: 53,
 		overDefault: false,
 	}.check(t)
 }

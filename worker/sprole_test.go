@@ -2515,6 +2515,14 @@ type stubSideAgent struct {
 	syncupReply func(req *pb.SyncupSideRequest) *pb.SyncupSideReply
 	checkReply  func(req *pb.CheckSideRequest) *pb.CheckSideReply
 	pushCode    uint32
+	// refuse counts, per bm_idx, the next pushes of that piece to refuse
+	// with ReplyCodeSaveFailed, as the dn agent refuses a piece whose
+	// removal of the chunks at its index and above failed (dnagent.md
+	// DN15), whatever pushCode says.
+	refuse map[uint32]int
+	// pushHold, when set, keeps every push waiting, once recorded, until it
+	// is closed.
+	pushHold chan struct{}
 }
 
 func (s *stubSideAgent) SyncupSide(
@@ -2568,7 +2576,15 @@ func (s *stubSideAgent) PushMigrBitmap(
 	s.mu.Lock()
 	s.pushReqs = append(s.pushReqs, req)
 	code := s.pushCode
+	if s.refuse[req.GetBmIdx()] > 0 {
+		s.refuse[req.GetBmIdx()]--
+		code = common.ReplyCodeSaveFailed
+	}
+	hold := s.pushHold
 	s.mu.Unlock()
+	if hold != nil {
+		<-hold
+	}
 	return &pb.PushMigrBitmapReply{
 		AgentReply: &pb.AgentReply{Code: code},
 	}, nil

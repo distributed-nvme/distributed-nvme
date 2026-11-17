@@ -354,7 +354,7 @@ ClusterConf
     │   ├── meta_grp_list: Group ── leg_list: Leg ── side_list: Side
     │   └── data_grp_list: (same shape)
     ├── ThinDevice(td_name), Subsystem(nqn)+Namespace,
-    │   Transfer(xfer_name), Migration(migr_name)  (+ bitmap keys)
+    │   Transfer(xfer_name), Migration(migr_name)
     ├── Clone(clone_name)                      (+ bitmap keys)
     │   └── meta_grp: Group ── leg_list: Leg ── side_list: Side
     ├── Repair(rep_name) ── new_leg_list: Leg ── side_list: Side
@@ -1285,6 +1285,7 @@ this document relies on:
 | `CloneBitmap` | {p} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx} | one chunk of source slice `src_slice_idx`'s bitmap, self-positioned at byte `bm_idx` times `CloneBmChunkBytes` within it (Bitmap push protocol); `src_slice_idx` is below `src_slice_cnt`, itself at most `MaxSliceCntPerSp`, and `bm_idx` is below `MaxCloneBmCnt` |
 | `Transfer` | {p} transfer {cluster_id} {sp_id} {xfer_name} | |
 | `Migration` | {p} migration {cluster_id} {sp_id} {migr_name} | carries `meta_units`, the destination's metadata units, written by `CreateMigration` (Metadata units), and `cutover_pending`, which `CreateMigration` writes set and only the sp worker's cutover clears (Migration) |
+| (none) | {p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx} | one chunk of an older build's migration bitmap, `bm_idx` below `model.LegacyMigrBmCnt`; no build writes or reads it, and `model.EndMigrationIn` deletes it with its migration (Upgrade in lockstep) |
 | `Repair` | {p} repair {cluster_id} {sp_id} {rep_name} | its new leg embedded, with its side; listed in `SpConf.repair_name_list` and named by its group's `rep_name` (Repairs) |
 | `RetiredLeg` | {p} retired_leg {cluster_id} {sp_id} {leg_id} | keyed by the leg's own id, its side embedded; listed in `SpConf.retired_leg_id_list` and in its group's `retired_leg_id_list` (Retired legs) |
 | `SpName` | {p} sp_id_to_name {cluster_id} {sp_id} | reverse lookup for admin and log analysis; needed because `SpRev`, which also carries `sp_name`, can only be addressed with the SP's shard code [D10] |
@@ -4290,11 +4291,14 @@ its pad bits in the middle of the chunk and shift every later bit. So
   a chunk whose own file, or whose owner's or that owner's parent's, the
   restart could not load: it stays out of the applied set — left on disk
   or deleted — so the worker pushes it again if it still wants it
-  (`dnagent.md` DN2, `cnagent.md` CN2). A push whose save failed only at
-  the directory sync, after its rename, leaves its file in place and
-  applies nothing: the applied set keeps the chunk as it held it before
-  that push until a push rewrites the file or a later restart loads it
-  (`dnagent.md` SH21). Re-applying a chunk is always
+  (`dnagent.md` DN2, `cnagent.md` CN2). A push whose save fails applies
+  nothing; the dn agent refuses a migration's, and the cn agent acks a
+  clone's (`dnagent.md` DN15, `cnagent.md` CN22). One whose save failed
+  only at the directory sync, after its rename, leaves its file in place:
+  the applied set keeps a clone chunk as it held it before that push, and
+  holds no migration chunk at that index or above, which the push took out
+  first, until a push rewrites the file or a later restart loads it
+  (`dnagent.md` SH21, DN15). Re-applying a chunk is always
   harmless — discarding an already-hydrated dm-clone region again is a
   no-op, which holds only because every dnv dm-clone carries
   `no_discard_passdown` ([D7]; `cnagent.md` CN18). Bitmap push protocol
@@ -4336,10 +4340,12 @@ its pad bits in the middle of the chunk and shift every later bit. So
 * `PushMigrBitmap` delivers one piece of a migration's bitmap
   (`side_pointer`, `migr_id`, `bm_idx`, `bitmap`) to the
   **destination**-side agent, per Bitmap push protocol: a `bm_idx` at or
-  above `MaxMigrBmCnt` is refused (`dnagent.md` DN15); persist the piece at
-  `LocalMigrBmPath`, then recompute and discard the fully skippable
-  dm-clone regions (Migrations, raid0 bitmap math). Reply `agent_reply`
-  only.
+  above `MaxMigrBmCnt` is refused (`dnagent.md` DN15); a piece equal to
+  the one held is taken as it is; any other first removes the stored
+  chunks at its `bm_idx` and above, the push refused when that removal
+  fails; persist the piece at `LocalMigrBmPath`, then recompute and
+  discard the fully skippable dm-clone regions (Migrations, raid0 bitmap
+  math). Reply `agent_reply` only.
 * `GetDnInfo` and `GetSideInfo` return the agent's latest observation of
   the DN or the side from memory, without changing anything, reading the
   node or starting a read (`agent_reply`, `revision`, the info,
@@ -4787,22 +4793,24 @@ against a report that a newer desired state has replaced is either still
 correct or refused, and a revision gate would only ever discard work the
 next round is about to redo. The worker learns what is missing from the
 applied sets the `SyncupSide` and `SyncupCntlr` replies carry — the clone
-chunks etcd holds, or the pieces of the worker's own read of a migration's
-bitmap, that the set does not list, compared as whole pairs for a clone —
-and pushes them one part per request, one in flight per migration or
-clone, in ascending address order (load-bearing for a migration, whose
-chunks concatenate; deterministic only for a clone), to the destination
-side's DN or to the CN hosting the primary cntlr; calls for different
-objects are independent. A migration's pieces are also pushed right
-after the worker's read and again on each of its later report rounds,
-against the applied set of the destination's last accepted `SyncupSide`
-reply, or all of them when the worker holds none, as after a restart of
-the worker while the agent kept its revision; a round leaves out the
-pieces the worker has delivered since. A failure ends that object's plan
-and is remembered nowhere: the object's next accepted `Syncup*` reply
-reports its applied set again, and what is still missing is planned again
-from that, or for a migration from its next round (`dnv-worker.md` BM1 to
-BM7); a reply that refuses the request, at a gate
+chunks etcd holds that the set does not list, compared as whole pairs, or
+the pieces of the worker's own read of a migration's bitmap that the set
+does not list or that the worker has not delivered itself, as the set may
+list the chunks an older build left (Upgrade in lockstep) — and pushes
+them one part per request, one in flight per migration or clone, in
+ascending address order (load-bearing for a migration, whose chunks
+concatenate; deterministic only for a clone), to the destination side's
+DN or to the CN hosting the primary cntlr; calls for different objects are
+independent. A migration's pieces are also all pushed right after the
+worker's read, whatever the set lists, and again on each of its later
+report rounds from the lowest piece the worker has not delivered, unless
+its earlier pushes are still under way; every
+migration plan runs from its lowest piece to the read's last, as the agent
+takes out of its set every chunk above a piece it saves. A failure ends
+that object's plan and is remembered nowhere: the object's next accepted
+`Syncup*` reply reports its applied set again, and what is still missing
+is planned again from that, or for a migration from its next round
+(`dnv-worker.md` BM1 to BM7); a reply that refuses the request, at a gate
 or for a failed save (`dnagent.md` SH9), gives the worker no applied set
 (`dnv-worker.md` RW5).
 
@@ -4811,8 +4819,14 @@ chunk's address, never a revision: a `migr_id` or `clone_id` it does not
 know, or a chunk address its object cannot hold, is refused with a
 non-zero `code` (`dnagent.md` DN15, `cnagent.md` CN22). A chunk equal,
 byte for byte, to the one it holds at that address is answered OK and
-neither saved nor applied again. Otherwise it **persists before it
-applies**: the chunk goes
+neither saved nor applied again. Otherwise a migration's agent first
+removes the chunks stored at the piece's index and above, files and set
+alike, since each of them was placed behind the chunk the piece replaces,
+which may be of another length; a removal that fails, or a save that
+fails after it, refuses the push with `ReplyCodeSaveFailed`, so the worker
+pushes no later piece over a chunk the removal left or a crash before
+the save's directory sync brought back (`dnagent.md` DN15). Then it
+**persists before it applies**: the chunk goes
 to its `LocalMigrBmPath` or `LocalCloneBmPath`
 file first, with the atomic, durable replace of Common agent rules, and
 only then are the fully skippable dm-clone regions recomputed — for a
@@ -6812,22 +6826,28 @@ again. A `ClusterConf` is write-once, so a cluster keeps a `qos_ratio` an
 older build stored even where it is not all zero, which `CreateCluster`
 refuses (Common validation): the worker copies it into every
 controller-node syncup and nothing enforces it (Controller node, common).
-An etcd key of a kind no build writes any more stays where an older build
-left it, unread: an older build kept a migration's bitmap in etcd, under
-keys of the kind migration_bitmap, which no later build reads or deletes,
-as no code deletes a pool's keys by their prefix, and they stay until an
-operator deletes them. A migration under way at the upgrade keeps the
-chunks its destination already holds, which the agent reloads at startup
-and lists as applied (`dnagent.md` DN2), and the worker pushes the pieces
-of its own read either at the indexes those chunks leave free, when it
-holds the destination's applied set, or at every index, each piece
-replacing the older chunk there one push at a time, when it holds none, as
-after its own restart (`dnv-worker.md` BM7): either way an apply can join a
-piece with an older chunk that is not `MigrBmPieceBytes` long, so a later
-bit lands at the wrong place, and the copy can then skip a block the
-source wrote, which reads what the destination's recycled
-extents held, possibly another pool's bytes. So a migration is finished or
-cancelled before an upgrade (Known limits).
+An older build kept a migration's bitmap in etcd, under keys of the kind
+migration_bitmap, one per chunk at an index below `model.LegacyMigrBmCnt`,
+the bound its gateway held the chunks to. No build writes or reads that
+kind; the transaction that ends a migration, a finish or a cancel of the
+gateway or of the worker, deletes those keys of its migration with the
+record (`dnv-worker.md` MD2, MD6). Reason: every way a migration ends runs
+that one write, and a delete inside it cannot be lost to a crash, which a
+delete by prefix after it could be, as these transactions offer none.
+A migration under way at the upgrade keeps the chunks its destination
+already holds, of whatever lengths the older build was given, which the
+agent reloads at startup, re-applies at the places that build gave them
+and lists as applied (`dnagent.md` DN2). The worker pushes every piece of
+its own read right after the read, whatever that set lists, and counts a
+piece as delivered only once it has pushed it itself (`dnv-worker.md` BM2,
+BM7); before it saves a piece, the agent takes out every chunk at the
+piece's index and above it, files and set alike (`dnagent.md` DN15). So
+the first piece it saves removes every older chunk from there on, and no
+piece is placed behind an older chunk of another length, where a later
+bit would land at the wrong place and the copy could skip a block the
+source wrote: an older chunk stays only behind pieces equal to the older
+chunks before it byte for byte, at the place that build gave it, so its
+bits mean there what they meant to that build.
 
 A kind of object a build does not build, it does not take over either: a
 dm device, a loop device or a mount that an older build left under a name
@@ -7733,12 +7753,6 @@ document and only pointed to here.
   where that host wrote a block the bitmap marked never written, and the
   old bytes where it wrote a region the copy had already read. Nothing
   checks what `allowed_hosts` name.
-* **A migration under way across an upgrade can place its pieces
-  wrongly** (Upgrade in lockstep): its destination keeps the bitmap chunks
-  an older build pushed, and the worker's pieces either fill the indexes
-  they leave free or replace them one push at a time, so an apply can join
-  a piece with an older chunk of another length.
-  A migration is finished or cancelled before an upgrade.
 * **A clone bitmap page sent again without its position is stored
   twice.** `AppendCloneBitmap` places a page only when the request names
   its position (Clones). Without it the page lands at the end, so a caller

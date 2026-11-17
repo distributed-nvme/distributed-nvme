@@ -32,6 +32,14 @@ func TestSpNameKeyGolden(t *testing.T) {
 // TestKeyGoldenStrings pins one golden string per key (MD9; architecture.md,
 // Key table).
 func TestKeyGoldenStrings(t *testing.T) {
+	// The keys an older build kept a migration's bitmap under are deleted at
+	// every index it could write (LegacyMigrBitmapKey), so the bound is
+	// pinned as well as the key.
+	if LegacyMigrBmCnt != 4 {
+		t.Fatalf("LegacyMigrBmCnt = %d, want 4: release v0.1.0's gateway "+
+			"took appends at bm_idx 0 to 3 (its MaxMigrBmCnt was 4)",
+			LegacyMigrBmCnt)
+	}
 	cases := []struct {
 		name string
 		got  string
@@ -148,6 +156,12 @@ func TestKeyGoldenStrings(t *testing.T) {
 			"MigrationKey",
 			MigrationKey(goldenCid, goldenSpId, "migr0"),
 			"dnv migration ebada5168620c5fe 0000000000000011 migr0",
+		},
+		{
+			"LegacyMigrBitmapKey",
+			LegacyMigrBitmapKey(goldenCid, goldenSpId, "migr0", 3),
+			"dnv migration_bitmap ebada5168620c5fe 0000000000000011 " +
+				"migr0 03",
 		},
 		{
 			"RepairKey",

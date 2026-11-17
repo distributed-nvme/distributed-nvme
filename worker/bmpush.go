@@ -73,9 +73,13 @@ type bmPart struct {
 }
 
 // bmPlan is the work one Syncup* reply's diff produced for ONE migration or
-// clone (BM2): the chunks the agent does not hold, ascending by
-// (src_slice_idx, bm_idx), which is what makes a migration's chunk
-// concatenation interpretable (architecture.md, Bitmap push protocol).
+// clone (BM2), or for a migration its read or an offer (BM7): for a clone
+// the chunks the agent does not hold; for a migration every piece from the
+// first one the memo of BM5 does not list (an offer), or the memo or the
+// agent's set does not list (a reply), or every piece (the read), to the
+// read's last piece. Either is ascending by (src_slice_idx, bm_idx), which
+// is what makes a migration's chunk concatenation interpretable
+// (architecture.md, Bitmap push protocol).
 //
 // A plan carries no revision. A push is position-addressed data keyed by an
 // id that is never reused, it never advances the agent's stored revision, and
@@ -148,12 +152,13 @@ type bmPusherParams struct {
 
 // bmPusher is the push engine of one sp child (BM1-BM7). Its public surface is
 // missing (BM2/BM5), unacked (BM7) and submit (BM3), which the child's loop
-// goroutine calls and, for a migration, also the child's read goroutine and
-// the coordinator's offer (BM7); spawn, which runs that read; and stop,
-// which the coordinator makes after joining the child's loop. Each takes the
-// engine's lock. A failure raises no flag and re-arms nothing: it is logged,
-// and the next Syncup* reply re-plans the diff from the agent's acknowledged
-// set, as does a migration's next offer (BM7).
+// goroutine calls and, for a migration, also the child's read goroutine;
+// offer, which the coordinator's offer of a migration calls (BM7); spawn,
+// which runs that read; and stop, which the coordinator makes after joining
+// the child's loop. Each takes the engine's lock. A failure raises no flag
+// and re-arms nothing: it is logged, and the next Syncup* reply re-plans the
+// diff from the agent's acknowledged set; a migration's next offer re-plans
+// from the first piece the memo does not list (BM7).
 type bmPusher struct {
 	deps     *deps
 	seed     string
@@ -185,9 +190,12 @@ type bmPusher struct {
 	running map[uint64]bool
 	next    map[uint64]*bmPlan
 	// memo is BM5: per (res_id, src_slice_idx, bm_idx) the etcd mod_revision
-	// of the chunk last pushed. In-memory and lost with its child — a handoff
-	// or a restart of the child on the same worker (dnv-worker.md RW14) — as
-	// [D8] accepts.
+	// of the chunk last pushed, and for a migration the pieces this child
+	// holds as delivered (BM2). A migration piece leaves it, with every
+	// piece above it, when it is pushed (forgetFrom), and comes back alone
+	// when that push is answered code zero (memoize). In-memory and lost
+	// with its child — a handoff or a restart of the child on the same
+	// worker (dnv-worker.md RW14) — as [D8] accepts.
 	memo     map[bmMemoKey]int64
 	conn     *grpc.ClientConn
 	connHeld bool
@@ -292,10 +300,47 @@ func (p *bmPusher) submit(plan *bmPlan) {
 	go p.run(plan)
 }
 
-// unacked keeps the chunks of resId this engine has not delivered with a
-// code-zero reply (its memo, BM5). An offer re-plans a migration's pieces
-// against the applied set of the last SyncupSide reply, which can predate a
-// piece delivered since; this leaves such a piece out (BM7).
+// offer is a migration's offer to the engine (BM7): when no plan of resId
+// runs or waits, it starts the plan from the first of chunks, ascending,
+// that the memo does not list (BM5) to the last of them; otherwise it plans
+// nothing. The pushes of a plan that runs or waits take its pieces out of
+// the memo until each is answered (forgetFrom), so a plan built from the
+// memo meanwhile would push them again; the first offer after it ends plans
+// from what it left. The memo is read and the plan started under one hold
+// of the engine's lock, so no plan of resId can start or end in between.
+func (p *bmPusher) offer(
+	resId uint64,
+	name string,
+	chunks []model.BmChunk,
+) {
+	p.mu.Lock()
+	if p.stopped || p.running[resId] {
+		p.mu.Unlock()
+		return
+	}
+	first := len(chunks)
+	for i, chunk := range chunks {
+		if _, ok := p.memo[memoKeyOf(resId, chunk)]; !ok {
+			first = i
+			break
+		}
+	}
+	if first == len(chunks) {
+		p.mu.Unlock()
+		return
+	}
+	p.running[resId] = true
+	p.wg.Add(1)
+	p.mu.Unlock()
+	go p.run(&bmPlan{resId: resId, name: name, parts: chunks[first:]})
+}
+
+// unacked keeps the chunks of resId its memo does not list (BM5): for a
+// migration, a piece this engine has not delivered with a code-zero reply,
+// or has since pushed again or pushed a piece below (forgetFrom). A
+// migration's piece counts as delivered by this alone, whatever the agent's
+// applied set lists, which may be the chunks an older build left at the
+// same indexes (BM2, BM7).
 func (p *bmPusher) unacked(
 	resId uint64,
 	chunks []model.BmChunk,
@@ -378,8 +423,8 @@ func (p *bmPusher) run(plan *bmPlan) {
 // pushPlan delivers one plan's chunks in ascending (src_slice_idx, bm_idx),
 // one at a time (BM3). Every failure ends the rest of the plan and is logged;
 // nothing is re-armed. The next Syncup* reply carries the agent's acknowledged
-// set and re-plans whatever is still missing, which is the only place a diff
-// has ever come from.
+// set and re-plans whatever is still missing; a migration's next offer
+// re-plans from the first piece the memo does not list (BM7).
 func (p *bmPusher) pushPlan(plan *bmPlan) {
 	conn, err := p.connect()
 	if err != nil {
@@ -419,8 +464,8 @@ func (p *bmPusher) pushOne(
 		// The chunk's address came from the coordinator's snapshot or the
 		// child's read, so a value that cannot be read now is an etcd
 		// failure, a chunk deleted with its object, or a piece the child no
-		// longer holds. Each ends this plan; the next Syncup* reply re-plans
-		// it.
+		// longer holds. Each ends this plan; the next Syncup* reply, or a
+		// migration's next offer, re-plans it.
 		attrs := p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx)
 		if err != nil {
 			attrs = append(attrs, slog.String("error", err.Error()))
@@ -429,6 +474,9 @@ func (p *bmPusher) pushOne(
 		}
 		slog.InfoContext(ctx, msgBitmapPushFailed, attrs...)
 		return false
+	}
+	if p.kind == bmKindMigr {
+		p.forgetFrom(plan.resId, chunk.Idx)
 	}
 	rpcCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx), p.deps.tmo.push,
@@ -453,10 +501,12 @@ func (p *bmPusher) pushOne(
 	)
 	slog.InfoContext(ctx, msgBitmapPushed, attrs...)
 	if code != 0 {
-		// The agent does not know the object, or the chunk's address is out
-		// of range for it. The "bitmap pushed" record above (dnv-worker.md, Log
-		// records) carries only the code, so the agent's own explanation is
-		// logged next to it and the plan ends.
+		// The agent does not know the object, the chunk's address is out of
+		// range for it, or it could not remove the chunks at a migration
+		// piece's index and above or save the piece (dnagent.md DN15). The
+		// "bitmap pushed" record above (dnv-worker.md, Log records) carries
+		// only the code, so the agent's own explanation is logged next to it
+		// and the plan ends.
 		slog.InfoContext(ctx, msgBitmapPushFailed, append(
 			p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 			slog.Uint64("code", uint64(code)),
@@ -473,6 +523,24 @@ func (p *bmPusher) memoize(resId uint64, chunk model.BmChunk) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.memo[memoKeyOf(resId, chunk)] = chunk.ModRev
+}
+
+// forgetFrom takes a migration's pieces at bmIdx and above out of the memo
+// before the piece at bmIdx is pushed (BM5). Whatever its reply, the push may
+// have taken the chunks at its index and above out of the agent's set, which
+// the agent does before it saves a piece (dnagent.md DN15); and a piece
+// pushed again may be one the agent's set lacks. So each counts as delivered
+// only once a later push of it is answered code zero, and a push that fails
+// leaves them to the next offer (BM6, BM7). The runner pushes one piece of a
+// migration at a time, so no other push of it runs meanwhile (BM3).
+func (p *bmPusher) forgetFrom(resId uint64, bmIdx uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key := range p.memo {
+		if key.resId == resId && key.bmIdx >= bmIdx {
+			delete(p.memo, key)
+		}
+	}
 }
 
 // connect takes this pusher's own reference to the child's agent connection

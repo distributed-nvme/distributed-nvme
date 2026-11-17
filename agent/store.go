@@ -197,9 +197,11 @@ func (s *Store) Load(
 // state and no converge runs, so the store never holds a request older than
 // the last one the agent accepted (SH5). A save whose rename held but whose
 // directory fsync failed leaves the refused request in the file, which a
-// restart converges and the worker wants anyway. A chunk whose save failed
-// is acked at once, and its RPC returns, releasing its locks. Every Save
-// updates both states, as SaveFailing and Refusal say.
+// restart converges and the worker wants anyway. A clone chunk whose save
+// failed is acked at once, and a migration piece whose save failed is
+// refused with common.ReplyCodeSaveFailed (dnagent.md DN15); either RPC
+// returns, releasing its locks. Every Save updates both states, as
+// SaveFailing and Refusal say.
 func (s *Store) Save(
 	ctx context.Context,
 	path string,
@@ -281,15 +283,16 @@ func (s *Store) Row(t *ResTracker) *pb.ResInfo {
 
 // Probe writes the probe file at path, but only while Refusal holds; while it
 // is clear it writes nothing and returns nil. A node's background read calls
-// it every read (dnagent.md DN18, cnagent.md CN28): a chunk whose save failed
-// is acked, and the worker pushes it again only after a later accepted syncup
-// of its object (dnagent.md DN15, cnagent.md CN22), which a quiet node does
-// not get, so without the probe the store row of a quiet node would read the
-// refusal until the next save of anything. The probe makes the write the
-// refused save made, a temp file, its fsync, the rename and the directory's
-// fsync, under the same bound, of random bytes, at least as many as that save
-// tried to write, so that no file system stores it in less room by compressing
-// it or sharing its blocks. A probe that holds proves the disk took one such
+// it every read (dnagent.md DN18, cnagent.md CN28): the worker pushes a chunk
+// whose save failed again only after a later accepted syncup of its object
+// or, for a migration piece, on an offer of its migration (dnagent.md DN15,
+// cnagent.md CN22), and a quiet node gets neither, so without the probe the
+// store row of a quiet node would read the refusal until the next save of
+// anything. The probe makes the write the refused save made, a temp file,
+// its fsync, the rename and the directory's fsync, under the same bound, of
+// random bytes, at least as many as that save tried to write, so that no
+// file system stores it in less room by compressing it or sharing its
+// blocks. A probe that holds proves the disk took one such
 // write and clears Refusal, unless a Save the disk refused came after it
 // began, and then removes the file, so that it keeps none of the room it
 // proved; a refused probe keeps Refusal and gives it the probe's error; a

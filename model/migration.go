@@ -46,12 +46,14 @@ const (
 // to its disk node, which is bumped, and the migration's units to the
 // destination's, which is written and re-indexed but not bumped, nothing it
 // is sent depending on the count (architecture.md, Metadata units). Either
-// way the migration's record and its name in migr_name_list go, the slice
-// and the SpConf are written, and SpRev is bumped. The caller has made its
-// checks; the errors here are the lost invariants of a live migration — a
-// slice, a side or a disk node record missing, two sides not in one leg, or
-// a stored cluster conf that fails its validation — which the gateway
-// answers ABORTED.
+// way the migration's record and its name in migr_name_list go, and with
+// them the keys an older build kept the migration's bitmap under, at every
+// index below LegacyMigrBmCnt (architecture.md, Upgrade in lockstep); the
+// slice and the SpConf are written, and SpRev is bumped. The caller has
+// made its checks; the errors here are the lost invariants of a live
+// migration — a slice, a side or a disk node record missing, two sides not
+// in one leg, or a stored cluster conf that fails its validation — which
+// the gateway answers ABORTED.
 func EndMigrationIn(
 	s etcdutil.STM,
 	op string,
@@ -149,6 +151,9 @@ func EndMigrationIn(
 	}
 	leg.SideList = sides
 	s.Del(MigrationKey(cid, spId, migrName))
+	for bmIdx := range uint32(LegacyMigrBmCnt) {
+		s.Del(LegacyMigrBitmapKey(cid, spId, migrName, bmIdx))
+	}
 	conf.MigrNameList = removeName(conf.GetMigrNameList(), migrName)
 	s.Put(SliceKey(cid, spId, sliceId), slice)
 	s.Put(SpConfKey(cid, spName), conf)

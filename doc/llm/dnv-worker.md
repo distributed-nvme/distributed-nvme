@@ -414,7 +414,11 @@ visit every pool (`gateway.md` GW19), scanned by no worker; `CntlrKey` and
 `SliceKey`;
 `ThinDeviceKey` and `SubsystemKey`; `CloneKey` and `CloneBitmapKey` — the
 seven-field key, BOTH indexes rendered with `BmIdxFmt` —, `CloneBitmapPrefix`
-and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`; `RepairKey` and `RetiredLegKey`, with `RepairPrefix` and
+and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`;
+`LegacyMigrBitmapKey`, the key under which an older build kept one chunk
+of a migration's bitmap, at an index below `LegacyMigrBmCnt`, of a kind no
+build writes: only `EndMigrationIn` names it, to delete it
+(`architecture.md`, Upgrade in lockstep); `RepairKey` and `RetiredLegKey`, with `RepairPrefix` and
 `RetiredLegPrefix`, the prefixes MD3's load ranges; `WorkerRegKey`,
 `WorkerRegPrefix` and `ParseWorkerRegKey`; and `WorkerRegistryPrefix`, the
 whole registry, every role at once, which only the gateway's `ListWorkers`
@@ -435,7 +439,9 @@ most `CloneBmChunkBytes` of them, with *s* below the clone's `src_slice_cnt`
 alone, so chunks are order-independent and gap-tolerant: an absent chunk, and
 a short chunk's missing tail, read as *written* — the safe direction, the
 region being copied rather than skipped. A migration's bitmap has no key:
-the worker reads it from the primary and holds it in memory (BM7).
+the worker reads it from the primary and holds it in memory (BM7); only
+the keys an older build kept it under are left to delete
+(`LegacyMigrBitmapKey`).
 `ParseCloneBmKey` takes the seven-field `clone_bitmap` key alone, and a key
 of another length under the clone prefix is malformed: it parses as not ok
 and is skipped by MD3's loader.
@@ -1007,8 +1013,9 @@ list; the flip, which reads the repair's key alone, and
   dropped side's extents back to its DN, which is bumped, the migration's
   metadata units back to the destination's DN, which a finish does not
   bump, the side out of its leg, the record and its name in
-  `migr_name_list` deleted, and `SpRev` bumped (AR8; `architecture.md`,
-  Migrations).
+  `migr_name_list` deleted, with the keys an older build kept the
+  migration's bitmap under (`LegacyMigrBitmapKey`, MD2), and `SpRev`
+  bumped (AR8; `architecture.md`, Migrations).
 * `ClearCntlrDemotion` takes a cntlr id and a revision, and clears the
   cntlr's `demoted_revision` only while the record still carries that
   revision, with no expected revision and no bump of any revision, since no
@@ -3086,11 +3093,17 @@ addresses come from the snapshot's keys-only scan (`CloneBmIdx`, MD3);
 clone chunk **values** are read one at a time (`Get`) when pushed, at the
 key the address names.
 
-BM2. **Diff.** After every accepted `SyncupSide` reply (RW5): the missing
-set is the child's pieces of the migration minus `bm_info.bm_idx_list`
-(only when `bm_info.res_id` is the `migr_id`), and empty while the child
-holds no pieces; the child keeps that `bm_info`, which plans the push right
-after its read and on each offer (BM7). After every accepted `SyncupCntlr`
+BM2. **Diff.** After every accepted `SyncupSide` reply (RW5) whose
+`bm_info.res_id` is the `migr_id`: the missing set is the child's pieces of
+the migration that `bm_info.bm_idx_list` does not list, together with
+every piece the memo of BM5 does not list, and empty while the child holds
+no pieces. A piece the set lists is held back only while the memo lists
+it: after an upgrade the set lists the chunks an older build left at the
+same indexes, of any length (`architecture.md`, Upgrade in lockstep). The push then runs from
+the lowest missing piece to the last piece of the child's read, every
+piece above it pushed again, as the agent takes out of its set every chunk
+above a piece it saves (`dnagent.md` DN15); the same holds for the pushes
+right after the read and on each offer (BM7). After every accepted `SyncupCntlr`
 reply on the primary: per `bm_info_list` entry (its `res_id` the
 `clone_id`), the missing set is `CloneBmIdx` of the clone minus
 `bm_info.chunk_id_list`. A clone reports `chunk_id_list` and leaves
@@ -3147,29 +3160,47 @@ chunk the agent has acknowledged can then grow in etcd and stay shorter at
 the agent, which costs copying only. A migration's pieces never change once
 read (BM7), so nothing can make the rule re-push one; `worker/bmpush.go`
 implements BM1 to BM6 once for both kinds and therefore memoizes migration
-pieces too, where the mod-revision comparison is inert.
+pieces too, where the mod-revision comparison is inert and the memo is
+what counts a piece as delivered (BM2). A migration piece leaves the
+memo, with every piece above it, when it is pushed, and comes back alone
+when that push is answered code zero. Reasons: whatever the reply, the
+push may have taken the chunks at its index and above out of the agent's
+set, which the agent does before it saves a piece (`dnagent.md` DN15),
+and a piece pushed again may be one the agent's set lacks; so a push that
+fails leaves the piece and those above it to the next offer (BM6, BM7). A
+memo lost with its child costs nothing more for a migration, whose pieces
+a new child reads and pushes again (BM7).
 
 BM6. **Failure.** A push that fails — a gRPC error or timeout, a clone
 chunk whose value can no longer be read from etcd, a migration piece its
 child no longer holds, or a non-zero
 `agent_reply.code` (`ReplyCodeUnknownObject`: the introducing `Syncup*` has
 not been applied yet, or the address is out of range for the object) — is
-logged as `bitmap push failed` (Log records) and **ends that plan**. The
+logged as `bitmap push failed` (Log records) and **ends that plan**; a
+migration piece is also refused `ReplyCodeSaveFailed` when its agent
+could not remove the chunks at its index and above, or could not save
+it (`dnagent.md` DN15), so no piece above it is pushed until it is
+pushed again. The
 remaining parts are not sent, nothing is re-armed and no flag is raised
 anywhere. The next accepted `Syncup*` reply for the object re-plans the
-diff (BM2) from the agent's OWN acknowledged set, which is the only place a
-diff has ever come from; a plan rebuilt from a remembered failure would be
-a plan built from the worker's memory instead of from the agent's state.
+diff (BM2) from the agent's OWN acknowledged set, together with, for a
+migration, every piece the memo of BM5 does not list; the pushes after a
+migration's read and on its offers are planned without the agent's set
+(BM7). A plan rebuilt from a remembered failure would be a plan built from
+the worker's memory instead of from the agent's state.
 The rest of the plan goes with the failed part because the parts are
 ordered (BM3) and a migration's pieces are interpretable only in sequence.
 A migration's pieces are the one exception to waiting for a `Syncup*`:
-each offer of BM7 plans them again, as no `SyncupSide` need follow the
+the offers of BM7 plan them again, as no `SyncupSide` need follow the
 read.
 
 There is no push-specific timer and no push-driven re-sync. When the
 refusal was the agent's own, its `Check*` reply says so too — the same
 rejection code, or a stored revision behind the desired one — and RW4 step
-5 issues the `Syncup*` whose accepted reply re-plans within the round. When
+5 issues the `Syncup*` whose accepted reply re-plans within the round. A
+migration piece refused because its agent could not remove the chunks at
+its index and above, or could not save it (`dnagent.md` DN15), has no
+such echo; it waits for the next offer (BM7). When
 the push failed on the wire while the agent is healthy and at the desired
 revision, no re-sync is due and a clone's chunk waits for the next accepted
 `Syncup*` from any cause (a revision bump or a leftover; a handoff sends
@@ -3198,8 +3229,8 @@ destination builds its dm-clone only over the source's export, which the
 source links only once every per-CN dm-linear of the side is fenced
 (`dnagent.md` DN12), so the source takes no more writes
 (`architecture.md`, Migration); a reply at the desired revision leaves no
-`SyncupSide` pending, so the applied set the pushes are planned from is the
-agent's latest; and the path keeps the read's commit of the pool from
+`SyncupSide` pending, so the dm-clone the reply shows is that of the
+request the plan names, which the pushes address; and the path keeps the read's commit of the pool from
 blocking on a leg with no path. The read is one `GetLegBm` of the whole leg
 (`block_cnt` zero) to that CN, under `DefaultWorkerSyncupTimeout` (RW5), on a
 goroutine of the child's pusher, so a slow read holds neither the
@@ -3208,17 +3239,22 @@ reply is cut into pieces of `MigrBmPieceBytes`, each but the last covering
 a multiple of 8 blocks, so they join at the byte (`architecture.md`, Bitmap
 reads); more than `MaxMigrBmCnt` pieces fails the read, as the agent
 refuses a `bm_idx` past it (`dnagent.md` DN15). The pieces live in the
-child's memory alone. Right after the read the child plans the pushes
-(BM2) from the `bm_info` of its last accepted `SyncupSide` reply, or with
-every piece missing when it holds none: a new child whose agent kept the
-desired revision has had no `SyncupSide` reply, and pushes every piece
-again, which the agent takes without applying a piece it holds byte for
-byte (`dnagent.md` DN15). Each later offer to a child that holds the bitmap,
-made while the same condition on its last reply holds, plans the pushes
-again from that same `bm_info`, leaving out every piece
-this child has delivered with a code-zero reply (the memo of BM5), which
-the set may not list yet: no `SyncupSide` need follow the read, so the
-offer is what retries a push that failed (BM6). A read that fails — the
+child's memory alone. Right after the read the child pushes every piece,
+whatever the applied set of any `SyncupSide` reply lists: that set may
+list an older build's chunks (BM2), and a new child whose agent kept the
+desired revision has had no `SyncupSide` reply at all. The agent takes a
+piece it holds byte for byte without saving or applying it again, and
+saves any other, taking out the chunk at its index and those above it
+first (`dnagent.md` DN15), so no piece is placed behind an older chunk of
+another length (`architecture.md`, Upgrade in lockstep). Each later offer
+to a child that holds the bitmap, made while the same condition on its
+last reply holds, pushes again from the lowest piece the memo of BM5 does
+not list to the last piece (BM2): no `SyncupSide` need follow the read, so
+the offer is what retries a push that failed (BM6). An offer made while a
+plan of the migration runs or waits pushes nothing: that plan's pushes
+take its pieces out of the memo until each is answered (BM5), so a plan
+built from the memo meanwhile would push them again; the first offer
+after it ends plans from what it left. A read that fails — the
 call fails or times out, or the bitmap has more than `MaxMigrBmCnt` pieces
 — is logged as `migration bitmap read failed` and leaves no bitmap, and a
 later offer reads again; but a bitmap of too many pieces, and the third
@@ -5838,8 +5874,11 @@ or refuses it. It applies the agents' revision gate per object and
 their ordering rule — a side or cntlr its node's last syncup does not list
 is an unknown object, which the worker's independent roles must survive
 (RW5) — refuses a bitmap push for a migration or a clone its object's last
-request does not name, and derives every `*Info` row from the last accepted
-request. It keeps what it accepted, in memory or in a state file, so that a
+request does not name, drops, with each migration chunk it records, every
+chunk it recorded above that chunk's index, as the dn agent takes them out
+of its set when it saves a piece (`dnagent.md` DN15) — it keeps no chunk's
+bytes, so a piece pushed again drops them too — and derives every `*Info`
+row from the last accepted request. It keeps what it accepted, in memory or in a state file, so that a
 killed and restarted fake replies like a restarted agent; a Go test stops a
 fake, which ends every call and stream it serves as a killed agent's end,
 so that no call in flight at the stop applies anything after it, and starts

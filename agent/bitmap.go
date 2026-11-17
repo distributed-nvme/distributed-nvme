@@ -99,8 +99,9 @@ func (c *ChunkSet) Indexes() []uint32 {
 // bm_idx 0. Migration chunks are interpretable only as such a prefix: chunk
 // k's first bit sits at the summed bit length of chunks 0…k−1, so a gap makes
 // every later chunk unplaceable (SH23). The worker's ascending, one-in-flight
-// push makes gaps unreachable in practice; the applied set (Indexes) still
-// reports every chunk in the set, not only this prefix.
+// push leaves a gap only where a piece's save failed, until it pushes that
+// piece again (SH23, DN15); the applied set (Indexes) still reports every
+// chunk in the set, not only this prefix.
 func (c *ChunkSet) ContiguousPrefix() []byte {
 	var out []byte
 	for bmIdx := uint32(0); ; bmIdx++ {

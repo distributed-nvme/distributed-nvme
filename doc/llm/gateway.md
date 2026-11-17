@@ -1390,16 +1390,19 @@ rather than a candidate problem.
   `BumpDnRev`, and the destination DN gets back the `meta_units` the
   `Migration` records — a units-only change, so that DN is written and
   re-indexed with no `BumpDnRev`; a record with no units leaves it unread;
-  the `Migration` and its list entry are deleted; `BumpSpRev`. The write's
-  errors are lost invariants, `ABORTED`. Reply `migr_id`.
+  the `Migration` and its list entry are deleted, with the keys an older
+  build kept the migration's bitmap under (`architecture.md`, Upgrade in
+  lockstep); `BumpSpRev`. The write's errors are lost invariants,
+  `ABORTED`. Reply `migr_id`.
 * **CancelMigration** — STM: resolve; token; the migration; its
   `cutover_pending` clear and `force` false is `FAILED_PRECONDITION`
   (`migrCancelAllowed`; `architecture.md`, Migrations); the reverse of the
   create through `model.EndMigrationIn`, the write the sp worker's cancel
   runs too (`dnv-worker.md` MD6): drop the destination side, release the
   destination DN's extents and the `meta_units` the `Migration` records
-  with one `BumpDnRev`, delete the `Migration` and its list entry;
-  `BumpSpRev`. Reply `migr_id`.
+  with one `BumpDnRev`, delete the `Migration` and its list entry, with
+  the keys an older build kept the migration's bitmap under
+  (`architecture.md`, Upgrade in lockstep); `BumpSpRev`. Reply `migr_id`.
 * **GetMigration** — one STM read; the record as stored, `cutover_pending`
   included.
 

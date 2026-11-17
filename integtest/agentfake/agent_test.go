@@ -584,18 +584,16 @@ func TestGateUnknownPushId(t *testing.T) {
 			got, common.ReplyCodeUnknownObject)
 	}
 
-	// The known id is accepted and lands in the derived applied set.
-	if _, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr,
-		MigrId: 30, BmIdx: 1, Bitmap: []byte{0xff, 0xff},
-	}); err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
-	}
-	if _, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr,
-		MigrId: 30, BmIdx: 0, Bitmap: []byte{0xff, 0xff},
-	}); err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
+	// The known id is accepted and lands in the derived applied set, in
+	// the ascending order the worker pushes in, since a chunk drops those
+	// above it (TestMigrChunkDropsTheChunksAboveIt).
+	for _, bmIdx := range []uint32{0, 1} {
+		if _, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
+			ClusterId: 1, DnId: 1, SidePointer: ptr,
+			MigrId: 30, BmIdx: bmIdx, Bitmap: []byte{0xff, 0xff},
+		}); err != nil {
+			t.Fatalf("PushMigrBitmap: %v", err)
+		}
 	}
 	bmInfo := syncupSide(t, dnClient, ptr, 2, 30).GetBmInfo()
 	if bmInfo.GetResId() != 30 ||
@@ -2752,6 +2750,44 @@ func TestStateSurvivesRestart(t *testing.T) {
 		GetCode(); got != common.ReplyCodeStaleRevision {
 		t.Errorf("stale SyncupDn after the restart code = %d, want %d",
 			got, common.ReplyCodeStaleRevision)
+	}
+}
+
+// TestMigrChunkDropsTheChunksAboveIt: a migration chunk the fake records
+// drops every chunk it recorded above its index, as the dn agent's saved
+// push does (dnagent.md DN15), and state.json keeps the drop.
+func TestMigrChunkDropsTheChunksAboveIt(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, _ := startAgent(t, agent)
+	ptr := sidePtr(1, 3, 5)
+	syncupDn(t, dnClient, 7, ptr)
+	syncupSide(t, dnClient, ptr, 7, 30)
+	push := func(bmIdx uint32, size int) {
+		t.Helper()
+		reply, err := dnClient.PushMigrBitmap(context.Background(),
+			&pb.PushMigrBitmapRequest{
+				ClusterId: 1, DnId: 1, SidePointer: ptr, MigrId: 30,
+				BmIdx: bmIdx, Bitmap: bytes.Repeat([]byte{0xa5}, size),
+			})
+		if err != nil || reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("PushMigrBitmap %d: %v, %v", bmIdx, err,
+				reply.GetAgentReply())
+		}
+	}
+	for idx := range uint32(4) {
+		push(idx, 1)
+	}
+	push(1, 2)
+	if got := readStateChunks(t, agent, sideObjKey(ptr), 30); !maps.Equal(
+		got, map[string]uint64{"0": 1, "1": 2}) {
+		t.Errorf("state.json chunks after piece 1 = %v, want 0 and the "+
+			"new 1 alone", got)
+	}
+	push(0, 3)
+	if got := readStateChunks(t, agent, sideObjKey(ptr), 30); !maps.Equal(
+		got, map[string]uint64{"0": 3}) {
+		t.Errorf("state.json chunks after piece 0 = %v, want the new 0 "+
+			"alone", got)
 	}
 }
 

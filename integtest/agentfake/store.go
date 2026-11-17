@@ -80,6 +80,18 @@ func (o *objectState) putChunk(resId uint64, chunkKey string, size int) {
 	o.Chunks[key][chunkKey] = uint64(size)
 }
 
+// dropMigrChunksAbove forgets the recorded chunks of one MIGRATION whose
+// index is above bmIdx: the dn agent takes them out when it saves a piece,
+// as each was placed behind the chunk that piece replaces (dnagent.md DN15).
+func (o *objectState) dropMigrChunksAbove(resId uint64, bmIdx uint32) {
+	for _, idx := range o.bmIdxList(resId) {
+		if idx > bmIdx {
+			delete(o.Chunks[strconv.FormatUint(resId, 10)],
+				migrChunkKey(idx))
+		}
+	}
+}
+
 // bmIdxList derives the applied index set of one MIGRATION from the recorded
 // chunks (architecture.md, Bitmap push protocol: the report is derived from
 // the files present, so it survives a restart). A clone's applied set is

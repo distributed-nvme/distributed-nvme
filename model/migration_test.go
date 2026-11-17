@@ -2,7 +2,25 @@ package model
 
 import (
 	"testing"
+
+	"github.com/distributed-nvme/distributed-nvme/pb"
 )
+
+// olderMigrName is a migration other than the one a test ends, whose keys
+// of an older build's bitmap must stay.
+const olderMigrName = "migr-other"
+
+// seedOlderBitmapKeys puts the keys an older build kept a migration's
+// bitmap under, at every index it could write, for migrName; the value
+// stands for that build's chunk, a message no build decodes any more.
+func seedOlderBitmapKeys(t *testing.T, env *opsEnv, migrName string) {
+	t.Helper()
+	for bmIdx := range uint32(LegacyMigrBmCnt) {
+		mustPut(t, env.cli,
+			LegacyMigrBitmapKey(env.cid, opsSpId, migrName, bmIdx),
+			&pb.PushMigrBitmapRequest{Bitmap: []byte{0xff}})
+	}
+}
 
 // TestWorkerMigrationEnds pins the sp worker's two migration ends (MD6,
 // AR8): a cancel drops the destination side while the cutover is pending,
@@ -10,8 +28,10 @@ import (
 // drops the source side once the cutover has started, its extents back to
 // its disk node, which is bumped, and the migration's units back to the
 // destination's disk node, which is not; either drops the record and its
-// name, with one SpRev bump. A cancel after the cutover, a finish before
-// it, and a record that is not the one read are refused, writing nothing.
+// name, and the keys an older build kept the migration's bitmap under,
+// with one SpRev bump; another migration's such keys stay. A cancel after
+// the cutover, a finish before it, and a record that is not the one read
+// are refused, writing nothing.
 func TestWorkerMigrationEnds(t *testing.T) {
 	const units = 3
 	setup := func(t *testing.T, pending bool) *opsEnv {
@@ -24,6 +44,8 @@ func TestWorkerMigrationEnds(t *testing.T) {
 		dn := env.dn(opsDnC)
 		dn.UsedMetaUnits = units
 		mustPut(t, env.cli, DnConfKey(env.cid, opsDnC), dn)
+		seedOlderBitmapKeys(t, env, opsMigrName)
+		seedOlderBitmapKeys(t, env, olderMigrName)
 		return env
 	}
 	sides := func(env *opsEnv) []uint64 {
@@ -40,6 +62,16 @@ func TestWorkerMigrationEnds(t *testing.T) {
 		}
 		if names := env.spConf().GetMigrNameList(); len(names) != 0 {
 			t.Errorf("migr_name_list %v, want empty", names)
+		}
+		for bmIdx := range uint32(LegacyMigrBmCnt) {
+			key := LegacyMigrBitmapKey(env.cid, opsSpId, opsMigrName, bmIdx)
+			if env.exists(key) {
+				t.Errorf("the older build's bitmap key %q survived", key)
+			}
+			key = LegacyMigrBitmapKey(env.cid, opsSpId, olderMigrName, bmIdx)
+			if !env.exists(key) {
+				t.Errorf("another migration's key %q went", key)
+			}
 		}
 	}
 

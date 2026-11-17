@@ -226,11 +226,13 @@ func TestMigrBmReadWaitsForItsTrigger(t *testing.T) {
 }
 
 // TestMigrBmPiecesReachTheDestination pins BM7 end to end: one GetLegBm of
-// the whole leg to the primary's CN, the bitmap cut into pieces, and only
-// the pieces the dst agent's applied set lacks pushed, in order, to the dst
-// side's DN and to no other (BM4). Later rounds read nothing again and push
-// nothing again; a later SyncupSide reply whose applied set lacks a piece
-// pushes that piece again from the child's own read (BM2, BM6).
+// the whole leg to the primary's CN, the bitmap cut into pieces, and every
+// piece pushed right after the read, in order, whatever the dst agent's
+// applied set lists (here piece 0), to the dst side's DN and to no other
+// (BM4). Later rounds read nothing again and push nothing again; a later
+// SyncupSide reply whose applied set lacks piece 1 pushes it again from the
+// child's own read, and piece 2 after it, which the agent takes out of its
+// set when it saves piece 1 (BM2, BM6; dnagent.md DN15).
 func TestMigrBmPiecesReachTheDestination(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		smallPieces(t, 4)
@@ -241,9 +243,9 @@ func TestMigrBmPiecesReachTheDestination(t *testing.T) {
 		h, agents := migrBmHarness(t, false, cloneShownInfo(), m)
 		w := h.start()
 		dst := h.sides[spDnC]
-		h.advanceUntil("two pushes and three rounds", roundInterval,
+		h.advanceUntil("three pushes and three rounds", roundInterval,
 			func() bool {
-				return len(dst.pushes()) >= 2 &&
+				return len(dst.pushes()) >= 3 &&
 					agents.rounds.atLeast(3, spCnA, spDnC)
 			})
 
@@ -255,9 +257,8 @@ func TestMigrBmPiecesReachTheDestination(t *testing.T) {
 		if len(reads) != 1 || !proto.Equal(reads[0], wantReq) {
 			t.Fatalf("GetLegBm calls = %v, want one %v", reads, wantReq)
 		}
-		wantPieces(t, dst.pushes(), map[uint32][]byte{
-			1: {5, 6, 7, 8}, 2: {9, 10},
-		}, 1, 2)
+		all := map[uint32][]byte{0: {1, 2, 3, 4}, 1: {5, 6, 7, 8}, 2: {9, 10}}
+		wantPieces(t, dst.pushes(), all, 0, 1, 2)
 		for _, addr := range []string{spDnA, spDnB, spDnD} {
 			if n := len(h.sides[addr].pushes()); n != 0 {
 				t.Fatalf("%d pushes to %s, not the dst side's DN", n, addr)
@@ -270,16 +271,15 @@ func TestMigrBmPiecesReachTheDestination(t *testing.T) {
 				msgMigrBitmapRead, read)
 		}
 
-		// A bump brings a SyncupSide whose applied set lacks piece 2.
-		m.setApplied(0, 1)
+		// A bump brings a SyncupSide whose applied set lacks piece 1.
+		m.setApplied(0, 2)
 		before := len(dst.syncups())
 		w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
-		h.advanceUntil("the re-push of piece 2", roundInterval, func() bool {
-			return len(dst.syncups()) > before && len(dst.pushes()) >= 3
-		})
-		wantPieces(t, dst.pushes(), map[uint32][]byte{
-			1: {5, 6, 7, 8}, 2: {9, 10},
-		}, 1, 2, 2)
+		h.advanceUntil("the re-push of pieces 1 and 2", roundInterval,
+			func() bool {
+				return len(dst.syncups()) > before && len(dst.pushes()) >= 5
+			})
+		wantPieces(t, dst.pushes(), all, 0, 1, 2, 1, 2)
 		if n := len(h.cntlrs[spCnA].legBmCalls()); n != 1 {
 			t.Fatalf("%d GetLegBm calls, want the one read", n)
 		}
@@ -310,13 +310,14 @@ func wantPieces(
 	}
 }
 
-// TestMigrBmRestartedChildPushesWhatIsMissing: the pieces live in the
-// child's memory only, so a new child reads the bitmap again. With its agent
-// at the desired revision it meets no SyncupSide and so knows no applied set,
-// and pushes every piece again, which the dn agent takes without applying a
-// piece it holds byte for byte (dnagent.md DN15); once a SyncupSide reply
-// gives the set, it pushes only the pieces the set lacks (BM2).
-func TestMigrBmRestartedChildPushesWhatIsMissing(t *testing.T) {
+// TestMigrBmRestartedChildPushesEveryPiece: the pieces live in the child's
+// memory only, so a new child reads the bitmap again and pushes every piece
+// again, which the dn agent takes without applying a piece it holds byte
+// for byte (dnagent.md DN15): with its agent at the desired revision it
+// meets no SyncupSide, and with an agent restarted it meets one whose
+// applied set lists pieces it has not pushed itself, which may be an older
+// build's chunks (BM2, BM7).
+func TestMigrBmRestartedChildPushesEveryPiece(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		smallPieces(t, 4)
 		m := &migrBmAgents{legBm: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}}
@@ -346,20 +347,262 @@ func TestMigrBmRestartedChildPushesWhatIsMissing(t *testing.T) {
 		}
 
 		// The agent restarted with pieces 0 and 2: a SyncupSide gives the
-		// set, and only piece 1 is pushed.
+		// set, which holds back none of the pieces.
 		m.setApplied(0, 2)
 		m.restartDst()
 		h.start()
-		h.advanceUntil("a third read and a push", roundInterval,
+		h.advanceUntil("a third read and three pushes", roundInterval,
 			func() bool {
 				return len(h.cntlrs[spCnA].legBmCalls()) >= 3 &&
-					len(dst.pushes()) >= 7
+					len(dst.pushes()) >= 9
 			})
-		wantPieces(t, dst.pushes(), all, 0, 1, 2, 0, 1, 2, 1)
+		wantPieces(t, dst.pushes(), all, 0, 1, 2, 0, 1, 2, 0, 1, 2)
 		if n := len(dst.syncups()); n != syncups+1 {
 			t.Fatalf("%d SyncupSides of the restarted agent, want 1",
 				n-syncups)
 		}
+	})
+}
+
+// TestMigrBmAnOlderAppliedSetHoldsBackNoPiece: after an upgrade the dst
+// agent's applied set lists the chunks an older build left, at the indexes
+// the child's pieces take. Right after its read the child pushes every
+// piece all the same; a later SyncupSide reply that lists every piece the
+// child delivered pushes none again (BM2, BM7).
+func TestMigrBmAnOlderAppliedSetHoldsBackNoPiece(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		smallPieces(t, 4)
+		m := &migrBmAgents{
+			applied: []uint32{0, 1, 2, 3},
+			legBm:   []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+		}
+		h, agents := migrBmHarness(t, false, cloneShownInfo(), m)
+		w := h.start()
+		dst := h.sides[spDnC]
+		h.advanceUntil("the read and three rounds", roundInterval,
+			func() bool {
+				return len(h.cntlrs[spCnA].legBmCalls()) >= 1 &&
+					agents.rounds.atLeast(3, spCnA, spDnC)
+			})
+		all := map[uint32][]byte{0: {1, 2, 3, 4}, 1: {5, 6, 7, 8}, 2: {9, 10}}
+		wantPieces(t, dst.pushes(), all, 0, 1, 2)
+
+		m.setApplied(0, 1, 2)
+		before := len(dst.syncups())
+		w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+		h.advanceUntil("the SyncupSide and three more rounds",
+			roundInterval, func() bool {
+				return len(dst.syncups()) > before &&
+					agents.rounds.atLeast(6, spCnA, spDnC)
+			})
+		wantPieces(t, dst.pushes(), all, 0, 1, 2)
+	})
+}
+
+// TestMigrBmAFailedPushIsFollowedByEveryLaterPiece: a push of piece 1 that
+// fails ends the plan; the next offer pushes piece 1 again and every piece
+// after it, though the applied set, an older build's, lists them all: a
+// piece counts as delivered only once this child pushed it with a code-zero
+// reply (BM2, BM6, BM7).
+func TestMigrBmAFailedPushIsFollowedByEveryLaterPiece(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		smallPieces(t, 4)
+		m := &migrBmAgents{
+			applied: []uint32{0, 1, 2},
+			legBm:   []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+		}
+		h, agents := migrBmHarness(t, false, cloneShownInfo(), m)
+		dst := h.sides[spDnC]
+		dst.mu.Lock()
+		dst.refuse = map[uint32]int{1: 1}
+		dst.mu.Unlock()
+		h.start()
+		h.advanceUntil("the read and three rounds", roundInterval,
+			func() bool {
+				return len(h.cntlrs[spCnA].legBmCalls()) >= 1 &&
+					agents.rounds.atLeast(3, spCnA, spDnC)
+			})
+		syncups := len(dst.syncups())
+		base := agents.rounds.get(spCnA)
+		h.advanceUntil("three more rounds", roundInterval, func() bool {
+			return agents.rounds.atLeast(base+3, spCnA)
+		})
+		all := map[uint32][]byte{0: {1, 2, 3, 4}, 1: {5, 6, 7, 8}, 2: {9, 10}}
+		wantPieces(t, dst.pushes(), all, 0, 1, 1, 2)
+		if n := len(dst.syncups()); n != syncups {
+			t.Fatalf("%d SyncupSides re-planned the push, want none: the "+
+				"offer must", n-syncups)
+		}
+	})
+}
+
+// TestMigrBmARePushForgetsThePiecesAboveIt: a SyncupSide reply whose applied
+// set lacks piece 1 pushes pieces 1 and 2 again. The agent takes piece 2 out
+// of its set when it saves piece 1 (dnagent.md DN15), so the delivery of
+// piece 1 makes the child forget it delivered piece 2; when the push of
+// piece 2 then fails, the next offer pushes it again, with no SyncupSide in
+// between (BM5, BM6, BM7).
+func TestMigrBmARePushForgetsThePiecesAboveIt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		smallPieces(t, 4)
+		m := &migrBmAgents{legBm: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}}
+		h, agents := migrBmHarness(t, false, cloneShownInfo(), m)
+		w := h.start()
+		dst := h.sides[spDnC]
+		h.advanceUntil("three pushes", roundInterval, func() bool {
+			return len(dst.pushes()) >= 3 &&
+				agents.rounds.atLeast(3, spCnA, spDnC)
+		})
+		all := map[uint32][]byte{0: {1, 2, 3, 4}, 1: {5, 6, 7, 8}, 2: {9, 10}}
+		wantPieces(t, dst.pushes(), all, 0, 1, 2)
+
+		dst.mu.Lock()
+		dst.refuse = map[uint32]int{2: 1}
+		dst.mu.Unlock()
+		m.setApplied(0, 2)
+		before := len(dst.syncups())
+		w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+		h.advanceUntil("the SyncupSide and the re-push", roundInterval,
+			func() bool {
+				return len(dst.syncups()) > before && len(dst.pushes()) >= 5
+			})
+		syncups := len(dst.syncups())
+		h.advanceUntil("piece 2 pushed again", roundInterval, func() bool {
+			return len(dst.pushes()) >= 6
+		})
+		base := agents.rounds.get(spCnA)
+		h.advanceUntil("three more rounds", roundInterval, func() bool {
+			return agents.rounds.atLeast(base+3, spCnA)
+		})
+		wantPieces(t, dst.pushes(), all, 0, 1, 2, 1, 2, 2)
+		if n := len(dst.syncups()); n != syncups {
+			t.Fatalf("%d SyncupSides re-planned the push, want none: the "+
+				"offer must", n-syncups)
+		}
+	})
+}
+
+// TestMigrBmARefusedRePushIsOfferedAgain: a SyncupSide reply whose applied
+// set lacks pieces 1 and 2, which the child delivered, pushes piece 1 again,
+// and the agent refuses that push. The push takes pieces 1 and 2 out of the
+// child's memo whatever its reply, so the next offer pushes both again, with
+// no SyncupSide in between (BM5, BM6, BM7).
+func TestMigrBmARefusedRePushIsOfferedAgain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		smallPieces(t, 4)
+		m := &migrBmAgents{legBm: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}}
+		h, agents := migrBmHarness(t, false, cloneShownInfo(), m)
+		w := h.start()
+		dst := h.sides[spDnC]
+		h.advanceUntil("three pushes", roundInterval, func() bool {
+			return len(dst.pushes()) >= 3 &&
+				agents.rounds.atLeast(3, spCnA, spDnC)
+		})
+		all := map[uint32][]byte{0: {1, 2, 3, 4}, 1: {5, 6, 7, 8}, 2: {9, 10}}
+		wantPieces(t, dst.pushes(), all, 0, 1, 2)
+
+		dst.mu.Lock()
+		dst.refuse = map[uint32]int{1: 1}
+		dst.mu.Unlock()
+		m.setApplied(0)
+		before := len(dst.syncups())
+		w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+		h.advanceUntil("the SyncupSide and the refused re-push",
+			roundInterval, func() bool {
+				return len(dst.syncups()) > before && len(dst.pushes()) >= 4
+			})
+		syncups := len(dst.syncups())
+		h.advanceUntil("pieces 1 and 2 pushed again", roundInterval,
+			func() bool { return len(dst.pushes()) >= 6 })
+		base := agents.rounds.get(spCnA)
+		h.advanceUntil("three more rounds", roundInterval, func() bool {
+			return agents.rounds.atLeast(base+3, spCnA)
+		})
+		wantPieces(t, dst.pushes(), all, 0, 1, 2, 1, 1, 2)
+		if n := len(dst.syncups()); n != syncups {
+			t.Fatalf("%d SyncupSides re-planned the push, want none: the "+
+				"offer must", n-syncups)
+		}
+	})
+}
+
+// TestMigrBmAReplyPushesWhatTheMemoLacks: the agent refuses the push of
+// piece 1, and then the primary shows no live path to the dst side, so no
+// offer comes. A SyncupSide reply whose applied set, an older build's, lists
+// every piece pushes piece 1 again and piece 2 after it: the reply's plan
+// starts at the first piece the memo of BM5 does not list, though the set
+// lists it (BM2).
+func TestMigrBmAReplyPushesWhatTheMemoLacks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		smallPieces(t, 4)
+		m := &migrBmAgents{
+			applied: []uint32{0, 1, 2},
+			legBm:   []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+		}
+		h, agents := migrBmHarness(t, false, cloneShownInfo(), m)
+		dst := h.sides[spDnC]
+		hold := make(chan struct{})
+		dst.mu.Lock()
+		dst.refuse = map[uint32]int{1: 1}
+		dst.pushHold = hold
+		dst.mu.Unlock()
+		w := h.start()
+		h.advanceUntil("the first push held", roundInterval, func() bool {
+			return len(dst.pushes()) >= 1
+		})
+		agents.setPaths(spCnA, pathInfo(spSideSrc))
+		dst.mu.Lock()
+		dst.pushHold = nil
+		dst.mu.Unlock()
+		close(hold)
+		base := agents.rounds.get(spCnA)
+		h.advanceUntil("three rounds with no path", roundInterval,
+			func() bool { return agents.rounds.atLeast(base+3, spCnA) })
+		all := map[uint32][]byte{0: {1, 2, 3, 4}, 1: {5, 6, 7, 8}, 2: {9, 10}}
+		wantPieces(t, dst.pushes(), all, 0, 1)
+
+		before := len(dst.syncups())
+		w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+		h.advanceUntil("the SyncupSide and three more rounds",
+			roundInterval, func() bool {
+				return len(dst.syncups()) > before &&
+					agents.rounds.atLeast(base+6, spCnA)
+			})
+		wantPieces(t, dst.pushes(), all, 0, 1, 1, 2)
+	})
+}
+
+// TestMigrBmAnOfferWaitsForTheRunningPlan: the offers made while a plan of
+// the migration runs plan nothing, though the pieces of that plan are not
+// in the child's memo while it runs: the plan pushes every piece to the
+// last, and only an offer after it ends plans from what it left (BM7).
+func TestMigrBmAnOfferWaitsForTheRunningPlan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		smallPieces(t, 4)
+		m := &migrBmAgents{legBm: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}}
+		h, agents := migrBmHarness(t, false, cloneShownInfo(), m)
+		dst := h.sides[spDnC]
+		hold := make(chan struct{})
+		dst.mu.Lock()
+		dst.pushHold = hold
+		dst.mu.Unlock()
+		h.start()
+		h.advanceUntil("the first push held", roundInterval, func() bool {
+			return len(dst.pushes()) >= 1
+		})
+		base := agents.rounds.get(spCnA)
+		h.advanceUntil("three rounds with the push held", roundInterval,
+			func() bool { return agents.rounds.atLeast(base+3, spCnA) })
+		dst.mu.Lock()
+		dst.pushHold = nil
+		dst.mu.Unlock()
+		close(hold)
+		base = agents.rounds.get(spCnA)
+		h.advanceUntil("three more rounds", roundInterval, func() bool {
+			return agents.rounds.atLeast(base+3, spCnA)
+		})
+		all := map[uint32][]byte{0: {1, 2, 3, 4}, 1: {5, 6, 7, 8}, 2: {9, 10}}
+		wantPieces(t, dst.pushes(), all, 0, 1, 2)
 	})
 }
 

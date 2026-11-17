@@ -3297,9 +3297,8 @@ type sideDriver struct {
 	// cloneReady is whether the last reply the loop observed was accepted
 	// at the desired revision and its SideInfo shows the dm-clone
 	// (migrCloneShown): a bitmap read waits for it (BM7). A reply behind the
-	// desired revision is followed by a SyncupSide, whose reply brings the
-	// applied set the pushes after the read are planned from, so the read
-	// waits for that reply too.
+	// desired revision reports a request the plan has replaced, so the read
+	// waits for the SyncupSide that brings the agent to the plan's.
 	cloneReady bool
 
 	plan   *sidePlan
@@ -3313,15 +3312,13 @@ type sideDriver struct {
 	// bmMigrId and bmMigrName are the migration the rest is about, bmPieces
 	// the leg's bitmap read from the primary and cut into pieces, nil until a
 	// read ended (empty, never nil, once the child gave up reading),
-	// bmReading whether a read is in flight, bmFailures the reads that failed
-	// on the agent's side, and bmApplied the bm_info of the last accepted
-	// SyncupSide reply, the agent's applied set.
+	// bmReading whether a read is in flight, and bmFailures the reads that
+	// failed on the agent's side.
 	bmMigrId   uint64
 	bmMigrName string
 	bmPieces   [][]byte
 	bmReading  bool
 	bmFailures int
-	bmApplied  *pb.BitmapInfo
 }
 
 // storeInfo remembers the latest SideInfo (HL5); info returns it. A Check
@@ -3554,10 +3551,10 @@ func migrChunkIds(bmIdxList []uint32) []model.BmChunk {
 	return out
 }
 
-// diffBitmap is BM2 for a migration destination side: it keeps the reply's
-// bm_info, the agent's applied set, when the reply is about this side's
-// migration, and pushes the pieces of the child's read the set lacks (BM7).
-// Only a destination side pushes at all (BM4).
+// diffBitmap is BM2 for a migration destination side: when the reply's
+// bm_info, the agent's applied set, is about this side's migration, it
+// pushes the pieces of the child's read the set lacks or this child has not
+// delivered (BM7). Only a destination side pushes at all (BM4).
 func (d *sideDriver) diffBitmap(
 	plan *sidePlan,
 	info *pb.BitmapInfo,
@@ -3574,14 +3571,11 @@ func (d *sideDriver) diffBitmap(
 	if plan.migrName == "" || info.GetResId() != plan.migrId {
 		return
 	}
-	d.mu.Lock()
-	d.bmApplied = info
-	d.mu.Unlock()
-	d.pushMigrPieces(plan.migrId, plan.migrName, false)
+	d.pushMigrPieces(plan.migrId, plan.migrName, migrPushReply,
+		migrChunkIds(info.GetBmIdxList()))
 }
 
-// dropBitmap forgets the child's migration bitmap; bmApplied stays, as it
-// names its own migration. Called with mu held.
+// dropBitmap forgets the child's migration bitmap. Called with mu held.
 func (d *sideDriver) dropBitmap() {
 	d.bmMigrId, d.bmMigrName = 0, ""
 	d.bmPieces, d.bmReading, d.bmFailures = nil, false, 0
@@ -3603,12 +3597,12 @@ type bmSource struct {
 // revision and shows the dm-clone (cloneReady), which the destination builds
 // only over the source's export, linked once every per-CN dm-linear of the
 // source is fenced (dnagent.md DN12), and only when it holds no bitmap of
-// that migration and no read is in flight. An offer to a
-// child that holds the bitmap pushes again the pieces the agent's last
-// applied set lacks and this child has no code-zero reply for: no SyncupSide
-// need follow the read, so the offer is what retries a push that failed
-// (BM6, BM7). The read runs on the pusher's lifecycle, so the child's stop
-// ends it.
+// that migration and no read is in flight. An offer to a child that holds
+// the bitmap pushes again from the first piece its pusher's memo does not
+// list (BM5) to the last, unless a plan of the migration runs or waits
+// (bmPusher.offer): no SyncupSide need follow the read, so the offer is
+// what retries a push that failed (BM6, BM7). The read runs on the
+// pusher's lifecycle, so the child's stop ends it.
 func (d *sideDriver) offerBitmapRead(
 	migrId uint64,
 	migrName string,
@@ -3621,7 +3615,7 @@ func (d *sideDriver) offerBitmapRead(
 	}
 	if d.bmMigrId == migrId && d.bmPieces != nil {
 		d.mu.Unlock()
-		d.pushMigrPieces(migrId, migrName, true)
+		d.pushMigrPieces(migrId, migrName, migrPushOffer, nil)
 		return
 	}
 	if d.bmMigrId != migrId {
@@ -3709,7 +3703,7 @@ func (d *sideDriver) readMigrBitmap(
 	}
 	slog.InfoContext(ctx, msgMigrBitmapRead,
 		append(attrs, slog.Int("piece_cnt", len(pieces)))...)
-	d.pushMigrPieces(migrId, migrName, false)
+	d.pushMigrPieces(migrId, migrName, migrPushRead, nil)
 }
 
 // migrPieceBytes is the size of every piece but the last of a migration's
@@ -3773,16 +3767,35 @@ func (d *sideDriver) migrPiece(migrName string, bmIdx uint32) ([]byte, bool) {
 	return d.bmPieces[bmIdx], true
 }
 
-// pushMigrPieces submits the pieces of the child's read of migrId that the
-// agent's last applied set (bmApplied) does not list, in ascending bm_idx
-// (BM2, BM3, BM7). It runs on a SyncupSide reply's diff, right after the
-// read, and on each offer, which also leaves out every piece this child
-// delivered with a code-zero reply (fromOffer): an offer's set is the last
-// reply's, which may predate those pushes.
+// migrPushCause is what plans a migration's pushes (BM2, BM7).
+type migrPushCause int
+
+const (
+	// migrPushRead is the child's read of the bitmap: every piece.
+	migrPushRead migrPushCause = iota
+	// migrPushOffer is an offer to a child that holds the bitmap: from the
+	// first piece the pusher's memo does not list (BM5), and nothing while
+	// a plan of the migration runs or waits (bmPusher.offer).
+	migrPushOffer
+	// migrPushReply is an accepted SyncupSide reply about the migration:
+	// from the first piece the pusher's memo or the reply's applied set
+	// does not list.
+	migrPushReply
+)
+
+// pushMigrPieces submits the pushes of the child's read of migrId that cause
+// plans (migrPushCause), in ascending bm_idx (BM2, BM3, BM7). A piece the
+// agent's applied set lists counts as delivered only while the pusher's
+// memo lists it (BM5): the set may list the chunks an older build left at
+// the same indexes. The plan runs from the lowest of the pieces not
+// delivered to the read's last piece, since the agent takes out of its set
+// every chunk above a piece it saves (dnagent.md DN15).
+// applied is the reply's set, for migrPushReply alone.
 func (d *sideDriver) pushMigrPieces(
 	migrId uint64,
 	migrName string,
-	fromOffer bool,
+	cause migrPushCause,
+	applied []model.BmChunk,
 ) {
 	d.mu.Lock()
 	if d.bmMigrId != migrId || d.bmPieces == nil {
@@ -3793,22 +3806,28 @@ func (d *sideDriver) pushMigrPieces(
 	for i := range d.bmPieces {
 		chunks[i] = model.BmChunk{Idx: uint32(i)}
 	}
-	var applied []model.BmChunk
-	if d.bmApplied.GetResId() == migrId {
-		applied = migrChunkIds(d.bmApplied.GetBmIdxList())
-	}
 	d.mu.Unlock()
-	missing := d.pusher.missing(migrId, chunks, applied)
-	if fromOffer {
-		missing = d.pusher.unacked(migrId, missing)
+	if cause == migrPushOffer {
+		d.pusher.offer(migrId, migrName, chunks)
+		return
 	}
-	if len(missing) == 0 {
+	first := len(chunks)
+	if cause == migrPushRead {
+		first = 0
+	} else {
+		missing := append(d.pusher.unacked(migrId, chunks),
+			d.pusher.missing(migrId, chunks, applied)...)
+		for _, chunk := range missing {
+			first = min(first, int(chunk.Idx))
+		}
+	}
+	if first == len(chunks) {
 		return
 	}
 	d.pusher.submit(&bmPlan{
 		resId: migrId,
 		name:  migrName,
-		parts: missing,
+		parts: chunks[first:],
 	})
 }
 
@@ -3816,7 +3835,8 @@ func (d *sideDriver) pushMigrPieces(
 // HL4), the RW18 flip report, the cutover's wait (setAwaiting) and RW14's
 // barrier. A failed push is not re-armed here: it is logged and left to the
 // next Syncup* reply, which re-plans the diff from the agent's own
-// acknowledged set.
+// acknowledged set; a migration's piece is also pushed again by the next
+// offer (BM7).
 func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 	info := d.info()
 	obs, res := sideObservation(r.code, info)

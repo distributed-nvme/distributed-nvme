@@ -367,15 +367,7 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-- **A migration under way across an upgrade can place pieces of its list
-  wrongly.** The new side keeps the pieces of the list of written blocks
-  that the older build sent, and the worker sends only the pieces it does
-  not see there. A new piece that follows an older piece of another length
-  lands at the wrong place. The copy can then skip a block the source
-  wrote, and the pool reads there the old bytes of the new side's extents,
-  possibly another pool's, with no error. State: procedure, finish
-  or cancel every migration before an upgrade. Fix later. Not seen in the
-  lab.
+No case is known today.
 
 ### 5.4 Hosts and the Kubernetes driver
 

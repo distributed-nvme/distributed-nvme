@@ -4422,6 +4422,66 @@ func TestCancelMigrationIsTheExactMirror(t *testing.T) {
 	}
 }
 
+// TestMigrationEndDeletesTheOlderBitmapKeys pins the old keys' end
+// (architecture.md, Upgrade in lockstep): an older build kept a migration's
+// bitmap in etcd, and the transaction that ends the migration, a finish or
+// a cancel, deletes the keys of every index that build could write, while
+// another migration's keys stay.
+func TestMigrationEndDeletesTheOlderBitmapKeys(t *testing.T) {
+	for _, finish := range []bool{true, false} {
+		name := "a cancel"
+		if finish {
+			name = "a finish"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := newVolEnv(t)
+			volCreateMigration(env, "migr-a")
+			for _, migrName := range []string{"migr-a", "migr-other"} {
+				for bmIdx := range uint32(model.LegacyMigrBmCnt) {
+					mustPut(t, env.cli, model.LegacyMigrBitmapKey(env.cid,
+						volSpId, migrName, bmIdx),
+						&pb.PushMigrBitmapRequest{Bitmap: []byte{0xff}})
+				}
+			}
+			var err error
+			if finish {
+				volCutover(env, "migr-a")
+				_, err = env.srv.FinishMigration(env.ctx,
+					&pb.FinishMigrationRequest{
+						ClusterName: env.cluster,
+						SpName:      volSpName,
+						SpRev:       env.token(),
+						MigrName:    "migr-a",
+						Force:       true,
+					})
+			} else {
+				_, err = env.srv.CancelMigration(env.ctx,
+					&pb.CancelMigrationRequest{
+						ClusterName: env.cluster,
+						SpName:      volSpName,
+						SpRev:       env.token(),
+						MigrName:    "migr-a",
+					})
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			for bmIdx := range uint32(model.LegacyMigrBmCnt) {
+				key := model.LegacyMigrBitmapKey(env.cid, volSpId, "migr-a",
+					bmIdx)
+				if env.exists(key, &pb.PushMigrBitmapRequest{}) {
+					t.Errorf("the older build's bitmap key %q survived", key)
+				}
+				key = model.LegacyMigrBitmapKey(env.cid, volSpId,
+					"migr-other", bmIdx)
+				if !env.exists(key, &pb.PushMigrBitmapRequest{}) {
+					t.Errorf("another migration's key %q went", key)
+				}
+			}
+		})
+	}
+}
+
 // TestFinishMigrationReleasesSource pins the other terminal RPC of
 // architecture.md, Migrations: the
 // destination becomes the leg's only side and the SOURCE's extents and pointer

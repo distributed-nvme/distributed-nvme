@@ -122,7 +122,9 @@ The constants this document relies on, whose values and comments
   `ReplyCodeSaveFailed` refuses a request the gates admitted whose save to
   the local store failed (SH5): the request is current and its conf
   usable, and the agent cannot keep it, which is why it is none of the
-  other three.
+  other three; a dn agent also refuses with it a migration piece whose
+  push could not first remove the chunks stored at its index and above,
+  or could not then save the piece (DN15).
   `ReplyCodeLeftover` reports an **accepted** request with residue: the
   desired state is stored and the converge built what it could, but the
   node still holds objects the desired state does not want, or an
@@ -350,8 +352,9 @@ SH7): the calls are in-process, so the bound ends only a wait for an
 SH11), and without the bound a save that finds every slot held could wait
 until the RPC's deadline. A save the bound cuts off fails like any other:
 its caller logs it, and a request whose save failed is refused with no
-converge (SH5), while a chunk whose save failed is acked at once (DN15,
-`cnagent.md` CN22); either RPC then returns and releases its locks. The
+converge (SH5) and a migration piece whose save failed is refused too
+(DN15), while a clone chunk whose save failed is acked at once
+(`cnagent.md` CN22); each RPC then returns and releases its locks. The
 store keeps two states over every save, of a request or a chunk, whatever
 its object. The first is whether its latest save failed, until a save
 succeeds (`Store.SaveFailing`); SH30 says what a syncup does while it holds.
@@ -504,6 +507,9 @@ an unknown object, and `details` names the proto field rather than an id.
 A request the gates admit whose save then fails is rejected with
 `ReplyCodeSaveFailed`, its `details` carrying the save's error (SH5): the
 request is current and its conf usable, so it is none of the other three.
+A migration piece whose push could not first remove the chunks stored at
+its index and above, or could not then save the piece, is rejected with
+it too (DN15).
 All four rejection kinds
 return a normal gRPC reply (`AgentReply.code` non-zero), never a gRPC
 error status — only `GetDnSize`/`GetCnSize` and `Get*Bm` report failure
@@ -1085,7 +1091,7 @@ persist the received `Push*BitmapRequest` verbatim at its `Local*BmPath`
 (via `WriteProto`) **before** applying; the applied set is derived from the
 files present, save those the startup reload leaves unloaded and those a
 failed push left in place for a chunk outside the set, since a push whose
-save fails changes nothing in it (below) —
+save fails adds nothing to it (below) —
 `BitmapInfo.bm_idx_list` for a migration, keyed by the piece index, and
 `BitmapInfo.chunk_id_list` for a clone, keyed by the `src_slice_idx` and
 `bm_idx` pair that addresses the chunk. The file name carries that pair too,
@@ -1095,11 +1101,12 @@ not decode, DN2's skips while a `dn-*` or `side-*` file does not load, and
 `cnagent.md` CN2's while a `cn-*` or `cntlr-*` file does not — is in no
 applied set until a push rewrites it or a later restart loads it. A push
 whose save failed only at the directory sync, after its rename, leaves
-its file in place and applies nothing (DN15, `cnagent.md` CN22): the
-applied set keeps the chunk as it held it before that push — out of the
-set if it was out, in it at the bytes it held if it was in, which for a
-clone chunk that grows in place are its older bytes — until a push
-rewrites it or a later restart loads it.
+its file in place and applies nothing (DN15, `cnagent.md` CN22): a clone
+chunk stays in the applied set as it held it before that push — out of
+the set if it was out, in it at the bytes it held if it was in, which for
+a chunk that grows in place are its older bytes — and a migration chunk
+is out of it, as the push took the chunk at its index out before its save
+(DN15), until a push rewrites it or a later restart loads it.
 
 SH22. Of `architecture.md`, raid0 bitmap math, this file holds the
 migration's chunk placement (concatenation in `bm_idx` order,
@@ -1120,7 +1127,11 @@ The dn supplies only the positioning parameters (it shifts by the leg's
 SH23. Migration chunks are interpretable only as a contiguous prefix from
 `bm_idx` zero; the apply computation uses the longest contiguous prefix of
 the applied set's chunks (`ChunkSet.ContiguousPrefix`, SH21) — the worker's
-ascending, one-in-flight push makes gaps unreachable in practice. The
+ascending, one-in-flight push leaves a gap only where a piece's save
+failed, until it pushes that piece again (DN15, `dnv-worker.md` BM2). A
+saved chunk first takes every chunk above it out of the set (DN15), so a
+piece is placed only behind pieces of the same read or older chunks equal
+to them byte for byte, never behind an older chunk of another length. The
 applied set still reports every chunk in it, not only that prefix.
 
 ### Check-stream rules
@@ -1597,7 +1608,10 @@ area: a converge refused the run registers the DN8 retry instead, and
 whichever later pass takes the run starts the goroutine, DN13), and one
 whose stored length to zero DN8's side conf gate refuses converges and
 sweeps nothing of that side. Then every chunk that was kept is re-applied
-(SH21 to SH23); that step deletes nothing. A chunk whose side is not
+(SH21 to SH23); that step deletes nothing. The chunks an older build left
+for a migration under way at the upgrade are loaded and re-applied like
+any other, at the places that build gave them; the first piece the worker
+saves takes out every one at its index or above (DN15). A chunk whose side is not
 loaded is no orphan while a
 `side-*` file does not load and the chunk's loaded DN still names its side:
 that file names no side, so it may be this side's, and the chunk is
@@ -1613,13 +1627,15 @@ Scope 2) once the side's request carries no `migr_dst_conf` of the chunks'
 `migr_id` (the finish of `architecture.md`, Migration; a level that only
 suppresses the destination role keeps them, DN11) — names the files from
 the side's in-memory chunk set, keyed by the one `migr_id` that set is
-tracking, so a file this process never loaded is invisible to all of them
-and a restart is the only place that can collect it. The reconcile holds
+tracking, so a file this process never loaded is invisible to all of them,
+and a restart is the only place that can collect it, save a push of a
+chunk that is not equal to the one held, which removes its migration's
+chunk files at its index and above by their paths (DN15). The reconcile holds
 the node write lock throughout, with the SH2 trace id. Outside it, a side's
 drop runs under `SyncupDn`'s node write lock, and DN13's deletions and the
 sweep's inside a converge of the side — a `SyncupSide`'s, a DN8 retry
-attempt's or the DN12 fence timer's — under the node read lock and the
-side's object lock (DN1).
+attempt's or the DN12 fence timer's — and a push's removal under the node
+read lock and the side's object lock (DN1).
 
 ### `GetDnSize`
 
@@ -3298,12 +3314,36 @@ planned against a report the agent has since replaced with a newer one is
 harmless — while rejecting it would throw away work the worker has already
 done and need a whole re-sync to re-drive (`dnv-worker.md` BM3). A chunk
 equal, byte for byte, to the one the applied set holds at its index for
-the same migration is answered code zero with nothing saved and nothing
-applied: a worker that does not know the applied set, as one restarted
-while this agent kept its revision, pushes every piece again
-(`dnv-worker.md` BM7), and applying an unchanged piece again would only
-pause the volume once more, as the cn agent's identical clone chunk does
-not (`cnagent.md` CN22). Otherwise SH21 to SH23: persist the chunk at `LocalMigrBmPath`, recompute from the applied
+the same migration is answered code zero with nothing removed, nothing
+saved and nothing applied: a worker pushes every piece again after each
+read of the bitmap (`dnv-worker.md` BM7), and applying an unchanged piece
+again would only pause the volume once more, as the cn agent's identical
+clone chunk does not (`cnagent.md` CN22); the chunks above it keep their
+places, as it keeps its length. Otherwise the push first removes the
+migration's chunk files at its `bm_idx` and at every index above it below
+`MaxMigrBmCnt`, by their paths (`Store.Remove`), so a file the startup
+reload left unloaded goes too, and takes those indexes out of the applied
+set. Reasons: a chunk above the index was placed behind the chunk the
+push replaces, which may be of another length — an older build's chunks
+are of any length (`architecture.md`, Upgrade in lockstep) — so it would
+join the new piece at the wrong place, and the copy would never copy the
+regions it then marks skippable; the worker pushes every piece above one
+it pushes, in rising order (`dnv-worker.md` BM2), so the drop costs a save
+for each of them, and only when a piece changes. The chunk at the index
+goes too, so that a save that fails leaves no older chunk there. The
+removal comes before the save and syncs no directory: the save's
+directory sync makes it durable with the new file (`architecture.md`,
+Common agent rules), and a crash of the machine before that sync can
+bring the removed files back, which a restart reloads (DN2). So a push
+past the byte-for-byte check answers code zero only once its save holds;
+a removal that fails, or a save that fails after it, refuses the push
+with `ReplyCodeSaveFailed`, its `details` naming the index and the error.
+A code-zero reply would let the worker push the next piece, whose save
+could put it above an older chunk the removal left or a crash brought
+back; the refusal ends the worker's plan (`dnv-worker.md` BM6) and its
+next offer pushes the piece again (`dnv-worker.md` BM7). A removal that
+fails saves, takes out and applies nothing. Then SH21 to SH23: persist
+the chunk at `LocalMigrBmPath`, recompute from the applied
 set's contiguous prefix (SH23; shifted by the leg's `meta_blocks`),
 discard the fully-skippable regions of `DnMigrFinalName`, in one call of
 the agent's own process (`OsClient.DiscardRanges`: one open and one
@@ -3313,15 +3353,15 @@ map the dm-clone paused and its background copy stopped for the moment
 the dm-clone does not currently exist — not built yet, suppressed by
 `sp_level`, or still behind DN13's provisioning gate — or is suspended, the
 file still counts as applied; chunks are re-applied whenever DN13 step 4
-creates, resumes or reloads the dm-clone. A **failed persist is still acked code zero**, with the error
-logged and neither the recompute nor the discard attempted
-(`architecture.md`, Bitmap push protocol): not persisted is not applied, so
-the push leaves the applied set as it was (SH21), and a chunk not yet in
-it stays out, even when only the directory sync after the rename failed
-and its file is in place — the next accepted `SyncupSide` reply's
-`bm_info.bm_idx_list` omits the index, and the worker pushes it again on
-a later round. Reply
-`agent_reply` only.
+creates, resumes or reloads the dm-clone. A **failed persist is
+refused**, as above, with the error logged and neither the recompute nor
+the discard attempted: not persisted is not applied, so the push adds
+nothing to the applied set, which it has already left without a chunk at
+its index or above (SH21), even when only the directory sync after the
+rename failed and its file is in place. The cn agent acks a clone chunk
+whose persist failed instead (`cnagent.md` CN22): a clone's chunks are
+self-positioned, so no later chunk depends on it. Reply `agent_reply`
+only.
 
 ### `GetDnInfo` / `GetSideInfo`
 
@@ -3555,12 +3595,12 @@ needed, and the worker never turns one into an `err_epoch`
   row its error, and once the row reads ERROR a refused probe leaves its
   epoch where it is. A removal that fails leaves the file until the next
   startup deletes it (SH6). A read writes no probe file while the second
-  state is clear. Reason: a chunk whose save failed is acked, and the worker
-  pushes it again only after a later accepted syncup of its side (DN15;
-  `dnv-worker.md` BM2), which a quiet node does not get, so without the
-  probe the row of a quiet node would read the refusal, with an old error,
-  until the next save of anything, and the worker would offer the node for
-  no new side for that long; and the bytes are random, since a file system
+  state is clear. Reason: the worker pushes a piece whose save failed
+  again only on an offer of its migration or after a later accepted syncup
+  of its side (DN15; `dnv-worker.md` BM2, BM7), which a quiet node does not
+  get, so without the probe the row of a quiet node would read the
+  refusal, with an old error, until the next save of anything, and the
+  worker would offer the node for no new side for that long; and the bytes are random, since a file system
   that compresses or shares blocks stores zeros in next to no room. The row
   is the node's alone: a side's refused save marks the node and no side;
   what the worker does with it is `dnv-worker.md` HL1's.

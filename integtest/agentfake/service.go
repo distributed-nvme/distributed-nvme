@@ -666,9 +666,12 @@ func (a *Agent) SyncupSide(
 }
 
 // PushMigrBitmap records one migration-bitmap chunk behind the push gate
-// (dnv-worker.md, Integration test plan, The fake agent); the applied set
-// derived from the recorded chunks is what the next SyncupSide reply reports
-// as bm_info (architecture.md, Bitmap push protocol).
+// (dnv-worker.md, Integration test plan, The fake agent), after it drops
+// every chunk it recorded above the chunk's index, as the dn agent's saved
+// push does (dnagent.md DN15); it holds no chunk's bytes, so a piece pushed
+// again drops them too. The applied set derived from the recorded chunks is
+// what the next SyncupSide reply reports as bm_info (architecture.md, Bitmap
+// push protocol).
 func (a *Agent) PushMigrBitmap(
 	ctx context.Context, req *pb.PushMigrBitmapRequest,
 ) (*pb.PushMigrBitmapReply, error) {
@@ -688,6 +691,7 @@ func (a *Agent) PushMigrBitmap(
 		a.migrKnownLocked(key, req.GetMigrId())
 	code, details := a.gatePushLocked(key, req.GetMigrId(), known)
 	if code == 0 {
+		a.state[key].dropMigrChunksAbove(req.GetMigrId(), req.GetBmIdx())
 		a.state[key].putChunk(req.GetMigrId(),
 			migrChunkKey(req.GetBmIdx()), len(req.GetBitmap()))
 		a.saveStateLocked(ctx)

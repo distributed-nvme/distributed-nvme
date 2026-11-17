@@ -49,6 +49,9 @@ const (
 	kindRetiredLeg  = "retired_leg"
 	kindSpName      = "sp_id_to_name"
 	kindWorkerReg   = "worker"
+	// kindLegacyMigrBitmap is the kind an older build kept a migration's
+	// bitmap chunks under; no build writes it (LegacyMigrBitmapKey).
+	kindLegacyMigrBitmap = "migration_bitmap"
 )
 
 // keySep is the single space every key field is joined by (architecture.md,
@@ -376,6 +379,27 @@ func MigrationKey(cid uint64, spId uint64, migrName string) string {
 	return joinKey(
 		common.DnvPrefix, kindMigration,
 		idField(cid), idField(spId), migrName,
+	)
+}
+
+// LegacyMigrBmCnt bounds the indexes of the keys an older build kept a
+// migration's bitmap chunks under (LegacyMigrBitmapKey): its gateway refused
+// a chunk at any index at or past it.
+const LegacyMigrBmCnt = 4
+
+// LegacyMigrBitmapKey is the key of one chunk of a migration's bitmap as an
+// older build kept it in etcd (MD2; architecture.md, Upgrade in lockstep).
+// No build writes or reads it: EndMigrationIn deletes the keys of every
+// index below LegacyMigrBmCnt with the migration's record.
+func LegacyMigrBitmapKey(
+	cid uint64,
+	spId uint64,
+	migrName string,
+	bmIdx uint32,
+) string {
+	return joinKey(
+		common.DnvPrefix, kindLegacyMigrBitmap,
+		idField(cid), idField(spId), migrName, bmIdxField(bmIdx),
 	)
 }
 
