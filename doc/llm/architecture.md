@@ -7443,16 +7443,20 @@ document and only pointed to here.
   want more queues per path, and a node with many paths fewer; an
   operator who measures sets the flag. A subsystem linked before the cap
   changed keeps its old cap until it is unlinked everywhere or removed.
-* **The default stripe gives hosts large IO hints.** dm-stripe reports the
-  stripe as a device's smallest efficient IO and the stripe times the slice
-  count as its optimal IO, and nvmet passes both to the host, which sets its
-  read-ahead to at least twice the optimal IO and, above 4 MiB, lets one
-  request grow to it. With the stripe equal to the default block (Common
-  validation), a pool of many slices has hosts read ahead twice the block
-  times the slice count and send commands of up to that product, each of
-  which nvmet buffers on the controller node; a filesystem maker takes its
-  alignment from the same hints. Read in the kernel's source, not measured;
-  a pool that names a smaller stripe keeps smaller hints.
+* **The default stripe gives hosts large IO hints, and a controller node
+  refuses the reads they bring.** dm-stripe reports the stripe as a device's
+  smallest efficient IO and the stripe times the slice count as its optimal
+  IO, and nvmet passes both to the host, which sets its read-ahead to at
+  least twice the optimal IO and, above 4 MiB, lets one request grow to it.
+  nvmet over TCP refuses a command whose data is longer than 4 MiB with the
+  status "Data SGL Length Invalid" and logs "failed to map data", on every
+  kernel that carries the upstream bound of a command's data length. With
+  the stripe equal to the default block (Common validation), a pool of five
+  or more slices has hosts send reads of more than 4 MiB, which fail with an
+  IO error; a filesystem maker takes its alignment from the same hints. Seen
+  in the lab: a command of 4 MiB passes, one block more is refused. A pool
+  that names a smaller stripe keeps smaller hints, and the lab's kernels
+  have no port setting that would tell a host a smaller largest transfer.
 * **A CSI volume costs the cluster a pool** (`csi.md`, The volume model).
 * **A RAID1 pool needs as many disk nodes per slice at create as its meta
   and data groups have legs together.** `CreateStoragePool` puts every leg

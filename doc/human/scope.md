@@ -1055,13 +1055,22 @@ design:
   node's create. An auto-grow refused for want of budget shows only in
   the worker's log. State: accepted. Fix decided: a node created without
   a budget gets the largest one.
-- **The default cap on IO queues is unmeasured. The default stripe gives
-  hosts large IO sizes.** Each path holds one TCP connection per IO queue,
-  and the agent caps the queues of a subsystem; no host with many CPUs has
-  been measured for it. The stripe tells the host the device's best IO
-  size, and the host reads ahead and sends commands up to the stripe times
-  the slice count. State: accepted; a measurement item of the performance
-  plan. Procedure to write, one line on the stripe setting.
+- **The default cap on IO queues is unmeasured. The default stripe makes
+  hosts send reads that a controller node refuses.** Each path holds one
+  TCP connection per IO queue, and the agent caps the queues of a
+  subsystem; no host with many CPUs has been measured for it. State:
+  accepted; a measurement item of the performance plan. The stripe tells
+  the host the device's best IO size, the stripe times the slice count,
+  and the host reads ahead twice that size and sends commands up to it. A
+  controller node's kernel refuses, over TCP, a command that carries more
+  than 4 MiB of data, since a kernel fix of 2026 that the distributions'
+  kernels carry. So a host that reads a large file on a pool of five or
+  more slices at the default stripe of 1 MiB gets IO errors. Seen in the
+  lab on kernel 7.0.0-42. State: fix decided, the default stripe keeps the
+  stripe times the slice count at 4 MiB, and a pool that names a larger
+  product is refused; the price is that a whole block a host writes is
+  split over slices, so the first write of a block costs more. Procedure
+  to write, one line on the stripe setting.
 - **A CSI volume costs a pool.** Under the CSI driver every volume is a
   pool with its own cntlrs and sides, so the ceilings of the introduction's
   table bound the volume count. A controller node holds at most 256
