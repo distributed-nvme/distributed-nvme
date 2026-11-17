@@ -18,7 +18,9 @@ import (
 // pathsToCut names, its answer deciding whether the verdict names them; the
 // entry of each NVMe subsystem a lookup
 // uses — its NQN once more, its namespace and its controllers
-// (lookupSubsys); the own read of a dm name that a partial info listing, or
+// (lookupSubsys) — and the number in /sys/block of a looked-up leg's
+// multipath head, which the wrapper's name compares (wrapperName); the own
+// read of a dm name that a partial info listing, or
 // the table listing, lacks (cnReading); the fresh `dmsetup info` that
 // confirms a device gone after its own status or table read failed; and the
 // superblock reads (Md.ReadMember) of the take-back check, of a repair's new
@@ -60,7 +62,9 @@ type legSide struct {
 // it returns each provisioned side of a wanted leg that the converge would
 // connect, the leg's lookup having answered (sidesToConnect, CN30), and each
 // side whose live path the converge would cut (pathsToCut, CN10), which the
-// verdict names too.
+// verdict names too. It marks in the plan each leg wrapper and each
+// RedundNone group's dm-linear the converge would change (wrapperName,
+// linearGroupName), which the verdict names (cntlrRowVerdict).
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -119,6 +123,13 @@ func (s *CnAgentServer) probeCntlr(
 			for _, side := range sidesToConnect(lp, view, plan.primary) {
 				noCtrl = append(noCtrl, legSide{nqn: lp.nqn, side: side})
 			}
+			// The leg's wrapper, which the verdict names while a converge
+			// would create, reload or resume it (CN30). A primary's
+			// one-sided leg whose row reads OK, not looked up, has a
+			// wrapper of the leg's target and size there and resumed,
+			// through which its last probe passed, so the head it maps
+			// serves.
+			lp.wrapperName = s.wrapperName(ctx, plan.rd, lp, view)
 			cut := pathsToCut(plan.primary, lp, view)
 			if len(cut) > 0 && !s.otherMemberInSync(ctx, lp) {
 				cut = nil
@@ -156,6 +167,11 @@ func (s *CnAgentServer) probeCntlr(
 			status, details, detail, broken := s.probeGroup(ctx, plan, gp)
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
+			if !gp.raid1 {
+				// The verdict names a RedundNone group's dm-linear by the
+				// group's row while a converge would change it (CN30).
+				gp.linearName = s.linearGroupName(ctx, plan, gp)
+			}
 			names, refusals := s.putBackNames(
 				ctx, plan, gp, detail, info.LegIdToLeg, dead)
 			for _, name := range names {

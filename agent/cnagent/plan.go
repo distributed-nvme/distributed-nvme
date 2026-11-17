@@ -277,6 +277,10 @@ type grpPlan struct {
 	// (forcedAssemble), whatever came of it, so the converge records the
 	// mark as the one this incarnation acted on (cntlrState.forcedStarts).
 	forcedRan bool
+	// linearName is what this pass names a RedundNone group's dm-linear
+	// with (cntlrRowVerdict, CN30), nil for nothing: a converge's step on it
+	// that failed, or a read's linearGroupName.
+	linearName error
 
 	// deferred is the [D15] group gate: some leg of leg_list is provisioning, so
 	// the group builds no md array and no CnGrpName, and is left out of the
@@ -531,6 +535,10 @@ type legPlan struct {
 	// on-leg layout: meta region, data region, health block).
 	sectors      uint64
 	healthOffset uint64
+	// wrapperName is what this pass names the leg's wrapper with
+	// (cntlrRowVerdict, CN30), nil for nothing: a converge's wrapper step
+	// that failed, or a read's wrapperName.
+	wrapperName error
 }
 
 // repPlan is a group's repair as the cntlr's request carries it

@@ -320,6 +320,14 @@ func (s *CnAgentServer) convergeNsDev(
 				if err := s.dm.Reload(ctx, np.devName, table); err != nil {
 					return nsDevFailed, err
 				}
+				if dev.ReadOnly {
+					// A reload leaves the block layer's own read-only flag
+					// set (CN10, A read-only device is made writable).
+					if err := s.dm.SetWritable(
+						ctx, s.nf.DmPath(np.devName)); err != nil {
+						return nsDevFailed, err
+					}
+				}
 				dev = &agent.DmDevInfo{}
 			}
 		}

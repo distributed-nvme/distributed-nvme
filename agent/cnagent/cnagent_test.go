@@ -2626,17 +2626,24 @@ func TestGroupRowReadsItsLegWrapperFirst(t *testing.T) {
 	}
 }
 
-// TestGroupProbeWalksOnce pins the cost of the sysfs md read (CN12): a
-// cntlr's read, which a Check round starts and answers from (dnagent.md
-// SH29), lists /sys/block and each array's md/ directory once, in its
-// reading's one md walk, which serves all of its group rows, its concat rows
-// and its verdict (CN28, CN30), not once per group and not once more for the
-// verdict. A walk per group lists every array of the node per group: at 32
-// slices, 64 groups over 64 arrays, 4160 listings a read where the whole
-// round has one cntlr_interval. The walk lists no /sys/block entry that is
-// not an array node, and the read reads nothing of one, its number
-// included: a CN's dm devices and nvme heads outnumber its arrays many times
-// over.
+// TestGroupProbeWalksOnce pins the cost of the sysfs md read (CN12): a cntlr's
+// read, which a Check round starts and answers from (dnagent.md SH29), lists
+// /sys/block and each array's md/ directory once, in its reading's one md
+// walk, which serves all of its group rows, its concat rows and its verdict
+// (CN28, CN30), not once per group and not once more for the verdict. A walk
+// per group lists every array of the node per group: at 32 slices, 64 groups
+// over 64 arrays, 4160 listings a read where the whole round has one
+// cntlr_interval. The walk lists no /sys/block entry that is not an array
+// node, and the read reads nothing of one, its number included, save at most
+// one number read of a leg's multipath head for each leg its leg loop looks up
+// — on a standby every wanted leg not provisioning, on a primary a two-sided
+// leg or one whose row does not read OK — and none where that lookup has no
+// head or an unknown controller, which the wrapper's name compares with the
+// number the wrapper maps (wrapperName, CN30), and at most one more for a
+// RedundNone group's leg while the group's device is missing, maps another
+// table or is read-only (linearGroupServes), with the same exceptions, each
+// one file read in the agent's own process: a CN's dm devices and nvme heads
+// outnumber its arrays many times over, so the md walk reads none of them.
 func TestGroupProbeWalksOnce(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -2670,7 +2677,15 @@ func TestGroupProbeWalksOnce(t *testing.T) {
 			t.Errorf("the read listed %s %d times, want 1", dir, got)
 		}
 	}
-	assertNoNonArrayRead(t, node, others, "the read")
+	// The fixture's first leg head is nvme0n1, an entry seedNonArrayEntries
+	// plants as well. No prober of this primary has passed, so the read looks
+	// up every leg, and reads that head's number once.
+	head := sysfsBlockDir + "/nvme0n1/dev"
+	if got := countCalls(node, "read "+head); got != 1 {
+		t.Errorf("the read read %s %d times, want 1 (the wrapper's name of "+
+			"the leg it looks up)", head, got)
+	}
+	assertNoNonArrayRead(t, node, others, "the read", "nvme0n1")
 }
 
 // seedNonArrayEntries puts more of the block devices a CN really has beside

@@ -1335,19 +1335,26 @@ func runningArrayErr(detail *MdDetail) error {
 // has not flipped to this CN yet exports dm-error to it: a pool, a raid0 and
 // an ns-dev built over such a leg would let a promotion that came before the
 // sides' switch-over ([D16]) move its namespaces optimized over IO errors.
-// A device that is there with the table it wants is kept whatever the leg's
-// availability, resumed if it is suspended, as ensureDmSingle does: a
-// primary that serves keeps serving through a short loss of its leg's path,
-// with no teardown and no reload. A late leg under a device that is missing
-// or maps something else fails the group with "no available leg" and
-// touches nothing. A missing device leaves the slice's concat without the
+// A device that is there with the table it wants and is not read-only is
+// kept whatever the leg's availability, resumed if it is suspended, as
+// ensureDmSingle does: a primary that serves keeps serving through a short
+// loss of its leg's path, with no teardown and no reload. A late leg under
+// a device that is missing, maps something else or is read-only fails the
+// group with "no available leg" and touches nothing; over a leg that serves,
+// a read-only one is reloaded and made writable (dmStepReloadWritable). A missing device leaves the slice's concat without the
 // group's number: a pool not built yet, as at a promotion's first converge,
 // waits, and every layer above it with it, the namespaces inaccessible
 // (CN16); a pool that serves when a grow adds the group keeps serving at its
 // old size, with the raid0s and ns-devs over it, while its concat and pool
 // rows read ERROR. The CN10 retry that the late member registers (build)
 // then finds the leg available, builds the group and builds or grows the
-// pool.
+// pool; so does the SyncupCntlr the worker re-sends once a read of the
+// cntlr names the device (linearGroupStep, CN30).
+//
+// The step is linearGroupStep's, over the device as the pass reads it
+// (linearGroupShape). A create, reload or resume that fails is named by the
+// converge's own verdict (grpPlan.linearName); a read that did not answer
+// is left to the next read.
 func (s *CnAgentServer) ensureLinearGroup(
 	ctx context.Context,
 	gp *grpPlan,
@@ -1357,39 +1364,140 @@ func (s *CnAgentServer) ensureLinearGroup(
 		return fmt.Errorf(
 			"RedundNone group has %d legs, want 1", len(gp.legs))
 	}
+	if gp.dataSectors == 0 {
+		return fmt.Errorf("device size is 0")
+	}
 	lp := gp.legs[0]
-	if available[lp.legId] {
-		legNo, err := s.dmDevNo(ctx, nil, lp.name)
-		if err != nil {
+	shape, legNo, err := s.linearGroupShape(ctx, nil, gp, true)
+	if err != nil {
+		return err
+	}
+	step, err := linearGroupStep(shape, func() bool {
+		return available[lp.legId]
+	})
+	if err != nil {
+		return err
+	}
+	if step == dmStepCreate {
+		// An absent device is read with no number of the wrapper.
+		if legNo, err = s.dmDevNo(ctx, nil, lp.name); err != nil {
 			return err
 		}
-		return s.ensureDmLinear(ctx, gp.dmName, gp.dataSectors,
-			legNo, gp.dataOffsetSectors)
 	}
-	dev, err := s.dm.Info(ctx, gp.dmName)
+	err = s.takeDmStep(ctx, gp.dmName, step, dmTable("linear",
+		gp.dataSectors, linearGroupArgs(gp, legNo)))
 	if err != nil {
-		return err
+		gp.linearName = rowFailure(errRowDiffers, err.Error())
+	}
+	return err
+}
+
+// linearGroupArgs is the table arguments of a RedundNone group's dm-linear
+// over its leg wrapper, whose number is legNo.
+func linearGroupArgs(gp *grpPlan, legNo string) []string {
+	return linearArgs(legNo, gp.dataOffsetSectors)
+}
+
+// linearGroupShape reads a RedundNone group's dm-linear against the linear
+// over its leg's wrapper at the group's data offset, from rd, the reading of
+// a cntlr's read, or with no reading the device's own reads: the device's
+// info, then, for a device that is there, the wrapper's number and the
+// device's table. It returns the shape (dmShapeOf), the wrapper's number,
+// "" for an absent device, and the error of a read that did not answer, a
+// wrapper that is not there among them. readOnlyDiffers is dmShapeOf's.
+func (s *CnAgentServer) linearGroupShape(
+	ctx context.Context,
+	rd *cnReading,
+	gp *grpPlan,
+	readOnlyDiffers bool,
+) (dmShape, string, error) {
+	dev, err := s.dmInfo(ctx, rd, gp.dmName)
+	if err != nil {
+		return dmShapeWanted, "", err
 	}
 	if dev == nil {
-		return errNoAvailableLeg()
+		return dmShapeAbsent, "", nil
 	}
-	legNo, err := s.dmDevNo(ctx, nil, lp.name)
+	legNo, err := s.dmDevNo(ctx, rd, gp.legs[0].name)
 	if err != nil {
-		return err
+		return dmShapeWanted, "", err
 	}
-	targets, err := s.dm.Table(ctx, gp.dmName)
+	targets, err := s.dmTable(ctx, rd, gp.dmName)
 	if err != nil {
-		return err
+		return dmShapeWanted, "", err
 	}
-	args := []string{legNo, strconv.FormatUint(gp.dataOffsetSectors, 10)}
-	if dev.ReadOnly ||
-		!dmTableMatches(targets, "linear", gp.dataSectors, args, 0) {
-		return errNoAvailableLeg()
+	return shapeOf(dev, dmTableMatches(targets, "linear", gp.dataSectors,
+		linearGroupArgs(gp, legNo), 0), readOnlyDiffers), legNo, nil
+}
+
+// linearGroupStep is CN12's step on a RedundNone group's dm-linear of shape,
+// which ensureLinearGroup takes and a cntlr's read names the device by
+// (CN30): dmSingleStep's, save that a device absent, with another table or
+// read-only is created or reloaded only while its leg serves — serves, the
+// converge's availability, a read's linearGroupServes — and is refused with
+// "no available leg" otherwise. A device with the table it wants, not
+// read-only, is resumed whatever the leg, so a primary keeps serving through
+// a short loss of its leg's path.
+func linearGroupStep(shape dmShape, serves func() bool) (dmStep, error) {
+	step := dmSingleStep(shape)
+	if step != dmStepNone && step != dmStepResume && !serves() {
+		return dmStepNone, errNoAvailableLeg()
 	}
-	if dev.Suspended {
-		return s.dm.Resume(ctx, gp.dmName)
+	return step, nil
+}
+
+// linearGroupName is what a cntlr's read names a RedundNone group's dm-linear
+// with (CN30), "absent" or "differs", while linearGroupStep, over the device
+// as the read's reading holds it, read-only flag included as the converge
+// reads it, would change it, and nil otherwise. A read that did not answer
+// names nothing, and neither does a device over a wrapper that is not there,
+// which the wrapper's own name covers (wrapperName), nor a group of no size,
+// which the converge refuses.
+func (s *CnAgentServer) linearGroupName(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+) error {
+	if len(gp.legs) != 1 || gp.dataSectors == 0 {
+		return nil
 	}
-	return nil
+	shape, _, err := s.linearGroupShape(ctx, plan.rd, gp, true)
+	if err != nil {
+		return nil
+	}
+	step, err := linearGroupStep(shape, func() bool {
+		return s.linearGroupServes(ctx, plan, gp.legs[0])
+	})
+	if err != nil || step == dmStepNone {
+		return nil
+	}
+	return shapeFailure(shape, "linear")
+}
+
+// linearGroupServes is a read's twin of the converge's availability of a
+// RedundNone group's leg (CN12), which needs ensureLeg to get through: no
+// sweep disconnects the leg's subsystem, its lookup answers, ensureLeg's
+// steps up to the wrapper's would take none (wrapperStepOf: the lookup's
+// test, the head's number, the wrapper the whole-size dm-linear over that
+// number, there, resumed and not read-only), and the lookup holds a path
+// both live and optimized, which with the lookup's test is legServes'
+// reading of the leg. A wrapper a converge would change is the wrapper's own
+// name (wrapperName), and the group's device waits for it, as a row waits
+// for the rows it is built on (cntlrRowVerdict).
+func (s *CnAgentServer) linearGroupServes(
+	ctx context.Context,
+	plan *cntlrPlan,
+	lp *legPlan,
+) bool {
+	if s.disconnectInFlight(lp.nqn) {
+		return false
+	}
+	view, err := s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
+	if err != nil {
+		return false
+	}
+	_, step, ok := s.wrapperStepOf(ctx, plan.rd, lp, view)
+	return ok && step == dmStepNone && view.available()
 }
 
 // errNoAvailableLeg is the error of a group this pass leaves unbuilt because
@@ -3348,7 +3456,8 @@ func (s *CnAgentServer) putBackNames(
 }
 
 // legServes is the part of a leg's availability (CN12) that a call can read
-// without building anything, which putBackNames tests: its subsystem, looked
+// without building anything, which putBackNames tests, and
+// linearGroupServes with its own lookup: its subsystem, looked
 // up in the call's walk, has every controller's address known, a multipath
 // namespace and a path that is both live and optimized. The wrapper is the
 // leg row's (legInfo), which putBackNames reads beside it. Not read: the

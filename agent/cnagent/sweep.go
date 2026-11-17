@@ -1832,7 +1832,9 @@ func (s *CnAgentServer) sweepCntlr(
 //
 // The rows are the concats, thin pools, raid0s, the thin volume's dm-error
 // and thin devices, ns-devs, namespaces, subsystems, and a transfer's
-// dm-linear, subsystem and namespace. It names a row that reads
+// dm-linear, subsystem and namespace; and the leg wrappers and the
+// RedundNone groups' dm-linears that the pass's own test of them names
+// (legPlan.wrapperName, grpPlan.linearName). It names a row that reads
 // RES_STATUS_MISSING with no reason, as "absent"; one that reads
 // RES_STATUS_ERROR, or RES_STATUS_OK with RES_REASON_DIFFERS (a namespace
 // whose ANA group differs, or a thin pool short of its metadata device), as
@@ -1847,10 +1849,13 @@ func (s *CnAgentServer) sweepCntlr(
 // has lost its thin id (RES_REASON_THIN_ID_LOST), no pool row that reads
 // needs_check (RES_REASON_POOL_NEEDS_CHECK) or failed
 // (RES_REASON_POOL_FAILED), and no row of a transfer
-// whose origin the request no longer names, none of which a converge cures. The rows of legs, paths, arrays and clones rest on a remote end, and
-// keep the rules the verdict has for them (sides to connect, md members to
-// put back): a new syncup does not cure a disk node that is gone. A nil info
-// names nothing.
+// whose origin the request no longer names, none of which a converge cures.
+// A transfer's dm-linear rests on its origin's raid0 only where the
+// transfer is served (xferServed): elsewhere it is an error table, which
+// rests on nothing. The rest of the rows of legs and groups, and those of
+// paths, arrays and clones, rest on a remote end, and keep the rules the
+// verdict has for them (sides to connect, md members to put back): a new
+// syncup does not cure a disk node that is gone. A nil info names nothing.
 func cntlrRowVerdict(
 	plan *cntlrPlan,
 	info *pb.CntlrInfo,
@@ -1863,6 +1868,21 @@ func cntlrRowVerdict(
 	name := func(row *pb.ResInfo, under ...*pb.ResInfo) {
 		if row != nil && rowsUnder(under) {
 			nameCntlrRow(row, res)
+		}
+	}
+	// A leg's wrapper and a RedundNone group's dm-linear are named by their
+	// own test, which the pass ran (wrapperName, linearGroupName), and not
+	// by their rows: those also carry what a remote end does, the leg's
+	// prober or transport and the leg's availability, and read neither the
+	// read-only flag nor, for the wrapper, the head's number.
+	for _, lp := range plan.legs {
+		if lp.wrapperName != nil {
+			res.Fail(lp.name, lp.wrapperName)
+		}
+	}
+	for _, gp := range plan.grps {
+		if gp.linearName != nil {
+			res.Fail(gp.resName, gp.linearName)
 		}
 	}
 	for _, sp := range plan.slices {
@@ -1913,7 +1933,13 @@ func cntlrRowVerdict(
 		if xp.ori == nil || xp.ori.td == nil {
 			continue
 		}
-		under := info.GetTdIdToRaid0()[xp.ori.td.tdId]
+		// A transfer device rests on its origin's raid0 only where it maps
+		// it (xferServed); elsewhere it is an error table, which rests on
+		// nothing, at a level that suppresses the raid0 too.
+		var under *pb.ResInfo
+		if plan.xferServed(xp) {
+			under = info.GetTdIdToRaid0()[xp.ori.td.tdId]
+		}
 		dm := info.GetXferIdToDmLinear()[xp.xferId]
 		subsys := info.GetXferIdToSubsystem()[xp.xferId]
 		name(dm, under)
@@ -2010,10 +2036,28 @@ func nameCntlrRow(row *pb.ResInfo, res *agent.SweepResult) {
 	default:
 		return
 	}
-	if details, _, _ := strings.Cut(row.GetDetails(), "\n"); details != "" {
-		err = fmt.Errorf("%w: %s", err, details)
+	res.Fail(row.GetResName(), rowFailure(err, row.GetDetails()))
+}
+
+// rowFailure is the failure a cntlr's verdict names a row with: why, the
+// first line of details after it where there is one.
+func rowFailure(why error, details string) error {
+	if first, _, _ := strings.Cut(details, "\n"); first != "" {
+		return fmt.Errorf("%w: %s", why, first)
 	}
-	res.Fail(row.GetResName(), err)
+	return why
+}
+
+// shapeFailure is the failure a cntlr's verdict names a single-target dm
+// device of shape with, as nameCntlrRow names the row its probe writes
+// (shapeRow): "absent" for one that is not there, and "differs" with the
+// row's details otherwise.
+func shapeFailure(shape dmShape, targetType string) error {
+	if shape == dmShapeAbsent {
+		return errRowAbsent
+	}
+	_, details := shapeRow(shape, targetType)
+	return rowFailure(errRowDiffers, details)
 }
 
 // errRowAbsent and errRowDiffers are the failures cntlrRowVerdict records

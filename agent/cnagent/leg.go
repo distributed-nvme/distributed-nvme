@@ -416,21 +416,95 @@ func (s *CnAgentServer) ensureLeg(
 	// CN10: unknown, never unwanted — disconnectDeadPaths passed over it, and
 	// the leg fails for the pass, which registers the retry that reads it
 	// again. After a connect this pass made, this is the re-read view.
-	if err := view.unknownCtrl(); err != nil {
+	if err := wrapperUnder(lp, view); err != nil {
 		return nil, err
-	}
-	if view.nsDev == "" {
-		return nil, fmt.Errorf("no multipath namespace for %s", lp.nqn)
 	}
 	headNo, err := s.blockDevNo(ctx, path.Base(view.nsDev))
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ensureDmLinear(
-		ctx, lp.name, lp.sectors, headNo, 0); err != nil {
+	step, err := s.stepDmLinear(ctx, lp.name, lp.sectors, headNo, 0)
+	if err != nil {
+		// CN30: a create, reload or resume of the wrapper that failed is
+		// named by the converge's own verdict, as a read names a wrapper
+		// such a step would change (wrapperName); a read of the wrapper that
+		// did not answer is left to the next read.
+		if step != dmStepNone {
+			lp.wrapperName = rowFailure(errRowDiffers, err.Error())
+		}
 		return nil, err
 	}
 	return view, nil
+}
+
+// wrapperUnder is the test ensureLeg makes of a leg's lookup before the
+// wrapper step (CN10), which a cntlr's read shares (wrapperName): every
+// controller's address known, since an unknown one may be any side's path,
+// and a multipath namespace head to build the wrapper over. It returns the
+// error the leg fails with, nil when the step can run.
+func wrapperUnder(lp *legPlan, view *subsysView) error {
+	if err := view.unknownCtrl(); err != nil {
+		return err
+	}
+	if view.nsDev == "" {
+		return fmt.Errorf("no multipath namespace for %s", lp.nqn)
+	}
+	return nil
+}
+
+// wrapperStepOf is ensureLeg's steps up to the wrapper's, read and not
+// taken, which a cntlr's read shares (wrapperName, linearGroupServes): the
+// test of the lookup view (wrapperUnder), the head's number from /sys/block
+// (blockDevNo), one file read in the agent's own process, and the wrapper's
+// shape against the whole-size dm-linear over that number, read-only flag
+// included, from the read's reading rd. It returns that shape and the step
+// a converge would take on it (dmSingleStep), and false where the converge
+// would fail the leg before that step — a wrapper of no size, which
+// stepDmSingle refuses, a lookup with an unknown controller or no head, a
+// number read that failed, the head's /sys/block entry not there among
+// them — or the wrapper's read did not answer.
+func (s *CnAgentServer) wrapperStepOf(
+	ctx context.Context,
+	rd *cnReading,
+	lp *legPlan,
+	view *subsysView,
+) (dmShape, dmStep, bool) {
+	if lp.sectors == 0 || wrapperUnder(lp, view) != nil {
+		return dmShapeWanted, dmStepNone, false
+	}
+	headNo, err := s.blockDevNo(ctx, path.Base(view.nsDev))
+	if err != nil {
+		return dmShapeWanted, dmStepNone, false
+	}
+	shape, err := s.dmShapeOf(ctx, rd, lp.name, "linear", lp.sectors,
+		linearArgs(headNo, 0), 0, true)
+	if err != nil {
+		return dmShapeWanted, dmStepNone, false
+	}
+	return shape, dmSingleStep(shape), true
+}
+
+// wrapperName is what a cntlr's read names lp's wrapper with (CN10, CN30):
+// "absent" or "differs" while a converge would create, reload or resume it
+// (wrapperStepOf), and nil otherwise. view is the leg's lookup, which
+// answered. So a wrapper that maps another number than the head the lookup
+// finds is named, as the converge reloads it, and so is a read-only one, as
+// the converge reloads it and makes it writable. A step the converge would
+// fail the leg at names nothing, and so does a read that did not answer. A
+// read takes it only for a wanted leg that is not provisioning and whose
+// subsystem no sweep is disconnecting (probeCntlr), the legs ensureLeg
+// reaches the steps for.
+func (s *CnAgentServer) wrapperName(
+	ctx context.Context,
+	rd *cnReading,
+	lp *legPlan,
+	view *subsysView,
+) error {
+	shape, step, ok := s.wrapperStepOf(ctx, rd, lp, view)
+	if !ok || step == dmStepNone {
+		return nil
+	}
+	return shapeFailure(shape, "linear")
 }
 
 // sideNsid is the single namespace id every side of a leg exports

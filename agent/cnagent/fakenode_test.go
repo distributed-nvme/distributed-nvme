@@ -317,9 +317,16 @@ type fakeNode struct {
 }
 
 type fakeDm struct {
-	table     string
-	readOnly  bool
-	suspended bool
+	table string
+	// readOnly is the live table's mode, which a load with --readonly sets
+	// and a resume onto a read-write table clears; bdevReadOnly is the block
+	// layer's own read-only flag of the device, which `blockdev --setro`
+	// sets and only `blockdev --setrw` clears, a reload and a resume leaving
+	// it as it is. dmsetup's attr column reads the device read-only while
+	// either is set, as kernel 7.0.0-42 does.
+	readOnly     bool
+	bdevReadOnly bool
+	suspended    bool
 	// waiting is the table a `dmsetup reload` loaded and no resume has made
 	// live yet, nil when none waits: dmsetup's inactive table. A resume
 	// makes it live, a `dmsetup clear` drops it, and the attr column shows
@@ -1399,6 +1406,8 @@ func (f *fakeNode) dispatch(
 		return f.cmdLsblk(args)
 	case "dmsetup":
 		return f.cmdDmsetup(args, stdin)
+	case "blockdev":
+		return f.cmdBlockdev(args)
 	case "nvme":
 		return f.cmdNvme(args)
 	case "mdadm":
@@ -1409,6 +1418,29 @@ func (f *fakeNode) dispatch(
 		return f.cmdThinDump(args)
 	}
 	return "", 127
+}
+
+// cmdBlockdev is `blockdev --setro|--setrw <path>` of a dm device: the block
+// layer's own read-only flag (fakeDm.bdevReadOnly).
+func (f *fakeNode) cmdBlockdev(args []string) (string, int) {
+	if len(args) != 2 {
+		return "", 1
+	}
+	dm, ok := f.dms[strings.TrimPrefix(args[1], "/dev/mapper/")]
+	if !ok || !strings.HasPrefix(args[1], "/dev/mapper/") {
+		f.dispatchStderr = "blockdev: cannot open " + args[1] +
+			": No such file or directory"
+		return "", 1
+	}
+	switch args[0] {
+	case "--setro":
+		dm.bdevReadOnly = true
+	case "--setrw":
+		dm.bdevReadOnly = false
+	default:
+		return "", 1
+	}
+	return "", 0
 }
 
 func (f *fakeNode) children(path string) []string {
@@ -2010,7 +2042,7 @@ func dmAttr(dm *fakeDm) string {
 	if dm.suspended {
 		attr[2] = 's'
 	}
-	if dm.readOnly {
+	if dm.readOnly || dm.bdevReadOnly {
 		attr[3] = 'r'
 	} else {
 		attr[3] = 'w'

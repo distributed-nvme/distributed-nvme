@@ -68,7 +68,10 @@ func (s *CnAgentServer) ensureSlice(
 		resKeyOf(resKeyPoolDataFmt, sp.sliceId), sp.poolDataName, "", dataErr)
 
 	poolKey := resKeyOf(resKeyPoolFmt, sp.sliceId)
-	if metaErr != nil || dataErr != nil {
+	// A concat whose only failure is the clear of its read-only flag is
+	// there, resumed and on its table, so the pool is built over it; its own
+	// row reads the failure (stopsOver).
+	if stopsOver(metaErr) || stopsOver(dataErr) {
 		info.SliceIdToDmPool[sp.sliceId] = st.tracker.Err(
 			poolKey, sp.poolFinalName, "pool concat missing")
 		return false

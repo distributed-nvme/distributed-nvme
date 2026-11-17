@@ -1001,6 +1001,71 @@ answer, save on a primary the sides of a migrating leg of an md-raid1
 group whose serving path is down (`sidesToConnect`, the connect step's own
 test; The cut of a migrating leg's path, below).
 
+**The wrapper name.** Only a converge builds a leg's wrapper too, so a
+cntlr's read names the wrapper (CN30) while a converge would create,
+reload or resume it (`wrapperName`): a wanted leg that is not
+provisioning, whose subsystem no sweep is disconnecting and whose lookup
+answered with every controller's "address" known and a multipath namespace
+head, has a wrapper that is missing, is not the leg's whole-size dm-linear
+over that head's number, is read-only, or is suspended. The read makes the
+converge's own steps up to the wrapper's and takes none (`wrapperStepOf`):
+the check of the lookup before the wrapper step (`wrapperUnder`), the
+head's number from its "/sys/block/<name>/dev", and the step the wrapper's
+shape against the dm-linear over that number decides (`dmSingleStep`), the
+wrapper read from the reading with its read-only flag. That is at most one
+file read in the agent's own process for each leg the read's leg loop
+looks up, and none where the lookup has no head or a controller whose
+address is unknown (CN28). So a lookup the converge fails the leg on names
+nothing, and neither does a number read that fails, the head's
+"/sys/block" entry not there included, nor a read that did not answer. A
+connect the converge makes before the wrapper step, of a side with no
+controller, can still fail and leave the wrapper as it is; that side's own
+name covers it (above). A converge whose create, reload or resume of the
+wrapper fails names the wrapper in its own verdict too. The read takes the
+lookup the sides with no controller take, so a primary's one-sided leg
+whose row reads `OK` takes none: its wrapper reads as the leg's whole-size
+dm-linear, there and resumed, since the row reads the wrapper before the
+prober, and its last probe wrote through it, so the wrapper is writable
+and the head it maps serves. Reason: only a converge builds the wrapper,
+and the worker brings a converge on a code, never on a row
+(`dnv-worker.md` RW4), so without the name a standby's leg, a repair's new
+leg or a clone meta group's leg whose head completed after the converge's
+wait, or whose wrapper step failed, reads code zero; and so does a leg
+whose wrapper still maps the number of a head the kernel replaced after
+the leg's last controller went, when the converge that connected the leg
+again stopped before the wrapper step.
+
+**A read-only device is made writable.** A converge that reloads a device
+of the cntlr because it reads read-only — a leg wrapper or another device
+it takes through `ensureDmSingle` (a thin pool, a thin volume, a raid0, a
+dm-error or a transfer device), a `RedundNone` group's dm-linear, a pool
+concat (CN13) or an ns-dev (CN16) — reloads it onto the table it wants and
+then clears the block layer's read-only flag of the device with
+`blockdev --setrw` (`Dm.SetWritable`; `dmStepReloadWritable` is the step
+of `ensureDmSingle` and of the group's dm-linear). A dm-clone is not
+reloaded for the flag, and no read names it for the flag. The clear is
+part of the device's step, so a clear that fails fails the step. For a
+wrapper and a group's dm-linear both channels then name the device: the
+converge's reply with blockdev's error, the read "differs: read-only"
+(CN30). A pool concat's and an ns-dev's rows do not read the flag (CN28),
+so a failed clear there is the converge's row alone: its reply names the
+row with blockdev's error, the read after it names nothing, and the
+worker's re-send on the round that answers from the converge's observation
+tries the clear again, after a reload of the device. A concat whose clear
+failed is there, resumed and on its table, so the slice goes on to its
+pool; an ns-dev whose clear failed is a failed ns-dev step (CN16). The
+cost lasts only while blockdev keeps failing on a device that is there, a
+fault of the node. Reason: dmsetup reads a device read-only while either
+its table's mode or the block layer's own flag of the device says so, and
+a reload of a read-write table clears only the first. In the lab on kernel
+7.0.0-42, after `blockdev --setro` a read-write reload, suspend and resume
+left the device read-only and a dd write to it failed with EPERM, and only
+`blockdev --setrw` cleared the flag; a reload with `--readonly` set the
+mode, and a read-write reload cleared it. dnv never makes a device
+read-only ([D11]); an operator's `blockdev --setro` does, and without the
+clear the read's name of such a device would bring a converge on every
+second round that cures nothing.
+
 **Dead paths**: a controller of the leg NQN whose traddr and trsvcid
 match no desired side (the source side after `FinishMigration` — its
 controller died with DNR and will never reconnect) is disconnected by
@@ -1411,8 +1476,8 @@ dm-clone (CN18).
   pool, a raid0 and an ns-dev built over a late leg would serve that
   leg's blocks as IO errors, and a promotion would move their namespaces
   to optimized (CN16). A late leg under a group device that is missing,
-  or that maps another table, fails the group ("no available leg") and
-  touches nothing. A missing device fails the slice's concat that names
+  that maps another table or that is read-only fails the group ("no
+  available leg") and touches nothing. A missing device fails the slice's concat that names
   it (CN13). A pool that is not built yet, such as the pools of a
   promotion's first converge, waits for it, and every layer above the
   pool waits too, their namespaces inaccessible (CN16). A pool that
@@ -1420,9 +1485,27 @@ dm-clone (CN18).
   do the raid0s and ns-devs over it, their namespaces optimized, while
   that concat's row and the pool's row read `ERROR`, until the retry
   builds the group and grows the concat and the pool. A group device
-  that is there with the table the group wants is kept whatever the
-  leg's availability, with no teardown and no reload: a primary that
-  serves keeps serving through a short loss of its leg's path. No log
+  that is there with the table the group wants and is not read-only is
+  kept whatever the leg's availability, with no teardown and no reload,
+  and resumed if it is suspended: a primary that
+  serves keeps serving through a short loss of its leg's path. One test
+  decides the device's step for the converge and whether a cntlr's read
+  names the device (`linearGroupStep`), the read taking the device's
+  read-only flag as the converge does: the read names it (CN30) while it
+  is missing, maps another table or is read-only and its leg serves, and
+  while it is suspended on the table the group wants and not read-only,
+  whatever the leg. A read takes the leg as serving where the converge
+  would find it available (`linearGroupServes`): no sweep disconnecting
+  the leg, the leg's lookup answering, the converge's steps up to the
+  wrapper's taking none (CN10, The wrapper name), the head's number read
+  and the wrapper there, resumed, not read-only and the leg's whole-size
+  dm-linear over that number among them, and a path both
+  live and optimized, as `legServes` reads it. A read-only device the
+  converge reloads is made writable too (CN10, A read-only device is made
+  writable), and a converge whose create, reload or resume of it fails
+  names it in its own verdict too. So once a
+  late leg's side flips, the worker's re-send on the round whose read
+  finds the leg serving builds the group and the stack over it. No log
   record of its own: the rows already report it — a group's error, or
   degraded once a probe reads an md array, and the member's own leg row.
   The retry runs a
@@ -3003,7 +3086,15 @@ a converge that leaves the device of a transfer whose desired group is
 optimized off what the desired state wants registers the CN10 retry, as
 does a transfer's move that fails and a failed step of the transfer's
 export, its subsystem, its namespace or its port link. The clone in the other pool then waits
-rather than reads IO errors.
+rather than reads IO errors. The cntlr's verdict names a transfer device
+that is not as wanted (CN30) only while its origin td's raid0 reads `OK`
+where the transfer is served (`xferServed`); elsewhere the device is an
+error table, which rests on no row of the cntlr, so the verdict names it
+whatever the raid0's row reads — save a transfer whose origin the request
+no longer names (CN29), whose rows the verdict leaves out. Reason: at a
+level from `SP_LEVEL_NO_THINPOOL` up to but excluding `SP_LEVEL_DISABLE`
+the raid0's row is the level's, which never reads `OK`, so an error-table
+step that failed there would be named by nothing.
 
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 `sp_level` below `SP_LEVEL_NO_CLONE`). Per `clone_list` entry, in order:
@@ -4158,7 +4249,12 @@ it which dm devices, nvme subsystems and md arrays the node holds, and
 each dm device's attr flags, number and table: a row reads its dm device
 there, and finds its
 leg's or clone source's entry in the walk and its group's array in the
-md walk; its other reads stay outside the reading (below). Reason: most
+md walk; its other reads stay outside the reading (below). The read-only
+flag among the attr flags is set while the device's table is read-only or
+the block layer's own flag of the device is (CN10, A read-only device is
+made writable); no row reads it, and the names of a leg wrapper and of a
+`RedundNone` group's dm-linear, which a converge's step decides, do
+(CN30). Reason: most
 of a read's time goes to starting processes, and one listing of the
 whole node costs about what one device's read does, so such a read
 starts a few processes whatever the slice count, besides its status
@@ -4219,7 +4315,14 @@ against, is read for an md array or an nvme multipath head from the
 device's own "/sys/block/<name>/dev" — an md array's
 from the array CN12's match finds — and for a dm device from
 `dmsetup info`: from the reading in a cntlr's read, from one
-`dmsetup info` of the device elsewhere. The sweep turns a live
+`dmsetup info` of the device elsewhere. A cntlr's read checks a leg's
+wrapper against the number of the multipath head the leg's lookup finds,
+as the converge builds the wrapper over it (CN10, The wrapper name): at
+most one file read for each leg the read's leg loop looks up, none where
+that lookup has no head or a controller whose address is unknown, and at
+most one for a `RedundNone` group's leg that the group's name looks up,
+with the same exceptions (CN12). The
+sweep turns a live
 table's numbers back into dm names through the dm listing it enumerates
 with: `dmsetup ls` (CN21), or in a cntlr's verdict the reading's
 `dmsetup info` listing (CN30). No number comes from `lsblk`: the cn
@@ -4432,12 +4535,16 @@ The rows, each with its `res_name` and what its probe checks:
   made; for a leg whose connect step failed they look the leg up again,
   so they say what the node holds rather than the connect's error. In a
   read they come first in each leg's turn, and the read's other uses of
-  the leg — the sides it names with no controller (CN30) and a standby's
-  leg row — read their lookup, so the leg loop looks up a leg at most once:
+  the leg — the sides it names with no controller and the wrapper it names
+  (CN30), and a standby's leg row — read their lookup, so the leg loop
+  looks up a leg at most once:
   every wanted leg on a standby, and on a primary a two-sided leg or one
   whose row does not read `OK` (CN30); the put-back test looks up again the
   legs it weighs, members whose row reads `OK` and their copy sources, and
-  so does the in-sync guard (CN30, CN12). The
+  so does the in-sync guard (CN30, CN12), and so does the name of a
+  `RedundNone` group's device, of the group's leg while the device is
+  missing, maps another table or is read-only and no sweep is
+  disconnecting the leg (CN12, CN30). The
   worker's cutover reads the primary's row of a migration's destination
   side (`dnv-worker.md` RW18), and no health rule judges these rows
   (`dnv-worker.md` HL2). Reason for the rows' scope: the primary's leg
@@ -4664,8 +4771,11 @@ while every row it is built on reads `RES_STATUS_OK` (`cntlrRowVerdict`;
 over their concats, the thin volumes over their pools, the td's
 dm-error, the raid0s over their thin volumes, the ns-devs over the
 device their backing names, the subsystems, the namespaces over their
-ns-dev and subsystem, and a transfer's dm-linear over its origin's
-raid0, its subsystem and its namespace over both. It names a row that
+ns-dev and subsystem, and a transfer's dm-linear — over its origin's
+raid0 where the transfer is served (`xferServed`, CN17), over nothing
+where its device is an error table — its subsystem and its namespace
+over both; and, by tests of their own (below), the leg wrappers and the
+`RedundNone` groups' dm-linears. It names a row that
 reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
 `RES_STATUS_ERROR`, or `RES_STATUS_OK` with `RES_REASON_DIFFERS` (a
 namespace that serves and whose ANA group differs, or a thin pool short of
@@ -4693,7 +4803,8 @@ names the volume (Known limits). Reason for the rows it is built on: a stack ove
 whose array does not run waits for that array, which the member rules
 below and CN10's late-member retry cover, and over a broken layer of its
 own only that layer is named, the lowest, whose converge builds the rest.
-Reason for leaving out legs, paths, arrays and clones: their state rests
+Reason for leaving out the rest of the legs' and groups' rows, the paths,
+the arrays and the clones: their state rests
 on a remote end, and a new syncup does not cure a disk node that is gone;
 the rules below name what a converge can do for them. A converge's own
 code names these rows from its build, so a step whose command failed or
@@ -4701,6 +4812,48 @@ was cut off by its own deadline (`dnagent.md` SH15), a resume that failed
 and an ANA move that failed bring the
 `SyncupCntlr` again on the next round, and the read after a converge whose
 call was cut off names what the converge left undone.
+
+A leg's wrapper and a `RedundNone` group's dm-linear are named by tests of
+their own, which the converge shares, and not by their rows' status, since
+those rows also carry what a remote end does — the leg row its prober's or
+its transport's verdict (CN11), the group's row the converge's refusal
+over a leg that does not serve (CN12) — and read neither the read-only
+flag nor, for the wrapper, the head's number. A read names each "absent"
+when it is missing and "differs" otherwise, with what differs after it; a
+converge names either one when its own create, reload or resume of it
+fails, "differs" with the command's error, as its other rows read `ERROR`.
+A read names a wrapper while a converge would create, reload or resume it
+(`wrapperName`; CN10, The wrapper name): a wanted leg that is not
+provisioning, whose subsystem no sweep is disconnecting and whose lookup
+answered with every controller's "address" known and a multipath namespace
+head, has a wrapper that is missing, is not the leg's whole-size dm-linear
+over that head's number, is read-only, or is suspended; the read takes the
+lookup the sides with no controller take (below), and the head's number
+once for it. A read names a group's dm-linear while a converge would
+change it (`linearGroupStep`, CN12): while it is missing, maps another
+table or is read-only and its leg serves as the converge would find it
+available (`linearGroupServes`) — no sweep disconnecting the leg, the
+converge's steps up to the wrapper's taking none, and a path both live and
+optimized, as the member rules below read it (`legServes`) — and while it
+is suspended on the table it wants and not read-only, whatever its leg.
+The converge makes a read-only one writable as it reloads it (CN10, A
+read-only device is made writable), so the name is one a converge cures.
+The read takes the read-only flag and the numbers as the converge does, so
+it names what the converge would change, save where a step only the
+converge takes fails first, such as the connect of a side with no
+controller, which that side's own name covers (below). A read that did not
+answer names neither. A group's dm-linear that is missing, maps another
+table or is read-only over a wrapper the converge would change waits for
+the wrapper's name, the lowest layer, though the converge that name brings
+builds both; one suspended on the table it wants and not read-only is
+named whatever its wrapper. Reason: only a converge builds them, and the
+worker brings a converge on a code, never on a row, so without the name a
+wrapper whose head completed after the converge's wait, or a group a
+promotion left unbuilt over a leg that had not flipped yet, reads code
+zero; and over a leg a converge cannot use, a name, which a read alone
+would give, would bring a `SyncupCntlr` on every second round
+(`dnv-worker.md` RW4 step 5) for a converge that changes nothing, so the
+name comes with the first read that finds the leg serving.
 
 A cntlr's read-only verdict also names each side its converge would
 connect (CN10): each provisioned side of a wanted leg that the leg's

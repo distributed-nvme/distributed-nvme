@@ -2,11 +2,13 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -74,6 +76,135 @@ func dmTable(targetType string, sectors uint64, args []string) string {
 		sectors, targetType, strings.Join(args, " "))
 }
 
+// dmShape is what one read of a single-target dm device found against the
+// table a pass wants it to carry (dmShapeOf), which decides the step a
+// converge takes on it (dmSingleStep) and the row a probe writes for it
+// (probeDmArgs).
+type dmShape int
+
+const (
+	// dmShapeWanted: there, with the wanted table, and not suspended.
+	dmShapeWanted dmShape = iota
+	// dmShapeAbsent: not there.
+	dmShapeAbsent
+	// dmShapeOther: there with another table.
+	dmShapeOther
+	// dmShapeSuspended: there with the wanted table, and suspended.
+	dmShapeSuspended
+	// dmShapeReadOnly: there and read-only, whatever its table, which a
+	// converge reloads onto the wanted table and makes writable
+	// (dmSingleStep); only a read that counts the flag finds it (dmShapeOf's
+	// readOnlyDiffers).
+	dmShapeReadOnly
+)
+
+// dmStep is the command a converge runs on one single-target device.
+type dmStep int
+
+const (
+	dmStepNone dmStep = iota
+	dmStepCreate
+	dmStepReload
+	dmStepResume
+	// dmStepReloadWritable is a reload followed by a clear of the block
+	// layer's read-only flag (Dm.SetWritable), the step for a read-only
+	// device: dmsetup reads a device read-only while its table's mode or
+	// that flag says so, and a reload clears only the first (cnagent.md
+	// CN10).
+	dmStepReloadWritable
+)
+
+// dmShapeOf reads one single-target device, from rd, the reading of a
+// cntlr's read, or with no reading its own `dmsetup info` and, for a device
+// that is there, `dmsetup table`: the shape it has against the wanted
+// table, or the error of a read that did not answer. readOnlyDiffers reads
+// the read-only flag (dmShapeReadOnly), as a converge does, which reloads
+// such a device and makes it writable (ensureDmSingle), and as a cntlr's
+// read does for what it names by a converge's step (wrapperName,
+// linearGroupName); a probe's row does not read the flag.
+func (s *CnAgentServer) dmShapeOf(
+	ctx context.Context,
+	rd *cnReading,
+	name string,
+	targetType string,
+	sectors uint64,
+	args []string,
+	argCmp int,
+	readOnlyDiffers bool,
+) (dmShape, error) {
+	dev, err := s.dmInfo(ctx, rd, name)
+	if err != nil {
+		return dmShapeWanted, err
+	}
+	if dev == nil {
+		return dmShapeAbsent, nil
+	}
+	targets, err := s.dmTable(ctx, rd, name)
+	if err != nil {
+		return dmShapeWanted, err
+	}
+	return shapeOf(dev,
+		dmTableMatches(targets, targetType, sectors, args, argCmp),
+		readOnlyDiffers), nil
+}
+
+// shapeOf is the shape of a device that is there, whose table does or does
+// not match the wanted one (dmShapeOf).
+func shapeOf(dev *agent.DmDevInfo, matches, readOnlyDiffers bool) dmShape {
+	switch {
+	case readOnlyDiffers && dev.ReadOnly:
+		return dmShapeReadOnly
+	case !matches:
+		return dmShapeOther
+	case dev.Suspended:
+		return dmShapeSuspended
+	}
+	return dmShapeWanted
+}
+
+// dmSingleStep is the step a converge takes on a single-target device of
+// shape (ensureDmSingle): it creates one that is absent, reloads one with
+// another table, reloads one that is read-only and makes it writable, and
+// resumes one suspended on the table it wants. A cntlr's
+// read names a leg wrapper by the same step (wrapperName, cnagent.md CN30).
+func dmSingleStep(shape dmShape) dmStep {
+	switch shape {
+	case dmShapeAbsent:
+		return dmStepCreate
+	case dmShapeOther:
+		return dmStepReload
+	case dmShapeReadOnly:
+		return dmStepReloadWritable
+	case dmShapeSuspended:
+		return dmStepResume
+	}
+	return dmStepNone
+}
+
+// takeDmStep runs step on the device name, table being the table a create
+// or a reload loads.
+func (s *CnAgentServer) takeDmStep(
+	ctx context.Context,
+	name string,
+	step dmStep,
+	table string,
+) error {
+	switch step {
+	case dmStepCreate:
+		return s.dm.Create(ctx, name, table)
+	case dmStepReload:
+		return s.dm.Reload(ctx, name, table)
+	case dmStepReloadWritable:
+		if err := s.dm.Reload(ctx, name, table); err != nil {
+			return err
+		}
+		return s.dm.SetWritable(ctx, s.nf.DmPath(name))
+	case dmStepResume:
+		return s.dm.Resume(ctx, name)
+	}
+	return nil
+}
+
 // ensureDmSingle converges one single-target device. The reload path resumes
 // on its own when its load succeeds; a load that fails leaves the device
 // suspended on its old table (Dm.Reload fails closed, cnagent.md CN16) for a
@@ -87,29 +218,32 @@ func (s *CnAgentServer) ensureDmSingle(
 	args []string,
 	argCmp int,
 ) error {
+	_, err := s.stepDmSingle(ctx, name, targetType, sectors, args, argCmp)
+	return err
+}
+
+// stepDmSingle is ensureDmSingle, and says which step it took
+// (dmSingleStep): dmStepNone for a device it found as wanted and for a read
+// that did not answer, whose error it returns.
+func (s *CnAgentServer) stepDmSingle(
+	ctx context.Context,
+	name string,
+	targetType string,
+	sectors uint64,
+	args []string,
+	argCmp int,
+) (dmStep, error) {
 	if sectors == 0 {
-		return fmt.Errorf("device size is 0")
+		return dmStepNone, fmt.Errorf("device size is 0")
 	}
-	table := dmTable(targetType, sectors, args)
-	dev, err := s.dm.Info(ctx, name)
+	shape, err := s.dmShapeOf(
+		ctx, nil, name, targetType, sectors, args, argCmp, true)
 	if err != nil {
-		return err
+		return dmStepNone, err
 	}
-	if dev == nil {
-		return s.dm.Create(ctx, name, table)
-	}
-	targets, err := s.dm.Table(ctx, name)
-	if err != nil {
-		return err
-	}
-	if !dmTableMatches(targets, targetType, sectors, args, argCmp) ||
-		dev.ReadOnly {
-		return s.dm.Reload(ctx, name, table)
-	}
-	if dev.Suspended {
-		return s.dm.Resume(ctx, name)
-	}
-	return nil
+	step := dmSingleStep(shape)
+	return step, s.takeDmStep(
+		ctx, name, step, dmTable(targetType, sectors, args))
 }
 
 func (s *CnAgentServer) ensureDmError(
@@ -131,8 +265,27 @@ func (s *CnAgentServer) ensureDmLinear(
 	backingNo string,
 	offsetSectors uint64,
 ) error {
-	args := []string{backingNo, strconv.FormatUint(offsetSectors, 10)}
-	return s.ensureDmSingle(ctx, name, "linear", sectors, args, 0)
+	_, err := s.stepDmLinear(ctx, name, sectors, backingNo, offsetSectors)
+	return err
+}
+
+// linearArgs are the table arguments of a dm-linear over the device whose
+// number is backingNo, at offsetSectors of it.
+func linearArgs(backingNo string, offsetSectors uint64) []string {
+	return []string{backingNo, strconv.FormatUint(offsetSectors, 10)}
+}
+
+// stepDmLinear is ensureDmLinear, and says which step it took
+// (stepDmSingle).
+func (s *CnAgentServer) stepDmLinear(
+	ctx context.Context,
+	name string,
+	sectors uint64,
+	backingNo string,
+	offsetSectors uint64,
+) (dmStep, error) {
+	return s.stepDmSingle(ctx, name, "linear", sectors,
+		linearArgs(backingNo, offsetSectors), 0)
 }
 
 // ensureDmMulti converges a multi-target concat (the pool meta/data linears of
@@ -182,12 +335,42 @@ func (s *CnAgentServer) ensureDmMulti(
 				"%s from %d to %d sectors", detailsConcatNoShrink,
 				live, desired)
 		}
-		return true, s.dm.ReloadMulti(ctx, name, lines)
+		if err := s.dm.ReloadMulti(ctx, name, lines); err != nil {
+			return true, err
+		}
+		if dev.ReadOnly {
+			// A reload leaves the block layer's own read-only flag set
+			// (cnagent.md CN10, A read-only device is made writable).
+			if err := s.dm.SetWritable(
+				ctx, s.nf.DmPath(name)); err != nil {
+				return true, writableError{err}
+			}
+		}
+		return true, nil
 	}
 	if dev.Suspended {
 		return false, s.dm.Resume(ctx, name)
 	}
 	return false, nil
+}
+
+// writableError is a clear of the block layer's read-only flag that failed
+// after a reload that went through (Dm.SetWritable): the device is there,
+// resumed and on the table it wants, so what is built over it goes on, and
+// only the device's own row reads the failure (cnagent.md CN10, A read-only
+// device is made writable).
+type writableError struct{ err error }
+
+func (e writableError) Error() string { return e.err.Error() }
+
+func (e writableError) Unwrap() error { return e.err }
+
+// stopsOver reports whether a device's step error stops what is built over
+// the device: any error but a failed clear of its read-only flag
+// (writableError).
+func stopsOver(err error) bool {
+	var clear writableError
+	return err != nil && !errors.As(err, &clear)
 }
 
 // dmSegment is one target of a concat: a group's device and how much of it,
@@ -331,23 +514,28 @@ func (s *CnAgentServer) probeDmArgs(
 	args []string,
 	argCmp int,
 ) (pb.ResStatus, string) {
-	dev, err := s.dmInfo(ctx, rd, name)
+	shape, err := s.dmShapeOf(
+		ctx, rd, name, targetType, sectors, args, argCmp, false)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
-	if dev == nil {
+	return shapeRow(shape, targetType)
+}
+
+// shapeRow is the row a probe writes for a device of shape, and the
+// details a verdict names it with (shapeFailure). A probe never finds
+// dmShapeReadOnly: its row does not read the flag.
+func shapeRow(shape dmShape, targetType string) (pb.ResStatus, string) {
+	switch shape {
+	case dmShapeAbsent:
 		return pb.ResStatus_RES_STATUS_MISSING, ""
-	}
-	targets, err := s.dmTable(ctx, rd, name)
-	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
-	}
-	if !dmTableMatches(targets, targetType, sectors, args, argCmp) {
+	case dmShapeOther:
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
 			"table is not the desired %s target", targetType)
-	}
-	if dev.Suspended {
+	case dmShapeSuspended:
 		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
+	case dmShapeReadOnly:
+		return pb.ResStatus_RES_STATUS_ERROR, "read-only"
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }

@@ -501,6 +501,17 @@ func (d *Dm) Reload(
 	return d.resumeLoaded(ctx, name)
 }
 
+// SetWritable clears the read-only flag the block layer keeps for the
+// device at path, the one `blockdev --setro` sets: `blockdev --setrw`.
+// dmsetup's attr column reads a device read-only while its table's mode or
+// that flag says so, and a reload of a read-write table clears only the
+// first (cnagent.md CN10): after an operator's `blockdev --setro` and a
+// read-write reload, a dd write to the device still failed with EPERM in
+// the lab.
+func (d *Dm) SetWritable(ctx context.Context, path string) error {
+	return d.runOk(ctx, "blockdev", "--setrw", path)
+}
+
 // CreateMulti / ReloadMulti build or swap a **multi-target** table. dmsetup's
 // --table option takes a single line only, so the table is fed through stdin:
 // `dmsetup create {name}` and `dmsetup load {name}` read it from there when
