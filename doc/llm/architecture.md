@@ -5510,7 +5510,11 @@ claims a clean full array is not started degraded on its own ("Make sure
 all groups are available"), and once both legs are reachable the event
 counts pick the newer one and resync overwrites the stale leg. dnv adds no
 fencing epoch of its own, so (b) is an explicit dependency on mdadm's
-behaviour ([D16]).
+behaviour ([D16]). (b) holds only where md's record of a failed leg reaches
+a surviving leg: a fence that cuts that record off leaves the legs equal,
+and the start's resync copies the lowest in-sync slot over the others,
+which loses a write only another leg took (Known limits, A failover while
+the old primary serves can lose an acknowledged write).
 
 **What hosts see at a failover ([D16]).** The common failover — a dead CN
 — is a pause from the host's side: its paths drop, IO queues, and the
@@ -5582,7 +5586,9 @@ runs. The assemble leaves the degraded start to mdadm: a lone
 survivor whose superblock still counts a clean full array is refused, and
 the group is then not available this pass. That refusal is the cross-leg
 half of failover safety ([D16]) — a stale leg cannot be started alone,
-and once both legs are back the event counts pick the newer one. md
+and once both legs are back the event counts pick the newer one, where
+md's record of the failed leg reached the other (Known limits, A failover
+while the old primary serves can lose an acknowledged write). md
 writes a member's death into the other members' superblocks when it
 fails the member, which on an idle array happens when the primary fails
 it: above all by the early fail of a member whose leg is dead while
@@ -7824,6 +7830,27 @@ document and only pointed to here.
   write cache on its controllers, so hosts flush as they do to a disk with
   one. Read in the kernel's dm-thin, nvmet, block and NVMe host sources,
   not measured.
+* **A failover while the old primary serves can lose an acknowledged
+  write.** The failover's fan-out reaches a group's sides in no order
+  (Failover, [D16]), and while the old primary has not applied its
+  demotion its kernel goes on serving a host still on its path. A write
+  whose copy to one leg waits on that leg's fence and then fails, while its
+  copy to another leg landed before that leg's fence, is acknowledged: md
+  fails the first leg (failfast) and completes the write from the copy that
+  landed. md's record of that failure, its superblock and bitmap writes to
+  the surviving leg, then fails when that leg is fenced too, and md never
+  fails its last member, so both legs keep equal superblocks. The new
+  primary's start of the array (`cnagent.md` CN12, case 2) finds it not
+  clean and resyncs from the lowest in-sync slot; when that slot is the leg
+  that missed the write, the write is lost, with no error. The same on a
+  meta group would roll the thin pool back to its commit before (read from
+  the code). Seen in the e2e
+  cutoff case at 32 slices, and pinned with md alone on the lab kernel:
+  every run that fenced the slot-0 leg first lost the last acknowledged
+  write, and every run that fenced it last kept it, whichever leg slot 0
+  was. The worker's records name no leg's slot: only the inspect call
+  reads it (`cnagent.md` CN12, InspectGrp), on an operator's request, so
+  the fan-out cannot order the fence by it.
 * **md's assembly behaviour is pinned in the lab only.** The cross-leg
   half of failover safety ([D16], "Make sure all groups are available")
   rests on mdadm refusing to start an array from a lone survivor whose

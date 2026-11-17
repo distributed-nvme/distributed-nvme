@@ -288,6 +288,23 @@ the host.
   writes are gone. A plain PCIe disk never takes this path. dnv's own
   programs cannot fix this. State: fix later; a change inside dm-thin is
   under test. Read from the kernel's code; not seen in the lab.
+- **A failover while the old primary still serves can lose a write the
+  host was told was done.** Silent. A failover fences the old primary's
+  paths to the legs of a group one after another. A host still writing
+  through the old primary can have a write that lands only on the leg
+  fenced last: md fails the other leg and completes the write to the host
+  from the one copy, but its record of that failure cannot be written,
+  since the last leg is fenced by then. The legs then look equal to md,
+  and when the new primary starts the array, md copies its first member
+  over the other. If the first member is the leg that missed the write,
+  the write is gone. It needs the old primary to keep serving until the
+  fence, which it does only when it has not applied its demotion, as a
+  controller node whose agent is stopped or cut off from the control plane
+  but not from the hosts, and a host still writing through it. Seen once
+  in the lab, in the e2e suite at 32 slices, and shown with md alone: each
+  run that fenced md's first member first lost the last completed write,
+  and each run that fenced it last kept it. State: fix later; the fix
+  fences, in each group, the leg md copies from last.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
