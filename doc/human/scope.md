@@ -267,8 +267,9 @@ once a second. A primary that dies before that commit loses the write, and
 the block reads as it did before the write: zeros where nothing was
 written. This is the behaviour of a disk with a volatile write cache, not
 a loss in the sense of this document. A flush that completes although its
-primary died is a defect, and so is a durable write lost in a failover
-while the old primary still serves; section 5.1 has both.
+primary died is a defect; section 5.1 has it. So is a durable write lost
+in a failover while the old primary still serves, but for the few cases
+section 5.1 lists and accepts.
 
 ## 5. Data loss outside the accepted cases
 
@@ -290,32 +291,49 @@ the host.
   programs cannot fix this. State: fix later; a change inside dm-thin is
   under test. Read from the kernel's code; not seen in the lab.
 - **A failover while the old primary still serves can lose a write the
-  host was told was done.** Silent. A failover fences the old primary's
-  paths to the legs of a group at different moments, in no set order. A
-  host still writing through the old primary can have a write that lands
-  only on the leg fenced last: md fails the other leg and completes the
-  write to the host from the one copy, but its record of that failure
-  cannot be written, since the last leg is fenced by then. The legs then
-  look equal to md, and when the new primary starts the array, md copies
-  its first member over the other. If the first member is the leg that
-  missed the write, the write is gone. On a meta group the lost write is
-  part of the slice's thin pool metadata: the pool comes back as of an
-  earlier commit, and the blocks mapped since are gone. On a clone meta
-  group the clone forgets parts it had copied and copies them from its
-  source again, over what hosts wrote there. These two are read from the
-  kernel's code, not seen in the lab. The loss needs a host still writing
-  through the old primary, and the old primary to keep serving until the
-  fence. The old primary does so when it has not applied its demotion, as
-  on a controller node whose agent is stopped or cut off from the control
-  plane but not from the hosts. A cntlr replacement of the primary can
-  lose a write the same way: the replaced primary serves until its
-  controller node tears its stack down, which a stopped or cut-off agent
-  never does. Seen once in the lab, in the e2e suite at 32 slices, and
-  shown with md alone: each run that fenced md's first member first lost
-  the last completed write, and each run that fenced it last kept it.
-  State: fix decided: in each group the worker fences the leg md copies
-  from last, once the other legs' paths are fenced, so that every write
-  the old primary acknowledged is on the leg the new primary copies from.
+  host was told was done, in a few cases.** Silent. A host still writing
+  through the old primary can have a write that lands on one leg of a
+  group and fails on another, where the fence came first: md fails that
+  other leg and completes the write to the host from the one copy. md then
+  records that failure on the leg that took the write. When that record
+  cannot be written, because that leg is fenced too by then, the legs look
+  equal to md, and when the new primary starts the array, md copies the
+  leg in its first place over the others. So the worker fences, in each
+  group, the leg md copies from last: it first hands the other legs' disk
+  nodes the failover, and that leg's only once they report their fence
+  done, or one interval later, 2 seconds at the default. A write that
+  fails on the other legs then lands on that leg, md's record reaches it
+  before its own fence, and the new primary starts from it. The worker
+  learns which leg md copies from in the primary's reports. The loss stays
+  possible in these cases. The worker that runs the failover started, or
+  took the pool over, after the old primary's last report, so it does not
+  know the leg. The old primary's agent is of a build older than this
+  order, which does not report it. A cntlr replacement of the primary is
+  handed out by a worker that started or took the pool over within the
+  three-second hold (section 8), which holds nothing. A disk node does not
+  report its fence within that interval, or reports the failover without
+  having fenced, as one whose side device failed does. A leg that md
+  brought back in a lower place after the primary's last report, so the
+  worker fences it before the leg it read as the one md copies from. For
+  the late disk node and the leg brought back, the write is lost only when
+  that fence falls in the few milliseconds after the other leg failed the
+  write and before md recorded the failure. On a meta group the lost write is part of the slice's thin
+  pool metadata: the pool comes back as of an earlier commit, and the
+  blocks mapped since are gone. On a clone meta group the clone forgets
+  parts it had copied and copies them from its source again, over what
+  hosts wrote there. These two are read from the kernel's code, not seen
+  in the lab. The loss needs a host still writing through the old primary,
+  and the old primary to keep serving until the fence. The old primary
+  does so when it has not applied its demotion, as on a controller node
+  whose agent is stopped or cut off from the control plane but not from
+  the hosts. A cntlr replacement of the primary can lose a write the same
+  way: the replaced primary serves until its controller node tears its
+  stack down, which a stopped or cut-off agent never does. Seen once in
+  the lab, in the e2e suite at 32 slices, with the paths fenced in no
+  order, and shown with md alone: each run that began fencing md's first
+  member first lost the last completed write, and each run that began it
+  last kept it. State: accepted: each case needs a second fault at the
+  moment of the failover, or an upgrade under way.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
@@ -469,7 +487,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 | A controller node is down and comes back | Each primary on it that has a healthy enabled standby is failed over to it. Hosts see a pause. A pool of one cntlr waits for a cntlr replacement. Back, the cntlrs that were failed over are standbys. A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default. A missed round counts only once its own wait of one interval has run out, so a failover comes about 6 to 10 seconds after the node dies. `cntlr_unhealthy`, 600, before a replacement. | Nothing. |
 | The network between a controller node and a disk node is cut | When the controller node holds the primary, as for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. A cut from a node that holds only standbys changes nothing. | `leg_unhealthy`, 1200. | Nothing. |
 | The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
-| The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and can lose a write it was told was done (section 5.1). With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
+| The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and, in the cases section 5.1 lists, can lose a write it was told was done. With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
 | etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure to write, "running while the control plane is down". |
 | A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. | Nothing. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). |
 | An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. A controller node agent away for more than a few seconds has its primaries failed over. | `primary_unhealthy` with two check rounds in a row. A stopped agent's rounds fail at once, so a failover comes about 4 to 8 seconds after the agent stops, at the defaults. | Until the fix, stop the workers first for a planned restart of a controller node agent. State: fix decided, the agent answers "starting" while it restarts (section 6.1). |
@@ -729,7 +747,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   dropped. A cdc cut off from etcd keeps listing a failed-over primary. The
   Kubernetes node plugin keeps a cdc address an old attach named. Such a
   host writes to the fenced old primary and gets IO errors in the failover
-  window, and can lose a write it was told was done (section 5.1). State: procedure to write for the first two; fix decided for the
+  window, and, in the cases section 5.1 lists, can lose a write it was
+  told was done. State: procedure to write for the first two; fix decided for the
   plugin, which takes the cdc list from its deployment on every pass.
 - **A Kubernetes mount waits for ever when no cntlr of its volume comes
   back.** The node plugin's connect keeps reconnecting through an outage
@@ -765,7 +784,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   its verdict on that node's cntlrs for a bounded time, a cluster setting
   fixed when the cluster is created, 120 seconds by default. Worked out
   from the defaults; not seen in the lab. A host still writing through
-  such a primary can also lose a write it was told was done (section 5.1).
+  such a primary can also lose a write it was told was done, in the cases
+  section 5.1 lists.
 - **A corrupt cdc entry withdraws its subsystem from hosts.** A cdc entry
   is the record in etcd that the cdc serves for one subsystem. Only a hand
   edit or a bug corrupts it. State: accepted.
@@ -943,7 +963,10 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 - **The failover pause is the full stack build on the new primary.** A
   standby holds no array and no thin pool. The write in flight waits until
   the new primary has built the whole stack. The figures are in the
-  introduction. State: accepted. Fix later, large: a standby that
+  introduction. Before the build, the worker hands each group's leg md
+  copies from its fence last (section 5.1), which adds the time the
+  slowest disk node takes to report its fence, at most one interval, 2
+  seconds at the default. State: accepted. Fix later, large: a standby that
   pre-assembles its arrays.
 - **Hosts still on the old primary's path see IO errors from the fence.**
   The worker hands the old primary its demotion first and holds the sides
@@ -954,7 +977,7 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   holds the sides for the same three seconds, so the old controller node
   usually tears its stack down first. Three windows remain, all accepted
   for their IO errors; in each, a write the host was told was done can
-  also be lost (section 5.1). A slow old primary misses the hold. A
+  also be lost, in the cases section 5.1 lists. A slow old primary misses the hold. A
   replaced primary whose controller node takes longer than the hold to
   tear its stack down is fenced while it still serves.
   A worker that restarts or takes the pool over within those three

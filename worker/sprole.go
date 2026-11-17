@@ -105,6 +105,12 @@ const (
 	// record keeps it, and a later fan-out with no report of the cntlr at
 	// that revision runs the hold again.
 	msgSpDemotionClearFailed = "sp demotion clear failed"
+	// msgSpFenceRoundEnded is the end of RW24's fence round by its reports or
+	// its bound: the sides of the fence-last legs are handed the fan-out, once
+	// the other sides the round waits for have reported it applied or one
+	// cntlr_interval has passed. One record per such end, with the wait it
+	// took and the count of sides that had not reported.
+	msgSpFenceRoundEnded = "sp fence round ended"
 )
 
 // spConfRefusal is the memo that keeps a steady invalid stored conf to one
@@ -578,6 +584,11 @@ type spReport struct {
 	// the revision its agent now holds, which RW22's demotion hold waits
 	// for. 0 on every other report.
 	cntlrSynced uint64
+	// fenceViews are the primary's report's views of its groups for RW24
+	// (fenceViewsOf), one per group the report reads, sent beside its leg
+	// rows and under the same gate; nil when the reply carried no leg rows of
+	// a primary, or no info at all.
+	fenceViews map[uint64]grpFenceView
 }
 
 // sideSynced names one side and the revision its agent reported applied.
@@ -696,6 +707,16 @@ type spWorker struct {
 	// verdicts is AR10's own-verdict memo, which the health monitors of the
 	// children and of the legs note into and the reaction pass reads.
 	verdicts *verdictMemo
+	// fenceLast is RW24's view of each RAID1 group, by group id: the
+	// fence-last leg, whose member md holds in sync in the lowest slot, and
+	// the legs md holds in sync, as the latest report of the cntlr the
+	// coordinator's latest plan makes the enabled primary read the group. A
+	// report changes the groups it reads and keeps the others, so a group
+	// whose array the report could not read keeps its last view; a group
+	// whose fence-last leg leaves the plan loses it (applyPlan). Nothing
+	// persists it: a coordinator that has just started has none until the
+	// primary reports.
+	fenceLast map[uint64]grpFenceView
 }
 
 // newSpWorker starts the sp coordinator (SW2). Its signature is the
@@ -735,6 +756,7 @@ func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
 		tdRefs:    make(map[uint64]model.TdRef),
 		react:     newReactor(&modelReactionOps{cli: p.deps.cli}),
 		verdicts:  newVerdictMemo(),
+		fenceLast: make(map[uint64]grpFenceView),
 	}
 	go w.run()
 	return w
@@ -821,7 +843,9 @@ func (w *spWorker) run() {
 			w.handleReports(rep)
 		case <-w.heldC():
 			// RW22: the demotion hold's bound — the sides go without
-			// waiting for a demoted cntlr that has not reported. RW14: the
+			// waiting for a demoted cntlr that has not reported. RW24: the
+			// fence round's bound — the fence-last legs' sides go without waiting
+			// for the round's other sides that have not reported. RW14: the
 			// sides-first barrier's bound — one cntlr_interval after the
 			// sides were handed the fan-out, the cntlrs go without waiting
 			// for the sides that have not reported.
@@ -2127,7 +2151,9 @@ func (w *spWorker) buildCntlrPlans(
 // revision every side child in awaited must report applied first, and the
 // timer that bounds the wait. Under RW22's demotion hold, which comes first,
 // it holds the side half as well, until every cntlr the fan-out demoted
-// reports its demotion applied or the demotion hold's own timer fires.
+// reports its demotion applied or the demotion hold's own timer fires, and
+// under RW24's fence round, which follows it, the fence-last legs' side
+// plans.
 type cntlrHold struct {
 	revision uint64
 	plans    map[uint64]*cntlrPlan
@@ -2137,7 +2163,7 @@ type cntlrHold struct {
 	// replaces the held plans. Nothing else changes the set: a fan-out at the
 	// held revision keeps it and adds none of the sides it starts, and a side
 	// that turns unhealthy during the wait is still waited for. nil while
-	// RW22's demotion hold waits.
+	// RW22's demotion hold waits, and while RW24's fence round runs.
 	awaited map[sideKey]bool
 	// demoted maps each cntlr RW22's demotion hold waits for to the revision
 	// of its demotion; nil when that hold is over, or never began.
@@ -2147,13 +2173,30 @@ type cntlrHold struct {
 	marks map[uint64]uint64
 	// sides are the side plans RW22's demotion hold keeps back.
 	sides map[sideKey]*sidePlan
+	// lastPlans are the fence-last legs' side plans RW24's fence round keeps
+	// back, non-nil exactly while the round runs (fencing); lastLegs is the
+	// set of fence-last legs and inSyncLegs the set of legs md holds in sync,
+	// both as the round began, which a fan-out during it splits its sides and
+	// takes its waits by. fenceAwaited are the sides of the round it waits
+	// for (fenceAwaitedSides): taken when the round begins, and again when a
+	// fan-out of a newer revision replaces what it holds. fenceSides are every
+	// side plan of the round's newest fan-out, which the sides-first barrier
+	// takes its set from when the round ends, and fenceStart the moment the
+	// round began.
+	lastPlans    map[sideKey]*sidePlan
+	lastLegs     map[uint64]bool
+	inSyncLegs   map[uint64]bool
+	fenceAwaited map[sideKey]bool
+	fenceSides   map[sideKey]*sidePlan
+	fenceStart   time.Time
 }
 
 // holdCntlrs is RW14's sides-first barrier: the cntlr children are handed the
 // fan-out's requests only once every side the barrier waits for has reported
 // its revision applied, or one cntlr_interval after the barrier began — when
-// the sides were handed the fan-out, at the fan-out or at the end of RW22's
-// demotion hold — whichever comes first. It waits for the sides whose record
+// the sides were handed the fan-out, at the fan-out, at the end of RW22's
+// demotion hold when no fence round runs, or at the end of RW24's fence
+// round (endFence) — whichever comes first. It waits for the sides whose record
 // the fan-out's load read with no err_epoch (awaitedSides). A fan-out that
 // finds a hold pending replaces its plans and keeps its deadline, so a stream
 // of bumps cannot hold the cntlrs past the bound. One of a newer revision than
@@ -2312,8 +2355,9 @@ func (w *spWorker) heldC() <-chan time.Time {
 
 // releaseHeld moves a held fan-out on as far as the reports allow: RW22's
 // demotion hold ends once every demoted cntlr reports its demotion applied,
-// and RW14's barrier then releases once every side it waits for reports the
-// revision. A demoted cntlr whose child is gone reports nothing more, so only
+// RW24's fence round then once every other side it waits for reports the
+// revision, and RW14's barrier then releases once every side it waits for
+// reports the revision. A demoted cntlr whose child is gone reports nothing more, so only
 // the demotion hold's timer ends the wait for it.
 func (w *spWorker) releaseHeld(ctx context.Context) {
 	if w.demoting() {
@@ -2325,14 +2369,26 @@ func (w *spWorker) releaseHeld(ctx context.Context) {
 		}
 		w.endDemotion(ctx, false)
 	}
+	if w.fencing() {
+		// RW24: the fence-last legs' sides go once every other side the round waits
+		// for holds the revision; a round that waits for none ends here.
+		if w.fenceUnsynced() > 0 {
+			return
+		}
+		w.endFence(ctx)
+	}
 	w.releaseSynced()
 }
 
-// endDemotion ends RW22's demotion hold: the held side plans are handed out,
-// and RW14's barrier takes over the held cntlr plans with a bound of one
-// cntlr_interval from now and the sides it waits for taken from those side
-// plans, the newest the demotion hold kept. When the demotion hold's timer
-// ended it, the record names the demoted cntlrs that had not reported.
+// endDemotion ends RW22's demotion hold: the held side plans are handed out in
+// RW24's two rounds (startFence), or at once when they hold no fence-last
+// leg, and
+// the cntlr plans stay held, under RW14's barrier from the moment the last
+// side plans are handed, with a bound of one cntlr_interval from then and the
+// sides it waits for taken from the newest side plans. The timer it re-arms
+// is the fence round's bound, or the barrier's when no round runs. When the
+// demotion hold's timer ended it, the record names the demoted cntlrs that
+// had not reported.
 func (w *spWorker) endDemotion(ctx context.Context, expired bool) {
 	held := w.held
 	if expired {
@@ -2357,9 +2413,163 @@ func (w *spWorker) endDemotion(ctx context.Context, expired bool) {
 	held.demoted = nil
 	held.marks = nil
 	held.sides = nil
-	held.awaited = awaitedSides(sides)
-	w.handSides(sides)
+	if !w.startFence(sides) {
+		held.awaited = awaitedSides(sides)
+		w.handSides(sides)
+	}
 	w.clearDemotions(ctx, marks)
+}
+
+// fencing reports whether RW24's fence round is keeping the fence-last legs'
+// sides back.
+func (w *spWorker) fencing() bool {
+	return w.held != nil && w.held.lastPlans != nil
+}
+
+// grpFenceView is RW24's view of one group in the primary's report: its
+// fence-last leg, zero when the reading names none, and the legs md holds in
+// sync.
+type grpFenceView struct {
+	last   uint64
+	inSync []uint64
+}
+
+// fenceLegs are the fence-last legs and the legs md holds in sync of every
+// group the coordinator has a fence-last leg for (RW24).
+func (w *spWorker) fenceLegs() (last, inSync map[uint64]bool) {
+	last = make(map[uint64]bool, len(w.fenceLast))
+	inSync = make(map[uint64]bool)
+	for _, view := range w.fenceLast {
+		last[view.last] = true
+		for _, legId := range view.inSync {
+			inSync[legId] = true
+		}
+	}
+	return last, inSync
+}
+
+// splitLast splits a fan-out's side plans by the fence-last legs (RW24): the
+// sides of every other leg, and the fence-last legs' sides, both sides of a
+// migrating fence-last leg included. last is never nil.
+func splitLast(
+	sides map[sideKey]*sidePlan,
+	lastLegs map[uint64]bool,
+) (map[sideKey]*sidePlan, map[sideKey]*sidePlan) {
+	others := make(map[sideKey]*sidePlan, len(sides))
+	last := make(map[sideKey]*sidePlan)
+	for key, p := range sides {
+		if lastLegs[key.legId] {
+			last[key] = p
+			continue
+		}
+		others[key] = p
+	}
+	return others, last
+}
+
+// fenceAwaitedSides is the set of sides RW24's fence round waits for, out of
+// the sides it hands first: every side RW14's barrier would wait for
+// (awaitedSides), and every other side, its err_epoch whatever, of a leg md
+// holds in sync by the primary's report, a retired side aside. md can
+// acknowledge a write from such a leg, so its fence must fall before the
+// fence-last leg's, whatever its disk node's health record says.
+func fenceAwaitedSides(
+	sides map[sideKey]*sidePlan,
+	inSyncLegs map[uint64]bool,
+) map[sideKey]bool {
+	out := awaitedSides(sides)
+	for key, p := range sides {
+		if inSyncLegs[key.legId] && !p.retired {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+// startFence begins RW24's fence round at the end of RW22's demotion hold,
+// whose timer the caller has already re-armed for one cntlr_interval, the
+// round's bound: every side but the fence-last legs' is handed the fan-out
+// at once, and the fence-last legs' sides are held until every other side the
+// round waits for (fenceAwaitedSides) has reported the revision applied, or
+// until the bound. A fan-out whose sides hold no fence-last leg runs no
+// round: it reports false and hands nothing.
+func (w *spWorker) startFence(sides map[sideKey]*sidePlan) bool {
+	lastLegs, inSyncLegs := w.fenceLegs()
+	others, last := splitLast(sides, lastLegs)
+	if len(last) == 0 {
+		return false
+	}
+	held := w.held
+	held.lastLegs = lastLegs
+	held.inSyncLegs = inSyncLegs
+	held.lastPlans = last
+	held.fenceSides = sides
+	held.fenceAwaited = fenceAwaitedSides(others, inSyncLegs)
+	held.fenceStart = w.deps.clk.now()
+	held.awaited = nil
+	w.handSides(others)
+	return true
+}
+
+// holdFence is a fan-out during RW24's fence round: the sides of every leg
+// but the round's fence-last legs are handed at once, the fence-last legs'
+// replace what the round holds, and the cntlr plans replace the held ones;
+// the round keeps its deadline. One of a newer revision than the held one
+// takes the sides the round waits for afresh, from its own load; a re-fan at
+// the held revision keeps them.
+func (w *spWorker) holdFence(plan *spPlan) {
+	held := w.held
+	others, last := splitLast(plan.sides, held.lastLegs)
+	if w.desired.revision > held.revision {
+		held.fenceAwaited = fenceAwaitedSides(others, held.inSyncLegs)
+	}
+	held.revision = w.desired.revision
+	held.plans = plan.cntlrs
+	held.lastPlans = last
+	held.fenceSides = plan.sides
+	w.handSides(others)
+}
+
+// fenceUnsynced counts the sides RW24's fence round waits for that have not
+// reported the held revision applied; a side of the set whose child the diff
+// has stopped since is not waited for.
+func (w *spWorker) fenceUnsynced() int {
+	cnt := 0
+	for key := range w.held.fenceAwaited {
+		child, ok := w.sides[key]
+		if ok && child.synced < w.held.revision {
+			cnt++
+		}
+	}
+	return cnt
+}
+
+// endFence ends RW24's fence round, by the reports or by its bound: the
+// fence-last legs' sides are handed the fan-out, and RW14's sides-first
+// barrier begins over every side of the round's newest fan-out, with its own
+// bound of one cntlr_interval from now. The record gives the round's wait and
+// the count of sides it waited for that had not reported.
+func (w *spWorker) endFence(ctx context.Context) {
+	held := w.held
+	slog.InfoContext(ctx, msgSpFenceRoundEnded,
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+		slog.Uint64("revision", held.revision),
+		slog.Int("last_side_cnt", len(held.lastPlans)),
+		slog.Int("side_cnt", w.fenceUnsynced()),
+		slog.Int64("wait_ms", w.deps.clk.now().Sub(held.fenceStart).Milliseconds()),
+	)
+	last := held.lastPlans
+	sides := held.fenceSides
+	held.lastPlans = nil
+	held.lastLegs = nil
+	held.inSyncLegs = nil
+	held.fenceAwaited = nil
+	held.fenceSides = nil
+	held.timer.stop()
+	held.timer = w.deps.clk.newTimer(w.tickPeriod())
+	held.awaited = awaitedSides(sides)
+	w.handSides(last)
 }
 
 // clearDemotions clears the demoted_revision of each cntlr whose record
@@ -2390,7 +2600,7 @@ func (w *spWorker) clearDemotions(ctx context.Context, marks map[uint64]uint64) 
 // hold releases nothing here: its sides have not been handed the revision
 // yet.
 func (w *spWorker) releaseSynced() {
-	if w.held == nil || w.demoting() {
+	if w.held == nil || w.demoting() || w.fencing() {
 		return
 	}
 	if w.unsyncedSides() > 0 {
@@ -2413,15 +2623,27 @@ func (w *spWorker) unsyncedSides() int {
 }
 
 // expireHold is the bound of whatever is held. RW22's demotion hold ends and
-// RW14's barrier begins; RW14's barrier releases the cntlrs one cntlr_interval
-// after it began, whatever the sides reported, and the record counts the side
-// children it waited for that had not reported the revision.
+// RW24's fence round or RW14's barrier begins; the fence round hands the
+// fence-last legs' sides one cntlr_interval after it began, whatever the round's
+// other sides reported, and RW14's barrier begins; RW14's barrier releases
+// the cntlrs one cntlr_interval after it began, whatever the sides reported,
+// and the record counts the side children it waited for that had not
+// reported the revision.
 func (w *spWorker) expireHold(ctx context.Context) {
 	if w.held == nil {
 		return
 	}
 	if w.demoting() {
 		w.endDemotion(ctx, true)
+		// RW24's fence round may begin, and end at once when it waits for
+		// no side.
+		w.releaseHeld(ctx)
+		return
+	}
+	if w.fencing() {
+		// RW24: the round's bound — the fence-last legs' sides go without waiting
+		// for the other sides that have not reported.
+		w.endFence(ctx)
 		w.releaseSynced()
 		return
 	}
@@ -2570,6 +2792,10 @@ func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 
 	if len(fresh) > 0 || w.demoting() {
 		w.holdDemotion(plan, fresh)
+	} else if w.fencing() {
+		// RW24: the fence-last legs' sides stay held for the rest of the
+		// round.
+		w.holdFence(plan)
 	} else {
 		// Held before any side is handed its request, so the bound runs from
 		// the fan-out and no side's Syncup* is ahead of the hold.
@@ -2595,6 +2821,14 @@ func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 		if !ok || owner != w.legOwners[legId] {
 			delete(w.legs, legId)
 			delete(w.legOwners, legId)
+		}
+	}
+	// RW24: a group whose fence-last leg the plan no longer holds loses its
+	// view, so a deleted group's view does not outlive it.
+	for grpId, view := range w.fenceLast {
+		if _, ok := legOwnerOf(w.legSlice, w.legClone, w.legRepair,
+			view.last); !ok {
+			delete(w.fenceLast, grpId)
 		}
 	}
 	w.idleCnt = plan.unresolved
@@ -2789,6 +3023,15 @@ func (w *spWorker) handleReports(first spReport) {
 		if w.recordsLegRows(rep.cntlrId) {
 			for _, row := range rep.legRows {
 				w.observeLeg(ctx, row)
+			}
+			// RW24: the primary's views of the groups it read, under the
+			// leg rows' gate; a group it did not read keeps its view.
+			for grpId, view := range rep.fenceViews {
+				if view.last == 0 {
+					delete(w.fenceLast, grpId)
+					continue
+				}
+				w.fenceLast[grpId] = view
 			}
 		}
 		if rep.paths != nil && w.countsPaths(rep.cntlrId) {
@@ -4457,6 +4700,7 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		// known state, which can be another reply's (ownInfo).
 		rep.legRows = d.legRows(info)
 		rep.paths = newPathReport(r.revision, d.ownInfo(r))
+		rep.fenceViews = fenceViewsOf(info)
 	} else if !plan.effectivePrimary() {
 		d.logStandbyLegRows(ctx, info, plan.cntlrId)
 	}
@@ -4467,10 +4711,44 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		rep.cntlrSynced = r.revision
 	}
 	if len(rep.createdTdIds) == 0 && len(rep.legRows) == 0 &&
-		rep.cntlrSynced == 0 && rep.paths.empty() {
+		rep.cntlrSynced == 0 && rep.paths.empty() && rep.fenceViews == nil {
 		return
 	}
 	d.send(ctx, rep)
+}
+
+// fenceViewsOf is RW24's reading of the primary's report: for each group the
+// report reads, its fence-last leg — the leg whose member md holds in sync in
+// the lowest slot, a tie going to the lower leg id — and the legs md holds in
+// sync. A reading that gives no in-sync leg a slot, as an older cn agent's
+// does not, names no fence-last leg. nil for a reply that reads no group, or
+// carries no info at all: a group a report does not read keeps its view, so
+// such a reply has nothing to send.
+func fenceViewsOf(info *pb.CntlrInfo) map[uint64]grpFenceView {
+	if len(info.GetGrpIdToGrpInfo()) == 0 {
+		return nil
+	}
+	views := make(map[uint64]grpFenceView, len(info.GetGrpIdToGrpInfo()))
+	for grpId, reading := range info.GetGrpIdToGrpInfo() {
+		slots := reading.GetInSyncLegIdToSlot()
+		var (
+			view   grpFenceView
+			lowest uint32
+		)
+		view.inSync = slices.Clone(reading.GetInSyncLegIdList())
+		for _, legId := range view.inSync {
+			slot, ok := slots[legId]
+			if !ok {
+				continue
+			}
+			if view.last == 0 || slot < lowest ||
+				(slot == lowest && legId < view.last) {
+				view.last, lowest = legId, slot
+			}
+		}
+		views[grpId] = view
+	}
+	return views
 }
 
 // legRows is the PRIMARY's probe (architecture.md, Group on-leg layout: meta

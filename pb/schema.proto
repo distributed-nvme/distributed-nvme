@@ -536,6 +536,12 @@ message CntlrInfo {
         // (cnagent.md CN12, CN28); the sp worker's leg repair reads it
         // (dnv-worker.md AR8). Appended, never renumbered.
         map<uint64, uint32> leg_id_to_bad_blocks = 6;
+        // md's slot of the member of each leg the running array holds in
+        // sync (dev-*/slot), keyed by the legs of in_sync_leg_id_list
+        // (cnagent.md CN28). The sp worker fences the leg of the lowest slot
+        // last in a failover (dnv-worker.md RW24). Appended, never
+        // renumbered.
+        map<uint64, uint32> in_sync_leg_id_to_slot = 7;
     }
     map<uint64, ResInfo> ss_id_to_subsystem = 1;
     map<uint64, ResInfo> ns_id_to_namespace = 2;

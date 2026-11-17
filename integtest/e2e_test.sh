@@ -25396,8 +25396,8 @@ cut_fence_writer() {
 	bound=$((THR_PRIMARY + 3 * CUT_CI + CUT_SLACK))
 	range_secs=$((FENCE_RANGE_MIB * 256 / FENCE_IOPS))
 	assert_ge "$range_secs" \
-		"$((2 * (FENCE_WARMUP_SECS + bound + DEMOTION_HOLD_TIMEOUT + WAIT_SHORT)))" \
-		"the writer's range lasts twice the warm-up, the failover's bound, the demotion hold and one side converge"
+		"$((2 * (FENCE_WARMUP_SECS + bound + DEMOTION_HOLD_TIMEOUT + CUT_CI + WAIT_SHORT)))" \
+		"the writer's range lasts twice the warm-up, the failover's bound, the demotion hold, the fence round and one side converge"
 
 	size=$(((FENCE_RANGE_MIB * 1048576 + TD_UNIT - 1) / TD_UNIT * TD_UNIT))
 	ctl_ok td create --name "$TD_FENCE" --size "$size"
@@ -25467,8 +25467,12 @@ cut_fence_writer() {
 
 	# The fence fails host1's next write: the demotion hold runs to its timer
 	# (the stopped agent never reports), and the sides then fence the old
-	# primary before they open the new one's path (dnagent.md DN10).
-	wait_until "$((DEMOTION_HOLD_TIMEOUT + WAIT_SHORT + CUT_SLACK))" \
+	# primary before they open the new one's path (dnagent.md DN10). A write
+	# that fails on a leg the fence round fences md completes from the
+	# fence-last leg, so the first write that fails is one after the
+	# fence-last leg's fence, at most one cntlr interval after the round
+	# began (dnv-worker.md RW24).
+	wait_until "$((DEMOTION_HOLD_TIMEOUT + CUT_CI + WAIT_SHORT + CUT_SLACK))" \
 		"host1's fence writer to stop on a write error once the sides fence the stopped primary" \
 		fence_writer_stopped
 	out=$(helper_host 1 fwrite_stat) || die "host1: the fwrite_stat verb failed"

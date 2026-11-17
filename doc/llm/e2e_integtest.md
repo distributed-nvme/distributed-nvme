@@ -1025,9 +1025,12 @@ rate, with fio's own verify and its saved verify state; it must be running
 with no error before the stop. The primary's cn agent is stopped, the
 primary role must move to the standby within the same bound as the first
 cut, with one failover more, and fio must then stop on a write error within
-the demotion hold, one side converge and the driver's polling slack: the
-sides fence the old primary once the hold runs to its timer, and its next
-write fails. A writer that never sees an error fails the case, as does one
+the demotion hold, the fence round, one side converge and the driver's
+polling slack: the sides fence the old primary once the hold runs to its
+timer, the fence-last legs' sides once the round ends, and md completes a
+write that fails on a leg the round fences from the fence-last leg, so the
+first write that fails is one after the fence-last leg's fence
+(`dnv-worker.md` RW24). A writer that never sees an error fails the case, as does one
 that finished its range first. host1 then leaves the old primary, its agent
 runs again and converges to a standby, the new primary builds its stack, and
 host1 connects to it. fio must have issued exactly the writes before the
@@ -1042,7 +1045,7 @@ the legs and still be reported failed, as one 32-slice run showed. With one
 write in flight the first failed write is the only one the host is told is
 in doubt, and these checks show that every write the host saw succeed
 landed and that nothing written after the failed one did; a write the old
-primary acknowledged can still be lost to a known defect, and the case then
+primary acknowledged can still be lost to a known limit, and the case then
 fails (Known limits). Either outcome of the failed write lands before the
 new primary serves, whose path opens only once the old one is fenced
 (`dnagent.md` DN10). host1 lets go, host0's two plain paths, kept through
@@ -1351,12 +1354,14 @@ the connect attempted.
   times neither the drop nor the fence. On a host that drops the path after
   the fence, a write sent in between fails (`architecture.md`, Known limits),
   and with it the case.
-* **The cutoff case's writer can meet a known defect.** A failover while
-  the old primary still serves can lose a write it acknowledged
-  (`architecture.md`, Known limits, A failover while the old primary serves
-  can lose an acknowledged write), and the case's second cut is such a
-  failover; fio's verify then fails the case on a block before the failed
-  write, a failure of that defect and not of the suite.
+* **The cutoff case's writer can meet a known limit.** A failover while
+  the old primary still serves can lose a write it acknowledged in the
+  cases `architecture.md`, Known limits, A failover while the old primary
+  serves can lose an acknowledged write, lists (`dnv-worker.md` RW24). The case's second cut is such a failover, and
+  its worker has the old primary's reports, so the round runs; a side of
+  the round that reports its fence later than the round's bound can still
+  cost the write, and fio's verify then fails the case on a block before
+  the failed write, a failure of that limit and not of the suite.
 * **The drop is asserted only on paths nvme-stas made.** host0 lets go of its
   own paths before nvme-stas starts, so a path nvme-stas took over is not
   exercised, and one it does not manage it never drops (`architecture.md`,

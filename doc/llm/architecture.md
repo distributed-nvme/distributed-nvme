@@ -5209,9 +5209,10 @@ and the retired sides included (Repair), and `SyncupCntlr` to
 **every cntlr**, with the new revision; each request always carries the
 full desired state (Common agent rules), and each side's DN and each cntlr's CN
 is resolved by reading the `DnConf` or `CnConf` at the record's endpoint
-(`dnv-worker.md` RW14). The fan-out holds requests back in two waits, the
-demotion hold and the sides-first hold, and neither is a correctness
-dependency ([D16]):
+(`dnv-worker.md` RW14). The fan-out holds requests back in three waits, the
+demotion hold, the fence round and the sides-first hold; the demotion hold
+and the sides-first hold are no correctness dependency, and the fence
+round's order is part of the write safety ([D16]):
 
 * **Demotion first.** A fan-out that demotes a primary — in production
   one that follows a failover, on either of its triggers, which makes the
@@ -5227,10 +5228,17 @@ dependency ([D16]):
   that applies its demotion within the bound is ANA inaccessible before any
   side fences it, and the bound lets the hosts of an unreachable one drop
   the path the failover withdrew (Failover, [D16]).
+* **Fence-last legs last.** At the demotion hold's end, in each RAID1
+  group, the sides of the fence-last leg — the leg md holds in sync in the
+  lowest slot, by the primary's reports — are held until the other sides
+  of the fence round have reported the new revision applied, or for one
+  `cntlr_interval` at most, so that a write md acknowledged is on the leg
+  the new primary's start copies from (`dnv-worker.md` RW24; Failover).
 * **Sides first.** The cntlrs' requests are then held until the sides
   `dnv-worker.md` RW14 waits for have reported the new revision applied,
-  or for one `cntlr_interval` at most, counted from the end of the
-  demotion hold when the fan-out had one. The order mitigates three races;
+  or for one `cntlr_interval` at most, counted from the end of the fence
+  round, or of the demotion hold when no round runs, when the fan-out had
+  one. The order mitigates three races;
   `dnv-worker.md` RW14 says which sides are waited for, when the hold
   releases and what it costs.
 
@@ -5414,14 +5422,18 @@ An SP has several cntlrs; exactly one is primary. A failover switches the
 primary from one cntlr (**old_primary**) to another (**new_primary**) and
 involves three kinds of participants: the two cntlrs and the **sides**. The
 trigger is only ever an etcd change (Automatic reactions, or
-`UpdateCntlrEnabled`), delivered by revision-ordered syncups in the two
-waits of sp role's hold: the demotion of **old_primary** first; the **sides** once
-old_primary has reported its demotion applied or `DemotionHoldTimeout` has
-passed (`dnv-worker.md` RW22); and **new_primary** once the sides
+`UpdateCntlrEnabled`), delivered by revision-ordered syncups in three
+bounded waits of sp role's hold: the demotion of **old_primary** first; the
+**sides** once old_primary has reported its demotion applied or
+`DemotionHoldTimeout` has passed (`dnv-worker.md` RW22), in two rounds, in
+each RAID1 group the fence-last leg, the leg md copies from, once the
+round's other sides have reported their fence or one `cntlr_interval` has
+passed (`dnv-worker.md` RW24); and **new_primary** once the sides
 `dnv-worker.md` RW14 waits for have reported the revision applied or one
-`cntlr_interval` has passed. The two waits narrow what hosts see, and
-safety rests on the sides' flips and md's arbitration below, not on them
-([D16]).
+`cntlr_interval` has passed. The demotion hold and the sides-first hold
+narrow what hosts see, and safety does not rest on them; the fence round's
+order is part of the write safety below, and its bound leaves a gap
+([D16]; Known limits).
 
 **old_primary** — on a `SyncupCntlr` saying it is not primary (a revision
 higher than everything it has seen):
@@ -5442,7 +5454,7 @@ revision):
 1. Make sure all groups are available ("Make sure all groups are
    available"). A group whose member is not yet available is retried by
    the agent until it is (`cnagent.md` CN10); the worker is not involved.
-   The fan-out's two waits are bounded in time ([D16]), so this `SyncupCntlr`
+   The fan-out's waits are bounded in time ([D16]), so this `SyncupCntlr`
    can land before the sides' ANA flips have reached the new primary, and
    nothing re-sends it on that account; the sides-first hold (sp role,
    `dnv-worker.md` RW14) makes that rarer, not impossible.
@@ -5508,12 +5520,14 @@ leaves the device suspended on its old table, queueing its IO, which
 counts as not fenced; what a failback costs after it is `dnagent.md`,
 Known limits.
 
-**What makes the unordered fan-out write-safe, and where it is not ([D16]).**
-The sp worker pushes the failover's `SyncupSide` calls with no order among
-the sides, and each wait of its fan-out ends at its bound whether the
-reports it waits for came or not, so mid-failover the old primary can
-still hold a live path to one leg while the new primary already owns
-another. Two mechanisms make that harmless, save the case the end of this
+**What makes the fan-out write-safe, and where it is not ([D16]).**
+The sp worker pushes the failover's `SyncupSide` calls in one order only:
+in each RAID1 group the fence-last leg's sides — the leg whose member md
+holds in sync in the lowest slot, by the old primary's reports — after the
+other sides (`dnv-worker.md` RW24). Each wait of its fan-out ends at its
+bound whether the reports it waits for came or not, so mid-failover the
+old primary can still hold a live path to one leg while the new primary
+already owns another. Two mechanisms make that harmless, save the case the end of this
 paragraph names, and both are load-bearing: (a) each side's flip
 **fences first, within one DN converge** — the old primary's dm-linear
 reloads onto dm-error before the same pass puts the new
@@ -5527,11 +5541,17 @@ claims a clean full array is not started degraded on its own ("Make sure
 all groups are available"), and once both legs are reachable the event
 counts pick the newer one and resync overwrites the stale leg. dnv adds no
 fencing epoch of its own, so (b) is an explicit dependency on mdadm's
-behaviour ([D16]). (b) holds only where md's record of a failed leg reaches
-a surviving leg: a fence that cuts that record off leaves the legs equal,
-and the start's resync copies the lowest in-sync slot over the others,
-which loses a write only another leg took (Known limits, A failover while
-the old primary serves can lose an acknowledged write).
+behaviour ([D16]). (b) holds where md's record of a failed leg reaches a
+surviving leg; a fence that cuts that record off leaves the legs equal,
+and the start's resync copies the lowest in-sync slot over the others.
+The fence round makes that slot's leg the one that holds every write md
+acknowledged: a write in flight fails on each leg the round fences and
+lands on the fence-last leg, the record of the failed legs reaches the
+fence-last leg before its fence and gives it the highest event count, and
+where the record is cut off all the same the resync copies the fence-last
+leg. A failover with no round, or a side of the round that is fenced late,
+can still lose a write only another leg took (Known limits, A failover
+while the old primary serves can lose an acknowledged write).
 
 **What hosts see at a failover ([D16]).** The common failover — a dead CN
 — is a pause from the host's side: its paths drop, IO queues, and the
@@ -5605,8 +5625,10 @@ survivor whose superblock still counts a clean full array is refused, and
 the group is then not available this pass. That refusal is the cross-leg
 half of failover safety ([D16]) — a stale leg cannot be started alone,
 and once both legs are back the event counts pick the newer one, where
-md's record of the failed leg reached the other (Known limits, A failover
-while the old primary serves can lose an acknowledged write). md
+md's record of the failed leg reached the other, and the resync copies the
+fence-last leg, which the fence round fences last, where it did not
+(`dnv-worker.md` RW24; Known limits, A failover while the old primary
+serves can lose an acknowledged write). md
 writes a member's death into the other members' superblocks when it
 fails the member, which on an idle array happens when the primary fails
 it: above all by the early fail of a member whose leg is dead while
@@ -6517,9 +6539,10 @@ show regions copied since as not copied, and dm-clone would copy them from
 the source again over what the hosts wrote there. That gate is the same
 dependency on mdadm's behaviour that [D16] states for every group (Known
 limits), with the same gap: where a fence cuts md's record of a failed
-leg off, the start's resync can copy the stale leg over the others, with
-the same result (Known limits, A failover while the old primary serves
-can lose an acknowledged write); a group without redundancy has one leg
+leg off and the fence round did not fence the fence-last leg last
+(`dnv-worker.md` RW24), the start's resync can copy the stale leg over the
+others, with the same result (Known limits, A failover while the old
+primary serves can lose an acknowledged write); a group without redundancy has one leg
 and no such case.
 
 **The source bitmaps are no part of it.** Read when Clones says, they
@@ -7348,11 +7371,14 @@ document and the component documents cite it by its id.
   it reads it, which is what lets the group's array be created clean as
   a data group's is (`cnagent.md` CN12).
 * **[D16] Failover fencing has no epoch; safety = per-side fence-first flip + md
-  arbitration.** Among the nodes a failover moves — the cntlrs and the
-  sides — the only coordination is the revisioned fan-out of sp role,
-  unordered among the sides; toward hosts the failover also withdraws the
+  arbitration, ordered by the fence round.** Among the nodes a failover
+  moves — the cntlrs and the sides — the only coordination is the
+  revisioned fan-out of sp role, unordered among the sides but for one
+  order: in each RAID1 group the fence-last leg's sides last
+  (`dnv-worker.md` RW24); toward hosts the failover also withdraws the
   old primary's address from the discovery records ([D18]). The fan-out
-  comes in two waits, each bounded in time. The demotion hold hands the
+  comes in three waits, each bounded in time: the demotion hold, the fence
+  round and the sides-first hold. The demotion hold hands the
   old primary its demotion first and holds the sides and the other cntlrs
   until it reports the demotion applied, for `DemotionHoldTimeout` at most
   (`dnv-worker.md` RW22): an old primary that applies its demotion within
@@ -7374,9 +7400,11 @@ document and the component documents cite it by its id.
   out a side found unhealthy because waiting for one that does not answer
   would hold every change of the pool for the whole bound and let a
   failover fire inside the wait, while the wait only narrows; a side so
-  found that answers after all loses only that narrowing. Neither wait
-  is a correctness dependency: at each bound the next requests go whether
-  the awaited reports came or not, and nothing below relies on them.
+  found that answers after all loses only that narrowing. Neither the
+  demotion hold nor the sides-first hold is a correctness dependency: at
+  each bound the next requests go whether the awaited reports came or not,
+  and nothing below relies on them. The fence round's order is part of the
+  arbitration below, and its bound is a gap Known limits states.
   Correctness rests on two things (Failover, "Make sure all groups are
   available"): each DN converges its side's old-primary-to-dm-error and
   new-primary-to-side-device reloads in one pass, the fence first, and
@@ -7386,27 +7414,36 @@ document and the component documents cite it by its id.
   mdadm's assembly rules arbitrate across legs — a stale leg whose
   superblock claims a clean full array will not start degraded alone, and
   event counts plus resync direction repair divergence once both legs
-  return. That arbitration holds only where md's record of a failed leg
-  reaches a surviving leg; a fence can cut that record off while an old
-  primary that still serves acknowledges a write, which can then be lost
-  (Known limits, A failover while the old primary serves can lose an
-  acknowledged write), a defect and not one of the two costs accepted
-  below. md's assembly behaviour is therefore a load-bearing external
+  return. That arbitration needs md's record of a failed leg to reach a
+  surviving leg, or the leg that took a write to be the one the start
+  copies from: a fence can cut the record off while an old primary that
+  still serves acknowledges a write, and the start then resyncs from the
+  lowest in-sync slot. So the sides are fenced in two rounds, in each
+  RAID1 group the leg of that slot, the fence-last leg, last
+  (`dnv-worker.md` RW24): every write md acknowledged is on the fence-last
+  leg, whose record wins when it lands and whose copy the resync spreads
+  when it does not. A failover with no round, and a side of the round that
+  is fenced late, keep the loss possible (Known limits, A failover while
+  the old primary serves can lose an acknowledged write). md's assembly behaviour is therefore a load-bearing external
   dependency, which the cn suite's redund case asserts on the lab's mdadm
   (`cnagent_integtest.md`, Cases): mdadm refuses to start an array from one
   leg whose superblock still counts a clean full array, and once both legs
   are back a block only the newer leg holds reads as that leg's; nothing
   checks the mdadm a deployed node runs (Known limits). For a host
-  that follows the discovery log, the two waits and the withdrawal close
+  that follows the discovery log, the demotion hold and the withdrawal close
   both edges of a failover: an old primary that applies its demotion within
   the demotion hold is inaccessible before the fence, and one the worker
   cannot reach is off the host's paths before it, save on a node of the
   Kubernetes driver, which drops it only once it holds a path to a listed
-  cntlr that shows the volume's namespace (`csi.md` CSI15). Two costs are
-  accepted.
+  cntlr that shows the volume's namespace (`csi.md` CSI15). Three costs
+  are accepted.
   Every failover of an old primary that does not answer, a dead CN's
   among them, spends the demotion hold's bound before its sides are
-  told, and its new primary comes up that much later. And an old primary
+  told, and its new primary comes up that much later. Every failover or
+  replacement of the primary whose coordinator has a fence reading of a
+  RAID1 group spends the fence round, the round trip of the slowest side
+  it waits for, one `cntlr_interval` at most, before the fence-last legs'
+  sides are told, and its new primary comes up that much later too. And an old primary
   still on a host's path at the fence that has not applied its demotion —
   the residual cases of Known limits — returns DNR
   internal errors that host multipath does not fail over from, so
@@ -7863,30 +7900,50 @@ document and only pointed to here.
   one. Read in the kernel's dm-thin, nvmet, block and NVMe host sources,
   not measured.
 * **A failover while the old primary serves can lose an acknowledged
-  write.** The fan-out of a failover, or of a cntlr replacement of the
-  primary, reaches a group's sides in no order (sp role; Failover,
-  [D16]), and an old primary that has not applied its demotion, or a
-  primary a cntlr replacement deleted whose CN has not torn its stack
-  down, goes on serving a host still on its path (Failover, What hosts see
-  at a failover). A write whose copy to one leg waits on that leg's fence and then
-  fails, while its copy to another leg landed before that leg's fence, is
-  acknowledged: md fails the first leg (failfast) and completes the write
-  from the copy that landed. md's record of that failure, its superblock and bitmap writes to
-  the surviving leg, then fails when that leg is fenced too, and md never
-  fails its last member, so both legs keep equal superblocks. The new
-  primary's start of the array (`cnagent.md` CN12, case 2) finds it not
-  clean and resyncs from the lowest in-sync slot; when that slot is the leg
-  that missed the write, the write is lost, with no error. The same on a
-  meta group would roll the thin pool back to its commit before, and on a
-  clone meta group would hand dm-clone metadata older than the copy, so
-  dm-clone copies regions from the source again over what hosts wrote
-  there (Clone metadata durability; read from the code). Seen in the e2e
-  cutoff case at 32 slices, and pinned with md alone on the lab kernel:
-  every run that fenced the slot-0 leg first lost the last acknowledged
-  write, and every run that fenced it last kept it, whichever leg slot 0
-  was. The worker's records name no leg's slot, and only the inspect call
-  reports it (`cnagent.md` CN31), on an operator's request, so the fan-out
-  cannot order the fence by it.
+  write.** An old primary that has not applied its demotion, or a primary
+  a cntlr replacement deleted whose CN has not torn its stack down, goes
+  on serving a host still on its path (Failover, What hosts see at a
+  failover). A write whose copy to one leg waits on that leg's fence and
+  then fails, while its copy to another leg landed before that leg's
+  fence, is acknowledged: md fails the first leg (failfast) and completes
+  the write from the copy that landed. When md's record of that failure,
+  its superblock and bitmap writes to the surviving leg, then fails because
+  that leg is fenced too — md never fails its last member — both legs keep
+  equal superblocks, and the new primary's start of the array
+  (`cnagent.md` CN12, case 2) finds it not clean and resyncs from the
+  lowest in-sync slot. The fence round fences that slot's leg, the
+  fence-last leg, last, once the round's other sides have reported their
+  fence (`dnv-worker.md` RW24), so the write lands on the fence-last leg
+  and md's record of the failed legs reaches it before its fence. The loss
+  stays open where the round does not order a group's fence: a failover
+  whose coordinator has no fence reading of the group, having no report of
+  the old primary since it started, after a worker restart or a handoff; a primary
+  whose cn agent reports no slot, as an older build's does; a replacement
+  of the primary fanned out by a coordinator that has just started, which
+  runs no demotion hold (A replacement of the primary can fence the old
+  primary first when the pool's coordinator changes during its demotion
+  hold, below). And it stays open where a side of the round is fenced after
+  the fence-last leg: one that does not report within the round's bound of
+  one `cntlr_interval`, and one that reports the revision from a converge
+  that could not fence, which a later re-send fences. And it stays open
+  where the fence reading is older than md: a member md brings into sync
+  in a lower slot after the primary's last report that reads the group,
+  by a put-back or a repair's new leg, is fenced in the round, or not
+  waited for when its side has a health epoch, while the reading's
+  fence-last leg is fenced last. Such a late or reversed fence loses the
+  write only when it falls after the fence-last leg's failed the write and
+  before md's record of that failure reaches the side, which md writes as
+  soon as it fails a member. When the
+  resync copies the leg that missed the write, the write is lost, with no
+  error. The same on a meta group would roll the thin pool back to its
+  commit before, and on a clone meta group would hand dm-clone metadata
+  older than the copy, so dm-clone copies regions from the source again
+  over what hosts wrote there (Clone metadata durability; read from the
+  code). Seen in the e2e cutoff case at 32 slices, with the sides fenced in
+  no order, and pinned with md alone on the lab kernel by
+  `integtest/md_fence_order.sh`: every run that began the slot-0 leg's
+  fence first lost the last acknowledged write, and every run that began
+  it last kept it, whichever leg slot 0 was.
 * **md's assembly behaviour is pinned in the lab only.** The cross-leg
   half of failover safety ([D16], "Make sure all groups are available")
   rests on mdadm refusing to start an array from a lone survivor whose

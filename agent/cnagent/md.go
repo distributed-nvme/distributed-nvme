@@ -3446,7 +3446,9 @@ func (s *CnAgentServer) probeGroup(
 // it has failed in its place and one it copies onto, and not a member
 // without a place. The legs held in sync are the group's leg_list legs and
 // its repair's new legs whose members md marks in sync (MdMember.inSync), in
-// ascending leg id, so a reading that does not change reads the same.
+// ascending leg id, so a reading that does not change reads the same, each
+// with its md slot, which the sp worker's fence order reads (dnv-worker.md
+// RW24).
 // refusal is the take-back check's (takeBackStep) for the verdict, which a
 // converge's member reconciliation and a read's putBackNames return. acted
 // is the revision of the group's mark whose forced start this incarnation
@@ -3478,6 +3480,15 @@ func reportGrpReading(
 		member, ok := held[lp.name]
 		if ok && member.inSync() {
 			reading.InSyncLegIdList = append(reading.InSyncLegIdList, lp.legId)
+			// The slot of an in-sync member is a place number; one that does
+			// not parse is left out, and the sp worker orders no fence of the
+			// group by it (dnv-worker.md RW24).
+			if slot, err := strconv.ParseUint(member.Slot, 10, 32); err == nil {
+				if reading.InSyncLegIdToSlot == nil {
+					reading.InSyncLegIdToSlot = make(map[uint64]uint32)
+				}
+				reading.InSyncLegIdToSlot[lp.legId] = uint32(slot)
+			}
 		}
 		if ok && member.BadBlocks > 0 {
 			if reading.LegIdToBadBlocks == nil {

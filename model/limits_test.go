@@ -141,6 +141,8 @@ func widestCounts() map[protoreflect.FullName]int {
 		// The bad-block counts of the members md holds: the group's legs and
 		// its repair's new leg, as the in-sync list.
 		"CntlrInfo.GrpInfo.leg_id_to_bad_blocks": common.MaxAllocLegPerGrp + 1,
+		// The slots of the members md holds in sync: the in-sync list's legs.
+		"CntlrInfo.GrpInfo.in_sync_leg_id_to_slot": common.MaxAllocLegPerGrp + 1,
 		// The new legs of a repair md holds: one per repair.
 		"CntlrInfo.RepairInfo.held_new_leg_id_list": 1,
 		// A migration's list; a cntlr reports the bitmaps of clones only.

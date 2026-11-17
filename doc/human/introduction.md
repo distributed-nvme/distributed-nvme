@@ -178,7 +178,12 @@ path before the path stops working, then puts its namespace devices on an
 error target, a device-mapper table that fails every IO, and stops its arrays
 and thin pools; its legs stay connected. Then the fence: each disk node
 reloads the old primary's path onto an error target and the new primary's
-onto the side device, and moves ANA with them. Then the new primary assembles
+onto the side device, and moves ANA with them. In each RAID1 group the worker
+fences the leg md copies from last: it tells that leg's disk node only once
+the other legs' disk nodes report their fence done, or after one interval.
+So a write that an old primary still serving completed is on that leg, the
+one the new primary's start of the array copies from, but for the few
+cases [the scope page](scope.md#51-hosts-flushes-and-snapshots) lists. Then the new primary assembles
 the arrays, builds the thin pools and the striped devices, and only then moves
 its namespaces to ANA optimized. In the common case, a dead controller node,
 the host sees a pause, not errors: its IO queues until the new primary moves
@@ -199,8 +204,10 @@ sequenceDiagram
     H->>H: drops its path to the old primary
     Note over W,O: hold: the worker waits for the demotion's report,<br/>bounded in time
     O-->>W: demotion applied
-    W->>S: syncup: the primary changed
+    W->>S: syncup to the other legs' sides: the primary changed
     Note over S,N: fence: the old primary's path onto an error target,<br/>the new primary's onto the side device
+    S-->>W: fence done
+    W->>S: syncup to the side of the leg md copies from
     S->>N: the new primary's paths ANA optimized, the old primary's non-optimized
     Note over W,S: hold: the worker waits for the sides' reports,<br/>bounded in time
     S-->>W: revision applied

@@ -500,8 +500,8 @@ reads back, for one pool at a time, since no case stops the cn agent of a
 controller node that holds many pools; eight volumes live at once; the
 upstream conformance test passes; and every delete leaves nothing behind.
 No case reads back a write made during a failover, which a failover can lose
-(`architecture.md`, Known limits, A failover while the old primary serves
-can lose an acknowledged write).
+in the cases that `architecture.md`, Known limits, A failover while the
+old primary serves can lose an acknowledged write, lists.
 
 ### Topology and parameters
 

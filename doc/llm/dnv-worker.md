@@ -1823,7 +1823,8 @@ parent that hands a change on late, and on purpose: its cntlr children receive a
 fan-out once every side child RW14's sides-first hold waits for has
 reported it applied, and at the latest one `cntlr_interval` after the sides
 were handed it; a fan-out that demotes a primary reaches the demoted cntlr
-at once and the sides only when RW22's demotion hold ends; from each
+at once and the sides only when RW22's demotion hold ends, the
+fence-last legs' sides only when RW24's fence round ends; from each
 hand-over on, this rule applies unchanged.
 
 RW7. **Connections.** A process-wide cache from `addr_port` to one client
@@ -2082,7 +2083,8 @@ next syncup; it delivers nothing to an agent already at that revision,
 since a round sends a syncup only on a non-zero code or a different
 revision (RW4). That is the fan-out: unordered within each kind, sides
 before cntlrs
-(below), and a demoted cntlr before both (RW22). `ErrNotFound` from
+(below), a demoted cntlr before both (RW22), and at the end of a demotion
+hold the fence-last legs' sides after the other sides (RW24). `ErrNotFound` from
 `LoadSp` means the SP is being deleted: log, keep the children until the
 `SpRev` delete arrives (the agents tear down through the pointer lists).
 An endpoint without a `DnConf` or `CnConf`
@@ -2107,7 +2109,8 @@ idle by the rule above — and the primary's leg rows are still placed on
 the record that holds each leg, its slice, its clone or its repair (HL2).
 
 **Sides first.** The side half of the diff is applied at once, unless a
-demotion hold keeps it back (RW22). The cntlr half — every running cntlr
+demotion hold keeps it back (RW22), or a fence round keeps the fence-last
+legs' sides back (RW24). The cntlr half — every running cntlr
 child's new request, and every cntlr child to start — is HELD until every
 side the hold waits for has reported the fan-out's revision (or a newer
 one) applied, or until one `cntlr_interval` has passed since the hold
@@ -2189,9 +2192,12 @@ Known limits). The wait is the demotion hold's own cost: a failover whose
 old primary does not answer — every failover of one that cannot be
 reached, since the worker judges no reachability — holds its sides and its
 promotion for the whole demotion hold, and the sides-first hold begins only
-after it; and a replacement of the primary that RW22 finds holds its sides
-and its new primary for the whole demotion hold, since the deleted cntlr
-reports nothing. Only an accepted reply reports,
+after it and after RW24's fence round, which holds the fence-last legs'
+sides and the promotion for the round trip of the slowest side the round
+waits for; and a
+replacement of the primary that RW22 finds holds its sides and its new
+primary for the whole demotion hold, since the deleted cntlr reports
+nothing. Only an accepted reply reports,
 so a side the hold waits for whose agent does not accept the fan-out's
 revision costs that fan-out up to one `cntlr_interval` of cntlr latency and
 an `sp sides unsynced` record, a failover's promotion included, and RW9
@@ -2323,10 +2329,12 @@ to inaccessible failed gains nothing from the wait: the same demotion
 converge parks that namespace's ns-dev on the td's dm-error (`cnagent.md`
 CN16), so a host still on that path reads IO errors from then on whether
 the hold ends or not, and the next round's re-send to the demoted cntlr
-(RW4) runs either way. Then the sides are handed the fan-out, and
-the other cntlrs follow under the sides-first hold, which takes the sides
-it waits for (RW14) from the side plans the demotion hold kept, the
-newest, and whose bound of one `cntlr_interval` runs from that moment.
+(RW4) runs either way. Then the sides are handed the fan-out in
+RW24's two rounds, and the other cntlrs follow under the sides-first hold,
+which takes the sides it waits for (RW14) from the side plans of the
+newest fan-out the hold and the round kept, and whose bound of one
+`cntlr_interval` runs from the moment the fence-last legs' sides are
+handed, or from the demotion hold's end when no round runs.
 The demotion hold waits for the demoted cntlrs alone, so it holds the
 other cntlrs even when every side is idle.
 Like the sides-first hold, it lives on the coordinator's loop and never
@@ -2393,6 +2401,58 @@ primary has neither a child of the deleted cntlr nor its record, so its
 fan-out keeps RW14's order (Known limits). The demotion hold is no
 correctness dependency (`architecture.md`, [D16]): at its end the sides go
 whether the old primary reported or not.
+
+RW24. **Fence round.** At the end of RW22's demotion hold, by its reports
+or by its timer, the sides are handed the fan-out in two rounds, so that in
+each RAID1 group the leg the new primary's start of the array copies from
+is fenced last (`architecture.md`, Failover). The **fence-last leg** of a
+group is the leg whose member md holds in sync in the lowest slot, a tie
+going to the lower leg id, as the group's reading in a report of the
+primary gives it (`grp_id_to_grp_info`, its `in_sync_leg_id_list` and
+`in_sync_leg_id_to_slot`; `cnagent.md` CN28); the primary is the cntlr the
+coordinator's latest plan makes the enabled primary, and its report counts
+under the two gates of its leg rows (HL2). The coordinator keeps, per
+group, a **fence reading**: the fence-last leg and the legs md holds in
+sync of the latest report that reads the group. A report changes the
+fence readings of the groups it reads, and a group it does not read, as
+one whose array's row did not read `OK` (CN28), keeps its last fence
+reading; a group reading that names no fence-last leg clears the group's
+fence reading, and so does a plan that no longer holds the fence-last leg.
+Nothing persists the fence readings. The **fence round** hands at once every
+side whose leg is no fence-last leg; the fence-last legs' sides, both
+sides of a migrating one included, are held until every side of the round
+that RW14's barrier would wait for — no `err_epoch` in the load, not
+retired — and every other side of the round of a leg md holds in sync by
+the fence readings, whatever its `err_epoch`, a retired one aside, has reported the
+revision applied, or until one `cntlr_interval` after the round began,
+whichever comes first. Then the fence-last legs' sides are handed, and
+RW14's sides-first barrier begins over every side of the newest fan-out,
+its bound running from that moment. A fan-out whose sides hold no
+fence-last leg runs no round and hands every side at once: one whose
+coordinator has no fence reading since it started, one whose cn agent reports no
+slot, as an older build's does, and one whose groups hold no member in
+sync or have no redundancy. A fan-out during the round replaces the
+fence-last legs' held plans, hands its other sides at once and keeps the
+round's deadline; one of a newer revision takes the sides the round waits
+for afresh from its own load, as RW14's barrier does, and the fence-last
+and in-sync legs stay those the round began with. A demotion found during
+the round ends it and begins a demotion hold, whose end runs a new round;
+a round so ended logs nothing, and every other end of a round logs `sp
+fence round ended` (Log records). Reason: a write in flight through an
+old primary that still serves fails on every leg the round fences and
+lands on the fence-last leg, so every write md acknowledged is on that
+leg. md's record of the failed legs then reaches the fence-last leg
+before its fence, which comes only once the round's sides have reported
+theirs, so its event count is the highest and the new primary's start
+takes it; and where a fence cuts that record off all the same, the
+superblocks read equal and the start copies the lowest slot, the
+fence-last leg (`architecture.md`, [D16]). md can acknowledge a write
+from any leg it holds in sync, so the round waits for those legs' sides
+whatever their health records say. The round costs a failover the syncup
+round trip of the slowest side it waits for, one `cntlr_interval` at
+most; a round side that does not report within the bound, a side that
+reports the revision without its fence, and the fan-outs with no round
+leave the loss open (Known limits).
 
 RW15. **Side request.** A `SyncupSideRequest` carrying `cluster_id`,
 `dn_id`, the `side_pointer` (sp id, leg id, side id), `revision` (the
@@ -2742,12 +2802,13 @@ The rules are the same for every kind of record:
 The path rows of `side_id_to_path` (`cnagent.md` CN28), a primary's and a
 standby's alike, set and clear none of the three: they exist for RW18's
 cutover alone, and a leg's health is its leg row's. The primary's verdicts
-on repairs and the groups' whole flags and in-sync lists, which a
-`CntlrInfo` carries beside its rows (`rep_id_to_repair_info`,
+on repairs and the groups' whole flags, in-sync lists and in-sync slots,
+which a `CntlrInfo` carries beside its rows (`rep_id_to_repair_info`,
 `grp_id_to_grp_info`), are no rows:
 they set and clear none of the three, the marking of a dead stream's info
 leaves them as they are, and the pass reads them as fields (AR8, AR11,
-AR12, AR13).
+AR12, AR13); the coordinator reads the in-sync lists and slots for the
+fence-last legs of RW24, under the two gates of the leg rows.
 
 `PROVISIONING`, `PENDING`, `MISSING` and a rejection code never set any of
 the three, and `Leg.err_epoch` clears on the primary's `RES_STATUS_OK`
@@ -5301,7 +5362,12 @@ from the worker — and at a replacement of the primary fanned out by a
 coordinator with a running child of the deleted cntlr, which then reports
 nothing (RW22); `sp demotion clear failed` a clear of a
 demoted cntlr's `demoted_revision` at the end of that hold that failed,
-with its error (RW22).
+with its error (RW22); `sp fence round ended` the end of RW24's fence
+round by its reports or its bound, one record per such end, with the count
+of the fence-last legs' sides handed, the count of the round's sides it
+waited for that had not reported, zero when the reports ended it, and the
+wait in milliseconds, the round's cost in the failover's pause; a round a
+demotion ends logs none (RW24).
 
 **Bitmap pushes.** `bitmap pushed` every push that got a reply, with the
 agent's code (BM3); `bitmap push failed` a push that got none — the chunk
@@ -6387,7 +6453,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
   one `cntlr_interval`, which RW9 lets be as long as
   `MaxHealthCheckInterval`, a failover's promotion included; a failover
   whose old primary does not report its demotion applied holds its sides
-  and its promotion for the whole `DemotionHoldTimeout` first; and a
+  and its promotion for the whole `DemotionHoldTimeout` first, and its
+  fence-last legs' sides and its promotion for RW24's fence round after it,
+  up to one more `cntlr_interval`; and a
   replacement of the primary that RW22 finds holds its sides and its new
   primary for the whole `DemotionHoldTimeout`, since the deleted cntlr
   reports nothing (RW22). A side whose
@@ -6421,6 +6489,34 @@ which no suite case sets, so no suite case runs RW13's count compare.
   source connection the dn sweep runs under the side's lock, races the
   source disk node's `SyncupDn`, which no hold orders either and which takes
   that export away (`dnagent.md`, Known limits).
+* **The fence round orders only what the coordinator saw, and counts a
+  report as a fence** (RW24). A coordinator with no fence reading of a
+  group — no report of the primary since it started, after a worker restart or a
+  handoff, or a primary whose cn agent reports no slot — has no fence-last
+  leg for it, so its failover hands that group's sides at once, as does a
+  replacement of the primary that it fans out with no demotion hold
+  (below). A side of the round counts as fenced once it reports the
+  revision applied, which a converge that could not fence does too: a
+  side device that failed (`dnagent.md` DN9) or a dm-error that could not
+  be built leaves the old primary's dm-linear live, and a later re-send
+  fences it. A side of the round that does not report within one
+  `cntlr_interval` is not waited for further. In each case a side can be
+  fenced after the fence-last leg; a write is lost only when that fence
+  falls after the fence-last leg's failed the write and before md's record
+  of that failure reaches the side, a matter of milliseconds, since the
+  start then copies the fence-last leg, which missed the write
+  (`architecture.md`, Known limits, A failover while the old primary
+  serves can lose an acknowledged write). A fence reading older than md's
+  last change is harmless one way and narrows the guard the other way. A
+  member md failed since is no longer in sync, so the round fences the leg
+  md writes alone, whose writes then fail, and md's record lands on it. A
+  member md brings into sync in a lower slot after the fence reading, by a
+  put-back or a repair's new leg, is fenced in the round — or not waited
+  for, when its side has an `err_epoch`, since the reading does not hold it
+  in sync — while the reading's fence-last leg is fenced last, so the write
+  survives only by md's record reaching the fence-last leg before its
+  fence, which it does unless that fence comes sooner than md's superblock
+  write.
 * **A bad leg whose migration's cutover has started is left alone while
   its copy is not shown whole.** AR8 ends a bad leg's migration only in a
   direction that loses nothing: a cancel before the cutover, a finish after
