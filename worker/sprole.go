@@ -3525,6 +3525,11 @@ type sideDriver struct {
 	dnId uint64
 	ptr  *pb.SidePointer
 	addr string
+	// noteStarting tells the coordinator's memo that the side's agent
+	// answered starting, and noteStartEnded that the hold ended (HL8); nil
+	// before the loop starts.
+	noteStarting   func()
+	noteStartEnded func()
 
 	// mu guards next — the newest plan the coordinator built (RW6), which the
 	// loop takes in setDesired — lastInfo, which fold writes from the
@@ -3640,6 +3645,8 @@ func newSideDriver(
 	d.health.verdict = func(unhealthy bool) {
 		memo.noteSide(key, unhealthy)
 	}
+	d.noteStarting = func() { memo.noteSideStarting(key) }
+	d.noteStartEnded = func() { memo.noteSideStartEnded(key) }
 	d.pusher = newBmPusher(bmPusherParams{
 		deps:     w.deps,
 		seed:     w.seed,
@@ -4175,6 +4182,22 @@ func (d *sideDriver) send(ctx context.Context, rep spReport) {
 	}
 }
 
+// starting is HL8's starting round: no verdict on the side, and AR10's memo
+// holds the side from the side clocks of AR6 and AR8 until a verdict on it
+// or the round after the one that ends the agent's start (startEnded).
+func (d *sideDriver) starting(ctx context.Context) {
+	if d.noteStarting != nil {
+		d.noteStarting()
+	}
+}
+
+// startEnded ends the side's hold of HL8.
+func (d *sideDriver) startEnded(ctx context.Context) {
+	if d.noteStartEnded != nil {
+		d.noteStartEnded()
+	}
+}
+
 // unreachable folds a broken stream, a missed reply or a reply whose
 // observation is too old (HL7) into the side's health (HL2). The in-memory
 // info is marked RES_STATUS_UNKNOWN (architecture.md, Live-state reporting)
@@ -4306,6 +4329,16 @@ type cntlrDriver struct {
 	// synced is the last revision a report handed the coordinator, so a
 	// standing reply does not report every round (RW22).
 	synced uint64
+	// refusedRev is the driven revision whose SyncupCntlr the agent refused
+	// with a code that says it knows the cntlr and will not apply the
+	// request — an invalid conf or a failed save — zero once a reply accepts
+	// one or a round shows the agent holding the driven revision (HL9).
+	// Each round of the enabled primary that answers below it is then
+	// unhealthy, and a cntlr so refused is no failover candidate. sentRev
+	// is the revision of the SyncupCntlr the child sent last, which a
+	// refusal refuses.
+	refusedRev uint64
+	sentRev    uint64
 }
 
 // newCntlrDriver builds one cntlr child's driver.
@@ -4547,6 +4580,7 @@ func (d *cntlrDriver) syncup(
 	cc *pb.ClusterConf,
 ) (*replyState, error) {
 	plan := d.current()
+	d.sentRev = plan.req.GetRevision()
 	reply, err := pb.NewControllerNodeAgentClient(conn).SyncupCntlr(
 		ctx, plan.req,
 	)
@@ -4618,8 +4652,16 @@ func (d *cntlrDriver) diffBitmaps(
 // push is not re-armed here: it is logged and left to the next Syncup* reply.
 func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	plan := d.current()
+	d.noteRefusal(r, plan)
 	info := d.info()
 	obs, res := cntlrObservation(r.code, info)
+	refusing := d.refusing(r, plan)
+	if refusing {
+		// HL9: a primary that refuses its driven revision answers its
+		// rounds from the older one; it is unhealthy, so AR5 fails it over
+		// at the primary threshold.
+		obs, res = healthErrorRow, resSyncupRefused
+	}
 	if obs == healthClean && !plan.primary &&
 		r.revision < plan.req.GetRevision() {
 		// HL2: a cntlr driven as a standby proves nothing by a clean reply
@@ -4666,7 +4708,7 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		// counts a look of the old one's: its loop observes no round whose
 		// observation ended before its own first round (HL7).
 		own, _ := cntlrObservation(r.code, d.roundInfo())
-		d.memo.noteRound(d.cntlrId, own != healthClean)
+		d.memo.noteRound(d.cntlrId, own != healthClean || refusing)
 	}
 	if d.health.observeSettle(ctx, obs, res, canSettle) {
 		slog.InfoContext(ctx, msgCntlrSettled,
@@ -4751,6 +4793,49 @@ func fenceViewsOf(info *pb.CntlrInfo) map[uint64]grpFenceView {
 	return views
 }
 
+// resSyncupRefused names HL9's unhealthy verdict in the cntlr's health
+// record: the agent refuses the SyncupCntlr of the revision its child drives.
+const resSyncupRefused = "SyncupCntlr refused"
+
+// noteRefusal is HL9's memory of a refused driven revision: a Syncup* reply
+// that refuses the revision it carried with an invalid conf or a failed
+// save — the agent knows the cntlr and will not apply the request — marks
+// it, and one that accepts a request ends it, as does a round that answers,
+// accepted, at the driven revision or later: the agent holds what it once
+// refused, though no accepting reply came back (a syncup cut by its
+// deadline, a reply lost, a child stopped). A stale, unknown-object or
+// starting refusal says the agent is behind or not ready, which other rules
+// judge, and changes nothing. The memo learns whether the cntlr refuses,
+// which AR5 reads of its standbys.
+func (d *cntlrDriver) noteRefusal(r *replyState, plan *cntlrPlan) {
+	if r.fromRound {
+		if accepted(r.code) && r.revision >= plan.req.GetRevision() {
+			d.refusedRev = 0
+			d.memo.noteRefusing(d.cntlrId, false)
+		}
+		return
+	}
+	switch {
+	case r.code == common.ReplyCodeInvalidConf ||
+		r.code == common.ReplyCodeSaveFailed:
+		d.refusedRev = d.sentRev
+	case accepted(r.code):
+		d.refusedRev = 0
+	default:
+		return
+	}
+	d.memo.noteRefusing(d.cntlrId, d.refusedRev != 0)
+}
+
+// refusing is HL9's verdict on one round: the plan makes the cntlr the
+// enabled primary, its agent refused the plan's revision, and the round
+// answers, accepted, from an observation of an older one.
+func (d *cntlrDriver) refusing(r *replyState, plan *cntlrPlan) bool {
+	return r.fromRound && accepted(r.code) && plan.effectivePrimary() &&
+		d.refusedRev != 0 && d.refusedRev == plan.req.GetRevision() &&
+		r.revision < d.refusedRev
+}
+
 // legRows is the PRIMARY's probe (architecture.md, Group on-leg layout: meta
 // region, data region, health block) of every leg it reported, the new legs
 // of repairs included (HL2). ERROR sets the leg's err_epoch, OK clears it, everything
@@ -4809,6 +4894,19 @@ func (d *cntlrDriver) send(ctx context.Context, rep spReport) {
 	}
 }
 
+// starting is HL8's starting round: no verdict on the cntlr, and AR10's
+// memo ends its run of unhealthy rounds and holds its failover and its
+// replacement until a verdict on it or the round after the one that ends
+// the agent's start (startEnded).
+func (d *cntlrDriver) starting(ctx context.Context) {
+	d.memo.noteStarting(d.cntlrId)
+}
+
+// startEnded ends the cntlr's hold of HL8.
+func (d *cntlrDriver) startEnded(ctx context.Context) {
+	d.memo.noteStartEnded(d.cntlrId)
+}
+
 // unreachable folds a broken stream, a missed reply or a reply whose
 // observation is too old (HL7) into the cntlr's health (HL2; architecture.md,
 // Live-state reporting). It reports nothing about the legs: only an ERROR row
@@ -4818,6 +4916,11 @@ func (d *cntlrDriver) send(ctx context.Context, rep spReport) {
 func (d *cntlrDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
 	d.memo.noteRound(d.cntlrId, true)
+	// HL9: a missed round ends the refusal mark. A cntlr that does not
+	// answer is unhealthy on its own account, and whether it still refuses
+	// is learnt again from the Syncup* its next answered round re-sends.
+	d.refusedRev = 0
+	d.memo.noteRefusing(d.cntlrId, false)
 	d.health.observe(ctx, healthUnreachable, "")
 }
 

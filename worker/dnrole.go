@@ -335,6 +335,12 @@ func (d *dnDriver) compareCounts(ctx context.Context, r *replyState) {
 	)
 }
 
+// starting is HL8's starting round: no verdict on the node's record.
+func (d *dnDriver) starting(ctx context.Context) {}
+
+// startEnded holds nothing for the node's record (HL8).
+func (d *dnDriver) startEnded(ctx context.Context) {}
+
 // unreachable folds a broken stream, a missed reply or a reply whose
 // observation is too old (HL7) into the DN's health (HL1). The in-memory info
 // is marked RES_STATUS_UNKNOWN — what the worker records itself while the

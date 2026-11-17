@@ -231,10 +231,14 @@ sudo nohup ./dnv-agent cn --grpc-address 127.0.0.1:29950 \
   > cn0.log 2>&1 & echo $! > cn0.pid
 ```
 
-Check: five agents serve, a second after the starts.
+Check: five agents have started, a second after the starts. An agent
+logs "agent serving" as soon as it answers calls, and "agent started" once
+it has rebuilt the node from its local files; until then it answers the
+worker's check rounds with "starting". A new node has nothing to rebuild,
+so the two lines come together here.
 
 ```
-grep -l '"agent serving"' dn0.log dn1.log dn2.log dn3.log cn0.log
+grep -l '"agent started"' dn0.log dn1.log dn2.log dn3.log cn0.log
 ```
 
 It prints the five file names.

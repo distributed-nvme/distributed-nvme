@@ -314,7 +314,10 @@ func sidePointerOf(sp, leg, side *hexUint) *pb.SidePointer {
 
 // cmdGetDnSize doubles as the agent liveness probe: GetDnSize takes no lock,
 // so --wait retries it until the freshly started agent answers
-// (dnagent_integtest.md, Cases, the setup paragraph).
+// (dnagent_integtest.md, Cases, the setup paragraph). The port opens before
+// the startup pass (dnagent.md SH33), so --wait then also waits, within the
+// same deadline, until GetDnInfo no longer answers that the agent is
+// starting: a case that goes on reads the agent as its pass left it.
 func cmdGetDnSize(args []string) {
 	var g globals
 	fs := newFlagSet("get-dn-size", &g)
@@ -335,6 +338,9 @@ func cmdGetDnSize(args []string) {
 		reply, err := client.GetDnSize(ctx, req)
 		cancel()
 		if err == nil {
+			if *wait > 0 {
+				waitStarted(&g, client, deadline)
+			}
 			emit(reply)
 			return
 		}
@@ -344,6 +350,30 @@ func cmdGetDnSize(args []string) {
 		fmt.Fprintf(os.Stderr,
 			"dnagentctl: waiting for %s (attempt %d): %v\n",
 			g.addr, attempt, err)
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// waitStarted retries GetDnInfo until the agent no longer answers that its
+// startup pass runs (dnagent.md SH33), and dies past deadline.
+func waitStarted(g *globals, client pb.DiskNodeAgentClient, deadline time.Time) {
+	req := &pb.GetDnInfoRequest{
+		ClusterId: uint64(g.cluster), DnId: uint64(g.dn)}
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := g.rpcCtx()
+		reply, err := client.GetDnInfo(ctx, req)
+		cancel()
+		if err == nil &&
+			reply.GetAgentReply().GetCode() != common.ReplyCodeStarting {
+			return
+		}
+		if time.Now().After(deadline) {
+			die("the agent at %s still starts after %d attempts: %v",
+				g.addr, attempt, err)
+		}
+		fmt.Fprintf(os.Stderr,
+			"dnagentctl: waiting for %s to start (attempt %d)\n",
+			g.addr, attempt)
 		time.Sleep(500 * time.Millisecond)
 	}
 }

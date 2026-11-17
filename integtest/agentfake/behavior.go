@@ -146,6 +146,19 @@ type Object struct {
 	// ReplyCode forces agent_reply.code on every reply of the object and
 	// suppresses the apply of a Syncup* and a push.
 	ReplyCode uint32
+	// Starting, when set, answers every round and info read of the object
+	// with ReplyCodeStarting, no observation and Starting as the agent's
+	// start time, refuses every Syncup* and push with the same code before
+	// any other gate, a Syncup* with only its code and its stamp, and fails
+	// a bitmap read with the gRPC status Unavailable, as an agent whose
+	// startup pass still runs does (dnagent.md SH33). The start stays the
+	// agent's once the lever is cleared.
+	Starting time.Time
+	// SyncupCode forces agent_reply.code on the object's Syncup* replies
+	// alone and suppresses their apply; its rounds and info reads answer
+	// from what the object last applied, as a real agent whose gate or
+	// save refuses a request does (dnv-worker.md HL9).
+	SyncupCode uint32
 
 	// ObsAge answers each round and info read from an observation that
 	// ended that long before the answer, never from one earlier than the
@@ -394,8 +407,12 @@ func (a *Agent) SetBehavior(b *Behavior) error {
 	a.beh = b
 	clear(a.heldRounds)
 	clear(a.leftRounds)
-	for key := range b.Objects {
+	for key, ob := range b.Objects {
 		a.armLocked(key)
+		if ob != nil && !ob.Starting.IsZero() {
+			// As Update: the Starting lever's start becomes the agent's.
+			a.started = ob.Starting
+		}
 	}
 	a.notifyLocked()
 	return nil
@@ -419,6 +436,11 @@ func (a *Agent) Update(key string, fn func(*Object)) error {
 	fn(ob)
 	if err := ob.validate("objects["+key+"]", key); err != nil {
 		return err
+	}
+	if !ob.Starting.IsZero() {
+		// One process, one start (dnagent.md SH33): the Starting lever's
+		// start is the agent's, and stays so after the lever is cleared.
+		a.started = ob.Starting
 	}
 	if a.beh.Objects == nil {
 		a.beh.Objects = make(map[string]*Object)
@@ -537,6 +559,7 @@ type objectJSON struct {
 	Hang              bool                `json:"hang,omitempty"`
 	DropStream        bool                `json:"drop_stream,omitempty"`
 	ReplyCode         uint32              `json:"reply_code,omitempty"`
+	SyncupCode        uint32              `json:"syncup_code,omitempty"`
 	HangSyncup        bool                `json:"hang_syncup,omitempty"`
 	HangRounds        uint32              `json:"hang_rounds,omitempty"`
 	DelayRoundsMs     uint32              `json:"delay_rounds_ms,omitempty"`
@@ -632,6 +655,7 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 		DelayRounds:       time.Duration(oj.DelayRoundsMs) * time.Millisecond,
 		DropStream:        oj.DropStream,
 		ReplyCode:         oj.ReplyCode,
+		SyncupCode:        oj.SyncupCode,
 		ObsAge:            time.Duration(oj.ObsAgeMs) * time.Millisecond,
 		ObsNone:           oj.ObsNone,
 		SyncupRevision:    oj.SyncupRevision,

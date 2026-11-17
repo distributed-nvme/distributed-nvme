@@ -82,8 +82,8 @@ type Cluster struct {
 	Conf *pb.ClusterConf
 }
 
-// ClusterSpec is what PutCluster stores. A zero member but MdCheckDays is
-// resolved the way
+// ClusterSpec is what PutCluster stores. A zero member but MdCheckDays, and a
+// nil StartHoldSeconds, is resolved the way
 // CreateCluster resolves it (model.ResolveClusterConf), so the zero spec with
 // a name plants a cluster of the defaults; note that the default extent size
 // is common.DefaultDnExtSize, not the common.MinDnExtSize workerctl's flag
@@ -113,6 +113,11 @@ type ClusterSpec struct {
 	// the gateway's CreateCluster stores its default for a request without
 	// the setting.
 	MdCheckDays uint32
+	// StartHoldSeconds is start_hold_conf.seconds (dnv-worker.md HL8): nil
+	// stores the default hold, as the gateway's CreateCluster does for a
+	// request without the setting (model.ResolveClusterConf); set, it is
+	// stored as given, a zero turning the hold off.
+	StartHoldSeconds *uint32
 }
 
 // PutCluster implements CreateCluster (architecture.md, Clusters and
@@ -167,6 +172,9 @@ func PutCluster(
 			CntlrInterval: spec.CntlrInterval,
 		},
 		MdCheckConf: &pb.MdCheckConf{IntervalDays: spec.MdCheckDays},
+	}
+	if spec.StartHoldSeconds != nil {
+		cc.StartHoldConf = &pb.StartHoldConf{Seconds: *spec.StartHoldSeconds}
 	}
 	// This library plays the gateway, so it must store what CreateCluster
 	// stores: a FULLY RESOLVED conf (architecture.md, Common validation).

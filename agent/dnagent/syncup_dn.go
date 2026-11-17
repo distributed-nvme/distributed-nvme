@@ -12,6 +12,15 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
+// Prepare hands the server the process's ctx and begins its startup state,
+// before agent.Serve opens the port (SH33): every RPC goroutine then reads
+// the rootCtx Reconcile keeps.
+func (s *DnAgentServer) Prepare(ctx context.Context) {
+	s.rootCtx = ctx
+	s.rootSet = true
+	s.startup.Begin(s.now())
+}
+
 // ResTracker keys of the node-level resources.
 const (
 	resKeyDisk = "disk"
@@ -28,10 +37,15 @@ const (
 // observation is stored once its node-level sweep has run, and each side's
 // once its converge has (SH28); a side the pass skips gets none. It runs
 // under the node write lock with the caller's startup trace id (SH2), and
-// fails only when the local store itself is unreadable (SH3). No RPC reaches
-// the server before it returns, so it marks no converge (SH30).
+// fails only when the local store itself is unreadable (SH3). It ends the
+// agent's start just before it returns nil (SH33); a syncup that arrives
+// before that is refused as starting before it marks anything, so the pass
+// marks no converge (SH30), and one that arrives after it marks its own and
+// waits for the node lock the pass is about to let go.
 func (s *DnAgentServer) Reconcile(ctx context.Context) error {
-	s.rootCtx = ctx
+	if !s.rootSet {
+		s.rootCtx = ctx
+	}
 	s.locks.Node().Lock()
 	defer s.locks.Node().Unlock()
 
@@ -266,6 +280,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		}
 		s.applyMigrBitmaps(ctx, st, extentSize)
 	}
+	s.startup.End()
 	return nil
 }
 
@@ -622,7 +637,7 @@ func (s *DnAgentServer) syncupDn(
 		AgentReply: reply,
 		Revision:   req.GetRevision(),
 		DnInfo:     info,
-		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), time.Time{})),
 		SaveTime:   agent.Timestamp(savedAt),
 	}
 }

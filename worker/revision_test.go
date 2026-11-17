@@ -1392,6 +1392,21 @@ type obsRecorder struct {
 	mu           sync.Mutex
 	replies      []replyState
 	unreachables int
+	startsEnded  int
+}
+
+func (r *obsRecorder) startEnded(ctx context.Context) {
+	r.mu.Lock()
+	r.startsEnded++
+	r.mu.Unlock()
+	r.objDriver.startEnded(ctx)
+}
+
+// holdsEnded is how many times the loop ended its driver's hold of HL8.
+func (r *obsRecorder) holdsEnded() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.startsEnded
 }
 
 func (r *obsRecorder) observe(ctx context.Context, reply *replyState) {

@@ -651,3 +651,133 @@ connection. With both lines and the script as written, a second
 namespace created on the controller node while the host was connected
 over two paths had both its path devices set, and an 8 MiB direct read
 of it passed. Step 3 is not tested.
+
+## A planned restart of an agent
+
+Words: when an agent starts, it first runs its **startup pass**: it reads
+the requests it saved on its node and builds again whatever of them the
+kernel does not hold. The **start hold** is how long the worker waits for
+an agent's startup pass to end. A cluster stores it when it is created
+(`dnvctl cluster create --start-hold-seconds`), and `dnvctl cluster get`
+shows a stored one as `cluster_conf.start_hold_conf.seconds`. A cluster
+that stores none waits 120 seconds, and one that stores 0 does not wait.
+The **check interval** is the time between two check rounds of the
+worker to one cntlr. `dnvctl cluster get` shows it as
+`cluster_conf.health_check_conf.cntlr_interval`. It is 2 seconds at the
+default.
+
+When: you restart the agent of one node with the same program, for
+example to change a setting of the node, and the pools on the node must go
+on serving. An upgrade is different: every program stops
+at once, the workers first ([the scope page](scope.md), Upgrade).
+
+What dnv does alone:
+
+- While the agent is stopped, what it built in the kernel goes on serving.
+  Hosts keep reading and writing through the node.
+- An agent stopped with SIGTERM stops answering within about a second,
+  and then exits.
+- The worker's check rounds to the stopped agent fail. The first failed
+  round sets the health epoch of the node and of each cntlr and side on it.
+- The new agent opens its port before its startup pass. Until the pass
+  ends, it answers every check round that it is starting, and it refuses
+  every syncup, which the worker sends again later.
+- While the agent answers that it is starting, and for the start hold at
+  most, the worker makes no failover and no cntlr replacement for a cntlr
+  on the node. A side on the node does not count toward a leg repair, and
+  a new leg on the node is not given up while it is zeroed. The health
+  epochs stay set. The start hold counts from the agent's first start,
+  also when the agent stops and starts again, during its startup pass or
+  after it but before a check round has judged that cntlr or side again.
+  A worker restart, or the pool's move to another worker, in that time
+  counts it from the agent's latest start instead.
+- The check rounds after the startup pass clear those health epochs, if
+  nothing else is wrong. The first round after the pass judges nothing
+  yet, so the epochs normally clear at the second.
+- The start hold does not cover the time the agent is stopped. The worker
+  learns that the agent is starting only from a check round. Two failed
+  check rounds in a row can fail a primary on the node over, once its
+  health epoch is as old as the pool's `primary_unhealthy`, 4 seconds at
+  the default. At the defaults the two failed rounds come 2 seconds
+  apart, and the health epoch, which counts in whole seconds, can be 4
+  seconds old before the next round comes. So a stop a little longer than
+  one check interval can already fail a primary over.
+- If a startup pass takes longer than the start hold, the worker counts
+  the agent's check rounds as missed from then, and the reactions follow
+  at their event thresholds.
+
+Safe steps:
+
+1. Find how long the agent may stay stopped. On a controller node that
+   holds a primary, the time from the stop to the moment the new agent
+   opens its port must stay well under one check interval: about one and
+   a half seconds at the defaults. The worker's connection to the agent
+   waits a little before it tries again after a refused connect, so a
+   whole interval leaves no margin. The agent stops answering within
+   about a second of SIGTERM, so the new agent must start right after the
+   old one exits. On a node that
+   holds no primary, the pools' `cntlr_unhealthy` for a cntlr and
+   `side_unhealthy` for a side bound it, 600 seconds each at the default.
+   `dnvctl sp get` shows them in `sp_conf.event_threshold`.
+2. Have the command that starts the agent ready before you stop it, so
+   that the stop lasts only as long as the restart itself.
+3. If the agent of a controller node that holds a primary may stay
+   stopped longer than step 1 allows, move each primary off the node
+   first. For each cntlr on the node that `dnvctl sp get` shows as
+   primary, first check that `dnvctl sp get` shows another cntlr of the
+   pool with `disabled` false and `err_epoch` 0: an enabled standby with
+   no health epoch. If there is one, run
+   `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`, and wait
+   until `dnvctl sp get` shows another cntlr of the pool as primary. A
+   disabled cntlr serves no IO. A standby whose agent refuses its own
+   syncups also shows no health epoch, and the worker does not make it
+   primary. So if no other cntlr becomes primary within a few check
+   intervals, enable the disabled cntlr again at once, with step 8's
+   command, to give the pool its IO back, and then ask for help. If there
+   is none, do not disable the
+   primary: that stops the pool's IO, and no other cntlr becomes primary.
+   In such a pool a stop of any length fails the primary over only if an
+   enabled standby with no health epoch appears meanwhile, but a stop
+   longer than the pool's `cntlr_unhealthy`, 600 seconds at the default,
+   can replace the primary with a new cntlr on another controller node.
+4. Stop the agent with SIGTERM (`kill <pid>`, or `systemctl stop` for a
+   service), not with SIGKILL, and wait until its process has exited.
+5. Start the agent again at once with the same addresses, port id and
+   `--local-store` as before.
+6. In the agent's log, find the record `agent serving` and after it the
+   record `agent started`. Its `startup_ms` is how long the startup pass
+   took. It must be well under the start hold. In one lab measurement, of
+   one pool of 32 slices, the stop, sent over ssh, took about 1.3
+   seconds, the new agent's port opened at once, and the startup pass
+   took 1.8 seconds on the primary's controller node and 1.1 seconds on
+   the standby's.
+7. Check that nothing moved: `dnvctl sp get` shows the same primary for
+   each pool, unless step 3 moved it.
+8. If step 3 moved a primary, enable the cntlr it disabled again:
+   `dnvctl cntlr set-enabled --id <cntlr id>`. It comes back as a standby.
+
+Steps that can lose data: a stop longer than step 1 allows, on a
+controller node that holds a primary whose pool has an enabled standby
+with no health epoch, without step 3. The worker can then fail the
+primary over while the old primary's kernel objects still serve, and a
+write a host sent through the old primary in that time can be lost even
+though the host was told it was done ([the scope page](scope.md) says
+when). So can a stop longer than the pool's `cntlr_unhealthy` on a
+controller node that holds the primary of a pool without such a standby:
+the worker can then replace the primary while its kernel objects still
+serve. Step 3 avoids the first case: the worker gives the disabled primary its
+demotion first, and waits up to three seconds for it to report the
+demotion done before the other cntlr serves. An agent that runs reports
+it well inside that time.
+
+Stop and ask for help when the agent's log shows `agent reconcile failed`,
+when the agent exits on its own, when no other cntlr becomes primary
+after step 3 disabled one (enable it again first, as step 3 says), or
+when `dnvctl sp get` shows a failover or a new cntlr that step 3 did not
+ask for.
+
+Tested: the e2e suite's react case restarts the primary's cn agent this
+way, with its host connected, and checks that no failover and no cntlr
+replacement follows and that the host reads its data. No test restarts a
+dn agent this way; the worker's tests check that a dn agent's start keeps
+a new leg from being given up.

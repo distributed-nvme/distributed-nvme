@@ -279,7 +279,13 @@ ids); one background read of a CN — node read; `GetCnSize`, `GetCnInfo`,
 `GetCntlrInfo` and one `CheckCn` or `CheckCntlr` round — no lock, since
 the last four answer from the object's latest observation (`dnagent.md`
 SH28). How a syncup cancels a read and how every other holder waits for
-one is `dnagent.md` SH30. The CN11 leg probers take no
+one is `dnagent.md` SH30. While the agent starts, every RPC above that
+takes a lock is refused before it takes one, and no background read
+starts (`dnagent.md` SH33), so no RPC queues behind the startup
+reconcile's node write lock. A connect-retry attempt the reconcile
+itself arms (CN10, CN18) can: one that falls due while the reconcile
+still runs waits for that lock and runs once the reconcile lets it go.
+The CN11 leg probers take no
 lock at all: their IO can block far past every command timeout, without limit
 while no path of the leg can serve and one stays live (`osclient.md`, Exported
 raw helpers and the probe-IO carve-out), and nothing that holds a lock ever
@@ -365,8 +371,9 @@ reconnects, so such a host must connect again once the cntlr's
 rebuild, or while the port carries nothing and so does not listen,
 reconnects by itself (CN21; `dnagent_integtest.md`, Assumptions and
 preflight checks).
-Nor is anything hidden: with none of it in memory, the CN and
-each of those cntlrs answer their Check rounds `ReplyCodeUnknownObject`
+Nor is anything hidden: with none of it in memory, once the agent has
+started, the CN and each of those cntlrs answer their Check rounds
+`ReplyCodeUnknownObject`
 (`dnagent.md` SH25), and the worker re-sends each `Syncup*` (`dnv-worker.md` RW4). The
 `SyncupCn` rewrites the file, and from there each skipped cntlr the list
 still names is where a lost `--local-store` leaves one — known by its
@@ -423,7 +430,10 @@ had enabled hydration. The pass order is therefore: load, then converge
 every CN's base state, then drop the orphan cntlrs, then the node-level
 sweep per CN, then converge every remaining cntlr.
 
-All under the node write lock, with the `dnagent.md` SH2 trace id. Background retries
+All under the node write lock, with the `dnagent.md` SH2 trace id, while
+the port answers every round and info read that the agent is starting
+(`dnagent.md` SH33): none of the observations the pass stores is answered
+before the whole pass ends. Background retries
 (CN10, CN18) and probers (CN11) mint a fresh trace id per attempt.
 Each CN's converge and node-level sweep, and each cntlr's converge, end
 in the object's observation (`dnagent.md` SH28): its rows, with the code
@@ -3879,7 +3889,9 @@ the startup reload could not load or skipped its file (CN2) and none has
 been accepted since — ⇒ `ReplyCodeUnknownObject` with a zero `revision` and a stamp
 with no observation time. For a known object the `agent_reply` is the
 observation's code (CN30), and a `CheckCn` or `CheckCntlr` round at the
-same moment answers the same observation (CN24).
+same moment answers the same observation (CN24). While the agent starts,
+every info read, of a known object or not, answers `ReplyCodeStarting`
+with no observation instead (`dnagent.md` SH33).
 
 What the observation holds was read by the object's background read,
 which a round starts (`dnagent.md` SH29), or made by a converge, whose
@@ -3908,7 +3920,8 @@ CN24. Instantiate the `dnagent.md` SH24 to SH26 loop: one round answers
 from the object's latest observation as the corresponding `Get*Info`
 does (CN23), taking no lock of CN1 and reading nothing of the node, and
 then starts the object's background read when `dnagent.md` SH29 allows
-one. The read runs the probes of Probing and error capture — `probe.go`: a
+one; while the agent starts, every round answers `ReplyCodeStarting` with
+no observation and starts no read (`dnagent.md` SH33). The read runs the probes of Probing and error capture — `probe.go`: a
 cntlr's read takes the node's reading (CN28) under its CN1 locks and
 builds its rows and its verdict from it (CN23); a CN's read takes none.
 The round's `agent_reply` is the observation's code (CN30), which is what
@@ -3930,7 +3943,8 @@ failure only through
 the gRPC status (`architecture.md`, Common agent rules — they have no
 `AgentReply`): an unknown cntlr, a non-primary role, a missing pool, or
 a failing command all end the RPC with an Internal status naming the
-step. Under the CN1 locks (node read plus object — the snapshot must not
+step, and an agent still starting ends it with Unavailable before any
+lock (`dnagent.md` SH33). Under the CN1 locks (node read plus object — the snapshot must not
 race a converge): the `reserve_metadata_snap` message to the
 `CnPoolFinalName` (`dmsetup message`), then `thin_dump --metadata-snap` on
 the `CnPoolMetaName`'s device path with `-o` naming the output file (the
@@ -4071,7 +4085,9 @@ nothing.
 CN31. `InspectGrp`: the primary's look at one md-raid1 group's members,
 for an operator choosing the leg of a forced start (`architecture.md`,
 Repairs, `InspectGroup`). It answers only a cntlr whose held request makes
-it the primary. It holds the node read lock and the cntlr's object lock,
+it the primary, and nothing while the agent starts, which it refuses with
+Unavailable before any lock (`dnagent.md` SH33). It holds the node read
+lock and the cntlr's object lock,
 as `GetLegBm` does, only while it reads the plan of the held request, the
 group's array and which legs serve, so no converge changes them under that
 read; the superblock reads and the dry run run after the locks are let
@@ -5525,6 +5541,12 @@ stores instead is CN23's.
   (`dnagent.md` SH5), so a cntlr here is neither promoted nor demoted, a
   td new to `td_list` gets no thin volume, and a cntlr whose pointer
   leaves the CN's list keeps its devices (`dnagent.md`, Known limits).
+  The worker reads an enabled primary here unhealthy for those refusals
+  and fails it over, and fails no primary over onto a cntlr here, and
+  where every healthy, enabled standby refuses so too it moves no role at
+  all
+  (`dnv-worker.md` HL9, AR5, AR7); the failed-over primary, whose demotion is
+  refused too, serves on until the fence.
   A refused `SyncupCntlr` newer than the held request makes the held
   request count as delivered no more (CN8), so until a `SyncupCntlr` of
   that cntlr is saved, no converge acts on a forced-start mark the held

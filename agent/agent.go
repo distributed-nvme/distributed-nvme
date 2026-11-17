@@ -11,19 +11,27 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"time"
 
 	"google.golang.org/grpc"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// Serve runs the shared agent lifecycle (SH1-SH3): reconcile the OS to the
-// local store, then listen and serve until ctx is canceled (SIGTERM/SIGINT
-// via signal.NotifyContext in cmd/dnv-agent).
+// Serve runs the shared agent lifecycle (SH1-SH3, SH33): prepare the role
+// server with the process's ctx, listen and serve, then reconcile the OS to
+// the local store while the port answers that the agent is starting, and
+// serve until ctx is canceled (SIGTERM/SIGINT via signal.NotifyContext in
+// cmd/dnv-agent). A listen that fails touches nothing of the node, so a
+// second agent on the same port stops before its reconcile.
 //
-// waitBackground (may be nil) is joined after GracefulStop has drained every
-// RPC, so no background goroutine it covers — and, more to the point, no
-// child process one of them owns, such as DN9's zeroing `blkdiscard` —
+// prepare hands the role server the ctx its background work derives from
+// (its rootCtx) and begins its startup state, before any RPC can arrive, so
+// no RPC goroutine reads that ctx while the reconcile sets it.
+//
+// waitBackground (may be nil) is joined after the gRPC server has drained
+// every RPC, so no background goroutine it covers — and, more to the point,
+// no child process one of them owns, such as DN9's zeroing `blkdiscard` —
 // outlives the agent (dnagent.md SH27). Only a role whose background work
 // holds a long-running child that must not outlive it passes one: the dn
 // passes its WaitGroup join, the cn passes nil because its CN11 probers are
@@ -36,15 +44,15 @@ import (
 // The cancel-then-join pair is deferred, so *every* return path takes it, not
 // just the one through grpcServer.Serve: reconcile has already armed the
 // background goroutines (and forked their children) by the time a reconcile
-// error or a net.Listen error returns, and cancellation alone does not reap a
-// child — the exec.CommandContext watchdog that turns it into SIGTERM and then
-// SIGKILL (SH15, osclient.md, RunCommand) lives in this process and dies with
-// it, so the child would be reparented to init still holding its dm device
-// open.
+// error returns, and cancellation alone does not reap a child — the
+// exec.CommandContext watchdog that turns it into SIGTERM and then SIGKILL
+// (SH15, osclient.md, RunCommand) lives in this process and dies with it, so
+// the child would be reparented to init still holding its dm device open.
 func Serve(
 	ctx context.Context,
 	network string,
 	address string,
+	prepare func(ctx context.Context),
 	reconcile func(ctx context.Context) error,
 	register func(grpcServer *grpc.Server),
 	waitBackground func(),
@@ -65,34 +73,97 @@ func Serve(
 			waitBackground()
 		}
 	}()
-	if err := reconcile(runCtx); err != nil {
-		slog.ErrorContext(startupCtx, "agent reconcile failed",
-			slog.String("error", err.Error()))
-		return err
+	if prepare != nil {
+		prepare(runCtx)
 	}
 	lis, err := net.Listen(network, address)
 	if err != nil {
 		return err
 	}
 	// The message limit and both server chains (grpc.md, Wiring).
+	// The connection timeout bounds a handshake still pending when the stop
+	// begins: grpc's stop waits for it before it ends any stream.
 	grpcServer := grpc.NewServer(append(common.GrpcServerMsgOptions(),
+		grpc.ConnectionTimeout(common.AgentHandshakeTimeout),
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
 	)...)
 	register(grpcServer)
+	served := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		grpcServer.GracefulStop()
+		served <- grpcServer.Serve(lis)
 	}()
+	// The stop runs once ctx is cancelled, or once grpc's Serve has ended
+	// without a signal (a failed accept, or the hard stop of a reconcile
+	// that failed), which leaves the connections and their handlers
+	// running. Serve returns only after the stop has ended (stopDone):
+	// grpc's Serve returns as soon as a hard stop begins, before the
+	// handlers that stop cut have returned, and a handler cut mid-converge
+	// must end, its commands killed (SH15), before the process does.
+	serveEnded := make(chan struct{})
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		select {
+		case <-ctx.Done():
+		case <-serveEnded:
+		}
+		agentStop(grpcServer, common.AgentStopGrace)
+	}()
+	finish := func(err error) error {
+		close(serveEnded)
+		<-stopDone
+		return err
+	}
 	slog.InfoContext(startupCtx, "agent serving",
 		slog.String("network", network),
 		slog.String("address", address))
-	// GracefulStop has drained every RPC by the time Serve returns. A signal
-	// has cancelled runCtx by then, since it derives from ctx; the deferred
-	// cancel-and-join above cancels it on an error return and then waits for
-	// the workers waitBackground covers, so no orphan child process of theirs
-	// outlives the agent (SH27).
-	return grpcServer.Serve(lis)
+	start := time.Now()
+	if err := reconcile(runCtx); err != nil {
+		slog.ErrorContext(startupCtx, "agent reconcile failed",
+			slog.String("error", err.Error()))
+		grpcServer.Stop()
+		<-served
+		return finish(err)
+	}
+	slog.InfoContext(startupCtx, "agent started",
+		slog.Int64("startup_ms", time.Since(start).Milliseconds()))
+	// The stop has drained every RPC, or cut the ones past its grace and
+	// waited for their handlers, by the time Serve returns (finish). A
+	// signal has cancelled runCtx by then, since it derives from ctx; the
+	// deferred cancel-and-join above cancels it on an error return and then
+	// waits for the workers waitBackground covers, so no orphan child
+	// process of theirs outlives the agent (SH27).
+	return finish(<-served)
+}
+
+// agentStop is the stop Serve runs; a test replaces it to order the stop
+// against Serve's return.
+var agentStop = stopGracefully
+
+// stopGracefully is the agent's stop: a graceful stop, which lets the RPCs
+// in flight end, bounded by grace, past which the server stops at once,
+// which cancels the handlers still running; it returns once every handler
+// has returned, as the graceful stop it began waits for them. A
+// worker's Check* stream never ends by itself, and the worker drops it only
+// once the agent's answers, which no read refreshes any more, have aged past
+// its bound, so an unbounded drain would keep a stopping agent answering
+// stale rounds for several seconds before it exits (dnagent.md, Bootstrap
+// and lifecycle).
+func stopGracefully(grpcServer *grpc.Server, grace time.Duration) {
+	stopped := make(chan struct{})
+	go func() {
+		grpcServer.GracefulStop()
+		close(stopped)
+	}()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-stopped:
+	case <-timer.C:
+		grpcServer.Stop()
+		<-stopped
+	}
 }
 
 // CheckRoundCtx is the ctx one Check* round runs under (SH24): the stream's,

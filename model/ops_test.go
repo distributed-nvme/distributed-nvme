@@ -3505,3 +3505,68 @@ func TestClearCntlrDemotion(t *testing.T) {
 		t.Fatalf("a cntlr that is gone: cleared %v, err %v", cleared, err)
 	}
 }
+
+// TestFailoverPassesOverRefusingStandbys pins FailoverPassingOver's
+// election (dnv-worker.md HL9, AR5): a smaller healthy standby the worker
+// passes over does not stop the failover onto the next one, and without it
+// passed over the same failover is refused.
+func TestFailoverPassesOverRefusingStandbys(t *testing.T) {
+	setup := func() *opsEnv {
+		env := newOpsEnv(t)
+		env.setCntlrErr(opsCntlrA, 1000)
+		// A third, smaller-id standby, healthy.
+		mustPut(env.t, env.cli,
+			CntlrKey(env.cid, opsSpId, 199), &pb.Cntlr{
+				AddrPort:   opsCnC,
+				NvmeTrConf: opsTrConf(opsCnC),
+			})
+		conf := env.spConf()
+		conf.CntlrIdList = append(conf.CntlrIdList, 199)
+		mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+		return env
+	}
+	now := uint64(1000 + common.DefaultPrimaryUnhealthy)
+	env := setup()
+	err := FailoverPassingOver(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		opsSpName, opsCntlrA, opsCntlrB, now, nil)
+	if got := wantPrecondition(t, err, opFailover).Reason; got !=
+		"new cntlr is not the smallest candidate" {
+		t.Fatalf("with none passed over: %q", got)
+	}
+	if err := FailoverPassingOver(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, opsCntlrA, opsCntlrB, now,
+		[]uint64{199}); err != nil {
+		t.Fatalf("passing over the smaller standby: %v", err)
+	}
+	if !env.cntlr(opsCntlrB).GetPrimary() {
+		t.Fatal("the next standby was not promoted")
+	}
+}
+
+// TestReplaceCntlrPassesOverRefusingStandbys pins ReplaceCntlrPassingOver
+// (dnv-worker.md HL9, AR7): a primary whose only healthy standby the worker
+// passes over has no failover candidate, so it is replaced; without the
+// standby passed over the replacement is refused.
+func TestReplaceCntlrPassesOverRefusingStandbys(t *testing.T) {
+	env := newOpsEnv(t)
+	env.setCntlrErr(opsCntlrA, 1000)
+	now := uint64(1000 + common.DefaultCntlrUnhealthy)
+	_, err := ReplaceCntlrPassingOver(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, opsCntlrA, env.cnCand(opsCnC), nil, true, now,
+		nil)
+	if got := wantPrecondition(t, err, opReplaceCntlr).Reason; got !=
+		"failover candidate exists" {
+		t.Fatalf("with none passed over: %q", got)
+	}
+	// The scan's exclusion names the surviving standby's controller node.
+	survivors := []string{env.cntlr(opsCntlrB).GetAddrPort()}
+	newId, err := ReplaceCntlrPassingOver(env.ctx, env.cli, env.cid,
+		opsShard, opsSpId, opsSpName, opsCntlrA, env.cnCand(opsCnC),
+		survivors, true, now, []uint64{opsCntlrB})
+	if err != nil {
+		t.Fatalf("passing over the standby: %v", err)
+	}
+	if !env.cntlr(newId).GetPrimary() {
+		t.Fatal("the replacement of the primary is not primary")
+	}
+}

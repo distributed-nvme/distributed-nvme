@@ -168,6 +168,12 @@ func (d *cnDriver) observe(ctx context.Context, r *replyState) {
 	d.health.observe(ctx, obs, res)
 }
 
+// starting is HL8's starting round: no verdict on the node's record.
+func (d *cnDriver) starting(ctx context.Context) {}
+
+// startEnded holds nothing for the node's record (HL8).
+func (d *cnDriver) startEnded(ctx context.Context) {}
+
 // unreachable folds a broken stream, a missed reply or a reply whose
 // observation is too old (HL7) into the CN's health (HL1; architecture.md,
 // Live-state reporting).

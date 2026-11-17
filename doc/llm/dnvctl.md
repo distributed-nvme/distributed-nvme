@@ -392,8 +392,9 @@ no token field; on the wire the integration suite makes the first claim, sends
 commands whose request has no `cluster_name`: they ignore both scope
 global flags.
 
-Two `cluster create` flags reach a `ClusterConf` member: `--md-check-days`
-(below) and `--extent-size`, which sets `dn_bin_conf.extent_size`, the DN
+Three `cluster create` flags reach a `ClusterConf` member:
+`--md-check-days`, `--start-hold-seconds` (both below) and `--extent-size`,
+which sets `dn_bin_conf.extent_size`, the DN
 and CN allocation unit (`architecture.md`, Size → extents), which
 `DefaultDnExtSize` fixes otherwise. A pool of `MaxSliceCntPerSp` slices
 takes a meta group and a data group per slice, each with one side per
@@ -425,6 +426,13 @@ included, and none when it is not. Reason: a zero turns the md check off,
 while a request without the message takes the gateway's default
 (`architecture.md`, Common validation and The md check), so the zero must
 reach the gateway. dnvctl checks no bound on it (CT8).
+
+`--start-hold-seconds` follows `--md-check-days`'s rule: it sends a
+`start_hold_conf` carrying `seconds` whenever it is typed, zero included,
+and none when it is not. Reason: a zero turns off the worker's hold of an
+agent that answers that it is starting, while a request without the
+message takes the gateway's default (`architecture.md`, Common
+validation; `dnv-worker.md` HL8). dnvctl checks no bound on it (CT8).
 
 No other `cluster create` flag reaches the request's other conf members.
 `bdev_conf`, `alloc_conf` and `health_check_conf` are stored as the
@@ -773,8 +781,9 @@ codes, CT7's empty stderr, CT8's parse-only refusals, CT9's precedence of flag
 over environment, and the field and flag rules of Conventions. What one step
 per RPC has no room for is left to the unit tests: the transport conf's nil
 rule and a clone's empty source list, a bare `cluster create` sending no
-`dn_bin_conf` and no `md_check_conf`, a typed `--md-check-days` sent as
-typed (its zero included), the silence of the environment and the config
+`dn_bin_conf`, no `md_check_conf` and no `start_hold_conf`, a typed
+`--md-check-days` or `--start-hold-seconds` sent as typed (its zero
+included), the silence of the environment and the config
 file on leaf flags (CT9), `--timeout` refused or clamped from every carrier, the code name of
 every gRPC code (CT5), and the `--rev` refusal on the leaves with no token
 field other than the one the suite types it on, which the unit tests pin

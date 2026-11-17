@@ -203,7 +203,7 @@ func runDn(cmd *cobra.Command, args []string) error {
 
 	return agent.Serve(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
-		srv.Reconcile,
+		srv.Prepare, srv.Reconcile,
 		func(grpcServer *grpc.Server) {
 			pb.RegisterDiskNodeAgentServer(grpcServer, srv)
 		},
@@ -244,7 +244,7 @@ func runCn(cmd *cobra.Command, args []string) error {
 
 	return agent.Serve(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
-		srv.Reconcile,
+		srv.Prepare, srv.Reconcile,
 		func(grpcServer *grpc.Server) {
 			pb.RegisterControllerNodeAgentServer(grpcServer, srv)
 		},

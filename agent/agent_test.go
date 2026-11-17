@@ -6,16 +6,21 @@ import (
 	"fmt"
 	// Aliased: the fakeSysfs methods below bind `fs` to their receiver.
 	iofs "io/fs"
+	"net"
 	"os"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -50,8 +55,9 @@ func TestServeJoinsBackgroundOnEveryReturnPath(t *testing.T) {
 		address      string
 		reconcileErr error
 	}{
-		// An unusable listen address: net.Listen fails after reconcile has
-		// already started the zeroing goroutines.
+		// An unusable listen address: net.Listen fails after prepare has
+		// handed the role server its ctx, on which background work may
+		// already hang.
 		{"listener failure", "127.0.0.1:999999", nil},
 		// reconcile itself fails after starting some of them — convergeSide
 		// arms the goroutine before the loop's later error (DN9).
@@ -60,18 +66,21 @@ func TestServeJoinsBackgroundOnEveryReturnPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var background sync.WaitGroup
 			joined := make(chan struct{})
-			reconcile := func(runCtx context.Context) error {
+			arm := func(runCtx context.Context) {
 				background.Add(1)
 				go func() {
 					defer background.Done()
 					<-runCtx.Done()
 				}()
+			}
+			reconcile := func(runCtx context.Context) error {
+				arm(runCtx)
 				return tc.reconcileErr
 			}
 			done := make(chan error, 1)
 			go func() {
 				done <- Serve(
-					context.Background(), "tcp", tc.address, reconcile,
+					context.Background(), "tcp", tc.address, arm, reconcile,
 					func(*grpc.Server) {},
 					func() {
 						background.Wait()
@@ -95,6 +104,65 @@ func TestServeJoinsBackgroundOnEveryReturnPath(t *testing.T) {
 					"orphaning its children")
 			}
 		})
+	}
+}
+
+// TestServeAnswersDuringTheStartupPass pins SH33's order: Serve prepares the
+// role server, opens its port and serves before it runs the reconcile, so a
+// connection reaches the agent while its startup pass still runs; a
+// reconcile that fails then stops the server and Serve returns its error.
+func TestServeAnswersDuringTheStartupPass(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	address := probe.Addr().String()
+	probe.Close()
+	var order []string
+	var mu sync.Mutex
+	note := func(step string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, step)
+	}
+	release := make(chan struct{})
+	reconcile := func(context.Context) error {
+		note("reconcile")
+		<-release
+		return errors.New("reconcile failed")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(context.Background(), "tcp", address,
+			func(context.Context) { note("prepare") }, reconcile,
+			func(*grpc.Server) { note("register") }, nil)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		conn, err := net.Dial("tcp", address)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the port never opened while the reconcile ran: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	if len(got) < 2 || got[0] != "prepare" || got[1] != "register" {
+		t.Fatalf("order %v, want prepare, register, then reconcile", got)
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "reconcile failed" {
+			t.Fatalf("Serve = %v, want the reconcile's error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve never returned after the reconcile failed")
 	}
 }
 
@@ -1424,5 +1492,168 @@ func TestDmInfoAttrPositions(t *testing.T) {
 				tc.attr, dev.Suspended, dev.ReadOnly,
 				tc.suspended, tc.readOnly)
 		}
+	}
+}
+
+// TestStopGracefullyIsBounded pins the agent's stop (dnagent.md, Bootstrap
+// and lifecycle): a stream that never ends by itself, as a worker's Check*
+// stream does not, keeps the graceful stop waiting, so past its grace the
+// server stops at once and the stream ends.
+func TestStopGracefullyIsBounded(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	hs := health.NewServer()
+	healthpb.RegisterHealthServer(srv, hs)
+	go srv.Serve(lis)
+	conn, err := grpc.NewClient(lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	stream, err := healthpb.NewHealthClient(conn).Watch(context.Background(),
+		&healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("the stream's first answer: %v", err)
+	}
+	const grace = 200 * time.Millisecond
+	start := time.Now()
+	stopGracefully(srv, grace)
+	if took := time.Since(start); took < grace || took > grace+2*time.Second {
+		t.Fatalf("the stop took %v, want its grace %v and little more",
+			took, grace)
+	}
+	if _, err := stream.Recv(); err == nil {
+		t.Fatal("the stream outlived the stop")
+	}
+}
+
+// slowHealth is a health service whose Check runs until its ctx is
+// cancelled and then takes a while to end, as a converge cut by the stop
+// unwinds its commands.
+type slowHealth struct {
+	healthpb.UnimplementedHealthServer
+	entered chan struct{}
+	ended   atomic.Bool
+}
+
+func (h *slowHealth) Check(
+	ctx context.Context, _ *healthpb.HealthCheckRequest,
+) (*healthpb.HealthCheckResponse, error) {
+	close(h.entered)
+	<-ctx.Done()
+	time.Sleep(300 * time.Millisecond)
+	h.ended.Store(true)
+	return nil, ctx.Err()
+}
+
+// TestServeWaitsForTheHandlersItsStopCut pins the agent's stop (dnagent.md,
+// Bootstrap and lifecycle): an RPC still running past the stop's grace has
+// its ctx cancelled, and Serve returns only once its handler has returned,
+// so no converge goes on, and no command of it outlives the process. The
+// stop here is the grace's end at once: a hard stop, which lets grpc's
+// Serve return before the handler has, and then the wait for the handlers.
+func TestServeWaitsForTheHandlersItsStopCut(t *testing.T) {
+	agentStop = func(s *grpc.Server, _ time.Duration) {
+		s.Stop()
+		s.GracefulStop()
+	}
+	t.Cleanup(func() { agentStop = stopGracefully })
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	address := probe.Addr().String()
+	probe.Close()
+	h := &slowHealth{entered: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, "tcp", address, nil,
+			func(context.Context) error { return nil },
+			func(s *grpc.Server) { healthpb.RegisterHealthServer(s, h) }, nil)
+	}()
+	conn, err := grpc.NewClient(address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	go func() {
+		callCtx, stop := context.WithTimeout(context.Background(),
+			30*time.Second)
+		defer stop()
+		healthpb.NewHealthClient(conn).Check(callCtx,
+			&healthpb.HealthCheckRequest{}, grpc.WaitForReady(true))
+	}()
+	select {
+	case <-h.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call never reached its handler")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(common.AgentStopGrace + 10*time.Second):
+		t.Fatal("Serve never returned after its stop")
+	}
+	if !h.ended.Load() {
+		t.Fatal("Serve returned before the handler its stop cut had ended")
+	}
+}
+
+// TestServeWaitsForHandlersWhenTheReconcileFails pins Serve's stop on its
+// error path (dnagent.md SH3, SH27): a reconcile that fails stops the server
+// hard while a handler still runs, and Serve returns its error only once
+// that handler has returned.
+func TestServeWaitsForHandlersWhenTheReconcileFails(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	address := probe.Addr().String()
+	probe.Close()
+	h := &slowHealth{entered: make(chan struct{})}
+	reconcile := func(context.Context) error {
+		select {
+		case <-h.entered:
+		case <-time.After(10 * time.Second):
+		}
+		return errors.New("reconcile failed")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(context.Background(), "tcp", address, nil, reconcile,
+			func(s *grpc.Server) { healthpb.RegisterHealthServer(s, h) }, nil)
+	}()
+	conn, err := grpc.NewClient(address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	go func() {
+		callCtx, stop := context.WithTimeout(context.Background(),
+			30*time.Second)
+		defer stop()
+		healthpb.NewHealthClient(conn).Check(callCtx,
+			&healthpb.HealthCheckRequest{}, grpc.WaitForReady(true))
+	}()
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "reconcile failed" {
+			t.Fatalf("Serve = %v, want the reconcile's error", err)
+		}
+	case <-time.After(common.AgentStopGrace + 20*time.Second):
+		t.Fatal("Serve never returned after the reconcile failed")
+	}
+	if !h.ended.Load() {
+		t.Fatal("Serve returned before the handler its stop cut had ended")
 	}
 }

@@ -247,7 +247,8 @@ func TestEveryLeafIsRunnable(t *testing.T) {
 // same defaults.
 var leafFlags = map[string][]string{
 	// cluster
-	"cluster create":       {"name", "extent-size", "md-check-days"},
+	"cluster create": {"name", "extent-size", "md-check-days",
+		"start-hold-seconds"},
 	"cluster delete":       {"name"},
 	"cluster get":          {"name"},
 	"cluster list":         {"count", "page-token"},

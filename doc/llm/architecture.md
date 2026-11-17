@@ -1927,8 +1927,8 @@ harmless. A migration destination takes its run before it zeroes
   proto3 zero is always accepted — it means "unset" and asks for the
   default, which the create RPC substitutes once and for all (the resolution
   rule below, which also names the two stored messages it exempts), save
-  `md_check_conf.interval_days`, whose zero in a present message turns the
-  md check off (below). The list `count` is different: it reaches no
+  `md_check_conf.interval_days` and `start_hold_conf.seconds`, whose zero
+  in a present message turns the md check, or the start hold, off (below). The list `count` is different: it reaches no
   create RPC and is stored nowhere — the
   paged list RPCs resolve it per request, cut one page with it and throw it
   away (page_token; `gateway.md` GW4). The bounds and the defaults are
@@ -1992,6 +1992,12 @@ harmless. A migration destination takes its run before it zeroes
     group (The md check): at most `MaxMdCheckDays`, zero for no check;
     a `CreateClusterRequest` without the message gets
     `DefaultMdCheckDays`, and one with it keeps its value, zero included;
+  * `start_hold_conf.seconds`, how long from an agent's start the worker
+    holds its verdict on the agent's objects while the agent answers that
+    it is starting (`dnv-worker.md` HL8): at most `MaxStartHoldSeconds`,
+    zero for no hold; a `CreateClusterRequest` without the message gets
+    `DefaultStartHoldSeconds`, and one with it keeps its value, zero
+    included;
   * the list `count`: at most `MaxListCnt`, default `DefaultListCnt`.
 * **Geometry rules.** Beyond the bounds above, `CreateCluster` and
   `CreateStoragePool` hold the geometry of the `bdev_conf` they store to
@@ -2108,7 +2114,8 @@ harmless. A migration destination takes its run before it zeroes
   is resolved — resolving first would make every bound check a tautology.
 * A zero read back **out of** etcd is therefore invalid, not "unset".
   Every reader refuses the object rather than substituting (the next
-  bullet's exempt messages and an `md_check_conf` zero aside): the gateway
+  bullet's exempt messages and an `md_check_conf` or `start_hold_conf`
+  zero aside): the gateway
   with `ABORTED` (UNEXPECTED_ERROR → `ABORTED`), the worker by skipping that
   object's pass (one Error record, nothing sent, retried next round;
   `dnv-worker.md` RW9, RW14 and AR1), an agent by refusing the `Syncup*`
@@ -2117,8 +2124,9 @@ harmless. A migration destination takes its run before it zeroes
   of failing, and a stored zero pins the geometry to whatever default the
   **reading** binary carries — so changing a constant would re-geometry
   live storage pools and move the bin ladder every capacity key was written
-  under (DN bins). There is no compatibility shim, `md_check_conf` aside
-  (next bullet): a cluster whose stored conf holds zeros is refused loudly
+  under (DN bins). There is no compatibility shim, `md_check_conf` and
+  `start_hold_conf` aside (next bullet): a cluster whose stored conf holds
+  zeros is refused loudly
   and must be recreated.
 * Two stored messages are deliberately exempt, because they are policy
   timers and knobs rather than geometry — nothing is formatted or addressed
@@ -2134,6 +2142,11 @@ harmless. A migration destination takes its run before it zeroes
   its zero, or its absence in a conf a build before the md check stored,
   is no corruption but no check (The md check), and the stored-conf
   validator refuses only a value above `MaxMdCheckDays`.
+  `start_hold_conf` is one too, resolved the same way, an absent one to
+  `DefaultStartHoldSeconds`. Its zero is no hold, while its absence in a
+  conf a build before the hold stored reads as `DefaultStartHoldSeconds`
+  (`model.ResolveStartHoldSeconds`), so such a cluster keeps a hold; the
+  stored-conf validator refuses only a value above `MaxStartHoldSeconds`.
 * `CmdSoftTimeout` and `CmdHardTimeout` bound the shell commands an agent
   runs, a child blocked in an uninterruptible kernel wait aside. A command
   they end did not answer: its resource reports `RES_STATUS_ERROR` with
@@ -2213,9 +2226,11 @@ first `next_id` with every `shard_bucket` entry zero (Globals: id
 allocation + shard buckets). Reply `cluster_id`. Nothing downstream
 resolves again: a zero read back out of this key is corruption and is
 refused, not substituted, save an `md_check_conf` zero, which means no
-check (Common validation).
+check, and a `start_hold_conf` zero, which means no start hold (Common
+validation).
 `ClusterConf` is **write-once**: `qos_ratio`, `bdev_conf`, `dn_bin_conf`,
-`alloc_conf`, `health_check_conf` and `md_check_conf` can only be set here — no RPC updates
+`alloc_conf`, `health_check_conf`, `md_check_conf` and `start_hold_conf`
+can only be set here — no RPC updates
 a `ClusterConf`, deliberately; changing them means creating a new
 cluster. (`bdev_conf` defaults can still be overridden per SP at
 `CreateStoragePool`, Storage pools.)
@@ -2419,7 +2434,10 @@ Action: read the `DnConf` in an STM for the ids, which address the agent
 request and the log line; then, outside the STM, call
 `DiskNodeAgent.GetDnInfo`, which answers from the agent's latest
 observation of the node and reads nothing (Live-state reporting), and
-return its `revision`, `DnInfo` and stamp. The reply's `applied_revision`
+return its `revision`, `DnInfo` and stamp; an agent still starting
+answers with no observation (`dnagent.md` SH33), so the reply then
+carries a zero revision, no `DnInfo` and a stamp with no observation
+time. The reply's `applied_revision`
 is that `revision`, the revision of the request the agent held for the
 node while the converge or read that made the observation ran, so a caller
 can diff it against the desired revision
@@ -4191,9 +4209,11 @@ its pad bits in the middle of the chunk and shift every later bit. So
   current request is an atomic pointer, so another object's pass reads it
   whole beside the converge that replaces it; a node's request is replaced
   only under the node write lock. On start the agent loads every other
-  request and chunk file of its role's kinds under its prefix, reconciles
-  the system to it (full idempotent re-apply; for a clone, Clone metadata
-  durability), then serves — except that it skips, neither loading nor
+  request and chunk file of its role's kinds under its prefix and
+  reconciles the system to it (full idempotent re-apply; for a clone, Clone
+  metadata durability), its port already open and answering that it is
+  starting until that reconcile ends (`dnagent.md` SH1, SH33) —
+  except that it skips, neither loading nor
   deleting them, the files that may belong under a file it cannot load: a
   file that did not load names no object, so it proves no owner gone
   (`dnagent.md` DN2 and `cnagent.md` CN2 say which files that holds back).
@@ -4260,7 +4280,8 @@ its pad bits in the middle of the chunk and shift every later bit. So
   `Syncup*`, `Push*Bitmap`, `Get*Info` and `Check*` replies embed
   `AgentReply` with its `code` and `details` (zero is OK). `Syncup*`,
   `Get*Info` and `Check*` replies also carry the object's `*Info`, a
-  `revision` and an `obs_stamp` (Live-state reporting). A `Get*Info` or
+  `revision` and an `obs_stamp` (Live-state reporting). Once the agent has
+  started (`dnagent.md` SH33), a `Get*Info` or
   `Check*` reply about an object the agent holds answers from the agent's
   latest observation of it: the code, the `revision` and the `*Info` — on
   a `Check*` reply as `show_info` asks (Check streams) — are that
@@ -4276,7 +4297,10 @@ its pad bits in the middle of the chunk and shift every later bit. So
   `PushCloneBitmapReply` carry only `AgentReply`; `GetDnSize`, `GetCnSize`,
   `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` return only their payload
   (`size`, `bitmap`, the members' reads) and report failure through the
-  gRPC status. A worker issues the
+  gRPC status. While the agent starts, every `Syncup*`, `Push*Bitmap`,
+  `Get*Info` and `Check*` reply carries `ReplyCodeStarting` and no
+  observation, and `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` end
+  with gRPC's Unavailable (`dnagent.md` SH33). A worker issues the
   `Syncup*` calls for one object sequentially — the next revision only after
   the previous call returned.
 * **Error capture.** Shell execution uses the command timeouts (Common
@@ -4634,14 +4658,20 @@ unless a syncup cancelled it (`dnagent.md` SH29, SH30). A
 read nothing themselves: their `agent_reply`, `revision` and `*Info` are
 the observation's, and their `obs_stamp` gives its time and trace id, the
 agent's clock as it answers and the start of a converge of the object in
-flight. A round or an info read of an object the agent does not hold
+flight. Every stamp also gives the time the agent started, by the node's
+clock, and while the agent's startup reconcile runs every round and info
+read answers `ReplyCodeStarting` with no observation (`dnagent.md` SH33),
+by which the worker holds its verdict for a bounded time
+(`dnv-worker.md` HL8). A round or an info read of an object the agent does not hold
 refuses it as unknown (`dnagent.md` SH25, DN16; `cnagent.md` CN23); its
 stamp carries no observation time, nor does the stamp of one about an
 object the agent holds but has not observed yet. When the agent accepts a
 `Syncup*` request, its reply's `obs_stamp` gives the observation its
 converge stored, and its `save_time` when the agent saved the request; a
 reply that refuses the request, at a gate or because its save failed
-(Common agent rules, Revision gate), carries neither. The worker judges an
+(Common agent rules, Revision gate), carries neither, nor does the
+refusal of an agent still starting, whose stamp gives only its answer and
+start times. The worker judges an
 observation by its age, which it takes on the node's own clock from the
 times the agent's stamps carry
 (`dnv-worker.md` HL7).
@@ -4921,7 +4951,8 @@ They carry no desired state — `Syncup*` does that — and exist so a worker
 can watch an object's state cheaply: a round answers at once from the
 agent's latest observation of the object (Live-state reporting) and can
 start the background read that makes the next one, which a `Get*Info`
-never does (`dnagent.md` SH28, SH29):
+never does (`dnagent.md` SH28, SH29), save while the agent starts, when
+every round answers that it is starting (`dnagent.md` SH33):
 
 * **One stream per object.** The owning worker keeps one `CheckDn` per DN,
   one `CheckSide` per side of an SP (`dnv-worker.md` RW14), one
@@ -4965,7 +4996,8 @@ never does (`dnagent.md` SH28, SH29):
   `ReplyCodeLeftover` included — which is the whole of the sweep's retry
   machinery (Teardown by sweep; `dnv-worker.md` RW4 and RW5) — save on a
   reply whose observation is too old, which re-issues nothing (Health,
-  below).
+  below), and on a reply that the agent is starting, which re-issues
+  nothing either (`dnv-worker.md` HL8).
 * **Health.** The worker turns a broken stream, a missing reply within the
   round timeout, a reply whose observation is too old, or
   `RES_STATUS_ERROR` entries in the `*Info` into the `err_epoch` updates
@@ -4974,8 +5006,16 @@ never does (`dnagent.md` SH28, SH29):
   whose observation is too old counts as a missing reply; how old is too
   old, and why, is `dnv-worker.md` HL7, which also makes the first round
   after a pause in the worker's rounds of an object give no verdict on an
-  observation that ended before that round. The `Check*` replies are the
-  primary health signal; the `Syncup*` replies are the secondary one.
+  observation that ended before that round. A reply that the agent is
+  starting is no verdict while the agent has been starting for less than
+  the cluster's start hold, counted from the first of its starts since
+  the worker last judged a round of the object, and a missing reply once
+  it has been starting longer, and the end of each start is a pause in
+  the worker's rounds (`dnv-worker.md` HL8). A
+  primary whose agent refuses its syncups, with an invalid conf or a
+  failed save, is unhealthy on its rounds (`dnv-worker.md` HL9). The
+  `Check*` replies are the primary health signal; the `Syncup*` replies
+  are the secondary one.
 
 ### Teardown by sweep
 
@@ -5341,7 +5381,7 @@ itself. That judgment reads the agent's report, and the agent answers from
 its latest observation, which only a converge or a read that a round
 starts renews (Live-state reporting; `dnagent.md` SH29). After a pause in
 the worker's rounds of an object (`dnv-worker.md` HL7), such as a worker
-restart, a fence or a handoff, a round that answers from an observation
+restart, a fence, a handoff or the end of an agent's start, a round that answers from an observation
 that ended before the first round after the pause gives no verdict on
 what it reports and drives only the re-sync, until the
 observation is too old and the round is a missed round (`dnv-worker.md`
@@ -5349,11 +5389,22 @@ HL7). No failover on its threshold, withdrawal of a stuck grow, cntlr
 replacement or leg repair therefore rests on what such an observation
 reports, though a missed
 round counts in a failover run as any other does (`dnv-worker.md` AR10).
+While an agent answers that it is starting, for no longer than the
+cluster's start hold from the first of its starts since the worker last
+judged a round of the object, a round of it ends a cntlr's failover
+run, keeps the cntlr from a failover and a replacement, and keeps a side
+off the side clocks of the withdrawal of a stuck grow and of leg repair,
+each until the round after the one that ends the start, or an earlier
+verdict on the object, its health epoch standing (`dnv-worker.md` HL8). A
+primary whose agent refuses its syncups, with an invalid conf or a failed
+save, reads unhealthy and is failed over, and a cntlr so refused is no
+failover candidate (`dnv-worker.md` HL9).
 The four reactions:
 
 * **Failover** (`dnv-worker.md` AR5): an unhealthy primary — or a
   `disabled` one, with no threshold wait (Cntlrs) — gives the role to a
-  healthy, enabled cntlr; this *is* the failover trigger of Failover.
+  healthy, enabled cntlr whose agent does not refuse its syncups; this
+  *is* the failover trigger of Failover.
 * **Thin-pool auto-grow** (`dnv-worker.md` AR6): a slice pool whose data or
   metadata usage passes `DmPoolConf.low_water_mark_pct`, which is not an
   `EventThreshold` field, is grown by an internal `GrowSlice` (GrowSlice); a
@@ -6659,8 +6710,9 @@ overview), so while etcd is unreachable the control plane changes nothing,
 and the data plane goes on serving what it last applied:
 
 * **Agents** keep serving from their stores. An agent needs no call to keep
-  what it has built, and one that restarts meanwhile rebuilds from its store
-  before it serves (Common agent rules).
+  what it has built, and one that restarts meanwhile rebuilds from its store,
+  answering that it is starting until it has (Common agent rules;
+  `dnagent.md` SH33).
 * **Hosts** keep the paths they have, and their IO goes on through them: no
   discovery record changes, so nothing that follows the discovery log drops
   a path (Host view).
@@ -6838,7 +6890,8 @@ model, CSI10) — crosses from one build to the next, and the rules below
 keep it readable.
 
 Every worker stops before any agent does, and the workers start last, once
-the agents serve again (`dnagent.md` SH1); the gateways and the cdc
+the agents have started again, their startup reconciles ended
+(`dnagent.md` SH1, SH33); the gateways and the cdc
 instances stop and start in any order. Reason: to a running worker a
 stopped agent is a failed node, and its reactions would fail over
 primaries, replace cntlrs and repair legs that only wait for their agent
@@ -6847,7 +6900,7 @@ primaries, replace cntlrs and repair legs that only wait for their agent
 Every agent keeps its local store across the upgrade and, at start,
 rebuilds from it what its node should hold, probe-first, as after any
 restart (`dnagent.md` DN2, `cnagent.md` CN2). Reason: the store is the
-desired state an agent rebuilds from before it serves (Common agent rules).
+desired state an agent rebuilds from while it starts (Common agent rules).
 So a build takes over whatever an older build left of the kinds of object
 it builds, as it is: it finds what the nodes hold and etcd's records by the
 names of Naming and the keys of etcd data model, which it keeps for those

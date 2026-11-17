@@ -117,7 +117,7 @@ func (s *CnAgentServer) syncupCntlr(
 		Revision:   req.GetRevision(),
 		CntlrInfo:  info,
 		BmInfoList: s.bitmapInfoList(st),
-		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), time.Time{})),
 		SaveTime:   agent.Timestamp(saveAt),
 	}
 }

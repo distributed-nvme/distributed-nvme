@@ -327,6 +327,49 @@ func TestPutClusterReadsBack(t *testing.T) {
 	}
 }
 
+// TestPutClusterStartHold pins ClusterSpec.StartHoldSeconds (dnv-worker.md
+// HL8): nil stores the default hold, as CreateCluster does for a request
+// without the setting, and a set value is stored as given, its zero
+// included.
+func TestPutClusterStartHold(t *testing.T) {
+	ctx := testCtx(t)
+	cli := newTestClient(t)
+	name := testClusterName(t)
+	cl, err := PutCluster(ctx, cli, ClusterSpec{Name: name})
+	if err != nil {
+		t.Fatalf("PutCluster: %v", err)
+	}
+	loaded, err := LoadCluster(ctx, cli, name)
+	if err != nil {
+		t.Fatalf("LoadCluster: %v", err)
+	}
+	if got := loaded.Conf.GetStartHoldConf(); got == nil ||
+		got.GetSeconds() != common.DefaultStartHoldSeconds {
+		t.Errorf("a nil StartHoldSeconds stored %v, want seconds %d", got,
+			common.DefaultStartHoldSeconds)
+	}
+	if !proto.Equal(loaded.Conf, cl.Conf) {
+		t.Errorf("LoadCluster = %v, PutCluster wrote %v", loaded.Conf,
+			cl.Conf)
+	}
+	for _, seconds := range []uint32{0, 5} {
+		name := testClusterName(t)
+		if _, err := PutCluster(ctx, cli, ClusterSpec{
+			Name: name, StartHoldSeconds: &seconds,
+		}); err != nil {
+			t.Fatalf("PutCluster: %v", err)
+		}
+		loaded, err := LoadCluster(ctx, cli, name)
+		if err != nil {
+			t.Fatalf("LoadCluster: %v", err)
+		}
+		if got := loaded.Conf.GetStartHoldConf(); got == nil ||
+			got.GetSeconds() != seconds {
+			t.Errorf("StartHoldSeconds %d stored %v", seconds, got)
+		}
+	}
+}
+
 // TestPutSpReadsBack pins PutSp's transaction as model reads it: the pool's
 // records, its slice tree, the geometry
 // model.GroupBlocks gives, and the bookkeeping of every node it names — the

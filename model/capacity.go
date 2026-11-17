@@ -315,10 +315,11 @@ func ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf {
 }
 
 // ResolveClusterConf is what CreateCluster STORES: a copy of cc with
-// bdev_conf, dn_bin_conf, alloc_conf, health_check_conf and md_check_conf
-// fully concrete (ResolveMdCheckConf keeps a present md_check_conf's zero, no
-// check), and creation_epoch and qos_ratio exactly as given (neither is
-// defaultable). A nil cc resolves to the pure defaults.
+// bdev_conf, dn_bin_conf, alloc_conf, health_check_conf, md_check_conf and
+// start_hold_conf fully concrete (ResolveMdCheckConf keeps a present
+// md_check_conf's zero, no check, and ResolveStartHoldConf a present
+// start_hold_conf's zero, no hold), and creation_epoch and qos_ratio exactly
+// as given (neither is defaultable). A nil cc resolves to the pure defaults.
 //
 // ClusterConf is write-once (architecture.md, Clusters: no UpdateCluster* RPC
 // exists), so this is
@@ -333,6 +334,7 @@ func ResolveClusterConf(cc *pb.ClusterConf) *pb.ClusterConf {
 		AllocConf:       ResolveAllocConf(cc.GetAllocConf()),
 		HealthCheckConf: ResolveHealthCheckConf(cc.GetHealthCheckConf()),
 		MdCheckConf:     ResolveMdCheckConf(cc.GetMdCheckConf()),
+		StartHoldConf:   ResolveStartHoldConf(cc.GetStartHoldConf()),
 	}
 }
 
@@ -344,6 +346,28 @@ func ResolveMdCheckConf(conf *pb.MdCheckConf) *pb.MdCheckConf {
 		return &pb.MdCheckConf{IntervalDays: common.DefaultMdCheckDays}
 	}
 	return &pb.MdCheckConf{IntervalDays: conf.GetIntervalDays()}
+}
+
+// ResolveStartHoldConf returns the start hold setting a create stores, the
+// seconds from an agent's start during which the worker holds its verdict on
+// a starting reply (dnv-worker.md HL8): an absent one takes
+// common.DefaultStartHoldSeconds, and a present one is kept as given, its
+// zero turning the hold off.
+func ResolveStartHoldConf(conf *pb.StartHoldConf) *pb.StartHoldConf {
+	if conf == nil {
+		return &pb.StartHoldConf{Seconds: common.DefaultStartHoldSeconds}
+	}
+	return &pb.StartHoldConf{Seconds: conf.GetSeconds()}
+}
+
+// ResolveStartHoldSeconds is the hold a stored ClusterConf names
+// (dnv-worker.md HL8; architecture.md, Clusters), by the rule of
+// ResolveStartHoldConf. Unlike the md check, an absent start_hold_conf does
+// not read as zero: a cluster created by a build before the hold has none,
+// and it keeps a defined hold, common.DefaultStartHoldSeconds. A present one
+// reads as stored, its zero as no hold.
+func ResolveStartHoldSeconds(cc *pb.ClusterConf) uint32 {
+	return ResolveStartHoldConf(cc.GetStartHoldConf()).GetSeconds()
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +500,14 @@ func ValidateClusterConf(cc *pb.ClusterConf) error {
 		common.MaxMdCheckDays {
 		return invalidConf("md_check_conf.interval_days %d is above %d",
 			days, common.MaxMdCheckDays)
+	}
+	// An absent start hold setting is a cluster a build before the hold
+	// created, and reads as the default hold (ResolveStartHoldSeconds); only
+	// a value no create takes is refused.
+	if seconds := cc.GetStartHoldConf().GetSeconds(); seconds >
+		common.MaxStartHoldSeconds {
+		return invalidConf("start_hold_conf.seconds %d is above %d",
+			seconds, common.MaxStartHoldSeconds)
 	}
 	if cc.GetBdevConf() != nil {
 		return ValidateBdevConf(cc.GetBdevConf())

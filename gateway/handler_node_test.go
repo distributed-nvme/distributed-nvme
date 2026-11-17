@@ -302,6 +302,9 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 		},
 		// No md check setting asked for: the default interval.
 		MdCheckConf: &pb.MdCheckConf{IntervalDays: common.DefaultMdCheckDays},
+		// No start hold setting asked for: the default hold.
+		StartHoldConf: &pb.StartHoldConf{
+			Seconds: common.DefaultStartHoldSeconds},
 	}, "stored cluster_conf")
 
 	// next_id starts at 1 and the bucket is ShardBucketSize zeros
@@ -388,6 +391,8 @@ func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 		},
 		// An absent md check setting takes the default interval.
 		MdCheckConf: &pb.MdCheckConf{IntervalDays: 30},
+		// An absent start hold setting takes the default hold.
+		StartHoldConf: &pb.StartHoldConf{Seconds: 120},
 	}, "the cluster_conf stored for an empty request")
 
 	// The other side of the same rule: what CreateCluster writes is exactly
@@ -425,6 +430,52 @@ func TestCreateClusterMdCheckConf(t *testing.T) {
 				IntervalDays: common.MaxMdCheckDays + 1}})
 	wantCode(t, err, codes.InvalidArgument,
 		"CreateCluster with md_check_conf above the cap")
+	if hnodeExists(t, s, model.ClusterConfKey(name)) {
+		t.Errorf("a refused create wrote its cluster_conf")
+	}
+}
+
+// TestCreateClusterStartHoldConf: a request without a start hold setting
+// stores the default hold, a present one is stored as given, its zero
+// turning the hold off, and one above MaxStartHoldSeconds is
+// INVALID_ARGUMENT naming the bound, with nothing written (dnv-worker.md
+// HL8; architecture.md, Clusters).
+func TestCreateClusterStartHoldConf(t *testing.T) {
+	s := newTestServer(t)
+	stored := func(name string) *pb.StartHoldConf {
+		cc := &pb.ClusterConf{}
+		hnodeGet(t, s, model.ClusterConfKey(name), cc)
+		return cc.GetStartHoldConf()
+	}
+	name := hnodeName("starthold-absent")
+	_, err := s.CreateCluster(context.Background(),
+		&pb.CreateClusterRequest{ClusterName: name})
+	wantCode(t, err, codes.OK, "CreateCluster without start_hold_conf")
+	if got := stored(name); got == nil ||
+		got.GetSeconds() != common.DefaultStartHoldSeconds {
+		t.Errorf("an absent start_hold_conf stored %v, want seconds %d",
+			got, common.DefaultStartHoldSeconds)
+	}
+	for _, seconds := range []uint32{0, 1, common.MaxStartHoldSeconds} {
+		name := hnodeName(fmt.Sprintf("starthold-%d", seconds))
+		_, err := s.CreateCluster(context.Background(),
+			&pb.CreateClusterRequest{ClusterName: name,
+				StartHoldConf: &pb.StartHoldConf{Seconds: seconds}})
+		wantCode(t, err, codes.OK, "CreateCluster with start_hold_conf")
+		if got := stored(name); got == nil || got.GetSeconds() != seconds {
+			t.Errorf("start_hold_conf %v stored, want seconds %d", got,
+				seconds)
+		}
+	}
+	name = hnodeName("starthold-over")
+	_, err = s.CreateCluster(context.Background(),
+		&pb.CreateClusterRequest{ClusterName: name,
+			StartHoldConf: &pb.StartHoldConf{
+				Seconds: common.MaxStartHoldSeconds + 1}})
+	wantCode(t, err, codes.InvalidArgument,
+		"CreateCluster with start_hold_conf above the cap")
+	hnodeWantMsg(t, err, "start_hold_conf.seconds 3601 is above 3600",
+		"CreateCluster with start_hold_conf above the cap")
 	if hnodeExists(t, s, model.ClusterConfKey(name)) {
 		t.Errorf("a refused create wrote its cluster_conf")
 	}

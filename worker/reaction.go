@@ -91,6 +91,10 @@ const (
 	// a primary created, only on rows the primary it replaced failed on. The
 	// record's kind tells the two apart.
 	reasonSameError = "same_error"
+	// reasonCandidateRefuses is AR5's third refusal: every healthy,
+	// enabled standby's agent refuses its own SyncupCntlr (HL9), so none is
+	// a candidate, and the record names the smallest of them.
+	reasonCandidateRefuses = "candidate_refuses"
 	// reasonGrowPending is AR6's stateless pending rule. It is model's
 	// string: the same reason reaches this record from the pass's pre-check
 	// and from a GrowSlice whose STM found the grow pending, whose record
@@ -329,7 +333,8 @@ type reactionOps interface {
 		spCnAddrs []string,
 		excludeLocs []string,
 	) ([]model.Cand, error)
-	// failover is AR5.
+	// failover is AR5; passed are the standbys its election passes over,
+	// whose agents refuse their own SyncupCntlr (HL9).
 	failover(
 		ctx context.Context,
 		cid uint64,
@@ -339,6 +344,7 @@ type reactionOps interface {
 		oldId uint64,
 		newId uint64,
 		now uint64,
+		passed []uint64,
 	) error
 	// growSlice is AR6; it returns the new group's grp_id. poolTotal is the
 	// total the primary reported for the pool of this kind, which the op
@@ -372,7 +378,8 @@ type reactionOps interface {
 	) (uint64, error)
 	// replaceCntlr is AR7; it returns the new cntlr_id. spCnAddrs is the
 	// exclusion the scan that found newCn was given, which the op holds the
-	// SP's surviving cntlrs against.
+	// SP's surviving cntlrs against; passed are the standbys its test for a
+	// failover candidate passes over, as failover's election does (HL9).
 	replaceCntlr(
 		ctx context.Context,
 		cid uint64,
@@ -384,6 +391,7 @@ type reactionOps interface {
 		spCnAddrs []string,
 		asPrimary bool,
 		now uint64,
+		passed []uint64,
 	) (uint64, error)
 	// createRepair is AR8's create: the worker's repair repName of the group
 	// grpId, which parent holds, for its bad leg badLegId, with a fresh new
@@ -704,9 +712,10 @@ func (o *modelReactionOps) failover(
 	oldId uint64,
 	newId uint64,
 	now uint64,
+	passed []uint64,
 ) error {
-	return model.Failover(
-		ctx, o.cli, cid, shard, spId, spName, oldId, newId, now,
+	return model.FailoverPassingOver(
+		ctx, o.cli, cid, shard, spId, spName, oldId, newId, now, passed,
 	)
 }
 
@@ -760,10 +769,11 @@ func (o *modelReactionOps) replaceCntlr(
 	spCnAddrs []string,
 	asPrimary bool,
 	now uint64,
+	passed []uint64,
 ) (uint64, error) {
-	return model.ReplaceCntlr(
+	return model.ReplaceCntlrPassingOver(
 		ctx, o.cli, cid, shard, spId, spName, oldId, newCn, spCnAddrs,
-		asPrimary, now,
+		asPrimary, now, passed,
 	)
 }
 
@@ -1177,16 +1187,82 @@ type verdictMemo struct {
 	runs  map[uint64]int
 	legs  map[uint64]bool
 	sides map[sideKey]bool
+	// starting holds the cntlrs whose latest round answered that their
+	// agent is starting, within the start hold (HL8): AR5 fails none of them
+	// over and AR7 replaces none. A round that judges the cntlr, and any
+	// verdict on it, drops it.
+	starting map[uint64]bool
+	// refusing holds the cntlrs whose agent refuses their driven revision's
+	// SyncupCntlr with an invalid conf or a failed save (HL9): AR5 does not
+	// fail a primary over onto one.
+	refusing map[uint64]bool
+	// sidesStarting holds the sides whose latest round answered that their
+	// disk node's agent is starting, within the start hold (HL8): no side
+	// clock of AR6 or AR8 counts for them. A verdict on the side drops it.
+	sidesStarting map[sideKey]bool
 }
 
 // newVerdictMemo builds an empty memo.
 func newVerdictMemo() *verdictMemo {
 	return &verdictMemo{
-		cntlrs: make(map[uint64]bool),
-		runs:   make(map[uint64]int),
-		legs:   make(map[uint64]bool),
-		sides:  make(map[sideKey]bool),
+		cntlrs:   make(map[uint64]bool),
+		runs:     make(map[uint64]int),
+		legs:     make(map[uint64]bool),
+		sides:    make(map[sideKey]bool),
+		starting: make(map[uint64]bool),
+		refusing: make(map[uint64]bool),
+
+		sidesStarting: make(map[sideKey]bool),
 	}
+}
+
+// noteRefusing records whether a cntlr's agent refuses its driven revision's
+// SyncupCntlr (HL9).
+func (m *verdictMemo) noteRefusing(cntlrId uint64, refusing bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if refusing {
+		m.refusing[cntlrId] = true
+		return
+	}
+	delete(m.refusing, cntlrId)
+}
+
+// noteStarting records a round of a cntlr whose agent answered that it is
+// starting (HL8): the cntlr's run ends, and it is held from AR5 and AR7
+// until a verdict on it or the end of the hold (noteStartEnded).
+func (m *verdictMemo) noteStarting(cntlrId uint64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.runs, cntlrId)
+	m.starting[cntlrId] = true
+}
+
+// noteStartEnded ends a cntlr's hold of HL8: the round after the one that
+// ended its agent's start, a move or an idle of its loop.
+func (m *verdictMemo) noteStartEnded(cntlrId uint64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.starting, cntlrId)
+}
+
+// noteSideStartEnded is noteStartEnded for a side.
+func (m *verdictMemo) noteSideStartEnded(key sideKey) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sidesStarting, key)
 }
 
 // noteCntlr records one verdict on a cntlr, whichever answer gave it:
@@ -1198,6 +1274,7 @@ func (m *verdictMemo) noteCntlr(cntlrId uint64, unhealthy bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	noteVerdict(m.cntlrs, cntlrId, unhealthy)
+	delete(m.starting, cntlrId)
 	if !unhealthy {
 		delete(m.runs, cntlrId)
 	}
@@ -1215,6 +1292,7 @@ func (m *verdictMemo) noteRound(cntlrId uint64, unhealthy bool) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.starting, cntlrId)
 	if unhealthy {
 		m.runs[cntlrId]++
 		return
@@ -1240,6 +1318,20 @@ func (m *verdictMemo) noteSide(key sideKey, unhealthy bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	noteVerdict(m.sides, key, unhealthy)
+	delete(m.sidesStarting, key)
+}
+
+// noteSideStarting records a round of a side whose disk node's agent
+// answered that it is starting (HL8): the side is held from the side clocks
+// of AR6 and AR8 until a verdict on it or the end of the hold
+// (noteSideStartEnded).
+func (m *verdictMemo) noteSideStarting(key sideKey) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sidesStarting[key] = true
 }
 
 // noteVerdict is the one update every kind shares.
@@ -1258,6 +1350,23 @@ type judgedSet struct {
 	runs   map[uint64]int
 	legs   map[uint64]bool
 	sides  map[sideKey]bool
+	// starting are the cntlrs held while their agent starts (HL8).
+	starting map[uint64]bool
+	// refusing are the cntlrs whose agent refuses their driven revision's
+	// SyncupCntlr (HL9).
+	refusing map[uint64]bool
+	// sidesStarting are the sides held while their disk node's agent starts
+	// (HL8).
+	sidesStarting map[sideKey]bool
+}
+
+// sideClockReached is the side clock AR6 and AR8 read: this coordinator's
+// own unhealthy verdict on the side (AR10), its err_epoch at least
+// side_unhealthy old, and no start of its disk node's agent in the hold
+// (HL8).
+func sideClockReached(p *spPass, key sideKey, side *pb.Side) bool {
+	return p.judged.sides[key] && !p.judged.sidesStarting[key] &&
+		reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy())
 }
 
 // snapshot copies the memo for one pass, after it has dropped every object
@@ -1267,10 +1376,14 @@ type judgedSet struct {
 // never reused within an SP, so such an entry could only grow the memo.
 func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 	out := judgedSet{
-		cntlrs: make(map[uint64]bool),
-		runs:   make(map[uint64]int),
-		legs:   make(map[uint64]bool),
-		sides:  make(map[sideKey]bool),
+		cntlrs:   make(map[uint64]bool),
+		runs:     make(map[uint64]int),
+		legs:     make(map[uint64]bool),
+		sides:    make(map[sideKey]bool),
+		starting: make(map[uint64]bool),
+		refusing: make(map[uint64]bool),
+
+		sidesStarting: make(map[sideKey]bool),
 	}
 	if m == nil {
 		return out
@@ -1292,6 +1405,20 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 		}
 		out.runs[cntlrId] = run
 	}
+	for cntlrId := range m.starting {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.starting, cntlrId)
+			continue
+		}
+		out.starting[cntlrId] = true
+	}
+	for cntlrId := range m.refusing {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.refusing, cntlrId)
+			continue
+		}
+		out.refusing[cntlrId] = true
+	}
 	for legId := range m.legs {
 		if _, ok := legs[legId]; !ok {
 			delete(m.legs, legId)
@@ -1305,6 +1432,13 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 			continue
 		}
 		out.sides[key] = true
+	}
+	for key := range m.sidesStarting {
+		if _, ok := sides[key]; !ok {
+			delete(m.sidesStarting, key)
+			continue
+		}
+		out.sidesStarting[key] = true
 	}
 	return out
 }
@@ -1338,7 +1472,12 @@ type spPass struct {
 	infoRev uint64
 	// failoverCand is AR5's election, computed once because AR7's
 	// sole-primary variant is defined as "AR5 found none". 0 = none.
+	// refusingCand is the smallest standby passed over because its agent
+	// refuses its own SyncupCntlr (HL9), 0 = none, and passedOver all of
+	// them, which the ops' own checks pass over too.
 	failoverCand uint64
+	refusingCand uint64
+	passedOver   []uint64
 	// judged is AR10's memo as the pass began: the objects this coordinator
 	// last judged unhealthy, which alone a threshold may fire on, and each
 	// cntlr's run of unhealthy verdicts from its rounds.
@@ -1642,9 +1781,25 @@ func (w *spWorker) newPass(state *model.SpState, cc *pb.ClusterConf) *spPass {
 		if cntlr.GetPrimary() && p.primary == nil {
 			p.primaryId, p.primary = cntlrId, cntlr
 		}
-		if failoverEligible(cntlr) && p.failoverCand == 0 {
+		if !failoverEligible(cntlr) {
+			continue
+		}
+		if p.judged.refusing[cntlrId] {
+			// HL9: a standby whose agent refuses its own SyncupCntlr would
+			// not apply the promotion either, so it is no candidate; the
+			// election in model.Failover and the candidate test of
+			// model.ReplaceCntlr pass over it too (passedOver), and the
+			// smallest one names AR5's third refusal.
+			p.passedOver = append(p.passedOver, cntlrId)
+			if p.refusingCand == 0 {
+				p.refusingCand = cntlrId
+			}
+			continue
+		}
+		if p.failoverCand == 0 {
 			// AR5: the smallest cntlr_id among the healthy, enabled,
-			// non-primary cntlrs; the ids are walked ascending.
+			// non-primary cntlrs whose agent does not refuse its syncups;
+			// the ids are walked ascending.
 			p.failoverCand = cntlrId
 		}
 	}
@@ -1730,9 +1885,9 @@ func (w *spWorker) reactionSuppressed(ctx context.Context, p *spPass) bool {
 
 // tryFailover is AR5. It reports whether the pass ends here.
 //
-// The no-candidate case and the two refusals (shared_state, same_error)
-// deliberately do NOT end the pass (AR2): they are AR5's skips that let the
-// next reaction run.
+// The no-candidate case and the three refusals (shared_state, same_error,
+// candidate_refuses) deliberately do NOT end the pass (AR2): they are AR5's
+// skips that let the next reaction run.
 func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	if p.primary == nil {
 		return false
@@ -1769,7 +1924,8 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		// the disabled trigger needs no verdict.
 		if !reached(p.now, p.primary.GetErrEpoch(), threshold) ||
 			!p.judged.cntlrs[p.primaryId] ||
-			p.judged.runs[p.primaryId] < failoverRun {
+			p.judged.runs[p.primaryId] < failoverRun ||
+			p.judged.starting[p.primaryId] {
 			return false
 		}
 		// AR5's first refusal: a report whose every ERROR row is of HL2's
@@ -1794,6 +1950,17 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 			return false
 		}
 	}
+	if p.failoverCand == 0 && p.refusingCand != 0 {
+		// AR5's third refusal (HL9): every healthy, enabled standby's
+		// agent refuses its own SyncupCntlr, so none would apply the
+		// promotion; the role stays, and the pass goes on (AR2) to AR7,
+		// which may replace a primary with no candidate.
+		w.reactionSkipped(ctx, reactionFailover, reasonCandidateRefuses,
+			slog.Uint64("old_cntlr_id", p.primaryId),
+			slog.Uint64("new_cntlr_id", p.refusingCand),
+		)
+		return false
+	}
 	if p.failoverCand == 0 {
 		w.reactionSkipped(ctx, reactionFailover, reasonNoCandidate,
 			slog.Uint64("cntlr_id", p.primaryId),
@@ -1811,7 +1978,7 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	}
 	err := w.reactor().ops.failover(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
-		p.primaryId, p.failoverCand, p.now,
+		p.primaryId, p.failoverCand, p.now, p.passedOver,
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionFailover, err, ids...)
@@ -2305,8 +2472,7 @@ func withdrawTarget(
 	for _, leg := range grp.GetLegList() {
 		side := leg.GetSideList()[0]
 		key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
-		if !side.GetProvisioned() && p.judged.sides[key] &&
-			reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) {
+		if !side.GetProvisioned() && sideClockReached(p, key, side) {
 			addrs = append(addrs, side.GetAddrPort())
 		}
 	}
@@ -2520,7 +2686,7 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	}
 	newId, err := w.reactor().ops.replaceCntlr(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
-		oldId, picks[0], spCnAddrs, old.GetPrimary(), p.now,
+		oldId, picks[0], spCnAddrs, old.GetPrimary(), p.now, p.passedOver,
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionReplaceCntlr, err, ids...)
@@ -2562,9 +2728,10 @@ func (w *spWorker) replaceTarget(
 		if cntlr.GetDisabled() {
 			continue
 		}
-		// AR10: only a cntlr this coordinator has judged unhealthy itself.
+		// AR10: only a cntlr this coordinator has judged unhealthy itself,
+		// and none whose agent answers that it is starting (HL8).
 		if !reached(p.now, cntlr.GetErrEpoch(), p.th.GetCntlrUnhealthy()) ||
-			!p.judged.cntlrs[cntlrId] {
+			!p.judged.cntlrs[cntlrId] || p.judged.starting[cntlrId] {
 			continue
 		}
 		if cntlr.GetPrimary() && p.failoverCand != 0 {
@@ -2572,6 +2739,19 @@ func (w *spWorker) replaceTarget(
 			// cannot help or is presumed not to (its shared_state and
 			// same_error); replacing it as primary would fail
 			// model.ReplaceCntlr's own precondition anyway.
+			continue
+		}
+		if cntlr.GetPrimary() && p.refusingCand != 0 &&
+			p.judged.refusing[cntlrId] {
+			// HL9: the primary refuses its own SyncupCntlr, and so does every
+			// healthy standby. A refusal every cntlr shares moves no role: a
+			// replacement would refuse the same request and never build,
+			// while the primary still serves the revision it last applied.
+			w.reactionSkipped(ctx, reactionReplaceCntlr,
+				reasonCandidateRefuses,
+				slog.Uint64("old_cntlr_id", cntlrId),
+				slog.Uint64("new_cntlr_id", p.refusingCand),
+			)
 			continue
 		}
 		// AR7's two refusals, both judged on the report the pass holds, the
@@ -3156,8 +3336,7 @@ func legNeedsRepair(p *spPass, leg *pb.Leg) bool {
 	}
 	for _, side := range leg.GetSideList() {
 		key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
-		if p.judged.sides[key] &&
-			reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) {
+		if sideClockReached(p, key, side) {
 			return true
 		}
 	}
@@ -3184,8 +3363,7 @@ func newLegDue(p *spPass, leg *pb.Leg) bool {
 	}
 	for _, side := range leg.GetSideList() {
 		key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
-		if p.judged.sides[key] &&
-			reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) {
+		if sideClockReached(p, key, side) {
 			return true
 		}
 	}

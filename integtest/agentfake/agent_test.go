@@ -3066,3 +3066,79 @@ func TestGetLegBmAnswersTheLever(t *testing.T) {
 		t.Fatalf("GetLegBm = %x, %v; want aa00ff", got.GetBitmap(), err)
 	}
 }
+
+// TestStartingLeverAnswersAsAStartingAgent pins the Starting lever against
+// the real agent's answers (dnagent.md SH33): a SyncupCntlr is refused
+// before any gate with only the starting code and the stamp, no revision and
+// no info; a leg bitmap read and a thin device bitmap read fail with
+// Unavailable; and once the lever is cleared, every stamp still carries the
+// lever's start, as one process keeps one start.
+func TestStartingLeverAnswersAsAStartingAgent(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	syncupCntlrFixture(t, cnClient, true)
+	start := time.Now().Add(time.Minute).Round(0)
+	if err := agent.Update(CntlrKey(1, 1), func(o *Object) {
+		o.Starting = start
+	}); err != nil {
+		t.Fatalf("lever: %v", err)
+	}
+	ctx := context.Background()
+	req := cntlrFixture(true)
+	req.Revision = 6
+	reply, err := cnClient.SyncupCntlr(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != common.ReplyCodeStarting ||
+		reply.GetRevision() != 0 || reply.GetCntlrInfo() != nil ||
+		len(reply.GetBmInfoList()) != 0 ||
+		!reply.GetObsStamp().GetAgentStartTime().AsTime().Equal(start) ||
+		reply.GetObsStamp().GetObsTime() != nil {
+		t.Fatalf("a starting SyncupCntlr answered %v, want the starting "+
+			"code and the start alone", reply)
+	}
+	if _, err := cnClient.GetLegBm(ctx, &pb.GetLegBmRequest{
+		ClusterId: 1, CnId: 1, SpId: 1, CntlrId: 1}); status.Code(err) !=
+		codes.Unavailable {
+		t.Fatalf("a starting leg bitmap read: %v, want Unavailable", err)
+	}
+	if _, err := cnClient.GetThinDeviceBm(ctx, &pb.GetThinDeviceBmRequest{
+		ClusterId: 1, CnId: 1, SpId: 1, CntlrId: 1}); status.Code(err) !=
+		codes.Unavailable {
+		t.Fatalf("a starting thin device bitmap read: %v, want Unavailable",
+			err)
+	}
+	if err := agent.Update(CntlrKey(1, 1), func(o *Object) {
+		o.Starting = time.Time{}
+	}); err != nil {
+		t.Fatalf("lever: %v", err)
+	}
+	reply, err = cnClient.SyncupCntlr(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if code := reply.GetAgentReply().GetCode(); code != 0 ||
+		!reply.GetObsStamp().GetAgentStartTime().AsTime().Equal(start) {
+		t.Fatalf("after the start: code %d, start %v; want 0 and %v", code,
+			reply.GetObsStamp().GetAgentStartTime().AsTime(), start)
+	}
+}
+
+// TestARestartedFakeStampsANewStart pins the fake's agent start against the
+// real agent's (dnagent.md SH33): a fake stopped and started again is a new
+// process, so its stamps carry a later start than before.
+func TestARestartedFakeStampsANewStart(t *testing.T) {
+	fleet := newTestFleet(t, true)
+	agent := addAgent(t, fleet, "cn-restart:1", Cn, Config{Dir: t.TempDir()})
+	before := agent.obsStamp(time.Time{}, "", time.Now()).GetAgentStartTime().AsTime()
+	time.Sleep(10 * time.Millisecond)
+	agent.Stop()
+	if err := agent.Start(KeepStore); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	after := agent.obsStamp(time.Time{}, "", time.Now()).GetAgentStartTime().AsTime()
+	if !after.After(before) {
+		t.Fatalf("the start after a restart %v, want after %v", after, before)
+	}
+}

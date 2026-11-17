@@ -603,6 +603,13 @@ func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 		return errInvalid("md_check_conf.interval_days %d is above %d",
 			days, common.MaxMdCheckDays)
 	}
+	// Absent takes the default hold and zero turns it off (dnv-worker.md
+	// HL8); only a value above the bound is refused.
+	if seconds := req.GetStartHoldConf().GetSeconds(); seconds >
+		common.MaxStartHoldSeconds {
+		return errInvalid("start_hold_conf.seconds %d is above %d",
+			seconds, common.MaxStartHoldSeconds)
+	}
 	return validateQosRatio(req.GetQosRatio())
 }
 

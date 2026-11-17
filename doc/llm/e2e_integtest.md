@@ -57,6 +57,9 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   ends with a destination equal to the whole source.
 * **The four reactions fire on real faults** (`dnv-worker.md` AR5 to AR8), on
   a pool of at most `REACT_SLICE_CAP` slices (Topology and parameters): a
+  planned restart of the primary's cn agent moves nothing, as the agent
+  answers that it is starting until its startup reconcile ends
+  (`dnagent.md` SH33; `dnv-worker.md` HL8), a
   killed cn agent moves the primary role and then loses its cntlr, a killed dn
   agent with its nvmet port removed loses its leg to the worker's repair with
   a fresh leg, the dead leg kept as a retired leg, a group whose legs all lose
@@ -424,7 +427,7 @@ infrastructure and the whole of setup, which clears every id the last case
 read; that rebuild is also where the next case's thresholds take effect.
 
 E2E12. **The shell literals mirror named constants and say so.** Every number a
-Go constant owns is repeated beside a comment naming the constant, except eight
+Go constant owns is repeated beside a comment naming the constant, except nine
 read from `workerctl constants` at the driver's preflight: `EtcdMaxTxnOps` and
 `EtcdMaxRequestBytes`, which etcd must be started with and which this suite,
 committing the transaction the first is sized by at two cntlrs, short of the
@@ -435,7 +438,11 @@ and against which every set's primary threshold is checked;
 `DefaultPrimaryUnhealthy`, which the run only prints; `DemotionHoldTimeout`,
 which the run prints beside the cutoff case's timings and from which that
 case computes its wait for its writer's failed write and the least time the
-writer's range must last; `DefaultStripeSize`, the stripe every cluster of
+writer's range must last; `DefaultStartHoldSeconds`, the start hold every
+cluster of the suite stores, as none names one at its create
+(`dnv-worker.md` HL8), which bounds the react case's wait for a restarted
+agent's start;
+`DefaultStripeSize`, the stripe every cluster of
 the suite stores, which the react case's stripe also mirrors, the preflight
 holding that copy to the value read; and `MaxNvmeTcpCmdBytes`, which the
 pool's stripe times its slice count and the IO sizes host0 reads are held
@@ -754,7 +761,19 @@ pool grow on the device (`dnv-worker.md` AR6); the case's two thin devices
 together need more blocks in slice 0 than its data groups hold, asserted
 before the writes, since the covered rule of the same AR6 would otherwise
 stop the grow the case waits for, and a primary that moves meanwhile stops
-the run. Failover and cntlr replacement: the primary's cn agent is killed,
+the run. A planned restart: the primary's cn agent is stopped by SIGTERM,
+on which it must exit, not on the kill that follows the suite's wait
+(`dnagent.md`, Bootstrap and lifecycle), and started again with the same
+flags; its log must show `agent serving` and then `agent started`
+(`dnagent.md` SH33), with a startup pass shorter than the start hold or
+the run stops, and past the larger of the reacting set's primary and
+cntlr thresholds plus a few passes the worker must have applied no failover and no cntlr
+replacement, the same cntlr still primary on the same node and host0's
+data unchanged (`dnv-worker.md` HL8). When the agent's startup pass took
+two check intervals or more, the worker must also have logged at least
+one `agent starting` since the step began; a shorter pass can fall
+between two rounds, so the step only logs that it tested a short
+restart. Failover and cntlr replacement: the primary's cn agent is killed,
 host0 having let go first since a killed agent's nvmet objects go on
 advertising optimized; the standby must become primary and build the stack,
 held to the cntlr threshold while settling (`dnv-worker.md` AR5, HL2;

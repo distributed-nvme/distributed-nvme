@@ -6590,9 +6590,10 @@ func (o *failoverCommitter) failover(
 	oldId uint64,
 	newId uint64,
 	now uint64,
+	passed []uint64,
 ) error {
 	err := o.fakeReactionOps.failover(
-		ctx, cid, shard, spId, spName, oldId, newId, now,
+		ctx, cid, shard, spId, spName, oldId, newId, now, passed,
 	)
 	if err != nil {
 		return err
@@ -6654,10 +6655,11 @@ func (o *replaceCommitter) replaceCntlr(
 	spCnAddrs []string,
 	asPrimary bool,
 	now uint64,
+	passed []uint64,
 ) (uint64, error) {
 	_, err := o.fakeReactionOps.replaceCntlr(
 		ctx, cid, shard, spId, spName, oldId, newCn, spCnAddrs, asPrimary,
-		now,
+		now, passed,
 	)
 	if err != nil {
 		return 0, err

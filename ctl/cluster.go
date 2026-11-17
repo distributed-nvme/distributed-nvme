@@ -14,15 +14,17 @@
 // simply ignored there (dnvctl.md, `cluster` — `ctl/cluster.go`) and --name is
 // not declared on it.
 //
-// Two conf flags (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
+// Three conf flags (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
 // declares --extent-size, which fills dn_bin_conf.extent_size and nothing
-// else, and --md-check-days, which fills md_check_conf.interval_days. The
+// else, --md-check-days, which fills md_check_conf.interval_days, and
+// --start-hold-seconds, which fills start_hold_conf.seconds. The
 // ClusterConf's other conf members — qos_ratio, bdev_conf, alloc_conf and
 // health_check_conf — have no flag at all, so a created cluster still takes
 // the gateway's defaults for the last three and an unset qos_ratio, which
 // has no default; it takes the default dn_bin_conf too whenever
-// --extent-size is left at its zero, and the default md_check_conf whenever
-// --md-check-days is not typed. Cluster-scoped is the whole of that claim:
+// --extent-size is left at its zero, the default md_check_conf whenever
+// --md-check-days is not typed, and the default start_hold_conf whenever
+// --start-hold-seconds is not typed. Cluster-scoped is the whole of that claim:
 // `sp create` does declare flags that fill an SP's OWN bdev_conf (dnvctl.md,
 // `sp` — `ctl/sp.go`), which is a different message from the cluster-wide
 // one this command leaves untouched.
@@ -68,13 +70,15 @@ func clusterNameFlag(cmd *cobra.Command) {
 
 // clusterCreateCmd drives CreateCluster.
 //
-// --extent-size is one of the two cluster-conf values dnvctl exposes. It
+// --extent-size is one of the three cluster-conf values dnvctl exposes. It
 // follows the `sp create` convention for an optional sub-message
 // (spCreateCmd's --stripe-size and --block-size): zero means "not given", so
 // dn_bin_conf is built only when the flag is non-zero and an untouched create
-// sends no dn_bin_conf at all. --md-check-days, the other, does not follow
-// it: its zero turns the md check off, so it is sent whenever typed
-// (TestClusterCreateMdCheckDays).
+// sends no dn_bin_conf at all. --md-check-days and --start-hold-seconds, the
+// other two, do not follow it: the zero of the first turns the md check off
+// and of the second the start hold (dnv-worker.md HL8), so each is sent
+// whenever typed (TestClusterCreateMdCheckDays,
+// TestClusterCreateStartHoldSeconds).
 //
 // The four bin shifts are deliberately NOT exposed, and the message this
 // builds carries only extent_size. model.ResolveDnBinConf takes the shift set
@@ -113,6 +117,13 @@ func clusterCreateCmd() *cobra.Command {
 					IntervalDays: u32Of("md-check-days"),
 				}
 			}
+			// Sent only when typed, for the same reason: its zero turns
+			// the hold off, and an absent setting takes the default.
+			if invoked.Changed("start-hold-seconds") {
+				req.StartHoldConf = &pb.StartHoldConf{
+					Seconds: u32Of("start-hold-seconds"),
+				}
+			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
 			) (any, error) {
@@ -132,6 +143,11 @@ func clusterCreateCmd() *cobra.Command {
 		fmt.Sprintf("md_check_conf.interval_days, the days between two md "+
 			"checks of a group; 0 turns the check off (sent only when "+
 			"given; the gateway default is %d)", common.DefaultMdCheckDays))
+	flags.Uint32("start-hold-seconds", 0,
+		fmt.Sprintf("start_hold_conf.seconds, the seconds from an agent's "+
+			"start during which the worker holds its verdict on a starting "+
+			"reply; 0 turns the hold off (sent only when given; the "+
+			"gateway default is %d)", common.DefaultStartHoldSeconds))
 	return cmd
 }
 

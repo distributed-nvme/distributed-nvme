@@ -476,8 +476,10 @@ No case is known today.
 
 The table says what dnv does by itself for each fault, and what an
 operator does by hand. The third column gives the wait where a setting controls it. The
-settings are the pool's thresholds and the check interval, in seconds,
-and two flags of the worker.
+settings are the pool's thresholds, the check interval and the
+cluster's start hold, which is how long the worker waits for an agent
+that is still rebuilding after a restart, in seconds, and two flags of
+the worker.
 Measured times are in [the introduction](introduction.md#status-and-limits-of-01).
 
 | Fault | What dnv does by itself | The wait, where a setting controls it | By hand |
@@ -490,7 +492,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 | The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and, in the cases section 5.1 lists, can lose a write it was told was done. With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
 | etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure to write, "running while the control plane is down". |
 | A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. | Nothing. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). |
-| An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. A controller node agent away for more than a few seconds has its primaries failed over. | `primary_unhealthy` with two check rounds in a row. A stopped agent's rounds fail at once, so a failover comes about 4 to 8 seconds after the agent stops, at the defaults. | Until the fix, stop the workers first for a planned restart of a controller node agent. State: fix decided, the agent answers "starting" while it restarts (section 6.1). |
+| An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. As soon as the program runs again, the agent answers each check round with "starting", an answer that says it is still rebuilding, and while it does, for the start hold at most, the worker starts no failover, cntlr replacement or leg repair because of that node. A controller node agent that stays stopped for longer than one check interval can have its primaries failed over, as for a controller node that is down. | For a stopped agent, `primary_unhealthy` with two check rounds in a row: its rounds fail at once, so a stop a little longer than one `cntlr_interval`, 2 at the default, can already fail a primary over, and a failover comes about 4 to 8 seconds after the agent stops, at the defaults. For an agent that answers "starting", the start hold: the longest time the worker waits for an agent that is still rebuilding, 120 at the default, counted from its first start even when it stops and starts again while it rebuilds or just after, before a check round has judged it, a cluster setting fixed when the cluster is created (`--start-hold-seconds` of `dnvctl cluster create`). | For a planned restart, the steps in [the operations doc](operations.md#a-planned-restart-of-an-agent). A rebuild longer than the start hold, and a reboot that the worker first sees as an agent that answers "starting", are in section 6.1. |
 | A host reboots | Nothing on dnv's side. nvme-stas or the Kubernetes node plugin connects the paths again. | None. | See the host actions in section 7. |
 | All disk nodes of a pool are down at once, as in a switch reload | md marks each array broken under IO. Hosts see IO errors. The broken array makes the primary unhealthy, so the worker fails it over at the primary threshold, even while the nodes are still down. Once the legs are back, the new primary assembles the arrays again. If a data group broke while its meta group still took writes, the thin pool comes back read-only and needs the repair by hand (section 6.1). A pool of one cntlr waits for a cntlr replacement at the cntlr threshold. | `primary_unhealthy` for the failover. `cntlr_unhealthy`, 600, for a replacement. | A forced start, when no failover comes. The blocks mapped since the last commit of a broken meta group are gone (accepted case 1). |
 
@@ -638,14 +640,27 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   decided, the worker calls the repair off only while md still holds the
   leg. It needs md to refuse an add, which is rare, and nothing is lost.
   Not seen in the lab.
-- **A repair whose new leg the primary never reports stays open.** It
-  blocks every other repair of the group. This happens only while the
-  primary does not apply the syncup that carries the repair. The worker's
-  request to abort the repair reaches the primary only in a later syncup
-  that carries the repair too, so giving up on a timer would not end the
-  wait, and it would abort repairs that a slow primary still carries out.
-  State: fix decided, a primary that has not applied its syncups for longer
-  than the primary threshold is failed over. Not seen in the lab.
+- **A repair whose new leg the primary never reports stays open while
+  the primary role cannot move.** It blocks every other repair of the
+  group. This happens only while the primary does not apply the syncup
+  that carries the repair. A primary whose agent refuses that syncup,
+  because it cannot save it to its local files or finds a setting in it
+  invalid, is unhealthy, so the worker fails it over at the primary
+  threshold, and the new primary reports the new leg. The repair stays
+  open when the role cannot move that way. When the pool has no healthy,
+  enabled standby, the worker replaces the primary with a new cntlr after
+  the cntlr threshold, 600 seconds at the default, and the wait ends when
+  the new cntlr's node saves the syncup. When every healthy, enabled
+  standby refuses its syncups too, the worker takes the refusal as one
+  they all share, makes no such standby primary and does not replace the
+  primary either, though a refusal of each node's own local files would
+  not stop a new cntlr on another node. The wait then lasts until the
+  refusals end, or until the primary stops answering, which the worker
+  then replaces as a dead primary. The worker's request to abort the repair reaches the
+  primary only in a later syncup that carries the repair too, so giving up
+  on a timer would not end the wait, and it would abort repairs that a slow
+  primary still carries out. State: accepted; a failover onto a standby
+  that refuses its syncups too would not help. Not seen in the lab.
 - **A repair's new leg that holds the whole data starts the array alone
   only where md recorded the other legs as failed.** When both legs of
   the group's list are dead, the group otherwise waits for its legs. An
@@ -773,19 +788,45 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   primary and the cntlr thresholds, 600 seconds at the defaults. The pool
   stays on it that long. Disabling the primary ends it sooner. State:
   accepted, by design.
-- **Restarting a controller node's agent fails over its primaries.** The
-  agent answers no check round before its first converge ends. At the
-  defaults a restart of more than about 4 seconds can fail over every
-  primary on the node that has a healthy standby and has reported its
-  stack built, and one of more than about 8 seconds does. Until the fix,
-  stop the workers first, as an upgrade does, or create pools with a larger primary threshold
-  (`--thr-primary` of `dnvctl sp create`). State: fix decided, the agent
-  answers "starting" until its first converge ends, and the worker holds
-  its verdict on that node's cntlrs for a bounded time, a cluster setting
-  fixed when the cluster is created, 120 seconds by default. Worked out
-  from the defaults; not seen in the lab. A host still writing through
-  such a primary can also lose a write it was told was done, in the cases
+- **A controller node's agent that takes longer than the start hold to
+  rebuild fails over its primaries.** After a restart the agent answers
+  each check round with "starting", an answer that says it is still
+  rebuilding from its local files, until it has rebuilt every cntlr of the
+  node, one after another. The worker waits for such an agent for the
+  start hold, a cluster setting fixed when the cluster is created
+  (`--start-hold-seconds` of `dnvctl cluster create`), 120 seconds by
+  default, counted from the agent's first start, also when the agent
+  stops and starts again while it rebuilds, or just after, before a check
+  round has judged it. When the worker that drives a
+  pool restarts, or another worker takes the pool over, in that time, the
+  new one counts from the agent's latest start. A rebuild that takes
+  longer fails over every primary on the node that has a healthy standby.
+  Create a cluster whose controller nodes hold many pools with a longer
+  start hold. State: accepted; the wait must
+  end, so that an agent whose rebuild never ends is treated as a node that
+  is down. Not seen in the lab. A host still writing through such a
+  primary can also lose a write it was told was done, in the cases
   section 5.1 lists.
+- **A reboot that the worker first sees as an agent that answers
+  "starting" delays the failover.** The worker cannot tell an agent that
+  restarted on a running kernel, whose devices still serve, from the agent
+  of a controller node that rebooted, whose devices are gone. When the
+  agent of a rebooted controller node answers "starting" before the
+  failover has begun, as after a fast reboot or when a worker has just
+  taken over the pool, each primary on the node keeps its role for up to
+  the start hold while its hosts' IO waits. State: accepted; the start
+  hold bounds the wait. Not seen in the lab.
+- **A disabled primary whose standbys all refuse their syncups keeps its
+  role.** A standby refuses its syncups when it cannot save them to its
+  local files or finds a setting in them invalid. The worker does not
+  make such a standby primary, since it would refuse the syncup that
+  makes it primary too. When an operator disables a primary and every
+  healthy, enabled standby of its pool refuses, no other cntlr takes the
+  role, and the worker does not replace a disabled cntlr. The pool's IO stays
+  stopped until a standby accepts its syncups again or the operator
+  enables the primary again. State: accepted; a cntlr the operator
+  disabled is left to the operator, and the worker does not replace it.
+  Read from the code; not seen in the lab.
 - **A corrupt cdc entry withdraws its subsystem from hosts.** A cdc entry
   is the record in etcd that the cdc serves for one subsystem. Only a hand
   edit or a bug corrupts it. State: accepted.
@@ -798,8 +839,9 @@ worker does by itself. "Doc" names the document with the steps. The two
 tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
-follows by hand, which holds the forced-start guide so far and gets the
-others as they are written. Every row with no tool
+follows by hand, which holds the forced-start guide, the steps for a pool
+made before the stripe bound and a planned restart of an agent so far, and
+gets the others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
 
@@ -817,6 +859,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | See a node's live state and the cluster's capacity | `dnvctl dn inspect`, `dnvctl cn inspect`, `dnvctl cluster get-capacity` | none | procedure to write, one line. Fix decided: a capacity answer that also says what can still be placed and which limit the cluster reaches first. |
 | Compare a disk node's own free count with its record | `dnvctl dn inspect` shows the agent's count, `dnvctl dn get` the record's | none | procedure to write, one line: the counts are compared, never reconciled |
 | Gather a node's state for a bug report | none | none | fix decided: a gather subcommand of `dnv-agent` writes one archive |
+| Restart a node's agent | none; the agent answers "starting" while it rebuilds, and the worker waits for it up to the start hold | the operations doc | done |
 
 ### Pools
 

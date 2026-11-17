@@ -1460,6 +1460,27 @@ func TestClusterCreateMdCheckDays(t *testing.T) {
 	}
 }
 
+// TestClusterCreateStartHoldSeconds: --start-hold-seconds is sent only when
+// typed, a typed zero included, since its zero turns the start hold off
+// while an absent start_hold_conf takes the gateway's default
+// (dnv-worker.md HL8); the value travels unchecked (CT8), so one above the
+// gateway's bound still reaches the request.
+func TestClusterCreateStartHoldSeconds(t *testing.T) {
+	bare := runArgv(t, "CreateCluster",
+		"cluster", "create", "--name", "c1").(*pb.CreateClusterRequest)
+	if bare.StartHoldConf != nil {
+		t.Errorf("a bare cluster create sent start_hold_conf %v, want it "+
+			"absent", bare.StartHoldConf)
+	}
+	for _, seconds := range []uint32{0, 30, 4000} {
+		req := runArgv(t, "CreateCluster", "cluster", "create", "--name",
+			"c1", "--start-hold-seconds",
+			strconv.FormatUint(uint64(seconds), 10)).(*pb.CreateClusterRequest)
+		wantRequest(t, req.StartHoldConf,
+			&pb.StartHoldConf{Seconds: seconds})
+	}
+}
+
 // TestClusterNameFallback is the first field→flag exception of dnvctl.md,
 // Conventions, in all three states: --name wins, an empty --name falls back
 // to the global --cluster, and `cluster list` — a request with no

@@ -18,6 +18,17 @@ const (
 	inspectKindNewLeg = "new leg"
 )
 
+// startingErr is the error of a call whose reply carries no code — a bitmap
+// read, the inspect call — while the startup pass runs (dnagent.md SH33):
+// Unavailable, so the caller tries again later; nil once the pass ended.
+func (s *CnAgentServer) startingErr() error {
+	if !s.startup.Starting() {
+		return nil
+	}
+	return status.Error(codes.Unavailable,
+		"the agent's startup pass still runs")
+}
+
 // InspectGrp is cnagent.md CN31, the inspect of one md-raid1 group on the
 // primary: for every member the group keeps — its leg_list legs and the new
 // legs of its open repair — whether the leg serves, its superblock read
@@ -41,6 +52,9 @@ func (s *CnAgentServer) InspectGrp(
 	ctx context.Context,
 	req *pb.InspectGrpRequest,
 ) (*pb.InspectGrpReply, error) {
+	if err := s.startingErr(); err != nil {
+		return nil, err
+	}
 	look, err := s.inspectLook(ctx, req)
 	if err != nil {
 		return nil, err

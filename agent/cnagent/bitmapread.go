@@ -45,6 +45,9 @@ func (s *CnAgentServer) GetThinDeviceBm(
 	ctx context.Context,
 	req *pb.GetThinDeviceBmRequest,
 ) (*pb.GetThinDeviceBmReply, error) {
+	if err := s.startingErr(); err != nil {
+		return nil, err
+	}
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
@@ -107,6 +110,9 @@ func (s *CnAgentServer) GetLegBm(
 	ctx context.Context,
 	req *pb.GetLegBmRequest,
 ) (*pb.GetLegBmReply, error) {
+	if err := s.startingErr(); err != nil {
+		return nil, err
+	}
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),

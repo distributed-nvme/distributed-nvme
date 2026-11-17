@@ -226,8 +226,9 @@ GW4. **Request validation first.** `validate.go` implements the table of
 sizes and patterns, the NQN rules and bounded numerics. A zero passes as
 "give me the default", and for every member that ends up in a stored conf
 substituting that default is GW11's job on the write path, never this
-one's. `md_check_conf.interval_days` is the one exception: its zero in a
-present message is kept as no check (GW11). `validate.go` also refuses a
+one's. `md_check_conf.interval_days` and `start_hold_conf.seconds` are
+the two exceptions: the zero of each in a present message is kept, as no
+md check and as no start hold (GW11). `validate.go` also refuses a
 `bdev_feature_list` that is not empty and a `qos_ratio` that is not all
 zero, and it checks the `bdev_conf` geometry rules, which `CreateCluster`
 judges once more on its resolved conf, still before any read (Clusters).
@@ -555,8 +556,8 @@ the RPC that writes the conf; a pool's stripe from its cluster is then
 narrowed where its product with the slice count is over the bound
 (`architecture.md`, Common validation, the stripe's product). This
 rule is where each handler carries that out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
-settles `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf` and
-`md_check_conf` (Clusters); `CreateStoragePool` stores `resolveSpBdevConf`'s
+settles `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf`,
+`md_check_conf` and `start_hold_conf` (Clusters); `CreateStoragePool` stores `resolveSpBdevConf`'s
 conf, `model.ResolveSpBdevConf` of the merge `mergeSpBdevConf` makes over
 the cluster's conf (`architecture.md`, Storage pools; Storage pools and
 GrowSlice). A handler that then COMPUTES with a
@@ -620,7 +621,10 @@ error. `ValidateClusterConf` adds `dn_bin_conf.extent_size` non-zero —
 non-zero only, because a DN header may legitimately be formatted at an
 unusual size — the shift ladder of `architecture.md`, DN bins, the two batch
 sizes, the four intervals, `md_check_conf.interval_days` no greater than
-`MaxMdCheckDays` (a zero or an absent message passing, as no check), and
+`MaxMdCheckDays` (a zero or an absent message passing, as no check),
+`start_hold_conf.seconds` no greater than `MaxStartHoldSeconds` (a zero
+passing as no hold, and an absent message as the default hold,
+`model.ResolveStartHoldSeconds`), and
 `ValidateBdevConf` of `bdev_conf` when the cluster carries one. The ladder predicate is one unexported function shared
 with `model.ResolveDnBinConf`, so resolver and validator cannot drift; the
 all-zero shift set a `ClusterConf` written without a `dn_bin_conf` would
@@ -690,9 +694,10 @@ and field-level rules stay in the cited section of `architecture.md`,
   this attempt reuse it (`architecture.md`, Clusters), and build the message
   to store outside it too, for the same reason: it is
   `model.ResolveClusterConf` of the request's conf members plus that epoch,
-  so `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf` and
-  `md_check_conf` land concrete — an absent `md_check_conf` as the default
-  interval, a present one as given, its zero included — while `qos_ratio`
+  so `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf`,
+  `md_check_conf` and `start_hold_conf` land concrete — an absent
+  `md_check_conf` as the default interval and an absent `start_hold_conf`
+  as the default hold, a present one as given, its zero included — while `qos_ratio`
   and the epoch, which have no default, always pass through as given (GW11;
   validation first, resolution second — never the other way round). STM:
   `ClusterConfKey` of the name present is `ALREADY_EXISTS`; compute the
@@ -798,6 +803,8 @@ to no cluster (`architecture.md`, Worker registry).
   call `GetDnInfo` with the cluster id and `dn_id`; an agent failure is
   `ABORTED`. Reply `applied_revision`, `dn_info` and `obs_stamp`, all from
   the agent's reply, which answers from its latest observation of the node,
+  or with none while the agent starts (`dnagent.md` SH33), its code not
+  passed on,
   and `obs_age`, which `obsAge` derives from that stamp (`architecture.md`,
   Disk nodes — deliberately the observation's revision, never the stored
   rev key).
@@ -1809,7 +1816,7 @@ gateway, never through `workerctl`.
   which a list of every cntlr would fail, but only the list's length as
   the cntlr mutators change it, and the entry gone with its subsystem;
   every defaultable member of the stored confs resolved on the write path
-  but `md_check_conf`, which the Go cases pin;
+  but `md_check_conf` and `start_hold_conf`, which the Go cases pin;
   paging with its empty last page and a malformed token; the inspects passing
   the agent's report and revision through verbatim, a revision the pool's rev
   key has passed, and the bitmap read passing its bitmap through, which the

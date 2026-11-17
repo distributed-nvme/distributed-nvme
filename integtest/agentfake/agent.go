@@ -202,6 +202,10 @@ type Agent struct {
 	pb.UnimplementedControllerNodeAgentServer
 
 	cfg Config
+	// started is the agent start time every reply's stamp carries
+	// (dnagent.md SH33): the fake's creation, or the latest start a Starting
+	// lever gave, which stays after the lever is cleared.
+	started time.Time
 
 	mu         sync.Mutex
 	state      map[string]*objectState
@@ -238,6 +242,7 @@ type Agent struct {
 func New(ctx context.Context, cfg Config) (*Agent, error) {
 	a := &Agent{
 		cfg:        cfg,
+		started:    time.Now().Round(0),
 		state:      make(map[string]*objectState),
 		beh:        &Behavior{},
 		epochs:     make(map[string]map[string]*epochEntry),

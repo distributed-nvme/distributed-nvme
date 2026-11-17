@@ -41,6 +41,25 @@ const (
 	// a create takes; zero turns the check off.
 	DefaultMdCheckDays = 30
 	MaxMdCheckDays     = 365
+	// The hold of an agent that answers it is starting
+	// (ClusterConf.start_hold_conf; dnv-worker.md HL8): the seconds from the
+	// agent's start during which the worker judges none of its objects by a
+	// starting reply, the value a cluster that names none reads and the
+	// largest a create takes; zero turns the hold off.
+	DefaultStartHoldSeconds = 120
+	MaxStartHoldSeconds     = 3600
+	// AgentStopGrace bounds an agent's graceful stop (dnagent.md, Bootstrap
+	// and lifecycle): the RPCs in flight get that long to end, and then the
+	// server stops at once, which ends the worker's Check* streams, so a
+	// stopping agent stops answering within about a second of its signal; it
+	// exits once its background work has unwound.
+	AgentStopGrace = time.Second
+	// AgentHandshakeTimeout bounds a connection's handshake on an agent's
+	// server (grpc's connection timeout): a stop waits for a handshake
+	// still pending before it ends any stream, so a client that connected
+	// and then went silent could otherwise hold the stop for grpc's default
+	// of two minutes.
+	AgentHandshakeTimeout = 3 * time.Second
 	// MdCheckRequestBound is how long the sp worker lets one check request
 	// stand before it ends the request unfinished and schedules the next
 	// (dnv-worker.md AR16), in seconds: two days, far more than md takes to
@@ -478,6 +497,15 @@ const (
 	// index and above, or could not then save the piece (dnagent.md DN15);
 	// a push reply carries no revision.
 	ReplyCodeSaveFailed = 5
+	// ReplyCodeStarting answers a request to an agent whose startup pass has
+	// not ended (dnagent.md SH33): every check round and info read, which
+	// carry no observation, and every Syncup* and push, which the agent does
+	// not apply. A bitmap read and the inspect call, whose replies carry no
+	// code, fail with the gRPC status Unavailable instead. The reply's stamp
+	// carries the agent's start time (ObsStamp.agent_start_time), by which
+	// the worker bounds how long it holds its verdict (dnv-worker.md HL8).
+	// It is a rejection: nothing was applied.
+	ReplyCodeStarting = 6
 
 	// Seconds between background retries of a migration destination whose
 	// build stopped short, at its nvme connect once the in-pass retries below

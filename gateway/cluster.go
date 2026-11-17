@@ -57,8 +57,13 @@ import (
 // Nothing downstream resolves again. A zero read back out of this key is
 // corruption, and the worker and the agents refuse it rather than guessing,
 // save md_check_conf's zero, which means no md check (architecture.md,
-// Common validation) — which is what makes a cluster's extent size and bin ladder immutable
-// facts rather than whatever the reading binary's constants happen to say.
+// Common validation), and start_hold_conf's zero, which means no hold
+// (dnv-worker.md HL8) — which is what makes a cluster's extent size and bin
+// ladder immutable facts rather than whatever the reading binary's constants
+// happen to say. The one reader-side default is an absent start_hold_conf,
+// which only a cluster created before the setting existed lacks: it reads as
+// the default hold (model.ResolveStartHoldSeconds), so such a cluster keeps
+// a defined, non-zero hold.
 func (s *Server) CreateCluster(
 	ctx context.Context,
 	req *pb.CreateClusterRequest,
@@ -78,6 +83,7 @@ func (s *Server) CreateCluster(
 		AllocConf:       req.GetAllocConf(),
 		HealthCheckConf: req.GetHealthCheckConf(),
 		MdCheckConf:     req.GetMdCheckConf(),
+		StartHoldConf:   req.GetStartHoldConf(),
 	})
 	var cid uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {

@@ -76,11 +76,15 @@ type CnAgentServer struct {
 	// the whole `nvme disconnect`. It is a field so a test can shrink it.
 	disconnectSlots chan struct{}
 
-	// rootCtx is the process lifetime ctx, captured at Reconcile; the
-	// CN10/CN18 connect retries, the CN10 background disconnects and path
-	// watchers, the CN11 probers and the background reads (SH29) hang off
-	// it, so shutdown cancels them.
+	// rootCtx is the process lifetime ctx, captured by Prepare before the
+	// port opens, or at Reconcile when nothing prepared the server (a test);
+	// the CN10/CN18 connect retries, the CN10 background disconnects and
+	// path watchers, the CN11 probers and the background reads (SH29) hang
+	// off it, so shutdown cancels them. rootSet says Prepare set it.
 	rootCtx context.Context
+	rootSet bool
+	// startup is the agent's startup state (dnagent.md SH33).
+	startup agent.Startup
 
 	// probeInterval / probeStall / retryInterval are fields rather than
 	// constants, and now and sleep — like probeIO above — are overridable,
@@ -474,6 +478,13 @@ func (s *CnAgentServer) SyncupCn(
 	ctx context.Context,
 	req *pb.SyncupCnRequest,
 ) (*pb.SyncupCnReply, error) {
+	if s.startup.Starting() {
+		// dnagent.md SH33: refused, not applied, while the pass runs.
+		return &pb.SyncupCnReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(s.now()),
+		}, nil
+	}
 	defer s.markNodeSyncup(cnKey(req.GetClusterId(), req.GetCnId()),
 		req.GetRevision())()
 	s.locks.Node().Lock()
@@ -504,6 +515,13 @@ func (s *CnAgentServer) SyncupCntlr(
 	ctx context.Context,
 	req *pb.SyncupCntlrRequest,
 ) (*pb.SyncupCntlrReply, error) {
+	if s.startup.Starting() {
+		// dnagent.md SH33: refused, not applied, while the pass runs.
+		return &pb.SyncupCntlrReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(s.now()),
+		}, nil
+	}
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
 	defer s.markSyncup(key, req)()
@@ -529,6 +547,11 @@ func (s *CnAgentServer) PushCloneBitmap(
 	ctx context.Context,
 	req *pb.PushCloneBitmapRequest,
 ) (*pb.PushCloneBitmapReply, error) {
+	if s.startup.Starting() {
+		// dnagent.md SH33: refused, not applied, while the pass runs.
+		return &pb.PushCloneBitmapReply{AgentReply: agent.StartingReply()},
+			nil
+	}
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
@@ -549,20 +572,29 @@ func (s *CnAgentServer) GetCnInfo(
 	ctx context.Context,
 	req *pb.GetCnInfoRequest,
 ) (*pb.GetCnInfoReply, error) {
+	// Starting is read before the observation: the pass ends the start
+	// after it stored its last observation, so a call that finds the
+	// start ended reads every observation the pass made (dnagent.md SH33).
+	if s.startup.Starting() {
+		return &pb.GetCnInfoReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(s.now()),
+		}, nil
+	}
 	obs, since, known := s.answerCn(ctx,
 		cnKey(req.GetClusterId(), req.GetCnId()), false)
 	now := s.now()
 	if !known {
 		return &pb.GetCnInfoReply{
 			AgentReply: unknownCn(req.GetCnId()),
-			ObsStamp:   (&cnObs{}).Stamp(now, time.Time{}),
+			ObsStamp:   s.startup.Stamped((&cnObs{}).Stamp(now, time.Time{})),
 		}, nil
 	}
 	return &pb.GetCnInfoReply{
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
 		CnInfo:     obs.Info,
-		ObsStamp:   obs.Stamp(now, since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(now, since)),
 	}, nil
 }
 
@@ -576,20 +608,36 @@ func (s *CnAgentServer) GetCntlrInfo(
 ) (*pb.GetCntlrInfoReply, error) {
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
+	// Starting is read before the observation: the pass ends the start
+	// after it stored its last observation, so a call that finds the
+	// start ended reads every observation the pass made (dnagent.md SH33).
+	if s.startup.Starting() {
+		return &pb.GetCntlrInfoReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(s.now()),
+		}, nil
+	}
 	obs, since, known := s.answerCntlr(ctx, key, false)
 	now := s.now()
 	if !known {
 		return &pb.GetCntlrInfoReply{
 			AgentReply: unknownCntlr(req.GetCntlrPointer()),
-			ObsStamp:   (&cntlrObs{}).Stamp(now, time.Time{}),
+			ObsStamp:   s.startup.Stamped((&cntlrObs{}).Stamp(now, time.Time{})),
 		}, nil
 	}
 	return &pb.GetCntlrInfoReply{
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
 		CntlrInfo:  obs.Info,
-		ObsStamp:   obs.Stamp(now, since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(now, since)),
 	}, nil
+}
+
+// startingStamp is the stamp of a reply the agent gives while its startup
+// pass runs (dnagent.md SH33): no observation, the answer's time and the
+// agent's start.
+func (s *CnAgentServer) startingStamp(now time.Time) *pb.ObsStamp {
+	return s.startup.Stamped(&pb.ObsStamp{AnswerTime: agent.Timestamp(now)})
 }
 
 // unknownCn and unknownCntlr are the refusals of a round or an info read of

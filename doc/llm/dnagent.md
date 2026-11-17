@@ -112,7 +112,9 @@ The constants this document relies on, whose values and comments
 * The `AgentReply.code` values. Zero is OK. `ReplyCodeStaleRevision`,
   `ReplyCodeUnknownObject`, `ReplyCodeInvalidConf` and
   `ReplyCodeSaveFailed` are rejections: the request was not applied, so
-  the worker reads no verdict from the reply's rows.
+  the worker reads no verdict from the reply's rows; so is
+  `ReplyCodeStarting`, the answer of an agent whose startup reconcile still
+  runs (SH33), which applies nothing and reads nothing.
   `ReplyCodeInvalidConf` refuses a request whose conf carries a value the
   control plane cannot have written — a proto3 zero where
   `architecture.md`, Common validation, requires a concrete geometry, or a
@@ -153,11 +155,16 @@ The constants this document relies on, whose values and comments
   kept only as the code of the observation each of them stores (SH28). Any
   non-zero code in a `Check*` reply makes the worker issue a `Syncup*`
   (`dnv-worker.md` RW4), save in a reply whose observation is too old
-  (`dnv-worker.md` HL7), and in a `Push*Bitmap` reply ends that push plan.
+  (`dnv-worker.md` HL7) and in a reply of `ReplyCodeStarting`, which the
+  worker judges by the agent's start time (`dnv-worker.md` HL8), and in a
+  `Push*Bitmap` reply ends that push plan.
   Among the rejections the specific value sets the level of the worker's
-  "syncup rejected" record (`dnv-worker.md` RW5), and a round answered
+  "syncup rejected" record (`dnv-worker.md` RW5), a round answered
   with `ReplyCodeUnknownObject` is not judged by its observation's age
-  (`dnv-worker.md` HL7); otherwise it serves details and tests.
+  (`dnv-worker.md` HL7), and a `SyncupCntlr` refused with
+  `ReplyCodeInvalidConf` or `ReplyCodeSaveFailed` makes the worker judge
+  an enabled primary's later rounds unhealthy (`dnv-worker.md` HL9);
+  otherwise it serves details and tests.
 * `DnMigrConnectRetryInterval`, the pace of the background retries of a
   migration destination whose build stopped short, at its `nvme connect`
   once the retries within its pass ran out or at another step, and of one
@@ -205,6 +212,11 @@ The constants this document relies on, whose values and comments
   Migration: a migration source's per-CN dm-linears stay suspended at least
   this long before they are reloaded onto their dm-errors — sooner where an
   export above one is to go (DN12, [D12]).
+* `AgentStopGrace`, how long `Serve`'s graceful stop lets the RPCs in
+  flight end before it stops the server at once and cancels the handlers
+  still running, and `AgentHandshakeTimeout`, how long the server waits
+  for a connection's handshake, which a stop also waits for (Bootstrap and
+  lifecycle).
 * The dnv disk format ([D13]), all byte offsets on the raw `--disk`
   device: `DnHeaderOffset` and `DnHeaderSize` (the header block),
   `DnTableSlotAOffset`, `DnTableSlotBOffset` and `DnTableSlotSize` (the two
@@ -224,8 +236,10 @@ leg ids, rendered as an RFC-4122-shaped uuid string and as a bare hex nguid.
 
 ### Bootstrap and lifecycle
 
-SH1. The lifecycle is **reconcile, then serve** (`architecture.md`, Common
-agent rules): the gRPC listener MUST NOT open before the startup reconcile
+SH1. The lifecycle is **serve, then reconcile** (`architecture.md`, Common
+agent rules): the gRPC listener opens before the startup reconcile, which
+runs while the agent answers that it is starting (SH33), and the agent
+serves every request as the rules below say once the reconcile has
 finished. A fresh node has an empty local store — an empty directory, which
 must already exist: the agent creates none, and a missing one is SH3's fatal
 case — so its reconcile is instant.
@@ -236,7 +250,37 @@ correlatable.
 
 SH3. Reconcile returns an error only for **fatal** conditions (the
 local-store prefix unreadable); per-resource failures are captured as
-`RES_STATUS_ERROR` (`ResInfo` tracking) and never abort startup.
+`RES_STATUS_ERROR` (`ResInfo` tracking) and never abort startup. A fatal
+reconcile stops the gRPC server SH33 opened and ends the process.
+
+SH33. **The agent answers while it starts.** (Its number is out of order
+because rule ids never shift.) `Serve` first prepares the role server —
+it hands it the `rootCtx` its background work derives from (SH27) and
+marks it **starting** from that moment, its **start time** — then opens
+the port and serves, and then runs the startup reconcile (SH1); the agent
+is starting until that reconcile ends. While it starts, every check round
+and every info read, of any object, answers `ReplyCodeStarting` with no
+observation, and every `Syncup*` and push is refused with that code, and
+a bitmap read or an inspect call with gRPC's Unavailable, its reply
+carrying no code: none of them takes a lock, touches the node or starts a
+read (SH29). Every reply's stamp carries the start time
+(`ObsStamp.agent_start_time`), by the node's clock, during the start and
+after it. A round or an info read reads whether the agent is starting
+before it reads the object's observation, and the reconcile ends the
+start only after it has stored its last observation, so one that finds
+the start ended answers from every observation the reconcile made.
+Reason: the startup reconcile holds the
+node write lock while it converges every object, at many pools for
+minutes, and a worker's round to a port not yet open is a missed round, two
+of which fail a primary over (`dnv-worker.md` AR10); an agent that answers
+that it starts lets the worker hold its verdict for a bounded time
+(`dnv-worker.md` HL8), and the start time lets it bound that hold by the
+node's clock across a worker restart. Every object answers starting, not
+only the ones the reconcile has not converged yet: no read runs while the
+reconcile holds the node write lock, so an object converged early would
+answer from an observation that ages for the rest of the pass. A listen
+that fails comes before the reconcile, so a second agent on a port already
+in use ends before it touches the node.
 
 SH27. **Background tasks and process exit.** (Its number is out of order
 because rule ids never shift: code comments cite them.) A role server MAY
@@ -246,9 +290,11 @@ is specified in DN13), the DN12 fence timer, the DN9 side-zeroing workers,
 the background reads the check rounds start (SH29), the cn's connect retry,
 the CN11 leg probers, the CN10 path watchers and the cn sweep's
 background `nvme disconnect` (`cnagent.md` CN10, CN18). Every one of them
-derives its ctx from the server's **`rootCtx`** — the process-lifetime ctx
-captured at `Reconcile`, which `Serve` derives from its own ctx and cancels
-before returning — and, the background disconnect and the background reads
+derives its ctx from the server's **`rootCtx`** — the process-lifetime
+ctx, which `Serve` derives from its own ctx, hands the server before the
+port opens (SH33) and cancels before returning, and which `Reconcile`
+captures instead when nothing prepared the server, as in a test — and,
+the background disconnect and the background reads
 aside, mints a fresh trace id per attempt (`common.NewTraceId`), taking the
 SH11 locks, where it takes any, for the attempt only, never across the
 whole task. The
@@ -276,7 +322,8 @@ begun — a task that would start then is refused, and the next process's
 reconcile starts its work again (DN2). `Serve` takes it as its
 `waitBackground` parameter; the task ctx derives from the signal ctx, so a
 signal cancels it as the graceful stop starts, and `Serve` waits once the
-stop has drained the last RPC. Cancellation kills the in-flight
+stop has ended, every RPC drained or, past `AgentStopGrace`, cut and its
+handler returned (Bootstrap and lifecycle). Cancellation kills the in-flight
 child through the SH15 soft/hard timeout machinery (`osclient.md`,
 RunCommand, sends SIGTERM then SIGKILL), so the wait is bounded by
 `CmdHardTimeout` per in-flight command — unless the child sits in an
@@ -319,15 +366,38 @@ end: its restart finds the linears suspended and treats the window as
 elapsed (DN12 rule 1), save the restarts Known limits names.
 
 `Serve` in `agent/agent.go` is the shared lifecycle: it mints the startup
-trace id, derives the run ctx the role servers capture as `rootCtx`, runs
-the role's reconcile, listens, builds the gRPC server with the message limit
-and the two server interceptors, registers the role's service and serves
-until its own ctx is cancelled (SIGTERM or SIGINT, CM4), when the graceful
-stop drains every RPC.
+trace id, derives the run ctx, hands it to the role server's prepare step,
+which keeps it as `rootCtx` and marks the agent starting (SH33), listens,
+builds the gRPC server with the message limit, a handshake bound of
+`AgentHandshakeTimeout` and the two server interceptors, registers the role's service, serves and logs
+`agent serving`, then runs the role's reconcile and logs `agent started`
+with the time the reconcile took, and serves on until its own ctx is
+cancelled (SIGTERM or SIGINT, CM4). Then it stops the gRPC server
+gracefully, which lets the RPCs in flight end, for at most
+`AgentStopGrace`, and past it stops the server at once, which ends every
+stream still open and cancels the ctx of every handler still running;
+`Serve` returns only once that stop has ended, which waits until every
+handler has returned. A converge so cut has its commands killed through
+its cancelled ctx (SH15) and is left as a crash would leave it, and the
+next start's reconcile converges the node again from the local store
+(SH1). Reason: a worker's `Check*` stream never ends by
+itself, and a worker whose rounds the agent answers in time drops it
+once those answers, which no read refreshes after the signal has
+cancelled `rootCtx`, have aged past its bound (`dnv-worker.md` HL7), so
+an unbounded drain would keep a stopping agent answering stale rounds
+for seconds; bounded, the agent stops answering within about a second of
+its signal. A connection whose handshake is still pending holds grpc's
+stop, so the handshake bound keeps that wait to a few seconds. `Serve`
+waits for the handlers the stop cut so that no converge goes on, and no
+command of one outlives the process, once it has returned. A reconcile
+that fails stops the server at once and returns its error (SH3), and a
+gRPC server that ends without a signal, as on a failed accept, is
+stopped the same way; on either path `Serve` waits for the handlers
+still running before it returns.
 The cancel-then-join pair is deferred, so **every** return path takes it,
 not just the one through serving: the reconcile has already armed the
 background goroutines (and forked their children) by the time a reconcile
-or listen error returns, and cancellation alone does not reap a child — the
+error returns, and cancellation alone does not reap a child — the
 watchdog that turns it into SIGTERM and then SIGKILL lives in this process
 and dies with it, so the child would be reparented to init still holding its
 dm device open. Cancel first, then join, in that order: the background
@@ -511,10 +581,12 @@ request is current and its conf usable, so it is none of the other three.
 A migration piece whose push could not first remove the chunks stored at
 its index and above, or could not then save the piece, is rejected with
 it too (DN15).
-All four rejection kinds
+All four rejection kinds, and the refusal of a request that reaches an
+agent still starting (`ReplyCodeStarting`, SH33),
 return a normal gRPC reply (`AgentReply.code` non-zero), never a gRPC
-error status — only `GetDnSize`/`GetCnSize` and `Get*Bm` report failure
-through the status (`architecture.md`, Common agent rules). A request a
+error status — only `GetDnSize`/`GetCnSize`, `Get*Bm` and `InspectGrp`
+report failure through the status, the Unavailable of an agent still
+starting among them (`architecture.md`, Common agent rules). A request a
 gate refuses is never persisted (SH5); one refused for a failed save is
 in the store only when its rename held and the directory sync after it
 failed (SH5). Neither becomes the desired state of the process that
@@ -1180,8 +1252,8 @@ T2) — on a worker's stream, that of the round that opened it (T3) — so
 without it every later round's read would log under that first round's id.
 An empty `trace_id` keeps the stream ctx's id.
 
-SH25. Per round: validate the object (unknown ⇒ reply `agent_reply.code`
-of `ReplyCodeUnknownObject`, `revision` zero, no info, and a stamp with no
+SH25. Per round, once the agent has started (SH33): validate the object
+(unknown ⇒ reply `agent_reply.code` of `ReplyCodeUnknownObject`, `revision` zero, no info, and a stamp with no
 observation time — the stream stays open); otherwise answer from the
 object's latest observation (SH28) — its code in `agent_reply`, its
 revision, its info as SH26 says, and the reply's stamp — then start the
@@ -1203,13 +1275,15 @@ agent keeps in memory its latest observation (`architecture.md`,
 Live-state reporting): the rows, the code, the revision of the request the
 agent held for the object while the converge or read that made it ran,
 the time by the node's clock when that converge or read ended, and the
-trace id of the call whose converge or read made it. The four
+trace id of the call whose converge or read made it. Once the agent has
+started (SH33), the four
 check rounds and the four info reads (`GetDnInfo`, `GetSideInfo`,
 `GetCnInfo`, `GetCntlrInfo`) answer from it alone: they take no lock of
 the SH10 to SH13 hierarchy, read nothing of the node, and put in the reply
 its stamp (`ObsStamp`) — the observation's time and trace id, the agent's
-clock as it answers, and the start of a converge of the object in flight
-(SH30), unset when none is. An info read starts no read. An object the
+clock as it answers, the start of a converge of the object in flight
+(SH30), unset when none is, and the agent's start time (SH33). An info
+read starts no read. An object the
 agent holds but has no observation of yet is answered with code zero,
 revision zero and no observation time; how the worker judges such a reply
 is `dnv-worker.md` HL7.
@@ -1237,7 +1311,9 @@ the agent accepted carries the stamp of the observation its converge
 stored, with no converge start, and the time the agent saved the request
 to its local store (SH5), which every accepted request has. A reply that
 refuses the request, a gate's refusal or a failed save's (SH9), carries
-no rows, no stamp and no save time, and its call stores no observation.
+no rows, no stamp and no save time, and its call stores no observation;
+the refusal of an agent still starting carries no rows and no save time
+either, and a stamp with no observation (SH33).
 An object's observation times only increase: a time not later than
 the stored one is stored as just after it, so equal times mean the same
 observation.
@@ -1252,7 +1328,8 @@ re-send the syncup every time (`dnv-worker.md` RW4).
 
 SH29. **The background read.** A check round of an object the agent holds
 starts a read of that object when no read of it runs, no converge of it is
-in flight and no node-level syncup marks the node (SH30), and, on the dn, the join of
+in flight and no node-level syncup marks the node (SH30), the agent has
+started (SH33), and, on the dn, the join of
 SH27 has not begun. The read runs under `rootCtx` with the trace id of the
 round that started it (SH24, SH27), so it outlives the round and its
 stream. It holds the node read lock, plus the object's lock for a side or a
@@ -1488,11 +1565,13 @@ underscores.
 
 CM4. Each subcommand's `RunE`: bind viper, then run CM3's three checks —
 `requireValues`, then the `--nvmet-port-id` floor and the `--nvmet-qid-max`
-range, whose resolved values are carried on to the constructor; a signal-notified ctx for SIGINT and SIGTERM;
+range, whose resolved values are carried on to the constructor; a
+signal-notified ctx for SIGINT and SIGTERM, whose cancellation starts
+`Serve`'s bounded stop (Bootstrap and lifecycle);
 construct `common.NewNameFmt` over the local store and the process's
 **single** `common.NewLimitedOsClient` (with the default limit); build the
 role server (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call
-`agent.Serve` with the role's reconcile, a register func that calls
+`agent.Serve` with the role's prepare step (SH33) and reconcile, a register func that calls
 `pb.RegisterDiskNodeAgentServer` (resp.
 `pb.RegisterControllerNodeAgentServer`), and the role's SH27 background
 waiter — the dn passes its `WaitBackground`, the cn passes nil (its probers
@@ -1533,8 +1612,9 @@ one `PortConf`),
 the per-object `ResInfo` trackers, each DN's and each side's latest
 observation and running background read (SH28, SH29), the converge marks
 (SH30), the DN8 retry registry (DN13), the per-side zeroing registry and its
-zeroing slots (DN9), and the SH27 background-task bookkeeping: the
-`rootCtx` captured at `Reconcile`, the wait group that `WaitBackground`
+zeroing slots (DN9), the startup state of SH33, and the SH27
+background-task bookkeeping: the `rootCtx` `Serve` hands it before the
+port opens, the wait group that `WaitBackground`
 waits on, and the mark that wait sets when it begins, under the lock every
 registration and every fence-timer arming takes, and never clears: from
 then on no task registers and no fence timer is armed (SH27). The
@@ -1663,7 +1743,8 @@ tracking, so a file this process never loaded is invisible to all of them,
 and a restart is the only place that can collect it, save a push of a
 chunk that is not equal to the one held, which removes its migration's
 chunk files at its index and above by their paths (DN15). The reconcile holds
-the node write lock throughout, with the SH2 trace id. Outside it, a side's
+the node write lock throughout, with the SH2 trace id, while the port
+answers that the agent is starting (SH33). Outside it, a side's
 drop runs under `SyncupDn`'s node write lock, and DN13's deletions and the
 sweep's inside a converge of the side — a `SyncupSide`'s, a DN8 retry
 attempt's or the DN12 fence timer's — and a push's removal under the node
@@ -3980,11 +4061,15 @@ else reported through `agent_reply` is still a protocol-level refusal.
 * A side the startup reconcile holds but does not converge — one whose
   DN's stored extent size is unusable (DN2) — has no observation until its
   first read (SH28), so its first round after the restart is answered with
-  no observation time. An agent restart is no pause in the worker's
-  rounds of the side (`dnv-worker.md` HL7), so unless those rounds paused
-  meanwhile for a reason of the worker's own, the worker counts that
-  reply's age from a round before the restart, and takes the round for a
-  missed round once that earlier round lies more than its bound back.
+  no observation time. When a round of the side found the agent starting
+  (SH33), the first round after the start is the first after a pause in
+  the worker's rounds of the side, and that reply's age counts from it
+  alone (`dnv-worker.md` HL8). When none did, as when the whole start fell
+  between two rounds, the restart is no pause in the worker's rounds of
+  the side (`dnv-worker.md` HL7), so unless those rounds paused meanwhile
+  for a reason of the worker's own, the worker counts that reply's age
+  from a round before the restart, and takes the round for a missed round
+  once that earlier round lies more than its bound back.
 * The dn sweep gates its removals on its `dmsetup ls` alone: an nvmet
   listing or a host walk that did not answer is named in the verdict, so
   the reply is not clean and the worker re-drives the pass, but it stops
@@ -4012,8 +4097,9 @@ else reported through `agent_reply` is still a protocol-level refusal.
   as a leftover's sweep (DN17) or the start of a side's zeroing that nothing
   runs (DN16); only the converges no syncup brings still run — the
   background converge attempts (SH11) and a restart's reconcile (DN2). Apart
-  from one narrow case on a CN, during an ownership change of a pool
-  (`cnagent.md`, Known limits), nothing is lost on either role: the node
+  from two narrow cases on a CN, during an ownership change of a pool
+  (`cnagent.md`, Known limits) and at the failover below, nothing is lost
+  on either role: the node
   serves on as the requests it accepted left it, and md's arbitration keeps
   a group from two writers (`architecture.md`, Failover). On a CN, what a
   `SyncupCntlr` refused for its failed save does to the forced-start marks
@@ -4024,7 +4110,14 @@ else reported through `agent_reply` is still a protocol-level refusal.
   in flight rather than cancel them (SH30). A rejection neither sets nor
   clears a health epoch (`dnv-worker.md` HL1); the node's store row does
   (DN18), from the first save the disk refuses, with the effects
-  `dnv-worker.md` HL1 gives it. The fault also shows in the logs: the
+  `dnv-worker.md` HL1 gives it. On a CN, the rounds of an enabled primary
+  whose `SyncupCntlr` is so refused read unhealthy, so the worker fails it
+  over, and fails no primary over onto a cntlr so refused, and where every
+  healthy, enabled standby is so refused too it moves no role at all
+  (`dnv-worker.md` HL9, AR5, AR7); the old primary's demotion is refused as well, so
+  it serves on until the fence (`architecture.md`, Known limits, A
+  failover while the old primary serves can lose an acknowledged write).
+  The fault also shows in the logs: the
   agent's record of each failed save, and the worker's record of each
   rejection, on each round that re-sends the refused request (SH5;
   `dnv-worker.md`, Log records).

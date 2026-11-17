@@ -10,6 +10,15 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
+// Prepare hands the server the process's ctx and begins its startup state,
+// before agent.Serve opens the port (dnagent.md SH33): every RPC goroutine
+// then reads the rootCtx Reconcile keeps.
+func (s *CnAgentServer) Prepare(ctx context.Context) {
+	s.rootCtx = ctx
+	s.rootSet = true
+	s.startup.Begin(s.now())
+}
+
 // Reconcile is the SH1 startup pass (CN2): load the local store — while a
 // cn-* file does not load, no cntlr or chunk whose CN is not loaded is loaded
 // or deleted, and while a cntlr-* file does not load, neither is a chunk
@@ -24,9 +33,12 @@ import (
 // a no-op. It runs under the node write lock with the caller's
 // startup trace id (SH2), and fails only when the local store itself is
 // unreadable (SH3). Background retries (CN10/CN18) and probers (CN11) mint a
-// fresh trace id per attempt.
+// fresh trace id per attempt. It ends the agent's start as it returns nil
+// (dnagent.md SH33).
 func (s *CnAgentServer) Reconcile(ctx context.Context) error {
-	s.rootCtx = ctx
+	if !s.rootSet {
+		s.rootCtx = ctx
+	}
 	s.locks.Node().Lock()
 	defer s.locks.Node().Unlock()
 
@@ -204,6 +216,7 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 		s.storeCntlrObs(ctx, st, st.loadReq().GetRevision(), info,
 			sweep.Reply())
 	}
+	s.startup.End()
 	return nil
 }
 
@@ -275,7 +288,7 @@ func (s *CnAgentServer) syncupCn(
 		AgentReply: code,
 		Revision:   req.GetRevision(),
 		CnInfo:     info,
-		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), time.Time{})),
 		SaveTime:   agent.Timestamp(saveAt),
 	}
 }

@@ -100,10 +100,12 @@ func (s *CnAgentServer) answerCntlr(
 }
 
 // mayReadLocked reports whether a round may start a read of key (SH29): no
-// read of it runs (reading), and no converge of it and no node-level syncup
-// is in flight (SH30). Called with mu held.
+// read of it runs (reading), no converge of it and no node-level syncup is
+// in flight (SH30), and the startup pass has ended (SH33), since a read
+// would wait for the node lock the pass holds. Called with mu held.
 func (s *CnAgentServer) mayReadLocked(key string, reading bool) bool {
-	return s.roundReads && !reading && s.marks.QuietLocked(key)
+	return s.roundReads && !reading && s.marks.QuietLocked(key) &&
+		!s.startup.Starting()
 }
 
 // readParent is the ctx a round's read derives from: rootCtx, since the read

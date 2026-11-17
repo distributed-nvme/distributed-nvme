@@ -580,8 +580,8 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
-// the others, for computed values). It prints nineteen keys, and the suites
-// read seventeen of them and stop when one is missing: sixteen at preflight,
+// the others, for computed values). It prints twenty keys, and the suites
+// read eighteen of them and stop when one is missing: seventeen at preflight,
 // and RetiredLegMaxAge, which the worker suite's repair case reads.
 // Every suite that starts an etcd — the worker, gateway, cdc and e2e suites —
 // launches it with EtcdMaxTxnOps and EtcdMaxRequestBytes. The e2e suite
@@ -594,10 +594,11 @@ func TestKeyPrefix(t *testing.T) {
 // ceiling case to DnCloneMetaUnitCnt in units of DnCloneMetaUnit, and checks
 // the counters the id step moves against IdStepStride and ThinIdStepStride. The
 // worker and e2e suites read DefaultHealthCheckInterval,
-// DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases.
+// DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases,
+// and the e2e suite DefaultStartHoldSeconds for react's restart step.
 // The cdc suite's flood case fills the pending cap, CdcMaxPendingConnCnt, and
 // waits by the pre-Connect deadline, DefaultCdcPendingTmoMs. One of those
-// seventeen dropped or renamed here would otherwise surface only when a suite
+// eighteen dropped or renamed here would otherwise surface only when a suite
 // is run, at its preflight or in that case. No suite reads the other two,
 // MaxDelGrpPerTxn and MaxDelBmPerTxn; they are pinned as well, because a case
 // may size itself against them.
@@ -636,6 +637,7 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"MaxNvmeTcpCmdBytes":      common.MaxNvmeTcpCmdBytes,
 		"DefaultPrimaryUnhealthy": common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":     common.DemotionHoldTimeout,
+		"DefaultStartHoldSeconds": common.DefaultStartHoldSeconds,
 		"RetiredLegMaxAge":        common.RetiredLegMaxAge,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,

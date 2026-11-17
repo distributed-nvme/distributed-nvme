@@ -228,9 +228,11 @@ func reactFixture(t *testing.T) *model.SpState {
 
 // reactionCall is one mutation a pass ran, in call order.
 type reactionCall struct {
-	op        string
-	oldId     uint64
-	newId     uint64
+	op    string
+	oldId uint64
+	newId uint64
+	// passed are the standbys a failover or a replacement passes over (HL9).
+	passed    []uint64
 	sliceId   uint64
 	grpId     uint64
 	isMeta    bool
@@ -445,9 +447,11 @@ func (o *fakeReactionOps) failover(
 	oldId uint64,
 	newId uint64,
 	now uint64,
+	passed []uint64,
 ) error {
 	return o.record(reactionCall{
 		op: "failover", oldId: oldId, newId: newId, now: now,
+		passed: passed,
 	})
 }
 
@@ -500,6 +504,7 @@ func (o *fakeReactionOps) replaceCntlr(
 	spCnAddrs []string,
 	asPrimary bool,
 	now uint64,
+	passed []uint64,
 ) (uint64, error) {
 	err := o.record(reactionCall{
 		op: "replace", oldId: oldId, asPrimary: asPrimary, now: now,
@@ -4342,4 +4347,28 @@ func TestReactionPoolNeedsCheckIsNotATrigger(t *testing.T) {
 		h.wantOps()
 		h.wantSkipped(reactionReplaceCntlr, "shared_state")
 	})
+}
+
+// TestReactionFailoverPassesOverARefusingStandby pins AR5's election with
+// HL9: the smaller standby's agent refuses its own SyncupCntlr, so the
+// failover of the disabled primary goes to the next healthy standby, and the
+// op is handed the refusing standby to pass over, as model.Failover's own
+// election must.
+func TestReactionFailoverPassesOverARefusingStandby(t *testing.T) {
+	state := reactFixture(t)
+	state.Conf.CntlrIdList = append(state.Conf.CntlrIdList, reactCntlrC)
+	state.Cntlrs[reactCntlrC] = &pb.Cntlr{AddrPort: reactCnC}
+	h := newReactHarness(t, state)
+	h.state.Cntlrs[reactCntlrA].Disabled = true
+	h.w.verdicts.noteRefusing(reactCntlrB, true)
+	h.pass()
+	calls := h.wantOps("failover")
+	if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrC {
+		t.Fatalf("failover %d -> %d, want %d -> %d", calls[0].oldId,
+			calls[0].newId, reactCntlrA, reactCntlrC)
+	}
+	if !slices.Equal(calls[0].passed, []uint64{reactCntlrB}) {
+		t.Fatalf("the failover passed over %v, want [%d]", calls[0].passed,
+			reactCntlrB)
+	}
 }

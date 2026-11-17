@@ -196,6 +196,7 @@ var renderCases = []renderCase{
 		},
 		want: `{"applied_revision":"9","cntlr_info":null,` +
 			`"obs_age":"1.500500s","obs_stamp":{` +
+			`"agent_start_time":null,` +
 			`"answer_time":"2026-01-02T03:04:06.500506Z",` +
 			`"converge_start":null,` +
 			`"obs_time":"2026-01-02T03:04:05.000006Z",` +

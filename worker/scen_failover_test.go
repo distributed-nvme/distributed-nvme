@@ -812,14 +812,12 @@ func TestFailoverNewPrimarySettlesOverACloneSourceFault(t *testing.T) {
 		})
 }
 
-// TestFailoverNewPrimaryRefusingItsSyncup pins what a refused promotion
-// costs: the new primary's agent refuses every reply with a code, a refusal
-// gives no health verdict (HL1, HL2) and adds to no run (AR10), so the new
-// primary keeps the role with no health epoch, stays settling and stays in
-// the discovery record (architecture.md [D18]); the promotion is sent again
-// from every round (RW5) and no failover moves the role back, though the old
-// primary is a candidate again. Once the agent accepts, the new primary
-// settles.
+// TestFailoverNewPrimaryRefusingItsSyncup pins HL9: the primary's agent
+// refuses its SyncupCntlr with the invalid-conf code, so it answers its
+// rounds from the observation of the revision before. Each such round is
+// unhealthy, the health record names the refusal, its health epoch is set,
+// and AR5 fails it over to the healthy standby. Once the agent accepts
+// again, the pool converges.
 func TestFailoverNewPrimaryRefusingItsSyncup(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
@@ -827,50 +825,256 @@ func TestFailoverNewPrimaryRefusingItsSyncup(t *testing.T) {
 	w := h.startWorker(t, "w1")
 	h.waitOwnsAll(t, w)
 	c.waitConverged(t)
-	newAgent, newKey := c.cntlrAgent(t, 2)
-	foLever(t, newAgent, newKey, func(o *agentfake.Object) {
-		o.ReplyCode = common.ReplyCodeInvalidConf
+	primary, primaryKey := c.cntlrAgent(t, 1)
+	foLever(t, primary, primaryKey, func(o *agentfake.Object) {
+		o.SyncupCode = common.ReplyCodeInvalidConf
 	})
-
-	foSetDisabled(t, c, 1, true)
-	applied := foWaitFailover(t, h, w, 1, 2, 20*time.Second)
-	failRev := applied.num("revision")
-	foSetDisabled(t, c, 1, false)
-	// Six refusals take about six rounds, past the threshold of two seconds
-	// and the two rounds a failover back would need if a refusal counted.
-	const refusals = 6
-	h.waitUntil(t, 30*time.Second, fmt.Sprintf("%d refusals of the "+
-		"promotion", refusals), func() (bool, string) {
-		cntlr := c.cntlr(t, 2)
-		if !cntlr.GetPrimary() || cntlr.GetErrEpoch() != 0 || !cntlr.GetSettling() {
-			t.Fatalf("cntlr 2 while it refuses: primary %t, err_epoch %d, "+
-				"settling %t; want primary, no epoch, settling",
-				cntlr.GetPrimary(), cntlr.GetErrEpoch(), cntlr.GetSettling())
+	// A bump of the revision drives the primary a SyncupCntlr to refuse.
+	foSetDisabled(t, c, 2, false)
+	foWaitFailover(t, h, w, 1, 2, 30*time.Second)
+	found := false
+	for _, rec := range h.records(w, msgHealthChanged) {
+		if rec.num("cntlr_id") == 1 && rec.str("res_name") == resSyncupRefused {
+			found = true
 		}
-		if n := len(foReactions(h, w, reactionFailover)); n != 1 {
-			t.Fatalf("%d failovers applied, want only the first", n)
-		}
-		n := 0
-		for _, rec := range h.records(w, msgSyncupRejected) {
-			if foIsCntlr(2)(rec) && rec.num("revision") >= failRev {
-				n++
-			}
-		}
-		return n >= refusals, fmt.Sprintf("%d so far", n)
-	})
-	// The enable above is planted, and only the gateway's UpdateCntlrEnabled
-	// rewrites the discovery record, so the record is read for the refusing
-	// primary alone.
-	got := c.cdcEntry(t).GetNvmeTrConfList()
-	if !slices.ContainsFunc(got, func(conf *pb.NvmeTrConf) bool {
-		return proto.Equal(conf, c.cntlr(t, 2).GetNvmeTrConf())
-	}) {
-		t.Errorf("the discovery record lists %v, without the refusing primary", got)
+	}
+	if !found {
+		t.Errorf("no %q record names %q for cntlr 1", msgHealthChanged,
+			resSyncupRefused)
 	}
 
-	foLever(t, newAgent, newKey, func(o *agentfake.Object) { o.ReplyCode = 0 })
-	h.waitRecord(t, 10*time.Second, w, msgCntlrSettled, foIsCntlr(2))
+	foLever(t, primary, primaryKey, func(o *agentfake.Object) { o.SyncupCode = 0 })
 	c.waitConverged(t)
+}
+
+// TestFailoverOntoARefusingCandidateIsHeld pins AR5's third refusal (HL9):
+// the one standby's agent refuses its own SyncupCntlr, so it is no
+// candidate, and a primary failing on its threshold keeps the role while
+// the pass logs the refusal; once the standby holds the revision again, its
+// refusal ends and the failover runs. The cntlr threshold is long, so AR7's
+// sole-primary variant does not act meanwhile.
+func TestFailoverOntoARefusingCandidateIsHeld(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 2,
+			CntlrUnhealthy:   600,
+			SideUnhealthy:    1,
+			LegUnhealthy:     2,
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	standby, standbyKey := c.cntlrAgent(t, 2)
+	foLever(t, standby, standbyKey, func(o *agentfake.Object) {
+		o.SyncupCode = common.ReplyCodeInvalidConf
+	})
+	// A bump of the revision drives the standby a SyncupCntlr to refuse.
+	foSetDisabled(t, c, 2, false)
+
+	foFailPrimaryByRow(t, c)
+	h.waitRecord(t, 20*time.Second, w, msgReactionSkipped,
+		func(rec logRecord) bool {
+			return rec.str("kind") == reactionFailover &&
+				rec.str("reason") == reasonCandidateRefuses &&
+				rec.num("old_cntlr_id") == 1 && rec.num("new_cntlr_id") == 2
+		})
+	if n := len(foReactions(h, w, reactionFailover)); n != 0 {
+		t.Fatalf("%d failovers onto a refusing candidate", n)
+	}
+
+	foLever(t, standby, standbyKey, func(o *agentfake.Object) { o.SyncupCode = 0 })
+	foWaitFailover(t, h, w, 1, 2, 30*time.Second)
+}
+
+// TestRefusingStandbyLetsThePrimaryBeReplaced pins AR7 on a primary whose
+// only healthy standby's agent refuses its own SyncupCntlr (HL9): the
+// standby is no candidate, so AR5 logs its third refusal and AR7's
+// sole-primary variant replaces the failing primary once it has been
+// unhealthy for cntlr_unhealthy, the replacement's own check passing over
+// the refusing standby as the election does.
+func TestRefusingStandbyLetsThePrimaryBeReplaced(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 2,
+			CntlrUnhealthy:   6,
+			SideUnhealthy:    1,
+			LegUnhealthy:     2,
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	standby, standbyKey := c.cntlrAgent(t, 2)
+	foLever(t, standby, standbyKey, func(o *agentfake.Object) {
+		o.SyncupCode = common.ReplyCodeSaveFailed
+	})
+	// A bump of the revision drives the standby a SyncupCntlr to refuse.
+	foSetDisabled(t, c, 2, false)
+
+	foFailPrimaryByRow(t, c)
+	h.waitRecord(t, 20*time.Second, w, msgReactionSkipped,
+		func(rec logRecord) bool {
+			return rec.str("kind") == reactionFailover &&
+				rec.str("reason") == reasonCandidateRefuses
+		})
+	replaced := h.waitRecord(t, 30*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool { return rec.str("kind") == reactionReplaceCntlr })
+	if replaced.num("old_cntlr_id") != 1 || replaced.str("primary") != "true" {
+		t.Fatalf("the replacement %v, want the failing primary, cntlr 1",
+			replaced.attrs)
+	}
+	if n := len(foReactions(h, w, reactionFailover)); n != 0 {
+		t.Errorf("%d failovers onto a refusing standby", n)
+	}
+	// A write the model refuses is logged skipped with its op.
+	if n := h.countRecs(w, msgReactionSkipped, func(rec logRecord) bool {
+		return rec.str("op") != ""
+	}); n != 0 {
+		t.Errorf("%d reactions refused by their own checks", n)
+	}
+}
+
+// TestSharedRefusalMovesNoRole pins HL9's shared refusal: the primary's
+// agent and its one standby's both refuse their SyncupCntlr, so the primary
+// is unhealthy, AR5 finds no candidate but a refusing standby, and AR7 holds
+// the primary too, as a replacement would refuse the same request: each
+// logs candidate_refuses, and no role moves.
+func TestSharedRefusalMovesNoRole(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 2,
+			CntlrUnhealthy:   4,
+			SideUnhealthy:    1,
+			LegUnhealthy:     2,
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	for _, cntlrId := range []uint64{1, 2} {
+		agent, key := c.cntlrAgent(t, cntlrId)
+		foLever(t, agent, key, func(o *agentfake.Object) {
+			o.SyncupCode = common.ReplyCodeInvalidConf
+		})
+	}
+	// A bump of the revision drives both a SyncupCntlr to refuse.
+	foSetDisabled(t, c, 2, false)
+	for _, kind := range []string{reactionFailover, reactionReplaceCntlr} {
+		h.waitRecord(t, 30*time.Second, w, msgReactionSkipped,
+			func(rec logRecord) bool {
+				return rec.str("kind") == kind &&
+					rec.str("reason") == reasonCandidateRefuses &&
+					rec.num("old_cntlr_id") == 1
+			})
+	}
+	if n := len(foReactions(h, w, reactionFailover)) +
+		len(foReactions(h, w, reactionReplaceCntlr)); n != 0 {
+		t.Fatalf("%d failovers or replacements on a shared refusal", n)
+	}
+	if c.primary(t) != 1 {
+		t.Fatalf("the primary is cntlr %d, want 1", c.primary(t))
+	}
+}
+
+// TestSharedRefusalThenADeadPrimaryIsReplaced pins the end of HL9's mark on
+// a missed round: the primary and its one standby both refuse, so AR7 holds
+// the primary; then the primary's agent stops answering, its missed rounds
+// end its refusal mark, and AR7 replaces it once it has been unhealthy for
+// cntlr_unhealthy, as a dead primary with no candidate.
+func TestSharedRefusalThenADeadPrimaryIsReplaced(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 2,
+			CntlrUnhealthy:   4,
+			SideUnhealthy:    1,
+			LegUnhealthy:     2,
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	for _, cntlrId := range []uint64{1, 2} {
+		agent, key := c.cntlrAgent(t, cntlrId)
+		foLever(t, agent, key, func(o *agentfake.Object) {
+			o.SyncupCode = common.ReplyCodeSaveFailed
+		})
+	}
+	// A bump of the revision drives both a SyncupCntlr to refuse.
+	foSetDisabled(t, c, 2, false)
+	h.waitRecord(t, 30*time.Second, w, msgReactionSkipped,
+		func(rec logRecord) bool {
+			return rec.str("kind") == reactionReplaceCntlr &&
+				rec.str("reason") == reasonCandidateRefuses
+		})
+	primary, primaryKey := c.cntlrAgent(t, 1)
+	foLever(t, primary, primaryKey, func(o *agentfake.Object) { o.Hang = true })
+	replaced := h.waitRecord(t, 30*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool { return rec.str("kind") == reactionReplaceCntlr })
+	if replaced.num("old_cntlr_id") != 1 || replaced.str("primary") != "true" {
+		t.Fatalf("the replacement %v, want the dead primary, cntlr 1",
+			replaced.attrs)
+	}
+	foLever(t, primary, primaryKey, func(o *agentfake.Object) { o.Hang = false })
+}
+
+// TestFailoverRefusingPrimaryWithNoCandidateIsReplaced pins HL9 where AR5
+// has no candidate: the primary's agent refuses its SyncupCntlr, so its
+// rounds give unhealthy verdicts, the one standby then carries a health
+// epoch of its own, and AR7 replaces the primary once it has been unhealthy
+// for cntlr_unhealthy. A refusal adds no ERROR row to the report, so neither
+// of AR7's refusals holds it. The standby's epoch is stamped after the
+// primary's, so the primary is the first cntlr due for replacement.
+func TestFailoverRefusingPrimaryWithNoCandidateIsReplaced(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 4,
+			CntlrUnhealthy:   6,
+			SideUnhealthy:    1,
+			LegUnhealthy:     2,
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	primary, primaryKey := c.cntlrAgent(t, 1)
+	foLever(t, primary, primaryKey, func(o *agentfake.Object) {
+		o.SyncupCode = common.ReplyCodeInvalidConf
+	})
+	// A bump of the revision drives the primary a SyncupCntlr to refuse.
+	foSetDisabled(t, c, 2, false)
+	h.waitUntil(t, 10*time.Second, "the refusing primary's health epoch",
+		func() (bool, string) { return c.cntlr(t, 1).GetErrEpoch() != 0, "none yet" })
+	standby, standbyKey := c.cntlrAgent(t, 2)
+	foLever(t, standby, standbyKey, func(o *agentfake.Object) {
+		foSetRow(o, foDataGrpRow(), foStatusRow(pb.ResStatus_RES_STATUS_ERROR, false))
+	})
+	h.waitUntil(t, 10*time.Second, "the standby's health epoch",
+		func() (bool, string) { return c.cntlr(t, 2).GetErrEpoch() != 0, "none yet" })
+	if n := len(foReactions(h, w, reactionFailover)); n != 0 {
+		t.Fatalf("a failover ran before the standby turned unhealthy")
+	}
+
+	replaced := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool { return rec.str("kind") == reactionReplaceCntlr })
+	if replaced.num("old_cntlr_id") != 1 || replaced.str("primary") != "true" {
+		t.Fatalf("the replacement %v, want the refusing primary, cntlr 1",
+			replaced.attrs)
+	}
+	if n := len(foReactions(h, w, reactionFailover)); n != 0 {
+		t.Errorf("%d failovers applied, want none: no standby was a candidate", n)
+	}
 }
 
 // TestFailoverEveryStandbyUnhealthyReplacesThePrimary pins AR7's sole-primary

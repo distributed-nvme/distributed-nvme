@@ -85,7 +85,7 @@ func (s *DnAgentServer) syncupSide(
 		Revision:   req.GetRevision(),
 		SideInfo:   info,
 		BmInfo:     s.bitmapInfo(st),
-		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), time.Time{})),
 		SaveTime:   agent.Timestamp(savedAt),
 	}
 }

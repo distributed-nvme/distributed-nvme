@@ -58,6 +58,15 @@ const (
 	msgCntlrSettled  = "cntlr settled"
 
 	msgLateObservation = "late observation"
+
+	// msgAgentStarting and msgAgentStarted are HL8's records of a node's
+	// agent start: the first round of a start series it answered starting,
+	// and the first that answered from an observation after it, with the
+	// start's length; msgAgentRestarted is a round's reply that carries
+	// another agent start than the loop's rounds last carried.
+	msgAgentStarting  = "agent starting"
+	msgAgentStarted   = "agent started"
+	msgAgentRestarted = "agent restarted"
 )
 
 // Config is everything cmd/dnv-worker passes to Run (CM1, CM4).

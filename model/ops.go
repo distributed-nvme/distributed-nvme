@@ -1646,9 +1646,13 @@ func failoverCandidate(
 	s etcdutil.STM,
 	cid uint64,
 	conf *pb.SpConf,
+	passed map[uint64]bool,
 ) uint64 {
 	best := uint64(0)
 	for _, cntlrId := range conf.GetCntlrIdList() {
+		if passed[cntlrId] {
+			continue
+		}
 		cntlr := &pb.Cntlr{}
 		if !s.Get(CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
 			continue
@@ -1666,6 +1670,18 @@ func failoverCandidate(
 	return best
 }
 
+// idSetOf is ids as a set, nil for none.
+func idSetOf(ids []uint64) map[uint64]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
 // Failover moves the primary role from oldId to newId (MD6, AR5;
 // architecture.md, Automatic reactions): the
 // old primary has been unhealthy for primary_unhealthy seconds — for the
@@ -1681,8 +1697,10 @@ func failoverCandidate(
 // Every precondition the store holds is re-validated here, election
 // included, so two owners overlapping on one SP (VW7) cannot both apply it:
 // the second finds the old cntlr no longer primary. What no STM sees is not
-// re-checked: AR5's two refusals, which read a report, and AR10's own
-// verdict.
+// re-checked: AR5's three refusals (two read a report, the third the
+// worker's memory of the refusals) and AR10's own verdict; and
+// FailoverPassingOver's election passes over the standbys its caller names
+// on the caller's word.
 func Failover(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1694,6 +1712,26 @@ func Failover(
 	newId uint64,
 	now uint64,
 ) error {
+	return FailoverPassingOver(
+		ctx, cli, cid, shard, spId, spName, oldId, newId, now, nil)
+}
+
+// FailoverPassingOver is Failover whose election passes over the cntlrs of
+// passed: the standbys whose agents refuse their own SyncupCntlr, which the
+// worker alone knows of from their replies (dnv-worker.md HL9, AR5).
+func FailoverPassingOver(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	oldId uint64,
+	newId uint64,
+	now uint64,
+	passed []uint64,
+) error {
+	skip := idSetOf(passed)
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		conf, err := loadSpConfForOp(s, opFailover, cid, spName, spId)
 		if err != nil {
@@ -1747,7 +1785,7 @@ func Failover(
 		}
 		// The election is part of the transaction: a healthier, smaller
 		// candidate that appeared since the pass read its snapshot wins.
-		if failoverCandidate(s, cid, conf) != newId {
+		if failoverCandidate(s, cid, conf, skip) != newId {
 			return fail(opFailover, "new cntlr is not the smallest candidate")
 		}
 		// The new primary is settling until it reports its stack built and
@@ -2317,6 +2355,30 @@ func ReplaceCntlr(
 	asPrimary bool,
 	now uint64,
 ) (uint64, error) {
+	return ReplaceCntlrPassingOver(ctx, cli, cid, shard, spId, spName, oldId,
+		newCn, spCnAddrs, asPrimary, now, nil)
+}
+
+// ReplaceCntlrPassingOver is ReplaceCntlr whose test for a failover
+// candidate passes over the cntlrs of passed, as FailoverPassingOver's
+// election does: a primary whose only healthy standbys refuse their own
+// SyncupCntlr has no candidate, so its replacement may go on (dnv-worker.md
+// HL9, AR7).
+func ReplaceCntlrPassingOver(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	oldId uint64,
+	newCn Cand,
+	spCnAddrs []string,
+	asPrimary bool,
+	now uint64,
+	passed []uint64,
+) (uint64, error) {
+	skip := idSetOf(passed)
 	planned := make(map[string]struct{}, len(spCnAddrs))
 	for _, addrPort := range spCnAddrs {
 		planned[addrPort] = struct{}{}
@@ -2354,7 +2416,7 @@ func ReplaceCntlr(
 					"primary replacement must stay primary",
 				)
 			}
-			if failoverCandidate(s, cid, conf) != 0 {
+			if failoverCandidate(s, cid, conf, skip) != 0 {
 				return fail(opReplaceCntlr, "failover candidate exists")
 			}
 		}

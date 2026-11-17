@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -242,6 +243,14 @@ func (a *Agent) Start(store Store) error {
 	}
 	a.mu.Lock()
 	a.gen++
+	// A new process has a new start (dnagent.md SH33), unless a Starting
+	// lever names it.
+	a.started = time.Now().Round(0)
+	for _, ob := range a.beh.Objects {
+		if ob != nil && ob.Starting.After(a.started) {
+			a.started = ob.Starting
+		}
+	}
 	a.restartStoreLocked(context.Background(), store)
 	clear(a.epochs)
 	clear(a.observed)

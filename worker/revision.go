@@ -23,6 +23,11 @@ var errRoundTimeout = errors.New("round timeout")
 // object's intervals, or from none at all.
 var errStaleObservation = errors.New("observation too old")
 
+// errStartingPastHold is HL8's cause of a failed round: a reply that says
+// the agent is starting, whose start lies further back than the cluster's
+// start hold, or that carries no start time to judge it by.
+var errStartingPastHold = errors.New("agent starting past its hold")
+
 // errRoundAborted ends a round that a desired change overtook (RW6). The
 // pending reply would answer the request built from the SUPERSEDED revision,
 // so the round is given up together with its stream. It is NOT a health
@@ -75,6 +80,11 @@ type replyState struct {
 	answerTime    time.Time
 	convergeStart time.Time
 	obsTraceId    string
+	// agentStart is when the agent process began to serve (dnagent.md
+	// SH33), zero when the reply carries none: the start HL8 measures a
+	// start series' hold from, and whose change on a round's reply shows
+	// the agent's restart (seeAgentStart).
+	agentStart time.Time
 	// saveTime is when the agent saved the request a Syncup* reply answers
 	// to its local store, zero on a round's reply and on a Syncup* reply
 	// that refuses the request (architecture.md, Live-state reporting).
@@ -104,6 +114,7 @@ func newReplyState(
 		answerTime:    pbTime(stamp.GetAnswerTime()),
 		convergeStart: pbTime(stamp.GetConvergeStart()),
 		obsTraceId:    stamp.GetObsTraceId(),
+		agentStart:    pbTime(stamp.GetAgentStartTime()),
 		saveTime:      pbTime(saveTime),
 	}
 }
@@ -195,6 +206,16 @@ type objDriver interface {
 	// reply, or a reply whose observation is too old (HL7), into health
 	// (HL1/HL2). Only a round reaches it (fail).
 	unreachable(ctx context.Context)
+	// starting folds a round whose agent answered that it is starting,
+	// within the start hold (HL8): no verdict on the object; a cntlr ends
+	// its run of unhealthy rounds and is held from a failover and a
+	// replacement, and a side from the side clocks (AR10). Only a round
+	// reaches it (startingRound).
+	starting(ctx context.Context)
+	// startEnded ends the hold starting began: the round after the one that
+	// ended the agent's start, a move to another endpoint and an idle reach
+	// it (HL8).
+	startEnded(ctx context.Context)
 }
 
 // roundPeriod turns a stored health-check interval into the round period
@@ -309,11 +330,32 @@ type revWorker struct {
 	syncupObs time.Time
 	// askFrom is the agent's answer time on the first round the loop judged
 	// after a pause in its rounds of the object: its start, an idle or a
-	// refused conf (quiesce), or a move to another endpoint (connect). An
+	// refused conf (quiesce), a move to another endpoint (connect), or the
+	// agent's own start, whose rounds it answered starting (HL8). An
 	// observation's age is counted from no earlier than askFrom (HL7), since
 	// no round asked the agent to read during the pause. It is by the node's
 	// clock; zero until that first round.
 	askFrom time.Time
+	// starting says a round since the last pause found the agent starting
+	// (HL8), with only missed rounds and starting answers since. The first
+	// round it answers otherwise ends the start, and is the first round
+	// after a pause, which resets askFrom. startFrom is the agent's start in
+	// the first starting answer of the start series, by the node's clock,
+	// which the series' hold is measured from; it outlives the start until
+	// the loop judges a round's observation, so an agent that dies after
+	// each start, before any round is judged, stays in one series and is
+	// judged past the hold from its first start.
+	starting  bool
+	startFrom time.Time
+	// endHold says the round before this one ended a start series: the next
+	// answered round ends the driver's hold (driver.startEnded), whatever
+	// verdict it gives, so a hold cannot outlive its start by more than one
+	// round.
+	endHold bool
+	// agentStart is the agent's start the loop's rounds last carried, zero
+	// until one does and after a move: a different one is the agent's
+	// restart, which a DN's or a CN's loop logs (HL8).
+	agentStart time.Time
 }
 
 // streamState is one open Check* stream plus the goroutine that turns its
@@ -492,6 +534,28 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 		w.fail(ctx)
 		return
 	}
+	w.seeAgentStart(ctx, reply)
+	if reply.code == common.ReplyCodeStarting {
+		w.startingRound(ctx, cc, reply)
+		return
+	}
+	if w.endHold {
+		// HL8: the round after the start's end; its verdict, if any, is
+		// judged without the hold.
+		w.endHold = false
+		w.driver.startEnded(ctx)
+	}
+	if w.starting {
+		// HL8: the agent's start ended. Its startup pass held every read off,
+		// so the observations this round answers from are the pass's; the
+		// start is a pause in the loop's rounds (HL7), so this round gives no
+		// verdict, and the read it starts brings the next round's. The
+		// series' start stays until a round is judged (startFrom).
+		w.starting = false
+		w.endHold = true
+		w.askFrom = time.Time{}
+		w.logStartEnded(ctx, reply)
+	}
 	if w.staleRound(ctx, reply, interval) {
 		return
 	}
@@ -515,6 +579,9 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 	// brings one the next round judges.
 	if !reply.obsTime.Before(w.askFrom) ||
 		reply.code == common.ReplyCodeUnknownObject {
+		// A judged round closes the start series (HL8): a starting answer
+		// after it begins a new one.
+		w.startFrom = time.Time{}
 		w.driver.observe(ctx, reply)
 	}
 	needSyncup := reply.code != 0 || reply.revision != w.desired.revision
@@ -526,8 +593,9 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 // staleRound judges the age of the observation a round's reply answers from
 // (HL7) and reports whether the round failed on it. The age counts from no
 // earlier than the first round after a pause in the loop's rounds (askFrom):
-// its start, an idle or a move. No round asked the agent to read during the
-// pause, so an observation that aged then tells nothing of the agent. A gap
+// its start, an idle, a move or the agent's start (HL8). No round asked the
+// agent to read during the pause, so an observation that aged then tells
+// nothing of the agent. A gap
 // between two rounds of a running loop is no pause: a round that waited out
 // a long Syncup*, behind a converge that holds the object's reads off, must
 // find the observation as old as it is. The reply came in time, but the
@@ -580,6 +648,90 @@ func (w *revWorker) staleRound(
 	slog.InfoContext(ctx, "check round failed", attrs...)
 	w.fail(ctx)
 	return true
+}
+
+// startingRound is HL8: a round whose agent answers that it is starting
+// (dnagent.md SH33). The first one since the last pause begins a start
+// series, which later starting answers and missed rounds extend, so an
+// agent that dies in its startup pass and starts again stays in one series;
+// its hold is measured from the series' first start, by the node's clock.
+// Within the cluster's start hold the round gives no verdict and no Syncup*
+// follows, which the agent would refuse; the driver ends a cntlr's run of
+// unhealthy rounds and holds its failover and replacement, or a side's
+// clocks (driver.starting). Past the hold, with a hold of zero, with no
+// start time or answer time to judge by, or with an answer before the
+// series' start (the node's clock stepped back), it is a missed round.
+func (w *revWorker) startingRound(
+	ctx context.Context,
+	cc *pb.ClusterConf,
+	reply *replyState,
+) {
+	if !w.starting && !reply.agentStart.IsZero() {
+		// A new start series, or one whose start ended with no round judged
+		// since, which goes on from its first start.
+		w.starting = true
+		w.endHold = false
+		if w.startFrom.IsZero() {
+			w.startFrom = reply.agentStart
+			if w.role != common.WorkerRoleSp {
+				slog.InfoContext(ctx, msgAgentStarting, append(w.idAttrs(),
+					slog.Time("agent_start_time", reply.agentStart))...)
+			}
+		}
+	}
+	held := reply.answerTime.Sub(w.startFrom)
+	hold := time.Duration(model.ResolveStartHoldSeconds(cc)) * time.Second
+	if w.startFrom.IsZero() || reply.answerTime.IsZero() || held < 0 ||
+		held >= hold {
+		slog.InfoContext(ctx, "check round failed", append(w.idAttrs(),
+			slog.String("error", errStartingPastHold.Error()),
+			slog.Int64("starting_ms", held.Milliseconds()))...)
+		w.fail(ctx)
+		return
+	}
+	w.driver.starting(ctx)
+}
+
+// seeAgentStart compares the agent's start a round's reply carries with the
+// one the loop's rounds last carried: a different one is the agent's
+// restart, which a DN's or a CN's loop logs once (HL8), whether or not a
+// round found the agent starting.
+func (w *revWorker) seeAgentStart(ctx context.Context, reply *replyState) {
+	if reply.agentStart.IsZero() {
+		return
+	}
+	if !w.agentStart.IsZero() && !reply.agentStart.Equal(w.agentStart) &&
+		w.role != common.WorkerRoleSp {
+		slog.InfoContext(ctx, msgAgentRestarted, append(w.idAttrs(),
+			slog.Time("old_agent_start_time", w.agentStart),
+			slog.Time("agent_start_time", reply.agentStart))...)
+	}
+	w.agentStart = reply.agentStart
+}
+
+// endStart forgets a start series and ends its hold: on a move to another
+// endpoint, whose agent is another, and on an idle, after which no round
+// has asked the agent anything (HL7).
+func (w *revWorker) endStart(ctx context.Context) {
+	if w.starting || w.endHold {
+		w.driver.startEnded(ctx)
+	}
+	w.starting = false
+	w.startFrom = time.Time{}
+	w.endHold = false
+}
+
+// logStartEnded logs the end of an agent's start the loop saw (HL8), with
+// how long the agent took from its start to its first answer from an
+// observation, by the node's clock; one record per node, as startingRound's.
+func (w *revWorker) logStartEnded(ctx context.Context, reply *replyState) {
+	if w.role == common.WorkerRoleSp || reply.agentStart.IsZero() ||
+		reply.answerTime.IsZero() {
+		return
+	}
+	slog.InfoContext(ctx, msgAgentStarted, append(w.idAttrs(),
+		slog.Int64("starting_ms",
+			reply.answerTime.Sub(reply.agentStart).Milliseconds()))...)
 }
 
 // seeRound marks a round's reply r, one not judged stale (HL7), before
@@ -865,6 +1017,10 @@ func (w *revWorker) connect() (*grpc.ClientConn, error) {
 	if addr != w.obsAddr {
 		w.obsSeen = time.Time{}
 		w.askFrom = time.Time{}
+		w.agentStart = time.Time{}
+		if w.obsAddr != "" {
+			w.endStart(w.ctx)
+		}
 		w.obsAddr = addr
 	}
 	if w.conn != nil && w.connAddr == addr {
@@ -930,8 +1086,10 @@ func (w *revWorker) quiesce() {
 	w.dropStream()
 	w.releaseConn()
 	// No round asks the agent to read while the loop idles, so the first
-	// round after it counts an observation's age from its own answer (HL7).
+	// round after it counts an observation's age from its own answer (HL7),
+	// and a start series the idle cut is forgotten (HL8).
 	w.askFrom = time.Time{}
+	w.endStart(w.ctx)
 }
 
 // cleanup is the graceful-stop tail of RW11.

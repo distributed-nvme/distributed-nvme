@@ -545,11 +545,53 @@ func TestResolveClusterConf(t *testing.T) {
 		off.GetMdCheckConf().GetIntervalDays() != 0 {
 		t.Errorf("a zero md_check_conf resolved to %v", off.GetMdCheckConf())
 	}
+	// The start hold setting: absent takes the default, present stays as
+	// given, its zero included (the hold off).
+	if got.GetStartHoldConf() == nil || got.GetStartHoldConf().GetSeconds() !=
+		common.DefaultStartHoldSeconds {
+		t.Errorf("an absent start_hold_conf resolved to %v",
+			got.GetStartHoldConf())
+	}
+	for _, seconds := range []uint32{0, 7} {
+		held := ResolveClusterConf(&pb.ClusterConf{
+			StartHoldConf: &pb.StartHoldConf{Seconds: seconds}})
+		if held.GetStartHoldConf() == nil ||
+			held.GetStartHoldConf().GetSeconds() != seconds {
+			t.Errorf("start_hold_conf.seconds %d resolved to %v", seconds,
+				held.GetStartHoldConf())
+		}
+	}
 	// What CreateCluster stores is what its readers accept: the two families
 	// are each other's mirror image (architecture.md, Common validation), so a
 	// resolved conf must validate.
 	if err := ValidateClusterConf(ResolveClusterConf(nil)); err != nil {
 		t.Errorf("a resolved ClusterConf must validate: %v", err)
+	}
+}
+
+// TestResolveStartHoldSeconds: the hold a stored conf names (dnv-worker.md
+// HL8). An absent start_hold_conf, a cluster a build before the hold
+// created, reads as the default rather than as zero, unlike the md check's;
+// a present one reads as stored, its zero as no hold.
+func TestResolveStartHoldSeconds(t *testing.T) {
+	cases := []struct {
+		name string
+		cc   *pb.ClusterConf
+		want uint32
+	}{
+		{"nil conf", nil, common.DefaultStartHoldSeconds},
+		{"absent", &pb.ClusterConf{}, common.DefaultStartHoldSeconds},
+		{"off", &pb.ClusterConf{StartHoldConf: &pb.StartHoldConf{}}, 0},
+		{"as stored", &pb.ClusterConf{
+			StartHoldConf: &pb.StartHoldConf{Seconds: 45}}, 45},
+		{"at the cap", &pb.ClusterConf{StartHoldConf: &pb.StartHoldConf{
+			Seconds: common.MaxStartHoldSeconds}},
+			common.MaxStartHoldSeconds},
+	}
+	for _, tc := range cases {
+		if got := ResolveStartHoldSeconds(tc.cc); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -720,6 +762,35 @@ func TestValidateClusterConf(t *testing.T) {
 			},
 			wantErr: "invalid stored conf: md_check_conf.interval_days " +
 				"366 is above 365",
+		},
+		{
+			// A cluster a build before the hold created: the default hold.
+			name: "no start_hold_conf",
+			tweak: func(cc *pb.ClusterConf) {
+				cc.StartHoldConf = nil
+			},
+		},
+		{
+			name: "start hold off",
+			tweak: func(cc *pb.ClusterConf) {
+				cc.StartHoldConf = &pb.StartHoldConf{}
+			},
+		},
+		{
+			name: "a start hold at the cap",
+			tweak: func(cc *pb.ClusterConf) {
+				cc.StartHoldConf = &pb.StartHoldConf{
+					Seconds: common.MaxStartHoldSeconds}
+			},
+		},
+		{
+			name: "a start hold above the cap",
+			tweak: func(cc *pb.ClusterConf) {
+				cc.StartHoldConf = &pb.StartHoldConf{
+					Seconds: common.MaxStartHoldSeconds + 1}
+			},
+			wantErr: "invalid stored conf: start_hold_conf.seconds " +
+				"3601 is above 3600",
 		},
 		{
 			name: "extent_size zero",

@@ -169,10 +169,14 @@ MAX_ALLOC_LEG_PER_GRP=
 # set's primary threshold; and two the suite only logs,
 # common.DefaultPrimaryUnhealthy, what a pool created without --thr-primary
 # reads, and common.DemotionHoldTimeout, how long a fan-out that demotes a
-# primary holds its sides for the demoted cntlr (dnv-worker.md RW22).
+# primary holds its sides for the demoted cntlr (dnv-worker.md RW22). And
+# common.DefaultStartHoldSeconds, the start hold every cluster of this suite
+# stores, as none names one at its create (dnv-worker.md HL8): react's
+# restart step bounds its wait by it.
 DEFAULT_HC_INTERVAL=
 DEFAULT_PRIMARY_UNHEALTHY=
 DEMOTION_HOLD_TIMEOUT=
+DEFAULT_START_HOLD=
 # The two that bound a pool's stripe, from the same JSON:
 # model.DefaultStripeSize of common.DefaultDmPoolDataBlockSize, the stripe
 # every cluster of this suite stores (setup step 4 checks it), and
@@ -1330,7 +1334,7 @@ read_constants() {
 	fi
 	local key val
 	for key in DefaultHealthCheckInterval DefaultPrimaryUnhealthy \
-		DemotionHoldTimeout; do
+		DemotionHoldTimeout DefaultStartHoldSeconds; do
 		val=$(jq_of "$json" ".$key")
 		case "$val" in
 		'' | *[!0-9]* | 0)
@@ -1341,6 +1345,7 @@ read_constants() {
 		DefaultHealthCheckInterval) DEFAULT_HC_INTERVAL=$val ;;
 		DefaultPrimaryUnhealthy) DEFAULT_PRIMARY_UNHEALTHY=$val ;;
 		DemotionHoldTimeout) DEMOTION_HOLD_TIMEOUT=$val ;;
+		DefaultStartHoldSeconds) DEFAULT_START_HOLD=$val ;;
 		esac
 	done
 	for key in DefaultStripeSize MaxNvmeTcpCmdBytes; do
@@ -19324,9 +19329,9 @@ react_kill_dn() { # <v> <k>
 # SIGTERM before it sends SIGKILL, stop_dn_instance's own default when it is
 # left out. A SIGTERM alone does not make the worker's rounds fail at once:
 # the agent's gRPC server drains (Serve (agent/agent.go)) and answers the
-# worker's open check streams from its last observation until the worker
-# judges that observation too old and drops them (dnv-worker.md HL7), a few
-# seconds; only then does the agent exit. A SIGKILL breaks the streams, and
+# worker's open check streams from its last observation for at most
+# common.AgentStopGrace, about a second, and then ends every stream and exits
+# (dnagent.md, Bootstrap and lifecycle). A SIGKILL breaks the streams, and
 # with them the rounds, the moment it lands. SIGCONT and SIGTERM still go
 # first whatever [secs] is (kill_pidfile).
 react_stop_dn_agent() { # <v> <k> [secs]
@@ -21049,6 +21054,161 @@ react_grow() {
 	check_sha0 "after AR6 grew slice 0"
 }
 
+# --- step 2b ----------------------------------------------------------------
+#
+# A planned restart of the primary's cn agent (dnagent.md SH33; dnv-worker.md
+# HL8). The agent is stopped by SIGTERM, as an operator stops it, and exits
+# within its stop grace (common.AgentStopGrace); it is started again with the
+# same flags. It opens its port before its startup pass and answers every
+# round `starting` until the pass ends; the worker holds a starting primary
+# and a starting cntlr, so neither AR5 nor AR7 follows, under the reacting
+# set's 5-second primary threshold. host0 keeps its paths: the kernel objects
+# serve through the restart. The step judges the worker's records after its
+# own mark, and waits past the larger of the two thresholds plus a few passes
+# after the agent's own `agent started`: the rounds the downtime misses start
+# an err_epoch, and the second round answered after the start clears it (the
+# first gives no verdict), or the first when no round found the agent
+# starting. A pass shorter than two rounds can end between them, so the
+# worker's `agent starting` record is asserted only for a pass that lasted
+# two cn intervals or more; a shorter one tests no hold, and the step logs
+# so.
+
+REACT_RESTART_CN=-1
+REACT_RESTART_MARK=0
+
+# react_restart_started is the step's wait: the restarted agent's log holds
+# `agent serving` and then `agent started` after the step's mark. It prints
+# the startup_ms the agent logged, and fails while either is missing.
+react_restart_started() {
+	local lines
+	lines=$(ssh_cn "$REACT_RESTART_CN" \
+		"tail -n +$((REACT_RESTART_MARK + 1)) $(cn_log) |
+		grep -F -e '\"msg\":\"agent serving\"' -e '\"msg\":\"agent started\"' ||
+		[ \$? -eq 1 ]") || return 1
+	REACT_RESTART_MS=$(printf '%s\n' "$lines" | "$JQ" -R -r -s \
+		'[split("\n")[] | fromjson? // empty | .msg] as $m
+		 | ($m | index("agent serving")) as $s
+		 | ($m | index("agent started")) as $t
+		 | if $s != null and $t != null and $s < $t then "ok" else "" end') ||
+		return 1
+	[ "$REACT_RESTART_MS" = ok ] || return 1
+	REACT_RESTART_MS=$(printf '%s\n' "$lines" | "$JQ" -R -r \
+		'fromjson? // empty | select(.msg == "agent started") | .startup_ms' |
+		tail -n 1)
+	case "$REACT_RESTART_MS" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	return 0
+}
+
+# worker_msg_cnt_after counts the worker's records after line <mark>
+# (worker_log_mark) whose msg is <msg>, matched whole and as a fixed string.
+# Fatal on a log it cannot read, as worker_msg_cnt is.
+worker_msg_cnt_after() { # <mark> <msg>
+	local n
+	case "$2" in
+	'' | *[\'\"\\]*) die "worker_msg_cnt_after cannot match the msg '$2'" ;;
+	esac
+	n=$(ssh_cp "tail -n +$(($1 + 1)) $WORK/worker/worker.log |
+		grep -cF '\"msg\":\"$2\"' || [ \$? -eq 1 ]") ||
+		die "cannot count the '$2' records in $WORK/worker/worker.log on $CP_IP"
+	case "$n" in
+	'' | *[!0-9]*) die "the worker log's '$2' count read '$n'" ;;
+	esac
+	echo "$n"
+}
+
+# worker_reaction_kind_cnt counts the worker's `reaction applied` records
+# after line <mark> (worker_log_mark) whose kind is <kind>. Fatal on a log it
+# cannot read, as worker_failover_cnt is.
+worker_reaction_kind_cnt() { # <mark> <kind>
+	local n
+	case "$2" in
+	'' | *[!a-z_]*) die "worker_reaction_kind_cnt cannot match the kind '$2'" ;;
+	esac
+	n=$(ssh_cp "tail -n +$(($1 + 1)) $WORK/worker/worker.log |
+		grep -c '\"msg\":\"reaction applied\".*\"kind\":\"$2\"' ||
+		[ \$? -eq 1 ]") ||
+		die "cannot count the '$2' reactions in $WORK/worker/worker.log on $CP_IP"
+	case "$n" in
+	'' | *[!0-9]*) die "the worker log's '$2' count read '$n'" ;;
+	esac
+	echo "$n"
+}
+
+react_restart() {
+	stage 02b "a planned restart of the primary's cn agent: no failover follows"
+	local out wmark id hold settle starting started
+
+	sp_refresh
+	sp_read_roles
+	id=$PRIMARY_CNTLR_ID
+	REACT_RESTART_CN=$PRIMARY_CN
+	REACT_RESTART_MARK=$(ssh_cn "$REACT_RESTART_CN" "wc -l < $(cn_log)") ||
+		die "cannot count the lines of $(cn_log) on cn$REACT_RESTART_CN"
+	case "$REACT_RESTART_MARK" in
+	'' | *[!0-9]*)
+		die "the line count of $(cn_log) on cn$REACT_RESTART_CN reads" \
+			"'$REACT_RESTART_MARK'"
+		;;
+	esac
+	wmark=$(worker_log_mark)
+	log "  primary cntlr $id is on cn$REACT_RESTART_CN; host0 keeps its paths"
+
+	out=$(stop_cn_agent "$REACT_RESTART_CN") ||
+		die "cn$REACT_RESTART_CN: kill_pidfile failed"
+	printf '%s\n' "$out" >&2
+	case "$out" in
+	stopped*) ;;
+	*) die "cn$REACT_RESTART_CN's agent did not stop on SIGTERM: $out" ;;
+	esac
+	start_cn_agent "$REACT_RESTART_CN"
+
+	hold=$DEFAULT_START_HOLD
+	wait_until "$((hold + WAIT_REACT))" \
+		"cn$REACT_RESTART_CN's restarted agent to serve and then end its startup pass" \
+		react_restart_started
+	log "  cn$REACT_RESTART_CN: startup pass ${REACT_RESTART_MS} ms" \
+		"(start hold ${hold}s)"
+	# A pass longer than the hold is past what the worker holds: the failover
+	# that follows is HL8's, not a fault of this step's, and the stop names it.
+	[ "$REACT_RESTART_MS" -lt $((hold * 1000)) ] ||
+		die "cn$REACT_RESTART_CN's startup pass took ${REACT_RESTART_MS} ms," \
+			"past the ${hold}s start hold (dnv-worker.md HL8)"
+
+	settle=$THR_PRIMARY
+	[ "$THR_CNTLR" -le "$settle" ] || settle=$THR_CNTLR
+	settle=$((settle + 3 * DEFAULT_HC_INTERVAL + VOTE_INTERVAL))
+	log "  waiting ${settle}s: the larger of thr_primary ${THR_PRIMARY}s and" \
+		"thr_cntlr ${THR_CNTLR}s, plus three passes and a vote interval"
+	sleep "$settle"
+
+	assert_eq "$(worker_reaction_kind_cnt "$wmark" failover)" 0 \
+		"failovers the worker applied after the restart (AR5)"
+	assert_eq "$(worker_reaction_kind_cnt "$wmark" replace_cntlr)" 0 \
+		"cntlr replacements the worker applied after the restart (AR7)"
+	sp_refresh
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$id" \
+		"the primary after the restart is the cntlr that was primary"
+	assert_eq "$PRIMARY_CN" "$REACT_RESTART_CN" \
+		"and it is still on the CN whose agent restarted"
+	# What the worker saw of the start, after the step's mark. Only one agent
+	# restarts in this step, so a record of any node is this one's.
+	starting=$(worker_msg_cnt_after "$wmark" "agent starting")
+	started=$(worker_msg_cnt_after "$wmark" "agent started")
+	log "  the worker logged $starting 'agent starting' and $started" \
+		"'agent started' record(s) since the restart"
+	if [ "$REACT_RESTART_MS" -ge $((2 * DEFAULT_HC_INTERVAL * 1000)) ]; then
+		assert_ge "$starting" 1 \
+			"the worker's 'agent starting' records over a pass of two cn intervals or more (HL8)"
+	else
+		log "  the pass ended within two cn intervals: no round needed the" \
+			"hold, so this run tested only a short restart"
+	fi
+	check_sha0 "after the primary's cn agent restarted"
+}
+
 # --- step 3 -----------------------------------------------------------------
 #
 # AR5. Everything about the reaction is asserted against what the primary was
@@ -21860,8 +22020,9 @@ react_leg_repair() {
 # timeout, a probe interval and a round after its port goes. So the step
 # stops every agent first and only then removes every port, and sends each
 # agent SIGKILL right behind its SIGTERM: on a SIGTERM alone the agent drains
-# the worker's rounds for a few seconds before it exits (react_stop_dn_agent),
-# and two such drains in a row could take the whole margin. The step logs how
+# the worker's rounds for up to its stop grace, about a second, before it
+# exits (react_stop_dn_agent), and the SIGKILL saves that second for each of
+# the back-to-back kills. The step logs how
 # long its kills took, from before the first signal to the last port's
 # removal, against that margin and shouts when none is left; the watch dies
 # on the repair if it comes.
@@ -24193,6 +24354,7 @@ case_react() {
 	react_snapshot
 	react_target
 	react_grow
+	react_restart
 	react_failover
 	react_replace
 	react_leg_repair

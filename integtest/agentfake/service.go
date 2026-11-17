@@ -81,11 +81,16 @@ func (a *Agent) observeLocked(
 // obsStamp is the ObsStamp of a reply that answers at answer from the
 // observation made at obs under traceId: the answer time never before the
 // observation's, and no observation for a zero obs.
-func obsStamp(obs time.Time, traceId string, answer time.Time) *pb.ObsStamp {
+func (a *Agent) obsStamp(obs time.Time, traceId string, answer time.Time) *pb.ObsStamp {
 	if answer.Before(obs) {
 		answer = obs
 	}
-	stamp := &pb.ObsStamp{AnswerTime: agent.Timestamp(answer)}
+	// Every reply stamps the agent's start, as a real agent's does
+	// (dnagent.md SH33): the fake's creation.
+	stamp := &pb.ObsStamp{
+		AnswerTime:     agent.Timestamp(answer),
+		AgentStartTime: agent.Timestamp(a.started),
+	}
 	if !obs.IsZero() {
 		stamp.ObsTime = agent.Timestamp(obs)
 		stamp.ObsTraceId = traceId
@@ -118,9 +123,20 @@ func (a *Agent) readLocked(
 		a.forcedCodeLocked(key) != common.ReplyCodeUnknownObject
 	ob := a.objLocked(key)
 	obsAt := now
+	if ob != nil && !ob.Starting.IsZero() {
+		return answer{
+			code:    common.ReplyCodeStarting,
+			details: detailsStarting,
+			stamp: &pb.ObsStamp{
+				AnswerTime:     agent.Timestamp(now),
+				AgentStartTime: agent.Timestamp(ob.Starting),
+			},
+			noObs: true,
+		}
+	}
 	if known && ob != nil {
 		if ob.ObsNone {
-			return answer{stamp: obsStamp(time.Time{}, "", now), noObs: true}
+			return answer{stamp: a.obsStamp(time.Time{}, "", now), noObs: true}
 		}
 		if ob.ObsAge > 0 {
 			obsAt = now.Add(-ob.ObsAge)
@@ -131,7 +147,7 @@ func (a *Agent) readLocked(
 					details:  last.details,
 					revision: last.revision,
 					info:     last.info,
-					stamp:    obsStamp(last.time, last.traceId, now),
+					stamp:    a.obsStamp(last.time, last.traceId, now),
 				}
 			}
 		}
@@ -147,11 +163,11 @@ func (a *Agent) readLocked(
 	}
 	ans.info = info(known)
 	if !known {
-		ans.stamp = obsStamp(time.Time{}, "", now)
+		ans.stamp = a.obsStamp(time.Time{}, "", now)
 		return ans
 	}
 	obs := a.observeLocked(key, traceId, obsAt, time.Time{}, &ans)
-	ans.stamp = obsStamp(obs, traceId, now)
+	ans.stamp = a.obsStamp(obs, traceId, now)
 	return ans
 }
 
@@ -184,8 +200,36 @@ func (a *Agent) syncupStampLocked(
 		revision: a.revisionLocked(key),
 		info:     info,
 	})
-	return obsStamp(obs, traceId, time.Now().Round(0)),
+	return a.obsStamp(obs, traceId, time.Now().Round(0)),
 		agent.Timestamp(saveAt)
+}
+
+// startingStampLocked is the stamp of an answer while the object's Starting
+// lever is set, as an agent whose startup pass runs answers (dnagent.md
+// SH33): the answer time and the lever's start, and no observation; ok is
+// false when the lever is unset.
+func (a *Agent) startingStampLocked(key string) (*pb.ObsStamp, bool) {
+	ob := a.objLocked(key)
+	if ob == nil || ob.Starting.IsZero() {
+		return nil, false
+	}
+	return &pb.ObsStamp{
+		AnswerTime:     agent.Timestamp(time.Now().Round(0)),
+		AgentStartTime: agent.Timestamp(ob.Starting),
+	}, true
+}
+
+// startingErrLocked is the error of a call whose reply carries no code — a
+// bitmap read — while the Starting lever of one of keys is set, as the real
+// agent's (dnagent.md SH33).
+func (a *Agent) startingErrLocked(keys ...string) error {
+	for _, key := range keys {
+		if ob := a.objLocked(key); ob != nil && !ob.Starting.IsZero() {
+			return status.Error(codes.Unavailable,
+				"the agent's startup pass still runs")
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +240,7 @@ func (a *Agent) syncupStampLocked(
 const (
 	detailsForcedCode = "behavior.json reply_code"
 	detailsLeftover   = "behavior.json leftover_rounds"
+	detailsStarting   = "starting"
 )
 
 func agentReply(code uint32, details string) *pb.AgentReply {
@@ -233,6 +278,9 @@ func (a *Agent) gateSyncupLocked(
 	if code := a.forcedCodeLocked(key); code != 0 {
 		return code, detailsForcedCode, false
 	}
+	if ob := a.objLocked(key); ob != nil && ob.SyncupCode != 0 {
+		return ob.SyncupCode, detailsForcedCode, false
+	}
 	if obj := a.state[key]; obj != nil && revision < obj.Revision {
 		return common.ReplyCodeStaleRevision, fmt.Sprintf(
 			"stale revision %d < stored %d", revision, obj.Revision), false
@@ -269,14 +317,18 @@ func (a *Agent) infoCodeLocked(key string) (uint32, string) {
 }
 
 // gatePushLocked is the gate of the Push* RPCs. A push carries no revision:
-// its only rejections are the forced code and an object its node's last
-// syncup does not list or an id the object's last request does not name
-// (dnv-worker.md, Integration test plan, The fake agent).
+// its only rejections are the forced code, the starting lever (dnagent.md
+// SH33), and an object its node's last syncup does not list or an id the
+// object's last request does not name (dnv-worker.md, Integration test plan,
+// The fake agent).
 func (a *Agent) gatePushLocked(
 	key string, resId uint64, known bool,
 ) (uint32, string) {
 	if code := a.forcedCodeLocked(key); code != 0 {
 		return code, detailsForcedCode
+	}
+	if ob := a.objLocked(key); ob != nil && !ob.Starting.IsZero() {
+		return common.ReplyCodeStarting, detailsStarting
 	}
 	if !known {
 		return common.ReplyCodeUnknownObject, fmt.Sprintf(
@@ -598,6 +650,14 @@ func (a *Agent) SyncupDn(
 	}
 	a.reloadStateLocked(ctx)
 
+	if stamp, ok := a.startingStampLocked(DnKey); ok {
+		// The real agent refuses as starting before any gate, with only
+		// its code and its stamp (dnagent.md SH33).
+		return &pb.SyncupDnReply{
+			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
+			ObsStamp:   stamp,
+		}, nil
+	}
 	code, details, apply := a.gateSyncupLocked(DnKey, req.GetRevision())
 	if apply {
 		a.applyLocked(ctx, DnKey, req.GetRevision(), req)
@@ -641,6 +701,12 @@ func (a *Agent) SyncupSide(
 	}
 	a.reloadStateLocked(ctx)
 
+	if stamp, ok := a.startingStampLocked(key); ok {
+		return &pb.SyncupSideReply{
+			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
+			ObsStamp:   stamp,
+		}, nil
+	}
 	if !a.sideKnownLocked(req.GetSidePointer()) {
 		return &pb.SyncupSideReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,
@@ -748,11 +814,17 @@ func (a *Agent) GetSideInfo(
 	}
 	a.reloadStateLocked(ctx)
 
+	if stamp, ok := a.startingStampLocked(key); ok {
+		return &pb.GetSideInfoReply{
+			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
+			ObsStamp:   stamp,
+		}, nil
+	}
 	if !a.sideKnownLocked(req.GetSidePointer()) {
 		return &pb.GetSideInfoReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,
 				key+" is not in the last SyncupDn.side_pointer_list"),
-			ObsStamp: obsStamp(time.Time{}, "", time.Now().Round(0)),
+			ObsStamp: a.obsStamp(time.Time{}, "", time.Now().Round(0)),
 		}, nil
 	}
 	ans := a.readLocked(key, true, false, callTraceId(ctx),
@@ -930,6 +1002,12 @@ func (a *Agent) SyncupCn(
 	}
 	a.reloadStateLocked(ctx)
 
+	if stamp, ok := a.startingStampLocked(CnKey); ok {
+		return &pb.SyncupCnReply{
+			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
+			ObsStamp:   stamp,
+		}, nil
+	}
 	code, details, apply := a.gateSyncupLocked(CnKey, req.GetRevision())
 	if apply {
 		a.applyLocked(ctx, CnKey, req.GetRevision(), req)
@@ -973,6 +1051,12 @@ func (a *Agent) SyncupCntlr(
 	}
 	a.reloadStateLocked(ctx)
 
+	if stamp, ok := a.startingStampLocked(key); ok {
+		return &pb.SyncupCntlrReply{
+			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
+			ObsStamp:   stamp,
+		}, nil
+	}
 	if !a.cntlrKnownLocked(req.GetCntlrPointer()) {
 		return &pb.SyncupCntlrReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,
@@ -1078,11 +1162,17 @@ func (a *Agent) GetCntlrInfo(
 	}
 	a.reloadStateLocked(ctx)
 
+	if stamp, ok := a.startingStampLocked(key); ok {
+		return &pb.GetCntlrInfoReply{
+			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
+			ObsStamp:   stamp,
+		}, nil
+	}
 	if !a.cntlrKnownLocked(req.GetCntlrPointer()) {
 		return &pb.GetCntlrInfoReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,
 				key+" is not in the last SyncupCn.cntlr_pointer_list"),
-			ObsStamp: obsStamp(time.Time{}, "", time.Now().Round(0)),
+			ObsStamp: a.obsStamp(time.Time{}, "", time.Now().Round(0)),
 		}, nil
 	}
 	ans := a.readLocked(key, true, false, callTraceId(ctx),
@@ -1107,6 +1197,12 @@ func (a *Agent) GetThinDeviceBm(
 	if err := a.hangUnary(ctx, CnKey); err != nil {
 		return nil, err
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.startingErrLocked(CnKey,
+		CntlrKey(req.GetSpId(), req.GetCntlrId())); err != nil {
+		return nil, err
+	}
 	return &pb.GetThinDeviceBmReply{}, nil
 }
 
@@ -1126,6 +1222,9 @@ func (a *Agent) GetLegBm(
 	key := CntlrKey(req.GetSpId(), req.GetCntlrId())
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.startingErrLocked(CnKey, key); err != nil {
+		return nil, err
+	}
 	var bitmap []byte
 	if ob := a.objLocked(key); ob != nil {
 		bitmap = append([]byte(nil), ob.LegBm...)

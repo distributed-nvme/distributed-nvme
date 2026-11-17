@@ -24,6 +24,12 @@ message ObsStamp {
     google.protobuf.Timestamp answer_time = 3;
     // When the converge of the object that runs now began. Unset: none runs.
     google.protobuf.Timestamp converge_start = 4;
+    // When the agent process began to serve, the start of its startup pass
+    // (dnagent.md SH33): the worker measures a start series' hold from it,
+    // and logs a new value on a round's reply as the agent's restart
+    // (dnv-worker.md HL8).
+    // Appended, never renumbered.
+    google.protobuf.Timestamp agent_start_time = 5;
 }
 
 message NodeSelector {
@@ -621,6 +627,17 @@ message MdCheckConf {
     uint32 interval_days = 1;
 }
 
+// The hold of an agent that answers that it is starting (dnv-worker.md
+// HL8; architecture.md, Clusters).
+message StartHoldConf {
+    // The seconds from an agent's start during which the worker holds its
+    // verdict on a starting reply; zero turns the hold off. A cluster conf
+    // without the message reads common.DefaultStartHoldSeconds;
+    // CreateCluster stores that default when the request carries none, and
+    // refuses a value above common.MaxStartHoldSeconds.
+    uint32 seconds = 1;
+}
+
 // {dnv_prefix} cluster_conf {cluster_name}
 message ClusterConf {
     uint64 creation_epoch = 1;
@@ -632,6 +649,9 @@ message ClusterConf {
     // A cluster created without it, by a build before the md check, reads
     // a zero interval: no check. Appended, never renumbered.
     MdCheckConf md_check_conf = 7;
+    // A cluster created without it, by a build before the hold, reads
+    // common.DefaultStartHoldSeconds. Appended, never renumbered.
+    StartHoldConf start_hold_conf = 8;
 }
 
 // {dnv_prefix} dn_global {cluster_id}
@@ -1043,6 +1063,9 @@ message CreateClusterRequest {
     // Absent: the default interval; present: as given, zero for no check.
     // Appended, never renumbered.
     MdCheckConf md_check_conf = 7;
+    // Absent: the default hold; present: as given, zero for no hold.
+    // Appended, never renumbered.
+    StartHoldConf start_hold_conf = 8;
 }
 
 message CreateClusterReply {

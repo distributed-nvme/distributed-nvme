@@ -118,11 +118,14 @@ against a real etcd started with it;
 carries (RW19); and the three role names `WorkerRoleDn`, `WorkerRoleCn` and
 `WorkerRoleSp`. Two constants of this document's sit outside that region:
 `ObsMaxAgeIntervals`, after the health-check intervals it counts in and the
-md check defaults, how
+md check and start hold defaults, how
 many of an object's intervals the observation a round's reply answers from
 may be old before the round is a missed one (HL7); and
-`MdCheckRequestBound`, beside the md check defaults, how long a check
-request may stand before the pass ends it unfinished (AR16).
+`MdCheckRequestBound`, after the md check and start hold defaults, how
+long a check request may stand before the pass ends it unfinished (AR16).
+The start hold's default and bound, `DefaultStartHoldSeconds` and
+`MaxStartHoldSeconds`, are bounds of a cluster setting
+(`architecture.md`, Common validation) that HL8 reads.
 
 Derived, never a constant: the **dead threshold** is twice the configured vote
 interval; the **round timeout** is the object kind's health-check interval
@@ -748,7 +751,10 @@ list; the flip, which reads the repair's key alone, and
   `primary_unhealthy` — "primary_unhealthy not reached" resp. "cntlr_unhealthy
   not reached for a settling primary" (AR5); the new cntlr is not `primary`,
   not `disabled`, has `err_epoch` zero **and** has the smallest `cntlr_id`
-  among all such cntlrs. It flips both `primary` booleans, sets the new
+  among all such cntlrs but the ones the caller passes over
+  (`FailoverPassingOver`; `Failover` passes over none): the worker hands
+  it the standbys whose agents refuse their own `SyncupCntlr` (AR5, HL9),
+  which no STM can see. It flips both `primary` booleans, sets the new
   cntlr's `settling` and clears the old one's (HL2), writes the revision
   its own bump writes into the old cntlr's `demoted_revision` and clears the
   new one's (RW22), rewrites the SP's
@@ -809,7 +815,9 @@ list; the flip, which reads the repair's key alone, and
   scan ran against, whether the new cntlr is primary and `now`, and requires
   the SP checks; the old cntlr's `err_epoch` set and `now` minus it at least
   `cntlr_unhealthy`, and the old cntlr not `disabled`; if the old cntlr is
-  `primary`: the new one requested primary and no failover candidate existing;
+  `primary`: the new one requested primary and no failover candidate existing,
+  by `Failover`'s election with the standbys the caller passes over left
+  out (`ReplaceCntlrPassingOver`; `ReplaceCntlr` passes over none, AR7);
   every cntlr of the SP but the old one on a CN among the handed endpoints,
   the plan the pick was scanned against (else `ReasonCandidateChanged`, MD5: a
   cntlr committed after the caller's snapshot, whose CN and domain the scan
@@ -1604,15 +1612,19 @@ bookkeeping), the latest observation time seen for the object with the
 endpoint it was seen at (RW23), the observation time of the latest
 `Syncup*` reply, kept for the late record's leave until the next round is
 judged or a round fails (HL7), the agent's answer time on the first round
-after a pause in the loop's rounds, kept until the next pause (HL7), and
-the round timer. No round's outcome is
+after a pause in the loop's rounds, kept until the next pause (HL7),
+the agent's start series (HL8) — whether a start runs, the series' first
+start, kept until the loop judges a round, and whether the round before
+ended a start — the agent start time the loop's rounds last carried
+(HL8), and the round timer. No
+round's outcome is
 kept as WORK STILL OWED: no last-acknowledged revision decides a re-sync,
 and no "re-sync wanted" flag exists anywhere in the loop. RW4 step 5
 recomputes the whole re-sync condition from the reply in hand — its own
 `revision` against the desired revision, its own `agent_reply.code` — so a
 worker just handed the shard decides its re-syncs exactly as one that has
 driven the object for an hour, and no failure can be forgotten by a flag
-something cleared. Five things the loop's replies leave do outlive them, and
+something cleared. Seven things the loop's replies leave do outlive them, and
 none is such a record: `lastInfo`, because a `show_info` false reply omits
 an unchanged `*Info` and health is evaluated on the latest known one (HL5);
 the health state, a cache of the record: the last health verdict WRITTEN,
@@ -1626,15 +1638,24 @@ row counts a round only on an observation later than every one seen
 (RW23); the answer time of the first round after a pause, because an
 observation's age counts from no earlier than that round and one that
 ended before it gives no verdict, no round having asked the agent to read
-during the pause (HL7); and the latest `Syncup*` reply's observation time,
+during the pause (HL7); the latest `Syncup*` reply's observation time,
 because the round right after that reply, when it answers from that observation, is
 late by the loop's own wait when that `Syncup*` ended a round (RW4 step 5,
-RW6), which the late record leaves out (HL7).
+RW6), which the late record leaves out (HL7); the start series, because
+the first round the agent answers otherwise after a start is the first
+after a pause, the series' hold is measured from its first start, and
+the round after the one that ends a start ends the hold (HL8); and the agent start
+time last carried, because a different one is the agent's restart, which
+a DN's or a CN's loop logs (HL8).
 BM5's memo survives rounds too, but it belongs to the pusher. AR10's memo
 of the health verdicts the rounds reach belongs to the sp coordinator: it
 holds health verdicts — the
-objects the coordinator last judged unhealthy and each cntlr's run of
-unhealthy verdicts from rounds — and no work owed. A dn loop's count
+objects the coordinator last judged unhealthy, each cntlr's run of
+unhealthy verdicts from rounds, the cntlrs and sides HL8 holds and the
+cntlrs whose agent refuses a `SyncupCntlr` (HL9) — and no work owed. A
+cntlr child keeps the refused revision itself (HL9): it decides a health
+verdict and a candidate, never
+a re-sync, which RW4 step 5 still computes from the reply in hand. A dn loop's count
 compare (RW13) keeps a cache of the record as well — its free and total
 extents with the `DnRev` revision read with them, replaced by every read
 of the record that answers — and two memos of its compares that owe
@@ -1668,7 +1689,10 @@ RW4. **Round**, every interval (RW9):
    stop of RW11 cut short, each of which drops its stream the same way but
    carries no health verdict: a cancelled stop ctx is not a sick agent, and
    the verdict would start the threshold clock of Automatic reactions on a
-   healthy object;
+   healthy object. A reply of `ReplyCodeStarting` is judged by HL8 instead:
+   within the start hold it gives no verdict, issues no `Syncup*` and keeps
+   the stream, and past it, which HL8 says includes a hold of zero and a
+   start it cannot measure, it is a missed round as above;
 5. any other reply: process its `*Info` if present (Health bookkeeping; sp:
    RW18, RW19), which for a round that answers from an observation no
    round asked for is only to keep it as the latest known info (HL7);
@@ -1700,9 +1724,13 @@ send under `DefaultWorkerSyncupTimeout` with a trace id (RW10). An ACCEPTED
 reply — code zero, or `ReplyCodeLeftover` below — has its `*Info` processed
 (Health bookkeeping), its `bm_info` or `bm_info_list` diffed (Bitmap pushes)
 and its sp flips run (RW18, RW19). A REJECTED one (`ReplyCodeStaleRevision`,
-`ReplyCodeUnknownObject`, `ReplyCodeInvalidConf`, `ReplyCodeSaveFailed`, and
+`ReplyCodeUnknownObject`, `ReplyCodeInvalidConf`, `ReplyCodeSaveFailed`,
+`ReplyCodeStarting`, and
 any other non-zero code — below) is logged as `syncup rejected` (`code`,
-`details`) and left to the next round: unknown object means the parent
+`details`) and left to the next round: starting means the agent's startup
+reconcile still runs and it applied nothing (`dnagent.md` SH33), and the
+rounds send no `Syncup*` while it answers so within the start hold (HL8);
+unknown object means the parent
 syncup has not landed yet — an sp worker's `SyncupSide` reaching the DN
 before the dn worker's `SyncupDn` listed the side, say, which is normal
 since the roles are independent (VW10) — and stale revision means the agent
@@ -1737,7 +1765,9 @@ the agent's soft timeout cut off is another (`dnagent.md` SH4). It is logged
 at Error: a rejection neither sets nor clears a health epoch (HL1, HL2), so
 this record is where the worker's log shows the fault, once for each refused
 `Syncup*`; the node's store row shows the disk's refusal as the node's
-health epoch (HL1; `dnagent.md` DN18).
+health epoch (HL1; `dnagent.md` DN18), and an enabled primary whose
+`SyncupCntlr` is refused, for a failed save or an invalid conf, reads
+unhealthy on its later rounds (HL9).
 
 `ReplyCodeLeftover` is the one non-zero code that is **not** a rejection:
 the request was applied — the desired state is stored and the converge
@@ -1790,7 +1820,9 @@ The rejection handling does not enumerate the codes: only
 Error, every other value —
 including one this worker does not know — is Info, and an unknown code
 counts as a rejection, because a reply this worker cannot interpret carries
-no verdict it may act on. Nothing is remembered either way (RW2): the
+no verdict it may act on. Nothing that arms a re-send is remembered either
+way (RW2) — a cntlr child keeps only the revision an invalid conf or a
+failed save refused, for HL9's verdict: the
 re-send is not armed here, it comes from the NEXT round's own reply, which
 repeats the same code or the same revision mismatch until the agent's
 answer changes. An agent that stores a non-zero outcome must therefore
@@ -1953,7 +1985,9 @@ a run is that run's own rule: only an agreeing compare ends a DN's run, and
 only a round on a new observation that a round asked for makes a compare
 (RW13), while any clean
 health verdict ends a cntlr's run, that of a round on an observation already seen
-or of a `Syncup*` reply included (AR10). The time seen is forgotten when
+or of a `Syncup*` reply included, and so does a round whose agent answers
+that it is starting within the start hold (AR10, HL8); past the hold
+such a round counts as a missed round does. The time seen is forgotten when
 the object moves to another endpoint (RW13), and a loop starts with none.
 A child restarted at the same endpoint never counts in its cntlr's run
 (AR10) what a look its predecessor saw reported: its loop's start is a
@@ -2667,7 +2701,8 @@ the record reads such a record as missing too. The effect of each reply or
 missed round on `DnConf.err_epoch` or `CnConf.err_epoch`:
 
 * the stream cannot be opened, breaks, or no reply arrives within the round
-  timeout, or a reply answers from an observation HL7 finds too old: set to
+  timeout, or a reply answers from an observation HL7 finds too old, or
+  says the agent is starting past the start hold (HL8): set to
   now if zero; the in-memory info is marked
   `RES_STATUS_UNKNOWN` (what the worker records itself while the stream is
   dead, `architecture.md`, Live-state reporting — never written to etcd);
@@ -2676,7 +2711,9 @@ missed round on `DnConf.err_epoch` or `CnConf.err_epoch`:
   on a round that answers from an observation no round asked for (below):
   set to now if zero; the store row's error marks the node alone, so a node
   whose local store refuses writes gets no new side or cntlr, and no
-  failover, leg repair or cntlr replacement starts from it; it alone
+  failover, leg repair or cntlr replacement starts from it — the failover
+  of a primary there whose `SyncupCntlr` is refused starts from that
+  cntlr's own verdict (HL9); it alone
   withdraws no stuck grow, though it completes AR6's condition for a side
   unhealthy on that node for a reason of its own (AR6; `dnagent.md` DN18);
 * a clean round — a reply in time from an observation that is not too old
@@ -2696,6 +2733,9 @@ missed round on `DnConf.err_epoch` or `CnConf.err_epoch`:
   save, or one this worker does not know): neither set nor clear; on a
   round it triggers a re-sync (RW4 step 5), and a `Syncup*` reply's is left
   to the next round (RW5);
+* the starting code on a round within the start hold: neither set nor
+  clear, and no re-sync (HL8); a `Syncup*` reply's is a rejection, as
+  above;
 * `agent_reply.code` equal to `ReplyCodeLeftover`: evaluated exactly as code
   zero — the rows above set it, clear it or do neither — and the re-sync of
   RW4 step 5 still runs. The request WAS applied, so the `*Info` is a full
@@ -2752,9 +2792,12 @@ The rules are the same for every kind of record:
 
 * `Cntlr.err_epoch` is set to now (if zero) when its `CheckCntlr` stream
   cannot be opened, breaks or misses a round — a round whose observation
-  HL7 finds too old included — or any `RES_STATUS_ERROR` row of its
+  HL7 finds too old, and a starting round past the start hold (HL8),
+  included — or any `RES_STATUS_ERROR` row of its
   `CntlrInfo` **other than** `leg_id_to_leg` and `side_id_to_path` reads
-  so; it is cleared when its next round is clean (HL1). The write keeps the
+  so, or a round of an enabled primary answers from a revision older than
+  the driven one, whose `SyncupCntlr` its agent refused (HL9); it is cleared
+  when its next round is clean (HL1). The write keeps the
   SP's discovery records to the
   listing rule of `architecture.md`, [D18], in the same transaction (MD6):
   an enabled standby leaves them when its epoch is set and returns when it
@@ -2789,11 +2832,14 @@ The rules are the same for every kind of record:
   path rows are read under the same two gates. So while the primary's agent
   stays behind that revision, as while it refuses the plan's `SyncupCntlr`
   (RW5), no leg row and no path row of it counts: a leg that dies meanwhile
-  gets no epoch, so leg repair (AR8) waits, and a cutover waits too. A retired
+  gets no epoch, so leg repair (AR8) waits, and a cutover waits too, until
+  the primary applies the revision or, when it refuses it with an invalid
+  conf or a failed save, HL9 fails it over. A retired
   leg has no leg row: no cntlr connects it.
 * `Side.err_epoch` is set to now (if zero) when its `CheckSide` stream cannot
   be opened, breaks or misses a round — a round whose observation HL7 finds
-  too old included — or `side_dev_info` or any
+  too old, and a starting round past the start hold (HL8), included — or
+  `side_dev_info` or any
   `cn_id_to_dm_error`, `cn_id_to_dm_linear` or `cn_id_to_nvmeof` row is
   `RES_STATUS_ERROR`, or a `migr_src_info` or `migr_dst_info` row is `ERROR`;
   it is cleared when its next round is clean. A sides-first hold whose
@@ -2811,7 +2857,8 @@ AR12, AR13); the coordinator reads the in-sync lists and slots for the
 fence-last legs of RW24, under the two gates of the leg rows.
 
 `PROVISIONING`, `PENDING`, `MISSING` and a rejection code never set any of
-the three, and `Leg.err_epoch` clears on the primary's `RES_STATUS_OK`
+the three — HL9 judges the rounds after a primary's refusal, not the
+refusing reply — and `Leg.err_epoch` clears on the primary's `RES_STATUS_OK`
 alone. `PENDING` is the primary's leg row while its prober for the leg has
 not completed a round (or none is registered yet) — a first round stalled
 past `CnLegProbeStallSeconds` reads `ERROR` — and a fresh prober starts at
@@ -3071,9 +3118,12 @@ worker's host and the node enters a verdict. It counts the age from no
 earlier than the first round after a pause in its rounds of the object,
 and from that round alone for a reply that carries no observation time,
 and keeps the agent's answer time on that round until the next pause
-(RW2). A pause is the loop's start, an idle or a refused conf (RW9), or a
-move to another endpoint (RW13); its first round is the first that the
-agent answers in time without refusing the object as unknown. A gap
+(RW2). A pause is the loop's start, an idle or a refused conf (RW9), a
+move to another endpoint (RW13), or an agent's start (HL8), from the
+starting answer that begins it through the starting answers and missed
+rounds that follow, within the start hold or past it; its
+first round is the first that the agent answers in time
+without refusing the object as unknown or answering that it is starting. A gap
 between two rounds of a running loop is no pause: a round that waited out
 a long `Syncup*` behind a converge that holds the object's reads off finds
 the observation as old as it is. A round whose observation ended before
@@ -3090,7 +3140,9 @@ next round, which answers from the read the first round started — is
 judged as any other (Known limits). A round answered with
 `ReplyCodeUnknownObject` is not judged by its age: the agent holds no
 state of the object and so no observation of it, and the re-sync of RW4
-step 5 that this reply brings is what makes the object known. A round
+step 5 that this reply brings is what makes the object known. Nor is a
+round answered with `ReplyCodeStarting`, which carries no observation and
+which HL8 judges by the agent's start time. A round
 whose observation's age, so counted, exceeds `ObsMaxAgeIntervals` of the
 object's intervals, or whose reply carries no answer time to count it by —
 an observation too old — is a missed round in every way (RW4 step 4): the
@@ -3133,13 +3185,109 @@ that wait alone would find it, by about the bound less one of the object's
 intervals; and a hang can sit in a read as well as in a converge. The age
 counts from the first round after a pause because only a round starts a
 read (`dnagent.md` SH29): while no round asks — the worker restarts, fences
-itself (VW8), takes over the shard or idles — every observation ages with
+itself (VW8), takes over the shard or idles — or no read may run — the
+agent starts (`dnagent.md` SH33) — every observation ages with
 no fault of the agent's, and judged from its own time the first round
 after the pause would set the health epoch of every object. An
 observation that ended before that first round tells of the object as it
 was while no round asked, so no verdict rests on what it reports.
 The stream drops because the agent leaves an unchanged info out on a kept
 stream, which the unknown marking would then read as clean.
+
+HL8. **An agent that starts.** A round whose agent answers
+`ReplyCodeStarting` (`dnagent.md` SH33) is judged by how long the agent
+has been starting, by the node's clock. A starting answer that carries a
+start time begins a **start** of the agent, and the starting answers and
+missed rounds that follow extend it, whatever start each later answer
+carries, until the first round the agent answers otherwise ends it. The
+starts from the first one since the loop began, since a move, an idle or a
+refused conf of the loop, or since the last round the loop **judged** — one whose
+reply reaches its health judgement, answering in time from an observation
+that is not too old and ended no earlier than the first round after the
+pause (HL7), or refusing the object as unknown — up to the next round it
+judges make one **start series**, measured from its first start. So an
+agent that dies in its startup pass and starts again, its rounds missed
+while it is down, stays in one series, and so does one that ends each
+pass and dies before a round is judged. A starting round is measured by
+its answer time less the series' first start. Below the cluster's
+**start hold** (`ClusterConf.start_hold_conf`,
+`model.ResolveStartHoldSeconds`; a stored conf without it reads
+`DefaultStartHoldSeconds`), the round gives no verdict on the object,
+sends no `Syncup*`, which the agent would refuse, and keeps its stream,
+and a cntlr or a side is **held**: a cntlr's run of unhealthy rounds ends
+(AR10), AR5's threshold trigger fails no held cntlr over and AR7 replaces
+none, and a held side counts on no side clock — AR6's pick of a stuck
+group's side, AR8's case 2 and the side clock of a worker's repair's new
+leg. Past the hold — at or past it, with a hold of zero, which turns the
+hold off, with no start time or no answer time to measure by, or with an
+answer before the series' first start, as when the node's clock stepped
+back — the round is a missed round, as one with no reply is (`check round
+failed`, its error naming the hold), and a series that runs goes on. The
+first round the agent answers otherwise ends the start, within the hold
+or past it, and with it the pause (HL7): the startup reconcile held every
+read off, so the observations the agent answers from are the
+reconcile's, and the first round after the pause gives no verdict; the
+read it starts brings the next round's, which closes the series when the
+loop judges it. A hold ends at the round after the one that ends the
+start, whatever verdict that round gives, unless the agent answers it
+starting again, so it outlasts the start by one round; it ends sooner at
+any verdict on its object, a round's, a missed round's or a `Syncup*`
+reply's, and at a move to another endpoint (RW13), an idle or a refused
+conf (RW9) of its loop, which also forget the series. AR10's memo keeps a hold across a
+restart of the child that drives the object, until the new child's first
+verdict on it or the end of a start the new child sees. A starting reply
+keeps the health epoch that the missed rounds before the agent's port
+opened may have set: a restart does not clear a fault, and the first
+clean round does. The loop of a DN or a CN logs the starting answer that
+begins a series, each round that ends a start, and a round whose reply
+carries another agent start time than the loop's rounds last carried,
+starting or not, as the agent's restart; a move forgets the start time
+last carried. An sp child logs none of them, so a controller node's
+restart makes one record of each, not one per cntlr (Log records).
+Reason: a restart of a controller node's agent converges every cntlr
+before it can read any, at many pools for longer than the primary
+threshold, and failing every primary over for it moves hosts to another
+controller node for no fault of the data path; the hold bounds that, by
+the node's clock, across a worker restart or a handoff, since the start
+time travels in every reply. A series is measured from its first start,
+and stays open past the end of a start until a round is judged, so that
+an agent that never comes to serve — its startup pass runs on, or dies
+and starts again, or ends each time and the agent dies before a round is
+judged — is judged past the hold as one that does not answer; a series
+lives in its loop, so each new loop during such a run — a worker
+restart, a handoff, a restarted child — and each idle can hold it up to
+one more start hold (Known limits).
+
+HL9. **A primary that refuses its syncups.** When the agent refuses a
+`SyncupCntlr` with `ReplyCodeInvalidConf` or `ReplyCodeSaveFailed` — the
+agent knows the cntlr and will not apply the request — the cntlr child
+marks the revision that `SyncupCntlr` carried, the one it sent, and AR10's
+memo marks the cntlr refusing. The mark ends at a `Syncup*` reply that
+accepts, and at a round that answers, accepted, at the revision the child
+drives or a later one: the agent holds what it once refused though no
+accepting reply came back, as after a syncup cut by its deadline, a lost
+reply or a stopped child. A missed round ends it too: a cntlr that does not
+answer is unhealthy on its own account, and whether it still refuses is
+learnt again from the `Syncup*` its next answered round re-sends. While the
+mark names the revision the child
+drives and the plan makes the cntlr the enabled primary, each round that
+the agent answers, accepted, from an observation of an older revision is
+unhealthy (`res_name` `SyncupCntlr refused`), so its `err_epoch` is set
+and AR5 fails it over at the primary threshold, the settling primary's
+rule included, as for any unhealthy primary. While any mark stands, the
+cntlr is no failover candidate: AR5's election passes over it, and so do
+the failover's and the replacement's own writes, to which the pass hands
+it (AR5, AR7). The stale, unknown and starting
+refusals, and every other code, change nothing here: they say the agent
+is behind or not ready, which RW4, RW5 and HL8 handle. Reason: a primary
+that never applies its syncups never applies a change of the pool either
+— a repair's new leg it never adds, a thin device it never creates —
+while it answers its rounds clean from what it last applied; and a cntlr
+whose agent refuses its own syncups would refuse the promotion's too, so
+a failover onto it would leave the pool's changes waiting on the new
+primary, and a refusal every cntlr shares, such as a conf every agent
+finds invalid, would move the role from one refuser to the next every
+threshold.
 
 ## Bitmap pushes — `worker/bmpush.go`
 
@@ -3503,15 +3651,17 @@ end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, which can hold for as long as the error does — an
-operator's intervention, for a lost thin id or a pool's needs_check; AR6's `grow_pending`,
+operator's intervention, for a lost thin id or a pool's needs_check — and
+its `candidate_refuses`, for as long as the standbys' refusals do (HL9),
+a no-candidate case as well; AR6's `grow_pending`,
 `data_covered`, `grp_list_full`, `meta_ladder_cap`, `no_data_group` and the
 CN budget's `cn free_ext_cnt too low` when the pass's own check finds them,
 ahead of any scan and any transaction, and its scan that finds fewer DNs
 with room than the group has legs (each can hold indefinitely — a grow
 deferred on the CN, a ceiling of `architecture.md`, GrowSlice, a full
 cluster — and must not disable AR7 and AR8 for the duration); AR7's
-`shared_state` and `same_error`, which can hold as long as AR5's and move
-the scan to the next cntlr, and its scan that finds no CN, which moves the
+`shared_state`, `same_error` and `candidate_refuses`, which can hold as
+long as AR5's and move the scan to the next cntlr, and its scan that finds no CN, which moves the
 pass on to AR8; AR8's refusal of a drive step by its op, which
 holds that repair's group and moves the walk to the next repair, and its
 cancel's wait on `grp_row_stale` (`repair_cancel`), which does the same;
@@ -3616,18 +3766,25 @@ AR5's `disabled` trigger needs no verdict. AR8's case 1 needs the leg's
 verdict, and its case 2 the leg's and that of the side whose clock fires;
 AR8's try-to-abort on a new leg's clock needs the verdict on that leg or on
 the side whose clock fires, and on another leg its triggers' verdicts.
+A side's clock — AR6's, AR8's case 2's and the new leg's — also needs
+the side not held by HL8, which a round that finds its disk node's agent
+starting within the start hold begins.
 AR5's threshold trigger needs more than the latest verdict: the primary's
-last two verdicts from check rounds — a round with no reply in time or
-whose observation is too old (HL7), which counts on every such round, or a
-reply with an `ERROR` row that answers from an observation new to the
+last two verdicts from check rounds — a round with no reply in time,
+whose observation is too old (HL7) or whose agent answers that it is
+starting past the start hold (HL8), which counts on every such round, or a
+reply with an `ERROR` row, or one HL9 reads unhealthy, that answers from
+an observation new to the
 loop of the cntlr's child (RW23) and that a round asked for (HL7) — must
 both be unhealthy,
-with no clean answer, of a round or of a `Syncup*`, since the earlier of
-them; a `Syncup*` reply with an `ERROR` row neither starts that run nor
-adds to it, and neither does a round that answers from an observation
-already seen and not too old (RW23), nor one that answers from an
-observation no round asked for and not too old, which gives no verdict at
-all (HL7). A
+with no clean answer, of a round or of a `Syncup*`, and no round whose
+agent answers that it is starting within the start hold, since the
+earlier of them (HL8); a `Syncup*` reply with an `ERROR` row neither starts
+that run nor adds to it, and neither does a round that answers from an
+observation already seen and not too old (RW23), nor one that answers
+from an observation no round asked for and not too old, which gives no
+verdict at all (HL7). A starting round within the hold also holds the
+cntlr from AR5's threshold trigger and from AR7 until HL8's hold ends. A
 round counts by its
 own report: the info its reply carried or, when the reply leaves it out as
 unchanged, the info its stream last carried, never a `Syncup*`'s info that
@@ -3638,9 +3795,11 @@ the memo keeps while the pass's snapshot lists them (`architecture.md`,
 Repair): an
 unhealthy verdict puts the object in, a clean one takes it out, and a reply
 that neither sets nor clears changes nothing; for a cntlr it also counts
-the run of unhealthy verdicts from rounds, which a clean answer ends and
+the run of unhealthy verdicts from rounds, which a clean answer or a
+starting round within the hold ends and
 which outlives the cntlr's child (RW23 says what a restarted child adds
-to it). A
+to it), and it marks the cntlrs and the sides HL8 holds and the cntlrs
+whose agent refuses a `SyncupCntlr` (HL9). A
 verdict counts whether or not its monitor writes, so one that
 finds the record set already — re-seeded from another observer's epoch,
 say (HL3) — counts though it is no transition. The memo lives with the
@@ -3680,17 +3839,25 @@ primary's next converge (Known limits).
 AR5. When the primary cntlr is `disabled`, or has `err_epoch` set, `now`
 minus it at least `primary_unhealthy` — `cntlr_unhealthy`, when that is the
 longer, while it is **settling** (HL2) — and this coordinator's own
-verdicts on it unhealthy for two of its counted rounds in a row (AR10): the
+verdicts on it unhealthy for two of its counted rounds in a row (AR10),
+and HL8 does not hold it: the
 candidate is the cntlr with the
 smallest `cntlr_id` among those with `primary` false, `disabled` false and
-`err_epoch` zero; none means `reaction skipped` (`no candidate`) and the
-pass continues (AR2); else `model.Failover` of the old primary and the
-candidate — for an enabled primary, unless one of the two refusals below
-holds it (the first is judged ahead of the candidate, and where there is
-none it logs in place of `no candidate`). This is the failover trigger of
+`err_epoch` zero whose agent does not refuse its own `SyncupCntlr` (HL9);
+none means `reaction skipped` (`no candidate`) and the
+pass continues (AR2); else `model.FailoverPassingOver` of the old primary
+and the candidate, handed the standbys passed over for their refusal, so
+the election it re-validates inside its STM passes over them as well
+(MD6),
+unless one of the three refusals below holds it, the first two only an
+enabled primary. The first is
+judged ahead of the candidate, and where there is none it logs in place
+of `no candidate`; the third is judged where HL9 leaves no candidate, at
+least one cntlr being eligible but for its refusal, in place of
+`no candidate` too; and the second only where there is a candidate. This is the failover trigger of
 `architecture.md`, Failover; the data-plane choreography is the agents'.
-The `disabled` trigger waits out no threshold and needs no verdict:
-disabling is explicit operator intent, and the disabled primary has
+The `disabled` trigger waits out no threshold, needs no verdict and is
+not held by HL8: disabling is explicit operator intent, and the disabled primary has
 normally stopped serving by then (`architecture.md`, Cntlrs) — its disable
 request reaches it one sides-first hold after the bump (RW14). A pass runs
 inside that hold whenever a side the hold waits for does not report and
@@ -3711,7 +3878,7 @@ the threshold the worker already gives a cntlr before giving up on it. The
 hold lasts until that report: the promotion's, or, while a new SP's sides are
 still being zeroed, the end of its first build (HL2's settle paragraph); a
 primary that never makes it is failed over at the same threshold AR7 would
-replace the cntlr at, unless one of the two refusals below holds it. The hold
+replace the cntlr at, unless one of the refusals below holds it. The hold
 applies only where `cntlr_unhealthy` is the longer, as it is at the defaults:
 nothing orders the two thresholds (AR4), and an SP stored with a shorter
 `cntlr_unhealthy` would otherwise have its settling primaries failed over
@@ -3723,17 +3890,19 @@ on every pass. `model.Failover` re-validates the same selection inside its STM
 rule as they are — `failoverEligible` never reads the flag. A settling primary
 with no candidate reaches the no-candidate skip only at the longer of the two
 thresholds, and AR7's sole-primary variant, which waits `cntlr_unhealthy`
-either way, replaces it unless the first refusal below holds it or AR7's twin
-of the second does (AR7); the replacement is created settling in turn.
+either way, replaces it unless one of AR7's refusals holds it (AR7); the
+replacement is created settling in turn.
 
 A primary unhealthy past its threshold is not failed over where a failover
 cannot help, or is presumed not to (the second refusal compares rows, not
-causes) — its `err_epoch` stays set, and every pass logs why and goes on
+causes, and the third reads the standbys' refusals, not their causes) — its
+`err_epoch` stays set, and every pass logs why and goes on
 (AR2), as AR8 does for what only an operator can repair; a primary with no
 candidate is replaced by AR7's sole-primary variant at `cntlr_unhealthy`,
-except over a report the first refusal holds or, for the replacement AR7
-last made, over only the rows of the primary it replaced (AR7, Known
-limits):
+except over a report the first refusal holds; for the replacement AR7
+last made, over only the rows of the primary it replaced; and where the
+primary's agent refuses its syncups as every healthy, enabled standby's
+does (AR7, Known limits):
 
 * **Shared state.** Every `ERROR` row of its latest report that HL2 judges
   it by (every map of rows but `leg_id_to_leg` and `side_id_to_path`) is of
@@ -3768,10 +3937,31 @@ limits):
   it can first move it on to a cntlr that has not held it. An `err_epoch` set later is a new
   error, judged as any, and a report with no `ERROR` row — a primary read
   unreachable, whose rows the worker marks `UNKNOWN` — is refused nothing.
+* **The candidates refuse.** Every cntlr with `primary` false, `disabled`
+  false and `err_epoch` zero has an agent that refuses its own
+  `SyncupCntlr` with an invalid conf or a failed save (HL9), so none is a
+  candidate: `reaction skipped` (`candidate_refuses`, with `old_cntlr_id`
+  and, as `new_cntlr_id`, the smallest of them). Such a cntlr would
+  refuse the promotion's syncup as well, so the role stays where it is,
+  and the pass goes on (AR2) to AR7, whose sole-primary variant reads the
+  primary as one with no candidate and replaces it once it has been
+  unhealthy for `cntlr_unhealthy`, the replacement's own candidate test
+  passing over the same standbys — unless the primary's own agent refuses
+  its `SyncupCntlr` too, which AR7 holds as well (AR7). A refusal every
+  cntlr shares would otherwise move the role from one refuser to the next
+  every threshold.
 
-Neither refusal holds a `disabled` primary: that trigger is the operator's.
-Both read a report, which no STM sees, so `model.Failover` does not
-re-validate them, nor AR10's verdict, which no STM sees either. The second
+The first two refusals hold no `disabled` primary: that trigger is the
+operator's. The third holds one too, as no cntlr is left that would take
+the role; AR7 replaces no disabled cntlr (AR3), so such a primary keeps
+the role, its namespaces inaccessible and the pool's IO stopped
+(`architecture.md`, Cntlrs), every pass logging `candidate_refuses`,
+until a refusal ends or an operator enables the primary again. The first
+two read a report and the third the memo of a refusal (AR10), none of
+which an STM sees, so `model.Failover` does not re-validate them, nor
+AR10's verdict, which no STM sees either; it takes the refusing standbys
+the pass passes over on the worker's word, and re-validates the election
+among the rest. The second
 rests on the coordinator's record of the last failover it applied, one of
 the two records of its own a pass decides by (AR7's second refusal rests on
 the other): why the role moved is kept in no etcd record. A coordinator
@@ -3927,9 +4117,11 @@ them, and logs nothing for those grows. The step changes nothing.
 
 AR7. When a cntlr has `err_epoch` set, `now` minus it at least
 `cntlr_unhealthy`, this coordinator's own latest verdict on it unhealthy
-(AR10), `disabled` false, and either `primary` false or it is the primary and
-**no failover candidate exists** (AR5 found none — the sole-cntlr SP, or every
-other cntlr unhealthy or disabled): the candidates are
+(AR10), HL8 not holding it, `disabled` false, and either `primary` false
+or it is the primary and
+**no failover candidate exists** (AR5 found none — the sole-cntlr SP,
+every other cntlr unhealthy or disabled, or every healthy, enabled one
+refusing its syncups, HL9): the candidates are
 `FindCnCandidatesAntiAffine` with the SP footprint (the sum of `ext_cnt` over
 all groups of its slices), a candidate count of `cn_batch_size`, a black list
 of the old cntlr's `addr_port`, the SP's other cntlrs' endpoints as the SP's
@@ -3948,7 +4140,9 @@ one's — the same `cntlid_slot`, `primary` true and `settling` true only in the
 sole-primary variant, `disabled` false, `err_epoch` zero (HL2: a primary
 replacement is created settling, as a promoted primary is, and AR5 judges it
 by the settling threshold until it reports its stack built and clean as
-primary). The old CN is black-listed even when the node itself is healthy: its
+primary). The op is handed the standbys AR5 passes over for their refusal
+as well (`ReplaceCntlrPassingOver`), so its test for a failover candidate
+passes over them as AR5's election does (MD6). The old CN is black-listed even when the node itself is healthy: its
 cntlr is what failed. None means `reaction skipped` (`no candidate`), and
 the pass goes on to AR8 (AR2) without trying the next due cntlr, whose scan
 would pass over the same CNs, those of the SP's cntlrs. The op is handed the
@@ -3966,13 +4160,14 @@ The new CN takes no clone's metadata: a primary on it builds every clone
 of the SP over the clone's clone meta group (`cnagent.md` CN18), so the
 scan and the op count the footprint alone (MD6).
 
-The sole-primary variant takes two refusals, the twins of AR5's. Both are
-judged once AR7's trigger holds, whether or not AR5's threshold has run
-out, on the report AR5 judges, the info the pass holds for the primary
-(AR1, HL5), and each skip moves the scan to the next cntlr, so a standby
-due for replacement is still replaced, and with none the pass goes on
-(AR2). A standby's report is not read here, and carries no thin row
-(`cnagent.md` CN14), so its `ERROR` rows are its own.
+The sole-primary variant takes three refusals, the twins of AR5's. All
+are judged once AR7's trigger holds, whether or not AR5's threshold has
+run out, the third first; the first two on the report AR5 judges, the
+info the pass holds for the primary (AR1, HL5), and the third on AR10's
+memo of refusals (HL9). Each skip moves the scan to the next cntlr, so a
+standby due for replacement is still replaced, and with none the pass
+goes on (AR2). A standby's report is not read here, and carries no thin
+row (`cnagent.md` CN14), so its `ERROR` rows are its own.
 
 * **Shared state.** A primary whose latest report has `ERROR` rows of HL2's
   shared-state class alone is not replaced — `reaction skipped`
@@ -4022,8 +4217,20 @@ due for replacement is still replaced, and with none the pass goes on
   missed round of a child that has never had a reply, so that the one after
   it is not held either.
 
-Like AR5's refusals these read a report, which no STM sees, so
-`model.ReplaceCntlr` does not re-validate them, nor AR10's verdict.
+* **The cntlrs all refuse.** The primary's own agent refuses its
+  `SyncupCntlr` (HL9), and every healthy, enabled standby's refuses its
+  own, which left AR5 no candidate: `reaction skipped` (`candidate_refuses`,
+  with `old_cntlr_id` and, as `new_cntlr_id`, the smallest refusing
+  standby; the kind, `replace_cntlr`, tells the record from AR5's). A
+  refusal every cntlr shares moves no role: the replacement would refuse
+  the same request and never build, while the primary still serves what
+  it last applied. A primary whose own agent refuses nothing is replaced
+  as any, whatever made it unhealthy, though every standby refuses; and a
+  primary whose agent stops answering has its mark ended by its missed
+  rounds (HL9), so it is replaced as a dead primary with no candidate.
+
+Like AR5's refusals these read a report or the memo, which no STM sees,
+so `model.ReplaceCntlr` does not re-validate them, nor AR10's verdict.
 
 ### Leg repair
 
@@ -4114,7 +4321,10 @@ stage it left. For each other repair:
   lasts as long as the create's own would, so a primary that keeps refusing
   syncups, as one whose local store fails does, keeps the repair and its
   new leg's extents until the primary reports at the snapshot's
-  revision. A failed read of the node records (AR1) or a scan that fails
+  revision, or until the refusal makes it unhealthy (HL9) and AR5 fails it
+  over or, with no failover candidate, AR7 replaces it, which it does not
+  while every healthy, enabled standby refuses too (AR7). A failed read
+  of the node records (AR1) or a scan that fails
   logs the create's failure and ends the pass, the repair left to the next
   one. A changed candidate
   refuses the joined transaction as any refusal of this step does: it
@@ -5315,11 +5525,19 @@ round after a pause, exceeds one interval, or whose reply carries no
 answer time, too old or not, but for the leave HL7 gives the round right
 after a `Syncup*` reply (HL7), the record telling a round whose reply
 carries no observation from one that answers from an observation;
+`agent starting` the starting answer of a DN's or a CN's loop that
+begins a start series, within the start hold or past it, with the
+agent's start time; `agent started` each round that ends a start, with
+the time from the agent start its reply carries to its answer, by the
+node's clock; and `agent restarted` a round whose reply carries another
+agent start time than the loop's rounds last carried, with both; none of
+the three on an sp child (HL8);
 `dn free count disagrees`, at Error, the second compare in a row, each on
 a round's new observation, that found a disk node's own free count other
 than its record's, once until a compare agrees (RW13, RW23).
 
 **Health and the sp role.** `health changed` every HL1 or HL2 transition,
+HL9's included, an `error_row` whose `res_name` is `SyncupCntlr refused`,
 judged against the memo HL3 re-seeds from the record — the correction of an
 epoch another observer wrote or cleared included —, a clean one with the
 reason `initial` while its monitor has written nothing yet and `recovered`
@@ -5529,7 +5747,38 @@ rounds alone. A case can also act from inside one of a worker's records, in
 the call that logs it, so that a change lands between two steps of that call,
 such as a scan and its commit. A whole-worker case that holds one dimension at
 its maximum of `architecture.md`, Cardinality limits, asserts the state the
-worker leaves in etcd and in the fakes, never how long it takes.
+worker leaves in etcd and in the fakes, never how long it takes. The start
+hold and the refused syncups are proved by Go cases alone. A unit case of
+a disk node's loop proves a start as a pause: a starting round gives no
+verdict and begins a start series, logged once; the first round answered
+otherwise ends the start, is logged, and judges no observation of the
+startup pass however old; a series past the hold, a hold of zero and a node's
+clock stepped back make the starting rounds missed ones; and another
+agent start than the one the rounds last carried is logged as a restart
+(HL7, HL8). Whole-worker cases over a cluster planted with a start hold
+of their own prove that an agent that answers starting for less than the
+hold keeps its primary and one past it is failed over, that a restart
+whose missed rounds have filled the failover's run and set the health
+epoch before the agent answers starting keeps its cntlrs past both
+thresholds with the epoch standing, and that an agent that dies in each
+startup pass and starts again, or ends each pass and dies before a round
+is judged, is failed over once the hold has passed from its first start
+(HL8). Unit cases of AR10's memo prove that a side
+whose disk node's agent starts counts on no side clock until a round
+judges it again, and a whole-worker case at the default hold that a
+repair's new leg whose disk node starts is not given up while the start
+lasts (HL8). A unit case of a cntlr child proves that a refusal marks
+the revision the child sent and that a round at the driven revision ends
+the mark, and unit cases of `model` that the failover and the
+replacement writes pass over the standbys the worker hands them;
+whole-worker cases prove that a primary whose agent refuses its syncups
+is failed over, that a standby whose agent refuses its own is no
+candidate, so a primary failing on its threshold keeps the role, logged
+as `candidate_refuses`, until the standby's refusal ends, that a
+primary is replaced at `cntlr_unhealthy` when its one standby refuses
+its syncups, and when its agent refuses its own and its one standby is
+unhealthy, and that no role moves when the primary's agent and its one
+standby's both refuse (HL9, AR5, AR7).
 
 **Topology.** The developer machine drives one Linux server over ssh, as a
 plain user with no sudo. The server runs one etcd on localhost, configured
@@ -5811,7 +6060,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Twenty-one records no suite case stages: `worker reg watch restarting`, `rev
+Twenty-three records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -5822,7 +6071,9 @@ any rev key and no suite case asserts either way; `syncup leftover`, which
 no fake produces on its own, since no fake computes a sweep verdict, and no
 suite case forces that code or sets `leftover_rounds`;
 `bitmap push failed`, for the reason given for BM6 above;
-`migration bitmap read failed`, since no fake refuses a `GetLegBm`;
+`migration bitmap read failed`, since a fake refuses a `GetLegBm` only
+under its `Starting` lever, which only a Go call sets; `agent starting`
+and `agent started`, for the same reason (HL8);
 `late observation`, since no suite case sets `obs_age_ms` or `obs_none`;
 `dn free count disagrees`, since no suite case sets `disk_counts`;
 `forced start kept`, since every clear the repair case stages commits;
@@ -5961,7 +6212,7 @@ killed and restarted fake replies like a restarted agent; a Go test stops a
 fake, which ends every call and stream it serves as a killed agent's end,
 so that no call in flight at the stop applies anything after it, and starts
 it again with what it kept or with nothing, as an agent restarts on its
-local files or on empty ones. Of its levers, `hang` holds an
+local files or on empty ones, under a new agent start. Of its levers, `hang` holds an
 object's `Check*` rounds while it is set, `hang_rounds` holds only as many
 of the next rounds as it counts, so that a case misses exactly the rounds
 it means to whatever its own polls cost, `delay_rounds_ms` answers every
@@ -6001,7 +6252,12 @@ group's whole flag, in-sync list, acted mark (`acted`) or done md check
 (`md_done`) by `grp_id`,
 change what a primary reports, and a standby reports neither. It stamps
 every reply as an agent does
-(`dnagent.md` SH28): a round or an info read about an object it knows, and
+(`dnagent.md` SH28), every stamp carrying an agent start time
+(`dnagent.md` SH33) — the fake's creation or its latest start again after
+a stop, unless a `Starting` lever names a later one, or the start the
+latest `Starting` lever set gave (below), set alone or with a whole
+behavior, which stays its start once the lever is cleared, as one process
+has one start: a round or an info read about an object it knows, and
 a `Syncup*` it does not refuse, answers
 from a new observation, made as it answers and under the call's trace id —
 the round's own for a round — so that, unless a lever says otherwise, no
@@ -6009,8 +6265,8 @@ round answers from an observation that is late, too old or already seen; a
 round or an info read that refuses its object as unknown carries no
 observation; a `Syncup*` it refuses — a stale revision, an object its
 node's last syncup does not list, or a refusing code a lever forces —
-carries no stamp, as an agent's refusal carries none (`architecture.md`,
-Live-state reporting); and a `Syncup*` that saved its request carries the
+carries no stamp, as an agent's refusal at a gate carries none
+(`architecture.md`, Live-state reporting); and a `Syncup*` that saved its request carries the
 save time, with its observation after it, while one whose code a lever
 forces saves nothing, so a forced `ReplyCodeLeftover` carries an
 observation and no save time.
@@ -6041,6 +6297,19 @@ reply carried (RW2), which holds the count compare off (RW13) until a
 round's reply carries a `DnInfo` again. A value above the request's
 revision plays nothing an agent produces: on a side or a cntlr it can
 release the sides-first hold (RW14) or the demotion hold (RW22) early.
+`syncup_code` forces a code on the object's `Syncup*` replies alone and
+applies nothing, while its rounds and info reads answer from what it last
+applied, as an agent whose gate or save refuses a request does (HL9).
+`Starting`, which only a Go call sets, answers every round and info read
+of the object with `ReplyCodeStarting`, no observation and the lever's
+time as the agent's start, an info read ahead of its check of an unknown
+object, as an agent whose startup reconcile still runs answers them
+(`dnagent.md` SH33; HL8); it refuses every `Syncup*` of the object with
+that code ahead of every other gate, with only the code and a stamp of
+the answer time and that start, and every push of it with that code
+unless a forced code answers first; and a cntlr's `GetLegBm` and
+`GetThinDeviceBm` fail with gRPC's Unavailable while it is set on that
+cntlr or on its CN.
 `leftover_rounds` is a leftover that clears: the fake
 applies and saves the request, unlike under a forced code, answers
 `ReplyCodeLeftover` (RW5) on the syncups and info reads meanwhile and on as
@@ -6157,7 +6426,8 @@ which no suite case sets, so no suite case runs RW13's count compare.
 * **After a pause, the first verdict waits a round.** Only rounds start
   background reads (`dnagent.md` SH29), so while no round drives an
   object — an undriven window, the gap of an ownership change (VW7), an
-  idle (RW9) — its observation ages, unless a converge of the agent's own
+  idle (RW9) — or the agent starts and runs no read (HL8), its
+  observation ages, unless a converge of the agent's own
   stores one: a background retry attempt, the dn's fence timer or a
   startup reconcile (`dnagent.md` SH28). The first round after the pause
   answers from that observation and gives no verdict on it (HL7): it
@@ -6216,12 +6486,21 @@ which no suite case sets, so no suite case runs RW13's count compare.
   conditions AR8 checks before the flag, logs the hold
   (`grp_operator_in_charge`, AR8); the worker never writes the flag (MD6;
   `architecture.md`, Repairs).
-* **A new leg the primary never reports keeps its repair CREATED.** AR8's
+* **A new leg the primary never reports keeps its repair CREATED while
+  the role cannot move.** AR8's
   try-to-abort reads the new leg's health epoch and its side's, and the
   worker stamps the leg's only from the primary's leg row of it (HL2), so a
   new leg whose side is provisioned and healthy while the primary reports
   nothing of it, as when the primary never applies the syncup that carries
-  the repair, never asks for an abort. The repair stays CREATED, and keeps
+  the repair, never asks for an abort. A primary whose agent refuses that
+  syncup with an invalid conf or a failed save reads unhealthy and is
+  failed over at its threshold (HL9), and the new primary reports the new
+  leg; the wait stays where the role cannot move that way: with no
+  enabled standby with no `err_epoch`, where AR7 replaces the primary only
+  at `cntlr_unhealthy`, and with only standbys whose agents refuse their
+  syncups too, where neither AR5 nor AR7 moves a role that every cntlr's
+  refusal would follow (AR5, AR7), until the refusals end. Meanwhile the
+  repair stays CREATED, and keeps
   the worker from creating another repair for its group, until the primary
   reports the new leg holding a place in the array or confirms an abort. An
   abort, whether the operator asks for it or one of AR8's other triggers
@@ -6384,6 +6663,35 @@ which no suite case sets, so no suite case runs RW13's count compare.
   reachability: two such rounds in a row are two missed rounds all the
   same, and fail over a primary that still serves its hosts once its
   threshold has run out.
+* **A startup longer than the start hold fails over the node's
+  primaries.** An agent answers every round starting until its whole
+  startup reconcile ends, and the reconcile converges every object of the
+  node one after another (`dnagent.md` SH33). Past the cluster's start
+  hold, counted from the first start of the start series, each such round
+  is a missed round (HL8), so every primary with a failover candidate on a
+  controller node whose reconcile outlasts the
+  hold is failed over once its threshold has run out and two such rounds
+  in a row have filled its run (AR5, AR10), and its cntlrs are replaced
+  as AR7 says once the hold has passed and `cntlr_unhealthy` has run out
+  from their health epochs, which the rounds missed while the agent was
+  stopped may have set before it started. The hold is fixed when the
+  cluster is created (`architecture.md`, Clusters), so a cluster whose
+  controller nodes hold more pools than its hold covers needs a longer
+  one at its create. A start series lives in its loop (HL8): a worker
+  restart, a handoff, a restarted child or an idle begins a new one at
+  the agent's latest start, so an agent that dies in its startup pass and
+  starts again, or ends each pass and dies before a round is judged, is
+  held up to one more start hold for each of them.
+* **A reboot that the worker first sees as a starting agent holds its
+  failover up to the start hold.** The start time tells the worker how
+  long the agent has been starting, not whether the node's kernel kept
+  what the agent built: when a controller node reboots and its agent
+  answers starting before AR5 has failed its primaries over — a fast
+  reset, or a coordinator newly handed the pool whose first rounds find
+  the agent starting — each of those primaries keeps the role for up to
+  the hold while its stack is gone and its hosts' IO waits (HL8). A
+  restart over a live kernel, which the hold is for, and a reboot answer
+  alike.
 * **A round that answers from a retry attempt counts the attempt's rows.**
   The cn agent's connect retry re-runs the cntlr's whole converge while a
   member stays late (`cnagent.md` CN10, CN12), and each attempt stores its
@@ -6740,9 +7048,11 @@ which no suite case sets, so no suite case runs RW13's count compare.
   `health write failed` while a health write keeps failing (RW12). The sp
   coordinator's pass adds its own, in these amounts: failover's once per
   pool — AR5's `reaction skipped` with `no candidate`, say, for as long as a
-  primary due for failover has no eligible candidate, or `shared_state` or
-  `same_error` for as long as the error that holds one lasts —, cntlr
-  replacement's once per cntlr — AR7's `shared_state` or `same_error` once
+  primary due for failover has no eligible candidate, or `shared_state`,
+  `same_error` or `candidate_refuses` for as long as the error or the
+  refusal that holds one lasts —, cntlr
+  replacement's once per cntlr — AR7's `shared_state`, `same_error` or
+  `candidate_refuses` once
   the primary it holds is due for replacement, beside AR5's, or alone while
   a `primary_unhealthy` longer than `cntlr_unhealthy` has not yet run out —,
   auto-grow's once per slice and kind (AR6), leg repair's once per candidate

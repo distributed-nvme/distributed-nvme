@@ -313,6 +313,81 @@ func TestScenLegRepairAbortsANewLegWhoseDnDiesWhileZeroing(t *testing.T) {
 	}
 }
 
+// TestScenLegRepairHoldsANewLegWhoseDnStarts pins HL8 on the new leg's side
+// clock: the new leg's disk node misses rounds while it zeroes, which stamps
+// the side's epoch, and then answers that its agent is starting; past
+// side_unhealthy the repair is not aborted while the start lasts, and once
+// the agent answers again the repair goes on to its finish. side_unhealthy
+// is six seconds, so the start's first answer lands well inside it.
+func TestScenLegRepairHoldsANewLegWhoseDnStarts(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	shape := repairShape
+	shape.edit = func(s *stdSpec) {
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 2,
+			CntlrUnhealthy:   2,
+			SideUnhealthy:    6,
+			LegUnhealthy:     7,
+		}
+	}
+	c := h.plantScen(t, shape)
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	_, newLeg, newSide := c.nextRepairIds(t)
+	newKey := agentfake.SideKey(stdSpId, newLeg, newSide)
+	for _, id := range repairDns {
+		slowZeroing(t, c.dnAgent(id), newKey, true)
+	}
+	c.failLeg(t, 6)
+	created := h.waitCreated(t, w, 6)
+	repName := created.str("rep_name")
+	startDn := repairDnOf(created)
+	if startDn == 0 {
+		t.Fatalf("the new leg went to %s, want dn 3 or dn 4",
+			created.str("addr_port"))
+	}
+
+	dn := c.dnAgent(startDn)
+	down := func(o *agentfake.Object) { o.Hang = true }
+	setLever(t, dn, newKey, down)
+	setLever(t, dn, agentfake.DnKey, down)
+	h.waitUntil(t, 20*time.Second, "the new leg's side to carry a health "+
+		"epoch", func() (bool, string) {
+		_, side, ok := c.sideOf(t, newSide)
+		return ok && side.GetErrEpoch() != 0, fmt.Sprintf("%v", side)
+	})
+	start := time.Now()
+	up := func(o *agentfake.Object) {
+		o.Hang = false
+		o.Starting = start
+	}
+	setLever(t, dn, newKey, up)
+	setLever(t, dn, agentfake.DnKey, up)
+	// Past side_unhealthy from the epoch, and a few passes.
+	time.Sleep(9 * time.Second)
+	if n := h.countRecs(w, msgReactionApplied,
+		reactionIs(reactionRepairAbort, "")); n != 0 {
+		t.Fatalf("%d try-to-aborts of a new leg whose disk node starts", n)
+	}
+	if _, side, ok := c.sideOf(t, newSide); !ok || side.GetErrEpoch() == 0 {
+		t.Fatalf("the side's epoch is gone while its agent starts (%v); "+
+			"the case no longer tests a hold over an epoch", side)
+	}
+
+	ended := func(o *agentfake.Object) { o.Starting = time.Time{} }
+	setLever(t, dn, newKey, ended)
+	setLever(t, dn, agentfake.DnKey, ended)
+	slowZeroing(t, dn, newKey, false)
+	c.finishByVerdict(t, w, repName)
+	if n := h.countRecs(w, msgReactionApplied,
+		reactionIs(reactionRepairAbort, "")); n != 0 {
+		t.Fatalf("%d try-to-aborts after the start ended, want none", n)
+	}
+}
+
 // TestScenLegRepairWaitsForADnWithRoom pins the create's scan: with the one
 // DN outside the group full (the group's DNs are black-listed), the repair
 // finds no candidate and logs `reaction skipped` (no candidate) on every

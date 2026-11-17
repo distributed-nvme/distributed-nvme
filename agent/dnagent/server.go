@@ -79,7 +79,7 @@ type DnAgentServer struct {
 	sleep func(context.Context, time.Duration) error
 
 	// bg tracks every background goroutine that owns a child process, so
-	// agent.Serve can join them after GracefulStop and no orphan
+	// agent.Serve can join them after its stop and no orphan
 	// `blkdiscard --zeroout` ever outlives the agent (DN9, SH27). A task
 	// enrolls under mu (enrollLocked), and only while bgClosed is unset.
 	bg sync.WaitGroup
@@ -119,10 +119,14 @@ type DnAgentServer struct {
 	// in which each read is enrolled too (SH27).
 	reads sync.WaitGroup
 
-	// rootCtx is the process lifetime ctx, captured at Reconcile; the DN8
-	// background retries and the DN9 zeroing loops hang off it so shutdown
-	// stops them.
+	// rootCtx is the process lifetime ctx, captured by Prepare before the
+	// port opens, or at Reconcile when nothing prepared the server (a test);
+	// the DN8 background retries and the DN9 zeroing loops hang off it so
+	// shutdown stops them. rootSet says Prepare set it.
 	rootCtx context.Context
+	rootSet bool
+	// startup is the agent's startup state (SH33).
+	startup agent.Startup
 }
 
 // WaitBackground joins the dn background goroutines enrolled in bg — the DN9
@@ -136,9 +140,9 @@ type DnAgentServer struct {
 // deliberate carve-out: it is not enrolled and not waited for, and its
 // converge runs on rootCtx, which a signal cancels as the graceful stop starts
 // and agent.Serve cancels on an error return, so it starts no command and no
-// task. cmd/dnv-agent passes it to agent.Serve, which calls it after
-// GracefulStop has drained the last RPC, or straight after an error return,
-// with rootCtx cancelled either way (SH27).
+// task. cmd/dnv-agent passes it to agent.Serve, which calls it once its stop
+// has ended every RPC, drained or cut past the stop's grace with its handler
+// returned, with rootCtx cancelled either way (SH27).
 func (s *DnAgentServer) WaitBackground() {
 	s.mu.Lock()
 	s.bgClosed = true
@@ -431,6 +435,13 @@ func (s *DnAgentServer) SyncupDn(
 	ctx context.Context,
 	req *pb.SyncupDnRequest,
 ) (*pb.SyncupDnReply, error) {
+	if s.startup.Starting() {
+		// SH33: refused, not applied, while the pass runs.
+		return &pb.SyncupDnReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(),
+		}, nil
+	}
 	key := dnKey(req.GetClusterId(), req.GetDnId())
 	if end := s.beginDnSyncup(key, req); end != nil {
 		defer end()
@@ -464,6 +475,13 @@ func (s *DnAgentServer) SyncupSide(
 	ctx context.Context,
 	req *pb.SyncupSideRequest,
 ) (*pb.SyncupSideReply, error) {
+	if s.startup.Starting() {
+		// SH33: refused, not applied, while the pass runs.
+		return &pb.SyncupSideReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(),
+		}, nil
+	}
 	key := sideKey(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
 	if s.beginSideSyncup(key, req) {
@@ -491,6 +509,10 @@ func (s *DnAgentServer) PushMigrBitmap(
 	ctx context.Context,
 	req *pb.PushMigrBitmapRequest,
 ) (*pb.PushMigrBitmapReply, error) {
+	if s.startup.Starting() {
+		// SH33: refused, not applied, while the pass runs.
+		return &pb.PushMigrBitmapReply{AgentReply: agent.StartingReply()}, nil
+	}
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
 	key := sideKey(req.GetClusterId(), req.GetDnId(),
@@ -516,12 +538,19 @@ func (s *DnAgentServer) GetDnInfo(
 	key := dnKey(req.GetClusterId(), req.GetDnId())
 	s.mu.Lock()
 	st := s.dns[key]
+	if s.startup.Starting() {
+		s.mu.Unlock()
+		return &pb.GetDnInfoReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(),
+		}, nil
+	}
 	if st == nil {
 		s.mu.Unlock()
 		return &pb.GetDnInfoReply{
 			AgentReply: agent.UnknownObjectReply(
 				"unknown dn %d", req.GetDnId()),
-			ObsStamp: noObsStamp[*pb.DnInfo](s.now()),
+			ObsStamp: s.startup.Stamped(noObsStamp[*pb.DnInfo](s.now())),
 		}, nil
 	}
 	obs := st.obs.LatestLocked()
@@ -531,7 +560,7 @@ func (s *DnAgentServer) GetDnInfo(
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
 		DnInfo:     obs.Info,
-		ObsStamp:   obs.Stamp(s.now(), since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), since)),
 	}, nil
 }
 
@@ -546,12 +575,19 @@ func (s *DnAgentServer) GetSideInfo(
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
 	s.mu.Lock()
 	st := s.sides[key]
+	if s.startup.Starting() {
+		s.mu.Unlock()
+		return &pb.GetSideInfoReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(),
+		}, nil
+	}
 	if st == nil {
 		s.mu.Unlock()
 		return &pb.GetSideInfoReply{
 			AgentReply: agent.UnknownObjectReply(
 				"unknown side %s", sidePointerText(req.GetSidePointer())),
-			ObsStamp: noObsStamp[*pb.SideInfo](s.now()),
+			ObsStamp: s.startup.Stamped(noObsStamp[*pb.SideInfo](s.now())),
 		}, nil
 	}
 	obs := st.obs.LatestLocked()
@@ -561,7 +597,7 @@ func (s *DnAgentServer) GetSideInfo(
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
 		SideInfo:   obs.Info,
-		ObsStamp:   obs.Stamp(s.now(), since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), since)),
 	}, nil
 }
 

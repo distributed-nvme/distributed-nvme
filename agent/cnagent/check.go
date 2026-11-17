@@ -66,6 +66,16 @@ func (s *CnAgentServer) checkCnRound(
 	req *pb.CheckCnRequest,
 	lastSent *pb.CnInfo,
 ) (*pb.CheckCnReply, *pb.CnInfo) {
+	// Starting is read before the observation: the pass ends the start
+	// after it stored its last observation, so a call that finds the
+	// start ended reads every observation the pass made (dnagent.md SH33).
+	if s.startup.Starting() {
+		// dnagent.md SH33: the startup pass still runs.
+		return &pb.CheckCnReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(s.now()),
+		}, nil
+	}
 	obs, since, known := s.answerCn(ctx,
 		cnKey(req.GetClusterId(), req.GetCnId()), true)
 	now := s.now()
@@ -73,13 +83,13 @@ func (s *CnAgentServer) checkCnRound(
 		// The stream stays open; the worker re-issues SyncupCn.
 		return &pb.CheckCnReply{
 			AgentReply: unknownCn(req.GetCnId()),
-			ObsStamp:   (&cnObs{}).Stamp(now, time.Time{}),
+			ObsStamp:   s.startup.Stamped((&cnObs{}).Stamp(now, time.Time{})),
 		}, nil
 	}
 	reply := &pb.CheckCnReply{
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
-		ObsStamp:   obs.Stamp(now, since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(now, since)),
 	}
 	info := obs.Info
 	if info == nil ||
@@ -124,19 +134,29 @@ func (s *CnAgentServer) checkCntlrRound(
 ) (*pb.CheckCntlrReply, *pb.CntlrInfo) {
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
+	// Starting is read before the observation: the pass ends the start
+	// after it stored its last observation, so a call that finds the
+	// start ended reads every observation the pass made (dnagent.md SH33).
+	if s.startup.Starting() {
+		// dnagent.md SH33: the startup pass still runs.
+		return &pb.CheckCntlrReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(s.now()),
+		}, nil
+	}
 	obs, since, known := s.answerCntlr(ctx, key, true)
 	now := s.now()
 	if !known {
 		// The stream stays open; the worker re-issues SyncupCntlr.
 		return &pb.CheckCntlrReply{
 			AgentReply: unknownCntlr(req.GetCntlrPointer()),
-			ObsStamp:   (&cntlrObs{}).Stamp(now, time.Time{}),
+			ObsStamp:   s.startup.Stamped((&cntlrObs{}).Stamp(now, time.Time{})),
 		}, nil
 	}
 	reply := &pb.CheckCntlrReply{
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
-		ObsStamp:   obs.Stamp(now, since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(now, since)),
 	}
 	info := obs.Info
 	if info == nil ||

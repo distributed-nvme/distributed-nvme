@@ -950,6 +950,9 @@ type stdSpec struct {
 	// that holds a disk node and a controller node; by default every node
 	// is a location of its own.
 	sharedRacks bool
+	// startHold is the cluster's start hold in seconds (HL8), nil for the
+	// default.
+	startHold *uint32
 }
 
 // defaultStdSpec is the standard cluster: three disk nodes, three controller
@@ -1063,7 +1066,10 @@ func (h *workerHarness) plantStd(t *testing.T, edit func(*stdSpec)) *stdCluster 
 			t.Fatalf("fake cn %d: %v", id, err)
 		}
 	}
-	cl := h.putCluster(t, plant.ClusterSpec{ExtentSize: common.MinDnExtSize})
+	cl := h.putCluster(t, plant.ClusterSpec{
+		ExtentSize:       common.MinDnExtSize,
+		StartHoldSeconds: spec.startHold,
+	})
 	c.cl = cl
 	var err error
 	var dnSpecs []plant.DnSpec

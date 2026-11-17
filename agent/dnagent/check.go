@@ -62,13 +62,21 @@ func (s *DnAgentServer) checkDnRound(
 	key := dnKey(req.GetClusterId(), req.GetDnId())
 	s.mu.Lock()
 	st := s.dns[key]
+	if s.startup.Starting() {
+		s.mu.Unlock()
+		// SH33: the startup pass still runs.
+		return &pb.CheckDnReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(),
+		}, nil
+	}
 	if st == nil {
 		s.mu.Unlock()
 		// The stream stays open; the worker re-issues SyncupDn.
 		return &pb.CheckDnReply{
 			AgentReply: agent.UnknownObjectReply(
 				"unknown dn %d", req.GetDnId()),
-			ObsStamp: noObsStamp[*pb.DnInfo](s.now()),
+			ObsStamp: s.startup.Stamped(noObsStamp[*pb.DnInfo](s.now())),
 		}, nil
 	}
 	obs, since, readCtx := roundObsLocked(s, ctx, key, &st.obs)
@@ -88,7 +96,7 @@ func (s *DnAgentServer) checkDnRound(
 	reply := &pb.CheckDnReply{
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
-		ObsStamp:   obs.Stamp(s.now(), since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), since)),
 	}
 	info := obs.Info
 	if info == nil ||
@@ -136,13 +144,21 @@ func (s *DnAgentServer) checkSideRound(
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
 	s.mu.Lock()
 	st := s.sides[key]
+	if s.startup.Starting() {
+		s.mu.Unlock()
+		// SH33: the startup pass still runs.
+		return &pb.CheckSideReply{
+			AgentReply: agent.StartingReply(),
+			ObsStamp:   s.startingStamp(),
+		}, nil
+	}
 	if st == nil {
 		s.mu.Unlock()
 		// The stream stays open; the worker re-issues SyncupSide.
 		return &pb.CheckSideReply{
 			AgentReply: agent.UnknownObjectReply(
 				"unknown side %s", sidePointerText(req.GetSidePointer())),
-			ObsStamp: noObsStamp[*pb.SideInfo](s.now()),
+			ObsStamp: s.startup.Stamped(noObsStamp[*pb.SideInfo](s.now())),
 		}, nil
 	}
 	obs, since, readCtx := roundObsLocked(s, ctx, key, &st.obs)
@@ -159,7 +175,7 @@ func (s *DnAgentServer) checkSideRound(
 		// leftovers only; each object drives its own Syncup*.
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
-		ObsStamp:   obs.Stamp(s.now(), since),
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), since)),
 	}
 	info := obs.Info
 	if info == nil ||
@@ -168,6 +184,12 @@ func (s *DnAgentServer) checkSideRound(
 	}
 	reply.SideInfo = info
 	return reply, info
+}
+
+// startingStamp is the stamp of a reply the agent gives while its startup
+// pass runs (SH33): no observation, the answer's time and the agent's start.
+func (s *DnAgentServer) startingStamp() *pb.ObsStamp {
+	return s.startup.Stamped(noObsStamp[*pb.DnInfo](s.now()))
 }
 
 // noObsStamp is the stamp of a reply about an object the agent does not hold:
@@ -196,7 +218,8 @@ func roundObsLocked[T proto.Message](
 	obs := slot.LatestLocked()
 	since := s.marks.SinceLocked(key)
 	if !s.roundReads || slot.ReadingLocked() ||
-		!s.marks.QuietLocked(key) || s.bgClosedLocked() {
+		!s.marks.QuietLocked(key) || s.bgClosedLocked() ||
+		s.startup.Starting() {
 		return obs, since, nil
 	}
 	traceId, ok := common.TraceIdFromCtx(roundCtx)
