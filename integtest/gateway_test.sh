@@ -1096,7 +1096,7 @@ preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"
 	local tool
-	for tool in go ssh scp curl tar sha256sum date awk sed; do need_local "$tool"; done
+	for tool in go ssh scp curl tar sha256sum flock date awk sed; do need_local "$tool"; done
 	resolve_jq
 	fetch_etcd
 	log "  make build (CGO_ENABLED=0 GOOS=linux GOARCH=amd64)"

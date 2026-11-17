@@ -6237,7 +6237,7 @@ preflight_driver() {
 	local tool
 	# timeout is ssh_host_watched's, the watchdog over host IO. head makes the
 	# backing pattern below.
-	for tool in go ssh scp curl tar sha256sum awk sed mktemp timeout head; do
+	for tool in go ssh scp curl tar sha256sum flock awk sed mktemp timeout head; do
 		need_local "$tool"
 	done
 	resolve_jq

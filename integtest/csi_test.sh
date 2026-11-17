@@ -1554,7 +1554,7 @@ preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"
 	local tool
-	for tool in go ssh scp docker mktemp timeout awk sed grep curl tar sha256sum; do
+	for tool in go ssh scp docker mktemp timeout awk sed grep curl tar sha256sum flock; do
 		need_local "$tool"
 	done
 	docker info >/dev/null 2>&1 ||

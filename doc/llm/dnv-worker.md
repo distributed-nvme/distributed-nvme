@@ -362,9 +362,15 @@ that names no file as above; with `ETCD_BIN` empty or unset it hands the
 tests the etcd on the PATH, else the one in `integtest/bin/cache`, where
 the `fetch-etcd` target fetches the etcd release the integration suites
 pin, and with neither it fails before any test runs and names the
-`fetch-etcd` target. The same contract serves the etcd-backed tests of
-`model` (MD9), the worker, the gateway, the cdc (`cdc.md`, Integration
-test plan) and the planting library.
+`fetch-etcd` target. That fetch, which the suites that start an etcd run
+too, holds a lock on the cache from its first look at it to its last check,
+so fetches started at once take turns and one that follows a fetch that
+succeeded downloads nothing; it moves the release into place only once the
+release is whole, and the `test` target, like the fetch, takes a cached
+release only when both of its binaries are there, so it never takes a binary
+from a release the fetch would replace. The same contract serves the
+etcd-backed tests of `model` (MD9), the worker, the gateway, the cdc
+(`cdc.md`, Integration test plan) and the planting library.
 
 ## Package `model`
 

@@ -533,7 +533,7 @@ subcommand over ssh, with every manifest piped from the suite's machine,
 which installs no package: besides the tree's own builds and the images of CSI4
 it puts only csi-sanity, the pinned etcd release and, when the machine has no
 `jq`, `gojq` into `integtest/bin` (`layout.md`, Directory tree); it needs Go,
-ssh, scp and docker, and curl, tar and sha256sum for the etcd fetch.
+ssh, scp and docker, and curl, tar, sha256sum and flock for the etcd fetch.
 
 CSI4. **The suite's images reach a node by import.** The suite builds the
 driver's image and the smoke case's image on its machine, saves them and
