@@ -2197,8 +2197,11 @@ pending, the coordinator judges every leg row by the held plan (HL2). The
 order mitigates three races and is no correctness dependency
 (`architecture.md`, [D16]): a promotion's
 `SyncupCntlr` outrunning the sides' ANA flips, which leaves the new
-primary's groups to the agent's own retry, and a cntlr's connect to a new
-side outrunning that side's export (both `cnagent.md` CN10); and a leg
+primary's groups to a later converge — the agent's own retry, or the
+`SyncupCntlr` this worker re-sends once the cntlr's read names a group's
+absent array or a `RedundNone` group's dm-linear (`cnagent.md` CN10,
+CN30; RW4) — and a cntlr's connect to a new side outrunning that side's
+export (both `cnagent.md` CN10); and a leg
 removal's `nvme disconnect` on a CN overlapping the disk node's unlink of
 that side's export, which can leave the disconnect waiting out the kernel's
 admin timeout. That unlink comes from the dn role's `SyncupDn`, which the

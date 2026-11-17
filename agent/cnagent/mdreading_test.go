@@ -30,7 +30,9 @@ func mdSbArea(t *testing.T, lit string) []byte {
 const mdLabBadBlockList = "0800400000000000ffffffffffffffff"
 
 // TestParseMdSuperblockLabAreas parses areas md wrote in the lab and reads
-// back what mdadm --examine printed of each.
+// back what mdadm --examine printed of each, and the role table every one
+// carries: two places, both recorded as working ("Array State : AA"), the
+// half-copied member's and the spare's at member number 2.
 func TestParseMdSuperblockLabAreas(t *testing.T) {
 	const uuid = "e9b826b4:df214231:08620ea6:6f8f15ac"
 	cases := []struct {
@@ -68,6 +70,13 @@ func TestParseMdSuperblockLabAreas(t *testing.T) {
 				t.Errorf("parse: %+v, want uuid %s events %d role %#x "+
 					"recovering %v at %d", sb, uuid, tc.events, tc.role,
 					tc.recovering, tc.recovery)
+			}
+			if sb.RaidDisks != 2 || sb.workingRoles() != 2 ||
+				!sb.seesWorking(0) || !sb.seesWorking(1) ||
+				sb.seesWorking(2) || len(sb.Roles) != 128 {
+				t.Errorf("role table: %d places, %d working, roles %v; "+
+					"want 2 places, both working, of 128 roles",
+					sb.RaidDisks, sb.workingRoles(), sb.Roles[:4])
 			}
 			if got := sb.notFullMember(); got != tc.notFull {
 				t.Errorf("notFullMember: %q, want %q", got, tc.notFull)
@@ -191,15 +200,31 @@ func TestReadMemberReadFailures(t *testing.T) {
 }
 
 // TestCountBadBlocks: the list ends at the first all-ones word, and an entry
-// of length zero counts, since the kernel refuses a member that carries one.
+// of length zero counts and marks the list one the kernel refuses to import,
+// at any sector; entries with a length, the lab's among them, do not.
 func TestCountBadBlocks(t *testing.T) {
 	list := make([]byte, 32)
 	binary.LittleEndian.PutUint64(list[0:], 0)
 	binary.LittleEndian.PutUint64(list[8:], 4096<<10|8)
 	binary.LittleEndian.PutUint64(list[16:], mdBadBlockEnd)
 	binary.LittleEndian.PutUint64(list[24:], 1)
-	if n := countBadBlocks(list); n != 2 {
-		t.Fatalf("countBadBlocks: %d, want 2", n)
+	if n, refused := countBadBlocks(list); n != 2 || !refused {
+		t.Fatalf("countBadBlocks: %d, %v; want 2, refused", n, refused)
+	}
+	binary.LittleEndian.PutUint64(list[0:], 8192<<10)
+	if n, refused := countBadBlocks(list); n != 2 || !refused {
+		t.Fatalf("countBadBlocks of an entry of length zero at sector "+
+			"8192: %d, %v; want 2, refused", n, refused)
+	}
+	binary.LittleEndian.PutUint64(list[0:], 8192<<10|1)
+	if n, refused := countBadBlocks(list); n != 2 || refused {
+		t.Fatalf("countBadBlocks of entries with a length: %d, %v; want "+
+			"2, not refused", n, refused)
+	}
+	lab, _ := hex.DecodeString(mdLabBadBlockList)
+	if n, refused := countBadBlocks(lab); n != 1 || refused {
+		t.Fatalf("countBadBlocks of the lab's list: %d, %v; want 1, not "+
+			"refused", n, refused)
 	}
 }
 

@@ -5509,12 +5509,16 @@ higher than everything it has seen):
 revision):
 
 1. Make sure all groups are available ("Make sure all groups are
-   available"). A group whose member is not yet available is retried by
-   the agent until it is (`cnagent.md` CN10); the worker is not involved.
-   The fan-out's waits are bounded in time ([D16]), so this `SyncupCntlr`
-   can land before the sides' ANA flips have reached the new primary, and
-   nothing re-sends it on that account; the sides-first hold (sp role,
-   `dnv-worker.md` RW14) makes that rarer, not impossible.
+   available"). The fan-out's waits are bounded in time ([D16]), so this
+   `SyncupCntlr` can land before the sides' ANA flips have reached the new
+   primary; the sides-first hold (sp role, `dnv-worker.md` RW14) makes that
+   rarer, not impossible. A group whose member is not yet available is
+   then built by a later converge, which two things bring: the agent's own
+   retry re-runs the converge until the member is available (`cnagent.md`
+   CN10), and once the members serve, the cntlr's read names the group's
+   absent array, or a `RedundNone` group's dm-linear (`cnagent.md` CN12,
+   CN30), on which the worker re-sends the `SyncupCntlr` (`dnv-worker.md`
+   RW4).
 2. Create the pools, thin volumes and raid0 devices (Primary cntlr, steps
    3 to 5).
 3. Reload every namespace's `CnNsDevName` from its td's `CnErrorName` onto
@@ -5528,9 +5532,9 @@ revision):
    clone stacks (SpLevel) — and not before (`cnagent.md` CN16). A
    converge in which a member not yet available (step 1) kept the stack
    from being built leaves the namespaces inaccessible, and host IO waits
-   on the path until the agent's retry has built the stack (`cnagent.md`
-   CN10; `cnagent.md`, Known limits); a transfer the new primary serves
-   waits the same way (`cnagent.md` CN17).
+   on the path until a later converge (step 1) has built the stack
+   (`cnagent.md` CN10, CN30; `cnagent.md`, Known limits); a transfer the
+   new primary serves waits the same way (`cnagent.md` CN17).
 
 The failover's own transaction writes its revision into the old primary's
 `demoted_revision`, which the sp role's demotion hold reads (sp role), and
@@ -5617,8 +5621,10 @@ serves can lose an acknowledged write).
 — is a pause from the host's side: its paths drop, IO queues, and the
 new primary's optimized flip releases it once its stack is built
 (new_primary step 4). A promotion that outruns the sides' ANA flips
-(new_primary step 1) makes the pause longer by the agent's retry, which
-builds the stack (`cnagent.md`, Known limits), and never turns it into IO
+(new_primary step 1) makes the pause longer by the later converge that
+builds the stack — the agent's retry or the worker's re-send of the
+`SyncupCntlr` the read's name brings (`cnagent.md` CN10, CN30; `cnagent.md`,
+Known limits) — and never turns it into IO
 errors: the new primary builds its groups only over available legs, so no
 stack it builds reaches a side that still exports dm-error to it
 (`cnagent.md` CN12), and it moves no namespace to optimized over the

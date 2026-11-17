@@ -1400,10 +1400,11 @@ the connect attempted.
   group and no pool (`cnagent.md` CN12, CN13), so from the moment host0's path
   to the old primary goes, the loop's write in flight waits until the new
   primary has built the whole stack and turned its namespaces optimized. A
-  promotion that outruns the sides' ANA flips builds it only in the cn agent's
-  first background retry attempt after them, which adds the retry's interval
-  and one more converge to the wait, each converge growing with the slice
-  count (`cnagent.md`, Known limits). The case bounds that wait only by the
+  promotion that outruns the sides' ANA flips builds it only in a later
+  converge after them — the cn agent's first background retry attempt, or the
+  `SyncupCntlr` the worker re-sends once the cntlr's read names the absent
+  array, whichever comes first — which adds that wait and one more converge,
+  each converge growing with the slice count (`cnagent.md`, Known limits). The case bounds that wait only by the
   build's own and logs how long the write took.
 * **The outage takes etcd away, nothing else, and only once.** The gateway,
   the worker and the cdc run through it, so a program that starts while etcd

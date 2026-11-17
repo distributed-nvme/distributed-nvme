@@ -25,19 +25,23 @@ import (
 
 // LeftoverKind labels a leftover in the reply's details and in the agent log,
 // so an operator reading either can tell which enumeration found it.
-// LeftoverKindMdMember and LeftoverKindMdBroken are the two labels no
-// sweep's attribution produces. LeftoverKindMdMember names an md member that
-// a cn agent's cntlr verdict reports so that the worker re-sends the
-// SyncupCntlr whose converge fails it early for its dead leg, puts the member
-// back, adds it to an array that lacks it, or removes a repair's member md
-// holds without a place; LeftoverKindMdBroken names, by its node, a broken md
-// array of a wanted group that the converge would stop and assemble again
-// (cnagent.md CN12, The re-assembly; CN30).
+// LeftoverKindMdMember, LeftoverKindMdBroken and LeftoverKindMdAbsent are
+// the three labels no sweep's attribution produces. LeftoverKindMdMember
+// names an md member that a cn agent's cntlr verdict reports so that the
+// worker re-sends the SyncupCntlr whose converge fails it early for its dead
+// leg, puts the member back, adds it to an array that lacks it, or removes a
+// repair's member md holds without a place; LeftoverKindMdBroken names, by
+// its node, a broken md array of a wanted group that the converge would stop
+// and assemble again (cnagent.md CN12, The re-assembly; CN30);
+// LeftoverKindMdAbsent names, by the group's row name, the absent md array
+// of a wanted group that the converge's assembly would start (cnagent.md
+// CN12, CN30).
 const (
 	LeftoverKindDm       = "dm"
 	LeftoverKindMd       = "md"
 	LeftoverKindMdMember = "md_member"
 	LeftoverKindMdBroken = "md_broken"
+	LeftoverKindMdAbsent = "md_absent"
 	LeftoverKindNvmet    = "nvmet"
 	LeftoverKindNvmetNs  = "nvmet_ns"
 	LeftoverKindNvme     = "nvme"
@@ -51,9 +55,10 @@ const (
 const MsgSweepLeftover = "sweep leftover"
 
 // SweepResult is what one pass found: the leftovers — the objects still
-// present that nothing wants and, under LeftoverKindMdMember and
-// LeftoverKindMdBroken, the wanted md members and broken arrays a cntlr
-// verdict names (cnagent.md CN30) — and the failures — each
+// present that nothing wants and, under LeftoverKindMdMember,
+// LeftoverKindMdBroken and LeftoverKindMdAbsent, the wanted md members,
+// broken arrays and absent arrays a cntlr verdict names (cnagent.md CN30) —
+// and the failures — each
 // enumeration or read that did not answer, each removal that failed, and each
 // other condition an agent reports the same way so that the worker re-sends
 // the Syncup* whose converge acts on it (LeftoverReply).
@@ -70,8 +75,9 @@ func (r *SweepResult) Clean() bool {
 
 // Add records one object of kind that is present and unwanted, or, under
 // LeftoverKindMdMember, an md member the converge would fail early, put
-// back, add or remove for a repair, or, under LeftoverKindMdBroken, a broken
-// array the converge would assemble again.
+// back, add or remove for a repair, under LeftoverKindMdBroken, a broken
+// array the converge would assemble again, or, under LeftoverKindMdAbsent,
+// an absent array the converge would start.
 func (r *SweepResult) Add(kind string, name string) {
 	r.leftovers = append(r.leftovers, kind+":"+name)
 }

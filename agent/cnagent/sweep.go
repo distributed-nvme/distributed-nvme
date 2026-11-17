@@ -1688,7 +1688,10 @@ func (s *CnAgentServer) unownedSrcNqns(
 // putBack are the md conditions the verdict names beside the leftovers:
 // each md member, by dm name, the converge would fail early, put back, add
 // or remove for a repair (putBackNames), and each broken array, by its node,
-// the converge would assemble again (reassemblyNamed; CN30): what the call's
+// the converge would assemble again (reassemblyNamed; CN30), each absent
+// array, by its group's row name, the converge's assembly would start
+// (absentArrayNamed), and, as a failure, each forced start the converge
+// would carry through (forcedStartNamed): what the call's
 // probe read, so nothing here reads them again. A
 // converge passes none: it has just tried to put them back, and its rows say
 // how that went. The verdict also names each forced-start mark of a request
@@ -1796,6 +1799,10 @@ func (s *CnAgentServer) sweepCntlr(
 		st.tracker.Keep(cntlrResKeys(plan))
 	}
 	for _, vn := range putBack {
+		if vn.err != nil {
+			res.Fail(vn.name, vn.err)
+			continue
+		}
 		res.Add(vn.kind, vn.name)
 	}
 	for _, ls := range noCtrl {

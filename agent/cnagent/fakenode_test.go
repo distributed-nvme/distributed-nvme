@@ -127,14 +127,18 @@ type fakeNode struct {
 	sbFacts map[string]fakeSuperblock
 	// bblRefused are the members whose bad-block log the kernel refuses to
 	// import, as a stop of a broken array the member came back to can leave
-	// it (cnagent_integtest.md, Lab facts). An assembly that names one
-	// writes its superblock update first, as mdadm does — the new identity
-	// of an --update=uuid among them — and then fails with the lab mdadm's
-	// "failed to add"; one with --update=force-no-bbl drops the log, and the
-	// entry with it, and starts. With refusedLeaves the failed run leaves an
-	// inactive array at its node that holds the member and refusedLeavesAlso
-	// beside it, as an array the stock incremental rule assembled does: a
-	// device there that is no dm device makes that array foreign.
+	// it (cnagent_integtest.md, Lab facts). A plain assembly, with no
+	// --run, counts each such add as refused against its gate
+	// (fakeAssemblyStarts) and starts without the member, or refuses with
+	// the lab mdadm's "assembled from" words. A forced assembly that names
+	// one writes its superblock update first, as mdadm does — the new
+	// identity of an --update=uuid among them — and then fails with the lab
+	// mdadm's "failed to add"; one with --update=force-no-bbl drops the log,
+	// and the entry with it, and starts. With refusedLeaves the failed forced
+	// run leaves an inactive array at its node that holds the member and
+	// refusedLeavesAlso beside it, as an array the stock incremental rule
+	// assembled does: a device there that is no dm device makes that array
+	// foreign.
 	bblRefused map[string]bool
 	// zeroNoEffect are the members whose `mdadm --zero-superblock` answers
 	// success and writes nothing, as mdadm answers a zero whose read of the
@@ -2673,6 +2677,18 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 		f.dispatchStderr = "mdadm: Not enough devices to start the array."
 		return "", 1
 	}
+	// Without --run, mdadm starts the array only from enough members
+	// (fakeAssemblyStarts), and says how many it lacks; one that starts, it
+	// starts without each member whose add the kernel refused (bblRefused).
+	if !contains(args, "--run") {
+		if ok, why := f.fakeAssemblyStarts(members); !ok {
+			f.dispatchStderr = "mdadm: " + dev + " assembled from " + why
+			return "", 1
+		}
+		members = slices.DeleteFunc(members, func(member string) bool {
+			return f.bblRefused[member]
+		})
+	}
 	// The array is the one its started members' superblocks name. Only an
 	// assembly whose started members all carry a superblock a test stamped
 	// by hand mints a new identity, and an assembly with --update=uuid,
@@ -2723,6 +2739,81 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	f.devSize[dev] = f.arraySize(members)
 	f.publishArray(array)
 	return "", 0
+}
+
+// fakeAssemblyStarts is the fake's degraded gate of mdadm's plain assembly,
+// from what each member's superblock says (sbFacts), as the lab's mdadm
+// keeps it: the newest member in a place, by change count, decides how
+// many working members the array needs, the places its view records as
+// working; a member in a place counts, once a place, when its change count
+// is at most one below the newest's and its view records the newest's
+// place as working, the newest itself always; and the array starts when at
+// least one member that counts carries no copy position and the members
+// that count are as many as the array needs. mdadm adds every member it
+// keeps in a place, counted or not, and each add the kernel refuses, of a
+// member whose bad-block list it cannot import (bblRefused), takes one off
+// the members that count; the array needs one in-sync member whose add
+// went through. A refusal says why in the words of the lab's mdadm after
+// "assembled from ". Called with f.mu held.
+func (f *fakeNode) fakeAssemblyStarts(members []string) (bool, string) {
+	type placed struct {
+		member string
+		sb     fakeSuperblock
+		own    uint16
+	}
+	var newest *placed
+	byPlace := make(map[uint16]*placed)
+	for _, member := range members {
+		sb := f.sbFacts[member]
+		own := fakeRoleOf(sb.role)
+		if own >= mdRoleMax {
+			continue
+		}
+		p := &placed{member: member, sb: sb, own: own}
+		if newest == nil || sb.events > newest.sb.events {
+			newest = p
+		}
+		if cur := byPlace[own]; cur == nil || sb.events > cur.sb.events {
+			byPlace[own] = p
+		}
+	}
+	if newest == nil {
+		return false, "0 drives - not enough to start the array."
+	}
+	need := 0
+	for place := 0; place < fakeRaidDisks(newest.sb, newest.own); place++ {
+		if fakeSeesWorking(newest.sb, newest.own, uint16(place)) {
+			need++
+		}
+	}
+	whole, counted, refused, wholeAdded := 0, 0, 0, 0
+	for _, p := range byPlace {
+		if p != newest && !fakeSeesWorking(p.sb, p.own, newest.own) {
+			continue
+		}
+		if f.bblRefused[p.member] {
+			refused++
+		}
+		if p.sb.events+1 < newest.sb.events {
+			continue
+		}
+		counted++
+		if p.sb.recovery == "" {
+			whole++
+			if !f.bblRefused[p.member] {
+				wholeAdded++
+			}
+		}
+	}
+	switch {
+	case whole == 0:
+		return false, fmt.Sprintf("0 drives and %d rebuilding - not "+
+			"enough to start the array.", counted)
+	case counted-refused < need || wholeAdded == 0:
+		return false, fmt.Sprintf("%d drive(s) - need %d to start (use "+
+			"--run to insist).", counted-refused, need)
+	}
+	return true, ""
 }
 
 // leaveInactive installs the inactive array a refused assembly leaves at dev
@@ -2779,6 +2870,36 @@ type fakeSuperblock struct {
 	events   uint64
 	// badBlocks is the length of the member's bad-block list.
 	badBlocks int
+	// arrayState is the member's view of the array as mdadm's "Array
+	// State" line spells it: one character a place, 'A' for a place the
+	// member records as working and '.' for one it does not, so its length
+	// is the array's number of places (fakeSuperblockArea). "" records the
+	// member's own place alone as working, in an array of two places, or
+	// of one more than its own place: a view by which any one member that
+	// carries a superblock starts the array, as the fake started one before
+	// it read the view.
+	arrayState string
+}
+
+// fakeRaidDisks is the number of places of the array a member's superblock
+// says it has (fakeSuperblock.arrayState), own its own role word.
+func fakeRaidDisks(sb fakeSuperblock, own uint16) int {
+	if sb.arrayState != "" {
+		return len(sb.arrayState)
+	}
+	if own < mdRoleMax && int(own) >= 2 {
+		return int(own) + 1
+	}
+	return 2
+}
+
+// fakeSeesWorking reports whether a member's superblock records place as
+// working (fakeSuperblock.arrayState), own its own role word.
+func fakeSeesWorking(sb fakeSuperblock, own uint16, place uint16) bool {
+	if sb.arrayState == "" {
+		return place == own
+	}
+	return int(place) < len(sb.arrayState) && sb.arrayState[place] == 'A'
 }
 
 // setSuperblock stamps a superblock on a member device with the facts it
@@ -2853,7 +2974,18 @@ func fakeSuperblockArea(id string, sb fakeSuperblock, refused bool) []byte {
 		n, _ := strconv.ParseUint(strings.Fields(sb.recovery)[0], 10, 64)
 		le.PutUint64(area[mdSbRecoveryOffsetAt:], n)
 	}
-	le.PutUint32(area[mdSbDevNumberAt:], 0)
+	// The role table: entry i holds place i where the member's view records
+	// place i as working, and faulty where it does not; the member's own
+	// number is its own place, or the entry after the places for a member
+	// in none.
+	own := fakeRoleOf(sb.role)
+	raidDisks := fakeRaidDisks(sb, own)
+	devNumber := raidDisks
+	if own < mdRoleMax {
+		devNumber = int(own)
+	}
+	le.PutUint32(area[mdSbRaidDisksAt:], uint32(raidDisks))
+	le.PutUint32(area[mdSbDevNumberAt:], uint32(devNumber))
 	le.PutUint16(area[mdSbBblogSizeAt:], 8)
 	le.PutUint32(area[mdSbBblogOffsetAt:], fakeBblSectors)
 	if sb.badBlocks > 0 || refused {
@@ -2863,9 +2995,16 @@ func fakeSuperblockArea(id string, sb fakeSuperblock, refused bool) []byte {
 	le.PutUint64(area[mdSbEventsAt:], sb.events)
 	le.PutUint32(area[mdSbMaxDevAt:], maxDev)
 	for i := 0; i < maxDev; i++ {
-		le.PutUint16(area[mdSbHeaderLen+2*i:], mdRoleSpare)
+		role := uint16(mdRoleSpare)
+		switch {
+		case i < raidDisks && fakeSeesWorking(sb, own, uint16(i)):
+			role = uint16(i)
+		case i < raidDisks && sb.arrayState != "":
+			role = mdRoleFaulty
+		}
+		le.PutUint16(area[mdSbHeaderLen+2*i:], role)
 	}
-	le.PutUint16(area[mdSbHeaderLen:], fakeRoleOf(sb.role))
+	le.PutUint16(area[mdSbHeaderLen+2*devNumber:], own)
 	le.PutUint32(area[mdSbCsumAt:],
 		mdSbChecksum(area[:mdSbHeaderLen+2*maxDev]))
 	return area

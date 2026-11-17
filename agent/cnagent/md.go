@@ -1434,7 +1434,7 @@ func (s *CnAgentServer) linearGroupShape(
 // which ensureLinearGroup takes and a cntlr's read names the device by
 // (CN30): dmSingleStep's, save that a device absent, with another table or
 // read-only is created or reloaded only while its leg serves — serves, the
-// converge's availability, a read's linearGroupServes — and is refused with
+// converge's availability, a read's readAvailable — and is refused with
 // "no available leg" otherwise. A device with the table it wants, not
 // read-only, is resumed whatever the leg, so a primary keeps serving through
 // a short loss of its leg's path.
@@ -1466,7 +1466,7 @@ func (s *CnAgentServer) linearGroupName(
 		return nil
 	}
 	step, err := linearGroupStep(shape, func() bool {
-		return s.linearGroupServes(ctx, plan, gp.legs[0])
+		return s.readAvailable(ctx, plan, gp.legs[0])
 	})
 	if err != nil || step == dmStepNone {
 		return nil
@@ -1474,30 +1474,51 @@ func (s *CnAgentServer) linearGroupName(
 	return shapeFailure(shape, "linear")
 }
 
-// linearGroupServes is a read's twin of the converge's availability of a
-// RedundNone group's leg (CN12), which needs ensureLeg to get through: no
-// sweep disconnects the leg's subsystem, its lookup answers, ensureLeg's
-// steps up to the wrapper's would take none (wrapperStepOf: the lookup's
-// test, the head's number, the wrapper the whole-size dm-linear over that
-// number, there, resumed and not read-only), and the lookup holds a path
-// both live and optimized, which with the lookup's test is legServes'
-// reading of the leg. A wrapper a converge would change is the wrapper's own
-// name (wrapperName), and the group's device waits for it, as a row waits
-// for the rows it is built on (cntlrRowVerdict).
-func (s *CnAgentServer) linearGroupServes(
+// readAvailable is a read's twin of the converge's availability of a leg
+// (CN12), which needs ensureLeg to get through, and by which a cntlr's read
+// decides a group's names — a RedundNone group's dm-linear
+// (linearGroupName), an absent array (absentArrayNamed) and a forced start
+// (forcedStartNamed): the leg is not provisioning, no sweep disconnects its
+// subsystem, its lookup answers, the lookup holds a path both live and
+// optimized, and ensureLeg's steps up to the wrapper's would take none
+// (wrapperStepOf: the lookup's test, the head's number, the wrapper the
+// whole-size dm-linear over that number, there, resumed and not read-only),
+// which with the path test is legServes' reading of the leg. A leg whose
+// lookup in the read's leg loop (legPlan.readView) holds no such path is
+// out at once; every other leg is looked up afresh, since its path can have
+// stopped serving since the loop's lookup, and the superblock read the
+// group's name makes next through such a path can wait. The path is tested
+// before the head's number is read, so a leg that does not serve costs no
+// number read. A wrapper a converge would change is the wrapper's own name
+// (wrapperName), and the group waits for it, as a row waits for the rows it
+// is built on (cntlrRowVerdict); so no superblock is read through a
+// wrapper that is missing, suspended, read-only or over another number than
+// the head the lookup finds, a read that could wait for a resume or read
+// another device.
+func (s *CnAgentServer) readAvailable(
 	ctx context.Context,
 	plan *cntlrPlan,
 	lp *legPlan,
 ) bool {
-	if s.disconnectInFlight(lp.nqn) {
+	if lp.provisioning || s.disconnectInFlight(lp.nqn) {
+		return false
+	}
+	// A leg whose lookup in the leg loop found no path both live and
+	// optimized does not serve, and costs nothing more. One that did, or that
+	// the loop did not look up, is looked up afresh: its path can have
+	// stopped serving since, and the superblock read the group's name makes
+	// next through such a path can wait as long as the path holds its IO.
+	if lp.readView != nil && !lp.readView.available() {
 		return false
 	}
 	view, err := s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
-	if err != nil {
+	if err != nil || !view.available() {
 		return false
 	}
+	// The path before the head's number, so a leg whose path does not
+	// serve costs no number read.
 	_, step, ok := s.wrapperStepOf(ctx, plan.rd, lp, view)
-	return ok && step == dmStepNone && view.available()
+	return ok && step == dmStepNone
 }
 
 // errNoAvailableLeg is the error of a group this pass leaves unbuilt because
@@ -1507,17 +1528,53 @@ func errNoAvailableLeg() error {
 	return fmt.Errorf("no available leg")
 }
 
-// assembleGroup is the case selection of cnagent.md CN12: read each available
-// member's superblock area (ReadMember) and either create the array or
-// assemble it from the members that carry a superblock of one identity. The
-// candidates are the available leg_list legs and the available new legs of an
-// open repair: a new leg that carries a superblock is handed to the assembly
-// beside the leg_list legs that carry one, after them, and mdadm and the
-// kernel judge its membership from the superblocks, so a half-copied new leg
-// resumes its copy and never starts the array alone, and a whole one can
-// start it when no leg_list leg is available, if md recorded the other legs
-// as failed. A new leg never counts toward case 1, whose create holds only
-// when no candidate carries a superblock, and is never one of its members.
+// assembleGroup is CN12's assembly: its case selection (planAssembly), then
+// the one mdadm command that selection decides, the create of case 1 or the
+// assembly of case 2, which hands mdadm the members of one identity with no
+// --run, so that mdadm itself decides whether a degraded start is safe
+// (Md.Assemble).
+func (s *CnAgentServer) assembleGroup(
+	ctx context.Context,
+	gp *grpPlan,
+	available map[uint64]bool,
+) error {
+	ap, err := s.planAssembly(ctx, gp, available)
+	if err != nil {
+		return err
+	}
+	if ap.create {
+		return s.md.Create(ctx, ap.conf, ap.members)
+	}
+	return s.md.Assemble(ctx, gp.devPath, gp.mdArrayName, ap.members)
+}
+
+// assemblyPlan is what CN12's assembly would run (planAssembly): with create
+// set, the create of case 1 with conf over members, every leg_list member;
+// otherwise the assembly of case 2 from members, the candidates that carry
+// a superblock of the identity it hands mdadm, sbs their superblocks in the
+// same order.
+type assemblyPlan struct {
+	create  bool
+	conf    MdCreateConf
+	members []string
+	sbs     []*mdSuperblock
+}
+
+// planAssembly is the case selection of cnagent.md CN12, with no mdadm
+// command that changes the node: read each available member's superblock
+// area (ReadMember) and decide either to create the array or to assemble it
+// from the members that carry a superblock of one identity. The converge's
+// assembly (assembleGroup) and a cntlr's read (absentArrayNamed) both run
+// it, the read with its own availability (readAvailable), so the read names
+// an absent array by the converge's own decision. The candidates are the
+// available leg_list legs and the available new legs of an open repair: a
+// new leg that carries a superblock is handed to the assembly beside the
+// leg_list legs that carry one, after them, and mdadm and the kernel judge
+// its membership from the superblocks, so a half-copied new leg resumes its
+// copy and never starts the array alone, and a whole one can start it when
+// no leg_list leg is available, if md recorded the other legs as failed. A
+// new leg never counts toward case 1, whose create holds only when no
+// candidate carries a superblock, and is never one of its members.
 //
 // A reading whose read failed or did not answer aborts the whole assembly:
 // with no answer this pass cannot tell case 1 from case 2, and guessing case
@@ -1525,12 +1582,14 @@ func errNoAvailableLeg() error {
 // identities, so case 2 hands it only the members of one (assemblyIdentity),
 // and the others stay out: a leg_list member of another identity is refused
 // at its add (legListAddRefusal) and a taken-back new leg at the take-back
-// check (takeBackStep), both named in the primary's report.
-func (s *CnAgentServer) assembleGroup(
+// check (takeBackStep), both named in the primary's report. Case 1's two
+// refusals and the test of the name (Md.NameInUse, an lsblk, which changes
+// nothing) are part of the selection.
+func (s *CnAgentServer) planAssembly(
 	ctx context.Context,
 	gp *grpPlan,
 	available map[uint64]bool,
-) error {
+) (*assemblyPlan, error) {
 	var members []string
 	var cands []assemblyCand
 	read := func(lp *legPlan, tier int) error {
@@ -1551,7 +1610,7 @@ func (s *CnAgentServer) assembleGroup(
 			tier = assemblyTierBadLeg
 		}
 		if err := read(lp, tier); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if rp := gp.openRep(); rp != nil {
@@ -1560,16 +1619,16 @@ func (s *CnAgentServer) assembleGroup(
 				continue
 			}
 			if err := read(lp, assemblyTierNewLeg); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	uuid, err := assemblyIdentity(gp, cands)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(members) == 0 && uuid == "" {
-		return errNoAvailableLeg()
+		return nil, errNoAvailableLeg()
 	}
 	conf := MdCreateConf{
 		DevPath:        gp.devPath,
@@ -1612,7 +1671,7 @@ func (s *CnAgentServer) assembleGroup(
 		// single available member in case 2 (assemble, and mdadm decides on
 		// a degraded start), never in case 1.
 		if len(members) != len(gp.legs) {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"only %d of %d legs available and none carries a superblock",
 				len(members), len(gp.legs))
 		}
@@ -1627,7 +1686,7 @@ func (s *CnAgentServer) assembleGroup(
 		// case 2 once one is available, as a repair's new leg the forced
 		// start named; otherwise the operator's mark acts.
 		if gp.grp.GetArrayMade() {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"the array of group %#x has run before and no member "+
 					"carries a superblock: its legs hold data, so no new "+
 					"array is created", gp.grpId)
@@ -1648,26 +1707,27 @@ func (s *CnAgentServer) assembleGroup(
 		// never had an array that could have left one.
 		inUse, err := s.md.NameInUse(ctx, gp.devPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if inUse {
-			return fmt.Errorf("an array runs under %s %w",
+			return nil, fmt.Errorf("an array runs under %s %w",
 				gp.devPath, errArrayNameInUse)
 		}
 		conf.AssumeClean = true
-		return s.md.Create(ctx, conf, members)
+		return &assemblyPlan{create: true, conf: conf, members: members}, nil
 	}
 	// Case 2: assemble from the members that carry a superblock of the
 	// array's identity; anything left out — a freshly provisioned addition,
 	// a stale-metadata re-add or a leg of another identity — is for the
 	// member reconciliation (reconcileMembers, cnagent.md CN12).
-	var withSuperblock []string
+	ap := &assemblyPlan{}
 	for _, c := range cands {
 		if c.sb != nil && c.sb.Uuid == uuid {
-			withSuperblock = append(withSuperblock, c.lp.path)
+			ap.members = append(ap.members, c.lp.path)
+			ap.sbs = append(ap.sbs, c.sb)
 		}
 	}
-	return s.md.Assemble(ctx, gp.devPath, gp.mdArrayName, withSuperblock)
+	return ap, nil
 }
 
 // The sets an assembly's candidates fall in, in order of trust
@@ -2038,10 +2098,11 @@ func (e forcedStartError) Unwrap() error { return e.err }
 // makes before it knows whether the group's array runs — the pass's md
 // walk, the array's Detail — and a running array's member that is not a dm
 // device (runningArrayErr). Reason (cnagent.md CN12): a pass that could not
-// read the array could not start it either, and nothing else brings the
-// converge back while the array does not run; a retry over an array that in
-// fact runs finds it running, and the mark waits with the retry registered
-// again (grpPlan.markWaits) until a converge acts on the mark no more. The
+// read the array could not start it either, and a read whose own read of
+// the array does not answer names nothing (forcedStartNamed); a retry over
+// an array that in fact runs finds it running, and the mark waits with the
+// retry registered again (grpPlan.markWaits) until a converge acts on the
+// mark no more. The
 // array that holds such a member reads running by md's state of the
 // moment (mdRunningStates), and the same array read broken ends the forced
 // start in the same refusal (MdDetail.strangerErr), so the retry does not
@@ -2059,13 +2120,14 @@ func markedErr(gp *grpPlan, err error) error {
 // one but a wait for a member that is not available (errForcedStartWait),
 // which is the late member's, the provisioning new leg aside
 // (hasLateMember). Reason (cnagent.md CN12): the worker re-syncs on a
-// revision or a reply code, never on a row, and a read of a group whose
-// array does not run names nothing, so with the mark standing no converge
-// would come back to try again after a step that failed for a passing
-// reason — a run killed at the soft timeout, a stop that may have gone
-// through, a first assembly that left the old identity. A refusal that
-// lasts, such as a named leg that is no full member or a stop a layer above
-// refuses, retries at the retry interval for as long as it lasts.
+// revision or a reply code, never on a row, so with the mark standing the
+// retry brings the converge back to try again after a step that failed for
+// a passing reason — a run killed at the soft timeout, a stop that may have
+// gone through, a first assembly that left the old identity — as a read's
+// name of the forced start does once the read finds the checks passing
+// (forcedStartNamed). A refusal that lasts, such as a named leg that is no
+// full member or a stop a layer above refuses, retries at the retry
+// interval for as long as it lasts, and a read names nothing for it.
 func forcedStartRetries(err error) bool {
 	var fse forcedStartError
 	return errors.As(err, &fse) && !errors.Is(err, errForcedStartWait)
@@ -2085,8 +2147,10 @@ var errStoredMark = errors.New(
 // syncupCntlr refused for a failed save — so that the worker re-sends the
 // SyncupCntlr whose converge acts on the mark if it still stands (cnagent.md
 // CN12, CN30). A converge of such a request acts on no mark
-// (dropForcedStartMarks): it may be one the worker has cleared since, and
-// nothing else re-drives a converge for a group whose array does not run. A
+// (dropForcedStartMarks): it may be one the worker has cleared since, and a
+// read names no forced start of such a request (forcedStartNamed), nor the
+// absent array where the plain assembly is refused (absentArrayNamed), the
+// case a mark is for. A
 // deferred group builds nothing, and its provisioned flip raises the pool's
 // revision, whose fan-out delivers the request.
 func storedMarks(plan *cntlrPlan, res *agent.SweepResult) {
@@ -2100,6 +2164,192 @@ func storedMarks(plan *cntlrPlan, res *agent.SweepResult) {
 		res.Fail(fmt.Sprintf("forced start of group %#x", gp.grpId),
 			errStoredMark)
 	}
+}
+
+// mdadmStarts reports whether mdadm's plain assembly (Md.Assemble), handed
+// members whose superblocks are sbs, in that order, starts the array: the
+// degraded gate of mdadm's Assemble.c, which holds for an explicit device
+// list with neither --run nor --force, the form Md.Assemble runs (cnagent.md
+// CN12), and the kernel's refusal of a member whose bad-block list it cannot
+// import. The newest member is the one in a place of the array with the
+// highest change count, the first handed among equals; each place keeps its
+// newest member, the first handed among equals, and mdadm drops one whose
+// superblock does not record the newest member's place as working
+// (seesWorking). A kept member counts when its change count is the newest's
+// or one below: in sync when it carries no copy position, rebuilding when it
+// does. mdadm adds every kept member to the array, counted or not, and takes
+// one off its count for each add the kernel refuses (BadBlocksRefused). The
+// array starts when at least one member counts in sync, one such member's
+// add goes through, since md runs no RAID1 array without one, and the
+// members that count, less the refused adds, number at least the working
+// members the newest superblock records (workingRoles). Reason: a read names
+// an absent array only while the converge's assembly would start it
+// (absentArrayNamed), and mdadm refuses a lone survivor whose superblock
+// still counts its dead peer as working (cnagent_integtest.md, Lab facts),
+// so a name without the gate would bring a SyncupCntlr whose assembly mdadm
+// refuses, every second round for as long as the peer stays dead.
+// Replacement members, which mdadm keeps beside the member of their place,
+// are not modelled: dnv's adds never make one, since a repair takes its bad
+// leg out of its place before its new leg's add and a leg_list member is
+// added only to a free place, so only an operator's mdadm run makes one
+// (cnagent.md, Known limits).
+func mdadmStarts(sbs []*mdSuperblock) bool {
+	var newest *mdSuperblock
+	best := make(map[uint16]*mdSuperblock)
+	for _, sb := range sbs {
+		if sb.Role >= mdRoleMax {
+			continue
+		}
+		if newest == nil || sb.Events > newest.Events {
+			newest = sb
+		}
+		if cur := best[sb.Role]; cur == nil || sb.Events > cur.Events {
+			best[sb.Role] = sb
+		}
+	}
+	if newest == nil {
+		return false
+	}
+	inSync, rebuilding, refused := 0, 0, 0
+	inSyncAdded := false
+	for place, sb := range best {
+		if uint32(place) >= newest.RaidDisks ||
+			(sb != newest && !sb.seesWorking(newest.Role)) {
+			continue
+		}
+		if sb.BadBlocksRefused {
+			refused++
+		}
+		if sb.Events+1 < newest.Events {
+			continue
+		}
+		switch {
+		case sb.Recovering:
+			rebuilding++
+		default:
+			inSync++
+			inSyncAdded = inSyncAdded || !sb.BadBlocksRefused
+		}
+	}
+	return inSync >= 1 && inSyncAdded &&
+		inSync+rebuilding-refused >= newest.workingRoles()
+}
+
+// readAvailability is the availability a cntlr's read gives the members a
+// group keeps, its leg_list legs and the new legs of its open repair
+// (readAvailable), as the converge's availability map holds it.
+func (s *CnAgentServer) readAvailability(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+) map[uint64]bool {
+	available := make(map[uint64]bool, len(gp.legs)+1)
+	for _, lp := range gp.legs {
+		available[lp.legId] = s.readAvailable(ctx, plan, lp)
+	}
+	if rp := gp.openRep(); rp != nil {
+		for _, lp := range rp.newLegs {
+			available[lp.legId] = s.readAvailable(ctx, plan, lp)
+		}
+	}
+	return available
+}
+
+// actsOnMark reports whether a converge of the request the agent holds acts
+// on the group's forced-start mark (CN12): one stands, and the request counts
+// as delivered (cntlrState.reqFromRpc), since the converge of any other
+// request drops the marks (dropForcedStartMarks).
+func actsOnMark(st *cntlrState, gp *grpPlan) bool {
+	return gp.mark != nil && st.reqFromRpc
+}
+
+// absentArrayNamed reports whether a cntlr's read names the group's array as
+// absent (CN30), under agent.LeftoverKindMdAbsent: the group is a wanted
+// RedundMdRaid1 group that is not deferred and whose mark no converge acts
+// on (actsOnMark); found, the array the read's md walk matched to it
+// (probeGroup), answered and is not there; and CN12's case selection
+// (planAssembly), run with the read's availability (readAvailability),
+// decides a create, or an assembly that mdadm's degraded gate lets start
+// (mdadmStarts). So it names the array exactly while the converge's
+// assembly would start it, short of the states the gate does not read
+// (cnagent.md, Known limits), and names nothing for the refusals that last: a
+// member not available, two identities, a group whose array has run and no
+// member that carries a superblock, the name another array holds, and a
+// start mdadm or the kernel refuses as mdadmStarts reads it. A superblock
+// read, or a test of the name, that did not answer names nothing; the next
+// read reads again. The converge passes its group's assembly to mdadm
+// whatever the gate says: mdadm is the authority on its own refusal, and the
+// gate here is only the read's guess of it. A guess that names where mdadm
+// refuses costs a SyncupCntlr every second round while the state lasts, and
+// one that withholds a name leaves the array to another re-drive; neither
+// refuses a start (cnagent.md, Known limits).
+func (s *CnAgentServer) absentArrayNamed(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	found *MdDetail,
+) bool {
+	if !plan.wantGrp || !gp.raid1 || gp.deferred || actsOnMark(st, gp) ||
+		found == nil || found.Exists {
+		return false
+	}
+	ap, err := s.planAssembly(ctx, gp, s.readAvailability(ctx, plan, gp))
+	return err == nil && (ap.create || mdadmStarts(ap.sbs))
+}
+
+// errForcedStartDue is the failure a cntlr's read names a group's forced
+// start by (forcedStartNamed): its leg, and what a converge would do.
+func errForcedStartDue(named *legPlan) error {
+	return fmt.Errorf("no array of the group runs, and a converge starts "+
+		"it from leg %#x", named.legId)
+}
+
+// forcedStartNamed is the failure by which a cntlr's read names the group's
+// forced start (CN30), nil for none: a converge acts on the group's mark
+// (actsOnMark), the group is a wanted RedundMdRaid1 group that is not
+// deferred, found, the array the read's md walk matched to it (probeGroup),
+// answered and no array of the group runs, and the converge's forced start
+// would go through to its zeroes and its assembly. That is, an array of the
+// group that is there and does not run holds no member that is not a leg
+// wrapper of this pool (MdDetail.strangerErr) and md's holders listing of it
+// answers with no holder, so no layer above blocks the forced start's stop
+// (forcedStartPass); and the forced start's checks (planForcedStart), run
+// with the read's availability (readAvailability), return a plan. So it
+// names nothing for the refusals that last — a named leg that is no full
+// member or is older than another, a member that is no leg of this pool, a
+// device above that holds the array — and nothing while a member the start
+// keeps is not available, a kept new leg that is still provisioning among
+// them, whose provisioned flip raises the pool's revision. A process that
+// holds the array open shows in no holders listing, and the stop it refuses
+// is named on every read (cnagent.md, Known limits). A read of the holders
+// or of a superblock that did not answer names nothing; the next read reads
+// again.
+func (s *CnAgentServer) forcedStartNamed(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	found *MdDetail,
+) error {
+	if !plan.wantGrp || !gp.raid1 || gp.deferred || !actsOnMark(st, gp) ||
+		found == nil || (found.Exists && mdRunning(found.State)) {
+		return nil
+	}
+	if found.Exists {
+		if found.strangerErr(plan.clusterId, plan.cnId, plan.spId) != nil {
+			return nil
+		}
+		holders, err := s.md.Holders(ctx, found.Dev)
+		if err != nil || len(holders) > 0 {
+			return nil
+		}
+	}
+	fp, err := s.planForcedStart(ctx, gp, s.readAvailability(ctx, plan, gp))
+	if err != nil {
+		return nil
+	}
+	return errForcedStartDue(fp.named)
 }
 
 // forcedStartPlan is what CN12's forced start would do from its checks
@@ -3457,7 +3707,7 @@ func (s *CnAgentServer) putBackNames(
 
 // legServes is the part of a leg's availability (CN12) that a call can read
 // without building anything, which putBackNames tests, and
-// linearGroupServes with its own lookup: its subsystem, looked
+// readAvailable with the read's lookup: its subsystem, looked
 // up in the call's walk, has every controller's address known, a multipath
 // namespace and a path that is both live and optimized. The wrapper is the
 // leg row's (legInfo), which putBackNames reads beside it. Not read: the
@@ -3489,9 +3739,12 @@ func (s *CnAgentServer) legServes(
 // report the same row. The array it read OK is returned too, for the
 // verdict, and nil whenever the row is not that: the verdict names no member
 // of a group the guard holds, whose converge would refuse again, so no
-// syncup comes for it on every round. The fourth value is an array of the
-// group that reads broken, for the verdict's re-assembly name
-// (reassemblyNamed), and nil for any other row.
+// syncup comes for it on every round. The fourth value is the group's
+// array as the read's md walk matched it, Exists false when there is none,
+// for the verdict's names of a broken array (brokenArray, reassemblyNamed),
+// of an absent one (absentArrayNamed) and of a forced start
+// (forcedStartNamed); it is nil for a RedundNone group and when the walk or
+// the array's read did not answer.
 //
 // Like ensureGroup it is only ever reached for a non-deferred group ([D15]), and
 // like ensureGroup it states the leg-count invariant rather than trusting the
@@ -3519,25 +3772,34 @@ func (s *CnAgentServer) probeGroup(
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), nil, nil
 	}
 	if !detail.Exists || detail.State == "clear" {
-		return pb.ResStatus_RES_STATUS_MISSING, "", nil, nil
+		return pb.ResStatus_RES_STATUS_MISSING, "", nil, detail
 	}
 	if detail.Foreign {
-		return pb.ResStatus_RES_STATUS_ERROR, detail.foreignErr().Error(), nil, nil
+		return pb.ResStatus_RES_STATUS_ERROR, detail.foreignErr().Error(),
+			nil, detail
 	}
 	if !mdRunning(detail.State) {
-		var broken *MdDetail
-		if detail.State == mdStateBroken {
-			broken = detail
-		}
-		return pb.ResStatus_RES_STATUS_ERROR, detail.State, nil, broken
+		return pb.ResStatus_RES_STATUS_ERROR, detail.State, nil, detail
 	}
 	if leaver := inSyncGuard(gp, detail, func(lp *legPlan) bool {
 		return s.legServes(ctx, plan, lp)
 	}); leaver != "" {
 		return pb.ResStatus_RES_STATUS_ERROR,
-			errInSyncGuard(leaver, detail.Dev).Error(), nil, nil
+			errInSyncGuard(leaver, detail.Dev).Error(), nil, detail
 	}
-	return pb.ResStatus_RES_STATUS_OK, mdStateLine(detail), detail, nil
+	return pb.ResStatus_RES_STATUS_OK, mdStateLine(detail), detail, detail
+}
+
+// brokenArray is found, a group's array as a read's md walk matched it
+// (probeGroup), when it reads broken and holds no member that is not a dm
+// device, for the verdict's re-assembly name (reassemblyNamed); nil
+// otherwise.
+func brokenArray(found *MdDetail) *MdDetail {
+	if found == nil || !found.Exists || found.Foreign ||
+		found.State != mdStateBroken {
+		return nil
+	}
+	return found
 }
 
 // reportGrpReading writes, beside a group's rows, what the primary reads of

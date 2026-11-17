@@ -284,7 +284,8 @@ logs for the same thing.
   `leftovers` (the sorted "kind:name" entries joined by a space; `kind` is
   one of the `LeftoverKind*` labels of `agent/sweep.go`, and a cntlr's
   read-only verdict lists there, each under a kind of its own, the md
-  members and the broken arrays `cnagent.md` CN30 names) and
+  members, the broken arrays and the absent arrays `cnagent.md` CN30
+  names) and
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
   the dn, a disk whose identity is not confirmed or a side with bytes
@@ -294,8 +295,9 @@ logs for the same thing.
   absent that a re-sent `Syncup*` would build, or the node's nvmet port in
   a state one would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a
   side of a wanted leg with no controller that the converge would connect,
-  or a forced-start mark of the request the agent holds while that request
-  does not count as delivered (`cnagent.md` CN8, CN30) — each rendered
+  a forced-start mark of the request the agent holds while that request
+  does not count as delivered, or a group's forced start its converge would
+  carry through (`cnagent.md` CN8, CN12, CN30) — each rendered
   "what: error" and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`

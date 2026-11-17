@@ -444,9 +444,9 @@ func (gp *grpPlan) isStartedBadLeg(legId uint64) bool {
 // start keeps and may name and the array does not run, a repair's new leg
 // that the forced start keeps is late too (forcedStartLegs): the forced
 // start waits for every member it keeps to be available, the open repair's
-// bad leg aside, which is late then as a leg_list member (CN12), and no
-// read's verdict names a member of a group whose array does not run, so
-// nothing else would bring the converge back for a new leg. While the mark
+// bad leg aside, which is late then as a leg_list member (CN12), and a
+// read names the group's forced start only once that new leg serves too
+// (forcedStartNamed). While the mark
 // stands over an array that runs and that no forced start of the pass
 // started, the pass registers the retry for the mark itself (markWaits),
 // whatever this test says. A provisioning leg defers its whole group
@@ -500,9 +500,10 @@ func (gp *grpPlan) hasLateMember(
 // superblock write md makes to the dead member while it keeps retrying a
 // copy onto a half-copied member (mdRunningStates), so a pass cannot tell
 // such an array from one that runs, and only a converge acts on the mark,
-// while a read of a group whose array does not run brings no converge back
-// (CN30). The cost is a converge every retry interval for as long as a mark
-// stands over an array that runs (cnagent.md, Known limits). A running array
+// while a read names the forced start only when it reads no array of the
+// group running (forcedStartNamed, CN30). The cost is a converge every
+// retry interval for as long as a mark stands over an array that runs
+// (cnagent.md, Known limits). A running array
 // that holds a member that is not a dm device is the group's error, running
 // false, and that error registers the retry instead (markedErr). The pass
 // that started the array registers nothing for the mark: the array runs
@@ -539,6 +540,11 @@ type legPlan struct {
 	// (cntlrRowVerdict, CN30), nil for nothing: a converge's wrapper step
 	// that failed, or a read's wrapperName.
 	wrapperName error
+	// readView is the lookup of the leg's subsystem a cntlr's read took in
+	// its leg loop (probeCntlr), by which the read's group names leave out a
+	// leg whose path does not serve with no lookup of their own
+	// (readAvailable), nil where the loop took none or it did not answer.
+	readView *subsysView
 }
 
 // repPlan is a group's repair as the cntlr's request carries it

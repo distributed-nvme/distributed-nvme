@@ -459,9 +459,10 @@ func (s *CnAgentServer) build(
 		// forced start that ends the pass in an error registers it too, a wait
 		// for a member aside, which is the late member's, and so does a read
 		// of the group's array before it that fails while the mark stands
-		// (forcedStartRetries, markedErr), for the same reason: a read of an
-		// array that does not run names nothing and brings no reply code, so
-		// only the retry's converge tries the forced start again. So does a
+		// (forcedStartRetries, markedErr), for the same reason: the error is
+		// a row, and a read names the forced start only once the checks it
+		// can run pass (forcedStartNamed), and nothing while its own read of
+		// the array does not answer. So does a
 		// mark that stands over an array the pass found running and that no
 		// forced start of the pass started (grpPlan.markWaits; markedErr for
 		// such an array that holds a member that is not a dm device): a

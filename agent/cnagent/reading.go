@@ -101,8 +101,10 @@ func (rd *cnReading) mdWalks() *mdWalkOnce {
 // (sweepCntlr with nothing removed), both from that reading, so the verdict
 // judges the node the rows read. The verdict also names the md members the
 // rows show the converge would put back, add or remove for a repair
-// (putBackNames, CN30), and the sides of wanted legs the converge would
-// connect (sidesToConnect, CN30).
+// (putBackNames, CN30), the absent arrays it would start and the forced
+// starts it would carry through (absentArrayNamed, forcedStartNamed, CN30),
+// and the sides of wanted legs the converge would connect (sidesToConnect,
+// CN30).
 //
 // A stored conf the gate refuses (architecture.md, Common validation) takes
 // no reading: its rows are empty, what a cntlr with nothing provable looks

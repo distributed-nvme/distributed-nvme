@@ -2639,11 +2639,15 @@ func TestGroupRowReadsItsLegWrapperFirst(t *testing.T) {
 // — on a standby every wanted leg not provisioning, on a primary a two-sided
 // leg or one whose row does not read OK — and none where that lookup has no
 // head or an unknown controller, which the wrapper's name compares with the
-// number the wrapper maps (wrapperName, CN30), and at most one more for a
-// RedundNone group's leg while the group's device is missing, maps another
-// table or is read-only (linearGroupServes), with the same exceptions, each
-// one file read in the agent's own process: a CN's dm devices and nvme heads
-// outnumber its arrays many times over, so the md walk reads none of them.
+// number the wrapper maps (wrapperName, CN30), and at most one more for each
+// leg a group's name weighs (readAvailable): a RedundNone group's leg while
+// the group's device is missing, maps another table or is read-only, and
+// each member an absent array's or a forced start's name weighs, with the
+// same exceptions and only once its path serves, each one file read in the
+// agent's own process: a CN's dm devices and nvme heads outnumber its arrays
+// many times over, so the md walk reads none of them. This read's arrays all
+// run, so it weighs no member (TestAGroupNameLooksUpAgainOnlyALegThatServed
+// counts those that do).
 func TestGroupProbeWalksOnce(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -4400,11 +4404,11 @@ func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
 // retry. An attempt while it is still late is refused the same way, runs no
 // --create and keeps the retry; the attempt after its path reads optimized
 // assembles the array from both members, adds nothing and stops the retry.
-// The fake has no Array State gate — it starts an array from any member that
-// carries a superblock — so the refusal is injected, as
-// TestGroupAssembleRefusalIsAnError does, for as long as the member is late;
-// like mdadm, which stops an array whose start it refused, the injected
-// refusal leaves no array.
+// Both members' superblocks carry the role table that counts both, and the
+// fake's mdadm keeps mdadm's degraded gate (fakeAssemblyStarts); like mdadm,
+// which stops an array whose start it refused, its refusal leaves no array.
+// A read names the absent array (absentArrayNamed, CN30) only once leg 2
+// serves: before, the gate it reads refuses the start as mdadm does.
 func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -4432,10 +4436,19 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	lone := "cmd " + start + "--name " +
 		srv.nf.CnMdArrayName(testSp, 0, 0, false) + " " + leg1
 	both := lone + " " + leg2
-	node.mu.Lock()
-	node.failCmdAlways[start] = "mdadm: " + mdDev + " assembled from 1 " +
-		"drive - need 2 to start (use --run to insist)."
-	node.mu.Unlock()
+	node.setSuperblock(leg1, fakeSuperblock{events: 10, arrayState: "AA"})
+	node.setSuperblock(leg2, fakeSuperblock{role: "Active device 1",
+		events: 10, arrayState: "AA"})
+	absentNamed := func() bool {
+		t.Helper()
+		refreshTestCntlr(t, srv)
+		check, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 4,
+		}, nil)
+		return strings.Contains(check.GetAgentReply().GetDetails(),
+			agent.LeftoverKindMdAbsent+":"+mdDev)
+	}
 
 	node.Reset()
 	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
@@ -4471,11 +4484,15 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 		t.Fatalf("an attempt that still found a member late stopped the " +
 			"retry")
 	}
+	if absentNamed() {
+		t.Fatalf("a read names the absent array while mdadm's gate " +
+			"refuses its start")
+	}
 
-	node.mu.Lock()
-	delete(node.failCmdAlways, start)
-	node.mu.Unlock()
 	node.setAnaState(nqn2, testIp2, testSvcId2, "optimized")
+	if !absentNamed() {
+		t.Fatalf("a read after the flip does not name the absent array")
+	}
 	node.Reset()
 	retryAttempt(t, srv)
 	started = node.callsMatching("cmd " + start)
@@ -4506,9 +4523,10 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 // OK, but leg 2 — late — still has to be added, and that --add is the
 // retry's: an attempt while it is still late adds nothing and keeps the
 // retry, and the attempt after its path reads optimized adds it and stops
-// the retry. (The fake starts an array from any member that carries a
-// superblock; the --fail and --remove are what make the fixture the shape
-// that outcome belongs to.)
+// the retry. (The fake's superblocks of a create record each member's own
+// place alone as working, so the fake's mdadm starts the array from any one
+// member; the --fail and --remove are what make the fixture the shape that
+// outcome belongs to.)
 func TestLateMemberIsAddedByTheRetry(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour

@@ -13,8 +13,10 @@ import (
 // The reading of a member (cnagent.md CN12)
 //
 // The assembly, the forced start, the re-assembly, the inspect, the
-// take-back check and the add of a leg_list member decide from one reading
-// of each member's superblock area,
+// take-back check, the add of a leg_list member, and a cntlr's read for its
+// names of an absent array and of a forced start (absentArrayNamed,
+// forcedStartNamed), decide from one reading of each member's superblock
+// area,
 // which the agent reads itself (Md.ReadMember): one O_DIRECT read of the area
 // where md's version-1.2 superblock sits, 4096 bytes into the member, and, when
 // the superblock says its bad-block list is not empty, one more of the window
@@ -57,6 +59,9 @@ const (
 	// mdBadBlockEnd is the bad-block list's end mark: a word whose bits are
 	// all ones.
 	mdBadBlockEnd = ^uint64(0)
+	// mdBadBlockLenMask is the length field of a bad-block list entry, its
+	// low ten bits; the sector is the rest.
+	mdBadBlockLenMask = 0x3ff
 	// mdDirectAlign is the unit an O_DIRECT read is aligned to
 	// (OsClient.ReadBlockDirect).
 	mdDirectAlign = 4096
@@ -69,6 +74,7 @@ const (
 	mdSbMajorVersionAt   = 4
 	mdSbFeatureMapAt     = 8
 	mdSbSetUuidAt        = 16
+	mdSbRaidDisksAt      = 92
 	mdSbSuperOffsetAt    = 144
 	mdSbRecoveryOffsetAt = 152
 	mdSbDevNumberAt      = 160
@@ -101,6 +107,47 @@ type mdSuperblock struct {
 	// BadBlocks is the length of the member's bad-block list: md's list of
 	// the regions it could not read or write on the member.
 	BadBlocks int
+	// BadBlocksRefused is set when that list holds an entry of length zero,
+	// a list the kernel refuses to import (super_1_load), so md refuses to
+	// take the member into an array (cnagent_integtest.md, Lab facts).
+	BadBlocksRefused bool
+	// RaidDisks is the number of places the array has. Roles is the
+	// superblock's role table, one role for each member number md has
+	// given, the member's own (Role) at its own number: the roles md held
+	// its members in when it last wrote this superblock, which mdadm's
+	// assembly weighs (workingRoles, seesWorking; mdadmStarts).
+	RaidDisks uint32
+	Roles     []uint16
+}
+
+// workingRoles is how many members the superblock records as working, as
+// mdadm counts them for its assembly (super1.c getinfo_super1's
+// working_disks): the entries of the role table that are places of the
+// array, below RaidDisks.
+func (sb *mdSuperblock) workingRoles() int {
+	n := 0
+	for _, role := range sb.Roles {
+		if uint32(role) < sb.RaidDisks {
+			n++
+		}
+	}
+	return n
+}
+
+// seesWorking reports whether the superblock records the member in place as
+// working: an entry of its role table holds place, a place of the array.
+// mdadm's assembly drops a member whose superblock does not record the
+// newest member's place so (mdadmStarts).
+func (sb *mdSuperblock) seesWorking(place uint16) bool {
+	if uint32(place) >= sb.RaidDisks {
+		return false
+	}
+	for _, role := range sb.Roles {
+		if role == place {
+			return true
+		}
+	}
+	return false
 }
 
 // mdReading is the reading of one member's superblock area: Err when the
@@ -171,7 +218,7 @@ func (m *Md) ReadMember(ctx context.Context, dev string) mdReading {
 		return mdReading{Err: fmt.Errorf(
 			"%s: bad-block list %w: %w", dev, errNotRead, err)}
 	}
-	sb.BadBlocks = countBadBlocks(
+	sb.BadBlocks, sb.BadBlocksRefused = countBadBlocks(
 		window[bbl.start-start : bbl.start-start+bbl.length])
 	return mdReading{Sb: sb}
 }
@@ -223,11 +270,16 @@ func parseMdSuperblock(area []byte) (*mdSuperblock, mdBblWindow, error) {
 			devNumber, maxDev)
 	}
 	features := le.Uint32(area[mdSbFeatureMapAt:])
+	roles := make([]uint16, maxDev)
+	for i := range roles {
+		roles[i] = le.Uint16(area[mdSbHeaderLen+2*i:])
+	}
 	sb := &mdSuperblock{
-		Uuid:   mdUuidText(area[mdSbSetUuidAt : mdSbSetUuidAt+16]),
-		Events: le.Uint64(area[mdSbEventsAt:]),
-		Role: le.Uint16(
-			area[mdSbHeaderLen+2*devNumber:]),
+		Uuid:      mdUuidText(area[mdSbSetUuidAt : mdSbSetUuidAt+16]),
+		Events:    le.Uint64(area[mdSbEventsAt:]),
+		Role:      roles[devNumber],
+		RaidDisks: le.Uint32(area[mdSbRaidDisksAt:]),
+		Roles:     roles,
 	}
 	if features&mdFeatureRecoveryOffset != 0 {
 		sb.Recovering = true
@@ -270,18 +322,23 @@ func mdSbChecksum(sb []byte) uint32 {
 	return uint32(sum&0xffffffff) + uint32(sum>>32)
 }
 
-// countBadBlocks is the length of a bad-block list: its words up to the end
-// mark. An entry of length zero counts, since the kernel refuses a member
-// that carries one (cnagent_integtest.md, Lab facts).
-func countBadBlocks(list []byte) int {
-	n := 0
+// countBadBlocks is the length of a bad-block list, its words up to the end
+// mark, and whether one of them has length zero, its low ten bits, which the
+// kernel refuses to import (super_1_load), and with it the member
+// (cnagent_integtest.md, Lab facts). Such an entry counts.
+func countBadBlocks(list []byte) (int, bool) {
+	n, refused := 0, false
 	for i := 0; i+8 <= len(list); i += 8 {
-		if binary.LittleEndian.Uint64(list[i:]) == mdBadBlockEnd {
+		entry := binary.LittleEndian.Uint64(list[i:])
+		if entry == mdBadBlockEnd {
 			break
+		}
+		if entry&mdBadBlockLenMask == 0 {
+			refused = true
 		}
 		n++
 	}
-	return n
+	return n, refused
 }
 
 // mdUuidText spells an array's identity as mdadm prints it: the 16 bytes in

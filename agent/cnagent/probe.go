@@ -26,9 +26,14 @@ import (
 // superblock reads (Md.ReadMember) of the take-back check, of a repair's new
 // leg taken from a retired leg and of the member that keeps the data
 // (takeBackStep), and of the identity check, of a leg_list member the array
-// lacks (legListAddRefusal), both through putBackNames, and the re-assembly's
+// lacks (legListAddRefusal), both through putBackNames, the re-assembly's
 // listing of a broken array's holders and reads of every member the group
-// keeps (reassemblyNamed), which read those member devices. No
+// keeps (reassemblyNamed), the reads of CN12's case selection for a group
+// with no array, with its lsblk of the group's name for a create
+// (absentArrayNamed, planAssembly), and the forced start's listing of the
+// holders of an array of the group that does not run and reads of the
+// members it keeps (forcedStartNamed, planForcedStart), which read those
+// member devices. No
 // function here creates, changes or removes an object of the node, as a
 // cntlr's background read must not (CN23; dnagent.md SH29). A thin pool's
 // `dmsetup status` carries the noflush flag and commits nothing, though it
@@ -64,7 +69,10 @@ type legSide struct {
 // side whose live path the converge would cut (pathsToCut, CN10), which the
 // verdict names too. It marks in the plan each leg wrapper and each
 // RedundNone group's dm-linear the converge would change (wrapperName,
-// linearGroupName), which the verdict names (cntlrRowVerdict).
+// linearGroupName), which the verdict names (cntlrRowVerdict). Among the md
+// conditions it returns are also each absent array the converge's
+// assembly would start (absentArrayNamed) and each forced start the
+// converge would carry through (forcedStartNamed), the second as a failure.
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -120,6 +128,7 @@ func (s *CnAgentServer) probeCntlr(
 			view, lookupErr = s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
 		}
 		if lookupErr == nil && view != nil {
+			lp.readView = view
 			for _, side := range sidesToConnect(lp, view, plan.primary) {
 				noCtrl = append(noCtrl, legSide{nqn: lp.nqn, side: side})
 			}
@@ -164,7 +173,7 @@ func (s *CnAgentServer) probeCntlr(
 			info.GrpIdToMdRaid[gp.grpId] = t.Provisioning(
 				key, gp.resName, detailsProvisioning)
 		case plan.wantGrp:
-			status, details, detail, broken := s.probeGroup(ctx, plan, gp)
+			status, details, detail, found := s.probeGroup(ctx, plan, gp)
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
 			if !gp.raid1 {
@@ -178,10 +187,22 @@ func (s *CnAgentServer) probeCntlr(
 				putBack = append(putBack, verdictName{
 					kind: agent.LeftoverKindMdMember, name: name})
 			}
-			if broken != nil && s.reassemblyNamed(
-				ctx, plan, gp, broken, info.LegIdToLeg) {
+			if broken := brokenArray(found); broken != nil &&
+				s.reassemblyNamed(ctx, plan, gp, broken, info.LegIdToLeg) {
 				putBack = append(putBack, verdictName{
 					kind: agent.LeftoverKindMdBroken, name: broken.Dev})
+			}
+			// An absent array the converge's assembly would start, and a
+			// forced start the converge would carry through (CN30).
+			if s.absentArrayNamed(ctx, st, plan, gp, found) {
+				putBack = append(putBack, verdictName{
+					kind: agent.LeftoverKindMdAbsent, name: gp.resName})
+			}
+			if why := s.forcedStartNamed(
+				ctx, st, plan, gp, found); why != nil {
+				putBack = append(putBack, verdictName{
+					name: fmt.Sprintf("forced start of group %#x", gp.grpId),
+					err:  why})
 			}
 			noteMdCheck(st, gp, detail)
 			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp),
@@ -408,10 +429,12 @@ func cloneSourceLive(view *subsysView, cp *clonePlan) bool {
 }
 
 // verdictName is one md condition a read's verdict names beside the
-// leftovers (CN30): its leftover kind and its name.
+// leftovers (CN30): its leftover kind and its name, or, with err set, a
+// failure, err naming the cause after the name (forcedStartNamed).
 type verdictName struct {
 	kind string
 	name string
+	err  error
 }
 
 // reassemblyNamed reports whether a read's verdict names the group's broken

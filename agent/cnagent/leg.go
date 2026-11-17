@@ -453,7 +453,7 @@ func wrapperUnder(lp *legPlan, view *subsysView) error {
 }
 
 // wrapperStepOf is ensureLeg's steps up to the wrapper's, read and not
-// taken, which a cntlr's read shares (wrapperName, linearGroupServes): the
+// taken, which a cntlr's read shares (wrapperName, readAvailable): the
 // test of the lookup view (wrapperUnder), the head's number from /sys/block
 // (blockDevNo), one file read in the agent's own process, and the wrapper's
 // shape against the whole-size dm-linear over that number, read-only flag

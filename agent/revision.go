@@ -61,27 +61,29 @@ func OkReply() *pb.AgentReply {
 // read never attempts (dnagent.md DN19); on both roles what a background
 // read found absent that a re-sent Syncup* would build, or the node's port in
 // a state one would rewrite (dnagent.md SH31, DN16); and on a cn a side of
-// a wanted leg with no controller that the converge would connect, and a
-// forced-start mark of a cntlr's request that does not count as delivered
-// (cnagent.md CN8, CN10, CN12, CN30). Each
+// a wanted leg with no controller that the converge would connect, a
+// forced-start mark of a cntlr's request that does not count as delivered,
+// and a group's forced start its converge would carry through (cnagent.md
+// CN8, CN10, CN12, CN30). Each
 // arrives among the failures, rendered like an enumeration that did not
-// answer. Two conditions arrive among the
+// answer. Three conditions arrive among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background
 // read names as one its converge would fail early, put back or add, under
-// LeftoverKindMdMember, and a broken array its converge would assemble
-// again, under LeftoverKindMdBroken (cnagent.md CN30). Only a read's verdict
-// names these
-// conditions, save two of the dn's: the unconfirmed disk identity, which the
-// converge's own code names too, since the record step that reports it runs
-// in the converge, and the record a pass could not free, which only a
-// converge's code names, since a read frees nothing (dnagent.md DN16, DN19);
-// a converge's code names none of the others.
+// LeftoverKindMdMember, a broken array its converge would assemble
+// again, under LeftoverKindMdBroken, and an absent array its converge's
+// assembly would start, under LeftoverKindMdAbsent (cnagent.md CN30). Only
+// a read's verdict names these conditions, save two of the dn's: the
+// unconfirmed disk identity, which the converge's own code names too,
+// since the record step that reports it runs in the converge, and the
+// record a pass could not free, which only a converge's code names, since a
+// read frees nothing (dnagent.md DN16, DN19); a converge's code names none
+// of the others.
 //
 // A leftover is the one per-resource outcome that cannot ride in the *Info
 // rows (SH14, CN29, DN19): the rows are keyed by the ids of WANTED objects,
 // and a leftover is by definition something nothing wanted names — the md
-// member and the broken array above are the wanted objects listed among
-// them. It is never
+// member, the broken array and the absent array above are the wanted
+// objects listed among them. It is never
 // stored as work owed — the agent recomputes it by enumerating the node in
 // every converge and every background read, and keeps it only as the code of
 // the object's observation (dnagent.md SH28, SH29), so the worker's ordinary
