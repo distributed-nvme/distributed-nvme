@@ -313,10 +313,9 @@ the host.
   never does. Seen once in the lab, in the e2e suite at 32 slices, and
   shown with md alone: each run that fenced md's first member first lost
   the last completed write, and each run that fenced it last kept it.
-  State: fix later. The fix waits for a plan of its own: it changes the
-  order of the fence, and it needs to know which leg md copies from, which
-  no record holds today. The proposed fix fences, in each group, that leg
-  last.
+  State: fix decided: in each group the worker fences the leg md copies
+  from last, once the other legs' paths are fenced, so that every write
+  the old primary acknowledged is on the leg the new primary copies from.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
@@ -370,7 +369,9 @@ The entries:
   When the mark names the half-copied leg instead, hosts read, over the
   regions md never copied, whatever that leg's disk held there, possibly
   another pool's bytes, with no error. Both legs show the same change
-  count. State: procedure written,
+  count. State: fix decided, the forced start refuses a named leg that
+  carries a bad-block list unless the mark carries the force flag; until
+  then, procedure written,
   [the forced-start guide](operations.md#the-forced-start-guide): name the
   leg md copied from, not the new leg it copied onto; `dnvctl group
   inspect` shows each leg's bad-block count and md's view of it. Seen in
@@ -380,8 +381,9 @@ The entries:
   stops it at once, and starts it again with the list dropped. If that stop
   fails, the array runs with the list, and the legs added to it copy the
   list's regions as bad too. Hosts then get IO errors over those regions,
-  though the named leg holds their data. State: accepted; no tested
-  procedure, and [the forced-start guide](operations.md#the-forced-start-guide)
+  though the named leg holds their data. State: procedure to write: the
+  way back, a level step down and a new mark, is tried in the lab first;
+  until then [the forced-start guide](operations.md#the-forced-start-guide)
   says to stop and ask for help. Forty such stops in the lab never failed.
 - **A forced-start mark cleared during a change of the pool's owner.**
   Silent. A pool's owner is the worker that drives it. At an owner change
@@ -489,10 +491,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   an array that is held. The group then stays down until a failover or a
   cntlr replacement builds it again on another cntlr, or an operator runs
   a forced start; a pool with one cntlr waits for the cntlr replacement.
-  State: fix later: no way is chosen yet; whether the primary should take
-  the pool and the volumes above down to assemble the array in place is an
-  open question. Seen in the lab: on
-  loop devices, and in the cn agent suite after a level step.
+  State: accepted: taking the pool and the volumes above down to assemble
+  the array in place would take the volumes from hosts as well, and the
+  failover or the cntlr replacement builds the group again. Seen in the
+  lab: on loop devices, and in the cn agent suite after a level step.
 - **A forced start cut short after its zeroing can leave no leg to start
   from.** The forced start zeroes the md superblock of every other member
   it keeps, except the open repair's bad leg. When the operator withdraws
@@ -614,16 +616,18 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   leg, since md no longer holds it, and the worker calls the repair off.
   The primary then puts the old leg back into md, and the group runs on
   its other legs until it does. A new repair comes only when a report
-  names the bad blocks again, or when the leg's health fails. State:
-  accepted. It needs md to refuse an add, which is rare, and nothing is
-  lost. Not seen in the lab.
+  names the bad blocks again, or when the leg's health fails. State: fix
+  decided, the worker calls the repair off only while md still holds the
+  leg. It needs md to refuse an add, which is rare, and nothing is lost.
+  Not seen in the lab.
 - **A repair whose new leg the primary never reports stays open.** It
   blocks every other repair of the group. This happens only while the
   primary does not apply the syncup that carries the repair. The worker's
   request to abort the repair reaches the primary only in a later syncup
   that carries the repair too, so giving up on a timer would not end the
   wait, and it would abort repairs that a slow primary still carries out.
-  State: accepted. Not seen in the lab.
+  State: fix decided, a primary that has not applied its syncups for longer
+  than the primary threshold is failed over. Not seen in the lab.
 - **A repair's new leg that holds the whole data starts the array alone
   only where md recorded the other legs as failed.** When both legs of
   the group's list are dead, the group otherwise waits for its legs. An
@@ -637,8 +641,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   assembly, as after a failover or a restart, finds legs of two identities
   and leaves the group down, its row in error. A repair that would keep
   that leg's data is refused while the leg reads healthy, which it does,
-  and a forced start from the leg wanted wipes it. State: fix later: no
-  way to fix it is known yet, and
+  and a forced start from the leg wanted wipes it. State: fix decided, the
+  primary's report names the leg's identity refusal, and a repair may then
+  take it as its bad leg; until then
   [the forced-start guide](operations.md#the-forced-start-guide) says to
   stop and ask for help. Not seen in the lab.
 - **A primary that keeps a leaving member is failed over, and the new
@@ -928,7 +933,8 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   Before that, an operator can end the migration. Where no other leg is in
   sync, as in a pool without RAID, the primary does not cut the path,
   since the write would fail. The IO then waits until the disk node comes
-  back. State: accepted. Seen in the lab: in a RAID1 pool, after the
+  back. State: accepted; the group left one leg short after a cutover with
+  a copy not whole is fix later. Seen in the lab: in a RAID1 pool, after the
   cutover with the copy whole, all traffic to the NVMe-oF port of the
   serving disk node was dropped. The primary cut the other path, md
   failed the leg, host writes went on and none failed, and the worker
@@ -1133,15 +1139,16 @@ design:
   any other slice count is refused. So is every clone into a pool whose
   block is above 4 MiB, and every clone into a pool of the default block
   when either pool was created before the bound above with more than four
-  slices of the default stripe. State: accepted.
+  slices of the default stripe. State: accepted; a device layer that keeps
+  the clone's best IO size at the destination's is fix later.
 - **A migration in a pool whose block is above 4 MiB can be sent commands
   its new side refuses.** During a migration the device on the new side's
   disk node that pulls the data from the old side tells the controller node a best IO size of at least one
   block, so the controller node's path to it can carry commands up to the
   block, above what the disk node's kernel takes. Read from the kernel's
-  code, not seen in the lab. The default block is 1 MiB. State: fix later,
-  when a lab shows it; the fix would bound the block, which changes the
-  rule every pool's layout rests on.
+  code, not seen in the lab. The default block is 1 MiB. State: fix
+  decided: the block is bounded at 4 MiB at cluster and pool create; a
+  pool made before the bound keeps its block.
 - **A CSI volume costs a pool.** Under the CSI driver every volume is a
   pool with its own cntlrs and sides, so the ceilings of the introduction's
   table bound the volume count. A controller node holds at most 256
