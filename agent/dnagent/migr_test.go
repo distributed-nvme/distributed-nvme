@@ -3391,52 +3391,62 @@ func TestFenceRestartThatHoldsNoSideOpensAWholeWindow(t *testing.T) {
 	}
 }
 
-// TestMigrationConnectSucceedsFromTheRetryLoop pins that the DN8 loop alone
-// finishes a destination whose connect was refused: with no further RPC the
-// destination ends serving through its dm-clone, and the loop's own pass —
-// the one that gets it there — deregisters it.
-//
-// TestMigrationDestinationConnectFailureRetries drives its second converge
-// from an RPC. Here every
-// step after the refused connect, DN13 step (5) included, runs in a pass of
-// the loop, on the ctx the loop hands its attempts (rootCtx,
-// migrRetryLoop). That pass deregisters the loop as its last act
-// (settleMigrRetry), so the assertion is the end state, not a call order:
-// the primary's stack on the dm-clone, its namespace optimized, and no
-// retry left.
-func TestMigrationConnectSucceedsFromTheRetryLoop(t *testing.T) {
+// TestARefusedMigrationConnectIsCuredByOneResend pins how a destination
+// whose connect was refused is finished: by the worker's re-send alone. The
+// converge's reply and the side's read both name the target and the dm-clone
+// rows while the walk finds no controller (DN16), since a converge connects
+// then; nothing runs the converge again between the worker's calls; and once
+// the target answers, the one re-send the next round brings connects, under
+// that round's trace id, and leaves the destination serving through its
+// dm-clone, after which a round names nothing.
+func TestARefusedMigrationConnectIsCuredByOneResend(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
-	srv.migrRetryInterval = 5 * time.Millisecond
 	syncupBoth(t, srv, 1, testSide)
 	// Every refused connect spends the pass's connect budget, on a clock
 	// that does not sleep.
 	withDnClock(srv, node)
 	names := newMigrDstNames()
+	srcNqn := srv.nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
 
-	// Every connect is refused until the registration has been read, and
-	// succeeds from then on: a loop pass that connected first would finish
-	// the build, and deregister, before the test could look.
 	setFailAlways(node, "nvme connect", "failed to write to nvme-fabrics device")
-	if _, err := srv.SyncupSide(ctx,
-		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+	held := migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+	reply, err := srv.SyncupSide(ctx, held)
+	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
-	}
-	if !migrRetrying(srv) {
-		t.Fatal("fixture is wrong: no background retry was registered")
 	}
 	if dmPresent(node, names.clone) {
 		t.Fatal("fixture is wrong: the dm-clone was built despite the " +
 			"refused connect")
 	}
-	clearFailAlways(node, "nvme connect")
+	assertNamed(t, "the converge", reply, srcNqn, names.clone)
+	assertNothingRunsBetweenCalls(t, node)
+	if dmPresent(node, names.clone) {
+		t.Fatal("the dm-clone was built with no call of the worker's")
+	}
 
-	// No further RPC. The retry loop alone has to get there, and the pass
-	// that does deregisters it.
-	waitUntil(t, "the retry loop to leave the destination serving through "+
-		"its dm-clone with no retry registered", func() bool {
-		return servesThroughClone(t, srv, node, names) && !migrRetrying(srv)
-	})
+	clearFailAlways(node, "nvme connect")
+	node.Reset()
+	round, resent := workerRound(t, srv, held, "round-1")
+	assertNamed(t, "round-1", round, srcNqn, names.clone)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
+	}
+	assertNotNamed(t, "round-1's re-send", resent)
+	if n := len(node.callsMatching("cmd nvme connect ")); n != 1 ||
+		!tracedCall(node, "round-1", "cmd nvme connect ") {
+		t.Errorf("%d connects, want the one of round-1's re-send", n)
+	}
+	if !servesThroughClone(t, srv, node, names) {
+		t.Error("the re-send did not leave the destination serving " +
+			"through its dm-clone")
+	}
+	round, resent = workerRound(t, srv, held, "round-2")
+	assertNotNamed(t, "round-2", round)
+	if resent != nil {
+		t.Errorf("round-2 re-sent: %v", resent.GetAgentReply())
+	}
+	assertNothingRunsBetweenCalls(t, node, "round-1", "round-2")
 }
 
 // ---------------------------------------------------------------------------
@@ -3483,8 +3493,7 @@ func withDnClock(srv *DnAgentServer, node *fakeNode) *dnClock {
 // find a controller and no namespace and fail the target "controller has no
 // namespace" for a device milliseconds away. The pass re-reads, in
 // DnMigrDstNsPause steps, until the device is there — still with exactly one
-// connect, so the dm-clone is built on the first reply and no DN8 retry is
-// registered.
+// connect, so the dm-clone is built on the first reply, which names nothing.
 func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
 	for _, misses := range []int{1, 3} {
 		t.Run(fmt.Sprintf("namespace after %d missed read(s)", misses),
@@ -3527,18 +3536,18 @@ func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
 					t.Fatalf("the pass waited %v, want %d pause(s), %v",
 						got, misses, want)
 				}
-				st := srv.getSide(sideKey(testCluster, testDn, testSp,
-					testSide))
-				if st.retrying {
-					t.Fatalf("a connect whose namespace came registered " +
-						"the DN8 retry")
-				}
+				assertNotNamed(t, "a connect whose namespace came", reply)
 			})
 	}
 
 	// The wait is bounded: a namespace that never comes costs the pass
 	// DnMigrDstNsWait and ends it exactly as the single re-read did — the
-	// target reads "controller has no namespace" and the DN8 loop takes over.
+	// target reads "controller has no namespace". A converge connects only
+	// where the walk finds no controller, so neither channel names the
+	// destination while its live controller has no namespace device (DN16),
+	// and nothing runs meanwhile. Once the device is there, the read names
+	// the dm-clone, which a converge would build, and the re-send that
+	// brings builds it.
 	t.Run("namespace never comes", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		ctx := context.Background()
@@ -3550,8 +3559,8 @@ func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
 		node.mu.Unlock()
 		start := clock.Now()
 
-		reply, err := srv.SyncupSide(ctx,
-			migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+		held := migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+		reply, err := srv.SyncupSide(ctx, held)
 		if err != nil {
 			t.Fatalf("SyncupSide: %v", err)
 		}
@@ -3566,9 +3575,34 @@ func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
 			t.Fatalf("the pass waited %v, want the bound %v", got,
 				common.DnMigrDstNsWait)
 		}
-		st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
-		if !st.retrying {
-			t.Fatalf("no DN8 retry was registered")
+		assertNotNamed(t, "the converge", reply)
+		round, resent := workerRound(t, srv, held, "round-1")
+		assertNotNamed(t, "round-1", round)
+		if resent != nil {
+			t.Errorf("round-1 re-sent: %v", resent.GetAgentReply())
+		}
+		assertNothingRunsBetweenCalls(t, node, "round-1")
+
+		// The namespace comes: the scan the connect queued lands at the
+		// next listing.
+		names := newMigrDstNames()
+		node.mu.Lock()
+		for _, pending := range node.pendingNs {
+			pending.misses = 0
+		}
+		node.mu.Unlock()
+		round, resent = workerRound(t, srv, held, "round-2")
+		assertNamed(t, "round-2", round, names.clone)
+		if resent == nil {
+			t.Fatal("round-2 re-sent nothing")
+		}
+		assertNotNamed(t, "round-2's re-send", resent)
+		if !servesThroughClone(t, srv, node, names) {
+			t.Error("the re-send did not build the destination over the " +
+				"namespace")
+		}
+		if n := len(node.callsMatching("cmd nvme connect ")); n != 1 {
+			t.Errorf("%d connects, want the first pass's alone", n)
 		}
 	})
 

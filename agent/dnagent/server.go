@@ -61,20 +61,12 @@ type DnAgentServer struct {
 	// of its sides are zeroing (DN9).
 	zeroSlots chan struct{}
 
-	// migrRetryInterval paces the DN8 retry of a migration destination
-	// (common.DnMigrConnectRetryInterval; DN13), a field for the same
-	// reason. It is what lets a test finish a destination's build, or take
-	// the run a destination waits for, from the RETRY LOOP rather than from
-	// an RPC: a pass of the loop can deregister the loop it runs in, which is
-	// why its attempts run on rootCtx (migrRetryLoop).
-	migrRetryInterval time.Duration
-
 	// now and sleep are the clock seams, real by default: DN6's orphan age
 	// gate compares a subsystem directory's mtime with now, and DN13's
 	// in-pass retry of the connect to the migration source export and its
 	// wait for the source's namespace pace themselves through both
-	// (agent.WaitBudget). Fields for the same reason as the three above: a
-	// unit test runs them on a fake clock; nothing else changes them.
+	// (agent.WaitBudget). Fields for the same reason as fenceWait: a unit
+	// test runs them on a fake clock; nothing else changes them.
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) error
 
@@ -91,7 +83,7 @@ type DnAgentServer struct {
 	// mu guards the in-memory mirrors of the local store below: which DNs
 	// and sides this agent holds. The request each of them holds is an
 	// atomic pointer of its own (dnState.req, sideState.req). It also guards
-	// bgClosed, each side's retry, zeroing and fence fields, each DN's and
+	// bgClosed, each side's zeroing and fence fields, each DN's and
 	// side's observation slot (obs) and marks, so a task's start and the
 	// join's mark are ordered by it, and so are a round's start of a read
 	// and a syncup's mark and its cancel of that read (SH30). It is a leaf
@@ -121,8 +113,9 @@ type DnAgentServer struct {
 
 	// rootCtx is the process lifetime ctx, captured by Prepare before the
 	// port opens, or at Reconcile when nothing prepared the server (a test);
-	// the DN8 background retries and the DN9 zeroing loops hang off it so
-	// shutdown stops them. rootSet says Prepare set it.
+	// the DN9 zeroing loops, the background reads and the DN12 fence timer's
+	// converge hang off it so shutdown stops them. rootSet says Prepare set
+	// it.
 	rootCtx context.Context
 	rootSet bool
 	// startup is the agent's startup state (SH33).
@@ -130,8 +123,8 @@ type DnAgentServer struct {
 }
 
 // WaitBackground joins the dn background goroutines enrolled in bg — the DN9
-// zeroing loops, the DN8 connect retries and the background reads check
-// rounds start (SH29) — after it stops every armed DN12
+// zeroing loops and the background reads check rounds start (SH29) — after
+// it stops every armed DN12
 // fence timer (SH27). It first marks the server closed (bgClosed) under mu,
 // the lock every enrollment and every arming takes, so a task either enrolled
 // before the join began and is waited for, or is refused, and no timer is
@@ -223,8 +216,8 @@ type sideState struct {
 	// lock, which the replacement shares. So it is an atomic pointer, and
 	// each of them loads a whole request, the old one or the new one.
 	// Nothing else a SyncupSide changes is read that way: the chunk set and
-	// the tracker stay under this side's object lock, and the retry,
-	// zeroing and fence fields and the observation under s.mu.
+	// the tracker stay under this side's object lock, and the zeroing and
+	// fence fields and the observation under s.mu.
 	req     atomic.Pointer[pb.SyncupSideRequest]
 	tracker *agent.ResTracker
 	chunks  *agent.ChunkSet
@@ -234,12 +227,6 @@ type sideState struct {
 	// chunkMigrId identifies the migration the chunks belong to, so chunks
 	// left over from an earlier migration are never applied to a new one.
 	chunkMigrId uint64
-	// retrying/cancel drive the DN8 retry of a migration destination (DN13):
-	// one whose build stopped short, or one that has not provisioned and
-	// waits for its run in the clone-metadata area before it zeroes.
-	retrying bool
-	cancel   context.CancelFunc
-
 	// zeroing/zeroCancel/zeroDone drive the DN9 background side-zeroing
 	// goroutine. zeroDone is closed by the goroutine on exit, which is what
 	// makes cancel-and-wait possible before the side device is removed — its
@@ -307,7 +294,6 @@ func NewDnAgentServer(
 		zeroBatchMax:      common.DnZeroBatchMaxBytes,
 		zeroBatchMin:      common.DnZeroBatchMinBytes,
 		zeroSlots:         make(chan struct{}, common.DnZeroConcurrency),
-		migrRetryInterval: common.DnMigrConnectRetryInterval * time.Second,
 		now:               time.Now,
 		sleep:             agent.SleepCtx,
 		marks:             agent.NewConvergeMarks(),

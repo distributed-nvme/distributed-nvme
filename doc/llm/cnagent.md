@@ -69,8 +69,7 @@ and comments `common/constants.go` holds:
   region, data region, health block): the payload is the magic, the writer
   id and a timestamp, never interpreted on read (`architecture.md`, [D6]).
 * `CnConnectRetryInterval`, the pace of the background retries of a cn
-  cntlr's converge after any of CN10's triggers; the cn twin of
-  `DnMigrConnectRetryInterval`.
+  cntlr's converge after any of CN10's triggers.
 * `CnConnectPassBudget`, `CnConnectRetryPause`, `CnNsScanPause` and
   `CnNsHeadPause`, the connect step's one wait budget per converge pass
   (CN10, CN18), shared by every leg and clone source of the pass and drawn
@@ -952,7 +951,9 @@ the budget is one per pass and not one per leg.
 A connect failure marks that leg `RES_STATUS_ERROR` and registers the
 cntlr in a background retry registry that re-runs the converge every
 `CnConnectRetryInterval` under the CN1 locks until a pass registers it no
-more, or teardown (the `dnagent.md` DN13 pattern); the RPC itself retries a connect,
+more, or teardown; each attempt runs on `rootCtx`, not on the loop's own
+context, since the pass that ends the retry cancels that context (the
+comment on `connectRetryLoop` says why). The RPC itself retries a connect,
 or waits for its head, only as far as the pass's budget allows. These
 register it: a leg that failed to converge — its connect, its
 multipath namespace or its wrapper (above), an unknown controller or a
@@ -5249,9 +5250,11 @@ stores instead is CN23's.
   only when the converge has something to act on — a late member
   available again, a provisioned side with no controller, CN18's clone
   triggers — read from the desired state and sysfs with nothing
-  remembered. It is not done, so that the cn retry loop stays the
-  `dnagent.md` DN13 pattern (the comment on `connectRetryLoop` says why
-  the two copies must not drift apart).
+  remembered. It is not done, since another fix is decided in its place:
+  the agent reads the node once per interval on its own clock, reads and
+  converges use the latest reading, and this retry goes (the entry of
+  `scope.md` on the retry for a leg that joins late, whose state is "fix
+  decided").
 * A promotion that outruns the sides' ANA flips pauses its hosts until the
   retry builds the stack: the promotion's own converge reads its legs
   before the sides' ANA flips have reached this CN's sysfs (CN12), so its

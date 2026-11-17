@@ -121,9 +121,9 @@ excludes a read by its locks (`dnagent.md` SH14, SH29), and a disk node's read
 holds only the node read lock, which lets the next read start before the first
 has returned. An observation newer than that one was therefore read wholly
 after that answer, at the cost of about one read more. Where a background
-converge of the object can run, such as an attempt of the connect retry
-(`dnagent.md` SH28), the observation a fresh round reports can be that
-converge's rather than a read's. The pollers, which wait until a side is zeroed
+converge of the object can run, the DN12 fence timer's on a migration
+source (`dnagent.md` SH28), the observation a fresh round reports can be
+that converge's rather than a read's. The pollers, which wait until a side is zeroed
 or a destination hydrated, the latter through `common.ParseCloneStatus`, sample
 with rounds on one stream: the first sample is a fresh round's reply and each
 later one a reply with a newer observation, since neither the zeroing loop nor
@@ -280,10 +280,13 @@ the export and the destination's controller of it staying: the
 destination's rows — its side device, its migration rows and its per-CN
 rows — then read one status, with one epoch, on a converge, in the
 observations a fresh round and then an info read report, each made after
-that converge by a read or by an attempt of the connect retry, which a
-destination with no source to read from keeps registered, and on a second
-converge (`dnagent.md` DN13, DN18), and each answers the leftover code,
-which names the destination's two rows (`dnagent.md` DN16). The converge
+that converge by a read, and on a second converge (`dnagent.md` DN13,
+DN18). Each answers code zero over a live controller with no namespace,
+which no converge connects beside, and the leftover code naming the
+destination's two rows where the controller is gone, which the re-sent
+syncup's connect cures (`dnagent.md` DN16). The agent runs no command on
+the destination's dm-clone or per-CN dm-linear under a trace id of its own
+between the stage's calls (`dnagent.md` SH31). The converge
 takes the primary's stack
 off the dm-clone and, with no source to read from, does not read the
 dm-clone's status line, which the agent's reads still record: only a read's

@@ -74,15 +74,12 @@ func assertSameDstRows(t *testing.T, converged, checked *pb.SideInfo) {
 // its dm-error, every namespace inaccessible — and nothing more: no connect
 // to the source, no dm-clone, no read of one. Its two rows read PROVISIONING
 // "waiting for the cutover" with RES_REASON_AWAITING_CUTOVER, the same on
-// both channels, and no DN8 retry is registered, since only the worker's
-// cutover ends the wait and it comes with a new request. That request,
-// without the flag, runs steps (3) to (5): the destination ends serving
-// through its dm-clone.
+// both channels, and neither names them, since only the worker's cutover
+// ends the wait and it comes with a new request; nothing runs between the
+// worker's calls. That request, without the flag, runs steps (3) to (5): the
+// destination ends serving through its dm-clone.
 func TestADestinationWaitsForTheCutover(t *testing.T) {
 	srv, node := newTestServer(t)
-	// A retry, were one registered, would run many passes in the window
-	// the test reads.
-	srv.migrRetryInterval = 5 * time.Millisecond
 	ctx := context.Background()
 	names := newMigrDstNames()
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
@@ -111,13 +108,7 @@ func TestADestinationWaitsForTheCutover(t *testing.T) {
 	if code := reply.GetAgentReply().GetCode(); code != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	// Read before anything else can run: a retry registered by the pass
-	// would have run passes of its own by the end of the wait below.
-	if migrRetrying(srv) {
-		t.Error("a destination waiting for the cutover registered the " +
-			"DN8 retry")
-	}
-	time.Sleep(10 * srv.migrRetryInterval)
+	assertNothingRunsBetweenCalls(t, node)
 	if n := convergePasses(node); n != 1 {
 		t.Errorf("%d converge passes ran, want the RPC's alone", n)
 	}
@@ -158,9 +149,15 @@ func TestADestinationWaitsForTheCutover(t *testing.T) {
 		}
 	}
 
-	// The check round reads the same rows, the per-CN ones included.
+	// The check round reads the same rows, the per-CN ones included, and
+	// names nothing.
 	node.Reset()
-	checked := checkRoundInfo(t, srv, 1)
+	round, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
+		ClusterId: testCluster, DnId: testDn,
+		SidePointer: sidePtr(testSide), Revision: 1, ShowInfo: true,
+	}, nil)
+	assertNotNamed(t, "the round", round)
+	checked := round.GetSideInfo()
 	assertSameDstRows(t, converged, checked)
 	for name, row := range destinationRows(checked) {
 		if strings.HasPrefix(name, "cn ") &&
@@ -204,142 +201,117 @@ func TestADestinationWaitsForTheCutover(t *testing.T) {
 				row.GetReason())
 		}
 	}
-	if !servesThroughClone(t, srv, node, names) || migrRetrying(srv) {
+	if !servesThroughClone(t, srv, node, names) {
 		t.Error("after the cutover the destination does not serve through " +
-			"its dm-clone with no retry registered")
+			"its dm-clone")
 	}
+	assertNotNamed(t, "the cutover's converge", reply)
 }
 
 // A destination whose DN13 step (2) does not hold while the cutover is
 // pending reads as any destination whose step (2) stopped, on both
 // channels, and with no reason: the cutover waits for a wrapper that stands.
-// The pass registers the DN8 retry to build it, as such a pass always does.
-// The pass that builds it waits for the cutover and stops that retry,
-// whether an RPC runs it or the retry itself.
+// Both channels name the destination's rows, since a converge would build
+// the wrapper (DN16), and nothing builds it between the worker's calls. The
+// re-send the next round brings builds it and waits for the cutover, and a
+// round then names nothing.
 func TestADestinationWaitsForItsWrapperBeforeTheCutover(t *testing.T) {
 	names := newMigrDstNames()
-	// refusedWrapper provisions the side and runs one pending pass whose
-	// wrapper create is refused, and checks what it reads.
-	refusedWrapper := func(
-		t *testing.T,
-		srv *DnAgentServer,
-		node *fakeNode,
-	) {
-		t.Helper()
-		ctx := context.Background()
-		syncupBoth(t, srv, 1, testSide)
-		node.mu.Lock()
-		node.failCmd["dmsetup create "+names.meta] = "refused once"
-		node.mu.Unlock()
-		node.Reset()
-		reply, err := srv.SyncupSide(ctx,
-			pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
-		if err != nil {
-			t.Fatalf("SyncupSide: %v", err)
-		}
-		info := reply.GetSideInfo()
-		dst := info.GetMigrDstInfo()
-		if got := dst.GetTargetInfo(); got.GetStatus() !=
-			pb.ResStatus_RES_STATUS_MISSING ||
-			got.GetDetails() != detailsCloneMetaMissing ||
-			got.GetReason() != pb.ResReason_RES_REASON_NONE {
-			t.Errorf("target_info = %v/%q/%v, want MISSING/%q with no "+
-				"reason", got.GetStatus(), got.GetDetails(), got.GetReason(),
-				detailsCloneMetaMissing)
-		}
-		if got := dst.GetDmCloneInfo(); got.GetStatus() !=
-			pb.ResStatus_RES_STATUS_ERROR ||
-			!strings.Contains(got.GetDetails(), "refused once") ||
-			got.GetReason() != pb.ResReason_RES_REASON_NONE {
-			t.Errorf("dm_clone_info = %v/%q/%v, want ERROR with the "+
-				"refusal and no reason", got.GetStatus(), got.GetDetails(),
-				got.GetReason())
-		}
-		if !sitsOnDmError(t, srv, node, names) {
-			t.Error("the primary is not on its dm-error, its namespace " +
-				"inaccessible")
-		}
-		if node.hasCall("cmd nvme connect") {
-			t.Error("a pending pass with no wrapper connected to its source")
-		}
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	node.mu.Lock()
+	node.failCmd["dmsetup create "+names.meta] = "refused once"
+	node.mu.Unlock()
+	node.Reset()
+	held := pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+	reply, err := srv.SyncupSide(ctx, held)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	info := reply.GetSideInfo()
+	dst := info.GetMigrDstInfo()
+	if got := dst.GetTargetInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_MISSING ||
+		got.GetDetails() != detailsCloneMetaMissing ||
+		got.GetReason() != pb.ResReason_RES_REASON_NONE {
+		t.Errorf("target_info = %v/%q/%v, want MISSING/%q with no "+
+			"reason", got.GetStatus(), got.GetDetails(), got.GetReason(),
+			detailsCloneMetaMissing)
+	}
+	if got := dst.GetDmCloneInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(got.GetDetails(), "refused once") ||
+		got.GetReason() != pb.ResReason_RES_REASON_NONE {
+		t.Errorf("dm_clone_info = %v/%q/%v, want ERROR with the "+
+			"refusal and no reason", got.GetStatus(), got.GetDetails(),
+			got.GetReason())
+	}
+	if !sitsOnDmError(t, srv, node, names) {
+		t.Error("the primary is not on its dm-error, its namespace " +
+			"inaccessible")
+	}
+	if node.hasCall("cmd nvme connect") {
+		t.Error("a pending pass with no wrapper connected to its source")
+	}
+	assertNamed(t, "the converge", reply, names.clone)
+	assertNothingRunsBetweenCalls(t, node)
+	if n := convergePasses(node); n != 1 || dmPresent(node, names.meta) {
+		t.Errorf("%d converge passes ran and the wrapper is there = %v; "+
+			"want the RPC's alone, and no wrapper", n,
+			dmPresent(node, names.meta))
 	}
 
-	t.Run("an RPC builds it", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		srv.migrRetryInterval = time.Hour
-		refusedWrapper(t, srv, node)
-		if !migrRetrying(srv) {
-			t.Fatal("a pass whose step (2) stopped registered no retry")
+	// The round reads the slot's wrapper missing, with no reason, and
+	// names it; its re-send builds it.
+	round, resent := workerRound(t, srv, held, "round-1")
+	for name, row := range map[string]*pb.ResInfo{
+		"target_info":   round.GetSideInfo().GetMigrDstInfo().GetTargetInfo(),
+		"dm_clone_info": round.GetSideInfo().GetMigrDstInfo().GetDmCloneInfo(),
+	} {
+		if row.GetReason() != pb.ResReason_RES_REASON_NONE ||
+			row.GetStatus() == pb.ResStatus_RES_STATUS_PROVISIONING {
+			t.Errorf("the round's %s = %v/%q/%v, want step (2)'s "+
+				"stop with no reason", name, row.GetStatus(),
+				row.GetDetails(), row.GetReason())
 		}
-		// The round reads the slot's wrapper missing, with no reason.
-		checked := checkRoundInfo(t, srv, 2)
-		for name, row := range map[string]*pb.ResInfo{
-			"target_info":   checked.GetMigrDstInfo().GetTargetInfo(),
-			"dm_clone_info": checked.GetMigrDstInfo().GetDmCloneInfo(),
-		} {
-			if row.GetReason() != pb.ResReason_RES_REASON_NONE ||
-				row.GetStatus() == pb.ResStatus_RES_STATUS_PROVISIONING {
-				t.Errorf("the round's %s = %v/%q/%v, want step (2)'s "+
-					"stop with no reason", name, row.GetStatus(),
-					row.GetDetails(), row.GetReason())
-			}
-		}
-
-		reply, err := srv.SyncupSide(context.Background(),
-			pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
-		if err != nil {
-			t.Fatalf("SyncupSide: %v", err)
-		}
-		assertDstRows(t, "the pass that builds the wrapper",
-			reply.GetSideInfo(), pb.ResStatus_RES_STATUS_PROVISIONING,
-			tagCutoverWait, pb.ResReason_RES_REASON_AWAITING_CUTOVER)
-		if !dmPresent(node, names.meta) {
-			t.Error("the wrapper was not built")
-		}
-		if migrRetrying(srv) {
-			t.Error("the retry outlived the pass that left the " +
-				"destination waiting for the cutover")
-		}
-		assertSameDstRows(t, reply.GetSideInfo(), checkRoundInfo(t, srv, 2))
-	})
-
-	t.Run("the retry's own pass builds it", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		srv.migrRetryInterval = 5 * time.Millisecond
-		refusedWrapper(t, srv, node)
-		waitUntil(t, "the retry to build the wrapper and stop", func() bool {
-			return dmPresent(node, names.meta) && !migrRetrying(srv)
-		})
-		if n := convergePasses(node); n < 2 {
-			t.Errorf("%d converge passes ran, want the RPC's and the "+
-				"retry's", n)
-		}
-		checked := checkRoundInfo(t, srv, 2)
-		assertDstRows(t, "the round after the retry", checked,
-			pb.ResStatus_RES_STATUS_PROVISIONING, tagCutoverWait,
-			pb.ResReason_RES_REASON_AWAITING_CUTOVER)
-		if !sitsOnDmError(t, srv, node, names) {
-			t.Error("the primary is not on its dm-error, its namespace " +
-				"inaccessible")
-		}
-		if node.hasCall("cmd nvme connect") || dmPresent(node, names.clone) {
-			t.Error("the retry's pass went past step (2) while the " +
-				"cutover is pending")
-		}
-	})
+	}
+	assertNamed(t, "round-1", round, names.clone)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
+	}
+	assertDstRows(t, "the pass that builds the wrapper",
+		resent.GetSideInfo(), pb.ResStatus_RES_STATUS_PROVISIONING,
+		tagCutoverWait, pb.ResReason_RES_REASON_AWAITING_CUTOVER)
+	assertNotNamed(t, "round-1's re-send", resent)
+	if !dmPresent(node, names.meta) {
+		t.Error("the wrapper was not built")
+	}
+	if node.hasCall("cmd nvme connect") || dmPresent(node, names.clone) {
+		t.Error("the re-sent pass went past step (2) while the cutover " +
+			"is pending")
+	}
+	round, resent = workerRound(t, srv, held, "round-2")
+	assertSameDstRows(t, round.GetSideInfo(), checkRoundInfo(t, srv, 2))
+	assertNotNamed(t, "round-2", round)
+	if resent != nil {
+		t.Errorf("round-2 re-sent: %v", resent.GetAgentReply())
+	}
 }
 
 // A destination that waits for the cutover still builds the primary's
 // per-CN stack, on its dm-error with its namespace inaccessible, and the
 // cutover waits for the primary's live path through that stack's export
-// (dnv-worker.md RW18). So when a step of that stack fails, the pass keeps
-// the DN8 retry, as a pass whose step (5) failed does: the worker re-sends a
+// (dnv-worker.md RW18). So when a step of that stack fails, both channels
+// name the primary's row, as after a failed step (5): the worker re-sends a
 // SyncupSide on a revision or a reply code, never on a row, and nothing else
 // would build the stack again. So does a pass that cannot read where the
-// stacks go, which leaves them as they are, as a step that stops does. The
-// retry's pass that builds the stack stops the retry, and still goes no
-// further than step (2).
-func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
+// stacks go, which leaves them as they are, as a step that stops does.
+// Nothing runs between the worker's calls; the re-send the next round
+// brings builds the stack and still goes no further than step (2).
+func TestAWaitingDestinationsFailedPrimaryStackIsCuredByTheResend(
+	t *testing.T,
+) {
 	names := newMigrDstNames()
 	for _, tc := range []struct {
 		name string
@@ -348,7 +320,7 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 		failed string
 		killed bool
 		// rerun is a command only a converge runs, and runs is how many
-		// times it runs by the end: the RPC's pass and the retry's.
+		// times it runs by the end: the RPC's pass and the re-send's.
 		rerun string
 		runs  int
 		// row is the primary's row the failure leaves not OK.
@@ -373,7 +345,7 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 			},
 		},
 		{
-			// The flip's pass builds no stack: the retry's builds it.
+			// The flip's pass builds no stack: the re-send's builds it.
 			name:   "where the stacks go, unread",
 			failed: "-o attr " + names.clone,
 			killed: true,
@@ -386,7 +358,6 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.migrRetryInterval = 5 * time.Millisecond
 			ctx := context.Background()
 			if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 				t.Fatalf("SyncupDn: %v", err)
@@ -408,13 +379,13 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 				node.mu.Unlock()
 			}
 			node.Reset()
-			reply, err := srv.SyncupSide(ctx,
-				pendingDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE))
+			held := pendingDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)
+			reply, err := srv.SyncupSide(ctx, held)
 			if err != nil {
 				t.Fatalf("SyncupSide: %v", err)
 			}
 			// The step that stopped is named, so the worker's next round
-			// sends the syncup again beside the retry (SH31).
+			// sends the syncup again (SH31).
 			if code := reply.GetAgentReply().GetCode(); code !=
 				common.ReplyCodeLeftover {
 				t.Fatalf("code = %v, want the leftover code naming the "+
@@ -429,19 +400,29 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 				pb.ResStatus_RES_STATUS_PROVISIONING, tagCutoverWait,
 				pb.ResReason_RES_REASON_AWAITING_CUTOVER)
 
-			var checked *pb.SideInfo
-			waitUntil(t, "the retry to build the primary's stack and stop",
-				func() bool {
-					checked = checkRoundInfo(t, srv, 1)
-					return tc.row(checked).GetStatus() ==
-						pb.ResStatus_RES_STATUS_OK && !migrRetrying(srv)
-				})
-			// The read before each round lists the dm devices as a
-			// converge does, so a command only a converge runs counts the
-			// passes.
-			if n := len(node.callsMatching(tc.rerun)); n < tc.runs {
-				t.Errorf("%q ran %d times, want %d at least: the retry "+
-					"ran no pass", tc.rerun, n, tc.runs)
+			assertNothingRunsBetweenCalls(t, node)
+			round, resent := workerRound(t, srv, held, "round-1")
+			if round.GetAgentReply().GetCode() != common.ReplyCodeLeftover ||
+				resent == nil {
+				t.Fatalf("round-1 = %v, re-sent %v; want the leftover code "+
+					"and a re-send", round.GetAgentReply(), resent != nil)
+			}
+			assertNotNamed(t, "round-1's re-send", resent)
+			round, resent = workerRound(t, srv, held, "round-2")
+			assertNotNamed(t, "round-2", round)
+			if resent != nil {
+				t.Errorf("round-2 re-sent: %v", resent.GetAgentReply())
+			}
+			checked := round.GetSideInfo()
+			if row := tc.row(checked); row.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Errorf("the primary's row after the re-send = %v/%q",
+					row.GetStatus(), row.GetDetails())
+			}
+			// A command only a converge runs counts the passes: the
+			// RPC's and the re-send's.
+			if n := len(node.callsMatching(tc.rerun)); n != tc.runs {
+				t.Errorf("%q ran %d times, want %d", tc.rerun, n, tc.runs)
 			}
 			for name, row := range destinationRows(checked) {
 				if strings.HasPrefix(name, "cn ") &&
@@ -450,7 +431,7 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 						row.GetStatus(), row.GetDetails())
 				}
 			}
-			assertDstRows(t, "the round after the retry", checked,
+			assertDstRows(t, "the round after the re-send", checked,
 				pb.ResStatus_RES_STATUS_PROVISIONING, tagCutoverWait,
 				pb.ResReason_RES_REASON_AWAITING_CUTOVER)
 			if !sitsOnDmError(t, srv, node, names) {
@@ -458,7 +439,7 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 					"inaccessible")
 			}
 			if node.hasCall("cmd nvme connect") || dmPresent(node, names.clone) {
-				t.Error("the retry's pass went past step (2) while the " +
+				t.Error("the re-sent pass went past step (2) while the " +
 					"cutover is pending")
 			}
 		})
@@ -471,8 +452,8 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 // reads where the per-CN stacks are, as a step that stops does, so the primary
 // keeps serving through the dm-clone until the worker sends the newer request
 // again: reloading it onto its dm-error under a live dm-clone would fail host
-// IO. The check round's read reads the per-CN rows by the same answer, and the
-// pass leaves no retry, since its primary's stack is where the pass put it.
+// IO. The check round's read reads the per-CN rows by the same answer and
+// names nothing, since the primary's stack is where the pass put it.
 func TestAStalePendingRequestKeepsAServingClone(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -512,11 +493,14 @@ func TestAStalePendingRequestKeepsAServingClone(t *testing.T) {
 			t.Errorf("the restart ran %q under a serving dm-clone", call)
 		}
 	}
-	if migrRetrying(restarted) {
-		t.Error("the restart registered the DN8 retry over a primary " +
-			"stack that serves")
-	}
-	checked := checkRoundInfo(t, restarted, 2)
+	node.Reset()
+	round, _ := checkSideNow(restarted, ctx, &pb.CheckSideRequest{
+		ClusterId: testCluster, DnId: testDn,
+		SidePointer: sidePtr(testSide), Revision: 2, ShowInfo: true,
+	}, nil)
+	assertNotNamed(t, "the round", round)
+	assertNothingRunsBetweenCalls(t, node)
+	checked := round.GetSideInfo()
 	assertDstRows(t, "the round", checked,
 		pb.ResStatus_RES_STATUS_PROVISIONING, tagCutoverWait,
 		pb.ResReason_RES_REASON_AWAITING_CUTOVER)
@@ -618,7 +602,7 @@ const budgetRetries = int(
 // after the cutover the src side links its export to its port only after its
 // own first two steps, so the first connect often comes too early. One that
 // answers within the budget is absorbed: the pass builds the dm-clone and
-// serves through it, and registers no DN8 retry. The wait for the source's
+// serves through it, and names nothing. The wait for the source's
 // namespace runs after it unchanged, on a budget of its own, even after a
 // connect that took the whole of the connect's.
 func TestMigrationDestinationRetriesItsConnectWithinThePass(t *testing.T) {
@@ -674,10 +658,8 @@ func TestMigrationDestinationRetriesItsConnectWithinThePass(t *testing.T) {
 				t.Error("the destination does not serve through its " +
 					"dm-clone")
 			}
-			if migrRetrying(srv) {
-				t.Error("a connect the pass's own retry absorbed " +
-					"registered the DN8 retry")
-			}
+			assertNotNamed(t, "a connect the pass's own retry absorbed",
+				reply)
 		})
 	}
 }
@@ -693,11 +675,10 @@ const cutoverRetries = int(
 // export to the port only after its own step 1 and the suspend of its step
 // 2, which on a loaded node takes longer than DnMigrConnectPassBudget. A
 // source that answers after the short budget's last retry is still caught
-// by that pass, which builds the dm-clone, serves through it and registers
-// no DN8 retry, so the migration gap ends in the cutover's own pass.
+// by that pass, which builds the dm-clone, serves through it and names
+// nothing, so the migration gap ends in the cutover's own pass.
 func TestTheCutoverConvergeOutwaitsASlowSource(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
 	clock := withDnClock(srv, node)
@@ -732,24 +713,20 @@ func TestTheCutoverConvergeOutwaitsASlowSource(t *testing.T) {
 				row.GetDetails())
 		}
 	}
-	if !servesThroughClone(t, srv, node, names) || migrRetrying(srv) {
-		t.Error("the cutover's pass does not serve through its dm-clone " +
-			"with no retry registered")
+	if !servesThroughClone(t, srv, node, names) {
+		t.Error("the cutover's pass does not serve through its dm-clone")
 	}
+	assertNotNamed(t, "the cutover's pass", reply)
 }
 
 // Only the converge the cutover brings waits the longer budget, and only
 // once: against a source that never answers it spends
-// DnMigrCutoverConnectBudget, while the same request sent again, the next
-// SyncupSide and a pass of the DN8 retry each spend DnMigrConnectPassBudget,
-// as every other converge does (DN13). The longer wait holds the side's
-// locks once per cutover in a process, not on every retry and not on every
-// revision.
+// DnMigrCutoverConnectBudget, while the same request sent again and the
+// next SyncupSide each spend DnMigrConnectPassBudget, as every other
+// converge does (DN13). The longer wait holds the side's locks once per
+// cutover in a process, not on every re-send and not on every revision.
 func TestOnlyTheCutoverConvergeWaitsTheLongerBudget(t *testing.T) {
 	srv, node := newTestServer(t)
-	// The DN8 retry's own passes would run on the fake clock while a pass
-	// is measured; the test runs one by hand instead.
-	srv.migrRetryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
 	clock := withDnClock(srv, node)
@@ -758,7 +735,6 @@ func TestOnlyTheCutoverConvergeWaitsTheLongerBudget(t *testing.T) {
 		t.Fatalf("SyncupSide: %v", err)
 	}
 	setFailAlways(node, "nvme connect", "connect refused")
-	key := sideKey(testCluster, testDn, testSp, testSide)
 	syncup := func(revision uint64) func() {
 		return func() {
 			if _, err := srv.SyncupSide(ctx, migrDstReq(revision,
@@ -777,9 +753,6 @@ func TestOnlyTheCutoverConvergeWaitsTheLongerBudget(t *testing.T) {
 		{"the cutover's request sent again", syncup(3),
 			common.DnMigrConnectPassBudget},
 		{"the next SyncupSide", syncup(4), common.DnMigrConnectPassBudget},
-		{"a pass of the DN8 retry", func() {
-			srv.reconvergeSide(ctx, key, srv.getSide(key))
-		}, common.DnMigrConnectPassBudget},
 	} {
 		start := clock.Now()
 		node.Reset()
@@ -793,9 +766,6 @@ func TestOnlyTheCutoverConvergeWaitsTheLongerBudget(t *testing.T) {
 			t.Errorf("%s made %d connects, want the first and %d retries",
 				pass.name, n, retries)
 		}
-	}
-	if !migrRetrying(srv) {
-		t.Error("no DN8 retry is registered for a source that never answers")
 	}
 }
 
@@ -818,7 +788,6 @@ func TestAConvergeWithNoFlagClearedKeepsTheShortBudget(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.migrRetryInterval = time.Hour
 			ctx := context.Background()
 			syncupBoth(t, srv, 1, testSide)
 			clock := withDnClock(srv, node)
@@ -852,13 +821,12 @@ func TestAConvergeWithNoFlagClearedKeepsTheShortBudget(t *testing.T) {
 // DN2's re-run after a restart keeps DnMigrConnectPassBudget, even over the
 // request the cutover brought: it converges from the stored request alone,
 // with no request held before it to show the flag cleared (DN13). So a
-// restart inside the cutover's converge leaves the gap to the DN8 retry, and
-// a restarted agent with many destination sides whose source does not answer
-// holds each side's locks the shorter budget, not the longer one, side after
-// side.
+// restart inside the cutover's converge leaves the gap to the worker's
+// re-send, and a restarted agent with many destination sides whose source
+// does not answer holds each side's locks the shorter budget, not the longer
+// one, side after side.
 func TestARestartReRunKeepsTheShortBudget(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
 	withDnClock(srv, node)
@@ -879,7 +847,6 @@ func TestARestartReRunKeepsTheShortBudget(t *testing.T) {
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId, 0)
 	restarted.roundReads = false
-	restarted.migrRetryInterval = time.Hour
 	clock := withDnClock(restarted, node)
 	rootCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(func() {
@@ -906,10 +873,9 @@ func TestARestartReRunKeepsTheShortBudget(t *testing.T) {
 // first request of the side the new process takes: with nothing held,
 // nothing shows the pass that the flag was cleared (DN13). So after a lost
 // --local-store a source slower than the shorter budget leaves the gap to
-// the DN8 retry.
+// the worker's re-send.
 func TestARestartThatHoldsNoRequestKeepsTheShortBudget(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
 	if _, err := srv.SyncupSide(ctx,
@@ -924,7 +890,6 @@ func TestARestartThatHoldsNoRequestKeepsTheShortBudget(t *testing.T) {
 	node.protos = map[string][]byte{}
 	node.mu.Unlock()
 	restarted := startTestServer(t, node)
-	restarted.migrRetryInterval = time.Hour
 	clock := withDnClock(restarted, node)
 	if _, err := restarted.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
@@ -954,7 +919,6 @@ func TestARestartThatHoldsNoRequestKeepsTheShortBudget(t *testing.T) {
 // failed save costs the cutover its pass, never its longer budget.
 func TestARefusedClearingRequestLeavesTheFlaggedRequestHeld(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
 	clock := withDnClock(srv, node)
@@ -1035,11 +999,12 @@ func TestARefusedClearingRequestLeavesTheFlaggedRequestHeld(t *testing.T) {
 // A connect refused past DnMigrConnectPassBudget fails the pass after the
 // budget's last retry: the target reads ERROR with the last refusal, the
 // stacks stay on their dm-errors with every namespace inaccessible, and the
-// DN8 loop is registered. The next converge whose connect answers runs the
-// rest: the primary's dm-linear onto the dm-clone and the namespaces off
-// inaccessible (architecture.md, Migration, dst step 5), the transition the
-// retry loop exists to reach, and that pass deregisters it.
-func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
+// reply names the target. Nothing runs the converge again between the
+// worker's calls; the converge the next round's re-send brings, whose
+// connect answers, runs the rest: the primary's dm-linear onto the dm-clone
+// and the namespaces off inaccessible (architecture.md, Migration, dst step
+// 5), and its reply names nothing.
+func TestMigrationDestinationConnectFailureIsNamedAndResent(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
@@ -1048,13 +1013,13 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 	setFailAlways(node, "nvme connect", "connect refused")
 	start := clock.Now()
 	node.Reset()
-	reply, err := srv.SyncupSide(ctx,
-		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+	held := migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+	reply, err := srv.SyncupSide(ctx, held)
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
 	// The RPC still returns, naming the target in error, so the worker
-	// sends it again; the connect is retried in the background too.
+	// sends it again.
 	if reply.GetAgentReply().GetCode() != common.ReplyCodeLeftover {
 		t.Fatalf("code = %v, want the leftover code", reply.GetAgentReply())
 	}
@@ -1073,9 +1038,7 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 		t.Errorf("the pass waited %v, want the budget %v", got,
 			common.DnMigrConnectPassBudget)
 	}
-	if !migrRetrying(srv) {
-		t.Fatal("no background retry was registered")
-	}
+	assertNothingRunsBetweenCalls(t, node)
 	// While the dm-clone is absent the destination keeps its exports on
 	// dm-error with every namespace inaccessible.
 	for cnId := range reply.GetSideInfo().GetCnIdToNvmeof() {
@@ -1092,14 +1055,13 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 
 	clearFailAlways(node, "nvme connect")
 	node.Reset()
-	if _, err := srv.SyncupSide(ctx,
-		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
-		t.Fatalf("SyncupSide: %v", err)
+	round, resent := workerRound(t, srv, held, "round-1")
+	if round.GetAgentReply().GetCode() != common.ReplyCodeLeftover ||
+		resent == nil {
+		t.Fatalf("round-1 = %v, re-sent %v; want the leftover code and "+
+			"a re-send", round.GetAgentReply(), resent != nil)
 	}
-	if migrRetrying(srv) {
-		t.Error("retry registration survived a pass that ran the whole " +
-			"destination sequence")
-	}
+	assertNotNamed(t, "round-1's re-send", resent)
 	names := newMigrDstNames()
 	assertOrder(t, node,
 		"cmd dmsetup create "+names.clone,

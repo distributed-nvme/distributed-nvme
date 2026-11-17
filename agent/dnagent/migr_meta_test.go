@@ -249,8 +249,10 @@ func TestMigrMetaUnits(t *testing.T) {
 // the area's text, which sets no health epoch. Where the level emits them,
 // both migr_dst_info rows carry the same text, and the per-CN rows keep
 // "side provisioning". The check round reads the same rows at the same
-// epochs and answers code 0, and the DN8 retry takes the run, and then
-// zeroes, with no RPC once the units come free.
+// epochs and answers code 0, since a re-sent request would wait the same way
+// (DN16), and nothing runs the converge again between the worker's calls.
+// Once the units come free the side's read names a side nothing zeroes, and
+// the re-send that brings takes the run and zeroes.
 func TestMigrationDestinationWaitsForRoomBeforeZeroing(t *testing.T) {
 	for _, level := range []pb.SpLevel{
 		pb.SpLevel_SP_LEVEL_READWRITE,
@@ -259,7 +261,6 @@ func TestMigrationDestinationWaitsForRoomBeforeZeroing(t *testing.T) {
 	} {
 		t.Run(level.String(), func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.migrRetryInterval = 5 * time.Millisecond
 			ctx := context.Background()
 			if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 				t.Fatalf("SyncupDn: %v", err)
@@ -267,7 +268,8 @@ func TestMigrationDestinationWaitsForRoomBeforeZeroing(t *testing.T) {
 			fillMetaArea(t, srv)
 			node.Reset()
 
-			reply, err := srv.SyncupSide(ctx, waitingDstReq(1, level))
+			req := waitingDstReq(1, level)
+			reply, err := srv.SyncupSide(ctx, req)
 			if err != nil {
 				t.Fatalf("SyncupSide: %v", err)
 			}
@@ -276,14 +278,9 @@ func TestMigrationDestinationWaitsForRoomBeforeZeroing(t *testing.T) {
 			}
 			info := reply.GetSideInfo()
 			assertWaitingRows(t, "SyncupSide", info, level)
-			if !migrRetrying(srv) {
-				t.Error("no background retry was registered")
-			}
 
-			// The retry's passes come and go, and none of them zeroes.
-			waitUntil(t, "three retry passes", func() bool {
-				return convergePasses(node) >= 4
-			})
+			// Nothing runs between the worker's calls, so nothing zeroes.
+			assertNothingRunsBetweenCalls(t, node)
 			if got := node.callsMatching("blkdiscard --zeroout"); len(got) != 0 {
 				t.Errorf("a destination with no run zeroed: %v", got)
 			}
@@ -303,72 +300,162 @@ func TestMigrationDestinationWaitsForRoomBeforeZeroing(t *testing.T) {
 					check.GetSideInfo(), info)
 			}
 
-			// The other migration ends; no RPC follows.
+			// The other migration ends: the next round names the side, and
+			// its re-send takes the run and zeroes.
 			freeMetaArea(t, srv)
+			round, resent := workerRound(t, srv, req, "round-1")
+			assertNothingZeroing(t, "round-1", round)
+			if resent == nil {
+				t.Fatal("round-1 re-sent nothing")
+			}
 			waitZeroed(t, srv, testSide)
-			waitUntil(t, "the retry to end", func() bool {
-				return !migrRetrying(srv)
-			})
 			assertRunHeld(t, srv, node)
 		})
 	}
 }
 
-// At a level that suppresses the destination role, the run is still taken
-// before zeroing, so the retry that waits for it stays registered through
-// every pass, a pass that stops before the run included: the sweep's
-// pre-step leaves it to the run's own step (sidePreSteps). Were the pre-step
-// to stop it, a pass whose side device did not converge would end the wait,
-// and nothing but an RPC would take the run once units came free.
-func TestAWaitingDestinationKeepsItsRetryWhenAPassStopsEarly(t *testing.T) {
+// assertNothingZeroing fails unless reply names the fixture side as a side
+// nothing zeroes, at 0 of its bytes (zeroingVerdict).
+func assertNothingZeroing(
+	t *testing.T,
+	what string,
+	reply interface{ GetAgentReply() *pb.AgentReply },
+) {
+	t.Helper()
+	want := zeroingDetails(0, testZeroBytes) + ": nothing is zeroing the side"
+	if got := reply.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover || !strings.Contains(got.GetDetails(), want) {
+		t.Errorf("%s: verdict %v, want a leftover naming %q", what, got,
+			want)
+	}
+}
+
+// At a level that suppresses the destination role the run is still taken
+// before zeroing, and the side's read leaves the wait out only while the
+// side device row it just made reads the area's refusal (readsRunRefusal):
+// a read whose check of the side device does not answer reads that row in
+// error, and a converge would act on the side device before the run, so the
+// read names the side, and its re-send, which converges the side device and
+// waits for the run again, is followed by a round that names nothing. Once
+// the units come free the read names the side again, and the re-send takes
+// the run and zeroes.
+func TestAWaitingDestinationIsNamedWhileItsSideDeviceIsUnread(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = 5 * time.Millisecond
 	ctx := context.Background()
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
 	fillMetaArea(t, srv)
-	if _, err := srv.SyncupSide(ctx, waitingDstReq(
-		1, pb.SpLevel_SP_LEVEL_NO_MIGRATION)); err != nil {
+	req := waitingDstReq(1, pb.SpLevel_SP_LEVEL_NO_MIGRATION)
+	reply, err := srv.SyncupSide(ctx, req)
+	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if !migrRetrying(srv) {
-		t.Fatal("fixture is wrong: the waiting destination has no retry")
+	if got := reply.GetAgentReply(); got.GetCode() != 0 {
+		t.Fatalf("fixture is wrong: the waiting destination replied %v", got)
 	}
 
-	// One retry pass stops at the side device, before the run.
+	// The next read's check of the side device is killed.
 	stop := "dmsetup table " + srv.nf.DnSideName(
 		testCluster, testDn, testSp, testSide)
 	setHook(node, node.killCmdNoEffect, stop)
-	waitUntil(t, "a pass to stop at the side device", func() bool {
-		node.mu.Lock()
-		defer node.mu.Unlock()
-		return !node.killCmdNoEffect[stop]
-	})
-	node.Reset()
-	waitUntil(t, "the retry to run on", func() bool {
-		return convergePasses(node) >= 2
-	})
+	round, resent := workerRound(t, srv, req, "round-1")
+	node.mu.Lock()
+	armed := node.killCmdNoEffect[stop]
+	node.mu.Unlock()
+	if armed {
+		t.Fatalf("fixture is wrong: %q never ran", stop)
+	}
+	if got := round.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("fixture is wrong: round-1's side_dev_info = %v", got)
+	}
+	assertNothingZeroing(t, "round-1", round)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
+	}
+	assertWaitingRows(t, "round-1's re-send", resent.GetSideInfo(),
+		pb.SpLevel_SP_LEVEL_NO_MIGRATION)
+	round, resent = workerRound(t, srv, req, "round-2")
+	assertNotNamed(t, "round-2", round)
+	if resent != nil {
+		t.Errorf("round-2 re-sent: %v", resent.GetAgentReply())
+	}
+	assertNothingRunsBetweenCalls(t, node, "round-1", "round-2")
 
-	// The other migration ends; no RPC follows.
+	// The other migration ends.
 	freeMetaArea(t, srv)
+	round, resent = workerRound(t, srv, req, "round-3")
+	assertNothingZeroing(t, "round-3", round)
+	if resent == nil {
+		t.Fatal("round-3 re-sent nothing")
+	}
 	waitZeroed(t, srv, testSide)
-	waitUntil(t, "the retry to end", func() bool {
-		return !migrRetrying(srv)
-	})
+	assertRunHeld(t, srv, node)
+}
+
+// A destination whose side device reads suspended while its record is not
+// fully zeroed and the area has no free run is named a side nothing zeroes
+// (DN16): the area's refusal alone leaves out nothing, since the read's own
+// side device row reads the suspended device, not the wait, and the
+// converge a re-send brings resumes that device before it reaches the run.
+// After the re-send the row reads the wait again, and a round names nothing.
+func TestAWaitingDestinationWithASuspendedSideDeviceIsNamed(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	fillMetaArea(t, srv)
+	req := waitingDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)
+	if _, err := srv.SyncupSide(ctx, req); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := checkSide(ctx, srv).GetAgentReply(); got.GetCode() != 0 {
+		t.Fatalf("fixture is wrong: the waiting destination's verdict = %v",
+			got)
+	}
+
+	sideDev := srv.nf.DnSideName(testCluster, testDn, testSp, testSide)
+	node.mu.Lock()
+	node.dms[sideDev].suspended = true
+	node.mu.Unlock()
+	node.Reset()
+	round, resent := workerRound(t, srv, req, "round-1")
+	if got := round.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		got.GetDetails() != detailsSuspended {
+		t.Fatalf("fixture is wrong: round-1's side_dev_info = %v/%q, "+
+			"want ERROR/%q", got.GetStatus(), got.GetDetails(),
+			detailsSuspended)
+	}
+	assertNothingZeroing(t, "round-1", round)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
+	}
+	if !tracedCall(node, "round-1", "cmd dmsetup resume "+sideDev) {
+		t.Error("the re-send did not resume the side device")
+	}
+	if dmSuspended(node, sideDev) {
+		t.Error("the side device is still suspended")
+	}
+	assertWaitingRows(t, "round-1's re-send", resent.GetSideInfo(),
+		pb.SpLevel_SP_LEVEL_READWRITE)
+	round, resent = workerRound(t, srv, req, "round-2")
+	assertNotNamed(t, "round-2", round)
+	if resent != nil {
+		t.Errorf("round-2 re-sent: %v", resent.GetAgentReply())
+	}
 }
 
 // A destination that waits for its run zeroes nothing by design, so the
 // side verdict does not name it a side nothing zeroes (DN16): that leftover
 // would have the worker re-send its SyncupSide every round only to repeat
-// the wait its own retry covers. Once the area could supply the run and
-// still nothing zeroes — the retry has not run yet — the verdict names it
-// again, and the SyncupSide the worker then re-sends takes the run and
-// zeroes.
+// the wait. Once the area could supply the run and still nothing zeroes, the
+// verdict names it, and the SyncupSide the worker then re-sends takes the
+// run and zeroes.
 func TestAWaitingDestinationIsNotALeftover(t *testing.T) {
 	srv, node := newTestServer(t)
-	// No retry pass runs: every pass here is the test's.
-	srv.migrRetryInterval = time.Hour
 	ctx := context.Background()
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
@@ -384,41 +471,29 @@ func TestAWaitingDestinationIsNotALeftover(t *testing.T) {
 	}
 
 	freeMetaArea(t, srv)
-	wantLeftover := zeroingDetails(0, testZeroBytes) +
-		": nothing is zeroing the side"
-	if got := checkSide(ctx, srv).GetAgentReply(); got.GetCode() !=
-		common.ReplyCodeLeftover ||
-		!strings.Contains(got.GetDetails(), wantLeftover) {
-		t.Errorf("the verdict once the area has room = %v, want a leftover "+
-			"naming %q", got, wantLeftover)
-	}
-
 	node.Reset()
-	if _, err := srv.SyncupSide(ctx, req); err != nil {
-		t.Fatalf("SyncupSide: %v", err)
+	round, resent := workerRound(t, srv, req, "round-1")
+	assertNothingZeroing(t, "the verdict once the area has room", round)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
 	}
 	waitZeroed(t, srv, testSide)
 	assertRunHeld(t, srv, node)
-	if migrRetrying(srv) {
-		t.Error("the pass that took the run left the retry registered")
-	}
 	if got := checkSide(ctx, srv).GetAgentReply(); got.GetCode() != 0 {
 		t.Errorf("the verdict once zeroed = %v, want code 0", got)
 	}
 }
 
-// The exemption above rests on the DN8 retry, and only the run's own step
-// registers it while the side has not provisioned, so a destination whose
-// pass stopped before that step — here its side device's first `dmsetup
-// create` fails — has none, and nothing would take the run once units came
-// free. The verdict names it a side nothing zeroes although the area still
-// has no free run (DN16); the SyncupSide the worker then re-sends reaches the
-// run's step, which registers the retry, and the next verdict is clean. The
-// retry takes the run and zeroes with no further RPC once the units come
-// free.
-func TestAWaitingDestinationWithNoRetryIsALeftover(t *testing.T) {
+// A waiting destination whose pass stopped before the run's step — here its
+// side device's first `dmsetup create` fails — is named a side nothing zeroes
+// although the area still has no free run (DN16): its side device row reads
+// the failure, not the area's wait, and a converge would build the device.
+// The SyncupSide the worker then re-sends builds the side device and reaches
+// the run's step, which waits, and the next verdict is clean. Once the units
+// come free the verdict names the side again, and the re-send takes the run
+// and zeroes.
+func TestAWaitingDestinationStoppedBeforeItsRunIsALeftover(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = 5 * time.Millisecond
 	ctx := context.Background()
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
@@ -437,52 +512,42 @@ func TestAWaitingDestinationWithNoRetryIsALeftover(t *testing.T) {
 		pb.ResStatus_RES_STATUS_ERROR {
 		t.Fatalf("fixture is wrong: side_dev_info = %v, want ERROR", got)
 	}
-	if migrRetrying(srv) {
-		t.Fatal("fixture is wrong: a pass that stopped at the side device " +
-			"registered the retry")
-	}
-	wantLeftover := zeroingDetails(0, testZeroBytes) +
-		": nothing is zeroing the side"
-	if got := checkSide(ctx, srv).GetAgentReply(); got.GetCode() !=
-		common.ReplyCodeLeftover ||
-		!strings.Contains(got.GetDetails(), wantLeftover) {
-		t.Errorf("the verdict with no retry registered = %v, want a "+
-			"leftover naming %q", got, wantLeftover)
-	}
 
 	// The worker re-sends the SyncupSide.
-	reply, err = srv.SyncupSide(ctx, req)
-	if err != nil {
-		t.Fatalf("SyncupSide: %v", err)
+	round, resent := workerRound(t, srv, req, "round-1")
+	assertNothingZeroing(t, "round-1", round)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
 	}
-	assertWaitingRows(t, "the re-sent SyncupSide", reply.GetSideInfo(),
+	assertWaitingRows(t, "the re-sent SyncupSide", resent.GetSideInfo(),
 		pb.SpLevel_SP_LEVEL_READWRITE)
-	if !migrRetrying(srv) {
-		t.Error("the pass that reached the run's step registered no retry")
+	round, resent = workerRound(t, srv, req, "round-2")
+	assertNotNamed(t, "round-2", round)
+	if resent != nil {
+		t.Errorf("round-2 re-sent: %v", resent.GetAgentReply())
 	}
-	if got := checkSide(ctx, srv).GetAgentReply(); got.GetCode() != 0 {
-		t.Errorf("the verdict of a waiting destination with its retry = "+
-			"%v, want code 0", got)
-	}
+	assertNothingRunsBetweenCalls(t, node, "round-1", "round-2")
 
-	// The other migration ends; no RPC follows.
+	// The other migration ends.
 	freeMetaArea(t, srv)
+	round, resent = workerRound(t, srv, req, "round-3")
+	assertNothingZeroing(t, "round-3", round)
+	if resent == nil {
+		t.Fatal("round-3 re-sent nothing")
+	}
 	waitZeroed(t, srv, testSide)
-	waitUntil(t, "the retry to end", func() bool {
-		return !migrRetrying(srv)
-	})
 	assertRunHeld(t, srv, node)
 }
 
-// A refusal of the run other than "no free run" — here the write of its head
-// fails — is a fault, not a wait: side_dev_info reads ERROR with the write's
-// error while the rows above it keep the gate's own text, nothing zeroes,
-// and the verdict names a side nothing zeroes. The DN8 retry is registered
-// all the same, and it takes the run and zeroes with no RPC once the disk
-// takes the write again (DN13).
+// A refusal of the run other than "no free run" that a re-sent request may
+// not meet — here the write of its head fails — is a fault, not a wait:
+// side_dev_info reads ERROR with the write's error while the rows above it
+// keep the gate's own text, nothing zeroes, and the verdict names a side
+// nothing zeroes, since the read finds a run the area could supply. Nothing
+// runs the converge again between the worker's calls; once the disk takes
+// the write again, the next round's re-send takes the run and zeroes (DN13).
 func TestMigrationDestinationRunErrorIsAnError(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = 5 * time.Millisecond
 	ctx := context.Background()
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
@@ -492,8 +557,8 @@ func TestMigrationDestinationRunErrorIsAnError(t *testing.T) {
 	node.mu.Unlock()
 	node.Reset()
 
-	reply, err := srv.SyncupSide(ctx,
-		waitingDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE))
+	req := waitingDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)
+	reply, err := srv.SyncupSide(ctx, req)
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
@@ -510,87 +575,131 @@ func TestMigrationDestinationRunErrorIsAnError(t *testing.T) {
 		info.GetMigrDstInfo().GetTargetInfo(), tagProvisioningWait)
 	assertProvisioning(t, "migr_dst dm_clone_info",
 		info.GetMigrDstInfo().GetDmCloneInfo(), tagProvisioningWait)
-	if !migrRetrying(srv) {
-		t.Error("no background retry was registered")
-	}
-	waitUntil(t, "two retry passes", func() bool {
-		return convergePasses(node) >= 3
-	})
+	assertNothingRunsBetweenCalls(t, node)
 	if got := node.callsMatching("blkdiscard --zeroout"); len(got) != 0 {
 		t.Errorf("a destination whose run failed zeroed: %v", got)
 	}
 	if _, ok, _ := srv.meta.LookupCloneMeta(ctx, testSp, testMigrId); ok {
 		t.Error("a run whose head was not zeroed was recorded")
 	}
-	wantLeftover := zeroingDetails(0, testZeroBytes) +
-		": nothing is zeroing the side"
-	if got := checkSide(ctx, srv).GetAgentReply(); got.GetCode() !=
-		common.ReplyCodeLeftover ||
-		!strings.Contains(got.GetDetails(), wantLeftover) {
-		t.Errorf("the verdict while the run fails = %v, want a leftover "+
-			"naming %q", got, wantLeftover)
-	}
+	assertNothingZeroing(t, "the verdict while the run fails",
+		checkSide(ctx, srv))
 
-	// The disk takes the write again; no RPC follows.
+	// The disk takes the write again.
 	node.mu.Lock()
 	node.failBlockSet = false
 	node.mu.Unlock()
+	round, resent := workerRound(t, srv, req, "round-1")
+	assertNothingZeroing(t, "round-1", round)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
+	}
 	waitZeroed(t, srv, testSide)
-	waitUntil(t, "the retry to end", func() bool {
-		return !migrRetrying(srv)
-	})
 	assertRunHeld(t, srv, node)
 }
 
-// A destination whose request carries no usable block size sizes no run:
-// side_dev_info reads ERROR with the same text on the converge's reply and on
-// the check round, so the rows do not trade between the two channels; the
-// retry is registered, nothing zeroes, and the verdict names a side nothing
-// zeroes.
+// A destination whose request carries no usable block size sizes no run, and
+// a re-sent request meets that refusal the same way, so neither channel
+// names it (DN16), and no round re-sends it. Before it provisions,
+// side_dev_info reads ERROR with the same text on the converge's reply and
+// on the check round, so the rows do not trade between the two channels, and
+// nothing zeroes; a side device a converge would act on first — here one
+// left suspended — is named all the same, and the re-send that brings
+// resumes it. Once provisioned, its two destination rows read the refusal at
+// DN13 step (2), and are not named either.
 func TestADestinationWithNoBlockSizeIsAnError(t *testing.T) {
-	srv, node := newTestServer(t)
-	// No retry pass runs: every pass here is the test's.
-	srv.migrRetryInterval = time.Hour
-	ctx := context.Background()
-	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	req := waitingDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)
-	req.MigrDstConf.BlockSize = 0
-	reply, err := srv.SyncupSide(ctx, req)
-	if err != nil {
-		t.Fatalf("SyncupSide: %v", err)
-	}
 	const want = "migr_dst_conf.block_size is 0"
-	synced := reply.GetSideInfo().GetSideDevInfo()
-	if synced.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		synced.GetDetails() != want {
-		t.Errorf("side_dev_info = %v/%q, want ERROR/%q", synced.GetStatus(),
-			synced.GetDetails(), want)
-	}
-	if !migrRetrying(srv) {
-		t.Error("no background retry was registered")
-	}
-	check := checkSide(ctx, srv)
-	if probed := check.GetSideInfo().GetSideDevInfo(); !proto.Equal(
-		probed, synced) {
-		t.Errorf("the check round reports side_dev_info %v, the converge %v",
-			probed, synced)
-	}
-	if got := check.GetAgentReply(); got.GetCode() !=
-		common.ReplyCodeLeftover ||
-		!strings.Contains(got.GetDetails(), "nothing is zeroing the side") {
-		t.Errorf("the verdict = %v, want a leftover naming a side nothing "+
-			"zeroes", got)
-	}
-	if got := node.callsMatching("blkdiscard --zeroout"); len(got) != 0 {
-		t.Errorf("a destination with no run zeroed: %v", got)
-	}
+	t.Run("before it provisions", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		ctx := context.Background()
+		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+		req := waitingDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)
+		req.MigrDstConf.BlockSize = 0
+		reply, err := srv.SyncupSide(ctx, req)
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		synced := reply.GetSideInfo().GetSideDevInfo()
+		if synced.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			synced.GetDetails() != want {
+			t.Errorf("side_dev_info = %v/%q, want ERROR/%q",
+				synced.GetStatus(), synced.GetDetails(), want)
+		}
+		assertNotNamed(t, "the converge", reply)
+		round, resent := workerRound(t, srv, req, "round-1")
+		if probed := round.GetSideInfo().GetSideDevInfo(); !proto.Equal(
+			probed, synced) {
+			t.Errorf("the check round reports side_dev_info %v, the "+
+				"converge %v", probed, synced)
+		}
+		assertNotNamed(t, "round-1", round)
+		if resent != nil {
+			t.Errorf("round-1 re-sent: %v", resent.GetAgentReply())
+		}
+		assertNothingRunsBetweenCalls(t, node, "round-1")
+		if got := node.callsMatching("blkdiscard --zeroout"); len(got) != 0 {
+			t.Errorf("a destination with no run zeroed: %v", got)
+		}
+
+		// The side device is left suspended.
+		sideDev := srv.nf.DnSideName(testCluster, testDn, testSp, testSide)
+		node.mu.Lock()
+		node.dms[sideDev].suspended = true
+		node.mu.Unlock()
+		round, resent = workerRound(t, srv, req, "round-2")
+		if got := round.GetSideInfo().GetSideDevInfo(); got.GetDetails() !=
+			detailsSuspended {
+			t.Fatalf("fixture is wrong: round-2's side_dev_info = %v", got)
+		}
+		assertNothingZeroing(t, "round-2", round)
+		if resent == nil {
+			t.Fatal("round-2 re-sent nothing")
+		}
+		if dmSuspended(node, sideDev) {
+			t.Error("the re-send left the side device suspended")
+		}
+		round, resent = workerRound(t, srv, req, "round-3")
+		assertNotNamed(t, "round-3", round)
+		if resent != nil {
+			t.Errorf("round-3 re-sent: %v", resent.GetAgentReply())
+		}
+	})
+	t.Run("once provisioned", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		ctx := context.Background()
+		syncupBoth(t, srv, 1, testSide)
+		req := migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+		req.MigrDstConf.BlockSize = 0
+		reply, err := srv.SyncupSide(ctx, req)
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		dst := reply.GetSideInfo().GetMigrDstInfo()
+		if got := dst.GetDmCloneInfo(); got.GetStatus() !=
+			pb.ResStatus_RES_STATUS_ERROR || got.GetDetails() != want {
+			t.Errorf("dm_clone_info = %v/%q, want ERROR/%q",
+				got.GetStatus(), got.GetDetails(), want)
+		}
+		if got := dst.GetTargetInfo(); got.GetStatus() !=
+			pb.ResStatus_RES_STATUS_MISSING {
+			t.Errorf("target_info = %v/%q, want MISSING", got.GetStatus(),
+				got.GetDetails())
+		}
+		assertNotNamed(t, "the converge", reply)
+		round, resent := workerRound(t, srv, req, "round-1")
+		assertNotNamed(t, "round-1", round)
+		if resent != nil {
+			t.Errorf("round-1 re-sent: %v", resent.GetAgentReply())
+		}
+		assertNothingRunsBetweenCalls(t, node, "round-1")
+	})
 }
 
 // Cancelling a migration drops the destination side's pointer from its DN's
 // list (architecture.md, Migrations): the side's state goes, with its
-// zeroing loop and its retry, and the node-level sweep frees its run's record
+// zeroing loop, and the node-level sweep frees its run's record
 // along with the side's own, since with the side dropped no held side claims
 // the run and no wrapper maps it (DN6). A destination that only waits for a
 // run holds none, and leaves nothing running either.
@@ -630,7 +739,6 @@ func TestACancelledDestinationReleasesItsRun(t *testing.T) {
 
 	t.Run("holding its run", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.migrRetryInterval = 5 * time.Millisecond
 		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 			t.Fatalf("SyncupDn: %v", err)
 		}
@@ -662,7 +770,6 @@ func TestACancelledDestinationReleasesItsRun(t *testing.T) {
 
 	t.Run("waiting for a run", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.migrRetryInterval = 5 * time.Millisecond
 		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 			t.Fatalf("SyncupDn: %v", err)
 		}
@@ -670,9 +777,6 @@ func TestACancelledDestinationReleasesItsRun(t *testing.T) {
 		if _, err := srv.SyncupSide(ctx, waitingDstReq(
 			1, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 			t.Fatalf("SyncupSide: %v", err)
-		}
-		if !migrRetrying(srv) {
-			t.Fatal("fixture is wrong: the waiting destination has no retry")
 		}
 
 		if _, err := srv.SyncupDn(ctx, dnReq(2)); err != nil {

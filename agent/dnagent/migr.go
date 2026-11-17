@@ -244,6 +244,10 @@ const (
 	// nothing to read from.
 	detailsNoCtrl = "no controller for the subsystem"
 	detailsNoNs   = "controller has no namespace"
+	// detailsPaths leads target_info's once the walk found a controller
+	// with a namespace device, the state of each path after it: OK while a
+	// path is live, ERROR while none is and the kernel reconnects.
+	detailsPaths = "paths: "
 	// detailsTargetNotRead leads dm_clone_info's, before the walk's error,
 	// when the walk of the source connection did not answer.
 	detailsTargetNotRead = "target not read: "
@@ -306,12 +310,14 @@ func (m *migrDstSeen) srcServes() bool {
 // targetRow is migr_dst_info.target_info's status and details (DN18). Step
 // (2)'s refusal comes first: an area with no free run for a slot not yet held
 // is a wait, not a fault, so the row reads provisioning with the area's text,
-// as the side's own row does while it waits before zeroing (ensureSideDev),
-// and the retry takes the run once units come free; any other refusal reads
-// the slot missing. A pass that stopped after step (2) for the cutover reads
-// provisioning, waiting for the cutover, with the reason the worker's cutover
-// reads (reason). Past them the row is the walk of the source connection,
-// with the error of the connect a converge made.
+// as the side's own row does while it waits before zeroing (ensureSideDev);
+// once units come free a read finds no run held (HeldCloneMeta) and reads the
+// slot missing, which the side's verdict names, so the worker's re-send takes
+// the run. Any other refusal reads the slot missing. A pass that stopped
+// after step (2) for the cutover reads provisioning, waiting for the
+// cutover, with the reason the worker's cutover reads (reason). Past them
+// the row is the walk of the source connection, with the error of the
+// connect a converge made.
 func (m *migrDstSeen) targetRow() (pb.ResStatus, string) {
 	switch {
 	case m.metaErr != nil && isNoFreeRun(m.metaErr):
@@ -328,7 +334,7 @@ func (m *migrDstSeen) targetRow() (pb.ResStatus, string) {
 	case m.conn.DevicePath == "":
 		return pb.ResStatus_RES_STATUS_ERROR, detailsNoNs
 	}
-	paths := "paths: " + strings.Join(m.conn.States, ",")
+	paths := detailsPaths + strings.Join(m.conn.States, ",")
 	if !m.conn.Live {
 		return pb.ResStatus_RES_STATUS_ERROR, paths
 	}
@@ -380,27 +386,14 @@ func (m *migrDstSeen) cloneRow(plan *sidePlan) (pb.ResStatus, string) {
 	return status, note
 }
 
-// held reports whether every step of the pass held, hydration included, as
-// the status line read after the messages shows it: a converge whose steps
-// all held leaves the retry to settleMigrRetry, after step (5). A pass that
-// waits for the cutover has not held: it ran no step past (2), though it
-// leaves its retry to settleMigrRetry too, unless it could not read where
-// its stacks are, when ensureMigrDst registers it.
-func (m *migrDstSeen) held(plan *sidePlan) bool {
-	return m.metaErr == nil && !m.awaitingCutover && !m.connUnread &&
-		m.srcServes() && m.cloneErr == nil && m.statusRead &&
-		m.statusErr == nil && (cloneMetaMode(m.raw) != "" ||
-		m.hydrationErr == nil && hydrationGap(plan, m.raw) == nil)
-}
-
 // detailsCloneMetaMode starts the dm-clone row of a destination whose
 // dm-clone's metadata is read-only or failed, the mode after it. dm-clone
 // enters either mode when an operation on its metadata fails, and no step of
 // a converge brings it back: a reload of its table would reopen the metadata
 // from its last commit and read the regions copied since from the source
-// again, losing what was written to them. So the row reads RES_STATUS_ERROR,
-// the side's verdict does not name it (rowVerdict), and the pass counts as
-// held, so no retry repeats it (held).
+// again, losing what was written to them. So the row reads RES_STATUS_ERROR
+// and the side's verdict does not name it (rowVerdict): no re-send repeats
+// a converge that cannot cure it.
 const detailsCloneMetaMode = "dm-clone metadata mode "
 
 // cloneMetaMode is the metadata mode of a dm-clone status line when it is
@@ -528,34 +521,27 @@ func (s *DnAgentServer) migrDstStopped(
 }
 
 // ensureMigrDst runs DN13 steps (2) to (4) of the destination sequence of
-// architecture.md, Migration — the slot and its wrapper, the source
-// connection, the dm-clone with hydration on — and the dm-clone's status read
-// (runMigrDst), then reports the destination's two rows and decides where the
-// per-CN stacks serve from by the rule a check round's read applies to what it
-// reads (reportMigrDst, migrDstServing). It returns that decision, which sets
-// the per-CN dm-linear targets and ANA groups for this pass, and whether the
-// pass leaves its retry to settleMigrRetry. Step (5), the primary's stack onto
-// the dm-clone, is convergeSide's, and so is the retry of a pass whose steps
-// here all held, and of a pass that stopped after step (2) to wait for the
-// cutover and read where its stacks go: either pass builds the primary's stack
-// after this, and the retry is decided only once that stack's rows are known,
-// so it is neither registered nor deregistered here. A waiting pass whose
-// stack converged wants no retry, since only the worker's cutover ends the
-// wait and it comes with a new request; one whose stack did not converge does,
-// since the cutover waits for the primary's path through that stack. Every
-// other pass registers it here (startMigrRetry), a waiting pass that could not
-// read where its stacks are among them, since that pass leaves them as they
-// are (migrCloneUnread). The slot of step (2) is normally the run the side has
-// held since it provisioned (holdMigrMeta), so step (2) finds its record and
-// builds the wrapper over it. connectBudget is the budget of step (3)'s
-// retries (connectMigrSrc).
+// architecture.md, Migration — the slot and its wrapper, the source connection,
+// the dm-clone with hydration on — and the dm-clone's status read (runMigrDst),
+// then reports the destination's two rows and decides where the per-CN stacks
+// serve from by the rule a check round's read applies to what it reads
+// (reportMigrDst, migrDstServing). It returns that decision, which sets the
+// per-CN dm-linear targets and ANA groups for this pass. Step (5), the
+// primary's stack onto the dm-clone, is convergeSide's. A step that stops
+// leaves its row as it reads, and nothing of the agent's own runs the converge
+// again but an agent restart's reconcile (DN2): a SyncupSide does, the worker's
+// re-send among them, which the side's verdict brings while a converge would
+// act on the row (rowVerdict). The slot of step (2) is normally the run the
+// side has held since it provisioned (holdMigrMeta), so step (2) finds its
+// record and builds the wrapper over it. connectBudget is the budget of step
+// (3)'s retries (connectMigrSrc).
 func (s *DnAgentServer) ensureMigrDst(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
 	connectBudget time.Duration,
-) (migrServing, bool) {
+) migrServing {
 	// Chunks left over from a previous migration on this side are never
 	// applied to a new one.
 	if st.chunks.Len() > 0 &&
@@ -564,13 +550,7 @@ func (s *DnAgentServer) ensureMigrDst(
 	}
 	seen := s.runMigrDst(ctx, st, plan, connectBudget)
 	s.reportMigrDst(st, plan, info, seen)
-	serving := s.migrDstServing(ctx, plan, seen)
-	settles := seen.held(plan) ||
-		(seen.awaitingCutover && serving.state != migrCloneUnread)
-	if !settles {
-		s.startMigrRetry(st, plan)
-	}
-	return serving, settles
+	return s.migrDstServing(ctx, plan, seen)
 }
 
 // runMigrDst runs the destination's steps (2) to (4), the hydration messages
@@ -604,9 +584,11 @@ func (s *DnAgentServer) runMigrDst(
 	// (3) the connect, tried again within the pass for a short while
 	// (connectMigrSrc), and after a connect that succeeded the wait for the
 	// source's namespace node, which the kernel adds from a scan the connect
-	// only queued (awaitMigrSrcNs). "Retrying until success"
-	// (architecture.md, Migration, dst step 3) past that is the DN8
-	// background registry.
+	// only queued (awaitMigrSrcNs). Past that pass, the connect is tried
+	// again by the next converge: a SyncupSide's, the worker's re-send among
+	// them (architecture.md, Migration), which the side's verdict brings
+	// while the walk finds no controller or does not answer
+	// (nameMigrDstRows), or an agent restart's reconcile (DN2).
 	state, err := s.host.ListSubsys(ctx, nqn)
 	// unread: the walk did not answer, so the connection is not known to be
 	// gone. A connect that failed is the opposite case — the walk had just
@@ -676,9 +658,10 @@ func (s *DnAgentServer) runMigrDst(
 // fence holds, the old primary's stack still mapping the dm-clone. Only plan.cnIds
 // are read, so when a flip also drops the old primary, whose stack the
 // pass's sweep removes, the read finds none on the dm-clone and the new
-// primary waits on its dm-error for the retry. It only reads: the read a
-// check round starts reads the stacks through it as a converge does
-// (migrDstStopped).
+// primary waits on its dm-error until a pass runs the whole sequence, which
+// the re-send the stopped step's named row brings runs (rowVerdict). It only
+// reads: the read a check round starts reads the stacks through it as a
+// converge does (migrDstStopped).
 func (s *DnAgentServer) migrCloneMapped(
 	ctx context.Context,
 	plan *sidePlan,
@@ -826,14 +809,15 @@ func (s *DnAgentServer) migrMetaRead(
 // first connect of the pass the cutover brings often comes too early. That
 // pass's budget is DnMigrCutoverConnectBudget, sized to outlast the src
 // side's pass on a loaded node, so that normally the connect that ends the
-// migration gap is this pass's and not the DN8 loop's, whose next pass would
-// come DnMigrConnectRetryInterval seconds later; a src side slower than that
-// leaves it to the loop all the same. Every other pass's budget is
+// migration gap is this pass's and not that of the converge the worker's
+// re-send brings, which comes on the side's next round, up to one interval
+// later (dnv-worker.md RW4, RW6); a src side slower than that leaves it to
+// that re-send all the same. Every other pass's budget is
 // DnMigrConnectPassBudget (convergeSide). The error is never classified: an
 // export not linked yet, a dead source DN and a refused host answer alike,
 // and the budget is what caps how often the last two are tried. The last
-// attempt's error is the one returned, and the pass then registers the DN8
-// loop (ensureMigrDst). The cn twin is connectWithin.
+// attempt's error is the one returned; the target row carries it and the
+// side's verdict names it (rowVerdict). The cn twin is connectWithin.
 func (s *DnAgentServer) connectMigrSrc(
 	ctx context.Context,
 	plan *sidePlan,
@@ -870,8 +854,7 @@ func (s *DnAgentServer) connectMigrSrc(
 // controller and no namespace yet, failing the target with "controller has
 // no namespace" for a device milliseconds away.
 // A ListSubsys that fails ends the wait at once. It connects nothing and
-// has a budget of its own: the connect's retries are connectMigrSrc's, and
-// past them the DN8 loop's.
+// has a budget of its own: the connect's retries are connectMigrSrc's.
 func (s *DnAgentServer) awaitMigrSrcNs(
 	ctx context.Context,
 	nqn string,
@@ -1213,159 +1196,18 @@ func hydrationGap(plan *sidePlan, raw string) error {
 }
 
 // ---------------------------------------------------------------------------
-// DN8 background connect retry
+// The DN12 fence timer's converge
 // ---------------------------------------------------------------------------
 
-// startMigrRetry registers a side whose destination pass did not run the
-// whole sequence, save one that waits for the cutover with the primary's
-// stack converged (settleMigrRetry): the connect failed after its in-pass
-// retries (connectMigrSrc) or the source's namespace did not appear, another
-// step stopped for a reason of its own (migrDstStopped), hydration would not
-// converge (a knob or the enable) as the status line read after the messages
-// shows it (hydrationGap), the primary's stack did not converge where the
-// pass puts it — onto the dm-clone (DN13 step (5)) or, while the pass waits
-// for the cutover, wherever that pass reads it goes (settleMigrRetry) — or a
-// pass that waits for the cutover could not read where its stacks go
-// (ensureMigrDst). It also registers a destination that has not
-// provisioned and could not take its run in the clone-metadata area before
-// zeroing (holdMigrMeta, in ensureSideDev). A goroutine re-runs the
-// destination converge every DnMigrConnectRetryInterval seconds under the
-// DN1 locks, until a pass runs the whole sequence, the primary's stack
-// included, or, for a destination that has not provisioned, takes its run;
-// a pass whose sweep lists the node's dm devices finds the destination role
-// no longer wanted (sidePreSteps), though a destination that has not
-// provisioned keeps its retry at a level that suppresses the role, until it
-// takes its run; a pass that waits for the cutover converges the primary's
-// stack where it puts it (settleMigrRetry); or the side is dropped
-// (dropSideState). Within a pass of the loop a failed connect is tried again
-// only for DnMigrConnectPassBudget (connectMigrSrc), and the source's
-// namespace is waited for only DnMigrDstNsWait (awaitMigrSrcNs).
-//
-// The loop is enrolled in the server's WaitGroup so WaitBackground covers the
-// connect retries too, not just zeroing (SH27). As in startZeroing, the
-// refusal and the enrollment sit under s.mu, the lock the join marks the
-// server closed under: a retry is refused once the join has begun or rootCtx
-// is done (bgClosedLocked), and no bg.Add can follow the join's bg.Wait.
-func (s *DnAgentServer) startMigrRetry(st *sideState, plan *sidePlan) {
-	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
-	s.mu.Lock()
-	if st.retrying || s.bgClosedLocked() {
-		s.mu.Unlock()
-		return
-	}
-	ctx, cancel := context.WithCancel(s.rootCtx)
-	st.retrying = true
-	st.cancel = cancel
-	s.enrollLocked()
-	s.mu.Unlock()
-	go func() {
-		defer s.bg.Done()
-		s.migrRetryLoop(ctx, key, st)
-	}()
-}
-
-// settleMigrRetry ends a destination pass whose steps in ensureMigrDst all
-// held, or that stopped after step (2) to wait for the cutover and read
-// where its stacks go (ensureMigrDst). The per-CN stacks have converged by
-// then, so the retry is deregistered only when the primary's dm-linear and
-// its export converged on what the pass asks of them — after the whole
-// sequence, step (5)'s, the dm-linear on the dm-clone and the namespace
-// optimized; while the pass waits for the cutover, step (1)'s, the
-// dm-linear on its dm-error and the namespace inaccessible, unless a stack
-// already served through the dm-clone (linearBacking, anaGrpId,
-// migrDstServing) — and registered otherwise: the worker re-sends a
-// SyncupSide on a revision or a reply code, never on a row, so a primary
-// stack that failed with nothing retrying it would stay failed until the
-// SP's next revision — a refused reload, for one, leaves the primary's
-// dm-linear suspended (a reload fails closed), and a waiting destination
-// whose primary export is not linked to the port leaves the primary no path
-// to it, which the cutover waits for (dnv-worker.md RW18). Both rows are
-// there: wantMigr implies wantExport, and the primary is the first of
-// plan.cnIds.
-//
-// convergeSide calls it last, so no OS call of the pass follows its
-// deregistration.
-func (s *DnAgentServer) settleMigrRetry(
-	st *sideState,
-	plan *sidePlan,
-	info *pb.SideInfo,
-) {
-	primary := plan.primaryCnId
-	if rowAsWanted(info.GetCnIdToDmLinear()[primary]) &&
-		rowAsWanted(info.GetCnIdToNvmeof()[primary]) {
-		s.stopMigrRetry(st)
-		return
-	}
-	s.startMigrRetry(st, plan)
-}
-
-// rowAsWanted reports whether row reads RES_STATUS_OK with nothing that
-// differs: an export whose ANA move failed reads OK with RES_REASON_DIFFERS,
-// and step (5) has not converged it.
-func rowAsWanted(row *pb.ResInfo) bool {
-	return row.GetStatus() == pb.ResStatus_RES_STATUS_OK &&
-		row.GetReason() != pb.ResReason_RES_REASON_DIFFERS
-}
-
-func (s *DnAgentServer) stopMigrRetry(st *sideState) {
-	s.mu.Lock()
-	cancel := st.cancel
-	st.cancel = nil
-	st.retrying = false
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
-func (s *DnAgentServer) migrRetryLoop(
-	ctx context.Context,
-	key string,
-	st *sideState,
-) {
-	ticker := time.NewTicker(s.migrRetryInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		// The attempt runs on rootCtx, never on this loop's ctx. That ctx is
-		// what stopMigrRetry cancels, and a pass of this very loop can be
-		// the one that calls it: settleMigrRetry, the last act of a pass
-		// whose build held or that waits for the cutover with the primary's
-		// stack converged; ensureSideDev's run step in the middle of a pass,
-		// on a destination that has not provisioned, once it takes or finds
-		// its run (holdMigrMeta), after which the pass goes on to start
-		// zeroing; or the sweep's pre-step near the start of a pass
-		// (sidePreSteps), for a destination role no longer wanted — a role
-		// that is gone, or one a level suppresses on a destination that has
-		// provisioned, since one that has not keeps its retry until it takes
-		// its run — which a pass of the loop meets when the SyncupSide that
-		// ended the role could not list the node's dm devices, since its
-		// sweep then skipped the pre-steps. An attempt on the loop's ctx
-		// would fail every OS call that follows the deregistration in its
-		// pass on the dead context, with `retrying` already false and
-		// nothing ticking again, so where a deregistration falls in a pass
-		// would decide whether the rest of the pass runs. On rootCtx it
-		// never does, as for the fence timer, which reconverges on rootCtx
-		// too.
-		//
-		// Cancelling therefore ends the LOOP, not the attempt: the ctx.Err()
-		// check below is what reads it, one tick late at worst. Shutdown is
-		// unaffected, because rootCtx is cancelled before WaitBackground
-		// joins (SH27), so an attempt in flight then still aborts.
-		s.reconvergeSide(s.rootCtx, key, st)
-		if ctx.Err() != nil || s.rootCtx.Err() != nil {
-			return
-		}
-	}
-}
-
-// reconvergeSide re-runs one side's converge from a background goroutine
-// under the DN1 locks. It backs both the DN8 connect retry and the DN12
-// fence timer — anything that has to happen later without blocking an RPC.
+// reconvergeSide re-runs one side's converge from a background goroutine under
+// the DN1 locks. The DN12 fence timer is its one caller: the converge that ends
+// a source's bounded suspension once the window has elapsed, which no RPC may
+// wait for. It is no retry: it is armed only for a source's window, never
+// because a step stopped, though its converge runs that source's steps again; a
+// stopped step is otherwise re-driven only by the worker's re-send its name
+// brings, or by an agent restart's reconcile (SH31, DN2). It passes
+// DnMigrConnectPassBudget, the budget of a destination's connect, which a
+// migration source's converge never draws on.
 //
 // The side is checked under the node read lock and before its object lock is
 // taken: a side dropped since the attempt was scheduled — the drop runs under

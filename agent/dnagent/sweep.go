@@ -822,8 +822,8 @@ func (s *DnAgentServer) freeCloneMetaOf(
 // remove = false is the read-only verdict the side's background read takes
 // (SH29): same enumeration, same comparison, nothing touched — plus zeroing
 // that should run (zeroingVerdict), a comparison only the read makes, and
-// the rows of the read's probe a re-sent SyncupSide could cure (rowVerdict,
-// from read), taken before the result is logged so the pass's one `sweep
+// the rows of the read's probe a re-sent SyncupSide could cure (rowVerdict),
+// both from read, taken before the result is logged so the pass's one `sweep
 // leftover` record carries them. A converge passes no rows and logs nothing
 // here: it takes rowVerdict over the rows of its own build once that has
 // run, and logs then (convergeSide).
@@ -866,7 +866,7 @@ func (s *DnAgentServer) sweepSide(
 	if !remove {
 		reportChain(chain, res)
 		if verdict {
-			s.zeroingVerdict(ctx, st, plan, res)
+			s.zeroingVerdict(ctx, st, plan, read, res)
 			s.rowVerdict(ctx, plan, read, res)
 			res.Log(ctx, sideIdAttrs(plan)...)
 		}
@@ -1391,14 +1391,6 @@ func (s *DnAgentServer) sidePreSteps(
 	actual *dnActual,
 	wanted *dnWanted,
 ) {
-	// The destination role this side no longer plays keeps no retry loop. A
-	// destination that has not provisioned keeps it at every level: it takes
-	// its run in the clone-metadata area before it zeroes, whatever the
-	// level, and that step registers and deregisters the retry itself
-	// (ensureSideDev, DN13).
-	if plan.migrDst == nil || (plan.provisioned && !plan.wantMigr) {
-		s.stopMigrRetry(st)
-	}
 	if plan.migrSrc == nil {
 		// The fence only ever applies while a source role is live, so a side
 		// that is not one has no window — clearing unconditionally needs no
@@ -1811,22 +1803,24 @@ func (s *DnAgentServer) sideVerdict(
 // the removing sweep, takes no part of it, so the observation a converge
 // stores (SH28) leaves it out until the side's next read.
 //
-// A migration destination that has not provisioned, that the
-// clone-metadata area has no free run for, and whose DN8 retry is registered
-// adds nothing either: it zeroes nothing until it holds its run (DN13), and
-// that retry takes the run once units come free, so a re-sent SyncupSide
-// every round would only repeat the wait. The retry is read from the
-// registry and the area's answer from the table, fresh like the two halves
-// above, so a destination whose run the area can supply, or that no retry
-// covers, and that still zeroes nothing is re-driven like any other side.
-// Only the run's own step registers the retry while the side has not
-// provisioned (ensureSideDev), so none covers a destination whose passes all
-// stopped before that step — at the record or the side device, the startup
-// reconcile's included — and the verdict re-drives it until one gets there.
+// A migration destination that has not provisioned zeroes nothing until it
+// holds its run in the clone-metadata area (DN13), and a converge takes the
+// run only after the side device holds (ensureSideDev). Such a side adds
+// nothing while the side device row of read, the rows this read just made,
+// reads the area's refusal of its run (readsRunRefusal): the converge a
+// re-sent request brings would stop at the same refusal — the area's wait
+// for room, or one no wait cures. The row, and not the area's answer alone,
+// is what decides: a side device row that reads a fault of the device's own
+// — absent, on another table, suspended — is one a converge would act on
+// before it reaches the run, so such a side is named whatever the area
+// answers. A destination whose run the area can supply, and that still
+// zeroes nothing, is named like any other side, so the re-send takes its
+// run once units come free.
 func (s *DnAgentServer) zeroingVerdict(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
+	read *pb.SideInfo,
 	res *agent.SweepResult,
 ) {
 	rec, ok, err := s.meta.LookupConfirmedSide(ctx, plan.spId, plan.sideId)
@@ -1841,28 +1835,52 @@ func (s *DnAgentServer) zeroingVerdict(
 		return
 	}
 	s.mu.Lock()
-	running, retrying := st.zeroing, st.retrying
+	running := st.zeroing
 	s.mu.Unlock()
-	if running {
-		return
-	}
-	if retrying && !plan.provisioned && plan.migrDst != nil &&
-		isNoFreeRun(s.migrMetaRefusal(ctx, plan)) {
+	if running || s.readsRunRefusal(ctx, plan, read.GetSideDevInfo()) {
 		return
 	}
 	res.Fail(zeroingDetails(sideZeroedBytes(rec), sideZeroBytes(rec)),
 		fmt.Errorf("nothing is zeroing the side"))
 }
 
-// rowVerdict is what a side's verdict names beyond the sweep's leftovers:
-// each row of the pass that is not as the desired state wants it and that a
-// re-sent SyncupSide could cure (SH31, DN16). Both a converge and a read take
-// it, each from the rows it just made, so nothing about a failed step is
-// remembered and the two channels name the same node alike. The worker
-// re-sends a Syncup* on a Check reply's code alone, never on its rows
-// (dnv-worker.md RW4), so without the name a side whose step stopped once —
-// a side device check that did not answer in the converge a cutover brings,
-// a port link that failed, a device left suspended — would stay so with
+// readsRunRefusal reports whether row, the side device row of a migration
+// destination that has not provisioned, reads the clone-metadata area's
+// refusal of the destination's run as the area gives it now
+// (migrMetaRefusal): for an area with no free run, RES_STATUS_PROVISIONING,
+// which the row reads then only with the wait's text (metaRoomDetails); for
+// any other refusal, the refusal's own text, which the row carries only as
+// RES_STATUS_ERROR. Both channels set either reading only once the side
+// device held (ensureSideDev, probeSideDev).
+func (s *DnAgentServer) readsRunRefusal(
+	ctx context.Context,
+	plan *sidePlan,
+	row *pb.ResInfo,
+) bool {
+	if plan.provisioned || plan.migrDst == nil {
+		return false
+	}
+	refusal := s.migrMetaRefusal(ctx, plan)
+	switch {
+	case refusal == nil:
+		return false
+	case isNoFreeRun(refusal):
+		return row.GetStatus() == pb.ResStatus_RES_STATUS_PROVISIONING
+	}
+	return row.GetDetails() == refusal.Error()
+}
+
+// rowVerdict is what a side's verdict names beyond the sweep's leftovers: each
+// row of the pass that is not as the desired state wants it and that a re-sent
+// SyncupSide could cure (SH31, DN16). Both a converge and a read take it, each
+// from the rows it just made, so nothing about a failed step is remembered and
+// the two channels name the same node alike. The worker re-sends a Syncup* on a
+// Check reply's code alone, never on its rows (dnv-worker.md RW4), and nothing
+// else runs a side's converge again short of an agent restart's reconcile (DN2)
+// or, for a migration source, the DN12 fence timer's converge, so without the
+// name a side whose step stopped once — a side device check that did not answer
+// in the converge a cutover brings, a port link that failed, a device left
+// suspended, a connect to a migration source that failed — would stay so with
 // code zero until something else moved its revision.
 //
 // It names a row by its object:
@@ -1889,7 +1907,8 @@ func (s *DnAgentServer) zeroingVerdict(
 //     (detailsPortMissing), which the DN's verdict names, so the sides are
 //     not re-sent for the link alone; and a migration destination's dm-clone
 //     whose metadata is read-only (detailsCloneMetaMode), which no converge
-//     brings back.
+//     brings back. A migration destination's two rows are named only while
+//     a converge would act on them (nameMigrDstRows).
 //
 // A RES_STATUS_PROVISIONING row is never named: the stack above a side that
 // is still zeroing, or that the control plane has not released, and the wait
@@ -1938,8 +1957,61 @@ func (s *DnAgentServer) rowVerdict(
 	}
 	nameRow(info.GetMigrSrcInfo().GetDmLinearInfo(), res)
 	nameRow(info.GetMigrSrcInfo().GetNvmeofInfo(), res)
-	nameRow(info.GetMigrDstInfo().GetTargetInfo(), res)
-	nameRow(info.GetMigrDstInfo().GetDmCloneInfo(), res)
+	s.nameMigrDstRows(ctx, plan, info.GetMigrDstInfo(), res)
+}
+
+// nameMigrDstRows names a migration destination's two rows as nameRow names
+// any row, but only while the converge a re-sent SyncupSide brings would act
+// on them (DN16):
+//
+//   - Neither while the clone-metadata area refuses the destination's run
+//     (migrMetaRefusal), as rowVerdict leaves a side AllocSide refuses. A
+//     zero block size, a record smaller than the request and a run larger
+//     than the whole area meet a re-sent request the same way; the area's
+//     wait for room reads RES_STATUS_PROVISIONING, which is never named.
+//   - Not the target row while the walk of the source connection finds a
+//     controller that is not live, which the kernel reconnects by itself, or
+//     a live one with no namespace device (srcCtrlWaits): a converge connects
+//     only where the walk finds no controller (runMigrDst), so it would do
+//     nothing. Nor the dm-clone row then while it reads the same answer of
+//     the walk (detailsTargetNotConnected), on its first line: a read that
+//     finds the dm-clone standing adds its status line after it, which a
+//     converge that stops at the walk does not read, and both channels name
+//     the row alike all the same. Over a namespace device the dm-clone row
+//     is the dm-clone's own, which a converge acts on.
+//
+// Both stay named while the walk finds no controller, which a converge
+// connects, and while it does not answer.
+func (s *DnAgentServer) nameMigrDstRows(
+	ctx context.Context,
+	plan *sidePlan,
+	dst *pb.SideInfo_MigrDstInfo,
+	res *agent.SweepResult,
+) {
+	if dst == nil || s.migrMetaRefusal(ctx, plan) != nil {
+		return
+	}
+	target, clone := dst.GetTargetInfo(), dst.GetDmCloneInfo()
+	if srcCtrlWaits(target) {
+		if first, _, _ := strings.Cut(clone.GetDetails(), "\n"); first !=
+			detailsTargetNotConnected {
+			nameRow(clone, res)
+		}
+		return
+	}
+	nameRow(target, res)
+	nameRow(clone, res)
+}
+
+// srcCtrlWaits reports whether a migration destination's target row reads a
+// controller of the source that the walk found, which a converge leaves
+// alone: one with no namespace device (detailsNoNs), or one with a namespace
+// device (detailsPaths), whose row reads RES_STATUS_ERROR while no path is
+// live. The details alone tell it: no other reading of the row carries
+// either text.
+func srcCtrlWaits(target *pb.ResInfo) bool {
+	details := target.GetDetails()
+	return details == detailsNoNs || strings.HasPrefix(details, detailsPaths)
 }
 
 // nameRow records row in res when rowVerdict names it: a row that reads

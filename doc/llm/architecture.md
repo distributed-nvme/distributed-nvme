@@ -1819,8 +1819,9 @@ commit before the DN tears the copy down, Teardown by sweep: those of
 change). That refusal is a wait, not a fault: the dn agent reports the
 waiting destination's rows `RES_STATUS_PROVISIONING`, their details saying
 that the copy waits for metadata room and carrying the area's own text,
-which sets no health epoch, and it tries again (Live-state reporting;
-`dnagent.md` DN13). An area that did not answer, and a run larger than the
+which sets no health epoch (Live-state reporting), and once a run comes
+free a read names the side, so the converge the worker's re-send brings
+takes the run (`dnagent.md` DN13, DN16). An area that did not answer, and a run larger than the
 whole area, which can never fit, read `RES_STATUS_ERROR`. Reason: no disk
 format change; the count keeps the refusal rare, and as provisioning it is
 harmless. A migration destination takes its run before it zeroes
@@ -5925,9 +5926,10 @@ end state (`dnagent.md` DN13):
 3. `nvme connect` to the `MigrSrcNqn` of the cluster,
    `migr_dst_conf.src_dn_id`, the sp and the `migr_id` at
    `migr_dst_conf.src_nvme_tr_conf`, with the host NQN `DnHostNqn` the
-   source admits. A step that stops is tried again by the destination's
-   retry and by the `SyncupSide` the side's verdict brings, which names
-   what the stop left not as wanted (`dnagent.md` DN13, DN16).
+   source admits. A connect that fails is tried again within its pass;
+   past that pass, a step that stops is tried again by the `SyncupSide`
+   the side's verdict brings, which names what the stop left not as
+   wanted while a converge would act on it (`dnagent.md` DN13, DN16).
 4. Create the dm-clone `DnMigrFinalName`: metadata the step-2 wrapper,
    destination the local side device `DnSideName`, source the connected
    nvme device, region size `migr_dst_conf.block_size` (the SP's
@@ -7857,10 +7859,12 @@ document and only pointed to here.
   their steps. Where a step of theirs stops instead, as when the destination's
   connect to the source is still refused once its pass's retries run out, or
   the check of its side device does not answer, the gap lasts until a later
-  pass runs it: the destination's retry, or the `SyncupSide` the side's
-  verdict brings on the worker's next round, since that verdict names what
-  the stop left not as wanted (`dnagent.md` DN13, DN16); a commit waits
-  that long. The pass the cutover brings retries the
+  pass runs it: the `SyncupSide` the side's verdict brings on the worker's
+  next round, since that verdict names what the stop left not as wanted
+  (`dnagent.md` DN13, DN16); a commit waits that long. No such pass runs
+  while no worker drives the pool, nor while the destination's store disk
+  refuses writes, which refuses every re-sent `SyncupSide` for its failed
+  save (`dnagent.md`, Known limits). The pass the cutover brings retries the
   connect longer than any other (`dnagent.md` DN13). A migration whose record
   carries no `cutover_pending` has no cutover to wait at (Upgrade in lockstep):
   its gap can open before the primary has connected the destination, and the

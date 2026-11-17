@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -35,9 +34,9 @@ func serveThenDropSourceCtrls(
 		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if !servesThroughClone(t, srv, node, names) || migrRetrying(srv) {
+	if !servesThroughClone(t, srv, node, names) {
 		t.Fatal("fixture is wrong: the destination is not serving " +
-			"through its dm-clone with no retry registered")
+			"through its dm-clone")
 	}
 
 	nqn := srv.nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
@@ -155,7 +154,7 @@ func assertCloneOnTheNewHead(
 // deleted controller the directory still lists until the last reference to
 // it drops (HasCtrl): one SyncupSide connects again, reloads the dm-clone
 // onto the source's new device and leaves the destination serving through
-// it, with no retry left.
+// it, and its reply names nothing.
 func TestMigrationDestinationReconnectsASourceWithNoController(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -195,21 +194,19 @@ func TestMigrationDestinationReconnectsASourceWithNoController(t *testing.T) {
 				t.Error("the destination does not serve through its " +
 					"dm-clone")
 			}
-			if migrRetrying(srv) {
-				t.Error("a retry is registered after a pass that ran the " +
-					"whole sequence")
-			}
+			assertNotNamed(t, "the converge", reply)
 		})
 	}
 }
 
 // The same source, but that pass's connect is refused: the pass reports the
-// refusal, takes the primary off its dm-clone and registers the retry, and the
-// retry loop alone, with no further RPC, connects once the target answers and
-// leaves the destination serving through its dm-clone.
-func TestMigrationRetryReconnectsASourceWithNoController(t *testing.T) {
+// refusal and takes the primary off its dm-clone, and both channels name the
+// target and the dm-clone while the walk finds no controller (DN16). Nothing
+// runs the converge again between the worker's calls; once the target
+// answers, the next round's re-send connects and leaves the destination
+// serving through its dm-clone.
+func TestAResendReconnectsASourceWithNoController(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.migrRetryInterval = 5 * time.Millisecond
 	names := newMigrDstNames()
 	nqn, lost := serveThenDropSourceCtrls(t, srv, node, names, false)
 
@@ -218,8 +215,8 @@ func TestMigrationRetryReconnectsASourceWithNoController(t *testing.T) {
 	// that does not sleep.
 	withDnClock(srv, node)
 	setFailAlways(node, "nvme connect", refused)
-	reply, err := srv.SyncupSide(context.Background(),
-		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE))
+	held := migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)
+	reply, err := srv.SyncupSide(context.Background(), held)
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
@@ -236,23 +233,24 @@ func TestMigrationRetryReconnectsASourceWithNoController(t *testing.T) {
 		t.Errorf("dm_clone_info = %v/%q, want MISSING/%q", got.GetStatus(),
 			got.GetDetails(), "target not connected")
 	}
-	// Read while the refusal still holds: nothing can have finished yet,
-	// and every retry pass meanwhile leaves the stacks where this one put
-	// them.
-	if !migrRetrying(srv) {
-		t.Fatal("no background retry was registered")
-	}
+	assertNamed(t, "the converge", reply, nqn, names.clone)
 	if !sitsOnDmError(t, srv, node, names) {
 		t.Error("the primary is not on its dm-error, its namespace " +
 			"inaccessible, after a refused connect")
 	}
-	clearFailAlways(node, "nvme connect")
+	assertNothingRunsBetweenCalls(t, node)
 
-	waitUntil(t, "the retry loop to reconnect the source and leave the "+
-		"destination serving through its dm-clone with no retry "+
-		"registered", func() bool {
-		return servesThroughClone(t, srv, node, names) && !migrRetrying(srv)
-	})
+	clearFailAlways(node, "nvme connect")
+	round, resent := workerRound(t, srv, held, "round-1")
+	assertNamed(t, "round-1", round, nqn, names.clone)
+	if resent == nil {
+		t.Fatal("round-1 re-sent nothing")
+	}
+	assertNotNamed(t, "round-1's re-send", resent)
+	if !servesThroughClone(t, srv, node, names) {
+		t.Error("the re-send did not leave the destination serving " +
+			"through its dm-clone")
+	}
 	assertCloneOnTheNewHead(t, node, names, nqn, lost)
 }
 
@@ -261,11 +259,10 @@ func TestMigrationRetryReconnectsASourceWithNoController(t *testing.T) {
 // while the dm-clone keeps the subsystem's directory. That is the source
 // connection's own answer, read as it stands: the target row says there is no
 // controller, the primary goes off a dm-clone that has lost its source, onto
-// its dm-error, and the retry is registered.
+// its dm-error, and the reply names both destination rows, since a converge
+// connects where the walk finds no controller (DN16).
 func TestMigrationDestinationReadsAConnectThatLeftNoController(t *testing.T) {
 	srv, node := newTestServer(t)
-	// No retry pass may run before the test has looked.
-	srv.migrRetryInterval = time.Hour
 	names := newMigrDstNames()
 	nqn, lost := serveThenDropSourceCtrls(t, srv, node, names, false)
 	// The pass waits for a namespace device that never comes; the fake
@@ -302,9 +299,7 @@ func TestMigrationDestinationReadsAConnectThatLeftNoController(t *testing.T) {
 		t.Errorf("dm_clone_info = %v/%q, want MISSING/%q", got.GetStatus(),
 			got.GetDetails(), "target not connected")
 	}
-	if !migrRetrying(srv) {
-		t.Error("no background retry was registered")
-	}
+	assertNamed(t, "the converge", reply, nqn, names.clone)
 	if !sitsOnDmError(t, srv, node, names) {
 		t.Error("the primary stayed on a dm-clone whose source has no " +
 			"controller")
@@ -323,12 +318,11 @@ func TestMigrationDestinationReadsAConnectThatLeftNoController(t *testing.T) {
 // head the kernel keeps listed with no path (its delayed_removal_secs), or one
 // a walk lists just before the head goes with its last controller. When the
 // connect brings no controller, the pass reads the namespace device it finds
-// as no source: it takes the primary off its dm-clone, onto its dm-error, and
-// registers the retry.
+// as no source: it takes the primary off its dm-clone, onto its dm-error,
+// and its reply names both destination rows, since a converge connects where
+// the walk finds no controller (DN16).
 func TestMigrationDestinationReadsAPathlessHeadAsNoConnection(t *testing.T) {
 	srv, node := newTestServer(t)
-	// No retry pass may run before the test has looked.
-	srv.migrRetryInterval = time.Hour
 	names := newMigrDstNames()
 	nqn, lost := serveThenDropSourceCtrls(t, srv, node, names, false)
 	// Should the pass wait for a namespace device, the fake clock spends
@@ -378,9 +372,7 @@ func TestMigrationDestinationReadsAPathlessHeadAsNoConnection(t *testing.T) {
 		t.Error("the primary stayed on a dm-clone whose source has no " +
 			"controller")
 	}
-	if !migrRetrying(srv) {
-		t.Error("no background retry was registered")
-	}
+	assertNamed(t, "the converge", reply, nqn, names.clone)
 	if got := node.callsMatching(
 		"cmd dmsetup reload " + names.clone); len(got) != 0 {
 		t.Errorf("the dm-clone was reloaded: %v", got)
@@ -389,7 +381,10 @@ func TestMigrationDestinationReadsAPathlessHeadAsNoConnection(t *testing.T) {
 
 // A source controller that is still reconnecting is a connection: the pass
 // connects nothing beside it, reports its path's state, and leaves the
-// dm-clone on the namespace device it reads through.
+// dm-clone on the namespace device it reads through. A converge would do
+// nothing more while the kernel reconnects, so neither the reply nor the
+// side's read names the target row (DN16): no round re-sends the request,
+// and nothing runs between the worker's calls.
 func TestMigrationDestinationLeavesAReconnectingSourceAlone(t *testing.T) {
 	srv, node := newTestServer(t)
 	names := newMigrDstNames()
@@ -399,17 +394,17 @@ func TestMigrationDestinationLeavesAReconnectingSourceAlone(t *testing.T) {
 		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if !servesThroughClone(t, srv, node, names) || migrRetrying(srv) {
+	if !servesThroughClone(t, srv, node, names) {
 		t.Fatal("fixture is wrong: the destination is not serving " +
-			"through its dm-clone with no retry registered")
+			"through its dm-clone")
 	}
 	nqn := srv.nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
 	src := cloneSourceNo(node, names)
 	node.setConnState(nqn, "connecting")
 	node.Reset()
 
-	reply, err := srv.SyncupSide(ctx,
-		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE))
+	held := migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)
+	reply, err := srv.SyncupSide(ctx, held)
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
@@ -433,5 +428,21 @@ func TestMigrationDestinationLeavesAReconnectingSourceAlone(t *testing.T) {
 	}
 	if !servesThroughClone(t, srv, node, names) {
 		t.Error("the destination does not serve through its dm-clone")
+	}
+	assertNotNamed(t, "the converge", reply)
+	round, resent := workerRound(t, srv, held, "round-1")
+	if got := round.GetSideInfo().GetMigrDstInfo().GetTargetInfo(); got.
+		GetDetails() != "paths: connecting" {
+		t.Errorf("round-1's target_info = %v/%q, want the reconnecting "+
+			"path", got.GetStatus(), got.GetDetails())
+	}
+	assertNotNamed(t, "round-1", round)
+	if resent != nil {
+		t.Errorf("round-1 re-sent: %v", resent.GetAgentReply())
+	}
+	assertNothingRunsBetweenCalls(t, node, "round-1")
+	if got := node.callsMatching("cmd nvme connect "); len(got) != 0 {
+		t.Errorf("%d connects beside a reconnecting controller: %v",
+			len(got), got)
 	}
 }

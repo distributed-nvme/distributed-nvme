@@ -103,8 +103,8 @@ func (s *DnAgentServer) syncupSide(
 // still the one the cutover brings. A process that held no request with the
 // flag when the request without it came gives the longer budget to none
 // (DN13). The entrances that converge a request stored earlier — DN2's
-// startup re-run, the DN13 retry and the DN12 fence timer — do not come
-// through here, so none of them gets it either.
+// startup re-run and the DN12 fence timer — do not come through here, so
+// neither gets it either.
 func bringsCutover(held, req *pb.SyncupSideRequest) bool {
 	was, dst := held.GetMigrDstConf(), req.GetMigrDstConf()
 	return was.GetCutoverPending() && dst != nil &&
@@ -270,8 +270,8 @@ func (s *DnAgentServer) convergeSideSteps(
 ) (*pb.SideInfo, *agent.SweepResult, *sidePlan) {
 	// The same refusal as syncupSide's (DN8), for the entrances that do not
 	// come through it: the startup Reconcile, which converges from a stored
-	// file, and reconvergeSide — the DN13 retry and the DN12 fence timer —
-	// which re-enter with the request the side already holds. Refusing
+	// file, and reconvergeSide, the DN12 fence timer's converge, which
+	// re-enters with the request the side already holds. Refusing
 	// before the sweep touches nothing at all: a conf fault must not destroy
 	// resources (architecture.md, Common agent rules), and nothing was
 	// converged or enumerated, so the pass has no verdict to give either.
@@ -352,11 +352,9 @@ func (s *DnAgentServer) convergeSideSteps(
 		}
 	}
 
-	cloneLive, dstSettles := false, false
+	cloneLive := false
 	if plan.wantMigr {
-		var serving migrServing
-		serving, dstSettles = s.ensureMigrDst(ctx, st, plan, info,
-			connectBudget)
+		serving := s.ensureMigrDst(ctx, st, plan, info, connectBudget)
 		switch serving.state {
 		case migrCloneUp:
 			cloneLive = true
@@ -364,10 +362,11 @@ func (s *DnAgentServer) convergeSideSteps(
 			// Nothing decides the per-CN stacks this pass, so they stay
 			// where they are and are only reported, judged by the
 			// dm-clone's presence as a check round's read judges them in
-			// the same state (probeStacks); the retry the destination
-			// registered converges them. The fence is settled as under the DN9 gate
-			// above, for the same reason: [D12]'s bound does not wait for a
-			// probe.
+			// the same state (probeStacks); a later converge, which the
+			// worker's re-send brings while a row of the side stays named
+			// (rowVerdict), converges them. The fence is settled as under
+			// the DN9 gate above, for the same reason: [D12]'s bound does
+			// not wait for a probe.
 			s.settleFence(ctx, st, plan)
 			s.probeStacks(ctx, st, plan, info, serving.cloneLive())
 			return info, sweep, plan
@@ -392,14 +391,6 @@ func (s *DnAgentServer) convergeSideSteps(
 	}
 	if plan.wantExport {
 		s.ensureCnExports(ctx, st, plan, info, cloneLive, primary)
-	}
-	if dstSettles {
-		// The per-CN stacks have been converged where the destination rule
-		// puts them — by DN13 step (5), or, while the pass waits for the
-		// cutover, where a stopped step puts them: whether the destination
-		// still needs its retry is decided last, so no OS call of this pass
-		// follows its deregistration.
-		s.settleMigrRetry(st, plan, info)
 	}
 	return info, sweep, plan
 }
@@ -457,9 +448,11 @@ const (
 // A migration destination adds one step to the first two rows: it takes its
 // run in the node's clone-metadata area before the goroutine starts
 // (holdMigrMeta, DN13). While the area has no free run for it, the side
-// starts no goroutine and reports PROVISIONING with the area's text, and the
-// DN8 retry takes the run once units come free; any other refusal of the run
-// is ERROR, retried the same way.
+// starts no goroutine and reports PROVISIONING with the area's text; once
+// units come free the side's read names the side (zeroingVerdict), so the
+// worker's re-send takes the run. Any other refusal of the run is ERROR. One
+// that a re-sent request meets the same way is named by nothing; a failed
+// write is named by the read (zeroingVerdict).
 //
 // Allocation is permitted **only** at provisioned = false. At true a missing
 // record means the data is gone (a lost or foreign disk); silently
@@ -534,13 +527,12 @@ func (s *DnAgentServer) ensureSideDev(
 			// A migration destination takes its run in the clone-metadata
 			// area before it zeroes, at every level (holdMigrMeta, DN13).
 			// Without the run nothing zeroes, so the worker does not flip the
-			// side and the source keeps serving. The retry re-runs this
-			// converge, and this step owns it while the side has not
-			// provisioned: registered while the run is refused, deregistered
-			// by the pass that takes it. That pass may be the retry's own,
-			// which is safe: its attempts run on rootCtx (migrRetryLoop).
+			// side and the source keeps serving. Nothing of the agent's own
+			// runs this step again but an agent restart's reconcile (DN2):
+			// the converge of a SyncupSide does, the re-send the side's read
+			// asks for once the area could supply the run among them
+			// (zeroingVerdict).
 			if err := s.holdMigrMeta(ctx, plan); err != nil {
-				s.startMigrRetry(st, plan)
 				if isNoFreeRun(err) {
 					info.SideDevInfo = t.Provisioning(resKeySideDev, name,
 						metaRoomDetails(err))
@@ -549,7 +541,6 @@ func (s *DnAgentServer) ensureSideDev(
 				info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 				return sideDevFailed, nil
 			}
-			s.stopMigrRetry(st)
 		}
 		// Rows 2 and 5. The goroutine runs on both sides of the gate: at
 		// provisioned = true it is what self-heals a side whose count was lost

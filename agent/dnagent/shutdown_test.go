@@ -15,12 +15,12 @@ import (
 // ---------------------------------------------------------------------------
 
 // Nothing starts once the join has begun, whether or not rootCtx is done
-// yet: no zeroing loop, no connect retry, no fence timer, no read a check
-// round would start (SH29). A start the join did not refuse would run a
-// task, and fork its children, that the join does not wait for. Each start
-// here would stay visible were it made: the side has bytes to zero and its
-// zeroing batch parks, the retry ticks once an hour, the timer's window
-// lasts an hour, and a read runs its commands under its round's trace id.
+// yet: no zeroing loop, no fence timer, no read a check round would start
+// (SH29). A start the join did not refuse would run a task, and fork its
+// children, that the join does not wait for. Each start here would stay
+// visible were it made: the side has bytes to zero and its zeroing batch
+// parks, the timer's window lasts an hour, and a read runs its commands
+// under its round's trace id.
 func TestNothingStartsOnceTheJoinHasBegun(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, 1, testSide)
@@ -29,7 +29,6 @@ func TestNothingStartsOnceTheJoinHasBegun(t *testing.T) {
 	clearZeroed(t, srv, node)
 	node.blockCmd("blkdiscard --zeroout")
 	t.Cleanup(func() { node.releaseCmd("blkdiscard --zeroout") })
-	srv.migrRetryInterval = time.Hour
 	srv.fenceWait = time.Hour
 	srv.mu.Lock()
 	st.fenceAt = time.Now()
@@ -40,7 +39,6 @@ func TestNothingStartsOnceTheJoinHasBegun(t *testing.T) {
 		t.Fatal("fixture is wrong: rootCtx is done")
 	}
 	srv.startZeroing(st, plan)
-	srv.startMigrRetry(st, plan)
 	srv.armFenceTimer(st, plan)
 	srv.roundReads = true
 	node.Reset()
@@ -49,7 +47,7 @@ func TestNothingStartsOnceTheJoinHasBegun(t *testing.T) {
 
 	dn := srv.getDn(dnKey(testCluster, testDn))
 	srv.mu.Lock()
-	zeroing, retrying, timer := st.zeroing, st.retrying, st.fenceTimer
+	zeroing, timer := st.zeroing, st.fenceTimer
 	reading := st.obs.ReadingLocked() || dn.obs.ReadingLocked()
 	srv.mu.Unlock()
 	if timer != nil {
@@ -62,9 +60,6 @@ func TestNothingStartsOnceTheJoinHasBegun(t *testing.T) {
 	}
 	if zeroing {
 		t.Error("a zeroing loop started after the join")
-	}
-	if retrying {
-		t.Error("a connect retry started after the join")
 	}
 	if timer != nil {
 		t.Error("a fence timer was armed after the join")
@@ -195,9 +190,9 @@ func TestARunningFenceCallbackIsNotJoined(t *testing.T) {
 // passed by the whole join — the mark, and a bg.Wait that does not count the
 // task — and its task would run unjoined. The race detector sees such a
 // start only when the join lands between the two, so the seam checks the
-// lock at every enrollment instead. The zeroing loop parks in its blkdiscard
-// and the retry ticks once an hour, so no task of the test holds mu while the
-// other start enrolls; the read a check round starts (SH29) enrolls last.
+// lock at every enrollment instead. The zeroing loop parks in its blkdiscard,
+// so it holds no mu while the other start enrolls; the read a check round
+// starts (SH29) enrolls last.
 func TestEveryEnrollmentHoldsTheJoinLock(t *testing.T) {
 	var enrolled, unlocked atomic.Int32
 	saved := bgEnrolling
@@ -224,7 +219,6 @@ func TestEveryEnrollmentHoldsTheJoinLock(t *testing.T) {
 	clearZeroed(t, srv, node)
 	node.blockCmd("blkdiscard --zeroout")
 	t.Cleanup(func() { node.releaseCmd("blkdiscard --zeroout") })
-	srv.migrRetryInterval = time.Hour
 
 	enrolled.Store(0)
 	unlocked.Store(0)
@@ -234,35 +228,34 @@ func TestEveryEnrollmentHoldsTheJoinLock(t *testing.T) {
 	}) {
 		t.Fatal("the zeroing loop never reached its blkdiscard")
 	}
-	srv.startMigrRetry(st, plan)
 	srv.roundReads = true
 	dnRound(srv, "round")
-	if got := enrolled.Load(); got != 3 {
+	if got := enrolled.Load(); got != 2 {
 		t.Fatalf("%d enrollments through enrollLocked, want one for each "+
-			"of the 3 starts", got)
+			"of the 2 starts", got)
 	}
 	if got := unlocked.Load(); got != 0 {
-		t.Errorf("%d of the 3 enrollments were made without mu", got)
+		t.Errorf("%d of the 2 enrollments were made without mu", got)
 	}
 	joinReads(t, srv)
 }
 
-// Starts racing the join while rootCtx is live: each start is either
-// enrolled before the join's mark, and its task joined, or refused, so the
-// join returns with the server marked closed, no zeroing loop of the starts
-// still registered, no fence timer armed and no read a check round started
-// (SH29) still running. The tasks end by themselves: a zeroing loop finds its
-// side state not held on its first pass, each retry is stopped as soon as it
-// has started, and a read ends once it has read. A starter stops once it reads
-// the mark or the join has returned, and once maxRun has passed in any case,
-// so a join that never marks the server closed fails here instead of making
-// the starters run, and keep their states, without end. A round in which a
-// starter ran out of time ends the test, so a broken join makes the starters
-// run for maxRun once at most, not in every round. On one CPU, a join that
-// marks the server closed only after its wait can keep them running that
-// long: its wait does not end while they keep enrolling tasks. A start that
-// enrolled after letting go of mu fails here only when the join lands in
-// that gap; the test that pins the lock is TestEveryEnrollmentHoldsTheJoinLock.
+// Starts racing the join while rootCtx is live: each start is either enrolled
+// before the join's mark, and its task joined, or refused, so the join returns
+// with the server marked closed, no zeroing loop of the starts still
+// registered, no fence timer armed and no read a check round started (SH29)
+// still running. The tasks end by themselves: a zeroing loop finds its side
+// state not held on its first pass, and a read ends once it has read. A starter
+// stops once it reads the mark or the join has returned, and once maxRun has
+// passed in any case, so a join that never marks the server closed fails here
+// instead of making the starters run, and keep their states, without end. A
+// round in which a starter ran out of time ends the test, so a broken join
+// makes the starters run for maxRun once at most, not in every round. On one
+// CPU, a join that marks the server closed only after its wait can keep them
+// running that long: its wait does not end while they keep enrolling tasks. A
+// start that enrolled after letting go of mu fails here only when the join
+// lands in that gap; the test that pins the lock is
+// TestEveryEnrollmentHoldsTheJoinLock.
 func TestShutdownUnderConcurrentStarts(t *testing.T) {
 	// maxRun is far above the time a correct join takes to mark the server
 	// closed, on any number of CPUs. A count of passes could not bound the
@@ -271,7 +264,6 @@ func TestShutdownUnderConcurrentStarts(t *testing.T) {
 	const maxRun = 5 * time.Second
 	for i := 0; i < 10; i++ {
 		srv, _ := newTestServer(t)
-		srv.migrRetryInterval = time.Hour
 		srv.fenceWait = time.Hour
 		syncupBoth(t, srv, 1, testSide)
 		srv.roundReads = true
@@ -298,15 +290,12 @@ func TestShutdownUnderConcurrentStarts(t *testing.T) {
 				defer wg.Done()
 				<-start
 				for {
-					// States the server does not hold.
+					// A state the server does not hold.
 					zst := newSideState(st.req.Load())
-					rst := newSideState(st.req.Load())
 					started.Lock()
 					zeroing = append(zeroing, zst)
 					started.Unlock()
 					srv.startZeroing(zst, plan)
-					srv.startMigrRetry(rst, plan)
-					srv.stopMigrRetry(rst)
 					srv.armFenceTimer(st, plan)
 					sideRound(srv, "side-round")
 					dnRound(srv, "dn-round")

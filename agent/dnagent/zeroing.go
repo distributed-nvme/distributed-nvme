@@ -8,9 +8,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The background side-zeroing loop of dnagent.md DN9 — the dn twin of the DN8
-// connect-retry registry (migr.go) and of the cn leg probers
-// (cnagent/healthcheck.go).
+// The background side-zeroing loop of dnagent.md DN9 — the dn twin of the cn
+// leg probers (cnagent/healthcheck.go).
 //
 // A new side zeroes the part of itself that must read as zeros before its
 // first export (architecture.md, Side provisioning protocol): its first
@@ -114,7 +113,7 @@ func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
 // ends (SH15): the wait then lasts until the kernel returns.
 //
 // s.mu is a leaf lock never held across an OS call, so the cancel and the wait
-// happen outside it — the stopMigrRetry / stopLegProbers shape.
+// happen outside it — the clearFence shape.
 func (s *DnAgentServer) stopZeroing(st *sideState) {
 	s.mu.Lock()
 	cancel := st.zeroCancel

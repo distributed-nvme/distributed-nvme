@@ -971,6 +971,27 @@ dm_verb_times() {
 	    | .args[0] + " " + .time' "$WORK/agent.log"
 }
 
+# log_lines — how many records the agent log holds, the mark agent_made_on
+# reads from.
+log_lines() { wc -l <"$WORK/agent.log"; }
+
+# agent_made_on <from> <name> <name> — the trace ids the agent made itself,
+# none of the driver's "it-" ids, under which it ran an os command on either
+# of two dm devices, among the records after the first <from> lines, one per
+# line: what a background converge of their side would leave (dnagent.md
+# SH27). One jq evaluation (see the note above clone_discards).
+agent_made_on() {
+	local lines ids
+	lines=$(tail -n +"$(($1 + 1))" "$WORK/agent.log") || return 1
+	ids=$(printf '%s\n' "$lines" | jq -rn --arg a "$2" --arg b "$3" '
+	    inputs
+	    | select(.msg == "os command"
+	        and ((.trace_id // "") | startswith("it-") | not)
+	        and ((.args | index($a)) != null or (.args | index($b)) != null))
+	    | .trace_id') || return 1
+	[ -z "$ids" ] || printf '%s\n' "$ids" | sort -u
+}
+
 # --- the slowed copy of migr_bitmap's late push (dnagent_integtest.md, Cases,
 # migr_bitmap) -----------------------------------------------------------------
 #
@@ -3221,6 +3242,13 @@ migr_finish_dst() { # m revision
 # What serves is not the rows' to decide: the converge takes the primary's
 # per-CN stack off the dm-clone, as for any source with nothing to read from,
 # and the agent's read still proves the hydration the gateway's checks read.
+# Every channel answers one code. Over a live controller with no namespace
+# the code is zero: a converge connects nowhere beside a controller, so the
+# destination's rows are not named (dnagent.md DN16). With no controller
+# the code names both rows, since the re-sent syncup's connect is what
+# cures them. Either way the agent runs nothing of the destination by
+# itself between the stage's calls: no command on its dm-clone or its
+# per-CN dm-linear under a trace id of the agent's own (dnagent.md SH31).
 #
 # The state compared is measured, never assumed. The destination's node must
 # read the source subsystem with a live controller and no namespace node,
@@ -3236,8 +3264,12 @@ migr_src_ns_gone() { # m
 	local src=${MSRCDN[$m]} dst=${MDSTDN[$m]} vm=${MCNVM[$m]}
 	local rev=${REV[${MDSTDN[$m]}]} key=$((MCN[m]))
 	local srcnqn srcside susp deadline shape now rows c1 k g c2
+	local want from lin clone made
 	srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[$src]}" "$SP" "${MID[$m]}")
 	srcside="$(hex16 "$SP")-$(hex16 "${MSRCSIDE[$m]}")"
+	lin=$(dn_linear_name "$CLUSTER" "${DNID[$dst]}" "$SP" \
+		"${MDSTSIDE[$m]}" "${MCN[$m]}")
+	clone=$(dn_clone_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MID[$m]}")
 
 	stage stage3gone "migration $m's source loses its namespace: the destination's rows read one status on every channel"
 	# The source's cutover grace window must be over, and the converge its
@@ -3291,23 +3323,28 @@ migr_src_ns_gone() { # m
 		;;
 	esac
 
-	# The enabling converge's request again, at its own revision. Every
-	# channel answers the leftover code: the destination's two rows, which a
-	# re-sent syncup would cure once the source serves again, are named
-	# (dnagent.md SH31, DN16).
-	c1=$(migr_dst_syncup "$m" "$rev" readwrite false --expect-code 4)
+	# The enabling converge's request again, at its own revision. Over a live
+	# controller with no namespace every channel answers code zero: a
+	# converge connects nowhere beside a controller, so a re-sent syncup
+	# would do nothing, and the destination's two rows are not named. With
+	# no controller every channel answers the leftover code naming them,
+	# since the re-sent syncup's connect cures them once the source serves
+	# again (dnagent.md SH31, DN16).
+	if [ "$shape" = "1 1 0" ]; then want=0; else want=4; fi
+	from=$(helper "$dst" log_lines)
+	c1=$(migr_dst_syncup "$m" "$rev" readwrite false --expect-code "$want")
 	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" inaccessible 30
 	sleep 1.1
 	k=$(ctl "$dst" check-side --fresh --revision "$rev" --show-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-		--expect-code 4)
+		--expect-code "$want")
 	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev" \
 		"migr $m check-side revision"
 	g=$(ctl "$dst" get-side-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-		--expect-code 4)
+		--expect-code "$want")
 	sleep 1.1
-	c2=$(migr_dst_syncup "$m" "$rev" readwrite false --expect-code 4)
+	c2=$(migr_dst_syncup "$m" "$rev" readwrite false --expect-code "$want")
 	# The reading compared held through all four replies.
 	now=$(helper "$dst" "subsys_shape '$srcnqn'")
 	if [ "$shape" = "1 1 0" ]; then
@@ -3356,11 +3393,21 @@ migr_src_ns_gone() { # m
 	# The agent's read records the dm-clone's status line whenever the device
 	# is there, whatever its row's status, so its observation still proves the
 	# hydration HydrationComplete (common/dm_status.go) reads; wait-hydrated
-	# samples it with rounds, which start the reads, each answering the
-	# leftover code that names the destination's rows.
+	# samples it with rounds, which start the reads, each answering the code
+	# above.
 	ctl "$dst" wait-hydrated --sp "$SP" --leg "${MLEG[$m]}" \
 		--side "${MDSTSIDE[$m]}" --interval 0.5 --timeout 10 \
-		--expect-code 4 >/dev/null
+		--expect-code "$want" >/dev/null
+	# Nothing of the destination runs between the stage's calls: a converge
+	# the agent ran by itself would run commands on the dm-clone or the
+	# per-CN dm-linear under a trace id of its own (dnagent.md SH27). The
+	# six seconds with no call of the stage's cover three of the worker's
+	# default intervals (DefaultHealthCheckInterval), so a re-drive paced
+	# anywhere near the worker's rounds would show.
+	sleep 6
+	made=$(helper "$dst" "agent_made_on '$from' '$clone' '$lin'")
+	assert_eq "$made" "" \
+		"migr $m: trace ids the agent made itself for commands on the destination"
 }
 
 # migr_drop_src drops the source side and the dead source path

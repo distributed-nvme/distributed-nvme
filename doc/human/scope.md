@@ -1013,7 +1013,17 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 - **A pool commit in a migration gap waits for the gap to end.** The gap is
   the time with no usable path from the primary to the moving leg. The gap
   ends by the disk nodes' steps or by a forced cancel. Measured at 32 slices: one
-  to two and a half seconds. State: accepted.
+  to two and a half seconds. When the new side cannot connect to the old
+  side at the cutover, the gap lasts until a later syncup of the new side
+  connects, and the worker sends that syncup again at its next check
+  round. Two faults stretch the wait. While the new side's disk node
+  cannot save to its store disk, the disk that holds the agent's local
+  store, the files in which it keeps the desired state it last accepted,
+  the agent refuses every syncup, so the gap lasts as long as the fault,
+  unless the agent restarts. While no worker drives the pool, as before a
+  new worker takes it over, the gap lasts until that worker's first check
+  round. A destination that waits for free metadata units waits the same
+  way under both faults. State: accepted.
 - **A migrating leg whose serving disk node dies waits without limit
   where its group has no other leg in sync, as in a pool without RAID.
   One whose destination dies after the cutover, before its copy is whole,
@@ -1095,11 +1105,13 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   node once per interval on its own clock, reads and converges use the
   latest reading, and this retry goes. Seen in the lab.
 - **A migration destination waits for a run of free metadata units the
-  count allowed.** The gateway counts free units, not runs. The
-  destination re-runs its converge every interval. The source keeps
-  serving, and a cancel frees the units. State: accepted. Counting runs
-  would need a map of the units in etcd that every allocation and release
-  keeps. Not seen in the lab.
+  count allowed.** The gateway counts free units, not runs. While it
+  waits, the destination does no work of its own. Once a run comes free,
+  a check round soon after reports the side as not zeroing, and the
+  converge of the worker's syncup that follows takes the run. The source
+  keeps serving, and a cancel frees the units. State: accepted. Counting
+  runs would need a map of the units in etcd that every allocation and
+  release keeps. Not seen in the lab.
 - **Smaller bounded waits.** An agent that marks the regions of a piece
   of a written-block list holds that object's other work, and while the
   copy serves pauses the volume's IO, until the marks are done; a copy

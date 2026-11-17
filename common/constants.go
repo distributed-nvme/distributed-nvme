@@ -507,14 +507,6 @@ const (
 	// It is a rejection: nothing was applied.
 	ReplyCodeStarting = 6
 
-	// Seconds between background retries of a migration destination whose
-	// build stopped short, at its nvme connect once the in-pass retries below
-	// ran out or at another step, and of one that waits for a free run in
-	// the node's metadata area before it zeroes (dnagent.md DN13; the loop
-	// is SH27's "DN8 retry", so nicknamed for the DN8-gated converge it
-	// re-runs).
-	DnMigrConnectRetryInterval = 5
-
 	// The migration destination's in-pass retry of its connect to the
 	// migration source export (dnagent.md DN13 step (3)). After the cutover
 	// the src side links that export to its nvmet port only after its step 1
@@ -528,10 +520,10 @@ const (
 	// this process held before it carried — sized to outlast the src side's
 	// own cutover pass on a loaded node, and DnMigrConnectPassBudget in
 	// every other converge. Only once it is spent does the pass fail its
-	// connect and register the DN8 loop above, so a src side whose pass
-	// outlasts even the longer budget leaves the migration gap to that loop.
-	// The namespace wait below has a budget of its own. Unlike the
-	// whole-second integer above them, these three are time.Durations.
+	// connect, which the side's verdict names, so a src side whose pass
+	// outlasts even the longer budget leaves the migration gap to the
+	// converge the worker's next re-send brings. The namespace wait below
+	// has a budget of its own. These three are time.Durations.
 	DnMigrConnectPassBudget    = 1 * time.Second
 	DnMigrCutoverConnectBudget = 5 * time.Second
 	DnMigrConnectRetryPause    = 100 * time.Millisecond
@@ -543,8 +535,7 @@ const (
 	// re-reads the subsystem until the device is there, pausing
 	// DnMigrDstNsPause between reads and DnMigrDstNsWait in all (the reads
 	// themselves are not counted). It is not a connect retry: that is the
-	// in-pass retry above, and after it the DN8 loop. time.Durations, like
-	// the three above.
+	// in-pass retry above. time.Durations, like the three above.
 	DnMigrDstNsWait  = 1 * time.Second
 	DnMigrDstNsPause = 50 * time.Millisecond
 
@@ -577,8 +568,8 @@ const (
 	// command, and persists the count of bytes zeroed from the side's start
 	// after each success. A bound in bytes keeps a command's length, and so
 	// its run time, independent of the extent size. A failed or timed-out
-	// batch is retried no sooner than DnZeroRetryInterval seconds later —
-	// the zeroing twin of DnMigrConnectRetryInterval, never a hot loop.
+	// batch is retried no sooner than DnZeroRetryInterval seconds later,
+	// never a hot loop.
 	DnZeroBatchMaxBytes = 64 * 1024 * 1024
 	DnZeroRetryInterval = 5
 	// DnZeroBatchMinBytes is the floor a side's batch backs off to. A batch
@@ -622,8 +613,7 @@ const (
 	LegHealthMagic     = "DNVHLTH1"
 
 	// Seconds between background retries of a cn cntlr's converge after any
-	// of CN10's triggers (cnagent.md CN10); the cn twin of
-	// DnMigrConnectRetryInterval.
+	// of CN10's triggers (cnagent.md CN10).
 	CnConnectRetryInterval = 5
 
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,

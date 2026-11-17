@@ -132,9 +132,7 @@ func TestADmCloneWithBrokenMetadataReadsErrorAndIsNotNamed(t *testing.T) {
 						ch.code)
 				}
 			}
-			if migrRetrying(srv) {
-				t.Error("a retry is registered for a dm-clone no step cures")
-			}
+			assertNothingRunsBetweenCalls(t, node)
 		})
 	}
 }

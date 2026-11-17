@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -95,6 +96,45 @@ func (w *fakeWorker) syncupSide(
 			sidePointerText(req.GetSidePointer()), req.GetRevision(), err)
 	}
 	return reply
+}
+
+// syncupSideTraced is syncupSide under traceId, as the worker sends a
+// re-send under the trace id of the round that brought it (dnv-worker.md
+// RW4).
+func (w *fakeWorker) syncupSideTraced(
+	req *pb.SyncupSideRequest,
+	traceId string,
+) *pb.SyncupSideReply {
+	w.t.Helper()
+	ctx, cancel := w.callCtx()
+	defer cancel()
+	ctx = metadata.AppendToOutgoingContext(ctx, common.TraceIdMetadataKey,
+		traceId)
+	reply, err := w.client.SyncupSide(ctx, req)
+	if err != nil {
+		w.t.Fatalf("%s: SyncupSide %s rev %d: %v", traceId,
+			sidePointerText(req.GetSidePointer()), req.GetRevision(), err)
+	}
+	return reply
+}
+
+// resendRound is one of the worker's rounds of the side held names, under
+// traceId, as dnv-worker.md RW4 has it: a CheckSide round at held's
+// revision, then, when the round's code is not zero or its revision is not
+// held's, held sent again under the round's trace id. It returns the
+// round's reply and the re-send's, nil when the round sent nothing.
+func (w *fakeWorker) resendRound(
+	held *pb.SyncupSideRequest,
+	traceId string,
+) (*pb.CheckSideReply, *pb.SyncupSideReply) {
+	w.t.Helper()
+	round := w.sideRoundTraced(held.GetSidePointer(), held.GetRevision(),
+		traceId)
+	if round.GetAgentReply().GetCode() == 0 &&
+		round.GetRevision() == held.GetRevision() {
+		return round, nil
+	}
+	return round, w.syncupSideTraced(held, traceId)
 }
 
 func (w *fakeWorker) push(
@@ -1201,9 +1241,11 @@ func (w *fakeWorker) promptRound(
 // side's observation before the syncup, with the converge's start, and
 // starts no read of a side whose converge is in flight (SH28 to SH30). The
 // hang spends the whole budget, so the pass tries no second connect (DN13),
-// reports the target in error and leaves the destination to the DN8 retry,
-// which connects once the source answers: the next rounds answer the retry's
-// observation at the syncup's revision, with no further syncup.
+// and reports the target in error, which its code names. Nothing runs the
+// converge again between the worker's calls. Once the source answers, the
+// worker's next round, which answers that code, re-sends the request under
+// its own trace id (dnv-worker.md RW4), and the re-send connects and
+// finishes the destination; a round after it answers code 0.
 func TestFakeWorkerHungConnectAcrossRounds(t *testing.T) {
 	srv, node := newTestServer(t)
 	w := newFakeWorker(t, srv)
@@ -1217,13 +1259,13 @@ func TestFakeWorkerHungConnectAcrossRounds(t *testing.T) {
 	w.sideRound(sidePtr(testSide), 1)
 	joinReads(t, srv)
 	before := sideObs(t, srv).Time
+	// That round carried no id, so its read ran under one of its own.
+	node.forgetTraces()
 
-	// The DN8 retry the hung pass registers comes soon after it, so the
-	// case does not wait out the production interval.
-	srv.migrRetryInterval = 200 * time.Millisecond
 	release := softGate(t, node, "cmd nvme connect ")
 	start := time.Now()
-	done := w.asyncSyncupSide(migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+	held := migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+	done := w.asyncSyncupSide(held)
 	waitUntil(t, "the destination's connect", func() bool {
 		return node.hasCall("cmd nvme connect ")
 	})
@@ -1303,22 +1345,136 @@ func TestFakeWorkerHungConnectAcrossRounds(t *testing.T) {
 			target.GetStatus(), target.GetDetails())
 	}
 
-	// The source answers again; the DN8 retry finishes the destination.
-	release()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		round := w.sideRound(sidePtr(testSide), 2)
-		dst := round.GetSideInfo().GetMigrDstInfo()
-		if round.GetRevision() == 2 &&
-			dst.GetTargetInfo().GetStatus() == pb.ResStatus_RES_STATUS_OK &&
-			dst.GetDmCloneInfo().GetStatus() == pb.ResStatus_RES_STATUS_OK {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the retry never finished the destination: %v", round)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// Nothing ran between the calls. The source answers again; the next
+	// round re-sends, and the re-send finishes the destination.
+	own := []string{"resend-round", "after-round"}
+	for _, r := range rounds {
+		own = append(own, r.traceId)
 	}
+	assertNothingRunsBetweenCalls(t, node, own...)
+	release()
+	round, resent := w.resendRound(held, "resend-round")
+	if code := round.GetAgentReply().GetCode(); code !=
+		common.ReplyCodeLeftover || resent == nil {
+		t.Fatalf("the round after the hang answered %v and re-sent %v; "+
+			"want the leftover code and a re-send", round.GetAgentReply(),
+			resent != nil)
+	}
+	joinReads(t, srv)
+	dst := resent.GetSideInfo().GetMigrDstInfo()
+	if resent.GetAgentReply().GetCode() != 0 ||
+		dst.GetTargetInfo().GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+		dst.GetDmCloneInfo().GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("the re-send = %v, target %v, dm-clone %v; want code 0 "+
+			"and both rows OK", resent.GetAgentReply(),
+			dst.GetTargetInfo().GetStatus(),
+			dst.GetDmCloneInfo().GetStatus())
+	}
+	if !tracedCall(node, "resend-round", "cmd nvme connect ") {
+		t.Error("the connect did not run under the round's trace id")
+	}
+	// The round after the re-send starts a read; the next one answers it.
+	w.sideRoundTraced(sidePtr(testSide), 2, "after-round")
+	joinReads(t, srv)
+	round, resent = w.resendRound(held, "after-round")
+	if round.GetAgentReply().GetCode() != 0 || resent != nil {
+		t.Errorf("the round after the re-send answered %v, re-sent %v",
+			round.GetAgentReply(), resent != nil)
+	}
+	assertNothingRunsBetweenCalls(t, node, own...)
+}
+
+// TestFakeWorkerARefusedConnectAgesNoReport plays the check rounds of a
+// migration destination whose connect the source refuses, one worker
+// interval apart. Nothing converges the side between the worker's calls:
+// each round starts the side's read (SH29), the read ends before the next
+// round, and so each round answers from the read the round before it
+// started, an observation at most one interval plus that read's time old.
+// Beside a re-sent converge that hangs in its connect, a round answers at
+// once from the last read and starts no read (SH30); once that converge
+// ends, no converge follows it but the worker's next re-send. A converge the
+// agent ran by itself between the calls would hold the side's lock, keep the
+// rounds' reads from running, and leave rounds answering its own
+// observations.
+func TestFakeWorkerARefusedConnectAgesNoReport(t *testing.T) {
+	const interval = 200 * time.Millisecond
+	srv, node := newTestServer(t)
+	w := newFakeWorker(t, srv)
+	if reply := w.syncupDn(dnReq(1, testSide)); reply.GetAgentReply().
+		GetCode() != 0 {
+		t.Fatalf("SyncupDn: %v", reply.GetAgentReply())
+	}
+	w.provision(srv, sideReq(1, testSide, testCn0, []uint64{testCn1},
+		pb.SpLevel_SP_LEVEL_READWRITE))
+	srv.roundReads = true
+	srcNqn := srv.nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
+
+	setFailAlways(node, "nvme connect", "connect refused")
+	held := migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+	reply := w.syncupSideTraced(held, "syncup")
+	assertNamed(t, "the converge", reply, srcNqn)
+	node.Reset()
+
+	own := []string{"syncup", "hung-resend", "beside-the-hang"}
+	prev, readTook := "", time.Duration(0)
+	for i := 0; i < 5; i++ {
+		time.Sleep(interval)
+		id := fmt.Sprintf("round-%d", i)
+		own = append(own, id)
+		round := w.promptRound(sidePtr(testSide), 2, id)
+		started := time.Now()
+		joinReads(t, srv)
+		took := time.Since(started)
+		if len(node.Traced(id)) == 0 {
+			t.Errorf("%s started no read", id)
+		}
+		stamp := round.GetObsStamp()
+		if prev != "" {
+			age := stamp.GetAnswerTime().AsTime().Sub(
+				stamp.GetObsTime().AsTime())
+			if stamp.GetObsTraceId() != prev ||
+				age > interval+readTook+interval/2 {
+				t.Errorf("%s answered from %q, %v old; want %q's read, "+
+					"at most %v plus its %v old", id,
+					stamp.GetObsTraceId(), age, prev, interval, readTook)
+			}
+		}
+		if code := round.GetAgentReply().GetCode(); code !=
+			common.ReplyCodeLeftover {
+			t.Errorf("%s answered code %d, want the leftover code naming "+
+				"the refused target", id, code)
+		}
+		prev, readTook = id, took
+	}
+	if calls := agentMadeCalls(node, own...); len(calls) > 0 {
+		t.Errorf("calls ran under ids the agent made itself: %v", calls)
+	}
+
+	// A re-send hangs in its connect; a round beside it answers at once
+	// from the last read and starts none.
+	clearFailAlways(node, "nvme connect")
+	release := softGate(t, node, "cmd nvme connect ")
+	done := make(chan *pb.SyncupSideReply, 1)
+	go func() { done <- w.syncupSideTraced(held, "hung-resend") }()
+	waitUntil(t, "the re-send's connect", func() bool {
+		return node.hasCall("cmd nvme connect ")
+	})
+	round := w.promptRound(sidePtr(testSide), 2, "beside-the-hang")
+	if got := round.GetObsStamp(); got.GetObsTraceId() != prev ||
+		got.GetConvergeStart() == nil {
+		t.Errorf("the round beside the hang = %v; want %q's read and the "+
+			"converge's start", got, prev)
+	}
+	if calls := node.Traced("beside-the-hang"); len(calls) != 0 {
+		t.Errorf("the round beside the hang started a read: %v", calls)
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the hung re-send never replied")
+	}
+	assertNothingRunsBetweenCalls(t, node, own...)
 }
 
 // TestFakeWorkerSyncupDuringAConverge sends a side's next syncup while the

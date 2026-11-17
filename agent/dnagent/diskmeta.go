@@ -1160,8 +1160,7 @@ func (d *DiskMeta) FreeSide(
 // An area with no free run long enough for the request answers with a
 // wrapped noFreeRunError (isNoFreeRun): the units are held by other
 // migrations, or free only in runs too short, which is a wait the caller
-// reports as provisioning and retries (DN13). Every other refusal is a plain
-// error.
+// reports as provisioning (DN13). Every other refusal is a plain error.
 //
 // An existing record passes the same identity gate as a new one, exactly as
 // AllocSide's does (confirmedLocked): its slot is this node's only if its
@@ -1460,7 +1459,8 @@ func allocContiguous(
 // (architecture.md, Metadata units). The control plane's count of the node's
 // units makes it rare, and it is a wait, not a fault: units come free as
 // other migrations end. A migration destination that meets it reports
-// provisioning and is retried (DN13). It has a type of its own so that a
+// provisioning, and its read names it once the area could supply the run
+// (DN13). It has a type of its own so that a
 // caller tells it from every other refusal without reading its text, which
 // stays the allocator's.
 type noFreeRunError struct {

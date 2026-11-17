@@ -14088,8 +14088,8 @@ copy_gap_reads() { # <v> <k> <side id> <revision> <nqn> <group>
 # that carries no cutover_pending. It prints the gap, at every slice count,
 # and sets no time limit on it. It fails when the destination's optimized
 # write does not carry the trace id of the destination's cutover request,
-# which means that a pass of the destination's background retry, or a later
-# SyncupSide, ended the gap, and not the pass the cutover brought. That pass
+# which means that a later SyncupSide, such as the worker's re-send of that
+# request, ended the gap, and not the pass the cutover brought. That pass
 # waits for the source's own pass only as long as its connect budget
 # (dnagent.md, DN13), so a source whose pass outlasts the budget, or any
 # other step of that pass that stops, fails the check: a slow enough lab
@@ -16171,8 +16171,8 @@ copy_migration() {
 	# write of the optimized group to its own. The gap is printed, and the
 	# optimized write must come from the destination's cutover request, whose
 	# connect waits for the source's own pass only as long as its connect
-	# budget (dnagent.md, DN13), never from a pass of its background retry
-	# or a later request (copy_check_gap).
+	# budget (dnagent.md, DN13), never from a later request, such as the
+	# worker's re-send of it (copy_check_gap).
 	copy_check_gap "$srcv" "$srck" "$sideid" "$v" "$k" "$dstside" "$legnqn"
 	# THE WORKER READS THE LEG BITMAP ITSELF, once the cutover is clear, the
 	# destination reports its dm-clone at the desired revision and the

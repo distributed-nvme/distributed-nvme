@@ -391,8 +391,8 @@ func TestASaveRefusedSyncupSideLeavesAnEntryUntilItsPointerLeaves(
 }
 
 // A background attempt scheduled for a side that a drop takes away before
-// the attempt gets the node read lock — a fence callback or a retry pass
-// racing the side's pointer leaving its DN's list — creates no lock entry:
+// the attempt gets the node read lock — a fence callback racing the side's
+// pointer leaving its DN's list — creates no lock entry:
 // the attempt checks the side under the node read lock, which the drop's
 // write lock excludes, before it takes the object lock (reconvergeSide). So
 // does the side's background read (refreshSide, SH29). Neither stores an

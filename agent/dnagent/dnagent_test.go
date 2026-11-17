@@ -2355,9 +2355,7 @@ func TestZeroingDetailsInMiB(t *testing.T) {
 func stopTestServer(t *testing.T, srv *DnAgentServer) {
 	t.Helper()
 	for _, key := range srv.allSideKeys() {
-		st := srv.getSide(key)
-		srv.stopMigrRetry(st)
-		srv.stopZeroing(st)
+		srv.stopZeroing(srv.getSide(key))
 	}
 	srv.WaitBackground()
 }

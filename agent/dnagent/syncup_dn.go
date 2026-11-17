@@ -930,7 +930,6 @@ func (s *DnAgentServer) dropSideState(
 	key string,
 	st *sideState,
 ) {
-	s.stopMigrRetry(st)
 	s.stopZeroing(st)
 	s.clearFence(st)
 	req := st.req.Load()

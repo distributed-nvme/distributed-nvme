@@ -1225,7 +1225,7 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// CN10/CN18 background connect retry (the DN13 pattern)
+// CN10/CN18 background connect retry
 // ---------------------------------------------------------------------------
 
 // startConnectRetry registers a cntlr for the CN10 background retry: a leg or
@@ -1297,14 +1297,18 @@ func (s *CnAgentServer) connectRetryLoop(
 			return
 		case <-ticker.C:
 		}
-		// The attempt runs on rootCtx, never on this loop's ctx, for the
-		// reason dnagent's migrRetryLoop carries in full: the pass that ends
-		// the retry calls stopConnectRetry, which cancels exactly the
-		// retry's loop's ctx, so an attempt running on it would cancel
-		// ITSELF and abandon the rest of the pass. The rule rests on
-		// rootCtx alone, never on where a stop call happens to sit: this
-		// loop is written as the DN13 pattern, and the two agents must not
-		// differ in it.
+		// The attempt runs on rootCtx, never on this loop's ctx. That ctx is
+		// what stopConnectRetry cancels, and a pass of this very loop can be
+		// the one that calls it: the pass that ends the retry deregisters
+		// it, so an attempt running on the loop's ctx would cancel ITSELF
+		// and fail every OS call left in its pass on the dead context, with
+		// the registration already cleared and nothing ticking again. Where
+		// a stop call happens to sit in a pass would then decide whether the
+		// rest of the pass runs; on rootCtx it never does. Cancelling
+		// therefore ends the LOOP, not the attempt: the ctx.Err() check
+		// below reads it, one tick late at worst. Shutdown still stops an
+		// attempt in flight: process exit cancels rootCtx (dnagent.md
+		// SH27).
 		s.reconvergeCntlr(s.rootCtx, key, st)
 		if ctx.Err() != nil || s.rootCtx.Err() != nil {
 			return

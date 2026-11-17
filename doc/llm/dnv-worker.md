@@ -1787,7 +1787,7 @@ It is logged as
 `syncup leftover` (`log.md`, Leftovers) beside the ordinary
 `syncup result`: nothing agent-side re-drives the sweep for a leftover (the
 agents' own background converges, `cnagent.md` CN10's connect retry and
-`dnagent.md` DN13's connect retry and DN12's fence timer, sweep only
+`dnagent.md` DN12's fence timer, sweep only
 while one is registered or armed for a
 reason of its own); it runs again on the
 re-sync RW4 step 5 issues, so a leftover is a normal state for as long as a
@@ -6743,9 +6743,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
   on its threshold therefore waits until the leftover clears unless its
   rounds miss, answer from an observation too old, answer from such
   attempts (AR10) or answer from reads while the agent's saves fail (end
-  of this item). The dn agent's background converges, its fence timer
-  and its migration retry, each converge a side (`dnagent.md` DN12,
-  DN13), so a DN's count compare (RW13) waits until the leftover clears,
+  of this item). The dn agent's one background converge, its fence
+  timer, converges a side (`dnagent.md` DN12), so a DN's count compare
+  (RW13) waits until the leftover clears,
   unless the agent's saves fail (end of this item). A `Syncup*` reply's
   observation counts for nothing because a converge's rows can read unhealthy while it
   waits for a member (AR10); the case needs a leftover that lasts and an

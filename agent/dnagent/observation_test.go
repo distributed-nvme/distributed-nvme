@@ -238,13 +238,12 @@ func TestRoundReadsDefault(t *testing.T) {
 }
 
 // Every converge end stores the object's observation before its locks go
-// (SH28): a syncup's, the startup reconcile's, a DN13 retry attempt's and the
-// DN12 fence timer's. It carries the converge's own info, code and revision,
-// a time and the converge's trace id; a syncup's reply stamps it with no
-// converge start, beside the time the request was saved. A syncup whose save
-// fails is refused before any converge (SH5), so it stores none: the
-// observation stays the one before the call, and the reply carries no save
-// time.
+// (SH28): a syncup's, the startup reconcile's and the DN12 fence timer's. It
+// carries the converge's own info, code and revision, a time and the converge's
+// trace id; a syncup's reply stamps it with no converge start, beside the time
+// the request was saved. A syncup whose save fails is refused before any
+// converge (SH5), so it stores none: the observation stays the one before the
+// call, and the reply carries no save time.
 func TestEveryConvergeEndStoresAnObservation(t *testing.T) {
 	t.Run("SyncupDn", func(t *testing.T) {
 		srv, _ := newTestServer(t)
@@ -355,34 +354,6 @@ func TestEveryConvergeEndStoresAnObservation(t *testing.T) {
 			t.Errorf("side observation = rev %d, trace %q, info %v; want "+
 				"the reconcile's", side.Revision, side.TraceId, side.Info)
 		}
-	})
-
-	t.Run("a DN13 retry attempt", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		names := newMigrDstNames()
-		srv.migrRetryInterval = 5 * time.Millisecond
-		syncupBoth(t, srv, 1, testSide)
-		setFailAlways(node, "dmsetup create "+names.clone, "refused")
-		if _, err := srv.SyncupSide(traced("side-syncup"),
-			migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
-			t.Fatalf("SyncupSide: %v", err)
-		}
-		if !migrRetrying(srv) {
-			t.Fatal("fixture is wrong: no retry registered")
-		}
-		waitUntil(t, "a retry attempt to store an observation", func() bool {
-			obs := sideObs(t, srv)
-			return obs.TraceId != "side-syncup" && obs.Revision == 2
-		})
-		// The attempt that ends the retry stores what it built.
-		clearFailAlways(node, "dmsetup create "+names.clone)
-		waitUntil(t, "the retry to end with the dm-clone observed",
-			func() bool {
-				obs := sideObs(t, srv)
-				return !migrRetrying(srv) && obs.Info.GetMigrDstInfo().
-					GetDmCloneInfo().GetStatus() ==
-					pb.ResStatus_RES_STATUS_OK
-			})
 	})
 
 	t.Run("the DN12 fence timer", func(t *testing.T) {
@@ -1521,10 +1492,11 @@ func TestTheJoinWaitsForARead(t *testing.T) {
 	}
 }
 
-// A background converge attempt (DN12, DN13) marks its converge once it has
-// found the side, before it waits for the side's lock, and cancels no read
-// (SH30): a round meanwhile reports the converge's start and starts no read,
-// and a read the attempt finds running runs on to its end.
+// The DN12 fence timer's converge (reconvergeSide), the one background converge
+// of a side, marks its converge once it has found the side, before it waits for
+// the side's lock, and cancels no read (SH30): a round meanwhile reports the
+// converge's start and starts no read, and a read the attempt finds running
+// runs on to its end.
 func TestABackgroundAttemptMarksItsConverge(t *testing.T) {
 	t.Run("the mark", func(t *testing.T) {
 		srv, node := newTestServer(t)
