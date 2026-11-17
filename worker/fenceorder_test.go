@@ -456,7 +456,8 @@ func TestFenceViewsOf(t *testing.T) {
 	info := &pb.CntlrInfo{GrpIdToGrpInfo: map[uint64]*pb.CntlrInfo_GrpInfo{
 		1: {InSyncLegIdList: []uint64{10, 11}, InSyncLegIdToSlot: map[uint64]uint32{10: 1, 11: 0}},
 		2: {InSyncLegIdList: []uint64{20, 21}, InSyncLegIdToSlot: map[uint64]uint32{20: 3, 21: 3}},
-		// An older cn agent's reading: no slots.
+		// A reading with no slots, as when md's slot of each member did not
+		// read as a number.
 		3: {InSyncLegIdList: []uint64{30, 31}},
 		// A slot of a leg the list does not hold in sync counts for nothing.
 		4: {InSyncLegIdList: []uint64{41}, InSyncLegIdToSlot: map[uint64]uint32{40: 0, 41: 1}},

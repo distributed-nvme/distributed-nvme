@@ -4762,8 +4762,10 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 // fenceViewsOf is RW24's reading of the primary's report: for each group the
 // report reads, its fence-last leg — the leg whose member md holds in sync in
 // the lowest slot, a tie going to the lower leg id — and the legs md holds in
-// sync. A reading that gives no in-sync leg a slot, as an older cn agent's
-// does not, names no fence-last leg. nil for a reply that reads no group, or
+// sync. A reading that gives no in-sync leg a slot names no fence-last leg:
+// the cn agent leaves out only a slot that does not read as a number
+// (cnagent.md CN28), and no agent of another build reports to this worker
+// (architecture.md, Upgrade in lockstep). nil for a reply that reads no group, or
 // carries no info at all: a group a report does not read keeps its view, so
 // such a reply has nothing to send.
 func fenceViewsOf(info *pb.CntlrInfo) map[uint64]grpFenceView {

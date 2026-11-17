@@ -1664,8 +1664,9 @@ that run was logged. The memos of what was LOGGED — RW9's two, plus, on a
 cntlr child, the last standby leg row logged per leg, so HL2's standing row
 does not repeat every round — never record what is owed, and neither does
 a side or cntlr child's memo of what it REPORTED:
-the last revision it handed RW14's sides-first hold or RW22's demotion
-hold as applied, so a standing reply does not report it every round.
+the last revision it handed RW14's sides-first hold, RW22's demotion
+hold or RW24's fence round as applied, so a standing reply does not report
+it every round.
 
 RW3. **Coalescing.** Desired changes arrive from the parent (shard worker
 or SP coordinator) over a channel of capacity one that is overwritten, so
@@ -2227,8 +2228,8 @@ old primary does not answer — every failover of one that cannot be
 reached, since the worker judges no reachability — holds its sides and its
 promotion for the whole demotion hold, and the sides-first hold begins only
 after it and after RW24's fence round, which holds the fence-last legs'
-sides and the promotion for the round trip of the slowest side the round
-waits for; and a
+sides and the promotion until the slowest side the round waits for
+reports, one `cntlr_interval` at most; and a
 replacement of the primary that RW22 finds holds its sides and its new
 primary for the whole demotion hold, since the deleted cntlr reports
 nothing. Only an accepted reply reports,
@@ -2467,9 +2468,13 @@ whichever comes first. Then the fence-last legs' sides are handed, and
 RW14's sides-first barrier begins over every side of the newest fan-out,
 its bound running from that moment. A fan-out whose sides hold no
 fence-last leg runs no round and hands every side at once: one whose
-coordinator has no fence reading since it started, one whose cn agent reports no
-slot, as an older build's does, and one whose groups hold no member in
-sync or have no redundancy. A fan-out during the round replaces the
+coordinator has no fence reading since it started, and one whose groups
+hold no member in sync or have no redundancy. A group reading that gives
+no in-sync member a slot names no fence-last leg, a guard only: the cn
+agent reports md's slot of every in-sync member, leaving out only one
+that does not read as a number (`cnagent.md` CN28), and no cn agent of
+another build reports to this worker (`architecture.md`, Upgrade in
+lockstep). A fan-out during the round replaces the
 fence-last legs' held plans, hands its other sides at once and keeps the
 round's deadline; one of a newer revision takes the sides the round waits
 for afresh from its own load, as RW14's barrier does, and the fence-last
@@ -3554,9 +3559,9 @@ snapshot re-seeds the SP's health memos first, ahead of every gate below
 (HL3); it seeds nothing into AR10's memo, because a stored epoch is no
 verdict of this coordinator's. The primary is the one the snapshot names,
 and its info is taken only once its child has been handed the primary plan.
-While a hold keeps a promotion from the child (RW22's demotion hold, then
-RW14's sides-first hold), the child's info is still a standby's report — a
-leg row there is transport liveness and ANA state, not the health-block
+While a hold keeps a promotion from the child (RW22's demotion hold,
+RW24's fence round, then RW14's sides-first hold), the child's info is
+still a standby's report — a leg row there is transport liveness and ANA state, not the health-block
 probe — so the pass has none: AR6 grows and times nothing, AR8 creates no
 repair and asks for no abort on a bad leg that reads healthy again, AR11
 moves no stage, AR12 deletes no retired leg, AR13 clears no forced-start
@@ -5974,7 +5979,9 @@ ranges and its cancel joined to the next create
 coordinator with no running child of it, the clear of the record at the
 hold's end, and the hold at a replacement of the primary, which the
 reaction case's replacement of its sole primary runs and no assertion
-reads; AR1's read of the node records only by a step that needs them and
+reads; RW24's fence round, since no fake reports md's slot of a member,
+so no case's fan-out runs a round, the end-to-end suite running it with
+real agents; AR1's read of the node records only by a step that needs them and
 its first pass's random offset; AR6's timing of a grow, which no assertion
 reads; RW14's reading of a pool of another id as gone; RW13's and HL1's
 reading of a node record of another id as missing; RW3's unchanged
@@ -6065,7 +6072,7 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Twenty-three records no suite case stages: `worker reg watch restarting`, `rev
+Twenty-four records no suite case stages: `worker reg watch restarting`, `rev
 watch restarting` and `cluster conf watch restarting`, since no suite case
 ends a watch on an error or a compaction; `sp drain failed` and `clone drain
 failed`,
@@ -6090,8 +6097,10 @@ whose group is missing; `member add refused`, since no fake agent reports
 a group's refusal (AR14); `repair leg partial kept`, since every partial
 mark the repair case stages commits (AR11); `groups array made kept`,
 since every
-write of the flag the suite makes commits (AR15); and `md checks kept`,
-since every write of the schedule the repair case stages commits (AR16). `repair stage skipped` is
+write of the flag the suite makes commits (AR15); `md checks kept`,
+since every write of the schedule the repair case stages commits (AR16);
+and `sp fence round ended`, since no fake reports md's slot of a member,
+so no fan-out runs a fence round (RW24). `repair stage skipped` is
 staged only as the record of a refused take-back, every stage move the
 repair and reaction cases stage committing.
 
@@ -6809,9 +6818,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
 * **The fence round orders only what the coordinator saw, and counts a
   report as a fence** (RW24). A coordinator with no fence reading of a
   group — no report of the primary since it started, after a worker restart or a
-  handoff, or a primary whose cn agent reports no slot — has no fence-last
-  leg for it, so its failover hands that group's sides at once, as does a
-  replacement of the primary that it fans out with no demotion hold
+  handoff — has no fence-last leg for it, so a failover or a replacement
+  of the primary that it fans out hands that group's sides at once, as
+  does a replacement of the primary fanned out with no demotion hold
   (below). A side of the round counts as fenced once it reports the
   revision applied, which a converge that could not fence does too: a
   side device that failed (`dnagent.md` DN9) or a dm-error that could not

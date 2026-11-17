@@ -5583,7 +5583,7 @@ holds in sync in the lowest slot, by the old primary's reports — after the
 other sides (`dnv-worker.md` RW24). Each wait of its fan-out ends at its
 bound whether the reports it waits for came or not, so mid-failover the
 old primary can still hold a live path to one leg while the new primary
-already owns another. Two mechanisms make that harmless, save the case the end of this
+already owns another. Two mechanisms make that harmless, save the cases the end of this
 paragraph names, and both are load-bearing: (a) each side's flip
 **fences first, within one DN converge** — the old primary's dm-linear
 reloads onto dm-error before the same pass puts the new
@@ -5605,9 +5605,12 @@ acknowledged: a write in flight fails on each leg the round fences and
 lands on the fence-last leg, the record of the failed legs reaches the
 fence-last leg before its fence and gives it the highest event count, and
 where the record is cut off all the same the resync copies the fence-last
-leg. A failover with no round, or a side of the round that is fenced late,
-can still lose a write only another leg took (Known limits, A failover
-while the old primary serves can lose an acknowledged write).
+leg. A write only another leg took can still be lost in a group whose
+fence no round orders, because its fan-out runs none or the coordinator
+has no fence reading of the group; where a side of the round is fenced
+late; and where md has brought a member into sync in a lower slot since
+the group's fence reading (Known limits, A failover while the old primary
+serves can lose an acknowledged write).
 
 **What hosts see at a failover ([D16]).** The common failover — a dead CN
 — is a pause from the host's side: its paths drop, IO queues, and the
@@ -5682,7 +5685,7 @@ the group is then not available this pass. That refusal is the cross-leg
 half of failover safety ([D16]) — a stale leg cannot be started alone,
 and once both legs are back the event counts pick the newer one, where
 md's record of the failed leg reached the other, and the resync copies the
-fence-last leg, which the fence round fences last, where it did not
+fence-last leg, whose sides the fence round tells last, where it did not
 (`dnv-worker.md` RW24; Known limits, A failover while the old primary
 serves can lose an acknowledged write). md
 writes a member's death into the other members' superblocks when it
@@ -7480,14 +7483,22 @@ document and the component documents cite it by its id.
   RAID1 group the leg of that slot, the fence-last leg, last
   (`dnv-worker.md` RW24): every write md acknowledged is on the fence-last
   leg, whose record wins when it lands and whose copy the resync spreads
-  when it does not. A failover with no round, and a side of the round that
-  is fenced late, keep the loss possible (Known limits, A failover while
-  the old primary serves can lose an acknowledged write). md's assembly behaviour is therefore a load-bearing external
-  dependency, which the cn suite's redund case asserts on the lab's mdadm
-  (`cnagent_integtest.md`, Cases): mdadm refuses to start an array from one
-  leg whose superblock still counts a clean full array, and once both legs
-  are back a block only the newer leg holds reads as that leg's; nothing
-  checks the mdadm a deployed node runs (Known limits). For a host
+  when it does not. The loss stays possible in a group whose fence no
+  round orders, because its fan-out runs none or the coordinator has no
+  fence reading of the group; where a side of the round is fenced late;
+  and where md has brought a member into sync in a lower slot since the
+  group's fence reading (Known limits, A failover while the old primary
+  serves can lose an acknowledged write). md's assembly behaviour is
+  therefore a load-bearing external dependency. The cn suite's redund
+  case asserts two parts of it on the lab's mdadm (`cnagent_integtest.md`,
+  Cases): mdadm refuses to start an array from one leg whose superblock
+  still counts a clean full array, and once both legs are back a block
+  only the newer leg holds reads as that leg's. Only
+  `integtest/md_fence_order.sh` pins another part, which the fence round
+  rests on: a start from equal superblocks copies the member in the
+  lowest slot. That script is run by hand on one lab guest and by no
+  suite (`layout.md`, Directory tree). Nothing checks the mdadm or the
+  kernel a deployed node runs (Known limits). For a host
   that follows the discovery log, the demotion hold and the withdrawal close
   both edges of a failover: an old primary that applies its demotion within
   the demotion hold is inaccessible before the fence, and one the worker
@@ -7975,9 +7986,9 @@ document and only pointed to here.
   fence (`dnv-worker.md` RW24), so the write lands on the fence-last leg
   and md's record of the failed legs reaches it before its fence. The loss
   stays open where the round does not order a group's fence: a failover
-  whose coordinator has no fence reading of the group, having no report of
-  the old primary since it started, after a worker restart or a handoff; a primary
-  whose cn agent reports no slot, as an older build's does; a replacement
+  or a replacement of the primary whose coordinator has no fence reading
+  of the group, having no report of the old primary since it started,
+  after a worker restart or a handoff; a replacement
   of the primary fanned out by a coordinator that has just started, which
   runs no demotion hold (A replacement of the primary can fence the old
   primary first when the pool's coordinator changes during its demotion
@@ -8001,11 +8012,12 @@ document and only pointed to here.
   commit before, and on a clone meta group would hand dm-clone metadata
   older than the copy, so dm-clone copies regions from the source again
   over what hosts wrote there (Clone metadata durability; read from the
-  code). A fan-out with no order loses the write this way, as
-  `integtest/md_fence_order.sh` pins with md alone on the lab kernel:
-  every run that began the slot-0 leg's fence first lost the last
-  acknowledged write, and every run that began it last kept it, whichever
-  leg slot 0 was. On the lab at 32 slices every copy and cutoff failover
+  code). A fan-out with no order can lose the write this way.
+  `integtest/md_fence_order.sh` pins, with md alone on the lab kernel,
+  that a run that begins the slot-0 leg's fence last keeps the last
+  acknowledged write, whichever leg slot 0 is; the runs that begin it
+  first, which the script prints and does not judge, lost that write in
+  every lab run. On the lab at 32 slices every copy and cutoff failover
   of the e2e suite ended its round by the bound, with 15 to 51 of the
   round's awaited sides not reported, so there the order held only for
   the groups whose sides reported in time (`dnv-worker.md`, Known limits);
@@ -8018,7 +8030,11 @@ document and only pointed to here.
   the stale one; on the lab's mdadm the cn suite asserts the refusal and
   that a block only the newer leg holds reads as that leg's
   (`cnagent_integtest.md`, Cases), and nothing checks the mdadm a deployed
-  node runs. The forced start rests on md behaviour pinned in the lab
+  node runs. The fence round rests as well on a start from equal
+  superblocks copying the member in the lowest slot (`dnv-worker.md`
+  RW24), which only `integtest/md_fence_order.sh` pins, run by hand on
+  one lab guest's kernel and by no suite, and nothing checks the kernel a
+  deployed node runs. The forced start rests on md behaviour pinned in the lab
   only as well (Repair, Forced start): an assembly from one member with
   mdadm's run and force flags under a new identity, a run that writes the
   new identity into the member before the kernel takes it, the layout of

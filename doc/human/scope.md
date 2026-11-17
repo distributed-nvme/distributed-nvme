@@ -304,21 +304,23 @@ the host.
   done, or one interval later, 2 seconds at the default. A write that
   fails on the other legs then lands on that leg, md's record reaches it
   before its own fence, and the new primary starts from it. The worker
-  learns which leg md copies from in the primary's reports. The loss stays
-  possible in these cases. The worker that runs the failover started, or
-  took the pool over, after the old primary's last report, so it does not
-  know the leg. The old primary's agent is of a build older than this
-  order, which does not report it. A cntlr replacement of the primary is
-  handed out by a worker that started or took the pool over within the
-  three-second hold (section 8), which holds nothing. A disk node does not
-  report its fence within that interval, or reports the failover without
-  having fenced, as one whose side device failed does. At 32 slices a
-  late disk node is the common case: in the lab, the wait ended at its
-  interval in every failover of a pool of 32 slices, with 15 to 51 of
-  roughly 64 sides it waited for not yet reported, so the worker kept the
-  order only for the groups whose sides reported in time. md brought a leg
-  into sync in a lower place after the primary's last report: a leg the
-  primary put back into the array, or the spare leg a leg repair put in.
+  learns which leg md copies from in the primary's reports, and keeps it
+  in memory only. The loss stays possible in these cases. The worker that
+  hands the sides a failover or a cntlr replacement of the primary has had
+  no report from the old primary as the primary since it started or took
+  the pool over, so it does not know the leg. A worker that restarts or
+  takes the pool over during the waits of a failover or a replacement,
+  before the leg md copies from is told, is such a worker. A disk node
+  does not report its fence within the one interval the worker waits, or
+  reports the failover without having fenced, as one whose side device
+  failed does. On the lab VMs, where 45 disk nodes share each VM that
+  runs disk nodes, a late disk node was the common case at 32 slices: the
+  wait ended at its interval in every failover of a pool of 32 slices,
+  with 15 to 51 of roughly 64 sides it waited for not yet reported, so
+  the worker kept the order only for the groups whose sides reported in
+  time. md brought a leg into sync in a lower place after the primary's
+  last report: a leg the primary put back into the array, or the spare
+  leg a leg repair put in.
   The worker then fences that leg before the leg it read as the one md
   copies from. For the late disk node and the leg brought into sync, the
   write is lost only when, of the two legs, the one md copies from is
@@ -341,13 +343,22 @@ the host.
   the lab, in the e2e suite at 32 slices, with the paths fenced in no
   order, and shown with md alone: each run that began fencing md's first
   member first lost the last completed write, and each run that began it
-  last kept it. State: accepted. The first three cases need a worker
-  restart, a worker taking the pool over, or an upgrade at the moment of
-  the failover. A disk node that reports without having fenced needs a
-  second fault, and a leg brought into sync needs md to change the array
-  between the primary's last report and the failover. A late disk node
-  needs no fault at 32 slices; whether the wait should grow with the pool
-  is not decided yet.
+  last kept it. State: accepted, for every case but the late disk node.
+  The first case needs a worker restart, or a worker taking the pool over,
+  between the old primary's last report as the primary and the fence of
+  the leg md copies from. For an agent that is stopped or cut off from
+  the control plane, that time is a few seconds, under 20 at the
+  defaults. For an agent that answers "starting", it is a little more
+  than the start hold, the longest time the worker waits for an agent
+  that is still rebuilding, 120 seconds at the default. Before a cntlr
+  replacement of the primary, it can be a little more than the cntlr
+  threshold, the event threshold of any cntlr, 600 seconds at the
+  default. A disk node that reports without having fenced needs a second
+  fault, and a leg brought into sync needs md to change the array between
+  the primary's last report and the failover. State for a late disk node:
+  fix later. On the lab VMs a late disk node needed no fault at 32 slices.
+  The fix waits for dnv's maintainers to decide whether the wait should
+  grow with the pool.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
@@ -974,11 +985,17 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 ### Notes on the maintenance tools
 
 - **md's behaviour is tested in the lab only.** Failover safety and the
-  forced start rest on mdadm's behaviour, tested on the lab's mdadm.
-  Nothing checks the mdadm of a deployed node. State: fix decided, the
-  agent logs the mdadm version when it starts, the requirements name the
-  tested version, and the node check reports a version outside the tested
-  range.
+  forced start rest on mdadm's behaviour, tested on the lab's mdadm. The
+  order of fences of section 5.1 also rests on the kernel's md: it
+  completes a write that landed on one leg and failed on the other, and
+  when the legs' records read equal, the start of the array copies the
+  leg in its first place over the others. A script,
+  `integtest/md_fence_order.sh`, checks this by hand on one lab VM's
+  kernel, and no suite runs it. Nothing checks the
+  mdadm or the kernel of a deployed node. State: fix decided, the agent
+  logs the mdadm version when it starts, the requirements name the tested
+  version, and the node check reports a version outside the tested range
+  and a kernel outside the tested series.
 - **Retired legs keep their extents until deleted.** A group never back to
   whole keeps them for good. At the bound of two, an operator's repair
   with a fresh leg is refused. State: procedure to write, one line.

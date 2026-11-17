@@ -4499,8 +4499,8 @@ its repair's new legs whose members md marks in sync and not faulty,
 ascending, so that an array that has not changed reads the same and
 leaves the check stream nothing to send (`dnagent.md` SH26);
 `in_sync_leg_id_to_slot`, md's slot of each of those members, the
-"slot" number, which the worker's fence order reads (`dnv-worker.md`
-RW24); `refusal`, the text of CN12's identity check when it refuses the add of a
+"slot" number, one that does not read as a number left out, which the
+worker's fence order reads (`dnv-worker.md` RW24); `refusal`, the text of CN12's identity check when it refuses the add of a
 `leg_list` member of another identity, naming the first such member, its
 identity and the array's, empty when nothing holds an add back, text for
 people that the worker logs (`dnv-worker.md` AR14);

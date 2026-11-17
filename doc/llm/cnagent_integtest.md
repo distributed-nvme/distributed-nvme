@@ -16,9 +16,13 @@ instances behind the sides, the dn role having its own suite. It exercises
 every `ControllerNodeAgent` RPC but `GetCnInfo`, whose reading `CheckCn`
 answers the same way (`cnagent.md` CN23, CN24) and which the unit tests and the
 e2e suite's `InspectControllerNode` call, and reads the kernel state beside the
-agent's report. It also pins the md assembly rules the cross-leg half of
-failover safety rests on, the refusal before redund builds its pool and the
-kick in its late flip (`architecture.md`, [D16]). It proves the happy path;
+agent's report. It also pins two of the md assembly rules the cross-leg
+half of failover safety rests on, the refusal before redund builds its pool
+and the kick in its late flip (`architecture.md`, [D16]); another, a start
+from equal superblocks copying the member in the lowest slot, which the
+worker's fence round rests on, no case pins: only
+`integtest/md_fence_order.sh` does (`layout.md`, Directory tree). It proves
+the happy path;
 error paths are out of scope but for the stale probe, the dead leg, the
 promotion that outruns the sides' flip, md's refusal to start an array from one
 clean leg, md's check over sectors that fail reads, and over sectors that fail
